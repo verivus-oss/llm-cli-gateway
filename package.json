@@ -12,6 +12,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:unit": "vitest run src/__tests__/executor.test.ts",
+    "test:session": "vitest run src/__tests__/session-manager.test.ts",
     "test:integration": "vitest run src/__tests__/integration.test.ts"
   },
   "dependencies": {
