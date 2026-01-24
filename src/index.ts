@@ -213,16 +213,30 @@ server.tool(
     outputFormat: z.enum(["text", "json"]).default("text").describe("Output format"),
     sessionId: z.string().optional().describe("Session ID to use for this request. If not provided, uses the active session or creates a new one."),
     continueSession: z.boolean().default(false).describe("Continue the active session (uses --continue flag)"),
-    createNewSession: z.boolean().default(false).describe("Always create a new session for this request")
+    createNewSession: z.boolean().default(false).describe("Always create a new session for this request"),
+    allowedTools: z.array(z.string()).optional().describe("Tools that are allowed (e.g., ['Bash(git:*)', 'Edit', 'Write'])"),
+    disallowedTools: z.array(z.string()).optional().describe("Tools that are disallowed"),
+    dangerouslySkipPermissions: z.boolean().default(false).describe("Bypass all permission checks (use only in sandboxes)")
   },
-  async ({ prompt, model, outputFormat, sessionId, continueSession, createNewSession }) => {
+  async ({ prompt, model, outputFormat, sessionId, continueSession, createNewSession, allowedTools, disallowedTools, dangerouslySkipPermissions }) => {
     const startTime = Date.now();
-    logger.info(`claude_request invoked with model=${model || 'default'}, prompt length=${prompt.length}, sessionId=${sessionId}`);
+    logger.info(`claude_request invoked with model=${model || 'default'}, prompt length=${prompt.length}, sessionId=${sessionId}, dangerouslySkipPermissions=${dangerouslySkipPermissions}`);
 
     try {
       const args = ["-p", prompt];
       if (model) args.push("--model", model);
       if (outputFormat === "json") args.push("--output-format", "json");
+
+      // Tool permissions
+      if (allowedTools && allowedTools.length > 0) {
+        args.push("--allowed-tools", ...allowedTools);
+      }
+      if (disallowedTools && disallowedTools.length > 0) {
+        args.push("--disallowed-tools", ...disallowedTools);
+      }
+      if (dangerouslySkipPermissions) {
+        args.push("--dangerously-skip-permissions");
+      }
 
       // Session management
       let effectiveSessionId = sessionId;
@@ -347,15 +361,27 @@ server.tool(
     model: z.enum(["gemini-2.5-pro", "gemini-2.5-flash"]).optional().describe("Model to use"),
     sessionId: z.string().optional().describe("Session identifier to resume. Use 'latest' for most recent session or a session ID."),
     resumeLatest: z.boolean().default(false).describe("Resume the latest session automatically"),
-    createNewSession: z.boolean().default(false).describe("Always create a new session for this request")
+    createNewSession: z.boolean().default(false).describe("Always create a new session for this request"),
+    approvalMode: z.enum(["default", "auto_edit", "yolo"]).optional().describe("Approval mode: 'default' (prompt for approval), 'auto_edit' (auto-approve edit tools), 'yolo' (auto-approve all tools)"),
+    allowedTools: z.array(z.string()).optional().describe("Tools that are allowed to run without confirmation (e.g., ['Write', 'Edit', 'Bash'])"),
+    includeDirs: z.array(z.string()).optional().describe("Additional directories to include in the workspace")
   },
-  async ({ prompt, model, sessionId, resumeLatest, createNewSession }) => {
+  async ({ prompt, model, sessionId, resumeLatest, createNewSession, approvalMode, allowedTools, includeDirs }) => {
     const startTime = Date.now();
-    logger.info(`gemini_request invoked with model=${model || 'default'}, prompt length=${prompt.length}, sessionId=${sessionId}`);
+    logger.info(`gemini_request invoked with model=${model || 'default'}, approvalMode=${approvalMode}, prompt length=${prompt.length}, sessionId=${sessionId}`);
 
     try {
       const args = [prompt];
       if (model) args.push("--model", model);
+
+      // Tool approval settings
+      if (approvalMode) args.push("--approval-mode", approvalMode);
+      if (allowedTools && allowedTools.length > 0) {
+        allowedTools.forEach(tool => args.push("--allowed-tools", tool));
+      }
+      if (includeDirs && includeDirs.length > 0) {
+        includeDirs.forEach(dir => args.push("--include-directories", dir));
+      }
 
       // Session management
       let effectiveSessionId = sessionId;
