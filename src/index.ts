@@ -297,7 +297,7 @@ server.tool(
         sessionManager.updateSessionUsage(effectiveSessionId);
       }
 
-      const { stdout, stderr, code } = await executeCli("claude", args, { correlationId: corrId });
+      const { stdout, stderr, code } = await executeCli("claude", args);
       durationMs = Math.max(0, Date.now() - startTime);
 
       if (code !== 0) {
@@ -374,7 +374,7 @@ server.tool(
       if (fullAuto) args.push("--full-auto");
       args.push("--skip-git-repo-check", effectivePrompt);
 
-      const { stdout, stderr, code } = await executeCli("codex", args, { correlationId: corrId });
+      const { stdout, stderr, code } = await executeCli("codex", args);
       durationMs = Math.max(0, Date.now() - startTime);
 
       if (code !== 0) {
@@ -490,7 +490,7 @@ server.tool(
         sessionManager.updateSessionUsage(effectiveSessionId);
       }
 
-      const { stdout, stderr, code } = await executeCli("gemini", args, { correlationId: corrId });
+      const { stdout, stderr, code } = await executeCli("gemini", args);
       durationMs = Math.max(0, Date.now() - startTime);
 
       if (code !== 0) {
