@@ -1,7 +1,7 @@
 import { randomUUID } from "crypto";
 import { homedir } from "os";
 import { join, dirname } from "path";
-import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, unlinkSync, renameSync, openSync, fsyncSync, closeSync, chmodSync } from "fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, openSync, fsyncSync, closeSync, chmodSync } from "fs";
 
 export const CLI_TYPES = ["claude", "codex", "gemini"] as const;
 export type CliType = (typeof CLI_TYPES)[number];

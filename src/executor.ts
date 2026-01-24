@@ -7,7 +7,6 @@ import { createCircuitBreaker, withRetry } from "./retry.js";
 export interface ExecuteOptions {
   timeout?: number;
   cwd?: string;
-  correlationId?: string;
 }
 
 export interface ExecuteResult {
@@ -16,7 +15,9 @@ export interface ExecuteResult {
   code: number;
 }
 
+const MAX_OUTPUT_SIZE = 50 * 1024 * 1024;
 const circuitBreakers = new Map<string, ReturnType<typeof createCircuitBreaker>>();
+let cachedNvmPath: string | undefined | null;
 
 function getCircuitBreaker(command: string) {
   const existing = circuitBreakers.get(command);
@@ -26,6 +27,30 @@ function getCircuitBreaker(command: string) {
   const circuitBreaker = createCircuitBreaker();
   circuitBreakers.set(command, circuitBreaker);
   return circuitBreaker;
+}
+
+function getNvmPath(): string | null {
+  if (cachedNvmPath !== undefined) {
+    return cachedNvmPath;
+  }
+
+  const home = homedir();
+  const nvmVersionsDir = join(home, ".nvm/versions/node");
+  if (!existsSync(nvmVersionsDir)) {
+    cachedNvmPath = null;
+    return cachedNvmPath;
+  }
+
+  try {
+    const versions = readdirSync(nvmVersionsDir);
+    cachedNvmPath = versions.length
+      ? versions.map((version) => join(nvmVersionsDir, version, "bin")).join(":")
+      : null;
+  } catch {
+    cachedNvmPath = null;
+  }
+
+  return cachedNvmPath;
 }
 
 // Extend PATH to include common locations for CLI tools
@@ -39,16 +64,9 @@ function getExtendedPath(): string {
   ];
 
   // Add all nvm node version bin directories
-  const nvmVersionsDir = join(home, ".nvm/versions/node");
-  if (existsSync(nvmVersionsDir)) {
-    try {
-      const versions = readdirSync(nvmVersionsDir);
-      for (const version of versions) {
-        additionalPaths.push(join(nvmVersionsDir, version, "bin"));
-      }
-    } catch {
-      // Ignore errors reading nvm directory
-    }
+  const nvmPath = getNvmPath();
+  if (nvmPath) {
+    additionalPaths.push(nvmPath);
   }
 
   const currentPath = process.env.PATH || "";
@@ -74,6 +92,8 @@ export async function executeCli(
     let stdout = "";
     let stderr = "";
     let timedOut = false;
+    let outputSize = 0;
+    let settled = false;
 
     // Set up timeout
     const timeoutId = setTimeout(() => {
@@ -88,15 +108,54 @@ export async function executeCli(
       }, 5000);
     }, timeout);
 
+    const finalizeReject = (error: Error) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timeoutId);
+      reject(error);
+    };
+
+    const handleOutputChunk = (data: Buffer, stream: "stdout" | "stderr") => {
+      outputSize += data.length;
+      if (outputSize > MAX_OUTPUT_SIZE) {
+        proc.kill("SIGTERM");
+        setTimeout(() => {
+          if (!proc.killed) {
+            proc.kill("SIGKILL");
+          }
+        }, 5000);
+        finalizeReject(new Error("Output exceeded maximum size (50MB)"));
+        return;
+      }
+
+      const text = data.toString();
+      if (stream === "stdout") {
+        stdout += text;
+      } else {
+        stderr += text;
+      }
+    };
+
     proc.stdout.on("data", (data) => {
-      stdout += data.toString();
+      if (settled) {
+        return;
+      }
+      handleOutputChunk(data, "stdout");
     });
 
     proc.stderr.on("data", (data) => {
-      stderr += data.toString();
+      if (settled) {
+        return;
+      }
+      handleOutputChunk(data, "stderr");
     });
 
     proc.on("close", (code) => {
+      if (settled) {
+        return;
+      }
       clearTimeout(timeoutId);
 
       if (timedOut) {
@@ -125,7 +184,11 @@ export async function executeCli(
     });
 
     proc.on("error", (err) => {
+      if (settled) {
+        return;
+      }
       clearTimeout(timeoutId);
+      settled = true;
       reject(err);
     });
   });
@@ -133,6 +196,9 @@ export async function executeCli(
   try {
     return await withRetry(runOnce, circuitBreaker);
   } catch (error: any) {
+    if (error?.cause?.message === "Output exceeded maximum size (50MB)") {
+      throw error.cause;
+    }
     const result = error?.result ?? error?.cause?.result;
     if (result) {
       return result as ExecuteResult;
