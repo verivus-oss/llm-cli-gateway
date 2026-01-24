@@ -47,10 +47,19 @@ describe("MCP Server Integration", () => {
       const result = await client.listTools();
       const toolNames = result.tools.map(t => t.name);
 
+      // CLI tools
       expect(toolNames).toContain("claude_request");
       expect(toolNames).toContain("codex_request");
       expect(toolNames).toContain("gemini_request");
       expect(toolNames).toContain("list_models");
+
+      // Session management tools
+      expect(toolNames).toContain("session_create");
+      expect(toolNames).toContain("session_list");
+      expect(toolNames).toContain("session_set_active");
+      expect(toolNames).toContain("session_get");
+      expect(toolNames).toContain("session_delete");
+      expect(toolNames).toContain("session_clear_all");
     });
 
     it("should have correct schema for claude_request", async () => {
@@ -277,6 +286,391 @@ describe("MCP Server Integration", () => {
       expect(results).toHaveLength(3);
       results.forEach(result => {
         expect(result.content).toHaveLength(1);
+      });
+    });
+  });
+
+  describe("session management", () => {
+    // Clean up sessions before and after session tests
+    beforeAll(async () => {
+      await client.callTool({
+        name: "session_clear_all",
+        arguments: {}
+      });
+    });
+
+    afterAll(async () => {
+      await client.callTool({
+        name: "session_clear_all",
+        arguments: {}
+      });
+    });
+
+    describe("session_create", () => {
+      it("should create a new session", async () => {
+        const result = await client.callTool({
+          name: "session_create",
+          arguments: {
+            cli: "claude",
+            description: "Test session",
+            setAsActive: true
+          }
+        }) as CallToolResult;
+
+        expect(result.content).toHaveLength(1);
+        const response = JSON.parse(result.content[0].text);
+        expect(response.success).toBe(true);
+        expect(response.session.id).toBeDefined();
+        expect(response.session.cli).toBe("claude");
+        expect(response.session.description).toBe("Test session");
+        expect(response.session.isActive).toBe(true);
+      });
+
+      it("should create session without description", async () => {
+        const result = await client.callTool({
+          name: "session_create",
+          arguments: {
+            cli: "codex"
+          }
+        }) as CallToolResult;
+
+        const response = JSON.parse(result.content[0].text);
+        expect(response.success).toBe(true);
+        expect(response.session.id).toBeDefined();
+      });
+
+      it("should create sessions for different CLIs", async () => {
+        const claudeResult = await client.callTool({
+          name: "session_create",
+          arguments: { cli: "claude", description: "Claude session" }
+        }) as CallToolResult;
+
+        const codexResult = await client.callTool({
+          name: "session_create",
+          arguments: { cli: "codex", description: "Codex session" }
+        }) as CallToolResult;
+
+        const geminiResult = await client.callTool({
+          name: "session_create",
+          arguments: { cli: "gemini", description: "Gemini session" }
+        }) as CallToolResult;
+
+        const claudeSession = JSON.parse(claudeResult.content[0].text).session;
+        const codexSession = JSON.parse(codexResult.content[0].text).session;
+        const geminiSession = JSON.parse(geminiResult.content[0].text).session;
+
+        expect(claudeSession.cli).toBe("claude");
+        expect(codexSession.cli).toBe("codex");
+        expect(geminiSession.cli).toBe("gemini");
+      });
+    });
+
+    describe("session_list", () => {
+      it("should list all sessions", async () => {
+        // Create a few sessions first
+        await client.callTool({
+          name: "session_create",
+          arguments: { cli: "claude", description: "Session 1" }
+        });
+        await client.callTool({
+          name: "session_create",
+          arguments: { cli: "codex", description: "Session 2" }
+        });
+
+        const result = await client.callTool({
+          name: "session_list",
+          arguments: {}
+        }) as CallToolResult;
+
+        const response = JSON.parse(result.content[0].text);
+        expect(response.total).toBeGreaterThanOrEqual(2);
+        expect(response.sessions).toBeInstanceOf(Array);
+        expect(response.activeSessions).toBeDefined();
+      });
+
+      it("should filter sessions by CLI", async () => {
+        const result = await client.callTool({
+          name: "session_list",
+          arguments: { cli: "claude" }
+        }) as CallToolResult;
+
+        const response = JSON.parse(result.content[0].text);
+        expect(response.sessions.every((s: any) => s.cli === "claude")).toBe(true);
+      });
+
+      it("should show active session indicators", async () => {
+        const result = await client.callTool({
+          name: "session_list",
+          arguments: {}
+        }) as CallToolResult;
+
+        const response = JSON.parse(result.content[0].text);
+        expect(response.activeSessions).toHaveProperty("claude");
+        expect(response.activeSessions).toHaveProperty("codex");
+        expect(response.activeSessions).toHaveProperty("gemini");
+      });
+    });
+
+    describe("session_get", () => {
+      it("should retrieve a session by ID", async () => {
+        // Create a session
+        const createResult = await client.callTool({
+          name: "session_create",
+          arguments: { cli: "claude", description: "Test get" }
+        }) as CallToolResult;
+
+        const created = JSON.parse(createResult.content[0].text).session;
+
+        // Get the session
+        const getResult = await client.callTool({
+          name: "session_get",
+          arguments: { sessionId: created.id }
+        }) as CallToolResult;
+
+        const response = JSON.parse(getResult.content[0].text);
+        expect(response.success).toBe(true);
+        expect(response.session.id).toBe(created.id);
+        expect(response.session.description).toBe("Test get");
+      });
+
+      it("should return error for non-existent session", async () => {
+        const result = await client.callTool({
+          name: "session_get",
+          arguments: { sessionId: "non-existent-id" }
+        }) as CallToolResult;
+
+        const response = JSON.parse(result.content[0].text);
+        expect(response.success).toBe(false);
+        expect(response.error).toBeDefined();
+      });
+    });
+
+    describe("session_set_active", () => {
+      it("should set a session as active", async () => {
+        // Create a session
+        const createResult = await client.callTool({
+          name: "session_create",
+          arguments: { cli: "claude", description: "Active test", setAsActive: false }
+        }) as CallToolResult;
+
+        const session = JSON.parse(createResult.content[0].text).session;
+
+        // Set it as active
+        const setResult = await client.callTool({
+          name: "session_set_active",
+          arguments: { cli: "claude", sessionId: session.id }
+        }) as CallToolResult;
+
+        const response = JSON.parse(setResult.content[0].text);
+        expect(response.success).toBe(true);
+        expect(response.activeSessionId).toBe(session.id);
+
+        // Verify via session_list
+        const listResult = await client.callTool({
+          name: "session_list",
+          arguments: { cli: "claude" }
+        }) as CallToolResult;
+
+        const listResponse = JSON.parse(listResult.content[0].text);
+        expect(listResponse.activeSessions.claude).toBe(session.id);
+      });
+
+      it("should return error for non-existent session", async () => {
+        const result = await client.callTool({
+          name: "session_set_active",
+          arguments: { cli: "claude", sessionId: "non-existent" }
+        }) as CallToolResult;
+
+        const response = JSON.parse(result.content[0].text);
+        expect(response.success).toBe(false);
+      });
+
+      it("should return error when setting wrong CLI session", async () => {
+        const createResult = await client.callTool({
+          name: "session_create",
+          arguments: { cli: "claude" }
+        }) as CallToolResult;
+
+        const claudeSession = JSON.parse(createResult.content[0].text).session;
+
+        const result = await client.callTool({
+          name: "session_set_active",
+          arguments: { cli: "codex", sessionId: claudeSession.id }
+        }) as CallToolResult;
+
+        const response = JSON.parse(result.content[0].text);
+        expect(response.success).toBe(false);
+      });
+    });
+
+    describe("session_delete", () => {
+      it("should delete a session", async () => {
+        // Create a session
+        const createResult = await client.callTool({
+          name: "session_create",
+          arguments: { cli: "claude", description: "To be deleted" }
+        }) as CallToolResult;
+
+        const session = JSON.parse(createResult.content[0].text).session;
+
+        // Delete it
+        const deleteResult = await client.callTool({
+          name: "session_delete",
+          arguments: { sessionId: session.id }
+        }) as CallToolResult;
+
+        const response = JSON.parse(deleteResult.content[0].text);
+        expect(response.success).toBe(true);
+        expect(response.deletedSession.id).toBe(session.id);
+
+        // Verify it's gone
+        const getResult = await client.callTool({
+          name: "session_get",
+          arguments: { sessionId: session.id }
+        }) as CallToolResult;
+
+        const getResponse = JSON.parse(getResult.content[0].text);
+        expect(getResponse.success).toBe(false);
+      });
+
+      it("should return error for non-existent session", async () => {
+        const result = await client.callTool({
+          name: "session_delete",
+          arguments: { sessionId: "non-existent" }
+        }) as CallToolResult;
+
+        const response = JSON.parse(result.content[0].text);
+        expect(response.success).toBe(false);
+      });
+    });
+
+    describe("session_clear_all", () => {
+      it("should clear all sessions", async () => {
+        // Create some sessions
+        await client.callTool({
+          name: "session_create",
+          arguments: { cli: "claude" }
+        });
+        await client.callTool({
+          name: "session_create",
+          arguments: { cli: "codex" }
+        });
+
+        // Clear all
+        const result = await client.callTool({
+          name: "session_clear_all",
+          arguments: {}
+        }) as CallToolResult;
+
+        const response = JSON.parse(result.content[0].text);
+        expect(response.success).toBe(true);
+        expect(response.deletedCount).toBeGreaterThanOrEqual(2);
+
+        // Verify all are gone
+        const listResult = await client.callTool({
+          name: "session_list",
+          arguments: {}
+        }) as CallToolResult;
+
+        const listResponse = JSON.parse(listResult.content[0].text);
+        expect(listResponse.total).toBe(0);
+      });
+
+      it("should clear sessions for specific CLI only", async () => {
+        // Create sessions for different CLIs
+        await client.callTool({
+          name: "session_create",
+          arguments: { cli: "claude" }
+        });
+        await client.callTool({
+          name: "session_create",
+          arguments: { cli: "codex" }
+        });
+
+        // Clear only Claude sessions
+        const result = await client.callTool({
+          name: "session_clear_all",
+          arguments: { cli: "claude" }
+        }) as CallToolResult;
+
+        const response = JSON.parse(result.content[0].text);
+        expect(response.success).toBe(true);
+
+        // Verify Claude sessions gone but Codex remains
+        const claudeList = await client.callTool({
+          name: "session_list",
+          arguments: { cli: "claude" }
+        }) as CallToolResult;
+
+        const codexList = await client.callTool({
+          name: "session_list",
+          arguments: { cli: "codex" }
+        }) as CallToolResult;
+
+        expect(JSON.parse(claudeList.content[0].text).total).toBe(0);
+        expect(JSON.parse(codexList.content[0].text).total).toBeGreaterThan(0);
+      });
+    });
+
+    describe("session workflow", () => {
+      it("should support complete session lifecycle", async () => {
+        // 1. Create a session
+        const createResult = await client.callTool({
+          name: "session_create",
+          arguments: { cli: "claude", description: "Full lifecycle test" }
+        }) as CallToolResult;
+
+        const session = JSON.parse(createResult.content[0].text).session;
+        const sessionId = session.id;
+
+        // 2. Verify it's in the list
+        const listResult = await client.callTool({
+          name: "session_list",
+          arguments: { cli: "claude" }
+        }) as CallToolResult;
+
+        const sessions = JSON.parse(listResult.content[0].text).sessions;
+        expect(sessions.some((s: any) => s.id === sessionId)).toBe(true);
+
+        // 3. Get the session details
+        const getResult = await client.callTool({
+          name: "session_get",
+          arguments: { sessionId }
+        }) as CallToolResult;
+
+        expect(JSON.parse(getResult.content[0].text).success).toBe(true);
+
+        // 4. Set as active
+        await client.callTool({
+          name: "session_set_active",
+          arguments: { cli: "claude", sessionId }
+        });
+
+        // 5. Verify it's active
+        const listResult2 = await client.callTool({
+          name: "session_list",
+          arguments: {}
+        }) as CallToolResult;
+
+        expect(JSON.parse(listResult2.content[0].text).activeSessions.claude).toBe(sessionId);
+
+        // 6. Delete the session
+        const deleteResult = await client.callTool({
+          name: "session_delete",
+          arguments: { sessionId }
+        }) as CallToolResult;
+
+        expect(JSON.parse(deleteResult.content[0].text).success).toBe(true);
+
+        // 7. Verify it's gone and active is cleared
+        const listResult3 = await client.callTool({
+          name: "session_list",
+          arguments: {}
+        }) as CallToolResult;
+
+        const finalList = JSON.parse(listResult3.content[0].text);
+        expect(finalList.sessions.some((s: any) => s.id === sessionId)).toBe(false);
+        expect(finalList.activeSessions.claude).toBeNull();
       });
     });
   });
