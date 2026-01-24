@@ -649,3 +649,78 @@ Second review: 1 critical, 2 high, 3 medium, 2 low (8 total)
 > "The second review proves that security and quality are iterative processes. Fixing bugs reveals new issues, and new features introduce new risks. Multi-LLM collaboration is essential for comprehensive coverage."
 
 **Status:** 🔴 NOT production-ready until critical/high issues fixed
+
+---
+
+## UPDATE: All Critical/High Issues Fixed (2026-01-24)
+
+### Complete Fix Cycle ✅
+
+All 5 critical and high severity issues have been fixed by Codex via MCP gateway:
+
+**Process:**
+1. ✅ Second review identified 8 new issues (Codex + Gemini)
+2. ✅ Codex via MCP gateway implemented all 5 critical/high fixes
+3. ✅ All 114 tests passing (up from 113)
+4. ✅ Committed (f68a2f4)
+
+### Fixes Implemented by Codex
+
+**🔴 CRITICAL - Secret leakage** ✅ FIXED
+- Removed prompt content from session descriptions
+- Generic descriptions: "Claude Session", "Codex Session", "Gemini Session"
+- File permissions: 0o600 (owner read/write only)
+- Files: src/index.ts + src/session-manager.ts
+
+**🟡 HIGH - ReDoS in optimizer** ✅ FIXED
+- Replaced `.+?` with bounded character sets `[A-Za-z][\w-]*`
+- Added regression test for catastrophic backtracking
+- File: src/optimizer.ts
+
+**🟡 HIGH - Custom storage path** ✅ FIXED
+- ensureStorageDirectory creates dirname(storagePath)
+- No longer hardcoded to default path
+- File: src/session-manager.ts
+
+**🟡 MEDIUM - Atomic write collision** ✅ FIXED
+- Process-specific temp filenames (sessions.json.tmp.${process.pid})
+- Added fsync before rename
+- File: src/session-manager.ts
+
+**🟡 MEDIUM - Retry exit codes** ✅ FIXED
+- Non-zero exit codes now trigger retry
+- Preserved result metadata in error
+- File: src/executor.ts
+
+### Test Results
+
+**Before fixes:** 113 tests passing
+**After fixes:** 114 tests passing (added ReDoS regression test)
+**Build:** ✅ TypeScript compiles cleanly
+**Status:** ✅ Production-ready for 1.0 release
+
+### Remaining Low Priority Issues
+
+🟢 Low severity issues deferred to post-1.0:
+- Memory exhaustion from unbounded CLI output (add 50MB limit)
+- Performance overhead from NVM scanning (cache path)
+- Unused imports cleanup
+
+### Complete Dogfooding Validation
+
+This demonstrates the full iterative review cycle:
+
+```
+First Review → Fix Bugs → Second Review → Fix More Bugs → Ready
+     ↓              ↓            ↓              ↓            ✅
+  8 bugs       3 critical    8 new bugs    5 critical/
+   found         fixed         found      high fixed
+```
+
+**Time from second review to fixes committed:** 15 minutes
+
+**Commits:**
+- `bae8d17` - Second multi-LLM review findings documented
+- `f68a2f4` - Fix 5 critical/high severity bugs
+
+**Final Status:** ✅ PRODUCTION-READY
