@@ -4,6 +4,7 @@ This document outlines design and implementation best practices collected from i
 
 ## Table of Contents
 - [MCP Server Design](#mcp-server-design)
+- [Multi-LLM Orchestration Patterns](#multi-llm-orchestration-patterns)
 - [Error Handling](#error-handling)
 - [Retry & Circuit Breaker Patterns](#retry--circuit-breaker-patterns)
 - [Session Management](#session-management)
@@ -74,6 +75,143 @@ This document outlines design and implementation best practices collected from i
 
 **Research warning:**
 > "When a tool call returns no result, avoid starting the response with 'not found.' Provide as much generalized, relevant data as possible, as the LLM may be steered away from useful data."
+
+---
+
+## Multi-LLM Orchestration Patterns
+
+### 1. Single-Level Orchestration (Supported)
+**Pattern:** Parent LLM orchestrates child LLMs directly
+
+**Example:**
+```typescript
+// Claude orchestrates Codex for implementation
+await codex_request({
+  prompt: "Implement feature X",
+  fullAuto: true
+});
+
+// Claude orchestrates Gemini for review
+await gemini_request({
+  prompt: "Review implementation of feature X"
+});
+```
+
+**Status:** ✅ Fully supported and production-ready
+
+**Use cases:**
+- Implementation: Use Codex for code generation
+- Review: Use Claude for code quality, Gemini for bug finding
+- Specialized tasks: Route to appropriate LLM based on strength
+
+---
+
+### 2. Multi-Level Orchestration (Architectural Limitation)
+**Pattern:** Child LLM tries to orchestrate grandchild LLMs
+
+**Example that DOESN'T work:**
+```typescript
+// This will FAIL with "MCP error -32000: Connection closed"
+await codex_request({
+  prompt: "Implement feature X, then use claude_request to get a review",
+  fullAuto: true
+});
+// ❌ The claude_request call from within Codex will fail
+```
+
+**Why it fails:**
+- MCP server lifecycle is tied to the fullAuto execution context
+- Nested MCP connections from within a subprocess are not supported
+- The connection closes when a child tries to spawn a grandchild
+
+**Status:** ❌ Not supported (architectural limitation)
+
+**Discovered:** 2026-01-24 during performance metrics implementation (see DOGFOODING_LESSONS.md Issue #4)
+
+---
+
+### 3. Manual Multi-Level Orchestration (Recommended Pattern)
+**Pattern:** Parent orchestrates each level manually
+
+**Example that DOES work:**
+```typescript
+// Step 1: Parent → Child (implementation)
+const implementation = await codex_request({
+  prompt: "Implement feature X",
+  fullAuto: true
+});
+
+// Step 2: Parent → Child (review #1)
+const claudeReview = await claude_request({
+  prompt: "Review this implementation for code quality...",
+  model: "sonnet"
+});
+
+// Step 3: Parent → Child (review #2)
+const geminiReview = await gemini_request({
+  prompt: "Review this implementation for bugs...",
+  model: "gemini-2.5-pro"
+});
+
+// Step 4: Parent → Child (fixes)
+const fixes = await codex_request({
+  prompt: `Fix these issues:\n${claudeReview}\n${geminiReview}`,
+  fullAuto: true
+});
+```
+
+**Status:** ✅ Fully supported and proven in production
+
+**Benefits:**
+- Parent maintains full control over workflow
+- Each step is isolated and verifiable
+- Reviews can run in parallel if independent
+- Clear audit trail of orchestration
+
+---
+
+### 4. Orchestration Best Practices
+
+**Choose the right LLM for each task:**
+- **Codex**: Fast implementation, code generation
+- **Claude**: Code quality review, architecture analysis, orchestration
+- **Gemini**: Bug finding, edge case analysis
+
+**Proven workflow pattern:**
+```
+1. Codex implements feature
+2. Claude reviews for code quality
+3. Gemini reviews for bugs/edge cases
+4. Codex fixes issues found
+5. Tests verify all changes
+```
+
+**Parallel vs Sequential:**
+- Reviews can run in parallel (independent)
+- Implementation must precede reviews (sequential)
+- Fixes must follow reviews (sequential)
+
+**Error handling:**
+- Each orchestration step should handle failures independently
+- Don't assume child LLM success - verify results
+- Build/test verification after code changes
+
+**Documentation:**
+- Document which LLM performed each task
+- Capture review findings for audit trail
+- Track metrics on LLM performance per task type
+
+---
+
+### 5. Future Considerations
+
+**Potential improvements to enable autonomous multi-level orchestration:**
+1. **Batch request tool**: Package multiple sub-requests in a single call
+2. **Session sharing**: Allow child LLMs to inherit parent's MCP connection
+3. **Async orchestration**: Support fire-and-forget sub-tasks with callbacks
+4. **Connection pooling**: Maintain persistent MCP connections for nested calls
+
+**Current recommendation:** Use manual multi-level orchestration pattern until architecture supports nested connections.
 
 ---
 
