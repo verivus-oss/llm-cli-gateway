@@ -82,15 +82,79 @@ Use a different LLM (codex_request or gemini_request) to modify the code, as the
 
 ---
 
+## Issue #4: FullAuto Sessions Cannot Spawn MCP Sub-Sessions
+
+**Discovered:** 2026-01-24 during performance metrics implementation
+
+**Problem:** When an LLM runs in fullAuto mode and tries to use MCP tools (like `claude_request` or `gemini_request`) to spawn sub-sessions, the connection fails with "MCP error -32000: Connection closed".
+
+**Scenario:**
+1. User asks Claude to orchestrate Codex with instructions to use MCP tools
+2. Claude calls `codex_request` with fullAuto=true and instructions to call `claude_request` and `gemini_request` for code reviews
+3. Codex implements the feature successfully
+4. Codex tries to call `claude_request` for review
+5. **MCP connection closes** - sub-session fails
+
+**Why This Happens:**
+- The MCP server lifecycle is tied to the fullAuto execution context
+- When Codex runs in fullAuto mode, it's executing within a subprocess
+- Attempting to spawn another MCP tool call from within that subprocess tries to create a nested connection
+- The MCP server isn't designed for nested/recursive connections from the same execution context
+
+**Architectural Issue:**
+True multi-level autonomous orchestration is not currently possible. An LLM in fullAuto mode cannot orchestrate other LLMs via MCP tools.
+
+**Workaround:**
+Manual orchestration at each level:
+1. Parent LLM (Claude) orchestrates child LLM (Codex) for implementation
+2. Parent LLM manually orchestrates additional children (Claude + Gemini) for reviews
+3. Parent LLM orchestrates child LLM (Codex) again for fixes
+
+**Example that DOESN'T work:**
+```
+codex_request with instructions:
+  "Implement feature X, then use claude_request to get a review, then fix any issues found"
+  ❌ The claude_request call will fail with connection closed
+```
+
+**Example that DOES work:**
+```
+1. codex_request: "Implement feature X"
+2. claude_request: "Review the implementation of feature X"
+3. codex_request: "Fix these issues: [paste review feedback]"
+✅ Each is a separate top-level call from the orchestrator
+```
+
+**Impact:**
+- Limits autonomous multi-level orchestration
+- Requires human or top-level LLM to coordinate each step
+- Cannot delegate orchestration responsibilities to child LLMs
+
+**Future Consideration:**
+- Could be addressed with MCP server session management improvements
+- Would require supporting nested/concurrent MCP connections
+- Or: design a "batch request" tool that packages multiple sub-requests
+
+**Lesson:** MCP tool calls work great for single-level orchestration (Parent → Child), but multi-level autonomous orchestration (Parent → Child → GrandChild) requires architectural changes to support nested MCP connections.
+
+---
+
 ## Summary
 
-Through attempting to use `claude_request` to implement correlation ID tracking, we discovered:
+Through dogfooding the llm-cli-gateway, we discovered:
 
 1. ✅ **Fixed**: Wrong CLI flag for permission bypass
 2. ⚠️ **Limitation**: Tool can't bypass its own permissions (architectural)
 3. 📚 **Process**: Importance of debugging tool failures instead of manual workarounds
+4. ⚠️ **Limitation**: FullAuto sessions can't spawn MCP sub-sessions (architectural)
+
+**Proven Capabilities:**
+- ✅ Single-level orchestration: Claude → Codex ✓
+- ✅ Cross-tool collaboration: Codex + Claude + Gemini ✓
+- ✅ Manual multi-level orchestration ✓
+- ❌ Autonomous multi-level orchestration ✗
 
 **Next Steps:**
-- Consider adding a note in tool documentation about the permission limitation
-- Implement correlation ID manually (since dogfooding revealed this isn't possible via self-referential tool use)
-- OR use codex/gemini to implement it (proving cross-tool usage works)
+- Document MCP connection architecture in BEST_PRACTICES.md
+- Consider implementing batch/composite request patterns for multi-step workflows
+- Explore MCP session management improvements for nested connections
