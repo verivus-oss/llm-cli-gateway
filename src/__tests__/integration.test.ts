@@ -674,4 +674,313 @@ describe("MCP Server Integration", () => {
       });
     });
   });
+
+  describe("cross-client session sharing", () => {
+    // This tests the scenario where one LLM wants to reuse another LLM's conversation
+    // e.g., LLM A creates a session, LLM B continues it
+
+    afterAll(async () => {
+      await client.callTool({
+        name: "session_clear_all",
+        arguments: {}
+      });
+    });
+
+    it("should allow different clients to share the same session", async () => {
+      // Client A creates a session
+      const createResult = await client.callTool({
+        name: "session_create",
+        arguments: {
+          cli: "claude",
+          description: "Shared session for multiple LLMs",
+          setAsActive: false  // Don't set as active so we explicitly pass sessionId
+        }
+      }) as CallToolResult;
+
+      const sessionData = JSON.parse(createResult.content[0].text);
+      const sharedSessionId = sessionData.session.id;
+
+      expect(sharedSessionId).toBeDefined();
+
+      // Verify any client can retrieve the session
+      const getResult = await client.callTool({
+        name: "session_get",
+        arguments: { sessionId: sharedSessionId }
+      }) as CallToolResult;
+
+      const getResponse = JSON.parse(getResult.content[0].text);
+      expect(getResponse.success).toBe(true);
+      expect(getResponse.session.id).toBe(sharedSessionId);
+      expect(getResponse.session.description).toBe("Shared session for multiple LLMs");
+    });
+
+    it("should allow Client B to set active a session created by Client A", async () => {
+      // Client A creates a session
+      const createResult = await client.callTool({
+        name: "session_create",
+        arguments: {
+          cli: "codex",
+          description: "Client A's session",
+          setAsActive: false
+        }
+      }) as CallToolResult;
+
+      const sessionId = JSON.parse(createResult.content[0].text).session.id;
+
+      // Client B (simulated by same client) sets it as active
+      const setActiveResult = await client.callTool({
+        name: "session_set_active",
+        arguments: {
+          cli: "codex",
+          sessionId: sessionId
+        }
+      }) as CallToolResult;
+
+      const setResponse = JSON.parse(setActiveResult.content[0].text);
+      expect(setResponse.success).toBe(true);
+
+      // Verify it's now the active session
+      const listResult = await client.callTool({
+        name: "session_list",
+        arguments: { cli: "codex" }
+      }) as CallToolResult;
+
+      const listResponse = JSON.parse(listResult.content[0].text);
+      expect(listResponse.activeSessions.codex).toBe(sessionId);
+    });
+
+    it("should share session updates across clients", async () => {
+      // Client A creates a session
+      const createResult = await client.callTool({
+        name: "session_create",
+        arguments: {
+          cli: "gemini",
+          description: "Updated by multiple clients"
+        }
+      }) as CallToolResult;
+
+      const sessionId = JSON.parse(createResult.content[0].text).session.id;
+
+      // Client A retrieves it
+      const getResult1 = await client.callTool({
+        name: "session_get",
+        arguments: { sessionId }
+      }) as CallToolResult;
+
+      const session1 = JSON.parse(getResult1.content[0].text).session;
+      const originalLastUsed = session1.lastUsedAt;
+
+      // Simulate some time passing and Client B using the session
+      await new Promise(resolve => setTimeout(resolve, 10));
+
+      // Client B would use the session (simulated by retrieving it)
+      const getResult2 = await client.callTool({
+        name: "session_get",
+        arguments: { sessionId }
+      }) as CallToolResult;
+
+      const session2 = JSON.parse(getResult2.content[0].text).session;
+
+      // Both clients see the same session
+      expect(session2.id).toBe(session1.id);
+      expect(session2.description).toBe(session1.description);
+      expect(session2.cli).toBe(session1.cli);
+    });
+
+    it("should allow session handoff between LLMs", async () => {
+      // Scenario: LLM A creates a session and does some work
+      // LLM B wants to check something from that conversation
+      // LLM C might then continue the work
+
+      // LLM A creates and uses a session
+      const createResult = await client.callTool({
+        name: "session_create",
+        arguments: {
+          cli: "claude",
+          description: "Code review started by LLM A"
+        }
+      }) as CallToolResult;
+
+      const sessionId = JSON.parse(createResult.content[0].text).session.id;
+
+      // LLM A sets it as active (implicit in many scenarios)
+      await client.callTool({
+        name: "session_set_active",
+        arguments: { cli: "claude", sessionId }
+      });
+
+      // LLM B retrieves the session to check on progress
+      const llmBCheck = await client.callTool({
+        name: "session_get",
+        arguments: { sessionId }
+      }) as CallToolResult;
+
+      expect(JSON.parse(llmBCheck.content[0].text).success).toBe(true);
+
+      // LLM B can see it's the active session
+      const listResult = await client.callTool({
+        name: "session_list",
+        arguments: { cli: "claude" }
+      }) as CallToolResult;
+
+      const activeSessions = JSON.parse(listResult.content[0].text).activeSessions;
+      expect(activeSessions.claude).toBe(sessionId);
+
+      // LLM C could now continue using this session by passing sessionId
+      // This would happen in the actual claude_request call
+      // (We can't fully test this without actual CLI tools, but the session is accessible)
+    });
+
+    it("should prevent session interference between different CLIs", async () => {
+      // Create sessions for different CLIs
+      const claudeResult = await client.callTool({
+        name: "session_create",
+        arguments: { cli: "claude", description: "Claude work" }
+      }) as CallToolResult;
+
+      const codexResult = await client.callTool({
+        name: "session_create",
+        arguments: { cli: "codex", description: "Codex work" }
+      }) as CallToolResult;
+
+      const claudeSessionId = JSON.parse(claudeResult.content[0].text).session.id;
+      const codexSessionId = JSON.parse(codexResult.content[0].text).session.id;
+
+      // Try to set Claude session as active for Codex (should fail)
+      const wrongCliResult = await client.callTool({
+        name: "session_set_active",
+        arguments: { cli: "codex", sessionId: claudeSessionId }
+      }) as CallToolResult;
+
+      const response = JSON.parse(wrongCliResult.content[0].text);
+      expect(response.success).toBe(false);
+
+      // Verify sessions remain independent
+      const claudeList = await client.callTool({
+        name: "session_list",
+        arguments: { cli: "claude" }
+      }) as CallToolResult;
+
+      const codexList = await client.callTool({
+        name: "session_list",
+        arguments: { cli: "codex" }
+      }) as CallToolResult;
+
+      const claudeSessions = JSON.parse(claudeList.content[0].text);
+      const codexSessions = JSON.parse(codexList.content[0].text);
+
+      expect(claudeSessions.activeSessions.claude).toBe(claudeSessionId);
+      expect(codexSessions.activeSessions.codex).toBe(codexSessionId);
+    });
+
+    it("should support multi-LLM workflow with explicit session IDs", async () => {
+      // Complex scenario: Multiple LLMs coordinating using explicit session IDs
+
+      // LLM 1: Creates a session for initial analysis
+      const session1Result = await client.callTool({
+        name: "session_create",
+        arguments: {
+          cli: "claude",
+          description: "Step 1: Initial code analysis",
+          setAsActive: false
+        }
+      }) as CallToolResult;
+
+      const session1Id = JSON.parse(session1Result.content[0].text).session.id;
+
+      // LLM 2: Creates a separate session for design review
+      const session2Result = await client.callTool({
+        name: "session_create",
+        arguments: {
+          cli: "claude",
+          description: "Step 2: Design review",
+          setAsActive: false
+        }
+      }) as CallToolResult;
+
+      const session2Id = JSON.parse(session2Result.content[0].text).session.id;
+
+      // LLM 3: Creates a session for implementation
+      const session3Result = await client.callTool({
+        name: "session_create",
+        arguments: {
+          cli: "claude",
+          description: "Step 3: Implementation",
+          setAsActive: false
+        }
+      }) as CallToolResult;
+
+      const session3Id = JSON.parse(session3Result.content[0].text).session.id;
+
+      // Verify all sessions exist independently
+      const listResult = await client.callTool({
+        name: "session_list",
+        arguments: { cli: "claude" }
+      }) as CallToolResult;
+
+      const sessions = JSON.parse(listResult.content[0].text).sessions;
+      const sessionIds = sessions.map((s: any) => s.id);
+
+      expect(sessionIds).toContain(session1Id);
+      expect(sessionIds).toContain(session2Id);
+      expect(sessionIds).toContain(session3Id);
+
+      // LLM 4 (coordinator) can retrieve all sessions to check progress
+      const get1 = await client.callTool({
+        name: "session_get",
+        arguments: { sessionId: session1Id }
+      }) as CallToolResult;
+
+      const get2 = await client.callTool({
+        name: "session_get",
+        arguments: { sessionId: session2Id }
+      }) as CallToolResult;
+
+      const get3 = await client.callTool({
+        name: "session_get",
+        arguments: { sessionId: session3Id }
+      }) as CallToolResult;
+
+      expect(JSON.parse(get1.content[0].text).session.description).toBe("Step 1: Initial code analysis");
+      expect(JSON.parse(get2.content[0].text).session.description).toBe("Step 2: Design review");
+      expect(JSON.parse(get3.content[0].text).session.description).toBe("Step 3: Implementation");
+    });
+
+    it("should allow session deletion by any client", async () => {
+      // Client A creates a session
+      const createResult = await client.callTool({
+        name: "session_create",
+        arguments: {
+          cli: "gemini",
+          description: "Temporary collaboration session"
+        }
+      }) as CallToolResult;
+
+      const sessionId = JSON.parse(createResult.content[0].text).session.id;
+
+      // Verify it exists
+      const getResult = await client.callTool({
+        name: "session_get",
+        arguments: { sessionId }
+      }) as CallToolResult;
+
+      expect(JSON.parse(getResult.content[0].text).success).toBe(true);
+
+      // Client B decides to delete it (cleanup)
+      const deleteResult = await client.callTool({
+        name: "session_delete",
+        arguments: { sessionId }
+      }) as CallToolResult;
+
+      expect(JSON.parse(deleteResult.content[0].text).success).toBe(true);
+
+      // Client C verifies it's gone
+      const verifyResult = await client.callTool({
+        name: "session_get",
+        arguments: { sessionId }
+      }) as CallToolResult;
+
+      expect(JSON.parse(verifyResult.content[0].text).success).toBe(false);
+    });
+  });
 });

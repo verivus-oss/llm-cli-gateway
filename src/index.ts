@@ -5,6 +5,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { executeCli } from "./executor.js";
 import { SessionManager, type CliType } from "./session-manager.js";
+import { ResourceProvider } from "./resources.js";
 
 // Simple logger that writes to stderr (stdout is used for MCP protocol)
 const logger = {
@@ -26,8 +27,9 @@ const server = new McpServer({
   version: "1.0.0"
 });
 
-// Initialize session manager
+// Initialize session manager and resource provider
 const sessionManager = new SessionManager();
+const resourceProvider = new ResourceProvider(sessionManager);
 
 // Helper function for standardized error responses
 function createErrorResponse(cli: string, code: number, stderr: string, error?: Error) {
@@ -82,6 +84,122 @@ const CLI_INFO = {
     }
   }
 } as const;
+
+//──────────────────────────────────────────────────────────────────────────────
+// MCP Resources
+//──────────────────────────────────────────────────────────────────────────────
+
+// Register all sessions resource
+server.registerResource(
+  "all-sessions",
+  "sessions://all",
+  {
+    title: "📋 All Sessions",
+    description: "List of all conversation sessions across all CLIs",
+    mimeType: "application/json"
+  },
+  async (uri) => {
+    logger.debug("Reading all sessions resource");
+    const contents = resourceProvider.readResource(uri.href);
+    return { contents: contents ? [contents] : [] };
+  }
+);
+
+// Register Claude sessions resource
+server.registerResource(
+  "claude-sessions",
+  "sessions://claude",
+  {
+    title: "🤖 Claude Sessions",
+    description: "List of Claude conversation sessions",
+    mimeType: "application/json"
+  },
+  async (uri) => {
+    logger.debug("Reading Claude sessions resource");
+    const contents = resourceProvider.readResource(uri.href);
+    return { contents: contents ? [contents] : [] };
+  }
+);
+
+// Register Codex sessions resource
+server.registerResource(
+  "codex-sessions",
+  "sessions://codex",
+  {
+    title: "💻 Codex Sessions",
+    description: "List of Codex conversation sessions",
+    mimeType: "application/json"
+  },
+  async (uri) => {
+    logger.debug("Reading Codex sessions resource");
+    const contents = resourceProvider.readResource(uri.href);
+    return { contents: contents ? [contents] : [] };
+  }
+);
+
+// Register Gemini sessions resource
+server.registerResource(
+  "gemini-sessions",
+  "sessions://gemini",
+  {
+    title: "✨ Gemini Sessions",
+    description: "List of Gemini conversation sessions",
+    mimeType: "application/json"
+  },
+  async (uri) => {
+    logger.debug("Reading Gemini sessions resource");
+    const contents = resourceProvider.readResource(uri.href);
+    return { contents: contents ? [contents] : [] };
+  }
+);
+
+// Register Claude models resource
+server.registerResource(
+  "claude-models",
+  "models://claude",
+  {
+    title: "🧠 Claude Models & Capabilities",
+    description: "Available Claude models and their capabilities",
+    mimeType: "application/json"
+  },
+  async (uri) => {
+    logger.debug("Reading Claude models resource");
+    const contents = resourceProvider.readResource(uri.href);
+    return { contents: contents ? [contents] : [] };
+  }
+);
+
+// Register Codex models resource
+server.registerResource(
+  "codex-models",
+  "models://codex",
+  {
+    title: "🔧 Codex Models & Capabilities",
+    description: "Available Codex models and their capabilities",
+    mimeType: "application/json"
+  },
+  async (uri) => {
+    logger.debug("Reading Codex models resource");
+    const contents = resourceProvider.readResource(uri.href);
+    return { contents: contents ? [contents] : [] };
+  }
+);
+
+// Register Gemini models resource
+server.registerResource(
+  "gemini-models",
+  "models://gemini",
+  {
+    title: "🌟 Gemini Models & Capabilities",
+    description: "Available Gemini models and their capabilities",
+    mimeType: "application/json"
+  },
+  async (uri) => {
+    logger.debug("Reading Gemini models resource");
+    const contents = resourceProvider.readResource(uri.href);
+    return { contents: contents ? [contents] : [] };
+  }
+);
 
 //──────────────────────────────────────────────────────────────────────────────
 // Claude Code Tool
