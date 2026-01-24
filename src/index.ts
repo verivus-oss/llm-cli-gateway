@@ -227,16 +227,16 @@ server.registerResource(
 server.tool(
   "claude_request",
   {
-    prompt: z.string().min(1, "Prompt cannot be empty").max(100000, "Prompt too long (max 100k chars)").describe("The prompt to send to Claude Code"),
-    model: z.enum(["opus", "sonnet", "haiku"]).optional().describe("Model to use"),
-    outputFormat: z.enum(["text", "json"]).default("text").describe("Output format"),
-    sessionId: z.string().optional().describe("Session ID to use for this request. If not provided, uses the active session or creates a new one."),
-    continueSession: z.boolean().default(false).describe("Continue the active session (uses --continue flag)"),
-    createNewSession: z.boolean().default(false).describe("Always create a new session for this request"),
-    allowedTools: z.array(z.string()).optional().describe("Tools that are allowed (e.g., ['Bash(git:*)', 'Edit', 'Write'])"),
-    disallowedTools: z.array(z.string()).optional().describe("Tools that are disallowed"),
-    dangerouslySkipPermissions: z.boolean().default(false).describe("Bypass all permission checks (use only in sandboxes)"),
-    correlationId: z.string().optional().describe("Correlation ID for request tracing. Auto-generated if not provided.")
+    prompt: z.string().min(1, "Prompt cannot be empty").max(100000, "Prompt too long (max 100k chars)").describe("Prompt text for Claude"),
+    model: z.enum(["opus", "sonnet", "haiku"]).optional().describe("Model (opus|sonnet|haiku)"),
+    outputFormat: z.enum(["text", "json"]).default("text").describe("Output format (text|json)"),
+    sessionId: z.string().optional().describe("Session ID (uses active if omitted)"),
+    continueSession: z.boolean().default(false).describe("Continue active session"),
+    createNewSession: z.boolean().default(false).describe("Force new session"),
+    allowedTools: z.array(z.string()).optional().describe("Allowed tools (['Bash(git:*)','Edit','Write'])"),
+    disallowedTools: z.array(z.string()).optional().describe("Disallowed tools"),
+    dangerouslySkipPermissions: z.boolean().default(false).describe("Bypass permissions (sandbox only)"),
+    correlationId: z.string().optional().describe("Request trace ID (auto if omitted)")
   },
   async ({ prompt, model, outputFormat, sessionId, continueSession, createNewSession, allowedTools, disallowedTools, dangerouslySkipPermissions, correlationId }) => {
     const startTime = Date.now();
@@ -319,12 +319,12 @@ server.tool(
 server.tool(
   "codex_request",
   {
-    prompt: z.string().min(1, "Prompt cannot be empty").max(100000, "Prompt too long (max 100k chars)").describe("The prompt to send to Codex"),
-    model: z.enum(["o3", "o4-mini", "gpt-4.1"]).optional().describe("Model to use"),
-    fullAuto: z.boolean().default(false).describe("Enable full-auto mode for sandboxed automatic execution"),
-    sessionId: z.string().optional().describe("Session identifier to track conversations. Codex manages sessions internally."),
-    createNewSession: z.boolean().default(false).describe("Always create a new session for this request"),
-    correlationId: z.string().optional().describe("Correlation ID for request tracing. Auto-generated if not provided.")
+    prompt: z.string().min(1, "Prompt cannot be empty").max(100000, "Prompt too long (max 100k chars)").describe("Prompt text for Codex"),
+    model: z.enum(["o3", "o4-mini", "gpt-4.1"]).optional().describe("Model (o3|o4-mini|gpt-4.1)"),
+    fullAuto: z.boolean().default(false).describe("Full-auto mode (sandboxed execution)"),
+    sessionId: z.string().optional().describe("Session ID (Codex manages internally)"),
+    createNewSession: z.boolean().default(false).describe("Force new session"),
+    correlationId: z.string().optional().describe("Request trace ID (auto if omitted)")
   },
   async ({ prompt, model, fullAuto, sessionId, createNewSession, correlationId }) => {
     const startTime = Date.now();
@@ -392,15 +392,15 @@ server.tool(
 server.tool(
   "gemini_request",
   {
-    prompt: z.string().min(1, "Prompt cannot be empty").max(100000, "Prompt too long (max 100k chars)").describe("The prompt to send to Gemini CLI"),
-    model: z.enum(["gemini-2.5-pro", "gemini-2.5-flash"]).optional().describe("Model to use"),
-    sessionId: z.string().optional().describe("Session identifier to resume. Use 'latest' for most recent session or a session ID."),
-    resumeLatest: z.boolean().default(false).describe("Resume the latest session automatically"),
-    createNewSession: z.boolean().default(false).describe("Always create a new session for this request"),
-    approvalMode: z.enum(["default", "auto_edit", "yolo"]).optional().describe("Approval mode: 'default' (prompt for approval), 'auto_edit' (auto-approve edit tools), 'yolo' (auto-approve all tools)"),
-    allowedTools: z.array(z.string()).optional().describe("Tools that are allowed to run without confirmation (e.g., ['Write', 'Edit', 'Bash'])"),
-    includeDirs: z.array(z.string()).optional().describe("Additional directories to include in the workspace"),
-    correlationId: z.string().optional().describe("Correlation ID for request tracing. Auto-generated if not provided.")
+    prompt: z.string().min(1, "Prompt cannot be empty").max(100000, "Prompt too long (max 100k chars)").describe("Prompt text for Gemini"),
+    model: z.enum(["gemini-2.5-pro", "gemini-2.5-flash"]).optional().describe("Model (pro|flash)"),
+    sessionId: z.string().optional().describe("Session ID or 'latest'"),
+    resumeLatest: z.boolean().default(false).describe("Resume latest session"),
+    createNewSession: z.boolean().default(false).describe("Force new session"),
+    approvalMode: z.enum(["default", "auto_edit", "yolo"]).optional().describe("Approval: default|auto_edit|yolo"),
+    allowedTools: z.array(z.string()).optional().describe("Allowed tools (['Write','Edit','Bash'])"),
+    includeDirs: z.array(z.string()).optional().describe("Additional workspace directories"),
+    correlationId: z.string().optional().describe("Request trace ID (auto if omitted)")
   },
   async ({ prompt, model, sessionId, resumeLatest, createNewSession, approvalMode, allowedTools, includeDirs, correlationId }) => {
     const startTime = Date.now();
@@ -482,7 +482,7 @@ server.tool(
 server.tool(
   "list_models",
   {
-    cli: z.enum(["claude", "codex", "gemini"]).optional().describe("Specific CLI to list models for")
+    cli: z.enum(["claude", "codex", "gemini"]).optional().describe("CLI filter (claude|codex|gemini)")
   },
   async ({ cli }) => {
     const result = cli ? { [cli]: CLI_INFO[cli] } : CLI_INFO;
@@ -497,9 +497,9 @@ server.tool(
 server.tool(
   "session_create",
   {
-    cli: z.enum(["claude", "codex", "gemini"]).describe("Which CLI to create a session for"),
-    description: z.string().optional().describe("Optional description for the session"),
-    setAsActive: z.boolean().default(true).describe("Set this as the active session for the CLI")
+    cli: z.enum(["claude", "codex", "gemini"]).describe("CLI type (claude|codex|gemini)"),
+    description: z.string().optional().describe("Session description"),
+    setAsActive: z.boolean().default(true).describe("Set as active session")
   },
   async ({ cli, description, setAsActive }) => {
     try {
@@ -535,7 +535,7 @@ server.tool(
 server.tool(
   "session_list",
   {
-    cli: z.enum(["claude", "codex", "gemini"]).optional().describe("Filter sessions by CLI (optional)")
+    cli: z.enum(["claude", "codex", "gemini"]).optional().describe("CLI filter (claude|codex|gemini)")
   },
   async ({ cli }) => {
     try {
@@ -578,8 +578,8 @@ server.tool(
 server.tool(
   "session_set_active",
   {
-    cli: z.enum(["claude", "codex", "gemini"]).describe("Which CLI to set the active session for"),
-    sessionId: z.string().describe("Session ID to set as active (or null to clear)")
+    cli: z.enum(["claude", "codex", "gemini"]).describe("CLI type (claude|codex|gemini)"),
+    sessionId: z.string().describe("Session ID (null to clear)")
   },
   async ({ cli, sessionId }) => {
     try {
@@ -619,7 +619,7 @@ server.tool(
 server.tool(
   "session_delete",
   {
-    sessionId: z.string().describe("Session ID to delete")
+    sessionId: z.string().describe("Session ID")
   },
   async ({ sessionId }) => {
     try {
@@ -662,7 +662,7 @@ server.tool(
 server.tool(
   "session_get",
   {
-    sessionId: z.string().describe("Session ID to retrieve")
+    sessionId: z.string().describe("Session ID")
   },
   async ({ sessionId }) => {
     try {
@@ -704,7 +704,7 @@ server.tool(
 server.tool(
   "session_clear_all",
   {
-    cli: z.enum(["claude", "codex", "gemini"]).optional().describe("Clear sessions for specific CLI only (optional)")
+    cli: z.enum(["claude", "codex", "gemini"]).optional().describe("CLI filter (claude|codex|gemini)")
   },
   async ({ cli }) => {
     try {
