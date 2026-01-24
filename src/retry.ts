@@ -116,6 +116,20 @@ export async function withRetry<T>(
   circuitBreaker: CircuitBreaker,
   retryOptions?: Partial<RetryOptions>,
 ): Promise<T> {
+  const wrapError = (message: string, error?: any): Error => {
+    const wrapped = new Error(message) as Error & { code?: any; result?: any; cause?: any };
+    if (error) {
+      wrapped.cause = error;
+      if ("code" in error) {
+        wrapped.code = error.code;
+      }
+      if ("result" in error) {
+        wrapped.result = error.result;
+      }
+    }
+    return wrapped;
+  };
+
   const options: RetryOptions = {
     initialDelay: 1000, // 1s
     maxDelay: 30000, // 30s
@@ -137,7 +151,7 @@ export async function withRetry<T>(
       circuitBreaker.onStateChange?.(CircuitBreakerState.HALF_OPEN);
     } else {
       const remaining = Math.ceil((circuitBreaker.resetTimeout - timeSinceFailure) / 1000);
-      throw new Error(
+      throw wrapError(
         `[CircuitBreaker] Circuit is open. Failing fast. Will not try for another ${remaining}s.`,
       );
     }
@@ -162,7 +176,7 @@ export async function withRetry<T>(
       return result;
     } catch (error: any) {
       if (!options.isTransient(error)) {
-        throw new Error(`[CircuitBreaker] Operation failed with non-transient error: ${error.message}`);
+        throw wrapError(`[CircuitBreaker] Operation failed with non-transient error: ${error.message}`, error);
       }
 
       circuitBreaker.failures++;
@@ -171,7 +185,10 @@ export async function withRetry<T>(
       if (circuitBreaker.state === CircuitBreakerState.HALF_OPEN) {
         circuitBreaker.state = CircuitBreakerState.OPEN;
         circuitBreaker.onStateChange?.(CircuitBreakerState.OPEN, error);
-        throw new Error(`[CircuitBreaker] Circuit re-opened after failed attempt in HALF_OPEN state. Last error: ${error.message}`);
+        throw wrapError(
+          `[CircuitBreaker] Circuit re-opened after failed attempt in HALF_OPEN state. Last error: ${error.message}`,
+          error,
+        );
       }
 
       if (circuitBreaker.failures >= circuitBreaker.failureThreshold) {
@@ -180,8 +197,9 @@ export async function withRetry<T>(
         if(oldState === CircuitBreakerState.CLOSED) {
             circuitBreaker.onStateChange?.(CircuitBreakerState.OPEN, error);
         }
-        throw new Error(
+        throw wrapError(
           `[CircuitBreaker] Circuit opened after ${circuitBreaker.failures} consecutive failures. Last error: ${error.message}`,
+          error,
         );
       }
 

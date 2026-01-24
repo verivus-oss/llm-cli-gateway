@@ -1,7 +1,7 @@
 import { randomUUID } from "crypto";
 import { homedir } from "os";
 import { join } from "path";
-import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, unlinkSync } from "fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, unlinkSync, renameSync } from "fs";
 
 export const CLI_TYPES = ["claude", "codex", "gemini"] as const;
 export type CliType = (typeof CLI_TYPES)[number];
@@ -55,7 +55,9 @@ export class SessionManager {
   }
 
   private saveStorage(): void {
-    writeFileSync(this.storagePath, JSON.stringify(this.storage, null, 2), "utf-8");
+    const tempPath = `${this.storagePath}.tmp`;
+    writeFileSync(tempPath, JSON.stringify(this.storage, null, 2), "utf-8");
+    renameSync(tempPath, this.storagePath);
   }
 
   createSession(cli: CliType, description?: string, sessionId?: string): Session {

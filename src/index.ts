@@ -579,7 +579,7 @@ server.tool(
   "session_set_active",
   {
     cli: z.enum(["claude", "codex", "gemini"]).describe("CLI type (claude|codex|gemini)"),
-    sessionId: z.string().describe("Session ID (null to clear)")
+    sessionId: z.string().nullable().describe("Session ID (null to clear)")
   },
   async ({ cli, sessionId }) => {
     try {
