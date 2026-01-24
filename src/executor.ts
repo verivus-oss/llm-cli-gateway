@@ -6,6 +6,7 @@ import { readdirSync, existsSync } from "fs";
 export interface ExecuteOptions {
   timeout?: number;
   cwd?: string;
+  correlationId?: string;
 }
 
 export interface ExecuteResult {

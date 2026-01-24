@@ -2,6 +2,7 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { randomUUID } from "crypto";
 import { z } from "zod";
 import { executeCli } from "./executor.js";
 import { SessionManager, type CliType } from "./session-manager.js";
@@ -32,7 +33,7 @@ const sessionManager = new SessionManager();
 const resourceProvider = new ResourceProvider(sessionManager);
 
 // Helper function for standardized error responses
-function createErrorResponse(cli: string, code: number, stderr: string, error?: Error) {
+function createErrorResponse(cli: string, code: number, stderr: string, correlationId?: string, error?: Error) {
   let errorMessage = `Error executing ${cli} CLI`;
 
   if (error) {
@@ -41,15 +42,15 @@ function createErrorResponse(cli: string, code: number, stderr: string, error?: 
     if (error.message.includes("ENOENT")) {
       errorMessage += `\n\nThe '${cli}' command was not found. Please ensure ${cli} CLI is installed and in your PATH.`;
     }
-    logger.error(`${cli} CLI execution failed:`, error.message);
+    logger.error(`[${correlationId || "unknown"}] ${cli} CLI execution failed:`, error.message);
   } else if (code === 124) {
     // Timeout
     errorMessage += `: Command timed out\n${stderr}`;
-    logger.error(`${cli} CLI timed out`);
+    logger.error(`[${correlationId || "unknown"}] ${cli} CLI timed out`);
   } else if (code !== 0) {
     // Other non-zero exit code
     errorMessage += ` (exit code ${code}):\n${stderr}`;
-    logger.error(`${cli} CLI failed with exit code ${code}`);
+    logger.error(`[${correlationId || "unknown"}] ${cli} CLI failed with exit code ${code}`);
   }
 
   return {
@@ -216,11 +217,13 @@ server.tool(
     createNewSession: z.boolean().default(false).describe("Always create a new session for this request"),
     allowedTools: z.array(z.string()).optional().describe("Tools that are allowed (e.g., ['Bash(git:*)', 'Edit', 'Write'])"),
     disallowedTools: z.array(z.string()).optional().describe("Tools that are disallowed"),
-    dangerouslySkipPermissions: z.boolean().default(false).describe("Bypass all permission checks (use only in sandboxes)")
+    dangerouslySkipPermissions: z.boolean().default(false).describe("Bypass all permission checks (use only in sandboxes)"),
+    correlationId: z.string().optional().describe("Correlation ID for request tracing. Auto-generated if not provided.")
   },
-  async ({ prompt, model, outputFormat, sessionId, continueSession, createNewSession, allowedTools, disallowedTools, dangerouslySkipPermissions }) => {
+  async ({ prompt, model, outputFormat, sessionId, continueSession, createNewSession, allowedTools, disallowedTools, dangerouslySkipPermissions, correlationId }) => {
     const startTime = Date.now();
-    logger.info(`claude_request invoked with model=${model || 'default'}, prompt length=${prompt.length}, sessionId=${sessionId}, dangerouslySkipPermissions=${dangerouslySkipPermissions}`);
+    const corrId = correlationId || randomUUID();
+    logger.info(`[${corrId}] claude_request invoked with model=${model || 'default'}, prompt length=${prompt.length}, sessionId=${sessionId}, dangerouslySkipPermissions=${dangerouslySkipPermissions}`);
 
     try {
       const args = ["-p", prompt];
@@ -235,7 +238,7 @@ server.tool(
         args.push("--disallowed-tools", ...disallowedTools);
       }
       if (dangerouslySkipPermissions) {
-        args.push("--dangerously-skip-permissions");
+        args.push("--permission-mode", "bypassPermissions");
       }
 
       // Session management
@@ -255,12 +258,12 @@ server.tool(
         sessionManager.updateSessionUsage(effectiveSessionId);
       }
 
-      const { stdout, stderr, code } = await executeCli("claude", args);
+      const { stdout, stderr, code } = await executeCli("claude", args, { correlationId: corrId });
       const duration = Date.now() - startTime;
 
       if (code !== 0) {
-        logger.info(`claude_request failed in ${duration}ms`);
-        return createErrorResponse("claude", code, stderr);
+        logger.info(`[${corrId}] claude_request failed in ${duration}ms`);
+        return createErrorResponse("claude", code, stderr, corrId);
       }
 
       // If we used a session ID and it's not tracked yet, create a session record
@@ -268,7 +271,7 @@ server.tool(
         sessionManager.createSession("claude", `Session for: ${prompt.substring(0, 50)}...`, effectiveSessionId);
       }
 
-      logger.info(`claude_request completed successfully in ${duration}ms, response length=${stdout.length}`);
+      logger.info(`[${corrId}] claude_request completed successfully in ${duration}ms, response length=${stdout.length}`);
       const response = { content: [{ type: "text" as const, text: stdout }] };
 
       // Include session info in response if using a session
@@ -279,8 +282,8 @@ server.tool(
       return response;
     } catch (error) {
       const duration = Date.now() - startTime;
-      logger.info(`claude_request threw exception after ${duration}ms`);
-      return createErrorResponse("claude", 1, "", error as Error);
+      logger.info(`[${corrId}] claude_request threw exception after ${duration}ms`);
+      return createErrorResponse("claude", 1, "", corrId, error as Error);
     }
   }
 );
@@ -296,11 +299,13 @@ server.tool(
     model: z.enum(["o3", "o4-mini", "gpt-4.1"]).optional().describe("Model to use"),
     fullAuto: z.boolean().default(false).describe("Enable full-auto mode for sandboxed automatic execution"),
     sessionId: z.string().optional().describe("Session identifier to track conversations. Codex manages sessions internally."),
-    createNewSession: z.boolean().default(false).describe("Always create a new session for this request")
+    createNewSession: z.boolean().default(false).describe("Always create a new session for this request"),
+    correlationId: z.string().optional().describe("Correlation ID for request tracing. Auto-generated if not provided.")
   },
-  async ({ prompt, model, fullAuto, sessionId, createNewSession }) => {
+  async ({ prompt, model, fullAuto, sessionId, createNewSession, correlationId }) => {
     const startTime = Date.now();
-    logger.info(`codex_request invoked with model=${model || 'default'}, fullAuto=${fullAuto}, prompt length=${prompt.length}, sessionId=${sessionId}`);
+    const corrId = correlationId || randomUUID();
+    logger.info(`[${corrId}] codex_request invoked with model=${model || 'default'}, fullAuto=${fullAuto}, prompt length=${prompt.length}, sessionId=${sessionId}`);
 
     try {
       const args = ["exec"];
@@ -308,12 +313,12 @@ server.tool(
       if (fullAuto) args.push("--full-auto");
       args.push("--skip-git-repo-check", prompt);
 
-      const { stdout, stderr, code } = await executeCli("codex", args);
+      const { stdout, stderr, code } = await executeCli("codex", args, { correlationId: corrId });
       const duration = Date.now() - startTime;
 
       if (code !== 0) {
-        logger.info(`codex_request failed in ${duration}ms`);
-        return createErrorResponse("codex", code, stderr);
+        logger.info(`[${corrId}] codex_request failed in ${duration}ms`);
+        return createErrorResponse("codex", code, stderr, corrId);
       }
 
       // Track session usage
@@ -334,7 +339,7 @@ server.tool(
         effectiveSessionId = newSession.id;
       }
 
-      logger.info(`codex_request completed successfully in ${duration}ms, response length=${stdout.length}`);
+      logger.info(`[${corrId}] codex_request completed successfully in ${duration}ms, response length=${stdout.length}`);
       const response = { content: [{ type: "text" as const, text: stdout }] };
 
       if (effectiveSessionId) {
@@ -344,8 +349,8 @@ server.tool(
       return response;
     } catch (error) {
       const duration = Date.now() - startTime;
-      logger.info(`codex_request threw exception after ${duration}ms`);
-      return createErrorResponse("codex", 1, "", error as Error);
+      logger.info(`[${corrId}] codex_request threw exception after ${duration}ms`);
+      return createErrorResponse("codex", 1, "", corrId, error as Error);
     }
   }
 );
@@ -364,11 +369,13 @@ server.tool(
     createNewSession: z.boolean().default(false).describe("Always create a new session for this request"),
     approvalMode: z.enum(["default", "auto_edit", "yolo"]).optional().describe("Approval mode: 'default' (prompt for approval), 'auto_edit' (auto-approve edit tools), 'yolo' (auto-approve all tools)"),
     allowedTools: z.array(z.string()).optional().describe("Tools that are allowed to run without confirmation (e.g., ['Write', 'Edit', 'Bash'])"),
-    includeDirs: z.array(z.string()).optional().describe("Additional directories to include in the workspace")
+    includeDirs: z.array(z.string()).optional().describe("Additional directories to include in the workspace"),
+    correlationId: z.string().optional().describe("Correlation ID for request tracing. Auto-generated if not provided.")
   },
-  async ({ prompt, model, sessionId, resumeLatest, createNewSession, approvalMode, allowedTools, includeDirs }) => {
+  async ({ prompt, model, sessionId, resumeLatest, createNewSession, approvalMode, allowedTools, includeDirs, correlationId }) => {
     const startTime = Date.now();
-    logger.info(`gemini_request invoked with model=${model || 'default'}, approvalMode=${approvalMode}, prompt length=${prompt.length}, sessionId=${sessionId}`);
+    const corrId = correlationId || randomUUID();
+    logger.info(`[${corrId}] gemini_request invoked with model=${model || 'default'}, approvalMode=${approvalMode}, prompt length=${prompt.length}, sessionId=${sessionId}`);
 
     try {
       const args = [prompt];
@@ -400,12 +407,12 @@ server.tool(
         sessionManager.updateSessionUsage(effectiveSessionId);
       }
 
-      const { stdout, stderr, code } = await executeCli("gemini", args);
+      const { stdout, stderr, code } = await executeCli("gemini", args, { correlationId: corrId });
       const duration = Date.now() - startTime;
 
       if (code !== 0) {
-        logger.info(`gemini_request failed in ${duration}ms`);
-        return createErrorResponse("gemini", code, stderr);
+        logger.info(`[${corrId}] gemini_request failed in ${duration}ms`);
+        return createErrorResponse("gemini", code, stderr, corrId);
       }
 
       // Track session
@@ -416,7 +423,7 @@ server.tool(
         sessionManager.createSession("gemini", `Gemini: ${prompt.substring(0, 50)}...`, effectiveSessionId);
       }
 
-      logger.info(`gemini_request completed successfully in ${duration}ms, response length=${stdout.length}`);
+      logger.info(`[${corrId}] gemini_request completed successfully in ${duration}ms, response length=${stdout.length}`);
       const response = { content: [{ type: "text" as const, text: stdout }] };
 
       if (effectiveSessionId) {
@@ -426,8 +433,8 @@ server.tool(
       return response;
     } catch (error) {
       const duration = Date.now() - startTime;
-      logger.info(`gemini_request threw exception after ${duration}ms`);
-      return createErrorResponse("gemini", 1, "", error as Error);
+      logger.info(`[${corrId}] gemini_request threw exception after ${duration}ms`);
+      return createErrorResponse("gemini", 1, "", corrId, error as Error);
     }
   }
 );
@@ -484,7 +491,7 @@ server.tool(
         }]
       };
     } catch (error) {
-      return createErrorResponse("session_create", 1, "", error as Error);
+      return createErrorResponse("session_create", 1, "", undefined, error as Error);
     }
   }
 );
@@ -527,7 +534,7 @@ server.tool(
         }]
       };
     } catch (error) {
-      return createErrorResponse("session_list", 1, "", error as Error);
+      return createErrorResponse("session_list", 1, "", undefined, error as Error);
     }
   }
 );
@@ -568,7 +575,7 @@ server.tool(
         }]
       };
     } catch (error) {
-      return createErrorResponse("session_set_active", 1, "", error as Error);
+      return createErrorResponse("session_set_active", 1, "", undefined, error as Error);
     }
   }
 );
@@ -611,7 +618,7 @@ server.tool(
         }]
       };
     } catch (error) {
-      return createErrorResponse("session_delete", 1, "", error as Error);
+      return createErrorResponse("session_delete", 1, "", undefined, error as Error);
     }
   }
 );
@@ -653,7 +660,7 @@ server.tool(
         }]
       };
     } catch (error) {
-      return createErrorResponse("session_get", 1, "", error as Error);
+      return createErrorResponse("session_get", 1, "", undefined, error as Error);
     }
   }
 );
@@ -679,7 +686,7 @@ server.tool(
         }]
       };
     } catch (error) {
-      return createErrorResponse("session_clear_all", 1, "", error as Error);
+      return createErrorResponse("session_clear_all", 1, "", undefined, error as Error);
     }
   }
 );
