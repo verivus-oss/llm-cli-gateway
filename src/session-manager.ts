@@ -1,13 +1,19 @@
 import { randomUUID } from "crypto";
 import { homedir } from "os";
-import { join } from "path";
-import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, unlinkSync, renameSync } from "fs";
+import { join, dirname } from "path";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, unlinkSync, renameSync, openSync, fsyncSync, closeSync, chmodSync } from "fs";
 
 export const CLI_TYPES = ["claude", "codex", "gemini"] as const;
 export type CliType = (typeof CLI_TYPES)[number];
 
 const createEmptyActiveSessions = (): Record<CliType, string | null> =>
   Object.fromEntries(CLI_TYPES.map(cli => [cli, null])) as Record<CliType, string | null>;
+
+const DEFAULT_SESSION_DESCRIPTIONS: Record<CliType, string> = {
+  claude: "Claude Session",
+  codex: "Codex Session",
+  gemini: "Gemini Session"
+};
 
 export interface Session {
   id: string;
@@ -34,9 +40,9 @@ export class SessionManager {
   }
 
   private ensureStorageDirectory(): void {
-    const dir = join(homedir(), ".llm-cli-gateway");
-    if (!existsSync(dir)) {
-      mkdirSync(dir, { recursive: true });
+    const storageDir = dirname(this.storagePath);
+    if (!existsSync(storageDir)) {
+      mkdirSync(storageDir, { recursive: true });
     }
   }
 
@@ -55,19 +61,27 @@ export class SessionManager {
   }
 
   private saveStorage(): void {
-    const tempPath = `${this.storagePath}.tmp`;
-    writeFileSync(tempPath, JSON.stringify(this.storage, null, 2), "utf-8");
+    const tempPath = `${this.storagePath}.tmp.${process.pid}`;
+    writeFileSync(tempPath, JSON.stringify(this.storage, null, 2), { encoding: "utf-8", mode: 0o600 });
+    const fd = openSync(tempPath, "r+");
+    try {
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
     renameSync(tempPath, this.storagePath);
+    chmodSync(this.storagePath, 0o600);
   }
 
   createSession(cli: CliType, description?: string, sessionId?: string): Session {
     const id = sessionId || randomUUID();
+    const sessionDescription = description ?? DEFAULT_SESSION_DESCRIPTIONS[cli];
     const session: Session = {
       id,
       cli,
       createdAt: new Date().toISOString(),
       lastUsedAt: new Date().toISOString(),
-      description
+      description: sessionDescription
     };
 
     this.storage.sessions[id] = session;

@@ -112,7 +112,16 @@ export async function executeCli(
         return;
       }
 
-      resolve({ stdout, stderr, code: code ?? 0 });
+      const result = { stdout, stderr, code: code ?? 0 };
+      if (result.code !== 0) {
+        const error = new Error(`Process exited with code ${result.code}`) as Error & { code?: number; result?: ExecuteResult };
+        error.code = result.code;
+        error.result = result;
+        reject(error);
+        return;
+      }
+
+      resolve(result);
     });
 
     proc.on("error", (err) => {
@@ -124,11 +133,9 @@ export async function executeCli(
   try {
     return await withRetry(runOnce, circuitBreaker);
   } catch (error: any) {
-    if (error?.result) {
-      return error.result as ExecuteResult;
-    }
-    if (error?.cause?.result) {
-      return error.cause.result as ExecuteResult;
+    const result = error?.result ?? error?.cause?.result;
+    if (result) {
+      return result as ExecuteResult;
     }
     throw error;
   }
