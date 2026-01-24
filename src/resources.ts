@@ -1,4 +1,5 @@
 import { SessionManager } from "./session-manager.js";
+import { PerformanceMetrics } from "./metrics.js";
 
 export interface ResourceDefinition {
   uri: string;
@@ -47,7 +48,10 @@ const CLI_INFO = {
 } as const;
 
 export class ResourceProvider {
-  constructor(private sessionManager: SessionManager) {}
+  constructor(
+    private sessionManager: SessionManager,
+    private performanceMetrics: PerformanceMetrics
+  ) {}
 
   // List all available resources
   listResources(): ResourceDefinition[] {
@@ -128,6 +132,17 @@ export class ResourceProvider {
         annotations: {
           audience: ["user", "assistant"],
           priority: 0.8
+        }
+      },
+      {
+        uri: "metrics://performance",
+        name: "Performance Metrics",
+        title: "📈 Performance Metrics",
+        description: "Request counts, response times, and success/failure rates",
+        mimeType: "application/json",
+        annotations: {
+          audience: ["user", "assistant"],
+          priority: 0.9
         }
       }
     ];
@@ -223,6 +238,14 @@ export class ResourceProvider {
         uri,
         mimeType: "application/json",
         text: JSON.stringify(CLI_INFO.gemini, null, 2)
+      };
+    }
+
+    if (uri === "metrics://performance") {
+      return {
+        uri,
+        mimeType: "application/json",
+        text: JSON.stringify(this.performanceMetrics.snapshot(), null, 2)
       };
     }
 
