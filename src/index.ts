@@ -8,6 +8,7 @@ import { executeCli } from "./executor.js";
 import { SessionManager } from "./session-manager.js";
 import { ResourceProvider } from "./resources.js";
 import { PerformanceMetrics } from "./metrics.js";
+import { estimateTokens, optimizePrompt as optimizePromptText, optimizeResponse as optimizeResponseText } from "./optimizer.js";
 
 // Simple logger that writes to stderr (stdout is used for MCP protocol)
 const logger = {
@@ -23,6 +24,15 @@ const logger = {
     }
   }
 };
+
+function logOptimizationTokens(kind: "prompt" | "response", correlationId: string, original: string, optimized: string) {
+  const originalTokens = estimateTokens(original);
+  const optimizedTokens = estimateTokens(optimized);
+  const reduction = originalTokens === 0 ? 0 : ((originalTokens - optimizedTokens) / originalTokens) * 100;
+  logger.info(
+    `[${correlationId}] ${kind} tokens ${originalTokens} → ${optimizedTokens} (${reduction.toFixed(1)}% reduction)`
+  );
+}
 
 const server = new McpServer({
   name: "llm-cli-gateway",
@@ -236,17 +246,27 @@ server.tool(
     allowedTools: z.array(z.string()).optional().describe("Allowed tools (['Bash(git:*)','Edit','Write'])"),
     disallowedTools: z.array(z.string()).optional().describe("Disallowed tools"),
     dangerouslySkipPermissions: z.boolean().default(false).describe("Bypass permissions (sandbox only)"),
-    correlationId: z.string().optional().describe("Request trace ID (auto if omitted)")
+    correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
+    optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution"),
+    optimizeResponse: z.boolean().default(false).describe("Optimize response output")
   },
-  async ({ prompt, model, outputFormat, sessionId, continueSession, createNewSession, allowedTools, disallowedTools, dangerouslySkipPermissions, correlationId }) => {
+  async ({ prompt, model, outputFormat, sessionId, continueSession, createNewSession, allowedTools, disallowedTools, dangerouslySkipPermissions, correlationId, optimizePrompt, optimizeResponse }) => {
     const startTime = Date.now();
     const corrId = correlationId || randomUUID();
     let durationMs = 0;
     let wasSuccessful = false;
+    const originalPrompt = prompt;
+    let effectivePrompt = prompt;
     logger.info(`[${corrId}] claude_request invoked with model=${model || 'default'}, prompt length=${prompt.length}, sessionId=${sessionId}, dangerouslySkipPermissions=${dangerouslySkipPermissions}`);
 
+    if (optimizePrompt) {
+      const optimizedPrompt = optimizePromptText(effectivePrompt);
+      logOptimizationTokens("prompt", corrId, effectivePrompt, optimizedPrompt);
+      effectivePrompt = optimizedPrompt;
+    }
+
     try {
-      const args = ["-p", prompt];
+      const args = ["-p", effectivePrompt];
       if (model) args.push("--model", model);
       if (outputFormat === "json") args.push("--output-format", "json");
 
@@ -287,13 +307,20 @@ server.tool(
       }
       wasSuccessful = true;
 
-      // If we used a session ID and it's not tracked yet, create a session record
-      if (effectiveSessionId && !sessionManager.getSession(effectiveSessionId)) {
-        sessionManager.createSession("claude", `Session for: ${prompt.substring(0, 50)}...`, effectiveSessionId);
+      let finalStdout = stdout;
+      if (optimizeResponse) {
+        const optimizedResponse = optimizeResponseText(finalStdout);
+        logOptimizationTokens("response", corrId, finalStdout, optimizedResponse);
+        finalStdout = optimizedResponse;
       }
 
-      logger.info(`[${corrId}] claude_request completed successfully in ${durationMs}ms, response length=${stdout.length}`);
-      const response = { content: [{ type: "text" as const, text: stdout }] };
+      // If we used a session ID and it's not tracked yet, create a session record
+      if (effectiveSessionId && !sessionManager.getSession(effectiveSessionId)) {
+        sessionManager.createSession("claude", `Session for: ${originalPrompt.substring(0, 50)}...`, effectiveSessionId);
+      }
+
+      logger.info(`[${corrId}] claude_request completed successfully in ${durationMs}ms, response length=${finalStdout.length}`);
+      const response = { content: [{ type: "text" as const, text: finalStdout }] };
 
       // Include session info in response if using a session
       if (effectiveSessionId) {
@@ -324,20 +351,30 @@ server.tool(
     fullAuto: z.boolean().default(false).describe("Full-auto mode (sandboxed execution)"),
     sessionId: z.string().optional().describe("Session ID (Codex manages internally)"),
     createNewSession: z.boolean().default(false).describe("Force new session"),
-    correlationId: z.string().optional().describe("Request trace ID (auto if omitted)")
+    correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
+    optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution"),
+    optimizeResponse: z.boolean().default(false).describe("Optimize response output")
   },
-  async ({ prompt, model, fullAuto, sessionId, createNewSession, correlationId }) => {
+  async ({ prompt, model, fullAuto, sessionId, createNewSession, correlationId, optimizePrompt, optimizeResponse }) => {
     const startTime = Date.now();
     const corrId = correlationId || randomUUID();
     let durationMs = 0;
     let wasSuccessful = false;
+    const originalPrompt = prompt;
+    let effectivePrompt = prompt;
     logger.info(`[${corrId}] codex_request invoked with model=${model || 'default'}, fullAuto=${fullAuto}, prompt length=${prompt.length}, sessionId=${sessionId}`);
+
+    if (optimizePrompt) {
+      const optimizedPrompt = optimizePromptText(effectivePrompt);
+      logOptimizationTokens("prompt", corrId, effectivePrompt, optimizedPrompt);
+      effectivePrompt = optimizedPrompt;
+    }
 
     try {
       const args = ["exec"];
       if (model) args.push("--model", model);
       if (fullAuto) args.push("--full-auto");
-      args.push("--skip-git-repo-check", prompt);
+      args.push("--skip-git-repo-check", effectivePrompt);
 
       const { stdout, stderr, code } = await executeCli("codex", args, { correlationId: corrId });
       durationMs = Math.max(0, Date.now() - startTime);
@@ -348,6 +385,13 @@ server.tool(
       }
       wasSuccessful = true;
 
+      let finalStdout = stdout;
+      if (optimizeResponse) {
+        const optimizedResponse = optimizeResponseText(finalStdout);
+        logOptimizationTokens("response", corrId, finalStdout, optimizedResponse);
+        finalStdout = optimizedResponse;
+      }
+
       // Track session usage
       let effectiveSessionId = sessionId;
       if (!createNewSession && !sessionId) {
@@ -356,18 +400,18 @@ server.tool(
           effectiveSessionId = activeSession.id;
         } else {
           // Create a new session for tracking
-          const newSession = sessionManager.createSession("codex", `Codex: ${prompt.substring(0, 50)}...`);
+          const newSession = sessionManager.createSession("codex", `Codex: ${originalPrompt.substring(0, 50)}...`);
           effectiveSessionId = newSession.id;
         }
       } else if (sessionId) {
         sessionManager.updateSessionUsage(sessionId);
       } else if (createNewSession) {
-        const newSession = sessionManager.createSession("codex", `Codex: ${prompt.substring(0, 50)}...`);
+        const newSession = sessionManager.createSession("codex", `Codex: ${originalPrompt.substring(0, 50)}...`);
         effectiveSessionId = newSession.id;
       }
 
-      logger.info(`[${corrId}] codex_request completed successfully in ${durationMs}ms, response length=${stdout.length}`);
-      const response = { content: [{ type: "text" as const, text: stdout }] };
+      logger.info(`[${corrId}] codex_request completed successfully in ${durationMs}ms, response length=${finalStdout.length}`);
+      const response = { content: [{ type: "text" as const, text: finalStdout }] };
 
       if (effectiveSessionId) {
         (response as any).sessionId = effectiveSessionId;
@@ -400,17 +444,27 @@ server.tool(
     approvalMode: z.enum(["default", "auto_edit", "yolo"]).optional().describe("Approval: default|auto_edit|yolo"),
     allowedTools: z.array(z.string()).optional().describe("Allowed tools (['Write','Edit','Bash'])"),
     includeDirs: z.array(z.string()).optional().describe("Additional workspace directories"),
-    correlationId: z.string().optional().describe("Request trace ID (auto if omitted)")
+    correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
+    optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution"),
+    optimizeResponse: z.boolean().default(false).describe("Optimize response output")
   },
-  async ({ prompt, model, sessionId, resumeLatest, createNewSession, approvalMode, allowedTools, includeDirs, correlationId }) => {
+  async ({ prompt, model, sessionId, resumeLatest, createNewSession, approvalMode, allowedTools, includeDirs, correlationId, optimizePrompt, optimizeResponse }) => {
     const startTime = Date.now();
     const corrId = correlationId || randomUUID();
     let durationMs = 0;
     let wasSuccessful = false;
+    const originalPrompt = prompt;
+    let effectivePrompt = prompt;
     logger.info(`[${corrId}] gemini_request invoked with model=${model || 'default'}, approvalMode=${approvalMode}, prompt length=${prompt.length}, sessionId=${sessionId}`);
 
+    if (optimizePrompt) {
+      const optimizedPrompt = optimizePromptText(effectivePrompt);
+      logOptimizationTokens("prompt", corrId, effectivePrompt, optimizedPrompt);
+      effectivePrompt = optimizedPrompt;
+    }
+
     try {
-      const args = [prompt];
+      const args = [effectivePrompt];
       if (model) args.push("--model", model);
 
       // Tool approval settings
@@ -448,16 +502,23 @@ server.tool(
       }
       wasSuccessful = true;
 
-      // Track session
-      if (!effectiveSessionId && !createNewSession) {
-        const newSession = sessionManager.createSession("gemini", `Gemini: ${prompt.substring(0, 50)}...`);
-        effectiveSessionId = newSession.id;
-      } else if (effectiveSessionId && !sessionManager.getSession(effectiveSessionId)) {
-        sessionManager.createSession("gemini", `Gemini: ${prompt.substring(0, 50)}...`, effectiveSessionId);
+      let finalStdout = stdout;
+      if (optimizeResponse) {
+        const optimizedResponse = optimizeResponseText(finalStdout);
+        logOptimizationTokens("response", corrId, finalStdout, optimizedResponse);
+        finalStdout = optimizedResponse;
       }
 
-      logger.info(`[${corrId}] gemini_request completed successfully in ${durationMs}ms, response length=${stdout.length}`);
-      const response = { content: [{ type: "text" as const, text: stdout }] };
+      // Track session
+      if (!effectiveSessionId && !createNewSession) {
+        const newSession = sessionManager.createSession("gemini", `Gemini: ${originalPrompt.substring(0, 50)}...`);
+        effectiveSessionId = newSession.id;
+      } else if (effectiveSessionId && !sessionManager.getSession(effectiveSessionId)) {
+        sessionManager.createSession("gemini", `Gemini: ${originalPrompt.substring(0, 50)}...`, effectiveSessionId);
+      }
+
+      logger.info(`[${corrId}] gemini_request completed successfully in ${durationMs}ms, response length=${finalStdout.length}`);
+      const response = { content: [{ type: "text" as const, text: finalStdout }] };
 
       if (effectiveSessionId) {
         (response as any).sessionId = effectiveSessionId;
