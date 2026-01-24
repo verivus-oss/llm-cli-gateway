@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { executeCli } from "../utils/executor.js";
+import { executeCli } from "../executor.js";
 
 describe("executeCli", () => {
   describe("basic execution", () => {
