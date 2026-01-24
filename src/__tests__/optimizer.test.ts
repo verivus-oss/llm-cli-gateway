@@ -63,6 +63,14 @@ const value: string = "string";
     expect(optimized).toContain("str → number");
   });
 
+  it("avoids backtracking on long change phrases", () => {
+    const input = `Change ${"a ".repeat(1000)}to b`;
+    const optimized = optimizePrompt(input);
+
+    expect(optimized).toContain("Change a a");
+    expect(optimized).toContain("to b");
+  });
+
   it("optimizes responses and keeps code blocks intact", () => {
     const input = `
 In conclusion, the output is below:

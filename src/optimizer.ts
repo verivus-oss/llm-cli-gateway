@@ -202,10 +202,10 @@ function applyArrowNotation(text: string): string {
   const lines = text.split("\n");
   const output = lines.map((line) => {
     let updated = line;
-    updated = updated.replace(/\bChange\s+(.+?)\s+to\s+(.+?)([.!?]|$)/gi, (_m, from, to, end) => {
+    updated = updated.replace(/\bChange\s+(?:the\s+)?([A-Za-z][\w-]*)\s+to\s+(?:a\s+|an\s+)?([A-Za-z][\w-]*)([.!?]|$)/gi, (_m, from, to, end) => {
       return `${from.trim()} → ${to.trim()}${end || ""}`;
     });
-    updated = updated.replace(/\bConvert\s+(?:the\s+)?(.+?)\s+to\s+(?:a\s+|an\s+)?(.+?)([.!?]|$)/gi, (_m, from, to, end) => {
+    updated = updated.replace(/\bConvert\s+(?:the\s+)?([A-Za-z][\w-]*)\s+to\s+(?:a\s+|an\s+)?([A-Za-z][\w-]*)([.!?]|$)/gi, (_m, from, to, end) => {
       return `${from.trim()} → ${to.trim()}${end || ""}`;
     });
     updated = updated.replace(/\b(\w+)\s+should be\s+an?\s+(\w+)/gi, "$1: $2");

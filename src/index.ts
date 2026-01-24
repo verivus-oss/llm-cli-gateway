@@ -255,7 +255,6 @@ server.tool(
     const corrId = correlationId || randomUUID();
     let durationMs = 0;
     let wasSuccessful = false;
-    const originalPrompt = prompt;
     let effectivePrompt = prompt;
     logger.info(`[${corrId}] claude_request invoked with model=${model || 'default'}, prompt length=${prompt.length}, sessionId=${sessionId}, dangerouslySkipPermissions=${dangerouslySkipPermissions}`);
 
@@ -316,7 +315,7 @@ server.tool(
 
       // If we used a session ID and it's not tracked yet, create a session record
       if (effectiveSessionId && !sessionManager.getSession(effectiveSessionId)) {
-        sessionManager.createSession("claude", `Session for: ${originalPrompt.substring(0, 50)}...`, effectiveSessionId);
+        sessionManager.createSession("claude", "Claude Session", effectiveSessionId);
       }
 
       logger.info(`[${corrId}] claude_request completed successfully in ${durationMs}ms, response length=${finalStdout.length}`);
@@ -360,7 +359,6 @@ server.tool(
     const corrId = correlationId || randomUUID();
     let durationMs = 0;
     let wasSuccessful = false;
-    const originalPrompt = prompt;
     let effectivePrompt = prompt;
     logger.info(`[${corrId}] codex_request invoked with model=${model || 'default'}, fullAuto=${fullAuto}, prompt length=${prompt.length}, sessionId=${sessionId}`);
 
@@ -400,13 +398,13 @@ server.tool(
           effectiveSessionId = activeSession.id;
         } else {
           // Create a new session for tracking
-          const newSession = sessionManager.createSession("codex", `Codex: ${originalPrompt.substring(0, 50)}...`);
+          const newSession = sessionManager.createSession("codex", "Codex Session");
           effectiveSessionId = newSession.id;
         }
       } else if (sessionId) {
         sessionManager.updateSessionUsage(sessionId);
       } else if (createNewSession) {
-        const newSession = sessionManager.createSession("codex", `Codex: ${originalPrompt.substring(0, 50)}...`);
+        const newSession = sessionManager.createSession("codex", "Codex Session");
         effectiveSessionId = newSession.id;
       }
 
@@ -453,7 +451,6 @@ server.tool(
     const corrId = correlationId || randomUUID();
     let durationMs = 0;
     let wasSuccessful = false;
-    const originalPrompt = prompt;
     let effectivePrompt = prompt;
     logger.info(`[${corrId}] gemini_request invoked with model=${model || 'default'}, approvalMode=${approvalMode}, prompt length=${prompt.length}, sessionId=${sessionId}`);
 
@@ -511,10 +508,10 @@ server.tool(
 
       // Track session
       if (!effectiveSessionId && !createNewSession) {
-        const newSession = sessionManager.createSession("gemini", `Gemini: ${originalPrompt.substring(0, 50)}...`);
+        const newSession = sessionManager.createSession("gemini", "Gemini Session");
         effectiveSessionId = newSession.id;
       } else if (effectiveSessionId && !sessionManager.getSession(effectiveSessionId)) {
-        sessionManager.createSession("gemini", `Gemini: ${originalPrompt.substring(0, 50)}...`, effectiveSessionId);
+        sessionManager.createSession("gemini", "Gemini Session", effectiveSessionId);
       }
 
       logger.info(`[${corrId}] gemini_request completed successfully in ${durationMs}ms, response length=${finalStdout.length}`);

@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { SessionManager } from "../session-manager.js";
-import { existsSync, mkdirSync, rmSync, readFileSync } from "fs";
+import { existsSync, mkdirSync, rmSync, readFileSync, statSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
@@ -266,6 +266,8 @@ describe("SessionManager", () => {
       const storagePath = join(testDir, "sessions.json");
 
       expect(existsSync(storagePath)).toBe(true);
+      const mode = statSync(storagePath).mode & 0o777;
+      expect(mode).toBe(0o600);
 
       const content = readFileSync(storagePath, "utf-8");
       const data = JSON.parse(content);
@@ -340,7 +342,7 @@ describe("SessionManager", () => {
 
     it("should handle undefined description", () => {
       const session = sessionManager.createSession("claude");
-      expect(session.description).toBeUndefined();
+      expect(session.description).toBe("Claude Session");
     });
 
     it("should handle very long descriptions", () => {
