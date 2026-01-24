@@ -8,14 +8,22 @@
   },
   "scripts": {
     "build": "tsc",
-    "start": "node dist/index.js"
+    "start": "node dist/index.js",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:unit": "vitest run src/__tests__/executor.test.ts",
+    "test:claude": "vitest run src/__tests__/claude.test.ts",
+    "test:codex": "vitest run src/__tests__/codex.test.ts",
+    "test:gemini": "vitest run src/__tests__/gemini.test.ts",
+    "test:integration": "vitest run src/__tests__/integration.test.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
     "zod": "^3.23.0"
   },
   "devDependencies": {
-    "@types/node": "^20.0.0",
-    "typescript": "^5.0.0"
+    "@types/node": "^20.19.30",
+    "typescript": "^5.0.0",
+    "vitest": "^4.0.18"
   }
 }
