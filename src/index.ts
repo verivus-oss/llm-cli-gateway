@@ -5,8 +5,9 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { randomUUID } from "crypto";
 import { z } from "zod";
 import { executeCli } from "./executor.js";
-import { SessionManager, type CliType } from "./session-manager.js";
+import { SessionManager } from "./session-manager.js";
 import { ResourceProvider } from "./resources.js";
+import { PerformanceMetrics } from "./metrics.js";
 
 // Simple logger that writes to stderr (stdout is used for MCP protocol)
 const logger = {
@@ -30,7 +31,8 @@ const server = new McpServer({
 
 // Initialize session manager and resource provider
 const sessionManager = new SessionManager();
-const resourceProvider = new ResourceProvider(sessionManager);
+const performanceMetrics = new PerformanceMetrics();
+const resourceProvider = new ResourceProvider(sessionManager, performanceMetrics);
 
 // Helper function for standardized error responses
 function createErrorResponse(cli: string, code: number, stderr: string, correlationId?: string, error?: Error) {
@@ -202,6 +204,22 @@ server.registerResource(
   }
 );
 
+// Register performance metrics resource
+server.registerResource(
+  "performance-metrics",
+  "metrics://performance",
+  {
+    title: "📈 Performance Metrics",
+    description: "Request counts, response times, and success/failure rates",
+    mimeType: "application/json"
+  },
+  async (uri) => {
+    logger.debug("Reading performance metrics resource");
+    const contents = resourceProvider.readResource(uri.href);
+    return { contents: contents ? [contents] : [] };
+  }
+);
+
 //──────────────────────────────────────────────────────────────────────────────
 // Claude Code Tool
 //──────────────────────────────────────────────────────────────────────────────
@@ -223,6 +241,8 @@ server.tool(
   async ({ prompt, model, outputFormat, sessionId, continueSession, createNewSession, allowedTools, disallowedTools, dangerouslySkipPermissions, correlationId }) => {
     const startTime = Date.now();
     const corrId = correlationId || randomUUID();
+    let durationMs = 0;
+    let wasSuccessful = false;
     logger.info(`[${corrId}] claude_request invoked with model=${model || 'default'}, prompt length=${prompt.length}, sessionId=${sessionId}, dangerouslySkipPermissions=${dangerouslySkipPermissions}`);
 
     try {
@@ -259,19 +279,20 @@ server.tool(
       }
 
       const { stdout, stderr, code } = await executeCli("claude", args, { correlationId: corrId });
-      const duration = Date.now() - startTime;
+      durationMs = Math.max(0, Date.now() - startTime);
 
       if (code !== 0) {
-        logger.info(`[${corrId}] claude_request failed in ${duration}ms`);
+        logger.info(`[${corrId}] claude_request failed in ${durationMs}ms`);
         return createErrorResponse("claude", code, stderr, corrId);
       }
+      wasSuccessful = true;
 
       // If we used a session ID and it's not tracked yet, create a session record
       if (effectiveSessionId && !sessionManager.getSession(effectiveSessionId)) {
         sessionManager.createSession("claude", `Session for: ${prompt.substring(0, 50)}...`, effectiveSessionId);
       }
 
-      logger.info(`[${corrId}] claude_request completed successfully in ${duration}ms, response length=${stdout.length}`);
+      logger.info(`[${corrId}] claude_request completed successfully in ${durationMs}ms, response length=${stdout.length}`);
       const response = { content: [{ type: "text" as const, text: stdout }] };
 
       // Include session info in response if using a session
@@ -281,9 +302,12 @@ server.tool(
 
       return response;
     } catch (error) {
-      const duration = Date.now() - startTime;
-      logger.info(`[${corrId}] claude_request threw exception after ${duration}ms`);
+      const elapsedMs = Math.max(0, Date.now() - startTime);
+      logger.info(`[${corrId}] claude_request threw exception after ${elapsedMs}ms`);
       return createErrorResponse("claude", 1, "", corrId, error as Error);
+    } finally {
+      const finalizedDurationMs = Math.max(0, durationMs || Date.now() - startTime);
+      performanceMetrics.recordRequest("claude", finalizedDurationMs, wasSuccessful);
     }
   }
 );
@@ -305,6 +329,8 @@ server.tool(
   async ({ prompt, model, fullAuto, sessionId, createNewSession, correlationId }) => {
     const startTime = Date.now();
     const corrId = correlationId || randomUUID();
+    let durationMs = 0;
+    let wasSuccessful = false;
     logger.info(`[${corrId}] codex_request invoked with model=${model || 'default'}, fullAuto=${fullAuto}, prompt length=${prompt.length}, sessionId=${sessionId}`);
 
     try {
@@ -314,12 +340,13 @@ server.tool(
       args.push("--skip-git-repo-check", prompt);
 
       const { stdout, stderr, code } = await executeCli("codex", args, { correlationId: corrId });
-      const duration = Date.now() - startTime;
+      durationMs = Math.max(0, Date.now() - startTime);
 
       if (code !== 0) {
-        logger.info(`[${corrId}] codex_request failed in ${duration}ms`);
+        logger.info(`[${corrId}] codex_request failed in ${durationMs}ms`);
         return createErrorResponse("codex", code, stderr, corrId);
       }
+      wasSuccessful = true;
 
       // Track session usage
       let effectiveSessionId = sessionId;
@@ -339,7 +366,7 @@ server.tool(
         effectiveSessionId = newSession.id;
       }
 
-      logger.info(`[${corrId}] codex_request completed successfully in ${duration}ms, response length=${stdout.length}`);
+      logger.info(`[${corrId}] codex_request completed successfully in ${durationMs}ms, response length=${stdout.length}`);
       const response = { content: [{ type: "text" as const, text: stdout }] };
 
       if (effectiveSessionId) {
@@ -348,9 +375,12 @@ server.tool(
 
       return response;
     } catch (error) {
-      const duration = Date.now() - startTime;
-      logger.info(`[${corrId}] codex_request threw exception after ${duration}ms`);
+      const elapsedMs = Math.max(0, Date.now() - startTime);
+      logger.info(`[${corrId}] codex_request threw exception after ${elapsedMs}ms`);
       return createErrorResponse("codex", 1, "", corrId, error as Error);
+    } finally {
+      const finalizedDurationMs = Math.max(0, durationMs || Date.now() - startTime);
+      performanceMetrics.recordRequest("codex", finalizedDurationMs, wasSuccessful);
     }
   }
 );
@@ -375,6 +405,8 @@ server.tool(
   async ({ prompt, model, sessionId, resumeLatest, createNewSession, approvalMode, allowedTools, includeDirs, correlationId }) => {
     const startTime = Date.now();
     const corrId = correlationId || randomUUID();
+    let durationMs = 0;
+    let wasSuccessful = false;
     logger.info(`[${corrId}] gemini_request invoked with model=${model || 'default'}, approvalMode=${approvalMode}, prompt length=${prompt.length}, sessionId=${sessionId}`);
 
     try {
@@ -408,12 +440,13 @@ server.tool(
       }
 
       const { stdout, stderr, code } = await executeCli("gemini", args, { correlationId: corrId });
-      const duration = Date.now() - startTime;
+      durationMs = Math.max(0, Date.now() - startTime);
 
       if (code !== 0) {
-        logger.info(`[${corrId}] gemini_request failed in ${duration}ms`);
+        logger.info(`[${corrId}] gemini_request failed in ${durationMs}ms`);
         return createErrorResponse("gemini", code, stderr, corrId);
       }
+      wasSuccessful = true;
 
       // Track session
       if (!effectiveSessionId && !createNewSession) {
@@ -423,7 +456,7 @@ server.tool(
         sessionManager.createSession("gemini", `Gemini: ${prompt.substring(0, 50)}...`, effectiveSessionId);
       }
 
-      logger.info(`[${corrId}] gemini_request completed successfully in ${duration}ms, response length=${stdout.length}`);
+      logger.info(`[${corrId}] gemini_request completed successfully in ${durationMs}ms, response length=${stdout.length}`);
       const response = { content: [{ type: "text" as const, text: stdout }] };
 
       if (effectiveSessionId) {
@@ -432,9 +465,12 @@ server.tool(
 
       return response;
     } catch (error) {
-      const duration = Date.now() - startTime;
-      logger.info(`[${corrId}] gemini_request threw exception after ${duration}ms`);
+      const elapsedMs = Math.max(0, Date.now() - startTime);
+      logger.info(`[${corrId}] gemini_request threw exception after ${elapsedMs}ms`);
       return createErrorResponse("gemini", 1, "", corrId, error as Error);
+    } finally {
+      const finalizedDurationMs = Math.max(0, durationMs || Date.now() - startTime);
+      performanceMetrics.recordRequest("gemini", finalizedDurationMs, wasSuccessful);
     }
   }
 );

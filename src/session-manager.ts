@@ -3,7 +3,11 @@ import { homedir } from "os";
 import { join } from "path";
 import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, unlinkSync } from "fs";
 
-export type CliType = "claude" | "codex" | "gemini";
+export const CLI_TYPES = ["claude", "codex", "gemini"] as const;
+export type CliType = (typeof CLI_TYPES)[number];
+
+const createEmptyActiveSessions = (): Record<CliType, string | null> =>
+  Object.fromEntries(CLI_TYPES.map(cli => [cli, null])) as Record<CliType, string | null>;
 
 export interface Session {
   id: string;
@@ -21,7 +25,7 @@ export interface SessionStorage {
 
 export class SessionManager {
   private storagePath: string;
-  private storage: SessionStorage = { sessions: {}, activeSession: { claude: null, codex: null, gemini: null } };
+  private storage: SessionStorage = { sessions: {}, activeSession: createEmptyActiveSessions() };
 
   constructor(customPath?: string) {
     this.storagePath = customPath || join(homedir(), ".llm-cli-gateway", "sessions.json");
@@ -43,10 +47,10 @@ export class SessionManager {
         this.storage = JSON.parse(data);
       } catch (error) {
         // If file is corrupted, start fresh
-        this.storage = { sessions: {}, activeSession: { claude: null, codex: null, gemini: null } };
+        this.storage = { sessions: {}, activeSession: createEmptyActiveSessions() };
       }
     } else {
-      this.storage = { sessions: {}, activeSession: { claude: null, codex: null, gemini: null } };
+      this.storage = { sessions: {}, activeSession: createEmptyActiveSessions() };
     }
   }
 
