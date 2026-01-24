@@ -4,17 +4,83 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { executeCli } from "./executor.js";
+import { SessionManager, type CliType } from "./session-manager.js";
+
+// Simple logger that writes to stderr (stdout is used for MCP protocol)
+const logger = {
+  info: (message: string, ...args: any[]) => {
+    console.error(`[INFO] ${new Date().toISOString()} - ${message}`, ...args);
+  },
+  error: (message: string, ...args: any[]) => {
+    console.error(`[ERROR] ${new Date().toISOString()} - ${message}`, ...args);
+  },
+  debug: (message: string, ...args: any[]) => {
+    if (process.env.DEBUG) {
+      console.error(`[DEBUG] ${new Date().toISOString()} - ${message}`, ...args);
+    }
+  }
+};
 
 const server = new McpServer({
   name: "llm-cli-gateway",
   version: "1.0.0"
 });
 
-// Available models per CLI (used by list_models and for documentation)
-const CLI_MODELS = {
-  claude: ["opus", "sonnet", "haiku"],
-  codex: ["o4-mini", "o3", "gpt-4.1"],
-  gemini: ["gemini-2.5-pro", "gemini-2.5-flash"]
+// Initialize session manager
+const sessionManager = new SessionManager();
+
+// Helper function for standardized error responses
+function createErrorResponse(cli: string, code: number, stderr: string, error?: Error) {
+  let errorMessage = `Error executing ${cli} CLI`;
+
+  if (error) {
+    // Command not found or spawn error
+    errorMessage += `:\n${error.message}`;
+    if (error.message.includes("ENOENT")) {
+      errorMessage += `\n\nThe '${cli}' command was not found. Please ensure ${cli} CLI is installed and in your PATH.`;
+    }
+    logger.error(`${cli} CLI execution failed:`, error.message);
+  } else if (code === 124) {
+    // Timeout
+    errorMessage += `: Command timed out\n${stderr}`;
+    logger.error(`${cli} CLI timed out`);
+  } else if (code !== 0) {
+    // Other non-zero exit code
+    errorMessage += ` (exit code ${code}):\n${stderr}`;
+    logger.error(`${cli} CLI failed with exit code ${code}`);
+  }
+
+  return {
+    content: [{ type: "text" as const, text: errorMessage }],
+    isError: true
+  };
+}
+
+// Available models per CLI with descriptions
+const CLI_INFO = {
+  claude: {
+    description: "Anthropic's Claude Code CLI - best for code generation, analysis, and agentic coding tasks",
+    models: {
+      opus: "Most capable model. Best for: complex reasoning, nuanced analysis, difficult problems, research",
+      sonnet: "Balanced performance. Best for: everyday coding, code review, general tasks (default)",
+      haiku: "Fastest model. Best for: simple queries, quick answers, high-volume tasks, cost-sensitive use"
+    }
+  },
+  codex: {
+    description: "OpenAI's Codex CLI - best for code execution in sandboxed environments",
+    models: {
+      "o3": "Most capable reasoning model. Best for: complex multi-step problems, math, science",
+      "o4-mini": "Fast reasoning model. Best for: coding tasks, quick iterations",
+      "gpt-4.1": "Latest GPT-4 variant. Best for: general coding, instruction following"
+    }
+  },
+  gemini: {
+    description: "Google's Gemini CLI - best for multimodal tasks and Google ecosystem integration",
+    models: {
+      "gemini-2.5-pro": "Most capable model. Best for: complex reasoning, long context, multimodal",
+      "gemini-2.5-flash": "Fast model. Best for: quick responses, high throughput, cost-sensitive use"
+    }
+  }
 } as const;
 
 //──────────────────────────────────────────────────────────────────────────────
@@ -24,21 +90,66 @@ const CLI_MODELS = {
 server.tool(
   "claude_request",
   {
-    prompt: z.string().describe("The prompt to send to Claude Code"),
+    prompt: z.string().min(1, "Prompt cannot be empty").max(100000, "Prompt too long (max 100k chars)").describe("The prompt to send to Claude Code"),
     model: z.enum(["opus", "sonnet", "haiku"]).optional().describe("Model to use"),
-    outputFormat: z.enum(["text", "json"]).default("text").describe("Output format")
+    outputFormat: z.enum(["text", "json"]).default("text").describe("Output format"),
+    sessionId: z.string().optional().describe("Session ID to use for this request. If not provided, uses the active session or creates a new one."),
+    continueSession: z.boolean().default(false).describe("Continue the active session (uses --continue flag)"),
+    createNewSession: z.boolean().default(false).describe("Always create a new session for this request")
   },
-  async ({ prompt, model, outputFormat }) => {
-    const args = ["-p", prompt];
-    if (model) args.push("--model", model);
-    if (outputFormat === "json") args.push("--output-format", "json");
+  async ({ prompt, model, outputFormat, sessionId, continueSession, createNewSession }) => {
+    const startTime = Date.now();
+    logger.info(`claude_request invoked with model=${model || 'default'}, prompt length=${prompt.length}, sessionId=${sessionId}`);
 
-    const { stdout, stderr, code } = await executeCli("claude", args);
+    try {
+      const args = ["-p", prompt];
+      if (model) args.push("--model", model);
+      if (outputFormat === "json") args.push("--output-format", "json");
 
-    if (code !== 0) {
-      return { content: [{ type: "text", text: `Error: Claude failed (${code}): ${stderr}` }], isError: true };
+      // Session management
+      let effectiveSessionId = sessionId;
+      if (!createNewSession && !continueSession && !sessionId) {
+        // Use active session if exists
+        const activeSession = sessionManager.getActiveSession("claude");
+        if (activeSession) {
+          effectiveSessionId = activeSession.id;
+        }
+      }
+
+      if (continueSession) {
+        args.push("--continue");
+      } else if (effectiveSessionId) {
+        args.push("--session-id", effectiveSessionId);
+        sessionManager.updateSessionUsage(effectiveSessionId);
+      }
+
+      const { stdout, stderr, code } = await executeCli("claude", args);
+      const duration = Date.now() - startTime;
+
+      if (code !== 0) {
+        logger.info(`claude_request failed in ${duration}ms`);
+        return createErrorResponse("claude", code, stderr);
+      }
+
+      // If we used a session ID and it's not tracked yet, create a session record
+      if (effectiveSessionId && !sessionManager.getSession(effectiveSessionId)) {
+        sessionManager.createSession("claude", `Session for: ${prompt.substring(0, 50)}...`, effectiveSessionId);
+      }
+
+      logger.info(`claude_request completed successfully in ${duration}ms, response length=${stdout.length}`);
+      const response = { content: [{ type: "text" as const, text: stdout }] };
+
+      // Include session info in response if using a session
+      if (effectiveSessionId) {
+        (response as any).sessionId = effectiveSessionId;
+      }
+
+      return response;
+    } catch (error) {
+      const duration = Date.now() - startTime;
+      logger.info(`claude_request threw exception after ${duration}ms`);
+      return createErrorResponse("claude", 1, "", error as Error);
     }
-    return { content: [{ type: "text", text: stdout }] };
   }
 );
 
@@ -49,22 +160,61 @@ server.tool(
 server.tool(
   "codex_request",
   {
-    prompt: z.string().describe("The prompt to send to Codex"),
-    model: z.string().optional().describe("Model to use"),
-    fullAuto: z.boolean().default(false).describe("Enable full-auto mode for sandboxed automatic execution")
+    prompt: z.string().min(1, "Prompt cannot be empty").max(100000, "Prompt too long (max 100k chars)").describe("The prompt to send to Codex"),
+    model: z.enum(["o3", "o4-mini", "gpt-4.1"]).optional().describe("Model to use"),
+    fullAuto: z.boolean().default(false).describe("Enable full-auto mode for sandboxed automatic execution"),
+    sessionId: z.string().optional().describe("Session identifier to track conversations. Codex manages sessions internally."),
+    createNewSession: z.boolean().default(false).describe("Always create a new session for this request")
   },
-  async ({ prompt, model, fullAuto }) => {
-    const args = ["exec"];
-    if (model) args.push("--model", model);
-    if (fullAuto) args.push("--full-auto");
-    args.push("--skip-git-repo-check", prompt);
+  async ({ prompt, model, fullAuto, sessionId, createNewSession }) => {
+    const startTime = Date.now();
+    logger.info(`codex_request invoked with model=${model || 'default'}, fullAuto=${fullAuto}, prompt length=${prompt.length}, sessionId=${sessionId}`);
 
-    const { stdout, stderr, code } = await executeCli("codex", args);
+    try {
+      const args = ["exec"];
+      if (model) args.push("--model", model);
+      if (fullAuto) args.push("--full-auto");
+      args.push("--skip-git-repo-check", prompt);
 
-    if (code !== 0) {
-      return { content: [{ type: "text", text: `Error: Codex failed (${code}): ${stderr}` }], isError: true };
+      const { stdout, stderr, code } = await executeCli("codex", args);
+      const duration = Date.now() - startTime;
+
+      if (code !== 0) {
+        logger.info(`codex_request failed in ${duration}ms`);
+        return createErrorResponse("codex", code, stderr);
+      }
+
+      // Track session usage
+      let effectiveSessionId = sessionId;
+      if (!createNewSession && !sessionId) {
+        const activeSession = sessionManager.getActiveSession("codex");
+        if (activeSession) {
+          effectiveSessionId = activeSession.id;
+        } else {
+          // Create a new session for tracking
+          const newSession = sessionManager.createSession("codex", `Codex: ${prompt.substring(0, 50)}...`);
+          effectiveSessionId = newSession.id;
+        }
+      } else if (sessionId) {
+        sessionManager.updateSessionUsage(sessionId);
+      } else if (createNewSession) {
+        const newSession = sessionManager.createSession("codex", `Codex: ${prompt.substring(0, 50)}...`);
+        effectiveSessionId = newSession.id;
+      }
+
+      logger.info(`codex_request completed successfully in ${duration}ms, response length=${stdout.length}`);
+      const response = { content: [{ type: "text" as const, text: stdout }] };
+
+      if (effectiveSessionId) {
+        (response as any).sessionId = effectiveSessionId;
+      }
+
+      return response;
+    } catch (error) {
+      const duration = Date.now() - startTime;
+      logger.info(`codex_request threw exception after ${duration}ms`);
+      return createErrorResponse("codex", 1, "", error as Error);
     }
-    return { content: [{ type: "text", text: stdout }] };
   }
 );
 
@@ -75,19 +225,66 @@ server.tool(
 server.tool(
   "gemini_request",
   {
-    prompt: z.string().describe("The prompt to send to Gemini CLI"),
-    model: z.string().optional().describe("Model to use")
+    prompt: z.string().min(1, "Prompt cannot be empty").max(100000, "Prompt too long (max 100k chars)").describe("The prompt to send to Gemini CLI"),
+    model: z.enum(["gemini-2.5-pro", "gemini-2.5-flash"]).optional().describe("Model to use"),
+    sessionId: z.string().optional().describe("Session identifier to resume. Use 'latest' for most recent session or a session ID."),
+    resumeLatest: z.boolean().default(false).describe("Resume the latest session automatically"),
+    createNewSession: z.boolean().default(false).describe("Always create a new session for this request")
   },
-  async ({ prompt, model }) => {
-    const args = [prompt];
-    if (model) args.push("--model", model);
+  async ({ prompt, model, sessionId, resumeLatest, createNewSession }) => {
+    const startTime = Date.now();
+    logger.info(`gemini_request invoked with model=${model || 'default'}, prompt length=${prompt.length}, sessionId=${sessionId}`);
 
-    const { stdout, stderr, code } = await executeCli("gemini", args);
+    try {
+      const args = [prompt];
+      if (model) args.push("--model", model);
 
-    if (code !== 0) {
-      return { content: [{ type: "text", text: `Error: Gemini failed (${code}): ${stderr}` }], isError: true };
+      // Session management
+      let effectiveSessionId = sessionId;
+      if (!createNewSession && !sessionId && !resumeLatest) {
+        const activeSession = sessionManager.getActiveSession("gemini");
+        if (activeSession) {
+          effectiveSessionId = activeSession.id;
+          resumeLatest = true;
+        }
+      }
+
+      if (resumeLatest && !sessionId) {
+        args.push("--resume", "latest");
+      } else if (effectiveSessionId) {
+        args.push("--resume", effectiveSessionId);
+        sessionManager.updateSessionUsage(effectiveSessionId);
+      }
+
+      const { stdout, stderr, code } = await executeCli("gemini", args);
+      const duration = Date.now() - startTime;
+
+      if (code !== 0) {
+        logger.info(`gemini_request failed in ${duration}ms`);
+        return createErrorResponse("gemini", code, stderr);
+      }
+
+      // Track session
+      if (!effectiveSessionId && !createNewSession) {
+        const newSession = sessionManager.createSession("gemini", `Gemini: ${prompt.substring(0, 50)}...`);
+        effectiveSessionId = newSession.id;
+      } else if (effectiveSessionId && !sessionManager.getSession(effectiveSessionId)) {
+        sessionManager.createSession("gemini", `Gemini: ${prompt.substring(0, 50)}...`, effectiveSessionId);
+      }
+
+      logger.info(`gemini_request completed successfully in ${duration}ms, response length=${stdout.length}`);
+      const response = { content: [{ type: "text" as const, text: stdout }] };
+
+      if (effectiveSessionId) {
+        (response as any).sessionId = effectiveSessionId;
+      }
+
+      return response;
+    } catch (error) {
+      const duration = Date.now() - startTime;
+      logger.info(`gemini_request threw exception after ${duration}ms`);
+      return createErrorResponse("gemini", 1, "", error as Error);
     }
-    return { content: [{ type: "text", text: stdout }] };
   }
 );
 
@@ -101,8 +298,245 @@ server.tool(
     cli: z.enum(["claude", "codex", "gemini"]).optional().describe("Specific CLI to list models for")
   },
   async ({ cli }) => {
-    const result = cli ? { [cli]: CLI_MODELS[cli] } : CLI_MODELS;
+    const result = cli ? { [cli]: CLI_INFO[cli] } : CLI_INFO;
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+  }
+);
+
+//──────────────────────────────────────────────────────────────────────────────
+// Session Management Tools
+//──────────────────────────────────────────────────────────────────────────────
+
+server.tool(
+  "session_create",
+  {
+    cli: z.enum(["claude", "codex", "gemini"]).describe("Which CLI to create a session for"),
+    description: z.string().optional().describe("Optional description for the session"),
+    setAsActive: z.boolean().default(true).describe("Set this as the active session for the CLI")
+  },
+  async ({ cli, description, setAsActive }) => {
+    try {
+      const session = sessionManager.createSession(cli, description);
+
+      if (setAsActive) {
+        sessionManager.setActiveSession(cli, session.id);
+      }
+
+      logger.info(`Created new ${cli} session: ${session.id}`);
+
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({
+            success: true,
+            session: {
+              id: session.id,
+              cli: session.cli,
+              description: session.description,
+              createdAt: session.createdAt,
+              isActive: setAsActive
+            }
+          }, null, 2)
+        }]
+      };
+    } catch (error) {
+      return createErrorResponse("session_create", 1, "", error as Error);
+    }
+  }
+);
+
+server.tool(
+  "session_list",
+  {
+    cli: z.enum(["claude", "codex", "gemini"]).optional().describe("Filter sessions by CLI (optional)")
+  },
+  async ({ cli }) => {
+    try {
+      const sessions = sessionManager.listSessions(cli);
+      const activeSessions = {
+        claude: sessionManager.getActiveSession("claude"),
+        codex: sessionManager.getActiveSession("codex"),
+        gemini: sessionManager.getActiveSession("gemini")
+      };
+
+      const sessionList = sessions.map(s => ({
+        id: s.id,
+        cli: s.cli,
+        description: s.description,
+        createdAt: s.createdAt,
+        lastUsedAt: s.lastUsedAt,
+        isActive: activeSessions[s.cli]?.id === s.id
+      }));
+
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({
+            total: sessionList.length,
+            sessions: sessionList,
+            activeSessions: {
+              claude: activeSessions.claude?.id || null,
+              codex: activeSessions.codex?.id || null,
+              gemini: activeSessions.gemini?.id || null
+            }
+          }, null, 2)
+        }]
+      };
+    } catch (error) {
+      return createErrorResponse("session_list", 1, "", error as Error);
+    }
+  }
+);
+
+server.tool(
+  "session_set_active",
+  {
+    cli: z.enum(["claude", "codex", "gemini"]).describe("Which CLI to set the active session for"),
+    sessionId: z.string().describe("Session ID to set as active (or null to clear)")
+  },
+  async ({ cli, sessionId }) => {
+    try {
+      const success = sessionManager.setActiveSession(cli, sessionId || null);
+
+      if (!success) {
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              success: false,
+              error: "Session not found or does not belong to the specified CLI"
+            }, null, 2)
+          }],
+          isError: true
+        };
+      }
+
+      logger.info(`Set active ${cli} session to: ${sessionId}`);
+
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({
+            success: true,
+            cli,
+            activeSessionId: sessionId
+          }, null, 2)
+        }]
+      };
+    } catch (error) {
+      return createErrorResponse("session_set_active", 1, "", error as Error);
+    }
+  }
+);
+
+server.tool(
+  "session_delete",
+  {
+    sessionId: z.string().describe("Session ID to delete")
+  },
+  async ({ sessionId }) => {
+    try {
+      const session = sessionManager.getSession(sessionId);
+      if (!session) {
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              success: false,
+              error: "Session not found"
+            }, null, 2)
+          }],
+          isError: true
+        };
+      }
+
+      const success = sessionManager.deleteSession(sessionId);
+      logger.info(`Deleted session: ${sessionId}`);
+
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({
+            success,
+            deletedSession: {
+              id: session.id,
+              cli: session.cli,
+              description: session.description
+            }
+          }, null, 2)
+        }]
+      };
+    } catch (error) {
+      return createErrorResponse("session_delete", 1, "", error as Error);
+    }
+  }
+);
+
+server.tool(
+  "session_get",
+  {
+    sessionId: z.string().describe("Session ID to retrieve")
+  },
+  async ({ sessionId }) => {
+    try {
+      const session = sessionManager.getSession(sessionId);
+
+      if (!session) {
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              success: false,
+              error: "Session not found"
+            }, null, 2)
+          }],
+          isError: true
+        };
+      }
+
+      const activeSession = sessionManager.getActiveSession(session.cli);
+
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({
+            success: true,
+            session: {
+              ...session,
+              isActive: activeSession?.id === session.id
+            }
+          }, null, 2)
+        }]
+      };
+    } catch (error) {
+      return createErrorResponse("session_get", 1, "", error as Error);
+    }
+  }
+);
+
+server.tool(
+  "session_clear_all",
+  {
+    cli: z.enum(["claude", "codex", "gemini"]).optional().describe("Clear sessions for specific CLI only (optional)")
+  },
+  async ({ cli }) => {
+    try {
+      const count = sessionManager.clearAllSessions(cli);
+      logger.info(`Cleared ${count} sessions${cli ? ` for ${cli}` : ''}`);
+
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({
+            success: true,
+            deletedCount: count,
+            cli: cli || "all"
+          }, null, 2)
+        }]
+      };
+    } catch (error) {
+      return createErrorResponse("session_clear_all", 1, "", error as Error);
+    }
   }
 );
 
@@ -111,11 +545,14 @@ server.tool(
 //──────────────────────────────────────────────────────────────────────────────
 
 async function main() {
+  logger.info("Starting llm-cli-gateway MCP server");
   const transport = new StdioServerTransport();
   await server.connect(transport);
+  logger.info("llm-cli-gateway MCP server connected and ready");
 }
 
 main().catch((error) => {
+  logger.error("Fatal server error:", error);
   console.error("Server error:", error);
   process.exit(1);
 });
