@@ -58,6 +58,20 @@ export async function executeCli(
 
     let stdout = "";
     let stderr = "";
+    let timedOut = false;
+
+    // Set up timeout
+    const timeoutId = setTimeout(() => {
+      timedOut = true;
+      proc.kill("SIGTERM");
+
+      // Force kill if process doesn't terminate
+      setTimeout(() => {
+        if (!proc.killed) {
+          proc.kill("SIGKILL");
+        }
+      }, 5000);
+    }, timeout);
 
     proc.stdout.on("data", (data) => {
       stdout += data.toString();
@@ -68,10 +82,21 @@ export async function executeCli(
     });
 
     proc.on("close", (code) => {
-      resolve({ stdout, stderr, code: code ?? 0 });
+      clearTimeout(timeoutId);
+
+      if (timedOut) {
+        resolve({
+          stdout,
+          stderr: stderr + `\nProcess timed out after ${timeout}ms`,
+          code: 124 // Standard timeout exit code
+        });
+      } else {
+        resolve({ stdout, stderr, code: code ?? 0 });
+      }
     });
 
     proc.on("error", (err) => {
+      clearTimeout(timeoutId);
       reject(err);
     });
   });
