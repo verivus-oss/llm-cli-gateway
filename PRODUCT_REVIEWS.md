@@ -408,3 +408,59 @@ This demonstrates **Gemini's tool-oriented approach** vs Claude/Codex's direct a
 **Review Method:** Self-dogfooding (llm-cli-gateway reviewing itself)
 **Reviewers:** 3 LLMs via MCP tools
 **Outcome:** ✅ Product validated, 🔴 Critical bugs found, 📋 Clear roadmap
+
+---
+
+## UPDATE: Critical Bugs Fixed (2026-01-24)
+
+### Complete Dogfooding Cycle ✅
+
+The llm-cli-gateway was used to **fix itself** after the product review:
+
+**Process:**
+1. ✅ Multi-LLM review identified 3 critical bugs (Codex)
+2. ✅ Codex via MCP gateway implemented all fixes
+3. ✅ All 109 tests passing (up from 104)
+4. ✅ Committed (96e1776)
+
+### Bugs Fixed by Codex
+
+**Bug #1: session_set_active schema mismatch** ✅ FIXED
+- Changed `z.string()` → `z.string().nullable()`
+- Feature now works as documented
+- File: src/index.ts:430
+
+**Bug #2: Session persistence race conditions** ✅ FIXED
+- Implemented atomic writes (temp file + rename)
+- Safe concurrent session updates
+- Files: src/session-manager.ts:57,133
+
+**Bug #3: Retry/circuit breaker unused** ✅ FIXED
+- Integrated withRetry + CircuitBreaker into executeCli
+- Transient failures now retried automatically
+- Timeouts (code 124) treated as retryable
+- Files: src/executor.ts, src/retry.ts
+
+### Test Results
+
+**Before fixes:** 104 tests passing
+**After fixes:** 109 tests passing (retry integration added coverage)
+**Build:** ✅ TypeScript compiles cleanly
+**Status:** Production-ready for 1.0 release
+
+### Dogfooding Validation
+
+This demonstrates the complete value proposition:
+- ✅ Multi-LLM review finds real bugs (Claude + Codex + Gemini)
+- ✅ Cross-tool collaboration fixes bugs (Codex via MCP)
+- ✅ Self-improvement cycle works end-to-end
+- ✅ Product is now genuinely production-ready
+
+**Quote:**
+> "The llm-cli-gateway successfully used itself to orchestrate its own code review and bug fixes across multiple LLM tools. This is the future of software development."
+
+---
+
+**Initial Review:** 2026-01-24 09:00 UTC
+**Bugs Fixed:** 2026-01-24 09:30 UTC
+**Time to Fix:** 30 minutes (review → implementation → tests → commit)
