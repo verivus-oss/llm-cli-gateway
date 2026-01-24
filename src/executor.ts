@@ -2,6 +2,7 @@ import { spawn } from "child_process";
 import { homedir } from "os";
 import { join, dirname } from "path";
 import { readdirSync, existsSync } from "fs";
+import { createCircuitBreaker, withRetry } from "./retry.js";
 
 export interface ExecuteOptions {
   timeout?: number;
@@ -13,6 +14,18 @@ export interface ExecuteResult {
   stdout: string;
   stderr: string;
   code: number;
+}
+
+const circuitBreakers = new Map<string, ReturnType<typeof createCircuitBreaker>>();
+
+function getCircuitBreaker(command: string) {
+  const existing = circuitBreakers.get(command);
+  if (existing) {
+    return existing;
+  }
+  const circuitBreaker = createCircuitBreaker();
+  circuitBreakers.set(command, circuitBreaker);
+  return circuitBreaker;
 }
 
 // Extend PATH to include common locations for CLI tools
@@ -49,8 +62,9 @@ export async function executeCli(
 ): Promise<ExecuteResult> {
   const { timeout = 120000, cwd } = options;
   const extendedPath = getExtendedPath();
+  const circuitBreaker = getCircuitBreaker(command);
 
-  return new Promise((resolve, reject) => {
+  const runOnce = () => new Promise<ExecuteResult>((resolve, reject) => {
     const proc = spawn(command, args, {
       cwd,
       stdio: ["ignore", "pipe", "pipe"],
@@ -86,14 +100,19 @@ export async function executeCli(
       clearTimeout(timeoutId);
 
       if (timedOut) {
-        resolve({
+        const result = {
           stdout,
           stderr: stderr + `\nProcess timed out after ${timeout}ms`,
           code: 124 // Standard timeout exit code
-        });
-      } else {
-        resolve({ stdout, stderr, code: code ?? 0 });
+        };
+        const error = new Error(result.stderr) as Error & { code?: number; result?: ExecuteResult };
+        error.code = 124;
+        error.result = result;
+        reject(error);
+        return;
       }
+
+      resolve({ stdout, stderr, code: code ?? 0 });
     });
 
     proc.on("error", (err) => {
@@ -101,4 +120,16 @@ export async function executeCli(
       reject(err);
     });
   });
+
+  try {
+    return await withRetry(runOnce, circuitBreaker);
+  } catch (error: any) {
+    if (error?.result) {
+      return error.result as ExecuteResult;
+    }
+    if (error?.cause?.result) {
+      return error.cause.result as ExecuteResult;
+    }
+    throw error;
+  }
 }
