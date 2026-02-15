@@ -19,10 +19,14 @@ All notable changes to the llm-cli-gateway project.
 
 ### Tests
 
-- **143 tests passing** (up from 122 in v1.1.0)
+- **182 tests passing** (up from 122 in v1.1.0)
 - 5 new executor tests: idle timeout kill, idle timer reset, no false-positive without option, exit code 125 vs 124 distinction, SIGKILL escalation via `exited` flag
 - 5 new retry classifier tests: exit code 125 non-transient, exit code 124 transient, ENOENT non-transient, ECONNRESET transient, unknown codes non-transient
 - 11 new async job manager tests: basic lifecycle (start/complete, failed job, unknown ID), idle timeout (kill, reset, no false-positive, exit code 125), cancel (running, nonexistent, completed, SIGKILL escalation)
+- 15 new stream-json-parser tests: result extraction, cost/usage/session/model fields, error result, assistant fallback, empty/malformed input, multi-block, missing usage defaults
+- 15 new process-monitor tests: parseProcStat (standard, spaces, parentheses, malformed), parseVmRss (extract, missing, empty), ProcessMonitor (own PID, dead PID, CPU delta, job health, null PID, cleanup, runningForMs)
+- 5 new executor process-group tests: detached spawn, ESRCH on dead group, register/unregister, killAllProcessGroups empty
+- 4 new async-job-manager tests: process health for running jobs, empty health, outputFormat tracking (stored, undefined, non-existent)
 
 ---
 
