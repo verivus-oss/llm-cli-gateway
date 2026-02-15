@@ -1,19 +1,19 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { SessionManager } from "../session-manager.js";
+import { FileSessionManager } from "../session-manager.js";
 import { existsSync, mkdirSync, rmSync, readFileSync, statSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
 describe("SessionManager", () => {
   let testDir: string;
-  let sessionManager: SessionManager;
+  let sessionManager: FileSessionManager;
 
   beforeEach(() => {
     // Create a temporary directory for test storage
     testDir = join(tmpdir(), `session-test-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`);
     mkdirSync(testDir, { recursive: true });
     const storagePath = join(testDir, "sessions.json");
-    sessionManager = new SessionManager(storagePath);
+    sessionManager = new FileSessionManager(storagePath);
   });
 
   afterEach(() => {
@@ -282,7 +282,7 @@ describe("SessionManager", () => {
       const storagePath = join(testDir, "sessions.json");
 
       // Create a new instance that should load from disk
-      const newManager = new SessionManager(storagePath);
+      const newManager = new FileSessionManager(storagePath);
       const loaded = newManager.getSession(sessionId);
 
       expect(loaded).toBeDefined();
@@ -294,7 +294,7 @@ describe("SessionManager", () => {
       sessionManager.setActiveSession("claude", session.id);
       const storagePath = join(testDir, "sessions.json");
 
-      const newManager = new SessionManager(storagePath);
+      const newManager = new FileSessionManager(storagePath);
       const activeSession = newManager.getActiveSession("claude");
 
       expect(activeSession?.id).toBe(session.id);
@@ -309,7 +309,7 @@ describe("SessionManager", () => {
 
       // Should not throw, should start fresh
       expect(() => {
-        const newManager = new SessionManager(storagePath);
+        const newManager = new FileSessionManager(storagePath);
         expect(newManager.listSessions()).toEqual([]);
       }).not.toThrow();
     });
@@ -319,7 +319,7 @@ describe("SessionManager", () => {
       sessionManager.updateSessionMetadata(session.id, { test: "data" });
       const storagePath = join(testDir, "sessions.json");
 
-      const newManager = new SessionManager(storagePath);
+      const newManager = new FileSessionManager(storagePath);
       const loaded = newManager.getSession(session.id);
 
       expect(loaded?.metadata).toEqual({ test: "data" });
