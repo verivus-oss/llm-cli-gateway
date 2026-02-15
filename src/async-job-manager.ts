@@ -1,6 +1,8 @@
 import { ChildProcess, spawn } from "child_process";
 import { randomUUID } from "crypto";
 import { getExtendedPath } from "./executor.js";
+import type { Logger } from "./logger.js";
+import { noopLogger } from "./logger.js";
 
 export type LlmCli = "claude" | "codex" | "gemini";
 export type AsyncJobStatus = "running" | "completed" | "failed" | "canceled";
@@ -61,7 +63,7 @@ export class AsyncJobManager {
   private jobs = new Map<string, AsyncJobRecord>();
   private evictionTimer: ReturnType<typeof setInterval> | null = null;
 
-  constructor() {
+  constructor(private logger: Logger = noopLogger) {
     this.evictionTimer = setInterval(() => this.evictCompletedJobs(), EVICTION_INTERVAL_MS);
     // Allow the process to exit even if the timer is active
     if (this.evictionTimer.unref) {
@@ -71,13 +73,18 @@ export class AsyncJobManager {
 
   private evictCompletedJobs(): void {
     const now = Date.now();
+    let evicted = 0;
     for (const [id, job] of this.jobs) {
       if (job.status !== "running" && job.finishedAt) {
         const finishedMs = new Date(job.finishedAt).getTime();
         if (now - finishedMs > JOB_TTL_MS) {
           this.jobs.delete(id);
+          evicted++;
         }
       }
+    }
+    if (evicted > 0) {
+      this.logger.debug(`Evicted ${evicted} completed jobs`);
     }
   }
 
@@ -108,6 +115,7 @@ export class AsyncJobManager {
     };
 
     this.jobs.set(id, job);
+    this.logger.info(`Job ${id} started for ${cli}`, { correlationId });
 
     child.stdout?.on("data", (chunk: Buffer) => {
       this.appendOutput(job, "stdout", chunk);
@@ -122,6 +130,7 @@ export class AsyncJobManager {
         job.status = job.canceled ? "canceled" : "failed";
         job.error = error.message;
         job.finishedAt = new Date().toISOString();
+        this.logger.error(`Job ${id} error: ${error.message}`, { correlationId });
       }
     });
 
@@ -189,6 +198,7 @@ export class AsyncJobManager {
     job.status = "canceled";
     job.finishedAt = new Date().toISOString();
     job.process.kill("SIGTERM");
+    this.logger.info(`Job ${jobId} canceled`, { correlationId: job.correlationId });
 
     setTimeout(() => {
       if (!job.process.killed) {

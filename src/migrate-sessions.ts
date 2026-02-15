@@ -3,7 +3,8 @@
 import { readFileSync } from "fs";
 import { homedir } from "os";
 import { join } from "path";
-import { PostgreSQLSessionManager, Logger } from "./session-manager-pg.js";
+import { PostgreSQLSessionManager } from "./session-manager-pg.js";
+import type { Logger } from "./logger.js";
 import { SessionStorage, CliType } from "./session-manager.js";
 import { loadConfig } from "./config.js";
 import { createDatabaseConnection } from "./db.js";
@@ -130,7 +131,7 @@ Environment Variables:
 
   // Connect to database
   console.error("Connecting to database...");
-  const db = await createDatabaseConnection(config);
+  const db = await createDatabaseConnection(config, logger);
   const pgManager = new PostgreSQLSessionManager(db.getPool(), db.getRedis(), config.cacheTtl, logger);
   console.error("✓ Connected to database\n");
 
