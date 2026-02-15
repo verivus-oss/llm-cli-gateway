@@ -314,7 +314,7 @@ server.tool(
     allowedTools: z.array(z.string()).optional().describe("Allowed tools (['Bash(git:*)','Edit','Write'])"),
     disallowedTools: z.array(z.string()).optional().describe("Disallowed tools"),
     dangerouslySkipPermissions: z.boolean().default(false).describe("Bypass permissions (sandbox only)"),
-    approvalStrategy: z.enum(["legacy", "mcp_managed"]).default("mcp_managed").describe("Approval strategy"),
+    approvalStrategy: z.enum(["legacy", "mcp_managed"]).default("legacy").describe("Approval strategy"),
     approvalPolicy: z.enum(["strict", "balanced", "permissive"]).optional().describe("Approval policy override"),
     mcpServers: z.array(MCP_SERVER_ENUM).default(["sqry", "exa", "ref_tools"]).describe("MCP servers exposed to Claude"),
     strictMcpConfig: z.boolean().default(true).describe("Restrict Claude to provided MCP config only"),
@@ -477,7 +477,7 @@ server.tool(
     model: z.string().optional().describe("Model name or alias (e.g. gpt-5.2-codex, latest)"),
     fullAuto: z.boolean().default(false).describe("Full-auto mode (sandboxed execution)"),
     dangerouslyBypassApprovalsAndSandbox: z.boolean().default(false).describe("Run Codex without approvals/sandbox"),
-    approvalStrategy: z.enum(["legacy", "mcp_managed"]).default("mcp_managed").describe("Approval strategy"),
+    approvalStrategy: z.enum(["legacy", "mcp_managed"]).default("legacy").describe("Approval strategy"),
     approvalPolicy: z.enum(["strict", "balanced", "permissive"]).optional().describe("Approval policy override"),
     mcpServers: z.array(MCP_SERVER_ENUM).default(["sqry", "exa", "ref_tools"]).describe("MCP servers expected for Codex"),
     sessionId: z.string().optional().describe("Session ID (Codex manages internally)"),
@@ -603,7 +603,7 @@ server.tool(
     resumeLatest: z.boolean().default(false).describe("Resume latest session"),
     createNewSession: z.boolean().default(false).describe("Force new session"),
     approvalMode: z.enum(["default", "auto_edit", "yolo"]).optional().describe("Approval: default|auto_edit|yolo"),
-    approvalStrategy: z.enum(["legacy", "mcp_managed"]).default("mcp_managed").describe("Approval strategy"),
+    approvalStrategy: z.enum(["legacy", "mcp_managed"]).default("legacy").describe("Approval strategy"),
     approvalPolicy: z.enum(["strict", "balanced", "permissive"]).optional().describe("Approval policy override"),
     mcpServers: z.array(MCP_SERVER_ENUM).default(["sqry", "exa", "ref_tools"]).describe("Allowed MCP server names"),
     allowedTools: z.array(z.string()).optional().describe("Allowed tools (['Write','Edit','Bash'])"),
@@ -745,7 +745,7 @@ server.tool(
     allowedTools: z.array(z.string()).optional().describe("Allowed tools (['Bash(git:*)','Edit','Write'])"),
     disallowedTools: z.array(z.string()).optional().describe("Disallowed tools"),
     dangerouslySkipPermissions: z.boolean().default(false).describe("Bypass permissions (sandbox only)"),
-    approvalStrategy: z.enum(["legacy", "mcp_managed"]).default("mcp_managed").describe("Approval strategy"),
+    approvalStrategy: z.enum(["legacy", "mcp_managed"]).default("legacy").describe("Approval strategy"),
     approvalPolicy: z.enum(["strict", "balanced", "permissive"]).optional().describe("Approval policy override"),
     mcpServers: z.array(MCP_SERVER_ENUM).default(["sqry", "exa", "ref_tools"]).describe("MCP servers exposed to Claude"),
     strictMcpConfig: z.boolean().default(true).describe("Restrict Claude to provided MCP config only"),
@@ -874,7 +874,7 @@ server.tool(
     model: z.string().optional().describe("Model name or alias (e.g. gpt-5.2-codex, latest)"),
     fullAuto: z.boolean().default(false).describe("Full-auto mode (sandboxed execution)"),
     dangerouslyBypassApprovalsAndSandbox: z.boolean().default(false).describe("Run Codex without approvals/sandbox"),
-    approvalStrategy: z.enum(["legacy", "mcp_managed"]).default("mcp_managed").describe("Approval strategy"),
+    approvalStrategy: z.enum(["legacy", "mcp_managed"]).default("legacy").describe("Approval strategy"),
     approvalPolicy: z.enum(["strict", "balanced", "permissive"]).optional().describe("Approval policy override"),
     mcpServers: z.array(MCP_SERVER_ENUM).default(["sqry", "exa", "ref_tools"]).describe("MCP servers expected for Codex"),
     sessionId: z.string().optional().describe("Session ID (Codex manages internally)"),
@@ -1364,7 +1364,7 @@ async function initializeSessionManager(): Promise<void> {
     logger.info("File-based session manager initialized");
   }
 
-  resourceProvider = new ResourceProvider(sessionManager as any, performanceMetrics);
+  resourceProvider = new ResourceProvider(sessionManager, performanceMetrics);
 }
 
 //──────────────────────────────────────────────────────────────────────────────
@@ -1442,6 +1442,5 @@ async function main() {
 
 main().catch((error) => {
   logger.error("Fatal server error:", error);
-  console.error("Server error:", error);
   process.exit(1);
 });

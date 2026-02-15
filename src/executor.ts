@@ -78,7 +78,7 @@ export async function executeCli(
   args: string[],
   options: ExecuteOptions = {}
 ): Promise<ExecuteResult> {
-  const { timeout, cwd } = options;
+  const { timeout = 120000, cwd } = options;
   const extendedPath = getExtendedPath();
   const circuitBreaker = getCircuitBreaker(command);
 
