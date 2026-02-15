@@ -2,6 +2,30 @@
 
 All notable changes to the llm-cli-gateway project.
 
+## [1.2.0] - 2026-02-15
+
+### Fixed
+
+- **SIGTERM→SIGKILL escalation bug** — `proc.killed` becomes `true` after `.kill()` is *called*, not after the process *exits*, so the SIGKILL guard (`if (!proc.killed)`) was always false. Replaced with an `exited` flag set by `close`/`error` events in both `executor.ts` and `async-job-manager.ts`
+- **Timer priority race** — When both `timeout` and `idleTimeout` are set, idle timeout now clears the wall-clock timer to prevent `timedOut` from overriding `idledOut` in the close handler (which would misclassify code 125 as transient code 124)
+
+### Added
+
+- **Per-CLI idle timeout** — New `idleTimeout` option on `ExecuteOptions` kills processes with no stdout/stderr activity. Codex and Gemini default to 10 minutes; Claude disabled (no streaming output until completion). Exit code **125** distinguishes idle timeout from wall-clock timeout (124)
+- **Idle timeout in async jobs** — `AsyncJobManager.startJob()` accepts `idleTimeoutMs` parameter, wired for `claude_request_async` and `codex_request_async`
+- **Output overflow kill in async jobs** — `appendOutput()` now kills the process on overflow instead of silently truncating while the process runs forever
+- **Machine-readable exit codes on async jobs** — `exitCode = 125` for idle timeout, `exitCode = 126` for output overflow, so clients don't need to parse error strings
+- **Exit code 125 handling** — `createErrorResponse` in `index.ts` produces a specific inactivity message; `retry.ts` documents that 125 is intentionally non-transient
+
+### Tests
+
+- **143 tests passing** (up from 122 in v1.1.0)
+- 5 new executor tests: idle timeout kill, idle timer reset, no false-positive without option, exit code 125 vs 124 distinction, SIGKILL escalation via `exited` flag
+- 5 new retry classifier tests: exit code 125 non-transient, exit code 124 transient, ENOENT non-transient, ECONNRESET transient, unknown codes non-transient
+- 11 new async job manager tests: basic lifecycle (start/complete, failed job, unknown ID), idle timeout (kill, reset, no false-positive, exit code 125), cancel (running, nonexistent, completed, SIGKILL escalation)
+
+---
+
 ## [1.1.0] - 2026-02-15
 
 ### Improved

@@ -6,6 +6,7 @@ import { createCircuitBreaker, withRetry } from "./retry.js";
 
 export interface ExecuteOptions {
   timeout?: number;
+  idleTimeout?: number;
   cwd?: string;
 }
 
@@ -78,7 +79,7 @@ export async function executeCli(
   args: string[],
   options: ExecuteOptions = {}
 ): Promise<ExecuteResult> {
-  const { timeout, cwd } = options;
+  const { timeout, idleTimeout, cwd } = options;
   const extendedPath = getExtendedPath();
   const circuitBreaker = getCircuitBreaker(command);
 
@@ -92,6 +93,8 @@ export async function executeCli(
     let stdout = "";
     let stderr = "";
     let timedOut = false;
+    let idledOut = false;
+    let exited = false;
     let outputSize = 0;
     let settled = false;
 
@@ -103,12 +106,34 @@ export async function executeCli(
 
         // Force kill if process doesn't terminate
         setTimeout(() => {
-          if (!proc.killed) {
+          if (!exited) {
             proc.kill("SIGKILL");
           }
         }, 5000);
       }, timeoutMs)
       : undefined;
+
+    // Idle timeout: kill process if no stdout/stderr activity for idleMs
+    const idleMs = typeof idleTimeout === "number" && Number.isFinite(idleTimeout) && idleTimeout > 0
+      ? idleTimeout : undefined;
+    let idleTimerId: ReturnType<typeof setTimeout> | undefined;
+
+    const resetIdleTimer = () => {
+      if (!idleMs) return;
+      if (idleTimerId) clearTimeout(idleTimerId);
+      idleTimerId = setTimeout(() => {
+        idledOut = true;
+        // Clear wall-clock timeout to prevent timedOut from overriding idledOut
+        if (timeoutId) clearTimeout(timeoutId);
+        proc.kill("SIGTERM");
+        setTimeout(() => {
+          if (!exited) proc.kill("SIGKILL");
+        }, 5000);
+      }, idleMs);
+    };
+
+    // Start idle timer immediately (covers case where process never outputs)
+    resetIdleTimer();
 
     const finalizeReject = (error: Error) => {
       if (settled) {
@@ -118,6 +143,9 @@ export async function executeCli(
       if (timeoutId) {
         clearTimeout(timeoutId);
       }
+      if (idleTimerId) {
+        clearTimeout(idleTimerId);
+      }
       reject(error);
     };
 
@@ -126,13 +154,15 @@ export async function executeCli(
       if (outputSize > MAX_OUTPUT_SIZE) {
         proc.kill("SIGTERM");
         setTimeout(() => {
-          if (!proc.killed) {
+          if (!exited) {
             proc.kill("SIGKILL");
           }
         }, 5000);
         finalizeReject(new Error("Output exceeded maximum size (50MB)"));
         return;
       }
+
+      resetIdleTimer();
 
       const text = data.toString();
       if (stream === "stdout") {
@@ -157,6 +187,10 @@ export async function executeCli(
     });
 
     proc.on("close", (code) => {
+      exited = true;
+      if (idleTimerId) {
+        clearTimeout(idleTimerId);
+      }
       if (settled) {
         return;
       }
@@ -177,6 +211,19 @@ export async function executeCli(
         return;
       }
 
+      if (idledOut) {
+        const result = {
+          stdout,
+          stderr: stderr + `\nProcess killed after ${idleMs}ms of inactivity`,
+          code: 125
+        };
+        const error = new Error(result.stderr) as Error & { code?: number; result?: ExecuteResult };
+        error.code = 125;
+        error.result = result;
+        reject(error);
+        return;
+      }
+
       const result = { stdout, stderr, code: code ?? 0 };
       if (result.code !== 0) {
         const error = new Error(`Process exited with code ${result.code}`) as Error & { code?: number; result?: ExecuteResult };
@@ -190,6 +237,10 @@ export async function executeCli(
     });
 
     proc.on("error", (err) => {
+      exited = true;
+      if (idleTimerId) {
+        clearTimeout(idleTimerId);
+      }
       if (settled) {
         return;
       }

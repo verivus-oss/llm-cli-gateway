@@ -67,6 +67,14 @@ const asyncJobManager = new AsyncJobManager(logger);
 const approvalManager = new ApprovalManager(undefined, logger);
 const MCP_SERVER_ENUM = z.enum(["sqry", "exa", "ref_tools"]);
 
+// Per-CLI idle timeouts: kill process if no stdout/stderr activity for this duration.
+// Claude -p produces no output until done, so idle timeout would false-positive.
+const CLI_IDLE_TIMEOUTS: Record<string, number | undefined> = {
+  claude: undefined,
+  codex: 600_000,   // 10 minutes — Codex streams stderr progress
+  gemini: 600_000,  // 10 minutes — Gemini streams stdout in real-time
+};
+
 // Helper function for standardized error responses
 function createErrorResponse(cli: string, code: number, stderr: string, correlationId?: string, error?: Error) {
   let errorMessage = `Error executing ${cli} CLI`;
@@ -79,9 +87,13 @@ function createErrorResponse(cli: string, code: number, stderr: string, correlat
     }
     logger.error(`[${correlationId || "unknown"}] ${cli} CLI execution failed:`, error.message);
   } else if (code === 124) {
-    // Timeout
+    // Wall-clock timeout
     errorMessage += `: Command timed out\n${stderr}`;
     logger.error(`[${correlationId || "unknown"}] ${cli} CLI timed out`);
+  } else if (code === 125) {
+    // Idle timeout (stuck process)
+    errorMessage += `: Process killed due to inactivity\n${stderr}`;
+    logger.error(`[${correlationId || "unknown"}] ${cli} CLI killed due to inactivity`);
   } else if (code !== 0) {
     // Other non-zero exit code
     errorMessage += ` (exit code ${code}):\n${stderr}`;
@@ -540,7 +552,7 @@ server.tool(
         await sessionManager.updateSessionUsage(effectiveSessionId);
       }
 
-      const { stdout, stderr, code } = await executeCli("claude", args);
+      const { stdout, stderr, code } = await executeCli("claude", args, { idleTimeout: CLI_IDLE_TIMEOUTS.claude });
       durationMs = Math.max(0, Date.now() - startTime);
 
       if (code !== 0) {
@@ -605,7 +617,7 @@ server.tool(
     logger.info(`[${corrId}] codex_request invoked with model=${prep.resolvedModel || "default"}, fullAuto=${fullAuto}, prompt length=${prompt.length}`);
 
     try {
-      const { stdout, stderr, code } = await executeCli("codex", args);
+      const { stdout, stderr, code } = await executeCli("codex", args, { idleTimeout: CLI_IDLE_TIMEOUTS.codex });
       durationMs = Math.max(0, Date.now() - startTime);
 
       if (code !== 0) {
@@ -734,7 +746,7 @@ server.tool(
         }
       }
 
-      const { stdout, stderr, code } = await executeCli("gemini", args);
+      const { stdout, stderr, code } = await executeCli("gemini", args, { idleTimeout: CLI_IDLE_TIMEOUTS.gemini });
       durationMs = Math.max(0, Date.now() - startTime);
 
       if (code !== 0) {
@@ -827,7 +839,7 @@ server.tool(
         }
       }
 
-      const job = asyncJobManager.startJob("claude", args, corrId);
+      const job = asyncJobManager.startJob("claude", args, corrId, undefined, CLI_IDLE_TIMEOUTS.claude);
       logger.info(`[${corrId}] claude_request_async started job ${job.id}`);
 
       return {
@@ -878,7 +890,7 @@ server.tool(
     const { corrId, args, requestedMcpServers, approvalDecision } = prep;
 
     try {
-      const job = asyncJobManager.startJob("codex", args, corrId);
+      const job = asyncJobManager.startJob("codex", args, corrId, undefined, CLI_IDLE_TIMEOUTS.codex);
 
       // Session management (after job start for codex async)
       let effectiveSessionId = sessionId;

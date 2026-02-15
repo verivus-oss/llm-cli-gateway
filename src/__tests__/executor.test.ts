@@ -139,4 +139,44 @@ describe("executeCli", () => {
       expect(result.code).toBe(0);
     });
   });
+
+  describe("idle timeout", () => {
+    it("should kill process after idle timeout with no output", async () => {
+      const result = await executeCli("sleep", ["30"], { idleTimeout: 500 });
+      expect(result.code).toBe(125);
+      expect(result.stderr).toContain("inactivity");
+    }, 15000);
+
+    it("should reset idle timer on output", async () => {
+      // Process outputs every 200ms for ~1s — idle timeout of 500ms should not fire
+      const result = await executeCli("sh", [
+        "-c", "for i in 1 2 3 4 5; do echo tick; sleep 0.2; done"
+      ], { idleTimeout: 500 });
+      expect(result.code).toBe(0);
+    }, 15000);
+
+    it("should not idle-timeout when idleTimeout is not set", async () => {
+      const result = await executeCli("sleep", ["1"]);
+      expect(result.code).toBe(0);
+    }, 15000);
+
+    it("should return exit code 125 distinct from wall-clock timeout 124", async () => {
+      const result = await executeCli("sleep", ["30"], { idleTimeout: 300 });
+      expect(result.code).toBe(125);
+      expect(result.code).not.toBe(124);
+    }, 15000);
+  });
+
+  describe("kill escalation", () => {
+    it("should SIGKILL a process that ignores SIGTERM on idle timeout", async () => {
+      // Code 125 is non-transient → no retry, completes in ~5.5s.
+      // Verifies the exited flag fix: proc.killed was always true after
+      // SIGTERM so SIGKILL never fired. The exited flag tracks actual exit.
+      const result = await executeCli("bash", [
+        "-c", "trap '' TERM; sleep 30"
+      ], { idleTimeout: 500 });
+      expect(result.code).toBe(125);
+      expect(result.stderr).toContain("inactivity");
+    }, 15000);
+  });
 });
