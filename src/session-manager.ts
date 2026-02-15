@@ -2,6 +2,8 @@ import { randomUUID } from "crypto";
 import { homedir } from "os";
 import { join, dirname } from "path";
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, openSync, fsyncSync, closeSync, chmodSync } from "fs";
+import type { Config } from "./config.js";
+import type { DatabaseConnection } from "./db.js";
 
 export const CLI_TYPES = ["claude", "codex", "gemini"] as const;
 export type CliType = (typeof CLI_TYPES)[number];
@@ -29,7 +31,7 @@ export interface SessionStorage {
   activeSession: Record<CliType, string | null>;
 }
 
-export class SessionManager {
+export class FileSessionManager {
   private storagePath: string;
   private storage: SessionStorage = { sessions: {}, activeSession: createEmptyActiveSessions() };
 
@@ -180,5 +182,59 @@ export class SessionManager {
 
     this.saveStorage();
     return sessionsToDelete.length;
+  }
+}
+
+// Maintain backward compatibility
+export const SessionManager = FileSessionManager;
+
+/**
+ * Session manager interface supporting both sync (file) and async (PostgreSQL) backends.
+ * Methods return T | Promise<T> so both backends satisfy the contract.
+ * Callers must always use `await` for uniform handling.
+ */
+export interface ISessionManager {
+  createSession(cli: CliType, description?: string, sessionId?: string): Session | Promise<Session>;
+  getSession(sessionId: string): Session | null | Promise<Session | null>;
+  listSessions(cli?: CliType): Session[] | Promise<Session[]>;
+  deleteSession(sessionId: string): boolean | Promise<boolean>;
+  setActiveSession(cli: CliType, sessionId: string | null): boolean | Promise<boolean>;
+  getActiveSession(cli: CliType): Session | null | Promise<Session | null>;
+  updateSessionUsage(sessionId: string): void | Promise<void>;
+  updateSessionMetadata(sessionId: string, metadata: Record<string, any>): boolean | Promise<boolean>;
+  clearAllSessions(cli?: CliType): number | Promise<number>;
+}
+
+/**
+ * Factory function to create session manager
+ * Returns PostgreSQLSessionManager if config present, otherwise FileSessionManager
+ * @param config - Configuration object
+ * @param db - Optional pre-existing DatabaseConnection (avoids creating duplicate connections)
+ * @param logger - Logger instance for structured logging
+ */
+export async function createSessionManager(
+  config?: Config,
+  db?: DatabaseConnection,
+  logger?: { info(message: string, meta?: unknown): void; error(message: string, meta?: unknown): void; debug(message: string, meta?: unknown): void }
+): Promise<ISessionManager> {
+  if (config?.database && config?.redis) {
+    // Import dynamically to avoid loading pg/ioredis if not needed
+    const { PostgreSQLSessionManager } = await import("./session-manager-pg.js");
+
+    // Use provided db connection or create new one
+    if (!db) {
+      const { createDatabaseConnection } = await import("./db.js");
+      db = await createDatabaseConnection(config);
+    }
+
+    const pgLogger = logger ?? {
+      info: () => {},
+      error: () => {},
+      debug: () => {}
+    };
+    return new PostgreSQLSessionManager(db.getPool(), db.getRedis(), config.cacheTtl, pgLogger);
+  } else {
+    // Use file-based storage
+    return new FileSessionManager();
   }
 }

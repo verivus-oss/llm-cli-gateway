@@ -21,7 +21,7 @@ A **production-ready** Model Context Protocol (MCP) server that provides a unifi
 - **Atomic File Writes**: Process-specific temp files with fsync for data integrity
 - **Memory Limits**: 50MB cap on CLI output prevents DoS attacks
 - **NVM Path Caching**: Eliminates I/O overhead on every request
-- **Timeout Protection**: Configurable timeouts with graceful termination (SIGTERM → SIGKILL)
+- **Long-Running Jobs**: Non-time-bound async execution via `*_request_async` + polling tools
 
 ### Security & Quality
 - **100% Bug-Free**: All 16 bugs found through multi-LLM reviews fixed
@@ -93,14 +93,25 @@ Execute a Claude Code request with optional session management.
 
 **Parameters:**
 - `prompt` (string, required): The prompt to send (1-100,000 chars)
-- `model` (string, optional): Model to use ("opus", "sonnet", "haiku")
+- `model` (string, optional): Model name or alias (use `list_models` for available values; supports `latest`)
 - `outputFormat` (string, optional): Output format ("text" or "json"), default: "text"
 - `sessionId` (string, optional): Specific session ID to use
 - `continueSession` (boolean, optional): Continue the active session
 - `createNewSession` (boolean, optional): Always create a new session
+- `allowedTools` (string[], optional): Restrict Claude tools to this allow-list
+- `disallowedTools` (string[], optional): Explicitly deny listed Claude tools
+- `dangerouslySkipPermissions` (boolean, optional): Request CLI-side permission bypass (legacy mode only)
+- `approvalStrategy` (string, optional): `"mcp_managed"` (default) or `"legacy"`
+- `approvalPolicy` (string, optional): `"strict"`, `"balanced"`, or `"permissive"`
+- `mcpServers` (string[], optional): Claude MCP servers to expose (default: `["sqry","exa","ref_tools"]`)
+- `strictMcpConfig` (boolean, optional): Require Claude to use only supplied MCP config, default: true (request fails if any requested server is unavailable)
 - `optimizePrompt` (boolean, optional): Optimize prompt for token efficiency (44% reduction), default: false
 - `optimizeResponse` (boolean, optional): Optimize response for token efficiency (37% reduction), default: false
 - `correlationId` (string, optional): Request trace ID (auto-generated if omitted)
+
+**Response extras:**
+- `approval`: Approval decision record when `approvalStrategy="mcp_managed"`
+- `mcpServers`: Requested/enabled/missing MCP servers for this call
 
 **Example:**
 ```json
@@ -118,19 +129,27 @@ Execute a Codex request with optional session tracking.
 
 **Parameters:**
 - `prompt` (string, required): The prompt to send (1-100,000 chars)
-- `model` (string, optional): Model to use ("o3", "o4-mini", "gpt-4.1")
+- `model` (string, optional): Model name or alias (use `list_models` for available values; supports `latest`)
 - `fullAuto` (boolean, optional): Enable full-auto mode, default: false
+- `dangerouslyBypassApprovalsAndSandbox` (boolean, optional): Request Codex bypass flags
+- `approvalStrategy` (string, optional): `"mcp_managed"` (default) or `"legacy"`
+- `approvalPolicy` (string, optional): `"strict"`, `"balanced"`, or `"permissive"`
+- `mcpServers` (string[], optional): MCP servers expected for Codex execution context
 - `sessionId` (string, optional): Session identifier for tracking
 - `createNewSession` (boolean, optional): Always create a new session
 - `optimizePrompt` (boolean, optional): Optimize prompt for token efficiency, default: false
 - `optimizeResponse` (boolean, optional): Optimize response for token efficiency, default: false
 - `correlationId` (string, optional): Request trace ID (auto-generated if omitted)
 
+**Response extras:**
+- `approval`: Approval decision record when `approvalStrategy="mcp_managed"`
+- `mcpServers`: Requested MCP servers for this call
+
 **Example:**
 ```json
 {
   "prompt": "Create a REST API endpoint",
-  "model": "o4-mini",
+  "model": "latest",
   "fullAuto": true,
   "optimizePrompt": true
 }
@@ -141,23 +160,66 @@ Execute a Gemini CLI request with session support.
 
 **Parameters:**
 - `prompt` (string, required): The prompt to send (1-100,000 chars)
-- `model` (string, optional): Model to use ("gemini-2.5-pro", "gemini-2.5-flash")
+- `model` (string, optional): Model name or alias (use `list_models` for available values; supports `latest`, `pro`, `flash`)
 - `sessionId` (string, optional): Session ID to resume
 - `resumeLatest` (boolean, optional): Resume the latest session automatically
 - `createNewSession` (boolean, optional): Always create a new session
+- `approvalMode` (string, optional): Gemini approval mode (`default|auto_edit|yolo`) in legacy mode
+- `approvalStrategy` (string, optional): `"mcp_managed"` (default) or `"legacy"`
+- `approvalPolicy` (string, optional): `"strict"`, `"balanced"`, or `"permissive"`
+- `mcpServers` (string[], optional): Allowed Gemini MCP server names
+- `allowedTools` (string[], optional): Restrict Gemini tools to this allow-list
+- `includeDirs` (string[], optional): Additional workspace directories for Gemini
 - `optimizePrompt` (boolean, optional): Optimize prompt for token efficiency, default: false
 - `optimizeResponse` (boolean, optional): Optimize response for token efficiency, default: false
 - `correlationId` (string, optional): Request trace ID (auto-generated if omitted)
+
+**Response extras:**
+- `approval`: Approval decision record when `approvalStrategy="mcp_managed"`
+- `mcpServers`: Requested MCP servers for this call
 
 **Example:**
 ```json
 {
   "prompt": "Explain quantum computing",
-  "model": "gemini-2.5-pro",
+  "model": "latest",
   "resumeLatest": true,
   "optimizePrompt": true
 }
 ```
+
+##### `claude_request_async` / `codex_request_async`
+Start a long-running Claude or Codex request without waiting for completion in the same MCP call.
+
+Use this flow when analysis/runtime can exceed client tool-call limits:
+1. Start job with `*_request_async`
+2. Poll with `llm_job_status`
+3. Fetch output with `llm_job_result`
+4. Optionally stop with `llm_job_cancel`
+
+Async request tools accept the same approval strategy fields as their sync variants:
+- `approvalStrategy`: `"mcp_managed"` (default) or `"legacy"`
+- `approvalPolicy`: `"strict"|"balanced"|"permissive"` override
+- `mcpServers`: Requested MCP servers (`sqry`, `exa`, `ref_tools`)
+- `claude_request_async` also supports `strictMcpConfig` and fails fast when requested servers are unavailable
+
+##### `llm_job_status`
+Return lifecycle status (`running`, `completed`, `failed`, `canceled`) and metadata for an async job.
+
+##### `llm_job_result`
+Return captured stdout/stderr for an async job (with configurable max chars per stream).
+
+##### `llm_job_cancel`
+Cancel a running async job.
+
+##### `approval_list`
+List recent MCP-managed approval decisions recorded by the gateway.
+
+**Parameters:**
+- `limit` (number, optional): Max records (1-500), default: 50
+- `cli` (string, optional): Filter by `"claude"`, `"codex"`, or `"gemini"`
+
+Approval records are persisted to `~/.llm-cli-gateway/approvals.jsonl`.
 
 #### Session Management Tools
 
@@ -281,6 +343,10 @@ await callTool("session_delete", {
   ```bash
   DEBUG=1 node dist/index.js
   ```
+- `LLM_GATEWAY_APPROVAL_POLICY`: Default approval policy when request does not pass `approvalPolicy` (`strict`, `balanced`, `permissive`)
+  ```bash
+  LLM_GATEWAY_APPROVAL_POLICY=strict node dist/index.js
+  ```
 
 ### CLI-Specific Settings
 
@@ -348,7 +414,7 @@ spawn claude ENOENT
 The 'claude' command was not found. Please ensure claude CLI is installed and in your PATH.
 ```
 
-### Timeout
+### External Timeout / Legacy Timeout Option
 ```
 Error executing codex CLI: Command timed out
 Process timed out after 120000ms
@@ -425,10 +491,9 @@ cat ~/.llm-cli-gateway/sessions.json
 
 ### Timeouts
 
-Default timeout is 120 seconds (2 minutes). Commands that exceed this will be:
-1. Sent SIGTERM
-2. After 5 seconds, sent SIGKILL if still running
-3. Returned with exit code 124
+The gateway does not enforce a default execution timeout for LLM CLI requests.
+
+If your MCP client/runtime enforces per-tool-call deadlines, use async tools (`*_request_async` + `llm_job_status`/`llm_job_result`) so long-running jobs can complete outside a single call window.
 
 ### Concurrent Requests
 

@@ -54,7 +54,7 @@ function getNvmPath(): string | null {
 }
 
 // Extend PATH to include common locations for CLI tools
-function getExtendedPath(): string {
+export function getExtendedPath(): string {
   const home = homedir();
   const additionalPaths: string[] = [
     join(home, ".local/bin"),
@@ -95,25 +95,29 @@ export async function executeCli(
     let outputSize = 0;
     let settled = false;
 
-    // Set up timeout
-    const timeoutId = setTimeout(() => {
-      timedOut = true;
-      proc.kill("SIGTERM");
+    const timeoutMs = typeof timeout === "number" && Number.isFinite(timeout) && timeout > 0 ? timeout : undefined;
+    const timeoutId = timeoutMs
+      ? setTimeout(() => {
+        timedOut = true;
+        proc.kill("SIGTERM");
 
-      // Force kill if process doesn't terminate
-      setTimeout(() => {
-        if (!proc.killed) {
-          proc.kill("SIGKILL");
-        }
-      }, 5000);
-    }, timeout);
+        // Force kill if process doesn't terminate
+        setTimeout(() => {
+          if (!proc.killed) {
+            proc.kill("SIGKILL");
+          }
+        }, 5000);
+      }, timeoutMs)
+      : undefined;
 
     const finalizeReject = (error: Error) => {
       if (settled) {
         return;
       }
       settled = true;
-      clearTimeout(timeoutId);
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+      }
       reject(error);
     };
 
@@ -156,12 +160,14 @@ export async function executeCli(
       if (settled) {
         return;
       }
-      clearTimeout(timeoutId);
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+      }
 
       if (timedOut) {
         const result = {
           stdout,
-          stderr: stderr + `\nProcess timed out after ${timeout}ms`,
+          stderr: stderr + `\nProcess timed out after ${timeoutMs}ms`,
           code: 124 // Standard timeout exit code
         };
         const error = new Error(result.stderr) as Error & { code?: number; result?: ExecuteResult };
@@ -187,7 +193,9 @@ export async function executeCli(
       if (settled) {
         return;
       }
-      clearTimeout(timeoutId);
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+      }
       settled = true;
       reject(err);
     });
