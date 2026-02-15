@@ -9,11 +9,15 @@
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
+    "migrate": "node dist/migrate.js",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:unit": "vitest run src/__tests__/executor.test.ts",
     "test:session": "vitest run src/__tests__/session-manager.test.ts",
+    "test:session-pg": "bash ./scripts/test-pg.sh src/__tests__/session-manager-pg.test.ts",
     "test:integration": "vitest run src/__tests__/integration.test.ts",
+    "test:pg": "bash ./scripts/test-pg.sh",
+    "test:all": "npm run test && npm run test:pg",
     "lint": "eslint src/**/*.ts",
     "lint:fix": "eslint src/**/*.ts --fix",
     "format": "prettier --write 'src/**/*.ts'",
@@ -22,10 +26,14 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
+    "ioredis": "^5.4.1",
+    "pg": "^8.12.0",
+    "toml": "^3.0.0",
     "zod": "^3.23.0"
   },
   "devDependencies": {
     "@types/node": "^20.19.30",
+    "@types/pg": "^8.11.10",
     "@typescript-eslint/eslint-plugin": "^6.0.0",
     "@typescript-eslint/parser": "^6.0.0",
     "eslint": "^8.0.0",
