@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { PerformanceMetrics } from "../metrics.js";
 import { ResourceProvider } from "../resources.js";
-import { SessionManager } from "../session-manager.js";
+import { FileSessionManager } from "../session-manager.js";
 import { mkdirSync, rmSync, existsSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
@@ -62,14 +62,14 @@ describe("PerformanceMetrics", () => {
 
 describe("ResourceProvider performance metrics resource", () => {
   let testDir: string;
-  let sessionManager: SessionManager;
+  let sessionManager: FileSessionManager;
   let metrics: PerformanceMetrics;
   let resourceProvider: ResourceProvider;
 
   beforeEach(() => {
     testDir = join(tmpdir(), `metrics-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
     mkdirSync(testDir, { recursive: true });
-    sessionManager = new SessionManager(join(testDir, "sessions.json"));
+    sessionManager = new FileSessionManager(join(testDir, "sessions.json"));
     metrics = new PerformanceMetrics();
     resourceProvider = new ResourceProvider(sessionManager, metrics);
   });
@@ -85,10 +85,10 @@ describe("ResourceProvider performance metrics resource", () => {
     expect(resources.some(resource => resource.uri === "metrics://performance")).toBe(true);
   });
 
-  it("should expose performance metrics as a resource", () => {
+  it("should expose performance metrics as a resource", async () => {
     metrics.recordRequest("gemini", 250, true);
 
-    const resource = resourceProvider.readResource("metrics://performance");
+    const resource = await resourceProvider.readResource("metrics://performance");
     expect(resource).not.toBeNull();
 
     const parsed = JSON.parse(resource?.text || "{}");
