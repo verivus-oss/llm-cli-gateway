@@ -66,9 +66,10 @@ const isDefaultTransient = (error: any): boolean => {
   }
 
   // Shell command-related errors
-  if (error.code === 124) { // timeout
+  if (error.code === 124) { // wall-clock timeout (explicit, caller-set) — transient
     return true;
   }
+  // Note: exit code 125 = idle timeout (stuck process) — intentionally non-transient
   if (error.code === 'ENOENT') { // command not found
     return false;
   }

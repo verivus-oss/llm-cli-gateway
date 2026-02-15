@@ -26,6 +26,9 @@ interface AsyncJobRecord {
   canceled: boolean;
   error: string | null;
   process: ChildProcess;
+  exited: boolean;
+  resetIdleTimer?: () => void;
+  clearIdleTimer?: () => void;
 }
 
 export interface AsyncJobSnapshot {
@@ -40,6 +43,7 @@ export interface AsyncJobSnapshot {
   stdoutBytes: number;
   stderrBytes: number;
   error: string | null;
+  exited: boolean;
 }
 
 export interface AsyncJobResult extends AsyncJobSnapshot {
@@ -88,7 +92,7 @@ export class AsyncJobManager {
     }
   }
 
-  startJob(cli: LlmCli, args: string[], correlationId: string, cwd?: string): AsyncJobSnapshot {
+  startJob(cli: LlmCli, args: string[], correlationId: string, cwd?: string, idleTimeoutMs?: number): AsyncJobSnapshot {
     const id = randomUUID();
     const startedAt = new Date().toISOString();
     const child = spawn(cli, args, {
@@ -111,11 +115,36 @@ export class AsyncJobManager {
       outputTruncated: false,
       canceled: false,
       error: null,
-      process: child
+      process: child,
+      exited: false
     };
 
     this.jobs.set(id, job);
     this.logger.info(`Job ${id} started for ${cli}`, { correlationId });
+
+    // Idle timeout: kill process if no output activity for idleTimeoutMs
+    let idleTimerId: ReturnType<typeof setTimeout> | undefined;
+    const resetIdleTimer = () => {
+      if (!idleTimeoutMs || idleTimeoutMs <= 0) return;
+      if (idleTimerId) clearTimeout(idleTimerId);
+      idleTimerId = setTimeout(() => {
+        if (job.status !== "running") return;
+        job.status = "failed";
+        job.exitCode = 125;
+        job.error = `Process killed after ${idleTimeoutMs}ms of inactivity`;
+        job.finishedAt = new Date().toISOString();
+        job.process.kill("SIGTERM");
+        this.logger.info(`Job ${id} killed due to inactivity (${idleTimeoutMs}ms)`, { correlationId });
+        setTimeout(() => {
+          if (!job.exited) job.process.kill("SIGKILL");
+        }, 5000);
+      }, idleTimeoutMs);
+    };
+    job.resetIdleTimer = resetIdleTimer;
+    job.clearIdleTimer = () => {
+      if (idleTimerId) clearTimeout(idleTimerId);
+    };
+    resetIdleTimer();
 
     child.stdout?.on("data", (chunk: Buffer) => {
       this.appendOutput(job, "stdout", chunk);
@@ -126,6 +155,8 @@ export class AsyncJobManager {
     });
 
     child.on("error", (error: Error) => {
+      job.exited = true;
+      job.clearIdleTimer?.();
       if (job.status === "running") {
         job.status = job.canceled ? "canceled" : "failed";
         job.error = error.message;
@@ -135,6 +166,8 @@ export class AsyncJobManager {
     });
 
     child.on("close", (code: number | null) => {
+      job.exited = true;
+      job.clearIdleTimer?.();
       if (job.status !== "running") {
         job.exitCode = code ?? job.exitCode;
         if (!job.finishedAt) {
@@ -197,11 +230,12 @@ export class AsyncJobManager {
     job.canceled = true;
     job.status = "canceled";
     job.finishedAt = new Date().toISOString();
+    job.clearIdleTimer?.();
     job.process.kill("SIGTERM");
     this.logger.info(`Job ${jobId} canceled`, { correlationId: job.correlationId });
 
     setTimeout(() => {
-      if (!job.process.killed) {
+      if (!job.exited) {
         job.process.kill("SIGKILL");
       }
     }, 5000);
@@ -221,7 +255,8 @@ export class AsyncJobManager {
       outputTruncated: job.outputTruncated,
       stdoutBytes: Buffer.byteLength(job.stdout),
       stderrBytes: Buffer.byteLength(job.stderr),
-      error: job.error
+      error: job.error,
+      exited: job.exited
     };
   }
 
@@ -229,8 +264,22 @@ export class AsyncJobManager {
     const totalBytes = Buffer.byteLength(job.stdout) + Buffer.byteLength(job.stderr) + chunk.length;
     if (totalBytes > MAX_OUTPUT_SIZE) {
       job.outputTruncated = true;
+      if (job.status === "running") {
+        job.status = "failed";
+        job.exitCode = 126;
+        job.error = "Output exceeded maximum size (50MB)";
+        job.finishedAt = new Date().toISOString();
+        job.clearIdleTimer?.();
+        job.process.kill("SIGTERM");
+        this.logger.info(`Job ${job.id} killed due to output overflow`, { correlationId: job.correlationId });
+        setTimeout(() => {
+          if (!job.exited) job.process.kill("SIGKILL");
+        }, 5000);
+      }
       return;
     }
+
+    job.resetIdleTimer?.();
 
     const text = chunk.toString();
     if (stream === "stdout") {
