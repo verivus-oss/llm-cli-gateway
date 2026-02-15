@@ -4,7 +4,8 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { randomUUID } from "crypto";
 import { z } from "zod";
-import { executeCli } from "./executor.js";
+import { executeCli, killAllProcessGroups } from "./executor.js";
+import { parseStreamJson } from "./stream-json-parser.js";
 import { ISessionManager, createSessionManager } from "./session-manager.js";
 import { ResourceProvider } from "./resources.js";
 import { PerformanceMetrics } from "./metrics.js";
@@ -68,12 +69,18 @@ const approvalManager = new ApprovalManager(undefined, logger);
 const MCP_SERVER_ENUM = z.enum(["sqry", "exa", "ref_tools"]);
 
 // Per-CLI idle timeouts: kill process if no stdout/stderr activity for this duration.
-// Claude -p produces no output until done, so idle timeout would false-positive.
+// Claude idle timeout only applies in stream-json mode (with --include-partial-messages).
+// In text/json mode, Claude produces no output until done, so idle timeout would false-positive.
 const CLI_IDLE_TIMEOUTS: Record<string, number | undefined> = {
-  claude: undefined,
+  claude: 600_000,  // 10 minutes — only used when outputFormat=stream-json
   codex: 600_000,   // 10 minutes — Codex streams stderr progress
   gemini: 600_000,  // 10 minutes — Gemini streams stdout in real-time
 };
+
+function resolveIdleTimeout(cli: string, override?: number): number | undefined {
+  if (override !== undefined) return override;
+  return CLI_IDLE_TIMEOUTS[cli];
+}
 
 // Helper function for standardized error responses
 function createErrorResponse(cli: string, code: number, stderr: string, correlationId?: string, error?: Error) {
@@ -339,7 +346,7 @@ interface CliRequestPrep {
 function prepareClaudeRequest(params: {
   prompt: string;
   model?: string;
-  outputFormat: "text" | "json";
+  outputFormat: "text" | "json" | "stream-json";
   allowedTools?: string[];
   disallowedTools?: string[];
   dangerouslySkipPermissions: boolean;
@@ -390,7 +397,11 @@ function prepareClaudeRequest(params: {
 
   const args = ["-p", effectivePrompt];
   if (resolvedModel) args.push("--model", resolvedModel);
-  if (params.outputFormat === "json") args.push("--output-format", "json");
+  if (params.outputFormat === "json") {
+    args.push("--output-format", "json");
+  } else if (params.outputFormat === "stream-json") {
+    args.push("--output-format", "stream-json", "--include-partial-messages");
+  }
   if (params.allowedTools && params.allowedTools.length > 0) {
     args.push("--allowed-tools", ...params.allowedTools);
   }
@@ -503,7 +514,7 @@ server.tool(
   {
     prompt: z.string().min(1, "Prompt cannot be empty").max(100000, "Prompt too long (max 100k chars)").describe("Prompt text for Claude"),
     model: z.string().optional().describe("Model name or alias (e.g. sonnet, claude-sonnet-4-5-20250929, latest)"),
-    outputFormat: z.enum(["text", "json"]).default("text").describe("Output format (text|json)"),
+    outputFormat: z.enum(["text", "json", "stream-json"]).default("text").describe("Output format (text|json|stream-json). stream-json enables idle timeout protection via NDJSON streaming."),
     sessionId: z.string().optional().describe("Session ID (uses active if omitted)"),
     continueSession: z.boolean().default(false).describe("Continue active session"),
     createNewSession: z.boolean().default(false).describe("Force new session"),
@@ -516,9 +527,10 @@ server.tool(
     strictMcpConfig: z.boolean().default(true).describe("Restrict Claude to provided MCP config only"),
     correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
     optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution"),
-    optimizeResponse: z.boolean().default(false).describe("Optimize response output")
+    optimizeResponse: z.boolean().default(false).describe("Optimize response output"),
+    idleTimeoutMs: z.number().int().min(30_000).max(3_600_000).optional().describe("Idle timeout in ms (min 30s, max 1h, omit=CLI default). Kills process after this duration of no output activity.")
   },
-  async ({ prompt, model, outputFormat, sessionId, continueSession, createNewSession, allowedTools, disallowedTools, dangerouslySkipPermissions, approvalStrategy, approvalPolicy, mcpServers, strictMcpConfig, correlationId, optimizePrompt, optimizeResponse }) => {
+  async ({ prompt, model, outputFormat, sessionId, continueSession, createNewSession, allowedTools, disallowedTools, dangerouslySkipPermissions, approvalStrategy, approvalPolicy, mcpServers, strictMcpConfig, correlationId, optimizePrompt, optimizeResponse, idleTimeoutMs }) => {
     const startTime = Date.now();
     const prep = prepareClaudeRequest({
       prompt, model, outputFormat, allowedTools, disallowedTools, dangerouslySkipPermissions,
@@ -530,7 +542,7 @@ server.tool(
     const { corrId, args } = prep;
     let durationMs = 0;
     let wasSuccessful = false;
-    logger.info(`[${corrId}] claude_request invoked with model=${prep.resolvedModel || "default"}, prompt length=${prompt.length}, sessionId=${sessionId}`);
+    logger.info(`[${corrId}] claude_request invoked with model=${prep.resolvedModel || "default"}, outputFormat=${outputFormat}, prompt length=${prompt.length}, sessionId=${sessionId}`);
 
     try {
       // Session management
@@ -552,7 +564,11 @@ server.tool(
         await sessionManager.updateSessionUsage(effectiveSessionId);
       }
 
-      const { stdout, stderr, code } = await executeCli("claude", args, { idleTimeout: CLI_IDLE_TIMEOUTS.claude });
+      // Idle timeout only for stream-json (text/json produce no output until done)
+      const effectiveIdleTimeout = outputFormat === "stream-json"
+        ? resolveIdleTimeout("claude", idleTimeoutMs)
+        : undefined;
+      const { stdout, stderr, code } = await executeCli("claude", args, { idleTimeout: effectiveIdleTimeout });
       durationMs = Math.max(0, Date.now() - startTime);
 
       if (code !== 0) {
@@ -570,6 +586,15 @@ server.tool(
       }
 
       logger.info(`[${corrId}] claude_request completed successfully in ${durationMs}ms`);
+
+      // Parse stream-json NDJSON output to extract result text
+      if (outputFormat === "stream-json") {
+        const parsed = parseStreamJson(stdout);
+        if (parsed.costUsd !== null) {
+          logger.debug(`[${corrId}] stream-json cost=$${parsed.costUsd}, model=${parsed.model}, turns=${parsed.numTurns}`);
+        }
+        return buildCliResponse(parsed.text, optimizeResponse, corrId, effectiveSessionId, prep);
+      }
       return buildCliResponse(stdout, optimizeResponse, corrId, effectiveSessionId, prep);
     } catch (error) {
       const elapsedMs = Math.max(0, Date.now() - startTime);
@@ -600,9 +625,10 @@ server.tool(
     createNewSession: z.boolean().default(false).describe("Force new session"),
     correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
     optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution"),
-    optimizeResponse: z.boolean().default(false).describe("Optimize response output")
+    optimizeResponse: z.boolean().default(false).describe("Optimize response output"),
+    idleTimeoutMs: z.number().int().min(30_000).max(3_600_000).optional().describe("Idle timeout in ms (min 30s, max 1h, omit=CLI default). Kills process after this duration of no output activity.")
   },
-  async ({ prompt, model, fullAuto, dangerouslyBypassApprovalsAndSandbox, approvalStrategy, approvalPolicy, mcpServers, sessionId, createNewSession, correlationId, optimizePrompt, optimizeResponse }) => {
+  async ({ prompt, model, fullAuto, dangerouslyBypassApprovalsAndSandbox, approvalStrategy, approvalPolicy, mcpServers, sessionId, createNewSession, correlationId, optimizePrompt, optimizeResponse, idleTimeoutMs }) => {
     const startTime = Date.now();
     const prep = prepareCodexRequest({
       prompt, model, fullAuto, dangerouslyBypassApprovalsAndSandbox,
@@ -617,7 +643,7 @@ server.tool(
     logger.info(`[${corrId}] codex_request invoked with model=${prep.resolvedModel || "default"}, fullAuto=${fullAuto}, prompt length=${prompt.length}`);
 
     try {
-      const { stdout, stderr, code } = await executeCli("codex", args, { idleTimeout: CLI_IDLE_TIMEOUTS.codex });
+      const { stdout, stderr, code } = await executeCli("codex", args, { idleTimeout: resolveIdleTimeout("codex", idleTimeoutMs) });
       durationMs = Math.max(0, Date.now() - startTime);
 
       if (code !== 0) {
@@ -676,9 +702,10 @@ server.tool(
     includeDirs: z.array(z.string()).optional().describe("Additional workspace directories"),
     correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
     optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution"),
-    optimizeResponse: z.boolean().default(false).describe("Optimize response output")
+    optimizeResponse: z.boolean().default(false).describe("Optimize response output"),
+    idleTimeoutMs: z.number().int().min(30_000).max(3_600_000).optional().describe("Idle timeout in ms (min 30s, max 1h, omit=CLI default). Kills process after this duration of no output activity.")
   },
-  async ({ prompt, model, sessionId, resumeLatest, createNewSession, approvalMode, approvalStrategy, approvalPolicy, mcpServers, allowedTools, includeDirs, correlationId, optimizePrompt, optimizeResponse }) => {
+  async ({ prompt, model, sessionId, resumeLatest, createNewSession, approvalMode, approvalStrategy, approvalPolicy, mcpServers, allowedTools, includeDirs, correlationId, optimizePrompt, optimizeResponse, idleTimeoutMs }) => {
     const startTime = Date.now();
     const corrId = correlationId || randomUUID();
     let durationMs = 0;
@@ -746,7 +773,7 @@ server.tool(
         }
       }
 
-      const { stdout, stderr, code } = await executeCli("gemini", args, { idleTimeout: CLI_IDLE_TIMEOUTS.gemini });
+      const { stdout, stderr, code } = await executeCli("gemini", args, { idleTimeout: resolveIdleTimeout("gemini", idleTimeoutMs) });
       durationMs = Math.max(0, Date.now() - startTime);
 
       if (code !== 0) {
@@ -788,7 +815,7 @@ server.tool(
   {
     prompt: z.string().min(1, "Prompt cannot be empty").max(100000, "Prompt too long (max 100k chars)").describe("Prompt text for Claude"),
     model: z.string().optional().describe("Model name or alias (e.g. sonnet, claude-sonnet-4-5-20250929, latest)"),
-    outputFormat: z.enum(["text", "json"]).default("text").describe("Output format (text|json)"),
+    outputFormat: z.enum(["text", "json", "stream-json"]).default("text").describe("Output format (text|json|stream-json). stream-json enables idle timeout protection via NDJSON streaming."),
     sessionId: z.string().optional().describe("Session ID (uses active if omitted)"),
     continueSession: z.boolean().default(false).describe("Continue active session"),
     createNewSession: z.boolean().default(false).describe("Force new session"),
@@ -800,9 +827,10 @@ server.tool(
     mcpServers: z.array(MCP_SERVER_ENUM).default(["sqry", "exa", "ref_tools"]).describe("MCP servers exposed to Claude"),
     strictMcpConfig: z.boolean().default(true).describe("Restrict Claude to provided MCP config only"),
     correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
-    optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution")
+    optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution"),
+    idleTimeoutMs: z.number().int().min(30_000).max(3_600_000).optional().describe("Idle timeout in ms (min 30s, max 1h, omit=CLI default). Kills process after this duration of no output activity.")
   },
-  async ({ prompt, model, outputFormat, sessionId, continueSession, createNewSession, allowedTools, disallowedTools, dangerouslySkipPermissions, approvalStrategy, approvalPolicy, mcpServers, strictMcpConfig, correlationId, optimizePrompt }) => {
+  async ({ prompt, model, outputFormat, sessionId, continueSession, createNewSession, allowedTools, disallowedTools, dangerouslySkipPermissions, approvalStrategy, approvalPolicy, mcpServers, strictMcpConfig, correlationId, optimizePrompt, idleTimeoutMs }) => {
     const prep = prepareClaudeRequest({
       prompt, model, outputFormat, allowedTools, disallowedTools, dangerouslySkipPermissions,
       approvalStrategy, approvalPolicy, mcpServers: mcpServers as ClaudeMcpServerName[],
@@ -839,8 +867,12 @@ server.tool(
         }
       }
 
-      const job = asyncJobManager.startJob("claude", args, corrId, undefined, CLI_IDLE_TIMEOUTS.claude);
-      logger.info(`[${corrId}] claude_request_async started job ${job.id}`);
+      // Idle timeout only for stream-json (text/json produce no output until done)
+      const effectiveIdleTimeout = outputFormat === "stream-json"
+        ? resolveIdleTimeout("claude", idleTimeoutMs)
+        : undefined;
+      const job = asyncJobManager.startJob("claude", args, corrId, undefined, effectiveIdleTimeout, outputFormat);
+      logger.info(`[${corrId}] claude_request_async started job ${job.id}, outputFormat=${outputFormat}`);
 
       return {
         content: [{
@@ -877,9 +909,10 @@ server.tool(
     sessionId: z.string().optional().describe("Session ID (Codex manages internally)"),
     createNewSession: z.boolean().default(false).describe("Force new session"),
     correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
-    optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution")
+    optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution"),
+    idleTimeoutMs: z.number().int().min(30_000).max(3_600_000).optional().describe("Idle timeout in ms (min 30s, max 1h, omit=CLI default). Kills process after this duration of no output activity.")
   },
-  async ({ prompt, model, fullAuto, dangerouslyBypassApprovalsAndSandbox, approvalStrategy, approvalPolicy, mcpServers, sessionId, createNewSession, correlationId, optimizePrompt }) => {
+  async ({ prompt, model, fullAuto, dangerouslyBypassApprovalsAndSandbox, approvalStrategy, approvalPolicy, mcpServers, sessionId, createNewSession, correlationId, optimizePrompt, idleTimeoutMs }) => {
     const prep = prepareCodexRequest({
       prompt, model, fullAuto, dangerouslyBypassApprovalsAndSandbox,
       approvalStrategy, approvalPolicy, mcpServers: mcpServers as ClaudeMcpServerName[],
@@ -890,7 +923,7 @@ server.tool(
     const { corrId, args, requestedMcpServers, approvalDecision } = prep;
 
     try {
-      const job = asyncJobManager.startJob("codex", args, corrId, undefined, CLI_IDLE_TIMEOUTS.codex);
+      const job = asyncJobManager.startJob("codex", args, corrId, undefined, resolveIdleTimeout("codex", idleTimeoutMs));
 
       // Session management (after job start for codex async)
       let effectiveSessionId = sessionId;
@@ -984,12 +1017,20 @@ server.tool(
       };
     }
 
+    // Parse stream-json output for Claude async jobs
+    const outputFormat = asyncJobManager.getJobOutputFormat(jobId);
+    let parsed: ReturnType<typeof parseStreamJson> | undefined;
+    if (outputFormat === "stream-json" && result.stdout) {
+      parsed = parseStreamJson(result.stdout);
+    }
+
     return {
       content: [{
         type: "text",
         text: JSON.stringify({
           success: true,
-          result
+          result,
+          ...(parsed ? { parsed: { text: parsed.text, costUsd: parsed.costUsd, usage: parsed.usage, model: parsed.model, numTurns: parsed.numTurns } } : {})
         }, null, 2)
       }]
     };
@@ -1024,6 +1065,20 @@ server.tool(
           success: true,
           jobId
         }, null, 2)
+      }]
+    };
+  }
+);
+
+server.tool(
+  "llm_process_health",
+  {},
+  async () => {
+    const health = asyncJobManager.getJobHealth();
+    return {
+      content: [{
+        type: "text",
+        text: JSON.stringify({ success: true, ...health }, null, 2)
       }]
     };
   }
@@ -1360,6 +1415,28 @@ function registerHealthResource(): void {
     );
     logger.info("Health check resource registered");
   }
+
+  // Process health resource (always available, not dependent on DB)
+  server.registerResource(
+    "process-health",
+    "metrics://process-health",
+    {
+      title: "Process Health",
+      description: "Health status of running async jobs (CPU, memory, dead/zombie detection)",
+      mimeType: "application/json"
+    },
+    async (uri) => {
+      const health = asyncJobManager.getJobHealth();
+      return {
+        contents: [{
+          uri: uri.href,
+          mimeType: "application/json",
+          text: JSON.stringify(health, null, 2)
+        }]
+      };
+    }
+  );
+  logger.info("Process health resource registered");
 }
 
 //──────────────────────────────────────────────────────────────────────────────
@@ -1370,6 +1447,10 @@ async function shutdown(signal: string): Promise<void> {
   logger.info(`Received ${signal}, shutting down gracefully...`);
 
   try {
+    // Kill all active process groups (SIGTERM → wait 3s → SIGKILL)
+    await killAllProcessGroups();
+    logger.info("All process groups terminated");
+
     await server.close();
     logger.info("MCP server closed");
 

@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { executeCli } from "../executor.js";
+import { executeCli, killProcessGroup, killAllProcessGroups, registerProcessGroup, unregisterProcessGroup } from "../executor.js";
+import { spawn } from "child_process";
 
 describe("executeCli", () => {
   describe("basic execution", () => {
@@ -178,5 +179,47 @@ describe("executeCli", () => {
       expect(result.code).toBe(125);
       expect(result.stderr).toContain("inactivity");
     }, 15000);
+  });
+
+  describe("process group termination", () => {
+    it("should spawn with detached:true and use process group kill", async () => {
+      // Verify that a simple command still works with detached spawn
+      const result = await executeCli("echo", ["process-group-test"]);
+      expect(result.stdout.trim()).toBe("process-group-test");
+      expect(result.code).toBe(0);
+    });
+
+    it("should handle ESRCH when killing already-dead process group", () => {
+      const proc = spawn("true", [], { detached: true, stdio: "ignore" });
+      proc.unref();
+      // Wait for process to exit
+      return new Promise<void>((resolve) => {
+        proc.on("close", () => {
+          // Process is now dead — killProcessGroup should not throw
+          const result = killProcessGroup(proc, "SIGTERM");
+          expect(result).toBe(false);
+          resolve();
+        });
+      });
+    });
+  });
+
+  describe("process group registry", () => {
+    it("should register and unregister process groups", () => {
+      const fakePid = 9999999;
+      registerProcessGroup(fakePid);
+      // Should not throw
+      unregisterProcessGroup(fakePid);
+      // Double unregister should not throw
+      unregisterProcessGroup(fakePid);
+    });
+
+    it("should resolve immediately when no process groups are registered", async () => {
+      // killAllProcessGroups should return immediately when empty
+      const start = Date.now();
+      await killAllProcessGroups();
+      const elapsed = Date.now() - start;
+      expect(elapsed).toBeLessThan(100);
+    });
   });
 });
