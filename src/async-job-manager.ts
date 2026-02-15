@@ -28,6 +28,7 @@ interface AsyncJobRecord {
   error: string | null;
   process: ChildProcess;
   exited: boolean;
+  metricsRecorded: boolean;
   outputFormat?: string;
   resetIdleTimer?: () => void;
   clearIdleTimer?: () => void;
@@ -71,12 +72,28 @@ export class AsyncJobManager {
   private evictionTimer: ReturnType<typeof setInterval> | null = null;
   private processMonitor: ProcessMonitor;
 
-  constructor(private logger: Logger = noopLogger) {
+  constructor(
+    private logger: Logger = noopLogger,
+    private onJobComplete?: (cli: LlmCli, durationMs: number, success: boolean) => void
+  ) {
     this.processMonitor = new ProcessMonitor(logger);
     this.evictionTimer = setInterval(() => this.evictCompletedJobs(), EVICTION_INTERVAL_MS);
     // Allow the process to exit even if the timer is active
     if (this.evictionTimer.unref) {
       this.evictionTimer.unref();
+    }
+  }
+
+  private emitMetrics(job: AsyncJobRecord): void {
+    if (job.metricsRecorded) return;
+    if (job.status === "canceled") return;
+    if (job.status !== "completed" && job.status !== "failed") return;
+    job.metricsRecorded = true;
+    const durationMs = Date.now() - new Date(job.startedAt).getTime();
+    try {
+      this.onJobComplete?.(job.cli, durationMs, job.status === "completed");
+    } catch (err) {
+      this.logger.error("onJobComplete callback threw", err);
     }
   }
 
@@ -98,6 +115,7 @@ export class AsyncJobManager {
             job.exited = true;
             unregisterProcessGroup(job.process.pid);
             this.logger.error(`Job ${id} process ${job.process.pid} no longer exists, marking as failed`);
+            this.emitMetrics(job);
           }
           // EPERM: process exists but we can't signal it — ignore
         }
@@ -109,6 +127,7 @@ export class AsyncJobManager {
         job.finishedAt = job.finishedAt || new Date().toISOString();
         if (job.process.pid) unregisterProcessGroup(job.process.pid);
         this.logger.error(`Job ${id} has exited flag but was still in running state, marking as failed`);
+        this.emitMetrics(job);
       }
     }
 
@@ -163,6 +182,7 @@ export class AsyncJobManager {
       error: null,
       process: child,
       exited: false,
+      metricsRecorded: false,
       outputFormat,
       cleanupGroup
     };
@@ -183,6 +203,7 @@ export class AsyncJobManager {
         job.finishedAt = new Date().toISOString();
         killProcessGroup(job.process, "SIGTERM");
         this.logger.info(`Job ${id} killed due to inactivity (${idleTimeoutMs}ms)`, { correlationId });
+        this.emitMetrics(job);
         setTimeout(() => {
           if (!job.exited) killProcessGroup(job.process, "SIGKILL");
           job.cleanupGroup?.();
@@ -212,6 +233,7 @@ export class AsyncJobManager {
         job.error = error.message;
         job.finishedAt = new Date().toISOString();
         this.logger.error(`Job ${id} error: ${error.message}`, { correlationId });
+        this.emitMetrics(job);
       }
     });
 
@@ -240,6 +262,7 @@ export class AsyncJobManager {
       } else {
         job.status = "failed";
       }
+      this.emitMetrics(job);
     });
 
     return this.snapshot(job);
@@ -358,6 +381,7 @@ export class AsyncJobManager {
         job.clearIdleTimer?.();
         killProcessGroup(job.process, "SIGTERM");
         this.logger.info(`Job ${job.id} killed due to output overflow`, { correlationId: job.correlationId });
+        this.emitMetrics(job);
         setTimeout(() => {
           if (!job.exited) killProcessGroup(job.process, "SIGKILL");
           job.cleanupGroup?.();

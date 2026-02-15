@@ -32,6 +32,8 @@ export interface RedisConfig {
   };
 }
 
+export const DEFAULT_SESSION_TTL_SECONDS = 2592000; // 30 days
+
 export interface Config {
   database?: DatabaseConfig;
   redis?: RedisConfig;
@@ -40,10 +42,11 @@ export interface Config {
 }
 
 /**
- * Load configuration from environment variables
- * @returns Config object or undefined if database config not present
+ * Load configuration from environment variables.
+ * Always returns a Config object with base fields (cacheTtl, sessionTtl).
+ * Database and Redis fields are populated only when both env vars are set.
  */
-export function loadConfig(): Config | undefined {
+export function loadConfig(): Config {
   const databaseUrl = process.env.DATABASE_URL;
   const redisUrl = process.env.REDIS_URL;
 
@@ -54,11 +57,13 @@ export function loadConfig(): Config | undefined {
     sessionList: 120 // 2 minutes
   };
 
-  const sessionTtl = parseInt(process.env.SESSION_TTL || "2592000", 10); // 30 days default
+  const rawSessionTtl = parseInt(process.env.SESSION_TTL || String(DEFAULT_SESSION_TTL_SECONDS), 10);
+  const sessionTtl = (Number.isFinite(rawSessionTtl) && rawSessionTtl > 0)
+    ? rawSessionTtl : DEFAULT_SESSION_TTL_SECONDS;
 
-  // If no database config, return undefined (will use file-based storage)
+  // If no database config, return base config (file-based storage)
   if (!databaseUrl || !redisUrl) {
-    return undefined;
+    return { cacheTtl, sessionTtl };
   }
 
   // Validate URLs

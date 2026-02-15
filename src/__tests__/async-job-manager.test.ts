@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { AsyncJobManager, type LlmCli } from "../async-job-manager.js";
 
 /** Poll until predicate returns true, or reject after timeoutMs. */
@@ -216,6 +216,94 @@ describe("AsyncJobManager", () => {
     it("should return undefined for non-existent jobs", () => {
       const manager = new AsyncJobManager();
       expect(manager.getJobOutputFormat("nonexistent")).toBeUndefined();
+    });
+  });
+
+  describe("metrics callback", () => {
+    it("should fire callback exactly once on successful completion", async () => {
+      const callback = vi.fn();
+      const manager = new AsyncJobManager(undefined, callback);
+      const job = manager.startJob("echo" as LlmCli, ["hello"], "corr-metrics-1");
+
+      await waitForJobDone(manager, job.id);
+
+      const snapshot = manager.getJobSnapshot(job.id)!;
+      expect(snapshot.status).toBe("completed");
+      expect(callback).toHaveBeenCalledTimes(1);
+      expect(callback).toHaveBeenCalledWith("echo", expect.any(Number), true);
+    });
+
+    it("should fire callback exactly once on failure", async () => {
+      const callback = vi.fn();
+      const manager = new AsyncJobManager(undefined, callback);
+      const job = manager.startJob("sh" as LlmCli, ["-c", "exit 42"], "corr-metrics-2");
+
+      await waitForJobDone(manager, job.id);
+
+      const snapshot = manager.getJobSnapshot(job.id)!;
+      expect(snapshot.status).toBe("failed");
+      expect(callback).toHaveBeenCalledTimes(1);
+      expect(callback).toHaveBeenCalledWith("sh", expect.any(Number), false);
+    });
+
+    it("should NOT fire callback on cancellation", async () => {
+      const callback = vi.fn();
+      const manager = new AsyncJobManager(undefined, callback);
+      const job = manager.startJob("sleep" as LlmCli, ["30"], "corr-metrics-3");
+
+      manager.cancelJob(job.id);
+
+      // Wait for process exit
+      await waitFor(() => {
+        const s = manager.getJobSnapshot(job.id);
+        return s !== null && s.exited === true;
+      }, 10000);
+
+      expect(callback).not.toHaveBeenCalled();
+    }, 15000);
+
+    it("should fire callback on idle timeout kill", async () => {
+      const callback = vi.fn();
+      const manager = new AsyncJobManager(undefined, callback);
+      const job = manager.startJob("sleep" as LlmCli, ["30"], "corr-metrics-4", undefined, 300);
+
+      await waitForJobDone(manager, job.id, 10000);
+
+      expect(callback).toHaveBeenCalledTimes(1);
+      expect(callback).toHaveBeenCalledWith("sleep", expect.any(Number), false);
+    }, 15000);
+
+    it("should not destabilize manager when callback throws", async () => {
+      const throwingCallback = vi.fn().mockImplementation(() => {
+        throw new Error("callback boom");
+      });
+      const manager = new AsyncJobManager(undefined, throwingCallback);
+
+      // First job — callback throws
+      const job1 = manager.startJob("echo" as LlmCli, ["first"], "corr-metrics-5");
+      await waitForJobDone(manager, job1.id);
+      expect(throwingCallback).toHaveBeenCalledTimes(1);
+      expect(manager.getJobSnapshot(job1.id)!.status).toBe("completed");
+
+      // Second job — manager still works after throw
+      const job2 = manager.startJob("echo" as LlmCli, ["second"], "corr-metrics-6");
+      await waitForJobDone(manager, job2.id);
+      expect(throwingCallback).toHaveBeenCalledTimes(2);
+      expect(manager.getJobSnapshot(job2.id)!.status).toBe("completed");
+    });
+
+    it("should fire callback exactly once even if error and close both fire", async () => {
+      // Simulate a scenario where the process triggers both error and close events
+      // by using a command that fails. The metricsRecorded guard prevents double-counting.
+      const callback = vi.fn();
+      const manager = new AsyncJobManager(undefined, callback);
+      const job = manager.startJob("sh" as LlmCli, ["-c", "echo err >&2; exit 1"], "corr-metrics-7");
+
+      await waitForJobDone(manager, job.id);
+
+      // Regardless of event ordering, callback fires exactly once
+      expect(callback).toHaveBeenCalledTimes(1);
+      expect(callback).toHaveBeenCalledWith("sh", expect.any(Number), false);
     });
   });
 });

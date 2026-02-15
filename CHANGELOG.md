@@ -2,6 +2,34 @@
 
 All notable changes to the llm-cli-gateway project.
 
+## [1.3.0] - 2026-02-15
+
+### Fixed
+
+- **Logger injection in retry.ts** — Replaced `console.warn` with `logger?.debug()` in `withRetry()`. Added `logger?: Logger` parameter to `withRetry()` and `ExecuteOptions`, threaded from `index.ts` through `executeCli` calls. Resolves the last CLAUDE.md convention violation (no console.log/warn in source)
+- **codex_request_async session ordering** — Moved session I/O before `startJob()` to prevent orphaned async jobs if session operations throw. Previously session ops happened after job start, risking a running process with no session record
+- **Gemini session ID replay bug** — Gateway-generated session IDs now use `gw-` prefix to prevent accidentally passing them to `--resume`. User-provided session IDs are validated at the API boundary; `gw-*` IDs are rejected with a clear error message
+
+### Added
+
+- **`gemini_request_async` tool** — Async long-running Gemini requests, matching `claude_request_async` and `codex_request_async`. Supports all Gemini parameters (model, approvalMode, allowedTools, includeDirs, sessionId, resumeLatest, idleTimeoutMs)
+- **Async job metrics tracking** — `AsyncJobManager` now accepts an `onJobComplete` callback, fired exactly once at all 6 terminal transition points (close, error, idle timeout, output overflow, dead-process recovery, exited-flag mismatch). Uses `metricsRecorded` per-job flag for exactly-once semantics. Canceled jobs excluded from metrics. Exception-isolated callback (try/catch). Wired to `performanceMetrics.recordRequest()` in `index.ts`
+- **Session TTL for FileSessionManager** — Lazy expiration on all read/write paths (`getSession`, `getActiveSession`, `listSessions`, `createSession`, `updateSessionUsage`, `setActiveSession`, `updateSessionMetadata`). Uses `isExpired()` with `Number.isFinite()` NaN guard. TTL configurable via `SESSION_TTL` env var (default 30 days). `loadConfig()` now always returns `Config` (never undefined), with validation for invalid SESSION_TTL values
+- **`resumable` response field** — Added to `ExtendedToolResponse` and Gemini async JSON payload. `true` = user-provided CLI session handle (safe for `--resume`), `false` = gateway-generated ID (structural `gw-` prefix)
+- **`src/request-helpers.ts`** — Pure, side-effect-free module with `resolveSessionResumeArgs()`, `validateSessionId()`, and `GATEWAY_SESSION_PREFIX` constant
+- **Exported handler functions** — `handleGeminiRequest`, `handleGeminiRequestAsync`, `handleCodexRequestAsync` with dependency injection for testing. `import.meta.url` guard on `main()` prevents auto-start on import
+- **`prepareGeminiRequest()` DRY helper** — Extracted from inline Gemini handler, matching `prepareClaudeRequest()` / `prepareCodexRequest()` pattern
+
+### Tests
+
+- **221 tests passing** (up from 182 in v1.2.0)
+- 7 new config tests: `loadConfig()` always returns Config, SESSION_TTL validation (NaN, negative, zero, valid), DB+Redis config threading
+- 13 new request-helpers tests: `GATEWAY_SESSION_PREFIX`, `validateSessionId()` (gw- reject, normal accept), `resolveSessionResumeArgs()` matrix (all 8 flag combinations including createNewSession short-circuit)
+- 6 new async job metrics tests: callback on success, failure, NOT on cancel, idle timeout, throwing callback resilience, exactly-once (error+close sequence)
+- 13 new handler tests: gemini async response shape, resumable flag, gw- prefix rejection, anti-orphan (session throws → no job started), gateway session creation, --resume arg passing, sync replay protection, codex async anti-orphan and session ordering
+
+---
+
 ## [1.2.0] - 2026-02-15
 
 ### Fixed

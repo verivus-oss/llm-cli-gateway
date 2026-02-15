@@ -124,7 +124,7 @@ Environment Variables:
 
   // Load config
   const config = loadConfig();
-  if (!config) {
+  if (!config.database || !config.redis) {
     console.error("ERROR: DATABASE_URL and REDIS_URL must be set");
     process.exit(1);
   }
