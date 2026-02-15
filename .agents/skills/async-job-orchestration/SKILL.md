@@ -169,4 +169,4 @@ llm_job_result({ jobId: "failed-job-id" })
 - Async jobs do NOT support `optimizeResponse` — optimize the result yourself after retrieval
 - Sessions work with async jobs — pass `sessionId` or `createNewSession` as usual
 - For parallel reviews, start all jobs first, then poll in a loop
-- Sync request tools have a default 120s timeout via `executeCli` — use async for anything longer
+- Sync requests block until the CLI finishes — use async when you need to do other work in parallel

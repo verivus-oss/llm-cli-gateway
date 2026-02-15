@@ -60,8 +60,6 @@ gemini_request({
 })
 ```
 
-Note: Sync request tools run through `executeCli` with a default 120-second timeout. For reviews of large codebases, prefer async variants.
-
 ### Step 3: Synthesize findings
 
 After collecting all three responses:
@@ -96,7 +94,7 @@ Format the combined findings as a structured report:
 
 ## For Large Codebases
 
-When reviewing many files, use async jobs to avoid the 120s sync timeout:
+When reviewing many files, use async jobs so you can poll progress and work on other tasks while waiting:
 
 ```
 claude_request_async({
