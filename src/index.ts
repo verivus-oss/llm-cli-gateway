@@ -17,11 +17,13 @@ import { getCliInfo, resolveModelAlias } from "./model-registry.js";
 import { AsyncJobManager } from "./async-job-manager.js";
 import { ApprovalManager, ApprovalPolicy, ApprovalRecord } from "./approval-manager.js";
 import { buildClaudeMcpConfig, ClaudeMcpConfigResult, ClaudeMcpServerName } from "./claude-mcp-config.js";
+import { resolveSessionResumeArgs, GATEWAY_SESSION_PREFIX } from "./request-helpers.js";
 
 type ExtendedToolResponse = {
   content: { type: "text"; text: string }[];
   isError?: boolean;
   sessionId?: string;
+  resumable?: boolean;
   approval?: ApprovalRecord | null;
   mcpServers?: {
     requested: ClaudeMcpServerName[];
@@ -64,7 +66,9 @@ let sessionManager: ISessionManager;
 let db: DatabaseConnection | null = null;
 const performanceMetrics = new PerformanceMetrics();
 let resourceProvider: ResourceProvider;
-const asyncJobManager = new AsyncJobManager(logger);
+const asyncJobManager = new AsyncJobManager(logger, (cli, durationMs, success) => {
+  performanceMetrics.recordRequest(cli, durationMs, success);
+});
 const approvalManager = new ApprovalManager(undefined, logger);
 const MCP_SERVER_ENUM = z.enum(["sqry", "exa", "ref_tools"]);
 
@@ -476,12 +480,75 @@ function prepareCodexRequest(params: {
   return { corrId, effectivePrompt, resolvedModel, requestedMcpServers, approvalDecision, args };
 }
 
+function prepareGeminiRequest(params: {
+  prompt: string;
+  model?: string;
+  approvalMode?: string;
+  approvalStrategy: "legacy" | "mcp_managed";
+  approvalPolicy?: string;
+  allowedTools?: string[];
+  includeDirs?: string[];
+  mcpServers?: ClaudeMcpServerName[];
+  correlationId?: string;
+  optimizePrompt: boolean;
+  operation: string;
+}): CliRequestPrep | ExtendedToolResponse {
+  const corrId = params.correlationId || randomUUID();
+  const cliInfo = getCliInfo();
+  const resolvedModel = resolveModelAlias("gemini", params.model, cliInfo);
+
+  let effectivePrompt = params.prompt;
+  if (params.optimizePrompt) {
+    const optimized = optimizePromptText(effectivePrompt);
+    logOptimizationTokens("prompt", corrId, effectivePrompt, optimized);
+    effectivePrompt = optimized;
+  }
+
+  const requestedMcpServers = normalizeMcpServers(params.mcpServers);
+
+  let approvalDecision: ApprovalRecord | null = null;
+  if (params.approvalStrategy === "mcp_managed") {
+    approvalDecision = approvalManager.decide({
+      cli: "gemini",
+      operation: params.operation,
+      prompt: effectivePrompt,
+      bypassRequested: params.approvalMode === "yolo",
+      fullAuto: false,
+      requestedMcpServers,
+      allowedTools: params.allowedTools,
+      policy: params.approvalPolicy as ApprovalPolicy | undefined,
+      metadata: { model: resolvedModel || "default" }
+    });
+    if (approvalDecision.status !== "approved") {
+      return createApprovalDeniedResponse(params.operation, approvalDecision);
+    }
+  }
+
+  const effectiveApprovalMode = params.approvalStrategy === "mcp_managed" ? "yolo" : params.approvalMode;
+
+  const args = [effectivePrompt];
+  if (resolvedModel) args.push("--model", resolvedModel);
+  if (effectiveApprovalMode) args.push("--approval-mode", effectiveApprovalMode);
+  if (params.allowedTools && params.allowedTools.length > 0) {
+    params.allowedTools.forEach(tool => args.push("--allowed-tools", tool));
+  }
+  if (requestedMcpServers.length > 0) {
+    requestedMcpServers.forEach(serverName => args.push("--allowed-mcp-server-names", serverName));
+  }
+  if (params.includeDirs && params.includeDirs.length > 0) {
+    params.includeDirs.forEach(dir => args.push("--include-directories", dir));
+  }
+
+  return { corrId, effectivePrompt, resolvedModel, requestedMcpServers, approvalDecision, args };
+}
+
 function buildCliResponse(
   stdout: string,
   optimizeResponse: boolean,
   corrId: string,
   sessionId: string | undefined,
-  prep: CliRequestPrep
+  prep: CliRequestPrep,
+  resumable?: boolean
 ): ExtendedToolResponse {
   let finalStdout = stdout;
   if (optimizeResponse) {
@@ -499,10 +566,243 @@ function buildCliResponse(
   if (sessionId) {
     response.sessionId = sessionId;
   }
+  if (resumable !== undefined) {
+    response.resumable = resumable;
+  }
   if (prep.approvalDecision) {
     response.approval = prep.approvalDecision;
   }
   return response;
+}
+
+//──────────────────────────────────────────────────────────────────────────────
+// Exported Handler Functions (for DI-based testing)
+//──────────────────────────────────────────────────────────────────────────────
+
+export interface GeminiRequestParams {
+  prompt: string;
+  model?: string;
+  sessionId?: string;
+  resumeLatest: boolean;
+  createNewSession: boolean;
+  approvalMode?: string;
+  approvalStrategy: "legacy" | "mcp_managed";
+  approvalPolicy?: string;
+  mcpServers?: ClaudeMcpServerName[];
+  allowedTools?: string[];
+  includeDirs?: string[];
+  correlationId?: string;
+  optimizePrompt: boolean;
+  optimizeResponse?: boolean;
+  idleTimeoutMs?: number;
+}
+
+export interface HandlerDeps {
+  sessionManager: ISessionManager;
+  logger: { info: (...args: any[]) => void; error: (...args: any[]) => void; debug: (...args: any[]) => void };
+}
+
+export interface AsyncHandlerDeps extends HandlerDeps {
+  asyncJobManager: AsyncJobManager;
+}
+
+export async function handleGeminiRequest(
+  deps: HandlerDeps,
+  params: GeminiRequestParams
+): Promise<ExtendedToolResponse> {
+  const startTime = Date.now();
+  const prep = prepareGeminiRequest({
+    prompt: params.prompt, model: params.model, approvalMode: params.approvalMode,
+    approvalStrategy: params.approvalStrategy, approvalPolicy: params.approvalPolicy,
+    allowedTools: params.allowedTools, includeDirs: params.includeDirs,
+    mcpServers: params.mcpServers, correlationId: params.correlationId,
+    optimizePrompt: params.optimizePrompt, operation: "gemini_request"
+  });
+  if (!("args" in prep)) return prep;
+
+  const { corrId, args } = prep;
+  let durationMs = 0;
+  let wasSuccessful = false;
+  deps.logger.info(`[${corrId}] gemini_request invoked with model=${prep.resolvedModel || "default"}, approvalMode=${params.approvalMode}, prompt length=${params.prompt.length}`);
+
+  try {
+    // Session arg planning (pure, no I/O)
+    const sessionResult = resolveSessionResumeArgs({
+      sessionId: params.sessionId, resumeLatest: params.resumeLatest, createNewSession: params.createNewSession
+    });
+    args.push(...sessionResult.resumeArgs);
+
+    const { stdout, stderr, code } = await executeCli("gemini", args, { idleTimeout: resolveIdleTimeout("gemini", params.idleTimeoutMs), logger: deps.logger });
+    durationMs = Math.max(0, Date.now() - startTime);
+
+    if (code !== 0) {
+      deps.logger.info(`[${corrId}] gemini_request failed in ${durationMs}ms`);
+      return createErrorResponse("gemini", code, stderr, corrId);
+    }
+    wasSuccessful = true;
+
+    // Post-success session I/O (sync handlers: no phantom sessions on CLI failure)
+    let effectiveSessionId = sessionResult.effectiveSessionId;
+    if (sessionResult.userProvidedSession && effectiveSessionId) {
+      const existing = await deps.sessionManager.getSession(effectiveSessionId);
+      if (!existing) {
+        try {
+          await deps.sessionManager.createSession("gemini", "Gemini Session", effectiveSessionId);
+        } catch {
+          const rechecked = await deps.sessionManager.getSession(effectiveSessionId);
+          if (!rechecked) throw new Error(`Failed to create or find session ${effectiveSessionId}`);
+        }
+      }
+      await deps.sessionManager.updateSessionUsage(effectiveSessionId);
+    } else if (!params.createNewSession && !effectiveSessionId) {
+      const newSession = await deps.sessionManager.createSession(
+        "gemini", "Gemini Session", `${GATEWAY_SESSION_PREFIX}${randomUUID()}`
+      );
+      effectiveSessionId = newSession.id;
+    }
+
+    deps.logger.info(`[${corrId}] gemini_request completed successfully in ${durationMs}ms`);
+    return buildCliResponse(stdout, params.optimizeResponse ?? false, corrId, effectiveSessionId, prep, sessionResult.userProvidedSession);
+  } catch (error) {
+    const elapsedMs = Math.max(0, Date.now() - startTime);
+    deps.logger.info(`[${corrId}] gemini_request threw exception after ${elapsedMs}ms`);
+    return createErrorResponse("gemini", 1, "", corrId, error as Error);
+  } finally {
+    const finalizedDurationMs = Math.max(0, durationMs || Date.now() - startTime);
+    performanceMetrics.recordRequest("gemini", finalizedDurationMs, wasSuccessful);
+  }
+}
+
+export async function handleGeminiRequestAsync(
+  deps: AsyncHandlerDeps,
+  params: Omit<GeminiRequestParams, "optimizeResponse">
+): Promise<ExtendedToolResponse> {
+  const prep = prepareGeminiRequest({
+    prompt: params.prompt, model: params.model, approvalMode: params.approvalMode,
+    approvalStrategy: params.approvalStrategy, approvalPolicy: params.approvalPolicy,
+    allowedTools: params.allowedTools, includeDirs: params.includeDirs,
+    mcpServers: params.mcpServers, correlationId: params.correlationId,
+    optimizePrompt: params.optimizePrompt, operation: "gemini_request_async"
+  });
+  if (!("args" in prep)) return prep;
+
+  const { corrId, args, requestedMcpServers, approvalDecision } = prep;
+
+  try {
+    // Session arg planning (pure, no I/O)
+    const sessionResult = resolveSessionResumeArgs({
+      sessionId: params.sessionId, resumeLatest: params.resumeLatest, createNewSession: params.createNewSession
+    });
+    args.push(...sessionResult.resumeArgs);
+
+    // Pre-start session I/O (async handlers: prevent orphaned jobs)
+    let effectiveSessionId = sessionResult.effectiveSessionId;
+    if (sessionResult.userProvidedSession && effectiveSessionId) {
+      const existing = await deps.sessionManager.getSession(effectiveSessionId);
+      if (!existing) {
+        try {
+          await deps.sessionManager.createSession("gemini", "Gemini Session", effectiveSessionId);
+        } catch {
+          const rechecked = await deps.sessionManager.getSession(effectiveSessionId);
+          if (!rechecked) throw new Error(`Failed to create or find session ${effectiveSessionId}`);
+        }
+      }
+      await deps.sessionManager.updateSessionUsage(effectiveSessionId);
+    } else if (!params.createNewSession && !effectiveSessionId) {
+      const newSession = await deps.sessionManager.createSession(
+        "gemini", "Gemini Session", `${GATEWAY_SESSION_PREFIX}${randomUUID()}`
+      );
+      effectiveSessionId = newSession.id;
+    }
+
+    // Start job only after all session I/O succeeds
+    const job = deps.asyncJobManager.startJob("gemini", args, corrId, undefined, resolveIdleTimeout("gemini", params.idleTimeoutMs));
+    deps.logger.info(`[${corrId}] gemini_request_async started job ${job.id}`);
+
+    return {
+      content: [{
+        type: "text" as const,
+        text: JSON.stringify({
+          success: true,
+          job,
+          sessionId: effectiveSessionId || null,
+          resumable: sessionResult.userProvidedSession,
+          approval: approvalDecision,
+          mcpServers: { requested: requestedMcpServers }
+        }, null, 2)
+      }]
+    };
+  } catch (error) {
+    return createErrorResponse("gemini_request_async", 1, "", corrId, error as Error);
+  }
+}
+
+export async function handleCodexRequestAsync(
+  deps: AsyncHandlerDeps,
+  params: {
+    prompt: string;
+    model?: string;
+    fullAuto: boolean;
+    dangerouslyBypassApprovalsAndSandbox: boolean;
+    approvalStrategy: "legacy" | "mcp_managed";
+    approvalPolicy?: string;
+    mcpServers?: ClaudeMcpServerName[];
+    sessionId?: string;
+    createNewSession: boolean;
+    correlationId?: string;
+    optimizePrompt: boolean;
+    idleTimeoutMs?: number;
+  }
+): Promise<ExtendedToolResponse> {
+  const prep = prepareCodexRequest({
+    prompt: params.prompt, model: params.model, fullAuto: params.fullAuto,
+    dangerouslyBypassApprovalsAndSandbox: params.dangerouslyBypassApprovalsAndSandbox,
+    approvalStrategy: params.approvalStrategy, approvalPolicy: params.approvalPolicy,
+    mcpServers: params.mcpServers as ClaudeMcpServerName[],
+    correlationId: params.correlationId, optimizePrompt: params.optimizePrompt,
+    operation: "codex_request_async"
+  });
+  if (!("args" in prep)) return prep;
+
+  const { corrId, args, requestedMcpServers, approvalDecision } = prep;
+
+  try {
+    // Pre-start session I/O (async handlers: prevent orphaned jobs)
+    let effectiveSessionId = params.sessionId;
+    if (!params.createNewSession && !params.sessionId) {
+      const activeSession = await deps.sessionManager.getActiveSession("codex");
+      if (activeSession) {
+        effectiveSessionId = activeSession.id;
+      } else {
+        const newSession = await deps.sessionManager.createSession("codex", "Codex Session");
+        effectiveSessionId = newSession.id;
+      }
+    } else if (params.sessionId) {
+      await deps.sessionManager.updateSessionUsage(params.sessionId);
+    } else if (params.createNewSession) {
+      const newSession = await deps.sessionManager.createSession("codex", "Codex Session");
+      effectiveSessionId = newSession.id;
+    }
+
+    // Start job only after all session I/O succeeds
+    const job = deps.asyncJobManager.startJob("codex", args, corrId, undefined, resolveIdleTimeout("codex", params.idleTimeoutMs));
+    deps.logger.info(`[${corrId}] codex_request_async started job ${job.id}`);
+
+    return {
+      content: [{
+        type: "text" as const,
+        text: JSON.stringify({
+          success: true,
+          job,
+          sessionId: effectiveSessionId || null,
+          approval: approvalDecision,
+          mcpServers: { requested: requestedMcpServers }
+        }, null, 2)
+      }]
+    };
+  } catch (error) {
+    return createErrorResponse("codex_request_async", 1, "", corrId, error as Error);
+  }
 }
 
 //──────────────────────────────────────────────────────────────────────────────
@@ -568,7 +868,7 @@ server.tool(
       const effectiveIdleTimeout = outputFormat === "stream-json"
         ? resolveIdleTimeout("claude", idleTimeoutMs)
         : undefined;
-      const { stdout, stderr, code } = await executeCli("claude", args, { idleTimeout: effectiveIdleTimeout });
+      const { stdout, stderr, code } = await executeCli("claude", args, { idleTimeout: effectiveIdleTimeout, logger });
       durationMs = Math.max(0, Date.now() - startTime);
 
       if (code !== 0) {
@@ -643,7 +943,7 @@ server.tool(
     logger.info(`[${corrId}] codex_request invoked with model=${prep.resolvedModel || "default"}, fullAuto=${fullAuto}, prompt length=${prompt.length}`);
 
     try {
-      const { stdout, stderr, code } = await executeCli("codex", args, { idleTimeout: resolveIdleTimeout("codex", idleTimeoutMs) });
+      const { stdout, stderr, code } = await executeCli("codex", args, { idleTimeout: resolveIdleTimeout("codex", idleTimeoutMs), logger });
       durationMs = Math.max(0, Date.now() - startTime);
 
       if (code !== 0) {
@@ -706,103 +1006,10 @@ server.tool(
     idleTimeoutMs: z.number().int().min(30_000).max(3_600_000).optional().describe("Idle timeout in ms (min 30s, max 1h, omit=CLI default). Kills process after this duration of no output activity.")
   },
   async ({ prompt, model, sessionId, resumeLatest, createNewSession, approvalMode, approvalStrategy, approvalPolicy, mcpServers, allowedTools, includeDirs, correlationId, optimizePrompt, optimizeResponse, idleTimeoutMs }) => {
-    const startTime = Date.now();
-    const corrId = correlationId || randomUUID();
-    let durationMs = 0;
-    let wasSuccessful = false;
-    let effectivePrompt = prompt;
-    const cliInfo = getCliInfo();
-    const resolvedModel = resolveModelAlias("gemini", model, cliInfo);
-    logger.info(`[${corrId}] gemini_request invoked with model=${resolvedModel || "default"}, approvalMode=${approvalMode}, prompt length=${prompt.length}`);
-
-    if (optimizePrompt) {
-      const optimized = optimizePromptText(effectivePrompt);
-      logOptimizationTokens("prompt", corrId, effectivePrompt, optimized);
-      effectivePrompt = optimized;
-    }
-
-    const requestedMcpServers = normalizeMcpServers(mcpServers as ClaudeMcpServerName[]);
-    let approvalDecision: ApprovalRecord | null = null;
-    if (approvalStrategy === "mcp_managed") {
-      approvalDecision = approvalManager.decide({
-        cli: "gemini",
-        operation: "gemini_request",
-        prompt: effectivePrompt,
-        bypassRequested: approvalMode === "yolo",
-        fullAuto: false,
-        requestedMcpServers,
-        allowedTools,
-        policy: approvalPolicy as ApprovalPolicy | undefined,
-        metadata: { model: resolvedModel || "default" }
-      });
-      if (approvalDecision.status !== "approved") {
-        return createApprovalDeniedResponse("gemini_request", approvalDecision);
-      }
-    }
-
-    // Build a lightweight prep for buildCliResponse
-    const geminiPrep: CliRequestPrep = {
-      corrId, effectivePrompt, resolvedModel, requestedMcpServers, approvalDecision,
-      args: [] // not used by buildCliResponse
-    };
-
-    try {
-      const args = [effectivePrompt];
-      if (resolvedModel) args.push("--model", resolvedModel);
-
-      const effectiveApprovalMode = approvalStrategy === "mcp_managed" ? "yolo" : approvalMode;
-      if (effectiveApprovalMode) args.push("--approval-mode", effectiveApprovalMode);
-      if (allowedTools && allowedTools.length > 0) {
-        allowedTools.forEach(tool => args.push("--allowed-tools", tool));
-      }
-      if (requestedMcpServers.length > 0) {
-        requestedMcpServers.forEach(serverName => args.push("--allowed-mcp-server-names", serverName));
-      }
-      if (includeDirs && includeDirs.length > 0) {
-        includeDirs.forEach(dir => args.push("--include-directories", dir));
-      }
-
-      // Session management (only resume when explicitly requested)
-      let effectiveSessionId = sessionId;
-      if (!createNewSession) {
-        if (resumeLatest && !sessionId) {
-          args.push("--resume", "latest");
-        } else if (effectiveSessionId) {
-          args.push("--resume", effectiveSessionId);
-          await sessionManager.updateSessionUsage(effectiveSessionId);
-        }
-      }
-
-      const { stdout, stderr, code } = await executeCli("gemini", args, { idleTimeout: resolveIdleTimeout("gemini", idleTimeoutMs) });
-      durationMs = Math.max(0, Date.now() - startTime);
-
-      if (code !== 0) {
-        logger.info(`[${corrId}] gemini_request failed in ${durationMs}ms`);
-        return createErrorResponse("gemini", code, stderr, corrId);
-      }
-      wasSuccessful = true;
-
-      // Track session
-      if (!effectiveSessionId && !createNewSession) {
-        const newSession = await sessionManager.createSession("gemini", "Gemini Session");
-        effectiveSessionId = newSession.id;
-      } else if (effectiveSessionId) {
-        const existingSession = await sessionManager.getSession(effectiveSessionId);
-        if (!existingSession) {
-          await sessionManager.createSession("gemini", "Gemini Session", effectiveSessionId);
-        }
-      }
-
-      logger.info(`[${corrId}] gemini_request completed successfully in ${durationMs}ms`);
-      return buildCliResponse(stdout, optimizeResponse, corrId, effectiveSessionId, geminiPrep);
-    } catch (error) {
-      const elapsedMs = Math.max(0, Date.now() - startTime);
-      logger.info(`[${corrId}] gemini_request threw exception after ${elapsedMs}ms`);
-      return createErrorResponse("gemini", 1, "", corrId, error as Error);
-    } finally {
-      const finalizedDurationMs = Math.max(0, durationMs || Date.now() - startTime);
-      performanceMetrics.recordRequest("gemini", finalizedDurationMs, wasSuccessful);
-    }
+    return handleGeminiRequest(
+      { sessionManager, logger },
+      { prompt, model, sessionId, resumeLatest, createNewSession, approvalMode, approvalStrategy, approvalPolicy, mcpServers: mcpServers as ClaudeMcpServerName[], allowedTools, includeDirs, correlationId, optimizePrompt, optimizeResponse, idleTimeoutMs }
+    );
   }
 );
 
@@ -913,52 +1120,36 @@ server.tool(
     idleTimeoutMs: z.number().int().min(30_000).max(3_600_000).optional().describe("Idle timeout in ms (min 30s, max 1h, omit=CLI default). Kills process after this duration of no output activity.")
   },
   async ({ prompt, model, fullAuto, dangerouslyBypassApprovalsAndSandbox, approvalStrategy, approvalPolicy, mcpServers, sessionId, createNewSession, correlationId, optimizePrompt, idleTimeoutMs }) => {
-    const prep = prepareCodexRequest({
-      prompt, model, fullAuto, dangerouslyBypassApprovalsAndSandbox,
-      approvalStrategy, approvalPolicy, mcpServers: mcpServers as ClaudeMcpServerName[],
-      correlationId, optimizePrompt, operation: "codex_request_async"
-    });
-    if (!("args" in prep)) return prep;
+    return handleCodexRequestAsync(
+      { sessionManager, asyncJobManager, logger },
+      { prompt, model, fullAuto, dangerouslyBypassApprovalsAndSandbox, approvalStrategy, approvalPolicy, mcpServers: mcpServers as ClaudeMcpServerName[], sessionId, createNewSession, correlationId, optimizePrompt, idleTimeoutMs }
+    );
+  }
+);
 
-    const { corrId, args, requestedMcpServers, approvalDecision } = prep;
-
-    try {
-      const job = asyncJobManager.startJob("codex", args, corrId, undefined, resolveIdleTimeout("codex", idleTimeoutMs));
-
-      // Session management (after job start for codex async)
-      let effectiveSessionId = sessionId;
-      if (!createNewSession && !sessionId) {
-        const activeSession = await sessionManager.getActiveSession("codex");
-        if (activeSession) {
-          effectiveSessionId = activeSession.id;
-        } else {
-          const newSession = await sessionManager.createSession("codex", "Codex Session");
-          effectiveSessionId = newSession.id;
-        }
-      } else if (sessionId) {
-        await sessionManager.updateSessionUsage(sessionId);
-      } else if (createNewSession) {
-        const newSession = await sessionManager.createSession("codex", "Codex Session");
-        effectiveSessionId = newSession.id;
-      }
-
-      logger.info(`[${corrId}] codex_request_async started job ${job.id}`);
-
-      return {
-        content: [{
-          type: "text" as const,
-          text: JSON.stringify({
-            success: true,
-            job,
-            sessionId: effectiveSessionId || null,
-            approval: approvalDecision,
-            mcpServers: { requested: requestedMcpServers }
-          }, null, 2)
-        }]
-      };
-    } catch (error) {
-      return createErrorResponse("codex_request_async", 1, "", corrId, error as Error);
-    }
+server.tool(
+  "gemini_request_async",
+  {
+    prompt: z.string().min(1, "Prompt cannot be empty").max(100000, "Prompt too long (max 100k chars)").describe("Prompt text for Gemini"),
+    model: z.string().optional().describe("Model name or alias (e.g. gemini-3-pro-preview, gemini-2.5-flash, pro, flash, latest)"),
+    sessionId: z.string().optional().describe("Session ID (user-provided CLI handle for --resume)"),
+    resumeLatest: z.boolean().default(false).describe("Resume latest session"),
+    createNewSession: z.boolean().default(false).describe("Force new session"),
+    approvalMode: z.enum(["default", "auto_edit", "yolo"]).optional().describe("Approval: default|auto_edit|yolo"),
+    approvalStrategy: z.enum(["legacy", "mcp_managed"]).default("legacy").describe("Approval strategy"),
+    approvalPolicy: z.enum(["strict", "balanced", "permissive"]).optional().describe("Approval policy override"),
+    mcpServers: z.array(MCP_SERVER_ENUM).default(["sqry", "exa", "ref_tools"]).describe("Allowed MCP server names"),
+    allowedTools: z.array(z.string()).optional().describe("Allowed tools (['Write','Edit','Bash'])"),
+    includeDirs: z.array(z.string()).optional().describe("Additional workspace directories"),
+    correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
+    optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution"),
+    idleTimeoutMs: z.number().int().min(30_000).max(3_600_000).optional().describe("Idle timeout in ms (min 30s, max 1h, omit=CLI default). Kills process after this duration of no output activity.")
+  },
+  async ({ prompt, model, sessionId, resumeLatest, createNewSession, approvalMode, approvalStrategy, approvalPolicy, mcpServers, allowedTools, includeDirs, correlationId, optimizePrompt, idleTimeoutMs }) => {
+    return handleGeminiRequestAsync(
+      { sessionManager, asyncJobManager, logger },
+      { prompt, model, sessionId, resumeLatest, createNewSession, approvalMode, approvalStrategy, approvalPolicy, mcpServers: mcpServers as ClaudeMcpServerName[], allowedTools, includeDirs, correlationId, optimizePrompt, idleTimeoutMs }
+    );
   }
 );
 
@@ -1372,16 +1563,15 @@ server.tool(
 async function initializeSessionManager(): Promise<void> {
   const config = loadConfig();
 
-  if (config?.database && config?.redis) {
+  if (config.database && config.redis) {
     logger.info("Initializing PostgreSQL + Redis session manager");
     const { createDatabaseConnection } = await import("./db.js");
     db = await createDatabaseConnection(config, logger);
-    // Pass existing db and logger to avoid creating duplicate connections
     sessionManager = await createSessionManager(config, db, logger);
     logger.info("PostgreSQL session manager initialized");
   } else {
     logger.info("Initializing file-based session manager");
-    sessionManager = await createSessionManager(undefined, undefined, logger);
+    sessionManager = await createSessionManager(config, undefined, logger);
     logger.info("File-based session manager initialized");
   }
 
@@ -1487,7 +1677,10 @@ async function main() {
   logger.info("llm-cli-gateway MCP server connected and ready");
 }
 
-main().catch((error) => {
-  logger.error("Fatal server error:", error);
-  process.exit(1);
-});
+// Guard: only auto-start when run directly (not imported for testing)
+if (process.argv[1] && new URL(process.argv[1], "file://").href === import.meta.url) {
+  main().catch((error) => {
+    logger.error("Fatal server error:", error);
+    process.exit(1);
+  });
+}
