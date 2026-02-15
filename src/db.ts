@@ -1,6 +1,8 @@
 import { Pool, PoolConfig } from "pg";
 import { Redis, type RedisOptions } from "ioredis";
 import { Config } from "./config.js";
+import type { Logger } from "./logger.js";
+import { noopLogger } from "./logger.js";
 
 export interface HealthCheckResult {
   postgres: { connected: boolean; latency: number };
@@ -15,7 +17,7 @@ export class DatabaseConnection {
   private redis: Redis | null = null;
   private config: Config;
 
-  constructor(config: Config) {
+  constructor(config: Config, private logger: Logger = noopLogger) {
     if (!config.database || !config.redis) {
       throw new Error("Database and Redis configuration required");
     }
@@ -42,7 +44,9 @@ export class DatabaseConnection {
       const client = await this.pool.connect();
       await client.query("SELECT 1");
       client.release();
+      this.logger.info("PostgreSQL connection established");
     } catch (error) {
+      this.logger.error("Failed to connect to PostgreSQL", { error });
       throw new Error(`Failed to connect to PostgreSQL: ${error instanceof Error ? error.message : String(error)}`);
     }
 
@@ -68,7 +72,9 @@ export class DatabaseConnection {
     // Test Redis connection
     try {
       await this.redis.ping();
+      this.logger.info("Redis connection established");
     } catch (error) {
+      this.logger.error("Failed to connect to Redis", { error });
       throw new Error(`Failed to connect to Redis: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
@@ -77,6 +83,7 @@ export class DatabaseConnection {
    * Graceful shutdown - close all connections
    */
   async disconnect(): Promise<void> {
+    this.logger.info("Disconnecting database connections");
     const errors: Error[] = [];
 
     if (this.pool) {
@@ -142,6 +149,10 @@ export class DatabaseConnection {
       }
     }
 
+    this.logger.debug("Health check completed", {
+      postgres: result.postgres.connected,
+      redis: result.redis.connected
+    });
     return result;
   }
 
@@ -169,8 +180,8 @@ export class DatabaseConnection {
 /**
  * Factory function to create and connect DatabaseConnection
  */
-export async function createDatabaseConnection(config: Config): Promise<DatabaseConnection> {
-  const db = new DatabaseConnection(config);
+export async function createDatabaseConnection(config: Config, logger?: Logger): Promise<DatabaseConnection> {
+  const db = new DatabaseConnection(config, logger);
   await db.connect();
   return db;
 }

@@ -4,6 +4,8 @@ import { join, dirname } from "path";
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, openSync, fsyncSync, closeSync, chmodSync } from "fs";
 import type { Config } from "./config.js";
 import type { DatabaseConnection } from "./db.js";
+import type { Logger } from "./logger.js";
+import { noopLogger } from "./logger.js";
 
 export const CLI_TYPES = ["claude", "codex", "gemini"] as const;
 export type CliType = (typeof CLI_TYPES)[number];
@@ -215,7 +217,7 @@ export interface ISessionManager {
 export async function createSessionManager(
   config?: Config,
   db?: DatabaseConnection,
-  logger?: { info(message: string, meta?: unknown): void; error(message: string, meta?: unknown): void; debug(message: string, meta?: unknown): void }
+  logger?: Logger
 ): Promise<ISessionManager> {
   if (config?.database && config?.redis) {
     // Import dynamically to avoid loading pg/ioredis if not needed
@@ -224,15 +226,10 @@ export async function createSessionManager(
     // Use provided db connection or create new one
     if (!db) {
       const { createDatabaseConnection } = await import("./db.js");
-      db = await createDatabaseConnection(config);
+      db = await createDatabaseConnection(config, logger);
     }
 
-    const pgLogger = logger ?? {
-      info: () => {},
-      error: () => {},
-      debug: () => {}
-    };
-    return new PostgreSQLSessionManager(db.getPool(), db.getRedis(), config.cacheTtl, pgLogger);
+    return new PostgreSQLSessionManager(db.getPool(), db.getRedis(), config.cacheTtl, logger ?? noopLogger);
   } else {
     // Use file-based storage
     return new FileSessionManager();

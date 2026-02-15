@@ -3,18 +3,15 @@ import type { Redis } from "ioredis";
 import { randomUUID } from "crypto";
 import { Session, CliType } from "./session-manager.js";
 import { CacheTtl } from "./config.js";
+import type { Logger } from "./logger.js";
+
+export type { Logger } from "./logger.js";
 
 const DEFAULT_SESSION_DESCRIPTIONS: Record<CliType, string> = {
   claude: "Claude Session",
   codex: "Codex Session",
   gemini: "Gemini Session"
 };
-
-export interface Logger {
-  info(message: string, meta?: any): void;
-  error(message: string, meta?: any): void;
-  debug(message: string, meta?: any): void;
-}
 
 /**
  * PostgreSQL-backed session manager with Redis caching
@@ -436,10 +433,8 @@ export class PostgreSQLSessionManager {
     const query = cli ? "DELETE FROM sessions WHERE cli = $1" : "DELETE FROM sessions";
     const result = cli ? await this.pool.query(query, [cli]) : await this.pool.query(query);
 
-    // Invalidate individual session caches
-    for (const session of sessions) {
-      await this.invalidateCache(session.id);
-    }
+    // Invalidate individual session caches (concurrent — each has its own try/catch)
+    await Promise.all(sessions.map(session => this.invalidateCache(session.id)));
 
     // Invalidate active session caches
     if (cli) {
