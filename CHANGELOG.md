@@ -2,6 +2,45 @@
 
 All notable changes to the llm-cli-gateway project.
 
+## [1.1.0] - 2026-02-15
+
+### Improved
+
+- **Shared Logger interface** — Extracted `Logger` + `noopLogger` into `src/logger.ts`, injected into `db.ts`, `async-job-manager.ts`, and `approval-manager.ts` for structured logging across all modules
+- **Typed tool responses** — Defined `ExtendedToolResponse` type to eliminate 9 `(response as any)` casts in `src/index.ts`
+- **DRY request handlers** — Extracted `prepareClaudeRequest()`, `prepareCodexRequest()`, and `buildCliResponse()` helpers, reducing ~150 lines of duplication across sync/async tool handlers
+- **Parallel cache invalidation** — `clearAllSessions` in PostgreSQL backend now uses `Promise.all` instead of sequential awaits
+- **PostgreSQL session backend** — Added `src/session-manager-pg.ts` with Redis caching, `src/db.ts` connection management, `src/migrate-sessions.ts` migration script, and `ISessionManager` interface for backend-agnostic session storage
+- **Dynamic model discovery** — `src/model-registry.ts` discovers available models from filesystem and environment
+- **Async job tracking** — `src/async-job-manager.ts` for long-running CLI requests (`claude_request_async`, `codex_request_async`)
+- **Approval gate** — `src/approval-manager.ts` with risk scoring and JSONL audit log
+
+### Added
+
+- `src/logger.ts` — Shared `Logger` interface and `noopLogger` sentinel
+- `src/session-manager-pg.ts` — PostgreSQL session storage with Redis cache layer
+- `src/db.ts` — Database connection management (PostgreSQL + Redis)
+- `src/model-registry.ts` — Dynamic model discovery
+- `src/async-job-manager.ts` — Async CLI job lifecycle management
+- `src/approval-manager.ts` — Risk-scoring approval gate with audit trail
+- `src/migrate-sessions.ts` — File-to-PostgreSQL session migration script
+- Tools: `claude_request_async`, `codex_request_async`, `job_status`, `job_cancel`, `list_models` (dynamic), `approval_list`
+
+### Fixed
+
+- Logger not propagated to `createDatabaseConnection` in fallback path (`session-manager.ts`) and migration script (`migrate-sessions.ts`)
+- `startTime` captured after prep functions, understating reported durations
+- `approval: null` always emitted on responses vs original absent-key behavior
+- `sessionId: undefined` always present on responses vs original absent-key behavior
+- Sequential cache invalidation in `clearAllSessions` causing unnecessary latency
+
+### Tests
+
+- **122 tests passing** (up from 114 in v1.0.0)
+- PostgreSQL integration tests gated behind `PG_TESTS=1`
+
+---
+
 ## [1.0.0] - 2026-01-24
 
 ### 🎉 First Production Release - 100% Bug-Free
