@@ -1,7 +1,7 @@
 import { Pool } from "pg";
 import type { Redis } from "ioredis";
 import { randomUUID } from "crypto";
-import { Session, CliType, CLI_TYPES } from "./session-manager.js";
+import { Session, CliType } from "./session-manager.js";
 import { CacheTtl } from "./config.js";
 
 const DEFAULT_SESSION_DESCRIPTIONS: Record<CliType, string> = {
@@ -225,7 +225,7 @@ export class PostgreSQLSessionManager {
     try {
       await this.redis.setex(`session:${sessionId}`, this.cacheTtl.session, JSON.stringify(session));
     } catch (error) {
-      console.error("Cache write failed:", error);
+      this.logger.error("Cache write failed", { error });
     }
 
     return session;
@@ -291,8 +291,13 @@ export class PostgreSQLSessionManager {
       return false;
     }
 
-    // Invalidate caches
+    // Invalidate caches (session, active session for this CLI, and list)
     await this.invalidateCache(sessionId);
+    try {
+      await this.redis.del(`active_session:${session.cli}`);
+    } catch (error) {
+      this.logger.error(`Failed to invalidate active session cache for ${session.cli}`, { error });
+    }
     await this.invalidateListCache(session.cli);
 
     return true;
@@ -379,7 +384,7 @@ export class PostgreSQLSessionManager {
     try {
       await this.redis.setex(`active_session:${cli}`, this.cacheTtl.activeSession, sessionId);
     } catch (error) {
-      console.error("Cache write failed:", error);
+      this.logger.error("Cache write failed", { error });
     }
 
     return await this.getSession(sessionId);

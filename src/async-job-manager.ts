@@ -6,6 +6,8 @@ export type LlmCli = "claude" | "codex" | "gemini";
 export type AsyncJobStatus = "running" | "completed" | "failed" | "canceled";
 
 const MAX_OUTPUT_SIZE = 50 * 1024 * 1024;
+const JOB_TTL_MS = 60 * 60 * 1000; // 1 hour
+const EVICTION_INTERVAL_MS = 5 * 60 * 1000; // Check every 5 minutes
 
 interface AsyncJobRecord {
   id: string;
@@ -57,6 +59,27 @@ function truncateText(value: string, maxChars: number): { text: string; truncate
 
 export class AsyncJobManager {
   private jobs = new Map<string, AsyncJobRecord>();
+  private evictionTimer: ReturnType<typeof setInterval> | null = null;
+
+  constructor() {
+    this.evictionTimer = setInterval(() => this.evictCompletedJobs(), EVICTION_INTERVAL_MS);
+    // Allow the process to exit even if the timer is active
+    if (this.evictionTimer.unref) {
+      this.evictionTimer.unref();
+    }
+  }
+
+  private evictCompletedJobs(): void {
+    const now = Date.now();
+    for (const [id, job] of this.jobs) {
+      if (job.status !== "running" && job.finishedAt) {
+        const finishedMs = new Date(job.finishedAt).getTime();
+        if (now - finishedMs > JOB_TTL_MS) {
+          this.jobs.delete(id);
+        }
+      }
+    }
+  }
 
   startJob(cli: LlmCli, args: string[], correlationId: string, cwd?: string): AsyncJobSnapshot {
     const id = randomUUID();

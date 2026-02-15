@@ -1,7 +1,10 @@
 import { z } from "zod";
 
 // Zod schemas for configuration validation
-const DatabaseUrlSchema = z.string().url().startsWith("postgresql://");
+const DatabaseUrlSchema = z.string().url().refine(
+  (url) => url.startsWith("postgresql://") || url.startsWith("postgres://"),
+  { message: "Database URL must start with postgresql:// or postgres://" }
+);
 const RedisUrlSchema = z.string().url().startsWith("redis://");
 
 export interface CacheTtl {

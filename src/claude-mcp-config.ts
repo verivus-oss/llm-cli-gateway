@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync, renameSync, openSync, fsyncSync, closeSync, chmodSync } from "fs";
 import { homedir } from "os";
 import { dirname, join } from "path";
 import { parse as parseToml } from "toml";
@@ -184,7 +184,12 @@ export function buildClaudeMcpConfig(servers: ClaudeMcpServerName[]): ClaudeMcpC
   const configDir = dirname(configPath);
   try {
     mkdirSync(configDir, { recursive: true });
-    writeFileSync(configPath, JSON.stringify({ mcpServers }, null, 2), { encoding: "utf-8", mode: 0o600 });
+    const tempPath = `${configPath}.tmp.${process.pid}`;
+    writeFileSync(tempPath, JSON.stringify({ mcpServers }, null, 2), { encoding: "utf-8", mode: 0o600 });
+    const fd = openSync(tempPath, "r+");
+    try { fsyncSync(fd); } finally { closeSync(fd); }
+    renameSync(tempPath, configPath);
+    chmodSync(configPath, 0o600);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     throw new Error(`Failed to write Claude MCP config: ${message}`);

@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 
 import { readFileSync } from "fs";
+import { homedir } from "os";
+import { join } from "path";
 import { PostgreSQLSessionManager, Logger } from "./session-manager-pg.js";
 import { SessionStorage, CliType } from "./session-manager.js";
 import { loadConfig } from "./config.js";
@@ -105,7 +107,7 @@ Environment Variables:
   }
 
   // Parse arguments
-  let filePath = process.env.HOME + "/.llm-cli-gateway/sessions.json";
+  let filePath = join(homedir(), ".llm-cli-gateway", "sessions.json");
   for (let i = 0; i < args.length; i++) {
     if (args[i] === "--from" && args[i + 1]) {
       filePath = args[i + 1];

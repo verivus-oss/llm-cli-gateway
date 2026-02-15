@@ -2,6 +2,8 @@ import { randomUUID } from "crypto";
 import { homedir } from "os";
 import { join, dirname } from "path";
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, openSync, fsyncSync, closeSync, chmodSync } from "fs";
+import type { Config } from "./config.js";
+import type { DatabaseConnection } from "./db.js";
 
 export const CLI_TYPES = ["claude", "codex", "gemini"] as const;
 export type CliType = (typeof CLI_TYPES)[number];
@@ -187,7 +189,9 @@ export class FileSessionManager {
 export const SessionManager = FileSessionManager;
 
 /**
- * Session manager interface (union of sync/async signatures)
+ * Session manager interface supporting both sync (file) and async (PostgreSQL) backends.
+ * Methods return T | Promise<T> so both backends satisfy the contract.
+ * Callers must always use `await` for uniform handling.
  */
 export interface ISessionManager {
   createSession(cli: CliType, description?: string, sessionId?: string): Session | Promise<Session>;
@@ -208,7 +212,11 @@ export interface ISessionManager {
  * @param db - Optional pre-existing DatabaseConnection (avoids creating duplicate connections)
  * @param logger - Logger instance for structured logging
  */
-export async function createSessionManager(config?: any, db?: any, logger?: any): Promise<ISessionManager> {
+export async function createSessionManager(
+  config?: Config,
+  db?: DatabaseConnection,
+  logger?: { info(message: string, meta?: unknown): void; error(message: string, meta?: unknown): void; debug(message: string, meta?: unknown): void }
+): Promise<ISessionManager> {
   if (config?.database && config?.redis) {
     // Import dynamically to avoid loading pg/ioredis if not needed
     const { PostgreSQLSessionManager } = await import("./session-manager-pg.js");
@@ -219,7 +227,12 @@ export async function createSessionManager(config?: any, db?: any, logger?: any)
       db = await createDatabaseConnection(config);
     }
 
-    return new PostgreSQLSessionManager(db.getPool(), db.getRedis(), config.cacheTtl, logger);
+    const pgLogger = logger ?? {
+      info: () => {},
+      error: () => {},
+      debug: () => {}
+    };
+    return new PostgreSQLSessionManager(db.getPool(), db.getRedis(), config.cacheTtl, pgLogger);
   } else {
     // Use file-based storage
     return new FileSessionManager();
