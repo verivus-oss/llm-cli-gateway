@@ -4,6 +4,8 @@
  * @module retry
  */
 
+import type { Logger } from "./logger.js";
+
 /**
  * Defines the possible states of the circuit breaker.
  */
@@ -116,6 +118,7 @@ export async function withRetry<T>(
   operation: () => Promise<T>,
   circuitBreaker: CircuitBreaker,
   retryOptions?: Partial<RetryOptions>,
+  logger?: Logger,
 ): Promise<T> {
   const wrapError = (message: string, error?: any): Error => {
     const wrapped = new Error(message) as Error & { code?: any; result?: any; cause?: any };
@@ -137,9 +140,8 @@ export async function withRetry<T>(
     factor: 2,
     isTransient: isDefaultTransient,
     onRetry: (error, attempt, delay) => {
-      console.warn(
-        `[Retry] Attempt ${attempt} failed with transient error. Retrying in ${delay}ms...`,
-        error.message,
+      logger?.debug(
+        `[Retry] Attempt ${attempt} failed with transient error. Retrying in ${delay}ms... ${error.message}`,
       );
     },
     ...retryOptions,

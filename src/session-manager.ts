@@ -3,6 +3,7 @@ import { homedir } from "os";
 import { join, dirname } from "path";
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, openSync, fsyncSync, closeSync, chmodSync } from "fs";
 import type { Config } from "./config.js";
+import { DEFAULT_SESSION_TTL_SECONDS } from "./config.js";
 import type { DatabaseConnection } from "./db.js";
 import type { Logger } from "./logger.js";
 import { noopLogger } from "./logger.js";
@@ -36,11 +37,34 @@ export interface SessionStorage {
 export class FileSessionManager {
   private storagePath: string;
   private storage: SessionStorage = { sessions: {}, activeSession: createEmptyActiveSessions() };
+  private readonly sessionTtlMs: number;
 
-  constructor(customPath?: string) {
+  constructor(customPath?: string, sessionTtlMs?: number) {
+    this.sessionTtlMs = sessionTtlMs ?? DEFAULT_SESSION_TTL_SECONDS * 1000;
     this.storagePath = customPath || join(homedir(), ".llm-cli-gateway", "sessions.json");
     this.ensureStorageDirectory();
     this.loadStorage();
+  }
+
+  private isExpired(session: Session): boolean {
+    const ts = new Date(session.lastUsedAt).getTime();
+    if (!Number.isFinite(ts)) return true; // malformed → expired
+    return Date.now() - ts > this.sessionTtlMs;
+  }
+
+  private evictExpiredSessions(): number {
+    let count = 0;
+    for (const [id, session] of Object.entries(this.storage.sessions)) {
+      if (this.isExpired(session)) {
+        delete this.storage.sessions[id];
+        if (this.storage.activeSession[session.cli] === id) {
+          this.storage.activeSession[session.cli] = null;
+        }
+        count++;
+      }
+    }
+    if (count > 0) this.saveStorage();
+    return count;
   }
 
   private ensureStorageDirectory(): void {
@@ -78,6 +102,7 @@ export class FileSessionManager {
   }
 
   createSession(cli: CliType, description?: string, sessionId?: string): Session {
+    this.evictExpiredSessions();
     const id = sessionId || randomUUID();
     const sessionDescription = description ?? DEFAULT_SESSION_DESCRIPTIONS[cli];
     const session: Session = {
@@ -100,10 +125,17 @@ export class FileSessionManager {
   }
 
   getSession(sessionId: string): Session | null {
-    return this.storage.sessions[sessionId] || null;
+    const session = this.storage.sessions[sessionId];
+    if (!session) return null;
+    if (this.isExpired(session)) {
+      this.deleteSession(sessionId);
+      return null;
+    }
+    return session;
   }
 
   listSessions(cli?: CliType): Session[] {
+    this.evictExpiredSessions();
     const sessions = Object.values(this.storage.sessions);
     if (cli) {
       return sessions.filter(s => s.cli === cli);
@@ -129,12 +161,14 @@ export class FileSessionManager {
   }
 
   setActiveSession(cli: CliType, sessionId: string | null): boolean {
-    if (sessionId !== null && !this.storage.sessions[sessionId]) {
-      return false;
-    }
-
-    if (sessionId !== null && this.storage.sessions[sessionId].cli !== cli) {
-      return false;
+    if (sessionId !== null) {
+      const session = this.storage.sessions[sessionId];
+      if (!session) return false;
+      if (this.isExpired(session)) {
+        this.deleteSession(sessionId);
+        return false;
+      }
+      if (session.cli !== cli) return false;
     }
 
     this.storage.activeSession[cli] = sessionId;
@@ -144,28 +178,37 @@ export class FileSessionManager {
 
   getActiveSession(cli: CliType): Session | null {
     const sessionId = this.storage.activeSession[cli];
-    if (!sessionId) {
+    if (!sessionId) return null;
+    const session = this.storage.sessions[sessionId];
+    if (!session || this.isExpired(session)) {
+      this.storage.activeSession[cli] = null;
+      if (session) delete this.storage.sessions[sessionId];
+      this.saveStorage();
       return null;
     }
-    return this.storage.sessions[sessionId] || null;
+    return session;
   }
 
   updateSessionUsage(sessionId: string): void {
-    if (this.storage.sessions[sessionId]) {
-      this.storage.sessions[sessionId].lastUsedAt = new Date().toISOString();
-      this.saveStorage();
+    const session = this.storage.sessions[sessionId];
+    if (!session) return;
+    if (this.isExpired(session)) {
+      this.deleteSession(sessionId);
+      return;
     }
+    session.lastUsedAt = new Date().toISOString();
+    this.saveStorage();
   }
 
   updateSessionMetadata(sessionId: string, metadata: Record<string, any>): boolean {
-    if (!this.storage.sessions[sessionId]) {
+    const session = this.storage.sessions[sessionId];
+    if (!session) return false;
+    if (this.isExpired(session)) {
+      this.deleteSession(sessionId);
       return false;
     }
 
-    this.storage.sessions[sessionId].metadata = {
-      ...this.storage.sessions[sessionId].metadata,
-      ...metadata
-    };
+    session.metadata = { ...session.metadata, ...metadata };
     this.saveStorage();
     return true;
   }
@@ -231,7 +274,10 @@ export async function createSessionManager(
 
     return new PostgreSQLSessionManager(db.getPool(), db.getRedis(), config.cacheTtl, logger ?? noopLogger);
   } else {
-    // Use file-based storage
-    return new FileSessionManager();
+    // Use file-based storage with TTL from config
+    const sessionTtlMs = config?.sessionTtl
+      ? config.sessionTtl * 1000
+      : DEFAULT_SESSION_TTL_SECONDS * 1000;
+    return new FileSessionManager(undefined, sessionTtlMs);
   }
 }

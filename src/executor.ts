@@ -3,11 +3,13 @@ import { homedir } from "os";
 import { join, dirname } from "path";
 import { readdirSync, existsSync } from "fs";
 import { createCircuitBreaker, withRetry } from "./retry.js";
+import type { Logger } from "./logger.js";
 
 export interface ExecuteOptions {
   timeout?: number;
   idleTimeout?: number;
   cwd?: string;
+  logger?: Logger;
 }
 
 export interface ExecuteResult {
@@ -325,7 +327,7 @@ export async function executeCli(
   });
 
   try {
-    return await withRetry(runOnce, circuitBreaker);
+    return await withRetry(runOnce, circuitBreaker, undefined, options.logger);
   } catch (error: any) {
     if (error?.cause?.message === "Output exceeded maximum size (50MB)") {
       throw error.cause;
