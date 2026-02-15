@@ -1,4 +1,4 @@
-import { spawn } from "child_process";
+import { ChildProcess, spawn } from "child_process";
 import { homedir } from "os";
 import { join, dirname } from "path";
 import { readdirSync, existsSync } from "fs";
@@ -74,6 +74,61 @@ export function getExtendedPath(): string {
   return [...additionalPaths, currentPath].join(":");
 }
 
+/** Registry of active detached process groups for shutdown cleanup. */
+const activeProcessGroups = new Set<number>();
+
+export function registerProcessGroup(pid: number): void {
+  activeProcessGroups.add(pid);
+}
+
+export function unregisterProcessGroup(pid: number): void {
+  activeProcessGroups.delete(pid);
+}
+
+/**
+ * Kill all active process groups. Called on gateway shutdown.
+ * Sends SIGTERM to all groups, waits 3s, then SIGKILL survivors.
+ * Returns a Promise that resolves after SIGKILL escalation completes.
+ * The returned Promise keeps the event loop alive (no .unref()),
+ * ensuring the process does NOT exit before SIGKILL fires.
+ */
+export function killAllProcessGroups(): Promise<void> {
+  if (activeProcessGroups.size === 0) return Promise.resolve();
+
+  for (const pid of activeProcessGroups) {
+    try { process.kill(-pid, "SIGTERM"); } catch { /* ESRCH ok */ }
+  }
+  return new Promise(resolve => {
+    setTimeout(() => {
+      for (const pid of activeProcessGroups) {
+        try { process.kill(-pid, "SIGKILL"); } catch { /* ESRCH ok */ }
+      }
+      activeProcessGroups.clear();
+      resolve();
+    }, 3000); // No .unref() — keeps event loop alive through escalation
+  });
+}
+
+/**
+ * Kill an entire process group. Falls back to killing just the process
+ * if the group kill fails (e.g., pid not yet assigned).
+ */
+export function killProcessGroup(proc: ChildProcess, signal: NodeJS.Signals): boolean {
+  if (proc.pid) {
+    try {
+      process.kill(-proc.pid, signal);
+      return true;
+    } catch (err: any) {
+      // ESRCH = process/group already dead — not an error
+      if (err.code !== "ESRCH") {
+        try { return proc.kill(signal); } catch { return false; }
+      }
+      return false;
+    }
+  }
+  try { return proc.kill(signal); } catch { return false; }
+}
+
 export async function executeCli(
   command: string,
   args: string[],
@@ -86,29 +141,41 @@ export async function executeCli(
   const runOnce = () => new Promise<ExecuteResult>((resolve, reject) => {
     const proc = spawn(command, args, {
       cwd,
+      detached: true,
       stdio: ["ignore", "pipe", "pipe"],
       env: { ...process.env, PATH: extendedPath }
     });
+
+    if (proc.pid) registerProcessGroup(proc.pid);
+    // Prevent detached process from keeping parent alive when not needed
+    proc.unref();
 
     let stdout = "";
     let stderr = "";
     let timedOut = false;
     let idledOut = false;
+    let overflowed = false;
     let exited = false;
     let outputSize = 0;
     let settled = false;
+
+    // Single cleanup flag to prevent double-unregister
+    let groupCleaned = false;
+    const cleanupProcessGroup = () => {
+      if (groupCleaned) return;
+      groupCleaned = true;
+      if (proc.pid) unregisterProcessGroup(proc.pid);
+    };
 
     const timeoutMs = typeof timeout === "number" && Number.isFinite(timeout) && timeout > 0 ? timeout : undefined;
     const timeoutId = timeoutMs
       ? setTimeout(() => {
         timedOut = true;
-        proc.kill("SIGTERM");
+        killProcessGroup(proc, "SIGTERM");
 
-        // Force kill if process doesn't terminate
         setTimeout(() => {
-          if (!exited) {
-            proc.kill("SIGKILL");
-          }
+          if (!exited) killProcessGroup(proc, "SIGKILL");
+          cleanupProcessGroup();
         }, 5000);
       }, timeoutMs)
       : undefined;
@@ -123,11 +190,11 @@ export async function executeCli(
       if (idleTimerId) clearTimeout(idleTimerId);
       idleTimerId = setTimeout(() => {
         idledOut = true;
-        // Clear wall-clock timeout to prevent timedOut from overriding idledOut
         if (timeoutId) clearTimeout(timeoutId);
-        proc.kill("SIGTERM");
+        killProcessGroup(proc, "SIGTERM");
         setTimeout(() => {
-          if (!exited) proc.kill("SIGKILL");
+          if (!exited) killProcessGroup(proc, "SIGKILL");
+          cleanupProcessGroup();
         }, 5000);
       }, idleMs);
     };
@@ -152,11 +219,11 @@ export async function executeCli(
     const handleOutputChunk = (data: Buffer, stream: "stdout" | "stderr") => {
       outputSize += data.length;
       if (outputSize > MAX_OUTPUT_SIZE) {
-        proc.kill("SIGTERM");
+        overflowed = true;
+        killProcessGroup(proc, "SIGTERM");
         setTimeout(() => {
-          if (!exited) {
-            proc.kill("SIGKILL");
-          }
+          if (!exited) killProcessGroup(proc, "SIGKILL");
+          cleanupProcessGroup();
         }, 5000);
         finalizeReject(new Error("Output exceeded maximum size (50MB)"));
         return;
@@ -190,6 +257,10 @@ export async function executeCli(
       exited = true;
       if (idleTimerId) {
         clearTimeout(idleTimerId);
+      }
+      // Unregister process group on clean exit (no kill was issued)
+      if (!timedOut && !idledOut && !overflowed) {
+        cleanupProcessGroup();
       }
       if (settled) {
         return;
@@ -241,6 +312,7 @@ export async function executeCli(
       if (idleTimerId) {
         clearTimeout(idleTimerId);
       }
+      cleanupProcessGroup();
       if (settled) {
         return;
       }

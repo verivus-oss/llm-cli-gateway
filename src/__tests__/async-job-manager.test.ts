@@ -162,4 +162,60 @@ describe("AsyncJobManager", () => {
       expect(snapshot.status).toBe("canceled");
     }, 15000);
   });
+
+  describe("process health", () => {
+    it("should return health for running jobs", async () => {
+      const manager = new AsyncJobManager();
+      const job = manager.startJob("sleep" as LlmCli, ["10"], "corr-health-1");
+      expect(job.status).toBe("running");
+
+      const running = manager.getRunningJobs();
+      expect(running).toHaveLength(1);
+      expect(running[0].jobId).toBe(job.id);
+      expect(running[0].cli).toBe("sleep");
+
+      const health = manager.getJobHealth();
+      expect(health.runningJobs).toBe(1);
+      expect(health.deadJobs).toBe(0);
+      expect(health.jobs).toHaveLength(1);
+      expect(health.jobs[0].processHealth?.alive).toBe(true);
+
+      // Cleanup
+      manager.cancelJob(job.id);
+    });
+
+    it("should return empty health when no jobs are running", () => {
+      const manager = new AsyncJobManager();
+      const health = manager.getJobHealth();
+      expect(health.runningJobs).toBe(0);
+      expect(health.deadJobs).toBe(0);
+      expect(health.zombieJobs).toBe(0);
+      expect(health.jobs).toHaveLength(0);
+    });
+  });
+
+  describe("outputFormat tracking", () => {
+    it("should store and retrieve output format", async () => {
+      const manager = new AsyncJobManager();
+      const job = manager.startJob("echo" as LlmCli, ["test"], "corr-fmt-1", undefined, undefined, "stream-json");
+
+      expect(manager.getJobOutputFormat(job.id)).toBe("stream-json");
+
+      await waitForJobDone(manager, job.id);
+    });
+
+    it("should return undefined for jobs without output format", async () => {
+      const manager = new AsyncJobManager();
+      const job = manager.startJob("echo" as LlmCli, ["test"], "corr-fmt-2");
+
+      expect(manager.getJobOutputFormat(job.id)).toBeUndefined();
+
+      await waitForJobDone(manager, job.id);
+    });
+
+    it("should return undefined for non-existent jobs", () => {
+      const manager = new AsyncJobManager();
+      expect(manager.getJobOutputFormat("nonexistent")).toBeUndefined();
+    });
+  });
 });
