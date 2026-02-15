@@ -98,7 +98,7 @@ claude_request({
 
 ## For Long-Running Implementations
 
-If the implementation step may take more than 2 minutes (sync timeout is 120s):
+If the implementation step is long-running and you want non-blocking execution:
 
 ```
 codex_request_async({
