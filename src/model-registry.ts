@@ -1,8 +1,7 @@
 import { Dirent, existsSync, readFileSync, readdirSync, statSync } from "fs";
 import { homedir } from "os";
 import path from "path";
-
-export type CliType = "claude" | "codex" | "gemini";
+import type { CliType } from "./session-manager.js";
 
 export interface CliInfo {
   description: string;

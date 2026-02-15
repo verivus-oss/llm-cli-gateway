@@ -1,4 +1,4 @@
-import { Pool, PoolClient, PoolConfig } from "pg";
+import { Pool, PoolConfig } from "pg";
 import { Redis, type RedisOptions } from "ioredis";
 import { Config } from "./config.js";
 

@@ -1,4 +1,4 @@
-import { ISessionManager, FileSessionManager } from "./session-manager.js";
+import { ISessionManager } from "./session-manager.js";
 import { PerformanceMetrics } from "./metrics.js";
 import { getCliInfo } from "./model-registry.js";
 
@@ -23,7 +23,7 @@ export interface ResourceContents {
 
 export class ResourceProvider {
   constructor(
-    private sessionManager: ISessionManager | FileSessionManager,
+    private sessionManager: ISessionManager,
     private performanceMetrics: PerformanceMetrics
   ) {}
 
@@ -132,7 +132,7 @@ export class ResourceProvider {
         mimeType: "application/json",
         text: JSON.stringify({
           total: sessions.length,
-          sessions: sessions.map((s: any) => ({
+          sessions: sessions.map((s) => ({
             id: s.id,
             cli: s.cli,
             description: s.description,
