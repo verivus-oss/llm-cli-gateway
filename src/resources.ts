@@ -1,5 +1,6 @@
-import { SessionManager } from "./session-manager.js";
+import { ISessionManager, FileSessionManager } from "./session-manager.js";
 import { PerformanceMetrics } from "./metrics.js";
+import { getCliInfo } from "./model-registry.js";
 
 export interface ResourceDefinition {
   uri: string;
@@ -20,36 +21,9 @@ export interface ResourceContents {
   text: string;
 }
 
-// CLI model capabilities from index.ts
-const CLI_INFO = {
-  claude: {
-    description: "Anthropic's Claude Code CLI - best for code generation, analysis, and agentic coding tasks",
-    models: {
-      opus: "Most capable model. Best for: complex reasoning, nuanced analysis, difficult problems, research",
-      sonnet: "Balanced performance. Best for: everyday coding, code review, general tasks (default)",
-      haiku: "Fastest model. Best for: simple queries, quick answers, high-volume tasks, cost-sensitive use"
-    }
-  },
-  codex: {
-    description: "OpenAI's Codex CLI - best for code execution in sandboxed environments",
-    models: {
-      "o3": "Most capable reasoning model. Best for: complex multi-step problems, math, science",
-      "o4-mini": "Fast reasoning model. Best for: coding tasks, quick iterations",
-      "gpt-4.1": "Latest GPT-4 variant. Best for: general coding, instruction following"
-    }
-  },
-  gemini: {
-    description: "Google's Gemini CLI - best for multimodal tasks and Google ecosystem integration",
-    models: {
-      "gemini-2.5-pro": "Most capable model. Best for: complex reasoning, long context, multimodal",
-      "gemini-2.5-flash": "Fast model. Best for: quick responses, high throughput, cost-sensitive use"
-    }
-  }
-} as const;
-
 export class ResourceProvider {
   constructor(
-    private sessionManager: SessionManager,
+    private sessionManager: ISessionManager | FileSessionManager,
     private performanceMetrics: PerformanceMetrics
   ) {}
 
@@ -149,16 +123,16 @@ export class ResourceProvider {
   }
 
   // Read a specific resource by URI
-  readResource(uri: string): ResourceContents | null {
+  async readResource(uri: string): Promise<ResourceContents | null> {
     // Session resources
     if (uri === "sessions://all") {
-      const sessions = this.sessionManager.listSessions();
+      const sessions = await this.sessionManager.listSessions();
       return {
         uri,
         mimeType: "application/json",
         text: JSON.stringify({
           total: sessions.length,
-          sessions: sessions.map(s => ({
+          sessions: sessions.map((s: any) => ({
             id: s.id,
             cli: s.cli,
             description: s.description,
@@ -166,16 +140,16 @@ export class ResourceProvider {
             lastUsedAt: s.lastUsedAt
           })),
           activeSessions: {
-            claude: this.sessionManager.getActiveSession("claude")?.id || null,
-            codex: this.sessionManager.getActiveSession("codex")?.id || null,
-            gemini: this.sessionManager.getActiveSession("gemini")?.id || null
+            claude: (await this.sessionManager.getActiveSession("claude"))?.id || null,
+            codex: (await this.sessionManager.getActiveSession("codex"))?.id || null,
+            gemini: (await this.sessionManager.getActiveSession("gemini"))?.id || null
           }
         }, null, 2)
       };
     }
 
     if (uri === "sessions://claude") {
-      const sessions = this.sessionManager.listSessions("claude");
+      const sessions = await this.sessionManager.listSessions("claude");
       return {
         uri,
         mimeType: "application/json",
@@ -183,13 +157,13 @@ export class ResourceProvider {
           cli: "claude",
           total: sessions.length,
           sessions,
-          activeSession: this.sessionManager.getActiveSession("claude")?.id || null
+          activeSession: (await this.sessionManager.getActiveSession("claude"))?.id || null
         }, null, 2)
       };
     }
 
     if (uri === "sessions://codex") {
-      const sessions = this.sessionManager.listSessions("codex");
+      const sessions = await this.sessionManager.listSessions("codex");
       return {
         uri,
         mimeType: "application/json",
@@ -197,13 +171,13 @@ export class ResourceProvider {
           cli: "codex",
           total: sessions.length,
           sessions,
-          activeSession: this.sessionManager.getActiveSession("codex")?.id || null
+          activeSession: (await this.sessionManager.getActiveSession("codex"))?.id || null
         }, null, 2)
       };
     }
 
     if (uri === "sessions://gemini") {
-      const sessions = this.sessionManager.listSessions("gemini");
+      const sessions = await this.sessionManager.listSessions("gemini");
       return {
         uri,
         mimeType: "application/json",
@@ -211,33 +185,36 @@ export class ResourceProvider {
           cli: "gemini",
           total: sessions.length,
           sessions,
-          activeSession: this.sessionManager.getActiveSession("gemini")?.id || null
+          activeSession: (await this.sessionManager.getActiveSession("gemini"))?.id || null
         }, null, 2)
       };
     }
 
     // Model capability resources
     if (uri === "models://claude") {
+      const cliInfo = getCliInfo();
       return {
         uri,
         mimeType: "application/json",
-        text: JSON.stringify(CLI_INFO.claude, null, 2)
+        text: JSON.stringify(cliInfo.claude, null, 2)
       };
     }
 
     if (uri === "models://codex") {
+      const cliInfo = getCliInfo();
       return {
         uri,
         mimeType: "application/json",
-        text: JSON.stringify(CLI_INFO.codex, null, 2)
+        text: JSON.stringify(cliInfo.codex, null, 2)
       };
     }
 
     if (uri === "models://gemini") {
+      const cliInfo = getCliInfo();
       return {
         uri,
         mimeType: "application/json",
-        text: JSON.stringify(CLI_INFO.gemini, null, 2)
+        text: JSON.stringify(cliInfo.gemini, null, 2)
       };
     }
 
