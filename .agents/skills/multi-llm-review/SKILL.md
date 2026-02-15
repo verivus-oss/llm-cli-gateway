@@ -3,7 +3,7 @@ name: multi-llm-review
 description: Orchestrate parallel code reviews across Claude, Codex, and Gemini via the llm-cli-gateway MCP. Use when the user asks for code review, quality analysis, bug finding, or security audit across multiple LLMs.
 metadata:
   author: verivusai-labs
-  version: "1.1"
+  version: "1.2"
 ---
 
 # Multi-LLM Code Review
@@ -12,11 +12,11 @@ Orchestrate parallel code reviews using the llm-cli-gateway MCP tools. Each LLM 
 
 ## LLM Strengths
 
-| LLM | Best For | Tool |
-|-----|----------|------|
-| Claude | Architecture, design patterns, code quality, documentation | `claude_request` |
-| Codex | Implementation correctness, logic bugs, test coverage | `codex_request` |
-| Gemini | Security analysis, edge cases, multimodal context | `gemini_request` |
+| LLM | Best For | Sync Tool | Async Tool |
+|-----|----------|-----------|------------|
+| Claude | Architecture, design patterns, code quality, documentation | `claude_request` | `claude_request_async` |
+| Codex | Implementation correctness, logic bugs, test coverage | `codex_request` | `codex_request_async` |
+| Gemini | Security analysis, edge cases, multimodal context | `gemini_request` | `gemini_request_async` |
 
 ## Standard Review Workflow
 
@@ -94,16 +94,41 @@ Format the combined findings as a structured report:
 
 ## For Large Codebases
 
-When reviewing many files, use async jobs so you can poll progress and work on other tasks while waiting:
+When reviewing many files, use async jobs for all three CLIs so you can run reviews in parallel and work on other tasks while waiting:
 
 ```
+// All three reviews in parallel
 claude_request_async({
-  prompt: "Review all TypeScript files in src/ for...",
-  optimizePrompt: true
+  prompt: "Review all TypeScript files in src/ for architecture and quality...",
+  optimizePrompt: true,
+  correlationId: "review-quality"
+})
+
+codex_request_async({
+  prompt: "Check all TypeScript files in src/ for logic bugs and test gaps...",
+  optimizePrompt: true,
+  correlationId: "review-bugs"
+})
+
+gemini_request_async({
+  prompt: "Security audit all TypeScript files in src/...",
+  model: "gemini-2.5-pro",
+  correlationId: "review-security"
 })
 ```
 
-Then poll with `llm_job_status` and retrieve with `llm_job_result`. See the `async-job-orchestration` skill for details.
+Poll with `llm_job_status` and retrieve with `llm_job_result`. See the `async-job-orchestration` skill for details.
+
+For iterative Gemini reviews (review → discuss → re-review), pass a `sessionId` to `gemini_request_async` so the session is resumable:
+
+```
+gemini_request_async({
+  prompt: "Deep security audit of src/...",
+  sessionId: "gemini-security-review",
+  model: "gemini-2.5-pro"
+})
+// Response: resumable: true — session can be continued
+```
 
 ## Tips
 
@@ -112,3 +137,5 @@ Then poll with `llm_job_status` and retrieve with `llm_job_result`. See the `asy
 - For security-sensitive reviews, set `approvalStrategy: "mcp_managed"` with `approvalPolicy: "strict"`
 - Include file paths and line numbers in prompts for actionable feedback
 - If a CLI is unavailable, gracefully skip it and note the gap
+- For large codebases, use all three async variants (`claude_request_async`, `codex_request_async`, `gemini_request_async`) for true parallel reviews
+- Pass `sessionId` to `gemini_request_async` to make Gemini reviews resumable for follow-up discussion

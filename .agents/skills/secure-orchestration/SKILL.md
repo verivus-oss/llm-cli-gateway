@@ -3,7 +3,7 @@ name: secure-orchestration
 description: Security-conscious LLM orchestration with the llm-cli-gateway approval system. Use when executing high-risk operations, managing permissions, auditing LLM requests, or when the user requires approval gates.
 metadata:
   author: verivusai-labs
-  version: "1.1"
+  version: "1.2"
 ---
 
 # Secure Orchestration
@@ -77,6 +77,21 @@ codex_request({
 Score breakdown: bypass (+3) + full-auto (+2) + bypass+full-auto combo (+2) + sensitive keyword "delete" (+3) + default exa (+2) + default ref_tools (+1) = **13**, exceeds strict threshold of 2.
 
 The request is NOT executed when denied.
+
+### Async requests with approval gates
+
+Approval gates work identically for async requests. The approval check happens before the job is spawned:
+
+```
+gemini_request_async({
+  prompt: "Audit the authentication module for vulnerabilities",
+  model: "gemini-2.5-pro",
+  approvalStrategy: "mcp_managed",
+  approvalPolicy: "strict"
+})
+```
+
+If approved, the async job starts and you get a `job.id` to poll. If denied, no job is created and the denial is returned immediately.
 
 ### Important: mcp_managed forces permissive CLI modes
 
@@ -198,6 +213,17 @@ gemini_request({
 
 Options: `default` (ask for approval), `auto_edit` (auto-approve edits), `yolo` (approve everything — development only)
 
+The same `approvalMode` parameter is available on `gemini_request_async`:
+
+```
+gemini_request_async({
+  prompt: "...",
+  approvalMode: "default",
+  approvalStrategy: "mcp_managed",
+  approvalPolicy: "strict"
+})
+```
+
 ### Tool restrictions
 
 **Claude** supports both allowlists and blocklists:
@@ -217,6 +243,25 @@ gemini_request({
 })
 ```
 
+## Idle Timeout as a Security Control
+
+The `idleTimeoutMs` parameter can serve as a security guardrail. A tight idle timeout ensures that stuck or misbehaving CLI processes are killed promptly, limiting the window for unintended operations.
+
+For security-sensitive contexts, set a shorter timeout than the default 10 minutes:
+
+```
+claude_request({
+  prompt: "Audit the secrets management module",
+  approvalStrategy: "mcp_managed",
+  approvalPolicy: "strict",
+  idleTimeoutMs: 120_000
+})
+```
+
+This kills the process after 2 minutes of inactivity. When idle timeout fires, the job fails with exit code 125 (non-transient — no retry).
+
+**Guideline:** Use 60-120 seconds for security audits and sensitive operations. Use the full 10-minute default (or longer) only for large analysis tasks where long silent periods are expected.
+
 ## Tips
 
 - Start with `strict` policy and relax only when needed
@@ -226,3 +271,6 @@ gemini_request({
 - Audit logs include a `promptPreview` (first 280 chars) and `promptSha256` hash
 - Denied requests return immediately without executing — check `approval.status` in the response
 - Default policy is `balanced` unless overridden by `LLM_GATEWAY_APPROVAL_POLICY` env var
+- Approval gates apply equally to sync and async requests — `gemini_request_async` supports `approvalStrategy` and `approvalPolicy` just like the sync variant
+- Set a tight `idleTimeoutMs` (60-120s) for security-sensitive operations to limit the window for unintended behavior
+- Use `gemini_request_async` with `approvalStrategy: "mcp_managed"` for long-running Gemini security audits that need approval gates

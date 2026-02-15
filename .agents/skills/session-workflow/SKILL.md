@@ -3,7 +3,7 @@ name: session-workflow
 description: Manage conversation sessions across Claude, Codex, and Gemini via the llm-cli-gateway. Use when the user needs multi-turn conversations, session switching, or workspace management across LLM CLIs.
 metadata:
   author: verivusai-labs
-  version: "1.1"
+  version: "1.2"
 ---
 
 # Session Workflow
@@ -15,6 +15,9 @@ Sessions track conversation context across requests. Each CLI (Claude, Codex, Ge
 - **Active session** — The default session used when no `sessionId` is specified
 - **Session ID** — String identifier (typically UUID, but arbitrary strings accepted)
 - **Session metadata** — Optional key-value data attached to a session (no MCP tool to update it; backend-only)
+- **Session TTL** — Sessions expire after 30 days of inactivity (configurable via `SESSION_TTL` env var)
+- **`gw-*` prefix** — Gateway-generated session IDs use the `gw-` prefix; these are reserved and cannot be passed as `sessionId` in future requests
+- **`resumable`** — Response field indicating whether the session can be resumed (`true` = user-provided ID, `false` = gateway-generated `gw-*` ID)
 - One active session per CLI at a time
 - Sessions store only metadata (id, cli, timestamps, description) — not conversation content
 
@@ -130,6 +133,16 @@ gemini_request({
 })
 ```
 
+Gemini async requests also support sessions — pass `sessionId` to `gemini_request_async` for resumable long-running analysis:
+
+```
+gemini_request_async({
+  prompt: "Deep analysis of all modules...",
+  sessionId: "my-gemini-session"
+})
+// Response will include resumable: true
+```
+
 ## Switching Between Sessions
 
 ### View all sessions
@@ -178,6 +191,60 @@ claude_request({ prompt: "...", sessionId: authSessionId })
 claude_request({ prompt: "...", sessionId: bugfixSessionId })
 ```
 
+## Session TTL
+
+Sessions expire after a period of inactivity and are lazily evicted.
+
+### Default: 30 days
+
+Sessions that have not been used for 30 days (based on `lastUsedAt`) are considered expired. Expired sessions are removed automatically during the next read or write operation (lazy eviction).
+
+### Configuration
+
+Set the `SESSION_TTL` environment variable (in seconds) to override the default:
+
+```bash
+# 7-day TTL
+SESSION_TTL=604800 npm start
+
+# 90-day TTL
+SESSION_TTL=7776000 npm start
+```
+
+### Behavior
+
+- Expired sessions are **silently removed** — no error is returned
+- Eviction happens lazily on any session operation (list, get, create, set-active)
+- If an active session expires, the active pointer is cleared
+- TTL is based on `lastUsedAt`, not `createdAt` — active sessions stay alive
+- The file-based and PostgreSQL backends both enforce TTL
+
+## Gateway Session Prefix (`gw-`)
+
+Session IDs starting with `gw-` are reserved for gateway-generated sessions.
+
+### When `gw-*` IDs are created
+
+When a Gemini request runs without an explicit `sessionId`, the gateway generates one with the `gw-` prefix (e.g., `gw-a1b2c3d4-5678-...`). This is used internally for session tracking.
+
+### Restriction
+
+If you pass a `gw-*` session ID as `sessionId` in a request, the gateway rejects it with an error:
+
+> Session ID "gw-..." uses reserved prefix "gw-". Gateway-generated session IDs cannot be used for --resume.
+
+### Checking resumability
+
+The `resumable` field in responses tells you whether the session can be reused:
+
+```
+// resumable: true — you provided the sessionId, safe to reuse
+gemini_request({ prompt: "...", sessionId: "my-session-123" })
+
+// resumable: false — gateway generated a gw-* ID, cannot reuse
+gemini_request({ prompt: "..." })
+```
+
 ## Cleanup
 
 ### Delete a single session
@@ -215,3 +282,6 @@ Returns timestamps (`createdAt`, `lastUsedAt`), description, CLI type, and wheth
 - Each CLI tracks its active session independently — activating a Claude session doesn't affect Codex
 - `lastUsedAt` updates are conditional — they occur when a session ID is explicitly passed (not on all auto-continue flows)
 - For Codex workflows, sessions are purely organizational — do not rely on them for conversation continuity
+- Expired sessions (past TTL) are silently evicted — if a session disappears, check whether it was inactive for too long
+- Never pass a `gw-*` session ID back as `sessionId` — it will be rejected; use your own session IDs for resumable workflows
+- Check the `resumable` field in responses to know whether a session can be continued in future requests

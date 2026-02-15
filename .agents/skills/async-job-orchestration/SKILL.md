@@ -3,12 +3,12 @@ name: async-job-orchestration
 description: Manage long-running async LLM jobs through the llm-cli-gateway. Use when tasks may exceed 2 minutes, when running parallel jobs, or when you need non-blocking LLM execution.
 metadata:
   author: verivusai-labs
-  version: "1.1"
+  version: "1.2"
 ---
 
 # Async Job Orchestration
 
-The gateway supports async execution for Claude and Codex. Use this for long-running tasks, parallel execution, or when you need to do other work while waiting.
+The gateway supports async execution for Claude, Codex, and Gemini. Use this for long-running tasks, parallel execution, or when you need to do other work while waiting.
 
 ## When to Use Async
 
@@ -22,6 +22,7 @@ The gateway supports async execution for Claude and Codex. Use this for long-run
 |------|---------|
 | `claude_request_async` | Start async Claude job |
 | `codex_request_async` | Start async Codex job |
+| `gemini_request_async` | Start async Gemini job |
 | `llm_job_status` | Poll job status (no output) |
 | `llm_job_result` | Retrieve job output |
 | `llm_job_cancel` | Cancel a running job |
@@ -45,11 +46,17 @@ Response:
     "cli": "claude",
     "status": "running",
     "startedAt": "2026-02-15T..."
-  }
+  },
+  "sessionId": "gw-a1b2c3d4-...",
+  "resumable": false
 }
 ```
 
 Save the `job.id` for subsequent calls.
+
+- **`resumable: true`** — You provided a `sessionId`; the session can be resumed in future requests.
+- **`resumable: false`** — The gateway auto-generated a `gw-*` session ID; it cannot be resumed.
+- **`gw-*` prefix** — Gateway-generated session IDs start with `gw-`. These are rejected if passed as a `sessionId` in future requests.
 
 ### Poll
 
@@ -86,6 +93,35 @@ llm_job_cancel({ jobId: "job-abc123" })
 
 The gateway sends SIGTERM first, then SIGKILL after 5 seconds.
 
+## Idle Timeout
+
+Async (and sync) jobs are killed if they produce no stdout/stderr output for a configurable duration. This detects stuck processes that hang silently.
+
+### Default: 10 minutes (600,000ms)
+
+All three CLIs default to 600,000ms (10 minutes) of idle time before the process is killed.
+
+| CLI | Default | Notes |
+|-----|---------|-------|
+| Claude | 600,000ms | **Only effective in `stream-json` output mode.** In text/json mode, Claude produces no output until done, so idle timeout is not applied (would false-positive). |
+| Codex | 600,000ms | Codex streams stderr progress, so idle timeout works in all modes. |
+| Gemini | 600,000ms | Gemini streams stdout in real-time, so idle timeout works in all modes. |
+
+### Override with `idleTimeoutMs`
+
+Pass `idleTimeoutMs` on any async (or sync) request to override the default:
+
+```
+gemini_request_async({
+  prompt: "Deep analysis of the entire codebase...",
+  idleTimeoutMs: 1_800_000
+})
+```
+
+**Range:** 30,000ms (30 seconds) to 3,600,000ms (1 hour).
+
+When idle timeout fires, the process is killed and the job fails with **exit code 125**.
+
 ## Parallel Jobs
 
 Run multiple LLM tasks concurrently by starting them all, then collecting results.
@@ -105,8 +141,12 @@ codex_request_async({
   correlationId: "review-impl"
 })
 
-// Job 3: Gemini (sync only — no async variant)
-// Run gemini_request synchronously or skip
+// Job 3: Gemini security audit
+gemini_request_async({
+  prompt: "Security audit src/...",
+  model: "gemini-2.5-pro",
+  correlationId: "review-sec"
+})
 ```
 
 ### Poll all jobs
@@ -116,6 +156,7 @@ Check each job's status. Wait until all are `completed`, `failed`, or `canceled`
 ```
 llm_job_status({ jobId: "job-1-id" })
 llm_job_status({ jobId: "job-2-id" })
+llm_job_status({ jobId: "job-3-id" })
 ```
 
 ### Collect results
@@ -125,6 +166,7 @@ Retrieve output from each finished job (works for completed, failed, AND cancele
 ```
 llm_job_result({ jobId: "job-1-id" })
 llm_job_result({ jobId: "job-2-id" })
+llm_job_result({ jobId: "job-3-id" })
 ```
 
 ## Polling Strategy
@@ -142,11 +184,15 @@ Use exponential backoff to avoid excessive polling:
 |--------|-----------|---------|--------|
 | `completed` | 0 | Success | Retrieve result |
 | `failed` | 124 | CLI timeout | Check stderr in result |
+| `failed` | 125 | Idle timeout (stuck process) | Increase `idleTimeoutMs` or check if CLI is hanging |
+| `failed` | 126 | Output overflow (>50MB) | Reduce output scope; check stderr for partial diagnostics |
 | `failed` | non-zero | CLI error | Check stderr in result |
 | `failed` | null | Process error | Check `job.error` field |
 | `canceled` | any | Job was canceled | Result still retrievable |
 
 Important: Only `exitCode === 0` produces `completed` status. All non-zero exit codes produce `failed` status. Results are retrievable for ALL terminal states (completed, failed, canceled).
+
+Exit codes 125 (idle timeout) and 126 (output overflow) are **non-transient** — the retry engine will not retry them. Adjust the request parameters instead.
 
 When a job fails, retrieve the result — `stderr` often contains useful diagnostics:
 
@@ -158,15 +204,18 @@ llm_job_result({ jobId: "failed-job-id" })
 
 - Jobs are stored **in memory only** — they are lost on process restart
 - Jobs have a 1-hour TTL after completion, then are evicted
-- Maximum output: 50MB (stdout + stderr combined)
-- Truncated output is indicated by `outputTruncated: true` in the job status
+- Maximum output: 50MB (stdout + stderr combined) — exceeding this **kills the process** (exit code 126)
 - Always retrieve results promptly — before the 1-hour TTL expires and before any restart
+- Completed job metrics feed the `llm_performance_metrics` resource via an `onJobComplete` callback
 
 ## Tips
 
 - Use `correlationId` on every async job for log tracing
-- Gemini does not have an async variant — use `gemini_request` synchronously
+- All three CLIs now have async variants — use `claude_request_async`, `codex_request_async`, and `gemini_request_async` for parallel execution
 - Async jobs do NOT support `optimizeResponse` — optimize the result yourself after retrieval
 - Sessions work with async jobs — pass `sessionId` or `createNewSession` as usual
 - For parallel reviews, start all jobs first, then poll in a loop
 - Sync requests block until the CLI finishes — use async when you need to do other work in parallel
+- Set `idleTimeoutMs` higher than the default 10 minutes for tasks that may have long silent periods (e.g., large Gemini analyses)
+- Check the `resumable` field in the response — only `true` when you provided a `sessionId` (gateway-generated `gw-*` sessions are not resumable)
+- Async job metrics (latency, exit codes) are automatically tracked in `llm_performance_metrics`

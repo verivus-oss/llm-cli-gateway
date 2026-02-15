@@ -3,7 +3,7 @@ name: implement-review-fix
 description: Run the full implement-review-fix cycle using multiple LLMs via the llm-cli-gateway. Use when building features, fixing bugs, or refactoring code that benefits from multi-LLM collaboration.
 metadata:
   author: verivusai-labs
-  version: "1.1"
+  version: "1.2"
 ---
 
 # Implement-Review-Fix Cycle
@@ -109,6 +109,39 @@ codex_request_async({
 
 Poll with `llm_job_status({ jobId })` and retrieve with `llm_job_result({ jobId })` when complete. See the `async-job-orchestration` skill for details.
 
+### Parallel async reviews (all 3 CLIs)
+
+For the review step, run all three CLIs in parallel using their async variants:
+
+```
+// Start implementation
+codex_request_async({
+  prompt: "Implement [feature]...",
+  fullAuto: true,
+  correlationId: "impl"
+})
+// Wait for implementation to complete...
+
+// Run all three reviews in parallel
+claude_request_async({
+  prompt: "Review the changes in [file path] for quality...",
+  correlationId: "review-quality"
+})
+
+codex_request_async({
+  prompt: "Check [file path] for logic bugs...",
+  correlationId: "review-bugs"
+})
+
+gemini_request_async({
+  prompt: "Security audit [file path]...",
+  model: "gemini-2.5-pro",
+  correlationId: "review-security"
+})
+
+// Poll all three, collect results, synthesize findings, then fix
+```
+
 ## Tips
 
 - Always consolidate review findings before sending fixes (avoids redundant work)
@@ -117,3 +150,5 @@ Poll with `llm_job_status({ jobId })` and retrieve with `llm_job_result({ jobId 
 - Keep implementation prompts specific — include file paths, function names, and acceptance criteria
 - For Codex fix steps, re-state the problem context since it does not carry over from previous calls
 - After the cycle, clean up sessions with `session_delete` if no longer needed
+- Do not pass `gw-*` session IDs (gateway-generated) as `sessionId` — they are rejected; use your own session IDs for resumable workflows
+- Use `gemini_request_async` for long-running Gemini security reviews — all three CLIs now have async variants
