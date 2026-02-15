@@ -1,8 +1,9 @@
 import { ChildProcess, spawn } from "child_process";
 import { randomUUID } from "crypto";
-import { getExtendedPath } from "./executor.js";
+import { getExtendedPath, killProcessGroup, registerProcessGroup, unregisterProcessGroup } from "./executor.js";
 import type { Logger } from "./logger.js";
 import { noopLogger } from "./logger.js";
+import { ProcessMonitor, type JobHealth } from "./process-monitor.js";
 
 export type LlmCli = "claude" | "codex" | "gemini";
 export type AsyncJobStatus = "running" | "completed" | "failed" | "canceled";
@@ -27,8 +28,10 @@ interface AsyncJobRecord {
   error: string | null;
   process: ChildProcess;
   exited: boolean;
+  outputFormat?: string;
   resetIdleTimer?: () => void;
   clearIdleTimer?: () => void;
+  cleanupGroup?: () => void;
 }
 
 export interface AsyncJobSnapshot {
@@ -66,8 +69,10 @@ function truncateText(value: string, maxChars: number): { text: string; truncate
 export class AsyncJobManager {
   private jobs = new Map<string, AsyncJobRecord>();
   private evictionTimer: ReturnType<typeof setInterval> | null = null;
+  private processMonitor: ProcessMonitor;
 
   constructor(private logger: Logger = noopLogger) {
+    this.processMonitor = new ProcessMonitor(logger);
     this.evictionTimer = setInterval(() => this.evictCompletedJobs(), EVICTION_INTERVAL_MS);
     // Allow the process to exit even if the timer is active
     if (this.evictionTimer.unref) {
@@ -78,6 +83,35 @@ export class AsyncJobManager {
   private evictCompletedJobs(): void {
     const now = Date.now();
     let evicted = 0;
+
+    // Dead process auto-recovery: check for running jobs whose process no longer exists
+    for (const [id, job] of this.jobs) {
+      if (job.status === "running" && job.process.pid) {
+        try {
+          process.kill(job.process.pid, 0);
+        } catch (err: any) {
+          if (err.code === "ESRCH") {
+            job.status = "failed";
+            job.exitCode = job.exitCode ?? 1;
+            job.error = "Process no longer exists (dead process detected)";
+            job.finishedAt = new Date().toISOString();
+            job.exited = true;
+            unregisterProcessGroup(job.process.pid);
+            this.logger.error(`Job ${id} process ${job.process.pid} no longer exists, marking as failed`);
+          }
+          // EPERM: process exists but we can't signal it — ignore
+        }
+      }
+      // Check for exited flag mismatch (close handler may have fired but status wasn't updated)
+      if (job.status === "running" && job.exited) {
+        job.status = "failed";
+        job.error = "Process exited without proper status transition";
+        job.finishedAt = job.finishedAt || new Date().toISOString();
+        if (job.process.pid) unregisterProcessGroup(job.process.pid);
+        this.logger.error(`Job ${id} has exited flag but was still in running state, marking as failed`);
+      }
+    }
+
     for (const [id, job] of this.jobs) {
       if (job.status !== "running" && job.finishedAt) {
         const finishedMs = new Date(job.finishedAt).getTime();
@@ -92,14 +126,26 @@ export class AsyncJobManager {
     }
   }
 
-  startJob(cli: LlmCli, args: string[], correlationId: string, cwd?: string, idleTimeoutMs?: number): AsyncJobSnapshot {
+  startJob(cli: LlmCli, args: string[], correlationId: string, cwd?: string, idleTimeoutMs?: number, outputFormat?: string): AsyncJobSnapshot {
     const id = randomUUID();
     const startedAt = new Date().toISOString();
     const child = spawn(cli, args, {
       cwd,
+      detached: true,
       stdio: ["ignore", "pipe", "pipe"],
       env: { ...process.env, PATH: getExtendedPath() }
     });
+
+    if (child.pid) registerProcessGroup(child.pid);
+    child.unref();
+
+    // Single cleanup flag to prevent double-unregister
+    let groupCleaned = false;
+    const cleanupGroup = () => {
+      if (groupCleaned) return;
+      groupCleaned = true;
+      if (child.pid) unregisterProcessGroup(child.pid);
+    };
 
     const job: AsyncJobRecord = {
       id,
@@ -116,7 +162,9 @@ export class AsyncJobManager {
       canceled: false,
       error: null,
       process: child,
-      exited: false
+      exited: false,
+      outputFormat,
+      cleanupGroup
     };
 
     this.jobs.set(id, job);
@@ -133,10 +181,11 @@ export class AsyncJobManager {
         job.exitCode = 125;
         job.error = `Process killed after ${idleTimeoutMs}ms of inactivity`;
         job.finishedAt = new Date().toISOString();
-        job.process.kill("SIGTERM");
+        killProcessGroup(job.process, "SIGTERM");
         this.logger.info(`Job ${id} killed due to inactivity (${idleTimeoutMs}ms)`, { correlationId });
         setTimeout(() => {
-          if (!job.exited) job.process.kill("SIGKILL");
+          if (!job.exited) killProcessGroup(job.process, "SIGKILL");
+          job.cleanupGroup?.();
         }, 5000);
       }, idleTimeoutMs);
     };
@@ -157,6 +206,7 @@ export class AsyncJobManager {
     child.on("error", (error: Error) => {
       job.exited = true;
       job.clearIdleTimer?.();
+      job.cleanupGroup?.();
       if (job.status === "running") {
         job.status = job.canceled ? "canceled" : "failed";
         job.error = error.message;
@@ -168,6 +218,10 @@ export class AsyncJobManager {
     child.on("close", (code: number | null) => {
       job.exited = true;
       job.clearIdleTimer?.();
+      // Unregister process group on clean exit (no kill was issued)
+      if (!job.canceled && job.status === "running") {
+        job.cleanupGroup?.();
+      }
       if (job.status !== "running") {
         job.exitCode = code ?? job.exitCode;
         if (!job.finishedAt) {
@@ -231,16 +285,48 @@ export class AsyncJobManager {
     job.status = "canceled";
     job.finishedAt = new Date().toISOString();
     job.clearIdleTimer?.();
-    job.process.kill("SIGTERM");
+    killProcessGroup(job.process, "SIGTERM");
     this.logger.info(`Job ${jobId} canceled`, { correlationId: job.correlationId });
 
     setTimeout(() => {
-      if (!job.exited) {
-        job.process.kill("SIGKILL");
-      }
+      if (!job.exited) killProcessGroup(job.process, "SIGKILL");
+      job.cleanupGroup?.();
     }, 5000);
 
     return { canceled: true };
+  }
+
+  getRunningJobs(): { jobId: string; cli: string; status: string; pid: number | null; startedAt: string }[] {
+    const result = [];
+    for (const [id, job] of this.jobs) {
+      if (job.status === "running") {
+        result.push({
+          jobId: id, cli: job.cli, status: job.status,
+          pid: job.process.pid ?? null, startedAt: job.startedAt
+        });
+      }
+    }
+    return result;
+  }
+
+  getJobHealth(): { runningJobs: number; deadJobs: number; zombieJobs: number; jobs: JobHealth[] } {
+    const running = this.getRunningJobs();
+    const health = this.processMonitor.checkJobHealth(running);
+
+    // Clean up stale CPU samples for PIDs that are no longer running
+    const activePids = new Set(running.map(j => j.pid).filter((p): p is number => p !== null));
+    this.processMonitor.cleanupSamples(activePids);
+
+    return {
+      runningJobs: running.length,
+      deadJobs: health.filter(h => h.isDead).length,
+      zombieJobs: health.filter(h => h.isZombie).length,
+      jobs: health
+    };
+  }
+
+  getJobOutputFormat(jobId: string): string | undefined {
+    return this.jobs.get(jobId)?.outputFormat;
   }
 
   private snapshot(job: AsyncJobRecord): AsyncJobSnapshot {
@@ -270,10 +356,11 @@ export class AsyncJobManager {
         job.error = "Output exceeded maximum size (50MB)";
         job.finishedAt = new Date().toISOString();
         job.clearIdleTimer?.();
-        job.process.kill("SIGTERM");
+        killProcessGroup(job.process, "SIGTERM");
         this.logger.info(`Job ${job.id} killed due to output overflow`, { correlationId: job.correlationId });
         setTimeout(() => {
-          if (!job.exited) job.process.kill("SIGKILL");
+          if (!job.exited) killProcessGroup(job.process, "SIGKILL");
+          job.cleanupGroup?.();
         }, 5000);
       }
       return;
