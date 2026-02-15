@@ -2,6 +2,8 @@ import { createHash, randomUUID } from "crypto";
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "fs";
 import { homedir } from "os";
 import { dirname, join } from "path";
+import type { Logger } from "./logger.js";
+import { noopLogger } from "./logger.js";
 
 export type ApprovalPolicy = "strict" | "balanced" | "permissive";
 export type ApprovalStrategy = "legacy" | "mcp_managed";
@@ -68,7 +70,7 @@ function parseLogLine(line: string): ApprovalRecord | null {
 export class ApprovalManager {
   private readonly logPath: string;
 
-  constructor(customPath?: string) {
+  constructor(customPath?: string, private logger: Logger = noopLogger) {
     this.logPath = customPath || join(homedir(), ".llm-cli-gateway", "approvals.jsonl");
     const dir = dirname(this.logPath);
     mkdirSync(dir, { recursive: true });
@@ -142,6 +144,10 @@ export class ApprovalManager {
     };
 
     appendFileSync(this.logPath, `${JSON.stringify(record)}\n`, { encoding: "utf-8", mode: 0o600 });
+    this.logger.info(`Approval decision: ${status} (score=${score}, policy=${policy})`, {
+      cli: request.cli,
+      operation: request.operation
+    });
     return record;
   }
 
@@ -159,6 +165,8 @@ export class ApprovalManager {
       .filter((row): row is ApprovalRecord => row !== null);
 
     const filtered = cli ? rows.filter(row => row.cli === cli) : rows;
-    return filtered.slice(Math.max(0, filtered.length - limit)).reverse();
+    const result = filtered.slice(Math.max(0, filtered.length - limit)).reverse();
+    this.logger.debug(`Approval list retrieved: ${result.length} records`, { cli, limit });
+    return result;
   }
 }

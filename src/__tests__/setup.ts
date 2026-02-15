@@ -1,7 +1,7 @@
 import { Pool } from "pg";
 import { Redis } from "ioredis";
 import { beforeAll, afterAll, beforeEach } from "vitest";
-import type { Logger } from "../session-manager-pg.js";
+import type { Logger } from "../logger.js";
 
 // Test database configuration
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL || "postgresql://test:test@localhost:5433/llm_gateway_test";

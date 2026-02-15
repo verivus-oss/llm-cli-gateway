@@ -14,8 +14,20 @@ import { DatabaseConnection } from "./db.js";
 import { checkHealth } from "./health.js";
 import { getCliInfo, resolveModelAlias } from "./model-registry.js";
 import { AsyncJobManager } from "./async-job-manager.js";
-import { ApprovalManager, ApprovalPolicy } from "./approval-manager.js";
+import { ApprovalManager, ApprovalPolicy, ApprovalRecord } from "./approval-manager.js";
 import { buildClaudeMcpConfig, ClaudeMcpConfigResult, ClaudeMcpServerName } from "./claude-mcp-config.js";
+
+type ExtendedToolResponse = {
+  content: { type: "text"; text: string }[];
+  isError?: boolean;
+  sessionId?: string;
+  approval?: ApprovalRecord | null;
+  mcpServers?: {
+    requested: ClaudeMcpServerName[];
+    enabled?: ClaudeMcpServerName[];
+    missing?: ClaudeMcpServerName[];
+  };
+};
 
 // Simple logger that writes to stderr (stdout is used for MCP protocol)
 const logger = {
@@ -51,8 +63,8 @@ let sessionManager: ISessionManager;
 let db: DatabaseConnection | null = null;
 const performanceMetrics = new PerformanceMetrics();
 let resourceProvider: ResourceProvider;
-const asyncJobManager = new AsyncJobManager();
-const approvalManager = new ApprovalManager();
+const asyncJobManager = new AsyncJobManager(logger);
+const approvalManager = new ApprovalManager(undefined, logger);
 const MCP_SERVER_ENUM = z.enum(["sqry", "exa", "ref_tools"]);
 
 // Helper function for standardized error responses
@@ -299,6 +311,178 @@ server.registerResource(
 );
 
 //──────────────────────────────────────────────────────────────────────────────
+// DRY Helpers: per-CLI request preparation + response construction
+//──────────────────────────────────────────────────────────────────────────────
+
+interface CliRequestPrep {
+  corrId: string;
+  effectivePrompt: string;
+  resolvedModel: string | undefined;
+  requestedMcpServers: ClaudeMcpServerName[];
+  mcpConfig?: ClaudeMcpConfigResult;
+  approvalDecision: ApprovalRecord | null;
+  args: string[];
+}
+
+function prepareClaudeRequest(params: {
+  prompt: string;
+  model?: string;
+  outputFormat: "text" | "json";
+  allowedTools?: string[];
+  disallowedTools?: string[];
+  dangerouslySkipPermissions: boolean;
+  approvalStrategy: "legacy" | "mcp_managed";
+  approvalPolicy?: string;
+  mcpServers?: ClaudeMcpServerName[];
+  strictMcpConfig: boolean;
+  correlationId?: string;
+  optimizePrompt: boolean;
+  operation: string;
+}): CliRequestPrep | ExtendedToolResponse {
+  const corrId = params.correlationId || randomUUID();
+  const cliInfo = getCliInfo();
+  const resolvedModel = resolveModelAlias("claude", params.model, cliInfo);
+
+  let effectivePrompt = params.prompt;
+  if (params.optimizePrompt) {
+    const optimized = optimizePromptText(effectivePrompt);
+    logOptimizationTokens("prompt", corrId, effectivePrompt, optimized);
+    effectivePrompt = optimized;
+  }
+
+  const requestedMcpServers = normalizeMcpServers(params.mcpServers);
+  const mcpConfigResolution = resolveClaudeMcpConfig(params.operation, corrId, requestedMcpServers, params.strictMcpConfig);
+  if ("errorResponse" in mcpConfigResolution) {
+    return mcpConfigResolution.errorResponse;
+  }
+  const mcpConfig = mcpConfigResolution.config;
+
+  let approvalDecision: ApprovalRecord | null = null;
+  if (params.approvalStrategy === "mcp_managed") {
+    approvalDecision = approvalManager.decide({
+      cli: "claude",
+      operation: params.operation,
+      prompt: effectivePrompt,
+      bypassRequested: params.dangerouslySkipPermissions,
+      fullAuto: false,
+      requestedMcpServers,
+      allowedTools: params.allowedTools,
+      disallowedTools: params.disallowedTools,
+      policy: params.approvalPolicy as ApprovalPolicy | undefined,
+      metadata: { model: resolvedModel || "default", strictMcpConfig: params.strictMcpConfig }
+    });
+    if (approvalDecision.status !== "approved") {
+      return createApprovalDeniedResponse(params.operation, approvalDecision);
+    }
+  }
+
+  const args = ["-p", effectivePrompt];
+  if (resolvedModel) args.push("--model", resolvedModel);
+  if (params.outputFormat === "json") args.push("--output-format", "json");
+  if (params.allowedTools && params.allowedTools.length > 0) {
+    args.push("--allowed-tools", ...params.allowedTools);
+  }
+  if (params.disallowedTools && params.disallowedTools.length > 0) {
+    args.push("--disallowed-tools", ...params.disallowedTools);
+  }
+  if (params.approvalStrategy === "mcp_managed") {
+    args.push("--permission-mode", "bypassPermissions");
+  } else if (params.dangerouslySkipPermissions) {
+    args.push("--permission-mode", "bypassPermissions");
+  }
+  if (params.strictMcpConfig || mcpConfig.enabled.length > 0) {
+    args.push("--mcp-config", mcpConfig.path);
+    if (params.strictMcpConfig) {
+      args.push("--strict-mcp-config");
+    }
+  }
+
+  return { corrId, effectivePrompt, resolvedModel, requestedMcpServers, mcpConfig, approvalDecision, args };
+}
+
+function prepareCodexRequest(params: {
+  prompt: string;
+  model?: string;
+  fullAuto: boolean;
+  dangerouslyBypassApprovalsAndSandbox: boolean;
+  approvalStrategy: "legacy" | "mcp_managed";
+  approvalPolicy?: string;
+  mcpServers?: ClaudeMcpServerName[];
+  correlationId?: string;
+  optimizePrompt: boolean;
+  operation: string;
+}): CliRequestPrep | ExtendedToolResponse {
+  const corrId = params.correlationId || randomUUID();
+  const cliInfo = getCliInfo();
+  const resolvedModel = resolveModelAlias("codex", params.model, cliInfo);
+
+  let effectivePrompt = params.prompt;
+  if (params.optimizePrompt) {
+    const optimized = optimizePromptText(effectivePrompt);
+    logOptimizationTokens("prompt", corrId, effectivePrompt, optimized);
+    effectivePrompt = optimized;
+  }
+
+  const requestedMcpServers = normalizeMcpServers(params.mcpServers);
+
+  let approvalDecision: ApprovalRecord | null = null;
+  if (params.approvalStrategy === "mcp_managed") {
+    approvalDecision = approvalManager.decide({
+      cli: "codex",
+      operation: params.operation,
+      prompt: effectivePrompt,
+      bypassRequested: params.dangerouslyBypassApprovalsAndSandbox,
+      fullAuto: params.fullAuto,
+      requestedMcpServers,
+      policy: params.approvalPolicy as ApprovalPolicy | undefined,
+      metadata: { model: resolvedModel || "default" }
+    });
+    if (approvalDecision.status !== "approved") {
+      return createApprovalDeniedResponse(params.operation, approvalDecision);
+    }
+  }
+
+  const args = ["exec"];
+  if (resolvedModel) args.push("--model", resolvedModel);
+  if (params.fullAuto) args.push("--full-auto");
+  if (params.dangerouslyBypassApprovalsAndSandbox) {
+    args.push("--dangerously-bypass-approvals-and-sandbox");
+  }
+  args.push("--skip-git-repo-check", effectivePrompt);
+
+  return { corrId, effectivePrompt, resolvedModel, requestedMcpServers, approvalDecision, args };
+}
+
+function buildCliResponse(
+  stdout: string,
+  optimizeResponse: boolean,
+  corrId: string,
+  sessionId: string | undefined,
+  prep: CliRequestPrep
+): ExtendedToolResponse {
+  let finalStdout = stdout;
+  if (optimizeResponse) {
+    const optimized = optimizeResponseText(finalStdout);
+    logOptimizationTokens("response", corrId, finalStdout, optimized);
+    finalStdout = optimized;
+  }
+
+  const response: ExtendedToolResponse = {
+    content: [{ type: "text" as const, text: finalStdout }],
+    mcpServers: prep.mcpConfig
+      ? { requested: prep.requestedMcpServers, enabled: prep.mcpConfig.enabled, missing: prep.mcpConfig.missing }
+      : { requested: prep.requestedMcpServers }
+  };
+  if (sessionId) {
+    response.sessionId = sessionId;
+  }
+  if (prep.approvalDecision) {
+    response.approval = prep.approvalDecision;
+  }
+  return response;
+}
+
+//──────────────────────────────────────────────────────────────────────────────
 // Claude Code Tool
 //──────────────────────────────────────────────────────────────────────────────
 
@@ -324,89 +508,31 @@ server.tool(
   },
   async ({ prompt, model, outputFormat, sessionId, continueSession, createNewSession, allowedTools, disallowedTools, dangerouslySkipPermissions, approvalStrategy, approvalPolicy, mcpServers, strictMcpConfig, correlationId, optimizePrompt, optimizeResponse }) => {
     const startTime = Date.now();
-    const corrId = correlationId || randomUUID();
+    const prep = prepareClaudeRequest({
+      prompt, model, outputFormat, allowedTools, disallowedTools, dangerouslySkipPermissions,
+      approvalStrategy, approvalPolicy, mcpServers: mcpServers as ClaudeMcpServerName[],
+      strictMcpConfig, correlationId, optimizePrompt, operation: "claude_request"
+    });
+    if (!("args" in prep)) return prep;
+
+    const { corrId, args } = prep;
     let durationMs = 0;
     let wasSuccessful = false;
-    let effectivePrompt = prompt;
-    const cliInfo = getCliInfo();
-    const resolvedModel = resolveModelAlias("claude", model, cliInfo);
-    logger.info(`[${corrId}] claude_request invoked with model=${resolvedModel || "default"}, prompt length=${prompt.length}, sessionId=${sessionId}, dangerouslySkipPermissions=${dangerouslySkipPermissions}`);
-
-    if (optimizePrompt) {
-      const optimizedPrompt = optimizePromptText(effectivePrompt);
-      logOptimizationTokens("prompt", corrId, effectivePrompt, optimizedPrompt);
-      effectivePrompt = optimizedPrompt;
-    }
-
-    const requestedMcpServers = normalizeMcpServers(mcpServers as ClaudeMcpServerName[]);
-    const mcpConfigResolution = resolveClaudeMcpConfig("claude_request", corrId, requestedMcpServers, strictMcpConfig);
-    if ("errorResponse" in mcpConfigResolution) {
-      return mcpConfigResolution.errorResponse;
-    }
-    const mcpConfig = mcpConfigResolution.config;
-
-    let approvalDecision: ReturnType<ApprovalManager["decide"]> | null = null;
-    if (approvalStrategy === "mcp_managed") {
-      approvalDecision = approvalManager.decide({
-        cli: "claude",
-        operation: "claude_request",
-        prompt: effectivePrompt,
-        bypassRequested: dangerouslySkipPermissions,
-        fullAuto: false,
-        requestedMcpServers: requestedMcpServers,
-        allowedTools,
-        disallowedTools,
-        policy: approvalPolicy as ApprovalPolicy | undefined,
-        metadata: {
-          model: resolvedModel || "default",
-          strictMcpConfig
-        }
-      });
-      if (approvalDecision.status !== "approved") {
-        return createApprovalDeniedResponse("claude_request", approvalDecision);
-      }
-    }
+    logger.info(`[${corrId}] claude_request invoked with model=${prep.resolvedModel || "default"}, prompt length=${prompt.length}, sessionId=${sessionId}`);
 
     try {
-      const args = ["-p", effectivePrompt];
-      if (resolvedModel) args.push("--model", resolvedModel);
-      if (outputFormat === "json") args.push("--output-format", "json");
-
-      // Tool permissions
-      if (allowedTools && allowedTools.length > 0) {
-        args.push("--allowed-tools", ...allowedTools);
-      }
-      if (disallowedTools && disallowedTools.length > 0) {
-        args.push("--disallowed-tools", ...disallowedTools);
-      }
-      if (approvalStrategy === "mcp_managed") {
-        args.push("--permission-mode", "bypassPermissions");
-      } else if (dangerouslySkipPermissions) {
-        args.push("--permission-mode", "bypassPermissions");
-      }
-
-      if (strictMcpConfig || mcpConfig.enabled.length > 0) {
-        args.push("--mcp-config", mcpConfig.path);
-        if (strictMcpConfig) {
-          args.push("--strict-mcp-config");
-        }
-      }
-
       // Session management
       let effectiveSessionId = sessionId;
       let useContinue = continueSession;
       const activeSession = await sessionManager.getActiveSession("claude");
 
       if (!createNewSession && !continueSession && !sessionId && activeSession) {
-        // Prefer --continue for active sessions to avoid CLI-side session-id lock collisions.
         effectiveSessionId = activeSession.id;
         useContinue = true;
       }
-
       if (!useContinue && effectiveSessionId && activeSession?.id === effectiveSessionId) {
         useContinue = true;
       }
-
       if (useContinue) {
         args.push("--continue");
       } else if (effectiveSessionId) {
@@ -423,13 +549,6 @@ server.tool(
       }
       wasSuccessful = true;
 
-      let finalStdout = stdout;
-      if (optimizeResponse) {
-        const optimizedResponse = optimizeResponseText(finalStdout);
-        logOptimizationTokens("response", corrId, finalStdout, optimizedResponse);
-        finalStdout = optimizedResponse;
-      }
-
       // If we used a session ID and it's not tracked yet, create a session record
       if (effectiveSessionId) {
         const existingSession = await sessionManager.getSession(effectiveSessionId);
@@ -438,23 +557,8 @@ server.tool(
         }
       }
 
-      logger.info(`[${corrId}] claude_request completed successfully in ${durationMs}ms, response length=${finalStdout.length}`);
-      const response = { content: [{ type: "text" as const, text: finalStdout }] };
-
-      // Include session info in response if using a session
-      if (effectiveSessionId) {
-        (response as any).sessionId = effectiveSessionId;
-      }
-      if (approvalDecision) {
-        (response as any).approval = approvalDecision;
-      }
-      (response as any).mcpServers = {
-        requested: requestedMcpServers,
-        enabled: mcpConfig.enabled,
-        missing: mcpConfig.missing
-      };
-
-      return response;
+      logger.info(`[${corrId}] claude_request completed successfully in ${durationMs}ms`);
+      return buildCliResponse(stdout, optimizeResponse, corrId, effectiveSessionId, prep);
     } catch (error) {
       const elapsedMs = Math.max(0, Date.now() - startTime);
       logger.info(`[${corrId}] claude_request threw exception after ${elapsedMs}ms`);
@@ -488,49 +592,19 @@ server.tool(
   },
   async ({ prompt, model, fullAuto, dangerouslyBypassApprovalsAndSandbox, approvalStrategy, approvalPolicy, mcpServers, sessionId, createNewSession, correlationId, optimizePrompt, optimizeResponse }) => {
     const startTime = Date.now();
-    const corrId = correlationId || randomUUID();
+    const prep = prepareCodexRequest({
+      prompt, model, fullAuto, dangerouslyBypassApprovalsAndSandbox,
+      approvalStrategy, approvalPolicy, mcpServers: mcpServers as ClaudeMcpServerName[],
+      correlationId, optimizePrompt, operation: "codex_request"
+    });
+    if (!("args" in prep)) return prep;
+
+    const { corrId, args } = prep;
     let durationMs = 0;
     let wasSuccessful = false;
-    let effectivePrompt = prompt;
-    const cliInfo = getCliInfo();
-    const resolvedModel = resolveModelAlias("codex", model, cliInfo);
-    logger.info(`[${corrId}] codex_request invoked with model=${resolvedModel || "default"}, fullAuto=${fullAuto}, prompt length=${prompt.length}, sessionId=${sessionId}`);
-
-    if (optimizePrompt) {
-      const optimizedPrompt = optimizePromptText(effectivePrompt);
-      logOptimizationTokens("prompt", corrId, effectivePrompt, optimizedPrompt);
-      effectivePrompt = optimizedPrompt;
-    }
-
-    const requestedMcpServers = normalizeMcpServers(mcpServers as ClaudeMcpServerName[]);
-    let approvalDecision: ReturnType<ApprovalManager["decide"]> | null = null;
-    if (approvalStrategy === "mcp_managed") {
-      approvalDecision = approvalManager.decide({
-        cli: "codex",
-        operation: "codex_request",
-        prompt: effectivePrompt,
-        bypassRequested: dangerouslyBypassApprovalsAndSandbox,
-        fullAuto,
-        requestedMcpServers: requestedMcpServers,
-        policy: approvalPolicy as ApprovalPolicy | undefined,
-        metadata: {
-          model: resolvedModel || "default"
-        }
-      });
-      if (approvalDecision.status !== "approved") {
-        return createApprovalDeniedResponse("codex_request", approvalDecision);
-      }
-    }
+    logger.info(`[${corrId}] codex_request invoked with model=${prep.resolvedModel || "default"}, fullAuto=${fullAuto}, prompt length=${prompt.length}`);
 
     try {
-      const args = ["exec"];
-      if (resolvedModel) args.push("--model", resolvedModel);
-      if (fullAuto) args.push("--full-auto");
-      if (dangerouslyBypassApprovalsAndSandbox) {
-        args.push("--dangerously-bypass-approvals-and-sandbox");
-      }
-      args.push("--skip-git-repo-check", effectivePrompt);
-
       const { stdout, stderr, code } = await executeCli("codex", args);
       durationMs = Math.max(0, Date.now() - startTime);
 
@@ -540,13 +614,6 @@ server.tool(
       }
       wasSuccessful = true;
 
-      let finalStdout = stdout;
-      if (optimizeResponse) {
-        const optimizedResponse = optimizeResponseText(finalStdout);
-        logOptimizationTokens("response", corrId, finalStdout, optimizedResponse);
-        finalStdout = optimizedResponse;
-      }
-
       // Track session usage
       let effectiveSessionId = sessionId;
       if (!createNewSession && !sessionId) {
@@ -554,7 +621,6 @@ server.tool(
         if (activeSession) {
           effectiveSessionId = activeSession.id;
         } else {
-          // Create a new session for tracking
           const newSession = await sessionManager.createSession("codex", "Codex Session");
           effectiveSessionId = newSession.id;
         }
@@ -565,20 +631,8 @@ server.tool(
         effectiveSessionId = newSession.id;
       }
 
-      logger.info(`[${corrId}] codex_request completed successfully in ${durationMs}ms, response length=${finalStdout.length}`);
-      const response = { content: [{ type: "text" as const, text: finalStdout }] };
-
-      if (effectiveSessionId) {
-        (response as any).sessionId = effectiveSessionId;
-      }
-      if (approvalDecision) {
-        (response as any).approval = approvalDecision;
-      }
-      (response as any).mcpServers = {
-        requested: requestedMcpServers
-      };
-
-      return response;
+      logger.info(`[${corrId}] codex_request completed successfully in ${durationMs}ms`);
+      return buildCliResponse(stdout, optimizeResponse, corrId, effectiveSessionId, prep);
     } catch (error) {
       const elapsedMs = Math.max(0, Date.now() - startTime);
       logger.info(`[${corrId}] codex_request threw exception after ${elapsedMs}ms`);
@@ -620,16 +674,16 @@ server.tool(
     let effectivePrompt = prompt;
     const cliInfo = getCliInfo();
     const resolvedModel = resolveModelAlias("gemini", model, cliInfo);
-    logger.info(`[${corrId}] gemini_request invoked with model=${resolvedModel || "default"}, approvalMode=${approvalMode}, prompt length=${prompt.length}, sessionId=${sessionId}`);
+    logger.info(`[${corrId}] gemini_request invoked with model=${resolvedModel || "default"}, approvalMode=${approvalMode}, prompt length=${prompt.length}`);
 
     if (optimizePrompt) {
-      const optimizedPrompt = optimizePromptText(effectivePrompt);
-      logOptimizationTokens("prompt", corrId, effectivePrompt, optimizedPrompt);
-      effectivePrompt = optimizedPrompt;
+      const optimized = optimizePromptText(effectivePrompt);
+      logOptimizationTokens("prompt", corrId, effectivePrompt, optimized);
+      effectivePrompt = optimized;
     }
 
     const requestedMcpServers = normalizeMcpServers(mcpServers as ClaudeMcpServerName[]);
-    let approvalDecision: ReturnType<ApprovalManager["decide"]> | null = null;
+    let approvalDecision: ApprovalRecord | null = null;
     if (approvalStrategy === "mcp_managed") {
       approvalDecision = approvalManager.decide({
         cli: "gemini",
@@ -637,23 +691,26 @@ server.tool(
         prompt: effectivePrompt,
         bypassRequested: approvalMode === "yolo",
         fullAuto: false,
-        requestedMcpServers: requestedMcpServers,
+        requestedMcpServers,
         allowedTools,
         policy: approvalPolicy as ApprovalPolicy | undefined,
-        metadata: {
-          model: resolvedModel || "default"
-        }
+        metadata: { model: resolvedModel || "default" }
       });
       if (approvalDecision.status !== "approved") {
         return createApprovalDeniedResponse("gemini_request", approvalDecision);
       }
     }
 
+    // Build a lightweight prep for buildCliResponse
+    const geminiPrep: CliRequestPrep = {
+      corrId, effectivePrompt, resolvedModel, requestedMcpServers, approvalDecision,
+      args: [] // not used by buildCliResponse
+    };
+
     try {
       const args = [effectivePrompt];
       if (resolvedModel) args.push("--model", resolvedModel);
 
-      // Tool approval settings
       const effectiveApprovalMode = approvalStrategy === "mcp_managed" ? "yolo" : approvalMode;
       if (effectiveApprovalMode) args.push("--approval-mode", effectiveApprovalMode);
       if (allowedTools && allowedTools.length > 0) {
@@ -686,13 +743,6 @@ server.tool(
       }
       wasSuccessful = true;
 
-      let finalStdout = stdout;
-      if (optimizeResponse) {
-        const optimizedResponse = optimizeResponseText(finalStdout);
-        logOptimizationTokens("response", corrId, finalStdout, optimizedResponse);
-        finalStdout = optimizedResponse;
-      }
-
       // Track session
       if (!effectiveSessionId && !createNewSession) {
         const newSession = await sessionManager.createSession("gemini", "Gemini Session");
@@ -704,20 +754,8 @@ server.tool(
         }
       }
 
-      logger.info(`[${corrId}] gemini_request completed successfully in ${durationMs}ms, response length=${finalStdout.length}`);
-      const response = { content: [{ type: "text" as const, text: finalStdout }] };
-
-      if (effectiveSessionId) {
-        (response as any).sessionId = effectiveSessionId;
-      }
-      if (approvalDecision) {
-        (response as any).approval = approvalDecision;
-      }
-      (response as any).mcpServers = {
-        requested: requestedMcpServers
-      };
-
-      return response;
+      logger.info(`[${corrId}] gemini_request completed successfully in ${durationMs}ms`);
+      return buildCliResponse(stdout, optimizeResponse, corrId, effectiveSessionId, geminiPrep);
     } catch (error) {
       const elapsedMs = Math.max(0, Date.now() - startTime);
       logger.info(`[${corrId}] gemini_request threw exception after ${elapsedMs}ms`);
@@ -753,68 +791,17 @@ server.tool(
     optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution")
   },
   async ({ prompt, model, outputFormat, sessionId, continueSession, createNewSession, allowedTools, disallowedTools, dangerouslySkipPermissions, approvalStrategy, approvalPolicy, mcpServers, strictMcpConfig, correlationId, optimizePrompt }) => {
-    const corrId = correlationId || randomUUID();
-    let effectivePrompt = prompt;
-    const cliInfo = getCliInfo();
-    const resolvedModel = resolveModelAlias("claude", model, cliInfo);
+    const prep = prepareClaudeRequest({
+      prompt, model, outputFormat, allowedTools, disallowedTools, dangerouslySkipPermissions,
+      approvalStrategy, approvalPolicy, mcpServers: mcpServers as ClaudeMcpServerName[],
+      strictMcpConfig, correlationId, optimizePrompt, operation: "claude_request_async"
+    });
+    if (!("args" in prep)) return prep;
 
-    if (optimizePrompt) {
-      const optimizedPrompt = optimizePromptText(effectivePrompt);
-      logOptimizationTokens("prompt", corrId, effectivePrompt, optimizedPrompt);
-      effectivePrompt = optimizedPrompt;
-    }
-
-    const requestedMcpServers = normalizeMcpServers(mcpServers as ClaudeMcpServerName[]);
-    const mcpConfigResolution = resolveClaudeMcpConfig("claude_request_async", corrId, requestedMcpServers, strictMcpConfig);
-    if ("errorResponse" in mcpConfigResolution) {
-      return mcpConfigResolution.errorResponse;
-    }
-    const mcpConfig = mcpConfigResolution.config;
-    let approvalDecision: ReturnType<ApprovalManager["decide"]> | null = null;
-    if (approvalStrategy === "mcp_managed") {
-      approvalDecision = approvalManager.decide({
-        cli: "claude",
-        operation: "claude_request_async",
-        prompt: effectivePrompt,
-        bypassRequested: dangerouslySkipPermissions,
-        fullAuto: false,
-        requestedMcpServers,
-        allowedTools,
-        disallowedTools,
-        policy: approvalPolicy as ApprovalPolicy | undefined,
-        metadata: {
-          model: resolvedModel || "default",
-          strictMcpConfig
-        }
-      });
-      if (approvalDecision.status !== "approved") {
-        return createApprovalDeniedResponse("claude_request_async", approvalDecision);
-      }
-    }
+    const { corrId, args, requestedMcpServers, mcpConfig, approvalDecision } = prep;
 
     try {
-      const args = ["-p", effectivePrompt];
-      if (resolvedModel) args.push("--model", resolvedModel);
-      if (outputFormat === "json") args.push("--output-format", "json");
-
-      if (allowedTools && allowedTools.length > 0) {
-        args.push("--allowed-tools", ...allowedTools);
-      }
-      if (disallowedTools && disallowedTools.length > 0) {
-        args.push("--disallowed-tools", ...disallowedTools);
-      }
-      if (approvalStrategy === "mcp_managed") {
-        args.push("--permission-mode", "bypassPermissions");
-      } else if (dangerouslySkipPermissions) {
-        args.push("--permission-mode", "bypassPermissions");
-      }
-      if (strictMcpConfig || mcpConfig.enabled.length > 0) {
-        args.push("--mcp-config", mcpConfig.path);
-        if (strictMcpConfig) {
-          args.push("--strict-mcp-config");
-        }
-      }
-
+      // Session management (before job start for async)
       let effectiveSessionId = sessionId;
       let useContinue = continueSession;
       const activeSession = await sessionManager.getActiveSession("claude");
@@ -823,11 +810,9 @@ server.tool(
         effectiveSessionId = activeSession.id;
         useContinue = true;
       }
-
       if (!useContinue && effectiveSessionId && activeSession?.id === effectiveSessionId) {
         useContinue = true;
       }
-
       if (useContinue) {
         args.push("--continue");
       } else if (effectiveSessionId) {
@@ -847,7 +832,7 @@ server.tool(
 
       return {
         content: [{
-          type: "text",
+          type: "text" as const,
           text: JSON.stringify({
             success: true,
             job,
@@ -855,8 +840,8 @@ server.tool(
             approval: approvalDecision,
             mcpServers: {
               requested: requestedMcpServers,
-              enabled: mcpConfig.enabled,
-              missing: mcpConfig.missing
+              enabled: mcpConfig?.enabled,
+              missing: mcpConfig?.missing
             }
           }, null, 2)
         }]
@@ -883,48 +868,19 @@ server.tool(
     optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution")
   },
   async ({ prompt, model, fullAuto, dangerouslyBypassApprovalsAndSandbox, approvalStrategy, approvalPolicy, mcpServers, sessionId, createNewSession, correlationId, optimizePrompt }) => {
-    const corrId = correlationId || randomUUID();
-    let effectivePrompt = prompt;
-    const cliInfo = getCliInfo();
-    const resolvedModel = resolveModelAlias("codex", model, cliInfo);
+    const prep = prepareCodexRequest({
+      prompt, model, fullAuto, dangerouslyBypassApprovalsAndSandbox,
+      approvalStrategy, approvalPolicy, mcpServers: mcpServers as ClaudeMcpServerName[],
+      correlationId, optimizePrompt, operation: "codex_request_async"
+    });
+    if (!("args" in prep)) return prep;
 
-    if (optimizePrompt) {
-      const optimizedPrompt = optimizePromptText(effectivePrompt);
-      logOptimizationTokens("prompt", corrId, effectivePrompt, optimizedPrompt);
-      effectivePrompt = optimizedPrompt;
-    }
-
-    const requestedMcpServers = normalizeMcpServers(mcpServers as ClaudeMcpServerName[]);
-    let approvalDecision: ReturnType<ApprovalManager["decide"]> | null = null;
-    if (approvalStrategy === "mcp_managed") {
-      approvalDecision = approvalManager.decide({
-        cli: "codex",
-        operation: "codex_request_async",
-        prompt: effectivePrompt,
-        bypassRequested: dangerouslyBypassApprovalsAndSandbox,
-        fullAuto,
-        requestedMcpServers,
-        policy: approvalPolicy as ApprovalPolicy | undefined,
-        metadata: {
-          model: resolvedModel || "default"
-        }
-      });
-      if (approvalDecision.status !== "approved") {
-        return createApprovalDeniedResponse("codex_request_async", approvalDecision);
-      }
-    }
+    const { corrId, args, requestedMcpServers, approvalDecision } = prep;
 
     try {
-      const args = ["exec"];
-      if (resolvedModel) args.push("--model", resolvedModel);
-      if (fullAuto) args.push("--full-auto");
-      if (dangerouslyBypassApprovalsAndSandbox) {
-        args.push("--dangerously-bypass-approvals-and-sandbox");
-      }
-      args.push("--skip-git-repo-check", effectivePrompt);
-
       const job = asyncJobManager.startJob("codex", args, corrId);
 
+      // Session management (after job start for codex async)
       let effectiveSessionId = sessionId;
       if (!createNewSession && !sessionId) {
         const activeSession = await sessionManager.getActiveSession("codex");
@@ -945,15 +901,13 @@ server.tool(
 
       return {
         content: [{
-          type: "text",
+          type: "text" as const,
           text: JSON.stringify({
             success: true,
             job,
             sessionId: effectiveSessionId || null,
             approval: approvalDecision,
-            mcpServers: {
-              requested: requestedMcpServers
-            }
+            mcpServers: { requested: requestedMcpServers }
           }, null, 2)
         }]
       };
@@ -1354,7 +1308,7 @@ async function initializeSessionManager(): Promise<void> {
   if (config?.database && config?.redis) {
     logger.info("Initializing PostgreSQL + Redis session manager");
     const { createDatabaseConnection } = await import("./db.js");
-    db = await createDatabaseConnection(config);
+    db = await createDatabaseConnection(config, logger);
     // Pass existing db and logger to avoid creating duplicate connections
     sessionManager = await createSessionManager(config, db, logger);
     logger.info("PostgreSQL session manager initialized");
