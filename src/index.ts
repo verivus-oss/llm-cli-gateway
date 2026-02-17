@@ -16,7 +16,7 @@ import { checkHealth } from "./health.js";
 import { getCliInfo, resolveModelAlias } from "./model-registry.js";
 import { AsyncJobManager } from "./async-job-manager.js";
 import { ApprovalManager, ApprovalPolicy, ApprovalRecord } from "./approval-manager.js";
-import { buildClaudeMcpConfig, ClaudeMcpConfigResult, ClaudeMcpServerName } from "./claude-mcp-config.js";
+import { buildClaudeMcpConfig, ClaudeMcpConfigResult, ClaudeMcpServerName, CLAUDE_MCP_SERVER_NAMES } from "./claude-mcp-config.js";
 import { resolveSessionResumeArgs, GATEWAY_SESSION_PREFIX } from "./request-helpers.js";
 
 type ExtendedToolResponse = {
@@ -70,7 +70,7 @@ const asyncJobManager = new AsyncJobManager(logger, (cli, durationMs, success) =
   performanceMetrics.recordRequest(cli, durationMs, success);
 });
 const approvalManager = new ApprovalManager(undefined, logger);
-const MCP_SERVER_ENUM = z.enum(["sqry", "exa", "ref_tools"]);
+const MCP_SERVER_ENUM = z.enum(CLAUDE_MCP_SERVER_NAMES);
 
 // Per-CLI idle timeouts: kill process if no stdout/stderr activity for this duration.
 // Claude idle timeout only applies in stream-json mode (with --include-partial-messages).
@@ -758,7 +758,7 @@ export async function handleCodexRequestAsync(
     prompt: params.prompt, model: params.model, fullAuto: params.fullAuto,
     dangerouslyBypassApprovalsAndSandbox: params.dangerouslyBypassApprovalsAndSandbox,
     approvalStrategy: params.approvalStrategy, approvalPolicy: params.approvalPolicy,
-    mcpServers: params.mcpServers as ClaudeMcpServerName[],
+    mcpServers: params.mcpServers,
     correlationId: params.correlationId, optimizePrompt: params.optimizePrompt,
     operation: "codex_request_async"
   });
@@ -834,7 +834,7 @@ server.tool(
     const startTime = Date.now();
     const prep = prepareClaudeRequest({
       prompt, model, outputFormat, allowedTools, disallowedTools, dangerouslySkipPermissions,
-      approvalStrategy, approvalPolicy, mcpServers: mcpServers as ClaudeMcpServerName[],
+      approvalStrategy, approvalPolicy, mcpServers,
       strictMcpConfig, correlationId, optimizePrompt, operation: "claude_request"
     });
     if (!("args" in prep)) return prep;
@@ -932,7 +932,7 @@ server.tool(
     const startTime = Date.now();
     const prep = prepareCodexRequest({
       prompt, model, fullAuto, dangerouslyBypassApprovalsAndSandbox,
-      approvalStrategy, approvalPolicy, mcpServers: mcpServers as ClaudeMcpServerName[],
+      approvalStrategy, approvalPolicy, mcpServers,
       correlationId, optimizePrompt, operation: "codex_request"
     });
     if (!("args" in prep)) return prep;
@@ -1008,7 +1008,7 @@ server.tool(
   async ({ prompt, model, sessionId, resumeLatest, createNewSession, approvalMode, approvalStrategy, approvalPolicy, mcpServers, allowedTools, includeDirs, correlationId, optimizePrompt, optimizeResponse, idleTimeoutMs }) => {
     return handleGeminiRequest(
       { sessionManager, logger },
-      { prompt, model, sessionId, resumeLatest, createNewSession, approvalMode, approvalStrategy, approvalPolicy, mcpServers: mcpServers as ClaudeMcpServerName[], allowedTools, includeDirs, correlationId, optimizePrompt, optimizeResponse, idleTimeoutMs }
+      { prompt, model, sessionId, resumeLatest, createNewSession, approvalMode, approvalStrategy, approvalPolicy, mcpServers, allowedTools, includeDirs, correlationId, optimizePrompt, optimizeResponse, idleTimeoutMs }
     );
   }
 );
@@ -1040,7 +1040,7 @@ server.tool(
   async ({ prompt, model, outputFormat, sessionId, continueSession, createNewSession, allowedTools, disallowedTools, dangerouslySkipPermissions, approvalStrategy, approvalPolicy, mcpServers, strictMcpConfig, correlationId, optimizePrompt, idleTimeoutMs }) => {
     const prep = prepareClaudeRequest({
       prompt, model, outputFormat, allowedTools, disallowedTools, dangerouslySkipPermissions,
-      approvalStrategy, approvalPolicy, mcpServers: mcpServers as ClaudeMcpServerName[],
+      approvalStrategy, approvalPolicy, mcpServers,
       strictMcpConfig, correlationId, optimizePrompt, operation: "claude_request_async"
     });
     if (!("args" in prep)) return prep;
@@ -1122,7 +1122,7 @@ server.tool(
   async ({ prompt, model, fullAuto, dangerouslyBypassApprovalsAndSandbox, approvalStrategy, approvalPolicy, mcpServers, sessionId, createNewSession, correlationId, optimizePrompt, idleTimeoutMs }) => {
     return handleCodexRequestAsync(
       { sessionManager, asyncJobManager, logger },
-      { prompt, model, fullAuto, dangerouslyBypassApprovalsAndSandbox, approvalStrategy, approvalPolicy, mcpServers: mcpServers as ClaudeMcpServerName[], sessionId, createNewSession, correlationId, optimizePrompt, idleTimeoutMs }
+      { prompt, model, fullAuto, dangerouslyBypassApprovalsAndSandbox, approvalStrategy, approvalPolicy, mcpServers, sessionId, createNewSession, correlationId, optimizePrompt, idleTimeoutMs }
     );
   }
 );
@@ -1148,7 +1148,7 @@ server.tool(
   async ({ prompt, model, sessionId, resumeLatest, createNewSession, approvalMode, approvalStrategy, approvalPolicy, mcpServers, allowedTools, includeDirs, correlationId, optimizePrompt, idleTimeoutMs }) => {
     return handleGeminiRequestAsync(
       { sessionManager, asyncJobManager, logger },
-      { prompt, model, sessionId, resumeLatest, createNewSession, approvalMode, approvalStrategy, approvalPolicy, mcpServers: mcpServers as ClaudeMcpServerName[], allowedTools, includeDirs, correlationId, optimizePrompt, idleTimeoutMs }
+      { prompt, model, sessionId, resumeLatest, createNewSession, approvalMode, approvalStrategy, approvalPolicy, mcpServers, allowedTools, includeDirs, correlationId, optimizePrompt, idleTimeoutMs }
     );
   }
 );

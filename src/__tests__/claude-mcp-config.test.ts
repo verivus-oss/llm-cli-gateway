@@ -141,6 +141,82 @@ args = ["-y", "ref-tools-mcp"]
     expect(parsed.mcpServers.exa.args).toEqual([join(newer, "index.cjs")]);
   });
 
+  it("enables trstr without credentials (same as sqry)", () => {
+    const result = buildClaudeMcpConfig(["trstr"]);
+    expect(result.enabled).toEqual(["trstr"]);
+    expect(result.missing).toEqual([]);
+
+    const parsed = JSON.parse(readFileSync(result.path, "utf-8"));
+    expect(parsed.mcpServers.trstr.command).toContain("trstr-mcp");
+    expect(parsed.mcpServers.trstr.args).toEqual([]);
+  });
+
+  it("uses fallback path when no TOML entry for trstr", () => {
+    writeCodexConfig(`
+[mcp_servers.sqry]
+command = "/custom/sqry-mcp"
+`);
+    const result = buildClaudeMcpConfig(["trstr"]);
+    expect(result.enabled).toEqual(["trstr"]);
+
+    const parsed = JSON.parse(readFileSync(result.path, "utf-8"));
+    expect(parsed.mcpServers.trstr.command).toContain("trstr-mcp");
+  });
+
+  it("uses TOML override for trstr command", () => {
+    writeCodexConfig(`
+[mcp_servers.trstr]
+command = "/custom/trstr-mcp"
+args = ["--verbose"]
+`);
+    const result = buildClaudeMcpConfig(["trstr"]);
+    expect(result.enabled).toEqual(["trstr"]);
+
+    const parsed = JSON.parse(readFileSync(result.path, "utf-8"));
+    expect(parsed.mcpServers.trstr.command).toBe("/custom/trstr-mcp");
+    expect(parsed.mcpServers.trstr.args).toEqual(["--verbose"]);
+  });
+
+  it("uses TOML command-only override for trstr (args default to fallback)", () => {
+    writeCodexConfig(`
+[mcp_servers.trstr]
+command = "/opt/trstr-mcp"
+`);
+    const result = buildClaudeMcpConfig(["trstr"]);
+    expect(result.enabled).toEqual(["trstr"]);
+
+    const parsed = JSON.parse(readFileSync(result.path, "utf-8"));
+    expect(parsed.mcpServers.trstr.command).toBe("/opt/trstr-mcp");
+    expect(parsed.mcpServers.trstr.args).toEqual([]);
+  });
+
+  it("mixed strict mode: trstr enabled, exa missing without key", () => {
+    const result = buildClaudeMcpConfig(["trstr", "exa"]);
+    expect(result.enabled).toEqual(["trstr"]);
+    expect(result.missing).toEqual(["exa"]);
+  });
+
+  it("deduplicates trstr entries", () => {
+    const result = buildClaudeMcpConfig(["trstr", "trstr"]);
+    expect(result.enabled).toEqual(["trstr"]);
+
+    const parsed = JSON.parse(readFileSync(result.path, "utf-8"));
+    expect(Object.keys(parsed.mcpServers)).toEqual(["trstr"]);
+  });
+
+  it("trstr coexists with all default servers when credentials present", () => {
+    process.env.EXA_API_KEY = "exa-from-env";
+    process.env.REF_API_KEY = "ref-from-env";
+
+    const result = buildClaudeMcpConfig(["sqry", "exa", "ref_tools", "trstr"]);
+    expect(result.enabled).toEqual(["sqry", "exa", "ref_tools", "trstr"]);
+    expect(result.missing).toEqual([]);
+
+    const parsed = JSON.parse(readFileSync(result.path, "utf-8"));
+    expect(Object.keys(parsed.mcpServers).sort()).toEqual(["exa", "ref_tools", "sqry", "trstr"]);
+    expect(parsed.mcpServers.trstr.command).toContain("trstr-mcp");
+  });
+
   it("falls back gracefully when codex config.toml is invalid", () => {
     process.env.EXA_API_KEY = "exa-from-env";
     process.env.REF_API_KEY = "ref-from-env";

@@ -103,7 +103,7 @@ Execute a Claude Code request with optional session management.
 - `dangerouslySkipPermissions` (boolean, optional): Request CLI-side permission bypass (legacy mode only)
 - `approvalStrategy` (string, optional): `"mcp_managed"` (default) or `"legacy"`
 - `approvalPolicy` (string, optional): `"strict"`, `"balanced"`, or `"permissive"`
-- `mcpServers` (string[], optional): Claude MCP servers to expose (default: `["sqry","exa","ref_tools"]`)
+- `mcpServers` (string[], optional): Claude MCP servers to expose (default: `["sqry","exa","ref_tools"]`; `"trstr"` available as opt-in)
 - `strictMcpConfig` (boolean, optional): Require Claude to use only supplied MCP config, default: true (request fails if any requested server is unavailable)
 - `optimizePrompt` (boolean, optional): Optimize prompt for token efficiency (44% reduction), default: false
 - `optimizeResponse` (boolean, optional): Optimize response for token efficiency (37% reduction), default: false
@@ -200,7 +200,7 @@ Use this flow when analysis/runtime can exceed client tool-call limits:
 Async request tools accept the same approval strategy fields as their sync variants:
 - `approvalStrategy`: `"mcp_managed"` (default) or `"legacy"`
 - `approvalPolicy`: `"strict"|"balanced"|"permissive"` override
-- `mcpServers`: Requested MCP servers (`sqry`, `exa`, `ref_tools`)
+- `mcpServers`: Requested MCP servers (`sqry`, `exa`, `ref_tools`, `trstr`)
 - `claude_request_async` also supports `strictMcpConfig` and fails fast when requested servers are unavailable
 
 ##### `llm_job_status`

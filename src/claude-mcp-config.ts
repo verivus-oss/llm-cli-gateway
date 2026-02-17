@@ -3,7 +3,8 @@ import { homedir } from "os";
 import { dirname, join } from "path";
 import { parse as parseToml } from "toml";
 
-export type ClaudeMcpServerName = "sqry" | "exa" | "ref_tools";
+export const CLAUDE_MCP_SERVER_NAMES = ["sqry", "exa", "ref_tools", "trstr"] as const;
+export type ClaudeMcpServerName = (typeof CLAUDE_MCP_SERVER_NAMES)[number];
 
 interface ClaudeServerDef {
   command: string;
@@ -117,20 +118,25 @@ function findInstalledExaEntrypoint(): string | null {
 }
 
 function defaultServerDef(server: ClaudeMcpServerName): ClaudeServerDef {
-  if (server === "sqry") {
-    return { command: join(homedir(), ".local", "bin", "sqry-mcp"), args: [] };
-  }
-  if (server === "exa") {
-    const exaEntrypoint = findInstalledExaEntrypoint();
-    if (exaEntrypoint) {
-      return {
-        command: "node",
-        args: [exaEntrypoint]
-      };
+  switch (server) {
+    case "sqry":
+      return { command: join(homedir(), ".local", "bin", "sqry-mcp"), args: [] };
+    case "trstr":
+      return { command: join(homedir(), ".local", "bin", "trstr-mcp"), args: [] };
+    case "exa": {
+      const exaEntrypoint = findInstalledExaEntrypoint();
+      if (exaEntrypoint) {
+        return { command: "node", args: [exaEntrypoint] };
+      }
+      return { command: "npx", args: ["-y", "exa-mcp-server"] };
     }
-    return { command: "npx", args: ["-y", "exa-mcp-server"] };
+    case "ref_tools":
+      return { command: "npx", args: ["-y", "ref-tools-mcp"] };
+    default: {
+      const _exhaustive: never = server;
+      throw new Error(`Unknown MCP server: ${_exhaustive}`);
+    }
   }
-  return { command: "npx", args: ["-y", "ref-tools-mcp"] };
 }
 
 function toClaudeServerDef(server: ClaudeMcpServerName): ClaudeServerDef | null {
