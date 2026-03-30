@@ -1,11 +1,6 @@
-# LLM CLI Gateway
+# llm-cli-gateway
 
-[![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)](https://github.com/yourusername/llm-cli-gateway)
-[![Tests](https://img.shields.io/badge/tests-114%20passing-brightgreen.svg)](https://github.com/yourusername/llm-cli-gateway)
-[![Production Ready](https://img.shields.io/badge/production-ready-success.svg)](https://github.com/yourusername/llm-cli-gateway)
-[![Bug Free](https://img.shields.io/badge/bugs-0-brightgreen.svg)](https://github.com/yourusername/llm-cli-gateway)
-
-A **production-ready** Model Context Protocol (MCP) server that provides a unified gateway to multiple LLM CLI tools (Claude Code, Codex, and Gemini), with comprehensive session management, token optimization, and multi-LLM orchestration.
+A Model Context Protocol (MCP) server providing unified access to Claude Code, Codex, and Gemini CLIs with session management, retry logic, and async job orchestration.
 
 ## Features
 
@@ -24,12 +19,12 @@ A **production-ready** Model Context Protocol (MCP) server that provides a unifi
 - **Long-Running Jobs**: Non-time-bound async execution via `*_request_async` + polling tools
 
 ### Security & Quality
-- **100% Bug-Free**: All 16 bugs found through multi-LLM reviews fixed
+- **Comprehensive Testing**: 221 tests covering unit, integration, and regression scenarios
 - **Input Validation**: Zod schemas prevent injection attacks
 - **No Secret Leakage**: Generic session descriptions only (file permissions 0o600)
 - **No ReDoS**: Bounded regex patterns prevent catastrophic backtracking
 - **Type Safety**: Strict TypeScript with comprehensive error handling
-- **114 Tests**: Unit, integration, and regression tests with real CLI execution
+- **221 Tests**: Unit, integration, and regression tests with real CLI execution
 
 ## Prerequisites
 
@@ -44,26 +39,40 @@ npm install -g @anthropic-ai/claude-code
 
 ### Codex CLI
 ```bash
-# Installation instructions for Codex
-# Visit Codex documentation
+npm install -g @openai/codex
+codex login
 ```
 
 ### Gemini CLI
 ```bash
-# Installation instructions for Gemini
-# Visit Google AI documentation
+npm install -g @anthropic-ai/gemini-cli
+# Or: https://github.com/google-gemini/gemini-cli
 ```
 
 ## Installation
 
-1. Clone this repository
-2. Install dependencies:
+### As an MCP server (npm)
 ```bash
-npm install
+npm install -g llm-cli-gateway
 ```
 
-3. Build the project:
+Or use directly with `npx`:
+```json
+{
+  "mcpServers": {
+    "llm-gateway": {
+      "command": "npx",
+      "args": ["-y", "llm-cli-gateway"]
+    }
+  }
+}
+```
+
+### From source
 ```bash
+git clone https://github.com/verivusai-labs/llm-cli-gateway.git
+cd llm-cli-gateway
+npm install
 npm run build
 ```
 
@@ -101,7 +110,7 @@ Execute a Claude Code request with optional session management.
 - `allowedTools` (string[], optional): Restrict Claude tools to this allow-list
 - `disallowedTools` (string[], optional): Explicitly deny listed Claude tools
 - `dangerouslySkipPermissions` (boolean, optional): Request CLI-side permission bypass (legacy mode only)
-- `approvalStrategy` (string, optional): `"mcp_managed"` (default) or `"legacy"`
+- `approvalStrategy` (string, optional): `"legacy"` (default) or `"mcp_managed"`
 - `approvalPolicy` (string, optional): `"strict"`, `"balanced"`, or `"permissive"`
 - `mcpServers` (string[], optional): Claude MCP servers to expose (default: `["sqry","exa","ref_tools"]`; `"trstr"` available as opt-in)
 - `strictMcpConfig` (boolean, optional): Require Claude to use only supplied MCP config, default: true (request fails if any requested server is unavailable)
@@ -129,10 +138,10 @@ Execute a Codex request with optional session tracking.
 
 **Parameters:**
 - `prompt` (string, required): The prompt to send (1-100,000 chars)
-- `model` (string, optional): Model name or alias (use `list_models` for available values; supports `latest`)
+- `model` (string, optional): Model name or alias (use `list_models` for available values; supports `latest`, recommended: `gpt-5.4`)
 - `fullAuto` (boolean, optional): Enable full-auto mode, default: false
 - `dangerouslyBypassApprovalsAndSandbox` (boolean, optional): Request Codex bypass flags
-- `approvalStrategy` (string, optional): `"mcp_managed"` (default) or `"legacy"`
+- `approvalStrategy` (string, optional): `"legacy"` (default) or `"mcp_managed"`
 - `approvalPolicy` (string, optional): `"strict"`, `"balanced"`, or `"permissive"`
 - `mcpServers` (string[], optional): MCP servers expected for Codex execution context
 - `sessionId` (string, optional): Session identifier for tracking
@@ -140,6 +149,7 @@ Execute a Codex request with optional session tracking.
 - `optimizePrompt` (boolean, optional): Optimize prompt for token efficiency, default: false
 - `optimizeResponse` (boolean, optional): Optimize response for token efficiency, default: false
 - `correlationId` (string, optional): Request trace ID (auto-generated if omitted)
+- `idleTimeoutMs` (number, optional): Kill a stuck Codex process after output inactivity; 30,000 to 3,600,000 ms
 
 **Response extras:**
 - `approval`: Approval decision record when `approvalStrategy="mcp_managed"`
@@ -149,7 +159,7 @@ Execute a Codex request with optional session tracking.
 ```json
 {
   "prompt": "Create a REST API endpoint",
-  "model": "latest",
+  "model": "gpt-5.4",
   "fullAuto": true,
   "optimizePrompt": true
 }
@@ -165,7 +175,7 @@ Execute a Gemini CLI request with session support.
 - `resumeLatest` (boolean, optional): Resume the latest session automatically
 - `createNewSession` (boolean, optional): Always create a new session
 - `approvalMode` (string, optional): Gemini approval mode (`default|auto_edit|yolo`) in legacy mode
-- `approvalStrategy` (string, optional): `"mcp_managed"` (default) or `"legacy"`
+- `approvalStrategy` (string, optional): `"legacy"` (default) or `"mcp_managed"`
 - `approvalPolicy` (string, optional): `"strict"`, `"balanced"`, or `"permissive"`
 - `mcpServers` (string[], optional): Allowed Gemini MCP server names
 - `allowedTools` (string[], optional): Restrict Gemini tools to this allow-list
@@ -198,7 +208,7 @@ Use this flow when analysis/runtime can exceed client tool-call limits:
 4. Optionally stop with `llm_job_cancel`
 
 Async request tools accept the same approval strategy fields as their sync variants:
-- `approvalStrategy`: `"mcp_managed"` (default) or `"legacy"`
+- `approvalStrategy`: `"legacy"` (default) or `"mcp_managed"`
 - `approvalPolicy`: `"strict"|"balanced"|"permissive"` override
 - `mcpServers`: Requested MCP servers (`sqry`, `exa`, `ref_tools`, `trstr`)
 - `claude_request_async` also supports `strictMcpConfig` and fails fast when requested servers are unavailable
@@ -517,7 +527,7 @@ The gateway supports concurrent requests across different CLIs. Each request spa
 
 ## License
 
-[Your License Here]
+MIT. See [LICENSE](LICENSE) for details.
 
 ## Support
 
@@ -530,17 +540,3 @@ For issues and questions:
 
 See [CHANGELOG.md](CHANGELOG.md) for detailed release history.
 
-### v1.0.0 (2026-01-24) - Production Ready 🎉
-
-**Status:** ✅ 100% Bug-Free - 114 Tests Passing
-
-- **Multi-LLM orchestration** with Claude Code, Codex, and Gemini CLIs
-- **Token optimization** (44% prompt reduction, 37% response reduction)
-- **Session management** with atomic file writes and process-specific temp files
-- **Retry logic** with exponential backoff and circuit breaker
-- **Memory limits** (50MB cap) prevent DoS attacks
-- **Correlation ID tracking** for full request tracing
-- **Security hardening** (no secret leakage, bounded regex, file permissions 0o600)
-- **16 bugs fixed** through 2 comprehensive multi-LLM review rounds
-- **Complete dogfooding validation** (product improved itself)
-- **Comprehensive documentation** (7 guides, 8,000+ lines)
