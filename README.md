@@ -45,7 +45,7 @@ codex login
 
 ### Gemini CLI
 ```bash
-npm install -g @anthropic-ai/gemini-cli
+npm install -g @google/gemini-cli
 # Or: https://github.com/google-gemini/gemini-cli
 ```
 
