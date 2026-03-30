@@ -115,18 +115,94 @@ llm_job_result({jobId: "[jobId]"})
 | Medium | Fix in current sprint | Scheduled |
 | Low | Track, fix when convenient | Backlog |
 
-## Re-assess After Fixes
+## Blue Team Response
 
-Use the same LLM(s) that found the issues:
+Every red team finding requires a blue team response. The blue team (a different LLM than the one that found the issue) produces a defensive remediation plan for each finding.
+
+### Step 1: Collect Red Team Findings
+
+After the red team assessment completes, structure the findings as a numbered list with severity and attack scenario.
+
+### Step 2: Send to Blue Team LLM
+
+Use a **different LLM** than the red teamer for the blue team response. This avoids confirmation bias — the defender shouldn't be the same model that found the attack.
+
+| Red Teamer | Blue Team Responder | Why |
+|------------|-------------------|-----|
+| Gemini | Codex or Claude | Codex can implement fixes directly; Claude reasons about defense-in-depth |
+| Codex | Claude or Gemini | Claude designs defensive architecture; Gemini validates against known mitigations |
+| Claude | Codex or Gemini | Codex implements concrete patches; Gemini verifies against OWASP remediation guides |
+| Multi-LLM | Use the strongest available for the fix domain | Match remediation LLM to the type of fix needed |
 
 ```
-[llm]_request({
-  prompt: "Re-assess security after fixes.\n\nPrevious findings:\n1. [Critical] [issue] — Fixed by: [what changed]\n2. [High] [issue] — Fixed by: [what changed]\n\nVerify fixes are effective. Check for regressions. PASS or FAIL.",
+codex_request({
+  prompt: "Blue team response to red team findings for [path/component].\n\nRed team findings:\n1. [Critical] [finding + attack scenario]\n2. [High] [finding + attack scenario]\n3. [Medium] [finding + attack scenario]\n...\n\nFor EACH finding, provide:\n- **Defense**: Specific code change or configuration fix\n- **Detection**: How to detect this attack in production (logging, monitoring, alerting)\n- **Prevention**: Architectural change to prevent this class of vulnerability\n- **Verification**: How to test that the fix works (test case or verification step)\n\nThen implement the fixes for all Critical and High findings. Include tests.",
+  fullAuto: true,
+  correlationId: "blue-team-response"
+})
+```
+
+### Step 3: Blue Team Response Format
+
+For each red team finding, the blue team must address all four dimensions:
+
+```markdown
+### Finding 1: [Red team finding title] (Critical)
+
+**Red team**: [attack scenario summary]
+
+**Defense**: [specific code/config change]
+- File: [path]
+- Change: [what to change and why]
+
+**Detection**: [how to detect this attack in production]
+- Log: [what to log]
+- Alert: [what threshold triggers an alert]
+- Monitor: [what metric to watch]
+
+**Prevention**: [architectural change to prevent this class of vulnerability]
+- [e.g., "Add input validation layer before all handlers"]
+- [e.g., "Move secret rotation to vault with TTL"]
+
+**Verification**: [how to prove the fix works]
+- Test: [specific test case]
+- Manual: [manual verification step]
+```
+
+### Step 4: Implement Blue Team Fixes
+
+For Critical and High findings, the blue team LLM should implement fixes directly (not just describe them). Use Codex with `fullAuto: true` for implementation:
+
+```
+codex_request({
+  prompt: "Implement the blue team fixes for Critical and High findings:\n\n1. [Defense for finding 1 — what to change in which file]\n2. [Defense for finding 2 — what to change in which file]\n\nAlso add:\n- Detection logging for each finding\n- Test cases verifying each fix\n\nDo not change Medium/Low findings — those are tracked for later.",
+  fullAuto: true,
+  correlationId: "blue-team-impl"
+})
+```
+
+### Step 5: Re-assess (Red Team Verifies Blue Team)
+
+Send the original red teamer back to verify the fixes are effective:
+
+```
+[original_red_team_llm]_request({
+  prompt: "Re-assess security after blue team fixes.\n\nOriginal findings and blue team responses:\n1. [Critical] [finding] — Blue team fix: [what changed]\n2. [High] [finding] — Blue team fix: [what changed]\n\nVerify:\n- Are the fixes effective against the original attack scenarios?\n- Did the fixes introduce new vulnerabilities?\n- Are the detection/monitoring additions adequate?\n\nPASS or FAIL with findings.",
   ...same tool access as original assessment...
 })
 ```
 
-For multi-LLM red teams, re-submit to ALL reviewers after fixes (not just the ones that found issues).
+For multi-LLM red teams, re-submit to ALL original reviewers after blue team fixes.
+
+## Full Red/Blue Cycle
+
+```
+1. Red Team (one or more LLMs)     → findings with attack scenarios
+2. Blue Team (different LLM)       → defense + detection + prevention + verification per finding
+3. Blue Team Implementation        → code fixes for Critical/High
+4. Red Team Re-assess              → verify fixes, check for regressions
+5. Iterate until all red teamers PASS
+```
 
 ## Assessment Templates
 
