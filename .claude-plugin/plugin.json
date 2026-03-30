@@ -1,0 +1,15 @@
+{
+  "name": "llm-gateway",
+  "description": "Multi-LLM orchestration: delegate to Claude, Codex, and Gemini from a single interface with session management and async jobs.",
+  "version": "1.0.0",
+  "author": {
+    "name": "VerivusAI Labs",
+    "url": "https://github.com/verivusai-labs"
+  },
+  "repository": "https://github.com/verivusai-labs/llm-cli-gateway",
+  "license": "MIT",
+  "keywords": ["llm", "orchestration", "codex", "gemini", "multi-model"],
+  "commands": "./commands/",
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json"
+}
