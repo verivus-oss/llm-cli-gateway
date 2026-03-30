@@ -55,6 +55,7 @@
     "start": "node dist/index.js",
     "migrate": "node dist/migrate.js",
     "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
     "test:watch": "vitest",
     "test:unit": "vitest run src/__tests__/executor.test.ts",
     "test:session": "vitest run src/__tests__/session-manager.test.ts",
