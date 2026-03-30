@@ -1,0 +1,21 @@
+{
+  "name": "verivusai-llm-gateway",
+  "owner": {
+    "name": "VerivusAI Labs"
+  },
+  "metadata": {
+    "description": "Multi-LLM orchestration plugins for Claude Code.",
+    "version": "1.0.0"
+  },
+  "plugins": [
+    {
+      "name": "llm-gateway",
+      "description": "Delegate to Codex and Gemini from Claude Code with session management and async jobs.",
+      "version": "1.0.0",
+      "author": {
+        "name": "VerivusAI Labs"
+      },
+      "source": "."
+    }
+  ]
+}
