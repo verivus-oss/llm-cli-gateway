@@ -4,6 +4,8 @@ import { homedir } from "os";
 import { dirname, join } from "path";
 import type { Logger } from "./logger.js";
 import { noopLogger } from "./logger.js";
+import type { ReviewIntegrityResult } from "./review-integrity.js";
+import { isReviewContext } from "./review-integrity.js";
 
 export type ApprovalPolicy = "strict" | "balanced" | "permissive";
 export type ApprovalStrategy = "legacy" | "mcp_managed";
@@ -21,6 +23,7 @@ export interface ApprovalRequest {
   disallowedTools?: string[];
   policy?: ApprovalPolicy;
   metadata?: Record<string, unknown>;
+  reviewIntegrity?: ReviewIntegrityResult;
 }
 
 export interface ApprovalRecord {
@@ -38,6 +41,7 @@ export interface ApprovalRecord {
   bypassRequested: boolean;
   fullAuto: boolean;
   metadata?: Record<string, unknown>;
+  reviewIntegrity?: ReviewIntegrityResult;
 }
 
 function parsePolicy(policy?: ApprovalPolicy): ApprovalPolicy {
@@ -52,7 +56,10 @@ function parsePolicy(policy?: ApprovalPolicy): ApprovalPolicy {
 }
 
 function promptPreview(prompt: string): string {
-  return prompt.replace(/\s+/g, " ").trim().slice(0, 280);
+  if (process.env.APPROVAL_LOG_PROMPTS === "1") {
+    return prompt.replace(/\s+/g, " ").trim().slice(0, 280);
+  }
+  return "[redacted]";
 }
 
 function promptHash(prompt: string): string {
@@ -107,18 +114,51 @@ export class ApprovalManager {
     }
 
     if (request.allowedTools && request.allowedTools.length === 0) {
-      score -= 1;
-      reasons.push("No tool permissions requested");
+      // Independently verify review context from the prompt — never trust caller-supplied flags alone
+      const promptIsReview = isReviewContext(request.prompt);
+      if (promptIsReview) {
+        score += 6;
+        reasons.push("Empty allowedTools in review context — reviewers need tool access");
+      } else {
+        // Neutral score — tool restrictions should never reduce risk score
+        // (prevents gaming via review-context evasion + restrictive tools = negative score)
+        reasons.push("No tool permissions requested");
+      }
     }
 
     if (request.disallowedTools && request.disallowedTools.length > 0) {
-      score -= 1;
-      reasons.push("Has explicit disallowed tool restrictions");
+      const promptIsReviewForDisallowed = isReviewContext(request.prompt);
+      const criticalTools = ["Read", "Grep", "Glob", "Bash"];
+      // Canonicalize to handle scoped forms like "Read(*)", "Bash(git:*)"
+      const canonicalized = request.disallowedTools.map(s => {
+        const trimmed = s.trim();
+        const cut = Math.min(
+          ...[trimmed.indexOf("("), trimmed.indexOf(":")].filter(i => i >= 0).concat([trimmed.length])
+        );
+        return trimmed.slice(0, cut).trim();
+      });
+      const blockedCritical = criticalTools.filter(t => canonicalized.includes(t));
+      if (promptIsReviewForDisallowed && blockedCritical.length > 0) {
+        score += 6;
+        reasons.push(`Critical review tools disallowed: ${blockedCritical.join(", ")} — reviewers need these`);
+      } else {
+        // Neutral score — tool restrictions should never reduce risk score
+        reasons.push("Has explicit disallowed tool restrictions");
+      }
     }
 
     if (/\b(delete|destroy|wipe|exfiltrate|credential|token|password|secret)\b/i.test(request.prompt)) {
       score += 3;
       reasons.push("Prompt contains sensitive or destructive keywords");
+    }
+
+    if (request.reviewIntegrity && request.reviewIntegrity.violations.length > 0) {
+      for (const violation of request.reviewIntegrity.violations) {
+        // Skip empty_allowed_tools and critical_tools_disallowed — already handled in context-dependent scoring above
+        if (violation.type === "empty_allowed_tools" || violation.type === "critical_tools_disallowed") continue;
+        score += violation.score;
+        reasons.push(`Review integrity: ${violation.detail}`);
+      }
     }
 
     // Balanced policy allows routine full-auto requests with standard MCP servers,
@@ -140,7 +180,8 @@ export class ApprovalManager {
       requestedMcpServers: request.requestedMcpServers,
       bypassRequested: request.bypassRequested,
       fullAuto: request.fullAuto,
-      metadata: request.metadata
+      metadata: request.metadata,
+      reviewIntegrity: request.reviewIntegrity
     };
 
     appendFileSync(this.logPath, `${JSON.stringify(record)}\n`, { encoding: "utf-8", mode: 0o600 });
