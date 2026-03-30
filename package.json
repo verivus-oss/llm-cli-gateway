@@ -2,7 +2,7 @@
   "name": "llm-cli-gateway",
   "version": "1.0.0",
   "description": "MCP server providing unified access to Claude Code, Codex, and Gemini CLIs with session management, retry logic, and async job orchestration.",
-  "license": "Apache-2.0",
+  "license": "MIT",
   "author": {
     "name": "VerivusAI Labs",
     "url": "https://github.com/verivusai-labs"
