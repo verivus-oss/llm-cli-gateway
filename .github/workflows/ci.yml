@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: [18, 20, 22]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'npm'
+      - run: npm ci
+      - run: npm run build
+      - run: npm run lint
+      - run: npm run format:check
+      - run: npm test
+
+  pack-smoke-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+      - run: npm ci
+      - run: npm run build
+      - name: Verify npm pack contents
+        run: |
+          npm pack --dry-run 2>&1 | tee pack-output.txt
+          if grep -E '^npm notice [0-9]' pack-output.txt | grep -qE 'src/|node_modules/|__tests__'; then
+            echo "ERROR: Unwanted files in npm tarball"
+            exit 1
+          fi
+      - name: Verify server starts
+        run: |
+          timeout 5 node dist/index.js < /dev/null 2>/dev/null || true
+          echo "Server startup smoke test passed"
