@@ -1,11 +1,53 @@
 {
   "name": "llm-cli-gateway",
   "version": "1.0.0",
+  "description": "MCP server providing unified access to Claude Code, Codex, and Gemini CLIs with session management, retry logic, and async job orchestration.",
+  "license": "Apache-2.0",
+  "author": {
+    "name": "VerivusAI Labs",
+    "url": "https://github.com/verivusai-labs"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/verivusai-labs/llm-cli-gateway.git"
+  },
+  "homepage": "https://github.com/verivusai-labs/llm-cli-gateway#readme",
+  "bugs": {
+    "url": "https://github.com/verivusai-labs/llm-cli-gateway/issues"
+  },
+  "keywords": [
+    "mcp",
+    "llm",
+    "claude",
+    "codex",
+    "gemini",
+    "orchestration",
+    "model-context-protocol",
+    "ai",
+    "cli-gateway"
+  ],
   "type": "module",
   "main": "dist/index.js",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
   "bin": {
     "llm-cli-gateway": "./dist/index.js"
   },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "files": [
+    "dist/**/*.js",
+    "dist/**/*.d.ts",
+    "!dist/__tests__/**",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
