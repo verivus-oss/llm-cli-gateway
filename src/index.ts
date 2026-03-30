@@ -3,6 +3,9 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { randomUUID } from "crypto";
+import { readFileSync, readdirSync, realpathSync } from "fs";
+import { dirname, join } from "path";
+import { fileURLToPath } from "url";
 import { z } from "zod";
 import { executeCli, killAllProcessGroups } from "./executor.js";
 import { parseStreamJson } from "./stream-json-parser.js";
@@ -16,6 +19,7 @@ import { checkHealth } from "./health.js";
 import { getCliInfo, resolveModelAlias } from "./model-registry.js";
 import { AsyncJobManager } from "./async-job-manager.js";
 import { ApprovalManager, ApprovalPolicy, ApprovalRecord } from "./approval-manager.js";
+import { checkReviewIntegrity, ReviewIntegrityResult } from "./review-integrity.js";
 import { buildClaudeMcpConfig, ClaudeMcpConfigResult, ClaudeMcpServerName, CLAUDE_MCP_SERVER_NAMES } from "./claude-mcp-config.js";
 import { resolveSessionResumeArgs, GATEWAY_SESSION_PREFIX } from "./request-helpers.js";
 
@@ -30,6 +34,7 @@ type ExtendedToolResponse = {
     enabled?: ClaudeMcpServerName[];
     missing?: ClaudeMcpServerName[];
   };
+  reviewIntegrity?: ReviewIntegrityResult;
 };
 
 // Simple logger that writes to stderr (stdout is used for MCP protocol)
@@ -56,10 +61,79 @@ function logOptimizationTokens(kind: "prompt" | "response", correlationId: strin
   );
 }
 
-const server = new McpServer({
-  name: "llm-cli-gateway",
-  version: "1.0.0"
-});
+// Sync-to-async deadline: if a sync tool's CLI call hasn't finished within this
+// window, the tool returns a deferred async job reference instead of blocking
+// until the MCP client's tool-call timeout fires (~60s in many runtimes).
+// Configurable via SYNC_DEADLINE_MS env var. Set to 0 to disable (pure sync).
+const SYNC_DEADLINE_MS = (() => {
+  const env = process.env.SYNC_DEADLINE_MS;
+  if (env !== undefined) {
+    const parsed = parseInt(env, 10);
+    if (Number.isFinite(parsed) && parsed >= 0) return parsed;
+  }
+  return 45_000; // 45s default — safely under the 60s MCP client cap
+})();
+
+//──────────────────────────────────────────────────────────────────────────────
+// Skills loader — reads .agents/skills/*/SKILL.md at startup
+//──────────────────────────────────────────────────────────────────────────────
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+const SKILLS_DIR = join(__dirname, "..", ".agents", "skills");
+
+interface SkillEntry {
+  name: string;
+  content: string;
+  description: string;
+}
+
+function loadSkills(): SkillEntry[] {
+  const skills: SkillEntry[] = [];
+  try {
+    const dirs = readdirSync(SKILLS_DIR, { withFileTypes: true }).filter(d => d.isDirectory());
+    for (const dir of dirs) {
+      const skillPath = join(SKILLS_DIR, dir.name, "SKILL.md");
+      try {
+        const content = readFileSync(skillPath, "utf-8");
+        // Extract description from YAML frontmatter
+        const descMatch = content.match(/^---[\s\S]*?description:\s*(.+?)$/m);
+        const description = descMatch?.[1]?.trim() || dir.name;
+        skills.push({ name: dir.name, content, description });
+      } catch {
+        // Skill file missing or unreadable — skip silently
+      }
+    }
+  } catch {
+    // Skills directory missing — not fatal
+  }
+  return skills;
+}
+
+const loadedSkills = loadSkills();
+
+// L1: Compact server instructions (~200 tokens) — injected into every client's
+// system prompt at connection time. Covers key patterns + pointers to L2 resources.
+const SERVER_INSTRUCTIONS = `llm-cli-gateway: Multi-LLM orchestration via MCP.
+
+Tools: claude_request, codex_request, gemini_request (sync) | *_request_async (async)
+Jobs: llm_job_status, llm_job_result, llm_job_cancel
+Sessions: session_create, session_list, session_set_active, session_get, session_delete, session_clear_all
+Other: list_models, approval_list, llm_process_health
+
+Key behaviors:
+- Sync auto-defers at ${SYNC_DEADLINE_MS}ms. Poll deferred jobs via llm_job_status/llm_job_result.
+- Sessions: Claude --continue, Gemini --resume (real CLI continuity). Codex bookkeeping only.
+- Approval gates: opt-in via approvalStrategy:"mcp_managed".
+- Idle timeout kills stuck processes (default 10min, configurable via idleTimeoutMs).
+
+Skills (full docs via MCP resources):
+${loadedSkills.map(s => `- skills://${s.name} — ${s.description}`).join("\n")}`;
+
+const server = new McpServer(
+  { name: "llm-cli-gateway", version: "1.0.0" },
+  { instructions: SERVER_INSTRUCTIONS }
+);
 
 // Global state (initialized asynchronously)
 let sessionManager: ISessionManager;
@@ -84,6 +158,86 @@ const CLI_IDLE_TIMEOUTS: Record<string, number | undefined> = {
 function resolveIdleTimeout(cli: string, override?: number): number | undefined {
   if (override !== undefined) return override;
   return CLI_IDLE_TIMEOUTS[cli];
+}
+
+const SYNC_POLL_INTERVAL_MS = 1_000;
+
+interface DeferredJobResponse {
+  deferred: true;
+  jobId: string;
+  cli: string;
+  correlationId: string;
+  message: string;
+}
+
+/**
+ * Start an async job and poll until completion or deadline.
+ * Returns the job result if it finishes in time, or a deferral marker.
+ */
+async function awaitJobOrDefer(
+  cli: "claude" | "codex" | "gemini",
+  args: string[],
+  corrId: string,
+  idleTimeoutMs?: number,
+  outputFormat?: string
+): Promise<{ stdout: string; stderr: string; code: number } | DeferredJobResponse> {
+  if (SYNC_DEADLINE_MS === 0) {
+    // Disabled — fall through to direct execution
+    return executeCli(cli, args, { idleTimeout: idleTimeoutMs, logger });
+  }
+
+  const job = asyncJobManager.startJob(cli, args, corrId, undefined, idleTimeoutMs, outputFormat);
+  const deadline = Date.now() + SYNC_DEADLINE_MS;
+
+  while (Date.now() < deadline) {
+    const snapshot = asyncJobManager.getJobSnapshot(job.id);
+    if (snapshot && snapshot.status !== "running") {
+      // Job finished within deadline — extract result
+      const result = asyncJobManager.getJobResult(job.id);
+      if (!result) {
+        return { stdout: "", stderr: "Job result unavailable", code: 1 };
+      }
+      return {
+        stdout: result.stdout,
+        stderr: result.stderr,
+        code: result.exitCode ?? 1
+      };
+    }
+    await new Promise(resolve => setTimeout(resolve, SYNC_POLL_INTERVAL_MS));
+  }
+
+  // Deadline exceeded — return deferral
+  logger.info(`[${corrId}] ${cli} sync deadline exceeded (${SYNC_DEADLINE_MS}ms), deferring to async job ${job.id}`);
+  return {
+    deferred: true,
+    jobId: job.id,
+    cli,
+    correlationId: corrId,
+    message: `Execution exceeded sync deadline (${SYNC_DEADLINE_MS}ms). Poll with llm_job_status, fetch with llm_job_result.`
+  };
+}
+
+function isDeferredResponse(result: { stdout: string; stderr: string; code: number } | DeferredJobResponse): result is DeferredJobResponse {
+  return "deferred" in result && result.deferred === true;
+}
+
+function buildDeferredToolResponse(deferred: DeferredJobResponse, sessionId?: string): ExtendedToolResponse {
+  return {
+    content: [{
+      type: "text" as const,
+      text: JSON.stringify({
+        status: "deferred",
+        jobId: deferred.jobId,
+        cli: deferred.cli,
+        correlationId: deferred.correlationId,
+        message: deferred.message,
+        sessionId: sessionId || null,
+        pollWith: "llm_job_status",
+        fetchWith: "llm_job_result",
+        cancelWith: "llm_job_cancel"
+      }, null, 2)
+    }]
+  };
 }
 
 // Helper function for standardized error responses
@@ -133,7 +287,7 @@ function createApprovalDeniedResponse(operation: string, decision: ReturnType<Ap
 
 function normalizeMcpServers(mcpServers?: ClaudeMcpServerName[]): ClaudeMcpServerName[] {
   if (!mcpServers || mcpServers.length === 0) {
-    return ["sqry", "exa", "ref_tools"];
+    return ["sqry"];
   }
   return [...new Set(mcpServers)];
 }
@@ -205,13 +359,34 @@ function resolveClaudeMcpConfig(
 // MCP Resources
 //──────────────────────────────────────────────────────────────────────────────
 
+// Register skill resources (L2: full docs, read on demand)
+for (const skill of loadedSkills) {
+  server.registerResource(
+    `skill-${skill.name}`,
+    `skills://${skill.name}`,
+    {
+      title: skill.name,
+      description: skill.description,
+      mimeType: "text/markdown"
+    },
+    async () => ({
+      contents: [{
+        uri: `skills://${skill.name}`,
+        mimeType: "text/markdown",
+        text: skill.content
+      }]
+    })
+  );
+}
+logger.info(`Registered ${loadedSkills.length} skill resources`);
+
 // Register all sessions resource
 server.registerResource(
   "all-sessions",
   "sessions://all",
   {
     title: "📋 All Sessions",
-    description: "List of all conversation sessions across all CLIs",
+    description: "All conversation sessions across CLIs",
     mimeType: "application/json"
   },
   async (uri) => {
@@ -227,7 +402,7 @@ server.registerResource(
   "sessions://claude",
   {
     title: "🤖 Claude Sessions",
-    description: "List of Claude conversation sessions",
+    description: "Claude conversation sessions",
     mimeType: "application/json"
   },
   async (uri) => {
@@ -243,7 +418,7 @@ server.registerResource(
   "sessions://codex",
   {
     title: "💻 Codex Sessions",
-    description: "List of Codex conversation sessions",
+    description: "Codex conversation sessions",
     mimeType: "application/json"
   },
   async (uri) => {
@@ -259,7 +434,7 @@ server.registerResource(
   "sessions://gemini",
   {
     title: "✨ Gemini Sessions",
-    description: "List of Gemini conversation sessions",
+    description: "Gemini conversation sessions",
     mimeType: "application/json"
   },
   async (uri) => {
@@ -274,8 +449,8 @@ server.registerResource(
   "claude-models",
   "models://claude",
   {
-    title: "🧠 Claude Models & Capabilities",
-    description: "Available Claude models and their capabilities",
+    title: "🧠 Claude Models",
+    description: "Claude models and capabilities",
     mimeType: "application/json"
   },
   async (uri) => {
@@ -290,8 +465,8 @@ server.registerResource(
   "codex-models",
   "models://codex",
   {
-    title: "🔧 Codex Models & Capabilities",
-    description: "Available Codex models and their capabilities",
+    title: "🔧 Codex Models",
+    description: "Codex models and capabilities",
     mimeType: "application/json"
   },
   async (uri) => {
@@ -306,8 +481,8 @@ server.registerResource(
   "gemini-models",
   "models://gemini",
   {
-    title: "🌟 Gemini Models & Capabilities",
-    description: "Available Gemini models and their capabilities",
+    title: "🌟 Gemini Models",
+    description: "Gemini models and capabilities",
     mimeType: "application/json"
   },
   async (uri) => {
@@ -323,7 +498,7 @@ server.registerResource(
   "metrics://performance",
   {
     title: "📈 Performance Metrics",
-    description: "Request counts, response times, and success/failure rates",
+    description: "Request counts, latency, success/failure rates",
     mimeType: "application/json"
   },
   async (uri) => {
@@ -344,6 +519,7 @@ interface CliRequestPrep {
   requestedMcpServers: ClaudeMcpServerName[];
   mcpConfig?: ClaudeMcpConfigResult;
   approvalDecision: ApprovalRecord | null;
+  reviewIntegrity?: ReviewIntegrityResult;
   args: string[];
 }
 
@@ -366,6 +542,14 @@ function prepareClaudeRequest(params: {
   const cliInfo = getCliInfo();
   const resolvedModel = resolveModelAlias("claude", params.model, cliInfo);
 
+  // Review integrity check on raw prompt (before optimization)
+  const reviewIntegrity = checkReviewIntegrity({ prompt: params.prompt, allowedTools: params.allowedTools, disallowedTools: params.disallowedTools });
+  if (reviewIntegrity.violations.length > 0) {
+    logger.info(`[${corrId}] Review integrity violations detected: ${reviewIntegrity.violations.map(v => v.type).join(", ")}`, {
+      cli: "claude", operation: params.operation, score: reviewIntegrity.totalScore
+    });
+  }
+
   let effectivePrompt = params.prompt;
   if (params.optimizePrompt) {
     const optimized = optimizePromptText(effectivePrompt);
@@ -385,14 +569,15 @@ function prepareClaudeRequest(params: {
     approvalDecision = approvalManager.decide({
       cli: "claude",
       operation: params.operation,
-      prompt: effectivePrompt,
+      prompt: params.prompt, // Use raw prompt for review-context detection, not optimized
       bypassRequested: params.dangerouslySkipPermissions,
       fullAuto: false,
       requestedMcpServers,
       allowedTools: params.allowedTools,
       disallowedTools: params.disallowedTools,
       policy: params.approvalPolicy as ApprovalPolicy | undefined,
-      metadata: { model: resolvedModel || "default", strictMcpConfig: params.strictMcpConfig }
+      metadata: { model: resolvedModel || "default", strictMcpConfig: params.strictMcpConfig },
+      reviewIntegrity
     });
     if (approvalDecision.status !== "approved") {
       return createApprovalDeniedResponse(params.operation, approvalDecision);
@@ -424,7 +609,7 @@ function prepareClaudeRequest(params: {
     }
   }
 
-  return { corrId, effectivePrompt, resolvedModel, requestedMcpServers, mcpConfig, approvalDecision, args };
+  return { corrId, effectivePrompt, resolvedModel, requestedMcpServers, mcpConfig, approvalDecision, reviewIntegrity, args };
 }
 
 function prepareCodexRequest(params: {
@@ -443,6 +628,14 @@ function prepareCodexRequest(params: {
   const cliInfo = getCliInfo();
   const resolvedModel = resolveModelAlias("codex", params.model, cliInfo);
 
+  // Review integrity check on raw prompt (before optimization)
+  const reviewIntegrity = checkReviewIntegrity({ prompt: params.prompt });
+  if (reviewIntegrity.violations.length > 0) {
+    logger.info(`[${corrId}] Review integrity violations detected: ${reviewIntegrity.violations.map(v => v.type).join(", ")}`, {
+      cli: "codex", operation: params.operation, score: reviewIntegrity.totalScore
+    });
+  }
+
   let effectivePrompt = params.prompt;
   if (params.optimizePrompt) {
     const optimized = optimizePromptText(effectivePrompt);
@@ -457,12 +650,13 @@ function prepareCodexRequest(params: {
     approvalDecision = approvalManager.decide({
       cli: "codex",
       operation: params.operation,
-      prompt: effectivePrompt,
+      prompt: params.prompt, // Use raw prompt for review-context detection, not optimized
       bypassRequested: params.dangerouslyBypassApprovalsAndSandbox,
       fullAuto: params.fullAuto,
       requestedMcpServers,
       policy: params.approvalPolicy as ApprovalPolicy | undefined,
-      metadata: { model: resolvedModel || "default" }
+      metadata: { model: resolvedModel || "default" },
+      reviewIntegrity
     });
     if (approvalDecision.status !== "approved") {
       return createApprovalDeniedResponse(params.operation, approvalDecision);
@@ -477,7 +671,7 @@ function prepareCodexRequest(params: {
   }
   args.push("--skip-git-repo-check", effectivePrompt);
 
-  return { corrId, effectivePrompt, resolvedModel, requestedMcpServers, approvalDecision, args };
+  return { corrId, effectivePrompt, resolvedModel, requestedMcpServers, approvalDecision, reviewIntegrity, args };
 }
 
 function prepareGeminiRequest(params: {
@@ -497,6 +691,14 @@ function prepareGeminiRequest(params: {
   const cliInfo = getCliInfo();
   const resolvedModel = resolveModelAlias("gemini", params.model, cliInfo);
 
+  // Review integrity check on raw prompt (before optimization)
+  const reviewIntegrity = checkReviewIntegrity({ prompt: params.prompt, allowedTools: params.allowedTools });
+  if (reviewIntegrity.violations.length > 0) {
+    logger.info(`[${corrId}] Review integrity violations detected: ${reviewIntegrity.violations.map(v => v.type).join(", ")}`, {
+      cli: "gemini", operation: params.operation, score: reviewIntegrity.totalScore
+    });
+  }
+
   let effectivePrompt = params.prompt;
   if (params.optimizePrompt) {
     const optimized = optimizePromptText(effectivePrompt);
@@ -511,13 +713,14 @@ function prepareGeminiRequest(params: {
     approvalDecision = approvalManager.decide({
       cli: "gemini",
       operation: params.operation,
-      prompt: effectivePrompt,
+      prompt: params.prompt, // Use raw prompt for review-context detection, not optimized
       bypassRequested: params.approvalMode === "yolo",
       fullAuto: false,
       requestedMcpServers,
       allowedTools: params.allowedTools,
       policy: params.approvalPolicy as ApprovalPolicy | undefined,
-      metadata: { model: resolvedModel || "default" }
+      metadata: { model: resolvedModel || "default" },
+      reviewIntegrity
     });
     if (approvalDecision.status !== "approved") {
       return createApprovalDeniedResponse(params.operation, approvalDecision);
@@ -539,7 +742,7 @@ function prepareGeminiRequest(params: {
     params.includeDirs.forEach(dir => args.push("--include-directories", dir));
   }
 
-  return { corrId, effectivePrompt, resolvedModel, requestedMcpServers, approvalDecision, args };
+  return { corrId, effectivePrompt, resolvedModel, requestedMcpServers, approvalDecision, reviewIntegrity, args };
 }
 
 function buildCliResponse(
@@ -548,13 +751,23 @@ function buildCliResponse(
   corrId: string,
   sessionId: string | undefined,
   prep: CliRequestPrep,
-  resumable?: boolean
+  resumable?: boolean,
+  outputFormat?: string
 ): ExtendedToolResponse {
   let finalStdout = stdout;
-  if (optimizeResponse) {
+  // Skip response optimization for JSON output to prevent corrupting structured data
+  if (optimizeResponse && outputFormat !== "json") {
     const optimized = optimizeResponseText(finalStdout);
     logOptimizationTokens("response", corrId, finalStdout, optimized);
     finalStdout = optimized;
+  }
+
+  // Append review integrity warnings to response text (skip for JSON output to avoid corruption)
+  if (prep.reviewIntegrity && prep.reviewIntegrity.violations.length > 0 && outputFormat !== "json") {
+    const warnings = prep.reviewIntegrity.violations
+      .map(v => `- [${v.type}] ${v.detail}`)
+      .join("\n");
+    finalStdout += `\n\n⚠️ Review Integrity Warnings (score: ${prep.reviewIntegrity.totalScore}):\n${warnings}`;
   }
 
   const response: ExtendedToolResponse = {
@@ -571,6 +784,9 @@ function buildCliResponse(
   }
   if (prep.approvalDecision) {
     response.approval = prep.approvalDecision;
+  }
+  if (prep.reviewIntegrity && prep.reviewIntegrity.violations.length > 0) {
+    response.reviewIntegrity = prep.reviewIntegrity;
   }
   return response;
 }
@@ -632,7 +848,14 @@ export async function handleGeminiRequest(
     });
     args.push(...sessionResult.resumeArgs);
 
-    const { stdout, stderr, code } = await executeCli("gemini", args, { idleTimeout: resolveIdleTimeout("gemini", params.idleTimeoutMs), logger: deps.logger });
+    const result = await awaitJobOrDefer("gemini", args, corrId, resolveIdleTimeout("gemini", params.idleTimeoutMs));
+
+    // Deferred — job still running, return async reference
+    if (isDeferredResponse(result)) {
+      return buildDeferredToolResponse(result, sessionResult.effectiveSessionId);
+    }
+
+    const { stdout, stderr, code } = result;
     durationMs = Math.max(0, Date.now() - startTime);
 
     if (code !== 0) {
@@ -719,17 +942,22 @@ export async function handleGeminiRequestAsync(
     const job = deps.asyncJobManager.startJob("gemini", args, corrId, undefined, resolveIdleTimeout("gemini", params.idleTimeoutMs));
     deps.logger.info(`[${corrId}] gemini_request_async started job ${job.id}`);
 
+    const asyncResponse: Record<string, unknown> = {
+      success: true,
+      job,
+      sessionId: effectiveSessionId || null,
+      resumable: sessionResult.userProvidedSession,
+      approval: approvalDecision,
+      mcpServers: { requested: requestedMcpServers }
+    };
+    if (prep.reviewIntegrity && prep.reviewIntegrity.violations.length > 0) {
+      asyncResponse.reviewIntegrity = prep.reviewIntegrity;
+    }
+
     return {
       content: [{
         type: "text" as const,
-        text: JSON.stringify({
-          success: true,
-          job,
-          sessionId: effectiveSessionId || null,
-          resumable: sessionResult.userProvidedSession,
-          approval: approvalDecision,
-          mcpServers: { requested: requestedMcpServers }
-        }, null, 2)
+        text: JSON.stringify(asyncResponse, null, 2)
       }]
     };
   } catch (error) {
@@ -788,16 +1016,21 @@ export async function handleCodexRequestAsync(
     const job = deps.asyncJobManager.startJob("codex", args, corrId, undefined, resolveIdleTimeout("codex", params.idleTimeoutMs));
     deps.logger.info(`[${corrId}] codex_request_async started job ${job.id}`);
 
+    const asyncResponse: Record<string, unknown> = {
+      success: true,
+      job,
+      sessionId: effectiveSessionId || null,
+      approval: approvalDecision,
+      mcpServers: { requested: requestedMcpServers }
+    };
+    if (prep.reviewIntegrity && prep.reviewIntegrity.violations.length > 0) {
+      asyncResponse.reviewIntegrity = prep.reviewIntegrity;
+    }
+
     return {
       content: [{
         type: "text" as const,
-        text: JSON.stringify({
-          success: true,
-          job,
-          sessionId: effectiveSessionId || null,
-          approval: approvalDecision,
-          mcpServers: { requested: requestedMcpServers }
-        }, null, 2)
+        text: JSON.stringify(asyncResponse, null, 2)
       }]
     };
   } catch (error) {
@@ -814,7 +1047,7 @@ server.tool(
   {
     prompt: z.string().min(1, "Prompt cannot be empty").max(100000, "Prompt too long (max 100k chars)").describe("Prompt text for Claude"),
     model: z.string().optional().describe("Model name or alias (e.g. sonnet, claude-sonnet-4-5-20250929, latest)"),
-    outputFormat: z.enum(["text", "json", "stream-json"]).default("text").describe("Output format (text|json|stream-json). stream-json enables idle timeout protection via NDJSON streaming."),
+    outputFormat: z.enum(["text", "json", "stream-json"]).default("text").describe("Output format (text|json|stream-json). stream-json: NDJSON with idle timeout."),
     sessionId: z.string().optional().describe("Session ID (uses active if omitted)"),
     continueSession: z.boolean().default(false).describe("Continue active session"),
     createNewSession: z.boolean().default(false).describe("Force new session"),
@@ -823,12 +1056,12 @@ server.tool(
     dangerouslySkipPermissions: z.boolean().default(false).describe("Bypass permissions (sandbox only)"),
     approvalStrategy: z.enum(["legacy", "mcp_managed"]).default("legacy").describe("Approval strategy"),
     approvalPolicy: z.enum(["strict", "balanced", "permissive"]).optional().describe("Approval policy override"),
-    mcpServers: z.array(MCP_SERVER_ENUM).default(["sqry", "exa", "ref_tools"]).describe("MCP servers exposed to Claude"),
-    strictMcpConfig: z.boolean().default(true).describe("Restrict Claude to provided MCP config only"),
+    mcpServers: z.array(MCP_SERVER_ENUM).default(["sqry"]).describe("MCP servers exposed to Claude"),
+    strictMcpConfig: z.boolean().default(false).describe("Restrict Claude to provided MCP config only"),
     correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
     optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution"),
     optimizeResponse: z.boolean().default(false).describe("Optimize response output"),
-    idleTimeoutMs: z.number().int().min(30_000).max(3_600_000).optional().describe("Idle timeout in ms (min 30s, max 1h, omit=CLI default). Kills process after this duration of no output activity.")
+    idleTimeoutMs: z.number().int().min(30_000).max(3_600_000).optional().describe("Idle timeout in ms (min 30s, max 1h, omit=CLI default)")
   },
   async ({ prompt, model, outputFormat, sessionId, continueSession, createNewSession, allowedTools, disallowedTools, dangerouslySkipPermissions, approvalStrategy, approvalPolicy, mcpServers, strictMcpConfig, correlationId, optimizePrompt, optimizeResponse, idleTimeoutMs }) => {
     const startTime = Date.now();
@@ -868,7 +1101,14 @@ server.tool(
       const effectiveIdleTimeout = outputFormat === "stream-json"
         ? resolveIdleTimeout("claude", idleTimeoutMs)
         : undefined;
-      const { stdout, stderr, code } = await executeCli("claude", args, { idleTimeout: effectiveIdleTimeout, logger });
+      const result = await awaitJobOrDefer("claude", args, corrId, effectiveIdleTimeout, outputFormat);
+
+      // Deferred — job still running, return async reference
+      if (isDeferredResponse(result)) {
+        return buildDeferredToolResponse(result, effectiveSessionId);
+      }
+
+      const { stdout, stderr, code } = result;
       durationMs = Math.max(0, Date.now() - startTime);
 
       if (code !== 0) {
@@ -893,9 +1133,9 @@ server.tool(
         if (parsed.costUsd !== null) {
           logger.debug(`[${corrId}] stream-json cost=$${parsed.costUsd}, model=${parsed.model}, turns=${parsed.numTurns}`);
         }
-        return buildCliResponse(parsed.text, optimizeResponse, corrId, effectiveSessionId, prep);
+        return buildCliResponse(parsed.text, optimizeResponse, corrId, effectiveSessionId, prep, undefined, outputFormat);
       }
-      return buildCliResponse(stdout, optimizeResponse, corrId, effectiveSessionId, prep);
+      return buildCliResponse(stdout, optimizeResponse, corrId, effectiveSessionId, prep, undefined, outputFormat);
     } catch (error) {
       const elapsedMs = Math.max(0, Date.now() - startTime);
       logger.info(`[${corrId}] claude_request threw exception after ${elapsedMs}ms`);
@@ -915,18 +1155,18 @@ server.tool(
   "codex_request",
   {
     prompt: z.string().min(1, "Prompt cannot be empty").max(100000, "Prompt too long (max 100k chars)").describe("Prompt text for Codex"),
-    model: z.string().optional().describe("Model name or alias (e.g. gpt-5.2-codex, latest)"),
+    model: z.string().optional().describe("Model name or alias (e.g. gpt-5.4, latest)"),
     fullAuto: z.boolean().default(false).describe("Full-auto mode (sandboxed execution)"),
     dangerouslyBypassApprovalsAndSandbox: z.boolean().default(false).describe("Run Codex without approvals/sandbox"),
     approvalStrategy: z.enum(["legacy", "mcp_managed"]).default("legacy").describe("Approval strategy"),
     approvalPolicy: z.enum(["strict", "balanced", "permissive"]).optional().describe("Approval policy override"),
-    mcpServers: z.array(MCP_SERVER_ENUM).default(["sqry", "exa", "ref_tools"]).describe("MCP servers expected for Codex"),
+    mcpServers: z.array(MCP_SERVER_ENUM).default(["sqry"]).describe("MCP servers expected for Codex"),
     sessionId: z.string().optional().describe("Session ID (Codex manages internally)"),
     createNewSession: z.boolean().default(false).describe("Force new session"),
     correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
     optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution"),
     optimizeResponse: z.boolean().default(false).describe("Optimize response output"),
-    idleTimeoutMs: z.number().int().min(30_000).max(3_600_000).optional().describe("Idle timeout in ms (min 30s, max 1h, omit=CLI default). Kills process after this duration of no output activity.")
+    idleTimeoutMs: z.number().int().min(30_000).max(3_600_000).optional().describe("Idle timeout in ms (min 30s, max 1h, omit=CLI default)")
   },
   async ({ prompt, model, fullAuto, dangerouslyBypassApprovalsAndSandbox, approvalStrategy, approvalPolicy, mcpServers, sessionId, createNewSession, correlationId, optimizePrompt, optimizeResponse, idleTimeoutMs }) => {
     const startTime = Date.now();
@@ -943,7 +1183,14 @@ server.tool(
     logger.info(`[${corrId}] codex_request invoked with model=${prep.resolvedModel || "default"}, fullAuto=${fullAuto}, prompt length=${prompt.length}`);
 
     try {
-      const { stdout, stderr, code } = await executeCli("codex", args, { idleTimeout: resolveIdleTimeout("codex", idleTimeoutMs), logger });
+      const result = await awaitJobOrDefer("codex", args, corrId, resolveIdleTimeout("codex", idleTimeoutMs));
+
+      // Deferred — job still running, return async reference
+      if (isDeferredResponse(result)) {
+        return buildDeferredToolResponse(result, sessionId);
+      }
+
+      const { stdout, stderr, code } = result;
       durationMs = Math.max(0, Date.now() - startTime);
 
       if (code !== 0) {
@@ -997,13 +1244,13 @@ server.tool(
     approvalMode: z.enum(["default", "auto_edit", "yolo"]).optional().describe("Approval: default|auto_edit|yolo"),
     approvalStrategy: z.enum(["legacy", "mcp_managed"]).default("legacy").describe("Approval strategy"),
     approvalPolicy: z.enum(["strict", "balanced", "permissive"]).optional().describe("Approval policy override"),
-    mcpServers: z.array(MCP_SERVER_ENUM).default(["sqry", "exa", "ref_tools"]).describe("Allowed MCP server names"),
+    mcpServers: z.array(MCP_SERVER_ENUM).default(["sqry"]).describe("Allowed MCP server names"),
     allowedTools: z.array(z.string()).optional().describe("Allowed tools (['Write','Edit','Bash'])"),
     includeDirs: z.array(z.string()).optional().describe("Additional workspace directories"),
     correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
     optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution"),
     optimizeResponse: z.boolean().default(false).describe("Optimize response output"),
-    idleTimeoutMs: z.number().int().min(30_000).max(3_600_000).optional().describe("Idle timeout in ms (min 30s, max 1h, omit=CLI default). Kills process after this duration of no output activity.")
+    idleTimeoutMs: z.number().int().min(30_000).max(3_600_000).optional().describe("Idle timeout in ms (min 30s, max 1h, omit=CLI default)")
   },
   async ({ prompt, model, sessionId, resumeLatest, createNewSession, approvalMode, approvalStrategy, approvalPolicy, mcpServers, allowedTools, includeDirs, correlationId, optimizePrompt, optimizeResponse, idleTimeoutMs }) => {
     return handleGeminiRequest(
@@ -1022,7 +1269,7 @@ server.tool(
   {
     prompt: z.string().min(1, "Prompt cannot be empty").max(100000, "Prompt too long (max 100k chars)").describe("Prompt text for Claude"),
     model: z.string().optional().describe("Model name or alias (e.g. sonnet, claude-sonnet-4-5-20250929, latest)"),
-    outputFormat: z.enum(["text", "json", "stream-json"]).default("text").describe("Output format (text|json|stream-json). stream-json enables idle timeout protection via NDJSON streaming."),
+    outputFormat: z.enum(["text", "json", "stream-json"]).default("text").describe("Output format (text|json|stream-json). stream-json: NDJSON with idle timeout."),
     sessionId: z.string().optional().describe("Session ID (uses active if omitted)"),
     continueSession: z.boolean().default(false).describe("Continue active session"),
     createNewSession: z.boolean().default(false).describe("Force new session"),
@@ -1031,11 +1278,11 @@ server.tool(
     dangerouslySkipPermissions: z.boolean().default(false).describe("Bypass permissions (sandbox only)"),
     approvalStrategy: z.enum(["legacy", "mcp_managed"]).default("legacy").describe("Approval strategy"),
     approvalPolicy: z.enum(["strict", "balanced", "permissive"]).optional().describe("Approval policy override"),
-    mcpServers: z.array(MCP_SERVER_ENUM).default(["sqry", "exa", "ref_tools"]).describe("MCP servers exposed to Claude"),
-    strictMcpConfig: z.boolean().default(true).describe("Restrict Claude to provided MCP config only"),
+    mcpServers: z.array(MCP_SERVER_ENUM).default(["sqry"]).describe("MCP servers exposed to Claude"),
+    strictMcpConfig: z.boolean().default(false).describe("Restrict Claude to provided MCP config only"),
     correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
     optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution"),
-    idleTimeoutMs: z.number().int().min(30_000).max(3_600_000).optional().describe("Idle timeout in ms (min 30s, max 1h, omit=CLI default). Kills process after this duration of no output activity.")
+    idleTimeoutMs: z.number().int().min(30_000).max(3_600_000).optional().describe("Idle timeout in ms (min 30s, max 1h, omit=CLI default)")
   },
   async ({ prompt, model, outputFormat, sessionId, continueSession, createNewSession, allowedTools, disallowedTools, dangerouslySkipPermissions, approvalStrategy, approvalPolicy, mcpServers, strictMcpConfig, correlationId, optimizePrompt, idleTimeoutMs }) => {
     const prep = prepareClaudeRequest({
@@ -1081,20 +1328,25 @@ server.tool(
       const job = asyncJobManager.startJob("claude", args, corrId, undefined, effectiveIdleTimeout, outputFormat);
       logger.info(`[${corrId}] claude_request_async started job ${job.id}, outputFormat=${outputFormat}`);
 
+      const asyncResponse: Record<string, unknown> = {
+        success: true,
+        job,
+        sessionId: effectiveSessionId || activeSession?.id || null,
+        approval: approvalDecision,
+        mcpServers: {
+          requested: requestedMcpServers,
+          enabled: mcpConfig?.enabled,
+          missing: mcpConfig?.missing
+        }
+      };
+      if (prep.reviewIntegrity && prep.reviewIntegrity.violations.length > 0) {
+        asyncResponse.reviewIntegrity = prep.reviewIntegrity;
+      }
+
       return {
         content: [{
           type: "text" as const,
-          text: JSON.stringify({
-            success: true,
-            job,
-            sessionId: effectiveSessionId || activeSession?.id || null,
-            approval: approvalDecision,
-            mcpServers: {
-              requested: requestedMcpServers,
-              enabled: mcpConfig?.enabled,
-              missing: mcpConfig?.missing
-            }
-          }, null, 2)
+          text: JSON.stringify(asyncResponse, null, 2)
         }]
       };
     } catch (error) {
@@ -1107,17 +1359,17 @@ server.tool(
   "codex_request_async",
   {
     prompt: z.string().min(1, "Prompt cannot be empty").max(100000, "Prompt too long (max 100k chars)").describe("Prompt text for Codex"),
-    model: z.string().optional().describe("Model name or alias (e.g. gpt-5.2-codex, latest)"),
+    model: z.string().optional().describe("Model name or alias (e.g. gpt-5.4, latest)"),
     fullAuto: z.boolean().default(false).describe("Full-auto mode (sandboxed execution)"),
     dangerouslyBypassApprovalsAndSandbox: z.boolean().default(false).describe("Run Codex without approvals/sandbox"),
     approvalStrategy: z.enum(["legacy", "mcp_managed"]).default("legacy").describe("Approval strategy"),
     approvalPolicy: z.enum(["strict", "balanced", "permissive"]).optional().describe("Approval policy override"),
-    mcpServers: z.array(MCP_SERVER_ENUM).default(["sqry", "exa", "ref_tools"]).describe("MCP servers expected for Codex"),
+    mcpServers: z.array(MCP_SERVER_ENUM).default(["sqry"]).describe("MCP servers expected for Codex"),
     sessionId: z.string().optional().describe("Session ID (Codex manages internally)"),
     createNewSession: z.boolean().default(false).describe("Force new session"),
     correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
     optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution"),
-    idleTimeoutMs: z.number().int().min(30_000).max(3_600_000).optional().describe("Idle timeout in ms (min 30s, max 1h, omit=CLI default). Kills process after this duration of no output activity.")
+    idleTimeoutMs: z.number().int().min(30_000).max(3_600_000).optional().describe("Idle timeout in ms (min 30s, max 1h, omit=CLI default)")
   },
   async ({ prompt, model, fullAuto, dangerouslyBypassApprovalsAndSandbox, approvalStrategy, approvalPolicy, mcpServers, sessionId, createNewSession, correlationId, optimizePrompt, idleTimeoutMs }) => {
     return handleCodexRequestAsync(
@@ -1138,12 +1390,12 @@ server.tool(
     approvalMode: z.enum(["default", "auto_edit", "yolo"]).optional().describe("Approval: default|auto_edit|yolo"),
     approvalStrategy: z.enum(["legacy", "mcp_managed"]).default("legacy").describe("Approval strategy"),
     approvalPolicy: z.enum(["strict", "balanced", "permissive"]).optional().describe("Approval policy override"),
-    mcpServers: z.array(MCP_SERVER_ENUM).default(["sqry", "exa", "ref_tools"]).describe("Allowed MCP server names"),
+    mcpServers: z.array(MCP_SERVER_ENUM).default(["sqry"]).describe("Allowed MCP server names"),
     allowedTools: z.array(z.string()).optional().describe("Allowed tools (['Write','Edit','Bash'])"),
     includeDirs: z.array(z.string()).optional().describe("Additional workspace directories"),
     correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
     optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution"),
-    idleTimeoutMs: z.number().int().min(30_000).max(3_600_000).optional().describe("Idle timeout in ms (min 30s, max 1h, omit=CLI default). Kills process after this duration of no output activity.")
+    idleTimeoutMs: z.number().int().min(30_000).max(3_600_000).optional().describe("Idle timeout in ms (min 30s, max 1h, omit=CLI default)")
   },
   async ({ prompt, model, sessionId, resumeLatest, createNewSession, approvalMode, approvalStrategy, approvalPolicy, mcpServers, allowedTools, includeDirs, correlationId, optimizePrompt, idleTimeoutMs }) => {
     return handleGeminiRequestAsync(
@@ -1589,7 +1841,7 @@ function registerHealthResource(): void {
       "health://status",
       {
         title: "🏥 Health Status",
-        description: "Database connectivity status and latency metrics",
+        description: "DB connectivity and latency",
         mimeType: "application/json"
       },
       async () => {
@@ -1612,7 +1864,7 @@ function registerHealthResource(): void {
     "metrics://process-health",
     {
       title: "Process Health",
-      description: "Health status of running async jobs (CPU, memory, dead/zombie detection)",
+      description: "Async job health (CPU, memory, zombie detection)",
       mimeType: "application/json"
     },
     async (uri) => {
@@ -1678,7 +1930,11 @@ async function main() {
 }
 
 // Guard: only auto-start when run directly (not imported for testing)
-if (process.argv[1] && new URL(process.argv[1], "file://").href === import.meta.url) {
+// Resolve symlinks so `llm-cli-gateway` (npm-linked bin) matches import.meta.url
+const __entryUrl = process.argv[1]
+  ? new URL(realpathSync(process.argv[1]), "file://").href
+  : "";
+if (__entryUrl === import.meta.url) {
   main().catch((error) => {
     logger.error("Fatal server error:", error);
     process.exit(1);
