@@ -83,15 +83,44 @@ The llm-cli-gateway makes this practical because it manages the parallel executi
 
 Without the gateway, running this pattern means three terminal windows, manual copy-pasting, and losing conversation context between rounds. With the gateway, it is three tool calls and a synthesis step.
 
+## Red team / blue team
+
+The review gate and consensus patterns are about finding problems. The red team / blue team pattern takes it further -- adversarial attack and structured defense.
+
+The red team assessment sends code to one or more LLMs with an attacker's mindset. The prompt is explicit: find attack surfaces, injection vectors, auth bypasses, data leaks. Each LLM brings different strengths -- Gemini is strong on OWASP and known CVEs, Codex traces logic vulnerabilities and race conditions, Claude maps trust boundaries and architectural threats. Run all three in parallel for maximum coverage.
+
+But finding vulnerabilities is only half the work. Every red team finding needs a blue team response -- and critically, from a **different LLM** than the one that found the attack. This prevents confirmation bias. The model that identified the vulnerability should not be the one designing the defense.
+
+The blue team response covers four dimensions for each finding:
+
+- **Defense** -- the specific code or configuration fix
+- **Detection** -- how to detect this attack in production (logging, alerting, monitoring)
+- **Prevention** -- the architectural change that prevents this entire class of vulnerability
+- **Verification** -- the test case that proves the fix works
+
+Then the blue team LLM implements the fixes for critical and high findings. After implementation, the original red team reviewers re-assess to verify the fixes are effective and haven't introduced new vulnerabilities.
+
+The full cycle:
+
+```
+Red Team (LLM A) → findings with attack scenarios
+Blue Team (LLM B) → defense + detection + prevention + verification per finding
+Implementation (Codex, fullAuto: true) → code fixes for critical/high
+Red Team Re-assess (LLM A) → verify fixes, check for regressions
+Iterate until all red teamers PASS
+```
+
+We used this pattern before publishing llm-cli-gateway itself. Gemini red-teamed the npm tarball for information leakage and found that our `package.json` still referenced our internal GitHub organization instead of the public one. A straightforward finding, but one that would have leaked internal infrastructure details to every npm user. The blue team fix was a two-line change. The red team re-assessment confirmed the tarball was clean.
+
 ## Why this works
 
-The Proverbs 15:22 quote is not decoration. The insight behind the Codex review gate -- and the multi-LLM consensus pattern that extends it -- is genuinely old wisdom applied to new technology. A single perspective, no matter how capable, has blind spots. Multiple independent reviewers catch more issues than one reviewer who is twice as thorough.
+The Proverbs 15:22 quote is not decoration. The insight behind the Codex review gate, the multi-LLM consensus pattern, and the red/blue team cycle is genuinely old wisdom applied to new technology. A single perspective, no matter how capable, has blind spots. Multiple independent reviewers catch more issues than one reviewer who is twice as thorough.
 
 The key word is "independent." The agents do not see each other's reviews during the initial pass. This prevents anchoring bias -- where a second reviewer unconsciously defers to the first reviewer's assessment. Each agent evaluates the work from scratch, with its own strengths and biases.
 
 We did not design this pattern theoretically. It emerged from practice. We started with "let Codex review everything" because it was convenient. We noticed it caught real bugs. We made it mandatory. We noticed it still missed some things. We added more reviewers. We noticed the multi-reviewer pattern caught things the single reviewer missed. We made that mandatory too.
 
-Eleven repositories later, the pattern has proven itself. The Codex review gate is our most reliable quality control mechanism, and the multi-LLM consensus extension is our most thorough one. Both are built into llm-cli-gateway as workflow skills you can adopt directly.
+Eleven repositories later, the patterns have proven themselves. The Codex review gate is our most reliable quality control mechanism. The multi-LLM consensus extension is our most thorough. The red/blue team cycle is our most rigorous for security-sensitive work. All three are built into llm-cli-gateway as workflow skills you can adopt directly.
 
 ---
 
