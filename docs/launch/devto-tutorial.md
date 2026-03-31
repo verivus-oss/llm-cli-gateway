@@ -4,11 +4,11 @@ published: true
 tags: ai, codereview, mcp, typescript
 ---
 
-> *"Without consultation, plans are frustrated, but with many counselors they succeed."* -- Proverbs 15:22
+> *"Without consultation, plans are frustrated, but with many counselors they succeed."* - Proverbs 15:22
 
 Every LLM has blind spots. Claude is strong on architecture and design patterns. Codex catches logic bugs and missing error handling. Gemini is thorough on security issues and edge cases. Using just one reviewer means you are only getting one perspective.
 
-This tutorial walks through setting up **llm-cli-gateway** -- an MCP server that wraps the Claude Code, Codex, and Gemini CLIs -- and running a parallel code review that combines all three.
+This tutorial walks through setting up **llm-cli-gateway**, an MCP server that wraps the Claude Code, Codex, and Gemini CLIs, and running a parallel code review that combines all three.
 
 ## Prerequisites
 
@@ -59,7 +59,7 @@ This returns the available models for each detected CLI. If a CLI is not install
 
 Here is the core workflow. You send the same codebase to all three LLMs, each with a prompt tuned to its strengths.
 
-### Claude -- Architecture and Quality
+### Claude: Architecture and Quality
 
 ```json
 claude_request({
@@ -69,7 +69,7 @@ claude_request({
 })
 ```
 
-### Codex -- Logic and Correctness
+### Codex: Logic and Correctness
 
 ```json
 codex_request({
@@ -80,7 +80,9 @@ codex_request({
 })
 ```
 
-### Gemini -- Security and Edge Cases
+Note: `fullAuto: true` is required for Codex. Without it, Codex runs in a restricted sandbox and cannot read files or run commands.
+
+### Gemini: Security and Edge Cases
 
 ```json
 gemini_request({
@@ -140,15 +142,15 @@ The output should look like:
 ## Code Review Summary
 
 ### Critical (must fix)
-- SQL injection in login handler (line 47) -- found by Gemini, confirmed by Codex
+- SQL injection in login handler (line 47). Found by Gemini, confirmed by Codex.
 
 ### High
-- Missing error handling on token refresh (line 112) -- found by Codex
-- Session fixation vulnerability (line 89) -- found by Gemini
+- Missing error handling on token refresh (line 112). Found by Codex.
+- Session fixation vulnerability (line 89). Found by Gemini.
 
 ### Medium
-- Duplicated validation logic across handlers -- found by Claude
-- No rate limiting on auth endpoints -- found by Gemini, noted by Claude
+- Duplicated validation logic across handlers. Found by Claude.
+- No rate limiting on auth endpoints. Found by Gemini, noted by Claude.
 ```
 
 ## Step 6: Fix and Verify
@@ -203,7 +205,7 @@ The gateway scores the operation's risk and records an approval decision before 
 
 ## What This Is (and Is Not)
 
-**llm-cli-gateway wraps CLI binaries, not APIs.** It spawns `claude`, `codex`, and `gemini` as child processes. You get the full CLI experience -- tool use, sandboxing, file access, your existing authentication and billing. There is no API key to configure for the gateway itself.
+**llm-cli-gateway wraps CLI binaries, not APIs.** It spawns `claude`, `codex`, and `gemini` as child processes. You get the full CLI experience: tool use, sandboxing, file access, your existing authentication and billing. There is no API key to configure for the gateway itself.
 
 This means it does not work like LiteLLM or other API proxy tools. It cannot run in a cloud environment without the CLIs installed. It is designed for local development machines where you already have these tools.
 
