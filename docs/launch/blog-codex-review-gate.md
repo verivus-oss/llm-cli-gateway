@@ -28,7 +28,7 @@ Codex reads the code. It comes back with one of two responses:
 
 **APPROVED**, unconditionally. You ship.
 
-That is it. The iteration loop runs until the gate passes. Most submissions take 2-3 rounds. We have seen as many as 5 for complex changes and as few as 1 for well-prepared work.
+That is it. The iteration loop runs until the gate passes. Design documents and specifications typically take 10 to 13 rounds. Implementation reviews take 7 to 8. This is not a rubber stamp. Codex finds real issues in every round, and the work genuinely improves each time. We have never regretted the extra rounds.
 
 ## Why Codex specifically
 
