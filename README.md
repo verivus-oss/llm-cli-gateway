@@ -1,5 +1,8 @@
 # llm-cli-gateway
 
+> *"Without consultation, plans are frustrated, but with many counselors they succeed."*
+> — Proverbs 15:22 (LSB)
+
 A Model Context Protocol (MCP) server providing unified access to Claude Code, Codex, and Gemini CLIs with session management, retry logic, and async job orchestration.
 
 ## Features
