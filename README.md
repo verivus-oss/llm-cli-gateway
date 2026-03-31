@@ -73,7 +73,7 @@ Or use directly with `npx`:
 
 ### From source
 ```bash
-git clone https://github.com/verivusai-labs/llm-cli-gateway.git
+git clone https://github.com/verivus-oss/llm-cli-gateway.git
 cd llm-cli-gateway
 npm install
 npm run build

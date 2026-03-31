@@ -4,9 +4,9 @@
   "version": "1.0.0",
   "author": {
     "name": "VerivusAI Labs",
-    "url": "https://github.com/verivusai-labs"
+    "url": "https://github.com/verivus-oss"
   },
-  "repository": "https://github.com/verivusai-labs/llm-cli-gateway",
+  "repository": "https://github.com/verivus-oss/llm-cli-gateway",
   "license": "MIT",
   "keywords": ["llm", "orchestration", "codex", "gemini", "multi-model"],
   "commands": "./commands/",

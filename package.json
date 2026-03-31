@@ -5,15 +5,15 @@
   "license": "MIT",
   "author": {
     "name": "VerivusAI Labs",
-    "url": "https://github.com/verivusai-labs"
+    "url": "https://github.com/verivus-oss"
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/verivusai-labs/llm-cli-gateway.git"
+    "url": "https://github.com/verivus-oss/llm-cli-gateway.git"
   },
-  "homepage": "https://github.com/verivusai-labs/llm-cli-gateway#readme",
+  "homepage": "https://github.com/verivus-oss/llm-cli-gateway#readme",
   "bugs": {
-    "url": "https://github.com/verivusai-labs/llm-cli-gateway/issues"
+    "url": "https://github.com/verivus-oss/llm-cli-gateway/issues"
   },
   "keywords": [
     "mcp",
