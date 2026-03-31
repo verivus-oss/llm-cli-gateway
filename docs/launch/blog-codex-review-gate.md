@@ -8,13 +8,19 @@ Every repository at VerivusAI Labs has the same rule: before work ships, submit 
 
 ## How the loop works
 
-The pattern is simple in concept. You finish a piece of work -- a feature, a fix, a refactor, a publish-readiness review. Then you submit it to Codex with a prompt like:
+The pattern is simple in concept. You finish a piece of work -- a feature, a fix, a refactor, a publish-readiness review. Then you submit it to Codex with full access permissions and MCP tool access:
 
 ```
-Review the following changes for correctness, completeness, and production readiness.
-If everything passes, respond with APPROVED. If anything needs fixing, respond with
-NOT APPROVED and list the specific issues.
+codex_request({
+  prompt: "Review the following changes for correctness, completeness, and production
+  readiness. You have full tool access — read files directly, use sqry for semantic
+  search, run commands as needed. If everything passes, respond with APPROVED. If
+  anything needs fixing, respond with NOT APPROVED and list the specific issues.",
+  fullAuto: true
+})
 ```
+
+The `fullAuto: true` is critical. Without it, Codex runs in a restricted sandbox where it cannot read files, run tests, or verify claims. With it, Codex has the full tool access it needs to actually inspect the code rather than guessing from your description. This is the most common mistake people make with the review gate -- they forget to give Codex the permissions it needs, then blame the sandbox when it cannot verify anything.
 
 Codex reads the code. It comes back with one of two responses:
 
@@ -44,23 +50,26 @@ These are actual issues Codex caught during our own development of llm-cli-gatew
 
 None of these were subtle algorithmic bugs. They were the kind of issues that humans miss because they are looking at the interesting parts of the code -- the architecture, the algorithms, the clever bits -- while the mundane details slip through. Codex does not have that bias.
 
-## The sandbox problem
+## The permissions lesson
 
-There is one friction point with Codex as a reviewer: it cannot always execute shell commands. Depending on sandbox configuration and the operation in question, Codex may not be able to run your test suite, build your project, or verify that changes compile.
+Early on, we kept getting reviews that said "cannot verify" and "shell access blocked." We blamed the sandbox. The real problem was simpler: we were forgetting to pass `fullAuto: true`.
 
-The workaround is to provide evidence inline. Instead of asking Codex to run `npm test`, you run it yourself and include the output in your submission:
+Codex's sandbox has two modes. Without `fullAuto`, it runs in a restricted environment where shell commands are blocked by `bwrap` network isolation. With `fullAuto`, Codex gets workspace-write access -- it can read files, run commands, use MCP tools like sqry for semantic code search, and actually verify its claims.
+
+The rule is simple: **always pass `fullAuto: true` for review requests.** Codex needs to read the code it is reviewing. It needs to run tests to verify they pass. It needs tool access to trace call graphs and check references. Without these permissions, you are asking a reviewer to evaluate code through a keyhole.
+
+When Codex still cannot verify something specific -- for example, if it needs to run a command that requires network access or credentials it does not have -- provide the evidence inline:
 
 ```
-Here are the test results from `npm test`:
-[paste full output]
-
-Here is the build output from `npm run build`:
-[paste full output]
-
-Review the changes and the evidence above.
+codex_request({
+  prompt: "Review the changes. Here are the test results:\n[paste output]\n\n
+  Here is the build output:\n[paste output]\n\nVerify the fixes are correct.
+  APPROVED or NOT APPROVED.",
+  fullAuto: true
+})
 ```
 
-This is not ideal. It adds manual steps. But it means Codex reviews with full context -- it can see both the code changes and the verification results. In practice, the evidence-providing step takes 30 seconds and prevents the frustration of Codex flagging "cannot verify tests pass" on every review.
+This comes up rarely when `fullAuto` is set correctly. Most reviews complete without any manual evidence.
 
 ## From single reviewer to multi-LLM consensus
 
