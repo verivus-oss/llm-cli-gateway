@@ -160,5 +160,5 @@ The skill works with any document structure — the naming convention is optiona
 - Include context about the project and feature — reviewers don't have your conversation history.
 - Use `correlationId` for every review round to enable tracing.
 - For large documents, tell the reviewer which sections changed between rounds.
-- If Codex can't read files (sandbox), paste the relevant sections inline.
+- Always pass `fullAuto: true` for Codex reviews — without it, Codex cannot read files or run commands. If Codex still can't access something specific, paste the relevant sections inline.
 - Design reviews are cheaper than code reviews — catch issues before writing code.

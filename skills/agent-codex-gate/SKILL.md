@@ -70,15 +70,13 @@ if result contains "status":"deferred":
   // Parse APPROVED or NOT APPROVED from review.stdout
 ```
 
-### Handling Sandbox Limitations
+### Permissions — The Most Common Mistake
 
-Codex runs in a sandbox that blocks shell access. When Codex says "cannot verify":
-- Provide build output inline
-- Provide test results inline
-- Provide file contents that Codex couldn't read
-- Re-submit with this evidence
+If Codex says "cannot verify" or shows `bwrap` sandbox errors, `fullAuto: true` was not passed. Without it, Codex cannot read files, run commands, or use MCP tools. **Always include `fullAuto: true` in every `codex_request` for reviews.**
 
-This is expected behavior, not a failure.
+In the rare case Codex genuinely cannot access something (needs credentials it doesn't have), provide the evidence inline:
+- Paste build output, test results, or file contents
+- Re-submit with this evidence alongside `fullAuto: true`
 
 ## Example: Parallel Implementation with Gates
 
