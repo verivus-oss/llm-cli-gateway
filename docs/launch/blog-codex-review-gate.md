@@ -2,39 +2,39 @@
 
 *Published 2026-03-31 by VerivusAI Labs*
 
-> *"Without consultation, plans are frustrated, but with many counselors they succeed."* -- Proverbs 15:22
+> *"Without consultation, plans are frustrated, but with many counselors they succeed."* - Proverbs 15:22
 
-Every repository at VerivusAI Labs has the same rule: before work ships, submit it to Codex through llm-cli-gateway and iterate until you get unconditional approval. Not "looks good with minor suggestions." Not "approved with reservations." Unconditional. This is the single most-used pattern across all our projects, and it has caught real bugs that would have shipped otherwise.
+Every repository at VerivusAI Labs has the same rule. Before work ships, submit it to Codex through llm-cli-gateway and iterate until you get unconditional approval. Not "looks good with minor suggestions." Not "approved with reservations." Unconditional. This is the single most-used pattern across all our projects, and it has caught real bugs that would have shipped otherwise.
 
 ## How the loop works
 
-The pattern is simple in concept. You finish a piece of work -- a feature, a fix, a refactor, a publish-readiness review. Then you submit it to Codex with full access permissions and MCP tool access:
+You finish a piece of work. A feature, a fix, a refactor, a publish-readiness review. Then you submit it to Codex with full access permissions and MCP tool access:
 
 ```
 codex_request({
   prompt: "Review the following changes for correctness, completeness, and production
-  readiness. You have full tool access — read files directly, use sqry for semantic
+  readiness. You have full tool access. Read files directly, use sqry for semantic
   search, run commands as needed. If everything passes, respond with APPROVED. If
   anything needs fixing, respond with NOT APPROVED and list the specific issues.",
   fullAuto: true
 })
 ```
 
-The `fullAuto: true` is critical. Without it, Codex runs in a restricted sandbox where it cannot read files, run tests, or verify claims. With it, Codex has the full tool access it needs to actually inspect the code rather than guessing from your description. This is the most common mistake people make with the review gate -- they forget to give Codex the permissions it needs, then blame the sandbox when it cannot verify anything.
+The `fullAuto: true` is critical. Without it, Codex runs in a restricted sandbox where it cannot read files, run tests, or verify claims. With it, Codex gets the full tool access it needs to actually inspect the code rather than guess from your description. This is the most common mistake people make with the review gate. They forget to give Codex the permissions it needs, then blame the sandbox when it cannot verify anything.
 
 Codex reads the code. It comes back with one of two responses:
 
-**NOT APPROVED** -- with a list of specific, actionable findings. You fix them. You resubmit.
+**NOT APPROVED**, with a list of specific, actionable findings. You fix them. You resubmit.
 
-**APPROVED** -- unconditionally. You ship.
+**APPROVED**, unconditionally. You ship.
 
-That is it. The iteration loop runs until the gate passes. In practice, most submissions take 2-3 rounds. We have seen as many as 5 for complex changes and as few as 1 for well-prepared work.
+That is it. The iteration loop runs until the gate passes. Most submissions take 2-3 rounds. We have seen as many as 5 for complex changes and as few as 1 for well-prepared work.
 
 ## Why Codex specifically
 
-We use all three LLMs through the gateway -- Claude Code for architecture and implementation, Gemini for security analysis and edge cases, Codex for review. Each has strengths. But for the review gate, Codex earned the role through behavior, not benchmarks.
+We use all three LLMs through the gateway. Claude Code handles architecture and implementation. Gemini covers security analysis and edge cases. Codex does review. Each has strengths, but for the review gate, Codex earned the role through behavior, not benchmarks.
 
-Codex is thorough in a way that is useful for gating. It does not wave things through. When it finds an issue, it gives you the specific file, the specific line, and the specific fix. It does not say "consider improving error handling" -- it says "the catch block on line 47 swallows the error silently; propagate it or log it." That specificity makes the iteration loop efficient. You know exactly what to fix.
+Codex is thorough in a way that is useful for gating. It does not wave things through. When it finds an issue, it gives you the specific file, the specific line, and the specific fix. It does not say "consider improving error handling." It says "the catch block on line 47 swallows the error silently; propagate it or log it." That specificity makes the iteration loop efficient. You know exactly what to fix.
 
 It also has a low false-positive rate in our experience. When Codex flags something, it is almost always a real issue. This matters because a review gate with high false positives trains people to ignore it, and then it stops being a gate.
 
@@ -42,23 +42,23 @@ It also has a low false-positive rate in our experience. When Codex flags someth
 
 These are actual issues Codex caught during our own development of llm-cli-gateway.
 
-**Wrong tool descriptions for Gemini.** During publish-readiness review, Codex flagged that the Gemini tool descriptions in the MCP server were inaccurate -- they described capabilities the Gemini CLI did not actually support in the way stated. This was not a hypothetical concern. Incorrect tool descriptions cause LLM orchestrators to misuse the tools, leading to failed calls and confused error messages. We fixed the descriptions before publishing.
+**Wrong tool descriptions for Gemini.** During publish-readiness review, Codex flagged that the Gemini tool descriptions in the MCP server were inaccurate. They described capabilities the Gemini CLI did not actually support in the way stated. Incorrect tool descriptions cause LLM orchestrators to misuse the tools, leading to failed calls and confused error messages. We fixed the descriptions before publishing.
 
-**Wrong Gemini CLI package name.** Codex caught that our documentation and installation instructions referenced the wrong npm package name for the Gemini CLI. This would have caused every new user following our setup guide to hit an installation failure on the first step. The kind of bug that is trivial to fix but devastating to first impressions.
+**Wrong Gemini CLI package name.** Our documentation referenced the wrong npm package name for the Gemini CLI. This would have caused every new user following our setup guide to hit an installation failure on the first step. Trivial to fix, devastating to first impressions.
 
-**CI not enforcing coverage thresholds.** Our CI pipeline ran tests and reported coverage, but the Codex review found that coverage thresholds were not configured as hard gates. Tests could pass with 20% coverage and CI would still go green. Codex flagged the specific configuration needed to make the threshold enforced, not just reported.
+**CI not enforcing coverage thresholds.** Our CI pipeline ran tests and reported coverage, but Codex found that coverage thresholds were not configured as hard gates. Tests could pass with 20% coverage and CI would still go green. Codex flagged the specific configuration needed to make the threshold enforced, not just reported.
 
-None of these were subtle algorithmic bugs. They were the kind of issues that humans miss because they are looking at the interesting parts of the code -- the architecture, the algorithms, the clever bits -- while the mundane details slip through. Codex does not have that bias.
+None of these were subtle algorithmic bugs. They were the kind of issues that humans miss because they focus on the interesting parts of the code (the architecture, the algorithms, the clever bits) while the mundane details slip through. Codex does not have that bias.
 
 ## The permissions lesson
 
-Early on, we kept getting reviews that said "cannot verify" and "shell access blocked." We blamed the sandbox. The real problem was simpler: we were forgetting to pass `fullAuto: true`.
+Early on, we kept getting reviews that said "cannot verify" and "shell access blocked." We blamed the sandbox. The real problem was simpler. We were forgetting to pass `fullAuto: true`.
 
-Codex's sandbox has two modes. Without `fullAuto`, it runs in a restricted environment where shell commands are blocked by `bwrap` network isolation. With `fullAuto`, Codex gets workspace-write access -- it can read files, run commands, use MCP tools like sqry for semantic code search, and actually verify its claims.
+The Codex sandbox has two modes. Without `fullAuto`, it runs in a restricted environment where shell commands are blocked by `bwrap` network isolation. With `fullAuto`, Codex gets workspace-write access. It can read files, run commands, use MCP tools like sqry for semantic code search, and actually verify its claims.
 
-The rule is simple: **always pass `fullAuto: true` for review requests.** Codex needs to read the code it is reviewing. It needs to run tests to verify they pass. It needs tool access to trace call graphs and check references. Without these permissions, you are asking a reviewer to evaluate code through a keyhole.
+The rule is simple. **Always pass `fullAuto: true` for review requests.** Codex needs to read the code it is reviewing. It needs to run tests to verify they pass. It needs tool access to trace call graphs and check references. Without these permissions, you are asking a reviewer to evaluate code through a keyhole.
 
-When Codex still cannot verify something specific -- for example, if it needs to run a command that requires network access or credentials it does not have -- provide the evidence inline:
+When Codex still cannot verify something specific (for example, a command that requires network access or credentials it does not have), provide the evidence inline:
 
 ```
 codex_request({
@@ -73,40 +73,40 @@ This comes up rarely when `fullAuto` is set correctly. Most reviews complete wit
 
 ## From single reviewer to multi-LLM consensus
 
-The Codex review gate is powerful on its own, but we found that even Codex has blind spots. So we extended the pattern.
+The Codex review gate is powerful on its own, but even Codex has blind spots. So we extended the pattern.
 
-The multi-LLM consensus workflow submits the same review to three agents independently -- typically Claude, Codex, and Gemini. Each reviews without seeing the others' responses. Then the orchestrating agent synthesizes the three reviews and determines consensus.
+The multi-LLM consensus workflow submits the same review to three agents independently. Typically Claude, Codex, and Gemini. Each reviews without seeing the others' responses. Then the orchestrating agent synthesizes the three reviews and determines consensus.
 
-The rule is that all three must agree the work is ready. If any agent flags an issue, you address it and resubmit to all three. This catches a wider range of problems. Claude tends to find architectural issues and design inconsistencies. Codex catches implementation bugs and missing error handling. Gemini flags security concerns and unusual edge cases. Together, they cover more surface area than any single reviewer.
+All three must agree the work is ready. If any agent flags an issue, you address it and resubmit to all three. This catches a wider range of problems. Claude tends to find architectural issues and design inconsistencies. Codex catches implementation bugs and missing error handling. Gemini flags security concerns and unusual edge cases. Together, they cover more surface area than any single reviewer.
 
-The llm-cli-gateway makes this practical because it manages the parallel execution. You call `claude_request`, `codex_request`, and `gemini_request` concurrently. The auto-async deferral handles the timing -- if any review exceeds 45 seconds, it becomes an async job you poll. Session continuity means follow-up rounds maintain context from the previous review.
+The llm-cli-gateway makes this practical because it manages the parallel execution. You call `claude_request`, `codex_request`, and `gemini_request` concurrently. The auto-async deferral handles the timing. If any review exceeds 45 seconds, it becomes an async job you poll. Session continuity means follow-up rounds maintain context from the previous review.
 
 Without the gateway, running this pattern means three terminal windows, manual copy-pasting, and losing conversation context between rounds. With the gateway, it is three tool calls and a synthesis step.
 
 ## Red team / blue team
 
-The review gate and consensus patterns are about finding problems. The red team / blue team pattern takes it further -- adversarial attack and structured defense.
+The review gate and consensus patterns find problems. The red team / blue team pattern goes further with adversarial attack and structured defense.
 
-The red team assessment sends code to one or more LLMs with an attacker's mindset. The prompt is explicit: find attack surfaces, injection vectors, auth bypasses, data leaks. Each LLM brings different strengths -- Gemini is strong on OWASP and known CVEs, Codex traces logic vulnerabilities and race conditions, Claude maps trust boundaries and architectural threats. Run all three in parallel for maximum coverage.
+The red team assessment sends code to one or more LLMs with an attacker's mindset. The prompt is explicit: find attack surfaces, injection vectors, auth bypasses, data leaks. Each LLM brings different strengths. Gemini is strong on OWASP and known CVEs. Codex traces logic vulnerabilities and race conditions. Claude maps trust boundaries and architectural threats. Run all three in parallel for maximum coverage.
 
-But finding vulnerabilities is only half the work. Every red team finding needs a blue team response -- and critically, from a **different LLM** than the one that found the attack. This prevents confirmation bias. The model that identified the vulnerability should not be the one designing the defense.
+Finding vulnerabilities is only half the work. Every red team finding needs a blue team response, and critically, from a **different LLM** than the one that found the attack. This prevents confirmation bias. The model that identified the vulnerability should not be the one designing the defense.
 
 The blue team response covers four dimensions for each finding:
 
-- **Defense** -- the specific code or configuration fix
-- **Detection** -- how to detect this attack in production (logging, alerting, monitoring)
-- **Prevention** -- the architectural change that prevents this entire class of vulnerability
-- **Verification** -- the test case that proves the fix works
+- **Defense**: the specific code or configuration fix
+- **Detection**: how to detect this attack in production (logging, alerting, monitoring)
+- **Prevention**: the architectural change that prevents this entire class of vulnerability
+- **Verification**: the test case that proves the fix works
 
-Then the blue team LLM implements the fixes for critical and high findings. After implementation, the original red team reviewers re-assess to verify the fixes are effective and haven't introduced new vulnerabilities.
+Then the blue team LLM implements the fixes for critical and high findings. After implementation, the original red team reviewers re-assess to verify the fixes are effective and have not introduced new vulnerabilities.
 
 The full cycle:
 
 ```
-Red Team (LLM A) → findings with attack scenarios
-Blue Team (LLM B) → defense + detection + prevention + verification per finding
-Implementation (Codex, fullAuto: true) → code fixes for critical/high
-Red Team Re-assess (LLM A) → verify fixes, check for regressions
+Red Team (LLM A) > findings with attack scenarios
+Blue Team (LLM B) > defense + detection + prevention + verification per finding
+Implementation (Codex, fullAuto: true) > code fixes for critical/high
+Red Team Re-assess (LLM A) > verify fixes, check for regressions
 Iterate until all red teamers PASS
 ```
 
@@ -114,9 +114,9 @@ We used this pattern before publishing llm-cli-gateway itself. Gemini red-teamed
 
 ## Why this works
 
-The Proverbs 15:22 quote is not decoration. The insight behind the Codex review gate, the multi-LLM consensus pattern, and the red/blue team cycle is genuinely old wisdom applied to new technology. A single perspective, no matter how capable, has blind spots. Multiple independent reviewers catch more issues than one reviewer who is twice as thorough.
+The Proverbs 15:22 quote is not decoration. The insight behind the Codex review gate, the multi-LLM consensus pattern, and the red/blue team cycle is old wisdom applied to new technology. A single perspective, no matter how capable, has blind spots. Multiple independent reviewers catch more issues than one reviewer who is twice as thorough.
 
-The key word is "independent." The agents do not see each other's reviews during the initial pass. This prevents anchoring bias -- where a second reviewer unconsciously defers to the first reviewer's assessment. Each agent evaluates the work from scratch, with its own strengths and biases.
+The key word is "independent." The agents do not see each other's reviews during the initial pass. This prevents anchoring bias, where a second reviewer unconsciously defers to the first reviewer's assessment. Each agent evaluates the work from scratch, with its own strengths and biases.
 
 We did not design this pattern theoretically. It emerged from practice. We started with "let Codex review everything" because it was convenient. We noticed it caught real bugs. We made it mandatory. We noticed it still missed some things. We added more reviewers. We noticed the multi-reviewer pattern caught things the single reviewer missed. We made that mandatory too.
 

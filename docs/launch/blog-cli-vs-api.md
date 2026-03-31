@@ -2,9 +2,9 @@
 
 *Published 2026-03-31 by VerivusAI Labs*
 
-The multi-LLM orchestration space has a dozen tools now. LiteLLM, PAL MCP, Claude Octopus, Zen MCP -- most of them proxy API calls to multiple providers. You send a prompt, they forward it to OpenAI or Anthropic or Google's API, and you get text back.
+The multi-LLM orchestration space has a dozen tools now. LiteLLM, PAL MCP, Claude Octopus, Zen MCP. Most of them proxy API calls to multiple providers. You send a prompt, they forward it to OpenAI or Anthropic or Google's API, and you get text back.
 
-**llm-cli-gateway** does something different. It wraps the CLI binaries -- `claude`, `codex`, `gemini` -- as child processes. When you call `codex_request`, the gateway literally spawns `codex --quiet` with your prompt. This is not a philosophical distinction. It changes what the tool can do.
+**llm-cli-gateway** does something different. It wraps the CLI binaries (`claude`, `codex`, `gemini`) as child processes. When you call `codex_request`, the gateway literally spawns `codex --quiet` with your prompt. This is not a philosophical distinction. It changes what the tool can do.
 
 ## What CLI tools have that APIs don't
 
@@ -18,7 +18,7 @@ This matters most for implementation tasks. Asking an API to "implement retry lo
 
 Claude Code has `--continue`. Gemini CLI has `--resume`. These flags pick up where the last conversation left off, including full tool-use history and file context.
 
-llm-cli-gateway uses these natively. When you create a session and make multiple requests, Claude sessions pass `--continue` and Gemini sessions pass `--resume`. The CLI maintains the real conversation state -- you are not reconstructing context from a message array.
+llm-cli-gateway uses these natively. When you create a session and make multiple requests, Claude sessions pass `--continue` and Gemini sessions pass `--resume`. The CLI maintains the real conversation state. You are not reconstructing context from a message array.
 
 API-based orchestrators have to manage conversation state themselves. They store message histories, token-count them to stay under limits, and replay them with each request. This works, but it is a reimplementation of something the CLI tools already handle, and it loses the tool-use context that CLI sessions preserve.
 
@@ -26,7 +26,7 @@ API-based orchestrators have to manage conversation state themselves. They store
 
 If you have run `codex login` or `claude auth`, you are done. The gateway inherits your existing authentication. There are no API keys to configure in the gateway, no `.env` files with secrets, no key rotation to manage.
 
-API proxies need keys for every provider. LiteLLM needs your OpenAI key, your Anthropic key, your Google key -- all stored somewhere the proxy can read them. This is a real attack surface. llm-cli-gateway has zero credentials in its configuration.
+API proxies need keys for every provider. LiteLLM needs your OpenAI key, your Anthropic key, your Google key, all stored somewhere the proxy can read them. This is a real attack surface. llm-cli-gateway has zero credentials in its configuration.
 
 ## CLIs evolve faster
 
@@ -34,7 +34,7 @@ New model capabilities tend to land in CLI tools before they appear in stable AP
 
 ## The "All-Agents-MCP archived itself" counterargument
 
-There is a fair objection here. The All-Agents-MCP project (14 stars, now archived) tried CLI wrapping and the author concluded that "direct CLI + Skills is better than wrapping CLIs." They were right -- partially.
+There is a fair objection here. The All-Agents-MCP project (14 stars, now archived) tried CLI wrapping and the author concluded that "direct CLI + Skills is better than wrapping CLIs." They were right, partially.
 
 Raw CLI wrapping is not enough. If all you do is spawn `codex --quiet -p "do something"` and return the output, you have built a thin shell that adds overhead without adding value. The author was correct that direct CLI usage is simpler.
 
@@ -43,8 +43,9 @@ What changes the equation is opinionated workflow on top of the wrapping. llm-cl
 - **Approval gates with risk scoring** (0-13 points across 7 dimensions, with strict/balanced/permissive policies)
 - **Auto-async deferral** at 45 seconds, so sync MCP calls do not time out
 - **12 workflow skills** built from running multi-LLM patterns across 11+ production repos
-- **The Codex review gate** -- iterate with Codex until unconditional approval
-- **Multi-LLM consensus** -- three agents must independently agree
+- **The Codex review gate**: iterate with Codex until unconditional approval
+- **Multi-LLM consensus**: three agents must independently agree
+- **Red/blue team assessments**: adversarial attack from one LLM, structured defense from another
 - **Session continuity** using real CLI flags, not bookkeeping
 - **Circuit breakers and retry logic** per CLI
 
@@ -63,9 +64,9 @@ CLI wrapping is not universally better. The trade-offs are real:
 - **Local installation required.** Every developer needs the CLI tools installed. You cannot run this in a serverless cloud function. API proxies work from anywhere with HTTP access.
 - **Heavier execution.** Spawning a CLI process is slower and uses more resources than an HTTP API call. A Codex invocation might take 30-90 seconds. An API call returns in 2-5 seconds.
 - **Three CLI tools to maintain.** Updates, authentication, and compatibility across `claude`, `codex`, and `gemini` are your responsibility. API keys are simpler to manage at scale.
-- **Sandbox limitations.** CLI sandboxes vary. Codex cannot always execute shell commands depending on configuration. Claude Code's tool use depends on permissions. These constraints do not exist with pure API calls (because APIs cannot execute anything).
+- **Sandbox limitations.** CLI sandboxes vary. Codex cannot always execute shell commands depending on configuration (always pass `fullAuto: true` for review tasks). Claude Code's tool use depends on permissions. These constraints do not exist with pure API calls (because APIs cannot execute anything).
 
-For teams doing serious multi-LLM development work -- where agents need to read code, run tests, and build on each other's output -- the CLI approach gives you capabilities that API proxying fundamentally cannot provide. For teams that need lightweight, cloud-native multi-model routing, API proxies like LiteLLM are the right choice.
+For teams doing serious multi-LLM development work, where agents need to read code, run tests, and build on each other's output, the CLI approach gives you capabilities that API proxying fundamentally cannot provide. For teams that need lightweight, cloud-native multi-model routing, API proxies like LiteLLM are the right choice.
 
 We built llm-cli-gateway for the first group.
 
