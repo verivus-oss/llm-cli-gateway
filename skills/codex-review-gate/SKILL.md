@@ -30,6 +30,8 @@ codex_request({
 })
 ```
 
+**`fullAuto: true` is mandatory.** Without it, Codex runs in a restricted sandbox where it cannot read files, run commands, or use MCP tools. The review will fail with "cannot verify" errors. Always pass `fullAuto: true` for review requests.
+
 If the task is large or complex, expect auto-deferral at 45s. When response contains `status:"deferred"`:
 
 ```
@@ -71,24 +73,20 @@ Repeat Steps 2-3 until you get unconditional APPROVED. Typical iterations:
 
 If after 3 rounds Codex still has issues, escalate to the user.
 
-## Sandbox Limitations
+## Permissions — the Most Common Mistake
 
-Codex runs in a sandboxed environment. It often cannot:
-- Execute shell commands (bwrap errors)
-- Read files via shell (sed, cat blocked)
-- Run git commands
+If Codex says "cannot verify" or you see `bwrap` sandbox errors, you almost certainly forgot `fullAuto: true`. Without it, Codex runs in a restricted sandbox that blocks file access, shell commands, and MCP tools.
 
-Codex CAN use:
+With `fullAuto: true`, Codex gets:
+- Full file system read/write access in the workspace
+- Shell command execution
 - sqry MCP tools (semantic search, symbol lookup, code explanation)
 - GitHub app connector (fetch files from GitHub repos)
 - Web search
 
-When Codex says "cannot verify because shell blocked," provide the evidence inline:
-- Paste the actual file contents
-- Paste the `npm pack --dry-run` output
-- Paste the `npm test` results
-
-This is NOT cheating — it's giving the reviewer the same information they'd get from shell access.
+In the rare case where Codex genuinely cannot access something specific (e.g., needs credentials it doesn't have), provide the evidence inline:
+- Paste the test output, build output, or file contents
+- This gives the reviewer the same information it would get from running the commands itself
 
 ## Anti-Patterns
 
