@@ -14,6 +14,10 @@ A Model Context Protocol (MCP) server providing unified access to Claude Code, C
 - **Correlation ID Tracking**: Full request tracing across all LLM interactions
 - **Cross-Tool Collaboration**: LLMs can use each other via MCP (validated through dogfooding)
 
+### Observability
+- **SQLite Flight Recorder**: Every request/response logged to `~/.llm-cli-gateway/logs.db` with correlation IDs, token usage, duration, retry counts, and circuit breaker state. Browse with [Datasette](https://datasette.io/): `datasette ~/.llm-cli-gateway/logs.db`
+- **Structured Metadata**: Tool responses include machine-readable `structuredContent` (model, cli, correlationId, sessionId, durationMs, token counts)
+
 ### Reliability & Performance
 - **Retry Logic**: Exponential backoff with circuit breaker for transient failures
 - **Atomic File Writes**: Process-specific temp files with fsync for data integrity
@@ -22,7 +26,7 @@ A Model Context Protocol (MCP) server providing unified access to Claude Code, C
 - **Long-Running Jobs**: Non-time-bound async execution via `*_request_async` + polling tools
 
 ### Security & Quality
-- **Comprehensive Testing**: 221 tests covering unit, integration, and regression scenarios
+- **Comprehensive Testing**: 284 tests covering unit, integration, and regression scenarios
 - **Input Validation**: Zod schemas prevent injection attacks
 - **No Secret Leakage**: Generic session descriptions only (file permissions 0o600)
 - **No ReDoS**: Bounded regex patterns prevent catastrophic backtracking
@@ -359,6 +363,13 @@ await callTool("session_delete", {
 - `LLM_GATEWAY_APPROVAL_POLICY`: Default approval policy when request does not pass `approvalPolicy` (`strict`, `balanced`, `permissive`)
   ```bash
   LLM_GATEWAY_APPROVAL_POLICY=strict node dist/index.js
+  ```
+- `LLM_GATEWAY_LOGS_DB`: Path to SQLite flight recorder database. Default: `~/.llm-cli-gateway/logs.db`. Set to empty string or `none` to disable logging.
+  ```bash
+  # Custom path
+  LLM_GATEWAY_LOGS_DB=/var/log/gateway/logs.db node dist/index.js
+  # Disable flight recorder
+  LLM_GATEWAY_LOGS_DB=none node dist/index.js
   ```
 
 ### CLI-Specific Settings

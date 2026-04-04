@@ -2,6 +2,27 @@
 
 All notable changes to the llm-cli-gateway project.
 
+## [1.1.0] - 2026-04-04
+
+### Added
+
+- **SQLite flight recorder** — New `src/flight-recorder.ts` module logs all LLM requests/responses to `~/.llm-cli-gateway/logs.db` with two-phase logging (logStart/logComplete), WAL mode for concurrent Datasette reads, and graceful degradation when better-sqlite3 is unavailable
+- **`LLM_GATEWAY_LOGS_DB` env var** — Configure flight recorder database path; set to empty string or `"none"` to disable logging entirely
+- **`structuredContent` in MCP tool responses** — All tool handlers now return machine-readable metadata (model, cli, correlationId, sessionId, durationMs, token usage, exitCode) alongside the text response
+- **`better-sqlite3` dependency** — Native SQLite addon for flight recorder (synchronous writes, WAL support)
+
+### Changed
+
+- **review-integrity.ts simplified** — Reduced from 323 lines to 83 lines. Retains 3 violation types: empty_allowed_tools, critical_tools_disallowed, tool_suppression. Removed inlined_code detection and multi-pattern matching
+- **`buildCliResponse` signature** — Now requires `cli` and `durationMs` parameters for structuredContent population
+- **`createErrorResponse`** — Returns sanitized `errorCategory` enum in structuredContent instead of raw error messages (prevents path/secret leakage)
+- **Flight recorder writes are idempotent** — logComplete only updates rows with status='started', preventing double-completion
+
+### Tests
+
+- 284 tests passing (15 test files)
+- Rewritten review-integrity tests to match simplified API
+
 ## [1.3.0] - 2026-02-15
 
 ### Fixed
