@@ -379,6 +379,25 @@ Each CLI can be configured through its own configuration files:
 - Codex: `~/.codex/config.toml`
 - Gemini: `~/.gemini/config.json`
 
+## For Fans of Simon Willison
+
+Simon's `llm` tool made it trivially easy to talk to any LLM from the command line. But as AI-assisted development matures, the challenge shifts from "how do I call a model" to "how do I orchestrate multiple models reliably, and what did they actually do?"
+
+**Multiple models increase the confidence factor.** When Claude writes code, Codex reviews it, and Gemini checks for bugs -- each bringing different training data and reasoning patterns -- the result is more robust than any single model alone. And often this isn't even enough. Having the models do iterative reviews is where you start getting real confidence.
+
+**Every interaction should be queryable data.** Inspired by `llm`'s SQLite logging philosophy, the gateway records every request and response to a local SQLite database. Not just prompts and responses -- retry counts, circuit breaker states, approval decisions, thinking blocks, cost estimates. Open it with Datasette and you have a complete operational picture of your AI usage:
+
+    datasette ~/.llm-cli-gateway/logs.db
+
+**The `llm-gateway` plugin bridges both worlds.** Install it, and your existing `llm` workflows gain orchestration features without changing how you work:
+
+    llm install llm-gateway
+    llm -m gateway-claude "explain this function"
+
+Your gateway interactions appear in both `llm logs` (for your personal history) and the gateway's flight recorder (for operational observability). Two audiences, one workflow.
+
+**Composability over monoliths.** The gateway doesn't replace `llm` -- it complements it. Use `llm` directly when you want simplicity. Route through the gateway when you want resilience, multi-model coordination, or detailed operational telemetry. The plugin is the bridge, not the destination.
+
 ## Development
 
 ### Project Structure
