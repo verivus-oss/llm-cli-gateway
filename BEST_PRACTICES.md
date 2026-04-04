@@ -1,6 +1,6 @@
 # Best Practices: LLM CLI Gateway
 
-Design and implementation best practices for MCP server (research-sourced, production-validated).
+MCP server best practices (research-sourced, production-validated).
 
 ## Table of Contents
 - [MCP Server Design](#mcp-server-design)
@@ -32,7 +32,7 @@ Single domain focus: CLI gateway orchestration
 ✅ Good: `session_create` combines creation + optional activation
 ⚠️ Consider: Higher-level tools for common patterns (e.g., `ask_claude_with_context`)
 
-**Pattern:** Design tools around agent goals, not API mappings. Orchestrate internally, not in LLM context.
+**Pattern:** Design tools for agent goals, not API mappings. Orchestrate internally.
 
 **Action:** Add convenience tools for multi-step workflows.
 
@@ -56,7 +56,7 @@ Error messages: actionable guidance
 
 **Example:** "claude CLI not found. Ensure installed and in PATH"
 
-**Pattern:** Docstrings and errors inform agent's next action, not just human-readable output.
+**Pattern:** Docstrings and errors inform agent's next action.
 
 ---
 
@@ -82,7 +82,7 @@ snake_case: `claude_request`, `session_create`, `list_models`
 ### Avoid "Not Found" Text
 **Status:** ⚠️ Review needed
 
-**Pattern:** Provide generalized, relevant data on failure instead of "not found" to prevent steering LLM away from useful information.
+**Pattern:** Return relevant data on failure, not bare "not found".
 
 ---
 
@@ -116,7 +116,7 @@ codex_request({
 })
 ```
 
-**Why:** MCP server lifecycle tied to fullAuto execution context. Nested connections unsupported.
+**Why:** MCP server lifecycle tied to fullAuto context. Nested connections unsupported.
 
 **Discovered:** 2026-01-24 (DOGFOODING_LESSONS.md #4)
 
@@ -173,13 +173,13 @@ fixes = codex_request({prompt:`Fix:${review1}${review2}`,fullAuto:true})
 ---
 
 ### Future Improvements
-Potential for autonomous multi-level:
+Potential autonomous multi-level:
 1. Batch request tool (multi-sub-requests)
 2. Session sharing (inherit parent MCP connection)
 3. Async orchestration (fire-and-forget + callbacks)
 4. Connection pooling (persistent nested connections)
 
-**Current:** Use manual multi-level until architecture supports nested.
+**Current:** Use manual multi-level until nested supported.
 
 ---
 
@@ -191,7 +191,7 @@ Potential for autonomous multi-level:
 - Low-level (`executeCli`): throws errors
 - Top-level (tool handlers): catch, format via `createErrorResponse`
 
-**Pattern:** Errors bubble to top-level handler for consistent, friendly messages.
+**Pattern:** Errors bubble to top-level for consistent formatting.
 
 ---
 
@@ -201,7 +201,7 @@ Potential for autonomous multi-level:
 Transient (retry): 124 (timeout), ECONNRESET, ETIMEDOUT, ECONNREFUSED
 Non-transient (fail-fast): ENOENT (CLI not found)
 
-**Action:** Document retryable vs fail-fast per error type.
+**Action:** Document retryable vs fail-fast per error.
 
 ---
 
@@ -291,7 +291,7 @@ File: `~/.llm-cli-gateway/sessions.json`
 Minimal state: {id,cli,description,created,lastUsed,active}
 No conversation content in state
 
-**Pattern:** Persist only essential data to minimize overhead.
+**Pattern:** Persist only essential data.
 
 ---
 
@@ -332,7 +332,7 @@ Unit: `executor.test.ts`, `session-manager.test.ts`
 Integration: `integration.test.ts`
 Co-located: `__tests__/` directory
 
-**Pattern:** Separate unit/integration, use `describe` blocks, AAA pattern.
+**Pattern:** Separate unit/integration, `describe` blocks, AAA pattern.
 
 ---
 
@@ -357,14 +357,14 @@ Integration: Real MCP server, real CLI calls
 ---
 
 ### Coverage
-**Status:** ✅ Comprehensive (109 tests)
+**Status:** ✅ Comprehensive (284 tests)
 
 - Executor: errors, timeouts, paths
 - Sessions: CRUD, persistence, edge cases, concurrency
 - Integration: all tools, cross-client, resources
 - Metrics: aggregation, resource exposure
 
-**Pattern:** All paths covered including edge cases and errors.
+**Pattern:** All paths: happy, edge, error.
 
 ---
 
@@ -372,7 +372,7 @@ Integration: Real MCP server, real CLI calls
 **Status:** ⚠️ Integration slow (~42s)
 
 Real CLI calls: 2-14s each
-Total: 109 tests in ~42s
+Total: 284 tests in ~60s
 
 **Options:**
 1. Faster models (haiku, flash)
@@ -388,7 +388,7 @@ Each test: own sessions, cleanup
 No shared state
 Session file cleanup after tests
 
-**Pattern:** Disable isolation (`isolate:false`) for potential speedup.
+**Pattern:** Consider `isolate:false` for speedup.
 
 ---
 
@@ -437,7 +437,7 @@ Protocol: index (MCP server)
 Data: resources (MCP resources)
 Validation: Zod inline
 
-**Enhancement:** Extract schemas to `schemas.ts` for reusability.
+**Enhancement:** Extract schemas to `schemas.ts`.
 
 ---
 

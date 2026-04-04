@@ -22,12 +22,14 @@ import { ApprovalManager, ApprovalPolicy, ApprovalRecord } from "./approval-mana
 import { checkReviewIntegrity, ReviewIntegrityResult } from "./review-integrity.js";
 import { buildClaudeMcpConfig, ClaudeMcpConfigResult, ClaudeMcpServerName, CLAUDE_MCP_SERVER_NAMES } from "./claude-mcp-config.js";
 import { resolveSessionResumeArgs, GATEWAY_SESSION_PREFIX } from "./request-helpers.js";
+import { createFlightRecorder, FlightRecorderLike } from "./flight-recorder.js";
 
 type ExtendedToolResponse = {
   content: { type: "text"; text: string }[];
   isError?: boolean;
   sessionId?: string;
   resumable?: boolean;
+  structuredContent?: Record<string, unknown>;
   approval?: ApprovalRecord | null;
   mcpServers?: {
     requested: ClaudeMcpServerName[];
@@ -140,6 +142,7 @@ let sessionManager: ISessionManager;
 let db: DatabaseConnection | null = null;
 const performanceMetrics = new PerformanceMetrics();
 let resourceProvider: ResourceProvider;
+const flightRecorder: FlightRecorderLike = createFlightRecorder(logger);
 const asyncJobManager = new AsyncJobManager(logger, (cli, durationMs, success) => {
   performanceMetrics.recordRequest(cli, durationMs, success);
 });
@@ -267,8 +270,46 @@ function createErrorResponse(cli: string, code: number, stderr: string, correlat
 
   return {
     content: [{ type: "text" as const, text: errorMessage }],
-    isError: true
+    isError: true,
+    structuredContent: {
+      correlationId: correlationId || null,
+      cli,
+      exitCode: code,
+      errorCategory: code === 124 ? "timeout" : code === 125 ? "idle_timeout" : error ? "spawn_error" : "cli_error"
+    }
   };
+}
+
+function extractUsageAndCost(cli: "claude" | "codex" | "gemini", output: string, outputFormat?: string): {
+  inputTokens?: number;
+  outputTokens?: number;
+  costUsd?: number;
+} {
+  if (cli === "claude" && outputFormat === "stream-json") {
+    const parsed = parseStreamJson(output);
+    return {
+      inputTokens: parsed.usage?.inputTokens,
+      outputTokens: parsed.usage?.outputTokens,
+      costUsd: parsed.costUsd ?? undefined
+    };
+  }
+  return {};
+}
+
+function safeFlightStart(entry: Parameters<FlightRecorderLike["logStart"]>[0]): void {
+  try {
+    flightRecorder.logStart(entry);
+  } catch (error) {
+    logger.error("Flight recorder logStart failed", error);
+  }
+}
+
+function safeFlightComplete(correlationId: string, result: Parameters<FlightRecorderLike["logComplete"]>[1]): void {
+  try {
+    flightRecorder.logComplete(correlationId, result);
+  } catch (error) {
+    logger.error("Flight recorder logComplete failed", error);
+  }
 }
 
 function createApprovalDeniedResponse(operation: string, decision: ReturnType<ApprovalManager["decide"]>) {
@@ -746,11 +787,13 @@ function prepareGeminiRequest(params: {
 }
 
 function buildCliResponse(
+  cli: "claude" | "codex" | "gemini",
   stdout: string,
   optimizeResponse: boolean,
   corrId: string,
   sessionId: string | undefined,
   prep: CliRequestPrep,
+  durationMs: number,
   resumable?: boolean,
   outputFormat?: string
 ): ExtendedToolResponse {
@@ -772,6 +815,16 @@ function buildCliResponse(
 
   const response: ExtendedToolResponse = {
     content: [{ type: "text" as const, text: finalStdout }],
+    structuredContent: {
+      model: prep.resolvedModel || "default",
+      cli,
+      correlationId: corrId,
+      sessionId: sessionId || null,
+      durationMs,
+      ...extractUsageAndCost(cli, stdout, outputFormat),
+      exitCode: 0,
+      retryCount: 0
+    },
     mcpServers: prep.mcpConfig
       ? { requested: prep.requestedMcpServers, enabled: prep.mcpConfig.enabled, missing: prep.mcpConfig.missing }
       : { requested: prep.requestedMcpServers }
@@ -839,6 +892,13 @@ export async function handleGeminiRequest(
   const { corrId, args } = prep;
   let durationMs = 0;
   let wasSuccessful = false;
+  safeFlightStart({
+    correlationId: corrId,
+    cli: "gemini",
+    model: prep.resolvedModel || "default",
+    prompt: params.prompt,
+    sessionId: params.sessionId
+  });
   deps.logger.info(`[${corrId}] gemini_request invoked with model=${prep.resolvedModel || "default"}, approvalMode=${params.approvalMode}, prompt length=${params.prompt.length}`);
 
   try {
@@ -860,6 +920,10 @@ export async function handleGeminiRequest(
 
     if (code !== 0) {
       deps.logger.info(`[${corrId}] gemini_request failed in ${durationMs}ms`);
+      safeFlightComplete(corrId, {
+        response: stderr || "", durationMs, retryCount: 0, circuitBreakerState: "closed",
+        optimizationApplied: false, exitCode: code, errorMessage: stderr || `Exit code ${code}`, status: "failed"
+      });
       return createErrorResponse("gemini", code, stderr, corrId);
     }
     wasSuccessful = true;
@@ -885,10 +949,20 @@ export async function handleGeminiRequest(
     }
 
     deps.logger.info(`[${corrId}] gemini_request completed successfully in ${durationMs}ms`);
-    return buildCliResponse(stdout, params.optimizeResponse ?? false, corrId, effectiveSessionId, prep, sessionResult.userProvidedSession);
+    const response = buildCliResponse("gemini", stdout, params.optimizeResponse ?? false, corrId, effectiveSessionId, prep, durationMs, sessionResult.userProvidedSession);
+    safeFlightComplete(corrId, {
+      response: stdout, durationMs, retryCount: 0, circuitBreakerState: "closed",
+      approvalDecision: prep.approvalDecision?.status, optimizationApplied: params.optimizePrompt || (params.optimizeResponse ?? false),
+      exitCode: 0, status: "completed"
+    });
+    return response;
   } catch (error) {
     const elapsedMs = Math.max(0, Date.now() - startTime);
     deps.logger.info(`[${corrId}] gemini_request threw exception after ${elapsedMs}ms`);
+    safeFlightComplete(corrId, {
+      response: "", durationMs: elapsedMs, retryCount: 0, circuitBreakerState: "closed",
+      optimizationApplied: false, exitCode: 1, errorMessage: (error as Error).message, status: "failed"
+    });
     return createErrorResponse("gemini", 1, "", corrId, error as Error);
   } finally {
     const finalizedDurationMs = Math.max(0, durationMs || Date.now() - startTime);
@@ -1075,6 +1149,7 @@ server.tool(
     const { corrId, args } = prep;
     let durationMs = 0;
     let wasSuccessful = false;
+    safeFlightStart({ correlationId: corrId, cli: "claude", model: prep.resolvedModel || "default", prompt, sessionId });
     logger.info(`[${corrId}] claude_request invoked with model=${prep.resolvedModel || "default"}, outputFormat=${outputFormat}, prompt length=${prompt.length}, sessionId=${sessionId}`);
 
     try {
@@ -1113,6 +1188,11 @@ server.tool(
 
       if (code !== 0) {
         logger.info(`[${corrId}] claude_request failed in ${durationMs}ms`);
+        safeFlightComplete(corrId, {
+          response: stderr || "", durationMs, retryCount: 0, circuitBreakerState: "closed",
+          optimizationApplied: optimizePrompt || optimizeResponse, exitCode: code,
+          errorMessage: stderr || `Exit code ${code}`, status: "failed"
+        });
         return createErrorResponse("claude", code, stderr, corrId);
       }
       wasSuccessful = true;
@@ -1133,12 +1213,26 @@ server.tool(
         if (parsed.costUsd !== null) {
           logger.debug(`[${corrId}] stream-json cost=$${parsed.costUsd}, model=${parsed.model}, turns=${parsed.numTurns}`);
         }
-        return buildCliResponse(parsed.text, optimizeResponse, corrId, effectiveSessionId, prep, undefined, outputFormat);
+        safeFlightComplete(corrId, {
+          response: parsed.text, inputTokens: parsed.usage?.inputTokens, outputTokens: parsed.usage?.outputTokens,
+          durationMs, retryCount: 0, circuitBreakerState: "closed", costUsd: parsed.costUsd ?? undefined,
+          optimizationApplied: optimizePrompt || optimizeResponse, exitCode: 0, status: "completed"
+        });
+        return buildCliResponse("claude", parsed.text, optimizeResponse, corrId, effectiveSessionId, prep, durationMs, undefined, outputFormat);
       }
-      return buildCliResponse(stdout, optimizeResponse, corrId, effectiveSessionId, prep, undefined, outputFormat);
+      safeFlightComplete(corrId, {
+        response: stdout, durationMs, retryCount: 0, circuitBreakerState: "closed",
+        optimizationApplied: optimizePrompt || optimizeResponse, exitCode: 0, status: "completed"
+      });
+      return buildCliResponse("claude", stdout, optimizeResponse, corrId, effectiveSessionId, prep, durationMs, undefined, outputFormat);
     } catch (error) {
       const elapsedMs = Math.max(0, Date.now() - startTime);
       logger.info(`[${corrId}] claude_request threw exception after ${elapsedMs}ms`);
+      safeFlightComplete(corrId, {
+        response: "", durationMs: elapsedMs, retryCount: 0, circuitBreakerState: "closed",
+        optimizationApplied: optimizePrompt || optimizeResponse, exitCode: 1,
+        errorMessage: (error as Error).message, status: "failed"
+      });
       return createErrorResponse("claude", 1, "", corrId, error as Error);
     } finally {
       const finalizedDurationMs = Math.max(0, durationMs || Date.now() - startTime);
@@ -1180,6 +1274,7 @@ server.tool(
     const { corrId, args } = prep;
     let durationMs = 0;
     let wasSuccessful = false;
+    safeFlightStart({ correlationId: corrId, cli: "codex", model: prep.resolvedModel || "default", prompt, sessionId });
     logger.info(`[${corrId}] codex_request invoked with model=${prep.resolvedModel || "default"}, fullAuto=${fullAuto}, prompt length=${prompt.length}`);
 
     try {
@@ -1195,6 +1290,11 @@ server.tool(
 
       if (code !== 0) {
         logger.info(`[${corrId}] codex_request failed in ${durationMs}ms`);
+        safeFlightComplete(corrId, {
+          response: stderr || "", durationMs, retryCount: 0, circuitBreakerState: "closed",
+          optimizationApplied: optimizePrompt || optimizeResponse, exitCode: code,
+          errorMessage: stderr || `Exit code ${code}`, status: "failed"
+        });
         return createErrorResponse("codex", code, stderr, corrId);
       }
       wasSuccessful = true;
@@ -1217,10 +1317,19 @@ server.tool(
       }
 
       logger.info(`[${corrId}] codex_request completed successfully in ${durationMs}ms`);
-      return buildCliResponse(stdout, optimizeResponse, corrId, effectiveSessionId, prep);
+      safeFlightComplete(corrId, {
+        response: stdout, durationMs, retryCount: 0, circuitBreakerState: "closed",
+        optimizationApplied: optimizePrompt || optimizeResponse, exitCode: 0, status: "completed"
+      });
+      return buildCliResponse("codex", stdout, optimizeResponse, corrId, effectiveSessionId, prep, durationMs);
     } catch (error) {
       const elapsedMs = Math.max(0, Date.now() - startTime);
       logger.info(`[${corrId}] codex_request threw exception after ${elapsedMs}ms`);
+      safeFlightComplete(corrId, {
+        response: "", durationMs: elapsedMs, retryCount: 0, circuitBreakerState: "closed",
+        optimizationApplied: optimizePrompt || optimizeResponse, exitCode: 1,
+        errorMessage: (error as Error).message, status: "failed"
+      });
       return createErrorResponse("codex", 1, "", corrId, error as Error);
     } finally {
       const finalizedDurationMs = Math.max(0, durationMs || Date.now() - startTime);
@@ -1900,6 +2009,9 @@ async function shutdown(signal: string): Promise<void> {
       await db.disconnect();
       logger.info("Database connections closed");
     }
+
+    flightRecorder.close();
+    logger.info("Flight recorder closed");
 
     process.exit(0);
   } catch (error) {

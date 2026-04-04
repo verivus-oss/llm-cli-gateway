@@ -1,6 +1,6 @@
 {
   "name": "llm-cli-gateway",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "mcpName": "io.github.verivus-oss/llm-cli-gateway",
   "description": "MCP server providing unified access to Claude Code, Codex, and Gemini CLIs with session management, retry logic, and async job orchestration.",
   "license": "MIT",
@@ -72,12 +72,14 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
+    "better-sqlite3": "^11.0.0",
     "ioredis": "^5.4.1",
     "pg": "^8.12.0",
     "toml": "^3.0.0",
     "zod": "^3.23.0"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.0",
     "@types/node": "^20.19.30",
     "@types/pg": "^8.11.10",
     "@typescript-eslint/eslint-plugin": "^6.0.0",
