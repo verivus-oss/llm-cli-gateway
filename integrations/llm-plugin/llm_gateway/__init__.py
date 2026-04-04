@@ -1,6 +1,10 @@
 import llm
 
+from .models import GatewayClaude, GatewayCodex, GatewayGemini
+
 
 @llm.hookimpl
 def register_models(register):
-    pass  # Models added in Task 5
+    register(GatewayClaude())
+    register(GatewayCodex())
+    register(GatewayGemini())
