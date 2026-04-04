@@ -1,9 +1,0 @@
-README.md
-pyproject.toml
-llm_gateway/__init__.py
-llm_gateway.egg-info/PKG-INFO
-llm_gateway.egg-info/SOURCES.txt
-llm_gateway.egg-info/dependency_links.txt
-llm_gateway.egg-info/entry_points.txt
-llm_gateway.egg-info/requires.txt
-llm_gateway.egg-info/top_level.txt
