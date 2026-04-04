@@ -1,2 +1,15 @@
 node_modules/
 dist/
+
+# MCP Registry publishing
+mcp-publisher
+server.json
+
+# Python build artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+.eggs/
+build/
+*.dist-info/
