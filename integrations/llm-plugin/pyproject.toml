@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "llm-gateway"
+version = "0.1.0"
+description = "llm plugin for multi-LLM orchestration via llm-cli-gateway"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.9"
+dependencies = ["llm>=0.19"]
+
+[project.entry-points.llm]
+gateway = "llm_gateway"
+
+[tool.setuptools.packages.find]
+include = ["llm_gateway*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
