@@ -1,9 +1,9 @@
 # Simon Willison Integration Suite — Design Spec
 
 **Date:** 2026-04-04
-**Status:** Approved (Codex review passed — round 3)
+**Status:** Approved (Codex round 3 + Gemini round 2)
 **Approach:** Plugin-Heavy (Approach 1)
-**Review Round:** 3 (addressing Codex round 2 feedback)
+**Review Round:** 4 (addressing Gemini review feedback)
 
 ## Overview
 
@@ -45,24 +45,29 @@ Two tables joined by `correlation_id` (the canonical request identifier):
 
 ### SQLite engine: better-sqlite3 (gateway runtime) with esbuild externals
 
-After investigation, `node-sqlite3-wasm` does not have verified WAL support and ships a JS+WASM pair (not single-file). `better-sqlite3` is the proven choice for Node.js SQLite with WAL, synchronous writes, and production reliability.
+`better-sqlite3` is the proven choice for Node.js SQLite with WAL, synchronous writes, and production reliability.
 
-**Bundling strategy:** The esbuild command marks `better-sqlite3` as an external dependency (`--external:better-sqlite3`). The resulting `gateway.js` contains `require("better-sqlite3")` calls that Node.js must resolve at runtime. To make this work inside the Python package:
+**ABI safety:** Native Node.js addons (`.node` binaries) are compiled against a specific Node.js ABI version. Shipping a prebuilt `.node` binary inside a Python wheel would break when the user's Node.js ABI doesn't match the binary's target. This makes bundling native addons inside Python packages fundamentally unreliable.
 
-1. The `bundled/` directory includes a complete `node_modules/better-sqlite3/` subtree (the JS wrapper package + platform-specific `.node` binary).
-2. The gateway is launched with `NODE_PATH` set to the `bundled/` directory, so Node.js resolves `require("better-sqlite3")` from there.
-3. Platform-specific wheels (linux-x64, darwin-x64, darwin-arm64, win-x64) each include the correct prebuilt `.node` binary for that platform.
+**Resolution — two tiers:**
 
-This is the same pattern used by Electron apps and standalone Node.js deployments that ship native addons alongside a bundled entry point.
+1. **Bundled plugin (Python wheel):** The esbuild command marks `better-sqlite3` as external (`--external:better-sqlite3`). The Python package ships only `gateway.js` (pure JS, no native deps). When `better-sqlite3` is not available at runtime, the flight recorder is gracefully disabled with a stderr warning. The gateway works fully — just without SQLite logging.
 
-**Fallback:** If the native addon fails to load (unsupported platform), the flight recorder is silently disabled and a warning is logged to stderr. The gateway continues to function without logging.
+2. **Full install (npm):** Users who want the flight recorder install the gateway via `npm install -g llm-cli-gateway`. This runs `better-sqlite3`'s prebuild-install, which downloads the correct prebuilt binary for the user's exact Node.js ABI version and platform. The plugin detects the npm-installed gateway via `GATEWAY_PATH` env var or by finding `llm-cli-gateway` on PATH, and uses it instead of the bundled JS.
+
+**Fallback chain:**
+- `GATEWAY_PATH` → use that (assumed to have better-sqlite3 available)
+- `llm-cli-gateway` on PATH → use npm-installed version (flight recorder enabled)
+- `bundled/gateway.js` → use pure-JS bundle (flight recorder disabled, stderr warning)
+
+This means the "zero-config" install (`llm install llm-gateway`) works immediately for orchestration, but flight recording requires one additional step (`npm install -g llm-cli-gateway`). The README documents this clearly.
 
 ### Thinking blocks: Configurable, default stripped (Option C)
 
 - Default: final answer text only (safe for piping)
 - Opt-in: `llm -m gateway-claude -o show_thinking true`
 - Always: full trace retained in gateway flight recorder
-- `show_thinking` is a no-op for `gateway-codex` and `gateway-gemini` (only Claude produces thinking blocks)
+- `show_thinking` is a no-op for `gateway-codex`. For `gateway-gemini`, it is supported when using Gemini Flash Thinking models (which produce reasoning outputs). The gateway passes through whatever thinking/reasoning content the CLI returns.
 
 ### Conversation mode: Both, user-controlled (Option C)
 
@@ -81,8 +86,8 @@ Small set of common options + `gateway_args` escape hatch for full access.
 
 ### Distribution: Bundled by default (Option A)
 
-- Gateway compiled via esbuild with `better-sqlite3` as external, shipped inside Python package as platform-specific wheels
-- `GATEWAY_PATH` env var overrides bundled gateway for power users
+- Gateway compiled via esbuild with `better-sqlite3` as external, shipped as a single universal Python wheel (pure JS, no native deps)
+- `GATEWAY_PATH` env var or `llm-cli-gateway` on PATH overrides bundled gateway (enables flight recorder)
 - Requires Node.js 18+ on the system
 
 ### README pitch: Philosophy-focused (Option B)
@@ -240,10 +245,8 @@ integrations/llm-plugin/
 │   ├── __init__.py              # Plugin entry point, hook registrations (lazy imports)
 │   ├── models.py                # GatewayClaude, GatewayCodex, GatewayGemini
 │   ├── mcp_client.py            # MCP JSON-RPC stdio transport client
-│   ├── bundled/                 # gateway.js + better-sqlite3 module (platform-specific)
-│   │   ├── gateway.js
-│   │   └── node_modules/
-│   │       └── better-sqlite3/  # JS wrapper + prebuilt .node binary
+│   ├── bundled/                 # gateway.js only (pure JS, no native deps)
+│   │   └── gateway.js
 │   └── options.py               # Tiered option definitions
 ├── tests/
 │   ├── test_models.py
@@ -257,8 +260,9 @@ integrations/llm-plugin/
 
 1. `esbuild src/index.ts --bundle --platform=node --external:better-sqlite3 --outfile=gateway.js` — compiles gateway to single file with native dep excluded
 2. Copy `gateway.js` into `llm_gateway/bundled/`
-3. Install `better-sqlite3` for the target platform and copy the complete `node_modules/better-sqlite3/` subtree (JS wrapper + prebuilt `.node` binary) into `llm_gateway/bundled/node_modules/`
-4. Build platform-specific Python wheels (linux-x64, darwin-x64, darwin-arm64, win-x64)
+3. Build a single universal Python wheel (no platform-specific builds needed — the bundle is pure JS)
+
+Note: The bundled gateway.js will fail to load `better-sqlite3` at runtime. The flight recorder gracefully disables itself in this case. Users who want the flight recorder install the gateway via npm (`npm install -g llm-cli-gateway`), which handles native binary compilation.
 
 ### pyproject.toml
 
@@ -290,7 +294,7 @@ Three classes in `models.py`, all subclassing `llm.Model`:
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `show_thinking` | bool | `false` | Include Claude's reasoning blocks inline (no-op for codex/gemini) |
+| `show_thinking` | bool | `false` | Include reasoning blocks inline (Claude + Gemini Thinking models; no-op for codex) |
 | `timeout` | int | `300000` | Request timeout in ms |
 | `optimize_prompt` | bool | `false` | Apply gateway token optimization |
 | `session_mode` | string | `"off"` | `"off"` or `"gateway"` (CLI-native resume) |
@@ -300,7 +304,7 @@ Three classes in `models.py`, all subclassing `llm.Model`:
 
 Minimal MCP JSON-RPC client implementing the [MCP lifecycle spec](https://modelcontextprotocol.io/specification/2024-11-05/basic/lifecycle/):
 
-**Message framing:** Each JSON-RPC message is preceded by `Content-Length: N\r\n\r\n` followed by `N` bytes of JSON (same as LSP). The client reads/writes using this framing on stdin/stdout of the subprocess.
+**Message framing:** Newline-delimited JSON (NDJSON). Each JSON-RPC message is serialized as a single line of JSON followed by `\n`. This matches the `@modelcontextprotocol/sdk` `StdioServerTransport` implementation (verified: `ReadBuffer` splits on `\n`, `serializeMessage()` appends `\n`). This is NOT LSP-style Content-Length framing — the MCP stdio transport uses a simpler newline-delimited protocol.
 
 **Lifecycle:**
 1. Spawns `node gateway.js` (from bundled path or `GATEWAY_PATH`)
@@ -367,9 +371,10 @@ The plugin extracts:
 
 ### Gateway Resolution Order
 
-1. `GATEWAY_PATH` env var
-2. `llm_gateway/bundled/gateway.js`
-3. Error: "Node.js 18+ is required. Install from https://nodejs.org/"
+1. `GATEWAY_PATH` env var → use that path (flight recorder available if better-sqlite3 installed)
+2. `llm-cli-gateway` on system PATH → use npm-installed version (flight recorder enabled)
+3. `llm_gateway/bundled/gateway.js` → use bundled pure-JS version (flight recorder disabled)
+4. Error: "Node.js 18+ is required. Install from https://nodejs.org/"
 
 ### Node.js Detection
 
@@ -379,7 +384,13 @@ The plugin extracts:
 
 ### Streaming
 
-Plugin yields the full response as one chunk. True streaming (SSE/chunked MCP) is out of scope for v1.
+**v1 limitation:** The plugin yields the full response as one chunk. The gateway's `tools/call` returns a complete `CallToolResult` — there is no intermediate progress notification or chunked response in the current MCP tool handler implementation.
+
+**Impact:** `llm` users will see no output until the full LLM response is ready. For short prompts this is acceptable (~2-5s). For long-running requests (code generation, multi-step reasoning), this may feel unresponsive compared to native `llm` plugins that stream tokens.
+
+**v2 path (documented for future):** The gateway could emit MCP `notifications/progress` messages during CLI execution (piping CLI stdout chunks as progress updates). The Python client would yield these as chunks to `llm`'s streaming generator. This requires changes to both the gateway tool handlers and the Python MCP client, and is explicitly deferred to v2.
+
+**Workaround for v1:** Users who need streaming should use the CLI tools directly via native `llm` plugins (e.g., `llm-anthropic`). The gateway plugin is best suited for orchestration workflows where response completeness matters more than streaming speed.
 
 ### Usage Metadata
 
@@ -482,7 +493,7 @@ If `better-sqlite3` fails to load (unsupported platform, missing native addon), 
 ### Plugin: `tests/`
 
 - `test_models.py` — registration, options parsing, model_id values, `show_thinking` no-op for non-Claude
-- `test_mcp_client.py` — mock subprocess: full MCP lifecycle (initialize → notifications/initialized → tools/call → shutdown), Content-Length framing, timeout, stderr, Node version check, structured response parsing
+- `test_mcp_client.py` — mock subprocess: full MCP lifecycle (initialize → notifications/initialized → tools/call → shutdown), NDJSON framing (newline-delimited), timeout, stderr, Node version check, structured response parsing
 - `test_options.py` — tiered options, `gateway_args` JSON merge, reserved key rejection, invalid JSON rejection
 - `test_sessions.py` — session_mode=gateway flow: create → store in response_json → recover on -c, stale session fallback
 - Integration test (optional, marked slow): real gateway, simple prompt, verify response + flight recorder entry + structuredContent
@@ -492,7 +503,8 @@ If `better-sqlite3` fails to load (unsupported platform, missing native addon), 
 - Plugin tests: Python 3.9+, `llm` installed
 - Gateway tests: added to existing Vitest suite (`npm test`)
 - Smoke test: install wheel, `llm models list`, verify gateway models appear
-- Platform smoke tests for bundled better-sqlite3 (linux-x64, darwin-arm64 at minimum)
+- Bundled gateway smoke test: verify flight recorder gracefully disables when better-sqlite3 unavailable
+- npm-installed gateway smoke test: verify flight recorder activates when better-sqlite3 available
 
 ### Existing test impact
 
