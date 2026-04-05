@@ -1,7 +1,7 @@
 ---
-title: "3 AIs Reviewed Simon Willison's Code. They Disagreed on 2 Findings. That is the Point."
+title: "3 AIs Reviewed the Same Codebase. They Disagreed on 2 Findings. That is the Point."
 published: false
-description: "We used llm-cli-gateway and sqry to have Codex and Gemini independently review the llm codebase, then Claude adjudicated. 8 findings held up across all three. 2 did not. The disagreements taught us more than the findings."
+description: "We used llm-cli-gateway and sqry to have Codex and Gemini independently review a well-maintained open source project, then Claude adjudicated. 8 findings held up across all three. 2 did not."
 tags: ai, codereview, python, opensource
 ---
 
