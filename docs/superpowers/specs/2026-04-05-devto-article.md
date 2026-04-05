@@ -121,3 +121,7 @@ That said, the reviewers did not find SQL injection surfaces in the paths they i
 The interesting result wasn't the findings. It was the disagreements. Two models confirming something doesn't make it true. The third model pushing back -- "is this actually wrong?" -- is what separates a useful review from a noisy one.
 
 We're going to keep running this pattern. Not because we think AI review replaces human review, but because three independent perspectives catch things that one perspective, no matter how capable, misses. That's the premise behind [llm-cli-gateway](https://github.com/verivus-oss/llm-cli-gateway), and this was a useful case study.
+
+---
+
+*Werner Kasselman is a software engineer who builds open source developer tools in his spare time, including sqry and llm-cli-gateway. By day he works at ServiceNow. He lives in Australia with his family and blogs at [medium.com/@wernerk](https://medium.com/@wernerk). Views expressed here are his own and do not represent ServiceNow.*
