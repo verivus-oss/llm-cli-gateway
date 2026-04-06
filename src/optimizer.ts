@@ -7,7 +7,7 @@ const COURTESY_PATTERNS: RegExp[] = [
   /\bI would like\b\s*/gi,
   /\bI need you to\b\s*/gi,
   /\bI just implemented\b\s*/gi,
-  /\bPlease do the following:?\s*/gi
+  /\bPlease do the following:?\s*/gi,
 ];
 
 const ADJECTIVE_PATTERNS: RegExp[] = [
@@ -15,12 +15,12 @@ const ADJECTIVE_PATTERNS: RegExp[] = [
   /\bdetailed\b/gi,
   /\bthorough\b/gi,
   /\boverall\b/gi,
-  /\bcritical\b/gi
+  /\bcritical\b/gi,
 ];
 
 const TASK_PREFIXES: RegExp[] = [
   /^(First|Then|After that|Finally),?\s*/i,
-  /^(First|Then|After that|Finally),?\s*you should\s*/i
+  /^(First|Then|After that|Finally),?\s*you should\s*/i,
 ];
 
 export function estimateTokens(text: string): number {
@@ -57,18 +57,18 @@ function optimizeText(text: string, mode: OptimizationMode): string {
 function optimizeSegment(segment: string, mode: OptimizationMode): string {
   const inlineParts = segment.split(/(`[^`]*`)/g);
   return inlineParts
-    .map((part) => (part.startsWith("`") ? part : optimizePlain(part, mode)))
+    .map(part => (part.startsWith("`") ? part : optimizePlain(part, mode)))
     .join("");
 }
 
 function optimizePlain(text: string, mode: OptimizationMode): string {
   let output = text;
 
-  COURTESY_PATTERNS.forEach((pattern) => {
+  COURTESY_PATTERNS.forEach(pattern => {
     output = output.replace(pattern, "");
   });
 
-  ADJECTIVE_PATTERNS.forEach((pattern) => {
+  ADJECTIVE_PATTERNS.forEach(pattern => {
     output = output.replace(pattern, "");
   });
 
@@ -114,10 +114,7 @@ function inlineFileReferences(text: string): string {
     (_match, file, line) => `${file}:${line}`
   );
 
-  output = output.replace(
-    /\b(\S+)\s+line\s+~?(\d+)/gi,
-    (_match, file, line) => `${file}:${line}`
-  );
+  output = output.replace(/\b(\S+)\s+line\s+~?(\d+)/gi, (_match, file, line) => `${file}:${line}`);
 
   output = output.replace(
     /\b(?:in the )?([\w./-]+)\s+file\s+at\s+lines?\s+([0-9 ,and~]+)/gi,
@@ -189,7 +186,7 @@ function compressTaskLists(text: string): string {
 
 function cleanTaskItem(item: string): string {
   let cleaned = item.trim();
-  TASK_PREFIXES.forEach((pattern) => {
+  TASK_PREFIXES.forEach(pattern => {
     cleaned = cleaned.replace(pattern, "");
   });
   cleaned = cleaned.replace(/^you should\s*/i, "");
@@ -200,14 +197,20 @@ function cleanTaskItem(item: string): string {
 
 function applyArrowNotation(text: string): string {
   const lines = text.split("\n");
-  const output = lines.map((line) => {
+  const output = lines.map(line => {
     let updated = line;
-    updated = updated.replace(/\bChange\s+(?:the\s+)?([A-Za-z][\w-]*)\s+to\s+(?:a\s+|an\s+)?([A-Za-z][\w-]*)([.!?]|$)/gi, (_m, from, to, end) => {
-      return `${from.trim()} → ${to.trim()}${end || ""}`;
-    });
-    updated = updated.replace(/\bConvert\s+(?:the\s+)?([A-Za-z][\w-]*)\s+to\s+(?:a\s+|an\s+)?([A-Za-z][\w-]*)([.!?]|$)/gi, (_m, from, to, end) => {
-      return `${from.trim()} → ${to.trim()}${end || ""}`;
-    });
+    updated = updated.replace(
+      /\bChange\s+(?:the\s+)?([A-Za-z][\w-]*)\s+to\s+(?:a\s+|an\s+)?([A-Za-z][\w-]*)([.!?]|$)/gi,
+      (_m, from, to, end) => {
+        return `${from.trim()} → ${to.trim()}${end || ""}`;
+      }
+    );
+    updated = updated.replace(
+      /\bConvert\s+(?:the\s+)?([A-Za-z][\w-]*)\s+to\s+(?:a\s+|an\s+)?([A-Za-z][\w-]*)([.!?]|$)/gi,
+      (_m, from, to, end) => {
+        return `${from.trim()} → ${to.trim()}${end || ""}`;
+      }
+    );
     updated = updated.replace(/\b(\w+)\s+should be\s+an?\s+(\w+)/gi, "$1: $2");
     return updated;
   });
@@ -216,7 +219,7 @@ function applyArrowNotation(text: string): string {
 
 function applySlashNotation(text: string): string {
   const lines = text.split("\n");
-  const output = lines.map((line) => {
+  const output = lines.map(line => {
     const trimmed = line.trim();
     if (trimmed.length < 50 && /^[A-Za-z0-9][A-Za-z0-9\s/&-]+$/.test(trimmed)) {
       return line.replace(/\s+and\s+/, "/");

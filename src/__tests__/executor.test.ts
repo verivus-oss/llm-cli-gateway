@@ -1,5 +1,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { executeCli, killProcessGroup, killAllProcessGroups, registerProcessGroup, unregisterProcessGroup } from "../executor.js";
+import {
+  executeCli,
+  killProcessGroup,
+  killAllProcessGroups,
+  registerProcessGroup,
+  unregisterProcessGroup,
+} from "../executor.js";
 import { spawn } from "child_process";
 
 describe("executeCli", () => {
@@ -121,9 +127,7 @@ describe("executeCli", () => {
 
   describe("concurrent execution", () => {
     it("should handle multiple concurrent executions", async () => {
-      const promises = Array.from({ length: 5 }, (_, i) =>
-        executeCli("echo", [`message ${i}`])
-      );
+      const promises = Array.from({ length: 5 }, (_, i) => executeCli("echo", [`message ${i}`]));
       const results = await Promise.all(promises);
 
       results.forEach((result, i) => {
@@ -150,9 +154,11 @@ describe("executeCli", () => {
 
     it("should reset idle timer on output", async () => {
       // Process outputs every 200ms for ~1s — idle timeout of 500ms should not fire
-      const result = await executeCli("sh", [
-        "-c", "for i in 1 2 3 4 5; do echo tick; sleep 0.2; done"
-      ], { idleTimeout: 500 });
+      const result = await executeCli(
+        "sh",
+        ["-c", "for i in 1 2 3 4 5; do echo tick; sleep 0.2; done"],
+        { idleTimeout: 500 }
+      );
       expect(result.code).toBe(0);
     }, 15000);
 
@@ -173,9 +179,9 @@ describe("executeCli", () => {
       // Code 125 is non-transient → no retry, completes in ~5.5s.
       // Verifies the exited flag fix: proc.killed was always true after
       // SIGTERM so SIGKILL never fired. The exited flag tracks actual exit.
-      const result = await executeCli("bash", [
-        "-c", "trap '' TERM; sleep 30"
-      ], { idleTimeout: 500 });
+      const result = await executeCli("bash", ["-c", "trap '' TERM; sleep 30"], {
+        idleTimeout: 500,
+      });
       expect(result.code).toBe(125);
       expect(result.stderr).toContain("inactivity");
     }, 15000);
@@ -193,7 +199,7 @@ describe("executeCli", () => {
       const proc = spawn("true", [], { detached: true, stdio: "ignore" });
       proc.unref();
       // Wait for process to exit
-      return new Promise<void>((resolve) => {
+      return new Promise<void>(resolve => {
         proc.on("close", () => {
           // Process is now dead — killProcessGroup should not throw
           const result = killProcessGroup(proc, "SIGTERM");

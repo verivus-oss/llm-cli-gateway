@@ -11,11 +11,11 @@ import type { Logger } from "./logger.js";
  */
 export enum CircuitBreakerState {
   /** The circuit is closed and allows operations to execute. */
-  CLOSED = 'CLOSED',
+  CLOSED = "CLOSED",
   /** The circuit is open and fails operations immediately. */
-  OPEN = 'OPEN',
+  OPEN = "OPEN",
   /** The circuit is half-open and allows a single trial operation. */
-  HALF_OPEN = 'HALF_OPEN',
+  HALF_OPEN = "HALF_OPEN",
 }
 
 /**
@@ -68,16 +68,18 @@ const isDefaultTransient = (error: any): boolean => {
   }
 
   // Shell command-related errors
-  if (error.code === 124) { // wall-clock timeout (explicit, caller-set) — transient
+  if (error.code === 124) {
+    // wall-clock timeout (explicit, caller-set) — transient
     return true;
   }
   // Note: exit code 125 = idle timeout (stuck process) — intentionally non-transient
-  if (error.code === 'ENOENT') { // command not found
+  if (error.code === "ENOENT") {
+    // command not found
     return false;
   }
 
   // Node.js network errors
-  const transientErrorCodes = ['ECONNRESET', 'ETIMEDOUT', 'ECONNREFUSED', 'EPIPE'];
+  const transientErrorCodes = ["ECONNRESET", "ETIMEDOUT", "ECONNREFUSED", "EPIPE"];
   if (transientErrorCodes.includes(error.code)) {
     return true;
   }
@@ -91,9 +93,9 @@ const isDefaultTransient = (error: any): boolean => {
  * @returns A new CircuitBreaker instance.
  */
 export function createCircuitBreaker(options?: {
-  resetTimeout?: number,
-  failureThreshold?: number,
-  onStateChange?: (newState: CircuitBreakerState, error?: Error) => void
+  resetTimeout?: number;
+  failureThreshold?: number;
+  onStateChange?: (newState: CircuitBreakerState, error?: Error) => void;
 }): CircuitBreaker {
   return {
     state: CircuitBreakerState.CLOSED,
@@ -118,7 +120,7 @@ export async function withRetry<T>(
   operation: () => Promise<T>,
   circuitBreaker: CircuitBreaker,
   retryOptions?: Partial<RetryOptions>,
-  logger?: Logger,
+  logger?: Logger
 ): Promise<T> {
   const wrapError = (message: string, error?: any): Error => {
     const wrapped = new Error(message) as Error & { code?: any; result?: any; cause?: any };
@@ -141,7 +143,7 @@ export async function withRetry<T>(
     isTransient: isDefaultTransient,
     onRetry: (error, attempt, delay) => {
       logger?.debug(
-        `[Retry] Attempt ${attempt} failed with transient error. Retrying in ${delay}ms... ${error.message}`,
+        `[Retry] Attempt ${attempt} failed with transient error. Retrying in ${delay}ms... ${error.message}`
       );
     },
     ...retryOptions,
@@ -155,7 +157,7 @@ export async function withRetry<T>(
     } else {
       const remaining = Math.ceil((circuitBreaker.resetTimeout - timeSinceFailure) / 1000);
       throw wrapError(
-        `[CircuitBreaker] Circuit is open. Failing fast. Will not try for another ${remaining}s.`,
+        `[CircuitBreaker] Circuit is open. Failing fast. Will not try for another ${remaining}s.`
       );
     }
   }
@@ -171,15 +173,18 @@ export async function withRetry<T>(
         circuitBreaker.failures = 0;
         circuitBreaker.lastFailureTime = null;
         circuitBreaker.state = CircuitBreakerState.CLOSED;
-        if(oldState !== CircuitBreakerState.CLOSED) {
-            circuitBreaker.onStateChange?.(CircuitBreakerState.CLOSED);
+        if (oldState !== CircuitBreakerState.CLOSED) {
+          circuitBreaker.onStateChange?.(CircuitBreakerState.CLOSED);
         }
       }
 
       return result;
     } catch (error: any) {
       if (!options.isTransient(error)) {
-        throw wrapError(`[CircuitBreaker] Operation failed with non-transient error: ${error.message}`, error);
+        throw wrapError(
+          `[CircuitBreaker] Operation failed with non-transient error: ${error.message}`,
+          error
+        );
       }
 
       circuitBreaker.failures++;
@@ -190,19 +195,19 @@ export async function withRetry<T>(
         circuitBreaker.onStateChange?.(CircuitBreakerState.OPEN, error);
         throw wrapError(
           `[CircuitBreaker] Circuit re-opened after failed attempt in HALF_OPEN state. Last error: ${error.message}`,
-          error,
+          error
         );
       }
 
       if (circuitBreaker.failures >= circuitBreaker.failureThreshold) {
         const oldState = circuitBreaker.state;
         circuitBreaker.state = CircuitBreakerState.OPEN;
-        if(oldState === CircuitBreakerState.CLOSED) {
-            circuitBreaker.onStateChange?.(CircuitBreakerState.OPEN, error);
+        if (oldState === CircuitBreakerState.CLOSED) {
+          circuitBreaker.onStateChange?.(CircuitBreakerState.OPEN, error);
         }
         throw wrapError(
           `[CircuitBreaker] Circuit opened after ${circuitBreaker.failures} consecutive failures. Last error: ${error.message}`,
-          error,
+          error
         );
       }
 
@@ -210,11 +215,14 @@ export async function withRetry<T>(
         throw error;
       }
 
-      const delay = Math.min(options.initialDelay * options.factor ** (attempt - 1), options.maxDelay);
+      const delay = Math.min(
+        options.initialDelay * options.factor ** (attempt - 1),
+        options.maxDelay
+      );
       options.onRetry(error, attempt, delay);
       await new Promise(resolve => setTimeout(resolve, delay));
     }
   }
 
-  throw new Error('[Retry] Operation failed after all retry attempts.');
+  throw new Error("[Retry] Operation failed after all retry attempts.");
 }
