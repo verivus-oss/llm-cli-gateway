@@ -30,7 +30,11 @@ import {
   ClaudeMcpServerName,
   CLAUDE_MCP_SERVER_NAMES,
 } from "./claude-mcp-config.js";
-import { resolveSessionResumeArgs, GATEWAY_SESSION_PREFIX } from "./request-helpers.js";
+import {
+  resolveSessionResumeArgs,
+  sanitizeCliArgValues,
+  GATEWAY_SESSION_PREFIX,
+} from "./request-helpers.js";
 import { createFlightRecorder, FlightRecorderLike } from "./flight-recorder.js";
 
 type ExtendedToolResponse = {
@@ -714,9 +718,11 @@ function prepareClaudeRequest(params: {
     args.push("--output-format", "stream-json", "--include-partial-messages");
   }
   if (params.allowedTools && params.allowedTools.length > 0) {
+    sanitizeCliArgValues(params.allowedTools, "allowedTools");
     args.push("--allowed-tools", ...params.allowedTools);
   }
   if (params.disallowedTools && params.disallowedTools.length > 0) {
+    sanitizeCliArgValues(params.disallowedTools, "disallowedTools");
     args.push("--disallowed-tools", ...params.disallowedTools);
   }
   if (params.approvalStrategy === "mcp_managed") {
@@ -886,12 +892,15 @@ function prepareGeminiRequest(params: {
   if (resolvedModel) args.push("--model", resolvedModel);
   if (effectiveApprovalMode) args.push("--approval-mode", effectiveApprovalMode);
   if (params.allowedTools && params.allowedTools.length > 0) {
+    sanitizeCliArgValues(params.allowedTools, "allowedTools");
     params.allowedTools.forEach(tool => args.push("--allowed-tools", tool));
   }
   if (requestedMcpServers.length > 0) {
+    sanitizeCliArgValues(requestedMcpServers, "mcpServers");
     requestedMcpServers.forEach(serverName => args.push("--allowed-mcp-server-names", serverName));
   }
   if (params.includeDirs && params.includeDirs.length > 0) {
+    sanitizeCliArgValues(params.includeDirs, "includeDirs");
     params.includeDirs.forEach(dir => args.push("--include-directories", dir));
   }
 
