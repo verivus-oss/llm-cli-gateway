@@ -62,12 +62,14 @@ export function parseStreamJson(stdout: string): StreamJsonResult {
 
   // Extract from result event (preferred)
   if (resultEvent) {
-    const usage = resultEvent.usage ? {
-      inputTokens: resultEvent.usage.input_tokens ?? 0,
-      outputTokens: resultEvent.usage.output_tokens ?? 0,
-      cacheReadInputTokens: resultEvent.usage.cache_read_input_tokens ?? 0,
-      cacheCreationInputTokens: resultEvent.usage.cache_creation_input_tokens ?? 0,
-    } : null;
+    const usage = resultEvent.usage
+      ? {
+          inputTokens: resultEvent.usage.input_tokens ?? 0,
+          outputTokens: resultEvent.usage.output_tokens ?? 0,
+          cacheReadInputTokens: resultEvent.usage.cache_read_input_tokens ?? 0,
+          cacheCreationInputTokens: resultEvent.usage.cache_creation_input_tokens ?? 0,
+        }
+      : null;
 
     return {
       text: resultEvent.result ?? "",

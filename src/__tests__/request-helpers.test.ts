@@ -1,5 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { resolveSessionResumeArgs, validateSessionId, GATEWAY_SESSION_PREFIX } from "../request-helpers.js";
+import {
+  resolveSessionResumeArgs,
+  validateSessionId,
+  GATEWAY_SESSION_PREFIX,
+} from "../request-helpers.js";
 
 describe("request-helpers", () => {
   describe("GATEWAY_SESSION_PREFIX", () => {
@@ -31,7 +35,7 @@ describe("request-helpers", () => {
       const result = resolveSessionResumeArgs({
         sessionId: "user-abc",
         resumeLatest: true,
-        createNewSession: true
+        createNewSession: true,
       });
       expect(result.resumeArgs).toEqual([]);
       expect(result.effectiveSessionId).toBeUndefined();
@@ -41,7 +45,7 @@ describe("request-helpers", () => {
     it("resumeLatest=true without sessionId returns --resume latest", () => {
       const result = resolveSessionResumeArgs({
         resumeLatest: true,
-        createNewSession: false
+        createNewSession: false,
       });
       expect(result.resumeArgs).toEqual(["--resume", "latest"]);
       expect(result.effectiveSessionId).toBeUndefined();
@@ -51,7 +55,7 @@ describe("request-helpers", () => {
     it("user-provided sessionId returns --resume with that ID", () => {
       const result = resolveSessionResumeArgs({
         sessionId: "user-abc",
-        createNewSession: false
+        createNewSession: false,
       });
       expect(result.resumeArgs).toEqual(["--resume", "user-abc"]);
       expect(result.effectiveSessionId).toBe("user-abc");
@@ -62,7 +66,7 @@ describe("request-helpers", () => {
       const result = resolveSessionResumeArgs({
         sessionId: "user-abc",
         resumeLatest: true,
-        createNewSession: false
+        createNewSession: false,
       });
       expect(result.resumeArgs).toEqual(["--resume", "user-abc"]);
       expect(result.effectiveSessionId).toBe("user-abc");
@@ -71,7 +75,7 @@ describe("request-helpers", () => {
 
     it("no flags returns empty args", () => {
       const result = resolveSessionResumeArgs({
-        createNewSession: false
+        createNewSession: false,
       });
       expect(result.resumeArgs).toEqual([]);
       expect(result.effectiveSessionId).toBeUndefined();
@@ -86,15 +90,15 @@ describe("request-helpers", () => {
     });
 
     it("rejects gateway-prefixed sessionId with clear error", () => {
-      expect(() =>
-        resolveSessionResumeArgs({ sessionId: "gw-abc123" })
-      ).toThrow('Session ID "gw-abc123" uses reserved prefix "gw-"');
+      expect(() => resolveSessionResumeArgs({ sessionId: "gw-abc123" })).toThrow(
+        'Session ID "gw-abc123" uses reserved prefix "gw-"'
+      );
     });
 
     it("createNewSession=true with sessionId=gw-abc does not throw (createNewSession short-circuits)", () => {
       const result = resolveSessionResumeArgs({
         sessionId: "gw-abc",
-        createNewSession: true
+        createNewSession: true,
       });
       expect(result.resumeArgs).toEqual([]);
       expect(result.userProvidedSession).toBe(false);

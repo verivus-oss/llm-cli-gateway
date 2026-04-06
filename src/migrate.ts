@@ -50,7 +50,9 @@ async function getAppliedMigrations(pool: Pool): Promise<number[]> {
     )
   `);
 
-  const result = await pool.query<{ version: number }>("SELECT version FROM schema_migrations ORDER BY version");
+  const result = await pool.query<{ version: number }>(
+    "SELECT version FROM schema_migrations ORDER BY version"
+  );
   return result.rows.map(row => row.version);
 }
 

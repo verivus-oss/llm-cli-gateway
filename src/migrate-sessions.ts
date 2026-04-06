@@ -13,7 +13,7 @@ import { createDatabaseConnection } from "./db.js";
 const logger: Logger = {
   info: (message: string, meta?: any) => console.error(`[INFO] ${message}`, meta || ""),
   error: (message: string, meta?: any) => console.error(`[ERROR] ${message}`, meta || ""),
-  debug: (message: string, meta?: any) => console.error(`[DEBUG] ${message}`, meta || "")
+  debug: (message: string, meta?: any) => console.error(`[DEBUG] ${message}`, meta || ""),
 };
 
 interface MigrationResult {
@@ -32,7 +32,7 @@ export async function migrateFromFile(
   const result: MigrationResult = {
     migrated: 0,
     failed: 0,
-    errors: []
+    errors: [],
   };
 
   // Read file-based sessions
@@ -41,7 +41,9 @@ export async function migrateFromFile(
     const fileContent = readFileSync(filePath, "utf-8");
     fileData = JSON.parse(fileContent);
   } catch (error) {
-    throw new Error(`Failed to read sessions file: ${error instanceof Error ? error.message : String(error)}`);
+    throw new Error(
+      `Failed to read sessions file: ${error instanceof Error ? error.message : String(error)}`
+    );
   }
 
   console.error(`Found ${Object.keys(fileData.sessions).length} sessions to migrate`);
@@ -132,7 +134,12 @@ Environment Variables:
   // Connect to database
   console.error("Connecting to database...");
   const db = await createDatabaseConnection(config, logger);
-  const pgManager = new PostgreSQLSessionManager(db.getPool(), db.getRedis(), config.cacheTtl, logger);
+  const pgManager = new PostgreSQLSessionManager(
+    db.getPool(),
+    db.getRedis(),
+    config.cacheTtl,
+    logger
+  );
   console.error("✓ Connected to database\n");
 
   try {

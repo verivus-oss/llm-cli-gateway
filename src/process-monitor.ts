@@ -10,7 +10,7 @@ import { noopLogger } from "./logger.js";
 export interface ProcessHealth {
   pid: number;
   alive: boolean;
-  state: string | null;       // R=running, S=sleeping, Z=zombie, D=disk sleep, T=stopped, null=unknown
+  state: string | null; // R=running, S=sleeping, Z=zombie, D=disk sleep, T=stopped, null=unknown
   cpuPercent: number | null;
   memoryRssKb: number | null;
   sampledAt: string;
@@ -21,8 +21,8 @@ export interface JobHealth {
   cli: string;
   status: string;
   processHealth: ProcessHealth | null;
-  isDead: boolean;    // PID doesn't exist but job status is "running"
-  isZombie: boolean;  // Process state is Z
+  isDead: boolean; // PID doesn't exist but job status is "running"
+  isZombie: boolean; // Process state is Z
   runningForMs: number;
 }
 
@@ -33,8 +33,8 @@ export interface JobHealth {
  */
 export function parseProcStat(content: string): {
   state: string;
-  utime: number;  // clock ticks (field 14)
-  stime: number;  // clock ticks (field 15)
+  utime: number; // clock ticks (field 14)
+  stime: number; // clock ticks (field 15)
 } | null {
   const lastParen = content.lastIndexOf(")");
   if (lastParen === -1) return null;
@@ -75,7 +75,10 @@ function getTotalCpuJiffies(): number | null {
 
 export class ProcessMonitor {
   // Previous samples for CPU delta calculation
-  private prevSamples = new Map<number, { utime: number; stime: number; totalJiffies: number; timestamp: number }>();
+  private prevSamples = new Map<
+    number,
+    { utime: number; stime: number; totalJiffies: number; timestamp: number }
+  >();
 
   constructor(private logger: Logger = noopLogger) {}
 
@@ -94,7 +97,14 @@ export class ProcessMonitor {
       alive = true;
     } catch (err: any) {
       if (err.code === "ESRCH") {
-        return { pid, alive: false, state: null, cpuPercent: null, memoryRssKb: null, sampledAt: now };
+        return {
+          pid,
+          alive: false,
+          state: null,
+          cpuPercent: null,
+          memoryRssKb: null,
+          sampledAt: now,
+        };
       }
       // EPERM = process exists but we can't signal it
       if (err.code === "EPERM") {
@@ -115,7 +125,7 @@ export class ProcessMonitor {
         const totalJiffies = getTotalCpuJiffies();
         const prev = this.prevSamples.get(pid);
         if (prev && totalJiffies !== null) {
-          const processJiffiesDelta = (parsed.utime + parsed.stime) - (prev.utime + prev.stime);
+          const processJiffiesDelta = parsed.utime + parsed.stime - (prev.utime + prev.stime);
           const totalJiffiesDelta = totalJiffies - prev.totalJiffies;
           if (totalJiffiesDelta > 0) {
             cpuPercent = (processJiffiesDelta / totalJiffiesDelta) * 100;
@@ -124,8 +134,10 @@ export class ProcessMonitor {
         // Store for next delta
         if (totalJiffies !== null) {
           this.prevSamples.set(pid, {
-            utime: parsed.utime, stime: parsed.stime,
-            totalJiffies, timestamp: Date.now()
+            utime: parsed.utime,
+            stime: parsed.stime,
+            totalJiffies,
+            timestamp: Date.now(),
           });
         }
       }
@@ -145,24 +157,33 @@ export class ProcessMonitor {
     return { pid, alive, state, cpuPercent, memoryRssKb, sampledAt: now };
   }
 
-  checkJobHealth(jobs: { jobId: string; cli: string; status: string; pid: number | null; startedAt: string }[]): JobHealth[] {
+  checkJobHealth(
+    jobs: { jobId: string; cli: string; status: string; pid: number | null; startedAt: string }[]
+  ): JobHealth[] {
     return jobs.map(job => {
       const runningForMs = Date.now() - new Date(job.startedAt).getTime();
 
       if (!job.pid) {
         return {
-          jobId: job.jobId, cli: job.cli, status: job.status,
-          processHealth: null, isDead: false, isZombie: false, runningForMs
+          jobId: job.jobId,
+          cli: job.cli,
+          status: job.status,
+          processHealth: null,
+          isDead: false,
+          isZombie: false,
+          runningForMs,
         };
       }
 
       const health = this.sampleProcess(job.pid);
       return {
-        jobId: job.jobId, cli: job.cli, status: job.status,
+        jobId: job.jobId,
+        cli: job.cli,
+        status: job.status,
         processHealth: health,
         isDead: job.status === "running" && !health.alive,
         isZombie: job.status === "running" && health.state === "Z",
-        runningForMs
+        runningForMs,
       };
     });
   }
