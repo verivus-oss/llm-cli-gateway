@@ -77,7 +77,10 @@ function parseLogLine(line: string): ApprovalRecord | null {
 export class ApprovalManager {
   private readonly logPath: string;
 
-  constructor(customPath?: string, private logger: Logger = noopLogger) {
+  constructor(
+    customPath?: string,
+    private logger: Logger = noopLogger
+  ) {
     this.logPath = customPath || join(homedir(), ".llm-cli-gateway", "approvals.jsonl");
     const dir = dirname(this.logPath);
     mkdirSync(dir, { recursive: true });
@@ -133,21 +136,27 @@ export class ApprovalManager {
       const canonicalized = request.disallowedTools.map(s => {
         const trimmed = s.trim();
         const cut = Math.min(
-          ...[trimmed.indexOf("("), trimmed.indexOf(":")].filter(i => i >= 0).concat([trimmed.length])
+          ...[trimmed.indexOf("("), trimmed.indexOf(":")]
+            .filter(i => i >= 0)
+            .concat([trimmed.length])
         );
         return trimmed.slice(0, cut).trim();
       });
       const blockedCritical = criticalTools.filter(t => canonicalized.includes(t));
       if (promptIsReviewForDisallowed && blockedCritical.length > 0) {
         score += 6;
-        reasons.push(`Critical review tools disallowed: ${blockedCritical.join(", ")} — reviewers need these`);
+        reasons.push(
+          `Critical review tools disallowed: ${blockedCritical.join(", ")} — reviewers need these`
+        );
       } else {
         // Neutral score — tool restrictions should never reduce risk score
         reasons.push("Has explicit disallowed tool restrictions");
       }
     }
 
-    if (/\b(delete|destroy|wipe|exfiltrate|credential|token|password|secret)\b/i.test(request.prompt)) {
+    if (
+      /\b(delete|destroy|wipe|exfiltrate|credential|token|password|secret)\b/i.test(request.prompt)
+    ) {
       score += 3;
       reasons.push("Prompt contains sensitive or destructive keywords");
     }
@@ -155,7 +164,11 @@ export class ApprovalManager {
     if (request.reviewIntegrity && request.reviewIntegrity.violations.length > 0) {
       for (const violation of request.reviewIntegrity.violations) {
         // Skip empty_allowed_tools and critical_tools_disallowed — already handled in context-dependent scoring above
-        if (violation.type === "empty_allowed_tools" || violation.type === "critical_tools_disallowed") continue;
+        if (
+          violation.type === "empty_allowed_tools" ||
+          violation.type === "critical_tools_disallowed"
+        )
+          continue;
         score += violation.score;
         reasons.push(`Review integrity: ${violation.detail}`);
       }
@@ -181,13 +194,13 @@ export class ApprovalManager {
       bypassRequested: request.bypassRequested,
       fullAuto: request.fullAuto,
       metadata: request.metadata,
-      reviewIntegrity: request.reviewIntegrity
+      reviewIntegrity: request.reviewIntegrity,
     };
 
     appendFileSync(this.logPath, `${JSON.stringify(record)}\n`, { encoding: "utf-8", mode: 0o600 });
     this.logger.info(`Approval decision: ${status} (score=${score}, policy=${policy})`, {
       cli: request.cli,
-      operation: request.operation
+      operation: request.operation,
     });
     return record;
   }

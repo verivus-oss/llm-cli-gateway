@@ -1,4 +1,15 @@
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync, renameSync, openSync, fsyncSync, closeSync, chmodSync } from "fs";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  writeFileSync,
+  renameSync,
+  openSync,
+  fsyncSync,
+  closeSync,
+  chmodSync,
+} from "fs";
 import { homedir } from "os";
 import { dirname, join } from "path";
 import { parse as parseToml } from "toml";
@@ -72,7 +83,7 @@ function readCodexServerConfig(server: ClaudeMcpServerName): CodexServerDef {
     return {
       command,
       args,
-      env
+      env,
     };
   } catch {
     return {};
@@ -166,7 +177,7 @@ function toClaudeServerDef(server: ClaudeMcpServerName): ClaudeServerDef | null 
   return {
     command,
     args,
-    ...(Object.keys(env).length > 0 ? { env } : {})
+    ...(Object.keys(env).length > 0 ? { env } : {}),
   };
 }
 
@@ -191,9 +202,16 @@ export function buildClaudeMcpConfig(servers: ClaudeMcpServerName[]): ClaudeMcpC
   try {
     mkdirSync(configDir, { recursive: true });
     const tempPath = `${configPath}.tmp.${process.pid}`;
-    writeFileSync(tempPath, JSON.stringify({ mcpServers }, null, 2), { encoding: "utf-8", mode: 0o600 });
+    writeFileSync(tempPath, JSON.stringify({ mcpServers }, null, 2), {
+      encoding: "utf-8",
+      mode: 0o600,
+    });
     const fd = openSync(tempPath, "r+");
-    try { fsyncSync(fd); } finally { closeSync(fd); }
+    try {
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
     renameSync(tempPath, configPath);
     chmodSync(configPath, 0o600);
   } catch (error) {

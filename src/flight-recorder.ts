@@ -158,7 +158,9 @@ export class FlightRecorder {
       CREATE INDEX IF NOT EXISTS idx_metadata_status ON gateway_metadata(status);
     `);
 
-    this.db.prepare("INSERT OR IGNORE INTO _migrations(version, applied_at) VALUES(1, ?)").run(new Date().toISOString());
+    this.db
+      .prepare("INSERT OR IGNORE INTO _migrations(version, applied_at) VALUES(1, ?)")
+      .run(new Date().toISOString());
 
     if (process.platform !== "win32") {
       try {
@@ -186,12 +188,12 @@ export class FlightRecorder {
         prompt: entry.prompt,
         system: entry.system || null,
         session_id: entry.sessionId || null,
-        datetime_utc: new Date().toISOString()
+        datetime_utc: new Date().toISOString(),
       });
 
       insertMetadata.run({
         request_id: entry.correlationId,
-        async_job_id: entry.asyncJobId || null
+        async_job_id: entry.asyncJobId || null,
       });
     });
 
@@ -218,32 +220,35 @@ export class FlightRecorder {
       WHERE request_id = @id AND status = 'started'
     `);
 
-    this.updateCompleteTxn = this.db.transaction((correlationId: string, result: FlightLogResult) => {
-      const thinkingBlocks = result.thinkingBlocks && result.thinkingBlocks.length > 0
-        ? JSON.stringify(truncateThinkingBlocks(result.thinkingBlocks))
-        : null;
+    this.updateCompleteTxn = this.db.transaction(
+      (correlationId: string, result: FlightLogResult) => {
+        const thinkingBlocks =
+          result.thinkingBlocks && result.thinkingBlocks.length > 0
+            ? JSON.stringify(truncateThinkingBlocks(result.thinkingBlocks))
+            : null;
 
-      updateRequests.run({
-        id: correlationId,
-        response: result.response,
-        duration_ms: result.durationMs,
-        input_tokens: result.inputTokens ?? null,
-        output_tokens: result.outputTokens ?? null
-      });
+        updateRequests.run({
+          id: correlationId,
+          response: result.response,
+          duration_ms: result.durationMs,
+          input_tokens: result.inputTokens ?? null,
+          output_tokens: result.outputTokens ?? null,
+        });
 
-      updateMetadata.run({
-        id: correlationId,
-        retry_count: result.retryCount,
-        circuit_breaker_state: result.circuitBreakerState,
-        cost_usd: result.costUsd ?? null,
-        approval_decision: result.approvalDecision ?? null,
-        optimization_applied: result.optimizationApplied ? 1 : 0,
-        thinking_blocks: thinkingBlocks,
-        exit_code: result.exitCode,
-        error_message: result.errorMessage ?? null,
-        status: result.status
-      });
-    });
+        updateMetadata.run({
+          id: correlationId,
+          retry_count: result.retryCount,
+          circuit_breaker_state: result.circuitBreakerState,
+          cost_usd: result.costUsd ?? null,
+          approval_decision: result.approvalDecision ?? null,
+          optimization_applied: result.optimizationApplied ? 1 : 0,
+          thinking_blocks: thinkingBlocks,
+          exit_code: result.exitCode,
+          error_message: result.errorMessage ?? null,
+          status: result.status,
+        });
+      }
+    );
   }
 
   logStart(entry: FlightLogStart): void {

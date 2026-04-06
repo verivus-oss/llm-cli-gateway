@@ -15,14 +15,22 @@ describe("Session Migration", () => {
   beforeEach(async () => {
     await cleanTestDatabase();
     const { pool, redis } = await setupTestDatabase();
-    pgManager = new PostgreSQLSessionManager(pool, redis, {
-      session: 3600,
-      activeSession: 1800,
-      sessionList: 120
-    }, mockLogger);
+    pgManager = new PostgreSQLSessionManager(
+      pool,
+      redis,
+      {
+        session: 3600,
+        activeSession: 1800,
+        sessionList: 120,
+      },
+      mockLogger
+    );
 
     // Create test directory
-    testDir = join(tmpdir(), `migration-test-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`);
+    testDir = join(
+      tmpdir(),
+      `migration-test-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`
+    );
     mkdirSync(testDir, { recursive: true });
     testFilePath = join(testDir, "sessions.json");
   });
@@ -77,7 +85,7 @@ describe("Session Migration", () => {
     fileManager.updateSessionMetadata(session.id, {
       key1: "value1",
       key2: 42,
-      nested: { foo: "bar" }
+      nested: { foo: "bar" },
     });
 
     await migrateFromFile(testFilePath, pgManager);
@@ -86,7 +94,7 @@ describe("Session Migration", () => {
     expect(migrated?.metadata).toEqual({
       key1: "value1",
       key2: 42,
-      nested: { foo: "bar" }
+      nested: { foo: "bar" },
     });
   });
 
@@ -110,7 +118,7 @@ describe("Session Migration", () => {
   it("should handle empty sessions file", async () => {
     const emptyStorage: SessionStorage = {
       sessions: {},
-      activeSession: { claude: null, codex: null, gemini: null }
+      activeSession: { claude: null, codex: null, gemini: null },
     };
     writeFileSync(testFilePath, JSON.stringify(emptyStorage, null, 2));
 
@@ -150,7 +158,7 @@ describe("Session Migration", () => {
     const firstId = Object.keys(fileData.sessions)[0];
     fileData.sessions[firstId + "-duplicate"] = {
       ...fileData.sessions[firstId],
-      id: firstId // Same ID, will cause conflict
+      id: firstId, // Same ID, will cause conflict
     };
     writeFileSync(testFilePath, JSON.stringify(fileData, null, 2));
 

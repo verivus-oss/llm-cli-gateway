@@ -21,9 +21,11 @@ export interface ReviewIntegrityInput {
   disallowedTools?: string[];
 }
 
-const REVIEW_CONTEXT_PATTERN = /\b(review|audit|analy[sz]e|analysis|inspect|assess|pentest|security|vulnerabilit(?:y|ies)|bug(?:s)?|defect(?:s)?|quality|code\s+review)\b/i;
+const REVIEW_CONTEXT_PATTERN =
+  /\b(review|audit|analy[sz]e|analysis|inspect|assess|pentest|security|vulnerabilit(?:y|ies)|bug(?:s)?|defect(?:s)?|quality|code\s+review)\b/i;
 
-const TOOL_SUPPRESSION_PATTERN = /\b(do\s*not|don't|never|without)\b[\s\S]{0,80}\b(tool(?:s)?|shell|bash|command(?:s)?)\b/i;
+const TOOL_SUPPRESSION_PATTERN =
+  /\b(do\s*not|don't|never|without)\b[\s\S]{0,80}\b(tool(?:s)?|shell|bash|command(?:s)?)\b/i;
 
 const CRITICAL_TOOLS = ["Read", "Grep", "Glob", "Bash"];
 
@@ -51,7 +53,7 @@ export function checkReviewIntegrity(input: ReviewIntegrityInput): ReviewIntegri
     violations.push({
       type: "empty_allowed_tools",
       score: 6,
-      detail: "Review request with empty allowedTools limits reviewer capability"
+      detail: "Review request with empty allowedTools limits reviewer capability",
     });
   }
 
@@ -62,7 +64,7 @@ export function checkReviewIntegrity(input: ReviewIntegrityInput): ReviewIntegri
       violations.push({
         type: "critical_tools_disallowed",
         score: 6,
-        detail: `Critical review tools disallowed: ${blockedCritical.join(", ")}`
+        detail: `Critical review tools disallowed: ${blockedCritical.join(", ")}`,
       });
     }
   }
@@ -71,13 +73,13 @@ export function checkReviewIntegrity(input: ReviewIntegrityInput): ReviewIntegri
     violations.push({
       type: "tool_suppression",
       score: 4,
-      detail: "Prompt contains tool-suppression language in review context"
+      detail: "Prompt contains tool-suppression language in review context",
     });
   }
 
   return {
     isReviewContext: reviewContext,
     violations,
-    totalScore: violations.reduce((sum, violation) => sum + violation.score, 0)
+    totalScore: violations.reduce((sum, violation) => sum + violation.score, 0),
   };
 }

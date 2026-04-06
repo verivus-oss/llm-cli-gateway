@@ -10,7 +10,7 @@ export type { Logger } from "./logger.js";
 const DEFAULT_SESSION_DESCRIPTIONS: Record<CliType, string> = {
   claude: "Claude Session",
   codex: "Codex Session",
-  gemini: "Gemini Session"
+  gemini: "Gemini Session",
 };
 
 /**
@@ -166,7 +166,7 @@ export class PostgreSQLSessionManager {
         cli,
         createdAt: now,
         lastUsedAt: now,
-        description: sessionDescription
+        description: sessionDescription,
       };
 
       // Write-through to cache
@@ -220,7 +220,11 @@ export class PostgreSQLSessionManager {
 
     // Populate cache
     try {
-      await this.redis.setex(`session:${sessionId}`, this.cacheTtl.session, JSON.stringify(session));
+      await this.redis.setex(
+        `session:${sessionId}`,
+        this.cacheTtl.session,
+        JSON.stringify(session)
+      );
     } catch (error) {
       this.logger.error("Cache write failed", { error });
     }
@@ -255,7 +259,9 @@ export class PostgreSQLSessionManager {
          FROM sessions
          ORDER BY last_used_at DESC`;
 
-    const result = cli ? await this.pool.query<Session>(query, [cli]) : await this.pool.query<Session>(query);
+    const result = cli
+      ? await this.pool.query<Session>(query, [cli])
+      : await this.pool.query<Session>(query);
 
     const sessions = result.rows;
 
@@ -449,7 +455,7 @@ export class PostgreSQLSessionManager {
         await Promise.all([
           this.redis.del("active_session:claude"),
           this.redis.del("active_session:codex"),
-          this.redis.del("active_session:gemini")
+          this.redis.del("active_session:gemini"),
         ]);
       } catch (error) {
         this.logger.error("Failed to invalidate active session caches", { error });
