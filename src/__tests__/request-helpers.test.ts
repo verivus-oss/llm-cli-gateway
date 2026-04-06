@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   resolveSessionResumeArgs,
   validateSessionId,
+  sanitizeCliArgValues,
   GATEWAY_SESSION_PREFIX,
 } from "../request-helpers.js";
 
@@ -27,6 +28,30 @@ describe("request-helpers", () => {
 
     it("should not throw for UUIDs", () => {
       expect(() => validateSessionId("550e8400-e29b-41d4-a716-446655440000")).not.toThrow();
+    });
+  });
+
+  describe("sanitizeCliArgValues", () => {
+    it("should pass through normal values", () => {
+      expect(sanitizeCliArgValues(["Edit", "Write", "Bash(git:*)"], "allowedTools")).toEqual([
+        "Edit",
+        "Write",
+        "Bash(git:*)",
+      ]);
+    });
+
+    it("should reject values starting with -", () => {
+      expect(() =>
+        sanitizeCliArgValues(["Edit", "--dangerously-skip-permissions"], "allowedTools")
+      ).toThrow("argument injection");
+    });
+
+    it("should reject values starting with single dash", () => {
+      expect(() => sanitizeCliArgValues(["-p"], "allowedTools")).toThrow("argument injection");
+    });
+
+    it("should accept empty array", () => {
+      expect(sanitizeCliArgValues([], "allowedTools")).toEqual([]);
     });
   });
 
