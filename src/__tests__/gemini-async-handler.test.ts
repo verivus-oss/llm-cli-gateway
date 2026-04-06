@@ -7,12 +7,15 @@ import type { ISessionManager } from "../session-manager.js";
 import type { Session } from "../session-manager.js";
 import { GATEWAY_SESSION_PREFIX } from "../request-helpers.js";
 
-// Mock executeCli for sync handler tests — getExtendedPath() caches PATH
-// before our shim is added, so sync handlers can't find the gemini shim.
+// Mock executeCli AND getExtendedPath for sync handler tests —
+// getExtendedPath() caches PATH before our shim is added, so both sync
+// handlers (which call executeCli) and async jobs (which call spawn with
+// getExtendedPath()) need the mock to find the gemini shim.
 vi.mock("../executor.js", async importOriginal => {
   const actual = await importOriginal<typeof import("../executor.js")>();
   return {
     ...actual,
+    getExtendedPath: vi.fn(() => process.env.PATH || ""),
     executeCli: vi.fn(async (command: string, _args: string[], _options?: any) => {
       if (command === "gemini") {
         return { stdout: "mocked gemini response", stderr: "", code: 0 };

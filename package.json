@@ -39,7 +39,7 @@
     "llm-cli-gateway": "./dist/index.js"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=20.0.0"
   },
   "files": [
     "dist/**/*.js",
@@ -61,7 +61,7 @@
     "test:unit": "vitest run src/__tests__/executor.test.ts",
     "test:session": "vitest run src/__tests__/session-manager.test.ts",
     "test:session-pg": "bash ./scripts/test-pg.sh src/__tests__/session-manager-pg.test.ts",
-    "test:integration": "vitest run src/__tests__/integration.test.ts",
+    "test:integration": "INTEGRATION_TESTS=1 vitest run src/__tests__/integration.test.ts",
     "test:pg": "bash ./scripts/test-pg.sh",
     "test:all": "npm run test && npm run test:pg",
     "lint": "eslint src/**/*.ts",
@@ -84,6 +84,7 @@
     "@types/pg": "^8.11.10",
     "@typescript-eslint/eslint-plugin": "^6.0.0",
     "@typescript-eslint/parser": "^6.0.0",
+    "@vitest/coverage-v8": "^4.1.2",
     "eslint": "^8.0.0",
     "eslint-config-prettier": "^9.0.0",
     "prettier": "^3.0.0",
