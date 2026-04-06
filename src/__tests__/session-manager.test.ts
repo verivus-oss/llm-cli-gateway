@@ -10,7 +10,10 @@ describe("SessionManager", () => {
 
   beforeEach(() => {
     // Create a temporary directory for test storage
-    testDir = join(tmpdir(), `session-test-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`);
+    testDir = join(
+      tmpdir(),
+      `session-test-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`
+    );
     mkdirSync(testDir, { recursive: true });
     const storagePath = join(testDir, "sessions.json");
     sessionManager = new FileSessionManager(storagePath);
@@ -237,7 +240,7 @@ describe("SessionManager", () => {
       const session = sessionManager.createSession("claude");
       const success = sessionManager.updateSessionMetadata(session.id, {
         custom: "value",
-        count: 42
+        count: 42,
       });
 
       expect(success).toBe(true);
@@ -405,7 +408,7 @@ describe("SessionManager", () => {
         () => sessionManager.getSession(session.id),
         () => sessionManager.updateSessionUsage(session.id),
         () => sessionManager.listSessions("claude"),
-        () => sessionManager.updateSessionMetadata(session.id, { test: "value" })
+        () => sessionManager.updateSessionMetadata(session.id, { test: "value" }),
       ];
 
       await Promise.all(operations.map(op => Promise.resolve(op())));

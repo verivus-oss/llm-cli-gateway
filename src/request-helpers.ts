@@ -37,11 +37,19 @@ export function resolveSessionResumeArgs(opts: {
     return { resumeArgs: [], effectiveSessionId: undefined, userProvidedSession: false };
   }
   if (opts.resumeLatest && !opts.sessionId) {
-    return { resumeArgs: ["--resume", "latest"], effectiveSessionId: undefined, userProvidedSession: false };
+    return {
+      resumeArgs: ["--resume", "latest"],
+      effectiveSessionId: undefined,
+      userProvidedSession: false,
+    };
   }
   if (opts.sessionId) {
     validateSessionId(opts.sessionId);
-    return { resumeArgs: ["--resume", opts.sessionId], effectiveSessionId: opts.sessionId, userProvidedSession: true };
+    return {
+      resumeArgs: ["--resume", opts.sessionId],
+      effectiveSessionId: opts.sessionId,
+      userProvidedSession: true,
+    };
   }
   return { resumeArgs: [], effectiveSessionId: undefined, userProvidedSession: false };
 }

@@ -73,9 +73,13 @@ describe("AsyncJobManager", () => {
     it("should reset idle timer on output", async () => {
       const manager = new AsyncJobManager();
       // Process outputs every 200ms — idle timeout of 500ms should not fire
-      const job = manager.startJob("sh" as LlmCli, [
-        "-c", "for i in 1 2 3 4 5; do echo tick; sleep 0.2; done"
-      ], "corr-idle-2", undefined, 500);
+      const job = manager.startJob(
+        "sh" as LlmCli,
+        ["-c", "for i in 1 2 3 4 5; do echo tick; sleep 0.2; done"],
+        "corr-idle-2",
+        undefined,
+        500
+      );
 
       await waitForJobDone(manager, job.id);
 
@@ -142,9 +146,11 @@ describe("AsyncJobManager", () => {
       // process dies. If the old proc.killed bug was present, SIGKILL
       // would never fire and the process would hang for 30s (timeout).
       const manager = new AsyncJobManager();
-      const job = manager.startJob("bash" as LlmCli, [
-        "-c", "trap '' TERM; sleep 30"
-      ], "corr-cancel-3");
+      const job = manager.startJob(
+        "bash" as LlmCli,
+        ["-c", "trap '' TERM; sleep 30"],
+        "corr-cancel-3"
+      );
 
       // Give process time to set up trap
       await new Promise(r => setTimeout(r, 200));
@@ -197,7 +203,14 @@ describe("AsyncJobManager", () => {
   describe("outputFormat tracking", () => {
     it("should store and retrieve output format", async () => {
       const manager = new AsyncJobManager();
-      const job = manager.startJob("echo" as LlmCli, ["test"], "corr-fmt-1", undefined, undefined, "stream-json");
+      const job = manager.startJob(
+        "echo" as LlmCli,
+        ["test"],
+        "corr-fmt-1",
+        undefined,
+        undefined,
+        "stream-json"
+      );
 
       expect(manager.getJobOutputFormat(job.id)).toBe("stream-json");
 
@@ -297,7 +310,11 @@ describe("AsyncJobManager", () => {
       // by using a command that fails. The metricsRecorded guard prevents double-counting.
       const callback = vi.fn();
       const manager = new AsyncJobManager(undefined, callback);
-      const job = manager.startJob("sh" as LlmCli, ["-c", "echo err >&2; exit 1"], "corr-metrics-7");
+      const job = manager.startJob(
+        "sh" as LlmCli,
+        ["-c", "echo err >&2; exit 1"],
+        "corr-metrics-7"
+      );
 
       await waitForJobDone(manager, job.id);
 

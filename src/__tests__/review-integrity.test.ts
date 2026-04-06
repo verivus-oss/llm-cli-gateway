@@ -1,8 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-  isReviewContext,
-  checkReviewIntegrity,
-} from "../review-integrity.js";
+import { isReviewContext, checkReviewIntegrity } from "../review-integrity.js";
 
 describe("isReviewContext", () => {
   it.each([
@@ -20,7 +17,7 @@ describe("isReviewContext", () => {
     "Assess the code quality of the PR",
     "Review changes in src/auth.ts for security vulnerabilities",
     "Audit the source files for issues",
-  ])("detects review context: %s", (prompt) => {
+  ])("detects review context: %s", prompt => {
     expect(isReviewContext(prompt)).toBe(true);
   });
 
@@ -35,7 +32,7 @@ describe("isReviewContext", () => {
     "Generate a README for the project",
     "What time is it?",
     "",
-  ])("rejects non-review context: %s", (prompt) => {
+  ])("rejects non-review context: %s", prompt => {
     expect(isReviewContext(prompt)).toBe(false);
   });
 });

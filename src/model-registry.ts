@@ -14,30 +14,34 @@ export type CliInfoMap = Record<CliType, CliInfo>;
 
 const FALLBACK_INFO: CliInfoMap = {
   claude: {
-    description: "Anthropic's Claude Code CLI - best for code generation, analysis, and agentic coding tasks",
+    description:
+      "Anthropic's Claude Code CLI - best for code generation, analysis, and agentic coding tasks",
     models: {
       opus: "Most capable model. Best for: complex reasoning, nuanced analysis, difficult problems, research",
-      sonnet: "Balanced performance. Best for: everyday coding, code review, general tasks (default)",
-      haiku: "Fastest model. Best for: simple queries, quick answers, high-volume tasks, cost-sensitive use"
+      sonnet:
+        "Balanced performance. Best for: everyday coding, code review, general tasks (default)",
+      haiku:
+        "Fastest model. Best for: simple queries, quick answers, high-volume tasks, cost-sensitive use",
     },
     defaultModel: "sonnet",
-    modelOrder: ["opus", "sonnet", "haiku"]
+    modelOrder: ["opus", "sonnet", "haiku"],
   },
   codex: {
     description: "OpenAI's Codex CLI - best for code execution in sandboxed environments",
     models: {
-      "o3": "Most capable reasoning model. Best for: complex multi-step problems, math, science",
+      o3: "Most capable reasoning model. Best for: complex multi-step problems, math, science",
       "o4-mini": "Fast reasoning model. Best for: coding tasks, quick iterations",
-      "gpt-4.1": "Latest GPT-4 variant. Best for: general coding, instruction following"
-    }
+      "gpt-4.1": "Latest GPT-4 variant. Best for: general coding, instruction following",
+    },
   },
   gemini: {
     description: "Google's Gemini CLI - best for multimodal tasks and Google ecosystem integration",
     models: {
       "gemini-2.5-pro": "Most capable model. Best for: complex reasoning, long context, multimodal",
-      "gemini-2.5-flash": "Fast model. Best for: quick responses, high throughput, cost-sensitive use"
-    }
-  }
+      "gemini-2.5-flash":
+        "Fast model. Best for: quick responses, high throughput, cost-sensitive use",
+    },
+  },
 };
 
 const MODEL_CACHE_TTL_MS = 2 * 60 * 1000;
@@ -53,7 +57,11 @@ export function getCliInfo(forceRefresh = false): CliInfoMap {
   return info;
 }
 
-export function resolveModelAlias(cli: CliType, model: string | undefined, info: CliInfoMap): string | undefined {
+export function resolveModelAlias(
+  cli: CliType,
+  model: string | undefined,
+  info: CliInfoMap
+): string | undefined {
   if (!model) {
     return undefined;
   }
@@ -84,7 +92,7 @@ function buildCliInfo(): CliInfoMap {
   const info: CliInfoMap = {
     claude: cloneInfo(FALLBACK_INFO.claude),
     codex: cloneInfo(FALLBACK_INFO.codex),
-    gemini: cloneInfo(FALLBACK_INFO.gemini)
+    gemini: cloneInfo(FALLBACK_INFO.gemini),
   };
 
   applyClaudeOverrides(info.claude);
@@ -99,7 +107,7 @@ function cloneInfo(source: CliInfo): CliInfo {
     description: source.description,
     models: { ...source.models },
     defaultModel: source.defaultModel,
-    modelOrder: source.modelOrder ? [...source.modelOrder] : undefined
+    modelOrder: source.modelOrder ? [...source.modelOrder] : undefined,
   };
 }
 
@@ -323,7 +331,8 @@ function collectGeminiModels(): { models: Record<string, string>; order: string[
 
   const describedModels: Record<string, string> = {};
   order.forEach(model => {
-    describedModels[model] = `Observed in local Gemini sessions (last seen ${formatDate(models[model].lastSeen)})`;
+    describedModels[model] =
+      `Observed in local Gemini sessions (last seen ${formatDate(models[model].lastSeen)})`;
   });
 
   return { models: describedModels, order };

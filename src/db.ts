@@ -17,7 +17,10 @@ export class DatabaseConnection {
   private redis: Redis | null = null;
   private config: Config;
 
-  constructor(config: Config, private logger: Logger = noopLogger) {
+  constructor(
+    config: Config,
+    private logger: Logger = noopLogger
+  ) {
     if (!config.database || !config.redis) {
       throw new Error("Database and Redis configuration required");
     }
@@ -34,7 +37,7 @@ export class DatabaseConnection {
       max: this.config.database!.pool.max,
       idleTimeoutMillis: this.config.database!.pool.idleTimeoutMillis,
       connectionTimeoutMillis: this.config.database!.pool.connectionTimeoutMillis,
-      statement_timeout: this.config.database!.pool.statementTimeout
+      statement_timeout: this.config.database!.pool.statementTimeout,
     };
 
     this.pool = new Pool(poolConfig);
@@ -47,7 +50,9 @@ export class DatabaseConnection {
       this.logger.info("PostgreSQL connection established");
     } catch (error) {
       this.logger.error("Failed to connect to PostgreSQL", { error });
-      throw new Error(`Failed to connect to PostgreSQL: ${error instanceof Error ? error.message : String(error)}`);
+      throw new Error(
+        `Failed to connect to PostgreSQL: ${error instanceof Error ? error.message : String(error)}`
+      );
     }
 
     // Initialize Redis client
@@ -64,7 +69,7 @@ export class DatabaseConnection {
         // Reconnect on READONLY and ECONNRESET errors
         const targetErrors = ["READONLY", "ECONNRESET"];
         return targetErrors.some(targetError => err.message.includes(targetError));
-      }
+      },
     };
 
     this.redis = new Redis(this.config.redis!.url, redisOptions);
@@ -75,7 +80,9 @@ export class DatabaseConnection {
       this.logger.info("Redis connection established");
     } catch (error) {
       this.logger.error("Failed to connect to Redis", { error });
-      throw new Error(`Failed to connect to Redis: ${error instanceof Error ? error.message : String(error)}`);
+      throw new Error(
+        `Failed to connect to Redis: ${error instanceof Error ? error.message : String(error)}`
+      );
     }
   }
 
@@ -91,7 +98,11 @@ export class DatabaseConnection {
         await this.pool.end();
         this.pool = null;
       } catch (error) {
-        errors.push(new Error(`PostgreSQL disconnect error: ${error instanceof Error ? error.message : String(error)}`));
+        errors.push(
+          new Error(
+            `PostgreSQL disconnect error: ${error instanceof Error ? error.message : String(error)}`
+          )
+        );
       }
     }
 
@@ -100,7 +111,11 @@ export class DatabaseConnection {
         this.redis.disconnect();
         this.redis = null;
       } catch (error) {
-        errors.push(new Error(`Redis disconnect error: ${error instanceof Error ? error.message : String(error)}`));
+        errors.push(
+          new Error(
+            `Redis disconnect error: ${error instanceof Error ? error.message : String(error)}`
+          )
+        );
       }
     }
 
@@ -115,7 +130,7 @@ export class DatabaseConnection {
   async healthCheck(): Promise<HealthCheckResult> {
     const result: HealthCheckResult = {
       postgres: { connected: false, latency: 0 },
-      redis: { connected: false, latency: 0 }
+      redis: { connected: false, latency: 0 },
     };
 
     // Check PostgreSQL
@@ -151,7 +166,7 @@ export class DatabaseConnection {
 
     this.logger.debug("Health check completed", {
       postgres: result.postgres.connected,
-      redis: result.redis.connected
+      redis: result.redis.connected,
     });
     return result;
   }
@@ -180,7 +195,10 @@ export class DatabaseConnection {
 /**
  * Factory function to create and connect DatabaseConnection
  */
-export async function createDatabaseConnection(config: Config, logger?: Logger): Promise<DatabaseConnection> {
+export async function createDatabaseConnection(
+  config: Config,
+  logger?: Logger
+): Promise<DatabaseConnection> {
   const db = new DatabaseConnection(config, logger);
   await db.connect();
   return db;

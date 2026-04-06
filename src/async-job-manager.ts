@@ -1,6 +1,11 @@
 import { ChildProcess, spawn } from "child_process";
 import { randomUUID } from "crypto";
-import { getExtendedPath, killProcessGroup, registerProcessGroup, unregisterProcessGroup } from "./executor.js";
+import {
+  getExtendedPath,
+  killProcessGroup,
+  registerProcessGroup,
+  unregisterProcessGroup,
+} from "./executor.js";
 import type { Logger } from "./logger.js";
 import { noopLogger } from "./logger.js";
 import { ProcessMonitor, type JobHealth } from "./process-monitor.js";
@@ -63,7 +68,7 @@ function truncateText(value: string, maxChars: number): { text: string; truncate
   }
   return {
     text: value.slice(value.length - maxChars),
-    truncated: true
+    truncated: true,
   };
 }
 
@@ -114,7 +119,9 @@ export class AsyncJobManager {
             job.finishedAt = new Date().toISOString();
             job.exited = true;
             unregisterProcessGroup(job.process.pid);
-            this.logger.error(`Job ${id} process ${job.process.pid} no longer exists, marking as failed`);
+            this.logger.error(
+              `Job ${id} process ${job.process.pid} no longer exists, marking as failed`
+            );
             this.emitMetrics(job);
           }
           // EPERM: process exists but we can't signal it — ignore
@@ -126,7 +133,9 @@ export class AsyncJobManager {
         job.error = "Process exited without proper status transition";
         job.finishedAt = job.finishedAt || new Date().toISOString();
         if (job.process.pid) unregisterProcessGroup(job.process.pid);
-        this.logger.error(`Job ${id} has exited flag but was still in running state, marking as failed`);
+        this.logger.error(
+          `Job ${id} has exited flag but was still in running state, marking as failed`
+        );
         this.emitMetrics(job);
       }
     }
@@ -145,14 +154,21 @@ export class AsyncJobManager {
     }
   }
 
-  startJob(cli: LlmCli, args: string[], correlationId: string, cwd?: string, idleTimeoutMs?: number, outputFormat?: string): AsyncJobSnapshot {
+  startJob(
+    cli: LlmCli,
+    args: string[],
+    correlationId: string,
+    cwd?: string,
+    idleTimeoutMs?: number,
+    outputFormat?: string
+  ): AsyncJobSnapshot {
     const id = randomUUID();
     const startedAt = new Date().toISOString();
     const child = spawn(cli, args, {
       cwd,
       detached: true,
       stdio: ["ignore", "pipe", "pipe"],
-      env: { ...process.env, PATH: getExtendedPath() }
+      env: { ...process.env, PATH: getExtendedPath() },
     });
 
     if (child.pid) registerProcessGroup(child.pid);
@@ -184,7 +200,7 @@ export class AsyncJobManager {
       exited: false,
       metricsRecorded: false,
       outputFormat,
-      cleanupGroup
+      cleanupGroup,
     };
 
     this.jobs.set(id, job);
@@ -202,7 +218,9 @@ export class AsyncJobManager {
         job.error = `Process killed after ${idleTimeoutMs}ms of inactivity`;
         job.finishedAt = new Date().toISOString();
         killProcessGroup(job.process, "SIGTERM");
-        this.logger.info(`Job ${id} killed due to inactivity (${idleTimeoutMs}ms)`, { correlationId });
+        this.logger.info(`Job ${id} killed due to inactivity (${idleTimeoutMs}ms)`, {
+          correlationId,
+        });
         this.emitMetrics(job);
         setTimeout(() => {
           if (!job.exited) killProcessGroup(job.process, "SIGKILL");
@@ -290,7 +308,7 @@ export class AsyncJobManager {
       stdout: stdout.text,
       stderr: stderr.text,
       stdoutTruncated: stdout.truncated,
-      stderrTruncated: stderr.truncated
+      stderrTruncated: stderr.truncated,
     };
   }
 
@@ -319,13 +337,22 @@ export class AsyncJobManager {
     return { canceled: true };
   }
 
-  getRunningJobs(): { jobId: string; cli: string; status: string; pid: number | null; startedAt: string }[] {
+  getRunningJobs(): {
+    jobId: string;
+    cli: string;
+    status: string;
+    pid: number | null;
+    startedAt: string;
+  }[] {
     const result = [];
     for (const [id, job] of this.jobs) {
       if (job.status === "running") {
         result.push({
-          jobId: id, cli: job.cli, status: job.status,
-          pid: job.process.pid ?? null, startedAt: job.startedAt
+          jobId: id,
+          cli: job.cli,
+          status: job.status,
+          pid: job.process.pid ?? null,
+          startedAt: job.startedAt,
         });
       }
     }
@@ -344,7 +371,7 @@ export class AsyncJobManager {
       runningJobs: running.length,
       deadJobs: health.filter(h => h.isDead).length,
       zombieJobs: health.filter(h => h.isZombie).length,
-      jobs: health
+      jobs: health,
     };
   }
 
@@ -365,7 +392,7 @@ export class AsyncJobManager {
       stdoutBytes: Buffer.byteLength(job.stdout),
       stderrBytes: Buffer.byteLength(job.stderr),
       error: job.error,
-      exited: job.exited
+      exited: job.exited,
     };
   }
 
@@ -380,7 +407,9 @@ export class AsyncJobManager {
         job.finishedAt = new Date().toISOString();
         job.clearIdleTimer?.();
         killProcessGroup(job.process, "SIGTERM");
-        this.logger.info(`Job ${job.id} killed due to output overflow`, { correlationId: job.correlationId });
+        this.logger.info(`Job ${job.id} killed due to output overflow`, {
+          correlationId: job.correlationId,
+        });
         this.emitMetrics(job);
         setTimeout(() => {
           if (!job.exited) killProcessGroup(job.process, "SIGKILL");
