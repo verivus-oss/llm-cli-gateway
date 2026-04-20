@@ -1,154 +1,103 @@
 ---
 name: implement-review-fix
-description: Run the full implement-review-fix cycle using multiple LLMs via the llm-cli-gateway. Use when building features, fixing bugs, or refactoring code that benefits from multi-LLM collaboration.
+description: Run implement-review-fix cycle using multiple LLMs. Use for features, bugs, or refactoring with multi-LLM collaboration.
 metadata:
   author: verivusai-labs
-  version: "1.2"
+  version: "1.3"
 ---
 
 # Implement-Review-Fix Cycle
 
-A structured workflow for using multiple LLMs to implement code, review it, and iterate until quality is met.
+Structured workflow: multiple LLMs implement, review, iterate until quality met.
 
-## The Cycle
+## Cycle
 
 ```
-1. Implement (Codex) → 2. Review (Claude + Gemini) → 3. Fix (Codex) → 4. Verify
+1. Implement (Codex) → 2. Review (Claude+Gemini) → 3. Fix (Codex) → 4. Verify
 ```
 
-Only single-level orchestration is supported — you (the parent agent) coordinate all steps. LLMs called via the gateway cannot call other LLMs through it.
+Single-level orchestration only — parent agent coordinates all steps. Child LLMs cannot call other LLMs through gateway.
 
-## Session Continuity — Important
+## Session Continuity
 
-The gateway tracks sessions as metadata (id, cli, timestamps). How sessions affect CLI behavior differs per tool:
+| CLI | Effect | Mechanism |
+|-----|--------|-----------|
+| **Claude** | Real continuity | `--session-id` or `--continue` passed to CLI |
+| **Codex** | Bookkeeping only | `sessionId` tracked, NOT passed to CLI. Each call is fresh |
+| **Gemini** | Real continuity | `--resume` passed to CLI |
 
-- **Claude**: Real CLI continuity. Passing `sessionId` adds `--session-id` or `--continue` to the Claude CLI, resuming conversation context.
-- **Codex**: Gateway bookkeeping only. The `sessionId` is tracked in the gateway but does NOT resume a Codex CLI conversation. Each `codex_request` is a fresh CLI invocation.
-- **Gemini**: Real CLI continuity via `--resume`. Passing `sessionId` or `resumeLatest: true` resumes the Gemini CLI session.
-
-For Codex, include all necessary context in the prompt itself — do not rely on session continuity.
+For Codex: include all context in prompt — no session continuity.
 
 ## Step 1: Implement
 
-Use Codex for implementation. It works in a sandboxed environment and can make file changes.
-
 ```
-codex_request({
-  prompt: "Implement [feature description]. Requirements:\n- [req 1]\n- [req 2]\n\nWrite the code in [file path]. Include tests.",
-  fullAuto: true,
-  optimizePrompt: true
-})
+codex_request({prompt:"Implement [feature]. Requirements:\n- [req 1]\n- [req 2]\n\nWrite code in [path]. Include tests.",fullAuto:true,optimizePrompt:true})
 ```
-
-- Use `fullAuto: true` for automated file changes
-- The response includes a gateway `sessionId` for tracking purposes
 
 ## Step 2: Review
 
-Send the implementation to reviewers in parallel. Do NOT pass the code manually — let each LLM read the files directly.
+Send to reviewers in parallel. Reviewers **must have tool access** to read files and verify claims — never use `allowedTools:[]` or include tool-suppression language in review prompts.
 
-**Claude — Quality Review:**
+**Claude — Quality:**
 ```
-claude_request({
-  prompt: "Review the changes in [file path]. Check for:\n- Code quality and maintainability\n- Adherence to project conventions\n- Missing error handling\n- Documentation gaps\nList issues with severity and suggested fixes.",
-  optimizePrompt: true,
-  optimizeResponse: true
-})
+claude_request({prompt:"Review changes in [path]. Read the files directly. Check:\n- Code quality/maintainability\n- Project conventions\n- Error handling\n- Documentation gaps\nList issues with severity and fixes.",allowedTools:["Read","Grep","Glob"],optimizePrompt:true,optimizeResponse:true})
 ```
 
-**Gemini — Bug Finding:**
+**Gemini — Bugs/Security:**
 ```
-gemini_request({
-  prompt: "Analyze the implementation in [file path] for bugs, edge cases, and security issues. Check that tests cover the critical paths. Rate each finding: critical/high/medium/low.",
-  model: "gemini-2.5-pro",
-  optimizePrompt: true,
-  optimizeResponse: true
-})
+gemini_request({prompt:"Analyze [path] for bugs, edge cases, security issues. Read the files directly. Check test coverage. Rate: critical/high/medium/low.",allowedTools:["Read","Grep","Glob"],model:"gemini-2.5-pro",optimizePrompt:true,optimizeResponse:true})
 ```
+
+Sync tools auto-defer at 45s — if response contains `status:"deferred"`, poll `jobId` via `llm_job_status`/`llm_job_result`.
 
 ## Step 3: Fix
 
-Consolidate review findings and send fixes to Codex. Since Codex does not maintain CLI session context, include all relevant context in the prompt:
+Consolidate findings, send to Codex. Re-state context (no CLI continuity):
 
 ```
-codex_request({
-  prompt: "Fix the following issues found during code review of [file path]:\n\n1. [Critical] [description]\n2. [High] [description]\n3. [Medium] [description]\n\nThe original implementation is in [file path]. Apply fixes and update tests.",
-  fullAuto: true,
-  optimizePrompt: true
-})
+codex_request({prompt:"Fix issues in [path]:\n\n1. [Critical] [desc]\n2. [High] [desc]\n3. [Medium] [desc]\n\nApply fixes and update tests.",fullAuto:true,optimizePrompt:true})
 ```
 
 ## Step 4: Verify
 
-Run a final check to confirm fixes are correct:
-
 ```
-claude_request({
-  prompt: "Verify that these review findings have been properly addressed in [file path]:\n\n1. [issue 1] — expected fix: [description]\n2. [issue 2] — expected fix: [description]\n\nConfirm each fix or flag remaining issues.",
-  optimizePrompt: true,
-  optimizeResponse: true
-})
+claude_request({prompt:"Verify fixes in [path]:\n\n1. [issue 1] — expected: [fix]\n2. [issue 2] — expected: [fix]\n\nConfirm each or flag remaining.",optimizePrompt:true,optimizeResponse:true})
 ```
 
-## When to Iterate
+## Iteration
 
-- If Step 4 finds remaining issues, go back to Step 3
-- Limit to 3 iterations maximum to avoid diminishing returns
-- If issues persist after 3 rounds, escalate to the user
+- Issues remain → back to Step 3
+- Max 3 iterations (diminishing returns)
+- Issues persist after 3 rounds → escalate to user
 
-## For Long-Running Implementations
+## Long-Running Tasks
 
-If the implementation step is long-running and you want non-blocking execution:
+Sync tools auto-defer if execution exceeds 45s deadline. Response contains `status:"deferred"` with `jobId` — poll with `llm_job_status`, fetch with `llm_job_result`. No manual sync/async choice needed.
 
-```
-codex_request_async({
-  prompt: "...",
-  fullAuto: true
-})
-```
-
-Poll with `llm_job_status({ jobId })` and retrieve with `llm_job_result({ jobId })` when complete. See the `async-job-orchestration` skill for details.
-
-### Parallel async reviews (all 3 CLIs)
-
-For the review step, run all three CLIs in parallel using their async variants:
+For explicit non-blocking (fire-and-forget, parallel jobs):
 
 ```
-// Start implementation
-codex_request_async({
-  prompt: "Implement [feature]...",
-  fullAuto: true,
-  correlationId: "impl"
-})
-// Wait for implementation to complete...
+codex_request_async({prompt:"...",fullAuto:true})
+```
 
-// Run all three reviews in parallel
-claude_request_async({
-  prompt: "Review the changes in [file path] for quality...",
-  correlationId: "review-quality"
-})
+### Parallel Async Reviews (All 3 CLIs)
 
-codex_request_async({
-  prompt: "Check [file path] for logic bugs...",
-  correlationId: "review-bugs"
-})
+```
+codex_request_async({prompt:"Implement [feature]...",fullAuto:true,correlationId:"impl"})
+// Wait for completion...
 
-gemini_request_async({
-  prompt: "Security audit [file path]...",
-  model: "gemini-2.5-pro",
-  correlationId: "review-security"
-})
-
-// Poll all three, collect results, synthesize findings, then fix
+claude_request_async({prompt:"Review [path] for quality...",correlationId:"review-quality"})
+codex_request_async({prompt:"Check [path] for logic bugs...",correlationId:"review-bugs"})
+gemini_request_async({prompt:"Security audit [path]...",model:"gemini-2.5-pro",correlationId:"review-security"})
+// Poll all three, collect, synthesize, fix
 ```
 
 ## Tips
 
-- Always consolidate review findings before sending fixes (avoids redundant work)
-- Use `correlationId` to trace the full cycle in logs
-- For security-sensitive code, use `approvalStrategy: "mcp_managed"` with `approvalPolicy: "strict"`
-- Keep implementation prompts specific — include file paths, function names, and acceptance criteria
-- For Codex fix steps, re-state the problem context since it does not carry over from previous calls
-- After the cycle, clean up sessions with `session_delete` if no longer needed
-- Do not pass `gw-*` session IDs (gateway-generated) as `sessionId` — they are rejected; use your own session IDs for resumable workflows
-- Use `gemini_request_async` for long-running Gemini security reviews — all three CLIs now have async variants
+- Consolidate findings before sending fixes (avoid redundant work)
+- Use `correlationId` to trace full cycle
+- For security-sensitive code: `approvalStrategy:"mcp_managed"`, `approvalPolicy:"strict"`
+- Keep implementation prompts specific — file paths, function names, acceptance criteria
+- For Codex fixes: re-state problem context (no carry-over)
+- Never pass `gw-*` session IDs — use own IDs for resumable workflows
+- Check for `status:"deferred"` in sync responses — poll `jobId` if present

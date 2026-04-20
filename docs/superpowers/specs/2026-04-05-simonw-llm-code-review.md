@@ -66,16 +66,38 @@ It does NOT strip:
 **Found by:** Codex | **Confirmed by:** Gemini
 
 **Description:**
-`Collection.embed_multi_with_metadata()` implements a deduplication check that queries existing rows by `content_hash`, stores the returned row `id`s in `existing_ids`, then filters the incoming batch by checking if each incoming item's ID is in `existing_ids`. This compares the wrong key -- it should compare `content_hash` values, not IDs.
+`Collection.embed_multi_with_metadata()` implements a deduplication check that queries existing rows by `content_hash`, stores the returned `id` values in `existing_ids`, then filters the incoming batch by checking if each incoming item's ID is in `existing_ids`. This filters by identity instead of content existence.
 
-**Impact:** Duplicate content submitted under a new ID bypasses dedup entirely. The embeddings table accumulates redundant entries, increasing storage costs and degrading similarity search performance. The `content_hash` column is indexed but not unique in the schema, so duplicates persist silently.
+**Root cause (corrected 2026-04-05 per [@kaiisfree](https://github.com/kaiisfree)):**
+The `id` column in the `embeddings` table is the **user-provided identifier**, not an auto-increment row ID. The table's primary key is `(collection_id, id)` where `id` is a `str` supplied by the caller (e.g., a filename or document key). The query `SELECT id FROM embeddings WHERE collection_id = ? AND content_hash IN (...)` returns user-provided IDs of existing rows whose content matches. The filter `if item[0] not in existing_ids` checks whether the new item's user-provided ID appears among those existing rows' user-provided IDs. When the same content arrives under a different ID, the existing row's ID does not match, so dedup fails.
+
+**Contrast with single-item path:**
+`embed()` (line ~135) correctly deduplicates by content alone: `count_where("content_hash = ? and collection_id = ?", [content_hash, self.id])` — a pure existence check with no ID comparison. `embed_multi_with_metadata()` attempts the same semantic but introduces an ID comparison that breaks the invariant.
+
+**Impact:** Duplicate content submitted under a new ID bypasses dedup entirely. The embeddings table accumulates redundant entries, increasing storage costs and degrading similarity search performance. The `content_hash` column is indexed but not unique in the schema (deliberately — same content can exist across collections), so duplicates persist silently within a single collection.
 
 **Evidence:**
-- The query selects `id` from rows matching `content_hash IN (?)`
-- The filter checks `if item_id in existing_ids` -- but `item_id` is the user-provided ID, while `existing_ids` contains database row IDs from the hash lookup
-- These are semantically different: a new document with the same content but a different ID will never match
+- The query selects `id` (user-provided) from rows matching `content_hash IN (?)`
+- The filter checks `if item[0] not in existing_ids` — comparing new item's user-provided ID against existing rows' user-provided IDs
+- Same content + same ID = dedup works (by coincidence)
+- Same content + different ID = dedup fails (the core bug)
+- Concrete example: collection has `("doc0", md5("hello"))`. Incoming `[("doc1", "hello")]` — query returns `["doc0"]`, filter: `"doc1" not in ["doc0"]` = True → re-embedded
 
-**Suggested fix:** Compare `content_hash` values instead of IDs, or add a UNIQUE constraint on `(collection_id, content_hash)`.
+**Suggested fix:** Select and filter by `content_hash` instead of `id`:
+```python
+existing_hashes = {
+    row["content_hash"]
+    for row in self.db.query(
+        "SELECT content_hash FROM embeddings WHERE collection_id = ? AND content_hash IN ({})".format(
+            ",".join("?" for _ in items_and_hashes)
+        ),
+        [collection_id] + [h for _, h in items_and_hashes],
+    )
+}
+filtered_batch = [item for item, h in items_and_hashes if h not in existing_hashes]
+```
+
+**Additional context:** Neither path updates metadata or `store` settings for existing content (see upstream issue #224). Simon has acknowledged this needs to be "smarter." The `replace=True` on insert handles PK conflicts but only applies if the item passes the dedup filter.
 
 ---
 

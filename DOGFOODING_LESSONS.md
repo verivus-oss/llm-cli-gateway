@@ -4,7 +4,7 @@
 
 **Discovered:** 2026-01-24 during correlation ID implementation
 
-**Problem:** The `dangerouslySkipPermissions` parameter was using `--dangerously-skip-permissions` flag, which doesn't actually work.
+**Problem:** `dangerouslySkipPermissions` used `--dangerously-skip-permissions` flag, which doesn't work.
 
 **Fix:** Changed to `--permission-mode bypassPermissions` (line 238 in src/index.ts)
 
@@ -17,7 +17,7 @@ claude -p "create file" --dangerously-skip-permissions
 claude -p "create file" --permission-mode bypassPermissions
 ```
 
-**Lesson:** Always test CLI flags directly before assuming they work.
+**Lesson:** Always test CLI flags directly.
 
 ---
 
@@ -25,7 +25,7 @@ claude -p "create file" --permission-mode bypassPermissions
 
 **Discovered:** 2026-01-24 during correlation ID implementation attempt
 
-**Problem:** When using `claude_request` tool with `dangerouslySkipPermissions=true`, the permission bypass only affects the **subprocess** Claude instance, not the **parent** Claude instance that's executing the tool call.
+**Problem:** `dangerouslySkipPermissions=true` only affects subprocess Claude, not parent executing the tool call.
 
 **Scenario:**
 1. Parent Claude (the one responding to user) needs permission to use Edit tool
@@ -36,11 +36,11 @@ claude -p "create file" --permission-mode bypassPermissions
 **Why This Happens:**
 - The tool spawns a subprocess: `executeCli("claude", args, ...)`
 - The subprocess runs with `--permission-mode bypassPermissions`
-- But the **parent** Claude process (handling the MCP tool call) has its own permission system
+- But parent Claude (handling MCP tool call) has its own permission system
 - Subprocess permissions don't propagate to parent
 
 **Architectural Issue:**
-The `claude_request` tool cannot use itself to bypass permissions for file modifications. This creates a chicken-and-egg problem:
+`claude_request` cannot bypass its own permissions for file modifications. Chicken-and-egg:
 - To modify code via the tool, we need permission bypass
 - But the bypass only affects the subprocess, not the parent
 - The parent still requires manual approval
@@ -53,9 +53,9 @@ claude --permission-mode bypassPermissions
 ```
 
 **Alternative:**
-Use a different LLM (codex_request or gemini_request) to modify the code, as they don't have this self-referential permission issue.
+Use codex_request or gemini_request — no self-referential permission issue.
 
-**Lesson:** Dogfooding reveals architectural limitations. A tool cannot recursively bypass its own permission system through subprocess spawning.
+**Lesson:** Tool cannot recursively bypass its own permissions via subprocess.
 
 ---
 
@@ -63,12 +63,12 @@ Use a different LLM (codex_request or gemini_request) to modify the code, as the
 
 **Discovered:** Multiple times during session
 
-**Problem:** When the tool doesn't work as expected, there's a strong temptation to "just implement it manually" instead of debugging why the tool failed.
+**Problem:** When tools fail, temptation to implement manually instead of debugging.
 
 **Why This Is Bad:**
-- Prevents discovery of real bugs (like Issue #1 and #2)
-- Defeats the purpose of dogfooding
-- Doesn't improve the tool for future use
+- Prevents finding real bugs (Issues #1, #2)
+- Defeats dogfooding purpose
+- Doesn't improve tool for future use
 - Misses UX issues
 
 **Correct Approach:**
@@ -78,7 +78,7 @@ Use a different LLM (codex_request or gemini_request) to modify the code, as the
 4. Try again
 5. Repeat until it works OR document the limitation
 
-**Lesson:** Resist the urge to bypass the tool. The bugs you find are valuable!
+**Lesson:** Resist bypassing the tool. Bugs found are valuable.
 
 ---
 
@@ -86,7 +86,7 @@ Use a different LLM (codex_request or gemini_request) to modify the code, as the
 
 **Discovered:** 2026-01-24 during performance metrics implementation
 
-**Problem:** When an LLM runs in fullAuto mode and tries to use MCP tools (like `claude_request` or `gemini_request`) to spawn sub-sessions, the connection fails with "MCP error -32000: Connection closed".
+**Problem:** FullAuto LLM using MCP tools (`claude_request`, `gemini_request`) to spawn sub-sessions fails: "MCP error -32000: Connection closed".
 
 **Scenario:**
 1. User asks Claude to orchestrate Codex with instructions to use MCP tools
@@ -96,13 +96,13 @@ Use a different LLM (codex_request or gemini_request) to modify the code, as the
 5. **MCP connection closes** - sub-session fails
 
 **Why This Happens:**
-- The MCP server lifecycle is tied to the fullAuto execution context
-- When Codex runs in fullAuto mode, it's executing within a subprocess
-- Attempting to spawn another MCP tool call from within that subprocess tries to create a nested connection
-- The MCP server isn't designed for nested/recursive connections from the same execution context
+- MCP server lifecycle tied to fullAuto context
+- Codex in fullAuto executes within subprocess
+- Spawning MCP tool call from subprocess creates nested connection
+- MCP server doesn't support nested/recursive connections
 
 **Architectural Issue:**
-True multi-level autonomous orchestration is not currently possible. An LLM in fullAuto mode cannot orchestrate other LLMs via MCP tools.
+Multi-level autonomous orchestration not supported. FullAuto LLMs cannot orchestrate via MCP.
 
 **Workaround:**
 Manual orchestration at each level:
@@ -127,21 +127,21 @@ codex_request with instructions:
 
 **Impact:**
 - Limits autonomous multi-level orchestration
-- Requires human or top-level LLM to coordinate each step
-- Cannot delegate orchestration responsibilities to child LLMs
+- Requires human/top-level LLM to coordinate steps
+- Cannot delegate orchestration to child LLMs
 
 **Future Consideration:**
-- Could be addressed with MCP server session management improvements
-- Would require supporting nested/concurrent MCP connections
+- Could be addressed with MCP session management improvements
+- Requires nested/concurrent MCP connection support
 - Or: design a "batch request" tool that packages multiple sub-requests
 
-**Lesson:** MCP tool calls work great for single-level orchestration (Parent → Child), but multi-level autonomous orchestration (Parent → Child → GrandChild) requires architectural changes to support nested MCP connections.
+**Lesson:** MCP works for single-level (Parent→Child). Multi-level (Parent→Child→GrandChild) requires nested connection support.
 
 ---
 
 ## Summary
 
-Through dogfooding the llm-cli-gateway, we discovered:
+Dogfooding discovered:
 
 1. ✅ **Fixed**: Wrong CLI flag for permission bypass
 2. ⚠️ **Limitation**: Tool can't bypass its own permissions (architectural)
@@ -156,5 +156,5 @@ Through dogfooding the llm-cli-gateway, we discovered:
 
 **Next Steps:**
 - Document MCP connection architecture in BEST_PRACTICES.md
-- Consider implementing batch/composite request patterns for multi-step workflows
-- Explore MCP session management improvements for nested connections
+- Consider batch/composite request patterns for multi-step workflows
+- Explore MCP session improvements for nested connections

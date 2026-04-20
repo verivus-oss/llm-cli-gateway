@@ -1,0 +1,629 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=1200">
+<title>llm-cli-gateway — Repo Card</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Cormorant+Garamond:ital,wght@0,500;1,500&family=DM+Sans:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+  *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+  :root {
+    --brand: #6D28D9;
+    --accent: #A78BFA;
+    --glow: #C4B5FD;
+    --bg-deep: #0A0A0F;
+    --bg-surface: #111118;
+    --text-primary: #F0EEF5;
+    --text-secondary: #8B87A0;
+    --text-muted: #4A4660;
+    --grid-line: rgba(109, 40, 217, 0.06);
+    --node-claude: #D97706;
+    --node-codex: #059669;
+    --node-gemini: #2563EB;
+  }
+
+  body {
+    background: #000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    font-family: 'DM Sans', sans-serif;
+  }
+
+  .card {
+    width: 1200px;
+    height: 630px;
+    background: var(--bg-deep);
+    position: relative;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* ── Noise texture overlay ── */
+  .card::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.03'/%3E%3C/svg%3E");
+    background-size: 200px 200px;
+    pointer-events: none;
+    z-index: 10;
+  }
+
+  /* ── Subtle grid ── */
+  .grid-overlay {
+    position: absolute;
+    inset: 0;
+    background-image:
+      linear-gradient(var(--grid-line) 1px, transparent 1px),
+      linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
+    background-size: 40px 40px;
+    mask-image: radial-gradient(ellipse 70% 60% at 75% 50%, black 0%, transparent 100%);
+    -webkit-mask-image: radial-gradient(ellipse 70% 60% at 75% 50%, black 0%, transparent 100%);
+    z-index: 1;
+  }
+
+  /* ── Ambient glow from orchestration area ── */
+  .ambient-glow {
+    position: absolute;
+    width: 500px;
+    height: 500px;
+    right: -50px;
+    top: -50px;
+    background: radial-gradient(circle, rgba(109, 40, 217, 0.12) 0%, rgba(109, 40, 217, 0.03) 40%, transparent 70%);
+    z-index: 1;
+    animation: pulse-glow 6s ease-in-out infinite;
+  }
+
+  @keyframes pulse-glow {
+    0%, 100% { opacity: 0.7; transform: scale(1); }
+    50% { opacity: 1; transform: scale(1.08); }
+  }
+
+  /* ── Bottom edge accent line ── */
+  .edge-line {
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    height: 3px;
+    background: linear-gradient(90deg, transparent 0%, var(--brand) 20%, var(--accent) 50%, var(--brand) 80%, transparent 100%);
+    z-index: 20;
+  }
+
+  /* ── Top bar (terminal chrome) ── */
+  .top-bar {
+    position: relative;
+    z-index: 5;
+    display: flex;
+    align-items: center;
+    padding: 20px 40px 0 40px;
+    gap: 10px;
+  }
+
+  .dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    opacity: 0.6;
+  }
+  .dot--red { background: #EF4444; }
+  .dot--yellow { background: #F59E0B; }
+  .dot--green { background: #22C55E; }
+
+  .top-bar-path {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-left: 12px;
+    letter-spacing: 0.5px;
+  }
+
+  .top-bar-version {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    color: var(--accent);
+    margin-left: auto;
+    opacity: 0.6;
+  }
+
+  /* ── Main content area ── */
+  .content {
+    position: relative;
+    z-index: 5;
+    flex: 1;
+    display: flex;
+    padding: 32px 40px 28px 40px;
+    gap: 60px;
+  }
+
+  .content-left {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    min-width: 0;
+  }
+
+  /* ── Prompt line ── */
+  .prompt-line {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 13px;
+    color: var(--text-muted);
+    margin-bottom: 14px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .prompt-chevron {
+    color: var(--accent);
+    font-weight: 700;
+  }
+
+  .prompt-cmd {
+    color: var(--text-secondary);
+  }
+
+  /* ── Project name ── */
+  .project-name {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 44px;
+    font-weight: 700;
+    color: var(--text-primary);
+    letter-spacing: -1.5px;
+    line-height: 1;
+    margin-bottom: 6px;
+  }
+
+  .project-name .highlight {
+    background: linear-gradient(135deg, var(--accent), var(--glow));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+
+  /* ── Tagline ── */
+  .tagline {
+    font-family: 'Cormorant Garamond', serif;
+    font-size: 19px;
+    font-style: italic;
+    color: var(--text-secondary);
+    line-height: 1.45;
+    margin-top: 14px;
+    max-width: 520px;
+    letter-spacing: 0.2px;
+  }
+
+  /* ── Tags row ── */
+  .tags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 24px;
+  }
+
+  .tag {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10.5px;
+    font-weight: 500;
+    letter-spacing: 0.8px;
+    text-transform: uppercase;
+    padding: 5px 12px;
+    border-radius: 4px;
+    background: rgba(109, 40, 217, 0.1);
+    border: 1px solid rgba(109, 40, 217, 0.2);
+    color: var(--accent);
+  }
+
+  .tag--mit {
+    background: rgba(5, 150, 105, 0.1);
+    border-color: rgba(5, 150, 105, 0.25);
+    color: #6EE7B7;
+  }
+
+  /* ── Right side: orchestration visualization ── */
+  .content-right {
+    width: 320px;
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .orchestration {
+    position: relative;
+    width: 280px;
+    height: 280px;
+  }
+
+  /* Central hub */
+  .hub {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: 64px;
+    height: 64px;
+    border-radius: 16px;
+    background: linear-gradient(135deg, var(--brand), #4C1D95);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow:
+      0 0 40px rgba(109, 40, 217, 0.3),
+      0 0 80px rgba(109, 40, 217, 0.1);
+    z-index: 3;
+  }
+
+  .hub-icon {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 18px;
+    font-weight: 700;
+    color: white;
+    letter-spacing: -0.5px;
+  }
+
+  /* Orbit ring */
+  .orbit-ring {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: 220px;
+    height: 220px;
+    border-radius: 50%;
+    border: 1px solid rgba(109, 40, 217, 0.12);
+    z-index: 1;
+  }
+
+  .orbit-ring-inner {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: 150px;
+    height: 150px;
+    border-radius: 50%;
+    border: 1px dashed rgba(109, 40, 217, 0.08);
+    z-index: 1;
+  }
+
+  /* LLM Nodes */
+  .node {
+    position: absolute;
+    z-index: 4;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .node-dot {
+    width: 36px;
+    height: 36px;
+    border-radius: 10px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    font-weight: 700;
+    color: white;
+    position: relative;
+  }
+
+  .node-dot::after {
+    content: '';
+    position: absolute;
+    inset: -4px;
+    border-radius: 14px;
+    border: 1px solid;
+    opacity: 0.2;
+  }
+
+  .node-label {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px;
+    letter-spacing: 1.2px;
+    text-transform: uppercase;
+    color: var(--text-secondary);
+    white-space: nowrap;
+  }
+
+  .node--claude {
+    top: 8px;
+    left: 50%;
+    transform: translateX(-50%);
+  }
+  .node--claude .node-dot {
+    background: linear-gradient(135deg, #D97706, #B45309);
+  }
+  .node--claude .node-dot::after { border-color: #D97706; }
+
+  .node--codex {
+    bottom: 24px;
+    left: 12px;
+  }
+  .node--codex .node-dot {
+    background: linear-gradient(135deg, #059669, #047857);
+  }
+  .node--codex .node-dot::after { border-color: #059669; }
+
+  .node--gemini {
+    bottom: 24px;
+    right: 12px;
+  }
+  .node--gemini .node-dot {
+    background: linear-gradient(135deg, #2563EB, #1D4ED8);
+  }
+  .node--gemini .node-dot::after { border-color: #2563EB; }
+
+  /* Connection lines (SVG) */
+  .connections {
+    position: absolute;
+    inset: 0;
+    z-index: 2;
+  }
+
+  .conn-line {
+    stroke-width: 1.5;
+    stroke-dasharray: 4 4;
+    fill: none;
+    opacity: 0.3;
+    animation: dash-flow 2s linear infinite;
+  }
+
+  @keyframes dash-flow {
+    to { stroke-dashoffset: -16; }
+  }
+
+  /* ── Footer ── */
+  .footer {
+    position: relative;
+    z-index: 5;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 40px 22px 40px;
+  }
+
+  .footer-left {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .org-mark {
+    width: 28px;
+    height: 28px;
+    border-radius: 7px;
+    background: linear-gradient(135deg, var(--brand), #4C1D95);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    font-weight: 700;
+    color: white;
+  }
+
+  .org-info {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+  }
+
+  .org-name {
+    font-family: 'DM Sans', sans-serif;
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--text-primary);
+    letter-spacing: 0.3px;
+  }
+
+  .org-handle {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    color: var(--text-muted);
+    letter-spacing: 0.3px;
+  }
+
+  .footer-right {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+  }
+
+  .footer-stat {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    color: var(--text-muted);
+    letter-spacing: 0.5px;
+    display: flex;
+    align-items: center;
+    gap: 5px;
+  }
+
+  .footer-stat .dot-indicator {
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background: var(--accent);
+    opacity: 0.5;
+  }
+
+  /* ── Animated signal pulses from hub ── */
+  .pulse {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: 64px;
+    height: 64px;
+    border-radius: 16px;
+    border: 1px solid var(--accent);
+    z-index: 2;
+    opacity: 0;
+    animation: hub-pulse 3s ease-out infinite;
+  }
+
+  .pulse:nth-child(2) { animation-delay: 1s; }
+  .pulse:nth-child(3) { animation-delay: 2s; }
+
+  @keyframes hub-pulse {
+    0% { opacity: 0.4; transform: translate(-50%, -50%) scale(1); }
+    100% { opacity: 0; transform: translate(-50%, -50%) scale(3.5); border-radius: 50%; }
+  }
+
+  /* ── Floating particles ── */
+  .particle {
+    position: absolute;
+    width: 2px;
+    height: 2px;
+    background: var(--accent);
+    border-radius: 50%;
+    opacity: 0;
+    z-index: 2;
+    animation: float-particle 8s ease-in-out infinite;
+  }
+
+  .particle:nth-child(1) { top: 15%; right: 20%; animation-delay: 0s; }
+  .particle:nth-child(2) { top: 60%; right: 35%; animation-delay: 2s; }
+  .particle:nth-child(3) { top: 40%; right: 10%; animation-delay: 4s; }
+  .particle:nth-child(4) { top: 80%; right: 25%; animation-delay: 1s; }
+  .particle:nth-child(5) { top: 25%; right: 40%; animation-delay: 3s; }
+
+  @keyframes float-particle {
+    0%, 100% { opacity: 0; transform: translateY(0); }
+    20% { opacity: 0.6; }
+    80% { opacity: 0.6; }
+    50% { transform: translateY(-20px); }
+  }
+</style>
+</head>
+<body>
+
+<div class="card">
+  <!-- Background layers -->
+  <div class="grid-overlay"></div>
+  <div class="ambient-glow"></div>
+  <div class="edge-line"></div>
+
+  <!-- Floating particles -->
+  <div class="particle"></div>
+  <div class="particle"></div>
+  <div class="particle"></div>
+  <div class="particle"></div>
+  <div class="particle"></div>
+
+  <!-- Top bar -->
+  <div class="top-bar">
+    <div class="dot dot--red"></div>
+    <div class="dot dot--yellow"></div>
+    <div class="dot dot--green"></div>
+    <span class="top-bar-path">~/verivus-oss/llm-cli-gateway</span>
+    <span class="top-bar-version">v1.0.1</span>
+  </div>
+
+  <!-- Main content -->
+  <div class="content">
+    <div class="content-left">
+      <div class="prompt-line">
+        <span class="prompt-chevron">&#x276F;</span>
+        <span class="prompt-cmd">mcp serve --multi-llm</span>
+      </div>
+
+      <h1 class="project-name">llm-cli-<span class="highlight">gateway</span></h1>
+
+      <p class="tagline">
+        Unified multi-LLM orchestration via MCP &mdash; session management,
+        circuit-breaker retries &amp; async job coordination across
+        Claude&nbsp;Code, Codex&nbsp;&amp;&nbsp;Gemini.
+      </p>
+
+      <div class="tags">
+        <span class="tag">MCP</span>
+        <span class="tag">TypeScript</span>
+        <span class="tag">Claude</span>
+        <span class="tag">Codex</span>
+        <span class="tag">Gemini</span>
+        <span class="tag tag--mit">MIT</span>
+      </div>
+    </div>
+
+    <div class="content-right">
+      <div class="orchestration">
+        <!-- Orbit rings -->
+        <div class="orbit-ring"></div>
+        <div class="orbit-ring-inner"></div>
+
+        <!-- Pulse animations -->
+        <div class="pulse"></div>
+        <div class="pulse"></div>
+        <div class="pulse"></div>
+
+        <!-- Connection lines -->
+        <svg class="connections" viewBox="0 0 280 280">
+          <!-- Hub center: 140, 140 -->
+          <!-- Claude node: 140, 26 -->
+          <line class="conn-line" x1="140" y1="108" x2="140" y2="44" stroke="#D97706" />
+          <!-- Codex node: 30, 238 -->
+          <line class="conn-line" x1="120" y1="160" x2="48" y2="220" stroke="#059669" />
+          <!-- Gemini node: 250, 238 -->
+          <line class="conn-line" x1="160" y1="160" x2="232" y2="220" stroke="#2563EB" />
+        </svg>
+
+        <!-- Central hub -->
+        <div class="hub">
+          <span class="hub-icon">MCP</span>
+        </div>
+
+        <!-- LLM nodes -->
+        <div class="node node--claude">
+          <div class="node-dot">C</div>
+          <span class="node-label">Claude</span>
+        </div>
+
+        <div class="node node--codex">
+          <div class="node-dot">Cx</div>
+          <span class="node-label">Codex</span>
+        </div>
+
+        <div class="node node--gemini">
+          <div class="node-dot">G</div>
+          <span class="node-label">Gemini</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Footer -->
+  <div class="footer">
+    <div class="footer-left">
+      <div class="org-mark">VX</div>
+      <div class="org-info">
+        <span class="org-name">VerivusAI Labs</span>
+        <span class="org-handle">github.com/verivus-oss</span>
+      </div>
+    </div>
+    <div class="footer-right">
+      <span class="footer-stat">
+        <span class="dot-indicator"></span>
+        Model Context Protocol
+      </span>
+      <span class="footer-stat">
+        <span class="dot-indicator"></span>
+        Production Ready
+      </span>
+    </div>
+  </div>
+</div>
+
+</body>
+</html>
