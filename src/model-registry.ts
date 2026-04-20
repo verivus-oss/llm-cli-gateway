@@ -26,10 +26,13 @@ const FALLBACK_INFO: CliInfoMap = {
   codex: {
     description: "OpenAI's Codex CLI - best for code execution in sandboxed environments",
     models: {
-      "o3": "Most capable reasoning model. Best for: complex multi-step problems, math, science",
-      "o4-mini": "Fast reasoning model. Best for: coding tasks, quick iterations",
-      "gpt-4.1": "Latest GPT-4 variant. Best for: general coding, instruction following"
-    }
+      "gpt-5.4": "Frontier coding and professional-work model. Best for: most Codex tasks, long-running agentic work",
+      "gpt-5.3-codex": "Specialized Codex model. Best for: agentic coding workflows with Codex-tuned behavior",
+      "gpt-5.2": "Strong general-purpose GPT-5 model. Best for: broad coding and reasoning tasks",
+      "gpt-5-pro": "Highest-capability GPT-5 model. Best for: deep reasoning and difficult professional workflows"
+    },
+    defaultModel: "gpt-5.4",
+    modelOrder: ["gpt-5.4", "gpt-5.3-codex", "gpt-5.2", "gpt-5-pro"]
   },
   gemini: {
     description: "Google's Gemini CLI - best for multimodal tasks and Google ecosystem integration",

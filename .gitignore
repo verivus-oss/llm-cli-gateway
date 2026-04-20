@@ -13,3 +13,7 @@ __pycache__/
 .eggs/
 build/
 *.dist-info/
+
+# sqry tool cache (generated per-index; not source)
+.sqry/
+.sqry-cache/

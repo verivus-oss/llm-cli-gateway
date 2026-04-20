@@ -34,6 +34,8 @@ beforeAll(() => {
   chmodSync(shimScript, 0o755);
   originalPath = process.env.PATH || "";
   process.env.PATH = `${shimDir}:${originalPath}`;
+  // Disable auto-async deferral so sync handler tests route through the mocked executeCli
+  process.env.SYNC_DEADLINE_MS = "0";
 });
 
 afterAll(() => {
