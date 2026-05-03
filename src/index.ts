@@ -23,6 +23,7 @@ import { checkReviewIntegrity, ReviewIntegrityResult } from "./review-integrity.
 import { buildClaudeMcpConfig, ClaudeMcpConfigResult, ClaudeMcpServerName, CLAUDE_MCP_SERVER_NAMES } from "./claude-mcp-config.js";
 import { resolveSessionResumeArgs, GATEWAY_SESSION_PREFIX } from "./request-helpers.js";
 import { createFlightRecorder, FlightRecorderLike } from "./flight-recorder.js";
+import { getCliVersions, runCliUpgrade } from "./cli-updater.js";
 
 type ExtendedToolResponse = {
   content: { type: "text"; text: string }[];
@@ -121,7 +122,7 @@ const SERVER_INSTRUCTIONS = `llm-cli-gateway: Multi-LLM orchestration via MCP.
 Tools: claude_request, codex_request, gemini_request (sync) | *_request_async (async)
 Jobs: llm_job_status, llm_job_result, llm_job_cancel
 Sessions: session_create, session_list, session_set_active, session_get, session_delete, session_clear_all
-Other: list_models, approval_list, llm_process_health
+Other: list_models, cli_versions, cli_upgrade, approval_list, llm_process_health
 
 Key behaviors:
 - Sync auto-defers at ${SYNC_DEADLINE_MS}ms. Poll deferred jobs via llm_job_status/llm_job_result.
@@ -1677,6 +1678,56 @@ server.tool(
     const cliInfo = getCliInfo();
     const result = cli ? { [cli]: cliInfo[cli] } : cliInfo;
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+  }
+);
+
+server.tool(
+  "cli_versions",
+  {
+    cli: z.preprocess(
+      (value) => (value === "" || value === null ? undefined : value),
+      z.enum(["claude", "codex", "gemini"]).optional()
+    ).describe("CLI filter (claude|codex|gemini)")
+  },
+  async ({ cli }) => {
+    const versions = await getCliVersions(cli);
+    return { content: [{ type: "text", text: JSON.stringify({ versions }, null, 2) }] };
+  }
+);
+
+server.tool(
+  "cli_upgrade",
+  {
+    cli: z.enum(["claude", "codex", "gemini"]).describe("CLI to upgrade"),
+    target: z.string().min(1).default("latest").describe("Package tag/version/target to install (default: latest)"),
+    dryRun: z.boolean().default(true).describe("When true, return the upgrade plan without running it"),
+    timeoutMs: z.number().int().min(30_000).max(3_600_000).optional().describe("Upgrade timeout in ms when dryRun=false")
+  },
+  async ({ cli, target, dryRun, timeoutMs }) => {
+    try {
+      const result = await runCliUpgrade({ cli, target, dryRun, timeoutMs, logger });
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({
+            success: true,
+            ...result
+          }, null, 2)
+        }]
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({
+            success: false,
+            error: message
+          }, null, 2)
+        }],
+        isError: true
+      };
+    }
   }
 );
 
