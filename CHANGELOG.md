@@ -2,6 +2,19 @@
 
 All notable changes to the llm-cli-gateway project.
 
+## Unreleased
+
+### Added
+
+- **Source-aware model registry** — `list_models` now reports model source/confidence metadata, aliases, default model source, and non-fatal discovery warnings
+- **Deterministic model configuration overrides** — Added `*_SETTINGS_PATH`, `GEMINI_HISTORY_ROOT`, `*_MODEL_ALIASES`, and `LLM_GATEWAY_MODEL_ALIASES` support for stable deployments and tests
+- **CLI lifecycle tools** — Added `cli_versions` and `cli_upgrade` tools for inspecting and upgrading individual Claude, Codex, and Gemini CLI installations
+
+### Changed
+
+- **Gemini history discovery is no longer authoritative** — Models observed in local Gemini session files are merged as low-confidence entries and no longer replace the registry or set the default model
+- **Codex default handling remains explicit** — If Codex has no configured default, `default`/`latest` resolve to no model flag so the Codex CLI can use its own built-in default
+
 ## [1.1.0] - 2026-04-04
 
 ### Added

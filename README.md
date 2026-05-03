@@ -305,6 +305,68 @@ List available models for each CLI.
 - Model names and descriptions
 - Best use cases for each model
 - CLI-specific information
+- `defaultModel` and `defaultModelSource` when a default is explicitly configured
+- `modelMetadata` with source/confidence (`fallback`, `config`, `env`, `observed`)
+- `aliases` and `warnings` when configured or when discovery degrades gracefully
+
+The registry treats explicit configuration as authoritative. Bundled fallback models are low-confidence hints, and Gemini models observed in local session history are merged as low-confidence entries only; they do not become the default model.
+
+Model registry environment overrides:
+
+```bash
+# Explicit defaults
+CLAUDE_DEFAULT_MODEL=haiku
+CODEX_DEFAULT_MODEL=<codex-model-id>
+GEMINI_DEFAULT_MODEL=gemini-2.5-flash
+
+# Additional models: comma/newline list, JSON array, or JSON object of model->description
+GEMINI_MODELS='{"gemini-team-default":"Team-approved Gemini model"}'
+
+# Aliases
+GEMINI_MODEL_ALIASES='team=gemini-team-default'
+LLM_GATEWAY_MODEL_ALIASES='codex.fast=gpt-5.3-codex-spark,gemini.fast=gemini-team-default'
+
+# Deterministic config/discovery paths
+CODEX_CONFIG_PATH=/path/to/config.toml
+CLAUDE_SETTINGS_PATH=/path/to/settings.json
+CLAUDE_SETTINGS_LOCAL_PATH=/path/to/settings.local.json
+GEMINI_SETTINGS_PATH=/path/to/settings.json
+GEMINI_HISTORY_ROOT=/path/to/.gemini/tmp
+
+# Disable local model-history discovery
+LLM_GATEWAY_DISABLE_MODEL_DISCOVERY=1
+```
+
+##### `cli_versions`
+Report installed CLI versions.
+
+**Parameters:**
+- `cli` (string, optional): Specific CLI to inspect ("claude", "codex", "gemini")
+
+##### `cli_upgrade`
+Plan or run an upgrade for one CLI.
+
+**Parameters:**
+- `cli` (string, required): CLI to upgrade ("claude", "codex", "gemini")
+- `target` (string, optional): Package tag/version/target, default: `latest`
+- `dryRun` (boolean, optional): Return the upgrade plan without running it, default: `true`
+- `timeoutMs` (number, optional): Upgrade timeout when `dryRun=false`
+
+**Upgrade strategies:**
+- Claude latest: `claude update`
+- Claude explicit target: `claude install <target>`
+- Codex latest: `codex update`
+- Codex explicit target: `npm install -g @openai/codex@<target>`
+- Gemini: `npm install -g @google/gemini-cli@<target>`
+
+**Example dry run:**
+```json
+{
+  "cli": "gemini",
+  "target": "latest",
+  "dryRun": true
+}
+```
 
 ## Session Management
 
@@ -572,4 +634,3 @@ For issues and questions:
 ## Changelog
 
 See [CHANGELOG.md](CHANGELOG.md) for detailed release history.
-

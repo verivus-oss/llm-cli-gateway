@@ -52,6 +52,8 @@ describe("MCP Server Integration", () => {
       expect(toolNames).toContain("codex_request");
       expect(toolNames).toContain("gemini_request");
       expect(toolNames).toContain("list_models");
+      expect(toolNames).toContain("cli_versions");
+      expect(toolNames).toContain("cli_upgrade");
 
       // Session management tools
       expect(toolNames).toContain("session_create");
