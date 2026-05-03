@@ -7,6 +7,15 @@ description: Structured design document review via LLM gateway — submit plans,
 
 Submit design documents, implementation plans, or specifications for peer review through the LLM gateway. Track review iterations until approval.
 
+## Dispatch Defaults
+
+Apply these on every dispatch unless the caller has explicitly overridden a rule in the current turn:
+
+1. **Omit `model`** — let the gateway use its configured default per CLI.
+2. **`approvalStrategy:"mcp_managed"`** is the skill dispatch default (the gateway schema default is `"legacy"`). For Codex, also pass `fullAuto:true` when it must read files or run commands.
+3. **No wallclock timeout; poll every 60 s** — `idleTimeoutMs` is a separate no-output safeguard.
+4. **Iterate until unconditional APPROVED** (review dispatches only) — every review prompt must end with "End with APPROVED or NOT APPROVED with findings." Loop: dispatch → parse verdict → on `NOT APPROVED` or conditional, revise + re-submit → repeat. Escalate after 3 rounds. This rule does **not** apply to pure implementation or non-review analysis dispatches.
+
 ## When to Use
 
 - Before implementing a complex feature (review the plan first)
@@ -30,8 +39,9 @@ Write a clear review request that includes:
 
 ```
 codex_request({
-  prompt: "Review the design document at [path]. This is a [spec/plan/design] for [feature].\n\nReview for:\n- Completeness (are all requirements addressed?)\n- Correctness (will this approach work?)\n- Feasibility (can this be implemented as described?)\n- Risks (what could go wrong?)\n- Missing considerations\n\nGive APPROVED or NOT APPROVED with specific, actionable findings.",
+  prompt: "Review the design document at [path]. This is a [spec/plan/design] for [feature].\n\nReview for:\n- Completeness (are all requirements addressed?)\n- Correctness (will this approach work?)\n- Feasibility (can this be implemented as described?)\n- Risks (what could go wrong?)\n- Missing considerations\n\nEnd with APPROVED or NOT APPROVED with specific, actionable findings.",
   fullAuto: true,
+  approvalStrategy: "mcp_managed",
   correlationId: "design-review-r1"
 })
 ```
@@ -40,13 +50,14 @@ codex_request({
 
 ```
 codex_request_async({
-  prompt: "Review the design document at [path]...",
+  prompt: "Review the design document at [path]... End with APPROVED or NOT APPROVED with findings.",
   fullAuto: true,
+  approvalStrategy: "mcp_managed",
   correlationId: "design-review-r1-codex"
 })
 gemini_request_async({
-  prompt: "Review the design document at [path]. Focus on security implications, attack surfaces, data flow risks, and failure modes...",
-  model: "gemini-2.5-pro",
+  prompt: "Review the design document at [path]. Focus on security implications, attack surfaces, data flow risks, and failure modes... End with APPROVED or NOT APPROVED with findings.",
+  approvalStrategy: "mcp_managed",
   correlationId: "design-review-r1-gemini"
 })
 ```
@@ -66,8 +77,9 @@ For each finding:
 
 ```
 codex_request({
-  prompt: "Re-review the design at [path] after addressing round 1 feedback:\n\n1. [Finding] — Addressed by: [what changed]\n2. [Finding] — Addressed by: [what changed]\n3. [Finding] — Not applicable because: [justification]\n\nReview the updated document. APPROVED or NOT APPROVED.",
+  prompt: "Re-review the design at [path] after addressing round 1 feedback:\n\n1. [Finding] — Addressed by: [what changed]\n2. [Finding] — Addressed by: [what changed]\n3. [Finding] — Not applicable because: [justification]\n\nReview the updated document. End with APPROVED or NOT APPROVED with findings.",
   fullAuto: true,
+  approvalStrategy: "mcp_managed",
   correlationId: "design-review-r2"
 })
 ```
@@ -160,5 +172,5 @@ The skill works with any document structure — the naming convention is optiona
 - Include context about the project and feature — reviewers don't have your conversation history.
 - Use `correlationId` for every review round to enable tracing.
 - For large documents, tell the reviewer which sections changed between rounds.
-- Always pass `fullAuto: true` for Codex reviews — without it, Codex cannot read files or run commands. If Codex still can't access something specific, paste the relevant sections inline.
+- Always pass `fullAuto: true` **and** `approvalStrategy: "mcp_managed"` for Codex reviews — `fullAuto:true` gives Codex sandboxed file/shell access, while `mcp_managed` records and gates the request. If Codex still can't access something specific, paste the relevant sections inline.
 - Design reviews are cheaper than code reviews — catch issues before writing code.

@@ -7,6 +7,15 @@ description: Run a task through multiple LLMs independently and require agreemen
 
 When correctness matters more than speed, send the same task to Claude, Codex, and Gemini independently, then compare results. All agents must agree before proceeding.
 
+## Dispatch Defaults
+
+Apply these on every dispatch unless the caller has explicitly overridden a rule in the current turn:
+
+1. **Omit `model`** — let the gateway use its configured default per CLI. Nominating a model risks deprecated IDs (`o3`, `o3-pro`, `gpt-4o`, …) and capability mismatches.
+2. **`approvalStrategy:"mcp_managed"`** is the skill dispatch default (the gateway schema default is `"legacy"`). For Codex, also pass `fullAuto:true` when it needs file/shell access.
+3. **No wallclock timeout; poll every 60 s** — `idleTimeoutMs` is a separate no-output safeguard.
+4. **Iterate until unconditional APPROVED** (review dispatches only) — every review prompt must end with "End with APPROVED or NOT APPROVED with findings." Consensus requires **all** reviewers to return unconditional APPROVED; any `NOT APPROVED` or conditional approval from any reviewer triggers the fix-and-re-review loop to all reviewers. Escalate after 3 rounds. This rule does **not** apply to pure implementation or non-review analysis dispatches.
+
 ## When to Use
 
 - Generating code that will run in production without human review
@@ -23,15 +32,18 @@ Each LLM generates a solution independently. Compare outputs structurally.
 ```
 claude_request_async({
   prompt: "Given this specification:\n[spec]\n\nGenerate the implementation. Output only code.",
+  approvalStrategy: "mcp_managed",
   correlationId: "gen-claude"
 })
 codex_request_async({
   prompt: "Given this specification:\n[spec]\n\nGenerate the implementation. Output only code.",
   fullAuto: true,
+  approvalStrategy: "mcp_managed",
   correlationId: "gen-codex"
 })
 gemini_request_async({
   prompt: "Given this specification:\n[spec]\n\nGenerate the implementation. Output only code.",
+  approvalStrategy: "mcp_managed",
   correlationId: "gen-gemini"
 })
 ```
@@ -47,17 +59,19 @@ All three LLMs must approve the same artifact. Used for final review gates.
 
 ```
 claude_request_async({
-  prompt: "Review [path] for: grammar correctness, extraction completeness, test coverage, performance, security. Give APPROVED or NOT APPROVED with findings.",
+  prompt: "Review [path] for: grammar correctness, extraction completeness, test coverage, performance, security. End with APPROVED or NOT APPROVED with findings.",
+  approvalStrategy: "mcp_managed",
   correlationId: "review-claude"
 })
 codex_request_async({
-  prompt: "Review [path] for: grammar correctness, extraction completeness, test coverage, performance, security. Give APPROVED or NOT APPROVED with findings.",
+  prompt: "Review [path] for: grammar correctness, extraction completeness, test coverage, performance, security. End with APPROVED or NOT APPROVED with findings.",
   fullAuto: true,
+  approvalStrategy: "mcp_managed",
   correlationId: "review-codex"
 })
 gemini_request_async({
-  prompt: "Review [path] for: grammar correctness, extraction completeness, test coverage, performance, security. Give APPROVED or NOT APPROVED with findings.",
-  model: "gemini-2.5-pro",
+  prompt: "Review [path] for: grammar correctness, extraction completeness, test coverage, performance, security. End with APPROVED or NOT APPROVED with findings.",
+  approvalStrategy: "mcp_managed",
   correlationId: "review-gemini"
 })
 ```
@@ -77,7 +91,8 @@ Multiple valid approaches exist. Each LLM proposes independently, then a designa
 
 ```
 claude_request({
-  prompt: "Three LLMs proposed solutions for [problem]:\n\nClaude's proposal: [proposal]\nCodex's proposal: [proposal]\nGemini's proposal: [proposal]\n\nSynthesize the best approach, explaining why. If they agree, confirm. If they conflict, choose the strongest with justification."
+  prompt: "Three LLMs proposed solutions for [problem]:\n\nClaude's proposal: [proposal]\nCodex's proposal: [proposal]\nGemini's proposal: [proposal]\n\nSynthesize the best approach, explaining why. If they agree, confirm. If they conflict, choose the strongest with justification.",
+  approvalStrategy: "mcp_managed"
 })
 ```
 
@@ -88,20 +103,20 @@ claude_request({
 Always use async tools for consensus — you need all results before deciding:
 
 ```
-// Fire all three
+// Fire all three (each with approvalStrategy:"mcp_managed"; Codex also fullAuto:true)
 job1 = claude_request_async({...})
 job2 = codex_request_async({...})
 job3 = gemini_request_async({...})
 
-// Poll every 90 seconds
-llm_job_status({jobId: job1.jobId})
-llm_job_status({jobId: job2.jobId})
-llm_job_status({jobId: job3.jobId})
+// Poll every 60 seconds (no wallclock timeout; cancel only on explicit instruction or hard failure)
+llm_job_status({jobId: job1.job.id})
+llm_job_status({jobId: job2.job.id})
+llm_job_status({jobId: job3.job.id})
 
 // Collect results when all complete
-result1 = llm_job_result({jobId: job1.jobId})
-result2 = llm_job_result({jobId: job2.jobId})
-result3 = llm_job_result({jobId: job3.jobId})
+result1 = llm_job_result({jobId: job1.job.id})
+result2 = llm_job_result({jobId: job2.job.id})
+result3 = llm_job_result({jobId: job3.job.id})
 ```
 
 ### Comparison
@@ -128,11 +143,9 @@ For reviews:
 
 ## Model Selection
 
-- Claude: Use default (no model param needed)
-- Codex: Use default (omit model param — gateway uses configured default)
-- Gemini: Use `gemini-2.5-pro` for thorough review, default for speed
+Dispatch default: **omit `model` on every call**. The gateway's configured default per CLI is the right choice in the vast majority of cases. Only nominate a model when the caller explicitly named a specific variant in the current turn.
 
-**Never use deprecated models** (o3, o3-pro, gpt-4o). Omit model param to use defaults.
+Avoid stale hardcoded model IDs such as `o3`, `o3-pro`, and `gpt-4o`; omit `model` or call `list_models` instead.
 
 ## Tips
 

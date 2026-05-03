@@ -7,6 +7,15 @@ description: Pattern for spawning subagents that must get Codex approval before 
 
 Spawn subagents to do work, then each agent submits its work to Codex for review via the LLM gateway. Agents iterate on Codex feedback until they get unconditional approval. Work is not accepted until Codex approves.
 
+## Dispatch Defaults
+
+Apply these on every dispatch unless the caller has explicitly overridden a rule in the current turn:
+
+1. **Omit `model`** — let the gateway use its configured default per CLI. Nominating a model risks deprecated IDs (`o3`, `o3-pro`, `gpt-4o`, …) and capability mismatches.
+2. **`approvalStrategy:"mcp_managed"`** is the skill dispatch default (the gateway schema default is `"legacy"`). For Codex, also pass `fullAuto:true`; this gives sandboxed autonomy while keeping the gateway approval gate in front of execution.
+3. **No wallclock timeout; poll every 60 s** — `idleTimeoutMs` is a separate no-output safeguard.
+4. **Iterate until unconditional APPROVED** (review dispatches only) — every review prompt must end with "End with APPROVED or NOT APPROVED with findings." Loop: dispatch → poll → parse verdict → on `NOT APPROVED` or conditional approval, dispatch fixes + re-review → repeat. Escalate after 3 rounds. This rule does **not** apply to pure implementation or non-review analysis dispatches.
+
 ## When to Use
 
 - Dispatching multiple parallel agents to implement different tasks
@@ -26,12 +35,13 @@ After completing your implementation:
 1. Build and test to verify your changes work
 2. Submit your work for Codex review via the llm MCP gateway:
    codex_request({
-     prompt: "Review [description of what was done] in [paths]. APPROVED or NOT APPROVED with findings.",
-     fullAuto: true
+     prompt: "Review [description of what was done] in [paths]. End with APPROVED or NOT APPROVED with findings.",
+     fullAuto: true,
+     approvalStrategy: "mcp_managed"
    })
-3. If the response contains status:"deferred", poll llm_job_status every 90 seconds until completed, then fetch with llm_job_result
-4. If NOT APPROVED: fix every issue Codex identified, then re-submit
-5. Iterate until you get unconditional APPROVED from Codex
+3. If the response contains status:"deferred", poll llm_job_status every 60 seconds until completed, then fetch with llm_job_result
+4. If NOT APPROVED or conditional: fix every issue Codex identified, then re-submit
+5. Iterate until you get unconditional APPROVED from Codex (max 3 rounds, then escalate)
 6. Report back with: what you did, Codex's final verdict, and the approval details
 ```
 
@@ -44,9 +54,9 @@ The subagent follows this loop:
 
 ```
 implement → build → test → submit to Codex →
-  if APPROVED: done, report back
-  if NOT APPROVED: fix issues → rebuild → retest → resubmit to Codex
-  if deferred: poll every 90s → get result → parse verdict
+  if APPROVED (unconditional): done, report back
+  if NOT APPROVED or conditional: fix issues → rebuild → retest → resubmit to Codex
+  if deferred: poll every 60s → get result → parse verdict
 ```
 
 ### Handling Deferred Reviews
@@ -55,24 +65,36 @@ Codex reviews often exceed 45s. Subagents must handle deferral:
 
 ```
 // Submit review
-result = codex_request({prompt: "Review...", fullAuto: true})
+result = codex_request({
+  prompt: "Review... End with APPROVED or NOT APPROVED with findings.",
+  fullAuto: true,
+  approvalStrategy: "mcp_managed"
+})
 
 // Check if deferred
 if result contains "status":"deferred":
   jobId = result.jobId
-  // Poll every 90 seconds
+  // Poll every 60 seconds (no wallclock timeout; cancel only on explicit instruction or hard failure)
   loop:
-    wait 90 seconds
+    yield_until_next_poll(60 seconds)   // see "Wait mechanism" below
     status = llm_job_status({jobId})
-    if status.completed: break
+    if status.job.status in ["completed", "failed", "canceled"]: break
   // Get the review
   review = llm_job_result({jobId})
-  // Parse APPROVED or NOT APPROVED from review.stdout
+  // Parse APPROVED or NOT APPROVED from review.result.stdout
 ```
+
+### Wait mechanism (orchestrator-specific)
+
+`yield_until_next_poll(60 seconds)` above is an abstraction: yield control for ~60 s, then poll once. Standalone `sleep 60` is blocked in some orchestrators (e.g. the Claude Code harness). Use:
+
+- **Claude Code harness**: `Bash({command: "sleep 60 && echo done", run_in_background: true})` — returns a task ID, emits a completion notification after 60s. `Monitor` is for streaming progress, not one-shot waits. Do not chain short sleeps.
+- **`ScheduleWakeup`** (if available in your orchestrator): schedule a wakeup with `delaySeconds: 60` and a prompt that resumes the polling loop.
+- **Other orchestrators**: use the native non-blocking wait primitive. Never a synchronous blocking sleep that freezes the agent loop.
 
 ### Permissions — The Most Common Mistake
 
-If Codex says "cannot verify" or shows `bwrap` sandbox errors, `fullAuto: true` was not passed. Without it, Codex cannot read files, run commands, or use MCP tools. **Always include `fullAuto: true` in every `codex_request` for reviews.**
+If Codex says "cannot verify" or shows `bwrap` sandbox errors, `fullAuto: true` was not passed. Without it, Codex cannot read files, run commands, or use MCP tools. **Always include `fullAuto: true` and `approvalStrategy: "mcp_managed"` in every `codex_request` for reviews.** The gateway's `mcp_managed` gate scores the request first; `fullAuto:true` gives Codex sandboxed file/shell access.
 
 In the rare case Codex genuinely cannot access something (needs credentials it doesn't have), provide the evidence inline:
 - Paste build output, test results, or file contents
@@ -113,7 +135,8 @@ Before accepting an agent's work:
 
 ## Tips
 
-- Always include `fullAuto: true` for Codex — it needs tool access to review
+- Always include `fullAuto: true` and `approvalStrategy: "mcp_managed"` for Codex reviews
+- Omit `model` — let the gateway default apply
 - Use `correlationId` per agent per round: `"agent1-review-r1"`, `"agent1-review-r2"`
 - For large tasks, expect 2-3 review rounds
 - Don't let agents skip the Codex gate because "it's a small change"
