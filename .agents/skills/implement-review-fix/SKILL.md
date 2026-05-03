@@ -3,7 +3,7 @@ name: implement-review-fix
 description: Run implement-review-fix cycle using multiple LLMs. Use for features, bugs, or refactoring with multi-LLM collaboration.
 metadata:
   author: verivusai-labs
-  version: "1.3"
+  version: "1.4"
 ---
 
 # Implement-Review-Fix Cycle
@@ -14,9 +14,19 @@ Structured workflow: multiple LLMs implement, review, iterate until quality met.
 
 ```
 1. Implement (Codex) → 2. Review (Claude+Gemini) → 3. Fix (Codex) → 4. Verify
+   └──────────────── loop until unconditional APPROVED ────────────────┘
 ```
 
 Single-level orchestration only — parent agent coordinates all steps. Child LLMs cannot call other LLMs through gateway.
+
+## Dispatch Defaults
+
+Apply these on every dispatch unless the caller has explicitly overridden a rule in the current turn:
+
+1. **Omit `model`** — let the gateway use its configured default per CLI. Nominating a model risks deprecated IDs (`o3`, `o3-pro`, `gpt-4o`, …) and capability mismatches. Use `list_models` only if the caller has asked for a specific variant.
+2. **`approvalStrategy:"mcp_managed"`** is the skill dispatch default (the gateway schema default is `"legacy"`). It gates the request before execution; Claude then runs with `--permission-mode bypassPermissions`, Gemini with `--approval-mode yolo`, and Codex still needs `fullAuto:true` for autonomous file/shell work. Prefer this over raw bypass flags.
+3. **No wallclock timeout; poll every 60 s** — let sync auto-defer at 45 s or use `*_request_async`. Poll `llm_job_status` once every 60 seconds. Do **not** cancel jobs for taking too long; cancel only on explicit instruction or hard failure. `idleTimeoutMs` (no-output safeguard) is separate.
+4. **Iterate until unconditional APPROVED** (review dispatches only) — every review/re-review dispatch is a loop. End every review prompt with "End with APPROVED or NOT APPROVED with findings." On `NOT APPROVED` or conditional approval, consolidate findings, dispatch fixes (Codex + `fullAuto:true`), re-dispatch the review to the **same reviewer**. Repeat until unconditional APPROVED. Escalate after 3 rounds. This rule does **not** apply to pure implementation or non-review analysis dispatches. (The implementation step in Step 1 is not itself a review; the loop is driven by the reviewer verdict in Step 2 / Step 4.)
 
 ## Session Continuity
 
@@ -31,44 +41,47 @@ For Codex: include all context in prompt — no session continuity.
 ## Step 1: Implement
 
 ```
-codex_request({prompt:"Implement [feature]. Requirements:\n- [req 1]\n- [req 2]\n\nWrite code in [path]. Include tests.",fullAuto:true,optimizePrompt:true})
+codex_request({prompt:"Implement [feature]. Requirements:\n- [req 1]\n- [req 2]\n\nWrite code in [path]. Include tests.",fullAuto:true,approvalStrategy:"mcp_managed",optimizePrompt:true})
 ```
 
 ## Step 2: Review
 
-Send to reviewers in parallel. Reviewers **must have tool access** to read files and verify claims — never use `allowedTools:[]` or include tool-suppression language in review prompts.
+Send to reviewers in parallel. Reviewers **must have tool access** to read files and verify claims — never use `allowedTools:[]` or include tool-suppression language in review prompts. `mcp_managed` removes Claude/Gemini approval prompts; Codex also requires `fullAuto:true`.
 
 **Claude — Quality:**
 ```
-claude_request({prompt:"Review changes in [path]. Read the files directly. Check:\n- Code quality/maintainability\n- Project conventions\n- Error handling\n- Documentation gaps\nList issues with severity and fixes.",allowedTools:["Read","Grep","Glob"],optimizePrompt:true,optimizeResponse:true})
+claude_request({prompt:"Review changes in [path]. Read the files directly. Check:\n- Code quality/maintainability\n- Project conventions\n- Error handling\n- Documentation gaps\nList issues with severity and fixes. End with APPROVED or NOT APPROVED with findings.",allowedTools:["Read","Grep","Glob"],approvalStrategy:"mcp_managed",optimizePrompt:true,optimizeResponse:true})
 ```
 
 **Gemini — Bugs/Security:**
 ```
-gemini_request({prompt:"Analyze [path] for bugs, edge cases, security issues. Read the files directly. Check test coverage. Rate: critical/high/medium/low.",allowedTools:["Read","Grep","Glob"],model:"gemini-2.5-pro",optimizePrompt:true,optimizeResponse:true})
+gemini_request({prompt:"Analyze [path] for bugs, edge cases, security issues. Read the files directly. Check test coverage. Rate: critical/high/medium/low. End with APPROVED or NOT APPROVED with findings.",approvalStrategy:"mcp_managed",optimizePrompt:true,optimizeResponse:true})
 ```
 
-Sync tools auto-defer at 45s — if response contains `status:"deferred"`, poll `jobId` via `llm_job_status`/`llm_job_result`.
+Sync tools auto-defer at 45s — if response contains `status:"deferred"`, poll `jobId` via `llm_job_status` every 60s, fetch with `llm_job_result`.
 
 ## Step 3: Fix
 
 Consolidate findings, send to Codex. Re-state context (no CLI continuity):
 
 ```
-codex_request({prompt:"Fix issues in [path]:\n\n1. [Critical] [desc]\n2. [High] [desc]\n3. [Medium] [desc]\n\nApply fixes and update tests.",fullAuto:true,optimizePrompt:true})
+codex_request({prompt:"Fix issues in [path]:\n\n1. [Critical] [desc]\n2. [High] [desc]\n3. [Medium] [desc]\n\nApply fixes and update tests.",fullAuto:true,approvalStrategy:"mcp_managed",optimizePrompt:true})
 ```
 
-## Step 4: Verify
+## Step 4: Verify (re-review)
+
+Re-dispatch the **same reviewers** from Step 2 with fix context:
 
 ```
-claude_request({prompt:"Verify fixes in [path]:\n\n1. [issue 1] — expected: [fix]\n2. [issue 2] — expected: [fix]\n\nConfirm each or flag remaining.",optimizePrompt:true,optimizeResponse:true})
+claude_request({prompt:"Re-review [path] after fixes. Previous findings:\n1. [issue 1] — Fixed by: [what changed]\n2. [issue 2] — Fixed by: [what changed]\n\nConfirm each fix or flag remaining issues. End with APPROVED or NOT APPROVED with findings.",approvalStrategy:"mcp_managed",optimizePrompt:true,optimizeResponse:true})
 ```
 
-## Iteration
+## Iteration (mandatory)
 
-- Issues remain → back to Step 3
-- Max 3 iterations (diminishing returns)
-- Issues persist after 3 rounds → escalate to user
+- Any `NOT APPROVED` or conditional approval → back to Step 3 → Step 4
+- "APPROVED with residual notes" counts as approved only if notes are purely informational
+- Max 3 iterations before escalating to the user (but continue iterating until then)
+- All reviewers must return unconditional APPROVED before the cycle ends
 
 ## Long-Running Tasks
 
@@ -77,27 +90,27 @@ Sync tools auto-defer if execution exceeds 45s deadline. Response contains `stat
 For explicit non-blocking (fire-and-forget, parallel jobs):
 
 ```
-codex_request_async({prompt:"...",fullAuto:true})
+codex_request_async({prompt:"...",fullAuto:true,approvalStrategy:"mcp_managed"})
 ```
 
 ### Parallel Async Reviews (All 3 CLIs)
 
 ```
-codex_request_async({prompt:"Implement [feature]...",fullAuto:true,correlationId:"impl"})
-// Wait for completion...
+codex_request_async({prompt:"Implement [feature]...",fullAuto:true,approvalStrategy:"mcp_managed",correlationId:"impl"})
+// Poll every 60s until completed...
 
-claude_request_async({prompt:"Review [path] for quality...",correlationId:"review-quality"})
-codex_request_async({prompt:"Check [path] for logic bugs...",correlationId:"review-bugs"})
-gemini_request_async({prompt:"Security audit [path]...",model:"gemini-2.5-pro",correlationId:"review-security"})
-// Poll all three, collect, synthesize, fix
+claude_request_async({prompt:"Review [path] for quality... End with APPROVED or NOT APPROVED with findings.",approvalStrategy:"mcp_managed",correlationId:"review-quality"})
+codex_request_async({prompt:"Check [path] for logic bugs... End with APPROVED or NOT APPROVED with findings.",fullAuto:true,approvalStrategy:"mcp_managed",correlationId:"review-bugs"})
+gemini_request_async({prompt:"Security audit [path]... End with APPROVED or NOT APPROVED with findings.",approvalStrategy:"mcp_managed",correlationId:"review-security"})
+// Poll all three every 60s, collect, synthesize, fix, re-review — until all APPROVED
 ```
 
 ## Tips
 
 - Consolidate findings before sending fixes (avoid redundant work)
 - Use `correlationId` to trace full cycle
-- For security-sensitive code: `approvalStrategy:"mcp_managed"`, `approvalPolicy:"strict"`
+- For security-sensitive code: raise to `approvalPolicy:"strict"` (on top of default `mcp_managed`)
 - Keep implementation prompts specific — file paths, function names, acceptance criteria
 - For Codex fixes: re-state problem context (no carry-over)
-- Never pass `gw-*` session IDs — use own IDs for resumable workflows
-- Check for `status:"deferred"` in sync responses — poll `jobId` if present
+- Never pass Gemini `gw-*` session IDs — use your own Gemini IDs for resumable workflows
+- Check for `status:"deferred"` in sync responses — poll `jobId` every 60s if present

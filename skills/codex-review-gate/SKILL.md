@@ -7,6 +7,15 @@ description: Submit work to Codex for review and iterate until unconditional app
 
 Submit completed work to Codex via the llm-gateway for review. Iterate on feedback until you receive unconditional approval. This is the standard quality gate used across all VerivusAI projects.
 
+## Dispatch Defaults
+
+Apply these on every dispatch unless the caller has explicitly overridden a rule in the current turn:
+
+1. **Omit `model`** — let the gateway use its configured default per CLI.
+2. **`approvalStrategy:"mcp_managed"`** is the skill dispatch default (the gateway schema default is `"legacy"`). For Codex, also pass `fullAuto:true`; this gives sandboxed autonomy while keeping the gateway approval gate in front of execution.
+3. **No wallclock timeout; poll every 60 s** — `idleTimeoutMs` is a separate no-output safeguard.
+4. **Iterate until unconditional APPROVED** (review dispatches only) — every review prompt must end with "End with APPROVED or NOT APPROVED with findings." Loop: dispatch → parse verdict → on `NOT APPROVED` or conditional, fix + re-submit → repeat. Escalate after 3 rounds. This rule does **not** apply to pure implementation or non-review analysis dispatches.
+
 ## When to Use
 
 - After completing an implementation task
@@ -25,18 +34,19 @@ Use `codex_request` with a review prompt that includes:
 
 ```
 codex_request({
-  prompt: "Review the changes in [path]. This implements [feature/fix]. Check for: correctness, edge cases, test coverage, and adherence to project conventions. Give APPROVED or NOT APPROVED with specific findings.",
-  fullAuto: true
+  prompt: "Review the changes in [path]. This implements [feature/fix]. Check for: correctness, edge cases, test coverage, and adherence to project conventions. End with APPROVED or NOT APPROVED with specific findings.",
+  fullAuto: true,
+  approvalStrategy: "mcp_managed"
 })
 ```
 
-**`fullAuto: true` is mandatory.** Without it, Codex runs in a restricted sandbox where it cannot read files, run commands, or use MCP tools. The review will fail with "cannot verify" errors. Always pass `fullAuto: true` for review requests.
+**`fullAuto: true` is mandatory.** Without it, Codex runs in a restricted sandbox where it cannot read files, run commands, or use MCP tools. The review will fail with "cannot verify" errors. Always pass `fullAuto: true` and `approvalStrategy: "mcp_managed"` for review requests.
 
 If the task is large or complex, expect auto-deferral at 45s. When response contains `status:"deferred"`:
 
 ```
 llm_job_status({jobId: "[from deferred response]"})
-// Poll every 90 seconds until completed
+// Poll every 60 seconds until completed (no wallclock timeout)
 llm_job_result({jobId: "[jobId]"})
 ```
 
@@ -59,8 +69,9 @@ When NOT APPROVED:
 
 ```
 codex_request({
-  prompt: "Re-review after fixes. Previous findings:\n1. [issue] — Fixed by [what you did]\n2. [issue] — Fixed by [what you did]\n\nVerify the fixes are correct. APPROVED or NOT APPROVED.",
-  fullAuto: true
+  prompt: "Re-review after fixes. Previous findings:\n1. [issue] — Fixed by [what you did]\n2. [issue] — Fixed by [what you did]\n\nVerify the fixes are correct. End with APPROVED or NOT APPROVED with findings.",
+  fullAuto: true,
+  approvalStrategy: "mcp_managed"
 })
 ```
 
@@ -77,12 +88,10 @@ If after 3 rounds Codex still has issues, escalate to the user.
 
 If Codex says "cannot verify" or you see `bwrap` sandbox errors, you almost certainly forgot `fullAuto: true`. Without it, Codex runs in a restricted sandbox that blocks file access, shell commands, and MCP tools.
 
-With `fullAuto: true`, Codex gets:
+With `fullAuto: true`, Codex gets sandboxed autonomous execution:
 - Full file system read/write access in the workspace
 - Shell command execution
-- sqry MCP tools (semantic search, symbol lookup, code explanation)
-- GitHub app connector (fetch files from GitHub repos)
-- Web search
+- any MCP/tools configured for that Codex CLI environment
 
 In the rare case where Codex genuinely cannot access something specific (e.g., needs credentials it doesn't have), provide the evidence inline:
 - Paste the test output, build output, or file contents
@@ -107,14 +116,23 @@ This skill is referenced by:
 
 When `codex_request` returns `status:"deferred"`:
 
-1. Wait 5 seconds after initial deferral
-2. Poll `llm_job_status` every 90 seconds
-3. When `status:"completed"`, fetch with `llm_job_result`
-4. If still running after 10 minutes, consider canceling and re-scoping the review
+1. Poll `llm_job_status` every 60 seconds using a **non-blocking** wait between polls (see below)
+2. When `status:"completed"`, fetch with `llm_job_result`
+3. Do **not** cancel running jobs for taking too long. Cancel only on explicit user instruction or hard failure (process dead, non-transient error such as exit 125/126)
+4. `idleTimeoutMs` (no-output safeguard, default 10 min) remains active and will kill genuinely hung processes — this is separate from wallclock timeout
+
+### Wait-between-polls (orchestrator-specific)
+
+Standalone `sleep 60` is blocked in some orchestrators (e.g. the Claude Code harness rejects `Bash({command: "sleep 60"})` and also rejects chained short sleeps). Use a non-blocking equivalent:
+
+- **Claude Code harness**: `Bash({command: "sleep 60 && echo done", run_in_background: true})` — emits a completion notification after 60s; poll then. `Monitor` is for streaming progress, not one-shot waits.
+- **`ScheduleWakeup`** (if available in your orchestrator): schedule a wakeup with `delaySeconds: 60` and a prompt that resumes the polling loop.
+- **Other orchestrators**: use the native non-blocking wait primitive. Treat the 60 s as "yield control, get notified," not "block the shell for 60 s."
 
 ## Tips
 
 - Use `correlationId` to trace review rounds: `"review-round-1"`, `"review-round-2"`
+- Omit `model` — let the gateway default apply
 - For large reviews, use `codex_request_async` explicitly to avoid any sync wait
 - Codex is thorough but literal — it checks what you ask it to check. Be specific in review criteria.
 - When Codex's sqry index is stale, it may report "cannot find X." Provide the file contents inline.

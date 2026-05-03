@@ -3,19 +3,28 @@ name: session-workflow
 description: Manage conversation sessions across Claude, Codex, Gemini. Use for multi-turn conversations, session switching, workspace management.
 metadata:
   author: verivusai-labs
-  version: "1.3"
+  version: "1.4"
 ---
 
 # Session Workflow
 
 Sessions track conversation context across requests. One active session per CLI.
 
+## Dispatch Defaults
+
+Apply these on every dispatch unless the caller has explicitly overridden a rule in the current turn:
+
+1. **Omit `model`** — let the gateway use its configured default per CLI.
+2. **`approvalStrategy:"mcp_managed"`** is the skill dispatch default (the gateway schema default is `"legacy"`). For Codex, also pass `fullAuto:true` when the task needs file/shell access.
+3. **No wallclock timeout; poll every 60 s** — `idleTimeoutMs` is a separate no-output safeguard.
+4. **Iterate until unconditional APPROVED** (review dispatches only) — every review prompt must end with "End with APPROVED or NOT APPROVED with findings." Loop: dispatch review → poll if deferred → parse verdict → on `NOT APPROVED` or conditional approval, dispatch fixes + re-review → repeat. Escalate after 3 rounds. This rule does **not** apply to pure implementation or non-review analysis dispatches. Sessions make the loop cheap (Claude and Gemini preserve conversation continuity).
+
 ## Key Concepts
 
 - **Active session** — default when no `sessionId` specified
 - **Session ID** — string identifier (UUID or arbitrary)
-- **`gw-*` prefix** — gateway-generated, reserved, rejected if passed as `sessionId`
-- **`resumable`** — response field: `true`=user-provided ID, `false`=gateway `gw-*` ID
+- **`gw-*` prefix** — gateway-generated Gemini bookkeeping IDs; rejected if passed back to Gemini as `sessionId`
+- **`resumable`** — Gemini response field: `true`=user-provided ID, `false`=gateway `gw-*` ID
 - **Session TTL** — 30 days inactivity (configurable: `SESSION_TTL` env var, seconds)
 - Stores metadata only (id, cli, timestamps, description) — not conversation content
 
@@ -42,7 +51,7 @@ Returns: `{success:true,session:{id,cli,description,createdAt,isActive}}`
 ### Via request
 
 ```
-claude_request({prompt:"...",createNewSession:true})
+claude_request({prompt:"...",createNewSession:true,approvalStrategy:"mcp_managed"})
 ```
 
 ### Implicit active session
@@ -52,8 +61,8 @@ claude_request({prompt:"...",createNewSession:true})
 - **Gemini** — no auto-lookup; use `sessionId` or `resumeLatest:true` explicitly
 
 ```
-claude_request({prompt:"Continue where we left off"})          // auto-continues
-gemini_request({prompt:"Continue analysis",resumeLatest:true}) // explicit resume
+claude_request({prompt:"Continue where we left off",approvalStrategy:"mcp_managed"})          // auto-continues
+gemini_request({prompt:"Continue analysis",resumeLatest:true,approvalStrategy:"mcp_managed"}) // explicit resume
 ```
 
 ## Multi-Turn Patterns
@@ -61,10 +70,10 @@ gemini_request({prompt:"Continue analysis",resumeLatest:true}) // explicit resum
 ### Claude (real continuity)
 
 ```
-claude_request({prompt:"Implement rate limiter in src/rate-limiter.ts",createNewSession:true})
+claude_request({prompt:"Implement rate limiter in src/rate-limiter.ts",createNewSession:true,approvalStrategy:"mcp_managed"})
 // Save returned sessionId
 
-claude_request({prompt:"Add unit tests for rate limiter",sessionId:"[saved id]"})
+claude_request({prompt:"Add unit tests for rate limiter",sessionId:"[saved id]",approvalStrategy:"mcp_managed"})
 ```
 
 ### Codex (no CLI continuity)
@@ -72,16 +81,16 @@ claude_request({prompt:"Add unit tests for rate limiter",sessionId:"[saved id]"}
 Include full context each call:
 
 ```
-codex_request({prompt:"Implement rate limiter with sliding window",fullAuto:true})
-codex_request({prompt:"Rate limiter in src/rate-limiter.ts uses sliding window. Add tests: basic limiting, burst traffic, window expiry.",fullAuto:true})
+codex_request({prompt:"Implement rate limiter with sliding window",fullAuto:true,approvalStrategy:"mcp_managed"})
+codex_request({prompt:"Rate limiter in src/rate-limiter.ts uses sliding window. Add tests: basic limiting, burst traffic, window expiry.",fullAuto:true,approvalStrategy:"mcp_managed"})
 ```
 
 ### Gemini (resumable)
 
 ```
-gemini_request({prompt:"Continue analysis",resumeLatest:true})
-gemini_request({prompt:"Continue",sessionId:"latest"})
-gemini_request_async({prompt:"Deep analysis...",sessionId:"my-gemini-session"})
+gemini_request({prompt:"Continue analysis",resumeLatest:true,approvalStrategy:"mcp_managed"})
+gemini_request({prompt:"Continue",sessionId:"latest",approvalStrategy:"mcp_managed"})
+gemini_request_async({prompt:"Deep analysis...",sessionId:"my-gemini-session",approvalStrategy:"mcp_managed"})
 // Response: resumable:true
 ```
 
@@ -102,8 +111,8 @@ Separate sessions for independent workstreams:
 session_create({cli:"claude",description:"Feature: user auth"})   // → authSessionId
 session_create({cli:"claude",description:"Bugfix: rate limit"})   // → bugfixSessionId
 
-claude_request({prompt:"...",sessionId:authSessionId})    // auth context
-claude_request({prompt:"...",sessionId:bugfixSessionId})  // bugfix context
+claude_request({prompt:"...",sessionId:authSessionId,approvalStrategy:"mcp_managed"})    // auth context
+claude_request({prompt:"...",sessionId:bugfixSessionId,approvalStrategy:"mcp_managed"})  // bugfix context
 ```
 
 ## Session TTL
@@ -153,6 +162,6 @@ Returns: timestamps, description, CLI type, active status.
 - Each CLI tracks active session independently
 - For Codex: sessions are organizational only — no conversation continuity
 - Expired sessions (past TTL) silently evicted
-- Never pass `gw-*` IDs as `sessionId` — use own IDs for resumable workflows
-- Check `resumable` field to know if session can continue
+- Never pass Gemini `gw-*` IDs as `sessionId` — use own IDs for resumable Gemini workflows
+- Check Gemini's `resumable` field to know if that session can continue
 - Sync tools may auto-defer at 45s — deferred response preserves `sessionId`
