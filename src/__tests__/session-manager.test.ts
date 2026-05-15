@@ -63,14 +63,17 @@ describe("SessionManager", () => {
       const claudeSession = sessionManager.createSession("claude");
       const codexSession = sessionManager.createSession("codex");
       const geminiSession = sessionManager.createSession("gemini");
+      const grokSession = sessionManager.createSession("grok");
 
       expect(claudeSession.cli).toBe("claude");
       expect(codexSession.cli).toBe("codex");
       expect(geminiSession.cli).toBe("gemini");
+      expect(grokSession.cli).toBe("grok");
 
       expect(sessionManager.getActiveSession("claude")?.id).toBe(claudeSession.id);
       expect(sessionManager.getActiveSession("codex")?.id).toBe(codexSession.id);
       expect(sessionManager.getActiveSession("gemini")?.id).toBe(geminiSession.id);
+      expect(sessionManager.getActiveSession("grok")?.id).toBe(grokSession.id);
     });
   });
 

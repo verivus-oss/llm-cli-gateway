@@ -5,7 +5,7 @@ import { createRequire } from "module";
 
 export interface FlightLogStart {
   correlationId: string;
-  cli: "claude" | "codex" | "gemini";
+  cli: "claude" | "codex" | "gemini" | "grok";
   model: string;
   prompt: string;
   system?: string;

@@ -10,7 +10,8 @@ export type { Logger } from "./logger.js";
 const DEFAULT_SESSION_DESCRIPTIONS: Record<CliType, string> = {
   claude: "Claude Session",
   codex: "Codex Session",
-  gemini: "Gemini Session"
+  gemini: "Gemini Session",
+  grok: "Grok Session"
 };
 
 /**

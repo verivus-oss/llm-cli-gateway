@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { resolveSessionResumeArgs, validateSessionId, GATEWAY_SESSION_PREFIX } from "../request-helpers.js";
+import { resolveSessionResumeArgs, resolveGrokSessionArgs, validateSessionId, GATEWAY_SESSION_PREFIX } from "../request-helpers.js";
 
 describe("request-helpers", () => {
   describe("GATEWAY_SESSION_PREFIX", () => {
@@ -98,6 +98,44 @@ describe("request-helpers", () => {
       });
       expect(result.resumeArgs).toEqual([]);
       expect(result.userProvidedSession).toBe(false);
+    });
+  });
+
+  describe("resolveGrokSessionArgs", () => {
+    it("createNewSession=true ignores all other flags", () => {
+      const result = resolveGrokSessionArgs({
+        sessionId: "user-abc",
+        resumeLatest: true,
+        createNewSession: true
+      });
+      expect(result.resumeArgs).toEqual([]);
+      expect(result.userProvidedSession).toBe(false);
+    });
+
+    it("resumeLatest=true maps to --continue (not --resume latest)", () => {
+      const result = resolveGrokSessionArgs({
+        resumeLatest: true,
+        createNewSession: false
+      });
+      expect(result.resumeArgs).toEqual(["--continue"]);
+      expect(result.effectiveSessionId).toBeUndefined();
+      expect(result.userProvidedSession).toBe(false);
+    });
+
+    it("user-provided sessionId returns --resume with that ID", () => {
+      const result = resolveGrokSessionArgs({
+        sessionId: "user-abc",
+        createNewSession: false
+      });
+      expect(result.resumeArgs).toEqual(["--resume", "user-abc"]);
+      expect(result.effectiveSessionId).toBe("user-abc");
+      expect(result.userProvidedSession).toBe(true);
+    });
+
+    it("rejects gateway-prefixed sessionId with clear error", () => {
+      expect(() =>
+        resolveGrokSessionArgs({ sessionId: "gw-abc123" })
+      ).toThrow('Session ID "gw-abc123" uses reserved prefix "gw-"');
     });
   });
 });

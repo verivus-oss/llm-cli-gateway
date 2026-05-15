@@ -22,6 +22,9 @@ const ENV_KEYS = [
   "GEMINI_HISTORY_MAX_FILES",
   "GEMINI_HISTORY_MAX_FILE_BYTES",
   "GEMINI_DISABLE_HISTORY_DISCOVERY",
+  "GROK_DEFAULT_MODEL",
+  "GROK_MODELS",
+  "GROK_MODEL_ALIASES",
   "LLM_GATEWAY_DISABLE_MODEL_DISCOVERY",
   "LLM_GATEWAY_MODEL_ALIASES"
 ] as const;
@@ -117,6 +120,29 @@ describe("model registry", () => {
     expect(resolveModelAlias("gemini", "team", info)).toBe("gemini-team-default");
     expect(resolveModelAlias("gemini", "fast", info)).toBe("gemini-team-default");
     expect(resolveModelAlias("codex", "fast", info)).toBe("gpt-5.3-codex-spark");
+  });
+
+  it("seeds Grok with grok-build as a fallback model and no default", () => {
+    const info = getCliInfo(true);
+
+    expect(info.grok.models["grok-build"]).toContain("Default Grok model");
+    expect(info.grok.defaultModel).toBeUndefined();
+    expect(resolveModelAlias("grok", "default", info)).toBeUndefined();
+  });
+
+  it("supports env-driven Grok default model and aliases", () => {
+    process.env.GROK_MODELS = JSON.stringify({
+      "grok-team-pin": "Team-approved Grok model"
+    });
+    process.env.GROK_MODEL_ALIASES = "team=grok-team-pin";
+    process.env.GROK_DEFAULT_MODEL = "grok-team-pin";
+
+    const info = getCliInfo(true);
+
+    expect(info.grok.models["grok-team-pin"]).toBe("Team-approved Grok model");
+    expect(info.grok.defaultModel).toBe("grok-team-pin");
+    expect(resolveModelAlias("grok", "team", info)).toBe("grok-team-pin");
+    expect(resolveModelAlias("grok", "default", info)).toBe("grok-team-pin");
   });
 });
 

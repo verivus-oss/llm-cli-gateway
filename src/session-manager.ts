@@ -8,7 +8,7 @@ import type { DatabaseConnection } from "./db.js";
 import type { Logger } from "./logger.js";
 import { noopLogger } from "./logger.js";
 
-export const CLI_TYPES = ["claude", "codex", "gemini"] as const;
+export const CLI_TYPES = ["claude", "codex", "gemini", "grok"] as const;
 export type CliType = (typeof CLI_TYPES)[number];
 
 const createEmptyActiveSessions = (): Record<CliType, string | null> =>
@@ -17,7 +17,8 @@ const createEmptyActiveSessions = (): Record<CliType, string | null> =>
 const DEFAULT_SESSION_DESCRIPTIONS: Record<CliType, string> = {
   claude: "Claude Session",
   codex: "Codex Session",
-  gemini: "Gemini Session"
+  gemini: "Gemini Session",
+  grok: "Grok Session"
 };
 
 export interface Session {

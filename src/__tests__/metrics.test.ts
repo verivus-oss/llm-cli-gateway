@@ -17,6 +17,7 @@ describe("PerformanceMetrics", () => {
     expect(snapshot.byTool.claude.requestCount).toBe(0);
     expect(snapshot.byTool.codex.requestCount).toBe(0);
     expect(snapshot.byTool.gemini.requestCount).toBe(0);
+    expect(snapshot.byTool.grok.requestCount).toBe(0);
     expect(snapshot.byTool.claude.averageResponseTimeMs).toBe(0);
     expect(snapshot.byTool.claude.successRate).toBe(0);
     expect(snapshot.byTool.claude.failureRate).toBe(0);
