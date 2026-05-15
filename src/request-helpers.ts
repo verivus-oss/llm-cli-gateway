@@ -47,6 +47,51 @@ export function resolveSessionResumeArgs(opts: {
 }
 
 /**
+ * Codex-specific resume planning.
+ *
+ * Codex CLI ≥ 0.30 exposes session resume as a subcommand (`codex exec resume`),
+ * not a flag pair like Claude/Gemini/Grok. So we can't return a simple list of
+ * args — we describe the *mode* and let the caller branch when building argv:
+ *
+ *   - "new"            → `codex exec [...flags] PROMPT`
+ *   - "resume-by-id"   → `codex exec resume [...resume-safe flags] <SESSION_ID> PROMPT`
+ *   - "resume-latest"  → `codex exec resume --last [...resume-safe flags] PROMPT`
+ *
+ * `codex exec resume` rejects `--full-auto`; the original session's approval
+ * policy is inherited. Callers MUST filter `--full-auto` out of the flag set
+ * when mode is one of the resume forms (see `prepareCodexRequest`).
+ *
+ * `sessionId` MUST be a real Codex session UUID (as recorded under
+ * `~/.codex/sessions/`). Gateway-generated `gw-*` IDs are rejected, since
+ * they are bookkeeping handles and would 404 against `codex resume`.
+ */
+export type CodexSessionMode = "new" | "resume-by-id" | "resume-latest";
+
+export interface CodexSessionPlan {
+  mode: CodexSessionMode;
+  /** Real Codex session UUID. Present only when mode === "resume-by-id". */
+  sessionId?: string;
+}
+
+export function resolveCodexSessionArgs(opts: {
+  sessionId?: string;
+  resumeLatest?: boolean;
+  createNewSession?: boolean;
+}): CodexSessionPlan {
+  if (opts.createNewSession) {
+    return { mode: "new" };
+  }
+  if (opts.sessionId) {
+    validateSessionId(opts.sessionId);
+    return { mode: "resume-by-id", sessionId: opts.sessionId };
+  }
+  if (opts.resumeLatest) {
+    return { mode: "resume-latest" };
+  }
+  return { mode: "new" };
+}
+
+/**
  * Grok-specific resume args. Grok accepts `--resume <id>` to resume a named session,
  * and `--continue` to resume the most recent session for the current working directory.
  * Unlike `resolveSessionResumeArgs`, "resume latest" maps to `--continue` (not `--resume latest`)
