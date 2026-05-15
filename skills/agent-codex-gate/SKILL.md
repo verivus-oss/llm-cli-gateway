@@ -141,3 +141,6 @@ Before accepting an agent's work:
 - For large tasks, expect 2-3 review rounds
 - Don't let agents skip the Codex gate because "it's a small change"
 - If an agent reports "Codex approved with residual notes" — that counts as approved if the notes are informational only
+- For round 2+, agents can pass `resumeLatest:true` to Codex to carry the prior review's context (or `sessionId:<UUID>` for a specific Codex session). Note: `--full-auto` is silently dropped on resume; the original session's approval policy is inherited. Gateway-generated `gw-*` IDs are rejected for Codex.
+- **Deferred jobs are durable** (default 30-day retention, `LLM_GATEWAY_JOB_RETENTION_DAYS`). If a subagent crashes between polls, it can re-issue the identical review call — auto-dedup snaps back onto the live Codex job. Or fetch by `jobId` after the fact. Use `forceRefresh:true` only when the underlying changes have shifted.
+- For high-stakes work, optionally add a Grok diversity gate alongside Codex: `grok_request_async({prompt:"Independent review of agent's work in [paths]... End with APPROVED or NOT APPROVED with findings.",approvalStrategy:"mcp_managed",correlationId:"agent1-review-r1-grok"})` — accept only when **both** reviewers return APPROVED.

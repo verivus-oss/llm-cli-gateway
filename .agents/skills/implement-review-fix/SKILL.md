@@ -1,9 +1,9 @@
 ---
 name: implement-review-fix
-description: Run implement-review-fix cycle using multiple LLMs. Use for features, bugs, or refactoring with multi-LLM collaboration.
+description: Run implement-review-fix cycle using multiple LLMs (Claude, Codex, Gemini, Grok). Use for features, bugs, or refactoring with multi-LLM collaboration.
 metadata:
   author: verivusai-labs
-  version: "1.4"
+  version: "1.5"
 ---
 
 # Implement-Review-Fix Cycle
@@ -33,10 +33,11 @@ Apply these on every dispatch unless the caller has explicitly overridden a rule
 | CLI | Effect | Mechanism |
 |-----|--------|-----------|
 | **Claude** | Real continuity | `--session-id` or `--continue` passed to CLI |
-| **Codex** | Bookkeeping only | `sessionId` tracked, NOT passed to CLI. Each call is fresh |
+| **Codex** | Real continuity | `codex exec resume <UUID>` (`sessionId`) or `codex exec resume --last` (`resumeLatest:true`). `sessionId` must be a real Codex session UUID from `~/.codex/sessions/`; gateway-generated `gw-*` IDs are rejected |
 | **Gemini** | Real continuity | `--resume` passed to CLI |
+| **Grok** | Real continuity | `--resume` / `--continue` passed to CLI |
 
-For Codex: include all context in prompt — no session continuity.
+For Codex resumption: pass the UUID printed by `codex resume` / visible under `~/.codex/sessions/`, **or** pass `resumeLatest:true` to use the most recent session in cwd. Note: `--full-auto` is silently dropped on resume — Codex inherits the original session's approval policy.
 
 ## Step 1: Implement
 
@@ -58,7 +59,14 @@ claude_request({prompt:"Review changes in [path]. Read the files directly. Check
 gemini_request({prompt:"Analyze [path] for bugs, edge cases, security issues. Read the files directly. Check test coverage. Rate: critical/high/medium/low. End with APPROVED or NOT APPROVED with findings.",approvalStrategy:"mcp_managed",optimizePrompt:true,optimizeResponse:true})
 ```
 
-Sync tools auto-defer at 45s — if response contains `status:"deferred"`, poll `jobId` via `llm_job_status` every 60s, fetch with `llm_job_result`.
+**Grok — Optional 4th Reviewer (Diversity / Consensus):**
+```
+grok_request({prompt:"Independent review of [path]. Flag issues the other reviewers may have missed; contradict findings you disagree with. End with APPROVED or NOT APPROVED with findings.",approvalStrategy:"mcp_managed",optimizePrompt:true,optimizeResponse:true})
+```
+
+Add Grok when consensus matters (high-stakes paths) or to break ties. Auth must already be set up (`grok login` or `GROK_CODE_XAI_API_KEY`).
+
+Sync tools auto-defer at 45s — if response contains `status:"deferred"`, poll `jobId` via `llm_job_status` every 60s, fetch with `llm_job_result`. Results are durable (default 30 days) — if your polling wrapper times out, fetch by `jobId` later or re-issue the identical call (auto-dedup reattaches to the live job).
 
 ## Step 3: Fix
 
@@ -93,7 +101,7 @@ For explicit non-blocking (fire-and-forget, parallel jobs):
 codex_request_async({prompt:"...",fullAuto:true,approvalStrategy:"mcp_managed"})
 ```
 
-### Parallel Async Reviews (All 3 CLIs)
+### Parallel Async Reviews (up to 4 CLIs)
 
 ```
 codex_request_async({prompt:"Implement [feature]...",fullAuto:true,approvalStrategy:"mcp_managed",correlationId:"impl"})
@@ -102,7 +110,8 @@ codex_request_async({prompt:"Implement [feature]...",fullAuto:true,approvalStrat
 claude_request_async({prompt:"Review [path] for quality... End with APPROVED or NOT APPROVED with findings.",approvalStrategy:"mcp_managed",correlationId:"review-quality"})
 codex_request_async({prompt:"Check [path] for logic bugs... End with APPROVED or NOT APPROVED with findings.",fullAuto:true,approvalStrategy:"mcp_managed",correlationId:"review-bugs"})
 gemini_request_async({prompt:"Security audit [path]... End with APPROVED or NOT APPROVED with findings.",approvalStrategy:"mcp_managed",correlationId:"review-security"})
-// Poll all three every 60s, collect, synthesize, fix, re-review — until all APPROVED
+grok_request_async({prompt:"Independent review of [path]... End with APPROVED or NOT APPROVED with findings.",approvalStrategy:"mcp_managed",correlationId:"review-grok"})
+// Poll every 60s, collect, synthesize, fix, re-review — until all APPROVED
 ```
 
 ## Tips
@@ -111,6 +120,7 @@ gemini_request_async({prompt:"Security audit [path]... End with APPROVED or NOT 
 - Use `correlationId` to trace full cycle
 - For security-sensitive code: raise to `approvalPolicy:"strict"` (on top of default `mcp_managed`)
 - Keep implementation prompts specific — file paths, function names, acceptance criteria
-- For Codex fixes: re-state problem context (no carry-over)
+- For Codex fixes: either pass `resumeLatest:true` (or the session UUID) to carry conversation context, **or** re-state problem context inline if running fresh
 - Never pass Gemini `gw-*` session IDs — use your own Gemini IDs for resumable workflows
 - Check for `status:"deferred"` in sync responses — poll `jobId` every 60s if present
+- **Durable results**: deferred jobs persist for 30 days (`LLM_GATEWAY_JOB_RETENTION_DAYS`). If the cycle is interrupted, re-issue identical calls (auto-dedup snaps onto the live job) or fetch by `jobId` later. Use `forceRefresh:true` only when inputs have actually changed

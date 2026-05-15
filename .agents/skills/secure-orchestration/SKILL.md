@@ -1,14 +1,14 @@
 ---
 name: secure-orchestration
-description: Security-conscious LLM orchestration with approval gates. Use for high-risk operations, permissions, auditing.
+description: Security-conscious LLM orchestration with approval gates across Claude, Codex, Gemini, and Grok. Use for high-risk operations, permissions, auditing.
 metadata:
   author: verivusai-labs
-  version: "1.4"
+  version: "1.5"
 ---
 
 # Secure Orchestration
 
-Approval gate scores request risk, enforces policy thresholds. Use when security matters — production codebases, sensitive data, autonomous operations.
+Approval gate scores request risk, enforces policy thresholds. Applies uniformly to Claude, Codex, Gemini, and Grok (xAI) dispatches. Use when security matters — production codebases, sensitive data, autonomous operations.
 
 ## Dispatch Defaults
 
@@ -81,7 +81,8 @@ Approved → job starts, get `job.id` to poll (every 60s per dispatch defaults).
 When `approvalStrategy:"mcp_managed"`:
 - Claude: `--permission-mode bypassPermissions`
 - Gemini: `--approval-mode yolo`
-- Codex: no automatic bypass flag; use `fullAuto:true` for sandboxed autonomous execution. `dangerouslyBypassApprovalsAndSandbox:true` is still raw bypass.
+- Codex: no automatic bypass flag; use `fullAuto:true` for sandboxed autonomous execution. `dangerouslyBypassApprovalsAndSandbox:true` is still raw bypass. On `codex exec resume` (when `sessionId` or `resumeLatest` is set), `fullAuto` is silently dropped — the original session's approval policy is inherited, so audit the source session's approval posture before resuming.
+- Grok: equivalent permissive flag handled by the Grok provider; raw `alwaysApprove` / `permissionMode` overrides are scored the same way as Claude/Gemini raw bypass.
 
 Gateway approval engine becomes the gatekeeper before permissive CLI modes are applied.
 
@@ -116,8 +117,9 @@ codex_request({prompt:"...",approvalStrategy:"mcp_managed",approvalPolicy:"balan
 - `dangerouslySkipPermissions:true` (Claude)
 - `dangerouslyBypassApprovalsAndSandbox:true` (Codex)
 - `approvalMode:"yolo"` (Gemini)
+- Raw permissive flags on `grok_request` (e.g., caller-supplied `alwaysApprove` or permissive `permissionMode`)
 
-Use `approvalStrategy:"mcp_managed"` instead so the gateway scores and gates the request before permissive CLI modes are applied. For Codex, include `fullAuto:true` when the task needs file or shell access.
+Use `approvalStrategy:"mcp_managed"` instead so the gateway scores and gates the request before permissive CLI modes are applied. For Codex, include `fullAuto:true` when the task needs file or shell access (note: not honored on `codex exec resume` — the resumed session inherits its original approval policy).
 
 ## Permission Management
 
@@ -176,3 +178,5 @@ Kills process after 2min inactivity. Exit code 125 (non-transient, no retry).
 - `idleTimeoutMs` is a security control (tight 60–120 s for security audits kills silent processes quickly) — this is **not** a wallclock timeout, so it does not conflict with the "no wallclock timeout, poll every 60 s" dispatch default
 - Approval checks run before auto-deferral — denied requests reject instantly
 - Review dispatches loop until unconditional APPROVED — the approval gate is separate from the reviewer's verdict, and both must pass
+- **Durable audit trail**: approvals and job state are persisted (default 30 days, `LLM_GATEWAY_JOB_RETENTION_DAYS`). Combine `approval_list` with `llm_job_status/result` by `correlationId` to reconstruct any past dispatch, even across gateway restarts
+- **Auto-dedup interacts with approvals**: an identical replayed request within the dedup window (`LLM_GATEWAY_DEDUP_WINDOW_MS`, default 1 h) reuses the original job. The **original** approval decision is the one of record; the dedup hit does not re-run the gate. Use `forceRefresh:true` to force a fresh approval evaluation when the security-relevant context (caller, prompt, flags) has actually changed

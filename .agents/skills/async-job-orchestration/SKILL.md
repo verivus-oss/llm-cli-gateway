@@ -3,12 +3,12 @@ name: async-job-orchestration
 description: Manage long-running async LLM jobs. Use for tasks >2min, parallel jobs, or non-blocking execution.
 metadata:
   author: verivusai-labs
-  version: "1.4"
+  version: "1.5"
 ---
 
 # Async Job Orchestration
 
-Async execution for Claude, Codex, Gemini. Non-blocking jobs with polling lifecycle.
+Async execution for Claude, Codex, Gemini, and Grok. Non-blocking jobs with polling lifecycle. Job state is **durable** — results survive gateway restarts and polling timeouts (see [Durability & Dedup](#durability--dedup)).
 
 ## Dispatch Defaults
 
@@ -25,7 +25,7 @@ Sync tools auto-defer when execution exceeds sync deadline. No manual sync/async
 
 ### Flow
 
-1. Call sync tool (`claude_request`, `codex_request`, `gemini_request`)
+1. Call sync tool (`claude_request`, `codex_request`, `gemini_request`, `grok_request`)
 2. Gateway starts CLI as background job, polls internally
 3. Job completes within deadline (default **45s**) → result returned directly
 4. Deadline exceeded → **deferred response** with `jobId` for polling
@@ -40,10 +40,10 @@ Sync tools auto-defer when execution exceeds sync deadline. No manual sync/async
 
 1. Parse response as JSON
 2. If `status==="deferred"` → extract `jobId`
-3. Poll `llm_job_status({jobId})` until `job.status` is terminal (`completed`, `failed`, or `canceled`)
+3. Poll `llm_job_status({jobId})` until `job.status` is terminal (`completed`, `failed`, `canceled`, or `orphaned`)
 4. Fetch `llm_job_result({jobId})`
 
-Non-deferred responses: process as normal.
+Non-deferred responses: process as normal. Results are durable (default 30 days) — you can fetch them long after the deferred response was returned, even across gateway restarts.
 
 ### Configuration
 
@@ -67,8 +67,9 @@ Use `*_request_async` when:
 | `claude_request_async` | Start async Claude job |
 | `codex_request_async` | Start async Codex job |
 | `gemini_request_async` | Start async Gemini job |
-| `llm_job_status` | Poll job status |
-| `llm_job_result` | Retrieve job output |
+| `grok_request_async` | Start async Grok (xAI) job |
+| `llm_job_status` | Poll job status (in-memory + durable store fallback) |
+| `llm_job_result` | Retrieve job output (in-memory + durable store fallback) |
 | `llm_job_cancel` | Cancel running job |
 | `llm_process_health` | Inspect in-memory job/process health |
 
@@ -122,6 +123,7 @@ Kills process if no stdout/stderr for configurable duration. Detects stuck proce
 | Claude | 600,000ms | **stream-json mode only.** text/json produce no output until done (would false-positive) |
 | Codex | 600,000ms | Streams stderr progress — works all modes |
 | Gemini | 600,000ms | Streams stdout — works all modes |
+| Grok | 600,000ms | Streams stdout — works all modes |
 
 Override: `idleTimeoutMs:int (30,000–3,600,000)`
 
@@ -135,6 +137,7 @@ Start all, then collect:
 claude_request_async({prompt:"Review architecture... End with APPROVED or NOT APPROVED with findings.",approvalStrategy:"mcp_managed",correlationId:"review-arch"})
 codex_request_async({prompt:"Check for bugs... End with APPROVED or NOT APPROVED with findings.",fullAuto:true,approvalStrategy:"mcp_managed",correlationId:"review-impl"})
 gemini_request_async({prompt:"Security audit... End with APPROVED or NOT APPROVED with findings.",approvalStrategy:"mcp_managed",correlationId:"review-sec"})
+grok_request_async({prompt:"Independent diversity review... End with APPROVED or NOT APPROVED with findings.",approvalStrategy:"mcp_managed",correlationId:"review-grok"})
 ```
 
 Poll each with `llm_job_status` every 60s. Retrieve with `llm_job_result` when terminal.
@@ -181,19 +184,56 @@ Exit codes 125/126 are non-transient — retry engine skips them. Adjust paramet
 
 ## Job Lifecycle
 
-- In-memory only — lost on process restart
-- 1-hour TTL after completion, then evicted
-- 50MB max output (stdout+stderr) — exceeding kills process (exit 126)
-- Retrieve results promptly (before TTL/restart)
+- **Durable**. Every state transition (start, throttled output flush, completion) is persisted to a `jobs` table in `~/.llm-cli-gateway/logs.db`. `llm_job_status` / `llm_job_result` transparently fall back to the durable store when the job is no longer in memory.
+- **Default retention 30 days** — override with `LLM_GATEWAY_JOB_RETENTION_DAYS`. Override the sqlite path with `LLM_GATEWAY_JOBS_DB` (defaults to `LLM_GATEWAY_LOGS_DB`, then `~/.llm-cli-gateway/logs.db`). Set `LLM_GATEWAY_JOBS_DB=none` to disable durability (in-memory only — legacy behavior, not recommended).
+- **Jobs still running when the gateway stopped** are flipped to `orphaned` on next boot (the detached child cannot be reattached). Their captured partial output remains readable via `llm_job_result`.
+- 50 MB max output (stdout+stderr) — exceeding kills process (exit 126).
+- In-memory cache eviction has 1-hour TTL after completion; this no longer means the result is gone — durable store backs every read.
+
+## Durability & Dedup
+
+The gateway is a durable result collection layer. Two behaviors directly address the "agent polls, times out, re-issues, the whole CLI run starts over" failure mode:
+
+### Auto-dedup
+
+Identical `*_request` / `*_request_async` calls within the dedup window (default **1 hour**, `LLM_GATEWAY_DEDUP_WINDOW_MS` in ms) short-circuit onto the existing running or completed job. You get back the same `jobId` instead of spawning a duplicate run.
+
+- Set `LLM_GATEWAY_DEDUP_WINDOW_MS=0` to disable dedup gateway-wide.
+- Pass `forceRefresh: true` on a single call to bypass dedup for that request:
+
+```
+codex_request_async({prompt:"...",fullAuto:true,approvalStrategy:"mcp_managed",forceRefresh:true})
+```
+
+Use `forceRefresh` when you genuinely need a fresh CLI run (e.g., file contents changed since the last dispatch, retry after manual fix). For normal "I crashed and restarted, let me re-issue" recovery, **omit `forceRefresh`** — dedup is exactly what you want.
+
+### Durable retrieval
+
+- Polling timeouts no longer destroy results. If your wrapper agent gives up at 5 minutes, `llm_job_status({jobId})` and `llm_job_result({jobId})` still return the completed result hours/days later.
+- Gateway restarts no longer destroy results. Persisted rows survive process restarts.
+- An `orphaned` job is one that was `running` when the gateway last stopped — partial output is still readable; treat it as a non-recoverable terminal state for the active CLI invocation (re-dispatch with `forceRefresh:true` if you need fresh work).
+
+### Recovery pattern
+
+```
+// 1. Wrapper agent died after dispatching — you have no jobId in memory.
+// 2. Re-issue the identical *_request_async call. The gateway dedups onto
+//    the existing in-flight or completed job and returns its jobId.
+result = codex_request_async({prompt:"<same prompt as before>",fullAuto:true,approvalStrategy:"mcp_managed",correlationId:"<same correlationId>"})
+// result.job.id is the original job
+// 3. Poll/fetch as normal — works whether the job is running, completed, or completed days ago.
+```
 
 ## Tips
 
 - Use `correlationId` on every job for log tracing
 - Async jobs do NOT support `optimizeResponse` — optimize after retrieval
-- Sessions work with async — pass `sessionId` or `createNewSession`
+- Sessions work with async — pass `sessionId` or `createNewSession` (Claude, Gemini, and Grok carry real CLI continuity; Codex is bookkeeping only)
 - **Sync tools auto-defer at 45s** — check for `status:"deferred"` in sync responses, then poll every 60s
 - `SYNC_DEADLINE_MS=0` disables auto-deferral
 - For Gemini, check `resumable` — only `true` for user-provided `sessionId`
 - Set higher `idleTimeoutMs` for tasks with long silent periods
 - Review jobs: the verdict from the CLI is the gate — loop until unconditional APPROVED, do not settle early
-- If jobs fail because a CLI is missing or stale, check `cli_versions` and run `cli_upgrade` as a dry run before any real upgrade
+- If jobs fail because a CLI is missing or stale, check `cli_versions` and run `cli_upgrade` as a dry run before any real upgrade. Grok self-updates via `grok update`; `cli_upgrade` routes that for you.
+- **Don't burn re-runs after a polling timeout** — re-issue the same call; auto-dedup snaps you back onto the live job. Reserve `forceRefresh:true` for cases where the underlying inputs actually changed.
+- **Durable results outlive in-memory caches** — `llm_job_result({jobId})` returns the same output 30 days later by default. Don't hold polling open just because you fear losing the result.

@@ -1,9 +1,9 @@
 ---
 name: multi-llm-review
-description: Parallel code reviews across Claude, Codex, Gemini. Use for quality analysis, bug finding, or security audit.
+description: Parallel code reviews across Claude, Codex, Gemini, and Grok. Use for quality analysis, bug finding, or security audit.
 metadata:
   author: verivusai-labs
-  version: "1.4"
+  version: "1.5"
 ---
 
 # Multi-LLM Code Review
@@ -17,6 +17,7 @@ Parallel reviews using gateway MCP tools. Each LLM has different strengths — c
 | Claude | Architecture, design, quality, docs | `claude_request` | `claude_request_async` |
 | Codex | Implementation correctness, logic bugs, tests | `codex_request` | `codex_request_async` |
 | Gemini | Security, edge cases, multimodal context | `gemini_request` | `gemini_request_async` |
+| Grok (xAI) | Independent fourth perspective for diversity / consensus tie-breaks | `grok_request` | `grok_request_async` |
 
 ## Dispatch Defaults
 
@@ -58,6 +59,13 @@ codex_request({prompt:"Analyze {path} for logic bugs, off-by-one, missing error 
 gemini_request({prompt:"Security audit {path}: injection, auth bypasses, data leaks, OWASP Top 10, crash-causing edge cases. Read the files directly. End with APPROVED or NOT APPROVED with findings.",approvalStrategy:"mcp_managed",optimizePrompt:true,optimizeResponse:true})
 ```
 
+**Grok — Independent Diversity (optional 4th reviewer):**
+```
+grok_request({prompt:"Independent review of {path}. Read the files directly. Flag issues the other reviewers may have missed, contradict findings you disagree with, and call out blind spots. End with APPROVED or NOT APPROVED with findings.",approvalStrategy:"mcp_managed",optimizePrompt:true,optimizeResponse:true})
+```
+
+Add Grok when consensus matters (high-stakes changes, security-critical paths) or to break ties between the other three. Auth must already be set up (`grok login` OAuth or `GROK_CODE_XAI_API_KEY`).
+
 ### 3. Synthesize
 
 1. **Deduplicate** — Remove findings from multiple LLMs
@@ -89,9 +97,10 @@ Use async for parallel execution:
 claude_request_async({prompt:"Review all TS files in src/ for architecture/quality... End with APPROVED or NOT APPROVED with findings.",approvalStrategy:"mcp_managed",optimizePrompt:true,correlationId:"review-quality"})
 codex_request_async({prompt:"Check all TS files in src/ for logic bugs/test gaps... End with APPROVED or NOT APPROVED with findings.",fullAuto:true,approvalStrategy:"mcp_managed",optimizePrompt:true,correlationId:"review-bugs"})
 gemini_request_async({prompt:"Security audit all TS files in src/... End with APPROVED or NOT APPROVED with findings.",approvalStrategy:"mcp_managed",correlationId:"review-security"})
+grok_request_async({prompt:"Independent diversity review of all TS files in src/... End with APPROVED or NOT APPROVED with findings.",approvalStrategy:"mcp_managed",correlationId:"review-grok"})
 ```
 
-Poll with `llm_job_status` every 60s, retrieve with `llm_job_result` when terminal.
+Poll with `llm_job_status` every 60s, retrieve with `llm_job_result` when terminal. Jobs are durable — if your polling wrapper times out, re-issue the same call (the gateway auto-dedups onto the live job) or fetch by `jobId` later (default 30-day retention).
 
 For iterative Gemini reviews, pass `sessionId` for resumability:
 
@@ -125,11 +134,12 @@ Reviews are not one-shot. The caller runs this loop:
 ## Tips
 
 - Always use `optimizePrompt:true` and `optimizeResponse:true`
-- Use sessions for iterative reviews (review → fix → re-review)
+- Use sessions for iterative reviews (review → fix → re-review). Claude/Gemini/Grok carry real CLI continuity; Codex is bookkeeping only
 - For security-sensitive: `approvalPolicy:"strict"` (in addition to default `mcp_managed`)
 - Include file paths and line numbers for actionable feedback
 - If CLI unavailable, skip gracefully and note gap
-- Use all three async variants for true parallel reviews
-- Pass `sessionId` to `gemini_request_async` for resumable follow-up
+- Use all four async variants for true parallel reviews when you want Grok's independent perspective
+- Pass `sessionId` to `gemini_request_async` / `grok_request_async` for resumable follow-up
 - Check for `status:"deferred"` in sync responses — poll `jobId` every 60s if present
 - Gateway `mcpServers` default to `["sqry"]`; add `exa`, `ref_tools`, or `trstr` only when the review needs those capabilities
+- **Re-issuing after a polling timeout is safe** — auto-dedup (default 1 h window, `LLM_GATEWAY_DEDUP_WINDOW_MS`) reattaches the new call to the existing job. Use `forceRefresh:true` only when inputs genuinely changed

@@ -1,9 +1,9 @@
 ---
 name: session-workflow
-description: Manage conversation sessions across Claude, Codex, Gemini. Use for multi-turn conversations, session switching, workspace management.
+description: Manage conversation sessions across Claude, Codex, Gemini, and Grok. Use for multi-turn conversations, session switching, workspace management.
 metadata:
   author: verivusai-labs
-  version: "1.4"
+  version: "1.5"
 ---
 
 # Session Workflow
@@ -33,10 +33,11 @@ Apply these on every dispatch unless the caller has explicitly overridden a rule
 | CLI | Effect | Mechanism |
 |-----|--------|-----------|
 | **Claude** | Real continuity | `--session-id` or `--continue` to CLI |
-| **Codex** | Bookkeeping only | Tracked, NOT passed to CLI. Each call fresh |
+| **Codex** | Real continuity | `codex exec resume <UUID>` (`sessionId`) or `codex exec resume --last` (`resumeLatest:true`). `sessionId` must be a real Codex UUID from `~/.codex/sessions/`; gateway-generated `gw-*` IDs are rejected. `--full-auto` silently dropped on resume (approval policy inherits from the original session) |
 | **Gemini** | Real continuity | `--resume` to CLI |
+| **Grok** | Real continuity | `--resume` / `--continue` to CLI |
 
-Claude/Gemini: true multi-turn. Codex: organizational metadata only — include all context in every prompt.
+All four CLIs now carry true multi-turn continuity. For Codex, you must either pass `resumeLatest:true` or supply a real Codex session UUID — the gateway no longer treats Codex sessions as bookkeeping-only.
 
 ## Creating Sessions
 
@@ -57,12 +58,15 @@ claude_request({prompt:"...",createNewSession:true,approvalStrategy:"mcp_managed
 ### Implicit active session
 
 - **Claude** — auto-continues active session via `--continue`
-- **Codex** — active session for bookkeeping only (no CLI resume)
+- **Codex** — no auto-lookup; pass `resumeLatest:true` (→ `codex exec resume --last`) or `sessionId:<UUID>` (→ `codex exec resume <UUID>`) explicitly
 - **Gemini** — no auto-lookup; use `sessionId` or `resumeLatest:true` explicitly
+- **Grok** — pass `sessionId` (or `resumeLatest:true`) to resume via `--resume`/`--continue`
 
 ```
-claude_request({prompt:"Continue where we left off",approvalStrategy:"mcp_managed"})          // auto-continues
+claude_request({prompt:"Continue where we left off",approvalStrategy:"mcp_managed"})           // auto-continues
+codex_request({prompt:"Continue",resumeLatest:true,fullAuto:true,approvalStrategy:"mcp_managed"}) // codex exec resume --last
 gemini_request({prompt:"Continue analysis",resumeLatest:true,approvalStrategy:"mcp_managed"}) // explicit resume
+grok_request({prompt:"Continue",sessionId:"my-grok-session",approvalStrategy:"mcp_managed"})  // explicit resume
 ```
 
 ## Multi-Turn Patterns
@@ -76,14 +80,19 @@ claude_request({prompt:"Implement rate limiter in src/rate-limiter.ts",createNew
 claude_request({prompt:"Add unit tests for rate limiter",sessionId:"[saved id]",approvalStrategy:"mcp_managed"})
 ```
 
-### Codex (no CLI continuity)
+### Codex (real continuity via `codex exec resume`)
 
-Include full context each call:
+Pass `resumeLatest:true` to continue the most recent Codex session in cwd, or `sessionId:<UUID>` to target a specific session (UUID visible in `~/.codex/sessions/` or via `codex resume`):
 
 ```
 codex_request({prompt:"Implement rate limiter with sliding window",fullAuto:true,approvalStrategy:"mcp_managed"})
-codex_request({prompt:"Rate limiter in src/rate-limiter.ts uses sliding window. Add tests: basic limiting, burst traffic, window expiry.",fullAuto:true,approvalStrategy:"mcp_managed"})
+// Subsequent turn — resume the same Codex session:
+codex_request({prompt:"Add tests: basic limiting, burst traffic, window expiry.",resumeLatest:true,approvalStrategy:"mcp_managed"})
+// Or target a known UUID:
+codex_request({prompt:"Now add metrics.",sessionId:"7f9f9a2e-1b3c-4c7a-9b0e-deadbeefcafe",approvalStrategy:"mcp_managed"})
 ```
+
+Note: `fullAuto:true` is silently dropped on resume — the original session's approval policy is inherited. If you need a fresh approval posture, pass `createNewSession:true` and re-state the context.
 
 ### Gemini (resumable)
 
@@ -92,6 +101,17 @@ gemini_request({prompt:"Continue analysis",resumeLatest:true,approvalStrategy:"m
 gemini_request({prompt:"Continue",sessionId:"latest",approvalStrategy:"mcp_managed"})
 gemini_request_async({prompt:"Deep analysis...",sessionId:"my-gemini-session",approvalStrategy:"mcp_managed"})
 // Response: resumable:true
+```
+
+### Grok (real continuity)
+
+Grok carries real CLI continuity via `--resume` / `--continue`. Auth must already be set up (`grok login` OAuth, or `GROK_CODE_XAI_API_KEY`):
+
+```
+grok_request({prompt:"Implement rate limiter in src/rate-limiter.ts",createNewSession:true,approvalStrategy:"mcp_managed"})
+// Save returned sessionId
+
+grok_request({prompt:"Add unit tests for the rate limiter",sessionId:"[saved id]",approvalStrategy:"mcp_managed"})
 ```
 
 ## Switching Sessions
@@ -160,8 +180,9 @@ Returns: timestamps, description, CLI type, active status.
 - Use `createNewSession:true` for quick one-offs
 - Clean up completed workflow sessions
 - Each CLI tracks active session independently
-- For Codex: sessions are organizational only — no conversation continuity
+- For Codex: real `codex exec resume <UUID>` / `--last` continuity. The gateway-tracked session ID is independent of the Codex CLI's session UUID — for resume, supply a real Codex UUID or use `resumeLatest:true`. `--full-auto` is dropped on resume (approval policy inherits from the original session)
+- For Grok: real `--resume`/`--continue` continuity, same model as Claude — but auth must be set up first (`grok login` or `GROK_CODE_XAI_API_KEY`)
 - Expired sessions (past TTL) silently evicted
 - Never pass Gemini `gw-*` IDs as `sessionId` — use own IDs for resumable Gemini workflows
 - Check Gemini's `resumable` field to know if that session can continue
-- Sync tools may auto-defer at 45s — deferred response preserves `sessionId`
+- Sync tools may auto-defer at 45s — deferred response preserves `sessionId`. Deferred jobs and their results are now durable (default 30-day retention via `LLM_GATEWAY_JOB_RETENTION_DAYS`), so a session that auto-defers can be picked up across gateway restarts

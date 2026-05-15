@@ -1,11 +1,11 @@
 ---
 name: multi-llm-consensus
-description: Run a task through multiple LLMs independently and require agreement before proceeding. Use for high-stakes generation, conflict resolution, or final quality gates requiring unanimous approval.
+description: Run a task through multiple LLMs (Claude, Codex, Gemini, Grok) independently and require agreement before proceeding. Use for high-stakes generation, conflict resolution, or final quality gates requiring unanimous approval.
 ---
 
 # Multi-LLM Consensus
 
-When correctness matters more than speed, send the same task to Claude, Codex, and Gemini independently, then compare results. All agents must agree before proceeding.
+When correctness matters more than speed, send the same task to Claude, Codex, Gemini, and (optionally) Grok independently, then compare results. All agents must agree before proceeding. Adding Grok gives an independent fourth model from a different vendor (xAI) — useful when consensus needs diversity to defend against shared-blind-spot failures across the OpenAI/Google/Anthropic family.
 
 ## Dispatch Defaults
 
@@ -46,12 +46,18 @@ gemini_request_async({
   approvalStrategy: "mcp_managed",
   correlationId: "gen-gemini"
 })
+grok_request_async({
+  prompt: "Given this specification:\n[spec]\n\nGenerate the implementation. Output only code.",
+  approvalStrategy: "mcp_managed",
+  correlationId: "gen-grok"
+})
 ```
 
-Poll all three. When complete, compare:
-- If all three agree → high confidence, proceed
-- If two agree, one differs → investigate the outlier
-- If all three differ → the spec is ambiguous, clarify before proceeding
+Poll all four. When complete, compare:
+- If all four agree → very high confidence, proceed
+- If three agree, one differs → investigate the outlier (often a real edge case the majority missed)
+- If split 2-2 → escalate; the spec is ambiguous, clarify before proceeding
+- If all four differ → spec is fundamentally underspecified
 
 ### Pattern 2: Unanimous Approval Gate
 
@@ -74,11 +80,16 @@ gemini_request_async({
   approvalStrategy: "mcp_managed",
   correlationId: "review-gemini"
 })
+grok_request_async({
+  prompt: "Review [path] for: grammar correctness, extraction completeness, test coverage, performance, security. End with APPROVED or NOT APPROVED with findings.",
+  approvalStrategy: "mcp_managed",
+  correlationId: "review-grok"
+})
 ```
 
 **Verdict rules:**
-- All three APPROVED → gate passes
-- Any NOT APPROVED → fix issues, re-submit to all three
+- All reviewers APPROVED → gate passes
+- Any NOT APPROVED → fix issues, re-submit to **all** reviewers (not just the one that rejected)
 - Any unable to review → provide evidence, re-submit to that reviewer
 
 ### Pattern 3: Conflict Resolution
@@ -103,21 +114,26 @@ claude_request({
 Always use async tools for consensus — you need all results before deciding:
 
 ```
-// Fire all three (each with approvalStrategy:"mcp_managed"; Codex also fullAuto:true)
+// Fire all four (each with approvalStrategy:"mcp_managed"; Codex also fullAuto:true)
 job1 = claude_request_async({...})
 job2 = codex_request_async({...})
 job3 = gemini_request_async({...})
+job4 = grok_request_async({...})
 
 // Poll every 60 seconds (no wallclock timeout; cancel only on explicit instruction or hard failure)
 llm_job_status({jobId: job1.job.id})
 llm_job_status({jobId: job2.job.id})
 llm_job_status({jobId: job3.job.id})
+llm_job_status({jobId: job4.job.id})
 
 // Collect results when all complete
 result1 = llm_job_result({jobId: job1.job.id})
 result2 = llm_job_result({jobId: job2.job.id})
 result3 = llm_job_result({jobId: job3.job.id})
+result4 = llm_job_result({jobId: job4.job.id})
 ```
+
+Results are durable (default 30 days). If your polling wrapper dies, re-issue the same `*_request_async` calls — auto-dedup snaps each new call back onto the live job. Use `forceRefresh:true` only if you've genuinely changed the inputs.
 
 ### Comparison
 
@@ -140,6 +156,7 @@ For reviews:
 | Claude | Architecture, patterns, documentation | Design quality, maintainability |
 | Codex | Implementation correctness, algorithms | Logic bugs, edge cases, test gaps |
 | Gemini | Security-aware generation, edge cases | Security audit, OWASP, crash cases |
+| Grok (xAI) | Independent perspective from a different vendor family | Tie-breaker / diversity reviewer when the other three converge on a blind spot |
 
 ## Model Selection
 
@@ -149,9 +166,10 @@ Avoid stale hardcoded model IDs such as `o3`, `o3-pro`, and `gpt-4o`; omit `mode
 
 ## Tips
 
-- Use `correlationId` to group consensus rounds: `"consensus-r1-claude"`, `"consensus-r1-codex"`
-- For Codex: always include full context in prompt (no session continuity)
-- For Gemini reviews: use `sessionId` for resumable follow-up rounds
-- If one LLM is unavailable, proceed with 2-of-3 but note the gap
-- Consensus is expensive (3x tokens). Use it for high-stakes decisions, not routine tasks.
+- Use `correlationId` to group consensus rounds: `"consensus-r1-claude"`, `"consensus-r1-codex"`, `"consensus-r1-gemini"`, `"consensus-r1-grok"`
+- For Codex: real continuity is available via `resumeLatest:true` or `sessionId:<UUID>` (the UUID from `~/.codex/sessions/`); otherwise re-state context inline
+- For Gemini and Grok reviews: pass `sessionId` for resumable follow-up rounds
+- If one LLM is unavailable, proceed with the rest but note the gap
+- Consensus is expensive (3–4x tokens). Use it for high-stakes decisions, not routine tasks.
 - When re-submitting after fixes, re-submit to ALL reviewers (not just the one that rejected)
+- **Durable results**: deferred consensus jobs persist (default 30 days, `LLM_GATEWAY_JOB_RETENTION_DAYS`). If the orchestrator dies mid-round, re-issue the same calls — auto-dedup reattaches to the running jobs and you don't restart the consensus round.
