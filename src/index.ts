@@ -22,7 +22,7 @@ import { JobStore, resolveJobStoreDbPath } from "./job-store.js";
 import { ApprovalManager, ApprovalPolicy, ApprovalRecord } from "./approval-manager.js";
 import { checkReviewIntegrity, ReviewIntegrityResult } from "./review-integrity.js";
 import { buildClaudeMcpConfig, ClaudeMcpConfigResult, ClaudeMcpServerName, CLAUDE_MCP_SERVER_NAMES } from "./claude-mcp-config.js";
-import { resolveSessionResumeArgs, resolveGrokSessionArgs, GATEWAY_SESSION_PREFIX } from "./request-helpers.js";
+import { resolveSessionResumeArgs, resolveGrokSessionArgs, resolveCodexSessionArgs, GATEWAY_SESSION_PREFIX } from "./request-helpers.js";
 import { createFlightRecorder, FlightRecorderLike } from "./flight-recorder.js";
 import { getCliVersions, runCliUpgrade } from "./cli-updater.js";
 
@@ -127,7 +127,7 @@ Other: list_models, cli_versions, cli_upgrade, approval_list, llm_process_health
 
 Key behaviors:
 - Sync auto-defers at ${SYNC_DEADLINE_MS}ms. Poll deferred jobs via llm_job_status/llm_job_result.
-- Sessions: Claude --continue, Gemini --resume, Grok --resume/--continue (real CLI continuity). Codex bookkeeping only.
+- Sessions: Claude --continue, Gemini --resume, Grok --resume/--continue, Codex \`exec resume <ID>\` / \`exec resume --last\` (all real CLI continuity). For Codex, sessionId must be a real Codex UUID (from ~/.codex/sessions/); gateway-generated gw-* IDs are rejected.
 - Approval gates: opt-in via approvalStrategy:"mcp_managed".
 - Idle timeout kills stuck processes (default 10min, configurable via idleTimeoutMs).
 
@@ -724,6 +724,9 @@ function prepareCodexRequest(params: {
   approvalStrategy: "legacy" | "mcp_managed";
   approvalPolicy?: string;
   mcpServers?: ClaudeMcpServerName[];
+  sessionId?: string;
+  resumeLatest?: boolean;
+  createNewSession?: boolean;
   correlationId?: string;
   optimizePrompt: boolean;
   operation: string;
@@ -767,13 +770,39 @@ function prepareCodexRequest(params: {
     }
   }
 
-  const args = ["exec"];
+  // Resume mode: codex exec resume <SESSION_ID|--last> [flags] PROMPT
+  // Note: `codex exec resume` does NOT accept `--full-auto`; the original
+  // session's approval policy is inherited. We silently drop fullAuto on resume.
+  let sessionPlan;
+  try {
+    sessionPlan = resolveCodexSessionArgs({
+      sessionId: params.sessionId,
+      resumeLatest: params.resumeLatest,
+      createNewSession: params.createNewSession
+    });
+  } catch (err) {
+    return createErrorResponse(params.operation, 1, "", corrId, err as Error);
+  }
+
+  const args: string[] = ["exec"];
+  if (sessionPlan.mode !== "new") {
+    args.push("resume");
+    if (sessionPlan.mode === "resume-latest") {
+      args.push("--last");
+    }
+  }
   if (resolvedModel) args.push("--model", resolvedModel);
-  if (params.fullAuto) args.push("--full-auto");
+  if (sessionPlan.mode === "new" && params.fullAuto) {
+    args.push("--full-auto");
+  }
   if (params.dangerouslyBypassApprovalsAndSandbox) {
     args.push("--dangerously-bypass-approvals-and-sandbox");
   }
-  args.push("--skip-git-repo-check", effectivePrompt);
+  args.push("--skip-git-repo-check");
+  if (sessionPlan.mode === "resume-by-id" && sessionPlan.sessionId) {
+    args.push(sessionPlan.sessionId);
+  }
+  args.push(effectivePrompt);
 
   return { corrId, effectivePrompt, resolvedModel, requestedMcpServers, approvalDecision, reviewIntegrity, args };
 }
@@ -1385,6 +1414,7 @@ export async function handleCodexRequestAsync(
     approvalPolicy?: string;
     mcpServers?: ClaudeMcpServerName[];
     sessionId?: string;
+    resumeLatest?: boolean;
     createNewSession: boolean;
     correlationId?: string;
     optimizePrompt: boolean;
@@ -1397,6 +1427,7 @@ export async function handleCodexRequestAsync(
     dangerouslyBypassApprovalsAndSandbox: params.dangerouslyBypassApprovalsAndSandbox,
     approvalStrategy: params.approvalStrategy, approvalPolicy: params.approvalPolicy,
     mcpServers: params.mcpServers,
+    sessionId: params.sessionId, resumeLatest: params.resumeLatest, createNewSession: params.createNewSession,
     correlationId: params.correlationId, optimizePrompt: params.optimizePrompt,
     operation: "codex_request_async"
   });
@@ -1592,19 +1623,21 @@ server.tool(
     approvalStrategy: z.enum(["legacy", "mcp_managed"]).default("legacy").describe("Approval strategy"),
     approvalPolicy: z.enum(["strict", "balanced", "permissive"]).optional().describe("Approval policy override"),
     mcpServers: z.array(MCP_SERVER_ENUM).default(["sqry"]).describe("MCP server names for approval tracking (Codex manages its own MCP config)"),
-    sessionId: z.string().optional().describe("Session ID (Codex manages internally)"),
-    createNewSession: z.boolean().default(false).describe("Force new session"),
+    sessionId: z.string().optional().describe("Codex session UUID to resume via `codex exec resume <ID>`. Must be a real Codex session ID (from `~/.codex/sessions/` or the `codex resume` picker). Gateway-generated `gw-*` IDs are rejected."),
+    resumeLatest: z.boolean().default(false).describe("Resume the most recent Codex session in the current cwd via `codex exec resume --last`. Ignored if sessionId is set."),
+    createNewSession: z.boolean().default(false).describe("Force a fresh session (no resume)"),
     correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
     optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution"),
     optimizeResponse: z.boolean().default(false).describe("Optimize response output"),
     idleTimeoutMs: z.number().int().min(30_000).max(3_600_000).optional().describe("Idle timeout in ms (min 30s, max 1h, omit=CLI default)"),
     forceRefresh: z.boolean().default(false).describe("Bypass dedup and force a fresh CLI run even if a recent identical request exists")
   },
-  async ({ prompt, model, fullAuto, dangerouslyBypassApprovalsAndSandbox, approvalStrategy, approvalPolicy, mcpServers, sessionId, createNewSession, correlationId, optimizePrompt, optimizeResponse, idleTimeoutMs, forceRefresh }) => {
+  async ({ prompt, model, fullAuto, dangerouslyBypassApprovalsAndSandbox, approvalStrategy, approvalPolicy, mcpServers, sessionId, resumeLatest, createNewSession, correlationId, optimizePrompt, optimizeResponse, idleTimeoutMs, forceRefresh }) => {
     const startTime = Date.now();
     const prep = prepareCodexRequest({
       prompt, model, fullAuto, dangerouslyBypassApprovalsAndSandbox,
       approvalStrategy, approvalPolicy, mcpServers,
+      sessionId, resumeLatest, createNewSession,
       correlationId, optimizePrompt, operation: "codex_request"
     });
     if (!("args" in prep)) return prep;
@@ -1850,17 +1883,18 @@ server.tool(
     approvalStrategy: z.enum(["legacy", "mcp_managed"]).default("legacy").describe("Approval strategy"),
     approvalPolicy: z.enum(["strict", "balanced", "permissive"]).optional().describe("Approval policy override"),
     mcpServers: z.array(MCP_SERVER_ENUM).default(["sqry"]).describe("MCP server names for approval tracking (Codex manages its own MCP config)"),
-    sessionId: z.string().optional().describe("Session ID (Codex manages internally)"),
-    createNewSession: z.boolean().default(false).describe("Force new session"),
+    sessionId: z.string().optional().describe("Codex session UUID to resume via `codex exec resume <ID>`. Must be a real Codex session ID (from `~/.codex/sessions/` or the `codex resume` picker). Gateway-generated `gw-*` IDs are rejected."),
+    resumeLatest: z.boolean().default(false).describe("Resume the most recent Codex session in the current cwd via `codex exec resume --last`. Ignored if sessionId is set."),
+    createNewSession: z.boolean().default(false).describe("Force a fresh session (no resume)"),
     correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
     optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution"),
     idleTimeoutMs: z.number().int().min(30_000).max(3_600_000).optional().describe("Idle timeout in ms (min 30s, max 1h, omit=CLI default)"),
     forceRefresh: z.boolean().default(false).describe("Bypass dedup and force a fresh CLI run even if a recent identical request exists")
   },
-  async ({ prompt, model, fullAuto, dangerouslyBypassApprovalsAndSandbox, approvalStrategy, approvalPolicy, mcpServers, sessionId, createNewSession, correlationId, optimizePrompt, idleTimeoutMs, forceRefresh }) => {
+  async ({ prompt, model, fullAuto, dangerouslyBypassApprovalsAndSandbox, approvalStrategy, approvalPolicy, mcpServers, sessionId, resumeLatest, createNewSession, correlationId, optimizePrompt, idleTimeoutMs, forceRefresh }) => {
     return handleCodexRequestAsync(
       { sessionManager, asyncJobManager, logger },
-      { prompt, model, fullAuto, dangerouslyBypassApprovalsAndSandbox, approvalStrategy, approvalPolicy, mcpServers, sessionId, createNewSession, correlationId, optimizePrompt, idleTimeoutMs, forceRefresh }
+      { prompt, model, fullAuto, dangerouslyBypassApprovalsAndSandbox, approvalStrategy, approvalPolicy, mcpServers, sessionId, resumeLatest, createNewSession, correlationId, optimizePrompt, idleTimeoutMs, forceRefresh }
     );
   }
 );

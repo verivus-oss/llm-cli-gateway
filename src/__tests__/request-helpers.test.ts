@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { resolveSessionResumeArgs, resolveGrokSessionArgs, validateSessionId, GATEWAY_SESSION_PREFIX } from "../request-helpers.js";
+import { resolveSessionResumeArgs, resolveGrokSessionArgs, resolveCodexSessionArgs, validateSessionId, GATEWAY_SESSION_PREFIX } from "../request-helpers.js";
 
 describe("request-helpers", () => {
   describe("GATEWAY_SESSION_PREFIX", () => {
@@ -136,6 +136,45 @@ describe("request-helpers", () => {
       expect(() =>
         resolveGrokSessionArgs({ sessionId: "gw-abc123" })
       ).toThrow('Session ID "gw-abc123" uses reserved prefix "gw-"');
+    });
+  });
+
+  describe("resolveCodexSessionArgs", () => {
+    it("defaults to mode=new with no options", () => {
+      expect(resolveCodexSessionArgs({})).toEqual({ mode: "new" });
+    });
+
+    it("createNewSession=true forces mode=new even with sessionId", () => {
+      expect(
+        resolveCodexSessionArgs({
+          sessionId: "11111111-2222-3333-4444-555555555555",
+          resumeLatest: true,
+          createNewSession: true
+        })
+      ).toEqual({ mode: "new" });
+    });
+
+    it("sessionId takes precedence over resumeLatest", () => {
+      const result = resolveCodexSessionArgs({
+        sessionId: "11111111-2222-3333-4444-555555555555",
+        resumeLatest: true
+      });
+      expect(result.mode).toBe("resume-by-id");
+      expect(result.sessionId).toBe("11111111-2222-3333-4444-555555555555");
+    });
+
+    it("resumeLatest=true with no sessionId maps to resume-latest", () => {
+      expect(resolveCodexSessionArgs({ resumeLatest: true })).toEqual({ mode: "resume-latest" });
+    });
+
+    it("rejects gw- prefixed sessionId", () => {
+      expect(() => resolveCodexSessionArgs({ sessionId: "gw-abc123" })).toThrow('reserved prefix "gw-"');
+    });
+
+    it("accepts a normal UUID-shaped session id", () => {
+      const result = resolveCodexSessionArgs({ sessionId: "7f9f9a2e-1b3c-4c7a-9b0e-deadbeefcafe" });
+      expect(result.mode).toBe("resume-by-id");
+      expect(result.sessionId).toBe("7f9f9a2e-1b3c-4c7a-9b0e-deadbeefcafe");
     });
   });
 });
