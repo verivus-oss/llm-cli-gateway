@@ -28,7 +28,10 @@ interface ToolMetrics {
 
 const createEmptyMetrics = (): Record<CliType, ToolMetrics> =>
   Object.fromEntries(
-    CLI_TYPES.map(cli => [cli, { requestCount: 0, successCount: 0, failureCount: 0, totalResponseTimeMs: 0 }])
+    CLI_TYPES.map(cli => [
+      cli,
+      { requestCount: 0, successCount: 0, failureCount: 0, totalResponseTimeMs: 0 },
+    ])
   ) as Record<CliType, ToolMetrics>;
 
 export class PerformanceMetrics {
@@ -54,15 +57,12 @@ export class PerformanceMetrics {
 
     for (const cli of CLI_TYPES) {
       const metrics = this.metrics[cli];
-      const averageResponseTimeMs = metrics.requestCount > 0
-        ? metrics.totalResponseTimeMs / metrics.requestCount
-        : 0;
-      const successRate = metrics.requestCount > 0
-        ? metrics.successCount / metrics.requestCount
-        : 0;
-      const failureRate = metrics.requestCount > 0
-        ? metrics.failureCount / metrics.requestCount
-        : 0;
+      const averageResponseTimeMs =
+        metrics.requestCount > 0 ? metrics.totalResponseTimeMs / metrics.requestCount : 0;
+      const successRate =
+        metrics.requestCount > 0 ? metrics.successCount / metrics.requestCount : 0;
+      const failureRate =
+        metrics.requestCount > 0 ? metrics.failureCount / metrics.requestCount : 0;
 
       byTool[cli] = {
         requestCount: metrics.requestCount,
@@ -70,7 +70,7 @@ export class PerformanceMetrics {
         failureCount: metrics.failureCount,
         averageResponseTimeMs,
         successRate,
-        failureRate
+        failureRate,
       };
 
       totalRequests += metrics.requestCount;
@@ -88,7 +88,7 @@ export class PerformanceMetrics {
       overallSuccessRate,
       overallFailureRate,
       byTool,
-      generatedAt: new Date().toISOString()
+      generatedAt: new Date().toISOString(),
     };
   }
 }

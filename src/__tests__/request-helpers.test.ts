@@ -1,5 +1,12 @@
 import { describe, it, expect } from "vitest";
-import { resolveSessionResumeArgs, resolveGrokSessionArgs, resolveCodexSessionArgs, validateSessionId, GATEWAY_SESSION_PREFIX } from "../request-helpers.js";
+import {
+  resolveSessionResumeArgs,
+  resolveGrokSessionArgs,
+  resolveCodexSessionArgs,
+  validateSessionId,
+  sanitizeCliArgValues,
+  GATEWAY_SESSION_PREFIX,
+} from "../request-helpers.js";
 
 describe("request-helpers", () => {
   describe("GATEWAY_SESSION_PREFIX", () => {
@@ -26,12 +33,36 @@ describe("request-helpers", () => {
     });
   });
 
+  describe("sanitizeCliArgValues", () => {
+    it("should pass through normal values", () => {
+      expect(sanitizeCliArgValues(["Edit", "Write", "Bash(git:*)"], "allowedTools")).toEqual([
+        "Edit",
+        "Write",
+        "Bash(git:*)",
+      ]);
+    });
+
+    it("should reject values starting with -", () => {
+      expect(() =>
+        sanitizeCliArgValues(["Edit", "--dangerously-skip-permissions"], "allowedTools")
+      ).toThrow("argument injection");
+    });
+
+    it("should reject values starting with single dash", () => {
+      expect(() => sanitizeCliArgValues(["-p"], "allowedTools")).toThrow("argument injection");
+    });
+
+    it("should accept empty array", () => {
+      expect(sanitizeCliArgValues([], "allowedTools")).toEqual([]);
+    });
+  });
+
   describe("resolveSessionResumeArgs", () => {
     it("createNewSession=true ignores all other flags", () => {
       const result = resolveSessionResumeArgs({
         sessionId: "user-abc",
         resumeLatest: true,
-        createNewSession: true
+        createNewSession: true,
       });
       expect(result.resumeArgs).toEqual([]);
       expect(result.effectiveSessionId).toBeUndefined();
@@ -41,7 +72,7 @@ describe("request-helpers", () => {
     it("resumeLatest=true without sessionId returns --resume latest", () => {
       const result = resolveSessionResumeArgs({
         resumeLatest: true,
-        createNewSession: false
+        createNewSession: false,
       });
       expect(result.resumeArgs).toEqual(["--resume", "latest"]);
       expect(result.effectiveSessionId).toBeUndefined();
@@ -51,7 +82,7 @@ describe("request-helpers", () => {
     it("user-provided sessionId returns --resume with that ID", () => {
       const result = resolveSessionResumeArgs({
         sessionId: "user-abc",
-        createNewSession: false
+        createNewSession: false,
       });
       expect(result.resumeArgs).toEqual(["--resume", "user-abc"]);
       expect(result.effectiveSessionId).toBe("user-abc");
@@ -62,7 +93,7 @@ describe("request-helpers", () => {
       const result = resolveSessionResumeArgs({
         sessionId: "user-abc",
         resumeLatest: true,
-        createNewSession: false
+        createNewSession: false,
       });
       expect(result.resumeArgs).toEqual(["--resume", "user-abc"]);
       expect(result.effectiveSessionId).toBe("user-abc");
@@ -71,7 +102,7 @@ describe("request-helpers", () => {
 
     it("no flags returns empty args", () => {
       const result = resolveSessionResumeArgs({
-        createNewSession: false
+        createNewSession: false,
       });
       expect(result.resumeArgs).toEqual([]);
       expect(result.effectiveSessionId).toBeUndefined();
@@ -86,15 +117,15 @@ describe("request-helpers", () => {
     });
 
     it("rejects gateway-prefixed sessionId with clear error", () => {
-      expect(() =>
-        resolveSessionResumeArgs({ sessionId: "gw-abc123" })
-      ).toThrow('Session ID "gw-abc123" uses reserved prefix "gw-"');
+      expect(() => resolveSessionResumeArgs({ sessionId: "gw-abc123" })).toThrow(
+        'Session ID "gw-abc123" uses reserved prefix "gw-"'
+      );
     });
 
     it("createNewSession=true with sessionId=gw-abc does not throw (createNewSession short-circuits)", () => {
       const result = resolveSessionResumeArgs({
         sessionId: "gw-abc",
-        createNewSession: true
+        createNewSession: true,
       });
       expect(result.resumeArgs).toEqual([]);
       expect(result.userProvidedSession).toBe(false);

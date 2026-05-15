@@ -8,11 +8,16 @@ describe("PostgreSQLSessionManager", () => {
   beforeEach(async () => {
     await cleanTestDatabase();
     const { pool, redis } = await setupTestDatabase();
-    manager = new PostgreSQLSessionManager(pool, redis, {
-      session: 3600,
-      activeSession: 1800,
-      sessionList: 120
-    }, mockLogger);
+    manager = new PostgreSQLSessionManager(
+      pool,
+      redis,
+      {
+        session: 3600,
+        activeSession: 1800,
+        sessionList: 120,
+      },
+      mockLogger
+    );
   });
 
   //──────────────────────────────────────────────────────────────────────────
@@ -101,7 +106,7 @@ describe("PostgreSQLSessionManager", () => {
       const [result1, result2, result3] = await Promise.all([
         manager.getSession(created.id),
         manager.getSession(created.id),
-        manager.getSession(created.id)
+        manager.getSession(created.id),
       ]);
 
       expect(result1?.id).toBe(created.id);
@@ -238,7 +243,7 @@ describe("PostgreSQLSessionManager", () => {
       // Concurrent attempts to set active session
       await Promise.all([
         manager.setActiveSession("claude", session1.id),
-        manager.setActiveSession("claude", session2.id)
+        manager.setActiveSession("claude", session2.id),
       ]);
 
       const activeSession = await manager.getActiveSession("claude");
@@ -294,7 +299,7 @@ describe("PostgreSQLSessionManager", () => {
 
       const success = await manager.updateSessionMetadata(session.id, {
         key1: "value1",
-        key2: 42
+        key2: 42,
       });
 
       expect(success).toBe(true);
@@ -302,7 +307,7 @@ describe("PostgreSQLSessionManager", () => {
       const updated = await manager.getSession(session.id);
       expect(updated?.metadata).toEqual({
         key1: "value1",
-        key2: 42
+        key2: 42,
       });
     });
 
@@ -315,7 +320,7 @@ describe("PostgreSQLSessionManager", () => {
       const updated = await manager.getSession(session.id);
       expect(updated?.metadata).toEqual({
         key1: "value1",
-        key2: "value2"
+        key2: "value2",
       });
     });
 
@@ -427,7 +432,7 @@ describe("PostgreSQLSessionManager", () => {
       const sessions = await Promise.all([
         manager.createSession("claude", "Session 1"),
         manager.createSession("claude", "Session 2"),
-        manager.createSession("claude", "Session 3")
+        manager.createSession("claude", "Session 3"),
       ]);
 
       expect(sessions.length).toBe(3);
@@ -498,7 +503,7 @@ describe("PostgreSQLSessionManager", () => {
       const session2 = await manager.createSession("claude", "Session 2");
       await manager.updateSessionMetadata(session2.id, {
         tag: "important",
-        priority: 1
+        priority: 1,
       });
 
       // Verify metadata was stored correctly
@@ -525,7 +530,7 @@ describe("PostgreSQLSessionManager", () => {
       // Concurrent deletion attempts
       const [result1, result2] = await Promise.all([
         manager.deleteSession(session.id),
-        manager.deleteSession(session.id)
+        manager.deleteSession(session.id),
       ]);
 
       // One should succeed, one should fail

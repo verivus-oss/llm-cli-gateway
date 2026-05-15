@@ -12,7 +12,11 @@ import { parseStreamJson } from "./stream-json-parser.js";
 import { ISessionManager, createSessionManager } from "./session-manager.js";
 import { ResourceProvider } from "./resources.js";
 import { PerformanceMetrics } from "./metrics.js";
-import { estimateTokens, optimizePrompt as optimizePromptText, optimizeResponse as optimizeResponseText } from "./optimizer.js";
+import {
+  estimateTokens,
+  optimizePrompt as optimizePromptText,
+  optimizeResponse as optimizeResponseText,
+} from "./optimizer.js";
 import { loadConfig } from "./config.js";
 import { DatabaseConnection } from "./db.js";
 import { checkHealth } from "./health.js";
@@ -21,8 +25,19 @@ import { AsyncJobManager } from "./async-job-manager.js";
 import { JobStore, resolveJobStoreDbPath } from "./job-store.js";
 import { ApprovalManager, ApprovalPolicy, ApprovalRecord } from "./approval-manager.js";
 import { checkReviewIntegrity, ReviewIntegrityResult } from "./review-integrity.js";
-import { buildClaudeMcpConfig, ClaudeMcpConfigResult, ClaudeMcpServerName, CLAUDE_MCP_SERVER_NAMES } from "./claude-mcp-config.js";
-import { resolveSessionResumeArgs, resolveGrokSessionArgs, resolveCodexSessionArgs, GATEWAY_SESSION_PREFIX } from "./request-helpers.js";
+import {
+  buildClaudeMcpConfig,
+  ClaudeMcpConfigResult,
+  ClaudeMcpServerName,
+  CLAUDE_MCP_SERVER_NAMES,
+} from "./claude-mcp-config.js";
+import {
+  resolveSessionResumeArgs,
+  resolveGrokSessionArgs,
+  resolveCodexSessionArgs,
+  sanitizeCliArgValues,
+  GATEWAY_SESSION_PREFIX,
+} from "./request-helpers.js";
 import { createFlightRecorder, FlightRecorderLike } from "./flight-recorder.js";
 import { getCliVersions, runCliUpgrade } from "./cli-updater.js";
 
@@ -53,13 +68,19 @@ const logger = {
     if (process.env.DEBUG) {
       console.error(`[DEBUG] ${new Date().toISOString()} - ${message}`, ...args);
     }
-  }
+  },
 };
 
-function logOptimizationTokens(kind: "prompt" | "response", correlationId: string, original: string, optimized: string) {
+function logOptimizationTokens(
+  kind: "prompt" | "response",
+  correlationId: string,
+  original: string,
+  optimized: string
+) {
   const originalTokens = estimateTokens(original);
   const optimizedTokens = estimateTokens(optimized);
-  const reduction = originalTokens === 0 ? 0 : ((originalTokens - optimizedTokens) / originalTokens) * 100;
+  const reduction =
+    originalTokens === 0 ? 0 : ((originalTokens - optimizedTokens) / originalTokens) * 100;
   logger.info(
     `[${correlationId}] ${kind} tokens ${originalTokens} → ${optimizedTokens} (${reduction.toFixed(1)}% reduction)`
   );
@@ -177,10 +198,10 @@ const MCP_SERVER_ENUM = z.enum(CLAUDE_MCP_SERVER_NAMES);
 // Claude idle timeout only applies in stream-json mode (with --include-partial-messages).
 // In text/json mode, Claude produces no output until done, so idle timeout would false-positive.
 const CLI_IDLE_TIMEOUTS: Record<string, number | undefined> = {
-  claude: 600_000,  // 10 minutes — only used when outputFormat=stream-json
-  codex: 600_000,   // 10 minutes — Codex streams stderr progress
-  gemini: 600_000,  // 10 minutes — Gemini streams stdout in real-time
-  grok: 600_000,    // 10 minutes — Grok streams stderr/stdout activity in headless mode
+  claude: 600_000, // 10 minutes — only used when outputFormat=stream-json
+  codex: 600_000, // 10 minutes — Codex streams stderr progress
+  gemini: 600_000, // 10 minutes — Gemini streams stdout in real-time
+  grok: 600_000, // 10 minutes — Grok streams stderr/stdout activity in headless mode
 };
 
 function resolveIdleTimeout(cli: string, override?: number): number | undefined {
@@ -234,48 +255,67 @@ async function awaitJobOrDefer(
       return {
         stdout: result.stdout,
         stderr: result.stderr,
-        code: result.exitCode ?? 1
+        code: result.exitCode ?? 1,
       };
     }
     await new Promise(resolve => setTimeout(resolve, SYNC_POLL_INTERVAL_MS));
   }
 
   // Deadline exceeded — return deferral
-  logger.info(`[${corrId}] ${cli} sync deadline exceeded (${SYNC_DEADLINE_MS}ms), deferring to async job ${job.id}`);
+  logger.info(
+    `[${corrId}] ${cli} sync deadline exceeded (${SYNC_DEADLINE_MS}ms), deferring to async job ${job.id}`
+  );
   return {
     deferred: true,
     jobId: job.id,
     cli,
     correlationId: corrId,
-    message: `Execution exceeded sync deadline (${SYNC_DEADLINE_MS}ms). Poll with llm_job_status, fetch with llm_job_result.`
+    message: `Execution exceeded sync deadline (${SYNC_DEADLINE_MS}ms). Poll with llm_job_status, fetch with llm_job_result.`,
   };
 }
 
-function isDeferredResponse(result: { stdout: string; stderr: string; code: number } | DeferredJobResponse): result is DeferredJobResponse {
+function isDeferredResponse(
+  result: { stdout: string; stderr: string; code: number } | DeferredJobResponse
+): result is DeferredJobResponse {
   return "deferred" in result && result.deferred === true;
 }
 
-function buildDeferredToolResponse(deferred: DeferredJobResponse, sessionId?: string): ExtendedToolResponse {
+function buildDeferredToolResponse(
+  deferred: DeferredJobResponse,
+  sessionId?: string
+): ExtendedToolResponse {
   return {
-    content: [{
-      type: "text" as const,
-      text: JSON.stringify({
-        status: "deferred",
-        jobId: deferred.jobId,
-        cli: deferred.cli,
-        correlationId: deferred.correlationId,
-        message: deferred.message,
-        sessionId: sessionId || null,
-        pollWith: "llm_job_status",
-        fetchWith: "llm_job_result",
-        cancelWith: "llm_job_cancel"
-      }, null, 2)
-    }]
+    content: [
+      {
+        type: "text" as const,
+        text: JSON.stringify(
+          {
+            status: "deferred",
+            jobId: deferred.jobId,
+            cli: deferred.cli,
+            correlationId: deferred.correlationId,
+            message: deferred.message,
+            sessionId: sessionId || null,
+            pollWith: "llm_job_status",
+            fetchWith: "llm_job_result",
+            cancelWith: "llm_job_cancel",
+          },
+          null,
+          2
+        ),
+      },
+    ],
   };
 }
 
 // Helper function for standardized error responses
-function createErrorResponse(cli: string, code: number, stderr: string, correlationId?: string, error?: Error) {
+function createErrorResponse(
+  cli: string,
+  code: number,
+  stderr: string,
+  correlationId?: string,
+  error?: Error
+) {
   let errorMessage = `Error executing ${cli} CLI`;
 
   if (error) {
@@ -306,12 +346,23 @@ function createErrorResponse(cli: string, code: number, stderr: string, correlat
       correlationId: correlationId || null,
       cli,
       exitCode: code,
-      errorCategory: code === 124 ? "timeout" : code === 125 ? "idle_timeout" : error ? "spawn_error" : "cli_error"
-    }
+      errorCategory:
+        code === 124
+          ? "timeout"
+          : code === 125
+            ? "idle_timeout"
+            : error
+              ? "spawn_error"
+              : "cli_error",
+    },
   };
 }
 
-function extractUsageAndCost(cli: "claude" | "codex" | "gemini" | "grok", output: string, outputFormat?: string): {
+function extractUsageAndCost(
+  cli: "claude" | "codex" | "gemini" | "grok",
+  output: string,
+  outputFormat?: string
+): {
   inputTokens?: number;
   outputTokens?: number;
   costUsd?: number;
@@ -321,7 +372,7 @@ function extractUsageAndCost(cli: "claude" | "codex" | "gemini" | "grok", output
     return {
       inputTokens: parsed.usage?.inputTokens,
       outputTokens: parsed.usage?.outputTokens,
-      costUsd: parsed.costUsd ?? undefined
+      costUsd: parsed.costUsd ?? undefined,
     };
   }
   return {};
@@ -335,7 +386,10 @@ function safeFlightStart(entry: Parameters<FlightRecorderLike["logStart"]>[0]): 
   }
 }
 
-function safeFlightComplete(correlationId: string, result: Parameters<FlightRecorderLike["logComplete"]>[1]): void {
+function safeFlightComplete(
+  correlationId: string,
+  result: Parameters<FlightRecorderLike["logComplete"]>[1]
+): void {
   try {
     flightRecorder.logComplete(correlationId, result);
   } catch (error) {
@@ -343,17 +397,26 @@ function safeFlightComplete(correlationId: string, result: Parameters<FlightReco
   }
 }
 
-function createApprovalDeniedResponse(operation: string, decision: ReturnType<ApprovalManager["decide"]>) {
+function createApprovalDeniedResponse(
+  operation: string,
+  decision: ReturnType<ApprovalManager["decide"]>
+) {
   return {
-    content: [{
-      type: "text" as const,
-      text: JSON.stringify({
-        success: false,
-        error: `${operation} denied by MCP-managed approval policy`,
-        approval: decision
-      }, null, 2)
-    }],
-    isError: true
+    content: [
+      {
+        type: "text" as const,
+        text: JSON.stringify(
+          {
+            success: false,
+            error: `${operation} denied by MCP-managed approval policy`,
+            approval: decision,
+          },
+          null,
+          2
+        ),
+      },
+    ],
+    isError: true,
   };
 }
 
@@ -372,20 +435,26 @@ function createMcpConfigErrorResponse(
   missing: ClaudeMcpServerName[] = []
 ) {
   return {
-    content: [{
-      type: "text" as const,
-      text: JSON.stringify({
-        success: false,
-        error: `${operation} failed to prepare Claude MCP config`,
-        message,
-        correlationId,
-        mcpServers: {
-          requested,
-          missing
-        }
-      }, null, 2)
-    }],
-    isError: true
+    content: [
+      {
+        type: "text" as const,
+        text: JSON.stringify(
+          {
+            success: false,
+            error: `${operation} failed to prepare Claude MCP config`,
+            message,
+            correlationId,
+            mcpServers: {
+              requested,
+              missing,
+            },
+          },
+          null,
+          2
+        ),
+      },
+    ],
+    isError: true,
   };
 }
 
@@ -394,7 +463,9 @@ function resolveClaudeMcpConfig(
   correlationId: string,
   requestedMcpServers: ClaudeMcpServerName[],
   strictMcpConfig: boolean
-): { config: ClaudeMcpConfigResult } | { errorResponse: ReturnType<typeof createMcpConfigErrorResponse> } {
+):
+  | { config: ClaudeMcpConfigResult }
+  | { errorResponse: ReturnType<typeof createMcpConfigErrorResponse> } {
   let mcpConfig: ClaudeMcpConfigResult;
   try {
     mcpConfig = buildClaudeMcpConfig(requestedMcpServers);
@@ -407,7 +478,7 @@ function resolveClaudeMcpConfig(
         correlationId,
         requestedMcpServers,
         message
-      )
+      ),
     };
   }
 
@@ -420,7 +491,7 @@ function resolveClaudeMcpConfig(
         requestedMcpServers,
         `strictMcpConfig=true but requested servers are unavailable: ${missing}`,
         mcpConfig.missing
-      )
+      ),
     };
   }
 
@@ -439,14 +510,16 @@ for (const skill of loadedSkills) {
     {
       title: skill.name,
       description: skill.description,
-      mimeType: "text/markdown"
+      mimeType: "text/markdown",
     },
     async () => ({
-      contents: [{
-        uri: `skills://${skill.name}`,
-        mimeType: "text/markdown",
-        text: skill.content
-      }]
+      contents: [
+        {
+          uri: `skills://${skill.name}`,
+          mimeType: "text/markdown",
+          text: skill.content,
+        },
+      ],
     })
   );
 }
@@ -459,9 +532,9 @@ server.registerResource(
   {
     title: "📋 All Sessions",
     description: "All conversation sessions across CLIs",
-    mimeType: "application/json"
+    mimeType: "application/json",
   },
-  async (uri) => {
+  async uri => {
     logger.debug("Reading all sessions resource");
     const contents = await resourceProvider.readResource(uri.href);
     return { contents: contents ? [contents] : [] };
@@ -475,9 +548,9 @@ server.registerResource(
   {
     title: "🤖 Claude Sessions",
     description: "Claude conversation sessions",
-    mimeType: "application/json"
+    mimeType: "application/json",
   },
-  async (uri) => {
+  async uri => {
     logger.debug("Reading Claude sessions resource");
     const contents = await resourceProvider.readResource(uri.href);
     return { contents: contents ? [contents] : [] };
@@ -491,9 +564,9 @@ server.registerResource(
   {
     title: "💻 Codex Sessions",
     description: "Codex conversation sessions",
-    mimeType: "application/json"
+    mimeType: "application/json",
   },
-  async (uri) => {
+  async uri => {
     logger.debug("Reading Codex sessions resource");
     const contents = await resourceProvider.readResource(uri.href);
     return { contents: contents ? [contents] : [] };
@@ -507,9 +580,9 @@ server.registerResource(
   {
     title: "✨ Gemini Sessions",
     description: "Gemini conversation sessions",
-    mimeType: "application/json"
+    mimeType: "application/json",
   },
-  async (uri) => {
+  async uri => {
     logger.debug("Reading Gemini sessions resource");
     const contents = await resourceProvider.readResource(uri.href);
     return { contents: contents ? [contents] : [] };
@@ -539,9 +612,9 @@ server.registerResource(
   {
     title: "🧠 Claude Models",
     description: "Claude models and capabilities",
-    mimeType: "application/json"
+    mimeType: "application/json",
   },
-  async (uri) => {
+  async uri => {
     logger.debug("Reading Claude models resource");
     const contents = await resourceProvider.readResource(uri.href);
     return { contents: contents ? [contents] : [] };
@@ -555,9 +628,9 @@ server.registerResource(
   {
     title: "🔧 Codex Models",
     description: "Codex models and capabilities",
-    mimeType: "application/json"
+    mimeType: "application/json",
   },
-  async (uri) => {
+  async uri => {
     logger.debug("Reading Codex models resource");
     const contents = await resourceProvider.readResource(uri.href);
     return { contents: contents ? [contents] : [] };
@@ -571,9 +644,9 @@ server.registerResource(
   {
     title: "🌟 Gemini Models",
     description: "Gemini models and capabilities",
-    mimeType: "application/json"
+    mimeType: "application/json",
   },
-  async (uri) => {
+  async uri => {
     logger.debug("Reading Gemini models resource");
     const contents = await resourceProvider.readResource(uri.href);
     return { contents: contents ? [contents] : [] };
@@ -603,9 +676,9 @@ server.registerResource(
   {
     title: "📈 Performance Metrics",
     description: "Request counts, latency, success/failure rates",
-    mimeType: "application/json"
+    mimeType: "application/json",
   },
-  async (uri) => {
+  async uri => {
     logger.debug("Reading performance metrics resource");
     const contents = await resourceProvider.readResource(uri.href);
     return { contents: contents ? [contents] : [] };
@@ -647,11 +720,20 @@ function prepareClaudeRequest(params: {
   const resolvedModel = resolveModelAlias("claude", params.model, cliInfo);
 
   // Review integrity check on raw prompt (before optimization)
-  const reviewIntegrity = checkReviewIntegrity({ prompt: params.prompt, allowedTools: params.allowedTools, disallowedTools: params.disallowedTools });
+  const reviewIntegrity = checkReviewIntegrity({
+    prompt: params.prompt,
+    allowedTools: params.allowedTools,
+    disallowedTools: params.disallowedTools,
+  });
   if (reviewIntegrity.violations.length > 0) {
-    logger.info(`[${corrId}] Review integrity violations detected: ${reviewIntegrity.violations.map(v => v.type).join(", ")}`, {
-      cli: "claude", operation: params.operation, score: reviewIntegrity.totalScore
-    });
+    logger.info(
+      `[${corrId}] Review integrity violations detected: ${reviewIntegrity.violations.map(v => v.type).join(", ")}`,
+      {
+        cli: "claude",
+        operation: params.operation,
+        score: reviewIntegrity.totalScore,
+      }
+    );
   }
 
   let effectivePrompt = params.prompt;
@@ -662,7 +744,12 @@ function prepareClaudeRequest(params: {
   }
 
   const requestedMcpServers = normalizeMcpServers(params.mcpServers);
-  const mcpConfigResolution = resolveClaudeMcpConfig(params.operation, corrId, requestedMcpServers, params.strictMcpConfig);
+  const mcpConfigResolution = resolveClaudeMcpConfig(
+    params.operation,
+    corrId,
+    requestedMcpServers,
+    params.strictMcpConfig
+  );
   if ("errorResponse" in mcpConfigResolution) {
     return mcpConfigResolution.errorResponse;
   }
@@ -681,7 +768,7 @@ function prepareClaudeRequest(params: {
       disallowedTools: params.disallowedTools,
       policy: params.approvalPolicy as ApprovalPolicy | undefined,
       metadata: { model: resolvedModel || "default", strictMcpConfig: params.strictMcpConfig },
-      reviewIntegrity
+      reviewIntegrity,
     });
     if (approvalDecision.status !== "approved") {
       return createApprovalDeniedResponse(params.operation, approvalDecision);
@@ -696,9 +783,11 @@ function prepareClaudeRequest(params: {
     args.push("--output-format", "stream-json", "--include-partial-messages");
   }
   if (params.allowedTools && params.allowedTools.length > 0) {
+    sanitizeCliArgValues(params.allowedTools, "allowedTools");
     args.push("--allowed-tools", ...params.allowedTools);
   }
   if (params.disallowedTools && params.disallowedTools.length > 0) {
+    sanitizeCliArgValues(params.disallowedTools, "disallowedTools");
     args.push("--disallowed-tools", ...params.disallowedTools);
   }
   if (params.approvalStrategy === "mcp_managed") {
@@ -713,7 +802,16 @@ function prepareClaudeRequest(params: {
     }
   }
 
-  return { corrId, effectivePrompt, resolvedModel, requestedMcpServers, mcpConfig, approvalDecision, reviewIntegrity, args };
+  return {
+    corrId,
+    effectivePrompt,
+    resolvedModel,
+    requestedMcpServers,
+    mcpConfig,
+    approvalDecision,
+    reviewIntegrity,
+    args,
+  };
 }
 
 function prepareCodexRequest(params: {
@@ -738,9 +836,14 @@ function prepareCodexRequest(params: {
   // Review integrity check on raw prompt (before optimization)
   const reviewIntegrity = checkReviewIntegrity({ prompt: params.prompt });
   if (reviewIntegrity.violations.length > 0) {
-    logger.info(`[${corrId}] Review integrity violations detected: ${reviewIntegrity.violations.map(v => v.type).join(", ")}`, {
-      cli: "codex", operation: params.operation, score: reviewIntegrity.totalScore
-    });
+    logger.info(
+      `[${corrId}] Review integrity violations detected: ${reviewIntegrity.violations.map(v => v.type).join(", ")}`,
+      {
+        cli: "codex",
+        operation: params.operation,
+        score: reviewIntegrity.totalScore,
+      }
+    );
   }
 
   let effectivePrompt = params.prompt;
@@ -763,7 +866,7 @@ function prepareCodexRequest(params: {
       requestedMcpServers,
       policy: params.approvalPolicy as ApprovalPolicy | undefined,
       metadata: { model: resolvedModel || "default" },
-      reviewIntegrity
+      reviewIntegrity,
     });
     if (approvalDecision.status !== "approved") {
       return createApprovalDeniedResponse(params.operation, approvalDecision);
@@ -804,7 +907,15 @@ function prepareCodexRequest(params: {
   }
   args.push(effectivePrompt);
 
-  return { corrId, effectivePrompt, resolvedModel, requestedMcpServers, approvalDecision, reviewIntegrity, args };
+  return {
+    corrId,
+    effectivePrompt,
+    resolvedModel,
+    requestedMcpServers,
+    approvalDecision,
+    reviewIntegrity,
+    args,
+  };
 }
 
 function prepareGeminiRequest(params: {
@@ -825,11 +936,19 @@ function prepareGeminiRequest(params: {
   const resolvedModel = resolveModelAlias("gemini", params.model, cliInfo);
 
   // Review integrity check on raw prompt (before optimization)
-  const reviewIntegrity = checkReviewIntegrity({ prompt: params.prompt, allowedTools: params.allowedTools });
+  const reviewIntegrity = checkReviewIntegrity({
+    prompt: params.prompt,
+    allowedTools: params.allowedTools,
+  });
   if (reviewIntegrity.violations.length > 0) {
-    logger.info(`[${corrId}] Review integrity violations detected: ${reviewIntegrity.violations.map(v => v.type).join(", ")}`, {
-      cli: "gemini", operation: params.operation, score: reviewIntegrity.totalScore
-    });
+    logger.info(
+      `[${corrId}] Review integrity violations detected: ${reviewIntegrity.violations.map(v => v.type).join(", ")}`,
+      {
+        cli: "gemini",
+        operation: params.operation,
+        score: reviewIntegrity.totalScore,
+      }
+    );
   }
 
   let effectivePrompt = params.prompt;
@@ -853,29 +972,41 @@ function prepareGeminiRequest(params: {
       allowedTools: params.allowedTools,
       policy: params.approvalPolicy as ApprovalPolicy | undefined,
       metadata: { model: resolvedModel || "default" },
-      reviewIntegrity
+      reviewIntegrity,
     });
     if (approvalDecision.status !== "approved") {
       return createApprovalDeniedResponse(params.operation, approvalDecision);
     }
   }
 
-  const effectiveApprovalMode = params.approvalStrategy === "mcp_managed" ? "yolo" : params.approvalMode;
+  const effectiveApprovalMode =
+    params.approvalStrategy === "mcp_managed" ? "yolo" : params.approvalMode;
 
   const args = [effectivePrompt];
   if (resolvedModel) args.push("--model", resolvedModel);
   if (effectiveApprovalMode) args.push("--approval-mode", effectiveApprovalMode);
   if (params.allowedTools && params.allowedTools.length > 0) {
+    sanitizeCliArgValues(params.allowedTools, "allowedTools");
     params.allowedTools.forEach(tool => args.push("--allowed-tools", tool));
   }
   if (requestedMcpServers.length > 0) {
+    sanitizeCliArgValues(requestedMcpServers, "mcpServers");
     requestedMcpServers.forEach(serverName => args.push("--allowed-mcp-server-names", serverName));
   }
   if (params.includeDirs && params.includeDirs.length > 0) {
+    sanitizeCliArgValues(params.includeDirs, "includeDirs");
     params.includeDirs.forEach(dir => args.push("--include-directories", dir));
   }
 
-  return { corrId, effectivePrompt, resolvedModel, requestedMcpServers, approvalDecision, reviewIntegrity, args };
+  return {
+    corrId,
+    effectivePrompt,
+    resolvedModel,
+    requestedMcpServers,
+    approvalDecision,
+    reviewIntegrity,
+    args,
+  };
 }
 
 function prepareGrokRequest(params: {
@@ -978,7 +1109,11 @@ function buildCliResponse(
   }
 
   // Append review integrity warnings to response text (skip for JSON output to avoid corruption)
-  if (prep.reviewIntegrity && prep.reviewIntegrity.violations.length > 0 && outputFormat !== "json") {
+  if (
+    prep.reviewIntegrity &&
+    prep.reviewIntegrity.violations.length > 0 &&
+    outputFormat !== "json"
+  ) {
     const warnings = prep.reviewIntegrity.violations
       .map(v => `- [${v.type}] ${v.detail}`)
       .join("\n");
@@ -995,11 +1130,15 @@ function buildCliResponse(
       durationMs,
       ...extractUsageAndCost(cli, stdout, outputFormat),
       exitCode: 0,
-      retryCount: 0
+      retryCount: 0,
     },
     mcpServers: prep.mcpConfig
-      ? { requested: prep.requestedMcpServers, enabled: prep.mcpConfig.enabled, missing: prep.mcpConfig.missing }
-      : { requested: prep.requestedMcpServers }
+      ? {
+          requested: prep.requestedMcpServers,
+          enabled: prep.mcpConfig.enabled,
+          missing: prep.mcpConfig.missing,
+        }
+      : { requested: prep.requestedMcpServers },
   };
   if (sessionId) {
     response.sessionId = sessionId;
@@ -1041,7 +1180,11 @@ export interface GeminiRequestParams {
 
 export interface HandlerDeps {
   sessionManager: ISessionManager;
-  logger: { info: (...args: any[]) => void; error: (...args: any[]) => void; debug: (...args: any[]) => void };
+  logger: {
+    info: (...args: any[]) => void;
+    error: (...args: any[]) => void;
+    debug: (...args: any[]) => void;
+  };
 }
 
 export interface AsyncHandlerDeps extends HandlerDeps {
@@ -1054,11 +1197,17 @@ export async function handleGeminiRequest(
 ): Promise<ExtendedToolResponse> {
   const startTime = Date.now();
   const prep = prepareGeminiRequest({
-    prompt: params.prompt, model: params.model, approvalMode: params.approvalMode,
-    approvalStrategy: params.approvalStrategy, approvalPolicy: params.approvalPolicy,
-    allowedTools: params.allowedTools, includeDirs: params.includeDirs,
-    mcpServers: params.mcpServers, correlationId: params.correlationId,
-    optimizePrompt: params.optimizePrompt, operation: "gemini_request"
+    prompt: params.prompt,
+    model: params.model,
+    approvalMode: params.approvalMode,
+    approvalStrategy: params.approvalStrategy,
+    approvalPolicy: params.approvalPolicy,
+    allowedTools: params.allowedTools,
+    includeDirs: params.includeDirs,
+    mcpServers: params.mcpServers,
+    correlationId: params.correlationId,
+    optimizePrompt: params.optimizePrompt,
+    operation: "gemini_request",
   });
   if (!("args" in prep)) return prep;
 
@@ -1070,18 +1219,29 @@ export async function handleGeminiRequest(
     cli: "gemini",
     model: prep.resolvedModel || "default",
     prompt: params.prompt,
-    sessionId: params.sessionId
+    sessionId: params.sessionId,
   });
-  deps.logger.info(`[${corrId}] gemini_request invoked with model=${prep.resolvedModel || "default"}, approvalMode=${params.approvalMode}, prompt length=${params.prompt.length}`);
+  deps.logger.info(
+    `[${corrId}] gemini_request invoked with model=${prep.resolvedModel || "default"}, approvalMode=${params.approvalMode}, prompt length=${params.prompt.length}`
+  );
 
   try {
     // Session arg planning (pure, no I/O)
     const sessionResult = resolveSessionResumeArgs({
-      sessionId: params.sessionId, resumeLatest: params.resumeLatest, createNewSession: params.createNewSession
+      sessionId: params.sessionId,
+      resumeLatest: params.resumeLatest,
+      createNewSession: params.createNewSession,
     });
     args.push(...sessionResult.resumeArgs);
 
-    const result = await awaitJobOrDefer("gemini", args, corrId, resolveIdleTimeout("gemini", params.idleTimeoutMs), undefined, params.forceRefresh);
+    const result = await awaitJobOrDefer(
+      "gemini",
+      args,
+      corrId,
+      resolveIdleTimeout("gemini", params.idleTimeoutMs),
+      undefined,
+      params.forceRefresh
+    );
 
     // Deferred — job still running, return async reference
     if (isDeferredResponse(result)) {
@@ -1094,8 +1254,14 @@ export async function handleGeminiRequest(
     if (code !== 0) {
       deps.logger.info(`[${corrId}] gemini_request failed in ${durationMs}ms`);
       safeFlightComplete(corrId, {
-        response: stderr || "", durationMs, retryCount: 0, circuitBreakerState: "closed",
-        optimizationApplied: false, exitCode: code, errorMessage: stderr || `Exit code ${code}`, status: "failed"
+        response: stderr || "",
+        durationMs,
+        retryCount: 0,
+        circuitBreakerState: "closed",
+        optimizationApplied: false,
+        exitCode: code,
+        errorMessage: stderr || `Exit code ${code}`,
+        status: "failed",
       });
       return createErrorResponse("gemini", code, stderr, corrId);
     }
@@ -1116,25 +1282,47 @@ export async function handleGeminiRequest(
       await deps.sessionManager.updateSessionUsage(effectiveSessionId);
     } else if (!params.createNewSession && !effectiveSessionId) {
       const newSession = await deps.sessionManager.createSession(
-        "gemini", "Gemini Session", `${GATEWAY_SESSION_PREFIX}${randomUUID()}`
+        "gemini",
+        "Gemini Session",
+        `${GATEWAY_SESSION_PREFIX}${randomUUID()}`
       );
       effectiveSessionId = newSession.id;
     }
 
     deps.logger.info(`[${corrId}] gemini_request completed successfully in ${durationMs}ms`);
-    const response = buildCliResponse("gemini", stdout, params.optimizeResponse ?? false, corrId, effectiveSessionId, prep, durationMs, sessionResult.userProvidedSession);
+    const response = buildCliResponse(
+      "gemini",
+      stdout,
+      params.optimizeResponse ?? false,
+      corrId,
+      effectiveSessionId,
+      prep,
+      durationMs,
+      sessionResult.userProvidedSession
+    );
     safeFlightComplete(corrId, {
-      response: stdout, durationMs, retryCount: 0, circuitBreakerState: "closed",
-      approvalDecision: prep.approvalDecision?.status, optimizationApplied: params.optimizePrompt || (params.optimizeResponse ?? false),
-      exitCode: 0, status: "completed"
+      response: stdout,
+      durationMs,
+      retryCount: 0,
+      circuitBreakerState: "closed",
+      approvalDecision: prep.approvalDecision?.status,
+      optimizationApplied: params.optimizePrompt || (params.optimizeResponse ?? false),
+      exitCode: 0,
+      status: "completed",
     });
     return response;
   } catch (error) {
     const elapsedMs = Math.max(0, Date.now() - startTime);
     deps.logger.info(`[${corrId}] gemini_request threw exception after ${elapsedMs}ms`);
     safeFlightComplete(corrId, {
-      response: "", durationMs: elapsedMs, retryCount: 0, circuitBreakerState: "closed",
-      optimizationApplied: false, exitCode: 1, errorMessage: (error as Error).message, status: "failed"
+      response: "",
+      durationMs: elapsedMs,
+      retryCount: 0,
+      circuitBreakerState: "closed",
+      optimizationApplied: false,
+      exitCode: 1,
+      errorMessage: (error as Error).message,
+      status: "failed",
     });
     return createErrorResponse("gemini", 1, "", corrId, error as Error);
   } finally {
@@ -1148,11 +1336,17 @@ export async function handleGeminiRequestAsync(
   params: Omit<GeminiRequestParams, "optimizeResponse">
 ): Promise<ExtendedToolResponse> {
   const prep = prepareGeminiRequest({
-    prompt: params.prompt, model: params.model, approvalMode: params.approvalMode,
-    approvalStrategy: params.approvalStrategy, approvalPolicy: params.approvalPolicy,
-    allowedTools: params.allowedTools, includeDirs: params.includeDirs,
-    mcpServers: params.mcpServers, correlationId: params.correlationId,
-    optimizePrompt: params.optimizePrompt, operation: "gemini_request_async"
+    prompt: params.prompt,
+    model: params.model,
+    approvalMode: params.approvalMode,
+    approvalStrategy: params.approvalStrategy,
+    approvalPolicy: params.approvalPolicy,
+    allowedTools: params.allowedTools,
+    includeDirs: params.includeDirs,
+    mcpServers: params.mcpServers,
+    correlationId: params.correlationId,
+    optimizePrompt: params.optimizePrompt,
+    operation: "gemini_request_async",
   });
   if (!("args" in prep)) return prep;
 
@@ -1161,7 +1355,9 @@ export async function handleGeminiRequestAsync(
   try {
     // Session arg planning (pure, no I/O)
     const sessionResult = resolveSessionResumeArgs({
-      sessionId: params.sessionId, resumeLatest: params.resumeLatest, createNewSession: params.createNewSession
+      sessionId: params.sessionId,
+      resumeLatest: params.resumeLatest,
+      createNewSession: params.createNewSession,
     });
     args.push(...sessionResult.resumeArgs);
 
@@ -1180,13 +1376,23 @@ export async function handleGeminiRequestAsync(
       await deps.sessionManager.updateSessionUsage(effectiveSessionId);
     } else if (!params.createNewSession && !effectiveSessionId) {
       const newSession = await deps.sessionManager.createSession(
-        "gemini", "Gemini Session", `${GATEWAY_SESSION_PREFIX}${randomUUID()}`
+        "gemini",
+        "Gemini Session",
+        `${GATEWAY_SESSION_PREFIX}${randomUUID()}`
       );
       effectiveSessionId = newSession.id;
     }
 
     // Start job only after all session I/O succeeds
-    const job = deps.asyncJobManager.startJob("gemini", args, corrId, undefined, resolveIdleTimeout("gemini", params.idleTimeoutMs), undefined, params.forceRefresh);
+    const job = deps.asyncJobManager.startJob(
+      "gemini",
+      args,
+      corrId,
+      undefined,
+      resolveIdleTimeout("gemini", params.idleTimeoutMs),
+      undefined,
+      params.forceRefresh
+    );
     deps.logger.info(`[${corrId}] gemini_request_async started job ${job.id}`);
 
     const asyncResponse: Record<string, unknown> = {
@@ -1195,17 +1401,19 @@ export async function handleGeminiRequestAsync(
       sessionId: effectiveSessionId || null,
       resumable: sessionResult.userProvidedSession,
       approval: approvalDecision,
-      mcpServers: { requested: requestedMcpServers }
+      mcpServers: { requested: requestedMcpServers },
     };
     if (prep.reviewIntegrity && prep.reviewIntegrity.violations.length > 0) {
       asyncResponse.reviewIntegrity = prep.reviewIntegrity;
     }
 
     return {
-      content: [{
-        type: "text" as const,
-        text: JSON.stringify(asyncResponse, null, 2)
-      }]
+      content: [
+        {
+          type: "text" as const,
+          text: JSON.stringify(asyncResponse, null, 2),
+        },
+      ],
     };
   } catch (error) {
     return createErrorResponse("gemini_request_async", 1, "", corrId, error as Error);
@@ -1423,13 +1631,19 @@ export async function handleCodexRequestAsync(
   }
 ): Promise<ExtendedToolResponse> {
   const prep = prepareCodexRequest({
-    prompt: params.prompt, model: params.model, fullAuto: params.fullAuto,
+    prompt: params.prompt,
+    model: params.model,
+    fullAuto: params.fullAuto,
     dangerouslyBypassApprovalsAndSandbox: params.dangerouslyBypassApprovalsAndSandbox,
-    approvalStrategy: params.approvalStrategy, approvalPolicy: params.approvalPolicy,
+    approvalStrategy: params.approvalStrategy,
+    approvalPolicy: params.approvalPolicy,
     mcpServers: params.mcpServers,
-    sessionId: params.sessionId, resumeLatest: params.resumeLatest, createNewSession: params.createNewSession,
-    correlationId: params.correlationId, optimizePrompt: params.optimizePrompt,
-    operation: "codex_request_async"
+    sessionId: params.sessionId,
+    resumeLatest: params.resumeLatest,
+    createNewSession: params.createNewSession,
+    correlationId: params.correlationId,
+    optimizePrompt: params.optimizePrompt,
+    operation: "codex_request_async",
   });
   if (!("args" in prep)) return prep;
 
@@ -1454,7 +1668,15 @@ export async function handleCodexRequestAsync(
     }
 
     // Start job only after all session I/O succeeds
-    const job = deps.asyncJobManager.startJob("codex", args, corrId, undefined, resolveIdleTimeout("codex", params.idleTimeoutMs), undefined, params.forceRefresh);
+    const job = deps.asyncJobManager.startJob(
+      "codex",
+      args,
+      corrId,
+      undefined,
+      resolveIdleTimeout("codex", params.idleTimeoutMs),
+      undefined,
+      params.forceRefresh
+    );
     deps.logger.info(`[${corrId}] codex_request_async started job ${job.id}`);
 
     const asyncResponse: Record<string, unknown> = {
@@ -1462,17 +1684,19 @@ export async function handleCodexRequestAsync(
       job,
       sessionId: effectiveSessionId || null,
       approval: approvalDecision,
-      mcpServers: { requested: requestedMcpServers }
+      mcpServers: { requested: requestedMcpServers },
     };
     if (prep.reviewIntegrity && prep.reviewIntegrity.violations.length > 0) {
       asyncResponse.reviewIntegrity = prep.reviewIntegrity;
     }
 
     return {
-      content: [{
-        type: "text" as const,
-        text: JSON.stringify(asyncResponse, null, 2)
-      }]
+      content: [
+        {
+          type: "text" as const,
+          text: JSON.stringify(asyncResponse, null, 2),
+        },
+      ],
     };
   } catch (error) {
     return createErrorResponse("codex_request_async", 1, "", corrId, error as Error);
@@ -1486,39 +1710,113 @@ export async function handleCodexRequestAsync(
 server.tool(
   "claude_request",
   {
-    prompt: z.string().min(1, "Prompt cannot be empty").max(100000, "Prompt too long (max 100k chars)").describe("Prompt text for Claude"),
-    model: z.string().optional().describe("Model name or alias (e.g. sonnet, claude-sonnet-4-5-20250929, latest)"),
-    outputFormat: z.enum(["text", "json", "stream-json"]).default("text").describe("Output format (text|json|stream-json). stream-json: NDJSON with idle timeout."),
+    prompt: z
+      .string()
+      .min(1, "Prompt cannot be empty")
+      .max(100000, "Prompt too long (max 100k chars)")
+      .describe("Prompt text for Claude"),
+    model: z
+      .string()
+      .optional()
+      .describe("Model name or alias (e.g. sonnet, claude-sonnet-4-5-20250929, latest)"),
+    outputFormat: z
+      .enum(["text", "json", "stream-json"])
+      .default("text")
+      .describe("Output format (text|json|stream-json). stream-json: NDJSON with idle timeout."),
     sessionId: z.string().optional().describe("Session ID (uses active if omitted)"),
     continueSession: z.boolean().default(false).describe("Continue active session"),
     createNewSession: z.boolean().default(false).describe("Force new session"),
-    allowedTools: z.array(z.string()).optional().describe("Allowed tools (['Bash(git:*)','Edit','Write'])"),
+    allowedTools: z
+      .array(z.string())
+      .optional()
+      .describe("Allowed tools (['Bash(git:*)','Edit','Write'])"),
     disallowedTools: z.array(z.string()).optional().describe("Disallowed tools"),
-    dangerouslySkipPermissions: z.boolean().default(false).describe("Bypass permissions (sandbox only)"),
-    approvalStrategy: z.enum(["legacy", "mcp_managed"]).default("legacy").describe("Approval strategy"),
-    approvalPolicy: z.enum(["strict", "balanced", "permissive"]).optional().describe("Approval policy override"),
-    mcpServers: z.array(MCP_SERVER_ENUM).default(["sqry"]).describe("MCP servers exposed to Claude"),
-    strictMcpConfig: z.boolean().default(false).describe("Restrict Claude to provided MCP config only"),
+    dangerouslySkipPermissions: z
+      .boolean()
+      .default(false)
+      .describe("Bypass permissions (sandbox only)"),
+    approvalStrategy: z
+      .enum(["legacy", "mcp_managed"])
+      .default("legacy")
+      .describe("Approval strategy"),
+    approvalPolicy: z
+      .enum(["strict", "balanced", "permissive"])
+      .optional()
+      .describe("Approval policy override"),
+    mcpServers: z
+      .array(MCP_SERVER_ENUM)
+      .default(["sqry"])
+      .describe("MCP servers exposed to Claude"),
+    strictMcpConfig: z
+      .boolean()
+      .default(false)
+      .describe("Restrict Claude to provided MCP config only"),
     correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
     optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution"),
     optimizeResponse: z.boolean().default(false).describe("Optimize response output"),
-    idleTimeoutMs: z.number().int().min(30_000).max(3_600_000).optional().describe("Idle timeout in ms (min 30s, max 1h, omit=CLI default)"),
-    forceRefresh: z.boolean().default(false).describe("Bypass dedup and force a fresh CLI run even if a recent identical request exists")
+    idleTimeoutMs: z
+      .number()
+      .int()
+      .min(30_000)
+      .max(3_600_000)
+      .optional()
+      .describe("Idle timeout in ms (min 30s, max 1h, omit=CLI default)"),
+    forceRefresh: z
+      .boolean()
+      .default(false)
+      .describe("Bypass dedup and force a fresh CLI run even if a recent identical request exists"),
   },
-  async ({ prompt, model, outputFormat, sessionId, continueSession, createNewSession, allowedTools, disallowedTools, dangerouslySkipPermissions, approvalStrategy, approvalPolicy, mcpServers, strictMcpConfig, correlationId, optimizePrompt, optimizeResponse, idleTimeoutMs, forceRefresh }) => {
+  async ({
+    prompt,
+    model,
+    outputFormat,
+    sessionId,
+    continueSession,
+    createNewSession,
+    allowedTools,
+    disallowedTools,
+    dangerouslySkipPermissions,
+    approvalStrategy,
+    approvalPolicy,
+    mcpServers,
+    strictMcpConfig,
+    correlationId,
+    optimizePrompt,
+    optimizeResponse,
+    idleTimeoutMs,
+    forceRefresh,
+  }) => {
     const startTime = Date.now();
     const prep = prepareClaudeRequest({
-      prompt, model, outputFormat, allowedTools, disallowedTools, dangerouslySkipPermissions,
-      approvalStrategy, approvalPolicy, mcpServers,
-      strictMcpConfig, correlationId, optimizePrompt, operation: "claude_request"
+      prompt,
+      model,
+      outputFormat,
+      allowedTools,
+      disallowedTools,
+      dangerouslySkipPermissions,
+      approvalStrategy,
+      approvalPolicy,
+      mcpServers,
+      strictMcpConfig,
+      correlationId,
+      optimizePrompt,
+      operation: "claude_request",
     });
     if (!("args" in prep)) return prep;
 
     const { corrId, args } = prep;
     let durationMs = 0;
     let wasSuccessful = false;
-    safeFlightStart({ correlationId: corrId, cli: "claude", model: prep.resolvedModel || "default", prompt, sessionId });
-    logger.info(`[${corrId}] claude_request invoked with model=${prep.resolvedModel || "default"}, outputFormat=${outputFormat}, prompt length=${prompt.length}, sessionId=${sessionId}`);
+    safeFlightStart({
+      correlationId: corrId,
+      cli: "claude",
+      model: prep.resolvedModel || "default",
+      prompt,
+      sessionId,
+    });
+    logger.info(
+      `[${corrId}] claude_request invoked with model=${prep.resolvedModel || "default"}, outputFormat=${outputFormat}, prompt length=${prompt.length}, sessionId=${sessionId}`
+    );
 
     try {
       // Session management
@@ -1541,10 +1839,16 @@ server.tool(
       }
 
       // Idle timeout only for stream-json (text/json produce no output until done)
-      const effectiveIdleTimeout = outputFormat === "stream-json"
-        ? resolveIdleTimeout("claude", idleTimeoutMs)
-        : undefined;
-      const result = await awaitJobOrDefer("claude", args, corrId, effectiveIdleTimeout, outputFormat, forceRefresh);
+      const effectiveIdleTimeout =
+        outputFormat === "stream-json" ? resolveIdleTimeout("claude", idleTimeoutMs) : undefined;
+      const result = await awaitJobOrDefer(
+        "claude",
+        args,
+        corrId,
+        effectiveIdleTimeout,
+        outputFormat,
+        forceRefresh
+      );
 
       // Deferred — job still running, return async reference
       if (isDeferredResponse(result)) {
@@ -1557,9 +1861,14 @@ server.tool(
       if (code !== 0) {
         logger.info(`[${corrId}] claude_request failed in ${durationMs}ms`);
         safeFlightComplete(corrId, {
-          response: stderr || "", durationMs, retryCount: 0, circuitBreakerState: "closed",
-          optimizationApplied: optimizePrompt || optimizeResponse, exitCode: code,
-          errorMessage: stderr || `Exit code ${code}`, status: "failed"
+          response: stderr || "",
+          durationMs,
+          retryCount: 0,
+          circuitBreakerState: "closed",
+          optimizationApplied: optimizePrompt || optimizeResponse,
+          exitCode: code,
+          errorMessage: stderr || `Exit code ${code}`,
+          status: "failed",
         });
         return createErrorResponse("claude", code, stderr, corrId);
       }
@@ -1579,27 +1888,66 @@ server.tool(
       if (outputFormat === "stream-json") {
         const parsed = parseStreamJson(stdout);
         if (parsed.costUsd !== null) {
-          logger.debug(`[${corrId}] stream-json cost=$${parsed.costUsd}, model=${parsed.model}, turns=${parsed.numTurns}`);
+          logger.debug(
+            `[${corrId}] stream-json cost=$${parsed.costUsd}, model=${parsed.model}, turns=${parsed.numTurns}`
+          );
         }
         safeFlightComplete(corrId, {
-          response: parsed.text, inputTokens: parsed.usage?.inputTokens, outputTokens: parsed.usage?.outputTokens,
-          durationMs, retryCount: 0, circuitBreakerState: "closed", costUsd: parsed.costUsd ?? undefined,
-          optimizationApplied: optimizePrompt || optimizeResponse, exitCode: 0, status: "completed"
+          response: parsed.text,
+          inputTokens: parsed.usage?.inputTokens,
+          outputTokens: parsed.usage?.outputTokens,
+          durationMs,
+          retryCount: 0,
+          circuitBreakerState: "closed",
+          costUsd: parsed.costUsd ?? undefined,
+          optimizationApplied: optimizePrompt || optimizeResponse,
+          exitCode: 0,
+          status: "completed",
         });
-        return buildCliResponse("claude", parsed.text, optimizeResponse, corrId, effectiveSessionId, prep, durationMs, undefined, outputFormat);
+        return buildCliResponse(
+          "claude",
+          parsed.text,
+          optimizeResponse,
+          corrId,
+          effectiveSessionId,
+          prep,
+          durationMs,
+          undefined,
+          outputFormat
+        );
       }
       safeFlightComplete(corrId, {
-        response: stdout, durationMs, retryCount: 0, circuitBreakerState: "closed",
-        optimizationApplied: optimizePrompt || optimizeResponse, exitCode: 0, status: "completed"
+        response: stdout,
+        durationMs,
+        retryCount: 0,
+        circuitBreakerState: "closed",
+        optimizationApplied: optimizePrompt || optimizeResponse,
+        exitCode: 0,
+        status: "completed",
       });
-      return buildCliResponse("claude", stdout, optimizeResponse, corrId, effectiveSessionId, prep, durationMs, undefined, outputFormat);
+      return buildCliResponse(
+        "claude",
+        stdout,
+        optimizeResponse,
+        corrId,
+        effectiveSessionId,
+        prep,
+        durationMs,
+        undefined,
+        outputFormat
+      );
     } catch (error) {
       const elapsedMs = Math.max(0, Date.now() - startTime);
       logger.info(`[${corrId}] claude_request threw exception after ${elapsedMs}ms`);
       safeFlightComplete(corrId, {
-        response: "", durationMs: elapsedMs, retryCount: 0, circuitBreakerState: "closed",
-        optimizationApplied: optimizePrompt || optimizeResponse, exitCode: 1,
-        errorMessage: (error as Error).message, status: "failed"
+        response: "",
+        durationMs: elapsedMs,
+        retryCount: 0,
+        circuitBreakerState: "closed",
+        optimizationApplied: optimizePrompt || optimizeResponse,
+        exitCode: 1,
+        errorMessage: (error as Error).message,
+        status: "failed",
       });
       return createErrorResponse("claude", 1, "", corrId, error as Error);
     } finally {
@@ -1616,40 +1964,115 @@ server.tool(
 server.tool(
   "codex_request",
   {
-    prompt: z.string().min(1, "Prompt cannot be empty").max(100000, "Prompt too long (max 100k chars)").describe("Prompt text for Codex"),
+    prompt: z
+      .string()
+      .min(1, "Prompt cannot be empty")
+      .max(100000, "Prompt too long (max 100k chars)")
+      .describe("Prompt text for Codex"),
     model: z.string().optional().describe("Model name or alias (e.g. gpt-5.4, latest)"),
     fullAuto: z.boolean().default(false).describe("Full-auto mode (sandboxed execution)"),
-    dangerouslyBypassApprovalsAndSandbox: z.boolean().default(false).describe("Run Codex without approvals/sandbox"),
-    approvalStrategy: z.enum(["legacy", "mcp_managed"]).default("legacy").describe("Approval strategy"),
-    approvalPolicy: z.enum(["strict", "balanced", "permissive"]).optional().describe("Approval policy override"),
-    mcpServers: z.array(MCP_SERVER_ENUM).default(["sqry"]).describe("MCP server names for approval tracking (Codex manages its own MCP config)"),
-    sessionId: z.string().optional().describe("Codex session UUID to resume via `codex exec resume <ID>`. Must be a real Codex session ID (from `~/.codex/sessions/` or the `codex resume` picker). Gateway-generated `gw-*` IDs are rejected."),
-    resumeLatest: z.boolean().default(false).describe("Resume the most recent Codex session in the current cwd via `codex exec resume --last`. Ignored if sessionId is set."),
+    dangerouslyBypassApprovalsAndSandbox: z
+      .boolean()
+      .default(false)
+      .describe("Run Codex without approvals/sandbox"),
+    approvalStrategy: z
+      .enum(["legacy", "mcp_managed"])
+      .default("legacy")
+      .describe("Approval strategy"),
+    approvalPolicy: z
+      .enum(["strict", "balanced", "permissive"])
+      .optional()
+      .describe("Approval policy override"),
+    mcpServers: z
+      .array(MCP_SERVER_ENUM)
+      .default(["sqry"])
+      .describe("MCP server names for approval tracking (Codex manages its own MCP config)"),
+    sessionId: z
+      .string()
+      .optional()
+      .describe(
+        "Codex session UUID to resume via `codex exec resume <ID>`. Must be a real Codex session ID (from `~/.codex/sessions/` or the `codex resume` picker). Gateway-generated `gw-*` IDs are rejected."
+      ),
+    resumeLatest: z
+      .boolean()
+      .default(false)
+      .describe(
+        "Resume the most recent Codex session in the current cwd via `codex exec resume --last`. Ignored if sessionId is set."
+      ),
     createNewSession: z.boolean().default(false).describe("Force a fresh session (no resume)"),
     correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
     optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution"),
     optimizeResponse: z.boolean().default(false).describe("Optimize response output"),
-    idleTimeoutMs: z.number().int().min(30_000).max(3_600_000).optional().describe("Idle timeout in ms (min 30s, max 1h, omit=CLI default)"),
-    forceRefresh: z.boolean().default(false).describe("Bypass dedup and force a fresh CLI run even if a recent identical request exists")
+    idleTimeoutMs: z
+      .number()
+      .int()
+      .min(30_000)
+      .max(3_600_000)
+      .optional()
+      .describe("Idle timeout in ms (min 30s, max 1h, omit=CLI default)"),
+    forceRefresh: z
+      .boolean()
+      .default(false)
+      .describe("Bypass dedup and force a fresh CLI run even if a recent identical request exists"),
   },
-  async ({ prompt, model, fullAuto, dangerouslyBypassApprovalsAndSandbox, approvalStrategy, approvalPolicy, mcpServers, sessionId, resumeLatest, createNewSession, correlationId, optimizePrompt, optimizeResponse, idleTimeoutMs, forceRefresh }) => {
+  async ({
+    prompt,
+    model,
+    fullAuto,
+    dangerouslyBypassApprovalsAndSandbox,
+    approvalStrategy,
+    approvalPolicy,
+    mcpServers,
+    sessionId,
+    resumeLatest,
+    createNewSession,
+    correlationId,
+    optimizePrompt,
+    optimizeResponse,
+    idleTimeoutMs,
+    forceRefresh,
+  }) => {
     const startTime = Date.now();
     const prep = prepareCodexRequest({
-      prompt, model, fullAuto, dangerouslyBypassApprovalsAndSandbox,
-      approvalStrategy, approvalPolicy, mcpServers,
-      sessionId, resumeLatest, createNewSession,
-      correlationId, optimizePrompt, operation: "codex_request"
+      prompt,
+      model,
+      fullAuto,
+      dangerouslyBypassApprovalsAndSandbox,
+      approvalStrategy,
+      approvalPolicy,
+      mcpServers,
+      sessionId,
+      resumeLatest,
+      createNewSession,
+      correlationId,
+      optimizePrompt,
+      operation: "codex_request",
     });
     if (!("args" in prep)) return prep;
 
     const { corrId, args } = prep;
     let durationMs = 0;
     let wasSuccessful = false;
-    safeFlightStart({ correlationId: corrId, cli: "codex", model: prep.resolvedModel || "default", prompt, sessionId });
-    logger.info(`[${corrId}] codex_request invoked with model=${prep.resolvedModel || "default"}, fullAuto=${fullAuto}, prompt length=${prompt.length}`);
+    safeFlightStart({
+      correlationId: corrId,
+      cli: "codex",
+      model: prep.resolvedModel || "default",
+      prompt,
+      sessionId,
+    });
+    logger.info(
+      `[${corrId}] codex_request invoked with model=${prep.resolvedModel || "default"}, fullAuto=${fullAuto}, prompt length=${prompt.length}`
+    );
 
     try {
-      const result = await awaitJobOrDefer("codex", args, corrId, resolveIdleTimeout("codex", idleTimeoutMs), undefined, forceRefresh);
+      const result = await awaitJobOrDefer(
+        "codex",
+        args,
+        corrId,
+        resolveIdleTimeout("codex", idleTimeoutMs),
+        undefined,
+        forceRefresh
+      );
 
       // Deferred — job still running, return async reference
       if (isDeferredResponse(result)) {
@@ -1662,9 +2085,14 @@ server.tool(
       if (code !== 0) {
         logger.info(`[${corrId}] codex_request failed in ${durationMs}ms`);
         safeFlightComplete(corrId, {
-          response: stderr || "", durationMs, retryCount: 0, circuitBreakerState: "closed",
-          optimizationApplied: optimizePrompt || optimizeResponse, exitCode: code,
-          errorMessage: stderr || `Exit code ${code}`, status: "failed"
+          response: stderr || "",
+          durationMs,
+          retryCount: 0,
+          circuitBreakerState: "closed",
+          optimizationApplied: optimizePrompt || optimizeResponse,
+          exitCode: code,
+          errorMessage: stderr || `Exit code ${code}`,
+          status: "failed",
         });
         return createErrorResponse("codex", code, stderr, corrId);
       }
@@ -1689,17 +2117,35 @@ server.tool(
 
       logger.info(`[${corrId}] codex_request completed successfully in ${durationMs}ms`);
       safeFlightComplete(corrId, {
-        response: stdout, durationMs, retryCount: 0, circuitBreakerState: "closed",
-        optimizationApplied: optimizePrompt || optimizeResponse, exitCode: 0, status: "completed"
+        response: stdout,
+        durationMs,
+        retryCount: 0,
+        circuitBreakerState: "closed",
+        optimizationApplied: optimizePrompt || optimizeResponse,
+        exitCode: 0,
+        status: "completed",
       });
-      return buildCliResponse("codex", stdout, optimizeResponse, corrId, effectiveSessionId, prep, durationMs);
+      return buildCliResponse(
+        "codex",
+        stdout,
+        optimizeResponse,
+        corrId,
+        effectiveSessionId,
+        prep,
+        durationMs
+      );
     } catch (error) {
       const elapsedMs = Math.max(0, Date.now() - startTime);
       logger.info(`[${corrId}] codex_request threw exception after ${elapsedMs}ms`);
       safeFlightComplete(corrId, {
-        response: "", durationMs: elapsedMs, retryCount: 0, circuitBreakerState: "closed",
-        optimizationApplied: optimizePrompt || optimizeResponse, exitCode: 1,
-        errorMessage: (error as Error).message, status: "failed"
+        response: "",
+        durationMs: elapsedMs,
+        retryCount: 0,
+        circuitBreakerState: "closed",
+        optimizationApplied: optimizePrompt || optimizeResponse,
+        exitCode: 1,
+        errorMessage: (error as Error).message,
+        status: "failed",
       });
       return createErrorResponse("codex", 1, "", corrId, error as Error);
     } finally {
@@ -1716,16 +2162,40 @@ server.tool(
 server.tool(
   "gemini_request",
   {
-    prompt: z.string().min(1, "Prompt cannot be empty").max(100000, "Prompt too long (max 100k chars)").describe("Prompt text for Gemini"),
-    model: z.string().optional().describe("Model name or alias (e.g. gemini-3-pro-preview, gemini-2.5-flash, pro, flash, latest)"),
+    prompt: z
+      .string()
+      .min(1, "Prompt cannot be empty")
+      .max(100000, "Prompt too long (max 100k chars)")
+      .describe("Prompt text for Gemini"),
+    model: z
+      .string()
+      .optional()
+      .describe(
+        "Model name or alias (e.g. gemini-3-pro-preview, gemini-2.5-flash, pro, flash, latest)"
+      ),
     sessionId: z.string().optional().describe("Session ID or 'latest'"),
     resumeLatest: z.boolean().default(false).describe("Resume latest session"),
     createNewSession: z.boolean().default(false).describe("Force new session"),
-    approvalMode: z.enum(["default", "auto_edit", "yolo"]).optional().describe("Approval: default|auto_edit|yolo"),
-    approvalStrategy: z.enum(["legacy", "mcp_managed"]).default("legacy").describe("Approval strategy"),
-    approvalPolicy: z.enum(["strict", "balanced", "permissive"]).optional().describe("Approval policy override"),
-    mcpServers: z.array(MCP_SERVER_ENUM).default(["sqry"]).describe("MCP server names passed to Gemini as --allowed-mcp-server-names"),
-    allowedTools: z.array(z.string()).optional().describe("Allowed tools (['Write','Edit','Bash'])"),
+    approvalMode: z
+      .enum(["default", "auto_edit", "yolo"])
+      .optional()
+      .describe("Approval: default|auto_edit|yolo"),
+    approvalStrategy: z
+      .enum(["legacy", "mcp_managed"])
+      .default("legacy")
+      .describe("Approval strategy"),
+    approvalPolicy: z
+      .enum(["strict", "balanced", "permissive"])
+      .optional()
+      .describe("Approval policy override"),
+    mcpServers: z
+      .array(MCP_SERVER_ENUM)
+      .default(["sqry"])
+      .describe("MCP server names passed to Gemini as --allowed-mcp-server-names"),
+    allowedTools: z
+      .array(z.string())
+      .optional()
+      .describe("Allowed tools (['Write','Edit','Bash'])"),
     includeDirs: z.array(z.string()).optional().describe("Additional workspace directories"),
     correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
     optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution"),
@@ -1784,19 +2254,47 @@ server.tool(
 server.tool(
   "claude_request_async",
   {
-    prompt: z.string().min(1, "Prompt cannot be empty").max(100000, "Prompt too long (max 100k chars)").describe("Prompt text for Claude"),
-    model: z.string().optional().describe("Model name or alias (e.g. sonnet, claude-sonnet-4-5-20250929, latest)"),
-    outputFormat: z.enum(["text", "json", "stream-json"]).default("text").describe("Output format (text|json|stream-json). stream-json: NDJSON with idle timeout."),
+    prompt: z
+      .string()
+      .min(1, "Prompt cannot be empty")
+      .max(100000, "Prompt too long (max 100k chars)")
+      .describe("Prompt text for Claude"),
+    model: z
+      .string()
+      .optional()
+      .describe("Model name or alias (e.g. sonnet, claude-sonnet-4-5-20250929, latest)"),
+    outputFormat: z
+      .enum(["text", "json", "stream-json"])
+      .default("text")
+      .describe("Output format (text|json|stream-json). stream-json: NDJSON with idle timeout."),
     sessionId: z.string().optional().describe("Session ID (uses active if omitted)"),
     continueSession: z.boolean().default(false).describe("Continue active session"),
     createNewSession: z.boolean().default(false).describe("Force new session"),
-    allowedTools: z.array(z.string()).optional().describe("Allowed tools (['Bash(git:*)','Edit','Write'])"),
+    allowedTools: z
+      .array(z.string())
+      .optional()
+      .describe("Allowed tools (['Bash(git:*)','Edit','Write'])"),
     disallowedTools: z.array(z.string()).optional().describe("Disallowed tools"),
-    dangerouslySkipPermissions: z.boolean().default(false).describe("Bypass permissions (sandbox only)"),
-    approvalStrategy: z.enum(["legacy", "mcp_managed"]).default("legacy").describe("Approval strategy"),
-    approvalPolicy: z.enum(["strict", "balanced", "permissive"]).optional().describe("Approval policy override"),
-    mcpServers: z.array(MCP_SERVER_ENUM).default(["sqry"]).describe("MCP servers exposed to Claude"),
-    strictMcpConfig: z.boolean().default(false).describe("Restrict Claude to provided MCP config only"),
+    dangerouslySkipPermissions: z
+      .boolean()
+      .default(false)
+      .describe("Bypass permissions (sandbox only)"),
+    approvalStrategy: z
+      .enum(["legacy", "mcp_managed"])
+      .default("legacy")
+      .describe("Approval strategy"),
+    approvalPolicy: z
+      .enum(["strict", "balanced", "permissive"])
+      .optional()
+      .describe("Approval policy override"),
+    mcpServers: z
+      .array(MCP_SERVER_ENUM)
+      .default(["sqry"])
+      .describe("MCP servers exposed to Claude"),
+    strictMcpConfig: z
+      .boolean()
+      .default(false)
+      .describe("Restrict Claude to provided MCP config only"),
     correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
     optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution"),
     idleTimeoutMs: z.number().int().min(30_000).max(3_600_000).optional().describe("Idle timeout in ms (min 30s, max 1h, omit=CLI default)"),
@@ -1804,9 +2302,19 @@ server.tool(
   },
   async ({ prompt, model, outputFormat, sessionId, continueSession, createNewSession, allowedTools, disallowedTools, dangerouslySkipPermissions, approvalStrategy, approvalPolicy, mcpServers, strictMcpConfig, correlationId, optimizePrompt, idleTimeoutMs, forceRefresh }) => {
     const prep = prepareClaudeRequest({
-      prompt, model, outputFormat, allowedTools, disallowedTools, dangerouslySkipPermissions,
-      approvalStrategy, approvalPolicy, mcpServers,
-      strictMcpConfig, correlationId, optimizePrompt, operation: "claude_request_async"
+      prompt,
+      model,
+      outputFormat,
+      allowedTools,
+      disallowedTools,
+      dangerouslySkipPermissions,
+      approvalStrategy,
+      approvalPolicy,
+      mcpServers,
+      strictMcpConfig,
+      correlationId,
+      optimizePrompt,
+      operation: "claude_request_async",
     });
     if (!("args" in prep)) return prep;
 
@@ -1854,18 +2362,20 @@ server.tool(
         mcpServers: {
           requested: requestedMcpServers,
           enabled: mcpConfig?.enabled,
-          missing: mcpConfig?.missing
-        }
+          missing: mcpConfig?.missing,
+        },
       };
       if (prep.reviewIntegrity && prep.reviewIntegrity.violations.length > 0) {
         asyncResponse.reviewIntegrity = prep.reviewIntegrity;
       }
 
       return {
-        content: [{
-          type: "text" as const,
-          text: JSON.stringify(asyncResponse, null, 2)
-        }]
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify(asyncResponse, null, 2),
+          },
+        ],
       };
     } catch (error) {
       return createErrorResponse("claude_request_async", 1, "", corrId, error as Error);
@@ -1876,7 +2386,11 @@ server.tool(
 server.tool(
   "codex_request_async",
   {
-    prompt: z.string().min(1, "Prompt cannot be empty").max(100000, "Prompt too long (max 100k chars)").describe("Prompt text for Codex"),
+    prompt: z
+      .string()
+      .min(1, "Prompt cannot be empty")
+      .max(100000, "Prompt too long (max 100k chars)")
+      .describe("Prompt text for Codex"),
     model: z.string().optional().describe("Model name or alias (e.g. gpt-5.4, latest)"),
     fullAuto: z.boolean().default(false).describe("Full-auto mode (sandboxed execution)"),
     dangerouslyBypassApprovalsAndSandbox: z.boolean().default(false).describe("Run Codex without approvals/sandbox"),
@@ -1902,16 +2416,40 @@ server.tool(
 server.tool(
   "gemini_request_async",
   {
-    prompt: z.string().min(1, "Prompt cannot be empty").max(100000, "Prompt too long (max 100k chars)").describe("Prompt text for Gemini"),
-    model: z.string().optional().describe("Model name or alias (e.g. gemini-3-pro-preview, gemini-2.5-flash, pro, flash, latest)"),
+    prompt: z
+      .string()
+      .min(1, "Prompt cannot be empty")
+      .max(100000, "Prompt too long (max 100k chars)")
+      .describe("Prompt text for Gemini"),
+    model: z
+      .string()
+      .optional()
+      .describe(
+        "Model name or alias (e.g. gemini-3-pro-preview, gemini-2.5-flash, pro, flash, latest)"
+      ),
     sessionId: z.string().optional().describe("Session ID (user-provided CLI handle for --resume)"),
     resumeLatest: z.boolean().default(false).describe("Resume latest session"),
     createNewSession: z.boolean().default(false).describe("Force new session"),
-    approvalMode: z.enum(["default", "auto_edit", "yolo"]).optional().describe("Approval: default|auto_edit|yolo"),
-    approvalStrategy: z.enum(["legacy", "mcp_managed"]).default("legacy").describe("Approval strategy"),
-    approvalPolicy: z.enum(["strict", "balanced", "permissive"]).optional().describe("Approval policy override"),
-    mcpServers: z.array(MCP_SERVER_ENUM).default(["sqry"]).describe("MCP server names passed to Gemini as --allowed-mcp-server-names"),
-    allowedTools: z.array(z.string()).optional().describe("Allowed tools (['Write','Edit','Bash'])"),
+    approvalMode: z
+      .enum(["default", "auto_edit", "yolo"])
+      .optional()
+      .describe("Approval: default|auto_edit|yolo"),
+    approvalStrategy: z
+      .enum(["legacy", "mcp_managed"])
+      .default("legacy")
+      .describe("Approval strategy"),
+    approvalPolicy: z
+      .enum(["strict", "balanced", "permissive"])
+      .optional()
+      .describe("Approval policy override"),
+    mcpServers: z
+      .array(MCP_SERVER_ENUM)
+      .default(["sqry"])
+      .describe("MCP server names passed to Gemini as --allowed-mcp-server-names"),
+    allowedTools: z
+      .array(z.string())
+      .optional()
+      .describe("Allowed tools (['Write','Edit','Bash'])"),
     includeDirs: z.array(z.string()).optional().describe("Additional workspace directories"),
     correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
     optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution"),
@@ -1960,32 +2498,44 @@ server.tool(
 server.tool(
   "llm_job_status",
   {
-    jobId: z.string().describe("Async job ID from *_request_async")
+    jobId: z.string().describe("Async job ID from *_request_async"),
   },
   async ({ jobId }) => {
     const job = asyncJobManager.getJobSnapshot(jobId);
     if (!job) {
       return {
-        content: [{
-          type: "text",
-          text: JSON.stringify({
-            success: false,
-            error: "Job not found",
-            jobId
-          }, null, 2)
-        }],
-        isError: true
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(
+              {
+                success: false,
+                error: "Job not found",
+                jobId,
+              },
+              null,
+              2
+            ),
+          },
+        ],
+        isError: true,
       };
     }
 
     return {
-      content: [{
-        type: "text",
-        text: JSON.stringify({
-          success: true,
-          job
-        }, null, 2)
-      }]
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify(
+            {
+              success: true,
+              job,
+            },
+            null,
+            2
+          ),
+        },
+      ],
     };
   }
 );
@@ -1994,21 +2544,33 @@ server.tool(
   "llm_job_result",
   {
     jobId: z.string().describe("Async job ID from *_request_async"),
-    maxChars: z.number().int().min(1000).max(2000000).default(200000).describe("Max chars returned per stream")
+    maxChars: z
+      .number()
+      .int()
+      .min(1000)
+      .max(2000000)
+      .default(200000)
+      .describe("Max chars returned per stream"),
   },
   async ({ jobId, maxChars }) => {
     const result = asyncJobManager.getJobResult(jobId, maxChars);
     if (!result) {
       return {
-        content: [{
-          type: "text",
-          text: JSON.stringify({
-            success: false,
-            error: "Job not found",
-            jobId
-          }, null, 2)
-        }],
-        isError: true
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(
+              {
+                success: false,
+                error: "Job not found",
+                jobId,
+              },
+              null,
+              2
+            ),
+          },
+        ],
+        isError: true,
       };
     }
 
@@ -2020,14 +2582,30 @@ server.tool(
     }
 
     return {
-      content: [{
-        type: "text",
-        text: JSON.stringify({
-          success: true,
-          result,
-          ...(parsed ? { parsed: { text: parsed.text, costUsd: parsed.costUsd, usage: parsed.usage, model: parsed.model, numTurns: parsed.numTurns } } : {})
-        }, null, 2)
-      }]
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify(
+            {
+              success: true,
+              result,
+              ...(parsed
+                ? {
+                    parsed: {
+                      text: parsed.text,
+                      costUsd: parsed.costUsd,
+                      usage: parsed.usage,
+                      model: parsed.model,
+                      numTurns: parsed.numTurns,
+                    },
+                  }
+                : {}),
+            },
+            null,
+            2
+          ),
+        },
+      ],
     };
   }
 );
@@ -2035,49 +2613,59 @@ server.tool(
 server.tool(
   "llm_job_cancel",
   {
-    jobId: z.string().describe("Async job ID from *_request_async")
+    jobId: z.string().describe("Async job ID from *_request_async"),
   },
   async ({ jobId }) => {
     const cancel = asyncJobManager.cancelJob(jobId);
     if (!cancel.canceled) {
       return {
-        content: [{
-          type: "text",
-          text: JSON.stringify({
-            success: false,
-            jobId,
-            reason: cancel.reason || "Unable to cancel"
-          }, null, 2)
-        }],
-        isError: true
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(
+              {
+                success: false,
+                jobId,
+                reason: cancel.reason || "Unable to cancel",
+              },
+              null,
+              2
+            ),
+          },
+        ],
+        isError: true,
       };
     }
 
     return {
-      content: [{
-        type: "text",
-        text: JSON.stringify({
-          success: true,
-          jobId
-        }, null, 2)
-      }]
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify(
+            {
+              success: true,
+              jobId,
+            },
+            null,
+            2
+          ),
+        },
+      ],
     };
   }
 );
 
-server.tool(
-  "llm_process_health",
-  {},
-  async () => {
-    const health = asyncJobManager.getJobHealth();
-    return {
-      content: [{
+server.tool("llm_process_health", {}, async () => {
+  const health = asyncJobManager.getJobHealth();
+  return {
+    content: [
+      {
         type: "text",
-        text: JSON.stringify({ success: true, ...health }, null, 2)
-      }]
-    };
-  }
-);
+        text: JSON.stringify({ success: true, ...health }, null, 2),
+      },
+    ],
+  };
+});
 
 //──────────────────────────────────────────────────────────────────────────────
 // Approval Audit Tools
@@ -2087,19 +2675,25 @@ server.tool(
   "approval_list",
   {
     limit: z.number().int().min(1).max(500).default(50).describe("Max number of approval records"),
-    cli: z.enum(["claude", "codex", "gemini"]).optional().describe("Optional CLI filter")
+    cli: z.enum(["claude", "codex", "gemini"]).optional().describe("Optional CLI filter"),
   },
   async ({ limit, cli }) => {
     const approvals = approvalManager.list(limit, cli);
     return {
-      content: [{
-        type: "text",
-        text: JSON.stringify({
-          success: true,
-          count: approvals.length,
-          approvals
-        }, null, 2)
-      }]
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify(
+            {
+              success: true,
+              count: approvals.length,
+              approvals,
+            },
+            null,
+            2
+          ),
+        },
+      ],
     };
   }
 );
@@ -2111,10 +2705,12 @@ server.tool(
 server.tool(
   "list_models",
   {
-    cli: z.preprocess(
-      (value) => (value === "" || value === null ? undefined : value),
-      z.enum(["claude", "codex", "gemini"]).optional()
-    ).describe("CLI filter (claude|codex|gemini)")
+    cli: z
+      .preprocess(
+        value => (value === "" || value === null ? undefined : value),
+        z.enum(["claude", "codex", "gemini"]).optional()
+      )
+      .describe("CLI filter (claude|codex|gemini)"),
   },
   async ({ cli }) => {
     const cliInfo = getCliInfo();
@@ -2182,7 +2778,7 @@ server.tool(
   {
     cli: z.enum(["claude", "codex", "gemini"]).describe("CLI type (claude|codex|gemini)"),
     description: z.string().optional().describe("Session description"),
-    setAsActive: z.boolean().default(true).describe("Set as active session")
+    setAsActive: z.boolean().default(true).describe("Set as active session"),
   },
   async ({ cli, description, setAsActive }) => {
     try {
@@ -2195,19 +2791,25 @@ server.tool(
       logger.info(`Created new ${cli} session: ${session.id}`);
 
       return {
-        content: [{
-          type: "text",
-          text: JSON.stringify({
-            success: true,
-            session: {
-              id: session.id,
-              cli: session.cli,
-              description: session.description,
-              createdAt: session.createdAt,
-              isActive: setAsActive
-            }
-          }, null, 2)
-        }]
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(
+              {
+                success: true,
+                session: {
+                  id: session.id,
+                  cli: session.cli,
+                  description: session.description,
+                  createdAt: session.createdAt,
+                  isActive: setAsActive,
+                },
+              },
+              null,
+              2
+            ),
+          },
+        ],
       };
     } catch (error) {
       return createErrorResponse("session_create", 1, "", undefined, error as Error);
@@ -2218,7 +2820,10 @@ server.tool(
 server.tool(
   "session_list",
   {
-    cli: z.enum(["claude", "codex", "gemini"]).optional().describe("CLI filter (claude|codex|gemini)")
+    cli: z
+      .enum(["claude", "codex", "gemini"])
+      .optional()
+      .describe("CLI filter (claude|codex|gemini)"),
   },
   async ({ cli }) => {
     try {
@@ -2227,7 +2832,7 @@ server.tool(
         claude: await sessionManager.getActiveSession("claude"),
         codex: await sessionManager.getActiveSession("codex"),
         gemini: await sessionManager.getActiveSession("gemini"),
-        grok: await sessionManager.getActiveSession("grok")
+        grok: await sessionManager.getActiveSession("grok"),
       };
 
       const sessionList = sessions.map(s => ({
@@ -2236,23 +2841,29 @@ server.tool(
         description: s.description,
         createdAt: s.createdAt,
         lastUsedAt: s.lastUsedAt,
-        isActive: activeSessions[s.cli]?.id === s.id
+        isActive: activeSessions[s.cli]?.id === s.id,
       }));
 
       return {
-        content: [{
-          type: "text",
-          text: JSON.stringify({
-            total: sessionList.length,
-            sessions: sessionList,
-            activeSessions: {
-              claude: activeSessions.claude?.id || null,
-              codex: activeSessions.codex?.id || null,
-              gemini: activeSessions.gemini?.id || null,
-              grok: activeSessions.grok?.id || null
-            }
-          }, null, 2)
-        }]
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(
+              {
+                total: sessionList.length,
+                sessions: sessionList,
+                activeSessions: {
+                  claude: activeSessions.claude?.id || null,
+                  codex: activeSessions.codex?.id || null,
+                  gemini: activeSessions.gemini?.id || null,
+                  grok: activeSessions.grok?.id || null,
+                },
+              },
+              null,
+              2
+            ),
+          },
+        ],
       };
     } catch (error) {
       return createErrorResponse("session_list", 1, "", undefined, error as Error);
@@ -2264,7 +2875,7 @@ server.tool(
   "session_set_active",
   {
     cli: z.enum(["claude", "codex", "gemini"]).describe("CLI type (claude|codex|gemini)"),
-    sessionId: z.string().nullable().describe("Session ID (null to clear)")
+    sessionId: z.string().nullable().describe("Session ID (null to clear)"),
   },
   async ({ cli, sessionId }) => {
     try {
@@ -2272,28 +2883,40 @@ server.tool(
 
       if (!success) {
         return {
-          content: [{
-            type: "text",
-            text: JSON.stringify({
-              success: false,
-              error: "Session not found or does not belong to the specified CLI"
-            }, null, 2)
-          }],
-          isError: true
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(
+                {
+                  success: false,
+                  error: "Session not found or does not belong to the specified CLI",
+                },
+                null,
+                2
+              ),
+            },
+          ],
+          isError: true,
         };
       }
 
       logger.info(`Set active ${cli} session to: ${sessionId}`);
 
       return {
-        content: [{
-          type: "text",
-          text: JSON.stringify({
-            success: true,
-            cli,
-            activeSessionId: sessionId
-          }, null, 2)
-        }]
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(
+              {
+                success: true,
+                cli,
+                activeSessionId: sessionId,
+              },
+              null,
+              2
+            ),
+          },
+        ],
       };
     } catch (error) {
       return createErrorResponse("session_set_active", 1, "", undefined, error as Error);
@@ -2304,21 +2927,27 @@ server.tool(
 server.tool(
   "session_delete",
   {
-    sessionId: z.string().describe("Session ID")
+    sessionId: z.string().describe("Session ID"),
   },
   async ({ sessionId }) => {
     try {
       const session = await sessionManager.getSession(sessionId);
       if (!session) {
         return {
-          content: [{
-            type: "text",
-            text: JSON.stringify({
-              success: false,
-              error: "Session not found"
-            }, null, 2)
-          }],
-          isError: true
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(
+                {
+                  success: false,
+                  error: "Session not found",
+                },
+                null,
+                2
+              ),
+            },
+          ],
+          isError: true,
         };
       }
 
@@ -2326,17 +2955,23 @@ server.tool(
       logger.info(`Deleted session: ${sessionId}`);
 
       return {
-        content: [{
-          type: "text",
-          text: JSON.stringify({
-            success,
-            deletedSession: {
-              id: session.id,
-              cli: session.cli,
-              description: session.description
-            }
-          }, null, 2)
-        }]
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(
+              {
+                success,
+                deletedSession: {
+                  id: session.id,
+                  cli: session.cli,
+                  description: session.description,
+                },
+              },
+              null,
+              2
+            ),
+          },
+        ],
       };
     } catch (error) {
       return createErrorResponse("session_delete", 1, "", undefined, error as Error);
@@ -2347,7 +2982,7 @@ server.tool(
 server.tool(
   "session_get",
   {
-    sessionId: z.string().describe("Session ID")
+    sessionId: z.string().describe("Session ID"),
   },
   async ({ sessionId }) => {
     try {
@@ -2355,30 +2990,42 @@ server.tool(
 
       if (!session) {
         return {
-          content: [{
-            type: "text",
-            text: JSON.stringify({
-              success: false,
-              error: "Session not found"
-            }, null, 2)
-          }],
-          isError: true
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(
+                {
+                  success: false,
+                  error: "Session not found",
+                },
+                null,
+                2
+              ),
+            },
+          ],
+          isError: true,
         };
       }
 
       const activeSession = await sessionManager.getActiveSession(session.cli);
 
       return {
-        content: [{
-          type: "text",
-          text: JSON.stringify({
-            success: true,
-            session: {
-              ...session,
-              isActive: activeSession?.id === session.id
-            }
-          }, null, 2)
-        }]
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(
+              {
+                success: true,
+                session: {
+                  ...session,
+                  isActive: activeSession?.id === session.id,
+                },
+              },
+              null,
+              2
+            ),
+          },
+        ],
       };
     } catch (error) {
       return createErrorResponse("session_get", 1, "", undefined, error as Error);
@@ -2389,22 +3036,31 @@ server.tool(
 server.tool(
   "session_clear_all",
   {
-    cli: z.enum(["claude", "codex", "gemini"]).optional().describe("CLI filter (claude|codex|gemini)")
+    cli: z
+      .enum(["claude", "codex", "gemini"])
+      .optional()
+      .describe("CLI filter (claude|codex|gemini)"),
   },
   async ({ cli }) => {
     try {
       const count = await sessionManager.clearAllSessions(cli);
-      logger.info(`Cleared ${count} sessions${cli ? ` for ${cli}` : ''}`);
+      logger.info(`Cleared ${count} sessions${cli ? ` for ${cli}` : ""}`);
 
       return {
-        content: [{
-          type: "text",
-          text: JSON.stringify({
-            success: true,
-            deletedCount: count,
-            cli: cli || "all"
-          }, null, 2)
-        }]
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(
+              {
+                success: true,
+                deletedCount: count,
+                cli: cli || "all",
+              },
+              null,
+              2
+            ),
+          },
+        ],
       };
     } catch (error) {
       return createErrorResponse("session_clear_all", 1, "", undefined, error as Error);
@@ -2446,16 +3102,18 @@ function registerHealthResource(): void {
       {
         title: "🏥 Health Status",
         description: "DB connectivity and latency",
-        mimeType: "application/json"
+        mimeType: "application/json",
       },
       async () => {
         const health = await checkHealth(db!);
         return {
-          contents: [{
-            uri: "health://status",
-            text: JSON.stringify(health, null, 2),
-            mimeType: "application/json"
-          }]
+          contents: [
+            {
+              uri: "health://status",
+              text: JSON.stringify(health, null, 2),
+              mimeType: "application/json",
+            },
+          ],
         };
       }
     );
@@ -2469,16 +3127,18 @@ function registerHealthResource(): void {
     {
       title: "Process Health",
       description: "Async job health (CPU, memory, zombie detection)",
-      mimeType: "application/json"
+      mimeType: "application/json",
     },
-    async (uri) => {
+    async uri => {
       const health = asyncJobManager.getJobHealth();
       return {
-        contents: [{
-          uri: uri.href,
-          mimeType: "application/json",
-          text: JSON.stringify(health, null, 2)
-        }]
+        contents: [
+          {
+            uri: uri.href,
+            mimeType: "application/json",
+            text: JSON.stringify(health, null, 2),
+          },
+        ],
       };
     }
   );
@@ -2538,11 +3198,9 @@ async function main() {
 
 // Guard: only auto-start when run directly (not imported for testing)
 // Resolve symlinks so `llm-cli-gateway` (npm-linked bin) matches import.meta.url
-const __entryUrl = process.argv[1]
-  ? new URL(realpathSync(process.argv[1]), "file://").href
-  : "";
+const __entryUrl = process.argv[1] ? new URL(realpathSync(process.argv[1]), "file://").href : "";
 if (__entryUrl === import.meta.url) {
-  main().catch((error) => {
+  main().catch(error => {
     logger.error("Fatal server error:", error);
     process.exit(1);
   });

@@ -35,12 +35,14 @@ describe("ApprovalManager", () => {
       prompt: "delete leaked secret immediately",
       bypassRequested: false,
       fullAuto: false,
-      requestedMcpServers: []
+      requestedMcpServers: [],
     });
 
     expect(decision.policy).toBe("strict");
     expect(decision.status).toBe("denied");
-    expect(decision.reasons.some(reason => reason.includes("sensitive or destructive keywords"))).toBe(true);
+    expect(
+      decision.reasons.some(reason => reason.includes("sensitive or destructive keywords"))
+    ).toBe(true);
 
     const lines = readFileSync(logPath, "utf-8").trim().split("\n");
     expect(lines).toHaveLength(1);
@@ -57,7 +59,7 @@ describe("ApprovalManager", () => {
       prompt: "safe prompt one",
       bypassRequested: false,
       fullAuto: false,
-      requestedMcpServers: []
+      requestedMcpServers: [],
     });
     const second = manager.decide({
       cli: "codex",
@@ -65,7 +67,7 @@ describe("ApprovalManager", () => {
       prompt: "safe prompt two",
       bypassRequested: false,
       fullAuto: false,
-      requestedMcpServers: []
+      requestedMcpServers: [],
     });
     const third = manager.decide({
       cli: "claude",
@@ -73,7 +75,7 @@ describe("ApprovalManager", () => {
       prompt: "safe prompt three",
       bypassRequested: false,
       fullAuto: false,
-      requestedMcpServers: []
+      requestedMcpServers: [],
     });
 
     const latestTwo = manager.list(2);
@@ -93,7 +95,7 @@ describe("ApprovalManager", () => {
       bypassRequested: false,
       fullAuto: true,
       requestedMcpServers: ["sqry", "exa", "ref_tools"],
-      policy: "balanced"
+      policy: "balanced",
     });
 
     expect(decision.status).toBe("approved");
@@ -109,7 +111,7 @@ describe("ApprovalManager", () => {
       bypassRequested: true,
       fullAuto: true,
       requestedMcpServers: ["sqry"],
-      policy: "balanced"
+      policy: "balanced",
     });
 
     expect(decision.status).toBe("denied");
@@ -129,10 +131,12 @@ describe("ApprovalManager", () => {
       fullAuto: false,
       requestedMcpServers: [],
       allowedTools: [],
-      reviewIntegrity
+      reviewIntegrity,
     });
 
-    expect(decision.reasons).toContain("Empty allowedTools in review context — reviewers need tool access");
+    expect(decision.reasons).toContain(
+      "Empty allowedTools in review context — reviewers need tool access"
+    );
     expect(decision.reasons).not.toContain("No tool permissions requested");
     // Score should include +6 (empty tools in review) — empty_allowed_tools violation from review integrity is skipped
     expect(decision.score).toBe(6);
@@ -151,7 +155,7 @@ describe("ApprovalManager", () => {
       fullAuto: false,
       requestedMcpServers: [],
       allowedTools: [],
-      reviewIntegrity
+      reviewIntegrity,
     });
 
     expect(decision.reasons).toContain("No tool permissions requested");
@@ -171,7 +175,7 @@ describe("ApprovalManager", () => {
       fullAuto: false,
       requestedMcpServers: [],
       allowedTools: [],
-      reviewIntegrity
+      reviewIntegrity,
     });
 
     // Verify in-memory record
@@ -202,11 +206,13 @@ describe("ApprovalManager", () => {
         isReviewContext: false, // caller lies
         violations: [],
         totalScore: 0,
-      }
+      },
     });
 
     // ApprovalManager independently calls isReviewContext on the prompt
-    expect(decision.reasons).toContain("Empty allowedTools in review context — reviewers need tool access");
+    expect(decision.reasons).toContain(
+      "Empty allowedTools in review context — reviewers need tool access"
+    );
     expect(decision.score).toBe(6);
   });
 
@@ -223,7 +229,7 @@ describe("ApprovalManager", () => {
       fullAuto: false,
       requestedMcpServers: [],
       allowedTools: [],
-      reviewIntegrity
+      reviewIntegrity,
     });
 
     // Should have +6 for empty allowedTools in review context (from independent check)
@@ -231,7 +237,9 @@ describe("ApprovalManager", () => {
     // Should NOT double-count empty_allowed_tools from reviewIntegrity
     expect(decision.score).toBe(10);
     expect(decision.reasons.some(r => r.includes("tool-suppression language"))).toBe(true);
-    expect(decision.reasons).toContain("Empty allowedTools in review context — reviewers need tool access");
+    expect(decision.reasons).toContain(
+      "Empty allowedTools in review context — reviewers need tool access"
+    );
   });
 
   it("detects review context from expanded keywords (inspect, assess, pentest)", () => {
@@ -252,7 +260,9 @@ describe("ApprovalManager", () => {
         allowedTools: [],
       });
       // Each should be detected as review context → +6 for empty allowedTools
-      expect(decision.reasons).toContain("Empty allowedTools in review context — reviewers need tool access");
+      expect(decision.reasons).toContain(
+        "Empty allowedTools in review context — reviewers need tool access"
+      );
       expect(decision.score).toBe(6);
     }
   });
@@ -274,7 +284,7 @@ describe("ApprovalManager", () => {
       fullAuto: false,
       requestedMcpServers: [],
       disallowedTools: ["Read", "Grep", "Glob", "Bash"],
-      reviewIntegrity
+      reviewIntegrity,
     });
 
     expect(decision.reasons.some(r => r.includes("Critical review tools disallowed"))).toBe(true);
@@ -316,7 +326,7 @@ describe("ApprovalManager", () => {
       fullAuto: false,
       requestedMcpServers: [],
       disallowedTools: ["Read(*)", "Grep(*)", "Glob(*)", "Bash(git:*)"],
-      reviewIntegrity
+      reviewIntegrity,
     });
 
     expect(decision.reasons.some(r => r.includes("Critical review tools disallowed"))).toBe(true);
@@ -333,7 +343,7 @@ describe("ApprovalManager", () => {
       fullAuto: false,
       requestedMcpServers: [],
       allowedTools: [],
-      policy: "balanced"
+      policy: "balanced",
     });
 
     expect(decision.score).toBe(6);
@@ -350,7 +360,7 @@ describe("ApprovalManager", () => {
       fullAuto: false,
       requestedMcpServers: [],
       disallowedTools: ["Read", "Grep", "Glob"],
-      policy: "balanced"
+      policy: "balanced",
     });
 
     expect(decision.score).toBe(6);
@@ -369,7 +379,7 @@ describe("ApprovalManager", () => {
       requestedMcpServers: [],
       allowedTools: [],
       disallowedTools: ["Read", "Grep", "Glob", "Bash"],
-      policy: "balanced"
+      policy: "balanced",
     });
 
     // Score should be 0 (neutral), not -2 (gamed)
@@ -402,7 +412,7 @@ describe("ApprovalManager", () => {
         prompt: "This is a sensitive prompt with secret data",
         bypassRequested: false,
         fullAuto: false,
-        requestedMcpServers: []
+        requestedMcpServers: [],
       });
 
       expect(decision.promptPreview).toBe("[redacted]");
@@ -423,7 +433,7 @@ describe("ApprovalManager", () => {
         prompt: promptText,
         bypassRequested: false,
         fullAuto: false,
-        requestedMcpServers: []
+        requestedMcpServers: [],
       });
 
       expect(decision.promptPreview).toBe(promptText);
@@ -444,7 +454,7 @@ describe("ApprovalManager", () => {
         prompt: "Another sensitive prompt",
         bypassRequested: false,
         fullAuto: false,
-        requestedMcpServers: []
+        requestedMcpServers: [],
       });
 
       expect(decision.promptPreview).toBe("[redacted]");
@@ -458,7 +468,7 @@ describe("ApprovalManager", () => {
         prompt: "Prompt for hash verification",
         bypassRequested: false,
         fullAuto: false,
-        requestedMcpServers: []
+        requestedMcpServers: [],
       });
 
       expect(decision.promptPreview).toBe("[redacted]");

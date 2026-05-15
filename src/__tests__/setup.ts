@@ -4,7 +4,8 @@ import { beforeAll, afterAll, beforeEach } from "vitest";
 import type { Logger } from "../logger.js";
 
 // Test database configuration
-const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL || "postgresql://test:test@localhost:5433/llm_gateway_test";
+const TEST_DATABASE_URL =
+  process.env.TEST_DATABASE_URL || "postgresql://test:test@localhost:5433/llm_gateway_test";
 const TEST_REDIS_URL = process.env.TEST_REDIS_URL || "redis://localhost:6380/1";
 const PG_TESTS_ENABLED = process.env.PG_TESTS === "1";
 const MIGRATION_LOCK_KEY = 88421173;
@@ -19,7 +20,7 @@ let testRedis: Redis | null = null;
 export const mockLogger: Logger = {
   info: () => {},
   error: () => {},
-  debug: () => {}
+  debug: () => {},
 };
 
 /**
@@ -91,7 +92,7 @@ export async function setupTestDatabase(): Promise<{ pool: Pool; redis: Redis }>
 
   if (!testRedis) {
     testRedis = new Redis(TEST_REDIS_URL, {
-      lazyConnect: false
+      lazyConnect: false,
     });
     await testRedis.ping();
   }

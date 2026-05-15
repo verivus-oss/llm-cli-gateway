@@ -12,7 +12,7 @@ const FULL_STREAM = [
   '{"type":"stream_event","event":{"type":"content_block_stop","index":0}}',
   '{"type":"stream_event","event":{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":5}}}',
   '{"type":"stream_event","event":{"type":"message_stop"}}',
-  '{"type":"result","subtype":"success","result":"Hello world!","total_cost_usd":0.137,"duration_ms":3067,"duration_api_ms":2650,"num_turns":1,"session_id":"abc-123","usage":{"input_tokens":100,"output_tokens":5,"cache_read_input_tokens":50,"cache_creation_input_tokens":10}}'
+  '{"type":"result","subtype":"success","result":"Hello world!","total_cost_usd":0.137,"duration_ms":3067,"duration_api_ms":2650,"num_turns":1,"session_id":"abc-123","usage":{"input_tokens":100,"output_tokens":5,"cache_read_input_tokens":50,"cache_creation_input_tokens":10}}',
 ].join("\n");
 
 describe("parseStreamJson", () => {
@@ -32,7 +32,7 @@ describe("parseStreamJson", () => {
       inputTokens: 100,
       outputTokens: 5,
       cacheReadInputTokens: 50,
-      cacheCreationInputTokens: 10
+      cacheCreationInputTokens: 10,
     });
   });
 
@@ -62,7 +62,8 @@ describe("parseStreamJson", () => {
   });
 
   it("should mark as error when is_error is true", () => {
-    const errorStream = '{"type":"result","subtype":"error","result":"Something went wrong","is_error":true,"total_cost_usd":0.01}';
+    const errorStream =
+      '{"type":"result","subtype":"error","result":"Something went wrong","is_error":true,"total_cost_usd":0.01}';
     const result = parseStreamJson(errorStream);
     expect(result.isError).toBe(true);
     expect(result.text).toBe("Something went wrong");
@@ -71,7 +72,7 @@ describe("parseStreamJson", () => {
   it("should fall back to assistant event when no result event", () => {
     const noResult = [
       '{"type":"system","subtype":"init","session_id":"abc-456","model":"claude-sonnet-4-5-20250929"}',
-      '{"type":"assistant","message":{"content":[{"type":"text","text":"Fallback text"}],"model":"claude-sonnet-4-5-20250929"}}'
+      '{"type":"assistant","message":{"content":[{"type":"text","text":"Fallback text"}],"model":"claude-sonnet-4-5-20250929"}}',
     ].join("\n");
     const result = parseStreamJson(noResult);
     expect(result.text).toBe("Fallback text");
@@ -89,9 +90,9 @@ describe("parseStreamJson", () => {
 
   it("should skip malformed JSON lines gracefully", () => {
     const mixedStream = [
-      'not valid json',
+      "not valid json",
       '{"type":"result","result":"good","total_cost_usd":0.05}',
-      'another bad line'
+      "another bad line",
     ].join("\n");
     const result = parseStreamJson(mixedStream);
     expect(result.text).toBe("good");
@@ -99,7 +100,8 @@ describe("parseStreamJson", () => {
   });
 
   it("should handle stream with only system init event", () => {
-    const initOnly = '{"type":"system","subtype":"init","session_id":"init-only","model":"claude-opus-4-6"}';
+    const initOnly =
+      '{"type":"system","subtype":"init","session_id":"init-only","model":"claude-opus-4-6"}';
     const result = parseStreamJson(initOnly);
     expect(result.text).toBe("");
     expect(result.sessionId).toBe("init-only");
@@ -107,19 +109,21 @@ describe("parseStreamJson", () => {
   });
 
   it("should handle assistant with multiple text blocks", () => {
-    const multiBlock = '{"type":"assistant","message":{"content":[{"type":"text","text":"Part 1 "},{"type":"text","text":"Part 2"}]}}';
+    const multiBlock =
+      '{"type":"assistant","message":{"content":[{"type":"text","text":"Part 1 "},{"type":"text","text":"Part 2"}]}}';
     const result = parseStreamJson(multiBlock);
     expect(result.text).toBe("Part 1 Part 2");
   });
 
   it("should handle missing usage fields with defaults", () => {
-    const minimalResult = '{"type":"result","result":"minimal","usage":{"input_tokens":10,"output_tokens":5}}';
+    const minimalResult =
+      '{"type":"result","result":"minimal","usage":{"input_tokens":10,"output_tokens":5}}';
     const result = parseStreamJson(minimalResult);
     expect(result.usage).toEqual({
       inputTokens: 10,
       outputTokens: 5,
       cacheReadInputTokens: 0,
-      cacheCreationInputTokens: 0
+      cacheCreationInputTokens: 0,
     });
   });
 });

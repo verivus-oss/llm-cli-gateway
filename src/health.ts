@@ -20,13 +20,13 @@ export async function checkHealth(db: DatabaseConnection): Promise<HealthStatus>
     status: "unhealthy",
     postgres: {
       status: result.postgres.connected ? "up" : "down",
-      latency: result.postgres.latency
+      latency: result.postgres.latency,
     },
     redis: {
       status: result.redis.connected ? "up" : "down",
-      latency: result.redis.latency
+      latency: result.redis.latency,
     },
-    timestamp: new Date().toISOString()
+    timestamp: new Date().toISOString(),
   };
 
   // Determine overall health status
