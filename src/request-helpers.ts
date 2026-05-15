@@ -45,3 +45,27 @@ export function resolveSessionResumeArgs(opts: {
   }
   return { resumeArgs: [], effectiveSessionId: undefined, userProvidedSession: false };
 }
+
+/**
+ * Grok-specific resume args. Grok accepts `--resume <id>` to resume a named session,
+ * and `--continue` to resume the most recent session for the current working directory.
+ * Unlike `resolveSessionResumeArgs`, "resume latest" maps to `--continue` (not `--resume latest`)
+ * because Grok would interpret a literal "latest" as a session ID.
+ */
+export function resolveGrokSessionArgs(opts: {
+  sessionId?: string;
+  resumeLatest?: boolean;
+  createNewSession?: boolean;
+}): SessionResumeResult {
+  if (opts.createNewSession) {
+    return { resumeArgs: [], effectiveSessionId: undefined, userProvidedSession: false };
+  }
+  if (opts.resumeLatest && !opts.sessionId) {
+    return { resumeArgs: ["--continue"], effectiveSessionId: undefined, userProvidedSession: false };
+  }
+  if (opts.sessionId) {
+    validateSessionId(opts.sessionId);
+    return { resumeArgs: ["--resume", opts.sessionId], effectiveSessionId: opts.sessionId, userProvidedSession: true };
+  }
+  return { resumeArgs: [], effectiveSessionId: undefined, userProvidedSession: false };
+}

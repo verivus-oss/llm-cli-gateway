@@ -9,7 +9,7 @@ import { isReviewContext } from "./review-integrity.js";
 
 export type ApprovalPolicy = "strict" | "balanced" | "permissive";
 export type ApprovalStrategy = "legacy" | "mcp_managed";
-export type ApprovalCli = "claude" | "codex" | "gemini";
+export type ApprovalCli = "claude" | "codex" | "gemini" | "grok";
 export type ApprovalStatus = "approved" | "denied";
 
 export interface ApprovalRequest {

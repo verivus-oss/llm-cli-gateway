@@ -34,10 +34,11 @@ export interface CliUpgradeResult {
 const VERSION_ARGS: Record<CliType, string[]> = {
   claude: ["--version"],
   codex: ["--version"],
-  gemini: ["--version"]
+  gemini: ["--version"],
+  grok: ["--version"]
 };
 
-const NPM_PACKAGES: Record<Exclude<CliType, "claude">, string> = {
+const NPM_PACKAGES: Record<Exclude<CliType, "claude" | "grok">, string> = {
   codex: "@openai/codex",
   gemini: "@google/gemini-cli"
 };
@@ -64,6 +65,28 @@ export function buildCliUpgradePlan(cli: CliType, target = "latest"): CliUpgrade
       strategy: "self-update",
       requiresNetwork: true,
       note: "Claude Code supports explicit install targets through 'claude install <target>'."
+    };
+  }
+
+  if (cli === "grok") {
+    if (normalizedTarget === "latest") {
+      return {
+        cli,
+        target: normalizedTarget,
+        command: "grok",
+        args: ["update"],
+        strategy: "self-update",
+        requiresNetwork: true
+      };
+    }
+    return {
+      cli,
+      target: normalizedTarget,
+      command: "grok",
+      args: ["update", "--version", normalizedTarget],
+      strategy: "self-update",
+      requiresNetwork: true,
+      note: "Grok CLI supports explicit version targets via 'grok update --version <target>'."
     };
   }
 
@@ -120,7 +143,7 @@ export async function getCliVersion(cli: CliType): Promise<CliVersionInfo> {
 }
 
 export async function getCliVersions(cli?: CliType): Promise<CliVersionInfo[]> {
-  const clis: CliType[] = cli ? [cli] : ["claude", "codex", "gemini"];
+  const clis: CliType[] = cli ? [cli] : ["claude", "codex", "gemini", "grok"];
   return Promise.all(clis.map(item => getCliVersion(item)));
 }
 

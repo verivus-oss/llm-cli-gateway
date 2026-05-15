@@ -33,6 +33,22 @@ describe("cli updater", () => {
     expect(plan.args).toEqual(["install", "-g", "@openai/codex@1.2.3"]);
   });
 
+  it("uses self-update for Grok latest", () => {
+    const plan = buildCliUpgradePlan("grok");
+
+    expect(plan.command).toBe("grok");
+    expect(plan.args).toEqual(["update"]);
+    expect(plan.strategy).toBe("self-update");
+  });
+
+  it("uses self-update with explicit version for Grok pinned targets", () => {
+    const plan = buildCliUpgradePlan("grok", "0.1.210");
+
+    expect(plan.command).toBe("grok");
+    expect(plan.args).toEqual(["update", "--version", "0.1.210"]);
+    expect(plan.strategy).toBe("self-update");
+  });
+
   it("rejects invalid targets", () => {
     expect(() => buildCliUpgradePlan("gemini", "bad target")).toThrow("Upgrade target");
     expect(() => buildCliUpgradePlan("gemini", "--global")).toThrow("Upgrade target");

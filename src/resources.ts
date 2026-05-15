@@ -76,6 +76,17 @@ export class ResourceProvider {
         }
       },
       {
+        uri: "sessions://grok",
+        name: "Grok Sessions",
+        title: "⚡ Grok Sessions",
+        description: "List of Grok conversation sessions",
+        mimeType: "application/json",
+        annotations: {
+          audience: ["user", "assistant"],
+          priority: 0.6
+        }
+      },
+      {
         uri: "models://claude",
         name: "Claude Models",
         title: "🧠 Claude Models & Capabilities",
@@ -102,6 +113,17 @@ export class ResourceProvider {
         name: "Gemini Models",
         title: "🌟 Gemini Models & Capabilities",
         description: "Available Gemini models and their capabilities",
+        mimeType: "application/json",
+        annotations: {
+          audience: ["user", "assistant"],
+          priority: 0.8
+        }
+      },
+      {
+        uri: "models://grok",
+        name: "Grok Models",
+        title: "⚡ Grok Models & Capabilities",
+        description: "Available Grok models and their capabilities",
         mimeType: "application/json",
         annotations: {
           audience: ["user", "assistant"],
@@ -142,7 +164,8 @@ export class ResourceProvider {
           activeSessions: {
             claude: (await this.sessionManager.getActiveSession("claude"))?.id || null,
             codex: (await this.sessionManager.getActiveSession("codex"))?.id || null,
-            gemini: (await this.sessionManager.getActiveSession("gemini"))?.id || null
+            gemini: (await this.sessionManager.getActiveSession("gemini"))?.id || null,
+            grok: (await this.sessionManager.getActiveSession("grok"))?.id || null
           }
         }, null, 2)
       };
@@ -190,6 +213,20 @@ export class ResourceProvider {
       };
     }
 
+    if (uri === "sessions://grok") {
+      const sessions = await this.sessionManager.listSessions("grok");
+      return {
+        uri,
+        mimeType: "application/json",
+        text: JSON.stringify({
+          cli: "grok",
+          total: sessions.length,
+          sessions,
+          activeSession: (await this.sessionManager.getActiveSession("grok"))?.id || null
+        }, null, 2)
+      };
+    }
+
     // Model capability resources
     if (uri === "models://claude") {
       const cliInfo = getCliInfo();
@@ -215,6 +252,15 @@ export class ResourceProvider {
         uri,
         mimeType: "application/json",
         text: JSON.stringify(cliInfo.gemini, null, 2)
+      };
+    }
+
+    if (uri === "models://grok") {
+      const cliInfo = getCliInfo();
+      return {
+        uri,
+        mimeType: "application/json",
+        text: JSON.stringify(cliInfo.grok, null, 2)
       };
     }
 

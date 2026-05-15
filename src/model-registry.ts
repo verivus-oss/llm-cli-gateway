@@ -57,6 +57,15 @@ const FALLBACK_INFO: CliInfoMap = {
       "gemini-2.5-pro": "Most capable model. Best for: complex reasoning, long context, multimodal",
       "gemini-2.5-flash": "Fast model. Best for: quick responses, high throughput, cost-sensitive use"
     }
+  },
+  grok: {
+    // No hardcoded `defaultModel`. Let Grok CLI pick its own built-in default
+    // unless an explicit value is found via env vars in applyGrokOverrides.
+    description: "xAI's Grok Build CLI - best for agentic coding tasks via xAI's Grok models",
+    models: {
+      "grok-build": "Default Grok model for code/agentic tasks. Best for: most Grok build sessions"
+    },
+    modelOrder: ["grok-build"]
   }
 };
 
@@ -125,12 +134,14 @@ function buildCliInfo(): CliInfoMap {
   const info: CliInfoMap = {
     claude: cloneInfo(FALLBACK_INFO.claude),
     codex: cloneInfo(FALLBACK_INFO.codex),
-    gemini: cloneInfo(FALLBACK_INFO.gemini)
+    gemini: cloneInfo(FALLBACK_INFO.gemini),
+    grok: cloneInfo(FALLBACK_INFO.grok)
   };
 
   applyClaudeOverrides(info.claude);
   applyCodexOverrides(info.codex);
   applyGeminiOverrides(info.gemini);
+  applyGrokOverrides(info.grok);
 
   return info;
 }
@@ -377,6 +388,20 @@ function applyGeminiOverrides(info: CliInfo): void {
 
   if (envDefault) {
     setDefaultModel(info, envDefault, "GEMINI_DEFAULT_MODEL", "env");
+  }
+
+  info.modelOrder = buildOrder(info, info.defaultModel);
+}
+
+function applyGrokOverrides(info: CliInfo): void {
+  const envDefault = process.env.GROK_DEFAULT_MODEL;
+
+  addEnvModels(info, "GROK_MODELS");
+  addEnvAliases(info, "grok", "GROK_MODEL_ALIASES");
+  addGlobalEnvAliases(info, "grok");
+
+  if (envDefault) {
+    setDefaultModel(info, envDefault, "GROK_DEFAULT_MODEL", "env");
   }
 
   info.modelOrder = buildOrder(info, info.defaultModel);

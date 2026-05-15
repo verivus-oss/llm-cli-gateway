@@ -3,12 +3,12 @@
 > *"Without consultation, plans are frustrated, but with many counselors they succeed."*
 > — Proverbs 15:22 (LSB)
 
-A Model Context Protocol (MCP) server providing unified access to Claude Code, Codex, and Gemini CLIs with session management, retry logic, and async job orchestration.
+A Model Context Protocol (MCP) server providing unified access to Claude Code, Codex, Gemini, and Grok CLIs with session management, retry logic, and async job orchestration.
 
 ## Features
 
 ### Core Capabilities
-- **Multi-LLM Orchestration**: Unified interface for Claude Code, Codex, and Gemini CLIs
+- **Multi-LLM Orchestration**: Unified interface for Claude Code, Codex, Gemini, and Grok CLIs
 - **Session Management**: Track and resume conversations across all CLIs with persistent storage
 - **Token Optimization**: Automatic 44% reduction on prompts, 37% on responses (opt-in)
 - **Correlation ID Tracking**: Full request tracing across all LLM interactions
@@ -54,6 +54,13 @@ codex login
 ```bash
 npm install -g @google/gemini-cli
 # Or: https://github.com/google-gemini/gemini-cli
+```
+
+### Grok CLI (xAI)
+```bash
+npm install -g grok-build
+grok login   # OAuth flow, or set GROK_CODE_XAI_API_KEY
+# Docs: https://docs.x.ai/build/cli
 ```
 
 ## Installation
@@ -205,8 +212,54 @@ Execute a Gemini CLI request with session support.
 }
 ```
 
-##### `claude_request_async` / `codex_request_async`
-Start a long-running Claude or Codex request without waiting for completion in the same MCP call.
+##### `grok_request`
+Execute a Grok CLI (xAI) request with session support.
+
+**Parameters:**
+- `prompt` (string, required): The prompt to send (1-100,000 chars)
+- `model` (string, optional): Model name or alias (e.g. `grok-build`, `latest`)
+- `outputFormat` (string, optional): `"plain"` (default), `"json"`, or `"streaming-json"`
+- `sessionId` (string, optional): Session ID to resume (`--resume <id>`)
+- `resumeLatest` (boolean, optional): Resume the most recent session in the current cwd (`--continue`)
+- `createNewSession` (boolean, optional): Always create a new session
+- `alwaysApprove` (boolean, optional): Auto-approve all tool executions (`--always-approve`) in legacy mode
+- `permissionMode` (string, optional): `default|acceptEdits|auto|dontAsk|bypassPermissions|plan`
+- `effort` (string, optional): `low|medium|high|xhigh|max`
+- `reasoningEffort` (string, optional): Reasoning effort for reasoning models
+- `approvalStrategy` (string, optional): `"legacy"` (default) or `"mcp_managed"`
+- `approvalPolicy` (string, optional): `"strict"`, `"balanced"`, or `"permissive"`
+- `mcpServers` (string[], optional): MCP server names tracked for approvals (Grok manages its own MCP config via `grok mcp`)
+- `allowedTools` (string[], optional): Allowed built-in tools (passed as `--tools` comma list)
+- `disallowedTools` (string[], optional): Disallowed built-in tools (passed as `--disallowed-tools` comma list)
+- `optimizePrompt` (boolean, optional): Optimize prompt for token efficiency, default: false
+- `optimizeResponse` (boolean, optional): Optimize response for token efficiency, default: false
+- `correlationId` (string, optional): Request trace ID (auto-generated if omitted)
+
+**Example:**
+```json
+{
+  "prompt": "Summarize the latest commit message in 1 sentence",
+  "model": "grok-build",
+  "effort": "low"
+}
+```
+
+#### Durable job results & automatic dedup
+
+Every async job is persisted to a `jobs` table in `~/.llm-cli-gateway/logs.db` as it transitions through running → completed/failed/canceled. This makes the gateway a durable collection layer:
+
+- **Re-issuing a request is safe.** Identical `*_request` / `*_request_async` calls within the dedup window (default 1 hour) short-circuit onto the existing running or completed job — the caller gets back the same job ID instead of starting a duplicate run. This directly fixes the "agent times out polling, re-issues, and the whole job starts over" failure mode.
+- **`llm_job_status` and `llm_job_result` work across gateway restarts.** Job rows live for 30 days by default; callers can fetch results long after the in-memory cache has evicted them.
+- **Jobs running at shutdown are marked `orphaned`** on the next gateway boot (the detached child can't be reattached to). Their captured partial output remains readable.
+- **Pass `forceRefresh: true`** on any request tool to bypass dedup and force a fresh CLI run.
+
+Environment variables:
+- `LLM_GATEWAY_JOB_RETENTION_DAYS` — how long completed jobs stay queryable. Default `30`.
+- `LLM_GATEWAY_DEDUP_WINDOW_MS` — how recent an existing job must be to dedup against. Default `3600000` (1 hour). Set `0` to disable dedup.
+- `LLM_GATEWAY_JOBS_DB` — override the sqlite path. Defaults to the value of `LLM_GATEWAY_LOGS_DB`, then `~/.llm-cli-gateway/logs.db`. Set to `none` to disable durability entirely (in-memory only).
+
+##### `claude_request_async` / `codex_request_async` / `gemini_request_async` / `grok_request_async`
+Start a long-running Claude, Codex, Gemini, or Grok request without waiting for completion in the same MCP call.
 
 Use this flow when analysis/runtime can exceed client tool-call limits:
 1. Start job with `*_request_async`
@@ -244,7 +297,7 @@ Approval records are persisted to `~/.llm-cli-gateway/approvals.jsonl`.
 Create a new session for a specific CLI.
 
 **Parameters:**
-- `cli` (string, required): CLI to create session for ("claude", "codex", "gemini")
+- `cli` (string, required): CLI to create session for ("claude", "codex", "gemini", "grok")
 - `description` (string, optional): Description for the session
 - `setAsActive` (boolean, optional): Set as active session, default: true
 
@@ -261,7 +314,7 @@ Create a new session for a specific CLI.
 List all sessions, optionally filtered by CLI.
 
 **Parameters:**
-- `cli` (string, optional): Filter by CLI ("claude", "codex", "gemini")
+- `cli` (string, optional): Filter by CLI ("claude", "codex", "gemini", "grok")
 
 **Response includes:**
 - Total session count
@@ -299,7 +352,7 @@ Clear all sessions, optionally for a specific CLI.
 List available models for each CLI.
 
 **Parameters:**
-- `cli` (string, optional): Specific CLI to list models for ("claude", "codex", "gemini")
+- `cli` (string, optional): Specific CLI to list models for ("claude", "codex", "gemini", "grok")
 
 **Response includes:**
 - Model names and descriptions
@@ -341,13 +394,13 @@ LLM_GATEWAY_DISABLE_MODEL_DISCOVERY=1
 Report installed CLI versions.
 
 **Parameters:**
-- `cli` (string, optional): Specific CLI to inspect ("claude", "codex", "gemini")
+- `cli` (string, optional): Specific CLI to inspect ("claude", "codex", "gemini", "grok")
 
 ##### `cli_upgrade`
 Plan or run an upgrade for one CLI.
 
 **Parameters:**
-- `cli` (string, required): CLI to upgrade ("claude", "codex", "gemini")
+- `cli` (string, required): CLI to upgrade ("claude", "codex", "gemini", "grok")
 - `target` (string, optional): Package tag/version/target, default: `latest`
 - `dryRun` (boolean, optional): Return the upgrade plan without running it, default: `true`
 - `timeoutMs` (number, optional): Upgrade timeout when `dryRun=false`

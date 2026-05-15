@@ -6,9 +6,11 @@ All notable changes to the llm-cli-gateway project.
 
 ### Added
 
+- **Durable job results + automatic dedup** — Async jobs are now persisted to a `jobs` table in `~/.llm-cli-gateway/logs.db` on every state transition (start, output flush, completion). `llm_job_status` and `llm_job_result` fall back to the database when the job is no longer in memory, so callers can collect a result regardless of how long ago the work completed (default retention: **30 days**, configurable via `LLM_GATEWAY_JOB_RETENTION_DAYS`). Identical `*_request` / `*_request_async` calls within a dedup window (default **1 hour**, configurable via `LLM_GATEWAY_DEDUP_WINDOW_MS`) short-circuit onto the existing running or completed job instead of spawning a duplicate run — directly fixing the "agent re-issues and the whole job starts over" loop. Each tool now accepts `forceRefresh: true` to bypass dedup. Jobs that were running when the gateway last stopped are flipped to `orphaned` on startup so callers can still read their partial output.
+- **Grok CLI provider (xAI Grok Build TUI)** — New `grok_request` and `grok_request_async` MCP tools mirror the existing Claude/Codex/Gemini surface (sync + async, session management via `--resume`/`--continue`, idle-timeout, approval policy, review-integrity, flight recorder, metrics). Auth assumes a prior `grok login` (OAuth) or `GROK_CODE_XAI_API_KEY`. Default model: `grok-build`. `GROK_DEFAULT_MODEL`, `GROK_MODELS`, and `GROK_MODEL_ALIASES` env vars are honored by the model registry. `cli_upgrade` treats Grok as self-updating (`grok update` / `grok update --version <target>`).
 - **Source-aware model registry** — `list_models` now reports model source/confidence metadata, aliases, default model source, and non-fatal discovery warnings
 - **Deterministic model configuration overrides** — Added `*_SETTINGS_PATH`, `GEMINI_HISTORY_ROOT`, `*_MODEL_ALIASES`, and `LLM_GATEWAY_MODEL_ALIASES` support for stable deployments and tests
-- **CLI lifecycle tools** — Added `cli_versions` and `cli_upgrade` tools for inspecting and upgrading individual Claude, Codex, and Gemini CLI installations
+- **CLI lifecycle tools** — Added `cli_versions` and `cli_upgrade` tools for inspecting and upgrading individual Claude, Codex, Gemini, and Grok CLI installations
 
 ### Changed
 
