@@ -29,14 +29,17 @@ export type CliInfoMap = Record<CliType, CliInfo>;
 
 const FALLBACK_INFO: CliInfoMap = {
   claude: {
-    description: "Anthropic's Claude Code CLI - best for code generation, analysis, and agentic coding tasks",
+    description:
+      "Anthropic's Claude Code CLI - best for code generation, analysis, and agentic coding tasks",
     models: {
       opus: "Most capable model. Best for: complex reasoning, nuanced analysis, difficult problems, research",
-      sonnet: "Balanced performance. Best for: everyday coding, code review, general tasks (default)",
-      haiku: "Fastest model. Best for: simple queries, quick answers, high-volume tasks, cost-sensitive use"
+      sonnet:
+        "Balanced performance. Best for: everyday coding, code review, general tasks (default)",
+      haiku:
+        "Fastest model. Best for: simple queries, quick answers, high-volume tasks, cost-sensitive use",
     },
     defaultModel: "sonnet",
-    modelOrder: ["opus", "sonnet", "haiku"]
+    modelOrder: ["opus", "sonnet", "haiku"],
   },
   codex: {
     // Note: no hardcoded `defaultModel`. Let Codex CLI pick its own built-in default
@@ -47,26 +50,27 @@ const FALLBACK_INFO: CliInfoMap = {
       "gpt-5.4": "Frontier coding and professional-work model. Best for: most Codex tasks, long-running agentic work",
       "gpt-5.3-codex": "Specialized Codex model. Best for: agentic coding workflows with Codex-tuned behavior",
       "gpt-5.2": "Strong general-purpose GPT-5 model. Best for: broad coding and reasoning tasks",
-      "gpt-5-pro": "Highest-capability GPT-5 model. Best for: deep reasoning and difficult professional workflows"
+      "gpt-5-pro": "Highest-capability GPT-5 model. Best for: deep reasoning and difficult professional workflows",
     },
-    modelOrder: ["gpt-5.3-codex", "gpt-5.4", "gpt-5.2", "gpt-5-pro"]
+    modelOrder: ["gpt-5.3-codex", "gpt-5.4", "gpt-5.2", "gpt-5-pro"],
   },
   gemini: {
     description: "Google's Gemini CLI - best for multimodal tasks and Google ecosystem integration",
     models: {
       "gemini-2.5-pro": "Most capable model. Best for: complex reasoning, long context, multimodal",
-      "gemini-2.5-flash": "Fast model. Best for: quick responses, high throughput, cost-sensitive use"
-    }
+      "gemini-2.5-flash":
+        "Fast model. Best for: quick responses, high throughput, cost-sensitive use",
+    },
   },
   grok: {
     // No hardcoded `defaultModel`. Let Grok CLI pick its own built-in default
     // unless an explicit value is found via env vars in applyGrokOverrides.
     description: "xAI's Grok Build CLI - best for agentic coding tasks via xAI's Grok models",
     models: {
-      "grok-build": "Default Grok model for code/agentic tasks. Best for: most Grok build sessions"
+      "grok-build": "Default Grok model for code/agentic tasks. Best for: most Grok build sessions",
     },
-    modelOrder: ["grok-build"]
-  }
+    modelOrder: ["grok-build"],
+  },
 };
 
 const MODEL_CACHE_TTL_MS = 2 * 60 * 1000;
@@ -95,7 +99,11 @@ export function clearModelRegistryCache(): void {
   cachedInfo = null;
 }
 
-export function resolveModelAlias(cli: CliType, model: string | undefined, info: CliInfoMap): string | undefined {
+export function resolveModelAlias(
+  cli: CliType,
+  model: string | undefined,
+  info: CliInfoMap
+): string | undefined {
   if (!model) {
     return undefined;
   }
@@ -135,7 +143,7 @@ function buildCliInfo(): CliInfoMap {
     claude: cloneInfo(FALLBACK_INFO.claude),
     codex: cloneInfo(FALLBACK_INFO.codex),
     gemini: cloneInfo(FALLBACK_INFO.gemini),
-    grok: cloneInfo(FALLBACK_INFO.grok)
+    grok: cloneInfo(FALLBACK_INFO.grok),
   };
 
   applyClaudeOverrides(info.claude);
@@ -155,7 +163,7 @@ function cloneInfo(source: CliInfo): CliInfo {
     modelOrder: source.modelOrder ? [...source.modelOrder] : undefined,
     aliases: source.aliases ? { ...source.aliases } : undefined,
     modelMetadata: source.modelMetadata ? { ...source.modelMetadata } : {},
-    warnings: source.warnings ? [...source.warnings] : []
+    warnings: source.warnings ? [...source.warnings] : [],
   };
 
   Object.keys(cloned.models).forEach(model => {

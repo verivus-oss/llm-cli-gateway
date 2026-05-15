@@ -7,5 +7,5 @@ export interface Logger {
 export const noopLogger: Logger = {
   info: () => {},
   error: () => {},
-  debug: () => {}
+  debug: () => {},
 };

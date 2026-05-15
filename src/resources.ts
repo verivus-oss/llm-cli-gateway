@@ -39,8 +39,8 @@ export class ResourceProvider {
         annotations: {
           audience: ["user", "assistant"],
           priority: 0.7,
-          lastModified: new Date().toISOString()
-        }
+          lastModified: new Date().toISOString(),
+        },
       },
       {
         uri: "sessions://claude",
@@ -50,8 +50,8 @@ export class ResourceProvider {
         mimeType: "application/json",
         annotations: {
           audience: ["user", "assistant"],
-          priority: 0.6
-        }
+          priority: 0.6,
+        },
       },
       {
         uri: "sessions://codex",
@@ -61,8 +61,8 @@ export class ResourceProvider {
         mimeType: "application/json",
         annotations: {
           audience: ["user", "assistant"],
-          priority: 0.6
-        }
+          priority: 0.6,
+        },
       },
       {
         uri: "sessions://gemini",
@@ -72,8 +72,8 @@ export class ResourceProvider {
         mimeType: "application/json",
         annotations: {
           audience: ["user", "assistant"],
-          priority: 0.6
-        }
+          priority: 0.6,
+        },
       },
       {
         uri: "sessions://grok",
@@ -94,8 +94,8 @@ export class ResourceProvider {
         mimeType: "application/json",
         annotations: {
           audience: ["user", "assistant"],
-          priority: 0.8
-        }
+          priority: 0.8,
+        },
       },
       {
         uri: "models://codex",
@@ -105,8 +105,8 @@ export class ResourceProvider {
         mimeType: "application/json",
         annotations: {
           audience: ["user", "assistant"],
-          priority: 0.8
-        }
+          priority: 0.8,
+        },
       },
       {
         uri: "models://gemini",
@@ -116,8 +116,8 @@ export class ResourceProvider {
         mimeType: "application/json",
         annotations: {
           audience: ["user", "assistant"],
-          priority: 0.8
-        }
+          priority: 0.8,
+        },
       },
       {
         uri: "models://grok",
@@ -138,9 +138,9 @@ export class ResourceProvider {
         mimeType: "application/json",
         annotations: {
           audience: ["user", "assistant"],
-          priority: 0.9
-        }
-      }
+          priority: 0.9,
+        },
+      },
     ];
   }
 
@@ -152,22 +152,26 @@ export class ResourceProvider {
       return {
         uri,
         mimeType: "application/json",
-        text: JSON.stringify({
-          total: sessions.length,
-          sessions: sessions.map((s) => ({
-            id: s.id,
-            cli: s.cli,
-            description: s.description,
-            createdAt: s.createdAt,
-            lastUsedAt: s.lastUsedAt
-          })),
-          activeSessions: {
-            claude: (await this.sessionManager.getActiveSession("claude"))?.id || null,
-            codex: (await this.sessionManager.getActiveSession("codex"))?.id || null,
-            gemini: (await this.sessionManager.getActiveSession("gemini"))?.id || null,
-            grok: (await this.sessionManager.getActiveSession("grok"))?.id || null
-          }
-        }, null, 2)
+        text: JSON.stringify(
+          {
+            total: sessions.length,
+            sessions: sessions.map(s => ({
+              id: s.id,
+              cli: s.cli,
+              description: s.description,
+              createdAt: s.createdAt,
+              lastUsedAt: s.lastUsedAt,
+            })),
+            activeSessions: {
+              claude: (await this.sessionManager.getActiveSession("claude"))?.id || null,
+              codex: (await this.sessionManager.getActiveSession("codex"))?.id || null,
+              gemini: (await this.sessionManager.getActiveSession("gemini"))?.id || null,
+              grok: (await this.sessionManager.getActiveSession("grok"))?.id || null,
+            },
+          },
+          null,
+          2
+        ),
       };
     }
 
@@ -176,12 +180,16 @@ export class ResourceProvider {
       return {
         uri,
         mimeType: "application/json",
-        text: JSON.stringify({
-          cli: "claude",
-          total: sessions.length,
-          sessions,
-          activeSession: (await this.sessionManager.getActiveSession("claude"))?.id || null
-        }, null, 2)
+        text: JSON.stringify(
+          {
+            cli: "claude",
+            total: sessions.length,
+            sessions,
+            activeSession: (await this.sessionManager.getActiveSession("claude"))?.id || null,
+          },
+          null,
+          2
+        ),
       };
     }
 
@@ -190,12 +198,16 @@ export class ResourceProvider {
       return {
         uri,
         mimeType: "application/json",
-        text: JSON.stringify({
-          cli: "codex",
-          total: sessions.length,
-          sessions,
-          activeSession: (await this.sessionManager.getActiveSession("codex"))?.id || null
-        }, null, 2)
+        text: JSON.stringify(
+          {
+            cli: "codex",
+            total: sessions.length,
+            sessions,
+            activeSession: (await this.sessionManager.getActiveSession("codex"))?.id || null,
+          },
+          null,
+          2
+        ),
       };
     }
 
@@ -204,12 +216,16 @@ export class ResourceProvider {
       return {
         uri,
         mimeType: "application/json",
-        text: JSON.stringify({
-          cli: "gemini",
-          total: sessions.length,
-          sessions,
-          activeSession: (await this.sessionManager.getActiveSession("gemini"))?.id || null
-        }, null, 2)
+        text: JSON.stringify(
+          {
+            cli: "gemini",
+            total: sessions.length,
+            sessions,
+            activeSession: (await this.sessionManager.getActiveSession("gemini"))?.id || null,
+          },
+          null,
+          2
+        ),
       };
     }
 
@@ -233,7 +249,7 @@ export class ResourceProvider {
       return {
         uri,
         mimeType: "application/json",
-        text: JSON.stringify(cliInfo.claude, null, 2)
+        text: JSON.stringify(cliInfo.claude, null, 2),
       };
     }
 
@@ -242,7 +258,7 @@ export class ResourceProvider {
       return {
         uri,
         mimeType: "application/json",
-        text: JSON.stringify(cliInfo.codex, null, 2)
+        text: JSON.stringify(cliInfo.codex, null, 2),
       };
     }
 
@@ -251,7 +267,7 @@ export class ResourceProvider {
       return {
         uri,
         mimeType: "application/json",
-        text: JSON.stringify(cliInfo.gemini, null, 2)
+        text: JSON.stringify(cliInfo.gemini, null, 2),
       };
     }
 
@@ -268,7 +284,7 @@ export class ResourceProvider {
       return {
         uri,
         mimeType: "application/json",
-        text: JSON.stringify(this.performanceMetrics.snapshot(), null, 2)
+        text: JSON.stringify(this.performanceMetrics.snapshot(), null, 2),
       };
     }
 

@@ -28,6 +28,23 @@ export function validateSessionId(sessionId: string): void {
  * Pure function: determine --resume args and session provenance from request flags.
  * Does NOT perform any session I/O — callers handle create/update separately.
  */
+/**
+ * Reject CLI arg values that start with "-" to prevent argument injection.
+ * spawn() doesn't invoke a shell so there's no shell injection, but a value
+ * like "--dangerously-skip-permissions" passed as a tool name would be
+ * interpreted as a flag by the child CLI.
+ */
+export function sanitizeCliArgValues(values: string[], fieldName: string): string[] {
+  for (const v of values) {
+    if (v.startsWith("-")) {
+      throw new Error(
+        `Invalid ${fieldName} value "${v}": values must not start with "-" (argument injection prevention)`
+      );
+    }
+  }
+  return values;
+}
+
 export function resolveSessionResumeArgs(opts: {
   sessionId?: string;
   resumeLatest?: boolean;
@@ -37,11 +54,19 @@ export function resolveSessionResumeArgs(opts: {
     return { resumeArgs: [], effectiveSessionId: undefined, userProvidedSession: false };
   }
   if (opts.resumeLatest && !opts.sessionId) {
-    return { resumeArgs: ["--resume", "latest"], effectiveSessionId: undefined, userProvidedSession: false };
+    return {
+      resumeArgs: ["--resume", "latest"],
+      effectiveSessionId: undefined,
+      userProvidedSession: false,
+    };
   }
   if (opts.sessionId) {
     validateSessionId(opts.sessionId);
-    return { resumeArgs: ["--resume", opts.sessionId], effectiveSessionId: opts.sessionId, userProvidedSession: true };
+    return {
+      resumeArgs: ["--resume", opts.sessionId],
+      effectiveSessionId: opts.sessionId,
+      userProvidedSession: true,
+    };
   }
   return { resumeArgs: [], effectiveSessionId: undefined, userProvidedSession: false };
 }

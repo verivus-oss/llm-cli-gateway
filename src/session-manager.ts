@@ -1,7 +1,17 @@
 import { randomUUID } from "crypto";
 import { homedir } from "os";
 import { join, dirname } from "path";
-import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, openSync, fsyncSync, closeSync, chmodSync } from "fs";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  writeFileSync,
+  renameSync,
+  openSync,
+  fsyncSync,
+  closeSync,
+  chmodSync,
+} from "fs";
 import type { Config } from "./config.js";
 import { DEFAULT_SESSION_TTL_SECONDS } from "./config.js";
 import type { DatabaseConnection } from "./db.js";
@@ -18,7 +28,7 @@ const DEFAULT_SESSION_DESCRIPTIONS: Record<CliType, string> = {
   claude: "Claude Session",
   codex: "Codex Session",
   gemini: "Gemini Session",
-  grok: "Grok Session"
+  grok: "Grok Session",
 };
 
 export interface Session {
@@ -91,7 +101,10 @@ export class FileSessionManager {
 
   private saveStorage(): void {
     const tempPath = `${this.storagePath}.tmp.${process.pid}`;
-    writeFileSync(tempPath, JSON.stringify(this.storage, null, 2), { encoding: "utf-8", mode: 0o600 });
+    writeFileSync(tempPath, JSON.stringify(this.storage, null, 2), {
+      encoding: "utf-8",
+      mode: 0o600,
+    });
     const fd = openSync(tempPath, "r+");
     try {
       fsyncSync(fd);
@@ -111,7 +124,7 @@ export class FileSessionManager {
       cli,
       createdAt: new Date().toISOString(),
       lastUsedAt: new Date().toISOString(),
-      description: sessionDescription
+      description: sessionDescription,
     };
 
     this.storage.sessions[id] = session;
@@ -247,7 +260,10 @@ export interface ISessionManager {
   setActiveSession(cli: CliType, sessionId: string | null): boolean | Promise<boolean>;
   getActiveSession(cli: CliType): Session | null | Promise<Session | null>;
   updateSessionUsage(sessionId: string): void | Promise<void>;
-  updateSessionMetadata(sessionId: string, metadata: Record<string, any>): boolean | Promise<boolean>;
+  updateSessionMetadata(
+    sessionId: string,
+    metadata: Record<string, any>
+  ): boolean | Promise<boolean>;
   clearAllSessions(cli?: CliType): number | Promise<number>;
 }
 
@@ -273,7 +289,12 @@ export async function createSessionManager(
       db = await createDatabaseConnection(config, logger);
     }
 
-    return new PostgreSQLSessionManager(db.getPool(), db.getRedis(), config.cacheTtl, logger ?? noopLogger);
+    return new PostgreSQLSessionManager(
+      db.getPool(),
+      db.getRedis(),
+      config.cacheTtl,
+      logger ?? noopLogger
+    );
   } else {
     // Use file-based storage with TTL from config
     const sessionTtlMs = config?.sessionTtl
