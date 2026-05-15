@@ -4,18 +4,24 @@ All notable changes to the llm-cli-gateway project.
 
 ## Unreleased
 
+## [1.2.0] - 2026-05-16
+
 ### Added
 
+- **Codex `exec resume` wired through the gateway** — `codex_request` and `codex_request_async` now accept `sessionId` (real Codex session UUID from `~/.codex/sessions/` or the `codex resume` picker) and `resumeLatest:true`, emitting `codex exec resume <UUID>` and `codex exec resume --last` respectively. Codex sessions are no longer bookkeeping-only at the gateway layer; multi-turn workflows carry real CLI continuity, matching Claude/Gemini/Grok. Gateway-generated `gw-*` IDs are rejected for Codex (as for Gemini/Grok). `--full-auto` is silently dropped on resume because `codex exec resume` does not accept it — the original session's approval policy is inherited.
 - **Durable job results + automatic dedup** — Async jobs are now persisted to a `jobs` table in `~/.llm-cli-gateway/logs.db` on every state transition (start, output flush, completion). `llm_job_status` and `llm_job_result` fall back to the database when the job is no longer in memory, so callers can collect a result regardless of how long ago the work completed (default retention: **30 days**, configurable via `LLM_GATEWAY_JOB_RETENTION_DAYS`). Identical `*_request` / `*_request_async` calls within a dedup window (default **1 hour**, configurable via `LLM_GATEWAY_DEDUP_WINDOW_MS`) short-circuit onto the existing running or completed job instead of spawning a duplicate run — directly fixing the "agent re-issues and the whole job starts over" loop. Each tool now accepts `forceRefresh: true` to bypass dedup. Jobs that were running when the gateway last stopped are flipped to `orphaned` on startup so callers can still read their partial output.
 - **Grok CLI provider (xAI Grok Build TUI)** — New `grok_request` and `grok_request_async` MCP tools mirror the existing Claude/Codex/Gemini surface (sync + async, session management via `--resume`/`--continue`, idle-timeout, approval policy, review-integrity, flight recorder, metrics). Auth assumes a prior `grok login` (OAuth) or `GROK_CODE_XAI_API_KEY`. Default model: `grok-build`. `GROK_DEFAULT_MODEL`, `GROK_MODELS`, and `GROK_MODEL_ALIASES` env vars are honored by the model registry. `cli_upgrade` treats Grok as self-updating (`grok update` / `grok update --version <target>`).
 - **Source-aware model registry** — `list_models` now reports model source/confidence metadata, aliases, default model source, and non-fatal discovery warnings
 - **Deterministic model configuration overrides** — Added `*_SETTINGS_PATH`, `GEMINI_HISTORY_ROOT`, `*_MODEL_ALIASES`, and `LLM_GATEWAY_MODEL_ALIASES` support for stable deployments and tests
 - **CLI lifecycle tools** — Added `cli_versions` and `cli_upgrade` tools for inspecting and upgrading individual Claude, Codex, Gemini, and Grok CLI installations
+- **`resolveCodexSessionArgs` helper** in `src/request-helpers.ts` with 7 new tests covering mode resolution and `gw-*` rejection (Codex uses an `exec resume` subcommand rather than a flag pair, so the helper returns a `mode` discriminant: `new` | `resume-by-id` | `resume-latest`)
 
 ### Changed
 
+- **`better-sqlite3` bumped to `^12.9.0`** (from `^11.0.0`) — required engines now `node 20.x || 22.x || 23.x || 24.x || 25.x`
 - **Gemini history discovery is no longer authoritative** — Models observed in local Gemini session files are merged as low-confidence entries and no longer replace the registry or set the default model
 - **Codex default handling remains explicit** — If Codex has no configured default, `default`/`latest` resolve to no model flag so the Codex CLI can use its own built-in default
+- **Gateway skills refreshed** — The `.agents/skills/` (async-job-orchestration, implement-review-fix, multi-llm-review, secure-orchestration, session-workflow) and `skills/` (multi-llm-orchestration, multi-llm-consensus, model-routing, design-review-cycle, agent-codex-gate, codex-review-gate, red-team-assessment) skill docs now cover Grok, durable job results, auto-dedup, and the new Codex resume capability. `.agents/skills/` entries bumped to metadata version 1.5.
 
 ## [1.1.0] - 2026-04-04
 
