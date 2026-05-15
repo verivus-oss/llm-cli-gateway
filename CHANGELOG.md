@@ -4,7 +4,7 @@ All notable changes to the llm-cli-gateway project.
 
 ## Unreleased
 
-## [1.2.0] - 2026-05-16
+## [1.4.0] - 2026-05-16
 
 ### Added
 
