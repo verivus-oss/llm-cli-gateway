@@ -136,3 +136,6 @@ Standalone `sleep 60` is blocked in some orchestrators (e.g. the Claude Code har
 - For large reviews, use `codex_request_async` explicitly to avoid any sync wait
 - Codex is thorough but literal — it checks what you ask it to check. Be specific in review criteria.
 - When Codex's sqry index is stale, it may report "cannot find X." Provide the file contents inline.
+- **For multi-round reviews, pass `resumeLatest:true`** (or `sessionId:<real Codex UUID from ~/.codex/sessions/>`) on round 2+ so Codex carries the prior round's findings into the re-review. `--full-auto` is silently dropped on resume — the resumed session inherits its original approval policy.
+- **Deferred jobs are durable** (default 30-day retention, `LLM_GATEWAY_JOB_RETENTION_DAYS`). If your polling wrapper times out, fetch by `jobId` later or re-issue the identical call — auto-dedup reattaches to the existing Codex job within the dedup window (`LLM_GATEWAY_DEDUP_WINDOW_MS`, default 1 h). Use `forceRefresh:true` only when the diff under review has actually changed.
+- For high-stakes paths, consider stacking a Grok diversity reviewer on top of the Codex gate (`grok_request` with `approvalStrategy:"mcp_managed"`) and require both to APPROVE.

@@ -1,6 +1,6 @@
 ---
 name: model-routing
-description: Choose the right LLM and model for each task based on proven patterns. Use when deciding whether to delegate to Claude, Codex, or Gemini, or when selecting model variants.
+description: Choose the right LLM and model for each task based on proven patterns. Use when deciding whether to delegate to Claude, Codex, Gemini, or Grok, or when selecting model variants.
 ---
 
 # Model Routing
@@ -33,6 +33,8 @@ All tool invocations below use the dispatch defaults above (omit `model`, `appro
 | **Test generation** | Codex | Understands test frameworks, generates comprehensive cases | `codex_request` (`fullAuto:true`, `approvalStrategy:"mcp_managed"`) |
 | **Security audit** | Gemini | Security-focused analysis, threat modeling | `gemini_request` (`approvalStrategy:"mcp_managed"`) |
 | **Multi-file analysis** | Codex | Handles large codebases with sqry integration | `codex_request` (`fullAuto:true`, `approvalStrategy:"mcp_managed"`) |
+| **Diversity / tie-breaker review** | Grok (xAI) | Independent fourth model from a different vendor family — useful when Claude/Codex/Gemini might share a blind spot | `grok_request` (`approvalStrategy:"mcp_managed"`) |
+| **Consensus / unanimous gate** | All four in parallel | Catches issues any single model misses; use when correctness > cost | `*_request_async` for Claude/Codex/Gemini/Grok |
 
 ## Model Selection Rules
 
@@ -44,6 +46,7 @@ The gateway uses sensible configured defaults. Omitting `model` is almost always
 codex_request({prompt: "...", fullAuto: true, approvalStrategy: "mcp_managed"})
 gemini_request({prompt: "...", approvalStrategy: "mcp_managed"})
 claude_request({prompt: "...", approvalStrategy: "mcp_managed"})
+grok_request({prompt: "...", approvalStrategy: "mcp_managed"})
 ```
 
 ### Rule 2: Avoid stale hardcoded model IDs
@@ -112,6 +115,7 @@ For comprehensive coverage:
 ```
 codex_request_async({prompt: "Review [path] for correctness... End with APPROVED or NOT APPROVED with findings.", fullAuto: true, approvalStrategy: "mcp_managed", correlationId: "review-codex"})
 gemini_request_async({prompt: "Security audit [path]... End with APPROVED or NOT APPROVED with findings.", approvalStrategy: "mcp_managed", correlationId: "review-gemini"})
+grok_request_async({prompt: "Independent review of [path]... End with APPROVED or NOT APPROVED with findings.", approvalStrategy: "mcp_managed", correlationId: "review-grok"})
 ```
 
 ## Session Continuity Implications
@@ -120,30 +124,33 @@ Model routing affects session strategy:
 
 | LLM | Session Continuity | Implication |
 |-----|-------------------|-------------|
-| Claude | Real (conversation carries over) | Can do multi-turn refinement |
-| Codex | None (each call is fresh) | Must include all context in every prompt |
-| Gemini | Real (can resume) | Good for iterative analysis |
+| Claude | Real (`--continue` / `--session-id`) | Can do multi-turn refinement |
+| Codex | Real (`codex exec resume <UUID>` / `--last`) — sessionId must be a real Codex UUID from `~/.codex/sessions/`; `--full-auto` dropped on resume | Good for iterative work; pass `resumeLatest:true` for the most recent cwd session |
+| Gemini | Real (`--resume`) | Good for iterative analysis |
+| Grok | Real (`--resume <id>` / `--continue`) | Good for iterative review/diversity rounds |
 
 This means:
-- **Codex tasks must be self-contained** — include all context in the prompt
-- **Claude/Gemini tasks can be conversational** — "continue from where we left off"
-- **Don't use Codex for multi-turn workflows** unless you restate context each time
+- **All four CLIs support multi-turn workflows** through the gateway
+- Codex resume requires either `resumeLatest:true` or a real Codex session UUID — gateway-generated `gw-*` IDs are rejected
+- Resumed Codex sessions inherit the original approval policy; `fullAuto:true` is silently dropped on resume
+- Gemini-generated `gw-*` IDs are bookkeeping handles and rejected if replayed
 
 ## Cost Considerations
 
 - Codex with `fullAuto` is the most autonomous but most expensive per call
 - Gemini is generally cheaper for review tasks
 - Claude is middle ground
+- Grok depends on xAI billing/pricing — treat as an extra reviewer slot for high-stakes paths, not the default
 - For routine reviews: single LLM (Codex) is sufficient
-- For critical reviews: parallel multi-LLM (see multi-llm-consensus skill)
+- For critical reviews: parallel multi-LLM (see multi-llm-consensus skill); add Grok when consensus across vendor families matters
 - For huge codebases: use async variants to avoid blocking
 
 ## Tips
 
 - For routine read-only analysis, drafting, or review, prefer Claude or Gemini with omitted `model` so configured fast defaults such as Haiku or Flash can apply.
 - Use Codex with `fullAuto: true` and `approvalStrategy: "mcp_managed"` when the task needs autonomous code edits, tests, or shell commands.
-- For security-specific work, always include Gemini.
+- For security-specific work, always include Gemini. Add Grok for an independent vendor-family perspective when stakes are high.
 - Don't overthink model selection — the default is almost always fine. **Omit `model` unless the caller asked for a specific variant.**
 - Use `correlationId` on every request for tracing.
-- If a task exceeds 45s, it auto-defers. Check for `status:"deferred"` in responses, then poll every 60s.
-- Use `cli_versions` to inspect installed CLI versions. Use `cli_upgrade` with `dryRun:true` first; run real upgrades only when the caller wants the local CLI updated.
+- If a task exceeds 45s, it auto-defers. Check for `status:"deferred"` in responses, then poll every 60s. Results are durable for 30 days (`LLM_GATEWAY_JOB_RETENTION_DAYS`) — re-issuing the same call within the dedup window (`LLM_GATEWAY_DEDUP_WINDOW_MS`, default 1h) reattaches to the live job. Pass `forceRefresh:true` only when inputs actually changed.
+- Use `cli_versions` to inspect installed CLI versions. Use `cli_upgrade` with `dryRun:true` first; run real upgrades only when the caller wants the local CLI updated. Grok self-updates via `grok update`; the same `cli_upgrade` tool routes it for you.

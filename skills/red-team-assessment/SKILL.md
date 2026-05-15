@@ -1,6 +1,6 @@
 ---
 name: red-team-assessment
-description: Get an adversarial red team security assessment from any LLM (Claude, Codex, or Gemini) with gateway-managed approvals and optional sqry, exa, and ref_tools MCP access. Use when you need adversarial security analysis of code, architecture, or configurations.
+description: Get an adversarial red team security assessment from any LLM (Claude, Codex, Gemini, or Grok) with gateway-managed approvals and optional sqry, exa, and ref_tools MCP access. Use when you need adversarial security analysis of code, architecture, or configurations.
 ---
 
 # Red Team Assessment
@@ -33,6 +33,7 @@ Any LLM can red team. Choose based on the assessment type:
 | **Gemini** | Security-focused, OWASP-aware, CVE research via exa | Web security, API security, dependency audits |
 | **Codex** | Deep code analysis, logic bug hunting, can execute tests | Implementation vulnerabilities, race conditions, logic flaws |
 | **Claude** | Architecture analysis, design-level threats, broad reasoning | Threat modeling, design review, trust boundary analysis |
+| **Grok (xAI)** | Independent vendor-family perspective; useful when the other three converge on the same threat model and miss adversarial angles outside it | Diversity reviewer / tie-breaker for high-stakes assessments |
 
 For maximum coverage, use **multiple LLMs in parallel** (see Multi-LLM Red Team below).
 
@@ -95,9 +96,15 @@ gemini_request_async({
   mcpServers: ["sqry", "exa", "ref_tools"],
   correlationId: "red-team-gemini"
 })
+
+grok_request_async({
+  prompt: "Red team [path] from an independent perspective. Look for threats the other reviewers may have missed, contradict findings you disagree with, and call out shared blind spots in the threat model. End with PASS or FAIL with findings.",
+  approvalStrategy: "mcp_managed",
+  correlationId: "red-team-grok"
+})
 ```
 
-Poll all three every 60 seconds. Synthesize findings:
+Poll every 60 seconds. Synthesize findings:
 
 1. **Union all findings** — every finding from every LLM counts
 2. **Deduplicate** — same issue found by multiple LLMs = high confidence
@@ -116,6 +123,8 @@ llm_job_status({jobId: "[jobId]"})
 // When completed:
 llm_job_result({jobId: "[jobId]"})
 ```
+
+Red-team jobs are **durable** (default 30-day retention, `LLM_GATEWAY_JOB_RETENTION_DAYS`). If your polling wrapper times out or restarts mid-assessment, fetch by `jobId` later, or re-issue the identical call — auto-dedup (default 1 h window, `LLM_GATEWAY_DEDUP_WINDOW_MS`) reattaches to the live job. This protects long-running adversarial sweeps from being silently restarted. Use `forceRefresh:true` only when the target code/config has actually changed.
 
 ## Triage Findings
 
@@ -143,6 +152,7 @@ Use a **different LLM** than the red teamer for the blue team response. This avo
 | Gemini | Codex or Claude | Codex can implement fixes directly; Claude reasons about defense-in-depth |
 | Codex | Claude or Gemini | Claude designs defensive architecture; Gemini validates against known mitigations |
 | Claude | Codex or Gemini | Codex implements concrete patches; Gemini verifies against OWASP remediation guides |
+| Grok | Codex or Claude | Same reasoning — pair with a model from a different vendor family to break confirmation bias |
 | Multi-LLM | Use the strongest available for the fix domain | Match remediation LLM to the type of fix needed |
 
 ```
@@ -229,6 +239,15 @@ claude_request({
 })
 ```
 
+**If the original red teamer was Grok:**
+
+```
+grok_request({
+  prompt: "Re-assess security after blue team fixes.\n\nOriginal findings and blue team responses:\n1. [Critical] [finding] — Blue team fix: [what changed]\n2. [High] [finding] — Blue team fix: [what changed]\n\nVerify:\n- Are the fixes effective against the original attack scenarios?\n- Did the fixes introduce new vulnerabilities?\n- Are the detection/monitoring additions adequate?\n\nEnd with PASS or FAIL with findings.",
+  approvalStrategy: "mcp_managed"
+})
+```
+
 For multi-LLM red teams, re-submit to ALL original reviewers after blue team fixes.
 
 ## Full Red/Blue Cycle
@@ -288,11 +307,13 @@ The reviewer should use these MCP tools:
 ## Tips
 
 - Omit `model` by default — let the gateway default apply. Only nominate a specific variant when the caller has explicitly asked for it.
-- Include `mcpServers: ["sqry", "exa", "ref_tools"]` for research-heavy assessments. Claude gets a generated MCP config, Gemini gets allowed server names for its existing MCP config, and Codex treats this as approval tracking while using its own MCP config.
+- Include `mcpServers: ["sqry", "exa", "ref_tools"]` for research-heavy assessments. Claude gets a generated MCP config, Gemini gets allowed server names for its existing MCP config, and Codex/Grok treat this as approval tracking while using their own MCP config.
 - Provide context about data sensitivity and threat model — generic assessments miss domain-specific risks
 - Red team assessments are expensive but catch issues that code review misses
-- Use `correlationId` for tracing: `"red-team-r1-claude"`, `"red-team-r1-codex"`, `"red-team-r1-gemini"`
+- Use `correlationId` for tracing: `"red-team-r1-claude"`, `"red-team-r1-codex"`, `"red-team-r1-gemini"`, `"red-team-r1-grok"`
 - For large codebases, scope to specific components rather than "audit everything"
-- Multi-LLM red teams find more issues but cost 3x — use for critical security paths
+- Multi-LLM red teams find more issues but cost 3–4x — use for critical security paths. Adding Grok specifically defends against shared blind spots across the Anthropic/OpenAI/Google family.
 - Single-LLM is fine for routine security checks
 - Use `approvalStrategy: "mcp_managed"` as the skill default; add `fullAuto: true` for Codex — do not use raw `dangerouslyBypassApprovalsAndSandbox` for red-team work
+- For multi-round red/blue cycles, pass `resumeLatest:true` (or `sessionId:<UUID>`) to Codex on the re-assess step so it carries the original threat model into the verification. Note: `--full-auto` is dropped on Codex resume — the original session's approval policy is inherited.
+- **Durable assessment results** (default 30 days, `LLM_GATEWAY_JOB_RETENTION_DAYS`) mean you can complete a red/blue cycle hours or days later from where you left off; jobs are not lost when the orchestrator dies or polling times out.

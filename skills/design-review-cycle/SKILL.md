@@ -1,6 +1,6 @@
 ---
 name: design-review-cycle
-description: Structured design document review via LLM gateway — submit plans, specs, or designs for peer review from Codex/Gemini, iterate on feedback, track review rounds. Use before implementing complex features.
+description: Structured design document review via LLM gateway — submit plans, specs, or designs for peer review from Codex, Gemini, or Grok, iterate on feedback, track review rounds. Use before implementing complex features.
 ---
 
 # Design Review Cycle
@@ -62,6 +62,16 @@ gemini_request_async({
 })
 ```
 
+**Triple reviewer (add Grok for independent diversity on high-stakes designs):**
+
+```
+grok_request_async({
+  prompt: "Independent review of the design document at [path]. Flag completeness gaps, feasibility concerns, and assumptions the other reviewers may accept too easily. End with APPROVED or NOT APPROVED with findings.",
+  approvalStrategy: "mcp_managed",
+  correlationId: "design-review-r1-grok"
+})
+```
+
 ### Step 3: Process Feedback
 
 Parse the review response for:
@@ -99,9 +109,10 @@ If after 3 rounds the design is still not approved, the design likely needs a fu
 |--------------|-----------------|-------------|
 | Implementation plan | Codex | Feasibility, task ordering, test strategy |
 | API specification | Codex + Gemini | Completeness, security, error handling |
-| Architecture decision | Codex | Trade-offs, scalability, maintenance burden |
+| Architecture decision | Codex + Grok | Trade-offs, scalability, maintenance burden, independent perspective |
 | Security design | Gemini | Attack surfaces, threat model, mitigations |
 | Data model | Codex | Normalization, query patterns, migration path |
+| High-stakes / hard-to-reverse design | Codex + Gemini + Grok | Use all three when the design locks in a contract or migration path |
 
 ## Review Request Templates
 
@@ -174,3 +185,5 @@ The skill works with any document structure — the naming convention is optiona
 - For large documents, tell the reviewer which sections changed between rounds.
 - Always pass `fullAuto: true` **and** `approvalStrategy: "mcp_managed"` for Codex reviews — `fullAuto:true` gives Codex sandboxed file/shell access, while `mcp_managed` records and gates the request. If Codex still can't access something specific, paste the relevant sections inline.
 - Design reviews are cheaper than code reviews — catch issues before writing code.
+- For multi-round reviews of the same design, pass `resumeLatest:true` to Codex on round 2+ to carry the reviewer's prior context (or `sessionId:<UUID>` for a specific Codex session). Note: `--full-auto` is dropped on resume — the original session's approval policy is inherited.
+- **Deferred review jobs are durable** (default 30-day retention, `LLM_GATEWAY_JOB_RETENTION_DAYS`). If polling times out mid-round, re-issue the same call (auto-dedup reattaches to the running job) or fetch by `jobId` later. Use `forceRefresh:true` only when the design document has actually been updated.
