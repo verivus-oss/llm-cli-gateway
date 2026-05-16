@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "llm-cli-gateway"
-version = "0.1.0"
+version = "1.4.0"
 description = "llm plugin for multi-LLM orchestration via llm-cli-gateway"
 readme = "README.md"
 license = {text = "MIT"}
