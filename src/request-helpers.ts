@@ -131,11 +131,19 @@ export function resolveGrokSessionArgs(opts: {
     return { resumeArgs: [], effectiveSessionId: undefined, userProvidedSession: false };
   }
   if (opts.resumeLatest && !opts.sessionId) {
-    return { resumeArgs: ["--continue"], effectiveSessionId: undefined, userProvidedSession: false };
+    return {
+      resumeArgs: ["--continue"],
+      effectiveSessionId: undefined,
+      userProvidedSession: false,
+    };
   }
   if (opts.sessionId) {
     validateSessionId(opts.sessionId);
-    return { resumeArgs: ["--resume", opts.sessionId], effectiveSessionId: opts.sessionId, userProvidedSession: true };
+    return {
+      resumeArgs: ["--resume", opts.sessionId],
+      effectiveSessionId: opts.sessionId,
+      userProvidedSession: true,
+    };
   }
   return { resumeArgs: [], effectiveSessionId: undefined, userProvidedSession: false };
 }

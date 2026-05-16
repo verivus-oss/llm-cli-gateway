@@ -47,10 +47,13 @@ const FALLBACK_INFO: CliInfoMap = {
     // This prevents the gateway from pinning a model that may become deprecated upstream.
     description: "OpenAI's Codex CLI - best for code execution in sandboxed environments",
     models: {
-      "gpt-5.4": "Frontier coding and professional-work model. Best for: most Codex tasks, long-running agentic work",
-      "gpt-5.3-codex": "Specialized Codex model. Best for: agentic coding workflows with Codex-tuned behavior",
+      "gpt-5.4":
+        "Frontier coding and professional-work model. Best for: most Codex tasks, long-running agentic work",
+      "gpt-5.3-codex":
+        "Specialized Codex model. Best for: agentic coding workflows with Codex-tuned behavior",
       "gpt-5.2": "Strong general-purpose GPT-5 model. Best for: broad coding and reasoning tasks",
-      "gpt-5-pro": "Highest-capability GPT-5 model. Best for: deep reasoning and difficult professional workflows",
+      "gpt-5-pro":
+        "Highest-capability GPT-5 model. Best for: deep reasoning and difficult professional workflows",
     },
     modelOrder: ["gpt-5.3-codex", "gpt-5.4", "gpt-5.2", "gpt-5-pro"],
   },
@@ -80,7 +83,7 @@ const SOURCE_PRIORITY: Record<ModelSource, number> = {
   fallback: 0,
   observed: 1,
   config: 2,
-  env: 3
+  env: 3,
 };
 
 let cachedInfo: { loadedAt: number; info: CliInfoMap } | null = null;
@@ -170,7 +173,7 @@ function cloneInfo(source: CliInfo): CliInfo {
     cloned.modelMetadata![model] = cloned.modelMetadata![model] ?? {
       source: "fallback",
       sourceDetail: "Bundled fallback registry",
-      confidence: "low"
+      confidence: "low",
     };
   });
 
@@ -205,7 +208,11 @@ function addModel(
   const existingPriority = existingMetadata ? SOURCE_PRIORITY[existingMetadata.source] : -1;
   const incomingPriority = SOURCE_PRIORITY[metadata.source];
 
-  if (!info.models[normalized] || options.preferDescription || incomingPriority > existingPriority) {
+  if (
+    !info.models[normalized] ||
+    options.preferDescription ||
+    incomingPriority > existingPriority
+  ) {
     info.models[normalized] = description;
   }
 
@@ -215,7 +222,12 @@ function addModel(
   }
 }
 
-function setDefaultModel(info: CliInfo, model: string | undefined, source: string, sourceType: ModelSource): void {
+function setDefaultModel(
+  info: CliInfo,
+  model: string | undefined,
+  source: string,
+  sourceType: ModelSource
+): void {
   const normalized = model?.trim();
   if (!normalized) {
     return;
@@ -229,7 +241,7 @@ function setDefaultModel(info: CliInfo, model: string | undefined, source: strin
   addModel(info, normalized, `Configured default from ${source}`, {
     source: sourceType,
     sourceDetail: source,
-    confidence: sourceType === "env" ? "high" : "medium"
+    confidence: sourceType === "env" ? "high" : "medium",
   });
   info.defaultModel = normalized;
   info.defaultModelSource = source;
@@ -264,11 +276,17 @@ function resolveConfiguredAlias(info: CliInfo, normalizedAlias: string): string 
 function addEnvModels(info: CliInfo, envName: string): void {
   const entries = parseEnvModelEntries(process.env[envName], envName);
   entries.forEach(entry => {
-    addModel(info, entry.model, entry.description ?? `Configured via ${envName}`, {
-      source: "env",
-      sourceDetail: envName,
-      confidence: "high"
-    }, { preferDescription: Boolean(entry.description) });
+    addModel(
+      info,
+      entry.model,
+      entry.description ?? `Configured via ${envName}`,
+      {
+        source: "env",
+        sourceDetail: envName,
+        confidence: "high",
+      },
+      { preferDescription: Boolean(entry.description) }
+    );
   });
 }
 
@@ -279,14 +297,21 @@ function addEnvAliases(info: CliInfo, cli: CliType, envName: string): void {
 }
 
 function addGlobalEnvAliases(info: CliInfo, cli: CliType): void {
-  parseEnvAliasEntries(process.env.LLM_GATEWAY_MODEL_ALIASES, "LLM_GATEWAY_MODEL_ALIASES", cli).forEach(entry => {
+  parseEnvAliasEntries(
+    process.env.LLM_GATEWAY_MODEL_ALIASES,
+    "LLM_GATEWAY_MODEL_ALIASES",
+    cli
+  ).forEach(entry => {
     addAlias(info, entry.alias, entry.target, "LLM_GATEWAY_MODEL_ALIASES");
   });
 }
 
 function applyClaudeOverrides(info: CliInfo): void {
-  const settingsPath = process.env.CLAUDE_SETTINGS_PATH || path.join(homedir(), ".claude", "settings.json");
-  const settingsLocalPath = process.env.CLAUDE_SETTINGS_LOCAL_PATH || path.join(homedir(), ".claude", "settings.local.json");
+  const settingsPath =
+    process.env.CLAUDE_SETTINGS_PATH || path.join(homedir(), ".claude", "settings.json");
+  const settingsLocalPath =
+    process.env.CLAUDE_SETTINGS_LOCAL_PATH ||
+    path.join(homedir(), ".claude", "settings.local.json");
   const envDefault = process.env.CLAUDE_DEFAULT_MODEL;
   const localDefault = readJsonStringValue(settingsLocalPath, [["model"], ["model", "name"]], info);
   const settingsDefault = readJsonStringValue(settingsPath, [["model"], ["model", "name"]], info);
@@ -326,7 +351,7 @@ function applyCodexOverrides(info: CliInfo): void {
           addModel(info, profileModel, `Configured in Codex profile '${profileName}'`, {
             source: "config",
             sourceDetail: `${configPath} profile ${profileName}`,
-            confidence: "medium"
+            confidence: "medium",
           });
         }
       });
@@ -340,12 +365,12 @@ function applyCodexOverrides(info: CliInfo): void {
         addModel(info, to, `Migration target for ${from}`, {
           source: "config",
           sourceDetail: `${configPath} notice.model_migrations`,
-          confidence: "medium"
+          confidence: "medium",
         });
         addModel(info, from, `Legacy model (migrates to ${to})`, {
           source: "config",
           sourceDetail: `${configPath} notice.model_migrations`,
-          confidence: "medium"
+          confidence: "medium",
         });
       });
     } catch (error) {
@@ -366,7 +391,8 @@ function applyCodexOverrides(info: CliInfo): void {
 }
 
 function applyGeminiOverrides(info: CliInfo): void {
-  const settingsPath = process.env.GEMINI_SETTINGS_PATH || path.join(homedir(), ".gemini", "settings.json");
+  const settingsPath =
+    process.env.GEMINI_SETTINGS_PATH || path.join(homedir(), ".gemini", "settings.json");
   const settingsDefault = readJsonStringValue(
     settingsPath,
     [["model"], ["model", "name"], ["selectedModel"], ["defaultModel"]],
@@ -381,12 +407,17 @@ function applyGeminiOverrides(info: CliInfo): void {
   if (!isModelDiscoveryDisabled()) {
     const observed = collectGeminiModels();
     observed.forEach(observation => {
-      addModel(info, observation.model, `Observed in local Gemini sessions (last seen ${observation.lastSeen})`, {
-        source: "observed",
-        sourceDetail: observation.filePath,
-        confidence: "low",
-        lastSeen: observation.lastSeen
-      });
+      addModel(
+        info,
+        observation.model,
+        `Observed in local Gemini sessions (last seen ${observation.lastSeen})`,
+        {
+          source: "observed",
+          sourceDetail: observation.filePath,
+          confidence: "low",
+          lastSeen: observation.lastSeen,
+        }
+      );
     });
   }
 
@@ -415,7 +446,11 @@ function applyGrokOverrides(info: CliInfo): void {
   info.modelOrder = buildOrder(info, info.defaultModel);
 }
 
-function readJsonStringValue(filePath: string, paths: string[][], info?: CliInfo): string | undefined {
+function readJsonStringValue(
+  filePath: string,
+  paths: string[][],
+  info?: CliInfo
+): string | undefined {
   if (!existsSync(filePath)) {
     return undefined;
   }
@@ -463,7 +498,9 @@ function readRecordProperty(value: unknown, key: string): Record<string, unknown
     return {};
   }
   const prop = (value as Record<string, unknown>)[key];
-  return prop && typeof prop === "object" && !Array.isArray(prop) ? prop as Record<string, unknown> : {};
+  return prop && typeof prop === "object" && !Array.isArray(prop)
+    ? (prop as Record<string, unknown>)
+    : {};
 }
 
 interface EnvModelEntry {
@@ -520,7 +557,7 @@ function parseEnvModelEntries(value: string | undefined, source: string): EnvMod
       if (eqIndex > 0) {
         return {
           model: entry.slice(0, eqIndex).trim(),
-          description: entry.slice(eqIndex + 1).trim() || undefined
+          description: entry.slice(eqIndex + 1).trim() || undefined,
         };
       }
       return { model: entry };
@@ -532,7 +569,11 @@ interface EnvAliasEntry {
   target: string;
 }
 
-function parseEnvAliasEntries(value: string | undefined, source: string, cli: CliType): EnvAliasEntry[] {
+function parseEnvAliasEntries(
+  value: string | undefined,
+  source: string,
+  cli: CliType
+): EnvAliasEntry[] {
   if (!value) {
     return [];
   }
@@ -562,7 +603,9 @@ function parseEnvAliasEntries(value: string | undefined, source: string, cli: Cl
     try {
       const parsed = JSON.parse(trimmed);
       if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-        Object.entries(parsed as Record<string, unknown>).forEach(([alias, target]) => addEntry(alias, target));
+        Object.entries(parsed as Record<string, unknown>).forEach(([alias, target]) =>
+          addEntry(alias, target)
+        );
         return entries;
       }
     } catch {
@@ -598,8 +641,10 @@ interface GeminiObservation {
 }
 
 function isModelDiscoveryDisabled(): boolean {
-  return process.env.LLM_GATEWAY_DISABLE_MODEL_DISCOVERY === "1"
-    || process.env.GEMINI_DISABLE_HISTORY_DISCOVERY === "1";
+  return (
+    process.env.LLM_GATEWAY_DISABLE_MODEL_DISCOVERY === "1" ||
+    process.env.GEMINI_DISABLE_HISTORY_DISCOVERY === "1"
+  );
 }
 
 function parsePositiveInt(value: string | undefined, fallback: number): number {
@@ -617,7 +662,10 @@ function collectGeminiModels(): GeminiObservation[] {
   }
 
   const maxFiles = parsePositiveInt(process.env.GEMINI_HISTORY_MAX_FILES, MAX_GEMINI_HISTORY_FILES);
-  const maxFileBytes = parsePositiveInt(process.env.GEMINI_HISTORY_MAX_FILE_BYTES, MAX_GEMINI_HISTORY_FILE_BYTES);
+  const maxFileBytes = parsePositiveInt(
+    process.env.GEMINI_HISTORY_MAX_FILE_BYTES,
+    MAX_GEMINI_HISTORY_FILE_BYTES
+  );
   const candidates: { filePath: string; mtimeMs: number; size: number }[] = [];
   const roots = safeReadDir(root);
   roots.forEach(entry => {
@@ -656,20 +704,19 @@ function collectGeminiModels(): GeminiObservation[] {
           model,
           lastSeen: formatDate(candidate.mtimeMs),
           lastSeenMs: candidate.mtimeMs,
-          filePath: candidate.filePath
+          filePath: candidate.filePath,
         };
       }
     });
   }
 
-  return Object.values(models)
-    .sort((a, b) => {
-      const versionDiff = extractModelVersion(b.model) - extractModelVersion(a.model);
-      if (versionDiff !== 0) {
-        return versionDiff;
-      }
-      return b.lastSeenMs - a.lastSeenMs;
-    });
+  return Object.values(models).sort((a, b) => {
+    const versionDiff = extractModelVersion(b.model) - extractModelVersion(a.model);
+    if (versionDiff !== 0) {
+      return versionDiff;
+    }
+    return b.lastSeenMs - a.lastSeenMs;
+  });
 }
 
 function extractGeminiModels(filePath: string): string[] {
@@ -703,7 +750,10 @@ function collectModelValues(value: unknown, found: Set<string>): void {
     return;
   }
   Object.entries(value as Record<string, unknown>).forEach(([key, child]) => {
-    if ((key === "model" || key === "modelName" || key === "modelId") && typeof child === "string") {
+    if (
+      (key === "model" || key === "modelName" || key === "modelId") &&
+      typeof child === "string"
+    ) {
       found.add(child);
     } else {
       collectModelValues(child, found);
@@ -775,13 +825,13 @@ function pickLatestMatching(info: CliInfo, token: string): string | undefined {
       }
       const aMetadata = info.modelMetadata?.[a];
       const bMetadata = info.modelMetadata?.[b];
-      const priorityDiff = (bMetadata ? SOURCE_PRIORITY[bMetadata.source] : 0)
-        - (aMetadata ? SOURCE_PRIORITY[aMetadata.source] : 0);
+      const priorityDiff =
+        (bMetadata ? SOURCE_PRIORITY[bMetadata.source] : 0) -
+        (aMetadata ? SOURCE_PRIORITY[aMetadata.source] : 0);
       if (priorityDiff !== 0) {
         return priorityDiff;
       }
       return a.localeCompare(b);
-    }
-    );
+    });
   return candidates[0];
 }

@@ -2,7 +2,12 @@ import { mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { JobStore, computeRequestKey, resolveDedupWindowMs, resolveJobRetentionMs } from "../job-store.js";
+import {
+  JobStore,
+  computeRequestKey,
+  resolveDedupWindowMs,
+  resolveJobRetentionMs,
+} from "../job-store.js";
 
 describe("JobStore", () => {
   let tempDir: string;
@@ -16,7 +21,11 @@ describe("JobStore", () => {
   });
 
   afterEach(() => {
-    try { store.close(); } catch { /* ignore */ }
+    try {
+      store.close();
+    } catch {
+      /* ignore */
+    }
     rmSync(tempDir, { recursive: true, force: true });
   });
 
@@ -47,15 +56,26 @@ describe("JobStore", () => {
       const startedAt = new Date().toISOString();
 
       store.recordStart({
-        id, correlationId: "corr-1", requestKey, cli: "claude",
-        args: ["-p", "hi"], outputFormat: "text", startedAt, pid: 42
+        id,
+        correlationId: "corr-1",
+        requestKey,
+        cli: "claude",
+        args: ["-p", "hi"],
+        outputFormat: "text",
+        startedAt,
+        pid: 42,
       });
 
       const finishedAt = new Date().toISOString();
       store.recordComplete({
-        id, status: "completed", exitCode: 0,
-        stdout: "result", stderr: "", outputTruncated: false,
-        error: null, finishedAt
+        id,
+        status: "completed",
+        exitCode: 0,
+        stdout: "result",
+        stderr: "",
+        outputTruncated: false,
+        error: null,
+        finishedAt,
       });
 
       const row = store.getById(id);
@@ -79,9 +99,14 @@ describe("JobStore", () => {
     it("returns a recent running job", () => {
       const requestKey = computeRequestKey("grok", ["-p", "test"]);
       store.recordStart({
-        id: "j1", correlationId: "c1", requestKey, cli: "grok",
-        args: ["-p", "test"], outputFormat: undefined,
-        startedAt: new Date().toISOString(), pid: 7
+        id: "j1",
+        correlationId: "c1",
+        requestKey,
+        cli: "grok",
+        args: ["-p", "test"],
+        outputFormat: undefined,
+        startedAt: new Date().toISOString(),
+        pid: 7,
       });
 
       const found = store.findByRequestKey(requestKey);
@@ -95,23 +120,43 @@ describe("JobStore", () => {
       const newer = new Date().toISOString();
 
       store.recordStart({
-        id: "older", correlationId: "co", requestKey, cli: "claude",
-        args: ["-p", "x"], startedAt: older, pid: 1
+        id: "older",
+        correlationId: "co",
+        requestKey,
+        cli: "claude",
+        args: ["-p", "x"],
+        startedAt: older,
+        pid: 1,
       });
       store.recordComplete({
-        id: "older", status: "completed", exitCode: 0,
-        stdout: "old", stderr: "", outputTruncated: false, error: null,
-        finishedAt: older
+        id: "older",
+        status: "completed",
+        exitCode: 0,
+        stdout: "old",
+        stderr: "",
+        outputTruncated: false,
+        error: null,
+        finishedAt: older,
       });
 
       store.recordStart({
-        id: "newer", correlationId: "cn", requestKey, cli: "claude",
-        args: ["-p", "x"], startedAt: newer, pid: 2
+        id: "newer",
+        correlationId: "cn",
+        requestKey,
+        cli: "claude",
+        args: ["-p", "x"],
+        startedAt: newer,
+        pid: 2,
       });
       store.recordComplete({
-        id: "newer", status: "completed", exitCode: 0,
-        stdout: "new", stderr: "", outputTruncated: false, error: null,
-        finishedAt: newer
+        id: "newer",
+        status: "completed",
+        exitCode: 0,
+        stdout: "new",
+        stderr: "",
+        outputTruncated: false,
+        error: null,
+        finishedAt: newer,
       });
 
       const found = store.findByRequestKey(requestKey);
@@ -125,13 +170,23 @@ describe("JobStore", () => {
       const ancient = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
 
       store.recordStart({
-        id: "ancient", correlationId: "ca", requestKey, cli: "codex",
-        args: ["exec", "ancient"], startedAt: ancient, pid: 5
+        id: "ancient",
+        correlationId: "ca",
+        requestKey,
+        cli: "codex",
+        args: ["exec", "ancient"],
+        startedAt: ancient,
+        pid: 5,
       });
       store.recordComplete({
-        id: "ancient", status: "completed", exitCode: 0,
-        stdout: "result", stderr: "", outputTruncated: false, error: null,
-        finishedAt: ancient
+        id: "ancient",
+        status: "completed",
+        exitCode: 0,
+        stdout: "result",
+        stderr: "",
+        outputTruncated: false,
+        error: null,
+        finishedAt: ancient,
       });
 
       const found = store.findByRequestKey(requestKey);
@@ -142,13 +197,23 @@ describe("JobStore", () => {
       const requestKey = computeRequestKey("claude", ["-p", "broken"]);
       const t = new Date().toISOString();
       store.recordStart({
-        id: "bad", correlationId: "cb", requestKey, cli: "claude",
-        args: ["-p", "broken"], startedAt: t, pid: 9
+        id: "bad",
+        correlationId: "cb",
+        requestKey,
+        cli: "claude",
+        args: ["-p", "broken"],
+        startedAt: t,
+        pid: 9,
       });
       store.recordComplete({
-        id: "bad", status: "failed", exitCode: 1,
-        stdout: "", stderr: "boom", outputTruncated: false,
-        error: "boom", finishedAt: t
+        id: "bad",
+        status: "failed",
+        exitCode: 1,
+        stdout: "",
+        stderr: "boom",
+        outputTruncated: false,
+        error: "boom",
+        finishedAt: t,
       });
 
       expect(store.findByRequestKey(requestKey)).toBeNull();
@@ -159,17 +224,32 @@ describe("JobStore", () => {
     it("flips running rows to orphaned and leaves terminal rows alone", () => {
       const t = new Date().toISOString();
       store.recordStart({
-        id: "running", correlationId: "cr", requestKey: "k1", cli: "claude",
-        args: ["-p", "still going"], startedAt: t, pid: 100
+        id: "running",
+        correlationId: "cr",
+        requestKey: "k1",
+        cli: "claude",
+        args: ["-p", "still going"],
+        startedAt: t,
+        pid: 100,
       });
       store.recordStart({
-        id: "done", correlationId: "cd", requestKey: "k2", cli: "claude",
-        args: ["-p", "done"], startedAt: t, pid: 101
+        id: "done",
+        correlationId: "cd",
+        requestKey: "k2",
+        cli: "claude",
+        args: ["-p", "done"],
+        startedAt: t,
+        pid: 101,
       });
       store.recordComplete({
-        id: "done", status: "completed", exitCode: 0,
-        stdout: "ok", stderr: "", outputTruncated: false, error: null,
-        finishedAt: t
+        id: "done",
+        status: "completed",
+        exitCode: 0,
+        stdout: "ok",
+        stderr: "",
+        outputTruncated: false,
+        error: null,
+        finishedAt: t,
       });
 
       const changes = store.markOrphanedOnStartup();
@@ -185,14 +265,24 @@ describe("JobStore", () => {
     it("deletes rows whose expires_at is in the past", () => {
       const t = new Date().toISOString();
       store.recordStart({
-        id: "expired", correlationId: "ce", requestKey: "k", cli: "claude",
-        args: [], startedAt: t, pid: 1
+        id: "expired",
+        correlationId: "ce",
+        requestKey: "k",
+        cli: "claude",
+        args: [],
+        startedAt: t,
+        pid: 1,
       });
       store.recordComplete({
-        id: "expired", status: "completed", exitCode: 0,
-        stdout: "", stderr: "", outputTruncated: false, error: null,
+        id: "expired",
+        status: "completed",
+        exitCode: 0,
+        stdout: "",
+        stderr: "",
+        outputTruncated: false,
+        error: null,
         // finishedAt in the far past so retention has elapsed.
-        finishedAt: new Date(Date.now() - resolveJobRetentionMs() - 60_000).toISOString()
+        finishedAt: new Date(Date.now() - resolveJobRetentionMs() - 60_000).toISOString(),
       });
 
       const removed = store.evictExpired();
@@ -202,8 +292,13 @@ describe("JobStore", () => {
 
     it("keeps running jobs (far-future expiry) untouched", () => {
       store.recordStart({
-        id: "live", correlationId: "cl", requestKey: "k", cli: "claude",
-        args: [], startedAt: new Date().toISOString(), pid: 1
+        id: "live",
+        correlationId: "cl",
+        requestKey: "k",
+        cli: "claude",
+        args: [],
+        startedAt: new Date().toISOString(),
+        pid: 1,
       });
       store.evictExpired();
       expect(store.getById("live")?.status).toBe("running");

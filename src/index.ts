@@ -237,10 +237,16 @@ async function awaitJobOrDefer(
     return executeCli(cli, args, { idleTimeout: idleTimeoutMs, logger });
   }
 
-  const outcome = asyncJobManager.startJobWithDedup(cli, args, corrId, { idleTimeoutMs, outputFormat, forceRefresh });
+  const outcome = asyncJobManager.startJobWithDedup(cli, args, corrId, {
+    idleTimeoutMs,
+    outputFormat,
+    forceRefresh,
+  });
   const job = outcome.snapshot;
   if (outcome.deduped) {
-    logger.info(`[${corrId}] sync request deduped onto running job ${job.id} (original corrId=${outcome.originalCorrelationId})`);
+    logger.info(
+      `[${corrId}] sync request deduped onto running job ${job.id} (original corrId=${outcome.originalCorrelationId})`
+    );
   }
   const deadline = Date.now() + SYNC_DEADLINE_MS;
 
@@ -596,9 +602,9 @@ server.registerResource(
   {
     title: "⚡ Grok Sessions",
     description: "Grok conversation sessions",
-    mimeType: "application/json"
+    mimeType: "application/json",
   },
-  async (uri) => {
+  async uri => {
     logger.debug("Reading Grok sessions resource");
     const contents = await resourceProvider.readResource(uri.href);
     return { contents: contents ? [contents] : [] };
@@ -660,9 +666,9 @@ server.registerResource(
   {
     title: "⚡ Grok Models",
     description: "Grok models and capabilities",
-    mimeType: "application/json"
+    mimeType: "application/json",
   },
-  async (uri) => {
+  async uri => {
     logger.debug("Reading Grok models resource");
     const contents = await resourceProvider.readResource(uri.href);
     return { contents: contents ? [contents] : [] };
@@ -881,7 +887,7 @@ function prepareCodexRequest(params: {
     sessionPlan = resolveCodexSessionArgs({
       sessionId: params.sessionId,
       resumeLatest: params.resumeLatest,
-      createNewSession: params.createNewSession
+      createNewSession: params.createNewSession,
     });
   } catch (err) {
     return createErrorResponse(params.operation, 1, "", corrId, err as Error);
@@ -1031,11 +1037,20 @@ function prepareGrokRequest(params: {
   const resolvedModel = resolveModelAlias("grok", params.model, cliInfo);
 
   // Review integrity check on raw prompt (before optimization)
-  const reviewIntegrity = checkReviewIntegrity({ prompt: params.prompt, allowedTools: params.allowedTools, disallowedTools: params.disallowedTools });
+  const reviewIntegrity = checkReviewIntegrity({
+    prompt: params.prompt,
+    allowedTools: params.allowedTools,
+    disallowedTools: params.disallowedTools,
+  });
   if (reviewIntegrity.violations.length > 0) {
-    logger.info(`[${corrId}] Review integrity violations detected: ${reviewIntegrity.violations.map(v => v.type).join(", ")}`, {
-      cli: "grok", operation: params.operation, score: reviewIntegrity.totalScore
-    });
+    logger.info(
+      `[${corrId}] Review integrity violations detected: ${reviewIntegrity.violations.map(v => v.type).join(", ")}`,
+      {
+        cli: "grok",
+        operation: params.operation,
+        score: reviewIntegrity.totalScore,
+      }
+    );
   }
 
   let effectivePrompt = params.prompt;
@@ -1053,21 +1068,23 @@ function prepareGrokRequest(params: {
       cli: "grok",
       operation: params.operation,
       prompt: params.prompt, // Use raw prompt for review-context detection, not optimized
-      bypassRequested: Boolean(params.alwaysApprove) || params.permissionMode === "bypassPermissions",
+      bypassRequested:
+        Boolean(params.alwaysApprove) || params.permissionMode === "bypassPermissions",
       fullAuto: false,
       requestedMcpServers,
       allowedTools: params.allowedTools,
       disallowedTools: params.disallowedTools,
       policy: params.approvalPolicy as ApprovalPolicy | undefined,
       metadata: { model: resolvedModel || "default" },
-      reviewIntegrity
+      reviewIntegrity,
     });
     if (approvalDecision.status !== "approved") {
       return createApprovalDeniedResponse(params.operation, approvalDecision);
     }
   }
 
-  const effectiveAlwaysApprove = params.approvalStrategy === "mcp_managed" ? true : Boolean(params.alwaysApprove);
+  const effectiveAlwaysApprove =
+    params.approvalStrategy === "mcp_managed" ? true : Boolean(params.alwaysApprove);
 
   const args = ["-p", effectivePrompt];
   if (resolvedModel) args.push("--model", resolvedModel);
@@ -1086,7 +1103,15 @@ function prepareGrokRequest(params: {
     args.push("--disallowed-tools", params.disallowedTools.join(","));
   }
 
-  return { corrId, effectivePrompt, resolvedModel, requestedMcpServers, approvalDecision, reviewIntegrity, args };
+  return {
+    corrId,
+    effectivePrompt,
+    resolvedModel,
+    requestedMcpServers,
+    approvalDecision,
+    reviewIntegrity,
+    args,
+  };
 }
 
 function buildCliResponse(
@@ -1449,13 +1474,21 @@ export async function handleGrokRequest(
 ): Promise<ExtendedToolResponse> {
   const startTime = Date.now();
   const prep = prepareGrokRequest({
-    prompt: params.prompt, model: params.model, outputFormat: params.outputFormat,
-    alwaysApprove: params.alwaysApprove, permissionMode: params.permissionMode,
-    effort: params.effort, reasoningEffort: params.reasoningEffort,
-    allowedTools: params.allowedTools, disallowedTools: params.disallowedTools,
-    approvalStrategy: params.approvalStrategy, approvalPolicy: params.approvalPolicy,
-    mcpServers: params.mcpServers, correlationId: params.correlationId,
-    optimizePrompt: params.optimizePrompt, operation: "grok_request"
+    prompt: params.prompt,
+    model: params.model,
+    outputFormat: params.outputFormat,
+    alwaysApprove: params.alwaysApprove,
+    permissionMode: params.permissionMode,
+    effort: params.effort,
+    reasoningEffort: params.reasoningEffort,
+    allowedTools: params.allowedTools,
+    disallowedTools: params.disallowedTools,
+    approvalStrategy: params.approvalStrategy,
+    approvalPolicy: params.approvalPolicy,
+    mcpServers: params.mcpServers,
+    correlationId: params.correlationId,
+    optimizePrompt: params.optimizePrompt,
+    operation: "grok_request",
   });
   if (!("args" in prep)) return prep;
 
@@ -1467,18 +1500,29 @@ export async function handleGrokRequest(
     cli: "grok",
     model: prep.resolvedModel || "default",
     prompt: params.prompt,
-    sessionId: params.sessionId
+    sessionId: params.sessionId,
   });
-  deps.logger.info(`[${corrId}] grok_request invoked with model=${prep.resolvedModel || "default"}, permissionMode=${params.permissionMode}, prompt length=${params.prompt.length}`);
+  deps.logger.info(
+    `[${corrId}] grok_request invoked with model=${prep.resolvedModel || "default"}, permissionMode=${params.permissionMode}, prompt length=${params.prompt.length}`
+  );
 
   try {
     // Session arg planning (pure, no I/O)
     const sessionResult = resolveGrokSessionArgs({
-      sessionId: params.sessionId, resumeLatest: params.resumeLatest, createNewSession: params.createNewSession
+      sessionId: params.sessionId,
+      resumeLatest: params.resumeLatest,
+      createNewSession: params.createNewSession,
     });
     args.push(...sessionResult.resumeArgs);
 
-    const result = await awaitJobOrDefer("grok", args, corrId, resolveIdleTimeout("grok", params.idleTimeoutMs), params.outputFormat, params.forceRefresh);
+    const result = await awaitJobOrDefer(
+      "grok",
+      args,
+      corrId,
+      resolveIdleTimeout("grok", params.idleTimeoutMs),
+      params.outputFormat,
+      params.forceRefresh
+    );
 
     // Deferred — job still running, return async reference
     if (isDeferredResponse(result)) {
@@ -1491,8 +1535,14 @@ export async function handleGrokRequest(
     if (code !== 0) {
       deps.logger.info(`[${corrId}] grok_request failed in ${durationMs}ms`);
       safeFlightComplete(corrId, {
-        response: stderr || "", durationMs, retryCount: 0, circuitBreakerState: "closed",
-        optimizationApplied: false, exitCode: code, errorMessage: stderr || `Exit code ${code}`, status: "failed"
+        response: stderr || "",
+        durationMs,
+        retryCount: 0,
+        circuitBreakerState: "closed",
+        optimizationApplied: false,
+        exitCode: code,
+        errorMessage: stderr || `Exit code ${code}`,
+        status: "failed",
       });
       return createErrorResponse("grok", code, stderr, corrId);
     }
@@ -1513,25 +1563,48 @@ export async function handleGrokRequest(
       await deps.sessionManager.updateSessionUsage(effectiveSessionId);
     } else if (!params.createNewSession && !effectiveSessionId) {
       const newSession = await deps.sessionManager.createSession(
-        "grok", "Grok Session", `${GATEWAY_SESSION_PREFIX}${randomUUID()}`
+        "grok",
+        "Grok Session",
+        `${GATEWAY_SESSION_PREFIX}${randomUUID()}`
       );
       effectiveSessionId = newSession.id;
     }
 
     deps.logger.info(`[${corrId}] grok_request completed successfully in ${durationMs}ms`);
-    const response = buildCliResponse("grok", stdout, params.optimizeResponse ?? false, corrId, effectiveSessionId, prep, durationMs, sessionResult.userProvidedSession, params.outputFormat);
+    const response = buildCliResponse(
+      "grok",
+      stdout,
+      params.optimizeResponse ?? false,
+      corrId,
+      effectiveSessionId,
+      prep,
+      durationMs,
+      sessionResult.userProvidedSession,
+      params.outputFormat
+    );
     safeFlightComplete(corrId, {
-      response: stdout, durationMs, retryCount: 0, circuitBreakerState: "closed",
-      approvalDecision: prep.approvalDecision?.status, optimizationApplied: params.optimizePrompt || (params.optimizeResponse ?? false),
-      exitCode: 0, status: "completed"
+      response: stdout,
+      durationMs,
+      retryCount: 0,
+      circuitBreakerState: "closed",
+      approvalDecision: prep.approvalDecision?.status,
+      optimizationApplied: params.optimizePrompt || (params.optimizeResponse ?? false),
+      exitCode: 0,
+      status: "completed",
     });
     return response;
   } catch (error) {
     const elapsedMs = Math.max(0, Date.now() - startTime);
     deps.logger.info(`[${corrId}] grok_request threw exception after ${elapsedMs}ms`);
     safeFlightComplete(corrId, {
-      response: "", durationMs: elapsedMs, retryCount: 0, circuitBreakerState: "closed",
-      optimizationApplied: false, exitCode: 1, errorMessage: (error as Error).message, status: "failed"
+      response: "",
+      durationMs: elapsedMs,
+      retryCount: 0,
+      circuitBreakerState: "closed",
+      optimizationApplied: false,
+      exitCode: 1,
+      errorMessage: (error as Error).message,
+      status: "failed",
     });
     return createErrorResponse("grok", 1, "", corrId, error as Error);
   } finally {
@@ -1545,13 +1618,21 @@ export async function handleGrokRequestAsync(
   params: Omit<GrokRequestParams, "optimizeResponse">
 ): Promise<ExtendedToolResponse> {
   const prep = prepareGrokRequest({
-    prompt: params.prompt, model: params.model, outputFormat: params.outputFormat,
-    alwaysApprove: params.alwaysApprove, permissionMode: params.permissionMode,
-    effort: params.effort, reasoningEffort: params.reasoningEffort,
-    allowedTools: params.allowedTools, disallowedTools: params.disallowedTools,
-    approvalStrategy: params.approvalStrategy, approvalPolicy: params.approvalPolicy,
-    mcpServers: params.mcpServers, correlationId: params.correlationId,
-    optimizePrompt: params.optimizePrompt, operation: "grok_request_async"
+    prompt: params.prompt,
+    model: params.model,
+    outputFormat: params.outputFormat,
+    alwaysApprove: params.alwaysApprove,
+    permissionMode: params.permissionMode,
+    effort: params.effort,
+    reasoningEffort: params.reasoningEffort,
+    allowedTools: params.allowedTools,
+    disallowedTools: params.disallowedTools,
+    approvalStrategy: params.approvalStrategy,
+    approvalPolicy: params.approvalPolicy,
+    mcpServers: params.mcpServers,
+    correlationId: params.correlationId,
+    optimizePrompt: params.optimizePrompt,
+    operation: "grok_request_async",
   });
   if (!("args" in prep)) return prep;
 
@@ -1560,7 +1641,9 @@ export async function handleGrokRequestAsync(
   try {
     // Session arg planning (pure, no I/O)
     const sessionResult = resolveGrokSessionArgs({
-      sessionId: params.sessionId, resumeLatest: params.resumeLatest, createNewSession: params.createNewSession
+      sessionId: params.sessionId,
+      resumeLatest: params.resumeLatest,
+      createNewSession: params.createNewSession,
     });
     args.push(...sessionResult.resumeArgs);
 
@@ -1579,13 +1662,23 @@ export async function handleGrokRequestAsync(
       await deps.sessionManager.updateSessionUsage(effectiveSessionId);
     } else if (!params.createNewSession && !effectiveSessionId) {
       const newSession = await deps.sessionManager.createSession(
-        "grok", "Grok Session", `${GATEWAY_SESSION_PREFIX}${randomUUID()}`
+        "grok",
+        "Grok Session",
+        `${GATEWAY_SESSION_PREFIX}${randomUUID()}`
       );
       effectiveSessionId = newSession.id;
     }
 
     // Start job only after all session I/O succeeds
-    const job = deps.asyncJobManager.startJob("grok", args, corrId, undefined, resolveIdleTimeout("grok", params.idleTimeoutMs), params.outputFormat, params.forceRefresh);
+    const job = deps.asyncJobManager.startJob(
+      "grok",
+      args,
+      corrId,
+      undefined,
+      resolveIdleTimeout("grok", params.idleTimeoutMs),
+      params.outputFormat,
+      params.forceRefresh
+    );
     deps.logger.info(`[${corrId}] grok_request_async started job ${job.id}`);
 
     const asyncResponse: Record<string, unknown> = {
@@ -1594,17 +1687,19 @@ export async function handleGrokRequestAsync(
       sessionId: effectiveSessionId || null,
       resumable: sessionResult.userProvidedSession,
       approval: approvalDecision,
-      mcpServers: { requested: requestedMcpServers }
+      mcpServers: { requested: requestedMcpServers },
     };
     if (prep.reviewIntegrity && prep.reviewIntegrity.violations.length > 0) {
       asyncResponse.reviewIntegrity = prep.reviewIntegrity;
     }
 
     return {
-      content: [{
-        type: "text" as const,
-        text: JSON.stringify(asyncResponse, null, 2)
-      }]
+      content: [
+        {
+          type: "text" as const,
+          text: JSON.stringify(asyncResponse, null, 2),
+        },
+      ],
     };
   } catch (error) {
     return createErrorResponse("grok_request_async", 1, "", corrId, error as Error);
@@ -2200,13 +2295,56 @@ server.tool(
     correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
     optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution"),
     optimizeResponse: z.boolean().default(false).describe("Optimize response output"),
-    idleTimeoutMs: z.number().int().min(30_000).max(3_600_000).optional().describe("Idle timeout in ms (min 30s, max 1h, omit=CLI default)"),
-    forceRefresh: z.boolean().default(false).describe("Bypass dedup and force a fresh CLI run even if a recent identical request exists")
+    idleTimeoutMs: z
+      .number()
+      .int()
+      .min(30_000)
+      .max(3_600_000)
+      .optional()
+      .describe("Idle timeout in ms (min 30s, max 1h, omit=CLI default)"),
+    forceRefresh: z
+      .boolean()
+      .default(false)
+      .describe("Bypass dedup and force a fresh CLI run even if a recent identical request exists"),
   },
-  async ({ prompt, model, sessionId, resumeLatest, createNewSession, approvalMode, approvalStrategy, approvalPolicy, mcpServers, allowedTools, includeDirs, correlationId, optimizePrompt, optimizeResponse, idleTimeoutMs, forceRefresh }) => {
+  async ({
+    prompt,
+    model,
+    sessionId,
+    resumeLatest,
+    createNewSession,
+    approvalMode,
+    approvalStrategy,
+    approvalPolicy,
+    mcpServers,
+    allowedTools,
+    includeDirs,
+    correlationId,
+    optimizePrompt,
+    optimizeResponse,
+    idleTimeoutMs,
+    forceRefresh,
+  }) => {
     return handleGeminiRequest(
       { sessionManager, logger },
-      { prompt, model, sessionId, resumeLatest, createNewSession, approvalMode, approvalStrategy, approvalPolicy, mcpServers, allowedTools, includeDirs, correlationId, optimizePrompt, optimizeResponse, idleTimeoutMs, forceRefresh }
+      {
+        prompt,
+        model,
+        sessionId,
+        resumeLatest,
+        createNewSession,
+        approvalMode,
+        approvalStrategy,
+        approvalPolicy,
+        mcpServers,
+        allowedTools,
+        includeDirs,
+        correlationId,
+        optimizePrompt,
+        optimizeResponse,
+        idleTimeoutMs,
+        forceRefresh,
+      }
     );
   }
 );
@@ -2218,31 +2356,118 @@ server.tool(
 server.tool(
   "grok_request",
   {
-    prompt: z.string().min(1, "Prompt cannot be empty").max(100000, "Prompt too long (max 100k chars)").describe("Prompt text for Grok"),
+    prompt: z
+      .string()
+      .min(1, "Prompt cannot be empty")
+      .max(100000, "Prompt too long (max 100k chars)")
+      .describe("Prompt text for Grok"),
     model: z.string().optional().describe("Model name or alias (e.g. grok-build, latest)"),
-    outputFormat: z.enum(["plain", "json", "streaming-json"]).optional().describe("Output format (plain|json|streaming-json). Grok default is plain."),
+    outputFormat: z
+      .enum(["plain", "json", "streaming-json"])
+      .optional()
+      .describe("Output format (plain|json|streaming-json). Grok default is plain."),
     sessionId: z.string().optional().describe("Session ID (user-provided CLI handle for --resume)"),
-    resumeLatest: z.boolean().default(false).describe("Resume most recent Grok session in cwd (--continue)"),
+    resumeLatest: z
+      .boolean()
+      .default(false)
+      .describe("Resume most recent Grok session in cwd (--continue)"),
     createNewSession: z.boolean().default(false).describe("Force new session"),
-    alwaysApprove: z.boolean().default(false).describe("Auto-approve all tool executions (--always-approve)"),
-    permissionMode: z.enum(["default", "acceptEdits", "auto", "dontAsk", "bypassPermissions", "plan"]).optional().describe("Grok permission mode"),
-    effort: z.enum(["low", "medium", "high", "xhigh", "max"]).optional().describe("Grok effort level"),
+    alwaysApprove: z
+      .boolean()
+      .default(false)
+      .describe("Auto-approve all tool executions (--always-approve)"),
+    permissionMode: z
+      .enum(["default", "acceptEdits", "auto", "dontAsk", "bypassPermissions", "plan"])
+      .optional()
+      .describe("Grok permission mode"),
+    effort: z
+      .enum(["low", "medium", "high", "xhigh", "max"])
+      .optional()
+      .describe("Grok effort level"),
     reasoningEffort: z.string().optional().describe("Reasoning effort for reasoning models"),
-    approvalStrategy: z.enum(["legacy", "mcp_managed"]).default("legacy").describe("Approval strategy"),
-    approvalPolicy: z.enum(["strict", "balanced", "permissive"]).optional().describe("Approval policy override"),
-    mcpServers: z.array(MCP_SERVER_ENUM).default(["sqry"]).describe("MCP server names for approval tracking (Grok manages its own MCP config via `grok mcp`)"),
-    allowedTools: z.array(z.string()).optional().describe("Allowed built-in tools (passed as --tools comma list)"),
-    disallowedTools: z.array(z.string()).optional().describe("Disallowed built-in tools (passed as --disallowed-tools comma list)"),
+    approvalStrategy: z
+      .enum(["legacy", "mcp_managed"])
+      .default("legacy")
+      .describe("Approval strategy"),
+    approvalPolicy: z
+      .enum(["strict", "balanced", "permissive"])
+      .optional()
+      .describe("Approval policy override"),
+    mcpServers: z
+      .array(MCP_SERVER_ENUM)
+      .default(["sqry"])
+      .describe(
+        "MCP server names for approval tracking (Grok manages its own MCP config via `grok mcp`)"
+      ),
+    allowedTools: z
+      .array(z.string())
+      .optional()
+      .describe("Allowed built-in tools (passed as --tools comma list)"),
+    disallowedTools: z
+      .array(z.string())
+      .optional()
+      .describe("Disallowed built-in tools (passed as --disallowed-tools comma list)"),
     correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
     optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution"),
     optimizeResponse: z.boolean().default(false).describe("Optimize response output"),
-    idleTimeoutMs: z.number().int().min(30_000).max(3_600_000).optional().describe("Idle timeout in ms (min 30s, max 1h, omit=CLI default)"),
-    forceRefresh: z.boolean().default(false).describe("Bypass dedup and force a fresh CLI run even if a recent identical request exists")
+    idleTimeoutMs: z
+      .number()
+      .int()
+      .min(30_000)
+      .max(3_600_000)
+      .optional()
+      .describe("Idle timeout in ms (min 30s, max 1h, omit=CLI default)"),
+    forceRefresh: z
+      .boolean()
+      .default(false)
+      .describe("Bypass dedup and force a fresh CLI run even if a recent identical request exists"),
   },
-  async ({ prompt, model, outputFormat, sessionId, resumeLatest, createNewSession, alwaysApprove, permissionMode, effort, reasoningEffort, approvalStrategy, approvalPolicy, mcpServers, allowedTools, disallowedTools, correlationId, optimizePrompt, optimizeResponse, idleTimeoutMs, forceRefresh }) => {
+  async ({
+    prompt,
+    model,
+    outputFormat,
+    sessionId,
+    resumeLatest,
+    createNewSession,
+    alwaysApprove,
+    permissionMode,
+    effort,
+    reasoningEffort,
+    approvalStrategy,
+    approvalPolicy,
+    mcpServers,
+    allowedTools,
+    disallowedTools,
+    correlationId,
+    optimizePrompt,
+    optimizeResponse,
+    idleTimeoutMs,
+    forceRefresh,
+  }) => {
     return handleGrokRequest(
       { sessionManager, logger },
-      { prompt, model, outputFormat, sessionId, resumeLatest, createNewSession, alwaysApprove, permissionMode, effort, reasoningEffort, approvalStrategy, approvalPolicy, mcpServers, allowedTools, disallowedTools, correlationId, optimizePrompt, optimizeResponse, idleTimeoutMs, forceRefresh }
+      {
+        prompt,
+        model,
+        outputFormat,
+        sessionId,
+        resumeLatest,
+        createNewSession,
+        alwaysApprove,
+        permissionMode,
+        effort,
+        reasoningEffort,
+        approvalStrategy,
+        approvalPolicy,
+        mcpServers,
+        allowedTools,
+        disallowedTools,
+        correlationId,
+        optimizePrompt,
+        optimizeResponse,
+        idleTimeoutMs,
+        forceRefresh,
+      }
     );
   }
 );
@@ -2297,10 +2522,37 @@ server.tool(
       .describe("Restrict Claude to provided MCP config only"),
     correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
     optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution"),
-    idleTimeoutMs: z.number().int().min(30_000).max(3_600_000).optional().describe("Idle timeout in ms (min 30s, max 1h, omit=CLI default)"),
-    forceRefresh: z.boolean().default(false).describe("Bypass dedup and force a fresh CLI run even if a recent identical request exists")
+    idleTimeoutMs: z
+      .number()
+      .int()
+      .min(30_000)
+      .max(3_600_000)
+      .optional()
+      .describe("Idle timeout in ms (min 30s, max 1h, omit=CLI default)"),
+    forceRefresh: z
+      .boolean()
+      .default(false)
+      .describe("Bypass dedup and force a fresh CLI run even if a recent identical request exists"),
   },
-  async ({ prompt, model, outputFormat, sessionId, continueSession, createNewSession, allowedTools, disallowedTools, dangerouslySkipPermissions, approvalStrategy, approvalPolicy, mcpServers, strictMcpConfig, correlationId, optimizePrompt, idleTimeoutMs, forceRefresh }) => {
+  async ({
+    prompt,
+    model,
+    outputFormat,
+    sessionId,
+    continueSession,
+    createNewSession,
+    allowedTools,
+    disallowedTools,
+    dangerouslySkipPermissions,
+    approvalStrategy,
+    approvalPolicy,
+    mcpServers,
+    strictMcpConfig,
+    correlationId,
+    optimizePrompt,
+    idleTimeoutMs,
+    forceRefresh,
+  }) => {
     const prep = prepareClaudeRequest({
       prompt,
       model,
@@ -2348,11 +2600,20 @@ server.tool(
       }
 
       // Idle timeout only for stream-json (text/json produce no output until done)
-      const effectiveIdleTimeout = outputFormat === "stream-json"
-        ? resolveIdleTimeout("claude", idleTimeoutMs)
-        : undefined;
-      const job = asyncJobManager.startJob("claude", args, corrId, undefined, effectiveIdleTimeout, outputFormat, forceRefresh);
-      logger.info(`[${corrId}] claude_request_async started job ${job.id}, outputFormat=${outputFormat}`);
+      const effectiveIdleTimeout =
+        outputFormat === "stream-json" ? resolveIdleTimeout("claude", idleTimeoutMs) : undefined;
+      const job = asyncJobManager.startJob(
+        "claude",
+        args,
+        corrId,
+        undefined,
+        effectiveIdleTimeout,
+        outputFormat,
+        forceRefresh
+      );
+      logger.info(
+        `[${corrId}] claude_request_async started job ${job.id}, outputFormat=${outputFormat}`
+      );
 
       const asyncResponse: Record<string, unknown> = {
         success: true,
@@ -2393,22 +2654,83 @@ server.tool(
       .describe("Prompt text for Codex"),
     model: z.string().optional().describe("Model name or alias (e.g. gpt-5.4, latest)"),
     fullAuto: z.boolean().default(false).describe("Full-auto mode (sandboxed execution)"),
-    dangerouslyBypassApprovalsAndSandbox: z.boolean().default(false).describe("Run Codex without approvals/sandbox"),
-    approvalStrategy: z.enum(["legacy", "mcp_managed"]).default("legacy").describe("Approval strategy"),
-    approvalPolicy: z.enum(["strict", "balanced", "permissive"]).optional().describe("Approval policy override"),
-    mcpServers: z.array(MCP_SERVER_ENUM).default(["sqry"]).describe("MCP server names for approval tracking (Codex manages its own MCP config)"),
-    sessionId: z.string().optional().describe("Codex session UUID to resume via `codex exec resume <ID>`. Must be a real Codex session ID (from `~/.codex/sessions/` or the `codex resume` picker). Gateway-generated `gw-*` IDs are rejected."),
-    resumeLatest: z.boolean().default(false).describe("Resume the most recent Codex session in the current cwd via `codex exec resume --last`. Ignored if sessionId is set."),
+    dangerouslyBypassApprovalsAndSandbox: z
+      .boolean()
+      .default(false)
+      .describe("Run Codex without approvals/sandbox"),
+    approvalStrategy: z
+      .enum(["legacy", "mcp_managed"])
+      .default("legacy")
+      .describe("Approval strategy"),
+    approvalPolicy: z
+      .enum(["strict", "balanced", "permissive"])
+      .optional()
+      .describe("Approval policy override"),
+    mcpServers: z
+      .array(MCP_SERVER_ENUM)
+      .default(["sqry"])
+      .describe("MCP server names for approval tracking (Codex manages its own MCP config)"),
+    sessionId: z
+      .string()
+      .optional()
+      .describe(
+        "Codex session UUID to resume via `codex exec resume <ID>`. Must be a real Codex session ID (from `~/.codex/sessions/` or the `codex resume` picker). Gateway-generated `gw-*` IDs are rejected."
+      ),
+    resumeLatest: z
+      .boolean()
+      .default(false)
+      .describe(
+        "Resume the most recent Codex session in the current cwd via `codex exec resume --last`. Ignored if sessionId is set."
+      ),
     createNewSession: z.boolean().default(false).describe("Force a fresh session (no resume)"),
     correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
     optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution"),
-    idleTimeoutMs: z.number().int().min(30_000).max(3_600_000).optional().describe("Idle timeout in ms (min 30s, max 1h, omit=CLI default)"),
-    forceRefresh: z.boolean().default(false).describe("Bypass dedup and force a fresh CLI run even if a recent identical request exists")
+    idleTimeoutMs: z
+      .number()
+      .int()
+      .min(30_000)
+      .max(3_600_000)
+      .optional()
+      .describe("Idle timeout in ms (min 30s, max 1h, omit=CLI default)"),
+    forceRefresh: z
+      .boolean()
+      .default(false)
+      .describe("Bypass dedup and force a fresh CLI run even if a recent identical request exists"),
   },
-  async ({ prompt, model, fullAuto, dangerouslyBypassApprovalsAndSandbox, approvalStrategy, approvalPolicy, mcpServers, sessionId, resumeLatest, createNewSession, correlationId, optimizePrompt, idleTimeoutMs, forceRefresh }) => {
+  async ({
+    prompt,
+    model,
+    fullAuto,
+    dangerouslyBypassApprovalsAndSandbox,
+    approvalStrategy,
+    approvalPolicy,
+    mcpServers,
+    sessionId,
+    resumeLatest,
+    createNewSession,
+    correlationId,
+    optimizePrompt,
+    idleTimeoutMs,
+    forceRefresh,
+  }) => {
     return handleCodexRequestAsync(
       { sessionManager, asyncJobManager, logger },
-      { prompt, model, fullAuto, dangerouslyBypassApprovalsAndSandbox, approvalStrategy, approvalPolicy, mcpServers, sessionId, resumeLatest, createNewSession, correlationId, optimizePrompt, idleTimeoutMs, forceRefresh }
+      {
+        prompt,
+        model,
+        fullAuto,
+        dangerouslyBypassApprovalsAndSandbox,
+        approvalStrategy,
+        approvalPolicy,
+        mcpServers,
+        sessionId,
+        resumeLatest,
+        createNewSession,
+        correlationId,
+        optimizePrompt,
+        idleTimeoutMs,
+        forceRefresh,
+      }
     );
   }
 );
@@ -2453,13 +2775,54 @@ server.tool(
     includeDirs: z.array(z.string()).optional().describe("Additional workspace directories"),
     correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
     optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution"),
-    idleTimeoutMs: z.number().int().min(30_000).max(3_600_000).optional().describe("Idle timeout in ms (min 30s, max 1h, omit=CLI default)"),
-    forceRefresh: z.boolean().default(false).describe("Bypass dedup and force a fresh CLI run even if a recent identical request exists")
+    idleTimeoutMs: z
+      .number()
+      .int()
+      .min(30_000)
+      .max(3_600_000)
+      .optional()
+      .describe("Idle timeout in ms (min 30s, max 1h, omit=CLI default)"),
+    forceRefresh: z
+      .boolean()
+      .default(false)
+      .describe("Bypass dedup and force a fresh CLI run even if a recent identical request exists"),
   },
-  async ({ prompt, model, sessionId, resumeLatest, createNewSession, approvalMode, approvalStrategy, approvalPolicy, mcpServers, allowedTools, includeDirs, correlationId, optimizePrompt, idleTimeoutMs, forceRefresh }) => {
+  async ({
+    prompt,
+    model,
+    sessionId,
+    resumeLatest,
+    createNewSession,
+    approvalMode,
+    approvalStrategy,
+    approvalPolicy,
+    mcpServers,
+    allowedTools,
+    includeDirs,
+    correlationId,
+    optimizePrompt,
+    idleTimeoutMs,
+    forceRefresh,
+  }) => {
     return handleGeminiRequestAsync(
       { sessionManager, asyncJobManager, logger },
-      { prompt, model, sessionId, resumeLatest, createNewSession, approvalMode, approvalStrategy, approvalPolicy, mcpServers, allowedTools, includeDirs, correlationId, optimizePrompt, idleTimeoutMs, forceRefresh }
+      {
+        prompt,
+        model,
+        sessionId,
+        resumeLatest,
+        createNewSession,
+        approvalMode,
+        approvalStrategy,
+        approvalPolicy,
+        mcpServers,
+        allowedTools,
+        includeDirs,
+        correlationId,
+        optimizePrompt,
+        idleTimeoutMs,
+        forceRefresh,
+      }
     );
   }
 );
@@ -2467,30 +2830,115 @@ server.tool(
 server.tool(
   "grok_request_async",
   {
-    prompt: z.string().min(1, "Prompt cannot be empty").max(100000, "Prompt too long (max 100k chars)").describe("Prompt text for Grok"),
+    prompt: z
+      .string()
+      .min(1, "Prompt cannot be empty")
+      .max(100000, "Prompt too long (max 100k chars)")
+      .describe("Prompt text for Grok"),
     model: z.string().optional().describe("Model name or alias (e.g. grok-build, latest)"),
-    outputFormat: z.enum(["plain", "json", "streaming-json"]).optional().describe("Output format (plain|json|streaming-json). Grok default is plain."),
+    outputFormat: z
+      .enum(["plain", "json", "streaming-json"])
+      .optional()
+      .describe("Output format (plain|json|streaming-json). Grok default is plain."),
     sessionId: z.string().optional().describe("Session ID (user-provided CLI handle for --resume)"),
-    resumeLatest: z.boolean().default(false).describe("Resume most recent Grok session in cwd (--continue)"),
+    resumeLatest: z
+      .boolean()
+      .default(false)
+      .describe("Resume most recent Grok session in cwd (--continue)"),
     createNewSession: z.boolean().default(false).describe("Force new session"),
-    alwaysApprove: z.boolean().default(false).describe("Auto-approve all tool executions (--always-approve)"),
-    permissionMode: z.enum(["default", "acceptEdits", "auto", "dontAsk", "bypassPermissions", "plan"]).optional().describe("Grok permission mode"),
-    effort: z.enum(["low", "medium", "high", "xhigh", "max"]).optional().describe("Grok effort level"),
+    alwaysApprove: z
+      .boolean()
+      .default(false)
+      .describe("Auto-approve all tool executions (--always-approve)"),
+    permissionMode: z
+      .enum(["default", "acceptEdits", "auto", "dontAsk", "bypassPermissions", "plan"])
+      .optional()
+      .describe("Grok permission mode"),
+    effort: z
+      .enum(["low", "medium", "high", "xhigh", "max"])
+      .optional()
+      .describe("Grok effort level"),
     reasoningEffort: z.string().optional().describe("Reasoning effort for reasoning models"),
-    approvalStrategy: z.enum(["legacy", "mcp_managed"]).default("legacy").describe("Approval strategy"),
-    approvalPolicy: z.enum(["strict", "balanced", "permissive"]).optional().describe("Approval policy override"),
-    mcpServers: z.array(MCP_SERVER_ENUM).default(["sqry"]).describe("MCP server names for approval tracking (Grok manages its own MCP config via `grok mcp`)"),
-    allowedTools: z.array(z.string()).optional().describe("Allowed built-in tools (passed as --tools comma list)"),
-    disallowedTools: z.array(z.string()).optional().describe("Disallowed built-in tools (passed as --disallowed-tools comma list)"),
+    approvalStrategy: z
+      .enum(["legacy", "mcp_managed"])
+      .default("legacy")
+      .describe("Approval strategy"),
+    approvalPolicy: z
+      .enum(["strict", "balanced", "permissive"])
+      .optional()
+      .describe("Approval policy override"),
+    mcpServers: z
+      .array(MCP_SERVER_ENUM)
+      .default(["sqry"])
+      .describe(
+        "MCP server names for approval tracking (Grok manages its own MCP config via `grok mcp`)"
+      ),
+    allowedTools: z
+      .array(z.string())
+      .optional()
+      .describe("Allowed built-in tools (passed as --tools comma list)"),
+    disallowedTools: z
+      .array(z.string())
+      .optional()
+      .describe("Disallowed built-in tools (passed as --disallowed-tools comma list)"),
     correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
     optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution"),
-    idleTimeoutMs: z.number().int().min(30_000).max(3_600_000).optional().describe("Idle timeout in ms (min 30s, max 1h, omit=CLI default)"),
-    forceRefresh: z.boolean().default(false).describe("Bypass dedup and force a fresh CLI run even if a recent identical request exists")
+    idleTimeoutMs: z
+      .number()
+      .int()
+      .min(30_000)
+      .max(3_600_000)
+      .optional()
+      .describe("Idle timeout in ms (min 30s, max 1h, omit=CLI default)"),
+    forceRefresh: z
+      .boolean()
+      .default(false)
+      .describe("Bypass dedup and force a fresh CLI run even if a recent identical request exists"),
   },
-  async ({ prompt, model, outputFormat, sessionId, resumeLatest, createNewSession, alwaysApprove, permissionMode, effort, reasoningEffort, approvalStrategy, approvalPolicy, mcpServers, allowedTools, disallowedTools, correlationId, optimizePrompt, idleTimeoutMs, forceRefresh }) => {
+  async ({
+    prompt,
+    model,
+    outputFormat,
+    sessionId,
+    resumeLatest,
+    createNewSession,
+    alwaysApprove,
+    permissionMode,
+    effort,
+    reasoningEffort,
+    approvalStrategy,
+    approvalPolicy,
+    mcpServers,
+    allowedTools,
+    disallowedTools,
+    correlationId,
+    optimizePrompt,
+    idleTimeoutMs,
+    forceRefresh,
+  }) => {
     return handleGrokRequestAsync(
       { sessionManager, asyncJobManager, logger },
-      { prompt, model, outputFormat, sessionId, resumeLatest, createNewSession, alwaysApprove, permissionMode, effort, reasoningEffort, approvalStrategy, approvalPolicy, mcpServers, allowedTools, disallowedTools, correlationId, optimizePrompt, idleTimeoutMs, forceRefresh }
+      {
+        prompt,
+        model,
+        outputFormat,
+        sessionId,
+        resumeLatest,
+        createNewSession,
+        alwaysApprove,
+        permissionMode,
+        effort,
+        reasoningEffort,
+        approvalStrategy,
+        approvalPolicy,
+        mcpServers,
+        allowedTools,
+        disallowedTools,
+        correlationId,
+        optimizePrompt,
+        idleTimeoutMs,
+        forceRefresh,
+      }
     );
   }
 );
@@ -2722,10 +3170,12 @@ server.tool(
 server.tool(
   "cli_versions",
   {
-    cli: z.preprocess(
-      (value) => (value === "" || value === null ? undefined : value),
-      z.enum(["claude", "codex", "gemini"]).optional()
-    ).describe("CLI filter (claude|codex|gemini)")
+    cli: z
+      .preprocess(
+        value => (value === "" || value === null ? undefined : value),
+        z.enum(["claude", "codex", "gemini"]).optional()
+      )
+      .describe("CLI filter (claude|codex|gemini)"),
   },
   async ({ cli }) => {
     const versions = await getCliVersions(cli);
@@ -2737,33 +3187,58 @@ server.tool(
   "cli_upgrade",
   {
     cli: z.enum(["claude", "codex", "gemini"]).describe("CLI to upgrade"),
-    target: z.string().min(1).default("latest").describe("Package tag/version/target to install (default: latest)"),
-    dryRun: z.boolean().default(true).describe("When true, return the upgrade plan without running it"),
-    timeoutMs: z.number().int().min(30_000).max(3_600_000).optional().describe("Upgrade timeout in ms when dryRun=false")
+    target: z
+      .string()
+      .min(1)
+      .default("latest")
+      .describe("Package tag/version/target to install (default: latest)"),
+    dryRun: z
+      .boolean()
+      .default(true)
+      .describe("When true, return the upgrade plan without running it"),
+    timeoutMs: z
+      .number()
+      .int()
+      .min(30_000)
+      .max(3_600_000)
+      .optional()
+      .describe("Upgrade timeout in ms when dryRun=false"),
   },
   async ({ cli, target, dryRun, timeoutMs }) => {
     try {
       const result = await runCliUpgrade({ cli, target, dryRun, timeoutMs, logger });
       return {
-        content: [{
-          type: "text",
-          text: JSON.stringify({
-            success: true,
-            ...result
-          }, null, 2)
-        }]
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(
+              {
+                success: true,
+                ...result,
+              },
+              null,
+              2
+            ),
+          },
+        ],
       };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       return {
-        content: [{
-          type: "text",
-          text: JSON.stringify({
-            success: false,
-            error: message
-          }, null, 2)
-        }],
-        isError: true
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(
+              {
+                success: false,
+                error: message,
+              },
+              null,
+              2
+            ),
+          },
+        ],
+        isError: true,
       };
     }
   }

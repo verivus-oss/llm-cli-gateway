@@ -137,7 +137,7 @@ describe("request-helpers", () => {
       const result = resolveGrokSessionArgs({
         sessionId: "user-abc",
         resumeLatest: true,
-        createNewSession: true
+        createNewSession: true,
       });
       expect(result.resumeArgs).toEqual([]);
       expect(result.userProvidedSession).toBe(false);
@@ -146,7 +146,7 @@ describe("request-helpers", () => {
     it("resumeLatest=true maps to --continue (not --resume latest)", () => {
       const result = resolveGrokSessionArgs({
         resumeLatest: true,
-        createNewSession: false
+        createNewSession: false,
       });
       expect(result.resumeArgs).toEqual(["--continue"]);
       expect(result.effectiveSessionId).toBeUndefined();
@@ -156,7 +156,7 @@ describe("request-helpers", () => {
     it("user-provided sessionId returns --resume with that ID", () => {
       const result = resolveGrokSessionArgs({
         sessionId: "user-abc",
-        createNewSession: false
+        createNewSession: false,
       });
       expect(result.resumeArgs).toEqual(["--resume", "user-abc"]);
       expect(result.effectiveSessionId).toBe("user-abc");
@@ -164,9 +164,9 @@ describe("request-helpers", () => {
     });
 
     it("rejects gateway-prefixed sessionId with clear error", () => {
-      expect(() =>
-        resolveGrokSessionArgs({ sessionId: "gw-abc123" })
-      ).toThrow('Session ID "gw-abc123" uses reserved prefix "gw-"');
+      expect(() => resolveGrokSessionArgs({ sessionId: "gw-abc123" })).toThrow(
+        'Session ID "gw-abc123" uses reserved prefix "gw-"'
+      );
     });
   });
 
@@ -180,7 +180,7 @@ describe("request-helpers", () => {
         resolveCodexSessionArgs({
           sessionId: "11111111-2222-3333-4444-555555555555",
           resumeLatest: true,
-          createNewSession: true
+          createNewSession: true,
         })
       ).toEqual({ mode: "new" });
     });
@@ -188,7 +188,7 @@ describe("request-helpers", () => {
     it("sessionId takes precedence over resumeLatest", () => {
       const result = resolveCodexSessionArgs({
         sessionId: "11111111-2222-3333-4444-555555555555",
-        resumeLatest: true
+        resumeLatest: true,
       });
       expect(result.mode).toBe("resume-by-id");
       expect(result.sessionId).toBe("11111111-2222-3333-4444-555555555555");
@@ -199,7 +199,9 @@ describe("request-helpers", () => {
     });
 
     it("rejects gw- prefixed sessionId", () => {
-      expect(() => resolveCodexSessionArgs({ sessionId: "gw-abc123" })).toThrow('reserved prefix "gw-"');
+      expect(() => resolveCodexSessionArgs({ sessionId: "gw-abc123" })).toThrow(
+        'reserved prefix "gw-"'
+      );
     });
 
     it("accepts a normal UUID-shaped session id", () => {

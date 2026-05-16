@@ -26,7 +26,7 @@ const ENV_KEYS = [
   "GROK_MODELS",
   "GROK_MODEL_ALIASES",
   "LLM_GATEWAY_DISABLE_MODEL_DISCOVERY",
-  "LLM_GATEWAY_MODEL_ALIASES"
+  "LLM_GATEWAY_MODEL_ALIASES",
 ] as const;
 
 describe("model registry", () => {
@@ -68,15 +68,18 @@ describe("model registry", () => {
 
   it("reads Codex default, profile models, and migrations from config.toml", () => {
     const configPath = join(tempDir, "codex.toml");
-    writeFileSync(configPath, [
-      'model = "gpt-5.5"',
-      "",
-      "[profiles.fast]",
-      'model = "gpt-5.3-codex-spark"',
-      "",
-      "[notice.model_migrations]",
-      '"gpt-5.2" = "gpt-5.3-codex"'
-    ].join("\n"));
+    writeFileSync(
+      configPath,
+      [
+        'model = "gpt-5.5"',
+        "",
+        "[profiles.fast]",
+        'model = "gpt-5.3-codex-spark"',
+        "",
+        "[notice.model_migrations]",
+        '"gpt-5.2" = "gpt-5.3-codex"',
+      ].join("\n")
+    );
     process.env.CODEX_CONFIG_PATH = configPath;
 
     const info = getCliInfo(true);
@@ -91,9 +94,12 @@ describe("model registry", () => {
   it("merges observed Gemini models without making local history authoritative", () => {
     const chatDir = join(tempDir, "gemini", "project", "chats");
     mkdirSync(chatDir, { recursive: true });
-    writeFileSync(join(chatDir, "chat.json"), JSON.stringify({
-      history: [{ request: { model: "gemini-3.0-flash-preview" } }]
-    }));
+    writeFileSync(
+      join(chatDir, "chat.json"),
+      JSON.stringify({
+        history: [{ request: { model: "gemini-3.0-flash-preview" } }],
+      })
+    );
     process.env.GEMINI_HISTORY_ROOT = join(tempDir, "gemini");
 
     const info = getCliInfo(true);
@@ -107,11 +113,12 @@ describe("model registry", () => {
 
   it("supports structured env models and explicit aliases", () => {
     process.env.GEMINI_MODELS = JSON.stringify({
-      "gemini-team-default": "Team-approved Gemini model"
+      "gemini-team-default": "Team-approved Gemini model",
     });
     process.env.GEMINI_MODEL_ALIASES = "team=gemini-team-default";
     process.env.GEMINI_DEFAULT_MODEL = "gemini-team-default";
-    process.env.LLM_GATEWAY_MODEL_ALIASES = "codex.fast=gpt-5.3-codex-spark,gemini.fast=gemini-team-default";
+    process.env.LLM_GATEWAY_MODEL_ALIASES =
+      "codex.fast=gpt-5.3-codex-spark,gemini.fast=gemini-team-default";
 
     const info = getCliInfo(true);
 
@@ -132,7 +139,7 @@ describe("model registry", () => {
 
   it("supports env-driven Grok default model and aliases", () => {
     process.env.GROK_MODELS = JSON.stringify({
-      "grok-team-pin": "Team-approved Grok model"
+      "grok-team-pin": "Team-approved Grok model",
     });
     process.env.GROK_MODEL_ALIASES = "team=grok-team-pin";
     process.env.GROK_DEFAULT_MODEL = "grok-team-pin";

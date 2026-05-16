@@ -35,12 +35,12 @@ const VERSION_ARGS: Record<CliType, string[]> = {
   claude: ["--version"],
   codex: ["--version"],
   gemini: ["--version"],
-  grok: ["--version"]
+  grok: ["--version"],
 };
 
 const NPM_PACKAGES: Record<Exclude<CliType, "claude" | "grok">, string> = {
   codex: "@openai/codex",
-  gemini: "@google/gemini-cli"
+  gemini: "@google/gemini-cli",
 };
 
 export function buildCliUpgradePlan(cli: CliType, target = "latest"): CliUpgradePlan {
@@ -54,7 +54,7 @@ export function buildCliUpgradePlan(cli: CliType, target = "latest"): CliUpgrade
         command: "claude",
         args: ["update"],
         strategy: "self-update",
-        requiresNetwork: true
+        requiresNetwork: true,
       };
     }
     return {
@@ -64,7 +64,7 @@ export function buildCliUpgradePlan(cli: CliType, target = "latest"): CliUpgrade
       args: ["install", normalizedTarget],
       strategy: "self-update",
       requiresNetwork: true,
-      note: "Claude Code supports explicit install targets through 'claude install <target>'."
+      note: "Claude Code supports explicit install targets through 'claude install <target>'.",
     };
   }
 
@@ -76,7 +76,7 @@ export function buildCliUpgradePlan(cli: CliType, target = "latest"): CliUpgrade
         command: "grok",
         args: ["update"],
         strategy: "self-update",
-        requiresNetwork: true
+        requiresNetwork: true,
       };
     }
     return {
@@ -86,7 +86,7 @@ export function buildCliUpgradePlan(cli: CliType, target = "latest"): CliUpgrade
       args: ["update", "--version", normalizedTarget],
       strategy: "self-update",
       requiresNetwork: true,
-      note: "Grok CLI supports explicit version targets via 'grok update --version <target>'."
+      note: "Grok CLI supports explicit version targets via 'grok update --version <target>'.",
     };
   }
 
@@ -97,7 +97,7 @@ export function buildCliUpgradePlan(cli: CliType, target = "latest"): CliUpgrade
       command: "codex",
       args: ["update"],
       strategy: "self-update",
-      requiresNetwork: true
+      requiresNetwork: true,
     };
   }
 
@@ -109,9 +109,10 @@ export function buildCliUpgradePlan(cli: CliType, target = "latest"): CliUpgrade
     args: ["install", "-g", `${packageName}@${normalizedTarget}`],
     strategy: "npm-global-install",
     requiresNetwork: true,
-    note: cli === "codex"
-      ? "Explicit Codex targets use the documented npm package path; latest can use 'codex update'."
-      : "Gemini CLI does not expose a self-update command in the gateway-supported CLI surface, so upgrades use npm."
+    note:
+      cli === "codex"
+        ? "Explicit Codex targets use the documented npm package path; latest can use 'codex update'."
+        : "Gemini CLI does not expose a self-update command in the gateway-supported CLI surface, so upgrades use npm.",
   };
 }
 
@@ -126,7 +127,7 @@ export async function getCliVersion(cli: CliType): Promise<CliVersionInfo> {
       installed: true,
       version: extractVersion(result.stdout, result.stderr),
       stdout: result.stdout,
-      stderr: result.stderr
+      stderr: result.stderr,
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -137,7 +138,7 @@ export async function getCliVersion(cli: CliType): Promise<CliVersionInfo> {
       installed: false,
       stdout: "",
       stderr: "",
-      error: message
+      error: message,
     };
   }
 }
@@ -159,21 +160,30 @@ export async function runCliUpgrade(params: {
     return { dryRun: true, plan };
   }
 
-  params.logger?.info(`Upgrading ${params.cli} CLI`, { target: plan.target, command: plan.command, args: plan.args });
-  const result = await executeCli(plan.command, plan.args, { timeout: params.timeoutMs ?? 600_000, logger: params.logger });
+  params.logger?.info(`Upgrading ${params.cli} CLI`, {
+    target: plan.target,
+    command: plan.command,
+    args: plan.args,
+  });
+  const result = await executeCli(plan.command, plan.args, {
+    timeout: params.timeoutMs ?? 600_000,
+    logger: params.logger,
+  });
   return {
     dryRun: false,
     plan,
     stdout: result.stdout,
     stderr: result.stderr,
-    exitCode: result.code
+    exitCode: result.code,
   };
 }
 
 function normalizeTarget(target: string): string {
   const normalized = target.trim();
   if (!normalized || normalized.startsWith("-") || /[\u0000-\u001f\u007f\s]/.test(normalized)) {
-    throw new Error("Upgrade target must be a non-empty package tag or version without whitespace and cannot start with '-'");
+    throw new Error(
+      "Upgrade target must be a non-empty package tag or version without whitespace and cannot start with '-'"
+    );
   }
   return normalized;
 }
