@@ -96,7 +96,7 @@ function rowToRecord(row: any): JobRecord {
     startedAt: row.started_at,
     finishedAt: row.finished_at,
     pid: row.pid,
-    expiresAt: row.expires_at
+    expiresAt: row.expires_at,
   };
 }
 
@@ -113,7 +113,10 @@ export class JobStore {
   private markOrphanedStmt: StatementLike;
   private deleteExpiredStmt: StatementLike;
 
-  constructor(dbPath: string, private logger: Logger = noopLogger) {
+  constructor(
+    dbPath: string,
+    private logger: Logger = noopLogger
+  ) {
     const require = createRequire(import.meta.url);
     const BetterSqlite3 = require("better-sqlite3");
 
@@ -238,7 +241,7 @@ export class JobStore {
       finished_at: null,
       pid: input.pid,
       // Running jobs never expire — only completed/failed/canceled do.
-      expires_at: FAR_FUTURE_ISO
+      expires_at: FAR_FUTURE_ISO,
     });
   }
 
@@ -250,7 +253,7 @@ export class JobStore {
       id,
       stdout,
       stderr,
-      output_truncated: outputTruncated ? 1 : 0
+      output_truncated: outputTruncated ? 1 : 0,
     });
   }
 
@@ -277,7 +280,7 @@ export class JobStore {
       output_truncated: input.outputTruncated ? 1 : 0,
       error: input.error,
       finished_at: input.finishedAt,
-      expires_at: expiresAt
+      expires_at: expiresAt,
     });
   }
 

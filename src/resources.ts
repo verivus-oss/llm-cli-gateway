@@ -83,8 +83,8 @@ export class ResourceProvider {
         mimeType: "application/json",
         annotations: {
           audience: ["user", "assistant"],
-          priority: 0.6
-        }
+          priority: 0.6,
+        },
       },
       {
         uri: "models://claude",
@@ -127,8 +127,8 @@ export class ResourceProvider {
         mimeType: "application/json",
         annotations: {
           audience: ["user", "assistant"],
-          priority: 0.8
-        }
+          priority: 0.8,
+        },
       },
       {
         uri: "metrics://performance",
@@ -234,12 +234,16 @@ export class ResourceProvider {
       return {
         uri,
         mimeType: "application/json",
-        text: JSON.stringify({
-          cli: "grok",
-          total: sessions.length,
-          sessions,
-          activeSession: (await this.sessionManager.getActiveSession("grok"))?.id || null
-        }, null, 2)
+        text: JSON.stringify(
+          {
+            cli: "grok",
+            total: sessions.length,
+            sessions,
+            activeSession: (await this.sessionManager.getActiveSession("grok"))?.id || null,
+          },
+          null,
+          2
+        ),
       };
     }
 
@@ -276,7 +280,7 @@ export class ResourceProvider {
       return {
         uri,
         mimeType: "application/json",
-        text: JSON.stringify(cliInfo.grok, null, 2)
+        text: JSON.stringify(cliInfo.grok, null, 2),
       };
     }
 

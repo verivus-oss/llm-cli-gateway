@@ -34,14 +34,14 @@ interface AsyncJobRecord {
   outputTruncated: boolean;
   canceled: boolean;
   error: string | null;
-  process: ChildProcess | null;        // null when reconstituted from persistence (orphan/historical)
+  process: ChildProcess | null; // null when reconstituted from persistence (orphan/historical)
   exited: boolean;
   metricsRecorded: boolean;
   outputFormat?: string;
   resetIdleTimer?: () => void;
   clearIdleTimer?: () => void;
   cleanupGroup?: () => void;
-  outputDirty: boolean;                // true if stdout/stderr changed since last DB flush
+  outputDirty: boolean; // true if stdout/stderr changed since last DB flush
   lastOutputFlushAt: number;
 }
 
@@ -188,7 +188,9 @@ export class AsyncJobManager {
       }
     }
     if (evicted > 0) {
-      this.logger.debug(`Evicted ${evicted} completed jobs from memory (durable store retains them)`);
+      this.logger.debug(
+        `Evicted ${evicted} completed jobs from memory (durable store retains them)`
+      );
     }
 
     // Sweep the durable store, too. Errors are non-fatal — the job rows just stay until next sweep.
@@ -253,7 +255,7 @@ export class AsyncJobManager {
         stderr: job.stderr,
         outputTruncated: job.outputTruncated,
         error: job.error,
-        finishedAt: job.finishedAt!
+        finishedAt: job.finishedAt!,
       })
     );
   }
@@ -303,7 +305,7 @@ export class AsyncJobManager {
       metricsRecorded: true,
       outputFormat: row.outputFormat ?? undefined,
       outputDirty: false,
-      lastOutputFlushAt: Date.now()
+      lastOutputFlushAt: Date.now(),
     };
     this.jobs.set(jobId, reconstituted);
     return reconstituted;
@@ -314,8 +316,21 @@ export class AsyncJobManager {
    * Existing callers keep working unchanged; forceRefresh is exposed as a trailing
    * optional param for the dedup-aware path.
    */
-  startJob(cli: LlmCli, args: string[], correlationId: string, cwd?: string, idleTimeoutMs?: number, outputFormat?: string, forceRefresh?: boolean): AsyncJobSnapshot {
-    return this.startJobWithDedup(cli, args, correlationId, { cwd, idleTimeoutMs, outputFormat, forceRefresh }).snapshot;
+  startJob(
+    cli: LlmCli,
+    args: string[],
+    correlationId: string,
+    cwd?: string,
+    idleTimeoutMs?: number,
+    outputFormat?: string,
+    forceRefresh?: boolean
+  ): AsyncJobSnapshot {
+    return this.startJobWithDedup(cli, args, correlationId, {
+      cwd,
+      idleTimeoutMs,
+      outputFormat,
+      forceRefresh,
+    }).snapshot;
   }
 
   /**
@@ -326,7 +341,12 @@ export class AsyncJobManager {
    * the dedup window (default 1h) and is still running or completed, its snapshot
    * is returned without spawning a new process. forceRefresh skips dedup entirely.
    */
-  startJobWithDedup(cli: LlmCli, args: string[], correlationId: string, opts: StartJobOptions = {}): StartJobOutcome {
+  startJobWithDedup(
+    cli: LlmCli,
+    args: string[],
+    correlationId: string,
+    opts: StartJobOptions = {}
+  ): StartJobOutcome {
     const { cwd, idleTimeoutMs, outputFormat, forceRefresh } = opts;
     const requestKey = this.buildRequestKey(cli, args);
 
@@ -343,12 +363,12 @@ export class AsyncJobManager {
             this.logger.info(`Job ${existing.id} reused via dedup for ${cli}`, {
               correlationId,
               originalCorrelationId: record.correlationId,
-              status: record.status
+              status: record.status,
             });
             return {
               snapshot: this.snapshot(record),
               deduped: true,
-              originalCorrelationId: record.correlationId
+              originalCorrelationId: record.correlationId,
             };
           }
         }
@@ -398,7 +418,7 @@ export class AsyncJobManager {
       outputFormat,
       cleanupGroup,
       outputDirty: false,
-      lastOutputFlushAt: Date.now()
+      lastOutputFlushAt: Date.now(),
     };
 
     this.jobs.set(id, job);
@@ -411,7 +431,7 @@ export class AsyncJobManager {
         args: [...args],
         outputFormat,
         startedAt,
-        pid: child.pid ?? null
+        pid: child.pid ?? null,
       })
     );
     this.logger.info(`Job ${id} started for ${cli}`, { correlationId });
@@ -541,7 +561,10 @@ export class AsyncJobManager {
 
     // Reconstituted (orphaned) jobs have no live process to signal — refuse cancel.
     if (!job.process) {
-      return { canceled: false, reason: "Job has no live process (orphaned from prior gateway run)" };
+      return {
+        canceled: false,
+        reason: "Job has no live process (orphaned from prior gateway run)",
+      };
     }
 
     job.canceled = true;

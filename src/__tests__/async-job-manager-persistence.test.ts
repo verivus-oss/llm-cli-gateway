@@ -24,7 +24,11 @@ describe("AsyncJobManager + JobStore (durability + dedup)", () => {
   });
 
   afterEach(() => {
-    try { store.close(); } catch { /* ignore */ }
+    try {
+      store.close();
+    } catch {
+      /* ignore */
+    }
     rmSync(tempDir, { recursive: true, force: true });
   });
 
@@ -42,7 +46,7 @@ describe("AsyncJobManager + JobStore (durability + dedup)", () => {
       cli,
       args,
       startedAt: t,
-      pid: 1234
+      pid: 1234,
     });
     store.recordComplete({
       id: "preexisting-job",
@@ -52,7 +56,7 @@ describe("AsyncJobManager + JobStore (durability + dedup)", () => {
       stderr: "",
       outputTruncated: false,
       error: null,
-      finishedAt: t
+      finishedAt: t,
     });
 
     const outcome = manager.startJobWithDedup(cli, args, "new-corr-id");
@@ -80,7 +84,7 @@ describe("AsyncJobManager + JobStore (durability + dedup)", () => {
       cli,
       args,
       startedAt: t,
-      pid: 9999
+      pid: 9999,
     });
     store.recordComplete({
       id: "historic-job",
@@ -90,7 +94,7 @@ describe("AsyncJobManager + JobStore (durability + dedup)", () => {
       stderr: "",
       outputTruncated: false,
       error: null,
-      finishedAt: t
+      finishedAt: t,
     });
 
     // The manager has not seen this job — it was created before manager existed.
@@ -111,7 +115,7 @@ describe("AsyncJobManager + JobStore (durability + dedup)", () => {
       cli: "codex",
       args: ["exec", "hi"],
       startedAt: t,
-      pid: 1
+      pid: 1,
     });
 
     // Spin up a fresh manager — its constructor should mark the row orphaned.
@@ -137,7 +141,7 @@ describe("AsyncJobManager + JobStore (durability + dedup)", () => {
       cli: "claude",
       args: args1,
       startedAt: t,
-      pid: 1
+      pid: 1,
     });
     store.recordComplete({
       id: "claude-job",
@@ -147,7 +151,7 @@ describe("AsyncJobManager + JobStore (durability + dedup)", () => {
       stderr: "",
       outputTruncated: false,
       error: null,
-      finishedAt: t
+      finishedAt: t,
     });
 
     // Different cli: should NOT dedup. We can verify by checking that
