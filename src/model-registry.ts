@@ -47,10 +47,8 @@ const FALLBACK_INFO: CliInfoMap = {
     // models map so callers that still pass `gpt-5.3-codex` resolve cleanly.
     description: "OpenAI's Codex CLI - best for code execution in sandboxed environments",
     models: {
-      "gpt-5.5":
-        "Latest Codex frontier model. Best for: most Codex tasks (default since U26)",
-      "gpt-5.4":
-        "Frontier coding and professional-work model. Best for: long-running agentic work",
+      "gpt-5.5": "Latest Codex frontier model. Best for: most Codex tasks (default since U26)",
+      "gpt-5.4": "Frontier coding and professional-work model. Best for: long-running agentic work",
       "gpt-5.3-codex":
         "Legacy specialized Codex model (kept for backwards-compat). Best for: agentic coding workflows with Codex-tuned behavior",
       "gpt-5.2": "Strong general-purpose GPT-5 model. Best for: broad coding and reasoning tasks",
@@ -479,7 +477,9 @@ function applyMistralOverrides(info: CliInfo): void {
   addGlobalEnvAliases(info, "mistral");
 
   if (envDefault) {
-    const source = process.env.MISTRAL_DEFAULT_MODEL ? "MISTRAL_DEFAULT_MODEL" : "VIBE_ACTIVE_MODEL";
+    const source = process.env.MISTRAL_DEFAULT_MODEL
+      ? "MISTRAL_DEFAULT_MODEL"
+      : "VIBE_ACTIVE_MODEL";
     setDefaultModel(info, envDefault, source, "env");
   }
 

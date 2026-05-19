@@ -13,7 +13,9 @@ function startedAt(): string {
   return new Date(0).toISOString();
 }
 
-function result(overrides: Partial<NormalizedValidationResult> & { provider: ValidationProvider }): NormalizedValidationResult {
+function result(
+  overrides: Partial<NormalizedValidationResult> & { provider: ValidationProvider }
+): NormalizedValidationResult {
   const hasExplicitJobRef = Object.prototype.hasOwnProperty.call(overrides, "rawJobReference");
   return {
     provider: overrides.provider,
@@ -23,7 +25,7 @@ function result(overrides: Partial<NormalizedValidationResult> & { provider: Val
     rationale: overrides.rationale ?? "ok",
     risks: overrides.risks ?? [],
     rawJobReference: hasExplicitJobRef
-      ? overrides.rawJobReference ?? null
+      ? (overrides.rawJobReference ?? null)
       : {
           jobId: `job-${overrides.provider}`,
           correlationId: `corr-${overrides.provider}`,
@@ -44,10 +46,7 @@ describe("Layer 6 validation report structuredContent (U20)", () => {
       intent: "validate",
       originalRequest: { question: "Is this connected?" },
       modelList: ["claude", "codex"],
-      results: [
-        result({ provider: "claude" }),
-        result({ provider: "codex" }),
-      ],
+      results: [result({ provider: "claude" }), result({ provider: "codex" })],
       synthesis: {
         status: "not_requested",
         judgeModel: null,
@@ -59,7 +58,9 @@ describe("Layer 6 validation report structuredContent (U20)", () => {
     expect(report.structuredContent.confidence).toBe("high");
     expect(report.structuredContent.disagreements.hasMaterialDisagreement).toBe(false);
     expect(report.structuredContent.jobIds).toEqual(["job-claude", "job-codex"]);
-    expect(report.structuredContent.finalRecommendation).toContain("no normalized verdict disagreement");
+    expect(report.structuredContent.finalRecommendation).toContain(
+      "no normalized verdict disagreement"
+    );
   });
 
   it("returns medium confidence for a single completed provider", () => {
@@ -177,7 +178,13 @@ describe("Layer 6 validation report structuredContent (U20)", () => {
       modelList: ["claude"],
       results: [
         result({ provider: "claude" }),
-        result({ provider: "grok", status: "skipped", rawJobReference: null, error: "not installed", verdict: "not_run" }),
+        result({
+          provider: "grok",
+          status: "skipped",
+          rawJobReference: null,
+          error: "not installed",
+          verdict: "not_run",
+        }),
       ],
       synthesis: {
         status: "running",

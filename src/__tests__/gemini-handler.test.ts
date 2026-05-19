@@ -63,12 +63,7 @@ describe("U27 prepareGeminiHighImpactFlags", () => {
   it("emits --policy <path> per file when paths exist", () => {
     const out = prepareGeminiHighImpactFlags({ policyFiles: [realFile1, realFile2] });
     expect(out.missingPolicyPath).toBeNull();
-    expect(out.args).toEqual([
-      "--policy",
-      realFile1,
-      "--policy",
-      realFile2,
-    ]);
+    expect(out.args).toEqual(["--policy", realFile1, "--policy", realFile2]);
   });
 
   it("returns missingPolicyPath when a policyFile does not exist", () => {
@@ -228,9 +223,7 @@ describe("U27 prepareGeminiRequest end-to-end", () => {
 
   it("returns error response for missing attachment paths", () => {
     const missing = join(tmp, "nope.png");
-    const prep = prepareGeminiRequest(
-      baseParams({ attachments: [missing] })
-    );
+    const prep = prepareGeminiRequest(baseParams({ attachments: [missing] }));
     expect("args" in prep).toBe(false);
     if ("args" in prep) throw new Error("expected error response");
     expect(prep.content[0].text).toContain(missing);

@@ -10,7 +10,10 @@ export interface HealthStatus {
 
 export interface ProviderRuntimeHealth {
   status: "healthy" | "degraded" | "unhealthy";
-  providers: Record<string, Pick<ProviderRuntimeStatus, "installed" | "version" | "loginStatus" | "loginCheck">>;
+  providers: Record<
+    string,
+    Pick<ProviderRuntimeStatus, "installed" | "version" | "loginStatus" | "loginCheck">
+  >;
   timestamp: string;
 }
 
@@ -63,7 +66,9 @@ export function checkProviderRuntimeHealth(): ProviderRuntimeHealth {
   );
   const statuses = Object.values(providers);
   const installedCount = statuses.filter(provider => provider.installed).length;
-  const authenticatedCount = statuses.filter(provider => provider.loginStatus === "authenticated").length;
+  const authenticatedCount = statuses.filter(
+    provider => provider.loginStatus === "authenticated"
+  ).length;
   const status =
     installedCount === 0 ? "unhealthy" : authenticatedCount === 0 ? "degraded" : "healthy";
 

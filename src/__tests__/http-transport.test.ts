@@ -17,14 +17,10 @@ const ORIGINAL_ENV = { ...process.env };
 
 function makeEchoServer(): McpServer {
   const server = new McpServer({ name: "echo-test-server", version: "0.0.1" });
-  server.tool(
-    "echo",
-    { value: z.string().describe("Value to echo back.") },
-    async ({ value }) => ({
-      content: [{ type: "text" as const, text: `echo:${value}` }],
-      structuredContent: { value },
-    })
-  );
+  server.tool("echo", { value: z.string().describe("Value to echo back.") }, async ({ value }) => ({
+    content: [{ type: "text" as const, text: `echo:${value}` }],
+    structuredContent: { value },
+  }));
   return server;
 }
 

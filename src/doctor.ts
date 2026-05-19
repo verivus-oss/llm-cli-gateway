@@ -156,9 +156,7 @@ export function checkGeminiConfig(
     }
   }
 
-  const missingFromSettings = whitelist.filter(
-    name => !mcpServersRegistered.includes(name)
-  );
+  const missingFromSettings = whitelist.filter(name => !mcpServersRegistered.includes(name));
 
   const nextActions: string[] = [];
   if (!projectGeminiMdPresent && !userGeminiMdPresent) {
@@ -379,7 +377,9 @@ export function printDoctorJson(): void {
   process.stdout.write(`${JSON.stringify(createDoctorReport(), null, 2)}\n`);
 }
 
-function doctorProviderStatus(provider: ProviderRuntimeStatus): DoctorReport["providers"]["claude"] {
+function doctorProviderStatus(
+  provider: ProviderRuntimeStatus
+): DoctorReport["providers"]["claude"] {
   return {
     cli_available: provider.installed,
     version: provider.version,

@@ -9,12 +9,12 @@ import { describe, expect, it } from "vitest";
 import { prepareCodexForkRequest } from "../request-helpers.js";
 
 describe("U26 — codex_fork_session (prepareCodexForkRequest)", () => {
-  it("emits [\"fork\", \"--last\", PROMPT] when forkLast=true", () => {
+  it('emits ["fork", "--last", PROMPT] when forkLast=true', () => {
     const { args } = prepareCodexForkRequest({ forkLast: true, prompt: "hello" });
     expect(args).toEqual(["fork", "--last", "hello"]);
   });
 
-  it("emits [\"fork\", <UUID>, PROMPT] when sessionId is supplied", () => {
+  it('emits ["fork", <UUID>, PROMPT] when sessionId is supplied', () => {
     const { args } = prepareCodexForkRequest({
       sessionId: "abc-123",
       prompt: "hello",
@@ -39,15 +39,15 @@ describe("U26 — codex_fork_session (prepareCodexForkRequest)", () => {
   });
 
   it("rejects a gateway-prefixed sessionId via validateSessionId", () => {
-    expect(() =>
-      prepareCodexForkRequest({ sessionId: "gw-fake", prompt: "hi" })
-    ).toThrow(/reserved prefix/);
+    expect(() => prepareCodexForkRequest({ sessionId: "gw-fake", prompt: "hi" })).toThrow(
+      /reserved prefix/
+    );
   });
 
   it("preserves the prompt as the final positional regardless of mode", () => {
-    expect(
-      prepareCodexForkRequest({ forkLast: true, prompt: "multi word prompt" }).args[2]
-    ).toBe("multi word prompt");
+    expect(prepareCodexForkRequest({ forkLast: true, prompt: "multi word prompt" }).args[2]).toBe(
+      "multi word prompt"
+    );
     expect(
       prepareCodexForkRequest({
         sessionId: "uuid-1",

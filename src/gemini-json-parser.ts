@@ -46,12 +46,9 @@ export function parseGeminiJson(stdout: string): GeminiJsonParseResult | null {
 
   const meta = parsed.usageMetadata;
   if (meta && typeof meta === "object") {
-    const input =
-      typeof meta.promptTokenCount === "number" ? meta.promptTokenCount : undefined;
+    const input = typeof meta.promptTokenCount === "number" ? meta.promptTokenCount : undefined;
     const output =
-      typeof meta.candidatesTokenCount === "number"
-        ? meta.candidatesTokenCount
-        : undefined;
+      typeof meta.candidatesTokenCount === "number" ? meta.candidatesTokenCount : undefined;
     if (input !== undefined || output !== undefined) {
       const usage: GeminiUsage = {
         input_tokens: input ?? 0,

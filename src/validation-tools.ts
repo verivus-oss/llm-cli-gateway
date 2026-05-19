@@ -52,7 +52,10 @@ function responseText(body: unknown): string {
 
 function findHumanReadableReport(value: unknown): string | null {
   if (typeof value !== "object" || value === null) return null;
-  if ("humanReadable" in value && typeof (value as { humanReadable?: unknown }).humanReadable === "string") {
+  if (
+    "humanReadable" in value &&
+    typeof (value as { humanReadable?: unknown }).humanReadable === "string"
+  ) {
     return (value as { humanReadable: string }).humanReadable;
   }
   if ("report" in value) {

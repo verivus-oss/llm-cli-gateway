@@ -467,21 +467,11 @@ describe("SessionManager", () => {
 //     even though the storage layer supports it.
 // (2) prepareGeminiRequest passed the prompt as a positional argument; the
 //     CLI's TTY/mode-detection heuristics make this fragile.
-import {
-  SESSION_PROVIDER_VALUES,
-  SESSION_PROVIDER_ENUM,
-  prepareGeminiRequest,
-} from "../index.js";
+import { SESSION_PROVIDER_VALUES, SESSION_PROVIDER_ENUM, prepareGeminiRequest } from "../index.js";
 
 describe("U22 session-provider enum (Layer 10)", () => {
   it("includes all five providers, with grok and mistral present", () => {
-    expect(SESSION_PROVIDER_VALUES).toEqual([
-      "claude",
-      "codex",
-      "gemini",
-      "grok",
-      "mistral",
-    ]);
+    expect(SESSION_PROVIDER_VALUES).toEqual(["claude", "codex", "gemini", "grok", "mistral"]);
   });
 
   it("accepts grok as a valid cli value", () => {

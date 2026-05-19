@@ -75,7 +75,10 @@ export function buildValidationReport(input: ValidationReportInput): ValidationR
   const disagreements = summarizeDisagreement(input.results);
   const limitations = summarizeLimitations(input.results, input.synthesis);
   const confidence = confidenceFor(input.results, disagreements.hasMaterialDisagreement);
-  const finalRecommendation = recommendationFor(input.results, disagreements.hasMaterialDisagreement);
+  const finalRecommendation = recommendationFor(
+    input.results,
+    disagreements.hasMaterialDisagreement
+  );
   const structuredContent = {
     validationId: input.validationId,
     status: input.status,
@@ -99,23 +102,29 @@ export function buildValidationReport(input: ValidationReportInput): ValidationR
   };
 }
 
-function summarizeDisagreement(results: NormalizedValidationResult[]): ValidationReport["structuredContent"]["disagreements"] {
+function summarizeDisagreement(
+  results: NormalizedValidationResult[]
+): ValidationReport["structuredContent"]["disagreements"] {
   const completed = results.filter(result => result.status === "completed");
   const terminalProblems = results.filter(result =>
     ["failed", "canceled", "orphaned", "skipped"].includes(result.status)
   );
-  const pending = results.filter(result => result.status === "running" || result.verdict === "pending");
+  const pending = results.filter(
+    result => result.status === "running" || result.verdict === "pending"
+  );
   const verdicts = new Set(
     completed
       .map(result => normalizeVerdict(result.verdict))
       .filter((verdict): verdict is string => Boolean(verdict))
   );
   const signals: string[] = [];
-  if (verdicts.size > 1) signals.push(`Completed providers returned ${verdicts.size} different verdicts.`);
+  if (verdicts.size > 1)
+    signals.push(`Completed providers returned ${verdicts.size} different verdicts.`);
   for (const result of terminalProblems) signals.push(`${result.provider} is ${result.status}.`);
   for (const result of pending) signals.push(`${result.provider} is still pending.`);
 
-  const hasMaterialDisagreement = verdicts.size > 1 || terminalProblems.length > 0 || pending.length > 0;
+  const hasMaterialDisagreement =
+    verdicts.size > 1 || terminalProblems.length > 0 || pending.length > 0;
   return {
     hasMaterialDisagreement,
     summary: hasMaterialDisagreement
@@ -133,19 +142,27 @@ function summarizeLimitations(
 ): string[] {
   const limitations: string[] = [];
   if (results.some(result => result.status === "running")) {
-    limitations.push("Some provider jobs are still running; poll job_status and job_result before treating the report as final.");
+    limitations.push(
+      "Some provider jobs are still running; poll job_status and job_result before treating the report as final."
+    );
   }
   if (results.some(result => result.status !== "completed")) {
     limitations.push("Only completed provider outputs are suitable as judge synthesis evidence.");
   }
   if (synthesis.status === "waiting_for_provider_results") {
-    limitations.push("Judge synthesis has not run because provider results still need to be collected.");
+    limitations.push(
+      "Judge synthesis has not run because provider results still need to be collected."
+    );
   } else if (synthesis.status === "skipped") {
     limitations.push(`Judge synthesis skipped: ${synthesis.note}`);
   } else if (synthesis.status === "not_requested") {
-    limitations.push("No explicit judge synthesis was requested; use per-model outputs for the decision.");
+    limitations.push(
+      "No explicit judge synthesis was requested; use per-model outputs for the decision."
+    );
   }
-  limitations.push("Large raw outputs are intentionally kept behind job_result references to fit normal MCP client responses.");
+  limitations.push(
+    "Large raw outputs are intentionally kept behind job_result references to fit normal MCP client responses."
+  );
   return limitations;
 }
 
@@ -160,7 +177,10 @@ function confidenceFor(
   return "high";
 }
 
-function recommendationFor(results: NormalizedValidationResult[], hasMaterialDisagreement: boolean): string {
+function recommendationFor(
+  results: NormalizedValidationResult[],
+  hasMaterialDisagreement: boolean
+): string {
   const completedCount = results.filter(result => result.status === "completed").length;
   if (completedCount === 0) {
     return "Wait for at least one provider job to complete, then collect job_result before deciding.";
