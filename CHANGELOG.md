@@ -7,6 +7,7 @@ All notable changes to the llm-cli-gateway project.
 ### Fixed
 
 - Disable the default shared SQLite flight recorder during Vitest runs so parallel test workers do not race on `~/.llm-cli-gateway/logs.db` in GitHub Actions.
+- Keep the npm publish job under the public mirror's hosted-runner limit by installing without lifecycle scripts/audit, building once, verifying package contents, and leaving the full suite to CI.
 
 ## [1.5.3] - 2026-05-19
 
