@@ -17,7 +17,7 @@ title = "Personal cross-LLM validation MCP MVP"
 spec = "docs/superpowers/specs/2026-05-19-cross-llm-validation-mvp.dag.toml"
 decomposition = "docs/superpowers/specs/2026-05-19-cross-llm-validation-mvp.dag.toml"
 created = "2026-05-19"
-total_units = 20
+total_units = 27
 tier1_units = [
   "U01",
   "U02",
@@ -39,9 +39,23 @@ tier1_units = [
   "U18",
   "U19",
   "U20",
+  "U21",
+  "U22",
+  "U23",
+  "U24",
+  "U25",
+  "U26",
+  "U27",
 ]
 tier2_units = []
 tier3_units = []
+# Provider modernisation initiative (U21-U27) was added 2026-05-19 by a parallel
+# Claude session after a capability-gap audit found pre-existing bugs (Grok Zod
+# enums, Gemini positional prompt) and that Mistral Vibe ships an official CLI.
+# These units depend on the MCP factory refactor (U02), provider runtime
+# (U09), and validation orchestrator (U12) completing first, so the same files
+# are not under concurrent edit. See `docs/personal-mcp/PROVIDER_MODERNISATION_AUDIT.md`
+# for the gap audit and Mistral integration notes when that artifact lands.
 
 [product]
 problem = "Non-developers should be able to connect one personal MCP endpoint to their preferred AI clients and ask for cross-LLM validation without understanding MCP, CLIs, TOML, JSON, or provider-specific config."
@@ -85,35 +99,35 @@ manual_code_editing_allowed = false
 kind = "web"
 connection = "remote_mcp_https"
 minimum_mvp = true
-support_status = "must_confirm_before_release"
+support_status = "verified_chatgpt_web_custom_mcp_with_plan_limits"
 setup_artifact = "setup/providers/chatgpt.md"
 
 [provider_targets.claude_web]
 kind = "web"
 connection = "remote_mcp_https"
 minimum_mvp = true
-support_status = "must_confirm_before_release"
+support_status = "verified_claude_web_remote_mcp_beta"
 setup_artifact = "setup/providers/claude-web.md"
 
 [provider_targets.claude_desktop]
 kind = "desktop"
 connection = "remote_mcp_or_stdio"
 minimum_mvp = true
-support_status = "must_confirm_before_release"
+support_status = "verified_claude_desktop_remote_mcp_beta_or_local_stdio"
 setup_artifact = "setup/providers/claude-desktop.md"
 
 [provider_targets.codex]
 kind = "cli_or_ide"
 connection = "streamable_http_or_stdio"
 minimum_mvp = true
-support_status = "must_confirm_before_release"
+support_status = "verified_codex_cli_or_ide_mcp"
 setup_artifact = "setup/providers/codex.md"
 
 [provider_targets.gemini_cli]
 kind = "cli"
 connection = "streamable_http_or_stdio"
 minimum_mvp = true
-support_status = "must_confirm_before_release"
+support_status = "verified_gemini_cli_mcp"
 setup_artifact = "setup/providers/gemini-cli.md"
 
 [provider_targets.gemini_web]
@@ -125,9 +139,9 @@ setup_artifact = "setup/providers/gemini-web-status.md"
 
 [provider_targets.grok]
 kind = "api_or_cli"
-connection = "remote_mcp_for_api_or_provider_cli_adapter"
+connection = "remote_mcp_https_or_provider_cli_adapter"
 minimum_mvp = false
-support_status = "outbound_provider_first_inbound_deferred_until_confirmed"
+support_status = "verified_grok_custom_mcp_public_url_and_outbound_provider"
 setup_artifact = "setup/providers/grok.md"
 
 # ============================================================================
@@ -193,6 +207,8 @@ blocks = [
   "U05",
   "U06",
   "U07",
+  "U21",
+  "U22",
 ]
 estimated_loc = 220
 spec_sections = ["Architecture"]
@@ -546,6 +562,7 @@ depends_on = ["U08"]
 blocks = [
   "U12",
   "U13",
+  "U22",
 ]
 estimated_loc = 260
 spec_sections = ["Provider Targets"]
@@ -758,6 +775,7 @@ blocks = [
   "U15",
   "U20",
   "U16",
+  "U22",
 ]
 estimated_loc = 340
 spec_sections = ["Validation Tools"]
@@ -823,6 +841,7 @@ files_create = [
 files_modify = [
   "package.json",
   "README.md",
+  "installer/main.go",
 ]
 acceptance = [
   "Release process builds signed or checksummed binaries for macOS, Linux, and Windows.",
@@ -1110,21 +1129,383 @@ failure_modes = [
 ]
 rationale = "The final validation is whether the intended assistants can help real users complete setup."
 
+# ============================================================================
+# LAYER 9: Provider modernisation (added 2026-05-19 after capability-gap audit)
+# ============================================================================
+# Sequencing note: all U21-U27 units depend on the MCP factory refactor (U02),
+# provider-runtime detection (U09), and validation-orchestrator (U12) being
+# committed first, because they share the same files (src/index.ts,
+# src/cli-updater.ts, src/async-job-manager.ts, src/provider-status.ts, etc.).
+# This prevents concurrent edit of files under heavy active refactor.
+
+[units.U21]
+name = "phase-0-grok-zod-enum-and-gemini-positional-prompt-fixes"
+summary = "Fix two pre-existing parity bugs found during the 2026-05-19 capability audit: (1) session_create/session_list/session_clear_all Zod enums omit \"grok\" despite the storage layer supporting it; (2) Gemini prompt passed as positional arg instead of -p/--prompt, fragile against future CLI mode-detection changes."
+layer = 9
+tier = 1
+status = "blocked"
+depends_on = ["U02"]
+blocks = ["U22"]
+estimated_loc = 80
+spec_sections = ["Provider Modernisation"]
+spec_anchors = []
+files_create = []
+files_modify = [
+  "src/index.ts",
+  "src/__tests__/session-manager.test.ts",
+]
+acceptance = [
+  "session_create, session_list, and session_clear_all Zod enums include all five providers once Mistral lands; until then include claude, codex, gemini, and grok with description strings updated to match.",
+  "Tool description strings for those three tools no longer hardcode \"claude|codex|gemini\".",
+  "prepareGeminiRequest emits the prompt via -p/--prompt rather than as a positional argument; verify by inspecting args array in unit test.",
+  "Tests assert the new Zod schemas accept grok and reject unknown providers.",
+  "Tests assert prepareGeminiRequest produces an args array starting with -p, prompt before any other flags.",
+  "Reviewers (Codex+Gemini+Grok) verify by inspecting the actual diff, not Claude's summary; approval is unconditional or yields a concrete blocker.",
+]
+produces = ["ART:phase-0-parity-fixes"]
+consumes = ["ART:server-factory"]
+critical_decisions = [
+  "Phase 0 ships separately from Phase 1 (Mistral) so the bug fixes are easy to revert if Mistral integration uncovers further issues.",
+]
+constraints = [
+  "Do not bundle Mistral additions into the same PR.",
+  "Do not silently add \"mistral\" to the Zod enums before U22 lands; the enum must reject mistral until that point.",
+]
+failure_modes = [
+  "If Gemini's mode-detection changes upstream (TTY heuristics, positional-arg behavior), the bug becomes user-visible. The -p fix removes that dependency.",
+]
+rationale = "Tiny, low-risk fixes worth shipping immediately rather than bundling into the larger Mistral addition. They also reduce review surface for U22."
+
+[units.U22]
+name = "mistral-vibe-fifth-cli-provider"
+summary = "Add Mistral Vibe (xAI's Devstral-powered open-source CLI coding agent) as the fifth provider alongside Claude/Codex/Gemini/Grok, mirroring the Grok addition pattern (commit 765bc0e) with five Vibe-specific divergences."
+layer = 10
+tier = 1
+status = "blocked"
+depends_on = [
+  "U02",
+  "U09",
+  "U12",
+  "U21",
+]
+blocks = [
+  "U23",
+  "U24",
+]
+estimated_loc = 2000
+spec_sections = ["Provider Modernisation"]
+spec_anchors = []
+files_create = [
+  "docs/personal-mcp/PROVIDER_MODERNISATION_AUDIT.md",
+  "src/__tests__/mistral-handler.test.ts",
+]
+files_modify = [
+  "src/index.ts",
+  "src/request-helpers.ts",
+  "src/model-registry.ts",
+  "src/cli-updater.ts",
+  "src/approval-manager.ts",
+  "src/review-integrity.ts",
+  "src/session-manager.ts",
+  "src/async-job-manager.ts",
+  "src/flight-recorder.ts",
+  "src/job-store.ts",
+  "src/doctor.ts",
+  "src/provider-status.ts",
+  "src/provider-login-guidance.ts",
+  "src/validation-normalizer.ts",
+  "src/validation-orchestrator.ts",
+  "src/validation-tools.ts",
+  "src/resources.ts",
+  "src/__tests__/model-registry.test.ts",
+  "src/__tests__/request-helpers.test.ts",
+  "src/__tests__/session-manager.test.ts",
+  "src/__tests__/cli-updater.test.ts",
+  "src/__tests__/job-store.test.ts",
+  "src/__tests__/validation-orchestrator.layer4.test.ts",
+  "README.md",
+  "CHANGELOG.md",
+  ".agents/skills/async-job-orchestration/SKILL.md",
+  ".agents/skills/implement-review-fix/SKILL.md",
+  ".agents/skills/multi-llm-review/SKILL.md",
+  ".agents/skills/secure-orchestration/SKILL.md",
+  ".agents/skills/session-workflow/SKILL.md",
+  "skills/multi-llm-orchestration/SKILL.md",
+  "skills/multi-llm-consensus/SKILL.md",
+  "skills/model-routing/SKILL.md",
+  "skills/design-review-cycle/SKILL.md",
+  "skills/agent-codex-gate/SKILL.md",
+  "skills/codex-review-gate/SKILL.md",
+  "skills/red-team-assessment/SKILL.md",
+]
+acceptance = [
+  "mistral_request and mistral_request_async tools registered with sync and async parity matching the other four providers.",
+  "VIBE_ACTIVE_MODEL env var is set per-invocation for model selection (Vibe has no --model flag).",
+  "Doctor reports an actionable error when ~/.vibe/config.toml has [session_logging] enabled = false or the file is missing, before any --continue/--resume request fails opaquely.",
+  "permissionMode parameter accepts default|plan|accept-edits|auto-approve|chat|explore|lean and emits --agent accordingly; programmatic-mode default is auto-approve.",
+  "allowedTools parameter emits --enabled-tools repeatedly; disallowedTools is accepted in the schema but logged as not honored for Mistral with a clear warning.",
+  "cli_upgrade detects pip / uv tool / brew installation and shells out to the appropriate upgrade command; no \"vibe update\" attempted.",
+  "Token/cost extraction returns null for Mistral (Vibe does not surface in stdout JSON); follow-up issue filed to parse ~/.vibe/logs/session/<id>/metadata.json.",
+  "session_create/list/clear_all Zod enums include \"mistral\" (continuation of U21).",
+  "Multi-LLM review gate (Codex+Gemini+Grok) yields unconditional approval; reviewers verify by reading the actual diff against the Vibe source and docs, not Claude's summary.",
+]
+produces = ["ART:mistral-provider"]
+consumes = [
+  "ART:server-factory",
+  "ART:provider-runtime",
+  "ART:validation-runtime",
+  "ART:phase-0-parity-fixes",
+]
+critical_decisions = [
+  "Vibe is added as a peer provider, not via the provider-CLI-management U09 framework, because the gateway already has the Grok pattern and the parity surface is wider than U09 covers.",
+  "Vibe-specific divergences from Grok pattern are five: no --model flag (env var only), session-logging opt-in in user config, --agent enum replaces --always-approve, --enabled-tools allowlist-only no --disabled-tools, no self-update.",
+]
+constraints = [
+  "Must not mutate ~/.vibe/config.toml; surface the session_logging requirement via doctor.",
+  "Must reuse the durable job store (job-store.ts) the same way the other providers do; no Mistral-specific persistence path.",
+]
+failure_modes = [
+  "Vibe's CLI surface changes faster than the other four (newer project); model registry env-var pattern is the safety valve.",
+  "Programmatic-mode forces auto-approve if --agent omitted; the gateway must pass --agent explicitly to avoid surprise tool execution.",
+]
+rationale = "Five-vendor consensus diversity (Anthropic/OpenAI/Google/xAI/Mistral). Mistral lineage is independent of the others and Devstral is the only open-weights coding agent in the set, strengthening cross-LLM validation signal."
+
+[units.U23]
+name = "json-output-and-usage-cost-parity-across-providers"
+summary = "Close the JSON output and token/cost extraction gap across all five providers: wire Codex --json event stream parser, Gemini -o json parser, capture Claude cache tokens that the parser already extracts but extractUsageAndCost discards, and add cache-token columns to the flight recorder."
+layer = 11
+tier = 1
+status = "blocked"
+depends_on = ["U22"]
+blocks = ["U25", "U26", "U27"]
+estimated_loc = 400
+spec_sections = ["Provider Modernisation"]
+spec_anchors = []
+files_create = [
+  "src/codex-json-parser.ts",
+  "src/gemini-json-parser.ts",
+  "src/__tests__/codex-json-parser.test.ts",
+  "src/__tests__/gemini-json-parser.test.ts",
+]
+files_modify = [
+  "src/index.ts",
+  "src/stream-json-parser.ts",
+  "src/flight-recorder.ts",
+  "src/__tests__/flight-recorder.test.ts",
+]
+acceptance = [
+  "extractUsageAndCost returns {input_tokens, output_tokens, cache_read_tokens?, cache_creation_tokens?, cost_usd?} for every provider that supports JSON output; null otherwise.",
+  "Codex --json JSONL event stream (thread.started, turn.started/completed/failed, item.started/completed, error) is parsed by a new src/codex-json-parser.ts; tests cover happy path, partial stream, error event.",
+  "Gemini -o json with usageMetadata (promptTokenCount, candidatesTokenCount, cachedContentTokenCount, totalTokenCount) is parsed; tests cover usage extraction.",
+  "Claude cache_read_input_tokens and cache_creation_input_tokens (already collected by parser at src/stream-json-parser.ts:11-13) are surfaced through extractUsageAndCost rather than discarded.",
+  "flight-recorder.ts adds cache_read_tokens and cache_creation_tokens columns; migration is backwards compatible.",
+  "Multi-LLM review gate verifies tests run + pass against real CLI fixtures captured at audit time.",
+]
+produces = ["ART:json-usage-cost-parity"]
+consumes = ["ART:mistral-provider"]
+critical_decisions = [
+  "Schema-level cost reporting is provider-agnostic; per-provider parsers return the same shape.",
+]
+constraints = [
+  "Do not change the existing Claude stream-json shape; extend it.",
+  "Flight recorder migration must not break existing logs.db files.",
+]
+failure_modes = [
+  "Provider JSON shapes drift; pin to fixtures captured at audit date 2026-05-19.",
+]
+rationale = "Only one of four providers reports tokens/cost today; cost-attribution dashboards and validation tools have no signal for Codex/Gemini/Mistral. This is foundational for any future cost-based routing or budget guardrails."
+
+[units.U24]
+name = "permission-and-approval-mode-parity-across-providers"
+summary = "Make permission/approval-mode taxonomies consistent across providers: Claude permissionMode enum (currently only bypassPermissions emitted), Gemini plan mode (CLI supports it, our schema omits it), Codex split --full-auto into --sandbox + --ask-for-approval."
+layer = 11
+tier = 1
+status = "blocked"
+depends_on = ["U22"]
+blocks = ["U25", "U26", "U27"]
+estimated_loc = 300
+spec_sections = ["Provider Modernisation"]
+spec_anchors = []
+files_create = []
+files_modify = [
+  "src/index.ts",
+  "src/request-helpers.ts",
+  "src/__tests__/request-helpers.test.ts",
+]
+acceptance = [
+  "Claude: dangerouslySkipPermissions boolean replaced by permissionMode enum (default|acceptEdits|plan|auto|dontAsk|bypassPermissions); each mode emits the correct --permission-mode flag.",
+  "Gemini: approvalMode enum gains \"plan\" value; --approval-mode plan is emitted.",
+  "Codex: prepareCodexRequest accepts sandboxMode (read-only|workspace-write|danger-full-access) and askForApproval (untrusted|on-request|never) as separate parameters; --full-auto retained as escape hatch with a clear deprecation comment.",
+  "Codex resume mode filters out --sandbox and --ask-for-approval the same way it filters --full-auto, since resume inherits the session's policy.",
+  "Tests verify each provider's flag emission for every documented mode.",
+  "Multi-LLM review gate confirms behavior against CLI --help output at audit date.",
+]
+produces = ["ART:permission-mode-parity"]
+consumes = ["ART:mistral-provider"]
+critical_decisions = [
+  "Boolean approval flags (dangerouslySkipPermissions, fullAuto) are kept as escape hatches but no longer the primary surface.",
+]
+constraints = [
+  "Do not break callers using the existing boolean flags; map them to the new enum values for backwards compatibility for one minor release.",
+]
+failure_modes = [
+  "If approval mode is silently mis-mapped, agents may execute tools without the safety the caller expected.",
+]
+rationale = "Each CLI has its own permission taxonomy; we expose subsets inconsistently. This unit makes the gateway speak each CLI's full safety vocabulary."
+
+[units.U25]
+name = "claude-high-impact-features-subagents-fork-system-prompt-budget-effort"
+summary = "Wire Claude's HIGH-impact features identified in the 2026-05-19 audit: --agent/--agents (native sub-agent dispatch), --fork-session, --system-prompt/--append-system-prompt, --max-budget-usd/--max-turns, --effort enum, --exclude-dynamic-system-prompt-sections."
+layer = 12
+tier = 1
+status = "blocked"
+depends_on = ["U23", "U24"]
+blocks = []
+estimated_loc = 400
+spec_sections = ["Provider Modernisation"]
+spec_anchors = []
+files_create = []
+files_modify = [
+  "src/index.ts",
+  "src/__tests__/claude-handler.test.ts",
+]
+acceptance = [
+  "claude_request schema gains: agent?: string, agents?: Record<string, object>, forkSession?: boolean, systemPrompt?: string, appendSystemPrompt?: string, maxBudgetUsd?: number, maxTurns?: number, effort?: enum(low|medium|high|xhigh|max), excludeDynamicSystemPromptSections?: boolean.",
+  "Each parameter emits the documented flag; tests verify args array against CLI --help.",
+  "systemPrompt and appendSystemPrompt are mutually exclusive in the schema.",
+  "agents parameter accepts inline JSON, validated against Anthropic's agent schema before being passed to --agents.",
+  "Multi-LLM review gate confirms each flag against claude --help output and Anthropic docs.",
+]
+produces = ["ART:claude-high-impact-features"]
+consumes = [
+  "ART:json-usage-cost-parity",
+  "ART:permission-mode-parity",
+]
+critical_decisions = [
+  "Sub-agent dispatch via --agent is preferred over multi-process orchestration where the workflow fits, because it preserves Claude's native isolation guarantees.",
+]
+constraints = [
+  "Do not deprecate the multi-process orchestration patterns; sub-agents are an option, not a replacement.",
+]
+failure_modes = [
+  "If --agents JSON drifts from Anthropic's schema, the request fails opaquely. Validate before passing.",
+]
+rationale = "Claude's native sub-agent dispatch removes most of the multi-process orchestration overhead we built around. The other flags close obvious gaps (budget caps, cache control, system-prompt cleanliness)."
+
+[units.U26]
+name = "codex-high-impact-features-output-schema-fork-search-profile-ephemeral"
+summary = "Wire Codex's HIGH-impact features: --output-schema (JSON-schema-constrained final message), codex fork (branch a session), --search (native web search), --profile (named TOML profiles), -c key=value (per-call overrides), --ephemeral, -i/--image, --ignore-user-config/--ignore-rules. Also refresh default model from gpt-5.3-codex to gpt-5.5."
+layer = 12
+tier = 1
+status = "blocked"
+depends_on = ["U23", "U24"]
+blocks = []
+estimated_loc = 500
+spec_sections = ["Provider Modernisation"]
+spec_anchors = []
+files_create = [
+  "src/__tests__/codex-fork.test.ts",
+]
+files_modify = [
+  "src/index.ts",
+  "src/model-registry.ts",
+  "src/__tests__/codex-handler.test.ts",
+]
+acceptance = [
+  "codex_request schema gains: outputSchema?: string|object, search?: boolean, profile?: string, configOverrides?: Record<string,string>, ephemeral?: boolean, images?: string[], ignoreUserConfig?: boolean, ignoreRules?: boolean.",
+  "outputSchema as object is written to a temp file before passing --output-schema <path>; temp file cleanup happens regardless of CLI exit code.",
+  "New tool codex_fork_session: forks a session via codex fork <UUID> <prompt> or codex fork --last <prompt>.",
+  "Per-call configOverrides are sanitized: keys match /^[a-zA-Z0-9._]+$/, values shell-escaped; emitted as repeated -c k=v.",
+  "Model registry default updated to gpt-5.5; old aliases kept for backwards compat.",
+  "Codex resume filters out --add-dir, -C, --output-schema, and --search (none are valid on resume per codex exec resume --help at audit date).",
+  "Multi-LLM review gate verifies against codex --help and codex exec --help at audit date.",
+]
+produces = ["ART:codex-high-impact-features"]
+consumes = [
+  "ART:json-usage-cost-parity",
+  "ART:permission-mode-parity",
+]
+critical_decisions = [
+  "codex fork is exposed as a separate tool rather than a parameter on codex_request because the semantics (creates a new session from an existing one) are distinct enough to warrant it.",
+]
+constraints = [
+  "configOverrides must not allow shell injection; sanitize aggressively.",
+]
+failure_modes = [
+  "If gpt-5.5 isn't yet stable in the user's Codex install, the request fails. Keep the registry's fallback chain intact.",
+]
+rationale = "Codex's --output-schema is the single biggest validation-pipeline unlock (constrains final message to a schema the gateway can validate). codex fork enables A/B'ing prompts against a shared session prefix without polluting the original."
+
+[units.U27]
+name = "gemini-high-impact-features-session-id-sandbox-policy-engine-multimodal-doctor"
+summary = "Wire Gemini's HIGH-impact features: --session-id UUID (deterministic session creation), -s/--sandbox, --policy/--admin-policy (Policy Engine replaces deprecated --allowed-tools), multimodal @path attachments, GEMINI.md doctor detection, Vertex/API-key auth detection, gemini mcp list reconciliation."
+layer = 12
+tier = 1
+status = "blocked"
+depends_on = ["U23", "U24"]
+blocks = []
+estimated_loc = 400
+spec_sections = ["Provider Modernisation"]
+spec_anchors = []
+files_create = []
+files_modify = [
+  "src/index.ts",
+  "src/request-helpers.ts",
+  "src/doctor.ts",
+  "src/provider-status.ts",
+  "src/__tests__/gemini-handler.test.ts",
+]
+acceptance = [
+  "gemini_request schema gains: sandbox?: boolean, policyFiles?: string[], adminPolicyFiles?: string[], attachments?: string[].",
+  "When createNewSession is true (or sessionId is fresh), --session-id <uuid> is emitted instead of --resume; this maps the gateway session ID to Gemini's authoritative session store.",
+  "approvalMode enum gains \"plan\" value (already documented in U24, verify it lands consistently).",
+  "@path attachment helper prepends @<absolute-path> tokens to the prompt; paths validated to exist before spawn.",
+  "doctor.ts detects ./GEMINI.md, ~/.gemini/GEMINI.md, ~/.gemini/settings.json; reports presence/absence with next_actions.",
+  "provider-status.ts geminiCredentialStoreStatus() recognises GEMINI_API_KEY, GOOGLE_API_KEY, and GOOGLE_CLOUD_PROJECT + GOOGLE_GENAI_USE_VERTEXAI=true as valid auth in addition to oauth_creds.json.",
+  "Gateway doctor reconciles ~/.gemini/settings.json mcpServers against the gateway's --allowed-mcp-server-names; warns when whitelisted servers are not registered with Gemini.",
+  "Multi-LLM review gate verifies against gemini --help at audit date plus Gemini CLI release notes for v0.40-0.44.",
+]
+produces = ["ART:gemini-high-impact-features"]
+consumes = [
+  "ART:json-usage-cost-parity",
+  "ART:permission-mode-parity",
+]
+critical_decisions = [
+  "Deterministic session IDs (--session-id) replace the gateway's gw-* prefix workaround; gateway IDs map 1:1 to Gemini's store.",
+]
+constraints = [
+  "Policy Engine is additive; --allowed-tools deprecation warning surfaces in logger but the flag still works for one minor release.",
+]
+failure_modes = [
+  "Gemini CLI's session ID UUID format may be stricter than what the gateway generates; validate before emitting.",
+]
+rationale = "Gemini's sandbox, Policy Engine, and deterministic sessions close the largest gaps relative to where Claude and Codex have been since the gateway shipped. doctor parity is foundational for the personal-MCP MVP (U07)."
+
 [computed]
 entry_points = ["U01"]
-leaf_nodes = ["U16"]
+leaf_nodes = ["U16", "U25", "U26", "U27"]
 critical_path = [
   "U01",
   "U03",
   "U08",
   "U09",
   "U12",
-  "U15",
-  "U20",
-  "U13",
-  "U16",
+  "U22",
+  "U23",
+  "U26",
 ]
-critical_path_loc = 1980
+critical_path_loc = 4060
+provider_modernisation_path = [
+  "U02",
+  "U09",
+  "U12",
+  "U21",
+  "U22",
+  "U23",
+  "U24",
+  "U25",
+]
+provider_modernisation_loc = 4080
 
 [computed.max_parallel]
 layer0 = 1
@@ -1136,21 +1517,67 @@ layer5 = 3
 layer6 = 2
 layer7 = 1
 layer8 = 1
+layer9 = 1
+layer10 = 1
+layer11 = 2
+layer12 = 3
 
 [[computed.conflict_groups]]
 files = ["README.md"]
-units = ["U01", "U08", "U10", "U13", "U16"]
+units = ["U01", "U08", "U10", "U13", "U16", "U22"]
 
 [[computed.conflict_groups]]
 files = ["src/index.ts"]
-units = ["U02", "U05", "U06", "U07", "U12"]
+units = ["U02", "U05", "U06", "U07", "U12", "U21", "U22", "U23", "U24", "U25", "U26", "U27"]
 
 [[computed.conflict_groups]]
 files = ["package.json"]
 units = ["U05", "U07", "U13"]
 
+[[computed.conflict_groups]]
+files = ["src/cli-updater.ts"]
+units = ["U09", "U22"]
+
+[[computed.conflict_groups]]
+files = ["src/async-job-manager.ts"]
+units = ["U12", "U22"]
+
+[[computed.conflict_groups]]
+files = ["src/doctor.ts"]
+units = ["U07", "U22", "U27"]
+
+[[computed.conflict_groups]]
+files = ["src/provider-status.ts"]
+units = ["U09", "U22", "U27"]
+
+[[computed.conflict_groups]]
+files = ["src/provider-login-guidance.ts"]
+units = ["U09", "U22"]
+
+[[computed.conflict_groups]]
+files = ["src/request-helpers.ts"]
+units = ["U22", "U24", "U27"]
+
+[[computed.conflict_groups]]
+files = ["src/model-registry.ts"]
+units = ["U22", "U26"]
+
+[[computed.conflict_groups]]
+files = ["src/validation-orchestrator.ts"]
+units = ["U12", "U15", "U22"]
+
+[[computed.conflict_groups]]
+files = ["src/stream-json-parser.ts"]
+units = ["U23"]
+
+[[computed.conflict_groups]]
+files = ["src/flight-recorder.ts"]
+units = ["U22", "U23"]
+
 [computed.loc_totals]
-all = 4080
-tier1 = 4080
+all = 8160
+tier1 = 8160
 tier2 = 0
 tier3 = 0
+mvp_personal_appliance_loc = 4080
+provider_modernisation_loc = 4080

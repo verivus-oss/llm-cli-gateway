@@ -1,11 +1,11 @@
 ---
 name: multi-llm-orchestration
-description: Guide for orchestrating multiple LLMs via the llm-gateway — use when delegating tasks to Codex, Gemini, or Grok, running parallel reviews, or managing cross-LLM workflows
+description: Guide for orchestrating multiple LLMs via the llm-gateway — use when delegating tasks to Codex, Gemini, Grok, or Mistral, running parallel reviews, or managing cross-LLM workflows
 ---
 
 # Multi-LLM Orchestration
 
-Use the llm-gateway MCP server tools to orchestrate work across Claude, Codex, Gemini, and Grok (xAI).
+Use the llm-gateway MCP server tools to orchestrate work across Claude, Codex, Gemini, Grok (xAI), and Mistral Vibe.
 
 ## Dispatch Defaults
 
@@ -22,6 +22,7 @@ Apply these on every dispatch unless the caller has explicitly overridden a rule
 - `codex_request` / `codex_request_async` — Delegate tasks to Codex CLI (pass `sessionId:<UUID>` or `resumeLatest:true` to use `codex exec resume`)
 - `gemini_request` / `gemini_request_async` — Delegate tasks to Gemini CLI
 - `grok_request` / `grok_request_async` — Delegate tasks to Grok CLI (xAI). Auth via prior `grok login` (OAuth) or `GROK_CODE_XAI_API_KEY`
+- `mistral_request` / `mistral_request_async` — Delegate tasks to Mistral Vibe CLI. Model selection is via `VIBE_ACTIVE_MODEL` env var (no `--model` flag); `permissionMode` is the `--agent` enum and defaults to `auto-approve` for programmatic callers. Session continuity (`sessionId`/`resumeLatest`) requires `[session_logging] enabled = true` in `~/.vibe/config.toml`.
 - `llm_job_status` — Check async job progress (in-memory + durable store fallback)
 - `llm_job_result` — Fetch completed job output (durable: default 30-day retention, `LLM_GATEWAY_JOB_RETENTION_DAYS`)
 - `llm_job_cancel` — Cancel a running async job (only on explicit instruction or hard failure)

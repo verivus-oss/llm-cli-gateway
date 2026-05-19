@@ -61,4 +61,43 @@ describe("cli updater", () => {
     expect(result.plan.command).toBe("npm");
     expect(result.stdout).toBeUndefined();
   });
+
+  describe("Mistral Vibe upgrade dispatch (U22)", () => {
+    it("dispatches to pip when vibe-cli is installed via pip", () => {
+      const plan = buildCliUpgradePlan("mistral", "latest", () => "pip");
+      expect(plan.command).toBe("pip");
+      expect(plan.args).toEqual(["install", "-U", "vibe-cli"]);
+      expect(plan.strategy).toBe("pip-install");
+    });
+
+    it("dispatches to uv tool upgrade when vibe-cli is installed via uv", () => {
+      const plan = buildCliUpgradePlan("mistral", "latest", () => "uv");
+      expect(plan.command).toBe("uv");
+      expect(plan.args).toEqual(["tool", "upgrade", "vibe-cli"]);
+      expect(plan.strategy).toBe("uv-tool-upgrade");
+    });
+
+    it("dispatches to brew upgrade when mistral-vibe is installed via Homebrew", () => {
+      const plan = buildCliUpgradePlan("mistral", "latest", () => "brew");
+      expect(plan.command).toBe("brew");
+      expect(plan.args).toEqual(["upgrade", "mistral-vibe"]);
+      expect(plan.strategy).toBe("brew-upgrade");
+    });
+
+    it("pip targets honour an explicit version", () => {
+      const plan = buildCliUpgradePlan("mistral", "1.2.3", () => "pip");
+      expect(plan.args).toEqual(["install", "-U", "vibe-cli==1.2.3"]);
+    });
+
+    it("rejects unknown Mistral installation methods with an actionable error", () => {
+      expect(() => buildCliUpgradePlan("mistral", "latest", () => "unknown")).toThrow(
+        /Could not detect how Mistral Vibe was installed/
+      );
+    });
+
+    it("never plans a `vibe update` self-update (Vibe has no self-update command)", () => {
+      const plan = buildCliUpgradePlan("mistral", "latest", () => "pip");
+      expect(plan.command).not.toBe("vibe");
+    });
+  });
 });

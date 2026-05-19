@@ -87,6 +87,17 @@ export class ResourceProvider {
         },
       },
       {
+        uri: "sessions://mistral",
+        name: "Mistral Sessions",
+        title: "🌬 Mistral Sessions",
+        description: "List of Mistral Vibe conversation sessions",
+        mimeType: "application/json",
+        annotations: {
+          audience: ["user", "assistant"],
+          priority: 0.6,
+        },
+      },
+      {
         uri: "models://claude",
         name: "Claude Models",
         title: "🧠 Claude Models & Capabilities",
@@ -131,6 +142,17 @@ export class ResourceProvider {
         },
       },
       {
+        uri: "models://mistral",
+        name: "Mistral Models",
+        title: "🌬 Mistral Models & Capabilities",
+        description: "Available Mistral Vibe models and their capabilities",
+        mimeType: "application/json",
+        annotations: {
+          audience: ["user", "assistant"],
+          priority: 0.8,
+        },
+      },
+      {
         uri: "metrics://performance",
         name: "Performance Metrics",
         title: "📈 Performance Metrics",
@@ -167,6 +189,7 @@ export class ResourceProvider {
               codex: (await this.sessionManager.getActiveSession("codex"))?.id || null,
               gemini: (await this.sessionManager.getActiveSession("gemini"))?.id || null,
               grok: (await this.sessionManager.getActiveSession("grok"))?.id || null,
+              mistral: (await this.sessionManager.getActiveSession("mistral"))?.id || null,
             },
           },
           null,
@@ -247,6 +270,24 @@ export class ResourceProvider {
       };
     }
 
+    if (uri === "sessions://mistral") {
+      const sessions = await this.sessionManager.listSessions("mistral");
+      return {
+        uri,
+        mimeType: "application/json",
+        text: JSON.stringify(
+          {
+            cli: "mistral",
+            total: sessions.length,
+            sessions,
+            activeSession: (await this.sessionManager.getActiveSession("mistral"))?.id || null,
+          },
+          null,
+          2
+        ),
+      };
+    }
+
     // Model capability resources
     if (uri === "models://claude") {
       const cliInfo = getCliInfo();
@@ -281,6 +322,15 @@ export class ResourceProvider {
         uri,
         mimeType: "application/json",
         text: JSON.stringify(cliInfo.grok, null, 2),
+      };
+    }
+
+    if (uri === "models://mistral") {
+      const cliInfo = getCliInfo();
+      return {
+        uri,
+        mimeType: "application/json",
+        text: JSON.stringify(cliInfo.mistral, null, 2),
       };
     }
 

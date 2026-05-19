@@ -1,9 +1,16 @@
 import { DatabaseConnection } from "./db.js";
+import { listProviderRuntimeStatuses, type ProviderRuntimeStatus } from "./provider-status.js";
 
 export interface HealthStatus {
   status: "healthy" | "degraded" | "unhealthy";
   postgres: { status: "up" | "down"; latency: number };
   redis: { status: "up" | "down"; latency: number };
+  timestamp: string;
+}
+
+export interface ProviderRuntimeHealth {
+  status: "healthy" | "degraded" | "unhealthy";
+  providers: Record<string, Pick<ProviderRuntimeStatus, "installed" | "version" | "loginStatus" | "loginCheck">>;
   timestamp: string;
 }
 
@@ -39,4 +46,30 @@ export async function checkHealth(db: DatabaseConnection): Promise<HealthStatus>
   }
 
   return health;
+}
+
+export function checkProviderRuntimeHealth(): ProviderRuntimeHealth {
+  const providers = listProviderRuntimeStatuses();
+  const projected = Object.fromEntries(
+    Object.entries(providers).map(([name, provider]) => [
+      name,
+      {
+        installed: provider.installed,
+        version: provider.version,
+        loginStatus: provider.loginStatus,
+        loginCheck: provider.loginCheck,
+      },
+    ])
+  );
+  const statuses = Object.values(providers);
+  const installedCount = statuses.filter(provider => provider.installed).length;
+  const authenticatedCount = statuses.filter(provider => provider.loginStatus === "authenticated").length;
+  const status =
+    installedCount === 0 ? "unhealthy" : authenticatedCount === 0 ? "degraded" : "healthy";
+
+  return {
+    status,
+    providers: projected,
+    timestamp: new Date().toISOString(),
+  };
 }

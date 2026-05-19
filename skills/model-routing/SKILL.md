@@ -1,6 +1,6 @@
 ---
 name: model-routing
-description: Choose the right LLM and model for each task based on proven patterns. Use when deciding whether to delegate to Claude, Codex, Gemini, or Grok, or when selecting model variants.
+description: Choose the right LLM and model for each task based on proven patterns. Use when deciding whether to delegate to Claude, Codex, Gemini, Grok, or Mistral, or when selecting model variants. Mistral Vibe selects model via `VIBE_ACTIVE_MODEL` env var (no `--model` flag).
 ---
 
 # Model Routing
@@ -34,7 +34,8 @@ All tool invocations below use the dispatch defaults above (omit `model`, `appro
 | **Security audit** | Gemini | Security-focused analysis, threat modeling | `gemini_request` (`approvalStrategy:"mcp_managed"`) |
 | **Multi-file analysis** | Codex | Handles large codebases with sqry integration | `codex_request` (`fullAuto:true`, `approvalStrategy:"mcp_managed"`) |
 | **Diversity / tie-breaker review** | Grok (xAI) | Independent fourth model from a different vendor family — useful when Claude/Codex/Gemini might share a blind spot | `grok_request` (`approvalStrategy:"mcp_managed"`) |
-| **Consensus / unanimous gate** | All four in parallel | Catches issues any single model misses; use when correctness > cost | `*_request_async` for Claude/Codex/Gemini/Grok |
+| **Maximum diversity** | Mistral Vibe | Fifth independent vendor (EU / open-weights family); uncorrelated with OpenAI/Anthropic/Google/xAI | `mistral_request` (`approvalStrategy:"mcp_managed"`) |
+| **Consensus / unanimous gate** | All five in parallel | Catches issues any single model misses; use when correctness > cost | `*_request_async` for Claude/Codex/Gemini/Grok/Mistral |
 
 ## Model Selection Rules
 

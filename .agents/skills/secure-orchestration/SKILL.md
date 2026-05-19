@@ -1,6 +1,6 @@
 ---
 name: secure-orchestration
-description: Security-conscious LLM orchestration with approval gates across Claude, Codex, Gemini, and Grok. Use for high-risk operations, permissions, auditing.
+description: Security-conscious LLM orchestration with approval gates across Claude, Codex, Gemini, Grok, and Mistral. Use for high-risk operations, permissions, auditing.
 metadata:
   author: verivusai-labs
   version: "1.5"
@@ -8,7 +8,9 @@ metadata:
 
 # Secure Orchestration
 
-Approval gate scores request risk, enforces policy thresholds. Applies uniformly to Claude, Codex, Gemini, and Grok (xAI) dispatches. Use when security matters — production codebases, sensitive data, autonomous operations.
+Approval gate scores request risk, enforces policy thresholds. Applies uniformly to Claude, Codex, Gemini, Grok (xAI), and Mistral Vibe dispatches. Use when security matters — production codebases, sensitive data, autonomous operations.
+
+> **Mistral Vibe note**: the gateway always emits `--agent <mode>` explicitly and defaults the programmatic mode to `auto-approve`. Set `permissionMode:"plan"` (or `chat`/`explore`) when you want stricter behaviour. Session continuity requires `[session_logging] enabled = true` in `~/.vibe/config.toml`; `doctor --json` surfaces this as a `next_actions` entry.
 
 ## Dispatch Defaults
 

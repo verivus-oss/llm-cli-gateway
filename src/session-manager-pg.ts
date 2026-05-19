@@ -12,6 +12,7 @@ const DEFAULT_SESSION_DESCRIPTIONS: Record<CliType, string> = {
   codex: "Codex Session",
   gemini: "Gemini Session",
   grok: "Grok Session",
+  mistral: "Mistral Session",
 };
 
 /**

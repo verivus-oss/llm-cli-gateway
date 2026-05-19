@@ -33,6 +33,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./gateway-server": {
+      "types": "./dist/gateway-server.d.ts",
+      "default": "./dist/gateway-server.js"
     }
   },
   "bin": {
@@ -45,6 +49,7 @@
     "dist/**/*.js",
     "dist/**/*.d.ts",
     "!dist/__tests__/**",
+    "setup/status.schema.json",
     "README.md",
     "CHANGELOG.md",
     "LICENSE"
@@ -54,6 +59,8 @@
     "build:all": "tsc",
     "prepublishOnly": "npm run build && npm test",
     "start": "node dist/index.js",
+    "start:http": "node dist/index.js --transport=http",
+    "doctor": "node dist/index.js doctor --json",
     "migrate": "node dist/migrate.js",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
@@ -68,7 +75,10 @@
     "lint:fix": "eslint src/**/*.ts --fix",
     "format": "prettier --write 'src/**/*.ts'",
     "format:check": "prettier --check 'src/**/*.ts'",
-    "check": "npm run build && npm run lint && npm test"
+    "check": "npm run build && npm run lint && npm test",
+    "release:build": "bash installer/build-release.sh",
+    "release:checksums": "cd installer/dist && sha256sum --check SHA256SUMS",
+    "release:docker": "docker compose -f docker-compose.personal.yml build"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",

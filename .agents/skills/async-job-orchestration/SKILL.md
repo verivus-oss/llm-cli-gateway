@@ -8,7 +8,9 @@ metadata:
 
 # Async Job Orchestration
 
-Async execution for Claude, Codex, Gemini, and Grok. Non-blocking jobs with polling lifecycle. Job state is **durable** — results survive gateway restarts and polling timeouts (see [Durability & Dedup](#durability--dedup)).
+Async execution for Claude, Codex, Gemini, Grok, and Mistral. Non-blocking jobs with polling lifecycle. Job state is **durable** — results survive gateway restarts and polling timeouts (see [Durability & Dedup](#durability--dedup)).
+
+> **Mistral Vibe**: the gateway always emits `--agent <mode>` and defaults to `auto-approve` for programmatic callers. Session continuity (`sessionId` / `resumeLatest`) requires `[session_logging] enabled = true` in `~/.vibe/config.toml`.
 
 ## Dispatch Defaults
 
@@ -25,7 +27,7 @@ Sync tools auto-defer when execution exceeds sync deadline. No manual sync/async
 
 ### Flow
 
-1. Call sync tool (`claude_request`, `codex_request`, `gemini_request`, `grok_request`)
+1. Call sync tool (`claude_request`, `codex_request`, `gemini_request`, `grok_request`, `mistral_request`)
 2. Gateway starts CLI as background job, polls internally
 3. Job completes within deadline (default **45s**) → result returned directly
 4. Deadline exceeded → **deferred response** with `jobId` for polling

@@ -1,6 +1,6 @@
 ---
 name: implement-review-fix
-description: Run implement-review-fix cycle using multiple LLMs (Claude, Codex, Gemini, Grok). Use for features, bugs, or refactoring with multi-LLM collaboration.
+description: Run implement-review-fix cycle using multiple LLMs (Claude, Codex, Gemini, Grok, Mistral). Use for features, bugs, or refactoring with multi-LLM collaboration. Mistral defaults to `--agent auto-approve`; session continuity requires `[session_logging] enabled = true` in `~/.vibe/config.toml`.
 metadata:
   author: verivusai-labs
   version: "1.5"

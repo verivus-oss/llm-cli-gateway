@@ -1,0 +1,58 @@
+# Personal Appliance Dockerfile
+# Layer 7 / U13: Docker fallback path for users who already manage containers.
+# The single binary remains the primary install; this image is documented
+# but not the happy path.
+#
+# Two stages:
+#   1. build  — compile the Node gateway with dev dependencies.
+#   2. runtime — slim image with runtime deps + provider CLI install hooks.
+#
+# Provider CLIs (claude, codex, gemini, grok) are NOT baked in — the
+# personal appliance contract is that provider credentials and CLIs stay on
+# the user's host. Volume-mount the host CLI binaries into /opt/cli-bin and
+# set PATH if you want them available inside the container; otherwise use
+# the gateway only for tools that don't require provider CLIs.
+
+ARG NODE_VERSION=20
+FROM node:${NODE_VERSION}-bookworm-slim AS build
+
+WORKDIR /app
+COPY package.json package-lock.json* ./
+RUN --mount=type=cache,target=/root/.npm \
+    npm ci --no-audit --no-fund
+
+COPY tsconfig.json tsconfig.build.json ./
+COPY src ./src
+COPY setup ./setup
+RUN npm run build && \
+    npm prune --omit=dev
+
+FROM node:${NODE_VERSION}-bookworm-slim AS runtime
+
+# Non-root user owning the managed app directory.
+RUN useradd --create-home --uid 1500 --shell /bin/bash gateway
+
+WORKDIR /home/gateway/gateway
+COPY --from=build /app/dist ./dist
+COPY --from=build /app/node_modules ./node_modules
+COPY --from=build /app/package.json ./package.json
+COPY --from=build /app/setup ./setup
+
+ENV LLM_GATEWAY_TRANSPORT=http \
+    LLM_GATEWAY_HTTP_HOST=0.0.0.0 \
+    LLM_GATEWAY_HTTP_PORT=3333 \
+    LLM_GATEWAY_HTTP_PATH=/mcp \
+    NODE_ENV=production
+
+# /home/gateway/.llm-cli-gateway is mounted from the host in
+# docker-compose.personal.yml so the auth token, sessions, and provider
+# credentials stay on user-owned storage.
+VOLUME ["/home/gateway/.llm-cli-gateway"]
+
+EXPOSE 3333
+USER gateway
+
+# LLM_GATEWAY_AUTH_TOKEN must be supplied at runtime (read from the host
+# secrets-store or compose env). The image never bakes a token.
+ENTRYPOINT ["node", "dist/index.js"]
+CMD ["--transport=http"]

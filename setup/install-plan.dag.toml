@@ -1,0 +1,58 @@
+# Machine-readable install plan for assistant-led personal MCP setup.
+
+[meta]
+name = "llm-cli-gateway personal install"
+schema_version = "1.0"
+source_of_truth = "setup/ui/index.html"
+doctor_command = "llm-cli-gateway doctor --json"
+
+[[steps]]
+id = "choose-targets"
+depends_on = []
+actor = "assistant"
+action = "Ask which inbound client and outbound validation providers the user wants."
+idempotent = true
+validation = "Selected targets map to setup/providers/*.md and unsupported targets are labeled deferred."
+
+[[steps]]
+id = "start-gateway"
+depends_on = ["choose-targets"]
+actor = "human_or_command_capable_assistant"
+action = "Run the bootstrapper setup/start flow or open the local setup UI."
+idempotent = true
+validation = "doctor JSON exists and contains schema_version = 1.0."
+
+[[steps]]
+id = "check-diagnostics"
+depends_on = ["start-gateway"]
+actor = "assistant"
+action = "Read redacted doctor JSON and summarize transport, auth, provider login, and endpoint exposure. Before proposing any web-client setup action, the assistant must inspect `endpoint_exposure.web_clients_supported` and `auth.token_configured`; web-client readiness must not be inferred from `transport.http.enabled` alone."
+idempotent = true
+validation = "No raw tokens, authorization headers, provider credentials, or tunnel tokens are requested or echoed. Assistant explicitly names `endpoint_exposure.web_clients_supported` and `auth.token_configured` when web-client targets are in scope."
+
+[[steps]]
+id = "prepare-endpoint"
+depends_on = ["check-diagnostics"]
+actor = "human_or_command_capable_assistant"
+action = "Use local endpoint for local clients, or configure HTTPS endpoint exposure for web clients."
+idempotent = true
+validation = "Local clients have a local MCP URL; web clients require endpoint_exposure.web_clients_supported = true."
+
+[[steps]]
+id = "apply-client-snippet"
+depends_on = ["prepare-endpoint"]
+actor = "human_or_command_capable_assistant"
+action = "Apply the generated setup UI snippet for the selected client."
+idempotent = true
+validation = "Fresh doctor JSON or client listing shows the client configuration is present when the client exposes such evidence."
+
+[[steps]]
+id = "verify-validation-tool"
+depends_on = ["apply-client-snippet"]
+actor = "human"
+action = "In the selected client, ask: validate this sentence with two other models: gateway setup works."
+idempotent = true
+validation = "The client can call a validation tool or returns a concrete diagnostic blocker."
+
+[rollback]
+guidance = "Use the setup UI or bootstrapper repair/status output first. Restore any client config backup before removing gateway auth. Never disable gateway auth to work around setup failure."

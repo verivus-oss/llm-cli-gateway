@@ -1,6 +1,6 @@
 ---
 name: design-review-cycle
-description: Structured design document review via LLM gateway — submit plans, specs, or designs for peer review from Codex, Gemini, or Grok, iterate on feedback, track review rounds. Use before implementing complex features.
+description: Structured design document review via LLM gateway — submit plans, specs, or designs for peer review from Codex, Gemini, Grok, or Mistral, iterate on feedback, track review rounds. Use before implementing complex features. Mistral Vibe defaults to `--agent auto-approve`.
 ---
 
 # Design Review Cycle

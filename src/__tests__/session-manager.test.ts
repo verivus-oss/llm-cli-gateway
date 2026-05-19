@@ -448,3 +448,97 @@ describe("SessionManager", () => {
     });
   });
 });
+
+// ──────────────────────────────────────────────────────────────────────────────
+// U21 / Layer 9: Phase-0 parity fixes
+// ──────────────────────────────────────────────────────────────────────────────
+//
+// These tests pin the two pre-existing bugs the capability-gap audit found:
+// (1) session_create/session_list/session_clear_all Zod enums omitted "grok"
+//     even though the storage layer supports it.
+// (2) prepareGeminiRequest passed the prompt as a positional argument; the
+//     CLI's TTY/mode-detection heuristics make this fragile.
+import {
+  SESSION_PROVIDER_VALUES,
+  SESSION_PROVIDER_ENUM,
+  prepareGeminiRequest,
+} from "../index.js";
+
+describe("U22 session-provider enum (Layer 10)", () => {
+  it("includes all five providers, with grok and mistral present", () => {
+    expect(SESSION_PROVIDER_VALUES).toEqual([
+      "claude",
+      "codex",
+      "gemini",
+      "grok",
+      "mistral",
+    ]);
+  });
+
+  it("accepts grok as a valid cli value", () => {
+    const parsed = SESSION_PROVIDER_ENUM.safeParse("grok");
+    expect(parsed.success).toBe(true);
+  });
+
+  it("accepts mistral as a valid cli value", () => {
+    const parsed = SESSION_PROVIDER_ENUM.safeParse("mistral");
+    expect(parsed.success).toBe(true);
+  });
+
+  it("accepts claude, codex, gemini, grok, mistral and rejects unknown providers", () => {
+    for (const provider of ["claude", "codex", "gemini", "grok", "mistral"] as const) {
+      expect(SESSION_PROVIDER_ENUM.safeParse(provider).success).toBe(true);
+    }
+    expect(SESSION_PROVIDER_ENUM.safeParse("openai").success).toBe(false);
+    expect(SESSION_PROVIDER_ENUM.safeParse("").success).toBe(false);
+  });
+});
+
+describe("U21 prepareGeminiRequest args ordering (Layer 9)", () => {
+  function baseParams() {
+    return {
+      prompt: "hello world",
+      approvalStrategy: "legacy" as const,
+      optimizePrompt: false,
+      operation: "gemini_request",
+    };
+  }
+
+  it("emits -p as the first arg, with the prompt immediately after", () => {
+    const prep = prepareGeminiRequest(baseParams());
+    // prep is either CliRequestPrep with .args, or an ExtendedToolResponse on
+    // approval denial. The legacy path with no MCP-managed approval cannot
+    // produce a denial response, so .args must be present.
+    expect("args" in prep).toBe(true);
+    if (!("args" in prep)) throw new Error("expected args");
+    expect(prep.args[0]).toBe("-p");
+    expect(prep.args[1]).toBe("hello world");
+  });
+
+  it("places -p prompt before any other flags (model, approval-mode, allowedTools)", () => {
+    const prep = prepareGeminiRequest({
+      ...baseParams(),
+      model: "flash",
+      approvalMode: "yolo",
+      allowedTools: ["Write"],
+    });
+    if (!("args" in prep)) throw new Error("expected args");
+    expect(prep.args[0]).toBe("-p");
+    expect(prep.args[1]).toBe("hello world");
+    // The remainder must include the flags, but none of them must precede -p.
+    const remainder = prep.args.slice(2);
+    expect(remainder).toContain("--model");
+    expect(remainder).toContain("--approval-mode");
+    expect(remainder).toContain("--allowed-tools");
+    // Prompt itself must not appear positionally anywhere later.
+    expect(remainder).not.toContain("hello world");
+  });
+
+  it("never emits the prompt as a positional first argument", () => {
+    const prep = prepareGeminiRequest(baseParams());
+    if (!("args" in prep)) throw new Error("expected args");
+    // The first arg must be the -p flag, NOT the prompt itself.
+    expect(prep.args[0]).not.toBe("hello world");
+    expect(prep.args[0]).toBe("-p");
+  });
+});

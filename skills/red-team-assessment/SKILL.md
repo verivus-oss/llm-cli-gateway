@@ -1,6 +1,6 @@
 ---
 name: red-team-assessment
-description: Get an adversarial red team security assessment from any LLM (Claude, Codex, Gemini, or Grok) with gateway-managed approvals and optional sqry, exa, and ref_tools MCP access. Use when you need adversarial security analysis of code, architecture, or configurations.
+description: Get an adversarial red team security assessment from any LLM (Claude, Codex, Gemini, Grok, or Mistral) with gateway-managed approvals and optional sqry, exa, and ref_tools MCP access. Use when you need adversarial security analysis of code, architecture, or configurations.
 ---
 
 # Red Team Assessment
@@ -34,6 +34,7 @@ Any LLM can red team. Choose based on the assessment type:
 | **Codex** | Deep code analysis, logic bug hunting, can execute tests | Implementation vulnerabilities, race conditions, logic flaws |
 | **Claude** | Architecture analysis, design-level threats, broad reasoning | Threat modeling, design review, trust boundary analysis |
 | **Grok (xAI)** | Independent vendor-family perspective; useful when the other three converge on the same threat model and miss adversarial angles outside it | Diversity reviewer / tie-breaker for high-stakes assessments |
+| **Mistral Vibe** | Fifth-vendor diversity perspective (EU / open-weights family); useful for shared-blind-spot defence across OpenAI/Anthropic/Google/xAI; defaults to `--agent auto-approve` (override via `permissionMode`) | Additional diversity reviewer; pair with Grok when consensus is the goal |
 
 For maximum coverage, use **multiple LLMs in parallel** (see Multi-LLM Red Team below).
 

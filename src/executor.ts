@@ -10,6 +10,8 @@ export interface ExecuteOptions {
   idleTimeout?: number;
   cwd?: string;
   logger?: Logger;
+  /** Extra environment variables to inject; merged after PATH. */
+  env?: NodeJS.ProcessEnv;
 }
 
 export interface ExecuteResult {
@@ -152,7 +154,7 @@ export async function executeCli(
   args: string[],
   options: ExecuteOptions = {}
 ): Promise<ExecuteResult> {
-  const { timeout, idleTimeout, cwd } = options;
+  const { timeout, idleTimeout, cwd, env: extraEnv } = options;
   const extendedPath = getExtendedPath();
   const circuitBreaker = getCircuitBreaker(command);
 
@@ -162,7 +164,7 @@ export async function executeCli(
         cwd,
         detached: true,
         stdio: ["ignore", "pipe", "pipe"],
-        env: { ...process.env, PATH: extendedPath },
+        env: { ...process.env, PATH: extendedPath, ...(extraEnv ?? {}) },
       });
 
       if (proc.pid) registerProcessGroup(proc.pid);
