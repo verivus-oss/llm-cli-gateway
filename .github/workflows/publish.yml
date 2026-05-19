@@ -10,6 +10,11 @@ jobs:
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
+      # Declaring `permissions:` shrinks GITHUB_TOKEN to ONLY the listed
+      # scopes, so `contents: read` must be explicit for actions/checkout to
+      # fetch the release tag. Without it, checkout retries on auth failure
+      # and the job exits with `fatal: could not read Username`.
+      contents: read
       id-token: write
     steps:
       - uses: actions/checkout@v4

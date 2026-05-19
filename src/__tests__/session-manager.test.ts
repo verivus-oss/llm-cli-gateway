@@ -434,17 +434,26 @@ describe("SessionManager", () => {
       expect(session.createdAt <= after).toBe(true);
     });
 
-    it("should update lastUsedAt but not createdAt", () => {
+    it("should update lastUsedAt but not createdAt", async () => {
+      // Pre-fix bug: this test used `setTimeout(...)` without awaiting it, so
+      // the assertions never ran AND the timer fired after `afterEach` had
+      // removed the tmpdir — `updateSessionUsage` → `saveStorage` then threw
+      // an unhandled ENOENT, which CI vitest correctly treats as a failed
+      // run. Also: `session` is the same object reference held inside the
+      // SessionManager's storage map, so `session.lastUsedAt` would mutate
+      // when `updateSessionUsage` ran — snapshot the original string here.
       const session = sessionManager.createSession("claude");
       const originalCreated = session.createdAt;
+      const originalLastUsed = session.lastUsedAt;
 
-      setTimeout(() => {
-        sessionManager.updateSessionUsage(session.id);
-        const updated = sessionManager.getSession(session.id);
+      // Wait long enough for `lastUsedAt` to differ from the creation
+      // timestamp (millisecond resolution).
+      await new Promise(resolve => setTimeout(resolve, 10));
+      sessionManager.updateSessionUsage(session.id);
+      const updated = sessionManager.getSession(session.id);
 
-        expect(updated?.createdAt).toBe(originalCreated);
-        expect(updated?.lastUsedAt).not.toBe(session.lastUsedAt);
-      }, 10);
+      expect(updated?.createdAt).toBe(originalCreated);
+      expect(updated?.lastUsedAt).not.toBe(originalLastUsed);
     });
   });
 });
