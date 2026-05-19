@@ -2,6 +2,16 @@
 
 All notable changes to the llm-cli-gateway project.
 
+## [1.5.2] - 2026-05-19
+
+### Fixed
+
+- **CI publish workflows fixed.** Both v1.5.0 and v1.5.1 npm + PyPI publish workflows failed; this release unblocks them:
+  - **`src/__tests__/session-manager.test.ts:437` — "should update lastUsedAt but not createdAt" was a broken test.** It used `setTimeout(...)` without awaiting it: the inner assertions never ran, AND the timer fired after `afterEach` removed the tmpdir, causing `FileSessionManager.updateSessionUsage` → `saveStorage` → `writeFileSync` to throw an unhandled `ENOENT`. Local vitest happened to exit 0 anyway; CI vitest correctly exits 1 on unhandled errors, so `npm test` failed every publish job. The test now `await`s the timer and snapshots `originalLastUsed` as a string (the original code compared against `session.lastUsedAt`, which is a live reference into the storage map and mutates when `updateSessionUsage` runs).
+  - **`.github/workflows/publish.yml` (PyPI) missing `contents: read`.** Declaring `permissions: { id-token: write }` shrinks `GITHUB_TOKEN` to only that scope, so `actions/checkout@v4` couldn't authenticate to fetch the release tag and failed with `fatal: could not read Username for 'https://github.com': terminal prompts disabled`. Permission now explicitly includes `contents: read`.
+
+No package-code changes vs 1.5.0 (functional surface) or 1.5.1 (installer workflow). This patch is the test + workflow correctness fix that lets the npm + PyPI artifacts actually publish.
+
 ## [1.5.1] - 2026-05-19
 
 ### Changed
