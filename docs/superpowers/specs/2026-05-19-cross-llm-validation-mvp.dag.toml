@@ -1,0 +1,1156 @@
+# Personal Cross-LLM Validation MCP MVP DAG
+# Package llm-cli-gateway as a single-user personal MCP appliance that
+# non-developers can install and configure with assistance from any target LLM.
+#
+# HARD INVARIANTS:
+#   - `blocks` is exact inverse of direct `depends_on`
+#   - each `ART:` id has exactly one producer
+#   - each `consumes` entry matches an existing `produces` entry exactly
+#   - `layer` ordering follows dependency ordering
+#   - `[computed]` values are derived from `units`, never guessed
+#
+# STATUS VALUES: "pending" | "in_progress" | "done" | "blocked" | "deferred"
+# TIER VALUES:   1 = MVP release, 2 = next release, 3 = deferred / demand-driven
+
+[meta]
+title = "Personal cross-LLM validation MCP MVP"
+spec = "docs/superpowers/specs/2026-05-19-cross-llm-validation-mvp.dag.toml"
+decomposition = "docs/superpowers/specs/2026-05-19-cross-llm-validation-mvp.dag.toml"
+created = "2026-05-19"
+total_units = 20
+tier1_units = [
+  "U01",
+  "U02",
+  "U03",
+  "U04",
+  "U05",
+  "U06",
+  "U07",
+  "U08",
+  "U09",
+  "U10",
+  "U11",
+  "U12",
+  "U13",
+  "U14",
+  "U15",
+  "U16",
+  "U17",
+  "U18",
+  "U19",
+  "U20",
+]
+tier2_units = []
+tier3_units = []
+
+[product]
+problem = "Non-developers should be able to connect one personal MCP endpoint to their preferred AI clients and ask for cross-LLM validation without understanding MCP, CLIs, TOML, JSON, or provider-specific config."
+solution = "Ship llm-cli-gateway as a single-user personal MCP appliance with Streamable HTTP, a single-binary installer/bootstrapper, guided provider login, simple validation tools, and LLM-assistable setup artifacts for each target provider."
+non_goals = [
+  "Multi-tenant SaaS.",
+  "Hosted custody of provider credentials.",
+  "A proprietary replacement chat UI.",
+  "Consumer Gemini web or Grok web inbound MCP support unless provider support is confirmed.",
+]
+
+[mvp]
+deployment_model = "single_user_personal_gateway"
+primary_transport = "streamable_http"
+legacy_transport = "stdio"
+auth_model = "bearer_token_v1"
+credential_model = "provider_credentials_stored_on_user_owned_machine_or_volume"
+target_user = "non_developer_power_user"
+install_primary = "single_binary_bootstrapper"
+install_language_candidates = ["go", "rust"]
+install_language_recommendation = "go"
+install_language_rationale = "Go is preferred for the MVP bootstrapper because static cross-platform binaries, filesystem/config edits, process supervision, and simple embedded HTTP setup UI are straightforward. Rust remains a strong option if the bootstrapper grows into a long-lived native runtime."
+single_binary_definition = "The MVP binary must either embed the gateway runtime or fetch a version-pinned verified bundle. If Node remains a host prerequisite, the product must not describe the happy path as a self-contained single-binary install."
+
+[endpoint_exposure]
+requirement = "Web clients require an HTTPS-reachable MCP endpoint. The MVP must own a local-only mode and at least one guided tunnel/proxy path before claiming web-client support."
+candidate_paths = ["tailscale_funnel", "cloudflare_tunnel", "ngrok_for_testing", "byo_reverse_proxy"]
+must_redact = ["authorization_header", "bearer_token", "provider_credentials", "tunnel_tokens"]
+
+[llm_assisted_install]
+requirement = "The install and setup flow must be structured so any target LLM can guide or perform configuration for the user."
+design_rule = "Every setup step must exist in both human-readable markdown and machine-readable TOML/JSON task form."
+assistant_prompt_pack_required = true
+idempotent_commands_required = true
+copy_paste_safe_required = true
+diagnostic_json_required = true
+rollback_guidance_required = true
+manual_code_editing_allowed = false
+
+[provider_targets.chatgpt]
+kind = "web"
+connection = "remote_mcp_https"
+minimum_mvp = true
+support_status = "must_confirm_before_release"
+setup_artifact = "setup/providers/chatgpt.md"
+
+[provider_targets.claude_web]
+kind = "web"
+connection = "remote_mcp_https"
+minimum_mvp = true
+support_status = "must_confirm_before_release"
+setup_artifact = "setup/providers/claude-web.md"
+
+[provider_targets.claude_desktop]
+kind = "desktop"
+connection = "remote_mcp_or_stdio"
+minimum_mvp = true
+support_status = "must_confirm_before_release"
+setup_artifact = "setup/providers/claude-desktop.md"
+
+[provider_targets.codex]
+kind = "cli_or_ide"
+connection = "streamable_http_or_stdio"
+minimum_mvp = true
+support_status = "must_confirm_before_release"
+setup_artifact = "setup/providers/codex.md"
+
+[provider_targets.gemini_cli]
+kind = "cli"
+connection = "streamable_http_or_stdio"
+minimum_mvp = true
+support_status = "must_confirm_before_release"
+setup_artifact = "setup/providers/gemini-cli.md"
+
+[provider_targets.gemini_web]
+kind = "web"
+connection = "unknown_or_enterprise_only"
+minimum_mvp = false
+support_status = "deferred_until_confirmed"
+setup_artifact = "setup/providers/gemini-web-status.md"
+
+[provider_targets.grok]
+kind = "api_or_cli"
+connection = "remote_mcp_for_api_or_provider_cli_adapter"
+minimum_mvp = false
+support_status = "outbound_provider_first_inbound_deferred_until_confirmed"
+setup_artifact = "setup/providers/grok.md"
+
+# ============================================================================
+# LAYER 0: Product contract
+# ============================================================================
+
+[units.U01]
+name = "product-contract-and-target-support-matrix"
+summary = "Define the single-user MVP contract, target provider support matrix, non-goals, security posture, and user-facing cross-validation workflows."
+layer = 0
+tier = 1
+status = "pending"
+depends_on = []
+blocks = [
+  "U02",
+  "U03",
+  "U04",
+  "U17",
+]
+estimated_loc = 80
+spec_sections = ["Product", "MVP", "Provider Targets"]
+spec_anchors = ["product", "mvp", "provider_targets"]
+files_create = [
+  "docs/personal-mcp/PRODUCT_CONTRACT.md",
+]
+files_modify = [
+  "README.md",
+]
+acceptance = [
+  "Document says single-user only and explicitly rejects hosted multi-tenant credential custody.",
+  "Support matrix distinguishes inbound MCP clients from outbound validation providers.",
+  "User workflow is phrased as 'connect one MCP endpoint, ask any client for cross-LLM validation'.",
+  "Every provider target has a support_status field and every minimum_mvp=true target is gated by provider-support verification before user-facing setup docs claim support.",
+  "Gemini web and Grok web are marked unknown/deferred unless provider support is confirmed.",
+]
+produces = ["ART:product-contract"]
+consumes = []
+critical_decisions = [
+  "Provider UIs connect to the gateway; the gateway performs cross-model requests.",
+  "Users do not need every provider UI connected for validation to work.",
+]
+constraints = [
+  "No provider credentials may leave user-owned storage.",
+  "No setup path may require hand-editing code.",
+]
+failure_modes = [
+  "If the support matrix over-promises web client support, non-developers will get blocked during setup.",
+]
+rationale = "The MVP needs a narrow contract before implementation. It is a personal appliance, not SaaS."
+
+# ============================================================================
+# LAYER 1: Core design decisions
+# ============================================================================
+
+[units.U02]
+name = "mcp-server-factory-refactor"
+summary = "Refactor current singleton MCP server construction into createGatewayServer(deps), preserving stdio while enabling per-session HTTP server instances."
+layer = 1
+tier = 1
+status = "pending"
+depends_on = ["U01"]
+blocks = [
+  "U05",
+  "U06",
+  "U07",
+]
+estimated_loc = 220
+spec_sections = ["Architecture"]
+spec_anchors = ["architecture"]
+files_create = [
+  "src/gateway-server.ts",
+]
+files_modify = [
+  "src/index.ts",
+]
+acceptance = [
+  "Existing stdio startup path still works.",
+  "Tests can instantiate isolated MCP server instances without auto-starting the process.",
+  "Tool and resource registration no longer depends on one process-global server object.",
+]
+produces = ["ART:server-factory"]
+consumes = ["ART:product-contract"]
+critical_decisions = [
+  "Use one MCP server instance per Streamable HTTP transport session.",
+]
+constraints = [
+  "Do not regress existing MCP tool names.",
+]
+failure_modes = [
+  "If hidden module globals remain, concurrent HTTP sessions may leak state.",
+]
+rationale = "Remote MCP clients are session-oriented. A factory is the foundation for HTTP transport and testability."
+
+[units.U03]
+name = "single-binary-installer-feasibility-spike"
+summary = "Prove and document the MVP single-binary bootstrapper architecture, language choice, command surface, release targets, payload size, and interaction with the existing Node gateway."
+layer = 1
+tier = 1
+status = "pending"
+depends_on = ["U01"]
+blocks = [
+  "U08",
+]
+estimated_loc = 160
+spec_sections = ["MVP", "Installer"]
+spec_anchors = ["mvp", "install_primary"]
+files_create = [
+  "docs/personal-mcp/SINGLE_BINARY_INSTALLER.md",
+]
+files_modify = []
+acceptance = [
+  "Decision record compares Go and Rust for bootstrapper, setup UI, process supervision, config editing, and cross-platform distribution.",
+  "MVP recommendation is explicit: Go bootstrapper unless a Rust runtime requirement appears.",
+  "Decision includes a prototype build result or equivalent feasibility evidence for the chosen path.",
+  "Decision records measured binary size, first-run payload size, and whether Node is embedded, downloaded as a verified bundle, or remains a host prerequisite.",
+  "If Node remains a host prerequisite, the document forbids describing the happy path as self-contained single-binary install.",
+  "Decision explains whether the binary embeds the Node gateway bundle or downloads/verifies it with checksums/signatures.",
+  "Release targets include macOS arm64/x64, Linux x64/arm64, and Windows x64.",
+]
+produces = ["ART:binary-packaging-decision"]
+consumes = ["ART:product-contract"]
+critical_decisions = [
+  "Single binary is the primary non-developer install path.",
+  "The bootstrapper may supervise the existing Node gateway rather than rewriting the gateway in Go/Rust for MVP.",
+  "The graph does not proceed to bootstrapper scaffolding until the Node runtime packaging question is resolved.",
+]
+constraints = [
+  "Must not require npm, git, or Docker for the happy path.",
+  "Must be scriptable by an LLM assistant using copy/paste commands.",
+]
+failure_modes = [
+  "Embedding too much runtime logic in the bootstrapper could fork product behavior from the Node MCP server.",
+]
+rationale = "Non-developers need a single executable before they need Docker or npm options."
+
+[units.U04]
+name = "llm-assisted-setup-contract"
+summary = "Define the assistant contract that lets ChatGPT, Claude, Claude Desktop, Codex, Gemini, or Grok guide setup safely using diagnostics and generated snippets."
+layer = 1
+tier = 1
+status = "pending"
+depends_on = ["U01"]
+blocks = [
+  "U07",
+  "U08",
+  "U10",
+]
+estimated_loc = 140
+spec_sections = ["LLM Assisted Install"]
+spec_anchors = ["llm_assisted_install"]
+files_create = [
+  "setup/assistants/ASSISTANT_CONTRACT.md",
+]
+files_modify = []
+acceptance = [
+  "Contract tells assistants to ask for OS, desired clients, and diagnostic JSON only.",
+  "Contract forbids requesting provider passwords, raw credential files, or unrelated config.",
+  "Contract requires verification through doctor JSON after each step.",
+  "Contract explains when a target provider can be an installer assistant but not an inbound MCP host.",
+]
+produces = ["ART:assistant-setup-contract"]
+consumes = ["ART:product-contract"]
+critical_decisions = [
+  "Assistant instructions are product surface, not incidental docs.",
+]
+constraints = [
+  "No raw bearer token should be pasted into remote chat unless the user explicitly accepts that risk.",
+]
+failure_modes = [
+  "If assistant prompts are vague, target LLMs will invent unsafe setup steps.",
+]
+rationale = "The user's requirement is that target LLMs can do or guide setup. That needs a contract and diagnostics, not prose alone."
+
+[units.U17]
+name = "provider-support-verification"
+summary = "Verify and record inbound MCP support for every target provider/client before minimum-MVP setup docs or claims are published."
+layer = 1
+tier = 1
+status = "pending"
+depends_on = ["U01"]
+blocks = [
+  "U10",
+  "U14",
+  "U18",
+]
+estimated_loc = 140
+spec_sections = ["Provider Targets"]
+spec_anchors = ["provider_targets"]
+files_create = [
+  "docs/personal-mcp/PROVIDER_SUPPORT_MATRIX.md",
+]
+files_modify = [
+  "docs/superpowers/specs/2026-05-19-cross-llm-validation-mvp.dag.toml",
+]
+acceptance = [
+  "Support matrix cites current primary docs or inspected client behavior for ChatGPT, Claude web, Claude Desktop, Codex, Gemini CLI, Gemini web, and Grok.",
+  "Every provider target is classified as inbound MCP host, outbound validation provider, both, or unsupported/deferred.",
+  "Every minimum_mvp=true provider has a verified connection path or is downgraded before setup artifacts are generated.",
+  "Consumer Gemini web and Grok web remain deferred unless direct inbound custom MCP support is verified.",
+]
+produces = ["ART:provider-support-evidence"]
+consumes = ["ART:product-contract"]
+critical_decisions = [
+  "Provider support evidence gates user-facing setup claims.",
+]
+constraints = [
+  "Do not rely on model memory or another reviewer's summary as provider-support evidence.",
+]
+failure_modes = [
+  "Provider UIs can change quickly; support matrix must include source date and verification method.",
+]
+rationale = "Non-developers will fail immediately if setup docs claim a provider UI can connect when it cannot."
+
+# ============================================================================
+# LAYER 2: MCP, installer, and diagnostics
+# ============================================================================
+
+[units.U05]
+name = "streamable-http-transport"
+summary = "Add Streamable HTTP /mcp transport with bearer auth hooks, session transport map, graceful shutdown, and stdio/http startup selection."
+layer = 2
+tier = 1
+status = "pending"
+depends_on = ["U02"]
+blocks = [
+  "U12",
+  "U13",
+  "U14",
+  "U18",
+  "U20",
+]
+estimated_loc = 260
+spec_sections = ["Architecture"]
+spec_anchors = ["primary_transport"]
+files_create = [
+  "src/http-transport.ts",
+  "src/auth.ts",
+]
+files_modify = [
+  "src/index.ts",
+  "package.json",
+]
+acceptance = [
+  "MCP Inspector can initialize, list tools, call a simple tool, and reconnect with mcp-session-id.",
+  "stdio remains the default unless --transport=http or an env var is provided.",
+  "Unauthorized remote requests fail without leaking auth details.",
+  "Server shutdown closes active transports and child process groups.",
+]
+produces = ["ART:http-mcp"]
+consumes = ["ART:server-factory"]
+critical_decisions = [
+  "Use Streamable HTTP as primary remote transport; keep stdio for local clients.",
+]
+constraints = [
+  "HTTPS is expected at the tunnel/proxy boundary for web clients.",
+]
+failure_modes = [
+  "One global server instance across multiple HTTP clients will create transport races.",
+]
+rationale = "Web and remote desktop clients need HTTP MCP, not stdio."
+
+[units.U06]
+name = "simplified-validation-tool-contracts"
+summary = "Define and register the user-facing validation tools that hide provider-specific request details."
+layer = 2
+tier = 1
+status = "pending"
+depends_on = ["U02"]
+blocks = [
+  "U12",
+  "U15",
+  "U20",
+]
+estimated_loc = 180
+spec_sections = ["MVP Tools"]
+spec_anchors = ["tools"]
+files_create = [
+  "src/validation-tools.ts",
+]
+files_modify = [
+  "src/index.ts",
+]
+acceptance = [
+  "Tools include validate_with_models, second_opinion, compare_answers, red_team_review, consensus_check, ask_model, list_available_models, job_status, and job_result.",
+  "Schemas use plain non-developer language and conservative defaults.",
+  "Validation tools are read-mostly by default.",
+]
+produces = ["ART:validation-tool-contracts"]
+consumes = ["ART:server-factory"]
+critical_decisions = [
+  "Expose simple cross-validation tools rather than raw claude_request/codex_request/gemini_request/grok_request as the primary non-developer surface.",
+]
+constraints = [
+  "Existing raw request tools may remain for power users but should not dominate setup docs.",
+]
+failure_modes = [
+  "If tools expose too many provider-specific flags, non-developer clients will misuse them.",
+]
+rationale = "The product value is validation, not generic CLI proxying."
+
+[units.U07]
+name = "doctor-status-schema"
+summary = "Add a machine-readable doctor command and status schema for assistants, setup UI, and support diagnostics."
+layer = 2
+tier = 1
+status = "pending"
+depends_on = [
+  "U02",
+  "U04",
+]
+blocks = [
+  "U10",
+  "U11",
+  "U13",
+  "U18",
+  "U20",
+]
+estimated_loc = 160
+spec_sections = ["LLM Assisted Install"]
+spec_anchors = ["diagnostic_json_required"]
+files_create = [
+  "src/doctor.ts",
+  "setup/status.schema.json",
+]
+files_modify = [
+  "src/index.ts",
+  "package.json",
+]
+acceptance = [
+  "llm-cli-gateway doctor --json reports OS, gateway version, transport status, auth state, public URL, provider CLI availability, provider login status, and client config status.",
+  "Output validates against setup/status.schema.json.",
+  "Doctor output redacts secrets and credential paths where needed.",
+  "Doctor provides next_actions suitable for an LLM assistant to follow.",
+]
+produces = ["ART:doctor-status"]
+consumes = [
+  "ART:server-factory",
+  "ART:assistant-setup-contract",
+]
+critical_decisions = [
+  "Diagnostics are the control plane for LLM-assisted installation.",
+]
+constraints = [
+  "Doctor must not mutate config unless an explicit --fix flag is introduced later.",
+]
+failure_modes = [
+  "If doctor output is prose-only, assistants cannot reliably verify setup.",
+]
+rationale = "LLM-assisted setup needs structured, safe, current state."
+
+[units.U08]
+name = "single-binary-bootstrapper"
+summary = "Implement or scaffold the single-binary installer/bootstrapper that installs, configures, starts, repairs, and exposes the gateway without requiring npm or Docker."
+layer = 2
+tier = 1
+status = "pending"
+depends_on = [
+  "U03",
+  "U04",
+]
+blocks = [
+  "U09",
+  "U10",
+  "U11",
+  "U13",
+]
+estimated_loc = 320
+spec_sections = ["Installer", "LLM Assisted Install"]
+spec_anchors = ["install_primary", "llm_assisted_install"]
+files_create = [
+  "installer/README.md",
+  "installer/go.mod",
+  "installer/main.go",
+  "installer/internal/config/config.go",
+  "installer/internal/process/process.go",
+  "installer/internal/setupui/server.go",
+]
+files_modify = [
+  "README.md",
+]
+acceptance = [
+  "A downloaded binary can run setup, doctor, start, stop, status, repair, and print-client-config commands.",
+  "Binary either embeds a verified Node gateway bundle or downloads a version-pinned artifact with checksum verification.",
+  "Binary can launch the local setup UI and keep the gateway process alive.",
+  "All commands are idempotent and safe to run repeatedly from LLM-provided instructions.",
+]
+produces = ["ART:single-binary-bootstrap"]
+consumes = [
+  "ART:binary-packaging-decision",
+  "ART:assistant-setup-contract",
+]
+critical_decisions = [
+  "Single binary is the happy path for non-developer install.",
+  "Docker and npm remain secondary paths.",
+]
+constraints = [
+  "The binary must never ask users to paste provider passwords into a chat.",
+  "The binary must avoid destructive config edits; create backups before writing provider client config.",
+]
+failure_modes = [
+  "If binary distribution depends on npm being installed, it fails the non-developer requirement.",
+]
+rationale = "A single binary gives target LLMs a simple, repeatable install primitive to guide users through."
+
+# ============================================================================
+# LAYER 3: Provider runtime and setup UX
+# ============================================================================
+
+[units.U09]
+name = "provider-cli-management"
+summary = "Add provider CLI/API detection, login guidance, version checks, and safe process supervision hooks usable by the gateway and bootstrapper."
+layer = 3
+tier = 1
+status = "pending"
+depends_on = ["U08"]
+blocks = [
+  "U12",
+  "U13",
+]
+estimated_loc = 260
+spec_sections = ["Provider Targets"]
+spec_anchors = ["provider_targets"]
+files_create = [
+  "src/provider-status.ts",
+  "src/provider-login-guidance.ts",
+]
+files_modify = [
+  "src/cli-updater.ts",
+  "src/health.ts",
+]
+acceptance = [
+  "Gateway can identify installed/missing Claude, Codex, Gemini, and Grok runtimes.",
+  "Gateway reports login status without exposing credential material.",
+  "Setup guidance explains exact next steps when a provider runtime is missing or unauthenticated.",
+]
+produces = ["ART:provider-runtime"]
+consumes = ["ART:single-binary-bootstrap"]
+critical_decisions = [
+  "Provider login happens through official provider CLI/browser flows, not through gateway-collected passwords.",
+]
+constraints = [
+  "No automated step may bypass provider approvals or sandbox settings during setup.",
+]
+failure_modes = [
+  "Provider CLIs may change login commands; doctor must detect and report this clearly.",
+]
+rationale = "Cross-validation only works when outbound provider runtimes are installed and authenticated."
+
+[units.U18]
+name = "endpoint-exposure-and-tunnel-setup"
+summary = "Own the web-reachable MCP endpoint story: local-only mode, supported tunnel/proxy setup, public URL diagnostics, token redaction, and connection verification."
+layer = 3
+tier = 1
+status = "pending"
+depends_on = [
+  "U05",
+  "U07",
+  "U17",
+]
+blocks = [
+  "U10",
+  "U14",
+  "U16",
+]
+estimated_loc = 180
+spec_sections = ["Endpoint Exposure"]
+spec_anchors = ["endpoint_exposure"]
+files_create = [
+  "src/endpoint-exposure.ts",
+  "docs/personal-mcp/ENDPOINT_EXPOSURE.md",
+]
+files_modify = [
+  "src/doctor.ts",
+  "setup/status.schema.json",
+]
+acceptance = [
+  "Doctor distinguishes local-only, LAN, tunnel, and BYO reverse-proxy modes.",
+  "At least one guided tunnel/proxy path is documented and testable before web-client setup docs claim support.",
+  "Setup flow redacts bearer tokens, tunnel tokens, authorization headers, and provider credentials from logs and assistant packets.",
+  "Verification step confirms that the generated /mcp URL is reachable from outside localhost when web clients are selected.",
+]
+produces = ["ART:endpoint-exposure"]
+consumes = [
+  "ART:http-mcp",
+  "ART:doctor-status",
+  "ART:provider-support-evidence",
+]
+critical_decisions = [
+  "A web client support claim requires a reachable HTTPS endpoint, not only a local server.",
+]
+constraints = [
+  "No tunnel token may be placed in generated chat prompts.",
+]
+failure_modes = [
+  "A working local /mcp endpoint is insufficient for ChatGPT or Claude web if the user has no public HTTPS URL.",
+]
+rationale = "Endpoint exposure is a primary dependency for web clients and must not be left implicit."
+
+[units.U10]
+name = "setup-ui-and-config-snippets"
+summary = "Build local setup UI and generated provider-specific MCP connection snippets for non-developer users and LLM assistants."
+layer = 4
+tier = 1
+status = "pending"
+depends_on = [
+  "U04",
+  "U07",
+  "U08",
+  "U17",
+  "U18",
+]
+blocks = [
+  "U11",
+  "U14",
+  "U19",
+]
+estimated_loc = 260
+spec_sections = ["LLM Assisted Install", "Provider Targets"]
+spec_anchors = ["llm_assisted_install", "provider_targets"]
+files_create = [
+  "setup/ui/index.html",
+  "setup/providers/chatgpt.md",
+  "setup/providers/claude-web.md",
+  "setup/providers/claude-desktop.md",
+  "setup/providers/codex.md",
+  "setup/providers/gemini-cli.md",
+  "setup/providers/gemini-web-status.md",
+  "setup/providers/grok.md",
+]
+files_modify = [
+  "README.md",
+]
+acceptance = [
+  "Setup UI shows gateway URL, auth state, provider login state, and client-specific next steps.",
+  "Each provider page includes human instructions, assistant instructions, config snippet, verification step, and known limitations.",
+  "Generated snippets avoid raw token exposure when the client supports safer auth setup.",
+  "UI can export a setup packet for the user to paste into a target LLM.",
+]
+produces = ["ART:setup-ui"]
+consumes = [
+  "ART:assistant-setup-contract",
+  "ART:doctor-status",
+  "ART:single-binary-bootstrap",
+  "ART:provider-support-evidence",
+  "ART:endpoint-exposure",
+]
+critical_decisions = [
+  "The setup UI is local-first and can be served by the bootstrapper.",
+]
+constraints = [
+  "UI must not require a cloud account beyond provider accounts the user already has.",
+]
+failure_modes = [
+  "If setup snippets drift from actual provider config, assistant-led setup will fail.",
+]
+rationale = "Non-developers need visible status and exact snippets, not a README maze."
+
+# ============================================================================
+# LAYER 4: Assistant artifacts, orchestration, packaging, guides
+# ============================================================================
+
+[units.U11]
+name = "assistant-prompt-pack-and-machine-install-plan"
+summary = "Create universal and provider-specific prompts plus a machine-readable install DAG that any target LLM can follow to install and configure the gateway."
+layer = 5
+tier = 1
+status = "pending"
+depends_on = [
+  "U07",
+  "U08",
+  "U10",
+]
+blocks = [
+  "U19",
+  "U16",
+]
+estimated_loc = 220
+spec_sections = ["LLM Assisted Install"]
+spec_anchors = ["llm_assisted_install"]
+files_create = [
+  "setup/assistants/universal-install-prompt.md",
+  "setup/assistants/chatgpt-install-prompt.md",
+  "setup/assistants/claude-install-prompt.md",
+  "setup/assistants/codex-install-prompt.md",
+  "setup/assistants/gemini-install-prompt.md",
+  "setup/assistants/grok-install-prompt.md",
+  "setup/install-plan.dag.toml",
+]
+files_modify = []
+acceptance = [
+  "Each prompt instructs the target LLM to use doctor JSON, generated snippets, and verification commands.",
+  "Prompts include safety rules for tokens, credentials, and config backups.",
+  "Machine install plan contains ordered idempotent steps and validation checks.",
+  "At least one prompt is optimized for a chat-only assistant and one for a command-capable assistant.",
+]
+produces = [
+  "ART:assistant-prompt-pack",
+  "ART:machine-install-plan",
+]
+consumes = [
+  "ART:doctor-status",
+  "ART:single-binary-bootstrap",
+  "ART:setup-ui",
+]
+critical_decisions = [
+  "Install instructions are agent-readable first-class artifacts.",
+]
+constraints = [
+  "Prompts must not assume the target LLM can run shell commands unless that provider/client supports it.",
+]
+failure_modes = [
+  "If prompts do not state limitations, assistants may claim unsupported provider web clients can connect.",
+]
+rationale = "The MVP succeeds only if target LLMs can reliably guide setup."
+
+[units.U12]
+name = "validation-orchestration-runtime"
+summary = "Implement fan-out execution, async collection, normalization, error handling, and optional judge synthesis for cross-LLM validation."
+layer = 4
+tier = 1
+status = "pending"
+depends_on = [
+  "U05",
+  "U06",
+  "U09",
+]
+blocks = [
+  "U15",
+  "U20",
+  "U16",
+]
+estimated_loc = 340
+spec_sections = ["Validation Tools"]
+spec_anchors = ["validation"]
+files_create = [
+  "src/validation-orchestrator.ts",
+  "src/validation-normalizer.ts",
+  "src/validation-prompts.ts",
+]
+files_modify = [
+  "src/async-job-manager.ts",
+  "src/index.ts",
+]
+acceptance = [
+  "validate_with_models can call at least two configured providers in parallel.",
+  "Partial provider failure returns a useful report rather than failing the whole request.",
+  "Normalized output includes provider, model, status, verdict, rationale, risks, and raw job reference.",
+  "Judge synthesis is explicit about which model produced the summary.",
+]
+produces = ["ART:validation-runtime"]
+consumes = [
+  "ART:http-mcp",
+  "ART:validation-tool-contracts",
+  "ART:provider-runtime",
+]
+critical_decisions = [
+  "Validation reports preserve per-model disagreement instead of flattening to one answer too early.",
+]
+constraints = [
+  "Long-running validation must use durable async jobs.",
+]
+failure_modes = [
+  "If synthesis hides disagreement, users lose the value of cross-validation.",
+]
+rationale = "This is the core product behavior."
+
+[units.U13]
+name = "release-packaging-and-distribution"
+summary = "Package the personal gateway for single-binary install, Docker Compose fallback, checksum verification, upgrade, and uninstall."
+layer = 7
+tier = 1
+status = "pending"
+depends_on = [
+  "U05",
+  "U07",
+  "U08",
+  "U09",
+  "U19",
+  "U20",
+]
+blocks = [
+  "U16",
+]
+estimated_loc = 300
+spec_sections = ["Installer", "Packaging"]
+spec_anchors = ["install_primary"]
+files_create = [
+  "installer/build-release.sh",
+  "installer/packaging/README.md",
+  "docker-compose.personal.yml",
+  "Dockerfile.personal",
+]
+files_modify = [
+  "package.json",
+  "README.md",
+]
+acceptance = [
+  "Release process builds signed or checksummed binaries for macOS, Linux, and Windows.",
+  "Binary can install, upgrade, uninstall, and repair gateway state.",
+  "Docker Compose remains available as a fallback personal appliance path.",
+  "Release artifacts include copy/paste commands suitable for target LLM setup prompts.",
+]
+produces = ["ART:release-packages"]
+consumes = [
+  "ART:http-mcp",
+  "ART:doctor-status",
+  "ART:single-binary-bootstrap",
+  "ART:provider-runtime",
+  "ART:early-llm-setup-validation",
+  "ART:automated-mvp-tests",
+]
+critical_decisions = [
+  "Single binary is primary; Docker is fallback.",
+]
+constraints = [
+  "Release packages must be verifiable before execution.",
+]
+failure_modes = [
+  "Unsigned/unverified binaries will be hard to recommend to non-developers.",
+]
+rationale = "The install story is part of the product, not a later distribution chore."
+
+[units.U14]
+name = "client-connection-guides"
+summary = "Write client-specific connection guides generated from the setup UI snippets and tested against the actual gateway endpoint."
+layer = 5
+tier = 1
+status = "pending"
+depends_on = [
+  "U05",
+  "U10",
+  "U17",
+  "U18",
+]
+blocks = [
+  "U16",
+]
+estimated_loc = 180
+spec_sections = ["Provider Targets"]
+spec_anchors = ["provider_targets"]
+files_create = [
+  "docs/personal-mcp/connect-chatgpt.md",
+  "docs/personal-mcp/connect-claude.md",
+  "docs/personal-mcp/connect-claude-desktop.md",
+  "docs/personal-mcp/connect-codex.md",
+  "docs/personal-mcp/connect-gemini-cli.md",
+  "docs/personal-mcp/connect-grok.md",
+]
+files_modify = []
+acceptance = [
+  "Each guide starts with the setup UI path and assistant prompt path.",
+  "Each guide includes verification prompt: 'validate this sentence with two other models'.",
+  "Unsupported or uncertain clients are labeled clearly.",
+  "Guides avoid developer-first language where possible.",
+]
+produces = ["ART:client-guides"]
+consumes = [
+  "ART:http-mcp",
+  "ART:setup-ui",
+  "ART:provider-support-evidence",
+  "ART:endpoint-exposure",
+]
+critical_decisions = [
+  "Docs should teach the desired non-developer path, not every possible advanced configuration.",
+]
+constraints = [
+  "No guide should require manual JSON/TOML editing without a generated snippet.",
+]
+failure_modes = [
+  "Provider UI changes can stale guides quickly; setup UI should be source of truth.",
+]
+rationale = "Connection guides are the bridge between provider-specific clients and the personal gateway."
+
+# ============================================================================
+# LAYER 5: Report UX
+# ============================================================================
+
+[units.U15]
+name = "validation-report-format"
+summary = "Define and implement the structured validation report format returned to provider clients."
+layer = 5
+tier = 1
+status = "pending"
+depends_on = [
+  "U06",
+  "U12",
+]
+blocks = [
+  "U20",
+  "U16",
+]
+estimated_loc = 160
+spec_sections = ["Validation Tools"]
+spec_anchors = ["validation_report"]
+files_create = [
+  "src/validation-report.ts",
+  "docs/personal-mcp/VALIDATION_REPORT_FORMAT.md",
+]
+files_modify = [
+  "src/validation-orchestrator.ts",
+]
+acceptance = [
+  "Report includes original request, model list, per-model outputs, disagreements, final recommendation, confidence, limitations, and job IDs.",
+  "Report has both human-readable content and structuredContent.",
+  "Report does not claim consensus when models disagree materially.",
+]
+produces = ["ART:report-format"]
+consumes = [
+  "ART:validation-tool-contracts",
+  "ART:validation-runtime",
+]
+critical_decisions = [
+  "Disagreement is first-class output.",
+]
+constraints = [
+  "Report must fit normal MCP client response limits; large raw outputs stay behind job_result/artifact references.",
+]
+failure_modes = [
+  "Verbose reports may overwhelm chat UIs; provide compact defaults.",
+]
+rationale = "Users need a useful answer in the initiating client, not just raw model dumps."
+
+[units.U19]
+name = "early-llm-assisted-setup-validation"
+summary = "Exercise the prompt pack, doctor JSON, setup UI snippets, and machine install plan with target LLMs before release packaging proceeds."
+layer = 6
+tier = 1
+status = "pending"
+depends_on = [
+  "U10",
+  "U11",
+]
+blocks = [
+  "U13",
+  "U16",
+]
+estimated_loc = 160
+spec_sections = ["LLM Assisted Install"]
+spec_anchors = ["llm_assisted_install"]
+files_create = [
+  "docs/personal-mcp/EARLY_LLM_SETUP_VALIDATION.md",
+]
+files_modify = [
+  "setup/assistants/universal-install-prompt.md",
+  "setup/install-plan.dag.toml",
+]
+acceptance = [
+  "At least one chat-only target LLM and one command-capable target LLM attempt the setup flow from generated artifacts before release packaging.",
+  "Unsafe, hallucinated, or unsupported provider instructions are captured and corrected in the prompt pack.",
+  "Doctor JSON and setup UI snippets are sufficient for the assistant to choose next steps without developer interpretation.",
+]
+produces = ["ART:early-llm-setup-validation"]
+consumes = [
+  "ART:setup-ui",
+  "ART:assistant-prompt-pack",
+  "ART:machine-install-plan",
+]
+critical_decisions = [
+  "Assistant-led setup is validated before packaging, not only at release readiness.",
+]
+constraints = [
+  "Do not proceed to release packaging if assistants require developer interpretation to complete basic setup.",
+]
+failure_modes = [
+  "Late discovery of prompt or doctor gaps wastes release packaging work.",
+]
+rationale = "The MVP depends on target LLMs being able to guide setup, so this risk must be tested before packaging."
+
+[units.U20]
+name = "automated-mvp-test-harness"
+summary = "Add automated tests for HTTP MCP, auth, doctor JSON, validation tools, async orchestration, and report format before release packaging."
+layer = 6
+tier = 1
+status = "pending"
+depends_on = [
+  "U05",
+  "U06",
+  "U07",
+  "U12",
+  "U15",
+]
+blocks = [
+  "U13",
+  "U16",
+]
+estimated_loc = 180
+spec_sections = ["Verification"]
+spec_anchors = ["verification"]
+files_create = [
+  "src/__tests__/http-transport.test.ts",
+  "src/__tests__/doctor.test.ts",
+  "src/__tests__/validation-orchestrator.test.ts",
+  "src/__tests__/validation-report.test.ts",
+]
+files_modify = [
+  "vitest.config.ts",
+]
+acceptance = [
+  "Tests cover HTTP MCP initialize/list/call with mocked transport where practical.",
+  "Tests cover bearer auth failure and success paths.",
+  "Tests cover doctor JSON schema shape and secret redaction.",
+  "Tests cover mocked cross-validation partial success/failure and report structuredContent.",
+]
+produces = ["ART:automated-mvp-tests"]
+consumes = [
+  "ART:http-mcp",
+  "ART:validation-tool-contracts",
+  "ART:doctor-status",
+  "ART:validation-runtime",
+  "ART:report-format",
+]
+critical_decisions = [
+  "Release packaging depends on automated coverage of the new user-facing gateway paths.",
+]
+constraints = [
+  "Provider CLIs should be mocked in unit tests; real CLI dogfooding belongs in U16.",
+]
+failure_modes = [
+  "Without automated tests, future setup or validation regressions will only surface in user installs.",
+]
+rationale = "The new MVP paths need repeatable verification before release packaging and dogfooding."
+
+# ============================================================================
+# LAYER 8: Dogfood and readiness
+# ============================================================================
+
+[units.U16]
+name = "dogfood-and-release-readiness"
+summary = "Validate the full MVP by having target LLMs guide setup, connect clients, and run cross-LLM validation scenarios."
+layer = 8
+tier = 1
+status = "pending"
+depends_on = [
+  "U11",
+  "U12",
+  "U13",
+  "U14",
+  "U15",
+  "U18",
+  "U19",
+  "U20",
+]
+blocks = []
+estimated_loc = 180
+spec_sections = ["Success Criteria"]
+spec_anchors = ["success_criteria"]
+files_create = [
+  "docs/personal-mcp/DOGFOODING_RESULTS.md",
+  "docs/personal-mcp/RELEASE_READINESS.md",
+]
+files_modify = [
+  "README.md",
+]
+acceptance = [
+  "At least two target LLMs successfully guide setup from the assistant prompt pack without developer interpretation.",
+  "At least one web client and one local/desktop/CLI client can call validate_with_models.",
+  "Dogfood report records failures, unsafe assistant suggestions, and prompt fixes.",
+  "Release readiness checklist covers install, auth, provider login, validation, upgrade, uninstall, and support diagnostics.",
+]
+produces = ["OUT:mvp-release-candidate"]
+consumes = [
+  "ART:assistant-prompt-pack",
+  "ART:machine-install-plan",
+  "ART:validation-runtime",
+  "ART:endpoint-exposure",
+  "ART:early-llm-setup-validation",
+  "ART:automated-mvp-tests",
+  "ART:release-packages",
+  "ART:client-guides",
+  "ART:report-format",
+]
+critical_decisions = [
+  "Dogfooding with target LLMs is required before claiming non-developer install works.",
+]
+constraints = [
+  "Do not mark MVP ready if setup requires developer interpretation.",
+]
+failure_modes = [
+  "Target LLMs may hallucinate unsupported client capabilities; prompt pack must be tightened until this is rare and corrected by doctor/setup status.",
+]
+rationale = "The final validation is whether the intended assistants can help real users complete setup."
+
+[computed]
+entry_points = ["U01"]
+leaf_nodes = ["U16"]
+critical_path = [
+  "U01",
+  "U03",
+  "U08",
+  "U09",
+  "U12",
+  "U15",
+  "U20",
+  "U13",
+  "U16",
+]
+critical_path_loc = 1980
+
+[computed.max_parallel]
+layer0 = 1
+layer1 = 4
+layer2 = 4
+layer3 = 2
+layer4 = 2
+layer5 = 3
+layer6 = 2
+layer7 = 1
+layer8 = 1
+
+[[computed.conflict_groups]]
+files = ["README.md"]
+units = ["U01", "U08", "U10", "U13", "U16"]
+
+[[computed.conflict_groups]]
+files = ["src/index.ts"]
+units = ["U02", "U05", "U06", "U07", "U12"]
+
+[[computed.conflict_groups]]
+files = ["package.json"]
+units = ["U05", "U07", "U13"]
+
+[computed.loc_totals]
+all = 4080
+tier1 = 4080
+tier2 = 0
+tier3 = 0
