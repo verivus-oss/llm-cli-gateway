@@ -1,0 +1,125 @@
+/**
+ * U22 — Mistral Vibe handler tests.
+ *
+ * These tests exercise the pure helpers in request-helpers.ts (the parts that
+ * matter for U22's five hard divergences) — model-via-env, --agent enum,
+ * --enabled-tools allowlist, and the silent-ignore of disallowedTools.
+ */
+import { describe, it, expect } from "vitest";
+import {
+  prepareMistralRequest,
+  resolveMistralSessionArgs,
+  MISTRAL_AGENT_MODES,
+  MISTRAL_DEFAULT_AGENT_MODE,
+} from "../request-helpers.js";
+
+describe("U22 prepareMistralRequest — Vibe divergences", () => {
+  it("injects VIBE_ACTIVE_MODEL via env, never as a --model flag", () => {
+    const result = prepareMistralRequest({
+      prompt: "hello",
+      resolvedModel: "devstral-medium",
+    });
+    expect(result.env.VIBE_ACTIVE_MODEL).toBe("devstral-medium");
+    expect(result.args).not.toContain("--model");
+    // No arg should equal the model name either
+    expect(result.args).not.toContain("devstral-medium");
+  });
+
+  it("emits prompt via -p (mirrors Grok's headless surface)", () => {
+    const result = prepareMistralRequest({ prompt: "hello there" });
+    expect(result.args[0]).toBe("-p");
+    expect(result.args[1]).toBe("hello there");
+  });
+
+  it("defaults to --agent auto-approve in programmatic mode when no permissionMode is set", () => {
+    const result = prepareMistralRequest({ prompt: "x" });
+    const agentIdx = result.args.indexOf("--agent");
+    expect(agentIdx).toBeGreaterThan(-1);
+    expect(result.args[agentIdx + 1]).toBe("auto-approve");
+    expect(MISTRAL_DEFAULT_AGENT_MODE).toBe("auto-approve");
+  });
+
+  it.each(MISTRAL_AGENT_MODES)("maps permissionMode=%s onto --agent %s", mode => {
+    const result = prepareMistralRequest({ prompt: "x", permissionMode: mode });
+    const agentIdx = result.args.indexOf("--agent");
+    expect(result.args[agentIdx + 1]).toBe(mode);
+  });
+
+  it('emits "--enabled-tools <tool>" once per allowedTool (allowlist-only)', () => {
+    const result = prepareMistralRequest({
+      prompt: "x",
+      allowedTools: ["read", "write"],
+    });
+    // We expect two --enabled-tools flags, one per tool, in order
+    const positions = result.args
+      .map((arg, idx) => (arg === "--enabled-tools" ? idx : -1))
+      .filter(idx => idx !== -1);
+    expect(positions).toHaveLength(2);
+    expect(result.args[positions[0] + 1]).toBe("read");
+    expect(result.args[positions[1] + 1]).toBe("write");
+  });
+
+  it("accepts disallowedTools but produces no CLI flag and flags it as ignored", () => {
+    const result = prepareMistralRequest({
+      prompt: "x",
+      disallowedTools: ["bash"],
+    });
+    expect(result.args).not.toContain("--disallowed-tools");
+    expect(result.args).not.toContain("--disabled-tools");
+    expect(result.ignoredDisallowedTools).toBe(true);
+  });
+
+  it("does not flag ignoredDisallowedTools when disallowedTools is empty", () => {
+    const result = prepareMistralRequest({ prompt: "x", disallowedTools: [] });
+    expect(result.ignoredDisallowedTools).toBe(false);
+  });
+
+  it("emits outputFormat, effort, reasoningEffort flags when supplied", () => {
+    const result = prepareMistralRequest({
+      prompt: "x",
+      outputFormat: "json",
+      effort: "high",
+      reasoningEffort: "medium",
+    });
+    expect(result.args).toContain("--output-format");
+    expect(result.args).toContain("json");
+    expect(result.args).toContain("--effort");
+    expect(result.args).toContain("high");
+    expect(result.args).toContain("--reasoning-effort");
+    expect(result.args).toContain("medium");
+  });
+});
+
+describe("U22 resolveMistralSessionArgs", () => {
+  it("returns no resume args by default", () => {
+    expect(resolveMistralSessionArgs({})).toEqual({
+      resumeArgs: [],
+      effectiveSessionId: undefined,
+      userProvidedSession: false,
+    });
+  });
+
+  it("maps resumeLatest=true to --continue (not --resume latest)", () => {
+    const r = resolveMistralSessionArgs({ resumeLatest: true });
+    expect(r.resumeArgs).toEqual(["--continue"]);
+  });
+
+  it("maps sessionId to --resume <id>", () => {
+    const r = resolveMistralSessionArgs({ sessionId: "abc-123" });
+    expect(r.resumeArgs).toEqual(["--resume", "abc-123"]);
+    expect(r.userProvidedSession).toBe(true);
+  });
+
+  it("rejects gateway-generated gw- session IDs", () => {
+    expect(() => resolveMistralSessionArgs({ sessionId: "gw-abc" })).toThrow(/reserved prefix/);
+  });
+
+  it("returns no resume args when createNewSession is true", () => {
+    const r = resolveMistralSessionArgs({
+      createNewSession: true,
+      sessionId: "abc",
+      resumeLatest: true,
+    });
+    expect(r.resumeArgs).toEqual([]);
+  });
+});

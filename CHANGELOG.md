@@ -4,6 +4,17 @@ All notable changes to the llm-cli-gateway project.
 
 ## Unreleased
 
+### Added
+
+- **U22 — Mistral Vibe is the fifth supported provider.** New `mistral_request` and `mistral_request_async` MCP tools register alongside the four incumbents and route through the same async job manager, dedup store, flight recorder, approval manager, and validation orchestrator. Five Vibe-specific divergences are documented in `docs/personal-mcp/PROVIDER_MODERNISATION_AUDIT.md`:
+  - **No `--model` flag** — model selection is via the `VIBE_ACTIVE_MODEL` environment variable (default alias: `devstral-medium`); the executor and async job manager forward an `env` override.
+  - **Session-logging is opt-in** in `~/.vibe/config.toml` — `doctor --json` probes `[session_logging] enabled = true` (read-only) and surfaces an actionable `next_actions` entry when the toggle is missing.
+  - **`--agent` enum** replaces Grok's `--always-approve` (`default | plan | accept-edits | auto-approve | chat | explore | lean`); the gateway always emits `--agent` explicitly and defaults to `auto-approve` for programmatic callers.
+  - **`--enabled-tools` allow-list only** — `allowedTools` emits one `--enabled-tools <tool>` per entry; `disallowedTools` is accepted in the schema for caller parity but silently ignored at the CLI boundary (a logged warning records the no-op).
+  - **No self-update** — `cli_upgrade --cli mistral` detects pip / uv / brew via probes and dispatches to `pip install -U vibe-cli`, `uv tool upgrade vibe-cli`, or `brew upgrade mistral-vibe`. Unknown installations return an actionable error rather than running a non-existent `vibe update`.
+
+  Other surfaces extended: `SESSION_PROVIDER_VALUES` now includes `"mistral"`; `list_models`, `cli_versions`, `cli_upgrade`, `approval_list`, `session_create`, `session_list`, and `session_clear_all` accept the fifth provider; new MCP resources `sessions://mistral` and `models://mistral` are registered; `validate_with_models` / `consensus_check` / `red_team_review` can route to Mistral.
+
 ## [1.4.0] - 2026-05-16
 
 ### Added

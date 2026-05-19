@@ -11,7 +11,7 @@ import { noopLogger } from "./logger.js";
 import { ProcessMonitor, type JobHealth } from "./process-monitor.js";
 import { JobStore, computeRequestKey } from "./job-store.js";
 
-export type LlmCli = "claude" | "codex" | "gemini" | "grok";
+export type LlmCli = "claude" | "codex" | "gemini" | "grok" | "mistral";
 export type AsyncJobStatus = "running" | "completed" | "failed" | "canceled" | "orphaned";
 
 const MAX_OUTPUT_SIZE = 50 * 1024 * 1024;
@@ -41,6 +41,14 @@ interface AsyncJobRecord {
   resetIdleTimer?: () => void;
   clearIdleTimer?: () => void;
   cleanupGroup?: () => void;
+  /**
+   * U26 fix: fired exactly once when the job reaches a terminal state
+   * (completed/failed/canceled/orphaned), regardless of exit path. Used to
+   * release per-request resources such as outputSchema temp files that must
+   * outlive the deferred sync window.
+   */
+  onComplete?: () => void;
+  onCompleteFired?: boolean;
   outputDirty: boolean; // true if stdout/stderr changed since last DB flush
   lastOutputFlushAt: number;
 }
@@ -67,6 +75,21 @@ export interface AsyncJobResult extends AsyncJobSnapshot {
   stderrTruncated: boolean;
 }
 
+/**
+ * U22 fix: deterministic canonicalisation of an env-var map for the dedup key.
+ * Returns "" when env is undefined or empty (preserves dedup key continuity for
+ * pre-U22 callers that pass no env).
+ */
+function canonicaliseEnvForKey(env?: Record<string, string>): string {
+  if (!env) return "";
+  const entries = Object.entries(env)
+    .filter(([, v]) => v !== undefined && v !== null)
+    .map(([k, v]) => [k, String(v)] as [string, string]);
+  if (entries.length === 0) return "";
+  entries.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+  return JSON.stringify(entries);
+}
+
 function truncateText(value: string, maxChars: number): { text: string; truncated: boolean } {
   if (value.length <= maxChars) {
     return { text: value, truncated: false };
@@ -83,6 +106,22 @@ export interface StartJobOptions {
   outputFormat?: string;
   /** Bypass dedup and force a fresh CLI run even if a recent matching job exists. */
   forceRefresh?: boolean;
+  /**
+   * Extra environment variables to inject when spawning the child CLI.
+   * Used by Mistral Vibe to pass `VIBE_ACTIVE_MODEL` (Vibe has no `--model` flag).
+   *
+   * IMPORTANT: env vars participate in the dedup key (canonicalised by sorted
+   * keys + JSON-stringified). Two requests that differ only in env (e.g. two
+   * Mistral requests with the same prompt but different VIBE_ACTIVE_MODEL)
+   * therefore do NOT collide on dedup.
+   */
+  env?: Record<string, string>;
+  /**
+   * Optional hook fired exactly once when the job reaches a terminal state.
+   * Used by callers that own per-request resources (outputSchema temp files,
+   * etc.) that must persist for the lifetime of the spawned CLI process.
+   */
+  onComplete?: () => void;
 }
 
 export interface StartJobOutcome {
@@ -160,6 +199,7 @@ export class AsyncJobManager {
             );
             this.emitMetrics(job);
             this.persistComplete(job);
+            this.fireOnComplete(job);
           }
           // EPERM: process exists but we can't signal it — ignore
         }
@@ -175,6 +215,7 @@ export class AsyncJobManager {
         );
         this.emitMetrics(job);
         this.persistComplete(job);
+        this.fireOnComplete(job);
       }
     }
 
@@ -209,9 +250,24 @@ export class AsyncJobManager {
   /**
    * Compute the dedup key for a job. Stable across re-issues of the same request,
    * which is exactly what allows agents to safely retry without restarting the run.
+   *
+   * U22 fix: env vars participate in the key via a deterministic canonicalisation
+   * (sorted keys → JSON-stringified). This prevents two Mistral requests with the
+   * same argv but different `VIBE_ACTIVE_MODEL` from deduping onto each other.
    */
-  private buildRequestKey(cli: LlmCli, args: string[]): string {
-    return computeRequestKey(cli, args);
+  private buildRequestKey(cli: LlmCli, args: string[], env?: Record<string, string>): string {
+    return computeRequestKey(cli, args, canonicaliseEnvForKey(env));
+  }
+
+  private fireOnComplete(job: AsyncJobRecord): void {
+    if (job.onCompleteFired) return;
+    if (!job.onComplete) return;
+    job.onCompleteFired = true;
+    try {
+      job.onComplete();
+    } catch (err) {
+      this.logger.error(`Job ${job.id} onComplete hook threw`, err);
+    }
   }
 
   private safeStoreCall(label: string, fn: () => void): void {
@@ -323,13 +379,17 @@ export class AsyncJobManager {
     cwd?: string,
     idleTimeoutMs?: number,
     outputFormat?: string,
-    forceRefresh?: boolean
+    forceRefresh?: boolean,
+    env?: Record<string, string>,
+    onComplete?: () => void
   ): AsyncJobSnapshot {
     return this.startJobWithDedup(cli, args, correlationId, {
       cwd,
       idleTimeoutMs,
       outputFormat,
       forceRefresh,
+      env,
+      onComplete,
     }).snapshot;
   }
 
@@ -347,8 +407,8 @@ export class AsyncJobManager {
     correlationId: string,
     opts: StartJobOptions = {}
   ): StartJobOutcome {
-    const { cwd, idleTimeoutMs, outputFormat, forceRefresh } = opts;
-    const requestKey = this.buildRequestKey(cli, args);
+    const { cwd, idleTimeoutMs, outputFormat, forceRefresh, env: extraEnv, onComplete } = opts;
+    const requestKey = this.buildRequestKey(cli, args, extraEnv);
 
     if (!forceRefresh && this.store) {
       try {
@@ -365,6 +425,18 @@ export class AsyncJobManager {
               originalCorrelationId: record.correlationId,
               status: record.status,
             });
+            // U26 fix: the caller's per-request resources (e.g. outputSchema temp
+            // file) are NOT consumed by the deduped job, which reuses its own
+            // original resources. Release the new request's cleanup immediately
+            // to avoid an orphaned temp file. The original job's onComplete (if
+            // any) remains attached to that original job record.
+            if (onComplete) {
+              try {
+                onComplete();
+              } catch (err) {
+                this.logger.error("dedup onComplete cleanup threw", err);
+              }
+            }
             return {
               snapshot: this.snapshot(record),
               deduped: true,
@@ -379,11 +451,14 @@ export class AsyncJobManager {
 
     const id = randomUUID();
     const startedAt = new Date().toISOString();
-    const child = spawn(cli, args, {
+    // Mistral Vibe ships as the `vibe` binary; the gateway uses `mistral` as the
+    // provider key but spawns `vibe` on the shell.
+    const command = cli === "mistral" ? "vibe" : cli;
+    const child = spawn(command, args, {
       cwd,
       detached: true,
       stdio: ["ignore", "pipe", "pipe"],
-      env: { ...process.env, PATH: getExtendedPath() },
+      env: { ...process.env, PATH: getExtendedPath(), ...(extraEnv ?? {}) },
     });
 
     if (child.pid) registerProcessGroup(child.pid);
@@ -417,6 +492,8 @@ export class AsyncJobManager {
       metricsRecorded: false,
       outputFormat,
       cleanupGroup,
+      onComplete,
+      onCompleteFired: false,
       outputDirty: false,
       lastOutputFlushAt: Date.now(),
     };
@@ -453,6 +530,7 @@ export class AsyncJobManager {
         });
         this.emitMetrics(job);
         this.persistComplete(job);
+        this.fireOnComplete(job);
         setTimeout(() => {
           if (!job.exited && job.process) killProcessGroup(job.process, "SIGKILL");
           job.cleanupGroup?.();
@@ -484,6 +562,7 @@ export class AsyncJobManager {
         this.logger.error(`Job ${id} error: ${error.message}`, { correlationId });
         this.emitMetrics(job);
         this.persistComplete(job);
+        this.fireOnComplete(job);
       }
     });
 
@@ -501,6 +580,7 @@ export class AsyncJobManager {
         }
         // Ensure terminal state reaches the durable store (idle-timeout/output-overflow already persisted).
         this.persistComplete(job);
+        this.fireOnComplete(job);
         return;
       }
 
@@ -516,6 +596,7 @@ export class AsyncJobManager {
       }
       this.emitMetrics(job);
       this.persistComplete(job);
+      this.fireOnComplete(job);
     });
 
     return { snapshot: this.snapshot(job), deduped: false };
@@ -528,6 +609,10 @@ export class AsyncJobManager {
       if (!job) return null;
     }
     return this.snapshot(job);
+  }
+
+  getJobSnapshots(jobIds: string[]): Record<string, AsyncJobSnapshot | null> {
+    return Object.fromEntries(jobIds.map(jobId => [jobId, this.getJobSnapshot(jobId)]));
   }
 
   getJobResult(jobId: string, maxChars = 200000): AsyncJobResult | null {
@@ -574,6 +659,7 @@ export class AsyncJobManager {
     killProcessGroup(job.process, "SIGTERM");
     this.logger.info(`Job ${jobId} canceled`, { correlationId: job.correlationId });
     this.persistComplete(job);
+    this.fireOnComplete(job);
 
     setTimeout(() => {
       if (!job.exited && job.process) killProcessGroup(job.process, "SIGKILL");
@@ -658,6 +744,7 @@ export class AsyncJobManager {
         });
         this.emitMetrics(job);
         this.persistComplete(job);
+        this.fireOnComplete(job);
         setTimeout(() => {
           if (!job.exited && job.process) killProcessGroup(job.process, "SIGKILL");
           job.cleanupGroup?.();

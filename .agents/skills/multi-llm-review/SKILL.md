@@ -1,6 +1,6 @@
 ---
 name: multi-llm-review
-description: Parallel code reviews across Claude, Codex, Gemini, and Grok. Use for quality analysis, bug finding, or security audit.
+description: Parallel code reviews across Claude, Codex, Gemini, Grok, and Mistral. Use for quality analysis, bug finding, or security audit.
 metadata:
   author: verivus-oss
   version: "1.5"
@@ -18,6 +18,7 @@ Parallel reviews using gateway MCP tools. Each LLM has different strengths — c
 | Codex | Implementation correctness, logic bugs, tests | `codex_request` | `codex_request_async` |
 | Gemini | Security, edge cases, multimodal context | `gemini_request` | `gemini_request_async` |
 | Grok (xAI) | Independent fourth perspective for diversity / consensus tie-breaks | `grok_request` | `grok_request_async` |
+| Mistral Vibe | Independent fifth perspective; uncorrelated with the OpenAI/Anthropic/Google/xAI family; defaults to `--agent auto-approve` | `mistral_request` | `mistral_request_async` |
 
 ## Dispatch Defaults
 

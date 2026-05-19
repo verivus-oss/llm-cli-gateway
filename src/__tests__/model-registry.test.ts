@@ -25,6 +25,10 @@ const ENV_KEYS = [
   "GROK_DEFAULT_MODEL",
   "GROK_MODELS",
   "GROK_MODEL_ALIASES",
+  "MISTRAL_DEFAULT_MODEL",
+  "MISTRAL_MODELS",
+  "MISTRAL_MODEL_ALIASES",
+  "VIBE_ACTIVE_MODEL",
   "LLM_GATEWAY_DISABLE_MODEL_DISCOVERY",
   "LLM_GATEWAY_MODEL_ALIASES",
 ] as const;
@@ -58,12 +62,17 @@ describe("model registry", () => {
     rmSync(tempDir, { recursive: true, force: true });
   });
 
-  it("does not invent a Codex default when no config or env default exists", () => {
+  it("defaults Codex to gpt-5.5 (U26) and keeps gpt-5.3-codex as backwards-compat", () => {
     const info = getCliInfo(true);
 
-    expect(info.codex.defaultModel).toBeUndefined();
-    expect(resolveModelAlias("codex", "default", info)).toBeUndefined();
-    expect(resolveModelAlias("codex", "latest", info)).toBeUndefined();
+    // U26: bundled fallback default is gpt-5.5.
+    expect(info.codex.defaultModel).toBe("gpt-5.5");
+    expect(resolveModelAlias("codex", "default", info)).toBe("gpt-5.5");
+    expect(resolveModelAlias("codex", "latest", info)).toBe("gpt-5.5");
+
+    // Backwards-compat: the legacy alias still resolves to itself.
+    expect(resolveModelAlias("codex", "gpt-5.3-codex", info)).toBe("gpt-5.3-codex");
+    expect(info.codex.models["gpt-5.3-codex"]).toBeDefined();
   });
 
   it("reads Codex default, profile models, and migrations from config.toml", () => {
@@ -150,6 +159,38 @@ describe("model registry", () => {
     expect(info.grok.defaultModel).toBe("grok-team-pin");
     expect(resolveModelAlias("grok", "team", info)).toBe("grok-team-pin");
     expect(resolveModelAlias("grok", "default", info)).toBe("grok-team-pin");
+  });
+
+  it("seeds Mistral with devstral-medium as the default and resolves latest", () => {
+    const info = getCliInfo(true);
+
+    expect(info.mistral.models["devstral-medium"]).toContain("Default Vibe coding model");
+    expect(info.mistral.defaultModel).toBe("devstral-medium");
+    expect(resolveModelAlias("mistral", "latest", info)).toBe("devstral-medium");
+    expect(resolveModelAlias("mistral", "default", info)).toBe("devstral-medium");
+    expect(resolveModelAlias("mistral", "devstral-large", info)).toBe("devstral-large");
+  });
+
+  it("uses VIBE_ACTIVE_MODEL to override the Mistral default when set", () => {
+    process.env.VIBE_ACTIVE_MODEL = "mistral-large-latest";
+    const info = getCliInfo(true);
+    expect(info.mistral.defaultModel).toBe("mistral-large-latest");
+    expect(resolveModelAlias("mistral", "latest", info)).toBe("mistral-large-latest");
+  });
+
+  it("supports env-driven Mistral aliases", () => {
+    process.env.MISTRAL_MODELS = JSON.stringify({
+      "vibe-team-pin": "Team-approved Vibe model",
+    });
+    process.env.MISTRAL_MODEL_ALIASES = "team=vibe-team-pin";
+    process.env.MISTRAL_DEFAULT_MODEL = "vibe-team-pin";
+
+    const info = getCliInfo(true);
+
+    expect(info.mistral.models["vibe-team-pin"]).toBe("Team-approved Vibe model");
+    expect(info.mistral.defaultModel).toBe("vibe-team-pin");
+    expect(resolveModelAlias("mistral", "team", info)).toBe("vibe-team-pin");
+    expect(resolveModelAlias("mistral", "default", info)).toBe("vibe-team-pin");
   });
 });
 

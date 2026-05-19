@@ -1,0 +1,383 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>llm-cli-gateway setup</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --bg: #f6f7f8;
+        --text: #172026;
+        --muted: #5f6b73;
+        --line: #d9dee2;
+        --panel: #ffffff;
+        --good: #167a53;
+        --warn: #9a5b00;
+        --bad: #b42318;
+        --accent: #145c7d;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        font-family:
+          Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        background: var(--bg);
+        color: var(--text);
+      }
+      header,
+      main {
+        max-width: 1180px;
+        margin: 0 auto;
+        padding: 24px;
+      }
+      header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+        border-bottom: 1px solid var(--line);
+      }
+      h1 {
+        margin: 0;
+        font-size: 22px;
+        font-weight: 700;
+      }
+      h2 {
+        margin: 0 0 12px;
+        font-size: 16px;
+      }
+      button {
+        min-height: 36px;
+        border: 1px solid var(--accent);
+        border-radius: 6px;
+        padding: 0 12px;
+        background: var(--accent);
+        color: white;
+        font: inherit;
+        cursor: pointer;
+      }
+      button.secondary {
+        background: white;
+        color: var(--accent);
+      }
+      textarea {
+        width: 100%;
+        min-height: 180px;
+        resize: vertical;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        padding: 12px;
+        font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      }
+      code,
+      pre {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      }
+      pre {
+        overflow: auto;
+        margin: 0;
+        padding: 12px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        background: #fbfcfd;
+        font-size: 12px;
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: 1.1fr 0.9fr;
+        gap: 16px;
+      }
+      .panel {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 16px;
+      }
+      .status-grid {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 10px;
+      }
+      .status {
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        padding: 10px;
+        min-height: 72px;
+      }
+      .label {
+        display: block;
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .value {
+        display: block;
+        margin-top: 6px;
+        overflow-wrap: anywhere;
+        font-size: 14px;
+        font-weight: 650;
+      }
+      .good {
+        color: var(--good);
+      }
+      .warn {
+        color: var(--warn);
+      }
+      .bad {
+        color: var(--bad);
+      }
+      .providers {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 10px;
+      }
+      .provider {
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        padding: 12px;
+      }
+      .provider h3 {
+        margin: 0 0 8px;
+        font-size: 14px;
+      }
+      .actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+      .stack {
+        display: grid;
+        gap: 16px;
+      }
+      .small {
+        color: var(--muted);
+        font-size: 12px;
+      }
+      @media (max-width: 860px) {
+        header {
+          align-items: flex-start;
+          flex-direction: column;
+        }
+        .grid,
+        .providers,
+        .status-grid {
+          grid-template-columns: 1fr;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <div>
+        <h1>llm-cli-gateway setup</h1>
+        <div class="small">Personal MCP endpoint and cross-LLM validation status</div>
+      </div>
+      <div class="actions">
+        <button id="loadDoctor">Load doctor JSON</button>
+        <button class="secondary" id="copyPacket">Copy setup packet</button>
+      </div>
+    </header>
+    <main class="stack">
+      <section class="panel">
+        <h2>Gateway</h2>
+        <div class="status-grid">
+          <div class="status">
+            <span class="label">Endpoint</span>
+            <span class="value" id="gatewayUrl">Not loaded</span>
+          </div>
+          <div class="status">
+            <span class="label">Auth</span>
+            <span class="value" id="authState">Not loaded</span>
+          </div>
+          <div class="status">
+            <span class="label">Exposure</span>
+            <span class="value" id="exposureState">Not loaded</span>
+          </div>
+          <div class="status">
+            <span class="label">Web clients</span>
+            <span class="value" id="webState">Not loaded</span>
+          </div>
+        </div>
+      </section>
+      <section class="grid">
+        <div class="panel stack">
+          <div>
+            <h2>Doctor JSON</h2>
+            <textarea id="doctorInput" spellcheck="false" placeholder="Paste llm-cli-gateway doctor --json output here"></textarea>
+          </div>
+          <div class="actions">
+            <button id="parseDoctor">Update status</button>
+            <button class="secondary" id="clearDoctor">Clear</button>
+          </div>
+        </div>
+        <div class="panel">
+          <h2>Provider Login</h2>
+          <div class="providers" id="providerGrid"></div>
+        </div>
+      </section>
+      <section class="panel">
+        <h2>Client Snippets</h2>
+        <div class="providers" id="clientGrid"></div>
+      </section>
+      <section class="panel">
+        <h2>Assistant Packet</h2>
+        <pre id="packetOutput">{ "status": "waiting_for_doctor_json" }</pre>
+      </section>
+    </main>
+    <script>
+      const clients = [
+        ["ChatGPT", "setup/providers/chatgpt.md", "Requires public HTTPS MCP URL and eligible ChatGPT plan."],
+        ["Claude web", "setup/providers/claude-web.md", "Requires public HTTPS MCP URL."],
+        ["Claude Desktop", "setup/providers/claude-desktop.md", "Remote MCP or local stdio path."],
+        ["Codex", "setup/providers/codex.md", "CLI/IDE MCP client and outbound provider."],
+        ["Gemini CLI", "setup/providers/gemini-cli.md", "Streamable HTTP or stdio MCP client."],
+        ["Gemini web", "setup/providers/gemini-web-status.md", "Installer assistant only; inbound MCP deferred."],
+        ["Grok", "setup/providers/grok.md", "Requires public HTTPS MCP URL for custom connector."],
+      ];
+
+      let lastDoctor = null;
+
+      const el = id => document.getElementById(id);
+      const statusClass = value => {
+        if (value === true || value === "authenticated" || value === "reachable") return "good";
+        if (value === false || value === "not_authenticated" || value === "unreachable") return "bad";
+        return "warn";
+      };
+      const escapeHtml = value =>
+        String(value ?? "")
+          .replace(/&/g, "&amp;")
+          .replace(/</g, "&lt;")
+          .replace(/>/g, "&gt;")
+          .replace(/"/g, "&quot;")
+          .replace(/'/g, "&#39;");
+
+      async function loadDoctor() {
+        const response = await fetch("/doctor", { cache: "no-store" });
+        if (!response.ok) throw new Error(`doctor endpoint returned ${response.status}`);
+        const json = await response.json();
+        el("doctorInput").value = JSON.stringify(json, null, 2);
+        applyDoctor(json);
+      }
+
+      function parseDoctor() {
+        const raw = el("doctorInput").value.trim();
+        if (!raw) return;
+        applyDoctor(JSON.parse(raw));
+      }
+
+      function applyDoctor(json) {
+        lastDoctor = json;
+        const http = json.transport?.http || {};
+        const exposure = json.endpoint_exposure || {};
+        const endpoint = http.public_url || `http://${http.host || "127.0.0.1"}:${http.port || 3333}${http.path || "/mcp"}`;
+        setValue("gatewayUrl", endpoint, http.public_url ? "good" : "warn");
+        setValue("authState", json.auth?.token_configured ? "token configured" : "token missing", json.auth?.token_configured ? "good" : "bad");
+        setValue("exposureState", exposure.mode || "unknown", exposure.mode === "tunnel" || exposure.mode === "byo_reverse_proxy" ? "good" : "warn");
+        setValue("webState", exposure.web_clients_supported ? "ready" : "not ready", exposure.web_clients_supported ? "good" : "bad");
+        renderProviders(json.providers || {});
+        renderClients(endpoint, exposure);
+        renderPacket(json, endpoint);
+      }
+
+      function setValue(id, value, cls) {
+        const node = el(id);
+        node.textContent = value || "unknown";
+        node.className = `value ${cls}`;
+      }
+
+      function renderProviders(providers) {
+        el("providerGrid").innerHTML = Object.entries(providers)
+          .map(([name, provider]) => {
+            const login = provider.login_status || "unknown";
+            const runtimeLabel = provider.cli_available ? "installed" : "missing";
+            return `<article class="provider">
+              <h3>${escapeHtml(name)}</h3>
+              <div><span class="label">Runtime</span><span class="value ${provider.cli_available ? "good" : "bad"}">${runtimeLabel}</span></div>
+              <div><span class="label">Login</span><span class="value ${statusClass(login)}">${escapeHtml(login)}</span></div>
+            </article>`;
+          })
+          .join("");
+      }
+
+      function renderClients(endpoint, exposure) {
+        const webReady = exposure.web_clients_supported === true;
+        el("clientGrid").innerHTML = clients
+          .map(([name, href, note]) => {
+            const disabled = /ChatGPT|Claude web|Grok/.test(name) && !webReady;
+            return `<article class="provider">
+              <h3>${escapeHtml(name)}</h3>
+              <p class="small">${escapeHtml(note)}</p>
+              <pre>${escapeHtml(snippetFor(name, endpoint, disabled))}</pre>
+            </article>`;
+          })
+          .join("");
+      }
+
+      function snippetFor(name, endpoint, blocked) {
+        if (blocked) return "Run endpoint exposure verification before using this web client.";
+        const tokenFile = "~/.llm-cli-gateway/auth-token";
+        if (name === "Codex") {
+          return [
+            `export LLM_GATEWAY_AUTH_TOKEN="$(cat ${tokenFile})"`,
+            `codex mcp add llm-cli-gateway --url ${endpoint} --bearer-token-env-var LLM_GATEWAY_AUTH_TOKEN`,
+            "Keep the export local to the shell running Codex. Do not paste the expanded token into chat.",
+          ].join("\n");
+        }
+        if (name === "Gemini CLI") {
+          return [
+            `gemini mcp add llm-cli-gateway ${endpoint} --transport http --header "Authorization: Bearer $(cat ${tokenFile})"`,
+            "This writes the bearer header to the local Gemini CLI MCP config. Do not paste the expanded token into chat.",
+          ].join("\n");
+        }
+        if (name === "Claude Desktop") {
+          return [
+            `claude mcp add --transport http llm-cli-gateway ${endpoint} --header "Authorization: Bearer $(cat ${tokenFile})"`,
+            "For Claude Desktop remote connectors, configure the same Authorization bearer header in the local connector UI when custom headers are supported. Otherwise use local stdio setup.",
+          ].join("\n");
+        }
+        return `MCP URL: ${endpoint}\nAuth: configure bearer token in the client UI; do not paste raw tokens into remote chat.`;
+      }
+
+      function renderPacket(json, endpoint) {
+        const packet = {
+          product: "llm-cli-gateway personal MCP setup",
+          generated_at: new Date().toISOString(),
+          gateway_url: endpoint,
+          auth: {
+            required: json.auth?.required,
+            token_configured: json.auth?.token_configured,
+            token_value: "redacted",
+          },
+          endpoint_exposure: json.endpoint_exposure,
+          providers: json.providers,
+          next_actions: json.next_actions || [],
+          safety: [
+            "Do not ask for provider passwords, OAuth tokens, API keys, bearer tokens, tunnel tokens, or credential files.",
+            "Verify every setup step with fresh doctor JSON.",
+          ],
+        };
+        el("packetOutput").textContent = JSON.stringify(packet, null, 2);
+      }
+
+      el("loadDoctor").addEventListener("click", () => loadDoctor().catch(error => alert(error.message)));
+      el("parseDoctor").addEventListener("click", () => {
+        try {
+          parseDoctor();
+        } catch (error) {
+          alert(error.message);
+        }
+      });
+      el("clearDoctor").addEventListener("click", () => {
+        lastDoctor = null;
+        el("doctorInput").value = "";
+        el("packetOutput").textContent = '{ "status": "waiting_for_doctor_json" }';
+      });
+      el("copyPacket").addEventListener("click", async () => {
+        if (!lastDoctor) parseDoctor();
+        await navigator.clipboard.writeText(el("packetOutput").textContent);
+      });
+    </script>
+  </body>
+</html>

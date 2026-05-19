@@ -337,4 +337,43 @@ describe("JobStore", () => {
       }
     });
   });
+
+  describe("U22 Mistral jobs persist through the durable store", () => {
+    it("persists a Mistral job and rehydrates it via getById", () => {
+      const id = "mistral-job-1";
+      const requestKey = computeRequestKey("mistral", ["-p", "hi", "--agent", "auto-approve"]);
+      const startedAt = new Date().toISOString();
+
+      store.recordStart({
+        id,
+        correlationId: "mistral-corr-1",
+        requestKey,
+        cli: "mistral",
+        args: ["-p", "hi", "--agent", "auto-approve"],
+        outputFormat: "plain",
+        startedAt,
+        pid: 7777,
+      });
+
+      const finishedAt = new Date().toISOString();
+      store.recordComplete({
+        id,
+        status: "completed",
+        exitCode: 0,
+        stdout: "ok",
+        stderr: "",
+        outputTruncated: false,
+        error: null,
+        finishedAt,
+      });
+
+      const row = store.getById(id);
+      expect(row).not.toBeNull();
+      expect(row!.cli).toBe("mistral");
+      expect(row!.status).toBe("completed");
+      // Dedup lookups should resolve back to the Mistral job
+      const dedup = store.findByRequestKey(requestKey);
+      expect(dedup?.id).toBe(id);
+    });
+  });
 });

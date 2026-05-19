@@ -1,11 +1,13 @@
 ---
 name: multi-llm-consensus
-description: Run a task through multiple LLMs (Claude, Codex, Gemini, Grok) independently and require agreement before proceeding. Use for high-stakes generation, conflict resolution, or final quality gates requiring unanimous approval.
+description: Run a task through multiple LLMs (Claude, Codex, Gemini, Grok, Mistral) independently and require agreement before proceeding. Use for high-stakes generation, conflict resolution, or final quality gates requiring unanimous approval.
 ---
 
 # Multi-LLM Consensus
 
-When correctness matters more than speed, send the same task to Claude, Codex, Gemini, and (optionally) Grok independently, then compare results. All agents must agree before proceeding. Adding Grok gives an independent fourth model from a different vendor (xAI) — useful when consensus needs diversity to defend against shared-blind-spot failures across the OpenAI/Google/Anthropic family.
+When correctness matters more than speed, send the same task to Claude, Codex, Gemini, and (optionally) Grok and Mistral Vibe independently, then compare results. All agents must agree before proceeding. Adding Grok gives an independent fourth model from a different vendor (xAI), and Mistral Vibe gives a fifth — useful when consensus needs diversity to defend against shared-blind-spot failures across the OpenAI/Google/Anthropic/xAI family.
+
+> **Mistral note**: the gateway always emits `--agent <mode>` (default `auto-approve` for programmatic callers); set `permissionMode` explicitly when needed. Continuity-bearing consensus loops also need `[session_logging] enabled = true` in `~/.vibe/config.toml`.
 
 ## Dispatch Defaults
 

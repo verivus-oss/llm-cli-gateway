@@ -5,6 +5,54 @@
 
 A Model Context Protocol (MCP) server providing unified access to Claude Code, Codex, Gemini, and Grok CLIs with session management, retry logic, and async job orchestration.
 
+## Personal MCP Appliance MVP
+
+`llm-cli-gateway` is being packaged as a single-user personal MCP appliance for cross-LLM validation. The intended workflow is: connect one MCP endpoint, ask any client for cross-LLM validation.
+
+The product contract is documented in [docs/personal-mcp/PRODUCT_CONTRACT.md](docs/personal-mcp/PRODUCT_CONTRACT.md). It defines the single-user scope, security posture, target support matrix, and provider-support verification gates. Public setup guides must not claim ChatGPT, Claude web, Claude Desktop, Codex, Gemini CLI, Gemini web, or Grok inbound support until the corresponding provider/client path has been verified.
+
+This project does not provide hosted multi-tenant credential custody. Provider credentials stay on the user's machine or user-owned deployment volume.
+
+MVP release readiness is tracked in [docs/personal-mcp/RELEASE_READINESS.md](docs/personal-mcp/RELEASE_READINESS.md). Dogfooding evidence (which target LLMs guided setup, what unsafe suggestions were captured, which findings are deferred to post-MVP work) is in [docs/personal-mcp/DOGFOODING_RESULTS.md](docs/personal-mcp/DOGFOODING_RESULTS.md).
+
+Current personal-appliance artifacts include:
+
+- Streamable HTTP startup: `LLM_GATEWAY_AUTH_TOKEN=<token> npm run start:http`
+- Machine-readable diagnostics: `npm run doctor`
+- Go bootstrapper scaffold: `installer/` with `setup`, `doctor --json`, `start`, `stop`, `status`, `repair`, `upgrade`, `uninstall`, `print-client-config`, and verified bundle download commands.
+- Release packaging: `npm run release:build` produces cross-platform binaries plus a checksummed Node bundle under `installer/dist/`; see [installer/packaging/README.md](installer/packaging/README.md).
+- Docker Compose fallback: [docker-compose.personal.yml](docker-compose.personal.yml) + [Dockerfile.personal](Dockerfile.personal) for users who already manage containers.
+- Local setup UI artifact: [setup/ui/index.html](setup/ui/index.html)
+- Provider setup snippets: [setup/providers/](setup/providers/)
+- Cross-validation tools: `validate_with_models`, `second_opinion`, `compare_answers`, `red_team_review`, `consensus_check`, `ask_model`, `synthesize_validation`, `job_status`, and `job_result`.
+
+### Install / Upgrade / Uninstall (single binary)
+
+```bash
+# After downloading the binary that matches your OS/arch from a release:
+sha256sum --check SHA256SUMS            # verify before run (or `shasum -a 256 --check` on macOS)
+chmod +x llm-cli-gateway-<ver>-<os>-<arch>
+./llm-cli-gateway-<ver>-<os>-<arch> setup
+./llm-cli-gateway-<ver>-<os>-<arch> install-bundle    # uses RVWR_GATEWAY_BUNDLE_URL/_SHA256
+./llm-cli-gateway-<ver>-<os>-<arch> start
+./llm-cli-gateway-<ver>-<os>-<arch> doctor
+
+# Upgrade: replace the binary, set the new bundle env vars, run upgrade.
+./llm-cli-gateway-<new>-<os>-<arch> upgrade
+
+# Uninstall: dry-run first, then run with --yes.
+./llm-cli-gateway-<ver>-<os>-<arch> uninstall
+./llm-cli-gateway-<ver>-<os>-<arch> uninstall --yes
+```
+
+Docker fallback:
+
+```bash
+LLM_GATEWAY_AUTH_TOKEN=$(openssl rand -hex 32) \
+  docker compose -f docker-compose.personal.yml up -d
+docker compose -f docker-compose.personal.yml run --rm doctor
+```
+
 ## Features
 
 ### Core Capabilities
@@ -63,6 +111,36 @@ grok login   # OAuth flow, or set GROK_CODE_XAI_API_KEY
 # Docs: https://docs.x.ai/build/cli
 ```
 
+### Mistral Vibe CLI
+```bash
+# Pick one — the gateway's cli_upgrade auto-detects which one you used.
+pip install vibe-cli
+uv tool install vibe-cli
+brew install mistral-vibe
+
+vibe auth login
+# Required for `mistral_request --resume` / `--continue` to persist sessions:
+vibe config set session_logging.enabled true   # or edit ~/.vibe/config.toml
+```
+
+Vibe-specific notes:
+
+- **Model selection is via the `VIBE_ACTIVE_MODEL` environment variable** —
+  Vibe has no `--model` flag. The gateway resolves the requested model alias
+  (default: `devstral-medium`) and injects it as `VIBE_ACTIVE_MODEL` when
+  spawning `vibe`.
+- **`permissionMode` accepts** `default | plan | accept-edits | auto-approve |
+  chat | explore | lean` and emits `--agent <mode>`. The gateway's
+  programmatic-mode default is `auto-approve`; pick a stricter mode
+  explicitly if you need approval gates.
+- **`allowedTools` is allow-list only** — the gateway emits one
+  `--enabled-tools <tool>` flag per entry. `disallowedTools` is accepted in
+  the schema for caller-side parity but is silently ignored at the CLI
+  boundary (a `logger.info` warning records the no-op).
+- **No self-update**: `cli_upgrade --cli mistral` detects whether you used
+  pip / uv / brew and dispatches the matching upgrade command. Running
+  `vibe update` is not a thing.
+
 ## Installation
 
 ### As an MCP server (npm)
@@ -94,7 +172,7 @@ npm run build
 
 ### As an MCP Server
 
-Add to your MCP client configuration (e.g., Claude Desktop):
+For clients that already support local stdio MCP servers, add a configuration like:
 
 ```json
 {
@@ -107,7 +185,23 @@ Add to your MCP client configuration (e.g., Claude Desktop):
 }
 ```
 
+This generic stdio example is not provider-support verification for the Personal MCP Appliance MVP. Client-specific setup guides for ChatGPT, Claude web, Claude Desktop, Codex, Gemini CLI, Gemini web, and Grok remain gated by the provider-support matrix in [docs/personal-mcp/PRODUCT_CONTRACT.md](docs/personal-mcp/PRODUCT_CONTRACT.md).
+
 ### Available Tools
+
+#### Cross-LLM Validation Tools
+
+The personal-appliance surface exposes simplified validation tools for non-developer clients. These tools start provider CLI jobs through the durable async job manager and return normalized provider status plus raw job references.
+
+- `validate_with_models`: ask two or more providers to independently validate a question.
+- `second_opinion`: ask one provider to review an answer.
+- `red_team_review`: challenge a plan, answer, or document for risks and failure modes.
+- `consensus_check`: check whether providers agree with a claim.
+- `ask_model`: ask one provider through the simplified surface.
+- `synthesize_validation`: run an explicit judge model after provider results have been collected.
+- `job_status` and `job_result`: poll and collect validation job outputs.
+
+The validation report preserves per-provider disagreement. Optional judge synthesis is explicit about which provider produced the judge job.
 
 #### LLM Request Tools
 
@@ -258,8 +352,17 @@ Environment variables:
 - `LLM_GATEWAY_DEDUP_WINDOW_MS` — how recent an existing job must be to dedup against. Default `3600000` (1 hour). Set `0` to disable dedup.
 - `LLM_GATEWAY_JOBS_DB` — override the sqlite path. Defaults to the value of `LLM_GATEWAY_LOGS_DB`, then `~/.llm-cli-gateway/logs.db`. Set to `none` to disable durability entirely (in-memory only).
 
-##### `claude_request_async` / `codex_request_async` / `gemini_request_async` / `grok_request_async`
-Start a long-running Claude, Codex, Gemini, or Grok request without waiting for completion in the same MCP call.
+##### `mistral_request`
+Run a Mistral Vibe agentic coding request. Like `grok_request` in shape, but with Vibe's specific surface:
+
+- `model` (string, optional): Resolved alias (e.g. `devstral-medium`, `devstral-large`, `latest`). The resolved value is injected via the `VIBE_ACTIVE_MODEL` environment variable — Vibe has no `--model` flag.
+- `permissionMode`: `default | plan | accept-edits | auto-approve | chat | explore | lean` — emitted as `--agent <mode>`. Defaults to `auto-approve` in programmatic mode.
+- `allowedTools` (string[], optional): One `--enabled-tools <tool>` flag per entry (allow-list only).
+- `disallowedTools` (string[], optional): Accepted for parity with the other providers; ignored at the CLI boundary with a logged warning.
+- `sessionId` / `resumeLatest` / `createNewSession`: standard session controls. Continuity requires `[session_logging] enabled = true` in `~/.vibe/config.toml` — `doctor --json` surfaces an actionable next-action when the toggle is missing.
+
+##### `claude_request_async` / `codex_request_async` / `gemini_request_async` / `grok_request_async` / `mistral_request_async`
+Start a long-running Claude, Codex, Gemini, Grok, or Mistral request without waiting for completion in the same MCP call.
 
 Use this flow when analysis/runtime can exceed client tool-call limits:
 1. Start job with `*_request_async`
@@ -297,7 +400,7 @@ Approval records are persisted to `~/.llm-cli-gateway/approvals.jsonl`.
 Create a new session for a specific CLI.
 
 **Parameters:**
-- `cli` (string, required): CLI to create session for ("claude", "codex", "gemini", "grok")
+- `cli` (string, required): CLI to create session for ("claude", "codex", "gemini", "grok", "mistral")
 - `description` (string, optional): Description for the session
 - `setAsActive` (boolean, optional): Set as active session, default: true
 
@@ -314,7 +417,7 @@ Create a new session for a specific CLI.
 List all sessions, optionally filtered by CLI.
 
 **Parameters:**
-- `cli` (string, optional): Filter by CLI ("claude", "codex", "gemini", "grok")
+- `cli` (string, optional): Filter by CLI ("claude", "codex", "gemini", "grok", "mistral")
 
 **Response includes:**
 - Total session count
@@ -352,7 +455,7 @@ Clear all sessions, optionally for a specific CLI.
 List available models for each CLI.
 
 **Parameters:**
-- `cli` (string, optional): Specific CLI to list models for ("claude", "codex", "gemini", "grok")
+- `cli` (string, optional): Specific CLI to list models for ("claude", "codex", "gemini", "grok", "mistral")
 
 **Response includes:**
 - Model names and descriptions
@@ -394,13 +497,13 @@ LLM_GATEWAY_DISABLE_MODEL_DISCOVERY=1
 Report installed CLI versions.
 
 **Parameters:**
-- `cli` (string, optional): Specific CLI to inspect ("claude", "codex", "gemini", "grok")
+- `cli` (string, optional): Specific CLI to inspect ("claude", "codex", "gemini", "grok", "mistral")
 
 ##### `cli_upgrade`
 Plan or run an upgrade for one CLI.
 
 **Parameters:**
-- `cli` (string, required): CLI to upgrade ("claude", "codex", "gemini", "grok")
+- `cli` (string, required): CLI to upgrade ("claude", "codex", "gemini", "grok", "mistral")
 - `target` (string, optional): Package tag/version/target, default: `latest`
 - `dryRun` (boolean, optional): Return the upgrade plan without running it, default: `true`
 - `timeoutMs` (number, optional): Upgrade timeout when `dryRun=false`

@@ -5,7 +5,6 @@ import { tmpdir } from "os";
 import { AsyncJobManager, type LlmCli } from "../async-job-manager.js";
 import type { ISessionManager } from "../session-manager.js";
 import type { Session } from "../session-manager.js";
-import { GATEWAY_SESSION_PREFIX } from "../request-helpers.js";
 
 // Mock executeCli AND getExtendedPath for sync handler tests —
 // getExtendedPath() caches PATH before our shim is added, so both sync
@@ -199,9 +198,10 @@ describe("handleGeminiRequestAsync", () => {
     expect(startJobSpy).not.toHaveBeenCalled();
   });
 
-  it("should create gateway session with gw- prefix when no session context", async () => {
+  it("should create gateway session with deterministic UUID when no session context (U27)", async () => {
     const sm = createMockSessionManager();
     const ajm = new AsyncJobManager(noopLogger);
+    const startJobSpy = vi.spyOn(ajm, "startJob");
     const result = await handleGeminiRequestAsync(
       { sessionManager: sm, asyncJobManager: ajm, logger: noopLogger },
       {
@@ -214,13 +214,18 @@ describe("handleGeminiRequestAsync", () => {
     );
 
     const body = JSON.parse(result.content[0].text);
-    expect(body.sessionId).toMatch(/^gw-/);
+    const uuidV4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+    expect(body.sessionId).toMatch(uuidV4);
     expect(body.resumable).toBe(false);
     expect(sm.createSession).toHaveBeenCalledWith(
       "gemini",
       "Gemini Session",
-      expect.stringMatching(/^gw-/)
+      expect.stringMatching(uuidV4)
     );
+    // U27: deterministic --session-id is emitted, NOT --resume
+    const args = startJobSpy.mock.calls[0][1];
+    expect(args).toContain("--session-id");
+    expect(args).not.toContain("--resume");
 
     ajm.cancelJob(body.job.id);
   });
@@ -251,7 +256,7 @@ describe("handleGeminiRequestAsync", () => {
     ajm.cancelJob(jobId);
   });
 
-  it("should not pass --resume args when createNewSession=true", async () => {
+  it("should emit --session-id (not --resume) when createNewSession=true (U27)", async () => {
     const sm = createMockSessionManager();
     const ajm = new AsyncJobManager(noopLogger);
     const startJobSpy = vi.spyOn(ajm, "startJob");
@@ -271,6 +276,7 @@ describe("handleGeminiRequestAsync", () => {
     expect(startJobSpy).toHaveBeenCalled();
     const args = startJobSpy.mock.calls[0][1];
     expect(args).not.toContain("--resume");
+    expect(args).toContain("--session-id");
 
     const jobId = startJobSpy.mock.results[0].value.id;
     ajm.cancelJob(jobId);
@@ -346,7 +352,7 @@ describe("handleGeminiRequest (sync)", () => {
     expect(result.sessionId).toBe("user-abc");
   });
 
-  it("should return resumable=false for gateway-generated session", async () => {
+  it("should return resumable=false for gateway-generated session (U27 UUID)", async () => {
     const sm = createMockSessionManager();
     const result = await handleGeminiRequest(
       { sessionManager: sm, logger: noopLogger },
@@ -361,7 +367,9 @@ describe("handleGeminiRequest (sync)", () => {
 
     expect(result.isError).toBeUndefined();
     expect(result.resumable).toBe(false);
-    expect(result.sessionId).toMatch(/^gw-/);
+    expect(result.sessionId).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+    );
   });
 });
 

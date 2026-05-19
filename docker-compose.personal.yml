@@ -1,0 +1,79 @@
+# Personal Appliance — Docker Compose fallback (Layer 7 / U13).
+#
+# The single Go binary is the primary non-developer install path. This
+# compose file is the documented fallback for users who already manage
+# containers and want a personal MCP appliance container.
+#
+# Run from the repo root, after building the image:
+#   docker compose -f docker-compose.personal.yml build
+#   LLM_GATEWAY_AUTH_TOKEN=$(openssl rand -hex 32) \
+#     docker compose -f docker-compose.personal.yml up -d
+#   docker compose -f docker-compose.personal.yml exec gateway \
+#     node dist/index.js doctor --json
+#
+# Volume mounts keep state on the user's host:
+#   - ${HOME}/.llm-cli-gateway: gateway app dir (auth token, sessions,
+#     flight recorder DB, durable job store).
+#   - Provider CLI directories are NOT mounted here; provider runtimes
+#     stay on the host. To use provider CLIs from inside the container,
+#     mount each CLI's binary + credential dir explicitly and update PATH.
+#
+# This compose file never bakes secrets. `LLM_GATEWAY_AUTH_TOKEN` is read
+# from the user's shell at `up` time; if absent the container exits and
+# logs an actionable error.
+
+version: "3.9"
+
+services:
+  gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile.personal
+    image: llm-cli-gateway:personal
+    restart: unless-stopped
+    environment:
+      # Required: bearer token for the HTTP transport. The gateway refuses
+      # to serve HTTP requests when this is unset (doctor will report
+      # auth.token_configured = false).
+      LLM_GATEWAY_AUTH_TOKEN: ${LLM_GATEWAY_AUTH_TOKEN:?Set LLM_GATEWAY_AUTH_TOKEN before docker compose up}
+      # Optional public URL for diagnostics; doctor redacts secrets in
+      # query strings or userinfo before echoing.
+      LLM_GATEWAY_PUBLIC_URL: ${LLM_GATEWAY_PUBLIC_URL:-}
+      # Optional tunnel-provider label used for doctor reporting.
+      LLM_GATEWAY_TUNNEL_PROVIDER: ${LLM_GATEWAY_TUNNEL_PROVIDER:-}
+    ports:
+      # Bind to localhost by default; for web-client access the user is
+      # expected to put an HTTPS tunnel or reverse proxy in front of this
+      # port (see docs/personal-mcp/ENDPOINT_EXPOSURE.md).
+      - "127.0.0.1:3333:3333"
+    volumes:
+      - type: bind
+        source: ${HOME}/.llm-cli-gateway
+        target: /home/gateway/.llm-cli-gateway
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3333/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+  # Optional doctor sidecar — `docker compose run --rm doctor` produces the
+  # same JSON the bootstrapper emits, useful for assistant-led setup.
+  doctor:
+    image: llm-cli-gateway:personal
+    profiles: ["diagnostic"]
+    entrypoint: ["node", "dist/index.js"]
+    command: ["doctor", "--json"]
+    depends_on:
+      gateway:
+        condition: service_healthy
+    volumes:
+      - type: bind
+        source: ${HOME}/.llm-cli-gateway
+        target: /home/gateway/.llm-cli-gateway

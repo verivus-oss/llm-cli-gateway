@@ -1,0 +1,271 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://verivus.ai/schemas/llm-cli-gateway/status.schema.json",
+  "title": "llm-cli-gateway doctor status",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "ok",
+    "generated_at",
+    "system",
+    "gateway",
+    "transport",
+    "auth",
+    "providers",
+    "endpoint_exposure",
+    "client_config",
+    "next_actions"
+  ],
+  "properties": {
+    "schema_version": { "const": "1.0" },
+    "ok": { "type": "boolean" },
+    "generated_at": { "type": "string", "format": "date-time" },
+    "system": {
+      "type": "object",
+      "required": ["os", "arch", "release", "node_version"],
+      "properties": {
+        "os": { "type": "string" },
+        "arch": { "type": "string" },
+        "release": { "type": "string" },
+        "node_version": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "gateway": {
+      "type": "object",
+      "required": ["name", "version"],
+      "properties": {
+        "name": { "const": "llm-cli-gateway" },
+        "version": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "transport": {
+      "type": "object",
+      "required": ["default", "http"],
+      "properties": {
+        "default": { "enum": ["stdio", "http"] },
+        "http": {
+          "type": "object",
+          "required": ["enabled", "host", "port", "path", "public_url_configured", "public_url"],
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "host": { "type": "string" },
+            "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+            "path": { "type": "string" },
+            "public_url_configured": { "type": "boolean" },
+            "public_url": { "type": ["string", "null"] }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "auth": {
+      "type": "object",
+      "required": ["required", "token_configured", "source"],
+      "properties": {
+        "required": { "type": "boolean" },
+        "token_configured": { "type": "boolean" },
+        "source": { "enum": ["env", "disabled"] }
+      },
+      "additionalProperties": false
+    },
+    "providers": {
+      "type": "object",
+      "required": ["claude", "codex", "gemini", "grok", "mistral"],
+      "additionalProperties": {
+        "type": "object",
+        "required": [
+          "cli_available",
+          "version",
+          "login_status",
+          "version_command",
+          "login_check",
+          "install_guidance",
+          "login_guidance"
+        ],
+        "properties": {
+          "cli_available": { "type": "boolean" },
+          "version": { "type": ["string", "null"] },
+          "login_status": {
+            "enum": ["authenticated", "not_authenticated", "unknown", "not_checked"]
+          },
+          "version_command": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "login_check": {
+            "type": "object",
+            "required": ["method", "command", "credential_store", "detail"],
+            "properties": {
+              "method": { "enum": ["cli", "credential_store", "not_checked"] },
+              "command": {
+                "type": ["array", "null"],
+                "items": { "type": "string" }
+              },
+              "credential_store": { "enum": ["present", "not_found", "not_checked"] },
+              "detail": { "type": "string" }
+            },
+            "additionalProperties": false
+          },
+          "install_guidance": {
+            "type": "object",
+            "required": ["summary", "commands"],
+            "properties": {
+              "summary": { "type": "string" },
+              "commands": {
+                "type": "array",
+                "items": { "type": "string" }
+              },
+              "documentation_url": { "type": "string" }
+            },
+            "additionalProperties": false
+          },
+          "login_guidance": {
+            "type": "object",
+            "required": ["summary", "commands", "credential_handling"],
+            "properties": {
+              "summary": { "type": "string" },
+              "commands": {
+                "type": "array",
+                "items": { "type": "string" }
+              },
+              "credential_handling": { "type": "string" }
+            },
+            "additionalProperties": false
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "endpoint_exposure": {
+      "type": "object",
+      "required": [
+        "mode",
+        "local_url",
+        "public_url_configured",
+        "public_url",
+        "https_required_for_web",
+        "https_configured",
+        "web_clients_supported",
+        "tunnel_provider",
+        "reachable_from_web",
+        "verification",
+        "next_actions"
+      ],
+      "properties": {
+        "mode": {
+          "enum": ["local_only", "lan", "tunnel", "byo_reverse_proxy", "misconfigured"]
+        },
+        "local_url": { "type": "string" },
+        "public_url_configured": { "type": "boolean" },
+        "public_url": { "type": ["string", "null"] },
+        "https_required_for_web": { "type": "boolean" },
+        "https_configured": { "type": "boolean" },
+        "web_clients_supported": { "type": "boolean" },
+        "tunnel_provider": { "type": ["string", "null"] },
+        "reachable_from_web": { "enum": ["not_checked", "reachable", "unreachable"] },
+        "verification": {
+          "type": "object",
+          "required": ["method", "checked_url", "status_code", "error"],
+          "properties": {
+            "method": { "enum": ["not_checked", "http_head"] },
+            "checked_url": { "type": ["string", "null"] },
+            "status_code": { "type": ["integer", "null"] },
+            "error": { "type": ["string", "null"] }
+          },
+          "additionalProperties": false
+        },
+        "next_actions": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "client_config": {
+      "type": "object",
+      "required": [
+        "claude_desktop_config_present",
+        "codex_config_present",
+        "gemini_settings_present",
+        "gemini_config",
+        "vibe_session_logging"
+      ],
+      "properties": {
+        "claude_desktop_config_present": { "type": "boolean" },
+        "codex_config_present": { "type": "boolean" },
+        "gemini_settings_present": { "type": "boolean" },
+        "gemini_config": {
+          "type": "object",
+          "required": [
+            "project_gemini_md_present",
+            "project_gemini_md_path",
+            "user_gemini_md_present",
+            "user_gemini_md_path",
+            "settings_json_present",
+            "settings_json_path",
+            "mcp_servers_registered",
+            "mcp_reconciliation",
+            "next_actions"
+          ],
+          "properties": {
+            "project_gemini_md_present": { "type": "boolean" },
+            "project_gemini_md_path": { "type": "string" },
+            "user_gemini_md_present": { "type": "boolean" },
+            "user_gemini_md_path": { "type": "string" },
+            "settings_json_present": { "type": "boolean" },
+            "settings_json_path": { "type": "string" },
+            "mcp_servers_registered": {
+              "type": "array",
+              "items": { "type": "string" }
+            },
+            "mcp_reconciliation": {
+              "type": "object",
+              "required": ["whitelisted", "missing_from_settings"],
+              "properties": {
+                "whitelisted": {
+                  "type": "array",
+                  "items": { "type": "string" }
+                },
+                "missing_from_settings": {
+                  "type": "array",
+                  "items": { "type": "string" }
+                }
+              },
+              "additionalProperties": false
+            },
+            "next_actions": {
+              "type": "array",
+              "items": { "type": "string" }
+            }
+          },
+          "additionalProperties": false
+        },
+        "vibe_session_logging": {
+          "type": "object",
+          "required": [
+            "config_path",
+            "config_present",
+            "session_logging_enabled",
+            "note"
+          ],
+          "properties": {
+            "config_path": { "type": "string" },
+            "config_present": { "type": "boolean" },
+            "session_logging_enabled": { "type": "boolean" },
+            "note": { "type": "string" }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "next_actions": {
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  },
+  "additionalProperties": false
+}

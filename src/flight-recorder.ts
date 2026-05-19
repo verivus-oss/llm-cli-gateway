@@ -5,7 +5,7 @@ import { createRequire } from "module";
 
 export interface FlightLogStart {
   correlationId: string;
-  cli: "claude" | "codex" | "gemini" | "grok";
+  cli: "claude" | "codex" | "gemini" | "grok" | "mistral";
   model: string;
   prompt: string;
   system?: string;
@@ -17,6 +17,8 @@ export interface FlightLogResult {
   response: string;
   inputTokens?: number;
   outputTokens?: number;
+  cacheReadTokens?: number;
+  cacheCreationTokens?: number;
   durationMs: number;
   retryCount: number;
   circuitBreakerState: string;
@@ -36,6 +38,7 @@ interface LoggerLike {
 
 interface StatementLike {
   run: (...args: any[]) => void;
+  all?: (...args: any[]) => any[];
 }
 
 interface DatabaseLike {
@@ -47,6 +50,24 @@ interface DatabaseLike {
 }
 
 const MAX_THINKING_BYTES = 1_000_000;
+
+/**
+ * Idempotent migration: add `cache_read_tokens` / `cache_creation_tokens`
+ * columns to the `requests` table if a pre-U23 logs.db is opened. Existing
+ * rows keep NULL for the new columns; that is intentional.
+ */
+function ensureRequestsCacheColumns(db: DatabaseLike): void {
+  const rows = db.prepare("PRAGMA table_info(requests)").all?.() ?? [];
+  const names = new Set<string>(
+    rows.map((row: any) => (row && typeof row.name === "string" ? row.name : ""))
+  );
+  if (!names.has("cache_read_tokens")) {
+    db.exec("ALTER TABLE requests ADD COLUMN cache_read_tokens INTEGER");
+  }
+  if (!names.has("cache_creation_tokens")) {
+    db.exec("ALTER TABLE requests ADD COLUMN cache_creation_tokens INTEGER");
+  }
+}
 
 export function resolveFlightRecorderDbPath(): string | null {
   const configured = process.env.LLM_GATEWAY_LOGS_DB;
@@ -134,7 +155,9 @@ export class FlightRecorder {
         duration_ms INTEGER,
         datetime_utc TEXT NOT NULL,
         input_tokens INTEGER,
-        output_tokens INTEGER
+        output_tokens INTEGER,
+        cache_read_tokens INTEGER,
+        cache_creation_tokens INTEGER
       );
 
       CREATE TABLE IF NOT EXISTS gateway_metadata (
@@ -160,6 +183,15 @@ export class FlightRecorder {
 
     this.db
       .prepare("INSERT OR IGNORE INTO _migrations(version, applied_at) VALUES(1, ?)")
+      .run(new Date().toISOString());
+
+    // Migration v2: cache_read_tokens / cache_creation_tokens columns on
+    // pre-U23 logs.db files. ALTER TABLE ADD COLUMN is idempotent only via
+    // a prior PRAGMA table_info() check; better-sqlite3 has no native
+    // "IF NOT EXISTS" for ADD COLUMN.
+    ensureRequestsCacheColumns(this.db);
+    this.db
+      .prepare("INSERT OR IGNORE INTO _migrations(version, applied_at) VALUES(2, ?)")
       .run(new Date().toISOString());
 
     if (process.platform !== "win32") {
@@ -202,7 +234,9 @@ export class FlightRecorder {
       SET response = @response,
           duration_ms = @duration_ms,
           input_tokens = @input_tokens,
-          output_tokens = @output_tokens
+          output_tokens = @output_tokens,
+          cache_read_tokens = @cache_read_tokens,
+          cache_creation_tokens = @cache_creation_tokens
       WHERE id = @id
     `);
 
@@ -233,6 +267,8 @@ export class FlightRecorder {
           duration_ms: result.durationMs,
           input_tokens: result.inputTokens ?? null,
           output_tokens: result.outputTokens ?? null,
+          cache_read_tokens: result.cacheReadTokens ?? null,
+          cache_creation_tokens: result.cacheCreationTokens ?? null,
         });
 
         updateMetadata.run({

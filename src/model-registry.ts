@@ -42,20 +42,23 @@ const FALLBACK_INFO: CliInfoMap = {
     modelOrder: ["opus", "sonnet", "haiku"],
   },
   codex: {
-    // Note: no hardcoded `defaultModel`. Let Codex CLI pick its own built-in default
-    // unless an explicit value is found via config.toml / env vars in applyCodexOverrides.
-    // This prevents the gateway from pinning a model that may become deprecated upstream.
+    // U26: gpt-5.5 is the bundled fallback default. Config/env overrides still
+    // win (applyCodexOverrides runs after). Older aliases are retained in the
+    // models map so callers that still pass `gpt-5.3-codex` resolve cleanly.
     description: "OpenAI's Codex CLI - best for code execution in sandboxed environments",
     models: {
+      "gpt-5.5":
+        "Latest Codex frontier model. Best for: most Codex tasks (default since U26)",
       "gpt-5.4":
-        "Frontier coding and professional-work model. Best for: most Codex tasks, long-running agentic work",
+        "Frontier coding and professional-work model. Best for: long-running agentic work",
       "gpt-5.3-codex":
-        "Specialized Codex model. Best for: agentic coding workflows with Codex-tuned behavior",
+        "Legacy specialized Codex model (kept for backwards-compat). Best for: agentic coding workflows with Codex-tuned behavior",
       "gpt-5.2": "Strong general-purpose GPT-5 model. Best for: broad coding and reasoning tasks",
       "gpt-5-pro":
         "Highest-capability GPT-5 model. Best for: deep reasoning and difficult professional workflows",
     },
-    modelOrder: ["gpt-5.3-codex", "gpt-5.4", "gpt-5.2", "gpt-5-pro"],
+    defaultModel: "gpt-5.5",
+    modelOrder: ["gpt-5.5", "gpt-5.4", "gpt-5.3-codex", "gpt-5.2", "gpt-5-pro"],
   },
   gemini: {
     description: "Google's Gemini CLI - best for multimodal tasks and Google ecosystem integration",
@@ -73,6 +76,23 @@ const FALLBACK_INFO: CliInfoMap = {
       "grok-build": "Default Grok model for code/agentic tasks. Best for: most Grok build sessions",
     },
     modelOrder: ["grok-build"],
+  },
+  mistral: {
+    // Mistral Vibe selects the active model via the VIBE_ACTIVE_MODEL environment
+    // variable; there is NO `--model` flag. Aliases here are still resolvable so
+    // callers can pass e.g. `latest` → `devstral-medium`; the resolved value is
+    // injected via env in prepareMistralRequest.
+    description:
+      "Mistral AI's Vibe CLI - agentic coding via Mistral models (model selection via VIBE_ACTIVE_MODEL env var)",
+    models: {
+      "devstral-medium":
+        "Default Vibe coding model. Best for: most Vibe sessions (default when VIBE_ACTIVE_MODEL is unset)",
+      "devstral-large": "Higher-capability Devstral model. Best for: harder reasoning/coding tasks",
+      "mistral-large-latest":
+        "General-purpose flagship Mistral model. Best for: non-Devstral reasoning workloads",
+    },
+    defaultModel: "devstral-medium",
+    modelOrder: ["devstral-medium", "devstral-large", "mistral-large-latest"],
   },
 };
 
@@ -147,12 +167,14 @@ function buildCliInfo(): CliInfoMap {
     codex: cloneInfo(FALLBACK_INFO.codex),
     gemini: cloneInfo(FALLBACK_INFO.gemini),
     grok: cloneInfo(FALLBACK_INFO.grok),
+    mistral: cloneInfo(FALLBACK_INFO.mistral),
   };
 
   applyClaudeOverrides(info.claude);
   applyCodexOverrides(info.codex);
   applyGeminiOverrides(info.gemini);
   applyGrokOverrides(info.grok);
+  applyMistralOverrides(info.mistral);
 
   return info;
 }
@@ -441,6 +463,24 @@ function applyGrokOverrides(info: CliInfo): void {
 
   if (envDefault) {
     setDefaultModel(info, envDefault, "GROK_DEFAULT_MODEL", "env");
+  }
+
+  info.modelOrder = buildOrder(info, info.defaultModel);
+}
+
+function applyMistralOverrides(info: CliInfo): void {
+  // Vibe selects its active model via VIBE_ACTIVE_MODEL (no --model flag). When
+  // present, treat it as the configured default so resolveModelAlias("latest")
+  // returns the user-selected value.
+  const envDefault = process.env.MISTRAL_DEFAULT_MODEL || process.env.VIBE_ACTIVE_MODEL;
+
+  addEnvModels(info, "MISTRAL_MODELS");
+  addEnvAliases(info, "mistral", "MISTRAL_MODEL_ALIASES");
+  addGlobalEnvAliases(info, "mistral");
+
+  if (envDefault) {
+    const source = process.env.MISTRAL_DEFAULT_MODEL ? "MISTRAL_DEFAULT_MODEL" : "VIBE_ACTIVE_MODEL";
+    setDefaultModel(info, envDefault, source, "env");
   }
 
   info.modelOrder = buildOrder(info, info.defaultModel);
