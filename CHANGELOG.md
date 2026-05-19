@@ -2,6 +2,12 @@
 
 All notable changes to the llm-cli-gateway project.
 
+## [1.5.1] - 2026-05-19
+
+### Changed
+
+- **Desktop installer artifacts now built and uploaded automatically on release.** New `.github/workflows/release-installer.yml` triggers on `release: published`, cross-compiles the Go bootstrapper for 5 OS/arch targets (`darwin/{arm64,amd64}`, `linux/{amd64,arm64}`, `windows/amd64`), packages the Node gateway bundle (`llm-cli-gateway-bundle-<ver>.tar.gz`), generates `SHA256SUMS` + `release-manifest.json` with the repo-relative `RVWR_RELEASE_PUBLIC_BASE`, verifies checksums, and uploads everything as release assets via `gh release upload --clobber`. `workflow_dispatch` is supported so a missed run can be rebuilt for an existing tag. No package-code changes vs 1.5.0; this is purely the build/distribution pipeline that lets users install the desktop integration without git/npm/docker.
+
 ## [1.5.0] - 2026-05-19
 
 Lands DAG layers 6-12 — the personal-MCP MVP terminal plus all of Phase 0-3 provider modernisation. Codex round-2 unconditional SHIP across U22-U27 (correlation `517700e1`). 523 tests passing (+184 from 1.4.0).
