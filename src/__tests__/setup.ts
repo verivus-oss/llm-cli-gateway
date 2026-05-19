@@ -11,6 +11,8 @@ const PG_TESTS_ENABLED = process.env.PG_TESTS === "1";
 const MIGRATION_LOCK_KEY = 88421173;
 const CLEANUP_LOCK_KEY = 88421174;
 
+process.env.LLM_GATEWAY_LOGS_DB ??= "none";
+
 let testPool: Pool | null = null;
 let testRedis: Redis | null = null;
 
