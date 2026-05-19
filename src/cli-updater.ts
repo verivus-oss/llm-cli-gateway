@@ -23,7 +23,12 @@ export interface CliUpgradePlan {
   target: string;
   command: string;
   args: string[];
-  strategy: "self-update" | "npm-global-install" | "pip-install" | "uv-tool-upgrade" | "brew-upgrade";
+  strategy:
+    | "self-update"
+    | "npm-global-install"
+    | "pip-install"
+    | "uv-tool-upgrade"
+    | "brew-upgrade";
   requiresNetwork: boolean;
   note?: string;
 }
@@ -39,7 +44,10 @@ export type MistralInstallMethod = "pip" | "uv" | "brew" | "unknown";
  * blindly running `vibe update` (a command that does not exist).
  */
 export function detectMistralInstallMethod(
-  exec: (cmd: string, args: string[]) => { exitCode: number | null; stdout: string } = (cmd, args) => {
+  exec: (cmd: string, args: string[]) => { exitCode: number | null; stdout: string } = (
+    cmd,
+    args
+  ) => {
     const result = spawnSync(cmd, args, { encoding: "utf8", timeout: 5_000, windowsHide: true });
     return {
       exitCode: typeof result.status === "number" ? result.status : null,

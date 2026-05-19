@@ -74,7 +74,8 @@ const GUIDANCE: Record<CliType, ProviderLoginGuidance> = {
     },
     verification: {
       command: "gemini --version",
-      expected: "CLI is installed; doctor checks the local Gemini credential store for login evidence",
+      expected:
+        "CLI is installed; doctor checks the local Gemini credential store for login evidence",
     },
   },
   grok: {
@@ -106,7 +107,8 @@ const GUIDANCE: Record<CliType, ProviderLoginGuidance> = {
       documentationUrl: "https://docs.mistral.ai/agents/vibe-cli",
     },
     login: {
-      summary: "Sign in through Mistral's official auth flow and enable session_logging in ~/.vibe/config.toml.",
+      summary:
+        "Sign in through Mistral's official auth flow and enable session_logging in ~/.vibe/config.toml.",
       commands: ["vibe auth login", "vibe config set session_logging.enabled true"],
       credentialHandling:
         "Do not paste Mistral API keys, OAuth tokens, or ~/.vibe/credentials into the gateway or a remote chat.",

@@ -217,9 +217,7 @@ describe("U25 — Claude high-impact feature flags", () => {
 
     it("rejects non-positive maxBudgetUsd", () => {
       expect(CLAUDE_HIGH_IMPACT_PARAMS_SCHEMA.safeParse({ maxBudgetUsd: 0 }).success).toBe(false);
-      expect(
-        CLAUDE_HIGH_IMPACT_PARAMS_SCHEMA.safeParse({ maxBudgetUsd: -1 }).success
-      ).toBe(false);
+      expect(CLAUDE_HIGH_IMPACT_PARAMS_SCHEMA.safeParse({ maxBudgetUsd: -1 }).success).toBe(false);
     });
 
     it("rejects non-positive / non-integer maxTurns", () => {

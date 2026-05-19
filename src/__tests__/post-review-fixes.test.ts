@@ -17,11 +17,7 @@ import { join } from "path";
 import { AsyncJobManager } from "../async-job-manager.js";
 import { JobStore, computeRequestKey } from "../job-store.js";
 import { noopLogger } from "../logger.js";
-import {
-  prepareCodexRequest,
-  prepareGeminiRequest,
-  createGatewayServer,
-} from "../index.js";
+import { prepareCodexRequest, prepareGeminiRequest, createGatewayServer } from "../index.js";
 
 // ──────────────────────────────────────────────────────────────────────────────
 // U22 fix: dedup key includes env vars (Mistral VIBE_ACTIVE_MODEL, etc.)

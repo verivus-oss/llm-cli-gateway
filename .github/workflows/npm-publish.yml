@@ -44,12 +44,12 @@ jobs:
 
       - name: Publish (dry run)
         if: inputs.dry-run == 'true'
-        run: npm publish --provenance --dry-run
+        run: npm publish --provenance --dry-run --ignore-scripts
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Publish
         if: inputs.dry-run != 'true'
-        run: npm publish --provenance
+        run: npm publish --provenance --ignore-scripts
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

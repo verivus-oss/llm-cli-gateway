@@ -256,9 +256,10 @@ describe("request-helpers", () => {
     });
 
     it("emits --permission-mode bypassPermissions", () => {
-      expect(
-        resolveClaudePermissionFlags({ permissionMode: "bypassPermissions" }).args
-      ).toEqual(["--permission-mode", "bypassPermissions"]);
+      expect(resolveClaudePermissionFlags({ permissionMode: "bypassPermissions" }).args).toEqual([
+        "--permission-mode",
+        "bypassPermissions",
+      ]);
     });
 
     it("maps legacy dangerouslySkipPermissions=true to --permission-mode bypassPermissions", () => {
@@ -317,9 +318,10 @@ describe("request-helpers", () => {
     });
 
     it("emits --sandbox danger-full-access", () => {
-      expect(
-        resolveCodexSandboxFlags({ sandboxMode: "danger-full-access" }).args
-      ).toEqual(["--sandbox", "danger-full-access"]);
+      expect(resolveCodexSandboxFlags({ sandboxMode: "danger-full-access" }).args).toEqual([
+        "--sandbox",
+        "danger-full-access",
+      ]);
     });
 
     it("emits --ask-for-approval on-request for askForApproval alone", () => {
@@ -345,12 +347,7 @@ describe("request-helpers", () => {
 
     it("expands fullAuto=true (no escape hatch) to sandbox + ask-for-approval, NOT --full-auto", () => {
       const result = resolveCodexSandboxFlags({ fullAuto: true });
-      expect(result.args).toEqual([
-        "--sandbox",
-        "workspace-write",
-        "--ask-for-approval",
-        "never",
-      ]);
+      expect(result.args).toEqual(["--sandbox", "workspace-write", "--ask-for-approval", "never"]);
       expect(result.args).not.toContain("--full-auto");
     });
 
@@ -381,22 +378,21 @@ describe("request-helpers", () => {
 
   describe("U24 filterCodexResumeFlags", () => {
     it("strips --full-auto", () => {
-      expect(filterCodexResumeFlags(["exec", "--full-auto", "prompt"])).toEqual([
+      expect(filterCodexResumeFlags(["exec", "--full-auto", "prompt"])).toEqual(["exec", "prompt"]);
+    });
+
+    it("strips --sandbox and its value", () => {
+      expect(filterCodexResumeFlags(["exec", "--sandbox", "workspace-write", "prompt"])).toEqual([
         "exec",
         "prompt",
       ]);
     });
 
-    it("strips --sandbox and its value", () => {
-      expect(
-        filterCodexResumeFlags(["exec", "--sandbox", "workspace-write", "prompt"])
-      ).toEqual(["exec", "prompt"]);
-    });
-
     it("strips --ask-for-approval and its value", () => {
-      expect(
-        filterCodexResumeFlags(["exec", "--ask-for-approval", "never", "prompt"])
-      ).toEqual(["exec", "prompt"]);
+      expect(filterCodexResumeFlags(["exec", "--ask-for-approval", "never", "prompt"])).toEqual([
+        "exec",
+        "prompt",
+      ]);
     });
 
     it("strips both --sandbox and --ask-for-approval together", () => {
@@ -414,14 +410,7 @@ describe("request-helpers", () => {
 
     it("preserves unrelated flags", () => {
       expect(
-        filterCodexResumeFlags([
-          "exec",
-          "--model",
-          "gpt-5.4",
-          "--sandbox",
-          "read-only",
-          "prompt",
-        ])
+        filterCodexResumeFlags(["exec", "--model", "gpt-5.4", "--sandbox", "read-only", "prompt"])
       ).toEqual(["exec", "--model", "gpt-5.4", "prompt"]);
     });
   });

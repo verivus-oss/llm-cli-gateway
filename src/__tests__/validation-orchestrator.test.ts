@@ -16,7 +16,11 @@ import type { ValidationProvider } from "../validation-normalizer.js";
 // where the orchestrator produces a validation report alongside the job
 // references.
 
-function runtime(provider: ValidationProvider, installed = true, login: ProviderRuntimeStatus["loginStatus"] = "authenticated"): ProviderRuntimeStatus {
+function runtime(
+  provider: ValidationProvider,
+  installed = true,
+  login: ProviderRuntimeStatus["loginStatus"] = "authenticated"
+): ProviderRuntimeStatus {
   return {
     provider,
     displayName: provider,
@@ -246,7 +250,9 @@ describe("Layer 6 validation orchestrator (U20)", () => {
   });
 
   it("warns when a started provider's login status is not authenticated", () => {
-    const fake = makeScriptedManager({ gemini: { status: "completed", stdout: "Verdict: approve" } });
+    const fake = makeScriptedManager({
+      gemini: { status: "completed", stdout: "Verdict: approve" },
+    });
     const report = startValidationRun(
       {
         asyncJobManager: fake.manager as any,
@@ -279,13 +285,14 @@ describe("Layer 6 validation orchestrator (U20)", () => {
 
     expect(run.synthesis.status).toBe("waiting_for_provider_results");
 
-    const collected = run.results.map(result =>
-      collectValidationJobResult(
-        { asyncJobManager: fake.manager as any },
-        result.provider,
-        result.rawJobReference!.jobId,
-        result.provider
-      )!
+    const collected = run.results.map(
+      result =>
+        collectValidationJobResult(
+          { asyncJobManager: fake.manager as any },
+          result.provider,
+          result.rawJobReference!.jobId,
+          result.provider
+        )!
     );
     const synthesis = startJudgeSynthesis(
       {

@@ -5,11 +5,7 @@ import { spawnSync } from "node:child_process";
 import type { CliType } from "./session-manager.js";
 import { getProviderLoginGuidance, type ProviderLoginGuidance } from "./provider-login-guidance.js";
 
-export type ProviderLoginStatus =
-  | "authenticated"
-  | "not_authenticated"
-  | "unknown"
-  | "not_checked";
+export type ProviderLoginStatus = "authenticated" | "not_authenticated" | "unknown" | "not_checked";
 
 export interface ProviderRuntimeStatus {
   provider: CliType;
@@ -55,10 +51,9 @@ const LOGIN_CHECKS: Partial<Record<CliType, string[]>> = {
 };
 
 export function listProviderRuntimeStatuses(): Record<CliType, ProviderRuntimeStatus> {
-  return Object.fromEntries(PROVIDERS.map(provider => [provider, getProviderRuntimeStatus(provider)])) as Record<
-    CliType,
-    ProviderRuntimeStatus
-  >;
+  return Object.fromEntries(
+    PROVIDERS.map(provider => [provider, getProviderRuntimeStatus(provider)])
+  ) as Record<CliType, ProviderRuntimeStatus>;
 }
 
 export function getProviderRuntimeStatus(provider: CliType): ProviderRuntimeStatus {
@@ -80,7 +75,9 @@ export function getProviderRuntimeStatus(provider: CliType): ProviderRuntimeStat
       method: installed ? "not_checked" : "not_checked",
       command: null,
       credentialStore: "not_checked",
-      detail: installed ? "No safe non-interactive login check is available." : "Runtime is not installed.",
+      detail: installed
+        ? "No safe non-interactive login check is available."
+        : "Runtime is not installed.",
     },
     guidance,
   };
@@ -131,7 +128,11 @@ export function getProviderRuntimeStatus(provider: CliType): ProviderRuntimeStat
   };
 }
 
-function runCommand(command: string, args: string[], timeoutMs: number): { exitCode: number | null; output: string } {
+function runCommand(
+  command: string,
+  args: string[],
+  timeoutMs: number
+): { exitCode: number | null; output: string } {
   const result = spawnSync(command, args, {
     encoding: "utf8",
     input: "",
@@ -146,13 +147,19 @@ function runCommand(command: string, args: string[], timeoutMs: number): { exitC
 }
 
 function firstLine(text: string): string | null {
-  return text
-    .split(/\r?\n/)
-    .map(line => line.trim())
-    .find(Boolean) || null;
+  return (
+    text
+      .split(/\r?\n/)
+      .map(line => line.trim())
+      .find(Boolean) || null
+  );
 }
 
-function inferLoginStatus(provider: CliType, exitCode: number | null, output: string): ProviderLoginStatus {
+function inferLoginStatus(
+  provider: CliType,
+  exitCode: number | null,
+  output: string
+): ProviderLoginStatus {
   if (provider === "claude") {
     try {
       const parsed = JSON.parse(output) as { loggedIn?: boolean };
@@ -163,7 +170,11 @@ function inferLoginStatus(provider: CliType, exitCode: number | null, output: st
     }
   }
 
-  if (/not\s+(logged|signed|authenticated)\s*in|unauthenticated|login required|not authorized/i.test(output)) {
+  if (
+    /not\s+(logged|signed|authenticated)\s*in|unauthenticated|login required|not authorized/i.test(
+      output
+    )
+  ) {
     return "not_authenticated";
   }
   if (/logged\s*in|signed\s*in|authenticated|authorized|using chatgpt|auth store/i.test(output)) {
@@ -179,10 +190,17 @@ function inferLoginStatus(provider: CliType, exitCode: number | null, output: st
   return "unknown";
 }
 
-function loginCheckDetail(provider: CliType, status: ProviderLoginStatus, exitCode: number | null): string {
-  if (status === "authenticated") return `${provider} login check indicates an authenticated local runtime.`;
-  if (status === "not_authenticated") return `${provider} login check indicates the provider is not authenticated.`;
-  if (exitCode && exitCode !== 0) return `${provider} login check exited non-zero without exposing credential material.`;
+function loginCheckDetail(
+  provider: CliType,
+  status: ProviderLoginStatus,
+  exitCode: number | null
+): string {
+  if (status === "authenticated")
+    return `${provider} login check indicates an authenticated local runtime.`;
+  if (status === "not_authenticated")
+    return `${provider} login check indicates the provider is not authenticated.`;
+  if (exitCode && exitCode !== 0)
+    return `${provider} login check exited non-zero without exposing credential material.`;
   return `${provider} login check completed, but the output did not clearly indicate login state.`;
 }
 
@@ -220,8 +238,8 @@ export function geminiAuthStatus(
   const googleApiKey = Boolean(env.GOOGLE_API_KEY && env.GOOGLE_API_KEY.length > 0);
   const vertexAi = Boolean(
     env.GOOGLE_CLOUD_PROJECT &&
-      env.GOOGLE_CLOUD_PROJECT.length > 0 &&
-      env.GOOGLE_GENAI_USE_VERTEXAI === "true"
+    env.GOOGLE_CLOUD_PROJECT.length > 0 &&
+    env.GOOGLE_GENAI_USE_VERTEXAI === "true"
   );
   const methods: GeminiAuthMethods = { oauth, geminiApiKey, googleApiKey, vertexAi };
   const status: "present" | "not_found" =
@@ -254,6 +272,9 @@ function sanitizeOutput(output: string): string {
   return output
     .replace(/([A-Z0-9._%+-]+)@([A-Z0-9.-]+\.[A-Z]{2,})/gi, "<redacted-email>")
     .replace(/\b[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}\b/gi, "<redacted-id>")
-    .replace(/((?:token|secret|credential|password|authorization|api[_-]?key|access[_-]?key)[=:]\s*)\S+/gi, "$1<redacted>")
+    .replace(
+      /((?:token|secret|credential|password|authorization|api[_-]?key|access[_-]?key)[=:]\s*)\S+/gi,
+      "$1<redacted>"
+    )
     .trim();
 }

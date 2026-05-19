@@ -46,26 +46,44 @@ function validateAgainstSchema(node: unknown, schemaNode: JsonSchemaNode, pathLa
   if (schemaNode.type !== undefined) {
     expectTypeMatches(node, schemaNode.type, pathLabel);
   }
-  if (schemaNode.type === "object" || (Array.isArray(schemaNode.type) && schemaNode.type.includes("object"))) {
+  if (
+    schemaNode.type === "object" ||
+    (Array.isArray(schemaNode.type) && schemaNode.type.includes("object"))
+  ) {
     if (node !== null && typeof node === "object" && !Array.isArray(node)) {
       const required = (schemaNode.required as string[] | undefined) ?? [];
       for (const key of required) {
-        expect(Object.prototype.hasOwnProperty.call(node, key), `${pathLabel}.${key} required`).toBe(true);
+        expect(
+          Object.prototype.hasOwnProperty.call(node, key),
+          `${pathLabel}.${key} required`
+        ).toBe(true);
       }
-      const properties = (schemaNode.properties as Record<string, JsonSchemaNode> | undefined) ?? {};
+      const properties =
+        (schemaNode.properties as Record<string, JsonSchemaNode> | undefined) ?? {};
       for (const [key, childSchema] of Object.entries(properties)) {
         if (Object.prototype.hasOwnProperty.call(node, key)) {
-          validateAgainstSchema((node as Record<string, unknown>)[key], childSchema, `${pathLabel}.${key}`);
+          validateAgainstSchema(
+            (node as Record<string, unknown>)[key],
+            childSchema,
+            `${pathLabel}.${key}`
+          );
         }
       }
       if (schemaNode.additionalProperties && typeof schemaNode.additionalProperties === "object") {
         for (const [key, value] of Object.entries(node as Record<string, unknown>)) {
           if (properties[key]) continue;
-          validateAgainstSchema(value, schemaNode.additionalProperties as JsonSchemaNode, `${pathLabel}.${key}`);
+          validateAgainstSchema(
+            value,
+            schemaNode.additionalProperties as JsonSchemaNode,
+            `${pathLabel}.${key}`
+          );
         }
       } else if (schemaNode.additionalProperties === false) {
         for (const key of Object.keys(node as Record<string, unknown>)) {
-          expect(properties[key], `${pathLabel}.${key} not in additionalProperties=false`).toBeTruthy();
+          expect(
+            properties[key],
+            `${pathLabel}.${key} not in additionalProperties=false`
+          ).toBeTruthy();
         }
       }
     }
@@ -73,7 +91,9 @@ function validateAgainstSchema(node: unknown, schemaNode: JsonSchemaNode, pathLa
   if (schemaNode.type === "array" && Array.isArray(node)) {
     const itemSchema = schemaNode.items as JsonSchemaNode | undefined;
     if (itemSchema) {
-      node.forEach((item, index) => validateAgainstSchema(item, itemSchema, `${pathLabel}[${index}]`));
+      node.forEach((item, index) =>
+        validateAgainstSchema(item, itemSchema, `${pathLabel}[${index}]`)
+      );
     }
   }
 }
@@ -112,7 +132,9 @@ describe("Layer 6 doctor report (U20)", () => {
     expect(report.providers.grok).toBeDefined();
     expect(report.providers.mistral).toBeDefined();
     expect(report.client_config.vibe_session_logging).toBeDefined();
-    expect(typeof report.client_config.vibe_session_logging.session_logging_enabled).toBe("boolean");
+    expect(typeof report.client_config.vibe_session_logging.session_logging_enabled).toBe(
+      "boolean"
+    );
   });
 
   it("flags HTTP transport without auth token as not ok and surfaces an actionable next action", () => {
@@ -130,7 +152,8 @@ describe("Layer 6 doctor report (U20)", () => {
 
   it("redacts sensitive tokens from the diagnostic public URL", () => {
     const env: NodeJS.ProcessEnv = {
-      LLM_GATEWAY_PUBLIC_URL: "https://test.example.com/mcp?token=SECRET_ABC&authorization=DEF&safe=ok",
+      LLM_GATEWAY_PUBLIC_URL:
+        "https://test.example.com/mcp?token=SECRET_ABC&authorization=DEF&safe=ok",
     };
     const report = createDoctorReport(env);
 

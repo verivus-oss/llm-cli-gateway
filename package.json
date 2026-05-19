@@ -1,6 +1,6 @@
 {
   "name": "llm-cli-gateway",
-  "version": "1.5.2",
+  "version": "1.5.3",
   "mcpName": "io.github.verivus-oss/llm-cli-gateway",
   "description": "MCP server providing unified access to Claude Code, Codex, Gemini, Grok, and Mistral Vibe CLIs with session management, retry logic, async job orchestration, durable job results, and cross-LLM validation.",
   "license": "MIT",
@@ -10,7 +10,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/verivus-oss/llm-cli-gateway.git"
+    "url": "git+https://github.com/verivus-oss/llm-cli-gateway.git"
   },
   "homepage": "https://github.com/verivus-oss/llm-cli-gateway#readme",
   "bugs": {
@@ -40,7 +40,7 @@
     }
   },
   "bin": {
-    "llm-cli-gateway": "./dist/index.js"
+    "llm-cli-gateway": "dist/index.js"
   },
   "engines": {
     "node": ">=20.0.0"

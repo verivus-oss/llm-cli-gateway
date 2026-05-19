@@ -243,13 +243,7 @@ const MCP_SERVER_ENUM = z.enum(CLAUDE_MCP_SERVER_NAMES);
 // U22: Session-provider enum extended to five providers. The storage layer's
 // CLI_TYPES already includes "mistral"; the MCP-tool layer mirrors that here so
 // session_create / session_list / session_clear_all accept the fifth provider.
-export const SESSION_PROVIDER_VALUES = [
-  "claude",
-  "codex",
-  "gemini",
-  "grok",
-  "mistral",
-] as const;
+export const SESSION_PROVIDER_VALUES = ["claude", "codex", "gemini", "grok", "mistral"] as const;
 export const SESSION_PROVIDER_ENUM = z.enum(SESSION_PROVIDER_VALUES);
 export type SessionProvider = (typeof SESSION_PROVIDER_VALUES)[number];
 let activeServer: McpServer | null = null;
@@ -377,9 +371,7 @@ async function awaitJobOrDefer(
       return await executeCli(command, args, {
         idleTimeout: idleTimeoutMs,
         logger: runtime.logger,
-        env: env
-          ? ({ ...process.env, ...env } as NodeJS.ProcessEnv)
-          : undefined,
+        env: env ? ({ ...process.env, ...env } as NodeJS.ProcessEnv) : undefined,
       });
     } finally {
       // Direct-execution path completes inline; release per-request resources
@@ -1269,9 +1261,7 @@ export function prepareCodexRequest(
         1,
         "",
         corrId,
-        new Error(
-          `images: path does not exist: ${high.missingImagePath}`
-        )
+        new Error(`images: path does not exist: ${high.missingImagePath}`)
       );
     }
     args.push(...high.args);
@@ -1294,9 +1284,7 @@ export function prepareCodexRequest(
         1,
         "",
         corrId,
-        new Error(
-          `images: path does not exist: ${high.missingImagePath}`
-        )
+        new Error(`images: path does not exist: ${high.missingImagePath}`)
       );
     }
     args.push(...high.args);
@@ -1796,7 +1784,8 @@ function resolveHandlerRuntime(deps: HandlerDeps): GatewayServerRuntime {
   const depLogger = deps.logger;
   const normalizedLogger: GatewayLogger = {
     info: depLogger.info,
-    warn: depLogger.warn ?? ((msg: string, ...rest: any[]) => depLogger.info(`[WARN] ${msg}`, ...rest)),
+    warn:
+      depLogger.warn ?? ((msg: string, ...rest: any[]) => depLogger.info(`[WARN] ${msg}`, ...rest)),
     error: depLogger.error,
     debug: depLogger.debug,
   };
@@ -2830,7 +2819,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .boolean()
         .default(false)
         .describe(
-          "DEPRECATED: prefer `permissionMode: \"bypassPermissions\"`. Maps to it when `permissionMode` is unset."
+          'DEPRECATED: prefer `permissionMode: "bypassPermissions"`. Maps to it when `permissionMode` is unset.'
         ),
       permissionMode: z
         .enum(CLAUDE_PERMISSION_MODES)
@@ -3192,9 +3181,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       useLegacyFullAutoFlag: z
         .boolean()
         .default(false)
-        .describe(
-          "Escape hatch: emit `--full-auto` directly instead of expanding (deprecated)."
-        ),
+        .describe("Escape hatch: emit `--full-auto` directly instead of expanding (deprecated)."),
       dangerouslyBypassApprovalsAndSandbox: z
         .boolean()
         .default(false)
@@ -3500,9 +3487,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       sessionId: z
         .string()
         .optional()
-        .describe(
-          "Codex session UUID to fork from. Mutually exclusive with `forkLast`."
-        ),
+        .describe("Codex session UUID to fork from. Mutually exclusive with `forkLast`."),
       forkLast: z
         .boolean()
         .optional()
@@ -3525,7 +3510,16 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .optional()
         .describe("Idle timeout in ms (min 30s, max 1h, omit=CLI default)"),
     },
-    async ({ prompt, sessionId, forkLast, model, sandboxMode, askForApproval, correlationId, idleTimeoutMs }) => {
+    async ({
+      prompt,
+      sessionId,
+      forkLast,
+      model,
+      sandboxMode,
+      askForApproval,
+      correlationId,
+      idleTimeoutMs,
+    }) => {
       const corrId = correlationId || randomUUID();
       const startTime = Date.now();
       let durationMs = 0;
@@ -4043,7 +4037,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .boolean()
         .default(false)
         .describe(
-          "DEPRECATED: prefer `permissionMode: \"bypassPermissions\"`. Maps to it when `permissionMode` is unset."
+          'DEPRECATED: prefer `permissionMode: "bypassPermissions"`. Maps to it when `permissionMode` is unset.'
         ),
       permissionMode: z
         .enum(CLAUDE_PERMISSION_MODES)
@@ -4353,9 +4347,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       outputSchema: z
         .union([z.string(), z.record(z.unknown())])
         .optional()
-        .describe(
-          "Codex --output-schema. Pass a path (string) or an inline JSON Schema object."
-        ),
+        .describe("Codex --output-schema. Pass a path (string) or an inline JSON Schema object."),
       search: z.boolean().optional().describe("Emit Codex --search to enable web search."),
       profile: z.string().optional().describe("Codex --profile <name>."),
       configOverrides: CODEX_CONFIG_OVERRIDES_SCHEMA.describe(
@@ -4733,7 +4725,9 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       allowedTools: z
         .array(z.string())
         .optional()
-        .describe("Allowlist of built-in tools — each emitted as a separate --enabled-tools <tool> flag"),
+        .describe(
+          "Allowlist of built-in tools — each emitted as a separate --enabled-tools <tool> flag"
+        ),
       disallowedTools: z
         .array(z.string())
         .optional()
@@ -5163,7 +5157,9 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
   server.tool(
     "session_list",
     {
-      cli: SESSION_PROVIDER_ENUM.optional().describe("CLI filter (claude|codex|gemini|grok|mistral)"),
+      cli: SESSION_PROVIDER_ENUM.optional().describe(
+        "CLI filter (claude|codex|gemini|grok|mistral)"
+      ),
     },
     async ({ cli }) => {
       try {
@@ -5378,7 +5374,9 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
   server.tool(
     "session_clear_all",
     {
-      cli: SESSION_PROVIDER_ENUM.optional().describe("CLI filter (claude|codex|gemini|grok|mistral)"),
+      cli: SESSION_PROVIDER_ENUM.optional().describe(
+        "CLI filter (claude|codex|gemini|grok|mistral)"
+      ),
     },
     async ({ cli }) => {
       try {

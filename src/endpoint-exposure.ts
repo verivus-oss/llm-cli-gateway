@@ -1,6 +1,11 @@
 import { spawnSync } from "node:child_process";
 
-export type EndpointExposureMode = "local_only" | "lan" | "tunnel" | "byo_reverse_proxy" | "misconfigured";
+export type EndpointExposureMode =
+  | "local_only"
+  | "lan"
+  | "tunnel"
+  | "byo_reverse_proxy"
+  | "misconfigured";
 export type EndpointReachability = "not_checked" | "reachable" | "unreachable";
 
 export interface EndpointExposureReport {
@@ -55,19 +60,27 @@ export function createEndpointExposureReport(
 
   const nextActions: string[] = [];
   if (!publicConfigured) {
-    nextActions.push("Keep using local stdio/CLI clients, or configure an HTTPS tunnel before web-client setup.");
+    nextActions.push(
+      "Keep using local stdio/CLI clients, or configure an HTTPS tunnel before web-client setup."
+    );
   } else if (mode === "local_only" || mode === "lan") {
     nextActions.push(
       "Set LLM_GATEWAY_PUBLIC_URL to a public HTTPS tunnel or reverse-proxy URL, not localhost or a LAN address."
     );
   } else if (!httpsConfigured) {
-    nextActions.push("Use an HTTPS public URL before configuring ChatGPT, Claude web, or Grok web connectors.");
+    nextActions.push(
+      "Use an HTTPS public URL before configuring ChatGPT, Claude web, or Grok web connectors."
+    );
   }
   if (publicConfigured && mode !== "local_only" && mode !== "lan") {
     if (verification.method === "not_checked") {
-      nextActions.push("Set LLM_GATEWAY_VERIFY_PUBLIC_URL=1 to have doctor check public endpoint reachability.");
+      nextActions.push(
+        "Set LLM_GATEWAY_VERIFY_PUBLIC_URL=1 to have doctor check public endpoint reachability."
+      );
     } else if (verification.reachable_from_web === "unreachable") {
-      nextActions.push("Fix tunnel/proxy routing until the public MCP URL is reachable, then rerun doctor --json.");
+      nextActions.push(
+        "Fix tunnel/proxy routing until the public MCP URL is reachable, then rerun doctor --json."
+      );
     }
   }
 
@@ -232,7 +245,10 @@ function maybeVerifyEndpoint(
   };
 }
 
-function verifyEndpointSync(url: string, timeoutMs: number): { ok: boolean; statusCode: number | null; error: string | null } {
+function verifyEndpointSync(
+  url: string,
+  timeoutMs: number
+): { ok: boolean; statusCode: number | null; error: string | null } {
   const script = `
     const { request: http } = require("node:http");
     const { request: https } = require("node:https");
@@ -265,7 +281,11 @@ function verifyEndpointSync(url: string, timeoutMs: number): { ok: boolean; stat
     };
   }
   try {
-    return JSON.parse(result.stdout.trim()) as { ok: boolean; statusCode: number | null; error: string | null };
+    return JSON.parse(result.stdout.trim()) as {
+      ok: boolean;
+      statusCode: number | null;
+      error: string | null;
+    };
   } catch {
     return { ok: false, statusCode: null, error: "Endpoint verification failed." };
   }

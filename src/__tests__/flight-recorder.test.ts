@@ -68,14 +68,12 @@ describe("FlightRecorder migrations (U23 cache columns)", () => {
         status TEXT NOT NULL DEFAULT 'started'
       );
     `);
-    seed.prepare("INSERT INTO _migrations(version, applied_at) VALUES(1, ?)").run(
-      new Date().toISOString()
-    );
+    seed
+      .prepare("INSERT INTO _migrations(version, applied_at) VALUES(1, ?)")
+      .run(new Date().toISOString());
     // Seed a legacy row to confirm it survives migration with NULL cache cols.
     seed
-      .prepare(
-        `INSERT INTO requests (id, cli, model, prompt, datetime_utc) VALUES (?, ?, ?, ?, ?)`
-      )
+      .prepare(`INSERT INTO requests (id, cli, model, prompt, datetime_utc) VALUES (?, ?, ?, ?, ?)`)
       .run("legacy-1", "claude", "sonnet", "hi", new Date().toISOString());
     seed.close();
 
@@ -93,9 +91,7 @@ describe("FlightRecorder migrations (U23 cache columns)", () => {
     // Existing row is preserved with NULL for new columns.
     const db = new BetterSqlite3(dbPath);
     const row = db
-      .prepare(
-        "SELECT cache_read_tokens, cache_creation_tokens FROM requests WHERE id = ?"
-      )
+      .prepare("SELECT cache_read_tokens, cache_creation_tokens FROM requests WHERE id = ?")
       .get("legacy-1") as any;
     db.close();
     expect(row.cache_read_tokens).toBeNull();
@@ -175,9 +171,7 @@ describe("FlightRecorder migrations (U23 cache columns)", () => {
 
     const db = new BetterSqlite3(dbPath);
     const row = db
-      .prepare(
-        "SELECT cache_read_tokens, cache_creation_tokens FROM requests WHERE id = ?"
-      )
+      .prepare("SELECT cache_read_tokens, cache_creation_tokens FROM requests WHERE id = ?")
       .get("corr-2") as any;
     db.close();
 

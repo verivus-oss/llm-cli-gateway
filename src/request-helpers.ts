@@ -269,9 +269,7 @@ export function prepareMistralRequest(
     }
   }
 
-  const ignoredDisallowedTools = Boolean(
-    input.disallowedTools && input.disallowedTools.length > 0
-  );
+  const ignoredDisallowedTools = Boolean(input.disallowedTools && input.disallowedTools.length > 0);
 
   return { args, env, ignoredDisallowedTools };
 }
@@ -351,11 +349,7 @@ export type GeminiApprovalMode = (typeof GEMINI_APPROVAL_MODES)[number];
 /**
  * Codex sandbox modes (for `--sandbox <mode>`).
  */
-export const CODEX_SANDBOX_MODES = [
-  "read-only",
-  "workspace-write",
-  "danger-full-access",
-] as const;
+export const CODEX_SANDBOX_MODES = ["read-only", "workspace-write", "danger-full-access"] as const;
 export type CodexSandboxMode = (typeof CODEX_SANDBOX_MODES)[number];
 
 /**
@@ -399,9 +393,7 @@ export interface CodexSandboxFlagsResult {
  *      `--sandbox workspace-write --ask-for-approval never`.
  *   4. Else emit nothing.
  */
-export function resolveCodexSandboxFlags(
-  input: CodexSandboxFlagsInput
-): CodexSandboxFlagsResult {
+export function resolveCodexSandboxFlags(input: CodexSandboxFlagsInput): CodexSandboxFlagsResult {
   const { sandboxMode, askForApproval, fullAuto, useLegacyFullAutoFlag } = input;
 
   // deprecated: prefer sandboxMode + askForApproval; will be removed after Mistral GA.
@@ -511,14 +503,11 @@ export const CLAUDE_HIGH_IMPACT_PARAMS_SCHEMA = z
     effort: z.enum(CLAUDE_EFFORT_LEVELS).optional(),
     excludeDynamicSystemPromptSections: z.boolean().optional(),
   })
-  .refine(
-    data => !(data.systemPrompt !== undefined && data.appendSystemPrompt !== undefined),
-    {
-      message:
-        "systemPrompt and appendSystemPrompt are mutually exclusive; use one or the other (not both).",
-      path: ["appendSystemPrompt"],
-    }
-  );
+  .refine(data => !(data.systemPrompt !== undefined && data.appendSystemPrompt !== undefined), {
+    message:
+      "systemPrompt and appendSystemPrompt are mutually exclusive; use one or the other (not both).",
+    path: ["appendSystemPrompt"],
+  });
 
 /**
  * Minimal Anthropic agent-definition schema. Mirrors the shape expected by
@@ -546,7 +535,9 @@ export type ClaudeAgentDefinition = z.infer<typeof CLAUDE_AGENT_DEFINITION_SCHEM
  */
 export function validateClaudeAgentsMap(
   agents: Record<string, unknown>
-): { ok: true; value: Record<string, ClaudeAgentDefinition> } | { ok: false; agentKey: string; message: string } {
+):
+  | { ok: true; value: Record<string, ClaudeAgentDefinition> }
+  | { ok: false; agentKey: string; message: string } {
   const validated: Record<string, ClaudeAgentDefinition> = {};
   for (const [key, raw] of Object.entries(agents)) {
     const parsed = CLAUDE_AGENT_DEFINITION_SCHEMA.safeParse(raw);
@@ -642,11 +633,9 @@ export const CODEX_CONFIG_OVERRIDES_SCHEMA = z
         /^[a-zA-Z0-9._]+$/,
         "configOverrides keys must match /^[a-zA-Z0-9._]+$/ (no whitespace, '=', or flag-like prefixes)"
       ),
-    z
-      .string()
-      .refine(v => !/[\n\r]/.test(v), {
-        message: "configOverrides values must not contain CR or LF characters",
-      })
+    z.string().refine(v => !/[\n\r]/.test(v), {
+      message: "configOverrides values must not contain CR or LF characters",
+    })
   )
   .optional();
 
@@ -1022,9 +1011,7 @@ export function resolveGeminiSessionPlan(opts: {
   // Fresh session — emit deterministic --session-id
   const candidate = gen();
   if (!isValidGeminiSessionId(candidate)) {
-    throw new Error(
-      `Generated session id "${candidate}" does not match Gemini's UUID v4 format`
-    );
+    throw new Error(`Generated session id "${candidate}" does not match Gemini's UUID v4 format`);
   }
   return {
     args: ["--session-id", candidate],

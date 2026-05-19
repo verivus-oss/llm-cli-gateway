@@ -2,6 +2,14 @@
 
 All notable changes to the llm-cli-gateway project.
 
+## [1.5.3] - 2026-05-19
+
+### Fixed
+
+- Align npm and PyPI release versions at 1.5.3.
+- Publish npm from the build already verified by CI instead of re-running `prepublishOnly` inside `npm publish`, which was causing the release publish step to be cancelled.
+- Add a PyPI tag/version guard so future release jobs fail before upload when `integrations/llm-plugin/pyproject.toml` does not match the release tag.
+
 ## [1.5.2] - 2026-05-19
 
 ### Fixed

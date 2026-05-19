@@ -9,7 +9,11 @@ import {
   type ValidationProvider,
 } from "./validation-normalizer.js";
 import { buildValidationReport, type ValidationReport } from "./validation-report.js";
-import { buildJudgePrompt, buildValidationPrompt, type ValidationIntent } from "./validation-prompts.js";
+import {
+  buildJudgePrompt,
+  buildValidationPrompt,
+  type ValidationIntent,
+} from "./validation-prompts.js";
 
 export interface ValidationOrchestratorDeps {
   asyncJobManager: AsyncJobManager;
@@ -96,8 +100,7 @@ export function startValidationRun(
     results,
     synthesis,
     report: buildValidationReport(reportInput),
-    next:
-      "Use job_status to poll each rawJobReference.jobId, job_result to collect provider outputs, then synthesize_validation if a judge summary is needed.",
+    next: "Use job_status to poll each rawJobReference.jobId, job_result to collect provider outputs, then synthesize_validation if a judge summary is needed.",
   };
 }
 
