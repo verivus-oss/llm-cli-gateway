@@ -70,6 +70,11 @@ import { getCliVersions, runCliUpgrade } from "./cli-updater.js";
 import { startHttpGateway, type HttpGatewayHandle } from "./http-transport.js";
 import { printDoctorJson } from "./doctor.js";
 import { registerValidationTools } from "./validation-tools.js";
+import {
+  assertUpstreamCliArgs,
+  assertUpstreamCliEnv,
+  buildUpstreamContractReport,
+} from "./upstream-contracts.js";
 
 type ExtendedToolResponse = {
   content: { type: "text"; text: string }[];
@@ -180,7 +185,7 @@ Tools: claude_request, codex_request, gemini_request, grok_request, mistral_requ
 Validation: validate_with_models, second_opinion, compare_answers, red_team_review, consensus_check, ask_model, synthesize_validation
 Jobs: llm_job_status, llm_job_result, llm_job_cancel
 Sessions: session_create, session_list, session_set_active, session_get, session_delete, session_clear_all
-Other: list_models, cli_versions, cli_upgrade, approval_list, llm_process_health
+Other: list_models, cli_versions, upstream_contracts, cli_upgrade, approval_list, llm_process_health
 
 Key behaviors:
 - Sync auto-defers at ${SYNC_DEADLINE_MS}ms. Poll deferred jobs via llm_job_status/llm_job_result.
@@ -363,6 +368,14 @@ async function awaitJobOrDefer(
       runtime.logger.error(`awaitJobOrDefer onComplete (${cli}) threw`, err);
     }
   };
+
+  try {
+    assertUpstreamCliArgs(cli, args);
+    assertUpstreamCliEnv(cli, env);
+  } catch (err) {
+    consumeOnComplete();
+    throw err;
+  }
 
   if (SYNC_DEADLINE_MS === 0) {
     // Disabled — fall through to direct execution.
@@ -2025,6 +2038,8 @@ export async function handleGeminiRequestAsync(
     // Start job only after all session I/O succeeds. U23: forward outputFormat
     // so AsyncJobManager records it in the durable store (the manager also
     // surfaces it in the snapshot).
+    assertUpstreamCliArgs("gemini", args);
+    assertUpstreamCliEnv("gemini", undefined);
     const job = deps.asyncJobManager.startJob(
       "gemini",
       args,
@@ -2310,6 +2325,8 @@ export async function handleGrokRequestAsync(
     }
 
     // Start job only after all session I/O succeeds
+    assertUpstreamCliArgs("grok", args);
+    assertUpstreamCliEnv("grok", undefined);
     const job = deps.asyncJobManager.startJob(
       "grok",
       args,
@@ -2587,6 +2604,8 @@ export async function handleMistralRequestAsync(
       effectiveSessionId = newSession.id;
     }
 
+    assertUpstreamCliArgs("mistral", args);
+    assertUpstreamCliEnv("mistral", mistralEnv);
     const job = deps.asyncJobManager.startJob(
       "mistral",
       args,
@@ -2729,6 +2748,8 @@ export async function handleCodexRequestAsync(
 
     // Start job only after all session I/O succeeds. If startJob throws before
     // registering the record, ownership stays here and we run it in the catch.
+    assertUpstreamCliArgs("codex", args);
+    assertUpstreamCliEnv("codex", undefined);
     let job;
     try {
       job = deps.asyncJobManager.startJob(
@@ -4253,6 +4274,8 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         // Idle timeout only for stream-json (text/json produce no output until done)
         const effectiveIdleTimeout =
           outputFormat === "stream-json" ? resolveIdleTimeout("claude", idleTimeoutMs) : undefined;
+        assertUpstreamCliArgs("claude", args);
+        assertUpstreamCliEnv("claude", undefined);
         const job = asyncJobManager.startJob(
           "claude",
           args,
@@ -5095,6 +5118,26 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
   );
 
   server.tool(
+    "upstream_contracts",
+    {
+      cli: z
+        .preprocess(
+          value => (value === "" || value === null ? undefined : value),
+          SESSION_PROVIDER_ENUM.optional()
+        )
+        .describe("CLI filter (claude|codex|gemini|grok|mistral)"),
+      probeInstalled: z
+        .boolean()
+        .default(false)
+        .describe("When true, run local --help probes and compare advertised flags"),
+    },
+    async ({ cli, probeInstalled }) => {
+      const report = buildUpstreamContractReport({ cli, probeInstalled });
+      return { content: [{ type: "text", text: JSON.stringify(report, null, 2) }] };
+    }
+  );
+
+  server.tool(
     "cli_upgrade",
     {
       cli: z.enum(["claude", "codex", "gemini", "grok", "mistral"]).describe("CLI to upgrade"),
@@ -5588,6 +5631,27 @@ async function main() {
       return;
     }
     process.stderr.write("Only doctor --json is supported in this layer.\n");
+    process.exit(2);
+  }
+  if (args[0] === "contracts") {
+    if (args.includes("--json")) {
+      const cliArg = args.find(arg => arg.startsWith("--cli="))?.split("=")[1];
+      const cli = SESSION_PROVIDER_VALUES.includes(cliArg as SessionProvider)
+        ? (cliArg as SessionProvider)
+        : undefined;
+      if (cliArg && !cli) {
+        process.stderr.write(`Unsupported --cli value: ${cliArg}\n`);
+        process.exit(2);
+      }
+      const probeInstalled = args.includes("--probe-installed");
+      process.stdout.write(
+        JSON.stringify(buildUpstreamContractReport({ cli, probeInstalled }), null, 2) + "\n"
+      );
+      return;
+    }
+    process.stderr.write(
+      "Usage: llm-cli-gateway contracts --json [--cli=claude|codex|gemini|grok|mistral] [--probe-installed]\n"
+    );
     process.exit(2);
   }
 
