@@ -3,7 +3,7 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AsyncJobManager } from "../async-job-manager.js";
-import { JobStore, computeRequestKey } from "../job-store.js";
+import { SqliteJobStore, type JobStore, computeRequestKey } from "../job-store.js";
 
 /**
  * These tests focus on the durability + dedup behavior added on top of the
@@ -19,7 +19,7 @@ describe("AsyncJobManager + JobStore (durability + dedup)", () => {
   beforeEach(() => {
     tempDir = mkdtempSync(join(tmpdir(), "ajm-store-test-"));
     dbPath = join(tempDir, "jobs.db");
-    store = new JobStore(dbPath);
+    store = new SqliteJobStore(dbPath);
     manager = new AsyncJobManager(undefined, undefined, store);
   });
 

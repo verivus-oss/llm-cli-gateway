@@ -164,6 +164,17 @@ export class AsyncJobManager {
     }
   }
 
+  /**
+   * True iff a durable (or memory) job store is attached. The MCP-tool
+   * registration layer ANDs this with persistence.asyncJobsEnabled when
+   * deciding whether to register the *_request_async / llm_job_* tools.
+   * Without a store, async tools must not be registered, otherwise we
+   * re-open the silent in-memory loss path the structural invariant closes.
+   */
+  hasStore(): boolean {
+    return this.store !== null;
+  }
+
   private emitMetrics(job: AsyncJobRecord): void {
     if (job.metricsRecorded) return;
     if (job.status === "canceled") return;

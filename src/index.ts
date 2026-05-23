@@ -19,12 +19,12 @@ import {
   optimizePrompt as optimizePromptText,
   optimizeResponse as optimizeResponseText,
 } from "./optimizer.js";
-import { loadConfig } from "./config.js";
+import { loadConfig, loadPersistenceConfig, type PersistenceConfig } from "./config.js";
 import { DatabaseConnection } from "./db.js";
 import { checkHealth } from "./health.js";
 import { getCliInfo, resolveModelAlias } from "./model-registry.js";
 import { AsyncJobManager } from "./async-job-manager.js";
-import { JobStore, resolveJobStoreDbPath } from "./job-store.js";
+import { createJobStore, type JobStore } from "./job-store.js";
 import { ApprovalManager, ApprovalPolicy, ApprovalRecord } from "./approval-manager.js";
 import { checkReviewIntegrity, ReviewIntegrityResult } from "./review-integrity.js";
 import {
@@ -205,19 +205,17 @@ const performanceMetrics = new PerformanceMetrics();
 let resourceProvider: ResourceProvider;
 const flightRecorder: FlightRecorderLike = createFlightRecorder(logger);
 
-// Durable job store: persists every async job to ~/.llm-cli-gateway/logs.db so callers
-// can collect results across long polling gaps and gateway restarts, and so repeated
-// identical requests dedup onto the running/completed job instead of starting over.
+// Resolved persistence config — single source of truth for the async-job backend.
+// Driven by ~/.llm-cli-gateway/config.toml (+ deprecated env-var overrides).
+// When backend = "none", the JobStore is null AND *_request_async tools are not
+// registered (see createGatewayServer), making silent in-memory loss
+// structurally impossible.
+const persistenceConfig: PersistenceConfig = loadPersistenceConfig(logger);
 const jobStore: JobStore | null = (() => {
-  const dbPath = resolveJobStoreDbPath();
-  if (!dbPath) {
-    logger.info("Durable job store disabled (LLM_GATEWAY_LOGS_DB=none)");
-    return null;
-  }
   try {
-    return new JobStore(dbPath, logger);
+    return createJobStore(persistenceConfig, logger);
   } catch (err) {
-    logger.error("Failed to open durable job store; continuing in-memory only", err);
+    logger.error("Failed to open durable job store; async tools will be unavailable", err);
     return null;
   }
 })();
@@ -258,6 +256,7 @@ export interface GatewayServerDeps {
   approvalManager?: ApprovalManager;
   flightRecorder?: FlightRecorderLike;
   logger?: GatewayLogger;
+  persistence?: PersistenceConfig;
 }
 
 interface GatewayServerRuntime {
@@ -269,6 +268,7 @@ interface GatewayServerRuntime {
   approvalManager: ApprovalManager;
   flightRecorder: FlightRecorderLike;
   logger: GatewayLogger;
+  persistence: PersistenceConfig;
 }
 
 function resolveGatewayServerRuntime(
@@ -304,6 +304,7 @@ function resolveGatewayServerRuntime(
     approvalManager: runtimeApprovalManager,
     flightRecorder: deps.flightRecorder ?? flightRecorder,
     logger: runtimeLogger,
+    persistence: deps.persistence ?? persistenceConfig,
   };
 }
 
@@ -2786,7 +2787,27 @@ export async function handleCodexRequestAsync(
 
 export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
   const runtime = resolveGatewayServerRuntime(deps, { isolateState: true });
-  const { sessionManager, asyncJobManager, approvalManager, performanceMetrics, logger } = runtime;
+  const { sessionManager, asyncJobManager, approvalManager, performanceMetrics, logger, persistence } = runtime;
+  // Structural invariant: tools register iff ALL THREE conditions hold:
+  //   (1) persistence.backend !== "none"  — the operator/config has not
+  //       explicitly disabled durable persistence;
+  //   (2) persistence.asyncJobsEnabled === true — the derived opt-in flag
+  //       agrees (loadPersistenceConfig sets this iff backend is one of
+  //       sqlite/postgres/memory);
+  //   (3) asyncJobManager.hasStore() === true — the runtime manager
+  //       actually has a store attached (isolate-mode runtimes use null).
+  //
+  // Each guard closes a distinct re-entry path for the silent-loss footgun:
+  //   - Without (1), a caller can inject {backend:'none', asyncJobsEnabled:true}
+  //     and re-advertise the async tools while reporting backend='none' in
+  //     llm_process_health — exactly contradicting SPEC CLAIM 4f.
+  //   - Without (2), config that opts out is ignored.
+  //   - Without (3), a null-store manager (isolate-mode / HTTP per-session)
+  //     accepts registrations that have nowhere to persist results.
+  const asyncJobsEnabled =
+    persistence.backend !== "none" &&
+    persistence.asyncJobsEnabled &&
+    asyncJobManager.hasStore();
   const server = newGatewayMcpServer();
   registerBaseResources(server, runtime);
   registerValidationTools(server, { asyncJobManager });
@@ -4007,7 +4028,16 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
 
   //──────────────────────────────────────────────────────────────────────────────
   // Async Long-Running Job Tools (No Time-Bound LLM Execution)
+  //
+  // STRUCTURAL INVARIANT: these tools are only registered when a real job
+  // store is attached (`persistence.asyncJobsEnabled === true`). When the
+  // operator has configured `[persistence].backend = "none"`, none of the
+  // *_request_async / llm_job_* tools exist in the MCP tool list at all —
+  // orchestrating agents get a clean "tool not found" signal at connect
+  // time instead of silent in-memory loss after the 1-hour TTL.
   //──────────────────────────────────────────────────────────────────────────────
+
+  if (asyncJobsEnabled) {
 
   server.tool(
     "claude_request_async",
@@ -4956,13 +4986,32 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
     }
   );
 
+  } // end if (asyncJobsEnabled)
+
   server.tool("llm_process_health", {}, async () => {
     const health = asyncJobManager.getJobHealth();
+    const persistenceBlock = {
+      backend: persistence.backend,
+      dbPath: persistence.path,
+      dsn: persistence.dsn ? "[redacted]" : null,
+      retentionDays: persistence.retentionDays,
+      dedupWindowMs: persistence.dedupWindowMs,
+      asyncJobsEnabled: persistence.asyncJobsEnabled,
+      acknowledgeEphemeral: persistence.acknowledgeEphemeral,
+      sources: persistence.sources,
+      warning: persistence.asyncJobsEnabled
+        ? null
+        : "Async job persistence is disabled (backend = 'none'). *_request_async tools are NOT registered on this gateway. Set [persistence].backend = 'sqlite' (or 'memory' + acknowledgeEphemeral = true) to enable them.",
+    };
     return {
       content: [
         {
           type: "text",
-          text: JSON.stringify({ success: true, ...health }, null, 2),
+          text: JSON.stringify(
+            { success: true, ...health, persistence: persistenceBlock },
+            null,
+            2
+          ),
         },
       ],
     };

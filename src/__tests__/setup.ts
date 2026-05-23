@@ -1,3 +1,6 @@
+import { writeFileSync } from "fs";
+import { tmpdir } from "os";
+import { join } from "path";
 import { Pool } from "pg";
 import { Redis } from "ioredis";
 import { beforeAll, afterAll, beforeEach } from "vitest";
@@ -11,7 +14,26 @@ const PG_TESTS_ENABLED = process.env.PG_TESTS === "1";
 const MIGRATION_LOCK_KEY = 88421173;
 const CLEANUP_LOCK_KEY = 88421174;
 
-process.env.LLM_GATEWAY_LOGS_DB ??= "none";
+// Test isolation: route the gateway's async job persistence to an in-process
+// MemoryJobStore so tests don't touch ~/.llm-cli-gateway/logs.db. Async tools
+// stay fully registered (unlike the old LLM_GATEWAY_LOGS_DB=none, which would
+// now disable them entirely under the new structural-invariant model).
+if (process.env.LLM_GATEWAY_CONFIG === undefined) {
+  const testConfigPath = join(tmpdir(), `llm-cli-gateway-test-config-${process.pid}.toml`);
+  writeFileSync(
+    testConfigPath,
+    [
+      "[persistence]",
+      'backend = "memory"',
+      "acknowledgeEphemeral = true",
+      "",
+    ].join("\n")
+  );
+  process.env.LLM_GATEWAY_CONFIG = testConfigPath;
+}
+// Clear the legacy env vars so they don't override the test config.
+delete process.env.LLM_GATEWAY_LOGS_DB;
+delete process.env.LLM_GATEWAY_JOBS_DB;
 
 let testPool: Pool | null = null;
 let testRedis: Redis | null = null;
