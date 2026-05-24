@@ -2,6 +2,12 @@
 
 All notable changes to the llm-cli-gateway project.
 
+## [1.5.10] - 2026-05-24
+
+### Fixed
+
+- Hide Windows console windows when the gateway spawns provider CLIs for synchronous and asynchronous requests.
+
 ## [1.5.9] - 2026-05-24
 
 ### Fixed

@@ -468,6 +468,7 @@ export class AsyncJobManager {
     const child = spawn(command, args, {
       cwd,
       detached: true,
+      windowsHide: true,
       stdio: ["ignore", "pipe", "pipe"],
       env: { ...process.env, PATH: getExtendedPath(), ...(extraEnv ?? {}) },
     });

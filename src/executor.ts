@@ -163,6 +163,7 @@ export async function executeCli(
       const proc = spawn(command, args, {
         cwd,
         detached: true,
+        windowsHide: true,
         stdio: ["ignore", "pipe", "pipe"],
         env: { ...process.env, PATH: extendedPath, ...(extraEnv ?? {}) },
       });
