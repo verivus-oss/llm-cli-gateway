@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -102,5 +103,20 @@ func TestPowershellSingleQuoted(t *testing.T) {
 	want := `'C:\Users\O''Brien\llm-cli-gateway.exe'`
 	if got != want {
 		t.Fatalf("powershellSingleQuoted = %q", got)
+	}
+}
+
+func TestContractsCommandIsDelegatedNotUnknown(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	err := run([]string{"contracts", "--json", "--cli=gemini", "--probe-installed"})
+	if err == nil {
+		t.Fatal("expected missing bundle error")
+	}
+	if strings.Contains(err.Error(), "unknown command") {
+		t.Fatalf("contracts returned unknown command error: %v", err)
+	}
+	if !strings.Contains(err.Error(), "gateway bundle missing") {
+		t.Fatalf("contracts error = %v", err)
 	}
 }

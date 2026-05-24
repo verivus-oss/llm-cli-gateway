@@ -2,6 +2,12 @@
 
 All notable changes to the llm-cli-gateway project.
 
+## [1.5.27] - 2026-05-25
+
+### Fixed
+
+- Expose the installed Node gateway `contracts` diagnostic command through the desktop bootstrapper, so `llm-cli-gateway contracts --json --cli=gemini --probe-installed` works on Windows desktop installs.
+
 ## [1.5.26] - 2026-05-25
 
 ### Fixed

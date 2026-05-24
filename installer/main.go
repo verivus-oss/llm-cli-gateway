@@ -58,6 +58,8 @@ func run(args []string) error {
 		}
 		fmt.Println(string(body))
 		return nil
+	case "contracts":
+		return nodeGatewayCommand(args)
 	case "start":
 		cfg, token, err := config.Ensure()
 		if err != nil {
@@ -153,6 +155,7 @@ Usage:
 Commands:
   setup                Create local config and auth token
   doctor               Print desktop gateway diagnostics as JSON
+  contracts            Run installed gateway CLI contract diagnostics
   start                Start the managed local HTTP gateway
   stop                 Stop the managed local HTTP gateway
   status               Print managed gateway process status
@@ -176,6 +179,36 @@ Flags:
   --version            Print bootstrapper version
   --help, /?           Print this help
 `
+}
+
+func nodeGatewayCommand(args []string) error {
+	cfg, err := config.Default()
+	if err != nil {
+		return err
+	}
+	entry := filepath.Join(cfg.GatewayDir, "dist", "index.js")
+	if _, err := os.Stat(entry); err != nil {
+		return errors.New("gateway bundle missing; install a verified bundle before running this command")
+	}
+	nodePath := cfg.RuntimeNode
+	if _, err := os.Stat(nodePath); err != nil {
+		if os.Getenv("RVWR_ALLOW_HOST_NODE") != "1" {
+			return errors.New("managed Node runtime missing; install the verified platform bundle before running this command")
+		}
+		nodePath = "node"
+	}
+	token := ""
+	if raw, err := os.ReadFile(filepath.Join(cfg.AppDir, "auth-token")); err == nil {
+		token = string(raw)
+	}
+	cmd := exec.Command(nodePath, append([]string{entry}, args...)...)
+	cmd.Env = config.EnvForGateway(cfg, token)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("gateway command failed: %w", err)
+	}
+	return nil
 }
 
 func tunnelCommand(args []string) error {
