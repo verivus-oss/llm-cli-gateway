@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import type { CliType } from "./session-manager.js";
 import { getProviderLoginGuidance, type ProviderLoginGuidance } from "./provider-login-guidance.js";
+import { envWithExtendedPath, getExtendedPath, resolveCommandForSpawn } from "./executor.js";
 
 export type ProviderLoginStatus = "authenticated" | "not_authenticated" | "unknown" | "not_checked";
 
@@ -133,8 +134,12 @@ function runCommand(
   args: string[],
   timeoutMs: number
 ): { exitCode: number | null; output: string } {
-  const result = spawnSync(command, args, {
+  const extendedPath = getExtendedPath();
+  const env = envWithExtendedPath(process.env, extendedPath);
+  const resolved = resolveCommandForSpawn(command, args, { envPath: extendedPath });
+  const result = spawnSync(resolved.command, resolved.args, {
     encoding: "utf8",
+    env,
     input: "",
     timeout: timeoutMs,
     windowsHide: true,

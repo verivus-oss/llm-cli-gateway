@@ -1,6 +1,7 @@
 import { ChildProcess } from "child_process";
 import { randomUUID } from "crypto";
 import {
+  envWithExtendedPath,
   getExtendedPath,
   killProcessGroup,
   spawnCliProcess,
@@ -496,10 +497,11 @@ export class AsyncJobManager {
     // Mistral Vibe ships as the `vibe` binary; the gateway uses `mistral` as the
     // provider key but spawns `vibe` on the shell.
     const command = cli === "mistral" ? "vibe" : cli;
+    const baseEnv = envWithExtendedPath(process.env, getExtendedPath());
     const child = spawnCliProcess(command, args, {
       cwd,
       stdio: ["ignore", "pipe", "pipe"],
-      env: { ...process.env, PATH: getExtendedPath(), ...(extraEnv ?? {}) },
+      env: { ...baseEnv, ...(extraEnv ?? {}) },
     });
 
     // Single cleanup flag to prevent double-unregister

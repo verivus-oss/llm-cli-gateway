@@ -2,6 +2,14 @@
 
 All notable changes to the llm-cli-gateway project.
 
+## [1.5.19] - 2026-05-24
+
+### Fixed
+
+- Use the gateway's extended provider CLI PATH in `doctor --json`, not only in request execution.
+- Add common Windows npm/Corepack/Scoop/Volta/Chocolatey CLI shim directories to provider PATH discovery.
+- Resolve Windows PowerShell npm shims such as `gemini.ps1` and `claude.ps1` without invoking a shell command string.
+
 ## [1.5.18] - 2026-05-24
 
 ### Fixed

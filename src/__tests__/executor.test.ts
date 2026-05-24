@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
+  buildExtendedPath,
   executeCli,
   getExtendedPath,
   killProcessGroup,
@@ -112,6 +113,30 @@ describe("executeCli", () => {
     it("should join extended PATH entries with the platform delimiter", () => {
       const extendedPath = getExtendedPath();
       expect(extendedPath).toContain(delimiter);
+    });
+
+    it("includes common Windows package-manager shim directories", () => {
+      const env = {
+        Path: "C:\\Windows\\System32",
+        APPDATA: "C:\\Users\\tester\\AppData\\Roaming",
+        LOCALAPPDATA: "C:\\Users\\tester\\AppData\\Local",
+        ProgramFiles: "C:\\Program Files",
+        "ProgramFiles(x86)": "C:\\Program Files (x86)",
+        ProgramData: "C:\\ProgramData",
+      } as NodeJS.ProcessEnv;
+      const extendedPath = buildExtendedPath(
+        env,
+        "C:\\Users\\tester",
+        "C:\\Users\\tester\\.llm-cli-gateway\\runtime\\node.exe",
+        "win32"
+      );
+
+      expect(extendedPath).toContain("C:\\Users\\tester\\AppData\\Roaming\\npm");
+      expect(extendedPath).toContain("C:\\Users\\tester\\AppData\\Local\\pnpm");
+      expect(extendedPath).toContain("C:\\Users\\tester\\.volta\\bin");
+      expect(extendedPath).toContain("C:\\Users\\tester\\scoop\\shims");
+      expect(extendedPath).toContain("C:\\ProgramData\\chocolatey\\bin");
+      expect(extendedPath).toContain("C:\\Windows\\System32");
     });
 
     it("should inherit environment variables", async () => {

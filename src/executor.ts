@@ -1,6 +1,6 @@
 import { ChildProcess, spawn, spawnSync, type SpawnOptions } from "child_process";
 import { homedir } from "os";
-import { delimiter, join, dirname } from "path";
+import { delimiter, join, dirname, extname, win32 } from "path";
 import { readdirSync, existsSync } from "fs";
 import { createCircuitBreaker, withRetry } from "./retry.js";
 import type { Logger } from "./logger.js";
@@ -58,15 +58,79 @@ function getNvmPath(): string | null {
   return cachedNvmPath;
 }
 
-// Extend PATH to include common locations for CLI tools
-export function getExtendedPath(): string {
-  const home = homedir();
+function pathDelimiterFor(platform: NodeJS.Platform): string {
+  return platform === "win32" ? ";" : delimiter;
+}
+
+function pathJoinFor(platform: NodeJS.Platform, ...segments: string[]): string {
+  return platform === "win32" ? win32.join(...segments) : join(...segments);
+}
+
+function dirnameFor(platform: NodeJS.Platform, path: string): string {
+  return platform === "win32" ? win32.dirname(path) : dirname(path);
+}
+
+function pathValueFromEnv(env: NodeJS.ProcessEnv, platform: NodeJS.Platform): string {
+  if (platform === "win32") {
+    return env.Path || env.PATH || "";
+  }
+  return env.PATH || "";
+}
+
+function addIfPresent(paths: string[], value: string | undefined): void {
+  if (value) paths.push(value);
+}
+
+function windowsCommonCliPaths(env: NodeJS.ProcessEnv, home: string): string[] {
+  const paths: string[] = [];
+  addIfPresent(paths, env.APPDATA ? pathJoinFor("win32", env.APPDATA, "npm") : undefined);
+  addIfPresent(
+    paths,
+    env.LOCALAPPDATA ? pathJoinFor("win32", env.LOCALAPPDATA, "pnpm") : undefined
+  );
+  addIfPresent(
+    paths,
+    env.LOCALAPPDATA ? pathJoinFor("win32", env.LOCALAPPDATA, "Programs", "nodejs") : undefined
+  );
+  addIfPresent(
+    paths,
+    env.LOCALAPPDATA ? pathJoinFor("win32", env.LOCALAPPDATA, "Programs", "npm") : undefined
+  );
+  addIfPresent(
+    paths,
+    env.ProgramFiles ? pathJoinFor("win32", env.ProgramFiles, "nodejs") : undefined
+  );
+  addIfPresent(
+    paths,
+    env["ProgramFiles(x86)"] ? pathJoinFor("win32", env["ProgramFiles(x86)"], "nodejs") : undefined
+  );
+  addIfPresent(
+    paths,
+    env.ProgramData ? pathJoinFor("win32", env.ProgramData, "chocolatey", "bin") : undefined
+  );
+  paths.push(pathJoinFor("win32", home, "AppData", "Roaming", "npm"));
+  paths.push(pathJoinFor("win32", home, "AppData", "Local", "pnpm"));
+  paths.push(pathJoinFor("win32", home, ".volta", "bin"));
+  paths.push(pathJoinFor("win32", home, "scoop", "shims"));
+  return paths;
+}
+
+export function buildExtendedPath(
+  env: NodeJS.ProcessEnv = process.env,
+  home: string = homedir(),
+  nodePath: string = process.execPath,
+  platform: NodeJS.Platform = process.platform
+): string {
   const additionalPaths: string[] = [
-    join(home, ".local/bin"),
-    dirname(process.execPath), // Current node's bin directory
+    pathJoinFor(platform, home, ".local", "bin"),
+    dirnameFor(platform, nodePath), // Current node's bin directory
     "/usr/local/bin",
     "/usr/bin",
   ];
+
+  if (platform === "win32") {
+    additionalPaths.push(...windowsCommonCliPaths(env, home));
+  }
 
   // Add all nvm node version bin directories
   const nvmPath = getNvmPath();
@@ -74,8 +138,99 @@ export function getExtendedPath(): string {
     additionalPaths.push(nvmPath);
   }
 
-  const currentPath = process.env.PATH || "";
-  return [...additionalPaths, currentPath].join(delimiter);
+  const currentPath = pathValueFromEnv(env, platform);
+  return [...dedupePaths(additionalPaths, platform), currentPath]
+    .filter(Boolean)
+    .join(pathDelimiterFor(platform));
+}
+
+// Extend PATH to include common locations for CLI tools.
+export function getExtendedPath(): string {
+  return buildExtendedPath();
+}
+
+export function envWithExtendedPath(
+  baseEnv: NodeJS.ProcessEnv = process.env,
+  extendedPath: string = getExtendedPath(),
+  platform: NodeJS.Platform = process.platform
+): NodeJS.ProcessEnv {
+  const env = { ...baseEnv };
+  const key =
+    platform === "win32"
+      ? Object.keys(env).find(existing => existing.toLowerCase() === "path") || "Path"
+      : "PATH";
+  env[key] = extendedPath;
+  if (platform === "win32") {
+    for (const existing of Object.keys(env)) {
+      if (existing !== key && existing.toLowerCase() === "path") {
+        delete env[existing];
+      }
+    }
+  }
+  return env;
+}
+
+function dedupePaths(paths: string[], platform: NodeJS.Platform): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const path of paths) {
+    const normalized = platform === "win32" ? path.toLowerCase() : path;
+    if (seen.has(normalized)) continue;
+    seen.add(normalized);
+    result.push(path);
+  }
+  return result;
+}
+
+export interface ResolvedSpawnCommand {
+  command: string;
+  args: string[];
+}
+
+export function resolveCommandForSpawn(
+  command: string,
+  args: string[],
+  options: {
+    envPath?: string;
+    platform?: NodeJS.Platform;
+  } = {}
+): ResolvedSpawnCommand {
+  const platform = options.platform ?? process.platform;
+  if (platform !== "win32") {
+    return { command, args };
+  }
+
+  const resolved = resolveWindowsCommandPath(command, options.envPath ?? getExtendedPath());
+  if (!resolved) {
+    return { command, args };
+  }
+
+  if (extname(resolved).toLowerCase() === ".ps1") {
+    return {
+      command: "powershell.exe",
+      args: ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", resolved, ...args],
+    };
+  }
+
+  return { command: resolved, args };
+}
+
+function resolveWindowsCommandPath(command: string, envPath: string): string | null {
+  if (/[\\/]/.test(command)) {
+    return existsSync(command) ? command : null;
+  }
+
+  const hasExtension = extname(command) !== "";
+  const extensions = hasExtension ? [""] : ["", ".exe", ".ps1", ".cmd", ".bat"];
+  for (const dir of envPath.split(pathDelimiterFor("win32")).filter(Boolean)) {
+    for (const extension of extensions) {
+      const candidate = pathJoinFor("win32", dir, command + extension);
+      if (existsSync(candidate)) {
+        return candidate;
+      }
+    }
+  }
+  return null;
 }
 
 /** Registry of active detached process groups for shutdown cleanup. */
@@ -185,7 +340,10 @@ export function spawnCliProcess(
   }
 ): ChildProcess {
   const detached = shouldDetachProviderProcess();
-  const proc = spawn(command, args, {
+  const resolved = resolveCommandForSpawn(command, args, {
+    envPath: pathValueFromEnv(options.env, process.platform),
+  });
+  const proc = spawn(resolved.command, resolved.args, {
     cwd: options.cwd,
     detached,
     windowsHide: true,
@@ -204,6 +362,7 @@ export async function executeCli(
 ): Promise<ExecuteResult> {
   const { timeout, idleTimeout, cwd, env: extraEnv } = options;
   const extendedPath = getExtendedPath();
+  const baseEnv = envWithExtendedPath(process.env, extendedPath);
   const circuitBreaker = getCircuitBreaker(command);
 
   const runOnce = () =>
@@ -211,7 +370,7 @@ export async function executeCli(
       const proc = spawnCliProcess(command, args, {
         cwd,
         stdio: ["ignore", "pipe", "pipe"],
-        env: { ...process.env, PATH: extendedPath, ...(extraEnv ?? {}) },
+        env: { ...baseEnv, ...(extraEnv ?? {}) },
       });
 
       let stdout = "";
