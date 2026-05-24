@@ -1,4 +1,4 @@
-import { Pool } from "pg";
+import type { Pool } from "pg";
 import type { Redis } from "ioredis";
 import { randomUUID } from "crypto";
 import { Session, CliType } from "./session-manager.js";

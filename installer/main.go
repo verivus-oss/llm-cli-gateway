@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/verivus-oss/llm-cli-gateway/installer/internal/config"
@@ -21,7 +22,10 @@ import (
 	"github.com/verivus-oss/llm-cli-gateway/installer/internal/setupui"
 )
 
+var releaseVersion = "dev"
+
 func main() {
+	config.GatewayVersion = releaseVersion
 	if err := run(os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -34,6 +38,12 @@ func run(args []string) error {
 		cmd = args[0]
 	}
 	switch cmd {
+	case "--version", "-version", "version":
+		fmt.Println(releaseVersion)
+		return nil
+	case "--help", "-help", "/?", "help":
+		fmt.Print(helpText())
+		return nil
 	case "setup":
 		cfg, _, err := config.Ensure()
 		if err != nil {
@@ -104,11 +114,37 @@ func run(args []string) error {
 	}
 }
 
+func helpText() string {
+	return `llm-cli-gateway desktop bootstrapper
+
+Usage:
+  llm-cli-gateway [command]
+
+Commands:
+  setup                Create local config and auth token
+  doctor               Print desktop gateway diagnostics as JSON
+  start                Start the managed local HTTP gateway
+  stop                 Stop the managed local HTTP gateway
+  status               Print managed gateway process status
+  repair               Verify local installer state
+  install-bundle       Download and install the pinned gateway bundle
+  upgrade              Stop, install the pinned bundle, and leave gateway stopped
+  uninstall [--yes]    Remove managed app state; dry-run unless --yes is set
+  print-client-config  Print local MCP HTTP client configuration
+  setup-ui             Start the local setup UI
+  version              Print bootstrapper version
+
+Flags:
+  --version            Print bootstrapper version
+  --help, /?           Print this help
+`
+}
+
 func upgrade() error {
 	// `upgrade` is idempotent: it stops the gateway (if running), runs the
-	// same verified bundle download path as `install-bundle`, then leaves
-	// the bootstrapper for the user to `start` again. Config and auth
-	// token are preserved across upgrades.
+	// latest verified bundle download path, then leaves the bootstrapper for
+	// the user to `start` again. Config and auth token are preserved across
+	// upgrades.
 	cfg, err := config.Default()
 	if err != nil {
 		return err
@@ -119,12 +155,22 @@ func upgrade() error {
 			return err
 		}
 	}
-	if err := installBundle(); err != nil {
+	spec, err := latestBundleSpec()
+	if err != nil {
+		return err
+	}
+	installResult, err := installBundleSpec(spec)
+	if err != nil {
 		return err
 	}
 	return printJSON(map[string]any{
 		"ok":                 true,
 		"action":             "upgrade",
+		"bundle":             spec.Name,
+		"bundle_source":      spec.Source,
+		"bundle_version":     spec.Version,
+		"gateway_dir":        installResult["gateway_dir"],
+		"sha256":             installResult["sha256"],
 		"previously_running": prevStatus.Running,
 		"next":               "Run start to relaunch the gateway with the upgraded bundle.",
 	})
@@ -178,40 +224,85 @@ func uninstall(extra []string) error {
 }
 
 func installBundle() error {
-	url := os.Getenv("RVWR_GATEWAY_BUNDLE_URL")
-	wantSHA := os.Getenv("RVWR_GATEWAY_BUNDLE_SHA256")
-	if url == "" || wantSHA == "" {
-		return errors.New("set RVWR_GATEWAY_BUNDLE_URL and RVWR_GATEWAY_BUNDLE_SHA256")
-	}
-	cfg, _, err := config.Ensure()
+	spec, err := bundleSpecFromEnv()
 	if err != nil {
 		return err
+	}
+	if spec.URL == "" {
+		spec, err = latestBundleSpec()
+		if err != nil {
+			return err
+		}
+	}
+	result, err := installBundleSpec(spec)
+	if err != nil {
+		return err
+	}
+	return printJSON(result)
+}
+
+type bundleSpec struct {
+	URL     string
+	SHA256  string
+	Name    string
+	Version string
+	Source  string
+}
+
+func bundleSpecFromEnv() (bundleSpec, error) {
+	rawURL := strings.TrimSpace(os.Getenv("RVWR_GATEWAY_BUNDLE_URL"))
+	rawSHA := strings.TrimSpace(os.Getenv("RVWR_GATEWAY_BUNDLE_SHA256"))
+	if rawURL == "" && rawSHA == "" {
+		return bundleSpec{}, nil
+	}
+	if rawURL == "" || rawSHA == "" {
+		return bundleSpec{}, errors.New("set both RVWR_GATEWAY_BUNDLE_URL and RVWR_GATEWAY_BUNDLE_SHA256, or unset both to use the latest GitHub release")
+	}
+	return bundleSpec{
+		URL:    rawURL,
+		SHA256: rawSHA,
+		Name:   filepath.Base(rawURL),
+		Source: "env",
+	}, nil
+}
+
+func installBundleSpec(spec bundleSpec) (map[string]any, error) {
+	cfg, _, err := config.Ensure()
+	if err != nil {
+		return nil, err
 	}
 	tmp := filepath.Join(cfg.AppDir, "gateway-bundle.tmp")
 	file, err := os.Create(tmp)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	hasher := sha256.New()
-	if err := downloadBundle(url, io.MultiWriter(file, hasher)); err != nil {
+	if err := downloadBundle(spec.URL, io.MultiWriter(file, hasher)); err != nil {
 		_ = file.Close()
 		_ = os.Remove(tmp)
-		return err
+		return nil, err
 	}
 	if err := file.Close(); err != nil {
-		return err
+		return nil, err
 	}
 	gotSHA := hex.EncodeToString(hasher.Sum(nil))
-	if gotSHA != wantSHA {
+	if !strings.EqualFold(gotSHA, spec.SHA256) {
 		_ = os.Remove(tmp)
-		return fmt.Errorf("bundle checksum mismatch")
+		return nil, fmt.Errorf("bundle checksum mismatch for %s: expected %s, got %s", spec.URL, spec.SHA256, gotSHA)
 	}
 	installedRoot, err := installVerifiedBundle(tmp, cfg)
 	_ = os.Remove(tmp)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	return printJSON(map[string]any{"ok": true, "gateway_dir": installedRoot, "sha256": gotSHA})
+	return map[string]any{
+		"ok":             true,
+		"gateway_dir":    installedRoot,
+		"sha256":         gotSHA,
+		"bundle":         spec.Name,
+		"bundle_source":  spec.Source,
+		"bundle_version": spec.Version,
+	}, nil
 }
 
 func downloadBundle(rawURL string, dst io.Writer) error {
@@ -235,6 +326,96 @@ func downloadBundle(rawURL string, dst io.Writer) error {
 	}
 	_, err = io.Copy(dst, resp.Body)
 	return err
+}
+
+type githubRelease struct {
+	TagName string `json:"tag_name"`
+	Assets  []struct {
+		Name               string `json:"name"`
+		BrowserDownloadURL string `json:"browser_download_url"`
+	} `json:"assets"`
+}
+
+func latestBundleSpec() (bundleSpec, error) {
+	releaseURL := os.Getenv("RVWR_RELEASE_API_URL")
+	if releaseURL == "" {
+		releaseURL = "https://api.github.com/repos/verivus-oss/llm-cli-gateway/releases/latest"
+	}
+
+	body, err := getURL(releaseURL)
+	if err != nil {
+		return bundleSpec{}, err
+	}
+	var release githubRelease
+	if err := json.Unmarshal(body, &release); err != nil {
+		return bundleSpec{}, fmt.Errorf("parse latest release metadata: %w", err)
+	}
+	version := strings.TrimPrefix(release.TagName, "v")
+	if version == "" {
+		return bundleSpec{}, errors.New("latest release metadata did not include tag_name")
+	}
+
+	bundleName := fmt.Sprintf("llm-cli-gateway-bundle-%s-%s-%s.tar.gz", version, runtime.GOOS, runtime.GOARCH)
+	bundleURL, ok := releaseAssetURL(release, bundleName)
+	if !ok {
+		return bundleSpec{}, fmt.Errorf("latest release %s does not include %s", release.TagName, bundleName)
+	}
+	checksumsURL, ok := releaseAssetURL(release, "SHA256SUMS")
+	if !ok {
+		return bundleSpec{}, fmt.Errorf("latest release %s does not include SHA256SUMS", release.TagName)
+	}
+
+	checksums, err := getURL(checksumsURL)
+	if err != nil {
+		return bundleSpec{}, err
+	}
+	sha, err := shaFromChecksums(string(checksums), bundleName)
+	if err != nil {
+		return bundleSpec{}, err
+	}
+	return bundleSpec{
+		URL:     bundleURL,
+		SHA256:  sha,
+		Name:    bundleName,
+		Version: version,
+		Source:  "github-latest",
+	}, nil
+}
+
+func releaseAssetURL(release githubRelease, name string) (string, bool) {
+	for _, asset := range release.Assets {
+		if asset.Name == name && asset.BrowserDownloadURL != "" {
+			return asset.BrowserDownloadURL, true
+		}
+	}
+	return "", false
+}
+
+func shaFromChecksums(checksums, name string) (string, error) {
+	for _, line := range strings.Split(checksums, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 2 && fields[1] == name {
+			return strings.ToLower(fields[0]), nil
+		}
+	}
+	return "", fmt.Errorf("SHA256SUMS does not include %s", name)
+}
+
+func getURL(rawURL string) ([]byte, error) {
+	req, err := http.NewRequest(http.MethodGet, rawURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", "llm-cli-gateway-bootstrapper/"+releaseVersion)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		return nil, fmt.Errorf("download failed for %s: %s", rawURL, resp.Status)
+	}
+	return io.ReadAll(resp.Body)
 }
 
 func installVerifiedBundle(bundlePath string, cfg config.Config) (string, error) {

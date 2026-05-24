@@ -14,6 +14,8 @@ import (
 	"time"
 )
 
+var GatewayVersion = "dev"
+
 type Config struct {
 	AppDir       string `json:"app_dir"`
 	GatewayDir   string `json:"gateway_dir"`
@@ -94,7 +96,7 @@ func DoctorJSON() ([]byte, error) {
 		},
 		"gateway": map[string]any{
 			"name":    "llm-cli-gateway",
-			"version": "bootstrapper",
+			"version": GatewayVersion,
 		},
 		"transport": map[string]any{
 			"default": "http",

@@ -2,6 +2,18 @@
 
 All notable changes to the llm-cli-gateway project.
 
+## [1.5.15] - 2026-05-24
+
+### Fixed
+
+- Make the desktop bootstrapper `upgrade` command discover the latest GitHub release bundle and SHA256SUMS itself, so `llm-cli-gateway upgrade` no longer depends on stale `RVWR_GATEWAY_BUNDLE_URL` / `RVWR_GATEWAY_BUNDLE_SHA256` shell state.
+- Add desktop bootstrapper `--version`, `version`, `--help`, `-help`, and `/?` handling, and report the real release version in `doctor` instead of `"bootstrapper"`.
+- Normalize bundle checksum comparison and include expected/actual hashes when verification fails.
+
+### Changed
+
+- Move `pg` and `ioredis` out of the default production install path and into optional peer dependencies, while keeping them as dev dependencies for PostgreSQL/Redis tests and development.
+
 ## [1.5.14] - 2026-05-24
 
 ### Fixed

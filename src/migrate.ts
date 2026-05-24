@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { Pool } from "pg";
+import type { Pool } from "pg";
 import { readFileSync, readdirSync } from "fs";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
@@ -86,6 +86,7 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
+  const { Pool } = await importOptionalPg();
   const pool = new Pool({ connectionString: databaseUrl });
 
   try {
@@ -118,6 +119,19 @@ async function main(): Promise<void> {
     process.exit(1);
   } finally {
     await pool.end();
+  }
+}
+
+async function importOptionalPg(): Promise<typeof import("pg")> {
+  try {
+    return await import("pg");
+  } catch (error: any) {
+    if (error?.code === "ERR_MODULE_NOT_FOUND" || error?.code === "MODULE_NOT_FOUND") {
+      throw new Error(
+        "PostgreSQL migrations require optional peer dependency 'pg'. Install it alongside llm-cli-gateway before running migrate."
+      );
+    }
+    throw error;
   }
 }
 

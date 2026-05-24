@@ -1,13 +1,10 @@
 {
   "name": "llm-cli-gateway",
-  "version": "1.5.14",
+  "version": "1.5.15",
   "mcpName": "io.github.verivus-oss/llm-cli-gateway",
   "description": "MCP server providing unified access to Claude Code, Codex, Gemini, Grok, and Mistral Vibe CLIs with session management, retry logic, async job orchestration, durable job results, and cross-LLM validation.",
   "license": "MIT",
-  "author": {
-    "name": "VerivusAI Labs",
-    "url": "https://github.com/verivus-oss"
-  },
+  "author": "VerivusAI Labs (https://github.com/verivus-oss)",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/verivus-oss/llm-cli-gateway.git"
@@ -86,11 +83,21 @@
     "@modelcontextprotocol/sdk": "^1.29.0",
     "better-sqlite3": "^12.10.0",
     "content-type": "1.0.5",
-    "ioredis": "^5.4.1",
-    "pg": "^8.12.0",
     "toml": "^3.0.0",
     "type-is": "2.0.1",
     "zod": "^3.23.0"
+  },
+  "peerDependencies": {
+    "ioredis": "^5.4.1",
+    "pg": "^8.12.0"
+  },
+  "peerDependenciesMeta": {
+    "ioredis": {
+      "optional": true
+    },
+    "pg": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.0",
@@ -101,6 +108,8 @@
     "@vitest/coverage-v8": "^4.1.2",
     "eslint": "^8.57.1",
     "eslint-config-prettier": "^9.0.0",
+    "ioredis": "^5.4.1",
+    "pg": "^8.12.0",
     "prettier": "^3.0.0",
     "typescript": "^5.0.0",
     "vitest": "^4.0.18"
@@ -108,5 +117,9 @@
   "overrides": {
     "type-is": "2.0.1",
     "content-type": "1.0.5"
-  }
+  },
+  "directories": {
+    "doc": "docs"
+  },
+  "types": "./dist/index.d.ts"
 }
