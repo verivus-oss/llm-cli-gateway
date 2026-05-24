@@ -2,6 +2,14 @@
 
 All notable changes to the llm-cli-gateway project.
 
+## [1.5.21] - 2026-05-24
+
+### Fixed
+
+- Add a desktop `public-url` command that persists a public HTTPS `/mcp` endpoint for ChatGPT and other web clients.
+- Pass the persisted public URL and verification flag into managed gateway starts and `doctor --json`, instead of relying on one-off shell environment state.
+- Make `print-client-config` prefer the persisted public HTTPS URL while still reporting the local URL separately.
+
 ## [1.5.20] - 2026-05-24
 
 ### Fixed

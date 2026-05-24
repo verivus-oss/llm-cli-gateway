@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/url"
 	"os"
 	"os/exec"
@@ -19,14 +20,21 @@ import (
 var GatewayVersion = "dev"
 
 type Config struct {
-	AppDir       string `json:"app_dir"`
-	GatewayDir   string `json:"gateway_dir"`
-	RuntimeDir   string `json:"runtime_dir"`
-	RuntimeNode  string `json:"runtime_node"`
-	HTTPHost     string `json:"http_host"`
-	HTTPPort     string `json:"http_port"`
-	HTTPPath     string `json:"http_path"`
-	AuthTokenSet bool   `json:"auth_token_set"`
+	AppDir          string `json:"app_dir"`
+	GatewayDir      string `json:"gateway_dir"`
+	RuntimeDir      string `json:"runtime_dir"`
+	RuntimeNode     string `json:"runtime_node"`
+	HTTPHost        string `json:"http_host"`
+	HTTPPort        string `json:"http_port"`
+	HTTPPath        string `json:"http_path"`
+	PublicURL       string `json:"public_url,omitempty"`
+	VerifyPublicURL bool   `json:"verify_public_url,omitempty"`
+	AuthTokenSet    bool   `json:"auth_token_set"`
+}
+
+type Settings struct {
+	PublicURL       string `json:"public_url,omitempty"`
+	VerifyPublicURL bool   `json:"verify_public_url,omitempty"`
 }
 
 func Default() (Config, error) {
@@ -36,15 +44,70 @@ func Default() (Config, error) {
 	}
 	appDir := filepath.Join(home, ".llm-cli-gateway")
 	runtimeDir := filepath.Join(appDir, "runtime")
+	settings := readSettings(appDir)
+	publicURL := strings.TrimSpace(os.Getenv("LLM_GATEWAY_PUBLIC_URL"))
+	if publicURL == "" {
+		publicURL = settings.PublicURL
+	}
+	verifyPublicURL := settings.VerifyPublicURL || os.Getenv("LLM_GATEWAY_VERIFY_PUBLIC_URL") == "1"
 	return Config{
-		AppDir:      appDir,
-		GatewayDir:  filepath.Join(appDir, "gateway"),
-		RuntimeDir:  runtimeDir,
-		RuntimeNode: filepath.Join(runtimeDir, nodeExecutableName()),
-		HTTPHost:    envDefault("LLM_GATEWAY_HTTP_HOST", "127.0.0.1"),
-		HTTPPort:    envDefault("LLM_GATEWAY_HTTP_PORT", "3333"),
-		HTTPPath:    envDefault("LLM_GATEWAY_HTTP_PATH", "/mcp"),
+		AppDir:          appDir,
+		GatewayDir:      filepath.Join(appDir, "gateway"),
+		RuntimeDir:      runtimeDir,
+		RuntimeNode:     filepath.Join(runtimeDir, nodeExecutableName()),
+		HTTPHost:        envDefault("LLM_GATEWAY_HTTP_HOST", "127.0.0.1"),
+		HTTPPort:        envDefault("LLM_GATEWAY_HTTP_PORT", "3333"),
+		HTTPPath:        envDefault("LLM_GATEWAY_HTTP_PATH", "/mcp"),
+		PublicURL:       publicURL,
+		VerifyPublicURL: verifyPublicURL,
 	}, nil
+}
+
+func SetPublicURL(rawURL string, verify bool) (Settings, error) {
+	cfg, err := Default()
+	if err != nil {
+		return Settings{}, err
+	}
+	normalized, err := NormalizePublicURL(rawURL, cfg.HTTPPath)
+	if err != nil {
+		return Settings{}, err
+	}
+	settings := readSettings(cfg.AppDir)
+	settings.PublicURL = normalized
+	settings.VerifyPublicURL = verify
+	if err := writeSettings(cfg.AppDir, settings); err != nil {
+		return Settings{}, err
+	}
+	return settings, nil
+}
+
+func ClearPublicURL() error {
+	cfg, err := Default()
+	if err != nil {
+		return err
+	}
+	settings := readSettings(cfg.AppDir)
+	settings.PublicURL = ""
+	settings.VerifyPublicURL = false
+	return writeSettings(cfg.AppDir, settings)
+}
+
+func NormalizePublicURL(rawURL, defaultPath string) (string, error) {
+	trimmed := strings.TrimSpace(rawURL)
+	if trimmed == "" {
+		return "", errors.New("public URL is required")
+	}
+	parsed, err := url.Parse(trimmed)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return "", errors.New("public URL must be an absolute HTTPS URL")
+	}
+	if parsed.Scheme != "https" {
+		return "", errors.New("public URL must use https:// for ChatGPT and other web clients")
+	}
+	if parsed.Path == "" || parsed.Path == "/" {
+		parsed.Path = defaultPath
+	}
+	return parsed.String(), nil
 }
 
 func Ensure() (Config, string, error) {
@@ -86,7 +149,7 @@ func DoctorJSON() ([]byte, error) {
 	if err != nil {
 		port = 3333
 	}
-	publicURL := os.Getenv("LLM_GATEWAY_PUBLIC_URL")
+	publicURL := cfg.PublicURL
 	redactedPublicURL := redactDiagnosticURL(publicURL)
 	httpsConfigured := strings.HasPrefix(publicURL, "https://")
 	report := map[string]any{
@@ -313,6 +376,12 @@ func EnvForGateway(cfg Config, token string) []string {
 		"LLM_GATEWAY_HTTP_PATH="+cfg.HTTPPath,
 		"LLM_GATEWAY_AUTH_TOKEN="+token,
 	)
+	if cfg.PublicURL != "" {
+		env = append(env, "LLM_GATEWAY_PUBLIC_URL="+cfg.PublicURL)
+	}
+	if cfg.VerifyPublicURL {
+		env = append(env, "LLM_GATEWAY_VERIFY_PUBLIC_URL=1")
+	}
 	return env
 }
 
@@ -341,4 +410,33 @@ func randomToken() (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(buf), nil
+}
+
+func settingsPath(appDir string) string {
+	return filepath.Join(appDir, "settings.json")
+}
+
+func readSettings(appDir string) Settings {
+	body, err := os.ReadFile(settingsPath(appDir))
+	if err != nil {
+		return Settings{}
+	}
+	var settings Settings
+	if err := json.Unmarshal(body, &settings); err != nil {
+		return Settings{}
+	}
+	settings.PublicURL = strings.TrimSpace(settings.PublicURL)
+	return settings
+}
+
+func writeSettings(appDir string, settings Settings) error {
+	if err := os.MkdirAll(appDir, 0o700); err != nil {
+		return err
+	}
+	body, err := json.MarshalIndent(settings, "", "  ")
+	if err != nil {
+		return err
+	}
+	body = append(body, '\n')
+	return os.WriteFile(settingsPath(appDir), body, 0o600)
 }

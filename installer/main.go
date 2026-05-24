@@ -90,17 +90,25 @@ func run(args []string) error {
 			return err
 		}
 		return printJSON(map[string]any{"ok": true, "changed": false, "message": "No repair actions were required."})
+	case "public-url":
+		return publicURLCommand(args[1:])
 	case "print-client-config":
 		cfg, _, err := config.Ensure()
 		if err != nil {
 			return err
 		}
+		endpoint := "http://" + cfg.HTTPHost + ":" + cfg.HTTPPort + cfg.HTTPPath
+		if cfg.PublicURL != "" {
+			endpoint = cfg.PublicURL
+		}
 		return printJSON(map[string]any{
-			"ok":        true,
-			"transport": "streamable_http",
-			"url":       "http://" + cfg.HTTPHost + ":" + cfg.HTTPPort + cfg.HTTPPath,
-			"headers":   map[string]string{"Authorization": "Bearer <redacted>"},
-			"notes":     []string{"Read the bearer token from the local auth-token file; do not paste it into remote chat."},
+			"ok":                    true,
+			"transport":             "streamable_http",
+			"url":                   endpoint,
+			"local_url":             "http://" + cfg.HTTPHost + ":" + cfg.HTTPPort + cfg.HTTPPath,
+			"web_clients_supported": cfg.PublicURL != "" && strings.HasPrefix(cfg.PublicURL, "https://"),
+			"headers":               map[string]string{"Authorization": "Bearer <redacted>"},
+			"notes":                 []string{"Read the bearer token from the local auth-token file; do not paste it into remote chat."},
 		})
 	case "setup-ui":
 		return setupui.Listen("127.0.0.1:3340")
@@ -128,6 +136,8 @@ Commands:
   stop                 Stop the managed local HTTP gateway
   status               Print managed gateway process status
   repair               Verify local installer state
+  public-url <url>     Persist the public HTTPS /mcp URL for ChatGPT/web clients
+  public-url clear     Clear the persisted public HTTPS URL
   install-bundle       Download and install the pinned gateway bundle
   upgrade              Stop, install latest bundle, and update bootstrapper
   uninstall [--yes]    Remove managed app state; dry-run unless --yes is set
@@ -139,6 +149,48 @@ Flags:
   --version            Print bootstrapper version
   --help, /?           Print this help
 `
+}
+
+func publicURLCommand(args []string) error {
+	if len(args) == 0 {
+		cfg, err := config.Default()
+		if err != nil {
+			return err
+		}
+		return printJSON(map[string]any{
+			"ok":                true,
+			"public_url":        nullableString(cfg.PublicURL),
+			"verify_public_url": cfg.VerifyPublicURL,
+			"next":              "Run public-url <https://host/mcp> to persist a ChatGPT/web-client endpoint, or public-url clear.",
+		})
+	}
+	if args[0] == "clear" {
+		if err := config.ClearPublicURL(); err != nil {
+			return err
+		}
+		return printJSON(map[string]any{
+			"ok":         true,
+			"public_url": nil,
+			"next":       "Run stop then start to relaunch the gateway without a public web-client URL.",
+		})
+	}
+	settings, err := config.SetPublicURL(args[0], true)
+	if err != nil {
+		return err
+	}
+	return printJSON(map[string]any{
+		"ok":                true,
+		"public_url":        settings.PublicURL,
+		"verify_public_url": settings.VerifyPublicURL,
+		"next":              "Run stop, start, then doctor --json. Use this HTTPS URL in ChatGPT's MCP app/connector setup.",
+	})
+}
+
+func nullableString(value string) any {
+	if value == "" {
+		return nil
+	}
+	return value
 }
 
 func upgrade() error {
