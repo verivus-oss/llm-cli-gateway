@@ -1,9 +1,9 @@
-import { ChildProcess, spawn } from "child_process";
+import { ChildProcess } from "child_process";
 import { randomUUID } from "crypto";
 import {
   getExtendedPath,
   killProcessGroup,
-  registerProcessGroup,
+  spawnCliProcess,
   unregisterProcessGroup,
 } from "./executor.js";
 import type { Logger } from "./logger.js";
@@ -465,16 +465,11 @@ export class AsyncJobManager {
     // Mistral Vibe ships as the `vibe` binary; the gateway uses `mistral` as the
     // provider key but spawns `vibe` on the shell.
     const command = cli === "mistral" ? "vibe" : cli;
-    const child = spawn(command, args, {
+    const child = spawnCliProcess(command, args, {
       cwd,
-      detached: true,
-      windowsHide: true,
       stdio: ["ignore", "pipe", "pipe"],
       env: { ...process.env, PATH: getExtendedPath(), ...(extraEnv ?? {}) },
     });
-
-    if (child.pid) registerProcessGroup(child.pid);
-    child.unref();
 
     // Single cleanup flag to prevent double-unregister
     let groupCleaned = false;

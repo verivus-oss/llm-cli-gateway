@@ -4,6 +4,7 @@ import {
   killProcessGroup,
   killAllProcessGroups,
   registerProcessGroup,
+  shouldDetachProviderProcess,
   unregisterProcessGroup,
 } from "../executor.js";
 import { spawn } from "child_process";
@@ -188,6 +189,12 @@ describe("executeCli", () => {
   });
 
   describe("process group termination", () => {
+    it("should not detach provider processes on Windows", () => {
+      expect(shouldDetachProviderProcess("win32")).toBe(false);
+      expect(shouldDetachProviderProcess("linux")).toBe(true);
+      expect(shouldDetachProviderProcess("darwin")).toBe(true);
+    });
+
     it("should spawn with detached:true and use process group kill", async () => {
       // Verify that a simple command still works with detached spawn
       const result = await executeCli("echo", ["process-group-test"]);

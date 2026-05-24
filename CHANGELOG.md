@@ -2,6 +2,14 @@
 
 All notable changes to the llm-cli-gateway project.
 
+## [1.5.12] - 2026-05-24
+
+### Fixed
+
+- Stop detaching provider CLI processes on Windows so `ask_model` and async requests do not flash visible cmd/conhost windows.
+- Use hidden Windows process creation for the bootstrapper's managed Node gateway process and status checks.
+- Keep Windows process cleanup by killing provider process trees with hidden `taskkill.exe` instead of Unix process-group signals.
+
 ## [1.5.11] - 2026-05-24
 
 ### Fixed

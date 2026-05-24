@@ -1,4 +1,4 @@
-import { ChildProcess, spawn } from "child_process";
+import { ChildProcess, spawn, spawnSync, type SpawnOptions } from "child_process";
 import { homedir } from "os";
 import { join, dirname } from "path";
 import { readdirSync, existsSync } from "fs";
@@ -81,6 +81,13 @@ export function getExtendedPath(): string {
 /** Registry of active detached process groups for shutdown cleanup. */
 const activeProcessGroups = new Set<number>();
 
+export function shouldDetachProviderProcess(platform: NodeJS.Platform = process.platform): boolean {
+  // On Windows, detached console children can flash visible cmd/conhost windows
+  // when provider CLIs are native console apps or .cmd shims. Keep them in the
+  // gateway process tree and rely on hidden-window spawn plus taskkill cleanup.
+  return platform !== "win32";
+}
+
 export function registerProcessGroup(pid: number): void {
   activeProcessGroups.add(pid);
 }
@@ -100,19 +107,27 @@ export function killAllProcessGroups(): Promise<void> {
   if (activeProcessGroups.size === 0) return Promise.resolve();
 
   for (const pid of activeProcessGroups) {
-    try {
-      process.kill(-pid, "SIGTERM");
-    } catch {
-      /* ESRCH ok */
+    if (process.platform === "win32") {
+      killWindowsProcessTree(pid);
+    } else {
+      try {
+        process.kill(-pid, "SIGTERM");
+      } catch {
+        /* ESRCH ok */
+      }
     }
   }
   return new Promise(resolve => {
     setTimeout(() => {
       for (const pid of activeProcessGroups) {
-        try {
-          process.kill(-pid, "SIGKILL");
-        } catch {
-          /* ESRCH ok */
+        if (process.platform === "win32") {
+          killWindowsProcessTree(pid);
+        } else {
+          try {
+            process.kill(-pid, "SIGKILL");
+          } catch {
+            /* ESRCH ok */
+          }
         }
       }
       activeProcessGroups.clear();
@@ -127,6 +142,9 @@ export function killAllProcessGroups(): Promise<void> {
  */
 export function killProcessGroup(proc: ChildProcess, signal: NodeJS.Signals): boolean {
   if (proc.pid) {
+    if (process.platform === "win32") {
+      return killWindowsProcessTree(proc.pid);
+    }
     try {
       process.kill(-proc.pid, signal);
       return true;
@@ -149,6 +167,36 @@ export function killProcessGroup(proc: ChildProcess, signal: NodeJS.Signals): bo
   }
 }
 
+function killWindowsProcessTree(pid: number): boolean {
+  const result = spawnSync("taskkill.exe", ["/PID", String(pid), "/T", "/F"], {
+    stdio: "ignore",
+    windowsHide: true,
+  });
+  return result.status === 0;
+}
+
+export function spawnCliProcess(
+  command: string,
+  args: string[],
+  options: {
+    cwd?: string;
+    env: NodeJS.ProcessEnv;
+    stdio: SpawnOptions["stdio"];
+  }
+): ChildProcess {
+  const detached = shouldDetachProviderProcess();
+  const proc = spawn(command, args, {
+    cwd: options.cwd,
+    detached,
+    windowsHide: true,
+    stdio: options.stdio,
+    env: options.env,
+  });
+  if (proc.pid) registerProcessGroup(proc.pid);
+  proc.unref();
+  return proc;
+}
+
 export async function executeCli(
   command: string,
   args: string[],
@@ -160,17 +208,11 @@ export async function executeCli(
 
   const runOnce = () =>
     new Promise<ExecuteResult>((resolve, reject) => {
-      const proc = spawn(command, args, {
+      const proc = spawnCliProcess(command, args, {
         cwd,
-        detached: true,
-        windowsHide: true,
         stdio: ["ignore", "pipe", "pipe"],
         env: { ...process.env, PATH: extendedPath, ...(extraEnv ?? {}) },
       });
-
-      if (proc.pid) registerProcessGroup(proc.pid);
-      // Prevent detached process from keeping parent alive when not needed
-      proc.unref();
 
       let stdout = "";
       let stderr = "";
@@ -266,14 +308,14 @@ export async function executeCli(
         }
       };
 
-      proc.stdout.on("data", data => {
+      proc.stdout!.on("data", data => {
         if (settled) {
           return;
         }
         handleOutputChunk(data, "stdout");
       });
 
-      proc.stderr.on("data", data => {
+      proc.stderr!.on("data", data => {
         if (settled) {
           return;
         }

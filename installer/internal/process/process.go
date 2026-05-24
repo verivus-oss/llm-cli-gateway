@@ -54,6 +54,7 @@ func Start(cfg config.Config, token string) (Status, error) {
 	cmd.Env = config.EnvForGateway(cfg, token)
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
+	configureHiddenProcess(cmd)
 	if err := cmd.Start(); err != nil {
 		return Status{}, err
 	}
@@ -141,7 +142,9 @@ func processIsRunning(pid int) bool {
 }
 
 func windowsProcessIsRunning(pid int) bool {
-	output, err := exec.Command("tasklist", "/FI", fmt.Sprintf("PID eq %d", pid), "/FO", "CSV", "/NH").Output()
+	cmd := exec.Command("tasklist", "/FI", fmt.Sprintf("PID eq %d", pid), "/FO", "CSV", "/NH")
+	configureHiddenProcess(cmd)
+	output, err := cmd.Output()
 	if err != nil {
 		return false
 	}
