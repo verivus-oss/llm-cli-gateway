@@ -2,6 +2,12 @@
 
 All notable changes to the llm-cli-gateway project.
 
+## [1.5.32] - 2026-05-25
+
+### Changed
+
+- Move GitHub Actions workflows to Node 24-backed action majors and run CI/release Node jobs on Node 24, removing GitHub's Node 20 action-runtime deprecation warning before the June 2026 cutoff.
+
 ## [1.5.31] - 2026-05-25
 
 ### Changed
