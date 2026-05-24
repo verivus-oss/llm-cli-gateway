@@ -17,6 +17,8 @@ import (
 type Config struct {
 	AppDir       string `json:"app_dir"`
 	GatewayDir   string `json:"gateway_dir"`
+	RuntimeDir   string `json:"runtime_dir"`
+	RuntimeNode  string `json:"runtime_node"`
 	HTTPHost     string `json:"http_host"`
 	HTTPPort     string `json:"http_port"`
 	HTTPPath     string `json:"http_path"`
@@ -29,12 +31,15 @@ func Default() (Config, error) {
 		return Config{}, err
 	}
 	appDir := filepath.Join(home, ".llm-cli-gateway")
+	runtimeDir := filepath.Join(appDir, "runtime")
 	return Config{
-		AppDir:     appDir,
-		GatewayDir: filepath.Join(appDir, "gateway"),
-		HTTPHost:   envDefault("LLM_GATEWAY_HTTP_HOST", "127.0.0.1"),
-		HTTPPort:   envDefault("LLM_GATEWAY_HTTP_PORT", "3333"),
-		HTTPPath:   envDefault("LLM_GATEWAY_HTTP_PATH", "/mcp"),
+		AppDir:      appDir,
+		GatewayDir:  filepath.Join(appDir, "gateway"),
+		RuntimeDir:  runtimeDir,
+		RuntimeNode: filepath.Join(runtimeDir, nodeExecutableName()),
+		HTTPHost:    envDefault("LLM_GATEWAY_HTTP_HOST", "127.0.0.1"),
+		HTTPPort:    envDefault("LLM_GATEWAY_HTTP_PORT", "3333"),
+		HTTPPath:    envDefault("LLM_GATEWAY_HTTP_PATH", "/mcp"),
 	}, nil
 }
 
@@ -246,6 +251,13 @@ func envDefault(key, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func nodeExecutableName() string {
+	if runtime.GOOS == "windows" {
+		return "node.exe"
+	}
+	return "node"
 }
 
 func dirExists(path string) bool {

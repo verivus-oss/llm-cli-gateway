@@ -2,6 +2,15 @@
 
 All notable changes to the llm-cli-gateway project.
 
+## [1.5.6] - 2026-05-24
+
+### Fixed
+
+- Replace the host-Node installer path with platform-specific verified bundles that include the compiled gateway, production dependencies, setup assets, and a managed Node runtime.
+- Make the bootstrapper start the managed runtime from the installed bundle and require `RVWR_ALLOW_HOST_NODE=1` for the developer host-Node fallback.
+- Update release packaging metadata and docs so Windows/macOS/Linux install instructions use `llm-cli-gateway-bundle-<version>-<os>-<arch>.tar.gz`.
+- Update production dependencies (`@modelcontextprotocol/sdk`, `better-sqlite3`, and transitive Hono/AJV packages) so `npm audit --omit=dev` reports zero vulnerabilities while pinning `type-is` and `content-type` away from Socket-flagged latest releases.
+
 ## [1.5.5] - 2026-05-24
 
 ### Fixed

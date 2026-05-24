@@ -13,6 +13,7 @@ gate and the command an assistant can quote to a user.
 | Gate                                                              | Evidence                                                    |
 | ------------------------------------------------------------------ | ------------------------------------------------------------ |
 | Go bootstrapper binaries are built on Linux self-hosted plus GitHub-hosted Windows/macOS runners | `.github/workflows/release-installer.yml` `build-binaries` matrix; `installer/build-release.sh` defaults to host target |
+| Platform bundles include the gateway, production dependencies, and a managed Node runtime | `installer/build-release.sh` `package_platform_bundle` + `download_node_runtime` |
 | `SHA256SUMS` is produced; users must verify before run            | `installer/packaging/README.md:23-25` and `:51-64`           |
 | Bootstrapper has `setup` + `install-bundle` to materialize the gateway dir | `installer/main.go:37-42, 96-97`                       |
 | Docker Compose fallback exists                                    | `docker-compose.personal.yml`, `Dockerfile.personal`         |
@@ -27,6 +28,8 @@ sha256sum --check SHA256SUMS
 
 # Install.
 chmod +x llm-cli-gateway-<ver>-<os>-<arch>
+export RVWR_GATEWAY_BUNDLE_URL=<release-url>/llm-cli-gateway-bundle-<ver>-<os>-<arch>.tar.gz
+export RVWR_GATEWAY_BUNDLE_SHA256=<bundle-sha256-from-SHA256SUMS>
 ./llm-cli-gateway-<ver>-<os>-<arch> setup
 ./llm-cli-gateway-<ver>-<os>-<arch> install-bundle
 ./llm-cli-gateway-<ver>-<os>-<arch> start

@@ -82,20 +82,25 @@ jobs:
             exit 1
           fi
 
-      - name: Build bootstrapper binary
+      - name: Install npm deps + build gateway
+        shell: bash
+        run: |
+          npm ci
+          npm run build
+
+      - name: Build bootstrapper binary + platform bundle
         shell: bash
         env:
           REF_NAME: ${{ needs.resolve-tag.outputs.tag }}
         run: |
           TAG_VERSION="${REF_NAME#v}"
-          bash installer/build-release.sh --version "${TAG_VERSION}" --skip-bundle ${{ matrix.targets }}
+          bash installer/build-release.sh --version "${TAG_VERSION}" ${{ matrix.targets }}
 
       - uses: actions/upload-artifact@v4
         with:
           name: installer-${{ matrix.artifact }}
           path: |
             installer/dist/llm-cli-gateway-*
-            !installer/dist/llm-cli-gateway-bundle-*.tar.gz
             !installer/dist/SHA256SUMS
             !installer/dist/release-manifest.json
           if-no-files-found: error
@@ -108,28 +113,13 @@ jobs:
         with:
           ref: ${{ needs.resolve-tag.outputs.tag }}
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: "npm"
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version: "1.22"
-          cache-dependency-path: installer/go.mod
-
-      - name: Install npm deps + build gateway bundle
-        run: |
-          npm ci
-          npm run build
-
       - uses: actions/download-artifact@v4
         with:
           pattern: installer-*
           path: installer/dist
           merge-multiple: true
 
-      - name: Package Node bundle + combined release metadata
+      - name: Package combined release metadata
         shell: bash
         env:
           # Public base for the release-manifest.json copy/paste URLs. Points
@@ -138,7 +128,7 @@ jobs:
           REF_NAME: ${{ needs.resolve-tag.outputs.tag }}
         run: |
           TAG_VERSION="${REF_NAME#v}"
-          bash installer/build-release.sh --version "${TAG_VERSION}" --skip-binaries
+          bash installer/build-release.sh --version "${TAG_VERSION}" --skip-binaries --skip-bundle
 
       - name: Verify checksums (sanity check before upload)
         working-directory: installer/dist
@@ -155,7 +145,7 @@ jobs:
           # `--clobber` so a re-run via workflow_dispatch replaces stale assets.
           gh release upload "${REL_TAG}" \
             llm-cli-gateway-"${TAG_VERSION}"-* \
-            llm-cli-gateway-bundle-"${TAG_VERSION}".tar.gz \
+            llm-cli-gateway-bundle-"${TAG_VERSION}"-*.tar.gz \
             SHA256SUMS \
             release-manifest.json \
             --clobber

@@ -24,7 +24,14 @@ func Start(cfg config.Config, token string) (Status, error) {
 	if _, err := os.Stat(entry); err != nil {
 		return Status{}, errors.New("gateway bundle missing; install a verified bundle before start")
 	}
-	cmd := exec.Command("node", entry, "--transport=http")
+	nodePath := cfg.RuntimeNode
+	if _, err := os.Stat(nodePath); err != nil {
+		if os.Getenv("RVWR_ALLOW_HOST_NODE") != "1" {
+			return Status{}, errors.New("managed Node runtime missing; install the verified platform bundle before start")
+		}
+		nodePath = "node"
+	}
+	cmd := exec.Command(nodePath, entry, "--transport=http")
 	cmd.Env = config.EnvForGateway(cfg, token)
 	cmd.Stdout = nil
 	cmd.Stderr = nil

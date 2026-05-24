@@ -6,8 +6,8 @@ Builder: `installer/build-release.sh`
 This directory documents how `llm-cli-gateway` is built into a non-developer
 release: the local Linux self-hosted runner builds Linux Go bootstrapper
 binaries, GitHub-hosted Windows and macOS runners build their platform
-binaries, then a Linux packaging job publishes the checksummed Node gateway
-bundle the bootstrapper installs via `install-bundle`.
+binaries, and each OS runner packages its platform bundle. The final Linux job
+publishes combined checksums and metadata.
 
 ## Artifact set
 
@@ -18,7 +18,11 @@ After the release workflow runs, `installer/dist/` contains:
 - `llm-cli-gateway-<version>-linux-amd64`
 - `llm-cli-gateway-<version>-linux-arm64`
 - `llm-cli-gateway-<version>-windows-amd64.exe`
-- `llm-cli-gateway-bundle-<version>.tar.gz`
+- `llm-cli-gateway-bundle-<version>-darwin-arm64.tar.gz`
+- `llm-cli-gateway-bundle-<version>-darwin-amd64.tar.gz`
+- `llm-cli-gateway-bundle-<version>-linux-amd64.tar.gz`
+- `llm-cli-gateway-bundle-<version>-linux-arm64.tar.gz`
+- `llm-cli-gateway-bundle-<version>-windows-amd64.tar.gz`
 - `SHA256SUMS`
 - `release-manifest.json`
 
@@ -44,8 +48,8 @@ Options:
 | Flag             | Effect                                                       |
 | ---------------- | ------------------------------------------------------------ |
 | `--version VER`  | Override release version (default: `package.json#version`).  |
-| `--skip-bundle`  | Build only the Go binaries; skip the Node bundle tarball.    |
-| `--skip-binaries` | Package the Node bundle and metadata without building Go binaries. |
+| `--skip-bundle`  | Build only the Go binaries; skip platform bundle tarballs.    |
+| `--skip-binaries` | Package platform bundles/metadata without building Go binaries. |
 | `--target os/arch` | Restrict to one target (repeatable).                       |
 | `--all-targets`  | Build the full target list from the current host; for local testing only, not release CI. |
 
@@ -90,10 +94,12 @@ chmod +x llm-cli-gateway-<version>-<os>-<arch>
 
 Required environment for `install-bundle`:
 
-- `RVWR_GATEWAY_BUNDLE_URL` — pinned URL of `llm-cli-gateway-bundle-<version>.tar.gz`
+- `RVWR_GATEWAY_BUNDLE_URL` — pinned URL of `llm-cli-gateway-bundle-<version>-<os>-<arch>.tar.gz`
 - `RVWR_GATEWAY_BUNDLE_SHA256` — the bundle's SHA256 from `SHA256SUMS`
 
-The binary refuses to install an unverified bundle.
+The binary refuses to install an unverified bundle. The platform bundle
+contains the compiled gateway, production `node_modules`, setup assets, and a
+managed Node runtime; users do not install Node globally for the happy path.
 
 ### Upgrade
 

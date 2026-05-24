@@ -53,12 +53,12 @@ The MVP should prefer embedding the gateway bundle when release artifact size re
 
 ## Node Runtime Decision
 
-Current decision: the bootstrapper may supervise the existing Node gateway, but the happy path is not self-contained unless Node is embedded or provided as a verified runtime bundle.
+Current decision: the bootstrapper supervises the existing Node gateway through a verified platform bundle. The happy path installs the compiled gateway, production dependencies, and a managed Node runtime from the checksummed bundle; host Node is only an explicit developer fallback.
 
 Acceptable release modes:
 
 - Self-contained: Go bootstrapper embeds or installs a verified Node runtime and a verified gateway bundle.
-- Verified bundle: Go bootstrapper embeds or downloads the gateway bundle, and the bundle includes all JavaScript dependencies needed at runtime.
+- Verified bundle: Go bootstrapper embeds or downloads the platform bundle, and the bundle includes the Node runtime plus all JavaScript dependencies needed at runtime.
 - Host Node fallback: Go bootstrapper requires an existing compatible Node installation. This is not a self-contained single-binary happy path and must be labeled as fallback or developer mode.
 
 ## Feasibility Evidence

@@ -254,22 +254,19 @@ func installVerifiedBundle(bundlePath string, cfg config.Config) (string, error)
 	if err != nil {
 		return "", err
 	}
-	previous := cfg.GatewayDir + ".previous"
-	if err := os.RemoveAll(previous); err != nil {
-		return "", err
-	}
-	if _, err := os.Stat(cfg.GatewayDir); err == nil {
-		if err := os.Rename(cfg.GatewayDir, previous); err != nil {
+	runtimeRoot, err := findRuntimeRoot(staging)
+	if err != nil {
+		if os.Getenv("RVWR_ALLOW_HOST_NODE") != "1" {
 			return "", err
 		}
 	}
-	if err := os.Rename(root, cfg.GatewayDir); err != nil {
-		if _, statErr := os.Stat(previous); statErr == nil {
-			_ = os.Rename(previous, cfg.GatewayDir)
-		}
+	swaps := []dirSwap{{source: root, destination: cfg.GatewayDir}}
+	if runtimeRoot != "" {
+		swaps = append(swaps, dirSwap{source: runtimeRoot, destination: cfg.RuntimeDir})
+	}
+	if err := replaceDirs(swaps); err != nil {
 		return "", err
 	}
-	_ = os.RemoveAll(previous)
 	return cfg.GatewayDir, nil
 }
 
@@ -404,6 +401,91 @@ func findGatewayRoot(staging string) (string, error) {
 		return "", errors.New("verified bundle missing dist/index.js")
 	}
 	return found, nil
+}
+
+func findRuntimeRoot(staging string) (string, error) {
+	exe := runtimeNodeExecutableName()
+	var found string
+	err := filepath.WalkDir(staging, func(path string, entry os.DirEntry, err error) error {
+		if err != nil || found != "" || !entry.IsDir() {
+			return err
+		}
+		if _, markerErr := os.Stat(filepath.Join(path, ".llm-cli-gateway-runtime")); markerErr != nil {
+			return nil
+		}
+		if _, statErr := os.Stat(filepath.Join(path, exe)); statErr == nil {
+			found = path
+			return filepath.SkipDir
+		}
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	if found == "" {
+		return "", errors.New("verified bundle missing managed Node runtime")
+	}
+	return found, nil
+}
+
+func runtimeNodeExecutableName() string {
+	if strings.EqualFold(os.Getenv("OS"), "Windows_NT") {
+		return "node.exe"
+	}
+	if filepath.Separator == '\\' {
+		return "node.exe"
+	}
+	return "node"
+}
+
+type dirSwap struct {
+	source      string
+	destination string
+}
+
+func replaceDirs(swaps []dirSwap) error {
+	prepared := make([]dirSwap, 0, len(swaps))
+	applied := make([]dirSwap, 0, len(swaps))
+	for _, swap := range swaps {
+		previous := swap.destination + ".previous"
+		if err := os.RemoveAll(previous); err != nil {
+			return err
+		}
+		if _, err := os.Stat(swap.destination); err == nil {
+			if err := os.Rename(swap.destination, previous); err != nil {
+				rollbackDirs(prepared, applied)
+				return err
+			}
+		}
+		prepared = append(prepared, swap)
+	}
+
+	for _, swap := range swaps {
+		if err := os.Rename(swap.source, swap.destination); err != nil {
+			rollbackDirs(prepared, applied)
+			return err
+		}
+		applied = append(applied, swap)
+	}
+
+	for _, swap := range swaps {
+		if err := os.RemoveAll(swap.destination + ".previous"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func rollbackDirs(prepared, applied []dirSwap) {
+	for i := len(applied) - 1; i >= 0; i-- {
+		_ = os.RemoveAll(applied[i].destination)
+	}
+	for i := len(prepared) - 1; i >= 0; i-- {
+		previous := prepared[i].destination + ".previous"
+		if _, err := os.Stat(previous); err == nil {
+			_ = os.Rename(previous, prepared[i].destination)
+		}
+	}
 }
 
 func printJSON(value any) error {

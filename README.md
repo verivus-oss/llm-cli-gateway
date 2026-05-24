@@ -20,7 +20,7 @@ Current personal-appliance artifacts include:
 - Streamable HTTP startup: `LLM_GATEWAY_AUTH_TOKEN=<token> npm run start:http`
 - Machine-readable diagnostics: `npm run doctor`
 - Go bootstrapper scaffold: `installer/` with `setup`, `doctor --json`, `start`, `stop`, `status`, `repair`, `upgrade`, `uninstall`, `print-client-config`, and verified bundle download commands.
-- Release packaging: the release workflow builds Linux binaries on the local self-hosted runner, builds Windows/macOS binaries on GitHub-hosted runners, then publishes a checksummed Node bundle under `installer/dist/`; see [installer/packaging/README.md](installer/packaging/README.md).
+- Release packaging: the release workflow builds Linux binaries on the local self-hosted runner, builds Windows/macOS binaries on GitHub-hosted runners, then publishes checksummed platform bundles with the gateway, production dependencies, and a managed Node runtime; see [installer/packaging/README.md](installer/packaging/README.md).
 - Docker Compose fallback: [docker-compose.personal.yml](docker-compose.personal.yml) + [Dockerfile.personal](Dockerfile.personal) for users who already manage containers.
 - Local setup UI artifact: [setup/ui/index.html](setup/ui/index.html)
 - Provider setup snippets: [setup/providers/](setup/providers/)
@@ -33,7 +33,7 @@ Current personal-appliance artifacts include:
 sha256sum --check SHA256SUMS            # verify before run (or `shasum -a 256 --check` on macOS)
 chmod +x llm-cli-gateway-<ver>-<os>-<arch>
 ./llm-cli-gateway-<ver>-<os>-<arch> setup
-./llm-cli-gateway-<ver>-<os>-<arch> install-bundle    # uses RVWR_GATEWAY_BUNDLE_URL/_SHA256
+./llm-cli-gateway-<ver>-<os>-<arch> install-bundle    # uses the platform bundle URL/SHA256
 ./llm-cli-gateway-<ver>-<os>-<arch> start
 ./llm-cli-gateway-<ver>-<os>-<arch> doctor
 
