@@ -19,7 +19,37 @@ Local success is not enough for ChatGPT, Claude web, or Grok custom connectors. 
 - `byo_reverse_proxy`: public HTTPS URL is configured and does not match a known tunnel hostname.
 - `misconfigured`: a public URL is configured, but it is not HTTPS.
 
-## Supported Layer 3 Path
+## Managed Desktop Path
+
+The desktop bootstrapper can manage a Cloudflare Quick Tunnel and persist the HTTPS MCP URL:
+
+```powershell
+llm-cli-gateway tunnel start
+llm-cli-gateway doctor --json
+llm-cli-gateway print-client-config
+```
+
+`tunnel start` starts the local gateway if needed, launches `cloudflared tunnel --url
+http://127.0.0.1:3333`, reads the generated `https://*.trycloudflare.com` URL, persists the
+normalized `/mcp` URL, and enables public URL verification for future doctor runs.
+
+If `cloudflared` is not installed on Windows:
+
+```powershell
+winget install --id Cloudflare.cloudflared --exact
+llm-cli-gateway tunnel start
+```
+
+Stop the managed tunnel with:
+
+```powershell
+llm-cli-gateway tunnel stop
+```
+
+Stopping a managed tunnel clears the persisted public URL only when it still matches the URL created
+by that tunnel. User-provided `public-url` values are left alone.
+
+## Manual Layer 3 Path
 
 Layer 3 documents the first testable path as an HTTPS Cloudflare quick tunnel. Equivalent HTTPS
 tunnels or BYO reverse proxies are acceptable when they forward to the same local `/mcp` endpoint.

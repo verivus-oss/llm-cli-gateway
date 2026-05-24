@@ -2,6 +2,14 @@
 
 All notable changes to the llm-cli-gateway project.
 
+## [1.5.22] - 2026-05-24
+
+### Added
+
+- Add desktop `tunnel start`, `tunnel status`, and `tunnel stop` commands for a managed Cloudflare Quick Tunnel path to ChatGPT/web-client HTTPS MCP setup.
+- Make `tunnel start` launch the local gateway if needed, parse the generated `https://*.trycloudflare.com` address, persist the normalized `/mcp` public URL, and enable doctor verification.
+- Make `tunnel stop` stop the managed tunnel and clear the persisted URL only when it still matches the managed tunnel URL.
+
 ## [1.5.21] - 2026-05-24
 
 ### Fixed

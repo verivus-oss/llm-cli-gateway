@@ -92,6 +92,8 @@ func run(args []string) error {
 		return printJSON(map[string]any{"ok": true, "changed": false, "message": "No repair actions were required."})
 	case "public-url":
 		return publicURLCommand(args[1:])
+	case "tunnel":
+		return tunnelCommand(args[1:])
 	case "print-client-config":
 		cfg, _, err := config.Ensure()
 		if err != nil {
@@ -138,6 +140,9 @@ Commands:
   repair               Verify local installer state
   public-url <url>     Persist the public HTTPS /mcp URL for ChatGPT/web clients
   public-url clear     Clear the persisted public HTTPS URL
+  tunnel start         Start a managed Cloudflare HTTPS tunnel and persist its /mcp URL
+  tunnel status        Print managed tunnel status
+  tunnel stop          Stop the managed tunnel and clear its persisted URL
   install-bundle       Download and install the pinned gateway bundle
   upgrade              Stop, install latest bundle, and update bootstrapper
   uninstall [--yes]    Remove managed app state; dry-run unless --yes is set
@@ -149,6 +154,58 @@ Flags:
   --version            Print bootstrapper version
   --help, /?           Print this help
 `
+}
+
+func tunnelCommand(args []string) error {
+	subcommand := "status"
+	if len(args) > 0 {
+		subcommand = args[0]
+	}
+	switch subcommand {
+	case "start":
+		cfg, token, err := config.Ensure()
+		if err != nil {
+			return err
+		}
+		gatewayStatus, err := process.Start(cfg, token)
+		if err != nil {
+			return err
+		}
+		tunnelStatus, err := process.StartTunnel(cfg, "cloudflare")
+		if err != nil {
+			return err
+		}
+		return printJSON(map[string]any{
+			"ok":      true,
+			"gateway": gatewayStatus,
+			"tunnel":  tunnelStatus,
+			"next":    "Run doctor --json, then print-client-config. Use the public HTTPS URL in ChatGPT's MCP app/connector setup.",
+		})
+	case "status":
+		cfg, err := config.Default()
+		if err != nil {
+			return err
+		}
+		tunnelStatus, err := process.CurrentTunnel(cfg)
+		if err != nil {
+			return err
+		}
+		return printJSON(map[string]any{"ok": true, "tunnel": tunnelStatus})
+	case "stop":
+		cfg, err := config.Default()
+		if err != nil {
+			return err
+		}
+		if err := process.StopTunnel(cfg); err != nil {
+			return err
+		}
+		return printJSON(map[string]any{
+			"ok":   true,
+			"next": "Run doctor --json to confirm web-client endpoint exposure is no longer configured.",
+		})
+	default:
+		return fmt.Errorf("unknown tunnel command %q", subcommand)
+	}
 }
 
 func publicURLCommand(args []string) error {
