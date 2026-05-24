@@ -2,6 +2,12 @@
 
 All notable changes to the llm-cli-gateway project.
 
+## [1.5.24] - 2026-05-25
+
+### Fixed
+
+- Prefer Windows executable shims such as `.cmd`, `.bat`, `.exe`, and `.ps1` before extensionless npm shell shims when spawning provider CLIs, fixing npm-installed Gemini CLI launch failures on Windows.
+
 ## [1.5.23] - 2026-05-25
 
 ### Fixed

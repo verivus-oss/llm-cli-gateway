@@ -221,7 +221,7 @@ function resolveWindowsCommandPath(command: string, envPath: string): string | n
   }
 
   const hasExtension = extname(command) !== "";
-  const extensions = hasExtension ? [""] : ["", ".exe", ".ps1", ".cmd", ".bat"];
+  const extensions = hasExtension ? [""] : [".exe", ".cmd", ".bat", ".ps1", ""];
   for (const dir of envPath.split(pathDelimiterFor("win32")).filter(Boolean)) {
     for (const extension of extensions) {
       const candidate = pathJoinFor("win32", dir, command + extension);

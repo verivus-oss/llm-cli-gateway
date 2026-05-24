@@ -6,11 +6,15 @@ import {
   killProcessGroup,
   killAllProcessGroups,
   registerProcessGroup,
+  resolveCommandForSpawn,
   shouldDetachProviderProcess,
   unregisterProcessGroup,
 } from "../executor.js";
 import { spawn } from "child_process";
 import { delimiter } from "path";
+import { mkdtempSync, writeFileSync } from "fs";
+import { tmpdir } from "os";
+import { join } from "path";
 
 describe("executeCli", () => {
   describe("basic execution", () => {
@@ -137,6 +141,25 @@ describe("executeCli", () => {
       expect(extendedPath).toContain("C:\\Users\\tester\\scoop\\shims");
       expect(extendedPath).toContain("C:\\ProgramData\\chocolatey\\bin");
       expect(extendedPath).toContain("C:\\Windows\\System32");
+    });
+
+    it("prefers Windows executable shims over extensionless npm shell shims", () => {
+      const shimDir = mkdtempSync(join(tmpdir(), "gateway-win-shims-"));
+      const previousCwd = process.cwd();
+      try {
+        process.chdir(shimDir);
+        writeFileSync("gemini", "#!/bin/sh\nexit 0\n");
+        writeFileSync("gemini.cmd", "@echo off\r\nexit /b 0\r\n");
+
+        const resolved = resolveCommandForSpawn("gemini", [], {
+          envPath: ".",
+          platform: "win32",
+        });
+
+        expect(resolved.command.toLowerCase()).toBe("gemini.cmd");
+      } finally {
+        process.chdir(previousCwd);
+      }
     });
 
     it("should inherit environment variables", async () => {
