@@ -2,6 +2,13 @@
 
 All notable changes to the llm-cli-gateway project.
 
+## [1.5.8] - 2026-05-24
+
+### Fixed
+
+- Make `start` wait for the local HTTP health endpoint before reporting success.
+- Write gateway stdout/stderr to local log files so startup failures are diagnosable instead of returning a misleading PID.
+
 ## [1.5.7] - 2026-05-24
 
 ### Fixed
