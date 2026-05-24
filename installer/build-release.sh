@@ -358,10 +358,18 @@ $bundleSha = Get-ReleaseSha256 $BundleName
 $env:RVWR_GATEWAY_BUNDLE_URL = "$Base/$BundleName"
 $env:RVWR_GATEWAY_BUNDLE_SHA256 = $bundleSha
 
-& $ExePath setup | Write-Output
-& $ExePath install-bundle | Write-Output
-& $ExePath start | Write-Output
-& $ExePath doctor | Write-Output
+function Invoke-Gateway {
+  param([string[]] $GatewayArgs)
+  & $ExePath @GatewayArgs | Write-Output
+  if ($LASTEXITCODE -ne 0) {
+    throw "llm-cli-gateway $($GatewayArgs -join ' ') failed with exit code $LASTEXITCODE"
+  }
+}
+
+Invoke-Gateway @("setup")
+Invoke-Gateway @("install-bundle")
+Invoke-Gateway @("start")
+Invoke-Gateway @("doctor")
 
 Write-Host ""
 Write-Host "Installed bootstrapper: $ExePath"

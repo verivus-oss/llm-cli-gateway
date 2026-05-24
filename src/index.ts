@@ -3,7 +3,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { randomUUID } from "crypto";
-import { readFileSync, readdirSync, realpathSync } from "fs";
+import { readFileSync, readdirSync } from "fs";
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
 import { z } from "zod";
@@ -75,6 +75,7 @@ import {
   assertUpstreamCliEnv,
   buildUpstreamContractReport,
 } from "./upstream-contracts.js";
+import { entrypointFileURL } from "./entrypoint-url.js";
 
 type ExtendedToolResponse = {
   content: { type: "text"; text: string }[];
@@ -5712,7 +5713,7 @@ async function main() {
 
 // Guard: only auto-start when run directly (not imported for testing)
 // Resolve symlinks so `llm-cli-gateway` (npm-linked bin) matches import.meta.url
-const __entryUrl = process.argv[1] ? new URL(realpathSync(process.argv[1]), "file://").href : "";
+const __entryUrl = entrypointFileURL(process.argv[1]);
 if (__entryUrl === import.meta.url) {
   main().catch(error => {
     logger.error("Fatal server error:", error);

@@ -2,6 +2,13 @@
 
 All notable changes to the llm-cli-gateway project.
 
+## [1.5.9] - 2026-05-24
+
+### Fixed
+
+- Fix the Node entrypoint direct-run guard on Windows by using `pathToFileURL(realpathSync(...))` instead of constructing a POSIX-style file URL manually.
+- Make the Windows one-command installer stop when bootstrapper commands fail by checking native process exit codes.
+
 ## [1.5.8] - 2026-05-24
 
 ### Fixed
