@@ -146,6 +146,7 @@ jobs:
           gh release upload "${REL_TAG}" \
             llm-cli-gateway-"${TAG_VERSION}"-* \
             llm-cli-gateway-bundle-"${TAG_VERSION}"-*.tar.gz \
+            install-windows.ps1 \
             SHA256SUMS \
             release-manifest.json \
             --clobber

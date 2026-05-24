@@ -23,6 +23,7 @@ After the release workflow runs, `installer/dist/` contains:
 - `llm-cli-gateway-bundle-<version>-linux-amd64.tar.gz`
 - `llm-cli-gateway-bundle-<version>-linux-arm64.tar.gz`
 - `llm-cli-gateway-bundle-<version>-windows-amd64.tar.gz`
+- `install-windows.ps1`
 - `SHA256SUMS`
 - `release-manifest.json`
 
@@ -83,6 +84,15 @@ The bootstrapper binary is idempotent. Commands are safe to rerun from
 assistant-led instructions.
 
 ### Install
+
+Windows PowerShell:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://github.com/verivus-oss/llm-cli-gateway/releases/latest/download/install-windows.ps1 | iex"
+```
+
+The script downloads `SHA256SUMS`, verifies the Windows bootstrapper, installs
+the checksummed Windows platform bundle, starts the gateway, and runs `doctor`.
 
 ```bash
 chmod +x llm-cli-gateway-<version>-<os>-<arch>

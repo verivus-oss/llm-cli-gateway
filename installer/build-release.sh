@@ -6,6 +6,7 @@
 #   - llm-cli-gateway-bundle-<version>-<os>-<arch>.tar.gz (the platform bundle
 #     the bootstrapper consumes via `install-bundle`; includes the compiled
 #     gateway, production dependencies, and a managed Node runtime)
+#   - install-windows.ps1 (release-pinned one-command Windows installer)
 #   - SHA256SUMS (one line per artifact)
 #   - release-manifest.json (machine-readable copy/paste commands)
 #
@@ -283,7 +284,7 @@ build_artifacts_payload() {
   local entry name stem suffix os arch
 
   shopt -s nullglob
-  for entry in "${dist_dir}"/llm-cli-gateway-"${version}"-* "${dist_dir}"/llm-cli-gateway-bundle-"${version}"-*.tar.gz; do
+  for entry in "${dist_dir}"/llm-cli-gateway-"${version}"-* "${dist_dir}"/llm-cli-gateway-bundle-"${version}"-*.tar.gz "${dist_dir}"/install-windows.ps1; do
     if [[ ! -f "${entry}" ]]; then
       continue
     fi
@@ -300,6 +301,10 @@ build_artifacts_payload() {
       payload+="{\"name\":\"${name}\",\"role\":\"platform-bundle\",\"os\":\"${os}\",\"arch\":\"${arch}\"}"
       continue
     fi
+    if [[ "${name}" == "install-windows.ps1" ]]; then
+      payload+="{\"name\":\"${name}\",\"role\":\"installer-script\",\"os\":\"windows\",\"arch\":\"amd64\"}"
+      continue
+    fi
     stem="${name%.exe}"
     suffix="${stem#llm-cli-gateway-${version}-}"
     os="${suffix%-*}"
@@ -310,6 +315,65 @@ build_artifacts_payload() {
   payload+="]"
   printf '%s' "${payload}"
 }
+
+write_windows_installer_script() {
+  local script_path="$1"
+  local version="$2"
+  local public_base="$3"
+
+  cat > "${script_path}" <<'PS1'
+$ErrorActionPreference = "Stop"
+
+$Version = "__VERSION__"
+$Base = "__PUBLIC_BASE__"
+$ExeName = "llm-cli-gateway-$Version-windows-amd64.exe"
+$BundleName = "llm-cli-gateway-bundle-$Version-windows-amd64.tar.gz"
+$InstallDir = Join-Path $env:LOCALAPPDATA "Programs\llm-cli-gateway"
+$ExePath = Join-Path $InstallDir $ExeName
+$ChecksumsPath = Join-Path $InstallDir "SHA256SUMS"
+
+New-Item -ItemType Directory -Force $InstallDir | Out-Null
+
+function Get-ReleaseSha256 {
+  param([string] $Name)
+  $escaped = [regex]::Escape($Name)
+  $line = Select-String -Path $ChecksumsPath -Pattern "^[a-fA-F0-9]{64}\s+$escaped$" | Select-Object -First 1
+  if (-not $line) {
+    throw "No SHA256SUMS entry found for $Name"
+  }
+  return (($line.Line -split "\s+")[0]).ToLowerInvariant()
+}
+
+Write-Host "Downloading llm-cli-gateway $Version..."
+Invoke-WebRequest -UseBasicParsing "$Base/$ExeName" -OutFile $ExePath
+Invoke-WebRequest -UseBasicParsing "$Base/SHA256SUMS" -OutFile $ChecksumsPath
+
+$expectedExeSha = Get-ReleaseSha256 $ExeName
+$actualExeSha = (Get-FileHash $ExePath -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($actualExeSha -ne $expectedExeSha) {
+  throw "Checksum mismatch for $ExeName"
+}
+
+$bundleSha = Get-ReleaseSha256 $BundleName
+$env:RVWR_GATEWAY_BUNDLE_URL = "$Base/$BundleName"
+$env:RVWR_GATEWAY_BUNDLE_SHA256 = $bundleSha
+
+& $ExePath setup | Write-Output
+& $ExePath install-bundle | Write-Output
+& $ExePath start | Write-Output
+& $ExePath doctor | Write-Output
+
+Write-Host ""
+Write-Host "Installed bootstrapper: $ExePath"
+Write-Host "Gateway URL: http://127.0.0.1:3333/mcp"
+PS1
+
+  perl -0pi -e "s#__VERSION__#${version}#g; s#__PUBLIC_BASE__#${public_base}#g" "${script_path}"
+}
+
+if [[ -n "${PUBLIC_BASE}" && -f "${DIST_DIR}/llm-cli-gateway-${VERSION}-windows-amd64.exe" && -f "${DIST_DIR}/llm-cli-gateway-bundle-${VERSION}-windows-amd64.tar.gz" ]]; then
+  write_windows_installer_script "${DIST_DIR}/install-windows.ps1" "${VERSION}" "${PUBLIC_BASE}"
+fi
 
 # 3. Checksums. Use shasum on macOS, sha256sum on Linux.
 if command -v sha256sum >/dev/null 2>&1; then
@@ -324,7 +388,7 @@ fi
 (
   cd "${DIST_DIR}"
   files=()
-  for entry in llm-cli-gateway-"${VERSION}"-* llm-cli-gateway-bundle-"${VERSION}"-*.tar.gz; do
+  for entry in llm-cli-gateway-"${VERSION}"-* llm-cli-gateway-bundle-"${VERSION}"-*.tar.gz install-windows.ps1; do
     if [[ -f "${entry}" ]]; then
       files+=("${entry}")
     fi
@@ -351,6 +415,7 @@ cat > "${manifest}" <<EOF
   "setup_commands": {
     "verify_checksum_linux": "sha256sum --check SHA256SUMS",
     "verify_checksum_macos": "shasum -a 256 --check SHA256SUMS",
+    "install_windows_oneliner": "powershell -NoProfile -ExecutionPolicy Bypass -Command \"irm ${PUBLIC_BASE}/install-windows.ps1 | iex\"",
     "install_unix_oneliner": "export RVWR_GATEWAY_BUNDLE_URL=${PUBLIC_BASE}/llm-cli-gateway-bundle-${VERSION}-<os>-<arch>.tar.gz RVWR_GATEWAY_BUNDLE_SHA256=<bundle-sha256>; chmod +x ./llm-cli-gateway-${VERSION}-<os>-<arch> && ./llm-cli-gateway-${VERSION}-<os>-<arch> setup && ./llm-cli-gateway-${VERSION}-<os>-<arch> install-bundle",
     "install_windows_powershell": "\$env:RVWR_GATEWAY_BUNDLE_URL='${PUBLIC_BASE}/llm-cli-gateway-bundle-${VERSION}-windows-amd64.tar.gz'; \$env:RVWR_GATEWAY_BUNDLE_SHA256='<bundle-sha256>'; .\\\\llm-cli-gateway-${VERSION}-windows-amd64.exe setup; .\\\\llm-cli-gateway-${VERSION}-windows-amd64.exe install-bundle",
     "doctor_after_install": "./llm-cli-gateway-${VERSION}-<os>-<arch> doctor",

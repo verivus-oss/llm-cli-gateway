@@ -28,6 +28,12 @@ Current personal-appliance artifacts include:
 
 ### Install / Upgrade / Uninstall (single binary)
 
+Windows PowerShell:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://github.com/verivus-oss/llm-cli-gateway/releases/latest/download/install-windows.ps1 | iex"
+```
+
 ```bash
 # After downloading the binary that matches your OS/arch from a release:
 sha256sum --check SHA256SUMS            # verify before run (or `shasum -a 256 --check` on macOS)

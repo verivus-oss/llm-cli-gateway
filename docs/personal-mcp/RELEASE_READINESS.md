@@ -14,6 +14,7 @@ gate and the command an assistant can quote to a user.
 | ------------------------------------------------------------------ | ------------------------------------------------------------ |
 | Go bootstrapper binaries are built on Linux self-hosted plus GitHub-hosted Windows/macOS runners | `.github/workflows/release-installer.yml` `build-binaries` matrix; `installer/build-release.sh` defaults to host target |
 | Platform bundles include the gateway, production dependencies, and a managed Node runtime | `installer/build-release.sh` `package_platform_bundle` + `download_node_runtime` |
+| Windows has a one-command installer that still verifies release checksums | `installer/build-release.sh` `write_windows_installer_script` |
 | `SHA256SUMS` is produced; users must verify before run            | `installer/packaging/README.md:23-25` and `:51-64`           |
 | Bootstrapper has `setup` + `install-bundle` to materialize the gateway dir | `installer/main.go:37-42, 96-97`                       |
 | Docker Compose fallback exists                                    | `docker-compose.personal.yml`, `Dockerfile.personal`         |
@@ -25,6 +26,9 @@ Quote-for-user:
 ```bash
 # Verify before run.
 sha256sum --check SHA256SUMS
+
+# Windows one-command install.
+powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://github.com/verivus-oss/llm-cli-gateway/releases/latest/download/install-windows.ps1 | iex"
 
 # Install.
 chmod +x llm-cli-gateway-<ver>-<os>-<arch>

@@ -2,6 +2,13 @@
 
 All notable changes to the llm-cli-gateway project.
 
+## [1.5.7] - 2026-05-24
+
+### Fixed
+
+- Add a release-pinned `install-windows.ps1` asset so Windows users can install with one PowerShell command while still verifying the downloaded bootstrapper and platform bundle against `SHA256SUMS`.
+- Add the Windows one-liner to `release-manifest.json` and upload the installer script as part of the desktop release workflow.
+
 ## [1.5.6] - 2026-05-24
 
 ### Fixed
