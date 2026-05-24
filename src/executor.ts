@@ -234,10 +234,15 @@ function escapeWindowsCmdCommand(value: string): string {
   return win32.normalize(value).replace(WINDOWS_CMD_META_CHARS, "^$1");
 }
 
+// CommandLineToArgvW rules: a run of N backslashes before a literal " must be
+// doubled and followed by \" (yielding 2N+1 backslashes total, so the parser
+// strips N and keeps the quote as literal); a run of N backslashes immediately
+// before the closing " must be doubled (2N) so the quote still terminates the
+// arg. Then wrap in quotes and caret-escape cmd.exe metacharacters.
 function escapeWindowsCmdArgument(value: string): string {
   let arg = `${value}`;
-  arg = arg.replace(/(?=(\\+?)?)\1"/g, '$1$1\\"');
-  arg = arg.replace(/(?=(\\+?)?)\1$/, "$1$1");
+  arg = arg.replace(/(\\*)"/g, '$1$1\\"');
+  arg = arg.replace(/(\\*)$/, "$1$1");
   arg = `"${arg}"`;
   return arg.replace(WINDOWS_CMD_META_CHARS, "^$1");
 }

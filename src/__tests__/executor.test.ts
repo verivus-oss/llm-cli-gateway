@@ -184,6 +184,75 @@ describe("executeCli", () => {
       expect(resolved.windowsVerbatimArguments).toBe(true);
     });
 
+    // CommandLineToArgvW rule: N backslashes before a literal " must be encoded
+    // as 2N+1 backslashes followed by \". This test pins that contract
+    // end-to-end through resolveCommandForSpawn so future "simplifications" to
+    // the regex are caught.
+    it("encodes backslashes before a literal quote using the 2N+1 rule", () => {
+      const shimDir = mkdtempSync(join(tmpdir(), "gateway-win-shims-2n1-"));
+      const previousCwd = process.cwd();
+      try {
+        process.chdir(shimDir);
+        writeFileSync("tool.cmd", "@echo off\r\nexit /b 0\r\n");
+
+        // Cases: N backslashes immediately before a literal ".
+        // Expected encoded arg body (before quoting + caret escape): 2N+1 backslashes + \".
+        const cases: { input: string; n: number }[] = [
+          { input: '"', n: 0 }, // 0 \ before " -> \"
+          { input: '\\"', n: 1 }, // 1 \ before " -> \\\"
+          { input: '\\\\"', n: 2 }, // 2 \ before " -> \\\\\"
+          { input: '\\\\\\"', n: 3 }, // 3 \ before " -> \\\\\\\"
+        ];
+
+        for (const { input, n } of cases) {
+          const resolved = resolveCommandForSpawn("tool", [input], {
+            envPath: ".",
+            platform: "win32",
+          });
+
+          // After CommandLineToArgvW encoding the arg body is
+          //   <2N+1 backslashes> + "
+          // which is then quoted to
+          //   " <2N+1 backslashes> " "
+          // Each of those three " is caret-escaped for cmd.exe (\ is not in
+          // the metachar set, so backslashes pass through), giving
+          //   ^" <2N+1 backslashes> ^" ^"
+          // wrapped once more in outer quotes for `cmd.exe /s /c "..."`.
+          const backslashes = "\\".repeat(2 * n + 1);
+          const expected = `"tool.cmd ^"${backslashes}^"^""`;
+
+          expect(resolved.args[3]).toBe(expected);
+          expect(resolved.windowsVerbatimArguments).toBe(true);
+        }
+      } finally {
+        process.chdir(previousCwd);
+      }
+    });
+
+    // CommandLineToArgvW rule: N trailing backslashes immediately before the
+    // closing " of an arg must be doubled to 2N, so the quote still terminates
+    // the arg instead of being escaped.
+    it("doubles trailing backslashes before the closing quote (2N rule)", () => {
+      const shimDir = mkdtempSync(join(tmpdir(), "gateway-win-shims-trail-"));
+      const previousCwd = process.cwd();
+      try {
+        process.chdir(shimDir);
+        writeFileSync("tool.cmd", "@echo off\r\nexit /b 0\r\n");
+
+        const resolved = resolveCommandForSpawn("tool", ["c\\\\"], {
+          envPath: ".",
+          platform: "win32",
+        });
+
+        // Input is c\\ (c + 2 backslashes). Encoded body: c\\\\ (4 backslashes).
+        // Wrapped + caret-escaped quotes: ^"c\\\\^". Then outer wrap.
+        expect(resolved.args[3]).toBe('"tool.cmd ^"c\\\\\\\\^""');
+        expect(resolved.windowsVerbatimArguments).toBe(true);
+      } finally {
+        process.chdir(previousCwd);
+      }
+    });
+
     it("should inherit environment variables", async () => {
       const result = await executeCli("sh", ["-c", "echo $HOME"]);
       expect(result.stdout.trim()).toBeTruthy();
