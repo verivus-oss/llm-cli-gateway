@@ -17,6 +17,7 @@ export interface ModelMetadata {
 export interface CliInfo {
   description: string;
   models: Record<string, string>;
+  unverifiedModelHints?: Record<string, string>;
   defaultModel?: string;
   defaultModelSource?: string;
   modelOrder?: string[];
@@ -114,6 +115,17 @@ export function getCliInfo(forceRefresh = false): CliInfoMap {
   return info;
 }
 
+export function getAvailableCliInfo(forceRefresh = false): CliInfoMap {
+  const info = getCliInfo(forceRefresh);
+  return {
+    claude: filterUnverifiedModelHints(info.claude),
+    codex: filterUnverifiedModelHints(info.codex),
+    gemini: filterUnverifiedModelHints(info.gemini),
+    grok: filterUnverifiedModelHints(info.grok),
+    mistral: filterUnverifiedModelHints(info.mistral),
+  };
+}
+
 export function clearModelRegistryCache(): void {
   cachedInfo = null;
 }
@@ -179,6 +191,9 @@ function cloneInfo(source: CliInfo): CliInfo {
   const cloned: CliInfo = {
     description: source.description,
     models: { ...source.models },
+    unverifiedModelHints: source.unverifiedModelHints
+      ? { ...source.unverifiedModelHints }
+      : undefined,
     defaultModel: source.defaultModel,
     defaultModelSource: source.defaultModelSource,
     modelOrder: source.modelOrder ? [...source.modelOrder] : undefined,
@@ -196,6 +211,55 @@ function cloneInfo(source: CliInfo): CliInfo {
   });
 
   return cloned;
+}
+
+function filterUnverifiedModelHints(source: CliInfo): CliInfo {
+  const filtered = cloneInfo(source);
+  const models: Record<string, string> = {};
+  const metadata: Record<string, ModelMetadata> = {};
+  const hints: Record<string, string> = {};
+
+  Object.entries(source.models).forEach(([model, description]) => {
+    const modelMetadata = source.modelMetadata?.[model];
+    if (modelMetadata?.source === "fallback") {
+      hints[model] = description;
+      return;
+    }
+    models[model] = description;
+    if (modelMetadata) {
+      metadata[model] = modelMetadata;
+    }
+  });
+
+  filtered.models = models;
+  filtered.modelMetadata = metadata;
+  filtered.unverifiedModelHints = Object.keys(hints).length > 0 ? hints : undefined;
+  filtered.modelOrder = source.modelOrder?.filter(model => model in models);
+
+  if (filtered.defaultModel && !(filtered.defaultModel in models)) {
+    filtered.defaultModel = undefined;
+    filtered.defaultModelSource = undefined;
+  }
+
+  if (filtered.aliases) {
+    filtered.aliases = Object.fromEntries(
+      Object.entries(filtered.aliases).filter(
+        ([, target]) => target === "default" || target in models
+      )
+    );
+    if (Object.keys(filtered.aliases).length === 0) {
+      filtered.aliases = undefined;
+    }
+  }
+
+  if (filtered.unverifiedModelHints) {
+    addWarning(
+      filtered,
+      "Bundled fallback model hints were omitted from models because they are not validated against the installed CLI. They are exposed as unverifiedModelHints only."
+    );
+  }
+
+  return filtered;
 }
 
 function addWarning(info: CliInfo, warning: string): void {

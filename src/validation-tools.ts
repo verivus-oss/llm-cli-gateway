@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { AsyncJobManager } from "./async-job-manager.js";
-import { getCliInfo } from "./model-registry.js";
+import { getAvailableCliInfo } from "./model-registry.js";
 import {
   collectValidationJobResult,
   startJudgeSynthesis,
@@ -221,7 +221,7 @@ export function registerValidationTools(server: McpServer, deps: ValidationToolD
   );
 
   server.tool("list_available_models", {}, async () =>
-    textResponse({ success: true, models: getCliInfo() })
+    textResponse({ success: true, models: getAvailableCliInfo() })
   );
 
   server.tool(

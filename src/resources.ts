@@ -1,6 +1,6 @@
 import { ISessionManager } from "./session-manager.js";
 import { PerformanceMetrics } from "./metrics.js";
-import { getCliInfo } from "./model-registry.js";
+import { getAvailableCliInfo } from "./model-registry.js";
 
 export interface ResourceDefinition {
   uri: string;
@@ -290,7 +290,7 @@ export class ResourceProvider {
 
     // Model capability resources
     if (uri === "models://claude") {
-      const cliInfo = getCliInfo();
+      const cliInfo = getAvailableCliInfo();
       return {
         uri,
         mimeType: "application/json",
@@ -299,7 +299,7 @@ export class ResourceProvider {
     }
 
     if (uri === "models://codex") {
-      const cliInfo = getCliInfo();
+      const cliInfo = getAvailableCliInfo();
       return {
         uri,
         mimeType: "application/json",
@@ -308,7 +308,7 @@ export class ResourceProvider {
     }
 
     if (uri === "models://gemini") {
-      const cliInfo = getCliInfo();
+      const cliInfo = getAvailableCliInfo();
       return {
         uri,
         mimeType: "application/json",
@@ -317,7 +317,7 @@ export class ResourceProvider {
     }
 
     if (uri === "models://grok") {
-      const cliInfo = getCliInfo();
+      const cliInfo = getAvailableCliInfo();
       return {
         uri,
         mimeType: "application/json",
@@ -326,7 +326,7 @@ export class ResourceProvider {
     }
 
     if (uri === "models://mistral") {
-      const cliInfo = getCliInfo();
+      const cliInfo = getAvailableCliInfo();
       return {
         uri,
         mimeType: "application/json",

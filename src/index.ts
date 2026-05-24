@@ -22,7 +22,12 @@ import {
 import { loadConfig, loadPersistenceConfig, type PersistenceConfig } from "./config.js";
 import { DatabaseConnection } from "./db.js";
 import { checkHealth } from "./health.js";
-import { clearModelRegistryCache, getCliInfo, resolveModelAlias } from "./model-registry.js";
+import {
+  clearModelRegistryCache,
+  getAvailableCliInfo,
+  getCliInfo,
+  resolveModelAlias,
+} from "./model-registry.js";
 import { AsyncJobManager } from "./async-job-manager.js";
 import { createJobStore, type JobStore } from "./job-store.js";
 import { ApprovalManager, ApprovalPolicy, ApprovalRecord } from "./approval-manager.js";
@@ -1582,7 +1587,7 @@ function prepareGrokRequest(
   };
 }
 
-function prepareMistralRequest(
+export function prepareMistralRequest(
   params: {
     prompt: string;
     model?: string;
@@ -1603,8 +1608,7 @@ function prepareMistralRequest(
 ): (CliRequestPrep & { mistralEnv: Record<string, string> }) | ExtendedToolResponse {
   const corrId = params.correlationId || randomUUID();
   const cliInfo = getCliInfo();
-  const requestedModel = params.model ?? (cliInfo.mistral.defaultModel ? "default" : undefined);
-  const resolvedModel = resolveModelAlias("mistral", requestedModel, cliInfo);
+  const resolvedModel = resolveModelAlias("mistral", params.model, cliInfo);
 
   const reviewIntegrity = checkReviewIntegrity({
     prompt: params.prompt,
@@ -5169,7 +5173,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .describe("CLI filter (claude|codex|gemini|grok|mistral)"),
     },
     async ({ cli }) => {
-      const cliInfo = getCliInfo();
+      const cliInfo = getAvailableCliInfo();
       const result = cli ? { [cli]: cliInfo[cli] } : cliInfo;
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
     }

@@ -2,7 +2,12 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { clearModelRegistryCache, getCliInfo, resolveModelAlias } from "../model-registry.js";
+import {
+  clearModelRegistryCache,
+  getAvailableCliInfo,
+  getCliInfo,
+  resolveModelAlias,
+} from "../model-registry.js";
 
 const ENV_KEYS = [
   "CLAUDE_DEFAULT_MODEL",
@@ -77,6 +82,19 @@ describe("model registry", () => {
     expect(info.codex.models["gpt-5.3-codex"]).toBeDefined();
   });
 
+  it("does not report bundled fallback hints as validated available models", () => {
+    const info = getAvailableCliInfo(true);
+
+    expect(info.claude.models).toEqual({});
+    expect(info.claude.defaultModel).toBeUndefined();
+    expect(info.claude.unverifiedModelHints?.sonnet).toContain("Balanced performance");
+    expect(info.claude.warnings?.join("\n")).toContain("not validated");
+
+    expect(info.codex.models).toEqual({});
+    expect(info.codex.defaultModel).toBeUndefined();
+    expect(info.codex.unverifiedModelHints?.["gpt-5.5"]).toContain("Latest Codex");
+  });
+
   it("reads Codex default, profile models, and migrations from config.toml", () => {
     const configPath = join(tempDir, "codex.toml");
     writeFileSync(
@@ -138,6 +156,19 @@ describe("model registry", () => {
     expect(resolveModelAlias("gemini", "team", info)).toBe("gemini-team-default");
     expect(resolveModelAlias("gemini", "fast", info)).toBe("gemini-team-default");
     expect(resolveModelAlias("codex", "fast", info)).toBe("gpt-5.3-codex-spark");
+  });
+
+  it("keeps explicitly configured models in the available model view", () => {
+    process.env.GEMINI_MODELS = JSON.stringify({
+      "gemini-team-default": "Team-approved Gemini model",
+    });
+    process.env.GEMINI_DEFAULT_MODEL = "gemini-team-default";
+
+    const info = getAvailableCliInfo(true);
+
+    expect(info.gemini.models["gemini-team-default"]).toBe("Team-approved Gemini model");
+    expect(info.gemini.defaultModel).toBe("gemini-team-default");
+    expect(info.gemini.unverifiedModelHints?.["gemini-2.5-pro"]).toBeDefined();
   });
 
   it("seeds Grok with grok-build as a fallback model and no default", () => {

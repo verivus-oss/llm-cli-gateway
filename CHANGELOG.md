@@ -2,6 +2,14 @@
 
 All notable changes to the llm-cli-gateway project.
 
+## [1.5.20] - 2026-05-24
+
+### Fixed
+
+- Do not inject Mistral `VIBE_ACTIVE_MODEL` when a request omits `model`; let Vibe use its own CLI default unless the caller explicitly asks for a model.
+- Make `list_models`, `list_available_models`, and `models://*` omit bundled fallback entries from `models` and expose them only as `unverifiedModelHints`.
+- Add warnings when model entries are only bundled fallback hints, so clients do not present unvalidated model names as available provider models.
+
 ## [1.5.19] - 2026-05-24
 
 ### Fixed
