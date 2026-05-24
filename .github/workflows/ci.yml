@@ -24,6 +24,7 @@ jobs:
       - run: npm run lint
       - run: npm run format:check
       - run: npm run test:ci
+      - run: npm run security:audit
 
   pack-smoke-test:
     runs-on: ubuntu-latest

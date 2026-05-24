@@ -1,6 +1,6 @@
 {
   "name": "llm-cli-gateway",
-  "version": "1.5.13",
+  "version": "1.5.14",
   "mcpName": "io.github.verivus-oss/llm-cli-gateway",
   "description": "MCP server providing unified access to Claude Code, Codex, Gemini, Grok, and Mistral Vibe CLIs with session management, retry logic, async job orchestration, durable job results, and cross-LLM validation.",
   "license": "MIT",
@@ -76,7 +76,8 @@
     "lint:fix": "eslint src/**/*.ts --fix",
     "format": "prettier --write 'src/**/*.ts'",
     "format:check": "prettier --check 'src/**/*.ts'",
-    "check": "npm run build && npm run lint && npm test",
+    "security:audit": "bash scripts/release-security-audit.sh",
+    "check": "npm run build && npm run lint && npm test && npm run security:audit",
     "release:build": "bash installer/build-release.sh",
     "release:checksums": "cd installer/dist && sha256sum --check SHA256SUMS",
     "release:docker": "docker compose -f docker-compose.personal.yml build"
@@ -84,9 +85,11 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
     "better-sqlite3": "^12.10.0",
+    "content-type": "1.0.5",
     "ioredis": "^5.4.1",
     "pg": "^8.12.0",
     "toml": "^3.0.0",
+    "type-is": "2.0.1",
     "zod": "^3.23.0"
   },
   "devDependencies": {

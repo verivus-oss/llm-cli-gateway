@@ -143,14 +143,41 @@ Quote-for-user:
 # Or via the setup UI: http://127.0.0.1:3340/
 ```
 
+## Security and supply-chain audit
+
+| Gate                                                              | Evidence                                                     |
+| ------------------------------------------------------------------ | ------------------------------------------------------------- |
+| npm vulnerability audit is clean before release                    | `npm run security:audit` runs `npm audit --omit=dev --audit-level=moderate` |
+| Production source contains no dynamic execution patterns           | `scripts/release-security-audit.sh` scans non-test `src/` files for `eval`, `.eval`, `Function`, and `new Function` usage |
+| Socket-flagged dependency versions are blocked in the repo lockfile | `scripts/release-security-audit.sh` rejects `content-type@2.0.0` and `type-is@2.1.0` in `package-lock.json` |
+| Published npm consumers resolve the same safe dependency tree      | `scripts/release-security-audit.sh` packs the package, installs it into a temporary consumer project, and rejects the blocked dependency versions there too |
+| CI runs the same audit gate                                        | `.github/workflows/ci.yml` `build-and-test` job runs `npm run security:audit` |
+
+Socket capability alerts for network and shell access are expected for this
+package: the gateway intentionally serves an MCP HTTP endpoint and launches
+provider CLIs. Those alerts must be reviewed and documented for each release,
+but they cannot be removed without removing the product's core behavior.
+
+Quote-for-release:
+
+```bash
+npm run security:audit
+npx socket@latest package score npm llm-cli-gateway@<ver> --markdown
+```
+
+The Socket score command uses Socket's API and may require a Socket token or
+local `socket login`. If it cannot run in CI, attach the local/Socket dashboard
+evidence to the release notes before publishing.
+
 ## Final readiness sign-off
 
-The seven topics above are gated on artifacts that exist in this commit
+The release topics above are gated on artifacts that exist in this commit
 and were verified by:
 
 - Build: `npm run build` clean.
 - Lint: `npm run lint` 0 errors.
-- Unit + integration: 333 tests pass via `npx vitest run`.
+- Security/SCA: `npm run security:audit` clean.
+- Unit + integration: 560 tests pass via `npx vitest run`.
 - Release pipeline: `.github/workflows/release-installer.yml` builds
   platform binaries on the Linux self-hosted runner plus GitHub-hosted
   Windows/macOS runners; the final packaging job produces combined

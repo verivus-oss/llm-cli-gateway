@@ -78,6 +78,35 @@ Get-FileHash llm-cli-gateway-<version>-windows-amd64.exe -Algorithm SHA256
 
 If verification fails, **do not run the binary**; redownload and reverify.
 
+## Release security gate
+
+Run this before creating the GitHub release:
+
+```bash
+npm run security:audit
+```
+
+The gate runs the npm vulnerability audit, scans production source for dynamic
+execution patterns, rejects blocked Socket-flagged dependency versions in the
+repo lockfile, and then repeats the blocked-version policy against a real
+`npm pack` tarball installed into a temporary consumer project. The packed
+consumer install check is required because `overrides` can make the repository
+install look clean while downstream npm consumers still resolve newer
+transitive versions.
+
+Also collect Socket evidence for the exact version being released:
+
+```bash
+npx socket@latest package score npm llm-cli-gateway@<version> --markdown
+```
+
+The Socket CLI talks to Socket's API and may require `socket login` or a Socket
+API token. Treat network and shell capability alerts as expected-but-reviewed:
+this package serves a network MCP endpoint and launches provider CLIs by
+design. Do not waive dependency ownership, obfuscation, malware, or dynamic
+execution alerts without a concrete code/dependency finding linked from the
+release notes.
+
 ## Install / upgrade / uninstall (binary contract)
 
 The bootstrapper binary is idempotent. Commands are safe to rerun from

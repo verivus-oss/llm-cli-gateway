@@ -2,6 +2,17 @@
 
 All notable changes to the llm-cli-gateway project.
 
+## [1.5.14] - 2026-05-24
+
+### Fixed
+
+- Remove the Redis Lua `eval` lock-release path from production source and replace it with Redis `WATCH`/`MULTI` compare-and-delete semantics.
+- Add exact direct production dependencies for `content-type@1.0.5` and `type-is@2.0.1` so packed consumer installs do not resolve the Socket-flagged `content-type@2.0.0` / `type-is@2.1.0` versions.
+
+### Added
+
+- Add `npm run security:audit` as a CI/release gate covering `npm audit --omit=dev`, production source dynamic-execution scanning, blocked dependency-version checks, and a packed consumer install policy check.
+
 ## [1.5.13] - 2026-05-24
 
 ### Fixed
