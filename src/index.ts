@@ -3,7 +3,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { randomUUID } from "crypto";
-import { readFileSync, readdirSync } from "fs";
+import { existsSync, readFileSync, readdirSync, renameSync, unlinkSync } from "fs";
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
 import { z } from "zod";
@@ -116,6 +116,41 @@ const logger = {
 };
 
 type GatewayLogger = typeof logger;
+
+function startWindowsBootstrapperSelfHeal(): void {
+  if (process.platform !== "win32") return;
+  const localAppData = process.env.LOCALAPPDATA;
+  if (!localAppData) return;
+
+  const installDir = join(localAppData, "Programs", "llm-cli-gateway");
+  const exePath = join(installDir, "llm-cli-gateway.exe");
+  const pendingPath = `${exePath}.new`;
+  if (!existsSync(pendingPath)) return;
+
+  let attempts = 0;
+  const maxAttempts = 120;
+  const timer = setInterval(() => {
+    attempts += 1;
+    try {
+      if (!existsSync(pendingPath)) {
+        clearInterval(timer);
+        return;
+      }
+      if (existsSync(exePath)) {
+        unlinkSync(exePath);
+      }
+      renameSync(pendingPath, exePath);
+      clearInterval(timer);
+      logger.info(`Completed pending Windows bootstrapper replacement at ${exePath}`);
+    } catch (error) {
+      if (attempts >= maxAttempts) {
+        clearInterval(timer);
+        logger.warn(`Pending Windows bootstrapper replacement did not complete: ${error}`);
+      }
+    }
+  }, 500);
+  timer.unref();
+}
 
 function logOptimizationTokens(
   kind: "prompt" | "response",
@@ -5701,6 +5736,8 @@ process.on("SIGINT", () => shutdown("SIGINT"));
 //──────────────────────────────────────────────────────────────────────────────
 
 async function main() {
+  startWindowsBootstrapperSelfHeal();
+
   const args = process.argv.slice(2);
   if (args[0] === "doctor") {
     if (args.includes("--json")) {

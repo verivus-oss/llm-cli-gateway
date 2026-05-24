@@ -2,6 +2,13 @@
 
 All notable changes to the llm-cli-gateway project.
 
+## [1.5.28] - 2026-05-25
+
+### Fixed
+
+- Add Windows gateway startup self-healing for a verified pending `llm-cli-gateway.exe.new` bootstrapper update, so a failed staged bootstrapper replacement completes after `llm-cli-gateway start`.
+- Replace the Windows bootstrapper self-replacement helper with a `cmd.exe` script instead of PowerShell to avoid environments that block local PowerShell replacement scripts.
+
 ## [1.5.27] - 2026-05-25
 
 ### Fixed

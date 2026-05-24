@@ -773,28 +773,26 @@ func writeWindowsSelfReplaceScript(cfg config.Config, exePath, tmpPath string) (
 	if err := os.MkdirAll(cfg.AppDir, 0o700); err != nil {
 		return "", err
 	}
-	scriptPath := filepath.Join(cfg.AppDir, "replace-bootstrapper.ps1")
-	script := fmt.Sprintf(`$ErrorActionPreference = "Stop"
-$ParentPid = %d
-$Source = %s
-$Destination = %s
-for ($i = 0; $i -lt 120; $i++) {
-  try {
-    $process = Get-Process -Id $ParentPid -ErrorAction SilentlyContinue
-    if ($process) {
-      Wait-Process -Id $ParentPid -Timeout 1 -ErrorAction SilentlyContinue
-    }
-  } catch {}
-  try {
-    Move-Item -LiteralPath $Source -Destination $Destination -Force
-    Remove-Item -LiteralPath $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyContinue
-    exit 0
-  } catch {
-    Start-Sleep -Milliseconds 500
-  }
-}
-exit 1
-`, os.Getpid(), powershellSingleQuoted(tmpPath), powershellSingleQuoted(exePath))
+	scriptPath := filepath.Join(cfg.AppDir, "replace-bootstrapper.cmd")
+	script := fmt.Sprintf(`@echo off
+setlocal
+set "SOURCE=%s"
+set "DESTINATION=%s"
+set "PARENT_PID=%d"
+for /L %%%%I in (1,1,120) do (
+  tasklist /FI "PID eq %%PARENT_PID%%" 2^>nul | find "%%PARENT_PID%%" ^>nul
+  if not errorlevel 1 (
+    timeout /t 1 /nobreak ^>nul
+  )
+  move /Y "%%SOURCE%%" "%%DESTINATION%%" ^>nul 2^>nul
+  if not errorlevel 1 (
+    del "%%~f0" ^>nul 2^>nul
+    exit /b 0
+  )
+  timeout /t 1 /nobreak ^>nul
+)
+exit /b 1
+`, tmpPath, exePath, os.Getpid())
 	if err := os.WriteFile(scriptPath, []byte(script), 0o600); err != nil {
 		return "", err
 	}
@@ -802,7 +800,7 @@ exit 1
 }
 
 func startWindowsSelfReplace(scriptPath string) error {
-	cmd := exec.Command("powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", scriptPath)
+	cmd := exec.Command("cmd.exe", "/C", scriptPath)
 	if err := cmd.Start(); err != nil {
 		return err
 	}
