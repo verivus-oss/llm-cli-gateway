@@ -4,7 +4,8 @@ Status: Layer 7 (U13) packaging contract
 Builder: `installer/build-release.sh`
 
 This directory documents how `llm-cli-gateway` is built into a non-developer
-release: local Linux, Windows, and macOS runners build the Go bootstrapper
+release: the local Linux self-hosted runner builds Linux Go bootstrapper
+binaries, GitHub-hosted Windows and macOS runners build their platform
 binaries, then a Linux packaging job publishes the checksummed Node gateway
 bundle the bootstrapper installs via `install-bundle`.
 
@@ -34,8 +35,9 @@ installer/build-release.sh
 ```
 
 Direct local runs build only the current host target by default. Release CI
-invokes the script from local self-hosted Linux, Windows, and macOS runners and
-passes explicit `--target` values for the artifacts owned by that runner.
+invokes the script from the Linux self-hosted runner and GitHub-hosted
+Windows/macOS runners, passing explicit `--target` values for the artifacts
+owned by that runner.
 
 Options:
 

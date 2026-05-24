@@ -46,11 +46,14 @@ jobs:
             runs_on: '["self-hosted","linux","rust","x86_64","workhorse2"]'
             targets: "--target linux/amd64 --target linux/arm64"
           - artifact: windows
-            runs_on: '["self-hosted","Windows","X64","rust"]'
+            runs_on: '"windows-latest"'
             targets: "--target windows/amd64"
-          - artifact: macos
-            runs_on: '["self-hosted","macOS","ARM64"]'
-            targets: "--target darwin/arm64 --target darwin/amd64"
+          - artifact: macos-arm64
+            runs_on: '"macos-15"'
+            targets: "--target darwin/arm64"
+          - artifact: macos-amd64
+            runs_on: '"macos-15-intel"'
+            targets: "--target darwin/amd64"
     runs-on: ${{ fromJSON(matrix.runs_on) }}
     steps:
       - uses: actions/checkout@v4
@@ -79,7 +82,7 @@ jobs:
             exit 1
           fi
 
-      - name: Build native-runner bootstrapper binary
+      - name: Build bootstrapper binary
         shell: bash
         env:
           REF_NAME: ${{ needs.resolve-tag.outputs.tag }}
