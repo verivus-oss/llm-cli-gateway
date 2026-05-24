@@ -8,12 +8,7 @@ import {
   DEFAULT_DEDUP_WINDOW_MS,
   type PersistenceConfig,
 } from "../config.js";
-import {
-  MemoryJobStore,
-  SqliteJobStore,
-  createJobStore,
-  PostgresJobStore,
-} from "../job-store.js";
+import { MemoryJobStore, SqliteJobStore, createJobStore, PostgresJobStore } from "../job-store.js";
 import { AsyncJobManager } from "../async-job-manager.js";
 import { createGatewayServer } from "../index.js";
 import { noopLogger } from "../logger.js";
@@ -68,7 +63,13 @@ describe("loadPersistenceConfig", () => {
 
   it("loads sqlite backend with explicit path from config file", () => {
     pointToFile(
-      ['[persistence]', 'backend = "sqlite"', `path = "${join(tempDir, "jobs.db").replace(/\\/g, "\\\\")}"`, "retentionDays = 7", ""].join("\n")
+      [
+        "[persistence]",
+        'backend = "sqlite"',
+        `path = "${join(tempDir, "jobs.db").replace(/\\/g, "\\\\")}"`,
+        "retentionDays = 7",
+        "",
+      ].join("\n")
     );
     vi.stubEnv("LLM_GATEWAY_LOGS_DB", "");
     vi.stubEnv("LLM_GATEWAY_JOBS_DB", "");
@@ -80,7 +81,7 @@ describe("loadPersistenceConfig", () => {
   });
 
   it("backend=none disables async jobs", () => {
-    pointToFile(['[persistence]', 'backend = "none"', ""].join("\n"));
+    pointToFile(["[persistence]", 'backend = "none"', ""].join("\n"));
     vi.stubEnv("LLM_GATEWAY_LOGS_DB", "");
     vi.stubEnv("LLM_GATEWAY_JOBS_DB", "");
     const cfg = loadPersistenceConfig(noopLogger);
@@ -89,7 +90,7 @@ describe("loadPersistenceConfig", () => {
   });
 
   it("backend=memory without acknowledgeEphemeral throws at startup", () => {
-    pointToFile(['[persistence]', 'backend = "memory"', ""].join("\n"));
+    pointToFile(["[persistence]", 'backend = "memory"', ""].join("\n"));
     vi.stubEnv("LLM_GATEWAY_LOGS_DB", "");
     vi.stubEnv("LLM_GATEWAY_JOBS_DB", "");
     expect(() => loadPersistenceConfig(noopLogger)).toThrow(/acknowledgeEphemeral/);
@@ -97,7 +98,7 @@ describe("loadPersistenceConfig", () => {
 
   it("backend=memory + acknowledgeEphemeral=true enables async jobs", () => {
     pointToFile(
-      ['[persistence]', 'backend = "memory"', "acknowledgeEphemeral = true", ""].join("\n")
+      ["[persistence]", 'backend = "memory"', "acknowledgeEphemeral = true", ""].join("\n")
     );
     vi.stubEnv("LLM_GATEWAY_LOGS_DB", "");
     vi.stubEnv("LLM_GATEWAY_JOBS_DB", "");
@@ -107,7 +108,7 @@ describe("loadPersistenceConfig", () => {
   });
 
   it("backend=postgres requires dsn", () => {
-    pointToFile(['[persistence]', 'backend = "postgres"', ""].join("\n"));
+    pointToFile(["[persistence]", 'backend = "postgres"', ""].join("\n"));
     vi.stubEnv("LLM_GATEWAY_LOGS_DB", "");
     vi.stubEnv("LLM_GATEWAY_JOBS_DB", "");
     expect(() => loadPersistenceConfig(noopLogger)).toThrow(/dsn/);
@@ -115,7 +116,12 @@ describe("loadPersistenceConfig", () => {
 
   it("LLM_GATEWAY_LOGS_DB=none env overrides file with deprecation warning", () => {
     pointToFile(
-      ['[persistence]', 'backend = "sqlite"', `path = "${join(tempDir, "jobs.db").replace(/\\/g, "\\\\")}"`, ""].join("\n")
+      [
+        "[persistence]",
+        'backend = "sqlite"',
+        `path = "${join(tempDir, "jobs.db").replace(/\\/g, "\\\\")}"`,
+        "",
+      ].join("\n")
     );
     vi.stubEnv("LLM_GATEWAY_LOGS_DB", "none");
     const warn = vi.fn();
@@ -143,9 +149,7 @@ describe("loadPersistenceConfig", () => {
   });
 
   it("LLM_GATEWAY_ACKNOWLEDGE_EPHEMERAL env emits deprecation warning", () => {
-    pointToFile(
-      ['[persistence]', 'backend = "memory"', "", ""].join("\n")
-    );
+    pointToFile(["[persistence]", 'backend = "memory"', "", ""].join("\n"));
     vi.stubEnv("LLM_GATEWAY_LOGS_DB", "");
     vi.stubEnv("LLM_GATEWAY_JOBS_DB", "");
     vi.stubEnv("LLM_GATEWAY_ACKNOWLEDGE_EPHEMERAL", "1");
@@ -241,9 +245,7 @@ describe("createJobStore", () => {
   it("PostgresJobStore constructor also throws when called directly", () => {
     // Belt-and-braces: catches a regression where someone changes the factory
     // to swallow the throw but leaves the stub class lying around.
-    expect(() => new PostgresJobStore("postgresql://x@y/z")).toThrow(
-      /not yet implemented/
-    );
+    expect(() => new PostgresJobStore("postgresql://x@y/z")).toThrow(/not yet implemented/);
   });
 });
 

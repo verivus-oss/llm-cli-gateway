@@ -4,12 +4,13 @@ Status: Layer 7 (U13) packaging contract
 Builder: `installer/build-release.sh`
 
 This directory documents how `llm-cli-gateway` is built into a non-developer
-release: a single Go bootstrapper binary per platform, plus a checksummed
-Node gateway bundle the bootstrapper installs via `install-bundle`.
+release: local Linux, Windows, and macOS runners build the Go bootstrapper
+binaries, then a Linux packaging job publishes the checksummed Node gateway
+bundle the bootstrapper installs via `install-bundle`.
 
 ## Artifact set
 
-After `installer/build-release.sh` runs, `installer/dist/` contains:
+After the release workflow runs, `installer/dist/` contains:
 
 - `llm-cli-gateway-<version>-darwin-arm64`
 - `llm-cli-gateway-<version>-darwin-amd64`
@@ -32,13 +33,19 @@ From the repository root:
 installer/build-release.sh
 ```
 
+Direct local runs build only the current host target by default. Release CI
+invokes the script from local self-hosted Linux, Windows, and macOS runners and
+passes explicit `--target` values for the artifacts owned by that runner.
+
 Options:
 
 | Flag             | Effect                                                       |
 | ---------------- | ------------------------------------------------------------ |
 | `--version VER`  | Override release version (default: `package.json#version`).  |
 | `--skip-bundle`  | Build only the Go binaries; skip the Node bundle tarball.    |
+| `--skip-binaries` | Package the Node bundle and metadata without building Go binaries. |
 | `--target os/arch` | Restrict to one target (repeatable).                       |
+| `--all-targets`  | Build the full target list from the current host; for local testing only, not release CI. |
 
 Environment:
 
@@ -47,6 +54,7 @@ Environment:
 | `RVWR_RELEASE_VERSION`    | Same as `--version`.                                            |
 | `RVWR_RELEASE_DIR`        | Override output directory (default: `installer/dist`).          |
 | `RVWR_RELEASE_PUBLIC_BASE`| Optional public download base, written into `release-manifest.json`. Never put auth tokens in this URL. |
+| `RVWR_RELEASE_ALL_TARGETS`| Set to `1` to match `--all-targets`; for local testing only.     |
 
 ## Verification (what end users run)
 

@@ -20,7 +20,7 @@ Current personal-appliance artifacts include:
 - Streamable HTTP startup: `LLM_GATEWAY_AUTH_TOKEN=<token> npm run start:http`
 - Machine-readable diagnostics: `npm run doctor`
 - Go bootstrapper scaffold: `installer/` with `setup`, `doctor --json`, `start`, `stop`, `status`, `repair`, `upgrade`, `uninstall`, `print-client-config`, and verified bundle download commands.
-- Release packaging: `npm run release:build` produces cross-platform binaries plus a checksummed Node bundle under `installer/dist/`; see [installer/packaging/README.md](installer/packaging/README.md).
+- Release packaging: the release workflow builds Linux, Windows, and macOS binaries on local self-hosted runners, then publishes a checksummed Node bundle under `installer/dist/`; see [installer/packaging/README.md](installer/packaging/README.md).
 - Docker Compose fallback: [docker-compose.personal.yml](docker-compose.personal.yml) + [Dockerfile.personal](Dockerfile.personal) for users who already manage containers.
 - Local setup UI artifact: [setup/ui/index.html](setup/ui/index.html)
 - Provider setup snippets: [setup/providers/](setup/providers/)

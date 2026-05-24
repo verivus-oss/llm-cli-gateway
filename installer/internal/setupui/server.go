@@ -54,6 +54,9 @@ func resolveRepoPath(rel string) string {
 		filepath.Join(wd, "..", rel),
 		filepath.Join(wd, "..", "..", rel),
 	}
+	if cfg, err := config.Default(); err == nil {
+		candidates = append(candidates, filepath.Join(cfg.GatewayDir, rel))
+	}
 	for _, candidate := range candidates {
 		if _, err := os.Stat(candidate); err == nil {
 			return candidate

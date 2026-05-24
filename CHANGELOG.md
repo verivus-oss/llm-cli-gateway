@@ -2,6 +2,14 @@
 
 All notable changes to the llm-cli-gateway project.
 
+## [1.5.5] - 2026-05-24
+
+### Fixed
+
+- Build desktop installer binaries on local self-hosted Linux, Windows, and macOS runners, then publish combined release metadata from the Linux packaging job.
+- Make `installer/build-release.sh` default to the host target for local runs, with `--all-targets` / `RVWR_RELEASE_ALL_TARGETS=1` reserved for local full-matrix testing.
+- Package setup UI/provider assets into the verified gateway bundle and let the setup UI resolve installed bundle assets from the managed gateway directory.
+
 ## [1.5.4] - 2026-05-19
 
 ### Fixed

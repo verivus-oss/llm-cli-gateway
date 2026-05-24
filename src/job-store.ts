@@ -542,7 +542,10 @@ export class PostgresJobStore implements JobStore {
  * Returns `null` when `backend = "none"` — callers must not register
  * `*_request_async` tools in that case (use `config.asyncJobsEnabled`).
  */
-export function createJobStore(config: PersistenceConfig, logger: Logger = noopLogger): JobStore | null {
+export function createJobStore(
+  config: PersistenceConfig,
+  logger: Logger = noopLogger
+): JobStore | null {
   const opts = {
     retentionMs: config.retentionDays * 24 * 60 * 60 * 1000,
     dedupWindowMs: config.dedupWindowMs,

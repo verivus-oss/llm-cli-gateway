@@ -212,11 +212,12 @@ function applyEnvOverrides(
   // Empty string is treated as "not set" — only an explicitly non-empty value
   // (or the literal "none") overrides the file/defaults. This avoids the
   // old footgun where `LLM_GATEWAY_LOGS_DB=` silently disabled persistence.
-  const dbEnvRaw = (jobsDbEnv && jobsDbEnv.length > 0)
-    ? jobsDbEnv
-    : (logsDbEnv && logsDbEnv.length > 0)
-      ? logsDbEnv
-      : undefined;
+  const dbEnvRaw =
+    jobsDbEnv && jobsDbEnv.length > 0
+      ? jobsDbEnv
+      : logsDbEnv && logsDbEnv.length > 0
+        ? logsDbEnv
+        : undefined;
   if (dbEnvRaw !== undefined) {
     const normalized = dbEnvRaw.trim().toLowerCase();
     if (normalized === "none") {
@@ -226,8 +227,7 @@ function applyEnvOverrides(
       out.backend = "sqlite";
       out.path = dbEnvRaw.trim();
     }
-    const which =
-      jobsDbEnv && jobsDbEnv.length > 0 ? "LLM_GATEWAY_JOBS_DB" : "LLM_GATEWAY_LOGS_DB";
+    const which = jobsDbEnv && jobsDbEnv.length > 0 ? "LLM_GATEWAY_JOBS_DB" : "LLM_GATEWAY_LOGS_DB";
     sources.envOverrides.push(which);
     logWarn(
       logger,
@@ -314,8 +314,7 @@ export function loadPersistenceConfig(logger: Logger = noopLogger): PersistenceC
   }
 
   const backend = parsed.backend;
-  const resolvedPath =
-    backend === "sqlite" ? expandHome(parsed.path ?? DEFAULT_SQLITE_PATH) : null;
+  const resolvedPath = backend === "sqlite" ? expandHome(parsed.path ?? DEFAULT_SQLITE_PATH) : null;
   const dsn = backend === "postgres" ? (parsed.dsn ?? null) : null;
 
   if (backend === "postgres" && !dsn) {

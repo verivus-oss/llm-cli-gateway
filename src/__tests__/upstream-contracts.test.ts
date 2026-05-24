@@ -29,12 +29,7 @@ describe("upstream CLI contracts", () => {
   });
 
   it("rejects enum values outside the provider contract", () => {
-    const result = validateUpstreamCliArgs("codex", [
-      "exec",
-      "--sandbox",
-      "workspace",
-      "prompt",
-    ]);
+    const result = validateUpstreamCliArgs("codex", ["exec", "--sandbox", "workspace", "prompt"]);
     expect(result.ok).toBe(false);
     expect(result.violations[0]?.message).toMatch(/does not accept value "workspace"/);
   });
@@ -83,8 +78,9 @@ describe("upstream CLI contracts", () => {
 
   it("MCP request schemas expose the provider contract parameters", () => {
     const server = createGatewayServer();
-    const registry = (server as unknown as Record<string, Record<string, { inputSchema?: unknown }>>)
-      ._registeredTools;
+    const registry = (
+      server as unknown as Record<string, Record<string, { inputSchema?: unknown }>>
+    )._registeredTools;
 
     for (const contract of Object.values(UPSTREAM_CLI_CONTRACTS)) {
       for (const toolName of contract.mcpTools.filter(name => !name.endsWith("_async"))) {

@@ -33,7 +33,7 @@ All commands must be safe to paste from an assistant conversation and safe to ru
 | Embedded HTTP setup UI | Simple standard-library `net/http` path. | Strong with ecosystem crates, but more dependencies for equivalent ergonomics. |
 | Process supervision | Simple `os/exec`, signal handling, and platform-specific service wrappers. | Strong control, more code for common service/install plumbing. |
 | Config editing | Standard JSON/TOML/file APIs are adequate. | Strong typed parsing and safety, more compile-time ceremony. |
-| Cross-platform distribution | Mature `GOOS/GOARCH` matrix and small operational surface. | Mature, but target setup and linker details are more involved. |
+| Cross-platform distribution | Mature local-runner builds for Linux, Windows, and macOS with explicit `GOOS/GOARCH` targets. | Mature, but target setup and linker details are more involved. |
 | Long-lived native runtime | Adequate, but not the reason to pick Go. | Stronger if the bootstrapper becomes the gateway runtime. |
 
 Go is preferred because the MVP bootstrapper is mostly filesystem edits, process supervision, local HTTP setup UI, archive verification, and service registration. Rust remains a fallback if U08 expands into a long-lived native runtime with more demanding memory-safety or concurrency requirements.
@@ -45,7 +45,7 @@ Recommended MVP path:
 1. Build the TypeScript gateway with `npm run build` in release CI.
 2. Package `dist/`, `package.json`, lockfile metadata, and required runtime assets into a compressed bundle.
 3. Publish the bundle with SHA-256 checksums and a release signature.
-4. Build one Go bootstrapper per target platform.
+4. Build Go bootstrappers on local Linux, Windows, and macOS runners, with each runner owning its OS artifacts.
 5. On first run, the bootstrapper verifies and unpacks the embedded or downloaded bundle into a user-owned application directory.
 6. The bootstrapper starts the Node gateway with managed environment variables and keeps provider credentials in their official local stores.
 

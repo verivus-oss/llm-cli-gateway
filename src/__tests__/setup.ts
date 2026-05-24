@@ -22,12 +22,7 @@ if (process.env.LLM_GATEWAY_CONFIG === undefined) {
   const testConfigPath = join(tmpdir(), `llm-cli-gateway-test-config-${process.pid}.toml`);
   writeFileSync(
     testConfigPath,
-    [
-      "[persistence]",
-      'backend = "memory"',
-      "acknowledgeEphemeral = true",
-      "",
-    ].join("\n")
+    ["[persistence]", 'backend = "memory"', "acknowledgeEphemeral = true", ""].join("\n")
   );
   process.env.LLM_GATEWAY_CONFIG = testConfigPath;
 }

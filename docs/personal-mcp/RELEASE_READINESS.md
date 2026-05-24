@@ -12,7 +12,7 @@ gate and the command an assistant can quote to a user.
 
 | Gate                                                              | Evidence                                                    |
 | ------------------------------------------------------------------ | ------------------------------------------------------------ |
-| Single Go binary exists for darwin arm64+amd64, linux amd64+arm64, windows amd64 | `installer/build-release.sh:39-45` DEFAULT_TARGETS           |
+| Go bootstrapper binaries are built on local Linux, Windows, and macOS runners | `.github/workflows/release-installer.yml` `build-binaries` matrix; `installer/build-release.sh` defaults to host target |
 | `SHA256SUMS` is produced; users must verify before run            | `installer/packaging/README.md:23-25` and `:51-64`           |
 | Bootstrapper has `setup` + `install-bundle` to materialize the gateway dir | `installer/main.go:37-42, 96-97`                       |
 | Docker Compose fallback exists                                    | `docker-compose.personal.yml`, `Dockerfile.personal`         |
@@ -144,9 +144,10 @@ and were verified by:
 - Build: `npm run build` clean.
 - Lint: `npm run lint` 0 errors.
 - Unit + integration: 333 tests pass via `npx vitest run`.
-- Release pipeline: `installer/build-release.sh` produces a verifiable
-  binary in `installer/dist/` and a `release-manifest.json` with
-  copy/paste setup commands.
+- Release pipeline: `.github/workflows/release-installer.yml` builds
+  platform binaries on local Linux, Windows, and macOS runners; the final
+  packaging job produces combined `SHA256SUMS` and a `release-manifest.json`
+  with copy/paste setup commands.
 - DAG validator: PASSED, 27 units, layers 0-12, `critical_path_loc=4060`.
 - Dogfooding: two target LLMs guided setup without developer
   interpretation; one local-MCP-surface validation run completed

@@ -153,7 +153,10 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
     cli: "codex",
     executable: "codex",
     upstream: "OpenAI Codex CLI",
-    helpArgs: [["exec", "--help"], ["exec", "resume", "--help"]],
+    helpArgs: [
+      ["exec", "--help"],
+      ["exec", "resume", "--help"],
+    ],
     command: { requiredFirstArg: "exec", optionalSecondArg: "resume" },
     maxPositionals: 1,
     resumeMaxPositionals: 2,
@@ -573,10 +576,7 @@ export function validateUpstreamCliEnv(
   return { ok: violations.length === 0, violations };
 }
 
-export function assertUpstreamCliEnv(
-  cli: CliType,
-  env: Record<string, string> | undefined
-): void {
+export function assertUpstreamCliEnv(cli: CliType, env: Record<string, string> | undefined): void {
   const result = validateUpstreamCliEnv(cli, env);
   if (!result.ok) {
     const details = result.violations.map(v => v.message).join("; ");
@@ -619,7 +619,10 @@ export interface InstalledCliContractProbe {
   warnings: string[];
 }
 
-export function probeInstalledCliContract(cli: CliType, timeoutMs = 5_000): InstalledCliContractProbe {
+export function probeInstalledCliContract(
+  cli: CliType,
+  timeoutMs = 5_000
+): InstalledCliContractProbe {
   const contract = UPSTREAM_CLI_CONTRACTS[cli];
   const outputs: string[] = [];
   const warnings: string[] = [];
@@ -660,10 +663,12 @@ export function probeInstalledCliContract(cli: CliType, timeoutMs = 5_000): Inst
   };
 }
 
-export function buildUpstreamContractReport(options: {
-  cli?: CliType;
-  probeInstalled?: boolean;
-} = {}): Record<string, unknown> {
+export function buildUpstreamContractReport(
+  options: {
+    cli?: CliType;
+    probeInstalled?: boolean;
+  } = {}
+): Record<string, unknown> {
   const selected = options.cli ? [options.cli] : (Object.keys(UPSTREAM_CLI_CONTRACTS) as CliType[]);
   const contracts = Object.fromEntries(
     selected.map(cli => {
