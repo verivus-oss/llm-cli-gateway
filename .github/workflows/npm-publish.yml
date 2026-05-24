@@ -6,9 +6,9 @@ on:
   workflow_dispatch:
     inputs:
       dry-run:
-        description: 'Dry run (skip actual publish)'
+        description: "Dry run (skip actual publish)"
         required: false
-        default: 'false'
+        default: "false"
         type: boolean
 
 jobs:
@@ -22,9 +22,9 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
-          registry-url: 'https://registry.npmjs.org'
-          cache: 'npm'
+          node-version: 24
+          registry-url: "https://registry.npmjs.org"
+          cache: "npm"
 
       - run: npm ci --ignore-scripts --no-audit --no-fund
       - run: npm run build
@@ -46,12 +46,8 @@ jobs:
 
       - name: Publish (dry run)
         if: inputs.dry-run == 'true'
-        run: npm publish --provenance --dry-run --ignore-scripts
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --dry-run --ignore-scripts
 
       - name: Publish
         if: inputs.dry-run != 'true'
-        run: npm publish --provenance --ignore-scripts
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --ignore-scripts

@@ -19,7 +19,10 @@ const JOB_TTL_MS = 60 * 60 * 1000; // 1 hour in-memory retention; durable store 
 const EVICTION_INTERVAL_MS = 5 * 60 * 1000; // Check every 5 minutes
 const OUTPUT_FLUSH_INTERVAL_MS = 1000; // Throttle DB writes for streaming stdout/stderr
 
-function describeProcessLaunchError(cli: LlmCli, error: Error): { exitCode: number; message: string } {
+function describeProcessLaunchError(
+  cli: LlmCli,
+  error: Error
+): { exitCode: number; message: string } {
   const code = (error as NodeJS.ErrnoException).code;
   if (code === "ENOENT") {
     return {
