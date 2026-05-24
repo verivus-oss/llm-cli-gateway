@@ -63,6 +63,7 @@
     "doctor": "node dist/index.js doctor --json",
     "migrate": "node dist/migrate.js",
     "test": "vitest run",
+    "test:ci": "vitest run --pool=forks --maxWorkers=1",
     "test:coverage": "vitest run --coverage",
     "test:watch": "vitest",
     "test:unit": "vitest run src/__tests__/executor.test.ts",
