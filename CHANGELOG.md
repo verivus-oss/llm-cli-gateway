@@ -2,6 +2,14 @@
 
 All notable changes to the llm-cli-gateway project.
 
+## [1.5.18] - 2026-05-24
+
+### Fixed
+
+- Make desktop `upgrade` resolve the latest release once, install the verified platform bundle, and download/verify the matching bootstrapper executable.
+- Stage Windows bootstrapper self-replacement during `upgrade` so future upgrades can update command behavior instead of only rotating the Node gateway bundle.
+- Report `bootstrapper_update` in `upgrade` output so users can see whether the desktop command was already current, updated, or pending replacement.
+
 ## [1.5.17] - 2026-05-24
 
 ### Fixed

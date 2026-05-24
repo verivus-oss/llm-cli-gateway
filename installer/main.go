@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -128,7 +129,7 @@ Commands:
   status               Print managed gateway process status
   repair               Verify local installer state
   install-bundle       Download and install the pinned gateway bundle
-  upgrade              Stop, install the pinned bundle, and leave gateway stopped
+  upgrade              Stop, install latest bundle, and update bootstrapper
   uninstall [--yes]    Remove managed app state; dry-run unless --yes is set
   print-client-config  Print local MCP HTTP client configuration
   setup-ui             Start the local setup UI
@@ -142,9 +143,9 @@ Flags:
 
 func upgrade() error {
 	// `upgrade` is idempotent: it stops the gateway (if running), runs the
-	// latest verified bundle download path, then leaves the bootstrapper for
-	// the user to `start` again. Config and auth token are preserved across
-	// upgrades.
+	// latest verified bundle download path, and updates the desktop
+	// bootstrapper when the release includes a newer one. Config and auth token
+	// are preserved across upgrades.
 	cfg, err := config.Default()
 	if err != nil {
 		return err
@@ -155,25 +156,38 @@ func upgrade() error {
 			return err
 		}
 	}
-	spec, err := latestBundleSpec()
+	specs, err := latestReleaseSpecs()
 	if err != nil {
 		return err
 	}
-	installResult, err := installBundleSpec(spec)
+	installResult, err := installBundleSpec(specs.Bundle)
 	if err != nil {
 		return err
+	}
+	bootstrapperResult := map[string]any{
+		"current_version": releaseVersion,
+		"latest_version":  specs.Version,
+		"updated":         false,
+		"reason":          "already_latest",
+	}
+	if specs.Bootstrapper != nil && shouldUpdateBootstrapper(specs.Version) {
+		bootstrapperResult, err = installBootstrapperSpec(*specs.Bootstrapper, cfg)
+		if err != nil {
+			return err
+		}
 	}
 	return printJSON(map[string]any{
 		"ok":                   true,
 		"action":               "upgrade",
 		"bootstrapper_version": releaseVersion,
-		"bundle":               spec.Name,
-		"bundle_source":        spec.Source,
-		"bundle_version":       spec.Version,
+		"bundle":               specs.Bundle.Name,
+		"bundle_source":        specs.Bundle.Source,
+		"bundle_version":       specs.Bundle.Version,
+		"bootstrapper_update":  bootstrapperResult,
 		"gateway_dir":          installResult["gateway_dir"],
 		"sha256":               installResult["sha256"],
 		"previously_running":   prevStatus.Running,
-		"next":                 "Run start to relaunch the gateway with the upgraded bundle. Replace the bootstrapper executable separately when you need bootstrapper command fixes.",
+		"next":                 upgradeNextAction(bootstrapperResult),
 	})
 }
 
@@ -250,6 +264,20 @@ type bundleSpec struct {
 	Source  string
 }
 
+type bootstrapperSpec struct {
+	URL     string
+	SHA256  string
+	Name    string
+	Version string
+	Source  string
+}
+
+type releaseSpecs struct {
+	Version      string
+	Bundle       bundleSpec
+	Bootstrapper *bootstrapperSpec
+}
+
 func bundleSpecFromEnv() (bundleSpec, error) {
 	rawURL := strings.TrimSpace(os.Getenv("RVWR_GATEWAY_BUNDLE_URL"))
 	rawSHA := strings.TrimSpace(os.Getenv("RVWR_GATEWAY_BUNDLE_SHA256"))
@@ -273,23 +301,9 @@ func installBundleSpec(spec bundleSpec) (map[string]any, error) {
 		return nil, err
 	}
 	tmp := filepath.Join(cfg.AppDir, "gateway-bundle.tmp")
-	file, err := os.Create(tmp)
+	gotSHA, err := downloadVerifiedFile(spec.URL, spec.SHA256, tmp, "bundle")
 	if err != nil {
 		return nil, err
-	}
-	hasher := sha256.New()
-	if err := downloadBundle(spec.URL, io.MultiWriter(file, hasher)); err != nil {
-		_ = file.Close()
-		_ = os.Remove(tmp)
-		return nil, err
-	}
-	if err := file.Close(); err != nil {
-		return nil, err
-	}
-	gotSHA := hex.EncodeToString(hasher.Sum(nil))
-	if !strings.EqualFold(gotSHA, spec.SHA256) {
-		_ = os.Remove(tmp)
-		return nil, fmt.Errorf("bundle checksum mismatch for %s: expected %s, got %s", spec.URL, spec.SHA256, gotSHA)
 	}
 	installedRoot, err := installVerifiedBundle(tmp, cfg)
 	_ = os.Remove(tmp)
@@ -304,6 +318,80 @@ func installBundleSpec(spec bundleSpec) (map[string]any, error) {
 		"bundle_source":  spec.Source,
 		"bundle_version": spec.Version,
 	}, nil
+}
+
+func installBootstrapperSpec(spec bootstrapperSpec, cfg config.Config) (map[string]any, error) {
+	exePath, err := os.Executable()
+	if err != nil {
+		return nil, err
+	}
+	exePath, err = filepath.EvalSymlinks(exePath)
+	if err != nil {
+		return nil, err
+	}
+	tmp := exePath + ".new"
+	gotSHA, err := downloadVerifiedFile(spec.URL, spec.SHA256, tmp, "bootstrapper")
+	if err != nil {
+		return nil, err
+	}
+	if runtime.GOOS == "windows" {
+		scriptPath, err := writeWindowsSelfReplaceScript(cfg, exePath, tmp)
+		if err != nil {
+			_ = os.Remove(tmp)
+			return nil, err
+		}
+		if err := startWindowsSelfReplace(scriptPath); err != nil {
+			_ = os.Remove(tmp)
+			return nil, err
+		}
+		return map[string]any{
+			"current_version": releaseVersion,
+			"latest_version":  spec.Version,
+			"updated":         false,
+			"pending":         true,
+			"path":            exePath,
+			"sha256":          gotSHA,
+			"note":            "Bootstrapper replacement is staged and will complete after this command exits.",
+		}, nil
+	}
+	if err := os.Chmod(tmp, 0o755); err != nil {
+		_ = os.Remove(tmp)
+		return nil, err
+	}
+	if err := os.Rename(tmp, exePath); err != nil {
+		_ = os.Remove(tmp)
+		return nil, err
+	}
+	return map[string]any{
+		"current_version": releaseVersion,
+		"latest_version":  spec.Version,
+		"updated":         true,
+		"path":            exePath,
+		"sha256":          gotSHA,
+	}, nil
+}
+
+func downloadVerifiedFile(rawURL, expectedSHA, dstPath, label string) (string, error) {
+	file, err := os.Create(dstPath)
+	if err != nil {
+		return "", err
+	}
+	hasher := sha256.New()
+	if err := downloadBundle(rawURL, io.MultiWriter(file, hasher)); err != nil {
+		_ = file.Close()
+		_ = os.Remove(dstPath)
+		return "", err
+	}
+	if err := file.Close(); err != nil {
+		_ = os.Remove(dstPath)
+		return "", err
+	}
+	gotSHA := hex.EncodeToString(hasher.Sum(nil))
+	if !strings.EqualFold(gotSHA, expectedSHA) {
+		_ = os.Remove(dstPath)
+		return "", fmt.Errorf("%s checksum mismatch for %s: expected %s, got %s", label, rawURL, expectedSHA, gotSHA)
+	}
+	return gotSHA, nil
 }
 
 func downloadBundle(rawURL string, dst io.Writer) error {
@@ -338,6 +426,14 @@ type githubRelease struct {
 }
 
 func latestBundleSpec() (bundleSpec, error) {
+	specs, err := latestReleaseSpecs()
+	if err != nil {
+		return bundleSpec{}, err
+	}
+	return specs.Bundle, nil
+}
+
+func latestReleaseSpecs() (releaseSpecs, error) {
 	releaseURL := os.Getenv("RVWR_RELEASE_API_URL")
 	if releaseURL == "" {
 		releaseURL = "https://api.github.com/repos/verivus-oss/llm-cli-gateway/releases/latest"
@@ -345,42 +441,123 @@ func latestBundleSpec() (bundleSpec, error) {
 
 	body, err := getURL(releaseURL)
 	if err != nil {
-		return bundleSpec{}, err
+		return releaseSpecs{}, err
 	}
 	var release githubRelease
 	if err := json.Unmarshal(body, &release); err != nil {
-		return bundleSpec{}, fmt.Errorf("parse latest release metadata: %w", err)
+		return releaseSpecs{}, fmt.Errorf("parse latest release metadata: %w", err)
 	}
 	version := strings.TrimPrefix(release.TagName, "v")
 	if version == "" {
-		return bundleSpec{}, errors.New("latest release metadata did not include tag_name")
+		return releaseSpecs{}, errors.New("latest release metadata did not include tag_name")
 	}
 
 	bundleName := fmt.Sprintf("llm-cli-gateway-bundle-%s-%s-%s.tar.gz", version, runtime.GOOS, runtime.GOARCH)
 	bundleURL, ok := releaseAssetURL(release, bundleName)
 	if !ok {
-		return bundleSpec{}, fmt.Errorf("latest release %s does not include %s", release.TagName, bundleName)
+		return releaseSpecs{}, fmt.Errorf("latest release %s does not include %s", release.TagName, bundleName)
 	}
 	checksumsURL, ok := releaseAssetURL(release, "SHA256SUMS")
 	if !ok {
-		return bundleSpec{}, fmt.Errorf("latest release %s does not include SHA256SUMS", release.TagName)
+		return releaseSpecs{}, fmt.Errorf("latest release %s does not include SHA256SUMS", release.TagName)
 	}
 
 	checksums, err := getURL(checksumsURL)
 	if err != nil {
-		return bundleSpec{}, err
+		return releaseSpecs{}, err
 	}
 	sha, err := shaFromChecksums(string(checksums), bundleName)
 	if err != nil {
-		return bundleSpec{}, err
+		return releaseSpecs{}, err
 	}
-	return bundleSpec{
-		URL:     bundleURL,
-		SHA256:  sha,
-		Name:    bundleName,
+	specs := releaseSpecs{
 		Version: version,
-		Source:  "github-latest",
-	}, nil
+		Bundle: bundleSpec{
+			URL:     bundleURL,
+			SHA256:  sha,
+			Name:    bundleName,
+			Version: version,
+			Source:  "github-latest",
+		},
+	}
+	bootstrapperName := bootstrapperAssetName(version)
+	if bootstrapperURL, ok := releaseAssetURL(release, bootstrapperName); ok {
+		bootstrapperSHA, err := shaFromChecksums(string(checksums), bootstrapperName)
+		if err != nil {
+			return releaseSpecs{}, err
+		}
+		specs.Bootstrapper = &bootstrapperSpec{
+			URL:     bootstrapperURL,
+			SHA256:  bootstrapperSHA,
+			Name:    bootstrapperName,
+			Version: version,
+			Source:  "github-latest",
+		}
+	}
+	return specs, nil
+}
+
+func bootstrapperAssetName(version string) string {
+	name := fmt.Sprintf("llm-cli-gateway-%s-%s-%s", version, runtime.GOOS, runtime.GOARCH)
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	return name
+}
+
+func shouldUpdateBootstrapper(latestVersion string) bool {
+	return releaseVersion != "dev" && latestVersion != "" && latestVersion != releaseVersion
+}
+
+func upgradeNextAction(bootstrapperResult map[string]any) string {
+	if pending, _ := bootstrapperResult["pending"].(bool); pending {
+		return "Wait a moment for the bootstrapper replacement to complete, then run start."
+	}
+	return "Run start to relaunch the gateway with the upgraded bundle."
+}
+
+func writeWindowsSelfReplaceScript(cfg config.Config, exePath, tmpPath string) (string, error) {
+	if err := os.MkdirAll(cfg.AppDir, 0o700); err != nil {
+		return "", err
+	}
+	scriptPath := filepath.Join(cfg.AppDir, "replace-bootstrapper.ps1")
+	script := fmt.Sprintf(`$ErrorActionPreference = "Stop"
+$ParentPid = %d
+$Source = %s
+$Destination = %s
+for ($i = 0; $i -lt 120; $i++) {
+  try {
+    $process = Get-Process -Id $ParentPid -ErrorAction SilentlyContinue
+    if ($process) {
+      Wait-Process -Id $ParentPid -Timeout 1 -ErrorAction SilentlyContinue
+    }
+  } catch {}
+  try {
+    Move-Item -LiteralPath $Source -Destination $Destination -Force
+    Remove-Item -LiteralPath $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyContinue
+    exit 0
+  } catch {
+    Start-Sleep -Milliseconds 500
+  }
+}
+exit 1
+`, os.Getpid(), powershellSingleQuoted(tmpPath), powershellSingleQuoted(exePath))
+	if err := os.WriteFile(scriptPath, []byte(script), 0o600); err != nil {
+		return "", err
+	}
+	return scriptPath, nil
+}
+
+func startWindowsSelfReplace(scriptPath string) error {
+	cmd := exec.Command("powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", scriptPath)
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	return cmd.Process.Release()
+}
+
+func powershellSingleQuoted(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
 }
 
 func releaseAssetURL(release githubRelease, name string) (string, bool) {
