@@ -330,6 +330,7 @@ $ExeName = "llm-cli-gateway-$Version-windows-amd64.exe"
 $BundleName = "llm-cli-gateway-bundle-$Version-windows-amd64.tar.gz"
 $InstallDir = Join-Path $env:LOCALAPPDATA "Programs\llm-cli-gateway"
 $ExePath = Join-Path $InstallDir $ExeName
+$StableExePath = Join-Path $InstallDir "llm-cli-gateway.exe"
 $ChecksumsPath = Join-Path $InstallDir "SHA256SUMS"
 
 New-Item -ItemType Directory -Force $InstallDir | Out-Null
@@ -353,6 +354,21 @@ $actualExeSha = (Get-FileHash $ExePath -Algorithm SHA256).Hash.ToLowerInvariant(
 if ($actualExeSha -ne $expectedExeSha) {
   throw "Checksum mismatch for $ExeName"
 }
+Copy-Item -LiteralPath $ExePath -Destination $StableExePath -Force
+
+$userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+$pathEntries = @()
+if ($userPath) {
+  $pathEntries = $userPath -split ';' | Where-Object { $_ }
+}
+$installDirOnPath = $pathEntries | Where-Object { $_.TrimEnd('\') -ieq $InstallDir.TrimEnd('\') } | Select-Object -First 1
+if (-not $installDirOnPath) {
+  $newUserPath = if ($userPath) { "$userPath;$InstallDir" } else { $InstallDir }
+  [Environment]::SetEnvironmentVariable("Path", $newUserPath, "User")
+}
+if (-not (($env:Path -split ';' | Where-Object { $_.TrimEnd('\') -ieq $InstallDir.TrimEnd('\') } | Select-Object -First 1))) {
+  $env:Path = "$env:Path;$InstallDir"
+}
 
 $bundleSha = Get-ReleaseSha256 $BundleName
 $env:RVWR_GATEWAY_BUNDLE_URL = "$Base/$BundleName"
@@ -360,19 +376,21 @@ $env:RVWR_GATEWAY_BUNDLE_SHA256 = $bundleSha
 
 function Invoke-Gateway {
   param([string[]] $GatewayArgs)
-  & $ExePath @GatewayArgs | Write-Output
+  & $StableExePath @GatewayArgs | Write-Output
   if ($LASTEXITCODE -ne 0) {
     throw "llm-cli-gateway $($GatewayArgs -join ' ') failed with exit code $LASTEXITCODE"
   }
 }
 
 Invoke-Gateway @("setup")
+Invoke-Gateway @("stop")
 Invoke-Gateway @("install-bundle")
 Invoke-Gateway @("start")
 Invoke-Gateway @("doctor")
 
 Write-Host ""
 Write-Host "Installed bootstrapper: $ExePath"
+Write-Host "Stable command: $StableExePath"
 Write-Host "Gateway URL: http://127.0.0.1:3333/mcp"
 PS1
 
@@ -425,8 +443,8 @@ cat > "${manifest}" <<EOF
     "verify_checksum_macos": "shasum -a 256 --check SHA256SUMS",
     "install_windows_oneliner": "powershell -NoProfile -ExecutionPolicy Bypass -Command \"irm ${PUBLIC_BASE}/install-windows.ps1 | iex\"",
     "install_unix_oneliner": "export RVWR_GATEWAY_BUNDLE_URL=${PUBLIC_BASE}/llm-cli-gateway-bundle-${VERSION}-<os>-<arch>.tar.gz RVWR_GATEWAY_BUNDLE_SHA256=<bundle-sha256>; chmod +x ./llm-cli-gateway-${VERSION}-<os>-<arch> && ./llm-cli-gateway-${VERSION}-<os>-<arch> setup && ./llm-cli-gateway-${VERSION}-<os>-<arch> install-bundle",
-    "install_windows_powershell": "\$env:RVWR_GATEWAY_BUNDLE_URL='${PUBLIC_BASE}/llm-cli-gateway-bundle-${VERSION}-windows-amd64.tar.gz'; \$env:RVWR_GATEWAY_BUNDLE_SHA256='<bundle-sha256>'; .\\\\llm-cli-gateway-${VERSION}-windows-amd64.exe setup; .\\\\llm-cli-gateway-${VERSION}-windows-amd64.exe install-bundle",
-    "doctor_after_install": "./llm-cli-gateway-${VERSION}-<os>-<arch> doctor",
+    "install_windows_powershell": "\$env:RVWR_GATEWAY_BUNDLE_URL='${PUBLIC_BASE}/llm-cli-gateway-bundle-${VERSION}-windows-amd64.tar.gz'; \$env:RVWR_GATEWAY_BUNDLE_SHA256='<bundle-sha256>'; llm-cli-gateway setup; llm-cli-gateway stop; llm-cli-gateway install-bundle; llm-cli-gateway start",
+    "doctor_after_install": "llm-cli-gateway doctor",
     "upgrade_unix_oneliner": "./llm-cli-gateway-<new-version>-<os>-<arch> upgrade",
     "uninstall_unix_oneliner": "./llm-cli-gateway-<version>-<os>-<arch> uninstall --yes",
     "docker_fallback": "docker compose -f docker-compose.personal.yml up -d",

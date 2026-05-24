@@ -89,10 +89,16 @@ Windows PowerShell:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://github.com/verivus-oss/llm-cli-gateway/releases/latest/download/install-windows.ps1 | iex"
+llm-cli-gateway status
+llm-cli-gateway doctor
 ```
 
 The script downloads `SHA256SUMS`, verifies the Windows bootstrapper, installs
 the checksummed Windows platform bundle, starts the gateway, and runs `doctor`.
+It also writes a stable `llm-cli-gateway.exe` command to
+`%LOCALAPPDATA%\Programs\llm-cli-gateway`, adds that directory to the user PATH,
+and uses that stable command for future `start`, `stop`, `status`, and `doctor`
+operations.
 
 ```bash
 chmod +x llm-cli-gateway-<version>-<os>-<arch>

@@ -7,7 +7,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -71,42 +73,105 @@ func Start(cfg config.Config, token string) (Status, error) {
 }
 
 func Stop(cfg config.Config) error {
-	status, err := Current(cfg)
-	if err != nil || !status.Running {
-		_ = os.Remove(pidPath(cfg))
-		return nil
-	}
-	process, err := os.FindProcess(status.PID)
+	pid, err := readPID(cfg)
 	if err != nil {
 		_ = os.Remove(pidPath(cfg))
 		return nil
 	}
-	_ = process.Signal(syscall.SIGTERM)
+	process, err := os.FindProcess(pid)
+	if err != nil {
+		_ = os.Remove(pidPath(cfg))
+		return nil
+	}
+	if err := process.Signal(syscall.SIGTERM); err != nil {
+		_ = process.Kill()
+	}
+	if !waitForHTTPStopped(cfg, 2*time.Second) {
+		_ = process.Kill()
+		waitForHTTPStopped(cfg, 5*time.Second)
+	}
 	_ = os.Remove(pidPath(cfg))
 	return nil
 }
 
 func Current(cfg config.Config) (Status, error) {
-	raw, err := os.ReadFile(pidPath(cfg))
+	pid, err := readPID(cfg)
 	if err != nil {
 		return Status{Running: false}, nil
 	}
-	pid, err := strconv.Atoi(string(raw))
-	if err != nil {
-		return Status{Running: false}, err
+	if processIsRunning(pid) {
+		return runningStatus(cfg, pid), nil
 	}
-	process, err := os.FindProcess(pid)
-	if err != nil {
-		return Status{Running: false}, nil
+	if healthzReady(cfg) {
+		return runningStatus(cfg, pid), nil
 	}
-	if err := process.Signal(syscall.Signal(0)); err != nil {
-		return Status{Running: false, PID: pid}, nil
-	}
-	return Status{Running: true, PID: pid}, nil
+	return Status{Running: false, PID: pid}, nil
 }
 
 func pidPath(cfg config.Config) string {
 	return filepath.Join(cfg.AppDir, "gateway.pid")
+}
+
+func readPID(cfg config.Config) (int, error) {
+	raw, err := os.ReadFile(pidPath(cfg))
+	if err != nil {
+		return 0, err
+	}
+	return strconv.Atoi(strings.TrimSpace(string(raw)))
+}
+
+func runningStatus(cfg config.Config, pid int) Status {
+	return Status{
+		Running: true,
+		PID:     pid,
+		URL:     "http://" + cfg.HTTPHost + ":" + cfg.HTTPPort + cfg.HTTPPath,
+		LogPath: filepath.Join(cfg.AppDir, "gateway.log"),
+	}
+}
+
+func processIsRunning(pid int) bool {
+	process, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	if runtime.GOOS == "windows" {
+		return windowsProcessIsRunning(pid)
+	}
+	return process.Signal(syscall.Signal(0)) == nil
+}
+
+func windowsProcessIsRunning(pid int) bool {
+	output, err := exec.Command("tasklist", "/FI", fmt.Sprintf("PID eq %d", pid), "/FO", "CSV", "/NH").Output()
+	if err != nil {
+		return false
+	}
+	return strings.Contains(string(output), fmt.Sprintf("\"%d\"", pid))
+}
+
+func healthzReady(cfg config.Config) bool {
+	client := http.Client{Timeout: 500 * time.Millisecond}
+	resp, err := client.Get("http://" + cfg.HTTPHost + ":" + cfg.HTTPPort + "/healthz")
+	if err != nil {
+		return false
+	}
+	_ = resp.Body.Close()
+	return resp.StatusCode >= 200 && resp.StatusCode < 500
+}
+
+func waitForHTTPStopped(cfg config.Config, timeout time.Duration) bool {
+	deadline := time.After(timeout)
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-deadline:
+			return false
+		case <-ticker.C:
+			if !healthzReady(cfg) {
+				return true
+			}
+		}
+	}
 }
 
 func waitForHTTPReady(url string, done <-chan error, errPath string, timeout time.Duration) error {

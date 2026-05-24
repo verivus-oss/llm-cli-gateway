@@ -32,7 +32,13 @@ Windows PowerShell:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://github.com/verivus-oss/llm-cli-gateway/releases/latest/download/install-windows.ps1 | iex"
+llm-cli-gateway status
+llm-cli-gateway doctor
 ```
+
+The Windows installer keeps a stable `llm-cli-gateway.exe` command in
+`%LOCALAPPDATA%\Programs\llm-cli-gateway` and adds that directory to the user
+PATH. Do not script against release-versioned exe names after install.
 
 ```bash
 # After downloading the binary that matches your OS/arch from a release:

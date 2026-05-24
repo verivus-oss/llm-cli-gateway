@@ -2,6 +2,14 @@
 
 All notable changes to the llm-cli-gateway project.
 
+## [1.5.11] - 2026-05-24
+
+### Fixed
+
+- Install a stable Windows `llm-cli-gateway.exe` command alongside the versioned bootstrapper and add the install directory to the user PATH.
+- Make the Windows one-command installer stop any running gateway before replacing the managed bundle, then start and doctor through the stable command.
+- Fix bootstrapper `status` and `stop` behavior on Windows so they do not depend on Unix-style PID probing.
+
 ## [1.5.10] - 2026-05-24
 
 ### Fixed
