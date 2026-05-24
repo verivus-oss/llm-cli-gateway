@@ -56,16 +56,16 @@ jobs:
             targets: "--target darwin/amd64"
     runs-on: ${{ fromJSON(matrix.runs_on) }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           ref: ${{ needs.resolve-tag.outputs.tag }}
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
-          node-version: 20
+          node-version: 24
           cache: "npm"
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version: "1.22"
           cache-dependency-path: installer/go.mod
@@ -96,7 +96,7 @@ jobs:
           TAG_VERSION="${REF_NAME#v}"
           bash installer/build-release.sh --version "${TAG_VERSION}" ${{ matrix.targets }}
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: installer-${{ matrix.artifact }}
           path: |
@@ -109,11 +109,11 @@ jobs:
     needs: [resolve-tag, build-binaries]
     runs-on: [self-hosted, linux, rust, x86_64, workhorse2]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           ref: ${{ needs.resolve-tag.outputs.tag }}
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: installer-*
           path: installer/dist
