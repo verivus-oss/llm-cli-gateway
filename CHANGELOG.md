@@ -2,6 +2,17 @@
 
 All notable changes to the llm-cli-gateway project.
 
+## [1.5.31] - 2026-05-25
+
+### Changed
+
+- Replace direct dependency on `toml@3.0.0` (single-maintainer, last released 2020) with `smol-toml@^1.6.1` (actively maintained, TypeScript-native, zero deps). Same `parse(text)` API, drop-in across `src/config.ts`, `src/claude-mcp-config.ts`, and `src/model-registry.ts`.
+
+### Security
+
+- Add `socket.yml` documenting the rationale for Socket's behavioural alerts (`networkAccess`, `shellAccess`, `usesEval`). Alerts are left visible — not silenced — so downstream consumers can see the maintainer's review context.
+- Expand README "Security Considerations" with a per-alert breakdown mapping each Socket signal to where it lives in the code and why it is bounded.
+
 ## [1.5.30] - 2026-05-25
 
 ### Fixed

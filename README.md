@@ -1005,8 +1005,22 @@ The gateway supports concurrent requests across different CLIs. Each request spa
 
 - **Input Validation**: All prompts are validated (min 1 char, max 100k chars)
 - **Command Execution**: Uses `spawn` with separate arguments (not shell execution)
-- **No Eval**: No dynamic code evaluation
+- **No Eval**: No dynamic code evaluation in our source (see "Socket alerts" below for the transitive `ajv` codegen case)
 - **Sandboxing**: Consider running in containers for production use
+- **Provenance**: Releases are published with [npm provenance](https://docs.npmjs.com/generating-provenance-statements) via OIDC trusted publishing from GitHub Actions
+
+### Socket alerts — context for reviewers
+
+If you're vetting `llm-cli-gateway` through [Socket](https://socket.dev/npm/package/llm-cli-gateway) or a similar supply-chain scanner, you'll see three behavioural alerts and some dependency-ownership alerts. They are accurate descriptions of what the package does and what it depends on; we've left them visible (not silenced in `socket.yml`) so you don't have to take our word for it. Here's the context for each:
+
+| Alert | Where | Why it's bounded |
+|---|---|---|
+| **Network access** | `src/http-transport.ts` opens an HTTP MCP transport when started via `npm run start:http`. `src/endpoint-exposure.ts` issues a HEAD probe to verify configured public/tunnel URLs. | The transport binds to `127.0.0.1` by default and requires `LLM_GATEWAY_AUTH_TOKEN` to be set. The default stdio MCP entry point (`npm start`) opens no sockets. |
+| **Shell access** | `src/executor.ts` uses `child_process.spawn(cmd, args, …)` to invoke the underlying LLM CLIs. | `spawn` is called with an argument array and **never** `shell: true`, so there is no shell interpolation path for caller input. The command name is restricted to an allow-list of known CLI binaries (`claude`, `codex`, `gemini`, `grok`, `vibe`). |
+| **Uses eval** | None in our source. Transitive: `@modelcontextprotocol/sdk` → `ajv@8` uses `new Function(...)` in `ajv/dist/compile/index.js` to compile JSON Schema validators. | This is ajv's standard codegen path. Only known schemas (defined in our source and the MCP SDK) flow into it; no caller-supplied data ever reaches the compiled function body. |
+| **Dependency ownership** | A handful of small transitive packages (e.g. `bindings` via `better-sqlite3`, `media-typer` via `@modelcontextprotocol/sdk`) trip Socket's "unstable ownership" or "obfuscated code" heuristics. | These are pinned, well-known micro-deps in the Node ecosystem with no known issues. We pin direct override versions of `content-type` and `type-is` in `package.json#overrides`. Our previous direct dependency on `toml@3.0.0` (also single-maintainer, last released 2020) was replaced with the actively-maintained `smol-toml` to reduce inherited risk. |
+
+See [`socket.yml`](./socket.yml) for the same context in machine-readable form.
 
 ## Contributing
 

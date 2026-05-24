@@ -12,7 +12,7 @@ import {
 } from "fs";
 import { homedir } from "os";
 import { dirname, join } from "path";
-import { parse as parseToml } from "toml";
+import { parse as parseToml } from "smol-toml";
 
 export const CLAUDE_MCP_SERVER_NAMES = ["sqry", "exa", "ref_tools", "trstr"] as const;
 export type ClaudeMcpServerName = (typeof CLAUDE_MCP_SERVER_NAMES)[number];

@@ -185,7 +185,7 @@ function readPersistenceFile(
   }
   try {
     const require = createRequire(import.meta.url);
-    const TOML = require("toml");
+    const TOML = require("smol-toml");
     const text = readFileSync(configPath, "utf-8");
     const parsed = TOML.parse(text) as Record<string, unknown>;
     return { raw: parsed?.persistence, sourcePath: configPath };

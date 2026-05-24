@@ -1,7 +1,7 @@
 import { Dirent, existsSync, readFileSync, readdirSync, statSync } from "fs";
 import { homedir } from "os";
 import path from "path";
-import { parse as parseToml } from "toml";
+import { parse as parseToml } from "smol-toml";
 import type { CliType } from "./session-manager.js";
 
 type ModelSource = "fallback" | "observed" | "config" | "env";

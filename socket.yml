@@ -1,0 +1,49 @@
+version: 2
+
+# Socket alerts on llm-cli-gateway
+# ---------------------------------
+# This package intentionally triggers three of Socket's behavioural alerts.
+# We do NOT disable them — they are accurate descriptions of what the package
+# does, and silencing them would hide useful signal from anyone evaluating
+# this dependency. The rationale for each is documented inline below and in
+# detail under "Security Considerations" in README.md.
+#
+#   networkAccess
+#     src/http-transport.ts opens an HTTP MCP transport (createServer/listen).
+#     Defaults to 127.0.0.1, auth-token gated (LLM_GATEWAY_AUTH_TOKEN).
+#     src/endpoint-exposure.ts also issues a HEAD probe when verifying
+#     tunnel reachability — opt-in via the start:http entry point only.
+#
+#   shellAccess
+#     src/executor.ts uses child_process.spawn(cmd, args, { ... }) with a
+#     fixed allow-list of CLI binaries (claude / codex / gemini / grok /
+#     vibe). shell:true is never set; arguments are passed as an array, so
+#     there is no shell interpolation path for user input. Spawning these
+#     CLIs is the entire purpose of the package.
+#
+#   usesEval
+#     Not in our source. Transitive via @modelcontextprotocol/sdk → ajv@8,
+#     which compiles JSON Schema validators using `new Function(...)`.
+#     This is ajv's standard codegen path; no caller-supplied data flows
+#     into the compiled function body.
+
+issueRules:
+  # Defaults from Socket. Listed explicitly so future contributors see what
+  # is enforced rather than relying on implicit defaults.
+  malware: true
+  troll: true
+  didYouMean: true
+  installScripts: true
+  telemetry: true
+  hasNativeCode: true            # better-sqlite3 — known and expected
+  shellScriptOverride: true
+  gitDependency: true
+  httpDependency: true
+  invalidPackageJSON: true
+  unresolvedRequire: true
+
+githubApp:
+  enabled: true
+  pullRequestAlertsEnabled: true
+  dependencyOverviewEnabled: true
+  projectReportsEnabled: true
