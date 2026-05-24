@@ -2,6 +2,12 @@
 
 All notable changes to the llm-cli-gateway project.
 
+## [1.5.26] - 2026-05-25
+
+### Fixed
+
+- Make `upstream_contracts --probe-installed` use the same extended provider PATH and Windows shim resolver as request execution and `doctor --json`, avoiding false `ENOENT` diagnostics for npm-installed CLIs such as Gemini.
+
 ## [1.5.25] - 2026-05-25
 
 ### Fixed

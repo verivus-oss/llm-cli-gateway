@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
 import type { CliType } from "./session-manager.js";
+import { envWithExtendedPath, getExtendedPath, resolveCommandForSpawn } from "./executor.js";
 
 export type CliFlagArity = "none" | "one" | "variadic";
 
@@ -612,6 +613,8 @@ function validateFlagValue(
 export interface InstalledCliContractProbe {
   cli: CliType;
   executable: string;
+  resolvedCommand?: string;
+  resolvedArgs?: string[];
   available: boolean;
   checkedHelpCommands: string[][];
   missingFlags: string[];
@@ -625,17 +628,30 @@ export function probeInstalledCliContract(
   const contract = UPSTREAM_CLI_CONTRACTS[cli];
   const outputs: string[] = [];
   const warnings: string[] = [];
+  let resolvedCommand: string | undefined;
+  let resolvedArgs: string[] | undefined;
 
   for (const helpArgs of contract.helpArgs) {
-    const result = spawnSync(contract.executable, helpArgs, {
+    const extendedPath = getExtendedPath();
+    const env = envWithExtendedPath(process.env, extendedPath);
+    const resolved = resolveCommandForSpawn(contract.executable, helpArgs, {
+      envPath: extendedPath,
+    });
+    resolvedCommand ??= resolved.command;
+    resolvedArgs ??= resolved.args;
+    const result = spawnSync(resolved.command, resolved.args, {
       encoding: "utf8",
       timeout: timeoutMs,
       maxBuffer: 1024 * 1024,
+      env,
+      windowsHide: true,
     });
     if (result.error) {
       return {
         cli,
         executable: contract.executable,
+        resolvedCommand: resolved.command,
+        resolvedArgs: resolved.args,
         available: false,
         checkedHelpCommands: contract.helpArgs,
         missingFlags: [],
@@ -655,6 +671,8 @@ export function probeInstalledCliContract(
   return {
     cli,
     executable: contract.executable,
+    resolvedCommand,
+    resolvedArgs,
     available: true,
     checkedHelpCommands: contract.helpArgs,
     missingFlags,
