@@ -36,6 +36,20 @@ function describeProcessLaunchError(
   };
 }
 
+function describeWindowsLaunchExit(
+  cli: LlmCli,
+  exitCode: number
+): { exitCode: number; message: string } | null {
+  if (exitCode !== -4058) {
+    return null;
+  }
+
+  return {
+    exitCode: 127,
+    message: `The '${cli}' command was not found. Install the ${cli} CLI and make sure it is on PATH.`,
+  };
+}
+
 interface AsyncJobRecord {
   id: string;
   cli: LlmCli;
@@ -611,7 +625,14 @@ export class AsyncJobManager {
         return;
       }
 
-      job.exitCode = code ?? 0;
+      const rawExitCode = code ?? 0;
+      const launchExit =
+        !job.stdout && !job.stderr ? describeWindowsLaunchExit(cli, rawExitCode) : null;
+      job.exitCode = launchExit?.exitCode ?? rawExitCode;
+      if (launchExit) {
+        job.error = launchExit.message;
+        job.stderr = launchExit.message;
+      }
       job.finishedAt = new Date().toISOString();
 
       if (job.canceled) {

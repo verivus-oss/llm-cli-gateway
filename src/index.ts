@@ -22,7 +22,7 @@ import {
 import { loadConfig, loadPersistenceConfig, type PersistenceConfig } from "./config.js";
 import { DatabaseConnection } from "./db.js";
 import { checkHealth } from "./health.js";
-import { getCliInfo, resolveModelAlias } from "./model-registry.js";
+import { clearModelRegistryCache, getCliInfo, resolveModelAlias } from "./model-registry.js";
 import { AsyncJobManager } from "./async-job-manager.js";
 import { createJobStore, type JobStore } from "./job-store.js";
 import { ApprovalManager, ApprovalPolicy, ApprovalRecord } from "./approval-manager.js";
@@ -495,6 +495,7 @@ function createErrorResponse(
   error?: Error
 ) {
   let errorMessage = `Error executing ${cli} CLI`;
+  const isLaunchExit = code === 127 || code === -4058;
 
   if (error) {
     // Command not found or spawn error
@@ -511,6 +512,9 @@ function createErrorResponse(
     // Idle timeout (stuck process)
     errorMessage += `: Process killed due to inactivity\n${stderr}`;
     logger.error(`[${correlationId || "unknown"}] ${cli} CLI killed due to inactivity`);
+  } else if (isLaunchExit) {
+    errorMessage += `:\n${stderr || `The '${cli}' command was not found. Install the ${cli} CLI and make sure it is on PATH.`}`;
+    logger.error(`[${correlationId || "unknown"}] ${cli} CLI failed to launch`);
   } else if (code !== 0) {
     // Other non-zero exit code
     errorMessage += ` (exit code ${code}):\n${stderr}`;
@@ -531,7 +535,9 @@ function createErrorResponse(
             ? "idle_timeout"
             : error
               ? "spawn_error"
-              : "cli_error",
+              : isLaunchExit
+                ? "spawn_error"
+                : "cli_error",
     },
   };
 }
@@ -1597,7 +1603,8 @@ function prepareMistralRequest(
 ): (CliRequestPrep & { mistralEnv: Record<string, string> }) | ExtendedToolResponse {
   const corrId = params.correlationId || randomUUID();
   const cliInfo = getCliInfo();
-  const resolvedModel = resolveModelAlias("mistral", params.model, cliInfo) || "devstral-medium";
+  const requestedModel = params.model ?? (cliInfo.mistral.defaultModel ? "default" : undefined);
+  const resolvedModel = resolveModelAlias("mistral", requestedModel, cliInfo);
 
   const reviewIntegrity = checkReviewIntegrity({
     prompt: params.prompt,
@@ -1636,7 +1643,10 @@ function prepareMistralRequest(
       allowedTools: params.allowedTools,
       disallowedTools: params.disallowedTools,
       policy: params.approvalPolicy as ApprovalPolicy | undefined,
-      metadata: { model: resolvedModel, vibeActiveModelEnv: true },
+      metadata: {
+        model: resolvedModel ?? "vibe-default",
+        vibeActiveModelEnv: Boolean(resolvedModel),
+      },
       reviewIntegrity,
     });
     if (approvalDecision.status !== "approved") {
@@ -1679,6 +1689,24 @@ function prepareMistralRequest(
     args: prep.args,
     mistralEnv: prep.env,
   };
+}
+
+function isMistralModelSelectionFailure(stderr: string): boolean {
+  return /active model ['"].+['"] not found|model ['"].+['"] (?:isn't|is not) found|unknown model|model not found/i.test(
+    stderr
+  );
+}
+
+function selectMistralRecoveryModel(failedModel: string | undefined): string | undefined {
+  clearModelRegistryCache();
+  const refreshed = getCliInfo(true).mistral;
+  const candidates = [
+    refreshed.defaultModel,
+    ...(refreshed.modelOrder ?? []),
+    ...Object.keys(refreshed.models),
+  ].filter((model): model is string => Boolean(model && model !== failedModel));
+
+  return candidates.find(model => model !== "local");
 }
 
 function buildCliResponse(
@@ -2438,7 +2466,7 @@ export async function handleMistralRequest(
     });
     args.push(...sessionResult.resumeArgs);
 
-    const result = await awaitJobOrDefer(
+    let result = await awaitJobOrDefer(
       "mistral",
       args,
       corrId,
@@ -2451,6 +2479,44 @@ export async function handleMistralRequest(
 
     if (isDeferredResponse(result)) {
       return buildDeferredToolResponse(result, sessionResult.effectiveSessionId);
+    }
+
+    if (result.code !== 0 && isMistralModelSelectionFailure(result.stderr)) {
+      const recoveryModel = selectMistralRecoveryModel(prep.resolvedModel);
+      if (recoveryModel) {
+        deps.logger.info(
+          `[${corrId}] mistral_request detected stale Vibe model selection; retrying once with ${recoveryModel}`
+        );
+        const retryPrep = buildMistralCliInvocation({
+          prompt: prep.effectivePrompt,
+          resolvedModel: recoveryModel,
+          outputFormat: params.outputFormat,
+          permissionMode:
+            params.approvalStrategy === "mcp_managed"
+              ? "auto-approve"
+              : (params.permissionMode ?? "auto-approve"),
+          effort: params.effort,
+          reasoningEffort: params.reasoningEffort,
+          allowedTools: params.allowedTools,
+          disallowedTools: params.disallowedTools,
+        });
+        const retryArgs = [...retryPrep.args, ...sessionResult.resumeArgs];
+        result = await awaitJobOrDefer(
+          "mistral",
+          retryArgs,
+          corrId,
+          resolveIdleTimeout("mistral", params.idleTimeoutMs),
+          params.outputFormat,
+          true,
+          runtime,
+          retryPrep.env
+        );
+        if (isDeferredResponse(result)) {
+          return buildDeferredToolResponse(result, sessionResult.effectiveSessionId);
+        }
+        prep.resolvedModel = recoveryModel;
+        prep.args = retryArgs;
+      }
     }
 
     const { stdout, stderr, code } = result;
@@ -3934,7 +4000,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .string()
         .optional()
         .describe(
-          "Model alias (e.g. devstral-medium, devstral-large, latest). Resolved alias is injected via VIBE_ACTIVE_MODEL env var — Vibe has no --model flag."
+          "Model alias (e.g. mistral-medium-3.5, latest). Resolved alias is injected via VIBE_ACTIVE_MODEL env var; Vibe has no --model flag."
         ),
       outputFormat: z
         .enum(["plain", "json", "stream-json"])

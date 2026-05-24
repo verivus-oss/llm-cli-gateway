@@ -2,6 +2,15 @@
 
 All notable changes to the llm-cli-gateway project.
 
+## [1.5.16] - 2026-05-24
+
+### Fixed
+
+- Remove the stale hardcoded Mistral Vibe `devstral-medium` default from the gateway request path.
+- Discover Mistral Vibe model aliases from `~/.vibe/config.toml`, `VIBE_MODELS`, `VIBE_ACTIVE_MODEL`, and gateway env overrides before injecting `VIBE_ACTIVE_MODEL`.
+- Recover stale Vibe config such as `active_model = "devstral-medium"` to `mistral-medium-3.5`, and retry one synchronous Mistral request after a model-not-found failure with refreshed discovery.
+- Build provider CLI PATH values with the platform delimiter so Windows desktop installs can find CLIs in locations such as `%USERPROFILE%\.local\bin`, and normalize Windows `-4058` launch failures to command-not-found guidance.
+
 ## [1.5.15] - 2026-05-24
 
 ### Fixed
@@ -134,7 +143,7 @@ Lands DAG layers 6-12 — the personal-MCP MVP terminal plus all of Phase 0-3 pr
 - **U13 / U16 — Release packaging + dogfood readiness.** `installer/build-release.sh` cross-compiles 5 OS/arch targets (linux/{amd64,arm64}, darwin/{amd64,arm64}, windows/amd64) + Node bundle + `SHA256SUMS` + `release-manifest.json`. New `cli_upgrade --uninstall` (idempotent, dry-run by default) and `cli_upgrade --check`. New `Dockerfile.personal` + `docker-compose.personal.yml` for the personal-MCP container path. New `installer/packaging/README.md`. New `package.json` scripts `release:build`, `release:checksums`, `release:docker`. Comprehensive `docs/personal-mcp/{DOGFOODING_RESULTS,RELEASE_READINESS,SINGLE_BINARY_INSTALLER,ENDPOINT_EXPOSURE,PRODUCT_CONTRACT,PROVIDER_SUPPORT_MATRIX,VALIDATION_REPORT_FORMAT}.md` + per-provider `connect-*.md` guides + `setup/assistants/*-install-prompt.md` install-prompt corpus.
 - **U21 — Phase-0 parity fixes.** `SESSION_PROVIDER_VALUES` / `SESSION_PROVIDER_ENUM` now expose the full provider set (grok was previously absent from `session_create`/`session_list`/`session_clear_all` Zod enums despite the storage layer supporting it). `prepareGeminiRequest` emits `["-p", prompt, ...]` instead of a positional prompt, eliminating the dependency on Gemini's TTY/mode-detection heuristics. 6 new tests pin both fixes.
 - **U22 — Mistral Vibe is the fifth supported provider.** New `mistral_request` and `mistral_request_async` MCP tools register alongside the four incumbents and route through the same async job manager, dedup store, flight recorder, approval manager, and validation orchestrator. Five Vibe-specific divergences are documented in `docs/personal-mcp/PROVIDER_MODERNISATION_AUDIT.md`:
-  - **No `--model` flag** — model selection is via the `VIBE_ACTIVE_MODEL` environment variable (default alias: `devstral-medium`); the executor and async job manager forward an `env` override.
+  - **No `--model` flag** — model selection is via the `VIBE_ACTIVE_MODEL` environment variable; the gateway discovers Vibe config/env models, avoids stale hardcoded defaults, and forwards an `env` override only when needed.
   - **Session-logging is opt-in** in `~/.vibe/config.toml` — `doctor --json` probes `[session_logging] enabled = true` (read-only) and surfaces an actionable `next_actions` entry when the toggle is missing.
   - **`--agent` enum** replaces Grok's `--always-approve` (`default | plan | accept-edits | auto-approve | chat | explore | lean`); the gateway always emits `--agent` explicitly and defaults to `auto-approve` for programmatic callers.
   - **`--enabled-tools` allow-list only** — `allowedTools` emits one `--enabled-tools <tool>` per entry; `disallowedTools` is accepted in the schema for caller parity but silently ignored at the CLI boundary (a logged warning records the no-op).

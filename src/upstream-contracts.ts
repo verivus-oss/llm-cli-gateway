@@ -421,7 +421,7 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         id: "mistral-minimal",
         description: "Minimal prompt request with env-selected model",
         args: ["-p", "hello", "--agent", "auto-approve"],
-        env: { VIBE_ACTIVE_MODEL: "devstral-medium" },
+        env: { VIBE_ACTIVE_MODEL: "mistral-medium-3.5" },
         expect: "pass",
       },
       {

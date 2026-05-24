@@ -57,10 +57,10 @@ describe("upstream CLI contracts", () => {
   });
 
   it("validates provider-specific env contracts", () => {
-    expect(validateUpstreamCliEnv("mistral", { VIBE_ACTIVE_MODEL: "devstral-medium" }).ok).toBe(
+    expect(validateUpstreamCliEnv("mistral", { VIBE_ACTIVE_MODEL: "mistral-medium-3.5" }).ok).toBe(
       true
     );
-    const result = validateUpstreamCliEnv("codex", { VIBE_ACTIVE_MODEL: "devstral-medium" });
+    const result = validateUpstreamCliEnv("codex", { VIBE_ACTIVE_MODEL: "mistral-medium-3.5" });
     expect(result.ok).toBe(false);
     expect(result.violations[0]?.message).toMatch(/Unsupported codex CLI environment variable/);
   });

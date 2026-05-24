@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   executeCli,
+  getExtendedPath,
   killProcessGroup,
   killAllProcessGroups,
   registerProcessGroup,
@@ -8,6 +9,7 @@ import {
   unregisterProcessGroup,
 } from "../executor.js";
 import { spawn } from "child_process";
+import { delimiter } from "path";
 
 describe("executeCli", () => {
   describe("basic execution", () => {
@@ -105,6 +107,11 @@ describe("executeCli", () => {
       // The executor extends PATH to include common CLI locations
       const result = await executeCli("sh", ["-c", "echo $PATH"]);
       expect(result.stdout).toContain(".local/bin");
+    });
+
+    it("should join extended PATH entries with the platform delimiter", () => {
+      const extendedPath = getExtendedPath();
+      expect(extendedPath).toContain(delimiter);
     });
 
     it("should inherit environment variables", async () => {

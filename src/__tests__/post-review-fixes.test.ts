@@ -48,10 +48,10 @@ describe("U22 fix: dedup key respects env vars", () => {
       // Same prompt+flags, different model → must produce DIFFERENT job ids.
       const args = ["-p", "hello", "--agent", "auto-approve"];
       const j1 = manager.startJobWithDedup("mistral", args, "corr-A", {
-        env: { VIBE_ACTIVE_MODEL: "devstral-medium" },
+        env: { VIBE_ACTIVE_MODEL: "mistral-medium-3.5" },
       });
       const j2 = manager.startJobWithDedup("mistral", args, "corr-B", {
-        env: { VIBE_ACTIVE_MODEL: "devstral-large" },
+        env: { VIBE_ACTIVE_MODEL: "devstral-small" },
       });
       expect(j2.deduped).toBe(false);
       expect(j2.snapshot.id).not.toBe(j1.snapshot.id);
@@ -69,10 +69,10 @@ describe("U22 fix: dedup key respects env vars", () => {
     try {
       const args = ["-p", "hello", "--agent", "auto-approve"];
       const j1 = manager.startJobWithDedup("mistral", args, "corr-A", {
-        env: { VIBE_ACTIVE_MODEL: "devstral-medium" },
+        env: { VIBE_ACTIVE_MODEL: "mistral-medium-3.5" },
       });
       const j2 = manager.startJobWithDedup("mistral", args, "corr-B", {
-        env: { VIBE_ACTIVE_MODEL: "devstral-medium" },
+        env: { VIBE_ACTIVE_MODEL: "mistral-medium-3.5" },
       });
       expect(j2.deduped).toBe(true);
       expect(j2.snapshot.id).toBe(j1.snapshot.id);

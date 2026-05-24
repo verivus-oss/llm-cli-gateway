@@ -1,6 +1,6 @@
 import { ChildProcess, spawn, spawnSync, type SpawnOptions } from "child_process";
 import { homedir } from "os";
-import { join, dirname } from "path";
+import { delimiter, join, dirname } from "path";
 import { readdirSync, existsSync } from "fs";
 import { createCircuitBreaker, withRetry } from "./retry.js";
 import type { Logger } from "./logger.js";
@@ -49,7 +49,7 @@ function getNvmPath(): string | null {
   try {
     const versions = readdirSync(nvmVersionsDir);
     cachedNvmPath = versions.length
-      ? versions.map(version => join(nvmVersionsDir, version, "bin")).join(":")
+      ? versions.map(version => join(nvmVersionsDir, version, "bin")).join(delimiter)
       : null;
   } catch {
     cachedNvmPath = null;
@@ -75,7 +75,7 @@ export function getExtendedPath(): string {
   }
 
   const currentPath = process.env.PATH || "";
-  return [...additionalPaths, currentPath].join(":");
+  return [...additionalPaths, currentPath].join(delimiter);
 }
 
 /** Registry of active detached process groups for shutdown cleanup. */
@@ -370,7 +370,14 @@ export async function executeCli(
           return;
         }
 
-        const result = { stdout, stderr, code: code ?? 0 };
+        let result = { stdout, stderr, code: code ?? 0 };
+        if (result.code === -4058 && !stdout && !stderr) {
+          result = {
+            stdout,
+            stderr: `The '${command}' command was not found. Install the ${command} CLI and make sure it is on PATH.`,
+            code: 127,
+          };
+        }
         if (result.code !== 0) {
           const error = new Error(`Process exited with code ${result.code}`) as Error & {
             code?: number;

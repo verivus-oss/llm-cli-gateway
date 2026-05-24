@@ -149,9 +149,10 @@ vibe config set session_logging.enabled true   # or edit ~/.vibe/config.toml
 Vibe-specific notes:
 
 - **Model selection is via the `VIBE_ACTIVE_MODEL` environment variable** —
-  Vibe has no `--model` flag. The gateway resolves the requested model alias
-  (default: `devstral-medium`) and injects it as `VIBE_ACTIVE_MODEL` when
-  spawning `vibe`.
+  Vibe has no `--model` flag. The gateway discovers `~/.vibe/config.toml` /
+  `VIBE_MODELS`, injects `VIBE_ACTIVE_MODEL` only when a model is explicitly
+  requested or Vibe config needs recovery, and retries once after a
+  model-not-found failure with refreshed discovery.
 - **`permissionMode` accepts** `default | plan | accept-edits | auto-approve |
   chat | explore | lean` and emits `--agent <mode>`. The gateway's
   programmatic-mode default is `auto-approve`; pick a stricter mode
@@ -594,7 +595,7 @@ consumes       = ["OUT:mcp-reconnected"]
 ##### `mistral_request`
 Run a Mistral Vibe agentic coding request. Like `grok_request` in shape, but with Vibe's specific surface:
 
-- `model` (string, optional): Resolved alias (e.g. `devstral-medium`, `devstral-large`, `latest`). The resolved value is injected via the `VIBE_ACTIVE_MODEL` environment variable — Vibe has no `--model` flag.
+- `model` (string, optional): Vibe model alias (for example `mistral-medium-3.5` or `latest`). The resolved value is injected via the `VIBE_ACTIVE_MODEL` environment variable; omit it to let the gateway discover Vibe config and avoid stale hardcoded defaults.
 - `permissionMode`: `default | plan | accept-edits | auto-approve | chat | explore | lean` — emitted as `--agent <mode>`. Defaults to `auto-approve` in programmatic mode.
 - `allowedTools` (string[], optional): One `--enabled-tools <tool>` flag per entry (allow-list only).
 - `disallowedTools` (string[], optional): Accepted for parity with the other providers; ignored at the CLI boundary with a logged warning.

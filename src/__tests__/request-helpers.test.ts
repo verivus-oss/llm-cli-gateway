@@ -426,9 +426,9 @@ describe("request-helpers", () => {
       const { prepareMistralRequest } = await import("../request-helpers.js");
       const result = prepareMistralRequest({
         prompt: "hi",
-        resolvedModel: "devstral-large",
+        resolvedModel: "mistral-medium-3.5",
       });
-      expect(result.env).toEqual({ VIBE_ACTIVE_MODEL: "devstral-large" });
+      expect(result.env).toEqual({ VIBE_ACTIVE_MODEL: "mistral-medium-3.5" });
       expect(result.args).not.toContain("--model");
     });
 

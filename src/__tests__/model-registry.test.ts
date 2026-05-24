@@ -29,6 +29,8 @@ const ENV_KEYS = [
   "MISTRAL_MODELS",
   "MISTRAL_MODEL_ALIASES",
   "VIBE_ACTIVE_MODEL",
+  "VIBE_HOME",
+  "VIBE_MODELS",
   "LLM_GATEWAY_DISABLE_MODEL_DISCOVERY",
   "LLM_GATEWAY_MODEL_ALIASES",
 ] as const;
@@ -161,21 +163,59 @@ describe("model registry", () => {
     expect(resolveModelAlias("grok", "default", info)).toBe("grok-team-pin");
   });
 
-  it("seeds Mistral with devstral-medium as the default and resolves latest", () => {
+  it("does not hardcode a Mistral default when Vibe has no config", () => {
     const info = getCliInfo(true);
 
-    expect(info.mistral.models["devstral-medium"]).toContain("Default Vibe coding model");
-    expect(info.mistral.defaultModel).toBe("devstral-medium");
-    expect(resolveModelAlias("mistral", "latest", info)).toBe("devstral-medium");
-    expect(resolveModelAlias("mistral", "default", info)).toBe("devstral-medium");
-    expect(resolveModelAlias("mistral", "devstral-large", info)).toBe("devstral-large");
+    expect(info.mistral.models["mistral-medium-3.5"]).toContain("Vibe coding model alias");
+    expect(info.mistral.defaultModel).toBeUndefined();
+    expect(resolveModelAlias("mistral", "latest", info)).toBeUndefined();
+    expect(resolveModelAlias("mistral", "default", info)).toBeUndefined();
+    expect(resolveModelAlias("mistral", "mistral-medium-3.5", info)).toBe("mistral-medium-3.5");
   });
 
   it("uses VIBE_ACTIVE_MODEL to override the Mistral default when set", () => {
-    process.env.VIBE_ACTIVE_MODEL = "mistral-large-latest";
+    process.env.VIBE_ACTIVE_MODEL = "mistral-medium-3.5";
     const info = getCliInfo(true);
-    expect(info.mistral.defaultModel).toBe("mistral-large-latest");
-    expect(resolveModelAlias("mistral", "latest", info)).toBe("mistral-large-latest");
+    expect(info.mistral.defaultModel).toBe("mistral-medium-3.5");
+    expect(resolveModelAlias("mistral", "latest", info)).toBe("mistral-medium-3.5");
+  });
+
+  it("discovers Mistral models and active_model from Vibe config", () => {
+    const vibeHome = join(tempDir, "vibe-home");
+    mkdirSync(vibeHome);
+    process.env.VIBE_HOME = vibeHome;
+    writeFileSync(
+      join(vibeHome, "config.toml"),
+      [
+        'active_model = "mistral-medium-3.5"',
+        "",
+        "[[models]]",
+        'name = "mistral-vibe-cli-latest"',
+        'provider = "mistral"',
+        'alias = "mistral-medium-3.5"',
+      ].join("\n")
+    );
+
+    const info = getCliInfo(true);
+
+    expect(info.mistral.models["mistral-medium-3.5"]).toContain("mistral-vibe-cli-latest");
+    expect(info.mistral.defaultModel).toBe("mistral-medium-3.5");
+    expect(resolveModelAlias("mistral", "mistral-vibe-cli-latest", info)).toBe(
+      "mistral-medium-3.5"
+    );
+    expect(resolveModelAlias("mistral", "latest", info)).toBe("mistral-medium-3.5");
+  });
+
+  it("recovers a stale Vibe active_model from the discovered recovery list", () => {
+    const vibeHome = join(tempDir, "vibe-home");
+    mkdirSync(vibeHome);
+    process.env.VIBE_HOME = vibeHome;
+    writeFileSync(join(vibeHome, "config.toml"), 'active_model = "devstral-medium"\n');
+
+    const info = getCliInfo(true);
+
+    expect(info.mistral.defaultModel).toBe("mistral-medium-3.5");
+    expect(info.mistral.warnings?.join("\n")).toContain("devstral-medium");
   });
 
   it("supports env-driven Mistral aliases", () => {
