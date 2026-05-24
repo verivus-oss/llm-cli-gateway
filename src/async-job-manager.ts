@@ -19,6 +19,20 @@ const JOB_TTL_MS = 60 * 60 * 1000; // 1 hour in-memory retention; durable store 
 const EVICTION_INTERVAL_MS = 5 * 60 * 1000; // Check every 5 minutes
 const OUTPUT_FLUSH_INTERVAL_MS = 1000; // Throttle DB writes for streaming stdout/stderr
 
+function describeProcessLaunchError(cli: LlmCli, error: Error): { exitCode: number; message: string } {
+  const code = (error as NodeJS.ErrnoException).code;
+  if (code === "ENOENT") {
+    return {
+      exitCode: 127,
+      message: `The '${cli}' command was not found. Install the ${cli} CLI and make sure it is on PATH. (${error.message})`,
+    };
+  }
+  return {
+    exitCode: 126,
+    message: `Failed to launch ${cli} CLI: ${error.message}`,
+  };
+}
+
 interface AsyncJobRecord {
   id: string;
   cli: LlmCli;
@@ -563,10 +577,13 @@ export class AsyncJobManager {
       job.clearIdleTimer?.();
       job.cleanupGroup?.();
       if (job.status === "running") {
+        const launchError = describeProcessLaunchError(cli, error);
         job.status = job.canceled ? "canceled" : "failed";
-        job.error = error.message;
+        job.exitCode = launchError.exitCode;
+        job.error = launchError.message;
+        job.stderr = job.stderr ? `${job.stderr}\n${launchError.message}` : launchError.message;
         job.finishedAt = new Date().toISOString();
-        this.logger.error(`Job ${id} error: ${error.message}`, { correlationId });
+        this.logger.error(`Job ${id} error: ${launchError.message}`, { correlationId });
         this.emitMetrics(job);
         this.persistComplete(job);
         this.fireOnComplete(job);
@@ -581,7 +598,7 @@ export class AsyncJobManager {
         job.cleanupGroup?.();
       }
       if (job.status !== "running") {
-        job.exitCode = code ?? job.exitCode;
+        job.exitCode = job.exitCode ?? code ?? null;
         if (!job.finishedAt) {
           job.finishedAt = new Date().toISOString();
         }

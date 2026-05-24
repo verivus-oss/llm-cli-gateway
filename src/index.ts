@@ -432,7 +432,7 @@ async function awaitJobOrDefer(
       }
       return {
         stdout: result.stdout,
-        stderr: result.stderr,
+        stderr: result.stderr || result.error || "",
         code: result.exitCode ?? 1,
       };
     }

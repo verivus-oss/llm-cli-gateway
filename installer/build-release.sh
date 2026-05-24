@@ -426,6 +426,17 @@ fi
   "${SUM_CMD[@]}" "${files[@]}" > SHA256SUMS
 )
 
+windows_exe_sha=""
+windows_bundle_sha=""
+if [[ -f "${DIST_DIR}/SHA256SUMS" ]]; then
+  windows_exe_sha="$(
+    awk -v name="llm-cli-gateway-${VERSION}-windows-amd64.exe" '$2 == name { print $1 }' "${DIST_DIR}/SHA256SUMS"
+  )"
+  windows_bundle_sha="$(
+    awk -v name="llm-cli-gateway-bundle-${VERSION}-windows-amd64.tar.gz" '$2 == name { print $1 }' "${DIST_DIR}/SHA256SUMS"
+  )"
+fi
+
 # 4. Release manifest with copy/paste commands suitable for assistant
 #    prompts. Tokens, URLs, and provider credentials are NEVER embedded.
 manifest="${DIST_DIR}/release-manifest.json"
@@ -441,7 +452,7 @@ cat > "${manifest}" <<EOF
   "setup_commands": {
     "verify_checksum_linux": "sha256sum --check SHA256SUMS",
     "verify_checksum_macos": "shasum -a 256 --check SHA256SUMS",
-    "install_windows_oneliner": "powershell -NoProfile -ExecutionPolicy Bypass -Command \"irm ${PUBLIC_BASE}/install-windows.ps1 | iex\"",
+    "install_windows_direct": "\$ErrorActionPreference='Stop'; \$InstallDir=Join-Path \$env:LOCALAPPDATA 'Programs\\\\llm-cli-gateway'; \$Exe=Join-Path \$InstallDir 'llm-cli-gateway.exe'; New-Item -ItemType Directory -Force \$InstallDir | Out-Null; Invoke-WebRequest -UseBasicParsing -Uri '${PUBLIC_BASE}/llm-cli-gateway-${VERSION}-windows-amd64.exe' -OutFile \$Exe; if ((Get-FileHash \$Exe -Algorithm SHA256).Hash.ToLowerInvariant() -ne '${windows_exe_sha}') { throw 'Checksum mismatch' }; \$env:Path=\"\$env:Path;\$InstallDir\"; \$env:RVWR_GATEWAY_BUNDLE_URL='${PUBLIC_BASE}/llm-cli-gateway-bundle-${VERSION}-windows-amd64.tar.gz'; \$env:RVWR_GATEWAY_BUNDLE_SHA256='${windows_bundle_sha}'; & \$Exe setup; & \$Exe stop; & \$Exe install-bundle; & \$Exe start; & \$Exe status; Invoke-RestMethod -Uri 'http://127.0.0.1:3333/healthz'",
     "install_unix_oneliner": "export RVWR_GATEWAY_BUNDLE_URL=${PUBLIC_BASE}/llm-cli-gateway-bundle-${VERSION}-<os>-<arch>.tar.gz RVWR_GATEWAY_BUNDLE_SHA256=<bundle-sha256>; chmod +x ./llm-cli-gateway-${VERSION}-<os>-<arch> && ./llm-cli-gateway-${VERSION}-<os>-<arch> setup && ./llm-cli-gateway-${VERSION}-<os>-<arch> install-bundle",
     "install_windows_powershell": "\$env:RVWR_GATEWAY_BUNDLE_URL='${PUBLIC_BASE}/llm-cli-gateway-bundle-${VERSION}-windows-amd64.tar.gz'; \$env:RVWR_GATEWAY_BUNDLE_SHA256='<bundle-sha256>'; llm-cli-gateway setup; llm-cli-gateway stop; llm-cli-gateway install-bundle; llm-cli-gateway start",
     "doctor_after_install": "llm-cli-gateway doctor",

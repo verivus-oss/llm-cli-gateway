@@ -27,8 +27,8 @@ Quote-for-user:
 # Verify before run.
 sha256sum --check SHA256SUMS
 
-# Windows one-command install.
-powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://github.com/verivus-oss/llm-cli-gateway/releases/latest/download/install-windows.ps1 | iex"
+# Windows install: use the release manifest's pinned direct-download PowerShell
+# command. Do not pipe remote scripts into Invoke-Expression.
 
 # Install.
 chmod +x llm-cli-gateway-<ver>-<os>-<arch>

@@ -88,14 +88,27 @@ assistant-led instructions.
 Windows PowerShell:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://github.com/verivus-oss/llm-cli-gateway/releases/latest/download/install-windows.ps1 | iex"
-llm-cli-gateway status
-llm-cli-gateway doctor
+$Version = '<version>'
+$Base = "https://github.com/verivus-oss/llm-cli-gateway/releases/download/v$Version"
+$InstallDir = Join-Path (Join-Path $env:LOCALAPPDATA 'Programs') 'llm-cli-gateway'
+$Exe = Join-Path $InstallDir 'llm-cli-gateway.exe'
+New-Item -ItemType Directory -Force $InstallDir | Out-Null
+Invoke-WebRequest -UseBasicParsing "$Base/llm-cli-gateway-$Version-windows-amd64.exe" -OutFile $Exe
+$env:RVWR_GATEWAY_BUNDLE_URL = "$Base/llm-cli-gateway-bundle-$Version-windows-amd64.tar.gz"
+$env:RVWR_GATEWAY_BUNDLE_SHA256 = '<bundle-sha256-from-SHA256SUMS>'
+& $Exe setup
+& $Exe stop
+& $Exe install-bundle
+& $Exe start
+& $Exe status
+& $Exe doctor
 ```
 
-The script downloads `SHA256SUMS`, verifies the Windows bootstrapper, installs
-the checksummed Windows platform bundle, starts the gateway, and runs `doctor`.
-It also writes a stable `llm-cli-gateway.exe` command to
+The release manifest includes a pinned Windows PowerShell command with the
+exact artifact version and SHA256 values. The install flow downloads the
+Windows bootstrapper, installs the checksummed Windows platform bundle, starts
+the gateway, and runs `doctor`. It also writes a stable `llm-cli-gateway.exe`
+command to
 `%LOCALAPPDATA%\Programs\llm-cli-gateway`, adds that directory to the user PATH,
 and uses that stable command for future `start`, `stop`, `status`, and `doctor`
 operations.

@@ -2,6 +2,14 @@
 
 All notable changes to the llm-cli-gateway project.
 
+## [1.5.13] - 2026-05-24
+
+### Fixed
+
+- Report missing provider CLI launches as a clear command-not-found error instead of leaking Windows/libuv codes such as `-4058`.
+- Preserve async provider launch errors in job stderr/result output so sync MCP tools can return actionable setup guidance.
+- Replace `irm | iex` Windows install guidance and generated release manifest commands with direct binary download plus SHA256 verification.
+
 ## [1.5.12] - 2026-05-24
 
 ### Fixed
