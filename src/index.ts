@@ -1890,9 +1890,8 @@ export async function handleGeminiRequest(
   );
 
   try {
-    // U27: Session arg planning. For fresh sessions, emit `--session-id <uuid>`
-    // so the gateway and Gemini agree on the session identifier from turn 1.
-    // For resume flows, fall back to `--resume <id>` (existing behavior).
+    // Gemini CLI 0.43 supports `--resume`, but not a supported fresh
+    // `--session-id` flag. Fresh sessions emit no session flag.
     const sessionPlan = resolveGeminiSessionPlan({
       sessionId: params.sessionId,
       resumeLatest: params.resumeLatest,
@@ -1900,7 +1899,7 @@ export async function handleGeminiRequest(
     });
     args.push(...sessionPlan.args);
     const userProvidedSession = sessionPlan.resumed;
-    const effectiveSessionIdHint = sessionPlan.emittedSessionId ?? params.sessionId;
+    const effectiveSessionIdHint = sessionPlan.resumed ? params.sessionId : undefined;
 
     const result = await awaitJobOrDefer(
       "gemini",
@@ -1940,9 +1939,9 @@ export async function handleGeminiRequest(
     }
     wasSuccessful = true;
 
-    // U27 Post-success session I/O. Mirror the gateway store 1:1 to whatever
-    // session id Gemini is using (either the user-supplied resume id or the
-    // deterministic --session-id we emitted).
+    // Post-success session I/O for explicit resume flows. Fresh Gemini sessions
+    // are owned by the CLI because the current CLI has no supported fresh
+    // session-id flag the gateway can inject.
     let effectiveSessionId = effectiveSessionIdHint;
     if (effectiveSessionId) {
       const existing = await deps.sessionManager.getSession(effectiveSessionId);
@@ -2045,7 +2044,7 @@ export async function handleGeminiRequestAsync(
   const { corrId, args, requestedMcpServers, approvalDecision } = prep;
 
   try {
-    // U27: Session arg planning with deterministic --session-id for fresh sessions.
+    // Gemini CLI 0.43 supports `--resume`, but fresh sessions emit no session flag.
     const sessionPlan = resolveGeminiSessionPlan({
       sessionId: params.sessionId,
       resumeLatest: params.resumeLatest,
@@ -2054,7 +2053,7 @@ export async function handleGeminiRequestAsync(
     args.push(...sessionPlan.args);
 
     // Pre-start session I/O (async handlers: prevent orphaned jobs)
-    let effectiveSessionId = sessionPlan.emittedSessionId ?? params.sessionId;
+    let effectiveSessionId = sessionPlan.resumed ? params.sessionId : undefined;
     if (effectiveSessionId) {
       const existing = await deps.sessionManager.getSession(effectiveSessionId);
       if (!existing) {

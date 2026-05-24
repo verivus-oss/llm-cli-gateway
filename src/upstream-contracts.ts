@@ -287,7 +287,6 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       "--policy": { arity: "one", description: "Policy file path" },
       "--admin-policy": { arity: "one", description: "Admin policy file path" },
       "-o": { arity: "one", values: ["json"], description: "Output format" },
-      "--session-id": { arity: "one", description: "Fresh session UUID" },
       "--resume": { arity: "one", description: "Resume session" },
     },
     env: {},

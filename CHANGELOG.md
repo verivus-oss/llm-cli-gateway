@@ -2,6 +2,12 @@
 
 All notable changes to the llm-cli-gateway project.
 
+## [1.5.25] - 2026-05-25
+
+### Fixed
+
+- Stop passing unsupported Gemini `--session-id` arguments for fresh or `createNewSession` requests. The gateway now lets Gemini CLI create fresh sessions with its own default behavior and only emits `--resume` for explicit resume requests, fixing Gemini CLI 0.43 exit-code-1 failures misreported as spawn errors.
+
 ## [1.5.24] - 2026-05-25
 
 ### Fixed
