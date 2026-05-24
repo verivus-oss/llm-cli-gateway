@@ -11,8 +11,8 @@ import {
   unregisterProcessGroup,
 } from "../executor.js";
 import { spawn } from "child_process";
-import { delimiter } from "path";
-import { mkdtempSync, writeFileSync } from "fs";
+import { delimiter, win32 } from "path";
+import { mkdirSync, mkdtempSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 
@@ -143,7 +143,7 @@ describe("executeCli", () => {
       expect(extendedPath).toContain("C:\\Windows\\System32");
     });
 
-    it("prefers Windows executable shims over extensionless npm shell shims", () => {
+    it("wraps Windows cmd shims in cmd.exe with quoted arguments", () => {
       const shimDir = mkdtempSync(join(tmpdir(), "gateway-win-shims-"));
       const previousCwd = process.cwd();
       try {
@@ -151,17 +151,37 @@ describe("executeCli", () => {
         writeFileSync("gemini", "#!/bin/sh\nexit 0\n");
         writeFileSync("gemini.cmd", "@echo off\r\nexit /b 0\r\n");
 
-        const resolved = resolveCommandForSpawn("gemini", [], {
+        const resolved = resolveCommandForSpawn("gemini", ["--model", "a&b", "100%"], {
           envPath: ".",
           platform: "win32",
         });
 
         expect(resolved.command.toLowerCase()).toBe("cmd.exe");
         expect(resolved.args.slice(0, 3)).toEqual(["/d", "/s", "/c"]);
-        expect(resolved.args[3]?.toLowerCase()).toBe("gemini.cmd");
+        expect(resolved.args[3]?.toLowerCase()).toBe('"gemini.cmd ^"--model^" ^"a^&b^" ^"100^%^""');
+        expect(resolved.windowsVerbatimArguments).toBe(true);
       } finally {
         process.chdir(previousCwd);
       }
+    });
+
+    it("wraps Windows bat shims and paths with spaces in cmd.exe", () => {
+      const shimRoot = mkdtempSync(join(tmpdir(), "gateway win shims (x86) "));
+      const shimDir = join(shimRoot, "npm shims");
+      mkdirSync(shimDir, { recursive: true });
+      writeFileSync(join(shimDir, "provider.bat"), "@echo off\r\nexit /b 0\r\n");
+
+      const shimPath = join(shimDir, "provider.bat");
+      const resolved = resolveCommandForSpawn(shimPath, ["two words"], {
+        platform: "win32",
+      });
+
+      expect(resolved.command.toLowerCase()).toBe("cmd.exe");
+      expect(resolved.args.slice(0, 3)).toEqual(["/d", "/s", "/c"]);
+      expect(resolved.args[3]).toBe(
+        `"${win32.normalize(shimPath).replace(/([()\][%!^"`<>&|;, *?])/g, "^$1")} ^"two^ words^""`
+      );
+      expect(resolved.windowsVerbatimArguments).toBe(true);
     });
 
     it("should inherit environment variables", async () => {

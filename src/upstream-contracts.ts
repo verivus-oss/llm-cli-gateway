@@ -645,6 +645,7 @@ export function probeInstalledCliContract(
       maxBuffer: 1024 * 1024,
       env,
       windowsHide: true,
+      windowsVerbatimArguments: resolved.windowsVerbatimArguments,
     });
     if (result.error) {
       return {

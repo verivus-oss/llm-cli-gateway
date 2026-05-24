@@ -143,6 +143,7 @@ function runCommand(
     input: "",
     timeout: timeoutMs,
     windowsHide: true,
+    windowsVerbatimArguments: resolved.windowsVerbatimArguments,
   });
   const output = sanitizeOutput(`${result.stdout || ""}\n${result.stderr || ""}`);
   return {

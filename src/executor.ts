@@ -185,6 +185,7 @@ function dedupePaths(paths: string[], platform: NodeJS.Platform): string[] {
 export interface ResolvedSpawnCommand {
   command: string;
   args: string[];
+  windowsVerbatimArguments?: boolean;
 }
 
 export function resolveCommandForSpawn(
@@ -215,11 +216,30 @@ export function resolveCommandForSpawn(
   if ([".cmd", ".bat"].includes(extname(resolved).toLowerCase())) {
     return {
       command: "cmd.exe",
-      args: ["/d", "/s", "/c", resolved, ...args],
+      args: ["/d", "/s", "/c", `"${buildWindowsCmdCommand(resolved, args)}"`],
+      windowsVerbatimArguments: true,
     };
   }
 
   return { command: resolved, args };
+}
+
+function buildWindowsCmdCommand(command: string, args: string[]): string {
+  return [escapeWindowsCmdCommand(command), ...args.map(escapeWindowsCmdArgument)].join(" ");
+}
+
+const WINDOWS_CMD_META_CHARS = /([()\][%!^"`<>&|;, *?])/g;
+
+function escapeWindowsCmdCommand(value: string): string {
+  return win32.normalize(value).replace(WINDOWS_CMD_META_CHARS, "^$1");
+}
+
+function escapeWindowsCmdArgument(value: string): string {
+  let arg = `${value}`;
+  arg = arg.replace(/(?=(\\+?)?)\1"/g, '$1$1\\"');
+  arg = arg.replace(/(?=(\\+?)?)\1$/, "$1$1");
+  arg = `"${arg}"`;
+  return arg.replace(WINDOWS_CMD_META_CHARS, "^$1");
 }
 
 function resolveWindowsCommandPath(command: string, envPath: string): string | null {
@@ -354,6 +374,7 @@ export function spawnCliProcess(
     cwd: options.cwd,
     detached,
     windowsHide: true,
+    windowsVerbatimArguments: resolved.windowsVerbatimArguments,
     stdio: options.stdio,
     env: options.env,
   });

@@ -2,6 +2,12 @@
 
 All notable changes to the llm-cli-gateway project.
 
+## [1.5.30] - 2026-05-25
+
+### Fixed
+
+- Quote Windows `.cmd` and `.bat` provider shim invocations through `cmd.exe` to preserve paths with spaces and escape command-processor metacharacters in forwarded arguments.
+
 ## [1.5.29] - 2026-05-25
 
 ### Fixed
