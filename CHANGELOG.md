@@ -2,6 +2,14 @@
 
 All notable changes to the llm-cli-gateway project.
 
+## [1.5.17] - 2026-05-24
+
+### Fixed
+
+- Make desktop bootstrapper `doctor --json` delegate to the installed Node gateway doctor when a verified bundle is installed, so provider availability and `gateway.version` reflect the active bundle instead of stale bootstrapper-side placeholders.
+- Add `gateway.bootstrapper_version` and `gateway.diagnostic_source` to desktop doctor output so bundle version and bootstrapper version are distinguishable.
+- Include `bootstrapper_version` in desktop `upgrade` output and make the post-upgrade note explicit that command fixes require replacing the bootstrapper executable.
+
 ## [1.5.16] - 2026-05-24
 
 ### Fixed

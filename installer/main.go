@@ -164,15 +164,16 @@ func upgrade() error {
 		return err
 	}
 	return printJSON(map[string]any{
-		"ok":                 true,
-		"action":             "upgrade",
-		"bundle":             spec.Name,
-		"bundle_source":      spec.Source,
-		"bundle_version":     spec.Version,
-		"gateway_dir":        installResult["gateway_dir"],
-		"sha256":             installResult["sha256"],
-		"previously_running": prevStatus.Running,
-		"next":               "Run start to relaunch the gateway with the upgraded bundle.",
+		"ok":                   true,
+		"action":               "upgrade",
+		"bootstrapper_version": releaseVersion,
+		"bundle":               spec.Name,
+		"bundle_source":        spec.Source,
+		"bundle_version":       spec.Version,
+		"gateway_dir":          installResult["gateway_dir"],
+		"sha256":               installResult["sha256"],
+		"previously_running":   prevStatus.Running,
+		"next":                 "Run start to relaunch the gateway with the upgraded bundle. Replace the bootstrapper executable separately when you need bootstrapper command fixes.",
 	})
 }
 

@@ -1,11 +1,13 @@
 package config
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -75,6 +77,9 @@ func DoctorJSON() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	if body, ok := nodeDoctorJSON(cfg); ok {
+		return body, nil
+	}
 	_, err = os.Stat(filepath.Join(cfg.AppDir, "auth-token"))
 	cfg.AuthTokenSet = err == nil
 	port, err := strconv.Atoi(cfg.HTTPPort)
@@ -95,8 +100,11 @@ func DoctorJSON() ([]byte, error) {
 			"node_version": "",
 		},
 		"gateway": map[string]any{
-			"name":    "llm-cli-gateway",
-			"version": GatewayVersion,
+			"name":                  "llm-cli-gateway",
+			"version":               installedGatewayVersion(cfg),
+			"bootstrapper_version":  GatewayVersion,
+			"diagnostic_source":     "bootstrapper-fallback",
+			"diagnostic_limitation": "Provider runtime status is only checked by the installed Node gateway doctor.",
 		},
 		"transport": map[string]any{
 			"default": "http",
@@ -129,6 +137,66 @@ func DoctorJSON() ([]byte, error) {
 		"next_actions": nextActions(cfg.AuthTokenSet, publicURL, httpsConfigured),
 	}
 	return json.MarshalIndent(report, "", "  ")
+}
+
+func nodeDoctorJSON(cfg Config) ([]byte, bool) {
+	entry := filepath.Join(cfg.GatewayDir, "dist", "index.js")
+	if _, err := os.Stat(entry); err != nil {
+		return nil, false
+	}
+	nodePath := cfg.RuntimeNode
+	if _, err := os.Stat(nodePath); err != nil {
+		if os.Getenv("RVWR_ALLOW_HOST_NODE") != "1" {
+			return nil, false
+		}
+		nodePath = "node"
+	}
+
+	token := ""
+	if raw, err := os.ReadFile(filepath.Join(cfg.AppDir, "auth-token")); err == nil {
+		token = string(raw)
+	}
+
+	cmd := exec.Command(nodePath, entry, "doctor", "--json")
+	cmd.Env = EnvForGateway(cfg, token)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, false
+	}
+
+	var report map[string]any
+	if err := json.Unmarshal(output, &report); err != nil {
+		return nil, false
+	}
+	gateway, _ := report["gateway"].(map[string]any)
+	if gateway == nil {
+		gateway = map[string]any{}
+	}
+	gateway["bootstrapper_version"] = GatewayVersion
+	gateway["diagnostic_source"] = "node-gateway"
+	report["gateway"] = gateway
+
+	body, err := json.MarshalIndent(report, "", "  ")
+	if err != nil {
+		return nil, false
+	}
+	return body, true
+}
+
+func installedGatewayVersion(cfg Config) string {
+	body, err := os.ReadFile(filepath.Join(cfg.GatewayDir, "package.json"))
+	if err != nil {
+		return GatewayVersion
+	}
+	var pkg struct {
+		Version string `json:"version"`
+	}
+	if err := json.Unmarshal(body, &pkg); err != nil || pkg.Version == "" {
+		return GatewayVersion
+	}
+	return pkg.Version
 }
 
 func providerDoctor(provider, displayName string) map[string]any {
