@@ -2,6 +2,12 @@
 
 All notable changes to the llm-cli-gateway project.
 
+## [1.5.29] - 2026-05-25
+
+### Fixed
+
+- Launch Windows `.cmd` and `.bat` provider shims through `cmd.exe` instead of spawning them directly, fixing Gemini npm shim failures reported as `spawn EINVAL` by `gemini_request`, `cli_versions`, and `contracts --probe-installed`.
+
 ## [1.5.28] - 2026-05-25
 
 ### Fixed

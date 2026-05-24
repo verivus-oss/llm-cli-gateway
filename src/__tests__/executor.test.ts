@@ -156,7 +156,9 @@ describe("executeCli", () => {
           platform: "win32",
         });
 
-        expect(resolved.command.toLowerCase()).toBe("gemini.cmd");
+        expect(resolved.command.toLowerCase()).toBe("cmd.exe");
+        expect(resolved.args.slice(0, 3)).toEqual(["/d", "/s", "/c"]);
+        expect(resolved.args[3]?.toLowerCase()).toBe("gemini.cmd");
       } finally {
         process.chdir(previousCwd);
       }

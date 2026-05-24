@@ -212,6 +212,13 @@ export function resolveCommandForSpawn(
     };
   }
 
+  if ([".cmd", ".bat"].includes(extname(resolved).toLowerCase())) {
+    return {
+      command: "cmd.exe",
+      args: ["/d", "/s", "/c", resolved, ...args],
+    };
+  }
+
   return { command: resolved, args };
 }
 
