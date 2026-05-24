@@ -20,21 +20,25 @@ import (
 var GatewayVersion = "dev"
 
 type Config struct {
-	AppDir          string `json:"app_dir"`
-	GatewayDir      string `json:"gateway_dir"`
-	RuntimeDir      string `json:"runtime_dir"`
-	RuntimeNode     string `json:"runtime_node"`
-	HTTPHost        string `json:"http_host"`
-	HTTPPort        string `json:"http_port"`
-	HTTPPath        string `json:"http_path"`
-	PublicURL       string `json:"public_url,omitempty"`
-	VerifyPublicURL bool   `json:"verify_public_url,omitempty"`
-	AuthTokenSet    bool   `json:"auth_token_set"`
+	AppDir              string `json:"app_dir"`
+	GatewayDir          string `json:"gateway_dir"`
+	RuntimeDir          string `json:"runtime_dir"`
+	RuntimeNode         string `json:"runtime_node"`
+	HTTPHost            string `json:"http_host"`
+	HTTPPort            string `json:"http_port"`
+	HTTPPath            string `json:"http_path"`
+	PublicURL           string `json:"public_url,omitempty"`
+	VerifyPublicURL     bool   `json:"verify_public_url,omitempty"`
+	ChatGPTNoAuthPath   string `json:"chatgpt_no_auth_path,omitempty"`
+	ChatGPTConnectorURL string `json:"chatgpt_connector_url,omitempty"`
+	AuthTokenSet        bool   `json:"auth_token_set"`
 }
 
 type Settings struct {
-	PublicURL       string `json:"public_url,omitempty"`
-	VerifyPublicURL bool   `json:"verify_public_url,omitempty"`
+	PublicURL           string `json:"public_url,omitempty"`
+	VerifyPublicURL     bool   `json:"verify_public_url,omitempty"`
+	ChatGPTNoAuthPath   string `json:"chatgpt_no_auth_path,omitempty"`
+	ChatGPTConnectorURL string `json:"chatgpt_connector_url,omitempty"`
 }
 
 func Default() (Config, error) {
@@ -51,15 +55,17 @@ func Default() (Config, error) {
 	}
 	verifyPublicURL := settings.VerifyPublicURL || os.Getenv("LLM_GATEWAY_VERIFY_PUBLIC_URL") == "1"
 	return Config{
-		AppDir:          appDir,
-		GatewayDir:      filepath.Join(appDir, "gateway"),
-		RuntimeDir:      runtimeDir,
-		RuntimeNode:     filepath.Join(runtimeDir, nodeExecutableName()),
-		HTTPHost:        envDefault("LLM_GATEWAY_HTTP_HOST", "127.0.0.1"),
-		HTTPPort:        envDefault("LLM_GATEWAY_HTTP_PORT", "3333"),
-		HTTPPath:        envDefault("LLM_GATEWAY_HTTP_PATH", "/mcp"),
-		PublicURL:       publicURL,
-		VerifyPublicURL: verifyPublicURL,
+		AppDir:              appDir,
+		GatewayDir:          filepath.Join(appDir, "gateway"),
+		RuntimeDir:          runtimeDir,
+		RuntimeNode:         filepath.Join(runtimeDir, nodeExecutableName()),
+		HTTPHost:            envDefault("LLM_GATEWAY_HTTP_HOST", "127.0.0.1"),
+		HTTPPort:            envDefault("LLM_GATEWAY_HTTP_PORT", "3333"),
+		HTTPPath:            envDefault("LLM_GATEWAY_HTTP_PATH", "/mcp"),
+		PublicURL:           publicURL,
+		VerifyPublicURL:     verifyPublicURL,
+		ChatGPTNoAuthPath:   settings.ChatGPTNoAuthPath,
+		ChatGPTConnectorURL: settings.ChatGPTConnectorURL,
 	}, nil
 }
 
@@ -89,6 +95,90 @@ func ClearPublicURL() error {
 	settings := readSettings(cfg.AppDir)
 	settings.PublicURL = ""
 	settings.VerifyPublicURL = false
+	settings.ChatGPTConnectorURL = ""
+	return writeSettings(cfg.AppDir, settings)
+}
+
+func EnsureChatGPTNoAuthPath() (Settings, bool, error) {
+	cfg, err := Default()
+	if err != nil {
+		return Settings{}, false, err
+	}
+	settings := readSettings(cfg.AppDir)
+	if settings.ChatGPTNoAuthPath != "" {
+		return settings, false, nil
+	}
+	path, err := randomChatGPTNoAuthPath()
+	if err != nil {
+		return Settings{}, false, err
+	}
+	settings.ChatGPTNoAuthPath = path
+	if settings.PublicURL != "" {
+		if connectorURL, err := chatGPTConnectorURL(settings.PublicURL, path); err == nil {
+			settings.ChatGPTConnectorURL = connectorURL
+		}
+	}
+	if err := writeSettings(cfg.AppDir, settings); err != nil {
+		return Settings{}, false, err
+	}
+	return settings, true, nil
+}
+
+func SetChatGPTURLFromPublicURL(rawURL string) (Settings, error) {
+	cfg, err := Default()
+	if err != nil {
+		return Settings{}, err
+	}
+	settings := readSettings(cfg.AppDir)
+	if settings.ChatGPTNoAuthPath == "" {
+		path, err := randomChatGPTNoAuthPath()
+		if err != nil {
+			return Settings{}, err
+		}
+		settings.ChatGPTNoAuthPath = path
+	}
+	connectorURL, err := chatGPTConnectorURL(rawURL, settings.ChatGPTNoAuthPath)
+	if err != nil {
+		return Settings{}, err
+	}
+	settings.ChatGPTConnectorURL = connectorURL
+	if err := writeSettings(cfg.AppDir, settings); err != nil {
+		return Settings{}, err
+	}
+	return settings, nil
+}
+
+func RotateChatGPTURL() (Settings, error) {
+	cfg, err := Default()
+	if err != nil {
+		return Settings{}, err
+	}
+	settings := readSettings(cfg.AppDir)
+	path, err := randomChatGPTNoAuthPath()
+	if err != nil {
+		return Settings{}, err
+	}
+	settings.ChatGPTNoAuthPath = path
+	settings.ChatGPTConnectorURL = ""
+	if settings.PublicURL != "" {
+		if connectorURL, err := chatGPTConnectorURL(settings.PublicURL, path); err == nil {
+			settings.ChatGPTConnectorURL = connectorURL
+		}
+	}
+	if err := writeSettings(cfg.AppDir, settings); err != nil {
+		return Settings{}, err
+	}
+	return settings, nil
+}
+
+func ClearChatGPTURL() error {
+	cfg, err := Default()
+	if err != nil {
+		return err
+	}
+	settings := readSettings(cfg.AppDir)
+	settings.ChatGPTConnectorURL = ""
+	settings.ChatGPTNoAuthPath = ""
 	return writeSettings(cfg.AppDir, settings)
 }
 
@@ -107,6 +197,25 @@ func NormalizePublicURL(rawURL, defaultPath string) (string, error) {
 	if parsed.Path == "" || parsed.Path == "/" {
 		parsed.Path = defaultPath
 	}
+	return parsed.String(), nil
+}
+
+func chatGPTConnectorURL(rawURL, noAuthPath string) (string, error) {
+	path := normalizeNoAuthPath(noAuthPath)
+	if path == "" {
+		return "", errors.New("ChatGPT no-auth path is required")
+	}
+	normalized, err := NormalizePublicURL(rawURL, "/mcp")
+	if err != nil {
+		return "", err
+	}
+	parsed, err := url.Parse(normalized)
+	if err != nil {
+		return "", err
+	}
+	parsed.Path = path
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
 	return parsed.String(), nil
 }
 
@@ -178,6 +287,7 @@ func DoctorJSON() ([]byte, error) {
 				"path":                  cfg.HTTPPath,
 				"public_url_configured": publicURL != "",
 				"public_url":            nullableString(redactedPublicURL),
+				"chatgpt_connector_url": nullableString(redactDiagnosticURL(cfg.ChatGPTConnectorURL)),
 			},
 		},
 		"auth": map[string]any{
@@ -382,6 +492,9 @@ func EnvForGateway(cfg Config, token string) []string {
 	if cfg.VerifyPublicURL {
 		env = append(env, "LLM_GATEWAY_VERIFY_PUBLIC_URL=1")
 	}
+	if cfg.ChatGPTNoAuthPath != "" {
+		env = append(env, "LLM_GATEWAY_NO_AUTH_PATHS="+cfg.ChatGPTNoAuthPath)
+	}
 	return env
 }
 
@@ -412,6 +525,25 @@ func randomToken() (string, error) {
 	return hex.EncodeToString(buf), nil
 }
 
+func randomChatGPTNoAuthPath() (string, error) {
+	token, err := randomToken()
+	if err != nil {
+		return "", err
+	}
+	return "/chatgpt/" + token + "/mcp", nil
+}
+
+func normalizeNoAuthPath(path string) string {
+	trimmed := strings.TrimSpace(path)
+	if trimmed == "" || !strings.HasPrefix(trimmed, "/") {
+		return ""
+	}
+	if strings.ContainsAny(trimmed, "?#") || strings.Contains(trimmed, "..") {
+		return ""
+	}
+	return trimmed
+}
+
 func settingsPath(appDir string) string {
 	return filepath.Join(appDir, "settings.json")
 }
@@ -426,6 +558,8 @@ func readSettings(appDir string) Settings {
 		return Settings{}
 	}
 	settings.PublicURL = strings.TrimSpace(settings.PublicURL)
+	settings.ChatGPTNoAuthPath = normalizeNoAuthPath(settings.ChatGPTNoAuthPath)
+	settings.ChatGPTConnectorURL = strings.TrimSpace(settings.ChatGPTConnectorURL)
 	return settings
 }
 

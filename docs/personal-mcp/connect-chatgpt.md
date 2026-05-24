@@ -10,12 +10,15 @@ ChatGPT is a remote web client. Use this guide only when the setup UI shows a pu
 
 ## Steps
 
-1. Open the setup UI and load doctor JSON.
-2. Confirm the gateway shows auth configured and web clients ready.
+1. Run `llm-cli-gateway tunnel start`.
+2. Run `llm-cli-gateway chatgpt-url`.
 3. In ChatGPT, open the custom MCP connector/app setup flow available for your plan or workspace.
-4. Copy the public HTTPS MCP URL from the setup UI.
-5. Configure auth in the connector UI without pasting raw bearer tokens into chat.
-6. Save the connector and return to the setup UI for fresh doctor JSON.
+4. Copy the `chatgpt.url` value into the MCP server URL field.
+5. Set Authentication to `No Authentication`.
+6. Save the connector and rerun `llm-cli-gateway doctor --json`.
+
+Do not use the default `/mcp` URL for ChatGPT unless the ChatGPT UI explicitly supports static
+Authorization headers. The default `/mcp` URL remains bearer-protected for other MCP clients.
 
 ## Verification
 

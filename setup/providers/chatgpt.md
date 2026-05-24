@@ -6,11 +6,11 @@ ChatGPT is a verified inbound MCP host with plan limits. Use this path only when
 
 ## Human Instructions
 
-1. Start the gateway with HTTP transport and bearer auth.
-2. Configure a public HTTPS tunnel or reverse proxy to the gateway `/mcp` endpoint.
-3. Run `llm-cli-gateway doctor --json` and confirm `endpoint_exposure.web_clients_supported` is `true`.
-4. In ChatGPT connector/app settings, add the generated MCP URL.
-5. Configure bearer auth in the ChatGPT UI when prompted. Do not paste the token into a remote chat transcript.
+1. Run `llm-cli-gateway tunnel start` or configure a public HTTPS reverse proxy.
+2. Run `llm-cli-gateway chatgpt-url` or `llm-cli-gateway print-client-config`.
+3. In ChatGPT connector/app settings, add the generated `chatgpt.url`.
+4. Set Authentication to `No Authentication`.
+5. Do not paste the ChatGPT URL, bearer token, tunnel tokens, or provider credentials into a remote chat transcript.
 
 ## Assistant Instructions
 
@@ -20,8 +20,8 @@ Ask only for OS, desired clients, redacted `doctor --json`, and the setup packet
 
 ```text
 Name: llm-cli-gateway
-MCP URL: <public-https-url>/mcp
-Authentication: Bearer token configured in ChatGPT connector UI
+MCP URL: <chatgpt.url>
+Authentication: No Authentication
 ```
 
 ## Verification
@@ -30,4 +30,4 @@ In ChatGPT, ask: `validate this sentence with two other models: The gateway is c
 
 ## Known Limitations
 
-Plan access and connector UI names can vary. Gemini web status does not affect ChatGPT setup. Never include bearer tokens, tunnel tokens, provider credentials, or authorization headers in assistant prompts.
+Plan access and connector UI names can vary. Gemini web status does not affect ChatGPT setup. The default `/mcp` URL is still bearer-protected; ChatGPT uses a separate high-entropy URL because its connector setup may not support arbitrary static Authorization headers. Never include ChatGPT URLs, bearer tokens, tunnel tokens, provider credentials, or authorization headers in assistant prompts.

@@ -92,12 +92,30 @@ func run(args []string) error {
 		return printJSON(map[string]any{"ok": true, "changed": false, "message": "No repair actions were required."})
 	case "public-url":
 		return publicURLCommand(args[1:])
+	case "chatgpt-url":
+		return chatGPTURLCommand(args[1:])
 	case "tunnel":
 		return tunnelCommand(args[1:])
 	case "print-client-config":
 		cfg, _, err := config.Ensure()
 		if err != nil {
 			return err
+		}
+		if _, _, err := config.EnsureChatGPTNoAuthPath(); err != nil {
+			return err
+		}
+		cfg, err = config.Default()
+		if err != nil {
+			return err
+		}
+		if cfg.PublicURL != "" && cfg.ChatGPTConnectorURL == "" {
+			if _, err := config.SetChatGPTURLFromPublicURL(cfg.PublicURL); err != nil {
+				return err
+			}
+			cfg, err = config.Default()
+			if err != nil {
+				return err
+			}
 		}
 		endpoint := "http://" + cfg.HTTPHost + ":" + cfg.HTTPPort + cfg.HTTPPath
 		if cfg.PublicURL != "" {
@@ -109,8 +127,9 @@ func run(args []string) error {
 			"url":                   endpoint,
 			"local_url":             "http://" + cfg.HTTPHost + ":" + cfg.HTTPPort + cfg.HTTPPath,
 			"web_clients_supported": cfg.PublicURL != "" && strings.HasPrefix(cfg.PublicURL, "https://"),
+			"chatgpt":               chatGPTConfig(cfg),
 			"headers":               map[string]string{"Authorization": "Bearer <redacted>"},
-			"notes":                 []string{"Read the bearer token from the local auth-token file; do not paste it into remote chat."},
+			"notes":                 []string{"Use the ChatGPT URL with Authentication: No Authentication. Use the bearer-protected URL only for clients that support Authorization headers."},
 		})
 	case "setup-ui":
 		return setupui.Listen("127.0.0.1:3340")
@@ -140,6 +159,9 @@ Commands:
   repair               Verify local installer state
   public-url <url>     Persist the public HTTPS /mcp URL for ChatGPT/web clients
   public-url clear     Clear the persisted public HTTPS URL
+  chatgpt-url          Print the ChatGPT connector URL
+  chatgpt-url rotate   Rotate the ChatGPT connector URL path
+  chatgpt-url clear    Clear the ChatGPT connector URL path
   tunnel start         Start a managed Cloudflare HTTPS tunnel and persist its /mcp URL
   tunnel status        Print managed tunnel status
   tunnel stop          Stop the managed tunnel and clear its persisted URL
@@ -163,9 +185,21 @@ func tunnelCommand(args []string) error {
 	}
 	switch subcommand {
 	case "start":
+		if _, _, err := config.Ensure(); err != nil {
+			return err
+		}
+		_, pathChanged, err := config.EnsureChatGPTNoAuthPath()
+		if err != nil {
+			return err
+		}
 		cfg, token, err := config.Ensure()
 		if err != nil {
 			return err
+		}
+		if pathChanged {
+			if err := process.Stop(cfg); err != nil {
+				return err
+			}
 		}
 		gatewayStatus, err := process.Start(cfg, token)
 		if err != nil {
@@ -175,11 +209,16 @@ func tunnelCommand(args []string) error {
 		if err != nil {
 			return err
 		}
+		chatGPTSettings, err := config.SetChatGPTURLFromPublicURL(tunnelStatus.PublicURL)
+		if err != nil {
+			return err
+		}
 		return printJSON(map[string]any{
 			"ok":      true,
 			"gateway": gatewayStatus,
 			"tunnel":  tunnelStatus,
-			"next":    "Run doctor --json, then print-client-config. Use the public HTTPS URL in ChatGPT's MCP app/connector setup.",
+			"chatgpt": chatGPTSettingsJSON(chatGPTSettings),
+			"next":    "Use chatgpt.url in ChatGPT with Authentication: No Authentication. Run print-client-config to view both connector URLs.",
 		})
 	case "status":
 		cfg, err := config.Default()
@@ -218,6 +257,7 @@ func publicURLCommand(args []string) error {
 			"ok":                true,
 			"public_url":        nullableString(cfg.PublicURL),
 			"verify_public_url": cfg.VerifyPublicURL,
+			"chatgpt":           chatGPTConfig(cfg),
 			"next":              "Run public-url <https://host/mcp> to persist a ChatGPT/web-client endpoint, or public-url clear.",
 		})
 	}
@@ -235,12 +275,83 @@ func publicURLCommand(args []string) error {
 	if err != nil {
 		return err
 	}
+	chatGPTSettings, err := config.SetChatGPTURLFromPublicURL(settings.PublicURL)
+	if err != nil {
+		return err
+	}
 	return printJSON(map[string]any{
 		"ok":                true,
 		"public_url":        settings.PublicURL,
 		"verify_public_url": settings.VerifyPublicURL,
-		"next":              "Run stop, start, then doctor --json. Use this HTTPS URL in ChatGPT's MCP app/connector setup.",
+		"chatgpt":           chatGPTSettingsJSON(chatGPTSettings),
+		"next":              "Run stop, start, then doctor --json. Use chatgpt.url in ChatGPT with Authentication: No Authentication.",
 	})
+}
+
+func chatGPTURLCommand(args []string) error {
+	if len(args) > 0 {
+		switch args[0] {
+		case "rotate":
+			settings, err := config.RotateChatGPTURL()
+			if err != nil {
+				return err
+			}
+			return printJSON(map[string]any{
+				"ok":      true,
+				"chatgpt": chatGPTSettingsJSON(settings),
+				"next":    "Run stop then start, or rerun tunnel start, so the gateway serves the rotated path.",
+			})
+		case "clear":
+			if err := config.ClearChatGPTURL(); err != nil {
+				return err
+			}
+			return printJSON(map[string]any{
+				"ok":      true,
+				"chatgpt": map[string]any{"url": nil, "auth": "none"},
+				"next":    "Run stop then start to relaunch the gateway without the ChatGPT no-auth path.",
+			})
+		default:
+			return fmt.Errorf("unknown chatgpt-url command %q", args[0])
+		}
+	}
+	if _, _, err := config.Ensure(); err != nil {
+		return err
+	}
+	settings, _, err := config.EnsureChatGPTNoAuthPath()
+	if err != nil {
+		return err
+	}
+	cfg, err := config.Default()
+	if err != nil {
+		return err
+	}
+	if settings.ChatGPTConnectorURL == "" && cfg.PublicURL != "" {
+		settings, err = config.SetChatGPTURLFromPublicURL(cfg.PublicURL)
+		if err != nil {
+			return err
+		}
+	}
+	return printJSON(map[string]any{
+		"ok":      true,
+		"chatgpt": chatGPTSettingsJSON(settings),
+		"next":    "Use chatgpt.url in ChatGPT with Authentication: No Authentication. If url is null, run tunnel start first.",
+	})
+}
+
+func chatGPTConfig(cfg config.Config) map[string]any {
+	return map[string]any{
+		"url":  nullableString(cfg.ChatGPTConnectorURL),
+		"auth": "none",
+		"path": nullableString(cfg.ChatGPTNoAuthPath),
+	}
+}
+
+func chatGPTSettingsJSON(settings config.Settings) map[string]any {
+	return map[string]any{
+		"url":  nullableString(settings.ChatGPTConnectorURL),
+		"auth": "none",
+		"path": nullableString(settings.ChatGPTNoAuthPath),
+	}
 }
 
 func nullableString(value string) any {

@@ -25,13 +25,25 @@ The desktop bootstrapper can manage a Cloudflare Quick Tunnel and persist the HT
 
 ```powershell
 llm-cli-gateway tunnel start
+llm-cli-gateway chatgpt-url
 llm-cli-gateway doctor --json
 llm-cli-gateway print-client-config
 ```
 
 `tunnel start` starts the local gateway if needed, launches `cloudflared tunnel --url
 http://127.0.0.1:3333`, reads the generated `https://*.trycloudflare.com` URL, persists the
-normalized `/mcp` URL, and enables public URL verification for future doctor runs.
+normalized `/mcp` URL, creates a generated ChatGPT connector URL, and enables public URL
+verification for future doctor runs.
+
+Use the generated `chatgpt.url` value in ChatGPT with `Authentication: No Authentication`. The
+default public `/mcp` URL remains bearer-protected and is for clients that can send Authorization
+headers. The ChatGPT URL contains a high-entropy path; treat it like a credential and rotate it with:
+
+```powershell
+llm-cli-gateway chatgpt-url rotate
+llm-cli-gateway stop
+llm-cli-gateway start
+```
 
 If `cloudflared` is not installed on Windows:
 
@@ -78,6 +90,9 @@ If the tunnel prints `https://example.trycloudflare.com`, the public MCP URL is:
 ```text
 https://example.trycloudflare.com/mcp
 ```
+
+For ChatGPT, use `llm-cli-gateway chatgpt-url` or `print-client-config` and select the generated
+`chatgpt.url` instead of the bearer-protected `/mcp` URL.
 
 Example diagnostic command:
 

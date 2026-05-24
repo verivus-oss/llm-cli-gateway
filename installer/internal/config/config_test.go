@@ -84,6 +84,39 @@ func TestSetPublicURLPersistsForDefaultAndGatewayEnv(t *testing.T) {
 	}
 }
 
+func TestChatGPTConnectorURLUsesNoAuthPath(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	if runtime.GOOS == "windows" {
+		t.Setenv("USERPROFILE", os.Getenv("HOME"))
+	}
+
+	settings, err := SetPublicURL("https://example.trycloudflare.com/mcp", true)
+	if err != nil {
+		t.Fatalf("SetPublicURL returned error: %v", err)
+	}
+	chatGPTSettings, err := SetChatGPTURLFromPublicURL(settings.PublicURL)
+	if err != nil {
+		t.Fatalf("SetChatGPTURLFromPublicURL returned error: %v", err)
+	}
+	if chatGPTSettings.ChatGPTNoAuthPath == "" {
+		t.Fatal("ChatGPTNoAuthPath is empty")
+	}
+	if chatGPTSettings.ChatGPTConnectorURL != "https://example.trycloudflare.com"+chatGPTSettings.ChatGPTNoAuthPath {
+		t.Fatalf("ChatGPTConnectorURL = %q", chatGPTSettings.ChatGPTConnectorURL)
+	}
+
+	cfg, err := Default()
+	if err != nil {
+		t.Fatalf("Default returned error: %v", err)
+	}
+	if cfg.ChatGPTConnectorURL != chatGPTSettings.ChatGPTConnectorURL {
+		t.Fatalf("cfg.ChatGPTConnectorURL = %q", cfg.ChatGPTConnectorURL)
+	}
+	if !contains(EnvForGateway(cfg, "token"), "LLM_GATEWAY_NO_AUTH_PATHS="+chatGPTSettings.ChatGPTNoAuthPath) {
+		t.Fatalf("EnvForGateway missing ChatGPT no-auth path")
+	}
+}
+
 func TestNormalizePublicURLRequiresHTTPS(t *testing.T) {
 	if _, err := NormalizePublicURL("http://127.0.0.1:3333/mcp", "/mcp"); err == nil {
 		t.Fatal("expected http URL to be rejected")

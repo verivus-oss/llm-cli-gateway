@@ -2,6 +2,14 @@
 
 All notable changes to the llm-cli-gateway project.
 
+## [1.5.23] - 2026-05-25
+
+### Fixed
+
+- Add a ChatGPT-specific connector URL that uses a generated high-entropy no-auth path, while keeping the normal `/mcp` endpoint bearer-protected for clients that support Authorization headers.
+- Make `tunnel start`, `public-url`, `print-client-config`, and the new `chatgpt-url` command report the ChatGPT URL with `Authentication: No Authentication` guidance.
+- Teach the HTTP transport to serve explicitly configured no-auth connector paths without weakening auth on the default `/mcp` endpoint.
+
 ## [1.5.22] - 2026-05-24
 
 ### Added
