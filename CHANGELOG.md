@@ -2,6 +2,12 @@
 
 All notable changes to the llm-cli-gateway project.
 
+## [1.5.35] - 2026-05-25
+
+### Fixed
+
+- Keep metadata-only CLI commands quiet by avoiding flight-recorder and job-persistence startup before `--version`, help, `doctor --json`, and `contracts --json`; machine-readable JSON commands now emit JSON without startup log lines.
+
 ## [1.5.34] - 2026-05-25
 
 ### Security
