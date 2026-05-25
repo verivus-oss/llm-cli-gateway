@@ -150,7 +150,7 @@ Quote-for-user:
 | npm vulnerability audit is clean before release                    | `npm run security:audit` runs `npm audit --omit=dev --audit-level=moderate` |
 | Production source contains no dynamic execution patterns           | `scripts/release-security-audit.sh` scans non-test `src/` files for `eval`, `.eval`, `Function`, and `new Function` usage |
 | Production source does not call better-sqlite3's dynamic PRAGMA helper | `scripts/release-security-audit.sh` scans non-test `src/` files for `.pragma()` calls; fixed SQLite setup uses literal `PRAGMA` SQL through `exec` |
-| Socket-flagged dependency versions are blocked in the repo lockfile | `scripts/release-security-audit.sh` rejects `content-type@2.0.0` and `type-is@2.1.0` in `package-lock.json` |
+| Socket-flagged dependency versions are blocked in the repo lockfile | `scripts/release-security-audit.sh` rejects `content-type@2.0.0`, `type-is@2.1.0`, `ioredis@5.10.1`, and `@ioredis/commands@1.5.1` in `package-lock.json` |
 | Published npm consumers resolve the same safe dependency tree      | `scripts/release-security-audit.sh` packs the package, installs it into a temporary consumer project, and rejects the blocked dependency versions there too |
 | CI runs the same audit gate                                        | `.github/workflows/ci.yml` `build-and-test` job runs `npm run security:audit` |
 
@@ -158,6 +158,13 @@ Socket capability alerts for network and shell access are expected for this
 package: the gateway intentionally serves an MCP HTTP endpoint and launches
 provider CLIs. Those alerts must be reviewed and documented for each release,
 but they cannot be removed without removing the product's core behavior.
+
+The `ioredis` `built/constants/TLSProfiles.js` "obfuscated code" alert is
+reviewed as a false positive. The flagged strings are PEM-encoded Redis Cloud
+TLS CA certificates, not hidden executable code; the file is static TLS profile
+data and is byte-for-byte identical in `ioredis@5.9.2` and `ioredis@5.10.1`.
+The package remains outside the default production install path as an optional
+peer dependency for PostgreSQL/Redis session storage.
 
 Quote-for-release:
 
