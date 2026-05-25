@@ -188,6 +188,22 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const SKILLS_DIR = join(__dirname, "..", ".agents", "skills");
 
+function packageVersion(): string {
+  const candidates = [
+    join(__dirname, "..", "package.json"),
+    join(__dirname, "..", "..", "package.json"),
+  ];
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(readFileSync(candidate, "utf8")) as { version?: string };
+      return parsed.version || "unknown";
+    } catch {
+      // Try next candidate.
+    }
+  }
+  return "unknown";
+}
+
 interface SkillEntry {
   name: string;
   content: string;
@@ -249,27 +265,45 @@ let sessionManager: ISessionManager;
 let db: DatabaseConnection | null = null;
 const performanceMetrics = new PerformanceMetrics();
 let resourceProvider: ResourceProvider;
-const flightRecorder: FlightRecorderLike = createFlightRecorder(logger);
+let flightRecorder: FlightRecorderLike | null = null;
 
 // Resolved persistence config — single source of truth for the async-job backend.
 // Driven by ~/.llm-cli-gateway/config.toml (+ deprecated env-var overrides).
 // When backend = "none", the JobStore is null AND *_request_async tools are not
 // registered (see createGatewayServer), making silent in-memory loss
 // structurally impossible.
-const persistenceConfig: PersistenceConfig = loadPersistenceConfig(logger);
-const jobStore: JobStore | null = (() => {
+let persistenceConfig: PersistenceConfig | null = null;
+let jobStore: JobStore | null = null;
+let jobStoreInitialized = false;
+let asyncJobManager: AsyncJobManager | null = null;
+let approvalManager: ApprovalManager | null = null;
+
+function getFlightRecorder(runtimeLogger: GatewayLogger = logger): FlightRecorderLike {
+  flightRecorder ??= createFlightRecorder(runtimeLogger);
+  return flightRecorder;
+}
+
+function getPersistenceConfig(runtimeLogger: GatewayLogger = logger): PersistenceConfig {
+  persistenceConfig ??= loadPersistenceConfig(runtimeLogger);
+  return persistenceConfig;
+}
+
+function getJobStore(runtimeLogger: GatewayLogger = logger): JobStore | null {
+  if (jobStoreInitialized) return jobStore;
+  jobStoreInitialized = true;
   try {
-    return createJobStore(persistenceConfig, logger);
+    jobStore = createJobStore(getPersistenceConfig(runtimeLogger), runtimeLogger);
   } catch (err) {
-    logger.error("Failed to open durable job store; async tools will be unavailable", err);
-    return null;
+    runtimeLogger.error("Failed to open durable job store; async tools will be unavailable", err);
+    jobStore = null;
   }
-})();
+  return jobStore;
+}
 
 function newAsyncJobManager(
   metrics: PerformanceMetrics,
   runtimeLogger: GatewayLogger,
-  store: JobStore | null = jobStore
+  store: JobStore | null = getJobStore(runtimeLogger)
 ): AsyncJobManager {
   return new AsyncJobManager(
     runtimeLogger,
@@ -280,8 +314,16 @@ function newAsyncJobManager(
   );
 }
 
-const asyncJobManager = newAsyncJobManager(performanceMetrics, logger);
-const approvalManager = new ApprovalManager(undefined, logger);
+function getAsyncJobManager(runtimeLogger: GatewayLogger = logger): AsyncJobManager {
+  asyncJobManager ??= newAsyncJobManager(performanceMetrics, runtimeLogger);
+  return asyncJobManager;
+}
+
+function getApprovalManager(runtimeLogger: GatewayLogger = logger): ApprovalManager {
+  approvalManager ??= new ApprovalManager(undefined, runtimeLogger);
+  return approvalManager;
+}
+
 const MCP_SERVER_ENUM = z.enum(CLAUDE_MCP_SERVER_NAMES);
 
 // U22: Session-provider enum extended to five providers. The storage layer's
@@ -332,10 +374,12 @@ function resolveGatewayServerRuntime(
       ? // Factory-created test/HTTP session servers must not mark another instance's
         // durable jobs orphaned. Stdio startup injects the process-global manager.
         newAsyncJobManager(runtimePerformanceMetrics, runtimeLogger, null)
-      : asyncJobManager);
+      : getAsyncJobManager(runtimeLogger));
   const runtimeApprovalManager =
     deps.approvalManager ??
-    (options.isolateState ? new ApprovalManager(undefined, runtimeLogger) : approvalManager);
+    (options.isolateState
+      ? new ApprovalManager(undefined, runtimeLogger)
+      : getApprovalManager(runtimeLogger));
 
   return {
     sessionManager: runtimeSessionManager,
@@ -348,9 +392,9 @@ function resolveGatewayServerRuntime(
     performanceMetrics: runtimePerformanceMetrics,
     asyncJobManager: runtimeAsyncJobManager,
     approvalManager: runtimeApprovalManager,
-    flightRecorder: deps.flightRecorder ?? flightRecorder,
+    flightRecorder: deps.flightRecorder ?? getFlightRecorder(runtimeLogger),
     logger: runtimeLogger,
-    persistence: deps.persistence ?? persistenceConfig,
+    persistence: deps.persistence ?? getPersistenceConfig(runtimeLogger),
   };
 }
 
@@ -5674,7 +5718,7 @@ function registerHealthResource(server: McpServer): void {
       mimeType: "application/json",
     },
     async uri => {
-      const health = asyncJobManager.getJobHealth();
+      const health = getAsyncJobManager().getJobHealth();
       return {
         contents: [
           {
@@ -5718,8 +5762,10 @@ async function shutdown(signal: string): Promise<void> {
       logger.info("Database connections closed");
     }
 
-    flightRecorder.close();
-    logger.info("Flight recorder closed");
+    if (flightRecorder) {
+      flightRecorder.close();
+      logger.info("Flight recorder closed");
+    }
 
     process.exit(0);
   } catch (error) {
@@ -5739,6 +5785,22 @@ async function main() {
   startWindowsBootstrapperSelfHeal();
 
   const args = process.argv.slice(2);
+  if (args[0] === "--version" || args[0] === "-version" || args[0] === "version") {
+    process.stdout.write(`${packageVersion()}\n`);
+    return;
+  }
+  if (args[0] === "--help" || args[0] === "-help" || args[0] === "/?" || args[0] === "help") {
+    process.stdout.write(
+      [
+        "llm-cli-gateway MCP server",
+        "",
+        "Usage:",
+        "  llm-cli-gateway [doctor --json|contracts --json|--transport=http|--version]",
+        "",
+      ].join("\n")
+    );
+    return;
+  }
   if (args[0] === "doctor") {
     if (args.includes("--json")) {
       printDoctorJson();
@@ -5785,9 +5847,9 @@ async function main() {
     resourceProvider,
     db,
     performanceMetrics,
-    asyncJobManager,
-    approvalManager,
-    flightRecorder,
+    asyncJobManager: getAsyncJobManager(logger),
+    approvalManager: getApprovalManager(logger),
+    flightRecorder: getFlightRecorder(logger),
     logger,
   };
 
