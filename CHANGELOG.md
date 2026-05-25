@@ -2,6 +2,12 @@
 
 All notable changes to the llm-cli-gateway project.
 
+## [1.5.34] - 2026-05-25
+
+### Security
+
+- Pin the development Redis client fixture back to `ioredis@5.9.2` and reject the Socket-flagged `ioredis@5.10.1` / `@ioredis/commands@1.5.1` lockfile pair in the release security audit. The runtime Redis integration remains an optional peer dependency.
+
 ## [1.5.33] - 2026-05-25
 
 ### Security
