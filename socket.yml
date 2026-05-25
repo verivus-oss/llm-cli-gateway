@@ -26,6 +26,13 @@ version: 2
 #     which compiles JSON Schema validators using `new Function(...)`.
 #     This is ajv's standard codegen path; no caller-supplied data flows
 #     into the compiled function body.
+#
+#   better-sqlite3 PRAGMA helper
+#     Socket may flag better-sqlite3/lib/methods/pragma.js because it
+#     constructs PRAGMA SQL from its caller-provided `source` string. The
+#     gateway does not call db.pragma() from production code; SQLite setup
+#     uses fixed literal db.exec("PRAGMA ...") statements, and the release
+#     security audit fails future production `.pragma()` calls.
 
 issueRules:
   # Defaults from Socket. Listed explicitly so future contributors see what

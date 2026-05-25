@@ -35,7 +35,6 @@ interface StatementLike {
 }
 
 interface DatabaseLike {
-  pragma: (query: string) => any;
   exec: (sql: string) => void;
   prepare: (sql: string) => StatementLike;
   close: () => void;
@@ -165,8 +164,8 @@ export class SqliteJobStore implements JobStore {
     }
 
     this.db = new BetterSqlite3(dbPath);
-    this.db.pragma("journal_mode = WAL");
-    this.db.pragma("synchronous = NORMAL");
+    this.db.exec("PRAGMA journal_mode = WAL");
+    this.db.exec("PRAGMA synchronous = NORMAL");
 
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS jobs (

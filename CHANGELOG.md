@@ -2,6 +2,13 @@
 
 All notable changes to the llm-cli-gateway project.
 
+## [1.5.33] - 2026-05-25
+
+### Security
+
+- Stop using `better-sqlite3`'s dynamic `db.pragma(source)` helper in production code. SQLite setup now uses fixed literal `PRAGMA` statements through `db.exec(...)`, and the release security audit fails future production `.pragma()` calls.
+- Document the bounded `better-sqlite3/lib/methods/pragma.js` scanner alert in README and `socket.yml`, including the local mitigation and release audit gate.
+
 ## [1.5.32] - 2026-05-25
 
 ### Changed

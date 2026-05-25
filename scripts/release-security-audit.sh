@@ -45,6 +45,44 @@ if (findings.length > 0) {
 console.log('No production source dynamic execution patterns found.');
 NODE
 
+echo "==> sqlite pragma API scan"
+node --input-type=module <<'NODE'
+import fs from 'node:fs';
+import path from 'node:path';
+
+const root = path.resolve('src');
+const findings = [];
+const pattern = /\.\s*pragma\s*\(/;
+
+function walk(dir) {
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      if (entry.name === '__tests__') continue;
+      walk(full);
+      continue;
+    }
+    if (!/\.[cm]?[jt]s$/.test(entry.name)) continue;
+    const lines = fs.readFileSync(full, 'utf8').split(/\r?\n/);
+    lines.forEach((line, index) => {
+      if (pattern.test(line)) {
+        findings.push(`${path.relative(process.cwd(), full)}:${index + 1}: ${line.trim()}`);
+      }
+    });
+  }
+}
+
+walk(root);
+
+if (findings.length > 0) {
+  console.error('better-sqlite3 db.pragma() calls found in production source:');
+  for (const finding of findings) console.error(finding);
+  process.exit(1);
+}
+
+console.log('No production source calls better-sqlite3 db.pragma().');
+NODE
+
 echo "==> dependency tree policy"
 node --input-type=module <<'NODE'
 import fs from 'node:fs';
