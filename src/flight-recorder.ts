@@ -42,7 +42,6 @@ interface StatementLike {
 }
 
 interface DatabaseLike {
-  pragma: (query: string) => any;
   exec: (sql: string) => void;
   prepare: (sql: string) => StatementLike;
   transaction: <T extends (...args: any[]) => void>(fn: T) => T;
@@ -135,8 +134,8 @@ export class FlightRecorder {
     }
 
     this.db = new BetterSqlite3(dbPath);
-    this.db.pragma("journal_mode = WAL");
-    this.db.pragma("foreign_keys = ON");
+    this.db.exec("PRAGMA journal_mode = WAL");
+    this.db.exec("PRAGMA foreign_keys = ON");
 
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS _migrations (

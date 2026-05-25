@@ -1,4 +1,4 @@
-import { Pool } from "pg";
+import type { Pool } from "pg";
 import type { Redis } from "ioredis";
 import { randomUUID } from "crypto";
 import { Session, CliType } from "./session-manager.js";
@@ -70,22 +70,25 @@ export class PostgreSQLSessionManager {
   }
 
   /**
-   * Release distributed lock using Lua script for atomic compare-and-delete
-   * Only releases if lockValue matches (prevents releasing another process's lock)
+   * Release distributed lock with optimistic Redis transaction semantics.
+   * Only releases if lockValue matches, which prevents releasing another
+   * process's lock after expiry/reacquire.
    */
   private async releaseLock(key: string, lockValue: string): Promise<void> {
     const lockKey = `lock:${key}`;
 
-    // Lua script for atomic compare-and-delete
-    const script = `
-      if redis.call("get", KEYS[1]) == ARGV[1] then
-        return redis.call("del", KEYS[1])
-      else
-        return 0
-      end
-    `;
-
-    await this.redis.eval(script, 1, lockKey, lockValue);
+    await this.redis.watch(lockKey);
+    try {
+      const currentValue = await this.redis.get(lockKey);
+      if (currentValue !== lockValue) {
+        await this.redis.unwatch();
+        return;
+      }
+      await this.redis.multi().del(lockKey).exec();
+    } catch (error) {
+      await this.redis.unwatch().catch(() => undefined);
+      throw error;
+    }
   }
 
   /**

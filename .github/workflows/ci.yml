@@ -8,14 +8,14 @@ on:
 
 jobs:
   build-and-test:
-    runs-on: [self-hosted, linux, rust, x86_64, workhorse2]
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        node-version: [20, 22]
+        node-version: [24]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
         with:
           node-version: ${{ matrix.node-version }}
           cache: 'npm'
@@ -23,15 +23,16 @@ jobs:
       - run: npm run build
       - run: npm run lint
       - run: npm run format:check
-      - run: npm test
+      - run: npm run test:ci
+      - run: npm run security:audit
 
   pack-smoke-test:
-    runs-on: [self-hosted, linux, rust, x86_64, workhorse2]
+    runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
         with:
-          node-version: 20
+          node-version: 24
           cache: 'npm'
       - run: npm ci
       - run: npm run build

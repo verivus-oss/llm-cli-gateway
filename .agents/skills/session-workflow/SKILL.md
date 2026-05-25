@@ -2,7 +2,7 @@
 name: session-workflow
 description: Manage conversation sessions across Claude, Codex, Gemini, Grok, and Mistral. Use for multi-turn conversations, session switching, workspace management.
 metadata:
-  author: verivusai-labs
+  author: verivus-oss
   version: "1.5"
 ---
 

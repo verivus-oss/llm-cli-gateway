@@ -3,7 +3,8 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
-  JobStore,
+  SqliteJobStore,
+  type JobStore,
   computeRequestKey,
   resolveDedupWindowMs,
   resolveJobRetentionMs,
@@ -17,7 +18,7 @@ describe("JobStore", () => {
   beforeEach(() => {
     tempDir = mkdtempSync(join(tmpdir(), "job-store-test-"));
     dbPath = join(tempDir, "jobs.db");
-    store = new JobStore(dbPath);
+    store = new SqliteJobStore(dbPath);
   });
 
   afterEach(() => {

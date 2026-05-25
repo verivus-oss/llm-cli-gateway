@@ -3,7 +3,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { randomUUID } from "crypto";
-import { readFileSync, readdirSync, realpathSync } from "fs";
+import { existsSync, readFileSync, readdirSync, renameSync, unlinkSync } from "fs";
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
 import { z } from "zod";
@@ -19,12 +19,17 @@ import {
   optimizePrompt as optimizePromptText,
   optimizeResponse as optimizeResponseText,
 } from "./optimizer.js";
-import { loadConfig } from "./config.js";
+import { loadConfig, loadPersistenceConfig, type PersistenceConfig } from "./config.js";
 import { DatabaseConnection } from "./db.js";
 import { checkHealth } from "./health.js";
-import { getCliInfo, resolveModelAlias } from "./model-registry.js";
+import {
+  clearModelRegistryCache,
+  getAvailableCliInfo,
+  getCliInfo,
+  resolveModelAlias,
+} from "./model-registry.js";
 import { AsyncJobManager } from "./async-job-manager.js";
-import { JobStore, resolveJobStoreDbPath } from "./job-store.js";
+import { createJobStore, type JobStore } from "./job-store.js";
 import { ApprovalManager, ApprovalPolicy, ApprovalRecord } from "./approval-manager.js";
 import { checkReviewIntegrity, ReviewIntegrityResult } from "./review-integrity.js";
 import {
@@ -70,6 +75,12 @@ import { getCliVersions, runCliUpgrade } from "./cli-updater.js";
 import { startHttpGateway, type HttpGatewayHandle } from "./http-transport.js";
 import { printDoctorJson } from "./doctor.js";
 import { registerValidationTools } from "./validation-tools.js";
+import {
+  assertUpstreamCliArgs,
+  assertUpstreamCliEnv,
+  buildUpstreamContractReport,
+} from "./upstream-contracts.js";
+import { entrypointFileURL } from "./entrypoint-url.js";
 
 type ExtendedToolResponse = {
   content: { type: "text"; text: string }[];
@@ -105,6 +116,41 @@ const logger = {
 };
 
 type GatewayLogger = typeof logger;
+
+function startWindowsBootstrapperSelfHeal(): void {
+  if (process.platform !== "win32") return;
+  const localAppData = process.env.LOCALAPPDATA;
+  if (!localAppData) return;
+
+  const installDir = join(localAppData, "Programs", "llm-cli-gateway");
+  const exePath = join(installDir, "llm-cli-gateway.exe");
+  const pendingPath = `${exePath}.new`;
+  if (!existsSync(pendingPath)) return;
+
+  let attempts = 0;
+  const maxAttempts = 120;
+  const timer = setInterval(() => {
+    attempts += 1;
+    try {
+      if (!existsSync(pendingPath)) {
+        clearInterval(timer);
+        return;
+      }
+      if (existsSync(exePath)) {
+        unlinkSync(exePath);
+      }
+      renameSync(pendingPath, exePath);
+      clearInterval(timer);
+      logger.info(`Completed pending Windows bootstrapper replacement at ${exePath}`);
+    } catch (error) {
+      if (attempts >= maxAttempts) {
+        clearInterval(timer);
+        logger.warn(`Pending Windows bootstrapper replacement did not complete: ${error}`);
+      }
+    }
+  }, 500);
+  timer.unref();
+}
 
 function logOptimizationTokens(
   kind: "prompt" | "response",
@@ -180,7 +226,7 @@ Tools: claude_request, codex_request, gemini_request, grok_request, mistral_requ
 Validation: validate_with_models, second_opinion, compare_answers, red_team_review, consensus_check, ask_model, synthesize_validation
 Jobs: llm_job_status, llm_job_result, llm_job_cancel
 Sessions: session_create, session_list, session_set_active, session_get, session_delete, session_clear_all
-Other: list_models, cli_versions, cli_upgrade, approval_list, llm_process_health
+Other: list_models, cli_versions, upstream_contracts, cli_upgrade, approval_list, llm_process_health
 
 Key behaviors:
 - Sync auto-defers at ${SYNC_DEADLINE_MS}ms. Poll deferred jobs via llm_job_status/llm_job_result.
@@ -205,19 +251,17 @@ const performanceMetrics = new PerformanceMetrics();
 let resourceProvider: ResourceProvider;
 const flightRecorder: FlightRecorderLike = createFlightRecorder(logger);
 
-// Durable job store: persists every async job to ~/.llm-cli-gateway/logs.db so callers
-// can collect results across long polling gaps and gateway restarts, and so repeated
-// identical requests dedup onto the running/completed job instead of starting over.
+// Resolved persistence config — single source of truth for the async-job backend.
+// Driven by ~/.llm-cli-gateway/config.toml (+ deprecated env-var overrides).
+// When backend = "none", the JobStore is null AND *_request_async tools are not
+// registered (see createGatewayServer), making silent in-memory loss
+// structurally impossible.
+const persistenceConfig: PersistenceConfig = loadPersistenceConfig(logger);
 const jobStore: JobStore | null = (() => {
-  const dbPath = resolveJobStoreDbPath();
-  if (!dbPath) {
-    logger.info("Durable job store disabled (LLM_GATEWAY_LOGS_DB=none)");
-    return null;
-  }
   try {
-    return new JobStore(dbPath, logger);
+    return createJobStore(persistenceConfig, logger);
   } catch (err) {
-    logger.error("Failed to open durable job store; continuing in-memory only", err);
+    logger.error("Failed to open durable job store; async tools will be unavailable", err);
     return null;
   }
 })();
@@ -258,6 +302,7 @@ export interface GatewayServerDeps {
   approvalManager?: ApprovalManager;
   flightRecorder?: FlightRecorderLike;
   logger?: GatewayLogger;
+  persistence?: PersistenceConfig;
 }
 
 interface GatewayServerRuntime {
@@ -269,6 +314,7 @@ interface GatewayServerRuntime {
   approvalManager: ApprovalManager;
   flightRecorder: FlightRecorderLike;
   logger: GatewayLogger;
+  persistence: PersistenceConfig;
 }
 
 function resolveGatewayServerRuntime(
@@ -304,6 +350,7 @@ function resolveGatewayServerRuntime(
     approvalManager: runtimeApprovalManager,
     flightRecorder: deps.flightRecorder ?? flightRecorder,
     logger: runtimeLogger,
+    persistence: deps.persistence ?? persistenceConfig,
   };
 }
 
@@ -363,6 +410,14 @@ async function awaitJobOrDefer(
     }
   };
 
+  try {
+    assertUpstreamCliArgs(cli, args);
+    assertUpstreamCliEnv(cli, env);
+  } catch (err) {
+    consumeOnComplete();
+    throw err;
+  }
+
   if (SYNC_DEADLINE_MS === 0) {
     // Disabled — fall through to direct execution.
     // Note: direct execution bypasses dedup. forceRefresh is implied.
@@ -417,7 +472,7 @@ async function awaitJobOrDefer(
       }
       return {
         stdout: result.stdout,
-        stderr: result.stderr,
+        stderr: result.stderr || result.error || "",
         code: result.exitCode ?? 1,
       };
     }
@@ -480,6 +535,7 @@ function createErrorResponse(
   error?: Error
 ) {
   let errorMessage = `Error executing ${cli} CLI`;
+  const isLaunchExit = code === 127 || code === -4058;
 
   if (error) {
     // Command not found or spawn error
@@ -496,6 +552,9 @@ function createErrorResponse(
     // Idle timeout (stuck process)
     errorMessage += `: Process killed due to inactivity\n${stderr}`;
     logger.error(`[${correlationId || "unknown"}] ${cli} CLI killed due to inactivity`);
+  } else if (isLaunchExit) {
+    errorMessage += `:\n${stderr || `The '${cli}' command was not found. Install the ${cli} CLI and make sure it is on PATH.`}`;
+    logger.error(`[${correlationId || "unknown"}] ${cli} CLI failed to launch`);
   } else if (code !== 0) {
     // Other non-zero exit code
     errorMessage += ` (exit code ${code}):\n${stderr}`;
@@ -516,7 +575,9 @@ function createErrorResponse(
             ? "idle_timeout"
             : error
               ? "spawn_error"
-              : "cli_error",
+              : isLaunchExit
+                ? "spawn_error"
+                : "cli_error",
     },
   };
 }
@@ -1561,7 +1622,7 @@ function prepareGrokRequest(
   };
 }
 
-function prepareMistralRequest(
+export function prepareMistralRequest(
   params: {
     prompt: string;
     model?: string;
@@ -1582,7 +1643,7 @@ function prepareMistralRequest(
 ): (CliRequestPrep & { mistralEnv: Record<string, string> }) | ExtendedToolResponse {
   const corrId = params.correlationId || randomUUID();
   const cliInfo = getCliInfo();
-  const resolvedModel = resolveModelAlias("mistral", params.model, cliInfo) || "devstral-medium";
+  const resolvedModel = resolveModelAlias("mistral", params.model, cliInfo);
 
   const reviewIntegrity = checkReviewIntegrity({
     prompt: params.prompt,
@@ -1621,7 +1682,10 @@ function prepareMistralRequest(
       allowedTools: params.allowedTools,
       disallowedTools: params.disallowedTools,
       policy: params.approvalPolicy as ApprovalPolicy | undefined,
-      metadata: { model: resolvedModel, vibeActiveModelEnv: true },
+      metadata: {
+        model: resolvedModel ?? "vibe-default",
+        vibeActiveModelEnv: Boolean(resolvedModel),
+      },
       reviewIntegrity,
     });
     if (approvalDecision.status !== "approved") {
@@ -1664,6 +1728,24 @@ function prepareMistralRequest(
     args: prep.args,
     mistralEnv: prep.env,
   };
+}
+
+function isMistralModelSelectionFailure(stderr: string): boolean {
+  return /active model ['"].+['"] not found|model ['"].+['"] (?:isn't|is not) found|unknown model|model not found/i.test(
+    stderr
+  );
+}
+
+function selectMistralRecoveryModel(failedModel: string | undefined): string | undefined {
+  clearModelRegistryCache();
+  const refreshed = getCliInfo(true).mistral;
+  const candidates = [
+    refreshed.defaultModel,
+    ...(refreshed.modelOrder ?? []),
+    ...Object.keys(refreshed.models),
+  ].filter((model): model is string => Boolean(model && model !== failedModel));
+
+  return candidates.find(model => model !== "local");
 }
 
 function buildCliResponse(
@@ -1843,9 +1925,8 @@ export async function handleGeminiRequest(
   );
 
   try {
-    // U27: Session arg planning. For fresh sessions, emit `--session-id <uuid>`
-    // so the gateway and Gemini agree on the session identifier from turn 1.
-    // For resume flows, fall back to `--resume <id>` (existing behavior).
+    // Gemini CLI 0.43 supports `--resume`, but not a supported fresh
+    // `--session-id` flag. Fresh sessions emit no session flag.
     const sessionPlan = resolveGeminiSessionPlan({
       sessionId: params.sessionId,
       resumeLatest: params.resumeLatest,
@@ -1853,7 +1934,7 @@ export async function handleGeminiRequest(
     });
     args.push(...sessionPlan.args);
     const userProvidedSession = sessionPlan.resumed;
-    const effectiveSessionIdHint = sessionPlan.emittedSessionId ?? params.sessionId;
+    const effectiveSessionIdHint = sessionPlan.resumed ? params.sessionId : undefined;
 
     const result = await awaitJobOrDefer(
       "gemini",
@@ -1893,9 +1974,9 @@ export async function handleGeminiRequest(
     }
     wasSuccessful = true;
 
-    // U27 Post-success session I/O. Mirror the gateway store 1:1 to whatever
-    // session id Gemini is using (either the user-supplied resume id or the
-    // deterministic --session-id we emitted).
+    // Post-success session I/O for explicit resume flows. Fresh Gemini sessions
+    // are owned by the CLI because the current CLI has no supported fresh
+    // session-id flag the gateway can inject.
     let effectiveSessionId = effectiveSessionIdHint;
     if (effectiveSessionId) {
       const existing = await deps.sessionManager.getSession(effectiveSessionId);
@@ -1998,7 +2079,7 @@ export async function handleGeminiRequestAsync(
   const { corrId, args, requestedMcpServers, approvalDecision } = prep;
 
   try {
-    // U27: Session arg planning with deterministic --session-id for fresh sessions.
+    // Gemini CLI 0.43 supports `--resume`, but fresh sessions emit no session flag.
     const sessionPlan = resolveGeminiSessionPlan({
       sessionId: params.sessionId,
       resumeLatest: params.resumeLatest,
@@ -2007,7 +2088,7 @@ export async function handleGeminiRequestAsync(
     args.push(...sessionPlan.args);
 
     // Pre-start session I/O (async handlers: prevent orphaned jobs)
-    let effectiveSessionId = sessionPlan.emittedSessionId ?? params.sessionId;
+    let effectiveSessionId = sessionPlan.resumed ? params.sessionId : undefined;
     if (effectiveSessionId) {
       const existing = await deps.sessionManager.getSession(effectiveSessionId);
       if (!existing) {
@@ -2024,6 +2105,8 @@ export async function handleGeminiRequestAsync(
     // Start job only after all session I/O succeeds. U23: forward outputFormat
     // so AsyncJobManager records it in the durable store (the manager also
     // surfaces it in the snapshot).
+    assertUpstreamCliArgs("gemini", args);
+    assertUpstreamCliEnv("gemini", undefined);
     const job = deps.asyncJobManager.startJob(
       "gemini",
       args,
@@ -2309,6 +2392,8 @@ export async function handleGrokRequestAsync(
     }
 
     // Start job only after all session I/O succeeds
+    assertUpstreamCliArgs("grok", args);
+    assertUpstreamCliEnv("grok", undefined);
     const job = deps.asyncJobManager.startJob(
       "grok",
       args,
@@ -2419,7 +2504,7 @@ export async function handleMistralRequest(
     });
     args.push(...sessionResult.resumeArgs);
 
-    const result = await awaitJobOrDefer(
+    let result = await awaitJobOrDefer(
       "mistral",
       args,
       corrId,
@@ -2432,6 +2517,44 @@ export async function handleMistralRequest(
 
     if (isDeferredResponse(result)) {
       return buildDeferredToolResponse(result, sessionResult.effectiveSessionId);
+    }
+
+    if (result.code !== 0 && isMistralModelSelectionFailure(result.stderr)) {
+      const recoveryModel = selectMistralRecoveryModel(prep.resolvedModel);
+      if (recoveryModel) {
+        deps.logger.info(
+          `[${corrId}] mistral_request detected stale Vibe model selection; retrying once with ${recoveryModel}`
+        );
+        const retryPrep = buildMistralCliInvocation({
+          prompt: prep.effectivePrompt,
+          resolvedModel: recoveryModel,
+          outputFormat: params.outputFormat,
+          permissionMode:
+            params.approvalStrategy === "mcp_managed"
+              ? "auto-approve"
+              : (params.permissionMode ?? "auto-approve"),
+          effort: params.effort,
+          reasoningEffort: params.reasoningEffort,
+          allowedTools: params.allowedTools,
+          disallowedTools: params.disallowedTools,
+        });
+        const retryArgs = [...retryPrep.args, ...sessionResult.resumeArgs];
+        result = await awaitJobOrDefer(
+          "mistral",
+          retryArgs,
+          corrId,
+          resolveIdleTimeout("mistral", params.idleTimeoutMs),
+          params.outputFormat,
+          true,
+          runtime,
+          retryPrep.env
+        );
+        if (isDeferredResponse(result)) {
+          return buildDeferredToolResponse(result, sessionResult.effectiveSessionId);
+        }
+        prep.resolvedModel = recoveryModel;
+        prep.args = retryArgs;
+      }
     }
 
     const { stdout, stderr, code } = result;
@@ -2586,6 +2709,8 @@ export async function handleMistralRequestAsync(
       effectiveSessionId = newSession.id;
     }
 
+    assertUpstreamCliArgs("mistral", args);
+    assertUpstreamCliEnv("mistral", mistralEnv);
     const job = deps.asyncJobManager.startJob(
       "mistral",
       args,
@@ -2728,6 +2853,8 @@ export async function handleCodexRequestAsync(
 
     // Start job only after all session I/O succeeds. If startJob throws before
     // registering the record, ownership stays here and we run it in the catch.
+    assertUpstreamCliArgs("codex", args);
+    assertUpstreamCliEnv("codex", undefined);
     let job;
     try {
       job = deps.asyncJobManager.startJob(
@@ -2786,7 +2913,32 @@ export async function handleCodexRequestAsync(
 
 export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
   const runtime = resolveGatewayServerRuntime(deps, { isolateState: true });
-  const { sessionManager, asyncJobManager, approvalManager, performanceMetrics, logger } = runtime;
+  const {
+    sessionManager,
+    asyncJobManager,
+    approvalManager,
+    performanceMetrics,
+    logger,
+    persistence,
+  } = runtime;
+  // Structural invariant: tools register iff ALL THREE conditions hold:
+  //   (1) persistence.backend !== "none"  — the operator/config has not
+  //       explicitly disabled durable persistence;
+  //   (2) persistence.asyncJobsEnabled === true — the derived opt-in flag
+  //       agrees (loadPersistenceConfig sets this iff backend is one of
+  //       sqlite/postgres/memory);
+  //   (3) asyncJobManager.hasStore() === true — the runtime manager
+  //       actually has a store attached (isolate-mode runtimes use null).
+  //
+  // Each guard closes a distinct re-entry path for the silent-loss footgun:
+  //   - Without (1), a caller can inject {backend:'none', asyncJobsEnabled:true}
+  //     and re-advertise the async tools while reporting backend='none' in
+  //     llm_process_health — exactly contradicting SPEC CLAIM 4f.
+  //   - Without (2), config that opts out is ignored.
+  //   - Without (3), a null-store manager (isolate-mode / HTTP per-session)
+  //     accepts registrations that have nowhere to persist results.
+  const asyncJobsEnabled =
+    persistence.backend !== "none" && persistence.asyncJobsEnabled && asyncJobManager.hasStore();
   const server = newGatewayMcpServer();
   registerBaseResources(server, runtime);
   registerValidationTools(server, { asyncJobManager });
@@ -3886,7 +4038,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .string()
         .optional()
         .describe(
-          "Model alias (e.g. devstral-medium, devstral-large, latest). Resolved alias is injected via VIBE_ACTIVE_MODEL env var — Vibe has no --model flag."
+          "Model alias (e.g. mistral-medium-3.5, latest). Resolved alias is injected via VIBE_ACTIVE_MODEL env var; Vibe has no --model flag."
         ),
       outputFormat: z
         .enum(["plain", "json", "stream-json"])
@@ -4007,811 +4159,958 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
 
   //──────────────────────────────────────────────────────────────────────────────
   // Async Long-Running Job Tools (No Time-Bound LLM Execution)
+  //
+  // STRUCTURAL INVARIANT: these tools are only registered when a real job
+  // store is attached (`persistence.asyncJobsEnabled === true`). When the
+  // operator has configured `[persistence].backend = "none"`, none of the
+  // *_request_async / llm_job_* tools exist in the MCP tool list at all —
+  // orchestrating agents get a clean "tool not found" signal at connect
+  // time instead of silent in-memory loss after the 1-hour TTL.
   //──────────────────────────────────────────────────────────────────────────────
 
-  server.tool(
-    "claude_request_async",
-    {
-      prompt: z
-        .string()
-        .min(1, "Prompt cannot be empty")
-        .max(100000, "Prompt too long (max 100k chars)")
-        .describe("Prompt text for Claude"),
-      model: z
-        .string()
-        .optional()
-        .describe("Model name or alias (e.g. sonnet, claude-sonnet-4-5-20250929, latest)"),
-      outputFormat: z
-        .enum(["text", "json", "stream-json"])
-        .default("text")
-        .describe("Output format (text|json|stream-json). stream-json: NDJSON with idle timeout."),
-      sessionId: z.string().optional().describe("Session ID (uses active if omitted)"),
-      continueSession: z.boolean().default(false).describe("Continue active session"),
-      createNewSession: z.boolean().default(false).describe("Force new session"),
-      allowedTools: z
-        .array(z.string())
-        .optional()
-        .describe("Allowed tools (['Bash(git:*)','Edit','Write'])"),
-      disallowedTools: z.array(z.string()).optional().describe("Disallowed tools"),
-      dangerouslySkipPermissions: z
-        .boolean()
-        .default(false)
-        .describe(
-          'DEPRECATED: prefer `permissionMode: "bypassPermissions"`. Maps to it when `permissionMode` is unset.'
-        ),
-      permissionMode: z
-        .enum(CLAUDE_PERMISSION_MODES)
-        .optional()
-        .describe(
-          "Claude --permission-mode: default|acceptEdits|plan|auto|dontAsk|bypassPermissions. `default` is a no-op."
-        ),
-      // U25 — Claude high-impact features
-      agent: z
-        .string()
-        .optional()
-        .describe("Claude --agent: dispatch to a named single sub-agent."),
-      agents: z
-        .record(z.record(z.unknown()))
-        .optional()
-        .describe(
-          "Claude --agents: inline JSON map of agent name → { description, prompt, tools?, model? }."
-        ),
-      forkSession: z
-        .boolean()
-        .optional()
-        .describe("Claude --fork-session: branch from an existing session into a fresh fork."),
-      systemPrompt: z
-        .string()
-        .optional()
-        .describe("Claude --system-prompt: replace the system prompt entirely."),
-      appendSystemPrompt: z
-        .string()
-        .optional()
-        .describe("Claude --append-system-prompt: append to the existing system prompt."),
-      maxBudgetUsd: z
-        .number()
-        .positive()
-        .optional()
-        .describe("Claude --max-budget-usd: spend cap for this request in USD."),
-      maxTurns: z
-        .number()
-        .int()
-        .positive()
-        .optional()
-        .describe("Claude --max-turns: cap on agent loop iterations."),
-      effort: z
-        .enum(CLAUDE_EFFORT_LEVELS)
-        .optional()
-        .describe("Claude --effort: low|medium|high|xhigh|max."),
-      excludeDynamicSystemPromptSections: z
-        .boolean()
-        .optional()
-        .describe(
-          "Claude --exclude-dynamic-system-prompt-sections: trim dynamic context blocks from the system prompt."
-        ),
-      approvalStrategy: z
-        .enum(["legacy", "mcp_managed"])
-        .default("legacy")
-        .describe("Approval strategy"),
-      approvalPolicy: z
-        .enum(["strict", "balanced", "permissive"])
-        .optional()
-        .describe("Approval policy override"),
-      mcpServers: z
-        .array(MCP_SERVER_ENUM)
-        .default(["sqry"])
-        .describe("MCP servers exposed to Claude"),
-      strictMcpConfig: z
-        .boolean()
-        .default(false)
-        .describe("Restrict Claude to provided MCP config only"),
-      correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
-      optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution"),
-      idleTimeoutMs: z
-        .number()
-        .int()
-        .min(30_000)
-        .max(3_600_000)
-        .optional()
-        .describe("Idle timeout in ms (min 30s, max 1h, omit=CLI default)"),
-      forceRefresh: z
-        .boolean()
-        .default(false)
-        .describe(
-          "Bypass dedup and force a fresh CLI run even if a recent identical request exists"
-        ),
-    },
-    async ({
-      prompt,
-      model,
-      outputFormat,
-      sessionId,
-      continueSession,
-      createNewSession,
-      allowedTools,
-      disallowedTools,
-      dangerouslySkipPermissions,
-      permissionMode,
-      agent,
-      agents,
-      forkSession,
-      systemPrompt,
-      appendSystemPrompt,
-      maxBudgetUsd,
-      maxTurns,
-      effort,
-      excludeDynamicSystemPromptSections,
-      approvalStrategy,
-      approvalPolicy,
-      mcpServers,
-      strictMcpConfig,
-      correlationId,
-      optimizePrompt,
-      idleTimeoutMs,
-      forceRefresh,
-    }) => {
-      if (systemPrompt !== undefined && appendSystemPrompt !== undefined) {
-        return createErrorResponse(
-          "claude",
-          1,
-          "",
-          correlationId,
-          new Error(
-            "systemPrompt and appendSystemPrompt are mutually exclusive; use one or the other (not both)."
-          )
+  if (asyncJobsEnabled) {
+    server.tool(
+      "claude_request_async",
+      {
+        prompt: z
+          .string()
+          .min(1, "Prompt cannot be empty")
+          .max(100000, "Prompt too long (max 100k chars)")
+          .describe("Prompt text for Claude"),
+        model: z
+          .string()
+          .optional()
+          .describe("Model name or alias (e.g. sonnet, claude-sonnet-4-5-20250929, latest)"),
+        outputFormat: z
+          .enum(["text", "json", "stream-json"])
+          .default("text")
+          .describe(
+            "Output format (text|json|stream-json). stream-json: NDJSON with idle timeout."
+          ),
+        sessionId: z.string().optional().describe("Session ID (uses active if omitted)"),
+        continueSession: z.boolean().default(false).describe("Continue active session"),
+        createNewSession: z.boolean().default(false).describe("Force new session"),
+        allowedTools: z
+          .array(z.string())
+          .optional()
+          .describe("Allowed tools (['Bash(git:*)','Edit','Write'])"),
+        disallowedTools: z.array(z.string()).optional().describe("Disallowed tools"),
+        dangerouslySkipPermissions: z
+          .boolean()
+          .default(false)
+          .describe(
+            'DEPRECATED: prefer `permissionMode: "bypassPermissions"`. Maps to it when `permissionMode` is unset.'
+          ),
+        permissionMode: z
+          .enum(CLAUDE_PERMISSION_MODES)
+          .optional()
+          .describe(
+            "Claude --permission-mode: default|acceptEdits|plan|auto|dontAsk|bypassPermissions. `default` is a no-op."
+          ),
+        // U25 — Claude high-impact features
+        agent: z
+          .string()
+          .optional()
+          .describe("Claude --agent: dispatch to a named single sub-agent."),
+        agents: z
+          .record(z.record(z.unknown()))
+          .optional()
+          .describe(
+            "Claude --agents: inline JSON map of agent name → { description, prompt, tools?, model? }."
+          ),
+        forkSession: z
+          .boolean()
+          .optional()
+          .describe("Claude --fork-session: branch from an existing session into a fresh fork."),
+        systemPrompt: z
+          .string()
+          .optional()
+          .describe("Claude --system-prompt: replace the system prompt entirely."),
+        appendSystemPrompt: z
+          .string()
+          .optional()
+          .describe("Claude --append-system-prompt: append to the existing system prompt."),
+        maxBudgetUsd: z
+          .number()
+          .positive()
+          .optional()
+          .describe("Claude --max-budget-usd: spend cap for this request in USD."),
+        maxTurns: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .describe("Claude --max-turns: cap on agent loop iterations."),
+        effort: z
+          .enum(CLAUDE_EFFORT_LEVELS)
+          .optional()
+          .describe("Claude --effort: low|medium|high|xhigh|max."),
+        excludeDynamicSystemPromptSections: z
+          .boolean()
+          .optional()
+          .describe(
+            "Claude --exclude-dynamic-system-prompt-sections: trim dynamic context blocks from the system prompt."
+          ),
+        approvalStrategy: z
+          .enum(["legacy", "mcp_managed"])
+          .default("legacy")
+          .describe("Approval strategy"),
+        approvalPolicy: z
+          .enum(["strict", "balanced", "permissive"])
+          .optional()
+          .describe("Approval policy override"),
+        mcpServers: z
+          .array(MCP_SERVER_ENUM)
+          .default(["sqry"])
+          .describe("MCP servers exposed to Claude"),
+        strictMcpConfig: z
+          .boolean()
+          .default(false)
+          .describe("Restrict Claude to provided MCP config only"),
+        correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
+        optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution"),
+        idleTimeoutMs: z
+          .number()
+          .int()
+          .min(30_000)
+          .max(3_600_000)
+          .optional()
+          .describe("Idle timeout in ms (min 30s, max 1h, omit=CLI default)"),
+        forceRefresh: z
+          .boolean()
+          .default(false)
+          .describe(
+            "Bypass dedup and force a fresh CLI run even if a recent identical request exists"
+          ),
+      },
+      async ({
+        prompt,
+        model,
+        outputFormat,
+        sessionId,
+        continueSession,
+        createNewSession,
+        allowedTools,
+        disallowedTools,
+        dangerouslySkipPermissions,
+        permissionMode,
+        agent,
+        agents,
+        forkSession,
+        systemPrompt,
+        appendSystemPrompt,
+        maxBudgetUsd,
+        maxTurns,
+        effort,
+        excludeDynamicSystemPromptSections,
+        approvalStrategy,
+        approvalPolicy,
+        mcpServers,
+        strictMcpConfig,
+        correlationId,
+        optimizePrompt,
+        idleTimeoutMs,
+        forceRefresh,
+      }) => {
+        if (systemPrompt !== undefined && appendSystemPrompt !== undefined) {
+          return createErrorResponse(
+            "claude",
+            1,
+            "",
+            correlationId,
+            new Error(
+              "systemPrompt and appendSystemPrompt are mutually exclusive; use one or the other (not both)."
+            )
+          );
+        }
+        const prep = prepareClaudeRequest(
+          {
+            prompt,
+            model,
+            outputFormat,
+            allowedTools,
+            disallowedTools,
+            dangerouslySkipPermissions,
+            permissionMode,
+            approvalStrategy,
+            approvalPolicy,
+            mcpServers,
+            strictMcpConfig,
+            correlationId,
+            optimizePrompt,
+            operation: "claude_request_async",
+            agent,
+            agents,
+            forkSession,
+            systemPrompt,
+            appendSystemPrompt,
+            maxBudgetUsd,
+            maxTurns,
+            effort,
+            excludeDynamicSystemPromptSections,
+          },
+          runtime
         );
-      }
-      const prep = prepareClaudeRequest(
-        {
-          prompt,
-          model,
-          outputFormat,
-          allowedTools,
-          disallowedTools,
-          dangerouslySkipPermissions,
-          permissionMode,
-          approvalStrategy,
-          approvalPolicy,
-          mcpServers,
-          strictMcpConfig,
-          correlationId,
-          optimizePrompt,
-          operation: "claude_request_async",
-          agent,
-          agents,
-          forkSession,
-          systemPrompt,
-          appendSystemPrompt,
-          maxBudgetUsd,
-          maxTurns,
-          effort,
-          excludeDynamicSystemPromptSections,
-        },
-        runtime
-      );
-      if (!("args" in prep)) return prep;
+        if (!("args" in prep)) return prep;
 
-      const { corrId, args, requestedMcpServers, mcpConfig, approvalDecision } = prep;
+        const { corrId, args, requestedMcpServers, mcpConfig, approvalDecision } = prep;
 
-      try {
-        // Session management (before job start for async)
-        let effectiveSessionId = sessionId;
-        let useContinue = continueSession;
-        const activeSession = await sessionManager.getActiveSession("claude");
+        try {
+          // Session management (before job start for async)
+          let effectiveSessionId = sessionId;
+          let useContinue = continueSession;
+          const activeSession = await sessionManager.getActiveSession("claude");
 
-        if (!createNewSession && !continueSession && !sessionId && activeSession) {
-          effectiveSessionId = activeSession.id;
-          useContinue = true;
-        }
-        if (!useContinue && effectiveSessionId && activeSession?.id === effectiveSessionId) {
-          useContinue = true;
-        }
-        if (useContinue) {
-          args.push("--continue");
-        } else if (effectiveSessionId) {
-          args.push("--session-id", effectiveSessionId);
-          await sessionManager.updateSessionUsage(effectiveSessionId);
-        }
-
-        if (effectiveSessionId) {
-          const existingSession = await sessionManager.getSession(effectiveSessionId);
-          if (!existingSession) {
-            await sessionManager.createSession("claude", "Claude Session", effectiveSessionId);
+          if (!createNewSession && !continueSession && !sessionId && activeSession) {
+            effectiveSessionId = activeSession.id;
+            useContinue = true;
           }
-        }
+          if (!useContinue && effectiveSessionId && activeSession?.id === effectiveSessionId) {
+            useContinue = true;
+          }
+          if (useContinue) {
+            args.push("--continue");
+          } else if (effectiveSessionId) {
+            args.push("--session-id", effectiveSessionId);
+            await sessionManager.updateSessionUsage(effectiveSessionId);
+          }
 
-        // Idle timeout only for stream-json (text/json produce no output until done)
-        const effectiveIdleTimeout =
-          outputFormat === "stream-json" ? resolveIdleTimeout("claude", idleTimeoutMs) : undefined;
-        const job = asyncJobManager.startJob(
-          "claude",
-          args,
-          corrId,
-          undefined,
-          effectiveIdleTimeout,
-          outputFormat,
-          forceRefresh
+          if (effectiveSessionId) {
+            const existingSession = await sessionManager.getSession(effectiveSessionId);
+            if (!existingSession) {
+              await sessionManager.createSession("claude", "Claude Session", effectiveSessionId);
+            }
+          }
+
+          // Idle timeout only for stream-json (text/json produce no output until done)
+          const effectiveIdleTimeout =
+            outputFormat === "stream-json"
+              ? resolveIdleTimeout("claude", idleTimeoutMs)
+              : undefined;
+          assertUpstreamCliArgs("claude", args);
+          assertUpstreamCliEnv("claude", undefined);
+          const job = asyncJobManager.startJob(
+            "claude",
+            args,
+            corrId,
+            undefined,
+            effectiveIdleTimeout,
+            outputFormat,
+            forceRefresh
+          );
+          logger.info(
+            `[${corrId}] claude_request_async started job ${job.id}, outputFormat=${outputFormat}`
+          );
+
+          const asyncResponse: Record<string, unknown> = {
+            success: true,
+            job,
+            sessionId: effectiveSessionId || activeSession?.id || null,
+            approval: approvalDecision,
+            mcpServers: {
+              requested: requestedMcpServers,
+              enabled: mcpConfig?.enabled,
+              missing: mcpConfig?.missing,
+            },
+          };
+          if (prep.reviewIntegrity && prep.reviewIntegrity.violations.length > 0) {
+            asyncResponse.reviewIntegrity = prep.reviewIntegrity;
+          }
+
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: JSON.stringify(asyncResponse, null, 2),
+              },
+            ],
+          };
+        } catch (error) {
+          return createErrorResponse("claude_request_async", 1, "", corrId, error as Error);
+        }
+      }
+    );
+
+    server.tool(
+      "codex_request_async",
+      {
+        prompt: z
+          .string()
+          .min(1, "Prompt cannot be empty")
+          .max(100000, "Prompt too long (max 100k chars)")
+          .describe("Prompt text for Codex"),
+        model: z.string().optional().describe("Model name or alias (e.g. gpt-5.4, latest)"),
+        fullAuto: z
+          .boolean()
+          .default(false)
+          .describe(
+            "DEPRECATED: prefer `sandboxMode` + `askForApproval`. Expands to `--sandbox workspace-write --ask-for-approval never`."
+          ),
+        sandboxMode: z
+          .enum(CODEX_SANDBOX_MODES)
+          .optional()
+          .describe("Codex --sandbox: read-only|workspace-write|danger-full-access."),
+        askForApproval: z
+          .enum(CODEX_ASK_FOR_APPROVAL_MODES)
+          .optional()
+          .describe("Codex --ask-for-approval: untrusted|on-request|never."),
+        useLegacyFullAutoFlag: z
+          .boolean()
+          .default(false)
+          .describe("Escape hatch: emit `--full-auto` directly (deprecated)."),
+        dangerouslyBypassApprovalsAndSandbox: z
+          .boolean()
+          .default(false)
+          .describe("Run Codex without approvals/sandbox"),
+        approvalStrategy: z
+          .enum(["legacy", "mcp_managed"])
+          .default("legacy")
+          .describe("Approval strategy"),
+        approvalPolicy: z
+          .enum(["strict", "balanced", "permissive"])
+          .optional()
+          .describe("Approval policy override"),
+        mcpServers: z
+          .array(MCP_SERVER_ENUM)
+          .default(["sqry"])
+          .describe("MCP server names for approval tracking (Codex manages its own MCP config)"),
+        sessionId: z
+          .string()
+          .optional()
+          .describe(
+            "Codex session UUID to resume via `codex exec resume <ID>`. Must be a real Codex session ID (from `~/.codex/sessions/` or the `codex resume` picker). Gateway-generated `gw-*` IDs are rejected."
+          ),
+        resumeLatest: z
+          .boolean()
+          .default(false)
+          .describe(
+            "Resume the most recent Codex session in the current cwd via `codex exec resume --last`. Ignored if sessionId is set."
+          ),
+        createNewSession: z.boolean().default(false).describe("Force a fresh session (no resume)"),
+        correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
+        optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution"),
+        idleTimeoutMs: z
+          .number()
+          .int()
+          .min(30_000)
+          .max(3_600_000)
+          .optional()
+          .describe("Idle timeout in ms (min 30s, max 1h, omit=CLI default)"),
+        forceRefresh: z
+          .boolean()
+          .default(false)
+          .describe(
+            "Bypass dedup and force a fresh CLI run even if a recent identical request exists"
+          ),
+        // U23: emit `--json` to enable JSONL event-stream parsing for token usage.
+        outputFormat: z
+          .enum(["text", "json"])
+          .default("text")
+          .describe(
+            "Codex output format. `json` emits --json (JSONL events) for token usage extraction."
+          ),
+        // U26: high-impact feature flags. All optional.
+        outputSchema: z
+          .union([z.string(), z.record(z.unknown())])
+          .optional()
+          .describe("Codex --output-schema. Pass a path (string) or an inline JSON Schema object."),
+        search: z.boolean().optional().describe("Emit Codex --search to enable web search."),
+        profile: z.string().optional().describe("Codex --profile <name>."),
+        configOverrides: CODEX_CONFIG_OVERRIDES_SCHEMA.describe(
+          "Codex -c key=value overrides. Keys: /^[a-zA-Z0-9._]+$/. Values: no CR/LF."
+        ),
+        ephemeral: z.boolean().optional().describe("Codex --ephemeral."),
+        images: z.array(z.string()).optional().describe("Codex -i <path>: image attachments."),
+        ignoreUserConfig: z.boolean().optional().describe("Codex --ignore-user-config."),
+        ignoreRules: z.boolean().optional().describe("Codex --ignore-rules."),
+      },
+      async ({
+        prompt,
+        model,
+        fullAuto,
+        sandboxMode,
+        askForApproval,
+        useLegacyFullAutoFlag,
+        dangerouslyBypassApprovalsAndSandbox,
+        approvalStrategy,
+        approvalPolicy,
+        mcpServers,
+        sessionId,
+        resumeLatest,
+        createNewSession,
+        correlationId,
+        optimizePrompt,
+        idleTimeoutMs,
+        forceRefresh,
+        outputFormat,
+        outputSchema,
+        search,
+        profile,
+        configOverrides,
+        ephemeral,
+        images,
+        ignoreUserConfig,
+        ignoreRules,
+      }) => {
+        return handleCodexRequestAsync(
+          { sessionManager, asyncJobManager, logger, runtime },
+          {
+            prompt,
+            model,
+            fullAuto,
+            sandboxMode,
+            askForApproval,
+            useLegacyFullAutoFlag,
+            dangerouslyBypassApprovalsAndSandbox,
+            approvalStrategy,
+            approvalPolicy,
+            mcpServers,
+            sessionId,
+            resumeLatest,
+            createNewSession,
+            correlationId,
+            optimizePrompt,
+            idleTimeoutMs,
+            forceRefresh,
+            outputFormat,
+            outputSchema,
+            search,
+            profile,
+            configOverrides,
+            ephemeral,
+            images,
+            ignoreUserConfig,
+            ignoreRules,
+          }
         );
-        logger.info(
-          `[${corrId}] claude_request_async started job ${job.id}, outputFormat=${outputFormat}`
+      }
+    );
+
+    server.tool(
+      "gemini_request_async",
+      {
+        prompt: z
+          .string()
+          .min(1, "Prompt cannot be empty")
+          .max(100000, "Prompt too long (max 100k chars)")
+          .describe("Prompt text for Gemini"),
+        model: z
+          .string()
+          .optional()
+          .describe(
+            "Model name or alias (e.g. gemini-3-pro-preview, gemini-2.5-flash, pro, flash, latest)"
+          ),
+        sessionId: z
+          .string()
+          .optional()
+          .describe("Session ID (user-provided CLI handle for --resume)"),
+        resumeLatest: z.boolean().default(false).describe("Resume latest session"),
+        createNewSession: z.boolean().default(false).describe("Force new session"),
+        approvalMode: z
+          .enum(GEMINI_APPROVAL_MODES)
+          .optional()
+          .describe("Approval: default|auto_edit|yolo|plan"),
+        approvalStrategy: z
+          .enum(["legacy", "mcp_managed"])
+          .default("legacy")
+          .describe("Approval strategy"),
+        approvalPolicy: z
+          .enum(["strict", "balanced", "permissive"])
+          .optional()
+          .describe("Approval policy override"),
+        mcpServers: z
+          .array(MCP_SERVER_ENUM)
+          .default(["sqry"])
+          .describe("MCP server names passed to Gemini as --allowed-mcp-server-names"),
+        allowedTools: z
+          .array(z.string())
+          .optional()
+          .describe("Allowed tools (['Write','Edit','Bash'])"),
+        includeDirs: z.array(z.string()).optional().describe("Additional workspace directories"),
+        correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
+        optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution"),
+        idleTimeoutMs: z
+          .number()
+          .int()
+          .min(30_000)
+          .max(3_600_000)
+          .optional()
+          .describe("Idle timeout in ms (min 30s, max 1h, omit=CLI default)"),
+        forceRefresh: z
+          .boolean()
+          .default(false)
+          .describe(
+            "Bypass dedup and force a fresh CLI run even if a recent identical request exists"
+          ),
+        // U23: emit `-o json` to extract token usage via parseGeminiJson. Default
+        // remains text so existing callers see no behavior change.
+        outputFormat: z
+          .enum(["text", "json"])
+          .default("text")
+          .describe(
+            "Gemini output format. `json` emits `-o json` so usageMetadata is parsed and reported."
+          ),
+        sandbox: GEMINI_HIGH_IMPACT_PARAMS_SCHEMA.shape.sandbox.describe(
+          "Run Gemini in sandbox mode (-s)"
+        ),
+        policyFiles: GEMINI_HIGH_IMPACT_PARAMS_SCHEMA.shape.policyFiles.describe(
+          "Policy file paths (--policy <path>, one per file). Paths must exist."
+        ),
+        adminPolicyFiles: GEMINI_HIGH_IMPACT_PARAMS_SCHEMA.shape.adminPolicyFiles.describe(
+          "Admin policy file paths (--admin-policy <path>, one per file). Paths must exist."
+        ),
+        attachments: GEMINI_HIGH_IMPACT_PARAMS_SCHEMA.shape.attachments.describe(
+          "Absolute file paths prepended as @<path> tokens to the prompt"
+        ),
+      },
+      async ({
+        prompt,
+        model,
+        sessionId,
+        resumeLatest,
+        createNewSession,
+        approvalMode,
+        approvalStrategy,
+        approvalPolicy,
+        mcpServers,
+        allowedTools,
+        includeDirs,
+        correlationId,
+        optimizePrompt,
+        idleTimeoutMs,
+        forceRefresh,
+        outputFormat,
+        sandbox,
+        policyFiles,
+        adminPolicyFiles,
+        attachments,
+      }) => {
+        return handleGeminiRequestAsync(
+          { sessionManager, asyncJobManager, logger, runtime },
+          {
+            prompt,
+            model,
+            sessionId,
+            resumeLatest,
+            createNewSession,
+            approvalMode,
+            approvalStrategy,
+            approvalPolicy,
+            mcpServers,
+            allowedTools,
+            includeDirs,
+            correlationId,
+            optimizePrompt,
+            idleTimeoutMs,
+            forceRefresh,
+            outputFormat,
+            sandbox,
+            policyFiles,
+            adminPolicyFiles,
+            attachments,
+          }
         );
-
-        const asyncResponse: Record<string, unknown> = {
-          success: true,
-          job,
-          sessionId: effectiveSessionId || activeSession?.id || null,
-          approval: approvalDecision,
-          mcpServers: {
-            requested: requestedMcpServers,
-            enabled: mcpConfig?.enabled,
-            missing: mcpConfig?.missing,
-          },
-        };
-        if (prep.reviewIntegrity && prep.reviewIntegrity.violations.length > 0) {
-          asyncResponse.reviewIntegrity = prep.reviewIntegrity;
-        }
-
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: JSON.stringify(asyncResponse, null, 2),
-            },
-          ],
-        };
-      } catch (error) {
-        return createErrorResponse("claude_request_async", 1, "", corrId, error as Error);
       }
-    }
-  );
+    );
 
-  server.tool(
-    "codex_request_async",
-    {
-      prompt: z
-        .string()
-        .min(1, "Prompt cannot be empty")
-        .max(100000, "Prompt too long (max 100k chars)")
-        .describe("Prompt text for Codex"),
-      model: z.string().optional().describe("Model name or alias (e.g. gpt-5.4, latest)"),
-      fullAuto: z
-        .boolean()
-        .default(false)
-        .describe(
-          "DEPRECATED: prefer `sandboxMode` + `askForApproval`. Expands to `--sandbox workspace-write --ask-for-approval never`."
-        ),
-      sandboxMode: z
-        .enum(CODEX_SANDBOX_MODES)
-        .optional()
-        .describe("Codex --sandbox: read-only|workspace-write|danger-full-access."),
-      askForApproval: z
-        .enum(CODEX_ASK_FOR_APPROVAL_MODES)
-        .optional()
-        .describe("Codex --ask-for-approval: untrusted|on-request|never."),
-      useLegacyFullAutoFlag: z
-        .boolean()
-        .default(false)
-        .describe("Escape hatch: emit `--full-auto` directly (deprecated)."),
-      dangerouslyBypassApprovalsAndSandbox: z
-        .boolean()
-        .default(false)
-        .describe("Run Codex without approvals/sandbox"),
-      approvalStrategy: z
-        .enum(["legacy", "mcp_managed"])
-        .default("legacy")
-        .describe("Approval strategy"),
-      approvalPolicy: z
-        .enum(["strict", "balanced", "permissive"])
-        .optional()
-        .describe("Approval policy override"),
-      mcpServers: z
-        .array(MCP_SERVER_ENUM)
-        .default(["sqry"])
-        .describe("MCP server names for approval tracking (Codex manages its own MCP config)"),
-      sessionId: z
-        .string()
-        .optional()
-        .describe(
-          "Codex session UUID to resume via `codex exec resume <ID>`. Must be a real Codex session ID (from `~/.codex/sessions/` or the `codex resume` picker). Gateway-generated `gw-*` IDs are rejected."
-        ),
-      resumeLatest: z
-        .boolean()
-        .default(false)
-        .describe(
-          "Resume the most recent Codex session in the current cwd via `codex exec resume --last`. Ignored if sessionId is set."
-        ),
-      createNewSession: z.boolean().default(false).describe("Force a fresh session (no resume)"),
-      correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
-      optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution"),
-      idleTimeoutMs: z
-        .number()
-        .int()
-        .min(30_000)
-        .max(3_600_000)
-        .optional()
-        .describe("Idle timeout in ms (min 30s, max 1h, omit=CLI default)"),
-      forceRefresh: z
-        .boolean()
-        .default(false)
-        .describe(
-          "Bypass dedup and force a fresh CLI run even if a recent identical request exists"
-        ),
-      // U23: emit `--json` to enable JSONL event-stream parsing for token usage.
-      outputFormat: z
-        .enum(["text", "json"])
-        .default("text")
-        .describe(
-          "Codex output format. `json` emits --json (JSONL events) for token usage extraction."
-        ),
-      // U26: high-impact feature flags. All optional.
-      outputSchema: z
-        .union([z.string(), z.record(z.unknown())])
-        .optional()
-        .describe("Codex --output-schema. Pass a path (string) or an inline JSON Schema object."),
-      search: z.boolean().optional().describe("Emit Codex --search to enable web search."),
-      profile: z.string().optional().describe("Codex --profile <name>."),
-      configOverrides: CODEX_CONFIG_OVERRIDES_SCHEMA.describe(
-        "Codex -c key=value overrides. Keys: /^[a-zA-Z0-9._]+$/. Values: no CR/LF."
-      ),
-      ephemeral: z.boolean().optional().describe("Codex --ephemeral."),
-      images: z.array(z.string()).optional().describe("Codex -i <path>: image attachments."),
-      ignoreUserConfig: z.boolean().optional().describe("Codex --ignore-user-config."),
-      ignoreRules: z.boolean().optional().describe("Codex --ignore-rules."),
-    },
-    async ({
-      prompt,
-      model,
-      fullAuto,
-      sandboxMode,
-      askForApproval,
-      useLegacyFullAutoFlag,
-      dangerouslyBypassApprovalsAndSandbox,
-      approvalStrategy,
-      approvalPolicy,
-      mcpServers,
-      sessionId,
-      resumeLatest,
-      createNewSession,
-      correlationId,
-      optimizePrompt,
-      idleTimeoutMs,
-      forceRefresh,
-      outputFormat,
-      outputSchema,
-      search,
-      profile,
-      configOverrides,
-      ephemeral,
-      images,
-      ignoreUserConfig,
-      ignoreRules,
-    }) => {
-      return handleCodexRequestAsync(
-        { sessionManager, asyncJobManager, logger, runtime },
-        {
-          prompt,
-          model,
-          fullAuto,
-          sandboxMode,
-          askForApproval,
-          useLegacyFullAutoFlag,
-          dangerouslyBypassApprovalsAndSandbox,
-          approvalStrategy,
-          approvalPolicy,
-          mcpServers,
-          sessionId,
-          resumeLatest,
-          createNewSession,
-          correlationId,
-          optimizePrompt,
-          idleTimeoutMs,
-          forceRefresh,
-          outputFormat,
-          outputSchema,
-          search,
-          profile,
-          configOverrides,
-          ephemeral,
-          images,
-          ignoreUserConfig,
-          ignoreRules,
+    server.tool(
+      "grok_request_async",
+      {
+        prompt: z
+          .string()
+          .min(1, "Prompt cannot be empty")
+          .max(100000, "Prompt too long (max 100k chars)")
+          .describe("Prompt text for Grok"),
+        model: z.string().optional().describe("Model name or alias (e.g. grok-build, latest)"),
+        outputFormat: z
+          .enum(["plain", "json", "streaming-json"])
+          .optional()
+          .describe("Output format (plain|json|streaming-json). Grok default is plain."),
+        sessionId: z
+          .string()
+          .optional()
+          .describe("Session ID (user-provided CLI handle for --resume)"),
+        resumeLatest: z
+          .boolean()
+          .default(false)
+          .describe("Resume most recent Grok session in cwd (--continue)"),
+        createNewSession: z.boolean().default(false).describe("Force new session"),
+        alwaysApprove: z
+          .boolean()
+          .default(false)
+          .describe("Auto-approve all tool executions (--always-approve)"),
+        permissionMode: z
+          .enum(["default", "acceptEdits", "auto", "dontAsk", "bypassPermissions", "plan"])
+          .optional()
+          .describe("Grok permission mode"),
+        effort: z
+          .enum(["low", "medium", "high", "xhigh", "max"])
+          .optional()
+          .describe("Grok effort level"),
+        reasoningEffort: z.string().optional().describe("Reasoning effort for reasoning models"),
+        approvalStrategy: z
+          .enum(["legacy", "mcp_managed"])
+          .default("legacy")
+          .describe("Approval strategy"),
+        approvalPolicy: z
+          .enum(["strict", "balanced", "permissive"])
+          .optional()
+          .describe("Approval policy override"),
+        mcpServers: z
+          .array(MCP_SERVER_ENUM)
+          .default(["sqry"])
+          .describe(
+            "MCP server names for approval tracking (Grok manages its own MCP config via `grok mcp`)"
+          ),
+        allowedTools: z
+          .array(z.string())
+          .optional()
+          .describe("Allowed built-in tools (passed as --tools comma list)"),
+        disallowedTools: z
+          .array(z.string())
+          .optional()
+          .describe("Disallowed built-in tools (passed as --disallowed-tools comma list)"),
+        correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
+        optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution"),
+        idleTimeoutMs: z
+          .number()
+          .int()
+          .min(30_000)
+          .max(3_600_000)
+          .optional()
+          .describe("Idle timeout in ms (min 30s, max 1h, omit=CLI default)"),
+        forceRefresh: z
+          .boolean()
+          .default(false)
+          .describe(
+            "Bypass dedup and force a fresh CLI run even if a recent identical request exists"
+          ),
+      },
+      async ({
+        prompt,
+        model,
+        outputFormat,
+        sessionId,
+        resumeLatest,
+        createNewSession,
+        alwaysApprove,
+        permissionMode,
+        effort,
+        reasoningEffort,
+        approvalStrategy,
+        approvalPolicy,
+        mcpServers,
+        allowedTools,
+        disallowedTools,
+        correlationId,
+        optimizePrompt,
+        idleTimeoutMs,
+        forceRefresh,
+      }) => {
+        return handleGrokRequestAsync(
+          { sessionManager, asyncJobManager, logger, runtime },
+          {
+            prompt,
+            model,
+            outputFormat,
+            sessionId,
+            resumeLatest,
+            createNewSession,
+            alwaysApprove,
+            permissionMode,
+            effort,
+            reasoningEffort,
+            approvalStrategy,
+            approvalPolicy,
+            mcpServers,
+            allowedTools,
+            disallowedTools,
+            correlationId,
+            optimizePrompt,
+            idleTimeoutMs,
+            forceRefresh,
+          }
+        );
+      }
+    );
+
+    server.tool(
+      "mistral_request_async",
+      {
+        prompt: z
+          .string()
+          .min(1, "Prompt cannot be empty")
+          .max(100000, "Prompt too long (max 100k chars)")
+          .describe("Prompt text for Mistral Vibe"),
+        model: z
+          .string()
+          .optional()
+          .describe(
+            "Model alias (resolved into VIBE_ACTIVE_MODEL env var — Vibe has no --model flag)"
+          ),
+        outputFormat: z
+          .enum(["plain", "json", "stream-json"])
+          .optional()
+          .describe("Output format (plain|json|stream-json). Vibe default is plain."),
+        sessionId: z
+          .string()
+          .optional()
+          .describe(
+            "Session ID (user-provided CLI handle for --resume). Requires [session_logging] enabled = true in ~/.vibe/config.toml."
+          ),
+        resumeLatest: z
+          .boolean()
+          .default(false)
+          .describe("Resume most recent Vibe session in cwd (--continue)"),
+        createNewSession: z.boolean().default(false).describe("Force new session"),
+        permissionMode: z
+          .enum(MISTRAL_AGENT_MODES)
+          .optional()
+          .describe(
+            "Vibe agent mode (default|plan|accept-edits|auto-approve|chat|explore|lean). Defaults to auto-approve for programmatic use."
+          ),
+        effort: z
+          .enum(["low", "medium", "high", "xhigh", "max"])
+          .optional()
+          .describe("Vibe effort level"),
+        reasoningEffort: z.string().optional().describe("Reasoning effort for reasoning models"),
+        approvalStrategy: z
+          .enum(["legacy", "mcp_managed"])
+          .default("legacy")
+          .describe("Approval strategy"),
+        approvalPolicy: z
+          .enum(["strict", "balanced", "permissive"])
+          .optional()
+          .describe("Approval policy override"),
+        mcpServers: z
+          .array(MCP_SERVER_ENUM)
+          .default(["sqry"])
+          .describe(
+            "MCP server names for approval tracking (Vibe manages its own MCP config via `vibe mcp`)"
+          ),
+        allowedTools: z
+          .array(z.string())
+          .optional()
+          .describe(
+            "Allowlist of built-in tools — each emitted as a separate --enabled-tools <tool> flag"
+          ),
+        disallowedTools: z
+          .array(z.string())
+          .optional()
+          .describe(
+            "Accepted for caller parity; Vibe has no deny-list flag, so values are ignored (a warning is logged)."
+          ),
+        correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
+        optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution"),
+        idleTimeoutMs: z
+          .number()
+          .int()
+          .min(30_000)
+          .max(3_600_000)
+          .optional()
+          .describe("Idle timeout in ms (min 30s, max 1h, omit=CLI default)"),
+        forceRefresh: z
+          .boolean()
+          .default(false)
+          .describe(
+            "Bypass dedup and force a fresh CLI run even if a recent identical request exists"
+          ),
+      },
+      async ({
+        prompt,
+        model,
+        outputFormat,
+        sessionId,
+        resumeLatest,
+        createNewSession,
+        permissionMode,
+        effort,
+        reasoningEffort,
+        approvalStrategy,
+        approvalPolicy,
+        mcpServers,
+        allowedTools,
+        disallowedTools,
+        correlationId,
+        optimizePrompt,
+        idleTimeoutMs,
+        forceRefresh,
+      }) => {
+        return handleMistralRequestAsync(
+          { sessionManager, asyncJobManager, logger, runtime },
+          {
+            prompt,
+            model,
+            outputFormat,
+            sessionId,
+            resumeLatest,
+            createNewSession,
+            permissionMode,
+            effort,
+            reasoningEffort,
+            approvalStrategy,
+            approvalPolicy,
+            mcpServers,
+            allowedTools,
+            disallowedTools,
+            correlationId,
+            optimizePrompt,
+            idleTimeoutMs,
+            forceRefresh,
+          }
+        );
+      }
+    );
+
+    server.tool(
+      "llm_job_status",
+      {
+        jobId: z.string().describe("Async job ID from *_request_async"),
+      },
+      async ({ jobId }) => {
+        const job = asyncJobManager.getJobSnapshot(jobId);
+        if (!job) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify(
+                  {
+                    success: false,
+                    error: "Job not found",
+                    jobId,
+                  },
+                  null,
+                  2
+                ),
+              },
+            ],
+            isError: true,
+          };
         }
-      );
-    }
-  );
 
-  server.tool(
-    "gemini_request_async",
-    {
-      prompt: z
-        .string()
-        .min(1, "Prompt cannot be empty")
-        .max(100000, "Prompt too long (max 100k chars)")
-        .describe("Prompt text for Gemini"),
-      model: z
-        .string()
-        .optional()
-        .describe(
-          "Model name or alias (e.g. gemini-3-pro-preview, gemini-2.5-flash, pro, flash, latest)"
-        ),
-      sessionId: z
-        .string()
-        .optional()
-        .describe("Session ID (user-provided CLI handle for --resume)"),
-      resumeLatest: z.boolean().default(false).describe("Resume latest session"),
-      createNewSession: z.boolean().default(false).describe("Force new session"),
-      approvalMode: z
-        .enum(GEMINI_APPROVAL_MODES)
-        .optional()
-        .describe("Approval: default|auto_edit|yolo|plan"),
-      approvalStrategy: z
-        .enum(["legacy", "mcp_managed"])
-        .default("legacy")
-        .describe("Approval strategy"),
-      approvalPolicy: z
-        .enum(["strict", "balanced", "permissive"])
-        .optional()
-        .describe("Approval policy override"),
-      mcpServers: z
-        .array(MCP_SERVER_ENUM)
-        .default(["sqry"])
-        .describe("MCP server names passed to Gemini as --allowed-mcp-server-names"),
-      allowedTools: z
-        .array(z.string())
-        .optional()
-        .describe("Allowed tools (['Write','Edit','Bash'])"),
-      includeDirs: z.array(z.string()).optional().describe("Additional workspace directories"),
-      correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
-      optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution"),
-      idleTimeoutMs: z
-        .number()
-        .int()
-        .min(30_000)
-        .max(3_600_000)
-        .optional()
-        .describe("Idle timeout in ms (min 30s, max 1h, omit=CLI default)"),
-      forceRefresh: z
-        .boolean()
-        .default(false)
-        .describe(
-          "Bypass dedup and force a fresh CLI run even if a recent identical request exists"
-        ),
-      // U23: emit `-o json` to extract token usage via parseGeminiJson. Default
-      // remains text so existing callers see no behavior change.
-      outputFormat: z
-        .enum(["text", "json"])
-        .default("text")
-        .describe(
-          "Gemini output format. `json` emits `-o json` so usageMetadata is parsed and reported."
-        ),
-      sandbox: GEMINI_HIGH_IMPACT_PARAMS_SCHEMA.shape.sandbox.describe(
-        "Run Gemini in sandbox mode (-s)"
-      ),
-      policyFiles: GEMINI_HIGH_IMPACT_PARAMS_SCHEMA.shape.policyFiles.describe(
-        "Policy file paths (--policy <path>, one per file). Paths must exist."
-      ),
-      adminPolicyFiles: GEMINI_HIGH_IMPACT_PARAMS_SCHEMA.shape.adminPolicyFiles.describe(
-        "Admin policy file paths (--admin-policy <path>, one per file). Paths must exist."
-      ),
-      attachments: GEMINI_HIGH_IMPACT_PARAMS_SCHEMA.shape.attachments.describe(
-        "Absolute file paths prepended as @<path> tokens to the prompt"
-      ),
-    },
-    async ({
-      prompt,
-      model,
-      sessionId,
-      resumeLatest,
-      createNewSession,
-      approvalMode,
-      approvalStrategy,
-      approvalPolicy,
-      mcpServers,
-      allowedTools,
-      includeDirs,
-      correlationId,
-      optimizePrompt,
-      idleTimeoutMs,
-      forceRefresh,
-      outputFormat,
-      sandbox,
-      policyFiles,
-      adminPolicyFiles,
-      attachments,
-    }) => {
-      return handleGeminiRequestAsync(
-        { sessionManager, asyncJobManager, logger, runtime },
-        {
-          prompt,
-          model,
-          sessionId,
-          resumeLatest,
-          createNewSession,
-          approvalMode,
-          approvalStrategy,
-          approvalPolicy,
-          mcpServers,
-          allowedTools,
-          includeDirs,
-          correlationId,
-          optimizePrompt,
-          idleTimeoutMs,
-          forceRefresh,
-          outputFormat,
-          sandbox,
-          policyFiles,
-          adminPolicyFiles,
-          attachments,
-        }
-      );
-    }
-  );
-
-  server.tool(
-    "grok_request_async",
-    {
-      prompt: z
-        .string()
-        .min(1, "Prompt cannot be empty")
-        .max(100000, "Prompt too long (max 100k chars)")
-        .describe("Prompt text for Grok"),
-      model: z.string().optional().describe("Model name or alias (e.g. grok-build, latest)"),
-      outputFormat: z
-        .enum(["plain", "json", "streaming-json"])
-        .optional()
-        .describe("Output format (plain|json|streaming-json). Grok default is plain."),
-      sessionId: z
-        .string()
-        .optional()
-        .describe("Session ID (user-provided CLI handle for --resume)"),
-      resumeLatest: z
-        .boolean()
-        .default(false)
-        .describe("Resume most recent Grok session in cwd (--continue)"),
-      createNewSession: z.boolean().default(false).describe("Force new session"),
-      alwaysApprove: z
-        .boolean()
-        .default(false)
-        .describe("Auto-approve all tool executions (--always-approve)"),
-      permissionMode: z
-        .enum(["default", "acceptEdits", "auto", "dontAsk", "bypassPermissions", "plan"])
-        .optional()
-        .describe("Grok permission mode"),
-      effort: z
-        .enum(["low", "medium", "high", "xhigh", "max"])
-        .optional()
-        .describe("Grok effort level"),
-      reasoningEffort: z.string().optional().describe("Reasoning effort for reasoning models"),
-      approvalStrategy: z
-        .enum(["legacy", "mcp_managed"])
-        .default("legacy")
-        .describe("Approval strategy"),
-      approvalPolicy: z
-        .enum(["strict", "balanced", "permissive"])
-        .optional()
-        .describe("Approval policy override"),
-      mcpServers: z
-        .array(MCP_SERVER_ENUM)
-        .default(["sqry"])
-        .describe(
-          "MCP server names for approval tracking (Grok manages its own MCP config via `grok mcp`)"
-        ),
-      allowedTools: z
-        .array(z.string())
-        .optional()
-        .describe("Allowed built-in tools (passed as --tools comma list)"),
-      disallowedTools: z
-        .array(z.string())
-        .optional()
-        .describe("Disallowed built-in tools (passed as --disallowed-tools comma list)"),
-      correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
-      optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution"),
-      idleTimeoutMs: z
-        .number()
-        .int()
-        .min(30_000)
-        .max(3_600_000)
-        .optional()
-        .describe("Idle timeout in ms (min 30s, max 1h, omit=CLI default)"),
-      forceRefresh: z
-        .boolean()
-        .default(false)
-        .describe(
-          "Bypass dedup and force a fresh CLI run even if a recent identical request exists"
-        ),
-    },
-    async ({
-      prompt,
-      model,
-      outputFormat,
-      sessionId,
-      resumeLatest,
-      createNewSession,
-      alwaysApprove,
-      permissionMode,
-      effort,
-      reasoningEffort,
-      approvalStrategy,
-      approvalPolicy,
-      mcpServers,
-      allowedTools,
-      disallowedTools,
-      correlationId,
-      optimizePrompt,
-      idleTimeoutMs,
-      forceRefresh,
-    }) => {
-      return handleGrokRequestAsync(
-        { sessionManager, asyncJobManager, logger, runtime },
-        {
-          prompt,
-          model,
-          outputFormat,
-          sessionId,
-          resumeLatest,
-          createNewSession,
-          alwaysApprove,
-          permissionMode,
-          effort,
-          reasoningEffort,
-          approvalStrategy,
-          approvalPolicy,
-          mcpServers,
-          allowedTools,
-          disallowedTools,
-          correlationId,
-          optimizePrompt,
-          idleTimeoutMs,
-          forceRefresh,
-        }
-      );
-    }
-  );
-
-  server.tool(
-    "mistral_request_async",
-    {
-      prompt: z
-        .string()
-        .min(1, "Prompt cannot be empty")
-        .max(100000, "Prompt too long (max 100k chars)")
-        .describe("Prompt text for Mistral Vibe"),
-      model: z
-        .string()
-        .optional()
-        .describe(
-          "Model alias (resolved into VIBE_ACTIVE_MODEL env var — Vibe has no --model flag)"
-        ),
-      outputFormat: z
-        .enum(["plain", "json", "stream-json"])
-        .optional()
-        .describe("Output format (plain|json|stream-json). Vibe default is plain."),
-      sessionId: z
-        .string()
-        .optional()
-        .describe(
-          "Session ID (user-provided CLI handle for --resume). Requires [session_logging] enabled = true in ~/.vibe/config.toml."
-        ),
-      resumeLatest: z
-        .boolean()
-        .default(false)
-        .describe("Resume most recent Vibe session in cwd (--continue)"),
-      createNewSession: z.boolean().default(false).describe("Force new session"),
-      permissionMode: z
-        .enum(MISTRAL_AGENT_MODES)
-        .optional()
-        .describe(
-          "Vibe agent mode (default|plan|accept-edits|auto-approve|chat|explore|lean). Defaults to auto-approve for programmatic use."
-        ),
-      effort: z
-        .enum(["low", "medium", "high", "xhigh", "max"])
-        .optional()
-        .describe("Vibe effort level"),
-      reasoningEffort: z.string().optional().describe("Reasoning effort for reasoning models"),
-      approvalStrategy: z
-        .enum(["legacy", "mcp_managed"])
-        .default("legacy")
-        .describe("Approval strategy"),
-      approvalPolicy: z
-        .enum(["strict", "balanced", "permissive"])
-        .optional()
-        .describe("Approval policy override"),
-      mcpServers: z
-        .array(MCP_SERVER_ENUM)
-        .default(["sqry"])
-        .describe(
-          "MCP server names for approval tracking (Vibe manages its own MCP config via `vibe mcp`)"
-        ),
-      allowedTools: z
-        .array(z.string())
-        .optional()
-        .describe(
-          "Allowlist of built-in tools — each emitted as a separate --enabled-tools <tool> flag"
-        ),
-      disallowedTools: z
-        .array(z.string())
-        .optional()
-        .describe(
-          "Accepted for caller parity; Vibe has no deny-list flag, so values are ignored (a warning is logged)."
-        ),
-      correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
-      optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution"),
-      idleTimeoutMs: z
-        .number()
-        .int()
-        .min(30_000)
-        .max(3_600_000)
-        .optional()
-        .describe("Idle timeout in ms (min 30s, max 1h, omit=CLI default)"),
-      forceRefresh: z
-        .boolean()
-        .default(false)
-        .describe(
-          "Bypass dedup and force a fresh CLI run even if a recent identical request exists"
-        ),
-    },
-    async ({
-      prompt,
-      model,
-      outputFormat,
-      sessionId,
-      resumeLatest,
-      createNewSession,
-      permissionMode,
-      effort,
-      reasoningEffort,
-      approvalStrategy,
-      approvalPolicy,
-      mcpServers,
-      allowedTools,
-      disallowedTools,
-      correlationId,
-      optimizePrompt,
-      idleTimeoutMs,
-      forceRefresh,
-    }) => {
-      return handleMistralRequestAsync(
-        { sessionManager, asyncJobManager, logger, runtime },
-        {
-          prompt,
-          model,
-          outputFormat,
-          sessionId,
-          resumeLatest,
-          createNewSession,
-          permissionMode,
-          effort,
-          reasoningEffort,
-          approvalStrategy,
-          approvalPolicy,
-          mcpServers,
-          allowedTools,
-          disallowedTools,
-          correlationId,
-          optimizePrompt,
-          idleTimeoutMs,
-          forceRefresh,
-        }
-      );
-    }
-  );
-
-  server.tool(
-    "llm_job_status",
-    {
-      jobId: z.string().describe("Async job ID from *_request_async"),
-    },
-    async ({ jobId }) => {
-      const job = asyncJobManager.getJobSnapshot(jobId);
-      if (!job) {
         return {
           content: [
             {
               type: "text",
               text: JSON.stringify(
                 {
-                  success: false,
-                  error: "Job not found",
+                  success: true,
+                  job,
+                },
+                null,
+                2
+              ),
+            },
+          ],
+        };
+      }
+    );
+
+    server.tool(
+      "llm_job_result",
+      {
+        jobId: z.string().describe("Async job ID from *_request_async"),
+        maxChars: z
+          .number()
+          .int()
+          .min(1000)
+          .max(2000000)
+          .default(200000)
+          .describe("Max chars returned per stream"),
+      },
+      async ({ jobId, maxChars }) => {
+        const result = asyncJobManager.getJobResult(jobId, maxChars);
+        if (!result) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify(
+                  {
+                    success: false,
+                    error: "Job not found",
+                    jobId,
+                  },
+                  null,
+                  2
+                ),
+              },
+            ],
+            isError: true,
+          };
+        }
+
+        // Parse stream-json output for Claude async jobs
+        const outputFormat = asyncJobManager.getJobOutputFormat(jobId);
+        let parsed: ReturnType<typeof parseStreamJson> | undefined;
+        if (outputFormat === "stream-json" && result.stdout) {
+          parsed = parseStreamJson(result.stdout);
+        }
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(
+                {
+                  success: true,
+                  result,
+                  ...(parsed
+                    ? {
+                        parsed: {
+                          text: parsed.text,
+                          costUsd: parsed.costUsd,
+                          usage: parsed.usage,
+                          model: parsed.model,
+                          numTurns: parsed.numTurns,
+                        },
+                      }
+                    : {}),
+                },
+                null,
+                2
+              ),
+            },
+          ],
+        };
+      }
+    );
+
+    server.tool(
+      "llm_job_cancel",
+      {
+        jobId: z.string().describe("Async job ID from *_request_async"),
+      },
+      async ({ jobId }) => {
+        const cancel = asyncJobManager.cancelJob(jobId);
+        if (!cancel.canceled) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify(
+                  {
+                    success: false,
+                    jobId,
+                    reason: cancel.reason || "Unable to cancel",
+                  },
+                  null,
+                  2
+                ),
+              },
+            ],
+            isError: true,
+          };
+        }
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(
+                {
+                  success: true,
                   jobId,
                 },
                 null,
@@ -4819,150 +5118,35 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
               ),
             },
           ],
-          isError: true,
         };
       }
-
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify(
-              {
-                success: true,
-                job,
-              },
-              null,
-              2
-            ),
-          },
-        ],
-      };
-    }
-  );
-
-  server.tool(
-    "llm_job_result",
-    {
-      jobId: z.string().describe("Async job ID from *_request_async"),
-      maxChars: z
-        .number()
-        .int()
-        .min(1000)
-        .max(2000000)
-        .default(200000)
-        .describe("Max chars returned per stream"),
-    },
-    async ({ jobId, maxChars }) => {
-      const result = asyncJobManager.getJobResult(jobId, maxChars);
-      if (!result) {
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify(
-                {
-                  success: false,
-                  error: "Job not found",
-                  jobId,
-                },
-                null,
-                2
-              ),
-            },
-          ],
-          isError: true,
-        };
-      }
-
-      // Parse stream-json output for Claude async jobs
-      const outputFormat = asyncJobManager.getJobOutputFormat(jobId);
-      let parsed: ReturnType<typeof parseStreamJson> | undefined;
-      if (outputFormat === "stream-json" && result.stdout) {
-        parsed = parseStreamJson(result.stdout);
-      }
-
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify(
-              {
-                success: true,
-                result,
-                ...(parsed
-                  ? {
-                      parsed: {
-                        text: parsed.text,
-                        costUsd: parsed.costUsd,
-                        usage: parsed.usage,
-                        model: parsed.model,
-                        numTurns: parsed.numTurns,
-                      },
-                    }
-                  : {}),
-              },
-              null,
-              2
-            ),
-          },
-        ],
-      };
-    }
-  );
-
-  server.tool(
-    "llm_job_cancel",
-    {
-      jobId: z.string().describe("Async job ID from *_request_async"),
-    },
-    async ({ jobId }) => {
-      const cancel = asyncJobManager.cancelJob(jobId);
-      if (!cancel.canceled) {
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify(
-                {
-                  success: false,
-                  jobId,
-                  reason: cancel.reason || "Unable to cancel",
-                },
-                null,
-                2
-              ),
-            },
-          ],
-          isError: true,
-        };
-      }
-
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify(
-              {
-                success: true,
-                jobId,
-              },
-              null,
-              2
-            ),
-          },
-        ],
-      };
-    }
-  );
+    );
+  } // end if (asyncJobsEnabled)
 
   server.tool("llm_process_health", {}, async () => {
     const health = asyncJobManager.getJobHealth();
+    const persistenceBlock = {
+      backend: persistence.backend,
+      dbPath: persistence.path,
+      dsn: persistence.dsn ? "[redacted]" : null,
+      retentionDays: persistence.retentionDays,
+      dedupWindowMs: persistence.dedupWindowMs,
+      asyncJobsEnabled: persistence.asyncJobsEnabled,
+      acknowledgeEphemeral: persistence.acknowledgeEphemeral,
+      sources: persistence.sources,
+      warning: persistence.asyncJobsEnabled
+        ? null
+        : "Async job persistence is disabled (backend = 'none'). *_request_async tools are NOT registered on this gateway. Set [persistence].backend = 'sqlite' (or 'memory' + acknowledgeEphemeral = true) to enable them.",
+    };
     return {
       content: [
         {
           type: "text",
-          text: JSON.stringify({ success: true, ...health }, null, 2),
+          text: JSON.stringify(
+            { success: true, ...health, persistence: persistenceBlock },
+            null,
+            2
+          ),
         },
       ],
     };
@@ -5023,7 +5207,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .describe("CLI filter (claude|codex|gemini|grok|mistral)"),
     },
     async ({ cli }) => {
-      const cliInfo = getCliInfo();
+      const cliInfo = getAvailableCliInfo();
       const result = cli ? { [cli]: cliInfo[cli] } : cliInfo;
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
     }
@@ -5042,6 +5226,26 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
     async ({ cli }) => {
       const versions = await getCliVersions(cli);
       return { content: [{ type: "text", text: JSON.stringify({ versions }, null, 2) }] };
+    }
+  );
+
+  server.tool(
+    "upstream_contracts",
+    {
+      cli: z
+        .preprocess(
+          value => (value === "" || value === null ? undefined : value),
+          SESSION_PROVIDER_ENUM.optional()
+        )
+        .describe("CLI filter (claude|codex|gemini|grok|mistral)"),
+      probeInstalled: z
+        .boolean()
+        .default(false)
+        .describe("When true, run local --help probes and compare advertised flags"),
+    },
+    async ({ cli, probeInstalled }) => {
+      const report = buildUpstreamContractReport({ cli, probeInstalled });
+      return { content: [{ type: "text", text: JSON.stringify(report, null, 2) }] };
     }
   );
 
@@ -5532,6 +5736,8 @@ process.on("SIGINT", () => shutdown("SIGINT"));
 //──────────────────────────────────────────────────────────────────────────────
 
 async function main() {
+  startWindowsBootstrapperSelfHeal();
+
   const args = process.argv.slice(2);
   if (args[0] === "doctor") {
     if (args.includes("--json")) {
@@ -5539,6 +5745,27 @@ async function main() {
       return;
     }
     process.stderr.write("Only doctor --json is supported in this layer.\n");
+    process.exit(2);
+  }
+  if (args[0] === "contracts") {
+    if (args.includes("--json")) {
+      const cliArg = args.find(arg => arg.startsWith("--cli="))?.split("=")[1];
+      const cli = SESSION_PROVIDER_VALUES.includes(cliArg as SessionProvider)
+        ? (cliArg as SessionProvider)
+        : undefined;
+      if (cliArg && !cli) {
+        process.stderr.write(`Unsupported --cli value: ${cliArg}\n`);
+        process.exit(2);
+      }
+      const probeInstalled = args.includes("--probe-installed");
+      process.stdout.write(
+        JSON.stringify(buildUpstreamContractReport({ cli, probeInstalled }), null, 2) + "\n"
+      );
+      return;
+    }
+    process.stderr.write(
+      "Usage: llm-cli-gateway contracts --json [--cli=claude|codex|gemini|grok|mistral] [--probe-installed]\n"
+    );
     process.exit(2);
   }
 
@@ -5592,7 +5819,7 @@ async function main() {
 
 // Guard: only auto-start when run directly (not imported for testing)
 // Resolve symlinks so `llm-cli-gateway` (npm-linked bin) matches import.meta.url
-const __entryUrl = process.argv[1] ? new URL(realpathSync(process.argv[1]), "file://").href : "";
+const __entryUrl = entrypointFileURL(process.argv[1]);
 if (__entryUrl === import.meta.url) {
   main().catch(error => {
     logger.error("Fatal server error:", error);

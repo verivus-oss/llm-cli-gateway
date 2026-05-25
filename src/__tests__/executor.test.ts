@@ -1,12 +1,20 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
+  buildExtendedPath,
   executeCli,
+  getExtendedPath,
   killProcessGroup,
   killAllProcessGroups,
   registerProcessGroup,
+  resolveCommandForSpawn,
+  shouldDetachProviderProcess,
   unregisterProcessGroup,
 } from "../executor.js";
 import { spawn } from "child_process";
+import { delimiter, win32 } from "path";
+import { mkdirSync, mkdtempSync, writeFileSync } from "fs";
+import { tmpdir } from "os";
+import { join } from "path";
 
 describe("executeCli", () => {
   describe("basic execution", () => {
@@ -106,6 +114,145 @@ describe("executeCli", () => {
       expect(result.stdout).toContain(".local/bin");
     });
 
+    it("should join extended PATH entries with the platform delimiter", () => {
+      const extendedPath = getExtendedPath();
+      expect(extendedPath).toContain(delimiter);
+    });
+
+    it("includes common Windows package-manager shim directories", () => {
+      const env = {
+        Path: "C:\\Windows\\System32",
+        APPDATA: "C:\\Users\\tester\\AppData\\Roaming",
+        LOCALAPPDATA: "C:\\Users\\tester\\AppData\\Local",
+        ProgramFiles: "C:\\Program Files",
+        "ProgramFiles(x86)": "C:\\Program Files (x86)",
+        ProgramData: "C:\\ProgramData",
+      } as NodeJS.ProcessEnv;
+      const extendedPath = buildExtendedPath(
+        env,
+        "C:\\Users\\tester",
+        "C:\\Users\\tester\\.llm-cli-gateway\\runtime\\node.exe",
+        "win32"
+      );
+
+      expect(extendedPath).toContain("C:\\Users\\tester\\AppData\\Roaming\\npm");
+      expect(extendedPath).toContain("C:\\Users\\tester\\AppData\\Local\\pnpm");
+      expect(extendedPath).toContain("C:\\Users\\tester\\.volta\\bin");
+      expect(extendedPath).toContain("C:\\Users\\tester\\scoop\\shims");
+      expect(extendedPath).toContain("C:\\ProgramData\\chocolatey\\bin");
+      expect(extendedPath).toContain("C:\\Windows\\System32");
+    });
+
+    it("wraps Windows cmd shims in cmd.exe with quoted arguments", () => {
+      const shimDir = mkdtempSync(join(tmpdir(), "gateway-win-shims-"));
+      const previousCwd = process.cwd();
+      try {
+        process.chdir(shimDir);
+        writeFileSync("gemini", "#!/bin/sh\nexit 0\n");
+        writeFileSync("gemini.cmd", "@echo off\r\nexit /b 0\r\n");
+
+        const resolved = resolveCommandForSpawn("gemini", ["--model", "a&b", "100%"], {
+          envPath: ".",
+          platform: "win32",
+        });
+
+        expect(resolved.command.toLowerCase()).toBe("cmd.exe");
+        expect(resolved.args.slice(0, 3)).toEqual(["/d", "/s", "/c"]);
+        expect(resolved.args[3]?.toLowerCase()).toBe('"gemini.cmd ^"--model^" ^"a^&b^" ^"100^%^""');
+        expect(resolved.windowsVerbatimArguments).toBe(true);
+      } finally {
+        process.chdir(previousCwd);
+      }
+    });
+
+    it("wraps Windows bat shims and paths with spaces in cmd.exe", () => {
+      const shimRoot = mkdtempSync(join(tmpdir(), "gateway win shims (x86) "));
+      const shimDir = join(shimRoot, "npm shims");
+      mkdirSync(shimDir, { recursive: true });
+      writeFileSync(join(shimDir, "provider.bat"), "@echo off\r\nexit /b 0\r\n");
+
+      const shimPath = join(shimDir, "provider.bat");
+      const resolved = resolveCommandForSpawn(shimPath, ["two words"], {
+        platform: "win32",
+      });
+
+      expect(resolved.command.toLowerCase()).toBe("cmd.exe");
+      expect(resolved.args.slice(0, 3)).toEqual(["/d", "/s", "/c"]);
+      expect(resolved.args[3]).toBe(
+        `"${win32.normalize(shimPath).replace(/([()\][%!^"`<>&|;, *?])/g, "^$1")} ^"two^ words^""`
+      );
+      expect(resolved.windowsVerbatimArguments).toBe(true);
+    });
+
+    // CommandLineToArgvW rule: N backslashes before a literal " must be encoded
+    // as 2N+1 backslashes followed by \". This test pins that contract
+    // end-to-end through resolveCommandForSpawn so future "simplifications" to
+    // the regex are caught.
+    it("encodes backslashes before a literal quote using the 2N+1 rule", () => {
+      const shimDir = mkdtempSync(join(tmpdir(), "gateway-win-shims-2n1-"));
+      const previousCwd = process.cwd();
+      try {
+        process.chdir(shimDir);
+        writeFileSync("tool.cmd", "@echo off\r\nexit /b 0\r\n");
+
+        // Cases: N backslashes immediately before a literal ".
+        // Expected encoded arg body (before quoting + caret escape): 2N+1 backslashes + \".
+        const cases: { input: string; n: number }[] = [
+          { input: '"', n: 0 }, // 0 \ before " -> \"
+          { input: '\\"', n: 1 }, // 1 \ before " -> \\\"
+          { input: '\\\\"', n: 2 }, // 2 \ before " -> \\\\\"
+          { input: '\\\\\\"', n: 3 }, // 3 \ before " -> \\\\\\\"
+        ];
+
+        for (const { input, n } of cases) {
+          const resolved = resolveCommandForSpawn("tool", [input], {
+            envPath: ".",
+            platform: "win32",
+          });
+
+          // After CommandLineToArgvW encoding the arg body is
+          //   <2N+1 backslashes> + "
+          // which is then quoted to
+          //   " <2N+1 backslashes> " "
+          // Each of those three " is caret-escaped for cmd.exe (\ is not in
+          // the metachar set, so backslashes pass through), giving
+          //   ^" <2N+1 backslashes> ^" ^"
+          // wrapped once more in outer quotes for `cmd.exe /s /c "..."`.
+          const backslashes = "\\".repeat(2 * n + 1);
+          const expected = `"tool.cmd ^"${backslashes}^"^""`;
+
+          expect(resolved.args[3]).toBe(expected);
+          expect(resolved.windowsVerbatimArguments).toBe(true);
+        }
+      } finally {
+        process.chdir(previousCwd);
+      }
+    });
+
+    // CommandLineToArgvW rule: N trailing backslashes immediately before the
+    // closing " of an arg must be doubled to 2N, so the quote still terminates
+    // the arg instead of being escaped.
+    it("doubles trailing backslashes before the closing quote (2N rule)", () => {
+      const shimDir = mkdtempSync(join(tmpdir(), "gateway-win-shims-trail-"));
+      const previousCwd = process.cwd();
+      try {
+        process.chdir(shimDir);
+        writeFileSync("tool.cmd", "@echo off\r\nexit /b 0\r\n");
+
+        const resolved = resolveCommandForSpawn("tool", ["c\\\\"], {
+          envPath: ".",
+          platform: "win32",
+        });
+
+        // Input is c\\ (c + 2 backslashes). Encoded body: c\\\\ (4 backslashes).
+        // Wrapped + caret-escaped quotes: ^"c\\\\^". Then outer wrap.
+        expect(resolved.args[3]).toBe('"tool.cmd ^"c\\\\\\\\^""');
+        expect(resolved.windowsVerbatimArguments).toBe(true);
+      } finally {
+        process.chdir(previousCwd);
+      }
+    });
+
     it("should inherit environment variables", async () => {
       const result = await executeCli("sh", ["-c", "echo $HOME"]);
       expect(result.stdout.trim()).toBeTruthy();
@@ -188,6 +335,12 @@ describe("executeCli", () => {
   });
 
   describe("process group termination", () => {
+    it("should not detach provider processes on Windows", () => {
+      expect(shouldDetachProviderProcess("win32")).toBe(false);
+      expect(shouldDetachProviderProcess("linux")).toBe(true);
+      expect(shouldDetachProviderProcess("darwin")).toBe(true);
+    });
+
     it("should spawn with detached:true and use process group kill", async () => {
       // Verify that a simple command still works with detached spawn
       const result = await executeCli("echo", ["process-group-test"]);

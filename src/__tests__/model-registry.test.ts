@@ -2,7 +2,12 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { clearModelRegistryCache, getCliInfo, resolveModelAlias } from "../model-registry.js";
+import {
+  clearModelRegistryCache,
+  getAvailableCliInfo,
+  getCliInfo,
+  resolveModelAlias,
+} from "../model-registry.js";
 
 const ENV_KEYS = [
   "CLAUDE_DEFAULT_MODEL",
@@ -29,6 +34,8 @@ const ENV_KEYS = [
   "MISTRAL_MODELS",
   "MISTRAL_MODEL_ALIASES",
   "VIBE_ACTIVE_MODEL",
+  "VIBE_HOME",
+  "VIBE_MODELS",
   "LLM_GATEWAY_DISABLE_MODEL_DISCOVERY",
   "LLM_GATEWAY_MODEL_ALIASES",
 ] as const;
@@ -73,6 +80,19 @@ describe("model registry", () => {
     // Backwards-compat: the legacy alias still resolves to itself.
     expect(resolveModelAlias("codex", "gpt-5.3-codex", info)).toBe("gpt-5.3-codex");
     expect(info.codex.models["gpt-5.3-codex"]).toBeDefined();
+  });
+
+  it("does not report bundled fallback hints as validated available models", () => {
+    const info = getAvailableCliInfo(true);
+
+    expect(info.claude.models).toEqual({});
+    expect(info.claude.defaultModel).toBeUndefined();
+    expect(info.claude.unverifiedModelHints?.sonnet).toContain("Balanced performance");
+    expect(info.claude.warnings?.join("\n")).toContain("not validated");
+
+    expect(info.codex.models).toEqual({});
+    expect(info.codex.defaultModel).toBeUndefined();
+    expect(info.codex.unverifiedModelHints?.["gpt-5.5"]).toContain("Latest Codex");
   });
 
   it("reads Codex default, profile models, and migrations from config.toml", () => {
@@ -138,6 +158,19 @@ describe("model registry", () => {
     expect(resolveModelAlias("codex", "fast", info)).toBe("gpt-5.3-codex-spark");
   });
 
+  it("keeps explicitly configured models in the available model view", () => {
+    process.env.GEMINI_MODELS = JSON.stringify({
+      "gemini-team-default": "Team-approved Gemini model",
+    });
+    process.env.GEMINI_DEFAULT_MODEL = "gemini-team-default";
+
+    const info = getAvailableCliInfo(true);
+
+    expect(info.gemini.models["gemini-team-default"]).toBe("Team-approved Gemini model");
+    expect(info.gemini.defaultModel).toBe("gemini-team-default");
+    expect(info.gemini.unverifiedModelHints?.["gemini-2.5-pro"]).toBeDefined();
+  });
+
   it("seeds Grok with grok-build as a fallback model and no default", () => {
     const info = getCliInfo(true);
 
@@ -161,21 +194,59 @@ describe("model registry", () => {
     expect(resolveModelAlias("grok", "default", info)).toBe("grok-team-pin");
   });
 
-  it("seeds Mistral with devstral-medium as the default and resolves latest", () => {
+  it("does not hardcode a Mistral default when Vibe has no config", () => {
     const info = getCliInfo(true);
 
-    expect(info.mistral.models["devstral-medium"]).toContain("Default Vibe coding model");
-    expect(info.mistral.defaultModel).toBe("devstral-medium");
-    expect(resolveModelAlias("mistral", "latest", info)).toBe("devstral-medium");
-    expect(resolveModelAlias("mistral", "default", info)).toBe("devstral-medium");
-    expect(resolveModelAlias("mistral", "devstral-large", info)).toBe("devstral-large");
+    expect(info.mistral.models["mistral-medium-3.5"]).toContain("Vibe coding model alias");
+    expect(info.mistral.defaultModel).toBeUndefined();
+    expect(resolveModelAlias("mistral", "latest", info)).toBeUndefined();
+    expect(resolveModelAlias("mistral", "default", info)).toBeUndefined();
+    expect(resolveModelAlias("mistral", "mistral-medium-3.5", info)).toBe("mistral-medium-3.5");
   });
 
   it("uses VIBE_ACTIVE_MODEL to override the Mistral default when set", () => {
-    process.env.VIBE_ACTIVE_MODEL = "mistral-large-latest";
+    process.env.VIBE_ACTIVE_MODEL = "mistral-medium-3.5";
     const info = getCliInfo(true);
-    expect(info.mistral.defaultModel).toBe("mistral-large-latest");
-    expect(resolveModelAlias("mistral", "latest", info)).toBe("mistral-large-latest");
+    expect(info.mistral.defaultModel).toBe("mistral-medium-3.5");
+    expect(resolveModelAlias("mistral", "latest", info)).toBe("mistral-medium-3.5");
+  });
+
+  it("discovers Mistral models and active_model from Vibe config", () => {
+    const vibeHome = join(tempDir, "vibe-home");
+    mkdirSync(vibeHome);
+    process.env.VIBE_HOME = vibeHome;
+    writeFileSync(
+      join(vibeHome, "config.toml"),
+      [
+        'active_model = "mistral-medium-3.5"',
+        "",
+        "[[models]]",
+        'name = "mistral-vibe-cli-latest"',
+        'provider = "mistral"',
+        'alias = "mistral-medium-3.5"',
+      ].join("\n")
+    );
+
+    const info = getCliInfo(true);
+
+    expect(info.mistral.models["mistral-medium-3.5"]).toContain("mistral-vibe-cli-latest");
+    expect(info.mistral.defaultModel).toBe("mistral-medium-3.5");
+    expect(resolveModelAlias("mistral", "mistral-vibe-cli-latest", info)).toBe(
+      "mistral-medium-3.5"
+    );
+    expect(resolveModelAlias("mistral", "latest", info)).toBe("mistral-medium-3.5");
+  });
+
+  it("recovers a stale Vibe active_model from the discovered recovery list", () => {
+    const vibeHome = join(tempDir, "vibe-home");
+    mkdirSync(vibeHome);
+    process.env.VIBE_HOME = vibeHome;
+    writeFileSync(join(vibeHome, "config.toml"), 'active_model = "devstral-medium"\n');
+
+    const info = getCliInfo(true);
+
+    expect(info.mistral.defaultModel).toBe("mistral-medium-3.5");
+    expect(info.mistral.warnings?.join("\n")).toContain("devstral-medium");
   });
 
   it("supports env-driven Mistral aliases", () => {

@@ -15,7 +15,7 @@ import { mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { AsyncJobManager } from "../async-job-manager.js";
-import { JobStore, computeRequestKey } from "../job-store.js";
+import { SqliteJobStore, type JobStore, computeRequestKey } from "../job-store.js";
 import { noopLogger } from "../logger.js";
 import { prepareCodexRequest, prepareGeminiRequest, createGatewayServer } from "../index.js";
 
@@ -26,7 +26,7 @@ import { prepareCodexRequest, prepareGeminiRequest, createGatewayServer } from "
 describe("U22 fix: dedup key respects env vars", () => {
   function makeManager(): { manager: AsyncJobManager; store: JobStore; cleanup: () => void } {
     const dir = mkdtempSync(join(tmpdir(), "post-review-jobs-"));
-    const store = new JobStore(join(dir, "jobs.db"), noopLogger);
+    const store = new SqliteJobStore(join(dir, "jobs.db"), noopLogger);
     const manager = new AsyncJobManager(noopLogger, undefined, store);
     return {
       manager,
@@ -48,10 +48,10 @@ describe("U22 fix: dedup key respects env vars", () => {
       // Same prompt+flags, different model → must produce DIFFERENT job ids.
       const args = ["-p", "hello", "--agent", "auto-approve"];
       const j1 = manager.startJobWithDedup("mistral", args, "corr-A", {
-        env: { VIBE_ACTIVE_MODEL: "devstral-medium" },
+        env: { VIBE_ACTIVE_MODEL: "mistral-medium-3.5" },
       });
       const j2 = manager.startJobWithDedup("mistral", args, "corr-B", {
-        env: { VIBE_ACTIVE_MODEL: "devstral-large" },
+        env: { VIBE_ACTIVE_MODEL: "devstral-small" },
       });
       expect(j2.deduped).toBe(false);
       expect(j2.snapshot.id).not.toBe(j1.snapshot.id);
@@ -69,10 +69,10 @@ describe("U22 fix: dedup key respects env vars", () => {
     try {
       const args = ["-p", "hello", "--agent", "auto-approve"];
       const j1 = manager.startJobWithDedup("mistral", args, "corr-A", {
-        env: { VIBE_ACTIVE_MODEL: "devstral-medium" },
+        env: { VIBE_ACTIVE_MODEL: "mistral-medium-3.5" },
       });
       const j2 = manager.startJobWithDedup("mistral", args, "corr-B", {
-        env: { VIBE_ACTIVE_MODEL: "devstral-medium" },
+        env: { VIBE_ACTIVE_MODEL: "mistral-medium-3.5" },
       });
       expect(j2.deduped).toBe(true);
       expect(j2.snapshot.id).toBe(j1.snapshot.id);
@@ -86,7 +86,7 @@ describe("U22 fix: dedup key respects env vars", () => {
     // The dedup key payload is a sorted-keys JSON, so the order callers pass
     // env keys in must not change the resulting hash.
     const dir = mkdtempSync(join(tmpdir(), "post-review-jobs-canon-"));
-    const store = new JobStore(join(dir, "jobs.db"), noopLogger);
+    const store = new SqliteJobStore(join(dir, "jobs.db"), noopLogger);
     const manager = new AsyncJobManager(noopLogger, undefined, store);
     try {
       const args = ["-p", "hello"];
@@ -115,7 +115,7 @@ describe("U22 fix: dedup key respects env vars", () => {
     // and undefined env maps and `computeRequestKey(cli, args, "")` is the
     // documented identity.
     const dir = mkdtempSync(join(tmpdir(), "post-review-jobs-backcompat-"));
-    const store = new JobStore(join(dir, "jobs.db"), noopLogger);
+    const store = new SqliteJobStore(join(dir, "jobs.db"), noopLogger);
     const manager = new AsyncJobManager(noopLogger, undefined, store);
     try {
       const args = ["-p", "hello"];
@@ -232,7 +232,7 @@ describe("U23 fix: outputFormat reaches the CLI as a flag", () => {
 describe("U26 fix: AsyncJobManager.onComplete contract", () => {
   function makeManager() {
     const dir = mkdtempSync(join(tmpdir(), "post-review-jobs-oncomp-"));
-    const store = new JobStore(join(dir, "jobs.db"), noopLogger);
+    const store = new SqliteJobStore(join(dir, "jobs.db"), noopLogger);
     const manager = new AsyncJobManager(noopLogger, undefined, store);
     return {
       manager,

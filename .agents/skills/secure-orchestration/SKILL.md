@@ -2,7 +2,7 @@
 name: secure-orchestration
 description: Security-conscious LLM orchestration with approval gates across Claude, Codex, Gemini, Grok, and Mistral. Use for high-risk operations, permissions, auditing.
 metadata:
-  author: verivusai-labs
+  author: verivus-oss
   version: "1.5"
 ---
 

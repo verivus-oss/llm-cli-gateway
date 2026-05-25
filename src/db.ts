@@ -1,5 +1,5 @@
-import { Pool, PoolConfig } from "pg";
-import { Redis, type RedisOptions } from "ioredis";
+import type { Pool, PoolConfig } from "pg";
+import type { Redis, RedisOptions } from "ioredis";
 import { Config } from "./config.js";
 import type { Logger } from "./logger.js";
 import { noopLogger } from "./logger.js";
@@ -31,6 +31,9 @@ export class DatabaseConnection {
    * Initialize connections to PostgreSQL and Redis
    */
   async connect(): Promise<void> {
+    const { Pool } = await importOptionalPg();
+    const Redis = await importOptionalRedis();
+
     // Initialize PostgreSQL pool
     const poolConfig: PoolConfig = {
       connectionString: this.config.database!.connectionString,
@@ -189,6 +192,33 @@ export class DatabaseConnection {
       throw new Error("Redis client not initialized");
     }
     return this.redis;
+  }
+}
+
+async function importOptionalPg(): Promise<typeof import("pg")> {
+  try {
+    return await import("pg");
+  } catch (error: any) {
+    if (error?.code === "ERR_MODULE_NOT_FOUND" || error?.code === "MODULE_NOT_FOUND") {
+      throw new Error(
+        "PostgreSQL sessions require optional peer dependency 'pg'. Install it alongside llm-cli-gateway to use DATABASE_URL/REDIS_URL-backed sessions."
+      );
+    }
+    throw error;
+  }
+}
+
+async function importOptionalRedis(): Promise<typeof Redis> {
+  try {
+    const mod = await import("ioredis");
+    return mod.Redis ?? mod.default;
+  } catch (error: any) {
+    if (error?.code === "ERR_MODULE_NOT_FOUND" || error?.code === "MODULE_NOT_FOUND") {
+      throw new Error(
+        "PostgreSQL sessions require optional peer dependency 'ioredis'. Install it alongside llm-cli-gateway to use DATABASE_URL/REDIS_URL-backed sessions."
+      );
+    }
+    throw error;
   }
 }
 

@@ -5,6 +5,7 @@ import { createHash } from "crypto";
 import { createRequire } from "module";
 import type { Logger } from "./logger.js";
 import { noopLogger } from "./logger.js";
+import type { PersistenceConfig } from "./config.js";
 
 export type JobStoreStatus = "running" | "completed" | "failed" | "canceled" | "orphaned";
 
@@ -34,7 +35,6 @@ interface StatementLike {
 }
 
 interface DatabaseLike {
-  pragma: (query: string) => any;
   exec: (sql: string) => void;
   prepare: (sql: string) => StatementLike;
   close: () => void;
@@ -100,7 +100,44 @@ function rowToRecord(row: any): JobRecord {
   };
 }
 
-export class JobStore {
+/**
+ * Public surface every backend (sqlite/postgres/memory) must implement. The
+ * AsyncJobManager talks to this interface only.
+ */
+export interface JobStore {
+  recordStart(input: {
+    id: string;
+    correlationId: string;
+    requestKey: string;
+    cli: string;
+    args: string[];
+    outputFormat?: string;
+    startedAt: string;
+    pid: number | null;
+  }): void;
+  recordOutput(id: string, stdout: string, stderr: string, outputTruncated: boolean): void;
+  recordComplete(input: {
+    id: string;
+    status: Exclude<JobStoreStatus, "running">;
+    exitCode: number | null;
+    stdout: string;
+    stderr: string;
+    outputTruncated: boolean;
+    error: string | null;
+    finishedAt: string;
+  }): void;
+  getById(id: string): JobRecord | null;
+  findByRequestKey(requestKey: string): JobRecord | null;
+  markOrphanedOnStartup(): number;
+  evictExpired(): number;
+  close(): void;
+}
+
+/**
+ * SQLite-backed job store. Default backend for production. Durable across
+ * gateway restarts; safe for single-instance deployments.
+ */
+export class SqliteJobStore implements JobStore {
   private db: DatabaseLike;
   private retentionMs: number;
   private dedupWindowMs: number;
@@ -115,7 +152,8 @@ export class JobStore {
 
   constructor(
     dbPath: string,
-    private logger: Logger = noopLogger
+    private logger: Logger = noopLogger,
+    options: { retentionMs?: number; dedupWindowMs?: number } = {}
   ) {
     const require = createRequire(import.meta.url);
     const BetterSqlite3 = require("better-sqlite3");
@@ -126,8 +164,8 @@ export class JobStore {
     }
 
     this.db = new BetterSqlite3(dbPath);
-    this.db.pragma("journal_mode = WAL");
-    this.db.pragma("synchronous = NORMAL");
+    this.db.exec("PRAGMA journal_mode = WAL");
+    this.db.exec("PRAGMA synchronous = NORMAL");
 
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS jobs (
@@ -162,8 +200,8 @@ export class JobStore {
       }
     }
 
-    this.retentionMs = resolveJobRetentionMs();
-    this.dedupWindowMs = resolveDedupWindowMs();
+    this.retentionMs = options.retentionMs ?? resolveJobRetentionMs();
+    this.dedupWindowMs = options.dedupWindowMs ?? resolveDedupWindowMs();
 
     this.insertStmt = this.db.prepare(`
       INSERT INTO jobs (id, correlation_id, request_key, cli, args_json, output_format,
@@ -325,7 +363,205 @@ export class JobStore {
     try {
       this.db.close();
     } catch (err) {
-      this.logger.error("JobStore close failed", err);
+      this.logger.error("SqliteJobStore close failed", err);
     }
+  }
+}
+
+/**
+ * Backwards-compatibility alias. Older code and tests construct `new JobStore(path)`
+ * directly; that surface now resolves to the SQLite implementation. Prefer
+ * `createJobStore(config)` in new code.
+ *
+ * @deprecated Use `SqliteJobStore` directly, or `createJobStore(persistenceConfig)`.
+ */
+export const JobStoreClass = SqliteJobStore;
+
+/**
+ * In-process job store. Same semantics as SqliteJobStore but state lives in a
+ * Map and is lost on process exit. Use for tests and ephemeral/CI gateways
+ * that have explicitly acknowledged the trade-off via
+ * `[persistence].acknowledgeEphemeral = true`.
+ */
+export class MemoryJobStore implements JobStore {
+  private rows = new Map<string, JobRecord>();
+  private retentionMs: number;
+  private dedupWindowMs: number;
+
+  constructor(options: { retentionMs?: number; dedupWindowMs?: number } = {}) {
+    this.retentionMs = options.retentionMs ?? resolveJobRetentionMs();
+    this.dedupWindowMs = options.dedupWindowMs ?? resolveDedupWindowMs();
+  }
+
+  recordStart(input: {
+    id: string;
+    correlationId: string;
+    requestKey: string;
+    cli: string;
+    args: string[];
+    outputFormat?: string;
+    startedAt: string;
+    pid: number | null;
+  }): void {
+    this.rows.set(input.id, {
+      id: input.id,
+      correlationId: input.correlationId,
+      requestKey: input.requestKey,
+      cli: input.cli,
+      argsJson: JSON.stringify(input.args),
+      outputFormat: input.outputFormat ?? null,
+      status: "running",
+      exitCode: null,
+      stdout: "",
+      stderr: "",
+      outputTruncated: false,
+      error: null,
+      startedAt: input.startedAt,
+      finishedAt: null,
+      pid: input.pid,
+      expiresAt: FAR_FUTURE_ISO,
+    });
+  }
+
+  recordOutput(id: string, stdout: string, stderr: string, outputTruncated: boolean): void {
+    const row = this.rows.get(id);
+    if (!row) return;
+    row.stdout = stdout;
+    row.stderr = stderr;
+    row.outputTruncated = outputTruncated;
+  }
+
+  recordComplete(input: {
+    id: string;
+    status: Exclude<JobStoreStatus, "running">;
+    exitCode: number | null;
+    stdout: string;
+    stderr: string;
+    outputTruncated: boolean;
+    error: string | null;
+    finishedAt: string;
+  }): void {
+    const row = this.rows.get(input.id);
+    if (!row) return;
+    row.status = input.status;
+    row.exitCode = input.exitCode;
+    row.stdout = input.stdout;
+    row.stderr = input.stderr;
+    row.outputTruncated = input.outputTruncated;
+    row.error = input.error;
+    row.finishedAt = input.finishedAt;
+    row.expiresAt = new Date(Date.parse(input.finishedAt) + this.retentionMs).toISOString();
+  }
+
+  getById(id: string): JobRecord | null {
+    const row = this.rows.get(id);
+    return row ? { ...row } : null;
+  }
+
+  findByRequestKey(requestKey: string): JobRecord | null {
+    const cutoffMs = Date.now() - this.dedupWindowMs;
+    let best: JobRecord | null = null;
+    for (const row of this.rows.values()) {
+      if (row.requestKey !== requestKey) continue;
+      if (row.status !== "running" && row.status !== "completed") continue;
+      if (Date.parse(row.startedAt) < cutoffMs) continue;
+      if (!best || Date.parse(row.startedAt) > Date.parse(best.startedAt)) {
+        best = row;
+      }
+    }
+    return best ? { ...best } : null;
+  }
+
+  /**
+   * In-memory stores have no cross-process state, so any "running" rows here
+   * came from this very process and aren't actually orphaned. No-op.
+   */
+  markOrphanedOnStartup(): number {
+    return 0;
+  }
+
+  evictExpired(): number {
+    const nowIso = new Date().toISOString();
+    let removed = 0;
+    for (const [id, row] of this.rows) {
+      if (row.expiresAt < nowIso) {
+        this.rows.delete(id);
+        removed++;
+      }
+    }
+    return removed;
+  }
+
+  close(): void {
+    this.rows.clear();
+  }
+}
+
+/**
+ * Stub for the planned Postgres backend. The interface and config surface ship
+ * now so multi-instance deployments can plan around them, but the
+ * implementation is intentionally not yet provided — calling code must select
+ * `sqlite` or `memory` until a real impl lands.
+ */
+export class PostgresJobStore implements JobStore {
+  constructor(_dsn: string, _logger: Logger = noopLogger) {
+    throw new Error(
+      "PostgresJobStore is not yet implemented. Use backend = 'sqlite' (single-instance) or " +
+        "backend = 'memory' (ephemeral) until the Postgres backend ships."
+    );
+  }
+  recordStart(): void {
+    throw new Error("not implemented");
+  }
+  recordOutput(): void {
+    throw new Error("not implemented");
+  }
+  recordComplete(): void {
+    throw new Error("not implemented");
+  }
+  getById(): JobRecord | null {
+    throw new Error("not implemented");
+  }
+  findByRequestKey(): JobRecord | null {
+    throw new Error("not implemented");
+  }
+  markOrphanedOnStartup(): number {
+    throw new Error("not implemented");
+  }
+  evictExpired(): number {
+    throw new Error("not implemented");
+  }
+  close(): void {
+    /* no-op */
+  }
+}
+
+/**
+ * Construct the JobStore appropriate to the resolved PersistenceConfig.
+ * Returns `null` when `backend = "none"` — callers must not register
+ * `*_request_async` tools in that case (use `config.asyncJobsEnabled`).
+ */
+export function createJobStore(
+  config: PersistenceConfig,
+  logger: Logger = noopLogger
+): JobStore | null {
+  const opts = {
+    retentionMs: config.retentionDays * 24 * 60 * 60 * 1000,
+    dedupWindowMs: config.dedupWindowMs,
+  };
+  switch (config.backend) {
+    case "none":
+      return null;
+    case "memory":
+      return new MemoryJobStore(opts);
+    case "postgres":
+      // Throws today; design surface is honest so callers can react.
+      return new PostgresJobStore(config.dsn ?? "", logger);
+    case "sqlite":
+    default:
+      if (!config.path) {
+        throw new Error("SqliteJobStore requires a non-empty path");
+      }
+      return new SqliteJobStore(config.path, logger, opts);
   }
 }

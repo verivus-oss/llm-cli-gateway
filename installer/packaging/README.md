@@ -4,19 +4,26 @@ Status: Layer 7 (U13) packaging contract
 Builder: `installer/build-release.sh`
 
 This directory documents how `llm-cli-gateway` is built into a non-developer
-release: a single Go bootstrapper binary per platform, plus a checksummed
-Node gateway bundle the bootstrapper installs via `install-bundle`.
+release: the local Linux self-hosted runner builds Linux Go bootstrapper
+binaries, GitHub-hosted Windows and macOS runners build their platform
+binaries, and each OS runner packages its platform bundle. The final Linux job
+publishes combined checksums and metadata.
 
 ## Artifact set
 
-After `installer/build-release.sh` runs, `installer/dist/` contains:
+After the release workflow runs, `installer/dist/` contains:
 
 - `llm-cli-gateway-<version>-darwin-arm64`
 - `llm-cli-gateway-<version>-darwin-amd64`
 - `llm-cli-gateway-<version>-linux-amd64`
 - `llm-cli-gateway-<version>-linux-arm64`
 - `llm-cli-gateway-<version>-windows-amd64.exe`
-- `llm-cli-gateway-bundle-<version>.tar.gz`
+- `llm-cli-gateway-bundle-<version>-darwin-arm64.tar.gz`
+- `llm-cli-gateway-bundle-<version>-darwin-amd64.tar.gz`
+- `llm-cli-gateway-bundle-<version>-linux-amd64.tar.gz`
+- `llm-cli-gateway-bundle-<version>-linux-arm64.tar.gz`
+- `llm-cli-gateway-bundle-<version>-windows-amd64.tar.gz`
+- `install-windows.ps1`
 - `SHA256SUMS`
 - `release-manifest.json`
 
@@ -32,13 +39,20 @@ From the repository root:
 installer/build-release.sh
 ```
 
+Direct local runs build only the current host target by default. Release CI
+invokes the script from the Linux self-hosted runner and GitHub-hosted
+Windows/macOS runners, passing explicit `--target` values for the artifacts
+owned by that runner.
+
 Options:
 
 | Flag             | Effect                                                       |
 | ---------------- | ------------------------------------------------------------ |
 | `--version VER`  | Override release version (default: `package.json#version`).  |
-| `--skip-bundle`  | Build only the Go binaries; skip the Node bundle tarball.    |
+| `--skip-bundle`  | Build only the Go binaries; skip platform bundle tarballs.    |
+| `--skip-binaries` | Package platform bundles/metadata without building Go binaries. |
 | `--target os/arch` | Restrict to one target (repeatable).                       |
+| `--all-targets`  | Build the full target list from the current host; for local testing only, not release CI. |
 
 Environment:
 
@@ -47,6 +61,7 @@ Environment:
 | `RVWR_RELEASE_VERSION`    | Same as `--version`.                                            |
 | `RVWR_RELEASE_DIR`        | Override output directory (default: `installer/dist`).          |
 | `RVWR_RELEASE_PUBLIC_BASE`| Optional public download base, written into `release-manifest.json`. Never put auth tokens in this URL. |
+| `RVWR_RELEASE_ALL_TARGETS`| Set to `1` to match `--all-targets`; for local testing only.     |
 
 ## Verification (what end users run)
 
@@ -63,12 +78,69 @@ Get-FileHash llm-cli-gateway-<version>-windows-amd64.exe -Algorithm SHA256
 
 If verification fails, **do not run the binary**; redownload and reverify.
 
+## Release security gate
+
+Run this before creating the GitHub release:
+
+```bash
+npm run security:audit
+```
+
+The gate runs the npm vulnerability audit, scans production source for dynamic
+execution patterns, rejects blocked Socket-flagged dependency versions in the
+repo lockfile, and then repeats the blocked-version policy against a real
+`npm pack` tarball installed into a temporary consumer project. The packed
+consumer install check is required because `overrides` can make the repository
+install look clean while downstream npm consumers still resolve newer
+transitive versions.
+
+Also collect Socket evidence for the exact version being released:
+
+```bash
+npx socket@latest package score npm llm-cli-gateway@<version> --markdown
+```
+
+The Socket CLI talks to Socket's API and may require `socket login` or a Socket
+API token. Treat network and shell capability alerts as expected-but-reviewed:
+this package serves a network MCP endpoint and launches provider CLIs by
+design. Do not waive dependency ownership, obfuscation, malware, or dynamic
+execution alerts without a concrete code/dependency finding linked from the
+release notes.
+
 ## Install / upgrade / uninstall (binary contract)
 
 The bootstrapper binary is idempotent. Commands are safe to rerun from
 assistant-led instructions.
 
 ### Install
+
+Windows PowerShell:
+
+```powershell
+$Version = '<version>'
+$Base = "https://github.com/verivus-oss/llm-cli-gateway/releases/download/v$Version"
+$InstallDir = Join-Path (Join-Path $env:LOCALAPPDATA 'Programs') 'llm-cli-gateway'
+$Exe = Join-Path $InstallDir 'llm-cli-gateway.exe'
+New-Item -ItemType Directory -Force $InstallDir | Out-Null
+Invoke-WebRequest -UseBasicParsing "$Base/llm-cli-gateway-$Version-windows-amd64.exe" -OutFile $Exe
+$env:RVWR_GATEWAY_BUNDLE_URL = "$Base/llm-cli-gateway-bundle-$Version-windows-amd64.tar.gz"
+$env:RVWR_GATEWAY_BUNDLE_SHA256 = '<bundle-sha256-from-SHA256SUMS>'
+& $Exe setup
+& $Exe stop
+& $Exe install-bundle
+& $Exe start
+& $Exe status
+& $Exe doctor
+```
+
+The release manifest includes a pinned Windows PowerShell command with the
+exact artifact version and SHA256 values. The install flow downloads the
+Windows bootstrapper, installs the checksummed Windows platform bundle, starts
+the gateway, and runs `doctor`. It also writes a stable `llm-cli-gateway.exe`
+command to
+`%LOCALAPPDATA%\Programs\llm-cli-gateway`, adds that directory to the user PATH,
+and uses that stable command for future `start`, `stop`, `status`, and `doctor`
+operations.
 
 ```bash
 chmod +x llm-cli-gateway-<version>-<os>-<arch>
@@ -80,10 +152,12 @@ chmod +x llm-cli-gateway-<version>-<os>-<arch>
 
 Required environment for `install-bundle`:
 
-- `RVWR_GATEWAY_BUNDLE_URL` — pinned URL of `llm-cli-gateway-bundle-<version>.tar.gz`
+- `RVWR_GATEWAY_BUNDLE_URL` — pinned URL of `llm-cli-gateway-bundle-<version>-<os>-<arch>.tar.gz`
 - `RVWR_GATEWAY_BUNDLE_SHA256` — the bundle's SHA256 from `SHA256SUMS`
 
-The binary refuses to install an unverified bundle.
+The binary refuses to install an unverified bundle. The platform bundle
+contains the compiled gateway, production `node_modules`, setup assets, and a
+managed Node runtime; users do not install Node globally for the happy path.
 
 ### Upgrade
 

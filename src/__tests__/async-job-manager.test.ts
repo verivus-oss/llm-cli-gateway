@@ -50,6 +50,21 @@ describe("AsyncJobManager", () => {
       expect(snapshot.exitCode).toBe(42);
     });
 
+    it("should normalize missing CLI launch failures", async () => {
+      const manager = new AsyncJobManager();
+      const job = manager.startJob("missing-cli-for-test" as LlmCli, [], "corr-missing");
+
+      await waitForJobDone(manager, job.id);
+
+      const snapshot = manager.getJobSnapshot(job.id)!;
+      expect(snapshot.status).toBe("failed");
+      expect(snapshot.exitCode).toBe(127);
+      expect(snapshot.error).toContain("command was not found");
+
+      const result = manager.getJobResult(job.id)!;
+      expect(result.stderr).toContain("command was not found");
+    });
+
     it("should return null for unknown job ID", () => {
       const manager = new AsyncJobManager();
       expect(manager.getJobSnapshot("nonexistent")).toBeNull();

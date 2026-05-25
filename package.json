@@ -1,13 +1,10 @@
 {
   "name": "llm-cli-gateway",
-  "version": "1.5.4",
+  "version": "1.5.34",
   "mcpName": "io.github.verivus-oss/llm-cli-gateway",
   "description": "MCP server providing unified access to Claude Code, Codex, Gemini, Grok, and Mistral Vibe CLIs with session management, retry logic, async job orchestration, durable job results, and cross-LLM validation.",
   "license": "MIT",
-  "author": {
-    "name": "VerivusAI Labs",
-    "url": "https://github.com/verivus-oss"
-  },
+  "author": "VerivusAI Labs (https://github.com/verivus-oss)",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/verivus-oss/llm-cli-gateway.git"
@@ -52,6 +49,7 @@
     "setup/status.schema.json",
     "README.md",
     "CHANGELOG.md",
+    "socket.yml",
     "LICENSE"
   ],
   "scripts": {
@@ -63,6 +61,7 @@
     "doctor": "node dist/index.js doctor --json",
     "migrate": "node dist/migrate.js",
     "test": "vitest run",
+    "test:ci": "vitest run --pool=forks --maxWorkers=1",
     "test:coverage": "vitest run --coverage",
     "test:watch": "vitest",
     "test:unit": "vitest run src/__tests__/executor.test.ts",
@@ -75,30 +74,53 @@
     "lint:fix": "eslint src/**/*.ts --fix",
     "format": "prettier --write 'src/**/*.ts'",
     "format:check": "prettier --check 'src/**/*.ts'",
-    "check": "npm run build && npm run lint && npm test",
+    "security:audit": "bash scripts/release-security-audit.sh",
+    "check": "npm run build && npm run lint && npm test && npm run security:audit",
     "release:build": "bash installer/build-release.sh",
     "release:checksums": "cd installer/dist && sha256sum --check SHA256SUMS",
     "release:docker": "docker compose -f docker-compose.personal.yml build"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.0.0",
-    "better-sqlite3": "^12.9.0",
-    "ioredis": "^5.4.1",
-    "pg": "^8.12.0",
-    "toml": "^3.0.0",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "better-sqlite3": "^12.10.0",
+    "content-type": "1.0.5",
+    "smol-toml": "^1.6.1",
+    "type-is": "2.0.1",
     "zod": "^3.23.0"
+  },
+  "peerDependencies": {
+    "ioredis": "^5.4.1",
+    "pg": "^8.12.0"
+  },
+  "peerDependenciesMeta": {
+    "ioredis": {
+      "optional": true
+    },
+    "pg": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.0",
     "@types/node": "^20.19.30",
     "@types/pg": "^8.11.10",
-    "@typescript-eslint/eslint-plugin": "^6.0.0",
-    "@typescript-eslint/parser": "^6.0.0",
+    "@typescript-eslint/eslint-plugin": "^8.59.4",
+    "@typescript-eslint/parser": "^8.59.4",
     "@vitest/coverage-v8": "^4.1.2",
-    "eslint": "^8.0.0",
+    "eslint": "^8.57.1",
     "eslint-config-prettier": "^9.0.0",
+    "ioredis": "5.9.2",
+    "pg": "^8.12.0",
     "prettier": "^3.0.0",
     "typescript": "^5.0.0",
     "vitest": "^4.0.18"
-  }
+  },
+  "overrides": {
+    "type-is": "2.0.1",
+    "content-type": "1.0.5"
+  },
+  "directories": {
+    "doc": "docs"
+  },
+  "types": "./dist/index.d.ts"
 }

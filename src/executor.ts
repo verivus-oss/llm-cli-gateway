@@ -1,6 +1,6 @@
-import { ChildProcess, spawn } from "child_process";
+import { ChildProcess, spawn, spawnSync, type SpawnOptions } from "child_process";
 import { homedir } from "os";
-import { join, dirname } from "path";
+import { delimiter, join, dirname, extname, win32 } from "path";
 import { readdirSync, existsSync } from "fs";
 import { createCircuitBreaker, withRetry } from "./retry.js";
 import type { Logger } from "./logger.js";
@@ -49,7 +49,7 @@ function getNvmPath(): string | null {
   try {
     const versions = readdirSync(nvmVersionsDir);
     cachedNvmPath = versions.length
-      ? versions.map(version => join(nvmVersionsDir, version, "bin")).join(":")
+      ? versions.map(version => join(nvmVersionsDir, version, "bin")).join(delimiter)
       : null;
   } catch {
     cachedNvmPath = null;
@@ -58,15 +58,79 @@ function getNvmPath(): string | null {
   return cachedNvmPath;
 }
 
-// Extend PATH to include common locations for CLI tools
-export function getExtendedPath(): string {
-  const home = homedir();
+function pathDelimiterFor(platform: NodeJS.Platform): string {
+  return platform === "win32" ? ";" : delimiter;
+}
+
+function pathJoinFor(platform: NodeJS.Platform, ...segments: string[]): string {
+  return platform === "win32" ? win32.join(...segments) : join(...segments);
+}
+
+function dirnameFor(platform: NodeJS.Platform, path: string): string {
+  return platform === "win32" ? win32.dirname(path) : dirname(path);
+}
+
+function pathValueFromEnv(env: NodeJS.ProcessEnv, platform: NodeJS.Platform): string {
+  if (platform === "win32") {
+    return env.Path || env.PATH || "";
+  }
+  return env.PATH || "";
+}
+
+function addIfPresent(paths: string[], value: string | undefined): void {
+  if (value) paths.push(value);
+}
+
+function windowsCommonCliPaths(env: NodeJS.ProcessEnv, home: string): string[] {
+  const paths: string[] = [];
+  addIfPresent(paths, env.APPDATA ? pathJoinFor("win32", env.APPDATA, "npm") : undefined);
+  addIfPresent(
+    paths,
+    env.LOCALAPPDATA ? pathJoinFor("win32", env.LOCALAPPDATA, "pnpm") : undefined
+  );
+  addIfPresent(
+    paths,
+    env.LOCALAPPDATA ? pathJoinFor("win32", env.LOCALAPPDATA, "Programs", "nodejs") : undefined
+  );
+  addIfPresent(
+    paths,
+    env.LOCALAPPDATA ? pathJoinFor("win32", env.LOCALAPPDATA, "Programs", "npm") : undefined
+  );
+  addIfPresent(
+    paths,
+    env.ProgramFiles ? pathJoinFor("win32", env.ProgramFiles, "nodejs") : undefined
+  );
+  addIfPresent(
+    paths,
+    env["ProgramFiles(x86)"] ? pathJoinFor("win32", env["ProgramFiles(x86)"], "nodejs") : undefined
+  );
+  addIfPresent(
+    paths,
+    env.ProgramData ? pathJoinFor("win32", env.ProgramData, "chocolatey", "bin") : undefined
+  );
+  paths.push(pathJoinFor("win32", home, "AppData", "Roaming", "npm"));
+  paths.push(pathJoinFor("win32", home, "AppData", "Local", "pnpm"));
+  paths.push(pathJoinFor("win32", home, ".volta", "bin"));
+  paths.push(pathJoinFor("win32", home, "scoop", "shims"));
+  return paths;
+}
+
+export function buildExtendedPath(
+  env: NodeJS.ProcessEnv = process.env,
+  home: string = homedir(),
+  nodePath: string = process.execPath,
+  platform: NodeJS.Platform = process.platform
+): string {
   const additionalPaths: string[] = [
-    join(home, ".local/bin"),
-    dirname(process.execPath), // Current node's bin directory
+    pathJoinFor(platform, home, ".local", "bin"),
+    dirnameFor(platform, nodePath), // Current node's bin directory
     "/usr/local/bin",
     "/usr/bin",
   ];
+
+  if (platform === "win32") {
+    additionalPaths.push(...windowsCommonCliPaths(env, home));
+  }
 
   // Add all nvm node version bin directories
   const nvmPath = getNvmPath();
@@ -74,12 +138,142 @@ export function getExtendedPath(): string {
     additionalPaths.push(nvmPath);
   }
 
-  const currentPath = process.env.PATH || "";
-  return [...additionalPaths, currentPath].join(":");
+  const currentPath = pathValueFromEnv(env, platform);
+  return [...dedupePaths(additionalPaths, platform), currentPath]
+    .filter(Boolean)
+    .join(pathDelimiterFor(platform));
+}
+
+// Extend PATH to include common locations for CLI tools.
+export function getExtendedPath(): string {
+  return buildExtendedPath();
+}
+
+export function envWithExtendedPath(
+  baseEnv: NodeJS.ProcessEnv = process.env,
+  extendedPath: string = getExtendedPath(),
+  platform: NodeJS.Platform = process.platform
+): NodeJS.ProcessEnv {
+  const env = { ...baseEnv };
+  const key =
+    platform === "win32"
+      ? Object.keys(env).find(existing => existing.toLowerCase() === "path") || "Path"
+      : "PATH";
+  env[key] = extendedPath;
+  if (platform === "win32") {
+    for (const existing of Object.keys(env)) {
+      if (existing !== key && existing.toLowerCase() === "path") {
+        delete env[existing];
+      }
+    }
+  }
+  return env;
+}
+
+function dedupePaths(paths: string[], platform: NodeJS.Platform): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const path of paths) {
+    const normalized = platform === "win32" ? path.toLowerCase() : path;
+    if (seen.has(normalized)) continue;
+    seen.add(normalized);
+    result.push(path);
+  }
+  return result;
+}
+
+export interface ResolvedSpawnCommand {
+  command: string;
+  args: string[];
+  windowsVerbatimArguments?: boolean;
+}
+
+export function resolveCommandForSpawn(
+  command: string,
+  args: string[],
+  options: {
+    envPath?: string;
+    platform?: NodeJS.Platform;
+  } = {}
+): ResolvedSpawnCommand {
+  const platform = options.platform ?? process.platform;
+  if (platform !== "win32") {
+    return { command, args };
+  }
+
+  const resolved = resolveWindowsCommandPath(command, options.envPath ?? getExtendedPath());
+  if (!resolved) {
+    return { command, args };
+  }
+
+  if (extname(resolved).toLowerCase() === ".ps1") {
+    return {
+      command: "powershell.exe",
+      args: ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", resolved, ...args],
+    };
+  }
+
+  if ([".cmd", ".bat"].includes(extname(resolved).toLowerCase())) {
+    return {
+      command: "cmd.exe",
+      args: ["/d", "/s", "/c", `"${buildWindowsCmdCommand(resolved, args)}"`],
+      windowsVerbatimArguments: true,
+    };
+  }
+
+  return { command: resolved, args };
+}
+
+function buildWindowsCmdCommand(command: string, args: string[]): string {
+  return [escapeWindowsCmdCommand(command), ...args.map(escapeWindowsCmdArgument)].join(" ");
+}
+
+const WINDOWS_CMD_META_CHARS = /([()\][%!^"`<>&|;, *?])/g;
+
+function escapeWindowsCmdCommand(value: string): string {
+  return win32.normalize(value).replace(WINDOWS_CMD_META_CHARS, "^$1");
+}
+
+// CommandLineToArgvW rules: a run of N backslashes before a literal " must be
+// doubled and followed by \" (yielding 2N+1 backslashes total, so the parser
+// strips N and keeps the quote as literal); a run of N backslashes immediately
+// before the closing " must be doubled (2N) so the quote still terminates the
+// arg. Then wrap in quotes and caret-escape cmd.exe metacharacters.
+function escapeWindowsCmdArgument(value: string): string {
+  let arg = `${value}`;
+  arg = arg.replace(/(\\*)"/g, '$1$1\\"');
+  arg = arg.replace(/(\\*)$/, "$1$1");
+  arg = `"${arg}"`;
+  return arg.replace(WINDOWS_CMD_META_CHARS, "^$1");
+}
+
+function resolveWindowsCommandPath(command: string, envPath: string): string | null {
+  if (/[\\/]/.test(command)) {
+    return existsSync(command) ? command : null;
+  }
+
+  const hasExtension = extname(command) !== "";
+  const extensions = hasExtension ? [""] : [".exe", ".cmd", ".bat", ".ps1", ""];
+  for (const dir of envPath.split(pathDelimiterFor("win32")).filter(Boolean)) {
+    for (const extension of extensions) {
+      const candidate = pathJoinFor("win32", dir, command + extension);
+      if (existsSync(candidate)) {
+        return candidate;
+      }
+    }
+  }
+  return null;
 }
 
 /** Registry of active detached process groups for shutdown cleanup. */
 const activeProcessGroups = new Set<number>();
+
+export function shouldDetachProviderProcess(platform: NodeJS.Platform = process.platform): boolean {
+  // On Windows, detached console children can flash visible cmd/conhost windows
+  // when provider CLIs are native console apps or .cmd shims. Keep them in the
+  // gateway process tree and rely on hidden-window spawn plus taskkill cleanup.
+  return platform !== "win32";
+}
 
 export function registerProcessGroup(pid: number): void {
   activeProcessGroups.add(pid);
@@ -100,19 +294,27 @@ export function killAllProcessGroups(): Promise<void> {
   if (activeProcessGroups.size === 0) return Promise.resolve();
 
   for (const pid of activeProcessGroups) {
-    try {
-      process.kill(-pid, "SIGTERM");
-    } catch {
-      /* ESRCH ok */
+    if (process.platform === "win32") {
+      killWindowsProcessTree(pid);
+    } else {
+      try {
+        process.kill(-pid, "SIGTERM");
+      } catch {
+        /* ESRCH ok */
+      }
     }
   }
   return new Promise(resolve => {
     setTimeout(() => {
       for (const pid of activeProcessGroups) {
-        try {
-          process.kill(-pid, "SIGKILL");
-        } catch {
-          /* ESRCH ok */
+        if (process.platform === "win32") {
+          killWindowsProcessTree(pid);
+        } else {
+          try {
+            process.kill(-pid, "SIGKILL");
+          } catch {
+            /* ESRCH ok */
+          }
         }
       }
       activeProcessGroups.clear();
@@ -127,6 +329,9 @@ export function killAllProcessGroups(): Promise<void> {
  */
 export function killProcessGroup(proc: ChildProcess, signal: NodeJS.Signals): boolean {
   if (proc.pid) {
+    if (process.platform === "win32") {
+      return killWindowsProcessTree(proc.pid);
+    }
     try {
       process.kill(-proc.pid, signal);
       return true;
@@ -149,6 +354,40 @@ export function killProcessGroup(proc: ChildProcess, signal: NodeJS.Signals): bo
   }
 }
 
+function killWindowsProcessTree(pid: number): boolean {
+  const result = spawnSync("taskkill.exe", ["/PID", String(pid), "/T", "/F"], {
+    stdio: "ignore",
+    windowsHide: true,
+  });
+  return result.status === 0;
+}
+
+export function spawnCliProcess(
+  command: string,
+  args: string[],
+  options: {
+    cwd?: string;
+    env: NodeJS.ProcessEnv;
+    stdio: SpawnOptions["stdio"];
+  }
+): ChildProcess {
+  const detached = shouldDetachProviderProcess();
+  const resolved = resolveCommandForSpawn(command, args, {
+    envPath: pathValueFromEnv(options.env, process.platform),
+  });
+  const proc = spawn(resolved.command, resolved.args, {
+    cwd: options.cwd,
+    detached,
+    windowsHide: true,
+    windowsVerbatimArguments: resolved.windowsVerbatimArguments,
+    stdio: options.stdio,
+    env: options.env,
+  });
+  if (proc.pid) registerProcessGroup(proc.pid);
+  proc.unref();
+  return proc;
+}
+
 export async function executeCli(
   command: string,
   args: string[],
@@ -156,20 +395,16 @@ export async function executeCli(
 ): Promise<ExecuteResult> {
   const { timeout, idleTimeout, cwd, env: extraEnv } = options;
   const extendedPath = getExtendedPath();
+  const baseEnv = envWithExtendedPath(process.env, extendedPath);
   const circuitBreaker = getCircuitBreaker(command);
 
   const runOnce = () =>
     new Promise<ExecuteResult>((resolve, reject) => {
-      const proc = spawn(command, args, {
+      const proc = spawnCliProcess(command, args, {
         cwd,
-        detached: true,
         stdio: ["ignore", "pipe", "pipe"],
-        env: { ...process.env, PATH: extendedPath, ...(extraEnv ?? {}) },
+        env: { ...baseEnv, ...(extraEnv ?? {}) },
       });
-
-      if (proc.pid) registerProcessGroup(proc.pid);
-      // Prevent detached process from keeping parent alive when not needed
-      proc.unref();
 
       let stdout = "";
       let stderr = "";
@@ -265,14 +500,14 @@ export async function executeCli(
         }
       };
 
-      proc.stdout.on("data", data => {
+      proc.stdout!.on("data", data => {
         if (settled) {
           return;
         }
         handleOutputChunk(data, "stdout");
       });
 
-      proc.stderr.on("data", data => {
+      proc.stderr!.on("data", data => {
         if (settled) {
           return;
         }
@@ -327,7 +562,14 @@ export async function executeCli(
           return;
         }
 
-        const result = { stdout, stderr, code: code ?? 0 };
+        let result = { stdout, stderr, code: code ?? 0 };
+        if (result.code === -4058 && !stdout && !stderr) {
+          result = {
+            stdout,
+            stderr: `The '${command}' command was not found. Install the ${command} CLI and make sure it is on PATH.`,
+            code: 127,
+          };
+        }
         if (result.code !== 0) {
           const error = new Error(`Process exited with code ${result.code}`) as Error & {
             code?: number;

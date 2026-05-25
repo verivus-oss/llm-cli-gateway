@@ -214,6 +214,7 @@ export interface DoctorReport {
       path: string;
       public_url_configured: boolean;
       public_url: string | null;
+      chatgpt_connector_url: string | null;
     };
   };
   auth: {
@@ -290,6 +291,23 @@ function defaultTransport(env: NodeJS.ProcessEnv): "stdio" | "http" {
   return "stdio";
 }
 
+function chatGPTConnectorUrl(env: NodeJS.ProcessEnv, rawPublicUrl: string | null): string | null {
+  const path = (env.LLM_GATEWAY_NO_AUTH_PATHS || "")
+    .split(/[,;\s]+/)
+    .map(value => value.trim())
+    .find(value => value.startsWith("/") && !value.includes("?") && !value.includes("#"));
+  if (!rawPublicUrl || !path) return null;
+  try {
+    const url = new URL(rawPublicUrl);
+    url.pathname = path;
+    url.search = "";
+    url.hash = "";
+    return redactDiagnosticUrl(url.toString());
+  } catch {
+    return null;
+  }
+}
+
 export function createDoctorReport(env: NodeJS.ProcessEnv = process.env): DoctorReport {
   const auth = loadAuthConfig(env);
   const transport = defaultTransport(env);
@@ -320,6 +338,7 @@ export function createDoctorReport(env: NodeJS.ProcessEnv = process.env): Doctor
         path: env.LLM_GATEWAY_HTTP_PATH || "/mcp",
         public_url_configured: Boolean(publicUrl),
         public_url: publicUrl,
+        chatgpt_connector_url: chatGPTConnectorUrl(env, rawPublicUrl),
       },
     },
     auth: {

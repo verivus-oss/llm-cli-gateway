@@ -2,6 +2,235 @@
 
 All notable changes to the llm-cli-gateway project.
 
+## [1.5.34] - 2026-05-25
+
+### Security
+
+- Pin the development Redis client fixture back to `ioredis@5.9.2` and reject the Socket-flagged `ioredis@5.10.1` / `@ioredis/commands@1.5.1` lockfile pair in the release security audit. The runtime Redis integration remains an optional peer dependency.
+
+## [1.5.33] - 2026-05-25
+
+### Security
+
+- Stop using `better-sqlite3`'s dynamic `db.pragma(source)` helper in production code. SQLite setup now uses fixed literal `PRAGMA` statements through `db.exec(...)`, and the release security audit fails future production `.pragma()` calls.
+- Document the bounded `better-sqlite3/lib/methods/pragma.js` scanner alert in README and `socket.yml`, including the local mitigation and release audit gate.
+
+## [1.5.32] - 2026-05-25
+
+### Changed
+
+- Move GitHub Actions workflows to Node 24-backed action majors and run CI/release Node jobs on Node 24, removing GitHub's Node 20 action-runtime deprecation warning before the June 2026 cutoff.
+
+## [1.5.31] - 2026-05-25
+
+### Changed
+
+- Replace direct dependency on `toml@3.0.0` (single-maintainer, last released 2020) with `smol-toml@^1.6.1` (actively maintained, TypeScript-native, zero deps). Same `parse(text)` API, drop-in across `src/config.ts`, `src/claude-mcp-config.ts`, and `src/model-registry.ts`.
+
+### Security
+
+- Add `socket.yml` documenting the rationale for Socket's behavioural alerts (`networkAccess`, `shellAccess`, `usesEval`). Alerts are left visible — not silenced — so downstream consumers can see the maintainer's review context.
+- Expand README "Security Considerations" with a per-alert breakdown mapping each Socket signal to where it lives in the code and why it is bounded.
+
+## [1.5.30] - 2026-05-25
+
+### Fixed
+
+- Quote Windows `.cmd` and `.bat` provider shim invocations through `cmd.exe` to preserve paths with spaces and escape command-processor metacharacters in forwarded arguments.
+
+## [1.5.29] - 2026-05-25
+
+### Fixed
+
+- Launch Windows `.cmd` and `.bat` provider shims through `cmd.exe` instead of spawning them directly, fixing Gemini npm shim failures reported as `spawn EINVAL` by `gemini_request`, `cli_versions`, and `contracts --probe-installed`.
+
+## [1.5.28] - 2026-05-25
+
+### Fixed
+
+- Add Windows gateway startup self-healing for a verified pending `llm-cli-gateway.exe.new` bootstrapper update, so a failed staged bootstrapper replacement completes after `llm-cli-gateway start`.
+- Replace the Windows bootstrapper self-replacement helper with a `cmd.exe` script instead of PowerShell to avoid environments that block local PowerShell replacement scripts.
+
+## [1.5.27] - 2026-05-25
+
+### Fixed
+
+- Expose the installed Node gateway `contracts` diagnostic command through the desktop bootstrapper, so `llm-cli-gateway contracts --json --cli=gemini --probe-installed` works on Windows desktop installs.
+
+## [1.5.26] - 2026-05-25
+
+### Fixed
+
+- Make `upstream_contracts --probe-installed` use the same extended provider PATH and Windows shim resolver as request execution and `doctor --json`, avoiding false `ENOENT` diagnostics for npm-installed CLIs such as Gemini.
+
+## [1.5.25] - 2026-05-25
+
+### Fixed
+
+- Stop passing unsupported Gemini `--session-id` arguments for fresh or `createNewSession` requests. The gateway now lets Gemini CLI create fresh sessions with its own default behavior and only emits `--resume` for explicit resume requests, fixing Gemini CLI 0.43 exit-code-1 failures misreported as spawn errors.
+
+## [1.5.24] - 2026-05-25
+
+### Fixed
+
+- Prefer Windows executable shims such as `.cmd`, `.bat`, `.exe`, and `.ps1` before extensionless npm shell shims when spawning provider CLIs, fixing npm-installed Gemini CLI launch failures on Windows.
+
+## [1.5.23] - 2026-05-25
+
+### Fixed
+
+- Add a ChatGPT-specific connector URL that uses a generated high-entropy no-auth path, while keeping the normal `/mcp` endpoint bearer-protected for clients that support Authorization headers.
+- Make `tunnel start`, `public-url`, `print-client-config`, and the new `chatgpt-url` command report the ChatGPT URL with `Authentication: No Authentication` guidance.
+- Teach the HTTP transport to serve explicitly configured no-auth connector paths without weakening auth on the default `/mcp` endpoint.
+
+## [1.5.22] - 2026-05-24
+
+### Added
+
+- Add desktop `tunnel start`, `tunnel status`, and `tunnel stop` commands for a managed Cloudflare Quick Tunnel path to ChatGPT/web-client HTTPS MCP setup.
+- Make `tunnel start` launch the local gateway if needed, parse the generated `https://*.trycloudflare.com` address, persist the normalized `/mcp` public URL, and enable doctor verification.
+- Make `tunnel stop` stop the managed tunnel and clear the persisted URL only when it still matches the managed tunnel URL.
+
+## [1.5.21] - 2026-05-24
+
+### Fixed
+
+- Add a desktop `public-url` command that persists a public HTTPS `/mcp` endpoint for ChatGPT and other web clients.
+- Pass the persisted public URL and verification flag into managed gateway starts and `doctor --json`, instead of relying on one-off shell environment state.
+- Make `print-client-config` prefer the persisted public HTTPS URL while still reporting the local URL separately.
+
+## [1.5.20] - 2026-05-24
+
+### Fixed
+
+- Do not inject Mistral `VIBE_ACTIVE_MODEL` when a request omits `model`; let Vibe use its own CLI default unless the caller explicitly asks for a model.
+- Make `list_models`, `list_available_models`, and `models://*` omit bundled fallback entries from `models` and expose them only as `unverifiedModelHints`.
+- Add warnings when model entries are only bundled fallback hints, so clients do not present unvalidated model names as available provider models.
+
+## [1.5.19] - 2026-05-24
+
+### Fixed
+
+- Use the gateway's extended provider CLI PATH in `doctor --json`, not only in request execution.
+- Add common Windows npm/Corepack/Scoop/Volta/Chocolatey CLI shim directories to provider PATH discovery.
+- Resolve Windows PowerShell npm shims such as `gemini.ps1` and `claude.ps1` without invoking a shell command string.
+
+## [1.5.18] - 2026-05-24
+
+### Fixed
+
+- Make desktop `upgrade` resolve the latest release once, install the verified platform bundle, and download/verify the matching bootstrapper executable.
+- Stage Windows bootstrapper self-replacement during `upgrade` so future upgrades can update command behavior instead of only rotating the Node gateway bundle.
+- Report `bootstrapper_update` in `upgrade` output so users can see whether the desktop command was already current, updated, or pending replacement.
+
+## [1.5.17] - 2026-05-24
+
+### Fixed
+
+- Make desktop bootstrapper `doctor --json` delegate to the installed Node gateway doctor when a verified bundle is installed, so provider availability and `gateway.version` reflect the active bundle instead of stale bootstrapper-side placeholders.
+- Add `gateway.bootstrapper_version` and `gateway.diagnostic_source` to desktop doctor output so bundle version and bootstrapper version are distinguishable.
+- Include `bootstrapper_version` in desktop `upgrade` output and make the post-upgrade note explicit that command fixes require replacing the bootstrapper executable.
+
+## [1.5.16] - 2026-05-24
+
+### Fixed
+
+- Remove the stale hardcoded Mistral Vibe `devstral-medium` default from the gateway request path.
+- Discover Mistral Vibe model aliases from `~/.vibe/config.toml`, `VIBE_MODELS`, `VIBE_ACTIVE_MODEL`, and gateway env overrides before injecting `VIBE_ACTIVE_MODEL`.
+- Recover stale Vibe config such as `active_model = "devstral-medium"` to `mistral-medium-3.5`, and retry one synchronous Mistral request after a model-not-found failure with refreshed discovery.
+- Build provider CLI PATH values with the platform delimiter so Windows desktop installs can find CLIs in locations such as `%USERPROFILE%\.local\bin`, and normalize Windows `-4058` launch failures to command-not-found guidance.
+
+## [1.5.15] - 2026-05-24
+
+### Fixed
+
+- Make the desktop bootstrapper `upgrade` command discover the latest GitHub release bundle and SHA256SUMS itself, so `llm-cli-gateway upgrade` no longer depends on stale `RVWR_GATEWAY_BUNDLE_URL` / `RVWR_GATEWAY_BUNDLE_SHA256` shell state.
+- Add desktop bootstrapper `--version`, `version`, `--help`, `-help`, and `/?` handling, and report the real release version in `doctor` instead of `"bootstrapper"`.
+- Normalize bundle checksum comparison and include expected/actual hashes when verification fails.
+
+### Changed
+
+- Move `pg` and `ioredis` out of the default production install path and into optional peer dependencies, while keeping them as dev dependencies for PostgreSQL/Redis tests and development.
+
+## [1.5.14] - 2026-05-24
+
+### Fixed
+
+- Remove the Redis Lua `eval` lock-release path from production source and replace it with Redis `WATCH`/`MULTI` compare-and-delete semantics.
+- Add exact direct production dependencies for `content-type@1.0.5` and `type-is@2.0.1` so packed consumer installs do not resolve the Socket-flagged `content-type@2.0.0` / `type-is@2.1.0` versions.
+
+### Added
+
+- Add `npm run security:audit` as a CI/release gate covering `npm audit --omit=dev`, production source dynamic-execution scanning, blocked dependency-version checks, and a packed consumer install policy check.
+
+## [1.5.13] - 2026-05-24
+
+### Fixed
+
+- Report missing provider CLI launches as a clear command-not-found error instead of leaking Windows/libuv codes such as `-4058`.
+- Preserve async provider launch errors in job stderr/result output so sync MCP tools can return actionable setup guidance.
+- Replace `irm | iex` Windows install guidance and generated release manifest commands with direct binary download plus SHA256 verification.
+
+## [1.5.12] - 2026-05-24
+
+### Fixed
+
+- Stop detaching provider CLI processes on Windows so `ask_model` and async requests do not flash visible cmd/conhost windows.
+- Use hidden Windows process creation for the bootstrapper's managed Node gateway process and status checks.
+- Keep Windows process cleanup by killing provider process trees with hidden `taskkill.exe` instead of Unix process-group signals.
+
+## [1.5.11] - 2026-05-24
+
+### Fixed
+
+- Install a stable Windows `llm-cli-gateway.exe` command alongside the versioned bootstrapper and add the install directory to the user PATH.
+- Make the Windows one-command installer stop any running gateway before replacing the managed bundle, then start and doctor through the stable command.
+- Fix bootstrapper `status` and `stop` behavior on Windows so they do not depend on Unix-style PID probing.
+
+## [1.5.10] - 2026-05-24
+
+### Fixed
+
+- Hide Windows console windows when the gateway spawns provider CLIs for synchronous and asynchronous requests.
+
+## [1.5.9] - 2026-05-24
+
+### Fixed
+
+- Fix the Node entrypoint direct-run guard on Windows by using `pathToFileURL(realpathSync(...))` instead of constructing a POSIX-style file URL manually.
+- Make the Windows one-command installer stop when bootstrapper commands fail by checking native process exit codes.
+
+## [1.5.8] - 2026-05-24
+
+### Fixed
+
+- Make `start` wait for the local HTTP health endpoint before reporting success.
+- Write gateway stdout/stderr to local log files so startup failures are diagnosable instead of returning a misleading PID.
+
+## [1.5.7] - 2026-05-24
+
+### Fixed
+
+- Add a release-pinned `install-windows.ps1` asset so Windows users can install with one PowerShell command while still verifying the downloaded bootstrapper and platform bundle against `SHA256SUMS`.
+- Add the Windows one-liner to `release-manifest.json` and upload the installer script as part of the desktop release workflow.
+
+## [1.5.6] - 2026-05-24
+
+### Fixed
+
+- Replace the host-Node installer path with platform-specific verified bundles that include the compiled gateway, production dependencies, setup assets, and a managed Node runtime.
+- Make the bootstrapper start the managed runtime from the installed bundle and require `RVWR_ALLOW_HOST_NODE=1` for the developer host-Node fallback.
+- Update release packaging metadata and docs so Windows/macOS/Linux install instructions use `llm-cli-gateway-bundle-<version>-<os>-<arch>.tar.gz`.
+- Update production dependencies (`@modelcontextprotocol/sdk`, `better-sqlite3`, and transitive Hono/AJV packages) so `npm audit --omit=dev` reports zero vulnerabilities while pinning `type-is` and `content-type` away from Socket-flagged latest releases.
+
+## [1.5.5] - 2026-05-24
+
+### Fixed
+
+- Build desktop installer binaries on local self-hosted Linux, Windows, and macOS runners, then publish combined release metadata from the Linux packaging job.
+- Make `installer/build-release.sh` default to the host target for local runs, with `--all-targets` / `RVWR_RELEASE_ALL_TARGETS=1` reserved for local full-matrix testing.
+- Package setup UI/provider assets into the verified gateway bundle and let the setup UI resolve installed bundle assets from the managed gateway directory.
+
 ## [1.5.4] - 2026-05-19
 
 ### Fixed
@@ -43,7 +272,7 @@ Lands DAG layers 6-12 — the personal-MCP MVP terminal plus all of Phase 0-3 pr
 - **U13 / U16 — Release packaging + dogfood readiness.** `installer/build-release.sh` cross-compiles 5 OS/arch targets (linux/{amd64,arm64}, darwin/{amd64,arm64}, windows/amd64) + Node bundle + `SHA256SUMS` + `release-manifest.json`. New `cli_upgrade --uninstall` (idempotent, dry-run by default) and `cli_upgrade --check`. New `Dockerfile.personal` + `docker-compose.personal.yml` for the personal-MCP container path. New `installer/packaging/README.md`. New `package.json` scripts `release:build`, `release:checksums`, `release:docker`. Comprehensive `docs/personal-mcp/{DOGFOODING_RESULTS,RELEASE_READINESS,SINGLE_BINARY_INSTALLER,ENDPOINT_EXPOSURE,PRODUCT_CONTRACT,PROVIDER_SUPPORT_MATRIX,VALIDATION_REPORT_FORMAT}.md` + per-provider `connect-*.md` guides + `setup/assistants/*-install-prompt.md` install-prompt corpus.
 - **U21 — Phase-0 parity fixes.** `SESSION_PROVIDER_VALUES` / `SESSION_PROVIDER_ENUM` now expose the full provider set (grok was previously absent from `session_create`/`session_list`/`session_clear_all` Zod enums despite the storage layer supporting it). `prepareGeminiRequest` emits `["-p", prompt, ...]` instead of a positional prompt, eliminating the dependency on Gemini's TTY/mode-detection heuristics. 6 new tests pin both fixes.
 - **U22 — Mistral Vibe is the fifth supported provider.** New `mistral_request` and `mistral_request_async` MCP tools register alongside the four incumbents and route through the same async job manager, dedup store, flight recorder, approval manager, and validation orchestrator. Five Vibe-specific divergences are documented in `docs/personal-mcp/PROVIDER_MODERNISATION_AUDIT.md`:
-  - **No `--model` flag** — model selection is via the `VIBE_ACTIVE_MODEL` environment variable (default alias: `devstral-medium`); the executor and async job manager forward an `env` override.
+  - **No `--model` flag** — model selection is via the `VIBE_ACTIVE_MODEL` environment variable; the gateway discovers Vibe config/env models, avoids stale hardcoded defaults, and forwards an `env` override only when needed.
   - **Session-logging is opt-in** in `~/.vibe/config.toml` — `doctor --json` probes `[session_logging] enabled = true` (read-only) and surfaces an actionable `next_actions` entry when the toggle is missing.
   - **`--agent` enum** replaces Grok's `--always-approve` (`default | plan | accept-edits | auto-approve | chat | explore | lean`); the gateway always emits `--agent` explicitly and defaults to `auto-approve` for programmatic callers.
   - **`--enabled-tools` allow-list only** — `allowedTools` emits one `--enabled-tools <tool>` per entry; `disallowedTools` is accepted in the schema for caller parity but silently ignored at the CLI boundary (a logged warning records the no-op).

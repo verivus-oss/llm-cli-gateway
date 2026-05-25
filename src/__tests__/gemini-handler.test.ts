@@ -6,7 +6,7 @@
  *   - policyFiles → `--policy <path>` (existence-validated)
  *   - adminPolicyFiles → `--admin-policy <path>` (existence-validated)
  *   - attachments → prepended `@<abs-path>` tokens (absolute + existence-validated)
- *   - createNewSession=true → `--session-id <uuid>` (NOT `--resume`)
+ *   - createNewSession=true → no session flag (NOT `--resume`)
  *   - createNewSession=false + sessionId → `--resume <id>` (preserved behavior)
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -18,7 +18,6 @@ import {
   prependGeminiAttachments,
   prepareGeminiHighImpactFlags,
   resolveGeminiSessionPlan,
-  isValidGeminiSessionId,
 } from "../request-helpers.js";
 import { prepareGeminiRequest } from "../index.js";
 
@@ -127,25 +126,22 @@ describe("U27 GEMINI_HIGH_IMPACT_PARAMS_SCHEMA", () => {
 });
 
 describe("U27 resolveGeminiSessionPlan", () => {
-  it("emits --session-id <uuid> for fresh sessions (createNewSession=true)", () => {
+  it("emits no session flag for fresh sessions (createNewSession=true)", () => {
     const plan = resolveGeminiSessionPlan({ createNewSession: true });
-    expect(plan.args[0]).toBe("--session-id");
-    expect(isValidGeminiSessionId(plan.args[1])).toBe(true);
-    expect(plan.emittedSessionId).toBe(plan.args[1]);
+    expect(plan.args).toEqual([]);
     expect(plan.resumed).toBe(false);
   });
 
-  it("emits --session-id <uuid> when no sessionId and no resumeLatest", () => {
+  it("emits no session flag when no sessionId and no resumeLatest", () => {
     const plan = resolveGeminiSessionPlan({});
-    expect(plan.args[0]).toBe("--session-id");
-    expect(isValidGeminiSessionId(plan.args[1])).toBe(true);
+    expect(plan.args).toEqual([]);
+    expect(plan.resumed).toBe(false);
   });
 
   it("emits --resume <id> when user supplies sessionId and createNewSession=false", () => {
     const plan = resolveGeminiSessionPlan({ sessionId: "user-abc-42" });
     expect(plan.args).toEqual(["--resume", "user-abc-42"]);
     expect(plan.resumed).toBe(true);
-    expect(plan.emittedSessionId).toBeUndefined();
   });
 
   it("emits --resume latest when resumeLatest=true and no sessionId", () => {
@@ -159,17 +155,8 @@ describe("U27 resolveGeminiSessionPlan", () => {
       createNewSession: true,
       sessionId: "user-abc-42",
     });
-    expect(plan.args[0]).toBe("--session-id");
-    expect(plan.args[1]).not.toBe("user-abc-42");
-  });
-
-  it("rejects generated ids that fail UUID v4 shape", () => {
-    expect(() =>
-      resolveGeminiSessionPlan({
-        createNewSession: true,
-        generateId: () => "not-a-uuid",
-      })
-    ).toThrow(/UUID v4/);
+    expect(plan.args).toEqual([]);
+    expect(plan.resumed).toBe(false);
   });
 });
 

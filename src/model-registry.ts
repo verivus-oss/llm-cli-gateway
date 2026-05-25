@@ -1,7 +1,7 @@
 import { Dirent, existsSync, readFileSync, readdirSync, statSync } from "fs";
 import { homedir } from "os";
 import path from "path";
-import { parse as parseToml } from "toml";
+import { parse as parseToml } from "smol-toml";
 import type { CliType } from "./session-manager.js";
 
 type ModelSource = "fallback" | "observed" | "config" | "env";
@@ -17,6 +17,7 @@ export interface ModelMetadata {
 export interface CliInfo {
   description: string;
   models: Record<string, string>;
+  unverifiedModelHints?: Record<string, string>;
   defaultModel?: string;
   defaultModelSource?: string;
   modelOrder?: string[];
@@ -76,21 +77,19 @@ const FALLBACK_INFO: CliInfoMap = {
     modelOrder: ["grok-build"],
   },
   mistral: {
-    // Mistral Vibe selects the active model via the VIBE_ACTIVE_MODEL environment
-    // variable; there is NO `--model` flag. Aliases here are still resolvable so
-    // callers can pass e.g. `latest` → `devstral-medium`; the resolved value is
-    // injected via env in prepareMistralRequest.
+    // Mistral Vibe selects the active model via VIBE_ACTIVE_MODEL; there is no
+    // `--model` flag. Do not set a bundled default here: Vibe's own default and
+    // user config move independently of this gateway. The model list is only a
+    // low-confidence recovery set for stale config/model-not-found failures.
     description:
       "Mistral AI's Vibe CLI - agentic coding via Mistral models (model selection via VIBE_ACTIVE_MODEL env var)",
     models: {
-      "devstral-medium":
-        "Default Vibe coding model. Best for: most Vibe sessions (default when VIBE_ACTIVE_MODEL is unset)",
-      "devstral-large": "Higher-capability Devstral model. Best for: harder reasoning/coding tasks",
-      "mistral-large-latest":
-        "General-purpose flagship Mistral model. Best for: non-Devstral reasoning workloads",
+      "mistral-medium-3.5":
+        "Vibe coding model alias observed in Vibe 2.x defaults. Used only when discovery/config requires an explicit VIBE_ACTIVE_MODEL.",
+      "devstral-small":
+        "Vibe coding model alias observed in Vibe 2.x defaults. Used only when configured explicitly.",
     },
-    defaultModel: "devstral-medium",
-    modelOrder: ["devstral-medium", "devstral-large", "mistral-large-latest"],
+    modelOrder: ["mistral-medium-3.5", "devstral-small"],
   },
 };
 
@@ -114,6 +113,17 @@ export function getCliInfo(forceRefresh = false): CliInfoMap {
   const info = buildCliInfo();
   cachedInfo = { loadedAt: Date.now(), info };
   return info;
+}
+
+export function getAvailableCliInfo(forceRefresh = false): CliInfoMap {
+  const info = getCliInfo(forceRefresh);
+  return {
+    claude: filterUnverifiedModelHints(info.claude),
+    codex: filterUnverifiedModelHints(info.codex),
+    gemini: filterUnverifiedModelHints(info.gemini),
+    grok: filterUnverifiedModelHints(info.grok),
+    mistral: filterUnverifiedModelHints(info.mistral),
+  };
 }
 
 export function clearModelRegistryCache(): void {
@@ -181,6 +191,9 @@ function cloneInfo(source: CliInfo): CliInfo {
   const cloned: CliInfo = {
     description: source.description,
     models: { ...source.models },
+    unverifiedModelHints: source.unverifiedModelHints
+      ? { ...source.unverifiedModelHints }
+      : undefined,
     defaultModel: source.defaultModel,
     defaultModelSource: source.defaultModelSource,
     modelOrder: source.modelOrder ? [...source.modelOrder] : undefined,
@@ -198,6 +211,55 @@ function cloneInfo(source: CliInfo): CliInfo {
   });
 
   return cloned;
+}
+
+function filterUnverifiedModelHints(source: CliInfo): CliInfo {
+  const filtered = cloneInfo(source);
+  const models: Record<string, string> = {};
+  const metadata: Record<string, ModelMetadata> = {};
+  const hints: Record<string, string> = {};
+
+  Object.entries(source.models).forEach(([model, description]) => {
+    const modelMetadata = source.modelMetadata?.[model];
+    if (modelMetadata?.source === "fallback") {
+      hints[model] = description;
+      return;
+    }
+    models[model] = description;
+    if (modelMetadata) {
+      metadata[model] = modelMetadata;
+    }
+  });
+
+  filtered.models = models;
+  filtered.modelMetadata = metadata;
+  filtered.unverifiedModelHints = Object.keys(hints).length > 0 ? hints : undefined;
+  filtered.modelOrder = source.modelOrder?.filter(model => model in models);
+
+  if (filtered.defaultModel && !(filtered.defaultModel in models)) {
+    filtered.defaultModel = undefined;
+    filtered.defaultModelSource = undefined;
+  }
+
+  if (filtered.aliases) {
+    filtered.aliases = Object.fromEntries(
+      Object.entries(filtered.aliases).filter(
+        ([, target]) => target === "default" || target in models
+      )
+    );
+    if (Object.keys(filtered.aliases).length === 0) {
+      filtered.aliases = undefined;
+    }
+  }
+
+  if (filtered.unverifiedModelHints) {
+    addWarning(
+      filtered,
+      "Bundled fallback model hints were omitted from models because they are not validated against the installed CLI. They are exposed as unverifiedModelHints only."
+    );
+  }
+
+  return filtered;
 }
 
 function addWarning(info: CliInfo, warning: string): void {
@@ -467,23 +529,154 @@ function applyGrokOverrides(info: CliInfo): void {
 }
 
 function applyMistralOverrides(info: CliInfo): void {
-  // Vibe selects its active model via VIBE_ACTIVE_MODEL (no --model flag). When
-  // present, treat it as the configured default so resolveModelAlias("latest")
-  // returns the user-selected value.
-  const envDefault = process.env.MISTRAL_DEFAULT_MODEL || process.env.VIBE_ACTIVE_MODEL;
+  const vibeConfig = readVibeConfig(info);
+
+  addVibeModelEntries(info, parseVibeModels(process.env.VIBE_MODELS, "VIBE_MODELS"), "env");
+  addVibeModelEntries(info, vibeConfig.models, "config");
 
   addEnvModels(info, "MISTRAL_MODELS");
   addEnvAliases(info, "mistral", "MISTRAL_MODEL_ALIASES");
   addGlobalEnvAliases(info, "mistral");
 
+  // Vibe uses VIBE_ACTIVE_MODEL instead of a CLI flag. Explicit env values win.
+  const envDefault = process.env.MISTRAL_DEFAULT_MODEL || process.env.VIBE_ACTIVE_MODEL;
   if (envDefault) {
     const source = process.env.MISTRAL_DEFAULT_MODEL
       ? "MISTRAL_DEFAULT_MODEL"
       : "VIBE_ACTIVE_MODEL";
     setDefaultModel(info, envDefault, source, "env");
+  } else if (vibeConfig.activeModel) {
+    const configuredActiveModel = vibeConfig.activeModel;
+    if (info.models[configuredActiveModel]) {
+      setDefaultModel(info, configuredActiveModel, vibeConfig.source, "config");
+    } else {
+      const migrated = migrateDeprecatedMistralModel(configuredActiveModel, info);
+      if (migrated) {
+        addWarning(
+          info,
+          `Vibe active_model '${configuredActiveModel}' is not in the discovered model list; using '${migrated}' as the gateway recovery model`
+        );
+        setDefaultModel(info, migrated, `${vibeConfig.source} recovery`, "config");
+      } else {
+        addWarning(
+          info,
+          `Vibe active_model '${configuredActiveModel}' is not in the discovered model list`
+        );
+      }
+    }
   }
 
   info.modelOrder = buildOrder(info, info.defaultModel);
+}
+
+interface VibeModelEntry {
+  alias: string;
+  name?: string;
+  description?: string;
+  sourceDetail: string;
+}
+
+interface VibeConfigDiscovery {
+  activeModel?: string;
+  models: VibeModelEntry[];
+  source: string;
+}
+
+function readVibeConfig(info: CliInfo): VibeConfigDiscovery {
+  const vibeHome = process.env.VIBE_HOME || path.join(homedir(), ".vibe");
+  const configPath = path.join(vibeHome, "config.toml");
+  const result: VibeConfigDiscovery = { models: [], source: configPath };
+
+  if (!existsSync(configPath)) {
+    return result;
+  }
+
+  try {
+    const parsed = parseToml(readFileSync(configPath, "utf-8"));
+    const activeModel = readStringProperty(parsed, "active_model");
+    if (activeModel) {
+      result.activeModel = activeModel.trim();
+    }
+    result.models = parseVibeModelArray(readRecordOrArrayProperty(parsed, "models"), configPath);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    addWarning(info, `Could not parse Vibe config ${configPath}: ${message}`);
+  }
+
+  return result;
+}
+
+function parseVibeModels(value: string | undefined, sourceDetail: string): VibeModelEntry[] {
+  if (!value || !value.trim()) {
+    return [];
+  }
+
+  try {
+    return parseVibeModelArray(JSON.parse(value), sourceDetail);
+  } catch {
+    return [];
+  }
+}
+
+function parseVibeModelArray(value: unknown, sourceDetail: string): VibeModelEntry[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .map((entry): VibeModelEntry | null => {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+        return null;
+      }
+      const record = entry as Record<string, unknown>;
+      const alias = typeof record.alias === "string" ? record.alias.trim() : "";
+      const name = typeof record.name === "string" ? record.name.trim() : undefined;
+      if (!alias) {
+        return null;
+      }
+      return {
+        alias,
+        name,
+        description: name ? `${alias} (${name}) from Vibe config` : `${alias} from Vibe config`,
+        sourceDetail,
+      };
+    })
+    .filter((entry): entry is VibeModelEntry => entry !== null);
+}
+
+function addVibeModelEntries(
+  info: CliInfo,
+  entries: VibeModelEntry[],
+  source: "config" | "env"
+): void {
+  entries.forEach(entry => {
+    addModel(
+      info,
+      entry.alias,
+      entry.description ?? `${entry.alias} from Vibe model configuration`,
+      {
+        source,
+        sourceDetail: entry.sourceDetail,
+        confidence: source === "env" ? "high" : "medium",
+      },
+      { preferDescription: true }
+    );
+
+    if (entry.name && entry.name !== entry.alias && isValidModelName(entry.name)) {
+      addAlias(info, entry.name, entry.alias, entry.sourceDetail);
+    }
+  });
+}
+
+function migrateDeprecatedMistralModel(model: string, info: CliInfo): string | undefined {
+  const normalized = model.trim().toLowerCase();
+  const replacement = ["devstral-medium", "devstral-large"].includes(normalized)
+    ? "mistral-medium-3.5"
+    : undefined;
+  if (replacement && info.models[replacement]) {
+    return replacement;
+  }
+  return undefined;
 }
 
 function readJsonStringValue(
@@ -541,6 +734,13 @@ function readRecordProperty(value: unknown, key: string): Record<string, unknown
   return prop && typeof prop === "object" && !Array.isArray(prop)
     ? (prop as Record<string, unknown>)
     : {};
+}
+
+function readRecordOrArrayProperty(value: unknown, key: string): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+  return (value as Record<string, unknown>)[key];
 }
 
 interface EnvModelEntry {

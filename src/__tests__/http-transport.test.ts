@@ -64,6 +64,7 @@ describe("Layer 6 HTTP MCP transport (U20)", () => {
   beforeEach(() => {
     process.env = { ...ORIGINAL_ENV, LLM_GATEWAY_AUTH_TOKEN: TEST_TOKEN };
     delete process.env.LLM_GATEWAY_AUTH_DISABLED;
+    delete process.env.LLM_GATEWAY_NO_AUTH_PATHS;
   });
 
   afterEach(async () => {
@@ -98,6 +99,38 @@ describe("Layer 6 HTTP MCP transport (U20)", () => {
     expect(response.status).toBe(401);
     const body = (await response.json()) as { error?: string };
     expect(body.error).toBe("Unauthorized");
+  });
+
+  it("serves configured no-auth connector paths while keeping /mcp protected", async () => {
+    process.env.LLM_GATEWAY_NO_AUTH_PATHS = "/chatgpt/unit-test/mcp";
+    gateway = await startGateway();
+
+    const protectedResponse = await fetch(gateway.url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} }),
+    });
+    expect(protectedResponse.status).toBe(401);
+
+    const chatGPTUrl = new URL("/chatgpt/unit-test/mcp", gateway.url).toString();
+    const connectorResponse = await fetch(chatGPTUrl, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: "2025-06-18",
+          capabilities: {},
+          clientInfo: { name: "chatgpt-test", version: "0.0.1" },
+        },
+      }),
+    });
+    expect(connectorResponse.status).toBe(200);
   });
 
   it("returns 503 when HTTP transport is started without LLM_GATEWAY_AUTH_TOKEN", async () => {

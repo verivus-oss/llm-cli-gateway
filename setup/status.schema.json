@@ -54,7 +54,8 @@
             "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
             "path": { "type": "string" },
             "public_url_configured": { "type": "boolean" },
-            "public_url": { "type": ["string", "null"] }
+            "public_url": { "type": ["string", "null"] },
+            "chatgpt_connector_url": { "type": ["string", "null"] }
           },
           "additionalProperties": false
         }

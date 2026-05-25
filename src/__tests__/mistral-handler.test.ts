@@ -17,12 +17,12 @@ describe("U22 prepareMistralRequest — Vibe divergences", () => {
   it("injects VIBE_ACTIVE_MODEL via env, never as a --model flag", () => {
     const result = prepareMistralRequest({
       prompt: "hello",
-      resolvedModel: "devstral-medium",
+      resolvedModel: "mistral-medium-3.5",
     });
-    expect(result.env.VIBE_ACTIVE_MODEL).toBe("devstral-medium");
+    expect(result.env.VIBE_ACTIVE_MODEL).toBe("mistral-medium-3.5");
     expect(result.args).not.toContain("--model");
     // No arg should equal the model name either
-    expect(result.args).not.toContain("devstral-medium");
+    expect(result.args).not.toContain("mistral-medium-3.5");
   });
 
   it("emits prompt via -p (mirrors Grok's headless surface)", () => {

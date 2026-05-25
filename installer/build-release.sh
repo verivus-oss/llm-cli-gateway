@@ -2,15 +2,17 @@
 # Build the llm-cli-gateway release artifact set.
 #
 # Produces, under installer/dist/:
-#   - llm-cli-gateway-<version>-<os>-<arch>(.exe) per target
-#   - llm-cli-gateway-bundle-<version>.tar.gz (the Node gateway bundle the
-#     bootstrapper consumes via `install-bundle`)
+#   - llm-cli-gateway-<version>-<os>-<arch>(.exe) for the requested target(s)
+#   - llm-cli-gateway-bundle-<version>-<os>-<arch>.tar.gz (the platform bundle
+#     the bootstrapper consumes via `install-bundle`; includes the compiled
+#     gateway, production dependencies, and a managed Node runtime)
+#   - install-windows.ps1 (release-pinned one-command Windows installer)
 #   - SHA256SUMS (one line per artifact)
 #   - release-manifest.json (machine-readable copy/paste commands)
 #
 # U13 acceptance gates that this script must satisfy:
-#   1. Cross-platform binaries for macOS arm64+amd64, Linux amd64+arm64,
-#      Windows amd64.
+#   1. Desktop binaries are built on local OS runners. This script defaults to
+#      the current host target; release CI invokes it once per OS runner.
 #   2. Checksum verification: every artifact gets a SHA256 line in SHA256SUMS.
 #   3. Docker Compose remains a fallback (see docker-compose.personal.yml).
 #   4. Artifacts include copy/paste commands suitable for target-LLM setup
@@ -23,7 +25,7 @@
 #     locally by `bootstrapper setup`.
 #
 # Usage:
-#   installer/build-release.sh [--version <ver>] [--skip-bundle] [--target os/arch]
+#   installer/build-release.sh [--version <ver>] [--skip-bundle] [--skip-binaries] [--target os/arch]
 #
 # Environment overrides:
 #   RVWR_RELEASE_VERSION   release version label (default: package.json version)
@@ -36,7 +38,7 @@ set -Eeuo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-DEFAULT_TARGETS=(
+ALL_TARGETS=(
   "darwin/arm64"
   "darwin/amd64"
   "linux/amd64"
@@ -45,6 +47,8 @@ DEFAULT_TARGETS=(
 )
 TARGETS=()
 SKIP_BUNDLE=0
+SKIP_BINARIES=0
+ALL_TARGETS_REQUESTED=0
 VERSION=""
 
 while [[ $# -gt 0 ]]; do
@@ -53,6 +57,10 @@ while [[ $# -gt 0 ]]; do
       VERSION="$2"; shift 2;;
     --skip-bundle)
       SKIP_BUNDLE=1; shift;;
+    --skip-binaries)
+      SKIP_BINARIES=1; shift;;
+    --all-targets)
+      ALL_TARGETS_REQUESTED=1; shift;;
     --target)
       TARGETS+=("$2"); shift 2;;
     -h|--help)
@@ -61,10 +69,6 @@ while [[ $# -gt 0 ]]; do
       echo "build-release.sh: unknown arg $1" >&2; exit 2;;
   esac
 done
-
-if [[ ${#TARGETS[@]} -eq 0 ]]; then
-  TARGETS=("${DEFAULT_TARGETS[@]}")
-fi
 
 if [[ -z "${VERSION}" ]]; then
   VERSION="${RVWR_RELEASE_VERSION:-}"
@@ -82,9 +86,17 @@ fi
 DIST_DIR="${RVWR_RELEASE_DIR:-${REPO_ROOT}/installer/dist}"
 PUBLIC_BASE="${RVWR_RELEASE_PUBLIC_BASE:-}"
 
-if [[ ! -x "$(command -v go)" ]]; then
+if [[ "${SKIP_BINARIES}" -eq 0 && ! -x "$(command -v go)" ]]; then
   echo "build-release.sh: go toolchain not found in PATH" >&2
   exit 2
+fi
+
+if [[ ${#TARGETS[@]} -eq 0 && "${SKIP_BINARIES}" -eq 0 ]]; then
+  if [[ "${ALL_TARGETS_REQUESTED}" -eq 1 || "${RVWR_RELEASE_ALL_TARGETS:-}" == "1" ]]; then
+    TARGETS=("${ALL_TARGETS[@]}")
+  else
+    TARGETS=("$(go env GOOS)/$(go env GOARCH)")
+  fi
 fi
 
 mkdir -p "${DIST_DIR}"
@@ -93,39 +105,138 @@ rm -f "${DIST_DIR}/SHA256SUMS"
 echo "build-release.sh: version=${VERSION}"
 echo "build-release.sh: output=${DIST_DIR}"
 
-ARTIFACTS_JSON=""
-
 cd "${REPO_ROOT}"
 
-# 1. Cross-compile the Go bootstrapper for each target.
-for target in "${TARGETS[@]}"; do
-  GOOS="${target%/*}"
-  GOARCH="${target#*/}"
-  ext=""
-  if [[ "${GOOS}" == "windows" ]]; then
-    ext=".exe"
-  fi
-  bin_name="llm-cli-gateway-${VERSION}-${GOOS}-${GOARCH}${ext}"
-  out="${DIST_DIR}/${bin_name}"
-  echo "build-release.sh: building ${bin_name}"
-  (
-    cd installer
-    CGO_ENABLED=0 GOOS="${GOOS}" GOARCH="${GOARCH}" \
-      go build -trimpath -ldflags "-s -w -X main.releaseVersion=${VERSION}" \
-        -o "${out}" .
-  )
-  ARTIFACTS_JSON+="{\"name\":\"${bin_name}\",\"os\":\"${GOOS}\",\"arch\":\"${GOARCH}\"}, "
-done
+# 1. Build the Go bootstrapper for each requested target. Release CI calls this
+#    from local Linux, Windows, and macOS runners; direct local runs default to
+#    the host target instead of silently producing every platform artifact.
+if [[ "${SKIP_BINARIES}" -eq 0 ]]; then
+  for target in "${TARGETS[@]}"; do
+    GOOS="${target%/*}"
+    GOARCH="${target#*/}"
+    ext=""
+    if [[ "${GOOS}" == "windows" ]]; then
+      ext=".exe"
+    fi
+    bin_name="llm-cli-gateway-${VERSION}-${GOOS}-${GOARCH}${ext}"
+    out="${DIST_DIR}/${bin_name}"
+    echo "build-release.sh: building ${bin_name}"
+    (
+      cd installer
+      CGO_ENABLED=0 GOOS="${GOOS}" GOARCH="${GOARCH}" \
+        go build -trimpath -ldflags "-s -w -X main.releaseVersion=${VERSION}" \
+          -o "${out}" .
+    )
+  done
+fi
 
-# 2. Package the Node gateway bundle the bootstrapper installs via
-#    `install-bundle`. The bundle ships the compiled dist/, package.json,
-#    package-lock.json, and the runtime-required setup/status.schema.json
-#    so node_modules can be reproduced locally without git.
-if [[ "${SKIP_BUNDLE}" -eq 0 ]]; then
-  bundle_name="llm-cli-gateway-bundle-${VERSION}.tar.gz"
+node_platform_for_goos() {
+  case "$1" in
+    windows) printf 'win';;
+    darwin) printf 'darwin';;
+    linux) printf 'linux';;
+    *) echo "build-release.sh: unsupported node runtime os $1" >&2; return 2;;
+  esac
+}
+
+npm_platform_for_goos() {
+  case "$1" in
+    windows) printf 'win32';;
+    darwin) printf 'darwin';;
+    linux) printf 'linux';;
+    *) echo "build-release.sh: unsupported npm platform $1" >&2; return 2;;
+  esac
+}
+
+node_arch_for_goarch() {
+  case "$1" in
+    amd64) printf 'x64';;
+    arm64) printf 'arm64';;
+    *) echo "build-release.sh: unsupported node runtime arch $1" >&2; return 2;;
+  esac
+}
+
+download_node_runtime() {
+  local target="$1"
+  local runtime_dir="$2"
+  local goos="${target%/*}"
+  local goarch="${target#*/}"
+  local node_platform node_arch node_version archive archive_url extracted
+
+  node_platform="$(node_platform_for_goos "${goos}")"
+  node_arch="$(node_arch_for_goarch "${goarch}")"
+  node_version="${RVWR_NODE_RUNTIME_VERSION:-}"
+  if [[ -z "${node_version}" ]]; then
+    node_version="$(node -p "process.versions.node")"
+  fi
+
+  mkdir -p "${runtime_dir}"
+  touch "${runtime_dir}/.llm-cli-gateway-runtime"
+
+  archive="$(mktemp)"
+  case "${goos}" in
+    windows)
+      archive_url="https://nodejs.org/dist/v${node_version}/node-v${node_version}-${node_platform}-${node_arch}.zip"
+      ;;
+    darwin)
+      archive_url="https://nodejs.org/dist/v${node_version}/node-v${node_version}-${node_platform}-${node_arch}.tar.gz"
+      ;;
+    linux)
+      archive_url="https://nodejs.org/dist/v${node_version}/node-v${node_version}-${node_platform}-${node_arch}.tar.xz"
+      ;;
+  esac
+
+  echo "build-release.sh: downloading Node runtime ${archive_url}"
+  curl -fsSL "${archive_url}" -o "${archive}"
+
+  extracted="$(mktemp -d)"
+  case "${goos}" in
+    windows)
+      if command -v unzip >/dev/null 2>&1; then
+        unzip -q "${archive}" -d "${extracted}"
+      elif command -v 7z >/dev/null 2>&1; then
+        7z x "-o${extracted}" "${archive}" >/dev/null
+      else
+        powershell.exe -NoProfile -Command "Expand-Archive -LiteralPath '${archive}' -DestinationPath '${extracted}' -Force"
+      fi
+      cp "${extracted}"/node-v"${node_version}"-"${node_platform}"-"${node_arch}"/node.exe "${runtime_dir}/node.exe"
+      ;;
+    darwin)
+      tar -xzf "${archive}" -C "${extracted}"
+      cp "${extracted}"/node-v"${node_version}"-"${node_platform}"-"${node_arch}"/bin/node "${runtime_dir}/node"
+      chmod 755 "${runtime_dir}/node"
+      ;;
+    linux)
+      tar -xJf "${archive}" -C "${extracted}"
+      cp "${extracted}"/node-v"${node_version}"-"${node_platform}"-"${node_arch}"/bin/node "${runtime_dir}/node"
+      chmod 755 "${runtime_dir}/node"
+      ;;
+  esac
+  rm -rf "${archive}" "${extracted}"
+}
+
+package_platform_bundle() {
+  local target="$1"
+  local goos="${target%/*}"
+  local goarch="${target#*/}"
+  local npm_platform node_arch bundle_name bundle_path staging
+
+  if ! command -v npm >/dev/null 2>&1 || ! command -v node >/dev/null 2>&1; then
+    echo "build-release.sh: node and npm are required to package platform bundles" >&2
+    exit 2
+  fi
+  if ! command -v curl >/dev/null 2>&1; then
+    echo "build-release.sh: curl is required to download the managed Node runtime" >&2
+    exit 2
+  fi
+
+  npm_platform="$(npm_platform_for_goos "${goos}")"
+  node_arch="$(node_arch_for_goarch "${goarch}")"
+  bundle_name="llm-cli-gateway-bundle-${VERSION}-${goos}-${goarch}.tar.gz"
   bundle_path="${DIST_DIR}/${bundle_name}"
   staging="$(mktemp -d)"
   trap 'rm -rf "${staging}"' EXIT
+
   echo "build-release.sh: producing ${bundle_name}"
   (
     cd "${REPO_ROOT}"
@@ -133,18 +244,161 @@ if [[ "${SKIP_BUNDLE}" -eq 0 ]]; then
       npm run build >/dev/null
     fi
     mkdir -p "${staging}/gateway"
-    cp -R dist "${staging}/gateway/dist"
     cp package.json "${staging}/gateway/"
     if [[ -f package-lock.json ]]; then
       cp package-lock.json "${staging}/gateway/"
     fi
-    mkdir -p "${staging}/gateway/setup"
-    cp setup/status.schema.json "${staging}/gateway/setup/"
+    (
+      cd "${staging}/gateway"
+      npm_config_platform="${npm_platform}" npm_config_arch="${node_arch}" npm ci --omit=dev >/dev/null
+    )
+    cp -R dist "${staging}/gateway/dist"
+    cp -R setup "${staging}/gateway/setup"
+    if [[ -d .agents ]]; then
+      cp -R .agents "${staging}/gateway/.agents"
+    fi
   )
-  tar -C "${staging}" -czf "${bundle_path}" gateway
-  ARTIFACTS_JSON+="{\"name\":\"${bundle_name}\",\"role\":\"node-bundle\"}, "
+  download_node_runtime "${target}" "${staging}/runtime"
+  tar -C "${staging}" -czf "${bundle_path}" gateway runtime
   rm -rf "${staging}"
   trap - EXIT
+}
+
+# 2. Package platform bundles. Each bundle includes the compiled gateway,
+#    production dependencies resolved for the target platform, and a managed
+#    Node runtime so users do not have to install Node globally.
+if [[ "${SKIP_BUNDLE}" -eq 0 ]]; then
+  if [[ ${#TARGETS[@]} -eq 0 ]]; then
+    TARGETS=("$(go env GOOS)/$(go env GOARCH)")
+  fi
+  for target in "${TARGETS[@]}"; do
+    package_platform_bundle "${target}"
+  done
+fi
+
+build_artifacts_payload() {
+  local dist_dir="$1"
+  local version="$2"
+  local first=1
+  local payload="["
+  local entry name stem suffix os arch
+
+  shopt -s nullglob
+  for entry in "${dist_dir}"/llm-cli-gateway-"${version}"-* "${dist_dir}"/llm-cli-gateway-bundle-"${version}"-*.tar.gz "${dist_dir}"/install-windows.ps1; do
+    if [[ ! -f "${entry}" ]]; then
+      continue
+    fi
+    name="$(basename "${entry}")"
+    if [[ "${first}" -eq 0 ]]; then
+      payload+=", "
+    fi
+    first=0
+    if [[ "${name}" == llm-cli-gateway-bundle-"${version}"-*.tar.gz ]]; then
+      stem="${name%.tar.gz}"
+      suffix="${stem#llm-cli-gateway-bundle-${version}-}"
+      os="${suffix%-*}"
+      arch="${suffix##*-}"
+      payload+="{\"name\":\"${name}\",\"role\":\"platform-bundle\",\"os\":\"${os}\",\"arch\":\"${arch}\"}"
+      continue
+    fi
+    if [[ "${name}" == "install-windows.ps1" ]]; then
+      payload+="{\"name\":\"${name}\",\"role\":\"installer-script\",\"os\":\"windows\",\"arch\":\"amd64\"}"
+      continue
+    fi
+    stem="${name%.exe}"
+    suffix="${stem#llm-cli-gateway-${version}-}"
+    os="${suffix%-*}"
+    arch="${suffix##*-}"
+    payload+="{\"name\":\"${name}\",\"os\":\"${os}\",\"arch\":\"${arch}\"}"
+  done
+  shopt -u nullglob
+  payload+="]"
+  printf '%s' "${payload}"
+}
+
+write_windows_installer_script() {
+  local script_path="$1"
+  local version="$2"
+  local public_base="$3"
+
+  cat > "${script_path}" <<'PS1'
+$ErrorActionPreference = "Stop"
+
+$Version = "__VERSION__"
+$Base = "__PUBLIC_BASE__"
+$ExeName = "llm-cli-gateway-$Version-windows-amd64.exe"
+$BundleName = "llm-cli-gateway-bundle-$Version-windows-amd64.tar.gz"
+$InstallDir = Join-Path $env:LOCALAPPDATA "Programs\llm-cli-gateway"
+$ExePath = Join-Path $InstallDir $ExeName
+$StableExePath = Join-Path $InstallDir "llm-cli-gateway.exe"
+$ChecksumsPath = Join-Path $InstallDir "SHA256SUMS"
+
+New-Item -ItemType Directory -Force $InstallDir | Out-Null
+
+function Get-ReleaseSha256 {
+  param([string] $Name)
+  $escaped = [regex]::Escape($Name)
+  $line = Select-String -Path $ChecksumsPath -Pattern "^[a-fA-F0-9]{64}\s+$escaped$" | Select-Object -First 1
+  if (-not $line) {
+    throw "No SHA256SUMS entry found for $Name"
+  }
+  return (($line.Line -split "\s+")[0]).ToLowerInvariant()
+}
+
+Write-Host "Downloading llm-cli-gateway $Version..."
+Invoke-WebRequest -UseBasicParsing "$Base/$ExeName" -OutFile $ExePath
+Invoke-WebRequest -UseBasicParsing "$Base/SHA256SUMS" -OutFile $ChecksumsPath
+
+$expectedExeSha = Get-ReleaseSha256 $ExeName
+$actualExeSha = (Get-FileHash $ExePath -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($actualExeSha -ne $expectedExeSha) {
+  throw "Checksum mismatch for $ExeName"
+}
+Copy-Item -LiteralPath $ExePath -Destination $StableExePath -Force
+
+$userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+$pathEntries = @()
+if ($userPath) {
+  $pathEntries = $userPath -split ';' | Where-Object { $_ }
+}
+$installDirOnPath = $pathEntries | Where-Object { $_.TrimEnd('\') -ieq $InstallDir.TrimEnd('\') } | Select-Object -First 1
+if (-not $installDirOnPath) {
+  $newUserPath = if ($userPath) { "$userPath;$InstallDir" } else { $InstallDir }
+  [Environment]::SetEnvironmentVariable("Path", $newUserPath, "User")
+}
+if (-not (($env:Path -split ';' | Where-Object { $_.TrimEnd('\') -ieq $InstallDir.TrimEnd('\') } | Select-Object -First 1))) {
+  $env:Path = "$env:Path;$InstallDir"
+}
+
+$bundleSha = Get-ReleaseSha256 $BundleName
+$env:RVWR_GATEWAY_BUNDLE_URL = "$Base/$BundleName"
+$env:RVWR_GATEWAY_BUNDLE_SHA256 = $bundleSha
+
+function Invoke-Gateway {
+  param([string[]] $GatewayArgs)
+  & $StableExePath @GatewayArgs | Write-Output
+  if ($LASTEXITCODE -ne 0) {
+    throw "llm-cli-gateway $($GatewayArgs -join ' ') failed with exit code $LASTEXITCODE"
+  }
+}
+
+Invoke-Gateway @("setup")
+Invoke-Gateway @("stop")
+Invoke-Gateway @("install-bundle")
+Invoke-Gateway @("start")
+Invoke-Gateway @("doctor")
+
+Write-Host ""
+Write-Host "Installed bootstrapper: $ExePath"
+Write-Host "Stable command: $StableExePath"
+Write-Host "Gateway URL: http://127.0.0.1:3333/mcp"
+PS1
+
+  perl -0pi -e "s#__VERSION__#${version}#g; s#__PUBLIC_BASE__#${public_base}#g" "${script_path}"
+}
+
+if [[ -n "${PUBLIC_BASE}" && -f "${DIST_DIR}/llm-cli-gateway-${VERSION}-windows-amd64.exe" && -f "${DIST_DIR}/llm-cli-gateway-bundle-${VERSION}-windows-amd64.tar.gz" ]]; then
+  write_windows_installer_script "${DIST_DIR}/install-windows.ps1" "${VERSION}" "${PUBLIC_BASE}"
 fi
 
 # 3. Checksums. Use shasum on macOS, sha256sum on Linux.
@@ -160,7 +414,7 @@ fi
 (
   cd "${DIST_DIR}"
   files=()
-  for entry in llm-cli-gateway-*; do
+  for entry in llm-cli-gateway-"${VERSION}"-* llm-cli-gateway-bundle-"${VERSION}"-*.tar.gz install-windows.ps1; do
     if [[ -f "${entry}" ]]; then
       files+=("${entry}")
     fi
@@ -172,10 +426,21 @@ fi
   "${SUM_CMD[@]}" "${files[@]}" > SHA256SUMS
 )
 
+windows_exe_sha=""
+windows_bundle_sha=""
+if [[ -f "${DIST_DIR}/SHA256SUMS" ]]; then
+  windows_exe_sha="$(
+    awk -v name="llm-cli-gateway-${VERSION}-windows-amd64.exe" '$2 == name { print $1 }' "${DIST_DIR}/SHA256SUMS"
+  )"
+  windows_bundle_sha="$(
+    awk -v name="llm-cli-gateway-bundle-${VERSION}-windows-amd64.tar.gz" '$2 == name { print $1 }' "${DIST_DIR}/SHA256SUMS"
+  )"
+fi
+
 # 4. Release manifest with copy/paste commands suitable for assistant
 #    prompts. Tokens, URLs, and provider credentials are NEVER embedded.
 manifest="${DIST_DIR}/release-manifest.json"
-artifacts_payload="[${ARTIFACTS_JSON%, }]"
+artifacts_payload="$(build_artifacts_payload "${DIST_DIR}" "${VERSION}")"
 
 cat > "${manifest}" <<EOF
 {
@@ -187,8 +452,10 @@ cat > "${manifest}" <<EOF
   "setup_commands": {
     "verify_checksum_linux": "sha256sum --check SHA256SUMS",
     "verify_checksum_macos": "shasum -a 256 --check SHA256SUMS",
-    "install_unix_oneliner": "chmod +x ./llm-cli-gateway-${VERSION}-<os>-<arch> && ./llm-cli-gateway-${VERSION}-<os>-<arch> setup",
-    "doctor_after_install": "./llm-cli-gateway-${VERSION}-<os>-<arch> doctor",
+    "install_windows_direct": "\$ErrorActionPreference='Stop'; \$InstallDir=Join-Path \$env:LOCALAPPDATA 'Programs\\\\llm-cli-gateway'; \$Exe=Join-Path \$InstallDir 'llm-cli-gateway.exe'; New-Item -ItemType Directory -Force \$InstallDir | Out-Null; Invoke-WebRequest -UseBasicParsing -Uri '${PUBLIC_BASE}/llm-cli-gateway-${VERSION}-windows-amd64.exe' -OutFile \$Exe; if ((Get-FileHash \$Exe -Algorithm SHA256).Hash.ToLowerInvariant() -ne '${windows_exe_sha}') { throw 'Checksum mismatch' }; \$env:Path=\"\$env:Path;\$InstallDir\"; \$env:RVWR_GATEWAY_BUNDLE_URL='${PUBLIC_BASE}/llm-cli-gateway-bundle-${VERSION}-windows-amd64.tar.gz'; \$env:RVWR_GATEWAY_BUNDLE_SHA256='${windows_bundle_sha}'; & \$Exe setup; & \$Exe stop; & \$Exe install-bundle; & \$Exe start; & \$Exe status; Invoke-RestMethod -Uri 'http://127.0.0.1:3333/healthz'",
+    "install_unix_oneliner": "export RVWR_GATEWAY_BUNDLE_URL=${PUBLIC_BASE}/llm-cli-gateway-bundle-${VERSION}-<os>-<arch>.tar.gz RVWR_GATEWAY_BUNDLE_SHA256=<bundle-sha256>; chmod +x ./llm-cli-gateway-${VERSION}-<os>-<arch> && ./llm-cli-gateway-${VERSION}-<os>-<arch> setup && ./llm-cli-gateway-${VERSION}-<os>-<arch> install-bundle",
+    "install_windows_powershell": "\$env:RVWR_GATEWAY_BUNDLE_URL='${PUBLIC_BASE}/llm-cli-gateway-bundle-${VERSION}-windows-amd64.tar.gz'; \$env:RVWR_GATEWAY_BUNDLE_SHA256='<bundle-sha256>'; llm-cli-gateway setup; llm-cli-gateway stop; llm-cli-gateway install-bundle; llm-cli-gateway start",
+    "doctor_after_install": "llm-cli-gateway doctor",
     "upgrade_unix_oneliner": "./llm-cli-gateway-<new-version>-<os>-<arch> upgrade",
     "uninstall_unix_oneliner": "./llm-cli-gateway-<version>-<os>-<arch> uninstall --yes",
     "docker_fallback": "docker compose -f docker-compose.personal.yml up -d",

@@ -11,16 +11,18 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Existing release tag to (re)build installer assets for (e.g. v1.5.1)'
+        description: "Existing release tag to (re)build installer assets for (e.g. v1.5.1)"
         required: true
         type: string
 
 permissions:
-  contents: write   # gh release upload
+  contents: write # gh release upload
 
 jobs:
-  build-installer:
-    runs-on: ubuntu-latest
+  resolve-tag:
+    runs-on: [self-hosted, linux, rust, x86_64, workhorse2]
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
     steps:
       - name: Resolve tag
         id: tag
@@ -34,23 +36,44 @@ jobs:
             echo "tag=${REF_NAME}" >> "$GITHUB_OUTPUT"
           fi
 
-      - uses: actions/checkout@v4
+  build-binaries:
+    needs: resolve-tag
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - artifact: linux
+            runs_on: '["self-hosted","linux","rust","x86_64","workhorse2"]'
+            targets: "--target linux/amd64 --target linux/arm64"
+          - artifact: windows
+            runs_on: '"windows-latest"'
+            targets: "--target windows/amd64"
+          - artifact: macos-arm64
+            runs_on: '"macos-15"'
+            targets: "--target darwin/arm64"
+          - artifact: macos-amd64
+            runs_on: '"macos-15-intel"'
+            targets: "--target darwin/amd64"
+    runs-on: ${{ fromJSON(matrix.runs_on) }}
+    steps:
+      - uses: actions/checkout@v6
         with:
-          ref: ${{ steps.tag.outputs.tag }}
+          ref: ${{ needs.resolve-tag.outputs.tag }}
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
-          node-version: 20
-          cache: 'npm'
+          node-version: 24
+          cache: "npm"
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
-          go-version: '1.22'
+          go-version: "1.22"
           cache-dependency-path: installer/go.mod
 
       - name: Verify package.json version matches tag
+        shell: bash
         env:
-          REF_NAME: ${{ steps.tag.outputs.tag }}
+          REF_NAME: ${{ needs.resolve-tag.outputs.tag }}
         run: |
           PKG_VERSION=$(node -p "require('./package.json').version")
           TAG_VERSION="${REF_NAME#v}"
@@ -59,17 +82,53 @@ jobs:
             exit 1
           fi
 
-      - name: Install npm deps + build gateway bundle
+      - name: Install npm deps + build gateway
+        shell: bash
         run: |
           npm ci
           npm run build
 
-      - name: Cross-compile bootstrapper + package Node bundle
+      - name: Build bootstrapper binary + platform bundle
+        shell: bash
+        env:
+          REF_NAME: ${{ needs.resolve-tag.outputs.tag }}
+        run: |
+          TAG_VERSION="${REF_NAME#v}"
+          bash installer/build-release.sh --version "${TAG_VERSION}" ${{ matrix.targets }}
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: installer-${{ matrix.artifact }}
+          path: |
+            installer/dist/llm-cli-gateway-*
+            !installer/dist/SHA256SUMS
+            !installer/dist/release-manifest.json
+          if-no-files-found: error
+
+  package-and-upload:
+    needs: [resolve-tag, build-binaries]
+    runs-on: [self-hosted, linux, rust, x86_64, workhorse2]
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.resolve-tag.outputs.tag }}
+
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: installer-*
+          path: installer/dist
+          merge-multiple: true
+
+      - name: Package combined release metadata
+        shell: bash
         env:
           # Public base for the release-manifest.json copy/paste URLs. Points
           # at the GitHub release download URL pattern for this repo.
-          RVWR_RELEASE_PUBLIC_BASE: https://github.com/${{ github.repository }}/releases/download/${{ steps.tag.outputs.tag }}
-        run: bash installer/build-release.sh
+          RVWR_RELEASE_PUBLIC_BASE: https://github.com/${{ github.repository }}/releases/download/${{ needs.resolve-tag.outputs.tag }}
+          REF_NAME: ${{ needs.resolve-tag.outputs.tag }}
+        run: |
+          TAG_VERSION="${REF_NAME#v}"
+          bash installer/build-release.sh --version "${TAG_VERSION}" --skip-binaries --skip-bundle
 
       - name: Verify checksums (sanity check before upload)
         working-directory: installer/dist
@@ -78,17 +137,16 @@ jobs:
       - name: Upload installer artifacts to release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REL_TAG: ${{ steps.tag.outputs.tag }}
+          REL_TAG: ${{ needs.resolve-tag.outputs.tag }}
         working-directory: installer/dist
+        shell: bash
         run: |
+          TAG_VERSION="${REL_TAG#v}"
           # `--clobber` so a re-run via workflow_dispatch replaces stale assets.
           gh release upload "${REL_TAG}" \
-            llm-cli-gateway-*-darwin-arm64 \
-            llm-cli-gateway-*-darwin-amd64 \
-            llm-cli-gateway-*-linux-amd64 \
-            llm-cli-gateway-*-linux-arm64 \
-            llm-cli-gateway-*-windows-amd64.exe \
-            llm-cli-gateway-bundle-*.tar.gz \
+            llm-cli-gateway-"${TAG_VERSION}"-* \
+            llm-cli-gateway-bundle-"${TAG_VERSION}"-*.tar.gz \
+            install-windows.ps1 \
             SHA256SUMS \
             release-manifest.json \
             --clobber

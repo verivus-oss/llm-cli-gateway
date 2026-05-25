@@ -2,7 +2,7 @@
 name: async-job-orchestration
 description: Manage long-running async LLM jobs. Use for tasks >2min, parallel jobs, or non-blocking execution.
 metadata:
-  author: verivusai-labs
+  author: verivus-oss
   version: "1.5"
 ---
 

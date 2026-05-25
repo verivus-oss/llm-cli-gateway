@@ -2,7 +2,7 @@
 name: multi-llm-review
 description: Parallel code reviews across Claude, Codex, Gemini, Grok, and Mistral. Use for quality analysis, bug finding, or security audit.
 metadata:
-  author: verivusai-labs
+  author: verivus-oss
   version: "1.5"
 ---
 

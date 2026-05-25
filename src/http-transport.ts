@@ -67,10 +67,29 @@ function jsonError(res: ServerResponse, status: number, message: string): void {
   res.end(JSON.stringify({ error: message }));
 }
 
+function parseNoAuthPaths(raw: string | undefined, protectedPath: string): Set<string> {
+  const paths = new Set<string>();
+  for (const value of (raw ?? "").split(/[,;\s]+/)) {
+    const path = value.trim();
+    if (
+      path &&
+      path.startsWith("/") &&
+      path !== protectedPath &&
+      !path.includes("?") &&
+      !path.includes("#") &&
+      !path.includes("..")
+    ) {
+      paths.add(path);
+    }
+  }
+  return paths;
+}
+
 export async function startHttpGateway(options: HttpTransportOptions): Promise<HttpGatewayHandle> {
   const host = options.host ?? process.env.LLM_GATEWAY_HTTP_HOST ?? "127.0.0.1";
   const port = options.port ?? Number(process.env.LLM_GATEWAY_HTTP_PORT ?? 3333);
   const path = options.path ?? process.env.LLM_GATEWAY_HTTP_PATH ?? "/mcp";
+  const noAuthPaths = parseNoAuthPaths(process.env.LLM_GATEWAY_NO_AUTH_PATHS, path);
   const logger = options.logger ?? noopLogger;
   const sessions = new Map<string, SessionEntry>();
   const token = getRequiredBearerToken();
@@ -111,15 +130,18 @@ export async function startHttpGateway(options: HttpTransportOptions): Promise<H
         res.end(JSON.stringify({ ok: true, sessions: sessions.size }));
         return;
       }
-      if (url.pathname !== path) {
+      const noAuthPath = noAuthPaths.has(url.pathname);
+      if (url.pathname !== path && !noAuthPath) {
         jsonError(res, 404, "Not found");
         return;
       }
 
-      const auth = authorizeBearerRequest(req, token);
-      if (!auth.ok) {
-        writeAuthFailure(res, auth);
-        return;
+      if (!noAuthPath) {
+        const auth = authorizeBearerRequest(req, token);
+        if (!auth.ok) {
+          writeAuthFailure(res, auth);
+          return;
+        }
       }
 
       if (req.method !== "GET" && req.method !== "POST" && req.method !== "DELETE") {
@@ -191,6 +213,9 @@ export async function startHttpGateway(options: HttpTransportOptions): Promise<H
   const actualPort = typeof address === "object" && address ? address.port : port;
   const url = `http://${host}:${actualPort}${path}`;
   logger.info(`HTTP MCP transport listening at ${url}`);
+  if (noAuthPaths.size > 0) {
+    logger.info(`HTTP MCP transport also serving ${noAuthPaths.size} no-auth connector path(s)`);
+  }
 
   return {
     server: httpServer,
