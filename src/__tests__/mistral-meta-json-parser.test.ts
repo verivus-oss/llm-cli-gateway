@@ -8,7 +8,7 @@
  * and (on collision) matching `session_id` inside meta.json.
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
@@ -152,6 +152,43 @@ describe("parseVibeMetaJson", () => {
       outputTokens: undefined,
       costUsd: 0.5,
     });
+  });
+
+  it("returns {} when the only short-prefix candidate has a different full UUID (no cross-session leak)", () => {
+    // Two UUIDs sharing the first 8 hex chars; only the SECOND one's
+    // directory exists on disk. A naive resolver would happily return its
+    // stats under the first UUID's name.
+    writeMetaUnder(
+      home,
+      DIRNAME,
+      { stats: { session_prompt_tokens: 999, session_completion_tokens: 999, session_cost: 9.99 } },
+      { sessionId: SECOND_UUID }
+    );
+    expect(parseVibeMetaJson(home, SESSION_UUID)).toEqual({});
+  });
+
+  it("rejects a session dir that is a symlink to a directory outside baseDir", () => {
+    // Plant an out-of-tree directory containing a fully valid meta.json,
+    // then symlink it under ~/.vibe/logs/session/<dirname>. An unhardened
+    // parser would happily read it.
+    const outside = join(home, "outside");
+    mkdirSync(outside, { recursive: true });
+    writeFileSync(
+      join(outside, "meta.json"),
+      JSON.stringify({
+        session_id: SESSION_UUID,
+        stats: {
+          session_prompt_tokens: 1_000_000,
+          session_completion_tokens: 500_000,
+          session_cost: 42,
+        },
+      })
+    );
+    const sessionRoot = join(home, ".vibe", "logs", "session");
+    mkdirSync(sessionRoot, { recursive: true });
+    symlinkSync(outside, join(sessionRoot, DIRNAME), "dir");
+    expect(parseVibeMetaJson(home, SESSION_UUID)).toEqual({});
+    expect(parseVibeMetaJson(home, DIRNAME)).toEqual({});
   });
 
   it("rejects path-traversal sessionIds (../, absolute, control chars)", () => {

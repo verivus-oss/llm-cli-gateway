@@ -32,7 +32,7 @@
  * outside the session log root) returns `{}` so the flight-recorder row
  * simply lacks usage data.
  */
-import { existsSync, readdirSync, readFileSync, statSync } from "fs";
+import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "fs";
 import { join, resolve, sep } from "path";
 
 import { GATEWAY_SESSION_PREFIX } from "./request-helpers.js";
@@ -59,6 +59,29 @@ function asPositiveNumber(value: unknown): number | undefined {
   return value;
 }
 
+/**
+ * Read a file only if its realpath lives under `realBase`. Returns undefined
+ * on any error, missing file, or out-of-tree symlink target. This is the one
+ * place that calls `readFileSync` for meta.json content — the rest of the
+ * module routes through it so the security boundary is uniform.
+ */
+function readInBase(realBase: string, candidate: string): string | undefined {
+  if (!existsSync(candidate)) return undefined;
+  let realCandidate: string;
+  try {
+    realCandidate = realpathSync(candidate);
+  } catch {
+    return undefined;
+  }
+  const realBaseWithSep = realBase.endsWith(sep) ? realBase : realBase + sep;
+  if (!realCandidate.startsWith(realBaseWithSep)) return undefined;
+  try {
+    return readFileSync(realCandidate, "utf-8");
+  } catch {
+    return undefined;
+  }
+}
+
 // UUID v4-ish (Vibe's own session UUIDs are not strictly v4, so we
 // validate against the broader 8-4-4-4-12 lowercase-hex shape) OR
 // Vibe's session_<digits>_<digits>_<first8> directory basename.
@@ -70,8 +93,19 @@ const DIRNAME_RE = /^session_\d{8}_\d{6}_[0-9a-f]{8}$/;
  * Returns undefined when no candidate can be found or the input is
  * unsuitable. Pure with respect to side-effects on the caller — only reads
  * the filesystem.
+ *
+ * Security invariants enforced here:
+ *   - Inputs are charset-gated (UUID or DIRNAME) before any filesystem read.
+ *   - For UUID input, the chosen candidate's meta.json MUST advertise the
+ *     same `session_id` — single-candidate is NOT trusted, because two
+ *     UUIDs sharing the first 8 hex chars would otherwise cross-attribute
+ *     usage (and leak telemetry to the caller of the other session).
  */
-function resolveVibeSessionDirname(baseDir: string, sessionId: string): string | undefined {
+function resolveVibeSessionDirname(
+  baseDir: string,
+  realBase: string,
+  sessionId: string
+): string | undefined {
   // 1. Caller already supplied the directory name verbatim.
   if (DIRNAME_RE.test(sessionId) && existsSync(join(baseDir, sessionId, "meta.json"))) {
     return sessionId;
@@ -88,8 +122,7 @@ function resolveVibeSessionDirname(baseDir: string, sessionId: string): string |
   }
 
   // Filter to candidates matching `session_*_<short>`. Sort newest-first
-  // by mtime as a tiebreaker; on disambiguation we still read each
-  // candidate's `session_id` field below.
+  // by mtime; we still require an exact session_id match below.
   const candidates = entries
     .filter(name => DIRNAME_RE.test(name) && name.endsWith(`_${short}`))
     .map(name => {
@@ -103,12 +136,10 @@ function resolveVibeSessionDirname(baseDir: string, sessionId: string): string |
     })
     .sort((a, b) => b.mtimeMs - a.mtimeMs);
 
-  if (candidates.length === 0) return undefined;
-  if (candidates.length === 1) return candidates[0].name;
-
   for (const { name } of candidates) {
+    const text = readInBase(realBase, join(baseDir, name, "meta.json"));
+    if (text === undefined) continue;
     try {
-      const text = readFileSync(join(baseDir, name, "meta.json"), "utf-8");
       const parsed = JSON.parse(text) as RawMetaJson;
       if (typeof parsed.session_id === "string" && parsed.session_id === sessionId) {
         return name;
@@ -131,20 +162,25 @@ export function parseVibeMetaJson(
   }
 
   const baseDir = resolve(join(home, ".vibe", "logs", "session"));
-  const dirname = resolveVibeSessionDirname(baseDir, sessionId);
+  let realBase: string;
+  try {
+    realBase = realpathSync(baseDir);
+  } catch {
+    return {};
+  }
+
+  const dirname = resolveVibeSessionDirname(baseDir, realBase, sessionId);
   if (!dirname) return {};
 
-  // Defensive: ensure the joined path resolves under baseDir even after
-  // following any symlinks below. `resolveVibeSessionDirname` already
-  // restricts to a strict charset, but treat this as the security boundary.
-  const candidate = resolve(join(baseDir, dirname, "meta.json"));
-  const baseWithSep = baseDir.endsWith(sep) ? baseDir : baseDir + sep;
-  if (!candidate.startsWith(baseWithSep)) return {};
-  if (!existsSync(candidate)) return {};
+  // `readInBase` is the security boundary: it realpath-resolves the file
+  // and rejects anything whose target lives outside `realBase`. Re-routing
+  // the final read through it (instead of a bespoke readFileSync) keeps
+  // the in-tree-only invariant in one place.
+  const text = readInBase(realBase, join(baseDir, dirname, "meta.json"));
+  if (text === undefined) return {};
 
   let raw: RawMetaJson;
   try {
-    const text = readFileSync(candidate, "utf-8");
     raw = JSON.parse(text) as RawMetaJson;
   } catch {
     return {};
