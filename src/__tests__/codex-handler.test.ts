@@ -222,7 +222,7 @@ describe("U26 — Codex high-impact feature flags", () => {
   });
 
   describe("Codex resume-mode flag filtering", () => {
-    it("filters --output-schema, --search, --add-dir, -C, --sandbox, --ask-for-approval, --full-auto", () => {
+    it("filters --search, --add-dir, -C, --sandbox, --ask-for-approval, --full-auto", () => {
       const input = [
         "--model",
         "gpt-5.5",
@@ -235,8 +235,6 @@ describe("U26 — Codex high-impact feature flags", () => {
         "/tmp/extra",
         "-C",
         "/tmp/cwd",
-        "--output-schema",
-        "/tmp/schema.json",
         "--search",
         "PROMPT",
       ];
@@ -244,9 +242,84 @@ describe("U26 — Codex high-impact feature flags", () => {
       expect(out).toEqual(["--model", "gpt-5.5", "PROMPT"]);
     });
 
+    it("preserves --output-schema on resume (Phase 4 slice α — accepted by codex exec resume)", () => {
+      const input = ["--model", "gpt-5.5", "--output-schema", "/tmp/schema.json", "PROMPT"];
+      expect(filterCodexResumeFlags(input)).toEqual(input);
+    });
+
+    it("preserves -c key=value on resume (Phase 4 slice α — config overrides accepted)", () => {
+      const input = ["--model", "gpt-5.5", "-c", "model.foo=bar", "PROMPT"];
+      expect(filterCodexResumeFlags(input)).toEqual(input);
+    });
+
     it("preserves benign flags when filtering", () => {
       const input = ["exec", "resume", "--last", "--model", "gpt-5.5", "hello"];
       expect(filterCodexResumeFlags(input)).toEqual(input);
+    });
+  });
+
+  describe("Phase 4 slice α — resume branch passes --output-schema + -c", () => {
+    const RESUME_ID = "01940000-0000-7000-8000-000000000abc"; // not gw- prefix
+
+    it("resume + outputSchema (string) emits --output-schema <path>", () => {
+      const schemaPath = "/some/preexisting/schema.json";
+      const { args } = callPrepare({ sessionId: RESUME_ID, outputSchema: schemaPath });
+      expect(args).toContain("resume");
+      const idx = args.indexOf("--output-schema");
+      expect(idx).toBeGreaterThan(-1);
+      expect(args[idx + 1]).toBe(schemaPath);
+    });
+
+    it("resume + outputSchema (object) materialises a temp file and cleanup deletes it", () => {
+      const schemaObj = { type: "object", properties: { y: { type: "number" } } };
+      const { args, cleanup } = callPrepare({ sessionId: RESUME_ID, outputSchema: schemaObj });
+      expect(args).toContain("resume");
+      const idx = args.indexOf("--output-schema");
+      expect(idx).toBeGreaterThan(-1);
+      const path = args[idx + 1];
+      expect(path.startsWith(tmpdir())).toBe(true);
+      expect(existsSync(path)).toBe(true);
+      cleanup?.();
+      expect(existsSync(path)).toBe(false);
+    });
+
+    it("resume + configOverrides emits -c key=value for each entry", () => {
+      const { args } = callPrepare({
+        sessionId: RESUME_ID,
+        configOverrides: { "model.foo": "bar", "tools.web_search": "true" },
+      });
+      expect(args).toContain("resume");
+      const pairs: string[] = [];
+      for (let i = 0; i < args.length - 1; i++) {
+        if (args[i] === "-c") pairs.push(args[i + 1]);
+      }
+      expect(pairs).toContain("model.foo=bar");
+      expect(pairs).toContain("tools.web_search=true");
+    });
+
+    it("resume still drops --search (not accepted by codex exec resume)", () => {
+      const { args } = callPrepare({ sessionId: RESUME_ID, search: true });
+      expect(args).toContain("resume");
+      expect(args).not.toContain("--search");
+    });
+
+    it("regression: new-session path still emits --output-schema + -c when supplied", () => {
+      const { args } = callPrepare({
+        createNewSession: true,
+        outputSchema: "/tmp/x.json",
+        configOverrides: { "model.foo": "bar" },
+      });
+      expect(args).not.toContain("resume");
+      expect(args).toContain("--output-schema");
+      // ["-c", "model.foo=bar"] adjacency check
+      let found = false;
+      for (let i = 0; i < args.length - 1; i++) {
+        if (args[i] === "-c" && args[i + 1] === "model.foo=bar") {
+          found = true;
+          break;
+        }
+      }
+      expect(found).toBe(true);
     });
   });
 

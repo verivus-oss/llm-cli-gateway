@@ -425,9 +425,11 @@ export function resolveCodexSandboxFlags(input: CodexSandboxFlagsInput): CodexSa
  * Flags that `codex exec resume` rejects (the original session's policy is
  * inherited). Callers must drop these when building resume argv.
  *
- * U26 expands this list with `--add-dir`, `-C`, `--output-schema`, and
- * `--search`, all of which `codex exec resume --help` rejects at the audit
- * date.
+ * Verified against `codex exec resume --help` (codex-cli 0.133.0):
+ * `--full-auto`, `--sandbox`, `--ask-for-approval`, `--add-dir`, `-C`, and
+ * `--search` are rejected. `--output-schema` and `-c key=value` ARE accepted
+ * on resume and therefore are NOT in this filter (Phase 4 slice α restored
+ * the previously-silent drop of those two).
  */
 export const CODEX_RESUME_FILTERED_FLAGS: ReadonlySet<string> = new Set([
   "--full-auto",
@@ -435,7 +437,6 @@ export const CODEX_RESUME_FILTERED_FLAGS: ReadonlySet<string> = new Set([
   "--ask-for-approval",
   "--add-dir",
   "-C",
-  "--output-schema",
   "--search",
 ]);
 
@@ -448,7 +449,6 @@ const CODEX_RESUME_FILTERED_FLAGS_WITH_VALUE: ReadonlySet<string> = new Set([
   "--ask-for-approval",
   "--add-dir",
   "-C",
-  "--output-schema",
 ]);
 
 /**

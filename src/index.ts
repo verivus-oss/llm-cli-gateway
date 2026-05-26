@@ -1626,11 +1626,12 @@ export function prepareCodexRequest(
   }
   args.push("--skip-git-repo-check");
 
-  // U26: High-impact feature flags. Some of these (`--output-schema`,
-  // `--search`, `-C`, `--add-dir`) are rejected by `codex exec resume`, so we
-  // only emit them on a NEW session. Images / ephemeral / profile /
-  // ignore-rules / ignore-user-config are allowed on resume per the audited
-  // CLI help; we emit them in both branches.
+  // U26: High-impact feature flags. `--search` is rejected by
+  // `codex exec resume` (resume inherits the original session's web-search
+  // state), so we only emit it on a NEW session. `--output-schema`,
+  // `-c key=value`, profile, ephemeral, images, and the ignore-* flags are
+  // all accepted on resume per `codex exec resume --help` (codex-cli 0.133.0)
+  // and are emitted in both branches.
   let highImpactCleanup: (() => void) | undefined;
   if (sessionPlan.mode === "new") {
     const high = prepareCodexHighImpactFlags({
@@ -1655,12 +1656,10 @@ export function prepareCodexRequest(
     args.push(...high.args);
     highImpactCleanup = high.cleanup;
   } else {
-    // On resume, emit only the resume-safe subset (profile, ephemeral,
-    // images, ignoreUserConfig, ignoreRules). outputSchema, search, and
-    // configOverrides are dropped silently to mirror existing behavior for
-    // sandbox/ask-for-approval on resume.
     const high = prepareCodexHighImpactFlags({
+      outputSchema: params.outputSchema,
       profile: params.profile,
+      configOverrides: params.configOverrides,
       ephemeral: params.ephemeral,
       images: params.images,
       ignoreUserConfig: params.ignoreUserConfig,
