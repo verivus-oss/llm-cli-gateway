@@ -2193,7 +2193,10 @@ function buildCliResponse(
       correlationId: corrId,
       sessionId: sessionId || null,
       durationMs,
-      ...extractUsageAndCost(cli, stdout, outputFormat),
+      // Phase 4 slice β: thread sessionId + home so the Mistral branch of
+      // extractUsageAndCost can read `~/.vibe/logs/session/<dir>/meta.json`.
+      // Other CLIs ignore the ctx (their usage source is stdout).
+      ...extractUsageAndCost(cli, stdout, outputFormat, { sessionId, home: homedir() }),
       exitCode: 0,
       retryCount: 0,
     },
@@ -3050,6 +3053,10 @@ export async function handleMistralRequest(
           reasoningEffort: params.reasoningEffort,
           allowedTools: params.allowedTools,
           disallowedTools: params.disallowedTools,
+          // Phase 4 slice γ: preserve --trust on the model-selection retry
+          // so a fresh untrusted workspace doesn't block headlessly on the
+          // second attempt after surviving the first.
+          trust: params.trust,
         });
         const retryArgs = [...retryPrep.args, ...sessionResult.resumeArgs];
         // Reuse the FR handoff built above — the retry preserves corrId,
