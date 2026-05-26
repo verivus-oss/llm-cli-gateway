@@ -1,0 +1,859 @@
+# Implementation plan: async-path flight-recorder integration + codex parser fix.
+#
+# Goal: close the two telemetry gaps that v1.6.0 (cache-awareness phase 1)
+# explicitly deferred. After this slice:
+#   1. *_request_async tools write rows to the flight recorder with
+#      stable_prefix_hash / stable_prefix_tokens populated (same shape as the
+#      sync path), so cache_state://* aggregates include async-job activity.
+#   2. Codex CLI's actual `cached_input_tokens` field is parsed, so the
+#      cache_read_tokens column starts populating on codex rows.
+#
+# Out of scope for this slice (gated on this slice's data):
+#   - Slice 4 (cache-aware multi-LLM routing) — needs 24h+ of clean
+#     cache_state://global data first; see cache-awareness.dag.toml comments.
+#   - Slice 5 (explicit Claude cache_control via stream-json — Branch A) —
+#     separate plan; requires human-in-the-loop live smoke test.
+#
+# Invariant preserved: "No conversation content in session storage"
+# (project-root CLAUDE.md). The new FR writes go to the existing flight
+# recorder (~/.llm-cli-gateway/logs.db, which already stores prompts/responses
+# for audit), NOT to the session manager.
+
+[meta]
+name = "llm-cli-gateway async-path flight-recorder + codex parser fix (slice 1.5)"
+schema_version = "1.1"
+owner = "werner"
+slice = "cache-awareness-1.5"
+target_branch = "feat/cache-awareness-slice-1.5"
+release_version = "1.7.0"
+acceptance_resource = "cache_state://global aggregates include async-job rows; codex rows show non-NULL cache_read_tokens on cache hits"
+invariant_sources = [
+  "/srv/repos/internal/verivusai-labs/rvwr/CLAUDE.md",
+  "/srv/repos/internal/verivusai-labs/rvwr/llm-cli-gateway/BEST_PRACTICES.md",
+]
+predecessor_plan = "docs/plans/cache-awareness.dag.toml"
+
+# ---------------------------------------------------------------------------
+# Foundation — research, no behaviour change yet
+# ---------------------------------------------------------------------------
+
+[[steps]]
+id = "research-async-job-lifecycle"
+depends_on = []
+actor = "assistant"
+action = """
+Read end-to-end:
+  - src/async-job-manager.ts (entire file)
+  - src/job-store.ts (JobStore interface + SqliteJobStore + MemoryJobStore +
+    markOrphanedOnStartup return shape)
+  - src/__tests__/async-job-manager*.test.ts (all files; the suite is large
+    and the new wiring must not break existing fixtures)
+  - src/index.ts safeFlightStart / safeFlightComplete sites for claude
+    (~3543), codex (~3904), gemini (~2251), grok (~2543), mistral (~2833)
+    so the new async writes mirror the sync entry shape exactly.
+
+Catalogue:
+  (a) every code path in async-job-manager.ts that transitions a job into a
+      terminal state (completed / failed / orphaned / canceled):
+        - close handler (lines ~612-650): clean exit → completed / failed
+        - error handler (lines ~594-610): launch error → failed
+        - idle timeout (lines ~558-579): timeout kill → failed
+        - output overflow in appendOutput (lines ~781-816): kill → failed
+        - cancelJob (lines ~687-720): user-requested → canceled
+        - evictCompletedJobs dead-process detector (lines ~228-249) →
+          failed
+        - evictCompletedJobs exited-without-status detector (lines ~250-263)
+          → failed
+        - markOrphanedOnStartup (constructor, lines ~181-190) → orphaned
+  (b) the existing dedup path in startJobWithDedup (lines ~447-493) — must
+      NOT write a duplicate FR row when reusing an existing job (the
+      original job's FR row already exists).
+
+Document the catalogue (with current line numbers re-verified via `rg`) in
+docs/personal-mcp/ASYNC_FLIGHT_RECORDER_SURFACES.md. Cover:
+  - one section per terminal state with its trigger and the data already in
+    scope at that callsite (job.exitCode, job.stdout, job.stderr, job.error,
+    job.finishedAt, job.correlationId)
+  - the "dedup-hit MUST NOT write FR" rule with a one-line rationale
+  - the cancel-vs-failed distinction (cancel = user-requested; do NOT write
+    a FR complete row because the user already knows the outcome — OR write
+    one with status="failed", errorMessage="canceled"; decide and document)
+  - the markOrphanedOnStartup boot path: today returns only a count. To
+    write FR complete rows for orphans, the method needs to return the list
+    of {id, correlationId} rows it flipped. Document the JobStore interface
+    extension.
+
+NOTE on the JobStore interface change: this is a breaking change to the
+JobStore interface (the three implementations — Sqlite, Memory, Postgres —
+must update). The Postgres impl is interface-only today (see
+src/job-store.ts comment) and the change is mechanical (return `{count,
+orphaned}` instead of just `count`). Document the rollout in the research
+note.
+"""
+idempotent = true
+validation = """
+docs/personal-mcp/ASYNC_FLIGHT_RECORDER_SURFACES.md exists with:
+  (a) one subsection per terminal state with current src/async-job-manager.ts
+      line numbers (re-verified via `rg` at write time),
+  (b) explicit "dedup hit → no FR write" rule with rationale,
+  (c) cancel-handling decision (FR write yes/no) documented,
+  (d) JobStore.markOrphanedOnStartup interface change documented including
+      what the three implementations need to return,
+  (e) entry-data table showing which fields (prep.stablePrefixHash,
+      prep.stablePrefixTokens, prep.effectivePrompt, prep.resolvedModel,
+      sessionId, asyncJobId) are available at startJob time vs at terminal
+      time, so the wiring step has an explicit data contract.
+"""
+
+# ---------------------------------------------------------------------------
+# Implementation — wiring
+# ---------------------------------------------------------------------------
+
+[[steps]]
+id = "extend-async-job-manager-deps"
+depends_on = ["research-async-job-lifecycle"]
+actor = "assistant"
+action = """
+Extend AsyncJobManager to accept a FlightRecorderLike dependency and an
+optional usage parser per job:
+
+1. src/async-job-manager.ts — constructor:
+     constructor(
+       logger: Logger = noopLogger,
+       onJobComplete?: (cli, durationMs, success) => void,
+       store: JobStore | null = null,
+       flightRecorder: FlightRecorderLike = new NoopFlightRecorder()
+     )
+   Defaulting to NoopFlightRecorder is critical: every existing test that
+   constructs an AsyncJobManager without injecting a recorder keeps working
+   unchanged, and the cumulative test count must not drop.
+
+2. src/async-job-manager.ts — extend StartJobOptions with:
+     /**
+      * Slice 1.5: data needed to write a flight-recorder row mirroring the
+      * sync path's safeFlightStart entry. When omitted (legacy callers,
+      * tests that don't supply a prep), no FR write is performed at start
+      * and the complete write is also suppressed (no orphaned start row).
+      *
+      * R2 Codex-F1 / Codex-F5 fix: shape decomposed to primitive fields
+      * (no nested object pinning), and a separate `writeFlightStart` flag
+      * controls whether AsyncJobManager INSERTs a logStart row. Callers
+      * whose upstream already wrote logStart (the sync path's
+      * awaitJobOrDefer) must pass writeFlightStart=false to avoid a
+      * primary-key collision on requests.id.
+      */
+     writeFlightStart?: boolean;        // default false (back-compat)
+     flightRecorderEntry?: {
+       model: string;
+       prompt: string;                  // assembled effective prompt
+       sessionId?: string;
+       stablePrefixHash?: string;
+       stablePrefixTokens?: number;
+     };
+     /**
+      * Slice 1.5: callback to extract token usage from terminal stdout for
+      * the FR complete write. Called only on `completed` (exitCode === 0).
+      * Returns null/undefined fields when usage cannot be extracted.
+      * AsyncJobManager does NOT import extractUsageAndCost itself to avoid
+      * an index.ts ↔ async-job-manager.ts circular dependency — callers
+      * supply the closure.
+      *
+      * R2 Codex-F5 / Gemini-F3 fix: callers MUST construct the closure
+      * from primitive locals only, never by capturing `params` directly.
+      * Pattern:
+      *     const fmt = params.outputFormat;
+      *     const cliName = "claude";
+      *     const extractUsage = (stdout: string) =>
+      *       extractUsageAndCost(cliName, stdout, fmt);
+      * The closure is cleared from the AsyncJobRecord after the terminal
+      * write to release retained references inside its scope.
+      */
+     extractUsage?: (stdout: string) => {
+       inputTokens?: number;
+       outputTokens?: number;
+       cacheReadTokens?: number;
+       cacheCreationTokens?: number;
+       costUsd?: number;
+     };
+
+3. src/async-job-manager.ts — extend the legacy positional `startJob(...)`
+   signature to ALSO take optional `flightRecorderEntry`, `extractUsage`,
+   and `writeFlightStart` trailing params (after `onComplete`). All
+   existing call sites stay working by omitting them. The new dedup-aware
+   `startJobWithDedup(..., opts)` reads them from `opts`.
+
+4. Persist flightRecorderEntry + extractUsage on the in-memory
+   AsyncJobRecord so the close/error/idle-timeout/overflow handlers can
+   reach them at terminal time. After writeFlightComplete fires, clear
+   both fields (`job.flightRecorderEntry = undefined; job.extractUsage =
+   undefined`) so retained references can be GC'd before the JOB_TTL_MS
+   eviction window (Codex-F5 fix).
+   Reconstituted (hydrated-from-store) records do NOT get an extractUsage
+   (the in-process closure is lost) — their FR write was made by the
+   prior process and is already complete.
+
+5. src/index.ts — thread the new fields through every async handler
+   (handle*RequestAsync, 5 functions). Each builds the
+   flightRecorderEntry from its existing `prep` object, extracts
+   primitives BEFORE building the extractUsage closure (Codex-F5 fix), and
+   passes `writeFlightStart: true` (no upstream wrote logStart for async
+   handlers).
+
+6. src/index.ts — awaitJobOrDefer (lines ~472-578): build a
+   flightRecorderEntry from `prep` (this requires threading `prep` into
+   awaitJobOrDefer; today only args/corrId/etc are passed) and pass
+   `writeFlightStart: false`. The sync handler's upstream safeFlightStart
+   already wrote the logStart row keyed on corrId; AsyncJobManager's
+   terminal write will UPDATE that same row. This closes Codex-F1:
+   deferred-from-sync rows now get a logComplete from the manager when
+   the underlying async job terminates.
+
+   Known limitation (documented in CHANGELOG + SURFACES.md): when a sync
+   request dedup-hits an in-flight original AND the sync deadline
+   expires, the dedup'd request's correlationId row stays at
+   status='started' forever (the manager's logComplete writes the
+   original's corrId, not the dedup'd one). This is the same pre-existing
+   tracing limitation as the prompt-parts wiring; a future slice can
+   address it via a per-request corrId fan-out.
+
+7. src/index.ts — extend createGatewayServer to pass the runtime's
+   flightRecorder into AsyncJobManager. Today the runtime owns the
+   recorder; the manager just doesn't see it.
+"""
+idempotent = true
+validation = """
+- npm run build passes.
+- Existing async-job-manager tests pass unmodified (they construct the
+  manager without the new dependency; the NoopFlightRecorder default
+  short-circuits the FR writes).
+- New unit test: constructing AsyncJobManager without a flightRecorder
+  arg yields a manager whose internal recorder is a NoopFlightRecorder
+  (verified via a NoopFlightRecorder.queryRequests return shape probe,
+  no private-field reflection).
+- New unit test: startJob/startJobWithDedup accept the new options and the
+  in-memory job record carries them through.
+"""
+
+[[steps]]
+id = "wire-flight-start-on-startjob"
+depends_on = ["extend-async-job-manager-deps"]
+actor = "assistant"
+action = """
+Inside AsyncJobManager.startJobWithDedup, AFTER the dedup short-circuit
+(so dedup hits do NOT double-write a FR row) and AFTER the JobStore
+recordStart succeeds, conditionally call logStart based on the
+writeFlightStart opt-in (R2 Codex-F1 fix — pure async handlers opt in;
+sync-deferred path opts out because the sync handler already wrote
+logStart for the same correlationId):
+
+  if (opts.writeFlightStart && opts.flightRecorderEntry) {
+    try {
+      this.flightRecorder.logStart({
+        correlationId: correlationId,
+        cli,
+        model: opts.flightRecorderEntry.model,
+        prompt: opts.flightRecorderEntry.prompt,
+        sessionId: opts.flightRecorderEntry.sessionId,
+        asyncJobId: id,
+        stablePrefixHash: opts.flightRecorderEntry.stablePrefixHash,
+        stablePrefixTokens: opts.flightRecorderEntry.stablePrefixTokens,
+      });
+    } catch (err) {
+      this.logger.error("Async-path flight recorder logStart failed", err);
+    }
+  }
+
+Critical: `asyncJobId: id` is the AsyncJobManager-generated job UUID, NOT
+the request correlation id. asyncJobId is non-null for rows written here
+(pure async handlers) and null for rows that came via the sync path's
+upstream safeFlightStart call (which omits asyncJobId). This is the
+column that cache-stats / future routing queries can use to distinguish
+sync-initiated vs async-initiated rows.
+
+The logStart call is wrapped in try/catch locally because AsyncJobManager
+does not import the safeFlightStart helper from index.ts (that helper
+resolves a default GatewayServerRuntime which a freshly-constructed
+manager outside the server bootstrap path may not have). The local
+try/catch reproduces safeFlightStart's failure semantics: log to logger,
+swallow the error, continue.
+
+Do NOT call logStart for dedup-hit short-circuits (the original job's row
+already exists). Do NOT call logStart for reconstituted-from-store records
+(they were started by a previous process). Do NOT call logStart when
+writeFlightStart is false (R2 Codex-F1: sync-deferred path).
+"""
+idempotent = true
+validation = """
+- New test using CapturingFlightRecorder: startJobWithDedup with
+  writeFlightStart=true AND flightRecorderEntry produces exactly one
+  logStart call with asyncJobId === the returned job.id and
+  stablePrefixHash === the entry's value.
+- New test (R2 Codex-F1 regression): startJobWithDedup with
+  writeFlightStart=false AND flightRecorderEntry produces zero logStart
+  calls (the upstream sync handler already wrote one).
+- New test: same dedup key → second call skips logStart (capturing recorder
+  sees only one call total).
+- New test: startJobWithDedup WITHOUT flightRecorderEntry produces zero
+  logStart calls.
+"""
+
+[[steps]]
+id = "wire-flight-complete-on-terminal"
+depends_on = ["wire-flight-start-on-startjob"]
+actor = "assistant"
+action = """
+In AsyncJobManager, add a private helper. The shape below incorporates
+R2 fixes for Codex-F2 (failure payload mirrors sync helpers), Codex-F4
+(guard set only on successful write so retries from interleaved terminal
+callbacks can recover from a thrown logComplete), and Codex-F5 (clear
+retained fields after the terminal write):
+
+  private writeFlightComplete(
+    job: AsyncJobRecord,
+    finalStatus: "completed" | "failed",
+    overrideErrorMessage?: string,
+  ): void {
+    if (!job.flightRecorderEntry) return;   // never opted in, skip
+    if (job.flightRecorderComplete) return; // already wrote successfully
+    const durationMs = Math.max(0, Date.now() - new Date(job.startedAt).getTime());
+    const usage =
+      finalStatus === "completed" && job.extractUsage
+        ? this.safeExtractUsage(job)
+        : {};
+
+    // R2 Codex-F2: mirror sync-path failure payload semantics. On non-zero
+    // exit `job.error` is often null; fall back to stderr / "Exit code N".
+    // On clean exit, response = stdout. On failure, response = stderr ||
+    // stdout (stderr is where the useful text lives on launch errors).
+    const isFailure = finalStatus === "failed";
+    const response = isFailure ? job.stderr || job.stdout : job.stdout;
+    const exitCode = job.exitCode ?? (finalStatus === "completed" ? 0 : 1);
+    const errorMessage = isFailure
+      ? overrideErrorMessage ?? job.error ?? job.stderr ?? `Exit code ${exitCode}`
+      : undefined;
+
+    try {
+      this.flightRecorder.logComplete(job.correlationId, {
+        response,
+        durationMs,
+        retryCount: 0,
+        circuitBreakerState: "closed",
+        optimizationApplied: false,
+        exitCode,
+        errorMessage,
+        status: finalStatus,
+        inputTokens: usage.inputTokens,
+        outputTokens: usage.outputTokens,
+        cacheReadTokens: usage.cacheReadTokens,
+        cacheCreationTokens: usage.cacheCreationTokens,
+        costUsd: usage.costUsd,
+      });
+      // R2 Codex-F4: only mark complete on SUCCESSFUL write. If the call
+      // threw, leave the flag false so a later terminal callback can retry.
+      // The FR's WHERE status='started' guard makes the retry a safe
+      // no-op once the first write eventually lands.
+      job.flightRecorderComplete = true;
+      // R2 Codex-F5: clear retained references so GC can collect anything
+      // captured by extractUsage's closure before JOB_TTL_MS eviction.
+      job.flightRecorderEntry = undefined;
+      job.extractUsage = undefined;
+    } catch (err) {
+      this.logger.error("Async-path flight recorder logComplete failed", err);
+    }
+  }
+
+  private safeExtractUsage(job: AsyncJobRecord) {
+    try {
+      return job.extractUsage?.(job.stdout) ?? {};
+    } catch (err) {
+      this.logger.error(`Job ${job.id} extractUsage threw`, err);
+      return {};
+    }
+  }
+
+Add to AsyncJobRecord:
+  flightRecorderEntry?: StartJobOptions["flightRecorderEntry"];
+  extractUsage?: StartJobOptions["extractUsage"];
+  flightRecorderComplete?: boolean;   // set ONLY on successful logComplete
+
+Call writeFlightComplete from EVERY terminal-state code path:
+  - close handler → "completed" if exitCode === 0 && !canceled, else "failed"
+  - error handler → "failed" (launch failure: stderr already mirrored from launchError.message at lines ~594-610)
+  - idle timeout → "failed", overrideErrorMessage from job.error which the timeout cb set to the inactivity message
+  - output overflow → "failed", overrideErrorMessage="Output exceeded maximum size (50MB)"
+  - cancelJob → "failed", overrideErrorMessage="canceled by caller"
+  - evictCompletedJobs dead-process branch → "failed", overrideErrorMessage="Process no longer exists (dead process detected)"
+  - evictCompletedJobs exited-mismatch branch → "failed", overrideErrorMessage="Process exited without proper status transition"
+
+For markOrphanedOnStartup (R2 Codex-F3 / Mistral-F1 fix — orphan rows
+need enough data for a useful logComplete):
+
+  - Extend JobStore.markOrphanedOnStartup() to return:
+      {
+        count: number;
+        orphaned: Array<{
+          id: string;
+          correlationId: string;
+          startedAt: string;
+          stdout: string;
+          stderr: string;
+          exitCode: number | null;
+        }>;
+      }
+    (Sqlite + Memory + Postgres impls.) Update existing tests:
+    `src/__tests__/job-store.test.ts:256` and
+    `src/__tests__/persistence-config.test.ts:348` — both currently
+    assert `.toBe(<number>)`; switch to `.count`.
+
+  - SqliteJobStore impl: SELECT id, correlation_id, started_at, stdout,
+    stderr, exit_code FROM jobs WHERE status='running' INTO an array,
+    THEN UPDATE (same SQL as today). No transaction wrapper needed (the
+    DatabaseLike interface lacks one; gateway boot is single-threaded
+    before any new jobs arrive, so the SELECT-then-UPDATE race window is
+    closed). This avoids R2 Gemini-F4 (no DatabaseLike.transaction change
+    required).
+
+  - MemoryJobStore impl: collect rows where status==='running' before
+    flipping them.
+
+  - AsyncJobManager constructor: for each orphan, call
+    this.flightRecorder.logComplete(orphan.correlationId, {
+      response: orphan.stderr || orphan.stdout,
+      durationMs: Math.max(0, Date.now() - new Date(orphan.startedAt).getTime()),
+      retryCount: 0,
+      circuitBreakerState: "closed",
+      optimizationApplied: false,
+      exitCode: orphan.exitCode ?? 1,
+      errorMessage: "orphaned after gateway restart",
+      status: "failed",
+    }). Wrap in try/catch. The underlying UPDATE has WHERE status='started'
+    so it silently no-ops when no FR row exists (e.g. pre-1.7.0 async
+    jobs that never wrote a logStart).
+
+Cancel decision: write FR complete with status="failed",
+errorMessage="canceled by caller". Rationale documented in
+ASYNC_FLIGHT_RECORDER_SURFACES.md (audit trail value outweighs the
+status-encoding loss; JobStore retains the distinct 'canceled' status
+for getJobSnapshot callers).
+
+Single-shot guard rationale (R2 Codex-F4 fix applied above): the flag
+is set ONLY after a successful logComplete write. The flag's purpose is
+to skip cheap-but-redundant calls from interleaved terminal callbacks
+in the common case; the FR's `WHERE status='started'` UPDATE guard is
+the actual idempotency mechanism (so a thrown write CAN be retried by
+the next terminal callback, which is the correctness-critical property).
+"""
+idempotent = true
+validation = """
+- New test using CapturingFlightRecorder: an async job that exits cleanly
+  produces exactly one logComplete call with status='completed' and
+  inputTokens/outputTokens populated (via a fake extractUsage closure
+  built from primitive locals).
+- New test: an async job that fails (non-zero exit, no job.error set)
+  produces one logComplete with status='failed', errorMessage falling
+  back to stderr/`Exit code N` (Codex-F2 regression).
+- New test: launch failure (ENOENT) produces logComplete with the
+  launch-error message in errorMessage (Codex-F2 regression).
+- New test: idle timeout produces one logComplete with status='failed'
+  and errorMessage containing 'inactivity'.
+- New test: output overflow (>50MB streamed) produces logComplete with
+  status='failed' and errorMessage='Output exceeded maximum size (50MB)'
+  (Codex-F6 regression).
+- New test: cancelJob produces one logComplete with status='failed' and
+  errorMessage='canceled by caller'.
+- New test: evictCompletedJobs dead-process branch produces one
+  logComplete with status='failed' (Codex-F6 regression). Simulate by
+  starting a job, killing the child PID externally, then triggering an
+  eviction sweep.
+- New test: constructor with a JobStore that has a pre-seeded
+  status='running' row produces a logComplete call for that row with
+  status='failed', errorMessage='orphaned after gateway restart',
+  durationMs computed from the seeded startedAt.
+- New test (R2 Codex-F4 regression): when this.flightRecorder.logComplete
+  throws on the FIRST terminal callback (e.g. idle-timeout), the
+  flightRecorderComplete flag stays false, and a SECOND terminal callback
+  (e.g. close handler) successfully writes the row. Use a recorder stub
+  that throws once then succeeds.
+- Regression: a job that exits via close handler AFTER idle-timeout
+  already wrote complete does NOT produce a second logComplete (single-
+  shot guard in the common case).
+- New test (R2 Codex-F5 regression): after writeFlightComplete returns
+  successfully, job.flightRecorderEntry and job.extractUsage are both
+  undefined.
+- New test (R2 Codex-F1 regression — sync-deferred path): an
+  AsyncJobManager started via startJobWithDedup with writeFlightStart=
+  false and flightRecorderEntry set still writes a logComplete on
+  terminal state (so the upstream sync handler's logStart row gets
+  closed out).
+"""
+
+[[steps]]
+id = "codex-parser-cached-input-tokens"
+depends_on = []
+actor = "assistant"
+action = """
+src/codex-json-parser.ts:69-77 currently checks Anthropic-style
+`cache_read_input_tokens` first, then falls back to `cache_read_tokens`.
+Codex CLI ≥0.133.0 actually emits `cached_input_tokens` (verified via
+2026-05-26 smoke test, see PROVIDER_CACHE_SURFACES.md "Codex — field name
+divergence"). Update the cache-read field priority to:
+
+  1. cached_input_tokens         // current Codex CLI
+  2. cache_read_input_tokens     // legacy / hypothetical Anthropic-style
+  3. cache_read_tokens           // bare fallback
+
+Codex does NOT emit a cache-creation field today (OpenAI's API does not
+distinguish cache writes from reads), so leave the cache_creation_tokens
+extraction unchanged.
+
+Implementation:
+
+  if (typeof u.cached_input_tokens === "number") {
+    usage.cache_read_tokens = u.cached_input_tokens;
+  } else if (typeof u.cache_read_input_tokens === "number") {
+    usage.cache_read_tokens = u.cache_read_input_tokens;
+  } else if (typeof u.cache_read_tokens === "number") {
+    usage.cache_read_tokens = u.cache_read_tokens;
+  }
+
+NOT a CLI version detection — both fields cannot co-exist in a real Codex
+emit (the CLI emits one OR the other; we prefer the newer name when both
+are somehow present rather than failing).
+"""
+idempotent = true
+validation = """
+- New parser unit test: input event with `cached_input_tokens: 4992`
+  produces usage.cache_read_tokens === 4992.
+- New parser unit test: when both `cached_input_tokens` and
+  `cache_read_input_tokens` are present (hypothetical), the new name wins.
+- New parser unit test: legacy event with only `cache_read_input_tokens`
+  still produces the right value (backwards compat).
+- Existing codex-json-parser tests pass unmodified.
+"""
+
+[[steps]]
+id = "add-tests"
+depends_on = [
+  "wire-flight-complete-on-terminal",
+  "codex-parser-cached-input-tokens",
+]
+actor = "assistant"
+action = """
+1. src/__tests__/codex-json-parser.test.ts — add the three new cases above
+   (cached_input_tokens, dual-field preference, legacy compat).
+
+2. src/__tests__/async-job-manager-flight-recorder.test.ts — NEW. Mirror
+   the CapturingFlightRecorder pattern from
+   src/__tests__/prompt-parts-tool-wiring.test.ts:106-117 (which already
+   ships a working FlightRecorderLike stand-in including the queryRequests
+   stub). Cover:
+     (a) startJobWithDedup with writeFlightStart=true + flightRecorderEntry
+         → one logStart with asyncJobId, stablePrefixHash,
+         stablePrefixTokens populated.
+     (a2) startJobWithDedup with writeFlightStart=false + flightRecorderEntry
+         (sync-deferred regression for Codex-F1) → zero logStart, ONE
+         logComplete when the job terminates.
+     (b) clean exit (exitCode=0) → one logComplete, status='completed',
+         inputTokens/outputTokens/cacheReadTokens populated via a fake
+         extractUsage closure that returns fixed values.
+     (c) non-zero exit with job.error=null → one logComplete,
+         status='failed', errorMessage falls back to stderr / "Exit code N"
+         (Codex-F2 regression).
+     (c2) launch failure (ENOENT-like) → logComplete with errorMessage
+         containing the launch-error message (Codex-F2 regression).
+     (d) cancelJob → one logComplete, status='failed',
+         errorMessage='canceled by caller'.
+     (e) idle timeout (use a tiny idleTimeoutMs) → one logComplete,
+         status='failed', errorMessage contains 'inactivity'.
+     (e2) output overflow → one logComplete, status='failed',
+         errorMessage='Output exceeded maximum size (50MB)' (Codex-F6
+         regression; use a child that streams large output past 50MB).
+     (e3) evictCompletedJobs dead-process branch → one logComplete,
+         status='failed' (Codex-F6 regression; simulate by killing the
+         child PID then calling the private evict via a manager
+         method or short-cadence trigger).
+     (f) dedup hit → second startJobWithDedup with same args produces
+         zero new logStart/logComplete calls (and onComplete cleanup
+         fires for the second caller's resources).
+     (g) constructor with a JobStore seeded with status='running' →
+         exactly one logComplete per seeded row, status='failed',
+         errorMessage='orphaned after gateway restart', durationMs
+         computed from the seeded startedAt (Mistral-F1 regression).
+     (h) constructor with a JobStore that has NO running rows → zero
+         logComplete calls for orphans.
+     (i) jobs without flightRecorderEntry → zero logStart and zero
+         logComplete (regression guard: tests that don't opt-in stay
+         silent on the FR).
+     (j) Codex-F4 regression: recorder stub that throws on first
+         logComplete then succeeds → flightRecorderComplete stays false
+         after the throw, second terminal callback retries and succeeds.
+     (k) Codex-F5 regression: after writeFlightComplete returns,
+         job.flightRecorderEntry and job.extractUsage are both undefined
+         (verify via a getter or a manager helper that exposes the
+         in-memory record for tests — do NOT use private-field
+         reflection).
+
+   Use child_process spawn against a tiny shell stub (the existing async
+   tests already do this via spawnCliProcess; reuse the pattern). For
+   cases that need a clean exit, spawn `node -e "console.log('ok')"`. For
+   non-zero exit, spawn `node -e "process.exit(2)"`. For idle timeout,
+   spawn `node -e "setTimeout(()=>{},10000)"` with idleTimeoutMs=100.
+
+3. src/__tests__/cache-state-resources.test.ts — add new test cases
+   verifying that cache_state://global and cache_state://prefix/{hash}
+   correctly aggregate async-job rows after the wiring lands. Seed the
+   flight recorder with synthetic rows whose asyncJobId is non-null and
+   confirm they appear in the aggregates.
+
+   Implementation detail: the existing test seeds rows via flight
+   recorder logStart/logComplete directly; just add a test that seeds
+   rows with asyncJobId set and verifies they aggregate.
+
+4. R2 Gemini-F1 / Grok-F1 — UPDATE EXISTING TESTS for the breaking
+   markOrphanedOnStartup signature change:
+     - src/__tests__/job-store.test.ts:256 — `expect(changes).toBe(1)`
+       becomes `expect(changes.count).toBe(1)` plus a new assertion that
+       `changes.orphaned` has one entry with the expected
+       id/correlationId/startedAt.
+     - src/__tests__/persistence-config.test.ts:348 —
+       `expect(store.markOrphanedOnStartup()).toBe(0)` becomes
+       `expect(store.markOrphanedOnStartup()).toEqual({ count: 0,
+       orphaned: [] })`.
+     - src/__tests__/async-job-manager-persistence.test.ts:108 — verify
+       the existing assertions still hold under the new shape.
+
+Test count delta target: at least +15 new test cases across the four
+files (the matrix grew from a–i to a–k plus a2/c2/e2/e3).
+"""
+idempotent = true
+validation = """
+- New file src/__tests__/async-job-manager-flight-recorder.test.ts has
+  cases (a) through (i) above, all passing.
+- src/__tests__/codex-json-parser.test.ts has 3 new cases, all passing.
+- src/__tests__/cache-state-resources.test.ts has at least 1 new case for
+  async-job-row aggregation, passing.
+- No existing test was weakened or deleted (verify via git diff for
+  __tests__/ files).
+- npm test exits 0; total test count rises by ≥ 12.
+"""
+
+# ---------------------------------------------------------------------------
+# Docs + release
+# ---------------------------------------------------------------------------
+
+[[steps]]
+id = "verify-cache-state-now-includes-async"
+depends_on = ["add-tests"]
+actor = "assistant"
+action = """
+Verification gate (no code change beyond what add-tests already added).
+Confirm by inspection:
+  - src/cache-stats.ts queries do not filter by asyncJobId IS NULL, so
+    async rows aggregate naturally once they exist.
+  - The new test in cache-state-resources.test.ts passes both:
+      (a) cache_state://global total_hits reflects async-row cache reads
+      (b) cache_state://prefix/{hash} returns the async row when its
+          stable_prefix_hash matches
+
+If filtering exists anywhere in cache-stats.ts that would silently exclude
+async rows, fix it here and add a regression test.
+"""
+idempotent = true
+validation = """
+- Inspection of src/cache-stats.ts confirms no asyncJobId filtering.
+- cache-state-resources.test.ts async-row aggregation case passes.
+"""
+
+[[steps]]
+id = "update-docs-and-changelog"
+depends_on = ["verify-cache-state-now-includes-async"]
+actor = "assistant"
+action = """
+1. docs/personal-mcp/PROVIDER_CACHE_SURFACES.md
+   - "Codex — field name divergence" subsection: update "Gateway parser
+     today" paragraph to reflect that the parser NOW accepts
+     cached_input_tokens (delete the "out of scope for this slice" callout).
+   - "Implications for slice 1 / 2 / 3" → "Slice 2" bullet: update the
+     "Populated for claude only today" claim — codex now populates too.
+   - Add a short "Slice 1.5 follow-up landed" callout near the top of the
+     Codex section pointing at this dag.
+
+2. CHANGELOG.md — add an Unreleased entry (date-stamped at release time
+   to 1.7.0) covering:
+     - Async-path flight recorder integration:
+         * AsyncJobManager now writes logStart on startJob and logComplete
+           on every terminal state (completed / failed / orphaned / canceled)
+           when a flightRecorderEntry is supplied.
+         * Backwards compatible: tests/callers that don't opt-in see no
+           behaviour change (NoopFlightRecorder default).
+         * JobStore.markOrphanedOnStartup now returns the list of orphaned
+           {id, correlationId} pairs (breaking change to the interface;
+           SqliteJobStore + MemoryJobStore + PostgresJobStore stub updated).
+     - Codex parser: accepts `cached_input_tokens` (current Codex CLI)
+       in addition to the legacy `cache_read_input_tokens`. Cache hits on
+       codex rows now populate `cache_read_tokens` in the flight recorder.
+     - cache_state://* MCP resources now include async-job activity.
+     - Migration impact: none. Schema unchanged from v1.6.x. No config
+       changes. No opt-in flag — the behaviour is always on for new
+       async-job rows.
+
+3. docs/launch/blog-cache-awareness.md — append a "Slice 1.5 follow-up
+   (v1.7.0)" subsection to the "What's next" area noting:
+     - Async-path FR integration shipped — cache_state://* aggregates are
+       now complete across sync + async tools.
+     - Codex parser fix shipped — cache_read_tokens populated for codex
+       rows on cache hits.
+     - Slice 4 (cache-aware multi-LLM routing) still pending — gated on
+       24h+ of dogfood data.
+
+4. docs/plans/cache-awareness.dag.toml — append a comment near the end
+   noting that slice 4 is "blocked on observability data; do not start
+   until 24h after v1.7.0 ships". One-line edit; no behavioural change.
+
+5. docs/plans/async-flight-recorder.pr-body.md — NEW. Mirror the structure
+   of docs/plans/cache-awareness.pr-body.md:
+     - Scope
+     - Files touched (checklist)
+     - Test count delta table
+     - What's intentionally NOT shipped (slice 4, slice 5)
+     - Multi-LLM review log (filled in as Unit A/B/C complete)
+     - Rollback (hard rollback only — no opt-in flag to flip)
+     - Acceptance gate
+"""
+idempotent = true
+validation = """
+- PROVIDER_CACHE_SURFACES.md, CHANGELOG.md, blog post updated.
+- docs/plans/cache-awareness.dag.toml has slice-4-blocked comment.
+- docs/plans/async-flight-recorder.pr-body.md exists and follows
+  cache-awareness.pr-body.md structure.
+- /srv/repos/internal/verivusai-labs/rvwr/CLAUDE.md — UNCHANGED (verify
+  via stat / diff of file content).
+"""
+
+[[steps]]
+id = "release-readiness-check"
+depends_on = ["update-docs-and-changelog"]
+actor = "assistant"
+action = """
+Final gates:
+  npm run build
+  npm run lint
+  npm run format:check
+  npm test
+  npm run check       # the canonical pre-commit gate
+
+Local CI mirror (skip iteration cost on the public mirror):
+  actionlint .github/workflows/*.yml
+  zizmor .github/workflows/
+  gitleaks detect --source . --no-banner
+  osv-scanner --lockfile package-lock.json
+  ruff check integrations/
+  bandit -r integrations/
+  typos
+
+Cross-cutting checklist:
+  [ ] src/async-job-manager.ts — FlightRecorderLike constructor dep,
+      StartJobOptions extended (writeFlightStart + flightRecorderEntry +
+      extractUsage), terminal-state writes wired with sync-helper failure
+      payload semantics, guard set only on successful write, orphan-
+      recovery FR writes from richer markOrphanedOnStartup return,
+      flightRecorderEntry + extractUsage cleared after terminal write.
+  [ ] src/codex-json-parser.ts — cached_input_tokens preferred over
+      cache_read_input_tokens.
+  [ ] src/job-store.ts — markOrphanedOnStartup returns
+      {count, orphaned: Array<{id, correlationId, startedAt, stdout,
+      stderr, exitCode}>} across all three implementations. No
+      DatabaseLike.transaction added (SELECT-then-UPDATE is safe at boot).
+  [ ] src/index.ts — createGatewayServer passes flightRecorder into
+      AsyncJobManager. Every handle*RequestAsync threads
+      flightRecorderEntry + extractUsage into startJob WITH
+      writeFlightStart=true. awaitJobOrDefer threads flightRecorderEntry
+      (built from upstream sync handler's prep) WITH writeFlightStart=
+      false so the sync-deferred row gets a logComplete from the manager.
+  [ ] src/__tests__/async-job-manager-flight-recorder.test.ts — new
+      (cases a–k including a2/c2/e2/e3 R2 regressions).
+  [ ] src/__tests__/codex-json-parser.test.ts — 3 new cases.
+  [ ] src/__tests__/cache-state-resources.test.ts — async-row case added.
+  [ ] src/__tests__/job-store.test.ts:256 — assertion updated to
+      `.count`/`.orphaned` (R2 Gemini-F1).
+  [ ] src/__tests__/persistence-config.test.ts:348 — assertion updated
+      to the new shape (R2 Gemini-F1).
+  [ ] docs/personal-mcp/PROVIDER_CACHE_SURFACES.md — codex caveat removed,
+      slice 1.5 landed callout added.
+  [ ] docs/personal-mcp/ASYNC_FLIGHT_RECORDER_SURFACES.md — new (with
+      R2 clarifications: usage-extract guard, asyncJobId null/non-null
+      semantics, dedup-deferred-corrId limitation, cancel/orphan
+      modelling wart).
+  [ ] CHANGELOG.md — [1.7.0] entry with both pieces of work + the
+      sync-deferred-orphaned-corrId-on-dedup known limitation.
+  [ ] docs/launch/blog-cache-awareness.md — slice 1.5 follow-up note.
+  [ ] docs/plans/async-flight-recorder.dag.toml — this file.
+  [ ] docs/plans/async-flight-recorder.pr-body.md — new.
+  [ ] /srv/repos/internal/verivusai-labs/rvwr/CLAUDE.md — UNCHANGED.
+
+Verify total test count increased by ≥ 15 (R2 matrix expansion).
+
+Release sequence (do AFTER unanimous approval on Units A/B/C):
+  1. npm version 1.7.0 --no-git-tag-version --allow-same-version
+  2. Update integrations/llm-plugin/pyproject.toml to 1.7.0.
+  3. Stamp CHANGELOG [1.7.0] heading with the release date.
+  4. git commit -m "chore(release): 1.7.0"   (NO Co-Authored-By trailer)
+  5. git push origin master
+  6. Watch CI + security workflows on private remote.
+  7. gh auth switch --user verivusOSS-releases
+  8. git push public master:main
+  9. gh release create v1.7.0 --repo verivus-oss/llm-cli-gateway
+       --title "v1.7.0 — async-path flight recorder + codex parser fix"
+       --notes-file docs/plans/async-flight-recorder.pr-body.md
+       --target main
+  10. Watch npm-publish.yml, publish.yml, release-installer.yml exit 0.
+  11. Verify on npmjs + pypi + GitHub release page.
+"""
+idempotent = true
+validation = """
+- All npm + local-CI commands exit 0.
+- Cross-cutting checklist complete (visible in PR body).
+- v1.7.0 visible on npmjs.com, pypi.org, and the public GitHub releases
+  page with installer artefacts attached.
+- CI + security workflows green on the release commit on BOTH remotes.
+"""
+
+# ---------------------------------------------------------------------------
+# Rollback + risks
+# ---------------------------------------------------------------------------
+
+[rollback]
+guidance = """
+This slice has no opt-in flag — the new FR writes are always on for new
+async jobs once the wiring lands. Rollback options:
+
+1. Hard rollback: revert the feature branch (or the release commit). FR
+   migration schema is unchanged from v1.6.x (no v4 migration), so revert
+   is non-destructive. Async-job rows written between release and revert
+   stay in logs.db with valid shape; nothing has to be cleaned up.
+
+2. Targeted disable (no flag): if a bug in the async-path writes is
+   discovered post-release, the safest fix is forward — patch the
+   writeFlightComplete helper or the startJob log site to no-op until
+   the bug is fixed. The infrastructure (CapturingFlightRecorder tests,
+   etc.) supports rapid iteration.
+
+There is no schema migration to roll back. The FR table shape is
+unchanged.
+"""
+
+[risks]
+known = [
+  "AsyncJobManager closure retention — flightRecorderEntry + extractUsage live on the in-memory record. R2 Codex-F5 / Gemini-F3 fix: closure constructed from primitive locals only (not from `params`), and both fields cleared after the terminal write so the GC can reclaim them well before JOB_TTL_MS eviction.",
+  "JobStore.markOrphanedOnStartup signature change is a breaking change at the TypeScript interface level. PostgresJobStore is interface-only today; SqliteJobStore + MemoryJobStore + their tests (job-store.test.ts:256, persistence-config.test.ts:348) are updated in this slice. No external implementers are known.",
+  "Cancel-as-failed (and orphan-as-failed) in the FR: external consumers of `~/.llm-cli-gateway/logs.db` that filter `status='failed'` will count cancels and boot orphans as errors. cache-stats does not currently distinguish, so internal aggregation is unaffected. The JobStore retains the distinct 'canceled' / 'orphaned' statuses for getJobSnapshot callers.",
+  "Sync-deferred-dedup orphan rows (R2 Codex-F1 known limitation): when a sync request hits dedup AND the sync deadline expires, the dedup'd caller's correlationId row stays at status='started' forever (manager only writes complete for the original job's corrId). Documented in CHANGELOG.",
+  "Codex parser change is a one-line behaviour shift. If a hypothetical Codex build emits both cached_input_tokens AND cache_read_input_tokens with different values, the new code prefers the newer name. This is the safer choice (newer CLI is canonical) but is a behaviour change.",
+]
+mitigations = [
+  "Closure-retention risk neutralised by primitive-locals closure construction (Codex-F5 fix) plus explicit field-clear post-write.",
+  "JobStore interface change rollout includes test updates and a single-file stub for PostgresJobStore.",
+  "Cancel/orphan-as-failed semantics documented in ASYNC_FLIGHT_RECORDER_SURFACES.md and CHANGELOG.",
+  "Sync-deferred-dedup orphan documented as a known limitation; future slice can address via per-request corrId fan-out.",
+  "Codex parser dual-field test pins the priority ordering and surfaces any future ambiguity in CI.",
+]

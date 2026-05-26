@@ -10,6 +10,17 @@
 # Out of scope for this slice: explicit cache-resource APIs (Gemini Context
 # Caching, Anthropic 1h beta) and cache-aware multi-LLM routing. Those are
 # gated on this slice's observability data.
+#
+# Slice 1.5 (v1.7.0) landed the two tactical follow-ups this plan flagged
+# as deferred: async-path flight-recorder integration + Codex parser
+# accepting `cached_input_tokens`. See
+# `docs/plans/async-flight-recorder.dag.toml` for that slice's record.
+#
+# Slice 4 (cache-aware multi-LLM routing) is BLOCKED ON OBSERVABILITY DATA.
+# Do not start until 24h+ of `cache_state://global` data has been collected
+# from real use after v1.7.0 ships. The routing slice needs a clean signal
+# of per-provider cache warmth across the prefix space — without 24h+ of
+# dogfood data the routing decisions are guesses.
 
 [meta]
 name = "llm-cli-gateway cache-awareness — phase 1"

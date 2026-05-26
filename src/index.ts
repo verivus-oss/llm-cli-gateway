@@ -34,7 +34,11 @@ import {
   getCliInfo,
   resolveModelAlias,
 } from "./model-registry.js";
-import { AsyncJobManager } from "./async-job-manager.js";
+import {
+  AsyncJobManager,
+  type AsyncJobFlightRecorderEntry,
+  type AsyncJobUsageExtractor,
+} from "./async-job-manager.js";
 import { createJobStore, type JobStore } from "./job-store.js";
 import { ApprovalManager, ApprovalPolicy, ApprovalRecord } from "./approval-manager.js";
 import { checkReviewIntegrity, ReviewIntegrityResult } from "./review-integrity.js";
@@ -335,14 +339,16 @@ function getJobStore(runtimeLogger: GatewayLogger = logger): JobStore | null {
 function newAsyncJobManager(
   metrics: PerformanceMetrics,
   runtimeLogger: GatewayLogger,
-  store: JobStore | null = getJobStore(runtimeLogger)
+  store: JobStore | null = getJobStore(runtimeLogger),
+  fr: FlightRecorderLike = getFlightRecorder(runtimeLogger)
 ): AsyncJobManager {
   return new AsyncJobManager(
     runtimeLogger,
     (cli, durationMs, success) => {
       metrics.recordRequest(cli, durationMs, success);
     },
-    store
+    store,
+    fr
   );
 }
 
@@ -402,20 +408,21 @@ function resolveGatewayServerRuntime(
   const runtimePerformanceMetrics =
     deps.performanceMetrics ??
     (options.isolateState ? new PerformanceMetrics() : performanceMetrics);
+  // Resolve flight recorder BEFORE async manager so isolateState managers
+  // can be wired with the same recorder instance the runtime exposes.
+  const runtimeFlightRecorder = deps.flightRecorder ?? getFlightRecorder(runtimeLogger);
   const runtimeAsyncJobManager =
     deps.asyncJobManager ??
     (options.isolateState
       ? // Factory-created test/HTTP session servers must not mark another instance's
         // durable jobs orphaned. Stdio startup injects the process-global manager.
-        newAsyncJobManager(runtimePerformanceMetrics, runtimeLogger, null)
+        newAsyncJobManager(runtimePerformanceMetrics, runtimeLogger, null, runtimeFlightRecorder)
       : getAsyncJobManager(runtimeLogger));
   const runtimeApprovalManager =
     deps.approvalManager ??
     (options.isolateState
       ? new ApprovalManager(undefined, runtimeLogger)
       : getApprovalManager(runtimeLogger));
-
-  const runtimeFlightRecorder = deps.flightRecorder ?? getFlightRecorder(runtimeLogger);
   return {
     sessionManager: runtimeSessionManager,
     resourceProvider:
@@ -478,7 +485,17 @@ async function awaitJobOrDefer(
   forceRefresh?: boolean,
   runtime: GatewayServerRuntime = resolveGatewayServerRuntime(),
   env?: Record<string, string>,
-  onComplete?: () => void
+  onComplete?: () => void,
+  /**
+   * Slice 1.5: when the sync handler has already written a logStart row
+   * keyed on `corrId`, pass these so the manager can write logComplete
+   * (with usage extraction) when the underlying async job terminates —
+   * even if the sync handler returned a deferred response.
+   * `writeFlightStart` is NEVER true on this path: the sync handler is
+   * always the upstream logStart writer.
+   */
+  flightRecorderEntry?: AsyncJobFlightRecorderEntry,
+  extractUsage?: AsyncJobUsageExtractor
 ): Promise<{ stdout: string; stderr: string; code: number } | DeferredJobResponse> {
   // U26 fix: ownership of onComplete is a contract. Once this function returns
   // OR throws, the caller MUST consider onComplete consumed — i.e. it has
@@ -528,6 +545,13 @@ async function awaitJobOrDefer(
       forceRefresh,
       env,
       onComplete,
+      // Sync-deferred path: the upstream sync handler already wrote
+      // logStart for this corrId, so writeFlightStart stays false. The
+      // manager still writes logComplete on terminal state (which UPDATEs
+      // the sync handler's row), closing the previously-orphaned
+      // sync-deferred case.
+      flightRecorderEntry,
+      extractUsage,
     });
     // Handoff succeeded: AsyncJobManager owns onComplete (it'll fire via
     // fireOnComplete on terminal status, or run inline immediately for dedup).
@@ -564,7 +588,14 @@ async function awaitJobOrDefer(
     await new Promise(resolve => setTimeout(resolve, SYNC_POLL_INTERVAL_MS));
   }
 
-  // Deadline exceeded — return deferral
+  // Deadline exceeded — return deferral.
+  // R2 Codex-Unit-B F1: hand FR-complete ownership to the manager. Until
+  // this call, the manager skips writeFlightComplete on terminal so the
+  // sync handler's safeFlightComplete (with rich approvalDecision /
+  // optimizationApplied metadata) wins for sync-inline completions. From
+  // here on the sync handler returns deferred and will NOT write
+  // safeFlightComplete, so the manager must.
+  runtime.asyncJobManager.armFlightCompleteForDeferral(job.id);
   runtime.logger.info(
     `[${corrId}] ${cli} sync deadline exceeded (${SYNC_DEADLINE_MS}ms), deferring to async job ${job.id}`
   );
@@ -719,6 +750,44 @@ function extractUsageAndCost(
   // future unit can read it from `~/.vibe/logs/session/<id>/metadata.json`
   // once we resolve the session id post-run.
   return {};
+}
+
+/**
+ * Slice 1.5: build the async-job-manager's FR payload from a prep object
+ * (which every prepare*Request returns), plus the bound CLI and output
+ * format primitives needed by extractUsageAndCost. Returning the closure
+ * separately means it captures `cliName` and `fmt` ONLY — never `params`
+ * or `prep` — so retention on AsyncJobRecord is O(constant).
+ */
+function buildAsyncFlightRecorderHandoff(
+  cliName: "claude" | "codex" | "gemini" | "grok" | "mistral",
+  prep: {
+    effectivePrompt: string;
+    resolvedModel?: string;
+    stablePrefixHash?: string | null;
+    stablePrefixTokens?: number | null;
+  },
+  sessionId: string | undefined,
+  outputFormat: string | undefined
+): {
+  flightRecorderEntry: AsyncJobFlightRecorderEntry;
+  extractUsage: AsyncJobUsageExtractor;
+} {
+  // Extract primitives BEFORE building the closure — capturing `prep` or
+  // `params` directly would pin large attachments / promptParts on the
+  // AsyncJobRecord for JOB_TTL_MS.
+  const cli = cliName;
+  const fmt = outputFormat;
+  return {
+    flightRecorderEntry: {
+      model: prep.resolvedModel || "default",
+      prompt: prep.effectivePrompt,
+      sessionId,
+      stablePrefixHash: prep.stablePrefixHash ?? undefined,
+      stablePrefixTokens: prep.stablePrefixTokens ?? undefined,
+    },
+    extractUsage: (stdout: string) => extractUsageAndCost(cli, stdout, fmt),
+  };
 }
 
 function safeFlightStart(
@@ -2276,6 +2345,12 @@ export async function handleGeminiRequest(
     const userProvidedSession = sessionPlan.resumed;
     const effectiveSessionIdHint = sessionPlan.resumed ? params.sessionId : undefined;
 
+    const geminiFrHandoff = buildAsyncFlightRecorderHandoff(
+      "gemini",
+      prep,
+      params.sessionId,
+      params.outputFormat
+    );
     const result = await awaitJobOrDefer(
       "gemini",
       args,
@@ -2283,7 +2358,11 @@ export async function handleGeminiRequest(
       resolveIdleTimeout("gemini", params.idleTimeoutMs),
       params.outputFormat,
       params.forceRefresh,
-      runtime
+      runtime,
+      undefined,
+      undefined,
+      geminiFrHandoff.flightRecorderEntry,
+      geminiFrHandoff.extractUsage
     );
 
     // Deferred — job still running, return async reference
@@ -2448,6 +2527,14 @@ export async function handleGeminiRequestAsync(
     // surfaces it in the snapshot).
     assertUpstreamCliArgs("gemini", args);
     assertUpstreamCliEnv("gemini", undefined);
+    // Slice 1.5: pure async path — no upstream safeFlightStart, so the
+    // manager owns both logStart and logComplete for this corrId.
+    const geminiAsyncFrHandoff = buildAsyncFlightRecorderHandoff(
+      "gemini",
+      prep,
+      effectiveSessionId,
+      params.outputFormat
+    );
     const job = deps.asyncJobManager.startJob(
       "gemini",
       args,
@@ -2455,7 +2542,12 @@ export async function handleGeminiRequestAsync(
       undefined,
       resolveIdleTimeout("gemini", params.idleTimeoutMs),
       params.outputFormat,
-      params.forceRefresh
+      params.forceRefresh,
+      undefined,
+      undefined,
+      geminiAsyncFrHandoff.flightRecorderEntry,
+      geminiAsyncFrHandoff.extractUsage,
+      true
     );
     deps.logger.info(`[${corrId}] gemini_request_async started job ${job.id}`);
 
@@ -2565,6 +2657,12 @@ export async function handleGrokRequest(
     });
     args.push(...sessionResult.resumeArgs);
 
+    const grokFrHandoff = buildAsyncFlightRecorderHandoff(
+      "grok",
+      prep,
+      params.sessionId,
+      params.outputFormat
+    );
     const result = await awaitJobOrDefer(
       "grok",
       args,
@@ -2572,7 +2670,11 @@ export async function handleGrokRequest(
       resolveIdleTimeout("grok", params.idleTimeoutMs),
       params.outputFormat,
       params.forceRefresh,
-      runtime
+      runtime,
+      undefined,
+      undefined,
+      grokFrHandoff.flightRecorderEntry,
+      grokFrHandoff.extractUsage
     );
 
     // Deferred — job still running, return async reference
@@ -2740,6 +2842,12 @@ export async function handleGrokRequestAsync(
     // Start job only after all session I/O succeeds
     assertUpstreamCliArgs("grok", args);
     assertUpstreamCliEnv("grok", undefined);
+    const grokAsyncFrHandoff = buildAsyncFlightRecorderHandoff(
+      "grok",
+      prep,
+      effectiveSessionId,
+      params.outputFormat
+    );
     const job = deps.asyncJobManager.startJob(
       "grok",
       args,
@@ -2747,7 +2855,12 @@ export async function handleGrokRequestAsync(
       undefined,
       resolveIdleTimeout("grok", params.idleTimeoutMs),
       params.outputFormat,
-      params.forceRefresh
+      params.forceRefresh,
+      undefined,
+      undefined,
+      grokAsyncFrHandoff.flightRecorderEntry,
+      grokAsyncFrHandoff.extractUsage,
+      true
     );
     deps.logger.info(`[${corrId}] grok_request_async started job ${job.id}`);
 
@@ -2854,6 +2967,12 @@ export async function handleMistralRequest(
     });
     args.push(...sessionResult.resumeArgs);
 
+    const mistralFrHandoff = buildAsyncFlightRecorderHandoff(
+      "mistral",
+      prep,
+      params.sessionId,
+      params.outputFormat
+    );
     let result = await awaitJobOrDefer(
       "mistral",
       args,
@@ -2862,7 +2981,10 @@ export async function handleMistralRequest(
       params.outputFormat,
       params.forceRefresh,
       runtime,
-      mistralEnv
+      mistralEnv,
+      undefined,
+      mistralFrHandoff.flightRecorderEntry,
+      mistralFrHandoff.extractUsage
     );
 
     if (isDeferredResponse(result)) {
@@ -2889,6 +3011,8 @@ export async function handleMistralRequest(
           disallowedTools: params.disallowedTools,
         });
         const retryArgs = [...retryPrep.args, ...sessionResult.resumeArgs];
+        // Reuse the FR handoff built above — the retry preserves corrId,
+        // so the manager's logComplete still updates the original row.
         result = await awaitJobOrDefer(
           "mistral",
           retryArgs,
@@ -2897,7 +3021,10 @@ export async function handleMistralRequest(
           params.outputFormat,
           true,
           runtime,
-          retryPrep.env
+          retryPrep.env,
+          undefined,
+          mistralFrHandoff.flightRecorderEntry,
+          mistralFrHandoff.extractUsage
         );
         if (isDeferredResponse(result)) {
           return buildDeferredToolResponse(result, sessionResult.effectiveSessionId);
@@ -3062,6 +3189,12 @@ export async function handleMistralRequestAsync(
 
     assertUpstreamCliArgs("mistral", args);
     assertUpstreamCliEnv("mistral", mistralEnv);
+    const mistralAsyncFrHandoff = buildAsyncFlightRecorderHandoff(
+      "mistral",
+      prep,
+      effectiveSessionId,
+      params.outputFormat
+    );
     const job = deps.asyncJobManager.startJob(
       "mistral",
       args,
@@ -3070,7 +3203,11 @@ export async function handleMistralRequestAsync(
       resolveIdleTimeout("mistral", params.idleTimeoutMs),
       params.outputFormat,
       params.forceRefresh,
-      mistralEnv
+      mistralEnv,
+      undefined,
+      mistralAsyncFrHandoff.flightRecorderEntry,
+      mistralAsyncFrHandoff.extractUsage,
+      true
     );
     deps.logger.info(`[${corrId}] mistral_request_async started job ${job.id}`);
 
@@ -3208,6 +3345,12 @@ export async function handleCodexRequestAsync(
     // registering the record, ownership stays here and we run it in the catch.
     assertUpstreamCliArgs("codex", args);
     assertUpstreamCliEnv("codex", undefined);
+    const codexAsyncFrHandoff = buildAsyncFlightRecorderHandoff(
+      "codex",
+      prep,
+      effectiveSessionId,
+      params.outputFormat
+    );
     let job;
     try {
       job = deps.asyncJobManager.startJob(
@@ -3219,7 +3362,10 @@ export async function handleCodexRequestAsync(
         params.outputFormat,
         params.forceRefresh,
         undefined,
-        prepCleanup
+        prepCleanup,
+        codexAsyncFrHandoff.flightRecorderEntry,
+        codexAsyncFrHandoff.extractUsage,
+        true
       );
       // Handoff succeeded: AsyncJobManager will fire prepCleanup on terminal
       // status. Release our local ownership claim so the catch path doesn't
@@ -3567,6 +3713,12 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         // Idle timeout only for stream-json (text/json produce no output until done)
         const effectiveIdleTimeout =
           outputFormat === "stream-json" ? resolveIdleTimeout("claude", idleTimeoutMs) : undefined;
+        const claudeSyncFrHandoff = buildAsyncFlightRecorderHandoff(
+          "claude",
+          prep,
+          effectiveSessionId,
+          outputFormat
+        );
         const result = await awaitJobOrDefer(
           "claude",
           args,
@@ -3574,7 +3726,11 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           effectiveIdleTimeout,
           outputFormat,
           forceRefresh,
-          runtime
+          runtime,
+          undefined,
+          undefined,
+          claudeSyncFrHandoff.flightRecorderEntry,
+          claudeSyncFrHandoff.extractUsage
         );
 
         // Deferred — job still running, return async reference
@@ -3925,6 +4081,12 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         "cleanup" in prep && typeof prep.cleanup === "function" ? prep.cleanup : undefined;
 
       try {
+        const codexSyncFrHandoff = buildAsyncFlightRecorderHandoff(
+          "codex",
+          prep,
+          sessionId,
+          outputFormat
+        );
         const result = await awaitJobOrDefer(
           "codex",
           args,
@@ -3934,7 +4096,9 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           forceRefresh,
           runtime,
           undefined,
-          prepCleanup
+          prepCleanup,
+          codexSyncFrHandoff.flightRecorderEntry,
+          codexSyncFrHandoff.extractUsage
         );
 
         // Deferred — job still running, return async reference. Cleanup
@@ -4836,6 +5000,12 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
               : undefined;
           assertUpstreamCliArgs("claude", args);
           assertUpstreamCliEnv("claude", undefined);
+          const claudeAsyncFrHandoff = buildAsyncFlightRecorderHandoff(
+            "claude",
+            prep,
+            effectiveSessionId,
+            outputFormat
+          );
           const job = asyncJobManager.startJob(
             "claude",
             args,
@@ -4843,7 +5013,12 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             undefined,
             effectiveIdleTimeout,
             outputFormat,
-            forceRefresh
+            forceRefresh,
+            undefined,
+            undefined,
+            claudeAsyncFrHandoff.flightRecorderEntry,
+            claudeAsyncFrHandoff.extractUsage,
+            true
           );
           logger.info(
             `[${corrId}] claude_request_async started job ${job.id}, outputFormat=${outputFormat}`

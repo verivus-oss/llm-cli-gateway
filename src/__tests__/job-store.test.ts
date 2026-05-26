@@ -254,7 +254,13 @@ describe("JobStore", () => {
       });
 
       const changes = store.markOrphanedOnStartup();
-      expect(changes).toBe(1);
+      expect(changes.count).toBe(1);
+      expect(changes.orphaned).toHaveLength(1);
+      expect(changes.orphaned[0]).toMatchObject({
+        id: "running",
+        correlationId: "cr",
+        startedAt: t,
+      });
 
       expect(store.getById("running")?.status).toBe("orphaned");
       expect(store.getById("running")?.error).toContain("Gateway restarted");

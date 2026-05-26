@@ -2,6 +2,115 @@
 
 All notable changes to the llm-cli-gateway project.
 
+## [1.7.0] - 2026-05-26 — cache-awareness slice 1.5 (async-path flight recorder + codex parser fix)
+
+Closes the two telemetry gaps that v1.6.0 explicitly deferred: async-path
+flight-recorder integration and Codex parser support for the actual
+`cached_input_tokens` field the current Codex CLI emits. Both ship
+together because they jointly close out `cache_state://*` completeness
+for the async tools and the codex CLI.
+
+### Added — async-path flight recorder writes
+
+- `AsyncJobManager` now accepts a `FlightRecorderLike` constructor
+  dependency (defaults to `NoopFlightRecorder` for tests that don't
+  inject one). `StartJobOptions` extended with `writeFlightStart`,
+  `flightRecorderEntry`, and `extractUsage` — pure async tools
+  (`*_request_async`) pass `writeFlightStart: true` so the manager owns
+  the row. The legacy positional `startJob(...)` signature was extended
+  with trailing optional params so existing callers keep working.
+- New private `writeFlightComplete` helper inside the manager fires on
+  every terminal-state code path (close handler, error handler, idle
+  timeout, output overflow, cancelJob, evictCompletedJobs dead-process
+  and exited-mismatch branches). Failure payload mirrors sync-helper
+  semantics: `response = stderr || stdout` on failure, `errorMessage`
+  falls back through override → `job.error` → `job.stderr` →
+  `"Exit code N"`. Single-shot guard set only on successful write so a
+  thrown `logComplete` can be retried by a later terminal callback.
+- New public `armFlightCompleteForDeferral(jobId)` on AsyncJobManager.
+  Called by `awaitJobOrDefer` in `src/index.ts` immediately before
+  returning a `DeferredJobResponse` — this lets the sync handler keep
+  ownership of the rich-metadata `safeFlightComplete` write for
+  sync-inline completions, while still ensuring deferred-from-sync rows
+  get a terminal `logComplete` from the manager when the underlying job
+  finishes. Includes a race-mitigation immediate-write path if the job
+  already terminated before the arm signal landed.
+- `JobStore.markOrphanedOnStartup()` return shape extended from `number`
+  to `{ count, orphaned: Array<{ id, correlationId, startedAt, stdout,
+  stderr, exitCode }> }` so the manager constructor can write FR
+  `logComplete` rows for previously orphaned jobs with proper audit data
+  (durationMs from `startedAt`, response from `stderr || stdout`,
+  errorMessage `"orphaned after gateway restart"`). `SqliteJobStore`
+  SELECTs the per-orphan fields before the orphan-flip UPDATE; no
+  transaction wrapper needed because gateway boot is single-threaded
+  before any new jobs can arrive. `MemoryJobStore` returns
+  `{ count: 0, orphaned: [] }` (in-process state can't be orphaned).
+  Breaking change to the `JobStore` interface; the `PostgresJobStore`
+  stub was updated to match (the impl is still not yet shipped).
+- `cache_state://global`, `cache_state://session/{id}`, and
+  `cache_state://prefix/{hash}` aggregates now include async-job
+  activity. No query changes — `cache_state://*` already didn't filter
+  on `asyncJobId`, so the new rows participate naturally.
+
+### Fixed — Codex parser accepts current CLI's cache-token field
+
+- `src/codex-json-parser.ts` now reads `cached_input_tokens` (preferred,
+  what Codex CLI ≥0.133.0 emits) in addition to the legacy
+  `cache_read_input_tokens` and the bare `cache_read_tokens` fallback.
+  Live smoke-tested against Codex CLI on 2026-05-26 — see
+  `docs/personal-mcp/PROVIDER_CACHE_SURFACES.md` "Codex — field name
+  divergence" for the exact invocation. Cache hits on codex rows now
+  populate the FR's `cache_read_tokens` column.
+
+### Known limitation — sync-deferred-dedup orphan rows
+
+When a sync request dedup-hits an in-flight original job AND the sync
+deadline expires before the original finishes, the dedup'd caller's
+sync-side `logStart` row stays at `status='started'` forever. The
+manager's `logComplete` writes to the ORIGINAL job's correlationId, not
+the dedup'd caller's. This is a pre-existing limitation surfaced by the
+slice's clearer accounting; it predates v1.7.0 and is not a regression.
+A future slice can address it via per-request corrId fan-out.
+
+### Cross-table asymmetry — `canceled` / `orphaned` jobs in the FR
+
+`FlightLogResult.status` only carries `"completed" | "failed"`, so
+canceled and orphaned async jobs are encoded as `"failed"` plus a
+distinguishing `errorMessage`. The underlying `jobs` table in JobStore
+retains the distinct `"canceled"` / `"orphaned"` statuses for
+`getJobSnapshot` callers. External consumers of `~/.llm-cli-gateway/
+logs.db` that filter `status='failed'` will count cancels and boot-time
+orphans as errors; `cache_state://*` aggregation does not distinguish.
+
+### No config or schema changes
+
+No migration. No new opt-in flag. The new behaviour is gated solely on
+whether the caller (handler or `awaitJobOrDefer`) supplies a
+`flightRecorderEntry` to `startJobWithDedup`. Tests/callers that don't
+opt in see no behaviour change (the constructor's default
+`NoopFlightRecorder` short-circuits the FR writes).
+
+### Migration impact
+
+None. SQLite schema and TOML config surface are byte-identical to
+v1.6.1. Rollback is non-destructive (revert the release commit).
+
+### Documentation
+
+- `docs/plans/async-flight-recorder.dag.toml` — new slice plan (Unit A
+  unanimously approved across Codex/Gemini/Grok/Mistral).
+- `docs/plans/async-flight-recorder.pr-body.md` — new PR description.
+- `docs/personal-mcp/ASYNC_FLIGHT_RECORDER_SURFACES.md` — new research
+  note documenting every terminal state, the data contract per FR write
+  site, the sync-path responsibility split table, and the cancel /
+  orphan / dedup limitations.
+- `docs/personal-mcp/PROVIDER_CACHE_SURFACES.md` — Codex section updated
+  to reflect that the parser now accepts `cached_input_tokens`; slice 2
+  "Populated for **claude only** today" claim corrected to include
+  codex.
+- `docs/launch/blog-cache-awareness.md` — slice 1.5 follow-up note in
+  the "What's next" section.
+
 ## [1.6.1] - 2026-05-26 — docs-only follow-up to 1.6.0
 
 Pure documentation release; zero source-code changes since 1.6.0.

@@ -144,4 +144,89 @@ describe("cache_state resources", () => {
     expect(stats.requestCount).toBe(0);
     expect(stats.cliBreakdown).toEqual([]);
   });
+
+  // Slice 1.5: cache_state://* must aggregate async-job rows now that
+  // AsyncJobManager writes its own logStart/logComplete with asyncJobId set.
+  // Seed an async-flavoured row alongside the sync rows in beforeEach and
+  // verify that the global + per-prefix aggregates include it.
+  it("readCacheStateGlobal aggregates async-job rows (slice 1.5)", () => {
+    rec.logStart({
+      correlationId: "r-async-1",
+      cli: "codex",
+      model: "codex-mini",
+      prompt: "SECRET async-job assembled prompt",
+      sessionId: "sess-B",
+      asyncJobId: "job-uuid-1",
+      stablePrefixHash: "hash-async",
+      stablePrefixTokens: 200,
+    });
+    rec.logComplete("r-async-1", {
+      response: "SECRET async response",
+      durationMs: 1,
+      retryCount: 0,
+      circuitBreakerState: "closed",
+      optimizationApplied: false,
+      exitCode: 0,
+      status: "completed",
+      cacheReadTokens: 60,
+      cacheCreationTokens: 0,
+    });
+
+    const stats = provider.readCacheStateGlobal();
+    // 2 sync claude rows from beforeEach + 1 async codex row.
+    expect(stats.totalRequests).toBe(3);
+    expect(stats.totalHits).toBe(3);
+    expect(stats.totalCacheReadTokens).toBe(125 + 60);
+    const codexBreakdown = stats.perCli.find(c => c.cli === "codex");
+    expect(codexBreakdown).toBeDefined();
+    expect(codexBreakdown!.requestCount).toBe(1);
+    expect(codexBreakdown!.totalCacheReadTokens).toBe(60);
+  });
+
+  it("readCacheStateForPrefix aggregates async-job rows (slice 1.5)", () => {
+    rec.logStart({
+      correlationId: "r-async-2",
+      cli: "claude",
+      model: "claude-sonnet-4-5",
+      prompt: "SECRET",
+      sessionId: "sess-C",
+      asyncJobId: "job-uuid-2",
+      stablePrefixHash: "hash-shared",
+      stablePrefixTokens: 100,
+    });
+    rec.logComplete("r-async-2", {
+      response: "SECRET",
+      durationMs: 1,
+      retryCount: 0,
+      circuitBreakerState: "closed",
+      optimizationApplied: false,
+      exitCode: 0,
+      status: "completed",
+      cacheReadTokens: 80,
+    });
+    // Same prefix from a sync row too.
+    rec.logStart({
+      correlationId: "r-sync-2",
+      cli: "claude",
+      model: "claude-sonnet-4-5",
+      prompt: "SECRET",
+      sessionId: "sess-C",
+      stablePrefixHash: "hash-shared",
+      stablePrefixTokens: 100,
+    });
+    rec.logComplete("r-sync-2", {
+      response: "SECRET",
+      durationMs: 1,
+      retryCount: 0,
+      circuitBreakerState: "closed",
+      optimizationApplied: false,
+      exitCode: 0,
+      status: "completed",
+      cacheReadTokens: 20,
+    });
+
+    const stats = provider.readCacheStateForPrefix("hash-shared");
+    expect(stats.requestCount).toBe(2); // one async + one sync share the hash
+    expect(stats.totalCacheReadTokens).toBe(100);
+  });
 });
