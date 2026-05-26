@@ -15,12 +15,17 @@ on:
         required: true
         type: string
 
+# Default to read-only at the workflow level; only the upload job below
+# escalates to `contents: write` for `gh release upload`. zizmor flags
+# unscoped write permissions (excessive-permissions).
 permissions:
-  contents: write # gh release upload
+  contents: read
 
 jobs:
   resolve-tag:
     runs-on: [self-hosted, linux, rust, x86_64, workhorse2]
+    permissions:
+      contents: read
     outputs:
       tag: ${{ steps.tag.outputs.tag }}
     steps:
@@ -55,20 +60,32 @@ jobs:
             runs_on: '"macos-15-intel"'
             targets: "--target darwin/amd64"
     runs-on: ${{ fromJSON(matrix.runs_on) }}
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
         with:
           ref: ${{ needs.resolve-tag.outputs.tag }}
+          # Drop the auth token from .git/config after checkout (zizmor
+          # artipacked). Subsequent `gh release upload` runs in a
+          # separate job that re-checks out with its own credentials.
+          persist-credentials: false
 
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6 # zizmor: ignore[cache-poisoning]
+        # cache-poisoning ignore rationale: no `cache:` set → no cache
+        # read or written → no attack vector. zizmor's audit is
+        # path-based and flags any setup-node on a release-triggered
+        # workflow regardless of cache state.
         with:
           node-version: 24
-          cache: "npm"
 
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c  # v6
         with:
           go-version: "1.22"
-          cache-dependency-path: installer/go.mod
+          # setup-go enables caching by default — explicitly disable on
+          # the release path. Without this, zizmor (correctly) flags
+          # cache-poisoning.
+          cache: false
 
       - name: Verify package.json version matches tag
         shell: bash
@@ -108,10 +125,20 @@ jobs:
   package-and-upload:
     needs: [resolve-tag, build-binaries]
     runs-on: [self-hosted, linux, rust, x86_64, workhorse2]
+    # ONLY job in this workflow that needs write — `gh release upload`
+    # below appends installer artifacts to the existing release.
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
         with:
           ref: ${{ needs.resolve-tag.outputs.tag }}
+          # Keep credentials for `gh release upload`; gh CLI prefers the
+          # GITHUB_TOKEN env var but some setups fall back to the
+          # checkout-persisted creds. Reviewers: if a future zizmor
+          # artipacked finding cites this line, switch to passing the
+          # token via gh's env var and set persist-credentials: false.
+          persist-credentials: true
 
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8
         with:

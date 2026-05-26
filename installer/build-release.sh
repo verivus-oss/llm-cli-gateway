@@ -295,7 +295,7 @@ build_artifacts_payload() {
     first=0
     if [[ "${name}" == llm-cli-gateway-bundle-"${version}"-*.tar.gz ]]; then
       stem="${name%.tar.gz}"
-      suffix="${stem#llm-cli-gateway-bundle-${version}-}"
+      suffix="${stem#llm-cli-gateway-bundle-"${version}"-}"
       os="${suffix%-*}"
       arch="${suffix##*-}"
       payload+="{\"name\":\"${name}\",\"role\":\"platform-bundle\",\"os\":\"${os}\",\"arch\":\"${arch}\"}"
@@ -306,7 +306,7 @@ build_artifacts_payload() {
       continue
     fi
     stem="${name%.exe}"
-    suffix="${stem#llm-cli-gateway-${version}-}"
+    suffix="${stem#llm-cli-gateway-"${version}"-}"
     os="${suffix%-*}"
     arch="${suffix##*-}"
     payload+="{\"name\":\"${name}\",\"os\":\"${os}\",\"arch\":\"${arch}\"}"

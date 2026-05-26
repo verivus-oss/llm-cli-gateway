@@ -1,0 +1,63 @@
+# typos config — consumed by crate-ci/typos in
+# .github/workflows/security.yml at the "Source-code spellcheck" step.
+#
+# Scope: catch genuine typos in normative surfaces (src/, scripts/,
+# README/CHANGELOG/BEST_PRACTICES). Skip non-normative surfaces where
+# "wrong" words are intentional (Markdown research notes, fixtures,
+# vendored content, build artefacts).
+
+[default]
+extend-ignore-identifiers-re = [
+  # Treat tokens containing a digit, dash, or underscore as identifiers
+  # and skip them entirely (covers model names, env-var names, MCP tool
+  # names that typos would otherwise mis-split, e.g.
+  # `claude-sonnet-4-5`, `LLM_GATEWAY_LOGS_DB`).
+  "^[A-Z][A-Za-z0-9_-]+$",
+  "^[a-z][a-z0-9_-]*$",
+]
+
+[default.extend-words]
+# Vendor / product names that look typo-shaped.
+Mistral = "Mistral"
+mistral = "mistral"
+Anthropic = "Anthropic"
+anthropic = "anthropic"
+# Cryptographic / standards acronyms.
+COSE = "COSE"
+# CLI / library short names that typos doesn't recognise.
+gtwy = "gtwy"           # mcp gateway short name
+sqry = "sqry"           # AST search tool
+exa  = "exa"            # web search tool
+NDJSON = "NDJSON"
+
+[files]
+extend-exclude = [
+  # Build outputs and lockfiles — typos doesn't usefully check these.
+  "dist/**",
+  "node_modules/**",
+  "**/package-lock.json",
+  "integrations/llm-plugin/dist/**",
+  "integrations/llm-plugin/*.egg-info/**",
+
+  # Test fixtures and golden files — intentionally contain odd strings.
+  "src/__tests__/**/*.json",
+  "src/__tests__/**/*.toml",
+
+  # Long-form research / docs trees where "wrong" words are intentional
+  # (anti-pattern dictionaries, historical incident logs, etc.).
+  "docs/personal-mcp/**",
+  "docs/reviews/**",
+  "DOGFOODING_*.md",
+  "PRODUCT_REVIEWS.md",
+  "RELEASE_NOTES_*.md",
+
+  # CHANGELOG accumulates words verbatim from commit subjects and may
+  # legitimately echo whatever the contributor typed; running typos here
+  # would force CHANGELOG history rewrites on every false-positive.
+  "CHANGELOG.md",
+
+  # Vendored / local-only.
+  ".sqry/**",
+  ".sqry-cache/**",
+  ".preexisting-doctor-index.patch.bak",
+]

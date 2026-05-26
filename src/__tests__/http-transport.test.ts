@@ -12,7 +12,7 @@ import { startHttpGateway, type HttpGatewayHandle } from "../http-transport.js";
 // auth, real session lifecycle, and real shutdown without spawning provider
 // CLIs.
 
-const TEST_TOKEN = "test-bearer-XYZ-987";
+const TEST_TOKEN = "test-bearer-XYZ-987"; // gitleaks:allow — deliberate test fixture token, not a real secret
 const ORIGINAL_ENV = { ...process.env };
 
 function makeEchoServer(): McpServer {

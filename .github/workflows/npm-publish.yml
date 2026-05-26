@@ -19,12 +19,22 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+        with:
+          # Drop the auth token from .git/config after checkout (zizmor
+          # artipacked). `npm publish` uses NODE_AUTH_TOKEN, not git
+          # credentials, so this is safe.
+          persist-credentials: false
 
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6 # zizmor: ignore[cache-poisoning]
+        # Why the ignore: zizmor's cache-poisoning audit flags setup-node
+        # on any `release: published` trigger regardless of whether cache
+        # is enabled. We do NOT set `cache:` here — no cache is read or
+        # written — so the attack vector (poisoned cache restored during
+        # publish) does not exist. The ignore is targeted and the rationale
+        # is documented inline.
         with:
           node-version: 24
           registry-url: "https://registry.npmjs.org"
-          cache: "npm"
 
       - run: npm ci --ignore-scripts --no-audit --no-fund
       - run: npm run build

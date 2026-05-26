@@ -1,0 +1,30 @@
+# bandit config for the llm-cli-gateway PyPI plugin.
+#
+# Consumed by the "Python static security analysis (bandit)" step in
+# .github/workflows/security.yml. YAML format (bandit ≥ 1.7).
+#
+# B404 (import subprocess) is informational — see the bandit step in
+# the workflow for the per-step --skip B404 rationale. The skips below
+# cover patterns the plugin legitimately uses.
+
+exclude_dirs:
+  - tests
+  - dist
+  - build
+
+skips:
+  # B101 (assert_used): legitimate in pytest test files (already
+  # excluded via exclude_dirs); covers any stray asserts in
+  # production code that exist as runtime invariant checks.
+  - B101
+  # B603 (subprocess_without_shell_equals_true): every subprocess
+  # call in this plugin invokes a binary whose path was resolved
+  # earlier via gateway_resolver.py (a pinned PATH lookup over `node`
+  # and `llm-cli-gateway`). `self._command` and friends are NOT
+  # user-controlled. Suppressing per-call-site with `# nosec B603`
+  # would clutter the call sites; doing it here keeps them readable.
+  - B603
+  # B607 (start_process_with_partial_path): we use partial paths
+  # (`node`, `llm-cli-gateway`) on purpose — the plugin's job is to
+  # find these on the user's PATH. Absolute paths would defeat that.
+  - B607
