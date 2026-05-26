@@ -3605,7 +3605,14 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             },
             runtime
           );
-          return createErrorResponse("claude", code, stderr, corrId);
+          // Slice 3: attach any computed warnings to the error response so
+          // the caller still sees cache_ttl_expiring_soon when the CLI
+          // happens to fail for an unrelated reason.
+          const errResp = createErrorResponse("claude", code, stderr, corrId);
+          if (warnings.length > 0) {
+            (errResp as ExtendedToolResponse).warnings = warnings;
+          }
+          return errResp;
         }
         wasSuccessful = true;
 
