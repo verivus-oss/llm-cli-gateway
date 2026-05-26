@@ -1,5 +1,7 @@
 # Connect ChatGPT
 
+> **Canonical install guidance lives under `setup/providers/<provider>.md` and `setup/assistants/`.** This page is retained for historical context; for the current install flow, follow the agent-driven contract at [`setup/assistants/ASSISTANT_CONTRACT.md`](../../setup/assistants/ASSISTANT_CONTRACT.md) and the per-provider snippets at [`setup/providers/`](../../setup/providers/).
+
 Start here:
 
 - Setup UI path: `http://127.0.0.1:3333/`

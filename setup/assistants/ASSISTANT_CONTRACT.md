@@ -1,7 +1,7 @@
 # Assistant Setup Contract
 
 Status: Layer 1 contract  
-Applies to: ChatGPT, Claude, Claude Desktop, Codex, Gemini, Grok, and other assistants helping a user install `llm-cli-gateway`.
+Applies to: ChatGPT, Claude, Claude Desktop, Codex, Gemini, Grok, Mistral Vibe, and other assistants helping a user install `llm-cli-gateway`.
 
 ## Purpose
 
@@ -13,7 +13,7 @@ Ask only for:
 
 - operating system and CPU architecture;
 - desired inbound clients, such as ChatGPT, Claude web, Claude Desktop, Codex, Gemini CLI, Gemini web, or Grok;
-- desired outbound validation providers, such as Claude Code, Codex CLI, Gemini CLI, or Grok CLI/API;
+- desired outbound validation providers, such as Claude Code, Codex CLI, Gemini CLI, Grok CLI/API, or Mistral Vibe CLI;
 - gateway `doctor --json` output;
 - generated setup packet or client snippet produced by the gateway;
 - non-secret error messages from the setup UI, doctor output, or provider CLI.
@@ -53,7 +53,17 @@ Distinguish these roles:
 - Outbound validation provider: a runtime the gateway can call for model responses.
 - Installer assistant: a chat or CLI that can guide the user but may not be able to connect as an inbound MCP host.
 
-A provider can be useful as an installer assistant without being an inbound MCP host. For example, Gemini web may help a user follow instructions, but it remains unsupported as an inbound MCP host until provider-support evidence verifies custom MCP support in that product.
+A provider can be useful as an installer assistant without being an inbound MCP host. For example, Gemini web may help a user follow instructions, but it remains unsupported as an inbound MCP host until provider-support evidence verifies custom MCP support in that product. Mistral Vibe is currently an outbound-only validation provider; do not offer inbound connector setup for it.
+
+## Doctor Report Notes (v1.6.0)
+
+`doctor --json` always emits a top-level `cache_awareness` block. Its
+presence is structural, not a configuration signal: all `[cache_awareness]`
+flags default off in 1.x, and an empty `enabled_features` list with zeroed
+`last_24h` aggregates is the expected default. Assistants may surface the
+block when the user explicitly asks about cache awareness, but must not
+treat its presence (or its zeroed defaults) as a missing-config blocker
+during install.
 
 ## Support-Status Rules
 

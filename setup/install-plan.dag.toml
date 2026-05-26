@@ -10,9 +10,9 @@ doctor_command = "llm-cli-gateway doctor --json"
 id = "choose-targets"
 depends_on = []
 actor = "assistant"
-action = "Ask which inbound client and outbound validation providers the user wants."
+action = "Ask which inbound client and outbound validation providers the user wants. The gateway brokers five outbound providers: claude, codex, gemini, grok, mistral (Vibe CLI). Inbound clients are a separate set; mistral is outbound-only."
 idempotent = true
-validation = "Selected targets map to setup/providers/*.md and unsupported targets are labeled deferred."
+validation = "Selected targets map to setup/providers/*.md (including mistral-vibe.md for Mistral) and unsupported targets are labeled deferred."
 
 [[steps]]
 id = "start-gateway"
@@ -26,9 +26,9 @@ validation = "doctor JSON exists and contains schema_version = 1.0."
 id = "check-diagnostics"
 depends_on = ["start-gateway"]
 actor = "assistant"
-action = "Read redacted doctor JSON and summarize transport, auth, provider login, and endpoint exposure. Before proposing any web-client setup action, the assistant must inspect `endpoint_exposure.web_clients_supported` and `auth.token_configured`; web-client readiness must not be inferred from `transport.http.enabled` alone."
+action = "Read redacted doctor JSON and summarize transport, auth, provider login, and endpoint exposure. Before proposing any web-client setup action, the assistant must inspect `endpoint_exposure.web_clients_supported` and `auth.token_configured`; web-client readiness must not be inferred from `transport.http.enabled` alone. Per-provider readiness is gated by `providers.<name>.cli_available` for each of claude, codex, gemini, grok, and mistral. The doctor report also includes a top-level `cache_awareness` block; its presence is structural and all flags default off in 1.x, so the assistant must not treat it as a missing-config signal."
 idempotent = true
-validation = "No raw tokens, authorization headers, provider credentials, or tunnel tokens are requested or echoed. Assistant explicitly names `endpoint_exposure.web_clients_supported` and `auth.token_configured` when web-client targets are in scope."
+validation = "No raw tokens, authorization headers, provider credentials, or tunnel tokens are requested or echoed. Assistant explicitly names `endpoint_exposure.web_clients_supported` and `auth.token_configured` when web-client targets are in scope. Assistant does not flag `cache_awareness` as a blocker when the user has not opted into cache-awareness features."
 
 [[steps]]
 id = "prepare-endpoint"
@@ -42,9 +42,9 @@ validation = "Local clients have a local MCP URL; web clients require endpoint_e
 id = "apply-client-snippet"
 depends_on = ["prepare-endpoint"]
 actor = "human_or_command_capable_assistant"
-action = "Apply the generated setup UI snippet for the selected client."
+action = "Apply the generated setup UI snippet for the selected client. For each outbound provider in scope (claude, codex, gemini, grok, mistral), confirm the corresponding doctor field is healthy: for mistral, additionally check `client_config.vibe_session_logging.session_logging_enabled` before exercising session-continuity flows."
 idempotent = true
-validation = "Fresh doctor JSON or client listing shows the client configuration is present when the client exposes such evidence."
+validation = "Fresh doctor JSON or client listing shows the client configuration is present when the client exposes such evidence. For mistral, `providers.mistral.cli_available` is true and any session-continuity callers see `client_config.vibe_session_logging.session_logging_enabled = true`."
 
 [[steps]]
 id = "verify-validation-tool"

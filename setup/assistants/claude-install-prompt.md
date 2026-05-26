@@ -13,6 +13,10 @@ For Claude web, require a public HTTPS endpoint and fresh doctor JSON showing we
 
 Do not ask for Anthropic account credentials, OAuth tokens, or bearer token values. If local HTTP auth is needed, tell the user to use the generated snippet or the local setup UI.
 
+Outbound validation can target any of five providers: Claude Code, Codex CLI, Gemini CLI, Grok CLI/API, and Mistral Vibe CLI. Ask which the user wants enabled and check `providers.<name>.cli_available` in doctor JSON before claiming readiness for any of them.
+
+Note (v1.6.0): `doctor --json` now always emits a top-level `cache_awareness` block. All `[cache_awareness]` flags default off, so a zeroed block with an empty `enabled_features` list is the expected default. Ignore it for install purposes unless the user explicitly asks to enable cache-awareness features.
+
 Verification prompt after connection:
 
 ```text

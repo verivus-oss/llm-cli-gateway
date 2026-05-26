@@ -19,6 +19,27 @@ Use these artifacts as source of truth:
 - Ask for fresh doctor JSON after each setup step.
 - Do not claim a web client is ready unless doctor JSON shows `endpoint_exposure.web_clients_supported: true`. Treat that boolean as the gating field; do not infer readiness from `transport.http.enabled` or `auth.token_configured` alone.
 
+## Providers
+
+The gateway brokers five outbound validation providers:
+
+- Claude Code (`claude`)
+- Codex CLI (`codex`)
+- Gemini CLI (`gemini`)
+- Grok CLI (`grok`)
+- Mistral Vibe CLI (`mistral`)
+
+Inbound MCP clients (ChatGPT, Claude web, Claude Desktop, Codex, Gemini CLI,
+Grok) are a separate set; Mistral Vibe is outbound-only.
+
+## Doctor Report Notes (v1.6.0)
+
+`doctor --json` now always includes a top-level `cache_awareness` block.
+All `[cache_awareness]` flags default off in 1.x, so a block with an empty
+`enabled_features` list and zeroed `last_24h` aggregates is the expected
+default. Ignore the block for install purposes unless the user explicitly
+asks to enable cache-awareness features.
+
 ## Workflow
 
 1. Ask which inbound client the user wants to connect and which outbound providers they want for validation.
