@@ -366,6 +366,20 @@ function getApprovalManager(runtimeLogger: GatewayLogger = logger): ApprovalMana
 
 const MCP_SERVER_ENUM = z.enum(CLAUDE_MCP_SERVER_NAMES);
 
+/**
+ * Phase 4 slice δ — shared Zod fragments for `maxTurns` / `maxPrice`.
+ *
+ * Both flags reach the upstream CLIs as decimal-formatted argv strings via
+ * `String(N)`. `z.number().int().positive()` alone lets values past
+ * `Number.MAX_SAFE_INTEGER` through, after which `String(1e21)` emits
+ * scientific notation that Grok and Vibe both reject. The bounds below
+ * (safe-integer cap + 10000 ceiling for turns; finite + 10000 USD ceiling
+ * for price) guarantee a lossless decimal stringification AND a sane
+ * upper bound — no plausible single agent loop exceeds 10k turns or 10k USD.
+ */
+export const MAX_TURNS_SCHEMA = z.number().int().positive().safe().max(10_000);
+export const MAX_PRICE_SCHEMA = z.number().positive().finite().max(10_000);
+
 // U22: Session-provider enum extended to five providers. The storage layer's
 // CLI_TYPES already includes "mistral"; the MCP-tool layer mirrors that here so
 // session_create / session_list / session_clear_all accept the fifth provider.
@@ -4648,14 +4662,9 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .describe(
           "Bypass dedup and force a fresh CLI run even if a recent identical request exists"
         ),
-      maxTurns: z
-        .number()
-        .int()
-        .positive()
-        .optional()
-        .describe(
-          "Grok `--max-turns N`: cap on agent-loop iterations for cost / latency control (Phase 4 slice δ)."
-        ),
+      maxTurns: MAX_TURNS_SCHEMA.optional().describe(
+        "Grok `--max-turns N`: cap on agent-loop iterations for cost / latency control (Phase 4 slice δ). Bounded to safe integers ≤ 10000."
+      ),
     },
     async ({
       prompt,
@@ -4807,21 +4816,12 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .describe(
           "Emit `--trust` so Vibe trusts the cwd for this invocation only (not persisted to trusted_folders.toml) and skips the interactive trust prompt (Phase 4 slice γ)."
         ),
-      maxTurns: z
-        .number()
-        .int()
-        .positive()
-        .optional()
-        .describe(
-          "Vibe `--max-turns N`: cap the agent-loop iteration count (programmatic mode only, Phase 4 slice δ)."
-        ),
-      maxPrice: z
-        .number()
-        .positive()
-        .optional()
-        .describe(
-          "Vibe `--max-price DOLLARS`: interrupt the session when cumulative cost crosses this cap (programmatic mode only, Phase 4 slice δ)."
-        ),
+      maxTurns: MAX_TURNS_SCHEMA.optional().describe(
+        "Vibe `--max-turns N`: cap the agent-loop iteration count (programmatic mode only, Phase 4 slice δ). Bounded to safe integers ≤ 10000."
+      ),
+      maxPrice: MAX_PRICE_SCHEMA.optional().describe(
+        "Vibe `--max-price DOLLARS`: interrupt the session when cumulative cost crosses this cap (programmatic mode only, Phase 4 slice δ). Bounded to finite values ≤ 10000 USD."
+      ),
     },
     async ({
       prompt,
@@ -5558,14 +5558,9 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .describe(
             "Bypass dedup and force a fresh CLI run even if a recent identical request exists"
           ),
-        maxTurns: z
-          .number()
-          .int()
-          .positive()
-          .optional()
-          .describe(
-            "Grok `--max-turns N`: cap on agent-loop iterations for cost / latency control (Phase 4 slice δ)."
-          ),
+        maxTurns: MAX_TURNS_SCHEMA.optional().describe(
+          "Grok `--max-turns N`: cap on agent-loop iterations for cost / latency control (Phase 4 slice δ). Bounded to safe integers ≤ 10000."
+        ),
       },
       async ({
         prompt,
@@ -5710,21 +5705,12 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .describe(
             "Emit `--trust` so Vibe trusts the cwd for this invocation only (not persisted to trusted_folders.toml) and skips the interactive trust prompt (Phase 4 slice γ)."
           ),
-        maxTurns: z
-          .number()
-          .int()
-          .positive()
-          .optional()
-          .describe(
-            "Vibe `--max-turns N`: cap the agent-loop iteration count (programmatic mode only, Phase 4 slice δ)."
-          ),
-        maxPrice: z
-          .number()
-          .positive()
-          .optional()
-          .describe(
-            "Vibe `--max-price DOLLARS`: interrupt the session when cumulative cost crosses this cap (programmatic mode only, Phase 4 slice δ)."
-          ),
+        maxTurns: MAX_TURNS_SCHEMA.optional().describe(
+          "Vibe `--max-turns N`: cap the agent-loop iteration count (programmatic mode only, Phase 4 slice δ). Bounded to safe integers ≤ 10000."
+        ),
+        maxPrice: MAX_PRICE_SCHEMA.optional().describe(
+          "Vibe `--max-price DOLLARS`: interrupt the session when cumulative cost crosses this cap (programmatic mode only, Phase 4 slice δ). Bounded to finite values ≤ 10000 USD."
+        ),
       },
       async ({
         prompt,

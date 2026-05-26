@@ -2,7 +2,7 @@
  * Phase 4 slice δ — Grok `--max-turns` wiring.
  */
 import { describe, expect, it } from "vitest";
-import { prepareGrokRequest } from "../index.js";
+import { prepareGrokRequest, MAX_TURNS_SCHEMA, MAX_PRICE_SCHEMA } from "../index.js";
 
 function baseParams(extra: Record<string, unknown> = {}) {
   return {
@@ -33,6 +33,33 @@ describe("Phase 4 slice δ — Grok --max-turns wiring", () => {
     const prep = prepareGrokRequest(baseParams({ maxTurns: undefined }));
     if (!("args" in prep)) throw new Error("expected args");
     expect(prep.args).not.toContain("--max-turns");
+  });
+
+  it("MAX_TURNS_SCHEMA rejects out-of-range / unsafe / scientific-notation values", () => {
+    // Accept the happy path.
+    expect(MAX_TURNS_SCHEMA.safeParse(1).success).toBe(true);
+    expect(MAX_TURNS_SCHEMA.safeParse(10_000).success).toBe(true);
+    // Reject zero / negative / non-integer.
+    expect(MAX_TURNS_SCHEMA.safeParse(0).success).toBe(false);
+    expect(MAX_TURNS_SCHEMA.safeParse(-1).success).toBe(false);
+    expect(MAX_TURNS_SCHEMA.safeParse(1.5).success).toBe(false);
+    // Reject above the 10k ceiling.
+    expect(MAX_TURNS_SCHEMA.safeParse(10_001).success).toBe(false);
+    // Reject values whose String() form would be scientific notation
+    // (`1e21` → "1e+21") — exactly Codex's review finding.
+    expect(MAX_TURNS_SCHEMA.safeParse(1e21).success).toBe(false);
+    expect(MAX_TURNS_SCHEMA.safeParse(Number.MAX_SAFE_INTEGER + 1).success).toBe(false);
+  });
+
+  it("MAX_PRICE_SCHEMA rejects Infinity / NaN / out-of-range / scientific-notation", () => {
+    expect(MAX_PRICE_SCHEMA.safeParse(0.001).success).toBe(true);
+    expect(MAX_PRICE_SCHEMA.safeParse(10_000).success).toBe(true);
+    expect(MAX_PRICE_SCHEMA.safeParse(0).success).toBe(false);
+    expect(MAX_PRICE_SCHEMA.safeParse(-0.5).success).toBe(false);
+    expect(MAX_PRICE_SCHEMA.safeParse(Infinity).success).toBe(false);
+    expect(MAX_PRICE_SCHEMA.safeParse(NaN).success).toBe(false);
+    expect(MAX_PRICE_SCHEMA.safeParse(10_001).success).toBe(false);
+    expect(MAX_PRICE_SCHEMA.safeParse(1e21).success).toBe(false);
   });
 
   it("emits --max-turns alongside existing flags without disturbing argv order", () => {
