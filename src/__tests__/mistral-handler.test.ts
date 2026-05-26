@@ -123,3 +123,20 @@ describe("U22 resolveMistralSessionArgs", () => {
     expect(r.resumeArgs).toEqual([]);
   });
 });
+
+describe("Phase 4 slice γ — Mistral --trust wiring", () => {
+  it("emits --trust when trust=true", () => {
+    const result = prepareMistralRequest({ prompt: "hi", trust: true });
+    expect(result.args).toContain("--trust");
+  });
+
+  it("does NOT emit --trust when trust=false", () => {
+    const result = prepareMistralRequest({ prompt: "hi", trust: false });
+    expect(result.args).not.toContain("--trust");
+  });
+
+  it("does NOT emit --trust when trust is omitted (default behaviour preserved)", () => {
+    const result = prepareMistralRequest({ prompt: "hi" });
+    expect(result.args).not.toContain("--trust");
+  });
+});

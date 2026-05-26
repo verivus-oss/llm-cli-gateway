@@ -1741,6 +1741,12 @@ export function prepareGeminiRequest(
     policyFiles?: string[];
     adminPolicyFiles?: string[];
     attachments?: string[];
+    /**
+     * Phase 4 slice γ: emit `--skip-trust` so first-run workspaces don't
+     * block headless invocations on the interactive trust prompt. Default
+     * is undefined (preserves current prompt behaviour for legacy callers).
+     */
+    skipTrust?: boolean;
   },
   runtime: GatewayServerRuntime = resolveGatewayServerRuntime()
 ): CliRequestPrep | ExtendedToolResponse {
@@ -1866,6 +1872,10 @@ export function prepareGeminiRequest(
   // structured usageMetadata is silently dropped.
   if (params.outputFormat === "json") {
     args.push("-o", "json");
+  }
+  // Phase 4 slice γ: opt-in trust-prompt bypass for fresh workspaces.
+  if (params.skipTrust) {
+    args.push("--skip-trust");
   }
 
   return {
@@ -2014,6 +2024,11 @@ export function prepareMistralRequest(
     correlationId?: string;
     optimizePrompt: boolean;
     operation: string;
+    /**
+     * Phase 4 slice γ: emit `--trust` to bypass Vibe's interactive trust
+     * prompt for this invocation only (not persisted). Default undefined.
+     */
+    trust?: boolean;
   },
   runtime: GatewayServerRuntime = resolveGatewayServerRuntime()
 ): (CliRequestPrep & { mistralEnv: Record<string, string> }) | ExtendedToolResponse {
@@ -2097,6 +2112,7 @@ export function prepareMistralRequest(
     reasoningEffort: params.reasoningEffort,
     allowedTools: params.allowedTools,
     disallowedTools: params.disallowedTools,
+    trust: params.trust,
   });
 
   if (prep.ignoredDisallowedTools) {
@@ -2266,6 +2282,8 @@ export interface GeminiRequestParams {
   policyFiles?: string[];
   adminPolicyFiles?: string[];
   attachments?: string[];
+  /** Phase 4 slice γ: emit `--skip-trust` for fresh-workspace headless runs. */
+  skipTrust?: boolean;
 }
 
 export interface HandlerDeps {
@@ -2327,6 +2345,7 @@ export async function handleGeminiRequest(
       policyFiles: params.policyFiles,
       adminPolicyFiles: params.adminPolicyFiles,
       attachments: params.attachments,
+      skipTrust: params.skipTrust,
     },
     runtime
   );
@@ -2509,6 +2528,7 @@ export async function handleGeminiRequestAsync(
       policyFiles: params.policyFiles,
       adminPolicyFiles: params.adminPolicyFiles,
       attachments: params.attachments,
+      skipTrust: params.skipTrust,
     },
     runtime
   );
@@ -2928,6 +2948,8 @@ export interface MistralRequestParams {
   optimizeResponse?: boolean;
   idleTimeoutMs?: number;
   forceRefresh?: boolean;
+  /** Phase 4 slice γ: emit `--trust` for fresh-workspace headless runs. */
+  trust?: boolean;
 }
 
 export async function handleMistralRequest(
@@ -2953,6 +2975,7 @@ export async function handleMistralRequest(
       correlationId: params.correlationId,
       optimizePrompt: params.optimizePrompt,
       operation: "mistral_request",
+      trust: params.trust,
     },
     runtime
   );
@@ -3169,6 +3192,7 @@ export async function handleMistralRequestAsync(
       correlationId: params.correlationId,
       optimizePrompt: params.optimizePrompt,
       operation: "mistral_request_async",
+      trust: params.trust,
     },
     runtime
   );
@@ -4443,6 +4467,12 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       attachments: GEMINI_HIGH_IMPACT_PARAMS_SCHEMA.shape.attachments.describe(
         "Absolute file paths prepended as @<path> tokens to the prompt"
       ),
+      skipTrust: z
+        .boolean()
+        .default(false)
+        .describe(
+          "Emit `--skip-trust` so Gemini trusts the workspace for this session and skips the interactive trust prompt (Phase 4 slice γ). Required for headless runs in fresh workspaces."
+        ),
     },
     async ({
       prompt,
@@ -4467,6 +4497,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       policyFiles,
       adminPolicyFiles,
       attachments,
+      skipTrust,
     }) => {
       return handleGeminiRequest(
         { sessionManager, logger, runtime },
@@ -4493,6 +4524,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           policyFiles,
           adminPolicyFiles,
           attachments,
+          skipTrust,
         }
       );
     }
@@ -4722,6 +4754,12 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .describe(
           "Bypass dedup and force a fresh CLI run even if a recent identical request exists"
         ),
+      trust: z
+        .boolean()
+        .default(false)
+        .describe(
+          "Emit `--trust` so Vibe trusts the cwd for this invocation only (not persisted to trusted_folders.toml) and skips the interactive trust prompt (Phase 4 slice γ)."
+        ),
     },
     async ({
       prompt,
@@ -4744,6 +4782,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       optimizeResponse,
       idleTimeoutMs,
       forceRefresh,
+      trust,
     }) => {
       return handleMistralRequest(
         { sessionManager, logger, runtime },
@@ -4768,6 +4807,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           optimizeResponse,
           idleTimeoutMs,
           forceRefresh,
+          trust,
         }
       );
     }
@@ -5315,6 +5355,12 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         attachments: GEMINI_HIGH_IMPACT_PARAMS_SCHEMA.shape.attachments.describe(
           "Absolute file paths prepended as @<path> tokens to the prompt"
         ),
+        skipTrust: z
+          .boolean()
+          .default(false)
+          .describe(
+            "Emit `--skip-trust` so Gemini trusts the workspace for this session and skips the interactive trust prompt (Phase 4 slice γ). Required for headless runs in fresh workspaces."
+          ),
       },
       async ({
         prompt,
@@ -5338,6 +5384,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         policyFiles,
         adminPolicyFiles,
         attachments,
+        skipTrust,
       }) => {
         return handleGeminiRequestAsync(
           { sessionManager, asyncJobManager, logger, runtime },
@@ -5363,6 +5410,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             policyFiles,
             adminPolicyFiles,
             attachments,
+            skipTrust,
           }
         );
       }
@@ -5580,6 +5628,12 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .describe(
             "Bypass dedup and force a fresh CLI run even if a recent identical request exists"
           ),
+        trust: z
+          .boolean()
+          .default(false)
+          .describe(
+            "Emit `--trust` so Vibe trusts the cwd for this invocation only (not persisted to trusted_folders.toml) and skips the interactive trust prompt (Phase 4 slice γ)."
+          ),
       },
       async ({
         prompt,
@@ -5601,6 +5655,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         optimizePrompt,
         idleTimeoutMs,
         forceRefresh,
+        trust,
       }) => {
         return handleMistralRequestAsync(
           { sessionManager, asyncJobManager, logger, runtime },
@@ -5624,6 +5679,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             optimizePrompt,
             idleTimeoutMs,
             forceRefresh,
+            trust,
           }
         );
       }

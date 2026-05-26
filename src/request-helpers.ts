@@ -222,6 +222,13 @@ export interface PrepareMistralRequestInput {
    * emit a `logger.warn` when this is non-empty.
    */
   disallowedTools?: string[];
+  /**
+   * Phase 4 slice γ: emit `--trust` so non-interactive runs in fresh
+   * workspaces skip Vibe's interactive trust prompt for this invocation
+   * only (not persisted to `trusted_folders.toml`). Default undefined →
+   * Vibe's prompt behaviour is preserved for existing callers.
+   */
+  trust?: boolean;
 }
 
 export interface PrepareMistralRequestResult {
@@ -267,6 +274,10 @@ export function prepareMistralRequest(
     for (const tool of input.allowedTools) {
       args.push("--enabled-tools", tool);
     }
+  }
+
+  if (input.trust) {
+    args.push("--trust");
   }
 
   const ignoredDisallowedTools = Boolean(input.disallowedTools && input.disallowedTools.length > 0);

@@ -233,3 +233,23 @@ describe("U27 prepareGeminiRequest end-to-end", () => {
     expect(remainder).toContain("-s");
   });
 });
+
+describe("Phase 4 slice γ — Gemini --skip-trust wiring", () => {
+  it("emits --skip-trust when skipTrust=true", () => {
+    const prep = prepareGeminiRequest(baseParams({ skipTrust: true }));
+    if (!("args" in prep)) throw new Error("expected args");
+    expect(prep.args).toContain("--skip-trust");
+  });
+
+  it("does NOT emit --skip-trust when skipTrust=false", () => {
+    const prep = prepareGeminiRequest(baseParams({ skipTrust: false }));
+    if (!("args" in prep)) throw new Error("expected args");
+    expect(prep.args).not.toContain("--skip-trust");
+  });
+
+  it("does NOT emit --skip-trust when skipTrust is omitted (default behaviour preserved)", () => {
+    const prep = prepareGeminiRequest(baseParams({}));
+    if (!("args" in prep)) throw new Error("expected args");
+    expect(prep.args).not.toContain("--skip-trust");
+  });
+});
