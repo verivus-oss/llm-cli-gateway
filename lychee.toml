@@ -48,6 +48,9 @@ exclude = [
   # browsers. Their stability is not our gate; we re-verify the
   # canonical URL during research steps.
   "^https://docs\\.x\\.ai/",
+  # OpenAI's help center sits behind Cloudflare bot protection (403
+  # on anon GET). URLs are correct; verifying them is a human task.
+  "^https://help\\.openai\\.com/",
 ]
 
 # Treat HTTP 429 (Too Many Requests) and 503 (Service Unavailable) as
