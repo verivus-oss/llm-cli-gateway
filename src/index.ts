@@ -2185,6 +2185,49 @@ function selectMistralRecoveryModel(failedModel: string | undefined): string | u
   return candidates.find(model => model !== "local");
 }
 
+/**
+ * Phase 4 slice δ post-review: pure helper extracted from
+ * `handleMistralRequest` so the retry-path arg-preservation invariants
+ * (trust + maxTurns + maxPrice from slices γ/δ) are unit-testable
+ * without mocking awaitJobOrDefer. Any param the wrapper threads into
+ * the FIRST `buildMistralCliInvocation` call MUST also be threaded
+ * through here, or a fresh-workspace / budgeted run can degrade on
+ * the second attempt.
+ */
+export function buildMistralRetryPrep(
+  params: Pick<
+    MistralRequestParams,
+    | "outputFormat"
+    | "permissionMode"
+    | "effort"
+    | "reasoningEffort"
+    | "allowedTools"
+    | "disallowedTools"
+    | "approvalStrategy"
+    | "trust"
+    | "maxTurns"
+    | "maxPrice"
+  > & { effectivePrompt: string },
+  recoveryModel: string
+): { args: string[]; env: Record<string, string>; ignoredDisallowedTools: boolean } {
+  return buildMistralCliInvocation({
+    prompt: params.effectivePrompt,
+    resolvedModel: recoveryModel,
+    outputFormat: params.outputFormat,
+    permissionMode:
+      params.approvalStrategy === "mcp_managed"
+        ? "auto-approve"
+        : (params.permissionMode ?? "auto-approve"),
+    effort: params.effort,
+    reasoningEffort: params.reasoningEffort,
+    allowedTools: params.allowedTools,
+    disallowedTools: params.disallowedTools,
+    trust: params.trust,
+    maxTurns: params.maxTurns,
+    maxPrice: params.maxPrice,
+  });
+}
+
 function buildCliResponse(
   cli: "claude" | "codex" | "gemini" | "grok" | "mistral",
   stdout: string,
@@ -3083,27 +3126,10 @@ export async function handleMistralRequest(
         deps.logger.info(
           `[${corrId}] mistral_request detected stale Vibe model selection; retrying once with ${recoveryModel}`
         );
-        const retryPrep = buildMistralCliInvocation({
-          prompt: prep.effectivePrompt,
-          resolvedModel: recoveryModel,
-          outputFormat: params.outputFormat,
-          permissionMode:
-            params.approvalStrategy === "mcp_managed"
-              ? "auto-approve"
-              : (params.permissionMode ?? "auto-approve"),
-          effort: params.effort,
-          reasoningEffort: params.reasoningEffort,
-          allowedTools: params.allowedTools,
-          disallowedTools: params.disallowedTools,
-          // Phase 4 slice γ: preserve --trust on the model-selection retry
-          // so a fresh untrusted workspace doesn't block headlessly on the
-          // second attempt after surviving the first.
-          trust: params.trust,
-          // Phase 4 slice δ: preserve --max-turns / --max-price on retry so
-          // the user-specified caps still bound the recovery attempt.
-          maxTurns: params.maxTurns,
-          maxPrice: params.maxPrice,
-        });
+        const retryPrep = buildMistralRetryPrep(
+          { ...params, effectivePrompt: prep.effectivePrompt },
+          recoveryModel
+        );
         const retryArgs = [...retryPrep.args, ...sessionResult.resumeArgs];
         // Reuse the FR handoff built above — the retry preserves corrId,
         // so the manager's logComplete still updates the original row.

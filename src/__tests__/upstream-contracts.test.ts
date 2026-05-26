@@ -91,14 +91,37 @@ describe("upstream CLI contracts", () => {
     }
   });
 
-  it("MCP request schemas expose the provider contract parameters", () => {
-    const server = createGatewayServer();
+  it("MCP request schemas expose the provider contract parameters (sync AND async)", async () => {
+    // Post-test-veracity-audit (slice δ): previously this iteration
+    // filtered out `_async` tools, so async-only schema drift would
+    // pass silently. Per Codex/Grok's P-C4 finding, we now walk every
+    // registered tool — including the `_async` variants, which only
+    // register when persistence.asyncJobsEnabled === true AND the
+    // manager has a real store. See test-veracity-regressions.test.ts
+    // for the explicit slice-α/γ/δ allowlist assertion that backs this
+    // up.
+    const { AsyncJobManager } = await import("../async-job-manager.js");
+    const { MemoryJobStore } = await import("../job-store.js");
+    const { noopLogger } = await import("../logger.js");
+    const manager = new AsyncJobManager(noopLogger, undefined, new MemoryJobStore());
+    const server = createGatewayServer({
+      asyncJobManager: manager,
+      persistence: {
+        backend: "sqlite",
+        logsDbPath: ":memory:",
+        jobsDbPath: ":memory:",
+        jobRetentionDays: 7,
+        dedupWindowMs: 0,
+        asyncJobsEnabled: true,
+        sources: { configFile: null, envOverrides: [] },
+      },
+    });
     const registry = (
       server as unknown as Record<string, Record<string, { inputSchema?: unknown }>>
     )._registeredTools;
 
     for (const contract of Object.values(UPSTREAM_CLI_CONTRACTS)) {
-      for (const toolName of contract.mcpTools.filter(name => !name.endsWith("_async"))) {
+      for (const toolName of contract.mcpTools) {
         const tool = registry[toolName];
         expect(tool, `${toolName} registered`).toBeDefined();
         const schema = tool.inputSchema as { _def?: { shape?: () => Record<string, unknown> } };
