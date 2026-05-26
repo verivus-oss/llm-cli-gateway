@@ -293,12 +293,14 @@ No conversation content in state
 
 **Pattern:** Persist only essential data.
 
-The cache-awareness feature (slice 1–3) preserves this invariant: only
-sha256 hashes of the stable prompt prefix are written to the flight
-recorder (a separate audit DB at `~/.llm-cli-gateway/logs.db`), never to
+The cache-awareness feature (slice 1–3) preserves this invariant by
+adding ONLY hash + token-count metadata (`stable_prefix_hash`,
+`stable_prefix_tokens`) to the existing flight recorder
+(`~/.llm-cli-gateway/logs.db` — which already stores prompts/responses
+for audit, separate from the session manager). NOTHING is added to
 `~/.llm-cli-gateway/sessions.json`. `session_get` projects a `cacheState`
 view at read time from flight-recorder aggregates — it is NOT a field on
-the Session interface.
+the Session interface in `src/session-manager.ts`.
 
 ---
 

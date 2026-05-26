@@ -73,9 +73,15 @@ when that lands.
 
 ### Invariant
 
-"No conversation content in session storage" is preserved. Only sha256
-hashes of stable prefixes are written to the flight recorder; the
-session manager (`~/.llm-cli-gateway/sessions.json`) is untouched.
+"No conversation content in session storage" is preserved. The session
+manager (`~/.llm-cli-gateway/sessions.json`) is UNTOUCHED by this slice.
+The cache-awareness columns added by migration v3
+(`stable_prefix_hash`, `stable_prefix_tokens`) live on the existing
+flight recorder (`~/.llm-cli-gateway/logs.db`), which is a separate
+audit-focused store that already records prompts and responses (and is
+not subject to the session-storage invariant). `session_get.cacheState`
+is a read-time PROJECTION from the flight recorder, never persisted on
+the Session interface.
 
 ## [1.5.35] - 2026-05-25
 

@@ -82,7 +82,16 @@ All flags live under `[cache_awareness]` in `~/.llm-cli-gateway/config.toml`. **
 
 ## Invariant statement
 
-"No conversation content in session storage" holds. Only sha256 hashes of stable prefixes (and integer token counts) are written to the flight recorder. The session manager (`~/.llm-cli-gateway/sessions.json`) is untouched. `session_get.cacheState` is a READ-TIME projection from the flight recorder, NOT a field on the Session interface.
+"No conversation content in session storage" holds. The session manager (`~/.llm-cli-gateway/sessions.json`) is UNTOUCHED by this slice. The new columns added by migration v3 (`stable_prefix_hash`, `stable_prefix_tokens`) live on the existing flight recorder (`~/.llm-cli-gateway/logs.db`), which is a separate audit-focused store that already records prompts/responses for diagnostics (and is not subject to the session-storage invariant). `session_get.cacheState` is a READ-TIME projection from the flight recorder, NOT a field on the Session interface.
+
+## Verifying the project-root CLAUDE.md is unchanged
+
+The file at `/srv/repos/internal/verivusai-labs/rvwr/CLAUDE.md` lives **outside** the gateway git repo (which begins at `…/rvwr/llm-cli-gateway`). It is not under version control via this repo's history, so `git diff master..feat/cache-awareness-phase-1 -- ../CLAUDE.md` cannot resolve it. Reviewers should verify the file is unchanged by:
+
+- `cat /srv/repos/internal/verivusai-labs/rvwr/CLAUDE.md` and confirming the "Session State Design" section still contains the "No conversation content in session storage" rule unchanged.
+- Or `git status` in the parent workspace's VCS (if one exists outside the gateway repo's scope).
+
+This branch has touched no file outside `…/rvwr/llm-cli-gateway/`.
 
 ## Multi-LLM review log
 
