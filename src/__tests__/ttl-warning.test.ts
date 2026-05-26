@@ -129,6 +129,28 @@ async function callTool(
 }
 
 describe("slice 3: cache_ttl_expiring_soon warning", () => {
+  it("SYNC path: claude_request with TTL ≈ 5s emits warning (read from prior session row, not the row about to be inserted)", async () => {
+    const { server, flight, sessions } = await setup({ warnOnTtlExpiry: true });
+    const sess = await sessions.createSession("claude", "ttl-sync");
+    flight.seedHit({ sessionId: sess.id, minutesAgo: 4 + 55 / 60 });
+
+    const result = await callTool(server, "claude_request", {
+      prompt: "any prompt",
+      approvalStrategy: "legacy",
+      sessionId: sess.id,
+    });
+    // The CLI invocation will most likely fail (no claude installed in
+    // test sandbox / no API key), but the warning is computed BEFORE the
+    // CLI runs and attached to either the success response or — for
+    // structured warnings on failure — surfaces via structuredContent.
+    // We check both shapes.
+    const raw = result.content[0].text;
+    const hasWarningInText = raw.includes("cache_ttl_expiring_soon");
+    const warnings = result.warnings ?? [];
+    const hasStructuredWarning = warnings.some(w => w.code === "cache_ttl_expiring_soon");
+    expect(hasWarningInText || hasStructuredWarning).toBe(true);
+  });
+
   it("ASYNC path: claude_request_async with TTL ≈ 5s (4m55s elapsed of 5min policy) emits warning", async () => {
     const { server, flight, sessions } = await setup({ warnOnTtlExpiry: true });
     const sess = await sessions.createSession("claude", "ttl-async");

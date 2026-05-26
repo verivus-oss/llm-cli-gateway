@@ -430,7 +430,8 @@ function resolveGatewayServerRuntime(
         ? new ResourceProvider(
             runtimeSessionManager,
             runtimePerformanceMetrics,
-            runtimeFlightRecorder
+            runtimeFlightRecorder,
+            deps.cacheAwareness ?? getCacheAwarenessConfig(runtimeLogger)
           )
         : resourceProvider),
     db: "db" in deps ? (deps.db ?? null) : db,
@@ -3502,52 +3503,70 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       const { corrId, args } = prep;
       let durationMs = 0;
       let wasSuccessful = false;
+
+      // Session resolution happens BEFORE safeFlightStart so that:
+      //   (1) the TTL warning reads the PRIOR session's lastWriteAt
+      //       rather than the row about to be inserted (codex-r1/F1).
+      //   (2) the flight-recorder row is tagged with effectiveSessionId
+      //       (the session the CLI will actually resume), not the raw
+      //       user-provided sessionId.
+      let effectiveSessionId = sessionId;
+      let useContinue = continueSession;
+      // Guard the active-session lookup: in some test harnesses the
+      // sessionManager is undefined; the original try-catch wrapped this
+      // block, so we replicate that tolerance here. Failure leaves
+      // effectiveSessionId as the user-provided sessionId.
+      let activeSession: Awaited<ReturnType<ISessionManager["getActiveSession"]>> | null = null;
+      try {
+        activeSession = await sessionManager.getActiveSession("claude");
+      } catch (err) {
+        logger.warn(
+          `[${corrId}] sessionManager.getActiveSession failed (non-fatal): ${(err as Error).message}`
+        );
+      }
+
+      if (!createNewSession && !continueSession && !sessionId && activeSession) {
+        effectiveSessionId = activeSession.id;
+        useContinue = true;
+      }
+      if (!useContinue && effectiveSessionId && activeSession?.id === effectiveSessionId) {
+        useContinue = true;
+      }
+
+      // Slice 3: if the resolved session has a near-expiry Anthropic
+      // cache breakpoint, attach a structured warning (NOT a hard error)
+      // to the response. Computed BEFORE safeFlightStart so the current
+      // row does not skew lastRequestAt.
+      const ttlWarning = maybeBuildCacheTtlWarning({
+        runtime,
+        sessionId: effectiveSessionId,
+        cli: "claude",
+      });
+      const warnings: WarningEntry[] = ttlWarning ? [ttlWarning] : [];
+
       safeFlightStart(
         {
           correlationId: corrId,
           cli: "claude",
           model: prep.resolvedModel || "default",
           prompt: prep.effectivePrompt,
-          sessionId,
+          sessionId: effectiveSessionId,
           stablePrefixHash: prep.stablePrefixHash ?? undefined,
           stablePrefixTokens: prep.stablePrefixTokens ?? undefined,
         },
         runtime
       );
       logger.info(
-        `[${corrId}] claude_request invoked with model=${prep.resolvedModel || "default"}, outputFormat=${outputFormat}, prompt length=${prep.effectivePrompt.length}, sessionId=${sessionId}`
+        `[${corrId}] claude_request invoked with model=${prep.resolvedModel || "default"}, outputFormat=${outputFormat}, prompt length=${prep.effectivePrompt.length}, sessionId=${effectiveSessionId}`
       );
 
       try {
-        // Session management
-        let effectiveSessionId = sessionId;
-        let useContinue = continueSession;
-        const activeSession = await sessionManager.getActiveSession("claude");
-
-        if (!createNewSession && !continueSession && !sessionId && activeSession) {
-          effectiveSessionId = activeSession.id;
-          useContinue = true;
-        }
-        if (!useContinue && effectiveSessionId && activeSession?.id === effectiveSessionId) {
-          useContinue = true;
-        }
         if (useContinue) {
           args.push("--continue");
         } else if (effectiveSessionId) {
           args.push("--session-id", effectiveSessionId);
           await sessionManager.updateSessionUsage(effectiveSessionId);
         }
-
-        // Slice 3: if the resolved session has a near-expiry Anthropic
-        // cache breakpoint, attach a structured warning (NOT a hard error)
-        // to the response. Gated on `[cache_awareness].warn_on_ttl_expiry`
-        // and only fires for claude.
-        const ttlWarning = maybeBuildCacheTtlWarning({
-          runtime,
-          sessionId: effectiveSessionId,
-          cli: "claude",
-        });
-        const warnings: WarningEntry[] = ttlWarning ? [ttlWarning] : [];
 
         // Idle timeout only for stream-json (text/json produce no output until done)
         const effectiveIdleTimeout =
@@ -6009,6 +6028,9 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         // The field is OMITTED entirely (not null, not empty object) when
         // the session has zero rows in the flight recorder so the response
         // stays compact for fresh sessions.
+        //
+        // Slice 3: include ttlRemainingMs derived from the gateway's
+        // configured TTL policy. Null for non-claude sessions.
         let cacheState:
           | {
               cli: string | null;
@@ -6019,11 +6041,15 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
               hitCount: number;
               hitRate: number;
               estimatedSavingsUsd: number;
+              ttlRemainingMs: number | null;
             }
           | undefined;
         try {
           const stats = computeSessionCacheStats(flightRecorder, session.id);
           if (stats.requestCount > 0) {
+            const ttlRemainingMs = computeTtlRemaining(stats, stats.cli, {
+              anthropicTtlSeconds: cacheAwareness?.anthropicTtlSeconds ?? 300,
+            });
             cacheState = {
               cli: stats.cli,
               prefixDistinct: stats.distinctPrefixCount,
@@ -6033,6 +6059,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
               hitCount: stats.hitCount,
               hitRate: stats.hitRate,
               estimatedSavingsUsd: stats.estimatedSavingsUsd,
+              ttlRemainingMs,
             };
           }
         } catch (err) {
@@ -6126,7 +6153,8 @@ async function initializeSessionManager(): Promise<void> {
   resourceProvider = new ResourceProvider(
     sessionManager,
     performanceMetrics,
-    getFlightRecorder(logger)
+    getFlightRecorder(logger),
+    getCacheAwarenessConfig(logger)
   );
 }
 

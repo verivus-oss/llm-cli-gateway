@@ -83,6 +83,30 @@ describe("cache_state resources", () => {
     expect((stats as unknown as Record<string, unknown>).task).toBeUndefined();
   });
 
+  it("readCacheStateSession populates ttlRemainingMs from the configured TTL policy", () => {
+    const claudeConfig = {
+      emitAnthropicCacheControl: false,
+      anthropicTtlSeconds: 300 as const,
+      warnOnTtlExpiry: false,
+      minStableTokensForCacheControl: {
+        sonnet: 1024,
+        opus: 4096,
+        haiku: 4096,
+        default: 4096,
+      },
+      sources: { configFile: null },
+    };
+    const providerWithConfig = new ResourceProvider(
+      sessionManagerStub,
+      new PerformanceMetrics(),
+      rec,
+      claudeConfig
+    );
+    const stats = providerWithConfig.readCacheStateSession("sess-A");
+    // claude session → ttlRemainingMs is a number (or 0 if elapsed > policy).
+    expect(typeof stats.ttlRemainingMs).toBe("number");
+  });
+
   it("readCacheStateSession returns aggregates without prompt text", () => {
     const stats = provider.readCacheStateSession("sess-A");
     const json = JSON.stringify(stats);

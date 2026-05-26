@@ -6,10 +6,12 @@ import {
   computeGlobalCacheStats,
   computePrefixCacheStats,
   computeSessionCacheStats,
+  computeTtlRemaining,
   type GlobalCacheStats,
   type PrefixCacheStats,
   type SessionCacheStats,
 } from "./cache-stats.js";
+import type { CacheAwarenessConfig } from "./config.js";
 
 export interface ResourceDefinition {
   uri: string;
@@ -37,7 +39,12 @@ export class ResourceProvider {
     // Optional read access to the flight recorder. Used by cache-state
     // resources (slice 2). Falls back to a stub returning [] when not
     // injected so existing call sites continue to work without changes.
-    private flightRecorder: FlightRecorderQuery = { queryRequests: () => [] }
+    private flightRecorder: FlightRecorderQuery = { queryRequests: () => [] },
+    // Slice 3: optional cache-awareness config. When present, drives the
+    // TTL policy applied to ttlRemainingMs on session-scoped reads.
+    // When absent, the default Anthropic 5-min TTL applies (matches the
+    // 1.x default of `[cache_awareness].anthropic_ttl_seconds = 300`).
+    private cacheAwareness: CacheAwarenessConfig | null = null
   ) {}
 
   /** Read-only flight-recorder accessor for cache-state resource readers. */
@@ -59,9 +66,18 @@ export class ResourceProvider {
   /**
    * cache_state://session/{sessionId} — per-session aggregates. Returns
    * empty defaults when the session has no rows. Token/hash fields only.
+   *
+   * Slice 3: populates `ttlRemainingMs` by applying the configured TTL
+   * policy. Null for non-claude sessions or when the gateway has no
+   * cache-awareness config loaded (defaults to 5-min policy).
    */
   readCacheStateSession(sessionId: string): SessionCacheStats {
-    return computeSessionCacheStats(this.flightRecorder, sessionId);
+    const stats = computeSessionCacheStats(this.flightRecorder, sessionId);
+    const ttlSeconds = this.cacheAwareness?.anthropicTtlSeconds ?? 300;
+    stats.ttlRemainingMs = computeTtlRemaining(stats, stats.cli, {
+      anthropicTtlSeconds: ttlSeconds,
+    });
+    return stats;
   }
 
   /**

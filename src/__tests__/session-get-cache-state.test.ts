@@ -188,12 +188,25 @@ describe("session_get cacheState (slice 2)", () => {
 
       const resp = (await callSessionGet(server, session.id)) as {
         success: boolean;
-        session: { cacheState?: { hitRate: number; requestCount: number } };
+        session: {
+          cacheState?: {
+            hitRate: number;
+            requestCount: number;
+            ttlRemainingMs: number | null;
+          };
+        };
       };
       expect(resp.success).toBe(true);
       expect(resp.session.cacheState).toBeDefined();
       expect(resp.session.cacheState!.requestCount).toBe(2);
       expect(resp.session.cacheState!.hitRate).toBeCloseTo(0.5, 5);
+      // Slice 3: ttlRemainingMs surfaces — claude is the only CLI for
+      // which it is non-null; the rest must be null.
+      if (cli === "claude") {
+        expect(typeof resp.session.cacheState!.ttlRemainingMs).toBe("number");
+      } else {
+        expect(resp.session.cacheState!.ttlRemainingMs).toBeNull();
+      }
     }
   );
 
