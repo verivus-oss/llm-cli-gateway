@@ -103,7 +103,7 @@ If you are evaluating llm-cli-gateway against an API proxy and your workload is 
 
 The Branch A live smoke test for explicit Claude `cache_control` injection via `--input-format stream-json`. The Codex parser fix to accept `cached_input_tokens`. Async-path flight-recorder integration, so the v3 `stable_prefix_hash` column gets populated on async jobs too (it does not today, by design, because `src/async-job-manager.ts` has zero flight-recorder integration, and that is a separate concern). And, once we have 24h of dogfooding data from `cache_state://global`, the cache-aware multi-LLM routing slice, which is the actual end goal: route a request to the provider whose session has the warmest cache for the requested prefix, rather than the round-robin default.
 
-v1.6.0 is on [npm](https://npmjs.com/package/llm-cli-gateway) (with sigstore provenance via the OIDC publish path) and [PyPI](https://pypi.org/project/llm-cli-gateway/); the [GitHub release](https://github.com/verivus-oss/llm-cli-gateway/releases/tag/v1.6.0) carries SHA256-verifiable installer artefacts for macOS / Linux / Windows.
+v1.6.0 is the feature release described above; a docs-only follow-up v1.6.1 went out the same day with the install-agent guidance for Mistral and the post-release doc audit fixes (no source changes). The current published artefacts are at v1.6.1 on [npm](https://npmjs.com/package/llm-cli-gateway) (with sigstore provenance via the OIDC publish path) and [PyPI](https://pypi.org/project/llm-cli-gateway/); the [GitHub release at v1.6.1](https://github.com/verivus-oss/llm-cli-gateway/releases/tag/v1.6.1) carries SHA256-verifiable installer artefacts for macOS / Linux / Windows.
 
 Thanks for reading this far. As always, MIT licensed.
 
