@@ -3,7 +3,7 @@
 > *"Without consultation, plans are frustrated, but with many counselors they succeed."*
 > — Proverbs 15:22 (LSB)
 
-A Model Context Protocol (MCP) server providing unified access to Claude Code, Codex, Gemini, and Grok CLIs with session management, retry logic, and async job orchestration.
+A Model Context Protocol (MCP) server providing unified access to Claude Code, Codex, Gemini, Grok, and Mistral (Vibe) CLIs with session management, retry logic, and async job orchestration.
 
 ## Personal MCP Appliance MVP
 
@@ -79,7 +79,7 @@ docker compose -f docker-compose.personal.yml run --rm doctor
 ## Features
 
 ### Core Capabilities
-- **Multi-LLM Orchestration**: Unified interface for Claude Code, Codex, Gemini, and Grok CLIs
+- **Multi-LLM Orchestration**: Unified interface for Claude Code, Codex, Gemini, Grok, and Mistral (Vibe) CLIs
 - **Session Management**: Track and resume conversations across all CLIs with persistent storage
 - **Token Optimization**: Automatic 44% reduction on prompts, 37% on responses (opt-in)
 - **Correlation ID Tracking**: Full request tracing across all LLM interactions
@@ -127,12 +127,12 @@ Opt-in flags (all default off) live under `[cache_awareness]` in `~/.llm-cli-gat
 - **Long-Running Jobs**: Non-time-bound async execution via `*_request_async` + polling tools
 
 ### Security & Quality
-- **Comprehensive Testing**: 284 tests covering unit, integration, and regression scenarios
+- **Comprehensive Testing**: 681 tests covering unit, integration, and regression scenarios with real CLI execution
 - **Input Validation**: Zod schemas prevent injection attacks
 - **No Secret Leakage**: Generic session descriptions only (file permissions 0o600)
 - **No ReDoS**: Bounded regex patterns prevent catastrophic backtracking
 - **Type Safety**: Strict TypeScript with comprehensive error handling
-- **221 Tests**: Unit, integration, and regression tests with real CLI execution
+- **Supply-chain hardening**: a dedicated `.github/workflows/security.yml` runs actionlint, zizmor, shellcheck, typos, osv-scanner, gitleaks, ruff, bandit, and lychee on every push and PR (see `SECURITY.md` for the threat model)
 
 ## Prerequisites
 

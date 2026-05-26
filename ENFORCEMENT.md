@@ -571,7 +571,7 @@ npm run build && npm run lint && npm test
 
 ## For LLMs: Self-Enforcement Checklist
 
-When an LLM (Claude, Codex, Gemini) is asked to modify this codebase:
+When an LLM (Claude, Codex, Gemini, Grok, or Mistral) is asked to modify this codebase:
 
 **Before making changes:**
 - [ ] Read `docs://best-practices` MCP resource (or BEST_PRACTICES.md)

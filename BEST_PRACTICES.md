@@ -409,7 +409,7 @@ Integration: Real MCP server, real CLI calls
 ---
 
 ### Coverage
-**Status:** ✅ Comprehensive (284 tests)
+**Status:** ✅ Comprehensive (681 tests)
 
 - Executor: errors, timeouts, paths
 - Sessions: CRUD, persistence, edge cases, concurrency
@@ -424,7 +424,7 @@ Integration: Real MCP server, real CLI calls
 **Status:** ⚠️ Integration slow (~42s)
 
 Real CLI calls: 2-14s each
-Total: 284 tests in ~60s
+Total: 681 tests in ~90s wall (additional cache-awareness, security-posture, async-job, and persistence suites)
 
 **Options:**
 1. Faster models (haiku, flash)
