@@ -11,6 +11,8 @@ import { executeCli, killAllProcessGroups } from "./executor.js";
 import { parseStreamJson } from "./stream-json-parser.js";
 import { parseCodexJsonStream } from "./codex-json-parser.js";
 import { parseGeminiJson } from "./gemini-json-parser.js";
+import { parseVibeMetaJson } from "./mistral-meta-json-parser.js";
+import { homedir } from "os";
 import { ISessionManager, createSessionManager } from "./session-manager.js";
 import { ResourceProvider } from "./resources.js";
 import { PerformanceMetrics } from "./metrics.js";
@@ -698,10 +700,17 @@ function createErrorResponse(
   };
 }
 
-function extractUsageAndCost(
+export function extractUsageAndCost(
   cli: "claude" | "codex" | "gemini" | "grok" | "mistral",
   output: string,
-  outputFormat?: string
+  outputFormat?: string,
+  /**
+   * Optional context for off-stdout telemetry sources. Today only Mistral
+   * uses this — its meta.json lives on disk keyed by sessionId. Threading
+   * this in keeps the closure built by `buildAsyncFlightRecorderHandoff`
+   * primitives-only (no `params`/`prep` retention on AsyncJobRecord).
+   */
+  ctx?: { sessionId?: string; home?: string }
 ): {
   inputTokens?: number;
   outputTokens?: number;
@@ -746,9 +755,14 @@ function extractUsageAndCost(
       cacheReadTokens: parsed.usage.cache_read_tokens,
     };
   }
-  // Mistral/Vibe: does not surface usage in its stdout/stream-json output. A
-  // future unit can read it from `~/.vibe/logs/session/<id>/metadata.json`
-  // once we resolve the session id post-run.
+  // Mistral/Vibe: usage/cost live on disk in `~/.vibe/logs/session/<id>/meta.json`
+  // (Phase 4 slice β). Best-effort: if we don't know the sessionId (fresh
+  // session whose Vibe-assigned UUID we never observed) or the file is
+  // missing/malformed, the parser returns `{}` and the FR row simply lacks
+  // usage data — matching pre-slice behaviour. No stdout fallback exists.
+  if (cli === "mistral") {
+    return parseVibeMetaJson(ctx?.home ?? homedir(), ctx?.sessionId);
+  }
   return {};
 }
 
@@ -775,9 +789,13 @@ function buildAsyncFlightRecorderHandoff(
 } {
   // Extract primitives BEFORE building the closure — capturing `prep` or
   // `params` directly would pin large attachments / promptParts on the
-  // AsyncJobRecord for JOB_TTL_MS.
+  // AsyncJobRecord for JOB_TTL_MS. Phase 4 slice β: `sid` and `home` are
+  // primitives too, threaded through so the Mistral branch of
+  // extractUsageAndCost can read `~/.vibe/logs/session/<id>/meta.json`.
   const cli = cliName;
   const fmt = outputFormat;
+  const sid = sessionId;
+  const home = homedir();
   return {
     flightRecorderEntry: {
       model: prep.resolvedModel || "default",
@@ -786,7 +804,8 @@ function buildAsyncFlightRecorderHandoff(
       stablePrefixHash: prep.stablePrefixHash ?? undefined,
       stablePrefixTokens: prep.stablePrefixTokens ?? undefined,
     },
-    extractUsage: (stdout: string) => extractUsageAndCost(cli, stdout, fmt),
+    extractUsage: (stdout: string) =>
+      extractUsageAndCost(cli, stdout, fmt, { sessionId: sid, home }),
   };
 }
 
