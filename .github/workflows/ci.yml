@@ -6,15 +6,31 @@ on:
   pull_request:
     branches: [main]
 
+# Default to read-only on the GITHUB_TOKEN. Every job below either reads
+# the working tree, builds, lints, or runs tests — none push commits,
+# create issues, or write release artifacts. Future jobs that need write
+# access should declare permissions at the job level rather than
+# loosening this top-level default. Caught by zizmor (excessive-permissions).
+permissions:
+  contents: read
+
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
+    # Job-level permissions match the workflow default explicitly — zizmor
+    # flags ambiguous-inheritance otherwise.
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
         node-version: [24]
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+        with:
+          # Wipe the auth token from .git/config after checkout so it
+          # cannot be picked up by later steps (zizmor artipacked).
+          persist-credentials: false
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6
         with:
           node-version: ${{ matrix.node-version }}
@@ -28,8 +44,12 @@ jobs:
 
   pack-smoke-test:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6
         with:
           node-version: 24

@@ -19,3 +19,31 @@ include = ["llm_gateway*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+# ruff config — applied when CI's "Python lint (ruff)" step runs.
+# Rule selection lives on the CLI (`--select S,F --ignore S404`); this
+# block adds per-path exceptions for legitimate patterns that the
+# default would otherwise reject.
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = [
+  "S101",   # assert is normal in pytest
+  "S106",   # hardcoded credentials in test fixtures are fine
+  "S603",   # subprocess calls in tests run pinned local binaries
+  "S607",   # partial executable paths in tests run pinned local binaries
+]
+"llm_gateway/gateway_resolver.py" = [
+  # gateway_resolver.py exists to *find* `node` and the
+  # `llm-cli-gateway` binary on PATH — partial executable paths are
+  # the entire point, and the inputs are hard-coded literals.
+  "S607",
+]
+"llm_gateway/mcp_client.py" = [
+  # mcp_client.py spawns the resolved gateway binary via subprocess.
+  # `self._command` is set by gateway_resolver.py's PATH lookup, never
+  # by user input. The S603 finding is acknowledged here at config
+  # level rather than per-call-site to keep the call sites readable.
+  "S603",
+]

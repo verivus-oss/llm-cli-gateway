@@ -1,6 +1,4 @@
-import json
 from unittest.mock import patch, MagicMock
-import pytest
 import llm
 from llm_gateway.models import GatewayClaude, GatewayCodex, GatewayGemini
 

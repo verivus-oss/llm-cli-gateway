@@ -1,0 +1,47 @@
+# Code ownership for review routing on llm-cli-gateway.
+#
+# This file is honoured by GitHub when:
+#   - the public mirror has branch protection with "Require review from
+#     Code Owners" enabled (private free-plan orgs cannot enable branch
+#     protection, but CODEOWNERS is still respected for auto-requested
+#     reviewers on PRs)
+#   - someone opens a PR and GitHub auto-requests the relevant owner
+#
+# Keep this list narrow: owners must actually review the lines they
+# own. Add new entries as the team grows.
+
+# Default: any file not otherwise matched.
+* @werner
+
+# Security-sensitive surfaces — these get an explicit owner so the
+# auto-request fires even if @werner is later removed from `*` above.
+
+# Workflow files set the entire CI security posture.
+/.github/workflows/                @werner
+
+# Security-policy documents — changing these is itself a security event.
+/SECURITY.md                       @werner
+/.github/CODEOWNERS                @werner
+
+# Executor + transport — the privileged subsystems.
+/src/executor.ts                   @werner
+/src/http-transport.ts             @werner
+/src/endpoint-exposure.ts          @werner
+/src/auth.ts                       @werner
+
+# Session manager — the invariant-bearing store.
+/src/session-manager.ts            @werner
+
+# Flight recorder — audit log; migrations need careful review.
+/src/flight-recorder.ts            @werner
+
+# Async-job persistence — durability + isolation contract.
+/src/job-store.ts                  @werner
+/src/async-job-manager.ts          @werner
+
+# Release security audit script — the gate on every CI run.
+/scripts/release-security-audit.sh @werner
+
+# Dependabot config — accidental over-broadening here would generate
+# noise that drowns out real security PRs.
+/.github/dependabot.yml            @werner

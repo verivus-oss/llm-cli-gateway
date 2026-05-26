@@ -1,0 +1,63 @@
+# lychee config — consumed by lycheeverse/lychee-action in
+# .github/workflows/security.yml at the "Link-rot scan" step.
+#
+# Scope: catch dead URLs in published docs (README.md, CHANGELOG.md,
+# BEST_PRACTICES.md, docs/personal-mcp/, integrations/llm-plugin/README.md).
+# Skip generated, vendored, and historical surfaces.
+
+# Files / directories that lychee should NOT inspect.
+exclude_path = [
+  "node_modules",
+  "dist",
+  "integrations/llm-plugin/dist",
+  "integrations/llm-plugin/*.egg-info",
+  ".sqry",
+  ".sqry-cache",
+  # Historical / immutable artefacts — dead links here are evidence,
+  # not bugs.
+  "docs/reviews",
+  "DOGFOODING_RESULTS.md",
+  "DOGFOODING_LESSONS.md",
+  "DOGFOODING_SUCCESS.md",
+  "PRODUCT_REVIEWS.md",
+  "SECOND_REVIEW_FINDINGS.md",
+  "RELEASE_NOTES_v1.0.0.md",
+]
+
+# URL patterns to skip. Each entry is a regex over the full URL.
+exclude = [
+  # localhost / loopback / private nets — never reachable from CI.
+  "^https?://(127\\.|localhost|10\\.|172\\.(1[6-9]|2[0-9]|3[01])\\.|192\\.168\\.)",
+  # Example placeholders used in docs.
+  "^https?://example\\.(com|org|net)",
+  "^https?://your-domain\\.",
+  # GitHub URLs that require auth on private repos (we test the
+  # public mirror separately during release).
+  "^https://github\\.com/verivusai-labs/",
+  # PyPI / npm vanity URLs that 302 to authenticated dashboards.
+  "^https://platform\\.claude\\.com/manage",
+  "^https://pypi\\.org/manage/",
+  # Anthropic / OpenAI / Google docs occasionally rate-limit anon
+  # browsers. Their stability is not our gate; we re-verify the
+  # canonical URL during research steps.
+  "^https://docs\\.x\\.ai/",
+]
+
+# Treat HTTP 429 (Too Many Requests) and 503 (Service Unavailable) as
+# transient — re-check rather than failing the build.
+accept = [200, 201, 202, 203, 204, 206, 301, 302, 303, 304, 307, 308, 429]
+
+# Network behaviour: short timeouts, modest concurrency to stay friendly
+# to upstream rate-limiters.
+timeout = 20
+max_concurrency = 8
+max_redirects = 5
+max_retries = 2
+retry_wait_time = 4
+
+# Identify ourselves so upstream operators can spot the traffic.
+user_agent = "llm-cli-gateway-lychee/1.0 (+https://github.com/verivus-oss/llm-cli-gateway)"
+
+# Don't follow base URL or anchor checks for offline files — paper-grade
+# rigour isn't needed for this repo's surface.
+include_fragments = false

@@ -1,0 +1,38 @@
+# gitleaks config — consumed by the "Secret scan (gitleaks)" step in
+# .github/workflows/security.yml.
+#
+# Defaults are inherited (extend the bundled "default" config); only
+# the allowlist below is local. Entries here are TEST FIXTURES with
+# clearly fake values that gitleaks' generic-api-key heuristic catches.
+# Each entry includes a comment explaining the fixture's purpose.
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "llm-cli-gateway allowlist: test fixtures, deliberate fake tokens"
+
+# File-scope allowlist: paths that ONLY contain test fixtures and never
+# real secrets. Adding paths here suppresses ALL findings under them —
+# use sparingly and prefer regex matches over directory exclusion where
+# possible.
+paths = [
+  # Build artefacts and lockfiles — gitleaks regularly false-positives
+  # on minified or hashed strings here.
+  '''dist/.*''',
+  '''node_modules/.*''',
+  '''package-lock\.json$''',
+  '''integrations/llm-plugin/dist/.*''',
+  '''integrations/llm-plugin/.*\.egg-info/.*''',
+]
+
+# Regex-scope allowlist: specific secret patterns that gitleaks would
+# otherwise flag. Each entry must match a deliberate test-fixture
+# token literal — NOT a regex broad enough to mask real secrets.
+regexes = [
+  # http-transport.test.ts uses a hard-coded fake bearer token to
+  # exercise the auth-token middleware end-to-end. Anyone reading the
+  # test file can see the token is a fixture; there is no
+  # corresponding deployment using it.
+  '''test-bearer-XYZ-987''',
+]

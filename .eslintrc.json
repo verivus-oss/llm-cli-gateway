@@ -6,15 +6,19 @@
     "sourceType": "module",
     "project": "./tsconfig.json"
   },
-  "plugins": ["@typescript-eslint"],
+  "plugins": ["@typescript-eslint", "security"],
   "extends": [
     "eslint:recommended",
-    "plugin:@typescript-eslint/recommended"
+    "plugin:@typescript-eslint/recommended",
+    "plugin:security/recommended-legacy"
   ],
   "rules": {
     "no-console": ["error", { "allow": ["error", "warn"] }],
     "prefer-const": "error",
     "no-var": "error",
+    "security/detect-child-process": "off",
+    "security/detect-non-literal-fs-filename": "warn",
+    "security/detect-object-injection": "warn",
     "@typescript-eslint/explicit-function-return-type": [
       "warn",
       {

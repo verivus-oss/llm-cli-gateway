@@ -1,0 +1,14 @@
+# actionlint config — consumed by .github/workflows/security.yml's
+# "Workflow lint" step. Declares the custom self-hosted runner labels
+# used by .github/workflows/release-installer.yml so actionlint stops
+# treating them as unknown.
+#
+# The four runner-label set matches `[self-hosted, linux, rust, x86_64,
+# workhorse2]` used by the release-installer.yml jobs that build /
+# upload installer artefacts on the workhorse2-oss org runner.
+
+self-hosted-runner:
+  labels:
+    - rust
+    - x86_64
+    - workhorse2
