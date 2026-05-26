@@ -140,3 +140,35 @@ describe("Phase 4 slice γ — Mistral --trust wiring", () => {
     expect(result.args).not.toContain("--trust");
   });
 });
+
+describe("Phase 4 slice δ — Mistral --max-turns / --max-price wiring", () => {
+  it("emits --max-turns <N> when maxTurns is set", () => {
+    const result = prepareMistralRequest({ prompt: "x", maxTurns: 5 });
+    const idx = result.args.indexOf("--max-turns");
+    expect(idx).toBeGreaterThan(-1);
+    expect(result.args[idx + 1]).toBe("5");
+  });
+
+  it("emits --max-price <DOLLARS> when maxPrice is set", () => {
+    const result = prepareMistralRequest({ prompt: "x", maxPrice: 0.5 });
+    const idx = result.args.indexOf("--max-price");
+    expect(idx).toBeGreaterThan(-1);
+    expect(result.args[idx + 1]).toBe("0.5");
+  });
+
+  it("does NOT emit --max-turns / --max-price when both are omitted", () => {
+    const result = prepareMistralRequest({ prompt: "x" });
+    expect(result.args).not.toContain("--max-turns");
+    expect(result.args).not.toContain("--max-price");
+  });
+
+  it("emits both flags together when both are set", () => {
+    const result = prepareMistralRequest({ prompt: "x", maxTurns: 3, maxPrice: 0.01 });
+    expect(result.args).toContain("--max-turns");
+    expect(result.args).toContain("--max-price");
+    const turnsIdx = result.args.indexOf("--max-turns");
+    const priceIdx = result.args.indexOf("--max-price");
+    expect(result.args[turnsIdx + 1]).toBe("3");
+    expect(result.args[priceIdx + 1]).toBe("0.01");
+  });
+});

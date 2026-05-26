@@ -229,6 +229,17 @@ export interface PrepareMistralRequestInput {
    * Vibe's prompt behaviour is preserved for existing callers.
    */
   trust?: boolean;
+  /**
+   * Phase 4 slice δ: emit `--max-turns N` to cap the agent-loop iteration
+   * count (only applies in programmatic mode with `-p`).
+   */
+  maxTurns?: number;
+  /**
+   * Phase 4 slice δ: emit `--max-price DOLLARS` so the session is
+   * interrupted when cumulative cost crosses the cap (programmatic mode
+   * only).
+   */
+  maxPrice?: number;
 }
 
 export interface PrepareMistralRequestResult {
@@ -278,6 +289,13 @@ export function prepareMistralRequest(
 
   if (input.trust) {
     args.push("--trust");
+  }
+
+  if (input.maxTurns !== undefined) {
+    args.push("--max-turns", String(input.maxTurns));
+  }
+  if (input.maxPrice !== undefined) {
+    args.push("--max-price", String(input.maxPrice));
   }
 
   const ignoredDisallowedTools = Boolean(input.disallowedTools && input.disallowedTools.length > 0);

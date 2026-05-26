@@ -1891,7 +1891,7 @@ export function prepareGeminiRequest(
   };
 }
 
-function prepareGrokRequest(
+export function prepareGrokRequest(
   params: {
     prompt?: string;
     promptParts?: PromptParts;
@@ -1909,6 +1909,11 @@ function prepareGrokRequest(
     correlationId?: string;
     optimizePrompt: boolean;
     operation: string;
+    /**
+     * Phase 4 slice δ: emit `--max-turns N` so callers can cap agent-loop
+     * iterations for cost / latency control. Mirrors Claude's wiring.
+     */
+    maxTurns?: number;
   },
   runtime: GatewayServerRuntime = resolveGatewayServerRuntime()
 ): CliRequestPrep | ExtendedToolResponse {
@@ -1993,6 +1998,9 @@ function prepareGrokRequest(
   if (params.disallowedTools && params.disallowedTools.length > 0) {
     args.push("--disallowed-tools", params.disallowedTools.join(","));
   }
+  if (params.maxTurns !== undefined) {
+    args.push("--max-turns", String(params.maxTurns));
+  }
 
   return {
     corrId,
@@ -2029,6 +2037,10 @@ export function prepareMistralRequest(
      * prompt for this invocation only (not persisted). Default undefined.
      */
     trust?: boolean;
+    /** Phase 4 slice δ: Vibe `--max-turns N` cap on agent-loop iterations. */
+    maxTurns?: number;
+    /** Phase 4 slice δ: Vibe `--max-price DOLLARS` cumulative-cost cap. */
+    maxPrice?: number;
   },
   runtime: GatewayServerRuntime = resolveGatewayServerRuntime()
 ): (CliRequestPrep & { mistralEnv: Record<string, string> }) | ExtendedToolResponse {
@@ -2113,6 +2125,8 @@ export function prepareMistralRequest(
     allowedTools: params.allowedTools,
     disallowedTools: params.disallowedTools,
     trust: params.trust,
+    maxTurns: params.maxTurns,
+    maxPrice: params.maxPrice,
   });
 
   if (prep.ignoredDisallowedTools) {
@@ -2639,6 +2653,8 @@ export interface GrokRequestParams {
   optimizeResponse?: boolean;
   idleTimeoutMs?: number;
   forceRefresh?: boolean;
+  /** Phase 4 slice δ: cap agent-loop iterations via `--max-turns N`. */
+  maxTurns?: number;
 }
 
 export async function handleGrokRequest(
@@ -2665,6 +2681,7 @@ export async function handleGrokRequest(
       correlationId: params.correlationId,
       optimizePrompt: params.optimizePrompt,
       operation: "grok_request",
+      maxTurns: params.maxTurns,
     },
     runtime
   );
@@ -2842,6 +2859,7 @@ export async function handleGrokRequestAsync(
       correlationId: params.correlationId,
       optimizePrompt: params.optimizePrompt,
       operation: "grok_request_async",
+      maxTurns: params.maxTurns,
     },
     runtime
   );
@@ -2953,6 +2971,10 @@ export interface MistralRequestParams {
   forceRefresh?: boolean;
   /** Phase 4 slice γ: emit `--trust` for fresh-workspace headless runs. */
   trust?: boolean;
+  /** Phase 4 slice δ: Vibe `--max-turns N` cap on agent-loop iterations. */
+  maxTurns?: number;
+  /** Phase 4 slice δ: Vibe `--max-price DOLLARS` cumulative-cost cap. */
+  maxPrice?: number;
 }
 
 export async function handleMistralRequest(
@@ -2979,6 +3001,8 @@ export async function handleMistralRequest(
       optimizePrompt: params.optimizePrompt,
       operation: "mistral_request",
       trust: params.trust,
+      maxTurns: params.maxTurns,
+      maxPrice: params.maxPrice,
     },
     runtime
   );
@@ -3057,6 +3081,10 @@ export async function handleMistralRequest(
           // so a fresh untrusted workspace doesn't block headlessly on the
           // second attempt after surviving the first.
           trust: params.trust,
+          // Phase 4 slice δ: preserve --max-turns / --max-price on retry so
+          // the user-specified caps still bound the recovery attempt.
+          maxTurns: params.maxTurns,
+          maxPrice: params.maxPrice,
         });
         const retryArgs = [...retryPrep.args, ...sessionResult.resumeArgs];
         // Reuse the FR handoff built above — the retry preserves corrId,
@@ -3200,6 +3228,8 @@ export async function handleMistralRequestAsync(
       optimizePrompt: params.optimizePrompt,
       operation: "mistral_request_async",
       trust: params.trust,
+      maxTurns: params.maxTurns,
+      maxPrice: params.maxPrice,
     },
     runtime
   );
@@ -4618,6 +4648,14 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .describe(
           "Bypass dedup and force a fresh CLI run even if a recent identical request exists"
         ),
+      maxTurns: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe(
+          "Grok `--max-turns N`: cap on agent-loop iterations for cost / latency control (Phase 4 slice δ)."
+        ),
     },
     async ({
       prompt,
@@ -4641,6 +4679,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       optimizeResponse,
       idleTimeoutMs,
       forceRefresh,
+      maxTurns,
     }) => {
       return handleGrokRequest(
         { sessionManager, logger, runtime },
@@ -4666,6 +4705,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           optimizeResponse,
           idleTimeoutMs,
           forceRefresh,
+          maxTurns,
         }
       );
     }
@@ -4767,6 +4807,21 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .describe(
           "Emit `--trust` so Vibe trusts the cwd for this invocation only (not persisted to trusted_folders.toml) and skips the interactive trust prompt (Phase 4 slice γ)."
         ),
+      maxTurns: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe(
+          "Vibe `--max-turns N`: cap the agent-loop iteration count (programmatic mode only, Phase 4 slice δ)."
+        ),
+      maxPrice: z
+        .number()
+        .positive()
+        .optional()
+        .describe(
+          "Vibe `--max-price DOLLARS`: interrupt the session when cumulative cost crosses this cap (programmatic mode only, Phase 4 slice δ)."
+        ),
     },
     async ({
       prompt,
@@ -4790,6 +4845,8 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       idleTimeoutMs,
       forceRefresh,
       trust,
+      maxTurns,
+      maxPrice,
     }) => {
       return handleMistralRequest(
         { sessionManager, logger, runtime },
@@ -4815,6 +4872,8 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           idleTimeoutMs,
           forceRefresh,
           trust,
+          maxTurns,
+          maxPrice,
         }
       );
     }
@@ -5499,6 +5558,14 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .describe(
             "Bypass dedup and force a fresh CLI run even if a recent identical request exists"
           ),
+        maxTurns: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .describe(
+            "Grok `--max-turns N`: cap on agent-loop iterations for cost / latency control (Phase 4 slice δ)."
+          ),
       },
       async ({
         prompt,
@@ -5521,6 +5588,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         optimizePrompt,
         idleTimeoutMs,
         forceRefresh,
+        maxTurns,
       }) => {
         return handleGrokRequestAsync(
           { sessionManager, asyncJobManager, logger, runtime },
@@ -5545,6 +5613,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             optimizePrompt,
             idleTimeoutMs,
             forceRefresh,
+            maxTurns,
           }
         );
       }
@@ -5641,6 +5710,21 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .describe(
             "Emit `--trust` so Vibe trusts the cwd for this invocation only (not persisted to trusted_folders.toml) and skips the interactive trust prompt (Phase 4 slice γ)."
           ),
+        maxTurns: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .describe(
+            "Vibe `--max-turns N`: cap the agent-loop iteration count (programmatic mode only, Phase 4 slice δ)."
+          ),
+        maxPrice: z
+          .number()
+          .positive()
+          .optional()
+          .describe(
+            "Vibe `--max-price DOLLARS`: interrupt the session when cumulative cost crosses this cap (programmatic mode only, Phase 4 slice δ)."
+          ),
       },
       async ({
         prompt,
@@ -5663,6 +5747,8 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         idleTimeoutMs,
         forceRefresh,
         trust,
+        maxTurns,
+        maxPrice,
       }) => {
         return handleMistralRequestAsync(
           { sessionManager, asyncJobManager, logger, runtime },
@@ -5687,6 +5773,8 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             idleTimeoutMs,
             forceRefresh,
             trust,
+            maxTurns,
+            maxPrice,
           }
         );
       }
