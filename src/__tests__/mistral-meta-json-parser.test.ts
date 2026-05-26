@@ -35,7 +35,9 @@ function writeMetaUnder(
     payload = body;
   } else {
     const wrapper: Record<string, unknown> =
-      opts.sessionId !== undefined ? { session_id: opts.sessionId, ...(body as object) } : (body as object);
+      opts.sessionId !== undefined
+        ? { session_id: opts.sessionId, ...(body as object) }
+        : (body as object);
     payload = JSON.stringify(wrapper);
   }
   writeFileSync(path, payload);

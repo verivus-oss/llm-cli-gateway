@@ -151,10 +151,7 @@ function resolveVibeSessionDirname(
   return undefined;
 }
 
-export function parseVibeMetaJson(
-  home: string,
-  sessionId: string | undefined
-): VibeMetaJsonUsage {
+export function parseVibeMetaJson(home: string, sessionId: string | undefined): VibeMetaJsonUsage {
   if (!sessionId) return {};
   if (sessionId.startsWith(GATEWAY_SESSION_PREFIX)) {
     // gw-* IDs are gateway internal — Vibe never wrote a meta.json under that name.
