@@ -194,6 +194,59 @@ describe("Layer 6 doctor report (U20)", () => {
     expect(report.auth.token_configured).toBe(true);
   });
 
+  it("cache_awareness block is present and zeroed when flight recorder + config absent", () => {
+    const report = createDoctorReport({ env: process.env });
+    expect(report.cache_awareness).toBeDefined();
+    expect(report.cache_awareness.enabled_features).toEqual([]);
+    expect(report.cache_awareness.last_24h.total_requests).toBe(0);
+    expect(report.cache_awareness.last_24h.hit_rate).toBe(0);
+    expect(report.cache_awareness.last_24h.total_hits).toBe(0);
+    expect(report.cache_awareness.last_24h.estimated_savings_usd).toBe(0);
+    expect(report.cache_awareness.per_cli).toEqual({});
+  });
+
+  it("cache_awareness.enabled_features lists active flags only", () => {
+    const report = createDoctorReport({
+      env: process.env,
+      cacheAwareness: {
+        emitAnthropicCacheControl: true,
+        anthropicTtlSeconds: 300,
+        warnOnTtlExpiry: true,
+        minStableTokensForCacheControl: {
+          sonnet: 1024,
+          opus: 4096,
+          haiku: 4096,
+          default: 4096,
+        },
+        sources: { configFile: null },
+      },
+    });
+    expect(report.cache_awareness.enabled_features).toEqual([
+      "anthropic_cache_control",
+      "ttl_warnings",
+    ]);
+  });
+
+  it("cache_awareness.enabled_features stays empty (NOT omitted) when all flags off", () => {
+    const report = createDoctorReport({
+      env: process.env,
+      cacheAwareness: {
+        emitAnthropicCacheControl: false,
+        anthropicTtlSeconds: 300,
+        warnOnTtlExpiry: false,
+        minStableTokensForCacheControl: {
+          sonnet: 1024,
+          opus: 4096,
+          haiku: 4096,
+          default: 4096,
+        },
+        sources: { configFile: null },
+      },
+    });
+    expect(report.cache_awareness.enabled_features).toEqual([]);
+    expect(Array.isArray(report.cache_awareness.enabled_features)).toBe(true);
+  });
+
   it("provides at least one next_action so LLM assistants never see an empty queue", () => {
     const report: DoctorReport = createDoctorReport({});
     expect(report.next_actions.length).toBeGreaterThanOrEqual(1);

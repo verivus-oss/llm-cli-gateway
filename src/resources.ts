@@ -1,6 +1,17 @@
 import { ISessionManager } from "./session-manager.js";
 import { PerformanceMetrics } from "./metrics.js";
 import { getAvailableCliInfo } from "./model-registry.js";
+import { FlightRecorderQuery } from "./flight-recorder.js";
+import {
+  computeGlobalCacheStats,
+  computePrefixCacheStats,
+  computeSessionCacheStats,
+  computeTtlRemaining,
+  type GlobalCacheStats,
+  type PrefixCacheStats,
+  type SessionCacheStats,
+} from "./cache-stats.js";
+import type { CacheAwarenessConfig } from "./config.js";
 
 export interface ResourceDefinition {
   uri: string;
@@ -24,8 +35,58 @@ export interface ResourceContents {
 export class ResourceProvider {
   constructor(
     private sessionManager: ISessionManager,
-    private performanceMetrics: PerformanceMetrics
+    private performanceMetrics: PerformanceMetrics,
+    // Optional read access to the flight recorder. Used by cache-state
+    // resources (slice 2). Falls back to a stub returning [] when not
+    // injected so existing call sites continue to work without changes.
+    private flightRecorder: FlightRecorderQuery = { queryRequests: () => [] },
+    // Slice 3: optional cache-awareness config. When present, drives the
+    // TTL policy applied to ttlRemainingMs on session-scoped reads.
+    // When absent, the default Anthropic 5-min TTL applies (matches the
+    // 1.x default of `[cache_awareness].anthropic_ttl_seconds = 300`).
+    private cacheAwareness: CacheAwarenessConfig | null = null
   ) {}
+
+  /** Read-only flight-recorder accessor for cache-state resource readers. */
+  getFlightRecorderQuery(): FlightRecorderQuery {
+    return this.flightRecorder;
+  }
+
+  /**
+   * cache_state://global — aggregates across the entire flight recorder.
+   * Optionally restrict to a recent window via `lastNHours`. Returns
+   * tokens/hashes/aggregates ONLY — no prompt text fields. The redaction is
+   * structural: the response shape (GlobalCacheStats) has no `prompt`,
+   * `response`, `system`, or `task` field by construction.
+   */
+  readCacheStateGlobal(opts: { lastNHours?: number } = {}): GlobalCacheStats {
+    return computeGlobalCacheStats(this.flightRecorder, opts);
+  }
+
+  /**
+   * cache_state://session/{sessionId} — per-session aggregates. Returns
+   * empty defaults when the session has no rows. Token/hash fields only.
+   *
+   * Slice 3: populates `ttlRemainingMs` by applying the configured TTL
+   * policy. Null for non-claude sessions or when the gateway has no
+   * cache-awareness config loaded (defaults to 5-min policy).
+   */
+  readCacheStateSession(sessionId: string): SessionCacheStats {
+    const stats = computeSessionCacheStats(this.flightRecorder, sessionId);
+    const ttlSeconds = this.cacheAwareness?.anthropicTtlSeconds ?? 300;
+    stats.ttlRemainingMs = computeTtlRemaining(stats, stats.cli, {
+      anthropicTtlSeconds: ttlSeconds,
+    });
+    return stats;
+  }
+
+  /**
+   * cache_state://prefix/{hash} — per-stable-prefix-hash aggregates.
+   * Returns empty defaults for unknown hashes. Token/hash fields only.
+   */
+  readCacheStateForPrefix(stablePrefixHash: string): PrefixCacheStats {
+    return computePrefixCacheStats(this.flightRecorder, stablePrefixHash);
+  }
 
   // List all available resources
   listResources(): ResourceDefinition[] {

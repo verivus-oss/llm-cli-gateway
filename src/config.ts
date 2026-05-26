@@ -351,3 +351,149 @@ export function loadPersistenceConfig(logger: Logger = noopLogger): PersistenceC
     sources,
   };
 }
+
+//──────────────────────────────────────────────────────────────────────────────
+// Cache-awareness configuration
+//
+// Reads the [cache_awareness] block from the same ~/.llm-cli-gateway/config.toml
+// file as [persistence], but uses a SEPARATE loader and schema. Keeping the two
+// independent means a malformed [cache_awareness] never breaks persistence
+// loading and vice versa. No env-var overrides — purely TOML.
+//
+// All defaults are "off"; behavioural changes (slice 1 cache_control, slice 3
+// TTL warnings) ship dormant until operators opt in.
+//──────────────────────────────────────────────────────────────────────────────
+
+export const ANTHROPIC_TTL_SECONDS_VALUES = [300, 3600] as const;
+export type AnthropicTtlSeconds = (typeof ANTHROPIC_TTL_SECONDS_VALUES)[number];
+
+/**
+ * Per-Anthropic-model-family minimum cacheable tokens. Sourced from
+ * docs/personal-mcp/PROVIDER_CACHE_SURFACES.md (Anthropic API docs as of
+ * 2026-05-26). Models below the threshold cannot be cached even with
+ * cache_control set — Anthropic silently returns un-cached.
+ */
+export const DEFAULT_MIN_STABLE_TOKENS_FOR_CACHE_CONTROL = {
+  sonnet: 1024,
+  opus: 4096,
+  haiku: 4096,
+  default: 4096,
+} as const;
+
+export type ModelFamilyAlias = keyof typeof DEFAULT_MIN_STABLE_TOKENS_FOR_CACHE_CONTROL;
+
+const MinStableTokensSchema = z
+  .object({
+    sonnet: z.number().int().positive().default(DEFAULT_MIN_STABLE_TOKENS_FOR_CACHE_CONTROL.sonnet),
+    opus: z.number().int().positive().default(DEFAULT_MIN_STABLE_TOKENS_FOR_CACHE_CONTROL.opus),
+    haiku: z.number().int().positive().default(DEFAULT_MIN_STABLE_TOKENS_FOR_CACHE_CONTROL.haiku),
+    default: z
+      .number()
+      .int()
+      .positive()
+      .default(DEFAULT_MIN_STABLE_TOKENS_FOR_CACHE_CONTROL.default),
+  })
+  .strict()
+  .default({
+    sonnet: DEFAULT_MIN_STABLE_TOKENS_FOR_CACHE_CONTROL.sonnet,
+    opus: DEFAULT_MIN_STABLE_TOKENS_FOR_CACHE_CONTROL.opus,
+    haiku: DEFAULT_MIN_STABLE_TOKENS_FOR_CACHE_CONTROL.haiku,
+    default: DEFAULT_MIN_STABLE_TOKENS_FOR_CACHE_CONTROL.default,
+  });
+
+const CacheAwarenessSchema = z
+  .object({
+    emit_anthropic_cache_control: z.boolean().default(false),
+    anthropic_ttl_seconds: z
+      .union([z.literal(300), z.literal(3600)])
+      .default(300),
+    warn_on_ttl_expiry: z.boolean().default(false),
+    min_stable_tokens_for_cache_control: MinStableTokensSchema,
+  })
+  .strict();
+
+export interface CacheAwarenessConfig {
+  emitAnthropicCacheControl: boolean;
+  anthropicTtlSeconds: AnthropicTtlSeconds;
+  warnOnTtlExpiry: boolean;
+  minStableTokensForCacheControl: {
+    sonnet: number;
+    opus: number;
+    haiku: number;
+    default: number;
+  };
+  /** Audit trail: file the config was loaded from (or null if defaults). */
+  sources: { configFile: string | null };
+}
+
+function readCacheAwarenessFile(
+  configPath: string,
+  logger: Logger
+): { raw: unknown; sourcePath: string | null } {
+  if (!existsSync(configPath)) {
+    return { raw: undefined, sourcePath: null };
+  }
+  try {
+    const require = createRequire(import.meta.url);
+    const TOML = require("smol-toml");
+    const text = readFileSync(configPath, "utf-8");
+    const parsed = TOML.parse(text) as Record<string, unknown>;
+    return { raw: parsed?.cache_awareness, sourcePath: configPath };
+  } catch (err) {
+    logger.error(
+      `Failed to parse gateway config at ${configPath}; using cache_awareness defaults`,
+      err
+    );
+    return { raw: undefined, sourcePath: null };
+  }
+}
+
+/**
+ * Load [cache_awareness] from ~/.llm-cli-gateway/config.toml. Defaults: all
+ * behaviour off, per-model min-token thresholds from PROVIDER_CACHE_SURFACES.md.
+ */
+export function loadCacheAwarenessConfig(logger: Logger = noopLogger): CacheAwarenessConfig {
+  const configPath = defaultPersistenceConfigPath();
+  const { raw, sourcePath } = readCacheAwarenessFile(configPath, logger);
+
+  let parsed;
+  try {
+    parsed = CacheAwarenessSchema.parse(
+      (raw as Record<string, unknown> | undefined) ?? {}
+    );
+  } catch (err) {
+    throw new Error(
+      `Invalid [cache_awareness] config: ${err instanceof Error ? err.message : String(err)}`
+    );
+  }
+
+  return {
+    emitAnthropicCacheControl: parsed.emit_anthropic_cache_control,
+    anthropicTtlSeconds: parsed.anthropic_ttl_seconds as AnthropicTtlSeconds,
+    warnOnTtlExpiry: parsed.warn_on_ttl_expiry,
+    minStableTokensForCacheControl: {
+      sonnet: parsed.min_stable_tokens_for_cache_control.sonnet,
+      opus: parsed.min_stable_tokens_for_cache_control.opus,
+      haiku: parsed.min_stable_tokens_for_cache_control.haiku,
+      default: parsed.min_stable_tokens_for_cache_control.default,
+    },
+    sources: { configFile: sourcePath },
+  };
+}
+
+/**
+ * Look up the per-model-family threshold. `modelName` is the user-facing model
+ * string (e.g. "claude-sonnet-4-6", "claude-opus-4-7"). Falls back to `default`
+ * when the family is unrecognised.
+ */
+export function minStableTokensForModel(
+  config: CacheAwarenessConfig,
+  modelName: string
+): number {
+  const lower = modelName.toLowerCase();
+  const table = config.minStableTokensForCacheControl;
+  if (lower.includes("sonnet")) return table.sonnet;
+  if (lower.includes("opus")) return table.opus;
+  if (lower.includes("haiku")) return table.haiku;
+  return table.default;
+}

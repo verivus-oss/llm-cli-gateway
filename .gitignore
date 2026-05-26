@@ -17,3 +17,5 @@ build/
 # sqry tool cache (generated per-index; not source)
 .sqry/
 .sqry-cache/
+.preexisting-doctor-index.patch.bak
+.review-unit-*-prompt.md

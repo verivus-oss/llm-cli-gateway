@@ -2,6 +2,87 @@
 
 All notable changes to the llm-cli-gateway project.
 
+## [Unreleased] — feat/cache-awareness-phase-1
+
+### Added — cache-awareness slice 1+2+3 (all opt-in, default OFF)
+
+- **`promptParts` on every `*_request` / `*_request_async` tool** (claude, codex,
+  gemini, grok, mistral; sync + async = 10 tools). Accepts
+  `{ system?, tools?, context?, task }`. Mutually exclusive with `prompt`.
+  The gateway concatenates in canonical order (`system → tools → context → task`)
+  so the stable prefix bytes precede the volatile task tail unchanged across
+  calls — raising implicit cache hit rate without calling provider cache APIs.
+  The exact error strings `provide exactly one of \`prompt\` or \`promptParts\``
+  and `one of \`prompt\` or \`promptParts\` is required` are stable API
+  contract.
+- **Flight-recorder v3 migration**: new columns `stable_prefix_hash`
+  (sha256) and `stable_prefix_tokens` (integer bytes/4 heuristic) on
+  `requests`, plus `idx_requests_stable_hash`. Legacy rows keep NULL.
+- **Cache-state MCP resources** (read-only, tokens/hashes/aggregates only —
+  never raw prompt text):
+  - `cache_state://global` (last 24h aggregates + per-CLI breakdown).
+  - `cache_state://session/{sessionId}` (per-session).
+  - `cache_state://prefix/{hash}` (per-stable-prefix-hash).
+- **`session_get.cacheState`** projection: compact hit-rate / hit-count /
+  cache-token-totals / estimated-savings-USD block, present only when the
+  session has prior requests. Omitted entirely (not null, not empty) for
+  fresh sessions. NOT persisted on the Session interface — it is a
+  read-time projection from the flight recorder.
+- **`computeTtlRemaining()` + `cache_ttl_expiring_soon` warning**: claude
+  sync + async handlers attach a structured `warnings[]` entry when a
+  resumed session's Anthropic cache breakpoint is within 30 s of expiry
+  (gated on `[cache_awareness].warn_on_ttl_expiry`; default false). The
+  TTL math respects `anthropic_ttl_seconds = 300 | 3600`.
+- **Doctor `cache_awareness` block**: always present, zeroed when the
+  flight recorder is empty. Reports `enabled_features` (active flags),
+  `last_24h` (hit rate + savings), and `per_cli` aggregates. JSON schema
+  updated; `setup/status.schema.json` `additionalProperties: false`
+  intact at the root.
+- **`[cache_awareness]` config block** in `~/.llm-cli-gateway/config.toml`:
+  - `emit_anthropic_cache_control = false`
+  - `anthropic_ttl_seconds = 300` (enum: 300 | 3600)
+  - `warn_on_ttl_expiry = false`
+  - `[cache_awareness.min_stable_tokens_for_cache_control]` per-family
+    table (sonnet=1024, opus=4096, haiku=4096, default=4096).
+  Validated by a separate Zod schema and loader (`loadCacheAwarenessConfig`);
+  a malformed `[cache_awareness]` block does NOT break `loadPersistenceConfig`
+  and vice versa. No env-var overrides.
+
+### Decision: Branch B (prefix-discipline only) for slice 1
+
+The gateway does NOT emit explicit `cache_control` JSON to Claude in this
+slice and does NOT route `promptParts.system` into `--system-prompt`. The
+upstream injection mechanism is unverified; Branch A is gated on a live
+smoke test in a follow-up slice. The
+`[cache_awareness].emit_anthropic_cache_control` flag is in place for
+when that lands.
+
+### Deferred / out of scope
+
+- **Async-path `stable_prefix_hash` recording**: `src/async-job-manager.ts`
+  has zero flight-recorder integration today, so the v3 columns are NOT
+  populated for async-job rows. This is a separate concern beyond
+  cache-awareness — tracked for a future plan
+  (`docs/plans/async-flight-recorder.dag.toml`, TBD). Slice 1's runtime
+  mutex check IS in place on the async tool surface; only the flight-recorder
+  write deferral applies.
+- **Codex parser cache-tokens fix**: `src/codex-json-parser.ts` reads
+  Anthropic-style `cache_read_input_tokens` but Codex CLI 0.133.0+ emits
+  `cached_input_tokens`. `cache_read_tokens` therefore stays NULL for codex
+  rows today. Out of scope for this slice (see PROVIDER_CACHE_SURFACES.md).
+
+### Invariant
+
+"No conversation content in session storage" is preserved. The session
+manager (`~/.llm-cli-gateway/sessions.json`) is UNTOUCHED by this slice.
+The cache-awareness columns added by migration v3
+(`stable_prefix_hash`, `stable_prefix_tokens`) live on the existing
+flight recorder (`~/.llm-cli-gateway/logs.db`), which is a separate
+audit-focused store that already records prompts and responses (and is
+not subject to the session-storage invariant). `session_get.cacheState`
+is a read-time PROJECTION from the flight recorder, never persisted on
+the Session interface.
+
 ## [1.5.35] - 2026-05-25
 
 ### Fixed

@@ -14,6 +14,41 @@ import {
   type ProviderRuntimeStatus,
 } from "./provider-status.js";
 import { CLAUDE_MCP_SERVER_NAMES } from "./claude-mcp-config.js";
+import type { FlightRecorderQuery } from "./flight-recorder.js";
+import { loadCacheAwarenessConfig, type CacheAwarenessConfig } from "./config.js";
+import { computeGlobalCacheStats } from "./cache-stats.js";
+import { FlightRecorder, resolveFlightRecorderDbPath } from "./flight-recorder.js";
+
+export type CliType = "claude" | "codex" | "gemini" | "grok" | "mistral";
+
+/**
+ * Slice 3 cross-cutting: doctor report block summarising the gateway's
+ * cache-awareness posture. Always PRESENT in the report (zeroed when the
+ * flight recorder has no rows for the last 24h).
+ *
+ * `enabled_features` is an empty array (NOT omitted) when all flags are
+ * off so callers can distinguish "configured but dormant" from
+ * "cache_awareness block missing".
+ */
+export interface CacheAwarenessReport {
+  enabled_features: Array<"anthropic_cache_control" | "ttl_warnings">;
+  last_24h: {
+    hit_rate: number;
+    total_hits: number;
+    total_requests: number;
+    estimated_savings_usd: number;
+  };
+  per_cli: Partial<
+    Record<
+      CliType,
+      {
+        hit_rate: number;
+        total_hits: number;
+        total_cache_read_tokens: number;
+      }
+    >
+  >;
+}
 
 export interface VibeSessionLoggingStatus {
   config_path: string;
@@ -255,6 +290,7 @@ export interface DoctorReport {
     gemini_config: GeminiConfigStatus;
     vibe_session_logging: VibeSessionLoggingStatus;
   };
+  cache_awareness: CacheAwarenessReport;
   next_actions: string[];
 }
 
@@ -308,7 +344,92 @@ function chatGPTConnectorUrl(env: NodeJS.ProcessEnv, rawPublicUrl: string | null
   }
 }
 
-export function createDoctorReport(env: NodeJS.ProcessEnv = process.env): DoctorReport {
+export interface CreateDoctorReportOptions {
+  env?: NodeJS.ProcessEnv;
+  /**
+   * Optional read access to the flight recorder. Drives the
+   * cache_awareness.last_24h and per_cli aggregates. When absent, those
+   * blocks report zeroed aggregates (still PRESENT in the report).
+   */
+  flightRecorder?: FlightRecorderQuery;
+  /**
+   * Optional CacheAwarenessConfig. Drives `enabled_features`. When
+   * absent, `enabled_features` is empty (all behaviour considered off).
+   */
+  cacheAwareness?: CacheAwarenessConfig;
+}
+
+/**
+ * Build the cache_awareness block. ALWAYS present in the report; fields
+ * are zeroed when the flight recorder is missing or empty.
+ */
+function buildCacheAwarenessReport(opts: CreateDoctorReportOptions): CacheAwarenessReport {
+  const enabled: CacheAwarenessReport["enabled_features"] = [];
+  if (opts.cacheAwareness?.emitAnthropicCacheControl) {
+    enabled.push("anthropic_cache_control");
+  }
+  if (opts.cacheAwareness?.warnOnTtlExpiry) {
+    enabled.push("ttl_warnings");
+  }
+
+  if (!opts.flightRecorder) {
+    return {
+      enabled_features: enabled,
+      last_24h: {
+        hit_rate: 0,
+        total_hits: 0,
+        total_requests: 0,
+        estimated_savings_usd: 0,
+      },
+      per_cli: {},
+    };
+  }
+
+  let stats;
+  try {
+    stats = computeGlobalCacheStats(opts.flightRecorder, { lastNHours: 24 });
+  } catch {
+    return {
+      enabled_features: enabled,
+      last_24h: {
+        hit_rate: 0,
+        total_hits: 0,
+        total_requests: 0,
+        estimated_savings_usd: 0,
+      },
+      per_cli: {},
+    };
+  }
+
+  const perCli: CacheAwarenessReport["per_cli"] = {};
+  for (const entry of stats.perCli) {
+    perCli[entry.cli] = {
+      hit_rate: entry.hitRate,
+      total_hits: entry.hitCount,
+      total_cache_read_tokens: entry.totalCacheReadTokens,
+    };
+  }
+
+  return {
+    enabled_features: enabled,
+    last_24h: {
+      hit_rate: stats.hitRate,
+      total_hits: stats.totalHits,
+      total_requests: stats.totalRequests,
+      estimated_savings_usd: stats.estimatedSavingsUsd,
+    },
+    per_cli: perCli,
+  };
+}
+
+export function createDoctorReport(
+  envOrOptions: NodeJS.ProcessEnv | CreateDoctorReportOptions = process.env
+): DoctorReport {
+  // Preserve back-compat: previous signature accepted a bare `env` object.
+  const opts: CreateDoctorReportOptions = isCreateDoctorReportOptions(envOrOptions)
+    ? envOrOptions
+    : { env: envOrOptions };
+  const env: NodeJS.ProcessEnv = opts.env ?? process.env;
   const auth = loadAuthConfig(env);
   const transport = defaultTransport(env);
   const rawPublicUrl = env.LLM_GATEWAY_PUBLIC_URL || null;
@@ -355,6 +476,7 @@ export function createDoctorReport(env: NodeJS.ProcessEnv = process.env): Doctor
     },
     endpoint_exposure: endpointExposure,
     client_config: clientConfigStatus(),
+    cache_awareness: buildCacheAwarenessReport(opts),
     next_actions: [],
   };
 
@@ -393,7 +515,56 @@ export function createDoctorReport(env: NodeJS.ProcessEnv = process.env): Doctor
 }
 
 export function printDoctorJson(): void {
-  process.stdout.write(`${JSON.stringify(createDoctorReport(), null, 2)}\n`);
+  // Load cache-awareness config + open the flight recorder so the doctor
+  // command can populate cache_awareness.last_24h. Both are best-effort —
+  // failures degrade to the zeroed block (buildCacheAwarenessReport
+  // handles missing deps).
+  let cacheAwareness: CacheAwarenessConfig | undefined;
+  let flightRecorder: FlightRecorder | undefined;
+  try {
+    cacheAwareness = loadCacheAwarenessConfig();
+  } catch {
+    // ignore
+  }
+  try {
+    const dbPath = resolveFlightRecorderDbPath();
+    if (dbPath) flightRecorder = new FlightRecorder(dbPath);
+  } catch {
+    // ignore
+  }
+  const report = createDoctorReport({
+    env: process.env,
+    cacheAwareness,
+    flightRecorder,
+  });
+  process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+  if (flightRecorder) {
+    try {
+      flightRecorder.close();
+    } catch {
+      // best effort
+    }
+  }
+}
+
+function isCreateDoctorReportOptions(
+  value: NodeJS.ProcessEnv | CreateDoctorReportOptions
+): value is CreateDoctorReportOptions {
+  // CreateDoctorReportOptions carries either `env` (an object) or
+  // `flightRecorder` (an object). A NodeJS.ProcessEnv is a flat
+  // Record<string, string|undefined> — even if a shell happens to export
+  // `env=production` or `flightRecorder=...`, the value at that key is a
+  // STRING, not an object, so the typeof checks here cannot collide.
+  if (value === null || typeof value !== "object") return false;
+  if (Object.prototype.hasOwnProperty.call(value, "flightRecorder")) {
+    const candidate = (value as { flightRecorder?: unknown }).flightRecorder;
+    return candidate === undefined || typeof candidate === "object";
+  }
+  if (Object.prototype.hasOwnProperty.call(value, "env")) {
+    const candidate = (value as { env?: unknown }).env;
+    return candidate === undefined || typeof candidate === "object";
+  }
+  return false;
 }
 
 function doctorProviderStatus(

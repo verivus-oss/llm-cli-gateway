@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { randomUUID } from "crypto";
 import { existsSync, readFileSync, readdirSync, renameSync, unlinkSync } from "fs";
@@ -19,7 +19,13 @@ import {
   optimizePrompt as optimizePromptText,
   optimizeResponse as optimizeResponseText,
 } from "./optimizer.js";
-import { loadConfig, loadPersistenceConfig, type PersistenceConfig } from "./config.js";
+import {
+  loadConfig,
+  loadPersistenceConfig,
+  loadCacheAwarenessConfig,
+  type PersistenceConfig,
+  type CacheAwarenessConfig,
+} from "./config.js";
 import { DatabaseConnection } from "./db.js";
 import { checkHealth } from "./health.js";
 import {
@@ -71,6 +77,12 @@ import {
   type ClaudeAgentDefinition,
 } from "./request-helpers.js";
 import { createFlightRecorder, FlightRecorderLike } from "./flight-recorder.js";
+import {
+  resolvePromptInput,
+  PromptPartsSchema,
+  type PromptParts,
+} from "./prompt-parts.js";
+import { computeSessionCacheStats, computeTtlRemaining } from "./cache-stats.js";
 import { getCliVersions, runCliUpgrade } from "./cli-updater.js";
 import { startHttpGateway, type HttpGatewayHandle } from "./http-transport.js";
 import { printDoctorJson } from "./doctor.js";
@@ -81,6 +93,22 @@ import {
   buildUpstreamContractReport,
 } from "./upstream-contracts.js";
 import { entrypointFileURL } from "./entrypoint-url.js";
+
+/**
+ * Slice 3: structured warning entries attached to tool responses.
+ * Distinct from review-integrity warnings (which are text-appended to
+ * the user-visible response). These are programmatic signals for caller
+ * agents to react to.
+ */
+export interface WarningEntry {
+  /** Stable machine-readable code, e.g. "cache_ttl_expiring_soon". */
+  code: string;
+  /** Optional human-readable message for surfaces that render text. */
+  message?: string;
+  /** Code-specific payload — left open for future warning types. */
+  ttlRemainingMs?: number;
+  [key: string]: unknown;
+}
 
 type ExtendedToolResponse = {
   content: { type: "text"; text: string }[];
@@ -95,6 +123,8 @@ type ExtendedToolResponse = {
     missing?: ClaudeMcpServerName[];
   };
   reviewIntegrity?: ReviewIntegrityResult;
+  /** Slice 3: structured warnings (e.g. cache_ttl_expiring_soon). */
+  warnings?: WarningEntry[];
 };
 
 // Simple logger that writes to stderr (stdout is used for MCP protocol)
@@ -273,6 +303,7 @@ let flightRecorder: FlightRecorderLike | null = null;
 // registered (see createGatewayServer), making silent in-memory loss
 // structurally impossible.
 let persistenceConfig: PersistenceConfig | null = null;
+let cacheAwarenessConfig: CacheAwarenessConfig | null = null;
 let jobStore: JobStore | null = null;
 let jobStoreInitialized = false;
 let asyncJobManager: AsyncJobManager | null = null;
@@ -286,6 +317,13 @@ function getFlightRecorder(runtimeLogger: GatewayLogger = logger): FlightRecorde
 function getPersistenceConfig(runtimeLogger: GatewayLogger = logger): PersistenceConfig {
   persistenceConfig ??= loadPersistenceConfig(runtimeLogger);
   return persistenceConfig;
+}
+
+function getCacheAwarenessConfig(
+  runtimeLogger: GatewayLogger = logger
+): CacheAwarenessConfig {
+  cacheAwarenessConfig ??= loadCacheAwarenessConfig(runtimeLogger);
+  return cacheAwarenessConfig;
 }
 
 function getJobStore(runtimeLogger: GatewayLogger = logger): JobStore | null {
@@ -345,6 +383,7 @@ export interface GatewayServerDeps {
   flightRecorder?: FlightRecorderLike;
   logger?: GatewayLogger;
   persistence?: PersistenceConfig;
+  cacheAwareness?: CacheAwarenessConfig;
 }
 
 interface GatewayServerRuntime {
@@ -357,6 +396,7 @@ interface GatewayServerRuntime {
   flightRecorder: FlightRecorderLike;
   logger: GatewayLogger;
   persistence: PersistenceConfig;
+  cacheAwareness: CacheAwarenessConfig;
 }
 
 function resolveGatewayServerRuntime(
@@ -381,20 +421,27 @@ function resolveGatewayServerRuntime(
       ? new ApprovalManager(undefined, runtimeLogger)
       : getApprovalManager(runtimeLogger));
 
+  const runtimeFlightRecorder = deps.flightRecorder ?? getFlightRecorder(runtimeLogger);
   return {
     sessionManager: runtimeSessionManager,
     resourceProvider:
       deps.resourceProvider ??
       (options.isolateState
-        ? new ResourceProvider(runtimeSessionManager, runtimePerformanceMetrics)
+        ? new ResourceProvider(
+            runtimeSessionManager,
+            runtimePerformanceMetrics,
+            runtimeFlightRecorder,
+            deps.cacheAwareness ?? getCacheAwarenessConfig(runtimeLogger)
+          )
         : resourceProvider),
     db: "db" in deps ? (deps.db ?? null) : db,
     performanceMetrics: runtimePerformanceMetrics,
     asyncJobManager: runtimeAsyncJobManager,
     approvalManager: runtimeApprovalManager,
-    flightRecorder: deps.flightRecorder ?? getFlightRecorder(runtimeLogger),
+    flightRecorder: runtimeFlightRecorder,
     logger: runtimeLogger,
     persistence: deps.persistence ?? getPersistenceConfig(runtimeLogger),
+    cacheAwareness: deps.cacheAwareness ?? getCacheAwarenessConfig(runtimeLogger),
   };
 }
 
@@ -1023,6 +1070,89 @@ function registerBaseResources(server: McpServer, runtime: GatewayServerRuntime)
       return { contents: contents ? [contents] : [] };
     }
   );
+
+  // Cache-state resources (slice 2). Static URI for global, templated for
+  // session/{id} and prefix/{hash}. All three return tokens/hashes/aggregates
+  // ONLY — never raw prompt or response text. The structural guarantee is in
+  // the SessionCacheStats / PrefixCacheStats / GlobalCacheStats types
+  // themselves: those shapes have no prompt/response/system/task fields.
+  server.registerResource(
+    "cache-state-global",
+    "cache_state://global",
+    {
+      title: "💾 Cache State (Global)",
+      description:
+        "Aggregate cache hit/miss/savings across all CLIs in the flight recorder. Tokens/hashes only — no prompt text.",
+      mimeType: "application/json",
+    },
+    async uri => {
+      runtime.logger.debug("Reading cache_state://global resource");
+      const stats = runtime.resourceProvider.readCacheStateGlobal({
+        lastNHours: 24,
+      });
+      return {
+        contents: [
+          {
+            uri: uri.href,
+            mimeType: "application/json",
+            text: JSON.stringify(stats, null, 2),
+          },
+        ],
+      };
+    }
+  );
+
+  server.registerResource(
+    "cache-state-session",
+    new ResourceTemplate("cache_state://session/{sessionId}", { list: undefined }),
+    {
+      title: "💾 Cache State (Session)",
+      description:
+        "Per-session cache hit/miss/savings. Tokens/hashes only — no prompt text.",
+      mimeType: "application/json",
+    },
+    async (uri, variables) => {
+      const sessionId = Array.isArray(variables.sessionId)
+        ? variables.sessionId[0]
+        : variables.sessionId;
+      runtime.logger.debug(`Reading cache_state://session/${sessionId}`);
+      const stats = runtime.resourceProvider.readCacheStateSession(String(sessionId));
+      return {
+        contents: [
+          {
+            uri: uri.href,
+            mimeType: "application/json",
+            text: JSON.stringify(stats, null, 2),
+          },
+        ],
+      };
+    }
+  );
+
+  server.registerResource(
+    "cache-state-prefix",
+    new ResourceTemplate("cache_state://prefix/{hash}", { list: undefined }),
+    {
+      title: "💾 Cache State (Prefix)",
+      description:
+        "Per-stable-prefix-hash cache hit/miss/savings, with CLI breakdown. Tokens/hashes only — no prompt text.",
+      mimeType: "application/json",
+    },
+    async (uri, variables) => {
+      const hash = Array.isArray(variables.hash) ? variables.hash[0] : variables.hash;
+      runtime.logger.debug(`Reading cache_state://prefix/${hash}`);
+      const stats = runtime.resourceProvider.readCacheStateForPrefix(String(hash));
+      return {
+        contents: [
+          {
+            uri: uri.href,
+            mimeType: "application/json",
+            text: JSON.stringify(stats, null, 2),
+          },
+        ],
+      };
+    }
+  );
 }
 
 //──────────────────────────────────────────────────────────────────────────────
@@ -1038,11 +1168,72 @@ interface CliRequestPrep {
   approvalDecision: ApprovalRecord | null;
   reviewIntegrity?: ReviewIntegrityResult;
   args: string[];
+  /**
+   * Sha256 of the assembled prompt's stable prefix bytes when the caller
+   * supplied `promptParts`. Null when the legacy `prompt` field was used.
+   * Populated by `resolvePromptOrPartsForPrep` and threaded into the
+   * flight-recorder row by the caller's safeFlightStart entry.
+   */
+  stablePrefixHash: string | null;
+  /** Heuristic token count (bytes/4) of the same stable prefix. */
+  stablePrefixTokens: number | null;
+}
+
+/**
+ * Slice 1: validate the prompt / promptParts mutex at the prep boundary and
+ * return either an error response or the resolved input. The exact error
+ * messages are part of the public contract — tests assert them verbatim.
+ */
+function resolvePromptOrPartsForPrep(args: {
+  prompt: string | undefined;
+  promptParts: PromptParts | undefined;
+  operation: string;
+  correlationId: string | undefined;
+}):
+  | { ok: true; assembledPrompt: string; stablePrefixHash: string | null; stablePrefixTokens: number | null }
+  | { ok: false; error: ExtendedToolResponse } {
+  const hasPrompt = typeof args.prompt === "string" && args.prompt.length > 0;
+  const hasParts = args.promptParts !== undefined;
+  if (hasPrompt && hasParts) {
+    return {
+      ok: false,
+      error: createErrorResponse(
+        args.operation,
+        1,
+        "",
+        args.correlationId,
+        new Error("provide exactly one of `prompt` or `promptParts`")
+      ) as ExtendedToolResponse,
+    };
+  }
+  if (!hasPrompt && !hasParts) {
+    return {
+      ok: false,
+      error: createErrorResponse(
+        args.operation,
+        1,
+        "",
+        args.correlationId,
+        new Error("one of `prompt` or `promptParts` is required")
+      ) as ExtendedToolResponse,
+    };
+  }
+  const resolved = resolvePromptInput({
+    prompt: args.prompt,
+    promptParts: args.promptParts,
+  });
+  return {
+    ok: true,
+    assembledPrompt: resolved.assembledPrompt,
+    stablePrefixHash: resolved.stablePrefixHash,
+    stablePrefixTokens: resolved.stablePrefixTokens,
+  };
 }
 
 export function prepareClaudeRequest(
   params: {
-    prompt: string;
+    prompt?: string;
+    promptParts?: PromptParts;
     model?: string;
     outputFormat: "text" | "json" | "stream-json";
     allowedTools?: string[];
@@ -1073,9 +1264,20 @@ export function prepareClaudeRequest(
   const cliInfo = getCliInfo();
   const resolvedModel = resolveModelAlias("claude", params.model, cliInfo);
 
+  const inputResolution = resolvePromptOrPartsForPrep({
+    prompt: params.prompt,
+    promptParts: params.promptParts,
+    operation: params.operation,
+    correlationId: corrId,
+  });
+  if (!inputResolution.ok) return inputResolution.error;
+  const assembledPrompt = inputResolution.assembledPrompt;
+  const stablePrefixHash = inputResolution.stablePrefixHash;
+  const stablePrefixTokens = inputResolution.stablePrefixTokens;
+
   // Review integrity check on raw prompt (before optimization)
   const reviewIntegrity = checkReviewIntegrity({
-    prompt: params.prompt,
+    prompt: assembledPrompt,
     allowedTools: params.allowedTools,
     disallowedTools: params.disallowedTools,
   });
@@ -1090,7 +1292,7 @@ export function prepareClaudeRequest(
     );
   }
 
-  let effectivePrompt = params.prompt;
+  let effectivePrompt = assembledPrompt;
   if (params.optimizePrompt) {
     const optimized = optimizePromptText(effectivePrompt);
     logOptimizationTokens("prompt", corrId, effectivePrompt, optimized);
@@ -1114,7 +1316,7 @@ export function prepareClaudeRequest(
     approvalDecision = runtime.approvalManager.decide({
       cli: "claude",
       operation: params.operation,
-      prompt: params.prompt, // Use raw prompt for review-context detection, not optimized
+      prompt: assembledPrompt, // Use raw assembled prompt for review-context detection, not optimized
       bypassRequested: params.dangerouslySkipPermissions,
       fullAuto: false,
       requestedMcpServers,
@@ -1201,6 +1403,8 @@ export function prepareClaudeRequest(
     approvalDecision,
     reviewIntegrity,
     args,
+    stablePrefixHash,
+    stablePrefixTokens,
   };
 }
 
@@ -1216,7 +1420,8 @@ export interface CodexRequestPrep extends CliRequestPrep {
 
 export function prepareCodexRequest(
   params: {
-    prompt: string;
+    prompt?: string;
+    promptParts?: PromptParts;
     model?: string;
     fullAuto: boolean;
     sandboxMode?: CodexSandboxMode;
@@ -1254,8 +1459,19 @@ export function prepareCodexRequest(
   const cliInfo = getCliInfo();
   const resolvedModel = resolveModelAlias("codex", params.model, cliInfo);
 
+  const inputResolution = resolvePromptOrPartsForPrep({
+    prompt: params.prompt,
+    promptParts: params.promptParts,
+    operation: params.operation,
+    correlationId: corrId,
+  });
+  if (!inputResolution.ok) return inputResolution.error;
+  const assembledPrompt = inputResolution.assembledPrompt;
+  const stablePrefixHash = inputResolution.stablePrefixHash;
+  const stablePrefixTokens = inputResolution.stablePrefixTokens;
+
   // Review integrity check on raw prompt (before optimization)
-  const reviewIntegrity = checkReviewIntegrity({ prompt: params.prompt });
+  const reviewIntegrity = checkReviewIntegrity({ prompt: assembledPrompt });
   if (reviewIntegrity.violations.length > 0) {
     runtime.logger.info(
       `[${corrId}] Review integrity violations detected: ${reviewIntegrity.violations.map(v => v.type).join(", ")}`,
@@ -1267,7 +1483,7 @@ export function prepareCodexRequest(
     );
   }
 
-  let effectivePrompt = params.prompt;
+  let effectivePrompt = assembledPrompt;
   if (params.optimizePrompt) {
     const optimized = optimizePromptText(effectivePrompt);
     logOptimizationTokens("prompt", corrId, effectivePrompt, optimized);
@@ -1281,7 +1497,7 @@ export function prepareCodexRequest(
     approvalDecision = runtime.approvalManager.decide({
       cli: "codex",
       operation: params.operation,
-      prompt: params.prompt, // Use raw prompt for review-context detection, not optimized
+      prompt: assembledPrompt, // Use raw assembled prompt for review-context detection, not optimized
       bypassRequested: params.dangerouslyBypassApprovalsAndSandbox,
       fullAuto: params.fullAuto,
       requestedMcpServers,
@@ -1410,12 +1626,15 @@ export function prepareCodexRequest(
     reviewIntegrity,
     args,
     cleanup: highImpactCleanup,
+    stablePrefixHash,
+    stablePrefixTokens,
   };
 }
 
 export function prepareGeminiRequest(
   params: {
-    prompt: string;
+    prompt?: string;
+    promptParts?: PromptParts;
     model?: string;
     approvalMode?: string;
     approvalStrategy: "legacy" | "mcp_managed";
@@ -1444,9 +1663,20 @@ export function prepareGeminiRequest(
   const cliInfo = getCliInfo();
   const resolvedModel = resolveModelAlias("gemini", params.model, cliInfo);
 
+  const inputResolution = resolvePromptOrPartsForPrep({
+    prompt: params.prompt,
+    promptParts: params.promptParts,
+    operation: params.operation,
+    correlationId: corrId,
+  });
+  if (!inputResolution.ok) return inputResolution.error;
+  const assembledPrompt = inputResolution.assembledPrompt;
+  const stablePrefixHash = inputResolution.stablePrefixHash;
+  const stablePrefixTokens = inputResolution.stablePrefixTokens;
+
   // Review integrity check on raw prompt (before optimization)
   const reviewIntegrity = checkReviewIntegrity({
-    prompt: params.prompt,
+    prompt: assembledPrompt,
     allowedTools: params.allowedTools,
   });
   if (reviewIntegrity.violations.length > 0) {
@@ -1460,7 +1690,7 @@ export function prepareGeminiRequest(
     );
   }
 
-  let effectivePrompt = params.prompt;
+  let effectivePrompt = assembledPrompt;
   if (params.optimizePrompt) {
     const optimized = optimizePromptText(effectivePrompt);
     logOptimizationTokens("prompt", corrId, effectivePrompt, optimized);
@@ -1474,7 +1704,7 @@ export function prepareGeminiRequest(
     approvalDecision = runtime.approvalManager.decide({
       cli: "gemini",
       operation: params.operation,
-      prompt: params.prompt, // Use raw prompt for review-context detection, not optimized
+      prompt: assembledPrompt, // Use raw assembled prompt for review-context detection, not optimized
       bypassRequested: params.approvalMode === "yolo",
       fullAuto: false,
       requestedMcpServers,
@@ -1561,12 +1791,15 @@ export function prepareGeminiRequest(
     approvalDecision,
     reviewIntegrity,
     args,
+    stablePrefixHash,
+    stablePrefixTokens,
   };
 }
 
 function prepareGrokRequest(
   params: {
-    prompt: string;
+    prompt?: string;
+    promptParts?: PromptParts;
     model?: string;
     outputFormat?: string;
     alwaysApprove?: boolean;
@@ -1588,9 +1821,20 @@ function prepareGrokRequest(
   const cliInfo = getCliInfo();
   const resolvedModel = resolveModelAlias("grok", params.model, cliInfo);
 
+  const inputResolution = resolvePromptOrPartsForPrep({
+    prompt: params.prompt,
+    promptParts: params.promptParts,
+    operation: params.operation,
+    correlationId: corrId,
+  });
+  if (!inputResolution.ok) return inputResolution.error;
+  const assembledPrompt = inputResolution.assembledPrompt;
+  const stablePrefixHash = inputResolution.stablePrefixHash;
+  const stablePrefixTokens = inputResolution.stablePrefixTokens;
+
   // Review integrity check on raw prompt (before optimization)
   const reviewIntegrity = checkReviewIntegrity({
-    prompt: params.prompt,
+    prompt: assembledPrompt,
     allowedTools: params.allowedTools,
     disallowedTools: params.disallowedTools,
   });
@@ -1605,7 +1849,7 @@ function prepareGrokRequest(
     );
   }
 
-  let effectivePrompt = params.prompt;
+  let effectivePrompt = assembledPrompt;
   if (params.optimizePrompt) {
     const optimized = optimizePromptText(effectivePrompt);
     logOptimizationTokens("prompt", corrId, effectivePrompt, optimized);
@@ -1619,7 +1863,7 @@ function prepareGrokRequest(
     approvalDecision = runtime.approvalManager.decide({
       cli: "grok",
       operation: params.operation,
-      prompt: params.prompt, // Use raw prompt for review-context detection, not optimized
+      prompt: assembledPrompt, // Use raw assembled prompt for review-context detection, not optimized
       bypassRequested:
         Boolean(params.alwaysApprove) || params.permissionMode === "bypassPermissions",
       fullAuto: false,
@@ -1663,12 +1907,15 @@ function prepareGrokRequest(
     approvalDecision,
     reviewIntegrity,
     args,
+    stablePrefixHash,
+    stablePrefixTokens,
   };
 }
 
 export function prepareMistralRequest(
   params: {
-    prompt: string;
+    prompt?: string;
+    promptParts?: PromptParts;
     model?: string;
     outputFormat?: string;
     permissionMode?: MistralAgentMode;
@@ -1689,8 +1936,19 @@ export function prepareMistralRequest(
   const cliInfo = getCliInfo();
   const resolvedModel = resolveModelAlias("mistral", params.model, cliInfo);
 
-  const reviewIntegrity = checkReviewIntegrity({
+  const inputResolution = resolvePromptOrPartsForPrep({
     prompt: params.prompt,
+    promptParts: params.promptParts,
+    operation: params.operation,
+    correlationId: corrId,
+  });
+  if (!inputResolution.ok) return inputResolution.error;
+  const assembledPrompt = inputResolution.assembledPrompt;
+  const stablePrefixHash = inputResolution.stablePrefixHash;
+  const stablePrefixTokens = inputResolution.stablePrefixTokens;
+
+  const reviewIntegrity = checkReviewIntegrity({
+    prompt: assembledPrompt,
     allowedTools: params.allowedTools,
     disallowedTools: params.disallowedTools,
   });
@@ -1705,7 +1963,7 @@ export function prepareMistralRequest(
     );
   }
 
-  let effectivePrompt = params.prompt;
+  let effectivePrompt = assembledPrompt;
   if (params.optimizePrompt) {
     const optimized = optimizePromptText(effectivePrompt);
     logOptimizationTokens("prompt", corrId, effectivePrompt, optimized);
@@ -1719,7 +1977,7 @@ export function prepareMistralRequest(
     approvalDecision = runtime.approvalManager.decide({
       cli: "mistral",
       operation: params.operation,
-      prompt: params.prompt,
+      prompt: assembledPrompt,
       bypassRequested: params.permissionMode === "auto-approve",
       fullAuto: false,
       requestedMcpServers,
@@ -1771,6 +2029,8 @@ export function prepareMistralRequest(
     reviewIntegrity,
     args: prep.args,
     mistralEnv: prep.env,
+    stablePrefixHash,
+    stablePrefixTokens,
   };
 }
 
@@ -1801,7 +2061,8 @@ function buildCliResponse(
   prep: CliRequestPrep,
   durationMs: number,
   resumable?: boolean,
-  outputFormat?: string
+  outputFormat?: string,
+  warnings?: WarningEntry[]
 ): ExtendedToolResponse {
   let finalStdout = stdout;
   // Skip response optimization for JSON output to prevent corrupting structured data
@@ -1855,7 +2116,40 @@ function buildCliResponse(
   if (prep.reviewIntegrity && prep.reviewIntegrity.violations.length > 0) {
     response.reviewIntegrity = prep.reviewIntegrity;
   }
+  if (warnings && warnings.length > 0) {
+    response.warnings = warnings;
+  }
   return response;
+}
+
+/**
+ * Slice 3 helper: compute the cache_ttl_expiring_soon warning for a
+ * claude session, if the feature is enabled, the session has prior cache
+ * writes, and ttlRemainingMs is below the threshold (30s by default).
+ * Returns null when no warning applies.
+ */
+function maybeBuildCacheTtlWarning(args: {
+  runtime: GatewayServerRuntime;
+  sessionId: string | undefined;
+  cli: "claude" | "codex" | "gemini" | "grok" | "mistral";
+  thresholdMs?: number;
+}): WarningEntry | null {
+  if (args.cli !== "claude") return null;
+  if (!args.sessionId) return null;
+  if (!args.runtime.cacheAwareness?.warnOnTtlExpiry) return null;
+  const stats = computeSessionCacheStats(args.runtime.flightRecorder, args.sessionId);
+  if (stats.requestCount === 0 || !stats.lastRequestAt) return null;
+  const ttl = computeTtlRemaining(stats, args.cli, {
+    anthropicTtlSeconds: args.runtime.cacheAwareness.anthropicTtlSeconds,
+  });
+  if (ttl === null) return null;
+  const threshold = args.thresholdMs ?? 30_000;
+  if (ttl >= threshold) return null;
+  return {
+    code: "cache_ttl_expiring_soon",
+    ttlRemainingMs: ttl,
+    message: `Anthropic cache breakpoint for session ${args.sessionId} expires in ${ttl}ms (< ${threshold}ms). Subsequent requests may miss the cache.`,
+  };
 }
 
 //──────────────────────────────────────────────────────────────────────────────
@@ -1863,7 +2157,8 @@ function buildCliResponse(
 //──────────────────────────────────────────────────────────────────────────────
 
 export interface GeminiRequestParams {
-  prompt: string;
+  prompt?: string;
+  promptParts?: PromptParts;
   model?: string;
   sessionId?: string;
   resumeLatest: boolean;
@@ -1931,6 +2226,7 @@ export async function handleGeminiRequest(
   const prep = prepareGeminiRequest(
     {
       prompt: params.prompt,
+      promptParts: params.promptParts,
       model: params.model,
       approvalMode: params.approvalMode,
       approvalStrategy: params.approvalStrategy,
@@ -1959,13 +2255,15 @@ export async function handleGeminiRequest(
       correlationId: corrId,
       cli: "gemini",
       model: prep.resolvedModel || "default",
-      prompt: params.prompt,
+      prompt: prep.effectivePrompt,
       sessionId: params.sessionId,
+      stablePrefixHash: prep.stablePrefixHash ?? undefined,
+      stablePrefixTokens: prep.stablePrefixTokens ?? undefined,
     },
     runtime
   );
   deps.logger.info(
-    `[${corrId}] gemini_request invoked with model=${prep.resolvedModel || "default"}, approvalMode=${params.approvalMode}, prompt length=${params.prompt.length}`
+    `[${corrId}] gemini_request invoked with model=${prep.resolvedModel || "default"}, approvalMode=${params.approvalMode}, prompt length=${prep.effectivePrompt.length}`
   );
 
   try {
@@ -2100,6 +2398,7 @@ export async function handleGeminiRequestAsync(
   const prep = prepareGeminiRequest(
     {
       prompt: params.prompt,
+      promptParts: params.promptParts,
       model: params.model,
       approvalMode: params.approvalMode,
       approvalStrategy: params.approvalStrategy,
@@ -2188,7 +2487,8 @@ export async function handleGeminiRequestAsync(
 }
 
 export interface GrokRequestParams {
-  prompt: string;
+  prompt?: string;
+  promptParts?: PromptParts;
   model?: string;
   outputFormat?: string;
   sessionId?: string;
@@ -2219,6 +2519,7 @@ export async function handleGrokRequest(
   const prep = prepareGrokRequest(
     {
       prompt: params.prompt,
+      promptParts: params.promptParts,
       model: params.model,
       outputFormat: params.outputFormat,
       alwaysApprove: params.alwaysApprove,
@@ -2246,13 +2547,15 @@ export async function handleGrokRequest(
       correlationId: corrId,
       cli: "grok",
       model: prep.resolvedModel || "default",
-      prompt: params.prompt,
+      prompt: prep.effectivePrompt,
       sessionId: params.sessionId,
+      stablePrefixHash: prep.stablePrefixHash ?? undefined,
+      stablePrefixTokens: prep.stablePrefixTokens ?? undefined,
     },
     runtime
   );
   deps.logger.info(
-    `[${corrId}] grok_request invoked with model=${prep.resolvedModel || "default"}, permissionMode=${params.permissionMode}, prompt length=${params.prompt.length}`
+    `[${corrId}] grok_request invoked with model=${prep.resolvedModel || "default"}, permissionMode=${params.permissionMode}, prompt length=${prep.effectivePrompt.length}`
   );
 
   try {
@@ -2383,6 +2686,7 @@ export async function handleGrokRequestAsync(
   const prep = prepareGrokRequest(
     {
       prompt: params.prompt,
+      promptParts: params.promptParts,
       model: params.model,
       outputFormat: params.outputFormat,
       alwaysApprove: params.alwaysApprove,
@@ -2475,7 +2779,8 @@ export async function handleGrokRequestAsync(
 }
 
 export interface MistralRequestParams {
-  prompt: string;
+  prompt?: string;
+  promptParts?: PromptParts;
   model?: string;
   outputFormat?: string;
   sessionId?: string;
@@ -2505,6 +2810,7 @@ export async function handleMistralRequest(
   const prep = prepareMistralRequest(
     {
       prompt: params.prompt,
+      promptParts: params.promptParts,
       model: params.model,
       outputFormat: params.outputFormat,
       permissionMode: params.permissionMode,
@@ -2531,13 +2837,15 @@ export async function handleMistralRequest(
       correlationId: corrId,
       cli: "mistral",
       model: prep.resolvedModel || "default",
-      prompt: params.prompt,
+      prompt: prep.effectivePrompt,
       sessionId: params.sessionId,
+      stablePrefixHash: prep.stablePrefixHash ?? undefined,
+      stablePrefixTokens: prep.stablePrefixTokens ?? undefined,
     },
     runtime
   );
   deps.logger.info(
-    `[${corrId}] mistral_request invoked with model=${prep.resolvedModel || "default"}, permissionMode=${params.permissionMode || "auto-approve"}, prompt length=${params.prompt.length}`
+    `[${corrId}] mistral_request invoked with model=${prep.resolvedModel || "default"}, permissionMode=${params.permissionMode || "auto-approve"}, prompt length=${prep.effectivePrompt.length}`
   );
 
   try {
@@ -2704,6 +3012,7 @@ export async function handleMistralRequestAsync(
   const prep = prepareMistralRequest(
     {
       prompt: params.prompt,
+      promptParts: params.promptParts,
       model: params.model,
       outputFormat: params.outputFormat,
       permissionMode: params.permissionMode,
@@ -2795,7 +3104,8 @@ export async function handleMistralRequestAsync(
 export async function handleCodexRequestAsync(
   deps: AsyncHandlerDeps,
   params: {
-    prompt: string;
+    prompt?: string;
+    promptParts?: PromptParts;
     model?: string;
     fullAuto: boolean;
     sandboxMode?: CodexSandboxMode;
@@ -2828,6 +3138,7 @@ export async function handleCodexRequestAsync(
   const prep = prepareCodexRequest(
     {
       prompt: params.prompt,
+      promptParts: params.promptParts,
       model: params.model,
       fullAuto: params.fullAuto,
       sandboxMode: params.sandboxMode,
@@ -2964,7 +3275,16 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
     performanceMetrics,
     logger,
     persistence,
+    flightRecorder,
+    cacheAwareness,
   } = runtime;
+  // `flightRecorder` is destructured into closure scope so the session_get
+  // handler (see ~line 5590) has the FlightRecorderQuery read capability
+  // available without re-resolving runtime. Slice 2 will populate the
+  // `cacheState` field of session_get's response from this read surface.
+  // `cacheAwareness` is the loaded [cache_awareness] block (config.ts).
+  void flightRecorder;
+  void cacheAwareness;
   // Structural invariant: tools register iff ALL THREE conditions hold:
   //   (1) persistence.backend !== "none"  — the operator/config has not
   //       explicitly disabled durable persistence;
@@ -2994,7 +3314,13 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .string()
         .min(1, "Prompt cannot be empty")
         .max(100000, "Prompt too long (max 100k chars)")
-        .describe("Prompt text for Claude"),
+        .optional()
+        .describe(
+          "Prompt text for Claude (mutually exclusive with promptParts)"
+        ),
+      promptParts: PromptPartsSchema.optional().describe(
+        "Cache-aware structured prompt: { system?, tools?, context?, task }. Mutually exclusive with prompt. Stable parts hash into cache_state for prefix-discipline tracking."
+      ),
       model: z
         .string()
         .optional()
@@ -3102,6 +3428,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
     },
     async ({
       prompt,
+      promptParts,
       model,
       outputFormat,
       sessionId,
@@ -3145,6 +3472,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       const prep = prepareClaudeRequest(
         {
           prompt,
+          promptParts,
           model,
           outputFormat,
           allowedTools,
@@ -3175,33 +3503,64 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       const { corrId, args } = prep;
       let durationMs = 0;
       let wasSuccessful = false;
+
+      // Session resolution happens BEFORE safeFlightStart so that:
+      //   (1) the TTL warning reads the PRIOR session's lastWriteAt
+      //       rather than the row about to be inserted (codex-r1/F1).
+      //   (2) the flight-recorder row is tagged with effectiveSessionId
+      //       (the session the CLI will actually resume), not the raw
+      //       user-provided sessionId.
+      let effectiveSessionId = sessionId;
+      let useContinue = continueSession;
+      // Guard the active-session lookup: in some test harnesses the
+      // sessionManager is undefined; the original try-catch wrapped this
+      // block, so we replicate that tolerance here. Failure leaves
+      // effectiveSessionId as the user-provided sessionId.
+      let activeSession: Awaited<ReturnType<ISessionManager["getActiveSession"]>> | null = null;
+      try {
+        activeSession = await sessionManager.getActiveSession("claude");
+      } catch (err) {
+        logger.warn(
+          `[${corrId}] sessionManager.getActiveSession failed (non-fatal): ${(err as Error).message}`
+        );
+      }
+
+      if (!createNewSession && !continueSession && !sessionId && activeSession) {
+        effectiveSessionId = activeSession.id;
+        useContinue = true;
+      }
+      if (!useContinue && effectiveSessionId && activeSession?.id === effectiveSessionId) {
+        useContinue = true;
+      }
+
+      // Slice 3: if the resolved session has a near-expiry Anthropic
+      // cache breakpoint, attach a structured warning (NOT a hard error)
+      // to the response. Computed BEFORE safeFlightStart so the current
+      // row does not skew lastRequestAt.
+      const ttlWarning = maybeBuildCacheTtlWarning({
+        runtime,
+        sessionId: effectiveSessionId,
+        cli: "claude",
+      });
+      const warnings: WarningEntry[] = ttlWarning ? [ttlWarning] : [];
+
       safeFlightStart(
         {
           correlationId: corrId,
           cli: "claude",
           model: prep.resolvedModel || "default",
-          prompt,
-          sessionId,
+          prompt: prep.effectivePrompt,
+          sessionId: effectiveSessionId,
+          stablePrefixHash: prep.stablePrefixHash ?? undefined,
+          stablePrefixTokens: prep.stablePrefixTokens ?? undefined,
         },
         runtime
       );
       logger.info(
-        `[${corrId}] claude_request invoked with model=${prep.resolvedModel || "default"}, outputFormat=${outputFormat}, prompt length=${prompt.length}, sessionId=${sessionId}`
+        `[${corrId}] claude_request invoked with model=${prep.resolvedModel || "default"}, outputFormat=${outputFormat}, prompt length=${prep.effectivePrompt.length}, sessionId=${effectiveSessionId}`
       );
 
       try {
-        // Session management
-        let effectiveSessionId = sessionId;
-        let useContinue = continueSession;
-        const activeSession = await sessionManager.getActiveSession("claude");
-
-        if (!createNewSession && !continueSession && !sessionId && activeSession) {
-          effectiveSessionId = activeSession.id;
-          useContinue = true;
-        }
-        if (!useContinue && effectiveSessionId && activeSession?.id === effectiveSessionId) {
-          useContinue = true;
-        }
         if (useContinue) {
           args.push("--continue");
         } else if (effectiveSessionId) {
@@ -3246,7 +3605,14 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             },
             runtime
           );
-          return createErrorResponse("claude", code, stderr, corrId);
+          // Slice 3: attach any computed warnings to the error response so
+          // the caller still sees cache_ttl_expiring_soon when the CLI
+          // happens to fail for an unrelated reason.
+          const errResp = createErrorResponse("claude", code, stderr, corrId);
+          if (warnings.length > 0) {
+            (errResp as ExtendedToolResponse).warnings = warnings;
+          }
+          return errResp;
         }
         wasSuccessful = true;
 
@@ -3295,7 +3661,8 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             prep,
             durationMs,
             undefined,
-            outputFormat
+            outputFormat,
+            warnings
           );
         }
         safeFlightComplete(
@@ -3320,7 +3687,8 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           prep,
           durationMs,
           undefined,
-          outputFormat
+          outputFormat,
+          warnings
         );
       } catch (error) {
         const elapsedMs = Math.max(0, Date.now() - startTime);
@@ -3358,7 +3726,11 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .string()
         .min(1, "Prompt cannot be empty")
         .max(100000, "Prompt too long (max 100k chars)")
-        .describe("Prompt text for Codex"),
+        .optional()
+        .describe("Prompt text for Codex (mutually exclusive with promptParts)"),
+      promptParts: PromptPartsSchema.optional().describe(
+        "Cache-aware structured prompt: { system?, tools?, context?, task }. Mutually exclusive with prompt. Stable parts hash into cache_state for prefix-discipline tracking."
+      ),
       model: z.string().optional().describe("Model name or alias (e.g. gpt-5.4, latest)"),
       fullAuto: z
         .boolean()
@@ -3468,6 +3840,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
     },
     async ({
       prompt,
+      promptParts,
       model,
       fullAuto,
       sandboxMode,
@@ -3499,6 +3872,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       const prep = prepareCodexRequest(
         {
           prompt,
+          promptParts,
           model,
           fullAuto,
           sandboxMode,
@@ -3536,13 +3910,15 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           correlationId: corrId,
           cli: "codex",
           model: prep.resolvedModel || "default",
-          prompt,
+          prompt: prep.effectivePrompt,
           sessionId,
+          stablePrefixHash: prep.stablePrefixHash ?? undefined,
+          stablePrefixTokens: prep.stablePrefixTokens ?? undefined,
         },
         runtime
       );
       logger.info(
-        `[${corrId}] codex_request invoked with model=${prep.resolvedModel || "default"}, fullAuto=${fullAuto}, prompt length=${prompt.length}`
+        `[${corrId}] codex_request invoked with model=${prep.resolvedModel || "default"}, fullAuto=${fullAuto}, prompt length=${prep.effectivePrompt.length}`
       );
 
       // U26 fix: pass the outputSchema cleanup to awaitJobOrDefer, which
@@ -3818,7 +4194,11 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .string()
         .min(1, "Prompt cannot be empty")
         .max(100000, "Prompt too long (max 100k chars)")
-        .describe("Prompt text for Gemini"),
+        .optional()
+        .describe("Prompt text for Gemini (mutually exclusive with promptParts)"),
+      promptParts: PromptPartsSchema.optional().describe(
+        "Cache-aware structured prompt: { system?, tools?, context?, task }. Mutually exclusive with prompt. Stable parts hash into cache_state for prefix-discipline tracking."
+      ),
       model: z
         .string()
         .optional()
@@ -3888,6 +4268,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
     },
     async ({
       prompt,
+      promptParts,
       model,
       sessionId,
       resumeLatest,
@@ -3913,6 +4294,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         { sessionManager, logger, runtime },
         {
           prompt,
+          promptParts,
           model,
           sessionId,
           resumeLatest,
@@ -3949,7 +4331,11 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .string()
         .min(1, "Prompt cannot be empty")
         .max(100000, "Prompt too long (max 100k chars)")
-        .describe("Prompt text for Grok"),
+        .optional()
+        .describe("Prompt text for Grok (mutually exclusive with promptParts)"),
+      promptParts: PromptPartsSchema.optional().describe(
+        "Cache-aware structured prompt: { system?, tools?, context?, task }. Mutually exclusive with prompt. Stable parts hash into cache_state for prefix-discipline tracking."
+      ),
       model: z.string().optional().describe("Model name or alias (e.g. grok-build, latest)"),
       outputFormat: z
         .enum(["plain", "json", "streaming-json"])
@@ -4018,6 +4404,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
     },
     async ({
       prompt,
+      promptParts,
       model,
       outputFormat,
       sessionId,
@@ -4042,6 +4429,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         { sessionManager, logger, runtime },
         {
           prompt,
+          promptParts,
           model,
           outputFormat,
           sessionId,
@@ -4077,7 +4465,11 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .string()
         .min(1, "Prompt cannot be empty")
         .max(100000, "Prompt too long (max 100k chars)")
-        .describe("Prompt text for Mistral Vibe"),
+        .optional()
+        .describe("Prompt text for Mistral Vibe (mutually exclusive with promptParts)"),
+      promptParts: PromptPartsSchema.optional().describe(
+        "Cache-aware structured prompt: { system?, tools?, context?, task }. Mutually exclusive with prompt. Stable parts hash into cache_state for prefix-discipline tracking."
+      ),
       model: z
         .string()
         .optional()
@@ -4155,6 +4547,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
     },
     async ({
       prompt,
+      promptParts,
       model,
       outputFormat,
       sessionId,
@@ -4178,6 +4571,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         { sessionManager, logger, runtime },
         {
           prompt,
+          promptParts,
           model,
           outputFormat,
           sessionId,
@@ -4220,7 +4614,11 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .string()
           .min(1, "Prompt cannot be empty")
           .max(100000, "Prompt too long (max 100k chars)")
-          .describe("Prompt text for Claude"),
+          .optional()
+          .describe("Prompt text for Claude (mutually exclusive with promptParts)"),
+        promptParts: PromptPartsSchema.optional().describe(
+          "Cache-aware structured prompt: { system?, tools?, context?, task }. Mutually exclusive with prompt. Stable parts hash into cache_state for prefix-discipline tracking."
+        ),
         model: z
           .string()
           .optional()
@@ -4329,6 +4727,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       },
       async ({
         prompt,
+        promptParts,
         model,
         outputFormat,
         sessionId,
@@ -4370,6 +4769,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         const prep = prepareClaudeRequest(
           {
             prompt,
+            promptParts,
             model,
             outputFormat,
             allowedTools,
@@ -4426,6 +4826,13 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             }
           }
 
+          // Slice 3: TTL warning on resume (async path too).
+          const ttlWarning = maybeBuildCacheTtlWarning({
+            runtime,
+            sessionId: effectiveSessionId,
+            cli: "claude",
+          });
+
           // Idle timeout only for stream-json (text/json produce no output until done)
           const effectiveIdleTimeout =
             outputFormat === "stream-json"
@@ -4460,6 +4867,9 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           if (prep.reviewIntegrity && prep.reviewIntegrity.violations.length > 0) {
             asyncResponse.reviewIntegrity = prep.reviewIntegrity;
           }
+          if (ttlWarning) {
+            asyncResponse.warnings = [ttlWarning];
+          }
 
           return {
             content: [
@@ -4482,7 +4892,11 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .string()
           .min(1, "Prompt cannot be empty")
           .max(100000, "Prompt too long (max 100k chars)")
-          .describe("Prompt text for Codex"),
+          .optional()
+          .describe("Prompt text for Codex (mutually exclusive with promptParts)"),
+        promptParts: PromptPartsSchema.optional().describe(
+          "Cache-aware structured prompt: { system?, tools?, context?, task }. Mutually exclusive with prompt. Stable parts hash into cache_state for prefix-discipline tracking."
+        ),
         model: z.string().optional().describe("Model name or alias (e.g. gpt-5.4, latest)"),
         fullAuto: z
           .boolean()
@@ -4570,6 +4984,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       },
       async ({
         prompt,
+        promptParts,
         model,
         fullAuto,
         sandboxMode,
@@ -4600,6 +5015,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           { sessionManager, asyncJobManager, logger, runtime },
           {
             prompt,
+            promptParts,
             model,
             fullAuto,
             sandboxMode,
@@ -4637,7 +5053,11 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .string()
           .min(1, "Prompt cannot be empty")
           .max(100000, "Prompt too long (max 100k chars)")
-          .describe("Prompt text for Gemini"),
+          .optional()
+          .describe("Prompt text for Gemini (mutually exclusive with promptParts)"),
+        promptParts: PromptPartsSchema.optional().describe(
+          "Cache-aware structured prompt: { system?, tools?, context?, task }. Mutually exclusive with prompt. Stable parts hash into cache_state for prefix-discipline tracking."
+        ),
         model: z
           .string()
           .optional()
@@ -4709,6 +5129,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       },
       async ({
         prompt,
+        promptParts,
         model,
         sessionId,
         resumeLatest,
@@ -4733,6 +5154,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           { sessionManager, asyncJobManager, logger, runtime },
           {
             prompt,
+            promptParts,
             model,
             sessionId,
             resumeLatest,
@@ -4764,7 +5186,11 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .string()
           .min(1, "Prompt cannot be empty")
           .max(100000, "Prompt too long (max 100k chars)")
-          .describe("Prompt text for Grok"),
+          .optional()
+          .describe("Prompt text for Grok (mutually exclusive with promptParts)"),
+        promptParts: PromptPartsSchema.optional().describe(
+          "Cache-aware structured prompt: { system?, tools?, context?, task }. Mutually exclusive with prompt. Stable parts hash into cache_state for prefix-discipline tracking."
+        ),
         model: z.string().optional().describe("Model name or alias (e.g. grok-build, latest)"),
         outputFormat: z
           .enum(["plain", "json", "streaming-json"])
@@ -4832,6 +5258,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       },
       async ({
         prompt,
+        promptParts,
         model,
         outputFormat,
         sessionId,
@@ -4855,6 +5282,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           { sessionManager, asyncJobManager, logger, runtime },
           {
             prompt,
+            promptParts,
             model,
             outputFormat,
             sessionId,
@@ -4885,7 +5313,11 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .string()
           .min(1, "Prompt cannot be empty")
           .max(100000, "Prompt too long (max 100k chars)")
-          .describe("Prompt text for Mistral Vibe"),
+          .optional()
+          .describe("Prompt text for Mistral Vibe (mutually exclusive with promptParts)"),
+        promptParts: PromptPartsSchema.optional().describe(
+          "Cache-aware structured prompt: { system?, tools?, context?, task }. Mutually exclusive with prompt. Stable parts hash into cache_state for prefix-discipline tracking."
+        ),
         model: z
           .string()
           .optional()
@@ -4962,6 +5394,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       },
       async ({
         prompt,
+        promptParts,
         model,
         outputFormat,
         sessionId,
@@ -4984,6 +5417,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           { sessionManager, asyncJobManager, logger, runtime },
           {
             prompt,
+            promptParts,
             model,
             outputFormat,
             sessionId,
@@ -5595,6 +6029,53 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
 
         const activeSession = await sessionManager.getActiveSession(session.cli);
 
+        // Slice 2: project a compact cacheState view from the flight
+        // recorder at read time. NOT persisted on the Session interface
+        // (sessions.json stays content-free per the project invariant).
+        // The field is OMITTED entirely (not null, not empty object) when
+        // the session has zero rows in the flight recorder so the response
+        // stays compact for fresh sessions.
+        //
+        // Slice 3: include ttlRemainingMs derived from the gateway's
+        // configured TTL policy. Null for non-claude sessions.
+        let cacheState:
+          | {
+              cli: string | null;
+              prefixDistinct: number;
+              totalCacheReadTokens: number;
+              totalCacheCreationTokens: number;
+              requestCount: number;
+              hitCount: number;
+              hitRate: number;
+              estimatedSavingsUsd: number;
+              ttlRemainingMs: number | null;
+            }
+          | undefined;
+        try {
+          const stats = computeSessionCacheStats(flightRecorder, session.id);
+          if (stats.requestCount > 0) {
+            const ttlRemainingMs = computeTtlRemaining(stats, stats.cli, {
+              anthropicTtlSeconds: cacheAwareness?.anthropicTtlSeconds ?? 300,
+            });
+            cacheState = {
+              cli: stats.cli,
+              prefixDistinct: stats.distinctPrefixCount,
+              totalCacheReadTokens: stats.totalCacheReadTokens,
+              totalCacheCreationTokens: stats.totalCacheCreationTokens,
+              requestCount: stats.requestCount,
+              hitCount: stats.hitCount,
+              hitRate: stats.hitRate,
+              estimatedSavingsUsd: stats.estimatedSavingsUsd,
+              ttlRemainingMs,
+            };
+          }
+        } catch (err) {
+          logger.warn?.(
+            `[session_get] cache-stats lookup failed (non-fatal)`,
+            err as Error
+          );
+        }
+
         return {
           content: [
             {
@@ -5605,6 +6086,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
                   session: {
                     ...session,
                     isActive: activeSession?.id === session.id,
+                    ...(cacheState ? { cacheState } : {}),
                   },
                 },
                 null,
@@ -5675,7 +6157,12 @@ async function initializeSessionManager(): Promise<void> {
     logger.info("File-based session manager initialized");
   }
 
-  resourceProvider = new ResourceProvider(sessionManager, performanceMetrics);
+  resourceProvider = new ResourceProvider(
+    sessionManager,
+    performanceMetrics,
+    getFlightRecorder(logger),
+    getCacheAwarenessConfig(logger)
+  );
 }
 
 //──────────────────────────────────────────────────────────────────────────────

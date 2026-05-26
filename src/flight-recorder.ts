@@ -1,3 +1,20 @@
+/**
+ * Flight recorder: SQLite-backed request log.
+ *
+ * Read access for cache-stats / MCP resources / doctor goes through the
+ * `queryRequests<T>(sql, ...params)` method exposed on both `FlightRecorder`
+ * and `NoopFlightRecorder` (the `FlightRecorderQuery` interface, see bottom
+ * of file). This is Option A from
+ * docs/plans/cache-awareness.dag.toml#expose-flight-recorder-read-access —
+ * a single read-only query surface on the existing class, NOT a sibling
+ * read-only SQLite connection. better-sqlite3 in WAL mode handles
+ * concurrent readers inside a single process safely, so the additional
+ * connection isn't needed and would have to be threaded through
+ * GatewayServerRuntime as a separate field.
+ *
+ * Callers MUST pass parameterised SQL — string-interpolation of untrusted
+ * values is unsafe even on a "read-only" query.
+ */
 import { chmodSync, existsSync, mkdirSync } from "fs";
 import os from "os";
 import path from "path";
@@ -11,6 +28,8 @@ export interface FlightLogStart {
   system?: string;
   sessionId?: string;
   asyncJobId?: string;
+  stablePrefixHash?: string;
+  stablePrefixTokens?: number;
 }
 
 export interface FlightLogResult {
@@ -66,6 +85,31 @@ function ensureRequestsCacheColumns(db: DatabaseLike): void {
   if (!names.has("cache_creation_tokens")) {
     db.exec("ALTER TABLE requests ADD COLUMN cache_creation_tokens INTEGER");
   }
+}
+
+/**
+ * Idempotent v3 migration: add `stable_prefix_hash` / `stable_prefix_tokens`
+ * columns plus their index. Populated only for new rows that carry a
+ * promptParts structure (slice 1); legacy rows keep NULL forever.
+ *
+ * Read access for cache-stats / MCP resources / doctor goes through the
+ * read-only `queryRequests()` method on FlightRecorder (no separate read
+ * connection — better-sqlite3 in WAL mode handles concurrent readers).
+ */
+function ensureStablePrefixColumns(db: DatabaseLike): void {
+  const rows = db.prepare("PRAGMA table_info(requests)").all?.() ?? [];
+  const names = new Set<string>(
+    rows.map((row: any) => (row && typeof row.name === "string" ? row.name : ""))
+  );
+  if (!names.has("stable_prefix_hash")) {
+    db.exec("ALTER TABLE requests ADD COLUMN stable_prefix_hash TEXT");
+  }
+  if (!names.has("stable_prefix_tokens")) {
+    db.exec("ALTER TABLE requests ADD COLUMN stable_prefix_tokens INTEGER");
+  }
+  db.exec(
+    "CREATE INDEX IF NOT EXISTS idx_requests_stable_hash ON requests(stable_prefix_hash)"
+  );
 }
 
 export function resolveFlightRecorderDbPath(): string | null {
@@ -193,6 +237,15 @@ export class FlightRecorder {
       .prepare("INSERT OR IGNORE INTO _migrations(version, applied_at) VALUES(2, ?)")
       .run(new Date().toISOString());
 
+    // Migration v3: stable_prefix_hash / stable_prefix_tokens columns plus
+    // their index. Populated only for new rows whose request carried a
+    // promptParts structure (slice 1 of cache-awareness); legacy rows keep
+    // NULL intentionally.
+    ensureStablePrefixColumns(this.db);
+    this.db
+      .prepare("INSERT OR IGNORE INTO _migrations(version, applied_at) VALUES(3, ?)")
+      .run(new Date().toISOString());
+
     if (process.platform !== "win32") {
       try {
         chmodSync(dbPath, 0o600);
@@ -202,8 +255,10 @@ export class FlightRecorder {
     }
 
     const insertRequest = this.db.prepare(`
-      INSERT INTO requests (id, cli, model, prompt, system, session_id, datetime_utc)
-      VALUES (@id, @cli, @model, @prompt, @system, @session_id, @datetime_utc)
+      INSERT INTO requests (id, cli, model, prompt, system, session_id, datetime_utc,
+                            stable_prefix_hash, stable_prefix_tokens)
+      VALUES (@id, @cli, @model, @prompt, @system, @session_id, @datetime_utc,
+              @stable_prefix_hash, @stable_prefix_tokens)
     `);
 
     const insertMetadata = this.db.prepare(`
@@ -220,6 +275,8 @@ export class FlightRecorder {
         system: entry.system || null,
         session_id: entry.sessionId || null,
         datetime_utc: new Date().toISOString(),
+        stable_prefix_hash: entry.stablePrefixHash ?? null,
+        stable_prefix_tokens: entry.stablePrefixTokens ?? null,
       });
 
       insertMetadata.run({
@@ -294,6 +351,34 @@ export class FlightRecorder {
     this.updateCompleteTxn(correlationId, result);
   }
 
+  /**
+   * Read-only query over the requests + gateway_metadata tables. Used by
+   * cache-stats / MCP resources / doctor without exposing a second SQLite
+   * connection. better-sqlite3 in WAL mode handles concurrent readers
+   * inside a single process safely.
+   *
+   * Safety:
+   * - Caller MUST pass parameterised SQL — direct string interpolation of
+   *   untrusted values is unsafe.
+   * - The compiled statement's `.readonly` flag is checked at runtime;
+   *   anything that can mutate rows (INSERT/UPDATE/DELETE, including the
+   *   `RETURNING` forms that better-sqlite3 surfaces via `.all()`) throws.
+   *   This blocks the writer-disguised-as-reader vector codex-r1/F3
+   *   flagged, even when the caller is internal gateway code.
+   */
+  queryRequests<T = Record<string, unknown>>(sql: string, ...params: unknown[]): T[] {
+    const stmt = this.db.prepare(sql) as StatementLike & { readonly?: boolean };
+    if (stmt.readonly === false) {
+      throw new Error(
+        "FlightRecorder.queryRequests refuses non-readonly SQL — use a transaction or a separate write surface for INSERT/UPDATE/DELETE."
+      );
+    }
+    if (!stmt.all) {
+      return [];
+    }
+    return stmt.all(...params) as T[];
+  }
+
   flush(): void {
     // No-op: better-sqlite3 writes synchronously.
   }
@@ -306,11 +391,23 @@ export class FlightRecorder {
 export class NoopFlightRecorder {
   logStart(_entry: FlightLogStart): void {}
   logComplete(_correlationId: string, _result: FlightLogResult): void {}
+  queryRequests<T = Record<string, unknown>>(_sql: string, ..._params: unknown[]): T[] {
+    return [];
+  }
   flush(): void {}
   close(): void {}
 }
 
 export type FlightRecorderLike = FlightRecorder | NoopFlightRecorder;
+
+/**
+ * Read-only subset of FlightRecorder used by cache-stats / MCP resources /
+ * doctor. Accepts either FlightRecorder or NoopFlightRecorder; the noop
+ * returns `[]` from every query so downstream aggregation is empty by design.
+ */
+export interface FlightRecorderQuery {
+  queryRequests<T = Record<string, unknown>>(sql: string, ...params: unknown[]): T[];
+}
 
 export function createFlightRecorder(logger: LoggerLike): FlightRecorderLike {
   const dbPath = resolveFlightRecorderDbPath();

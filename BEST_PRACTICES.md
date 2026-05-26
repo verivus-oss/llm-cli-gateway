@@ -293,6 +293,58 @@ No conversation content in state
 
 **Pattern:** Persist only essential data.
 
+The cache-awareness feature (slice 1–3) preserves this invariant by
+adding ONLY hash + token-count metadata (`stable_prefix_hash`,
+`stable_prefix_tokens`) to the existing flight recorder
+(`~/.llm-cli-gateway/logs.db` — which already stores prompts/responses
+for audit, separate from the session manager). NOTHING is added to
+`~/.llm-cli-gateway/sessions.json`. `session_get` projects a `cacheState`
+view at read time from flight-recorder aggregates — it is NOT a field on
+the Session interface in `src/session-manager.ts`.
+
+---
+
+### Cache hygiene
+**Status:** ✅ Slice 1–3 shipped (default off; opt-in flags)
+
+Every `*_request` / `*_request_async` tool accepts a `promptParts`
+structure: `{ system?, tools?, context?, task }`. The gateway concatenates
+in canonical order so the stable prefix bytes precede the volatile task
+tail unchanged across calls. This raises implicit cache hit rate without
+calling provider-specific cache APIs.
+
+Per-model minimum cacheable token thresholds (Anthropic — see
+`docs/personal-mcp/PROVIDER_CACHE_SURFACES.md` for the full table and
+dated source):
+
+| Model family       | Minimum cacheable tokens |
+|--------------------|--------------------------|
+| Sonnet (3.5 → 4.6) | 1,024                    |
+| Opus 4.5+ / Mythos | 4,096                    |
+| Opus 4.x (legacy)  | 1,024                    |
+| Haiku 4.5          | 4,096                    |
+| Haiku 3.5 (Vertex) | 2,048                    |
+
+Recommended client pattern:
+
+```ts
+// Put long stable context in `context`, volatile question in `task`.
+mcp.callTool("claude_request", {
+  promptParts: {
+    system: "You are a careful reviewer.",
+    tools:  "<long allowed-tools description>",
+    context: "<long file dump / spec / repo summary>",
+    task:    "What did the last patch change?"
+  },
+  approvalStrategy: "legacy"
+});
+```
+
+Behaviour gated by `[cache_awareness]` in
+`~/.llm-cli-gateway/config.toml` (all flags default OFF). Read the
+slice-3 `cache_ttl_expiring_soon` warning off the response payload's
+`warnings` array.
+
 ---
 
 ### Security
