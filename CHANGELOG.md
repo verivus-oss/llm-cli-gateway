@@ -2,6 +2,102 @@
 
 All notable changes to the llm-cli-gateway project.
 
+## [1.6.1] - 2026-05-26 — docs-only follow-up to 1.6.0
+
+Pure documentation release; zero source-code changes since 1.6.0.
+
+### Changed — agent-install guidance current with v1.6.0 + five providers
+
+- New `setup/providers/mistral-vibe.md` provider snippet (Mistral was the
+  fifth provider but had no setup/providers/ page; install agents had
+  nothing to point at when the user asked for Mistral coverage).
+- New `setup/assistants/mistral-install-prompt.md` per-assistant install
+  prompt (mirrors the Grok prompt; outbound-only framing,
+  session_logging walk-through, `VIBE_ACTIVE_MODEL` guidance, secret-
+  safety rules preserved).
+- `setup/assistants/ASSISTANT_CONTRACT.md`: Mistral added to "Applies
+  to" and outbound providers; new "Doctor Report Notes (v1.6.0)"
+  paragraph clarifying that the `cache_awareness` block is structural
+  (always present) and that all `[cache_awareness]` flags default off.
+- All 6 per-assistant install prompts (universal, chatgpt, claude,
+  codex, gemini, grok) extended to enumerate all five providers and
+  reference the cache_awareness doctor block.
+- `setup/install-plan.dag.toml` choose-targets / check-diagnostics /
+  apply-client-snippet steps generalised to all five providers; Mistral
+  named outbound-only; cache_awareness must-not-treat-as-blocker note
+  added inline. TOML re-validated.
+- 6 `docs/personal-mcp/connect-*.md` legacy pages now carry an
+  admonition pointing to `setup/providers/` + `ASSISTANT_CONTRACT.md`
+  as canonical.
+
+### Changed — 12 SKILL.md files current with v1.6.0
+
+- All 12 skills (7 under `skills/`, 5 under `.agents/skills/`) extended
+  with `promptParts`, `cache_state://` MCP resources, and (where the
+  skill's centre of gravity is session continuity) the
+  `cache_ttl_expiring_soon` warning. Depth tiered by skill audience:
+  multi-llm-orchestration, model-routing, multi-llm-consensus,
+  implement-review-fix, multi-llm-review, async-job-orchestration,
+  session-workflow, secure-orchestration carry full sections or
+  examples; agent-codex-gate, codex-review-gate, design-review-cycle,
+  red-team-assessment carry tip-level mentions.
+- Plugin-namespaced skills (`.agents/skills/*`) version-bumped 1.5 → 1.6.
+- Exact runtime strings cross-checked against `src/index.ts` (the
+  `provide exactly one of …` / `one of … is required` mutex errors and
+  the `cache_ttl_expiring_soon` warning code).
+
+### Fixed — README / BEST_PRACTICES / integrations doc drift
+
+- README.md: headline + Core Capabilities now name Mistral as the fifth
+  provider; test counts 284 / 221 → 681; new Supply-chain hardening
+  call-out under Security & Quality.
+- BEST_PRACTICES.md: testing coverage / performance lines 284 → 681.
+- integrations/llm-plugin/README.md: Grok + Mistral added to providers
+  list, usage examples, and the "at least one of" requirements list.
+- ENFORCEMENT.md: self-enforcement checklist provider list now Claude /
+  Codex / Gemini / Grok / Mistral.
+
+### Fixed — `docs/launch/blog-cache-awareness.md` accuracy + voice
+
+Technical corrections from the multi-LLM voice + technical review:
+- Mutually-exclusive error-string quotation reformatted so the
+  ``provide exactly one of `prompt` or `promptParts``` example renders
+  correctly in markdown.
+- `lastWriteAt` references corrected to `lastRequestAt` (the actual
+  public field name on `SessionCacheStats`).
+- Security tools sentence rewritten: separates SHA-pinned actions,
+  version-pinned Python/Go tools, and the SHA256-verified gitleaks
+  binary; clarifies that `eslint-plugin-security` runs via the existing
+  eslint config (not security.yml); replaces the inaccurate "Top-level
+  `permissions: contents: read` on every workflow" claim with the
+  accurate least-privilege phrasing.
+- "Signed installer artefacts" → "SHA256-verifiable installer artefacts"
+  (no signing today); npm note adds the sigstore-provenance context.
+- Haiku 3.5 Vertex 2048 caveat added: the in-code alias table
+  conservatively collapses all Haiku variants to 4096.
+- Solorigate / Codecov / xz now link separately.
+- Codex smoke-test evidence now links to
+  `docs/personal-mcp/PROVIDER_CACHE_SURFACES.md` and the CHANGELOG.
+- Three broken links surfaced by lychee CI fixed: Mistral Vibe URL,
+  bare CLAUDE.md link (the file lives outside the gateway repo), and
+  the agent-assurance exclude regex tightened to match bare URLs.
+
+### Fixed — `socket.yml` networkAccess false-positive documentation
+
+- Documented that the `globalThis["fetch"]` flag on `dist/index.js` /
+  `dist/job-store.js` is a substring-match false positive. Neither file
+  contains any actual fetch call; the matches are English-prose
+  occurrences in an error message, the `fetchWith` JSON field name, and
+  a code comment. Verified by sub-agent investigation, no code change
+  required, no attack-surface delta vs 1.5.35.
+
+### Fixed — `lychee.toml` exclusions
+
+- Added `https://npmjs.com/`, `https://help.openai.com/`, and bare
+  `github.com/verivus-oss/agent-assurance` URLs to the exclude list
+  (each is a Cloudflare bot-blocked / private host that returns
+  4xx/5xx to anonymous CI requests). Rationale documented inline.
+
 ## [1.6.0] - 2026-05-26 — cache-awareness phase 1 + security posture
 
 Also includes (beyond cache-awareness):
