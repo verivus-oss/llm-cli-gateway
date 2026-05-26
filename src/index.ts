@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { randomUUID } from "crypto";
 import { existsSync, readFileSync, readdirSync, renameSync, unlinkSync } from "fs";
@@ -82,6 +82,7 @@ import {
   PromptPartsSchema,
   type PromptParts,
 } from "./prompt-parts.js";
+import { computeSessionCacheStats } from "./cache-stats.js";
 import { getCliVersions, runCliUpgrade } from "./cli-updater.js";
 import { startHttpGateway, type HttpGatewayHandle } from "./http-transport.js";
 import { printDoctorJson } from "./doctor.js";
@@ -1048,6 +1049,89 @@ function registerBaseResources(server: McpServer, runtime: GatewayServerRuntime)
       runtime.logger.debug("Reading performance metrics resource");
       const contents = await runtime.resourceProvider.readResource(uri.href);
       return { contents: contents ? [contents] : [] };
+    }
+  );
+
+  // Cache-state resources (slice 2). Static URI for global, templated for
+  // session/{id} and prefix/{hash}. All three return tokens/hashes/aggregates
+  // ONLY — never raw prompt or response text. The structural guarantee is in
+  // the SessionCacheStats / PrefixCacheStats / GlobalCacheStats types
+  // themselves: those shapes have no prompt/response/system/task fields.
+  server.registerResource(
+    "cache-state-global",
+    "cache_state://global",
+    {
+      title: "💾 Cache State (Global)",
+      description:
+        "Aggregate cache hit/miss/savings across all CLIs in the flight recorder. Tokens/hashes only — no prompt text.",
+      mimeType: "application/json",
+    },
+    async uri => {
+      runtime.logger.debug("Reading cache_state://global resource");
+      const stats = runtime.resourceProvider.readCacheStateGlobal({
+        lastNHours: 24,
+      });
+      return {
+        contents: [
+          {
+            uri: uri.href,
+            mimeType: "application/json",
+            text: JSON.stringify(stats, null, 2),
+          },
+        ],
+      };
+    }
+  );
+
+  server.registerResource(
+    "cache-state-session",
+    new ResourceTemplate("cache_state://session/{sessionId}", { list: undefined }),
+    {
+      title: "💾 Cache State (Session)",
+      description:
+        "Per-session cache hit/miss/savings. Tokens/hashes only — no prompt text.",
+      mimeType: "application/json",
+    },
+    async (uri, variables) => {
+      const sessionId = Array.isArray(variables.sessionId)
+        ? variables.sessionId[0]
+        : variables.sessionId;
+      runtime.logger.debug(`Reading cache_state://session/${sessionId}`);
+      const stats = runtime.resourceProvider.readCacheStateSession(String(sessionId));
+      return {
+        contents: [
+          {
+            uri: uri.href,
+            mimeType: "application/json",
+            text: JSON.stringify(stats, null, 2),
+          },
+        ],
+      };
+    }
+  );
+
+  server.registerResource(
+    "cache-state-prefix",
+    new ResourceTemplate("cache_state://prefix/{hash}", { list: undefined }),
+    {
+      title: "💾 Cache State (Prefix)",
+      description:
+        "Per-stable-prefix-hash cache hit/miss/savings, with CLI breakdown. Tokens/hashes only — no prompt text.",
+      mimeType: "application/json",
+    },
+    async (uri, variables) => {
+      const hash = Array.isArray(variables.hash) ? variables.hash[0] : variables.hash;
+      runtime.logger.debug(`Reading cache_state://prefix/${hash}`);
+      const stats = runtime.resourceProvider.readCacheStateForPrefix(String(hash));
+      return {
+        contents: [
+          {
+            uri: uri.href,
+            mimeType: "application/json",
+            text: JSON.stringify(stats, null, 2),
+          },
+        ],
+      };
     }
   );
 }
@@ -5844,6 +5928,45 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
 
         const activeSession = await sessionManager.getActiveSession(session.cli);
 
+        // Slice 2: project a compact cacheState view from the flight
+        // recorder at read time. NOT persisted on the Session interface
+        // (sessions.json stays content-free per the project invariant).
+        // The field is OMITTED entirely (not null, not empty object) when
+        // the session has zero rows in the flight recorder so the response
+        // stays compact for fresh sessions.
+        let cacheState:
+          | {
+              cli: string | null;
+              prefixDistinct: number;
+              totalCacheReadTokens: number;
+              totalCacheCreationTokens: number;
+              requestCount: number;
+              hitCount: number;
+              hitRate: number;
+              estimatedSavingsUsd: number;
+            }
+          | undefined;
+        try {
+          const stats = computeSessionCacheStats(flightRecorder, session.id);
+          if (stats.requestCount > 0) {
+            cacheState = {
+              cli: stats.cli,
+              prefixDistinct: stats.distinctPrefixCount,
+              totalCacheReadTokens: stats.totalCacheReadTokens,
+              totalCacheCreationTokens: stats.totalCacheCreationTokens,
+              requestCount: stats.requestCount,
+              hitCount: stats.hitCount,
+              hitRate: stats.hitRate,
+              estimatedSavingsUsd: stats.estimatedSavingsUsd,
+            };
+          }
+        } catch (err) {
+          logger.warn?.(
+            `[session_get] cache-stats lookup failed (non-fatal)`,
+            err as Error
+          );
+        }
+
         return {
           content: [
             {
@@ -5854,6 +5977,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
                   session: {
                     ...session,
                     isActive: activeSession?.id === session.id,
+                    ...(cacheState ? { cacheState } : {}),
                   },
                 },
                 null,

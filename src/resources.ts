@@ -2,6 +2,14 @@ import { ISessionManager } from "./session-manager.js";
 import { PerformanceMetrics } from "./metrics.js";
 import { getAvailableCliInfo } from "./model-registry.js";
 import { FlightRecorderQuery } from "./flight-recorder.js";
+import {
+  computeGlobalCacheStats,
+  computePrefixCacheStats,
+  computeSessionCacheStats,
+  type GlobalCacheStats,
+  type PrefixCacheStats,
+  type SessionCacheStats,
+} from "./cache-stats.js";
 
 export interface ResourceDefinition {
   uri: string;
@@ -35,6 +43,33 @@ export class ResourceProvider {
   /** Read-only flight-recorder accessor for cache-state resource readers. */
   getFlightRecorderQuery(): FlightRecorderQuery {
     return this.flightRecorder;
+  }
+
+  /**
+   * cache_state://global — aggregates across the entire flight recorder.
+   * Optionally restrict to a recent window via `lastNHours`. Returns
+   * tokens/hashes/aggregates ONLY — no prompt text fields. The redaction is
+   * structural: the response shape (GlobalCacheStats) has no `prompt`,
+   * `response`, `system`, or `task` field by construction.
+   */
+  readCacheStateGlobal(opts: { lastNHours?: number } = {}): GlobalCacheStats {
+    return computeGlobalCacheStats(this.flightRecorder, opts);
+  }
+
+  /**
+   * cache_state://session/{sessionId} — per-session aggregates. Returns
+   * empty defaults when the session has no rows. Token/hash fields only.
+   */
+  readCacheStateSession(sessionId: string): SessionCacheStats {
+    return computeSessionCacheStats(this.flightRecorder, sessionId);
+  }
+
+  /**
+   * cache_state://prefix/{hash} — per-stable-prefix-hash aggregates.
+   * Returns empty defaults for unknown hashes. Token/hash fields only.
+   */
+  readCacheStateForPrefix(stablePrefixHash: string): PrefixCacheStats {
+    return computePrefixCacheStats(this.flightRecorder, stablePrefixHash);
   }
 
   // List all available resources

@@ -84,9 +84,9 @@ enabled.
 (b) **`--system-prompt <path>` + appended user message** — Viable as a partial
 mechanism. The system prompt is the natural cacheable boundary. Combined with
 `--exclude-dynamic-system-prompt-sections`, this moves volatile per-machine
-chunks out of the cached prefix without needing explicit cache_control. The
-slice 1 wiring (system part → `--system-prompt`, task → final user message)
-gives prefix-discipline benefits without needing JSON injection.
+chunks out of the cached prefix without needing explicit cache_control. This
+slice does NOT take this approach — see "Decision for slice 1" below for what
+shipped. Branch A (or this option) is gated on a follow-up live smoke test.
 
 (c) **Environment variable activation** — Claude Code documents several
 prompt-caching env vars (per <https://code.claude.com/docs/en/env-vars>,
@@ -108,12 +108,17 @@ behaviour. The 1-hour TTL is also selectable per-block via
 `cache_control.ttl="1h"` when caller code is constructing the API request
 body directly.
 
-**Decision for slice 1**: ship Branch B (prefix-discipline-only) by default.
-Wire system/tools/context into `--system-prompt` and `--append-system-prompt`
-so the stable bytes land before the volatile task, and rely on Anthropic's
-automatic caching to place a breakpoint on the last cacheable block. Re-evaluate
-explicit `cache_control` injection via stream-json in a follow-up slice with a
-live smoke test.
+**Decision for slice 1**: ship Branch B (prefix-discipline-only). The gateway
+concatenates `system → tools → context → task` and passes the result as the
+single positional prompt to `claude -p`. The stable prefix bytes precede the
+volatile `task` tail unchanged across calls, so Anthropic's automatic-caching
+breakpoint lands on the same content hash each time. The gateway does NOT
+emit explicit `cache_control` JSON and does NOT route `promptParts.system`
+into `--system-prompt`/`--append-system-prompt` in this slice — the
+injection mechanism is unverified and is gated on a follow-up live smoke
+test against the Anthropic API. The
+`[cache_awareness].emit_anthropic_cache_control` flag stays in config for
+that future slice.
 
 `--exclude-dynamic-system-prompt-sections` is recommended in cache-aware mode
 when no custom `--system-prompt` is set — it moves the per-machine sections
@@ -169,9 +174,16 @@ Mistral / vibe CLI: same. No cache reporting.
 ## Implications for slice 1 / 2 / 3
 
 - **Slice 1** (prompt-parts discipline): ships for all 5 CLIs as a structural
-  benefit (byte-identical stable prefix → higher implicit hit rate). For Claude
-  specifically, wires system/tools/context into `--system-prompt` and emits the
-  cache_control breakpoint via that surface (Branch B; see above).
+  benefit (byte-identical stable prefix → higher implicit hit rate). The
+  gateway assembles `system → tools → context → task` and passes the
+  concatenation as the CLI's positional `-p` / prompt argument; the stable
+  prefix bytes precede the volatile `task` tail unchanged across calls,
+  which is enough for Anthropic's automatic-caching breakpoint to land on
+  the same content hash across requests. The gateway does NOT emit explicit
+  `cache_control` JSON in this slice and does NOT route promptParts.system
+  into `--system-prompt`/`--append-system-prompt` — that injection
+  mechanism (Branch A) is gated on a live smoke-test follow-up. Branch B
+  here is "prefix discipline only".
 - **Slice 2** (cache observability): reads `cache_read_tokens` /
   `cache_creation_tokens` from the flight recorder. Populated for **claude
   only** today — the Codex parser still looks for `cache_read_input_tokens`
