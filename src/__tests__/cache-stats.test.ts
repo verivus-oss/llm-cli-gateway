@@ -71,9 +71,33 @@ describe("cache-stats", () => {
     });
 
     it("aggregates cache reads / creation across a session", () => {
-      seedRequest({ id: "s1-a", cli: "claude", model: "sonnet", sessionId: "sess-1", stableHash: "h1", cacheRead: 100, cacheCreation: 50 });
-      seedRequest({ id: "s1-b", cli: "claude", model: "sonnet", sessionId: "sess-1", stableHash: "h1", cacheRead: 200, cacheCreation: 0 });
-      seedRequest({ id: "s1-c", cli: "claude", model: "sonnet", sessionId: "sess-1", stableHash: "h2", cacheRead: 0, cacheCreation: 0 });
+      seedRequest({
+        id: "s1-a",
+        cli: "claude",
+        model: "sonnet",
+        sessionId: "sess-1",
+        stableHash: "h1",
+        cacheRead: 100,
+        cacheCreation: 50,
+      });
+      seedRequest({
+        id: "s1-b",
+        cli: "claude",
+        model: "sonnet",
+        sessionId: "sess-1",
+        stableHash: "h1",
+        cacheRead: 200,
+        cacheCreation: 0,
+      });
+      seedRequest({
+        id: "s1-c",
+        cli: "claude",
+        model: "sonnet",
+        sessionId: "sess-1",
+        stableHash: "h2",
+        cacheRead: 0,
+        cacheCreation: 0,
+      });
 
       const s = computeSessionCacheStats(rec, "sess-1");
       expect(s.requestCount).toBe(3);
@@ -85,12 +109,18 @@ describe("cache-stats", () => {
       expect(s.cli).toBe("claude");
       // sonnet input $3/M, cache read multiplier 0.1 → saved per token = $3 * 0.9 / 1e6
       // 300 tokens × $3 × 0.9 / 1e6 = 0.00081
-      expect(s.estimatedSavingsUsd).toBeCloseTo(300 * 3 * 0.9 / 1e6, 8);
+      expect(s.estimatedSavingsUsd).toBeCloseTo((300 * 3 * 0.9) / 1e6, 8);
     });
 
     it("tolerates only cache misses (NULL or 0 cache tokens) without dividing by zero", () => {
       seedRequest({ id: "miss-a", cli: "gemini", model: "flash", sessionId: "miss-sess" }); // no cache tokens
-      seedRequest({ id: "miss-b", cli: "gemini", model: "flash", sessionId: "miss-sess", cacheRead: 0 });
+      seedRequest({
+        id: "miss-b",
+        cli: "gemini",
+        model: "flash",
+        sessionId: "miss-sess",
+        cacheRead: 0,
+      });
       const s = computeSessionCacheStats(rec, "miss-sess");
       expect(s.requestCount).toBe(2);
       expect(s.hitCount).toBe(0);
@@ -117,9 +147,30 @@ describe("cache-stats", () => {
     });
 
     it("aggregates across sessions for the same hash, with multi-CLI breakdown", () => {
-      seedRequest({ id: "p-1", cli: "claude", model: "sonnet", sessionId: "x", stableHash: "shared", cacheRead: 100 });
-      seedRequest({ id: "p-2", cli: "claude", model: "sonnet", sessionId: "x", stableHash: "shared", cacheRead: 200 });
-      seedRequest({ id: "p-3", cli: "codex", model: "gpt-5.4", sessionId: "y", stableHash: "shared", cacheRead: 50 });
+      seedRequest({
+        id: "p-1",
+        cli: "claude",
+        model: "sonnet",
+        sessionId: "x",
+        stableHash: "shared",
+        cacheRead: 100,
+      });
+      seedRequest({
+        id: "p-2",
+        cli: "claude",
+        model: "sonnet",
+        sessionId: "x",
+        stableHash: "shared",
+        cacheRead: 200,
+      });
+      seedRequest({
+        id: "p-3",
+        cli: "codex",
+        model: "gpt-5.4",
+        sessionId: "y",
+        stableHash: "shared",
+        cacheRead: 50,
+      });
 
       const p = computePrefixCacheStats(rec, "shared");
       expect(p.requestCount).toBe(3);
@@ -232,16 +283,12 @@ describe("cache-stats", () => {
           anthropicTtlSeconds: 300,
         })
       ).toBeNull();
-      expect(
-        computeTtlRemaining(stats, "codex", { anthropicTtlSeconds: 300 })
-      ).toBeNull();
+      expect(computeTtlRemaining(stats, "codex", { anthropicTtlSeconds: 300 })).toBeNull();
     });
 
     it("null lastRequestAt → null ttlRemainingMs", () => {
       const stats = makeStats({ cli: "claude", lastRequestAt: null });
-      expect(
-        computeTtlRemaining(stats, "claude", { anthropicTtlSeconds: 300 })
-      ).toBeNull();
+      expect(computeTtlRemaining(stats, "claude", { anthropicTtlSeconds: 300 })).toBeNull();
     });
   });
 });

@@ -43,9 +43,7 @@ describe("loadCacheAwarenessConfig", () => {
     expect(cfg.emitAnthropicCacheControl).toBe(false);
     expect(cfg.warnOnTtlExpiry).toBe(false);
     expect(cfg.anthropicTtlSeconds).toBe(300);
-    expect(cfg.minStableTokensForCacheControl).toEqual(
-      DEFAULT_MIN_STABLE_TOKENS_FOR_CACHE_CONTROL
-    );
+    expect(cfg.minStableTokensForCacheControl).toEqual(DEFAULT_MIN_STABLE_TOKENS_FOR_CACHE_CONTROL);
     expect(cfg.sources.configFile).toBeNull();
   });
 
@@ -79,16 +77,12 @@ describe("loadCacheAwarenessConfig", () => {
   });
 
   it("rejects invalid anthropic_ttl_seconds (e.g. 999)", () => {
-    pointToFile(
-      ["[cache_awareness]", "anthropic_ttl_seconds = 999", ""].join("\n")
-    );
+    pointToFile(["[cache_awareness]", "anthropic_ttl_seconds = 999", ""].join("\n"));
     expect(() => loadCacheAwarenessConfig(noopLogger)).toThrow(/cache_awareness/i);
   });
 
   it("rejects unknown keys at the top level of [cache_awareness]", () => {
-    pointToFile(
-      ["[cache_awareness]", "bogus_key = true", ""].join("\n")
-    );
+    pointToFile(["[cache_awareness]", "bogus_key = true", ""].join("\n"));
     expect(() => loadCacheAwarenessConfig(noopLogger)).toThrow(/cache_awareness/i);
   });
 

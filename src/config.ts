@@ -404,9 +404,7 @@ const MinStableTokensSchema = z
 const CacheAwarenessSchema = z
   .object({
     emit_anthropic_cache_control: z.boolean().default(false),
-    anthropic_ttl_seconds: z
-      .union([z.literal(300), z.literal(3600)])
-      .default(300),
+    anthropic_ttl_seconds: z.union([z.literal(300), z.literal(3600)]).default(300),
     warn_on_ttl_expiry: z.boolean().default(false),
     min_stable_tokens_for_cache_control: MinStableTokensSchema,
   })
@@ -458,9 +456,7 @@ export function loadCacheAwarenessConfig(logger: Logger = noopLogger): CacheAwar
 
   let parsed;
   try {
-    parsed = CacheAwarenessSchema.parse(
-      (raw as Record<string, unknown> | undefined) ?? {}
-    );
+    parsed = CacheAwarenessSchema.parse((raw as Record<string, unknown> | undefined) ?? {});
   } catch (err) {
     throw new Error(
       `Invalid [cache_awareness] config: ${err instanceof Error ? err.message : String(err)}`
@@ -486,10 +482,7 @@ export function loadCacheAwarenessConfig(logger: Logger = noopLogger): CacheAwar
  * string (e.g. "claude-sonnet-4-6", "claude-opus-4-7"). Falls back to `default`
  * when the family is unrecognised.
  */
-export function minStableTokensForModel(
-  config: CacheAwarenessConfig,
-  modelName: string
-): number {
+export function minStableTokensForModel(config: CacheAwarenessConfig, modelName: string): number {
   const lower = modelName.toLowerCase();
   const table = config.minStableTokensForCacheControl;
   if (lower.includes("sonnet")) return table.sonnet;

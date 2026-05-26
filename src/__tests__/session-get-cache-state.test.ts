@@ -4,11 +4,7 @@ import { AsyncJobManager } from "../async-job-manager.js";
 import { MemoryJobStore } from "../job-store.js";
 import { noopLogger } from "../logger.js";
 import type { PersistenceConfig } from "../config.js";
-import type {
-  FlightLogStart,
-  FlightLogResult,
-  FlightRecorderLike,
-} from "../flight-recorder.js";
+import type { FlightLogStart, FlightLogResult, FlightRecorderLike } from "../flight-recorder.js";
 import { createSessionManager, type ISessionManager } from "../session-manager.js";
 
 const CLI_TYPES = ["claude", "codex", "gemini", "grok", "mistral"] as const;
@@ -72,25 +68,29 @@ class InMemoryFlightRecorder implements FlightRecorderLike {
     // SELECT * (no WHERE) returns all rows.
     if (sql.includes("session_id = ?")) {
       const sid = params[0];
-      return this.rows.filter(r => r.session_id === sid).map(r => ({
-        cli: r.cli,
-        model: r.model,
-        cache_read_tokens: r.cache_read_tokens ?? 0,
-        cache_creation_tokens: r.cache_creation_tokens ?? 0,
-        stable_prefix_hash: r.stable_prefix_hash,
-        datetime_utc: r.datetime_utc,
-      })) as unknown as T[];
+      return this.rows
+        .filter(r => r.session_id === sid)
+        .map(r => ({
+          cli: r.cli,
+          model: r.model,
+          cache_read_tokens: r.cache_read_tokens ?? 0,
+          cache_creation_tokens: r.cache_creation_tokens ?? 0,
+          stable_prefix_hash: r.stable_prefix_hash,
+          datetime_utc: r.datetime_utc,
+        })) as unknown as T[];
     }
     if (sql.includes("stable_prefix_hash = ?")) {
       const h = params[0];
-      return this.rows.filter(r => r.stable_prefix_hash === h).map(r => ({
-        cli: r.cli,
-        model: r.model,
-        cache_read_tokens: r.cache_read_tokens ?? 0,
-        cache_creation_tokens: r.cache_creation_tokens ?? 0,
-        stable_prefix_hash: r.stable_prefix_hash,
-        datetime_utc: r.datetime_utc,
-      })) as unknown as T[];
+      return this.rows
+        .filter(r => r.stable_prefix_hash === h)
+        .map(r => ({
+          cli: r.cli,
+          model: r.model,
+          cache_read_tokens: r.cache_read_tokens ?? 0,
+          cache_creation_tokens: r.cache_creation_tokens ?? 0,
+          stable_prefix_hash: r.stable_prefix_hash,
+          datetime_utc: r.datetime_utc,
+        })) as unknown as T[];
     }
     return this.rows.map(r => ({
       cli: r.cli,
@@ -106,7 +106,10 @@ class InMemoryFlightRecorder implements FlightRecorderLike {
 }
 
 interface RegisteredTool {
-  handler: (args: Record<string, unknown>, extra?: Record<string, unknown>) => Promise<{
+  handler: (
+    args: Record<string, unknown>,
+    extra?: Record<string, unknown>
+  ) => Promise<{
     content: Array<{ type: string; text: string }>;
     isError?: boolean;
   }>;

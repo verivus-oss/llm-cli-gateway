@@ -205,14 +205,11 @@ describe("FlightRecorder migrations (U23 cache columns)", () => {
         status TEXT NOT NULL DEFAULT 'started'
       );
     `);
-    seed.prepare("INSERT INTO _migrations(version, applied_at) VALUES(1, ?), (2, ?)").run(
-      new Date().toISOString(),
-      new Date().toISOString()
-    );
     seed
-      .prepare(
-        `INSERT INTO requests (id, cli, model, prompt, datetime_utc) VALUES (?, ?, ?, ?, ?)`
-      )
+      .prepare("INSERT INTO _migrations(version, applied_at) VALUES(1, ?), (2, ?)")
+      .run(new Date().toISOString(), new Date().toISOString());
+    seed
+      .prepare(`INSERT INTO requests (id, cli, model, prompt, datetime_utc) VALUES (?, ?, ?, ?, ?)`)
       .run("legacy-v2", "claude", "sonnet", "hi", new Date().toISOString());
     seed.close();
 
@@ -226,10 +223,11 @@ describe("FlightRecorder migrations (U23 cache columns)", () => {
 
     const db = new BetterSqlite3(dbPath);
     const row = db
-      .prepare(
-        "SELECT stable_prefix_hash, stable_prefix_tokens FROM requests WHERE id = ?"
-      )
-      .get("legacy-v2") as { stable_prefix_hash: string | null; stable_prefix_tokens: number | null };
+      .prepare("SELECT stable_prefix_hash, stable_prefix_tokens FROM requests WHERE id = ?")
+      .get("legacy-v2") as {
+      stable_prefix_hash: string | null;
+      stable_prefix_tokens: number | null;
+    };
     db.close();
     expect(row.stable_prefix_hash).toBeNull();
     expect(row.stable_prefix_tokens).toBeNull();
@@ -249,9 +247,7 @@ describe("FlightRecorder migrations (U23 cache columns)", () => {
 
     const db = new BetterSqlite3(dbPath);
     const row = db
-      .prepare(
-        "SELECT stable_prefix_hash, stable_prefix_tokens FROM requests WHERE id = ?"
-      )
+      .prepare("SELECT stable_prefix_hash, stable_prefix_tokens FROM requests WHERE id = ?")
       .get("corr-stable-1") as {
       stable_prefix_hash: string | null;
       stable_prefix_tokens: number | null;
@@ -273,9 +269,7 @@ describe("FlightRecorder migrations (U23 cache columns)", () => {
 
     const db = new BetterSqlite3(dbPath);
     const row = db
-      .prepare(
-        "SELECT stable_prefix_hash, stable_prefix_tokens FROM requests WHERE id = ?"
-      )
+      .prepare("SELECT stable_prefix_hash, stable_prefix_tokens FROM requests WHERE id = ?")
       .get("corr-nostable") as {
       stable_prefix_hash: string | null;
       stable_prefix_tokens: number | null;

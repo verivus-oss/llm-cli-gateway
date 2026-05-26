@@ -107,9 +107,7 @@ function ensureStablePrefixColumns(db: DatabaseLike): void {
   if (!names.has("stable_prefix_tokens")) {
     db.exec("ALTER TABLE requests ADD COLUMN stable_prefix_tokens INTEGER");
   }
-  db.exec(
-    "CREATE INDEX IF NOT EXISTS idx_requests_stable_hash ON requests(stable_prefix_hash)"
-  );
+  db.exec("CREATE INDEX IF NOT EXISTS idx_requests_stable_hash ON requests(stable_prefix_hash)");
 }
 
 export function resolveFlightRecorderDbPath(): string | null {

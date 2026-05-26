@@ -283,9 +283,7 @@ export function computeGlobalCacheStats(
               stable_prefix_hash,
               datetime_utc
        FROM requests`;
-  const rows = sinceIso
-    ? db.queryRequests<RawRow>(sql, sinceIso)
-    : db.queryRequests<RawRow>(sql);
+  const rows = sinceIso ? db.queryRequests<RawRow>(sql, sinceIso) : db.queryRequests<RawRow>(sql);
 
   interface CliAgg {
     requestCount: number;

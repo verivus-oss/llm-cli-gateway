@@ -4,11 +4,7 @@ import { AsyncJobManager } from "../async-job-manager.js";
 import { MemoryJobStore } from "../job-store.js";
 import { noopLogger } from "../logger.js";
 import type { PersistenceConfig, CacheAwarenessConfig } from "../config.js";
-import type {
-  FlightLogStart,
-  FlightLogResult,
-  FlightRecorderLike,
-} from "../flight-recorder.js";
+import type { FlightLogStart, FlightLogResult, FlightRecorderLike } from "../flight-recorder.js";
 import { createSessionManager, type ISessionManager } from "../session-manager.js";
 
 function mkPersistence(): PersistenceConfig {
@@ -70,14 +66,16 @@ class SeededFlightRecorder implements FlightRecorderLike {
   queryRequests<T = Record<string, unknown>>(sql: string, ...params: unknown[]): T[] {
     if (sql.includes("session_id = ?")) {
       const sid = params[0];
-      return this.rows.filter(r => r.session_id === sid).map(r => ({
-        cli: r.cli,
-        model: r.model,
-        cache_read_tokens: r.cache_read_tokens ?? 0,
-        cache_creation_tokens: r.cache_creation_tokens ?? 0,
-        stable_prefix_hash: r.stable_prefix_hash,
-        datetime_utc: r.datetime_utc,
-      })) as unknown as T[];
+      return this.rows
+        .filter(r => r.session_id === sid)
+        .map(r => ({
+          cli: r.cli,
+          model: r.model,
+          cache_read_tokens: r.cache_read_tokens ?? 0,
+          cache_creation_tokens: r.cache_creation_tokens ?? 0,
+          stable_prefix_hash: r.stable_prefix_hash,
+          datetime_utc: r.datetime_utc,
+        })) as unknown as T[];
     }
     return [] as T[];
   }
@@ -86,7 +84,10 @@ class SeededFlightRecorder implements FlightRecorderLike {
 }
 
 interface RegisteredTool {
-  handler: (args: Record<string, unknown>, extra?: Record<string, unknown>) => Promise<{
+  handler: (
+    args: Record<string, unknown>,
+    extra?: Record<string, unknown>
+  ) => Promise<{
     content: Array<{ type: string; text: string }>;
     isError?: boolean;
     warnings?: Array<{ code: string; ttlRemainingMs?: number }>;

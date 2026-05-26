@@ -31,8 +31,7 @@ export function assemble(parts: PromptParts): AssembleResult {
   const stableText = stableSegments.join(SEPARATOR);
   const stableByteEnd = Buffer.byteLength(stableText, "utf8");
 
-  const text =
-    stableText.length > 0 ? `${stableText}${SEPARATOR}${parts.task}` : parts.task;
+  const text = stableText.length > 0 ? `${stableText}${SEPARATOR}${parts.task}` : parts.task;
 
   return { text, stableByteEnd };
 }
@@ -51,10 +50,7 @@ export interface ResolvePromptInputArgs {
 export function resolvePromptInput(input: ResolvePromptInputArgs): ResolvedPromptInput {
   if (input.promptParts !== undefined) {
     const assembled = assemble(input.promptParts);
-    const stableBytes = Buffer.from(assembled.text, "utf8").subarray(
-      0,
-      assembled.stableByteEnd
-    );
+    const stableBytes = Buffer.from(assembled.text, "utf8").subarray(0, assembled.stableByteEnd);
     const hash =
       assembled.stableByteEnd > 0
         ? createHash("sha256").update(stableBytes).digest("hex")

@@ -77,11 +77,7 @@ import {
   type ClaudeAgentDefinition,
 } from "./request-helpers.js";
 import { createFlightRecorder, FlightRecorderLike } from "./flight-recorder.js";
-import {
-  resolvePromptInput,
-  PromptPartsSchema,
-  type PromptParts,
-} from "./prompt-parts.js";
+import { resolvePromptInput, PromptPartsSchema, type PromptParts } from "./prompt-parts.js";
 import { computeSessionCacheStats, computeTtlRemaining } from "./cache-stats.js";
 import { getCliVersions, runCliUpgrade } from "./cli-updater.js";
 import { startHttpGateway, type HttpGatewayHandle } from "./http-transport.js";
@@ -319,9 +315,7 @@ function getPersistenceConfig(runtimeLogger: GatewayLogger = logger): Persistenc
   return persistenceConfig;
 }
 
-function getCacheAwarenessConfig(
-  runtimeLogger: GatewayLogger = logger
-): CacheAwarenessConfig {
+function getCacheAwarenessConfig(runtimeLogger: GatewayLogger = logger): CacheAwarenessConfig {
   cacheAwarenessConfig ??= loadCacheAwarenessConfig(runtimeLogger);
   return cacheAwarenessConfig;
 }
@@ -1107,8 +1101,7 @@ function registerBaseResources(server: McpServer, runtime: GatewayServerRuntime)
     new ResourceTemplate("cache_state://session/{sessionId}", { list: undefined }),
     {
       title: "💾 Cache State (Session)",
-      description:
-        "Per-session cache hit/miss/savings. Tokens/hashes only — no prompt text.",
+      description: "Per-session cache hit/miss/savings. Tokens/hashes only — no prompt text.",
       mimeType: "application/json",
     },
     async (uri, variables) => {
@@ -1190,7 +1183,12 @@ function resolvePromptOrPartsForPrep(args: {
   operation: string;
   correlationId: string | undefined;
 }):
-  | { ok: true; assembledPrompt: string; stablePrefixHash: string | null; stablePrefixTokens: number | null }
+  | {
+      ok: true;
+      assembledPrompt: string;
+      stablePrefixHash: string | null;
+      stablePrefixTokens: number | null;
+    }
   | { ok: false; error: ExtendedToolResponse } {
   const hasPrompt = typeof args.prompt === "string" && args.prompt.length > 0;
   const hasParts = args.promptParts !== undefined;
@@ -3315,9 +3313,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .min(1, "Prompt cannot be empty")
         .max(100000, "Prompt too long (max 100k chars)")
         .optional()
-        .describe(
-          "Prompt text for Claude (mutually exclusive with promptParts)"
-        ),
+        .describe("Prompt text for Claude (mutually exclusive with promptParts)"),
       promptParts: PromptPartsSchema.optional().describe(
         "Cache-aware structured prompt: { system?, tools?, context?, task }. Mutually exclusive with prompt. Stable parts hash into cache_state for prefix-discipline tracking."
       ),
@@ -6070,10 +6066,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             };
           }
         } catch (err) {
-          logger.warn?.(
-            `[session_get] cache-stats lookup failed (non-fatal)`,
-            err as Error
-          );
+          logger.warn?.(`[session_get] cache-stats lookup failed (non-fatal)`, err as Error);
         }
 
         return {

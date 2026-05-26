@@ -4,11 +4,7 @@ import { AsyncJobManager } from "../async-job-manager.js";
 import { MemoryJobStore } from "../job-store.js";
 import { noopLogger } from "../logger.js";
 import type { PersistenceConfig } from "../config.js";
-import type {
-  FlightLogStart,
-  FlightLogResult,
-  FlightRecorderLike,
-} from "../flight-recorder.js";
+import type { FlightLogStart, FlightLogResult, FlightRecorderLike } from "../flight-recorder.js";
 
 const REQUEST_TOOLS = [
   "claude_request",
@@ -86,9 +82,7 @@ describe("slice 1: prompt / promptParts mutex (runtime check, NOT Zod refine)", 
         approvalStrategy: "legacy",
       });
       expect(result.isError).toBe(true);
-      expect(result.content[0].text).toContain(
-        "provide exactly one of `prompt` or `promptParts`"
-      );
+      expect(result.content[0].text).toContain("provide exactly one of `prompt` or `promptParts`");
     }
   );
 
@@ -99,9 +93,7 @@ describe("slice 1: prompt / promptParts mutex (runtime check, NOT Zod refine)", 
         approvalStrategy: "legacy",
       });
       expect(result.isError).toBe(true);
-      expect(result.content[0].text).toContain(
-        "one of `prompt` or `promptParts` is required"
-      );
+      expect(result.content[0].text).toContain("one of `prompt` or `promptParts` is required");
     }
   );
 });
@@ -163,7 +155,13 @@ describe("slice 1: sync claude_request writes stable_prefix_hash via flight-reco
   // assemble() (in prompt-parts.test.ts) plus the CliRequestPrep contract
   // (effectivePrompt = assembledPrompt) is sufficient. This test also
   // documents the dag's "prefix-discipline applies to all CLIs" claim.
-  it.each(["claude_request", "codex_request", "gemini_request", "grok_request", "mistral_request"] as const)(
+  it.each([
+    "claude_request",
+    "codex_request",
+    "gemini_request",
+    "grok_request",
+    "mistral_request",
+  ] as const)(
     "%s: same promptParts → byte-identical assembled prompt prefix (via prepare* contract)",
     async toolName => {
       const capturing = new CapturingFlightRecorder();
