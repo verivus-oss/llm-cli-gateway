@@ -2,7 +2,31 @@
 
 All notable changes to the llm-cli-gateway project.
 
-## [Unreleased] — feat/cache-awareness-phase-1
+## [1.6.0] - 2026-05-26 — cache-awareness phase 1 + security posture
+
+Also includes (beyond cache-awareness):
+
+### Added — free-OSS security posture (matches verivus-oss/agent-assurance)
+
+- New `.github/workflows/security.yml` running on every push + PR:
+  actionlint, zizmor, shellcheck, typos, osv-scanner, gitleaks, ruff,
+  bandit, lychee. SHA-pinned, fail-on-finding.
+- `eslint-plugin-security` 3.0.1 wired into the existing eslint config.
+- `SECURITY.md` (vulnerability reporting policy), `.github/CODEOWNERS`
+  (review routing for security-sensitive paths), `_typos.toml`,
+  `lychee.toml`, `.gitleaks.toml`, `.github/actionlint.yaml`,
+  `integrations/llm-plugin/.bandit`.
+- Workflow hygiene: top-level `permissions: contents: read`, per-job
+  explicit, `persist-credentials: false` on every `actions/checkout`
+  except the upload job in `release-installer.yml`. Cache disabled on
+  release-triggered setup-node/setup-go (zizmor cache-poisoning).
+- Dependabot: added `npm` ecosystem at `/` and `pip` ecosystem at
+  `/integrations/llm-plugin/` (github-actions group preserved).
+- `installer/go.mod` bumped Go 1.22 → 1.25 (clears 26 stdlib CVEs
+  flagged by osv-scanner); `release-installer.yml` setup-go pin
+  updated in lock-step.
+
+### Added — cache-awareness slice 1+2+3 (all opt-in, default OFF)
 
 ### Added — cache-awareness slice 1+2+3 (all opt-in, default OFF)
 
