@@ -82,7 +82,7 @@ import {
   PromptPartsSchema,
   type PromptParts,
 } from "./prompt-parts.js";
-import { computeSessionCacheStats } from "./cache-stats.js";
+import { computeSessionCacheStats, computeTtlRemaining } from "./cache-stats.js";
 import { getCliVersions, runCliUpgrade } from "./cli-updater.js";
 import { startHttpGateway, type HttpGatewayHandle } from "./http-transport.js";
 import { printDoctorJson } from "./doctor.js";
@@ -93,6 +93,22 @@ import {
   buildUpstreamContractReport,
 } from "./upstream-contracts.js";
 import { entrypointFileURL } from "./entrypoint-url.js";
+
+/**
+ * Slice 3: structured warning entries attached to tool responses.
+ * Distinct from review-integrity warnings (which are text-appended to
+ * the user-visible response). These are programmatic signals for caller
+ * agents to react to.
+ */
+export interface WarningEntry {
+  /** Stable machine-readable code, e.g. "cache_ttl_expiring_soon". */
+  code: string;
+  /** Optional human-readable message for surfaces that render text. */
+  message?: string;
+  /** Code-specific payload — left open for future warning types. */
+  ttlRemainingMs?: number;
+  [key: string]: unknown;
+}
 
 type ExtendedToolResponse = {
   content: { type: "text"; text: string }[];
@@ -107,6 +123,8 @@ type ExtendedToolResponse = {
     missing?: ClaudeMcpServerName[];
   };
   reviewIntegrity?: ReviewIntegrityResult;
+  /** Slice 3: structured warnings (e.g. cache_ttl_expiring_soon). */
+  warnings?: WarningEntry[];
 };
 
 // Simple logger that writes to stderr (stdout is used for MCP protocol)
@@ -2042,7 +2060,8 @@ function buildCliResponse(
   prep: CliRequestPrep,
   durationMs: number,
   resumable?: boolean,
-  outputFormat?: string
+  outputFormat?: string,
+  warnings?: WarningEntry[]
 ): ExtendedToolResponse {
   let finalStdout = stdout;
   // Skip response optimization for JSON output to prevent corrupting structured data
@@ -2096,7 +2115,40 @@ function buildCliResponse(
   if (prep.reviewIntegrity && prep.reviewIntegrity.violations.length > 0) {
     response.reviewIntegrity = prep.reviewIntegrity;
   }
+  if (warnings && warnings.length > 0) {
+    response.warnings = warnings;
+  }
   return response;
+}
+
+/**
+ * Slice 3 helper: compute the cache_ttl_expiring_soon warning for a
+ * claude session, if the feature is enabled, the session has prior cache
+ * writes, and ttlRemainingMs is below the threshold (30s by default).
+ * Returns null when no warning applies.
+ */
+function maybeBuildCacheTtlWarning(args: {
+  runtime: GatewayServerRuntime;
+  sessionId: string | undefined;
+  cli: "claude" | "codex" | "gemini" | "grok" | "mistral";
+  thresholdMs?: number;
+}): WarningEntry | null {
+  if (args.cli !== "claude") return null;
+  if (!args.sessionId) return null;
+  if (!args.runtime.cacheAwareness?.warnOnTtlExpiry) return null;
+  const stats = computeSessionCacheStats(args.runtime.flightRecorder, args.sessionId);
+  if (stats.requestCount === 0 || !stats.lastRequestAt) return null;
+  const ttl = computeTtlRemaining(stats, args.cli, {
+    anthropicTtlSeconds: args.runtime.cacheAwareness.anthropicTtlSeconds,
+  });
+  if (ttl === null) return null;
+  const threshold = args.thresholdMs ?? 30_000;
+  if (ttl >= threshold) return null;
+  return {
+    code: "cache_ttl_expiring_soon",
+    ttlRemainingMs: ttl,
+    message: `Anthropic cache breakpoint for session ${args.sessionId} expires in ${ttl}ms (< ${threshold}ms). Subsequent requests may miss the cache.`,
+  };
 }
 
 //──────────────────────────────────────────────────────────────────────────────
@@ -3486,6 +3538,17 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           await sessionManager.updateSessionUsage(effectiveSessionId);
         }
 
+        // Slice 3: if the resolved session has a near-expiry Anthropic
+        // cache breakpoint, attach a structured warning (NOT a hard error)
+        // to the response. Gated on `[cache_awareness].warn_on_ttl_expiry`
+        // and only fires for claude.
+        const ttlWarning = maybeBuildCacheTtlWarning({
+          runtime,
+          sessionId: effectiveSessionId,
+          cli: "claude",
+        });
+        const warnings: WarningEntry[] = ttlWarning ? [ttlWarning] : [];
+
         // Idle timeout only for stream-json (text/json produce no output until done)
         const effectiveIdleTimeout =
           outputFormat === "stream-json" ? resolveIdleTimeout("claude", idleTimeoutMs) : undefined;
@@ -3572,7 +3635,8 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             prep,
             durationMs,
             undefined,
-            outputFormat
+            outputFormat,
+            warnings
           );
         }
         safeFlightComplete(
@@ -3597,7 +3661,8 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           prep,
           durationMs,
           undefined,
-          outputFormat
+          outputFormat,
+          warnings
         );
       } catch (error) {
         const elapsedMs = Math.max(0, Date.now() - startTime);
@@ -4735,6 +4800,13 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             }
           }
 
+          // Slice 3: TTL warning on resume (async path too).
+          const ttlWarning = maybeBuildCacheTtlWarning({
+            runtime,
+            sessionId: effectiveSessionId,
+            cli: "claude",
+          });
+
           // Idle timeout only for stream-json (text/json produce no output until done)
           const effectiveIdleTimeout =
             outputFormat === "stream-json"
@@ -4768,6 +4840,9 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           };
           if (prep.reviewIntegrity && prep.reviewIntegrity.violations.length > 0) {
             asyncResponse.reviewIntegrity = prep.reviewIntegrity;
+          }
+          if (ttlWarning) {
+            asyncResponse.warnings = [ttlWarning];
           }
 
           return {

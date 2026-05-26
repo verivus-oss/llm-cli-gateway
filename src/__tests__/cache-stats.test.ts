@@ -7,6 +7,8 @@ import {
   computeSessionCacheStats,
   computePrefixCacheStats,
   computeGlobalCacheStats,
+  computeTtlRemaining,
+  type SessionCacheStats,
 } from "../cache-stats.js";
 
 describe("cache-stats", () => {
@@ -162,6 +164,84 @@ describe("cache-stats", () => {
       expect(codex?.totalCacheReadTokens).toBe(200);
       expect(gemini?.requestCount).toBe(1);
       expect(g.estimatedSavingsUsd).toBeGreaterThan(0);
+    });
+  });
+
+  describe("computeTtlRemaining (slice 3)", () => {
+    function makeStats(opts: {
+      cli: SessionCacheStats["cli"];
+      lastRequestAt: string | null;
+    }): SessionCacheStats {
+      return {
+        sessionId: "s",
+        cli: opts.cli,
+        totalCacheReadTokens: 0,
+        totalCacheCreationTokens: 0,
+        requestCount: 0,
+        hitCount: 0,
+        hitRate: 0,
+        distinctPrefixCount: 0,
+        lastRequestAt: opts.lastRequestAt,
+        estimatedSavingsUsd: 0,
+        ttlRemainingMs: null,
+      };
+    }
+
+    it("claude default 5-min TTL: 4 min after write → ≈60s remaining", () => {
+      const now = 1_700_000_000_000;
+      const lastWrite = new Date(now - 4 * 60_000).toISOString();
+      const stats = makeStats({ cli: "claude", lastRequestAt: lastWrite });
+      const ttl = computeTtlRemaining(stats, "claude", {
+        anthropicTtlSeconds: 300,
+        now: () => now,
+      });
+      // 5min = 300s = 300000ms; elapsed = 240000ms; remaining = 60000ms.
+      expect(ttl).toBe(60_000);
+    });
+
+    it("claude 1-hour TTL: 4 min after write → ≈56min remaining", () => {
+      const now = 1_700_000_000_000;
+      const lastWrite = new Date(now - 4 * 60_000).toISOString();
+      const stats = makeStats({ cli: "claude", lastRequestAt: lastWrite });
+      const ttl = computeTtlRemaining(stats, "claude", {
+        anthropicTtlSeconds: 3600,
+        now: () => now,
+      });
+      // 1h = 3600s = 3600000ms; elapsed = 240000ms; remaining = 3360000ms.
+      expect(ttl).toBe(3_360_000);
+    });
+
+    it("claude: TTL clamped to 0 when elapsed > policy", () => {
+      const now = 1_700_000_000_000;
+      const lastWrite = new Date(now - 10 * 60_000).toISOString();
+      const stats = makeStats({ cli: "claude", lastRequestAt: lastWrite });
+      const ttl = computeTtlRemaining(stats, "claude", {
+        anthropicTtlSeconds: 300,
+        now: () => now,
+      });
+      expect(ttl).toBe(0);
+    });
+
+    it("non-claude CLI returns null (we have no read on its cache state)", () => {
+      const stats = makeStats({
+        cli: "gemini",
+        lastRequestAt: new Date().toISOString(),
+      });
+      expect(
+        computeTtlRemaining(stats, "gemini", {
+          anthropicTtlSeconds: 300,
+        })
+      ).toBeNull();
+      expect(
+        computeTtlRemaining(stats, "codex", { anthropicTtlSeconds: 300 })
+      ).toBeNull();
+    });
+
+    it("null lastRequestAt → null ttlRemainingMs", () => {
+      const stats = makeStats({ cli: "claude", lastRequestAt: null });
+      expect(
+        computeTtlRemaining(stats, "claude", { anthropicTtlSeconds: 300 })
+      ).toBeNull();
     });
   });
 });

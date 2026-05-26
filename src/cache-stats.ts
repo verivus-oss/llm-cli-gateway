@@ -37,6 +37,13 @@ export interface SessionCacheStats {
   lastRequestAt: string | null;
   /** Estimated USD saved by cache reads in this session (best-effort). */
   estimatedSavingsUsd: number;
+  /**
+   * Slice 3: best-effort remaining TTL on the Anthropic cache breakpoint
+   * established at lastRequestAt. Null for non-claude CLIs (we have no
+   * read on their cache state) and null when lastRequestAt is null.
+   * Computed by computeTtlRemaining(); see ttlPolicy parameter.
+   */
+  ttlRemainingMs: number | null;
 }
 
 export interface PrefixCacheStats {
@@ -140,7 +147,53 @@ export function computeSessionCacheStats(
     distinctPrefixCount: prefixSet.size,
     lastRequestAt: lastAt,
     estimatedSavingsUsd,
+    // ttlRemainingMs is populated by computeTtlRemaining() — the field
+    // exists on the type so the resource shape is uniform, but its value
+    // is left null here. Callers (session_get / cache_state resources)
+    // apply the configured TTL policy and set the field.
+    ttlRemainingMs: null,
   };
+}
+
+export interface TtlPolicy {
+  /**
+   * Seconds: how long Anthropic holds a cache entry after the last
+   * write. Default 300 (5 minutes). Set to 3600 when the operator has
+   * opted into Anthropic's 1-hour cache TTL via
+   * `[cache_awareness].anthropic_ttl_seconds = 3600`.
+   */
+  anthropicTtlSeconds: 300 | 3600;
+  /** Defaults to `() => Date.now()`. Overridable for deterministic tests. */
+  now?: () => number;
+}
+
+/**
+ * Slice 3: compute the best-effort milliseconds remaining on the cache
+ * breakpoint established at `stats.lastRequestAt`.
+ *
+ * - Claude: Anthropic's documented TTL (5min default, 1h beta). Computed
+ *   as max(0, ttl - (now - lastWriteAt)).
+ * - Other CLIs: returns null. We do not observe the provider's actual
+ *   cache state, so any number we'd return would be a guess. session_get
+ *   and cache_state resources should report null for these.
+ *
+ * Note: this is "best effort". A cache eviction inside Anthropic's
+ * window will NOT be visible to us — the warning may be optimistic
+ * (see risks section in dag.toml).
+ */
+export function computeTtlRemaining(
+  stats: SessionCacheStats,
+  cli: CacheStatsCli | null,
+  ttlPolicy: TtlPolicy
+): number | null {
+  if (cli !== "claude") return null;
+  if (!stats.lastRequestAt) return null;
+  const nowMs = (ttlPolicy.now ?? Date.now)();
+  const lastWriteMs = Date.parse(stats.lastRequestAt);
+  if (!Number.isFinite(lastWriteMs)) return null;
+  const elapsedMs = nowMs - lastWriteMs;
+  const ttlMs = ttlPolicy.anthropicTtlSeconds * 1000;
+  return Math.max(0, ttlMs - elapsedMs);
 }
 
 export function computePrefixCacheStats(
