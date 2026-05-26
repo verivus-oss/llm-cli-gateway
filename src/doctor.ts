@@ -420,14 +420,21 @@ export function printDoctorJson(): void {
 function isCreateDoctorReportOptions(
   value: NodeJS.ProcessEnv | CreateDoctorReportOptions
 ): value is CreateDoctorReportOptions {
-  // CreateDoctorReportOptions carries either `env` or `flightRecorder`; a
-  // NodeJS.ProcessEnv is a plain Record<string, string|undefined> and has
-  // neither key.
+  // CreateDoctorReportOptions carries either `env` (an object) or
+  // `flightRecorder` (an object). A NodeJS.ProcessEnv is a flat
+  // Record<string, string|undefined> — even if a shell happens to export
+  // `env=production` or `flightRecorder=...`, the value at that key is a
+  // STRING, not an object, so the typeof checks here cannot collide.
   if (value === null || typeof value !== "object") return false;
-  return (
-    Object.prototype.hasOwnProperty.call(value, "env") ||
-    Object.prototype.hasOwnProperty.call(value, "flightRecorder")
-  );
+  if (Object.prototype.hasOwnProperty.call(value, "flightRecorder")) {
+    const candidate = (value as { flightRecorder?: unknown }).flightRecorder;
+    return candidate === undefined || typeof candidate === "object";
+  }
+  if (Object.prototype.hasOwnProperty.call(value, "env")) {
+    const candidate = (value as { env?: unknown }).env;
+    return candidate === undefined || typeof candidate === "object";
+  }
+  return false;
 }
 
 function doctorProviderStatus(

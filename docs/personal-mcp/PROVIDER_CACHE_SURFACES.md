@@ -13,7 +13,7 @@ underlying API field names — they diverge meaningfully for Codex.
 | CLI     | Cache reporting (observed in CLI output)          | Gateway lever for influencing cache             | Notes                                                                  |
 |---------|---------------------------------------------------|-------------------------------------------------|------------------------------------------------------------------------|
 | claude  | `cache_read_input_tokens`, `cache_creation_input_tokens` (via JSON output) | Prefix discipline + `--exclude-dynamic-system-prompt-sections`; `cache_control` injection via stream-json is **probable but unverified** | Anthropic native caching. Per-model min-token thresholds (see table).  |
-| codex   | `cache_read_input_tokens`, `cache_creation_input_tokens` (Anthropic-style names emitted by Codex CLI; underlying OpenAI API uses `usage.prompt_tokens_details.cached_tokens`) | Prefix discipline only (no CLI cache-control flag) | OpenAI implicit cache; CLI threshold is set server-side                |
+| codex   | `cached_input_tokens` (Codex CLI ≥ 0.133.0 emits this in `turn.completed.usage`); underlying OpenAI API uses `usage.prompt_tokens_details.cached_tokens` | Prefix discipline only (no CLI cache-control flag) | OpenAI implicit cache; CLI threshold is set server-side                |
 | gemini  | Not surfaced in CLI output                        | Prefix discipline only                          | Implicit prefix caching server-side; explicit `cachedContents` only via SDK |
 | grok    | Not surfaced in CLI output                        | Prefix discipline only                          | xAI caching, if any, is opaque to the CLI                              |
 | mistral | Not surfaced in CLI output                        | Prefix discipline only                          | Vibe CLI does not surface cache stats                                  |
@@ -88,10 +88,25 @@ chunks out of the cached prefix without needing explicit cache_control. The
 slice 1 wiring (system part → `--system-prompt`, task → final user message)
 gives prefix-discipline benefits without needing JSON injection.
 
-(c) **Environment variable activation** — No documented `ENABLE_PROMPT_CACHING_*`
-env var in Claude Code (it's enabled by default at the provider level when
-`cache_control` is present). The 1-hour TTL is selected per-block via
-`cache_control.ttl="1h"`, not via env var.
+(c) **Environment variable activation** — Claude Code documents several
+prompt-caching env vars (per <https://code.claude.com/docs/en/env-vars>,
+fetched 2026-05-26):
+
+- `DISABLE_PROMPT_CACHING` — global kill switch.
+- `DISABLE_PROMPT_CACHING_SONNET` / `DISABLE_PROMPT_CACHING_OPUS` /
+  `DISABLE_PROMPT_CACHING_HAIKU` — per-model-family kill switches.
+- `ENABLE_PROMPT_CACHING_1H` — opt into the 1-hour cache TTL (5-minute is
+  the default).
+- `ENABLE_PROMPT_CACHING_1H_BEDROCK` — Bedrock-specific 1-hour TTL opt-in
+  (deprecated; `ENABLE_PROMPT_CACHING_1H` covers Bedrock too).
+- `FORCE_PROMPT_CACHING_5M` — pin the 5-minute TTL even when the request
+  body would otherwise select 1h.
+
+The gateway does NOT inject any of these by default. Operators can set them
+in their shell or via the gateway's launcher script if they want global
+behaviour. The 1-hour TTL is also selectable per-block via
+`cache_control.ttl="1h"` when caller code is constructing the API request
+body directly.
 
 **Decision for slice 1**: ship Branch B (prefix-discipline-only) by default.
 Wire system/tools/context into `--system-prompt` and `--append-system-prompt`
@@ -107,17 +122,33 @@ the first user message, improving cache reuse across users/machines.
 
 ## Codex — field name divergence
 
-- **Codex CLI emits**: `cache_read_input_tokens` and `cache_creation_input_tokens`
-  in its turn.completed events (Anthropic-style naming, regardless of the
-  underlying provider). Confirmed in `src/codex-json-parser.ts:69-77`.
+- **Codex CLI emits**: `cached_input_tokens` (NOT `cache_read_input_tokens`) in
+  its `turn.completed.usage` payload. Verified by live smoke test against
+  Codex CLI 0.133.0 on 2026-05-26:
+  ```
+  echo "Reply with OK." | codex exec --json --skip-git-repo-check
+  ...
+  {"type":"turn.completed","usage":{"input_tokens":13420,"cached_input_tokens":4992,...}}
+  ```
 - **Underlying OpenAI API surfaces**: `usage.prompt_tokens_details.cached_tokens`
   (and no `cache_creation_*` field — OpenAI does not distinguish write from read
   in the way Anthropic does; only reads are counted).
+- **Gateway parser today**: `src/codex-json-parser.ts:69-77` reads
+  `cache_read_input_tokens` / `cache_creation_input_tokens` (Anthropic-style),
+  which the current Codex CLI does NOT emit. The codex parser's
+  `cache_read_tokens` column is therefore NULL for current codex output until
+  the parser is updated to also accept `cached_input_tokens`. **Out of scope
+  for this slice** — fixing the codex parser is a separate follow-up
+  (`docs/plans/codex-parser-cache-tokens.dag.toml`, TBD).
 
-Practical consequence: the flight-recorder column `cache_read_tokens` (already
-populated for codex via `cache_read_input_tokens`) is accurate for cache reads
-across both CLIs. `cache_creation_tokens` for codex will be `0`/`null` because
-OpenAI does not report it — only Anthropic writes are recorded there.
+Practical consequence for slice 1: claude is the only CLI whose
+`cache_read_tokens` column actually gets populated by current parsers. Slice 2
+cache-stats queries therefore tolerate NULL/0 across the board and the per-CLI
+breakdown will show claude-only data until the codex parser is fixed.
+
+Gateway has no CLI flag to influence Codex's caching behaviour. Prefix
+discipline (stable system+tools+context prefix, volatile task suffix) is the
+only lever.
 
 Gateway has no CLI flag to influence Codex's caching behaviour. Prefix
 discipline (stable system+tools+context prefix, volatile task suffix) is the

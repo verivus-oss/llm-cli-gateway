@@ -357,11 +357,22 @@ export class FlightRecorder {
    * connection. better-sqlite3 in WAL mode handles concurrent readers
    * inside a single process safely.
    *
-   * Caller MUST pass parameterised SQL — direct string interpolation of
-   * untrusted values is unsafe.
+   * Safety:
+   * - Caller MUST pass parameterised SQL — direct string interpolation of
+   *   untrusted values is unsafe.
+   * - The compiled statement's `.readonly` flag is checked at runtime;
+   *   anything that can mutate rows (INSERT/UPDATE/DELETE, including the
+   *   `RETURNING` forms that better-sqlite3 surfaces via `.all()`) throws.
+   *   This blocks the writer-disguised-as-reader vector codex-r1/F3
+   *   flagged, even when the caller is internal gateway code.
    */
   queryRequests<T = Record<string, unknown>>(sql: string, ...params: unknown[]): T[] {
-    const stmt = this.db.prepare(sql);
+    const stmt = this.db.prepare(sql) as StatementLike & { readonly?: boolean };
+    if (stmt.readonly === false) {
+      throw new Error(
+        "FlightRecorder.queryRequests refuses non-readonly SQL — use a transaction or a separate write surface for INSERT/UPDATE/DELETE."
+      );
+    }
     if (!stmt.all) {
       return [];
     }

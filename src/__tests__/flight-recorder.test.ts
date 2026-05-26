@@ -290,6 +290,49 @@ describe("FlightRecorder migrations (U23 cache columns)", () => {
     expect(noop.queryRequests("SELECT * FROM requests")).toEqual([]);
   });
 
+  it("queryRequests refuses non-readonly statements (DELETE … RETURNING)", () => {
+    const rec = new FlightRecorder(dbPath);
+    rec.logStart({
+      correlationId: "q-del-1",
+      cli: "claude",
+      model: "sonnet",
+      prompt: "p",
+    });
+    expect(() =>
+      rec.queryRequests("DELETE FROM requests WHERE id = ? RETURNING id", "q-del-1")
+    ).toThrow(/non-readonly|readonly/i);
+    // Row still present — DELETE did not execute.
+    const rows = rec.queryRequests<{ id: string }>(
+      "SELECT id FROM requests WHERE id = ?",
+      "q-del-1"
+    );
+    rec.close();
+    expect(rows).toHaveLength(1);
+  });
+
+  it("queryRequests refuses UPDATE … RETURNING", () => {
+    const rec = new FlightRecorder(dbPath);
+    rec.logStart({
+      correlationId: "q-upd-1",
+      cli: "claude",
+      model: "sonnet",
+      prompt: "p",
+    });
+    expect(() =>
+      rec.queryRequests(
+        "UPDATE requests SET prompt = ? WHERE id = ? RETURNING id",
+        "tampered",
+        "q-upd-1"
+      )
+    ).toThrow(/non-readonly|readonly/i);
+    const rows = rec.queryRequests<{ prompt: string }>(
+      "SELECT prompt FROM requests WHERE id = ?",
+      "q-upd-1"
+    );
+    rec.close();
+    expect(rows[0].prompt).toBe("p");
+  });
+
   it("queryRequests returns seeded rows from a real FlightRecorder", () => {
     const rec = new FlightRecorder(dbPath);
     rec.logStart({

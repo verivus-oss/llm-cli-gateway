@@ -19,7 +19,13 @@ import {
   optimizePrompt as optimizePromptText,
   optimizeResponse as optimizeResponseText,
 } from "./optimizer.js";
-import { loadConfig, loadPersistenceConfig, type PersistenceConfig } from "./config.js";
+import {
+  loadConfig,
+  loadPersistenceConfig,
+  loadCacheAwarenessConfig,
+  type PersistenceConfig,
+  type CacheAwarenessConfig,
+} from "./config.js";
 import { DatabaseConnection } from "./db.js";
 import { checkHealth } from "./health.js";
 import {
@@ -273,6 +279,7 @@ let flightRecorder: FlightRecorderLike | null = null;
 // registered (see createGatewayServer), making silent in-memory loss
 // structurally impossible.
 let persistenceConfig: PersistenceConfig | null = null;
+let cacheAwarenessConfig: CacheAwarenessConfig | null = null;
 let jobStore: JobStore | null = null;
 let jobStoreInitialized = false;
 let asyncJobManager: AsyncJobManager | null = null;
@@ -286,6 +293,13 @@ function getFlightRecorder(runtimeLogger: GatewayLogger = logger): FlightRecorde
 function getPersistenceConfig(runtimeLogger: GatewayLogger = logger): PersistenceConfig {
   persistenceConfig ??= loadPersistenceConfig(runtimeLogger);
   return persistenceConfig;
+}
+
+function getCacheAwarenessConfig(
+  runtimeLogger: GatewayLogger = logger
+): CacheAwarenessConfig {
+  cacheAwarenessConfig ??= loadCacheAwarenessConfig(runtimeLogger);
+  return cacheAwarenessConfig;
 }
 
 function getJobStore(runtimeLogger: GatewayLogger = logger): JobStore | null {
@@ -345,6 +359,7 @@ export interface GatewayServerDeps {
   flightRecorder?: FlightRecorderLike;
   logger?: GatewayLogger;
   persistence?: PersistenceConfig;
+  cacheAwareness?: CacheAwarenessConfig;
 }
 
 interface GatewayServerRuntime {
@@ -357,6 +372,7 @@ interface GatewayServerRuntime {
   flightRecorder: FlightRecorderLike;
   logger: GatewayLogger;
   persistence: PersistenceConfig;
+  cacheAwareness: CacheAwarenessConfig;
 }
 
 function resolveGatewayServerRuntime(
@@ -400,6 +416,7 @@ function resolveGatewayServerRuntime(
     flightRecorder: runtimeFlightRecorder,
     logger: runtimeLogger,
     persistence: deps.persistence ?? getPersistenceConfig(runtimeLogger),
+    cacheAwareness: deps.cacheAwareness ?? getCacheAwarenessConfig(runtimeLogger),
   };
 }
 
@@ -2969,7 +2986,16 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
     performanceMetrics,
     logger,
     persistence,
+    flightRecorder,
+    cacheAwareness,
   } = runtime;
+  // `flightRecorder` is destructured into closure scope so the session_get
+  // handler (see ~line 5590) has the FlightRecorderQuery read capability
+  // available without re-resolving runtime. Slice 2 will populate the
+  // `cacheState` field of session_get's response from this read surface.
+  // `cacheAwareness` is the loaded [cache_awareness] block (config.ts).
+  void flightRecorder;
+  void cacheAwareness;
   // Structural invariant: tools register iff ALL THREE conditions hold:
   //   (1) persistence.backend !== "none"  — the operator/config has not
   //       explicitly disabled durable persistence;
