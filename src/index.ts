@@ -77,6 +77,11 @@ import {
   type ClaudeAgentDefinition,
 } from "./request-helpers.js";
 import { createFlightRecorder, FlightRecorderLike } from "./flight-recorder.js";
+import {
+  resolvePromptInput,
+  PromptPartsSchema,
+  type PromptParts,
+} from "./prompt-parts.js";
 import { getCliVersions, runCliUpgrade } from "./cli-updater.js";
 import { startHttpGateway, type HttpGatewayHandle } from "./http-transport.js";
 import { printDoctorJson } from "./doctor.js";
@@ -1060,11 +1065,72 @@ interface CliRequestPrep {
   approvalDecision: ApprovalRecord | null;
   reviewIntegrity?: ReviewIntegrityResult;
   args: string[];
+  /**
+   * Sha256 of the assembled prompt's stable prefix bytes when the caller
+   * supplied `promptParts`. Null when the legacy `prompt` field was used.
+   * Populated by `resolvePromptOrPartsForPrep` and threaded into the
+   * flight-recorder row by the caller's safeFlightStart entry.
+   */
+  stablePrefixHash: string | null;
+  /** Heuristic token count (bytes/4) of the same stable prefix. */
+  stablePrefixTokens: number | null;
+}
+
+/**
+ * Slice 1: validate the prompt / promptParts mutex at the prep boundary and
+ * return either an error response or the resolved input. The exact error
+ * messages are part of the public contract — tests assert them verbatim.
+ */
+function resolvePromptOrPartsForPrep(args: {
+  prompt: string | undefined;
+  promptParts: PromptParts | undefined;
+  operation: string;
+  correlationId: string | undefined;
+}):
+  | { ok: true; assembledPrompt: string; stablePrefixHash: string | null; stablePrefixTokens: number | null }
+  | { ok: false; error: ExtendedToolResponse } {
+  const hasPrompt = typeof args.prompt === "string" && args.prompt.length > 0;
+  const hasParts = args.promptParts !== undefined;
+  if (hasPrompt && hasParts) {
+    return {
+      ok: false,
+      error: createErrorResponse(
+        args.operation,
+        1,
+        "",
+        args.correlationId,
+        new Error("provide exactly one of `prompt` or `promptParts`")
+      ) as ExtendedToolResponse,
+    };
+  }
+  if (!hasPrompt && !hasParts) {
+    return {
+      ok: false,
+      error: createErrorResponse(
+        args.operation,
+        1,
+        "",
+        args.correlationId,
+        new Error("one of `prompt` or `promptParts` is required")
+      ) as ExtendedToolResponse,
+    };
+  }
+  const resolved = resolvePromptInput({
+    prompt: args.prompt,
+    promptParts: args.promptParts,
+  });
+  return {
+    ok: true,
+    assembledPrompt: resolved.assembledPrompt,
+    stablePrefixHash: resolved.stablePrefixHash,
+    stablePrefixTokens: resolved.stablePrefixTokens,
+  };
 }
 
 export function prepareClaudeRequest(
   params: {
-    prompt: string;
+    prompt?: string;
+    promptParts?: PromptParts;
     model?: string;
     outputFormat: "text" | "json" | "stream-json";
     allowedTools?: string[];
@@ -1095,9 +1161,20 @@ export function prepareClaudeRequest(
   const cliInfo = getCliInfo();
   const resolvedModel = resolveModelAlias("claude", params.model, cliInfo);
 
+  const inputResolution = resolvePromptOrPartsForPrep({
+    prompt: params.prompt,
+    promptParts: params.promptParts,
+    operation: params.operation,
+    correlationId: corrId,
+  });
+  if (!inputResolution.ok) return inputResolution.error;
+  const assembledPrompt = inputResolution.assembledPrompt;
+  const stablePrefixHash = inputResolution.stablePrefixHash;
+  const stablePrefixTokens = inputResolution.stablePrefixTokens;
+
   // Review integrity check on raw prompt (before optimization)
   const reviewIntegrity = checkReviewIntegrity({
-    prompt: params.prompt,
+    prompt: assembledPrompt,
     allowedTools: params.allowedTools,
     disallowedTools: params.disallowedTools,
   });
@@ -1112,7 +1189,7 @@ export function prepareClaudeRequest(
     );
   }
 
-  let effectivePrompt = params.prompt;
+  let effectivePrompt = assembledPrompt;
   if (params.optimizePrompt) {
     const optimized = optimizePromptText(effectivePrompt);
     logOptimizationTokens("prompt", corrId, effectivePrompt, optimized);
@@ -1136,7 +1213,7 @@ export function prepareClaudeRequest(
     approvalDecision = runtime.approvalManager.decide({
       cli: "claude",
       operation: params.operation,
-      prompt: params.prompt, // Use raw prompt for review-context detection, not optimized
+      prompt: assembledPrompt, // Use raw assembled prompt for review-context detection, not optimized
       bypassRequested: params.dangerouslySkipPermissions,
       fullAuto: false,
       requestedMcpServers,
@@ -1223,6 +1300,8 @@ export function prepareClaudeRequest(
     approvalDecision,
     reviewIntegrity,
     args,
+    stablePrefixHash,
+    stablePrefixTokens,
   };
 }
 
@@ -1238,7 +1317,8 @@ export interface CodexRequestPrep extends CliRequestPrep {
 
 export function prepareCodexRequest(
   params: {
-    prompt: string;
+    prompt?: string;
+    promptParts?: PromptParts;
     model?: string;
     fullAuto: boolean;
     sandboxMode?: CodexSandboxMode;
@@ -1276,8 +1356,19 @@ export function prepareCodexRequest(
   const cliInfo = getCliInfo();
   const resolvedModel = resolveModelAlias("codex", params.model, cliInfo);
 
+  const inputResolution = resolvePromptOrPartsForPrep({
+    prompt: params.prompt,
+    promptParts: params.promptParts,
+    operation: params.operation,
+    correlationId: corrId,
+  });
+  if (!inputResolution.ok) return inputResolution.error;
+  const assembledPrompt = inputResolution.assembledPrompt;
+  const stablePrefixHash = inputResolution.stablePrefixHash;
+  const stablePrefixTokens = inputResolution.stablePrefixTokens;
+
   // Review integrity check on raw prompt (before optimization)
-  const reviewIntegrity = checkReviewIntegrity({ prompt: params.prompt });
+  const reviewIntegrity = checkReviewIntegrity({ prompt: assembledPrompt });
   if (reviewIntegrity.violations.length > 0) {
     runtime.logger.info(
       `[${corrId}] Review integrity violations detected: ${reviewIntegrity.violations.map(v => v.type).join(", ")}`,
@@ -1289,7 +1380,7 @@ export function prepareCodexRequest(
     );
   }
 
-  let effectivePrompt = params.prompt;
+  let effectivePrompt = assembledPrompt;
   if (params.optimizePrompt) {
     const optimized = optimizePromptText(effectivePrompt);
     logOptimizationTokens("prompt", corrId, effectivePrompt, optimized);
@@ -1303,7 +1394,7 @@ export function prepareCodexRequest(
     approvalDecision = runtime.approvalManager.decide({
       cli: "codex",
       operation: params.operation,
-      prompt: params.prompt, // Use raw prompt for review-context detection, not optimized
+      prompt: assembledPrompt, // Use raw assembled prompt for review-context detection, not optimized
       bypassRequested: params.dangerouslyBypassApprovalsAndSandbox,
       fullAuto: params.fullAuto,
       requestedMcpServers,
@@ -1432,12 +1523,15 @@ export function prepareCodexRequest(
     reviewIntegrity,
     args,
     cleanup: highImpactCleanup,
+    stablePrefixHash,
+    stablePrefixTokens,
   };
 }
 
 export function prepareGeminiRequest(
   params: {
-    prompt: string;
+    prompt?: string;
+    promptParts?: PromptParts;
     model?: string;
     approvalMode?: string;
     approvalStrategy: "legacy" | "mcp_managed";
@@ -1466,9 +1560,20 @@ export function prepareGeminiRequest(
   const cliInfo = getCliInfo();
   const resolvedModel = resolveModelAlias("gemini", params.model, cliInfo);
 
+  const inputResolution = resolvePromptOrPartsForPrep({
+    prompt: params.prompt,
+    promptParts: params.promptParts,
+    operation: params.operation,
+    correlationId: corrId,
+  });
+  if (!inputResolution.ok) return inputResolution.error;
+  const assembledPrompt = inputResolution.assembledPrompt;
+  const stablePrefixHash = inputResolution.stablePrefixHash;
+  const stablePrefixTokens = inputResolution.stablePrefixTokens;
+
   // Review integrity check on raw prompt (before optimization)
   const reviewIntegrity = checkReviewIntegrity({
-    prompt: params.prompt,
+    prompt: assembledPrompt,
     allowedTools: params.allowedTools,
   });
   if (reviewIntegrity.violations.length > 0) {
@@ -1482,7 +1587,7 @@ export function prepareGeminiRequest(
     );
   }
 
-  let effectivePrompt = params.prompt;
+  let effectivePrompt = assembledPrompt;
   if (params.optimizePrompt) {
     const optimized = optimizePromptText(effectivePrompt);
     logOptimizationTokens("prompt", corrId, effectivePrompt, optimized);
@@ -1496,7 +1601,7 @@ export function prepareGeminiRequest(
     approvalDecision = runtime.approvalManager.decide({
       cli: "gemini",
       operation: params.operation,
-      prompt: params.prompt, // Use raw prompt for review-context detection, not optimized
+      prompt: assembledPrompt, // Use raw assembled prompt for review-context detection, not optimized
       bypassRequested: params.approvalMode === "yolo",
       fullAuto: false,
       requestedMcpServers,
@@ -1583,12 +1688,15 @@ export function prepareGeminiRequest(
     approvalDecision,
     reviewIntegrity,
     args,
+    stablePrefixHash,
+    stablePrefixTokens,
   };
 }
 
 function prepareGrokRequest(
   params: {
-    prompt: string;
+    prompt?: string;
+    promptParts?: PromptParts;
     model?: string;
     outputFormat?: string;
     alwaysApprove?: boolean;
@@ -1610,9 +1718,20 @@ function prepareGrokRequest(
   const cliInfo = getCliInfo();
   const resolvedModel = resolveModelAlias("grok", params.model, cliInfo);
 
+  const inputResolution = resolvePromptOrPartsForPrep({
+    prompt: params.prompt,
+    promptParts: params.promptParts,
+    operation: params.operation,
+    correlationId: corrId,
+  });
+  if (!inputResolution.ok) return inputResolution.error;
+  const assembledPrompt = inputResolution.assembledPrompt;
+  const stablePrefixHash = inputResolution.stablePrefixHash;
+  const stablePrefixTokens = inputResolution.stablePrefixTokens;
+
   // Review integrity check on raw prompt (before optimization)
   const reviewIntegrity = checkReviewIntegrity({
-    prompt: params.prompt,
+    prompt: assembledPrompt,
     allowedTools: params.allowedTools,
     disallowedTools: params.disallowedTools,
   });
@@ -1627,7 +1746,7 @@ function prepareGrokRequest(
     );
   }
 
-  let effectivePrompt = params.prompt;
+  let effectivePrompt = assembledPrompt;
   if (params.optimizePrompt) {
     const optimized = optimizePromptText(effectivePrompt);
     logOptimizationTokens("prompt", corrId, effectivePrompt, optimized);
@@ -1641,7 +1760,7 @@ function prepareGrokRequest(
     approvalDecision = runtime.approvalManager.decide({
       cli: "grok",
       operation: params.operation,
-      prompt: params.prompt, // Use raw prompt for review-context detection, not optimized
+      prompt: assembledPrompt, // Use raw assembled prompt for review-context detection, not optimized
       bypassRequested:
         Boolean(params.alwaysApprove) || params.permissionMode === "bypassPermissions",
       fullAuto: false,
@@ -1685,12 +1804,15 @@ function prepareGrokRequest(
     approvalDecision,
     reviewIntegrity,
     args,
+    stablePrefixHash,
+    stablePrefixTokens,
   };
 }
 
 export function prepareMistralRequest(
   params: {
-    prompt: string;
+    prompt?: string;
+    promptParts?: PromptParts;
     model?: string;
     outputFormat?: string;
     permissionMode?: MistralAgentMode;
@@ -1711,8 +1833,19 @@ export function prepareMistralRequest(
   const cliInfo = getCliInfo();
   const resolvedModel = resolveModelAlias("mistral", params.model, cliInfo);
 
-  const reviewIntegrity = checkReviewIntegrity({
+  const inputResolution = resolvePromptOrPartsForPrep({
     prompt: params.prompt,
+    promptParts: params.promptParts,
+    operation: params.operation,
+    correlationId: corrId,
+  });
+  if (!inputResolution.ok) return inputResolution.error;
+  const assembledPrompt = inputResolution.assembledPrompt;
+  const stablePrefixHash = inputResolution.stablePrefixHash;
+  const stablePrefixTokens = inputResolution.stablePrefixTokens;
+
+  const reviewIntegrity = checkReviewIntegrity({
+    prompt: assembledPrompt,
     allowedTools: params.allowedTools,
     disallowedTools: params.disallowedTools,
   });
@@ -1727,7 +1860,7 @@ export function prepareMistralRequest(
     );
   }
 
-  let effectivePrompt = params.prompt;
+  let effectivePrompt = assembledPrompt;
   if (params.optimizePrompt) {
     const optimized = optimizePromptText(effectivePrompt);
     logOptimizationTokens("prompt", corrId, effectivePrompt, optimized);
@@ -1741,7 +1874,7 @@ export function prepareMistralRequest(
     approvalDecision = runtime.approvalManager.decide({
       cli: "mistral",
       operation: params.operation,
-      prompt: params.prompt,
+      prompt: assembledPrompt,
       bypassRequested: params.permissionMode === "auto-approve",
       fullAuto: false,
       requestedMcpServers,
@@ -1793,6 +1926,8 @@ export function prepareMistralRequest(
     reviewIntegrity,
     args: prep.args,
     mistralEnv: prep.env,
+    stablePrefixHash,
+    stablePrefixTokens,
   };
 }
 
@@ -1885,7 +2020,8 @@ function buildCliResponse(
 //──────────────────────────────────────────────────────────────────────────────
 
 export interface GeminiRequestParams {
-  prompt: string;
+  prompt?: string;
+  promptParts?: PromptParts;
   model?: string;
   sessionId?: string;
   resumeLatest: boolean;
@@ -1953,6 +2089,7 @@ export async function handleGeminiRequest(
   const prep = prepareGeminiRequest(
     {
       prompt: params.prompt,
+      promptParts: params.promptParts,
       model: params.model,
       approvalMode: params.approvalMode,
       approvalStrategy: params.approvalStrategy,
@@ -1981,13 +2118,15 @@ export async function handleGeminiRequest(
       correlationId: corrId,
       cli: "gemini",
       model: prep.resolvedModel || "default",
-      prompt: params.prompt,
+      prompt: prep.effectivePrompt,
       sessionId: params.sessionId,
+      stablePrefixHash: prep.stablePrefixHash ?? undefined,
+      stablePrefixTokens: prep.stablePrefixTokens ?? undefined,
     },
     runtime
   );
   deps.logger.info(
-    `[${corrId}] gemini_request invoked with model=${prep.resolvedModel || "default"}, approvalMode=${params.approvalMode}, prompt length=${params.prompt.length}`
+    `[${corrId}] gemini_request invoked with model=${prep.resolvedModel || "default"}, approvalMode=${params.approvalMode}, prompt length=${prep.effectivePrompt.length}`
   );
 
   try {
@@ -2122,6 +2261,7 @@ export async function handleGeminiRequestAsync(
   const prep = prepareGeminiRequest(
     {
       prompt: params.prompt,
+      promptParts: params.promptParts,
       model: params.model,
       approvalMode: params.approvalMode,
       approvalStrategy: params.approvalStrategy,
@@ -2210,7 +2350,8 @@ export async function handleGeminiRequestAsync(
 }
 
 export interface GrokRequestParams {
-  prompt: string;
+  prompt?: string;
+  promptParts?: PromptParts;
   model?: string;
   outputFormat?: string;
   sessionId?: string;
@@ -2241,6 +2382,7 @@ export async function handleGrokRequest(
   const prep = prepareGrokRequest(
     {
       prompt: params.prompt,
+      promptParts: params.promptParts,
       model: params.model,
       outputFormat: params.outputFormat,
       alwaysApprove: params.alwaysApprove,
@@ -2268,13 +2410,15 @@ export async function handleGrokRequest(
       correlationId: corrId,
       cli: "grok",
       model: prep.resolvedModel || "default",
-      prompt: params.prompt,
+      prompt: prep.effectivePrompt,
       sessionId: params.sessionId,
+      stablePrefixHash: prep.stablePrefixHash ?? undefined,
+      stablePrefixTokens: prep.stablePrefixTokens ?? undefined,
     },
     runtime
   );
   deps.logger.info(
-    `[${corrId}] grok_request invoked with model=${prep.resolvedModel || "default"}, permissionMode=${params.permissionMode}, prompt length=${params.prompt.length}`
+    `[${corrId}] grok_request invoked with model=${prep.resolvedModel || "default"}, permissionMode=${params.permissionMode}, prompt length=${prep.effectivePrompt.length}`
   );
 
   try {
@@ -2405,6 +2549,7 @@ export async function handleGrokRequestAsync(
   const prep = prepareGrokRequest(
     {
       prompt: params.prompt,
+      promptParts: params.promptParts,
       model: params.model,
       outputFormat: params.outputFormat,
       alwaysApprove: params.alwaysApprove,
@@ -2497,7 +2642,8 @@ export async function handleGrokRequestAsync(
 }
 
 export interface MistralRequestParams {
-  prompt: string;
+  prompt?: string;
+  promptParts?: PromptParts;
   model?: string;
   outputFormat?: string;
   sessionId?: string;
@@ -2527,6 +2673,7 @@ export async function handleMistralRequest(
   const prep = prepareMistralRequest(
     {
       prompt: params.prompt,
+      promptParts: params.promptParts,
       model: params.model,
       outputFormat: params.outputFormat,
       permissionMode: params.permissionMode,
@@ -2553,13 +2700,15 @@ export async function handleMistralRequest(
       correlationId: corrId,
       cli: "mistral",
       model: prep.resolvedModel || "default",
-      prompt: params.prompt,
+      prompt: prep.effectivePrompt,
       sessionId: params.sessionId,
+      stablePrefixHash: prep.stablePrefixHash ?? undefined,
+      stablePrefixTokens: prep.stablePrefixTokens ?? undefined,
     },
     runtime
   );
   deps.logger.info(
-    `[${corrId}] mistral_request invoked with model=${prep.resolvedModel || "default"}, permissionMode=${params.permissionMode || "auto-approve"}, prompt length=${params.prompt.length}`
+    `[${corrId}] mistral_request invoked with model=${prep.resolvedModel || "default"}, permissionMode=${params.permissionMode || "auto-approve"}, prompt length=${prep.effectivePrompt.length}`
   );
 
   try {
@@ -2726,6 +2875,7 @@ export async function handleMistralRequestAsync(
   const prep = prepareMistralRequest(
     {
       prompt: params.prompt,
+      promptParts: params.promptParts,
       model: params.model,
       outputFormat: params.outputFormat,
       permissionMode: params.permissionMode,
@@ -2817,7 +2967,8 @@ export async function handleMistralRequestAsync(
 export async function handleCodexRequestAsync(
   deps: AsyncHandlerDeps,
   params: {
-    prompt: string;
+    prompt?: string;
+    promptParts?: PromptParts;
     model?: string;
     fullAuto: boolean;
     sandboxMode?: CodexSandboxMode;
@@ -2850,6 +3001,7 @@ export async function handleCodexRequestAsync(
   const prep = prepareCodexRequest(
     {
       prompt: params.prompt,
+      promptParts: params.promptParts,
       model: params.model,
       fullAuto: params.fullAuto,
       sandboxMode: params.sandboxMode,
@@ -3025,7 +3177,13 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .string()
         .min(1, "Prompt cannot be empty")
         .max(100000, "Prompt too long (max 100k chars)")
-        .describe("Prompt text for Claude"),
+        .optional()
+        .describe(
+          "Prompt text for Claude (mutually exclusive with promptParts)"
+        ),
+      promptParts: PromptPartsSchema.optional().describe(
+        "Cache-aware structured prompt: { system?, tools?, context?, task }. Mutually exclusive with prompt. Stable parts hash into cache_state for prefix-discipline tracking."
+      ),
       model: z
         .string()
         .optional()
@@ -3133,6 +3291,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
     },
     async ({
       prompt,
+      promptParts,
       model,
       outputFormat,
       sessionId,
@@ -3176,6 +3335,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       const prep = prepareClaudeRequest(
         {
           prompt,
+          promptParts,
           model,
           outputFormat,
           allowedTools,
@@ -3211,13 +3371,15 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           correlationId: corrId,
           cli: "claude",
           model: prep.resolvedModel || "default",
-          prompt,
+          prompt: prep.effectivePrompt,
           sessionId,
+          stablePrefixHash: prep.stablePrefixHash ?? undefined,
+          stablePrefixTokens: prep.stablePrefixTokens ?? undefined,
         },
         runtime
       );
       logger.info(
-        `[${corrId}] claude_request invoked with model=${prep.resolvedModel || "default"}, outputFormat=${outputFormat}, prompt length=${prompt.length}, sessionId=${sessionId}`
+        `[${corrId}] claude_request invoked with model=${prep.resolvedModel || "default"}, outputFormat=${outputFormat}, prompt length=${prep.effectivePrompt.length}, sessionId=${sessionId}`
       );
 
       try {
@@ -3389,7 +3551,11 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .string()
         .min(1, "Prompt cannot be empty")
         .max(100000, "Prompt too long (max 100k chars)")
-        .describe("Prompt text for Codex"),
+        .optional()
+        .describe("Prompt text for Codex (mutually exclusive with promptParts)"),
+      promptParts: PromptPartsSchema.optional().describe(
+        "Cache-aware structured prompt: { system?, tools?, context?, task }. Mutually exclusive with prompt. Stable parts hash into cache_state for prefix-discipline tracking."
+      ),
       model: z.string().optional().describe("Model name or alias (e.g. gpt-5.4, latest)"),
       fullAuto: z
         .boolean()
@@ -3499,6 +3665,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
     },
     async ({
       prompt,
+      promptParts,
       model,
       fullAuto,
       sandboxMode,
@@ -3530,6 +3697,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       const prep = prepareCodexRequest(
         {
           prompt,
+          promptParts,
           model,
           fullAuto,
           sandboxMode,
@@ -3567,13 +3735,15 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           correlationId: corrId,
           cli: "codex",
           model: prep.resolvedModel || "default",
-          prompt,
+          prompt: prep.effectivePrompt,
           sessionId,
+          stablePrefixHash: prep.stablePrefixHash ?? undefined,
+          stablePrefixTokens: prep.stablePrefixTokens ?? undefined,
         },
         runtime
       );
       logger.info(
-        `[${corrId}] codex_request invoked with model=${prep.resolvedModel || "default"}, fullAuto=${fullAuto}, prompt length=${prompt.length}`
+        `[${corrId}] codex_request invoked with model=${prep.resolvedModel || "default"}, fullAuto=${fullAuto}, prompt length=${prep.effectivePrompt.length}`
       );
 
       // U26 fix: pass the outputSchema cleanup to awaitJobOrDefer, which
@@ -3849,7 +4019,11 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .string()
         .min(1, "Prompt cannot be empty")
         .max(100000, "Prompt too long (max 100k chars)")
-        .describe("Prompt text for Gemini"),
+        .optional()
+        .describe("Prompt text for Gemini (mutually exclusive with promptParts)"),
+      promptParts: PromptPartsSchema.optional().describe(
+        "Cache-aware structured prompt: { system?, tools?, context?, task }. Mutually exclusive with prompt. Stable parts hash into cache_state for prefix-discipline tracking."
+      ),
       model: z
         .string()
         .optional()
@@ -3919,6 +4093,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
     },
     async ({
       prompt,
+      promptParts,
       model,
       sessionId,
       resumeLatest,
@@ -3944,6 +4119,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         { sessionManager, logger, runtime },
         {
           prompt,
+          promptParts,
           model,
           sessionId,
           resumeLatest,
@@ -3980,7 +4156,11 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .string()
         .min(1, "Prompt cannot be empty")
         .max(100000, "Prompt too long (max 100k chars)")
-        .describe("Prompt text for Grok"),
+        .optional()
+        .describe("Prompt text for Grok (mutually exclusive with promptParts)"),
+      promptParts: PromptPartsSchema.optional().describe(
+        "Cache-aware structured prompt: { system?, tools?, context?, task }. Mutually exclusive with prompt. Stable parts hash into cache_state for prefix-discipline tracking."
+      ),
       model: z.string().optional().describe("Model name or alias (e.g. grok-build, latest)"),
       outputFormat: z
         .enum(["plain", "json", "streaming-json"])
@@ -4049,6 +4229,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
     },
     async ({
       prompt,
+      promptParts,
       model,
       outputFormat,
       sessionId,
@@ -4073,6 +4254,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         { sessionManager, logger, runtime },
         {
           prompt,
+          promptParts,
           model,
           outputFormat,
           sessionId,
@@ -4108,7 +4290,11 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .string()
         .min(1, "Prompt cannot be empty")
         .max(100000, "Prompt too long (max 100k chars)")
-        .describe("Prompt text for Mistral Vibe"),
+        .optional()
+        .describe("Prompt text for Mistral Vibe (mutually exclusive with promptParts)"),
+      promptParts: PromptPartsSchema.optional().describe(
+        "Cache-aware structured prompt: { system?, tools?, context?, task }. Mutually exclusive with prompt. Stable parts hash into cache_state for prefix-discipline tracking."
+      ),
       model: z
         .string()
         .optional()
@@ -4186,6 +4372,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
     },
     async ({
       prompt,
+      promptParts,
       model,
       outputFormat,
       sessionId,
@@ -4209,6 +4396,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         { sessionManager, logger, runtime },
         {
           prompt,
+          promptParts,
           model,
           outputFormat,
           sessionId,
@@ -4251,7 +4439,11 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .string()
           .min(1, "Prompt cannot be empty")
           .max(100000, "Prompt too long (max 100k chars)")
-          .describe("Prompt text for Claude"),
+          .optional()
+          .describe("Prompt text for Claude (mutually exclusive with promptParts)"),
+        promptParts: PromptPartsSchema.optional().describe(
+          "Cache-aware structured prompt: { system?, tools?, context?, task }. Mutually exclusive with prompt. Stable parts hash into cache_state for prefix-discipline tracking."
+        ),
         model: z
           .string()
           .optional()
@@ -4360,6 +4552,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       },
       async ({
         prompt,
+        promptParts,
         model,
         outputFormat,
         sessionId,
@@ -4401,6 +4594,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         const prep = prepareClaudeRequest(
           {
             prompt,
+            promptParts,
             model,
             outputFormat,
             allowedTools,
@@ -4513,7 +4707,11 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .string()
           .min(1, "Prompt cannot be empty")
           .max(100000, "Prompt too long (max 100k chars)")
-          .describe("Prompt text for Codex"),
+          .optional()
+          .describe("Prompt text for Codex (mutually exclusive with promptParts)"),
+        promptParts: PromptPartsSchema.optional().describe(
+          "Cache-aware structured prompt: { system?, tools?, context?, task }. Mutually exclusive with prompt. Stable parts hash into cache_state for prefix-discipline tracking."
+        ),
         model: z.string().optional().describe("Model name or alias (e.g. gpt-5.4, latest)"),
         fullAuto: z
           .boolean()
@@ -4601,6 +4799,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       },
       async ({
         prompt,
+        promptParts,
         model,
         fullAuto,
         sandboxMode,
@@ -4631,6 +4830,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           { sessionManager, asyncJobManager, logger, runtime },
           {
             prompt,
+            promptParts,
             model,
             fullAuto,
             sandboxMode,
@@ -4668,7 +4868,11 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .string()
           .min(1, "Prompt cannot be empty")
           .max(100000, "Prompt too long (max 100k chars)")
-          .describe("Prompt text for Gemini"),
+          .optional()
+          .describe("Prompt text for Gemini (mutually exclusive with promptParts)"),
+        promptParts: PromptPartsSchema.optional().describe(
+          "Cache-aware structured prompt: { system?, tools?, context?, task }. Mutually exclusive with prompt. Stable parts hash into cache_state for prefix-discipline tracking."
+        ),
         model: z
           .string()
           .optional()
@@ -4740,6 +4944,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       },
       async ({
         prompt,
+        promptParts,
         model,
         sessionId,
         resumeLatest,
@@ -4764,6 +4969,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           { sessionManager, asyncJobManager, logger, runtime },
           {
             prompt,
+            promptParts,
             model,
             sessionId,
             resumeLatest,
@@ -4795,7 +5001,11 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .string()
           .min(1, "Prompt cannot be empty")
           .max(100000, "Prompt too long (max 100k chars)")
-          .describe("Prompt text for Grok"),
+          .optional()
+          .describe("Prompt text for Grok (mutually exclusive with promptParts)"),
+        promptParts: PromptPartsSchema.optional().describe(
+          "Cache-aware structured prompt: { system?, tools?, context?, task }. Mutually exclusive with prompt. Stable parts hash into cache_state for prefix-discipline tracking."
+        ),
         model: z.string().optional().describe("Model name or alias (e.g. grok-build, latest)"),
         outputFormat: z
           .enum(["plain", "json", "streaming-json"])
@@ -4863,6 +5073,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       },
       async ({
         prompt,
+        promptParts,
         model,
         outputFormat,
         sessionId,
@@ -4886,6 +5097,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           { sessionManager, asyncJobManager, logger, runtime },
           {
             prompt,
+            promptParts,
             model,
             outputFormat,
             sessionId,
@@ -4916,7 +5128,11 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .string()
           .min(1, "Prompt cannot be empty")
           .max(100000, "Prompt too long (max 100k chars)")
-          .describe("Prompt text for Mistral Vibe"),
+          .optional()
+          .describe("Prompt text for Mistral Vibe (mutually exclusive with promptParts)"),
+        promptParts: PromptPartsSchema.optional().describe(
+          "Cache-aware structured prompt: { system?, tools?, context?, task }. Mutually exclusive with prompt. Stable parts hash into cache_state for prefix-discipline tracking."
+        ),
         model: z
           .string()
           .optional()
@@ -4993,6 +5209,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       },
       async ({
         prompt,
+        promptParts,
         model,
         outputFormat,
         sessionId,
@@ -5015,6 +5232,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           { sessionManager, asyncJobManager, logger, runtime },
           {
             prompt,
+            promptParts,
             model,
             outputFormat,
             sessionId,

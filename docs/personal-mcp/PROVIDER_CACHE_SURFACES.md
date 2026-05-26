@@ -173,8 +173,12 @@ Mistral / vibe CLI: same. No cache reporting.
   specifically, wires system/tools/context into `--system-prompt` and emits the
   cache_control breakpoint via that surface (Branch B; see above).
 - **Slice 2** (cache observability): reads `cache_read_tokens` /
-  `cache_creation_tokens` from the flight recorder. Already populated for
-  claude and codex; will read as NULL/0 for gemini/grok/mistral and aggregation
-  queries must tolerate this without dividing by zero.
+  `cache_creation_tokens` from the flight recorder. Populated for **claude
+  only** today — the Codex parser still looks for `cache_read_input_tokens`
+  rather than the actual `cached_input_tokens` Codex CLI emits, so
+  cache_read_tokens stays NULL for codex rows until that parser is updated
+  (separate follow-up — see the "Codex — field name divergence" section
+  above). For gemini/grok/mistral the columns are also NULL/0. Aggregation
+  queries must tolerate NULL without dividing by zero.
 - **Slice 3** (TTL tracking): only meaningful for Claude (5min default, 1h
   optional). For other CLIs, `ttlRemainingMs` is null.
