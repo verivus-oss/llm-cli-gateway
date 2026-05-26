@@ -1,9 +1,9 @@
 ---
 name: session-workflow
-description: Manage conversation sessions across Claude, Codex, Gemini, Grok, and Mistral. Use for multi-turn conversations, session switching, workspace management.
+description: Manage conversation sessions across Claude, Codex, Gemini, Grok, and Mistral. Use for multi-turn conversations, session switching, workspace management. Covers the `session_get.cacheState` projection, cache-aware `promptParts`, and `cache_state://` MCP resources.
 metadata:
   author: verivus-oss
-  version: "1.5"
+  version: "1.6"
 ---
 
 # Session Workflow
@@ -174,6 +174,58 @@ session_get({sessionId:"..."})
 ```
 
 Returns: timestamps, description, CLI type, active status.
+
+When the session has prior requests in the flight recorder, the response also includes a compact `cacheState` block (omitted entirely for fresh sessions — not null, not empty object):
+
+```json
+{
+  "cacheState": {
+    "cli": "claude",
+    "prefixDistinct": 3,
+    "totalCacheReadTokens": 14210,
+    "totalCacheCreationTokens": 8420,
+    "requestCount": 7,
+    "hitCount": 5,
+    "hitRate": 0.714,
+    "estimatedSavingsUsd": 0.0184,
+    "ttlRemainingMs": 142000
+  }
+}
+```
+
+`ttlRemainingMs` is non-null only for Claude sessions and reflects the configured `[cache_awareness] anthropic_ttl_seconds` (default 300 = 5 min, or 3600 = 1 h). Use it to decide whether the next turn will hit a warm cache or pay full cache-creation cost. No prompt/response text is stored or returned — only tokens, hashes, and aggregates.
+
+## Cache-Aware Prompts and Cache Observability
+
+Sessions and cache awareness compose. The structured `promptParts` field (mutually exclusive with `prompt`) lets you keep `system` / `tools` / `context` byte-identical across turns of a session while only the `task` mutates:
+
+```
+claude_request({
+  promptParts: {
+    system: "<stable system instruction>",
+    context: "<file dump or spec — same as last turn>",
+    task: "Now add metrics."
+  },
+  sessionId: savedSessionId,
+  approvalStrategy: "mcp_managed"
+})
+```
+
+The gateway hashes the stable prefix and writes it to the flight recorder so per-session and per-prefix cache effectiveness is queryable via MCP resources:
+
+- `cache_state://global` — last-24h aggregate hit rate, total hits, estimated savings, with per-CLI breakdown
+- `cache_state://session/{sessionId}` — per-session aggregates (same shape as `session_get.cacheState`)
+- `cache_state://prefix/{hash}` — per-stable-prefix-hash aggregates with CLI × model breakdown
+
+### TTL warning (Claude, opt-in)
+
+With `[cache_awareness] warn_on_ttl_expiry = true` in `~/.llm-cli-gateway/config.toml`, a resumed Claude turn whose prior `lastRequestAt` is within 30 s of the cache TTL returns:
+
+```json
+{ "warnings": [{ "code": "cache_ttl_expiring_soon", "ttlRemainingMs": 12000, "message": "..." }] }
+```
+
+That is a hint that the next turn will likely cold-miss; coalesce or accept the cost.
 
 ## Tips
 

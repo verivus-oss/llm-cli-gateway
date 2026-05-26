@@ -1,9 +1,9 @@
 ---
 name: async-job-orchestration
-description: Manage long-running async LLM jobs. Use for tasks >2min, parallel jobs, or non-blocking execution.
+description: Manage long-running async LLM jobs. Use for tasks >2min, parallel jobs, or non-blocking execution. Covers cache-aware `promptParts`, `cache_state://` MCP resources, and the Claude `cache_ttl_expiring_soon` warning.
 metadata:
   author: verivus-oss
-  version: "1.5"
+  version: "1.6"
 ---
 
 # Async Job Orchestration
@@ -225,6 +225,48 @@ result = codex_request_async({prompt:"<same prompt as before>",fullAuto:true,app
 // result.job.id is the original job
 // 3. Poll/fetch as normal — works whether the job is running, completed, or completed days ago.
 ```
+
+## Cache-Aware Prompts (`promptParts`)
+
+Every async request tool (`claude_request_async`, `codex_request_async`, `gemini_request_async`, `grok_request_async`, `mistral_request_async`) accepts a structured `promptParts` object instead of the flat `prompt` string. The two are **mutually exclusive** — supplying both returns `provide exactly one of \`prompt\` or \`promptParts\``; supplying neither returns `one of \`prompt\` or \`promptParts\` is required`.
+
+```
+codex_request_async({
+  promptParts: {
+    system:  "<long stable system instruction>",
+    tools:   "<long stable tool description>",
+    context: "<long stable spec or file dump>",
+    task:    "Implement X per the above."
+  },
+  fullAuto: true,
+  approvalStrategy: "mcp_managed",
+  correlationId: "impl-r1"
+})
+```
+
+The gateway concatenates in canonical order `system → tools → context → task` so parallel async dispatch to multiple CLIs sees byte-identical stable prefix bytes, and re-issues of the same async call (recovery, retry, dedup) keep the same stable-prefix hash. This raises implicit cache hit rate at each provider with no provider-API contortions.
+
+For parallel async fan-out (Pattern: "fire N reviewers, collect when done"), the win is largest — every reviewer shares the prefix, and `cache_state://prefix/{hash}` lets you verify they actually hit cache.
+
+### Cache observability resources
+
+Three MCP resources expose cache effectiveness from the flight recorder (tokens / hashes / aggregates only — no prompt or response text):
+
+- `cache_state://global` — last-24h aggregate hit rate, total hits, estimated savings, per-CLI breakdown
+- `cache_state://session/{sessionId}` — per-session aggregates incl. `ttlRemainingMs` for Claude
+- `cache_state://prefix/{hash}` — per-stable-prefix-hash aggregates with CLI × model breakdown
+
+`session_get({sessionId})` also projects a compact `cacheState` block when the session has prior requests (omitted entirely for fresh sessions).
+
+### TTL warning on Claude async jobs (opt-in)
+
+With `[cache_awareness] warn_on_ttl_expiry = true` in `~/.llm-cli-gateway/config.toml`, both `claude_request` and `claude_request_async` responses include a structured warning when the resumed session's prior `lastRequestAt` is within 30 s of Anthropic's cache TTL (default 5 min; 1 h when `[cache_awareness] anthropic_ttl_seconds = 3600`):
+
+```json
+{ "warnings": [{ "code": "cache_ttl_expiring_soon", "ttlRemainingMs": 12000, "message": "Anthropic cache breakpoint for session <id> expires in 12000ms (< 30000ms). Subsequent requests may miss the cache." }] }
+```
+
+For long-running async loops on a Claude session, treat the warning as a hint to dispatch the next turn promptly (or accept the upcoming cache miss). The warning is gated on the config flag and appears only for Claude sessions with prior cache writes.
 
 ## Tips
 

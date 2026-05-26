@@ -3,7 +3,7 @@ name: secure-orchestration
 description: Security-conscious LLM orchestration with approval gates across Claude, Codex, Gemini, Grok, and Mistral. Use for high-risk operations, permissions, auditing.
 metadata:
   author: verivus-oss
-  version: "1.5"
+  version: "1.6"
 ---
 
 # Secure Orchestration
@@ -168,6 +168,22 @@ claude_request({prompt:"Audit secrets module",approvalStrategy:"mcp_managed",app
 Kills process after 2min inactivity. Exit code 125 (non-transient, no retry).
 
 **Guideline:** 60-120s for security audits. Full 10min default for large analysis only.
+
+## Cache Observability for Audit Tracing
+
+Three read-only MCP resources expose cache effectiveness from the flight recorder — tokens / hashes / aggregates only, **no prompt or response text**:
+
+- `cache_state://global` — last-24h aggregate hit rate, total hits, estimated savings, per-CLI breakdown
+- `cache_state://session/{sessionId}` — per-session aggregates (also surfaces as `session_get.cacheState` when the session has prior requests)
+- `cache_state://prefix/{hash}` — per-stable-prefix-hash aggregates with CLI × model breakdown
+
+The "tokens/hashes only" property is the security guarantee: these resources let an auditor reconstruct "did the model see fresh context or a cached prefix?" without ever exposing prompt or response content. Combine with `approval_list` (which already redacts to a `promptPreview` + `promptSha256`) and `llm_job_status/result` by `correlationId` to reconstruct any past dispatch fully.
+
+For Claude sessions, `[cache_awareness] warn_on_ttl_expiry = true` in `~/.llm-cli-gateway/config.toml` adds a structured `cache_ttl_expiring_soon` warning to responses whose prior `lastRequestAt` is within 30 s of Anthropic's TTL — useful as a signal that an audit-relevant turn may have hit a cold cache and is paying full cache-creation tokens.
+
+### `promptParts` for prompt-discipline auditing
+
+Switching from `prompt` to the structured `promptParts` field (`{ system?, tools?, context?, task }`, mutually exclusive with `prompt`) makes the audit story stronger: the stable prefix hash is stable across calls, so reviewing an audit trail you can see at a glance whether two requests shared a system/tools/context block or genuinely differed. Identical hashes across reviewers in a parallel dispatch = same brief; differing hashes = drift to investigate.
 
 ## Tips
 

@@ -1,6 +1,6 @@
 ---
 name: multi-llm-orchestration
-description: Guide for orchestrating multiple LLMs via the llm-gateway — use when delegating tasks to Codex, Gemini, Grok, or Mistral, running parallel reviews, or managing cross-LLM workflows
+description: Guide for orchestrating multiple LLMs via the llm-gateway — use when delegating tasks to Codex, Gemini, Grok, or Mistral, running parallel reviews, or managing cross-LLM workflows. Covers cache-aware `promptParts` dispatch and the `cache_state://` MCP resources.
 ---
 
 # Multi-LLM Orchestration
@@ -29,6 +29,48 @@ Apply these on every dispatch unless the caller has explicitly overridden a rule
 - `llm_process_health` — Inspect in-memory process/job health
 - `list_models`, `cli_versions`, `cli_upgrade` — Inspect model/CLI registry and manage CLI upgrades (Grok self-updates via `grok update`)
 - `session_*` — Manage conversation sessions
+
+## Cache-Aware Prompts (`promptParts`)
+
+Every `*_request` / `*_request_async` tool accepts a structured `promptParts` object as an alternative to the flat `prompt` string. The two are **mutually exclusive** — supplying both returns `provide exactly one of \`prompt\` or \`promptParts\``; supplying neither returns `one of \`prompt\` or \`promptParts\` is required`.
+
+```json
+{
+  "promptParts": {
+    "system":  "long stable system instruction (optional)",
+    "tools":   "long stable tool description (optional)",
+    "context": "long stable file dump / spec / repo summary (optional)",
+    "task":    "the volatile per-turn question (required)"
+  }
+}
+```
+
+The gateway concatenates in canonical order — `system → tools → context → task` — so the stable prefix bytes precede the volatile task tail **unchanged across calls**. That raises implicit cache hit rate at the provider with no API contortions, and the gateway hashes the stable prefix into the flight recorder so cache effectiveness is observable.
+
+When to reach for `promptParts` over `prompt`:
+- Multi-turn workflows where the system/tools/context blocks are long and repeated.
+- Parallel dispatch across CLIs where each reviewer sees the same stable prefix.
+- Any review loop (`implement → review → fix → re-review`) on the same file set — the context block is identical round-to-round; only the `task` mutates.
+
+For one-off questions or short prompts, plain `prompt` is fine — `promptParts` only earns its keep when the stable prefix is large enough to matter.
+
+### Cache observability (read-only MCP resources)
+
+- `cache_state://global` — last-24h aggregate hit rate, total hits, estimated savings, with per-CLI breakdown.
+- `cache_state://session/{sessionId}` — per-session aggregates, including `ttlRemainingMs` for Claude.
+- `cache_state://prefix/{hash}` — per-stable-prefix-hash aggregates with CLI × model breakdown.
+
+All three return tokens / hashes / aggregates only — no prompt or response text. Read via the MCP `resources/read` flow. `session_get` also projects a compact `cacheState` block when the session has prior requests in the flight recorder; the field is omitted for fresh sessions.
+
+### TTL warning (Claude only, opt-in)
+
+With `[cache_awareness] warn_on_ttl_expiry = true` in `~/.llm-cli-gateway/config.toml`, `claude_request` / `claude_request_async` responses on resumed Claude sessions carry a structured warning when the session's prior `lastRequestAt` is within 30 s of Anthropic's cache TTL (5 min default, 1 h when `anthropic_ttl_seconds = 3600`):
+
+```json
+{ "warnings": [{ "code": "cache_ttl_expiring_soon", "ttlRemainingMs": 12000, "message": "..." }] }
+```
+
+Treat it as a hint to coalesce the next turn or accept the upcoming cache miss.
 
 ## Patterns
 
@@ -62,5 +104,6 @@ Use `session_create` before a multi-turn workflow, then pass `sessionId` to subs
 - Sync requests that exceed 45s auto-defer to async — check the response for `jobId`. Results are durable (30-day default retention via `LLM_GATEWAY_JOB_RETENTION_DAYS`), so you can fetch by `jobId` after a polling timeout or across gateway restarts.
 - Identical replays within `LLM_GATEWAY_DEDUP_WINDOW_MS` (default 1 h) auto-dedup onto the existing job. Pass `forceRefresh:true` to force a fresh CLI run.
 - `mcpServers` defaults to `["sqry"]`. Add `exa`, `ref_tools`, or `trstr` explicitly when needed.
+- Prefer `promptParts` over `prompt` for any workflow with a large stable prefix (system/tools/context) — the gateway maintains canonical-order concatenation so the prefix bytes are identical across calls, raising implicit cache hit rate. The two fields are mutually exclusive.
 - Claude: `mcpServers` builds a Claude MCP config. Gemini: gateway passes `--allowed-mcp-server-names`, but Gemini CLI must already have those servers configured. Codex and Grok: `mcpServers` is approval tracking only; the CLIs manage their own MCP config.
 - Check `cli_versions` when a CLI behaves unexpectedly; call `cli_upgrade` with `dryRun:true` before running an actual upgrade (Grok self-updates via `grok update`).

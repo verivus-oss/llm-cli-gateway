@@ -3,7 +3,7 @@ name: implement-review-fix
 description: Run implement-review-fix cycle using multiple LLMs (Claude, Codex, Gemini, Grok, Mistral). Use for features, bugs, or refactoring with multi-LLM collaboration. Mistral defaults to `--agent auto-approve`; session continuity requires `[session_logging] enabled = true` in `~/.vibe/config.toml`.
 metadata:
   author: verivus-oss
-  version: "1.5"
+  version: "1.6"
 ---
 
 # Implement-Review-Fix Cycle
@@ -38,6 +38,27 @@ Apply these on every dispatch unless the caller has explicitly overridden a rule
 | **Grok** | Real continuity | `--resume` / `--continue` passed to CLI |
 
 For Codex resumption: pass the UUID printed by `codex resume` / visible under `~/.codex/sessions/`, **or** pass `resumeLatest:true` to use the most recent session in cwd. Note: `--full-auto` is silently dropped on resume — Codex inherits the original session's approval policy.
+
+## Cache-Aware Prompts (`promptParts`)
+
+The implement → review → fix loop is the canonical use case for the structured `promptParts` field: across rounds the system instructions, tool block, and file/spec context are byte-identical; only the `task` mutates. Switch from `prompt` to `promptParts` in every step so the gateway can hash the stable prefix once and providers can serve the long prefix from cache:
+
+```
+codex_request({
+  promptParts: {
+    system:  "<stable implementation brief>",
+    context: "<spec + relevant file paths or dump>",
+    task:    "Implement [feature]. Requirements: …"
+  },
+  fullAuto: true,
+  approvalStrategy: "mcp_managed",
+  optimizePrompt: true
+})
+```
+
+`prompt` and `promptParts` are mutually exclusive — supplying both returns `provide exactly one of \`prompt\` or \`promptParts\``; supplying neither returns `one of \`prompt\` or \`promptParts\` is required`. The gateway assembles in canonical order `system → tools → context → task` so a re-review or fix call with the same `system` + `context` and a new `task` reuses the same hash.
+
+After a round, `session_get({sessionId})` projects a compact `cacheState` block (hit rate, distinct prefix count, savings, `ttlRemainingMs` for Claude) — useful for confirming the loop is actually cache-warming as expected.
 
 ## Step 1: Implement
 

@@ -3,7 +3,7 @@ name: multi-llm-review
 description: Parallel code reviews across Claude, Codex, Gemini, Grok, and Mistral. Use for quality analysis, bug finding, or security audit.
 metadata:
   author: verivus-oss
-  version: "1.5"
+  version: "1.6"
 ---
 
 # Multi-LLM Code Review
@@ -44,6 +44,8 @@ Otherwise omit `model` and proceed.
 ### 2. Send Parallel Reviews
 
 Sync tools auto-defer at 45s — if response contains `status:"deferred"`, poll `jobId` via `llm_job_status` every 60s, fetch with `llm_job_result`.
+
+**Tip — share the stable prefix across reviewers:** when the same long brief / file dump is sent to every reviewer, switch from `prompt` to the structured `promptParts` field. The gateway concatenates in canonical order `system → tools → context → task`, so every reviewer sees byte-identical stable prefix bytes, raising implicit cache hit rate at each provider. `prompt` and `promptParts` are mutually exclusive — the runtime returns `provide exactly one of \`prompt\` or \`promptParts\`` if both are supplied. After the round, read `cache_state://prefix/{hash}` (tokens/hashes only, no prompt text) to confirm reviewers actually shared the prefix.
 
 **Claude — Quality & Architecture:**
 ```

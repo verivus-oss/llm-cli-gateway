@@ -166,6 +166,33 @@ Dispatch default: **omit `model` on every call**. The gateway's configured defau
 
 Avoid stale hardcoded model IDs such as `o3`, `o3-pro`, and `gpt-4o`; omit `model` or call `list_models` instead.
 
+## Prefix Sharing with `promptParts`
+
+Consensus dispatch is the textbook use case for the structured `promptParts` field. Every reviewer sees the same spec / context block; only the `task` (or even nothing) varies. Switch from `prompt` to `promptParts` so each CLI receives byte-identical stable prefix bytes:
+
+```
+claude_request_async({
+  promptParts: {
+    system:  "<long stable review brief>",
+    context: "<spec + file dump under review>",
+    task:    "Review for: grammar, extraction, tests, perf, security. End with APPROVED or NOT APPROVED with findings."
+  },
+  approvalStrategy: "mcp_managed",
+  correlationId: "consensus-r1-claude"
+})
+codex_request_async({
+  promptParts: { /* same as above */ },
+  fullAuto: true,
+  approvalStrategy: "mcp_managed",
+  correlationId: "consensus-r1-codex"
+})
+// …same promptParts to gemini / grok / mistral
+```
+
+`prompt` and `promptParts` are mutually exclusive — the runtime returns `provide exactly one of \`prompt\` or \`promptParts\`` if both are supplied. The gateway concatenates in canonical order `system → tools → context → task` and hashes the stable prefix into the flight recorder. After the round, you can read `cache_state://prefix/{hash}` to confirm that every reviewer hit the same prefix and to see CLI × model hit-rate breakdown — useful for spotting "Claude cached, Gemini didn't" anomalies in a consensus round.
+
+For re-review rounds (round 2+), keep `system` + `context` identical and mutate only `task` (or append a "previous findings" block to `context`). Holding the prefix stable across rounds is what makes the consensus loop affordable at scale.
+
 ## Tips
 
 - Use `correlationId` to group consensus rounds: `"consensus-r1-claude"`, `"consensus-r1-codex"`, `"consensus-r1-gemini"`, `"consensus-r1-grok"`
