@@ -65,8 +65,17 @@ const ZERO: PricePerMillion = {
 
 /**
  * Look up pricing by (cli, model) name. Best-effort; unknown models return
- * zeroed pricing so estimated_savings_usd in aggregates falls back to 0
- * rather than throwing.
+ * ZEROED pricing so estimated_savings_usd in aggregates falls back to 0
+ * rather than throwing OR over-reporting savings on an unpriced model.
+ *
+ * Recognised model families:
+ *   - claude: model name contains "sonnet" | "opus" | "haiku".
+ *   - codex: model name contains "gpt-5" or "o3" (current OpenAI families).
+ *
+ * Anything outside these explicit matches returns ZERO. This is a
+ * deliberate conservative choice — we'd rather under-report savings on
+ * an unrecognised model than over-report on one whose actual pricing we
+ * don't know. Update this table when a new model family ships.
  */
 export function getPricing(
   cli: "claude" | "codex" | "gemini" | "grok" | "mistral",
@@ -77,10 +86,11 @@ export function getPricing(
     if (lower.includes("sonnet")) return ANTHROPIC_SONNET;
     if (lower.includes("opus")) return ANTHROPIC_OPUS;
     if (lower.includes("haiku")) return ANTHROPIC_HAIKU;
-    return ANTHROPIC_SONNET; // conservative default for unknown Claude family
+    return ZERO;
   }
   if (cli === "codex") {
-    return OPENAI_GPT5;
+    if (lower.includes("gpt-5") || lower.includes("o3")) return OPENAI_GPT5;
+    return ZERO;
   }
   return ZERO;
 }
