@@ -36,7 +36,8 @@ exclude = [
   "^https://github\\.com/verivusai-labs/",
   # agent-assurance is a private verivus-oss repo today; lychee
   # cannot auth into it from public CI. Re-evaluate when it's published.
-  "^https://github\\.com/verivus-oss/agent-assurance/",
+  # No trailing slash in the pattern so we match the bare repo URL too.
+  "^https://github\\.com/verivus-oss/agent-assurance(/|$)",
   # PyPI / npm vanity URLs that 302 to authenticated dashboards.
   "^https://platform\\.claude\\.com/manage",
   "^https://pypi\\.org/manage/",
