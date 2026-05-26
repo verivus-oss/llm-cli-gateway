@@ -35,16 +35,31 @@ describe("upstream CLI contracts", () => {
   });
 
   it("rejects flags not accepted by Codex resume", () => {
+    // Phase 4 slice α (v1.8.0) confirmed `--output-schema` IS accepted on
+    // resume per codex-cli 0.133.0; `--search` remains forbidden.
     const result = validateUpstreamCliArgs("codex", [
       "exec",
       "resume",
-      "--output-schema",
-      "/tmp/schema.json",
+      "--search",
       "session-id",
       "prompt",
     ]);
     expect(result.ok).toBe(false);
     expect(result.violations[0]?.message).toMatch(/not accepted by the resume command contract/);
+  });
+
+  it("accepts --output-schema + -c on Codex resume (Phase 4 slice α)", () => {
+    const result = validateUpstreamCliArgs("codex", [
+      "exec",
+      "resume",
+      "--output-schema",
+      "/tmp/schema.json",
+      "-c",
+      "model.foo=bar",
+      "session-id",
+      "prompt",
+    ]);
+    expect(result.ok).toBe(true);
   });
 
   it("exposes a stable report for MCP and CLI callers", () => {

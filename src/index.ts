@@ -378,7 +378,11 @@ const MCP_SERVER_ENUM = z.enum(CLAUDE_MCP_SERVER_NAMES);
  * upper bound — no plausible single agent loop exceeds 10k turns or 10k USD.
  */
 export const MAX_TURNS_SCHEMA = z.number().int().positive().safe().max(10_000);
-export const MAX_PRICE_SCHEMA = z.number().positive().finite().max(10_000);
+// `.min(1e-6)` keeps the value in JS's decimal-stringify range:
+// String(1e-6) === "0.000001" but String(1e-7) === "1e-7", which both
+// upstream CLIs would reject. 1µUSD per request is fine-grained enough
+// for any plausible budget-cap use.
+export const MAX_PRICE_SCHEMA = z.number().positive().finite().min(1e-6).max(10_000);
 
 // U22: Session-provider enum extended to five providers. The storage layer's
 // CLI_TYPES already includes "mistral"; the MCP-tool layer mirrors that here so

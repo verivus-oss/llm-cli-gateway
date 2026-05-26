@@ -186,14 +186,11 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       "ignoreRules",
     ],
     resumeOnlyFlags: ["--last"],
-    resumeForbiddenFlags: [
-      "--sandbox",
-      "--ask-for-approval",
-      "--full-auto",
-      "--output-schema",
-      "--search",
-      "-c",
-    ],
+    // Phase 4 slice α (v1.8.0) verified that `codex exec resume` accepts
+    // `--output-schema` and `-c` (codex-cli 0.133.0 `exec resume --help`),
+    // so they're no longer forbidden. `--search` stays forbidden (resume
+    // inherits the original session's web-search state).
+    resumeForbiddenFlags: ["--sandbox", "--ask-for-approval", "--full-auto", "--search"],
     flags: {
       "--last": { arity: "none", description: "Resume latest session" },
       "--model": { arity: "one", description: "Model selector" },
@@ -242,9 +239,24 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         expect: "fail",
       },
       {
+        // Phase 4 slice α: --output-schema IS accepted on resume per
+        // codex-cli 0.133.0; this fixture pins the new behaviour so future
+        // contract changes can't silently regress.
         id: "codex-resume-output-schema",
-        description: "Resume-incompatible output schema flag is rejected",
+        description: "Phase 4 slice α: --output-schema accepted on resume (codex-cli 0.133.0)",
         args: ["exec", "resume", "--output-schema", "/tmp/schema.json", "session-id", "hello"],
+        expect: "pass",
+      },
+      {
+        id: "codex-resume-config-override",
+        description: "Phase 4 slice α: -c key=value accepted on resume",
+        args: ["exec", "resume", "-c", "model.foo=bar", "session-id", "hello"],
+        expect: "pass",
+      },
+      {
+        id: "codex-resume-search-still-forbidden",
+        description: "Phase 4 slice α: --search remains forbidden on resume",
+        args: ["exec", "resume", "--search", "session-id", "hello"],
         expect: "fail",
       },
     ],
@@ -272,6 +284,8 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       "policyFiles",
       "adminPolicyFiles",
       "attachments",
+      // Phase 4 slice γ
+      "skipTrust",
     ],
     flags: {
       "-p": { arity: "one", description: "Prompt text" },
@@ -289,6 +303,10 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       "--admin-policy": { arity: "one", description: "Admin policy file path" },
       "-o": { arity: "one", values: ["json"], description: "Output format" },
       "--resume": { arity: "one", description: "Resume session" },
+      "--skip-trust": {
+        arity: "none",
+        description: "Trust workspace for this session (Phase 4 slice γ)",
+      },
     },
     env: {},
     conformanceFixtures: [
@@ -303,6 +321,12 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         description: "Unsupported flag is rejected before spawn",
         args: ["-p", "hello", "--not-a-gemini-flag"],
         expect: "fail",
+      },
+      {
+        id: "gemini-skip-trust",
+        description: "Phase 4 slice γ: --skip-trust is accepted",
+        args: ["-p", "hello", "--skip-trust"],
+        expect: "pass",
       },
     ],
   },
@@ -328,6 +352,8 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       "mcpServers",
       "allowedTools",
       "disallowedTools",
+      // Phase 4 slice δ
+      "maxTurns",
     ],
     flags: {
       "-p": { arity: "one", description: "Prompt text" },
@@ -352,6 +378,11 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       },
       "--resume": { arity: "one", description: "Resume session" },
       "--continue": { arity: "none", description: "Continue latest session" },
+      "--max-turns": {
+        arity: "one",
+        pattern: /^[1-9][0-9]*$/,
+        description: "Agent-loop iteration cap (Phase 4 slice δ)",
+      },
     },
     env: {},
     conformanceFixtures: [
@@ -365,6 +396,18 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         id: "grok-unsupported-flag",
         description: "Unsupported flag is rejected before spawn",
         args: ["-p", "hello", "--not-a-grok-flag"],
+        expect: "fail",
+      },
+      {
+        id: "grok-max-turns",
+        description: "Phase 4 slice δ: --max-turns N is accepted",
+        args: ["-p", "hello", "--max-turns", "5"],
+        expect: "pass",
+      },
+      {
+        id: "grok-max-turns-invalid-zero",
+        description: "Phase 4 slice δ: --max-turns 0 is rejected by contract pattern",
+        args: ["-p", "hello", "--max-turns", "0"],
         expect: "fail",
       },
     ],
@@ -390,6 +433,11 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       "mcpServers",
       "allowedTools",
       "disallowedTools",
+      // Phase 4 slice γ
+      "trust",
+      // Phase 4 slice δ
+      "maxTurns",
+      "maxPrice",
     ],
     flags: {
       "-p": { arity: "one", description: "Prompt text" },
@@ -408,6 +456,22 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       "--enabled-tools": { arity: "one", description: "Enabled tool" },
       "--resume": { arity: "one", description: "Resume session" },
       "--continue": { arity: "none", description: "Continue latest session" },
+      "--trust": {
+        arity: "none",
+        description: "Trust cwd for this invocation only (Phase 4 slice γ)",
+      },
+      "--max-turns": {
+        arity: "one",
+        pattern: /^[1-9][0-9]*$/,
+        description: "Agent-loop iteration cap (Phase 4 slice δ, programmatic mode only)",
+      },
+      "--max-price": {
+        arity: "one",
+        // Decimal-only: matches the MAX_PRICE_SCHEMA min(1e-6) lower bound
+        // that keeps String(N) in decimal form (no scientific notation).
+        pattern: /^(0|[1-9][0-9]*)(\.[0-9]+)?$/,
+        description: "Cumulative cost cap in USD (Phase 4 slice δ, programmatic mode only)",
+      },
     },
     env: {
       VIBE_ACTIVE_MODEL: {
@@ -429,6 +493,28 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         description: "Unsupported env var is rejected before spawn",
         args: ["-p", "hello"],
         env: { CODEX_MODEL: "gpt-5.5" },
+        expect: "fail",
+      },
+      {
+        id: "mistral-trust",
+        description: "Phase 4 slice γ: --trust is accepted",
+        args: ["-p", "hello", "--agent", "auto-approve", "--trust"],
+        env: { VIBE_ACTIVE_MODEL: "mistral-medium-3.5" },
+        expect: "pass",
+      },
+      {
+        id: "mistral-max-turns-and-price",
+        description: "Phase 4 slice δ: --max-turns + --max-price are accepted together",
+        args: ["-p", "hello", "--agent", "auto-approve", "--max-turns", "3", "--max-price", "0.01"],
+        env: { VIBE_ACTIVE_MODEL: "mistral-medium-3.5" },
+        expect: "pass",
+      },
+      {
+        id: "mistral-max-price-scientific-notation",
+        description:
+          "Phase 4 slice δ: scientific-notation --max-price is rejected by contract pattern (matches MAX_PRICE_SCHEMA bounds)",
+        args: ["-p", "hello", "--agent", "auto-approve", "--max-price", "1e-7"],
+        env: { VIBE_ACTIVE_MODEL: "mistral-medium-3.5" },
         expect: "fail",
       },
     ],

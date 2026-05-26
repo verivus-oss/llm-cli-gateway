@@ -54,12 +54,19 @@ describe("Phase 4 slice δ — Grok --max-turns wiring", () => {
   it("MAX_PRICE_SCHEMA rejects Infinity / NaN / out-of-range / scientific-notation", () => {
     expect(MAX_PRICE_SCHEMA.safeParse(0.001).success).toBe(true);
     expect(MAX_PRICE_SCHEMA.safeParse(10_000).success).toBe(true);
+    // Lower bound: 1e-6 is the smallest value String() emits in decimal form.
+    expect(MAX_PRICE_SCHEMA.safeParse(1e-6).success).toBe(true);
+    expect(String(1e-6)).toBe("0.000001");
     expect(MAX_PRICE_SCHEMA.safeParse(0).success).toBe(false);
     expect(MAX_PRICE_SCHEMA.safeParse(-0.5).success).toBe(false);
     expect(MAX_PRICE_SCHEMA.safeParse(Infinity).success).toBe(false);
     expect(MAX_PRICE_SCHEMA.safeParse(NaN).success).toBe(false);
     expect(MAX_PRICE_SCHEMA.safeParse(10_001).success).toBe(false);
     expect(MAX_PRICE_SCHEMA.safeParse(1e21).success).toBe(false);
+    // The exact attack vector from Codex round-2: 1e-7 stringifies as "1e-7"
+    // which Vibe and our --max-price contract regex both reject.
+    expect(MAX_PRICE_SCHEMA.safeParse(1e-7).success).toBe(false);
+    expect(String(1e-7)).toBe("1e-7");
   });
 
   it("emits --max-turns alongside existing flags without disturbing argv order", () => {
