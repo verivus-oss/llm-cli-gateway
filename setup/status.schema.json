@@ -14,6 +14,7 @@
     "providers",
     "endpoint_exposure",
     "client_config",
+    "cache_awareness",
     "next_actions"
   ],
   "properties": {
@@ -259,6 +260,44 @@
             "note": { "type": "string" }
           },
           "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "cache_awareness": {
+      "type": "object",
+      "required": ["enabled_features", "last_24h", "per_cli"],
+      "properties": {
+        "enabled_features": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": ["anthropic_cache_control", "ttl_warnings"]
+          }
+        },
+        "last_24h": {
+          "type": "object",
+          "required": ["hit_rate", "total_hits", "total_requests", "estimated_savings_usd"],
+          "properties": {
+            "hit_rate": { "type": "number" },
+            "total_hits": { "type": "integer" },
+            "total_requests": { "type": "integer" },
+            "estimated_savings_usd": { "type": "number" }
+          },
+          "additionalProperties": false
+        },
+        "per_cli": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "required": ["hit_rate", "total_hits", "total_cache_read_tokens"],
+            "properties": {
+              "hit_rate": { "type": "number" },
+              "total_hits": { "type": "integer" },
+              "total_cache_read_tokens": { "type": "integer" }
+            },
+            "additionalProperties": false
+          }
         }
       },
       "additionalProperties": false

@@ -88,6 +88,36 @@ docker compose -f docker-compose.personal.yml run --rm doctor
 ### Observability
 - **SQLite Flight Recorder**: Every request/response logged to `~/.llm-cli-gateway/logs.db` with correlation IDs, token usage, duration, retry counts, and circuit breaker state. Browse with [Datasette](https://datasette.io/): `datasette ~/.llm-cli-gateway/logs.db`
 - **Structured Metadata**: Tool responses include machine-readable `structuredContent` (model, cli, correlationId, sessionId, durationMs, token counts)
+- **Cache observability resources**: `cache_state://global`, `cache_state://session/{id}`, and `cache_state://prefix/{hash}` MCP resources return aggregate cache hit/miss/savings — tokens and hashes only, no prompt text. `session_get` includes a `cacheState` block when the session has prior requests.
+
+### Cache-aware operation
+
+Every `*_request` and `*_request_async` tool accepts an optional `promptParts` field that structures the prompt for better cache hit rates. The gateway concatenates the parts in canonical order (`system → tools → context → task`) so that the stable prefix bytes precede the volatile task tail unchanged across calls, letting each provider's automatic prompt-caching land on the same content hash each time.
+
+```json
+{
+  "promptParts": {
+    "system": "You are a helpful code reviewer.",
+    "tools": "You have access to Read, Grep, Bash.",
+    "context": "<long stable context block — file dumps, etc.>",
+    "task": "Review the changes in src/foo.ts for security issues."
+  }
+}
+```
+
+`prompt` and `promptParts` are mutually exclusive — pass exactly one.
+
+Per-CLI capability matrix:
+
+| CLI     | Prefix discipline (auto via `promptParts`) | Explicit `cache_control` emission |
+|---------|--------------------------------------------|------------------------------------|
+| claude  | yes                                        | not yet (Branch B; gated on `[cache_awareness].emit_anthropic_cache_control`) |
+| codex   | yes                                        | n/a (OpenAI implicit cache, no CLI lever) |
+| gemini  | yes                                        | n/a (implicit prefix cache server-side)  |
+| grok    | yes                                        | n/a (no surfaced cache lever)            |
+| mistral | yes                                        | n/a (no surfaced cache lever)            |
+
+Opt-in flags (all default off) live under `[cache_awareness]` in `~/.llm-cli-gateway/config.toml`. See `docs/personal-mcp/PROVIDER_CACHE_SURFACES.md` for the per-model minimum cacheable token thresholds and field-name divergences.
 
 ### Reliability & Performance
 - **Retry Logic**: Exponential backoff with circuit breaker for transient failures
