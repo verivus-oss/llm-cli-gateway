@@ -34,9 +34,16 @@ exclude = [
   # GitHub URLs that require auth on private repos (we test the
   # public mirror separately during release).
   "^https://github\\.com/verivusai-labs/",
+  # agent-assurance is a private verivus-oss repo today; lychee
+  # cannot auth into it from public CI. Re-evaluate when it's published.
+  "^https://github\\.com/verivus-oss/agent-assurance/",
   # PyPI / npm vanity URLs that 302 to authenticated dashboards.
   "^https://platform\\.claude\\.com/manage",
   "^https://pypi\\.org/manage/",
+  # npmjs.com rate-limits / 403s anonymous bot requests. The URLs are
+  # valid; lychee just can't reach them. Pattern catches both bare and
+  # www. variants.
+  "^https?://(www\\.)?npmjs\\.com/",
   # Anthropic / OpenAI / Google docs occasionally rate-limit anon
   # browsers. Their stability is not our gate; we re-verify the
   # canonical URL during research steps.
