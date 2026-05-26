@@ -2,6 +2,78 @@
 
 All notable changes to the llm-cli-gateway project.
 
+## [1.8.0] - 2026-05-27 — Phase 4 openers (codex resume fix, mistral telemetry, headless trust flags)
+
+Ships the first three slices of the Phase 4 provider-modernisation
+backlog, one bug fix and two small features. Multi-LLM review surfaced
+five additional bug classes during the cycle (path traversal, UUID→dir
+resolution gap, sync usage ctx drop, retry-path flag drop, symlink
+boundary bypass); all are addressed in the two follow-up fix commits.
+
+### Fixed — Codex `--output-schema` + `-c/--config` on `exec resume`
+
+- `prepareCodexRequest` previously dropped `outputSchema` and
+  `configOverrides` on the resume branch because the U26 audit assumed
+  `codex exec resume` rejected both flags. Live re-verification against
+  `codex exec resume --help` (codex-cli 0.133.0) confirms both ARE
+  accepted on resume; only `--search` remains resume-incompatible. The
+  resume branch now threads both fields through, reusing the existing
+  outputSchema temp-file materialisation + cleanup contract.
+  `CODEX_RESUME_FILTERED_FLAGS` no longer strips `--output-schema`.
+
+### Added — Mistral Vibe `meta.json` usage / cost telemetry
+
+- New `src/mistral-meta-json-parser.ts` reads
+  `~/.vibe/logs/session/session_<YYYYMMDD>_<HHMMSS>_<first8hex>/meta.json`
+  (the actual filename — an earlier TODO at `src/index.ts:750` said
+  `metadata.json`, which was incorrect). Maps `stats.session_prompt_tokens`,
+  `stats.session_completion_tokens`, and `stats.session_cost` onto the
+  gateway's `inputTokens`/`outputTokens`/`costUsd` flight-recorder
+  columns. Cache-token surfaces stay undefined — Vibe doesn't expose
+  them today.
+- The gateway's mistral sessionId surface accepts the full UUID (to match
+  `vibe --resume <uuid>`), but Vibe persists telemetry under
+  `session_<ts>_<first8>` directories. The new resolver globs by the
+  leading 8-hex prefix and verifies each candidate's `session_id` field
+  before returning — required for every UUID input including
+  single-match cases, so two UUIDs sharing the leading 8 hex chars never
+  cross-attribute usage.
+- `extractUsageAndCost` and `buildAsyncFlightRecorderHandoff` thread a
+  primitives-only `{ sessionId, home }` context so the AsyncJobRecord
+  retention stays O(constant). `buildCliResponse` passes the same ctx so
+  sync `mistral_request` resume calls populate structured usage in their
+  response (not just the flight-recorder row).
+
+### Added — Headless trust-prompt bypass for Gemini + Mistral
+
+- New optional `skipTrust?: boolean` field on `gemini_request` and
+  `gemini_request_async`, defaulting `false`. When set, emits
+  `--skip-trust` so fresh workspaces don't block headless invocations on
+  Gemini's interactive trust prompt.
+- New optional `trust?: boolean` field on `mistral_request` and
+  `mistral_request_async`, defaulting `false`. When set, emits `--trust`
+  (per-invocation only, not persisted to `trusted_folders.toml`) so
+  fresh workspaces don't block headless Vibe runs. Preserved on the
+  stale-model recovery retry path so a fresh untrusted workspace can't
+  deadlock on the second attempt.
+- Default `false` preserves existing prompt behaviour for legacy
+  callers.
+
+### Security
+
+- `parseVibeMetaJson` enforces a strict input charset (UUID-shape OR
+  `^session_\d{8}_\d{6}_[0-9a-f]{8}$` Vibe dir basename) before any
+  filesystem access.
+- New `readInBase(realBase, candidate)` helper realpath-resolves both
+  ends and rejects targets whose final inode lives outside the session
+  log root. Both the resolver's disambiguation reads and the final
+  parser read route through it, so an in-tree symlink to an
+  out-of-tree directory (or symlinked meta.json) cannot leak file
+  contents outside `~/.vibe/logs/session/`.
+- Test coverage: traversal inputs (`../`, absolute, control-char,
+  embedded `../`), single-candidate prefix-collision rejection,
+  symlink-to-outside-baseDir rejection.
+
 ## [1.7.0] - 2026-05-26 — cache-awareness slice 1.5 (async-path flight recorder + codex parser fix)
 
 Closes the two telemetry gaps that v1.6.0 explicitly deferred: async-path
