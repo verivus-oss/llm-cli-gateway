@@ -14,6 +14,7 @@ import {
   type ProviderRuntimeStatus,
 } from "./provider-status.js";
 import { CLAUDE_MCP_SERVER_NAMES } from "./claude-mcp-config.js";
+import type { FlightRecorderQuery } from "./flight-recorder.js";
 
 export interface VibeSessionLoggingStatus {
   config_path: string;
@@ -308,7 +309,27 @@ function chatGPTConnectorUrl(env: NodeJS.ProcessEnv, rawPublicUrl: string | null
   }
 }
 
-export function createDoctorReport(env: NodeJS.ProcessEnv = process.env): DoctorReport {
+export interface CreateDoctorReportOptions {
+  env?: NodeJS.ProcessEnv;
+  /**
+   * Optional read access to the flight recorder. Used by the cache_awareness
+   * block (added in doctor-cache-summary). When absent, that block reports
+   * zeroed aggregates.
+   */
+  flightRecorder?: FlightRecorderQuery;
+}
+
+export function createDoctorReport(
+  envOrOptions: NodeJS.ProcessEnv | CreateDoctorReportOptions = process.env
+): DoctorReport {
+  // Preserve back-compat: previous signature accepted a bare `env` object.
+  const opts: CreateDoctorReportOptions = isCreateDoctorReportOptions(envOrOptions)
+    ? envOrOptions
+    : { env: envOrOptions };
+  const env: NodeJS.ProcessEnv = opts.env ?? process.env;
+  // flightRecorder is currently unused — wired here so the doctor-cache-summary
+  // step can populate the cache_awareness block without touching this signature.
+  void opts.flightRecorder;
   const auth = loadAuthConfig(env);
   const transport = defaultTransport(env);
   const rawPublicUrl = env.LLM_GATEWAY_PUBLIC_URL || null;
@@ -394,6 +415,19 @@ export function createDoctorReport(env: NodeJS.ProcessEnv = process.env): Doctor
 
 export function printDoctorJson(): void {
   process.stdout.write(`${JSON.stringify(createDoctorReport(), null, 2)}\n`);
+}
+
+function isCreateDoctorReportOptions(
+  value: NodeJS.ProcessEnv | CreateDoctorReportOptions
+): value is CreateDoctorReportOptions {
+  // CreateDoctorReportOptions carries either `env` or `flightRecorder`; a
+  // NodeJS.ProcessEnv is a plain Record<string, string|undefined> and has
+  // neither key.
+  if (value === null || typeof value !== "object") return false;
+  return (
+    Object.prototype.hasOwnProperty.call(value, "env") ||
+    Object.prototype.hasOwnProperty.call(value, "flightRecorder")
+  );
 }
 
 function doctorProviderStatus(

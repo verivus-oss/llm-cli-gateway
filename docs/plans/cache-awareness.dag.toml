@@ -1,0 +1,850 @@
+# Implementation plan: gateway becomes cache-aware (slices #1 + #2 + #3).
+#
+# Goal: operate intelligently within each provider's native caching mechanism,
+# without adding any new conversation content to gateway storage. Preserves
+# the "No conversation content in session storage" invariant defined in
+# /srv/repos/internal/verivusai-labs/rvwr/CLAUDE.md (project root, one
+# directory above this gateway repo) and reinforced in BEST_PRACTICES.md
+# inside this repo.
+#
+# Out of scope for this slice: explicit cache-resource APIs (Gemini Context
+# Caching, Anthropic 1h beta) and cache-aware multi-LLM routing. Those are
+# gated on this slice's observability data.
+
+[meta]
+name = "llm-cli-gateway cache-awareness — phase 1"
+schema_version = "1.1"
+owner = "werner"
+slice = "ship-1-2-3"
+target_branch = "feat/cache-awareness-phase-1"
+acceptance_resource = "cache_state MCP resource returns non-zero hits within 24h of dogfooding"
+invariant_sources = [
+  "/srv/repos/internal/verivusai-labs/rvwr/CLAUDE.md",
+  "/srv/repos/internal/verivusai-labs/rvwr/llm-cli-gateway/BEST_PRACTICES.md",
+]
+
+# ---------------------------------------------------------------------------
+# Foundation — research + schema, no behaviour change yet
+# ---------------------------------------------------------------------------
+
+[[steps]]
+id = "research-provider-cache-surfaces"
+depends_on = []
+actor = "assistant"
+action = """
+Survey the actual cache control surfaces exposed by each upstream CLI AND
+upstream API. The CLI-surfaced field names differ from the underlying API
+field names — distinguish both.
+
+- claude (Anthropic Claude Code CLI):
+    * Does `claude -p` accept explicit cache_control / breakpoints via flag,
+      stdin JSON, or `--betas` activation? Verify by running `claude --help`
+      and reading https://code.claude.com/docs/en/cli-usage.
+    * What environment variables affect caching (e.g. ENABLE_PROMPT_CACHING_1H)?
+    * Per-model minimum-cacheable token thresholds. Anthropic documents 1024
+      tokens for Sonnet 3.5/Opus 3, 2048 for Haiku 3/3.5, and (per recent
+      Gemini-reviewer search) 4096 for Haiku 4.5 / Opus 4.5+. Confirm the
+      current per-model matrix from
+      https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching
+      and record it as a table in PROVIDER_CACHE_SURFACES.md.
+    * Observable hit fields: cache_read_input_tokens, cache_creation_input_tokens.
+- codex (Codex CLI wrapping OpenAI):
+    * CLI-emitted field names (per src/codex-json-parser.ts:69-77): the Codex
+      CLI emits `cache_read_input_tokens` / `cache_creation_input_tokens`
+      (Anthropic-style naming), NOT the underlying OpenAI API field
+      `usage.prompt_tokens_details.cached_tokens`.
+    * Confirm the CLI threshold and reporting field via `codex exec --help`
+      and a smoke test.
+- gemini: implicit prefix cache vs explicit cachedContents API, and what the
+  CLI surfaces (vs the SDK).
+- grok: any cache reporting in CLI output.
+- mistral (vibe): any cache reporting in CLI output.
+
+Record findings in docs/personal-mcp/PROVIDER_CACHE_SURFACES.md.
+"""
+idempotent = true
+validation = """
+PROVIDER_CACHE_SURFACES.md exists with:
+  (a) one section per CLI,
+  (b) a 'gateway lever' column noting whether the CLI lets us influence cache
+      behaviour (and how),
+  (c) a per-model minimum-cacheable-tokens table for Anthropic, sourced from
+      docs.anthropic.com and dated,
+  (d) explicit note distinguishing Codex CLI's `cache_read_input_tokens`
+      reporting field from the underlying OpenAI API's
+      `prompt_tokens_details.cached_tokens` field.
+"""
+
+[[steps]]
+id = "define-prompt-parts-schema"
+depends_on = []
+actor = "assistant"
+action = """
+In a NEW file src/prompt-parts.ts, define the canonical prompt-parts type,
+its Zod schema (so the wiring step can reference it without duplication),
+and the pure assemble() function:
+
+  export interface PromptParts {
+    system?: string;     // long-lived
+    tools?: string;      // long-lived
+    context?: string;    // session-lived (e.g. file dumps)
+    task: string;        // volatile, per-turn
+  }
+
+  export const PromptPartsSchema = z.object({
+    system: z.string().optional(),
+    tools: z.string().optional(),
+    context: z.string().optional(),
+    task: z.string().min(1),
+  });
+  // Exported as a value (not just inferred from z.infer) so it can be
+  // composed into tool schemas via .optional() at the call site.
+
+  export function assemble(parts: PromptParts): { text: string; stableByteEnd: number };
+    // Concatenates in canonical order (system → tools → context → task),
+    // returns the byte offset where the volatile tail begins.
+    // Pure function — no I/O, no logging.
+
+The resolvePromptInput() helper (defined in this same file) is the contract
+consumed by slice1-wire-prompt-parts-into-request-helpers. Its shape:
+
+  export function resolvePromptInput(input: {
+    prompt?: string;
+    promptParts?: PromptParts;
+  }): {
+    assembledPrompt: string;
+    stablePrefixHash: string | null;
+    stablePrefixTokens: number | null;
+  };
+  // Caller is responsible for mutual-exclusion check BEFORE calling this
+  // (see slice1-wire-prompt-parts-into-request-helpers point 2).
+  // When `prompt` is provided: hash/tokens stay null.
+  // When `promptParts` is provided: hash = sha256 of bytes[0..stableByteEnd],
+  // tokens = simple bytes/4 heuristic for slice 1.
+"""
+idempotent = true
+validation = """
+- Unit tests verify: (a) canonical ordering, (b) stableByteEnd is
+  byte-accurate for ASCII and multi-byte UTF-8, (c) missing optional parts
+  produce stable output, (d) re-invocation with identical parts produces
+  byte-identical output.
+- PromptPartsSchema is exported and importable; round-tripping via
+  PromptPartsSchema.parse(input) for valid inputs returns the typed shape.
+- resolvePromptInput contract holds: hash/tokens null when prompt set,
+  non-null when promptParts set, both null when neither set (caller
+  enforces required-one-of separately).
+"""
+
+[[steps]]
+id = "extend-flight-recorder-stable-hash"
+depends_on = []
+actor = "assistant"
+action = """
+Add migration v3 to src/flight-recorder.ts following the v2 pattern
+(PRAGMA table_info() guard + idempotent ALTER + INSERT OR IGNORE into
+_migrations; see src/flight-recorder.ts:58-69, 187-194):
+
+  ALTER TABLE requests ADD COLUMN stable_prefix_hash TEXT;
+  ALTER TABLE requests ADD COLUMN stable_prefix_tokens INTEGER;
+  CREATE INDEX IF NOT EXISTS idx_requests_stable_hash ON requests(stable_prefix_hash);
+
+Extend FlightLogStart (src/flight-recorder.ts:6-14) with two optional fields:
+  stablePrefixHash?: string;
+  stablePrefixTokens?: number;
+Wire them through the insertRequest statement (src/flight-recorder.ts:204-207)
+and the insertStartTxn transaction (src/flight-recorder.ts:214-229).
+
+Existing rows keep NULL for new columns (intentional — do not compute
+retroactively).
+
+NOTE: this step intentionally has NO dependency on `define-prompt-parts-schema`.
+The DB migration and the FlightLogStart field addition can land before the
+PromptParts type exists. The hash *value* is only produced once
+slice1-wire-prompt-parts is in place, which is when these columns start
+getting populated for new rows.
+
+These columns enable cache hit-rate analytics in slice #2 without re-parsing
+prompts and without ever storing reconstructed conversation content.
+"""
+idempotent = true
+validation = "npm run build passes. Re-opening an existing logs.db is non-destructive (existing rows keep NULL for new columns). New v3 row appears in _migrations table. PRAGMA table_info(requests) shows both new columns."
+
+[[steps]]
+id = "expose-flight-recorder-read-access"
+depends_on = ["extend-flight-recorder-stable-hash"]
+actor = "assistant"
+action = """
+Slice #2 components (cache-stats, resources, session_get, doctor) need
+read-only access to the flight-recorder SQLite. Today FlightRecorder.db is
+private (src/flight-recorder.ts:123) and FlightRecorderLike only exposes
+log methods. Choose ONE of the following surface changes and apply it:
+
+Option A — add a read-only query interface on FlightRecorder:
+  interface FlightRecorderQuery {
+    queryRequests<T>(sql: string, ...params: unknown[]): T[];
+  }
+  Implemented by FlightRecorder (real read), no-op by NoopFlightRecorder.
+
+Option B — open a sibling read-only SQLite connection from the resolved db
+  path (resolveFlightRecorderDbPath, src/flight-recorder.ts:71-82) and
+  thread it through GatewayServerRuntime as `flightRecorderReadDb`.
+
+Whichever option is chosen: inject the capability into ResourceProvider
+(src/resources.ts) constructor, into session_get handler in src/index.ts,
+and into createDoctorReport (src/doctor.ts).
+
+Document the choice in src/flight-recorder.ts header comment so reviewers
+of slice #2 know which to use.
+"""
+idempotent = true
+validation = "Unit test: with a NoopFlightRecorder, queryRequests/read connection returns [] without throwing. With a real FlightRecorder + seeded rows, returns those rows. New capability is wired into ResourceProvider, session_get handler, and createDoctorReport via type-safe injection (no `any`)."
+
+# ---------------------------------------------------------------------------
+# Slice #1 — prompt-structure discipline (all 5 providers)
+# ---------------------------------------------------------------------------
+
+[[steps]]
+id = "slice1-wire-prompt-parts-into-request-helpers"
+depends_on = ["define-prompt-parts-schema", "extend-flight-recorder-stable-hash"]
+actor = "assistant"
+action = """
+This is a CROSS-FILE change. The prepare*Request functions live in
+src/index.ts, NOT in src/request-helpers.ts — only Mistral-specific helper
+types live in request-helpers.ts:211-242. Touch points (re-verify lines with
+`rg` before editing — citations are accurate as of this plan revision but
+the file changes frequently):
+
+1. src/index.ts — prepare*Request functions:
+     prepareClaudeRequest  (src/index.ts:1043)
+     prepareCodexRequest   (src/index.ts:1217)
+     prepareGeminiRequest  (src/index.ts:1416)
+     prepareGrokRequest    (src/index.ts:1567)
+     prepareMistralRequest (src/index.ts:1669)
+   Each must accept optional `promptParts: PromptParts` in addition to the
+   existing `prompt: string`, and call resolvePromptInput() (new — see
+   point 2) to produce the assembled prompt string + stablePrefixHash +
+   stablePrefixTokens before doing any other work.
+
+2. src/index.ts — Zod tool schemas for every *_request and *_request_async
+   tool. Add optional `promptParts` field to each schema's z.object({...})
+   shape, AND make `prompt` optional.
+
+   CRITICAL: do NOT use Zod .refine() at the tool registration boundary —
+   the MCP SDK's server.tool(name, shape, handler) does not accept
+   top-level refines. Follow the precedent at src/index.ts:3724-3733
+   (codex_fork_session for sessionId/forkLast mutual exclusion): enforce
+   mutual exclusion via a runtime if-check at the top of the handler and
+   return createErrorResponse(...) with a clear message when invalid.
+
+   The sample below uses `prompt`/`promptParts`/`corrId` as placeholders.
+   At the real call sites, use whatever names the handler callback already
+   binds — most sync handlers destructure to bare `prompt` and
+   `correlationId` (e.g. around src/index.ts:~3132 for claude sync); some
+   async wrappers keep a `params` object (e.g. around src/index.ts:~4360
+   for claude_request_async). Match the surrounding style; do not paste
+   verbatim.
+
+     if (prompt && promptParts) {
+       return createErrorResponse(
+         "<tool_name>", 1, "", correlationId,
+         new Error("provide exactly one of `prompt` or `promptParts`")
+       );
+     }
+     if (!prompt && !promptParts) {
+       return createErrorResponse(
+         "<tool_name>", 1, "", correlationId,
+         new Error("one of `prompt` or `promptParts` is required")
+       );
+     }
+
+3. New file src/prompt-parts.ts — pure `assemble(parts: PromptParts)` and
+   the `resolvePromptInput(input)` helper that returns
+   `{ assembledPrompt, stablePrefixHash, stablePrefixTokens }`. No I/O.
+   Imported by each prepare*Request in src/index.ts.
+
+4. SYNC path: every safeFlightStart call site (src/index.ts:1957, 2244,
+   2529, 3178, 3534) must thread stablePrefixHash + stablePrefixTokens
+   into the FlightLogStart payload.
+
+5. ASYNC path: out-of-scope for this slice. async-job-manager.ts has
+   ZERO flight recorder integration today (confirmed by `grep -n
+   "FlightLogStart\\|safeFlightStart\\|logStart\\|flightRecorder"
+   src/async-job-manager.ts` returning empty). Wiring stablePrefixHash
+   through the async path requires first adding flight-recorder logging
+   to async-job-manager.ts itself, which is a separate concern beyond
+   cache-awareness. Defer to a follow-up plan
+   (`docs/plans/async-flight-recorder.dag.toml`) and explicitly note in
+   slice1 validation that the async-path integration assertion does NOT
+   apply yet.
+"""
+idempotent = true
+validation = """
+- Existing tests still pass (run `npm test`).
+- New unit test: same promptParts across two requests → identical
+  stablePrefixHash via resolvePromptInput (pure function test, no MCP).
+- New unit test: different `task` with same stable parts → identical hash.
+- New runtime test (NOT a Zod schema test): calling claude_request with
+  both `prompt` AND `promptParts` returns the createErrorResponse with the
+  exact error message "provide exactly one of `prompt` or `promptParts`".
+  Parametrised over all five *_request and all five *_request_async tools
+  (10 total). Use the same pattern doctor.test.ts uses for handler-level
+  assertions; do NOT assume Zod refine semantics.
+- New runtime test: calling claude_request with neither field returns the
+  "one of `prompt` or `promptParts` is required" error.
+- New integration test: a SYNC claude_request invocation with promptParts
+  writes a row to flight recorder with stable_prefix_hash NOT NULL.
+- Async-path stable_prefix_hash assertion is INTENTIONALLY OMITTED — see
+  point 5 in the action. Add a note in CHANGELOG.md that async-path
+  flight-recorder integration is a follow-up.
+"""
+
+[[steps]]
+id = "slice1-claude-cache-control-emission"
+depends_on = [
+  "slice1-wire-prompt-parts-into-request-helpers",
+  "research-provider-cache-surfaces",
+  "config-add-cache-awareness-block",
+]
+actor = "assistant"
+action = """
+For claude_request only, when promptParts is provided AND the assembled
+stable prefix is ≥ the per-model minimum from the table established in
+research-provider-cache-surfaces (1024 for Sonnet 3.5 / Opus 3, 2048 for
+Haiku 3.x, 4096 for Haiku 4.5 / Opus 4.5+), emit a cache_control breakpoint
+at the stable/volatile boundary IF the research step found a viable
+injection mechanism.
+
+The mechanism is uncertain — `claude --help` shows no `--cache-control`
+flag, only `--exclude-dynamic-system-prompt-sections` as a related lever.
+Three candidates the research step will test:
+  (a) stdin JSON with explicit cache_control markers (if `claude -p`
+      accepts a JSON-shaped payload),
+  (b) --system file + appended user message,
+  (c) environment variable activation (e.g. ENABLE_PROMPT_CACHING_1H).
+
+If NONE of (a)/(b)/(c) provide a viable injection surface, this step
+becomes a no-op for cache_control emission and the validation below falls
+back to the prefix-discipline-only path. Document the outcome in
+PROVIDER_CACHE_SURFACES.md.
+
+Behind config flag [cache_awareness].emit_anthropic_cache_control (default
+false), with model-aware threshold
+[cache_awareness].min_stable_tokens_for_cache_control (a TOML table keyed
+by model family, with documented defaults; see config-add-cache-awareness-block).
+"""
+idempotent = true
+validation = """
+The step has TWO validation branches; choose based on research outcome:
+
+Branch A — viable injection mechanism found:
+  Integration test against real claude CLI: two sequential requests with
+  same promptParts.stable + different task produce cache_read_input_tokens
+  > 0 on the second request. Recorded in flight recorder. Test is skipped
+  (not failed) if ANTHROPIC_API_KEY absent.
+
+Branch B — no viable injection mechanism (prefix-discipline-only):
+  Integration test asserts that two sequential requests with same
+  promptParts.stable produce byte-identical assembled prompts (verified
+  via the same stable_prefix_hash in flight recorder). NO cache_read_tokens
+  assertion. Document the limitation in PROVIDER_CACHE_SURFACES.md and
+  CHANGELOG.
+
+The branch is selected by reading PROVIDER_CACHE_SURFACES.md
+"claude — injection mechanism" outcome. Validation script reads that field
+and runs the appropriate branch.
+"""
+
+[[steps]]
+id = "slice1-other-clis-prefix-discipline"
+depends_on = ["slice1-wire-prompt-parts-into-request-helpers"]
+actor = "assistant"
+action = """
+For codex_request, gemini_request, grok_request, mistral_request: no new
+control flags exist on these CLIs. The benefit of promptParts is purely
+prefix-discipline (stable ordering → higher implicit cache hit rate).
+
+Verify per-CLI that the assembled prompt is byte-identical across calls when
+promptParts.stable is unchanged. No code change should be needed beyond what
+landed in slice1-wire-prompt-parts-into-request-helpers; this step is the
+validation gate.
+"""
+idempotent = true
+validation = "Unit test per CLI: same promptParts across two calls produces byte-identical strings handed to the executor. Documented in CHANGELOG under 'prefix-discipline applies to all CLIs'."
+
+# ---------------------------------------------------------------------------
+# Slice #2 — cache-state observability
+# ---------------------------------------------------------------------------
+
+[[steps]]
+id = "slice2-build-cache-aggregation-queries"
+depends_on = ["extend-flight-recorder-stable-hash"]
+actor = "assistant"
+action = """
+Create src/cache-stats.ts exposing:
+
+  computeSessionCacheStats(db, sessionId): SessionCacheStats
+  computePrefixCacheStats(db, stablePrefixHash): PrefixCacheStats
+  computeGlobalCacheStats(db, opts?): GlobalCacheStats
+
+SessionCacheStats = {
+  sessionId, cli, prefixTokens, lastHitAt, lastWriteAt,
+  hitCount30d, hitRate30d, totalCacheReadTokens, totalCacheCreationTokens,
+  estimatedSavingsUsd
+}
+
+Read-only on existing flight-recorder columns. Pure aggregation, no new
+storage. Per-model price table lives in a new src/pricing.ts (data-only,
+versioned by date).
+"""
+idempotent = true
+validation = "Unit tests with seeded in-memory SQLite cover: zero rows, only cache-misses, mixed hits/misses, multi-CLI, sessions with no stable_prefix_hash (legacy)."
+
+[[steps]]
+id = "slice2-add-cache-state-mcp-resource"
+depends_on = ["slice2-build-cache-aggregation-queries", "expose-flight-recorder-read-access"]
+actor = "assistant"
+action = """
+This change spans TWO files. MCP resource registration in this codebase
+lives in src/index.ts via `server.registerResource()` calls (NOT
+`server.resource()`) — first call at src/index.ts:814, registerBaseResources
+function starts at src/index.ts:811. Resource registration is NOT in
+resources.ts which only holds read/list logic.
+
+1. src/resources.ts (ResourceProvider): add `readCacheStateGlobal()`,
+   `readCacheStateSession(sessionId)`, `readCacheStateForPrefix(hash)`
+   methods that call into cache-stats.ts via the read access established
+   in expose-flight-recorder-read-access. Extend ResourceProvider
+   constructor to accept the read capability.
+
+2. src/index.ts: register three new MCP resources via server.registerResource()
+   inside registerBaseResources (alongside existing skill/session/model
+   registrations at ~lines 814-1012):
+     URI: cache_state://global               → GlobalCacheStats
+     URI: cache_state://session/{sessionId}  → SessionCacheStats
+     URI: cache_state://prefix/{hash}        → PrefixCacheStats
+   Each handler calls runtime.resourceProvider.readCacheState*().
+
+Resources must redact prompt text (return tokens/hashes/aggregates only).
+Add a unit test against ResourceProvider directly asserting no `prompt` or
+`response` strings appear in the JSON output.
+"""
+idempotent = true
+validation = """
+- MCP client can list cache_state resources via the existing list flow.
+- MCP client can read each of the three URIs. Response is JSON, never
+  contains a `prompt`, `response`, `system`, or `task` string field.
+- Integration test confirms (a) and (b) via a real MCP client transport.
+- ResourceProvider unit test asserts schema-level absence of raw text
+  fields in all three responses.
+"""
+
+[[steps]]
+id = "slice2-extend-session-get-with-cache"
+depends_on = ["slice2-build-cache-aggregation-queries", "expose-flight-recorder-read-access"]
+actor = "assistant"
+action = """
+The session_get tool handler lives in src/index.ts:5573 (per Grok reviewer
+F3). Extend its response payload to include an optional `cacheState` field
+when the requested session has any rows in the flight recorder. Field maps
+to SessionCacheStats minus the verbose timestamps (keep it compact).
+
+Specifically:
+- Do NOT add cacheState to the Session interface in src/session-manager.ts.
+  This is a projected view computed at read time, not persisted state.
+- In src/index.ts, the session_get handler calls
+  cacheStats.computeSessionCacheStats(sessionId) via the read capability
+  from expose-flight-recorder-read-access, and merges the result into the
+  response if non-empty.
+
+Update the session_get Zod response schema (if one exists) and the JSON
+example in the tool description.
+"""
+idempotent = true
+validation = """
+- session_get on a session with prior requests returns cacheState with
+  non-null hitRate30d.
+- session_get on a brand-new session omits cacheState entirely (no nulls,
+  no empty object — field is absent).
+- Existing session_get tests still pass.
+- New unit test parametrised over CLI_TYPES.
+"""
+
+# ---------------------------------------------------------------------------
+# Slice #3 — TTL-aware session routing (Anthropic surface only for now)
+# ---------------------------------------------------------------------------
+
+[[steps]]
+id = "slice3-anthropic-ttl-tracking"
+depends_on = ["slice2-build-cache-aggregation-queries"]
+actor = "assistant"
+action = """
+In src/cache-stats.ts, add computeTtlRemaining(stats, cli, ttlPolicy):
+  - claude default: 5 min from lastWriteAt
+  - claude 1h beta (if [cache_awareness] anthropic_ttl_seconds = 3600): 1 hour
+  - all others: null (we cannot observe their TTL)
+
+Add ttlRemainingMs (nullable) to SessionCacheStats. Surface in
+cache_state://session/{id} and in session_get.cacheState.
+"""
+idempotent = true
+validation = "Test: session whose lastWriteAt was 4 min ago returns ttlRemainingMs ≈ 60000 with claude default. Test: gemini session returns null ttlRemainingMs (we have no read on it). Test: 1h policy flips the calculation."
+
+[[steps]]
+id = "slice3-ttl-warning-on-resume"
+depends_on = [
+  "slice3-anthropic-ttl-tracking",
+  "config-add-cache-awareness-block",
+  "expose-flight-recorder-read-access",
+]
+actor = "assistant"
+action = """
+When claude_request (or claude_request_async) is invoked with sessionId AND
+computeTtlRemaining returns < 30s, attach a structured warning to the
+response payload (not a hard error):
+
+  { warnings: [{ code: "cache_ttl_expiring_soon", ttlRemainingMs: 12000 }] }
+
+Touch points:
+- src/index.ts claude_request and claude_request_async handlers: after
+  resolving sessionId, call computeTtlRemaining via the read capability
+  established in expose-flight-recorder-read-access.
+- Response payload shape: add optional `warnings: WarningEntry[]` to the
+  shared response shape (define `WarningEntry` once and reuse across CLIs
+  if we ever add ttl warnings for other providers; keep claude-only for
+  this slice).
+
+Behaviour gated on [cache_awareness].warn_on_ttl_expiry (default false in
+1.x; flip to true in a later release after dogfooding).
+"""
+idempotent = true
+validation = """
+- Integration test: mocked flight-recorder state with lastWriteAt = now - 4m55s
+  produces the warning on next claude_request. lastWriteAt = now - 1m
+  produces no warning.
+- Disabled flag ([cache_awareness].warn_on_ttl_expiry = false) suppresses
+  warning entirely; warnings field is absent (not empty).
+- Test covers both sync and async claude paths.
+"""
+
+# ---------------------------------------------------------------------------
+# Cross-cutting — config, docs, doctor
+# ---------------------------------------------------------------------------
+
+[[steps]]
+id = "config-add-cache-awareness-block"
+depends_on = ["research-provider-cache-surfaces"]
+actor = "assistant"
+action = """
+CRITICAL: this step MUST land before slice1-claude-cache-control-emission
+and slice3-ttl-warning-on-resume, both of which read flags defined here.
+
+Background — current config loader shape (src/config.ts):
+- loadConfig (src/config.ts:57-79) reads env-driven cacheTtl/sessionTtl
+  values; does NOT read TOML.
+- loadPersistenceConfig (src/config.ts:293) reads ONLY the [persistence]
+  block from ~/.llm-cli-gateway/config.toml via readPersistenceFile
+  (src/config.ts:179-195), which extracts only `parsed.persistence`.
+- PersistenceSchema is `.strict()`, but sibling blocks in the same TOML
+  are ignored by loadPersistenceConfig BEFORE the schema sees them —
+  readPersistenceFile passes only `parsed.persistence` to the schema
+  (src/config.ts:179-195). The `.strict()` therefore only rejects
+  unknown keys WITHIN [persistence]; it does not affect siblings.
+
+Add a sibling loader and schema for [cache_awareness]. Do NOT extend
+PersistenceSchema or PersistenceConfig — keep concerns separated.
+
+1. Add CacheAwarenessSchema (Zod) and loadCacheAwarenessConfig() in
+   src/config.ts. Mirror the readPersistenceFile/loadPersistenceConfig
+   pattern: read the same TOML file once, extract `parsed.cache_awareness`,
+   validate, return a defaulted `CacheAwarenessConfig`.
+
+2. Schema (TOML):
+
+     [cache_awareness]
+     emit_anthropic_cache_control = false       # bool, default false
+     anthropic_ttl_seconds = 300                # enum: 300 | 3600
+     warn_on_ttl_expiry = false                 # bool, default false
+
+     [cache_awareness.min_stable_tokens_for_cache_control]
+     # Per-model minimum tokens before cache_control is emitted.
+     # Keys: Anthropic model family aliases ("sonnet", "opus", "haiku",
+     # "default"). Values from PROVIDER_CACHE_SURFACES.md
+     # (research-provider-cache-surfaces step output), e.g.:
+     sonnet = 1024
+     opus = 4096
+     haiku = 4096
+     default = 4096   # conservative fallback for unknown families
+
+3. Thread CacheAwarenessConfig through GatewayServerRuntime so tool
+   registration and request handlers can gate on flags. Tool registration
+   for slice1-claude/slice3-ttl behaviours should check the flag at runtime,
+   not at module load (so config changes are picked up on restart, no
+   structural difference between flags absent vs explicitly false).
+
+4. No env-var overrides for this block — it's purely TOML.
+"""
+idempotent = true
+validation = """
+- New test: loadCacheAwarenessConfig with no config.toml returns defaulted
+  CacheAwarenessConfig (all flags false, min_stable_tokens defaults from
+  the table above).
+- New test: invalid TOML (e.g. anthropic_ttl_seconds = 999) is rejected
+  with a Zod error from loadCacheAwarenessConfig specifically (not from
+  loadPersistenceConfig — verify cross-contamination is impossible).
+- New test: extending [persistence] block does not affect [cache_awareness]
+  loading and vice versa.
+- New test: per-model min_stable_tokens lookup returns correct value for
+  "sonnet"/"opus"/"haiku" aliases and falls back to `default` for unknown.
+"""
+
+[[steps]]
+id = "doctor-cache-summary"
+depends_on = [
+  "slice2-add-cache-state-mcp-resource",
+  "expose-flight-recorder-read-access",
+  "config-add-cache-awareness-block",
+]
+actor = "assistant"
+action = """
+This change spans FOUR files. The DoctorReport interface, the JSON schema,
+and the schema-validating test must all be updated together — otherwise
+the new field is silently rejected.
+
+NOTE: line citations below were accurate at the time this plan was
+written. Re-verify with `rg` (e.g. `rg "interface DoctorReport"
+src/doctor.ts`) before editing — drift is expected.
+
+1. src/doctor.ts:
+   - Extend the DoctorReport interface (around src/doctor.ts:~194-259;
+     re-verify with `rg "interface DoctorReport" src/doctor.ts`) with an
+     optional `cache_awareness?: CacheAwarenessReport` field.
+   - Define CacheAwarenessReport shape:
+
+       interface CacheAwarenessReport {
+         enabled_features: string[];   // ["anthropic_cache_control", "ttl_warnings"]
+         last_24h: {
+           hit_rate: number;            // 0..1
+           total_hits: number;
+           estimated_savings_usd: number;
+         };
+         per_cli: Partial<Record<CliType, {
+           hit_rate: number;
+           total_hits: number;
+           total_cache_read_tokens: number;
+         }>>;
+       }
+
+   - Wire the field into createDoctorReport (src/doctor.ts:311+) by:
+     (a) extending the signature to accept an optional
+         `cacheAwarenessConfig?: CacheAwarenessConfig` parameter, OR
+     (b) calling loadCacheAwarenessConfig() at the top of createDoctorReport
+         directly.
+     Option (a) is preferred for testability (deps as args).
+   - Then call cacheStats.computeGlobalCacheStats(opts={lastNHours: 24})
+     via the read capability from expose-flight-recorder-read-access.
+   - `enabled_features` is derived from cacheAwarenessConfig flags
+     (emit_anthropic_cache_control → "anthropic_cache_control";
+     warn_on_ttl_expiry → "ttl_warnings"). When no config or all flags
+     false, return an empty array (NOT omit the field).
+   - Update the bottom-of-file invocation
+     `createDoctorReport()` at src/doctor.ts:396 to pass the loaded
+     CacheAwarenessConfig if option (a) is chosen.
+
+2. setup/status.schema.json:
+   - Add `cache_awareness` to the root `properties` object.
+   - The root currently has `additionalProperties: false` (around
+     setup/status.schema.json:~271; re-verify with `grep -n
+     additionalProperties setup/status.schema.json | head -1`). Either
+     (a) add the new property to the explicit list, or (b) flip root to
+     additionalProperties: true. Prefer (a) for strictness.
+   - Add a nested schema for CacheAwarenessReport with its own explicit
+     properties and `additionalProperties: false`.
+
+3. src/__tests__/doctor.test.ts (file is ~275 lines as of this plan; the
+   schema-validation walker — re-verify with `grep -n "schema"
+   src/__tests__/doctor.test.ts`):
+   - The test currently validates createDoctorReport output against
+     setup/status.schema.json. If any test hard-asserts the DoctorReport
+     shape (Object.keys), update those assertions.
+   - Add a new test case: createDoctorReport when flight-recorder is empty
+     produces cache_awareness with zeroed fields (not omitted).
+
+4. setup/install-plan.dag.toml — no change needed (install plan does not
+   schema-validate doctor output).
+"""
+idempotent = true
+validation = """
+- `llm-cli-gateway doctor --json` includes the cache_awareness block.
+- With no prior requests in flight recorder: last_24h.total_hits = 0,
+  hit_rate = 0, estimated_savings_usd = 0 (zeroed, NOT missing).
+- Existing doctor.test.ts passes.
+- New test asserts the cache_awareness block is present and matches the
+  CacheAwarenessReport shape.
+- JSON schema validation in doctor.test.ts passes for both the empty-state
+  and populated-state cases.
+"""
+
+[[steps]]
+id = "docs-update"
+depends_on = ["config-add-cache-awareness-block", "doctor-cache-summary"]
+actor = "assistant"
+action = """
+There are TWO CLAUDE.md files in scope; distinguish them:
+  (A) /srv/repos/internal/verivusai-labs/rvwr/CLAUDE.md — project root,
+      one directory above this gateway repo. Contains the "Session State
+      Design" rule with "No conversation content in session storage".
+      LEAVE UNTOUCHED IN THIS SLICE.
+  (B) /srv/repos/internal/verivusai-labs/rvwr/llm-cli-gateway/CLAUDE.md —
+      may not exist; do not assume.
+
+Update the following files (all paths relative to the gateway repo root
+/srv/repos/internal/verivusai-labs/rvwr/llm-cli-gateway unless noted):
+
+- README.md: add 'Cache-aware operation' section under Features with
+  example promptParts usage and a per-CLI capability matrix (which CLI
+  supports cache_control emission vs prefix-discipline-only).
+- BEST_PRACTICES.md: add 'Cache hygiene' section. Reference the canonical
+  promptParts order (system → tools → context → task) and the per-model
+  Anthropic min-token thresholds. Confirm that the existing 'No
+  conversation content in state' guidance is unchanged (Mistral reviewer
+  F1 confirmed this lives at BEST_PRACTICES.md ~line 290).
+- CHANGELOG.md: ship-note describing slice #1+#2+#3, the config block,
+  and the opt-in default of every behavioural change.
+
+Do NOT amend the 'no conversation content in session storage' rule in
+(A) above — this slice deliberately respects it. If a gateway-local
+CLAUDE.md (B) is created during this slice, it must EXPLICITLY note that
+the project-root CLAUDE.md takes precedence and inherits all rules.
+"""
+idempotent = true
+validation = """
+- README.md, BEST_PRACTICES.md, CHANGELOG.md modified.
+- README example actually runs (smoke test exercising promptParts).
+- /srv/repos/internal/verivusai-labs/rvwr/CLAUDE.md is unchanged from the
+  start of this slice (verify via `git diff --name-only`).
+- BEST_PRACTICES.md still contains the 'No conversation content in state'
+  rule (grep for exact phrase).
+- CHANGELOG entry lists every config flag introduced in
+  config-add-cache-awareness-block.
+"""
+
+[[steps]]
+id = "release-readiness-check"
+depends_on = [
+  "docs-update",
+  "slice1-other-clis-prefix-discipline",
+  "slice1-claude-cache-control-emission",
+  "slice2-extend-session-get-with-cache",
+  "slice3-ttl-warning-on-resume",
+]
+actor = "assistant"
+action = """
+Final gates:
+  npm run build
+  npm run lint
+  npm test         # all suites, including new ones
+  npm run check
+
+Re-anchoring step (do BEFORE editing): all line citations in this plan
+were accurate when written but the file changes. Run `rg` to confirm
+current locations for each prepare*Request function, server.registerResource
+call, safeFlightStart call site, and JSON schema additionalProperties before
+relying on any cited line number.
+
+Cross-cutting checklist (verify each touched explicitly):
+  [ ] src/index.ts — Zod tool schemas updated for every *_request and
+      *_request_async tool (prompt | promptParts BOTH optional).
+  [ ] src/index.ts — runtime mutual-exclusion check at top of EVERY
+      *_request and *_request_async handler (10 total), following
+      codex_fork_session pattern at src/index.ts:3724-3733. NOT Zod
+      .refine() — the SDK rejects top-level refines.
+  [ ] src/index.ts — prepare*Request functions (Claude:1043, Codex:1217,
+      Gemini:1416, Grok:1567, Mistral:1669) call resolvePromptInput().
+  [ ] src/index.ts — safeFlightStart call sites (1957, 2244, 2529, 3178,
+      3534) thread stablePrefixHash + stablePrefixTokens. SYNC PATH ONLY.
+  [ ] src/index.ts — new MCP resource registrations (server.registerResource,
+      NOT .resource()) for cache_state://*.
+  [ ] src/index.ts — session_get handler returns cacheState when present.
+  [ ] src/index.ts — claude_request / claude_request_async emit warnings
+      array when ttl < 30s and flag enabled.
+  [ ] src/prompt-parts.ts — NEW file with assemble() and resolvePromptInput().
+  [ ] src/request-helpers.ts — UNCHANGED for promptParts wiring. Only
+      Mistral-specific Prepare* types live here (lines 211-242); not the
+      core prepare*Request functions.
+  [ ] src/async-job-manager.ts — UNCHANGED. Async-path flight-recorder
+      integration is explicitly out of scope; see slice1-wire point 5.
+  [ ] src/flight-recorder.ts — migration v3 + FlightLogStart extension.
+  [ ] src/flight-recorder.ts — read-only query interface OR sibling
+      read-only connection per expose-flight-recorder-read-access choice.
+  [ ] src/resources.ts — ResourceProvider constructor + read methods for
+      cache_state URIs.
+  [ ] src/config.ts — CacheAwarenessSchema + loadCacheAwarenessConfig +
+      threaded through GatewayServerRuntime.
+  [ ] src/doctor.ts — DoctorReport interface extended (around 194-259),
+      createDoctorReport populates cache_awareness.
+  [ ] setup/status.schema.json — cache_awareness property added
+      (current additionalProperties:false at ~line 271).
+  [ ] src/__tests__/doctor.test.ts (~275 lines) — passes new shape.
+  [ ] src/pricing.ts — created with priced_as_of date.
+  [ ] src/cache-stats.ts — three computeXxxCacheStats functions.
+  [ ] docs/personal-mcp/PROVIDER_CACHE_SURFACES.md — research output with
+      per-model Anthropic threshold table.
+  [ ] README.md / BEST_PRACTICES.md / CHANGELOG.md — updated.
+      CHANGELOG must explicitly note async-path stable_prefix_hash is
+      a follow-up.
+  [ ] /srv/repos/internal/verivusai-labs/rvwr/CLAUDE.md — UNCHANGED.
+
+Verify total test count increased by at least the number of new tests
+added in this plan. Verify no existing test file was modified to make a
+failing test pass (review git diff for test files; any deletions or
+weakened assertions are blockers).
+
+Hand a draft PR description to the human with: scope, files touched (the
+list above with checkmarks), test count delta, opt-in flag matrix
+([cache_awareness] block contents), what is intentionally NOT shipped
+(slices 4 + 5), and a per-CLI cache_control emission table from
+PROVIDER_CACHE_SURFACES.md.
+"""
+idempotent = true
+validation = "All four npm commands exit 0. PR description drafted in docs/plans/cache-awareness.pr-body.md with the touched-files checklist completed. Reviewer can re-run the checklist against `git diff --stat`."
+
+# ---------------------------------------------------------------------------
+# Rollback + risks
+# ---------------------------------------------------------------------------
+
+[rollback]
+guidance = """
+Every behavioural change in this slice is gated behind an opt-in flag in
+[cache_awareness], all defaulting to false. Rollback options:
+
+1. Soft rollback: set all [cache_awareness] flags to false. Gateway reverts
+   to current behaviour. Flight-recorder columns stay populated (harmless).
+
+2. Hard rollback: revert the feature branch. Migration v3 columns remain on
+   existing logs.db files but are NULL for new rows — non-destructive, no
+   re-migration needed.
+
+3. Config corruption: delete the [cache_awareness] block from config.toml;
+   defaults apply (everything off).
+
+Do NOT roll back by dropping the v3 columns. SQLite has supported
+ALTER TABLE DROP COLUMN since 3.35.0 (2021-03-12), so the operation is
+technically available, but it rewrites the table internally and is unsafe
+on a live WAL database with concurrent readers without closing the DB.
+The columns are cheap to keep — leaving them as NULL on rollback is the
+safer path.
+"""
+
+[risks]
+known = [
+  "Anthropic CLI may not expose cache_control injection; slice1-claude step has a documented fallback to prefix-discipline-only.",
+  "stable_prefix_hash on legacy rows is NULL forever; cache-stats queries must tolerate this and not divide by zero.",
+  "ttlRemainingMs is best-effort — we observe writes via flight-recorder, not the provider's actual cache state. A cache eviction inside Anthropic's window will not be visible to us; the warning may be optimistic.",
+  "Pricing table in src/pricing.ts goes stale; estimatedSavingsUsd is an estimate, not a billing number.",
+]
+mitigations = [
+  "All new behaviour gated behind opt-in flags.",
+  "All new queries use COALESCE / explicit NULL handling.",
+  "ttlRemainingMs documented as 'best effort, computed locally' in resource description.",
+  "Pricing data carries a `priced_as_of` date field and doctor surfaces age.",
+]

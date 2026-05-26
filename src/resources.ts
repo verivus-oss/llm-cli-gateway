@@ -1,6 +1,7 @@
 import { ISessionManager } from "./session-manager.js";
 import { PerformanceMetrics } from "./metrics.js";
 import { getAvailableCliInfo } from "./model-registry.js";
+import { FlightRecorderQuery } from "./flight-recorder.js";
 
 export interface ResourceDefinition {
   uri: string;
@@ -24,8 +25,17 @@ export interface ResourceContents {
 export class ResourceProvider {
   constructor(
     private sessionManager: ISessionManager,
-    private performanceMetrics: PerformanceMetrics
+    private performanceMetrics: PerformanceMetrics,
+    // Optional read access to the flight recorder. Used by cache-state
+    // resources (slice 2). Falls back to a stub returning [] when not
+    // injected so existing call sites continue to work without changes.
+    private flightRecorder: FlightRecorderQuery = { queryRequests: () => [] }
   ) {}
+
+  /** Read-only flight-recorder accessor for cache-state resource readers. */
+  getFlightRecorderQuery(): FlightRecorderQuery {
+    return this.flightRecorder;
+  }
 
   // List all available resources
   listResources(): ResourceDefinition[] {

@@ -381,18 +381,23 @@ function resolveGatewayServerRuntime(
       ? new ApprovalManager(undefined, runtimeLogger)
       : getApprovalManager(runtimeLogger));
 
+  const runtimeFlightRecorder = deps.flightRecorder ?? getFlightRecorder(runtimeLogger);
   return {
     sessionManager: runtimeSessionManager,
     resourceProvider:
       deps.resourceProvider ??
       (options.isolateState
-        ? new ResourceProvider(runtimeSessionManager, runtimePerformanceMetrics)
+        ? new ResourceProvider(
+            runtimeSessionManager,
+            runtimePerformanceMetrics,
+            runtimeFlightRecorder
+          )
         : resourceProvider),
     db: "db" in deps ? (deps.db ?? null) : db,
     performanceMetrics: runtimePerformanceMetrics,
     asyncJobManager: runtimeAsyncJobManager,
     approvalManager: runtimeApprovalManager,
-    flightRecorder: deps.flightRecorder ?? getFlightRecorder(runtimeLogger),
+    flightRecorder: runtimeFlightRecorder,
     logger: runtimeLogger,
     persistence: deps.persistence ?? getPersistenceConfig(runtimeLogger),
   };
@@ -5675,7 +5680,11 @@ async function initializeSessionManager(): Promise<void> {
     logger.info("File-based session manager initialized");
   }
 
-  resourceProvider = new ResourceProvider(sessionManager, performanceMetrics);
+  resourceProvider = new ResourceProvider(
+    sessionManager,
+    performanceMetrics,
+    getFlightRecorder(logger)
+  );
 }
 
 //──────────────────────────────────────────────────────────────────────────────
