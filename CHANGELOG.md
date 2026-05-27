@@ -2,6 +2,154 @@
 
 All notable changes to the llm-cli-gateway project.
 
+## [1.14.0] - 2026-05-28 — Phase 4 slice κ (Claude explicit `cache_control` via `--input-format stream-json`)
+
+Ships the ninth Phase 4 slice. Callers can now opt their stable
+`promptParts` blocks into Anthropic's explicit `cache_control`
+breakpoints — the gateway switches from positional `-p <prompt>` to
+`claude -p --input-format stream-json` and pipes a JSON content-blocks
+payload via stdin. Smoke-test against a live 1-hour-cache-enabled
+account observed a **15,511-token shift from `cache_creation` to
+`cache_read` on the second call, 82 % cost drop, 36 % latency drop**.
+
+Seven recommendation commits land alongside the feature (default
+`outputFormat`, auto-emit-from-config, observability split, warning,
+schema mutex, smoke-script gate, tool description) plus three
+falsifiability-tightening commits driven by the multi-LLM review gate.
+
+### Added — slice κ feature
+
+- **`PromptParts.cacheControl`** (`src/prompt-parts.ts`): per-block
+  boolean opt-in (`system?`/`tools?`/`context?`) with strict Zod
+  schema. The `task` field is intentionally never markable — it's the
+  volatile tail. Setting any flag activates the κ emission path.
+- **`assembleClaudeCacheBlocks(parts)`** helper (`src/prompt-parts.ts`):
+  builds the `{type:"user",message:{role:"user",content:[…]}}` payload
+  in `system → tools → context → task` order. Each marked non-empty
+  block gets `cache_control: {type:"ephemeral", ttl:"1h"}`. Empty
+  parts are silently skipped; markers on empty parts are a no-op.
+- **`prepareClaudeRequest` κ branch** (`src/index.ts`): when the
+  caller marks any block AND requests `outputFormat: "stream-json"`,
+  argv switches to `-p --input-format stream-json --output-format
+  stream-json --include-partial-messages --verbose` with NO positional
+  prompt; the prep result carries `stdinPayload` + `cacheControlBlocks`.
+  Mixing `cacheControl` with `text`/`json` output returns an
+  actionable error instead of silently coercing.
+- **`-p` arity widened** to a new `"optional"` (`src/upstream-contracts.ts`):
+  consumes the next token as a value iff it does not start with `-`.
+  Preserves the legacy `-p <prompt>` positional form AND validates the
+  κ `-p` standalone form. New `--input-format` flag registered with
+  `values: ["text","stream-json"]`. New conformance fixture
+  `claude-input-format-stream-json` pins the exact κ argv combo.
+- **Executor + AsyncJobManager stdin** (`src/executor.ts`,
+  `src/async-job-manager.ts`): both gain `stdin?: string` options.
+  When set, stdio[0] switches from `"ignore"` to `"pipe"` and the
+  payload is written. The stdin payload participates in the
+  AsyncJobManager dedup key — two requests with identical argv but
+  different cache_control payloads cannot collide.
+- **Flight recorder migration v4** (`src/flight-recorder.ts`):
+  `cache_control_blocks INTEGER` column added idempotently;
+  `FlightLogStart.cacheControlBlocks?` persists the per-request
+  marker count for cache_state aggregates.
+
+### Added — seven recommendations (rec #1..#7)
+
+- **Rec #1** — `claude_request` + `claude_request_async` default
+  `outputFormat` changes from `"text"` to `"stream-json"`. The gateway
+  already parses NDJSON usage events; the prior default routed every
+  call through unparseable text, leaving 1,078 historic FR rows with
+  NULL tokens. Override to `"text"` still works for callers that
+  truly want raw stdout (loses observability).
+- **Rec #2** — `[cache_awareness].emit_anthropic_cache_control`
+  config flag is now wired. When enabled AND the caller passes a
+  `promptParts` whose stable prefix exceeds the per-model threshold
+  (`minStableTokensForModel`), the gateway auto-marks the rightmost
+  non-empty stable block (context → tools → system priority) with
+  `ttl: "1h"`. Skipped when `optimizePrompt: true` (rec #5 desync
+  risk) or `outputFormat !== "stream-json"`.
+- **Rec #3** — `GlobalCacheStats` (`src/cache-stats.ts`) gains five
+  derived metrics that distinguish κ-explicit hits from Claude Code's
+  baseline cache reads in the same flight-recorder window:
+  `explicitCacheControlRows`, `explicitCacheControlHits`,
+  `explicitCacheControlHitRate`, `stablePrefixReuseCount`,
+  `avgCacheCreationAfterFirstCall` (averaged over rows AFTER the
+  first-by-datetime in each stable-prefix reuse group).
+- **Rec #4** — new structured warning `cacheable_prefix_uncached`
+  (`src/index.ts`): fires when `promptParts`' stable prefix is above
+  the per-model threshold but no `cache_control` breakpoint will be
+  emitted (caller didn't set it AND auto-emit also didn't fire). The
+  warning includes the measured `stablePrefixTokens`, `threshold`,
+  and `reason` (outputFormat-not-streamjson / config-off /
+  no-eligible-block). Threaded through both Claude handlers.
+- **Rec #5** — `prepareClaudeRequest` refuses `optimizePrompt: true`
+  combined with `promptParts.cacheControl` (`src/index.ts:1455`)
+  before optimization runs. Without this mutex the FR `prompt` column
+  would log optimized text while Claude actually received raw
+  promptParts blocks via stdin, breaking prefix-cache reuse on the
+  next call. Actionable error message points the caller at the
+  combination to drop.
+- **Rec #6** — new `npm run smoke:cache-control` script
+  (`package.json`). Runs `docs/plans/slice-kappa-smoke-test.mjs`,
+  which gates on `SMOKE_CACHE_CONTROL=1` env var with a "BILLABLE
+  TEST" banner so accidental invocation in CI does not burn live
+  Anthropic credit (~$0.08 per run).
+- **Rec #7** — both Claude tools' `promptParts` descriptions now
+  explicitly document the `cacheControl` opt-in, the
+  `outputFormat: "stream-json"` requirement, the `ttl='1h'`
+  hard-code, and the "task is the volatile tail" convention.
+
+### Tests + multi-LLM review gate
+
+`886 → 940` tests pass. 54 new tests across `Kα/Kβ/Kγ/Kδ/Kε/Kζ`
+regression sets + 13 falsifiability-gap closures + 1 SQL-drop
+falsifier strengthening. Every new test is mutation-probe-verified:
+the targeted regression goes red on the predicted mutation.
+
+The branch passed a strict-evidence multi-LLM review gate per the
+project's standing protocol (`feedback_multi_llm_review_gate.md` and
+`feedback_test_veracity_audit_protocol.md`). Round 3 was sequential
+to avoid concurrent gateway contention; all four reviewers — Codex
+(`gpt-5.4`), Grok (`grok-build`), Mistral (`mistral-medium-3.5`),
+Claude (`sonnet-4-6`) — issued **UNCONDITIONAL APPROVE** against the
+head with file:line citations and executed mutation probes. The
+iteration trail (Codex round-3 REJECT → fix → recheck APPROVE; Grok
+round-3 REJECT → fix → recheck APPROVE; Mistral + Claude first-pass
+APPROVE) is preserved in commit history (`bea1aee` and `bbc3b5f`).
+
+### Caller-honest framing
+
+- κ adds caller-side reuse ON TOP of the irreducible ~10–12K
+  `cache_creation` token floor that every fresh `claude -p` session
+  rebuilds (Claude Code's session-wrap content). The *added* benefit
+  scales with the caller's stable block size, not the total prompt.
+- The `ttl='1h'` hard-code is mandatory because Anthropic rejects a
+  `5m` block after Claude Code's own 1h-marked session blocks; the
+  gateway warns if `[cache_awareness].anthropic_ttl_seconds` says 300.
+- Recommended migration: callers running batch / orchestration /
+  repeated similar prompts should opt in; callers running one-shot
+  ad-hoc prompts won't see benefit.
+
+### Files
+
+```
+src/prompt-parts.ts          — PromptParts.cacheControl + assembleClaudeCacheBlocks
+src/index.ts                 — prepareClaudeRequest κ branch + rec #1/#2/#4/#5/#7 + handler threading
+src/upstream-contracts.ts    — arity "optional", --input-format, claude-input-format-stream-json fixture
+src/executor.ts              — ExecuteOptions.stdin? threading
+src/async-job-manager.ts     — stdin? + dedup-key + cacheControlBlocks plumbing
+src/flight-recorder.ts       — migration v4 + cache_control_blocks column
+src/cache-stats.ts           — GlobalCacheStats 5 new derived metrics
+package.json                 — smoke:cache-control script
+docs/plans/slice-kappa.spec.md                   — audit spec
+docs/plans/slice-kappa-final-review.spec.md      — round-3 review spec
+docs/plans/slice-kappa-captures/                 — live smoke evidence
+docs/plans/slice-kappa-smoke-test.mjs            — billable smoke script (SMOKE_CACHE_CONTROL gated)
+src/__tests__/test-veracity-regressions-slice-kappa.test.ts — 40 κ regressions (Kα/Kβ/Kγ/Kδ/Kε/Kζ)
+src/__tests__/cache-stats.test.ts                — +7 rec #3 + SQL-drop falsifier tests
+src/__tests__/prompt-parts-tool-wiring.test.ts   — +5 B1/B2/D1/D2 schema falsifiers
+src/__tests__/smoke-script-gate.test.ts          — 2 I2 subprocess tests
+```
+
 ## [1.13.2] - 2026-05-27 — Claude stream-json regression fix (--verbose now required)
 
 Patch release. Single user-facing fix to `claude_request` /
