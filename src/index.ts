@@ -1975,6 +1975,26 @@ export function prepareGrokRequest(
      * working directory without depending on the gateway process's cwd.
      */
     workingDir?: string;
+    /**
+     * Phase 4 slice θ — Grok HIGH parity. All five are passthrough flags:
+     *
+     * - `sandbox` → `--sandbox <PROFILE>` (freeform; Grok 0.1.210 --help
+     *   shows no enum constraint, unlike --effort / --permission-mode /
+     *   --output-format which all show `[possible values: …]`).
+     * - `rules` → `--rules <RULES>`. Supports `@file` prefix; gateway
+     *   passes the value verbatim and lets Grok parse it.
+     * - `systemPromptOverride` → `--system-prompt-override <PROMPT>`.
+     *   Distinct from Claude's --system-prompt / --append-system-prompt
+     *   (Grok has only one override flag).
+     * - `allow` / `deny` → repeatable `--allow <RULE>` / `--deny <RULE>`
+     *   per --help ("Repeat to add multiple rules"). One argv pair per
+     *   entry — NOT comma-joined like --tools / --disallowed-tools.
+     */
+    sandbox?: string;
+    rules?: string;
+    systemPromptOverride?: string;
+    allow?: string[];
+    deny?: string[];
   },
   runtime: GatewayServerRuntime = resolveGatewayServerRuntime()
 ): CliRequestPrep | ExtendedToolResponse {
@@ -2064,6 +2084,25 @@ export function prepareGrokRequest(
   }
   if (params.workingDir) {
     args.push("--cwd", params.workingDir);
+  }
+  if (params.sandbox) {
+    args.push("--sandbox", params.sandbox);
+  }
+  if (params.rules) {
+    args.push("--rules", params.rules);
+  }
+  if (params.systemPromptOverride) {
+    args.push("--system-prompt-override", params.systemPromptOverride);
+  }
+  if (params.allow && params.allow.length > 0) {
+    for (const rule of params.allow) {
+      args.push("--allow", rule);
+    }
+  }
+  if (params.deny && params.deny.length > 0) {
+    for (const rule of params.deny) {
+      args.push("--deny", rule);
+    }
   }
 
   return {
@@ -2777,6 +2816,16 @@ export interface GrokRequestParams {
   maxTurns?: number;
   /** Phase 4 slice ζ: emit `--cwd <DIR>` so the CLI uses the specified working directory. */
   workingDir?: string;
+  /** Phase 4 slice θ: Grok `--sandbox <PROFILE>` (freeform passthrough). */
+  sandbox?: string;
+  /** Phase 4 slice θ: Grok `--rules <RULES>` (supports `@file` prefix; verbatim passthrough). */
+  rules?: string;
+  /** Phase 4 slice θ: Grok `--system-prompt-override <PROMPT>`. */
+  systemPromptOverride?: string;
+  /** Phase 4 slice θ: Grok `--allow <RULE>` (repeatable; one entry per --allow instance). */
+  allow?: string[];
+  /** Phase 4 slice θ: Grok `--deny <RULE>` (repeatable; one entry per --deny instance). */
+  deny?: string[];
 }
 
 export async function handleGrokRequest(
@@ -2805,6 +2854,11 @@ export async function handleGrokRequest(
       operation: "grok_request",
       maxTurns: params.maxTurns,
       workingDir: params.workingDir,
+      sandbox: params.sandbox,
+      rules: params.rules,
+      systemPromptOverride: params.systemPromptOverride,
+      allow: params.allow,
+      deny: params.deny,
     },
     runtime
   );
@@ -2984,6 +3038,11 @@ export async function handleGrokRequestAsync(
       operation: "grok_request_async",
       maxTurns: params.maxTurns,
       workingDir: params.workingDir,
+      sandbox: params.sandbox,
+      rules: params.rules,
+      systemPromptOverride: params.systemPromptOverride,
+      allow: params.allow,
+      deny: params.deny,
     },
     runtime
   );
@@ -4827,6 +4886,40 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .describe(
           "Grok --cwd <DIR>: working directory for this invocation. Lets headless callers run Grok against a directory other than the gateway process's cwd."
         ),
+      // Phase 4 slice θ — Grok HIGH parity (sandbox, rules, system-prompt-override, allow, deny).
+      sandbox: z
+        .string()
+        .min(1)
+        .optional()
+        .describe(
+          "Grok --sandbox <PROFILE>: sandbox profile for filesystem and network access. Freeform per `grok --help` (no enum constraint on Grok 0.1.210); also settable via GROK_SANDBOX env var. Caller responsibility to pass a valid profile name."
+        ),
+      rules: z
+        .string()
+        .min(1)
+        .optional()
+        .describe(
+          "Grok --rules <RULES>: extra rules to append to the system prompt. Supports `@file` prefix per `grok --help` to load from a file; gateway passes the value verbatim and lets Grok parse the prefix."
+        ),
+      systemPromptOverride: z
+        .string()
+        .min(1)
+        .optional()
+        .describe(
+          "Grok --system-prompt-override <PROMPT>: replace the agent's system prompt entirely. Distinct from Claude's --system-prompt / --append-system-prompt (Grok has only one override flag, not a pair)."
+        ),
+      allow: z
+        .array(z.string())
+        .optional()
+        .describe(
+          'Grok --allow <RULE>: permission allow rules. Each entry is emitted as its own --allow instance (per `grok --help`: "Repeat to add multiple rules").'
+        ),
+      deny: z
+        .array(z.string())
+        .optional()
+        .describe(
+          'Grok --deny <RULE>: permission deny rules. Each entry is emitted as its own --deny instance (per `grok --help`: "Repeat to add multiple rules").'
+        ),
     },
     async ({
       prompt,
@@ -4852,6 +4945,11 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       forceRefresh,
       maxTurns,
       workingDir,
+      sandbox,
+      rules,
+      systemPromptOverride,
+      allow,
+      deny,
     }) => {
       return handleGrokRequest(
         { sessionManager, logger, runtime },
@@ -4879,6 +4977,11 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           forceRefresh,
           maxTurns,
           workingDir,
+          sandbox,
+          rules,
+          systemPromptOverride,
+          allow,
+          deny,
         }
       );
     }
@@ -5799,6 +5902,40 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .describe(
             "Grok --cwd <DIR>: working directory for this invocation. Lets headless callers run Grok against a directory other than the gateway process's cwd."
           ),
+        // Phase 4 slice θ — Grok HIGH parity (sandbox, rules, system-prompt-override, allow, deny).
+        sandbox: z
+          .string()
+          .min(1)
+          .optional()
+          .describe(
+            "Grok --sandbox <PROFILE>: sandbox profile for filesystem and network access. Freeform per `grok --help` (no enum constraint); also settable via GROK_SANDBOX env var."
+          ),
+        rules: z
+          .string()
+          .min(1)
+          .optional()
+          .describe(
+            "Grok --rules <RULES>: extra rules to append to the system prompt. Supports `@file` prefix; gateway passes the value verbatim."
+          ),
+        systemPromptOverride: z
+          .string()
+          .min(1)
+          .optional()
+          .describe(
+            "Grok --system-prompt-override <PROMPT>: replace the agent's system prompt entirely."
+          ),
+        allow: z
+          .array(z.string())
+          .optional()
+          .describe(
+            "Grok --allow <RULE>: permission allow rules. Each entry → its own --allow instance."
+          ),
+        deny: z
+          .array(z.string())
+          .optional()
+          .describe(
+            "Grok --deny <RULE>: permission deny rules. Each entry → its own --deny instance."
+          ),
       },
       async ({
         prompt,
@@ -5823,6 +5960,11 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         forceRefresh,
         maxTurns,
         workingDir,
+        sandbox,
+        rules,
+        systemPromptOverride,
+        allow,
+        deny,
       }) => {
         return handleGrokRequestAsync(
           { sessionManager, asyncJobManager, logger, runtime },
@@ -5849,6 +5991,11 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             forceRefresh,
             maxTurns,
             workingDir,
+            sandbox,
+            rules,
+            systemPromptOverride,
+            allow,
+            deny,
           }
         );
       }
