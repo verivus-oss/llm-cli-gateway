@@ -2,6 +2,120 @@
 
 All notable changes to the llm-cli-gateway project.
 
+## [1.12.0] - 2026-05-27 — Phase 4 slice ζ (working-dir + add-dir cross-provider)
+
+Ships the seventh Phase 4 slice: working-directory and additional-directory
+flags are now reachable across four CLIs in a single bundled PR. Three
+commits land together (feature wiring, contract registration, test-veracity
+regressions) plus this release commit.
+
+### Added — working-dir + add-dir parity for four CLIs
+
+- **Claude** — `claude_request` and `claude_request_async` accept a new
+  `addDir: string[]` field. Threaded through `prepareClaudeRequest` →
+  `prepareClaudeHighImpactFlags` (`src/request-helpers.ts:687`). Each
+  entry emits its own `--add-dir` instance per `claude --help` ("Additional
+  directories to allow tool access to"). Claude has no working-dir flag
+  (uses the process cwd).
+- **Codex** — `codex_request` and `codex_request_async` accept new
+  `workingDir: string` (min 1) and `addDir: string[]` fields. Both flags
+  are already in `CODEX_RESUME_FILTERED_FLAGS` (the original session's cwd
+  and writable-dir policy are inherited on resume), so `prepareCodexRequest`
+  gates emission on `sessionPlan.mode === "new"` — resume argv stays clean
+  rather than emitting then stripping. Emits `-C <DIR>` (one) and
+  `--add-dir <DIR>` (one instance per entry).
+- **Grok** — `grok_request` and `grok_request_async` accept a new
+  `workingDir: string` (min 1) field. `prepareGrokRequest` emits
+  `--cwd <DIR>`. Grok has no `--add-dir` analogue.
+- **Vibe (Mistral)** — `mistral_request` and `mistral_request_async`
+  accept new `workingDir: string` (min 1) and `addDir: string[]` fields.
+  `prepareMistralRequest` (the `request-helpers.ts` helper) emits
+  `--workdir <DIR>` (one) and `--add-dir <DIR>` (one per entry; Vibe's
+  `--help` states the flag "Can be specified multiple times").
+  `buildMistralRetryPrep` threads both fields through to the stale-model
+  recovery argv per the slice-δ retry-path invariant.
+- **Gemini** is not re-wired: `--include-directories` was wired in master
+  before this slice. A regression-guard test in REGRESSIONS Zε asserts
+  the existing wiring stays intact while adjacent contract entries
+  changed.
+
+### Out of scope — worktree flags
+
+Worktree flags (`-w/--worktree` on Claude, Gemini, Grok) create new git
+worktree directories on disk with lifecycle implications and are
+explicitly deferred to a later slice with explicit cleanup semantics.
+
+### Contract surface
+
+`UPSTREAM_CLI_CONTRACTS` updates:
+
+- `claude.flags["--add-dir"]` (arity:"one"; repeated instances accepted)
+- `codex.flags["-C"]` (the gateway only emits the short form; codex
+  0.134.0 accepts `--cd` as an alias but the contract registers exactly
+  what we emit — a future code path that emitted `--cd` would correctly
+  fail the contract check).
+- `codex.flags["--add-dir"]`
+- `grok.flags["--cwd"]`
+- `mistral.flags["--workdir"]`
+- `mistral.flags["--add-dir"]`
+- `mcpParameters` arrays updated for all four CLIs.
+- Six new passing conformance fixtures (`claude-add-dir`,
+  `codex-working-dir`, `codex-add-dir`, `grok-working-dir`,
+  `mistral-working-dir`, `mistral-add-dir`); each is mechanically
+  validated against `validateUpstreamCliArgs` in the REGRESSIONS Zε
+  suite, closing the gap class identified in slice ε round 1.
+
+### Test-veracity audit
+
+Per the standing protocol (`feedback_test_veracity_audit_protocol`),
+this slice's tests were audited by all five LLM reviewers (Codex,
+Gemini, Grok, Mistral, Claude) in async parallel with mandatory
+mutation-probe execution against `docs/plans/test-veracity-audit-slice-zeta.spec.md`.
+
+**Round 1 outcomes:**
+
+- Codex: UNCONDITIONAL APPROVE — all 13 probes [as predicted], all 37
+  tests VERIFIED. Baseline (`npx vitest run` on the slice file: 37/37;
+  `npm test`: 54 files / 853 tests; build + format:check clean).
+- Grok: UNCONDITIONAL APPROVE — all 13 probes [as predicted].
+- Mistral: UNCONDITIONAL APPROVE — all 13 probes [as predicted].
+- Claude: UNCONDITIONAL APPROVE — all 13 probes red as predicted; ran
+  in an isolated `/tmp/zeta-audit-claude` worktree because the four
+  parallel reviewers were concurrently mutating the live tree.
+- Gemini: UNCONDITIONAL APPROVE — all 13 probes [as predicted].
+
+First unanimous round-1 pass on a multi-CLI slice. The 37 new tests
+(816 → 853 total) cover every new field/flag/fixture across REGRESSIONS
+Zα/β/ε:
+
+- **Zα** — Registered tool inputSchema for every new field on every
+  tool (sync + async), including `.min(1)` empty-string rejection on
+  `workingDir`.
+- **Zβ** — `prepare*Request` end-to-end argv emission per CLI. The
+  Codex resume branch asserts NEITHER `-C` NOR `--add-dir` appears
+  in resume argv. `buildMistralRetryPrep` regression catches the
+  slice-δ retry-path bug class. Prepare → contract end-to-end
+  consistency covers all four CLIs.
+- **Zε** — `UPSTREAM_CLI_CONTRACTS` introspection + mechanical
+  fixture validation in the same `it()` block (slice-ε round-1 gap
+  class). Includes a regression guard for the pre-existing Gemini
+  `--include-directories` wiring.
+
+### Mechanical anchors (verify with `rg` before relying)
+
+- `src/request-helpers.ts` — `ClaudeHighImpactFlagsInput.addDir`
+  (`:610`), `prepareClaudeHighImpactFlags` emission (`:686-690`).
+  `PrepareMistralRequestInput.workingDir`/`.addDir` (`:248-264`),
+  `prepareMistralRequest` emission (`:300-307`).
+- `src/index.ts` — `prepareClaudeRequest` (`:1338`),
+  `prepareCodexRequest` new-session gate (`:1687-1700`),
+  `prepareGrokRequest` `--cwd` emission (`:2065-2067`),
+  `prepareMistralRequest` wrapper (`:2153-2168`),
+  `buildMistralRetryPrep` (`:2249-2289`).
+- `src/upstream-contracts.ts` — flag registrations and conformance
+  fixtures for the four CLIs (`:146-149`, `:281-292`, `:438-441`,
+  `:524-533`, plus `mcpParameters` entries).
+
 ## [1.11.0] - 2026-05-27 — Phase 4 slice η (Claude `--fallback-model` + `--json-schema`)
 
 Ships the sixth Phase 4 slice: Claude's reliability fallback and
