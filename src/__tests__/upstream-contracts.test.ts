@@ -9,12 +9,16 @@ import {
 
 describe("upstream CLI contracts", () => {
   it("accepts a valid Claude argv emitted by the gateway", () => {
+    // Claude CLI 2.x requires --verbose alongside --print + stream-json;
+    // the gateway emits all three together — pin the combo here so a
+    // future removal trips this test before reaching the upstream CLI.
     const result = validateUpstreamCliArgs("claude", [
       "-p",
       "hello",
       "--output-format",
       "stream-json",
       "--include-partial-messages",
+      "--verbose",
       "--permission-mode",
       "bypassPermissions",
       "--continue",

@@ -1446,7 +1446,17 @@ export function prepareClaudeRequest(
   if (params.outputFormat === "json") {
     args.push("--output-format", "json");
   } else if (params.outputFormat === "stream-json") {
-    args.push("--output-format", "stream-json", "--include-partial-messages");
+    // Claude CLI 2.x rejects `--print --output-format stream-json` without
+    // `--verbose`: "When using --print, --output-format=stream-json requires
+    // --verbose". --verbose only affects what claude logs to stderr; the
+    // stream-json stdout payload is unchanged, so the gateway's NDJSON
+    // parser is unaffected.
+    args.push(
+      "--output-format",
+      "stream-json",
+      "--include-partial-messages",
+      "--verbose"
+    );
   }
   if (params.allowedTools && params.allowedTools.length > 0) {
     sanitizeCliArgValues(params.allowedTools, "allowedTools");

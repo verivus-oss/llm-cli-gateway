@@ -110,6 +110,11 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         arity: "none",
         description: "Include partial messages in stream-json output",
       },
+      "--verbose": {
+        arity: "none",
+        description:
+          "Claude CLI 2.x: required alongside --print + --output-format=stream-json; affects stderr only, stream-json stdout shape unchanged",
+      },
       "--allowed-tools": { arity: "variadic", description: "Allowed tool names/patterns" },
       "--disallowed-tools": { arity: "variadic", description: "Disallowed tool names/patterns" },
       "--permission-mode": {
@@ -193,6 +198,24 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         id: "claude-add-dir",
         description: "Phase 4 slice ζ: repeated --add-dir is accepted",
         args: ["-p", "hello", "--add-dir", "/tmp/a", "--add-dir", "/tmp/b"],
+        expect: "pass",
+      },
+      {
+        // Claude CLI 2.x: stream-json requires --verbose alongside --print.
+        // The gateway emits all three together; this fixture pins the combo
+        // so a future removal of --verbose breaks loudly here instead of
+        // silently at runtime against the upstream CLI.
+        id: "claude-stream-json-requires-verbose",
+        description:
+          "Claude CLI 2.x: --output-format stream-json + --include-partial-messages + --verbose accepted together",
+        args: [
+          "-p",
+          "hello",
+          "--output-format",
+          "stream-json",
+          "--include-partial-messages",
+          "--verbose",
+        ],
         expect: "pass",
       },
     ],
