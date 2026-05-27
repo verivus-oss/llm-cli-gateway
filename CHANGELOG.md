@@ -2,6 +2,42 @@
 
 All notable changes to the llm-cli-gateway project.
 
+## [1.13.1] - 2026-05-27 — Installer Windows build fix (no code changes)
+
+Patch release. **No changes to the gateway, MCP tools, or any provider
+wiring.** npm + PyPI 1.13.1 packages are functionally identical to 1.13.0.
+
+### Fixed
+
+- `installer/build-release.sh` registered a function-scoped EXIT trap
+  that referenced a `local` variable (`staging`). When something inside
+  the function failed, `set -e` + `set -u` made the trap die with
+  `staging: unbound variable` AFTER the function had already returned
+  and its locals had gone out of scope — masking the real failure.
+- This first surfaced on the v1.13.0 release-installer.yml Windows job
+  when GitHub started redirecting `windows-latest` to the new
+  `windows-2025-vs2026` image (rollout completes 2026-06-15). Linux
+  and both macOS targets still built clean.
+- The fix lifts the staging path to a script-level `RVWR_STAGING_DIR`
+  variable, registers a single idempotent `cleanup_staging` helper
+  with `|| true` so the EXIT trap can't fail itself under `set -e`,
+  and defensively cleans up between iterations of the
+  `for target in TARGETS` loop.
+- Smoke-tested locally on linux/amd64 (`npm ci` + `cp -R` + `tar` ran
+  clean; bundle produced; staging dir cleaned up). Once this reaches
+  the new tag, release-installer.yml either succeeds (the trap bug
+  WAS the whole problem) or fails with a clearer message we can
+  chase as a follow-up patch.
+
+### Why a patch release for an installer-only fix
+
+The `release-installer.yml` workflow checks out the tag it builds for
+(`needs.resolve-tag.outputs.tag`) and re-running it against the
+existing `v1.13.0` tag would pick up the broken script. A new tag is
+the simplest way to get the fix onto CI without force-pushing
+`v1.13.0`. npm + PyPI 1.13.1 are republished as a side-effect; this
+matches the precedent of `v1.6.1` (docs-only follow-up to 1.6.0).
+
 ## [1.13.0] - 2026-05-27 — Phase 4 slice θ (Grok HIGH parity)
 
 Ships the eighth Phase 4 slice: five HIGH-impact Grok CLI flags are now
