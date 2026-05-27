@@ -301,7 +301,11 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       "-s": { arity: "none", description: "Sandbox mode" },
       "--policy": { arity: "one", description: "Policy file path" },
       "--admin-policy": { arity: "one", description: "Admin policy file path" },
-      "-o": { arity: "one", values: ["json"], description: "Output format" },
+      "-o": {
+        arity: "one",
+        values: ["json", "stream-json"],
+        description: "Output format (Phase 4 slice ε adds stream-json)",
+      },
       "--resume": { arity: "one", description: "Resume session" },
       "--skip-trust": {
         arity: "none",
@@ -327,6 +331,18 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         description: "Phase 4 slice γ: --skip-trust is accepted",
         args: ["-p", "hello", "--skip-trust"],
         expect: "pass",
+      },
+      {
+        id: "gemini-stream-json",
+        description: "Phase 4 slice ε: -o stream-json is accepted",
+        args: ["-p", "hello", "-o", "stream-json"],
+        expect: "pass",
+      },
+      {
+        id: "gemini-output-format-invalid",
+        description: "Phase 4 slice ε: -o ndjson is rejected (not in contract enum)",
+        args: ["-p", "hello", "-o", "ndjson"],
+        expect: "fail",
       },
     ],
   },
