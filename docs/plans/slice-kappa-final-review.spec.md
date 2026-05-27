@@ -3,15 +3,22 @@
 ## Scope
 
 You are reviewing the **entire** `feat/phase-4-slice-kappa` branch
-(three commits on top of `master` @ `5f1b50d`):
+(five commits on top of `master` @ `5f1b50d`). Head ADVANCES across
+review rounds; check the live HEAD with `git rev-parse HEAD` in your
+worktree:
 
 | SHA       | Subject                                                              |
 |-----------|----------------------------------------------------------------------|
 | `a81aa5f` | feat(claude): slice κ — emit cache_control via --input-format stream-json |
 | `1bda5fc` | feat(claude): rec #1/#5/#7 + post-review test strengthening          |
 | `001def3` | feat(claude): rec #2/#3/#4/#6 — auto cache_control + warnings + stats + smoke script |
+| `8e18d1c` | docs(slice-kappa): final review spec (this file)                     |
+| `bea1aee` | test(slice-kappa): close 3 falsifiability gaps Codex round-3 flagged |
+| (later)   | further falsifiability tightening per Grok round-3                   |
 
-Head of branch: `001def3`.
+Latest published head at the time of writing: `bea1aee` (Codex round-3
+recheck APPROVED). Later commits address Grok's separate H2/H3
+falsifiability finding — review against `git rev-parse HEAD`.
 
 The branch ships as **v1.14.0**. This review answers:
 
@@ -30,18 +37,21 @@ Run the mutation probes yourself. Cite **file:line** for every verdict.
 ```bash
 cd /srv/repos/internal/verivusai-labs/rvwr/llm-cli-gateway
 git fetch
-git log --oneline 5f1b50d..001def3
-git diff --stat 5f1b50d..001def3
-git diff 5f1b50d..001def3 -- src/ docs/plans/ package.json
+HEAD=$(git rev-parse HEAD)
+git log --oneline 5f1b50d..$HEAD
+git diff --stat 5f1b50d..$HEAD
+git diff 5f1b50d..$HEAD -- src/ docs/plans/ package.json
 npm run build
 npm test
 npm run lint
 npm run format:check
 ```
 
-Baseline expectation: build clean, **926 tests pass**, format clean,
-lint emits warnings only on `*.test.ts` files (pre-existing ignore
-pattern noise, not new errors).
+Baseline expectation: build clean, **≥939 tests pass** (depending on
+head; was 926 at `001def3`, 939 at `bea1aee`, and grows by 1+ with
+each falsifiability-tightening commit), format clean, lint emits
+warnings only on `*.test.ts` files (pre-existing ignore-pattern noise,
+not new errors).
 
 ---
 

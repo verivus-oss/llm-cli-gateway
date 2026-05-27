@@ -221,19 +221,34 @@ describe("cache-stats", () => {
 
     // ───────────────────────────────────────────────────────────────────
     // Rec #3 (slice κ) — falsifiability for the 5 new derived metrics.
-    // Closes the gap Codex round-3 flagged at cache-stats.test.ts:188.
     //
-    // Mutation that must trip these:
+    // Mutation matrix:
     // - dropping `cache_control_blocks` from the SELECT in
-    //   computeGlobalCacheStats → both explicit counts collapse to 0;
+    //   computeGlobalCacheStats → row.cache_control_blocks becomes
+    //   undefined everywhere; safeNum(undef)===0; ccBlocks > 0 never
+    //   trips. The two "positive-data SQL-drop falsifier" tests below
+    //   (explicit Rows + explicit Hits) flip from >0 to 0.
     // - removing the `length > 1` guard on perPrefix groups → reuse
-    //   count picks up single-row prefixes too;
-    // - averaging ALL rows (not just "after first") → the average drops.
+    //   count picks up single-row prefixes too.
+    // - averaging ALL rows (not just "after first") → the average
+    //   shifts away from the expected value.
+    //
+    // Grok round-3 verified empirically that the clean SQL-drop
+    // mutation (delete the line + the trailing comma on the prior
+    // line, keeping the SELECT syntactically valid) goes red on the
+    // first two tests below, which are the *only* genuine SQL-drop
+    // guards. Earlier sanity-only zero-case tests, which seed
+    // ccBlocks=undefined, stay green either way and were renamed to
+    // not claim SQL-drop falsifiability they cannot deliver.
     // ───────────────────────────────────────────────────────────────────
 
-    it("rec #3: counts only rows with cache_control_blocks > 0 as explicit-control rows", () => {
+    it("rec #3 (SQL-drop falsifier — Rows): explicitCacheControlRows reflects ccBlocks>0 rows; dropping the SQL column collapses this to 0", () => {
       // Two κ-explicit rows (one hit, one miss), one non-κ Claude row,
       // and one pre-v4 row (cacheControlBlocks omitted entirely).
+      // The non-zero `explicitCacheControlRows` assertion is the
+      // falsifier — `safeNum(row.cache_control_blocks ?? 0)` returns 0
+      // for every row when the SELECT no longer projects the column,
+      // so the count collapses from 2 to 0 and this test goes red.
       seedRequest({
         id: "k-1",
         cli: "claude",
@@ -263,9 +278,49 @@ describe("cache-stats", () => {
       expect(g.explicitCacheControlHitRate).toBeCloseTo(0.5, 5);
     });
 
-    it("rec #3: explicitCacheControlRows is 0 when no row has cache_control_blocks > 0 (regression for dropped-column SQL)", () => {
-      // If the SQL select drops cache_control_blocks, every safeNum
-      // call returns 0 and ccBlocks > 0 never trips.
+    it("rec #3 (SQL-drop falsifier — Hits): explicitCacheControlHits requires both ccBlocks>0 AND cacheRead>0; dropping the column collapses to 0", () => {
+      // Three κ-explicit rows with cacheRead>0 (so the SQL-drop
+      // mutation cannot be hidden behind the "happened to be 0" path).
+      // explicitCacheControlHits MUST be 3 here; collapsing
+      // ccBlocks→undefined makes it 0 and the assertion goes red.
+      seedRequest({
+        id: "h-1",
+        cli: "claude",
+        model: "sonnet",
+        cacheControlBlocks: 1,
+        cacheRead: 5000,
+      });
+      seedRequest({
+        id: "h-2",
+        cli: "claude",
+        model: "sonnet",
+        cacheControlBlocks: 1,
+        cacheRead: 7000,
+      });
+      seedRequest({
+        id: "h-3",
+        cli: "claude",
+        model: "sonnet",
+        cacheControlBlocks: 4,
+        cacheRead: 12000,
+      });
+      // Decoy row WITHOUT ccBlocks but with cacheRead — must NOT count.
+      seedRequest({ id: "h-4", cli: "claude", model: "sonnet", cacheRead: 99999 });
+
+      const g = computeGlobalCacheStats(rec);
+      expect(g.explicitCacheControlRows).toBe(3);
+      expect(g.explicitCacheControlHits).toBe(3);
+      expect(g.explicitCacheControlHitRate).toBeCloseTo(1.0, 5);
+    });
+
+    it("rec #3 (sanity, NOT a SQL-drop guard): zero-ccBlocks seeds yield zero explicit-control metrics", () => {
+      // ⚠ This case does NOT falsify a clean SQL-drop mutation, because
+      // the seeds omit `cacheControlBlocks` — the metric is 0 both
+      // before and after the column is removed from the SELECT. It
+      // remains useful as a sanity check that mixed cacheRead>0 +
+      // missing-ccBlocks rows do not accidentally bump explicit counts.
+      // The SQL-drop guards live in the two "(SQL-drop falsifier — …)"
+      // tests above; do NOT rename this back without changing the seeds.
       seedRequest({ id: "n-1", cli: "claude", model: "sonnet", cacheRead: 100 });
       seedRequest({ id: "n-2", cli: "claude", model: "sonnet", cacheRead: 0 });
 
