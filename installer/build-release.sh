@@ -38,6 +38,22 @@ set -Eeuo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
+# Script-level cleanup state. Used by package_platform_bundle so the EXIT
+# trap can still see the staging dir after the function has returned and
+# its `local` bindings have gone out of scope. Without this, an early
+# failure inside the function unwinds the local, then the EXIT trap fires
+# under `set -u` and dies with `staging: unbound variable` — masking the
+# real error. Observed on the new windows-2025-vs2026 GitHub runner image
+# rolling out before 2026-06-15 (v1.12.0 was fine on the old image).
+RVWR_STAGING_DIR=""
+cleanup_staging() {
+  if [[ -n "${RVWR_STAGING_DIR}" && -d "${RVWR_STAGING_DIR}" ]]; then
+    rm -rf "${RVWR_STAGING_DIR}" || true
+  fi
+  RVWR_STAGING_DIR=""
+}
+trap cleanup_staging EXIT
+
 ALL_TARGETS=(
   "darwin/arm64"
   "darwin/amd64"
@@ -219,7 +235,7 @@ package_platform_bundle() {
   local target="$1"
   local goos="${target%/*}"
   local goarch="${target#*/}"
-  local npm_platform node_arch bundle_name bundle_path staging
+  local npm_platform node_arch bundle_name bundle_path
 
   if ! command -v npm >/dev/null 2>&1 || ! command -v node >/dev/null 2>&1; then
     echo "build-release.sh: node and npm are required to package platform bundles" >&2
@@ -230,12 +246,18 @@ package_platform_bundle() {
     exit 2
   fi
 
+  # Defensive cleanup of a previous iteration (multiple `--target` runs
+  # call this function in a loop) before starting a new staging dir.
+  cleanup_staging
+
   npm_platform="$(npm_platform_for_goos "${goos}")"
   node_arch="$(node_arch_for_goarch "${goarch}")"
   bundle_name="llm-cli-gateway-bundle-${VERSION}-${goos}-${goarch}.tar.gz"
   bundle_path="${DIST_DIR}/${bundle_name}"
-  staging="$(mktemp -d)"
-  trap 'rm -rf "${staging}"' EXIT
+  # Use the script-level RVWR_STAGING_DIR so the EXIT trap (registered
+  # once at the top of the script) can still see the path after this
+  # function unwinds — see the comment near the trap definition.
+  RVWR_STAGING_DIR="$(mktemp -d)"
 
   echo "build-release.sh: producing ${bundle_name}"
   (
@@ -243,25 +265,24 @@ package_platform_bundle() {
     if [[ ! -d dist ]] || [[ ! -f dist/index.js ]]; then
       npm run build >/dev/null
     fi
-    mkdir -p "${staging}/gateway"
-    cp package.json "${staging}/gateway/"
+    mkdir -p "${RVWR_STAGING_DIR}/gateway"
+    cp package.json "${RVWR_STAGING_DIR}/gateway/"
     if [[ -f package-lock.json ]]; then
-      cp package-lock.json "${staging}/gateway/"
+      cp package-lock.json "${RVWR_STAGING_DIR}/gateway/"
     fi
     (
-      cd "${staging}/gateway"
+      cd "${RVWR_STAGING_DIR}/gateway"
       npm_config_platform="${npm_platform}" npm_config_arch="${node_arch}" npm ci --omit=dev >/dev/null
     )
-    cp -R dist "${staging}/gateway/dist"
-    cp -R setup "${staging}/gateway/setup"
+    cp -R dist "${RVWR_STAGING_DIR}/gateway/dist"
+    cp -R setup "${RVWR_STAGING_DIR}/gateway/setup"
     if [[ -d .agents ]]; then
-      cp -R .agents "${staging}/gateway/.agents"
+      cp -R .agents "${RVWR_STAGING_DIR}/gateway/.agents"
     fi
   )
-  download_node_runtime "${target}" "${staging}/runtime"
-  tar -C "${staging}" -czf "${bundle_path}" gateway runtime
-  rm -rf "${staging}"
-  trap - EXIT
+  download_node_runtime "${target}" "${RVWR_STAGING_DIR}/runtime"
+  tar -C "${RVWR_STAGING_DIR}" -czf "${bundle_path}" gateway runtime
+  cleanup_staging
 }
 
 # 2. Package platform bundles. Each bundle includes the compiled gateway,
