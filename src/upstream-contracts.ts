@@ -90,6 +90,8 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       "maxTurns",
       "effort",
       "excludeDynamicSystemPromptSections",
+      "fallbackModel",
+      "jsonSchema",
       "approvalStrategy",
       "mcpServers",
       "strictMcpConfig",
@@ -131,6 +133,14 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         arity: "none",
         description: "Trim dynamic system prompt sections",
       },
+      "--fallback-model": {
+        arity: "one",
+        description: "Auto-fallback model when default is overloaded (Claude --print only)",
+      },
+      "--json-schema": {
+        arity: "one",
+        description: "JSON Schema literal constraining structured output",
+      },
       "--continue": { arity: "none", description: "Continue active session" },
       "--session-id": { arity: "one", description: "Session id" },
     },
@@ -147,6 +157,29 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         description: "Unsupported flag is rejected before spawn",
         args: ["-p", "hello", "--not-a-claude-flag"],
         expect: "fail",
+      },
+      {
+        // Phase 4 slice η: --fallback-model wired through prepareClaudeRequest.
+        id: "claude-fallback-model",
+        description: "Phase 4 slice η: --fallback-model accepted",
+        args: ["-p", "hello", "--fallback-model", "claude-haiku-4-5-20251001"],
+        expect: "pass",
+      },
+      {
+        // Phase 4 slice η: --json-schema accepts an inline JSON Schema literal
+        // (per `claude --help` example), not a path. Codex parity for
+        // structured-output validation in one slice.
+        id: "claude-json-schema",
+        description: "Phase 4 slice η: --json-schema accepts inline JSON literal",
+        args: [
+          "-p",
+          "hello",
+          "--output-format",
+          "json",
+          "--json-schema",
+          '{"type":"object","properties":{"name":{"type":"string"}},"required":["name"]}',
+        ],
+        expect: "pass",
       },
     ],
   },
