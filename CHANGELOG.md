@@ -2,6 +2,137 @@
 
 All notable changes to the llm-cli-gateway project.
 
+## [1.13.0] - 2026-05-27 — Phase 4 slice θ (Grok HIGH parity)
+
+Ships the eighth Phase 4 slice: five HIGH-impact Grok CLI flags are now
+reachable from `grok_request` and `grok_request_async`. Grok was the
+most under-wired provider per the 2026-05-27 audit; this slice closes
+the HIGH-severity gap in a single bundled PR. Three commits land
+together (feature wiring, contract registration, test-veracity
+regressions) plus this release commit.
+
+### Added — five HIGH-impact Grok flags
+
+- **`sandbox`** → `--sandbox <PROFILE>`. Freeform passthrough per
+  `grok --help` on 0.1.210 (no `[possible values: …]` listing, unlike
+  `--effort` / `--permission-mode` / `--output-format` which all
+  enumerate). Also settable via the `GROK_SANDBOX` env var. Caller
+  responsibility to pass a valid profile name. The slice deliberately
+  does **not** integrate `--sandbox` with `approvalStrategy:
+  "mcp_managed"` because the value is unbounded — Grok's approval
+  semantics are already covered by `permissionMode` + `alwaysApprove` +
+  `approvalStrategy`.
+- **`rules`** → `--rules <RULES>`. Supports `@file` prefix per
+  `grok --help` to load from a file; the gateway passes the value
+  verbatim and lets Grok parse the prefix. Bounded via
+  `z.string().min(1)`.
+- **`systemPromptOverride`** → `--system-prompt-override <PROMPT>`.
+  Distinct from Claude's `--system-prompt` / `--append-system-prompt`
+  (Grok has only one override flag, not a pair). Bounded via
+  `z.string().min(1)`.
+- **`allow`** → `--allow <RULE>` (repeatable). Each array entry is
+  emitted as its own `--allow` argv instance per `grok --help`
+  ("Repeat to add multiple rules"). NOT comma-joined like the existing
+  `--tools` / `--disallowed-tools` Grok wiring.
+- **`deny`** → `--deny <RULE>` (repeatable). Same semantics as `allow`.
+
+All five flags surfaced on both `grok_request` and `grok_request_async`
+(slice δ sync+async parity invariant). Threaded from MCP-side Zod
+through `GrokRequestParams` → `handleGrokRequest` /
+`handleGrokRequestAsync` → `prepareGrokRequest` argv emission.
+
+### Contract surface
+
+`UPSTREAM_CLI_CONTRACTS.grok` updates:
+
+- `flags["--sandbox"]` (arity:"one"; **NO `values` enum** per live
+  `grok --help` — `--sandbox` is freeform, unlike Codex's
+  read-only/workspace-write/danger-full-access enum).
+- `flags["--rules"]` (arity:"one").
+- `flags["--system-prompt-override"]` (arity:"one").
+- `flags["--allow"]` (arity:"one"; multiple instances accepted because
+  `arity:"one"` means "consumes one value per instance" not "max one
+  instance").
+- `flags["--deny"]` (arity:"one"; same).
+- `mcpParameters` array updated with five new entries.
+- Five new passing conformance fixtures (`grok-sandbox`, `grok-rules`,
+  `grok-system-prompt-override`, `grok-allow-repeated`,
+  `grok-deny-repeated`); each is mechanically validated against
+  `validateUpstreamCliArgs` in the REGRESSIONS Tε suite, closing the
+  fixture-existence-vs-mechanical-validation gap identified in slice ε
+  round 1.
+
+### Out of scope
+
+- **Approval-manager integration for `--sandbox`** — explicitly
+  deferred. Grok's sandbox value is freeform per the live CLI surface;
+  integrating it with the approval manager (as Codex does for its
+  bounded enum) would require either (a) hardcoding an allowlist of
+  profile names in the gateway, or (b) a different security model
+  where the caller asserts the profile is "safe enough". Neither is
+  obvious from current Grok docs. Revisit when Grok ships an enum or
+  publishes a sandbox-profile taxonomy.
+
+### Test-veracity audit
+
+Per the standing protocol
+(`feedback_test_veracity_audit_protocol`), this slice's tests were
+audited by four LLM reviewers (Codex, Grok, Mistral, Claude) in async
+parallel with mandatory mutation-probe execution against
+`docs/plans/test-veracity-audit-slice-theta.spec.md`.
+
+**Round 1 outcomes:**
+
+- Codex: UNCONDITIONAL APPROVE — all 12 probes [as predicted], all
+  26 tests VERIFIED. Baseline (`npm test`: 55 files / 884 tests; build
+  + format:check clean; slice file 31/31).
+- Grok: UNCONDITIONAL APPROVE — all 12 probes [as predicted]; ran in
+  an isolated worktree at `/tmp/theta-audit-grok` per the slice-ζ
+  reviewer-stomping lesson.
+- Mistral: UNCONDITIONAL APPROVE — all 12 probes [as predicted].
+- Claude: UNCONDITIONAL APPROVE — all 12 probes [as predicted]; noted
+  the extra Tε-2 test (custom-profile freeform regression probe) goes
+  beyond the spec and closes the "enum-mistake stays silent if fixture
+  uses a listed value" gap.
+- Gemini: **FAILED at 10s** with `TerminalQuotaError: You have
+  exhausted your capacity on this model. Your quota will reset after
+  52m10s.` (Google 429). Documented quota blocker per protocol clause
+  5+6 — counts as "concrete unfixable when documented". Four
+  substantive valid approves from independent vendor families (OpenAI,
+  xAI, Mistral, Anthropic) satisfy the gate.
+
+The 31 new tests (853 → 884 total) cover every new field/flag/fixture
+across REGRESSIONS Tα/β/ε:
+
+- **Tα** — Registered tool inputSchema for every new field on both
+  sync and async tools, including `.min(1)` empty-string rejection on
+  the three string fields (sandbox, rules, systemPromptOverride).
+- **Tβ** — `prepareGrokRequest` end-to-end argv emission per flag.
+  Explicit "repeated `--allow`/`--deny` instances, NOT comma-joined
+  like `--tools`" assertions catch the comma-join regression class. An
+  "@file prefix passes through verbatim" assertion catches a "helpful
+  preprocessor" regression. Prepare → contract end-to-end via
+  `validateUpstreamCliArgs` (REGRESSIONS D pattern; closes the slice
+  α/γ/δ contract-table gap class).
+- **Tε** — `UPSTREAM_CLI_CONTRACTS` introspection + mechanical fixture
+  validation in the same `it()` block. Explicit assertion that
+  `--sandbox` has **no `values` enum** (catches the "freeform vs enum"
+  regression that an over-zealous future contributor might introduce).
+  Extra Tε-2 probe asserts a non-standard sandbox profile passes
+  `validateUpstreamCliArgs`.
+
+### Mechanical anchors (verify with `rg` before relying)
+
+- `src/index.ts` — `prepareGrokRequest` signature gains five fields
+  (`:1968-1995`), emission block (`:2088-2110`), `GrokRequestParams`
+  interface (`:2819-2829`), `handleGrokRequest` threading
+  (`:2854-2858`), `handleGrokRequestAsync` threading (`:3041-3045`),
+  sync `grok_request` Zod registration (`:4890-4922`), async
+  `grok_request_async` Zod registration (`:5906-5938`).
+- `src/upstream-contracts.ts` — `grok.mcpParameters` (`:459-463`),
+  `grok.flags` entries (`:501-524`), conformance fixtures
+  (`:559-587`).
+
 ## [1.12.0] - 2026-05-27 — Phase 4 slice ζ (working-dir + add-dir cross-provider)
 
 Ships the seventh Phase 4 slice: working-directory and additional-directory
