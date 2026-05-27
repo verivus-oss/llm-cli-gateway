@@ -33,6 +33,7 @@ describe("cache-stats", () => {
     stableHash?: string;
     cacheRead?: number;
     cacheCreation?: number;
+    cacheControlBlocks?: number;
   }): void {
     rec.logStart({
       correlationId: opts.id,
@@ -42,6 +43,7 @@ describe("cache-stats", () => {
       sessionId: opts.sessionId,
       stablePrefixHash: opts.stableHash,
       stablePrefixTokens: opts.stableHash ? 100 : undefined,
+      cacheControlBlocks: opts.cacheControlBlocks,
     });
     rec.logComplete(opts.id, {
       response: "r",
@@ -215,6 +217,139 @@ describe("cache-stats", () => {
       expect(codex?.totalCacheReadTokens).toBe(200);
       expect(gemini?.requestCount).toBe(1);
       expect(g.estimatedSavingsUsd).toBeGreaterThan(0);
+    });
+
+    // ───────────────────────────────────────────────────────────────────
+    // Rec #3 (slice κ) — falsifiability for the 5 new derived metrics.
+    // Closes the gap Codex round-3 flagged at cache-stats.test.ts:188.
+    //
+    // Mutation that must trip these:
+    // - dropping `cache_control_blocks` from the SELECT in
+    //   computeGlobalCacheStats → both explicit counts collapse to 0;
+    // - removing the `length > 1` guard on perPrefix groups → reuse
+    //   count picks up single-row prefixes too;
+    // - averaging ALL rows (not just "after first") → the average drops.
+    // ───────────────────────────────────────────────────────────────────
+
+    it("rec #3: counts only rows with cache_control_blocks > 0 as explicit-control rows", () => {
+      // Two κ-explicit rows (one hit, one miss), one non-κ Claude row,
+      // and one pre-v4 row (cacheControlBlocks omitted entirely).
+      seedRequest({
+        id: "k-1",
+        cli: "claude",
+        model: "sonnet",
+        cacheControlBlocks: 1,
+        cacheRead: 9000,
+      });
+      seedRequest({
+        id: "k-2",
+        cli: "claude",
+        model: "sonnet",
+        cacheControlBlocks: 2,
+        cacheRead: 0,
+      });
+      seedRequest({
+        id: "k-3",
+        cli: "claude",
+        model: "sonnet",
+        cacheControlBlocks: 0,
+        cacheRead: 1234,
+      });
+      seedRequest({ id: "k-4", cli: "claude", model: "sonnet", cacheRead: 50 });
+
+      const g = computeGlobalCacheStats(rec);
+      expect(g.explicitCacheControlRows).toBe(2); // k-1, k-2 only
+      expect(g.explicitCacheControlHits).toBe(1); // k-1 had cacheRead > 0
+      expect(g.explicitCacheControlHitRate).toBeCloseTo(0.5, 5);
+    });
+
+    it("rec #3: explicitCacheControlRows is 0 when no row has cache_control_blocks > 0 (regression for dropped-column SQL)", () => {
+      // If the SQL select drops cache_control_blocks, every safeNum
+      // call returns 0 and ccBlocks > 0 never trips.
+      seedRequest({ id: "n-1", cli: "claude", model: "sonnet", cacheRead: 100 });
+      seedRequest({ id: "n-2", cli: "claude", model: "sonnet", cacheRead: 0 });
+
+      const g = computeGlobalCacheStats(rec);
+      expect(g.explicitCacheControlRows).toBe(0);
+      expect(g.explicitCacheControlHits).toBe(0);
+      expect(g.explicitCacheControlHitRate).toBe(0);
+    });
+
+    it("rec #3: stablePrefixReuseCount only counts hashes that appear in >1 row", () => {
+      // h1 has 3 rows → counted; h2 has 1 row → NOT counted; h3 has 2 → counted.
+      seedRequest({ id: "p-1", cli: "claude", model: "sonnet", stableHash: "h1" });
+      seedRequest({ id: "p-2", cli: "claude", model: "sonnet", stableHash: "h1" });
+      seedRequest({ id: "p-3", cli: "claude", model: "sonnet", stableHash: "h1" });
+      seedRequest({ id: "p-4", cli: "claude", model: "sonnet", stableHash: "h2" });
+      seedRequest({ id: "p-5", cli: "claude", model: "sonnet", stableHash: "h3" });
+      seedRequest({ id: "p-6", cli: "claude", model: "sonnet", stableHash: "h3" });
+
+      const g = computeGlobalCacheStats(rec);
+      expect(g.stablePrefixReuseCount).toBe(2);
+    });
+
+    it("rec #3: avgCacheCreationAfterFirstCall averages rows AFTER the first datetime within each reuse group", () => {
+      // Insert order = ascending datetime_utc (FlightRecorder stamps now()
+      // at logStart, and these calls are serial). For h1: first call has
+      // 1000 cache_creation, subsequent two have 200 + 0 → average 100
+      // across two "after first" rows.
+      seedRequest({
+        id: "a-1",
+        cli: "claude",
+        model: "sonnet",
+        stableHash: "h1",
+        cacheCreation: 1000,
+      });
+      seedRequest({
+        id: "a-2",
+        cli: "claude",
+        model: "sonnet",
+        stableHash: "h1",
+        cacheCreation: 200,
+      });
+      seedRequest({
+        id: "a-3",
+        cli: "claude",
+        model: "sonnet",
+        stableHash: "h1",
+        cacheCreation: 0,
+      });
+      // Single-row prefix; must be excluded from the average.
+      seedRequest({
+        id: "a-4",
+        cli: "claude",
+        model: "sonnet",
+        stableHash: "h-solo",
+        cacheCreation: 99999,
+      });
+
+      const g = computeGlobalCacheStats(rec);
+      // (200 + 0) / 2 = 100. The first row of h1 (1000) is dropped; h-solo
+      // (single row) contributes nothing.
+      expect(g.avgCacheCreationAfterFirstCall).toBe(100);
+    });
+
+    it("rec #3: avgCacheCreationAfterFirstCall is null when no prefix has >1 row", () => {
+      seedRequest({
+        id: "s-1",
+        cli: "claude",
+        model: "sonnet",
+        stableHash: "lonely",
+        cacheCreation: 500,
+      });
+
+      const g = computeGlobalCacheStats(rec);
+      expect(g.avgCacheCreationAfterFirstCall).toBeNull();
+      expect(g.stablePrefixReuseCount).toBe(0);
+    });
+
+    it("rec #3: zeroed metrics on a DB with no rows (regression: don't divide by zero)", () => {
+      const g = computeGlobalCacheStats(rec);
+      expect(g.explicitCacheControlRows).toBe(0);
+      expect(g.explicitCacheControlHits).toBe(0);
+      expect(g.explicitCacheControlHitRate).toBe(0);
+      expect(g.stablePrefixReuseCount).toBe(0);
+      expect(g.avgCacheCreationAfterFirstCall).toBeNull();
     });
   });
 
