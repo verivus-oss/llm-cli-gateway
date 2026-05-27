@@ -21,7 +21,9 @@ import os from "os";
 import path from "path";
 import { createRequire } from "module";
 import { PromptPartsSchema, assembleClaudeCacheBlocks } from "../prompt-parts.js";
-import { prepareClaudeRequest } from "../index.js";
+import { prepareClaudeRequest, resolveGatewayServerRuntime } from "../index.js";
+import type { CacheAwarenessConfig } from "../config.js";
+import { DEFAULT_MIN_STABLE_TOKENS_FOR_CACHE_CONTROL } from "../config.js";
 import { UPSTREAM_CLI_CONTRACTS, validateUpstreamCliArgs } from "../upstream-contracts.js";
 import { executeCli } from "../executor.js";
 import { AsyncJobManager } from "../async-job-manager.js";
@@ -368,21 +370,17 @@ describe("REGRESSIONS Kδ — executor + AsyncJobManager stdin (slice κ)", () =
     expect(result.stdout).toBe("kappa-payload\n");
   });
 
-  it(
-    "Kδ-2: executeCli WITHOUT stdin leaves stdio[0] as 'ignore' (regression — cat gets EOF immediately)",
-    async () => {
-      // Without `stdin`, stdin[0] is "ignore"; `cat` reads EOF and
-      // exits 0 with empty stdout. Catches the regression where stdin
-      // is always wired up to "pipe" (which would hang `cat` waiting
-      // for input). Per-test 5s timeout — without it, the "always
-      // pipe" mutation would hang the suite until vitest's global
-      // timeout fires (Codex round-1 finding).
-      const result = await executeCli("cat", []);
-      expect(result.code).toBe(0);
-      expect(result.stdout).toBe("");
-    },
-    5000
-  );
+  it("Kδ-2: executeCli WITHOUT stdin leaves stdio[0] as 'ignore' (regression — cat gets EOF immediately)", async () => {
+    // Without `stdin`, stdin[0] is "ignore"; `cat` reads EOF and
+    // exits 0 with empty stdout. Catches the regression where stdin
+    // is always wired up to "pipe" (which would hang `cat` waiting
+    // for input). Per-test 5s timeout — without it, the "always
+    // pipe" mutation would hang the suite until vitest's global
+    // timeout fires (Codex round-1 finding).
+    const result = await executeCli("cat", []);
+    expect(result.code).toBe(0);
+    expect(result.stdout).toBe("");
+  }, 5000);
 
   it("Kδ-3: AsyncJobManager dedup key includes stdin (two jobs with same args, different stdin do NOT collide)", () => {
     const mgr = new AsyncJobManager(noopLogger, undefined, new MemoryJobStore());
@@ -546,5 +544,222 @@ describe("REGRESSIONS Kε — flight-recorder cache_control_blocks (slice κ)", 
     };
     db.close();
     expect(cnt.n).toBe(1);
+  });
+});
+
+// ─── REGRESSIONS Kζ — rec #2 auto-emit + rec #4 cacheable-but-uncached warning ───
+
+function buildCacheAwareness(overrides: Partial<CacheAwarenessConfig> = {}): CacheAwarenessConfig {
+  return {
+    emitAnthropicCacheControl: false,
+    anthropicTtlSeconds: 3600,
+    warnOnTtlExpiry: false,
+    minStableTokensForCacheControl: {
+      sonnet: DEFAULT_MIN_STABLE_TOKENS_FOR_CACHE_CONTROL.sonnet,
+      opus: DEFAULT_MIN_STABLE_TOKENS_FOR_CACHE_CONTROL.opus,
+      haiku: DEFAULT_MIN_STABLE_TOKENS_FOR_CACHE_CONTROL.haiku,
+      default: DEFAULT_MIN_STABLE_TOKENS_FOR_CACHE_CONTROL.default,
+    },
+    sources: { configFile: null },
+    ...overrides,
+  };
+}
+
+// A stable block large enough to clear the 4096-token default threshold
+// (16K characters * ~4 chars/token ≈ 4096 tokens). Used by both the
+// auto-emit and warning tests so they trip the per-model threshold.
+const LARGE_STABLE_BLOCK = "x".repeat(16500);
+
+describe("REGRESSIONS Kζ — auto-emit (rec #2) + cacheable-uncached warning (rec #4)", () => {
+  let testHome: string;
+  let originalHome: string | undefined;
+  beforeEach(() => {
+    testHome = mkdtempSync(path.join(os.tmpdir(), "kappa-kzeta-"));
+    originalHome = process.env.HOME;
+    process.env.HOME = testHome;
+  });
+  afterEach(() => {
+    if (originalHome === undefined) delete process.env.HOME;
+    else process.env.HOME = originalHome;
+    rmSync(testHome, { recursive: true, force: true });
+  });
+
+  it("Kζ-1: auto-emits cache_control on the LAST non-empty stable block when config opts in and stable prefix exceeds threshold", () => {
+    const runtime = resolveGatewayServerRuntime(
+      {
+        cacheAwareness: buildCacheAwareness({ emitAnthropicCacheControl: true }),
+      },
+      { isolateState: true }
+    );
+    const prep = prepareClaudeRequest(
+      {
+        ...BASE_CLAUDE_PARAMS,
+        promptParts: {
+          system: "S-stable",
+          tools: "T-stable",
+          context: LARGE_STABLE_BLOCK,
+          task: "K",
+        },
+      } as never,
+      runtime
+    );
+    if (!("args" in prep)) throw new Error("expected args, got error response");
+    // κ branch must activate even though the caller did NOT pass cacheControl.
+    expect(prep.stdinPayload).toBeDefined();
+    const payload = JSON.parse(prep.stdinPayload!.trim());
+    // Rightmost non-empty stable block is `context` — it must be the marked one.
+    const ctxBlock = payload.message.content.find(
+      (b: { text: string }) => b.text === LARGE_STABLE_BLOCK
+    );
+    expect(ctxBlock?.cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
+    // System / tools blocks must NOT be marked (only the last stable block).
+    expect(
+      payload.message.content.find((b: { text: string }) => b.text === "S-stable")?.cache_control
+    ).toBeUndefined();
+    expect(
+      payload.message.content.find((b: { text: string }) => b.text === "T-stable")?.cache_control
+    ).toBeUndefined();
+    expect(prep.cacheControlBlocks).toBe(1);
+  });
+
+  it("Kζ-2: auto-emit DOES NOT fire when emit_anthropic_cache_control is false (regression)", () => {
+    const runtime = resolveGatewayServerRuntime(
+      {
+        cacheAwareness: buildCacheAwareness({ emitAnthropicCacheControl: false }),
+      },
+      { isolateState: true }
+    );
+    const prep = prepareClaudeRequest(
+      {
+        ...BASE_CLAUDE_PARAMS,
+        promptParts: { system: LARGE_STABLE_BLOCK, task: "K" },
+      } as never,
+      runtime
+    );
+    if (!("args" in prep)) throw new Error("expected args");
+    // No κ path: legacy positional emission.
+    expect(prep.stdinPayload).toBeUndefined();
+    expect(prep.args[0]).toBe("-p");
+    expect(prep.args).not.toContain("--input-format");
+  });
+
+  it("Kζ-3: auto-emit DOES NOT fire when stable prefix is below the per-model threshold", () => {
+    const runtime = resolveGatewayServerRuntime(
+      {
+        cacheAwareness: buildCacheAwareness({ emitAnthropicCacheControl: true }),
+      },
+      { isolateState: true }
+    );
+    const prep = prepareClaudeRequest(
+      {
+        ...BASE_CLAUDE_PARAMS,
+        promptParts: { system: "tiny", task: "K" },
+      } as never,
+      runtime
+    );
+    if (!("args" in prep)) throw new Error("expected args");
+    expect(prep.stdinPayload).toBeUndefined();
+  });
+
+  it("Kζ-4: auto-emit DOES NOT fire when optimizePrompt is on (rec #5 desync risk)", () => {
+    const runtime = resolveGatewayServerRuntime(
+      {
+        cacheAwareness: buildCacheAwareness({ emitAnthropicCacheControl: true }),
+      },
+      { isolateState: true }
+    );
+    const prep = prepareClaudeRequest(
+      {
+        ...BASE_CLAUDE_PARAMS,
+        optimizePrompt: true,
+        promptParts: { system: LARGE_STABLE_BLOCK, task: "K" },
+      } as never,
+      runtime
+    );
+    if (!("args" in prep)) throw new Error("expected args, got error response");
+    expect(prep.stdinPayload).toBeUndefined();
+  });
+
+  it("Kζ-5: emits cacheable_prefix_uncached warning when stable prefix is cacheable but no cacheControl is set and config is off (rec #4)", () => {
+    const runtime = resolveGatewayServerRuntime(
+      {
+        cacheAwareness: buildCacheAwareness({ emitAnthropicCacheControl: false }),
+      },
+      { isolateState: true }
+    );
+    const prep = prepareClaudeRequest(
+      {
+        ...BASE_CLAUDE_PARAMS,
+        promptParts: { system: LARGE_STABLE_BLOCK, task: "K" },
+      } as never,
+      runtime
+    );
+    if (!("args" in prep)) throw new Error("expected args");
+    expect(prep.warnings).toBeDefined();
+    const w = prep.warnings!.find(x => x.code === "cacheable_prefix_uncached");
+    expect(w).toBeDefined();
+    expect(w?.reason).toBe("[cache_awareness].emit_anthropic_cache_control is false");
+  });
+
+  it("Kζ-6: emits cacheable_prefix_uncached warning with reason='outputFormat is not stream-json' when outputFormat=text", () => {
+    const runtime = resolveGatewayServerRuntime(
+      {
+        cacheAwareness: buildCacheAwareness({ emitAnthropicCacheControl: true }),
+      },
+      { isolateState: true }
+    );
+    const prep = prepareClaudeRequest(
+      {
+        ...BASE_CLAUDE_PARAMS,
+        outputFormat: "text",
+        promptParts: { system: LARGE_STABLE_BLOCK, task: "K" },
+      } as never,
+      runtime
+    );
+    if (!("args" in prep)) throw new Error("expected args");
+    const w = prep.warnings?.find(x => x.code === "cacheable_prefix_uncached");
+    expect(w).toBeDefined();
+    expect(w?.reason).toBe("outputFormat is not 'stream-json'");
+  });
+
+  it("Kζ-7: NO warning when stable prefix is below threshold (regression — don't spam non-cacheable prompts)", () => {
+    const runtime = resolveGatewayServerRuntime(
+      {
+        cacheAwareness: buildCacheAwareness({ emitAnthropicCacheControl: false }),
+      },
+      { isolateState: true }
+    );
+    const prep = prepareClaudeRequest(
+      {
+        ...BASE_CLAUDE_PARAMS,
+        promptParts: { system: "tiny", task: "K" },
+      } as never,
+      runtime
+    );
+    if (!("args" in prep)) throw new Error("expected args");
+    expect(prep.warnings).toBeUndefined();
+  });
+
+  it("Kζ-8: NO warning when caller explicitly opts into cacheControl (regression)", () => {
+    const runtime = resolveGatewayServerRuntime(
+      {
+        cacheAwareness: buildCacheAwareness({ emitAnthropicCacheControl: false }),
+      },
+      { isolateState: true }
+    );
+    const prep = prepareClaudeRequest(
+      {
+        ...BASE_CLAUDE_PARAMS,
+        promptParts: {
+          system: LARGE_STABLE_BLOCK,
+          task: "K",
+          cacheControl: { system: true },
+        },
+      } as never,
+      runtime
+    );
+    if (!("args" in prep)) throw new Error("expected args");
+    const ccWarning = prep.warnings?.find(x => x.code === "cacheable_prefix_uncached");
+    expect(ccWarning).toBeUndefined();
   });
 });

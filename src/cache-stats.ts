@@ -78,6 +78,32 @@ export interface GlobalCacheStats {
     estimatedSavingsUsd: number;
   }>;
   estimatedSavingsUsd: number;
+  /**
+   * Rec #3 (slice κ): derived metrics that distinguish gateway-driven
+   * κ-explicit `cache_control` breakpoints from Claude Code's
+   * own baseline cache reads.
+   *
+   * - explicitCacheControlRows: rows where the gateway emitted at
+   *   least one `cache_control` marker (`cache_control_blocks > 0`).
+   * - explicitCacheControlHits: those rows whose `cache_read_tokens
+   *   > 0` — closest signal we have to "the caller's marked block
+   *   actually hit Anthropic's cache" (still includes Claude Code's
+   *   baseline cache reads on top, which is unavoidable without
+   *   per-block token accounting from Anthropic).
+   * - explicitCacheControlHitRate: ratio explicit hits / explicit rows.
+   * - stablePrefixReuseCount: distinct `stable_prefix_hash` values
+   *   that appear in >1 row in-window (i.e. real reuse opportunities).
+   * - avgCacheCreationAfterFirstCall: averaged across stable-prefix
+   *   reuse groups, the cache_creation_tokens on rows AFTER the
+   *   first-by-datetime in each group. Drops sharply when caller
+   *   blocks are reused; stays high when Claude Code's session-wrap
+   *   floor dominates.
+   */
+  explicitCacheControlRows: number;
+  explicitCacheControlHits: number;
+  explicitCacheControlHitRate: number;
+  stablePrefixReuseCount: number;
+  avgCacheCreationAfterFirstCall: number | null;
 }
 
 interface RawRow {
@@ -87,6 +113,12 @@ interface RawRow {
   cache_creation_tokens: number | null;
   stable_prefix_hash: string | null;
   datetime_utc: string;
+  /**
+   * Rec #3 (slice κ): number of caller-supplied content blocks the
+   * gateway emitted with an explicit `cache_control` marker. NULL on
+   * pre-v4 rows and on non-Claude / non-κ Claude rows.
+   */
+  cache_control_blocks?: number | null;
 }
 
 function safeNum(n: number | null | undefined): number {
@@ -274,14 +306,16 @@ export function computeGlobalCacheStats(
               COALESCE(cache_read_tokens, 0) AS cache_read_tokens,
               COALESCE(cache_creation_tokens, 0) AS cache_creation_tokens,
               stable_prefix_hash,
-              datetime_utc
+              datetime_utc,
+              cache_control_blocks
        FROM requests
        WHERE datetime_utc >= ?`
     : `SELECT cli, model,
               COALESCE(cache_read_tokens, 0) AS cache_read_tokens,
               COALESCE(cache_creation_tokens, 0) AS cache_creation_tokens,
               stable_prefix_hash,
-              datetime_utc
+              datetime_utc,
+              cache_control_blocks
        FROM requests`;
   const rows = sinceIso ? db.queryRequests<RawRow>(sql, sinceIso) : db.queryRequests<RawRow>(sql);
 
@@ -300,6 +334,22 @@ export function computeGlobalCacheStats(
   let totalCreation = 0;
   let totalSavings = 0;
 
+  // Rec #3: κ-explicit metrics. A row is "κ-explicit" iff it has
+  // `cache_control_blocks > 0` — i.e. the gateway emitted at least one
+  // caller-supplied `cache_control` marker. Rows with NULL or 0 are
+  // either pre-v4 or non-κ Claude / non-Claude requests.
+  let explicitRows = 0;
+  let explicitHits = 0;
+
+  // Per-prefix reuse tracking: collect cache_creation_tokens for every
+  // row keyed by stable_prefix_hash, ordered ascending by datetime_utc.
+  // For each group with >1 row, drop the first (the cache-write call)
+  // and average the rest (the cache-read calls).
+  const perPrefix = new Map<
+    string,
+    Array<{ datetime_utc: string; cache_creation_tokens: number }>
+  >();
+
   for (const row of rows) {
     totalRequests += 1;
     const reads = safeNum(row.cache_read_tokens);
@@ -307,6 +357,19 @@ export function computeGlobalCacheStats(
     totalRead += reads;
     totalCreation += creation;
     if (reads > 0) totalHits += 1;
+
+    const ccBlocks = safeNum(row.cache_control_blocks);
+    if (ccBlocks > 0) {
+      explicitRows += 1;
+      if (reads > 0) explicitHits += 1;
+    }
+
+    if (row.stable_prefix_hash) {
+      const arr = perPrefix.get(row.stable_prefix_hash) ?? [];
+      arr.push({ datetime_utc: row.datetime_utc, cache_creation_tokens: creation });
+      perPrefix.set(row.stable_prefix_hash, arr);
+    }
+
     if (!isCacheStatsCli(row.cli)) continue;
     const cli = row.cli;
     const savings = estimateCacheSavingsUsd(cli, row.model, reads);
@@ -325,6 +388,23 @@ export function computeGlobalCacheStats(
     agg.estimatedSavingsUsd += savings;
     perCliMap.set(cli, agg);
   }
+
+  let stablePrefixReuseCount = 0;
+  let creationAfterFirstSum = 0;
+  let creationAfterFirstCount = 0;
+  for (const arr of perPrefix.values()) {
+    if (arr.length <= 1) continue;
+    stablePrefixReuseCount += 1;
+    arr.sort((a, b) =>
+      a.datetime_utc < b.datetime_utc ? -1 : a.datetime_utc > b.datetime_utc ? 1 : 0
+    );
+    for (let i = 1; i < arr.length; i++) {
+      creationAfterFirstSum += arr[i].cache_creation_tokens;
+      creationAfterFirstCount += 1;
+    }
+  }
+  const avgCacheCreationAfterFirstCall =
+    creationAfterFirstCount > 0 ? creationAfterFirstSum / creationAfterFirstCount : null;
 
   const perCli = Array.from(perCliMap.entries()).map(([cli, agg]) => ({
     cli,
@@ -345,5 +425,10 @@ export function computeGlobalCacheStats(
     totalCacheCreationTokens: totalCreation,
     perCli,
     estimatedSavingsUsd: totalSavings,
+    explicitCacheControlRows: explicitRows,
+    explicitCacheControlHits: explicitHits,
+    explicitCacheControlHitRate: explicitRows > 0 ? explicitHits / explicitRows : 0,
+    stablePrefixReuseCount,
+    avgCacheCreationAfterFirstCall,
   };
 }

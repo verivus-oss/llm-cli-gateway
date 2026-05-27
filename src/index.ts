@@ -25,6 +25,7 @@ import {
   loadConfig,
   loadPersistenceConfig,
   loadCacheAwarenessConfig,
+  minStableTokensForModel,
   type PersistenceConfig,
   type CacheAwarenessConfig,
 } from "./config.js";
@@ -411,7 +412,7 @@ export interface GatewayServerDeps {
   cacheAwareness?: CacheAwarenessConfig;
 }
 
-interface GatewayServerRuntime {
+export interface GatewayServerRuntime {
   sessionManager: ISessionManager;
   resourceProvider: ResourceProvider;
   db: DatabaseConnection | null;
@@ -424,7 +425,7 @@ interface GatewayServerRuntime {
   cacheAwareness: CacheAwarenessConfig;
 }
 
-function resolveGatewayServerRuntime(
+export function resolveGatewayServerRuntime(
   deps: GatewayServerDeps = {},
   options: { isolateState?: boolean } = {}
 ): GatewayServerRuntime {
@@ -1307,6 +1308,13 @@ interface CliRequestPrep {
    * κ-explicit breakpoints from implicit prefix-cache hits.
    */
   cacheControlBlocks?: number;
+  /**
+   * Rec #4: structured warnings produced during prep (e.g. cacheable
+   * stable prefix without cacheControl). Handlers merge these with any
+   * other warnings (cache_ttl_expiring_soon, etc.) before returning to
+   * the caller.
+   */
+  warnings?: WarningEntry[];
 }
 
 /**
@@ -1495,14 +1503,89 @@ export function prepareClaudeRequest(
     }
   }
 
+  // Rec #2 (slice κ): auto-emit `cache_control` when the caller passes
+  // `promptParts` whose stable prefix exceeds the per-model minimum,
+  // the caller has NOT explicitly set `cacheControl`, the gateway
+  // config has opted in (`[cache_awareness].emit_anthropic_cache_control`),
+  // and outputFormat is stream-json. Auto-emit marks the LAST non-empty
+  // stable block (context → tools → system priority — the rightmost
+  // stable block covers the widest prefix). Skipped when optimizePrompt
+  // is on (same rec #5 desync risk).
+  //
+  // The 1h ttl is forced regardless of `anthropic_ttl_seconds`: 5m
+  // breakpoints from caller content are rejected by Anthropic once
+  // Claude Code's own 1h-marked session-wrap blocks land ahead of them.
+  let autoEmittedCacheControlBlock: "system" | "tools" | "context" | null = null;
+  if (
+    !cacheControlRequestedEarly &&
+    runtime.cacheAwareness.emitAnthropicCacheControl &&
+    !params.optimizePrompt &&
+    params.outputFormat === "stream-json" &&
+    params.promptParts &&
+    stablePrefixTokens !== null
+  ) {
+    const threshold = minStableTokensForModel(runtime.cacheAwareness, resolvedModel ?? "default");
+    if (stablePrefixTokens >= threshold) {
+      const pp = params.promptParts;
+      // Rightmost non-empty stable block — its cache_control breakpoint
+      // covers everything above it in the message (the API matches
+      // breakpoints in order).
+      if (pp.context && pp.context.length > 0) autoEmittedCacheControlBlock = "context";
+      else if (pp.tools && pp.tools.length > 0) autoEmittedCacheControlBlock = "tools";
+      else if (pp.system && pp.system.length > 0) autoEmittedCacheControlBlock = "system";
+
+      if (autoEmittedCacheControlBlock !== null) {
+        runtime.logger.info(
+          `[${corrId}] auto-emitting cache_control on '${autoEmittedCacheControlBlock}' (stablePrefixTokens=${stablePrefixTokens} >= ${threshold} for model='${resolvedModel ?? "default"}')`
+        );
+        if (runtime.cacheAwareness.anthropicTtlSeconds !== 3600) {
+          runtime.logger.warn(
+            `[${corrId}] [cache_awareness].anthropic_ttl_seconds=${runtime.cacheAwareness.anthropicTtlSeconds} ignored for Claude CLI path — Anthropic rejects 5m blocks after Claude Code's 1h-marked session-wrap content; using ttl='1h'.`
+          );
+        }
+      }
+    }
+  }
+
+  // Rec #4: warn when promptParts has a cacheable stable prefix but no
+  // cache_control breakpoint is being emitted (neither explicit nor
+  // auto). Either the caller forgot to set `cacheControl` or
+  // `[cache_awareness].emit_anthropic_cache_control` is off — both
+  // leave the stable prefix bytes unreused across calls, defeating the
+  // point of using `promptParts`.
+  const warnings: WarningEntry[] = [];
+  if (
+    !cacheControlRequestedEarly &&
+    autoEmittedCacheControlBlock === null &&
+    params.promptParts &&
+    stablePrefixTokens !== null
+  ) {
+    const threshold = minStableTokensForModel(runtime.cacheAwareness, resolvedModel ?? "default");
+    if (stablePrefixTokens >= threshold) {
+      const reason =
+        params.outputFormat !== "stream-json"
+          ? "outputFormat is not 'stream-json'"
+          : !runtime.cacheAwareness.emitAnthropicCacheControl
+            ? "[cache_awareness].emit_anthropic_cache_control is false"
+            : "no eligible non-empty stable block";
+      warnings.push({
+        code: "cacheable_prefix_uncached",
+        message: `Stable prefix is cacheable (${stablePrefixTokens} tokens >= ${threshold} for model='${resolvedModel ?? "default"}') but no cache_control breakpoint will be emitted (${reason}). Set promptParts.cacheControl explicitly, switch outputFormat to 'stream-json', or enable [cache_awareness].emit_anthropic_cache_control.`,
+        stablePrefixTokens,
+        threshold,
+        reason,
+      });
+    }
+  }
+
   // Slice κ: switch from the legacy positional `-p <prompt>` emission
   // to `claude -p --input-format stream-json` and feed a JSON
   // content-blocks payload via stdin. Non-κ callers (no cacheControl,
   // or cacheControl with all flags false) take the existing positional
-  // path bit-for-bit. `cacheControlRequestedEarly` was already computed
-  // above so the rec #5 guard could refuse the optimizePrompt + κ combo
-  // before optimization ran; reuse it here.
-  const cacheControlRequested = cacheControlRequestedEarly;
+  // path bit-for-bit. The κ path activates on EITHER an explicit caller
+  // opt-in (`cacheControlRequestedEarly`) OR a gateway-driven auto-emit
+  // (`autoEmittedCacheControlBlock`).
+  const cacheControlRequested = cacheControlRequestedEarly || autoEmittedCacheControlBlock !== null;
   let stdinPayload: string | undefined;
   let cacheControlBlocks: number | undefined;
 
@@ -1519,8 +1602,19 @@ export function prepareClaudeRequest(
       ) as ExtendedToolResponse;
     }
     // promptParts is non-null whenever cacheControlRequested is true
-    // (the cacheControl flag lives only inside PromptParts).
-    const built = assembleClaudeCacheBlocks(params.promptParts!);
+    // (explicit opt-in lives in PromptParts; auto-emit guard requires
+    // promptParts to be defined).
+    const effectiveParts: PromptParts =
+      autoEmittedCacheControlBlock !== null
+        ? {
+            ...params.promptParts!,
+            cacheControl: {
+              ...(params.promptParts!.cacheControl ?? {}),
+              [autoEmittedCacheControlBlock]: true,
+            },
+          }
+        : params.promptParts!;
+    const built = assembleClaudeCacheBlocks(effectiveParts);
     stdinPayload = `${JSON.stringify(built.payload)}\n`;
     cacheControlBlocks = built.markedBlockCount;
   }
@@ -1621,6 +1715,7 @@ export function prepareClaudeRequest(
     stablePrefixTokens,
     stdinPayload,
     cacheControlBlocks,
+    warnings: warnings.length > 0 ? warnings : undefined,
   };
 }
 
@@ -4074,7 +4169,11 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         sessionId: effectiveSessionId,
         cli: "claude",
       });
-      const warnings: WarningEntry[] = ttlWarning ? [ttlWarning] : [];
+      // Rec #4: include any prep-time warnings (e.g. cacheable_prefix_uncached).
+      const warnings: WarningEntry[] = [
+        ...(ttlWarning ? [ttlWarning] : []),
+        ...(prep.warnings ?? []),
+      ];
 
       safeFlightStart(
         {
@@ -5582,8 +5681,14 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           if (prep.reviewIntegrity && prep.reviewIntegrity.violations.length > 0) {
             asyncResponse.reviewIntegrity = prep.reviewIntegrity;
           }
-          if (ttlWarning) {
-            asyncResponse.warnings = [ttlWarning];
+          // Rec #4: include any prep-time warnings (e.g.
+          // cacheable_prefix_uncached) alongside ttlWarning.
+          const mergedWarnings: WarningEntry[] = [
+            ...(ttlWarning ? [ttlWarning] : []),
+            ...(prep.warnings ?? []),
+          ];
+          if (mergedWarnings.length > 0) {
+            asyncResponse.warnings = mergedWarnings;
           }
 
           return {

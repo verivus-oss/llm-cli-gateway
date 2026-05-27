@@ -18,7 +18,7 @@ import { spawn } from "node:child_process";
 // ~2K-token stable block. Must exceed Sonnet's 1024-token cache
 // minimum AND Claude Code's per-account 1h-TTL convention (see below).
 // Duplicated paragraphs to push token count comfortably above 1024.
-const STABLE_BLOCK = (`
+const STABLE_BLOCK = `
 === KAPPA SMOKE TEST STABLE REFERENCE ===
 
 This block is intentionally cacheable. It is sent identically on every
@@ -82,9 +82,11 @@ eius modi tempora incidunt ut labore et dolore magnam aliquam quaerat
 voluptatem.
 
 === END KAPPA SMOKE TEST STABLE REFERENCE ===
-`).repeat(3).trim();
+`
+  .repeat(3)
+  .trim();
 
-const buildPayload = (taskTag) =>
+const buildPayload = taskTag =>
   JSON.stringify({
     type: "user",
     message: {
@@ -127,17 +129,15 @@ function runCall(taskTag) {
 
     let stdout = "";
     let stderr = "";
-    proc.stdout.on("data", (d) => (stdout += d));
-    proc.stderr.on("data", (d) => (stderr += d));
+    proc.stdout.on("data", d => (stdout += d));
+    proc.stderr.on("data", d => (stderr += d));
     proc.on("error", reject);
-    proc.on("close", (code) => {
+    proc.on("close", code => {
       if (code !== 0) {
-        return reject(
-          new Error(`claude exited ${code}; stderr=${stderr.slice(0, 500)}`)
-        );
+        return reject(new Error(`claude exited ${code}; stderr=${stderr.slice(0, 500)}`));
       }
       // Find the terminal `result` event for usage.
-      const lines = stdout.split("\n").filter((l) => l.trim());
+      const lines = stdout.split("\n").filter(l => l.trim());
       let result = null;
       let assistantText = null;
       for (const line of lines) {
@@ -150,9 +150,7 @@ function runCall(taskTag) {
         } catch {}
       }
       if (!result) {
-        return reject(
-          new Error(`No 'result' event in claude output; tail: ${stdout.slice(-500)}`)
-        );
+        return reject(new Error(`No 'result' event in claude output; tail: ${stdout.slice(-500)}`));
       }
       resolve({
         taskTag,
@@ -177,6 +175,16 @@ function runCall(taskTag) {
 }
 
 (async () => {
+  console.log("[smoke:cache-control] BILLABLE TEST — this script makes two live Claude API");
+  console.log("[smoke:cache-control] calls (~$0.08 total at observed 2026-05 prices).");
+  console.log("[smoke:cache-control] Skipping in CI by default; set SMOKE_CACHE_CONTROL=1 to run.");
+  if (!process.env.SMOKE_CACHE_CONTROL) {
+    console.log(
+      "[smoke:cache-control] SMOKE_CACHE_CONTROL not set — exiting without making calls."
+    );
+    process.exit(0);
+  }
+
   console.log("STABLE_BLOCK characters:", STABLE_BLOCK.length);
   console.log("Approx stable-block tokens:", Math.round(STABLE_BLOCK.length / 4));
   console.log();
@@ -187,7 +195,7 @@ function runCall(taskTag) {
   console.log();
 
   // 5-second gap, well inside Anthropic's 5-min default cache TTL.
-  await new Promise((res) => setTimeout(res, 5000));
+  await new Promise(res => setTimeout(res, 5000));
 
   console.log("Call 2 (cache should be READ for the marked block)...");
   const r2 = await runCall("KAPPA-SMOKE-2");
@@ -197,8 +205,7 @@ function runCall(taskTag) {
   // Verdict
   const delta_creation =
     r1.usage.cache_creation_input_tokens - r2.usage.cache_creation_input_tokens;
-  const delta_read =
-    r2.usage.cache_read_input_tokens - r1.usage.cache_read_input_tokens;
+  const delta_read = r2.usage.cache_read_input_tokens - r1.usage.cache_read_input_tokens;
 
   console.log("=== VERDICT ===");
   console.log("Cache CREATION drop (call 1 → call 2):", delta_creation, "tokens");
@@ -206,29 +213,18 @@ function runCall(taskTag) {
   console.log();
 
   if (delta_read > 500 && delta_creation > 500) {
-    console.log(
-      "PASS: explicit cache_control via stream-json IS honored by Anthropic."
-    );
+    console.log("PASS: explicit cache_control via stream-json IS honored by Anthropic.");
     console.log(
       "      The marked block shifted from cache_creation on call 1 to cache_read on call 2."
     );
     console.log("      κ Branch A is implementable as designed.");
   } else if (Math.abs(delta_read) < 200 && Math.abs(delta_creation) < 200) {
-    console.log(
-      "FAIL: no cache shift between calls. Either cache_control was dropped"
-    );
-    console.log(
-      "      by Claude Code's input handler, or the block stayed under the"
-    );
-    console.log("      Sonnet 1024-token cache minimum. Investigate."
-    );
+    console.log("FAIL: no cache shift between calls. Either cache_control was dropped");
+    console.log("      by Claude Code's input handler, or the block stayed under the");
+    console.log("      Sonnet 1024-token cache minimum. Investigate.");
   } else {
-    console.log(
-      "AMBIGUOUS: partial shift. Possible Claude Code re-wraps the block with"
-    );
-    console.log(
-      "           per-session content that changes the cache key. Investigate"
-    );
+    console.log("AMBIGUOUS: partial shift. Possible Claude Code re-wraps the block with");
+    console.log("           per-session content that changes the cache key. Investigate");
     console.log("           with a smaller / larger stable block.");
   }
 })();
