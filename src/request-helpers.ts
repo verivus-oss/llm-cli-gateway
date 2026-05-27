@@ -240,6 +240,17 @@ export interface PrepareMistralRequestInput {
    * only).
    */
   maxPrice?: number;
+  /**
+   * Phase 4 slice ζ: emit `--workdir <DIR>` so Vibe changes into the named
+   * directory before running. Single value (Vibe accepts one --workdir).
+   */
+  workingDir?: string;
+  /**
+   * Phase 4 slice ζ: emit `--add-dir <DIR>` per directory. Vibe's `--help`
+   * states the flag "Can be specified multiple times" — each entry is its
+   * own argv pair.
+   */
+  addDir?: string[];
 }
 
 export interface PrepareMistralRequestResult {
@@ -296,6 +307,14 @@ export function prepareMistralRequest(
   }
   if (input.maxPrice !== undefined) {
     args.push("--max-price", String(input.maxPrice));
+  }
+  if (input.workingDir) {
+    args.push("--workdir", input.workingDir);
+  }
+  if (input.addDir && input.addDir.length > 0) {
+    for (const dir of input.addDir) {
+      args.push("--add-dir", dir);
+    }
   }
 
   const ignoredDisallowedTools = Boolean(input.disallowedTools && input.disallowedTools.length > 0);
@@ -609,6 +628,15 @@ export interface ClaudeHighImpactFlagsInput {
    * `--output-schema`, which takes a path).
    */
   jsonSchema?: string | Record<string, unknown>;
+  /**
+   * Phase 4 slice ζ — Claude `--add-dir <dirs...>`. Additional directories the
+   * Claude CLI is allowed to read/write beyond the process cwd. The CLI accepts
+   * a single variadic flag (space-separated values) per `claude --help`; we
+   * emit one `--add-dir` instance per directory so each path is its own argv
+   * token (survives any future tightening of the variadic parser without
+   * changing the call site).
+   */
+  addDir?: string[];
 }
 
 /**
@@ -655,6 +683,11 @@ export function prepareClaudeHighImpactFlags(input: ClaudeHighImpactFlagsInput):
     const schemaArg =
       typeof input.jsonSchema === "string" ? input.jsonSchema : JSON.stringify(input.jsonSchema);
     args.push("--json-schema", schemaArg);
+  }
+  if (input.addDir && input.addDir.length > 0) {
+    for (const dir of input.addDir) {
+      args.push("--add-dir", dir);
+    }
   }
 
   return args;

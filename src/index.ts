@@ -1365,6 +1365,8 @@ export function prepareClaudeRequest(
     // Phase 4 slice η — Claude reliability + structured-output parity
     fallbackModel?: string;
     jsonSchema?: string | Record<string, unknown>;
+    // Phase 4 slice ζ — Claude additional-workspace-dirs parity
+    addDir?: string[];
   },
   runtime: GatewayServerRuntime = resolveGatewayServerRuntime()
 ): CliRequestPrep | ExtendedToolResponse {
@@ -1501,6 +1503,7 @@ export function prepareClaudeRequest(
       excludeDynamicSystemPromptSections: params.excludeDynamicSystemPromptSections,
       fallbackModel: params.fallbackModel,
       jsonSchema: params.jsonSchema,
+      addDir: params.addDir,
     })
   );
 
@@ -1562,6 +1565,11 @@ export function prepareCodexRequest(
     images?: string[];
     ignoreUserConfig?: boolean;
     ignoreRules?: boolean;
+    // Phase 4 slice ζ — Codex working-dir + add-dir parity. Both flags are in
+    // CODEX_RESUME_FILTERED_FLAGS (resume inherits the original session's cwd
+    // and writable dirs), so we emit them on NEW sessions only.
+    workingDir?: string;
+    addDir?: string[];
   },
   runtime: GatewayServerRuntime = resolveGatewayServerRuntime()
 ): CodexRequestPrep | ExtendedToolResponse {
@@ -1677,6 +1685,19 @@ export function prepareCodexRequest(
   // and are emitted in both branches.
   let highImpactCleanup: (() => void) | undefined;
   if (sessionPlan.mode === "new") {
+    // Phase 4 slice ζ: emit working-dir and add-dir on new sessions only.
+    // Both flags are listed in CODEX_RESUME_FILTERED_FLAGS — resume inherits
+    // the original session's cwd and writable-dir policy, so emitting them
+    // on resume would be silently stripped (wasteful + misleading on argv
+    // logs). Gating here mirrors `--search` / `--sandbox` / `--full-auto`.
+    if (params.workingDir) {
+      args.push("-C", params.workingDir);
+    }
+    if (params.addDir && params.addDir.length > 0) {
+      for (const dir of params.addDir) {
+        args.push("--add-dir", dir);
+      }
+    }
     const high = prepareCodexHighImpactFlags({
       outputSchema: params.outputSchema,
       search: params.search,
@@ -1949,6 +1970,11 @@ export function prepareGrokRequest(
      * iterations for cost / latency control. Mirrors Claude's wiring.
      */
     maxTurns?: number;
+    /**
+     * Phase 4 slice ζ: emit `--cwd <DIR>` so headless callers can set Grok's
+     * working directory without depending on the gateway process's cwd.
+     */
+    workingDir?: string;
   },
   runtime: GatewayServerRuntime = resolveGatewayServerRuntime()
 ): CliRequestPrep | ExtendedToolResponse {
@@ -2036,6 +2062,9 @@ export function prepareGrokRequest(
   if (params.maxTurns !== undefined) {
     args.push("--max-turns", String(params.maxTurns));
   }
+  if (params.workingDir) {
+    args.push("--cwd", params.workingDir);
+  }
 
   return {
     corrId,
@@ -2076,6 +2105,10 @@ export function prepareMistralRequest(
     maxTurns?: number;
     /** Phase 4 slice δ: Vibe `--max-price DOLLARS` cumulative-cost cap. */
     maxPrice?: number;
+    /** Phase 4 slice ζ: Vibe `--workdir <DIR>` working-directory parity. */
+    workingDir?: string;
+    /** Phase 4 slice ζ: Vibe `--add-dir <DIR>` repeatable add-dir parity. */
+    addDir?: string[];
   },
   runtime: GatewayServerRuntime = resolveGatewayServerRuntime()
 ): (CliRequestPrep & { mistralEnv: Record<string, string> }) | ExtendedToolResponse {
@@ -2162,6 +2195,8 @@ export function prepareMistralRequest(
     trust: params.trust,
     maxTurns: params.maxTurns,
     maxPrice: params.maxPrice,
+    workingDir: params.workingDir,
+    addDir: params.addDir,
   });
 
   if (prep.ignoredDisallowedTools) {
@@ -2224,6 +2259,8 @@ export function buildMistralRetryPrep(
     | "trust"
     | "maxTurns"
     | "maxPrice"
+    | "workingDir"
+    | "addDir"
   > & { effectivePrompt: string },
   recoveryModel: string
 ): { args: string[]; env: Record<string, string>; ignoredDisallowedTools: boolean } {
@@ -2242,6 +2279,8 @@ export function buildMistralRetryPrep(
     trust: params.trust,
     maxTurns: params.maxTurns,
     maxPrice: params.maxPrice,
+    workingDir: params.workingDir,
+    addDir: params.addDir,
   });
 }
 
@@ -2736,6 +2775,8 @@ export interface GrokRequestParams {
   forceRefresh?: boolean;
   /** Phase 4 slice δ: cap agent-loop iterations via `--max-turns N`. */
   maxTurns?: number;
+  /** Phase 4 slice ζ: emit `--cwd <DIR>` so the CLI uses the specified working directory. */
+  workingDir?: string;
 }
 
 export async function handleGrokRequest(
@@ -2763,6 +2804,7 @@ export async function handleGrokRequest(
       optimizePrompt: params.optimizePrompt,
       operation: "grok_request",
       maxTurns: params.maxTurns,
+      workingDir: params.workingDir,
     },
     runtime
   );
@@ -2941,6 +2983,7 @@ export async function handleGrokRequestAsync(
       optimizePrompt: params.optimizePrompt,
       operation: "grok_request_async",
       maxTurns: params.maxTurns,
+      workingDir: params.workingDir,
     },
     runtime
   );
@@ -3056,6 +3099,10 @@ export interface MistralRequestParams {
   maxTurns?: number;
   /** Phase 4 slice δ: Vibe `--max-price DOLLARS` cumulative-cost cap. */
   maxPrice?: number;
+  /** Phase 4 slice ζ: Vibe `--workdir <DIR>` working-directory parity. */
+  workingDir?: string;
+  /** Phase 4 slice ζ: Vibe `--add-dir <DIR>` repeatable add-dir parity. */
+  addDir?: string[];
 }
 
 export async function handleMistralRequest(
@@ -3084,6 +3131,8 @@ export async function handleMistralRequest(
       trust: params.trust,
       maxTurns: params.maxTurns,
       maxPrice: params.maxPrice,
+      workingDir: params.workingDir,
+      addDir: params.addDir,
     },
     runtime
   );
@@ -3294,6 +3343,8 @@ export async function handleMistralRequestAsync(
       trust: params.trust,
       maxTurns: params.maxTurns,
       maxPrice: params.maxPrice,
+      workingDir: params.workingDir,
+      addDir: params.addDir,
     },
     runtime
   );
@@ -3410,6 +3461,9 @@ export async function handleCodexRequestAsync(
     images?: string[];
     ignoreUserConfig?: boolean;
     ignoreRules?: boolean;
+    // Phase 4 slice ζ — Codex working-dir + add-dir parity.
+    workingDir?: string;
+    addDir?: string[];
   }
 ): Promise<ExtendedToolResponse> {
   const runtime = resolveHandlerRuntime(deps);
@@ -3441,6 +3495,8 @@ export async function handleCodexRequestAsync(
       images: params.images,
       ignoreUserConfig: params.ignoreUserConfig,
       ignoreRules: params.ignoreRules,
+      workingDir: params.workingDir,
+      addDir: params.addDir,
     },
     runtime
   );
@@ -3692,6 +3748,13 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .describe(
           "Claude --json-schema: JSON Schema literal (NOT a path) constraining structured output. Object values are JSON.stringify-d; string values are passed verbatim. Use with outputFormat='json'."
         ),
+      // Phase 4 slice ζ — Claude additional-workspace-dirs parity
+      addDir: z
+        .array(z.string())
+        .optional()
+        .describe(
+          "Claude --add-dir: additional directories the CLI is allowed to read/write beyond the process cwd. Each entry is emitted as its own --add-dir instance."
+        ),
       approvalStrategy: z
         .enum(["legacy", "mcp_managed"])
         .default("legacy")
@@ -3748,6 +3811,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       excludeDynamicSystemPromptSections,
       fallbackModel,
       jsonSchema,
+      addDir,
       approvalStrategy,
       approvalPolicy,
       mcpServers,
@@ -3798,6 +3862,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           excludeDynamicSystemPromptSections,
           fallbackModel,
           jsonSchema,
+          addDir,
         },
         runtime
       );
@@ -4150,6 +4215,20 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .boolean()
         .optional()
         .describe("Codex --ignore-rules: skip project rule files for this run."),
+      // Phase 4 slice ζ — Codex working-dir + add-dir parity (new sessions only).
+      workingDir: z
+        .string()
+        .min(1)
+        .optional()
+        .describe(
+          "Codex -C/--cd <DIR>: working root for this session. Emitted on new sessions only; resume inherits the original session's cwd via CODEX_RESUME_FILTERED_FLAGS."
+        ),
+      addDir: z
+        .array(z.string())
+        .optional()
+        .describe(
+          "Codex --add-dir <DIR>: additional writable workspace directories. Emitted once per entry on new sessions only; resume inherits the original session's writable-dir policy."
+        ),
     },
     async ({
       prompt,
@@ -4180,6 +4259,8 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       images,
       ignoreUserConfig,
       ignoreRules,
+      workingDir,
+      addDir,
     }) => {
       const startTime = Date.now();
       const prep = prepareCodexRequest(
@@ -4210,6 +4291,8 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           images,
           ignoreUserConfig,
           ignoreRules,
+          workingDir,
+          addDir,
         },
         runtime
       );
@@ -4736,6 +4819,14 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       maxTurns: MAX_TURNS_SCHEMA.optional().describe(
         "Grok `--max-turns N`: cap on agent-loop iterations for cost / latency control (Phase 4 slice δ). Bounded to safe integers ≤ 10000."
       ),
+      // Phase 4 slice ζ — Grok working-directory parity.
+      workingDir: z
+        .string()
+        .min(1)
+        .optional()
+        .describe(
+          "Grok --cwd <DIR>: working directory for this invocation. Lets headless callers run Grok against a directory other than the gateway process's cwd."
+        ),
     },
     async ({
       prompt,
@@ -4760,6 +4851,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       idleTimeoutMs,
       forceRefresh,
       maxTurns,
+      workingDir,
     }) => {
       return handleGrokRequest(
         { sessionManager, logger, runtime },
@@ -4786,6 +4878,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           idleTimeoutMs,
           forceRefresh,
           maxTurns,
+          workingDir,
         }
       );
     }
@@ -4893,6 +4986,20 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       maxPrice: MAX_PRICE_SCHEMA.optional().describe(
         "Vibe `--max-price DOLLARS`: interrupt the session when cumulative cost crosses this cap (programmatic mode only, Phase 4 slice δ). Bounded to finite values ≤ 10000 USD."
       ),
+      // Phase 4 slice ζ — Vibe working-directory + additional-dirs parity.
+      workingDir: z
+        .string()
+        .min(1)
+        .optional()
+        .describe(
+          "Vibe --workdir <DIR>: change to this directory before running. Single value (Vibe accepts one --workdir per invocation)."
+        ),
+      addDir: z
+        .array(z.string())
+        .optional()
+        .describe(
+          "Vibe --add-dir <DIR>: additional writable workspace directories. Each entry is emitted as its own --add-dir instance (Vibe states this flag may be specified multiple times)."
+        ),
     },
     async ({
       prompt,
@@ -4918,6 +5025,8 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       trust,
       maxTurns,
       maxPrice,
+      workingDir,
+      addDir,
     }) => {
       return handleMistralRequest(
         { sessionManager, logger, runtime },
@@ -4945,6 +5054,8 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           trust,
           maxTurns,
           maxPrice,
+          workingDir,
+          addDir,
         }
       );
     }
@@ -5062,6 +5173,13 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .describe(
             "Claude --json-schema: JSON Schema literal (NOT a path) constraining structured output. Object values are JSON.stringify-d; string values are passed verbatim. Use with outputFormat='json'."
           ),
+        // Phase 4 slice ζ — Claude additional-workspace-dirs parity
+        addDir: z
+          .array(z.string())
+          .optional()
+          .describe(
+            "Claude --add-dir: additional directories the CLI is allowed to read/write beyond the process cwd. Each entry is emitted as its own --add-dir instance."
+          ),
         approvalStrategy: z
           .enum(["legacy", "mcp_managed"])
           .default("legacy")
@@ -5117,6 +5235,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         excludeDynamicSystemPromptSections,
         fallbackModel,
         jsonSchema,
+        addDir,
         approvalStrategy,
         approvalPolicy,
         mcpServers,
@@ -5165,6 +5284,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             excludeDynamicSystemPromptSections,
             fallbackModel,
             jsonSchema,
+            addDir,
           },
           runtime
         );
@@ -5365,6 +5485,20 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         images: z.array(z.string()).optional().describe("Codex -i <path>: image attachments."),
         ignoreUserConfig: z.boolean().optional().describe("Codex --ignore-user-config."),
         ignoreRules: z.boolean().optional().describe("Codex --ignore-rules."),
+        // Phase 4 slice ζ — Codex working-dir + add-dir parity (new sessions only).
+        workingDir: z
+          .string()
+          .min(1)
+          .optional()
+          .describe(
+            "Codex -C/--cd <DIR>: working root for this session. New sessions only; resume inherits the original session's cwd."
+          ),
+        addDir: z
+          .array(z.string())
+          .optional()
+          .describe(
+            "Codex --add-dir <DIR>: additional writable workspace directories (repeat per entry). New sessions only."
+          ),
       },
       async ({
         prompt,
@@ -5394,6 +5528,8 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         images,
         ignoreUserConfig,
         ignoreRules,
+        workingDir,
+        addDir,
       }) => {
         return handleCodexRequestAsync(
           { sessionManager, asyncJobManager, logger, runtime },
@@ -5425,6 +5561,8 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             images,
             ignoreUserConfig,
             ignoreRules,
+            workingDir,
+            addDir,
           }
         );
       }
@@ -5653,6 +5791,14 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         maxTurns: MAX_TURNS_SCHEMA.optional().describe(
           "Grok `--max-turns N`: cap on agent-loop iterations for cost / latency control (Phase 4 slice δ). Bounded to safe integers ≤ 10000."
         ),
+        // Phase 4 slice ζ — Grok working-directory parity.
+        workingDir: z
+          .string()
+          .min(1)
+          .optional()
+          .describe(
+            "Grok --cwd <DIR>: working directory for this invocation. Lets headless callers run Grok against a directory other than the gateway process's cwd."
+          ),
       },
       async ({
         prompt,
@@ -5676,6 +5822,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         idleTimeoutMs,
         forceRefresh,
         maxTurns,
+        workingDir,
       }) => {
         return handleGrokRequestAsync(
           { sessionManager, asyncJobManager, logger, runtime },
@@ -5701,6 +5848,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             idleTimeoutMs,
             forceRefresh,
             maxTurns,
+            workingDir,
           }
         );
       }
@@ -5803,6 +5951,20 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         maxPrice: MAX_PRICE_SCHEMA.optional().describe(
           "Vibe `--max-price DOLLARS`: interrupt the session when cumulative cost crosses this cap (programmatic mode only, Phase 4 slice δ). Bounded to finite values ≤ 10000 USD."
         ),
+        // Phase 4 slice ζ — Vibe working-directory + additional-dirs parity.
+        workingDir: z
+          .string()
+          .min(1)
+          .optional()
+          .describe(
+            "Vibe --workdir <DIR>: change to this directory before running. Single value per invocation."
+          ),
+        addDir: z
+          .array(z.string())
+          .optional()
+          .describe(
+            "Vibe --add-dir <DIR>: additional writable workspace directories. Each entry is emitted as its own --add-dir instance."
+          ),
       },
       async ({
         prompt,
@@ -5827,6 +5989,8 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         trust,
         maxTurns,
         maxPrice,
+        workingDir,
+        addDir,
       }) => {
         return handleMistralRequestAsync(
           { sessionManager, asyncJobManager, logger, runtime },
@@ -5853,6 +6017,8 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             trust,
             maxTurns,
             maxPrice,
+            workingDir,
+            addDir,
           }
         );
       }
