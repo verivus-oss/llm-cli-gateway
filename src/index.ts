@@ -83,7 +83,12 @@ import {
   type ClaudeAgentDefinition,
 } from "./request-helpers.js";
 import { createFlightRecorder, FlightRecorderLike } from "./flight-recorder.js";
-import { resolvePromptInput, PromptPartsSchema, type PromptParts } from "./prompt-parts.js";
+import {
+  resolvePromptInput,
+  PromptPartsSchema,
+  assembleClaudeCacheBlocks,
+  type PromptParts,
+} from "./prompt-parts.js";
 import { computeSessionCacheStats, computeTtlRemaining } from "./cache-stats.js";
 import { getCliVersions, runCliUpgrade } from "./cli-updater.js";
 import { startHttpGateway, type HttpGatewayHandle } from "./http-transport.js";
@@ -515,7 +520,14 @@ async function awaitJobOrDefer(
    * always the upstream logStart writer.
    */
   flightRecorderEntry?: AsyncJobFlightRecorderEntry,
-  extractUsage?: AsyncJobUsageExtractor
+  extractUsage?: AsyncJobUsageExtractor,
+  /**
+   * Slice κ: optional stdin payload piped to the child CLI. Currently
+   * only Claude's `--input-format stream-json` path sets this. Threaded
+   * through both the direct-execute fallback (SYNC_DEADLINE_MS===0) and
+   * the AsyncJobManager spawn path, and participates in the dedup key.
+   */
+  stdin?: string
 ): Promise<{ stdout: string; stderr: string; code: number } | DeferredJobResponse> {
   // U26 fix: ownership of onComplete is a contract. Once this function returns
   // OR throws, the caller MUST consider onComplete consumed — i.e. it has
@@ -549,6 +561,7 @@ async function awaitJobOrDefer(
         idleTimeout: idleTimeoutMs,
         logger: runtime.logger,
         env: env ? ({ ...process.env, ...env } as NodeJS.ProcessEnv) : undefined,
+        stdin,
       });
     } finally {
       // Direct-execution path completes inline; release per-request resources
@@ -564,6 +577,7 @@ async function awaitJobOrDefer(
       outputFormat,
       forceRefresh,
       env,
+      stdin,
       onComplete,
       // Sync-deferred path: the upstream sync handler already wrote
       // logStart for this corrId, so writeFlightStart stays false. The
@@ -799,6 +813,7 @@ function buildAsyncFlightRecorderHandoff(
     resolvedModel?: string;
     stablePrefixHash?: string | null;
     stablePrefixTokens?: number | null;
+    cacheControlBlocks?: number;
   },
   sessionId: string | undefined,
   outputFormat: string | undefined
@@ -822,6 +837,7 @@ function buildAsyncFlightRecorderHandoff(
       sessionId,
       stablePrefixHash: prep.stablePrefixHash ?? undefined,
       stablePrefixTokens: prep.stablePrefixTokens ?? undefined,
+      cacheControlBlocks: prep.cacheControlBlocks,
     },
     extractUsage: (stdout: string) =>
       extractUsageAndCost(cli, stdout, fmt, { sessionId: sid, home }),
@@ -1277,6 +1293,20 @@ interface CliRequestPrep {
   stablePrefixHash: string | null;
   /** Heuristic token count (bytes/4) of the same stable prefix. */
   stablePrefixTokens: number | null;
+  /**
+   * Slice κ (Claude only): JSON stream-json payload to feed on stdin
+   * when the gateway emits `-p --input-format stream-json`. Undefined
+   * when the caller did not opt into Anthropic `cache_control`
+   * breakpoints. Non-κ providers always leave this undefined.
+   */
+  stdinPayload?: string;
+  /**
+   * Slice κ (Claude only): number of caller-supplied content blocks
+   * that carry an explicit `cache_control` marker. Threaded into the
+   * flight recorder so `cache_state` aggregates can distinguish
+   * κ-explicit breakpoints from implicit prefix-cache hits.
+   */
+  cacheControlBlocks?: number;
 }
 
 /**
@@ -1441,17 +1471,59 @@ export function prepareClaudeRequest(
     }
   }
 
-  const args = ["-p", effectivePrompt];
+  // Slice κ: detect explicit Anthropic `cache_control` opt-in on
+  // promptParts. When set, switch from the legacy positional
+  // `-p <prompt>` emission to `claude -p --input-format stream-json`
+  // and feed a JSON content-blocks payload via stdin. Non-κ callers
+  // (no cacheControl, or cacheControl with all flags false) take the
+  // existing positional path bit-for-bit.
+  const cc = params.promptParts?.cacheControl;
+  const cacheControlRequested = !!(cc && (cc.system || cc.tools || cc.context));
+  let stdinPayload: string | undefined;
+  let cacheControlBlocks: number | undefined;
+
+  if (cacheControlRequested) {
+    if (params.outputFormat !== "stream-json") {
+      return createErrorResponse(
+        params.operation,
+        1,
+        "",
+        corrId,
+        new Error(
+          "promptParts.cacheControl requires outputFormat: 'stream-json' (slice κ pipes the cache_control blocks over --input-format stream-json; text/json output formats cannot carry the required NDJSON usage events)."
+        )
+      ) as ExtendedToolResponse;
+    }
+    // promptParts is non-null whenever cacheControlRequested is true
+    // (the cacheControl flag lives only inside PromptParts).
+    const built = assembleClaudeCacheBlocks(params.promptParts!);
+    stdinPayload = `${JSON.stringify(built.payload)}\n`;
+    cacheControlBlocks = built.markedBlockCount;
+  }
+
+  const args: string[] = cacheControlRequested
+    ? [
+        "-p",
+        "--input-format",
+        "stream-json",
+        "--output-format",
+        "stream-json",
+        "--include-partial-messages",
+        "--verbose",
+      ]
+    : ["-p", effectivePrompt];
   if (resolvedModel) args.push("--model", resolvedModel);
-  if (params.outputFormat === "json") {
-    args.push("--output-format", "json");
-  } else if (params.outputFormat === "stream-json") {
-    // Claude CLI 2.x rejects `--print --output-format stream-json` without
-    // `--verbose`: "When using --print, --output-format=stream-json requires
-    // --verbose". --verbose only affects what claude logs to stderr; the
-    // stream-json stdout payload is unchanged, so the gateway's NDJSON
-    // parser is unaffected.
-    args.push("--output-format", "stream-json", "--include-partial-messages", "--verbose");
+  if (!cacheControlRequested) {
+    if (params.outputFormat === "json") {
+      args.push("--output-format", "json");
+    } else if (params.outputFormat === "stream-json") {
+      // Claude CLI 2.x rejects `--print --output-format stream-json` without
+      // `--verbose`: "When using --print, --output-format=stream-json requires
+      // --verbose". --verbose only affects what claude logs to stderr; the
+      // stream-json stdout payload is unchanged, so the gateway's NDJSON
+      // parser is unaffected.
+      args.push("--output-format", "stream-json", "--include-partial-messages", "--verbose");
+    }
   }
   if (params.allowedTools && params.allowedTools.length > 0) {
     sanitizeCliArgValues(params.allowedTools, "allowedTools");
@@ -1523,6 +1595,8 @@ export function prepareClaudeRequest(
     args,
     stablePrefixHash,
     stablePrefixTokens,
+    stdinPayload,
+    cacheControlBlocks,
   };
 }
 
@@ -3985,11 +4059,12 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           sessionId: effectiveSessionId,
           stablePrefixHash: prep.stablePrefixHash ?? undefined,
           stablePrefixTokens: prep.stablePrefixTokens ?? undefined,
+          cacheControlBlocks: prep.cacheControlBlocks,
         },
         runtime
       );
       logger.info(
-        `[${corrId}] claude_request invoked with model=${prep.resolvedModel || "default"}, outputFormat=${outputFormat}, prompt length=${prep.effectivePrompt.length}, sessionId=${effectiveSessionId}`
+        `[${corrId}] claude_request invoked with model=${prep.resolvedModel || "default"}, outputFormat=${outputFormat}, prompt length=${prep.effectivePrompt.length}, sessionId=${effectiveSessionId}, cacheControlBlocks=${prep.cacheControlBlocks ?? 0}`
       );
 
       try {
@@ -4020,7 +4095,8 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           undefined,
           undefined,
           claudeSyncFrHandoff.flightRecorderEntry,
-          claudeSyncFrHandoff.extractUsage
+          claudeSyncFrHandoff.extractUsage,
+          prep.stdinPayload
         );
 
         // Deferred — job still running, return async reference
@@ -5459,7 +5535,8 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             undefined,
             claudeAsyncFrHandoff.flightRecorderEntry,
             claudeAsyncFrHandoff.extractUsage,
-            true
+            true,
+            prep.stdinPayload
           );
           logger.info(
             `[${corrId}] claude_request_async started job ${job.id}, outputFormat=${outputFormat}`

@@ -64,6 +64,13 @@ export interface AsyncJobFlightRecorderEntry {
   sessionId?: string;
   stablePrefixHash?: string;
   stablePrefixTokens?: number;
+  /**
+   * Slice κ: count of caller-supplied prompt-parts content blocks the
+   * gateway emitted with explicit Anthropic `cache_control` markers
+   * (ttl='1h'). Only set for Claude requests that opt into κ; left
+   * undefined elsewhere so legacy rows stay NULL.
+   */
+  cacheControlBlocks?: number;
 }
 
 /**
@@ -196,6 +203,13 @@ export interface StartJobOptions {
    * therefore do NOT collide on dedup.
    */
   env?: Record<string, string>;
+  /**
+   * Slice κ: optional UTF-8 payload to pipe into the child's stdin.
+   * Participates in the dedup key — two requests with identical argv
+   * but different stdin do NOT collide. When set, stdio[0] is "pipe";
+   * when unset, stdio[0] stays "ignore" (regression-protected).
+   */
+  stdin?: string;
   /**
    * Optional hook fired exactly once when the job reaches a terminal state.
    * Used by callers that own per-request resources (outputSchema temp files,
@@ -393,8 +407,21 @@ export class AsyncJobManager {
    * (sorted keys → JSON-stringified). This prevents two Mistral requests with the
    * same argv but different `VIBE_ACTIVE_MODEL` from deduping onto each other.
    */
-  private buildRequestKey(cli: LlmCli, args: string[], env?: Record<string, string>): string {
-    return computeRequestKey(cli, args, canonicaliseEnvForKey(env));
+  private buildRequestKey(
+    cli: LlmCli,
+    args: string[],
+    env?: Record<string, string>,
+    stdin?: string
+  ): string {
+    // Slice κ: stdin participates in the dedup key. Two Claude requests
+    // with identical argv but different cache_control content blocks
+    // would otherwise collide on dedup and the second caller would get
+    // the wrong response. The legacy "no stdin" code path passes
+    // stdin=undefined, which serialises to the same empty marker the
+    // previous version emitted — non-κ dedup is unchanged.
+    const extraEnv = canonicaliseEnvForKey(env);
+    const extra = stdin === undefined ? extraEnv : `${extraEnv}|stdin:${stdin}`;
+    return computeRequestKey(cli, args, extra);
   }
 
   private fireOnComplete(job: AsyncJobRecord): void {
@@ -612,7 +639,8 @@ export class AsyncJobManager {
     onComplete?: () => void,
     flightRecorderEntry?: AsyncJobFlightRecorderEntry,
     extractUsage?: AsyncJobUsageExtractor,
-    writeFlightStart?: boolean
+    writeFlightStart?: boolean,
+    stdin?: string
   ): AsyncJobSnapshot {
     return this.startJobWithDedup(cli, args, correlationId, {
       cwd,
@@ -620,6 +648,7 @@ export class AsyncJobManager {
       outputFormat,
       forceRefresh,
       env,
+      stdin,
       onComplete,
       flightRecorderEntry,
       extractUsage,
@@ -647,12 +676,13 @@ export class AsyncJobManager {
       outputFormat,
       forceRefresh,
       env: extraEnv,
+      stdin,
       onComplete,
       flightRecorderEntry,
       extractUsage,
       writeFlightStart,
     } = opts;
-    const requestKey = this.buildRequestKey(cli, args, extraEnv);
+    const requestKey = this.buildRequestKey(cli, args, extraEnv, stdin);
 
     if (!forceRefresh && this.store) {
       try {
@@ -701,9 +731,17 @@ export class AsyncJobManager {
     const baseEnv = envWithExtendedPath(process.env, getExtendedPath());
     const child = spawnCliProcess(command, args, {
       cwd,
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: stdin === undefined ? ["ignore", "pipe", "pipe"] : ["pipe", "pipe", "pipe"],
       env: { ...baseEnv, ...(extraEnv ?? {}) },
     });
+    if (stdin !== undefined && child.stdin) {
+      try {
+        child.stdin.write(stdin);
+      } catch (err) {
+        this.logger.error(`Job ${id} failed to write stdin payload`, err);
+      }
+      child.stdin.end();
+    }
 
     // Single cleanup flag to prevent double-unregister
     let groupCleaned = false;
@@ -775,6 +813,7 @@ export class AsyncJobManager {
           asyncJobId: id,
           stablePrefixHash: flightRecorderEntry.stablePrefixHash,
           stablePrefixTokens: flightRecorderEntry.stablePrefixTokens,
+          cacheControlBlocks: flightRecorderEntry.cacheControlBlocks,
         });
       } catch (err) {
         this.logger.error("Async-path flight recorder logStart failed", err);

@@ -2,7 +2,14 @@ import { spawnSync } from "node:child_process";
 import type { CliType } from "./session-manager.js";
 import { envWithExtendedPath, getExtendedPath, resolveCommandForSpawn } from "./executor.js";
 
-export type CliFlagArity = "none" | "one" | "variadic";
+/**
+ * `optional` (slice κ): consumes the next token as the flag's value
+ * ONLY if that token does not start with `-`. Used for Claude's
+ * `-p`/`--print`, which is a no-arg switch in claude-code 2.x but
+ * also doubles as the legacy `-p <prompt>` positional shorthand that
+ * the gateway has emitted since v0.x.
+ */
+export type CliFlagArity = "none" | "one" | "optional" | "variadic";
 
 export interface CliFlagContract {
   arity: CliFlagArity;
@@ -99,8 +106,18 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       "strictMcpConfig",
     ],
     flags: {
-      "-p": { arity: "one", description: "Prompt text" },
+      "-p": {
+        arity: "optional",
+        description:
+          "Print/non-interactive mode. Legacy gateway emission used `-p <prompt>` (consumed as positional in claude's grammar); slice κ emits `-p` standalone followed by `--input-format stream-json` so the prompt flows in on stdin.",
+      },
       "--model": { arity: "one", description: "Model selector" },
+      "--input-format": {
+        arity: "one",
+        values: ["text", "stream-json"],
+        description:
+          "Slice κ: realtime JSON stdin payload. `stream-json` enables Anthropic cache_control breakpoints from caller-supplied content blocks.",
+      },
       "--output-format": {
         arity: "one",
         values: ["json", "stream-json"],
@@ -211,6 +228,27 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         args: [
           "-p",
           "hello",
+          "--output-format",
+          "stream-json",
+          "--include-partial-messages",
+          "--verbose",
+        ],
+        expect: "pass",
+      },
+      {
+        // Slice κ: when caller marks promptParts with cache_control, the
+        // gateway emits `-p` as a standalone flag and pipes the JSON
+        // content-blocks payload over stdin via `--input-format
+        // stream-json`. The fixture pins the exact argv combination so
+        // a future regression (re-emitting a positional prompt, dropping
+        // `--input-format`, etc.) trips loudly here.
+        id: "claude-input-format-stream-json",
+        description:
+          "Slice κ: `-p` standalone + --input-format stream-json + --output-format stream-json + --include-partial-messages + --verbose",
+        args: [
+          "-p",
+          "--input-format",
+          "stream-json",
           "--output-format",
           "stream-json",
           "--include-partial-messages",
@@ -832,6 +870,15 @@ export function validateUpstreamCliArgs(
       }
       validateFlagValue(cli, arg, flag, value, i + 1, violations);
       i += 1;
+      continue;
+    }
+
+    if (flag.arity === "optional") {
+      const value = args[i + 1];
+      if (value !== undefined && !value.startsWith("-")) {
+        validateFlagValue(cli, arg, flag, value, i + 1, violations);
+        i += 1;
+      }
       continue;
     }
 

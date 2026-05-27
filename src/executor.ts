@@ -12,6 +12,14 @@ export interface ExecuteOptions {
   logger?: Logger;
   /** Extra environment variables to inject; merged after PATH. */
   env?: NodeJS.ProcessEnv;
+  /**
+   * Slice κ: optional UTF-8 payload to write to the child's stdin
+   * immediately after spawn. When provided, stdio for stdin switches
+   * from "ignore" to "pipe" so the CLI can read the payload (used by
+   * `claude --input-format stream-json`). Undefined preserves the
+   * legacy stdio:["ignore","pipe","pipe"] shape.
+   */
+  stdin?: string;
 }
 
 export interface ExecuteResult {
@@ -393,18 +401,24 @@ export async function executeCli(
   args: string[],
   options: ExecuteOptions = {}
 ): Promise<ExecuteResult> {
-  const { timeout, idleTimeout, cwd, env: extraEnv } = options;
+  const { timeout, idleTimeout, cwd, env: extraEnv, stdin } = options;
   const extendedPath = getExtendedPath();
   const baseEnv = envWithExtendedPath(process.env, extendedPath);
   const circuitBreaker = getCircuitBreaker(command);
 
   const runOnce = () =>
     new Promise<ExecuteResult>((resolve, reject) => {
+      const stdio: SpawnOptions["stdio"] =
+        stdin === undefined ? ["ignore", "pipe", "pipe"] : ["pipe", "pipe", "pipe"];
       const proc = spawnCliProcess(command, args, {
         cwd,
-        stdio: ["ignore", "pipe", "pipe"],
+        stdio,
         env: { ...baseEnv, ...(extraEnv ?? {}) },
       });
+      if (stdin !== undefined && proc.stdin) {
+        proc.stdin.write(stdin);
+        proc.stdin.end();
+      }
 
       let stdout = "";
       let stderr = "";

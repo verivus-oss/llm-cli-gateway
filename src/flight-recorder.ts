@@ -30,6 +30,13 @@ export interface FlightLogStart {
   asyncJobId?: string;
   stablePrefixHash?: string;
   stablePrefixTokens?: number;
+  /**
+   * Slice κ: number of caller-supplied prompt-parts content blocks
+   * that the gateway emitted with an explicit `cache_control`
+   * breakpoint on this request. `null` (default) for non-κ requests,
+   * including pre-κ rows after a v4 migration of a legacy DB.
+   */
+  cacheControlBlocks?: number;
 }
 
 export interface FlightLogResult {
@@ -108,6 +115,23 @@ function ensureStablePrefixColumns(db: DatabaseLike): void {
     db.exec("ALTER TABLE requests ADD COLUMN stable_prefix_tokens INTEGER");
   }
   db.exec("CREATE INDEX IF NOT EXISTS idx_requests_stable_hash ON requests(stable_prefix_hash)");
+}
+
+/**
+ * Idempotent v4 migration (slice κ): add `cache_control_blocks` column
+ * to the `requests` table. Counts the caller-supplied content blocks
+ * the gateway emitted with an explicit Anthropic `cache_control`
+ * marker. Pre-κ rows keep NULL; only κ-opt-in callers ever set the
+ * column to a non-NULL integer.
+ */
+function ensureCacheControlBlocksColumn(db: DatabaseLike): void {
+  const rows = db.prepare("PRAGMA table_info(requests)").all?.() ?? [];
+  const names = new Set<string>(
+    rows.map((row: any) => (row && typeof row.name === "string" ? row.name : ""))
+  );
+  if (!names.has("cache_control_blocks")) {
+    db.exec("ALTER TABLE requests ADD COLUMN cache_control_blocks INTEGER");
+  }
 }
 
 export function resolveFlightRecorderDbPath(): string | null {
@@ -244,6 +268,15 @@ export class FlightRecorder {
       .prepare("INSERT OR IGNORE INTO _migrations(version, applied_at) VALUES(3, ?)")
       .run(new Date().toISOString());
 
+    // Migration v4: cache_control_blocks (slice κ). Pre-κ rows keep NULL;
+    // only κ-opt-in writes populate this. Aggregates in cache-stats /
+    // MCP resources can use this to separate explicit κ hits from
+    // implicit prefix-cache hits.
+    ensureCacheControlBlocksColumn(this.db);
+    this.db
+      .prepare("INSERT OR IGNORE INTO _migrations(version, applied_at) VALUES(4, ?)")
+      .run(new Date().toISOString());
+
     if (process.platform !== "win32") {
       try {
         chmodSync(dbPath, 0o600);
@@ -254,9 +287,11 @@ export class FlightRecorder {
 
     const insertRequest = this.db.prepare(`
       INSERT INTO requests (id, cli, model, prompt, system, session_id, datetime_utc,
-                            stable_prefix_hash, stable_prefix_tokens)
+                            stable_prefix_hash, stable_prefix_tokens,
+                            cache_control_blocks)
       VALUES (@id, @cli, @model, @prompt, @system, @session_id, @datetime_utc,
-              @stable_prefix_hash, @stable_prefix_tokens)
+              @stable_prefix_hash, @stable_prefix_tokens,
+              @cache_control_blocks)
     `);
 
     const insertMetadata = this.db.prepare(`
@@ -275,6 +310,7 @@ export class FlightRecorder {
         datetime_utc: new Date().toISOString(),
         stable_prefix_hash: entry.stablePrefixHash ?? null,
         stable_prefix_tokens: entry.stablePrefixTokens ?? null,
+        cache_control_blocks: entry.cacheControlBlocks ?? null,
       });
 
       insertMetadata.run({
