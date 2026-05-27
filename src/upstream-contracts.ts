@@ -92,6 +92,8 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       "excludeDynamicSystemPromptSections",
       "fallbackModel",
       "jsonSchema",
+      // Phase 4 slice ζ
+      "addDir",
       "approvalStrategy",
       "mcpServers",
       "strictMcpConfig",
@@ -141,6 +143,10 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         arity: "one",
         description: "JSON Schema literal constraining structured output",
       },
+      "--add-dir": {
+        arity: "one",
+        description: "Additional workspace directory (Phase 4 slice ζ; repeat once per directory)",
+      },
       "--continue": { arity: "none", description: "Continue active session" },
       "--session-id": { arity: "one", description: "Session id" },
     },
@@ -181,6 +187,14 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         ],
         expect: "pass",
       },
+      {
+        // Phase 4 slice ζ: --add-dir wired through prepareClaudeHighImpactFlags.
+        // Repeated once per directory; each instance has arity:"one".
+        id: "claude-add-dir",
+        description: "Phase 4 slice ζ: repeated --add-dir is accepted",
+        args: ["-p", "hello", "--add-dir", "/tmp/a", "--add-dir", "/tmp/b"],
+        expect: "pass",
+      },
     ],
   },
   codex: {
@@ -217,6 +231,9 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       "images",
       "ignoreUserConfig",
       "ignoreRules",
+      // Phase 4 slice ζ
+      "workingDir",
+      "addDir",
     ],
     resumeOnlyFlags: ["--last"],
     // Phase 4 slice α (v1.8.0) verified that `codex exec resume` accepts
@@ -256,6 +273,19 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       "-i": { arity: "one", description: "Image path" },
       "--ignore-user-config": { arity: "none", description: "Ignore user config" },
       "--ignore-rules": { arity: "none", description: "Ignore rule files" },
+      // The gateway only ever emits the short form `-C` (codex 0.134.0 accepts
+      // both `-C` and `--cd` as aliases). The contract registers exactly what
+      // we emit; if a future code path emits `--cd` instead, the contract
+      // check will fail loudly — which is the intended catch.
+      "-C": {
+        arity: "one",
+        description: "Working root for the session (Phase 4 slice ζ; new sessions only)",
+      },
+      "--add-dir": {
+        arity: "one",
+        description:
+          "Additional writable workspace directory (Phase 4 slice ζ; repeat once per directory; new sessions only)",
+      },
     },
     env: {},
     conformanceFixtures: [
@@ -291,6 +321,26 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         description: "Phase 4 slice α: --search remains forbidden on resume",
         args: ["exec", "resume", "--search", "session-id", "hello"],
         expect: "fail",
+      },
+      {
+        id: "codex-working-dir",
+        description: "Phase 4 slice ζ: -C <DIR> accepted on a new session",
+        args: ["exec", "--skip-git-repo-check", "-C", "/tmp/work", "hello"],
+        expect: "pass",
+      },
+      {
+        id: "codex-add-dir",
+        description: "Phase 4 slice ζ: repeated --add-dir accepted on a new session",
+        args: [
+          "exec",
+          "--skip-git-repo-check",
+          "--add-dir",
+          "/tmp/a",
+          "--add-dir",
+          "/tmp/b",
+          "hello",
+        ],
+        expect: "pass",
       },
     ],
   },
@@ -403,6 +453,8 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       "disallowedTools",
       // Phase 4 slice δ
       "maxTurns",
+      // Phase 4 slice ζ
+      "workingDir",
     ],
     flags: {
       "-p": { arity: "one", description: "Prompt text" },
@@ -432,6 +484,10 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         pattern: /^[1-9][0-9]*$/,
         description: "Agent-loop iteration cap (Phase 4 slice δ)",
       },
+      "--cwd": {
+        arity: "one",
+        description: "Working directory for the invocation (Phase 4 slice ζ)",
+      },
     },
     env: {},
     conformanceFixtures: [
@@ -458,6 +514,12 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         description: "Phase 4 slice δ: --max-turns 0 is rejected by contract pattern",
         args: ["-p", "hello", "--max-turns", "0"],
         expect: "fail",
+      },
+      {
+        id: "grok-working-dir",
+        description: "Phase 4 slice ζ: --cwd <DIR> is accepted",
+        args: ["-p", "hello", "--cwd", "/tmp/work"],
+        expect: "pass",
       },
     ],
   },
@@ -487,6 +549,9 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       // Phase 4 slice δ
       "maxTurns",
       "maxPrice",
+      // Phase 4 slice ζ
+      "workingDir",
+      "addDir",
     ],
     flags: {
       "-p": { arity: "one", description: "Prompt text" },
@@ -520,6 +585,15 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         // that keeps String(N) in decimal form (no scientific notation).
         pattern: /^(0|[1-9][0-9]*)(\.[0-9]+)?$/,
         description: "Cumulative cost cap in USD (Phase 4 slice δ, programmatic mode only)",
+      },
+      "--workdir": {
+        arity: "one",
+        description: "Working directory for the invocation (Phase 4 slice ζ)",
+      },
+      "--add-dir": {
+        arity: "one",
+        description:
+          "Additional writable workspace directory (Phase 4 slice ζ; repeat once per directory)",
       },
     },
     env: {
@@ -565,6 +639,29 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         args: ["-p", "hello", "--agent", "auto-approve", "--max-price", "1e-7"],
         env: { VIBE_ACTIVE_MODEL: "mistral-medium-3.5" },
         expect: "fail",
+      },
+      {
+        id: "mistral-working-dir",
+        description: "Phase 4 slice ζ: --workdir <DIR> is accepted",
+        args: ["-p", "hello", "--agent", "auto-approve", "--workdir", "/tmp/work"],
+        env: { VIBE_ACTIVE_MODEL: "mistral-medium-3.5" },
+        expect: "pass",
+      },
+      {
+        id: "mistral-add-dir",
+        description: "Phase 4 slice ζ: repeated --add-dir is accepted",
+        args: [
+          "-p",
+          "hello",
+          "--agent",
+          "auto-approve",
+          "--add-dir",
+          "/tmp/a",
+          "--add-dir",
+          "/tmp/b",
+        ],
+        env: { VIBE_ACTIVE_MODEL: "mistral-medium-3.5" },
+        expect: "pass",
       },
     ],
   },
