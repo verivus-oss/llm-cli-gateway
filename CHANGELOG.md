@@ -2,6 +2,67 @@
 
 All notable changes to the llm-cli-gateway project.
 
+## [1.11.0] - 2026-05-27 — Phase 4 slice η (Claude `--fallback-model` + `--json-schema`)
+
+Ships the sixth Phase 4 slice: Claude's reliability fallback and
+structured-output JSON-Schema constraint flags are now reachable from
+`claude_request` and `claude_request_async`. Three commits land together
+(feature wiring, contract registration, test-veracity regressions) plus
+this release commit.
+
+### Added — `--fallback-model` and `--json-schema` for Claude
+
+- `claude_request` and `claude_request_async` accept a new `fallbackModel`
+  field (non-empty string, validated via `z.string().min(1)`). Threaded
+  through `prepareClaudeRequest` → `prepareClaudeHighImpactFlags`
+  (`src/request-helpers.ts:651`) → `--fallback-model <model>` argv pair.
+  Effective only with Claude `--print`; the gateway always passes `-p`,
+  so no extra gating required.
+- Both tools accept a new `jsonSchema` field
+  (`string | Record<string, unknown>`). Per `claude --help`, the CLI
+  argument is the JSON Schema *literal* (not a path; contrast with Codex
+  `--output-schema`). Object values are `JSON.stringify`-d; string values
+  pass verbatim. Use with `outputFormat: "json"` for structured output
+  validation. Achieves Codex parity for structured-output validation
+  in a single slice.
+- `UPSTREAM_CLI_CONTRACTS.claude.flags` registers `--fallback-model` and
+  `--json-schema` with `arity: "one"`. `mcpParameters` includes both new
+  field names. Two new passing conformance fixtures
+  (`claude-fallback-model`, `claude-json-schema`) pin the contract; both
+  are mechanically validated against `validateUpstreamCliArgs` in the
+  REGRESSIONS Hε suite.
+
+### Test-veracity audit
+
+Per the standing protocol (`feedback_test_veracity_audit_protocol`),
+this slice's tests were audited by Codex + Gemini + Grok + Mistral in
+async parallel with mandatory mutation-probe execution. Spec at
+`docs/plans/test-veracity-audit-slice-eta.spec.md`. Round 1 outcomes:
+Grok + Mistral unanimous UNCONDITIONAL APPROVE; Gemini stalled at 682B
+stderr for 15+ minutes (cancelled, documented quota/stall-class
+blocker); Codex initially REJECTED on P-Hβ-4 with an invalid claim
+("removing sync `jsonSchema` left the test green") — pre-verification
+on a clean tree confirmed the mutation does turn `Hα-4` + `Hα-6` RED as
+the spec predicts. Round-2 pushback with the verbatim vitest output:
+Codex self-corrected, reproduced the mutation in a worktree, observed
+the predicted red, restored, and issued UNCONDITIONAL APPROVE.
+
+Three substantive reviewer approves (Grok, Mistral, Codex) from
+independent vendor families satisfy the multi-LLM gate; Gemini stall
+documented.
+
+Test count: 816 → 837 (21 new across one file:
+`src/__tests__/test-veracity-regressions-slice-eta.test.ts`).
+
+### Known caveats
+
+- `npm run check` still excludes `format:check` (gap first flagged in
+  v1.8.0). Run both locally before pushing.
+- Claude `--fallback-model` and `--json-schema` are CLI-side gated to
+  `--print` mode by Claude itself; both gateway tools always pass `-p`,
+  so this is invisible to callers but worth noting if the upstream CLI
+  flag semantics change.
+
 ## [1.10.0] - 2026-05-27 — Phase 4 slice ε (Gemini `-o stream-json` enum widening)
 
 Ships the fifth Phase 4 slice: Gemini's NDJSON event-stream output format
