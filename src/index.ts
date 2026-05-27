@@ -10,7 +10,7 @@ import { z } from "zod";
 import { executeCli, killAllProcessGroups } from "./executor.js";
 import { parseStreamJson } from "./stream-json-parser.js";
 import { parseCodexJsonStream } from "./codex-json-parser.js";
-import { parseGeminiJson } from "./gemini-json-parser.js";
+import { parseGeminiJson, parseGeminiStreamJson } from "./gemini-json-parser.js";
 import { parseVibeMetaJson } from "./mistral-meta-json-parser.js";
 import { homedir } from "os";
 import { ISessionManager, createSessionManager } from "./session-manager.js";
@@ -762,8 +762,9 @@ export function extractUsageAndCost(
       costUsd: parsed.usage.cost_usd,
     };
   }
-  if (cli === "gemini" && outputFormat === "json") {
-    const parsed = parseGeminiJson(output);
+  if (cli === "gemini" && (outputFormat === "json" || outputFormat === "stream-json")) {
+    const parsed =
+      outputFormat === "stream-json" ? parseGeminiStreamJson(output) : parseGeminiJson(output);
     if (!parsed || !parsed.usage) {
       return {};
     }
@@ -1749,11 +1750,13 @@ export function prepareGeminiRequest(
     optimizePrompt: boolean;
     operation: string;
     /**
-     * U23: output format. When set to "json", emits `-o json` so Gemini emits
-     * the JSON object containing usageMetadata that `parseGeminiJson` (and
-     * downstream `extractUsageAndCost`) can consume. Defaults to "text".
+     * U23 + Phase 4 slice ε: output format. `json` emits `-o json` (single
+     * JSON object with usageMetadata). `stream-json` emits `-o stream-json`
+     * (NDJSON event stream — `init` / `message` / `result` lines). Both
+     * route through `extractUsageAndCost` so usage tokens reach the flight
+     * recorder. Defaults to "text".
      */
-    outputFormat?: "text" | "json";
+    outputFormat?: "text" | "json" | "stream-json";
     // U27: high-impact features (all optional)
     sandbox?: boolean;
     policyFiles?: string[];
@@ -1888,8 +1891,17 @@ export function prepareGeminiRequest(
   // U23 fix: emit `-o json` when the caller asked for JSON output. The Gemini
   // JSON parser is otherwise unreachable from the tool surface and the
   // structured usageMetadata is silently dropped.
+  //
+  // Phase 4 slice ε: same wiring for `-o stream-json` (NDJSON event stream).
+  // Gemini already streams stdout in real-time so the existing 10-minute
+  // idle timeout (CLI_IDLE_TIMEOUTS.gemini) covers both modes without
+  // adjustment — unlike Claude, no `--include-partial-messages` companion
+  // flag is required because Gemini emits assistant `delta` events as part
+  // of the default stream-json shape.
   if (params.outputFormat === "json") {
     args.push("-o", "json");
+  } else if (params.outputFormat === "stream-json") {
+    args.push("-o", "stream-json");
   }
   // Phase 4 slice γ: opt-in trust-prompt bypass for fresh workspaces.
   if (params.skipTrust) {
@@ -2353,8 +2365,11 @@ export interface GeminiRequestParams {
   optimizeResponse?: boolean;
   idleTimeoutMs?: number;
   forceRefresh?: boolean;
-  /** U23: "json" emits `-o json` so token usage is parsed and reported. */
-  outputFormat?: "text" | "json";
+  /**
+   * U23 + Phase 4 slice ε: "json" emits `-o json`; "stream-json" emits
+   * `-o stream-json` (NDJSON event stream). Both are usage-extracted.
+   */
+  outputFormat?: "text" | "json" | "stream-json";
   // U27: high-impact features
   sandbox?: boolean;
   policyFiles?: string[];
@@ -4529,12 +4544,15 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           "Bypass dedup and force a fresh CLI run even if a recent identical request exists"
         ),
       // U23: emit `-o json` to extract token usage via parseGeminiJson. Default
-      // remains text so existing callers see no behavior change.
+      // remains text so existing callers see no behavior change. Phase 4 slice
+      // ε adds `stream-json` (NDJSON event stream parsed by
+      // parseGeminiStreamJson — `init`/`message`/`result` lines, idle-timeout
+      // semantics covered by Gemini's existing real-time stdout streaming).
       outputFormat: z
-        .enum(["text", "json"])
+        .enum(["text", "json", "stream-json"])
         .default("text")
         .describe(
-          "Gemini output format. `json` emits `-o json` so usageMetadata is parsed and reported."
+          "Gemini output format. `json` emits `-o json` (single JSON with usageMetadata). `stream-json` emits `-o stream-json` (NDJSON event stream — `init`/`message`/`result` lines, usage extracted from the terminal `result.stats` event). Both report usage to the flight recorder."
         ),
       sandbox: GEMINI_HIGH_IMPACT_PARAMS_SCHEMA.shape.sandbox.describe(
         "Run Gemini in sandbox mode (-s)"
@@ -5432,12 +5450,15 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             "Bypass dedup and force a fresh CLI run even if a recent identical request exists"
           ),
         // U23: emit `-o json` to extract token usage via parseGeminiJson. Default
-        // remains text so existing callers see no behavior change.
+        // remains text so existing callers see no behavior change. Phase 4 slice
+        // ε adds `stream-json` (NDJSON event stream parsed by
+        // parseGeminiStreamJson — `init`/`message`/`result` lines, idle-timeout
+        // semantics covered by Gemini's existing real-time stdout streaming).
         outputFormat: z
-          .enum(["text", "json"])
+          .enum(["text", "json", "stream-json"])
           .default("text")
           .describe(
-            "Gemini output format. `json` emits `-o json` so usageMetadata is parsed and reported."
+            "Gemini output format. `json` emits `-o json` (single JSON with usageMetadata). `stream-json` emits `-o stream-json` (NDJSON event stream — `init`/`message`/`result` lines, usage extracted from the terminal `result.stats` event). Both report usage to the flight recorder."
           ),
         sandbox: GEMINI_HIGH_IMPACT_PARAMS_SCHEMA.shape.sandbox.describe(
           "Run Gemini in sandbox mode (-s)"
