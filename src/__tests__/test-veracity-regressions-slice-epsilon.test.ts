@@ -214,13 +214,30 @@ describe("REGRESSIONS Eε — gemini contract accepts -o stream-json", () => {
     expect(flag.values).toContain("json");
   });
 
-  it("conformance fixtures include the gemini-stream-json fixture", () => {
-    const ids = UPSTREAM_CLI_CONTRACTS.gemini.conformanceFixtures.map(f => f.id);
-    expect(ids).toContain("gemini-stream-json");
+  // Eε-4: the round-1 Codex audit flagged a real gap here. The presence
+  // check below is necessary but not sufficient — under P-Eε-1 (revert
+  // `gemini.flags["-o"].values` back to `["json"]`) the fixture object
+  // still exists, so a `toContain("gemini-stream-json")` assertion
+  // stayed green even though the contract had silently broken. The
+  // mechanical assertion underneath actually runs the fixture through
+  // `validateUpstreamCliArgs` so the test goes red whenever the contract
+  // and the fixture drift apart.
+  it("gemini-stream-json fixture exists AND mechanically validates against the contract", () => {
     const fixture = UPSTREAM_CLI_CONTRACTS.gemini.conformanceFixtures.find(
       f => f.id === "gemini-stream-json"
     );
+    expect(fixture, "gemini-stream-json fixture must be registered").toBeDefined();
     expect(fixture?.expect).toBe("pass");
     expect(fixture?.args).toEqual(["-p", "hello", "-o", "stream-json"]);
+
+    // Mechanical end-to-end: the fixture must actually pass
+    // validateUpstreamCliArgs. If `stream-json` were removed from the
+    // -o enum (P-Eε-1) this assertion goes red even though the fixture
+    // object still exists in the array — closing the round-1 gap.
+    const validation = validateUpstreamCliArgs(
+      "gemini",
+      fixture?.args as readonly string[]
+    );
+    expect(validation.ok, JSON.stringify(validation.violations)).toBe(true);
   });
 });
