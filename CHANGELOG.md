@@ -2,6 +2,104 @@
 
 All notable changes to the llm-cli-gateway project.
 
+## [1.9.0] - 2026-05-27 — Phase 4 slice δ (budget/max-turns parity) + retroactive α/γ contract closure
+
+Ships the fourth Phase 4 slice (budget/max-turns parity for Grok and Mistral),
+and retroactively closes three latent contract gaps that shipped silently in
+v1.8.0 (slices α and γ). Five commits land together: the slice δ feature,
+two bounds-tightening fixes, a contract-table closure, and a test-veracity
+hardening pass driven by an iterative multi-LLM audit.
+
+### Added — `maxTurns` / `maxPrice` budget caps (slice δ)
+
+- `grok_request` and `grok_request_async` gain optional `maxTurns?: number`
+  → emits `grok --max-turns N`. Grok exposes no per-request budget flag,
+  so `--max-price` is Mistral-only.
+- `mistral_request` and `mistral_request_async` gain optional
+  `maxTurns?: number` → `vibe --max-turns N` AND `maxPrice?: number` →
+  `vibe --max-price DOLLARS`. Both apply only in programmatic mode (`-p`),
+  matching Vibe's documented constraint.
+- The Mistral stale-model recovery retry path (extracted into a pure
+  `buildMistralRetryPrep` helper) preserves all three slice-γ/δ flags
+  (`trust`, `maxTurns`, `maxPrice`) on the second attempt.
+- Defaults: undefined for all three new fields → no flag emitted →
+  existing callers see no behavioural change.
+
+### Fixed — Bounded numeric schemas for lossless argv stringification
+
+- Extracted two shared, exported Zod constants:
+  - `MAX_TURNS_SCHEMA = z.number().int().positive().safe().max(10_000)`
+  - `MAX_PRICE_SCHEMA = z.number().positive().finite().min(1e-6).max(10_000)`
+- The lower `.min(1e-6)` cap on price is exactly the boundary where
+  `String(N)` switches from decimal to scientific notation
+  (`String(1e-6) === "0.000001"` but `String(1e-7) === "1e-7"`); both
+  upstream CLIs reject scientific-notation values.
+- Reused across all four slice-δ tool registrations so bounds stay
+  consistent if they ever need to change.
+
+### Fixed — Upstream contract table closes 5 latent flag gaps
+
+`assertUpstreamCliArgs` consults `UPSTREAM_CLI_CONTRACTS` on every real
+`*_request` call. The following flags / mcpParameters were never registered
+there before this release, so production calls setting any of them threw
+"Upstream contract violation" at runtime even though the prepare-function
+unit tests passed:
+
+- **Gemini** (slice γ retroactive): `skipTrust` + `--skip-trust`.
+- **Mistral** (slice γ + δ retroactive): `trust` + `--trust`; `maxTurns` +
+  `--max-turns`; `maxPrice` + `--max-price` (with a strict decimal-only
+  regex matching `MAX_PRICE_SCHEMA`'s lower bound).
+- **Grok** (slice δ): `maxTurns` + `--max-turns`.
+- **Codex** (slice α retroactive): `--output-schema` and `-c` removed
+  from `resumeForbiddenFlags` — verified accepted on `codex exec resume`
+  per codex-cli 0.133.0.
+
+Conformance fixtures pin each new flag's argv shape, including a
+`mistral-max-price-scientific-notation` fixture that locks the `1e-7`
+rejection at the contract layer.
+
+### Hardened — Test veracity (multi-LLM audit follow-up)
+
+Codex + Grok ran iterative test-veracity audits with mutation probes per
+`docs/plans/test-veracity-audit.spec.md`. They proved several added tests
+were not falsifiable on the dimensions their commit messages claimed.
+New file `src/__tests__/test-veracity-regressions.test.ts` closes those
+gaps with six describe blocks:
+
+- **REGRESSIONS A** — probes registered tool `inputSchema` bounds
+  directly (not the bare schema constants), so schema-drift in any of
+  the four sync/async registrations is caught.
+- **REGRESSIONS B** — tests the pure `buildMistralRetryPrep` helper
+  across all combinations of `trust × maxTurns × maxPrice`. Self-
+  validated: dropping any of the three forwards on retry goes red.
+- **REGRESSIONS C** — positive allowlist asserting slice α/γ/δ
+  parameters live in the matching contract's `mcpParameters` (closes
+  the self-oracle gap where removing a param from BOTH the contract
+  AND the schema previously stayed green).
+- **REGRESSIONS D** — threads `prepare*Request` output into
+  `validateUpstreamCliArgs` end-to-end; the exact consistency check
+  the latent v1.8.0 contract breaks would have failed.
+- **REGRESSIONS E** — `it.each` over sync AND async variants of every
+  slice-touched tool; the existing C4 was sync-only.
+- **REGRESSIONS F** — flag-fixture coverage map: every flag in each
+  contract `flags` table must be exercised by a passing fixture (with
+  a grandfathered pre-audit baseline). Forces future slice authors to
+  add a fixture alongside any new flag entry.
+
+The existing C4 (`MCP request schemas expose the provider contract
+parameters`) now walks `_async` tools too.
+
+### Notes
+
+Multi-LLM review across multiple iterative rounds, ending with a
+dedicated test-veracity audit per Werner's strict-evidence protocol
+(documented in `docs/plans/test-veracity-audit.spec.md`). Round 2 of the
+audit landed UNCONDITIONAL APPROVE from Codex, Grok, Claude, and Mistral
+with full mutation-probe evidence — every documented counterexample
+mutation went red as predicted; tests are falsifiable by exactly the
+regressions they claim to guard against. Gemini was quota-exhausted
+during the audit window (~6h reset) and did not participate in round 2.
+
 ## [1.8.0] - 2026-05-27 — Phase 4 openers (codex resume fix, mistral telemetry, headless trust flags)
 
 Ships the first three slices of the Phase 4 provider-modernisation
