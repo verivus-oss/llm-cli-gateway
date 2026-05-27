@@ -265,14 +265,44 @@ describe("REGRESSIONS Kβ — prepareClaudeRequest κ branch (slice κ)", () => 
     expect(prep.cacheControlBlocks).toBe(2);
   });
 
-  it("Kβ-8: κ argv passes validateUpstreamCliArgs (prepare → contract consistency)", () => {
+  it("Kβ-8: κ argv passes validateUpstreamCliArgs AND has the exact pinned shape (contract + structural)", () => {
     const prep = prepareClaudeRequest({
       ...BASE_CLAUDE_PARAMS,
       promptParts: { system: "S", task: "K", cacheControl: { system: true } },
     } as never);
     if (!("args" in prep)) throw new Error("expected args");
+
+    // Contract check — must be ok AND emit zero violations.
     const validation = validateUpstreamCliArgs("claude", prep.args);
     expect(validation.ok, JSON.stringify(validation.violations)).toBe(true);
+    expect(validation.violations).toEqual([]);
+
+    // Structural pin (Codex round-1 finding, Grok concur):
+    // `validateUpstreamCliArgs` is too loose for the κ shape — `-p` has
+    // `arity:"optional"`, so dropping `--verbose` (P-Kβ-1) or putting a
+    // positional prompt back after `-p` (P-Kβ-2) leaves the validator
+    // happy. Pin the exact prefix and required flags here so those
+    // probes still go red.
+    expect(prep.args[0]).toBe("-p");
+    expect(prep.args[1]).toBe("--input-format");
+    expect(prep.args[2]).toBe("stream-json");
+    expect(prep.args).toContain("--verbose");
+    expect(prep.args).toContain("--include-partial-messages");
+    // The token right after `-p` must be a flag (no positional prompt
+    // value snuck in between `-p` and `--input-format`).
+    expect(prep.args[1].startsWith("--")).toBe(true);
+  });
+
+  it("Kβ-9: optimizePrompt=true + cacheControl returns an error (rec #5 mutual exclusion)", () => {
+    const prep = prepareClaudeRequest({
+      ...BASE_CLAUDE_PARAMS,
+      optimizePrompt: true,
+      promptParts: { system: "S", task: "K", cacheControl: { system: true } },
+    } as never);
+    // Must be an error response, not a CliRequestPrep.
+    expect("args" in prep).toBe(false);
+    const r = prep as { content: Array<{ text: string }> };
+    expect(r.content[0].text).toMatch(/optimizePrompt.*incompatible|cacheControl/i);
   });
 });
 
@@ -338,14 +368,21 @@ describe("REGRESSIONS Kδ — executor + AsyncJobManager stdin (slice κ)", () =
     expect(result.stdout).toBe("kappa-payload\n");
   });
 
-  it("Kδ-2: executeCli WITHOUT stdin leaves stdio[0] as 'ignore' (regression — cat gets EOF immediately)", async () => {
-    // Without `stdin`, stdin[0] is "ignore"; `cat` reads EOF and exits 0
-    // with empty stdout. Catches the regression where stdin is always
-    // wired up to "pipe" (which would hang `cat` waiting for input).
-    const result = await executeCli("cat", []);
-    expect(result.code).toBe(0);
-    expect(result.stdout).toBe("");
-  });
+  it(
+    "Kδ-2: executeCli WITHOUT stdin leaves stdio[0] as 'ignore' (regression — cat gets EOF immediately)",
+    async () => {
+      // Without `stdin`, stdin[0] is "ignore"; `cat` reads EOF and
+      // exits 0 with empty stdout. Catches the regression where stdin
+      // is always wired up to "pipe" (which would hang `cat` waiting
+      // for input). Per-test 5s timeout — without it, the "always
+      // pipe" mutation would hang the suite until vitest's global
+      // timeout fires (Codex round-1 finding).
+      const result = await executeCli("cat", []);
+      expect(result.code).toBe(0);
+      expect(result.stdout).toBe("");
+    },
+    5000
+  );
 
   it("Kδ-3: AsyncJobManager dedup key includes stdin (two jobs with same args, different stdin do NOT collide)", () => {
     const mgr = new AsyncJobManager(noopLogger, undefined, new MemoryJobStore());

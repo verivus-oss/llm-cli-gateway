@@ -1432,6 +1432,30 @@ export function prepareClaudeRequest(
     );
   }
 
+  // Rec #5 (slice κ): refuse the optimizePrompt + cacheControl combo
+  // before running optimization. Optimization rewrites the assembled
+  // prompt text the flight-recorder logs, but the κ stdin payload is
+  // built from raw `promptParts` content blocks — letting both run
+  // produces a FR row whose `prompt` no longer matches what Claude
+  // actually received, AND any optimisation-driven text change would
+  // silently break Anthropic prefix-cache reuse on the next call.
+  const ccEarly = params.promptParts?.cacheControl;
+  const cacheControlRequestedEarly = !!(
+    ccEarly &&
+    (ccEarly.system || ccEarly.tools || ccEarly.context)
+  );
+  if (params.optimizePrompt && cacheControlRequestedEarly) {
+    return createErrorResponse(
+      params.operation,
+      1,
+      "",
+      corrId,
+      new Error(
+        "optimizePrompt is incompatible with promptParts.cacheControl (slice κ): optimization rewrites the assembled prompt text the flight recorder logs, while the cache_control payload is built from raw promptParts; the two would desync and break Anthropic prefix-cache reuse. Disable optimizePrompt when opting into cacheControl."
+      )
+    ) as ExtendedToolResponse;
+  }
+
   let effectivePrompt = assembledPrompt;
   if (params.optimizePrompt) {
     const optimized = optimizePromptText(effectivePrompt);
@@ -1471,14 +1495,14 @@ export function prepareClaudeRequest(
     }
   }
 
-  // Slice κ: detect explicit Anthropic `cache_control` opt-in on
-  // promptParts. When set, switch from the legacy positional
-  // `-p <prompt>` emission to `claude -p --input-format stream-json`
-  // and feed a JSON content-blocks payload via stdin. Non-κ callers
-  // (no cacheControl, or cacheControl with all flags false) take the
-  // existing positional path bit-for-bit.
-  const cc = params.promptParts?.cacheControl;
-  const cacheControlRequested = !!(cc && (cc.system || cc.tools || cc.context));
+  // Slice κ: switch from the legacy positional `-p <prompt>` emission
+  // to `claude -p --input-format stream-json` and feed a JSON
+  // content-blocks payload via stdin. Non-κ callers (no cacheControl,
+  // or cacheControl with all flags false) take the existing positional
+  // path bit-for-bit. `cacheControlRequestedEarly` was already computed
+  // above so the rec #5 guard could refuse the optimizePrompt + κ combo
+  // before optimization ran; reuse it here.
+  const cacheControlRequested = cacheControlRequestedEarly;
   let stdinPayload: string | undefined;
   let cacheControlBlocks: number | undefined;
 
@@ -3798,7 +3822,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .optional()
         .describe("Prompt text for Claude (mutually exclusive with promptParts)"),
       promptParts: PromptPartsSchema.optional().describe(
-        "Cache-aware structured prompt: { system?, tools?, context?, task }. Mutually exclusive with prompt. Stable parts hash into cache_state for prefix-discipline tracking."
+        "Cache-aware structured prompt: { system?, tools?, context?, task, cacheControl? }. Use for repeated calls that share a stable prefix — `system`/`tools`/`context` are the stable head; `task` is the volatile tail (never marked). Set `cacheControl: { system?: boolean, tools?: boolean, context?: boolean }` to opt into explicit Anthropic prefix caching via `--input-format stream-json` (slice κ). Requires `outputFormat: 'stream-json'` and hard-codes `ttl='1h'` (Anthropic rejects 5m blocks after Claude Code's 1h-marked session-wrap content). Mutually exclusive with `prompt`. The stable prefix hash is logged to the flight recorder for cache_state aggregates."
       ),
       model: z
         .string()
@@ -3806,8 +3830,10 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .describe("Model name or alias (e.g. sonnet, claude-sonnet-4-5-20250929, latest)"),
       outputFormat: z
         .enum(["text", "json", "stream-json"])
-        .default("text")
-        .describe("Output format (text|json|stream-json). stream-json: NDJSON with idle timeout."),
+        .default("stream-json")
+        .describe(
+          "Output format (text|json|stream-json). DEFAULT: stream-json — the gateway parses NDJSON usage events to extract input/output/cache_read/cache_creation tokens + cost + model, persists them to the flight recorder for cache_state aggregates, and still returns the assistant text. Override to 'text' only when you truly want unparsed stdout (loses observability)."
+        ),
       sessionId: z.string().optional().describe("Session ID (uses active if omitted)"),
       continueSession: z.boolean().default(false).describe("Continue active session"),
       createNewSession: z.boolean().default(false).describe("Force new session"),
@@ -5267,7 +5293,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .optional()
           .describe("Prompt text for Claude (mutually exclusive with promptParts)"),
         promptParts: PromptPartsSchema.optional().describe(
-          "Cache-aware structured prompt: { system?, tools?, context?, task }. Mutually exclusive with prompt. Stable parts hash into cache_state for prefix-discipline tracking."
+          "Cache-aware structured prompt: { system?, tools?, context?, task, cacheControl? }. Same semantics as claude_request: stable head (system/tools/context) + volatile tail (task). Set `cacheControl: { system?, tools?, context?: boolean }` to opt into explicit Anthropic prefix caching via `--input-format stream-json` (slice κ); requires `outputFormat: 'stream-json'` and hard-codes `ttl='1h'`. Mutually exclusive with `prompt`. Stable prefix hash logged to flight recorder."
         ),
         model: z
           .string()
@@ -5275,9 +5301,9 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .describe("Model name or alias (e.g. sonnet, claude-sonnet-4-5-20250929, latest)"),
         outputFormat: z
           .enum(["text", "json", "stream-json"])
-          .default("text")
+          .default("stream-json")
           .describe(
-            "Output format (text|json|stream-json). stream-json: NDJSON with idle timeout."
+            "Output format (text|json|stream-json). DEFAULT: stream-json — same rationale as claude_request: keeps usage/cache/cost observable for cache_state aggregates. Override to 'text' only when raw stdout is required (loses observability)."
           ),
         sessionId: z.string().optional().describe("Session ID (uses active if omitted)"),
         continueSession: z.boolean().default(false).describe("Continue active session"),
