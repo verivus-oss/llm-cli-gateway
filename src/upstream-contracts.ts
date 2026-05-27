@@ -455,6 +455,12 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       "maxTurns",
       // Phase 4 slice ζ
       "workingDir",
+      // Phase 4 slice θ — Grok HIGH parity
+      "sandbox",
+      "rules",
+      "systemPromptOverride",
+      "allow",
+      "deny",
     ],
     flags: {
       "-p": { arity: "one", description: "Prompt text" },
@@ -488,6 +494,34 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         arity: "one",
         description: "Working directory for the invocation (Phase 4 slice ζ)",
       },
+      // Phase 4 slice θ — Grok HIGH parity. `--sandbox` is freeform per
+      // `grok --help` on 0.1.210 (no `[possible values: …]` list, unlike
+      // --effort / --permission-mode / --output-format), so we register
+      // it without a `values` constraint.
+      "--sandbox": {
+        arity: "one",
+        description:
+          "Sandbox profile for filesystem + network access (Phase 4 slice θ; freeform passthrough; env: GROK_SANDBOX)",
+      },
+      "--rules": {
+        arity: "one",
+        description:
+          "Extra rules appended to the system prompt; supports `@file` prefix (Phase 4 slice θ)",
+      },
+      "--system-prompt-override": {
+        arity: "one",
+        description: "Replace the agent's system prompt entirely (Phase 4 slice θ)",
+      },
+      "--allow": {
+        arity: "one",
+        description:
+          "Permission allow rule (Phase 4 slice θ; repeat once per rule per `grok --help`)",
+      },
+      "--deny": {
+        arity: "one",
+        description:
+          "Permission deny rule (Phase 4 slice θ; repeat once per rule per `grok --help`)",
+      },
     },
     env: {},
     conformanceFixtures: [
@@ -519,6 +553,36 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         id: "grok-working-dir",
         description: "Phase 4 slice ζ: --cwd <DIR> is accepted",
         args: ["-p", "hello", "--cwd", "/tmp/work"],
+        expect: "pass",
+      },
+      {
+        id: "grok-sandbox",
+        description: "Phase 4 slice θ: --sandbox <PROFILE> accepted (freeform)",
+        args: ["-p", "hello", "--sandbox", "workspace-write"],
+        expect: "pass",
+      },
+      {
+        id: "grok-rules",
+        description: "Phase 4 slice θ: --rules <RULES> accepted (@file prefix preserved)",
+        args: ["-p", "hello", "--rules", "@./rules.md"],
+        expect: "pass",
+      },
+      {
+        id: "grok-system-prompt-override",
+        description: "Phase 4 slice θ: --system-prompt-override <PROMPT> accepted",
+        args: ["-p", "hello", "--system-prompt-override", "You are a tester"],
+        expect: "pass",
+      },
+      {
+        id: "grok-allow-repeated",
+        description: "Phase 4 slice θ: repeated --allow <RULE> accepted",
+        args: ["-p", "hello", "--allow", "bash", "--allow", "edit"],
+        expect: "pass",
+      },
+      {
+        id: "grok-deny-repeated",
+        description: "Phase 4 slice θ: repeated --deny <RULE> accepted",
+        args: ["-p", "hello", "--deny", "write", "--deny", "kill"],
         expect: "pass",
       },
     ],
