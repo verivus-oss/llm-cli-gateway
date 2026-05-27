@@ -2,6 +2,56 @@
 
 All notable changes to the llm-cli-gateway project.
 
+## [1.10.0] - 2026-05-27 — Phase 4 slice ε (Gemini `-o stream-json` enum widening)
+
+Ships the fifth Phase 4 slice: Gemini's NDJSON event-stream output format
+(`-o stream-json`) is now reachable from `gemini_request` and
+`gemini_request_async`. Four commits land together: the feature wiring, a
+contract-table widening, a test-veracity regression suite, and a follow-up
+test fix driven by the multi-LLM round-1 audit.
+
+### Added — `outputFormat: "stream-json"` for Gemini
+
+- `gemini_request` and `gemini_request_async` `outputFormat` enums widened
+  from `text | json` to `text | json | stream-json`.
+- `prepareGeminiRequest` emits `-o stream-json` when the new value is set.
+  No `--include-partial-messages` analogue is required: Gemini already
+  streams stdout in real time across all output modes (covered by
+  `CLI_IDLE_TIMEOUTS.gemini = 600_000`).
+- New `parseGeminiStreamJson` parser consumes the NDJSON event stream
+  (`init` / `message` / `result` lines), concatenates assistant `delta`
+  messages into the response, and extracts
+  `input_tokens` / `output_tokens` / `cached` → `cache_read_tokens` from
+  the terminal `result.stats` event.
+- `extractUsageAndCost("gemini", _, "stream-json")` routes to the new
+  parser so usage tokens reach the flight recorder on the stream-json
+  path, matching the existing `-o json` behaviour.
+- `UPSTREAM_CLI_CONTRACTS.gemini.flags["-o"].values` widened to
+  `["json", "stream-json"]`; two new conformance fixtures
+  (`gemini-stream-json` passing, `gemini-output-format-invalid` failing
+  for `-o ndjson`) pin the enum bound.
+
+### Test-veracity audit
+
+Per the standing protocol established with v1.9.0
+(`feedback_test_veracity_audit_protocol`), this slice's tests were
+audited by Codex + Gemini + Grok + Mistral in async parallel with
+mandatory mutation-probe execution. Round 1 found one real gap
+(`Eε-4` only checked fixture presence/shape — P-Eε-1 left it green);
+closed in commit `4a78f9c` by running the fixture's args through
+`validateUpstreamCliArgs` inside the same `it()` block. Round 2
+delivered unanimous UNCONDITIONAL APPROVE across all four reviewers,
+with site-by-site probe evidence for the contested `Eα` registered-schema
+helper. Spec at `docs/plans/test-veracity-audit-slice-epsilon.spec.md`.
+
+Test count: 771 → 795 → 796 (24 + 1 new across two files).
+
+### Known caveats
+
+- The `npm run check` script still does not include `format:check` (a
+  gap first flagged in the v1.8.0 release notes). Run both locally
+  before pushing; CI runs format:check separately.
+
 ## [1.9.0] - 2026-05-27 — Phase 4 slice δ (budget/max-turns parity) + retroactive α/γ contract closure
 
 Ships the fourth Phase 4 slice (budget/max-turns parity for Grok and Mistral),

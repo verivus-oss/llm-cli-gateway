@@ -234,10 +234,7 @@ describe("REGRESSIONS Eε — gemini contract accepts -o stream-json", () => {
     // validateUpstreamCliArgs. If `stream-json` were removed from the
     // -o enum (P-Eε-1) this assertion goes red even though the fixture
     // object still exists in the array — closing the round-1 gap.
-    const validation = validateUpstreamCliArgs(
-      "gemini",
-      fixture?.args as readonly string[]
-    );
+    const validation = validateUpstreamCliArgs("gemini", fixture?.args as readonly string[]);
     expect(validation.ok, JSON.stringify(validation.violations)).toBe(true);
   });
 });
