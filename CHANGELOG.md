@@ -2,6 +2,57 @@
 
 All notable changes to the llm-cli-gateway project.
 
+## [1.13.2] - 2026-05-27 — Claude stream-json regression fix (--verbose now required)
+
+Patch release. Single user-facing fix to `claude_request` /
+`claude_request_async` when called with `outputFormat: "stream-json"`.
+
+### Fixed
+
+- Claude CLI 2.x rejects `--print --output-format=stream-json` without
+  `--verbose` ("When using --print, --output-format=stream-json requires
+  --verbose"). The gateway was emitting `--output-format stream-json
+  --include-partial-messages` without `--verbose`, so every claude
+  request configured for stream-json (sync or async) was exiting 1.
+- `prepareClaudeRequest` now pushes `--verbose` as part of the
+  stream-json arg group. `--verbose` only affects what claude writes to
+  stderr; the stream-json stdout payload is unchanged, so the existing
+  NDJSON parser in `src/stream-json-parser.ts` needs no changes.
+- This was the practical reason the flight recorder's
+  `cache_read_tokens` / `cache_creation_tokens` columns stayed NULL for
+  claude rows — token capture is gated on a successful stream-json run.
+  With this fix, callers who opt into `outputFormat: "stream-json"` get
+  Anthropic cache_read_input_tokens / cache_creation_input_tokens
+  recorded in the FR for the first time since the CLI started enforcing
+  `--verbose`.
+- Direct CLI verification: `claude -p ... --output-format stream-json
+  --verbose --include-partial-messages` returned a clean NDJSON stream
+  with `cache_read_input_tokens: 17978` and
+  `cache_creation_input_tokens: 17435` on a 1-hour-cache-enabled
+  account. The parser path is correct; only the missing flag was
+  blocking it.
+
+### Tests
+
+- New regression: `prepareClaudeRequest` emits `--verbose` when
+  `outputFormat: "stream-json"` and does NOT emit it for `text` / `json`
+  (src/__tests__/claude-handler.test.ts).
+- Updated `upstream-contracts.test.ts` "accepts a valid Claude argv
+  emitted by the gateway" to pin the three-flag combo so a future
+  removal of `--verbose` fails at the contract gate.
+- New conformance fixture `claude-stream-json-requires-verbose` in
+  `src/upstream-contracts.ts` registering `--verbose` and asserting the
+  combo is accepted.
+- 886 tests pass (884 prior + 2 new). Build clean.
+
+### Why a patch release
+
+The regression silently broke a documented MCP API surface; users
+explicitly opting into stream-json (for token observability or
+upcoming cache_control work in slice κ) were getting exit-1 errors
+with no obvious gateway-side cause. Same shape as v1.13.1 (single
+focused fix, no behaviour change for callers using `text` / `json`).
+
 ## [1.13.1] - 2026-05-27 — Installer Windows build fix (no code changes)
 
 Patch release. **No changes to the gateway, MCP tools, or any provider

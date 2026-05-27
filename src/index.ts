@@ -1451,12 +1451,7 @@ export function prepareClaudeRequest(
     // --verbose". --verbose only affects what claude logs to stderr; the
     // stream-json stdout payload is unchanged, so the gateway's NDJSON
     // parser is unaffected.
-    args.push(
-      "--output-format",
-      "stream-json",
-      "--include-partial-messages",
-      "--verbose"
-    );
+    args.push("--output-format", "stream-json", "--include-partial-messages", "--verbose");
   }
   if (params.allowedTools && params.allowedTools.length > 0) {
     sanitizeCliArgValues(params.allowedTools, "allowedTools");
