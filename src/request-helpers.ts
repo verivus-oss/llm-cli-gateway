@@ -595,6 +595,20 @@ export interface ClaudeHighImpactFlagsInput {
   maxTurns?: number;
   effort?: ClaudeEffortLevel;
   excludeDynamicSystemPromptSections?: boolean;
+  /**
+   * Phase 4 slice η — Claude `--fallback-model <model>`. Routes overloaded-model
+   * requests to the named fallback. Only effective with `--print` (we always pass
+   * `-p`, so no extra gating required here).
+   */
+  fallbackModel?: string;
+  /**
+   * Phase 4 slice η — Claude `--json-schema <schema>`. Per `claude --help`, the
+   * argument is the JSON Schema *literal*, not a path. Object values are
+   * `JSON.stringify`-d; string values are passed verbatim (caller already wrote
+   * a JSON literal). No temp file lifecycle needed (contrast with Codex
+   * `--output-schema`, which takes a path).
+   */
+  jsonSchema?: string | Record<string, unknown>;
 }
 
 /**
@@ -633,6 +647,14 @@ export function prepareClaudeHighImpactFlags(input: ClaudeHighImpactFlagsInput):
   }
   if (input.excludeDynamicSystemPromptSections) {
     args.push("--exclude-dynamic-system-prompt-sections");
+  }
+  if (input.fallbackModel !== undefined) {
+    args.push("--fallback-model", input.fallbackModel);
+  }
+  if (input.jsonSchema !== undefined) {
+    const schemaArg =
+      typeof input.jsonSchema === "string" ? input.jsonSchema : JSON.stringify(input.jsonSchema);
+    args.push("--json-schema", schemaArg);
   }
 
   return args;

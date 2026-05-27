@@ -1362,6 +1362,9 @@ export function prepareClaudeRequest(
     maxTurns?: number;
     effort?: ClaudeEffortLevel;
     excludeDynamicSystemPromptSections?: boolean;
+    // Phase 4 slice η — Claude reliability + structured-output parity
+    fallbackModel?: string;
+    jsonSchema?: string | Record<string, unknown>;
   },
   runtime: GatewayServerRuntime = resolveGatewayServerRuntime()
 ): CliRequestPrep | ExtendedToolResponse {
@@ -1496,6 +1499,8 @@ export function prepareClaudeRequest(
       maxTurns: params.maxTurns,
       effort: params.effort,
       excludeDynamicSystemPromptSections: params.excludeDynamicSystemPromptSections,
+      fallbackModel: params.fallbackModel,
+      jsonSchema: params.jsonSchema,
     })
   );
 
@@ -3673,6 +3678,20 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .describe(
           "Claude --exclude-dynamic-system-prompt-sections: trim dynamic context blocks from the system prompt."
         ),
+      // Phase 4 slice η — Claude reliability + structured-output parity
+      fallbackModel: z
+        .string()
+        .min(1)
+        .optional()
+        .describe(
+          "Claude --fallback-model: model name to auto-fallback to when the default model is overloaded (effective only with --print, which the gateway always uses)."
+        ),
+      jsonSchema: z
+        .union([z.string(), z.record(z.unknown())])
+        .optional()
+        .describe(
+          "Claude --json-schema: JSON Schema literal (NOT a path) constraining structured output. Object values are JSON.stringify-d; string values are passed verbatim. Use with outputFormat='json'."
+        ),
       approvalStrategy: z
         .enum(["legacy", "mcp_managed"])
         .default("legacy")
@@ -3727,6 +3746,8 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       maxTurns,
       effort,
       excludeDynamicSystemPromptSections,
+      fallbackModel,
+      jsonSchema,
       approvalStrategy,
       approvalPolicy,
       mcpServers,
@@ -3775,6 +3796,8 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           maxTurns,
           effort,
           excludeDynamicSystemPromptSections,
+          fallbackModel,
+          jsonSchema,
         },
         runtime
       );
@@ -5025,6 +5048,20 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .describe(
             "Claude --exclude-dynamic-system-prompt-sections: trim dynamic context blocks from the system prompt."
           ),
+        // Phase 4 slice η — Claude reliability + structured-output parity
+        fallbackModel: z
+          .string()
+          .min(1)
+          .optional()
+          .describe(
+            "Claude --fallback-model: model name to auto-fallback to when the default model is overloaded (effective only with --print, which the gateway always uses)."
+          ),
+        jsonSchema: z
+          .union([z.string(), z.record(z.unknown())])
+          .optional()
+          .describe(
+            "Claude --json-schema: JSON Schema literal (NOT a path) constraining structured output. Object values are JSON.stringify-d; string values are passed verbatim. Use with outputFormat='json'."
+          ),
         approvalStrategy: z
           .enum(["legacy", "mcp_managed"])
           .default("legacy")
@@ -5078,6 +5115,8 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         maxTurns,
         effort,
         excludeDynamicSystemPromptSections,
+        fallbackModel,
+        jsonSchema,
         approvalStrategy,
         approvalPolicy,
         mcpServers,
@@ -5124,6 +5163,8 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             maxTurns,
             effort,
             excludeDynamicSystemPromptSections,
+            fallbackModel,
+            jsonSchema,
           },
           runtime
         );
