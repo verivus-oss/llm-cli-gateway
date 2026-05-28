@@ -3374,8 +3374,7 @@ export async function handleGrokRequest(
     if (worktreeResolution.worktreePath) {
       const first = response.content[0];
       if (first && first.type === "text") {
-        first.text =
-          formatWorktreePrefix(worktreeResolution.worktreePath) + first.text;
+        first.text = formatWorktreePrefix(worktreeResolution.worktreePath) + first.text;
       }
     }
     safeFlightComplete(
@@ -3776,8 +3775,7 @@ export async function handleMistralRequest(
     if (worktreeResolution.worktreePath) {
       const first = response.content[0];
       if (first && first.type === "text") {
-        first.text =
-          formatWorktreePrefix(worktreeResolution.worktreePath) + first.text;
+        first.text = formatWorktreePrefix(worktreeResolution.worktreePath) + first.text;
       }
     }
     safeFlightComplete(
@@ -4069,13 +4067,7 @@ export async function handleCodexRequestAsync(
       );
     } catch (err) {
       runPrepCleanupLocally();
-      return createErrorResponse(
-        "codex_request_async",
-        1,
-        "",
-        corrId,
-        err as Error
-      );
+      return createErrorResponse("codex_request_async", 1, "", corrId, err as Error);
     }
 
     // Start job only after all session I/O succeeds. If startJob throws before
@@ -4610,8 +4602,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           if (worktreeResolution.worktreePath) {
             const first = streamResponse.content[0];
             if (first && first.type === "text") {
-              first.text =
-                formatWorktreePrefix(worktreeResolution.worktreePath) + first.text;
+              first.text = formatWorktreePrefix(worktreeResolution.worktreePath) + first.text;
             }
           }
           return streamResponse;
@@ -4644,8 +4635,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         if (worktreeResolution.worktreePath) {
           const first = nonStreamResponse.content[0];
           if (first && first.type === "text") {
-            first.text =
-              formatWorktreePrefix(worktreeResolution.worktreePath) + first.text;
+            first.text = formatWorktreePrefix(worktreeResolution.worktreePath) + first.text;
           }
         }
         return nonStreamResponse;
@@ -4913,11 +4903,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       // the only reuse key.
       let worktreeResolution: ResolvedWorktree = {};
       try {
-        worktreeResolution = await resolveWorktreeForRequest(
-          worktree,
-          sessionId,
-          runtime
-        );
+        worktreeResolution = await resolveWorktreeForRequest(worktree, sessionId, runtime);
       } catch (err) {
         return createErrorResponse("codex_request", 1, "", corrId, err as Error);
       }
@@ -5025,8 +5011,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         if (worktreeResolution.worktreePath) {
           const first = codexResponse.content[0];
           if (first && first.type === "text") {
-            first.text =
-              formatWorktreePrefix(worktreeResolution.worktreePath) + first.text;
+            first.text = formatWorktreePrefix(worktreeResolution.worktreePath) + first.text;
           }
         }
         return codexResponse;
@@ -5999,13 +5984,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
               runtime
             );
           } catch (err) {
-            return createErrorResponse(
-              "claude_request_async",
-              1,
-              "",
-              corrId,
-              err as Error
-            );
+            return createErrorResponse("claude_request_async", 1, "", corrId, err as Error);
           }
 
           // Idle timeout only for stream-json (text/json produce no output until done)

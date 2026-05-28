@@ -129,7 +129,9 @@ async function execGit(
 async function listExistingWorktreePaths(repoRoot: string, logger: Logger): Promise<Set<string>> {
   const result = await execGit(repoRoot, ["worktree", "list", "--porcelain"], logger);
   if (result.code !== 0) {
-    throw new WorktreeError(`git worktree list failed (code ${result.code}): ${result.stderr.trim()}`);
+    throw new WorktreeError(
+      `git worktree list failed (code ${result.code}): ${result.stderr.trim()}`
+    );
   }
   const paths = new Set<string>();
   for (const line of result.stdout.split("\n")) {
@@ -160,7 +162,11 @@ export async function createWorktree(opts: CreateWorktreeOptions): Promise<Workt
   }
 
   const refArg = opts.ref ?? "HEAD";
-  const revParse = await execGit(opts.repoRoot, ["rev-parse", "--verify", `${refArg}^{commit}`], logger);
+  const revParse = await execGit(
+    opts.repoRoot,
+    ["rev-parse", "--verify", `${refArg}^{commit}`],
+    logger
+  );
   if (revParse.code !== 0) {
     throw new WorktreeError(
       `git rev-parse ${refArg} failed (code ${revParse.code}): ${revParse.stderr.trim()}`
@@ -192,10 +198,7 @@ export async function createWorktree(opts: CreateWorktreeOptions): Promise<Workt
     // registration.
     const prune = await execGit(opts.repoRoot, ["worktree", "prune"], logger);
     if (prune.code !== 0) {
-      logWarn(
-        logger,
-        `git worktree prune failed before creating ${name}: ${prune.stderr.trim()}`
-      );
+      logWarn(logger, `git worktree prune failed before creating ${name}: ${prune.stderr.trim()}`);
     }
   }
 
@@ -229,10 +232,7 @@ export async function createWorktree(opts: CreateWorktreeOptions): Promise<Workt
  * never blocks on git.
  */
 export function createWorktreeSessionCleanupHook(logger: Logger) {
-  return async (session: {
-    id: string;
-    metadata?: Record<string, unknown>;
-  }): Promise<void> => {
+  return async (session: { id: string; metadata?: Record<string, unknown> }): Promise<void> => {
     const meta = session.metadata ?? {};
     const worktreePath = typeof meta.worktreePath === "string" ? meta.worktreePath : undefined;
     if (!worktreePath) return;

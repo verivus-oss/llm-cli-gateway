@@ -64,7 +64,11 @@ export class FileSessionManager {
   private readonly cleanupHook?: SessionCleanupHook;
   private readonly logger: Logger;
 
-  constructor(customPath?: string, sessionTtlMs?: number, opts?: { cleanupHook?: SessionCleanupHook; logger?: Logger }) {
+  constructor(
+    customPath?: string,
+    sessionTtlMs?: number,
+    opts?: { cleanupHook?: SessionCleanupHook; logger?: Logger }
+  ) {
     this.sessionTtlMs = sessionTtlMs ?? DEFAULT_SESSION_TTL_SECONDS * 1000;
     this.storagePath = customPath || join(homedir(), ".llm-cli-gateway", "sessions.json");
     this.cleanupHook = opts?.cleanupHook;
