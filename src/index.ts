@@ -3905,6 +3905,8 @@ export async function handleCodexRequestAsync(
     // Phase 4 slice ζ — Codex working-dir + add-dir parity.
     workingDir?: string;
     addDir?: string[];
+    /** Slice λ: run this request inside a gateway-owned git worktree. */
+    worktree?: boolean | { name?: string; ref?: string };
   }
 ): Promise<ExtendedToolResponse> {
   const runtime = resolveHandlerRuntime(deps);
@@ -3981,6 +3983,27 @@ export async function handleCodexRequestAsync(
       effectiveSessionId = newSession.id;
     }
 
+    // Slice λ: resolve worktree directive after session I/O so resume reuse
+    // can read metadata.worktreePath. A pre-startJob failure here means
+    // prepCleanup is still owned locally; run it before returning.
+    let worktreeResolution: ResolvedWorktree = {};
+    try {
+      worktreeResolution = await resolveWorktreeForRequest(
+        params.worktree,
+        effectiveSessionId,
+        runtime
+      );
+    } catch (err) {
+      runPrepCleanupLocally();
+      return createErrorResponse(
+        "codex_request_async",
+        1,
+        "",
+        corrId,
+        err as Error
+      );
+    }
+
     // Start job only after all session I/O succeeds. If startJob throws before
     // registering the record, ownership stays here and we run it in the catch.
     assertUpstreamCliArgs("codex", args);
@@ -3997,7 +4020,7 @@ export async function handleCodexRequestAsync(
         "codex",
         args,
         corrId,
-        undefined,
+        worktreeResolution.cwd,
         resolveIdleTimeout("codex", params.idleTimeoutMs),
         params.outputFormat,
         params.forceRefresh,
@@ -4027,6 +4050,9 @@ export async function handleCodexRequestAsync(
     };
     if (prep.reviewIntegrity && prep.reviewIntegrity.violations.length > 0) {
       asyncResponse.reviewIntegrity = prep.reviewIntegrity;
+    }
+    if (worktreeResolution.worktreePath) {
+      asyncResponse.worktreePath = worktreeResolution.worktreePath;
     }
 
     return {
@@ -4710,6 +4736,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .describe(
           "Codex --add-dir <DIR>: additional writable workspace directories. Emitted once per entry on new sessions only; resume inherits the original session's writable-dir policy."
         ),
+      worktree: WORKTREE_SCHEMA.optional(),
     },
     async ({
       prompt,
@@ -4742,6 +4769,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       ignoreRules,
       workingDir,
       addDir,
+      worktree,
     }) => {
       const startTime = Date.now();
       const prep = prepareCodexRequest(
@@ -4805,6 +4833,21 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       const prepCleanup =
         "cleanup" in prep && typeof prep.cleanup === "function" ? prep.cleanup : undefined;
 
+      // Slice λ: resolve worktree directive into spawn cwd. Codex has no
+      // in-handler session resolution prior to spawn (session lookup is
+      // lazy via `codex exec resume`), so the user-supplied sessionId is
+      // the only reuse key.
+      let worktreeResolution: ResolvedWorktree = {};
+      try {
+        worktreeResolution = await resolveWorktreeForRequest(
+          worktree,
+          sessionId,
+          runtime
+        );
+      } catch (err) {
+        return createErrorResponse("codex_request", 1, "", corrId, err as Error);
+      }
+
       try {
         const codexSyncFrHandoff = buildAsyncFlightRecorderHandoff(
           "codex",
@@ -4823,7 +4866,9 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           undefined,
           prepCleanup,
           codexSyncFrHandoff.flightRecorderEntry,
-          codexSyncFrHandoff.extractUsage
+          codexSyncFrHandoff.extractUsage,
+          undefined,
+          worktreeResolution.cwd
         );
 
         // Deferred — job still running, return async reference. Cleanup
@@ -4892,7 +4937,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           },
           runtime
         );
-        return buildCliResponse(
+        const codexResponse = buildCliResponse(
           "codex",
           stdout,
           optimizeResponse,
@@ -4903,6 +4948,14 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           undefined,
           outputFormat
         );
+        if (worktreeResolution.worktreePath) {
+          const first = codexResponse.content[0];
+          if (first && first.type === "text") {
+            first.text =
+              formatWorktreePrefix(worktreeResolution.worktreePath) + first.text;
+          }
+        }
+        return codexResponse;
       } catch (error) {
         const elapsedMs = Math.max(0, Date.now() - startTime);
         logger.info(`[${corrId}] codex_request threw exception after ${elapsedMs}ms`);
@@ -6058,6 +6111,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .describe(
             "Codex --add-dir <DIR>: additional writable workspace directories (repeat per entry). New sessions only."
           ),
+        worktree: WORKTREE_SCHEMA.optional(),
       },
       async ({
         prompt,
@@ -6089,6 +6143,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         ignoreRules,
         workingDir,
         addDir,
+        worktree,
       }) => {
         return handleCodexRequestAsync(
           { sessionManager, asyncJobManager, logger, runtime },
@@ -6122,6 +6177,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             ignoreRules,
             workingDir,
             addDir,
+            worktree,
           }
         );
       }
