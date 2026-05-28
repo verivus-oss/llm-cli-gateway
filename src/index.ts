@@ -2808,6 +2808,8 @@ export interface GeminiRequestParams {
   attachments?: string[];
   /** Phase 4 slice γ: emit `--skip-trust` for fresh-workspace headless runs. */
   skipTrust?: boolean;
+  /** Slice λ: run this request inside a gateway-owned git worktree. */
+  worktree?: boolean | { name?: string; ref?: string };
 }
 
 export interface HandlerDeps {
@@ -2906,6 +2908,17 @@ export async function handleGeminiRequest(
     const userProvidedSession = sessionPlan.resumed;
     const effectiveSessionIdHint = sessionPlan.resumed ? params.sessionId : undefined;
 
+    let worktreeResolution: ResolvedWorktree = {};
+    try {
+      worktreeResolution = await resolveWorktreeForRequest(
+        params.worktree,
+        effectiveSessionIdHint,
+        runtime
+      );
+    } catch (err) {
+      return createErrorResponse("gemini_request", 1, "", corrId, err as Error);
+    }
+
     const geminiFrHandoff = buildAsyncFlightRecorderHandoff(
       "gemini",
       prep,
@@ -2923,7 +2936,8 @@ export async function handleGeminiRequest(
       undefined,
       undefined,
       geminiFrHandoff.flightRecorderEntry,
-      geminiFrHandoff.extractUsage
+      geminiFrHandoff.extractUsage,
+      worktreeResolution.cwd
     );
 
     // Deferred — job still running, return async reference
@@ -2983,6 +2997,12 @@ export async function handleGeminiRequest(
       userProvidedSession,
       params.outputFormat
     );
+    if (worktreeResolution.worktreePath) {
+      const first = response.content[0];
+      if (first && first.type === "text") {
+        first.text = formatWorktreePrefix(worktreeResolution.worktreePath) + first.text;
+      }
+    }
     const geminiUsage = extractUsageAndCost("gemini", stdout, params.outputFormat);
     safeFlightComplete(
       corrId,
@@ -3084,6 +3104,17 @@ export async function handleGeminiRequestAsync(
       await deps.sessionManager.updateSessionUsage(effectiveSessionId);
     }
 
+    let worktreeResolution: ResolvedWorktree = {};
+    try {
+      worktreeResolution = await resolveWorktreeForRequest(
+        params.worktree,
+        effectiveSessionId,
+        runtime
+      );
+    } catch (err) {
+      return createErrorResponse("gemini_request_async", 1, "", corrId, err as Error);
+    }
+
     // Start job only after all session I/O succeeds. U23: forward outputFormat
     // so AsyncJobManager records it in the durable store (the manager also
     // surfaces it in the snapshot).
@@ -3101,7 +3132,7 @@ export async function handleGeminiRequestAsync(
       "gemini",
       args,
       corrId,
-      undefined,
+      worktreeResolution.cwd,
       resolveIdleTimeout("gemini", params.idleTimeoutMs),
       params.outputFormat,
       params.forceRefresh,
@@ -3123,6 +3154,9 @@ export async function handleGeminiRequestAsync(
     };
     if (prep.reviewIntegrity && prep.reviewIntegrity.violations.length > 0) {
       asyncResponse.reviewIntegrity = prep.reviewIntegrity;
+    }
+    if (worktreeResolution.worktreePath) {
+      asyncResponse.worktreePath = worktreeResolution.worktreePath;
     }
 
     return {
@@ -5093,6 +5127,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .describe(
           "Emit `--skip-trust` so Gemini trusts the workspace for this session and skips the interactive trust prompt (Phase 4 slice γ). Required for headless runs in fresh workspaces."
         ),
+      worktree: WORKTREE_SCHEMA.optional(),
     },
     async ({
       prompt,
@@ -5118,6 +5153,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       adminPolicyFiles,
       attachments,
       skipTrust,
+      worktree,
     }) => {
       return handleGeminiRequest(
         { sessionManager, logger, runtime },
@@ -5145,6 +5181,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           adminPolicyFiles,
           attachments,
           skipTrust,
+          worktree,
         }
       );
     }
@@ -6123,6 +6160,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .describe(
             "Emit `--skip-trust` so Gemini trusts the workspace for this session and skips the interactive trust prompt (Phase 4 slice γ). Required for headless runs in fresh workspaces."
           ),
+        worktree: WORKTREE_SCHEMA.optional(),
       },
       async ({
         prompt,
@@ -6147,6 +6185,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         adminPolicyFiles,
         attachments,
         skipTrust,
+        worktree,
       }) => {
         return handleGeminiRequestAsync(
           { sessionManager, asyncJobManager, logger, runtime },
@@ -6173,6 +6212,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             adminPolicyFiles,
             attachments,
             skipTrust,
+            worktree,
           }
         );
       }
