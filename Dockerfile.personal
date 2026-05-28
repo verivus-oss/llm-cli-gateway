@@ -13,8 +13,7 @@
 # set PATH if you want them available inside the container; otherwise use
 # the gateway only for tools that don't require provider CLIs.
 
-ARG NODE_VERSION=20
-FROM node:${NODE_VERSION}-bookworm-slim AS build
+FROM node:20-bookworm-slim@sha256:2cf067cfed83d5ea958367df9f966191a942351a2df77d6f0193e162b5febfc0 AS build
 
 WORKDIR /app
 COPY package.json package-lock.json* ./
@@ -27,7 +26,7 @@ COPY setup ./setup
 RUN npm run build && \
     npm prune --omit=dev
 
-FROM node:${NODE_VERSION}-bookworm-slim AS runtime
+FROM node:20-bookworm-slim@sha256:2cf067cfed83d5ea958367df9f966191a942351a2df77d6f0193e162b5febfc0 AS runtime
 
 # Non-root user owning the managed app directory.
 RUN useradd --create-home --uid 1500 --shell /bin/bash gateway
