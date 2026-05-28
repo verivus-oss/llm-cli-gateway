@@ -91,7 +91,7 @@ jobs:
         # credential persistence through artifacts.
         run: |
           set -euo pipefail
-          python3 -m pip install --user 'zizmor==1.25.2'
+          python3 -m pip install --user --require-hashes -r .github/requirements/security-tools.txt
           # Default min-severity (low+); informational findings (job
           # names, concurrency limits, superfluous actions) are tracked
           # but not enforced — those don't move the security needle.
@@ -179,7 +179,6 @@ jobs:
         # Defense in depth.
         run: |
           set -euo pipefail
-          python3 -m pip install --user 'ruff==0.14.5'
           # Rules selected:
           #   F = pyflakes — real bugs (unused imports, undefined names)
           #   S = flake8-bandit — security
@@ -197,7 +196,6 @@ jobs:
         # crypto, hardcoded credentials, path traversal patterns.
         run: |
           set -euo pipefail
-          python3 -m pip install --user 'bandit==1.9.4'
           # --skip B404: this fires on every `import subprocess`
           # regardless of safe usage. The call-site checks (B602, B603,
           # B607) catch actual issues; B404 is informational noise.

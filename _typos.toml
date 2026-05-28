@@ -47,6 +47,7 @@ extend-exclude = [
   # (anti-pattern dictionaries, historical incident logs, etc.).
   "docs/personal-mcp/**",
   "docs/reviews/**",
+  "docs/plans/**/*.jsonl",
   "DOGFOODING_*.md",
   "PRODUCT_REVIEWS.md",
   "RELEASE_NOTES_*.md",
