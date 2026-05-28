@@ -3580,6 +3580,8 @@ export interface MistralRequestParams {
   workingDir?: string;
   /** Phase 4 slice ζ: Vibe `--add-dir <DIR>` repeatable add-dir parity. */
   addDir?: string[];
+  /** Slice λ: run this request inside a gateway-owned git worktree. */
+  worktree?: boolean | { name?: string; ref?: string };
 }
 
 export async function handleMistralRequest(
@@ -3642,6 +3644,17 @@ export async function handleMistralRequest(
     });
     args.push(...sessionResult.resumeArgs);
 
+    let worktreeResolution: ResolvedWorktree = {};
+    try {
+      worktreeResolution = await resolveWorktreeForRequest(
+        params.worktree,
+        sessionResult.effectiveSessionId,
+        runtime
+      );
+    } catch (err) {
+      return createErrorResponse("mistral_request", 1, "", corrId, err as Error);
+    }
+
     const mistralFrHandoff = buildAsyncFlightRecorderHandoff(
       "mistral",
       prep,
@@ -3659,7 +3672,9 @@ export async function handleMistralRequest(
       mistralEnv,
       undefined,
       mistralFrHandoff.flightRecorderEntry,
-      mistralFrHandoff.extractUsage
+      mistralFrHandoff.extractUsage,
+      undefined,
+      worktreeResolution.cwd
     );
 
     if (isDeferredResponse(result)) {
@@ -3690,7 +3705,9 @@ export async function handleMistralRequest(
           retryPrep.env,
           undefined,
           mistralFrHandoff.flightRecorderEntry,
-          mistralFrHandoff.extractUsage
+          mistralFrHandoff.extractUsage,
+          undefined,
+          worktreeResolution.cwd
         );
         if (isDeferredResponse(result)) {
           return buildDeferredToolResponse(result, sessionResult.effectiveSessionId);
@@ -3756,6 +3773,13 @@ export async function handleMistralRequest(
       sessionResult.userProvidedSession,
       params.outputFormat
     );
+    if (worktreeResolution.worktreePath) {
+      const first = response.content[0];
+      if (first && first.type === "text") {
+        first.text =
+          formatWorktreePrefix(worktreeResolution.worktreePath) + first.text;
+      }
+    }
     safeFlightComplete(
       corrId,
       {
@@ -3858,6 +3882,17 @@ export async function handleMistralRequestAsync(
       effectiveSessionId = newSession.id;
     }
 
+    let worktreeResolution: ResolvedWorktree = {};
+    try {
+      worktreeResolution = await resolveWorktreeForRequest(
+        params.worktree,
+        effectiveSessionId,
+        runtime
+      );
+    } catch (err) {
+      return createErrorResponse("mistral_request_async", 1, "", corrId, err as Error);
+    }
+
     assertUpstreamCliArgs("mistral", args);
     assertUpstreamCliEnv("mistral", mistralEnv);
     const mistralAsyncFrHandoff = buildAsyncFlightRecorderHandoff(
@@ -3870,7 +3905,7 @@ export async function handleMistralRequestAsync(
       "mistral",
       args,
       corrId,
-      undefined,
+      worktreeResolution.cwd,
       resolveIdleTimeout("mistral", params.idleTimeoutMs),
       params.outputFormat,
       params.forceRefresh,
@@ -3892,6 +3927,9 @@ export async function handleMistralRequestAsync(
     };
     if (prep.reviewIntegrity && prep.reviewIntegrity.violations.length > 0) {
       asyncResponse.reviewIntegrity = prep.reviewIntegrity;
+    }
+    if (worktreeResolution.worktreePath) {
+      asyncResponse.worktreePath = worktreeResolution.worktreePath;
     }
 
     return {
@@ -5620,6 +5658,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .describe(
           "Vibe --add-dir <DIR>: additional writable workspace directories. Each entry is emitted as its own --add-dir instance (Vibe states this flag may be specified multiple times)."
         ),
+      worktree: WORKTREE_SCHEMA.optional(),
     },
     async ({
       prompt,
@@ -5647,6 +5686,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       maxPrice,
       workingDir,
       addDir,
+      worktree,
     }) => {
       return handleMistralRequest(
         { sessionManager, logger, runtime },
@@ -5676,6 +5716,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           maxPrice,
           workingDir,
           addDir,
+          worktree,
         }
       );
     }
@@ -6669,6 +6710,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .describe(
             "Vibe --add-dir <DIR>: additional writable workspace directories. Each entry is emitted as its own --add-dir instance."
           ),
+        worktree: WORKTREE_SCHEMA.optional(),
       },
       async ({
         prompt,
@@ -6695,6 +6737,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         maxPrice,
         workingDir,
         addDir,
+        worktree,
       }) => {
         return handleMistralRequestAsync(
           { sessionManager, asyncJobManager, logger, runtime },
@@ -6723,6 +6766,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             maxPrice,
             workingDir,
             addDir,
+            worktree,
           }
         );
       }
