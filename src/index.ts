@@ -3208,6 +3208,8 @@ export interface GrokRequestParams {
   allow?: string[];
   /** Phase 4 slice θ: Grok `--deny <RULE>` (repeatable; one entry per --deny instance). */
   deny?: string[];
+  /** Slice λ: run this request inside a gateway-owned git worktree. */
+  worktree?: boolean | { name?: string; ref?: string };
 }
 
 export async function handleGrokRequest(
@@ -3274,6 +3276,17 @@ export async function handleGrokRequest(
     });
     args.push(...sessionResult.resumeArgs);
 
+    let worktreeResolution: ResolvedWorktree = {};
+    try {
+      worktreeResolution = await resolveWorktreeForRequest(
+        params.worktree,
+        sessionResult.effectiveSessionId,
+        runtime
+      );
+    } catch (err) {
+      return createErrorResponse("grok_request", 1, "", corrId, err as Error);
+    }
+
     const grokFrHandoff = buildAsyncFlightRecorderHandoff(
       "grok",
       prep,
@@ -3291,7 +3304,9 @@ export async function handleGrokRequest(
       undefined,
       undefined,
       grokFrHandoff.flightRecorderEntry,
-      grokFrHandoff.extractUsage
+      grokFrHandoff.extractUsage,
+      undefined,
+      worktreeResolution.cwd
     );
 
     // Deferred — job still running, return async reference
@@ -3356,6 +3371,13 @@ export async function handleGrokRequest(
       sessionResult.userProvidedSession,
       params.outputFormat
     );
+    if (worktreeResolution.worktreePath) {
+      const first = response.content[0];
+      if (first && first.type === "text") {
+        first.text =
+          formatWorktreePrefix(worktreeResolution.worktreePath) + first.text;
+      }
+    }
     safeFlightComplete(
       corrId,
       {
@@ -3463,6 +3485,17 @@ export async function handleGrokRequestAsync(
       effectiveSessionId = newSession.id;
     }
 
+    let worktreeResolution: ResolvedWorktree = {};
+    try {
+      worktreeResolution = await resolveWorktreeForRequest(
+        params.worktree,
+        effectiveSessionId,
+        runtime
+      );
+    } catch (err) {
+      return createErrorResponse("grok_request_async", 1, "", corrId, err as Error);
+    }
+
     // Start job only after all session I/O succeeds
     assertUpstreamCliArgs("grok", args);
     assertUpstreamCliEnv("grok", undefined);
@@ -3476,7 +3509,7 @@ export async function handleGrokRequestAsync(
       "grok",
       args,
       corrId,
-      undefined,
+      worktreeResolution.cwd,
       resolveIdleTimeout("grok", params.idleTimeoutMs),
       params.outputFormat,
       params.forceRefresh,
@@ -3498,6 +3531,9 @@ export async function handleGrokRequestAsync(
     };
     if (prep.reviewIntegrity && prep.reviewIntegrity.violations.length > 0) {
       asyncResponse.reviewIntegrity = prep.reviewIntegrity;
+    }
+    if (worktreeResolution.worktreePath) {
+      asyncResponse.worktreePath = worktreeResolution.worktreePath;
     }
 
     return {
@@ -5398,6 +5434,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .describe(
           'Grok --deny <RULE>: permission deny rules. Each entry is emitted as its own --deny instance (per `grok --help`: "Repeat to add multiple rules").'
         ),
+      worktree: WORKTREE_SCHEMA.optional(),
     },
     async ({
       prompt,
@@ -5428,6 +5465,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       systemPromptOverride,
       allow,
       deny,
+      worktree,
     }) => {
       return handleGrokRequest(
         { sessionManager, logger, runtime },
@@ -5460,6 +5498,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           systemPromptOverride,
           allow,
           deny,
+          worktree,
         }
       );
     }
@@ -6451,6 +6490,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .describe(
             "Grok --deny <RULE>: permission deny rules. Each entry → its own --deny instance."
           ),
+        worktree: WORKTREE_SCHEMA.optional(),
       },
       async ({
         prompt,
@@ -6480,6 +6520,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         systemPromptOverride,
         allow,
         deny,
+        worktree,
       }) => {
         return handleGrokRequestAsync(
           { sessionManager, asyncJobManager, logger, runtime },
@@ -6511,6 +6552,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             systemPromptOverride,
             allow,
             deny,
+            worktree,
           }
         );
       }
