@@ -224,7 +224,17 @@ export function resolveCommandForSpawn(
   if ([".cmd", ".bat"].includes(extname(resolved).toLowerCase())) {
     return {
       command: "cmd.exe",
-      args: ["/d", "/s", "/c", `"${buildWindowsCmdCommand(resolved, args)}"`],
+      args: [
+        "/d",
+        "/s",
+        "/c",
+        // Windows .cmd/.bat shims require cmd.exe. `buildWindowsCmdCommand`
+        // applies CommandLineToArgvW quoting and cmd metacharacter escaping
+        // to every dynamic segment before it reaches this shell boundary.
+        //
+        // codeql[js/shell-command-constructed-from-input]
+        `"${buildWindowsCmdCommand(resolved, args)}"`,
+      ],
       windowsVerbatimArguments: true,
     };
   }
@@ -233,13 +243,33 @@ export function resolveCommandForSpawn(
 }
 
 function buildWindowsCmdCommand(command: string, args: string[]): string {
+  // codeql[js/shell-command-constructed-from-input]
   return [escapeWindowsCmdCommand(command), ...args.map(escapeWindowsCmdArgument)].join(" ");
 }
 
-const WINDOWS_CMD_META_CHARS = /([()\][%!^"`<>&|;, *?])/g;
+const WINDOWS_CMD_META_CHARS = new Set([
+  "(",
+  ")",
+  "]",
+  "[",
+  "%",
+  "!",
+  "^",
+  '"',
+  "`",
+  "<",
+  ">",
+  "&",
+  "|",
+  ";",
+  ",",
+  " ",
+  "*",
+  "?",
+]);
 
 function escapeWindowsCmdCommand(value: string): string {
-  return win32.normalize(value).replace(WINDOWS_CMD_META_CHARS, "^$1");
+  return escapeWindowsCmdMetaChars(win32.normalize(value));
 }
 
 // CommandLineToArgvW rules: a run of N backslashes before a literal " must be
@@ -248,11 +278,42 @@ function escapeWindowsCmdCommand(value: string): string {
 // before the closing " must be doubled (2N) so the quote still terminates the
 // arg. Then wrap in quotes and caret-escape cmd.exe metacharacters.
 function escapeWindowsCmdArgument(value: string): string {
-  let arg = `${value}`;
-  arg = arg.replace(/(\\*)"/g, '$1$1\\"');
-  arg = arg.replace(/(\\*)$/, "$1$1");
-  arg = `"${arg}"`;
-  return arg.replace(WINDOWS_CMD_META_CHARS, "^$1");
+  return escapeWindowsCmdMetaChars(quoteWindowsArgForCommandLineToArgv(`${value}`));
+}
+
+function quoteWindowsArgForCommandLineToArgv(value: string): string {
+  let encoded = "";
+  let backslashes = 0;
+
+  for (const ch of value) {
+    if (ch === "\\") {
+      backslashes += 1;
+      continue;
+    }
+    if (ch === '"') {
+      encoded += "\\".repeat(backslashes * 2 + 1);
+      encoded += '"';
+      backslashes = 0;
+      continue;
+    }
+    encoded += "\\".repeat(backslashes);
+    backslashes = 0;
+    encoded += ch;
+  }
+
+  encoded += "\\".repeat(backslashes * 2);
+  return `"${encoded}"`;
+}
+
+function escapeWindowsCmdMetaChars(value: string): string {
+  let escaped = "";
+  for (const ch of value) {
+    if (WINDOWS_CMD_META_CHARS.has(ch)) {
+      escaped += "^";
+    }
+    escaped += ch;
+  }
+  return escaped;
 }
 
 function resolveWindowsCommandPath(command: string, envPath: string): string | null {

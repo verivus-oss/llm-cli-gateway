@@ -45,6 +45,10 @@ exclude = [
   # valid; lychee just can't reach them. Pattern catches both bare and
   # www. variants.
   "^https?://(www\\.)?npmjs\\.com/",
+  # Datasette's root intermittently resets anonymous CI connections.
+  # The link is stable and human-facing; do not fail the security gate
+  # on transient bot traffic handling.
+  "^https://datasette\\.io(/|$)",
   # Anthropic / OpenAI / Google docs occasionally rate-limit anon
   # browsers. Their stability is not our gate; we re-verify the
   # canonical URL during research steps.

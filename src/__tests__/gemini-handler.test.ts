@@ -104,6 +104,16 @@ describe("U27 prependGeminiAttachments", () => {
     const missing = join(tmp, "missing.png");
     expect(() => prependGeminiAttachments("p", [missing])).toThrow(/does not exist/);
   });
+
+  it("throws on paths that cannot be represented as Gemini @path tokens", () => {
+    const pathWithSpace = join(tmp, "file with space.png");
+    const pathWithAt = join(tmp, "file@name.png");
+    writeFileSync(pathWithSpace, "image", { mode: 0o600 });
+    writeFileSync(pathWithAt, "image", { mode: 0o600 });
+
+    expect(() => prependGeminiAttachments("p", [pathWithSpace])).toThrow(/without escaping/);
+    expect(() => prependGeminiAttachments("p", [pathWithAt])).toThrow(/without escaping/);
+  });
 });
 
 describe("U27 GEMINI_HIGH_IMPACT_PARAMS_SCHEMA", () => {

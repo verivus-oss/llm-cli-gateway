@@ -944,9 +944,24 @@ export function prependGeminiAttachments(prompt: string, attachments: string[]):
     if (!existsSync(p)) {
       throw new Error(`attachments: path does not exist: ${p}`);
     }
+    validateGeminiAttachmentTokenPath(p);
   }
   const tokens = attachments.map(p => `@${p}`).join(" ");
+  // Gemini attachments are prompt-level @path tokens rather than shell
+  // commands. Paths are absolute, existing, and token-safe before this join.
+  //
+  // codeql[js/shell-command-constructed-from-input]
   return `${tokens} ${prompt}`;
+}
+
+function validateGeminiAttachmentTokenPath(path: string): void {
+  for (const ch of path) {
+    if (ch === "@" || ch <= " ") {
+      throw new Error(
+        `attachments: path cannot be represented as a Gemini @path token without escaping: ${path}`
+      );
+    }
+  }
 }
 
 /**
