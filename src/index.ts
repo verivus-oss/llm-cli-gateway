@@ -4198,6 +4198,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .describe(
           "Claude --add-dir: additional directories the CLI is allowed to read/write beyond the process cwd. Each entry is emitted as its own --add-dir instance."
         ),
+      worktree: WORKTREE_SCHEMA.optional(),
       approvalStrategy: z
         .enum(["legacy", "mcp_managed"])
         .default("legacy")
@@ -4255,6 +4256,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       fallbackModel,
       jsonSchema,
       addDir,
+      worktree,
       approvalStrategy,
       approvalPolicy,
       mcpServers,
@@ -4384,6 +4386,19 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           await sessionManager.updateSessionUsage(effectiveSessionId);
         }
 
+        // Slice λ: resolve worktree directive into spawn cwd. Done after
+        // session resolution so resume reuse can read metadata.worktreePath.
+        let worktreeResolution: ResolvedWorktree = {};
+        try {
+          worktreeResolution = await resolveWorktreeForRequest(
+            worktree,
+            effectiveSessionId,
+            runtime
+          );
+        } catch (err) {
+          return createErrorResponse("claude_request", 1, "", corrId, err as Error);
+        }
+
         // Idle timeout only for stream-json (text/json produce no output until done)
         const effectiveIdleTimeout =
           outputFormat === "stream-json" ? resolveIdleTimeout("claude", idleTimeoutMs) : undefined;
@@ -4405,7 +4420,8 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           undefined,
           claudeSyncFrHandoff.flightRecorderEntry,
           claudeSyncFrHandoff.extractUsage,
-          prep.stdinPayload
+          prep.stdinPayload,
+          worktreeResolution.cwd
         );
 
         // Deferred — job still running, return async reference
@@ -4479,7 +4495,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             },
             runtime
           );
-          return buildCliResponse(
+          const streamResponse = buildCliResponse(
             "claude",
             parsed.text,
             optimizeResponse,
@@ -4491,6 +4507,14 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             outputFormat,
             warnings
           );
+          if (worktreeResolution.worktreePath) {
+            const first = streamResponse.content[0];
+            if (first && first.type === "text") {
+              first.text =
+                formatWorktreePrefix(worktreeResolution.worktreePath) + first.text;
+            }
+          }
+          return streamResponse;
         }
         safeFlightComplete(
           corrId,
@@ -4505,7 +4529,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           },
           runtime
         );
-        return buildCliResponse(
+        const nonStreamResponse = buildCliResponse(
           "claude",
           stdout,
           optimizeResponse,
@@ -4517,6 +4541,14 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           outputFormat,
           warnings
         );
+        if (worktreeResolution.worktreePath) {
+          const first = nonStreamResponse.content[0];
+          if (first && first.type === "text") {
+            first.text =
+              formatWorktreePrefix(worktreeResolution.worktreePath) + first.text;
+          }
+        }
+        return nonStreamResponse;
       } catch (error) {
         const elapsedMs = Math.max(0, Date.now() - startTime);
         logger.info(`[${corrId}] claude_request threw exception after ${elapsedMs}ms`);
@@ -5676,6 +5708,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .describe(
             "Claude --add-dir: additional directories the CLI is allowed to read/write beyond the process cwd. Each entry is emitted as its own --add-dir instance."
           ),
+        worktree: WORKTREE_SCHEMA.optional(),
         approvalStrategy: z
           .enum(["legacy", "mcp_managed"])
           .default("legacy")
@@ -5732,6 +5765,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         fallbackModel,
         jsonSchema,
         addDir,
+        worktree,
         approvalStrategy,
         approvalPolicy,
         mcpServers,
@@ -5822,6 +5856,25 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             cli: "claude",
           });
 
+          // Slice λ: resolve worktree directive after session metadata is
+          // settled so resume reuse can read metadata.worktreePath.
+          let worktreeResolution: ResolvedWorktree = {};
+          try {
+            worktreeResolution = await resolveWorktreeForRequest(
+              worktree,
+              effectiveSessionId,
+              runtime
+            );
+          } catch (err) {
+            return createErrorResponse(
+              "claude_request_async",
+              1,
+              "",
+              corrId,
+              err as Error
+            );
+          }
+
           // Idle timeout only for stream-json (text/json produce no output until done)
           const effectiveIdleTimeout =
             outputFormat === "stream-json"
@@ -5839,7 +5892,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             "claude",
             args,
             corrId,
-            undefined,
+            worktreeResolution.cwd,
             effectiveIdleTimeout,
             outputFormat,
             forceRefresh,
@@ -5867,6 +5920,9 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           };
           if (prep.reviewIntegrity && prep.reviewIntegrity.violations.length > 0) {
             asyncResponse.reviewIntegrity = prep.reviewIntegrity;
+          }
+          if (worktreeResolution.worktreePath) {
+            asyncResponse.worktreePath = worktreeResolution.worktreePath;
           }
           // Rec #4: include any prep-time warnings (e.g.
           // cacheable_prefix_uncached) alongside ttlWarning.
