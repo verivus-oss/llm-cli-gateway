@@ -14,6 +14,12 @@ import { parseGeminiJson, parseGeminiStreamJson } from "./gemini-json-parser.js"
 import { parseVibeMetaJson } from "./mistral-meta-json-parser.js";
 import { homedir } from "os";
 import { ISessionManager, createSessionManager } from "./session-manager.js";
+import {
+  createWorktree,
+  createWorktreeSessionCleanupHook,
+  WorktreeError,
+  type WorktreeHandle,
+} from "./worktree-manager.js";
 import { ResourceProvider } from "./resources.js";
 import { PerformanceMetrics } from "./metrics.js";
 import {
@@ -7085,6 +7091,12 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
 
 async function initializeSessionManager(): Promise<void> {
   const config = loadConfig();
+  // Slice λ: file-backed sessions get a cleanup hook that tears down any
+  // git worktrees recorded on session.metadata.worktreePath. PG-backed
+  // sessions skip the hook (multi-tenant deployments don't necessarily
+  // own a single filesystem); revisit if/when worktree support extends
+  // there.
+  const worktreeCleanupHook = createWorktreeSessionCleanupHook(logger);
 
   if (config.database && config.redis) {
     logger.info("Initializing PostgreSQL + Redis session manager");
@@ -7094,7 +7106,9 @@ async function initializeSessionManager(): Promise<void> {
     logger.info("PostgreSQL session manager initialized");
   } else {
     logger.info("Initializing file-based session manager");
-    sessionManager = await createSessionManager(config, undefined, logger);
+    sessionManager = await createSessionManager(config, undefined, logger, {
+      cleanupHook: worktreeCleanupHook,
+    });
     logger.info("File-based session manager initialized");
   }
 

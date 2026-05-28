@@ -46,16 +46,45 @@ export interface SessionStorage {
   activeSession: Record<CliType, string | null>;
 }
 
+/**
+ * Slice λ: callback invoked before a session record is removed (whether via
+ * explicit `deleteSession`, TTL eviction, or `clearAllSessions`). Used to
+ * tear down per-session resources owned by the gateway — currently git
+ * worktrees registered on `session.metadata.worktreePath`. The hook
+ * receives the path; promise failures are logged but do not block session
+ * removal (gateway-owned-lifecycle invariant: `session_delete` must always
+ * succeed for the caller).
+ */
+export type SessionCleanupHook = (session: Session) => void | Promise<void>;
+
 export class FileSessionManager {
   private storagePath: string;
   private storage: SessionStorage = { sessions: {}, activeSession: createEmptyActiveSessions() };
   private readonly sessionTtlMs: number;
+  private readonly cleanupHook?: SessionCleanupHook;
+  private readonly logger: Logger;
 
-  constructor(customPath?: string, sessionTtlMs?: number) {
+  constructor(customPath?: string, sessionTtlMs?: number, opts?: { cleanupHook?: SessionCleanupHook; logger?: Logger }) {
     this.sessionTtlMs = sessionTtlMs ?? DEFAULT_SESSION_TTL_SECONDS * 1000;
     this.storagePath = customPath || join(homedir(), ".llm-cli-gateway", "sessions.json");
+    this.cleanupHook = opts?.cleanupHook;
+    this.logger = opts?.logger ?? noopLogger;
     this.ensureStorageDirectory();
     this.loadStorage();
+  }
+
+  private invokeCleanupHook(session: Session): void {
+    if (!this.cleanupHook) return;
+    try {
+      const result = this.cleanupHook(session);
+      if (result && typeof (result as Promise<void>).catch === "function") {
+        (result as Promise<void>).catch(err => {
+          this.logger.error(`session cleanup hook rejected for ${session.id}`, err);
+        });
+      }
+    } catch (err) {
+      this.logger.error(`session cleanup hook threw for ${session.id}`, err);
+    }
   }
 
   private isExpired(session: Session): boolean {
@@ -68,6 +97,7 @@ export class FileSessionManager {
     let count = 0;
     for (const [id, session] of Object.entries(this.storage.sessions)) {
       if (this.isExpired(session)) {
+        this.invokeCleanupHook(session);
         delete this.storage.sessions[id];
         if (this.storage.activeSession[session.cli] === id) {
           this.storage.activeSession[session.cli] = null;
@@ -164,6 +194,7 @@ export class FileSessionManager {
     }
 
     const session = this.storage.sessions[sessionId];
+    this.invokeCleanupHook(session);
     delete this.storage.sessions[sessionId];
 
     // If this was the active session, clear it
@@ -234,6 +265,7 @@ export class FileSessionManager {
       : Object.values(this.storage.sessions);
 
     sessionsToDelete.forEach(session => {
+      this.invokeCleanupHook(session);
       delete this.storage.sessions[session.id];
       if (this.storage.activeSession[session.cli] === session.id) {
         this.storage.activeSession[session.cli] = null;
@@ -278,7 +310,8 @@ export interface ISessionManager {
 export async function createSessionManager(
   config?: Config,
   db?: DatabaseConnection,
-  logger?: Logger
+  logger?: Logger,
+  opts?: { cleanupHook?: SessionCleanupHook }
 ): Promise<ISessionManager> {
   if (config?.database && config?.redis) {
     // Import dynamically to avoid loading pg/ioredis if not needed
@@ -301,6 +334,9 @@ export async function createSessionManager(
     const sessionTtlMs = config?.sessionTtl
       ? config.sessionTtl * 1000
       : DEFAULT_SESSION_TTL_SECONDS * 1000;
-    return new FileSessionManager(undefined, sessionTtlMs);
+    return new FileSessionManager(undefined, sessionTtlMs, {
+      cleanupHook: opts?.cleanupHook,
+      logger,
+    });
   }
 }
