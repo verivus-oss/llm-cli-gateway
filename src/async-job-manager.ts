@@ -1077,7 +1077,9 @@ export class AsyncJobManager {
         job.error = "Output exceeded maximum size (50MB)";
         job.finishedAt = new Date().toISOString();
         job.clearIdleTimer?.();
-        if (job.process) killProcessGroup(job.process, "SIGTERM");
+        if (job.process) {
+          killProcessGroup(job.process, "SIGTERM");
+        }
         this.logger.info(`Job ${job.id} killed due to output overflow`, {
           correlationId: job.correlationId,
         });
@@ -1085,10 +1087,14 @@ export class AsyncJobManager {
         this.persistComplete(job);
         this.writeFlightComplete(job, "failed", "Output exceeded maximum size (50MB)");
         this.fireOnComplete(job);
-        setTimeout(() => {
-          if (!job.exited && job.process) killProcessGroup(job.process, "SIGKILL");
+        if (job.process) {
+          setTimeout(() => {
+            if (!job.exited && job.process) killProcessGroup(job.process, "SIGKILL");
+            job.cleanupGroup?.();
+          }, 5000);
+        } else {
           job.cleanupGroup?.();
-        }, 5000);
+        }
       }
       return;
     }
