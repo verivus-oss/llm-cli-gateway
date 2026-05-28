@@ -411,7 +411,8 @@ export class AsyncJobManager {
     cli: LlmCli,
     args: string[],
     env?: Record<string, string>,
-    stdin?: string
+    stdin?: string,
+    cwd?: string
   ): string {
     // Slice κ: stdin participates in the dedup key. Two Claude requests
     // with identical argv but different cache_control content blocks
@@ -419,8 +420,14 @@ export class AsyncJobManager {
     // the wrong response. The legacy "no stdin" code path passes
     // stdin=undefined, which serialises to the same empty marker the
     // previous version emitted — non-κ dedup is unchanged.
+    // Slice λ: cwd participates similarly. Two requests with identical
+    // argv but different worktrees would otherwise collide on dedup and
+    // the second caller would receive a response executed in the wrong
+    // worktree. cwd=undefined preserves the pre-λ key shape — non-λ
+    // dedup is unchanged.
     const extraEnv = canonicaliseEnvForKey(env);
-    const extra = stdin === undefined ? extraEnv : `${extraEnv}|stdin:${stdin}`;
+    const withStdin = stdin === undefined ? extraEnv : `${extraEnv}|stdin:${stdin}`;
+    const extra = cwd === undefined ? withStdin : `${withStdin}|cwd:${cwd}`;
     return computeRequestKey(cli, args, extra);
   }
 
@@ -682,7 +689,7 @@ export class AsyncJobManager {
       extractUsage,
       writeFlightStart,
     } = opts;
-    const requestKey = this.buildRequestKey(cli, args, extraEnv, stdin);
+    const requestKey = this.buildRequestKey(cli, args, extraEnv, stdin, cwd);
 
     if (!forceRefresh && this.store) {
       try {
