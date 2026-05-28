@@ -396,6 +396,53 @@ export const MAX_TURNS_SCHEMA = z.number().int().positive().safe().max(10_000);
 // for any plausible budget-cap use.
 export const MAX_PRICE_SCHEMA = z.number().positive().finite().min(1e-6).max(10_000);
 
+/**
+ * Slice λ: shared worktree directive for all 10 `*_request` / `*_request_async`
+ * tools. `true` creates a fresh worktree under `<repoRoot>/.worktrees/<uuid>`
+ * branched from HEAD. `{ name?, ref? }` lets the caller supply a sanitized
+ * name and/or git ref (default ref: HEAD).
+ *
+ * Lifecycle is gateway-owned: the gateway pre-creates the worktree via
+ * `git worktree add`, then spawns the child CLI with `cwd: <worktree-path>`.
+ * No `-w` / `--worktree` flag is ever emitted to the underlying CLI. When
+ * the request carries a sessionId and the session already has a worktree,
+ * that worktree is reused. On session_delete or TTL eviction the gateway
+ * runs `git worktree remove --force`.
+ *
+ * Tool response: when a worktree was used, the successful response stdout
+ * is prefixed with `[gateway] worktree=<absolute-path>\n` so callers can
+ * parse/use the path without a schema change (slice λ §1.d).
+ *
+ * NOTE: callers should `.gitignore` the `.worktrees/` directory in their
+ * repo (the gateway does NOT auto-gitignore — see slice λ spec Q4).
+ */
+export const WORKTREE_SCHEMA = z
+  .union([
+    z.boolean(),
+    z
+      .object({
+        name: z.string().min(1).max(64).optional(),
+        ref: z.string().min(1).max(255).optional(),
+      })
+      .strict(),
+  ])
+  .describe(
+    "Slice λ: run this request inside a dedicated git worktree owned by " +
+      "the gateway. `true` creates a fresh worktree at " +
+      "`<repoRoot>/.worktrees/<uuid>` branched from HEAD. " +
+      "`{ name?, ref? }` lets the caller supply a sanitized name and/or a " +
+      "git ref (default: HEAD). When the request carries a sessionId and " +
+      "the session already has a worktree, that worktree is reused. The " +
+      "gateway spawns the child CLI with `cwd: <worktree-path>` — no " +
+      "`-w`/`--worktree` flag is ever emitted to the underlying CLI. On " +
+      "session_delete or TTL eviction the gateway runs `git worktree " +
+      "remove --force`. Successful responses are prefixed with " +
+      "`[gateway] worktree=<absolute-path>\\n` so callers can use the " +
+      "path. NOTE: callers should `.gitignore` the `.worktrees/` " +
+      "directory in their repo (the gateway does NOT auto-gitignore — " +
+      "see slice λ spec Q4)."
+  );
+
 // U22: Session-provider enum extended to five providers. The storage layer's
 // CLI_TYPES already includes "mistral"; the MCP-tool layer mirrors that here so
 // session_create / session_list / session_clear_all accept the fifth provider.
@@ -534,7 +581,17 @@ async function awaitJobOrDefer(
    * through both the direct-execute fallback (SYNC_DEADLINE_MS===0) and
    * the AsyncJobManager spawn path, and participates in the dedup key.
    */
-  stdin?: string
+  stdin?: string,
+  /**
+   * Slice λ: optional working directory for the spawned child process,
+   * derived from a gateway-owned git worktree. Threaded to both the
+   * direct-execute fallback (`executeCli({ cwd })`) and the
+   * AsyncJobManager dedup-aware spawn path
+   * (`startJobWithDedup({ cwd })`). `cwd` also participates in the
+   * dedup key (see async-job-manager.buildRequestKey) so two requests
+   * with identical argv in different worktrees do not collide.
+   */
+  cwd?: string
 ): Promise<{ stdout: string; stderr: string; code: number } | DeferredJobResponse> {
   // U26 fix: ownership of onComplete is a contract. Once this function returns
   // OR throws, the caller MUST consider onComplete consumed — i.e. it has
@@ -569,6 +626,7 @@ async function awaitJobOrDefer(
         logger: runtime.logger,
         env: env ? ({ ...process.env, ...env } as NodeJS.ProcessEnv) : undefined,
         stdin,
+        cwd,
       });
     } finally {
       // Direct-execution path completes inline; release per-request resources
@@ -580,6 +638,7 @@ async function awaitJobOrDefer(
   let outcome;
   try {
     outcome = runtime.asyncJobManager.startJobWithDedup(cli, args, corrId, {
+      cwd,
       idleTimeoutMs,
       outputFormat,
       forceRefresh,
@@ -681,6 +740,91 @@ function buildDeferredToolResponse(
       },
     ],
   };
+}
+
+/**
+ * Slice λ: shape returned by `resolveWorktreeForRequest`. `cwd` is what
+ * the spawn helpers (`executeCli`, `startJobWithDedup`) consume;
+ * `worktreePath` is what the tool handler embeds in the response prefix
+ * so callers can discover the path.
+ */
+export interface ResolvedWorktree {
+  cwd?: string;
+  worktreePath?: string;
+}
+
+/**
+ * Slice λ: resolve a request's worktree directive into a spawn cwd.
+ *
+ * - `worktreeOpt` is the Zod-validated input value (boolean |
+ *   `{ name?, ref? }` | undefined).
+ * - When the request has a session AND the session already has a
+ *   `metadata.worktreePath`, that path is reused (resume semantics).
+ *   The reused path is returned without touching git; if the directory
+ *   was externally removed between requests, the next CLI invocation
+ *   will surface the error naturally.
+ * - When no reusable worktree exists, `createWorktree` runs; on success
+ *   the new path is written to `session.metadata` (only when a session
+ *   exists — request-scoped worktrees do NOT persist).
+ * - Returns `{}` when `worktreeOpt` is undefined/false (preserves
+ *   pre-λ behaviour at non-worktree call sites).
+ * - Errors propagate as `WorktreeError`/`Error`; the caller wraps them
+ *   in a `createErrorResponse` envelope. Do NOT swallow.
+ *
+ * Spec: docs/plans/slice-lambda.spec.md §"Implementation surface to
+ * verify" §5.
+ */
+export async function resolveWorktreeForRequest(
+  worktreeOpt: boolean | { name?: string; ref?: string } | undefined,
+  sessionId: string | undefined,
+  runtime: GatewayServerRuntime
+): Promise<ResolvedWorktree> {
+  if (!worktreeOpt) return {};
+  const sessionManager = runtime.sessionManager;
+  if (sessionId) {
+    const session = await Promise.resolve(sessionManager.getSession(sessionId));
+    const existingPath = session?.metadata?.worktreePath;
+    if (typeof existingPath === "string" && existingPath.length > 0) {
+      return { cwd: existingPath, worktreePath: existingPath };
+    }
+  }
+  const name = worktreeOpt === true ? undefined : worktreeOpt.name;
+  const ref = worktreeOpt === true ? undefined : worktreeOpt.ref;
+  const repoRoot = process.cwd();
+  const handle: WorktreeHandle = await createWorktree({
+    repoRoot,
+    name,
+    ref,
+    logger: runtime.logger,
+  });
+  if (sessionId) {
+    await Promise.resolve(
+      sessionManager.updateSessionMetadata(sessionId, {
+        worktreePath: handle.path,
+        worktreeName: handle.name,
+      })
+    );
+  }
+  return { cwd: handle.path, worktreePath: handle.path };
+}
+
+/**
+ * Slice λ §1.d: response-envelope shape decision for `worktreePath`.
+ *
+ * We surface the worktree path inline as a stdout prefix
+ * (`[gateway] worktree=<absolute-path>\n`) rather than as a
+ * structuredContent field or JSON wrapper. Rationale:
+ *   - zero schema change across all 10 tools and their downstream parsers
+ *   - matches how other slice features (session warnings, cache_state
+ *     aggregates) surface side-channel metadata today
+ *   - callers that want the path can split on the first newline; callers
+ *     that don't care see a single ignorable header line
+ *
+ * Use `formatWorktreePrefix(resolution.worktreePath)` once per tool, at
+ * the moment a successful response is constructed.
+ */
+export function formatWorktreePrefix(worktreePath?: string): string {
+  return worktreePath ? `[gateway] worktree=${worktreePath}\n` : "";
 }
 
 // Helper function for standardized error responses
