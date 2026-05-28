@@ -2,6 +2,148 @@
 
 All notable changes to the llm-cli-gateway project.
 
+## [1.15.0] - 2026-05-28 — Phase 4 slice λ (gateway-owned worktree lifecycle)
+
+Ships the tenth Phase 4 slice: a new top-level `worktree` field on every
+`*_request` and `*_request_async` tool lets a caller run the request
+inside a dedicated git worktree owned and lifecycle-managed by the
+gateway. The provider audit listed `-w/--worktree` as a per-CLI flag on
+Claude / Gemini / Grok; this slice deliberately does **not** wire any
+`-w` passthrough. Instead the gateway pre-creates a worktree via
+`git worktree add`, spawns the child CLI with `cwd: <worktree-path>`,
+and persists `worktreePath` on `session.metadata` for reuse. Five CLIs
+× two transports (sync + async) = ten tools all share one resolver, so
+the surface lands as one Zod schema + one helper per tool rather than
+five-times-two per-CLI argv wirings.
+
+### Added — gateway-owned worktree surface
+
+- **`WORKTREE_SCHEMA`** (`src/index.ts`): top-level Zod field
+  registered on all ten tools — `claude_request`, `codex_request`,
+  `gemini_request`, `grok_request`, `mistral_request`, plus the five
+  `*_request_async` siblings. Accepts `true` (anonymous UUID worktree
+  at `<repoRoot>/.worktrees/<uuid>` branched from HEAD) or
+  `{ name?, ref? }` (sanitised name and/or explicit git ref).
+- **`src/worktree-manager.ts`** (new file, 277 lines):
+  `sanitizeWorktreeName` (rejects path traversal — `..`, leading `/`,
+  control chars, length > 64), `createWorktree`
+  (`git rev-parse --verify <ref>` before `git worktree add`,
+  collision detection via `WorktreeCollisionError`, branch-namespaced
+  `gateway/<name>` worktrees), `removeWorktree`
+  (`git worktree remove --force`), and `createWorktreeSessionCleanupHook`
+  (hooks into session manager).
+- **`resolveWorktreeForRequest`** (`src/index.ts`): single per-request
+  resolver consumed by every tool handler. When the request carries
+  a `sessionId` and the session already has `metadata.worktreePath`,
+  the worktree is reused (no second `git worktree add`); otherwise a
+  new worktree is created and persisted onto the session via
+  `updateSessionMetadata`. The resolved path is threaded to the
+  executor via the existing `cwd` plumbing.
+- **`formatWorktreePrefix(path)`** (`src/index.ts:826`): every
+  successful tool result is prefixed with
+  `[gateway] worktree=<absolute-path>\n` so the caller can drive
+  `Bash(cd <path>)`, `Read <path>/...`, etc. Empty when the request
+  did not use a worktree (zero behaviour change for non-λ callers).
+- **`Session.metadata` extension** (`src/session-manager.ts`):
+  `worktreePath` + `worktreeName` land on the existing `metadata`
+  bag — no `Session` interface changes. `FileSessionManager` accepts
+  a `cleanupHook` option that fires on `deleteSession` and on
+  TTL-driven eviction; the hook calls `git worktree remove --force`
+  before the session record is dropped.
+- **`AsyncJobManager` cwd-aware dedup** (`src/async-job-manager.ts`):
+  the dedup key now includes the resolved `cwd`, so two
+  `*_request_async` calls with identical argv but different
+  worktree paths cannot collide (REGRESSIONS Lθ).
+
+### Out of scope — explicitly deferred
+
+- **Grok's `worktree` subcommand** (separate top-level subcommand
+  on the Grok CLI, distinct from `-w/--worktree`).
+- **Claude's `--tmux`** (terminal-multiplexer integration).
+- **Startup sweep of orphaned `.worktrees/*`** — left to future
+  housekeeping; the cleanup hook covers the happy path
+  (session_delete + TTL eviction).
+- **Multi-repo / submodule semantics** — gateway assumes a single
+  primary repo at `<repoRoot>`; multi-root behaviour is undefined.
+
+### Test surface
+
+`940 → 989` tests pass (+49):
+
+- **`src/__tests__/worktree-manager.test.ts`** (new, 26 tests) —
+  unit-tests for `sanitizeWorktreeName`, `createWorktree` (including
+  the rev-parse-before-add invariant + `WorktreeCollisionError`),
+  `removeWorktree`, and `createWorktreeSessionCleanupHook`.
+- **`src/__tests__/test-veracity-regressions-slice-lambda.test.ts`**
+  (new, 23 tests across REGRESSIONS Lα–Lθ + Lψ):
+  - **Lα** — `sanitizeWorktreeName` path-traversal rejection.
+  - **Lβ** — `createWorktree` runs `git rev-parse --verify` BEFORE
+    `git worktree add`.
+  - **Lγ** — `resolveWorktreeForRequest` persists `worktreePath`
+    onto session metadata via `updateSessionMetadata`.
+  - **Lδ** — same-session reuse: the second request with the same
+    `sessionId` skips `git worktree add`.
+  - **Lε** — `FileSessionManager.deleteSession` invokes the cleanup
+    hook (and TTL eviction does too).
+  - **Lζ** — `executor.executeCli` honours the resolved `cwd`.
+  - **Lη** — contract-as-negative-oracle: no CLI receives
+    `-w`/`--worktree` in emitted argv across all five providers
+    (pairs with slice δ's contract-as-positive-oracle).
+  - **Lθ** — `AsyncJobManager` dedup key includes `cwd`.
+  - **Lψ** — `formatWorktreePrefix` envelope shape locked
+    (`[gateway] worktree=<abs>\n`; empty when path missing).
+
+### Multi-LLM strict-evidence audit
+
+Per the standing protocol (`feedback_test_veracity_audit_protocol`
+
+- `feedback_multi_llm_review_gate`), the slice was audited round-1
+  on 2026-05-28 against `docs/plans/slice-lambda.spec.md`.
+
+**Round 1 outcomes:**
+
+- Codex: UNCONDITIONAL APPROVE — 9/9 mutation probes RED as
+  predicted; per-probe verbatim assertion text and pre/post-revert
+  test counts. Worktree at `audit/codex-round-1`.
+- Grok: UNCONDITIONAL APPROVE — 9/9 RED, per-probe verbatim
+  assertion text. Worktree at `audit/grok-round-1`.
+- Mistral: UNCONDITIONAL APPROVE — 9/9 RED with per-probe failed-
+  count summaries. Worktree at `audit/mistral-round-1`
+  (`5d75099`).
+- Gemini: **PARTIAL (quota-blocked)** — confirmed Lα–Lε RED (5/9)
+  with assertion text matching the substantive reviewers before
+  `TerminalQuotaError` (4h35m reset window > round budget) forced
+  a stop. No findings, no contradictions.
+- Claude: **STRUCTURAL BLOCKER** — two `claude_request_async`
+  jobs (`135c05c3-…`, `e411e8cc-…`) stalled silently
+  (`stdoutBytes: 0` for ≥10 minutes); the second produced a
+  1126-byte fabricated meta-summary with no per-probe evidence,
+  rejected per the strict-evidence rule. Documented stall pattern,
+  not a defect in slice λ.
+
+Four out of five independent vendor voices contributed evidence
+(three full + one partial corroborating) with one documented
+unfixable structural block, satisfying the slice-δ "4/5 minimum
+with documented block" bar. The three full audits are unanimous;
+the partial fourth corroborates without contradiction. Verdict:
+slice λ passes the gate and ships as v1.15.0.
+
+Full per-reviewer reports preserved at
+`docs/reviews/slice-lambda/{README,round-1-{codex,grok,mistral,
+gemini,claude}}.md`.
+
+### Mechanical anchors (verify with `rg` before relying)
+
+- `src/worktree-manager.ts` — new module, 277 lines.
+- `src/index.ts` — `WORKTREE_SCHEMA` (`:419-444`),
+  `formatWorktreePrefix` (`:826-828`), `resolveWorktreeForRequest`
+  - per-tool prefix injection (search `formatWorktreePrefix(`),
+    10 × `worktree: WORKTREE_SCHEMA.optional()` registrations on
+    every `*_request` / `*_request_async` tool input.
+- `src/session-manager.ts` — `cleanupHook` plumbing
+  (`:53-90, 318-342`).
+- `src/async-job-manager.ts` — dedup-key cwd inclusion.
+
 ## [1.14.0] - 2026-05-28 — Phase 4 slice κ (Claude explicit `cache_control` via `--input-format stream-json`)
 
 Ships the ninth Phase 4 slice. Callers can now opt their stable
@@ -31,7 +173,7 @@ falsifiability-tightening commits driven by the multi-LLM review gate.
 - **`prepareClaudeRequest` κ branch** (`src/index.ts`): when the
   caller marks any block AND requests `outputFormat: "stream-json"`,
   argv switches to `-p --input-format stream-json --output-format
-  stream-json --include-partial-messages --verbose` with NO positional
+stream-json --include-partial-messages --verbose` with NO positional
   prompt; the prep result carries `stdinPayload` + `cacheControlBlocks`.
   Mixing `cacheControl` with `text`/`json` output returns an
   actionable error instead of silently coercing.
@@ -120,7 +262,7 @@ APPROVE) is preserved in commit history (`bea1aee` and `bbc3b5f`).
 
 - κ adds caller-side reuse ON TOP of the irreducible ~10–12K
   `cache_creation` token floor that every fresh `claude -p` session
-  rebuilds (Claude Code's session-wrap content). The *added* benefit
+  rebuilds (Claude Code's session-wrap content). The _added_ benefit
   scales with the caller's stable block size, not the total prompt.
 - The `ttl='1h'` hard-code is mandatory because Anthropic rejects a
   `5m` block after Claude Code's own 1h-marked session blocks; the
@@ -160,7 +302,7 @@ Patch release. Single user-facing fix to `claude_request` /
 - Claude CLI 2.x rejects `--print --output-format=stream-json` without
   `--verbose` ("When using --print, --output-format=stream-json requires
   --verbose"). The gateway was emitting `--output-format stream-json
-  --include-partial-messages` without `--verbose`, so every claude
+--include-partial-messages` without `--verbose`, so every claude
   request configured for stream-json (sync or async) was exiting 1.
 - `prepareClaudeRequest` now pushes `--verbose` as part of the
   stream-json arg group. `--verbose` only affects what claude writes to
@@ -174,7 +316,7 @@ Patch release. Single user-facing fix to `claude_request` /
   recorded in the FR for the first time since the CLI started enforcing
   `--verbose`.
 - Direct CLI verification: `claude -p ... --output-format stream-json
-  --verbose --include-partial-messages` returned a clean NDJSON stream
+--verbose --include-partial-messages` returned a clean NDJSON stream
   with `cache_read_input_tokens: 17978` and
   `cache_creation_input_tokens: 17435` on a 1-hour-cache-enabled
   account. The parser path is correct; only the missing flag was
@@ -184,7 +326,7 @@ Patch release. Single user-facing fix to `claude_request` /
 
 - New regression: `prepareClaudeRequest` emits `--verbose` when
   `outputFormat: "stream-json"` and does NOT emit it for `text` / `json`
-  (src/__tests__/claude-handler.test.ts).
+  (src/**tests**/claude-handler.test.ts).
 - Updated `upstream-contracts.test.ts` "accepts a valid Claude argv
   emitted by the gateway" to pin the three-flag combo so a future
   removal of `--verbose` fails at the contract gate.
@@ -254,7 +396,7 @@ regressions) plus this release commit.
   enumerate). Also settable via the `GROK_SANDBOX` env var. Caller
   responsibility to pass a valid profile name. The slice deliberately
   does **not** integrate `--sandbox` with `approvalStrategy:
-  "mcp_managed"` because the value is unbounded — Grok's approval
+"mcp_managed"` because the value is unbounded — Grok's approval
   semantics are already covered by `permissionMode` + `alwaysApprove` +
   `approvalStrategy`.
 - **`rules`** → `--rules <RULES>`. Supports `@file` prefix per
@@ -320,7 +462,7 @@ parallel with mandatory mutation-probe execution against
 
 - Codex: UNCONDITIONAL APPROVE — all 12 probes [as predicted], all
   26 tests VERIFIED. Baseline (`npm test`: 55 files / 884 tests; build
-  + format:check clean; slice file 31/31).
+  - format:check clean; slice file 31/31).
 - Grok: UNCONDITIONAL APPROVE — all 12 probes [as predicted]; ran in
   an isolated worktree at `/tmp/theta-audit-grok` per the slice-ζ
   reviewer-stomping lesson.
@@ -330,8 +472,8 @@ parallel with mandatory mutation-probe execution against
   beyond the spec and closes the "enum-mistake stays silent if fixture
   uses a listed value" gap.
 - Gemini: **FAILED at 10s** with `TerminalQuotaError: You have
-  exhausted your capacity on this model. Your quota will reset after
-  52m10s.` (Google 429). Documented quota blocker per protocol clause
+exhausted your capacity on this model. Your quota will reset after
+52m10s.` (Google 429). Documented quota blocker per protocol clause
   5+6 — counts as "concrete unfixable when documented". Four
   substantive valid approves from independent vendor families (OpenAI,
   xAI, Mistral, Anthropic) satisfy the gate.
@@ -500,7 +642,7 @@ this release commit.
   so no extra gating required.
 - Both tools accept a new `jsonSchema` field
   (`string | Record<string, unknown>`). Per `claude --help`, the CLI
-  argument is the JSON Schema *literal* (not a path; contrast with Codex
+  argument is the JSON Schema _literal_ (not a path; contrast with Codex
   `--output-schema`). Object values are `JSON.stringify`-d; string values
   pass verbatim. Use with `outputFormat: "json"` for structured output
   validation. Achieves Codex parity for structured-output validation
@@ -798,7 +940,7 @@ for the async tools and the codex CLI.
   already terminated before the arm signal landed.
 - `JobStore.markOrphanedOnStartup()` return shape extended from `number`
   to `{ count, orphaned: Array<{ id, correlationId, startedAt, stdout,
-  stderr, exitCode }> }` so the manager constructor can write FR
+stderr, exitCode }> }` so the manager constructor can write FR
   `logComplete` rows for previously orphaned jobs with proper audit data
   (durationMs from `startedAt`, response from `stderr || stdout`,
   errorMessage `"orphaned after gateway restart"`). `SqliteJobStore`
@@ -930,8 +1072,9 @@ Pure documentation release; zero source-code changes since 1.6.0.
 ### Fixed — `docs/launch/blog-cache-awareness.md` accuracy + voice
 
 Technical corrections from the multi-LLM voice + technical review:
+
 - Mutually-exclusive error-string quotation reformatted so the
-  ``provide exactly one of `prompt` or `promptParts``` example renders
+  ``provide exactly one of `prompt`or`promptParts``` example renders
   correctly in markdown.
 - `lastWriteAt` references corrected to `lastRequestAt` (the actual
   public field name on `SessionCacheStats`).
@@ -1002,8 +1145,7 @@ Also includes (beyond cache-awareness):
   The gateway concatenates in canonical order (`system → tools → context → task`)
   so the stable prefix bytes precede the volatile task tail unchanged across
   calls — raising implicit cache hit rate without calling provider cache APIs.
-  The exact error strings `provide exactly one of \`prompt\` or \`promptParts\``
-  and `one of \`prompt\` or \`promptParts\` is required` are stable API
+  The exact error strings `provide exactly one of \`prompt\` or \`promptParts\``and`one of \`prompt\` or \`promptParts\` is required` are stable API
   contract.
 - **Flight-recorder v3 migration**: new columns `stable_prefix_hash`
   (sha256) and `stable_prefix_tokens` (integer bytes/4 heuristic) on
@@ -1034,9 +1176,9 @@ Also includes (beyond cache-awareness):
   - `warn_on_ttl_expiry = false`
   - `[cache_awareness.min_stable_tokens_for_cache_control]` per-family
     table (sonnet=1024, opus=4096, haiku=4096, default=4096).
-  Validated by a separate Zod schema and loader (`loadCacheAwarenessConfig`);
-  a malformed `[cache_awareness]` block does NOT break `loadPersistenceConfig`
-  and vice versa. No env-var overrides.
+    Validated by a separate Zod schema and loader (`loadCacheAwarenessConfig`);
+    a malformed `[cache_awareness]` block does NOT break `loadPersistenceConfig`
+    and vice versa. No env-var overrides.
 
 ### Decision: Branch B (prefix-discipline only) for slice 1
 
@@ -1356,6 +1498,7 @@ Lands DAG layers 6-12 — the personal-MCP MVP terminal plus all of Phase 0-3 pr
   - **No self-update** — `cli_upgrade --cli mistral` detects pip / uv / brew via probes and dispatches to `pip install -U vibe-cli`, `uv tool upgrade vibe-cli`, or `brew upgrade mistral-vibe`. Unknown installations return an actionable error rather than running a non-existent `vibe update`.
 
   Other surfaces extended: `SESSION_PROVIDER_VALUES` now includes `"mistral"`; `list_models`, `cli_versions`, `cli_upgrade`, `approval_list`, `session_create`, `session_list`, and `session_clear_all` accept the fifth provider; new MCP resources `sessions://mistral` and `models://mistral` are registered; `validate_with_models` / `consensus_check` / `red_team_review` can route to Mistral.
+
 - **U23 — JSON output + token/cost parity across providers.** New `src/codex-json-parser.ts` parses the Codex `--json` JSONL event stream (`thread.started`, `turn.started`/`completed`/`failed`, `item.*`, `error`); lenient against partial streams and garbage preamble. New `src/gemini-json-parser.ts` parses `gemini -o json` output and maps `usageMetadata.{promptTokenCount, candidatesTokenCount, cachedContentTokenCount}`. `extractUsageAndCost` is now a thin per-provider dispatcher returning `{inputTokens, outputTokens, cacheReadTokens?, cacheCreationTokens?, costUsd?}` for every provider that supports JSON; Claude `cache_read_input_tokens` / `cache_creation_input_tokens` are now plumbed through instead of being discarded. `codex_request`, `codex_request_async`, `gemini_request`, and `gemini_request_async` now expose `outputFormat: enum("text","json")` — set to `"json"` and the gateway emits `--json` (Codex) or `-o json` (Gemini) and forwards parsed usage/cost into the flight recorder. Flight-recorder schema gains `cache_read_tokens` and `cache_creation_tokens` columns via idempotent migration (`PRAGMA table_info` → `ALTER TABLE ADD COLUMN`); existing `logs.db` files are upgraded in place. 15 new tests.
 - **U24 — Permission/approval-mode parity across providers.** Claude `permissionMode` enum (`default | acceptEdits | plan | auto | dontAsk | bypassPermissions`) replaces the boolean `dangerouslySkipPermissions` (the boolean still works and now maps to `permissionMode: "bypassPermissions"`; setting both logs a warning, `permissionMode` wins). Gemini `approvalMode` gains `plan`. Codex splits `--full-auto` into `sandboxMode: enum("read-only","workspace-write","danger-full-access")` and `askForApproval: enum("untrusted","on-request","never")`, emitting `--sandbox <mode>` and `--ask-for-approval <mode>` independently; legacy `fullAuto: true` still works and expands to `--sandbox workspace-write --ask-for-approval never` by default, with `useLegacyFullAutoFlag: true` as an explicit escape hatch to emit `--full-auto` directly. Codex resume mode filters all three flags (`--full-auto`, `--sandbox`, `--ask-for-approval`) since `codex exec resume` inherits the session's policy. 26 new tests.
 - **U25 — Claude high-impact features.** `claude_request` / `claude_request_async` schemas gain `agent?: string` (single sub-agent dispatch), `agents?: Record<string, object>` (multi-agent JSON, validated against `CLAUDE_AGENT_DEFINITION_SCHEMA` before emit), `forkSession?: boolean`, `systemPrompt?: string`, `appendSystemPrompt?: string` (mutually exclusive at the schema + tool-callback boundary), `maxBudgetUsd?: number`, `maxTurns?: number`, `effort?: enum("low","medium","high","xhigh","max")`, and `excludeDynamicSystemPromptSections?: boolean`. Each emits the documented `--<flag>` form. 25 new tests in `src/__tests__/claude-handler.test.ts`.
@@ -1448,7 +1591,7 @@ Round-1 Codex review found 5 blockers across U22, U23, and U26; round-2 uncondit
 
 ### Fixed
 
-- **SIGTERM→SIGKILL escalation bug** — `proc.killed` becomes `true` after `.kill()` is *called*, not after the process *exits*, so the SIGKILL guard (`if (!proc.killed)`) was always false. Replaced with an `exited` flag set by `close`/`error` events in both `executor.ts` and `async-job-manager.ts`
+- **SIGTERM→SIGKILL escalation bug** — `proc.killed` becomes `true` after `.kill()` is _called_, not after the process _exits_, so the SIGKILL guard (`if (!proc.killed)`) was always false. Replaced with an `exited` flag set by `close`/`error` events in both `executor.ts` and `async-job-manager.ts`
 - **Timer priority race** — When both `timeout` and `idleTimeout` are set, idle timeout now clears the wall-clock timer to prevent `timedOut` from overriding `idledOut` in the close handler (which would misclassify code 125 as transient code 124)
 
 ### Added
@@ -1533,6 +1676,7 @@ Round-1 Codex review found 5 blockers across U22, U23, and U26; round-2 uncondit
 ## Core Features
 
 ### Multi-LLM Orchestration
+
 - **3 CLI tools supported**: Claude Code, Codex, Gemini
 - **Unified MCP interface**: Single protocol for all LLMs
 - **Cross-tool collaboration**: LLMs can use each other via MCP
@@ -1540,6 +1684,7 @@ Round-1 Codex review found 5 blockers across U22, U23, and U26; round-2 uncondit
 - **Correlation ID tracking**: Full request tracing
 
 ### Token Optimization
+
 - **Auto-optimization middleware**: 44% reduction on prompts, 37% on responses
 - **15+ optimization patterns**: Remove filler, compact types, arrow notation
 - **Opt-in feature**: `optimizePrompt` and `optimizeResponse` flags
@@ -1547,6 +1692,7 @@ Round-1 Codex review found 5 blockers across U22, U23, and U26; round-2 uncondit
 - **Research-backed**: 42 sources, best practices documented
 
 ### Reliability & Performance
+
 - **Retry logic**: Exponential backoff with circuit breaker
 - **Atomic file writes**: Process-specific temp files with fsync
 - **Memory limits**: 50MB cap on CLI output prevents DoS
@@ -1554,6 +1700,7 @@ Round-1 Codex review found 5 blockers across U22, U23, and U26; round-2 uncondit
 - **Non-zero exit code handling**: Proper retry behavior
 
 ### Security Hardening
+
 - **No secret leakage**: Generic session descriptions only
 - **File permissions**: 0o600 on sensitive files
 - **No ReDoS vulnerabilities**: Bounded regex patterns
@@ -1562,6 +1709,7 @@ Round-1 Codex review found 5 blockers across U22, U23, and U26; round-2 uncondit
 - **Custom storage paths**: Secure directory creation
 
 ### Testing & Quality
+
 - **114 tests**: 68 unit, 41 integration, 5 optimizer
 - **Real CLI integration**: Not mocks
 - **Regression tests**: ReDoS, schema validation, retry behavior
@@ -1569,6 +1717,7 @@ Round-1 Codex review found 5 blockers across U22, U23, and U26; round-2 uncondit
 - **Edge case coverage**: Timeouts, errors, concurrency
 
 ### Documentation Excellence
+
 - **7 comprehensive guides**: 4,000+ lines total
 - **Research-backed**: TOKEN_OPTIMIZATION_GUIDE.md with 42 sources
 - **Real-world examples**: PROMPT_OPTIMIZATION_EXAMPLES.md with 5 examples
@@ -1580,6 +1729,7 @@ Round-1 Codex review found 5 blockers across U22, U23, and U26; round-2 uncondit
 ## Added
 
 ### Features
+
 - Multi-LLM CLI orchestration via MCP
 - Session management with persistence
 - Correlation ID tracking for request tracing
@@ -1591,6 +1741,7 @@ Round-1 Codex review found 5 blockers across U22, U23, and U26; round-2 uncondit
 - Custom storage path support
 
 ### Tools (MCP)
+
 - `claude_request` - Execute Claude Code CLI
 - `codex_request` - Execute Codex CLI
 - `gemini_request` - Execute Gemini CLI
@@ -1604,6 +1755,7 @@ Round-1 Codex review found 5 blockers across U22, U23, and U26; round-2 uncondit
 - `list_models` - List available models for each CLI
 
 ### Resources (MCP)
+
 - `sessions://all` - All sessions across CLIs
 - `sessions://claude` - Claude-specific sessions
 - `sessions://codex` - Codex-specific sessions
@@ -1612,6 +1764,7 @@ Round-1 Codex review found 5 blockers across U22, U23, and U26; round-2 uncondit
 - `metrics://performance` - Performance metrics and stats
 
 ### Documentation
+
 - `README.md` - Installation and usage guide
 - `BEST_PRACTICES.md` - Design and implementation patterns
 - `TOKEN_OPTIMIZATION_GUIDE.md` - Research-backed optimization techniques (42 sources)
@@ -1625,6 +1778,7 @@ Round-1 Codex review found 5 blockers across U22, U23, and U26; round-2 uncondit
 - `CROSS_TOOL_SUCCESS.md` - Cross-LLM collaboration validation
 
 ### Tests
+
 - 68 unit tests (executor, sessions, metrics, optimizer)
 - 41 integration tests (full MCP with real CLIs)
 - 5 optimizer tests (pattern validation, ReDoS prevention)
@@ -1637,6 +1791,7 @@ Round-1 Codex review found 5 blockers across U22, U23, and U26; round-2 uncondit
 ### First Review Round (8 bugs)
 
 **Critical:**
+
 1. **session_set_active schema mismatch** (src/index.ts:430)
    - Issue: Documentation said "null to clear" but z.string() rejected null
    - Fix: Changed to z.string().nullable()
@@ -1652,12 +1807,12 @@ Round-1 Codex review found 5 blockers across U22, U23, and U26; round-2 uncondit
    - Fix: Integrated withRetry + CircuitBreaker into executeCli
    - Impact: Transient failures now retried automatically
 
-**Medium:**
-4. **Integration test brittleness**
-   - Issue: Tests failed without dist/ or CLIs installed
-   - Fix: Tests properly skip when CLIs unavailable
+**Medium:** 4. **Integration test brittleness**
 
-5. **Test timing issues** (src/__tests__/session-manager.test.ts:216,429)
+- Issue: Tests failed without dist/ or CLIs installed
+- Fix: Tests properly skip when CLIs unavailable
+
+5. **Test timing issues** (src/**tests**/session-manager.test.ts:216,429)
    - Issue: setTimeout not awaited → false positives
    - Fix: Proper async/await patterns
 
@@ -1665,10 +1820,10 @@ Round-1 Codex review found 5 blockers across U22, U23, and U26; round-2 uncondit
    - Issue: All stdout/stderr buffered in memory with no cap
    - Fix: Added 50MB limit with early termination
 
-**Low:**
-7. **Model data duplication** (src/index.ts:64, src/resources.ts:22)
-   - Issue: CLI_INFO defined in two places
-   - Fix: Centralized in single location
+**Low:** 7. **Model data duplication** (src/index.ts:64, src/resources.ts:22)
+
+- Issue: CLI_INFO defined in two places
+- Fix: Centralized in single location
 
 8. **Unused code** (src/resources.ts:33)
    - Issue: listResources() never called
@@ -1677,27 +1832,28 @@ Round-1 Codex review found 5 blockers across U22, U23, and U26; round-2 uncondit
 ### Second Review Round (8 bugs)
 
 **Critical:**
+
 1. **Secret leakage via session descriptions** (src/index.ts + src/session-manager.ts)
    - Issue: First 50 chars of prompts stored in plain text
    - Fix: Generic descriptions ("Claude Session"), file permissions 0o600
    - Impact: No user data exposed in session files
 
-**High:**
-2. **ReDoS in optimizer regex** (src/optimizer.ts:241,244)
-   - Issue: Catastrophic backtracking with .+? patterns
-   - Fix: Bounded character sets [A-Za-z][\w-]*
-   - Impact: No DoS from malicious prompts
+**High:** 2. **ReDoS in optimizer regex** (src/optimizer.ts:241,244)
+
+- Issue: Catastrophic backtracking with .+? patterns
+- Fix: Bounded character sets [A-Za-z][\w-]\*
+- Impact: No DoS from malicious prompts
 
 3. **Custom storage path directory not created** (src/session-manager.ts:36)
    - Issue: ensureStorageDirectory only created default path
    - Fix: Create dirname(storagePath) for custom paths
    - Impact: Custom storage paths work without errors
 
-**Medium:**
-4. **Atomic write temp filename collision** (src/session-manager.ts:57)
-   - Issue: All processes used same .tmp filename
-   - Fix: Process-specific temp files (sessions.json.tmp.${process.pid})
-   - Impact: Safe multi-process deployments
+**Medium:** 4. **Atomic write temp filename collision** (src/session-manager.ts:57)
+
+- Issue: All processes used same .tmp filename
+- Fix: Process-specific temp files (sessions.json.tmp.${process.pid})
+- Impact: Safe multi-process deployments
 
 5. **Retry doesn't handle non-zero exit codes** (src/executor.ts:99)
    - Issue: Only thrown errors triggered retry
@@ -1709,11 +1865,11 @@ Round-1 Codex review found 5 blockers across U22, U23, and U26; round-2 uncondit
    - Fix: 50MB limit with process termination
    - Impact: DoS prevention
 
-**Low:**
-7. **Performance overhead from NVM scanning** (src/executor.ts:41)
-   - Issue: Filesystem scan on every request
-   - Fix: Cache NVM path at module load
-   - Impact: Performance improvement
+**Low:** 7. **Performance overhead from NVM scanning** (src/executor.ts:41)
+
+- Issue: Filesystem scan on every request
+- Fix: Cache NVM path at module load
+- Impact: Performance improvement
 
 8. **Unused imports** (src/session-manager.ts:4, src/executor.ts:7)
    - Issue: Dead code and unused parameters
@@ -1725,6 +1881,7 @@ Round-1 Codex review found 5 blockers across U22, U23, and U26; round-2 uncondit
 ## Security
 
 ### Vulnerabilities Fixed
+
 - ✅ **Secret leakage**: No user data in session descriptions
 - ✅ **File permissions**: 0o600 on sessions.json
 - ✅ **ReDoS**: Bounded regex patterns prevent DoS
@@ -1733,6 +1890,7 @@ Round-1 Codex review found 5 blockers across U22, U23, and U26; round-2 uncondit
 - ✅ **Command injection**: Already prevented via spawn with args
 
 ### Security Best Practices
+
 - Input validation with Zod schemas
 - No stack trace leakage in errors
 - Atomic file writes with fsync
@@ -1744,6 +1902,7 @@ Round-1 Codex review found 5 blockers across U22, U23, and U26; round-2 uncondit
 ## Performance
 
 ### Optimizations Added
+
 - **Token optimization**: 44% reduction on prompts, 37% on responses
 - **NVM path caching**: Eliminates I/O on every request
 - **Circuit breaker**: Fast-fail during outages
@@ -1751,6 +1910,7 @@ Round-1 Codex review found 5 blockers across U22, U23, and U26; round-2 uncondit
 - **Memory limits**: Prevents resource exhaustion
 
 ### Metrics
+
 - Request counts per CLI tool
 - Response times with percentiles
 - Success/failure rates
@@ -1762,6 +1922,7 @@ Round-1 Codex review found 5 blockers across U22, U23, and U26; round-2 uncondit
 ## Testing
 
 ### Test Growth
+
 - **Initial**: 104 tests
 - **After first fixes**: 109 tests (+5 from retry integration)
 - **After optimizer**: 113 tests (+4 from optimizer)
@@ -1769,6 +1930,7 @@ Round-1 Codex review found 5 blockers across U22, U23, and U26; round-2 uncondit
 - **Growth**: +10 tests (9.6% increase)
 
 ### Coverage Areas
+
 - Unit: Executor, session manager, metrics, optimizer
 - Integration: Full MCP protocol with real CLI execution
 - Regression: Schema validation, ReDoS, retry behavior
@@ -1779,6 +1941,7 @@ Round-1 Codex review found 5 blockers across U22, U23, and U26; round-2 uncondit
 ## Documentation
 
 ### Guides Created
+
 1. **README.md** - Installation, usage, API reference
 2. **BEST_PRACTICES.md** - Design patterns and architecture
 3. **TOKEN_OPTIMIZATION_GUIDE.md** - Research (42 sources)
@@ -1792,6 +1955,7 @@ Round-1 Codex review found 5 blockers across U22, U23, and U26; round-2 uncondit
 11. **CROSS_TOOL_SUCCESS.md** - Collaboration proof
 
 ### Total Documentation
+
 - **11 comprehensive files**
 - **~8,000 lines** of documentation
 - **Research-backed** with citations
@@ -1802,17 +1966,20 @@ Round-1 Codex review found 5 blockers across U22, U23, and U26; round-2 uncondit
 ## Dogfooding Validation
 
 ### Multi-LLM Review Process
+
 - **Claude Sonnet 4.5**: Strategic/product review (8.5/10 → 10/10)
 - **Codex**: Bug finding and implementation (13 bugs found, 13 fixed)
 - **Gemini 2.5 Pro**: Security analysis (3 critical issues found, 3 fixed)
 
 ### Self-Improvement Cycle
+
 1. ✅ Multi-LLM review found 16 bugs
 2. ✅ Codex fixed all bugs via MCP
 3. ✅ Gateway validated fixes via test suite
 4. ✅ Complete autonomous improvement demonstrated
 
 ### Workflow Validated
+
 ```
 Implement (Codex) → Review (Gemini) → Fix (Codex) → Verify (Tests) → Iterate
 ```
@@ -1822,41 +1989,45 @@ Implement (Codex) → Review (Gemini) → Fix (Codex) → Verify (Tests) → Ite
 ## Migration Guide
 
 ### Breaking Changes
+
 None - This is the first release.
 
 ### New Features to Adopt
 
 **1. Token Optimization** (Optional, Opt-in)
+
 ```typescript
 // Enable prompt optimization
 await callTool("codex_request", {
   prompt: "Your verbose prompt...",
-  optimizePrompt: true  // 44% token reduction
+  optimizePrompt: true, // 44% token reduction
 });
 
 // Enable response optimization
 await callTool("claude_request", {
   prompt: "Generate docs...",
-  optimizeResponse: true  // 37% token reduction
+  optimizeResponse: true, // 37% token reduction
 });
 ```
 
 **2. Session Management**
+
 ```typescript
 // Create and use sessions
 const session = await callTool("session_create", {
   cli: "claude",
-  description: "My coding session"
+  description: "My coding session",
 });
 
 // Continue conversations
 await callTool("claude_request", {
   prompt: "Continue from previous context",
-  sessionId: session.id
+  sessionId: session.id,
 });
 ```
 
 **3. Correlation IDs** (Automatic)
+
 ```typescript
 // Automatically generated for tracing
 // Check logs: [corrId] prefix on all log lines
@@ -1867,6 +2038,7 @@ await callTool("claude_request", {
 ## Known Limitations
 
 ### Documented Constraints
+
 1. **Multi-level orchestration unsupported**
    - Nested MCP connections fail
    - LLMs can't spawn sub-LLMs via gateway
@@ -1881,6 +2053,7 @@ await callTool("claude_request", {
    - Consider encryption for sensitive data (future)
 
 ### Future Enhancements
+
 - Session encryption at rest
 - Session TTL and automatic cleanup
 - Redis/DynamoDB backend for horizontal scaling
@@ -1893,16 +2066,19 @@ await callTool("claude_request", {
 ## Credits
 
 ### Development
+
 - **Architecture & Orchestration**: Claude Sonnet 4.5
 - **Implementation & Bug Fixes**: Codex via llm-cli-gateway MCP
 - **Security Analysis**: Gemini 2.5 Pro via llm-cli-gateway MCP
 
 ### Research
+
 - Token optimization: 42 research sources (2025-2026)
 - Compression validation: Compel paper (OpenReview 2025)
 - Best practices: Industry standards + dogfooding
 
 ### Validation
+
 - **Self-dogfooding**: Gateway reviewed and fixed itself
 - **Multi-LLM collaboration**: 3 LLMs working via MCP
 - **Iterative quality**: 2 review rounds, 16 bugs found and fixed
@@ -1912,6 +2088,7 @@ await callTool("claude_request", {
 ## Statistics
 
 ### Development Timeline
+
 - **Total time**: ~2.5 hours (from first review to 100% bug-free)
 - **Review rounds**: 2 comprehensive multi-LLM reviews
 - **Bugs found**: 16 total
@@ -1919,12 +2096,14 @@ await callTool("claude_request", {
 - **Test growth**: 104 → 114 tests (+9.6%)
 
 ### Code Metrics
+
 - **Files modified**: 12 files
 - **Lines added**: ~2,500 lines
 - **Documentation**: ~8,000 lines (11 files)
 - **Test coverage**: 114 tests across unit/integration/regression
 
 ### Quality Metrics
+
 - **Bug-free rate**: 100%
 - **Test pass rate**: 100%
 - **Build success**: ✅
