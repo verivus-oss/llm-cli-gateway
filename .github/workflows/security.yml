@@ -91,7 +91,7 @@ jobs:
         # credential persistence through artifacts.
         run: |
           set -euo pipefail
-          python3 -m pip install --user --require-hashes -r requirements/ci/security.txt
+          python3 -m pip install --user --require-hashes -r requirements/ci/requirements-security.txt
           # Default min-severity (low+); informational findings (job
           # names, concurrency limits, superfluous actions) are tracked
           # but not enforced — those don't move the security needle.
