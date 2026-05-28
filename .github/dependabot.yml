@@ -5,7 +5,8 @@ version: 2
 #   with the upstream maintainer's latest tag → SHA mapping.
 # - npm: the gateway's primary runtime + devDeps + test fixtures. Weekly
 #   updates keep semver-compatible bumps flowing without manual chasing.
-# - pip: the integrations/llm-plugin/ surface that ships to PyPI.
+# - pip: the integrations/llm-plugin/ surface that ships to PyPI, plus
+#   the hashed CI tool requirements used by workflow bootstrap steps.
 #
 # Security-only mode is NOT enabled — we want all updates (security +
 # version) so the toolchain stays current. The gateway's dep surface
@@ -59,3 +60,15 @@ updates:
     labels:
       - "dependencies"
       - "python"
+
+  - package-ecosystem: "pip"
+    directory: "/.github/requirements"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "deps(ci-pip)"
+    labels:
+      - "dependencies"
+      - "python"
+      - "github-actions"
