@@ -494,26 +494,53 @@ describe("AsyncJobManager + flight-recorder (slice 1.5)", () => {
   });
 
   describe("output overflow (case e2, Codex-F6)", () => {
-    it("output overflow → status='failed' + errorMessage='Output exceeded maximum size (50MB)'", async () => {
+    it("output overflow → status='failed' + errorMessage='Output exceeded maximum size (50MB)'", () => {
       const fr = new CapturingFlightRecorder();
       const manager = new AsyncJobManager(noopLogger, undefined, new MemoryJobStore(), fr);
-      // Stream >50MB to trigger the overflow guard quickly.
-      const outcome = manager.startJobWithDedup(
-        "sh" as LlmCli,
-        ["-c", "yes ABCDEFGHIJ | head -c 55000000"],
-        "corr-e2",
-        {
-          writeFlightStart: true,
-          flightRecorderEntry: entry(),
-          extractUsage: fakeUsage,
-        }
-      );
-      await waitForJobDone(manager, outcome.snapshot.id, 20000);
-      await tick();
+      // Exercise the overflow branch directly instead of streaming 55MB
+      // through a shell pipeline; the latter is needlessly brittle on
+      // hosted CI runners and can leave cleanup work racing the test runner.
+      const internal = manager as unknown as {
+        jobs: Map<string, Record<string, unknown>>;
+        appendOutput(
+          job: Record<string, unknown>,
+          stream: "stdout" | "stderr",
+          chunk: Buffer
+        ): void;
+      };
+      const jobId = "fake-overflow-job-e2";
+      const job: Record<string, unknown> = {
+        id: jobId,
+        cli: "claude",
+        args: [],
+        requestKey: "rk-e2",
+        correlationId: "corr-e2",
+        status: "running",
+        startedAt: new Date().toISOString(),
+        finishedAt: null,
+        exitCode: null,
+        stdout: "x".repeat(50 * 1024 * 1024),
+        stderr: "",
+        outputTruncated: false,
+        canceled: false,
+        error: null,
+        process: null,
+        exited: false,
+        metricsRecorded: false,
+        outputDirty: false,
+        lastOutputFlushAt: Date.now(),
+        flightRecorderEntry: entry(),
+        extractUsage: fakeUsage,
+        flightRecorderComplete: false,
+        flightCompleteArmed: true,
+        clearIdleTimer: () => {},
+      };
+      internal.jobs.set(jobId, job);
+      internal.appendOutput(job, "stdout", Buffer.from("!"));
       const c = fr.completes.find(x => x.correlationId === "corr-e2");
       expect(c).toBeDefined();
       expect(c!.result.status).toBe("failed");
       expect(c!.result.errorMessage).toBe("Output exceeded maximum size (50MB)");
-    }, 30000);
+    });
   });
 });

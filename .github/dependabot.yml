@@ -7,6 +7,8 @@ version: 2
 #   updates keep semver-compatible bumps flowing without manual chasing.
 # - pip: the integrations/llm-plugin/ surface that ships to PyPI, plus
 #   the hashed CI tool requirements used by workflow bootstrap steps.
+#   The CI tool requirements intentionally live outside .github/ so
+#   Dependabot can both discover them and open update PRs for hash bumps.
 #
 # Security-only mode is NOT enabled — we want all updates (security +
 # version) so the toolchain stays current. The gateway's dep surface
@@ -62,7 +64,7 @@ updates:
       - "python"
 
   - package-ecosystem: "pip"
-    directory: "/.github/requirements"
+    directory: "/requirements/ci"
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 3
