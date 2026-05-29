@@ -115,7 +115,7 @@ Check on it:
 llm_job_status({ "jobId": "abc-123" })
 ```
 
-When status is `completed`, fetch the result:
+When status is `completed`, collect the result:
 
 ```json
 llm_job_result({ "jobId": "abc-123" })

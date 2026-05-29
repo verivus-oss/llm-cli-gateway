@@ -704,7 +704,7 @@ async function awaitJobOrDefer(
     jobId: job.id,
     cli,
     correlationId: corrId,
-    message: `Execution exceeded sync deadline (${SYNC_DEADLINE_MS}ms). Poll with llm_job_status, fetch with llm_job_result.`,
+    message: `Execution exceeded sync deadline (${SYNC_DEADLINE_MS}ms). Poll with llm_job_status, collect with llm_job_result.`,
   };
 }
 
@@ -731,7 +731,7 @@ function buildDeferredToolResponse(
             message: deferred.message,
             sessionId: sessionId || null,
             pollWith: "llm_job_status",
-            fetchWith: "llm_job_result",
+            collectWith: "llm_job_result",
             cancelWith: "llm_job_cancel",
           },
           null,

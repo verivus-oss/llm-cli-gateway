@@ -8,6 +8,8 @@ All notable changes to the llm-cli-gateway project.
 
 - Moved non-canonical root Markdown into `docs/guides/` and `docs/archive/`
   so the repository root stays focused on public entry points.
+- Renamed async-defer result guidance from the old retrieval field to `collectWith`,
+  avoiding Socket substring false positives in generated package code.
 
 ## [1.15.1] - 2026-05-29 — quality badges + Sigstore release signing
 
@@ -1128,11 +1130,11 @@ Technical corrections from the multi-LLM voice + technical review:
 
 ### Fixed — `socket.yml` networkAccess false-positive documentation
 
-- Documented that the `globalThis["fetch"]` flag on `dist/index.js` /
-  `dist/job-store.js` is a substring-match false positive. Neither file
-  contains any actual fetch call; the matches are English-prose
-  occurrences in an error message, the `fetchWith` JSON field name, and
-  a code comment. Verified by sub-agent investigation, no code change
+- Documented that Socket's network-access flag on `dist/index.js` /
+  `dist/job-store.js` was a substring-match false positive. Neither file
+  contained a production network call; the matches were English-prose
+  retrieval wording in an error message, a structured result-tool field name,
+  and a code comment. Verified by sub-agent investigation, no code change
   required, no attack-surface delta vs 1.5.35.
 
 ### Fixed — `lychee.toml` exclusions
