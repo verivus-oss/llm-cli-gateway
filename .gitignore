@@ -19,3 +19,6 @@ build/
 .sqry-cache/
 .preexisting-doctor-index.patch.bak
 .review-unit-*-prompt.md
+
+# Local MCP client configs may contain machine paths, account IDs, and secret refs.
+windows-mcp-config-with-gateway.json

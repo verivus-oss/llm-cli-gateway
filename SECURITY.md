@@ -34,9 +34,20 @@ We coordinate disclosure: the reporter and the maintainers agree on a timeline. 
 
 We credit reporters in `CHANGELOG.md` for the release that fixes the finding, unless the reporter requests otherwise.
 
-## Out-of-band signing
+## Release signing
 
-This repository **does not** sign release tags today (matching the historical pattern: v1.0.0 onward are unsigned annotated tags). `npm publish` provenance via the OIDC sigstore path is the supply-chain integrity gate for the npm artefact; PyPI trusted publishing is the equivalent for the Python plugin. If you need cryptographic proof of provenance for a specific release, contact security@verivus.com and we will negotiate a signed manifest out-of-band.
+Release tags are not signed today (matching the historical pattern: v1.0.0 onward are unsigned annotated tags). Starting with the next release workflow run, GitHub release installer artifacts are signed with Sigstore keyless signing from GitHub Actions OIDC. Each uploaded artifact gets a `<artifact>.sigstore.json` bundle, including `SHA256SUMS.sigstore.json`.
+
+Verify the checksum manifest before trusting artifact checksums:
+
+```bash
+cosign verify-blob SHA256SUMS --bundle SHA256SUMS.sigstore.json \
+  --certificate-identity "https://github.com/verivus-oss/llm-cli-gateway/.github/workflows/release-installer.yml@refs/tags/v<version>" \
+  --certificate-oidc-issuer "https://token.actions.githubusercontent.com"
+sha256sum --check SHA256SUMS
+```
+
+`npm publish` provenance via the OIDC sigstore path remains the supply-chain integrity gate for the npm artefact; PyPI trusted publishing is the equivalent for the Python plugin.
 
 ## Threat surfaces NOT covered by automated CI
 

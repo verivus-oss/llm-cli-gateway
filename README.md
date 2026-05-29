@@ -1,13 +1,31 @@
 # llm-cli-gateway
 
-> *"Without consultation, plans are frustrated, but with many counselors they succeed."*
+[![CI](https://github.com/verivus-oss/llm-cli-gateway/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/verivus-oss/llm-cli-gateway/actions/workflows/ci.yml)
+[![Security](https://github.com/verivus-oss/llm-cli-gateway/actions/workflows/security.yml/badge.svg?branch=main)](https://github.com/verivus-oss/llm-cli-gateway/actions/workflows/security.yml)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/verivus-oss/llm-cli-gateway/badge)](https://scorecard.dev/viewer/?uri=github.com/verivus-oss/llm-cli-gateway)
+[![npm](https://img.shields.io/npm/v/llm-cli-gateway.svg)](https://www.npmjs.com/package/llm-cli-gateway)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Releases: Sigstore signed](https://img.shields.io/badge/releases-Sigstore%20signed-2e7d32.svg)](SECURITY.md#release-signing)
+
+> _"Without consultation, plans are frustrated, but with many counselors they succeed."_
 > — Proverbs 15:22 (LSB)
 
-A Model Context Protocol (MCP) server providing unified access to Claude Code, Codex, Gemini, Grok, and Mistral (Vibe) CLIs with session management, retry logic, and async job orchestration.
+A Model Context Protocol (MCP) gateway for running Claude Code, Codex, Gemini, Grok, and Mistral (Vibe) CLIs from one MCP endpoint, with durable async jobs, session continuity, cache-aware prompting, observability, and personal-appliance setup tooling.
+
+## What It Provides Today
+
+`llm-cli-gateway` is a single-user MCP gateway for cross-LLM validation and multi-agent coding workflows. It is more than a thin CLI wrapper:
+
+- Runs five provider CLIs through consistent sync and async MCP tools.
+- Persists long-running jobs, supports restart-safe result collection, deduplication, cancellation, and sync-to-async deferral.
+- Tracks sessions, real CLI resume paths, structured response metadata, and cache telemetry.
+- Supports cache-aware `promptParts`, including explicit Claude `cache_control` when opted in.
+- Can run requests inside gateway-managed git worktrees for isolated multi-agent review and implementation loops.
+- Ships personal-appliance setup surfaces: HTTP transport with bearer-token auth, `doctor --json`, setup UI artifacts, provider setup snippets, Docker fallback, and checked release bundles.
 
 ## Personal MCP Appliance MVP
 
-`llm-cli-gateway` is being packaged as a single-user personal MCP appliance for cross-LLM validation. The intended workflow is: connect one MCP endpoint, ask any client for cross-LLM validation.
+The personal-appliance contract keeps that surface intentionally narrow: one trusted user runs the gateway on a machine or volume they own, connects one MCP endpoint, and asks any connected client for cross-LLM validation.
 
 The product contract is documented in [docs/personal-mcp/PRODUCT_CONTRACT.md](docs/personal-mcp/PRODUCT_CONTRACT.md). It defines the single-user scope, security posture, target support matrix, and provider-support verification gates. Public setup guides must not claim ChatGPT, Claude web, Claude Desktop, Codex, Gemini CLI, Gemini web, or Grok inbound support until the corresponding provider/client path has been verified.
 
@@ -19,7 +37,7 @@ Current personal-appliance artifacts include:
 
 - Streamable HTTP startup: `LLM_GATEWAY_AUTH_TOKEN=<token> npm run start:http`
 - Machine-readable diagnostics: `npm run doctor`
-- Go bootstrapper scaffold: `installer/` with `setup`, `doctor --json`, `start`, `stop`, `status`, `repair`, `upgrade`, `uninstall`, `print-client-config`, and verified bundle download commands.
+- Go bootstrapper: `installer/` with `setup`, `doctor --json`, `start`, `stop`, `status`, `repair`, `upgrade`, `uninstall`, `print-client-config`, and verified bundle download commands.
 - Release packaging: the release workflow builds Linux binaries on the local self-hosted runner, builds Windows/macOS binaries on GitHub-hosted runners, then publishes checksummed platform bundles with the gateway, production dependencies, and a managed Node runtime; see [installer/packaging/README.md](installer/packaging/README.md).
 - Docker Compose fallback: [docker-compose.personal.yml](docker-compose.personal.yml) + [Dockerfile.personal](Dockerfile.personal) for users who already manage containers.
 - Local setup UI artifact: [setup/ui/index.html](setup/ui/index.html)
@@ -34,11 +52,25 @@ Windows PowerShell:
 $Version = '<version>'
 $Base = "https://github.com/verivus-oss/llm-cli-gateway/releases/download/v$Version"
 $InstallDir = Join-Path (Join-Path $env:LOCALAPPDATA 'Programs') 'llm-cli-gateway'
+$ExeName = "llm-cli-gateway-$Version-windows-amd64.exe"
+$BundleName = "llm-cli-gateway-bundle-$Version-windows-amd64.tar.gz"
 $Exe = Join-Path $InstallDir 'llm-cli-gateway.exe'
+$Checksums = Join-Path $InstallDir 'SHA256SUMS'
+$ChecksumBundle = Join-Path $InstallDir 'SHA256SUMS.sigstore.json'
 New-Item -ItemType Directory -Force $InstallDir | Out-Null
-Invoke-WebRequest -UseBasicParsing "$Base/llm-cli-gateway-$Version-windows-amd64.exe" -OutFile $Exe
-$env:RVWR_GATEWAY_BUNDLE_URL = "$Base/llm-cli-gateway-bundle-$Version-windows-amd64.tar.gz"
-$env:RVWR_GATEWAY_BUNDLE_SHA256 = '<bundle-sha256-from-SHA256SUMS>'
+Invoke-WebRequest -UseBasicParsing "$Base/$ExeName" -OutFile $Exe
+Invoke-WebRequest -UseBasicParsing "$Base/SHA256SUMS" -OutFile $Checksums
+Invoke-WebRequest -UseBasicParsing "$Base/SHA256SUMS.sigstore.json" -OutFile $ChecksumBundle
+cosign verify-blob $Checksums --bundle $ChecksumBundle --certificate-identity "https://github.com/verivus-oss/llm-cli-gateway/.github/workflows/release-installer.yml@refs/tags/v$Version" --certificate-oidc-issuer "https://token.actions.githubusercontent.com"
+if ($LASTEXITCODE -ne 0) { throw "Sigstore verification failed for SHA256SUMS" }
+function Get-ReleaseSha256($Name) {
+  $line = Select-String -Path $Checksums -Pattern "^[a-fA-F0-9]{64}\s+$([regex]::Escape($Name))$" | Select-Object -First 1
+  if (-not $line) { throw "No SHA256SUMS entry found for $Name" }
+  return (($line.Line -split "\s+")[0]).ToLowerInvariant()
+}
+if ((Get-FileHash $Exe -Algorithm SHA256).Hash.ToLowerInvariant() -ne (Get-ReleaseSha256 $ExeName)) { throw "Checksum mismatch for $ExeName" }
+$env:RVWR_GATEWAY_BUNDLE_URL = "$Base/$BundleName"
+$env:RVWR_GATEWAY_BUNDLE_SHA256 = Get-ReleaseSha256 $BundleName
 & $Exe setup
 & $Exe stop
 & $Exe install-bundle
@@ -53,6 +85,9 @@ PATH. Do not script against release-versioned exe names after install.
 
 ```bash
 # After downloading the binary that matches your OS/arch from a release:
+cosign verify-blob SHA256SUMS --bundle SHA256SUMS.sigstore.json \
+  --certificate-identity "https://github.com/verivus-oss/llm-cli-gateway/.github/workflows/release-installer.yml@refs/tags/v<version>" \
+  --certificate-oidc-issuer "https://token.actions.githubusercontent.com"
 sha256sum --check SHA256SUMS            # verify before run (or `shasum -a 256 --check` on macOS)
 chmod +x llm-cli-gateway-<ver>-<os>-<arch>
 ./llm-cli-gateway-<ver>-<os>-<arch> setup
@@ -79,13 +114,16 @@ docker compose -f docker-compose.personal.yml run --rm doctor
 ## Features
 
 ### Core Capabilities
+
 - **Multi-LLM Orchestration**: Unified interface for Claude Code, Codex, Gemini, Grok, and Mistral (Vibe) CLIs
 - **Session Management**: Track and resume conversations across all CLIs with persistent storage
+- **Gateway-owned worktrees**: Run any sync or async provider request inside a managed git worktree, with per-session reuse and cleanup
 - **Token Optimization**: Automatic 44% reduction on prompts, 37% on responses (opt-in)
 - **Correlation ID Tracking**: Full request tracing across all LLM interactions
 - **Cross-Tool Collaboration**: LLMs can use each other via MCP (validated through dogfooding)
 
 ### Observability
+
 - **SQLite Flight Recorder**: Every request/response logged to `~/.llm-cli-gateway/logs.db` with correlation IDs, token usage, duration, retry counts, and circuit breaker state. Browse with [Datasette](https://datasette.io/): `datasette ~/.llm-cli-gateway/logs.db`
 - **Structured Metadata**: Tool responses include machine-readable `structuredContent` (model, cli, correlationId, sessionId, durationMs, token counts)
 - **Cache observability resources**: `cache_state://global`, `cache_state://session/{id}`, and `cache_state://prefix/{hash}` MCP resources return aggregate cache hit/miss/savings — tokens and hashes only, no prompt text. `session_get` includes a `cacheState` block when the session has prior requests.
@@ -109,17 +147,18 @@ Every `*_request` and `*_request_async` tool accepts an optional `promptParts` f
 
 Per-CLI capability matrix:
 
-| CLI     | Prefix discipline (auto via `promptParts`) | Explicit `cache_control` emission |
-|---------|--------------------------------------------|------------------------------------|
-| claude  | yes                                        | not yet (Branch B; gated on `[cache_awareness].emit_anthropic_cache_control`) |
-| codex   | yes                                        | n/a (OpenAI implicit cache, no CLI lever) |
-| gemini  | yes                                        | n/a (implicit prefix cache server-side)  |
-| grok    | yes                                        | n/a (no surfaced cache lever)            |
-| mistral | yes                                        | n/a (no surfaced cache lever)            |
+| CLI     | Prefix discipline (auto via `promptParts`) | Explicit `cache_control` emission                                            |
+| ------- | ------------------------------------------ | ---------------------------------------------------------------------------- |
+| claude  | yes                                        | yes, opt-in via `promptParts.cacheControl` and `outputFormat: "stream-json"` |
+| codex   | yes                                        | n/a (OpenAI implicit cache, no CLI lever)                                    |
+| gemini  | yes                                        | n/a (implicit prefix cache server-side)                                      |
+| grok    | yes                                        | n/a (no surfaced cache lever)                                                |
+| mistral | yes                                        | n/a (no surfaced cache lever)                                                |
 
 Opt-in flags (all default off) live under `[cache_awareness]` in `~/.llm-cli-gateway/config.toml`. See `docs/personal-mcp/PROVIDER_CACHE_SURFACES.md` for the per-model minimum cacheable token thresholds and field-name divergences.
 
 ### Reliability & Performance
+
 - **Retry Logic**: Exponential backoff with circuit breaker for transient failures
 - **Atomic File Writes**: Process-specific temp files with fsync for data integrity
 - **Memory Limits**: 50MB cap on CLI output prevents DoS attacks
@@ -127,7 +166,8 @@ Opt-in flags (all default off) live under `[cache_awareness]` in `~/.llm-cli-gat
 - **Long-Running Jobs**: Non-time-bound async execution via `*_request_async` + polling tools
 
 ### Security & Quality
-- **Comprehensive Testing**: 681 tests covering unit, integration, and regression scenarios with real CLI execution
+
+- **Comprehensive Testing**: 900+ tests covering unit, integration, and regression scenarios with real CLI execution
 - **Input Validation**: Zod schemas prevent injection attacks
 - **No Secret Leakage**: Generic session descriptions only (file permissions 0o600)
 - **No ReDoS**: Bounded regex patterns prevent catastrophic backtracking
@@ -139,6 +179,7 @@ Opt-in flags (all default off) live under `[cache_awareness]` in `~/.llm-cli-gat
 Before using this gateway, you need to install the CLI tools you want to use:
 
 ### Claude Code CLI
+
 ```bash
 # Installation instructions for Claude Code
 # Visit: https://docs.anthropic.com/claude-code
@@ -146,18 +187,21 @@ npm install -g @anthropic-ai/claude-code
 ```
 
 ### Codex CLI
+
 ```bash
 npm install -g @openai/codex
 codex login
 ```
 
 ### Gemini CLI
+
 ```bash
 npm install -g @google/gemini-cli
 # Or: https://github.com/google-gemini/gemini-cli
 ```
 
 ### Grok CLI (xAI)
+
 ```bash
 npm install -g grok-build
 grok login   # OAuth flow, or set GROK_CODE_XAI_API_KEY
@@ -165,6 +209,7 @@ grok login   # OAuth flow, or set GROK_CODE_XAI_API_KEY
 ```
 
 ### Mistral Vibe CLI
+
 ```bash
 # Pick one — the gateway's cli_upgrade auto-detects which one you used.
 pip install vibe-cli
@@ -184,7 +229,7 @@ Vibe-specific notes:
   requested or Vibe config needs recovery, and retries once after a
   model-not-found failure with refreshed discovery.
 - **`permissionMode` accepts** `default | plan | accept-edits | auto-approve |
-  chat | explore | lean` and emits `--agent <mode>`. The gateway's
+chat | explore | lean` and emits `--agent <mode>`. The gateway's
   programmatic-mode default is `auto-approve`; pick a stricter mode
   explicitly if you need approval gates.
 - **`allowedTools` is allow-list only** — the gateway emits one
@@ -198,11 +243,13 @@ Vibe-specific notes:
 ## Installation
 
 ### As an MCP server (npm)
+
 ```bash
 npm install -g llm-cli-gateway
 ```
 
 Or use directly with `npx`:
+
 ```json
 {
   "mcpServers": {
@@ -215,6 +262,7 @@ Or use directly with `npx`:
 ```
 
 ### From source
+
 ```bash
 git clone https://github.com/verivus-oss/llm-cli-gateway.git
 cd llm-cli-gateway
@@ -260,9 +308,11 @@ The validation report preserves per-provider disagreement. Optional judge synthe
 #### LLM Request Tools
 
 ##### `claude_request`
+
 Execute a Claude Code request with optional session management.
 
 **Parameters:**
+
 - `prompt` (string, required): The prompt to send (1-100,000 chars)
 - `model` (string, optional): Model name or alias (use `list_models` for available values; supports `latest`)
 - `outputFormat` (string, optional): Output format ("text" or "json"), default: "text"
@@ -281,10 +331,12 @@ Execute a Claude Code request with optional session management.
 - `correlationId` (string, optional): Request trace ID (auto-generated if omitted)
 
 **Response extras:**
+
 - `approval`: Approval decision record when `approvalStrategy="mcp_managed"`
 - `mcpServers`: Requested/enabled/missing MCP servers for this call
 
 **Example:**
+
 ```json
 {
   "prompt": "Write a Python function to calculate fibonacci numbers",
@@ -296,9 +348,11 @@ Execute a Claude Code request with optional session management.
 ```
 
 ##### `codex_request`
+
 Execute a Codex request with optional session tracking.
 
 **Parameters:**
+
 - `prompt` (string, required): The prompt to send (1-100,000 chars)
 - `model` (string, optional): Model name or alias (use `list_models` for available values; supports `latest`, recommended: `gpt-5.4`)
 - `fullAuto` (boolean, optional): Enable full-auto mode, default: false
@@ -314,10 +368,12 @@ Execute a Codex request with optional session tracking.
 - `idleTimeoutMs` (number, optional): Kill a stuck Codex process after output inactivity; 30,000 to 3,600,000 ms
 
 **Response extras:**
+
 - `approval`: Approval decision record when `approvalStrategy="mcp_managed"`
 - `mcpServers`: Requested MCP servers for this call
 
 **Example:**
+
 ```json
 {
   "prompt": "Create a REST API endpoint",
@@ -328,9 +384,11 @@ Execute a Codex request with optional session tracking.
 ```
 
 ##### `gemini_request`
+
 Execute a Gemini CLI request with session support.
 
 **Parameters:**
+
 - `prompt` (string, required): The prompt to send (1-100,000 chars)
 - `model` (string, optional): Model name or alias (use `list_models` for available values; supports `latest`, `pro`, `flash`)
 - `sessionId` (string, optional): Session ID to resume
@@ -347,10 +405,12 @@ Execute a Gemini CLI request with session support.
 - `correlationId` (string, optional): Request trace ID (auto-generated if omitted)
 
 **Response extras:**
+
 - `approval`: Approval decision record when `approvalStrategy="mcp_managed"`
 - `mcpServers`: Requested MCP servers for this call
 
 **Example:**
+
 ```json
 {
   "prompt": "Explain quantum computing",
@@ -361,9 +421,11 @@ Execute a Gemini CLI request with session support.
 ```
 
 ##### `grok_request`
+
 Execute a Grok CLI (xAI) request with session support.
 
 **Parameters:**
+
 - `prompt` (string, required): The prompt to send (1-100,000 chars)
 - `model` (string, optional): Model name or alias (e.g. `grok-build`, `latest`)
 - `outputFormat` (string, optional): `"plain"` (default), `"json"`, or `"streaming-json"`
@@ -384,6 +446,7 @@ Execute a Grok CLI (xAI) request with session support.
 - `correlationId` (string, optional): Request trace ID (auto-generated if omitted)
 
 **Example:**
+
 ```json
 {
   "prompt": "Summarize the latest commit message in 1 sentence",
@@ -416,12 +479,14 @@ acknowledgeEphemeral = false                # required to enable async tools wit
 ```
 
 Backends:
+
 - **`sqlite`** (default) — durable, file-backed. Safe for single-instance deployments.
 - **`memory`** — in-process Map. Lost on gateway exit. Requires `acknowledgeEphemeral = true` to be loaded. Suitable for tests and ephemeral CI gateways.
 - **`postgres`** — interface only, implementation not yet shipped. Selecting this backend throws at startup.
 - **`none`** — no store. **`*_request_async`, `llm_job_status`, `llm_job_result`, and `llm_job_cancel` are NOT registered on the gateway.** This is a structural invariant: agents that try to call async tools against a gateway with `backend = "none"` get a clean "tool not found" at connect time instead of silent in-memory loss after the 1-hour TTL. Use `llm_process_health` to inspect the resolved persistence state programmatically.
 
 Legacy environment variables (deprecated; emit a warning at startup):
+
 - `LLM_GATEWAY_LOGS_DB` / `LLM_GATEWAY_JOBS_DB` — `none` selects `backend = "none"`; any other value selects `backend = "sqlite"` with that path.
 - `LLM_GATEWAY_JOB_RETENTION_DAYS` — overrides `retentionDays`.
 - `LLM_GATEWAY_DEDUP_WINDOW_MS` — overrides `dedupWindowMs`.
@@ -459,7 +524,7 @@ backend = "sqlite"
 path = "/srv/repos/.../my-repo/.gateway/logs.db"
 ```
 
-Now every gateway subprocess spawned for *this* repo's Claude Code window reads its own config and writes to its own SQLite file; sessions, jobs, and dedup state are scoped to the repo. Other repos keep using the global default. `llm_process_health.persistence.sources.configFile` lets an agent confirm which config it's actually running under.
+Now every gateway subprocess spawned for _this_ repo's Claude Code window reads its own config and writes to its own SQLite file; sessions, jobs, and dedup state are scoped to the repo. Other repos keep using the global default. `llm_process_health.persistence.sources.configFile` lets an agent confirm which config it's actually running under.
 
 ###### Agent-executable spec (DAG-TOML)
 
@@ -623,6 +688,7 @@ consumes       = ["OUT:mcp-reconnected"]
 **Why this matters for agents:** the gateway has multiple configuration surfaces (TOML file, env-var overrides, two different MCP settings files) and one easy mistake — editing the committed `.mcp.json` instead of the local-only `.claude/settings.local.json` — will silently break the per-project scope for every other developer on the repo. The DAG above encodes the correct sequence, the verification gate, and the failure modes explicitly so an agent can execute it without inference.
 
 ##### `mistral_request`
+
 Run a Mistral Vibe agentic coding request. Like `grok_request` in shape, but with Vibe's specific surface:
 
 - `model` (string, optional): Vibe model alias (for example `mistral-medium-3.5` or `latest`). The resolved value is injected via the `VIBE_ACTIVE_MODEL` environment variable; omit it to let the gateway discover Vibe config and avoid stale hardcoded defaults.
@@ -632,33 +698,41 @@ Run a Mistral Vibe agentic coding request. Like `grok_request` in shape, but wit
 - `sessionId` / `resumeLatest` / `createNewSession`: standard session controls. Continuity requires `[session_logging] enabled = true` in `~/.vibe/config.toml` — `doctor --json` surfaces an actionable next-action when the toggle is missing.
 
 ##### `claude_request_async` / `codex_request_async` / `gemini_request_async` / `grok_request_async` / `mistral_request_async`
+
 Start a long-running Claude, Codex, Gemini, Grok, or Mistral request without waiting for completion in the same MCP call.
 
 Use this flow when analysis/runtime can exceed client tool-call limits:
+
 1. Start job with `*_request_async`
 2. Poll with `llm_job_status`
 3. Fetch output with `llm_job_result`
 4. Optionally stop with `llm_job_cancel`
 
 Async request tools accept the same approval strategy fields as their sync variants:
+
 - `approvalStrategy`: `"legacy"` (default) or `"mcp_managed"`
 - `approvalPolicy`: `"strict"|"balanced"|"permissive"` override
 - `mcpServers`: Requested MCP servers (`sqry`, `exa`, `ref_tools`, `trstr`)
 - `claude_request_async` also supports `strictMcpConfig` and fails fast when requested servers are unavailable
 
 ##### `llm_job_status`
+
 Return lifecycle status (`running`, `completed`, `failed`, `canceled`) and metadata for an async job.
 
 ##### `llm_job_result`
+
 Return captured stdout/stderr for an async job (with configurable max chars per stream).
 
 ##### `llm_job_cancel`
+
 Cancel a running async job.
 
 ##### `approval_list`
+
 List recent MCP-managed approval decisions recorded by the gateway.
 
 **Parameters:**
+
 - `limit` (number, optional): Max records (1-500), default: 50
 - `cli` (string, optional): Filter by `"claude"`, `"codex"`, or `"gemini"`
 
@@ -667,14 +741,17 @@ Approval records are persisted to `~/.llm-cli-gateway/approvals.jsonl`.
 #### Session Management Tools
 
 ##### `session_create`
+
 Create a new session for a specific CLI.
 
 **Parameters:**
+
 - `cli` (string, required): CLI to create session for ("claude", "codex", "gemini", "grok", "mistral")
 - `description` (string, optional): Description for the session
 - `setAsActive` (boolean, optional): Set as active session, default: true
 
 **Example:**
+
 ```json
 {
   "cli": "claude",
@@ -684,50 +761,64 @@ Create a new session for a specific CLI.
 ```
 
 ##### `session_list`
+
 List all sessions, optionally filtered by CLI.
 
 **Parameters:**
+
 - `cli` (string, optional): Filter by CLI ("claude", "codex", "gemini", "grok", "mistral")
 
 **Response includes:**
+
 - Total session count
 - Session details (ID, CLI, description, timestamps, active status)
 - Active session IDs for each CLI
 
 ##### `session_set_active`
+
 Set the active session for a specific CLI.
 
 **Parameters:**
+
 - `cli` (string, required): CLI to set active session for
 - `sessionId` (string, required): Session ID to activate (or null to clear)
 
 ##### `session_get`
+
 Retrieve details for a specific session.
 
 **Parameters:**
+
 - `sessionId` (string, required): Session ID to retrieve
 
 ##### `session_delete`
+
 Delete a specific session.
 
 **Parameters:**
+
 - `sessionId` (string, required): Session ID to delete
 
 ##### `session_clear_all`
+
 Clear all sessions, optionally for a specific CLI.
 
 **Parameters:**
+
 - `cli` (string, optional): Clear sessions for specific CLI only
 
 #### Utility Tools
 
 ##### `list_models`
+
 List available models for each CLI.
 
 **Parameters:**
+
 - `cli` (string, optional): Specific CLI to list models for ("claude", "codex", "gemini", "grok", "mistral")
 
 **Response includes:**
+
 - Model names and descriptions
 - Best use cases for each model
 - CLI-specific information
@@ -764,21 +855,26 @@ LLM_GATEWAY_DISABLE_MODEL_DISCOVERY=1
 ```
 
 ##### `cli_versions`
+
 Report installed CLI versions.
 
 **Parameters:**
+
 - `cli` (string, optional): Specific CLI to inspect ("claude", "codex", "gemini", "grok", "mistral")
 
 ##### `cli_upgrade`
+
 Plan or run an upgrade for one CLI.
 
 **Parameters:**
+
 - `cli` (string, required): CLI to upgrade ("claude", "codex", "gemini", "grok", "mistral")
 - `target` (string, optional): Package tag/version/target, default: `latest`
 - `dryRun` (boolean, optional): Return the upgrade plan without running it, default: `true`
 - `timeoutMs` (number, optional): Upgrade timeout when `dryRun=false`
 
 **Upgrade strategies:**
+
 - Claude latest: `claude update`
 - Claude explicit target: `claude install <target>`
 - Codex latest: `codex update`
@@ -786,6 +882,7 @@ Plan or run an upgrade for one CLI.
 - Gemini: `npm install -g @google/gemini-cli@<target>`
 
 **Example dry run:**
+
 ```json
 {
   "cli": "gemini",
@@ -810,7 +907,7 @@ Plan or run an upgrade for one CLI.
 await callTool("session_create", {
   cli: "claude",
   description: "Debugging session",
-  setAsActive: true
+  setAsActive: true,
 });
 
 // 2. Make requests (automatically uses active session)
@@ -822,7 +919,7 @@ await callTool("claude_request", {
 // 3. Continue the conversation
 await callTool("claude_request", {
   prompt: "Can you explain that fix in more detail?",
-  continueSession: true
+  continueSession: true,
 });
 
 // 4. List all sessions
@@ -831,12 +928,12 @@ await callTool("session_list", { cli: "claude" });
 // 5. Switch to a different session
 await callTool("session_set_active", {
   cli: "claude",
-  sessionId: "some-other-session-id"
+  sessionId: "some-other-session-id",
 });
 
 // 6. Delete when done
 await callTool("session_delete", {
-  sessionId: "session-id-to-delete"
+  sessionId: "session-id-to-delete",
 });
 ```
 
@@ -864,6 +961,7 @@ await callTool("session_delete", {
 ### CLI-Specific Settings
 
 Each CLI can be configured through its own configuration files:
+
 - Claude Code: `~/.claude/config.json`
 - Codex: `~/.codex/config.toml`
 - Gemini: `~/.gemini/config.json`
@@ -939,6 +1037,7 @@ npm start
 The gateway provides detailed error messages for common issues:
 
 ### CLI Not Found
+
 ```
 Error executing claude CLI:
 spawn claude ENOENT
@@ -947,12 +1046,14 @@ The 'claude' command was not found. Please ensure claude CLI is installed and in
 ```
 
 ### External Timeout / Legacy Timeout Option
+
 ```
 Error executing codex CLI: Command timed out
 Process timed out after 120000ms
 ```
 
 ### Invalid Parameters
+
 ```
 Prompt cannot be empty
 Prompt too long (max 100k chars)
@@ -970,6 +1071,7 @@ Logs are written to stderr (stdout is reserved for MCP protocol):
 ```
 
 Enable debug logging:
+
 ```bash
 DEBUG=1 node dist/index.js
 ```
@@ -979,6 +1081,7 @@ DEBUG=1 node dist/index.js
 ### CLIs Not Found
 
 Make sure the CLIs are installed and in your PATH:
+
 ```bash
 which claude
 which codex
@@ -986,6 +1089,7 @@ which gemini
 ```
 
 The gateway extends PATH to include common locations:
+
 - `~/.local/bin`
 - `/usr/local/bin`
 - `/usr/bin`
@@ -994,6 +1098,7 @@ The gateway extends PATH to include common locations:
 ### Permission Errors
 
 If you encounter permission errors, ensure the CLI tools have proper permissions:
+
 ```bash
 chmod +x $(which claude)
 chmod +x $(which codex)
@@ -1005,16 +1110,19 @@ chmod +x $(which gemini)
 Sessions are stored in `~/.llm-cli-gateway/sessions.json`. If you encounter issues:
 
 1. Check file permissions:
+
 ```bash
 ls -la ~/.llm-cli-gateway/
 ```
 
 2. Reset sessions:
+
 ```bash
 rm ~/.llm-cli-gateway/sessions.json
 ```
 
 3. Or manually edit the session file:
+
 ```bash
 cat ~/.llm-cli-gateway/sessions.json
 ```
@@ -1038,19 +1146,20 @@ The gateway supports concurrent requests across different CLIs. Each request spa
 - **No Eval**: No dynamic code evaluation in our source (see "Socket alerts" below for the transitive `ajv` codegen case)
 - **Sandboxing**: Consider running in containers for production use
 - **Provenance**: Releases are published with [npm provenance](https://docs.npmjs.com/generating-provenance-statements) via OIDC trusted publishing from GitHub Actions
+- **Release signing**: GitHub release installer artifacts are signed with Sigstore keyless signing; verify `SHA256SUMS.sigstore.json` before trusting the checksum file
 
 ### Socket alerts — context for reviewers
 
 If you're vetting `llm-cli-gateway` through [Socket](https://socket.dev/npm/package/llm-cli-gateway) or a similar supply-chain scanner, you'll see three behavioural alerts and some dependency-ownership alerts. They are accurate descriptions of what the package does and what it depends on; we've left them visible (not silenced in `socket.yml`) so you don't have to take our word for it. Here's the context for each:
 
-| Alert | Where | Why it's bounded |
-|---|---|---|
-| **Network access** | `src/http-transport.ts` opens an HTTP MCP transport when started via `npm run start:http`. `src/endpoint-exposure.ts` issues a HEAD probe to verify configured public/tunnel URLs. | The transport binds to `127.0.0.1` by default and requires `LLM_GATEWAY_AUTH_TOKEN` to be set. The default stdio MCP entry point (`npm start`) opens no sockets. |
-| **Shell access** | `src/executor.ts` uses `child_process.spawn(cmd, args, …)` to invoke the underlying LLM CLIs. | `spawn` is called with an argument array and **never** `shell: true`, so there is no shell interpolation path for caller input. The command name is restricted to an allow-list of known CLI binaries (`claude`, `codex`, `gemini`, `grok`, `vibe`). |
-| **Uses eval** | None in our source. Transitive: `@modelcontextprotocol/sdk` → `ajv@8` uses `new Function(...)` in `ajv/dist/compile/index.js` to compile JSON Schema validators. | This is ajv's standard codegen path. Only known schemas (defined in our source and the MCP SDK) flow into it; no caller-supplied data ever reaches the compiled function body. |
-| **better-sqlite3 PRAGMA helper** | Transitive: `better-sqlite3/lib/methods/pragma.js` interpolates its caller-provided `source` into a `PRAGMA ${source}` statement. | We do not call `db.pragma()` from production source. Internal SQLite setup uses fixed literal `db.exec("PRAGMA ...")` statements, and `npm run security:audit` fails the release if production code reintroduces `.pragma()` calls. |
-| **ioredis obfuscated code** | Optional peer/dev dependency: `ioredis@5.10.1` may be flagged at `built/constants/TLSProfiles.js` for base64-looking strings. | Reviewed as a false positive. The file is a Redis Cloud TLS CA certificate bundle in PEM format, which is base64 by design. It contains no decoder loop, dynamic evaluation, network call, or hidden execution path. The same file is byte-for-byte identical in `ioredis@5.9.2`; our default production install does not install `ioredis`, and our code does not pass ioredis TLS profile options. |
-| **Dependency ownership** | A handful of small transitive packages (e.g. `bindings` via `better-sqlite3`, `media-typer` via `@modelcontextprotocol/sdk`) trip Socket's "unstable ownership" or "obfuscated code" heuristics. | These are pinned, well-known micro-deps in the Node ecosystem with no known issues. We pin direct override versions of `content-type` and `type-is` in `package.json#overrides`. Our previous direct dependency on `toml@3.0.0` (also single-maintainer, last released 2020) was replaced with the actively-maintained `smol-toml` to reduce inherited risk. |
+| Alert                            | Where                                                                                                                                                                                            | Why it's bounded                                                                                                                                                                                                                                                                                                                                                                                     |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Network access**               | `src/http-transport.ts` opens an HTTP MCP transport when started via `npm run start:http`. `src/endpoint-exposure.ts` issues a HEAD probe to verify configured public/tunnel URLs.               | The transport binds to `127.0.0.1` by default and requires `LLM_GATEWAY_AUTH_TOKEN` to be set. The default stdio MCP entry point (`npm start`) opens no sockets.                                                                                                                                                                                                                                     |
+| **Shell access**                 | `src/executor.ts` uses `child_process.spawn(cmd, args, …)` to invoke the underlying LLM CLIs.                                                                                                    | `spawn` is called with an argument array and **never** `shell: true`, so there is no shell interpolation path for caller input. The command name is restricted to an allow-list of known CLI binaries (`claude`, `codex`, `gemini`, `grok`, `vibe`).                                                                                                                                                 |
+| **Uses eval**                    | None in our source. Transitive: `@modelcontextprotocol/sdk` → `ajv@8` uses `new Function(...)` in `ajv/dist/compile/index.js` to compile JSON Schema validators.                                 | This is ajv's standard codegen path. Only known schemas (defined in our source and the MCP SDK) flow into it; no caller-supplied data ever reaches the compiled function body.                                                                                                                                                                                                                       |
+| **better-sqlite3 PRAGMA helper** | Transitive: `better-sqlite3/lib/methods/pragma.js` interpolates its caller-provided `source` into a `PRAGMA ${source}` statement.                                                                | We do not call `db.pragma()` from production source. Internal SQLite setup uses fixed literal `db.exec("PRAGMA ...")` statements, and `npm run security:audit` fails the release if production code reintroduces `.pragma()` calls.                                                                                                                                                                  |
+| **ioredis obfuscated code**      | Optional peer/dev dependency: `ioredis@5.10.1` may be flagged at `built/constants/TLSProfiles.js` for base64-looking strings.                                                                    | Reviewed as a false positive. The file is a Redis Cloud TLS CA certificate bundle in PEM format, which is base64 by design. It contains no decoder loop, dynamic evaluation, network call, or hidden execution path. The same file is byte-for-byte identical in `ioredis@5.9.2`; our default production install does not install `ioredis`, and our code does not pass ioredis TLS profile options. |
+| **Dependency ownership**         | A handful of small transitive packages (e.g. `bindings` via `better-sqlite3`, `media-typer` via `@modelcontextprotocol/sdk`) trip Socket's "unstable ownership" or "obfuscated code" heuristics. | These are pinned, well-known micro-deps in the Node ecosystem with no known issues. We pin direct override versions of `content-type` and `type-is` in `package.json#overrides`. Our previous direct dependency on `toml@3.0.0` (also single-maintainer, last released 2020) was replaced with the actively-maintained `smol-toml` to reduce inherited risk.                                         |
 
 See [`socket.yml`](./socket.yml) for the same context in machine-readable form.
 
@@ -1070,6 +1179,7 @@ MIT. See [LICENSE](LICENSE) for details.
 ## Support
 
 For issues and questions:
+
 - Open an issue on GitHub
 - Check existing issues and documentation
 - Review CLI-specific documentation for CLI-related problems
