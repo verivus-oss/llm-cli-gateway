@@ -16,14 +16,10 @@ name: security
 #                     names / env-var names / config keys)
 #   gitleaks        — secret leak detection in commits + working tree
 #                     (replaces GHAS secret scanning)
-#   osv-scanner     — CVEs in package-lock.json (npm) and any Python
-#                     lockfile under integrations/llm-plugin/.
+#   osv-scanner     — CVEs in package-lock.json (npm) and hashed Python
+#                     CI tool requirements.
 #                     Complements Dependabot: catches transitive and
 #                     advisory-DB-only entries Dependabot misses.
-#   ruff            — Python deep linter (security `S` rules,
-#                     correctness, dead-code); defense-in-depth above
-#                     bandit on integrations/llm-plugin/.
-#   bandit          — Python static security analysis on the same tree.
 #   lychee          — link rot in README.md / CHANGELOG.md / docs/*
 #   attribution     — rejects new Claude/Anthropic author or co-author
 #                     trailers so GitHub contributor attribution stays human /
@@ -60,7 +56,7 @@ jobs:
           # cannot be picked up by tool installers (zizmor artipacked).
           persist-credentials: false
 
-      - name: Set up Python (for zizmor + ruff + bandit)
+      - name: Set up Python (for zizmor)
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
         with:
           python-version: "3.12"
@@ -94,6 +90,7 @@ jobs:
         # credential persistence through artifacts.
         run: |
           set -euo pipefail
+          python3 scripts/ci/validate_security_requirements.py requirements/ci/requirements-security.txt
           python3 -m pip install --user --require-hashes -r requirements/ci/requirements-security.txt
           # Default min-severity (low+); informational findings (job
           # names, concurrency limits, superfluous actions) are tracked
@@ -152,11 +149,8 @@ jobs:
         uses: google/osv-scanner-action/osv-scanner-action@9a498708959aeaef5ef730655706c5a1df1edbc2 # v2.3.8
         with:
           # --no-resolve disables network-required transitive dependency
-          # resolution. package-lock.json has full transitive info baked
-          # in; integrations/llm-plugin/ pyproject lacks a lockfile, so
-          # gets direct-dep-only coverage (one dep: llm>=0.19). When we
-          # add a requirements.lock or uv.lock we can re-enable
-          # transitive resolution.
+          # resolution. package-lock.json has full transitive info baked in,
+          # and requirements/ci uses hash-pinned direct tool dependencies.
           scan-args: |-
             --recursive
             --no-resolve
@@ -194,48 +188,7 @@ jobs:
             --exit-code 1
 
       # ---------------------------------------------------------------
-      # Python (integrations/llm-plugin/) — small surface but ships to
-      # PyPI, so security-lint it just like the npm surface.
-      # ---------------------------------------------------------------
-
-      - name: Python lint (ruff)
-        # ruff is a polyglot Python linter that includes the
-        # flake8-bandit security ruleset (S101..S702), plus correctness
-        # (F), dead-code, bug patterns (B), and simplifications (SIM).
-        # Pairs with bandit: ruff catches more correctness/bug patterns;
-        # bandit catches a few AST taint patterns ruff doesn't.
-        # Defense in depth.
-        run: |
-          set -euo pipefail
-          # Rules selected:
-          #   F = pyflakes — real bugs (unused imports, undefined names)
-          #   S = flake8-bandit — security
-          # Skip S404 (import subprocess) — same rationale as bandit:
-          # pure informational, the call-site checks (S603, S602) are
-          # what matter.
-          "$HOME/.local/bin/ruff" check \
-            --select S,F \
-            --ignore S404 \
-            --line-length 120 \
-            integrations/llm-plugin/
-
-      - name: Python static security analysis (bandit)
-        # bandit catches subprocess shell=True, eval, pickle, weak
-        # crypto, hardcoded credentials, path traversal patterns.
-        run: |
-          set -euo pipefail
-          # --skip B404: this fires on every `import subprocess`
-          # regardless of safe usage. The call-site checks (B602, B603,
-          # B607) catch actual issues; B404 is informational noise.
-          python3 -m bandit \
-            --configfile integrations/llm-plugin/.bandit \
-            --recursive integrations/llm-plugin/ \
-            --severity-level low \
-            --confidence-level low \
-            --skip B404
-
-      # ---------------------------------------------------------------
-      # Link rot — keeps the published docs (npmjs, PyPI README, GH
+      # Link rot — keeps the published docs (npmjs, GH
       # release notes) honest.
       # ---------------------------------------------------------------
 

@@ -4,6 +4,29 @@ All notable changes to the llm-cli-gateway project.
 
 ## Unreleased
 
+## [1.15.3] - 2026-05-29 — remove retired PyPI plugin
+
+Patch release removing the retired Python `llm` plugin integration so the
+project no longer depends on Simon Willison's `llm` package.
+
+### Removed
+
+- Removed `integrations/llm-plugin/`, including the `gateway-claude`,
+  `gateway-codex`, and `gateway-gemini` aliases that were registered through
+  the external `llm` package.
+- Removed the PyPI trusted-publishing workflow. Releases now publish npm and
+  signed GitHub installer artifacts only.
+- Removed the plugin-specific Dependabot and security-lint wiring for the
+  deleted Python package.
+
+### Changed
+
+- Removed README guidance that advertised `llm install llm-gateway` and
+  `llm -m gateway-*` usage.
+- Added an archived PyPI retirement description explaining the supported npm
+  and direct-MCP install paths for users who discover the historical PyPI
+  package.
+
 ## [1.15.2] - 2026-05-29 — security quality follow-up
 
 Patch release for GitHub Security & quality follow-up findings and Scorecard

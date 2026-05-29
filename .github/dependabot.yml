@@ -5,8 +5,7 @@ version: 2
 #   with the upstream maintainer's latest tag → SHA mapping.
 # - npm: the gateway's primary runtime + devDeps + test fixtures. Weekly
 #   updates keep semver-compatible bumps flowing without manual chasing.
-# - pip: the integrations/llm-plugin/ surface that ships to PyPI, plus
-#   the hashed CI tool requirements used by workflow bootstrap steps.
+# - pip: the hashed CI tool requirements used by workflow bootstrap steps.
 #   The CI tool requirements intentionally live outside .github/ and keep
 #   requirements-*.txt names so both Dependabot updates and Dependency Graph
 #   ingestion see them.
@@ -52,17 +51,6 @@ updates:
         update-types:
           - "minor"
           - "patch"
-
-  - package-ecosystem: "pip"
-    directory: "/integrations/llm-plugin"
-    schedule:
-      interval: "weekly"
-    open-pull-requests-limit: 3
-    commit-message:
-      prefix: "deps(pip)"
-    labels:
-      - "dependencies"
-      - "python"
 
   - package-ecosystem: "pip"
     directory: "/requirements/ci"
