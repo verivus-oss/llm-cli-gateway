@@ -4,6 +4,16 @@ All notable changes to the llm-cli-gateway project.
 
 ## Unreleased
 
+## [1.16.2] - 2026-05-29 — release formatting follow-up
+
+Patch release that keeps the Mistral Vibe CLI contract fixes from `1.16.1`
+and fixes the Prettier check failure on the release commit.
+
+### Fixed
+
+- Formatted the new Vibe session-logging doctor tests so the repository CI
+  format gate passes.
+
 ## [1.16.1] - 2026-05-29 — align Mistral Vibe CLI contract
 
 Patch release for the current `mistral-vibe` CLI surface.

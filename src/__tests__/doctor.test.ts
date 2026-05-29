@@ -293,10 +293,7 @@ describe("Mistral Vibe session logging probe", () => {
 
   it("flags explicit session_logging.enabled=false", () => {
     mkdirSync(join(home, ".vibe"), { recursive: true });
-    writeFileSync(
-      join(home, ".vibe", "config.toml"),
-      "[session_logging]\nenabled = false\n"
-    );
+    writeFileSync(join(home, ".vibe", "config.toml"), "[session_logging]\nenabled = false\n");
 
     const status = checkVibeSessionLogging(home);
 
