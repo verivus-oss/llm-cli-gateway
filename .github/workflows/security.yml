@@ -56,7 +56,7 @@ jobs:
           # cannot be picked up by tool installers (zizmor artipacked).
           persist-credentials: false
 
-      - name: Set up Python (for zizmor + ruff + bandit)
+      - name: Set up Python (for zizmor)
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
         with:
           python-version: "3.12"

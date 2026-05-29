@@ -176,7 +176,7 @@ Opt-in flags (all default off) live under `[cache_awareness]` in `~/.llm-cli-gat
 - **No Secret Leakage**: Generic session descriptions only (file permissions 0o600)
 - **No ReDoS**: Bounded regex patterns prevent catastrophic backtracking
 - **Type Safety**: Strict TypeScript with comprehensive error handling
-- **Supply-chain hardening**: a dedicated `.github/workflows/security.yml` runs actionlint, zizmor, shellcheck, typos, osv-scanner, gitleaks, ruff, bandit, and lychee on every push and PR (see `SECURITY.md` for the threat model)
+- **Supply-chain hardening**: a dedicated `.github/workflows/security.yml` runs actionlint, zizmor, shellcheck, typos, osv-scanner, gitleaks, and lychee on every push and PR (see `SECURITY.md` for the threat model)
 
 ## Prerequisites
 
