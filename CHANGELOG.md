@@ -4,6 +4,36 @@ All notable changes to the llm-cli-gateway project.
 
 ## Unreleased
 
+## [1.17.0] - 2026-05-30 — upstream provider tracking
+
+Feature release adding repeatable upstream-provider contract tracking for the
+gateway's supported CLIs.
+
+### Added
+
+- Added provider-specific maintenance skills for Claude Code, Codex, Gemini,
+  Grok, and Mistral Vibe.
+- Added upstream source metadata to the CLI contract table and mirrored it into
+  `docs/upstream/provider-sources.dag.toml`.
+- Added `scripts/upstream-scan.mjs` plus `npm run upstream:contracts` and
+  `npm run upstream:scan` for offline contract checks and advisory live source
+  scans.
+- Added upstream source tests covering contract/TOML synchronization.
+
+### Changed
+
+- Pointed Claude Code tracking at the markdown changelog, Codex tracking at the
+  GitHub releases feed plus product changelog, Gemini tracking at the Gemini CLI
+  changelog plus GitHub releases, and Grok tracking at the markdown xAI release
+  notes.
+- Ignored local-only agent/worktree artifacts that should not enter source
+  control.
+
+### Fixed
+
+- Fixed the `maxTokens` request schema so token budgets no longer reuse the
+  `maxTurns` limit.
+
 ## [1.16.2] - 2026-05-29 — release formatting follow-up
 
 Patch release that keeps the Mistral Vibe CLI contract fixes from `1.16.1`
