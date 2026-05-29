@@ -7459,8 +7459,8 @@ async function initializeSessionManager(): Promise<void> {
   // there.
   const worktreeCleanupHook = createWorktreeSessionCleanupHook(logger);
 
-  if (config.database && config.redis) {
-    logger.info("Initializing PostgreSQL + Redis session manager");
+  if (config.database) {
+    logger.info("Initializing PostgreSQL session manager");
     const { createDatabaseConnection } = await import("./db.js");
     db = await createDatabaseConnection(config, logger);
     sessionManager = await createSessionManager(config, db, logger);

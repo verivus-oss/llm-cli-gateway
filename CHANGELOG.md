@@ -4,6 +4,41 @@ All notable changes to the llm-cli-gateway project.
 
 ## Unreleased
 
+## [1.16.0] - 2026-05-29 — remove Redis session dependency
+
+Feature release that removes the optional Redis/ioredis layer from the
+PostgreSQL-backed session manager and tightens the public README around the
+project's current demand and quality signals.
+
+### Removed
+
+- Removed the optional `ioredis` peer/dev dependency and its transitive
+  packages from the install graph.
+- Removed `REDIS_URL` as a requirement for PostgreSQL-backed sessions.
+- Removed Redis from the PostgreSQL test Docker Compose stack and PG test
+  harness.
+
+### Changed
+
+- PostgreSQL-backed sessions now require only `DATABASE_URL` plus the optional
+  `pg` peer dependency. PostgreSQL remains the source of truth for session
+  records and active-session state.
+- Simplified database health reporting to PostgreSQL connectivity only.
+- Simplified the PG session manager by removing Redis cache-aside reads/writes
+  and Redis lock handling.
+- Updated migration and testing docs to describe the Postgres-only backend.
+- Updated release-readiness and Socket-alert documentation now that the Redis
+  client dependency is no longer present.
+- Refocused the README first screen around the strongest current trust and
+  demand signals: npm monthly downloads, passing CI/security workflows,
+  OpenSSF status, Sigstore-signed releases, and MIT licensing.
+
+### Added
+
+- Added `docs/plans/provider-workflow-assets.dag.toml`, a machine-readable
+  implementation plan for provider-specific skill and DAG-TOML pairs for
+  Claude, Codex, Gemini, Grok, and Mistral Vibe.
+
 ## [1.15.3] - 2026-05-29 — remove retired PyPI plugin
 
 Patch release removing the retired Python `llm` plugin integration so the

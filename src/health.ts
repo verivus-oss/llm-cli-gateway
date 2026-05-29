@@ -4,7 +4,6 @@ import { listProviderRuntimeStatuses, type ProviderRuntimeStatus } from "./provi
 export interface HealthStatus {
   status: "healthy" | "degraded" | "unhealthy";
   postgres: { status: "up" | "down"; latency: number };
-  redis: { status: "up" | "down"; latency: number };
   timestamp: string;
 }
 
@@ -18,10 +17,7 @@ export interface ProviderRuntimeHealth {
 }
 
 /**
- * Check health status of PostgreSQL and Redis
- * - Both up → healthy
- * - Only PostgreSQL up → degraded (Redis down but DB works)
- * - PostgreSQL down → unhealthy (critical failure)
+ * Check health status of PostgreSQL.
  */
 export async function checkHealth(db: DatabaseConnection): Promise<HealthStatus> {
   const result = await db.healthCheck();
@@ -32,21 +28,10 @@ export async function checkHealth(db: DatabaseConnection): Promise<HealthStatus>
       status: result.postgres.connected ? "up" : "down",
       latency: result.postgres.latency,
     },
-    redis: {
-      status: result.redis.connected ? "up" : "down",
-      latency: result.redis.latency,
-    },
     timestamp: new Date().toISOString(),
   };
 
-  // Determine overall health status
-  if (result.postgres.connected && result.redis.connected) {
-    health.status = "healthy";
-  } else if (result.postgres.connected && !result.redis.connected) {
-    health.status = "degraded";
-  } else {
-    health.status = "unhealthy";
-  }
+  health.status = result.postgres.connected ? "healthy" : "unhealthy";
 
   return health;
 }

@@ -279,9 +279,9 @@ File: `~/.llm-cli-gateway/sessions.json`
 - Atomic writes (temp + rename)
 - In-memory cache
 
-⚠️ **Scale:** Consider Redis/DynamoDB for production.
+⚠️ **Scale:** Use the PostgreSQL-backed session manager when file storage is too narrow.
 
-**Pattern:** Distributed stores with TTL for cleanup.
+**Pattern:** Durable stores with TTL for cleanup.
 
 ---
 
@@ -533,7 +533,7 @@ Logging at error points
 8. **Architecture docs** - Maintainability
 
 ### Low
-9. **Redis for sessions** - Scalability (if needed)
+9. **PostgreSQL sessions** - Scalability (if needed)
 10. **Session encryption** - Security (assess risk first)
 
 ---
