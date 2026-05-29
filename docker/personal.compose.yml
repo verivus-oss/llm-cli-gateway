@@ -5,10 +5,10 @@
 # containers and want a personal MCP appliance container.
 #
 # Run from the repo root, after building the image:
-#   docker compose -f docker-compose.personal.yml build
+#   docker compose -f docker/personal.compose.yml build
 #   LLM_GATEWAY_AUTH_TOKEN=$(openssl rand -hex 32) \
-#     docker compose -f docker-compose.personal.yml up -d
-#   docker compose -f docker-compose.personal.yml exec gateway \
+#     docker compose -f docker/personal.compose.yml up -d
+#   docker compose -f docker/personal.compose.yml exec gateway \
 #     node dist/index.js doctor --json
 #
 # Volume mounts keep state on the user's host:
@@ -27,8 +27,8 @@ version: "3.9"
 services:
   gateway:
     build:
-      context: .
-      dockerfile: Dockerfile.personal
+      context: ..
+      dockerfile: docker/Dockerfile.personal
     image: llm-cli-gateway:personal
     restart: unless-stopped
     environment:

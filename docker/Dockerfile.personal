@@ -44,7 +44,7 @@ ENV LLM_GATEWAY_TRANSPORT=http \
     NODE_ENV=production
 
 # /home/gateway/.llm-cli-gateway is mounted from the host in
-# docker-compose.personal.yml so the auth token, sessions, and provider
+# docker/personal.compose.yml so the auth token, sessions, and provider
 # credentials stay on user-owned storage.
 VOLUME ["/home/gateway/.llm-cli-gateway"]
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-COMPOSE_FILE="docker-compose.test.yml"
+COMPOSE_FILE="docker/test.compose.yml"
 PG_TEST_FILES=()
 
 cleanup() {

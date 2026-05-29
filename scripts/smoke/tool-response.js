@@ -1,11 +1,11 @@
-import { startValidationRun } from './dist/validation-orchestrator.js';
+import { startValidationRun } from "../../dist/validation-orchestrator.js";
 
 // Mock dependencies
 const deps = {
   asyncJobManager: {
-    startJob: () => ({ id: 'job-1', status: 'running', correlationId: 'c1' }),
+    startJob: () => ({ id: "job-1", status: "running", correlationId: "c1" }),
   },
-  getProviderRuntimeStatus: () => ({ installed: true, displayName: 'Fake' })
+  getProviderRuntimeStatus: () => ({ installed: true, displayName: "Fake" }),
 };
 
 const toolResult = {
@@ -20,7 +20,7 @@ const toolResult = {
 };
 
 function responseText(body) {
-  if (typeof body === "object" && body !== null && "report" in body) {
+  if (Object(body) === body && "report" in body) {
     const report = body.report;
     if (typeof report?.humanReadable === "string") return report.humanReadable;
   }
@@ -28,13 +28,13 @@ function responseText(body) {
 }
 
 const text = responseText(toolResult);
-console.log('Result length:', text.length);
-if (text.startsWith('{')) {
-  console.log('BUG DETECTED: Response is JSON instead of human-readable text');
+console.log("Result length:", text.length);
+if (text.startsWith("{")) {
+  console.log("BUG DETECTED: Response is JSON instead of human-readable text");
   console.log('Body keys in "report":', Object.keys(toolResult.report));
   if (toolResult.report.report) {
-    console.log('Human readable text is nested at toolResult.report.report.humanReadable');
+    console.log("Human readable text is nested at toolResult.report.report.humanReadable");
   }
 } else {
-  console.log('No bug: Response is human-readable text');
+  console.log("No bug: Response is human-readable text");
 }

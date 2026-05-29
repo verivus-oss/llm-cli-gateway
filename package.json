@@ -82,7 +82,7 @@
     "check": "npm run build && npm run lint && npm test && npm run security:audit",
     "release:build": "bash installer/build-release.sh",
     "release:checksums": "cd installer/dist && sha256sum --check SHA256SUMS",
-    "release:docker": "docker compose -f docker-compose.personal.yml build"
+    "release:docker": "docker compose -f docker/personal.compose.yml build"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",

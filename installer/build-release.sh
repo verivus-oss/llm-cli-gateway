@@ -15,7 +15,7 @@
 #   1. Desktop binaries are built on local OS runners. This script defaults to
 #      the current host target; release CI invokes it once per OS runner.
 #   2. Checksum verification: every artifact gets a SHA256 line in SHA256SUMS.
-#   3. Docker Compose remains a fallback (see docker-compose.personal.yml).
+#   3. Docker Compose remains a fallback (see docker/personal.compose.yml).
 #   4. Artifacts include copy/paste commands suitable for target-LLM setup
 #      prompts (release-manifest.json's `setup_commands`).
 #
@@ -501,8 +501,8 @@ cat > "${manifest}" <<EOF
     "doctor_after_install": "llm-cli-gateway doctor",
     "upgrade_unix_oneliner": "./llm-cli-gateway-<new-version>-<os>-<arch> upgrade",
     "uninstall_unix_oneliner": "./llm-cli-gateway-<version>-<os>-<arch> uninstall --yes",
-    "docker_fallback": "docker compose -f docker-compose.personal.yml up -d",
-    "docker_doctor": "docker compose -f docker-compose.personal.yml run --rm gateway node dist/index.js doctor --json"
+    "docker_fallback": "docker compose -f docker/personal.compose.yml up -d",
+    "docker_doctor": "docker compose -f docker/personal.compose.yml run --rm gateway node dist/index.js doctor --json"
   },
   "notes": [
     "All artifacts must be verified against SHA256SUMS before execution.",
