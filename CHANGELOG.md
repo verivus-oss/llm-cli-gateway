@@ -4,6 +4,18 @@ All notable changes to the llm-cli-gateway project.
 
 ## Unreleased
 
+## [1.17.1] - 2026-05-30 — Socket shell-access suppression
+
+Patch release updating the package's Socket policy for the reviewed gateway
+process-launching capability.
+
+### Changed
+
+- Suppressed Socket's `shellAccess` alert in `socket.yml` now that the
+  child-process surface is documented and release-audited.
+- Updated README Socket-alert wording so reviewers still get the bounded
+  shell-access rationale without seeing the same package alert on every release.
+
 ## [1.17.0] - 2026-05-30 — upstream provider tracking
 
 Feature release adding repeatable upstream-provider contract tracking for the

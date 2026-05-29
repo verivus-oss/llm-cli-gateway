@@ -2,11 +2,9 @@ version: 2
 
 # Socket alerts on llm-cli-gateway
 # ---------------------------------
-# This package intentionally triggers three of Socket's behavioural alerts.
-# We do NOT disable them — they are accurate descriptions of what the package
-# does, and silencing them would hide useful signal from anyone evaluating
-# this dependency. The rationale for each is documented inline below and in
-# detail under "Security Considerations" in README.md.
+# This package intentionally triggers behavioural alerts. They are accurate
+# descriptions of what the package does; the rationale for each is documented
+# inline below and in detail under "Security Considerations" in README.md.
 #
 #   networkAccess
 #     src/http-transport.ts opens an HTTP MCP transport (createServer/listen).
@@ -23,9 +21,10 @@ version: 2
 #
 #   shellAccess
 #     This alert fires on every module that imports node:child_process, and
-#     because spawning provider CLIs and git is the entire purpose of the
-#     package it surfaces on every release BY DESIGN — we keep it visible
-#     rather than silencing it. It is a capability description, not a finding.
+#     because spawning provider CLIs and git is the entire purpose of the package
+#     it is a reviewed capability description, not a finding. As of v1.17.1 this
+#     specific reviewed alert is suppressed via `issueRules.shellAccess: false`
+#     to avoid noisy repeat findings on every release.
 #
 #     INVARIANT enforced across ALL sites below: arguments are always passed
 #     as an array and `shell: true` is NEVER set, so there is no shell
@@ -75,6 +74,7 @@ issueRules:
   installScripts: true
   telemetry: true
   hasNativeCode: true            # better-sqlite3 — known and expected
+  shellAccess: false             # reviewed gateway capability; see rationale above
   shellScriptOverride: true
   gitDependency: true
   httpDependency: true
