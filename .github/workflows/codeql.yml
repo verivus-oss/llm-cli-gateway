@@ -23,6 +23,9 @@ jobs:
       security-events: write
     strategy:
       fail-fast: false
+      # Keep this aligned with the maintained source surfaces. The retired
+      # PyPI llm plugin was removed in v1.15.3, so Python is no longer a
+      # CodeQL target for this repository.
       matrix:
         language: [javascript-typescript, go]
     steps:
