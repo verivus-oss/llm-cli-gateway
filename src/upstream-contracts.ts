@@ -18,6 +18,44 @@ export interface CliFlagContract {
   description: string;
 }
 
+/**
+ * Pure upstream-tracking metadata for a provider CLI.
+ *
+ * IMPORTANT — non-duplication invariant: nothing here encodes mechanical
+ * behaviour. Flags, output modes, session/resume rules, permission modes,
+ * forbidden flags, env contracts, and positional limits live ONLY in the
+ * surrounding {@link CliContract} and are validated ONLY by
+ * {@link validateUpstreamCliArgs} / {@link validateUpstreamCliEnv}. The fields
+ * below are descriptive pointers used by the upstream changelog scanner
+ * (`scripts/upstream-scan.mjs`) and surfaced in the contract report — they
+ * never drive argv/env enforcement.
+ *
+ * `docs/upstream/provider-sources.dag.toml` mirrors `sourceUrls` and
+ * `watchCategories` for the scanner's offline scan plan; a unit test
+ * (`upstream-sources.test.ts`) asserts the TOML stays in sync with these
+ * fields so the two cannot drift. The TypeScript values here are authoritative;
+ * the TOML is scanner input only and is never consulted for contract
+ * enforcement.
+ */
+export interface CliUpstreamMetadata {
+  /** Canonical changelog / release-notes URLs the scanner fetches with --live. */
+  sourceUrls: readonly string[];
+  /** Distribution package identifier (npm package name, PyPI project, …). */
+  packageName?: string;
+  /** Source repository URL, when distinct from the changelog source. */
+  repo?: string;
+  /** Human-facing install / getting-started docs. */
+  installDocsUrl?: string;
+  /** Distribution channel the gateway expects the CLI to ship through. */
+  releaseChannel?: "npm" | "pypi" | "github-release" | "vendor";
+  /**
+   * Contract surfaces worth watching in upstream release notes (e.g. "flags",
+   * "output-formats", "session-resume"). Descriptive labels for the scanner and
+   * report ONLY — never a validation input.
+   */
+  watchCategories: readonly string[];
+}
+
 export interface CliContract {
   cli: CliType;
   executable: string;
@@ -36,6 +74,8 @@ export interface CliContract {
   resumeMaxPositionals?: number;
   resumeOnlyFlags?: readonly string[];
   resumeForbiddenFlags?: readonly string[];
+  /** Non-mechanical upstream-tracking metadata. See {@link CliUpstreamMetadata}. */
+  upstreamMetadata?: CliUpstreamMetadata;
 }
 
 export interface CliContractFixture {
@@ -74,6 +114,13 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
     cli: "claude",
     executable: "claude",
     upstream: "Claude Code CLI",
+    upstreamMetadata: {
+      sourceUrls: ["https://code.claude.com/docs/en/changelog.md"],
+      packageName: "@anthropic-ai/claude-code",
+      installDocsUrl: "https://code.claude.com/docs/en/overview",
+      releaseChannel: "npm",
+      watchCategories: ["flags", "output-formats", "permission-modes", "session-resume", "models"],
+    },
     helpArgs: [["--help"]],
     maxPositionals: 0,
     mcpTools: ["claude_request", "claude_request_async"],
@@ -262,6 +309,23 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
     cli: "codex",
     executable: "codex",
     upstream: "OpenAI Codex CLI",
+    upstreamMetadata: {
+      sourceUrls: [
+        "https://github.com/openai/codex/releases",
+        "https://developers.openai.com/codex/changelog",
+      ],
+      packageName: "@openai/codex",
+      repo: "https://github.com/openai/codex",
+      installDocsUrl: "https://developers.openai.com/codex/cli",
+      releaseChannel: "npm",
+      watchCategories: [
+        "flags",
+        "sandbox-modes",
+        "approval-modes",
+        "session-resume",
+        "output-schema",
+      ],
+    },
     helpArgs: [
       ["exec", "--help"],
       ["exec", "resume", "--help"],
@@ -409,6 +473,17 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
     cli: "gemini",
     executable: "gemini",
     upstream: "Google Gemini CLI",
+    upstreamMetadata: {
+      sourceUrls: [
+        "https://geminicli.com/docs/changelogs/",
+        "https://github.com/google-gemini/gemini-cli/releases",
+      ],
+      packageName: "@google/gemini-cli",
+      repo: "https://github.com/google-gemini/gemini-cli",
+      installDocsUrl: "https://geminicli.com/docs/",
+      releaseChannel: "npm",
+      watchCategories: ["flags", "approval-modes", "output-formats", "session-resume"],
+    },
     helpArgs: [["--help"]],
     maxPositionals: 0,
     mcpTools: ["gemini_request", "gemini_request_async"],
@@ -494,6 +569,12 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
     cli: "grok",
     executable: "grok",
     upstream: "xAI Grok CLI",
+    upstreamMetadata: {
+      sourceUrls: ["https://docs.x.ai/developers/release-notes.md"],
+      installDocsUrl: "https://docs.x.ai/build/overview",
+      releaseChannel: "vendor",
+      watchCategories: ["flags", "permission-modes", "session-resume", "sandbox", "output-formats"],
+    },
     helpArgs: [["--help"]],
     maxPositionals: 0,
     mcpTools: ["grok_request", "grok_request_async"],
@@ -652,6 +733,14 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
     cli: "mistral",
     executable: "vibe",
     upstream: "Mistral Vibe CLI",
+    upstreamMetadata: {
+      sourceUrls: ["https://github.com/mistralai/mistral-vibe/releases"],
+      packageName: "mistral-vibe",
+      repo: "https://github.com/mistralai/mistral-vibe",
+      installDocsUrl: "https://github.com/mistralai/mistral-vibe#installation",
+      releaseChannel: "pypi",
+      watchCategories: ["flags", "agent-modes", "session-logging", "output-formats", "env-model"],
+    },
     helpArgs: [["--help"]],
     maxPositionals: 0,
     mcpTools: ["mistral_request", "mistral_request_async"],
@@ -1084,6 +1173,19 @@ export function buildUpstreamContractReport(
         {
           executable: contract.executable,
           upstream: contract.upstream,
+          // Pure metadata pointers (changelog URLs, package name, watch
+          // categories). Enriched from the CliContract — the single source of
+          // truth — so report consumers and the scanner read the same values.
+          upstreamMetadata: contract.upstreamMetadata
+            ? {
+                sourceUrls: contract.upstreamMetadata.sourceUrls,
+                packageName: contract.upstreamMetadata.packageName ?? null,
+                repo: contract.upstreamMetadata.repo ?? null,
+                installDocsUrl: contract.upstreamMetadata.installDocsUrl ?? null,
+                releaseChannel: contract.upstreamMetadata.releaseChannel ?? null,
+                watchCategories: contract.upstreamMetadata.watchCategories,
+              }
+            : null,
           command: contract.command ?? null,
           helpArgs: contract.helpArgs,
           mcpTools: contract.mcpTools,

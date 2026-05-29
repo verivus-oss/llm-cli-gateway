@@ -71,6 +71,8 @@
     "test:pg": "bash ./scripts/test-pg.sh",
     "test:all": "npm run test && npm run test:pg",
     "smoke:cache-control": "node docs/plans/slice-kappa-smoke-test.mjs",
+    "upstream:contracts": "node scripts/upstream-scan.mjs --contracts-check",
+    "upstream:scan": "node scripts/upstream-scan.mjs",
     "lint": "eslint src/**/*.ts",
     "lint:fix": "eslint src/**/*.ts --fix",
     "format": "prettier --write 'src/**/*.ts'",

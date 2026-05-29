@@ -20,5 +20,10 @@ build/
 .preexisting-doctor-index.patch.bak
 .review-unit-*-prompt.md
 
+# Local agent/worktree artifacts
+.claude/
+.worktrees/
+.r3-poll.mjs
+
 # Local MCP client configs may contain machine paths, account IDs, and secret refs.
 windows-mcp-config-with-gateway.json
