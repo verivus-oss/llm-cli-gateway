@@ -290,7 +290,7 @@ Other: list_models, cli_versions, upstream_contracts, cli_upgrade, approval_list
 
 Key behaviors:
 - Sync auto-defers at ${SYNC_DEADLINE_MS}ms. Poll deferred jobs via llm_job_status/llm_job_result.
-- Sessions: Claude --continue, Gemini --resume, Grok --resume/--continue, Mistral --resume/--continue (requires session_logging.enabled=true in ~/.vibe/config.toml), Codex \`exec resume <ID>\` / \`exec resume --last\` (all real CLI continuity). For Codex, sessionId must be a real Codex UUID (from ~/.codex/sessions/); gateway-generated gw-* IDs are rejected.
+- Sessions: Claude --continue, Gemini --resume, Grok --resume/--continue, Mistral --resume/--continue (current Vibe defaults session logging on; doctor flags explicit session_logging.enabled=false), Codex \`exec resume <ID>\` / \`exec resume --last\` (all real CLI continuity). For Codex, sessionId must be a real Codex UUID (from ~/.codex/sessions/); gateway-generated gw-* IDs are rejected.
 - Approval gates: opt-in via approvalStrategy:"mcp_managed".
 - Idle timeout kills stuck processes (default 10min, configurable via idleTimeoutMs).
 
@@ -2492,6 +2492,8 @@ export function prepareMistralRequest(
     maxTurns?: number;
     /** Phase 4 slice δ: Vibe `--max-price DOLLARS` cumulative-cost cap. */
     maxPrice?: number;
+    /** Vibe 2.x: `--max-tokens N` cumulative prompt + completion token cap. */
+    maxTokens?: number;
     /** Phase 4 slice ζ: Vibe `--workdir <DIR>` working-directory parity. */
     workingDir?: string;
     /** Phase 4 slice ζ: Vibe `--add-dir <DIR>` repeatable add-dir parity. */
@@ -2582,6 +2584,7 @@ export function prepareMistralRequest(
     trust: params.trust,
     maxTurns: params.maxTurns,
     maxPrice: params.maxPrice,
+    maxTokens: params.maxTokens,
     workingDir: params.workingDir,
     addDir: params.addDir,
   });
@@ -2646,6 +2649,7 @@ export function buildMistralRetryPrep(
     | "trust"
     | "maxTurns"
     | "maxPrice"
+    | "maxTokens"
     | "workingDir"
     | "addDir"
   > & { effectivePrompt: string },
@@ -2666,6 +2670,7 @@ export function buildMistralRetryPrep(
     trust: params.trust,
     maxTurns: params.maxTurns,
     maxPrice: params.maxPrice,
+    maxTokens: params.maxTokens,
     workingDir: params.workingDir,
     addDir: params.addDir,
   });
@@ -3575,6 +3580,8 @@ export interface MistralRequestParams {
   maxTurns?: number;
   /** Phase 4 slice δ: Vibe `--max-price DOLLARS` cumulative-cost cap. */
   maxPrice?: number;
+  /** Vibe 2.x: `--max-tokens N` cumulative prompt + completion token cap. */
+  maxTokens?: number;
   /** Phase 4 slice ζ: Vibe `--workdir <DIR>` working-directory parity. */
   workingDir?: string;
   /** Phase 4 slice ζ: Vibe `--add-dir <DIR>` repeatable add-dir parity. */
@@ -3609,6 +3616,7 @@ export async function handleMistralRequest(
       trust: params.trust,
       maxTurns: params.maxTurns,
       maxPrice: params.maxPrice,
+      maxTokens: params.maxTokens,
       workingDir: params.workingDir,
       addDir: params.addDir,
     },
@@ -3842,6 +3850,7 @@ export async function handleMistralRequestAsync(
       trust: params.trust,
       maxTurns: params.maxTurns,
       maxPrice: params.maxPrice,
+      maxTokens: params.maxTokens,
       workingDir: params.workingDir,
       addDir: params.addDir,
     },
@@ -5550,14 +5559,16 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           "Model alias (e.g. mistral-medium-3.5, latest). Resolved alias is injected via VIBE_ACTIVE_MODEL env var; Vibe has no --model flag."
         ),
       outputFormat: z
-        .enum(["plain", "json", "stream-json"])
+        .enum(["text", "plain", "json", "streaming", "stream-json"])
         .optional()
-        .describe("Output format (plain|json|stream-json). Vibe default is plain."),
+        .describe(
+          "Output format for Vibe 2.x (text|json|streaming). Legacy aliases plain→text and stream-json→streaming are accepted."
+        ),
       sessionId: z
         .string()
         .optional()
         .describe(
-          "Session ID (user-provided CLI handle for --resume). Requires [session_logging] enabled = true in ~/.vibe/config.toml."
+          "Session ID (user-provided CLI handle for --resume). Current Vibe defaults session logging on; doctor flags explicit [session_logging] enabled = false."
         ),
       resumeLatest: z
         .boolean()
@@ -5629,6 +5640,9 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       maxPrice: MAX_PRICE_SCHEMA.optional().describe(
         "Vibe `--max-price DOLLARS`: interrupt the session when cumulative cost crosses this cap (programmatic mode only, Phase 4 slice δ). Bounded to finite values ≤ 10000 USD."
       ),
+      maxTokens: MAX_TURNS_SCHEMA.optional().describe(
+        "Vibe `--max-tokens N`: cap cumulative prompt + completion tokens for the session (programmatic mode only). Bounded to safe integers ≤ 10000."
+      ),
       // Phase 4 slice ζ — Vibe working-directory + additional-dirs parity.
       workingDir: z
         .string()
@@ -5669,6 +5683,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       trust,
       maxTurns,
       maxPrice,
+      maxTokens,
       workingDir,
       addDir,
       worktree,
@@ -5699,6 +5714,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           trust,
           maxTurns,
           maxPrice,
+          maxTokens,
           workingDir,
           addDir,
           worktree,
@@ -6597,14 +6613,16 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             "Model alias (resolved into VIBE_ACTIVE_MODEL env var — Vibe has no --model flag)"
           ),
         outputFormat: z
-          .enum(["plain", "json", "stream-json"])
+          .enum(["text", "plain", "json", "streaming", "stream-json"])
           .optional()
-          .describe("Output format (plain|json|stream-json). Vibe default is plain."),
+          .describe(
+            "Output format for Vibe 2.x (text|json|streaming). Legacy aliases plain→text and stream-json→streaming are accepted."
+          ),
         sessionId: z
           .string()
           .optional()
           .describe(
-            "Session ID (user-provided CLI handle for --resume). Requires [session_logging] enabled = true in ~/.vibe/config.toml."
+            "Session ID (user-provided CLI handle for --resume). Current Vibe defaults session logging on; doctor flags explicit [session_logging] enabled = false."
           ),
         resumeLatest: z
           .boolean()
@@ -6675,6 +6693,9 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         maxPrice: MAX_PRICE_SCHEMA.optional().describe(
           "Vibe `--max-price DOLLARS`: interrupt the session when cumulative cost crosses this cap (programmatic mode only, Phase 4 slice δ). Bounded to finite values ≤ 10000 USD."
         ),
+        maxTokens: MAX_TURNS_SCHEMA.optional().describe(
+          "Vibe `--max-tokens N`: cap cumulative prompt + completion tokens for the session (programmatic mode only). Bounded to safe integers ≤ 10000."
+        ),
         // Phase 4 slice ζ — Vibe working-directory + additional-dirs parity.
         workingDir: z
           .string()
@@ -6714,6 +6735,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         trust,
         maxTurns,
         maxPrice,
+        maxTokens,
         workingDir,
         addDir,
         worktree,
@@ -6743,6 +6765,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             trust,
             maxTurns,
             maxPrice,
+            maxTokens,
             workingDir,
             addDir,
             worktree,

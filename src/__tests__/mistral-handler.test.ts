@@ -81,12 +81,22 @@ describe("U22 prepareMistralRequest — Vibe divergences", () => {
       effort: "high",
       reasoningEffort: "medium",
     });
-    expect(result.args).toContain("--output-format");
+    expect(result.args).toContain("--output");
     expect(result.args).toContain("json");
     expect(result.args).toContain("--effort");
     expect(result.args).toContain("high");
     expect(result.args).toContain("--reasoning-effort");
     expect(result.args).toContain("medium");
+  });
+
+  it("normalizes legacy outputFormat aliases to Vibe 2.x values", () => {
+    const plain = prepareMistralRequest({ prompt: "x", outputFormat: "plain" });
+    const plainIdx = plain.args.indexOf("--output");
+    expect(plain.args[plainIdx + 1]).toBe("text");
+
+    const streaming = prepareMistralRequest({ prompt: "x", outputFormat: "stream-json" });
+    const streamingIdx = streaming.args.indexOf("--output");
+    expect(streaming.args[streamingIdx + 1]).toBe("streaming");
   });
 });
 
@@ -170,5 +180,12 @@ describe("Phase 4 slice δ — Mistral --max-turns / --max-price wiring", () => 
     const priceIdx = result.args.indexOf("--max-price");
     expect(result.args[turnsIdx + 1]).toBe("3");
     expect(result.args[priceIdx + 1]).toBe("0.01");
+  });
+
+  it("emits --max-tokens <N> when maxTokens is set", () => {
+    const result = prepareMistralRequest({ prompt: "x", maxTokens: 1234 });
+    const idx = result.args.indexOf("--max-tokens");
+    expect(idx).toBeGreaterThan(-1);
+    expect(result.args[idx + 1]).toBe("1234");
   });
 });

@@ -253,13 +253,16 @@ grok login   # OAuth flow, or set GROK_CODE_XAI_API_KEY
 
 ```bash
 # Pick one — the gateway's cli_upgrade auto-detects which one you used.
-pip install vibe-cli
-uv tool install vibe-cli
+curl -LsSf https://mistral.ai/vibe/install.sh | bash
+pip install mistral-vibe
+uv tool install mistral-vibe
 brew install mistral-vibe
 
 vibe auth login
-# Required for `mistral_request --resume` / `--continue` to persist sessions:
-vibe config set session_logging.enabled true   # or edit ~/.vibe/config.toml
+# Current Vibe defaults session logging to enabled. If an older config disabled it,
+# edit ~/.vibe/config.toml and set:
+# [session_logging]
+# enabled = true
 ```
 
 Vibe-specific notes:
@@ -736,7 +739,8 @@ Run a Mistral Vibe agentic coding request. Like `grok_request` in shape, but wit
 - `permissionMode`: `default | plan | accept-edits | auto-approve | chat | explore | lean` — emitted as `--agent <mode>`. Defaults to `auto-approve` in programmatic mode.
 - `allowedTools` (string[], optional): One `--enabled-tools <tool>` flag per entry (allow-list only).
 - `disallowedTools` (string[], optional): Accepted for parity with the other providers; ignored at the CLI boundary with a logged warning.
-- `sessionId` / `resumeLatest` / `createNewSession`: standard session controls. Continuity requires `[session_logging] enabled = true` in `~/.vibe/config.toml` — `doctor --json` surfaces an actionable next-action when the toggle is missing.
+- `outputFormat` (string, optional): Vibe 2.x values are `"text"`, `"json"`, or `"streaming"`; legacy aliases `"plain"` and `"stream-json"` are accepted and normalized before spawn.
+- `sessionId` / `resumeLatest` / `createNewSession`: standard session controls. Current Vibe defaults session logging to enabled; if an older config has `[session_logging] enabled = false`, `doctor --json` surfaces an actionable next-action.
 
 ##### `claude_request_async` / `codex_request_async` / `gemini_request_async` / `grok_request_async` / `mistral_request_async`
 

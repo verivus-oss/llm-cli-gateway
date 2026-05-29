@@ -4,6 +4,20 @@ All notable changes to the llm-cli-gateway project.
 
 ## Unreleased
 
+## [1.16.1] - 2026-05-29 — align Mistral Vibe CLI contract
+
+Patch release for the current `mistral-vibe` CLI surface.
+
+### Fixed
+
+- Updated Mistral Vibe requests to emit `--output text|json|streaming` instead
+  of the removed `--output-format` flag.
+- Kept legacy MCP aliases working by mapping `plain` to `text` and
+  `stream-json` to `streaming`.
+- Added `maxTokens` support for Mistral Vibe via `--max-tokens`.
+- Updated Vibe install, upgrade, and doctor guidance for the current
+  `mistral-vibe` package and default-on session logging.
+
 ## [1.16.0] - 2026-05-29 — remove Redis session dependency
 
 Feature release that removes the optional Redis/ioredis layer from the

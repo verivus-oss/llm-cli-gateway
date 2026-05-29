@@ -674,15 +674,16 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       // Phase 4 slice δ
       "maxTurns",
       "maxPrice",
+      "maxTokens",
       // Phase 4 slice ζ
       "workingDir",
       "addDir",
     ],
     flags: {
       "-p": { arity: "one", description: "Prompt text" },
-      "--output-format": {
+      "--output": {
         arity: "one",
-        values: ["plain", "json", "stream-json"],
+        values: ["text", "json", "streaming"],
         description: "Output format",
       },
       "--agent": {
@@ -710,6 +711,11 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         // that keeps String(N) in decimal form (no scientific notation).
         pattern: /^(0|[1-9][0-9]*)(\.[0-9]+)?$/,
         description: "Cumulative cost cap in USD (Phase 4 slice δ, programmatic mode only)",
+      },
+      "--max-tokens": {
+        arity: "one",
+        pattern: /^[1-9][0-9]*$/,
+        description: "Cumulative prompt + completion token cap (Vibe 2.x programmatic mode)",
       },
       "--workdir": {
         arity: "one",
@@ -754,6 +760,22 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         id: "mistral-max-turns-and-price",
         description: "Phase 4 slice δ: --max-turns + --max-price are accepted together",
         args: ["-p", "hello", "--agent", "auto-approve", "--max-turns", "3", "--max-price", "0.01"],
+        env: { VIBE_ACTIVE_MODEL: "mistral-medium-3.5" },
+        expect: "pass",
+      },
+      {
+        id: "mistral-output-streaming-and-max-tokens",
+        description: "Vibe 2.x: --output streaming and --max-tokens are accepted",
+        args: [
+          "-p",
+          "hello",
+          "--agent",
+          "auto-approve",
+          "--output",
+          "streaming",
+          "--max-tokens",
+          "1000",
+        ],
         env: { VIBE_ACTIVE_MODEL: "mistral-medium-3.5" },
         expect: "pass",
       },

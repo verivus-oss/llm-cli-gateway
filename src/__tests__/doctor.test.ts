@@ -3,7 +3,12 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { checkGeminiConfig, createDoctorReport, type DoctorReport } from "../doctor.js";
+import {
+  checkGeminiConfig,
+  checkVibeSessionLogging,
+  createDoctorReport,
+  type DoctorReport,
+} from "../doctor.js";
 
 // Layer 6 / U20: doctor JSON schema shape + secret redaction coverage.
 //
@@ -254,6 +259,50 @@ describe("Layer 6 doctor report (U20)", () => {
       expect(typeof action).toBe("string");
       expect(action.length).toBeGreaterThan(0);
     }
+  });
+});
+
+describe("Mistral Vibe session logging probe", () => {
+  let home: string;
+
+  beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), "vibe-doctor-"));
+  });
+
+  afterEach(() => {
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  it("treats missing config as enabled because current Vibe defaults session logging on", () => {
+    const status = checkVibeSessionLogging(home);
+
+    expect(status.config_present).toBe(false);
+    expect(status.session_logging_enabled).toBe(true);
+    expect(status.note).toContain("defaults session_logging.enabled to true");
+  });
+
+  it("treats a config without session_logging override as enabled", () => {
+    mkdirSync(join(home, ".vibe"), { recursive: true });
+    writeFileSync(join(home, ".vibe", "config.toml"), 'active_model = "local"\n');
+
+    const status = checkVibeSessionLogging(home);
+
+    expect(status.config_present).toBe(true);
+    expect(status.session_logging_enabled).toBe(true);
+  });
+
+  it("flags explicit session_logging.enabled=false", () => {
+    mkdirSync(join(home, ".vibe"), { recursive: true });
+    writeFileSync(
+      join(home, ".vibe", "config.toml"),
+      "[session_logging]\nenabled = false\n"
+    );
+
+    const status = checkVibeSessionLogging(home);
+
+    expect(status.config_present).toBe(true);
+    expect(status.session_logging_enabled).toBe(false);
+    expect(status.note).toContain("enabled = false");
   });
 });
 

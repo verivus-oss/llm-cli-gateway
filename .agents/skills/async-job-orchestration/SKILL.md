@@ -10,7 +10,7 @@ metadata:
 
 Async execution for Claude, Codex, Gemini, Grok, and Mistral. Non-blocking jobs with polling lifecycle. Job state is **durable** — results survive gateway restarts and polling timeouts (see [Durability & Dedup](#durability--dedup)).
 
-> **Mistral Vibe**: the gateway always emits `--agent <mode>` and defaults to `auto-approve` for programmatic callers. Session continuity (`sessionId` / `resumeLatest`) requires `[session_logging] enabled = true` in `~/.vibe/config.toml`.
+> **Mistral Vibe**: the gateway always emits `--agent <mode>` and defaults to `auto-approve` for programmatic callers. Current Vibe defaults session logging on; `doctor --json` flags an explicit `[session_logging] enabled = false` before session-continuity use.
 
 ## Dispatch Defaults
 
