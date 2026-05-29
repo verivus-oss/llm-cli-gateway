@@ -23,7 +23,7 @@ A Model Context Protocol (MCP) gateway for running Claude Code, Codex, Gemini, G
 - Can run requests inside gateway-managed git worktrees for isolated multi-agent review and implementation loops.
 - Ships personal-appliance setup surfaces: HTTP transport with bearer-token auth, `doctor --json`, setup UI artifacts, provider setup snippets, Docker fallback, and checked release bundles.
 
-## Personal MCP Appliance MVP
+## Personal MCP Appliance
 
 The personal-appliance contract keeps that surface intentionally narrow: one trusted user runs the gateway on a machine or volume they own, connects one MCP endpoint, and asks any connected client for cross-LLM validation.
 
@@ -31,7 +31,7 @@ The product contract is documented in [docs/personal-mcp/PRODUCT_CONTRACT.md](do
 
 This project does not provide hosted multi-tenant credential custody. Provider credentials stay on the user's machine or user-owned deployment volume.
 
-MVP release readiness is tracked in [docs/personal-mcp/RELEASE_READINESS.md](docs/personal-mcp/RELEASE_READINESS.md). Dogfooding evidence (which target LLMs guided setup, what unsafe suggestions were captured, which findings are deferred to post-MVP work) is in [docs/personal-mcp/DOGFOODING_RESULTS.md](docs/personal-mcp/DOGFOODING_RESULTS.md).
+Release-readiness history is tracked in [docs/personal-mcp/RELEASE_READINESS.md](docs/personal-mcp/RELEASE_READINESS.md). Dogfooding evidence (which target LLMs guided setup, what unsafe suggestions were captured, and which findings were deferred from the initial personal-appliance rollout) is in [docs/personal-mcp/DOGFOODING_RESULTS.md](docs/personal-mcp/DOGFOODING_RESULTS.md).
 
 Current personal-appliance artifacts include:
 
@@ -287,7 +287,7 @@ For clients that already support local stdio MCP servers, add a configuration li
 }
 ```
 
-This generic stdio example is not provider-support verification for the Personal MCP Appliance MVP. Client-specific setup guides for ChatGPT, Claude web, Claude Desktop, Codex, Gemini CLI, Gemini web, and Grok remain gated by the provider-support matrix in [docs/personal-mcp/PRODUCT_CONTRACT.md](docs/personal-mcp/PRODUCT_CONTRACT.md).
+This generic stdio example is not provider-support verification for the Personal MCP Appliance. Client-specific setup guides for ChatGPT, Claude web, Claude Desktop, Codex, Gemini CLI, Gemini web, and Grok remain gated by the provider-support matrix in [docs/personal-mcp/PRODUCT_CONTRACT.md](docs/personal-mcp/PRODUCT_CONTRACT.md).
 
 ### Available Tools
 
