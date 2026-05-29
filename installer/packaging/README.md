@@ -234,11 +234,11 @@ The single binary is the primary install path. Docker Compose remains a
 documented fallback for users who already manage containers:
 
 ```bash
-docker compose -f docker-compose.personal.yml up -d
-docker compose -f docker-compose.personal.yml exec gateway node dist/index.js doctor --json
+docker compose -f docker/personal.compose.yml up -d
+docker compose -f docker/personal.compose.yml exec gateway node dist/index.js doctor --json
 ```
 
-Volume mounts in `docker-compose.personal.yml` keep provider credentials
+Volume mounts in `docker/personal.compose.yml` keep provider credentials
 and the app directory on the host so the user retains custody.
 
 ## Release-manifest.json

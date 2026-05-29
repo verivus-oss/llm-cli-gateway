@@ -4,7 +4,6 @@
 [![Security](https://github.com/verivus-oss/llm-cli-gateway/actions/workflows/security.yml/badge.svg?branch=main)](https://github.com/verivus-oss/llm-cli-gateway/actions/workflows/security.yml)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/verivus-oss/llm-cli-gateway/badge)](https://scorecard.dev/viewer/?uri=github.com/verivus-oss/llm-cli-gateway)
 [![npm](https://img.shields.io/npm/v/llm-cli-gateway.svg)](https://www.npmjs.com/package/llm-cli-gateway)
-[![npm monthly downloads](https://img.shields.io/npm/dm/llm-cli-gateway.svg)](https://www.npmjs.com/package/llm-cli-gateway)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 > _"Without consultation, plans are frustrated, but with many counselors they succeed."_
@@ -14,7 +13,7 @@ A Model Context Protocol (MCP) gateway for running Claude Code, Codex, Gemini, G
 
 **Why developers try it:** one local MCP endpoint for cross-LLM validation, multi-agent coding workflows, and repeatable assistant-led setup across five provider CLIs.
 
-**Current signals:** crossed 5k monthly npm downloads in May 2026; live npm downloads are shown above. CI and security workflows pass on `main`, OpenSSF Scorecard is published, OpenSSF Best Practices is passing, releases use Sigstore signing, and the package is MIT licensed.
+**Current signals:** CI and security workflows pass on `main`, OpenSSF Scorecard is published, OpenSSF Best Practices is passing, releases use Sigstore signing, and the package is MIT licensed.
 
 ## Quick Start
 
@@ -55,8 +54,6 @@ The next documentation focus is provider-specific skill and DAG-TOML pairs for e
 ## Trust & Supply Chain
 
 [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/13025/badge)](https://www.bestpractices.dev/projects/13025)
-[![npm weekly downloads](https://img.shields.io/npm/dw/llm-cli-gateway.svg)](https://www.npmjs.com/package/llm-cli-gateway)
-[![GitHub release downloads](https://img.shields.io/github/downloads/verivus-oss/llm-cli-gateway/total.svg)](https://github.com/verivus-oss/llm-cli-gateway/releases)
 [![Releases: Sigstore signed](https://img.shields.io/badge/releases-Sigstore%20signed-2e7d32.svg)](SECURITY.md#release-signing)
 
 - CI runs build, lint, format, tests, package checks, and npm audit.
@@ -80,7 +77,7 @@ Current personal-appliance artifacts include:
 - Machine-readable diagnostics: `npm run doctor`
 - Go bootstrapper: `installer/` with `setup`, `doctor --json`, `start`, `stop`, `status`, `repair`, `upgrade`, `uninstall`, `print-client-config`, and verified bundle download commands.
 - Release packaging: the release workflow builds Linux binaries on the local self-hosted runner, builds Windows/macOS binaries on GitHub-hosted runners, then publishes checksummed platform bundles with the gateway, production dependencies, and a managed Node runtime; see [installer/packaging/README.md](installer/packaging/README.md).
-- Docker Compose fallback: [docker-compose.personal.yml](docker-compose.personal.yml) + [Dockerfile.personal](Dockerfile.personal) for users who already manage containers.
+- Docker Compose fallback: [docker/personal.compose.yml](docker/personal.compose.yml) + [docker/Dockerfile.personal](docker/Dockerfile.personal) for users who already manage containers.
 - Local setup UI artifact: [setup/ui/index.html](setup/ui/index.html)
 - Provider setup snippets: [setup/providers/](setup/providers/)
 - Cross-validation tools: `validate_with_models`, `second_opinion`, `compare_answers`, `red_team_review`, `consensus_check`, `ask_model`, `synthesize_validation`, `job_status`, and `job_result`.
@@ -148,8 +145,8 @@ Docker fallback:
 
 ```bash
 LLM_GATEWAY_AUTH_TOKEN=$(openssl rand -hex 32) \
-  docker compose -f docker-compose.personal.yml up -d
-docker compose -f docker-compose.personal.yml run --rm doctor
+  docker compose -f docker/personal.compose.yml up -d
+docker compose -f docker/personal.compose.yml run --rm doctor
 ```
 
 ## Features
@@ -1178,13 +1175,13 @@ The gateway supports concurrent requests across different CLIs. Each request spa
 
 If you're vetting `llm-cli-gateway` through [Socket](https://socket.dev/npm/package/llm-cli-gateway) or a similar supply-chain scanner, you'll see behavioural alerts and some dependency-ownership alerts. They are accurate descriptions of what the package does and what it depends on. The reviewed `shellAccess` capability is suppressed in `socket.yml` to avoid a repeat finding on every release; the rationale remains documented here and in the package.
 
-| Alert                            | Where                                                                                                                                                                                            | Why it's bounded                                                                                                                                                                                                                                                                                                                                                                                     |
-| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Network access**               | `src/http-transport.ts` opens an HTTP MCP transport when started via `npm run start:http`. `src/endpoint-exposure.ts` issues a HEAD probe to verify configured public/tunnel URLs.               | The transport binds to `127.0.0.1` by default and requires `LLM_GATEWAY_AUTH_TOKEN` to be set. The default stdio MCP entry point (`npm start`) opens no sockets.                                                                                                                                                                                                                                     |
-| **Shell access**                 | `src/executor.ts` uses `child_process.spawn(cmd, args, …)` to invoke the underlying LLM CLIs.                                                                                                    | `spawn` is called with an argument array and **never** `shell: true`, so there is no shell interpolation path for caller input. The command name is restricted to an allow-list of known CLI binaries (`claude`, `codex`, `gemini`, `grok`, `vibe`).                                                                                                                                                 |
-| **Uses eval**                    | None in our source. Transitive: `@modelcontextprotocol/sdk` → `ajv@8` uses `new Function(...)` in `ajv/dist/compile/index.js` to compile JSON Schema validators.                                 | This is ajv's standard codegen path. Only known schemas (defined in our source and the MCP SDK) flow into it; no caller-supplied data ever reaches the compiled function body.                                                                                                                                                                                                                       |
-| **better-sqlite3 PRAGMA helper** | Transitive: `better-sqlite3/lib/methods/pragma.js` interpolates its caller-provided `source` into a `PRAGMA ${source}` statement.                                                                | We do not call `db.pragma()` from production source. Internal SQLite setup uses fixed literal `db.exec("PRAGMA ...")` statements, and `npm run security:audit` fails the release if production code reintroduces `.pragma()` calls.                                                                                                                                                                  |
-| **Dependency ownership**         | A handful of small transitive packages (e.g. `bindings` via `better-sqlite3`, `media-typer` via `@modelcontextprotocol/sdk`) trip Socket's "unstable ownership" or "obfuscated code" heuristics. | These are pinned, well-known micro-deps in the Node ecosystem with no known issues. We pin direct override versions of `content-type` and `type-is` in `package.json#overrides`. Our previous direct dependency on `toml@3.0.0` (also single-maintainer, last released 2020) was replaced with the actively-maintained `smol-toml` to reduce inherited risk.                                         |
+| Alert                            | Where                                                                                                                                                                                            | Why it's bounded                                                                                                                                                                                                                                                                                                                                             |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Network access**               | `src/http-transport.ts` opens an HTTP MCP transport when started via `npm run start:http`. `src/endpoint-exposure.ts` issues a HEAD probe to verify configured public/tunnel URLs.               | The transport binds to `127.0.0.1` by default and requires `LLM_GATEWAY_AUTH_TOKEN` to be set. The default stdio MCP entry point (`npm start`) opens no sockets.                                                                                                                                                                                             |
+| **Shell access**                 | `src/executor.ts` uses `child_process.spawn(cmd, args, …)` to invoke the underlying LLM CLIs.                                                                                                    | `spawn` is called with an argument array and **never** `shell: true`, so there is no shell interpolation path for caller input. The command name is restricted to an allow-list of known CLI binaries (`claude`, `codex`, `gemini`, `grok`, `vibe`).                                                                                                         |
+| **Uses eval**                    | None in our source. Transitive: `@modelcontextprotocol/sdk` → `ajv@8` uses `new Function(...)` in `ajv/dist/compile/index.js` to compile JSON Schema validators.                                 | This is ajv's standard codegen path. Only known schemas (defined in our source and the MCP SDK) flow into it; no caller-supplied data ever reaches the compiled function body.                                                                                                                                                                               |
+| **better-sqlite3 PRAGMA helper** | Transitive: `better-sqlite3/lib/methods/pragma.js` interpolates its caller-provided `source` into a `PRAGMA ${source}` statement.                                                                | We do not call `db.pragma()` from production source. Internal SQLite setup uses fixed literal `db.exec("PRAGMA ...")` statements, and `npm run security:audit` fails the release if production code reintroduces `.pragma()` calls.                                                                                                                          |
+| **Dependency ownership**         | A handful of small transitive packages (e.g. `bindings` via `better-sqlite3`, `media-typer` via `@modelcontextprotocol/sdk`) trip Socket's "unstable ownership" or "obfuscated code" heuristics. | These are pinned, well-known micro-deps in the Node ecosystem with no known issues. We pin direct override versions of `content-type` and `type-is` in `package.json#overrides`. Our previous direct dependency on `toml@3.0.0` (also single-maintainer, last released 2020) was replaced with the actively-maintained `smol-toml` to reduce inherited risk. |
 
 See [`socket.yml`](./socket.yml) for the same context in machine-readable form.
 

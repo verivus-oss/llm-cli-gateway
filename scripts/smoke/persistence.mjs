@@ -10,7 +10,6 @@
 //   5. Captures stderr for deprecation warnings
 //   6. Reports PASS/FAIL per variant
 
-import { spawn } from "child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
@@ -65,12 +64,9 @@ async function runVariant(variant) {
   });
 
   // Capture child stderr.
-  transport.stderr?.on("data", (b) => stderrChunks.push(b.toString()));
+  transport.stderr?.on("data", b => stderrChunks.push(b.toString()));
 
-  const client = new Client(
-    { name: "smoke-test", version: "1.0.0" },
-    { capabilities: {} }
-  );
+  const client = new Client({ name: "smoke-test", version: "1.0.0" }, { capabilities: {} });
 
   const failures = [];
   let toolsList = [];
@@ -80,7 +76,7 @@ async function runVariant(variant) {
   try {
     await client.connect(transport);
     const tools = await client.listTools();
-    toolsList = tools.tools.map((t) => t.name).sort();
+    toolsList = tools.tools.map(t => t.name).sort();
 
     // Always callable: llm_process_health
     const health = await client.callTool({ name: "llm_process_health", arguments: {} });
@@ -90,8 +86,8 @@ async function runVariant(variant) {
   }
 
   // Assertions
-  const presentAsync = toolsList.filter((n) => ASYNC_TOOLS.has(n));
-  const missingAsync = [...ASYNC_TOOLS].filter((n) => !toolsList.includes(n));
+  const presentAsync = toolsList.filter(n => ASYNC_TOOLS.has(n));
+  const missingAsync = [...ASYNC_TOOLS].filter(n => !toolsList.includes(n));
 
   if (expect.startupFails) {
     if (!processFailedReason) {
@@ -139,7 +135,9 @@ async function runVariant(variant) {
         }
       } else {
         if (healthPayload.persistence?.warning) {
-          failures.push(`expected health.persistence.warning null when async enabled, got: ${healthPayload.persistence.warning}`);
+          failures.push(
+            `expected health.persistence.warning null when async enabled, got: ${healthPayload.persistence.warning}`
+          );
         }
       }
     }
@@ -268,6 +266,6 @@ for (const r of results) {
   }
 }
 
-const failed = results.filter((r) => !r.pass).length;
+const failed = results.filter(r => !r.pass).length;
 console.log(`\n${results.length - failed}/${results.length} passed`);
 process.exit(failed > 0 ? 1 : 0);

@@ -17,7 +17,7 @@ gate and the command an assistant can quote to a user.
 | Windows has a one-command installer that still verifies release checksums                        | `installer/build-release.sh` `write_windows_installer_script`                                                           |
 | `SHA256SUMS` and Sigstore bundles are produced; users must verify before run                     | `installer/packaging/README.md` "Verification" and "Signing" sections                                                   |
 | Bootstrapper has `setup` + `install-bundle` to materialize the gateway dir                       | `installer/main.go:37-42, 96-97`                                                                                        |
-| Docker Compose fallback exists                                                                   | `docker-compose.personal.yml`, `Dockerfile.personal`                                                                    |
+| Docker Compose fallback exists                                                                   | `docker/personal.compose.yml`, `docker/Dockerfile.personal`                                                             |
 | Install commands are idempotent and copy/paste safe                                              | `setup/install-plan.dag.toml` step `start-gateway` + `install-bundle`                                                   |
 | README documents the single-binary install path                                                  | `README.md` "Install / Upgrade / Uninstall" section                                                                     |
 
@@ -153,7 +153,7 @@ Quote-for-user:
 | npm vulnerability audit is clean before release                        | `npm run security:audit` runs `npm audit --omit=dev --audit-level=moderate`                                                                                 |
 | Production source contains no dynamic execution patterns               | `scripts/release-security-audit.sh` scans non-test `src/` files for `eval`, `.eval`, `Function`, and `new Function` usage                                   |
 | Production source does not call better-sqlite3's dynamic PRAGMA helper | `scripts/release-security-audit.sh` scans non-test `src/` files for `.pragma()` calls; fixed SQLite setup uses literal `PRAGMA` SQL through `exec`          |
-| Socket-flagged dependency versions are blocked in the repo lockfile    | `scripts/release-security-audit.sh` rejects `content-type@2.0.0` and `type-is@2.1.0` in `package-lock.json`                                            |
+| Socket-flagged dependency versions are blocked in the repo lockfile    | `scripts/release-security-audit.sh` rejects `content-type@2.0.0` and `type-is@2.1.0` in `package-lock.json`                                                 |
 | Published npm consumers resolve the same safe dependency tree          | `scripts/release-security-audit.sh` packs the package, installs it into a temporary consumer project, and rejects the blocked dependency versions there too |
 | CI runs the same audit gate                                            | `.github/workflows/ci.yml` `build-and-test` job runs `npm run security:audit`                                                                               |
 
@@ -185,12 +185,12 @@ evidence to the release notes before publishing.
 
 ## Upstream provider contracts
 
-| Gate                                                                                                | Evidence                                                                                                              |
-| --------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
-| Mechanical argv/env behaviour for all five CLIs has one source of truth                             | `src/upstream-contracts.ts` (`UPSTREAM_CLI_CONTRACTS`) + `validateUpstreamCliArgs` / `validateUpstreamCliEnv`         |
-| Bundled conformance fixtures + report + TOML-sync verified offline, network-free                    | `npm run upstream:contracts` (`scripts/upstream-scan.mjs --contracts-check`); fixtures pinned in `upstream-contracts.test.ts` |
-| TOML scanner input stays in sync with the TS metadata (no drift)                                    | `src/__tests__/upstream-sources.test.ts` asserts `provider-sources.dag.toml` mirrors `CliContract.upstreamMetadata`   |
-| Changelog/source tracking is advisory and manual; default gate needs no network or installed CLIs  | `docs/upstream/provider-sources.dag.toml` (scanner input only) + `docs/upstream/README.md`                            |
+| Gate                                                                                              | Evidence                                                                                                                      |
+| ------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| Mechanical argv/env behaviour for all five CLIs has one source of truth                           | `src/upstream-contracts.ts` (`UPSTREAM_CLI_CONTRACTS`) + `validateUpstreamCliArgs` / `validateUpstreamCliEnv`                 |
+| Bundled conformance fixtures + report + TOML-sync verified offline, network-free                  | `npm run upstream:contracts` (`scripts/upstream-scan.mjs --contracts-check`); fixtures pinned in `upstream-contracts.test.ts` |
+| TOML scanner input stays in sync with the TS metadata (no drift)                                  | `src/__tests__/upstream-sources.test.ts` asserts `provider-sources.dag.toml` mirrors `CliContract.upstreamMetadata`           |
+| Changelog/source tracking is advisory and manual; default gate needs no network or installed CLIs | `docs/upstream/provider-sources.dag.toml` (scanner input only) + `docs/upstream/README.md`                                    |
 
 Blocking release path (no network, no installed provider CLIs required beyond
 the existing optional `probeInstalledCliContract`):
