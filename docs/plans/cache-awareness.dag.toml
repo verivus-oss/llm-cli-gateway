@@ -4,12 +4,23 @@
 # without adding any new conversation content to gateway storage. Preserves
 # the "No conversation content in session storage" invariant defined in
 # /srv/repos/internal/verivusai-labs/rvwr/CLAUDE.md (project root, one
-# directory above this gateway repo) and reinforced in BEST_PRACTICES.md
-# inside this repo.
+# directory above this gateway repo) and reinforced in
+# docs/guides/BEST_PRACTICES.md inside this repo.
 #
 # Out of scope for this slice: explicit cache-resource APIs (Gemini Context
 # Caching, Anthropic 1h beta) and cache-aware multi-LLM routing. Those are
 # gated on this slice's observability data.
+#
+# Slice 1.5 (v1.7.0) landed the two tactical follow-ups this plan flagged
+# as deferred: async-path flight-recorder integration + Codex parser
+# accepting `cached_input_tokens`. See
+# `docs/plans/async-flight-recorder.dag.toml` for that slice's record.
+#
+# Slice 4 (cache-aware multi-LLM routing) is BLOCKED ON OBSERVABILITY DATA.
+# Do not start until 24h+ of `cache_state://global` data has been collected
+# from real use after v1.7.0 ships. The routing slice needs a clean signal
+# of per-provider cache warmth across the prefix space — without 24h+ of
+# dogfood data the routing decisions are guesses.
 
 [meta]
 name = "llm-cli-gateway cache-awareness — phase 1"
@@ -20,7 +31,7 @@ target_branch = "feat/cache-awareness-phase-1"
 acceptance_resource = "cache_state MCP resource returns non-zero hits within 24h of dogfooding"
 invariant_sources = [
   "/srv/repos/internal/verivusai-labs/rvwr/CLAUDE.md",
-  "/srv/repos/internal/verivusai-labs/rvwr/llm-cli-gateway/BEST_PRACTICES.md",
+  "/srv/repos/internal/verivusai-labs/rvwr/llm-cli-gateway/docs/guides/BEST_PRACTICES.md",
 ]
 
 # ---------------------------------------------------------------------------

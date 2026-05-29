@@ -43,7 +43,7 @@ type tunnelMetadata struct {
 
 var tunnelURLPattern = regexp.MustCompile(`https://[A-Za-z0-9.-]+\.trycloudflare\.com`)
 
-func Start(cfg config.Config, token string) (Status, error) {
+func Start(cfg config.Config, token string) (status Status, err error) {
 	if status, _ := Current(cfg); status.Running {
 		return status, nil
 	}
@@ -57,12 +57,12 @@ func Start(cfg config.Config, token string) (Status, error) {
 	if err != nil {
 		return Status{}, err
 	}
-	defer stdout.Close()
+	defer closeAndJoinError(stdout, &err)
 	stderr, err := os.OpenFile(errPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return Status{}, err
 	}
-	defer stderr.Close()
+	defer closeAndJoinError(stderr, &err)
 	nodePath := cfg.RuntimeNode
 	if _, err := os.Stat(nodePath); err != nil {
 		if os.Getenv("RVWR_ALLOW_HOST_NODE") != "1" {
@@ -91,6 +91,15 @@ func Start(cfg config.Config, token string) (Status, error) {
 		return Status{}, err
 	}
 	return Status{Running: true, PID: cmd.Process.Pid, URL: "http://" + cfg.HTTPHost + ":" + cfg.HTTPPort + cfg.HTTPPath, LogPath: logPath}, nil
+}
+
+func closeAndJoinError(file *os.File, errp *error) {
+	if file == nil {
+		return
+	}
+	if closeErr := file.Close(); closeErr != nil {
+		*errp = errors.Join(*errp, closeErr)
+	}
 }
 
 func StartTunnel(cfg config.Config, provider string) (TunnelStatus, error) {

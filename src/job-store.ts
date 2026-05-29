@@ -128,9 +128,35 @@ export interface JobStore {
   }): void;
   getById(id: string): JobRecord | null;
   findByRequestKey(requestKey: string): JobRecord | null;
-  markOrphanedOnStartup(): number;
+  /**
+   * Flip every `status='running'` row to `'orphaned'` at gateway boot.
+   *
+   * Returns the row count AND a snapshot of every row that was flipped, so
+   * AsyncJobManager can write a flight-recorder logComplete with the full
+   * sync-helper-equivalent payload (response from stderr||stdout,
+   * durationMs from startedAt). Pre-slice-1.5 rows that never wrote a
+   * logStart degrade silently to a no-op UPDATE inside the FR.
+   */
+  markOrphanedOnStartup(): {
+    count: number;
+    orphaned: Array<OrphanedJobSnapshot>;
+  };
   evictExpired(): number;
   close(): void;
+}
+
+/**
+ * Per-orphan snapshot returned by `markOrphanedOnStartup` so the
+ * AsyncJobManager constructor can build a faithful FlightLogResult for
+ * each row it flipped.
+ */
+export interface OrphanedJobSnapshot {
+  id: string;
+  correlationId: string;
+  startedAt: string;
+  stdout: string;
+  stderr: string;
+  exitCode: number | null;
 }
 
 /**
@@ -147,6 +173,7 @@ export class SqliteJobStore implements JobStore {
   private updateCompleteStmt: StatementLike;
   private getByIdStmt: StatementLike;
   private findByRequestKeyStmt: StatementLike;
+  private selectRunningOrphansStmt: StatementLike;
   private markOrphanedStmt: StatementLike;
   private deleteExpiredStmt: StatementLike;
 
@@ -235,6 +262,17 @@ export class SqliteJobStore implements JobStore {
         AND status IN ('running', 'completed')
       ORDER BY started_at DESC
       LIMIT 1
+    `);
+
+    // Snapshot every in-flight row's audit data BEFORE the orphan-flip
+    // UPDATE so AsyncJobManager can construct a full FlightLogResult per
+    // orphan. No transaction wrapper required: gateway boot is
+    // single-threaded before any new jobs can arrive, so no
+    // status='running' row can be inserted between this SELECT and the
+    // UPDATE below.
+    this.selectRunningOrphansStmt = this.db.prepare(`
+      SELECT id, correlation_id, started_at, stdout, stderr, exit_code
+      FROM jobs WHERE status = 'running'
     `);
 
     this.markOrphanedStmt = this.db.prepare(`
@@ -340,14 +378,39 @@ export class SqliteJobStore implements JobStore {
   /**
    * On gateway boot, flip any jobs that were 'running' to 'orphaned'.
    * The child processes were detached but can't be reattached to in this process.
+   *
+   * Returns the row count + a per-orphan snapshot so AsyncJobManager can
+   * write a flight-recorder logComplete with proper audit data
+   * (durationMs from startedAt, response from stderr||stdout).
    */
-  markOrphanedOnStartup(): number {
+  markOrphanedOnStartup(): {
+    count: number;
+    orphaned: Array<OrphanedJobSnapshot>;
+  } {
     const now = new Date().toISOString();
-    // Orphaned jobs retain a short window so callers can fetch the partial output,
+    // Orphaned jobs retain a short window so callers can collect the partial output,
     // then evict. Reuse the standard retention.
     const expiresAt = new Date(Date.now() + this.retentionMs).toISOString();
+    // SELECT before UPDATE — gateway boot is single-threaded so no row can
+    // appear in 'running' between the two statements.
+    const rows = (this.selectRunningOrphansStmt.all?.() ?? []) as Array<{
+      id: string;
+      correlation_id: string;
+      started_at: string;
+      stdout: string | null;
+      stderr: string | null;
+      exit_code: number | null;
+    }>;
+    const orphaned: OrphanedJobSnapshot[] = rows.map(row => ({
+      id: row.id,
+      correlationId: row.correlation_id,
+      startedAt: row.started_at,
+      stdout: row.stdout ?? "",
+      stderr: row.stderr ?? "",
+      exitCode: row.exit_code,
+    }));
     const result: any = this.markOrphanedStmt.run(now, expiresAt);
-    return result?.changes ?? 0;
+    return { count: result?.changes ?? 0, orphaned };
   }
 
   /**
@@ -476,8 +539,11 @@ export class MemoryJobStore implements JobStore {
    * In-memory stores have no cross-process state, so any "running" rows here
    * came from this very process and aren't actually orphaned. No-op.
    */
-  markOrphanedOnStartup(): number {
-    return 0;
+  markOrphanedOnStartup(): {
+    count: number;
+    orphaned: Array<OrphanedJobSnapshot>;
+  } {
+    return { count: 0, orphaned: [] };
   }
 
   evictExpired(): number {
@@ -525,7 +591,10 @@ export class PostgresJobStore implements JobStore {
   findByRequestKey(): JobRecord | null {
     throw new Error("not implemented");
   }
-  markOrphanedOnStartup(): number {
+  markOrphanedOnStartup(): {
+    count: number;
+    orphaned: Array<OrphanedJobSnapshot>;
+  } {
     throw new Error("not implemented");
   }
   evictExpired(): number {

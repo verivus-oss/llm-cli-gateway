@@ -1,0 +1,2 @@
+# Generated upstream source snapshots (npm run upstream:scan -- --live --write-snapshot).
+# Tracked so the next live scan can diff content hashes.

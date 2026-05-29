@@ -172,6 +172,19 @@ describe("U25 — Claude high-impact feature flags", () => {
       expect(args).toContain("--exclude-dynamic-system-prompt-sections");
     });
 
+    it("emits --verbose alongside --output-format stream-json (Claude CLI 2.x requires it with --print)", () => {
+      const args = callPrepare({ outputFormat: "stream-json" });
+      expect(args).toContain("--output-format");
+      expect(args).toContain("stream-json");
+      expect(args).toContain("--include-partial-messages");
+      expect(args).toContain("--verbose");
+    });
+
+    it("does NOT emit --verbose for text or json output formats", () => {
+      expect(callPrepare({ outputFormat: "text" })).not.toContain("--verbose");
+      expect(callPrepare({ outputFormat: "json" })).not.toContain("--verbose");
+    });
+
     it("does NOT emit any U25 flag when no new params are supplied (backwards compat)", () => {
       const args = callPrepare({});
       const u25Flags = [

@@ -22,7 +22,7 @@ What makes this different from API-based multi-LLM tools (LiteLLM, PAL MCP, etc.
 **Things that actually work well:**
 
 - **Real session continuity.** Claude sessions use `--continue`, Gemini uses `--resume`. Multi-turn conversations persist across requests, not just in bookkeeping.
-- **Auto-async deferral.** Sync calls that exceed 45 seconds transparently become async jobs. You poll with `llm_job_status` and fetch with `llm_job_result`. No more tool-call timeouts killing long reviews.
+- **Auto-async deferral.** Sync calls that exceed 45 seconds transparently become async jobs. You poll with `llm_job_status` and collect with `llm_job_result`. No more tool-call timeouts killing long reviews.
 - **Parallel multi-LLM review.** Send the same code to all three LLMs at once, then synthesize. The `multi-llm-review` skill has the exact prompts for this.
 - **Approval gates with risk scoring.** When you set `approvalStrategy: "mcp_managed"`, the gateway scores operations and can require approval before execution. No other orchestration tool does this.
 - **12 workflow skills** baked in, built from running this across 11+ production repos. Implement-review-fix cycles, red/blue team security assessments, model routing, design review, consensus workflows.

@@ -70,6 +70,23 @@ describe("AsyncJobManager", () => {
       expect(manager.getJobSnapshot("nonexistent")).toBeNull();
       expect(manager.getJobResult("nonexistent")).toBeNull();
     });
+
+    it("should truncate job results from the beginning of each stream", async () => {
+      const manager = new AsyncJobManager();
+      const job = manager.startJob(
+        "sh" as LlmCli,
+        ["-c", "printf abcdefghij; printf klmnopqrst >&2"],
+        "corr-truncate"
+      );
+
+      await waitForJobDone(manager, job.id);
+
+      const result = manager.getJobResult(job.id, 4)!;
+      expect(result.stdout).toBe("abcd");
+      expect(result.stderr).toBe("klmn");
+      expect(result.stdoutTruncated).toBe(true);
+      expect(result.stderrTruncated).toBe(true);
+    });
   });
 
   describe("idle timeout", () => {

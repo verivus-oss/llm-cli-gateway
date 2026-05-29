@@ -35,6 +35,9 @@ export interface CliUpgradePlan {
 
 export type MistralInstallMethod = "pip" | "uv" | "brew" | "unknown";
 
+const MISTRAL_VIBE_PACKAGE = "mistral-vibe";
+const LEGACY_VIBE_PACKAGE = "vibe-cli";
+
 /**
  * Detect how Vibe was installed on this machine. Vibe does not self-update, so
  * cli_upgrade has to dispatch to the package manager that owns the binary.
@@ -55,15 +58,19 @@ export function detectMistralInstallMethod(
     };
   }
 ): MistralInstallMethod {
-  const pip = exec("pip", ["show", "vibe-cli"]);
-  if (pip.exitCode === 0 && /Name:\s*vibe-cli/i.test(pip.stdout)) {
+  const pip = exec("pip", ["show", MISTRAL_VIBE_PACKAGE]);
+  if (pip.exitCode === 0 && /Name:\s*mistral-vibe/i.test(pip.stdout)) {
+    return "pip";
+  }
+  const legacyPip = exec("pip", ["show", LEGACY_VIBE_PACKAGE]);
+  if (legacyPip.exitCode === 0 && /Name:\s*vibe-cli/i.test(legacyPip.stdout)) {
     return "pip";
   }
   const uv = exec("uv", ["tool", "list"]);
-  if (uv.exitCode === 0 && /\bvibe(?:-cli)?\b/i.test(uv.stdout)) {
+  if (uv.exitCode === 0 && /\b(?:mistral-vibe|vibe-cli|vibe)\b/i.test(uv.stdout)) {
     return "uv";
   }
-  const brew = exec("brew", ["list", "mistral-vibe"]);
+  const brew = exec("brew", ["list", MISTRAL_VIBE_PACKAGE]);
   if (brew.exitCode === 0) {
     return "brew";
   }
@@ -218,7 +225,10 @@ function buildMistralUpgradePlan(
   // (we surface it as a no-op plan with `command: ""` so runCliUpgrade can
   // throw before spawning anything).
   if (method === "pip") {
-    const pkg = normalizedTarget === "latest" ? "vibe-cli" : `vibe-cli==${normalizedTarget}`;
+    const pkg =
+      normalizedTarget === "latest"
+        ? MISTRAL_VIBE_PACKAGE
+        : `${MISTRAL_VIBE_PACKAGE}==${normalizedTarget}`;
     return {
       cli: "mistral",
       target: normalizedTarget,
@@ -234,7 +244,7 @@ function buildMistralUpgradePlan(
       cli: "mistral",
       target: normalizedTarget,
       command: "uv",
-      args: ["tool", "upgrade", "vibe-cli"],
+      args: ["tool", "upgrade", MISTRAL_VIBE_PACKAGE],
       strategy: "uv-tool-upgrade",
       requiresNetwork: true,
       note:
@@ -248,7 +258,7 @@ function buildMistralUpgradePlan(
       cli: "mistral",
       target: normalizedTarget,
       command: "brew",
-      args: ["upgrade", "mistral-vibe"],
+      args: ["upgrade", MISTRAL_VIBE_PACKAGE],
       strategy: "brew-upgrade",
       requiresNetwork: true,
       note:
@@ -258,7 +268,7 @@ function buildMistralUpgradePlan(
     };
   }
   throw new Error(
-    "Could not detect how Mistral Vibe was installed. Install it via pip (`pip install vibe-cli`), uv (`uv tool install vibe-cli`), or Homebrew (`brew install mistral-vibe`) before running cli_upgrade."
+    "Could not detect how Mistral Vibe was installed. Install it via pip (`pip install mistral-vibe`), uv (`uv tool install mistral-vibe`), or Homebrew (`brew install mistral-vibe`) before running cli_upgrade."
   );
 }
 

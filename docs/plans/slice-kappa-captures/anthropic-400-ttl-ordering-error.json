@@ -1,0 +1,45 @@
+{
+  "test": "kappa-ttl-ordering-probe",
+  "date": "2026-05-27",
+  "purpose": "First-attempt smoke test that revealed Anthropic's TTL ordering rule. Default cache_control: {type: 'ephemeral'} resolves server-side to ttl='5m'. Claude Code injects its own session-wrap content blocks with ttl='1h'. Anthropic rejects 5m blocks that appear after 1h blocks.",
+  "invocation": "echo '<payload>' | claude -p --input-format stream-json --output-format stream-json --verbose --model sonnet",
+  "payload_offending": {
+    "type": "user",
+    "message": {
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "Hello stable block test",
+          "cache_control": { "type": "ephemeral" }
+        },
+        {
+          "type": "text",
+          "text": "Reply with exactly: OK"
+        }
+      ]
+    }
+  },
+  "anthropic_error_verbatim": "API Error: 400 messages.0.content.6.cache_control.ttl: a ttl='1h' cache_control block must not come after a ttl='5m' cache_control block. Note that blocks are processed in the following order: `tools`, `system`, `messages`.",
+  "decoded": {
+    "status": 400,
+    "field_path": "messages.0.content.6.cache_control.ttl",
+    "violation": "1h block must not come after 5m block",
+    "block_processing_order_per_anthropic": ["tools", "system", "messages"]
+  },
+  "what_this_tells_us": [
+    "cache_control IS being forwarded through Claude Code's stream-json input handler to Anthropic. This is the central viability question for κ Branch A, answered YES.",
+    "Claude Code's own session-wrap content uses ttl='1h'. Caller-supplied cache_control without explicit ttl resolves to 5m and breaks the ordering rule.",
+    "Caller content lands at position 6+ in the messages.0.content array — Claude Code injects ~6 system/wrap blocks before user content.",
+    "Implementation MUST hardcode ttl: '1h' on caller-supplied cache_control blocks until/unless Anthropic relaxes the ordering rule."
+  ],
+  "result_event_from_failure": {
+    "type": "result",
+    "subtype": "success",
+    "is_error": true,
+    "api_error_status": 400,
+    "duration_ms": 354,
+    "duration_api_ms": 1240,
+    "total_cost_usd": 0.000506
+  }
+}

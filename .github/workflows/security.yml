@@ -16,15 +16,14 @@ name: security
 #                     names / env-var names / config keys)
 #   gitleaks        — secret leak detection in commits + working tree
 #                     (replaces GHAS secret scanning)
-#   osv-scanner     — CVEs in package-lock.json (npm) and any Python
-#                     lockfile under integrations/llm-plugin/.
+#   osv-scanner     — CVEs in package-lock.json (npm) and hashed Python
+#                     CI tool requirements.
 #                     Complements Dependabot: catches transitive and
 #                     advisory-DB-only entries Dependabot misses.
-#   ruff            — Python deep linter (security `S` rules,
-#                     correctness, dead-code); defense-in-depth above
-#                     bandit on integrations/llm-plugin/.
-#   bandit          — Python static security analysis on the same tree.
 #   lychee          — link rot in README.md / CHANGELOG.md / docs/*
+#   attribution     — rejects new Claude/Anthropic author or co-author
+#                     trailers so GitHub contributor attribution stays human /
+#                     project-owned.
 #
 # Every step is SHA-pinned where the tool ships a stable release; binary
 # downloads include SHA256 verification. `continue-on-error: false` is
@@ -51,14 +50,14 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           # Drop the auth token from .git/config after checkout so it
           # cannot be picked up by tool installers (zizmor artipacked).
           persist-credentials: false
 
-      - name: Set up Python (for zizmor + ruff + bandit)
-        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6
+      - name: Set up Python (for zizmor)
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
         with:
           python-version: "3.12"
 
@@ -66,7 +65,7 @@ jobs:
         # actionlint is distributed as a Go binary. Pinning to "stable"
         # keeps us on the same line as the language's release cadence
         # rather than freezing a minor version that drifts.
-        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c  # v6
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
         with:
           go-version: "stable"
 
@@ -91,7 +90,8 @@ jobs:
         # credential persistence through artifacts.
         run: |
           set -euo pipefail
-          python3 -m pip install --user 'zizmor==1.25.2'
+          python3 scripts/ci/validate_security_requirements.py requirements/ci/requirements-security.txt
+          python3 -m pip install --user --require-hashes -r requirements/ci/requirements-security.txt
           # Default min-severity (low+); informational findings (job
           # names, concurrency limits, superfluous actions) are tracked
           # but not enforced — those don't move the security needle.
@@ -100,6 +100,31 @@ jobs:
       # ---------------------------------------------------------------
       # Content correctness — cheap, broad coverage.
       # ---------------------------------------------------------------
+
+      - name: Commit attribution policy
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [ -n "${BASE_SHA}" ] &&
+             [ "${BASE_SHA}" != "0000000000000000000000000000000000000000" ] &&
+             git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
+            range="${BASE_SHA}..${HEAD_SHA}"
+          elif git rev-parse "${HEAD_SHA}^" >/dev/null 2>&1; then
+            range="${HEAD_SHA}^..${HEAD_SHA}"
+          else
+            range="${HEAD_SHA}"
+          fi
+
+          git log --format='%H%n%an <%ae>%n%cn <%ce>%n%B%n---END---' "${range}" > /tmp/commit-attribution.txt
+          if grep -Ein \
+            'Co-authored-by:[[:space:]]*Claude|<[^>]*@anthropic\.com>|noreply@anthropic\.com' \
+            /tmp/commit-attribution.txt; then
+            echo "FAIL: commit attribution must not credit Claude/Anthropic accounts." >&2
+            echo "Use human or project-owned author identity only; remove Claude/Anthropic co-author trailers before merging." >&2
+            exit 1
+          fi
 
       - name: Shell-script lint (shellcheck)
         # ubuntu-latest pre-installs shellcheck. Our shell scripts run
@@ -114,21 +139,18 @@ jobs:
             installer/build-release.sh
 
       - name: Source-code spellcheck (typos)
-        uses: crate-ci/typos@7b04f660f4ee4f048d18fd341887cf28dfbedfe2  # v1.46.3
+        uses: crate-ci/typos@7b04f660f4ee4f048d18fd341887cf28dfbedfe2 # v1.46.3
 
       # ---------------------------------------------------------------
       # Secret + CVE scanning.
       # ---------------------------------------------------------------
 
       - name: Lock-file CVE scan (osv-scanner)
-        uses: google/osv-scanner-action/osv-scanner-action@9a498708959aeaef5ef730655706c5a1df1edbc2  # v2.3.8
+        uses: google/osv-scanner-action/osv-scanner-action@9a498708959aeaef5ef730655706c5a1df1edbc2 # v2.3.8
         with:
           # --no-resolve disables network-required transitive dependency
-          # resolution. package-lock.json has full transitive info baked
-          # in; integrations/llm-plugin/ pyproject lacks a lockfile, so
-          # gets direct-dep-only coverage (one dep: llm>=0.19). When we
-          # add a requirements.lock or uv.lock we can re-enable
-          # transitive resolution.
+          # resolution. package-lock.json has full transitive info baked in,
+          # and requirements/ci uses hash-pinned direct tool dependencies.
           scan-args: |-
             --recursive
             --no-resolve
@@ -166,56 +188,13 @@ jobs:
             --exit-code 1
 
       # ---------------------------------------------------------------
-      # Python (integrations/llm-plugin/) — small surface but ships to
-      # PyPI, so security-lint it just like the npm surface.
-      # ---------------------------------------------------------------
-
-      - name: Python lint (ruff)
-        # ruff is a polyglot Python linter that includes the
-        # flake8-bandit security ruleset (S101..S702), plus correctness
-        # (F), dead-code, bug patterns (B), and simplifications (SIM).
-        # Pairs with bandit: ruff catches more correctness/bug patterns;
-        # bandit catches a few AST taint patterns ruff doesn't.
-        # Defense in depth.
-        run: |
-          set -euo pipefail
-          python3 -m pip install --user 'ruff==0.14.5'
-          # Rules selected:
-          #   F = pyflakes — real bugs (unused imports, undefined names)
-          #   S = flake8-bandit — security
-          # Skip S404 (import subprocess) — same rationale as bandit:
-          # pure informational, the call-site checks (S603, S602) are
-          # what matter.
-          "$HOME/.local/bin/ruff" check \
-            --select S,F \
-            --ignore S404 \
-            --line-length 120 \
-            integrations/llm-plugin/
-
-      - name: Python static security analysis (bandit)
-        # bandit catches subprocess shell=True, eval, pickle, weak
-        # crypto, hardcoded credentials, path traversal patterns.
-        run: |
-          set -euo pipefail
-          python3 -m pip install --user 'bandit==1.9.4'
-          # --skip B404: this fires on every `import subprocess`
-          # regardless of safe usage. The call-site checks (B602, B603,
-          # B607) catch actual issues; B404 is informational noise.
-          python3 -m bandit \
-            --configfile integrations/llm-plugin/.bandit \
-            --recursive integrations/llm-plugin/ \
-            --severity-level low \
-            --confidence-level low \
-            --skip B404
-
-      # ---------------------------------------------------------------
-      # Link rot — keeps the published docs (npmjs, PyPI README, GH
+      # Link rot — keeps the published docs (npmjs, GH
       # release notes) honest.
       # ---------------------------------------------------------------
 
       - name: Link-rot scan (lychee)
         # lychee checks every http(s):// URL in tracked markdown and
         # TOML. Configured by lychee.toml at the repo root.
-        uses: lycheeverse/lychee-action@8646ba30535128ac92d33dfc9133794bfdd9b411  # v2.8.0
+        uses: lycheeverse/lychee-action@8646ba30535128ac92d33dfc9133794bfdd9b411 # v2.8.0
         with:
           fail: true

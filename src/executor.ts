@@ -12,6 +12,14 @@ export interface ExecuteOptions {
   logger?: Logger;
   /** Extra environment variables to inject; merged after PATH. */
   env?: NodeJS.ProcessEnv;
+  /**
+   * Slice κ: optional UTF-8 payload to write to the child's stdin
+   * immediately after spawn. When provided, stdio for stdin switches
+   * from "ignore" to "pipe" so the CLI can read the payload (used by
+   * `claude --input-format stream-json`). Undefined preserves the
+   * legacy stdio:["ignore","pipe","pipe"] shape.
+   */
+  stdin?: string;
 }
 
 export interface ExecuteResult {
@@ -216,7 +224,17 @@ export function resolveCommandForSpawn(
   if ([".cmd", ".bat"].includes(extname(resolved).toLowerCase())) {
     return {
       command: "cmd.exe",
-      args: ["/d", "/s", "/c", `"${buildWindowsCmdCommand(resolved, args)}"`],
+      args: [
+        "/d",
+        "/s",
+        "/c",
+        // Windows .cmd/.bat shims require cmd.exe. `buildWindowsCmdCommand`
+        // applies CommandLineToArgvW quoting and cmd metacharacter escaping
+        // to every dynamic segment before it reaches this shell boundary.
+        //
+        // codeql[js/shell-command-constructed-from-input]
+        `"${buildWindowsCmdCommand(resolved, args)}"`,
+      ],
       windowsVerbatimArguments: true,
     };
   }
@@ -225,13 +243,33 @@ export function resolveCommandForSpawn(
 }
 
 function buildWindowsCmdCommand(command: string, args: string[]): string {
+  // codeql[js/shell-command-constructed-from-input]
   return [escapeWindowsCmdCommand(command), ...args.map(escapeWindowsCmdArgument)].join(" ");
 }
 
-const WINDOWS_CMD_META_CHARS = /([()\][%!^"`<>&|;, *?])/g;
+const WINDOWS_CMD_META_CHARS = new Set([
+  "(",
+  ")",
+  "]",
+  "[",
+  "%",
+  "!",
+  "^",
+  '"',
+  "`",
+  "<",
+  ">",
+  "&",
+  "|",
+  ";",
+  ",",
+  " ",
+  "*",
+  "?",
+]);
 
 function escapeWindowsCmdCommand(value: string): string {
-  return win32.normalize(value).replace(WINDOWS_CMD_META_CHARS, "^$1");
+  return escapeWindowsCmdMetaChars(win32.normalize(value));
 }
 
 // CommandLineToArgvW rules: a run of N backslashes before a literal " must be
@@ -240,11 +278,42 @@ function escapeWindowsCmdCommand(value: string): string {
 // before the closing " must be doubled (2N) so the quote still terminates the
 // arg. Then wrap in quotes and caret-escape cmd.exe metacharacters.
 function escapeWindowsCmdArgument(value: string): string {
-  let arg = `${value}`;
-  arg = arg.replace(/(\\*)"/g, '$1$1\\"');
-  arg = arg.replace(/(\\*)$/, "$1$1");
-  arg = `"${arg}"`;
-  return arg.replace(WINDOWS_CMD_META_CHARS, "^$1");
+  return escapeWindowsCmdMetaChars(quoteWindowsArgForCommandLineToArgv(`${value}`));
+}
+
+function quoteWindowsArgForCommandLineToArgv(value: string): string {
+  let encoded = "";
+  let backslashes = 0;
+
+  for (const ch of value) {
+    if (ch === "\\") {
+      backslashes += 1;
+      continue;
+    }
+    if (ch === '"') {
+      encoded += "\\".repeat(backslashes * 2 + 1);
+      encoded += '"';
+      backslashes = 0;
+      continue;
+    }
+    encoded += "\\".repeat(backslashes);
+    backslashes = 0;
+    encoded += ch;
+  }
+
+  encoded += "\\".repeat(backslashes * 2);
+  return `"${encoded}"`;
+}
+
+function escapeWindowsCmdMetaChars(value: string): string {
+  let escaped = "";
+  for (const ch of value) {
+    if (WINDOWS_CMD_META_CHARS.has(ch)) {
+      escaped += "^";
+    }
+    escaped += ch;
+  }
+  return escaped;
 }
 
 function resolveWindowsCommandPath(command: string, envPath: string): string | null {
@@ -393,18 +462,24 @@ export async function executeCli(
   args: string[],
   options: ExecuteOptions = {}
 ): Promise<ExecuteResult> {
-  const { timeout, idleTimeout, cwd, env: extraEnv } = options;
+  const { timeout, idleTimeout, cwd, env: extraEnv, stdin } = options;
   const extendedPath = getExtendedPath();
   const baseEnv = envWithExtendedPath(process.env, extendedPath);
   const circuitBreaker = getCircuitBreaker(command);
 
   const runOnce = () =>
     new Promise<ExecuteResult>((resolve, reject) => {
+      const stdio: SpawnOptions["stdio"] =
+        stdin === undefined ? ["ignore", "pipe", "pipe"] : ["pipe", "pipe", "pipe"];
       const proc = spawnCliProcess(command, args, {
         cwd,
-        stdio: ["ignore", "pipe", "pipe"],
+        stdio,
         env: { ...baseEnv, ...(extraEnv ?? {}) },
       });
+      if (stdin !== undefined && proc.stdin) {
+        proc.stdin.write(stdin);
+        proc.stdin.end();
+      }
 
       let stdout = "";
       let stderr = "";
