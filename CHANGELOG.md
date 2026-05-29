@@ -2,6 +2,30 @@
 
 All notable changes to the llm-cli-gateway project.
 
+## [1.15.1] - 2026-05-29 — quality badges + Sigstore release signing
+
+Release-infrastructure follow-up to v1.15.0.
+
+### Added
+
+- README quality badges for CI, security, OpenSSF Scorecard, npm, license, and
+  Sigstore-signed release artifacts.
+- Sigstore keyless signing for GitHub release installer artifacts, including
+  `.sigstore.json` bundles and pre-upload verification in the release workflow.
+- End-user verification guidance for `SHA256SUMS.sigstore.json` before trusting
+  release checksums.
+- Sanitized Windows Claude Desktop MCP config example using 1Password
+  environment injection placeholders.
+- Security workflow attribution guard that rejects new Claude/Anthropic
+  author/co-author metadata in future commits.
+
+### Changed
+
+- Manual release-installer rebuilds now fail fast unless launched from the
+  matching release tag ref, keeping Sigstore certificate identities stable.
+- Windows installer snippets and generated release manifest commands now verify
+  the Sigstore checksum bundle before executing the downloaded bootstrapper.
+
 ## [1.15.0] - 2026-05-28 — Phase 4 slice λ (gateway-owned worktree lifecycle)
 
 Ships the tenth Phase 4 slice: a new top-level `worktree` field on every
