@@ -6,7 +6,7 @@ import { existsSync, unlinkSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join, isAbsolute } from "path";
 import { randomUUID } from "crypto";
-import { z } from "zod";
+import { z } from "zod/v3";
 
 /** Prefix for gateway-generated session IDs. Enforces provenance structurally. */
 export const GATEWAY_SESSION_PREFIX = "gw-";
@@ -558,7 +558,7 @@ export type ClaudeEffortLevel = (typeof CLAUDE_EFFORT_LEVELS)[number];
 export const CLAUDE_HIGH_IMPACT_PARAMS_SCHEMA = z
   .object({
     agent: z.string().optional(),
-    agents: z.record(z.record(z.unknown())).optional(),
+    agents: z.record(z.string(), z.record(z.string(), z.unknown())).optional(),
     forkSession: z.boolean().optional(),
     systemPrompt: z.string().optional(),
     appendSystemPrompt: z.string().optional(),
@@ -820,7 +820,7 @@ export function findMissingImagePath(images: string[] | undefined): string | nul
  * params before they reach `prepareCodexRequest`.
  */
 export const CODEX_HIGH_IMPACT_PARAMS_SCHEMA = z.object({
-  outputSchema: z.union([z.string(), z.record(z.unknown())]).optional(),
+  outputSchema: z.union([z.string(), z.record(z.string(), z.unknown())]).optional(),
   search: z.boolean().optional(),
   profile: z.string().optional(),
   configOverrides: CODEX_CONFIG_OVERRIDES_SCHEMA,

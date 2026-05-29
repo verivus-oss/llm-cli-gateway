@@ -1,4 +1,4 @@
-import { z } from "zod";
+import { z } from "zod/v3";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { AsyncJobManager } from "./async-job-manager.js";
 import { getAvailableCliInfo } from "./model-registry.js";

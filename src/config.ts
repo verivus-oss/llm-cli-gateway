@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from "fs";
 import os from "os";
 import path from "path";
 import { createRequire } from "module";
-import { z } from "zod";
+import { z } from "zod/v3";
 import type { Logger } from "./logger.js";
 import { logWarn, noopLogger } from "./logger.js";
 
