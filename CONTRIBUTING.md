@@ -4,7 +4,7 @@
 
 **Read the best practices first:**
 ```bash
-cat BEST_PRACTICES.md
+cat docs/guides/BEST_PRACTICES.md
 ```
 
 Or if you're an LLM working via MCP:
@@ -19,7 +19,7 @@ npm run build
 ```
 
 ### 2. Make Changes
-- Follow patterns in BEST_PRACTICES.md
+- Follow patterns in docs/guides/BEST_PRACTICES.md
 - Write tests as you code
 - Use TypeScript strict mode
 - Add JSDoc comments for exported functions
@@ -74,7 +74,7 @@ Before submitting PR, verify:
 - [ ] Tool names use `snake_case`
 - [ ] All exported functions have TypeScript return types
 - [ ] No duplicate code or constants (DRY principle)
-- [ ] BEST_PRACTICES.md updated if new patterns introduced
+- [ ] docs/guides/BEST_PRACTICES.md updated if new patterns introduced
 
 ## Best Practices Highlights
 
@@ -198,8 +198,8 @@ await withRetry(operation, circuitBreaker, { ... });
 
 ## Getting Help
 
-- Read [BEST_PRACTICES.md](./BEST_PRACTICES.md) for architectural guidance
-- Read [ENFORCEMENT.md](./ENFORCEMENT.md) for enforcement mechanisms
+- Read [BEST_PRACTICES.md](./docs/guides/BEST_PRACTICES.md) for architectural guidance
+- Read [ENFORCEMENT.md](./docs/guides/ENFORCEMENT.md) for enforcement mechanisms
 - Check existing code for patterns
 - Run tests to understand expected behavior
 

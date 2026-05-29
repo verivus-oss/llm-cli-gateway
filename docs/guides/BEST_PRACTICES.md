@@ -118,7 +118,7 @@ codex_request({
 
 **Why:** MCP server lifecycle tied to fullAuto context. Nested connections unsupported.
 
-**Discovered:** 2026-01-24 (DOGFOODING_LESSONS.md #4)
+**Discovered:** 2026-01-24 (docs/archive/DOGFOODING_LESSONS.md #4)
 
 ---
 

@@ -4,8 +4,8 @@
 # without adding any new conversation content to gateway storage. Preserves
 # the "No conversation content in session storage" invariant defined in
 # /srv/repos/internal/verivusai-labs/rvwr/CLAUDE.md (project root, one
-# directory above this gateway repo) and reinforced in BEST_PRACTICES.md
-# inside this repo.
+# directory above this gateway repo) and reinforced in
+# docs/guides/BEST_PRACTICES.md inside this repo.
 #
 # Out of scope for this slice: explicit cache-resource APIs (Gemini Context
 # Caching, Anthropic 1h beta) and cache-aware multi-LLM routing. Those are
@@ -31,7 +31,7 @@ target_branch = "feat/cache-awareness-phase-1"
 acceptance_resource = "cache_state MCP resource returns non-zero hits within 24h of dogfooding"
 invariant_sources = [
   "/srv/repos/internal/verivusai-labs/rvwr/CLAUDE.md",
-  "/srv/repos/internal/verivusai-labs/rvwr/llm-cli-gateway/BEST_PRACTICES.md",
+  "/srv/repos/internal/verivusai-labs/rvwr/llm-cli-gateway/docs/guides/BEST_PRACTICES.md",
 ]
 
 # ---------------------------------------------------------------------------

@@ -2,6 +2,13 @@
 
 All notable changes to the llm-cli-gateway project.
 
+## Unreleased
+
+### Changed
+
+- Moved non-canonical root Markdown into `docs/guides/` and `docs/archive/`
+  so the repository root stays focused on public entry points.
+
 ## [1.15.1] - 2026-05-29 — quality badges + Sigstore release signing
 
 Release-infrastructure follow-up to v1.15.0.

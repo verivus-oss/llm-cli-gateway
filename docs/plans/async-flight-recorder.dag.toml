@@ -29,7 +29,7 @@ release_version = "1.7.0"
 acceptance_resource = "cache_state://global aggregates include async-job rows; codex rows show non-NULL cache_read_tokens on cache hits"
 invariant_sources = [
   "/srv/repos/internal/verivusai-labs/rvwr/CLAUDE.md",
-  "/srv/repos/internal/verivusai-labs/rvwr/llm-cli-gateway/BEST_PRACTICES.md",
+  "/srv/repos/internal/verivusai-labs/rvwr/llm-cli-gateway/docs/guides/BEST_PRACTICES.md",
 ]
 predecessor_plan = "docs/plans/cache-awareness.dag.toml"
 

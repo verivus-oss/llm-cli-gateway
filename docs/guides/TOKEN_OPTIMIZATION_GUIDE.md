@@ -416,8 +416,8 @@ OUT: {content:[{type:"text",text:"response"}]}
 **How to measure:**
 ```bash
 # Using LZ4 compression
-original_size=$(wc -c < BEST_PRACTICES.md)
-compressed_size=$(lz4 -c BEST_PRACTICES.md | wc -c)
+original_size=$(wc -c < docs/guides/BEST_PRACTICES.md)
+compressed_size=$(lz4 -c docs/guides/BEST_PRACTICES.md | wc -c)
 ratio=$(echo "scale=2; $compressed_size / $original_size" | bc)
 echo "Compression ratio: $ratio"
 ```
@@ -701,7 +701,7 @@ that is not related to the core purpose of the server.
 // Cache BEST_PRACTICES.md across requests
 const cachedDocs = {
   cacheTTL: 3600,  // 1 hour
-  content: readFileSync("BEST_PRACTICES.md")
+  content: readFileSync("docs/guides/BEST_PRACTICES.md")
 };
 
 // Subsequent requests use cache
@@ -722,7 +722,7 @@ const cachedDocs = {
 **Current Documentation Size:**
 - BEST_PRACTICES.md: ~15KB → ~8,000 tokens
 - CROSS_TOOL_SUCCESS.md: ~12KB → ~6,500 tokens
-- DOGFOODING_LESSONS.md: ~5KB → ~2,800 tokens
+- docs/archive/DOGFOODING_LESSONS.md: ~5KB → ~2,800 tokens
 - **Total:** ~17,300 tokens
 
 **After Optimization (estimated):**

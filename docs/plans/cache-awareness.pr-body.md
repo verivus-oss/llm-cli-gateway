@@ -2,7 +2,7 @@
 
 ## Scope
 
-Make the gateway operate intelligently inside each provider's native prompt-caching mechanism, **without** adding any new conversation content to gateway storage. Preserves the "No conversation content in session storage" invariant defined in `/srv/repos/internal/verivusai-labs/rvwr/CLAUDE.md` and reinforced in `BEST_PRACTICES.md`.
+Make the gateway operate intelligently inside each provider's native prompt-caching mechanism, **without** adding any new conversation content to gateway storage. Preserves the "No conversation content in session storage" invariant defined in `/srv/repos/internal/verivusai-labs/rvwr/CLAUDE.md` and reinforced in `docs/guides/BEST_PRACTICES.md`.
 
 Three slices shipped together so cache observability data (slice 2) is in place when the prompt-discipline change (slice 1) goes live:
 
