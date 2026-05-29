@@ -1,9 +1,9 @@
 name: Build + upload desktop installer artifacts
 
-# Triggered on `release: published` (matching npm-publish.yml / publish.yml
-# semantics) so a single `gh release create vX.Y.Z` fans out to all three
-# pipelines. `workflow_dispatch` is supported so a missed run can be
-# rebuilt against an existing release without retagging; run it from the
+# Triggered on `release: published` (matching npm-publish.yml semantics) so
+# a single `gh release create vX.Y.Z` fans out to npm publish and installer
+# artifact pipelines. `workflow_dispatch` is supported so a missed run can
+# be rebuilt against an existing release without retagging; run it from the
 # matching tag ref so Sigstore verification keeps the same tag-bound
 # certificate identity as the release event.
 

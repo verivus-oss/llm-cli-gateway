@@ -5,6 +5,9 @@
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/verivus-oss/llm-cli-gateway/badge)](https://scorecard.dev/viewer/?uri=github.com/verivus-oss/llm-cli-gateway)
 [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/13025/badge)](https://www.bestpractices.dev/projects/13025)
 [![npm](https://img.shields.io/npm/v/llm-cli-gateway.svg)](https://www.npmjs.com/package/llm-cli-gateway)
+[![npm weekly downloads](https://img.shields.io/npm/dw/llm-cli-gateway.svg)](https://www.npmjs.com/package/llm-cli-gateway)
+[![npm monthly downloads](https://img.shields.io/npm/dm/llm-cli-gateway.svg)](https://www.npmjs.com/package/llm-cli-gateway)
+[![GitHub release downloads](https://img.shields.io/github/downloads/verivus-oss/llm-cli-gateway/total.svg)](https://github.com/verivus-oss/llm-cli-gateway/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Releases: Sigstore signed](https://img.shields.io/badge/releases-Sigstore%20signed-2e7d32.svg)](SECURITY.md#release-signing)
 
@@ -966,25 +969,6 @@ Each CLI can be configured through its own configuration files:
 - Claude Code: `~/.claude/config.json`
 - Codex: `~/.codex/config.toml`
 - Gemini: `~/.gemini/config.json`
-
-## For Fans of Simon Willison
-
-Simon's `llm` tool made it trivially easy to talk to any LLM from the command line. But as AI-assisted development matures, the challenge shifts from "how do I call a model" to "how do I orchestrate multiple models reliably, and what did they actually do?"
-
-**Multiple models increase the confidence factor.** When Claude writes code, Codex reviews it, and Gemini checks for bugs -- each bringing different training data and reasoning patterns -- the result is more robust than any single model alone. And often this isn't even enough. Having the models do iterative reviews is where you start getting real confidence.
-
-**Every interaction should be queryable data.** Inspired by `llm`'s SQLite logging philosophy, the gateway records every request and response to a local SQLite database. Not just prompts and responses -- retry counts, circuit breaker states, approval decisions, thinking blocks, cost estimates. Open it with Datasette and you have a complete operational picture of your AI usage:
-
-    datasette ~/.llm-cli-gateway/logs.db
-
-**The `llm-gateway` plugin bridges both worlds.** Install it, and your existing `llm` workflows gain orchestration features without changing how you work:
-
-    llm install llm-gateway
-    llm -m gateway-claude "explain this function"
-
-Your gateway interactions appear in both `llm logs` (for your personal history) and the gateway's flight recorder (for operational observability). Two audiences, one workflow.
-
-**Composability over monoliths.** The gateway doesn't replace `llm` -- it complements it. Use `llm` directly when you want simplicity. Route through the gateway when you want resilience, multi-model coordination, or detailed operational telemetry. The plugin is the bridge, not the destination.
 
 ## Development
 
