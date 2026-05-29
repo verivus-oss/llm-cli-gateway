@@ -22,11 +22,36 @@ version: 2
 #     (SQLite, sessions.json) or explicit local CLI process I/O.
 #
 #   shellAccess
-#     src/executor.ts uses child_process.spawn(cmd, args, { ... }) with a
-#     fixed allow-list of CLI binaries (claude / codex / gemini / grok /
-#     vibe). shell:true is never set; arguments are passed as an array, so
-#     there is no shell interpolation path for user input. Spawning these
-#     CLIs is the entire purpose of the package.
+#     This alert fires on every module that imports node:child_process, and
+#     because spawning provider CLIs and git is the entire purpose of the
+#     package it surfaces on every release BY DESIGN — we keep it visible
+#     rather than silencing it. It is a capability description, not a finding.
+#
+#     INVARIANT enforced across ALL sites below: arguments are always passed
+#     as an array and `shell: true` is NEVER set, so there is no shell
+#     interpolation path for user input. `scripts/release-security-audit.sh`
+#     guards the dynamic-execution surface. When you add a new module that
+#     imports child_process, add it to this list so the alert location set
+#     stays documented instead of reading like a regression.
+#
+#     Current production child_process sites (dist/*.js mirrors of src/*.ts):
+#       - src/executor.ts          spawn(cmd, args) — provider CLI allow-list
+#                                   (claude / codex / gemini / grok / vibe).
+#       - src/worktree-manager.ts  spawn("git", args) — gateway-owned git
+#                                   worktree lifecycle (add / list / prune /
+#                                   remove / branch -D).
+#       - src/cli-updater.ts       spawnSync(cmd, args) — provider CLI version
+#                                   + upgrade checks.
+#       - src/provider-status.ts   spawnSync(cmd, args) — provider login-status
+#                                   probe.
+#       - src/upstream-contracts.ts spawnSync(cmd, ["--help"]) — optional
+#                                   installed-CLI contract probe.
+#       - src/endpoint-exposure.ts spawnSync(process.execPath, ["-e", …]) —
+#                                   out-of-process HEAD reachability probe
+#                                   (opt-in via the start:http path only).
+#       - src/async-job-manager.ts imports the ChildProcess *type* only for
+#                                   job lifecycle tracking; it spawns via
+#                                   executor.ts (spawnCliProcess), not directly.
 #
 #   usesEval
 #     Not in our source. Transitive via @modelcontextprotocol/sdk → ajv@8,
@@ -40,16 +65,6 @@ version: 2
 #     gateway does not call db.pragma() from production code; SQLite setup
 #     uses fixed literal db.exec("PRAGMA ...") statements, and the release
 #     security audit fails future production `.pragma()` calls.
-#
-#   ioredis obfuscated code / base64 strings
-#     Socket may flag ioredis@5.10.1 built/constants/TLSProfiles.js because it
-#     contains base64-looking strings. This is a reviewed false positive: the
-#     strings are PEM-encoded Redis Cloud TLS CA certificates. The file exports
-#     static TLS profile data only; it contains no decoder loop, dynamic eval,
-#     network call, or hidden execution path. The same file is byte-for-byte
-#     identical in ioredis@5.9.2. ioredis is not installed by the default
-#     production dependency tree; it is an optional peer for PostgreSQL/Redis
-#     session storage and a pinned dev dependency for tests.
 
 issueRules:
   # Defaults from Socket. Listed explicitly so future contributors see what

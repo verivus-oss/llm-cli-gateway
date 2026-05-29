@@ -390,6 +390,10 @@ const MCP_SERVER_ENUM = z.enum(CLAUDE_MCP_SERVER_NAMES);
  * upper bound — no plausible single agent loop exceeds 10k turns or 10k USD.
  */
 export const MAX_TURNS_SCHEMA = z.number().int().positive().safe().max(10_000);
+// Token budgets can legitimately exceed the agent-turn cap by orders of
+// magnitude. Keep a finite operational guardrail while avoiding the 10k turn
+// ceiling that would make large-context Vibe sessions unusable.
+export const MAX_TOKENS_SCHEMA = z.number().int().positive().safe().max(100_000_000);
 // `.min(1e-6)` keeps the value in JS's decimal-stringify range:
 // String(1e-6) === "0.000001" but String(1e-7) === "1e-7", which both
 // upstream CLIs would reject. 1µUSD per request is fine-grained enough
@@ -5640,8 +5644,8 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       maxPrice: MAX_PRICE_SCHEMA.optional().describe(
         "Vibe `--max-price DOLLARS`: interrupt the session when cumulative cost crosses this cap (programmatic mode only, Phase 4 slice δ). Bounded to finite values ≤ 10000 USD."
       ),
-      maxTokens: MAX_TURNS_SCHEMA.optional().describe(
-        "Vibe `--max-tokens N`: cap cumulative prompt + completion tokens for the session (programmatic mode only). Bounded to safe integers ≤ 10000."
+      maxTokens: MAX_TOKENS_SCHEMA.optional().describe(
+        "Vibe `--max-tokens N`: cap cumulative prompt + completion tokens for the session (programmatic mode only). Bounded to safe integers ≤ 100000000."
       ),
       // Phase 4 slice ζ — Vibe working-directory + additional-dirs parity.
       workingDir: z
@@ -6693,8 +6697,8 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         maxPrice: MAX_PRICE_SCHEMA.optional().describe(
           "Vibe `--max-price DOLLARS`: interrupt the session when cumulative cost crosses this cap (programmatic mode only, Phase 4 slice δ). Bounded to finite values ≤ 10000 USD."
         ),
-        maxTokens: MAX_TURNS_SCHEMA.optional().describe(
-          "Vibe `--max-tokens N`: cap cumulative prompt + completion tokens for the session (programmatic mode only). Bounded to safe integers ≤ 10000."
+        maxTokens: MAX_TOKENS_SCHEMA.optional().describe(
+          "Vibe `--max-tokens N`: cap cumulative prompt + completion tokens for the session (programmatic mode only). Bounded to safe integers ≤ 100000000."
         ),
         // Phase 4 slice ζ — Vibe working-directory + additional-dirs parity.
         workingDir: z

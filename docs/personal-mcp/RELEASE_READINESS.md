@@ -183,6 +183,41 @@ The Socket score command uses Socket's API and may require a Socket token or
 local `socket login`. If it cannot run in CI, attach the local/Socket dashboard
 evidence to the release notes before publishing.
 
+## Upstream provider contracts
+
+| Gate                                                                                                | Evidence                                                                                                              |
+| --------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| Mechanical argv/env behaviour for all five CLIs has one source of truth                             | `src/upstream-contracts.ts` (`UPSTREAM_CLI_CONTRACTS`) + `validateUpstreamCliArgs` / `validateUpstreamCliEnv`         |
+| Bundled conformance fixtures + report + TOML-sync verified offline, network-free                    | `npm run upstream:contracts` (`scripts/upstream-scan.mjs --contracts-check`); fixtures pinned in `upstream-contracts.test.ts` |
+| TOML scanner input stays in sync with the TS metadata (no drift)                                    | `src/__tests__/upstream-sources.test.ts` asserts `provider-sources.dag.toml` mirrors `CliContract.upstreamMetadata`   |
+| Changelog/source tracking is advisory and manual; default gate needs no network or installed CLIs  | `docs/upstream/provider-sources.dag.toml` (scanner input only) + `docs/upstream/README.md`                            |
+
+Blocking release path (no network, no installed provider CLIs required beyond
+the existing optional `probeInstalledCliContract`):
+
+```bash
+npm run check               # build + lint + test + security:audit
+npm run upstream:contracts  # offline: fixtures + contract report + TOML-sync
+```
+
+Advisory upstream changelog scan (run manually, network required; never part of
+the default CI/release gate):
+
+```bash
+npm run upstream:scan -- --live --fail-on-critical
+# Persist source hashes + write a dated report:
+npm run upstream:scan -- --live --write-snapshot --write-report
+```
+
+If a live source fetch fails, the scanner reports an advisory finding and exits
+0 (it only exits non-zero under `--fail-on-critical`), so a flaky upstream page
+never breaks the default release gate.
+
+Synchronisation model (documented in `docs/upstream/README.md`): the TypeScript
+`CliContract.upstreamMetadata` is authoritative and enriches the contract
+report; `provider-sources.dag.toml` is scanner input only and is never consulted
+for mechanical contract enforcement.
+
 ## Final readiness sign-off
 
 The release topics above are gated on artifacts that exist in this commit
@@ -191,6 +226,8 @@ and were verified by:
 - Build: `npm run build` clean.
 - Lint: `npm run lint` 0 errors.
 - Security/SCA: `npm run security:audit` clean.
+- Upstream contracts: `npm run upstream:contracts` clean (offline fixtures +
+  report + TOML-sync).
 - Unit + integration: 560 tests pass via `npx vitest run`.
 - Release pipeline: `.github/workflows/release-installer.yml` builds
   platform binaries on the Linux self-hosted runner plus GitHub-hosted
