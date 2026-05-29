@@ -61,7 +61,7 @@ expands; new flight-recorder data appears where previously empty).
   content in session storage" still applies. The async-path write goes to
   the existing flight recorder (`~/.llm-cli-gateway/logs.db`, which already
   stores prompts/responses for audit), NOT to the session manager.
-- `BEST_PRACTICES.md` — gateway-level guidance.
+- `docs/guides/BEST_PRACTICES.md` — gateway-level guidance.
 
 ## Working environment
 

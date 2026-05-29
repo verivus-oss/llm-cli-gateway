@@ -1,6 +1,6 @@
 # Enforcing Best Practices
 
-This document outlines how to ensure adherence to the best practices defined in BEST_PRACTICES.md.
+This document outlines how to ensure adherence to the best practices defined in `docs/guides/BEST_PRACTICES.md`.
 
 ## Multi-Layer Enforcement Strategy
 
@@ -12,7 +12,7 @@ This document outlines how to ensure adherence to the best practices defined in 
 
 ```typescript
 // Add to src/resources.ts
-export const BEST_PRACTICES_CONTENT = `... (content from BEST_PRACTICES.md) ...`;
+export const BEST_PRACTICES_CONTENT = `... (content from docs/guides/BEST_PRACTICES.md) ...`;
 
 // Add to listResources():
 {
@@ -32,7 +32,7 @@ if (uri === "docs://best-practices") {
   return {
     uri,
     mimeType: "text/markdown",
-    text: fs.readFileSync("./BEST_PRACTICES.md", "utf-8")
+    text: fs.readFileSync("./docs/guides/BEST_PRACTICES.md", "utf-8")
   };
 }
 ```
@@ -365,7 +365,7 @@ Test Requirements:
 
 **Read the best practices first:**
 ```bash
-cat BEST_PRACTICES.md
+cat docs/guides/BEST_PRACTICES.md
 ```
 
 Or if you're an LLM working via MCP:
@@ -434,7 +434,7 @@ if (hasNewTools) {
 
 // Warn if best practices not updated with new patterns
 const hasNewRetryLogic = modifiedFiles.includes("src/retry.ts");
-const updatedBestPractices = modifiedFiles.includes("BEST_PRACTICES.md");
+const updatedBestPractices = modifiedFiles.includes("docs/guides/BEST_PRACTICES.md");
 
 if ((hasNewTools || hasNewRetryLogic) && !updatedBestPractices) {
   warn("Consider updating BEST_PRACTICES.md if you introduced new patterns.");
@@ -523,8 +523,8 @@ if (!validateToolName(name)) {
 ## Implementation Priority
 
 ### Phase 1: Immediate (No LLM needed)
-1. ✅ Create BEST_PRACTICES.md (done)
-2. ✅ Create this ENFORCEMENT.md (in progress)
+1. ✅ Create docs/guides/BEST_PRACTICES.md (done)
+2. ✅ Create this docs/guides/ENFORCEMENT.md (in progress)
 3. Add .cursorrules file
 4. Add CONTRIBUTING.md
 
