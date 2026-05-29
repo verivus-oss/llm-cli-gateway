@@ -68,7 +68,7 @@ Before submitting PR, verify:
 - [ ] TypeScript compiles without errors (`npm run build`)
 - [ ] Linting passes (`npm run lint`)
 - [ ] Code is properly formatted (`npm run format:check`)
-- [ ] Test coverage >= 80% for new code
+- [ ] Coverage reviewed for substantial code changes (`npm test -- --coverage`); no unexplained regression against configured thresholds
 - [ ] No `console.log` statements (use `logger.info/error/debug`)
 - [ ] Error messages are actionable and context-aware
 - [ ] Tool names use `snake_case`
