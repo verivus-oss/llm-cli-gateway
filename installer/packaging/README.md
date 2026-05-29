@@ -6,8 +6,9 @@ Builder: `installer/build-release.sh`
 This directory documents how `llm-cli-gateway` is built into a non-developer
 release: the local Linux self-hosted runner builds Linux Go bootstrapper
 binaries, GitHub-hosted Windows and macOS runners build their platform
-binaries, and each OS runner packages its platform bundle. The final Linux job
-publishes combined checksums and metadata.
+binaries, and each OS runner packages its platform bundle. The final publish
+job signs the combined artifact set with Sigstore keyless signing, then uploads
+checksums, metadata, artifacts, and signature bundles.
 
 ## Artifact set
 
@@ -26,9 +27,12 @@ After the release workflow runs, `installer/dist/` contains:
 - `install-windows.ps1`
 - `SHA256SUMS`
 - `release-manifest.json`
+- `<artifact>.sigstore.json` for each uploaded artifact, including
+  `SHA256SUMS.sigstore.json`
 
 Every artifact has a line in `SHA256SUMS`. Users MUST verify before
-execution; release notes and assistant prompts must instruct verification
+execution. Users SHOULD verify `SHA256SUMS.sigstore.json` before trusting the
+checksum file; release notes and assistant prompts must instruct verification
 before running the binary.
 
 ## Build
@@ -44,28 +48,39 @@ invokes the script from the Linux self-hosted runner and GitHub-hosted
 Windows/macOS runners, passing explicit `--target` values for the artifacts
 owned by that runner.
 
+If `release-installer.yml` is re-run manually with `workflow_dispatch`, select
+the existing release tag as the workflow ref. The workflow fails fast when a
+dispatch rebuild is launched from `main`, because Sigstore certificates bind to
+the workflow ref and the public verification command expects `refs/tags/v<ver>`.
+
 Options:
 
-| Flag             | Effect                                                       |
-| ---------------- | ------------------------------------------------------------ |
-| `--version VER`  | Override release version (default: `package.json#version`).  |
-| `--skip-bundle`  | Build only the Go binaries; skip platform bundle tarballs.    |
-| `--skip-binaries` | Package platform bundles/metadata without building Go binaries. |
-| `--target os/arch` | Restrict to one target (repeatable).                       |
-| `--all-targets`  | Build the full target list from the current host; for local testing only, not release CI. |
+| Flag               | Effect                                                                                    |
+| ------------------ | ----------------------------------------------------------------------------------------- |
+| `--version VER`    | Override release version (default: `package.json#version`).                               |
+| `--skip-bundle`    | Build only the Go binaries; skip platform bundle tarballs.                                |
+| `--skip-binaries`  | Package platform bundles/metadata without building Go binaries.                           |
+| `--target os/arch` | Restrict to one target (repeatable).                                                      |
+| `--all-targets`    | Build the full target list from the current host; for local testing only, not release CI. |
 
 Environment:
 
-| Variable                  | Effect                                                          |
-| ------------------------- | --------------------------------------------------------------- |
-| `RVWR_RELEASE_VERSION`    | Same as `--version`.                                            |
-| `RVWR_RELEASE_DIR`        | Override output directory (default: `installer/dist`).          |
-| `RVWR_RELEASE_PUBLIC_BASE`| Optional public download base, written into `release-manifest.json`. Never put auth tokens in this URL. |
-| `RVWR_RELEASE_ALL_TARGETS`| Set to `1` to match `--all-targets`; for local testing only.     |
+| Variable                        | Effect                                                                                                                         |
+| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| `RVWR_RELEASE_VERSION`          | Same as `--version`.                                                                                                           |
+| `RVWR_RELEASE_DIR`              | Override output directory (default: `installer/dist`).                                                                         |
+| `RVWR_RELEASE_PUBLIC_BASE`      | Optional public download base, written into `release-manifest.json`. Never put auth tokens in this URL.                        |
+| `RVWR_RELEASE_SIGNING_IDENTITY` | Expected Sigstore certificate identity, written into `release-manifest.json`. Release CI sets this from the workflow identity. |
+| `RVWR_RELEASE_ALL_TARGETS`      | Set to `1` to match `--all-targets`; for local testing only.                                                                   |
 
 ## Verification (what end users run)
 
 ```bash
+# Sigstore keyless signature for the checksum manifest
+cosign verify-blob SHA256SUMS --bundle SHA256SUMS.sigstore.json \
+  --certificate-identity "https://github.com/verivus-oss/llm-cli-gateway/.github/workflows/release-installer.yml@refs/tags/v<version>" \
+  --certificate-oidc-issuer "https://token.actions.githubusercontent.com"
+
 # Linux
 sha256sum --check SHA256SUMS
 
@@ -120,11 +135,25 @@ Windows PowerShell:
 $Version = '<version>'
 $Base = "https://github.com/verivus-oss/llm-cli-gateway/releases/download/v$Version"
 $InstallDir = Join-Path (Join-Path $env:LOCALAPPDATA 'Programs') 'llm-cli-gateway'
+$ExeName = "llm-cli-gateway-$Version-windows-amd64.exe"
+$BundleName = "llm-cli-gateway-bundle-$Version-windows-amd64.tar.gz"
 $Exe = Join-Path $InstallDir 'llm-cli-gateway.exe'
+$Checksums = Join-Path $InstallDir 'SHA256SUMS'
+$ChecksumBundle = Join-Path $InstallDir 'SHA256SUMS.sigstore.json'
 New-Item -ItemType Directory -Force $InstallDir | Out-Null
-Invoke-WebRequest -UseBasicParsing "$Base/llm-cli-gateway-$Version-windows-amd64.exe" -OutFile $Exe
-$env:RVWR_GATEWAY_BUNDLE_URL = "$Base/llm-cli-gateway-bundle-$Version-windows-amd64.tar.gz"
-$env:RVWR_GATEWAY_BUNDLE_SHA256 = '<bundle-sha256-from-SHA256SUMS>'
+Invoke-WebRequest -UseBasicParsing "$Base/$ExeName" -OutFile $Exe
+Invoke-WebRequest -UseBasicParsing "$Base/SHA256SUMS" -OutFile $Checksums
+Invoke-WebRequest -UseBasicParsing "$Base/SHA256SUMS.sigstore.json" -OutFile $ChecksumBundle
+cosign verify-blob $Checksums --bundle $ChecksumBundle --certificate-identity "https://github.com/verivus-oss/llm-cli-gateway/.github/workflows/release-installer.yml@refs/tags/v$Version" --certificate-oidc-issuer "https://token.actions.githubusercontent.com"
+if ($LASTEXITCODE -ne 0) { throw "Sigstore verification failed for SHA256SUMS" }
+function Get-ReleaseSha256($Name) {
+  $line = Select-String -Path $Checksums -Pattern "^[a-fA-F0-9]{64}\s+$([regex]::Escape($Name))$" | Select-Object -First 1
+  if (-not $line) { throw "No SHA256SUMS entry found for $Name" }
+  return (($line.Line -split "\s+")[0]).ToLowerInvariant()
+}
+if ((Get-FileHash $Exe -Algorithm SHA256).Hash.ToLowerInvariant() -ne (Get-ReleaseSha256 $ExeName)) { throw "Checksum mismatch for $ExeName" }
+$env:RVWR_GATEWAY_BUNDLE_URL = "$Base/$BundleName"
+$env:RVWR_GATEWAY_BUNDLE_SHA256 = Get-ReleaseSha256 $BundleName
 & $Exe setup
 & $Exe stop
 & $Exe install-bundle
@@ -222,8 +251,11 @@ assistant can consume:
   "schema_version": "release-manifest.v1",
   "version": "<ver>",
   "checksums_file": "SHA256SUMS",
+  "sigstore_bundle_suffix": ".sigstore.json",
+  "sigstore_signing_identity": "https://github.com/verivus-oss/llm-cli-gateway/.github/workflows/release-installer.yml@refs/tags/v<ver>",
   "artifacts": [ ... ],
   "setup_commands": {
+    "verify_sigstore_checksums": "cosign verify-blob SHA256SUMS --bundle SHA256SUMS.sigstore.json ...",
     "verify_checksum_linux": "sha256sum --check SHA256SUMS",
     "install_unix_oneliner": "...",
     "upgrade_unix_oneliner": "...",
@@ -236,13 +268,22 @@ assistant can consume:
 The `setup_commands` are copy/paste-safe and never embed auth tokens; the
 auth token is generated locally by `setup`.
 
-## Signing (next step)
+## Signing
 
-Layer 7 ships with SHA256 verification. Signed artifacts (cosign /
-sigstore or codesign / Authenticode) are tracked as follow-up work and
-will land before the public-release announcement; the verify step in
-`release-manifest.json` is forward-compatible with adding a
-`signatures_file` field.
+The release workflow signs every uploaded installer artifact with Sigstore
+keyless signing through `cosign sign-blob --bundle`. The publish job has
+`id-token: write` so cosign can request the GitHub Actions OIDC token, and it
+verifies each generated bundle with `cosign verify-blob` before `gh release
+upload`.
+
+The primary end-user trust path is:
+
+1. Verify `SHA256SUMS` against `SHA256SUMS.sigstore.json`.
+2. Verify the downloaded artifacts against `SHA256SUMS`.
+3. Run the bootstrapper only after both checks pass.
+
+Native platform signing (codesign / Authenticode) remains a separate roadmap
+item.
 
 ## Notes for assistants
 
