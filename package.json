@@ -101,7 +101,7 @@
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.0",
-    "@types/node": "^20.19.30",
+    "@types/node": "^25.9.1",
     "@types/pg": "^8.11.10",
     "@typescript-eslint/eslint-plugin": "^8.59.4",
     "@typescript-eslint/parser": "^8.59.4",
