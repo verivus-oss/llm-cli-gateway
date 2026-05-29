@@ -169,6 +169,11 @@ data and is byte-for-byte identical in `ioredis@5.9.2` and `ioredis@5.10.1`.
 The package remains outside the default production install path as an optional
 peer dependency for PostgreSQL/Redis session storage.
 
+OpenSSF Scorecard `FuzzingID` is valid, but tracked as a roadmap/process item.
+No fuzzing or property-test integration is present. This should not block a
+patch release, but adding `fast-check` style property tests for parser, argv,
+and worktree surfaces would improve the Scorecard signal.
+
 Quote-for-release:
 
 ```bash

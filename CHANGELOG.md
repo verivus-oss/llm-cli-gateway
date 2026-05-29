@@ -4,12 +4,29 @@ All notable changes to the llm-cli-gateway project.
 
 ## Unreleased
 
+## [1.15.2] - 2026-05-29 — security quality follow-up
+
+Patch release for GitHub Security & quality follow-up findings and Scorecard
+documentation.
+
+### Fixed
+
+- Preserve the leading content when truncating async job stdout/stderr in
+  `llm_job_result`, matching bounded-result consumer expectations instead of
+  returning only the tail.
+- Handle installer gateway log file close errors explicitly so failed flushes
+  from writable stdout/stderr log handles are surfaced to callers.
+
 ### Changed
 
 - Moved non-canonical root Markdown into `docs/guides/` and `docs/archive/`
   so the repository root stays focused on public entry points.
 - Renamed async-defer result guidance from the old retrieval field to `collectWith`,
   avoiding Socket substring false positives in generated package code.
+- Recorded OpenSSF Scorecard `FuzzingID` as a valid roadmap/process item:
+  adding `fast-check` style property tests for parser, argv, and worktree
+  surfaces would improve the Scorecard signal, but the absence of fuzzing does
+  not block this patch release.
 
 ## [1.15.1] - 2026-05-29 — quality badges + Sigstore release signing
 
