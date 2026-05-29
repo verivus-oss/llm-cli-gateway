@@ -36,7 +36,7 @@ Apply these on every dispatch unless the caller has explicitly overridden a rule
 | **Codex** | Real continuity | `codex exec resume <UUID>` (`sessionId`) or `codex exec resume --last` (`resumeLatest:true`). `sessionId` must be a real Codex UUID from `~/.codex/sessions/`; gateway-generated `gw-*` IDs are rejected. `--full-auto` silently dropped on resume (approval policy inherits from the original session) |
 | **Gemini** | Real continuity | `--resume` to CLI |
 | **Grok** | Real continuity | `--resume` / `--continue` to CLI |
-| **Mistral** | Real continuity (opt-in) | `--resume` / `--continue` to CLI; **requires `[session_logging] enabled = true` in `~/.vibe/config.toml`** |
+| **Mistral** | Real continuity | `--resume` / `--continue` to CLI; current Vibe defaults session logging on, and doctor flags explicit `[session_logging] enabled = false` |
 
 All four CLIs now carry true multi-turn continuity. For Codex, you must either pass `resumeLatest:true` or supply a real Codex session UUID — the gateway no longer treats Codex sessions as bookkeeping-only.
 

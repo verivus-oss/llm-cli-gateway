@@ -1,0 +1,22 @@
+{
+  "mcpServers": {
+    "llm-cli-gateway": {
+      "command": "op",
+      "args": [
+        "run",
+        "--account",
+        "<1password-account-id-or-subdomain>",
+        "--",
+        "npx",
+        "-y",
+        "mcp-remote",
+        "http://127.0.0.1:3333/mcp",
+        "--header",
+        "Authorization:Bearer ${LLM_CLI_GATEWAY_TOKEN}"
+      ],
+      "env": {
+        "LLM_CLI_GATEWAY_TOKEN": "op://<vault>/<gateway-token-item>/credential"
+      }
+    }
+  }
+}

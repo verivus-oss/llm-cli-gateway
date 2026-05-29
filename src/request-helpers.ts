@@ -156,9 +156,9 @@ export function resolveGrokSessionArgs(opts: {
 /**
  * Mistral Vibe-specific resume args.
  *
- * Vibe persists sessions only when `[session_logging] enabled = true` is set in
- * `~/.vibe/config.toml`. The doctor checks for that toggle and surfaces an
- * actionable error when it is missing; this pure helper just emits the args.
+ * Current Vibe defaults session logging on; older configs can explicitly set
+ * `[session_logging] enabled = false`. The doctor checks that toggle before
+ * callers rely on session continuity; this pure helper just emits the args.
  *
  * The args shape mirrors Grok (`--continue` for latest, `--resume <id>` for a
  * specific session) because Vibe exposes the same surface for its session log.
@@ -222,6 +222,40 @@ export interface PrepareMistralRequestInput {
    * emit a `logger.warn` when this is non-empty.
    */
   disallowedTools?: string[];
+  /**
+   * Phase 4 slice γ: emit `--trust` so non-interactive runs in fresh
+   * workspaces skip Vibe's interactive trust prompt for this invocation
+   * only (not persisted to `trusted_folders.toml`). Default undefined →
+   * Vibe's prompt behaviour is preserved for existing callers.
+   */
+  trust?: boolean;
+  /**
+   * Phase 4 slice δ: emit `--max-turns N` to cap the agent-loop iteration
+   * count (only applies in programmatic mode with `-p`).
+   */
+  maxTurns?: number;
+  /**
+   * Phase 4 slice δ: emit `--max-price DOLLARS` so the session is
+   * interrupted when cumulative cost crosses the cap (programmatic mode
+   * only).
+   */
+  maxPrice?: number;
+  /**
+   * Vibe 2.x supports `--max-tokens N` in programmatic mode, wired through to
+   * `run_programmatic(max_session_tokens=...)`.
+   */
+  maxTokens?: number;
+  /**
+   * Phase 4 slice ζ: emit `--workdir <DIR>` so Vibe changes into the named
+   * directory before running. Single value (Vibe accepts one --workdir).
+   */
+  workingDir?: string;
+  /**
+   * Phase 4 slice ζ: emit `--add-dir <DIR>` per directory. Vibe's `--help`
+   * states the flag "Can be specified multiple times" — each entry is its
+   * own argv pair.
+   */
+  addDir?: string[];
 }
 
 export interface PrepareMistralRequestResult {
@@ -236,6 +270,8 @@ export interface PrepareMistralRequestResult {
  * - Model is selected via `VIBE_ACTIVE_MODEL` env var (NOT a `--model` flag).
  * - Permission mode emits `--agent <mode>` (defaults to `auto-approve` when unset).
  * - Allowed tools emit `--enabled-tools <tool>` once per tool (allowlist only).
+ * - Output format emits `--output <text|json|streaming>` (legacy gateway
+ *   aliases `plain` and `stream-json` are normalized before spawn).
  * - Disallowed tools are accepted but ignored at the CLI boundary.
  */
 export function prepareMistralRequest(
@@ -249,7 +285,7 @@ export function prepareMistralRequest(
   }
 
   if (input.outputFormat) {
-    args.push("--output-format", input.outputFormat);
+    args.push("--output", normalizeMistralOutputFormat(input.outputFormat));
   }
 
   const mode = input.permissionMode ?? MISTRAL_DEFAULT_AGENT_MODE;
@@ -269,9 +305,37 @@ export function prepareMistralRequest(
     }
   }
 
+  if (input.trust) {
+    args.push("--trust");
+  }
+
+  if (input.maxTurns !== undefined) {
+    args.push("--max-turns", String(input.maxTurns));
+  }
+  if (input.maxPrice !== undefined) {
+    args.push("--max-price", String(input.maxPrice));
+  }
+  if (input.maxTokens !== undefined) {
+    args.push("--max-tokens", String(input.maxTokens));
+  }
+  if (input.workingDir) {
+    args.push("--workdir", input.workingDir);
+  }
+  if (input.addDir && input.addDir.length > 0) {
+    for (const dir of input.addDir) {
+      args.push("--add-dir", dir);
+    }
+  }
+
   const ignoredDisallowedTools = Boolean(input.disallowedTools && input.disallowedTools.length > 0);
 
   return { args, env, ignoredDisallowedTools };
+}
+
+function normalizeMistralOutputFormat(format: string): string {
+  if (format === "plain") return "text";
+  if (format === "stream-json") return "streaming";
+  return format;
 }
 
 //──────────────────────────────────────────────────────────────────────────────
@@ -425,9 +489,11 @@ export function resolveCodexSandboxFlags(input: CodexSandboxFlagsInput): CodexSa
  * Flags that `codex exec resume` rejects (the original session's policy is
  * inherited). Callers must drop these when building resume argv.
  *
- * U26 expands this list with `--add-dir`, `-C`, `--output-schema`, and
- * `--search`, all of which `codex exec resume --help` rejects at the audit
- * date.
+ * Verified against `codex exec resume --help` (codex-cli 0.133.0):
+ * `--full-auto`, `--sandbox`, `--ask-for-approval`, `--add-dir`, `-C`, and
+ * `--search` are rejected. `--output-schema` and `-c key=value` ARE accepted
+ * on resume and therefore are NOT in this filter (Phase 4 slice α restored
+ * the previously-silent drop of those two).
  */
 export const CODEX_RESUME_FILTERED_FLAGS: ReadonlySet<string> = new Set([
   "--full-auto",
@@ -435,7 +501,6 @@ export const CODEX_RESUME_FILTERED_FLAGS: ReadonlySet<string> = new Set([
   "--ask-for-approval",
   "--add-dir",
   "-C",
-  "--output-schema",
   "--search",
 ]);
 
@@ -448,7 +513,6 @@ const CODEX_RESUME_FILTERED_FLAGS_WITH_VALUE: ReadonlySet<string> = new Set([
   "--ask-for-approval",
   "--add-dir",
   "-C",
-  "--output-schema",
 ]);
 
 /**
@@ -566,6 +630,29 @@ export interface ClaudeHighImpactFlagsInput {
   maxTurns?: number;
   effort?: ClaudeEffortLevel;
   excludeDynamicSystemPromptSections?: boolean;
+  /**
+   * Phase 4 slice η — Claude `--fallback-model <model>`. Routes overloaded-model
+   * requests to the named fallback. Only effective with `--print` (we always pass
+   * `-p`, so no extra gating required here).
+   */
+  fallbackModel?: string;
+  /**
+   * Phase 4 slice η — Claude `--json-schema <schema>`. Per `claude --help`, the
+   * argument is the JSON Schema *literal*, not a path. Object values are
+   * `JSON.stringify`-d; string values are passed verbatim (caller already wrote
+   * a JSON literal). No temp file lifecycle needed (contrast with Codex
+   * `--output-schema`, which takes a path).
+   */
+  jsonSchema?: string | Record<string, unknown>;
+  /**
+   * Phase 4 slice ζ — Claude `--add-dir <dirs...>`. Additional directories the
+   * Claude CLI is allowed to read/write beyond the process cwd. The CLI accepts
+   * a single variadic flag (space-separated values) per `claude --help`; we
+   * emit one `--add-dir` instance per directory so each path is its own argv
+   * token (survives any future tightening of the variadic parser without
+   * changing the call site).
+   */
+  addDir?: string[];
 }
 
 /**
@@ -604,6 +691,19 @@ export function prepareClaudeHighImpactFlags(input: ClaudeHighImpactFlagsInput):
   }
   if (input.excludeDynamicSystemPromptSections) {
     args.push("--exclude-dynamic-system-prompt-sections");
+  }
+  if (input.fallbackModel !== undefined) {
+    args.push("--fallback-model", input.fallbackModel);
+  }
+  if (input.jsonSchema !== undefined) {
+    const schemaArg =
+      typeof input.jsonSchema === "string" ? input.jsonSchema : JSON.stringify(input.jsonSchema);
+    args.push("--json-schema", schemaArg);
+  }
+  if (input.addDir && input.addDir.length > 0) {
+    for (const dir of input.addDir) {
+      args.push("--add-dir", dir);
+    }
   }
 
   return args;
@@ -860,9 +960,24 @@ export function prependGeminiAttachments(prompt: string, attachments: string[]):
     if (!existsSync(p)) {
       throw new Error(`attachments: path does not exist: ${p}`);
     }
+    validateGeminiAttachmentTokenPath(p);
   }
   const tokens = attachments.map(p => `@${p}`).join(" ");
+  // Gemini attachments are prompt-level @path tokens rather than shell
+  // commands. Paths are absolute, existing, and token-safe before this join.
+  //
+  // codeql[js/shell-command-constructed-from-input]
   return `${tokens} ${prompt}`;
+}
+
+function validateGeminiAttachmentTokenPath(path: string): void {
+  for (const ch of path) {
+    if (ch === "@" || ch <= " ") {
+      throw new Error(
+        `attachments: path cannot be represented as a Gemini @path token without escaping: ${path}`
+      );
+    }
+  }
 }
 
 /**

@@ -81,12 +81,22 @@ describe("U22 prepareMistralRequest — Vibe divergences", () => {
       effort: "high",
       reasoningEffort: "medium",
     });
-    expect(result.args).toContain("--output-format");
+    expect(result.args).toContain("--output");
     expect(result.args).toContain("json");
     expect(result.args).toContain("--effort");
     expect(result.args).toContain("high");
     expect(result.args).toContain("--reasoning-effort");
     expect(result.args).toContain("medium");
+  });
+
+  it("normalizes legacy outputFormat aliases to Vibe 2.x values", () => {
+    const plain = prepareMistralRequest({ prompt: "x", outputFormat: "plain" });
+    const plainIdx = plain.args.indexOf("--output");
+    expect(plain.args[plainIdx + 1]).toBe("text");
+
+    const streaming = prepareMistralRequest({ prompt: "x", outputFormat: "stream-json" });
+    const streamingIdx = streaming.args.indexOf("--output");
+    expect(streaming.args[streamingIdx + 1]).toBe("streaming");
   });
 });
 
@@ -121,5 +131,61 @@ describe("U22 resolveMistralSessionArgs", () => {
       resumeLatest: true,
     });
     expect(r.resumeArgs).toEqual([]);
+  });
+});
+
+describe("Phase 4 slice γ — Mistral --trust wiring", () => {
+  it("emits --trust when trust=true", () => {
+    const result = prepareMistralRequest({ prompt: "hi", trust: true });
+    expect(result.args).toContain("--trust");
+  });
+
+  it("does NOT emit --trust when trust=false", () => {
+    const result = prepareMistralRequest({ prompt: "hi", trust: false });
+    expect(result.args).not.toContain("--trust");
+  });
+
+  it("does NOT emit --trust when trust is omitted (default behaviour preserved)", () => {
+    const result = prepareMistralRequest({ prompt: "hi" });
+    expect(result.args).not.toContain("--trust");
+  });
+});
+
+describe("Phase 4 slice δ — Mistral --max-turns / --max-price wiring", () => {
+  it("emits --max-turns <N> when maxTurns is set", () => {
+    const result = prepareMistralRequest({ prompt: "x", maxTurns: 5 });
+    const idx = result.args.indexOf("--max-turns");
+    expect(idx).toBeGreaterThan(-1);
+    expect(result.args[idx + 1]).toBe("5");
+  });
+
+  it("emits --max-price <DOLLARS> when maxPrice is set", () => {
+    const result = prepareMistralRequest({ prompt: "x", maxPrice: 0.5 });
+    const idx = result.args.indexOf("--max-price");
+    expect(idx).toBeGreaterThan(-1);
+    expect(result.args[idx + 1]).toBe("0.5");
+  });
+
+  it("does NOT emit --max-turns / --max-price when both are omitted", () => {
+    const result = prepareMistralRequest({ prompt: "x" });
+    expect(result.args).not.toContain("--max-turns");
+    expect(result.args).not.toContain("--max-price");
+  });
+
+  it("emits both flags together when both are set", () => {
+    const result = prepareMistralRequest({ prompt: "x", maxTurns: 3, maxPrice: 0.01 });
+    expect(result.args).toContain("--max-turns");
+    expect(result.args).toContain("--max-price");
+    const turnsIdx = result.args.indexOf("--max-turns");
+    const priceIdx = result.args.indexOf("--max-price");
+    expect(result.args[turnsIdx + 1]).toBe("3");
+    expect(result.args[priceIdx + 1]).toBe("0.01");
+  });
+
+  it("emits --max-tokens <N> when maxTokens is set", () => {
+    const result = prepareMistralRequest({ prompt: "x", maxTokens: 1234 });
+    const idx = result.args.indexOf("--max-tokens");
+    expect(idx).toBeGreaterThan(-1);
+    expect(result.args[idx + 1]).toBe("1234");
   });
 });

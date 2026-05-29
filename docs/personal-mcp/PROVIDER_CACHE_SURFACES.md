@@ -138,22 +138,19 @@ the first user message, improving cache reuse across users/machines.
 - **Underlying OpenAI API surfaces**: `usage.prompt_tokens_details.cached_tokens`
   (and no `cache_creation_*` field — OpenAI does not distinguish write from read
   in the way Anthropic does; only reads are counted).
-- **Gateway parser today**: `src/codex-json-parser.ts:69-77` reads
-  `cache_read_input_tokens` / `cache_creation_input_tokens` (Anthropic-style),
-  which the current Codex CLI does NOT emit. The codex parser's
-  `cache_read_tokens` column is therefore NULL for current codex output until
-  the parser is updated to also accept `cached_input_tokens`. **Out of scope
-  for this slice** — fixing the codex parser is a separate follow-up
-  (`docs/plans/codex-parser-cache-tokens.dag.toml`, TBD).
+- **Gateway parser**: `src/codex-json-parser.ts` accepts `cached_input_tokens`
+  as the preferred source for the FR's `cache_read_tokens` column, falling
+  back to the legacy `cache_read_input_tokens` and finally to a bare
+  `cache_read_tokens` field. The dual-name compatibility means codex rows now
+  populate `cache_read_tokens` on cache hits without depending on a Codex
+  CLI version detection. Shipped in v1.7.0 (cache-awareness slice 1.5;
+  see `docs/plans/async-flight-recorder.dag.toml`).
 
-Practical consequence for slice 1: claude is the only CLI whose
-`cache_read_tokens` column actually gets populated by current parsers. Slice 2
-cache-stats queries therefore tolerate NULL/0 across the board and the per-CLI
-breakdown will show claude-only data until the codex parser is fixed.
-
-Gateway has no CLI flag to influence Codex's caching behaviour. Prefix
-discipline (stable system+tools+context prefix, volatile task suffix) is the
-only lever.
+Practical consequence for slice 2 (v1.7.0+): both claude and codex rows
+populate `cache_read_tokens` on cache hits. Gemini/grok/mistral still leave
+the column NULL because the CLIs don't surface usage data. Slice 2
+cache-stats queries continue to tolerate NULL/0 across the board for the
+remaining three CLIs.
 
 Gateway has no CLI flag to influence Codex's caching behaviour. Prefix
 discipline (stable system+tools+context prefix, volatile task suffix) is the
@@ -185,12 +182,17 @@ Mistral / vibe CLI: same. No cache reporting.
   mechanism (Branch A) is gated on a live smoke-test follow-up. Branch B
   here is "prefix discipline only".
 - **Slice 2** (cache observability): reads `cache_read_tokens` /
-  `cache_creation_tokens` from the flight recorder. Populated for **claude
-  only** today — the Codex parser still looks for `cache_read_input_tokens`
-  rather than the actual `cached_input_tokens` Codex CLI emits, so
-  cache_read_tokens stays NULL for codex rows until that parser is updated
-  (separate follow-up — see the "Codex — field name divergence" section
-  above). For gemini/grok/mistral the columns are also NULL/0. Aggregation
-  queries must tolerate NULL without dividing by zero.
+  `cache_creation_tokens` from the flight recorder. From v1.7.0 onwards
+  both **claude AND codex** rows populate `cache_read_tokens` on cache hits
+  (the codex parser now accepts `cached_input_tokens` — see the "Codex —
+  field name divergence" section above). For gemini/grok/mistral the
+  columns remain NULL because those CLIs don't surface usage data.
+  Aggregation queries must tolerate NULL without dividing by zero.
+- **Slice 1.5** (v1.7.0): closes the async-path telemetry gap.
+  `AsyncJobManager` now writes `logStart` (with `asyncJobId` set) and
+  `logComplete` for `*_request_async` calls, AND covers the sync-deferred
+  completion case where the sync handler returns a deferred response
+  before the underlying job terminates. cache_state://* aggregates
+  therefore include both sync and async row populations.
 - **Slice 3** (TTL tracking): only meaningful for Claude (5min default, 1h
   optional). For other CLIs, `ttlRemainingMs` is null.

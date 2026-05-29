@@ -1,0 +1,101 @@
+# Upstream provider source map — scanner input ONLY.
+#
+# ============================================================================
+# NON-DUPLICATION / SYNCHRONISATION CONTRACT (read before editing)
+# ============================================================================
+# This file is consumed exclusively by `scripts/upstream-scan.mjs` to decide
+# WHAT changelog/release pages to fetch (with --live) and HOW to scan them. It
+# is NEVER loaded for mechanical contract enforcement.
+#
+# The single mechanical source of truth for every provider's argv/env
+# behaviour — flags, output modes, session/resume rules, permission modes,
+# forbidden flags, env contracts, positional limits — is `src/upstream-
+# contracts.ts` (`UPSTREAM_CLI_CONTRACTS`), validated by
+# `validateUpstreamCliArgs` / `validateUpstreamCliEnv`. Do NOT copy any of those
+# rules here.
+#
+# The `source_urls` and `watch_categories` below mirror the
+# `upstreamMetadata` field of each CliContract. They are authoritative in
+# TypeScript; this file is the scanner-facing copy. `upstream-sources.test.ts`
+# asserts the two stay byte-for-byte in sync, so editing one without the other
+# fails CI. To change a source URL or watch category: edit
+# `src/upstream-contracts.ts` first, then mirror it here.
+# ============================================================================
+
+[meta]
+name = "llm-cli-gateway upstream provider sources"
+schema_version = "1.0"
+owner = "verivus-oss"
+mechanical_source_of_truth = "src/upstream-contracts.ts (UPSTREAM_CLI_CONTRACTS)"
+scanner = "scripts/upstream-scan.mjs"
+# Providers are keyed by canonical CliType only.
+providers = ["claude", "codex", "gemini", "grok", "mistral"]
+
+[scan_policy]
+# Global defaults for --live scans. Per-provider blocks may override cadence.
+default_cadence_days = 7
+# Advisory finding categories. The default release gate runs offline and never
+# fails on these; `--live --fail-on-critical` promotes them to a non-zero exit.
+critical_findings = ["source-unreachable", "watched-category-changed"]
+# Default mode is offline + network-free; live fetches require --live.
+network_default = false
+
+[providers.claude]
+cli = "claude"
+source_urls = ["https://code.claude.com/docs/en/changelog.md"]
+watch_categories = [
+  "flags",
+  "output-formats",
+  "permission-modes",
+  "session-resume",
+  "models",
+]
+cadence_days = 7
+
+[providers.codex]
+cli = "codex"
+source_urls = [
+  "https://github.com/openai/codex/releases",
+  "https://developers.openai.com/codex/changelog",
+]
+watch_categories = [
+  "flags",
+  "sandbox-modes",
+  "approval-modes",
+  "session-resume",
+  "output-schema",
+]
+cadence_days = 7
+
+[providers.gemini]
+cli = "gemini"
+source_urls = [
+  "https://geminicli.com/docs/changelogs/",
+  "https://github.com/google-gemini/gemini-cli/releases",
+]
+watch_categories = ["flags", "approval-modes", "output-formats", "session-resume"]
+cadence_days = 7
+
+[providers.grok]
+cli = "grok"
+source_urls = ["https://docs.x.ai/developers/release-notes.md"]
+watch_categories = [
+  "flags",
+  "permission-modes",
+  "session-resume",
+  "sandbox",
+  "output-formats",
+]
+cadence_days = 7
+
+[providers.mistral]
+cli = "mistral"
+source_urls = ["https://github.com/mistralai/mistral-vibe/releases"]
+watch_categories = [
+  "flags",
+  "agent-modes",
+  "session-logging",
+  "output-formats",
+  "env-model",
+]
+cadence_days = 7

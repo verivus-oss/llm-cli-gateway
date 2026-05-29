@@ -79,4 +79,42 @@ describe("parseCodexJsonStream", () => {
   it("returns an empty result for empty input", () => {
     expect(parseCodexJsonStream("")).toEqual({});
   });
+
+  // slice 1.5: Codex CLI ≥0.133.0 emits `cached_input_tokens` in
+  // turn.completed.usage. The parser must prefer the new name over the
+  // legacy Anthropic-style `cache_read_input_tokens` so cache_read_tokens
+  // stops being NULL on codex rows.
+  it("extracts cache_read_tokens from cached_input_tokens (current Codex CLI)", () => {
+    const stream = [
+      `{"type":"thread.started","thread_id":"t-new"}`,
+      `{"type":"turn.completed","usage":{"input_tokens":13420,"output_tokens":256,"cached_input_tokens":4992}}`,
+    ].join("\n");
+
+    const result = parseCodexJsonStream(stream);
+    expect(result.usage).toEqual({
+      input_tokens: 13420,
+      output_tokens: 256,
+      cache_read_tokens: 4992,
+    });
+  });
+
+  it("prefers cached_input_tokens when both new and legacy fields are present", () => {
+    const stream = [
+      `{"type":"thread.started","thread_id":"t-both"}`,
+      `{"type":"turn.completed","usage":{"input_tokens":100,"output_tokens":10,"cached_input_tokens":50,"cache_read_input_tokens":999}}`,
+    ].join("\n");
+
+    const result = parseCodexJsonStream(stream);
+    expect(result.usage?.cache_read_tokens).toBe(50);
+  });
+
+  it("still accepts the bare cache_read_tokens fallback when nothing else is present", () => {
+    const stream = [
+      `{"type":"thread.started","thread_id":"t-bare"}`,
+      `{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":2,"cache_read_tokens":3}}`,
+    ].join("\n");
+
+    const result = parseCodexJsonStream(stream);
+    expect(result.usage?.cache_read_tokens).toBe(3);
+  });
 });

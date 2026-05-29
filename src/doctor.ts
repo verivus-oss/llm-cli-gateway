@@ -77,10 +77,10 @@ export interface GeminiConfigStatus {
 }
 
 /**
- * Probe ~/.vibe/config.toml to see whether session_logging is enabled. Vibe
- * persists session logs (which sessionId/--continue depends on) only when
- * `[session_logging] enabled = true` is set. The probe is read-only: the
- * gateway never mutates this file.
+ * Probe ~/.vibe/config.toml to see whether session_logging is enabled. Current
+ * Mistral Vibe defaults session logging to enabled; an explicit
+ * `[session_logging] enabled = false` disables `--continue` / `--resume`.
+ * The probe is read-only: the gateway never mutates this file.
  */
 export function checkVibeSessionLogging(home = homedir()): VibeSessionLoggingStatus {
   const configPath = join(home, ".vibe", "config.toml");
@@ -88,26 +88,29 @@ export function checkVibeSessionLogging(home = homedir()): VibeSessionLoggingSta
     return {
       config_path: configPath,
       config_present: false,
-      session_logging_enabled: false,
-      note: "~/.vibe/config.toml not found. Run `vibe config set session_logging.enabled true` or create the file with a [session_logging]\\nenabled = true block.",
+      session_logging_enabled: true,
+      note: "~/.vibe/config.toml not found; current Vibe defaults session_logging.enabled to true. If resume fails, create ~/.vibe/config.toml with [session_logging]\\nenabled = true.",
     };
   }
   try {
     const text = readFileSync(configPath, "utf8");
     const enabled = parseVibeSessionLoggingEnabled(text);
-    if (enabled) {
+    if (enabled !== false) {
       return {
         config_path: configPath,
         config_present: true,
         session_logging_enabled: true,
-        note: "session_logging.enabled is true; --continue/--resume will work for mistral_request.",
+        note:
+          enabled === true
+            ? "session_logging.enabled is true; --continue/--resume will work for mistral_request."
+            : "session_logging.enabled is not set; current Vibe defaults it to true.",
       };
     }
     return {
       config_path: configPath,
       config_present: true,
       session_logging_enabled: false,
-      note: "[session_logging] enabled = false (or missing). Run `vibe config set session_logging.enabled true` or edit ~/.vibe/config.toml so mistral_request --resume / --continue can persist sessions.",
+      note: "[session_logging] enabled = false. Edit ~/.vibe/config.toml so the [session_logging] block sets enabled = true before using mistral_request --resume / --continue.",
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -121,10 +124,10 @@ export function checkVibeSessionLogging(home = homedir()): VibeSessionLoggingSta
 }
 
 /**
- * Tiny TOML probe focused on `[session_logging] enabled = true`. Avoids pulling
+ * Tiny TOML probe focused on `[session_logging] enabled = ...`. Avoids pulling
  * in the full `toml` parser when only one boolean is needed.
  */
-function parseVibeSessionLoggingEnabled(text: string): boolean {
+function parseVibeSessionLoggingEnabled(text: string): boolean | undefined {
   const lines = text.split(/\r?\n/);
   let inSection = false;
   for (let raw of lines) {
@@ -139,18 +142,22 @@ function parseVibeSessionLoggingEnabled(text: string): boolean {
       const kv = line.match(/^enabled\s*=\s*(.+)$/);
       if (kv) {
         const value = kv[1].trim().toLowerCase();
-        return value === "true";
+        if (value === "true") return true;
+        if (value === "false") return false;
+        return undefined;
       }
     } else {
       // Allow dotted form: session_logging.enabled = true
       const dotted = line.match(/^session_logging\.enabled\s*=\s*(.+)$/);
       if (dotted) {
         const value = dotted[1].trim().toLowerCase();
-        return value === "true";
+        if (value === "true") return true;
+        if (value === "false") return false;
+        return undefined;
       }
     }
   }
-  return false;
+  return undefined;
 }
 
 /**

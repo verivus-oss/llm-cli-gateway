@@ -33,6 +33,7 @@ describe("cache-stats", () => {
     stableHash?: string;
     cacheRead?: number;
     cacheCreation?: number;
+    cacheControlBlocks?: number;
   }): void {
     rec.logStart({
       correlationId: opts.id,
@@ -42,6 +43,7 @@ describe("cache-stats", () => {
       sessionId: opts.sessionId,
       stablePrefixHash: opts.stableHash,
       stablePrefixTokens: opts.stableHash ? 100 : undefined,
+      cacheControlBlocks: opts.cacheControlBlocks,
     });
     rec.logComplete(opts.id, {
       response: "r",
@@ -215,6 +217,194 @@ describe("cache-stats", () => {
       expect(codex?.totalCacheReadTokens).toBe(200);
       expect(gemini?.requestCount).toBe(1);
       expect(g.estimatedSavingsUsd).toBeGreaterThan(0);
+    });
+
+    // ───────────────────────────────────────────────────────────────────
+    // Rec #3 (slice κ) — falsifiability for the 5 new derived metrics.
+    //
+    // Mutation matrix:
+    // - dropping `cache_control_blocks` from the SELECT in
+    //   computeGlobalCacheStats → row.cache_control_blocks becomes
+    //   undefined everywhere; safeNum(undef)===0; ccBlocks > 0 never
+    //   trips. The two "positive-data SQL-drop falsifier" tests below
+    //   (explicit Rows + explicit Hits) flip from >0 to 0.
+    // - removing the `length > 1` guard on perPrefix groups → reuse
+    //   count picks up single-row prefixes too.
+    // - averaging ALL rows (not just "after first") → the average
+    //   shifts away from the expected value.
+    //
+    // Grok round-3 verified empirically that the clean SQL-drop
+    // mutation (delete the line + the trailing comma on the prior
+    // line, keeping the SELECT syntactically valid) goes red on the
+    // first two tests below, which are the *only* genuine SQL-drop
+    // guards. Earlier sanity-only zero-case tests, which seed
+    // ccBlocks=undefined, stay green either way and were renamed to
+    // not claim SQL-drop falsifiability they cannot deliver.
+    // ───────────────────────────────────────────────────────────────────
+
+    it("rec #3 (SQL-drop falsifier — Rows): explicitCacheControlRows reflects ccBlocks>0 rows; dropping the SQL column collapses this to 0", () => {
+      // Two κ-explicit rows (one hit, one miss), one non-κ Claude row,
+      // and one pre-v4 row (cacheControlBlocks omitted entirely).
+      // The non-zero `explicitCacheControlRows` assertion is the
+      // falsifier — `safeNum(row.cache_control_blocks ?? 0)` returns 0
+      // for every row when the SELECT no longer projects the column,
+      // so the count collapses from 2 to 0 and this test goes red.
+      seedRequest({
+        id: "k-1",
+        cli: "claude",
+        model: "sonnet",
+        cacheControlBlocks: 1,
+        cacheRead: 9000,
+      });
+      seedRequest({
+        id: "k-2",
+        cli: "claude",
+        model: "sonnet",
+        cacheControlBlocks: 2,
+        cacheRead: 0,
+      });
+      seedRequest({
+        id: "k-3",
+        cli: "claude",
+        model: "sonnet",
+        cacheControlBlocks: 0,
+        cacheRead: 1234,
+      });
+      seedRequest({ id: "k-4", cli: "claude", model: "sonnet", cacheRead: 50 });
+
+      const g = computeGlobalCacheStats(rec);
+      expect(g.explicitCacheControlRows).toBe(2); // k-1, k-2 only
+      expect(g.explicitCacheControlHits).toBe(1); // k-1 had cacheRead > 0
+      expect(g.explicitCacheControlHitRate).toBeCloseTo(0.5, 5);
+    });
+
+    it("rec #3 (SQL-drop falsifier — Hits): explicitCacheControlHits requires both ccBlocks>0 AND cacheRead>0; dropping the column collapses to 0", () => {
+      // Three κ-explicit rows with cacheRead>0 (so the SQL-drop
+      // mutation cannot be hidden behind the "happened to be 0" path).
+      // explicitCacheControlHits MUST be 3 here; collapsing
+      // ccBlocks→undefined makes it 0 and the assertion goes red.
+      seedRequest({
+        id: "h-1",
+        cli: "claude",
+        model: "sonnet",
+        cacheControlBlocks: 1,
+        cacheRead: 5000,
+      });
+      seedRequest({
+        id: "h-2",
+        cli: "claude",
+        model: "sonnet",
+        cacheControlBlocks: 1,
+        cacheRead: 7000,
+      });
+      seedRequest({
+        id: "h-3",
+        cli: "claude",
+        model: "sonnet",
+        cacheControlBlocks: 4,
+        cacheRead: 12000,
+      });
+      // Decoy row WITHOUT ccBlocks but with cacheRead — must NOT count.
+      seedRequest({ id: "h-4", cli: "claude", model: "sonnet", cacheRead: 99999 });
+
+      const g = computeGlobalCacheStats(rec);
+      expect(g.explicitCacheControlRows).toBe(3);
+      expect(g.explicitCacheControlHits).toBe(3);
+      expect(g.explicitCacheControlHitRate).toBeCloseTo(1.0, 5);
+    });
+
+    it("rec #3 (sanity, NOT a SQL-drop guard): zero-ccBlocks seeds yield zero explicit-control metrics", () => {
+      // ⚠ This case does NOT falsify a clean SQL-drop mutation, because
+      // the seeds omit `cacheControlBlocks` — the metric is 0 both
+      // before and after the column is removed from the SELECT. It
+      // remains useful as a sanity check that mixed cacheRead>0 +
+      // missing-ccBlocks rows do not accidentally bump explicit counts.
+      // The SQL-drop guards live in the two "(SQL-drop falsifier — …)"
+      // tests above; do NOT rename this back without changing the seeds.
+      seedRequest({ id: "n-1", cli: "claude", model: "sonnet", cacheRead: 100 });
+      seedRequest({ id: "n-2", cli: "claude", model: "sonnet", cacheRead: 0 });
+
+      const g = computeGlobalCacheStats(rec);
+      expect(g.explicitCacheControlRows).toBe(0);
+      expect(g.explicitCacheControlHits).toBe(0);
+      expect(g.explicitCacheControlHitRate).toBe(0);
+    });
+
+    it("rec #3: stablePrefixReuseCount only counts hashes that appear in >1 row", () => {
+      // h1 has 3 rows → counted; h2 has 1 row → NOT counted; h3 has 2 → counted.
+      seedRequest({ id: "p-1", cli: "claude", model: "sonnet", stableHash: "h1" });
+      seedRequest({ id: "p-2", cli: "claude", model: "sonnet", stableHash: "h1" });
+      seedRequest({ id: "p-3", cli: "claude", model: "sonnet", stableHash: "h1" });
+      seedRequest({ id: "p-4", cli: "claude", model: "sonnet", stableHash: "h2" });
+      seedRequest({ id: "p-5", cli: "claude", model: "sonnet", stableHash: "h3" });
+      seedRequest({ id: "p-6", cli: "claude", model: "sonnet", stableHash: "h3" });
+
+      const g = computeGlobalCacheStats(rec);
+      expect(g.stablePrefixReuseCount).toBe(2);
+    });
+
+    it("rec #3: avgCacheCreationAfterFirstCall averages rows AFTER the first datetime within each reuse group", () => {
+      // Insert order = ascending datetime_utc (FlightRecorder stamps now()
+      // at logStart, and these calls are serial). For h1: first call has
+      // 1000 cache_creation, subsequent two have 200 + 0 → average 100
+      // across two "after first" rows.
+      seedRequest({
+        id: "a-1",
+        cli: "claude",
+        model: "sonnet",
+        stableHash: "h1",
+        cacheCreation: 1000,
+      });
+      seedRequest({
+        id: "a-2",
+        cli: "claude",
+        model: "sonnet",
+        stableHash: "h1",
+        cacheCreation: 200,
+      });
+      seedRequest({
+        id: "a-3",
+        cli: "claude",
+        model: "sonnet",
+        stableHash: "h1",
+        cacheCreation: 0,
+      });
+      // Single-row prefix; must be excluded from the average.
+      seedRequest({
+        id: "a-4",
+        cli: "claude",
+        model: "sonnet",
+        stableHash: "h-solo",
+        cacheCreation: 99999,
+      });
+
+      const g = computeGlobalCacheStats(rec);
+      // (200 + 0) / 2 = 100. The first row of h1 (1000) is dropped; h-solo
+      // (single row) contributes nothing.
+      expect(g.avgCacheCreationAfterFirstCall).toBe(100);
+    });
+
+    it("rec #3: avgCacheCreationAfterFirstCall is null when no prefix has >1 row", () => {
+      seedRequest({
+        id: "s-1",
+        cli: "claude",
+        model: "sonnet",
+        stableHash: "lonely",
+        cacheCreation: 500,
+      });
+
+      const g = computeGlobalCacheStats(rec);
+      expect(g.avgCacheCreationAfterFirstCall).toBeNull();
+      expect(g.stablePrefixReuseCount).toBe(0);
+    });
+
+    it("rec #3: zeroed metrics on a DB with no rows (regression: don't divide by zero)", () => {
+      const g = computeGlobalCacheStats(rec);
+      expect(g.explicitCacheControlRows).toBe(0);
+      expect(g.explicitCacheControlHits).toBe(0);
+      expect(g.explicitCacheControlHitRate).toBe(0);
+      expect(g.stablePrefixReuseCount).toBe(0);
+      expect(g.avgCacheCreationAfterFirstCall).toBeNull();
     });
   });
 

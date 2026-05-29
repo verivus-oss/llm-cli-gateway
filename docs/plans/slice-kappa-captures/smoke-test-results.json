@@ -1,0 +1,72 @@
+{
+  "test": "kappa-live-smoke",
+  "date": "2026-05-27",
+  "claude_cli_version": "2.1.152",
+  "gateway_version_at_run": "1.13.2",
+  "script": "docs/plans/slice-kappa-smoke-test.mjs",
+  "model": "sonnet (claude-sonnet-4-6 per result event)",
+  "invocation": "node docs/plans/slice-kappa-smoke-test.mjs",
+  "payload_shape": {
+    "type": "user",
+    "message": {
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "<STABLE_BLOCK ~2,639 tokens, 10,555 chars, repeated paragraphs about gateway architecture + Anthropic per-model cache thresholds + lorem ipsum filler to clear Sonnet's 1024-token cache minimum>",
+          "cache_control": { "type": "ephemeral", "ttl": "1h" }
+        },
+        {
+          "type": "text",
+          "text": "Reply with exactly: KAPPA-SMOKE-1 (or -2 on second call)"
+        }
+      ]
+    }
+  },
+  "stable_block_chars": 10555,
+  "stable_block_approx_tokens": 2639,
+  "results": {
+    "call_1_cache_write": {
+      "taskTag": "KAPPA-SMOKE-1",
+      "durationMs": 2831,
+      "replyText": "KAPPA-SMOKE-1",
+      "usage": {
+        "input_tokens": 3,
+        "output_tokens": 11,
+        "cache_read_input_tokens": 12928,
+        "cache_creation_input_tokens": 15523,
+        "ephemeral_5m_input_tokens": 0,
+        "ephemeral_1h_input_tokens": 15523
+      },
+      "cost_usd": 0.06587665
+    },
+    "call_2_cache_hit": {
+      "taskTag": "KAPPA-SMOKE-2",
+      "durationMs": 1795,
+      "replyText": "KAPPA-SMOKE-2",
+      "usage": {
+        "input_tokens": 3,
+        "output_tokens": 11,
+        "cache_read_input_tokens": 28439,
+        "cache_creation_input_tokens": 12,
+        "ephemeral_5m_input_tokens": 0,
+        "ephemeral_1h_input_tokens": 12
+      },
+      "cost_usd": 0.0123537
+    }
+  },
+  "deltas": {
+    "cache_creation_drop_tokens": 15511,
+    "cache_read_rise_tokens": 15511,
+    "cost_drop_pct": 81.24,
+    "cost_drop_usd": 0.0535229,
+    "duration_drop_pct": 36.59,
+    "duration_drop_ms": 1036
+  },
+  "interpretation": [
+    "15,511 tokens shifted CLEANLY from cache_creation to cache_read between the two identical calls.",
+    "Call 2's cache_creation_input_tokens dropped to 12 — essentially just the variable task tail.",
+    "Anthropic honored the cache_control breakpoint passed via Claude Code's --input-format stream-json.",
+    "κ Branch A (per docs/personal-mcp/PROVIDER_CACHE_SURFACES.md §a) is implementable as designed."
+  ]
+}

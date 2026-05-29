@@ -1,38 +1,34 @@
 import type { Pool, PoolConfig } from "pg";
-import type { Redis, RedisOptions } from "ioredis";
 import { Config } from "./config.js";
 import type { Logger } from "./logger.js";
 import { noopLogger } from "./logger.js";
 
 export interface HealthCheckResult {
   postgres: { connected: boolean; latency: number };
-  redis: { connected: boolean; latency: number };
 }
 
 /**
- * Database connection manager for PostgreSQL and Redis
+ * Database connection manager for PostgreSQL-backed sessions.
  */
 export class DatabaseConnection {
   private pool: Pool | null = null;
-  private redis: Redis | null = null;
   private config: Config;
 
   constructor(
     config: Config,
     private logger: Logger = noopLogger
   ) {
-    if (!config.database || !config.redis) {
-      throw new Error("Database and Redis configuration required");
+    if (!config.database) {
+      throw new Error("Database configuration required");
     }
     this.config = config;
   }
 
   /**
-   * Initialize connections to PostgreSQL and Redis
+   * Initialize connection to PostgreSQL.
    */
   async connect(): Promise<void> {
     const { Pool } = await importOptionalPg();
-    const Redis = await importOptionalRedis();
 
     // Initialize PostgreSQL pool
     const poolConfig: PoolConfig = {
@@ -57,36 +53,6 @@ export class DatabaseConnection {
         `Failed to connect to PostgreSQL: ${error instanceof Error ? error.message : String(error)}`
       );
     }
-
-    // Initialize Redis client
-    const redisOptions: RedisOptions = {
-      retryStrategy: (times: number): number | null => {
-        const { maxRetries, initialDelay, maxDelay } = this.config.redis!.retryStrategy;
-        if (times > maxRetries) {
-          return null; // Stop retrying
-        }
-        return Math.min(initialDelay * times, maxDelay);
-      },
-      lazyConnect: false,
-      reconnectOnError: (err: Error): boolean | 1 | 2 => {
-        // Reconnect on READONLY and ECONNRESET errors
-        const targetErrors = ["READONLY", "ECONNRESET"];
-        return targetErrors.some(targetError => err.message.includes(targetError));
-      },
-    };
-
-    this.redis = new Redis(this.config.redis!.url, redisOptions);
-
-    // Test Redis connection
-    try {
-      await this.redis.ping();
-      this.logger.info("Redis connection established");
-    } catch (error) {
-      this.logger.error("Failed to connect to Redis", { error });
-      throw new Error(
-        `Failed to connect to Redis: ${error instanceof Error ? error.message : String(error)}`
-      );
-    }
   }
 
   /**
@@ -109,31 +75,17 @@ export class DatabaseConnection {
       }
     }
 
-    if (this.redis) {
-      try {
-        this.redis.disconnect();
-        this.redis = null;
-      } catch (error) {
-        errors.push(
-          new Error(
-            `Redis disconnect error: ${error instanceof Error ? error.message : String(error)}`
-          )
-        );
-      }
-    }
-
     if (errors.length > 0) {
       throw new Error(`Disconnect errors: ${errors.map(e => e.message).join("; ")}`);
     }
   }
 
   /**
-   * Health check for PostgreSQL and Redis
+   * Health check for PostgreSQL.
    */
   async healthCheck(): Promise<HealthCheckResult> {
     const result: HealthCheckResult = {
       postgres: { connected: false, latency: 0 },
-      redis: { connected: false, latency: 0 },
     };
 
     // Check PostgreSQL
@@ -155,21 +107,8 @@ export class DatabaseConnection {
       }
     }
 
-    // Check Redis
-    if (this.redis) {
-      const redisStart = Date.now();
-      try {
-        await this.redis.ping();
-        result.redis.connected = true;
-        result.redis.latency = Date.now() - redisStart;
-      } catch (error) {
-        result.redis.connected = false;
-      }
-    }
-
     this.logger.debug("Health check completed", {
       postgres: result.postgres.connected,
-      redis: result.redis.connected,
     });
     return result;
   }
@@ -183,16 +122,6 @@ export class DatabaseConnection {
     }
     return this.pool;
   }
-
-  /**
-   * Get Redis client
-   */
-  getRedis(): Redis {
-    if (!this.redis) {
-      throw new Error("Redis client not initialized");
-    }
-    return this.redis;
-  }
 }
 
 async function importOptionalPg(): Promise<typeof import("pg")> {
@@ -201,21 +130,7 @@ async function importOptionalPg(): Promise<typeof import("pg")> {
   } catch (error: any) {
     if (error?.code === "ERR_MODULE_NOT_FOUND" || error?.code === "MODULE_NOT_FOUND") {
       throw new Error(
-        "PostgreSQL sessions require optional peer dependency 'pg'. Install it alongside llm-cli-gateway to use DATABASE_URL/REDIS_URL-backed sessions."
-      );
-    }
-    throw error;
-  }
-}
-
-async function importOptionalRedis(): Promise<typeof Redis> {
-  try {
-    const mod = await import("ioredis");
-    return mod.Redis ?? mod.default;
-  } catch (error: any) {
-    if (error?.code === "ERR_MODULE_NOT_FOUND" || error?.code === "MODULE_NOT_FOUND") {
-      throw new Error(
-        "PostgreSQL sessions require optional peer dependency 'ioredis'. Install it alongside llm-cli-gateway to use DATABASE_URL/REDIS_URL-backed sessions."
+        "PostgreSQL sessions require optional peer dependency 'pg'. Install it alongside llm-cli-gateway to use DATABASE_URL-backed sessions."
       );
     }
     throw error;

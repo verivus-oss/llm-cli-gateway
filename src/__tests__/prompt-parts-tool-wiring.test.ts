@@ -218,3 +218,82 @@ describe("slice 1: sync claude_request writes stable_prefix_hash via flight-reco
     expect(starts[0].prompt).not.toBe(starts[1].prompt); // task differs
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────
+// Rec #1 (B1, B2) + Rec #7 (D1, D2) — registered-tool schema
+// falsifiability. Closes the gap Codex round-3 flagged at
+// prompt-parts-tool-wiring.test.ts:43.
+//
+// Mutations that must trip these:
+// - reverting `.default("stream-json")` to `.default("text")` on either
+//   Claude tool → outputFormat default check fails;
+// - reverting either Claude `promptParts.describe(...)` to the legacy
+//   description that omits cacheControl / stream-json / ttl='1h' /
+//   "volatile tail" wording → description text check fails.
+// ─────────────────────────────────────────────────────────────────────
+
+describe("rec #1 + rec #7: Claude registered-tool defaults + promptParts descriptions", () => {
+  const manager = new AsyncJobManager(noopLogger, undefined, new MemoryJobStore());
+  const server = createGatewayServer({
+    asyncJobManager: manager,
+    persistence: mkPersistence(),
+  });
+
+  function shapeFor(
+    toolName: string
+  ): Record<
+    string,
+    { _def?: { defaultValue?: () => unknown; description?: string; typeName?: string } }
+  > {
+    const reg = getRegisteredTools(server);
+    const tool = reg[toolName];
+    if (!tool) throw new Error(`tool ${toolName} not registered`);
+    const schema = tool.inputSchema as {
+      _def?: { shape?: () => Record<string, unknown> };
+    };
+    return (schema._def?.shape?.() ?? {}) as Record<
+      string,
+      { _def?: { defaultValue?: () => unknown; description?: string; typeName?: string } }
+    >;
+  }
+
+  it("B1: claude_request.outputFormat default IS 'stream-json'", () => {
+    const shape = shapeFor("claude_request");
+    const def = shape.outputFormat?._def?.defaultValue?.();
+    expect(def).toBe("stream-json");
+  });
+
+  it("B2: claude_request_async.outputFormat default IS 'stream-json'", () => {
+    const shape = shapeFor("claude_request_async");
+    const def = shape.outputFormat?._def?.defaultValue?.();
+    expect(def).toBe("stream-json");
+  });
+
+  it("B1/B2: outputFormat default is NOT 'text' (regression for rec #1 revert)", () => {
+    // If somebody reverts either tool back to `.default("text")`, this
+    // test goes red — and ditto for `.default("json")`.
+    for (const tool of ["claude_request", "claude_request_async"]) {
+      const shape = shapeFor(tool);
+      const def = shape.outputFormat?._def?.defaultValue?.();
+      expect(def, `${tool}.outputFormat default must NOT be 'text' or 'json'`).not.toBe("text");
+      expect(def).not.toBe("json");
+    }
+  });
+
+  it("D1: claude_request.promptParts description mentions cacheControl + stream-json + ttl='1h' + volatile tail", () => {
+    const shape = shapeFor("claude_request");
+    const desc = shape.promptParts?._def?.description ?? "";
+    expect(desc).toMatch(/cacheControl/);
+    expect(desc).toMatch(/stream-json/);
+    expect(desc).toMatch(/ttl='1h'|ttl="1h"|ttl=`1h`/);
+    expect(desc).toMatch(/volatile tail/i);
+  });
+
+  it("D2: claude_request_async.promptParts description mentions the same κ wording", () => {
+    const shape = shapeFor("claude_request_async");
+    const desc = shape.promptParts?._def?.description ?? "";
+    expect(desc).toMatch(/cacheControl/);
+    expect(desc).toMatch(/stream-json/);
+    expect(desc).toMatch(/ttl='1h'|ttl="1h"|ttl=`1h`/);
+  });
+});

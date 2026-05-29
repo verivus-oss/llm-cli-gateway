@@ -104,7 +104,6 @@ Options:
 
 Environment Variables:
   DATABASE_URL     PostgreSQL connection string (required)
-  REDIS_URL        Redis connection string (required)
 `);
     process.exit(args[0] === "--help" || args[0] === "-h" ? 0 : 1);
   }
@@ -121,25 +120,19 @@ Environment Variables:
   console.error(`Migration Configuration:`);
   console.error(`  Source: ${filePath}`);
   console.error(`  DATABASE_URL: ${process.env.DATABASE_URL ? "[set]" : "[not set]"}`);
-  console.error(`  REDIS_URL: ${process.env.REDIS_URL ? "[set]" : "[not set]"}`);
   console.error("");
 
   // Load config
   const config = loadConfig();
-  if (!config.database || !config.redis) {
-    console.error("ERROR: DATABASE_URL and REDIS_URL must be set");
+  if (!config.database) {
+    console.error("ERROR: DATABASE_URL must be set");
     process.exit(1);
   }
 
   // Connect to database
   console.error("Connecting to database...");
   const db = await createDatabaseConnection(config, logger);
-  const pgManager = new PostgreSQLSessionManager(
-    db.getPool(),
-    db.getRedis(),
-    config.cacheTtl,
-    logger
-  );
+  const pgManager = new PostgreSQLSessionManager(db.getPool());
   console.error("✓ Connected to database\n");
 
   try {

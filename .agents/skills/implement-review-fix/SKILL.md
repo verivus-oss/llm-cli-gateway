@@ -1,6 +1,6 @@
 ---
 name: implement-review-fix
-description: Run implement-review-fix cycle using multiple LLMs (Claude, Codex, Gemini, Grok, Mistral). Use for features, bugs, or refactoring with multi-LLM collaboration. Mistral defaults to `--agent auto-approve`; session continuity requires `[session_logging] enabled = true` in `~/.vibe/config.toml`.
+description: Run implement-review-fix cycle using multiple LLMs (Claude, Codex, Gemini, Grok, Mistral). Use for features, bugs, or refactoring with multi-LLM collaboration. Mistral defaults to `--agent auto-approve`; current Vibe defaults session logging on, and doctor flags explicit `[session_logging] enabled = false` before session-continuity use.
 metadata:
   author: verivus-oss
   version: "1.6"

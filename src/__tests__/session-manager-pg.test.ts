@@ -1,23 +1,14 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { PostgreSQLSessionManager } from "../session-manager-pg.js";
-import { setupTestDatabase, cleanTestDatabase, mockLogger } from "./setup.js";
+import { setupTestDatabase, cleanTestDatabase } from "./setup.js";
 
 describe("PostgreSQLSessionManager", () => {
   let manager: PostgreSQLSessionManager;
 
   beforeEach(async () => {
     await cleanTestDatabase();
-    const { pool, redis } = await setupTestDatabase();
-    manager = new PostgreSQLSessionManager(
-      pool,
-      redis,
-      {
-        session: 3600,
-        activeSession: 1800,
-        sessionList: 120,
-      },
-      mockLogger
-    );
+    const { pool } = await setupTestDatabase();
+    manager = new PostgreSQLSessionManager(pool);
   });
 
   //──────────────────────────────────────────────────────────────────────────
@@ -381,43 +372,34 @@ describe("PostgreSQLSessionManager", () => {
   });
 
   //──────────────────────────────────────────────────────────────────────────
-  // Caching Behavior (3 tests - NEW for PostgreSQL)
+  // Fresh Read Behavior (3 tests)
   //──────────────────────────────────────────────────────────────────────────
 
-  describe("caching behavior", () => {
-    it("should cache session on creation", async () => {
+  describe("fresh read behavior", () => {
+    it("should retrieve session after creation", async () => {
       const session = await manager.createSession("claude", "Test Session");
 
-      // Retrieve should hit cache (second retrieval)
       const retrieved = await manager.getSession(session.id);
 
       expect(retrieved?.id).toBe(session.id);
     });
 
-    it("should invalidate cache on session deletion", async () => {
+    it("should return null after session deletion", async () => {
       const session = await manager.createSession("claude", "Test Session");
 
-      // Ensure it's cached
       await manager.getSession(session.id);
-
-      // Delete should invalidate cache
       await manager.deleteSession(session.id);
 
-      // Retrieve should return null (not stale cached data)
       const retrieved = await manager.getSession(session.id);
       expect(retrieved).toBeNull();
     });
 
-    it("should invalidate cache on metadata update", async () => {
+    it("should return fresh metadata after update", async () => {
       const session = await manager.createSession("claude", "Test Session");
 
-      // Cache the session
       await manager.getSession(session.id);
-
-      // Update metadata
       await manager.updateSessionMetadata(session.id, { key: "value" });
 
-      // Should get fresh data, not cached
       const retrieved = await manager.getSession(session.id);
       expect(retrieved?.metadata).toEqual({ key: "value" });
     });
