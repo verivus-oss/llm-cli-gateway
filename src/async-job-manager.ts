@@ -182,7 +182,7 @@ function truncateText(value: string, maxChars: number): { text: string; truncate
     return { text: value, truncated: false };
   }
   return {
-    text: value.slice(value.length - maxChars),
+    text: value.slice(0, maxChars),
     truncated: true,
   };
 }
