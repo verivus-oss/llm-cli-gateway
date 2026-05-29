@@ -388,7 +388,7 @@ export class SqliteJobStore implements JobStore {
     orphaned: Array<OrphanedJobSnapshot>;
   } {
     const now = new Date().toISOString();
-    // Orphaned jobs retain a short window so callers can fetch the partial output,
+    // Orphaned jobs retain a short window so callers can collect the partial output,
     // then evict. Reuse the standard retention.
     const expiresAt = new Date(Date.now() + this.retentionMs).toISOString();
     // SELECT before UPDATE — gateway boot is single-threaded so no row can

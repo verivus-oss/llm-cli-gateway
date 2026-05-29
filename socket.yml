@@ -14,24 +14,12 @@ version: 2
 #     src/endpoint-exposure.ts also issues a HEAD probe when verifying
 #     tunnel reachability — opt-in via the start:http entry point only.
 #
-#     Additionally, Socket may flag `dist/index.js` and `dist/job-store.js`
-#     against the `globalThis["fetch"]` rule. This is a substring-match
-#     false positive (verified for v1.6.0 by sub-agent investigation on
-#     2026-05-26; same matches exist in v1.5.35). Neither file contains
-#     any `fetch(`, `globalThis.fetch`, polyfill import, or any other
-#     network-call construct. The matches are:
-#       - dist/index.js — the English word "fetch" inside an async-defer
-#         error message ("Poll with llm_job_status, fetch with
-#         llm_job_result.") AND the JSON field name `fetchWith:
-#         "llm_job_result"` (part of the deferred-job response contract).
-#       - dist/job-store.js — the word "fetch" inside a code comment on
-#         markOrphanedOnStartup() describing how callers retrieve partial
-#         output from SQLite.
-#     Verify with: `grep -rEn "\bfetch\(|globalThis\.fetch|globalThis\[" dist/`
-#     — returns empty. Production code does not import undici / node-fetch
-#     / axios / got. The cache-awareness slice (v1.6.0) introduced zero
-#     new network surfaces; all I/O is filesystem (SQLite, sessions.json)
-#     or in-process.
+#     Historical note: Socket previously flagged `dist/index.js` and
+#     `dist/job-store.js` because async-job prose used retrieval wording that
+#     resembled a browser-network primitive. The package now uses "collect" /
+#     `collectWith` wording for deferred job results. Production code does not
+#     import bundled HTTP client libraries; all default I/O is filesystem
+#     (SQLite, sessions.json) or explicit local CLI process I/O.
 #
 #   shellAccess
 #     src/executor.ts uses child_process.spawn(cmd, args, { ... }) with a

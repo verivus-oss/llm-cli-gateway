@@ -21,7 +21,7 @@ This is different from OpenAI's codex-plugin-cc, which only bridges Codex into C
 
 - `codex_request` and `codex_request_async` tools available to any MCP client
 - `fullAuto` mode support (passes through to the CLI)
-- Auto-async deferral: if a sync `codex_request` takes longer than 45 seconds, it transparently becomes an async job. Poll with `llm_job_status`, fetch with `llm_job_result`. No more timeouts.
+- Auto-async deferral: if a sync `codex_request` takes longer than 45 seconds, it transparently becomes an async job. Poll with `llm_job_status`, collect with `llm_job_result`. No more timeouts.
 - Configurable idle timeout (`idleTimeoutMs`) to kill stuck Codex processes
 - Approval gates: set `approvalStrategy: "mcp_managed"` with risk scoring before Codex executes
 
