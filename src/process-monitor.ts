@@ -42,10 +42,13 @@ export function parseProcStat(content: string): {
   const fields = afterComm.split(" ");
   // fields[0] = state, fields[11] = utime (14-3), fields[12] = stime (15-3)
   if (fields.length < 13) return null;
+  const utime = parseInt(fields[11], 10);
+  const stime = parseInt(fields[12], 10);
+  if (!Number.isFinite(utime) || !Number.isFinite(stime)) return null;
   return {
     state: fields[0],
-    utime: parseInt(fields[11], 10),
-    stime: parseInt(fields[12], 10),
+    utime,
+    stime,
   };
 }
 

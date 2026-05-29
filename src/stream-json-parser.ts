@@ -23,6 +23,18 @@ export interface StreamJsonResult {
   numTurns: number | null;
 }
 
+function stringOrNull(value: unknown): string | null {
+  return typeof value === "string" ? value : null;
+}
+
+function numberOrNull(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function numberOrZero(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
 /**
  * Parse completed NDJSON stdout from `claude --output-format stream-json --include-partial-messages`.
  *
@@ -50,6 +62,9 @@ export function parseStreamJson(stdout: string): StreamJsonResult {
       // Skip malformed lines
       continue;
     }
+    if (!parsed || typeof parsed !== "object") {
+      continue;
+    }
 
     if (parsed.type === "result") {
       resultEvent = parsed;
@@ -64,22 +79,22 @@ export function parseStreamJson(stdout: string): StreamJsonResult {
   if (resultEvent) {
     const usage = resultEvent.usage
       ? {
-          inputTokens: resultEvent.usage.input_tokens ?? 0,
-          outputTokens: resultEvent.usage.output_tokens ?? 0,
-          cacheReadInputTokens: resultEvent.usage.cache_read_input_tokens ?? 0,
-          cacheCreationInputTokens: resultEvent.usage.cache_creation_input_tokens ?? 0,
+          inputTokens: numberOrZero(resultEvent.usage.input_tokens),
+          outputTokens: numberOrZero(resultEvent.usage.output_tokens),
+          cacheReadInputTokens: numberOrZero(resultEvent.usage.cache_read_input_tokens),
+          cacheCreationInputTokens: numberOrZero(resultEvent.usage.cache_creation_input_tokens),
         }
       : null;
 
     return {
-      text: resultEvent.result ?? "",
-      costUsd: resultEvent.total_cost_usd ?? null,
+      text: typeof resultEvent.result === "string" ? resultEvent.result : "",
+      costUsd: numberOrNull(resultEvent.total_cost_usd),
       usage,
-      sessionId: resultEvent.session_id ?? systemEvent?.session_id ?? null,
-      model: systemEvent?.model ?? resultEvent.model ?? null,
-      durationApiMs: resultEvent.duration_api_ms ?? null,
+      sessionId: stringOrNull(resultEvent.session_id) ?? stringOrNull(systemEvent?.session_id),
+      model: stringOrNull(systemEvent?.model) ?? stringOrNull(resultEvent.model),
+      durationApiMs: numberOrNull(resultEvent.duration_api_ms),
       isError: resultEvent.is_error === true,
-      numTurns: resultEvent.num_turns ?? null,
+      numTurns: numberOrNull(resultEvent.num_turns),
     };
   }
 
@@ -89,7 +104,13 @@ export function parseStreamJson(stdout: string): StreamJsonResult {
     let text = "";
     if (message?.content && Array.isArray(message.content)) {
       text = message.content
-        .filter((block: any) => block.type === "text")
+        .filter(
+          (block: any) =>
+            block &&
+            typeof block === "object" &&
+            block.type === "text" &&
+            typeof block.text === "string"
+        )
         .map((block: any) => block.text)
         .join("");
     }
@@ -98,8 +119,8 @@ export function parseStreamJson(stdout: string): StreamJsonResult {
       text,
       costUsd: null,
       usage: null,
-      sessionId: systemEvent?.session_id ?? null,
-      model: systemEvent?.model ?? message?.model ?? null,
+      sessionId: stringOrNull(systemEvent?.session_id),
+      model: stringOrNull(systemEvent?.model) ?? stringOrNull(message?.model),
       durationApiMs: null,
       isError: false,
       numTurns: null,
@@ -111,8 +132,8 @@ export function parseStreamJson(stdout: string): StreamJsonResult {
     text: "",
     costUsd: null,
     usage: null,
-    sessionId: systemEvent?.session_id ?? null,
-    model: systemEvent?.model ?? null,
+    sessionId: stringOrNull(systemEvent?.session_id),
+    model: stringOrNull(systemEvent?.model),
     durationApiMs: null,
     isError: false,
     numTurns: null,
