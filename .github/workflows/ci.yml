@@ -39,6 +39,7 @@ jobs:
       - run: npm run build
       - run: npm run lint
       - run: npm run format:check
+      - run: npm run test:fuzz
       - run: npm run test:ci
       - run: npm run security:audit
 
