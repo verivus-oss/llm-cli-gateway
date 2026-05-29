@@ -1,0 +1,86 @@
+name: Sigstore sign release tag
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to replace with a Sigstore-signed tag"
+        required: true
+        type: string
+      target-sha:
+        description: "Commit SHA the tag must continue to point at"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  sign-tag:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version: "1.25"
+          cache: false
+
+      - name: Install gitsign
+        run: go install github.com/sigstore/gitsign@v0.16.0
+
+      - name: Recreate tag with Sigstore signature
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ inputs.tag }}
+          TARGET_SHA: ${{ inputs.target-sha }}
+          GITSIGN_LOG: ${{ runner.temp }}/gitsign.log
+          GITSIGN_REKOR_MODE: offline
+          SIGNING_IDENTITY: https://github.com/${{ github.repository }}/.github/workflows/sigstore-tag.yml@refs/heads/main
+        run: |
+          set -euo pipefail
+          trap 'status=$?; if [ "$status" -ne 0 ] && [ -f "${GITSIGN_LOG}" ]; then echo "::group::gitsign log"; cat "${GITSIGN_LOG}"; echo "::endgroup::"; fi; exit "$status"' EXIT
+
+          if [[ ! "${TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "ERROR: refusing to sign unexpected tag name: ${TAG}" >&2
+            exit 1
+          fi
+
+          git fetch --force origin \
+            "${TARGET_SHA}" \
+            "+refs/tags/${TAG}:refs/tags/${TAG}"
+
+          current_sha="$(git rev-list -n 1 "${TAG}")"
+          if [[ "${current_sha}" != "${TARGET_SHA}" ]]; then
+            echo "ERROR: ${TAG} currently points at ${current_sha}, expected ${TARGET_SHA}" >&2
+            exit 1
+          fi
+
+          git config user.name "Verivus OSS Releases"
+          git config user.email "oss-release@verivus.com"
+          git config gpg.format x509
+          git config gpg.x509.program "$(go env GOPATH)/bin/gitsign"
+          git config tag.gpgSign true
+          git config gitsign.fulcio https://fulcio.sigstore.dev
+          git config gitsign.rekor https://rekor.sigstore.dev
+          git config gitsign.rekorMode offline
+          git config gitsign.issuer https://token.actions.githubusercontent.com
+          git config gitsign.tokenProvider github-actions
+
+          git tag -d "${TAG}"
+          git tag -s "${TAG}" "${TARGET_SHA}" -m "Release ${TAG}"
+
+          "$(go env GOPATH)/bin/gitsign" verify-tag "${TAG}" \
+            --certificate-identity "${SIGNING_IDENTITY}" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com
+
+          git push "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" \
+            "refs/tags/${TAG}:refs/tags/${TAG}" \
+            --force

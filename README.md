@@ -3,18 +3,37 @@
 [![CI](https://github.com/verivus-oss/llm-cli-gateway/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/verivus-oss/llm-cli-gateway/actions/workflows/ci.yml)
 [![Security](https://github.com/verivus-oss/llm-cli-gateway/actions/workflows/security.yml/badge.svg?branch=main)](https://github.com/verivus-oss/llm-cli-gateway/actions/workflows/security.yml)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/verivus-oss/llm-cli-gateway/badge)](https://scorecard.dev/viewer/?uri=github.com/verivus-oss/llm-cli-gateway)
-[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/13025/badge)](https://www.bestpractices.dev/projects/13025)
 [![npm](https://img.shields.io/npm/v/llm-cli-gateway.svg)](https://www.npmjs.com/package/llm-cli-gateway)
-[![npm weekly downloads](https://img.shields.io/npm/dw/llm-cli-gateway.svg)](https://www.npmjs.com/package/llm-cli-gateway)
 [![npm monthly downloads](https://img.shields.io/npm/dm/llm-cli-gateway.svg)](https://www.npmjs.com/package/llm-cli-gateway)
-[![GitHub release downloads](https://img.shields.io/github/downloads/verivus-oss/llm-cli-gateway/total.svg)](https://github.com/verivus-oss/llm-cli-gateway/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Releases: Sigstore signed](https://img.shields.io/badge/releases-Sigstore%20signed-2e7d32.svg)](SECURITY.md#release-signing)
 
 > _"Without consultation, plans are frustrated, but with many counselors they succeed."_
 > — Proverbs 15:22 (LSB)
 
 A Model Context Protocol (MCP) gateway for running Claude Code, Codex, Gemini, Grok, and Mistral (Vibe) CLIs from one MCP endpoint, with durable async jobs, session continuity, cache-aware prompting, observability, and personal-appliance setup tooling.
+
+**Why developers try it:** one local MCP endpoint for cross-LLM validation, multi-agent coding workflows, and repeatable assistant-led setup across five provider CLIs.
+
+**Current signals:** crossed 5k monthly npm downloads in May 2026; live npm downloads are shown above. CI and security workflows pass on `main`, OpenSSF Scorecard is published, OpenSSF Best Practices is passing, releases use Sigstore signing, and the package is MIT licensed.
+
+## Quick Start
+
+```bash
+npm install -g llm-cli-gateway
+```
+
+Or use directly with `npx` from an MCP client:
+
+```json
+{
+  "mcpServers": {
+    "llm-gateway": {
+      "command": "npx",
+      "args": ["-y", "llm-cli-gateway"]
+    }
+  }
+}
+```
 
 ## What It Provides Today
 
@@ -26,6 +45,24 @@ A Model Context Protocol (MCP) gateway for running Claude Code, Codex, Gemini, G
 - Supports cache-aware `promptParts`, including explicit Claude `cache_control` when opted in.
 - Can run requests inside gateway-managed git worktrees for isolated multi-agent review and implementation loops.
 - Ships personal-appliance setup surfaces: HTTP transport with bearer-token auth, `doctor --json`, setup UI artifacts, provider setup snippets, Docker fallback, and checked release bundles.
+
+## Workflow Assets
+
+The repo ships agent-ready workflow skills under [`.agents/skills`](.agents/skills) for async orchestration, session continuity, multi-LLM review, implement-review-fix loops, and secure approval-gated dispatch. Machine-readable DAG-TOML plans live under [`docs/plans`](docs/plans) and [`setup/install-plan.dag.toml`](setup/install-plan.dag.toml) for workflows that need deterministic sequencing and verification gates.
+
+The next documentation focus is provider-specific skill and DAG-TOML pairs for each outbound CLI: Claude, Codex, Gemini, Grok, and Mistral Vibe. The implementation plan is tracked in [`docs/plans/provider-workflow-assets.dag.toml`](docs/plans/provider-workflow-assets.dag.toml), with each provider asset expected to cover install/login checks, session behavior, approval modes, cache/telemetry surfaces, failure modes, and a smoke-test gate.
+
+## Trust & Supply Chain
+
+[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/13025/badge)](https://www.bestpractices.dev/projects/13025)
+[![npm weekly downloads](https://img.shields.io/npm/dw/llm-cli-gateway.svg)](https://www.npmjs.com/package/llm-cli-gateway)
+[![GitHub release downloads](https://img.shields.io/github/downloads/verivus-oss/llm-cli-gateway/total.svg)](https://github.com/verivus-oss/llm-cli-gateway/releases)
+[![Releases: Sigstore signed](https://img.shields.io/badge/releases-Sigstore%20signed-2e7d32.svg)](SECURITY.md#release-signing)
+
+- CI runs build, lint, format, tests, package checks, and npm audit.
+- Security CI runs actionlint, zizmor, shellcheck, typos, osv-scanner, gitleaks, and lychee.
+- GitHub release installer artifacts are checksummed and signed with Sigstore keyless signing.
+- npm releases use provenance through OIDC trusted publishing.
 
 ## Personal MCP Appliance
 
@@ -216,13 +253,16 @@ grok login   # OAuth flow, or set GROK_CODE_XAI_API_KEY
 
 ```bash
 # Pick one — the gateway's cli_upgrade auto-detects which one you used.
-pip install vibe-cli
-uv tool install vibe-cli
+curl -LsSf https://mistral.ai/vibe/install.sh | bash
+pip install mistral-vibe
+uv tool install mistral-vibe
 brew install mistral-vibe
 
 vibe auth login
-# Required for `mistral_request --resume` / `--continue` to persist sessions:
-vibe config set session_logging.enabled true   # or edit ~/.vibe/config.toml
+# Current Vibe defaults session logging to enabled. If an older config disabled it,
+# edit ~/.vibe/config.toml and set:
+# [session_logging]
+# enabled = true
 ```
 
 Vibe-specific notes:
@@ -699,7 +739,8 @@ Run a Mistral Vibe agentic coding request. Like `grok_request` in shape, but wit
 - `permissionMode`: `default | plan | accept-edits | auto-approve | chat | explore | lean` — emitted as `--agent <mode>`. Defaults to `auto-approve` in programmatic mode.
 - `allowedTools` (string[], optional): One `--enabled-tools <tool>` flag per entry (allow-list only).
 - `disallowedTools` (string[], optional): Accepted for parity with the other providers; ignored at the CLI boundary with a logged warning.
-- `sessionId` / `resumeLatest` / `createNewSession`: standard session controls. Continuity requires `[session_logging] enabled = true` in `~/.vibe/config.toml` — `doctor --json` surfaces an actionable next-action when the toggle is missing.
+- `outputFormat` (string, optional): Vibe 2.x values are `"text"`, `"json"`, or `"streaming"`; legacy aliases `"plain"` and `"stream-json"` are accepted and normalized before spawn.
+- `sessionId` / `resumeLatest` / `createNewSession`: standard session controls. Current Vibe defaults session logging to enabled; if an older config has `[session_logging] enabled = false`, `doctor --json` surfaces an actionable next-action.
 
 ##### `claude_request_async` / `codex_request_async` / `gemini_request_async` / `grok_request_async` / `mistral_request_async`
 
@@ -1135,7 +1176,7 @@ The gateway supports concurrent requests across different CLIs. Each request spa
 
 ### Socket alerts — context for reviewers
 
-If you're vetting `llm-cli-gateway` through [Socket](https://socket.dev/npm/package/llm-cli-gateway) or a similar supply-chain scanner, you'll see three behavioural alerts and some dependency-ownership alerts. They are accurate descriptions of what the package does and what it depends on; we've left them visible (not silenced in `socket.yml`) so you don't have to take our word for it. Here's the context for each:
+If you're vetting `llm-cli-gateway` through [Socket](https://socket.dev/npm/package/llm-cli-gateway) or a similar supply-chain scanner, you'll see behavioural alerts and some dependency-ownership alerts. They are accurate descriptions of what the package does and what it depends on. The reviewed `shellAccess` capability is suppressed in `socket.yml` to avoid a repeat finding on every release; the rationale remains documented here and in the package.
 
 | Alert                            | Where                                                                                                                                                                                            | Why it's bounded                                                                                                                                                                                                                                                                                                                                                                                     |
 | -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -1143,7 +1184,6 @@ If you're vetting `llm-cli-gateway` through [Socket](https://socket.dev/npm/pack
 | **Shell access**                 | `src/executor.ts` uses `child_process.spawn(cmd, args, …)` to invoke the underlying LLM CLIs.                                                                                                    | `spawn` is called with an argument array and **never** `shell: true`, so there is no shell interpolation path for caller input. The command name is restricted to an allow-list of known CLI binaries (`claude`, `codex`, `gemini`, `grok`, `vibe`).                                                                                                                                                 |
 | **Uses eval**                    | None in our source. Transitive: `@modelcontextprotocol/sdk` → `ajv@8` uses `new Function(...)` in `ajv/dist/compile/index.js` to compile JSON Schema validators.                                 | This is ajv's standard codegen path. Only known schemas (defined in our source and the MCP SDK) flow into it; no caller-supplied data ever reaches the compiled function body.                                                                                                                                                                                                                       |
 | **better-sqlite3 PRAGMA helper** | Transitive: `better-sqlite3/lib/methods/pragma.js` interpolates its caller-provided `source` into a `PRAGMA ${source}` statement.                                                                | We do not call `db.pragma()` from production source. Internal SQLite setup uses fixed literal `db.exec("PRAGMA ...")` statements, and `npm run security:audit` fails the release if production code reintroduces `.pragma()` calls.                                                                                                                                                                  |
-| **ioredis obfuscated code**      | Optional peer/dev dependency: `ioredis@5.10.1` may be flagged at `built/constants/TLSProfiles.js` for base64-looking strings.                                                                    | Reviewed as a false positive. The file is a Redis Cloud TLS CA certificate bundle in PEM format, which is base64 by design. It contains no decoder loop, dynamic evaluation, network call, or hidden execution path. The same file is byte-for-byte identical in `ioredis@5.9.2`; our default production install does not install `ioredis`, and our code does not pass ioredis TLS profile options. |
 | **Dependency ownership**         | A handful of small transitive packages (e.g. `bindings` via `better-sqlite3`, `media-typer` via `@modelcontextprotocol/sdk`) trip Socket's "unstable ownership" or "obfuscated code" heuristics. | These are pinned, well-known micro-deps in the Node ecosystem with no known issues. We pin direct override versions of `content-type` and `type-is` in `package.json#overrides`. Our previous direct dependency on `toml@3.0.0` (also single-maintainer, last released 2020) was replaced with the actively-maintained `smol-toml` to reduce inherited risk.                                         |
 
 See [`socket.yml`](./socket.yml) for the same context in machine-readable form.

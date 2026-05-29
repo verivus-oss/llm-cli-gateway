@@ -12,7 +12,7 @@ The new shape of the gateway: it now understands prompt caching as a first-class
 
 ## Mistral Vibe makes five (closing last week's loop)
 
-Mistral shipped [Vibe](https://docs.mistral.ai/mistral-vibe/overview), their open-source CLI coding agent powered by Devstral 2. The gateway now wires `mistral_request` and `mistral_request_async` alongside the other four providers. Same shape as the rest, sessions through `--resume` / `--continue` (which requires `[session_logging] enabled = true` in `~/.vibe/config.toml`, the doctor surfaces this so you do not get an opaque failure), model registry entries, self-update via the `vibe` binary itself, the same circuit-breaker, approval-gate, flight recorder, metrics, dedup, and durable-job-store plumbing as the others.
+Mistral shipped [Vibe](https://docs.mistral.ai/mistral-vibe/overview), their open-source CLI coding agent powered by Devstral 2. The gateway now wires `mistral_request` and `mistral_request_async` alongside the other four providers. Same shape as the rest, sessions through `--resume` / `--continue` (current Vibe defaults session logging on; doctor flags explicit disablement), model registry entries, installer-aware upgrades via pip/uv/Homebrew, the same circuit-breaker, approval-gate, flight recorder, metrics, dedup, and durable-job-store plumbing as the others.
 
 The model alias resolution is slightly different. Vibe has no `--model` flag, so the gateway injects the resolved alias via `VIBE_ACTIVE_MODEL` instead. That is the only material divergence from the Claude / Codex / Gemini / Grok pattern, and it is documented inline at the call site.
 

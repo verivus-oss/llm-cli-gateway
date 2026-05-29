@@ -103,20 +103,25 @@ const GUIDANCE: Record<CliType, ProviderLoginGuidance> = {
     install: {
       summary:
         "Install Mistral Vibe CLI via pip, uv, or Homebrew (Vibe does not self-update; cli_upgrade dispatches to the installer it detects).",
-      commands: ["pip install vibe-cli", "uv tool install vibe-cli", "brew install mistral-vibe"],
-      documentationUrl: "https://docs.mistral.ai/agents/vibe-cli",
+      commands: [
+        "curl -LsSf https://mistral.ai/vibe/install.sh | bash",
+        "pip install mistral-vibe",
+        "uv tool install mistral-vibe",
+        "brew install mistral-vibe",
+      ],
+      documentationUrl: "https://docs.mistral.ai/mistral-vibe/overview",
     },
     login: {
       summary:
-        "Sign in through Mistral's official auth flow and enable session_logging in ~/.vibe/config.toml.",
-      commands: ["vibe auth login", "vibe config set session_logging.enabled true"],
+        "Sign in through Mistral's official auth flow. Current Vibe defaults session logging to enabled; if an older config disabled it, edit ~/.vibe/config.toml and set [session_logging] enabled = true.",
+      commands: ["vibe auth login"],
       credentialHandling:
         "Do not paste Mistral API keys, OAuth tokens, or ~/.vibe/credentials into the gateway or a remote chat.",
     },
     verification: {
       command: "vibe --version",
       expected:
-        "Vibe CLI is installed; doctor additionally checks ~/.vibe/config.toml for session_logging.enabled=true",
+        "Vibe CLI is installed; doctor checks ~/.vibe/config.toml for an explicit session_logging.enabled=false override",
     },
   },
 };

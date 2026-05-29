@@ -153,7 +153,7 @@ Quote-for-user:
 | npm vulnerability audit is clean before release                        | `npm run security:audit` runs `npm audit --omit=dev --audit-level=moderate`                                                                                 |
 | Production source contains no dynamic execution patterns               | `scripts/release-security-audit.sh` scans non-test `src/` files for `eval`, `.eval`, `Function`, and `new Function` usage                                   |
 | Production source does not call better-sqlite3's dynamic PRAGMA helper | `scripts/release-security-audit.sh` scans non-test `src/` files for `.pragma()` calls; fixed SQLite setup uses literal `PRAGMA` SQL through `exec`          |
-| Socket-flagged dependency versions are blocked in the repo lockfile    | `scripts/release-security-audit.sh` rejects `content-type@2.0.0`, `type-is@2.1.0`, `ioredis@5.10.1`, and `@ioredis/commands@1.5.1` in `package-lock.json`   |
+| Socket-flagged dependency versions are blocked in the repo lockfile    | `scripts/release-security-audit.sh` rejects `content-type@2.0.0` and `type-is@2.1.0` in `package-lock.json`                                            |
 | Published npm consumers resolve the same safe dependency tree          | `scripts/release-security-audit.sh` packs the package, installs it into a temporary consumer project, and rejects the blocked dependency versions there too |
 | CI runs the same audit gate                                            | `.github/workflows/ci.yml` `build-and-test` job runs `npm run security:audit`                                                                               |
 
@@ -162,12 +162,10 @@ package: the gateway intentionally serves an MCP HTTP endpoint and launches
 provider CLIs. Those alerts must be reviewed and documented for each release,
 but they cannot be removed without removing the product's core behavior.
 
-The `ioredis` `built/constants/TLSProfiles.js` "obfuscated code" alert is
-reviewed as a false positive. The flagged strings are PEM-encoded Redis Cloud
-TLS CA certificates, not hidden executable code; the file is static TLS profile
-data and is byte-for-byte identical in `ioredis@5.9.2` and `ioredis@5.10.1`.
-The package remains outside the default production install path as an optional
-peer dependency for PostgreSQL/Redis session storage.
+The previous optional Redis cache layer for PostgreSQL-backed sessions was
+removed, so the release tree no longer carries the Redis client dependency or
+its transitive packages. PostgreSQL-backed sessions now require only the
+optional `pg` peer.
 
 OpenSSF Scorecard `FuzzingID` is valid, but tracked as a roadmap/process item.
 No fuzzing or property-test integration is present. This should not block a
@@ -185,6 +183,41 @@ The Socket score command uses Socket's API and may require a Socket token or
 local `socket login`. If it cannot run in CI, attach the local/Socket dashboard
 evidence to the release notes before publishing.
 
+## Upstream provider contracts
+
+| Gate                                                                                                | Evidence                                                                                                              |
+| --------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| Mechanical argv/env behaviour for all five CLIs has one source of truth                             | `src/upstream-contracts.ts` (`UPSTREAM_CLI_CONTRACTS`) + `validateUpstreamCliArgs` / `validateUpstreamCliEnv`         |
+| Bundled conformance fixtures + report + TOML-sync verified offline, network-free                    | `npm run upstream:contracts` (`scripts/upstream-scan.mjs --contracts-check`); fixtures pinned in `upstream-contracts.test.ts` |
+| TOML scanner input stays in sync with the TS metadata (no drift)                                    | `src/__tests__/upstream-sources.test.ts` asserts `provider-sources.dag.toml` mirrors `CliContract.upstreamMetadata`   |
+| Changelog/source tracking is advisory and manual; default gate needs no network or installed CLIs  | `docs/upstream/provider-sources.dag.toml` (scanner input only) + `docs/upstream/README.md`                            |
+
+Blocking release path (no network, no installed provider CLIs required beyond
+the existing optional `probeInstalledCliContract`):
+
+```bash
+npm run check               # build + lint + test + security:audit
+npm run upstream:contracts  # offline: fixtures + contract report + TOML-sync
+```
+
+Advisory upstream changelog scan (run manually, network required; never part of
+the default CI/release gate):
+
+```bash
+npm run upstream:scan -- --live --fail-on-critical
+# Persist source hashes + write a dated report:
+npm run upstream:scan -- --live --write-snapshot --write-report
+```
+
+If a live source fetch fails, the scanner reports an advisory finding and exits
+0 (it only exits non-zero under `--fail-on-critical`), so a flaky upstream page
+never breaks the default release gate.
+
+Synchronisation model (documented in `docs/upstream/README.md`): the TypeScript
+`CliContract.upstreamMetadata` is authoritative and enriches the contract
+report; `provider-sources.dag.toml` is scanner input only and is never consulted
+for mechanical contract enforcement.
+
 ## Final readiness sign-off
 
 The release topics above are gated on artifacts that exist in this commit
@@ -193,6 +226,8 @@ and were verified by:
 - Build: `npm run build` clean.
 - Lint: `npm run lint` 0 errors.
 - Security/SCA: `npm run security:audit` clean.
+- Upstream contracts: `npm run upstream:contracts` clean (offline fixtures +
+  report + TOML-sync).
 - Unit + integration: 560 tests pass via `npx vitest run`.
 - Release pipeline: `.github/workflows/release-installer.yml` builds
   platform binaries on the Linux self-hosted runner plus GitHub-hosted

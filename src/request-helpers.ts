@@ -6,7 +6,7 @@ import { existsSync, unlinkSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join, isAbsolute } from "path";
 import { randomUUID } from "crypto";
-import { z } from "zod";
+import { z } from "zod/v3";
 
 /** Prefix for gateway-generated session IDs. Enforces provenance structurally. */
 export const GATEWAY_SESSION_PREFIX = "gw-";
@@ -156,9 +156,9 @@ export function resolveGrokSessionArgs(opts: {
 /**
  * Mistral Vibe-specific resume args.
  *
- * Vibe persists sessions only when `[session_logging] enabled = true` is set in
- * `~/.vibe/config.toml`. The doctor checks for that toggle and surfaces an
- * actionable error when it is missing; this pure helper just emits the args.
+ * Current Vibe defaults session logging on; older configs can explicitly set
+ * `[session_logging] enabled = false`. The doctor checks that toggle before
+ * callers rely on session continuity; this pure helper just emits the args.
  *
  * The args shape mirrors Grok (`--continue` for latest, `--resume <id>` for a
  * specific session) because Vibe exposes the same surface for its session log.
@@ -241,6 +241,11 @@ export interface PrepareMistralRequestInput {
    */
   maxPrice?: number;
   /**
+   * Vibe 2.x supports `--max-tokens N` in programmatic mode, wired through to
+   * `run_programmatic(max_session_tokens=...)`.
+   */
+  maxTokens?: number;
+  /**
    * Phase 4 slice ζ: emit `--workdir <DIR>` so Vibe changes into the named
    * directory before running. Single value (Vibe accepts one --workdir).
    */
@@ -265,6 +270,8 @@ export interface PrepareMistralRequestResult {
  * - Model is selected via `VIBE_ACTIVE_MODEL` env var (NOT a `--model` flag).
  * - Permission mode emits `--agent <mode>` (defaults to `auto-approve` when unset).
  * - Allowed tools emit `--enabled-tools <tool>` once per tool (allowlist only).
+ * - Output format emits `--output <text|json|streaming>` (legacy gateway
+ *   aliases `plain` and `stream-json` are normalized before spawn).
  * - Disallowed tools are accepted but ignored at the CLI boundary.
  */
 export function prepareMistralRequest(
@@ -278,7 +285,7 @@ export function prepareMistralRequest(
   }
 
   if (input.outputFormat) {
-    args.push("--output-format", input.outputFormat);
+    args.push("--output", normalizeMistralOutputFormat(input.outputFormat));
   }
 
   const mode = input.permissionMode ?? MISTRAL_DEFAULT_AGENT_MODE;
@@ -308,6 +315,9 @@ export function prepareMistralRequest(
   if (input.maxPrice !== undefined) {
     args.push("--max-price", String(input.maxPrice));
   }
+  if (input.maxTokens !== undefined) {
+    args.push("--max-tokens", String(input.maxTokens));
+  }
   if (input.workingDir) {
     args.push("--workdir", input.workingDir);
   }
@@ -320,6 +330,12 @@ export function prepareMistralRequest(
   const ignoredDisallowedTools = Boolean(input.disallowedTools && input.disallowedTools.length > 0);
 
   return { args, env, ignoredDisallowedTools };
+}
+
+function normalizeMistralOutputFormat(format: string): string {
+  if (format === "plain") return "text";
+  if (format === "stream-json") return "streaming";
+  return format;
 }
 
 //──────────────────────────────────────────────────────────────────────────────
@@ -542,7 +558,7 @@ export type ClaudeEffortLevel = (typeof CLAUDE_EFFORT_LEVELS)[number];
 export const CLAUDE_HIGH_IMPACT_PARAMS_SCHEMA = z
   .object({
     agent: z.string().optional(),
-    agents: z.record(z.record(z.unknown())).optional(),
+    agents: z.record(z.string(), z.record(z.string(), z.unknown())).optional(),
     forkSession: z.boolean().optional(),
     systemPrompt: z.string().optional(),
     appendSystemPrompt: z.string().optional(),
@@ -804,7 +820,7 @@ export function findMissingImagePath(images: string[] | undefined): string | nul
  * params before they reach `prepareCodexRequest`.
  */
 export const CODEX_HIGH_IMPACT_PARAMS_SCHEMA = z.object({
-  outputSchema: z.union([z.string(), z.record(z.unknown())]).optional(),
+  outputSchema: z.union([z.string(), z.record(z.string(), z.unknown())]).optional(),
   search: z.boolean().optional(),
   profile: z.string().optional(),
   configOverrides: CODEX_CONFIG_OVERRIDES_SCHEMA,

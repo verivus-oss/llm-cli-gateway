@@ -6,7 +6,7 @@ import { randomUUID } from "crypto";
 import { existsSync, readFileSync, readdirSync, renameSync, unlinkSync } from "fs";
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
-import { z } from "zod";
+import { z } from "zod/v3";
 import { executeCli, killAllProcessGroups } from "./executor.js";
 import { parseStreamJson } from "./stream-json-parser.js";
 import { parseCodexJsonStream } from "./codex-json-parser.js";
@@ -290,7 +290,7 @@ Other: list_models, cli_versions, upstream_contracts, cli_upgrade, approval_list
 
 Key behaviors:
 - Sync auto-defers at ${SYNC_DEADLINE_MS}ms. Poll deferred jobs via llm_job_status/llm_job_result.
-- Sessions: Claude --continue, Gemini --resume, Grok --resume/--continue, Mistral --resume/--continue (requires session_logging.enabled=true in ~/.vibe/config.toml), Codex \`exec resume <ID>\` / \`exec resume --last\` (all real CLI continuity). For Codex, sessionId must be a real Codex UUID (from ~/.codex/sessions/); gateway-generated gw-* IDs are rejected.
+- Sessions: Claude --continue, Gemini --resume, Grok --resume/--continue, Mistral --resume/--continue (current Vibe defaults session logging on; doctor flags explicit session_logging.enabled=false), Codex \`exec resume <ID>\` / \`exec resume --last\` (all real CLI continuity). For Codex, sessionId must be a real Codex UUID (from ~/.codex/sessions/); gateway-generated gw-* IDs are rejected.
 - Approval gates: opt-in via approvalStrategy:"mcp_managed".
 - Idle timeout kills stuck processes (default 10min, configurable via idleTimeoutMs).
 
@@ -390,6 +390,10 @@ const MCP_SERVER_ENUM = z.enum(CLAUDE_MCP_SERVER_NAMES);
  * upper bound — no plausible single agent loop exceeds 10k turns or 10k USD.
  */
 export const MAX_TURNS_SCHEMA = z.number().int().positive().safe().max(10_000);
+// Token budgets can legitimately exceed the agent-turn cap by orders of
+// magnitude. Keep a finite operational guardrail while avoiding the 10k turn
+// ceiling that would make large-context Vibe sessions unusable.
+export const MAX_TOKENS_SCHEMA = z.number().int().positive().safe().max(100_000_000);
 // `.min(1e-6)` keeps the value in JS's decimal-stringify range:
 // String(1e-6) === "0.000001" but String(1e-7) === "1e-7", which both
 // upstream CLIs would reject. 1µUSD per request is fine-grained enough
@@ -2492,6 +2496,8 @@ export function prepareMistralRequest(
     maxTurns?: number;
     /** Phase 4 slice δ: Vibe `--max-price DOLLARS` cumulative-cost cap. */
     maxPrice?: number;
+    /** Vibe 2.x: `--max-tokens N` cumulative prompt + completion token cap. */
+    maxTokens?: number;
     /** Phase 4 slice ζ: Vibe `--workdir <DIR>` working-directory parity. */
     workingDir?: string;
     /** Phase 4 slice ζ: Vibe `--add-dir <DIR>` repeatable add-dir parity. */
@@ -2582,6 +2588,7 @@ export function prepareMistralRequest(
     trust: params.trust,
     maxTurns: params.maxTurns,
     maxPrice: params.maxPrice,
+    maxTokens: params.maxTokens,
     workingDir: params.workingDir,
     addDir: params.addDir,
   });
@@ -2646,6 +2653,7 @@ export function buildMistralRetryPrep(
     | "trust"
     | "maxTurns"
     | "maxPrice"
+    | "maxTokens"
     | "workingDir"
     | "addDir"
   > & { effectivePrompt: string },
@@ -2666,6 +2674,7 @@ export function buildMistralRetryPrep(
     trust: params.trust,
     maxTurns: params.maxTurns,
     maxPrice: params.maxPrice,
+    maxTokens: params.maxTokens,
     workingDir: params.workingDir,
     addDir: params.addDir,
   });
@@ -3575,6 +3584,8 @@ export interface MistralRequestParams {
   maxTurns?: number;
   /** Phase 4 slice δ: Vibe `--max-price DOLLARS` cumulative-cost cap. */
   maxPrice?: number;
+  /** Vibe 2.x: `--max-tokens N` cumulative prompt + completion token cap. */
+  maxTokens?: number;
   /** Phase 4 slice ζ: Vibe `--workdir <DIR>` working-directory parity. */
   workingDir?: string;
   /** Phase 4 slice ζ: Vibe `--add-dir <DIR>` repeatable add-dir parity. */
@@ -3609,6 +3620,7 @@ export async function handleMistralRequest(
       trust: params.trust,
       maxTurns: params.maxTurns,
       maxPrice: params.maxPrice,
+      maxTokens: params.maxTokens,
       workingDir: params.workingDir,
       addDir: params.addDir,
     },
@@ -3842,6 +3854,7 @@ export async function handleMistralRequestAsync(
       trust: params.trust,
       maxTurns: params.maxTurns,
       maxPrice: params.maxPrice,
+      maxTokens: params.maxTokens,
       workingDir: params.workingDir,
       addDir: params.addDir,
     },
@@ -4231,7 +4244,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .optional()
         .describe("Claude --agent: dispatch to a named single sub-agent."),
       agents: z
-        .record(z.record(z.unknown()))
+        .record(z.string(), z.record(z.string(), z.unknown()))
         .optional()
         .describe(
           "Claude --agents: inline JSON map of agent name → { description, prompt, tools?, model? }."
@@ -4278,7 +4291,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           "Claude --fallback-model: model name to auto-fallback to when the default model is overloaded (effective only with --print, which the gateway always uses)."
         ),
       jsonSchema: z
-        .union([z.string(), z.record(z.unknown())])
+        .union([z.string(), z.record(z.string(), z.unknown())])
         .optional()
         .describe(
           "Claude --json-schema: JSON Schema literal (NOT a path) constraining structured output. Object values are JSON.stringify-d; string values are passed verbatim. Use with outputFormat='json'."
@@ -4755,7 +4768,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         ),
       // U26: high-impact feature flags. All optional.
       outputSchema: z
-        .union([z.string(), z.record(z.unknown())])
+        .union([z.string(), z.record(z.string(), z.unknown())])
         .optional()
         .describe(
           "Codex --output-schema. Pass a path (string) or an inline JSON Schema object; object is materialised to a 0o600 temp file under os.tmpdir() and deleted after the run."
@@ -5550,14 +5563,16 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           "Model alias (e.g. mistral-medium-3.5, latest). Resolved alias is injected via VIBE_ACTIVE_MODEL env var; Vibe has no --model flag."
         ),
       outputFormat: z
-        .enum(["plain", "json", "stream-json"])
+        .enum(["text", "plain", "json", "streaming", "stream-json"])
         .optional()
-        .describe("Output format (plain|json|stream-json). Vibe default is plain."),
+        .describe(
+          "Output format for Vibe 2.x (text|json|streaming). Legacy aliases plain→text and stream-json→streaming are accepted."
+        ),
       sessionId: z
         .string()
         .optional()
         .describe(
-          "Session ID (user-provided CLI handle for --resume). Requires [session_logging] enabled = true in ~/.vibe/config.toml."
+          "Session ID (user-provided CLI handle for --resume). Current Vibe defaults session logging on; doctor flags explicit [session_logging] enabled = false."
         ),
       resumeLatest: z
         .boolean()
@@ -5629,6 +5644,9 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       maxPrice: MAX_PRICE_SCHEMA.optional().describe(
         "Vibe `--max-price DOLLARS`: interrupt the session when cumulative cost crosses this cap (programmatic mode only, Phase 4 slice δ). Bounded to finite values ≤ 10000 USD."
       ),
+      maxTokens: MAX_TOKENS_SCHEMA.optional().describe(
+        "Vibe `--max-tokens N`: cap cumulative prompt + completion tokens for the session (programmatic mode only). Bounded to safe integers ≤ 100000000."
+      ),
       // Phase 4 slice ζ — Vibe working-directory + additional-dirs parity.
       workingDir: z
         .string()
@@ -5669,6 +5687,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       trust,
       maxTurns,
       maxPrice,
+      maxTokens,
       workingDir,
       addDir,
       worktree,
@@ -5699,6 +5718,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           trust,
           maxTurns,
           maxPrice,
+          maxTokens,
           workingDir,
           addDir,
           worktree,
@@ -5767,7 +5787,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .optional()
           .describe("Claude --agent: dispatch to a named single sub-agent."),
         agents: z
-          .record(z.record(z.unknown()))
+          .record(z.string(), z.record(z.string(), z.unknown()))
           .optional()
           .describe(
             "Claude --agents: inline JSON map of agent name → { description, prompt, tools?, model? }."
@@ -5814,7 +5834,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             "Claude --fallback-model: model name to auto-fallback to when the default model is overloaded (effective only with --print, which the gateway always uses)."
           ),
         jsonSchema: z
-          .union([z.string(), z.record(z.unknown())])
+          .union([z.string(), z.record(z.string(), z.unknown())])
           .optional()
           .describe(
             "Claude --json-schema: JSON Schema literal (NOT a path) constraining structured output. Object values are JSON.stringify-d; string values are passed verbatim. Use with outputFormat='json'."
@@ -6144,7 +6164,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           ),
         // U26: high-impact feature flags. All optional.
         outputSchema: z
-          .union([z.string(), z.record(z.unknown())])
+          .union([z.string(), z.record(z.string(), z.unknown())])
           .optional()
           .describe("Codex --output-schema. Pass a path (string) or an inline JSON Schema object."),
         search: z.boolean().optional().describe("Emit Codex --search to enable web search."),
@@ -6597,14 +6617,16 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             "Model alias (resolved into VIBE_ACTIVE_MODEL env var — Vibe has no --model flag)"
           ),
         outputFormat: z
-          .enum(["plain", "json", "stream-json"])
+          .enum(["text", "plain", "json", "streaming", "stream-json"])
           .optional()
-          .describe("Output format (plain|json|stream-json). Vibe default is plain."),
+          .describe(
+            "Output format for Vibe 2.x (text|json|streaming). Legacy aliases plain→text and stream-json→streaming are accepted."
+          ),
         sessionId: z
           .string()
           .optional()
           .describe(
-            "Session ID (user-provided CLI handle for --resume). Requires [session_logging] enabled = true in ~/.vibe/config.toml."
+            "Session ID (user-provided CLI handle for --resume). Current Vibe defaults session logging on; doctor flags explicit [session_logging] enabled = false."
           ),
         resumeLatest: z
           .boolean()
@@ -6675,6 +6697,9 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         maxPrice: MAX_PRICE_SCHEMA.optional().describe(
           "Vibe `--max-price DOLLARS`: interrupt the session when cumulative cost crosses this cap (programmatic mode only, Phase 4 slice δ). Bounded to finite values ≤ 10000 USD."
         ),
+        maxTokens: MAX_TOKENS_SCHEMA.optional().describe(
+          "Vibe `--max-tokens N`: cap cumulative prompt + completion tokens for the session (programmatic mode only). Bounded to safe integers ≤ 100000000."
+        ),
         // Phase 4 slice ζ — Vibe working-directory + additional-dirs parity.
         workingDir: z
           .string()
@@ -6714,6 +6739,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         trust,
         maxTurns,
         maxPrice,
+        maxTokens,
         workingDir,
         addDir,
         worktree,
@@ -6743,6 +6769,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             trust,
             maxTurns,
             maxPrice,
+            maxTokens,
             workingDir,
             addDir,
             worktree,
@@ -7459,8 +7486,8 @@ async function initializeSessionManager(): Promise<void> {
   // there.
   const worktreeCleanupHook = createWorktreeSessionCleanupHook(logger);
 
-  if (config.database && config.redis) {
-    logger.info("Initializing PostgreSQL + Redis session manager");
+  if (config.database) {
+    logger.info("Initializing PostgreSQL session manager");
     const { createDatabaseConnection } = await import("./db.js");
     db = await createDatabaseConnection(config, logger);
     sessionManager = await createSessionManager(config, db, logger);

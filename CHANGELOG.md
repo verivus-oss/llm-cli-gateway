@@ -4,6 +4,107 @@ All notable changes to the llm-cli-gateway project.
 
 ## Unreleased
 
+## [1.17.1] - 2026-05-30 — Socket shell-access suppression
+
+Patch release updating the package's Socket policy for the reviewed gateway
+process-launching capability.
+
+### Changed
+
+- Suppressed Socket's `shellAccess` alert in `socket.yml` now that the
+  child-process surface is documented and release-audited.
+- Updated README Socket-alert wording so reviewers still get the bounded
+  shell-access rationale without seeing the same package alert on every release.
+
+## [1.17.0] - 2026-05-30 — upstream provider tracking
+
+Feature release adding repeatable upstream-provider contract tracking for the
+gateway's supported CLIs.
+
+### Added
+
+- Added provider-specific maintenance skills for Claude Code, Codex, Gemini,
+  Grok, and Mistral Vibe.
+- Added upstream source metadata to the CLI contract table and mirrored it into
+  `docs/upstream/provider-sources.dag.toml`.
+- Added `scripts/upstream-scan.mjs` plus `npm run upstream:contracts` and
+  `npm run upstream:scan` for offline contract checks and advisory live source
+  scans.
+- Added upstream source tests covering contract/TOML synchronization.
+
+### Changed
+
+- Pointed Claude Code tracking at the markdown changelog, Codex tracking at the
+  GitHub releases feed plus product changelog, Gemini tracking at the Gemini CLI
+  changelog plus GitHub releases, and Grok tracking at the markdown xAI release
+  notes.
+- Ignored local-only agent/worktree artifacts that should not enter source
+  control.
+
+### Fixed
+
+- Fixed the `maxTokens` request schema so token budgets no longer reuse the
+  `maxTurns` limit.
+
+## [1.16.2] - 2026-05-29 — release formatting follow-up
+
+Patch release that keeps the Mistral Vibe CLI contract fixes from `1.16.1`
+and fixes the Prettier check failure on the release commit.
+
+### Fixed
+
+- Formatted the new Vibe session-logging doctor tests so the repository CI
+  format gate passes.
+
+## [1.16.1] - 2026-05-29 — align Mistral Vibe CLI contract
+
+Patch release for the current `mistral-vibe` CLI surface.
+
+### Fixed
+
+- Updated Mistral Vibe requests to emit `--output text|json|streaming` instead
+  of the removed `--output-format` flag.
+- Kept legacy MCP aliases working by mapping `plain` to `text` and
+  `stream-json` to `streaming`.
+- Added `maxTokens` support for Mistral Vibe via `--max-tokens`.
+- Updated Vibe install, upgrade, and doctor guidance for the current
+  `mistral-vibe` package and default-on session logging.
+
+## [1.16.0] - 2026-05-29 — remove Redis session dependency
+
+Feature release that removes the optional Redis/ioredis layer from the
+PostgreSQL-backed session manager and tightens the public README around the
+project's current demand and quality signals.
+
+### Removed
+
+- Removed the optional `ioredis` peer/dev dependency and its transitive
+  packages from the install graph.
+- Removed `REDIS_URL` as a requirement for PostgreSQL-backed sessions.
+- Removed Redis from the PostgreSQL test Docker Compose stack and PG test
+  harness.
+
+### Changed
+
+- PostgreSQL-backed sessions now require only `DATABASE_URL` plus the optional
+  `pg` peer dependency. PostgreSQL remains the source of truth for session
+  records and active-session state.
+- Simplified database health reporting to PostgreSQL connectivity only.
+- Simplified the PG session manager by removing Redis cache-aside reads/writes
+  and Redis lock handling.
+- Updated migration and testing docs to describe the Postgres-only backend.
+- Updated release-readiness and Socket-alert documentation now that the Redis
+  client dependency is no longer present.
+- Refocused the README first screen around the strongest current trust and
+  demand signals: npm monthly downloads, passing CI/security workflows,
+  OpenSSF status, Sigstore-signed releases, and MIT licensing.
+
+### Added
+
+- Added `docs/plans/provider-workflow-assets.dag.toml`, a machine-readable
+  implementation plan for provider-specific skill and DAG-TOML pairs for
+  Claude, Codex, Gemini, Grok, and Mistral Vibe.
+
 ## [1.15.3] - 2026-05-29 — remove retired PyPI plugin
 
 Patch release removing the retired Python `llm` plugin integration so the

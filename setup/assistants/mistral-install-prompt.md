@@ -14,18 +14,20 @@ inbound connector steps.
 
 Before giving setup instructions, verify doctor JSON shows
 `providers.mistral.cli_available`. If it is `false`, walk the user through
-one of the supported installers (`pip install vibe-cli`,
-`uv tool install vibe-cli`, or `brew install mistral-vibe`) and ask for
-fresh doctor JSON.
+one of the supported installers
+(`curl -LsSf https://mistral.ai/vibe/install.sh | bash`,
+`pip install mistral-vibe`, `uv tool install mistral-vibe`, or
+`brew install mistral-vibe`) and ask for fresh doctor JSON.
 
-Session continuity (`mistral_request --resume` / `--continue`) requires
-`[session_logging] enabled = true` in `~/.vibe/config.toml`. The doctor
-field `client_config.vibe_session_logging.session_logging_enabled` gates
-this. When it is `false`, give the user this one command and ask for fresh
-doctor JSON afterwards:
+Session continuity (`mistral_request --resume` / `--continue`) uses Vibe's
+session log. Current Vibe defaults session logging to enabled; the doctor
+field `client_config.vibe_session_logging.session_logging_enabled` only goes
+false when config explicitly disables it. When it is `false`, tell the user to
+edit `~/.vibe/config.toml` and ask for fresh doctor JSON afterwards:
 
-```bash
-vibe config set session_logging.enabled true
+```toml
+[session_logging]
+enabled = true
 ```
 
 Model selection: Vibe has no `--model` flag. The gateway injects the active

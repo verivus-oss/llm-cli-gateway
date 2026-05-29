@@ -317,8 +317,8 @@ export async function createSessionManager(
   logger?: Logger,
   opts?: { cleanupHook?: SessionCleanupHook }
 ): Promise<ISessionManager> {
-  if (config?.database && config?.redis) {
-    // Import dynamically to avoid loading pg/ioredis if not needed
+  if (config?.database) {
+    // Import dynamically to avoid loading pg if not needed.
     const { PostgreSQLSessionManager } = await import("./session-manager-pg.js");
 
     // Use provided db connection or create new one
@@ -327,12 +327,7 @@ export async function createSessionManager(
       db = await createDatabaseConnection(config, logger);
     }
 
-    return new PostgreSQLSessionManager(
-      db.getPool(),
-      db.getRedis(),
-      config.cacheTtl,
-      logger ?? noopLogger
-    );
+    return new PostgreSQLSessionManager(db.getPool());
   } else {
     // Use file-based storage with TTL from config
     const sessionTtlMs = config?.sessionTtl
