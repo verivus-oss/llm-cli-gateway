@@ -4,7 +4,6 @@
 [![Security](https://github.com/verivus-oss/llm-cli-gateway/actions/workflows/security.yml/badge.svg?branch=main)](https://github.com/verivus-oss/llm-cli-gateway/actions/workflows/security.yml)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/verivus-oss/llm-cli-gateway/badge)](https://scorecard.dev/viewer/?uri=github.com/verivus-oss/llm-cli-gateway)
 [![npm](https://img.shields.io/npm/v/llm-cli-gateway.svg)](https://www.npmjs.com/package/llm-cli-gateway)
-[![npm monthly downloads](https://img.shields.io/npm/dm/llm-cli-gateway.svg)](https://www.npmjs.com/package/llm-cli-gateway)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 > _"Without consultation, plans are frustrated, but with many counselors they succeed."_
@@ -14,7 +13,7 @@ A Model Context Protocol (MCP) gateway for running Claude Code, Codex, Gemini, G
 
 **Why developers try it:** one local MCP endpoint for cross-LLM validation, multi-agent coding workflows, and repeatable assistant-led setup across five provider CLIs.
 
-**Current signals:** crossed 5k monthly npm downloads in May 2026; live npm downloads are shown above. CI and security workflows pass on `main`, OpenSSF Scorecard is published, OpenSSF Best Practices is passing, releases use Sigstore signing, and the package is MIT licensed.
+**Current signals:** CI and security workflows pass on `main`, OpenSSF Scorecard is published, OpenSSF Best Practices is passing, releases use Sigstore signing, and the package is MIT licensed.
 
 ## Quick Start
 
@@ -55,8 +54,6 @@ The next documentation focus is provider-specific skill and DAG-TOML pairs for e
 ## Trust & Supply Chain
 
 [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/13025/badge)](https://www.bestpractices.dev/projects/13025)
-[![npm weekly downloads](https://img.shields.io/npm/dw/llm-cli-gateway.svg)](https://www.npmjs.com/package/llm-cli-gateway)
-[![GitHub release downloads](https://img.shields.io/github/downloads/verivus-oss/llm-cli-gateway/total.svg)](https://github.com/verivus-oss/llm-cli-gateway/releases)
 [![Releases: Sigstore signed](https://img.shields.io/badge/releases-Sigstore%20signed-2e7d32.svg)](SECURITY.md#release-signing)
 
 - CI runs build, lint, format, tests, package checks, and npm audit.
