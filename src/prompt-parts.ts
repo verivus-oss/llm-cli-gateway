@@ -1,5 +1,5 @@
 import { createHash } from "crypto";
-import { z } from "zod";
+import { z } from "zod/v3";
 
 export interface PromptPartsCacheControl {
   system?: boolean;

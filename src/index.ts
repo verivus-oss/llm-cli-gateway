@@ -6,7 +6,7 @@ import { randomUUID } from "crypto";
 import { existsSync, readFileSync, readdirSync, renameSync, unlinkSync } from "fs";
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
-import { z } from "zod";
+import { z } from "zod/v3";
 import { executeCli, killAllProcessGroups } from "./executor.js";
 import { parseStreamJson } from "./stream-json-parser.js";
 import { parseCodexJsonStream } from "./codex-json-parser.js";
@@ -4244,7 +4244,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .optional()
         .describe("Claude --agent: dispatch to a named single sub-agent."),
       agents: z
-        .record(z.record(z.unknown()))
+        .record(z.string(), z.record(z.string(), z.unknown()))
         .optional()
         .describe(
           "Claude --agents: inline JSON map of agent name → { description, prompt, tools?, model? }."
@@ -4291,7 +4291,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           "Claude --fallback-model: model name to auto-fallback to when the default model is overloaded (effective only with --print, which the gateway always uses)."
         ),
       jsonSchema: z
-        .union([z.string(), z.record(z.unknown())])
+        .union([z.string(), z.record(z.string(), z.unknown())])
         .optional()
         .describe(
           "Claude --json-schema: JSON Schema literal (NOT a path) constraining structured output. Object values are JSON.stringify-d; string values are passed verbatim. Use with outputFormat='json'."
@@ -4768,7 +4768,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         ),
       // U26: high-impact feature flags. All optional.
       outputSchema: z
-        .union([z.string(), z.record(z.unknown())])
+        .union([z.string(), z.record(z.string(), z.unknown())])
         .optional()
         .describe(
           "Codex --output-schema. Pass a path (string) or an inline JSON Schema object; object is materialised to a 0o600 temp file under os.tmpdir() and deleted after the run."
@@ -5787,7 +5787,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .optional()
           .describe("Claude --agent: dispatch to a named single sub-agent."),
         agents: z
-          .record(z.record(z.unknown()))
+          .record(z.string(), z.record(z.string(), z.unknown()))
           .optional()
           .describe(
             "Claude --agents: inline JSON map of agent name → { description, prompt, tools?, model? }."
@@ -5834,7 +5834,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             "Claude --fallback-model: model name to auto-fallback to when the default model is overloaded (effective only with --print, which the gateway always uses)."
           ),
         jsonSchema: z
-          .union([z.string(), z.record(z.unknown())])
+          .union([z.string(), z.record(z.string(), z.unknown())])
           .optional()
           .describe(
             "Claude --json-schema: JSON Schema literal (NOT a path) constraining structured output. Object values are JSON.stringify-d; string values are passed verbatim. Use with outputFormat='json'."
@@ -6164,7 +6164,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           ),
         // U26: high-impact feature flags. All optional.
         outputSchema: z
-          .union([z.string(), z.record(z.unknown())])
+          .union([z.string(), z.record(z.string(), z.unknown())])
           .optional()
           .describe("Codex --output-schema. Pass a path (string) or an inline JSON Schema object."),
         search: z.boolean().optional().describe("Emit Codex --search to enable web search."),
