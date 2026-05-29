@@ -104,6 +104,16 @@ describe("U27 prependGeminiAttachments", () => {
     const missing = join(tmp, "missing.png");
     expect(() => prependGeminiAttachments("p", [missing])).toThrow(/does not exist/);
   });
+
+  it("throws on paths that cannot be represented as Gemini @path tokens", () => {
+    const pathWithSpace = join(tmp, "file with space.png");
+    const pathWithAt = join(tmp, "file@name.png");
+    writeFileSync(pathWithSpace, "image", { mode: 0o600 });
+    writeFileSync(pathWithAt, "image", { mode: 0o600 });
+
+    expect(() => prependGeminiAttachments("p", [pathWithSpace])).toThrow(/without escaping/);
+    expect(() => prependGeminiAttachments("p", [pathWithAt])).toThrow(/without escaping/);
+  });
 });
 
 describe("U27 GEMINI_HIGH_IMPACT_PARAMS_SCHEMA", () => {
@@ -231,5 +241,25 @@ describe("U27 prepareGeminiRequest end-to-end", () => {
     const remainder = prep.args.slice(2);
     expect(remainder).toContain("--model");
     expect(remainder).toContain("-s");
+  });
+});
+
+describe("Phase 4 slice γ — Gemini --skip-trust wiring", () => {
+  it("emits --skip-trust when skipTrust=true", () => {
+    const prep = prepareGeminiRequest(baseParams({ skipTrust: true }));
+    if (!("args" in prep)) throw new Error("expected args");
+    expect(prep.args).toContain("--skip-trust");
+  });
+
+  it("does NOT emit --skip-trust when skipTrust=false", () => {
+    const prep = prepareGeminiRequest(baseParams({ skipTrust: false }));
+    if (!("args" in prep)) throw new Error("expected args");
+    expect(prep.args).not.toContain("--skip-trust");
+  });
+
+  it("does NOT emit --skip-trust when skipTrust is omitted (default behaviour preserved)", () => {
+    const prep = prepareGeminiRequest(baseParams({}));
+    if (!("args" in prep)) throw new Error("expected args");
+    expect(prep.args).not.toContain("--skip-trust");
   });
 });

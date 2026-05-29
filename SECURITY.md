@@ -4,7 +4,7 @@
 
 Email **security@verivus.com** with:
 
-- A short description of the issue, including the affected version (`llm-cli-gateway` npm tag or `integrations/llm-plugin/pyproject.toml` version) and the affected component (specific tool, MCP resource, executor path, async-job handler, flight-recorder migration, etc.).
+- A short description of the issue, including the affected version (`llm-cli-gateway` npm tag or GitHub release tag) and the affected component (specific tool, MCP resource, executor path, async-job handler, flight-recorder migration, etc.).
 - A minimal reproduction if applicable: the MCP tool invocation (or curl against the HTTP transport), the expected outcome, and the observed outcome.
 - Whether you believe the issue is exploitable from an MCP client (e.g. an orchestrating agent), from an upstream CLI's stdout/stderr, from the audit-focused flight recorder (`~/.llm-cli-gateway/logs.db`), from the session manager (`~/.llm-cli-gateway/sessions.json`), or from the optional HTTP transport (`LLM_GATEWAY_TRANSPORT=http`).
 
@@ -25,7 +25,7 @@ In scope:
 Out of scope (please report upstream):
 
 - Vulnerabilities in the wrapped CLIs themselves (Claude Code, Codex, Gemini, Grok, Mistral Vibe). Report to the CLI vendor.
-- Vulnerabilities in transitive npm/PyPI dependencies — file with the upstream maintainer; we'll bump on disclosure.
+- Vulnerabilities in transitive npm dependencies — file with the upstream maintainer; we'll bump on disclosure.
 - Aesthetic preferences about the tool surface or naming.
 
 ## Disclosure
@@ -34,9 +34,20 @@ We coordinate disclosure: the reporter and the maintainers agree on a timeline. 
 
 We credit reporters in `CHANGELOG.md` for the release that fixes the finding, unless the reporter requests otherwise.
 
-## Out-of-band signing
+## Release signing
 
-This repository **does not** sign release tags today (matching the historical pattern: v1.0.0 onward are unsigned annotated tags). `npm publish` provenance via the OIDC sigstore path is the supply-chain integrity gate for the npm artefact; PyPI trusted publishing is the equivalent for the Python plugin. If you need cryptographic proof of provenance for a specific release, contact security@verivus.com and we will negotiate a signed manifest out-of-band.
+Release tags are not signed today (matching the historical pattern: v1.0.0 onward are unsigned annotated tags). Starting with v1.15.1, GitHub release installer artifacts are signed with Sigstore keyless signing from GitHub Actions OIDC. Each uploaded artifact gets a `<artifact>.sigstore.json` bundle, including `SHA256SUMS.sigstore.json`.
+
+Verify the checksum manifest before trusting artifact checksums:
+
+```bash
+cosign verify-blob SHA256SUMS --bundle SHA256SUMS.sigstore.json \
+  --certificate-identity "https://github.com/verivus-oss/llm-cli-gateway/.github/workflows/release-installer.yml@refs/tags/v<version>" \
+  --certificate-oidc-issuer "https://token.actions.githubusercontent.com"
+sha256sum --check SHA256SUMS
+```
+
+`npm publish` provenance via the OIDC sigstore path remains the supply-chain integrity gate for the npm artifact.
 
 ## Threat surfaces NOT covered by automated CI
 

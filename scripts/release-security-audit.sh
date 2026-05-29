@@ -89,9 +89,7 @@ import fs from 'node:fs';
 
 const lock = JSON.parse(fs.readFileSync('package-lock.json', 'utf8'));
 const blocked = new Map([
-  ['@ioredis/commands', new Set(['1.5.1'])],
   ['content-type', new Set(['2.0.0'])],
-  ['ioredis', new Set(['5.10.1'])],
   ['type-is', new Set(['2.1.0'])],
 ]);
 const findings = [];

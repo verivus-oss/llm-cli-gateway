@@ -37,6 +37,12 @@ For Claude CLI compatible local configuration, the equivalent command is:
 claude mcp add --transport http llm-cli-gateway http://127.0.0.1:3333/mcp --header "Authorization: Bearer $(cat ~/.llm-cli-gateway/auth-token)"
 ```
 
+For Claude Desktop on Windows with 1Password-managed environment injection, use
+[`claude-desktop-windows-mcp-config.example.json`](claude-desktop-windows-mcp-config.example.json)
+as a sanitized template. Replace only the placeholder account/vault/item values;
+do not commit a local config with real 1Password account IDs, vault item names,
+device names, or machine-specific tool paths.
+
 If a Claude Desktop remote connector path does not expose custom bearer headers, use local stdio setup instead of removing gateway auth. Do not paste the expanded bearer token into a remote chat.
 
 ## Verification

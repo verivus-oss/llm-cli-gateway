@@ -253,6 +253,27 @@ describe("executeCli", () => {
       }
     });
 
+    it("escapes long backslash runs in linear time", () => {
+      const shimDir = mkdtempSync(join(tmpdir(), "gateway-win-shims-long-"));
+      const previousCwd = process.cwd();
+      try {
+        process.chdir(shimDir);
+        writeFileSync("tool.cmd", "@echo off\r\nexit /b 0\r\n");
+
+        const longBackslashes = "\\".repeat(10_000);
+        const resolved = resolveCommandForSpawn("tool", [`${longBackslashes}"`], {
+          envPath: ".",
+          platform: "win32",
+        });
+
+        expect(resolved.command.toLowerCase()).toBe("cmd.exe");
+        expect(resolved.args[3]).toContain("\\".repeat(20_001));
+        expect(resolved.windowsVerbatimArguments).toBe(true);
+      } finally {
+        process.chdir(previousCwd);
+      }
+    });
+
     it("should inherit environment variables", async () => {
       const result = await executeCli("sh", ["-c", "echo $HOME"]);
       expect(result.stdout.trim()).toBeTruthy();

@@ -2,14 +2,12 @@ import { writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { Pool } from "pg";
-import { Redis } from "ioredis";
 import { beforeAll, afterAll, beforeEach } from "vitest";
 import type { Logger } from "../logger.js";
 
 // Test database configuration
 const TEST_DATABASE_URL =
   process.env.TEST_DATABASE_URL || "postgresql://test:test@localhost:5433/llm_gateway_test";
-const TEST_REDIS_URL = process.env.TEST_REDIS_URL || "redis://localhost:6380/1";
 const PG_TESTS_ENABLED = process.env.PG_TESTS === "1";
 const MIGRATION_LOCK_KEY = 88421173;
 const CLEANUP_LOCK_KEY = 88421174;
@@ -31,7 +29,6 @@ delete process.env.LLM_GATEWAY_LOGS_DB;
 delete process.env.LLM_GATEWAY_JOBS_DB;
 
 let testPool: Pool | null = null;
-let testRedis: Redis | null = null;
 
 /**
  * Mock logger for tests
@@ -45,7 +42,7 @@ export const mockLogger: Logger = {
 /**
  * Setup test database connections
  */
-export async function setupTestDatabase(): Promise<{ pool: Pool; redis: Redis }> {
+export async function setupTestDatabase(): Promise<{ pool: Pool }> {
   if (!testPool) {
     testPool = new Pool({ connectionString: TEST_DATABASE_URL });
 
@@ -109,14 +106,7 @@ export async function setupTestDatabase(): Promise<{ pool: Pool; redis: Redis }>
     }
   }
 
-  if (!testRedis) {
-    testRedis = new Redis(TEST_REDIS_URL, {
-      lazyConnect: false,
-    });
-    await testRedis.ping();
-  }
-
-  return { pool: testPool, redis: testRedis };
+  return { pool: testPool };
 }
 
 /**
@@ -140,10 +130,6 @@ export async function cleanTestDatabase(): Promise<void> {
       client.release();
     }
   }
-
-  if (testRedis) {
-    await testRedis.flushdb();
-  }
 }
 
 /**
@@ -153,11 +139,6 @@ export async function teardownTestDatabase(): Promise<void> {
   if (testPool) {
     await testPool.end();
     testPool = null;
-  }
-
-  if (testRedis) {
-    testRedis.disconnect();
-    testRedis = null;
   }
 }
 

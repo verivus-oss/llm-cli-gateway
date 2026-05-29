@@ -3,7 +3,7 @@
 ## Read first
 - Plan: `/srv/repos/internal/verivusai-labs/rvwr/llm-cli-gateway/docs/plans/cache-awareness.dag.toml`
 - Project invariants: `/srv/repos/internal/verivusai-labs/rvwr/CLAUDE.md` (one level above the gateway repo) — especially "No conversation content in session storage" under Session State Design. This invariant MUST be preserved.
-- Gateway-level guidance: `/srv/repos/internal/verivusai-labs/rvwr/llm-cli-gateway/BEST_PRACTICES.md`.
+- Gateway-level guidance: `/srv/repos/internal/verivusai-labs/rvwr/llm-cli-gateway/docs/guides/BEST_PRACTICES.md`.
 - Repo root: `/srv/repos/internal/verivusai-labs/rvwr/llm-cli-gateway`.
 
 The dag.toml has 16 steps with explicit depends_on, action bodies, and validation criteria. It was reviewed by Codex, Gemini, Grok, and Mistral over 3 rounds and unanimously approved. Treat the validation criteria as acceptance gates per step — do not consider a step done until its validation passes.

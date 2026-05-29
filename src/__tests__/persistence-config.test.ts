@@ -345,7 +345,7 @@ describe("MemoryJobStore", () => {
 
   it("markOrphanedOnStartup is a no-op for memory stores", () => {
     const store = new MemoryJobStore();
-    expect(store.markOrphanedOnStartup()).toBe(0);
+    expect(store.markOrphanedOnStartup()).toEqual({ count: 0, orphaned: [] });
   });
 });
 
