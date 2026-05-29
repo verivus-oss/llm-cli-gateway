@@ -36,7 +36,7 @@ We credit reporters in `CHANGELOG.md` for the release that fixes the finding, un
 
 ## Release signing
 
-Release tags are not signed today (matching the historical pattern: v1.0.0 onward are unsigned annotated tags). Starting with the next release workflow run, GitHub release installer artifacts are signed with Sigstore keyless signing from GitHub Actions OIDC. Each uploaded artifact gets a `<artifact>.sigstore.json` bundle, including `SHA256SUMS.sigstore.json`.
+Release tags are not signed today (matching the historical pattern: v1.0.0 onward are unsigned annotated tags). Starting with v1.15.1, GitHub release installer artifacts are signed with Sigstore keyless signing from GitHub Actions OIDC. Each uploaded artifact gets a `<artifact>.sigstore.json` bundle, including `SHA256SUMS.sigstore.json`.
 
 Verify the checksum manifest before trusting artifact checksums:
 
