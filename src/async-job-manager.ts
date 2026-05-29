@@ -11,6 +11,7 @@ import type { Logger } from "./logger.js";
 import { noopLogger } from "./logger.js";
 import { ProcessMonitor, type JobHealth } from "./process-monitor.js";
 import { JobStore, computeRequestKey } from "./job-store.js";
+import { NoopFlightRecorder, type FlightRecorderLike } from "./flight-recorder.js";
 
 export type LlmCli = "claude" | "codex" | "gemini" | "grok" | "mistral";
 export type AsyncJobStatus = "running" | "completed" | "failed" | "canceled" | "orphaned";
@@ -51,6 +52,41 @@ function describeWindowsLaunchExit(
   };
 }
 
+/**
+ * Slice 1.5 flight-recorder payload supplied via StartJobOptions.
+ * Decomposed to primitive fields (no nested handler-locals) so retaining
+ * a reference on the in-memory job record doesn't pin large promptParts
+ * or attachments via closure scope.
+ */
+export interface AsyncJobFlightRecorderEntry {
+  model: string;
+  prompt: string; // assembled effective prompt
+  sessionId?: string;
+  stablePrefixHash?: string;
+  stablePrefixTokens?: number;
+  /**
+   * Slice κ: count of caller-supplied prompt-parts content blocks the
+   * gateway emitted with explicit Anthropic `cache_control` markers
+   * (ttl='1h'). Only set for Claude requests that opt into κ; left
+   * undefined elsewhere so legacy rows stay NULL.
+   */
+  cacheControlBlocks?: number;
+}
+
+/**
+ * Slice 1.5 usage-extraction callback. Closures MUST be constructed from
+ * primitive locals only (e.g. const fmt = params.outputFormat; closure
+ * captures fmt). Capturing the handler's full `params` object pins large
+ * promptParts/attachments for JOB_TTL_MS.
+ */
+export type AsyncJobUsageExtractor = (stdout: string) => {
+  inputTokens?: number;
+  outputTokens?: number;
+  cacheReadTokens?: number;
+  cacheCreationTokens?: number;
+  costUsd?: number;
+};
+
 interface AsyncJobRecord {
   id: string;
   cli: LlmCli;
@@ -83,6 +119,25 @@ interface AsyncJobRecord {
   onCompleteFired?: boolean;
   outputDirty: boolean; // true if stdout/stderr changed since last DB flush
   lastOutputFlushAt: number;
+  /**
+   * Slice 1.5: data retained for the terminal-state flight-recorder write.
+   * Cleared after writeFlightComplete succeeds so the GC can reclaim the
+   * extractUsage closure's captured primitives.
+   */
+  flightRecorderEntry?: AsyncJobFlightRecorderEntry;
+  extractUsage?: AsyncJobUsageExtractor;
+  /** Set ONLY after a successful logComplete write so a thrown call retries. */
+  flightRecorderComplete?: boolean;
+  /**
+   * Slice 1.5 (R2 Codex-Unit-B F1 fix): the manager writes logComplete
+   * ONLY when this flag is true. Pure async handlers set it at startJob
+   * time (writeFlightStart implies armed). The sync-deferred path
+   * (awaitJobOrDefer) arms it only when the request is about to return a
+   * deferred response — so a sync-inline request that completes within
+   * the deadline gets its rich metadata via the sync handler's
+   * safeFlightComplete, not preempted by the manager's minimal payload.
+   */
+  flightCompleteArmed?: boolean;
 }
 
 export interface AsyncJobSnapshot {
@@ -127,7 +182,7 @@ function truncateText(value: string, maxChars: number): { text: string; truncate
     return { text: value, truncated: false };
   }
   return {
-    text: value.slice(value.length - maxChars),
+    text: value.slice(0, maxChars),
     truncated: true,
   };
 }
@@ -149,11 +204,35 @@ export interface StartJobOptions {
    */
   env?: Record<string, string>;
   /**
+   * Slice κ: optional UTF-8 payload to pipe into the child's stdin.
+   * Participates in the dedup key — two requests with identical argv
+   * but different stdin do NOT collide. When set, stdio[0] is "pipe";
+   * when unset, stdio[0] stays "ignore" (regression-protected).
+   */
+  stdin?: string;
+  /**
    * Optional hook fired exactly once when the job reaches a terminal state.
    * Used by callers that own per-request resources (outputSchema temp files,
    * etc.) that must persist for the lifetime of the spawned CLI process.
    */
   onComplete?: () => void;
+  /**
+   * Slice 1.5: when true, AsyncJobManager writes a flight-recorder logStart
+   * row at startJob entry using `flightRecorderEntry`. Pure async handlers
+   * (handle*RequestAsync) pass true because they have no upstream
+   * safeFlightStart writer. The sync-deferred path (awaitJobOrDefer) passes
+   * false because the upstream sync handler already wrote logStart keyed on
+   * the same correlationId — a second INSERT would crash on the PK.
+   */
+  writeFlightStart?: boolean;
+  /** Slice 1.5: payload for the FR logStart and the terminal logComplete. */
+  flightRecorderEntry?: AsyncJobFlightRecorderEntry;
+  /**
+   * Slice 1.5: invoked only on terminal `completed` to populate token-usage
+   * fields in the FR logComplete payload. Construct from primitive locals
+   * only (see AsyncJobUsageExtractor doc).
+   */
+  extractUsage?: AsyncJobUsageExtractor;
 }
 
 export interface StartJobOutcome {
@@ -170,19 +249,47 @@ export class AsyncJobManager {
   private processMonitor: ProcessMonitor;
   private store: JobStore | null;
 
+  private flightRecorder: FlightRecorderLike;
+
   constructor(
     private logger: Logger = noopLogger,
     private onJobComplete?: (cli: LlmCli, durationMs: number, success: boolean) => void,
-    store: JobStore | null = null
+    store: JobStore | null = null,
+    flightRecorder: FlightRecorderLike = new NoopFlightRecorder()
   ) {
     this.processMonitor = new ProcessMonitor(logger);
     this.store = store;
+    this.flightRecorder = flightRecorder;
 
     if (this.store) {
       try {
-        const orphaned = this.store.markOrphanedOnStartup();
-        if (orphaned > 0) {
-          this.logger.info(`Marked ${orphaned} in-flight job(s) as orphaned after gateway restart`);
+        const { count, orphaned } = this.store.markOrphanedOnStartup();
+        if (count > 0) {
+          this.logger.info(`Marked ${count} in-flight job(s) as orphaned after gateway restart`);
+        }
+        // Slice 1.5: close out the FR row for each orphaned job. The FR
+        // logComplete UPDATE has WHERE status='started' so pre-1.7.0 rows
+        // (where the prior gateway never wrote a logStart) silently
+        // no-op. Wrapped per-orphan so a single bad row can't tank boot.
+        for (const orphan of orphaned) {
+          try {
+            const durationMs = Math.max(0, Date.now() - new Date(orphan.startedAt).getTime());
+            this.flightRecorder.logComplete(orphan.correlationId, {
+              response: orphan.stderr || orphan.stdout,
+              durationMs,
+              retryCount: 0,
+              circuitBreakerState: "closed",
+              optimizationApplied: false,
+              exitCode: orphan.exitCode ?? 1,
+              errorMessage: "orphaned after gateway restart",
+              status: "failed",
+            });
+          } catch (err) {
+            this.logger.error(
+              `Async-path FR logComplete for orphaned job ${orphan.id} failed`,
+              err
+            );
+          }
         }
       } catch (err) {
         this.logger.error("markOrphanedOnStartup failed", err);
@@ -242,6 +349,7 @@ export class AsyncJobManager {
             );
             this.emitMetrics(job);
             this.persistComplete(job);
+            this.writeFlightComplete(job, "failed");
             this.fireOnComplete(job);
           }
           // EPERM: process exists but we can't signal it — ignore
@@ -258,6 +366,7 @@ export class AsyncJobManager {
         );
         this.emitMetrics(job);
         this.persistComplete(job);
+        this.writeFlightComplete(job, "failed");
         this.fireOnComplete(job);
       }
     }
@@ -298,8 +407,28 @@ export class AsyncJobManager {
    * (sorted keys → JSON-stringified). This prevents two Mistral requests with the
    * same argv but different `VIBE_ACTIVE_MODEL` from deduping onto each other.
    */
-  private buildRequestKey(cli: LlmCli, args: string[], env?: Record<string, string>): string {
-    return computeRequestKey(cli, args, canonicaliseEnvForKey(env));
+  private buildRequestKey(
+    cli: LlmCli,
+    args: string[],
+    env?: Record<string, string>,
+    stdin?: string,
+    cwd?: string
+  ): string {
+    // Slice κ: stdin participates in the dedup key. Two Claude requests
+    // with identical argv but different cache_control content blocks
+    // would otherwise collide on dedup and the second caller would get
+    // the wrong response. The legacy "no stdin" code path passes
+    // stdin=undefined, which serialises to the same empty marker the
+    // previous version emitted — non-κ dedup is unchanged.
+    // Slice λ: cwd participates similarly. Two requests with identical
+    // argv but different worktrees would otherwise collide on dedup and
+    // the second caller would receive a response executed in the wrong
+    // worktree. cwd=undefined preserves the pre-λ key shape — non-λ
+    // dedup is unchanged.
+    const extraEnv = canonicaliseEnvForKey(env);
+    const withStdin = stdin === undefined ? extraEnv : `${extraEnv}|stdin:${stdin}`;
+    const extra = cwd === undefined ? withStdin : `${withStdin}|cwd:${cwd}`;
+    return computeRequestKey(cli, args, extra);
   }
 
   private fireOnComplete(job: AsyncJobRecord): void {
@@ -311,6 +440,96 @@ export class AsyncJobManager {
     } catch (err) {
       this.logger.error(`Job ${job.id} onComplete hook threw`, err);
     }
+  }
+
+  /**
+   * Slice 1.5: write the terminal flight-recorder row. Mirrors sync-path
+   * failure semantics (response = stderr||stdout on failure, errorMessage
+   * falls back through overrideErrorMessage → job.error → job.stderr →
+   * "Exit code N"). Single-shot guard set only on SUCCESSFUL write so a
+   * thrown logComplete can be retried by a later terminal callback; the
+   * FR's WHERE status='started' UPDATE guard remains the actual
+   * idempotency mechanism for the common "retry succeeds, original
+   * succeeded too" case.
+   */
+  private writeFlightComplete(
+    job: AsyncJobRecord,
+    finalStatus: "completed" | "failed",
+    overrideErrorMessage?: string
+  ): void {
+    if (!job.flightRecorderEntry) return; // never opted in
+    // R2 Codex-Unit-B F1: only write when armed. Sync-inline requests are
+    // NOT armed at startJob — the sync handler owns the rich-metadata
+    // safeFlightComplete write. Pure async + sync-deferred ARE armed.
+    if (!job.flightCompleteArmed) return;
+    if (job.flightRecorderComplete) return; // already wrote successfully
+    const durationMs = Math.max(0, Date.now() - new Date(job.startedAt).getTime());
+    const usage = finalStatus === "completed" && job.extractUsage ? this.safeExtractUsage(job) : {};
+    const isFailure = finalStatus === "failed";
+    const response = isFailure ? job.stderr || job.stdout : job.stdout;
+    const exitCode = job.exitCode ?? (finalStatus === "completed" ? 0 : 1);
+    const errorMessage = isFailure
+      ? (overrideErrorMessage ?? job.error ?? job.stderr ?? `Exit code ${exitCode}`)
+      : undefined;
+
+    try {
+      this.flightRecorder.logComplete(job.correlationId, {
+        response,
+        durationMs,
+        retryCount: 0,
+        circuitBreakerState: "closed",
+        optimizationApplied: false,
+        exitCode,
+        errorMessage,
+        status: finalStatus,
+        inputTokens: usage.inputTokens,
+        outputTokens: usage.outputTokens,
+        cacheReadTokens: usage.cacheReadTokens,
+        cacheCreationTokens: usage.cacheCreationTokens,
+        costUsd: usage.costUsd,
+      });
+      // Only mark complete on successful write so a thrown logComplete
+      // can be retried by the next terminal callback.
+      job.flightRecorderComplete = true;
+      // Clear retained references so the GC can reclaim anything the
+      // extractUsage closure captured.
+      job.flightRecorderEntry = undefined;
+      job.extractUsage = undefined;
+    } catch (err) {
+      this.logger.error("Async-path flight recorder logComplete failed", err);
+    }
+  }
+
+  private safeExtractUsage(job: AsyncJobRecord): ReturnType<AsyncJobUsageExtractor> {
+    try {
+      return job.extractUsage?.(job.stdout) ?? {};
+    } catch (err) {
+      this.logger.error(`Job ${job.id} extractUsage threw`, err);
+      return {};
+    }
+  }
+
+  /**
+   * R2 Codex-Unit-B F1: awaitJobOrDefer calls this when returning a
+   * deferred response. From this point on the sync handler will not write
+   * its own safeFlightComplete, so the manager takes over.
+   *
+   * Race mitigation: if the job already terminated between the sync
+   * deadline expiring and this method firing, write logComplete
+   * synchronously here so the previously-skipped terminal callback's
+   * write isn't lost.
+   */
+  armFlightCompleteForDeferral(jobId: string): void {
+    const job = this.jobs.get(jobId);
+    if (!job) return;
+    if (job.flightCompleteArmed) return; // pure async already armed
+    job.flightCompleteArmed = true;
+    if (job.status === "running") return;
+    // Job already terminal — the close handler's writeFlightComplete
+    // saw flightCompleteArmed=false and skipped. Write now to recover.
+    const finalStatus = job.status === "completed" ? "completed" : "failed";
+    const override = job.canceled ? "canceled by caller" : undefined;
+    this.writeFlightComplete(job, finalStatus, override);
   }
 
   private safeStoreCall(label: string, fn: () => void): void {
@@ -424,7 +643,11 @@ export class AsyncJobManager {
     outputFormat?: string,
     forceRefresh?: boolean,
     env?: Record<string, string>,
-    onComplete?: () => void
+    onComplete?: () => void,
+    flightRecorderEntry?: AsyncJobFlightRecorderEntry,
+    extractUsage?: AsyncJobUsageExtractor,
+    writeFlightStart?: boolean,
+    stdin?: string
   ): AsyncJobSnapshot {
     return this.startJobWithDedup(cli, args, correlationId, {
       cwd,
@@ -432,7 +655,11 @@ export class AsyncJobManager {
       outputFormat,
       forceRefresh,
       env,
+      stdin,
       onComplete,
+      flightRecorderEntry,
+      extractUsage,
+      writeFlightStart,
     }).snapshot;
   }
 
@@ -450,8 +677,19 @@ export class AsyncJobManager {
     correlationId: string,
     opts: StartJobOptions = {}
   ): StartJobOutcome {
-    const { cwd, idleTimeoutMs, outputFormat, forceRefresh, env: extraEnv, onComplete } = opts;
-    const requestKey = this.buildRequestKey(cli, args, extraEnv);
+    const {
+      cwd,
+      idleTimeoutMs,
+      outputFormat,
+      forceRefresh,
+      env: extraEnv,
+      stdin,
+      onComplete,
+      flightRecorderEntry,
+      extractUsage,
+      writeFlightStart,
+    } = opts;
+    const requestKey = this.buildRequestKey(cli, args, extraEnv, stdin, cwd);
 
     if (!forceRefresh && this.store) {
       try {
@@ -500,9 +738,17 @@ export class AsyncJobManager {
     const baseEnv = envWithExtendedPath(process.env, getExtendedPath());
     const child = spawnCliProcess(command, args, {
       cwd,
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: stdin === undefined ? ["ignore", "pipe", "pipe"] : ["pipe", "pipe", "pipe"],
       env: { ...baseEnv, ...(extraEnv ?? {}) },
     });
+    if (stdin !== undefined && child.stdin) {
+      try {
+        child.stdin.write(stdin);
+      } catch (err) {
+        this.logger.error(`Job ${id} failed to write stdin payload`, err);
+      }
+      child.stdin.end();
+    }
 
     // Single cleanup flag to prevent double-unregister
     let groupCleaned = false;
@@ -536,6 +782,14 @@ export class AsyncJobManager {
       onCompleteFired: false,
       outputDirty: false,
       lastOutputFlushAt: Date.now(),
+      flightRecorderEntry,
+      extractUsage,
+      flightRecorderComplete: false,
+      // R2 Codex-Unit-B F1: pure async path arms now (writeFlightStart=true
+      // means the manager is the only FR writer). Sync-deferred path
+      // arrives with writeFlightStart=false and arms later via
+      // armFlightCompleteForDeferral when awaitJobOrDefer decides to defer.
+      flightCompleteArmed: writeFlightStart === true,
     };
 
     this.jobs.set(id, job);
@@ -551,6 +805,27 @@ export class AsyncJobManager {
         pid: child.pid ?? null,
       })
     );
+    // Slice 1.5: only opt-in callers (pure async handlers) write logStart
+    // here. The sync-deferred path passes writeFlightStart=false because
+    // the upstream sync handler already wrote a logStart row keyed on the
+    // same correlationId; a duplicate INSERT would crash on the PK.
+    if (writeFlightStart && flightRecorderEntry) {
+      try {
+        this.flightRecorder.logStart({
+          correlationId,
+          cli,
+          model: flightRecorderEntry.model,
+          prompt: flightRecorderEntry.prompt,
+          sessionId: flightRecorderEntry.sessionId,
+          asyncJobId: id,
+          stablePrefixHash: flightRecorderEntry.stablePrefixHash,
+          stablePrefixTokens: flightRecorderEntry.stablePrefixTokens,
+          cacheControlBlocks: flightRecorderEntry.cacheControlBlocks,
+        });
+      } catch (err) {
+        this.logger.error("Async-path flight recorder logStart failed", err);
+      }
+    }
     this.logger.info(`Job ${id} started for ${cli}`, { correlationId });
 
     // Idle timeout: kill process if no output activity for idleTimeoutMs
@@ -570,6 +845,7 @@ export class AsyncJobManager {
         });
         this.emitMetrics(job);
         this.persistComplete(job);
+        this.writeFlightComplete(job, "failed");
         this.fireOnComplete(job);
         setTimeout(() => {
           if (!job.exited && job.process) killProcessGroup(job.process, "SIGKILL");
@@ -605,6 +881,7 @@ export class AsyncJobManager {
         this.logger.error(`Job ${id} error: ${launchError.message}`, { correlationId });
         this.emitMetrics(job);
         this.persistComplete(job);
+        this.writeFlightComplete(job, "failed");
         this.fireOnComplete(job);
       }
     });
@@ -623,6 +900,12 @@ export class AsyncJobManager {
         }
         // Ensure terminal state reaches the durable store (idle-timeout/output-overflow already persisted).
         this.persistComplete(job);
+        // Slice 1.5: retry the FR complete write iff the earlier terminal
+        // callback's logComplete threw. The single-shot guard in
+        // writeFlightComplete makes this a no-op in the common case.
+        const fallbackFlightStatus = job.status === "completed" ? "completed" : "failed";
+        const fallbackOverride = job.status === "canceled" ? "canceled by caller" : undefined;
+        this.writeFlightComplete(job, fallbackFlightStatus, fallbackOverride);
         this.fireOnComplete(job);
         return;
       }
@@ -646,6 +929,11 @@ export class AsyncJobManager {
       }
       this.emitMetrics(job);
       this.persistComplete(job);
+      this.writeFlightComplete(
+        job,
+        job.status === "completed" ? "completed" : "failed",
+        job.status === "canceled" ? "canceled by caller" : undefined
+      );
       this.fireOnComplete(job);
     });
 
@@ -709,6 +997,7 @@ export class AsyncJobManager {
     killProcessGroup(job.process, "SIGTERM");
     this.logger.info(`Job ${jobId} canceled`, { correlationId: job.correlationId });
     this.persistComplete(job);
+    this.writeFlightComplete(job, "failed", "canceled by caller");
     this.fireOnComplete(job);
 
     setTimeout(() => {
@@ -788,17 +1077,24 @@ export class AsyncJobManager {
         job.error = "Output exceeded maximum size (50MB)";
         job.finishedAt = new Date().toISOString();
         job.clearIdleTimer?.();
-        if (job.process) killProcessGroup(job.process, "SIGTERM");
+        if (job.process) {
+          killProcessGroup(job.process, "SIGTERM");
+        }
         this.logger.info(`Job ${job.id} killed due to output overflow`, {
           correlationId: job.correlationId,
         });
         this.emitMetrics(job);
         this.persistComplete(job);
+        this.writeFlightComplete(job, "failed", "Output exceeded maximum size (50MB)");
         this.fireOnComplete(job);
-        setTimeout(() => {
-          if (!job.exited && job.process) killProcessGroup(job.process, "SIGKILL");
+        if (job.process) {
+          setTimeout(() => {
+            if (!job.exited && job.process) killProcessGroup(job.process, "SIGKILL");
+            job.cleanupGroup?.();
+          }, 5000);
+        } else {
           job.cleanupGroup?.();
-        }, 5000);
+        }
       }
       return;
     }

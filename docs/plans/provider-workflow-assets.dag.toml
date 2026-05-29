@@ -1,0 +1,211 @@
+# Implementation plan: provider-specific workflow skills and DAG-TOML assets.
+#
+# Goal: turn the gateway's five outbound CLIs into first-class, repeatable
+# workflow assets. Each provider should have:
+#   1. a high-quality agent skill under .agents/skills/, and
+#   2. a provider-specific DAG-TOML plan under docs/plans/.
+#
+# These assets complement the existing cross-provider skills. They should help
+# an agent choose the right provider, configure it correctly, and verify the
+# result without guessing from prose.
+
+[meta]
+name = "llm-cli-gateway provider workflow assets"
+schema_version = "1.0"
+owner = "verivus-oss"
+target_assets = [
+  "claude",
+  "codex",
+  "gemini",
+  "grok",
+  "mistral",
+]
+acceptance_resource = "Each outbound CLI has a provider-specific SKILL.md and DAG-TOML with install, auth, session, approval, cache or telemetry, and smoke-test gates."
+
+[[steps]]
+id = "audit-existing-assets"
+depends_on = []
+actor = "assistant"
+action = """
+Read the existing cross-provider skills in .agents/skills and the existing
+DAG-TOML plans in docs/plans plus setup/install-plan.dag.toml.
+
+Catalogue reusable patterns:
+  - frontmatter fields and versioning style for SKILL.md files
+  - dispatch defaults and approvalStrategy guidance
+  - promptParts and cache_state coverage
+  - session continuity requirements
+  - validation and rollback wording in DAG-TOML plans
+  - provider-specific setup notes under setup/providers/
+"""
+idempotent = true
+validation = """
+The implementation notes identify the common skill sections and DAG fields to
+reuse, and list any provider-specific warnings that must not be lost.
+"""
+
+[[steps]]
+id = "define-quality-bar"
+depends_on = ["audit-existing-assets"]
+actor = "assistant"
+action = """
+Define the minimum quality bar for every provider-specific asset pair.
+
+Each SKILL.md must include:
+  - when to use the provider
+  - install/login readiness checks
+  - default gateway request shape
+  - session continuity behavior
+  - approval and tool-permission behavior
+  - async-job guidance for long tasks
+  - cache or telemetry surfaces, including explicit "not surfaced" notes
+  - failure modes and recovery actions
+  - one copy-pasteable smoke request
+
+Each DAG-TOML must include:
+  - provider readiness gate
+  - auth/login gate
+  - session-continuity gate where supported
+  - approval-mode gate where the CLI exposes one
+  - async job smoke test
+  - rollback or safe-stop guidance
+"""
+idempotent = true
+validation = """
+The quality bar is represented as a checklist in the implementation notes and
+is referenced by every provider-specific creation step below.
+"""
+
+[[steps]]
+id = "create-claude-assets"
+depends_on = ["define-quality-bar"]
+actor = "assistant"
+action = """
+Create .agents/skills/claude-gateway-workflow/SKILL.md and
+docs/plans/claude-gateway-workflow.dag.toml.
+
+Must cover:
+  - Claude Code CLI install/login readiness
+  - claude_request and claude_request_async
+  - session continuation via Claude's real resume path
+  - allowedTools/disallowedTools behavior
+  - mcp_managed approvalStrategy and permission-mode implications
+  - promptParts.cacheControl with stream-json when explicitly opted in
+  - cache_ttl_expiring_soon warning behavior
+"""
+idempotent = true
+validation = """
+The Claude skill and DAG both include a smoke request that exercises
+claude_request_async, job polling, and session continuation without exposing
+secrets or requiring shell interpolation.
+"""
+
+[[steps]]
+id = "create-codex-assets"
+depends_on = ["define-quality-bar"]
+actor = "assistant"
+action = """
+Create .agents/skills/codex-gateway-workflow/SKILL.md and
+docs/plans/codex-gateway-workflow.dag.toml.
+
+Must cover:
+  - Codex CLI install/login readiness
+  - codex_request and codex_request_async
+  - sessionId / resumeLatest behavior using real Codex session IDs
+  - fullAuto requirements for autonomous file and shell work
+  - approvalStrategy guidance and sandbox implications
+  - Codex cache telemetry fields parsed by the gateway
+"""
+idempotent = true
+validation = """
+The Codex skill and DAG both include a smoke request that verifies Codex can
+run through the gateway, produce a pollable async job result, and report a
+clear blocker when login or fullAuto requirements are unmet.
+"""
+
+[[steps]]
+id = "create-gemini-assets"
+depends_on = ["define-quality-bar"]
+actor = "assistant"
+action = """
+Create .agents/skills/gemini-gateway-workflow/SKILL.md and
+docs/plans/gemini-gateway-workflow.dag.toml.
+
+Must cover:
+  - Gemini CLI install/login readiness
+  - gemini_request and gemini_request_async
+  - resume behavior supported by the gateway
+  - approval-mode defaults and yolo behavior under mcp_managed dispatch
+  - stream-json parsing and cache/telemetry limitations surfaced by Gemini CLI
+"""
+idempotent = true
+validation = """
+The Gemini skill and DAG both include a smoke request that distinguishes a
+provider-login failure from a gateway wiring failure.
+"""
+
+[[steps]]
+id = "create-grok-assets"
+depends_on = ["define-quality-bar"]
+actor = "assistant"
+action = """
+Create .agents/skills/grok-gateway-workflow/SKILL.md and
+docs/plans/grok-gateway-workflow.dag.toml.
+
+Must cover:
+  - grok-build install and login/API-key readiness
+  - grok_request and grok_request_async
+  - resumeLatest / continue behavior supported by the gateway
+  - explicit note that no cache statistics are currently surfaced
+  - common auth and CLI-not-found diagnostics
+"""
+idempotent = true
+validation = """
+The Grok skill and DAG both include a smoke request that can be run without
+capturing or printing provider credentials.
+"""
+
+[[steps]]
+id = "create-mistral-assets"
+depends_on = ["define-quality-bar"]
+actor = "assistant"
+action = """
+Create .agents/skills/mistral-gateway-workflow/SKILL.md and
+docs/plans/mistral-gateway-workflow.dag.toml.
+
+Must cover:
+  - Vibe CLI install/login readiness across pip, uv, and brew
+  - mistral_request and mistral_request_async
+  - required [session_logging] enabled = true in ~/.vibe/config.toml for
+    session continuity
+  - VIBE_ACTIVE_MODEL behavior and model recovery path
+  - permissionMode values emitted as --agent <mode>
+  - allowedTools as allow-list only and disallowedTools no-op warning
+  - explicit note that no cache statistics are currently surfaced
+"""
+idempotent = true
+validation = """
+The Mistral skill and DAG both include a doctor-gated smoke request that
+checks client_config.vibe_session_logging.session_logging_enabled before any
+resume or continue flow.
+"""
+
+[[steps]]
+id = "link-assets-from-readme"
+depends_on = [
+  "create-claude-assets",
+  "create-codex-assets",
+  "create-gemini-assets",
+  "create-grok-assets",
+  "create-mistral-assets",
+]
+actor = "assistant"
+action = """
+Update README.md and docs/guides/BEST_PRACTICES.md to link the completed
+provider-specific skills and DAG-TOML plans.
+"""
+idempotent = true
+validation = """
+README.md has a provider workflow assets table with one row per CLI, and all
+links resolve locally.
+"""

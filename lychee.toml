@@ -2,7 +2,8 @@
 # .github/workflows/security.yml at the "Link-rot scan" step.
 #
 # Scope: catch dead URLs in published docs (README.md, CHANGELOG.md,
-# BEST_PRACTICES.md, docs/personal-mcp/, integrations/llm-plugin/README.md).
+# docs/guides/BEST_PRACTICES.md, docs/personal-mcp/,
+# integrations/llm-plugin/README.md).
 # Skip generated, vendored, and historical surfaces.
 
 # Files / directories that lychee should NOT inspect.
@@ -15,13 +16,9 @@ exclude_path = [
   ".sqry-cache",
   # Historical / immutable artefacts — dead links here are evidence,
   # not bugs.
+  "docs/archive",
   "docs/reviews",
   "DOGFOODING_RESULTS.md",
-  "DOGFOODING_LESSONS.md",
-  "DOGFOODING_SUCCESS.md",
-  "PRODUCT_REVIEWS.md",
-  "SECOND_REVIEW_FINDINGS.md",
-  "RELEASE_NOTES_v1.0.0.md",
 ]
 
 # URL patterns to skip. Each entry is a regex over the full URL.
@@ -45,6 +42,10 @@ exclude = [
   # valid; lychee just can't reach them. Pattern catches both bare and
   # www. variants.
   "^https?://(www\\.)?npmjs\\.com/",
+  # Datasette's root intermittently resets anonymous CI connections.
+  # The link is stable and human-facing; do not fail the security gate
+  # on transient bot traffic handling.
+  "^https://datasette\\.io(/|$)",
   # Anthropic / OpenAI / Google docs occasionally rate-limit anon
   # browsers. Their stability is not our gate; we re-verify the
   # canonical URL during research steps.

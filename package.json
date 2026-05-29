@@ -1,6 +1,6 @@
 {
   "name": "llm-cli-gateway",
-  "version": "1.6.1",
+  "version": "1.17.1",
   "mcpName": "io.github.verivus-oss/llm-cli-gateway",
   "description": "MCP server providing unified access to Claude Code, Codex, Gemini, Grok, and Mistral Vibe CLIs with session management, retry logic, async job orchestration, durable job results, and cross-LLM validation.",
   "license": "MIT",
@@ -70,6 +70,9 @@
     "test:integration": "INTEGRATION_TESTS=1 vitest run src/__tests__/integration.test.ts",
     "test:pg": "bash ./scripts/test-pg.sh",
     "test:all": "npm run test && npm run test:pg",
+    "smoke:cache-control": "node docs/plans/slice-kappa-smoke-test.mjs",
+    "upstream:contracts": "node scripts/upstream-scan.mjs --contracts-check",
+    "upstream:scan": "node scripts/upstream-scan.mjs",
     "lint": "eslint src/**/*.ts",
     "lint:fix": "eslint src/**/*.ts --fix",
     "format": "prettier --write 'src/**/*.ts'",
@@ -86,31 +89,26 @@
     "content-type": "1.0.5",
     "smol-toml": "^1.6.1",
     "type-is": "2.0.1",
-    "zod": "^3.23.0"
+    "zod": "^4.4.3"
   },
   "peerDependencies": {
-    "ioredis": "^5.4.1",
     "pg": "^8.12.0"
   },
   "peerDependenciesMeta": {
-    "ioredis": {
-      "optional": true
-    },
     "pg": {
       "optional": true
     }
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.0",
-    "@types/node": "^20.19.30",
+    "@types/node": "^25.9.1",
     "@types/pg": "^8.11.10",
     "@typescript-eslint/eslint-plugin": "^8.59.4",
     "@typescript-eslint/parser": "^8.59.4",
     "@vitest/coverage-v8": "^4.1.2",
     "eslint": "^8.57.1",
-    "eslint-config-prettier": "^9.0.0",
-    "eslint-plugin-security": "^3.0.1",
-    "ioredis": "5.9.2",
+    "eslint-config-prettier": "^10.1.8",
+    "eslint-plugin-security": "^4.0.0",
     "pg": "^8.12.0",
     "prettier": "^3.0.0",
     "typescript": "^6.0.3",

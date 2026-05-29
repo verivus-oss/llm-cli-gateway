@@ -45,10 +45,11 @@ extend-exclude = [
 
   # Long-form research / docs trees where "wrong" words are intentional
   # (anti-pattern dictionaries, historical incident logs, etc.).
+  "docs/archive/**",
   "docs/personal-mcp/**",
   "docs/reviews/**",
+  "docs/plans/**/*.jsonl",
   "DOGFOODING_*.md",
-  "PRODUCT_REVIEWS.md",
   "RELEASE_NOTES_*.md",
 
   # CHANGELOG accumulates words verbatim from commit subjects and may

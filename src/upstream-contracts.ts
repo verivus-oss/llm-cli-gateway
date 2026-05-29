@@ -2,13 +2,58 @@ import { spawnSync } from "node:child_process";
 import type { CliType } from "./session-manager.js";
 import { envWithExtendedPath, getExtendedPath, resolveCommandForSpawn } from "./executor.js";
 
-export type CliFlagArity = "none" | "one" | "variadic";
+/**
+ * `optional` (slice κ): consumes the next token as the flag's value
+ * ONLY if that token does not start with `-`. Used for Claude's
+ * `-p`/`--print`, which is a no-arg switch in claude-code 2.x but
+ * also doubles as the legacy `-p <prompt>` positional shorthand that
+ * the gateway has emitted since v0.x.
+ */
+export type CliFlagArity = "none" | "one" | "optional" | "variadic";
 
 export interface CliFlagContract {
   arity: CliFlagArity;
   values?: readonly string[];
   pattern?: RegExp;
   description: string;
+}
+
+/**
+ * Pure upstream-tracking metadata for a provider CLI.
+ *
+ * IMPORTANT — non-duplication invariant: nothing here encodes mechanical
+ * behaviour. Flags, output modes, session/resume rules, permission modes,
+ * forbidden flags, env contracts, and positional limits live ONLY in the
+ * surrounding {@link CliContract} and are validated ONLY by
+ * {@link validateUpstreamCliArgs} / {@link validateUpstreamCliEnv}. The fields
+ * below are descriptive pointers used by the upstream changelog scanner
+ * (`scripts/upstream-scan.mjs`) and surfaced in the contract report — they
+ * never drive argv/env enforcement.
+ *
+ * `docs/upstream/provider-sources.dag.toml` mirrors `sourceUrls` and
+ * `watchCategories` for the scanner's offline scan plan; a unit test
+ * (`upstream-sources.test.ts`) asserts the TOML stays in sync with these
+ * fields so the two cannot drift. The TypeScript values here are authoritative;
+ * the TOML is scanner input only and is never consulted for contract
+ * enforcement.
+ */
+export interface CliUpstreamMetadata {
+  /** Canonical changelog / release-notes URLs the scanner fetches with --live. */
+  sourceUrls: readonly string[];
+  /** Distribution package identifier (npm package name, PyPI project, …). */
+  packageName?: string;
+  /** Source repository URL, when distinct from the changelog source. */
+  repo?: string;
+  /** Human-facing install / getting-started docs. */
+  installDocsUrl?: string;
+  /** Distribution channel the gateway expects the CLI to ship through. */
+  releaseChannel?: "npm" | "pypi" | "github-release" | "vendor";
+  /**
+   * Contract surfaces worth watching in upstream release notes (e.g. "flags",
+   * "output-formats", "session-resume"). Descriptive labels for the scanner and
+   * report ONLY — never a validation input.
+   */
+  watchCategories: readonly string[];
 }
 
 export interface CliContract {
@@ -29,6 +74,8 @@ export interface CliContract {
   resumeMaxPositionals?: number;
   resumeOnlyFlags?: readonly string[];
   resumeForbiddenFlags?: readonly string[];
+  /** Non-mechanical upstream-tracking metadata. See {@link CliUpstreamMetadata}. */
+  upstreamMetadata?: CliUpstreamMetadata;
 }
 
 export interface CliContractFixture {
@@ -67,6 +114,13 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
     cli: "claude",
     executable: "claude",
     upstream: "Claude Code CLI",
+    upstreamMetadata: {
+      sourceUrls: ["https://code.claude.com/docs/en/changelog.md"],
+      packageName: "@anthropic-ai/claude-code",
+      installDocsUrl: "https://code.claude.com/docs/en/overview",
+      releaseChannel: "npm",
+      watchCategories: ["flags", "output-formats", "permission-modes", "session-resume", "models"],
+    },
     helpArgs: [["--help"]],
     maxPositionals: 0,
     mcpTools: ["claude_request", "claude_request_async"],
@@ -90,13 +144,27 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       "maxTurns",
       "effort",
       "excludeDynamicSystemPromptSections",
+      "fallbackModel",
+      "jsonSchema",
+      // Phase 4 slice ζ
+      "addDir",
       "approvalStrategy",
       "mcpServers",
       "strictMcpConfig",
     ],
     flags: {
-      "-p": { arity: "one", description: "Prompt text" },
+      "-p": {
+        arity: "optional",
+        description:
+          "Print/non-interactive mode. Legacy gateway emission used `-p <prompt>` (consumed as positional in claude's grammar); slice κ emits `-p` standalone followed by `--input-format stream-json` so the prompt flows in on stdin.",
+      },
       "--model": { arity: "one", description: "Model selector" },
+      "--input-format": {
+        arity: "one",
+        values: ["text", "stream-json"],
+        description:
+          "Slice κ: realtime JSON stdin payload. `stream-json` enables Anthropic cache_control breakpoints from caller-supplied content blocks.",
+      },
       "--output-format": {
         arity: "one",
         values: ["json", "stream-json"],
@@ -105,6 +173,11 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       "--include-partial-messages": {
         arity: "none",
         description: "Include partial messages in stream-json output",
+      },
+      "--verbose": {
+        arity: "none",
+        description:
+          "Claude CLI 2.x: required alongside --print + --output-format=stream-json; affects stderr only, stream-json stdout shape unchanged",
       },
       "--allowed-tools": { arity: "variadic", description: "Allowed tool names/patterns" },
       "--disallowed-tools": { arity: "variadic", description: "Disallowed tool names/patterns" },
@@ -131,6 +204,18 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         arity: "none",
         description: "Trim dynamic system prompt sections",
       },
+      "--fallback-model": {
+        arity: "one",
+        description: "Auto-fallback model when default is overloaded (Claude --print only)",
+      },
+      "--json-schema": {
+        arity: "one",
+        description: "JSON Schema literal constraining structured output",
+      },
+      "--add-dir": {
+        arity: "one",
+        description: "Additional workspace directory (Phase 4 slice ζ; repeat once per directory)",
+      },
       "--continue": { arity: "none", description: "Continue active session" },
       "--session-id": { arity: "one", description: "Session id" },
     },
@@ -148,12 +233,99 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         args: ["-p", "hello", "--not-a-claude-flag"],
         expect: "fail",
       },
+      {
+        // Phase 4 slice η: --fallback-model wired through prepareClaudeRequest.
+        id: "claude-fallback-model",
+        description: "Phase 4 slice η: --fallback-model accepted",
+        args: ["-p", "hello", "--fallback-model", "claude-haiku-4-5-20251001"],
+        expect: "pass",
+      },
+      {
+        // Phase 4 slice η: --json-schema accepts an inline JSON Schema literal
+        // (per `claude --help` example), not a path. Codex parity for
+        // structured-output validation in one slice.
+        id: "claude-json-schema",
+        description: "Phase 4 slice η: --json-schema accepts inline JSON literal",
+        args: [
+          "-p",
+          "hello",
+          "--output-format",
+          "json",
+          "--json-schema",
+          '{"type":"object","properties":{"name":{"type":"string"}},"required":["name"]}',
+        ],
+        expect: "pass",
+      },
+      {
+        // Phase 4 slice ζ: --add-dir wired through prepareClaudeHighImpactFlags.
+        // Repeated once per directory; each instance has arity:"one".
+        id: "claude-add-dir",
+        description: "Phase 4 slice ζ: repeated --add-dir is accepted",
+        args: ["-p", "hello", "--add-dir", "/tmp/a", "--add-dir", "/tmp/b"],
+        expect: "pass",
+      },
+      {
+        // Claude CLI 2.x: stream-json requires --verbose alongside --print.
+        // The gateway emits all three together; this fixture pins the combo
+        // so a future removal of --verbose breaks loudly here instead of
+        // silently at runtime against the upstream CLI.
+        id: "claude-stream-json-requires-verbose",
+        description:
+          "Claude CLI 2.x: --output-format stream-json + --include-partial-messages + --verbose accepted together",
+        args: [
+          "-p",
+          "hello",
+          "--output-format",
+          "stream-json",
+          "--include-partial-messages",
+          "--verbose",
+        ],
+        expect: "pass",
+      },
+      {
+        // Slice κ: when caller marks promptParts with cache_control, the
+        // gateway emits `-p` as a standalone flag and pipes the JSON
+        // content-blocks payload over stdin via `--input-format
+        // stream-json`. The fixture pins the exact argv combination so
+        // a future regression (re-emitting a positional prompt, dropping
+        // `--input-format`, etc.) trips loudly here.
+        id: "claude-input-format-stream-json",
+        description:
+          "Slice κ: `-p` standalone + --input-format stream-json + --output-format stream-json + --include-partial-messages + --verbose",
+        args: [
+          "-p",
+          "--input-format",
+          "stream-json",
+          "--output-format",
+          "stream-json",
+          "--include-partial-messages",
+          "--verbose",
+        ],
+        expect: "pass",
+      },
     ],
   },
   codex: {
     cli: "codex",
     executable: "codex",
     upstream: "OpenAI Codex CLI",
+    upstreamMetadata: {
+      sourceUrls: [
+        "https://github.com/openai/codex/releases",
+        "https://developers.openai.com/codex/changelog",
+      ],
+      packageName: "@openai/codex",
+      repo: "https://github.com/openai/codex",
+      installDocsUrl: "https://developers.openai.com/codex/cli",
+      releaseChannel: "npm",
+      watchCategories: [
+        "flags",
+        "sandbox-modes",
+        "approval-modes",
+        "session-resume",
+        "output-schema",
+      ],
+    },
     helpArgs: [
       ["exec", "--help"],
       ["exec", "resume", "--help"],
@@ -184,16 +356,16 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       "images",
       "ignoreUserConfig",
       "ignoreRules",
+      // Phase 4 slice ζ
+      "workingDir",
+      "addDir",
     ],
     resumeOnlyFlags: ["--last"],
-    resumeForbiddenFlags: [
-      "--sandbox",
-      "--ask-for-approval",
-      "--full-auto",
-      "--output-schema",
-      "--search",
-      "-c",
-    ],
+    // Phase 4 slice α (v1.8.0) verified that `codex exec resume` accepts
+    // `--output-schema` and `-c` (codex-cli 0.133.0 `exec resume --help`),
+    // so they're no longer forbidden. `--search` stays forbidden (resume
+    // inherits the original session's web-search state).
+    resumeForbiddenFlags: ["--sandbox", "--ask-for-approval", "--full-auto", "--search"],
     flags: {
       "--last": { arity: "none", description: "Resume latest session" },
       "--model": { arity: "one", description: "Model selector" },
@@ -226,6 +398,19 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       "-i": { arity: "one", description: "Image path" },
       "--ignore-user-config": { arity: "none", description: "Ignore user config" },
       "--ignore-rules": { arity: "none", description: "Ignore rule files" },
+      // The gateway only ever emits the short form `-C` (codex 0.134.0 accepts
+      // both `-C` and `--cd` as aliases). The contract registers exactly what
+      // we emit; if a future code path emits `--cd` instead, the contract
+      // check will fail loudly — which is the intended catch.
+      "-C": {
+        arity: "one",
+        description: "Working root for the session (Phase 4 slice ζ; new sessions only)",
+      },
+      "--add-dir": {
+        arity: "one",
+        description:
+          "Additional writable workspace directory (Phase 4 slice ζ; repeat once per directory; new sessions only)",
+      },
     },
     env: {},
     conformanceFixtures: [
@@ -242,10 +427,45 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         expect: "fail",
       },
       {
+        // Phase 4 slice α: --output-schema IS accepted on resume per
+        // codex-cli 0.133.0; this fixture pins the new behaviour so future
+        // contract changes can't silently regress.
         id: "codex-resume-output-schema",
-        description: "Resume-incompatible output schema flag is rejected",
+        description: "Phase 4 slice α: --output-schema accepted on resume (codex-cli 0.133.0)",
         args: ["exec", "resume", "--output-schema", "/tmp/schema.json", "session-id", "hello"],
+        expect: "pass",
+      },
+      {
+        id: "codex-resume-config-override",
+        description: "Phase 4 slice α: -c key=value accepted on resume",
+        args: ["exec", "resume", "-c", "model.foo=bar", "session-id", "hello"],
+        expect: "pass",
+      },
+      {
+        id: "codex-resume-search-still-forbidden",
+        description: "Phase 4 slice α: --search remains forbidden on resume",
+        args: ["exec", "resume", "--search", "session-id", "hello"],
         expect: "fail",
+      },
+      {
+        id: "codex-working-dir",
+        description: "Phase 4 slice ζ: -C <DIR> accepted on a new session",
+        args: ["exec", "--skip-git-repo-check", "-C", "/tmp/work", "hello"],
+        expect: "pass",
+      },
+      {
+        id: "codex-add-dir",
+        description: "Phase 4 slice ζ: repeated --add-dir accepted on a new session",
+        args: [
+          "exec",
+          "--skip-git-repo-check",
+          "--add-dir",
+          "/tmp/a",
+          "--add-dir",
+          "/tmp/b",
+          "hello",
+        ],
+        expect: "pass",
       },
     ],
   },
@@ -253,6 +473,17 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
     cli: "gemini",
     executable: "gemini",
     upstream: "Google Gemini CLI",
+    upstreamMetadata: {
+      sourceUrls: [
+        "https://geminicli.com/docs/changelogs/",
+        "https://github.com/google-gemini/gemini-cli/releases",
+      ],
+      packageName: "@google/gemini-cli",
+      repo: "https://github.com/google-gemini/gemini-cli",
+      installDocsUrl: "https://geminicli.com/docs/",
+      releaseChannel: "npm",
+      watchCategories: ["flags", "approval-modes", "output-formats", "session-resume"],
+    },
     helpArgs: [["--help"]],
     maxPositionals: 0,
     mcpTools: ["gemini_request", "gemini_request_async"],
@@ -272,6 +503,8 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       "policyFiles",
       "adminPolicyFiles",
       "attachments",
+      // Phase 4 slice γ
+      "skipTrust",
     ],
     flags: {
       "-p": { arity: "one", description: "Prompt text" },
@@ -287,8 +520,16 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       "-s": { arity: "none", description: "Sandbox mode" },
       "--policy": { arity: "one", description: "Policy file path" },
       "--admin-policy": { arity: "one", description: "Admin policy file path" },
-      "-o": { arity: "one", values: ["json"], description: "Output format" },
+      "-o": {
+        arity: "one",
+        values: ["json", "stream-json"],
+        description: "Output format (Phase 4 slice ε adds stream-json)",
+      },
       "--resume": { arity: "one", description: "Resume session" },
+      "--skip-trust": {
+        arity: "none",
+        description: "Trust workspace for this session (Phase 4 slice γ)",
+      },
     },
     env: {},
     conformanceFixtures: [
@@ -304,12 +545,36 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         args: ["-p", "hello", "--not-a-gemini-flag"],
         expect: "fail",
       },
+      {
+        id: "gemini-skip-trust",
+        description: "Phase 4 slice γ: --skip-trust is accepted",
+        args: ["-p", "hello", "--skip-trust"],
+        expect: "pass",
+      },
+      {
+        id: "gemini-stream-json",
+        description: "Phase 4 slice ε: -o stream-json is accepted",
+        args: ["-p", "hello", "-o", "stream-json"],
+        expect: "pass",
+      },
+      {
+        id: "gemini-output-format-invalid",
+        description: "Phase 4 slice ε: -o ndjson is rejected (not in contract enum)",
+        args: ["-p", "hello", "-o", "ndjson"],
+        expect: "fail",
+      },
     ],
   },
   grok: {
     cli: "grok",
     executable: "grok",
     upstream: "xAI Grok CLI",
+    upstreamMetadata: {
+      sourceUrls: ["https://docs.x.ai/developers/release-notes.md"],
+      installDocsUrl: "https://docs.x.ai/build/overview",
+      releaseChannel: "vendor",
+      watchCategories: ["flags", "permission-modes", "session-resume", "sandbox", "output-formats"],
+    },
     helpArgs: [["--help"]],
     maxPositionals: 0,
     mcpTools: ["grok_request", "grok_request_async"],
@@ -328,6 +593,16 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       "mcpServers",
       "allowedTools",
       "disallowedTools",
+      // Phase 4 slice δ
+      "maxTurns",
+      // Phase 4 slice ζ
+      "workingDir",
+      // Phase 4 slice θ — Grok HIGH parity
+      "sandbox",
+      "rules",
+      "systemPromptOverride",
+      "allow",
+      "deny",
     ],
     flags: {
       "-p": { arity: "one", description: "Prompt text" },
@@ -352,6 +627,43 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       },
       "--resume": { arity: "one", description: "Resume session" },
       "--continue": { arity: "none", description: "Continue latest session" },
+      "--max-turns": {
+        arity: "one",
+        pattern: /^[1-9][0-9]*$/,
+        description: "Agent-loop iteration cap (Phase 4 slice δ)",
+      },
+      "--cwd": {
+        arity: "one",
+        description: "Working directory for the invocation (Phase 4 slice ζ)",
+      },
+      // Phase 4 slice θ — Grok HIGH parity. `--sandbox` is freeform per
+      // `grok --help` on 0.1.210 (no `[possible values: …]` list, unlike
+      // --effort / --permission-mode / --output-format), so we register
+      // it without a `values` constraint.
+      "--sandbox": {
+        arity: "one",
+        description:
+          "Sandbox profile for filesystem + network access (Phase 4 slice θ; freeform passthrough; env: GROK_SANDBOX)",
+      },
+      "--rules": {
+        arity: "one",
+        description:
+          "Extra rules appended to the system prompt; supports `@file` prefix (Phase 4 slice θ)",
+      },
+      "--system-prompt-override": {
+        arity: "one",
+        description: "Replace the agent's system prompt entirely (Phase 4 slice θ)",
+      },
+      "--allow": {
+        arity: "one",
+        description:
+          "Permission allow rule (Phase 4 slice θ; repeat once per rule per `grok --help`)",
+      },
+      "--deny": {
+        arity: "one",
+        description:
+          "Permission deny rule (Phase 4 slice θ; repeat once per rule per `grok --help`)",
+      },
     },
     env: {},
     conformanceFixtures: [
@@ -367,12 +679,68 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         args: ["-p", "hello", "--not-a-grok-flag"],
         expect: "fail",
       },
+      {
+        id: "grok-max-turns",
+        description: "Phase 4 slice δ: --max-turns N is accepted",
+        args: ["-p", "hello", "--max-turns", "5"],
+        expect: "pass",
+      },
+      {
+        id: "grok-max-turns-invalid-zero",
+        description: "Phase 4 slice δ: --max-turns 0 is rejected by contract pattern",
+        args: ["-p", "hello", "--max-turns", "0"],
+        expect: "fail",
+      },
+      {
+        id: "grok-working-dir",
+        description: "Phase 4 slice ζ: --cwd <DIR> is accepted",
+        args: ["-p", "hello", "--cwd", "/tmp/work"],
+        expect: "pass",
+      },
+      {
+        id: "grok-sandbox",
+        description: "Phase 4 slice θ: --sandbox <PROFILE> accepted (freeform)",
+        args: ["-p", "hello", "--sandbox", "workspace-write"],
+        expect: "pass",
+      },
+      {
+        id: "grok-rules",
+        description: "Phase 4 slice θ: --rules <RULES> accepted (@file prefix preserved)",
+        args: ["-p", "hello", "--rules", "@./rules.md"],
+        expect: "pass",
+      },
+      {
+        id: "grok-system-prompt-override",
+        description: "Phase 4 slice θ: --system-prompt-override <PROMPT> accepted",
+        args: ["-p", "hello", "--system-prompt-override", "You are a tester"],
+        expect: "pass",
+      },
+      {
+        id: "grok-allow-repeated",
+        description: "Phase 4 slice θ: repeated --allow <RULE> accepted",
+        args: ["-p", "hello", "--allow", "bash", "--allow", "edit"],
+        expect: "pass",
+      },
+      {
+        id: "grok-deny-repeated",
+        description: "Phase 4 slice θ: repeated --deny <RULE> accepted",
+        args: ["-p", "hello", "--deny", "write", "--deny", "kill"],
+        expect: "pass",
+      },
     ],
   },
   mistral: {
     cli: "mistral",
     executable: "vibe",
     upstream: "Mistral Vibe CLI",
+    upstreamMetadata: {
+      sourceUrls: ["https://github.com/mistralai/mistral-vibe/releases"],
+      packageName: "mistral-vibe",
+      repo: "https://github.com/mistralai/mistral-vibe",
+      installDocsUrl: "https://github.com/mistralai/mistral-vibe#installation",
+      releaseChannel: "pypi",
+      watchCategories: ["flags", "agent-modes", "session-logging", "output-formats", "env-model"],
+    },
     helpArgs: [["--help"]],
     maxPositionals: 0,
     mcpTools: ["mistral_request", "mistral_request_async"],
@@ -390,12 +758,21 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       "mcpServers",
       "allowedTools",
       "disallowedTools",
+      // Phase 4 slice γ
+      "trust",
+      // Phase 4 slice δ
+      "maxTurns",
+      "maxPrice",
+      "maxTokens",
+      // Phase 4 slice ζ
+      "workingDir",
+      "addDir",
     ],
     flags: {
       "-p": { arity: "one", description: "Prompt text" },
-      "--output-format": {
+      "--output": {
         arity: "one",
-        values: ["plain", "json", "stream-json"],
+        values: ["text", "json", "streaming"],
         description: "Output format",
       },
       "--agent": {
@@ -408,6 +785,36 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       "--enabled-tools": { arity: "one", description: "Enabled tool" },
       "--resume": { arity: "one", description: "Resume session" },
       "--continue": { arity: "none", description: "Continue latest session" },
+      "--trust": {
+        arity: "none",
+        description: "Trust cwd for this invocation only (Phase 4 slice γ)",
+      },
+      "--max-turns": {
+        arity: "one",
+        pattern: /^[1-9][0-9]*$/,
+        description: "Agent-loop iteration cap (Phase 4 slice δ, programmatic mode only)",
+      },
+      "--max-price": {
+        arity: "one",
+        // Decimal-only: matches the MAX_PRICE_SCHEMA min(1e-6) lower bound
+        // that keeps String(N) in decimal form (no scientific notation).
+        pattern: /^(0|[1-9][0-9]*)(\.[0-9]+)?$/,
+        description: "Cumulative cost cap in USD (Phase 4 slice δ, programmatic mode only)",
+      },
+      "--max-tokens": {
+        arity: "one",
+        pattern: /^[1-9][0-9]*$/,
+        description: "Cumulative prompt + completion token cap (Vibe 2.x programmatic mode)",
+      },
+      "--workdir": {
+        arity: "one",
+        description: "Working directory for the invocation (Phase 4 slice ζ)",
+      },
+      "--add-dir": {
+        arity: "one",
+        description:
+          "Additional writable workspace directory (Phase 4 slice ζ; repeat once per directory)",
+      },
     },
     env: {
       VIBE_ACTIVE_MODEL: {
@@ -430,6 +837,67 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         args: ["-p", "hello"],
         env: { CODEX_MODEL: "gpt-5.5" },
         expect: "fail",
+      },
+      {
+        id: "mistral-trust",
+        description: "Phase 4 slice γ: --trust is accepted",
+        args: ["-p", "hello", "--agent", "auto-approve", "--trust"],
+        env: { VIBE_ACTIVE_MODEL: "mistral-medium-3.5" },
+        expect: "pass",
+      },
+      {
+        id: "mistral-max-turns-and-price",
+        description: "Phase 4 slice δ: --max-turns + --max-price are accepted together",
+        args: ["-p", "hello", "--agent", "auto-approve", "--max-turns", "3", "--max-price", "0.01"],
+        env: { VIBE_ACTIVE_MODEL: "mistral-medium-3.5" },
+        expect: "pass",
+      },
+      {
+        id: "mistral-output-streaming-and-max-tokens",
+        description: "Vibe 2.x: --output streaming and --max-tokens are accepted",
+        args: [
+          "-p",
+          "hello",
+          "--agent",
+          "auto-approve",
+          "--output",
+          "streaming",
+          "--max-tokens",
+          "1000",
+        ],
+        env: { VIBE_ACTIVE_MODEL: "mistral-medium-3.5" },
+        expect: "pass",
+      },
+      {
+        id: "mistral-max-price-scientific-notation",
+        description:
+          "Phase 4 slice δ: scientific-notation --max-price is rejected by contract pattern (matches MAX_PRICE_SCHEMA bounds)",
+        args: ["-p", "hello", "--agent", "auto-approve", "--max-price", "1e-7"],
+        env: { VIBE_ACTIVE_MODEL: "mistral-medium-3.5" },
+        expect: "fail",
+      },
+      {
+        id: "mistral-working-dir",
+        description: "Phase 4 slice ζ: --workdir <DIR> is accepted",
+        args: ["-p", "hello", "--agent", "auto-approve", "--workdir", "/tmp/work"],
+        env: { VIBE_ACTIVE_MODEL: "mistral-medium-3.5" },
+        expect: "pass",
+      },
+      {
+        id: "mistral-add-dir",
+        description: "Phase 4 slice ζ: repeated --add-dir is accepted",
+        args: [
+          "-p",
+          "hello",
+          "--agent",
+          "auto-approve",
+          "--add-dir",
+          "/tmp/a",
+          "--add-dir",
+          "/tmp/b",
+        ],
+        env: { VIBE_ACTIVE_MODEL: "mistral-medium-3.5" },
+        expect: "pass",
       },
     ],
   },
@@ -513,6 +981,15 @@ export function validateUpstreamCliArgs(
       }
       validateFlagValue(cli, arg, flag, value, i + 1, violations);
       i += 1;
+      continue;
+    }
+
+    if (flag.arity === "optional") {
+      const value = args[i + 1];
+      if (value !== undefined && !value.startsWith("-")) {
+        validateFlagValue(cli, arg, flag, value, i + 1, violations);
+        i += 1;
+      }
       continue;
     }
 
@@ -696,6 +1173,19 @@ export function buildUpstreamContractReport(
         {
           executable: contract.executable,
           upstream: contract.upstream,
+          // Pure metadata pointers (changelog URLs, package name, watch
+          // categories). Enriched from the CliContract — the single source of
+          // truth — so report consumers and the scanner read the same values.
+          upstreamMetadata: contract.upstreamMetadata
+            ? {
+                sourceUrls: contract.upstreamMetadata.sourceUrls,
+                packageName: contract.upstreamMetadata.packageName ?? null,
+                repo: contract.upstreamMetadata.repo ?? null,
+                installDocsUrl: contract.upstreamMetadata.installDocsUrl ?? null,
+                releaseChannel: contract.upstreamMetadata.releaseChannel ?? null,
+                watchCategories: contract.upstreamMetadata.watchCategories,
+              }
+            : null,
           command: contract.command ?? null,
           helpArgs: contract.helpArgs,
           mcpTools: contract.mcpTools,

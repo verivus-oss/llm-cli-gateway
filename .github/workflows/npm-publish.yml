@@ -11,6 +11,9 @@ on:
         default: "false"
         type: boolean
 
+permissions:
+  contents: read
+
 jobs:
   publish:
     runs-on: ubuntu-latest

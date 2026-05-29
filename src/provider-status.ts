@@ -34,7 +34,7 @@ const VERSION_ARGS: Record<CliType, string[]> = {
   mistral: ["--version"],
 };
 
-// Mistral Vibe ships as the `vibe` binary (PyPI package vibe-cli); the gateway
+// Mistral Vibe ships as the `vibe` binary (PyPI package mistral-vibe); the gateway
 // uses `mistral` as the provider key but invokes `vibe` on the shell.
 export const PROVIDER_COMMANDS: Record<CliType, string> = {
   claude: "claude",

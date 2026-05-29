@@ -6,12 +6,20 @@ import { randomUUID } from "crypto";
 import { existsSync, readFileSync, readdirSync, renameSync, unlinkSync } from "fs";
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
-import { z } from "zod";
+import { z } from "zod/v3";
 import { executeCli, killAllProcessGroups } from "./executor.js";
 import { parseStreamJson } from "./stream-json-parser.js";
 import { parseCodexJsonStream } from "./codex-json-parser.js";
-import { parseGeminiJson } from "./gemini-json-parser.js";
+import { parseGeminiJson, parseGeminiStreamJson } from "./gemini-json-parser.js";
+import { parseVibeMetaJson } from "./mistral-meta-json-parser.js";
+import { homedir } from "os";
 import { ISessionManager, createSessionManager } from "./session-manager.js";
+import {
+  createWorktree,
+  createWorktreeSessionCleanupHook,
+  WorktreeError,
+  type WorktreeHandle,
+} from "./worktree-manager.js";
 import { ResourceProvider } from "./resources.js";
 import { PerformanceMetrics } from "./metrics.js";
 import {
@@ -23,6 +31,7 @@ import {
   loadConfig,
   loadPersistenceConfig,
   loadCacheAwarenessConfig,
+  minStableTokensForModel,
   type PersistenceConfig,
   type CacheAwarenessConfig,
 } from "./config.js";
@@ -34,7 +43,11 @@ import {
   getCliInfo,
   resolveModelAlias,
 } from "./model-registry.js";
-import { AsyncJobManager } from "./async-job-manager.js";
+import {
+  AsyncJobManager,
+  type AsyncJobFlightRecorderEntry,
+  type AsyncJobUsageExtractor,
+} from "./async-job-manager.js";
 import { createJobStore, type JobStore } from "./job-store.js";
 import { ApprovalManager, ApprovalPolicy, ApprovalRecord } from "./approval-manager.js";
 import { checkReviewIntegrity, ReviewIntegrityResult } from "./review-integrity.js";
@@ -77,7 +90,12 @@ import {
   type ClaudeAgentDefinition,
 } from "./request-helpers.js";
 import { createFlightRecorder, FlightRecorderLike } from "./flight-recorder.js";
-import { resolvePromptInput, PromptPartsSchema, type PromptParts } from "./prompt-parts.js";
+import {
+  resolvePromptInput,
+  PromptPartsSchema,
+  assembleClaudeCacheBlocks,
+  type PromptParts,
+} from "./prompt-parts.js";
 import { computeSessionCacheStats, computeTtlRemaining } from "./cache-stats.js";
 import { getCliVersions, runCliUpgrade } from "./cli-updater.js";
 import { startHttpGateway, type HttpGatewayHandle } from "./http-transport.js";
@@ -272,7 +290,7 @@ Other: list_models, cli_versions, upstream_contracts, cli_upgrade, approval_list
 
 Key behaviors:
 - Sync auto-defers at ${SYNC_DEADLINE_MS}ms. Poll deferred jobs via llm_job_status/llm_job_result.
-- Sessions: Claude --continue, Gemini --resume, Grok --resume/--continue, Mistral --resume/--continue (requires session_logging.enabled=true in ~/.vibe/config.toml), Codex \`exec resume <ID>\` / \`exec resume --last\` (all real CLI continuity). For Codex, sessionId must be a real Codex UUID (from ~/.codex/sessions/); gateway-generated gw-* IDs are rejected.
+- Sessions: Claude --continue, Gemini --resume, Grok --resume/--continue, Mistral --resume/--continue (current Vibe defaults session logging on; doctor flags explicit session_logging.enabled=false), Codex \`exec resume <ID>\` / \`exec resume --last\` (all real CLI continuity). For Codex, sessionId must be a real Codex UUID (from ~/.codex/sessions/); gateway-generated gw-* IDs are rejected.
 - Approval gates: opt-in via approvalStrategy:"mcp_managed".
 - Idle timeout kills stuck processes (default 10min, configurable via idleTimeoutMs).
 
@@ -335,14 +353,16 @@ function getJobStore(runtimeLogger: GatewayLogger = logger): JobStore | null {
 function newAsyncJobManager(
   metrics: PerformanceMetrics,
   runtimeLogger: GatewayLogger,
-  store: JobStore | null = getJobStore(runtimeLogger)
+  store: JobStore | null = getJobStore(runtimeLogger),
+  fr: FlightRecorderLike = getFlightRecorder(runtimeLogger)
 ): AsyncJobManager {
   return new AsyncJobManager(
     runtimeLogger,
     (cli, durationMs, success) => {
       metrics.recordRequest(cli, durationMs, success);
     },
-    store
+    store,
+    fr
   );
 }
 
@@ -357,6 +377,75 @@ function getApprovalManager(runtimeLogger: GatewayLogger = logger): ApprovalMana
 }
 
 const MCP_SERVER_ENUM = z.enum(CLAUDE_MCP_SERVER_NAMES);
+
+/**
+ * Phase 4 slice δ — shared Zod fragments for `maxTurns` / `maxPrice`.
+ *
+ * Both flags reach the upstream CLIs as decimal-formatted argv strings via
+ * `String(N)`. `z.number().int().positive()` alone lets values past
+ * `Number.MAX_SAFE_INTEGER` through, after which `String(1e21)` emits
+ * scientific notation that Grok and Vibe both reject. The bounds below
+ * (safe-integer cap + 10000 ceiling for turns; finite + 10000 USD ceiling
+ * for price) guarantee a lossless decimal stringification AND a sane
+ * upper bound — no plausible single agent loop exceeds 10k turns or 10k USD.
+ */
+export const MAX_TURNS_SCHEMA = z.number().int().positive().safe().max(10_000);
+// Token budgets can legitimately exceed the agent-turn cap by orders of
+// magnitude. Keep a finite operational guardrail while avoiding the 10k turn
+// ceiling that would make large-context Vibe sessions unusable.
+export const MAX_TOKENS_SCHEMA = z.number().int().positive().safe().max(100_000_000);
+// `.min(1e-6)` keeps the value in JS's decimal-stringify range:
+// String(1e-6) === "0.000001" but String(1e-7) === "1e-7", which both
+// upstream CLIs would reject. 1µUSD per request is fine-grained enough
+// for any plausible budget-cap use.
+export const MAX_PRICE_SCHEMA = z.number().positive().finite().min(1e-6).max(10_000);
+
+/**
+ * Slice λ: shared worktree directive for all 10 `*_request` / `*_request_async`
+ * tools. `true` creates a fresh worktree under `<repoRoot>/.worktrees/<uuid>`
+ * branched from HEAD. `{ name?, ref? }` lets the caller supply a sanitized
+ * name and/or git ref (default ref: HEAD).
+ *
+ * Lifecycle is gateway-owned: the gateway pre-creates the worktree via
+ * `git worktree add`, then spawns the child CLI with `cwd: <worktree-path>`.
+ * No `-w` / `--worktree` flag is ever emitted to the underlying CLI. When
+ * the request carries a sessionId and the session already has a worktree,
+ * that worktree is reused. On session_delete or TTL eviction the gateway
+ * runs `git worktree remove --force`.
+ *
+ * Tool response: when a worktree was used, the successful response stdout
+ * is prefixed with `[gateway] worktree=<absolute-path>\n` so callers can
+ * parse/use the path without a schema change (slice λ §1.d).
+ *
+ * NOTE: callers should `.gitignore` the `.worktrees/` directory in their
+ * repo (the gateway does NOT auto-gitignore — see slice λ spec Q4).
+ */
+export const WORKTREE_SCHEMA = z
+  .union([
+    z.boolean(),
+    z
+      .object({
+        name: z.string().min(1).max(64).optional(),
+        ref: z.string().min(1).max(255).optional(),
+      })
+      .strict(),
+  ])
+  .describe(
+    "Slice λ: run this request inside a dedicated git worktree owned by " +
+      "the gateway. `true` creates a fresh worktree at " +
+      "`<repoRoot>/.worktrees/<uuid>` branched from HEAD. " +
+      "`{ name?, ref? }` lets the caller supply a sanitized name and/or a " +
+      "git ref (default: HEAD). When the request carries a sessionId and " +
+      "the session already has a worktree, that worktree is reused. The " +
+      "gateway spawns the child CLI with `cwd: <worktree-path>` — no " +
+      "`-w`/`--worktree` flag is ever emitted to the underlying CLI. On " +
+      "session_delete or TTL eviction the gateway runs `git worktree " +
+      "remove --force`. Successful responses are prefixed with " +
+      "`[gateway] worktree=<absolute-path>\\n` so callers can use the " +
+      "path. NOTE: callers should `.gitignore` the `.worktrees/` " +
+      "directory in their repo (the gateway does NOT auto-gitignore — " +
+      "see slice λ spec Q4)."
+  );
 
 // U22: Session-provider enum extended to five providers. The storage layer's
 // CLI_TYPES already includes "mistral"; the MCP-tool layer mirrors that here so
@@ -380,7 +469,7 @@ export interface GatewayServerDeps {
   cacheAwareness?: CacheAwarenessConfig;
 }
 
-interface GatewayServerRuntime {
+export interface GatewayServerRuntime {
   sessionManager: ISessionManager;
   resourceProvider: ResourceProvider;
   db: DatabaseConnection | null;
@@ -393,7 +482,7 @@ interface GatewayServerRuntime {
   cacheAwareness: CacheAwarenessConfig;
 }
 
-function resolveGatewayServerRuntime(
+export function resolveGatewayServerRuntime(
   deps: GatewayServerDeps = {},
   options: { isolateState?: boolean } = {}
 ): GatewayServerRuntime {
@@ -402,20 +491,21 @@ function resolveGatewayServerRuntime(
   const runtimePerformanceMetrics =
     deps.performanceMetrics ??
     (options.isolateState ? new PerformanceMetrics() : performanceMetrics);
+  // Resolve flight recorder BEFORE async manager so isolateState managers
+  // can be wired with the same recorder instance the runtime exposes.
+  const runtimeFlightRecorder = deps.flightRecorder ?? getFlightRecorder(runtimeLogger);
   const runtimeAsyncJobManager =
     deps.asyncJobManager ??
     (options.isolateState
       ? // Factory-created test/HTTP session servers must not mark another instance's
         // durable jobs orphaned. Stdio startup injects the process-global manager.
-        newAsyncJobManager(runtimePerformanceMetrics, runtimeLogger, null)
+        newAsyncJobManager(runtimePerformanceMetrics, runtimeLogger, null, runtimeFlightRecorder)
       : getAsyncJobManager(runtimeLogger));
   const runtimeApprovalManager =
     deps.approvalManager ??
     (options.isolateState
       ? new ApprovalManager(undefined, runtimeLogger)
       : getApprovalManager(runtimeLogger));
-
-  const runtimeFlightRecorder = deps.flightRecorder ?? getFlightRecorder(runtimeLogger);
   return {
     sessionManager: runtimeSessionManager,
     resourceProvider:
@@ -478,7 +568,34 @@ async function awaitJobOrDefer(
   forceRefresh?: boolean,
   runtime: GatewayServerRuntime = resolveGatewayServerRuntime(),
   env?: Record<string, string>,
-  onComplete?: () => void
+  onComplete?: () => void,
+  /**
+   * Slice 1.5: when the sync handler has already written a logStart row
+   * keyed on `corrId`, pass these so the manager can write logComplete
+   * (with usage extraction) when the underlying async job terminates —
+   * even if the sync handler returned a deferred response.
+   * `writeFlightStart` is NEVER true on this path: the sync handler is
+   * always the upstream logStart writer.
+   */
+  flightRecorderEntry?: AsyncJobFlightRecorderEntry,
+  extractUsage?: AsyncJobUsageExtractor,
+  /**
+   * Slice κ: optional stdin payload piped to the child CLI. Currently
+   * only Claude's `--input-format stream-json` path sets this. Threaded
+   * through both the direct-execute fallback (SYNC_DEADLINE_MS===0) and
+   * the AsyncJobManager spawn path, and participates in the dedup key.
+   */
+  stdin?: string,
+  /**
+   * Slice λ: optional working directory for the spawned child process,
+   * derived from a gateway-owned git worktree. Threaded to both the
+   * direct-execute fallback (`executeCli({ cwd })`) and the
+   * AsyncJobManager dedup-aware spawn path
+   * (`startJobWithDedup({ cwd })`). `cwd` also participates in the
+   * dedup key (see async-job-manager.buildRequestKey) so two requests
+   * with identical argv in different worktrees do not collide.
+   */
+  cwd?: string
 ): Promise<{ stdout: string; stderr: string; code: number } | DeferredJobResponse> {
   // U26 fix: ownership of onComplete is a contract. Once this function returns
   // OR throws, the caller MUST consider onComplete consumed — i.e. it has
@@ -512,6 +629,8 @@ async function awaitJobOrDefer(
         idleTimeout: idleTimeoutMs,
         logger: runtime.logger,
         env: env ? ({ ...process.env, ...env } as NodeJS.ProcessEnv) : undefined,
+        stdin,
+        cwd,
       });
     } finally {
       // Direct-execution path completes inline; release per-request resources
@@ -523,11 +642,20 @@ async function awaitJobOrDefer(
   let outcome;
   try {
     outcome = runtime.asyncJobManager.startJobWithDedup(cli, args, corrId, {
+      cwd,
       idleTimeoutMs,
       outputFormat,
       forceRefresh,
       env,
+      stdin,
       onComplete,
+      // Sync-deferred path: the upstream sync handler already wrote
+      // logStart for this corrId, so writeFlightStart stays false. The
+      // manager still writes logComplete on terminal state (which UPDATEs
+      // the sync handler's row), closing the previously-orphaned
+      // sync-deferred case.
+      flightRecorderEntry,
+      extractUsage,
     });
     // Handoff succeeded: AsyncJobManager owns onComplete (it'll fire via
     // fireOnComplete on terminal status, or run inline immediately for dedup).
@@ -564,7 +692,14 @@ async function awaitJobOrDefer(
     await new Promise(resolve => setTimeout(resolve, SYNC_POLL_INTERVAL_MS));
   }
 
-  // Deadline exceeded — return deferral
+  // Deadline exceeded — return deferral.
+  // R2 Codex-Unit-B F1: hand FR-complete ownership to the manager. Until
+  // this call, the manager skips writeFlightComplete on terminal so the
+  // sync handler's safeFlightComplete (with rich approvalDecision /
+  // optimizationApplied metadata) wins for sync-inline completions. From
+  // here on the sync handler returns deferred and will NOT write
+  // safeFlightComplete, so the manager must.
+  runtime.asyncJobManager.armFlightCompleteForDeferral(job.id);
   runtime.logger.info(
     `[${corrId}] ${cli} sync deadline exceeded (${SYNC_DEADLINE_MS}ms), deferring to async job ${job.id}`
   );
@@ -573,7 +708,7 @@ async function awaitJobOrDefer(
     jobId: job.id,
     cli,
     correlationId: corrId,
-    message: `Execution exceeded sync deadline (${SYNC_DEADLINE_MS}ms). Poll with llm_job_status, fetch with llm_job_result.`,
+    message: `Execution exceeded sync deadline (${SYNC_DEADLINE_MS}ms). Poll with llm_job_status, collect with llm_job_result.`,
   };
 }
 
@@ -600,7 +735,7 @@ function buildDeferredToolResponse(
             message: deferred.message,
             sessionId: sessionId || null,
             pollWith: "llm_job_status",
-            fetchWith: "llm_job_result",
+            collectWith: "llm_job_result",
             cancelWith: "llm_job_cancel",
           },
           null,
@@ -609,6 +744,91 @@ function buildDeferredToolResponse(
       },
     ],
   };
+}
+
+/**
+ * Slice λ: shape returned by `resolveWorktreeForRequest`. `cwd` is what
+ * the spawn helpers (`executeCli`, `startJobWithDedup`) consume;
+ * `worktreePath` is what the tool handler embeds in the response prefix
+ * so callers can discover the path.
+ */
+export interface ResolvedWorktree {
+  cwd?: string;
+  worktreePath?: string;
+}
+
+/**
+ * Slice λ: resolve a request's worktree directive into a spawn cwd.
+ *
+ * - `worktreeOpt` is the Zod-validated input value (boolean |
+ *   `{ name?, ref? }` | undefined).
+ * - When the request has a session AND the session already has a
+ *   `metadata.worktreePath`, that path is reused (resume semantics).
+ *   The reused path is returned without touching git; if the directory
+ *   was externally removed between requests, the next CLI invocation
+ *   will surface the error naturally.
+ * - When no reusable worktree exists, `createWorktree` runs; on success
+ *   the new path is written to `session.metadata` (only when a session
+ *   exists — request-scoped worktrees do NOT persist).
+ * - Returns `{}` when `worktreeOpt` is undefined/false (preserves
+ *   pre-λ behaviour at non-worktree call sites).
+ * - Errors propagate as `WorktreeError`/`Error`; the caller wraps them
+ *   in a `createErrorResponse` envelope. Do NOT swallow.
+ *
+ * Spec: docs/plans/slice-lambda.spec.md §"Implementation surface to
+ * verify" §5.
+ */
+export async function resolveWorktreeForRequest(
+  worktreeOpt: boolean | { name?: string; ref?: string } | undefined,
+  sessionId: string | undefined,
+  runtime: GatewayServerRuntime
+): Promise<ResolvedWorktree> {
+  if (!worktreeOpt) return {};
+  const sessionManager = runtime.sessionManager;
+  if (sessionId) {
+    const session = await Promise.resolve(sessionManager.getSession(sessionId));
+    const existingPath = session?.metadata?.worktreePath;
+    if (typeof existingPath === "string" && existingPath.length > 0) {
+      return { cwd: existingPath, worktreePath: existingPath };
+    }
+  }
+  const name = worktreeOpt === true ? undefined : worktreeOpt.name;
+  const ref = worktreeOpt === true ? undefined : worktreeOpt.ref;
+  const repoRoot = process.cwd();
+  const handle: WorktreeHandle = await createWorktree({
+    repoRoot,
+    name,
+    ref,
+    logger: runtime.logger,
+  });
+  if (sessionId) {
+    await Promise.resolve(
+      sessionManager.updateSessionMetadata(sessionId, {
+        worktreePath: handle.path,
+        worktreeName: handle.name,
+      })
+    );
+  }
+  return { cwd: handle.path, worktreePath: handle.path };
+}
+
+/**
+ * Slice λ §1.d: response-envelope shape decision for `worktreePath`.
+ *
+ * We surface the worktree path inline as a stdout prefix
+ * (`[gateway] worktree=<absolute-path>\n`) rather than as a
+ * structuredContent field or JSON wrapper. Rationale:
+ *   - zero schema change across all 10 tools and their downstream parsers
+ *   - matches how other slice features (session warnings, cache_state
+ *     aggregates) surface side-channel metadata today
+ *   - callers that want the path can split on the first newline; callers
+ *     that don't care see a single ignorable header line
+ *
+ * Use `formatWorktreePrefix(resolution.worktreePath)` once per tool, at
+ * the moment a successful response is constructed.
+ */
+export function formatWorktreePrefix(worktreePath?: string): string {
+  return worktreePath ? `[gateway] worktree=${worktreePath}\n` : "";
 }
 
 // Helper function for standardized error responses
@@ -667,10 +887,17 @@ function createErrorResponse(
   };
 }
 
-function extractUsageAndCost(
+export function extractUsageAndCost(
   cli: "claude" | "codex" | "gemini" | "grok" | "mistral",
   output: string,
-  outputFormat?: string
+  outputFormat?: string,
+  /**
+   * Optional context for off-stdout telemetry sources. Today only Mistral
+   * uses this — its meta.json lives on disk keyed by sessionId. Threading
+   * this in keeps the closure built by `buildAsyncFlightRecorderHandoff`
+   * primitives-only (no `params`/`prep` retention on AsyncJobRecord).
+   */
+  ctx?: { sessionId?: string; home?: string }
 ): {
   inputTokens?: number;
   outputTokens?: number;
@@ -704,8 +931,9 @@ function extractUsageAndCost(
       costUsd: parsed.usage.cost_usd,
     };
   }
-  if (cli === "gemini" && outputFormat === "json") {
-    const parsed = parseGeminiJson(output);
+  if (cli === "gemini" && (outputFormat === "json" || outputFormat === "stream-json")) {
+    const parsed =
+      outputFormat === "stream-json" ? parseGeminiStreamJson(output) : parseGeminiJson(output);
     if (!parsed || !parsed.usage) {
       return {};
     }
@@ -715,10 +943,60 @@ function extractUsageAndCost(
       cacheReadTokens: parsed.usage.cache_read_tokens,
     };
   }
-  // Mistral/Vibe: does not surface usage in its stdout/stream-json output. A
-  // future unit can read it from `~/.vibe/logs/session/<id>/metadata.json`
-  // once we resolve the session id post-run.
+  // Mistral/Vibe: usage/cost live on disk in `~/.vibe/logs/session/<id>/meta.json`
+  // (Phase 4 slice β). Best-effort: if we don't know the sessionId (fresh
+  // session whose Vibe-assigned UUID we never observed) or the file is
+  // missing/malformed, the parser returns `{}` and the FR row simply lacks
+  // usage data — matching pre-slice behaviour. No stdout fallback exists.
+  if (cli === "mistral") {
+    return parseVibeMetaJson(ctx?.home ?? homedir(), ctx?.sessionId);
+  }
   return {};
+}
+
+/**
+ * Slice 1.5: build the async-job-manager's FR payload from a prep object
+ * (which every prepare*Request returns), plus the bound CLI and output
+ * format primitives needed by extractUsageAndCost. Returning the closure
+ * separately means it captures `cliName` and `fmt` ONLY — never `params`
+ * or `prep` — so retention on AsyncJobRecord is O(constant).
+ */
+function buildAsyncFlightRecorderHandoff(
+  cliName: "claude" | "codex" | "gemini" | "grok" | "mistral",
+  prep: {
+    effectivePrompt: string;
+    resolvedModel?: string;
+    stablePrefixHash?: string | null;
+    stablePrefixTokens?: number | null;
+    cacheControlBlocks?: number;
+  },
+  sessionId: string | undefined,
+  outputFormat: string | undefined
+): {
+  flightRecorderEntry: AsyncJobFlightRecorderEntry;
+  extractUsage: AsyncJobUsageExtractor;
+} {
+  // Extract primitives BEFORE building the closure — capturing `prep` or
+  // `params` directly would pin large attachments / promptParts on the
+  // AsyncJobRecord for JOB_TTL_MS. Phase 4 slice β: `sid` and `home` are
+  // primitives too, threaded through so the Mistral branch of
+  // extractUsageAndCost can read `~/.vibe/logs/session/<id>/meta.json`.
+  const cli = cliName;
+  const fmt = outputFormat;
+  const sid = sessionId;
+  const home = homedir();
+  return {
+    flightRecorderEntry: {
+      model: prep.resolvedModel || "default",
+      prompt: prep.effectivePrompt,
+      sessionId,
+      stablePrefixHash: prep.stablePrefixHash ?? undefined,
+      stablePrefixTokens: prep.stablePrefixTokens ?? undefined,
+      cacheControlBlocks: prep.cacheControlBlocks,
+    },
+    extractUsage: (stdout: string) =>
+      extractUsageAndCost(cli, stdout, fmt, { sessionId: sid, home }),
+  };
 }
 
 function safeFlightStart(
@@ -1170,6 +1448,27 @@ interface CliRequestPrep {
   stablePrefixHash: string | null;
   /** Heuristic token count (bytes/4) of the same stable prefix. */
   stablePrefixTokens: number | null;
+  /**
+   * Slice κ (Claude only): JSON stream-json payload to feed on stdin
+   * when the gateway emits `-p --input-format stream-json`. Undefined
+   * when the caller did not opt into Anthropic `cache_control`
+   * breakpoints. Non-κ providers always leave this undefined.
+   */
+  stdinPayload?: string;
+  /**
+   * Slice κ (Claude only): number of caller-supplied content blocks
+   * that carry an explicit `cache_control` marker. Threaded into the
+   * flight recorder so `cache_state` aggregates can distinguish
+   * κ-explicit breakpoints from implicit prefix-cache hits.
+   */
+  cacheControlBlocks?: number;
+  /**
+   * Rec #4: structured warnings produced during prep (e.g. cacheable
+   * stable prefix without cacheControl). Handlers merge these with any
+   * other warnings (cache_ttl_expiring_soon, etc.) before returning to
+   * the caller.
+   */
+  warnings?: WarningEntry[];
 }
 
 /**
@@ -1255,6 +1554,11 @@ export function prepareClaudeRequest(
     maxTurns?: number;
     effort?: ClaudeEffortLevel;
     excludeDynamicSystemPromptSections?: boolean;
+    // Phase 4 slice η — Claude reliability + structured-output parity
+    fallbackModel?: string;
+    jsonSchema?: string | Record<string, unknown>;
+    // Phase 4 slice ζ — Claude additional-workspace-dirs parity
+    addDir?: string[];
   },
   runtime: GatewayServerRuntime = resolveGatewayServerRuntime()
 ): CliRequestPrep | ExtendedToolResponse {
@@ -1288,6 +1592,30 @@ export function prepareClaudeRequest(
         score: reviewIntegrity.totalScore,
       }
     );
+  }
+
+  // Rec #5 (slice κ): refuse the optimizePrompt + cacheControl combo
+  // before running optimization. Optimization rewrites the assembled
+  // prompt text the flight-recorder logs, but the κ stdin payload is
+  // built from raw `promptParts` content blocks — letting both run
+  // produces a FR row whose `prompt` no longer matches what Claude
+  // actually received, AND any optimisation-driven text change would
+  // silently break Anthropic prefix-cache reuse on the next call.
+  const ccEarly = params.promptParts?.cacheControl;
+  const cacheControlRequestedEarly = !!(
+    ccEarly &&
+    (ccEarly.system || ccEarly.tools || ccEarly.context)
+  );
+  if (params.optimizePrompt && cacheControlRequestedEarly) {
+    return createErrorResponse(
+      params.operation,
+      1,
+      "",
+      corrId,
+      new Error(
+        "optimizePrompt is incompatible with promptParts.cacheControl (slice κ): optimization rewrites the assembled prompt text the flight recorder logs, while the cache_control payload is built from raw promptParts; the two would desync and break Anthropic prefix-cache reuse. Disable optimizePrompt when opting into cacheControl."
+      )
+    ) as ExtendedToolResponse;
   }
 
   let effectivePrompt = assembledPrompt;
@@ -1329,12 +1657,145 @@ export function prepareClaudeRequest(
     }
   }
 
-  const args = ["-p", effectivePrompt];
+  // Rec #2 (slice κ): auto-emit `cache_control` when the caller passes
+  // `promptParts` whose stable prefix exceeds the per-model minimum,
+  // the caller has NOT explicitly set `cacheControl`, the gateway
+  // config has opted in (`[cache_awareness].emit_anthropic_cache_control`),
+  // and outputFormat is stream-json. Auto-emit marks the LAST non-empty
+  // stable block (context → tools → system priority — the rightmost
+  // stable block covers the widest prefix). Skipped when optimizePrompt
+  // is on (same rec #5 desync risk).
+  //
+  // The 1h ttl is forced regardless of `anthropic_ttl_seconds`: 5m
+  // breakpoints from caller content are rejected by Anthropic once
+  // Claude Code's own 1h-marked session-wrap blocks land ahead of them.
+  let autoEmittedCacheControlBlock: "system" | "tools" | "context" | null = null;
+  if (
+    !cacheControlRequestedEarly &&
+    runtime.cacheAwareness.emitAnthropicCacheControl &&
+    !params.optimizePrompt &&
+    params.outputFormat === "stream-json" &&
+    params.promptParts &&
+    stablePrefixTokens !== null
+  ) {
+    const threshold = minStableTokensForModel(runtime.cacheAwareness, resolvedModel ?? "default");
+    if (stablePrefixTokens >= threshold) {
+      const pp = params.promptParts;
+      // Rightmost non-empty stable block — its cache_control breakpoint
+      // covers everything above it in the message (the API matches
+      // breakpoints in order).
+      if (pp.context && pp.context.length > 0) autoEmittedCacheControlBlock = "context";
+      else if (pp.tools && pp.tools.length > 0) autoEmittedCacheControlBlock = "tools";
+      else if (pp.system && pp.system.length > 0) autoEmittedCacheControlBlock = "system";
+
+      if (autoEmittedCacheControlBlock !== null) {
+        runtime.logger.info(
+          `[${corrId}] auto-emitting cache_control on '${autoEmittedCacheControlBlock}' (stablePrefixTokens=${stablePrefixTokens} >= ${threshold} for model='${resolvedModel ?? "default"}')`
+        );
+        if (runtime.cacheAwareness.anthropicTtlSeconds !== 3600) {
+          runtime.logger.warn(
+            `[${corrId}] [cache_awareness].anthropic_ttl_seconds=${runtime.cacheAwareness.anthropicTtlSeconds} ignored for Claude CLI path — Anthropic rejects 5m blocks after Claude Code's 1h-marked session-wrap content; using ttl='1h'.`
+          );
+        }
+      }
+    }
+  }
+
+  // Rec #4: warn when promptParts has a cacheable stable prefix but no
+  // cache_control breakpoint is being emitted (neither explicit nor
+  // auto). Either the caller forgot to set `cacheControl` or
+  // `[cache_awareness].emit_anthropic_cache_control` is off — both
+  // leave the stable prefix bytes unreused across calls, defeating the
+  // point of using `promptParts`.
+  const warnings: WarningEntry[] = [];
+  if (
+    !cacheControlRequestedEarly &&
+    autoEmittedCacheControlBlock === null &&
+    params.promptParts &&
+    stablePrefixTokens !== null
+  ) {
+    const threshold = minStableTokensForModel(runtime.cacheAwareness, resolvedModel ?? "default");
+    if (stablePrefixTokens >= threshold) {
+      const reason =
+        params.outputFormat !== "stream-json"
+          ? "outputFormat is not 'stream-json'"
+          : !runtime.cacheAwareness.emitAnthropicCacheControl
+            ? "[cache_awareness].emit_anthropic_cache_control is false"
+            : "no eligible non-empty stable block";
+      warnings.push({
+        code: "cacheable_prefix_uncached",
+        message: `Stable prefix is cacheable (${stablePrefixTokens} tokens >= ${threshold} for model='${resolvedModel ?? "default"}') but no cache_control breakpoint will be emitted (${reason}). Set promptParts.cacheControl explicitly, switch outputFormat to 'stream-json', or enable [cache_awareness].emit_anthropic_cache_control.`,
+        stablePrefixTokens,
+        threshold,
+        reason,
+      });
+    }
+  }
+
+  // Slice κ: switch from the legacy positional `-p <prompt>` emission
+  // to `claude -p --input-format stream-json` and feed a JSON
+  // content-blocks payload via stdin. Non-κ callers (no cacheControl,
+  // or cacheControl with all flags false) take the existing positional
+  // path bit-for-bit. The κ path activates on EITHER an explicit caller
+  // opt-in (`cacheControlRequestedEarly`) OR a gateway-driven auto-emit
+  // (`autoEmittedCacheControlBlock`).
+  const cacheControlRequested = cacheControlRequestedEarly || autoEmittedCacheControlBlock !== null;
+  let stdinPayload: string | undefined;
+  let cacheControlBlocks: number | undefined;
+
+  if (cacheControlRequested) {
+    if (params.outputFormat !== "stream-json") {
+      return createErrorResponse(
+        params.operation,
+        1,
+        "",
+        corrId,
+        new Error(
+          "promptParts.cacheControl requires outputFormat: 'stream-json' (slice κ pipes the cache_control blocks over --input-format stream-json; text/json output formats cannot carry the required NDJSON usage events)."
+        )
+      ) as ExtendedToolResponse;
+    }
+    // promptParts is non-null whenever cacheControlRequested is true
+    // (explicit opt-in lives in PromptParts; auto-emit guard requires
+    // promptParts to be defined).
+    const effectiveParts: PromptParts =
+      autoEmittedCacheControlBlock !== null
+        ? {
+            ...params.promptParts!,
+            cacheControl: {
+              ...(params.promptParts!.cacheControl ?? {}),
+              [autoEmittedCacheControlBlock]: true,
+            },
+          }
+        : params.promptParts!;
+    const built = assembleClaudeCacheBlocks(effectiveParts);
+    stdinPayload = `${JSON.stringify(built.payload)}\n`;
+    cacheControlBlocks = built.markedBlockCount;
+  }
+
+  const args: string[] = cacheControlRequested
+    ? [
+        "-p",
+        "--input-format",
+        "stream-json",
+        "--output-format",
+        "stream-json",
+        "--include-partial-messages",
+        "--verbose",
+      ]
+    : ["-p", effectivePrompt];
   if (resolvedModel) args.push("--model", resolvedModel);
-  if (params.outputFormat === "json") {
-    args.push("--output-format", "json");
-  } else if (params.outputFormat === "stream-json") {
-    args.push("--output-format", "stream-json", "--include-partial-messages");
+  if (!cacheControlRequested) {
+    if (params.outputFormat === "json") {
+      args.push("--output-format", "json");
+    } else if (params.outputFormat === "stream-json") {
+      // Claude CLI 2.x rejects `--print --output-format stream-json` without
+      // `--verbose`: "When using --print, --output-format=stream-json requires
+      // --verbose". --verbose only affects what claude logs to stderr; the
+      // stream-json stdout payload is unchanged, so the gateway's NDJSON
+      // parser is unaffected.
+      args.push("--output-format", "stream-json", "--include-partial-messages", "--verbose");
+    }
   }
   if (params.allowedTools && params.allowedTools.length > 0) {
     sanitizeCliArgValues(params.allowedTools, "allowedTools");
@@ -1389,6 +1850,9 @@ export function prepareClaudeRequest(
       maxTurns: params.maxTurns,
       effort: params.effort,
       excludeDynamicSystemPromptSections: params.excludeDynamicSystemPromptSections,
+      fallbackModel: params.fallbackModel,
+      jsonSchema: params.jsonSchema,
+      addDir: params.addDir,
     })
   );
 
@@ -1403,6 +1867,9 @@ export function prepareClaudeRequest(
     args,
     stablePrefixHash,
     stablePrefixTokens,
+    stdinPayload,
+    cacheControlBlocks,
+    warnings: warnings.length > 0 ? warnings : undefined,
   };
 }
 
@@ -1450,6 +1917,11 @@ export function prepareCodexRequest(
     images?: string[];
     ignoreUserConfig?: boolean;
     ignoreRules?: boolean;
+    // Phase 4 slice ζ — Codex working-dir + add-dir parity. Both flags are in
+    // CODEX_RESUME_FILTERED_FLAGS (resume inherits the original session's cwd
+    // and writable dirs), so we emit them on NEW sessions only.
+    workingDir?: string;
+    addDir?: string[];
   },
   runtime: GatewayServerRuntime = resolveGatewayServerRuntime()
 ): CodexRequestPrep | ExtendedToolResponse {
@@ -1557,13 +2029,27 @@ export function prepareCodexRequest(
   }
   args.push("--skip-git-repo-check");
 
-  // U26: High-impact feature flags. Some of these (`--output-schema`,
-  // `--search`, `-C`, `--add-dir`) are rejected by `codex exec resume`, so we
-  // only emit them on a NEW session. Images / ephemeral / profile /
-  // ignore-rules / ignore-user-config are allowed on resume per the audited
-  // CLI help; we emit them in both branches.
+  // U26: High-impact feature flags. `--search` is rejected by
+  // `codex exec resume` (resume inherits the original session's web-search
+  // state), so we only emit it on a NEW session. `--output-schema`,
+  // `-c key=value`, profile, ephemeral, images, and the ignore-* flags are
+  // all accepted on resume per `codex exec resume --help` (codex-cli 0.133.0)
+  // and are emitted in both branches.
   let highImpactCleanup: (() => void) | undefined;
   if (sessionPlan.mode === "new") {
+    // Phase 4 slice ζ: emit working-dir and add-dir on new sessions only.
+    // Both flags are listed in CODEX_RESUME_FILTERED_FLAGS — resume inherits
+    // the original session's cwd and writable-dir policy, so emitting them
+    // on resume would be silently stripped (wasteful + misleading on argv
+    // logs). Gating here mirrors `--search` / `--sandbox` / `--full-auto`.
+    if (params.workingDir) {
+      args.push("-C", params.workingDir);
+    }
+    if (params.addDir && params.addDir.length > 0) {
+      for (const dir of params.addDir) {
+        args.push("--add-dir", dir);
+      }
+    }
     const high = prepareCodexHighImpactFlags({
       outputSchema: params.outputSchema,
       search: params.search,
@@ -1586,12 +2072,10 @@ export function prepareCodexRequest(
     args.push(...high.args);
     highImpactCleanup = high.cleanup;
   } else {
-    // On resume, emit only the resume-safe subset (profile, ephemeral,
-    // images, ignoreUserConfig, ignoreRules). outputSchema, search, and
-    // configOverrides are dropped silently to mirror existing behavior for
-    // sandbox/ask-for-approval on resume.
     const high = prepareCodexHighImpactFlags({
+      outputSchema: params.outputSchema,
       profile: params.profile,
+      configOverrides: params.configOverrides,
       ephemeral: params.ephemeral,
       images: params.images,
       ignoreUserConfig: params.ignoreUserConfig,
@@ -1644,16 +2128,24 @@ export function prepareGeminiRequest(
     optimizePrompt: boolean;
     operation: string;
     /**
-     * U23: output format. When set to "json", emits `-o json` so Gemini emits
-     * the JSON object containing usageMetadata that `parseGeminiJson` (and
-     * downstream `extractUsageAndCost`) can consume. Defaults to "text".
+     * U23 + Phase 4 slice ε: output format. `json` emits `-o json` (single
+     * JSON object with usageMetadata). `stream-json` emits `-o stream-json`
+     * (NDJSON event stream — `init` / `message` / `result` lines). Both
+     * route through `extractUsageAndCost` so usage tokens reach the flight
+     * recorder. Defaults to "text".
      */
-    outputFormat?: "text" | "json";
+    outputFormat?: "text" | "json" | "stream-json";
     // U27: high-impact features (all optional)
     sandbox?: boolean;
     policyFiles?: string[];
     adminPolicyFiles?: string[];
     attachments?: string[];
+    /**
+     * Phase 4 slice γ: emit `--skip-trust` so first-run workspaces don't
+     * block headless invocations on the interactive trust prompt. Default
+     * is undefined (preserves current prompt behaviour for legacy callers).
+     */
+    skipTrust?: boolean;
   },
   runtime: GatewayServerRuntime = resolveGatewayServerRuntime()
 ): CliRequestPrep | ExtendedToolResponse {
@@ -1777,8 +2269,21 @@ export function prepareGeminiRequest(
   // U23 fix: emit `-o json` when the caller asked for JSON output. The Gemini
   // JSON parser is otherwise unreachable from the tool surface and the
   // structured usageMetadata is silently dropped.
+  //
+  // Phase 4 slice ε: same wiring for `-o stream-json` (NDJSON event stream).
+  // Gemini already streams stdout in real-time so the existing 10-minute
+  // idle timeout (CLI_IDLE_TIMEOUTS.gemini) covers both modes without
+  // adjustment — unlike Claude, no `--include-partial-messages` companion
+  // flag is required because Gemini emits assistant `delta` events as part
+  // of the default stream-json shape.
   if (params.outputFormat === "json") {
     args.push("-o", "json");
+  } else if (params.outputFormat === "stream-json") {
+    args.push("-o", "stream-json");
+  }
+  // Phase 4 slice γ: opt-in trust-prompt bypass for fresh workspaces.
+  if (params.skipTrust) {
+    args.push("--skip-trust");
   }
 
   return {
@@ -1794,7 +2299,7 @@ export function prepareGeminiRequest(
   };
 }
 
-function prepareGrokRequest(
+export function prepareGrokRequest(
   params: {
     prompt?: string;
     promptParts?: PromptParts;
@@ -1812,6 +2317,36 @@ function prepareGrokRequest(
     correlationId?: string;
     optimizePrompt: boolean;
     operation: string;
+    /**
+     * Phase 4 slice δ: emit `--max-turns N` so callers can cap agent-loop
+     * iterations for cost / latency control. Mirrors Claude's wiring.
+     */
+    maxTurns?: number;
+    /**
+     * Phase 4 slice ζ: emit `--cwd <DIR>` so headless callers can set Grok's
+     * working directory without depending on the gateway process's cwd.
+     */
+    workingDir?: string;
+    /**
+     * Phase 4 slice θ — Grok HIGH parity. All five are passthrough flags:
+     *
+     * - `sandbox` → `--sandbox <PROFILE>` (freeform; Grok 0.1.210 --help
+     *   shows no enum constraint, unlike --effort / --permission-mode /
+     *   --output-format which all show `[possible values: …]`).
+     * - `rules` → `--rules <RULES>`. Supports `@file` prefix; gateway
+     *   passes the value verbatim and lets Grok parse it.
+     * - `systemPromptOverride` → `--system-prompt-override <PROMPT>`.
+     *   Distinct from Claude's --system-prompt / --append-system-prompt
+     *   (Grok has only one override flag).
+     * - `allow` / `deny` → repeatable `--allow <RULE>` / `--deny <RULE>`
+     *   per --help ("Repeat to add multiple rules"). One argv pair per
+     *   entry — NOT comma-joined like --tools / --disallowed-tools.
+     */
+    sandbox?: string;
+    rules?: string;
+    systemPromptOverride?: string;
+    allow?: string[];
+    deny?: string[];
   },
   runtime: GatewayServerRuntime = resolveGatewayServerRuntime()
 ): CliRequestPrep | ExtendedToolResponse {
@@ -1896,6 +2431,31 @@ function prepareGrokRequest(
   if (params.disallowedTools && params.disallowedTools.length > 0) {
     args.push("--disallowed-tools", params.disallowedTools.join(","));
   }
+  if (params.maxTurns !== undefined) {
+    args.push("--max-turns", String(params.maxTurns));
+  }
+  if (params.workingDir) {
+    args.push("--cwd", params.workingDir);
+  }
+  if (params.sandbox) {
+    args.push("--sandbox", params.sandbox);
+  }
+  if (params.rules) {
+    args.push("--rules", params.rules);
+  }
+  if (params.systemPromptOverride) {
+    args.push("--system-prompt-override", params.systemPromptOverride);
+  }
+  if (params.allow && params.allow.length > 0) {
+    for (const rule of params.allow) {
+      args.push("--allow", rule);
+    }
+  }
+  if (params.deny && params.deny.length > 0) {
+    for (const rule of params.deny) {
+      args.push("--deny", rule);
+    }
+  }
 
   return {
     corrId,
@@ -1927,6 +2487,21 @@ export function prepareMistralRequest(
     correlationId?: string;
     optimizePrompt: boolean;
     operation: string;
+    /**
+     * Phase 4 slice γ: emit `--trust` to bypass Vibe's interactive trust
+     * prompt for this invocation only (not persisted). Default undefined.
+     */
+    trust?: boolean;
+    /** Phase 4 slice δ: Vibe `--max-turns N` cap on agent-loop iterations. */
+    maxTurns?: number;
+    /** Phase 4 slice δ: Vibe `--max-price DOLLARS` cumulative-cost cap. */
+    maxPrice?: number;
+    /** Vibe 2.x: `--max-tokens N` cumulative prompt + completion token cap. */
+    maxTokens?: number;
+    /** Phase 4 slice ζ: Vibe `--workdir <DIR>` working-directory parity. */
+    workingDir?: string;
+    /** Phase 4 slice ζ: Vibe `--add-dir <DIR>` repeatable add-dir parity. */
+    addDir?: string[];
   },
   runtime: GatewayServerRuntime = resolveGatewayServerRuntime()
 ): (CliRequestPrep & { mistralEnv: Record<string, string> }) | ExtendedToolResponse {
@@ -2010,6 +2585,12 @@ export function prepareMistralRequest(
     reasoningEffort: params.reasoningEffort,
     allowedTools: params.allowedTools,
     disallowedTools: params.disallowedTools,
+    trust: params.trust,
+    maxTurns: params.maxTurns,
+    maxPrice: params.maxPrice,
+    maxTokens: params.maxTokens,
+    workingDir: params.workingDir,
+    addDir: params.addDir,
   });
 
   if (prep.ignoredDisallowedTools) {
@@ -2048,6 +2629,55 @@ function selectMistralRecoveryModel(failedModel: string | undefined): string | u
   ].filter((model): model is string => Boolean(model && model !== failedModel));
 
   return candidates.find(model => model !== "local");
+}
+
+/**
+ * Phase 4 slice δ post-review: pure helper extracted from
+ * `handleMistralRequest` so the retry-path arg-preservation invariants
+ * (trust + maxTurns + maxPrice from slices γ/δ) are unit-testable
+ * without mocking awaitJobOrDefer. Any param the wrapper threads into
+ * the FIRST `buildMistralCliInvocation` call MUST also be threaded
+ * through here, or a fresh-workspace / budgeted run can degrade on
+ * the second attempt.
+ */
+export function buildMistralRetryPrep(
+  params: Pick<
+    MistralRequestParams,
+    | "outputFormat"
+    | "permissionMode"
+    | "effort"
+    | "reasoningEffort"
+    | "allowedTools"
+    | "disallowedTools"
+    | "approvalStrategy"
+    | "trust"
+    | "maxTurns"
+    | "maxPrice"
+    | "maxTokens"
+    | "workingDir"
+    | "addDir"
+  > & { effectivePrompt: string },
+  recoveryModel: string
+): { args: string[]; env: Record<string, string>; ignoredDisallowedTools: boolean } {
+  return buildMistralCliInvocation({
+    prompt: params.effectivePrompt,
+    resolvedModel: recoveryModel,
+    outputFormat: params.outputFormat,
+    permissionMode:
+      params.approvalStrategy === "mcp_managed"
+        ? "auto-approve"
+        : (params.permissionMode ?? "auto-approve"),
+    effort: params.effort,
+    reasoningEffort: params.reasoningEffort,
+    allowedTools: params.allowedTools,
+    disallowedTools: params.disallowedTools,
+    trust: params.trust,
+    maxTurns: params.maxTurns,
+    maxPrice: params.maxPrice,
+    maxTokens: params.maxTokens,
+    workingDir: params.workingDir,
+    addDir: params.addDir,
+  });
 }
 
 function buildCliResponse(
@@ -2090,7 +2720,10 @@ function buildCliResponse(
       correlationId: corrId,
       sessionId: sessionId || null,
       durationMs,
-      ...extractUsageAndCost(cli, stdout, outputFormat),
+      // Phase 4 slice β: thread sessionId + home so the Mistral branch of
+      // extractUsageAndCost can read `~/.vibe/logs/session/<dir>/meta.json`.
+      // Other CLIs ignore the ctx (their usage source is stdout).
+      ...extractUsageAndCost(cli, stdout, outputFormat, { sessionId, home: homedir() }),
       exitCode: 0,
       retryCount: 0,
     },
@@ -2172,13 +2805,20 @@ export interface GeminiRequestParams {
   optimizeResponse?: boolean;
   idleTimeoutMs?: number;
   forceRefresh?: boolean;
-  /** U23: "json" emits `-o json` so token usage is parsed and reported. */
-  outputFormat?: "text" | "json";
+  /**
+   * U23 + Phase 4 slice ε: "json" emits `-o json`; "stream-json" emits
+   * `-o stream-json` (NDJSON event stream). Both are usage-extracted.
+   */
+  outputFormat?: "text" | "json" | "stream-json";
   // U27: high-impact features
   sandbox?: boolean;
   policyFiles?: string[];
   adminPolicyFiles?: string[];
   attachments?: string[];
+  /** Phase 4 slice γ: emit `--skip-trust` for fresh-workspace headless runs. */
+  skipTrust?: boolean;
+  /** Slice λ: run this request inside a gateway-owned git worktree. */
+  worktree?: boolean | { name?: string; ref?: string };
 }
 
 export interface HandlerDeps {
@@ -2240,6 +2880,7 @@ export async function handleGeminiRequest(
       policyFiles: params.policyFiles,
       adminPolicyFiles: params.adminPolicyFiles,
       attachments: params.attachments,
+      skipTrust: params.skipTrust,
     },
     runtime
   );
@@ -2276,6 +2917,23 @@ export async function handleGeminiRequest(
     const userProvidedSession = sessionPlan.resumed;
     const effectiveSessionIdHint = sessionPlan.resumed ? params.sessionId : undefined;
 
+    let worktreeResolution: ResolvedWorktree = {};
+    try {
+      worktreeResolution = await resolveWorktreeForRequest(
+        params.worktree,
+        effectiveSessionIdHint,
+        runtime
+      );
+    } catch (err) {
+      return createErrorResponse("gemini_request", 1, "", corrId, err as Error);
+    }
+
+    const geminiFrHandoff = buildAsyncFlightRecorderHandoff(
+      "gemini",
+      prep,
+      params.sessionId,
+      params.outputFormat
+    );
     const result = await awaitJobOrDefer(
       "gemini",
       args,
@@ -2283,7 +2941,12 @@ export async function handleGeminiRequest(
       resolveIdleTimeout("gemini", params.idleTimeoutMs),
       params.outputFormat,
       params.forceRefresh,
-      runtime
+      runtime,
+      undefined,
+      undefined,
+      geminiFrHandoff.flightRecorderEntry,
+      geminiFrHandoff.extractUsage,
+      worktreeResolution.cwd
     );
 
     // Deferred — job still running, return async reference
@@ -2343,6 +3006,12 @@ export async function handleGeminiRequest(
       userProvidedSession,
       params.outputFormat
     );
+    if (worktreeResolution.worktreePath) {
+      const first = response.content[0];
+      if (first && first.type === "text") {
+        first.text = formatWorktreePrefix(worktreeResolution.worktreePath) + first.text;
+      }
+    }
     const geminiUsage = extractUsageAndCost("gemini", stdout, params.outputFormat);
     safeFlightComplete(
       corrId,
@@ -2412,6 +3081,7 @@ export async function handleGeminiRequestAsync(
       policyFiles: params.policyFiles,
       adminPolicyFiles: params.adminPolicyFiles,
       attachments: params.attachments,
+      skipTrust: params.skipTrust,
     },
     runtime
   );
@@ -2443,19 +3113,43 @@ export async function handleGeminiRequestAsync(
       await deps.sessionManager.updateSessionUsage(effectiveSessionId);
     }
 
+    let worktreeResolution: ResolvedWorktree = {};
+    try {
+      worktreeResolution = await resolveWorktreeForRequest(
+        params.worktree,
+        effectiveSessionId,
+        runtime
+      );
+    } catch (err) {
+      return createErrorResponse("gemini_request_async", 1, "", corrId, err as Error);
+    }
+
     // Start job only after all session I/O succeeds. U23: forward outputFormat
     // so AsyncJobManager records it in the durable store (the manager also
     // surfaces it in the snapshot).
     assertUpstreamCliArgs("gemini", args);
     assertUpstreamCliEnv("gemini", undefined);
+    // Slice 1.5: pure async path — no upstream safeFlightStart, so the
+    // manager owns both logStart and logComplete for this corrId.
+    const geminiAsyncFrHandoff = buildAsyncFlightRecorderHandoff(
+      "gemini",
+      prep,
+      effectiveSessionId,
+      params.outputFormat
+    );
     const job = deps.asyncJobManager.startJob(
       "gemini",
       args,
       corrId,
-      undefined,
+      worktreeResolution.cwd,
       resolveIdleTimeout("gemini", params.idleTimeoutMs),
       params.outputFormat,
-      params.forceRefresh
+      params.forceRefresh,
+      undefined,
+      undefined,
+      geminiAsyncFrHandoff.flightRecorderEntry,
+      geminiAsyncFrHandoff.extractUsage,
+      true
     );
     deps.logger.info(`[${corrId}] gemini_request_async started job ${job.id}`);
 
@@ -2469,6 +3163,9 @@ export async function handleGeminiRequestAsync(
     };
     if (prep.reviewIntegrity && prep.reviewIntegrity.violations.length > 0) {
       asyncResponse.reviewIntegrity = prep.reviewIntegrity;
+    }
+    if (worktreeResolution.worktreePath) {
+      asyncResponse.worktreePath = worktreeResolution.worktreePath;
     }
 
     return {
@@ -2506,6 +3203,22 @@ export interface GrokRequestParams {
   optimizeResponse?: boolean;
   idleTimeoutMs?: number;
   forceRefresh?: boolean;
+  /** Phase 4 slice δ: cap agent-loop iterations via `--max-turns N`. */
+  maxTurns?: number;
+  /** Phase 4 slice ζ: emit `--cwd <DIR>` so the CLI uses the specified working directory. */
+  workingDir?: string;
+  /** Phase 4 slice θ: Grok `--sandbox <PROFILE>` (freeform passthrough). */
+  sandbox?: string;
+  /** Phase 4 slice θ: Grok `--rules <RULES>` (supports `@file` prefix; verbatim passthrough). */
+  rules?: string;
+  /** Phase 4 slice θ: Grok `--system-prompt-override <PROMPT>`. */
+  systemPromptOverride?: string;
+  /** Phase 4 slice θ: Grok `--allow <RULE>` (repeatable; one entry per --allow instance). */
+  allow?: string[];
+  /** Phase 4 slice θ: Grok `--deny <RULE>` (repeatable; one entry per --deny instance). */
+  deny?: string[];
+  /** Slice λ: run this request inside a gateway-owned git worktree. */
+  worktree?: boolean | { name?: string; ref?: string };
 }
 
 export async function handleGrokRequest(
@@ -2532,6 +3245,13 @@ export async function handleGrokRequest(
       correlationId: params.correlationId,
       optimizePrompt: params.optimizePrompt,
       operation: "grok_request",
+      maxTurns: params.maxTurns,
+      workingDir: params.workingDir,
+      sandbox: params.sandbox,
+      rules: params.rules,
+      systemPromptOverride: params.systemPromptOverride,
+      allow: params.allow,
+      deny: params.deny,
     },
     runtime
   );
@@ -2565,6 +3285,23 @@ export async function handleGrokRequest(
     });
     args.push(...sessionResult.resumeArgs);
 
+    let worktreeResolution: ResolvedWorktree = {};
+    try {
+      worktreeResolution = await resolveWorktreeForRequest(
+        params.worktree,
+        sessionResult.effectiveSessionId,
+        runtime
+      );
+    } catch (err) {
+      return createErrorResponse("grok_request", 1, "", corrId, err as Error);
+    }
+
+    const grokFrHandoff = buildAsyncFlightRecorderHandoff(
+      "grok",
+      prep,
+      params.sessionId,
+      params.outputFormat
+    );
     const result = await awaitJobOrDefer(
       "grok",
       args,
@@ -2572,7 +3309,13 @@ export async function handleGrokRequest(
       resolveIdleTimeout("grok", params.idleTimeoutMs),
       params.outputFormat,
       params.forceRefresh,
-      runtime
+      runtime,
+      undefined,
+      undefined,
+      grokFrHandoff.flightRecorderEntry,
+      grokFrHandoff.extractUsage,
+      undefined,
+      worktreeResolution.cwd
     );
 
     // Deferred — job still running, return async reference
@@ -2637,6 +3380,12 @@ export async function handleGrokRequest(
       sessionResult.userProvidedSession,
       params.outputFormat
     );
+    if (worktreeResolution.worktreePath) {
+      const first = response.content[0];
+      if (first && first.type === "text") {
+        first.text = formatWorktreePrefix(worktreeResolution.worktreePath) + first.text;
+      }
+    }
     safeFlightComplete(
       corrId,
       {
@@ -2699,6 +3448,13 @@ export async function handleGrokRequestAsync(
       correlationId: params.correlationId,
       optimizePrompt: params.optimizePrompt,
       operation: "grok_request_async",
+      maxTurns: params.maxTurns,
+      workingDir: params.workingDir,
+      sandbox: params.sandbox,
+      rules: params.rules,
+      systemPromptOverride: params.systemPromptOverride,
+      allow: params.allow,
+      deny: params.deny,
     },
     runtime
   );
@@ -2737,17 +3493,39 @@ export async function handleGrokRequestAsync(
       effectiveSessionId = newSession.id;
     }
 
+    let worktreeResolution: ResolvedWorktree = {};
+    try {
+      worktreeResolution = await resolveWorktreeForRequest(
+        params.worktree,
+        effectiveSessionId,
+        runtime
+      );
+    } catch (err) {
+      return createErrorResponse("grok_request_async", 1, "", corrId, err as Error);
+    }
+
     // Start job only after all session I/O succeeds
     assertUpstreamCliArgs("grok", args);
     assertUpstreamCliEnv("grok", undefined);
+    const grokAsyncFrHandoff = buildAsyncFlightRecorderHandoff(
+      "grok",
+      prep,
+      effectiveSessionId,
+      params.outputFormat
+    );
     const job = deps.asyncJobManager.startJob(
       "grok",
       args,
       corrId,
-      undefined,
+      worktreeResolution.cwd,
       resolveIdleTimeout("grok", params.idleTimeoutMs),
       params.outputFormat,
-      params.forceRefresh
+      params.forceRefresh,
+      undefined,
+      undefined,
+      grokAsyncFrHandoff.flightRecorderEntry,
+      grokAsyncFrHandoff.extractUsage,
+      true
     );
     deps.logger.info(`[${corrId}] grok_request_async started job ${job.id}`);
 
@@ -2761,6 +3539,9 @@ export async function handleGrokRequestAsync(
     };
     if (prep.reviewIntegrity && prep.reviewIntegrity.violations.length > 0) {
       asyncResponse.reviewIntegrity = prep.reviewIntegrity;
+    }
+    if (worktreeResolution.worktreePath) {
+      asyncResponse.worktreePath = worktreeResolution.worktreePath;
     }
 
     return {
@@ -2797,6 +3578,20 @@ export interface MistralRequestParams {
   optimizeResponse?: boolean;
   idleTimeoutMs?: number;
   forceRefresh?: boolean;
+  /** Phase 4 slice γ: emit `--trust` for fresh-workspace headless runs. */
+  trust?: boolean;
+  /** Phase 4 slice δ: Vibe `--max-turns N` cap on agent-loop iterations. */
+  maxTurns?: number;
+  /** Phase 4 slice δ: Vibe `--max-price DOLLARS` cumulative-cost cap. */
+  maxPrice?: number;
+  /** Vibe 2.x: `--max-tokens N` cumulative prompt + completion token cap. */
+  maxTokens?: number;
+  /** Phase 4 slice ζ: Vibe `--workdir <DIR>` working-directory parity. */
+  workingDir?: string;
+  /** Phase 4 slice ζ: Vibe `--add-dir <DIR>` repeatable add-dir parity. */
+  addDir?: string[];
+  /** Slice λ: run this request inside a gateway-owned git worktree. */
+  worktree?: boolean | { name?: string; ref?: string };
 }
 
 export async function handleMistralRequest(
@@ -2822,6 +3617,12 @@ export async function handleMistralRequest(
       correlationId: params.correlationId,
       optimizePrompt: params.optimizePrompt,
       operation: "mistral_request",
+      trust: params.trust,
+      maxTurns: params.maxTurns,
+      maxPrice: params.maxPrice,
+      maxTokens: params.maxTokens,
+      workingDir: params.workingDir,
+      addDir: params.addDir,
     },
     runtime
   );
@@ -2854,6 +3655,23 @@ export async function handleMistralRequest(
     });
     args.push(...sessionResult.resumeArgs);
 
+    let worktreeResolution: ResolvedWorktree = {};
+    try {
+      worktreeResolution = await resolveWorktreeForRequest(
+        params.worktree,
+        sessionResult.effectiveSessionId,
+        runtime
+      );
+    } catch (err) {
+      return createErrorResponse("mistral_request", 1, "", corrId, err as Error);
+    }
+
+    const mistralFrHandoff = buildAsyncFlightRecorderHandoff(
+      "mistral",
+      prep,
+      params.sessionId,
+      params.outputFormat
+    );
     let result = await awaitJobOrDefer(
       "mistral",
       args,
@@ -2862,7 +3680,12 @@ export async function handleMistralRequest(
       params.outputFormat,
       params.forceRefresh,
       runtime,
-      mistralEnv
+      mistralEnv,
+      undefined,
+      mistralFrHandoff.flightRecorderEntry,
+      mistralFrHandoff.extractUsage,
+      undefined,
+      worktreeResolution.cwd
     );
 
     if (isDeferredResponse(result)) {
@@ -2875,20 +3698,13 @@ export async function handleMistralRequest(
         deps.logger.info(
           `[${corrId}] mistral_request detected stale Vibe model selection; retrying once with ${recoveryModel}`
         );
-        const retryPrep = buildMistralCliInvocation({
-          prompt: prep.effectivePrompt,
-          resolvedModel: recoveryModel,
-          outputFormat: params.outputFormat,
-          permissionMode:
-            params.approvalStrategy === "mcp_managed"
-              ? "auto-approve"
-              : (params.permissionMode ?? "auto-approve"),
-          effort: params.effort,
-          reasoningEffort: params.reasoningEffort,
-          allowedTools: params.allowedTools,
-          disallowedTools: params.disallowedTools,
-        });
+        const retryPrep = buildMistralRetryPrep(
+          { ...params, effectivePrompt: prep.effectivePrompt },
+          recoveryModel
+        );
         const retryArgs = [...retryPrep.args, ...sessionResult.resumeArgs];
+        // Reuse the FR handoff built above — the retry preserves corrId,
+        // so the manager's logComplete still updates the original row.
         result = await awaitJobOrDefer(
           "mistral",
           retryArgs,
@@ -2897,7 +3713,12 @@ export async function handleMistralRequest(
           params.outputFormat,
           true,
           runtime,
-          retryPrep.env
+          retryPrep.env,
+          undefined,
+          mistralFrHandoff.flightRecorderEntry,
+          mistralFrHandoff.extractUsage,
+          undefined,
+          worktreeResolution.cwd
         );
         if (isDeferredResponse(result)) {
           return buildDeferredToolResponse(result, sessionResult.effectiveSessionId);
@@ -2963,6 +3784,12 @@ export async function handleMistralRequest(
       sessionResult.userProvidedSession,
       params.outputFormat
     );
+    if (worktreeResolution.worktreePath) {
+      const first = response.content[0];
+      if (first && first.type === "text") {
+        first.text = formatWorktreePrefix(worktreeResolution.worktreePath) + first.text;
+      }
+    }
     safeFlightComplete(
       corrId,
       {
@@ -3024,6 +3851,12 @@ export async function handleMistralRequestAsync(
       correlationId: params.correlationId,
       optimizePrompt: params.optimizePrompt,
       operation: "mistral_request_async",
+      trust: params.trust,
+      maxTurns: params.maxTurns,
+      maxPrice: params.maxPrice,
+      maxTokens: params.maxTokens,
+      workingDir: params.workingDir,
+      addDir: params.addDir,
     },
     runtime
   );
@@ -3060,17 +3893,38 @@ export async function handleMistralRequestAsync(
       effectiveSessionId = newSession.id;
     }
 
+    let worktreeResolution: ResolvedWorktree = {};
+    try {
+      worktreeResolution = await resolveWorktreeForRequest(
+        params.worktree,
+        effectiveSessionId,
+        runtime
+      );
+    } catch (err) {
+      return createErrorResponse("mistral_request_async", 1, "", corrId, err as Error);
+    }
+
     assertUpstreamCliArgs("mistral", args);
     assertUpstreamCliEnv("mistral", mistralEnv);
+    const mistralAsyncFrHandoff = buildAsyncFlightRecorderHandoff(
+      "mistral",
+      prep,
+      effectiveSessionId,
+      params.outputFormat
+    );
     const job = deps.asyncJobManager.startJob(
       "mistral",
       args,
       corrId,
-      undefined,
+      worktreeResolution.cwd,
       resolveIdleTimeout("mistral", params.idleTimeoutMs),
       params.outputFormat,
       params.forceRefresh,
-      mistralEnv
+      mistralEnv,
+      undefined,
+      mistralAsyncFrHandoff.flightRecorderEntry,
+      mistralAsyncFrHandoff.extractUsage,
+      true
     );
     deps.logger.info(`[${corrId}] mistral_request_async started job ${job.id}`);
 
@@ -3084,6 +3938,9 @@ export async function handleMistralRequestAsync(
     };
     if (prep.reviewIntegrity && prep.reviewIntegrity.violations.length > 0) {
       asyncResponse.reviewIntegrity = prep.reviewIntegrity;
+    }
+    if (worktreeResolution.worktreePath) {
+      asyncResponse.worktreePath = worktreeResolution.worktreePath;
     }
 
     return {
@@ -3130,6 +3987,11 @@ export async function handleCodexRequestAsync(
     images?: string[];
     ignoreUserConfig?: boolean;
     ignoreRules?: boolean;
+    // Phase 4 slice ζ — Codex working-dir + add-dir parity.
+    workingDir?: string;
+    addDir?: string[];
+    /** Slice λ: run this request inside a gateway-owned git worktree. */
+    worktree?: boolean | { name?: string; ref?: string };
   }
 ): Promise<ExtendedToolResponse> {
   const runtime = resolveHandlerRuntime(deps);
@@ -3161,6 +4023,8 @@ export async function handleCodexRequestAsync(
       images: params.images,
       ignoreUserConfig: params.ignoreUserConfig,
       ignoreRules: params.ignoreRules,
+      workingDir: params.workingDir,
+      addDir: params.addDir,
     },
     runtime
   );
@@ -3204,22 +4068,46 @@ export async function handleCodexRequestAsync(
       effectiveSessionId = newSession.id;
     }
 
+    // Slice λ: resolve worktree directive after session I/O so resume reuse
+    // can read metadata.worktreePath. A pre-startJob failure here means
+    // prepCleanup is still owned locally; run it before returning.
+    let worktreeResolution: ResolvedWorktree = {};
+    try {
+      worktreeResolution = await resolveWorktreeForRequest(
+        params.worktree,
+        effectiveSessionId,
+        runtime
+      );
+    } catch (err) {
+      runPrepCleanupLocally();
+      return createErrorResponse("codex_request_async", 1, "", corrId, err as Error);
+    }
+
     // Start job only after all session I/O succeeds. If startJob throws before
     // registering the record, ownership stays here and we run it in the catch.
     assertUpstreamCliArgs("codex", args);
     assertUpstreamCliEnv("codex", undefined);
+    const codexAsyncFrHandoff = buildAsyncFlightRecorderHandoff(
+      "codex",
+      prep,
+      effectiveSessionId,
+      params.outputFormat
+    );
     let job;
     try {
       job = deps.asyncJobManager.startJob(
         "codex",
         args,
         corrId,
-        undefined,
+        worktreeResolution.cwd,
         resolveIdleTimeout("codex", params.idleTimeoutMs),
         params.outputFormat,
         params.forceRefresh,
         undefined,
-        prepCleanup
+        prepCleanup,
+        codexAsyncFrHandoff.flightRecorderEntry,
+        codexAsyncFrHandoff.extractUsage,
+        true
       );
       // Handoff succeeded: AsyncJobManager will fire prepCleanup on terminal
       // status. Release our local ownership claim so the catch path doesn't
@@ -3241,6 +4129,9 @@ export async function handleCodexRequestAsync(
     };
     if (prep.reviewIntegrity && prep.reviewIntegrity.violations.length > 0) {
       asyncResponse.reviewIntegrity = prep.reviewIntegrity;
+    }
+    if (worktreeResolution.worktreePath) {
+      asyncResponse.worktreePath = worktreeResolution.worktreePath;
     }
 
     return {
@@ -3315,7 +4206,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .optional()
         .describe("Prompt text for Claude (mutually exclusive with promptParts)"),
       promptParts: PromptPartsSchema.optional().describe(
-        "Cache-aware structured prompt: { system?, tools?, context?, task }. Mutually exclusive with prompt. Stable parts hash into cache_state for prefix-discipline tracking."
+        "Cache-aware structured prompt: { system?, tools?, context?, task, cacheControl? }. Use for repeated calls that share a stable prefix — `system`/`tools`/`context` are the stable head; `task` is the volatile tail (never marked). Set `cacheControl: { system?: boolean, tools?: boolean, context?: boolean }` to opt into explicit Anthropic prefix caching via `--input-format stream-json` (slice κ). Requires `outputFormat: 'stream-json'` and hard-codes `ttl='1h'` (Anthropic rejects 5m blocks after Claude Code's 1h-marked session-wrap content). Mutually exclusive with `prompt`. The stable prefix hash is logged to the flight recorder for cache_state aggregates."
       ),
       model: z
         .string()
@@ -3323,8 +4214,10 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .describe("Model name or alias (e.g. sonnet, claude-sonnet-4-5-20250929, latest)"),
       outputFormat: z
         .enum(["text", "json", "stream-json"])
-        .default("text")
-        .describe("Output format (text|json|stream-json). stream-json: NDJSON with idle timeout."),
+        .default("stream-json")
+        .describe(
+          "Output format (text|json|stream-json). DEFAULT: stream-json — the gateway parses NDJSON usage events to extract input/output/cache_read/cache_creation tokens + cost + model, persists them to the flight recorder for cache_state aggregates, and still returns the assistant text. Override to 'text' only when you truly want unparsed stdout (loses observability)."
+        ),
       sessionId: z.string().optional().describe("Session ID (uses active if omitted)"),
       continueSession: z.boolean().default(false).describe("Continue active session"),
       createNewSession: z.boolean().default(false).describe("Force new session"),
@@ -3351,7 +4244,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .optional()
         .describe("Claude --agent: dispatch to a named single sub-agent."),
       agents: z
-        .record(z.record(z.unknown()))
+        .record(z.string(), z.record(z.string(), z.unknown()))
         .optional()
         .describe(
           "Claude --agents: inline JSON map of agent name → { description, prompt, tools?, model? }."
@@ -3389,6 +4282,28 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .describe(
           "Claude --exclude-dynamic-system-prompt-sections: trim dynamic context blocks from the system prompt."
         ),
+      // Phase 4 slice η — Claude reliability + structured-output parity
+      fallbackModel: z
+        .string()
+        .min(1)
+        .optional()
+        .describe(
+          "Claude --fallback-model: model name to auto-fallback to when the default model is overloaded (effective only with --print, which the gateway always uses)."
+        ),
+      jsonSchema: z
+        .union([z.string(), z.record(z.string(), z.unknown())])
+        .optional()
+        .describe(
+          "Claude --json-schema: JSON Schema literal (NOT a path) constraining structured output. Object values are JSON.stringify-d; string values are passed verbatim. Use with outputFormat='json'."
+        ),
+      // Phase 4 slice ζ — Claude additional-workspace-dirs parity
+      addDir: z
+        .array(z.string())
+        .optional()
+        .describe(
+          "Claude --add-dir: additional directories the CLI is allowed to read/write beyond the process cwd. Each entry is emitted as its own --add-dir instance."
+        ),
+      worktree: WORKTREE_SCHEMA.optional(),
       approvalStrategy: z
         .enum(["legacy", "mcp_managed"])
         .default("legacy")
@@ -3443,6 +4358,10 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       maxTurns,
       effort,
       excludeDynamicSystemPromptSections,
+      fallbackModel,
+      jsonSchema,
+      addDir,
+      worktree,
       approvalStrategy,
       approvalPolicy,
       mcpServers,
@@ -3491,6 +4410,9 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           maxTurns,
           effort,
           excludeDynamicSystemPromptSections,
+          fallbackModel,
+          jsonSchema,
+          addDir,
         },
         runtime
       );
@@ -3538,7 +4460,11 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         sessionId: effectiveSessionId,
         cli: "claude",
       });
-      const warnings: WarningEntry[] = ttlWarning ? [ttlWarning] : [];
+      // Rec #4: include any prep-time warnings (e.g. cacheable_prefix_uncached).
+      const warnings: WarningEntry[] = [
+        ...(ttlWarning ? [ttlWarning] : []),
+        ...(prep.warnings ?? []),
+      ];
 
       safeFlightStart(
         {
@@ -3549,11 +4475,12 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           sessionId: effectiveSessionId,
           stablePrefixHash: prep.stablePrefixHash ?? undefined,
           stablePrefixTokens: prep.stablePrefixTokens ?? undefined,
+          cacheControlBlocks: prep.cacheControlBlocks,
         },
         runtime
       );
       logger.info(
-        `[${corrId}] claude_request invoked with model=${prep.resolvedModel || "default"}, outputFormat=${outputFormat}, prompt length=${prep.effectivePrompt.length}, sessionId=${effectiveSessionId}`
+        `[${corrId}] claude_request invoked with model=${prep.resolvedModel || "default"}, outputFormat=${outputFormat}, prompt length=${prep.effectivePrompt.length}, sessionId=${effectiveSessionId}, cacheControlBlocks=${prep.cacheControlBlocks ?? 0}`
       );
 
       try {
@@ -3564,9 +4491,28 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           await sessionManager.updateSessionUsage(effectiveSessionId);
         }
 
+        // Slice λ: resolve worktree directive into spawn cwd. Done after
+        // session resolution so resume reuse can read metadata.worktreePath.
+        let worktreeResolution: ResolvedWorktree = {};
+        try {
+          worktreeResolution = await resolveWorktreeForRequest(
+            worktree,
+            effectiveSessionId,
+            runtime
+          );
+        } catch (err) {
+          return createErrorResponse("claude_request", 1, "", corrId, err as Error);
+        }
+
         // Idle timeout only for stream-json (text/json produce no output until done)
         const effectiveIdleTimeout =
           outputFormat === "stream-json" ? resolveIdleTimeout("claude", idleTimeoutMs) : undefined;
+        const claudeSyncFrHandoff = buildAsyncFlightRecorderHandoff(
+          "claude",
+          prep,
+          effectiveSessionId,
+          outputFormat
+        );
         const result = await awaitJobOrDefer(
           "claude",
           args,
@@ -3574,7 +4520,13 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           effectiveIdleTimeout,
           outputFormat,
           forceRefresh,
-          runtime
+          runtime,
+          undefined,
+          undefined,
+          claudeSyncFrHandoff.flightRecorderEntry,
+          claudeSyncFrHandoff.extractUsage,
+          prep.stdinPayload,
+          worktreeResolution.cwd
         );
 
         // Deferred — job still running, return async reference
@@ -3648,7 +4600,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             },
             runtime
           );
-          return buildCliResponse(
+          const streamResponse = buildCliResponse(
             "claude",
             parsed.text,
             optimizeResponse,
@@ -3660,6 +4612,13 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             outputFormat,
             warnings
           );
+          if (worktreeResolution.worktreePath) {
+            const first = streamResponse.content[0];
+            if (first && first.type === "text") {
+              first.text = formatWorktreePrefix(worktreeResolution.worktreePath) + first.text;
+            }
+          }
+          return streamResponse;
         }
         safeFlightComplete(
           corrId,
@@ -3674,7 +4633,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           },
           runtime
         );
-        return buildCliResponse(
+        const nonStreamResponse = buildCliResponse(
           "claude",
           stdout,
           optimizeResponse,
@@ -3686,6 +4645,13 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           outputFormat,
           warnings
         );
+        if (worktreeResolution.worktreePath) {
+          const first = nonStreamResponse.content[0];
+          if (first && first.type === "text") {
+            first.text = formatWorktreePrefix(worktreeResolution.worktreePath) + first.text;
+          }
+        }
+        return nonStreamResponse;
       } catch (error) {
         const elapsedMs = Math.max(0, Date.now() - startTime);
         logger.info(`[${corrId}] claude_request threw exception after ${elapsedMs}ms`);
@@ -3802,7 +4768,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         ),
       // U26: high-impact feature flags. All optional.
       outputSchema: z
-        .union([z.string(), z.record(z.unknown())])
+        .union([z.string(), z.record(z.string(), z.unknown())])
         .optional()
         .describe(
           "Codex --output-schema. Pass a path (string) or an inline JSON Schema object; object is materialised to a 0o600 temp file under os.tmpdir() and deleted after the run."
@@ -3833,6 +4799,21 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .boolean()
         .optional()
         .describe("Codex --ignore-rules: skip project rule files for this run."),
+      // Phase 4 slice ζ — Codex working-dir + add-dir parity (new sessions only).
+      workingDir: z
+        .string()
+        .min(1)
+        .optional()
+        .describe(
+          "Codex -C/--cd <DIR>: working root for this session. Emitted on new sessions only; resume inherits the original session's cwd via CODEX_RESUME_FILTERED_FLAGS."
+        ),
+      addDir: z
+        .array(z.string())
+        .optional()
+        .describe(
+          "Codex --add-dir <DIR>: additional writable workspace directories. Emitted once per entry on new sessions only; resume inherits the original session's writable-dir policy."
+        ),
+      worktree: WORKTREE_SCHEMA.optional(),
     },
     async ({
       prompt,
@@ -3863,6 +4844,9 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       images,
       ignoreUserConfig,
       ignoreRules,
+      workingDir,
+      addDir,
+      worktree,
     }) => {
       const startTime = Date.now();
       const prep = prepareCodexRequest(
@@ -3893,6 +4877,8 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           images,
           ignoreUserConfig,
           ignoreRules,
+          workingDir,
+          addDir,
         },
         runtime
       );
@@ -3924,7 +4910,24 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       const prepCleanup =
         "cleanup" in prep && typeof prep.cleanup === "function" ? prep.cleanup : undefined;
 
+      // Slice λ: resolve worktree directive into spawn cwd. Codex has no
+      // in-handler session resolution prior to spawn (session lookup is
+      // lazy via `codex exec resume`), so the user-supplied sessionId is
+      // the only reuse key.
+      let worktreeResolution: ResolvedWorktree = {};
       try {
+        worktreeResolution = await resolveWorktreeForRequest(worktree, sessionId, runtime);
+      } catch (err) {
+        return createErrorResponse("codex_request", 1, "", corrId, err as Error);
+      }
+
+      try {
+        const codexSyncFrHandoff = buildAsyncFlightRecorderHandoff(
+          "codex",
+          prep,
+          sessionId,
+          outputFormat
+        );
         const result = await awaitJobOrDefer(
           "codex",
           args,
@@ -3934,7 +4937,11 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           forceRefresh,
           runtime,
           undefined,
-          prepCleanup
+          prepCleanup,
+          codexSyncFrHandoff.flightRecorderEntry,
+          codexSyncFrHandoff.extractUsage,
+          undefined,
+          worktreeResolution.cwd
         );
 
         // Deferred — job still running, return async reference. Cleanup
@@ -4003,7 +5010,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           },
           runtime
         );
-        return buildCliResponse(
+        const codexResponse = buildCliResponse(
           "codex",
           stdout,
           optimizeResponse,
@@ -4014,6 +5021,13 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           undefined,
           outputFormat
         );
+        if (worktreeResolution.worktreePath) {
+          const first = codexResponse.content[0];
+          if (first && first.type === "text") {
+            first.text = formatWorktreePrefix(worktreeResolution.worktreePath) + first.text;
+          }
+        }
+        return codexResponse;
       } catch (error) {
         const elapsedMs = Math.max(0, Date.now() - startTime);
         logger.info(`[${corrId}] codex_request threw exception after ${elapsedMs}ms`);
@@ -4242,12 +5256,15 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           "Bypass dedup and force a fresh CLI run even if a recent identical request exists"
         ),
       // U23: emit `-o json` to extract token usage via parseGeminiJson. Default
-      // remains text so existing callers see no behavior change.
+      // remains text so existing callers see no behavior change. Phase 4 slice
+      // ε adds `stream-json` (NDJSON event stream parsed by
+      // parseGeminiStreamJson — `init`/`message`/`result` lines, idle-timeout
+      // semantics covered by Gemini's existing real-time stdout streaming).
       outputFormat: z
-        .enum(["text", "json"])
+        .enum(["text", "json", "stream-json"])
         .default("text")
         .describe(
-          "Gemini output format. `json` emits `-o json` so usageMetadata is parsed and reported."
+          "Gemini output format. `json` emits `-o json` (single JSON with usageMetadata). `stream-json` emits `-o stream-json` (NDJSON event stream — `init`/`message`/`result` lines, usage extracted from the terminal `result.stats` event). Both report usage to the flight recorder."
         ),
       sandbox: GEMINI_HIGH_IMPACT_PARAMS_SCHEMA.shape.sandbox.describe(
         "Run Gemini in sandbox mode (-s)"
@@ -4261,6 +5278,13 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       attachments: GEMINI_HIGH_IMPACT_PARAMS_SCHEMA.shape.attachments.describe(
         "Absolute file paths prepended as @<path> tokens to the prompt"
       ),
+      skipTrust: z
+        .boolean()
+        .default(false)
+        .describe(
+          "Emit `--skip-trust` so Gemini trusts the workspace for this session and skips the interactive trust prompt (Phase 4 slice γ). Required for headless runs in fresh workspaces."
+        ),
+      worktree: WORKTREE_SCHEMA.optional(),
     },
     async ({
       prompt,
@@ -4285,6 +5309,8 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       policyFiles,
       adminPolicyFiles,
       attachments,
+      skipTrust,
+      worktree,
     }) => {
       return handleGeminiRequest(
         { sessionManager, logger, runtime },
@@ -4311,6 +5337,8 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           policyFiles,
           adminPolicyFiles,
           attachments,
+          skipTrust,
+          worktree,
         }
       );
     }
@@ -4397,6 +5425,52 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .describe(
           "Bypass dedup and force a fresh CLI run even if a recent identical request exists"
         ),
+      maxTurns: MAX_TURNS_SCHEMA.optional().describe(
+        "Grok `--max-turns N`: cap on agent-loop iterations for cost / latency control (Phase 4 slice δ). Bounded to safe integers ≤ 10000."
+      ),
+      // Phase 4 slice ζ — Grok working-directory parity.
+      workingDir: z
+        .string()
+        .min(1)
+        .optional()
+        .describe(
+          "Grok --cwd <DIR>: working directory for this invocation. Lets headless callers run Grok against a directory other than the gateway process's cwd."
+        ),
+      // Phase 4 slice θ — Grok HIGH parity (sandbox, rules, system-prompt-override, allow, deny).
+      sandbox: z
+        .string()
+        .min(1)
+        .optional()
+        .describe(
+          "Grok --sandbox <PROFILE>: sandbox profile for filesystem and network access. Freeform per `grok --help` (no enum constraint on Grok 0.1.210); also settable via GROK_SANDBOX env var. Caller responsibility to pass a valid profile name."
+        ),
+      rules: z
+        .string()
+        .min(1)
+        .optional()
+        .describe(
+          "Grok --rules <RULES>: extra rules to append to the system prompt. Supports `@file` prefix per `grok --help` to load from a file; gateway passes the value verbatim and lets Grok parse the prefix."
+        ),
+      systemPromptOverride: z
+        .string()
+        .min(1)
+        .optional()
+        .describe(
+          "Grok --system-prompt-override <PROMPT>: replace the agent's system prompt entirely. Distinct from Claude's --system-prompt / --append-system-prompt (Grok has only one override flag, not a pair)."
+        ),
+      allow: z
+        .array(z.string())
+        .optional()
+        .describe(
+          'Grok --allow <RULE>: permission allow rules. Each entry is emitted as its own --allow instance (per `grok --help`: "Repeat to add multiple rules").'
+        ),
+      deny: z
+        .array(z.string())
+        .optional()
+        .describe(
+          'Grok --deny <RULE>: permission deny rules. Each entry is emitted as its own --deny instance (per `grok --help`: "Repeat to add multiple rules").'
+        ),
+      worktree: WORKTREE_SCHEMA.optional(),
     },
     async ({
       prompt,
@@ -4420,6 +5494,14 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       optimizeResponse,
       idleTimeoutMs,
       forceRefresh,
+      maxTurns,
+      workingDir,
+      sandbox,
+      rules,
+      systemPromptOverride,
+      allow,
+      deny,
+      worktree,
     }) => {
       return handleGrokRequest(
         { sessionManager, logger, runtime },
@@ -4445,6 +5527,14 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           optimizeResponse,
           idleTimeoutMs,
           forceRefresh,
+          maxTurns,
+          workingDir,
+          sandbox,
+          rules,
+          systemPromptOverride,
+          allow,
+          deny,
+          worktree,
         }
       );
     }
@@ -4473,14 +5563,16 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           "Model alias (e.g. mistral-medium-3.5, latest). Resolved alias is injected via VIBE_ACTIVE_MODEL env var; Vibe has no --model flag."
         ),
       outputFormat: z
-        .enum(["plain", "json", "stream-json"])
+        .enum(["text", "plain", "json", "streaming", "stream-json"])
         .optional()
-        .describe("Output format (plain|json|stream-json). Vibe default is plain."),
+        .describe(
+          "Output format for Vibe 2.x (text|json|streaming). Legacy aliases plain→text and stream-json→streaming are accepted."
+        ),
       sessionId: z
         .string()
         .optional()
         .describe(
-          "Session ID (user-provided CLI handle for --resume). Requires [session_logging] enabled = true in ~/.vibe/config.toml."
+          "Session ID (user-provided CLI handle for --resume). Current Vibe defaults session logging on; doctor flags explicit [session_logging] enabled = false."
         ),
       resumeLatest: z
         .boolean()
@@ -4540,6 +5632,36 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .describe(
           "Bypass dedup and force a fresh CLI run even if a recent identical request exists"
         ),
+      trust: z
+        .boolean()
+        .default(false)
+        .describe(
+          "Emit `--trust` so Vibe trusts the cwd for this invocation only (not persisted to trusted_folders.toml) and skips the interactive trust prompt (Phase 4 slice γ)."
+        ),
+      maxTurns: MAX_TURNS_SCHEMA.optional().describe(
+        "Vibe `--max-turns N`: cap the agent-loop iteration count (programmatic mode only, Phase 4 slice δ). Bounded to safe integers ≤ 10000."
+      ),
+      maxPrice: MAX_PRICE_SCHEMA.optional().describe(
+        "Vibe `--max-price DOLLARS`: interrupt the session when cumulative cost crosses this cap (programmatic mode only, Phase 4 slice δ). Bounded to finite values ≤ 10000 USD."
+      ),
+      maxTokens: MAX_TOKENS_SCHEMA.optional().describe(
+        "Vibe `--max-tokens N`: cap cumulative prompt + completion tokens for the session (programmatic mode only). Bounded to safe integers ≤ 100000000."
+      ),
+      // Phase 4 slice ζ — Vibe working-directory + additional-dirs parity.
+      workingDir: z
+        .string()
+        .min(1)
+        .optional()
+        .describe(
+          "Vibe --workdir <DIR>: change to this directory before running. Single value (Vibe accepts one --workdir per invocation)."
+        ),
+      addDir: z
+        .array(z.string())
+        .optional()
+        .describe(
+          "Vibe --add-dir <DIR>: additional writable workspace directories. Each entry is emitted as its own --add-dir instance (Vibe states this flag may be specified multiple times)."
+        ),
+      worktree: WORKTREE_SCHEMA.optional(),
     },
     async ({
       prompt,
@@ -4562,6 +5684,13 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       optimizeResponse,
       idleTimeoutMs,
       forceRefresh,
+      trust,
+      maxTurns,
+      maxPrice,
+      maxTokens,
+      workingDir,
+      addDir,
+      worktree,
     }) => {
       return handleMistralRequest(
         { sessionManager, logger, runtime },
@@ -4586,6 +5715,13 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           optimizeResponse,
           idleTimeoutMs,
           forceRefresh,
+          trust,
+          maxTurns,
+          maxPrice,
+          maxTokens,
+          workingDir,
+          addDir,
+          worktree,
         }
       );
     }
@@ -4613,7 +5749,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .optional()
           .describe("Prompt text for Claude (mutually exclusive with promptParts)"),
         promptParts: PromptPartsSchema.optional().describe(
-          "Cache-aware structured prompt: { system?, tools?, context?, task }. Mutually exclusive with prompt. Stable parts hash into cache_state for prefix-discipline tracking."
+          "Cache-aware structured prompt: { system?, tools?, context?, task, cacheControl? }. Same semantics as claude_request: stable head (system/tools/context) + volatile tail (task). Set `cacheControl: { system?, tools?, context?: boolean }` to opt into explicit Anthropic prefix caching via `--input-format stream-json` (slice κ); requires `outputFormat: 'stream-json'` and hard-codes `ttl='1h'`. Mutually exclusive with `prompt`. Stable prefix hash logged to flight recorder."
         ),
         model: z
           .string()
@@ -4621,9 +5757,9 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .describe("Model name or alias (e.g. sonnet, claude-sonnet-4-5-20250929, latest)"),
         outputFormat: z
           .enum(["text", "json", "stream-json"])
-          .default("text")
+          .default("stream-json")
           .describe(
-            "Output format (text|json|stream-json). stream-json: NDJSON with idle timeout."
+            "Output format (text|json|stream-json). DEFAULT: stream-json — same rationale as claude_request: keeps usage/cache/cost observable for cache_state aggregates. Override to 'text' only when raw stdout is required (loses observability)."
           ),
         sessionId: z.string().optional().describe("Session ID (uses active if omitted)"),
         continueSession: z.boolean().default(false).describe("Continue active session"),
@@ -4651,7 +5787,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .optional()
           .describe("Claude --agent: dispatch to a named single sub-agent."),
         agents: z
-          .record(z.record(z.unknown()))
+          .record(z.string(), z.record(z.string(), z.unknown()))
           .optional()
           .describe(
             "Claude --agents: inline JSON map of agent name → { description, prompt, tools?, model? }."
@@ -4689,6 +5825,28 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .describe(
             "Claude --exclude-dynamic-system-prompt-sections: trim dynamic context blocks from the system prompt."
           ),
+        // Phase 4 slice η — Claude reliability + structured-output parity
+        fallbackModel: z
+          .string()
+          .min(1)
+          .optional()
+          .describe(
+            "Claude --fallback-model: model name to auto-fallback to when the default model is overloaded (effective only with --print, which the gateway always uses)."
+          ),
+        jsonSchema: z
+          .union([z.string(), z.record(z.string(), z.unknown())])
+          .optional()
+          .describe(
+            "Claude --json-schema: JSON Schema literal (NOT a path) constraining structured output. Object values are JSON.stringify-d; string values are passed verbatim. Use with outputFormat='json'."
+          ),
+        // Phase 4 slice ζ — Claude additional-workspace-dirs parity
+        addDir: z
+          .array(z.string())
+          .optional()
+          .describe(
+            "Claude --add-dir: additional directories the CLI is allowed to read/write beyond the process cwd. Each entry is emitted as its own --add-dir instance."
+          ),
+        worktree: WORKTREE_SCHEMA.optional(),
         approvalStrategy: z
           .enum(["legacy", "mcp_managed"])
           .default("legacy")
@@ -4742,6 +5900,10 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         maxTurns,
         effort,
         excludeDynamicSystemPromptSections,
+        fallbackModel,
+        jsonSchema,
+        addDir,
+        worktree,
         approvalStrategy,
         approvalPolicy,
         mcpServers,
@@ -4788,6 +5950,9 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             maxTurns,
             effort,
             excludeDynamicSystemPromptSections,
+            fallbackModel,
+            jsonSchema,
+            addDir,
           },
           runtime
         );
@@ -4829,6 +5994,19 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             cli: "claude",
           });
 
+          // Slice λ: resolve worktree directive after session metadata is
+          // settled so resume reuse can read metadata.worktreePath.
+          let worktreeResolution: ResolvedWorktree = {};
+          try {
+            worktreeResolution = await resolveWorktreeForRequest(
+              worktree,
+              effectiveSessionId,
+              runtime
+            );
+          } catch (err) {
+            return createErrorResponse("claude_request_async", 1, "", corrId, err as Error);
+          }
+
           // Idle timeout only for stream-json (text/json produce no output until done)
           const effectiveIdleTimeout =
             outputFormat === "stream-json"
@@ -4836,14 +6014,26 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
               : undefined;
           assertUpstreamCliArgs("claude", args);
           assertUpstreamCliEnv("claude", undefined);
+          const claudeAsyncFrHandoff = buildAsyncFlightRecorderHandoff(
+            "claude",
+            prep,
+            effectiveSessionId,
+            outputFormat
+          );
           const job = asyncJobManager.startJob(
             "claude",
             args,
             corrId,
-            undefined,
+            worktreeResolution.cwd,
             effectiveIdleTimeout,
             outputFormat,
-            forceRefresh
+            forceRefresh,
+            undefined,
+            undefined,
+            claudeAsyncFrHandoff.flightRecorderEntry,
+            claudeAsyncFrHandoff.extractUsage,
+            true,
+            prep.stdinPayload
           );
           logger.info(
             `[${corrId}] claude_request_async started job ${job.id}, outputFormat=${outputFormat}`
@@ -4863,8 +6053,17 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           if (prep.reviewIntegrity && prep.reviewIntegrity.violations.length > 0) {
             asyncResponse.reviewIntegrity = prep.reviewIntegrity;
           }
-          if (ttlWarning) {
-            asyncResponse.warnings = [ttlWarning];
+          if (worktreeResolution.worktreePath) {
+            asyncResponse.worktreePath = worktreeResolution.worktreePath;
+          }
+          // Rec #4: include any prep-time warnings (e.g.
+          // cacheable_prefix_uncached) alongside ttlWarning.
+          const mergedWarnings: WarningEntry[] = [
+            ...(ttlWarning ? [ttlWarning] : []),
+            ...(prep.warnings ?? []),
+          ];
+          if (mergedWarnings.length > 0) {
+            asyncResponse.warnings = mergedWarnings;
           }
 
           return {
@@ -4965,7 +6164,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           ),
         // U26: high-impact feature flags. All optional.
         outputSchema: z
-          .union([z.string(), z.record(z.unknown())])
+          .union([z.string(), z.record(z.string(), z.unknown())])
           .optional()
           .describe("Codex --output-schema. Pass a path (string) or an inline JSON Schema object."),
         search: z.boolean().optional().describe("Emit Codex --search to enable web search."),
@@ -4977,6 +6176,21 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         images: z.array(z.string()).optional().describe("Codex -i <path>: image attachments."),
         ignoreUserConfig: z.boolean().optional().describe("Codex --ignore-user-config."),
         ignoreRules: z.boolean().optional().describe("Codex --ignore-rules."),
+        // Phase 4 slice ζ — Codex working-dir + add-dir parity (new sessions only).
+        workingDir: z
+          .string()
+          .min(1)
+          .optional()
+          .describe(
+            "Codex -C/--cd <DIR>: working root for this session. New sessions only; resume inherits the original session's cwd."
+          ),
+        addDir: z
+          .array(z.string())
+          .optional()
+          .describe(
+            "Codex --add-dir <DIR>: additional writable workspace directories (repeat per entry). New sessions only."
+          ),
+        worktree: WORKTREE_SCHEMA.optional(),
       },
       async ({
         prompt,
@@ -5006,6 +6220,9 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         images,
         ignoreUserConfig,
         ignoreRules,
+        workingDir,
+        addDir,
+        worktree,
       }) => {
         return handleCodexRequestAsync(
           { sessionManager, asyncJobManager, logger, runtime },
@@ -5037,6 +6254,9 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             images,
             ignoreUserConfig,
             ignoreRules,
+            workingDir,
+            addDir,
+            worktree,
           }
         );
       }
@@ -5103,12 +6323,15 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             "Bypass dedup and force a fresh CLI run even if a recent identical request exists"
           ),
         // U23: emit `-o json` to extract token usage via parseGeminiJson. Default
-        // remains text so existing callers see no behavior change.
+        // remains text so existing callers see no behavior change. Phase 4 slice
+        // ε adds `stream-json` (NDJSON event stream parsed by
+        // parseGeminiStreamJson — `init`/`message`/`result` lines, idle-timeout
+        // semantics covered by Gemini's existing real-time stdout streaming).
         outputFormat: z
-          .enum(["text", "json"])
+          .enum(["text", "json", "stream-json"])
           .default("text")
           .describe(
-            "Gemini output format. `json` emits `-o json` so usageMetadata is parsed and reported."
+            "Gemini output format. `json` emits `-o json` (single JSON with usageMetadata). `stream-json` emits `-o stream-json` (NDJSON event stream — `init`/`message`/`result` lines, usage extracted from the terminal `result.stats` event). Both report usage to the flight recorder."
           ),
         sandbox: GEMINI_HIGH_IMPACT_PARAMS_SCHEMA.shape.sandbox.describe(
           "Run Gemini in sandbox mode (-s)"
@@ -5122,6 +6345,13 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         attachments: GEMINI_HIGH_IMPACT_PARAMS_SCHEMA.shape.attachments.describe(
           "Absolute file paths prepended as @<path> tokens to the prompt"
         ),
+        skipTrust: z
+          .boolean()
+          .default(false)
+          .describe(
+            "Emit `--skip-trust` so Gemini trusts the workspace for this session and skips the interactive trust prompt (Phase 4 slice γ). Required for headless runs in fresh workspaces."
+          ),
+        worktree: WORKTREE_SCHEMA.optional(),
       },
       async ({
         prompt,
@@ -5145,6 +6375,8 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         policyFiles,
         adminPolicyFiles,
         attachments,
+        skipTrust,
+        worktree,
       }) => {
         return handleGeminiRequestAsync(
           { sessionManager, asyncJobManager, logger, runtime },
@@ -5170,6 +6402,8 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             policyFiles,
             adminPolicyFiles,
             attachments,
+            skipTrust,
+            worktree,
           }
         );
       }
@@ -5251,6 +6485,52 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .describe(
             "Bypass dedup and force a fresh CLI run even if a recent identical request exists"
           ),
+        maxTurns: MAX_TURNS_SCHEMA.optional().describe(
+          "Grok `--max-turns N`: cap on agent-loop iterations for cost / latency control (Phase 4 slice δ). Bounded to safe integers ≤ 10000."
+        ),
+        // Phase 4 slice ζ — Grok working-directory parity.
+        workingDir: z
+          .string()
+          .min(1)
+          .optional()
+          .describe(
+            "Grok --cwd <DIR>: working directory for this invocation. Lets headless callers run Grok against a directory other than the gateway process's cwd."
+          ),
+        // Phase 4 slice θ — Grok HIGH parity (sandbox, rules, system-prompt-override, allow, deny).
+        sandbox: z
+          .string()
+          .min(1)
+          .optional()
+          .describe(
+            "Grok --sandbox <PROFILE>: sandbox profile for filesystem and network access. Freeform per `grok --help` (no enum constraint); also settable via GROK_SANDBOX env var."
+          ),
+        rules: z
+          .string()
+          .min(1)
+          .optional()
+          .describe(
+            "Grok --rules <RULES>: extra rules to append to the system prompt. Supports `@file` prefix; gateway passes the value verbatim."
+          ),
+        systemPromptOverride: z
+          .string()
+          .min(1)
+          .optional()
+          .describe(
+            "Grok --system-prompt-override <PROMPT>: replace the agent's system prompt entirely."
+          ),
+        allow: z
+          .array(z.string())
+          .optional()
+          .describe(
+            "Grok --allow <RULE>: permission allow rules. Each entry → its own --allow instance."
+          ),
+        deny: z
+          .array(z.string())
+          .optional()
+          .describe(
+            "Grok --deny <RULE>: permission deny rules. Each entry → its own --deny instance."
+          ),
+        worktree: WORKTREE_SCHEMA.optional(),
       },
       async ({
         prompt,
@@ -5273,6 +6553,14 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         optimizePrompt,
         idleTimeoutMs,
         forceRefresh,
+        maxTurns,
+        workingDir,
+        sandbox,
+        rules,
+        systemPromptOverride,
+        allow,
+        deny,
+        worktree,
       }) => {
         return handleGrokRequestAsync(
           { sessionManager, asyncJobManager, logger, runtime },
@@ -5297,6 +6585,14 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             optimizePrompt,
             idleTimeoutMs,
             forceRefresh,
+            maxTurns,
+            workingDir,
+            sandbox,
+            rules,
+            systemPromptOverride,
+            allow,
+            deny,
+            worktree,
           }
         );
       }
@@ -5321,14 +6617,16 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             "Model alias (resolved into VIBE_ACTIVE_MODEL env var — Vibe has no --model flag)"
           ),
         outputFormat: z
-          .enum(["plain", "json", "stream-json"])
+          .enum(["text", "plain", "json", "streaming", "stream-json"])
           .optional()
-          .describe("Output format (plain|json|stream-json). Vibe default is plain."),
+          .describe(
+            "Output format for Vibe 2.x (text|json|streaming). Legacy aliases plain→text and stream-json→streaming are accepted."
+          ),
         sessionId: z
           .string()
           .optional()
           .describe(
-            "Session ID (user-provided CLI handle for --resume). Requires [session_logging] enabled = true in ~/.vibe/config.toml."
+            "Session ID (user-provided CLI handle for --resume). Current Vibe defaults session logging on; doctor flags explicit [session_logging] enabled = false."
           ),
         resumeLatest: z
           .boolean()
@@ -5387,6 +6685,36 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .describe(
             "Bypass dedup and force a fresh CLI run even if a recent identical request exists"
           ),
+        trust: z
+          .boolean()
+          .default(false)
+          .describe(
+            "Emit `--trust` so Vibe trusts the cwd for this invocation only (not persisted to trusted_folders.toml) and skips the interactive trust prompt (Phase 4 slice γ)."
+          ),
+        maxTurns: MAX_TURNS_SCHEMA.optional().describe(
+          "Vibe `--max-turns N`: cap the agent-loop iteration count (programmatic mode only, Phase 4 slice δ). Bounded to safe integers ≤ 10000."
+        ),
+        maxPrice: MAX_PRICE_SCHEMA.optional().describe(
+          "Vibe `--max-price DOLLARS`: interrupt the session when cumulative cost crosses this cap (programmatic mode only, Phase 4 slice δ). Bounded to finite values ≤ 10000 USD."
+        ),
+        maxTokens: MAX_TOKENS_SCHEMA.optional().describe(
+          "Vibe `--max-tokens N`: cap cumulative prompt + completion tokens for the session (programmatic mode only). Bounded to safe integers ≤ 100000000."
+        ),
+        // Phase 4 slice ζ — Vibe working-directory + additional-dirs parity.
+        workingDir: z
+          .string()
+          .min(1)
+          .optional()
+          .describe(
+            "Vibe --workdir <DIR>: change to this directory before running. Single value per invocation."
+          ),
+        addDir: z
+          .array(z.string())
+          .optional()
+          .describe(
+            "Vibe --add-dir <DIR>: additional writable workspace directories. Each entry is emitted as its own --add-dir instance."
+          ),
+        worktree: WORKTREE_SCHEMA.optional(),
       },
       async ({
         prompt,
@@ -5408,6 +6736,13 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         optimizePrompt,
         idleTimeoutMs,
         forceRefresh,
+        trust,
+        maxTurns,
+        maxPrice,
+        maxTokens,
+        workingDir,
+        addDir,
+        worktree,
       }) => {
         return handleMistralRequestAsync(
           { sessionManager, asyncJobManager, logger, runtime },
@@ -5431,6 +6766,13 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             optimizePrompt,
             idleTimeoutMs,
             forceRefresh,
+            trust,
+            maxTurns,
+            maxPrice,
+            maxTokens,
+            workingDir,
+            addDir,
+            worktree,
           }
         );
       }
@@ -6137,16 +7479,24 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
 
 async function initializeSessionManager(): Promise<void> {
   const config = loadConfig();
+  // Slice λ: file-backed sessions get a cleanup hook that tears down any
+  // git worktrees recorded on session.metadata.worktreePath. PG-backed
+  // sessions skip the hook (multi-tenant deployments don't necessarily
+  // own a single filesystem); revisit if/when worktree support extends
+  // there.
+  const worktreeCleanupHook = createWorktreeSessionCleanupHook(logger);
 
-  if (config.database && config.redis) {
-    logger.info("Initializing PostgreSQL + Redis session manager");
+  if (config.database) {
+    logger.info("Initializing PostgreSQL session manager");
     const { createDatabaseConnection } = await import("./db.js");
     db = await createDatabaseConnection(config, logger);
     sessionManager = await createSessionManager(config, db, logger);
     logger.info("PostgreSQL session manager initialized");
   } else {
     logger.info("Initializing file-based session manager");
-    sessionManager = await createSessionManager(config, undefined, logger);
+    sessionManager = await createSessionManager(config, undefined, logger, {
+      cleanupHook: worktreeCleanupHook,
+    });
     logger.info("File-based session manager initialized");
   }
 

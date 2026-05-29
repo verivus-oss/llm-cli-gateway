@@ -66,7 +66,9 @@ export function parseCodexJsonStream(stdout: string): CodexJsonParseResult {
             input_tokens: typeof u.input_tokens === "number" ? u.input_tokens : 0,
             output_tokens: typeof u.output_tokens === "number" ? u.output_tokens : 0,
           };
-          if (typeof u.cache_read_input_tokens === "number") {
+          if (typeof u.cached_input_tokens === "number") {
+            usage.cache_read_tokens = u.cached_input_tokens;
+          } else if (typeof u.cache_read_input_tokens === "number") {
             usage.cache_read_tokens = u.cache_read_input_tokens;
           } else if (typeof u.cache_read_tokens === "number") {
             usage.cache_read_tokens = u.cache_read_tokens;

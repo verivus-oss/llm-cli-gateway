@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { migrateFromFile } from "../migrate-sessions.js";
 import { PostgreSQLSessionManager } from "../session-manager-pg.js";
 import { FileSessionManager, SessionStorage } from "../session-manager.js";
-import { setupTestDatabase, cleanTestDatabase, mockLogger } from "./setup.js";
+import { setupTestDatabase, cleanTestDatabase } from "./setup.js";
 import { writeFileSync, mkdirSync, rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
@@ -14,17 +14,8 @@ describe("Session Migration", () => {
 
   beforeEach(async () => {
     await cleanTestDatabase();
-    const { pool, redis } = await setupTestDatabase();
-    pgManager = new PostgreSQLSessionManager(
-      pool,
-      redis,
-      {
-        session: 3600,
-        activeSession: 1800,
-        sessionList: 120,
-      },
-      mockLogger
-    );
+    const { pool } = await setupTestDatabase();
+    pgManager = new PostgreSQLSessionManager(pool);
 
     // Create test directory
     testDir = join(

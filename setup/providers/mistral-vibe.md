@@ -13,16 +13,17 @@ Grok.
 1. Install the Vibe CLI through one of the supported installers (Vibe does
    not self-update; the gateway's `cli_upgrade` dispatches to whichever
    installer it detects):
-   - `pip install vibe-cli`
-   - `uv tool install vibe-cli`
+   - `curl -LsSf https://mistral.ai/vibe/install.sh | bash`
+   - `pip install mistral-vibe`
+   - `uv tool install mistral-vibe`
    - `brew install mistral-vibe`
 2. Sign in to Mistral through Vibe's official auth flow (`vibe auth login`).
    Do not paste API keys, OAuth tokens, or `~/.vibe/credentials` files into a
    remote chat.
-3. Enable `[session_logging] enabled = true` in `~/.vibe/config.toml`.
-   Without it, Vibe does not persist sessions and `mistral_request --resume`
-   / `--continue` cannot work. Run `vibe config set session_logging.enabled
-   true` (or edit the file directly) and verify with `doctor --json`.
+3. Confirm session logging is not explicitly disabled. Current Vibe defaults
+   session logging to enabled; if an older config has
+   `[session_logging] enabled = false`, edit `~/.vibe/config.toml` and set it
+   to `true`, then verify with `doctor --json`.
 4. Run `llm-cli-gateway doctor --json` and confirm:
    - `providers.mistral.cli_available` is `true`
    - `client_config.vibe_session_logging.session_logging_enabled` is `true`
@@ -39,22 +40,23 @@ API keys, or `~/.vibe/credentials`. If `providers.mistral.cli_available` is
 doctor JSON.
 
 When `client_config.vibe_session_logging.session_logging_enabled` is `false`,
-walk the user through enabling it before attempting any session-continuity
-request — the gateway will surface this in `next_actions` with the exact fix
-command. The gateway never writes to `~/.vibe/config.toml`; this is a
-human-on-the-loop step.
+walk the user through editing `~/.vibe/config.toml` before attempting any
+session-continuity request. The gateway never writes to `~/.vibe/config.toml`;
+this is a human-on-the-loop step.
 
 ## Config Snippet
 
 ```bash
 # Install
-pip install vibe-cli            # or: uv tool install vibe-cli / brew install mistral-vibe
+curl -LsSf https://mistral.ai/vibe/install.sh | bash
+# or: pip install mistral-vibe / uv tool install mistral-vibe / brew install mistral-vibe
 
 # Sign in
 vibe auth login
 
-# Enable session persistence (required for --continue / --resume)
-vibe config set session_logging.enabled true
+# If an older config disabled session persistence, edit ~/.vibe/config.toml:
+# [session_logging]
+# enabled = true
 
 # Optional: pin a specific model for the gateway to inject
 export VIBE_ACTIVE_MODEL=mistral-medium-3.5
@@ -88,7 +90,7 @@ validate this sentence with two other models: gateway setup works.
 
 ## Known Limitations
 
-- Vibe does not surface token/cost usage in its stdout/stream-json output;
+- Vibe does not surface token/cost usage in its stdout `--output streaming` output;
   per-request usage in gateway metrics is therefore `null` until a future
   unit reads `~/.vibe/logs/session/<id>/metadata.json`.
 - Vibe has no `--model` flag. Model selection only works through

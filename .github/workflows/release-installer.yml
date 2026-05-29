@@ -1,9 +1,11 @@
 name: Build + upload desktop installer artifacts
 
-# Triggered on `release: published` (matching npm-publish.yml / publish.yml
-# semantics) so a single `gh release create vX.Y.Z` fans out to all three
-# pipelines. `workflow_dispatch` is supported so a missed run can be
-# rebuilt against an existing release without retagging.
+# Triggered on `release: published` (matching npm-publish.yml semantics) so
+# a single `gh release create vX.Y.Z` fans out to npm publish and installer
+# artifact pipelines. `workflow_dispatch` is supported so a missed run can
+# be rebuilt against an existing release without retagging; run it from the
+# matching tag ref so Sigstore verification keeps the same tag-bound
+# certificate identity as the release event.
 
 on:
   release:
@@ -33,9 +35,16 @@ jobs:
         id: tag
         env:
           DISPATCH_TAG: ${{ inputs.tag }}
+          REF: ${{ github.ref }}
           REF_NAME: ${{ github.ref_name }}
         run: |
           if [ -n "${DISPATCH_TAG}" ]; then
+            expected_ref="refs/tags/${DISPATCH_TAG}"
+            if [ "${REF}" != "${expected_ref}" ]; then
+              echo "ERROR: workflow_dispatch release signing must be run from ${expected_ref}; current ref is ${REF}." >&2
+              echo "Re-run the workflow using the existing release tag so Sigstore verification matches the published tag identity." >&2
+              exit 1
+            fi
             echo "tag=${DISPATCH_TAG}" >> "$GITHUB_OUTPUT"
           else
             echo "tag=${REF_NAME}" >> "$GITHUB_OUTPUT"
@@ -63,7 +72,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           ref: ${{ needs.resolve-tag.outputs.tag }}
           # Drop the auth token from .git/config after checkout (zizmor
@@ -71,7 +80,7 @@ jobs:
           # separate job that re-checks out with its own credentials.
           persist-credentials: false
 
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6 # zizmor: ignore[cache-poisoning]
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6 # zizmor: ignore[cache-poisoning]
         # cache-poisoning ignore rationale: no `cache:` set → no cache
         # read or written → no attack vector. zizmor's audit is
         # path-based and flags any setup-node on a release-triggered
@@ -79,7 +88,7 @@ jobs:
         with:
           node-version: 24
 
-      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c  # v6
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
         with:
           # Track Go 1.25 (matches installer/go.mod). Earlier 1.22 pin
           # was flagged by osv-scanner for 26 stdlib CVEs fixed in
@@ -116,7 +125,7 @@ jobs:
           TAG_VERSION="${REF_NAME#v}"
           bash installer/build-release.sh --version "${TAG_VERSION}" ${{ matrix.targets }}
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: installer-${{ matrix.artifact }}
           path: |
@@ -127,23 +136,22 @@ jobs:
 
   package-and-upload:
     needs: [resolve-tag, build-binaries]
-    runs-on: [self-hosted, linux, rust, x86_64, workhorse2]
+    runs-on: ubuntu-latest
     # ONLY job in this workflow that needs write — `gh release upload`
-    # below appends installer artifacts to the existing release.
+    # below appends installer artifacts to the existing release. `id-token:
+    # write` is limited to this job so cosign can request the GitHub OIDC
+    # token for Sigstore keyless signing.
     permissions:
       contents: write
+      id-token: write
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           ref: ${{ needs.resolve-tag.outputs.tag }}
-          # Keep credentials for `gh release upload`; gh CLI prefers the
-          # GITHUB_TOKEN env var but some setups fall back to the
-          # checkout-persisted creds. Reviewers: if a future zizmor
-          # artipacked finding cites this line, switch to passing the
-          # token via gh's env var and set persist-credentials: false.
-          persist-credentials: true
+          # `gh release upload` receives GH_TOKEN explicitly in the upload step.
+          persist-credentials: false
 
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           pattern: installer-*
           path: installer/dist
@@ -155,6 +163,7 @@ jobs:
           # Public base for the release-manifest.json copy/paste URLs. Points
           # at the GitHub release download URL pattern for this repo.
           RVWR_RELEASE_PUBLIC_BASE: https://github.com/${{ github.repository }}/releases/download/${{ needs.resolve-tag.outputs.tag }}
+          RVWR_RELEASE_SIGNING_IDENTITY: https://github.com/${{ github.repository }}/.github/workflows/release-installer.yml@${{ github.ref }}
           REF_NAME: ${{ needs.resolve-tag.outputs.tag }}
         run: |
           TAG_VERSION="${REF_NAME#v}"
@@ -164,6 +173,64 @@ jobs:
         working-directory: installer/dist
         run: sha256sum --check SHA256SUMS
 
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: "v3.0.6"
+
+      - name: Sign installer artifacts with Sigstore
+        env:
+          COSIGN_YES: "true"
+          REL_TAG: ${{ needs.resolve-tag.outputs.tag }}
+        working-directory: installer/dist
+        shell: bash
+        run: |
+          TAG_VERSION="${REL_TAG#v}"
+          shopt -s nullglob
+          artifacts=(
+            llm-cli-gateway-"${TAG_VERSION}"-*
+            llm-cli-gateway-bundle-"${TAG_VERSION}"-*.tar.gz
+            install-windows.ps1
+            SHA256SUMS
+            release-manifest.json
+          )
+          if [ "${#artifacts[@]}" -eq 0 ]; then
+            echo "ERROR: no release artifacts found to sign" >&2
+            exit 1
+          fi
+          for artifact in "${artifacts[@]}"; do
+            if [[ "${artifact}" == *.sigstore.json ]]; then
+              continue
+            fi
+            cosign sign-blob --yes --bundle "${artifact}.sigstore.json" "${artifact}"
+          done
+
+      - name: Verify Sigstore signatures (sanity check before upload)
+        env:
+          REL_TAG: ${{ needs.resolve-tag.outputs.tag }}
+          SIGNING_IDENTITY: https://github.com/${{ github.repository }}/.github/workflows/release-installer.yml@${{ github.ref }}
+        working-directory: installer/dist
+        shell: bash
+        run: |
+          TAG_VERSION="${REL_TAG#v}"
+          shopt -s nullglob
+          artifacts=(
+            llm-cli-gateway-"${TAG_VERSION}"-*
+            llm-cli-gateway-bundle-"${TAG_VERSION}"-*.tar.gz
+            install-windows.ps1
+            SHA256SUMS
+            release-manifest.json
+          )
+          for artifact in "${artifacts[@]}"; do
+            if [[ "${artifact}" == *.sigstore.json ]]; then
+              continue
+            fi
+            cosign verify-blob "${artifact}" \
+              --bundle "${artifact}.sigstore.json" \
+              --certificate-identity "${SIGNING_IDENTITY}" \
+              --certificate-oidc-issuer "https://token.actions.githubusercontent.com"
+          done
+
       - name: Upload installer artifacts to release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -172,11 +239,27 @@ jobs:
         shell: bash
         run: |
           TAG_VERSION="${REL_TAG#v}"
-          # `--clobber` so a re-run via workflow_dispatch replaces stale assets.
-          gh release upload "${REL_TAG}" \
+          shopt -s nullglob
+          upload_args=()
+          for artifact in \
             llm-cli-gateway-"${TAG_VERSION}"-* \
             llm-cli-gateway-bundle-"${TAG_VERSION}"-*.tar.gz \
             install-windows.ps1 \
             SHA256SUMS \
-            release-manifest.json \
-            --clobber
+            release-manifest.json; do
+            if [[ "${artifact}" == *.sigstore.json ]]; then
+              continue
+            fi
+            upload_args+=("${artifact}")
+          done
+          for artifact in *.sigstore.json; do
+            if [[ "${artifact}" == *.sigstore.json.sigstore.json ]]; then
+              continue
+            fi
+            if [[ ! -f "${artifact%.sigstore.json}" ]]; then
+              continue
+            fi
+            upload_args+=("${artifact}")
+          done
+          # `--clobber` so a re-run via workflow_dispatch replaces stale assets.
+          gh release upload "${REL_TAG}" "${upload_args[@]}" --clobber
