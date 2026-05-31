@@ -2,23 +2,24 @@
  * U26 — Codex high-impact feature flags.
  *
  * Verifies `prepareCodexRequest` (the real emission path) surfaces the new
- * --output-schema / --search / --profile / -c / --ephemeral / -i /
+ * --output-schema / --profile / -c / --ephemeral / -i /
  * --ignore-user-config / --ignore-rules flags into the argv segment, that
  * configOverrides is sanitized at the Zod level, that missing image paths
  * fail fast via createErrorResponse, and that the outputSchema temp-file
  * cleanup hook actually deletes the file.
  */
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { existsSync, mkdtempSync, rmSync, writeFileSync, readFileSync, statSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
-import { prepareCodexRequest } from "../index.js";
+import { prepareCodexRequest, resolveGatewayServerRuntime } from "../index.js";
 import {
   CODEX_CONFIG_OVERRIDES_SCHEMA,
   filterCodexResumeFlags,
   prepareCodexHighImpactFlags,
   prepareCodexOutputSchema,
 } from "../request-helpers.js";
+import { validateUpstreamCliArgs } from "../upstream-contracts.js";
 
 const BASE_PARAMS = {
   prompt: "hello codex",
@@ -58,9 +59,9 @@ describe("U26 — Codex high-impact feature flags", () => {
   });
 
   describe("flag emission via prepareCodexRequest", () => {
-    it("emits --search when search=true", () => {
+    it("treats search as a deprecated no-op because current Codex exec rejects --search", () => {
       const { args } = callPrepare({ search: true });
-      expect(args).toContain("--search");
+      expect(args).not.toContain("--search");
     });
 
     it("emits --profile <name>", () => {
@@ -134,6 +135,44 @@ describe("U26 — Codex high-impact feature flags", () => {
       expect(args).not.toContain("-i");
       expect(args).not.toContain("--ignore-user-config");
       expect(args).not.toContain("--ignore-rules");
+    });
+
+    it("fullAuto emits current Codex-compatible argv", () => {
+      const { args } = callPrepare({ fullAuto: true });
+      expect(args).toContain("--sandbox");
+      expect(args).toContain("workspace-write");
+      expect(args).not.toContain("--ask-for-approval");
+      expect(args).not.toContain("--full-auto");
+      expect(validateUpstreamCliArgs("codex", args).ok).toBe(true);
+    });
+
+    it("logs deprecated Codex approval inputs on resume without emitting them", () => {
+      const warn = vi.fn();
+      const runtime = resolveGatewayServerRuntime({
+        logger: {
+          info: vi.fn(),
+          warn,
+          error: vi.fn(),
+          debug: vi.fn(),
+        },
+      });
+
+      const result = prepareCodexRequest(
+        {
+          ...BASE_PARAMS,
+          resumeLatest: true,
+          askForApproval: "on-request",
+          useLegacyFullAutoFlag: true,
+        } as never,
+        runtime
+      );
+
+      expect("args" in result).toBe(true);
+      if (!("args" in result)) return;
+      expect(result.args).not.toContain("--ask-for-approval");
+      expect(result.args).not.toContain("--full-auto");
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining("--ask-for-approval"));
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining("--full-auto"));
     });
   });
 
@@ -222,7 +261,7 @@ describe("U26 — Codex high-impact feature flags", () => {
   });
 
   describe("Codex resume-mode flag filtering", () => {
-    it("filters --search, --add-dir, -C, --sandbox, --ask-for-approval, --full-auto", () => {
+    it("filters --search, --add-dir, -C, --cd, --profile, --sandbox, --ask-for-approval, --full-auto", () => {
       const input = [
         "--model",
         "gpt-5.5",
@@ -235,6 +274,10 @@ describe("U26 — Codex high-impact feature flags", () => {
         "/tmp/extra",
         "-C",
         "/tmp/cwd",
+        "--cd",
+        "/tmp/cwd-long",
+        "--profile",
+        "research",
         "--search",
         "PROMPT",
       ];
@@ -297,10 +340,60 @@ describe("U26 — Codex high-impact feature flags", () => {
       expect(pairs).toContain("tools.web_search=true");
     });
 
-    it("resume still drops --search (not accepted by codex exec resume)", () => {
-      const { args } = callPrepare({ sessionId: RESUME_ID, search: true });
-      expect(args).toContain("resume");
-      expect(args).not.toContain("--search");
+    it("resume still drops --search and logs a deprecation warning", () => {
+      const warn = vi.fn();
+      const runtime = resolveGatewayServerRuntime({
+        logger: {
+          info: vi.fn(),
+          warn,
+          error: vi.fn(),
+          debug: vi.fn(),
+        },
+      });
+
+      const result = prepareCodexRequest(
+        {
+          ...BASE_PARAMS,
+          sessionId: RESUME_ID,
+          search: true,
+        } as never,
+        runtime
+      );
+
+      expect("args" in result).toBe(true);
+      if (!("args" in result)) return;
+      expect(result.args).toContain("resume");
+      expect(result.args).not.toContain("--search");
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining("--search"));
+    });
+
+    it("resume drops --profile and logs a compatibility warning", () => {
+      const warn = vi.fn();
+      const runtime = resolveGatewayServerRuntime({
+        logger: {
+          info: vi.fn(),
+          warn,
+          error: vi.fn(),
+          debug: vi.fn(),
+        },
+      });
+
+      const result = prepareCodexRequest(
+        {
+          ...BASE_PARAMS,
+          sessionId: RESUME_ID,
+          profile: "research",
+        } as never,
+        runtime
+      );
+
+      expect("args" in result).toBe(true);
+      if (!("args" in result)) return;
+      expect(result.args).toContain("resume");
+      expect(result.args).not.toContain("--profile");
+      expect(result.args).not.toContain("research");
+      expect(validateUpstreamCliArgs("codex", result.args).ok).toBe(true);
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining("--profile"));
     });
 
     it("regression: new-session path still emits --output-schema + -c when supplied", () => {

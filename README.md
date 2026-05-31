@@ -238,12 +238,12 @@ npm install -g @google/gemini-cli
 # Or: https://github.com/google-gemini/gemini-cli
 ```
 
-### Grok CLI (xAI)
+### Grok Build CLI (xAI)
 
 ```bash
-npm install -g grok-build
-grok login   # OAuth flow, or set GROK_CODE_XAI_API_KEY
-# Docs: https://docs.x.ai/build/cli
+curl -fsSL https://x.ai/cli/install.sh | bash
+grok login   # OAuth flow; for headless auth, set XAI_API_KEY
+# Docs: https://docs.x.ai/build/overview
 ```
 
 ### Mistral Vibe CLI

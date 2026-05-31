@@ -80,17 +80,17 @@ const GUIDANCE: Record<CliType, ProviderLoginGuidance> = {
   },
   grok: {
     provider: "grok",
-    displayName: "Grok CLI",
+    displayName: "Grok Build",
     install: {
-      summary: "Install Grok CLI using xAI's current official installer or managed update flow.",
-      commands: ["npm install -g grok-build"],
-      documentationUrl: "https://docs.x.ai/build/cli",
+      summary: "Install Grok Build using xAI's current official installer or managed update flow.",
+      commands: ["curl -fsSL https://x.ai/cli/install.sh | bash"],
+      documentationUrl: "https://docs.x.ai/build/overview",
     },
     login: {
       summary: "Sign in through Grok's official OAuth or device-code flow.",
       commands: ["grok login --oauth", "grok login --device-auth"],
       credentialHandling:
-        "Do not paste xAI API keys, OAuth tokens, or Grok auth files into the gateway or a remote chat.",
+        "For headless environments, set XAI_API_KEY in the local shell. Do not paste xAI API keys, OAuth tokens, or Grok auth files into the gateway or a remote chat.",
     },
     verification: {
       command: "grok inspect --json",

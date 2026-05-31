@@ -15,6 +15,7 @@
     "endpoint_exposure",
     "client_config",
     "cache_awareness",
+    "upstream",
     "next_actions"
   ],
   "properties": {
@@ -298,6 +299,36 @@
             },
             "additionalProperties": false
           }
+        }
+      },
+      "additionalProperties": false
+    },
+    "upstream": {
+      "type": "object",
+      "required": [
+        "note",
+        "recommendation",
+        "how_to_check",
+        "probed",
+        "installed_versions",
+        "contracts"
+      ],
+      "properties": {
+        "note": { "type": "string" },
+        "recommendation": { "type": "string" },
+        "how_to_check": { "type": "string" },
+        "probed": { "type": "boolean" },
+        "installed_versions": {
+          "type": "object",
+          "additionalProperties": { "type": ["string", "null"] }
+        },
+        "contracts": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "probe_report": {
+          "type": ["object", "null"],
+          "additionalProperties": true
         }
       },
       "additionalProperties": false

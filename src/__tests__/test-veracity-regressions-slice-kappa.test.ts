@@ -67,7 +67,6 @@ describe("REGRESSIONS Kα — PromptParts.cacheControl + assembleClaudeCacheBloc
   it("PromptPartsSchema rejects non-boolean cacheControl entries", () => {
     const parsed = PromptPartsSchema.safeParse({
       task: "x",
-      // @ts-expect-error — intentional bad type
       cacheControl: { system: "yes" },
     });
     expect(parsed.success).toBe(false);

@@ -361,12 +361,12 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       "workingDir",
       "addDir",
     ],
-    resumeOnlyFlags: ["--last"],
+    resumeOnlyFlags: ["--last", "--all"],
     // Phase 4 slice α (v1.8.0) verified that `codex exec resume` accepts
     // `--output-schema` and `-c` (codex-cli 0.133.0 `exec resume --help`),
-    // so they're no longer forbidden. `--search` stays forbidden (resume
-    // inherits the original session's web-search state).
-    resumeForbiddenFlags: ["--sandbox", "--ask-for-approval", "--full-auto", "--search"],
+    // so they're no longer forbidden. Current resume help does not accept
+    // session-profile or working-directory policy flags.
+    resumeForbiddenFlags: ["--sandbox", "-C", "--cd", "--add-dir", "--profile"],
     flags: {
       "--last": { arity: "none", description: "Resume latest session" },
       "--model": { arity: "one", description: "Model selector" },
@@ -375,12 +375,6 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         values: ["read-only", "workspace-write", "danger-full-access"],
         description: "Sandbox policy",
       },
-      "--ask-for-approval": {
-        arity: "one",
-        values: ["untrusted", "on-request", "never"],
-        description: "Approval policy",
-      },
-      "--full-auto": { arity: "none", description: "Legacy full-auto shortcut" },
       "--dangerously-bypass-approvals-and-sandbox": {
         arity: "none",
         description: "Disable approvals and sandbox",
@@ -388,24 +382,61 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       "--json": { arity: "none", description: "JSONL event stream" },
       "--skip-git-repo-check": { arity: "none", description: "Allow non-git cwd" },
       "--output-schema": { arity: "one", description: "Structured output JSON schema path" },
-      "--search": { arity: "none", description: "Enable web search" },
       "--profile": { arity: "one", description: "Config profile" },
       "-c": {
         arity: "one",
         pattern: /^[a-zA-Z0-9._]+=([^\r\n]*)$/,
         description: "Config override key=value",
       },
+      "--config": {
+        arity: "one",
+        pattern: /^[a-zA-Z0-9._]+=([^\r\n]*)$/,
+        description: "Config override key=value",
+      },
+      "--enable": { arity: "one", description: "Enable a Codex feature flag" },
+      "--disable": { arity: "one", description: "Disable a Codex feature flag" },
+      "--strict-config": {
+        arity: "none",
+        description: "Reject unrecognized config.toml fields",
+      },
       "--ephemeral": { arity: "none", description: "Do not persist session" },
       "-i": { arity: "one", description: "Image path" },
+      "--image": { arity: "one", description: "Image path" },
       "--ignore-user-config": { arity: "none", description: "Ignore user config" },
       "--ignore-rules": { arity: "none", description: "Ignore rule files" },
-      // The gateway only ever emits the short form `-C` (codex 0.134.0 accepts
-      // both `-C` and `--cd` as aliases). The contract registers exactly what
-      // we emit; if a future code path emits `--cd` instead, the contract
-      // check will fail loudly — which is the intended catch.
+      "--oss": { arity: "none", description: "Use open-source provider" },
+      "--local-provider": {
+        arity: "one",
+        values: ["lmstudio", "ollama"],
+        description: "Local open-source provider",
+      },
+      "--color": {
+        arity: "one",
+        values: ["always", "never", "auto"],
+        description: "Output color mode",
+      },
+      "--output-last-message": {
+        arity: "one",
+        description: "Write the final agent message to a file",
+      },
+      "--dangerously-bypass-hook-trust": {
+        arity: "none",
+        description: "Run enabled hooks without persisted hook trust",
+      },
+      "--version": { arity: "none", description: "Print version" },
+      "--all": {
+        arity: "none",
+        description: "Resume picker: show all sessions without cwd filtering",
+      },
+      // The gateway emits the short form `-C`, and the advisory contract also
+      // tracks the long `--cd` alias advertised by current Codex exec help.
       "-C": {
         arity: "one",
         description: "Working root for the session (Phase 4 slice ζ; new sessions only)",
+      },
+      "--cd": {
+        arity: "one",
+        description: "Working root for the session",
       },
       "--add-dir": {
         arity: "one",
@@ -428,6 +459,18 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         expect: "fail",
       },
       {
+        id: "codex-ask-for-approval-unsupported",
+        description: "Current Codex CLI no longer accepts --ask-for-approval",
+        args: ["exec", "--ask-for-approval", "never", "hello"],
+        expect: "fail",
+      },
+      {
+        id: "codex-full-auto-unsupported",
+        description: "Current Codex CLI no longer accepts --full-auto",
+        args: ["exec", "--full-auto", "hello"],
+        expect: "fail",
+      },
+      {
         // Phase 4 slice α: --output-schema IS accepted on resume per
         // codex-cli 0.133.0; this fixture pins the new behaviour so future
         // contract changes can't silently regress.
@@ -443,9 +486,9 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         expect: "pass",
       },
       {
-        id: "codex-resume-search-still-forbidden",
-        description: "Phase 4 slice α: --search remains forbidden on resume",
-        args: ["exec", "resume", "--search", "session-id", "hello"],
+        id: "codex-search-unsupported",
+        description: "Current Codex exec no longer accepts --search",
+        args: ["exec", "--search", "hello"],
         expect: "fail",
       },
       {
@@ -466,6 +509,42 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
           "/tmp/b",
           "hello",
         ],
+        expect: "pass",
+      },
+      {
+        id: "codex-current-exec-help-surface",
+        description:
+          "Current Codex exec advertises additional config, output, provider, and safety flags",
+        args: [
+          "exec",
+          "--config",
+          "features.foo=true",
+          "--enable",
+          "foo",
+          "--disable",
+          "bar",
+          "--strict-config",
+          "--image",
+          "/tmp/a.png",
+          "--oss",
+          "--local-provider",
+          "ollama",
+          "--color",
+          "auto",
+          "--cd",
+          "/tmp/work",
+          "--output-last-message",
+          "/tmp/out.txt",
+          "--dangerously-bypass-hook-trust",
+          "--version",
+          "hello",
+        ],
+        expect: "pass",
+      },
+      {
+        id: "codex-current-resume-help-surface",
+        description: "Current Codex resume advertises --all for disabling cwd filtering",
+        args: ["exec", "resume", "--all", "session-id", "hello"],
         expect: "pass",
       },
     ],
@@ -665,6 +744,38 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         description:
           "Permission deny rule (Phase 4 slice θ; repeat once per rule per `grok --help`)",
       },
+      "--agent": { arity: "one", description: "Agent name or definition file path" },
+      "--agents": { arity: "one", description: "Inline subagent definitions JSON" },
+      "--best-of-n": {
+        arity: "one",
+        pattern: /^[1-9][0-9]*$/,
+        description: "Run the task N ways in parallel and pick the best",
+      },
+      "--check": { arity: "none", description: "Append a self-verification loop" },
+      "--disable-web-search": {
+        arity: "none",
+        description: "Disable web search and web fetch tools",
+      },
+      "--experimental-memory": { arity: "none", description: "Enable cross-session memory" },
+      "--no-alt-screen": { arity: "none", description: "Run inline without alt screen" },
+      "--no-memory": { arity: "none", description: "Disable cross-session memory" },
+      "--no-plan": { arity: "none", description: "Disable plan mode" },
+      "--no-subagents": { arity: "none", description: "Disable subagent spawning" },
+      "--oauth": { arity: "none", description: "Use OAuth during authentication" },
+      "--prompt-file": { arity: "one", description: "Single-turn prompt from a file" },
+      "--prompt-json": { arity: "one", description: "Single-turn prompt JSON blocks" },
+      "--restore-code": {
+        arity: "none",
+        description: "Check out the original session commit when resuming",
+      },
+      "--single": { arity: "one", description: "Single-turn prompt" },
+      "--todo-gate": { arity: "none", description: "Enable runtime turn-end TodoGate" },
+      "--verbatim": { arity: "none", description: "Send prompt exactly as given" },
+      "--version": { arity: "none", description: "Print version" },
+      "--worktree": {
+        arity: "optional",
+        description: "Start the session in a new git worktree, optionally named",
+      },
     },
     env: {},
     conformanceFixtures: [
@@ -726,6 +837,41 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         id: "grok-deny-repeated",
         description: "Phase 4 slice θ: repeated --deny <RULE> accepted",
         args: ["-p", "hello", "--deny", "write", "--deny", "kill"],
+        expect: "pass",
+      },
+      {
+        id: "grok-current-help-surface",
+        description:
+          "Current Grok Build help advertises agent, prompt, memory, web, and worktree flags",
+        args: [
+          "-p",
+          "hello",
+          "--agent",
+          "reviewer",
+          "--agents",
+          "{}",
+          "--best-of-n",
+          "2",
+          "--check",
+          "--disable-web-search",
+          "--experimental-memory",
+          "--no-alt-screen",
+          "--no-memory",
+          "--no-plan",
+          "--no-subagents",
+          "--oauth",
+          "--prompt-file",
+          "/tmp/prompt.md",
+          "--prompt-json",
+          "[]",
+          "--restore-code",
+          "--single",
+          "single prompt",
+          "--todo-gate",
+          "--verbatim",
+          "--version",
+          "--worktree",
+        ],
         expect: "pass",
       },
     ],
@@ -1093,7 +1239,7 @@ function validateFlagValue(
  * Returns a sorted array of unique `--foo-bar` style flags discovered in the output.
  *
  * Heuristics:
- * - Matches common long-option patterns emitted by clap, yargs, commander, custom TUIs, etc.
+ * - Matches common option declaration lines emitted by clap, yargs, commander, custom TUIs, etc.
  * - Lowercases for stable comparison against our contract keys.
  * - Intentionally conservative: ignores obvious noise (URLs, prose in descriptions).
  *
@@ -1103,12 +1249,17 @@ function validateFlagValue(
  */
 export function extractDiscoveredFlags(helpText: string): readonly string[] {
   const discovered = new Set<string>();
-  // Long flags: --foo, --foo-bar, --foo_bar (some CLIs normalize _ to - in display)
-  const longRe = /--([a-z0-9][a-z0-9_-]{1,}[a-z0-9]?)/gi;
-  for (const match of helpText.matchAll(longRe)) {
-    const name = `--${match[1].toLowerCase().replace(/_/g, "-")}`;
-    // Drop obvious non-flag noise
-    if (name.length >= 3 && !name.includes("://") && !name.includes("--help")) {
+  // Long flags: --foo, --foo-bar, --foo_bar (some CLIs normalize _ to - in display).
+  // Only inspect option declaration lines so prose such as
+  // "(Claude Code: --allowedTools)" does not create false drift.
+  const longRe = /--([a-z0-9][a-z0-9_-]{1,}[a-z0-9]?)/g;
+  for (const line of helpText.split(/\r?\n/)) {
+    const trimmed = line.trimStart();
+    if (!trimmed.startsWith("-")) continue;
+    const declaration = trimmed.split(/\s{2,}/, 1)[0] ?? "";
+    for (const match of declaration.matchAll(longRe)) {
+      const name = `--${match[1].toLowerCase().replace(/_/g, "-")}`;
+      if (name === "--help") continue;
       discovered.add(name);
     }
   }

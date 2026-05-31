@@ -36,7 +36,7 @@ The detector has two complementary legs (both advisory only):
 
 2. **Installed binary help surface** (the improvement that makes the detector
    reliable for vendor / fast-moving CLIs) — when you pass `--probe-installed`
-   to a live scan (or use the MCP/CLI `upstream_contracts` / `contracts`
+   to either an offline or live scan (or use the MCP/CLI `upstream_contracts` / `contracts`
    surfaces with `probeInstalled: true`), the scanner runs the provider's
    documented `--help` (respecting multi-command cases like Codex), extracts
    the long flags it actually advertises, and reports:
@@ -85,16 +85,18 @@ npm run upstream:scan -- --live --fail-on-critical
 # Persist source hashes / write a report (manual).
 npm run upstream:scan -- --live --write-snapshot --write-report
 
-# Recommended for vendor / fast-moving CLIs (e.g. grok): also probe the
-# installed binary's --help surface for bidirectional drift detection.
+# Recommended for vendor / fast-moving CLIs (e.g. grok): probe the installed
+# binary's --help surface without requiring network access.
+npm run upstream:scan -- --provider grok --probe-installed --fail-on-critical
+
+# Persist source hashes / reports while also including installed help-surface data.
 npm run upstream:scan -- --live --provider grok --probe-installed --write-snapshot --write-report
 ```
 
 The default release gate is `npm run check && npm run upstream:contracts`.
-Neither requires network access nor installed provider CLIs (the optional
-`probeInstalledCliContract` is never invoked by the gate). Live scans are
-advisory and run manually; `--probe-installed` is an opt-in that only affects
-the live path.
+Neither requires network access nor installed provider CLIs. Live scans are
+advisory and run manually; `--probe-installed` is an opt-in local probe that
+works in offline and live scan modes.
 
 ## Per-provider skills
 

@@ -4,6 +4,22 @@ All notable changes to the llm-cli-gateway project.
 
 ## Unreleased
 
+## [1.17.2] - 2026-05-31 — upstream contract compatibility
+
+Patch release that keeps the gateway aligned with current provider CLI surfaces
+and fixes the reviewed outstanding-work blockers.
+
+### Fixed
+
+- Updated `doctor --json` schema coverage for the top-level upstream contract
+  report.
+- Stopped emitting removed Codex CLI flags such as `--ask-for-approval`,
+  `--full-auto`, `--search`, and resume-mode `--profile`.
+- Made `upstream:scan -- --probe-installed` compare installed CLI help surfaces
+  in offline mode.
+- Updated Grok Build contract metadata, install guidance, and public auth copy
+  for current xAI docs.
+
 ## [1.17.1] - 2026-05-30 — Socket shell-access suppression
 
 Patch release updating the package's Socket policy for the reviewed gateway

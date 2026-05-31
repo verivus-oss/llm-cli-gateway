@@ -1,0 +1,59 @@
+{
+  "cli": "grok",
+  "fetchedAt": "2026-05-31T08:04:13.344Z",
+  "sources": [
+    {
+      "url": "https://docs.x.ai/developers/release-notes.md",
+      "ok": true,
+      "status": 200,
+      "bytes": 10700,
+      "sha256": "ece115528941254cbe5135eade396ca3df2ffd193d78e80e36395ec1234d8f99"
+    }
+  ],
+  "helpSurface": {
+    "probedAt": "2026-05-31T08:04:13.344Z",
+    "available": true,
+    "version": null,
+    "flags": [
+      "--agent",
+      "--agents",
+      "--allow",
+      "--always-approve",
+      "--best-of-n",
+      "--check",
+      "--continue",
+      "--cwd",
+      "--deny",
+      "--disable-web-search",
+      "--disallowed-tools",
+      "--effort",
+      "--experimental-memory",
+      "--max-turns",
+      "--model",
+      "--no-alt-screen",
+      "--no-memory",
+      "--no-plan",
+      "--no-subagents",
+      "--oauth",
+      "--output-format",
+      "--permission-mode",
+      "--prompt-file",
+      "--prompt-json",
+      "--reasoning-effort",
+      "--restore-code",
+      "--resume",
+      "--rules",
+      "--sandbox",
+      "--single",
+      "--system-prompt-override",
+      "--todo-gate",
+      "--tools",
+      "--verbatim",
+      "--version",
+      "--worktree"
+    ],
+    "helpHash": "79f93fd59231d7d6047a42a695d521814f5e636751e361c50f70f09fbbf4e31b",
+    "extraVsContract": [],
+    "missingFromBinary": []
+  }
+}

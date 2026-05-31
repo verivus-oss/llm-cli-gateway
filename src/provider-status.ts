@@ -253,11 +253,6 @@ export function geminiAuthStatus(
   return { status, methods };
 }
 
-/** Back-compat shim retained for callers that only need the binary store status. */
-function geminiCredentialStoreStatus(): "present" | "not_found" {
-  return geminiAuthStatus().status;
-}
-
 function grokCredentialStoreStatus(): "present" | "not_found" {
   const home = homedir();
   const candidates = [join(home, ".grok", "auth.json"), join(home, ".config", "grok", "auth.json")];

@@ -50,7 +50,7 @@ describe("PostgreSQLSessionManager", () => {
 
     it("should not override existing active session", async () => {
       const session1 = await manager.createSession("claude", "Session 1");
-      const session2 = await manager.createSession("claude", "Session 2");
+      await manager.createSession("claude", "Session 2");
       const activeSession = await manager.getActiveSession("claude");
 
       expect(activeSession?.id).toBe(session1.id);

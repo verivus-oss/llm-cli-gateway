@@ -3,10 +3,7 @@ import { mkdtempSync, rmSync } from "fs";
 import os from "os";
 import path from "path";
 import { FlightRecorder, NoopFlightRecorder } from "../flight-recorder.js";
-import {
-  readPersistedRequest,
-  PERSISTED_REQUEST_DEFAULT_MAX_CHARS,
-} from "../cache-stats.js";
+import { readPersistedRequest, PERSISTED_REQUEST_DEFAULT_MAX_CHARS } from "../cache-stats.js";
 
 describe("readPersistedRequest", () => {
   let tmpDir: string;

@@ -25,5 +25,8 @@ build/
 .worktrees/
 .r3-poll.mjs
 
+# Internal agent working guide — internal repo/release context, must not ship
+AGENTS.md
+
 # Local MCP client configs may contain machine paths, account IDs, and secret refs.
 windows-mcp-config-with-gateway.json

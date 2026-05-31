@@ -346,7 +346,6 @@ describe("createWorktreeSessionCleanupHook (slice λ)", () => {
     await expect(
       hook({
         id: "sess-5",
-        // @ts-expect-error intentional: caller passed wrong type
         metadata: { worktreePath: 123 },
       })
     ).resolves.toBeUndefined();

@@ -17,7 +17,6 @@ import { ISessionManager, createSessionManager } from "./session-manager.js";
 import {
   createWorktree,
   createWorktreeSessionCleanupHook,
-  WorktreeError,
   type WorktreeHandle,
 } from "./worktree-manager.js";
 import { ResourceProvider } from "./resources.js";
@@ -58,7 +57,6 @@ import {
   CLAUDE_MCP_SERVER_NAMES,
 } from "./claude-mcp-config.js";
 import {
-  resolveSessionResumeArgs,
   resolveGrokSessionArgs,
   resolveMistralSessionArgs,
   resolveCodexSessionArgs,
@@ -291,12 +289,13 @@ Tools: claude_request, codex_request, gemini_request, grok_request, mistral_requ
 Validation: validate_with_models, second_opinion, compare_answers, red_team_review, consensus_check, ask_model, synthesize_validation
 Jobs: llm_job_status, llm_job_result, llm_job_cancel
 Sessions: session_create, session_list, session_set_active, session_get, session_delete, session_clear_all
-Other: list_models, cli_versions, upstream_contracts, cli_upgrade, approval_list, llm_process_health
+Other: list_models, cli_versions, upstream_contracts (use --probe-installed after CLI upgrades to detect drift), cli_upgrade, approval_list, llm_process_health, llm_request_result (read back any persisted request — sync or async — by correlationId)
 
 Key behaviors:
 - Sync auto-defers at ${SYNC_DEADLINE_MS}ms. Poll deferred jobs via llm_job_status/llm_job_result.
 - Sessions: Claude --continue, Gemini --resume, Grok --resume/--continue, Mistral --resume/--continue (current Vibe defaults session logging on; doctor flags explicit session_logging.enabled=false), Codex \`exec resume <ID>\` / \`exec resume --last\` (all real CLI continuity). For Codex, sessionId must be a real Codex UUID (from ~/.codex/sessions/); gateway-generated gw-* IDs are rejected.
 - Approval gates: opt-in via approvalStrategy:"mcp_managed".
+- Upstream drift detection: After upgrading any provider CLI (especially grok), use the upstream_contracts tool with probeInstalled: true (or the CLI command "llm-cli-gateway contracts --json --probe-installed"). This is the primary reliable way to detect when an installed binary has gained or lost flags compared to the gateway's declared contract. The probe is safe and read-only.
 - Idle timeout kills stuck processes (default 10min, configurable via idleTimeoutMs).
 
 Skills (full docs via MCP resources):
@@ -1986,7 +1985,7 @@ export function prepareCodexRequest(
   }
 
   // Resume mode: codex exec resume <SESSION_ID|--last> [flags] PROMPT
-  // Note: `codex exec resume` does NOT accept `--full-auto`; the original
+  // Note: `codex exec resume` does NOT accept sandbox policy flags; the original
   // session's approval policy is inherited. We silently drop fullAuto on resume.
   let sessionPlan;
   try {
@@ -2010,16 +2009,16 @@ export function prepareCodexRequest(
   // Codex sandbox / approval: resolve modern flags + legacy fullAuto shorthand.
   // `codex exec resume` rejects all of these (the original session's policy is
   // inherited), so we only emit them when starting a NEW session.
+  const sandboxFlags = resolveCodexSandboxFlags({
+    sandboxMode: params.sandboxMode,
+    askForApproval: params.askForApproval,
+    fullAuto: params.fullAuto,
+    useLegacyFullAutoFlag: params.useLegacyFullAutoFlag,
+  });
+  if (sandboxFlags.warning) {
+    runtime.logger.warn(`[${corrId}] ${sandboxFlags.warning}`);
+  }
   if (sessionPlan.mode === "new") {
-    const sandboxFlags = resolveCodexSandboxFlags({
-      sandboxMode: params.sandboxMode,
-      askForApproval: params.askForApproval,
-      fullAuto: params.fullAuto,
-      useLegacyFullAutoFlag: params.useLegacyFullAutoFlag,
-    });
-    if (sandboxFlags.warning) {
-      runtime.logger.warn(`[${corrId}] ${sandboxFlags.warning}`);
-    }
     args.push(...sandboxFlags.args);
   }
   if (params.dangerouslyBypassApprovalsAndSandbox) {
@@ -2034,19 +2033,18 @@ export function prepareCodexRequest(
   }
   args.push("--skip-git-repo-check");
 
-  // U26: High-impact feature flags. `--search` is rejected by
-  // `codex exec resume` (resume inherits the original session's web-search
-  // state), so we only emit it on a NEW session. `--output-schema`,
-  // `-c key=value`, profile, ephemeral, images, and the ignore-* flags are
-  // all accepted on resume per `codex exec resume --help` (codex-cli 0.133.0)
-  // and are emitted in both branches.
+  // U26: High-impact feature flags. `--search` is retained as a compatibility
+  // input but current `codex exec` no longer accepts it, so the helper warns
+  // and emits no argv. `--profile` is accepted for new sessions only. The other
+  // flags here are accepted on resume per `codex exec resume --help` and are
+  // emitted in both branches.
   let highImpactCleanup: (() => void) | undefined;
   if (sessionPlan.mode === "new") {
     // Phase 4 slice ζ: emit working-dir and add-dir on new sessions only.
     // Both flags are listed in CODEX_RESUME_FILTERED_FLAGS — resume inherits
     // the original session's cwd and writable-dir policy, so emitting them
     // on resume would be silently stripped (wasteful + misleading on argv
-    // logs). Gating here mirrors `--search` / `--sandbox` / `--full-auto`.
+    // logs). Gating here mirrors `--search` / `--sandbox`.
     if (params.workingDir) {
       args.push("-C", params.workingDir);
     }
@@ -2074,12 +2072,21 @@ export function prepareCodexRequest(
         new Error(`images: path does not exist: ${high.missingImagePath}`)
       );
     }
+    if (high.warning) {
+      runtime.logger.warn(`[${corrId}] ${high.warning}`);
+    }
     args.push(...high.args);
     highImpactCleanup = high.cleanup;
   } else {
+    if (params.profile) {
+      runtime.logger.warn(
+        `[${corrId}] profile is ignored on Codex resume because current codex exec resume does not accept --profile.`
+      );
+    }
     const high = prepareCodexHighImpactFlags({
       outputSchema: params.outputSchema,
-      profile: params.profile,
+      search: params.search,
+      profile: undefined,
       configOverrides: params.configOverrides,
       ephemeral: params.ephemeral,
       images: params.images,
@@ -2094,6 +2101,9 @@ export function prepareCodexRequest(
         corrId,
         new Error(`images: path does not exist: ${high.missingImagePath}`)
       );
+    }
+    if (high.warning) {
+      runtime.logger.warn(`[${corrId}] ${high.warning}`);
     }
     args.push(...high.args);
     highImpactCleanup = high.cleanup;
@@ -4703,7 +4713,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .boolean()
         .default(false)
         .describe(
-          "DEPRECATED: prefer `sandboxMode` + `askForApproval`. Expands to `--sandbox workspace-write --ask-for-approval never`."
+          "DEPRECATED: prefer `sandboxMode`. Expands to `--sandbox workspace-write`; current Codex no longer accepts approval-policy flags."
         ),
       sandboxMode: z
         .enum(CODEX_SANDBOX_MODES)
@@ -4712,11 +4722,15 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       askForApproval: z
         .enum(CODEX_ASK_FOR_APPROVAL_MODES)
         .optional()
-        .describe("Codex --ask-for-approval: untrusted|on-request|never."),
+        .describe(
+          "DEPRECATED compatibility input: accepted but ignored because current Codex no longer accepts --ask-for-approval."
+        ),
       useLegacyFullAutoFlag: z
         .boolean()
         .default(false)
-        .describe("Escape hatch: emit `--full-auto` directly instead of expanding (deprecated)."),
+        .describe(
+          "DEPRECATED compatibility input: accepted but ignored because current Codex no longer accepts --full-auto."
+        ),
       dangerouslyBypassApprovalsAndSandbox: z
         .boolean()
         .default(false)
@@ -4778,7 +4792,12 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .describe(
           "Codex --output-schema. Pass a path (string) or an inline JSON Schema object; object is materialised to a 0o600 temp file under os.tmpdir() and deleted after the run."
         ),
-      search: z.boolean().optional().describe("Emit Codex --search to enable web search."),
+      search: z
+        .boolean()
+        .optional()
+        .describe(
+          "DEPRECATED compatibility input: accepted but ignored because current Codex exec no longer accepts --search."
+        ),
       profile: z
         .string()
         .optional()
@@ -5087,7 +5106,9 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       askForApproval: z
         .enum(CODEX_ASK_FOR_APPROVAL_MODES)
         .optional()
-        .describe("Codex --ask-for-approval: untrusted|on-request|never."),
+        .describe(
+          "DEPRECATED compatibility input: accepted but ignored because current Codex no longer accepts --ask-for-approval."
+        ),
       correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
       idleTimeoutMs: z
         .number()
@@ -6102,7 +6123,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .boolean()
           .default(false)
           .describe(
-            "DEPRECATED: prefer `sandboxMode` + `askForApproval`. Expands to `--sandbox workspace-write --ask-for-approval never`."
+            "DEPRECATED: prefer `sandboxMode`. Expands to `--sandbox workspace-write`; current Codex no longer accepts approval-policy flags."
           ),
         sandboxMode: z
           .enum(CODEX_SANDBOX_MODES)
@@ -6111,11 +6132,15 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         askForApproval: z
           .enum(CODEX_ASK_FOR_APPROVAL_MODES)
           .optional()
-          .describe("Codex --ask-for-approval: untrusted|on-request|never."),
+          .describe(
+            "DEPRECATED compatibility input: accepted but ignored because current Codex no longer accepts --ask-for-approval."
+          ),
         useLegacyFullAutoFlag: z
           .boolean()
           .default(false)
-          .describe("Escape hatch: emit `--full-auto` directly (deprecated)."),
+          .describe(
+            "DEPRECATED compatibility input: accepted but ignored because current Codex no longer accepts --full-auto."
+          ),
         dangerouslyBypassApprovalsAndSandbox: z
           .boolean()
           .default(false)
@@ -6172,7 +6197,12 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .union([z.string(), z.record(z.string(), z.unknown())])
           .optional()
           .describe("Codex --output-schema. Pass a path (string) or an inline JSON Schema object."),
-        search: z.boolean().optional().describe("Emit Codex --search to enable web search."),
+        search: z
+          .boolean()
+          .optional()
+          .describe(
+            "DEPRECATED compatibility input: accepted but ignored because current Codex exec no longer accepts --search."
+          ),
         profile: z.string().optional().describe("Codex --profile <name>."),
         configOverrides: CODEX_CONFIG_OVERRIDES_SCHEMA.describe(
           "Codex -c key=value overrides. Keys: /^[a-zA-Z0-9._]+$/. Values: no CR/LF."
@@ -7127,7 +7157,9 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       probeInstalled: z
         .boolean()
         .default(false)
-        .describe("When true, run local --help probes and compare advertised flags"),
+        .describe(
+          "When true, run local --help probes and compare advertised flags against the declared contract. Strongly recommended after any provider CLI upgrade to detect drift."
+        ),
     },
     async ({ cli, probeInstalled }) => {
       const report = buildUpstreamContractReport({ cli, probeInstalled });
@@ -7697,13 +7729,22 @@ async function main() {
         "Usage:",
         "  llm-cli-gateway [doctor --json|contracts --json|--transport=http|--version]",
         "",
+        "Doctor:",
+        "  doctor --json                     # environment, providers, declared contracts",
+        "  doctor --json --probe-upstream    # + expensive installed --help probe for drift",
+        "",
+        "After upgrading provider CLIs (grok/claude/etc), use --probe-upstream or",
+        "  llm-cli-gateway contracts --json --probe-installed",
+        "to detect when installed binaries have drifted from the gateway contracts.",
+        "",
       ].join("\n")
     );
     return;
   }
   if (args[0] === "doctor") {
     if (args.includes("--json")) {
-      printDoctorJson();
+      const probeUpstream = args.includes("--probe-upstream") || args.includes("--probe-installed");
+      printDoctorJson({ probeUpstream });
       return;
     }
     process.stderr.write("Only doctor --json is supported in this layer.\n");
@@ -7726,7 +7767,13 @@ async function main() {
       return;
     }
     process.stderr.write(
-      "Usage: llm-cli-gateway contracts --json [--cli=claude|codex|gemini|grok|mistral] [--probe-installed]\n"
+      [
+        "Usage: llm-cli-gateway contracts --json [--cli=claude|codex|gemini|grok|mistral] [--probe-installed]",
+        "",
+        "After upgrading any provider CLI, use --probe-installed to detect drift between",
+        "the installed binary's advertised flags and the gateway's declared contract.",
+        "Example: llm-cli-gateway contracts --json --probe-installed --cli=grok",
+      ].join("\n") + "\n"
     );
     process.exit(2);
   }

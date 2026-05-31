@@ -5,7 +5,6 @@
 
 import { readFileSync } from "fs";
 import type { Logger } from "./logger.js";
-import { noopLogger } from "./logger.js";
 
 export interface ProcessHealth {
   pid: number;
@@ -83,7 +82,7 @@ export class ProcessMonitor {
     { utime: number; stime: number; totalJiffies: number; timestamp: number }
   >();
 
-  constructor(private logger: Logger = noopLogger) {}
+  constructor(_logger?: Logger) {}
 
   /** Clear all cached CPU samples */
   reset(): void {

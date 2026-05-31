@@ -1,4 +1,3 @@
-import type { ValidationProvider } from "./validation-normalizer.js";
 import type { NormalizedValidationResult } from "./validation-normalizer.js";
 
 export type ValidationIntent =

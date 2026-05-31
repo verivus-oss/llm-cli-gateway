@@ -21,7 +21,7 @@ Apply these on every dispatch unless the caller has explicitly overridden a rule
 - `claude_request` / `claude_request_async` — Send prompts to Claude Code CLI
 - `codex_request` / `codex_request_async` — Delegate tasks to Codex CLI (pass `sessionId:<UUID>` or `resumeLatest:true` to use `codex exec resume`)
 - `gemini_request` / `gemini_request_async` — Delegate tasks to Gemini CLI
-- `grok_request` / `grok_request_async` — Delegate tasks to Grok CLI (xAI). Auth via prior `grok login` (OAuth) or `GROK_CODE_XAI_API_KEY`
+- `grok_request` / `grok_request_async` — Delegate tasks to Grok CLI (xAI). Auth via prior `grok login` (OAuth) or local `XAI_API_KEY`
 - `mistral_request` / `mistral_request_async` — Delegate tasks to Mistral Vibe CLI. Model selection is via `VIBE_ACTIVE_MODEL` env var (no `--model` flag); `permissionMode` is the `--agent` enum and defaults to `auto-approve` for programmatic callers. Session continuity (`sessionId`/`resumeLatest`) requires `[session_logging] enabled = true` in `~/.vibe/config.toml`.
 - `llm_job_status` — Check async job progress (in-memory + durable store fallback)
 - `llm_job_result` — Fetch completed job output (durable: default 30-day retention, `LLM_GATEWAY_JOB_RETENTION_DAYS`)

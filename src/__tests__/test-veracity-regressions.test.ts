@@ -379,19 +379,12 @@ describe("REGRESSIONS F — every contract flag has at least one passing fixture
         codex: [
           "--model",
           "--sandbox",
-          "--ask-for-approval",
-          "--full-auto",
           "--json",
           "--profile",
           "--ephemeral",
           "-i",
           "--ignore-user-config",
           "--ignore-rules",
-          // `--search` has a "rejected on resume" fixture in
-          // upstream-contracts.ts but no `expect:pass` fixture; the
-          // fail-fixture line `["exec", "resume", "--search", ...]`
-          // doesn't exercise it on a non-resume codex call. Grandfathered.
-          "--search",
         ],
         gemini: [
           "--model",

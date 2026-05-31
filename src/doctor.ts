@@ -18,6 +18,7 @@ import type { FlightRecorderQuery } from "./flight-recorder.js";
 import { loadCacheAwarenessConfig, type CacheAwarenessConfig } from "./config.js";
 import { computeGlobalCacheStats } from "./cache-stats.js";
 import { FlightRecorder, resolveFlightRecorderDbPath } from "./flight-recorder.js";
+import { buildUpstreamContractReport } from "./upstream-contracts.js";
 
 export type CliType = "claude" | "codex" | "gemini" | "grok" | "mistral";
 
@@ -298,6 +299,19 @@ export interface DoctorReport {
     vibe_session_logging: VibeSessionLoggingStatus;
   };
   cache_awareness: CacheAwarenessReport;
+  upstream: {
+    note: string;
+    recommendation: string;
+    how_to_check: string;
+    /** Whether the expensive installed binary probe was performed (requires --probe-upstream). */
+    probed: boolean;
+    /** Cheap installed versions (always present when CLIs are detected). */
+    installed_versions: Partial<Record<CliType, string | null>>;
+    /** Lightweight declared contracts (always present, no spawning). */
+    contracts: ReturnType<typeof import("./upstream-contracts.js").buildUpstreamContractReport>;
+    /** Full probed report only when --probe-upstream was used. */
+    probe_report?: ReturnType<typeof import("./upstream-contracts.js").buildUpstreamContractReport>;
+  };
   next_actions: string[];
 }
 
@@ -364,6 +378,12 @@ export interface CreateDoctorReportOptions {
    * absent, `enabled_features` is empty (all behaviour considered off).
    */
   cacheAwareness?: CacheAwarenessConfig;
+  /**
+   * When true, perform the (potentially slow) installed CLI --help probe
+   * for upstream contract drift detection. This is opt-in because it
+   * spawns the real provider CLIs.
+   */
+  probeUpstream?: boolean;
 }
 
 /**
@@ -443,6 +463,29 @@ export function createDoctorReport(
   const publicUrl = redactDiagnosticUrl(rawPublicUrl);
   const endpointExposure = createEndpointExposureReport(env, publicUrl);
   const providerStatuses = listProviderRuntimeStatuses();
+  const installedVersions: Partial<Record<CliType, string | null>> = {};
+  for (const [name, status] of Object.entries(providerStatuses)) {
+    installedVersions[name as CliType] = status.version;
+  }
+
+  const lightweightContracts = buildUpstreamContractReport({ probeInstalled: false });
+  const probeReport = opts.probeUpstream
+    ? buildUpstreamContractReport({ probeInstalled: true })
+    : undefined;
+
+  const upstream: DoctorReport["upstream"] = {
+    note: "The gateway declares strict contracts for what flags, output modes, permission modes, and session/resume behaviour each provider CLI is expected to support.",
+    recommendation:
+      "After upgrading any provider CLI (especially fast-moving vendor binaries like grok), run the installed binary probe to detect drift between what the gateway expects and what your installed CLI actually advertises.",
+    how_to_check: "llm-cli-gateway contracts --json --probe-installed   (or with --cli=grok etc.)",
+    probed: !!opts.probeUpstream,
+    installed_versions: installedVersions,
+    contracts: lightweightContracts,
+  };
+  if (probeReport) {
+    upstream.probe_report = probeReport;
+  }
+
   const report: DoctorReport = {
     schema_version: "1.0",
     ok: true,
@@ -484,6 +527,7 @@ export function createDoctorReport(
     endpoint_exposure: endpointExposure,
     client_config: clientConfigStatus(),
     cache_awareness: buildCacheAwarenessReport(opts),
+    upstream,
     next_actions: [],
   };
 
@@ -518,10 +562,26 @@ export function createDoctorReport(
     );
   }
 
+  // Upstream drift detection recommendation — surfaced for habitual use after provider upgrades.
+  const hasAnyCli = Object.values(report.providers).some(p => p.cli_available);
+  if (hasAnyCli) {
+    if (report.upstream.probed) {
+      report.next_actions.push(
+        "Upstream probe was run (see upstream.probe_report for installed vs declared drift)."
+      );
+    } else {
+      report.next_actions.push(
+        "After upgrading provider CLIs, check for contract drift: " +
+          report.upstream.how_to_check +
+          "  (add --probe-upstream to this doctor command for one-shot probing)"
+      );
+    }
+  }
+
   return report;
 }
 
-export function printDoctorJson(): void {
+export function printDoctorJson(opts: { probeUpstream?: boolean } = {}): void {
   // Load cache-awareness config + open the flight recorder so the doctor
   // command can populate cache_awareness.last_24h. Both are best-effort —
   // failures degrade to the zeroed block (buildCacheAwarenessReport
@@ -543,6 +603,7 @@ export function printDoctorJson(): void {
     env: process.env,
     cacheAwareness,
     flightRecorder,
+    probeUpstream: opts.probeUpstream,
   });
   process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
   if (flightRecorder) {

@@ -39,9 +39,17 @@ describe("upstream CLI contracts", () => {
     expect(result.violations[0]?.message).toMatch(/does not accept value "workspace"/);
   });
 
-  it("rejects flags not accepted by Codex resume", () => {
-    // Phase 4 slice α (v1.8.0) confirmed `--output-schema` IS accepted on
-    // resume per codex-cli 0.133.0; `--search` remains forbidden.
+  it("rejects Codex approval flags removed from the installed CLI", () => {
+    const ask = validateUpstreamCliArgs("codex", ["exec", "--ask-for-approval", "never", "prompt"]);
+    expect(ask.ok).toBe(false);
+    expect(ask.violations[0]?.message).toMatch(/Unsupported codex CLI flag/);
+
+    const fullAuto = validateUpstreamCliArgs("codex", ["exec", "--full-auto", "prompt"]);
+    expect(fullAuto.ok).toBe(false);
+    expect(fullAuto.violations[0]?.message).toMatch(/Unsupported codex CLI flag/);
+  });
+
+  it("rejects Codex search because current codex exec no longer accepts it", () => {
     const result = validateUpstreamCliArgs("codex", [
       "exec",
       "resume",
@@ -50,7 +58,50 @@ describe("upstream CLI contracts", () => {
       "prompt",
     ]);
     expect(result.ok).toBe(false);
+    expect(result.violations[0]?.message).toMatch(/Unsupported codex CLI flag/);
+  });
+
+  it("rejects Codex working-directory policy flags on resume", () => {
+    const cd = validateUpstreamCliArgs("codex", [
+      "exec",
+      "resume",
+      "-C",
+      "/tmp/work",
+      "session-id",
+      "prompt",
+    ]);
+    expect(cd.ok).toBe(false);
+    expect(cd.violations[0]?.message).toMatch(/not accepted by the resume command contract/);
+
+    const addDir = validateUpstreamCliArgs("codex", [
+      "exec",
+      "resume",
+      "--add-dir",
+      "/tmp/extra",
+      "session-id",
+      "prompt",
+    ]);
+    expect(addDir.ok).toBe(false);
+    expect(addDir.violations[0]?.message).toMatch(/not accepted by the resume command contract/);
+  });
+
+  it("rejects Codex profile selection on resume", () => {
+    const result = validateUpstreamCliArgs("codex", [
+      "exec",
+      "resume",
+      "--profile",
+      "research",
+      "session-id",
+      "prompt",
+    ]);
+    expect(result.ok).toBe(false);
     expect(result.violations[0]?.message).toMatch(/not accepted by the resume command contract/);
+  });
+
+  it("rejects Codex resume-only flags outside resume", () => {
+    const result = validateUpstreamCliArgs("codex", ["exec", "--all", "prompt"]);
+    expect(result.ok).toBe(false);
+    expect(result.violations[0]?.message).toMatch(/only valid with the resume command contract/);
   });
 
   it("accepts --output-schema + -c on Codex resume (Phase 4 slice α)", () => {
@@ -161,9 +212,13 @@ Options:
     });
 
     it("is robust against noise, URLs, and prose", () => {
-      const noisy = "See https://example.com/docs --foo-bar and also --baz in the --other-thing docs.";
+      const noisy = [
+        "See https://example.com/docs --foo-bar and also --baz in the --other-thing docs.",
+        "Permission allow rule (Claude Code: --allowedTools)",
+        "      --real-flag <VALUE>  Permission allow rule (Claude Code: --allowedTools)",
+      ].join("\n");
       const flags = extractDiscoveredFlags(noisy);
-      expect(flags).toEqual(["--baz", "--foo-bar", "--other-thing"]);
+      expect(flags).toEqual(["--real-flag"]);
     });
 
     it("handles grok-style TUI help (realistic excerpt)", () => {

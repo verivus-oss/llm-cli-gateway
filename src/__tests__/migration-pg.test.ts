@@ -180,6 +180,10 @@ describe("Session Migration", () => {
 
     await migrateFromFile(testFilePath, pgManager);
 
+    expect(await pgManager.getSession(claudeSession.id)).not.toBeNull();
+    expect(await pgManager.getSession(codexSession.id)).not.toBeNull();
+    expect(await pgManager.getSession(geminiSession.id)).not.toBeNull();
+
     const claudeSessions = await pgManager.listSessions("claude");
     const codexSessions = await pgManager.listSessions("codex");
     const geminiSessions = await pgManager.listSessions("gemini");

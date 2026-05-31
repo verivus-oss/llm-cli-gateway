@@ -333,6 +333,7 @@ async function runScan(machinery, toml, flags) {
 
     const findings = [];
     let fetched = null;
+    let helpProbe = null;
 
     if (flags.live) {
       fetched = [];
@@ -364,95 +365,99 @@ async function runScan(machinery, toml, flags) {
           }
         }
       }
+    }
 
-      // Bidirectional installed-CLI help surface probe (when requested).
-      // This is the key improvement for vendor/fast-moving CLIs (e.g. grok)
-      // whose web changelogs are high-level or sparse. The probe is already
-      // graceful when the binary is absent.
-      let helpProbe = null;
-      if (flags.probeInstalled && typeof probeInstalledCliContract === "function") {
-        try {
-          helpProbe = probeInstalledCliContract(cli);
-        } catch (e) {
-          console.warn(`  [probe] failed for ${cli}: ${e?.message ?? e}`);
-        }
+    // Bidirectional installed-CLI help surface probe (when requested).
+    // Keep this outside the `--live` branch so offline `--probe-installed`
+    // catches local CLI drift without requiring network access.
+    if (flags.probeInstalled && typeof probeInstalledCliContract === "function") {
+      try {
+        helpProbe = probeInstalledCliContract(cli);
+      } catch (e) {
+        console.warn(`  [probe] failed for ${cli}: ${e?.message ?? e}`);
+      }
 
-        if (helpProbe) {
-          const prior = readSnapshot(cli); // re-read to get any prior helpSurface
-          const priorHelp = prior?.helpSurface;
+      if (helpProbe) {
+        const prior = readSnapshot(cli);
+        const priorHelp = prior?.helpSurface;
 
-          if (helpProbe.available) {
-            const contractFlags = new Set(Object.keys(contract.flags));
-            const extras = (helpProbe.extraFlags || []).filter(f => !contractFlags.has(f));
-            const missing = helpProbe.missingFlags || [];
+        if (helpProbe.available) {
+          const contractFlags = new Set(Object.keys(contract.flags));
+          const extras = (helpProbe.extraFlags || []).filter(f => !contractFlags.has(f));
+          const missing = helpProbe.missingFlags || [];
 
-            if (extras.length > 0) {
+          if (extras.length > 0) {
+            findings.push({
+              severity: "critical",
+              category: "installed-help-surface-drift",
+              message: `Installed ${cli} binary advertises ${extras.length} flag(s) not in contract: ${extras.slice(0, 8).join(", ")}${extras.length > 8 ? "..." : ""}. Review against watched categories (${meta.watchCategories.join(", ")}) and update src/upstream-contracts.ts + fixtures.`,
+            });
+            criticalCount++;
+            console.log(
+              `  [probe] EXTRA FLAGS in installed binary: ${extras.slice(0, 6).join(", ")}${extras.length > 6 ? ` (+${extras.length - 6} more)` : ""}`
+            );
+          }
+          if (missing.length > 0) {
+            findings.push({
+              severity: "warning",
+              category: "binary-missing-declared-flags",
+              message: `Installed ${cli} binary no longer advertises declared contract flag(s): ${missing.join(", ")}.`,
+            });
+            console.log(`  [probe] MISSING from binary (vs contract): ${missing.join(", ")}`);
+          }
+
+          // Diff vs prior help snapshot (if we have one).
+          if (priorHelp && priorHelp.discoveredFlags && Array.isArray(priorHelp.discoveredFlags)) {
+            const prevSet = new Set(priorHelp.discoveredFlags);
+            const currSet = new Set(helpProbe.discoveredFlags || []);
+            const newSince = [...currSet].filter(f => !prevSet.has(f));
+            const gone = [...prevSet].filter(f => !currSet.has(f));
+            if (newSince.length > 0 || gone.length > 0) {
               findings.push({
                 severity: "critical",
                 category: "installed-help-surface-drift",
-                message: `Installed ${cli} binary advertises ${extras.length} flag(s) not in contract: ${extras.slice(0, 8).join(", ")}${extras.length > 8 ? "..." : ""}. Review against watched categories (${meta.watchCategories.join(", ")}) and update src/upstream-contracts.ts + fixtures.`,
+                message: `Help surface for ${cli} changed since last snapshot (new: ${newSince.slice(0, 5).join(", ") || "—"}; removed: ${gone.slice(0, 5).join(", ") || "—"}).`,
               });
               criticalCount++;
-              console.log(`  [probe] EXTRA FLAGS in installed binary: ${extras.slice(0, 6).join(", ")}${extras.length > 6 ? ` (+${extras.length - 6} more)` : ""}`);
-            }
-            if (missing.length > 0) {
+              console.log(`  [probe] HELP SURFACE CHANGED vs prior snapshot`);
+            } else if (
+              priorHelp.helpHash &&
+              helpProbe.helpHash &&
+              priorHelp.helpHash !== helpProbe.helpHash
+            ) {
               findings.push({
                 severity: "warning",
-                category: "binary-missing-declared-flags",
-                message: `Installed ${cli} binary no longer advertises declared contract flag(s): ${missing.join(", ")}.`,
+                category: "installed-help-surface-drift",
+                message: `Help text hash for ${cli} changed since last snapshot (subtle drift even if flag set looks stable).`,
               });
-              console.log(`  [probe] MISSING from binary (vs contract): ${missing.join(", ")}`);
+              console.log(`  [probe] help text hash drift vs prior (no net flag add/remove)`);
             }
-
-            // Diff vs prior help snapshot (if we have one)
-            if (priorHelp && priorHelp.discoveredFlags && Array.isArray(priorHelp.discoveredFlags)) {
-              const prevSet = new Set(priorHelp.discoveredFlags);
-              const currSet = new Set(helpProbe.discoveredFlags || []);
-              const newSince = [...currSet].filter(f => !prevSet.has(f));
-              const gone = [...prevSet].filter(f => !currSet.has(f));
-              if (newSince.length > 0 || gone.length > 0) {
-                findings.push({
-                  severity: "critical",
-                  category: "installed-help-surface-drift",
-                  message: `Help surface for ${cli} changed since last snapshot (new: ${newSince.slice(0,5).join(", ") || "—"}; removed: ${gone.slice(0,5).join(", ") || "—"}).`,
-                });
-                criticalCount++;
-                console.log(`  [probe] HELP SURFACE CHANGED vs prior snapshot`);
-              } else if (priorHelp.helpHash && helpProbe.helpHash && priorHelp.helpHash !== helpProbe.helpHash) {
-                findings.push({
-                  severity: "warning",
-                  category: "installed-help-surface-drift",
-                  message: `Help text hash for ${cli} changed since last snapshot (subtle drift even if flag set looks stable).`,
-                });
-                console.log(`  [probe] help text hash drift vs prior (no net flag add/remove)`);
-              }
-            }
-          } else {
-            console.log(`  [probe] ${cli} binary not available on this machine (skipped surface diff)`);
           }
+        } else {
+          console.log(`  [probe] ${cli} binary not available on this machine (skipped surface diff)`);
         }
       }
+    }
 
-      if (flags.writeSnapshot) {
-        const snapshotPayload = {
-          cli,
-          fetchedAt: new Date().toISOString(),
-          sources: fetched,
+    if (flags.live && flags.writeSnapshot) {
+      const snapshotPayload = {
+        cli,
+        fetchedAt: new Date().toISOString(),
+        sources: fetched,
+      };
+      if (helpProbe && helpProbe.available) {
+        snapshotPayload.helpSurface = {
+          probedAt: helpProbe.probedAt,
+          available: true,
+          version: helpProbe.versionHint || null,
+          flags: helpProbe.discoveredFlags || [],
+          helpHash: helpProbe.helpHash || null,
+          extraVsContract: helpProbe.extraFlags || [],
+          missingFromBinary: helpProbe.missingFlags || [],
         };
-        if (helpProbe && helpProbe.available) {
-          snapshotPayload.helpSurface = {
-            probedAt: helpProbe.probedAt,
-            available: true,
-            version: helpProbe.versionHint || null,
-            flags: helpProbe.discoveredFlags || [],
-            helpHash: helpProbe.helpHash || null,
-            extraVsContract: helpProbe.extraFlags || [],
-            missingFromBinary: helpProbe.missingFlags || [],
-          };
-        }
-        const path = writeSnapshot(cli, snapshotPayload);
-        console.log(`  [snapshot] wrote ${path}`);
       }
+      const path = writeSnapshot(cli, snapshotPayload);
+      console.log(`  [snapshot] wrote ${path}`);
     }
 
     if (flags.writeReport) {

@@ -9,8 +9,6 @@ import {
   type ValidationOrchestratorDeps,
 } from "./validation-orchestrator.js";
 
-type ValidationProvider = "claude" | "codex" | "gemini" | "grok" | "mistral";
-
 export interface ValidationToolDeps extends ValidationOrchestratorDeps {
   asyncJobManager: AsyncJobManager;
 }

@@ -1,0 +1,354 @@
+# Fix plan: outstanding work review findings.
+#
+# Goal: turn the review blockers from 2026-05-31 into a small, ordered fix
+# slice that can be implemented without changing unrelated product work.
+#
+# Confirmed blockers:
+#   1. `doctor --json` emits top-level `upstream`, but
+#      `setup/status.schema.json` rejects it (`additionalProperties: false`).
+#   2. The installed Codex CLI no longer accepts `--ask-for-approval`, while
+#      gateway request prep and the upstream contract still emit/declare it.
+#   3. `scripts/upstream-scan.mjs --probe-installed` currently runs the
+#      installed-binary probe only inside the `--live` branch, so the documented
+#      offline `--probe-installed` usage can silently miss installed CLI drift.
+#   4. A checked-in Grok scan report records critical installed-help drift; the
+#      release-bound state must either resolve that drift or keep the report as
+#      an explicit advisory artifact with validation proving it is intentional.
+#   5. Prettier is red on touched TypeScript files.
+#
+# Note on Grok/Grok Build docs:
+#   The xAI Build docs are the canonical source for Grok Build public wording:
+#   https://docs.x.ai/build/overview and
+#   https://docs.x.ai/build/enterprise. This plan does not treat "Grok Build"
+#   naming as a bug. Any site/install copy changes should preserve alignment
+#   with those docs.
+
+[meta]
+name = "llm-cli-gateway outstanding work fix plan"
+schema_version = "1.1"
+owner = "werner"
+slice = "outstanding-work-fixes-2026-05-31"
+target_branch = "master"
+release_version = "1.17.2"
+acceptance_resource = "doctor --json validates against setup/status.schema.json; installed Codex drift is handled; upstream scan probe works offline; format/test gates are green"
+invariant_sources = [
+  "/srv/repos/internal/verivusai-labs/rvwr/llm-cli-gateway/AGENTS.md",
+  "/srv/repos/internal/verivusai-labs/rvwr/llm-cli-gateway/docs/guides/BEST_PRACTICES.md",
+]
+predecessor_plan = "none"
+
+# ---------------------------------------------------------------------------
+# Phase 0 — re-baseline and classify drift
+# ---------------------------------------------------------------------------
+
+[[steps]]
+id = "baseline-current-failures"
+depends_on = []
+actor = "assistant"
+action = """
+Re-run the exact failing gates before editing:
+
+  npm run build
+  npm test -- src/__tests__/doctor.test.ts src/__tests__/cli-entrypoint.test.ts src/__tests__/upstream-contracts.test.ts
+  npm run format:check
+
+Also capture installed CLI help evidence:
+
+  codex exec --help
+  codex exec resume --help
+  npm run upstream:scan -- --provider codex --probe-installed --fail-on-critical
+  npm run upstream:scan -- --provider grok --probe-installed --fail-on-critical
+
+Record the current failures in the implementation notes or PR body. Do not
+change behavior until the expected red states are confirmed.
+"""
+idempotent = true
+validation = """
+The captured baseline includes:
+  - doctor schema failure mentioning `doctor.upstream`, or a note that it was
+    already fixed before this plan was implemented.
+  - Codex help output showing whether `--ask-for-approval`, `--sandbox`, and
+    `--full-auto` are accepted by the installed CLI.
+  - upstream-scan results for Codex and Grok with `--probe-installed`.
+  - format:check file list.
+"""
+
+[[steps]]
+id = "decide-codex-flag-policy"
+depends_on = ["baseline-current-failures"]
+actor = "assistant"
+action = """
+Use the installed `codex exec --help` and `codex exec resume --help` output to
+decide the minimal compatibility policy:
+
+  - If `--ask-for-approval` is absent from the installed CLI, remove it from
+    emitted argv and from the Codex contract. Prefer the current CLI's
+    supported config/profile mechanism only if there is an established local
+    pattern for expressing approval policy without that flag.
+  - If `--full-auto` is absent, keep it deprecated and avoid emitting it except
+    behind an explicitly tested compatibility path, or remove the escape hatch
+    if no supported installed CLI still needs it.
+  - Keep `--sandbox` only if it remains advertised and accepted.
+  - For resume, keep rejecting flags that `codex exec resume --help` does not
+    accept.
+
+This step is a decision checkpoint because the fix must match the installed
+Codex CLI contract, not older assumptions in tests.
+"""
+idempotent = true
+validation = """
+A short decision note exists in the implementation notes or PR body listing:
+  - supported Codex exec flags,
+  - removed/retained gateway params,
+  - backward-compat behavior for deprecated `fullAuto` / `askForApproval`.
+"""
+
+# ---------------------------------------------------------------------------
+# Phase 1 — implementation fixes
+# ---------------------------------------------------------------------------
+
+[[steps]]
+id = "fix-doctor-schema-upstream"
+depends_on = ["baseline-current-failures"]
+actor = "assistant"
+action = """
+Make doctor output and schema agree.
+
+Preferred fix:
+  - Add `upstream` to `setup/status.schema.json` top-level `required`.
+  - Add a schema for the `upstream` block emitted by `src/doctor.ts`.
+  - Keep the schema permissive enough for contract report internals whose
+    details are already validated elsewhere, but strict enough for the public
+    doctor shape:
+      note: string
+      recommendation: string
+      how_to_check: string
+      probed: boolean
+      installed_versions: object with string/null values
+      contracts: object
+      probe_report: object or null/absent
+
+Alternative fix only if schema ownership requires a smaller doctor surface:
+  - Move the upstream contract report out of `doctor --json` and leave only a
+    `next_actions` recommendation that points to `contracts --json`.
+
+Do not leave `DoctorReport` TypeScript and `status.schema.json` out of sync.
+"""
+idempotent = true
+validation = """
+npm test -- src/__tests__/doctor.test.ts passes.
+The schema test specifically accepts the `upstream` block or proves it is no
+longer emitted.
+"""
+
+[[steps]]
+id = "fix-codex-contract-and-argv"
+depends_on = ["decide-codex-flag-policy"]
+actor = "assistant"
+action = """
+Apply the Codex flag-policy decision.
+
+Likely edit targets:
+  - `src/request-helpers.ts`
+      Update `CodexAskForApproval`, `resolveCodexSandboxFlags`, and related
+      comments/tests so unsupported flags are not emitted.
+  - `src/index.ts`
+      Update MCP schema descriptions and parameter handling so callers receive
+      an explicit compatibility response when asking for a removed flag, or so
+      the parameter maps to a supported current mechanism.
+  - `src/upstream-contracts.ts`
+      Remove unsupported Codex flags from `UPSTREAM_CLI_CONTRACTS.codex.flags`
+      and update conformance fixtures.
+  - `src/__tests__/request-helpers.test.ts`,
+    `src/__tests__/codex-handler.test.ts`, and upstream-contract tests.
+
+The fix must be contract-first: any argv emitted by `prepareCodexRequest`
+must pass `validateUpstreamCliArgs("codex", args)` and must also be accepted by
+the installed `codex exec --help` surface verified in Phase 0.
+"""
+idempotent = false
+validation = """
+Targeted checks pass:
+  npm test -- src/__tests__/request-helpers.test.ts src/__tests__/codex-handler.test.ts src/__tests__/upstream-contracts.test.ts
+
+A local async smoke dispatch that previously failed with
+`unexpected argument '--ask-for-approval'` no longer fails for that reason.
+"""
+
+[[steps]]
+id = "fix-upstream-scan-offline-probe"
+depends_on = ["baseline-current-failures"]
+actor = "assistant"
+action = """
+Fix `scripts/upstream-scan.mjs` so `--probe-installed` works in offline scan
+mode, not only under `--live`.
+
+Implementation shape:
+  - Move the installed-help probe block outside the `if (flags.live)` branch.
+  - Keep live changelog fetching gated by `--live`.
+  - When `--probe-installed` is passed without `--live`, compare installed
+    discovered flags against the contract and report critical drift.
+  - Preserve snapshot help-surface diffs only when a prior snapshot exists.
+  - Keep writes gated by `--write-snapshot` / `--write-report`.
+
+Update docs if needed so `docs/upstream/README.md` accurately describes
+offline `--probe-installed`.
+"""
+idempotent = false
+validation = """
+This command exits non-zero when installed drift exists:
+  npm run upstream:scan -- --provider codex --probe-installed --fail-on-critical
+
+If Codex drift has been fixed in the same slice, use a temporary mutation or a
+provider with known drift to prove the non-zero path. The final committed state
+must still pass `npm run upstream:contracts`.
+"""
+
+[[steps]]
+id = "resolve-or-quarantine-grok-report"
+depends_on = ["fix-upstream-scan-offline-probe"]
+actor = "assistant"
+action = """
+Handle the checked-in Grok critical-drift report deliberately.
+
+Choose one:
+  1. Resolve drift:
+       - Update `UPSTREAM_CLI_CONTRACTS.grok` with currently supported flags
+         that the gateway intentionally accepts.
+       - Add or adjust conformance fixtures for watched categories.
+       - Regenerate the Grok snapshot/report so it no longer records an
+         unresolved critical finding.
+  2. Quarantine advisory artifact:
+       - Move the report/snapshot into an archive or review-only location that
+         is not presented as release-ready evidence.
+       - Add a short note explaining that the report is an advisory input, not
+         a resolved contract state.
+
+Do not ship a fresh release-bound report that says "critical" unless the
+release intentionally contains a known unresolved provider-drift advisory.
+"""
+idempotent = false
+validation = """
+One of these is true:
+  - `npm run upstream:scan -- --provider grok --probe-installed --fail-on-critical`
+    exits zero in the final state, or
+  - the Grok critical report is clearly archived/quarantined and not treated as
+    release-ready evidence.
+"""
+
+[[steps]]
+id = "preserve-xai-build-doc-copy"
+depends_on = ["baseline-current-failures"]
+actor = "assistant"
+action = """
+Review `site/install.md`, `site/index.html`, and `site/llms.txt` for xAI/Grok
+wording against the canonical xAI Build docs:
+
+  - https://docs.x.ai/build/overview
+  - https://docs.x.ai/build/enterprise
+
+Preserve "Grok Build" as canonical product wording. Only change install
+commands if they are demonstrably inconsistent with the canonical docs or with
+the repo's current supported install guidance. If no change is needed, leave
+the site copy alone and record "no-op; canonical docs checked".
+"""
+idempotent = true
+validation = """
+Implementation notes state whether the site copy changed. If changed, the note
+links the changed command/wording to the canonical xAI Build docs. If unchanged,
+the note explicitly says it was reviewed as a no-op.
+"""
+
+# ---------------------------------------------------------------------------
+# Phase 2 — formatting and verification
+# ---------------------------------------------------------------------------
+
+[[steps]]
+id = "format-touched-files"
+depends_on = [
+  "fix-doctor-schema-upstream",
+  "fix-codex-contract-and-argv",
+  "fix-upstream-scan-offline-probe",
+  "resolve-or-quarantine-grok-report",
+  "preserve-xai-build-doc-copy",
+]
+actor = "assistant"
+action = """
+Run Prettier on touched TypeScript files. If `src/__tests__/read-persisted-request.test.ts`
+is still the only unrelated pre-existing formatting failure, do not modify it
+unless it was touched by this slice; instead record it separately. If it is
+release-gating and unrelated ownership is acceptable, run the repo formatter
+and include that mechanical change in the scope.
+"""
+idempotent = true
+validation = """
+npm run format:check passes, or the only remaining failure is explicitly
+documented as pre-existing and outside this slice.
+"""
+
+[[steps]]
+id = "run-final-gates"
+depends_on = ["format-touched-files"]
+actor = "assistant"
+action = """
+Run the final verification set:
+
+  npm run build
+  npm run lint
+  npm test -- src/__tests__/doctor.test.ts src/__tests__/cli-entrypoint.test.ts src/__tests__/upstream-contracts.test.ts src/__tests__/request-helpers.test.ts src/__tests__/codex-handler.test.ts
+  npm run upstream:contracts
+  npm run format:check
+
+If time allows, run the full suite:
+
+  npm test
+"""
+idempotent = true
+validation = """
+All targeted gates pass. Any skipped full-suite run is documented with the
+reason and residual risk.
+"""
+
+[[steps]]
+id = "review-evidence"
+depends_on = ["run-final-gates"]
+actor = "assistant"
+action = """
+Prepare a short review note with:
+  - changed files grouped by finding,
+  - before/after behavior for doctor schema and Codex argv,
+  - upstream scan probe evidence,
+  - xAI Build docs copy decision,
+  - exact commands run.
+
+Use this note as the PR body or final implementation summary.
+"""
+idempotent = true
+validation = """
+Review note exists in the PR body, commit message draft, or final handoff.
+It includes exact command results and any residual risk.
+"""
+
+[rollback]
+guidance = """
+If the Codex flag compatibility fix proves too broad, revert only the Codex
+request-helper/index/upstream-contract/test edits and leave the doctor schema
+and upstream-scan offline-probe fixes intact. If the doctor schema change risks
+breaking external consumers, choose the alternative doctor fix: remove the full
+contract report from `doctor --json` and keep only the recommendation pointing
+to `contracts --json`.
+"""
+
+[risks]
+known = [
+  "Installed provider CLIs may differ across developer machines, so contract fixes must be based on documented/current help output and not only one host.",
+  "Removing a deprecated Codex parameter can break MCP callers that still send it.",
+  "Leaving a critical Grok report in docs can be mistaken for release-ready evidence.",
+  "Formatting unrelated dirty files can make the review larger than necessary.",
+]
+mitigations = [
+  "Pin decisions to captured `--help` output and update conformance fixtures.",
+  "Prefer explicit compatibility errors or no-op deprecation behavior over silent argument emission.",
+  "Either resolve Grok drift or quarantine the report with an advisory note.",
+  "Format only touched files unless the repo gate requires a broader mechanical formatting pass.",
+]

@@ -125,7 +125,7 @@ export class FileSessionManager {
       try {
         const data = readFileSync(this.storagePath, "utf-8");
         this.storage = JSON.parse(data);
-      } catch (error) {
+      } catch {
         // If file is corrupted, start fresh
         this.storage = { sessions: {}, activeSession: createEmptyActiveSessions() };
       }

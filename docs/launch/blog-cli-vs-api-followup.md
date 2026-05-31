@@ -18,7 +18,7 @@ Codex now sits where Claude and Gemini sit. The bullet that said "Session contin
 
 ## Grok makes four, on purpose
 
-xAI shipped an official Grok CLI (the `grok-build` TUI) and we added it as the fourth provider. The tools mirror the others one-for-one, `grok_request` and `grok_request_async`, sessions through `--resume` / `--continue`, model registry entries, self-update via `grok update`, the same circuit-breaker and approval-gate plumbing, the same flight recorder, the same metrics. Auth follows the same shape, a prior `grok login` (OAuth) or a `GROK_CODE_XAI_API_KEY` environment variable, with `GROK_DEFAULT_MODEL`, `GROK_MODELS`, and `GROK_MODEL_ALIASES` all honoured.
+xAI shipped the official Grok Build CLI and we added it as the fourth provider. The tools mirror the others one-for-one, `grok_request` and `grok_request_async`, sessions through `--resume` / `--continue`, model registry entries, self-update via `grok update`, the same circuit-breaker and approval-gate plumbing, the same flight recorder, the same metrics. Auth follows the same shape, a prior `grok login` (OAuth) or a local `XAI_API_KEY` environment variable, with `GROK_DEFAULT_MODEL`, `GROK_MODELS`, and `GROK_MODEL_ALIASES` all honoured.
 
 The interesting question is not whether to add Grok (the parity work is mechanical) but why. The case is consensus diversity.
 

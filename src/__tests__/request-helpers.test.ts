@@ -324,41 +324,39 @@ describe("request-helpers", () => {
       ]);
     });
 
-    it("emits --ask-for-approval on-request for askForApproval alone", () => {
-      expect(resolveCodexSandboxFlags({ askForApproval: "on-request" }).args).toEqual([
-        "--ask-for-approval",
-        "on-request",
-      ]);
+    it("treats askForApproval as a deprecated no-op", () => {
+      const result = resolveCodexSandboxFlags({ askForApproval: "on-request" });
+      expect(result.args).toEqual([]);
+      expect(result.warning).toMatch(/no longer accepts --ask-for-approval/);
     });
 
-    it("emits both flags when both are set, no --full-auto", () => {
+    it("emits sandbox only when sandboxMode and deprecated askForApproval are both set", () => {
       const result = resolveCodexSandboxFlags({
         sandboxMode: "workspace-write",
         askForApproval: "on-request",
       });
-      expect(result.args).toEqual([
-        "--sandbox",
-        "workspace-write",
-        "--ask-for-approval",
-        "on-request",
-      ]);
+      expect(result.args).toEqual(["--sandbox", "workspace-write"]);
       expect(result.args).not.toContain("--full-auto");
+      expect(result.args).not.toContain("--ask-for-approval");
+      expect(result.warning).toMatch(/no longer accepts --ask-for-approval/);
     });
 
-    it("expands fullAuto=true (no escape hatch) to sandbox + ask-for-approval, NOT --full-auto", () => {
+    it("expands fullAuto=true to sandbox only, NOT approval flags", () => {
       const result = resolveCodexSandboxFlags({ fullAuto: true });
-      expect(result.args).toEqual(["--sandbox", "workspace-write", "--ask-for-approval", "never"]);
+      expect(result.args).toEqual(["--sandbox", "workspace-write"]);
       expect(result.args).not.toContain("--full-auto");
+      expect(result.args).not.toContain("--ask-for-approval");
     });
 
-    it("emits --full-auto literally when useLegacyFullAutoFlag=true && fullAuto=true", () => {
+    it("ignores useLegacyFullAutoFlag when fullAuto=true because Codex rejects --full-auto", () => {
       const result = resolveCodexSandboxFlags({
         fullAuto: true,
         useLegacyFullAutoFlag: true,
       });
-      expect(result.args).toEqual(["--full-auto"]);
-      expect(result.args).not.toContain("--sandbox");
+      expect(result.args).toEqual(["--sandbox", "workspace-write"]);
+      expect(result.args).not.toContain("--full-auto");
       expect(result.args).not.toContain("--ask-for-approval");
+      expect(result.warning).toMatch(/no longer accepts --full-auto/);
     });
 
     it("explicit sandboxMode wins when fullAuto is also set, and emits a warning", () => {
@@ -368,11 +366,13 @@ describe("request-helpers", () => {
       });
       expect(result.args).toEqual(["--sandbox", "read-only"]);
       expect(result.args).not.toContain("--full-auto");
-      expect(result.warning).toMatch(/explicit values win/);
+      expect(result.warning).toMatch(/sandboxMode wins/);
     });
 
-    it("useLegacyFullAutoFlag without fullAuto is a no-op", () => {
-      expect(resolveCodexSandboxFlags({ useLegacyFullAutoFlag: true }).args).toEqual([]);
+    it("useLegacyFullAutoFlag without fullAuto is a deprecated no-op with a warning", () => {
+      const result = resolveCodexSandboxFlags({ useLegacyFullAutoFlag: true });
+      expect(result.args).toEqual([]);
+      expect(result.warning).toMatch(/no longer accepts --full-auto/);
     });
   });
 

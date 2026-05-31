@@ -1,5 +1,4 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { ChildProcess } from "child_process";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import path from "path";
@@ -20,7 +19,6 @@ interface CallToolResult {
 describe("MCP Server Integration", () => {
   let client: Client;
   let transport: StdioClientTransport;
-  let serverProcess: ChildProcess;
 
   beforeAll(async () => {
     const serverPath = path.resolve(__dirname, "../../dist/index.js");
@@ -770,7 +768,6 @@ describe("MCP Server Integration", () => {
       })) as CallToolResult;
 
       const session1 = JSON.parse(getResult1.content[0].text).session;
-      const originalLastUsed = session1.lastUsedAt;
 
       // Simulate some time passing and Client B using the session
       await new Promise(resolve => setTimeout(resolve, 10));

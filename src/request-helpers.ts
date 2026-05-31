@@ -87,8 +87,8 @@ export function resolveSessionResumeArgs(opts: {
  *   - "resume-by-id"   → `codex exec resume [...resume-safe flags] <SESSION_ID> PROMPT`
  *   - "resume-latest"  → `codex exec resume --last [...resume-safe flags] PROMPT`
  *
- * `codex exec resume` rejects `--full-auto`; the original session's approval
- * policy is inherited. Callers MUST filter `--full-auto` out of the flag set
+ * `codex exec resume` rejects sandbox/working-directory policy flags; the original session's approval
+ * policy is inherited. Callers MUST filter those flags out of the flag set
  * when mode is one of the resume forms (see `prepareCodexRequest`).
  *
  * `sessionId` MUST be a real Codex session UUID (as recorded under
@@ -417,7 +417,9 @@ export const CODEX_SANDBOX_MODES = ["read-only", "workspace-write", "danger-full
 export type CodexSandboxMode = (typeof CODEX_SANDBOX_MODES)[number];
 
 /**
- * Codex approval modes (for `--ask-for-approval <mode>`).
+ * Deprecated Codex approval modes. Current Codex no longer exposes an
+ * `--ask-for-approval` flag; the MCP input is temporarily retained so older
+ * callers do not fail schema validation, but it emits no CLI argv.
  */
 export const CODEX_ASK_FOR_APPROVAL_MODES = ["untrusted", "on-request", "never"] as const;
 export type CodexAskForApproval = (typeof CODEX_ASK_FOR_APPROVAL_MODES)[number];
@@ -425,75 +427,76 @@ export type CodexAskForApproval = (typeof CODEX_ASK_FOR_APPROVAL_MODES)[number];
 export interface CodexSandboxFlagsInput {
   /** Modern: explicit sandbox mode. */
   sandboxMode?: CodexSandboxMode;
-  /** Modern: explicit approval mode. */
+  /** Deprecated compatibility input; current Codex exposes no approval-policy flag. */
   askForApproval?: CodexAskForApproval;
-  /** Legacy: shorthand for sandbox=workspace-write + askForApproval=never. */
+  /** Legacy: shorthand for sandbox=workspace-write. */
   fullAuto?: boolean;
   /**
-   * Escape hatch: when true + `fullAuto: true`, emit `--full-auto` directly
-   * instead of expanding. Off by default. Deprecated and removed after
-   * Mistral GA.
+   * Deprecated compatibility input. Current Codex rejects `--full-auto`, so
+   * this no longer changes argv emission.
    */
   useLegacyFullAutoFlag?: boolean;
 }
 
 export interface CodexSandboxFlagsResult {
   args: string[];
-  /** Set when fullAuto + explicit sandbox/approval are both supplied. */
+  /** Set when deprecated/no-op compatibility inputs are supplied. */
   warning?: string;
 }
 
 /**
- * Resolve Codex `--sandbox` / `--ask-for-approval` args from the modern
- * params + legacy `fullAuto` shorthand.
+ * Resolve current Codex sandbox args from the modern params + legacy
+ * `fullAuto` shorthand. Current Codex exposes `--sandbox`, but no longer
+ * exposes `--ask-for-approval` or `--full-auto`.
  *
  * Precedence:
- *   1. If `useLegacyFullAutoFlag && fullAuto`, emit `--full-auto` directly
- *      (escape hatch; deprecated).
- *   2. Else explicit `sandboxMode` / `askForApproval` always emit their
- *      flags. If `fullAuto: true` is set alongside, a warning is attached
- *      and the explicit values win.
- *   3. Else if `fullAuto: true`, expand to
- *      `--sandbox workspace-write --ask-for-approval never`.
+ *   1. Explicit `sandboxMode` emits `--sandbox <mode>`.
+ *   2. Else if `fullAuto: true`, expand to `--sandbox workspace-write`.
+ *   3. Deprecated `askForApproval` and `useLegacyFullAutoFlag` emit no argv
+ *      and return warnings for callers to surface/log.
  *   4. Else emit nothing.
  */
 export function resolveCodexSandboxFlags(input: CodexSandboxFlagsInput): CodexSandboxFlagsResult {
   const { sandboxMode, askForApproval, fullAuto, useLegacyFullAutoFlag } = input;
+  const args: string[] = [];
+  const warnings: string[] = [];
 
-  // deprecated: prefer sandboxMode + askForApproval; will be removed after Mistral GA.
-  if (useLegacyFullAutoFlag && fullAuto) {
-    return { args: ["--full-auto"] };
+  if (useLegacyFullAutoFlag) {
+    warnings.push(
+      "useLegacyFullAutoFlag is deprecated and ignored because current Codex no longer accepts --full-auto."
+    );
   }
 
-  const explicit = Boolean(sandboxMode || askForApproval);
-  if (explicit) {
-    const args: string[] = [];
-    if (sandboxMode) args.push("--sandbox", sandboxMode);
-    if (askForApproval) args.push("--ask-for-approval", askForApproval);
-    const warning = fullAuto
-      ? "fullAuto was set alongside explicit sandboxMode/askForApproval; explicit values win. fullAuto is deprecated."
-      : undefined;
-    return { args, warning };
+  if (askForApproval) {
+    warnings.push(
+      "askForApproval is deprecated and ignored because current Codex no longer accepts --ask-for-approval."
+    );
   }
 
-  if (fullAuto) {
-    return {
-      args: ["--sandbox", "workspace-write", "--ask-for-approval", "never"],
-    };
+  if (sandboxMode) {
+    args.push("--sandbox", sandboxMode);
+    if (fullAuto) {
+      warnings.push(
+        "fullAuto was set alongside explicit sandboxMode; sandboxMode wins. fullAuto is deprecated."
+      );
+    }
+  } else if (fullAuto) {
+    args.push("--sandbox", "workspace-write");
   }
 
-  return { args: [] };
+  return { args, warning: warnings.length > 0 ? warnings.join(" ") : undefined };
 }
 
 /**
  * Flags that `codex exec resume` rejects (the original session's policy is
  * inherited). Callers must drop these when building resume argv.
  *
- * Verified against `codex exec resume --help` (codex-cli 0.133.0):
- * `--full-auto`, `--sandbox`, `--ask-for-approval`, `--add-dir`, `-C`, and
- * `--search` are rejected. `--output-schema` and `-c key=value` ARE accepted
- * on resume and therefore are NOT in this filter (Phase 4 slice α restored
- * the previously-silent drop of those two).
+ * Verified against `codex exec resume --help` (codex-cli 0.135.0):
+ * `--sandbox`, `--add-dir`, `-C`, `--cd`, `--profile`, and `--search` are rejected.
+ * Deprecated `--full-auto` / `--ask-for-approval` are kept here defensively so
+ * legacy pre-filtered segments are stripped instead of reaching spawn.
+ * `--output-schema` and `-c key=value` ARE accepted on resume and therefore are
+ * NOT in this filter (Phase 4 slice α restored the previously-silent drop of those two).
  */
 export const CODEX_RESUME_FILTERED_FLAGS: ReadonlySet<string> = new Set([
   "--full-auto",
@@ -501,6 +504,8 @@ export const CODEX_RESUME_FILTERED_FLAGS: ReadonlySet<string> = new Set([
   "--ask-for-approval",
   "--add-dir",
   "-C",
+  "--cd",
+  "--profile",
   "--search",
 ]);
 
@@ -513,14 +518,16 @@ const CODEX_RESUME_FILTERED_FLAGS_WITH_VALUE: ReadonlySet<string> = new Set([
   "--ask-for-approval",
   "--add-dir",
   "-C",
+  "--cd",
+  "--profile",
 ]);
 
 /**
  * Strip resume-incompatible flag/value pairs from a Codex argv segment.
  *
  * Bare flags (`--full-auto`, `--search`) drop without consuming a value.
- * Value-taking flags (`--sandbox`, `--ask-for-approval`, `--add-dir`, `-C`,
- * `--output-schema`) drop together with their immediately-following value.
+ * Value-taking flags (`--sandbox`, `--ask-for-approval`, `--add-dir`, `-C`, `--cd`,
+ * `--profile`) drop together with their immediately-following value.
  */
 export function filterCodexResumeFlags(args: string[]): string[] {
   const out: string[] = [];
@@ -847,6 +854,8 @@ export interface CodexHighImpactFlagsResult {
   cleanup: () => void;
   /** First missing image path, if any. When set, the caller should bail before spawning. */
   missingImagePath: string | null;
+  /** Set when deprecated/no-op compatibility inputs are supplied. */
+  warning?: string;
 }
 
 /**
@@ -874,8 +883,12 @@ export function prepareCodexHighImpactFlags(
     cleanup = schema.cleanup;
   }
 
+  const warnings: string[] = [];
+
   if (input.search) {
-    args.push("--search");
+    warnings.push(
+      "search is deprecated and ignored because current Codex exec no longer accepts --search."
+    );
   }
 
   if (input.profile) {
@@ -902,7 +915,12 @@ export function prepareCodexHighImpactFlags(
     args.push("--ignore-rules");
   }
 
-  return { args, cleanup, missingImagePath: null };
+  return {
+    args,
+    cleanup,
+    missingImagePath: null,
+    warning: warnings.length > 0 ? warnings.join(" ") : undefined,
+  };
 }
 
 /**

@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import { mkdtempSync, writeFileSync, chmodSync, rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
-import { AsyncJobManager, type LlmCli } from "../async-job-manager.js";
+import { AsyncJobManager } from "../async-job-manager.js";
 import type { ISessionManager } from "../session-manager.js";
 import type { Session } from "../session-manager.js";
 
@@ -64,7 +64,7 @@ function createMockSession(overrides: Partial<Session> = {}): Session {
 
 function createMockSessionManager(sessions: Map<string, Session> = new Map()): ISessionManager {
   return {
-    createSession: vi.fn(async (cli, desc, id) => {
+    createSession: vi.fn(async (cli, _desc, id) => {
       const session = createMockSession({ id: id || `gw-${Date.now()}`, cli });
       sessions.set(session.id, session);
       return session;
@@ -80,28 +80,13 @@ function createMockSessionManager(sessions: Map<string, Session> = new Map()): I
   };
 }
 
-/** Poll until predicate, or reject. */
-function waitFor(fn: () => boolean, timeoutMs: number, intervalMs = 100): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const deadline = Date.now() + timeoutMs;
-    const check = () => {
-      if (fn()) return resolve();
-      if (Date.now() > deadline) return reject(new Error("waitFor timed out"));
-      setTimeout(check, intervalMs);
-    };
-    check();
-  });
-}
-
 describe("handleGeminiRequestAsync", () => {
   // Dynamic import to avoid auto-start (guarded by import.meta.url check)
   let handleGeminiRequestAsync: (typeof import("../index.js"))["handleGeminiRequestAsync"];
-  let handleGeminiRequest: (typeof import("../index.js"))["handleGeminiRequest"];
 
   beforeAll(async () => {
     const mod = await import("../index.js");
     handleGeminiRequestAsync = mod.handleGeminiRequestAsync;
-    handleGeminiRequest = mod.handleGeminiRequest;
   });
 
   it("should start an async job and return correct response shape", async () => {
