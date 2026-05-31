@@ -1,0 +1,20 @@
+{
+  "round": 2,
+  "launchedAt": "2026-05-31T05:38:10Z",
+  "correlationRoot": "detector-review-round-2",
+  "fixApplied": "src/upstream-contracts.ts:1110 let -> const (prefer-const lint blocker)",
+  "fixVerified": {
+    "eslint": "clean (no prefer-const on/near 1110)",
+    "upstreamContracts": "OK",
+    "tests": "12/12 passed"
+  },
+  "evidenceAddendum": "/tmp/detector-fix-round2-evidence.md",
+  "deltaPatch": "/tmp/detector-fix-round2-delta.patch",
+  "jobs": {
+    "claude": {"jobId": "ead17813-97ca-4a56-a089-084e751f9a39", "correlationId": "detector-review-round-2-claude"},
+    "codex": {"jobId": "5c38484a-9f77-4801-a2a8-9339834c46fb", "correlationId": "detector-review-round-2-codex"},
+    "gemini": {"jobId": "65a090f8-e07a-4891-8e3e-abaf20e83134", "correlationId": "detector-review-round-2-gemini"},
+    "grok": {"jobId": "d534ce1e-934a-4893-afb8-bf43956a969e", "correlationId": "detector-review-round-2-grok"},
+    "mistral": {"jobId": "9d7d351a-7fd3-4dc3-95ef-61d0e01ea48a", "correlationId": "detector-review-round-2-mistral"}
+  }
+}

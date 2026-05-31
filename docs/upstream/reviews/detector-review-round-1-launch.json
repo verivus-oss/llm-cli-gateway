@@ -1,0 +1,15 @@
+{
+  "round": 1,
+  "launchedAt": "2026-05-31T05:24:42Z",
+  "correlationRoot": "detector-review-round-1",
+  "jobs": {
+    "claude": {"jobId": "cc7056f1-f19b-493e-abd9-93d55739ef34", "sessionId": "40115598-d4b5-4d97-a34e-6ff8aedaf0a9", "correlationId": "detector-review-round-1-claude", "approvalId": "addb0f14-ca63-44a0-9e34-f9d698a3fb2a"},
+    "codex": {"jobId": "0f630386-6bd9-44a9-ac75-728bf54ca668", "sessionId": "a9079db2-4d90-43c5-8d6e-9b6155b9479e", "correlationId": "detector-review-round-1-codex", "approvalId": "41d18ce3-b213-4f88-b3c7-d3af50f288af"},
+    "gemini": {"jobId": "2e247f2d-d3cd-4e2e-b6a7-da68ed75696c", "correlationId": "detector-review-round-1-gemini", "approvalId": "dcea4f1e-07ef-4af1-aff2-848352cfe7c1"},
+    "grok": {"jobId": "2075ce88-4b5a-44bf-8e94-92fc4da54827", "sessionId": "gw-ca0a7731-6016-43ee-a2c0-1764e3b33a2e", "correlationId": "detector-review-round-1-grok", "approvalId": "ec0a12b6-98f2-40ec-bc62-5e206272e730"},
+    "mistral": {"jobId": "991cfd56-5a0f-44da-8d1a-28cbe2f119ba", "sessionId": "gw-31c55114-6825-404d-9ada-f5c8768fd538", "correlationId": "detector-review-round-1-mistral", "approvalId": "92b4be57-219c-4ca6-9491-88d58af658ee"}
+  },
+  "verificationReport": "docs/upstream/reviews/detector-fix-verification-report.md",
+  "minimalPatch": "/tmp/detector-fix.patch",
+  "changedFilesList": "/tmp/detector-fix-changed-files.txt"
+}

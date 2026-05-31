@@ -1,0 +1,11 @@
++  const discovered = new Set<string>();
++  // Long flags: --foo, --foo-bar, --foo_bar (some CLIs normalize _ to - in display)
++  const longRe = /--([a-z0-9][a-z0-9_-]{1,}[a-z0-9]?)/gi;
++  let match: RegExpExecArray | null;
++  while ((match = longRe.exec(helpText)) !== null) {
++    const name = `--${match[1].toLowerCase().replace(/_/g, "-")}`;
++    // Drop obvious non-flag noise
++    if (name.length >= 3 && !name.includes("://") && !name.includes("--help")) {
++      discovered.add(name);
++    }
++  }
