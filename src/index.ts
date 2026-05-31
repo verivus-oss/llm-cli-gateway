@@ -96,7 +96,12 @@ import {
   assembleClaudeCacheBlocks,
   type PromptParts,
 } from "./prompt-parts.js";
-import { computeSessionCacheStats, computeTtlRemaining } from "./cache-stats.js";
+import {
+  computeSessionCacheStats,
+  computeTtlRemaining,
+  readPersistedRequest,
+  PERSISTED_REQUEST_DEFAULT_MAX_CHARS,
+} from "./cache-stats.js";
 import { getCliVersions, runCliUpgrade } from "./cli-updater.js";
 import { startHttpGateway, type HttpGatewayHandle } from "./http-transport.js";
 import { printDoctorJson } from "./doctor.js";
@@ -6938,6 +6943,71 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       }
     );
   } // end if (asyncJobsEnabled)
+
+  // Read back any persisted request (sync OR async) by its correlation id.
+  // Registered unconditionally — it reads the flight recorder, which is
+  // independent of async-job persistence. Every sync/async response echoes
+  // its id in `structuredContent.correlationId`; pass that id here to recover
+  // the persisted prompt/response after the inline result is gone. With flight
+  // recording disabled (LLM_GATEWAY_LOGS_DB=none → NoopFlightRecorder) the
+  // query yields no rows and this returns the "not found" shape.
+  server.tool(
+    "llm_request_result",
+    {
+      correlationId: z
+        .string()
+        .min(1)
+        .describe(
+          "Correlation id from a prior request's structuredContent.correlationId (sync or async)"
+        ),
+      maxChars: z
+        .number()
+        .int()
+        .min(1000)
+        .max(2000000)
+        .default(PERSISTED_REQUEST_DEFAULT_MAX_CHARS)
+        .describe("Max chars of the persisted response to return"),
+      includePrompt: z
+        .boolean()
+        .default(false)
+        .describe("Include the full persisted prompt text in the result"),
+    },
+    async ({ correlationId, maxChars, includePrompt }) => {
+      const record = readPersistedRequest(flightRecorder, correlationId, {
+        maxChars,
+        includePrompt,
+      });
+      if (!record) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(
+                {
+                  success: false,
+                  error: "No persisted request found for this correlation id",
+                  correlationId,
+                  hint: "The id may be wrong, the row may have aged out of the flight recorder, or flight recording is disabled (LLM_GATEWAY_LOGS_DB=none).",
+                },
+                null,
+                2
+              ),
+            },
+          ],
+          isError: true,
+        };
+      }
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({ success: true, request: record }, null, 2),
+          },
+        ],
+      };
+    }
+  );
 
   server.tool("llm_process_health", {}, async () => {
     const health = asyncJobManager.getJobHealth();

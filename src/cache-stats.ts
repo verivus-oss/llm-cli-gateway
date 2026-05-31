@@ -398,8 +398,11 @@ export function computeGlobalCacheStats(
     arr.sort((a, b) =>
       a.datetime_utc < b.datetime_utc ? -1 : a.datetime_utc > b.datetime_utc ? 1 : 0
     );
-    for (let i = 1; i < arr.length; i++) {
-      creationAfterFirstSum += arr[i].cache_creation_tokens;
+    // Every row after the first-by-time in this prefix group (the reuse
+    // calls). Iterate the tail directly rather than index-walking `arr`.
+    const [, ...afterFirst] = arr;
+    for (const entry of afterFirst) {
+      creationAfterFirstSum += entry.cache_creation_tokens;
       creationAfterFirstCount += 1;
     }
   }
@@ -431,4 +434,160 @@ export function computeGlobalCacheStats(
     stablePrefixReuseCount,
     avgCacheCreationAfterFirstCall,
   };
+}
+
+//──────────────────────────────────────────────────────────────────────────────
+// Read-back of a single persisted request by correlation id.
+//
+// The flight recorder already persists every request's `response` column on
+// logComplete (flight-recorder.ts), regardless of sync vs async. But the only
+// MCP read-back surface — llm_job_result — is keyed on an async job id and
+// reads the AsyncJobManager, not the recorder. So a *sync* response (which has
+// async_job_id = NULL and is handed back inline exactly once) has no retrieval
+// path after the fact. This helper closes that gap: given the correlationId
+// that every sync/async response echoes in `structuredContent.correlationId`,
+// it returns the persisted row from the recorder. Pure read-only — uses the
+// same FlightRecorderQuery surface as the cache aggregates above.
+//──────────────────────────────────────────────────────────────────────────────
+
+/** Default response truncation budget, matching llm_job_result's maxChars. */
+export const PERSISTED_REQUEST_DEFAULT_MAX_CHARS = 200_000;
+
+export interface PersistedRequestRecord {
+  correlationId: string;
+  cli: string;
+  model: string;
+  sessionId: string | null;
+  datetimeUtc: string;
+  durationMs: number | null;
+  status: string | null;
+  exitCode: number | null;
+  errorMessage: string | null;
+  retryCount: number | null;
+  circuitBreakerState: string | null;
+  costUsd: number | null;
+  /** NULL for sync requests; the async job UUID for *_request_async rows. */
+  asyncJobId: string | null;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  cacheReadTokens: number | null;
+  cacheCreationTokens: number | null;
+  /** Full character length of the persisted prompt (always reported). */
+  promptChars: number;
+  /** Full character length of the persisted response (pre-truncation). */
+  responseChars: number;
+  /** True when `response` was clipped to `maxChars`. */
+  responseTruncated: boolean;
+  /** Persisted response text, truncated to maxChars. NULL if the row never completed. */
+  response: string | null;
+  /** Only present when includePrompt = true. */
+  prompt?: string;
+  /** Parsed thinking blocks (claude), or null. */
+  thinkingBlocks: string[] | null;
+}
+
+export interface ReadPersistedRequestOptions {
+  /** Truncate the returned response to this many characters. Default 200000. */
+  maxChars?: number;
+  /** Include the full persisted prompt text in the result. Default false. */
+  includePrompt?: boolean;
+}
+
+interface PersistedRequestRawRow {
+  id: string;
+  cli: string;
+  model: string;
+  prompt: string | null;
+  response: string | null;
+  session_id: string | null;
+  datetime_utc: string;
+  duration_ms: number | null;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  cache_read_tokens: number | null;
+  cache_creation_tokens: number | null;
+  retry_count: number | null;
+  circuit_breaker_state: string | null;
+  cost_usd: number | null;
+  exit_code: number | null;
+  error_message: string | null;
+  async_job_id: string | null;
+  status: string | null;
+  thinking_blocks: string | null;
+}
+
+function parseThinkingBlocks(raw: string | null): string[] | null {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.filter((b): b is string => typeof b === "string") : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Fetch a single persisted request by correlation id from the flight recorder.
+ * Returns null when no row matches (including a NoopFlightRecorder, which
+ * yields no rows — i.e. flight recording disabled). The response is truncated
+ * to `maxChars`; the full pre-truncation length is reported via responseChars.
+ */
+export function readPersistedRequest(
+  db: FlightRecorderQuery,
+  correlationId: string,
+  opts: ReadPersistedRequestOptions = {}
+): PersistedRequestRecord | null {
+  const maxChars = opts.maxChars ?? PERSISTED_REQUEST_DEFAULT_MAX_CHARS;
+  const rows = db.queryRequests<PersistedRequestRawRow>(
+    `SELECT r.id, r.cli, r.model, r.prompt, r.response, r.session_id,
+            r.datetime_utc, r.duration_ms, r.input_tokens, r.output_tokens,
+            r.cache_read_tokens, r.cache_creation_tokens,
+            m.retry_count, m.circuit_breaker_state, m.cost_usd,
+            m.exit_code, m.error_message, m.async_job_id, m.status,
+            m.thinking_blocks
+     FROM requests r
+     LEFT JOIN gateway_metadata m ON m.request_id = r.id
+     WHERE r.id = ?
+     LIMIT 1`,
+    correlationId
+  );
+
+  const [row] = rows;
+  if (!row) return null;
+
+  const fullResponse = row.response;
+  const responseChars = fullResponse ? fullResponse.length : 0;
+  const responseTruncated = fullResponse != null && responseChars > maxChars;
+  const response = fullResponse == null ? null : fullResponse.slice(0, maxChars);
+
+  const record: PersistedRequestRecord = {
+    correlationId: row.id,
+    cli: row.cli,
+    model: row.model,
+    sessionId: row.session_id,
+    datetimeUtc: row.datetime_utc,
+    durationMs: row.duration_ms,
+    status: row.status,
+    exitCode: row.exit_code,
+    errorMessage: row.error_message,
+    retryCount: row.retry_count,
+    circuitBreakerState: row.circuit_breaker_state,
+    costUsd: row.cost_usd,
+    asyncJobId: row.async_job_id,
+    inputTokens: row.input_tokens,
+    outputTokens: row.output_tokens,
+    cacheReadTokens: row.cache_read_tokens,
+    cacheCreationTokens: row.cache_creation_tokens,
+    promptChars: row.prompt ? row.prompt.length : 0,
+    responseChars,
+    responseTruncated,
+    response,
+    thinkingBlocks: parseThinkingBlocks(row.thinking_blocks),
+  };
+
+  if (opts.includePrompt) {
+    record.prompt = row.prompt ?? "";
+  }
+
+  return record;
 }

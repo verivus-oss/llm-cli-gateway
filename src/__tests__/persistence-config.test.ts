@@ -426,6 +426,9 @@ describe("createGatewayServer — structural invariant on async tool registratio
     }
     // Sanity: non-async tools are still registered.
     expect(tools.has("llm_process_health")).toBe(true);
+    // llm_request_result reads the flight recorder, not the async job store,
+    // so it must register even when async persistence is fully gated off.
+    expect(tools.has("llm_request_result")).toBe(true);
   });
 
   it("does NOT register async tools when persistence.asyncJobsEnabled=false, even if manager has store", () => {
