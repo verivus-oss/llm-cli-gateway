@@ -44,6 +44,7 @@ function parseArgs(argv) {
     writeReport: false,
     failOnCritical: false,
     provider: null,
+    probeInstalled: false,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -53,6 +54,7 @@ function parseArgs(argv) {
     else if (a === "--write-report") flags.writeReport = true;
     else if (a === "--fail-on-critical") flags.failOnCritical = true;
     else if (a === "--provider") flags.provider = argv[++i] ?? null;
+    else if (a === "--probe-installed") flags.probeInstalled = true;
     else if (a === "--help" || a === "-h") flags.help = true;
     else {
       console.error(`[upstream-scan] unknown argument: ${a}`);
@@ -73,6 +75,9 @@ function printHelp() {
       "  --write-report        Write a markdown report under docs/upstream/reports/YYYY-MM-DD-<provider>.md.",
       "  --fail-on-critical    Exit non-zero when a critical finding is present (advisory otherwise).",
       "  --provider <cli>      Limit to one CliType (claude|codex|gemini|grok|mistral).",
+      "  --probe-installed     Also run local --help probes and report bidirectional drift vs the contract",
+      "                        (and vs prior snapshots when --write-snapshot is also used). Safe no-op if",
+      "                        the binary is not present on this machine.",
       "  -h, --help            Show this help.",
       "",
       "Default (no flags): offline, network-free summary of tracked sources + contract surface.",
@@ -297,7 +302,7 @@ function writeReport(cli, content) {
 }
 
 async function runScan(machinery, toml, flags) {
-  const { UPSTREAM_CLI_CONTRACTS } = machinery;
+  const { UPSTREAM_CLI_CONTRACTS, probeInstalledCliContract } = machinery;
   const report = machinery.buildUpstreamContractReport();
   const providers = selectProviders(UPSTREAM_CLI_CONTRACTS, flags.provider);
 
@@ -360,12 +365,92 @@ async function runScan(machinery, toml, flags) {
         }
       }
 
+      // Bidirectional installed-CLI help surface probe (when requested).
+      // This is the key improvement for vendor/fast-moving CLIs (e.g. grok)
+      // whose web changelogs are high-level or sparse. The probe is already
+      // graceful when the binary is absent.
+      let helpProbe = null;
+      if (flags.probeInstalled && typeof probeInstalledCliContract === "function") {
+        try {
+          helpProbe = probeInstalledCliContract(cli);
+        } catch (e) {
+          console.warn(`  [probe] failed for ${cli}: ${e?.message ?? e}`);
+        }
+
+        if (helpProbe) {
+          const prior = readSnapshot(cli); // re-read to get any prior helpSurface
+          const priorHelp = prior?.helpSurface;
+
+          if (helpProbe.available) {
+            const contractFlags = new Set(Object.keys(contract.flags));
+            const extras = (helpProbe.extraFlags || []).filter(f => !contractFlags.has(f));
+            const missing = helpProbe.missingFlags || [];
+
+            if (extras.length > 0) {
+              findings.push({
+                severity: "critical",
+                category: "installed-help-surface-drift",
+                message: `Installed ${cli} binary advertises ${extras.length} flag(s) not in contract: ${extras.slice(0, 8).join(", ")}${extras.length > 8 ? "..." : ""}. Review against watched categories (${meta.watchCategories.join(", ")}) and update src/upstream-contracts.ts + fixtures.`,
+              });
+              criticalCount++;
+              console.log(`  [probe] EXTRA FLAGS in installed binary: ${extras.slice(0, 6).join(", ")}${extras.length > 6 ? ` (+${extras.length - 6} more)` : ""}`);
+            }
+            if (missing.length > 0) {
+              findings.push({
+                severity: "warning",
+                category: "binary-missing-declared-flags",
+                message: `Installed ${cli} binary no longer advertises declared contract flag(s): ${missing.join(", ")}.`,
+              });
+              console.log(`  [probe] MISSING from binary (vs contract): ${missing.join(", ")}`);
+            }
+
+            // Diff vs prior help snapshot (if we have one)
+            if (priorHelp && priorHelp.discoveredFlags && Array.isArray(priorHelp.discoveredFlags)) {
+              const prevSet = new Set(priorHelp.discoveredFlags);
+              const currSet = new Set(helpProbe.discoveredFlags || []);
+              const newSince = [...currSet].filter(f => !prevSet.has(f));
+              const gone = [...prevSet].filter(f => !currSet.has(f));
+              if (newSince.length > 0 || gone.length > 0) {
+                findings.push({
+                  severity: "critical",
+                  category: "installed-help-surface-drift",
+                  message: `Help surface for ${cli} changed since last snapshot (new: ${newSince.slice(0,5).join(", ") || "—"}; removed: ${gone.slice(0,5).join(", ") || "—"}).`,
+                });
+                criticalCount++;
+                console.log(`  [probe] HELP SURFACE CHANGED vs prior snapshot`);
+              } else if (priorHelp.helpHash && helpProbe.helpHash && priorHelp.helpHash !== helpProbe.helpHash) {
+                findings.push({
+                  severity: "warning",
+                  category: "installed-help-surface-drift",
+                  message: `Help text hash for ${cli} changed since last snapshot (subtle drift even if flag set looks stable).`,
+                });
+                console.log(`  [probe] help text hash drift vs prior (no net flag add/remove)`);
+              }
+            }
+          } else {
+            console.log(`  [probe] ${cli} binary not available on this machine (skipped surface diff)`);
+          }
+        }
+      }
+
       if (flags.writeSnapshot) {
-        const path = writeSnapshot(cli, {
+        const snapshotPayload = {
           cli,
           fetchedAt: new Date().toISOString(),
           sources: fetched,
-        });
+        };
+        if (helpProbe && helpProbe.available) {
+          snapshotPayload.helpSurface = {
+            probedAt: helpProbe.probedAt,
+            available: true,
+            version: helpProbe.versionHint || null,
+            flags: helpProbe.discoveredFlags || [],
+            helpHash: helpProbe.helpHash || null,
+            extraVsContract: helpProbe.extraFlags || [],
+            missingFromBinary: helpProbe.missingFlags || [],
+          };
+        }
+        const path = writeSnapshot(cli, snapshotPayload);
         console.log(`  [snapshot] wrote ${path}`);
       }
     }
@@ -378,7 +463,7 @@ async function runScan(machinery, toml, flags) {
   }
 
   console.log(
-    `\n[upstream-scan] scan complete: ${providers.length} provider(s), mode=${flags.live ? "live" : "offline"}.`
+    `\n[upstream-scan] scan complete: ${providers.length} provider(s), mode=${flags.live ? "live" : "offline"}${flags.probeInstalled ? " +probe-installed" : ""}.`
   );
   if (report.schemaVersion !== "upstream-cli-contracts.v1") {
     console.error("[upstream-scan] WARNING: contract report schemaVersion unexpected.");

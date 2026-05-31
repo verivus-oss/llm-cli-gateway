@@ -25,6 +25,34 @@ re-encodes those rules.
 exclusively by `scripts/upstream-scan.mjs` under the `--write-snapshot` /
 `--write-report` flags.
 
+## Detection channels
+
+The detector has two complementary legs (both advisory only):
+
+1. **Web changelog pages** — SHA-256 of the tracked `sourceUrls` (from each
+   provider's `upstreamMetadata`). A change emits a `watched-category-changed`
+   finding. This works well for providers that publish detailed release notes
+   (Claude, Codex, Gemini, Mistral).
+
+2. **Installed binary help surface** (the improvement that makes the detector
+   reliable for vendor / fast-moving CLIs) — when you pass `--probe-installed`
+   to a live scan (or use the MCP/CLI `upstream_contracts` / `contracts`
+   surfaces with `probeInstalled: true`), the scanner runs the provider's
+   documented `--help` (respecting multi-command cases like Codex), extracts
+   the long flags it actually advertises, and reports:
+
+   - `extraFlags` / `installed-help-surface-drift`: flags the binary knows
+     about that the contract in `src/upstream-contracts.ts` does not yet allow.
+   - `missingFlags` / `binary-missing-declared-flags`: the reverse (regressions).
+   - Hash + set diffs against the previous help surface snapshot (if any).
+
+   This is the primary reliable signal for Grok (vendor channel, high-level
+   release notes page) and any future CLIs whose public changelogs lag the
+   actual `--help` / behavior.
+
+Both channels feed the same findings list and can be persisted together in
+the per-CLI snapshot JSON when `--write-snapshot` is used.
+
 ## How the TOML and the TypeScript metadata stay in sync
 
 The chosen model is **TOML-is-scanner-input + report-enriched-from-TS**:
@@ -56,12 +84,17 @@ npm run upstream:scan -- --live --fail-on-critical
 
 # Persist source hashes / write a report (manual).
 npm run upstream:scan -- --live --write-snapshot --write-report
+
+# Recommended for vendor / fast-moving CLIs (e.g. grok): also probe the
+# installed binary's --help surface for bidirectional drift detection.
+npm run upstream:scan -- --live --provider grok --probe-installed --write-snapshot --write-report
 ```
 
 The default release gate is `npm run check && npm run upstream:contracts`.
-Neither requires network access nor installed provider CLIs (beyond the
-existing optional `probeInstalledCliContract`). Live scans are advisory and run
-manually.
+Neither requires network access nor installed provider CLIs (the optional
+`probeInstalledCliContract` is never invoked by the gate). Live scans are
+advisory and run manually; `--probe-installed` is an opt-in that only affects
+the live path.
 
 ## Per-provider skills
 

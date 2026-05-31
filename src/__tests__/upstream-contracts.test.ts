@@ -5,6 +5,7 @@ import {
   buildUpstreamContractReport,
   validateUpstreamCliEnv,
   validateUpstreamCliArgs,
+  extractDiscoveredFlags,
 } from "../upstream-contracts.js";
 
 describe("upstream CLI contracts", () => {
@@ -135,5 +136,48 @@ describe("upstream CLI contracts", () => {
         }
       }
     }
+  });
+
+  describe("extractDiscoveredFlags (advisory help surface extractor)", () => {
+    it("extracts long flags from typical clap-style help", () => {
+      const help = `
+Options:
+  -p, --prompt <TEXT>     The prompt
+      --output-format <FMT>  [possible values: plain, json, streaming-json]
+      --permission-mode <MODE>
+      --sandbox <PROFILE>
+  -c, --continue
+      --worktree [<NAME>]
+`;
+      const flags = extractDiscoveredFlags(help);
+      expect(flags).toContain("--prompt");
+      expect(flags).toContain("--output-format");
+      expect(flags).toContain("--permission-mode");
+      expect(flags).toContain("--sandbox");
+      expect(flags).toContain("--continue");
+      expect(flags).toContain("--worktree");
+      // Should be sorted and unique
+      expect(flags).toEqual([...flags].sort());
+    });
+
+    it("is robust against noise, URLs, and prose", () => {
+      const noisy = "See https://example.com/docs --foo-bar and also --baz in the --other-thing docs.";
+      const flags = extractDiscoveredFlags(noisy);
+      expect(flags).toEqual(["--baz", "--foo-bar", "--other-thing"]);
+    });
+
+    it("handles grok-style TUI help (realistic excerpt)", () => {
+      const grokish = `
+      --todo-gate
+      --best-of-n <N>
+  -r, --resume [<ID>]
+      --agent <NAME>
+`;
+      const flags = extractDiscoveredFlags(grokish);
+      expect(flags).toContain("--todo-gate");
+      expect(flags).toContain("--best-of-n");
+      expect(flags).toContain("--resume");
+      expect(flags).toContain("--agent");
+    });
   });
 });

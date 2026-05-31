@@ -44,6 +44,12 @@ npm run upstream:scan -- --live --provider grok --fail-on-critical
 npm run upstream:scan -- --live --provider grok --write-snapshot --write-report
 ```
 
+**Strongly recommended for Grok (vendor binary):** include `--probe-installed`.
+The tracked web page is high-level product notes and rarely contains detailed
+CLI flag/subcommand drift. The installed `--help` probe + help-surface
+snapshot diff is the reliable detector for new flags (`--worktree`,
+`--todo-gate`, `--agent`, etc.), arity changes, and new subcommands.
+
 A failed fetch is advisory (exit 0) unless `--fail-on-critical` is passed.
 
 ## Update procedure when the upstream CLI changes

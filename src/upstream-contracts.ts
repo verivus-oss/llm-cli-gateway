@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import type { CliType } from "./session-manager.js";
 import { envWithExtendedPath, getExtendedPath, resolveCommandForSpawn } from "./executor.js";
 
@@ -1087,6 +1088,33 @@ function validateFlagValue(
   }
 }
 
+/**
+ * Best-effort, advisory-only extraction of long-form flags from raw --help text.
+ * Returns a sorted array of unique `--foo-bar` style flags discovered in the output.
+ *
+ * Heuristics:
+ * - Matches common long-option patterns emitted by clap, yargs, commander, custom TUIs, etc.
+ * - Lowercases for stable comparison against our contract keys.
+ * - Intentionally conservative: ignores obvious noise (URLs, prose in descriptions).
+ *
+ * This powers the bidirectional drift detector (extra flags the installed binary
+ * advertises that our contract does not yet allow). It is NEVER used for argv
+ * validation — only for the upstream scanner and `upstream_contracts` probe reports.
+ */
+export function extractDiscoveredFlags(helpText: string): readonly string[] {
+  const discovered = new Set<string>();
+  // Long flags: --foo, --foo-bar, --foo_bar (some CLIs normalize _ to - in display)
+  const longRe = /--([a-z0-9][a-z0-9_-]{1,}[a-z0-9]?)/gi;
+  for (const match of helpText.matchAll(longRe)) {
+    const name = `--${match[1].toLowerCase().replace(/_/g, "-")}`;
+    // Drop obvious non-flag noise
+    if (name.length >= 3 && !name.includes("://") && !name.includes("--help")) {
+      discovered.add(name);
+    }
+  }
+  return Array.from(discovered).sort();
+}
+
 export interface InstalledCliContractProbe {
   cli: CliType;
   executable: string;
@@ -1095,6 +1123,16 @@ export interface InstalledCliContractProbe {
   available: boolean;
   checkedHelpCommands: string[][];
   missingFlags: string[];
+  /** Flags present in the installed binary's --help but absent from the declared contract. */
+  extraFlags: readonly string[];
+  /** Sorted list of long flags discovered in the help text (for snapshot diffing). */
+  discoveredFlags: readonly string[];
+  /** Stable hash of the concatenated help output (detects subtle text changes even if flag set is stable). */
+  helpHash?: string;
+  /** Best-effort version string scraped from the help/version output (if present). */
+  versionHint?: string;
+  /** ISO timestamp when this probe was performed. */
+  probedAt: string;
   warnings: string[];
 }
 
@@ -1133,6 +1171,11 @@ export function probeInstalledCliContract(
         available: false,
         checkedHelpCommands: contract.helpArgs,
         missingFlags: [],
+        extraFlags: [],
+        discoveredFlags: [],
+        helpHash: undefined,
+        versionHint: undefined,
+        probedAt: new Date().toISOString(),
         warnings: [result.error.message],
       };
     }
@@ -1146,6 +1189,16 @@ export function probeInstalledCliContract(
 
   const helpText = outputs.join("\n");
   const missingFlags = Object.keys(contract.flags).filter(flag => !helpText.includes(flag));
+  const discoveredFlags = extractDiscoveredFlags(helpText);
+  const contractFlagSet = new Set(Object.keys(contract.flags));
+  const extraFlags = discoveredFlags.filter(f => !contractFlagSet.has(f));
+
+  // Cheap version hint: first line that looks like a version banner
+  const versionMatch = helpText.match(/^\s*(?:[A-Za-z][\w .-]+)?v?\d+\.\d+\S*/m);
+  const versionHint = versionMatch ? versionMatch[0].trim().slice(0, 80) : undefined;
+
+  const helpHash = createHash("sha256").update(helpText).digest("hex");
+
   return {
     cli,
     executable: contract.executable,
@@ -1154,6 +1207,11 @@ export function probeInstalledCliContract(
     available: true,
     checkedHelpCommands: contract.helpArgs,
     missingFlags,
+    extraFlags,
+    discoveredFlags,
+    helpHash,
+    versionHint,
+    probedAt: new Date().toISOString(),
     warnings,
   };
 }
