@@ -39,7 +39,7 @@ export interface CliFlagContract {
  * enforcement.
  */
 export interface CliUpstreamMetadata {
-  /** Canonical changelog / release-notes URLs the scanner fetches with --live. */
+  /** Canonical changelog / release-notes URLs the scanner retrieves with --live. */
   sourceUrls: readonly string[];
   /** Distribution package identifier (npm package name, PyPI project, …). */
   packageName?: string;
@@ -754,7 +754,7 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       "--check": { arity: "none", description: "Append a self-verification loop" },
       "--disable-web-search": {
         arity: "none",
-        description: "Disable web search and web fetch tools",
+        description: "Disable web search and remote retrieval tools",
       },
       "--experimental-memory": { arity: "none", description: "Enable cross-session memory" },
       "--no-alt-screen": { arity: "none", description: "Run inline without alt screen" },

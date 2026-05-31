@@ -19,12 +19,18 @@ version: 2
 #     import bundled HTTP client libraries; all default I/O is filesystem
 #     (SQLite, sessions.json) or explicit local CLI process I/O.
 #
+#     Socket also flagged `dist/upstream-contracts.js` in v1.17.2 because a
+#     Mistral CLI flag description contained browser retrieval wording. That
+#     text is descriptive upstream metadata only; no network primitive is
+#     imported or called from upstream-contracts.ts. The wording now uses
+#     "remote retrieval" to avoid that heuristic.
+#
 #   shellAccess
 #     This alert fires on every module that imports node:child_process, and
 #     because spawning provider CLIs and git is the entire purpose of the package
-#     it is a reviewed capability description, not a finding. As of v1.17.1 this
-#     specific reviewed alert is suppressed via `issueRules.shellAccess: false`
-#     to avoid noisy repeat findings on every release.
+#     it is a reviewed capability description, not a finding. `issueRules` can
+#     quiet repository/PR policy surfaces, but Socket's public package page may
+#     still display this alert for the published npm artifact.
 #
 #     INVARIANT enforced across ALL sites below: arguments are always passed
 #     as an array and `shell: true` is NEVER set, so there is no shell

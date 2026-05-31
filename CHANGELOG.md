@@ -4,6 +4,18 @@ All notable changes to the llm-cli-gateway project.
 
 ## Unreleased
 
+## [1.17.3] - 2026-05-31 — Socket scanner prose cleanup
+
+Patch release that removes wording in shipped metadata that Socket classified
+as network access and corrects the public-package alert documentation.
+
+### Fixed
+
+- Reworded Mistral CLI contract metadata so Socket no longer interprets
+  descriptive text in `dist/upstream-contracts.js` as a network primitive.
+- Updated Socket alert documentation to distinguish repository/PR policy
+  configuration from Socket's public npm package page.
+
 ## [1.17.2] - 2026-05-31 — upstream contract compatibility
 
 Patch release that keeps the gateway aligned with current provider CLI surfaces
