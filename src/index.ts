@@ -2492,8 +2492,6 @@ export function prepareMistralRequest(
     model?: string;
     outputFormat?: string;
     permissionMode?: MistralAgentMode;
-    effort?: string;
-    reasoningEffort?: string;
     allowedTools?: string[];
     disallowedTools?: string[];
     approvalStrategy: "legacy" | "mcp_managed";
@@ -2596,8 +2594,6 @@ export function prepareMistralRequest(
     resolvedModel,
     outputFormat: params.outputFormat,
     permissionMode: effectivePermissionMode,
-    effort: params.effort,
-    reasoningEffort: params.reasoningEffort,
     allowedTools: params.allowedTools,
     disallowedTools: params.disallowedTools,
     trust: params.trust,
@@ -2660,8 +2656,6 @@ export function buildMistralRetryPrep(
     MistralRequestParams,
     | "outputFormat"
     | "permissionMode"
-    | "effort"
-    | "reasoningEffort"
     | "allowedTools"
     | "disallowedTools"
     | "approvalStrategy"
@@ -2682,8 +2676,6 @@ export function buildMistralRetryPrep(
       params.approvalStrategy === "mcp_managed"
         ? "auto-approve"
         : (params.permissionMode ?? "auto-approve"),
-    effort: params.effort,
-    reasoningEffort: params.reasoningEffort,
     allowedTools: params.allowedTools,
     disallowedTools: params.disallowedTools,
     trust: params.trust,
@@ -3581,8 +3573,6 @@ export interface MistralRequestParams {
   resumeLatest: boolean;
   createNewSession: boolean;
   permissionMode?: MistralAgentMode;
-  effort?: string;
-  reasoningEffort?: string;
   approvalStrategy: "legacy" | "mcp_managed";
   approvalPolicy?: string;
   mcpServers?: ClaudeMcpServerName[];
@@ -3622,8 +3612,6 @@ export async function handleMistralRequest(
       model: params.model,
       outputFormat: params.outputFormat,
       permissionMode: params.permissionMode,
-      effort: params.effort,
-      reasoningEffort: params.reasoningEffort,
       allowedTools: params.allowedTools,
       disallowedTools: params.disallowedTools,
       approvalStrategy: params.approvalStrategy,
@@ -3856,8 +3844,6 @@ export async function handleMistralRequestAsync(
       model: params.model,
       outputFormat: params.outputFormat,
       permissionMode: params.permissionMode,
-      effort: params.effort,
-      reasoningEffort: params.reasoningEffort,
       allowedTools: params.allowedTools,
       disallowedTools: params.disallowedTools,
       approvalStrategy: params.approvalStrategy,
@@ -5611,11 +5597,6 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .describe(
           "Vibe agent mode (default|plan|accept-edits|auto-approve|chat|explore|lean). Defaults to auto-approve for programmatic use."
         ),
-      effort: z
-        .enum(["low", "medium", "high", "xhigh", "max"])
-        .optional()
-        .describe("Vibe effort level"),
-      reasoningEffort: z.string().optional().describe("Reasoning effort for reasoning models"),
       approvalStrategy: z
         .enum(["legacy", "mcp_managed"])
         .default("legacy")
@@ -5698,8 +5679,6 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       resumeLatest,
       createNewSession,
       permissionMode,
-      effort,
-      reasoningEffort,
       approvalStrategy,
       approvalPolicy,
       mcpServers,
@@ -5729,8 +5708,6 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           resumeLatest,
           createNewSession,
           permissionMode,
-          effort,
-          reasoningEffort,
           approvalStrategy,
           approvalPolicy,
           mcpServers,
@@ -6674,11 +6651,6 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .describe(
             "Vibe agent mode (default|plan|accept-edits|auto-approve|chat|explore|lean). Defaults to auto-approve for programmatic use."
           ),
-        effort: z
-          .enum(["low", "medium", "high", "xhigh", "max"])
-          .optional()
-          .describe("Vibe effort level"),
-        reasoningEffort: z.string().optional().describe("Reasoning effort for reasoning models"),
         approvalStrategy: z
           .enum(["legacy", "mcp_managed"])
           .default("legacy")
@@ -6760,8 +6732,6 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         resumeLatest,
         createNewSession,
         permissionMode,
-        effort,
-        reasoningEffort,
         approvalStrategy,
         approvalPolicy,
         mcpServers,
@@ -6790,8 +6760,6 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             resumeLatest,
             createNewSession,
             permissionMode,
-            effort,
-            reasoningEffort,
             approvalStrategy,
             approvalPolicy,
             mcpServers,

@@ -145,8 +145,6 @@ describe("REGRESSIONS B — buildMistralRetryPrep forwards slice γ/δ flags", (
   const baseParams = {
     outputFormat: undefined,
     permissionMode: undefined,
-    effort: undefined,
-    reasoningEffort: undefined,
     allowedTools: undefined,
     disallowedTools: undefined,
     approvalStrategy: "legacy" as const,
@@ -407,13 +405,7 @@ describe("REGRESSIONS F — every contract flag has at least one passing fixture
           "--tools",
           "--disallowed-tools",
         ],
-        mistral: [
-          "--output-format",
-          "--agent",
-          "--effort",
-          "--reasoning-effort",
-          "--enabled-tools",
-        ],
+        mistral: ["--output-format", "--agent", "--enabled-tools"],
       };
       const allowed = new Set(PREAUDIT_BASELINE[cliName] ?? []);
       const reallyMissing = missing.filter(f => !allowed.has(f));

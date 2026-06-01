@@ -74,19 +74,33 @@ describe("U22 prepareMistralRequest — Vibe divergences", () => {
     expect(result.ignoredDisallowedTools).toBe(false);
   });
 
-  it("emits outputFormat, effort, reasoningEffort flags when supplied", () => {
+  it("emits outputFormat when supplied", () => {
     const result = prepareMistralRequest({
       prompt: "x",
       outputFormat: "json",
-      effort: "high",
-      reasoningEffort: "medium",
     });
     expect(result.args).toContain("--output");
     expect(result.args).toContain("json");
-    expect(result.args).toContain("--effort");
-    expect(result.args).toContain("high");
-    expect(result.args).toContain("--reasoning-effort");
-    expect(result.args).toContain("medium");
+  });
+
+  it("never emits --effort / --reasoning-effort (vibe rejects them)", () => {
+    // vibe 2.x argparse hard-rejects these ("unrecognized arguments: --effort"),
+    // so the builder must not emit them for any input. Exercise a fully-populated
+    // request to guard against a regression that re-adds the emission.
+    const result = prepareMistralRequest({
+      prompt: "x",
+      outputFormat: "json",
+      permissionMode: "auto-approve",
+      allowedTools: ["read"],
+      trust: true,
+      maxTurns: 3,
+      maxPrice: 0.5,
+      maxTokens: 1000,
+      workingDir: "/tmp/w",
+      addDir: ["/tmp/a"],
+    });
+    expect(result.args).not.toContain("--effort");
+    expect(result.args).not.toContain("--reasoning-effort");
   });
 
   it("normalizes legacy outputFormat aliases to Vibe 2.x values", () => {

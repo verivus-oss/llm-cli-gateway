@@ -213,8 +213,6 @@ export interface PrepareMistralRequestInput {
   resolvedModel?: string;
   outputFormat?: string;
   permissionMode?: MistralAgentMode;
-  effort?: string;
-  reasoningEffort?: string;
   allowedTools?: string[];
   /**
    * Vibe has no flag to deny tools; this is accepted in the schema for caller
@@ -291,12 +289,8 @@ export function prepareMistralRequest(
   const mode = input.permissionMode ?? MISTRAL_DEFAULT_AGENT_MODE;
   args.push("--agent", mode);
 
-  if (input.effort) {
-    args.push("--effort", input.effort);
-  }
-  if (input.reasoningEffort) {
-    args.push("--reasoning-effort", input.reasoningEffort);
-  }
+  // No reasoning-effort surface on vibe: --effort / --reasoning-effort are not
+  // emitted (the CLI rejects them; see upstream-contracts.ts mistral block).
 
   if (input.allowedTools && input.allowedTools.length > 0) {
     sanitizeCliArgValues(input.allowedTools, "allowedTools");

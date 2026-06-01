@@ -899,8 +899,6 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       "resumeLatest",
       "createNewSession",
       "permissionMode",
-      "effort",
-      "reasoningEffort",
       "approvalStrategy",
       "mcpServers",
       "allowedTools",
@@ -927,8 +925,12 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         values: ["default", "plan", "accept-edits", "auto-approve", "chat", "explore", "lean"],
         description: "Agent/permission mode",
       },
-      "--effort": { arity: "one", description: "Reasoning effort" },
-      "--reasoning-effort": { arity: "one", description: "Reasoning effort override" },
+      // NOTE: vibe has no reasoning-effort surface. `--effort` / `--reasoning-effort`
+      // were declared speculatively (mirroring Grok) in the provider-modernisation
+      // commit but were never accepted by the CLI: vibe 2.x argparse hard-rejects them
+      // ("error: unrecognized arguments: --effort"), failing the whole request before
+      // any model call. Removed from the contract, builder, and request schema; the
+      // mistral-effort-rejected / mistral-reasoning-effort-rejected fixtures lock it in.
       "--enabled-tools": { arity: "one", description: "Enabled tool" },
       "--resume": { arity: "one", description: "Resume session" },
       "--continue": { arity: "none", description: "Continue latest session" },
@@ -1045,6 +1047,21 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         ],
         env: { VIBE_ACTIVE_MODEL: "mistral-medium-3.5" },
         expect: "pass",
+      },
+      {
+        id: "mistral-effort-rejected",
+        description:
+          "vibe 2.x advertises no reasoning-effort surface: a raw --effort arg is rejected by the contract (mirrors the CLI's own 'unrecognized arguments' failure)",
+        args: ["-p", "hello", "--agent", "auto-approve", "--effort", "high"],
+        env: { VIBE_ACTIVE_MODEL: "mistral-medium-3.5" },
+        expect: "fail",
+      },
+      {
+        id: "mistral-reasoning-effort-rejected",
+        description: "vibe 2.x: a raw --reasoning-effort arg is rejected by the contract",
+        args: ["-p", "hello", "--agent", "auto-approve", "--reasoning-effort", "medium"],
+        env: { VIBE_ACTIVE_MODEL: "mistral-medium-3.5" },
+        expect: "fail",
       },
     ],
   },
