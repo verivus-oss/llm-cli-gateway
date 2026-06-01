@@ -405,7 +405,7 @@ describe("REGRESSIONS F — every contract flag has at least one passing fixture
           "--tools",
           "--disallowed-tools",
         ],
-        mistral: ["--output-format", "--agent", "--enabled-tools"],
+        mistral: ["--agent", "--enabled-tools"],
       };
       const allowed = new Set(PREAUDIT_BASELINE[cliName] ?? []);
       const reallyMissing = missing.filter(f => !allowed.has(f));
