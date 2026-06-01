@@ -1563,6 +1563,11 @@ export function prepareClaudeRequest(
     jsonSchema?: string | Record<string, unknown>;
     // Phase 4 slice ζ — Claude additional-workspace-dirs parity
     addDir?: string[];
+    // Claude session/settings/tools surface (2.x)
+    noSessionPersistence?: boolean;
+    settingSources?: string;
+    settings?: string;
+    tools?: string[];
   },
   runtime: GatewayServerRuntime = resolveGatewayServerRuntime()
 ): CliRequestPrep | ExtendedToolResponse {
@@ -1857,6 +1862,10 @@ export function prepareClaudeRequest(
       fallbackModel: params.fallbackModel,
       jsonSchema: params.jsonSchema,
       addDir: params.addDir,
+      noSessionPersistence: params.noSessionPersistence,
+      settingSources: params.settingSources,
+      settings: params.settings,
+      tools: params.tools,
     })
   );
 
@@ -4347,6 +4356,33 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .describe(
           "Claude --add-dir: additional directories the CLI is allowed to read/write beyond the process cwd. Each entry is emitted as its own --add-dir instance."
         ),
+      // Claude session / settings / tools surface (2.x)
+      noSessionPersistence: z
+        .boolean()
+        .optional()
+        .describe(
+          "Claude --no-session-persistence: do not write this session to disk (ephemeral one-shot runs; mirrors codex --ephemeral)."
+        ),
+      settingSources: z
+        .string()
+        .min(1)
+        .optional()
+        .describe(
+          "Claude --setting-sources: comma-separated setting sources to load (user|project|local) for reproducible/isolated headless runs."
+        ),
+      settings: z
+        .string()
+        .min(1)
+        .optional()
+        .describe(
+          "Claude --settings: path to a settings JSON file or a JSON literal of additional settings. Powerful: settings can define hooks/permissions/model; passed verbatim."
+        ),
+      tools: z
+        .array(z.string())
+        .optional()
+        .describe(
+          'Claude --tools: restrict the available built-in tool set (distinct from allowedTools permission gating). Pass [""] to disable all tools.'
+        ),
       worktree: WORKTREE_SCHEMA.optional(),
       approvalStrategy: z
         .enum(["legacy", "mcp_managed"])
@@ -4405,6 +4441,10 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       fallbackModel,
       jsonSchema,
       addDir,
+      noSessionPersistence,
+      settingSources,
+      settings,
+      tools,
       worktree,
       approvalStrategy,
       approvalPolicy,
@@ -4457,6 +4497,10 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           fallbackModel,
           jsonSchema,
           addDir,
+          noSessionPersistence,
+          settingSources,
+          settings,
+          tools,
         },
         runtime
       );
@@ -5916,6 +5960,33 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .describe(
             "Claude --add-dir: additional directories the CLI is allowed to read/write beyond the process cwd. Each entry is emitted as its own --add-dir instance."
           ),
+        // Claude session / settings / tools surface (2.x)
+        noSessionPersistence: z
+          .boolean()
+          .optional()
+          .describe(
+            "Claude --no-session-persistence: do not write this session to disk (ephemeral one-shot runs; mirrors codex --ephemeral)."
+          ),
+        settingSources: z
+          .string()
+          .min(1)
+          .optional()
+          .describe(
+            "Claude --setting-sources: comma-separated setting sources to load (user|project|local) for reproducible/isolated headless runs."
+          ),
+        settings: z
+          .string()
+          .min(1)
+          .optional()
+          .describe(
+            "Claude --settings: path to a settings JSON file or a JSON literal of additional settings. Powerful: settings can define hooks/permissions/model; passed verbatim."
+          ),
+        tools: z
+          .array(z.string())
+          .optional()
+          .describe(
+            'Claude --tools: restrict the available built-in tool set (distinct from allowedTools permission gating). Pass [""] to disable all tools.'
+          ),
         worktree: WORKTREE_SCHEMA.optional(),
         approvalStrategy: z
           .enum(["legacy", "mcp_managed"])
@@ -5973,6 +6044,10 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         fallbackModel,
         jsonSchema,
         addDir,
+        noSessionPersistence,
+        settingSources,
+        settings,
+        tools,
         worktree,
         approvalStrategy,
         approvalPolicy,
@@ -6023,6 +6098,10 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             fallbackModel,
             jsonSchema,
             addDir,
+            noSessionPersistence,
+            settingSources,
+            settings,
+            tools,
           },
           runtime
         );

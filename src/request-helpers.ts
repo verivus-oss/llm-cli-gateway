@@ -654,6 +654,30 @@ export interface ClaudeHighImpactFlagsInput {
    * changing the call site).
    */
   addDir?: string[];
+  /**
+   * Claude `--no-session-persistence`: do not write this session to disk
+   * (one-shot / ephemeral runs; mirrors Codex `--ephemeral`).
+   */
+  noSessionPersistence?: boolean;
+  /**
+   * Claude `--setting-sources <user,project,local>`: comma-separated list of
+   * setting sources to load, for reproducible / isolated headless runs.
+   * Passed through verbatim.
+   */
+  settingSources?: string;
+  /**
+   * Claude `--settings <file-or-json>`: load additional settings from a JSON
+   * file path or a JSON literal. Powerful: settings can define hooks,
+   * permissions, and model; the value is passed through verbatim.
+   */
+  settings?: string;
+  /**
+   * Claude `--tools <tools...>`: restrict the available built-in tool set
+   * (distinct from `--allowed-tools` permission gating). Emitted as a single
+   * variadic flag mirroring `--allowed-tools`; pass `[""]` to disable all
+   * tools per `claude --help`. An empty array emits nothing.
+   */
+  tools?: string[];
 }
 
 /**
@@ -705,6 +729,20 @@ export function prepareClaudeHighImpactFlags(input: ClaudeHighImpactFlagsInput):
     for (const dir of input.addDir) {
       args.push("--add-dir", dir);
     }
+  }
+  if (input.noSessionPersistence) {
+    args.push("--no-session-persistence");
+  }
+  if (input.settingSources !== undefined) {
+    args.push("--setting-sources", input.settingSources);
+  }
+  if (input.settings !== undefined) {
+    args.push("--settings", input.settings);
+  }
+  if (input.tools && input.tools.length > 0) {
+    // Single variadic flag (mirrors --allowed-tools emission). `[""]` → `--tools ""`
+    // which disables all built-in tools per `claude --help`.
+    args.push("--tools", ...input.tools);
   }
 
   return args;

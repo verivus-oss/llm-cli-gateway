@@ -288,4 +288,49 @@ describe("U25 — Claude high-impact feature flags", () => {
       expect(args).toContain("--exclude-dynamic-system-prompt-sections");
     });
   });
+
+  describe("prepareClaudeHighImpactFlags: session/settings/tools (2.x)", () => {
+    it("emits --no-session-persistence only when the flag is true", () => {
+      expect(prepareClaudeHighImpactFlags({ noSessionPersistence: true })).toContain(
+        "--no-session-persistence"
+      );
+      expect(prepareClaudeHighImpactFlags({ noSessionPersistence: false })).not.toContain(
+        "--no-session-persistence"
+      );
+      expect(prepareClaudeHighImpactFlags({})).not.toContain("--no-session-persistence");
+    });
+
+    it("emits --setting-sources <value> verbatim", () => {
+      const args = prepareClaudeHighImpactFlags({ settingSources: "project,local" });
+      const idx = args.indexOf("--setting-sources");
+      expect(idx).toBeGreaterThan(-1);
+      expect(args[idx + 1]).toBe("project,local");
+    });
+
+    it("emits --settings <value> verbatim", () => {
+      const args = prepareClaudeHighImpactFlags({ settings: '{"model":"x"}' });
+      const idx = args.indexOf("--settings");
+      expect(idx).toBeGreaterThan(-1);
+      expect(args[idx + 1]).toBe('{"model":"x"}');
+    });
+
+    it("emits --tools as a single variadic flag with all values", () => {
+      const args = prepareClaudeHighImpactFlags({ tools: ["Read", "Edit"] });
+      const idx = args.indexOf("--tools");
+      expect(idx).toBeGreaterThan(-1);
+      expect(args[idx + 1]).toBe("Read");
+      expect(args[idx + 2]).toBe("Edit");
+    });
+
+    it('emits --tools "" to disable all tools when tools=[""]', () => {
+      const args = prepareClaudeHighImpactFlags({ tools: [""] });
+      const idx = args.indexOf("--tools");
+      expect(idx).toBeGreaterThan(-1);
+      expect(args[idx + 1]).toBe("");
+    });
+
+    it("emits no --tools for an empty array", () => {
+      expect(prepareClaudeHighImpactFlags({ tools: [] })).not.toContain("--tools");
+    });
+  });
 });

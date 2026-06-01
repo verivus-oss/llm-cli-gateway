@@ -149,6 +149,11 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       "jsonSchema",
       // Phase 4 slice ζ
       "addDir",
+      // Claude 2.x session / settings / tools surface
+      "noSessionPersistence",
+      "settingSources",
+      "settings",
+      "tools",
       "approvalStrategy",
       "mcpServers",
       "strictMcpConfig",
@@ -199,6 +204,12 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         pattern: /^[0-9]+(?:\.[0-9]+)?$/,
         description: "Budget cap in USD",
       },
+      // NOTE: `--probe-installed` reports --max-turns as "missing from binary"
+      // because claude 2.x hides it from the `--help` body. It is nonetheless a
+      // real, accepted flag (verified: `claude --max-turns N --help` parses
+      // without an "unknown option" error, while a genuinely unknown flag errors
+      // loudly). Keep it in the contract; the probe drift here is a known
+      // help-text false-positive, not a removed flag.
       "--max-turns": { arity: "one", pattern: /^[1-9][0-9]*$/, description: "Turn cap" },
       "--effort": { arity: "one", values: EFFORT_LEVELS, description: "Reasoning effort" },
       "--exclude-dynamic-system-prompt-sections": {
@@ -219,6 +230,23 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       },
       "--continue": { arity: "none", description: "Continue active session" },
       "--session-id": { arity: "one", description: "Session id" },
+      // Claude 2.x session / settings / tools surface
+      "--no-session-persistence": {
+        arity: "none",
+        description: "Do not persist the session to disk (ephemeral; mirrors Codex --ephemeral)",
+      },
+      "--setting-sources": {
+        arity: "one",
+        description: "Comma-separated setting sources to load (user|project|local)",
+      },
+      "--settings": {
+        arity: "one",
+        description: "Settings JSON file path or literal (can define hooks/permissions/model)",
+      },
+      "--tools": {
+        arity: "variadic",
+        description: 'Restrict the available built-in tool set ("" disables all)',
+      },
     },
     env: {},
     conformanceFixtures: [
@@ -263,6 +291,24 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         id: "claude-add-dir",
         description: "Phase 4 slice ζ: repeated --add-dir is accepted",
         args: ["-p", "hello", "--add-dir", "/tmp/a", "--add-dir", "/tmp/b"],
+        expect: "pass",
+      },
+      {
+        id: "claude-session-settings-tools",
+        description:
+          "Claude 2.x: --no-session-persistence, --setting-sources, --settings, and --tools (variadic) are accepted",
+        args: [
+          "-p",
+          "hello",
+          "--no-session-persistence",
+          "--setting-sources",
+          "project,local",
+          "--settings",
+          "{}",
+          "--tools",
+          "Read",
+          "Edit",
+        ],
         expect: "pass",
       },
       {
