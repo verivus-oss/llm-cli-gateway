@@ -683,6 +683,9 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       "systemPromptOverride",
       "allow",
       "deny",
+      // Grok 0.2.x context/compaction controls
+      "compactionMode",
+      "compactionDetail",
     ],
     flags: {
       "-p": { arity: "one", description: "Prompt text" },
@@ -775,6 +778,19 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       "--worktree": {
         arity: "optional",
         description: "Start the session in a new git worktree, optionally named",
+      },
+      // Grok 0.2.x context/compaction controls (both enum, env-backed):
+      "--compaction-mode": {
+        arity: "one",
+        values: ["summary", "transcript", "segments"],
+        description:
+          "Compaction mode (default summary; sets GROK_COMPACTION_MODE). `segments` persists per-segment markdown.",
+      },
+      "--compaction-detail": {
+        arity: "one",
+        values: ["none", "minimal", "balanced", "verbose"],
+        description:
+          "Segment verbatim detail (default verbose; sets GROK_COMPACTION_DETAIL). Only affects `--compaction-mode segments`.",
       },
     },
     env: {},
@@ -873,6 +889,19 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
           "--worktree",
         ],
         expect: "pass",
+      },
+      {
+        id: "grok-compaction",
+        description:
+          "Grok 0.2.x: --compaction-mode and --compaction-detail accepted with valid enum values",
+        args: ["-p", "hello", "--compaction-mode", "segments", "--compaction-detail", "balanced"],
+        expect: "pass",
+      },
+      {
+        id: "grok-compaction-mode-invalid",
+        description: "Grok --compaction-mode rejects a value outside the contract enum",
+        args: ["-p", "hello", "--compaction-mode", "aggressive"],
+        expect: "fail",
       },
     ],
   },

@@ -90,3 +90,45 @@ describe("Phase 4 slice δ — Grok --max-turns wiring", () => {
     expect(prep.args[idx + 1]).toBe("12");
   });
 });
+
+describe("Grok 0.2.x: --compaction-mode / --compaction-detail wiring", () => {
+  it("emits --compaction-mode <MODE> when compactionMode is set", () => {
+    const prep = prepareGrokRequest(baseParams({ compactionMode: "segments" }));
+    if (!("args" in prep)) throw new Error("expected args");
+    const idx = prep.args.indexOf("--compaction-mode");
+    expect(idx).toBeGreaterThan(-1);
+    expect(prep.args[idx + 1]).toBe("segments");
+  });
+
+  it("emits --compaction-detail <DETAIL> when compactionDetail is set", () => {
+    const prep = prepareGrokRequest(baseParams({ compactionDetail: "balanced" }));
+    if (!("args" in prep)) throw new Error("expected args");
+    const idx = prep.args.indexOf("--compaction-detail");
+    expect(idx).toBeGreaterThan(-1);
+    expect(prep.args[idx + 1]).toBe("balanced");
+  });
+
+  it("emits both compaction flags together, appended after existing flags", () => {
+    const prep = prepareGrokRequest(
+      baseParams({
+        model: "grok-build",
+        outputFormat: "json",
+        compactionMode: "transcript",
+        compactionDetail: "verbose",
+      })
+    );
+    if (!("args" in prep)) throw new Error("expected args");
+    expect(prep.args[0]).toBe("-p");
+    const mIdx = prep.args.indexOf("--compaction-mode");
+    const dIdx = prep.args.indexOf("--compaction-detail");
+    expect(prep.args[mIdx + 1]).toBe("transcript");
+    expect(prep.args[dIdx + 1]).toBe("verbose");
+  });
+
+  it("emits neither compaction flag when both are omitted", () => {
+    const prep = prepareGrokRequest(baseParams({}));
+    if (!("args" in prep)) throw new Error("expected args");
+    expect(prep.args).not.toContain("--compaction-mode");
+    expect(prep.args).not.toContain("--compaction-detail");
+  });
+});

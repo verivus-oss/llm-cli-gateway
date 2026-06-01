@@ -2362,6 +2362,16 @@ export function prepareGrokRequest(
     systemPromptOverride?: string;
     allow?: string[];
     deny?: string[];
+    /**
+     * Grok 0.2.x context/compaction controls (both enum passthrough flags):
+     * - `compactionMode` → `--compaction-mode <summary|transcript|segments>`
+     *   (default summary; sets GROK_COMPACTION_MODE).
+     * - `compactionDetail` → `--compaction-detail <none|minimal|balanced|verbose>`
+     *   (default verbose; only affects `--compaction-mode segments`; sets
+     *   GROK_COMPACTION_DETAIL).
+     */
+    compactionMode?: string;
+    compactionDetail?: string;
   },
   runtime: GatewayServerRuntime = resolveGatewayServerRuntime()
 ): CliRequestPrep | ExtendedToolResponse {
@@ -2470,6 +2480,12 @@ export function prepareGrokRequest(
     for (const rule of params.deny) {
       args.push("--deny", rule);
     }
+  }
+  if (params.compactionMode) {
+    args.push("--compaction-mode", params.compactionMode);
+  }
+  if (params.compactionDetail) {
+    args.push("--compaction-detail", params.compactionDetail);
   }
 
   return {
@@ -3224,6 +3240,10 @@ export interface GrokRequestParams {
   allow?: string[];
   /** Phase 4 slice θ: Grok `--deny <RULE>` (repeatable; one entry per --deny instance). */
   deny?: string[];
+  /** Grok 0.2.x: `--compaction-mode <summary|transcript|segments>` context control. */
+  compactionMode?: string;
+  /** Grok 0.2.x: `--compaction-detail <none|minimal|balanced|verbose>`; only affects segments mode. */
+  compactionDetail?: string;
   /** Slice λ: run this request inside a gateway-owned git worktree. */
   worktree?: boolean | { name?: string; ref?: string };
 }
@@ -3259,6 +3279,8 @@ export async function handleGrokRequest(
       systemPromptOverride: params.systemPromptOverride,
       allow: params.allow,
       deny: params.deny,
+      compactionMode: params.compactionMode,
+      compactionDetail: params.compactionDetail,
     },
     runtime
   );
@@ -3462,6 +3484,8 @@ export async function handleGrokRequestAsync(
       systemPromptOverride: params.systemPromptOverride,
       allow: params.allow,
       deny: params.deny,
+      compactionMode: params.compactionMode,
+      compactionDetail: params.compactionDetail,
     },
     runtime
   );
@@ -5482,6 +5506,18 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .describe(
           'Grok --deny <RULE>: permission deny rules. Each entry is emitted as its own --deny instance (per `grok --help`: "Repeat to add multiple rules").'
         ),
+      compactionMode: z
+        .enum(["summary", "transcript", "segments"])
+        .optional()
+        .describe(
+          "Grok --compaction-mode: summary (default; no pointer) | transcript (points at the raw transcript) | segments (persists per-segment markdown to grep). Sets GROK_COMPACTION_MODE."
+        ),
+      compactionDetail: z
+        .enum(["none", "minimal", "balanced", "verbose"])
+        .optional()
+        .describe(
+          "Grok --compaction-detail: verbatim segment detail (none|minimal|balanced|verbose, default verbose). Only affects `--compaction-mode segments`. Sets GROK_COMPACTION_DETAIL."
+        ),
       worktree: WORKTREE_SCHEMA.optional(),
     },
     async ({
@@ -5513,6 +5549,8 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       systemPromptOverride,
       allow,
       deny,
+      compactionMode,
+      compactionDetail,
       worktree,
     }) => {
       return handleGrokRequest(
@@ -5546,6 +5584,8 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           systemPromptOverride,
           allow,
           deny,
+          compactionMode,
+          compactionDetail,
           worktree,
         }
       );
@@ -6542,6 +6582,18 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .describe(
             "Grok --deny <RULE>: permission deny rules. Each entry → its own --deny instance."
           ),
+        compactionMode: z
+          .enum(["summary", "transcript", "segments"])
+          .optional()
+          .describe(
+            "Grok --compaction-mode: summary (default) | transcript | segments. Sets GROK_COMPACTION_MODE."
+          ),
+        compactionDetail: z
+          .enum(["none", "minimal", "balanced", "verbose"])
+          .optional()
+          .describe(
+            "Grok --compaction-detail: segment verbatim detail (none|minimal|balanced|verbose, default verbose). Only affects segments mode. Sets GROK_COMPACTION_DETAIL."
+          ),
         worktree: WORKTREE_SCHEMA.optional(),
       },
       async ({
@@ -6572,6 +6624,8 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         systemPromptOverride,
         allow,
         deny,
+        compactionMode,
+        compactionDetail,
         worktree,
       }) => {
         return handleGrokRequestAsync(
@@ -6604,6 +6658,8 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             systemPromptOverride,
             allow,
             deny,
+            compactionMode,
+            compactionDetail,
             worktree,
           }
         );
