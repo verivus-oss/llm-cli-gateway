@@ -2161,6 +2161,14 @@ export function prepareGeminiRequest(
      * is undefined (preserves current prompt behaviour for legacy callers).
      */
     skipTrust?: boolean;
+    /**
+     * Emit `--yolo` (auto-approve all actions). Equivalent in effect to
+     * `approvalMode: "yolo"`; provided for CLI ergonomic parity. Routed
+     * through the same approval gate (sets `bypassRequested`), and never
+     * emitted alongside `--approval-mode yolo` so there is a single
+     * auto-approve path. Default undefined.
+     */
+    yolo?: boolean;
   },
   runtime: GatewayServerRuntime = resolveGatewayServerRuntime()
 ): CliRequestPrep | ExtendedToolResponse {
@@ -2210,7 +2218,7 @@ export function prepareGeminiRequest(
       cli: "gemini",
       operation: params.operation,
       prompt: assembledPrompt, // Use raw assembled prompt for review-context detection, not optimized
-      bypassRequested: params.approvalMode === "yolo",
+      bypassRequested: params.approvalMode === "yolo" || params.yolo === true,
       fullAuto: false,
       requestedMcpServers,
       allowedTools: params.allowedTools,
@@ -2266,6 +2274,13 @@ export function prepareGeminiRequest(
   const args = ["-p", effectivePrompt];
   if (resolvedModel) args.push("--model", resolvedModel);
   if (effectiveApprovalMode) args.push("--approval-mode", effectiveApprovalMode);
+  // `--yolo` is functionally identical to `--approval-mode yolo`; emit it only
+  // when the caller asked for yolo AND we are not already emitting
+  // `--approval-mode yolo` (under mcp_managed the gate forces that mode), so
+  // there is never a redundant double auto-approve flag.
+  if (params.yolo && effectiveApprovalMode !== "yolo") {
+    args.push("--yolo");
+  }
   if (params.allowedTools && params.allowedTools.length > 0) {
     sanitizeCliArgValues(params.allowedTools, "allowedTools");
     params.allowedTools.forEach(tool => args.push("--allowed-tools", tool));
@@ -2840,6 +2855,8 @@ export interface GeminiRequestParams {
   attachments?: string[];
   /** Phase 4 slice γ: emit `--skip-trust` for fresh-workspace headless runs. */
   skipTrust?: boolean;
+  /** Emit `--yolo` (auto-approve all). Equivalent to approvalMode "yolo"; gated identically. */
+  yolo?: boolean;
   /** Slice λ: run this request inside a gateway-owned git worktree. */
   worktree?: boolean | { name?: string; ref?: string };
 }
@@ -2904,6 +2921,7 @@ export async function handleGeminiRequest(
       adminPolicyFiles: params.adminPolicyFiles,
       attachments: params.attachments,
       skipTrust: params.skipTrust,
+      yolo: params.yolo,
     },
     runtime
   );
@@ -3105,6 +3123,7 @@ export async function handleGeminiRequestAsync(
       adminPolicyFiles: params.adminPolicyFiles,
       attachments: params.attachments,
       skipTrust: params.skipTrust,
+      yolo: params.yolo,
     },
     runtime
   );
@@ -5320,6 +5339,12 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .describe(
           "Emit `--skip-trust` so Gemini trusts the workspace for this session and skips the interactive trust prompt (Phase 4 slice γ). Required for headless runs in fresh workspaces."
         ),
+      yolo: z
+        .boolean()
+        .optional()
+        .describe(
+          "Emit `--yolo` to auto-approve all actions. Equivalent to approvalMode 'yolo'; routed through the same approval gate. Under mcp_managed the gate still decides."
+        ),
       worktree: WORKTREE_SCHEMA.optional(),
     },
     async ({
@@ -5346,6 +5371,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       adminPolicyFiles,
       attachments,
       skipTrust,
+      yolo,
       worktree,
     }) => {
       return handleGeminiRequest(
@@ -5374,6 +5400,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           adminPolicyFiles,
           attachments,
           skipTrust,
+          yolo,
           worktree,
         }
       );
@@ -6403,6 +6430,12 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .describe(
             "Emit `--skip-trust` so Gemini trusts the workspace for this session and skips the interactive trust prompt (Phase 4 slice γ). Required for headless runs in fresh workspaces."
           ),
+        yolo: z
+          .boolean()
+          .optional()
+          .describe(
+            "Emit `--yolo` to auto-approve all actions. Equivalent to approvalMode 'yolo'; routed through the same approval gate. Under mcp_managed the gate still decides."
+          ),
         worktree: WORKTREE_SCHEMA.optional(),
       },
       async ({
@@ -6428,6 +6461,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         adminPolicyFiles,
         attachments,
         skipTrust,
+        yolo,
         worktree,
       }) => {
         return handleGeminiRequestAsync(
@@ -6455,6 +6489,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             adminPolicyFiles,
             attachments,
             skipTrust,
+            yolo,
             worktree,
           }
         );

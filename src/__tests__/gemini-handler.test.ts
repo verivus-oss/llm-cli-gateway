@@ -263,3 +263,30 @@ describe("Phase 4 slice γ — Gemini --skip-trust wiring", () => {
     expect(prep.args).not.toContain("--skip-trust");
   });
 });
+
+describe("Gemini --yolo wiring", () => {
+  it("emits --yolo when yolo=true (legacy, no approvalMode)", () => {
+    const prep = prepareGeminiRequest(baseParams({ yolo: true }));
+    if (!("args" in prep)) throw new Error("expected args");
+    expect(prep.args).toContain("--yolo");
+    // No approval-mode emitted, so --yolo is the sole auto-approve signal.
+    expect(prep.args).not.toContain("--approval-mode");
+  });
+
+  it("does NOT emit --yolo when yolo is omitted", () => {
+    const prep = prepareGeminiRequest(baseParams({}));
+    if (!("args" in prep)) throw new Error("expected args");
+    expect(prep.args).not.toContain("--yolo");
+  });
+
+  it("does NOT double-emit: yolo=true + approvalMode=yolo yields only --approval-mode yolo", () => {
+    const prep = prepareGeminiRequest(baseParams({ yolo: true, approvalMode: "yolo" }));
+    if (!("args" in prep)) throw new Error("expected args");
+    const modeIdx = prep.args.indexOf("--approval-mode");
+    expect(modeIdx).toBeGreaterThan(-1);
+    expect(prep.args[modeIdx + 1]).toBe("yolo");
+    // The single-auto-approve-path invariant: --yolo is suppressed when
+    // --approval-mode yolo already covers it.
+    expect(prep.args).not.toContain("--yolo");
+  });
+});

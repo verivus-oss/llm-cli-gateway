@@ -585,6 +585,8 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       "attachments",
       // Phase 4 slice γ
       "skipTrust",
+      // Auto-approve-all ergonomic alias (equivalent to approvalMode "yolo")
+      "yolo",
     ],
     flags: {
       "-p": { arity: "one", description: "Prompt text" },
@@ -610,6 +612,11 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         arity: "none",
         description: "Trust workspace for this session (Phase 4 slice γ)",
       },
+      "--yolo": {
+        arity: "none",
+        description:
+          "Auto-approve all actions (gemini -y/--yolo). Functionally equivalent to --approval-mode yolo; the gateway emits at most one of the two.",
+      },
     },
     env: {},
     conformanceFixtures: [
@@ -629,6 +636,12 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         id: "gemini-skip-trust",
         description: "Phase 4 slice γ: --skip-trust is accepted",
         args: ["-p", "hello", "--skip-trust"],
+        expect: "pass",
+      },
+      {
+        id: "gemini-yolo",
+        description: "--yolo (auto-approve all) is accepted",
+        args: ["-p", "hello", "--yolo"],
         expect: "pass",
       },
       {
