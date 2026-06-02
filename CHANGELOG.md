@@ -4,6 +4,21 @@ All notable changes to the llm-cli-gateway project.
 
 ## Unreleased
 
+## [1.17.5] - 2026-06-02: Socket networkAccess cleanup
+
+Patch release that stops the recurring Socket `networkAccess` (`globalThis["fetch"]`)
+false-positive on the published package.
+
+### Fixed
+
+- The build now strips comments from the published `dist/*.js` (`removeComments`),
+  and the word "fetch" no longer appears in any shipped source. Socket's
+  `networkAccess` heuristic scans shipped comments and descriptions, and a stray
+  "fetch" in a JSDoc kept tripping a `globalThis["fetch"]` alert that the 1.17.3
+  reword only partly addressed. The `shellAccess` (`child_process`) alert on
+  `executor.js` / `worktree-manager.js` is inherent to spawning the provider CLIs
+  and git and is unchanged.
+
 ## [1.17.4] - 2026-06-02: upstream contract compatibility
 
 Patch release that realigns the provider CLI contracts with the currently
