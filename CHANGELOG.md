@@ -4,6 +4,36 @@ All notable changes to the llm-cli-gateway project.
 
 ## Unreleased
 
+## [1.17.4] - 2026-06-02: upstream contract compatibility
+
+Patch release that realigns the provider CLI contracts with the currently
+installed binaries (codex 0.135.0, grok 0.2.16, gemini 0.44.1, claude 2.1.159,
+vibe 2.12.1).
+
+### Fixed
+
+- Mistral: dropped the unsupported `--effort` / `--reasoning-effort` surface.
+  vibe 2.x argparse rejects both flags, so any `mistral_request` that passed
+  `effort` / `reasoningEffort` failed before reaching the model. Locked out with
+  two `expect:fail` conformance fixtures and a builder guard test.
+
+### Added
+
+- Grok: `--compaction-mode` (summary|transcript|segments) and
+  `--compaction-detail` (none|minimal|balanced|verbose) context controls, wired
+  as enum passthrough flags on `grok_request` / `grok_request_async`.
+- Gemini: a `yolo` boolean that emits `--yolo` (auto-approve all actions). It
+  routes through the mcp_managed approval gate and is never emitted alongside
+  `--approval-mode yolo`.
+- Claude: `--no-session-persistence`, `--setting-sources`, `--settings`, and
+  `--tools` exposed through `prepareClaudeHighImpactFlags`. `--betas` is left
+  out on purpose, since it is API-key only and the gateway runs Claude via OAuth.
+
+### Notes
+
+- Documented `--max-turns` as a known `--probe-installed` false-positive: claude
+  2.x hides it from `--help` but still accepts it.
+
 ## [1.17.3] - 2026-05-31 — Socket scanner prose cleanup
 
 Patch release that removes wording in shipped metadata that Socket classified
