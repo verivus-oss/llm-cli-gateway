@@ -1,4 +1,11 @@
 {
   "extends": "./tsconfig.json",
+  "compilerOptions": {
+    // Strip comments from the published dist. Socket's networkAccess heuristic
+    // scans shipped comments, and the literal word "fetch" in a JSDoc/comment
+    // recurringly trips a globalThis["fetch"] alert. Not shipping comments
+    // removes that surface entirely (and shrinks the package).
+    "removeComments": true
+  },
   "exclude": ["node_modules", "dist", "src/__tests__"]
 }

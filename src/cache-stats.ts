@@ -527,7 +527,7 @@ function parseThinkingBlocks(raw: string | null): string[] | null {
 }
 
 /**
- * Fetch a single persisted request by correlation id from the flight recorder.
+ * Read a single persisted request by correlation id from the flight recorder.
  * Returns null when no row matches (including a NoopFlightRecorder, which
  * yields no rows — i.e. flight recording disabled). The response is truncated
  * to `maxChars`; the full pre-truncation length is reported via responseChars.

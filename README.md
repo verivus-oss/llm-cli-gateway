@@ -747,7 +747,7 @@ Use this flow when analysis/runtime can exceed client tool-call limits:
 
 1. Start job with `*_request_async`
 2. Poll with `llm_job_status`
-3. Fetch output with `llm_job_result`
+3. Read output with `llm_job_result`
 4. Optionally stop with `llm_job_cancel`
 
 Async request tools accept the same approval strategy fields as their sync variants:
