@@ -25,7 +25,10 @@ permissions:
 
 jobs:
   resolve-tag:
-    runs-on: [self-hosted, linux, rust, x86_64, workhorse2]
+    # Runner split: the public mirror (verivus-oss) gets free, elastic
+    # GitHub-hosted runners; the private repo (verivusai-labs) keeps its
+    # internal self-hosted runner so it doesn't burn paid Actions minutes.
+    runs-on: ${{ github.repository == 'verivus-oss/llm-cli-gateway' && 'ubuntu-latest' || fromJSON('["self-hosted","linux","rust","x86_64","workhorse2"]') }}
     permissions:
       contents: read
     outputs:
@@ -68,7 +71,12 @@ jobs:
           - artifact: macos-amd64
             runs_on: '"macos-15-intel"'
             targets: "--target darwin/amd64"
-    runs-on: ${{ fromJSON(matrix.runs_on) }}
+    # Same split as resolve-tag, but only for the Linux leg: on the public
+    # mirror the Linux bootstrapper (CGO_ENABLED=0 pure-Go cross-compile,
+    # no host toolchain needed) builds on GitHub-hosted ubuntu-latest; the
+    # private repo keeps it on the internal self-hosted runner. Windows and
+    # macOS legs are unaffected (always their matrix runner).
+    runs-on: ${{ (matrix.artifact == 'linux' && github.repository == 'verivus-oss/llm-cli-gateway') && 'ubuntu-latest' || fromJSON(matrix.runs_on) }}
     permissions:
       contents: read
     steps:
