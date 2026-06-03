@@ -1,6 +1,6 @@
 {
   "cli": "grok",
-  "fetchedAt": "2026-05-31T08:04:13.344Z",
+  "fetchedAt": "2026-06-03T09:11:42.410Z",
   "sources": [
     {
       "url": "https://docs.x.ai/developers/release-notes.md",
@@ -11,7 +11,7 @@
     }
   ],
   "helpSurface": {
-    "probedAt": "2026-05-31T08:04:13.344Z",
+    "probedAt": "2026-06-03T09:11:42.410Z",
     "available": true,
     "version": null,
     "flags": [
@@ -21,6 +21,8 @@
       "--always-approve",
       "--best-of-n",
       "--check",
+      "--compaction-detail",
+      "--compaction-mode",
       "--continue",
       "--cwd",
       "--deny",
@@ -52,7 +54,7 @@
       "--version",
       "--worktree"
     ],
-    "helpHash": "79f93fd59231d7d6047a42a695d521814f5e636751e361c50f70f09fbbf4e31b",
+    "helpHash": "32a71734ced32c5a93ca7d442c9398d550b4f1833321f0184c63eb48be232225",
     "extraVsContract": [],
     "missingFromBinary": []
   }
