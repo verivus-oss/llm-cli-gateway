@@ -1,0 +1,751 @@
+# Implementation plan: integrate @xstate/store v4 as a durable, observable
+# agent-state engine inside/alongside llm-cli-gateway.
+#
+# PROVENANCE: this DAG follows the schema of
+# docs/plans/async-flight-recorder.dag.toml (the most recent + most complete
+# plan file: schema_version "1.1", [meta] with invariant_sources +
+# predecessor_plan, [[steps]] with id/depends_on/actor/action/idempotent/
+# validation, [rollback].guidance, [risks].known[]/mitigations[]). Where
+# async-flight-recorder and cache-awareness disagreed, async-flight-recorder
+# won (it is newer and richer). provider-workflow-assets.dag.toml uses an
+# older, thinner schema (schema_version "1.0", no [risks]/[rollback]) and was
+# NOT used as the template.
+#
+# GOAL: give orchestrating agents a small, inspectable, versionable, schema-
+# constrained state engine that survives gateway restarts and is observable
+# through MCP resources — without storing any conversation content. The store
+# becomes a structured "agent scratchpad / workflow state" surface that LLMs
+# reason about well (explicit events, strong schemas, `.can` guards), distinct
+# from sessions (CLI continuity) and the flight recorder (request telemetry).
+#
+# SCOPE (incremental, easiest -> most powerful):
+#   Phase 1 (read-only resource + dispatch): in-memory store registry,
+#     xstate_send / xstate_get_snapshot / xstate_can tools, and
+#     agent_state://{storeId} + agent_state://catalog MCP resources.
+#   Phase 2 (durability): persist store definitions + snapshots in the SAME
+#     SQLite database as async jobs (logs.db), gated on a NEW config flag
+#     mirroring persistence.asyncJobsEnabled. backend="none" => no xstate
+#     tools registered (structural invariant).
+#   Phase 3 (authoring): xstate_create_store, and a skill/workflow memory
+#     layer that binds a SKILL.md to a store definition + allowed events.
+#   Phase 4 (consensus on state changes): optional consensus_check gate
+#     before committing a "significant" event, reusing the gateway's existing
+#     multi-LLM validation tools.
+#
+# NON-GOALS for this plan:
+#   - Replacing the session manager or flight recorder. The store is additive.
+#   - Multi-instance / Postgres store backend (interface-only, mirrors
+#     PostgresJobStore today).
+#   - Browser framework bindings (@xstate/store-react etc.) — the gateway is a
+#     headless Node MCP server.
+#   - Using @xstate/store's `persist` extension for durability (see DESIGN
+#     note D3: that extension is browser/localStorage-oriented; the gateway
+#     persists via its own SQLite layer instead).
+#
+# INVARIANT preserved: "No conversation content in session storage" / no
+# conversation content in storage (project-root CLAUDE.md + BEST_PRACTICES.md).
+# The xstate store holds STRUCTURED agent state (counters, flags, enums, small
+# JSON), NOT prompt/response text. This is enforced structurally (Phase 2: a
+# context-size cap + a documented "no free-text blobs" rule) and is an
+# explicit OPEN QUESTION for human sign-off (see meta.open_questions Q1).
+
+[meta]
+name = "llm-cli-gateway @xstate/store v4 integration (durable observable agent-state engine)"
+schema_version = "1.1"
+owner = "werner"
+slice = "xstate-store-phase-1"
+target_branch = "feat/xstate-store-integration"
+release_version = "UNSET — assign at Phase 1 ship time (next minor after current HEAD)"
+acceptance_resource = "agent_state://{storeId} returns a redacted snapshot (context + schema, no free-text) and xstate_send mutates it through declared events only; with backend='none' NONE of the xstate_* tools or agent_state:// resources are registered"
+invariant_sources = [
+  "/srv/repos/internal/verivusai-labs/rvwr/CLAUDE.md",
+  "/srv/repos/internal/verivusai-labs/rvwr/llm-cli-gateway/docs/guides/BEST_PRACTICES.md",
+]
+predecessor_plan = "docs/plans/async-flight-recorder.dag.toml"
+
+# Companion prose doc for human review:
+companion_doc = "docs/plans/xstate-store-integration.md"
+
+# ---------------------------------------------------------------------------
+# VERIFIED-vs-UNVERIFIED facts about @xstate/store v4 (confirmed against
+# https://stately.ai/docs/xstate-store and .../migration + .../persist +
+# .../validate-schemas on 2026-05-30). The plan's design depends on these;
+# any step that relies on an UNVERIFIED claim must re-check before coding.
+# ---------------------------------------------------------------------------
+#
+# VERIFIED (v4 docs):
+#   - Package name: `@xstate/store`. Requires TypeScript >= 5.4.
+#   - Store creation is config-object form ONLY in v4:
+#       createStore({ context, on, schemas? })
+#     The legacy two-arg `createStore(context, transitions)` was REMOVED in v4
+#     (migration guide). The user's proposal sketch used the removed form.
+#   - Snapshot read: `store.getSnapshot()` (also `store.get()`). The snapshot
+#     has a `.context` field. `store._snapshot` was REMOVED.
+#   - Dispatch: `store.trigger.<eventType>(payload)` AND
+#     `store.send({ type, ...payload })`. Both exist in v4. The user's
+#     `xstate_send({event, payload})` maps cleanly to `store.send`.
+#   - Guard check: `store.can.<eventType>(payload)` -> boolean. This is the
+#     v4 shape. The user's proposed `.can(event)` single-arg signature is
+#     NOT the v4 API; the design uses `store.can[event](payload)`.
+#     A transition returning `undefined`/`void` marks the event as not allowed.
+#   - Pure transition (no mutation): `store.transition(snapshot, event)`
+#     returns `[nextState, effects]` — useful for "dry-run / preview" of a
+#     proposed event (DESIGN uses this for the consensus preview in Phase 4).
+#   - `store.getInitialSnapshot()` exists (re-seed / reset baseline).
+#   - Schemas: v4 supports Standard Schema libraries (Zod is one). Declared
+#     under `schemas: { context, events, emitted }`. BY DEFAULT schemas are
+#     used for typing/metadata only and are NOT validated at runtime.
+#   - Runtime validation is OPT-IN via `validateSchemas()` from
+#     `@xstate/store/validate`, attached with `.with(validateSchemas())`.
+#     It throws `StoreValidationError` on invalid send/trigger/transition;
+#     `store.can.*` stays boolean-only (returns false on validation error).
+#   - Extensions exist and attach via `.with(...)`: undo/redo (`undoRedo()`),
+#     persist (`persist()` from `@xstate/store/persist`), reset (`reset()`),
+#     schema validation (`validateSchemas()`).
+#   - Zod compatibility: VERIFIED (Standard Schema; docs examples import `z`).
+#
+# UNVERIFIED / FLAGGED (do not assert as fact in code/comments):
+#   - "~1kb minified+gzipped": this is the PUBLISHER's marketing claim for the
+#     CORE package only. Independent inspection of the published tarball shows
+#     the core ESM ~2.3KB packed and an internal `store` chunk ~20KB
+#     UNminified; the `persist` extension is a SEPARATE ~19KB chunk. Treat
+#     "~1kb" as core-only and publisher-stated, NOT independently verified,
+#     and note extensions add weight. Bundle size is largely irrelevant for a
+#     headless Node MCP server anyway (no client download).
+#   - The `persist` extension targets browser/RN storage (localStorage,
+#     sessionStorage, AsyncStorage, IndexedDB, BroadcastChannel). It accepts a
+#     custom `StateStorage` adapter, but there is NO first-party SQLite
+#     adapter. DESIGN D3 therefore does NOT use the persist extension for
+#     durability; the gateway serializes snapshots to SQLite itself.
+#   - Exact current published v4 patch version: NOT pinned here. The
+#     research step (research-xstate-v4-surface) must pin the exact version
+#     and re-confirm every API above against the installed package's d.ts.
+
+# ===========================================================================
+# PHASE 0 — research + decisions (no behaviour change)
+# ===========================================================================
+
+[[steps]]
+id = "research-xstate-v4-surface"
+depends_on = []
+actor = "assistant"
+action = """
+Pin and verify the @xstate/store v4 surface the design depends on. DO NOT
+add the dependency yet (this is a PLAN; dependency add happens in the
+implementation slice). Instead:
+
+1. Resolve the exact latest v4 version (npm view @xstate/store version) and
+   record it. Confirm peer/runtime requirements (TypeScript >= 5.4 — the repo
+   already runs TS 6.x per package.json, so this is satisfied; re-verify).
+
+2. Re-confirm, against the published v4 type declarations (store.d.ts,
+   index.d.ts, validate, persist subpath exports), every API the design
+   leans on:
+     - createStore({ context, on, schemas })   (config-object form ONLY)
+     - store.getSnapshot() / store.get()        (snapshot with .context)
+     - store.send({ type, ...payload })         (canonical dispatch)
+     - store.trigger.<event>(payload)
+     - store.can.<event>(payload) -> boolean    (NOT a single-arg can(event))
+     - store.transition(snapshot, event) -> [nextState, effects]
+     - store.getInitialSnapshot()
+     - validateSchemas() from '@xstate/store/validate' (.with(...))
+   Record any divergence from the v4 facts block at the top of this DAG and
+   FIX the design steps below before coding.
+
+3. Decide the serialization contract for persistence (Phase 2): the store's
+   `context` is the ONLY thing persisted (plus the store's definition id +
+   schema version). Confirm context is plain-JSON-serializable in the
+   gateway's intended use (numbers/strings/booleans/enums/small nested
+   objects). Effects, emitted-event listeners, and closures are NOT
+   persisted (they are reconstructed from the definition on rehydrate).
+
+4. Write findings to docs/personal-mcp/XSTATE_STORE_SURFACES.md:
+     (a) pinned version + the verified API table,
+     (b) the "definition vs instance vs snapshot" model the gateway will use,
+     (c) the redaction contract (what fields a snapshot resource exposes),
+     (d) the SQLite serialization contract (Phase 2),
+     (e) explicit list of v4 facts we VERIFIED vs the publisher claims we did
+         NOT verify (bundle size, persist-extension storage targets).
+"""
+idempotent = true
+validation = """
+docs/personal-mcp/XSTATE_STORE_SURFACES.md exists with: pinned version,
+verified API table (each row marked VERIFIED with the d.ts symbol it maps
+to), the definition/instance/snapshot model, the snapshot redaction
+contract, the SQLite serialization contract, and a VERIFIED-vs-UNVERIFIED
+facts section. No design step below references an API not listed VERIFIED
+in this note.
+"""
+
+[[steps]]
+id = "decide-store-definition-model"
+depends_on = ["research-xstate-v4-surface"]
+actor = "assistant"
+action = """
+Lock the gateway's three-layer model and document it in
+XSTATE_STORE_SURFACES.md:
+
+  - DEFINITION: a named, versioned blob describing a store: its declared
+    events (with Zod schemas), initial context, and the transition rules.
+    PROBLEM: @xstate/store transitions are JS functions, which cannot be
+    safely deserialized from agent-supplied data (arbitrary-code risk).
+    DECISION (default, secure): Phase 1/2 definitions are DECLARATIVE only —
+    a transition is described by a restricted, data-only DSL the gateway
+    interprets, NOT by agent-supplied JS. Supported transition ops (initial
+    set): `set` (assign a field), `inc`/`dec` (numeric delta with optional
+    min/max guard), `push`/`pop` (bounded array), `setEnum` (constrained
+    set). Each op compiles to a real @xstate/store transition function
+    INSIDE the gateway. Agents NEVER supply executable code. Record this as
+    the security cornerstone (mirrors review-integrity.ts's posture of
+    refusing to trust orchestrator-supplied capability).
+    Flag as OPEN QUESTION Q2 whether a future "trusted local definition
+    file" path (operator-authored JS transitions loaded from disk, like
+    skills) should exist — but NOT agent-authored JS, ever.
+
+  - INSTANCE: a live store created from a definition + an initial context
+    override, identified by a gateway-generated `storeId`
+    (crypto.randomUUID(); 0-prefixless, like async job ids).
+
+  - SNAPSHOT: the redacted view a resource/tool returns: { storeId,
+    definitionId, definitionVersion, context, allowedEvents (event types +
+    their schemas), createdAt, updatedAt }. NEVER includes raw prompt/
+    response text. A context-size cap (default 16 KB serialized JSON) and a
+    "scalar/enum/small-object values only; no free-text blobs > N chars"
+    rule keep it a STATE surface, not a content store.
+
+Document how this maps to v4: a DEFINITION compiles to a createStore config
+object; an INSTANCE is the createStore(...) return; a SNAPSHOT derives from
+store.getSnapshot().context plus the definition metadata.
+"""
+idempotent = true
+validation = """
+XSTATE_STORE_SURFACES.md documents the definition/instance/snapshot model,
+the declarative data-only transition DSL (with the initial op set), the
+"no agent-supplied JS" security decision, the context-size cap, and the
+snapshot redaction shape. Open questions Q1 (no-free-text enforcement) and
+Q2 (trusted operator JS definitions) are recorded.
+"""
+
+# ===========================================================================
+# PHASE 1 — in-memory store registry, tools, read-only resources
+# (no persistence, no config gating yet — fastest path to a usable surface)
+# ===========================================================================
+
+[[steps]]
+id = "create-store-engine-module"
+depends_on = ["decide-store-definition-model"]
+actor = "assistant"
+action = """
+NEW FILE src/xstate-store-engine.ts. This is the gateway-internal wrapper
+around @xstate/store v4 — the ONLY module that imports `@xstate/store`
+(single dependency surface, mirrors how flight-recorder.ts is the only
+better-sqlite3 importer for FR).
+
+Export:
+  - interface StoreDefinition { id; version; description?; events:
+    Record<eventType, ZodSchema>; initialContext: Record<string, unknown>;
+    transitions: TransitionSpec[]; }  // TransitionSpec = the data-only DSL.
+  - interface StoreSnapshot { storeId; definitionId; definitionVersion;
+    context; allowedEvents: Array<{ type; schema: JSONSchema }>; createdAt;
+    updatedAt; }   // serializable, redacted; no functions.
+  - class StoreEngine:
+      createInstance(def: StoreDefinition, initialOverride?): { storeId }
+      send(storeId, event: string, payload?): SendResult
+        // compiles event+payload, calls underlying store.send; returns
+        // { ok: true, snapshot } or { ok: false, reason } when the event is
+        // not allowed (store.can.<event> was false) or unknown.
+      can(storeId, event: string, payload?): { allowed: boolean; reason? }
+      getSnapshot(storeId): StoreSnapshot | null
+      preview(storeId, event, payload?): { nextContext; allowed }
+        // uses store.transition(snapshot, evt) — no mutation (Phase 4 dry-run)
+      listInstances(): Array<{ storeId; definitionId; updatedAt }>
+      deleteInstance(storeId): boolean
+
+Internals:
+  - compileDefinition(def) -> @xstate/store config object. Each TransitionSpec
+    op compiles to a transition function. validateSchemas() is attached via
+    `.with(validateSchemas())` when the definition opts into runtime
+    validation (default: ON — we want the schema enforced for agent input).
+  - Enforce the context-size cap and the no-free-text rule on every write;
+    reject (SendResult.ok=false, reason) rather than truncating.
+  - All errors are returned as data (never thrown across the tool boundary);
+    internal failures log via the injected Logger (stderr only — NEVER
+    console.log).
+  - Explicit return types on every exported function (repo convention).
+
+Phase 1 keeps a built-in DEFAULT definition (a small, generic
+"agent_workflow" state: { step: string; status: enum; counters: {} }) so the
+read-only resource has something to expose before authoring lands.
+"""
+idempotent = true
+validation = """
+- npm run build passes; src/xstate-store-engine.ts is the only file importing
+  '@xstate/store'.
+- Unit tests: createInstance returns a storeId; getSnapshot returns the
+  redacted shape with no function fields; send through a declared event
+  mutates context; send of an unknown event returns ok=false; can() reflects
+  a guarded transition (e.g. inc with max) returning false at the boundary;
+  preview() does NOT mutate the live snapshot; context-size cap rejects an
+  oversized write.
+- All exported functions have explicit return types.
+"""
+
+[[steps]]
+id = "register-xstate-tools-and-resources-phase1"
+depends_on = ["create-store-engine-module"]
+actor = "assistant"
+action = """
+Thread a StoreEngine through GatewayServerRuntime and register the Phase 1
+tools + resources in src/index.ts.
+
+1. GatewayServerRuntime + GatewayServerDeps (src/index.ts ~470 / ~457):
+   add `storeEngine: StoreEngine`. resolveGatewayServerRuntime wires it
+   (isolateState => a fresh StoreEngine; otherwise a process-global one,
+   mirroring asyncJobManager). A module-level getStoreEngine() lazily
+   constructs it with the runtime logger, like getAsyncJobManager().
+
+2. TOOLS (snake_case; Zod at the boundary; structured error responses via
+   createErrorResponse). Register UNCONDITIONALLY in Phase 1 (in-memory,
+   no persistence to gate on yet — gating arrives in Phase 2):
+     - xstate_send({ storeId, event, payload? }) -> dispatches via
+       StoreEngine.send; returns the new redacted snapshot or a structured
+       "event not allowed / unknown store" error.
+     - xstate_get_snapshot({ storeId }) -> StoreEngine.getSnapshot.
+     - xstate_can({ storeId, event, payload? }) -> { allowed, reason? }.
+   Tool descriptions >= 20 chars, actionable. payload validated as a JSON
+   object (z.record(z.unknown())); the engine applies the per-event Zod
+   schema, so the tool boundary stays generic.
+
+3. RESOURCES (read-only; tokens/state only, no conversation content):
+     - agent_state://catalog  -> list of live instances
+       ({ storeId, definitionId, definitionVersion, updatedAt }).
+     - agent_state://{storeId} (ResourceTemplate, like
+       cache_state://prefix/{hash}) -> the redacted StoreSnapshot.
+   Register in registerBaseResources(server, runtime) alongside the
+   cache_state resources (src/index.ts ~1349), using the same
+   server.registerResource(...) + JSON.stringify(stats, null, 2) shape.
+
+4. ResourceProvider (src/resources.ts): add readAgentStateCatalog() and
+   readAgentState(storeId) methods backed by an injected StoreEngine
+   (optional ctor arg defaulting to a stub returning [] / null, mirroring
+   how flightRecorder is an optional ctor arg). Add the two resource
+   descriptors to listResources().
+
+5. All logging via runtime.logger.{info,debug,error} (stderr).
+"""
+idempotent = true
+validation = """
+- New integration test: createGatewayServer registers xstate_send,
+  xstate_get_snapshot, xstate_can and the agent_state://catalog +
+  agent_state://{storeId} resources.
+- xstate_send through the default definition mutates the snapshot the
+  resource then returns; xstate_can returns allowed=false for a guarded
+  event; reading agent_state://{unknownId} returns an empty/redacted default
+  rather than throwing.
+- A snapshot resource response contains NO prompt/response/system/task field
+  (structural redaction assertion, mirroring cache-state-resources tests).
+- npm run build + npm test green; tool names are snake_case.
+"""
+
+# ===========================================================================
+# PHASE 2 — durability in the SAME SQLite as async jobs, gated on config
+# ===========================================================================
+
+[[steps]]
+id = "add-store-persistence-config"
+depends_on = ["register-xstate-tools-and-resources-phase1"]
+actor = "assistant"
+action = """
+Add an `[agent_state]` block to the gateway config, loaded by a SEPARATE
+loader/schema in src/config.ts (mirrors loadCacheAwarenessConfig — a
+malformed [agent_state] must never break [persistence] loading, and vice
+versa). NO env-var overrides (TOML only), all defaults OFF.
+
+Schema (Zod, .strict()):
+  - enabled: boolean (default false). When false, NO xstate persistence and
+    (per the gating step below) the durable behaviour is dormant.
+  - backend: enum("sqlite","memory","none") default "sqlite". REUSE the
+    async-job DB file by default (logs.db) — a new TABLE, not a new file —
+    so there is one durable store to back up. Allow an explicit override
+    path; "none" => no durable store; "memory" => process-lifetime only and
+    (like persistence.memory) requires acknowledgeEphemeral=true to enable
+    the durable-flavoured tools.
+  - maxContextBytes: positive int, default 16384 (the context-size cap).
+  - maxInstances: positive int, default 256 (DoS guard on instance count).
+
+Export AgentStateConfig with a derived `storeToolsEnabled: boolean`
+(true iff enabled && backend in sqlite|memory && (backend!=="memory" ||
+acknowledgeEphemeral)) — the EXACT structural mirror of
+persistence.asyncJobsEnabled. Thread AgentStateConfig through
+GatewayServerRuntime + GatewayServerDeps + resolveGatewayServerRuntime,
+exactly as cacheAwareness is threaded.
+
+DECISION: reuse the SqliteJobStore DB *file* but NOT its `jobs` table.
+Phase 2 introduces a sibling table (next step). The two share the WAL'd
+better-sqlite3 connection ONLY if that is clean to arrange; otherwise open
+a second connection to the same path (better-sqlite3 supports concurrent
+readers/single writer via WAL). Document the choice in SURFACES.md.
+"""
+idempotent = true
+validation = """
+- New config tests (mirror persistence-config.test.ts): defaults yield
+  enabled=false, storeToolsEnabled=false; enabled=true + backend=sqlite =>
+  storeToolsEnabled=true; backend=memory without acknowledgeEphemeral throws
+  (or yields storeToolsEnabled=false — match the persistence.memory
+  decision exactly and document which); backend=none => storeToolsEnabled
+  false; malformed [agent_state] throws a clear error and does NOT affect
+  loadPersistenceConfig.
+- npm run build green.
+"""
+
+[[steps]]
+id = "add-sqlite-store-backend"
+depends_on = ["add-store-persistence-config"]
+actor = "assistant"
+action = """
+NEW FILE src/store-persistence.ts. Define a StorePersistence interface and
+three implementations mirroring job-store.ts EXACTLY (SqliteStorePersistence
+default, MemoryStorePersistence for tests/ephemeral, PostgresStorePersistence
+stub that throws), plus createStorePersistence(config): StorePersistence|null
+that returns null for backend="none".
+
+Interface (definitions + instance snapshots; serializable only):
+  - upsertDefinition(def: StoreDefinition): void
+  - getDefinition(id, version?): StoreDefinition | null
+  - listDefinitions(): Array<{ id; version; description? }>
+  - saveInstance(snapshot: PersistedInstance): void
+    // PersistedInstance = { storeId, definitionId, definitionVersion,
+    //   contextJson, createdAt, updatedAt, expiresAt }
+  - getInstance(storeId): PersistedInstance | null
+  - listInstances(): PersistedInstance[]
+  - deleteInstance(storeId): boolean
+  - mark/evictExpired(): number   // TTL like jobs (reuse retentionDays)
+  - close(): void
+
+SqliteStorePersistence:
+  - Same constructor pattern as SqliteJobStore: createRequire ->
+    better-sqlite3, mkdir, WAL + synchronous=NORMAL, chmod 0o600 on the db
+    file (skip on win32). CREATE TABLE IF NOT EXISTS for two tables:
+      agent_state_definitions(id TEXT, version TEXT, description TEXT,
+        events_json TEXT NOT NULL, initial_context_json TEXT NOT NULL,
+        transitions_json TEXT NOT NULL, PRIMARY KEY(id, version))
+      agent_state_instances(store_id TEXT PRIMARY KEY, definition_id TEXT,
+        definition_version TEXT, context_json TEXT NOT NULL, created_at TEXT,
+        updated_at TEXT, expires_at TEXT NOT NULL)
+    plus indexes on definition_id and expires_at.
+  - Prepared statements only; explicit return types; logger.error on close
+    failure. Enforce maxContextBytes (reject oversized contextJson) and
+    maxInstances (count guard before insert).
+  - On boot, evictExpired() (same posture as job-store eviction). There is
+    NO "orphaned" concept here — a store instance has no live child process,
+    so a restart simply rehydrates from contextJson.
+
+MemoryStorePersistence + PostgresStorePersistence stub: identical structural
+pattern to MemoryJobStore / PostgresJobStore.
+"""
+idempotent = true
+validation = """
+- New tests (mirror job-store.test.ts): SqliteStorePersistence round-trips a
+  definition and an instance; getInstance(unknown) => null; evictExpired
+  removes past-expiry rows; maxContextBytes rejects oversized context;
+  maxInstances blocks the (N+1)th instance; MemoryStorePersistence has the
+  same semantics minus durability; PostgresStorePersistence throws on
+  construction; createStorePersistence(backend='none') => null; db file is
+  chmod 0o600 on non-win32.
+- npm run build green.
+"""
+
+[[steps]]
+id = "wire-engine-to-persistence-and-gate"
+depends_on = ["add-sqlite-store-backend"]
+actor = "assistant"
+action = """
+Make StoreEngine durable and gate the durable tools on config — the
+structural invariant mirror of the async-job gating in createGatewayServer
+(src/index.ts ~4191, the `if (asyncJobsEnabled)` block at ~5739).
+
+1. StoreEngine gains an optional StorePersistence dependency (default: a
+   no-op/in-memory persistence so existing Phase 1 tests keep passing). On
+   createInstance/send it writes the new snapshot through
+   persistence.saveInstance; on getSnapshot for an unknown in-memory id it
+   rehydrates from persistence.getInstance (recompiling the definition from
+   storage). definitions are loaded via persistence.getDefinition.
+
+2. createGatewayServer:
+     const storeToolsEnabled =
+       agentState.enabled &&
+       agentState.backend !== "none" &&
+       agentState.storeToolsEnabled &&
+       storeEngine.hasPersistence();   // mirror asyncJobManager.hasStore()
+   The MUTATING / authoring tools that imply durability — xstate_create_store
+   (Phase 3) and the persistence-backed delete — register ONLY inside
+   `if (storeToolsEnabled)`. The READ-ONLY Phase 1 tools (xstate_get_snapshot,
+   xstate_can) and resources stay registered unconditionally (they degrade to
+   the in-memory default definition when persistence is off), BUT
+   xstate_send is moved INSIDE the gate when agent_state.enabled is the
+   contract for "agents may mutate durable state". DECISION POINT (document
+   in SURFACES.md + flag as open question Q3): is xstate_send a read-tier or
+   write-tier tool when persistence is disabled? Default chosen here:
+   xstate_send stays available against the EPHEMERAL in-memory default store
+   even when durable persistence is off, but a durable-backed send (one that
+   would survive restart) requires storeToolsEnabled. Make the in-memory vs
+   durable distinction explicit in the tool's response metadata
+   (`durable: true|false`).
+
+3. llm_process_health: extend the JSON it returns with an `agentState`
+   section ({ enabled, backend, storeToolsEnabled, instanceCount,
+   maxInstances, maxContextBytes }) so operators can see the gate state,
+   exactly as it reports persistence today (src/index.ts ~6940).
+"""
+idempotent = true
+validation = """
+- STRUCTURAL-INVARIANT test (mirrors the async-tools test): a gateway built
+  with agent_state.backend='none' (or enabled=false) registers NO
+  xstate_create_store tool and reports storeToolsEnabled=false in
+  llm_process_health; a gateway with enabled=true + backend='sqlite'
+  registers it and reports storeToolsEnabled=true.
+- Durability test: create an instance + send an event, drop the engine,
+  build a new engine over the SAME sqlite file => getSnapshot rehydrates the
+  mutated context.
+- xstate_send response carries `durable: true` when persistence is on,
+  `durable: false` when off.
+- npm run build + npm test green.
+"""
+
+# ===========================================================================
+# PHASE 3 — authoring + skill/workflow memory layer
+# ===========================================================================
+
+[[steps]]
+id = "add-create-store-tool-and-skill-binding"
+depends_on = ["wire-engine-to-persistence-and-gate"]
+actor = "assistant"
+action = """
+Gate everything in this step inside `if (storeToolsEnabled)`.
+
+1. TOOL xstate_create_store({ name, description?, schema, initialContext,
+   transitions }) where:
+     - `schema` is a map of eventType -> a restricted JSON-Schema/Zod-ish
+       descriptor the gateway converts to a real Zod schema (the gateway
+       BUILDS the Zod schema from data; agents never supply executable Zod
+       code).
+     - `transitions` is the data-only DSL from Phase 0 (set/inc/dec/push/pop/
+       setEnum, with optional guards). The gateway compiles it; NO
+       agent-supplied JS is ever eval'd (security cornerstone).
+     - returns { definitionId, version, storeId } for an instance created
+       from the new definition, persisted via StorePersistence.
+   Validate name/description lengths, cap event count, cap transition count,
+   reject any transition op not in the allow-list, enforce maxContextBytes on
+   initialContext. Structured error responses via createErrorResponse.
+
+2. SKILL/WORKFLOW MEMORY BINDING (the "distilled skill runtime" idea):
+   extend the existing skills loader so a SKILL.md MAY carry frontmatter
+   linking a store definition file (data-only TOML/JSON, NOT JS) that lives
+   beside it under .agents/skills/<name>/store.toml. On load, the gateway
+   registers that definition with StorePersistence and exposes a
+   skills://<name> resource section noting the bound definitionId + allowed
+   events. This makes the gateway the runtime executor for a distilled
+   skill's procedural state WITHOUT trusting agent-authored code — the
+   definition is operator-authored, version-controlled, and reviewed like
+   any other skill asset.
+   Reuse the provider-workflow-assets.dag.toml SKILL.md frontmatter
+   conventions; do not invent a new frontmatter dialect.
+
+3. xstate_delete_store / instance cleanup tool (durable delete), gated.
+"""
+idempotent = true
+validation = """
+- xstate_create_store with a valid declarative definition persists it and
+  returns ids; an invalid transition op (not in the allow-list) is rejected
+  with a structured error; oversized initialContext is rejected.
+- A SKILL.md with a store.toml binding loads its definition into
+  StorePersistence and the skills://<name> resource reports the bound
+  definitionId + allowed events.
+- With storeToolsEnabled=false, xstate_create_store and xstate_delete_store
+  are NOT registered.
+- npm run build + npm test green.
+"""
+
+# ===========================================================================
+# PHASE 4 — consensus / validation gate on significant state changes
+# ===========================================================================
+
+[[steps]]
+id = "add-consensus-gated-state-change"
+depends_on = ["add-create-store-tool-and-skill-binding"]
+actor = "assistant"
+action = """
+OPTIONAL, opt-in per-call. Add a `requireConsensus?: boolean` (or a
+`consensusThreshold?`) option to xstate_send. When set:
+
+1. Compute the PREVIEW of the proposed event with StoreEngine.preview
+   (store.transition(snapshot, evt) — no mutation), yielding nextContext +
+   allowed. If the event is not allowed by `.can`, short-circuit with the
+   structured not-allowed error (no model spend).
+
+2. Build a consensus prompt describing (current redacted context, proposed
+   event+payload, computed nextContext, the definition's schema/business
+   rules) and route it through the gateway's EXISTING validation surface
+   (validate-tools.ts / consensus_check) rather than reimplementing
+   multi-LLM fan-out. The prompt contains STATE ONLY — no conversation
+   content — preserving the storage invariant and keeping the gate cheap.
+
+3. Commit the event ONLY if consensus passes the configured threshold;
+   otherwise return the proposed nextContext + the dissenting rationale
+   WITHOUT mutating the store. Record the decision (pass/fail + which models)
+   in the flight recorder as a normal request row (telemetry), NOT in the
+   store context.
+
+This layer is additive and fully optional: default behaviour (no
+requireConsensus) is unchanged. Document that consensus adds latency + model
+cost and is meant for high-impact transitions only.
+"""
+idempotent = true
+validation = """
+- xstate_send with requireConsensus and a mocked consensus surface that
+  PASSES commits the event; a mocked surface that FAILS leaves the store
+  unmutated and returns the proposed nextContext + rationale.
+- A not-allowed event with requireConsensus short-circuits BEFORE any model
+  call (assert the consensus surface was not invoked).
+- Default xstate_send (no requireConsensus) behaviour is byte-identical to
+  Phase 1/2 (regression).
+- npm run build + npm test green.
+"""
+
+# ===========================================================================
+# CROSS-CUTTING — tests (veracity/mutation-probe norms), docs, release
+# ===========================================================================
+
+[[steps]]
+id = "add-tests-and-veracity-audit"
+depends_on = ["add-consensus-gated-state-change"]
+actor = "assistant"
+action = """
+1. Test files (AAA pattern; unit mocks for isolation; integration with real
+   createGatewayServer):
+     - src/__tests__/xstate-store-engine.test.ts (Phase 1 engine: create,
+       send, can, preview-no-mutation, redaction, size cap).
+     - src/__tests__/xstate-store-config.test.ts (Phase 2 [agent_state]
+       loader, storeToolsEnabled derivation, malformed-block isolation).
+     - src/__tests__/store-persistence.test.ts (Phase 2 sqlite/memory/
+       postgres-stub round-trip, eviction, caps, 0o600).
+     - src/__tests__/xstate-store-tools.test.ts (integration: tool + resource
+       registration; structural-invariant gate; durable rehydrate; snapshot
+       redaction; consensus-gated send with a mocked consensus surface).
+   Target >= 80% coverage on the new modules (project minimum).
+
+2. STRICT-EVIDENCE MUTATION-PROBE VERACITY AUDIT (standing protocol from
+   slice epsilon, see MEMORY + docs/plans/test-veracity-audit-slice-*.spec.md):
+   write the spec to disk
+   (docs/plans/test-veracity-audit-xstate-store.spec.md) enumerating, for
+   each new test, the exact mutation it is supposed to catch (e.g. "delete
+   the .can guard check -> the not-allowed test must fail"; "make the
+   snapshot resource leak a `task` field -> the redaction test must fail";
+   "flip storeToolsEnabled off but still register xstate_create_store -> the
+   structural-invariant test must fail"). Run the audit across 4-5 models via
+   the gateway's own validation tools with >= 90s polling, on inspected
+   evidence only (no plan-compliance approvals). Record results.
+
+3. Multi-LLM review gate (standing): every phase's diff gets
+   Codex+Gemini+Grok review on inspected evidence before merge.
+"""
+idempotent = true
+validation = """
+- All four new test files pass; coverage on new modules >= 80%.
+- docs/plans/test-veracity-audit-xstate-store.spec.md exists with a
+  per-test mutation enumerated; the audit ran across 4-5 models with
+  >= 90s polling and its results are recorded.
+- No existing test weakened/deleted (git diff for __tests__/).
+- npm run check green.
+"""
+
+[[steps]]
+id = "docs-changelog-release"
+depends_on = ["add-tests-and-veracity-audit"]
+actor = "assistant"
+action = """
+1. docs/personal-mcp/XSTATE_STORE_SURFACES.md — finalize (verified API table,
+   model, redaction + size-cap contract, security posture, gate semantics,
+   VERIFIED-vs-UNVERIFIED facts).
+2. README.md — add an "Agent state (xstate)" section: the three tools
+   (xstate_send/get_snapshot/can), xstate_create_store, the agent_state://
+   resources, the [agent_state] config block, and an explicit "disabled by
+   default; backend='none' registers no tools" note.
+3. CHANGELOG.md — Unreleased entry per phase shipped. Note the dependency add
+   (@xstate/store + the version pinned in research) — this is the ONE place a
+   dependency is introduced; call it out for the security/OSV review.
+4. docs/guides/BEST_PRACTICES.md — document the data-only-transition DSL
+   security pattern and the "state, not content" rule as a reusable
+   convention.
+5. docs/plans/xstate-store-integration.pr-body.md — NEW, mirroring
+   docs/plans/async-flight-recorder.pr-body.md structure (Scope, Files
+   touched, Test-count delta, What's intentionally NOT shipped, Multi-LLM
+   review log, Rollback, Acceptance gate).
+6. Release gates: npm run build / lint / format:check / test / check, then
+   actionlint + zizmor + gitleaks + osv-scanner (the dependency add makes
+   osv-scanner load-bearing this time) + typos. Release sequence mirrors
+   async-flight-recorder.dag.toml's (private push -> public mirror -> gh
+   release), commits WITHOUT a Co-Authored-By trailer (repo convention).
+   Phase the release: ship Phase 1 (read-only + ephemeral) FIRST as its own
+   minor; Phase 2-4 follow once Phase 1 has dogfood evidence — do NOT ship
+   consensus (Phase 4) before persistence (Phase 2) has soaked.
+"""
+idempotent = true
+validation = """
+- SURFACES.md, README.md, CHANGELOG.md, BEST_PRACTICES.md updated;
+  xstate-store-integration.pr-body.md exists and follows the
+  async-flight-recorder.pr-body.md structure.
+- osv-scanner clean on the lockfile after the @xstate/store add.
+- All release gates exit 0. /srv/repos/internal/verivusai-labs/rvwr/CLAUDE.md
+  UNCHANGED.
+"""
+
+# ===========================================================================
+# rollback + risks
+# ===========================================================================
+
+[rollback]
+guidance = """
+The integration is additive and OFF by default ([agent_state].enabled =
+false => no durable tools, no agent_state mutation surface beyond the
+ephemeral default). Rollback options, least to most invasive:
+
+1. Config disable (no code change): set [agent_state].enabled = false (or
+   backend = "none") in ~/.llm-cli-gateway/config.toml. Per the structural
+   invariant, the durable/authoring tools then vanish from the tool list at
+   connect time. This is the primary kill switch.
+
+2. Targeted forward-fix: if a bug surfaces in the engine or persistence,
+   patch src/xstate-store-engine.ts / src/store-persistence.ts; the in-memory
+   default-definition path and the no-op persistence default keep the rest of
+   the gateway unaffected.
+
+3. Hard rollback: revert the feature branch / release commit AND remove the
+   @xstate/store dependency. The new SQLite tables (agent_state_definitions,
+   agent_state_instances) live in logs.db; a revert leaves them as inert
+   unused tables (no migration of the existing `jobs`/`requests` tables), so
+   revert is non-destructive. Optionally DROP the two tables to reclaim space.
+
+There is no migration to the existing jobs/flight-recorder schema, so a
+rollback cannot corrupt async-job or telemetry data.
+"""
+
+[risks]
+known = [
+  "Arbitrary-code risk: @xstate/store transitions are JS functions. If the gateway ever accepted agent-authored JS transitions, an orchestrating agent could run code in the gateway process. MITIGATED by the data-only transition DSL (set/inc/dec/push/pop/setEnum) — agents supply DATA describing transitions; the gateway compiles them. Open question Q2 (operator-authored trusted JS definitions from disk, like skills) is deliberately left for human sign-off.",
+  "Storage-invariant erosion: a free-form context could become a backdoor conversation store, violating 'no conversation content in storage'. MITIGATED by maxContextBytes (default 16KB) + a 'scalar/enum/small-object, no long free-text' rule enforced on every write. Open question Q1: is the byte cap + per-field length cap a strong-enough structural guarantee, or does a human want a stricter allow-listed value-type policy?",
+  "API-shape divergence from the user's proposal: the user's sketch used the REMOVED two-arg createStore(context, transitions) and a single-arg .can(event). v4 requires the config-object createStore and store.can.<event>(payload). The design uses the verified v4 shapes; if a future v5 changes them again, research-xstate-v4-surface must re-pin. The exact v4 patch version is NOT yet pinned (PLAN-only constraint).",
+  "Persist-extension mismatch: @xstate/store's own `persist` extension targets browser/RN storage (localStorage/IndexedDB/BroadcastChannel), NOT SQLite. The design deliberately does NOT use it and serializes snapshots to SQLite via a gateway-owned StorePersistence layer instead. Risk: maintaining a bespoke persistence layer; mitigated by mirroring the already-proven job-store.ts pattern 1:1.",
+  "Surface bloat / agent confusion: adding a third stateful surface (store) alongside sessions (CLI continuity) and the flight recorder (telemetry) could confuse orchestrating agents about WHERE to put state. MITIGATED by clear tool descriptions + a README 'state, not content; not a session, not telemetry' section. Decision point for a human: is the agent-state surface worth the cognitive cost, or should it ship behind a louder 'experimental' flag?",
+  "Consensus cost/latency (Phase 4): gating state changes on multi-LLM consensus adds real latency and model spend. MITIGATED by being strictly opt-in per call and short-circuiting on .can=false before any model is invoked. Decision point: which transitions (if any) should DEFAULT to consensus, or should it always be caller-explicit?",
+  "Bundle-size claim unverified: the publisher's '~1kb' is core-only and not independently confirmed (tarball inspection shows larger unminified chunks + a separate ~19KB persist chunk). Irrelevant operationally (headless Node server) but the README must not repeat '~1kb' as a verified fact.",
+]
+mitigations = [
+  "Data-only transition DSL + 'no agent-supplied JS, ever' as the security cornerstone, enforced in the engine and covered by a mutation-probe test (delete the op allow-list check -> test fails).",
+  "maxContextBytes + per-field length policy enforced on every write; redaction asserted structurally in tests (snapshot must contain no prompt/response/system/task field).",
+  "research-xstate-v4-surface pins the exact version and re-verifies every API against the installed d.ts before any code lands; the v4 facts block at the top of this DAG is the contract.",
+  "StorePersistence mirrors job-store.ts (proven pattern: WAL, 0o600, prepared statements, createJobStore-style factory returning null for backend='none').",
+  "Structural-invariant gating (storeToolsEnabled) mirrors persistence.asyncJobsEnabled exactly; a dedicated test asserts disabled-backend registers no durable tools and llm_process_health reports the gate state.",
+  "Phased rollout: Phase 1 (read-only + ephemeral) ships and soaks before Phase 2 (durable); Phase 4 (consensus) ships last. Each phase is independently revertable and config-gated.",
+  "README documents the verified API and the 'state not content' boundary; the '~1kb' claim is presented as publisher-stated, not verified.",
+]
