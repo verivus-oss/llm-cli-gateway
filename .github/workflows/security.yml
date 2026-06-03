@@ -194,7 +194,16 @@ jobs:
 
       - name: Link-rot scan (lychee)
         # lychee checks every http(s):// URL in tracked markdown and
-        # TOML. Configured by lychee.toml at the repo root.
+        # local site links in HTML. Root-relative site links such as
+        # /install.md resolve against the Pages output directory.
+        # Configured by lychee.toml at the repo root.
         uses: lycheeverse/lychee-action@8646ba30535128ac92d33dfc9133794bfdd9b411 # v2.8.0
         with:
           fail: true
+          args: >-
+            --verbose
+            --no-progress
+            --root-dir '${{ github.workspace }}/site'
+            './**/*.md'
+            './**/*.html'
+            './**/*.rst'

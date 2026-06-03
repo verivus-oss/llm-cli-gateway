@@ -14,6 +14,8 @@ exclude_path = [
   "integrations/llm-plugin/*.egg-info",
   ".sqry",
   ".sqry-cache",
+  ".claude",
+  ".worktrees",
   # Historical / immutable artefacts — dead links here are evidence,
   # not bugs.
   "docs/archive",
