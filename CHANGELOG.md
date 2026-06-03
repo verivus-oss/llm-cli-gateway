@@ -4,6 +4,26 @@ All notable changes to the llm-cli-gateway project.
 
 ## Unreleased
 
+## [1.17.6] - 2026-06-03: website front door and public demo workflow
+
+Patch release for the public front-door launch and agent-facing workflow docs.
+The gateway runtime is unchanged from 1.17.5.
+
+### Added
+
+- Added the Cloudflare Pages front door at `llm-cli-gateway.dev`, including the
+  agent-readable `/install.md`, `/llms.txt`, `/sitemap.md`, and
+  `/.well-known/agent.json` surfaces.
+- Added the "Upstreams + front door" launch post and the @xstate/store v4
+  integration plan.
+- Added the `public-demo-session` skill for clean, redacted demo recordings.
+
+### Updated
+
+- Refreshed the Grok upstream snapshot with the 2026-06-03 scan report.
+- Taught the security workflow's lychee scan to resolve root-relative website
+  links against the checked-in Pages output directory.
+
 ## [1.17.5] - 2026-06-02: Socket networkAccess cleanup
 
 Patch release that stops the recurring Socket `networkAccess` (`globalThis["fetch"]`)
