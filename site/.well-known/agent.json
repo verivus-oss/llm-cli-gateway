@@ -1,0 +1,18 @@
+{
+  "name": "llm-cli-gateway",
+  "description": "One local MCP endpoint for Claude Code, Codex, Gemini, Grok, and Mistral Vibe CLIs.",
+  "url": "https://llm-cli-gateway.dev/",
+  "repository": "https://github.com/verivus-oss/llm-cli-gateway",
+  "license": "MIT",
+  "mcp": {
+    "registryName": "io.github.verivus-oss/llm-cli-gateway",
+    "transport": "stdio",
+    "command": "npx",
+    "args": ["-y", "llm-cli-gateway"]
+  },
+  "retrieval": {
+    "llmsTxt": "https://llm-cli-gateway.dev/llms.txt",
+    "install": "https://llm-cli-gateway.dev/install.md",
+    "sitemap": "https://llm-cli-gateway.dev/sitemap.md"
+  }
+}
