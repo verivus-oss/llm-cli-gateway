@@ -43,8 +43,8 @@ jobs:
       - name: Create GitHub release (published)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag }}
         run: |
-          TAG="${{ inputs.tag }}"
           VER="${TAG#v}"
           NOTES="llm-cli-gateway v${VER}. See CHANGELOG.md on this tag for release notes."
           if gh release view "${TAG}" >/dev/null 2>&1; then
