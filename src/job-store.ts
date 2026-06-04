@@ -1,8 +1,9 @@
-import { chmodSync, existsSync, mkdirSync } from "fs";
+import { chmodSync } from "fs";
 import os from "os";
 import path from "path";
 import { createHash } from "crypto";
-import { createRequire } from "module";
+import { openDatabase } from "./sqlite-driver.js";
+import type { GatewayDatabase, GatewayStatement } from "./sqlite-driver.js";
 import type { Logger } from "./logger.js";
 import { noopLogger } from "./logger.js";
 import type { PersistenceConfig } from "./config.js";
@@ -26,18 +27,6 @@ export interface JobRecord {
   finishedAt: string | null;
   pid: number | null;
   expiresAt: string;
-}
-
-interface StatementLike {
-  run: (...args: any[]) => any;
-  get: (...args: any[]) => any;
-  all: (...args: any[]) => any[];
-}
-
-interface DatabaseLike {
-  exec: (sql: string) => void;
-  prepare: (sql: string) => StatementLike;
-  close: () => void;
 }
 
 export function resolveJobStoreDbPath(): string | null {
@@ -164,33 +153,28 @@ export interface OrphanedJobSnapshot {
  * gateway restarts; safe for single-instance deployments.
  */
 export class SqliteJobStore implements JobStore {
-  private db: DatabaseLike;
+  private db: GatewayDatabase;
   private retentionMs: number;
   private dedupWindowMs: number;
 
-  private insertStmt: StatementLike;
-  private updateOutputStmt: StatementLike;
-  private updateCompleteStmt: StatementLike;
-  private getByIdStmt: StatementLike;
-  private findByRequestKeyStmt: StatementLike;
-  private selectRunningOrphansStmt: StatementLike;
-  private markOrphanedStmt: StatementLike;
-  private deleteExpiredStmt: StatementLike;
+  private insertStmt: GatewayStatement;
+  private updateOutputStmt: GatewayStatement;
+  private updateCompleteStmt: GatewayStatement;
+  private getByIdStmt: GatewayStatement;
+  private findByRequestKeyStmt: GatewayStatement;
+  private selectRunningOrphansStmt: GatewayStatement;
+  private markOrphanedStmt: GatewayStatement;
+  private deleteExpiredStmt: GatewayStatement;
 
   constructor(
     dbPath: string,
     private logger: Logger = noopLogger,
     options: { retentionMs?: number; dedupWindowMs?: number } = {}
   ) {
-    const require = createRequire(import.meta.url);
-    const BetterSqlite3 = require("better-sqlite3");
-
-    const directory = path.dirname(dbPath);
-    if (!existsSync(directory)) {
-      mkdirSync(directory, { recursive: true });
-    }
-
-    this.db = new BetterSqlite3(dbPath);
+    // openDatabase owns parent-directory creation (mkdirSync recursive), so the
+    // job store no longer does its own mkdir. Any open/DDL failure throws to
+    // the caller (createJobStore), matching the prior require/open behaviour.
+    this.db = openDatabase(dbPath);
     this.db.exec("PRAGMA journal_mode = WAL");
     this.db.exec("PRAGMA synchronous = NORMAL");
 
@@ -322,7 +306,7 @@ export class SqliteJobStore implements JobStore {
   }
 
   /**
-   * Batched output flush. Cheap to call repeatedly; better-sqlite3 is sync.
+   * Batched output flush. Cheap to call repeatedly; node:sqlite is sync.
    */
   recordOutput(id: string, stdout: string, stderr: string, outputTruncated: boolean): void {
     this.updateOutputStmt.run({
@@ -393,7 +377,7 @@ export class SqliteJobStore implements JobStore {
     const expiresAt = new Date(Date.now() + this.retentionMs).toISOString();
     // SELECT before UPDATE — gateway boot is single-threaded so no row can
     // appear in 'running' between the two statements.
-    const rows = (this.selectRunningOrphansStmt.all?.() ?? []) as Array<{
+    const rows = this.selectRunningOrphansStmt.all() as Array<{
       id: string;
       correlation_id: string;
       started_at: string;
@@ -409,8 +393,8 @@ export class SqliteJobStore implements JobStore {
       stderr: row.stderr ?? "",
       exitCode: row.exit_code,
     }));
-    const result: any = this.markOrphanedStmt.run(now, expiresAt);
-    return { count: result?.changes ?? 0, orphaned };
+    const result = this.markOrphanedStmt.run(now, expiresAt);
+    return { count: Number(result.changes), orphaned };
   }
 
   /**
@@ -418,8 +402,8 @@ export class SqliteJobStore implements JobStore {
    */
   evictExpired(): number {
     const now = new Date().toISOString();
-    const result: any = this.deleteExpiredStmt.run(now);
-    return result?.changes ?? 0;
+    const result = this.deleteExpiredStmt.run(now);
+    return Number(result.changes);
   }
 
   close(): void {

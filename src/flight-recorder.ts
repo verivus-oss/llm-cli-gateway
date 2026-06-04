@@ -6,19 +6,23 @@
  * and `NoopFlightRecorder` (the `FlightRecorderQuery` interface, see bottom
  * of file). This is Option A from
  * docs/plans/cache-awareness.dag.toml#expose-flight-recorder-read-access —
- * a single read-only query surface on the existing class, NOT a sibling
- * read-only SQLite connection. better-sqlite3 in WAL mode handles
- * concurrent readers inside a single process safely, so the additional
- * connection isn't needed and would have to be threaded through
- * GatewayServerRuntime as a separate field.
+ * a single read-only query surface on the existing class, threaded through
+ * GatewayServerRuntime as one field.
+ *
+ * Since the node:sqlite migration (plan B4) that surface runs on a dedicated
+ * read-only connection (`openReadOnly`), opened lazily on first use. node:sqlite
+ * in WAL mode handles concurrent readers alongside the read/write logging
+ * connection inside a single process safely; write attempts on the read-only
+ * connection fail at the engine level (SQLITE_READONLY).
  *
  * Callers MUST pass parameterised SQL — string-interpolation of untrusted
  * values is unsafe even on a "read-only" query.
  */
-import { chmodSync, existsSync, mkdirSync } from "fs";
+import { chmodSync } from "fs";
 import os from "os";
 import path from "path";
-import { createRequire } from "module";
+import { openDatabase, openReadOnly } from "./sqlite-driver.js";
+import type { GatewayDatabase } from "./sqlite-driver.js";
 
 export interface FlightLogStart {
   correlationId: string;
@@ -62,18 +66,6 @@ interface LoggerLike {
   error: (message: string, ...args: any[]) => void;
 }
 
-interface StatementLike {
-  run: (...args: any[]) => void;
-  all?: (...args: any[]) => any[];
-}
-
-interface DatabaseLike {
-  exec: (sql: string) => void;
-  prepare: (sql: string) => StatementLike;
-  transaction: <T extends (...args: any[]) => void>(fn: T) => T;
-  close: () => void;
-}
-
 const MAX_THINKING_BYTES = 1_000_000;
 
 /**
@@ -81,8 +73,8 @@ const MAX_THINKING_BYTES = 1_000_000;
  * columns to the `requests` table if a pre-U23 logs.db is opened. Existing
  * rows keep NULL for the new columns; that is intentional.
  */
-function ensureRequestsCacheColumns(db: DatabaseLike): void {
-  const rows = db.prepare("PRAGMA table_info(requests)").all?.() ?? [];
+function ensureRequestsCacheColumns(db: GatewayDatabase): void {
+  const rows = db.prepare("PRAGMA table_info(requests)").all();
   const names = new Set<string>(
     rows.map((row: any) => (row && typeof row.name === "string" ? row.name : ""))
   );
@@ -100,11 +92,11 @@ function ensureRequestsCacheColumns(db: DatabaseLike): void {
  * promptParts structure (slice 1); legacy rows keep NULL forever.
  *
  * Read access for cache-stats / MCP resources / doctor goes through the
- * read-only `queryRequests()` method on FlightRecorder (no separate read
- * connection — better-sqlite3 in WAL mode handles concurrent readers).
+ * read-only `queryRequests()` method on FlightRecorder (a dedicated
+ * read-only connection — node:sqlite in WAL mode handles concurrent readers).
  */
-function ensureStablePrefixColumns(db: DatabaseLike): void {
-  const rows = db.prepare("PRAGMA table_info(requests)").all?.() ?? [];
+function ensureStablePrefixColumns(db: GatewayDatabase): void {
+  const rows = db.prepare("PRAGMA table_info(requests)").all();
   const names = new Set<string>(
     rows.map((row: any) => (row && typeof row.name === "string" ? row.name : ""))
   );
@@ -124,8 +116,8 @@ function ensureStablePrefixColumns(db: DatabaseLike): void {
  * marker. Pre-κ rows keep NULL; only κ-opt-in callers ever set the
  * column to a non-NULL integer.
  */
-function ensureCacheControlBlocksColumn(db: DatabaseLike): void {
-  const rows = db.prepare("PRAGMA table_info(requests)").all?.() ?? [];
+function ensureCacheControlBlocksColumn(db: GatewayDatabase): void {
+  const rows = db.prepare("PRAGMA table_info(requests)").all();
   const names = new Set<string>(
     rows.map((row: any) => (row && typeof row.name === "string" ? row.name : ""))
   );
@@ -186,20 +178,26 @@ function truncateThinkingBlocks(blocks: string[]): string[] {
 }
 
 export class FlightRecorder {
-  private db: DatabaseLike;
+  private db: GatewayDatabase;
+  /**
+   * Dedicated read-only connection for `queryRequests`. Opened lazily on the
+   * first read-back (a cache/MCP-resource/doctor path, not the hot logging
+   * path) and cached for the recorder's lifetime; closed in `close()`. Write
+   * attempts on this connection fail at the SQLite engine level
+   * (SQLITE_READONLY) — the engine-level replacement for the old
+   * `stmt.readonly` JS guard (plan B4).
+   */
+  private readOnlyDb: GatewayDatabase | null = null;
+  private readonly dbPath: string;
   private insertStartTxn: (entry: FlightLogStart) => void;
   private updateCompleteTxn: (correlationId: string, result: FlightLogResult) => void;
 
   constructor(dbPath: string) {
-    const require = createRequire(import.meta.url);
-    const BetterSqlite3 = require("better-sqlite3");
-
-    const directory = path.dirname(dbPath);
-    if (!existsSync(directory)) {
-      mkdirSync(directory, { recursive: true });
-    }
-
-    this.db = new BetterSqlite3(dbPath);
+    this.dbPath = dbPath;
+    // openDatabase owns parent-directory creation (mkdirSync recursive), so the
+    // recorder no longer does its own mkdir. Any open/DDL failure throws and is
+    // caught by createFlightRecorder → NoopFlightRecorder (graceful degradation).
+    this.db = openDatabase(dbPath);
     this.db.exec("PRAGMA journal_mode = WAL");
     this.db.exec("PRAGMA foreign_keys = ON");
 
@@ -252,7 +250,7 @@ export class FlightRecorder {
 
     // Migration v2: cache_read_tokens / cache_creation_tokens columns on
     // pre-U23 logs.db files. ALTER TABLE ADD COLUMN is idempotent only via
-    // a prior PRAGMA table_info() check; better-sqlite3 has no native
+    // a prior PRAGMA table_info() check; SQLite has no native
     // "IF NOT EXISTS" for ADD COLUMN.
     ensureRequestsCacheColumns(this.db);
     this.db
@@ -299,7 +297,7 @@ export class FlightRecorder {
       VALUES (@request_id, @async_job_id, 'started')
     `);
 
-    this.insertStartTxn = this.db.transaction((entry: FlightLogStart) => {
+    this.insertStartTxn = this.db.withTransaction((entry: FlightLogStart) => {
       insertRequest.run({
         id: entry.correlationId,
         cli: entry.cli,
@@ -344,7 +342,7 @@ export class FlightRecorder {
       WHERE request_id = @id AND status = 'started'
     `);
 
-    this.updateCompleteTxn = this.db.transaction(
+    this.updateCompleteTxn = this.db.withTransaction(
       (correlationId: string, result: FlightLogResult) => {
         const thinkingBlocks =
           result.thinkingBlocks && result.thinkingBlocks.length > 0
@@ -387,37 +385,39 @@ export class FlightRecorder {
 
   /**
    * Read-only query over the requests + gateway_metadata tables. Used by
-   * cache-stats / MCP resources / doctor without exposing a second SQLite
-   * connection. better-sqlite3 in WAL mode handles concurrent readers
-   * inside a single process safely.
+   * cache-stats / MCP resources / doctor.
    *
    * Safety:
    * - Caller MUST pass parameterised SQL — direct string interpolation of
    *   untrusted values is unsafe.
-   * - The compiled statement's `.readonly` flag is checked at runtime;
-   *   anything that can mutate rows (INSERT/UPDATE/DELETE, including the
-   *   `RETURNING` forms that better-sqlite3 surfaces via `.all()`) throws.
-   *   This blocks the writer-disguised-as-reader vector codex-r1/F3
-   *   flagged, even when the caller is internal gateway code.
+   * - The query runs on a dedicated read-only connection
+   *   (`openReadOnly` → `new DatabaseSync(path, { readOnly: true })`), so any
+   *   statement that mutates rows (INSERT/UPDATE/DELETE, including the
+   *   `RETURNING` forms surfaced via `.all()`) fails at the SQLite engine
+   *   level with SQLITE_READONLY ("attempt to write a readonly database").
+   *   This is the engine-level replacement for the old `stmt.readonly` JS
+   *   guard and blocks the writer-disguised-as-reader vector codex-r1/F3
+   *   flagged, even for internal gateway callers. node:sqlite WAL mode permits
+   *   this reader connection to run alongside the read/write logging
+   *   connection in-process; reads see only committed rows (every
+   *   queryRequests callsite is a post-commit readback/cache path).
    */
   queryRequests<T = Record<string, unknown>>(sql: string, ...params: unknown[]): T[] {
-    const stmt = this.db.prepare(sql) as StatementLike & { readonly?: boolean };
-    if (stmt.readonly === false) {
-      throw new Error(
-        "FlightRecorder.queryRequests refuses non-readonly SQL — use a transaction or a separate write surface for INSERT/UPDATE/DELETE."
-      );
+    if (!this.readOnlyDb) {
+      this.readOnlyDb = openReadOnly(this.dbPath);
     }
-    if (!stmt.all) {
-      return [];
-    }
-    return stmt.all(...params) as T[];
+    return this.readOnlyDb.prepare(sql).all(...params) as T[];
   }
 
   flush(): void {
-    // No-op: better-sqlite3 writes synchronously.
+    // No-op: node:sqlite (DatabaseSync) writes synchronously.
   }
 
   close(): void {
+    if (this.readOnlyDb) {
+      this.readOnlyDb.close();
+      this.readOnlyDb = null;
+    }
     this.db.close();
   }
 }
