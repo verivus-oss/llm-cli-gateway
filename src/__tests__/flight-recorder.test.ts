@@ -284,6 +284,23 @@ describe("FlightRecorder migrations (U23 cache columns)", () => {
     expect(noop.queryRequests("SELECT * FROM requests")).toEqual([]);
   });
 
+  it("queryRequests throws after close() and does not reopen the read-only connection", () => {
+    // B-review blocker regression: without the closed-state guard, a
+    // post-close queryRequests lazily REOPENED the RO connection (fd leak,
+    // never closed). Pre-migration semantics: any op on a closed handle threw.
+    const rec = new FlightRecorder(dbPath);
+    rec.logStart({
+      correlationId: "q-closed-1",
+      cli: "claude",
+      model: "sonnet",
+      prompt: "p",
+    });
+    rec.close();
+    expect(() => rec.queryRequests("SELECT COUNT(*) AS c FROM requests")).toThrow(/closed/i);
+    // Still throws on repeat calls — no lazy reopen on retry either.
+    expect(() => rec.queryRequests("SELECT 1")).toThrow(/closed/i);
+  });
+
   it("queryRequests refuses non-readonly statements (DELETE … RETURNING)", () => {
     const rec = new FlightRecorder(dbPath);
     rec.logStart({

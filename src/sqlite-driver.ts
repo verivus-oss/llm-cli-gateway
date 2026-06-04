@@ -131,8 +131,12 @@ class GatewayDatabaseImpl implements GatewayDatabase {
       if (this.inTransaction) {
         throw new Error("nested transaction");
       }
-      this.inTransaction = true;
+      // Mark in-transaction only AFTER BEGIN succeeds: if BEGIN itself throws
+      // (e.g. the connection is closed), no transaction was started and the
+      // flag must stay clear — otherwise every later call would die with a
+      // bogus "nested transaction" (state poisoning; found in B-review).
       this.db.exec("BEGIN");
+      this.inTransaction = true;
       try {
         fn(...args);
         this.db.exec("COMMIT");

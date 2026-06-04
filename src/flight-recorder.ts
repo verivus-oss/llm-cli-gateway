@@ -188,6 +188,9 @@ export class FlightRecorder {
    * `stmt.readonly` JS guard (plan B4).
    */
   private readOnlyDb: GatewayDatabase | null = null;
+
+  /** Set by close(); guards queryRequests from lazily reopening the RO connection. */
+  private closed = false;
   private readonly dbPath: string;
   private insertStartTxn: (entry: FlightLogStart) => void;
   private updateCompleteTxn: (correlationId: string, result: FlightLogResult) => void;
@@ -403,6 +406,13 @@ export class FlightRecorder {
    *   queryRequests callsite is a post-commit readback/cache path).
    */
   queryRequests<T = Record<string, unknown>>(sql: string, ...params: unknown[]): T[] {
+    // Closed-state guard: without it, a post-close() query would lazily
+    // REOPEN the read-only connection (fd leak, no later close — found in
+    // B-review). Matches the pre-migration semantics where any operation on
+    // a closed better-sqlite3 handle threw.
+    if (this.closed) {
+      throw new Error("flight recorder is closed");
+    }
     if (!this.readOnlyDb) {
       this.readOnlyDb = openReadOnly(this.dbPath);
     }
@@ -414,6 +424,7 @@ export class FlightRecorder {
   }
 
   close(): void {
+    this.closed = true;
     if (this.readOnlyDb) {
       this.readOnlyDb.close();
       this.readOnlyDb = null;

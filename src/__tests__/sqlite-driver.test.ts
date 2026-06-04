@@ -203,6 +203,25 @@ describe("sqlite-driver adapter", () => {
 
       db.close();
     });
+
+    it("does not poison inTransaction state when BEGIN itself throws (closed connection)", () => {
+      // Arrange — a transaction wrapper over a connection that is then closed,
+      // so BEGIN fails at startup (B-review blocker: the flag used to be set
+      // before BEGIN, turning every later call into a bogus "nested
+      // transaction").
+      const db = openDatabase(dbPath);
+      db.exec("CREATE TABLE t (id INTEGER PRIMARY KEY)");
+      const txn = db.withTransaction(() => {
+        db.prepare("INSERT INTO t (id) VALUES (1)").run();
+      });
+      db.close();
+
+      // Act + Assert — both calls fail with the REAL cause (closed database),
+      // never with "nested transaction".
+      expect(() => txn()).toThrow(/is not open/i);
+      expect(() => txn()).toThrow(/is not open/i);
+      expect(() => txn()).not.toThrow(/nested transaction/);
+    });
   });
 
   describe("openReadOnly", () => {
