@@ -540,6 +540,23 @@ sessions with full round-1 context):**
   Mistral UNCONDITIONAL. Gemini: B-review pending — provider quota
   exhausted during the round (account-wide, ~4h reset); seat to be filled
   before release per the standing Codex+Gemini+Grok minimum.
+- B-review round 3 — VACUUM delta (0c29a7c): the read-only `guardReadOnly`
+  fix (Mistral security probe: `{ readOnly: true }` blocks every write to the
+  OPEN db but NOT `VACUUM INTO '<path>'`, a new file on disk; better-sqlite3's
+  `stmt.readonly` had blocked it, so the bare engine path was momentarily
+  WEAKER for that one statement) landed AFTER round 2, so the round-2 Codex /
+  Grok approvals did not cover it. Re-reviewed against current HEAD, all three
+  available seats UNCONDITIONAL: Codex (read-only sandbox — walked the
+  `statementLeadingKeywords` tokenizer at src/sqlite-driver.ts:113-170, all
+  bypass shapes blocked, empirically disproved over-block of `SELECT
+  '; VACUUM'` / `[vacuum]` via real node:sqlite; P7 load-bearing verified
+  statically — RO sandbox EROFS blocked the file-escape mutation); Grok
+  (ran the no-op mutation in a `cp -a` scratch copy, rebuilt dist —
+  both P7 tests went red, `existsSync(target)` became `true` / file escaped
+  to disk; restored green; scratch deleted; main tree untouched); Mistral,
+  the probe author (ran the probe, confirmed red-on-no-op, hole fully
+  closed). Gemini seat still deferred to its pro-quota reset (~10:20Z); it
+  reviews the final HEAD covering B1-B4 + the VACUUM delta in one pass.
 
 ## 9c. Approval granularity
 
