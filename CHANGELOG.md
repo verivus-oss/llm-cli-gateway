@@ -42,7 +42,11 @@ anywhere in the consumer tree.
   `{ readOnly: true }`, so write-disguised-as-read SQL fails at the SQLite
   engine level (`SQLITE_READONLY`). This is **stronger** than the old
   better-sqlite3 `stmt.readonly` JS-property check it replaces — enforcement
-  is at the engine, not in JavaScript.
+  is at the engine, not in JavaScript — with one belt-and-braces guard: the
+  read-only connection also rejects `VACUUM`/`VACUUM INTO`, the one statement
+  that writes a new file to disk despite `{ readOnly: true }` (and that
+  `stmt.readonly` previously blocked). ATTACH-then-write and
+  `writable_schema` schema edits are already engine-rejected.
 - Cross-engine WAL crash-recovery fixtures in both directions
   (`src/__tests__/cross-engine-wal.test.ts`): a `better-sqlite3`-written DB
   (SQLite 3.53.1) with live `-wal`/`-shm` from a simulated unclean stop is

@@ -257,6 +257,41 @@ describe("sqlite-driver adapter", () => {
       ro.close();
     });
 
+    it("rejects VACUUM / VACUUM INTO on a read-only connection (writes to disk despite readOnly)", () => {
+      // Arrange — VACUUM INTO writes a NEW file, which the engine's
+      // { readOnly: true } does NOT block; better-sqlite3's stmt.readonly DID
+      // block it, so the adapter restores parity (B-review security probe).
+      seed(dbPath);
+      const ro = openReadOnly(dbPath);
+      const vacuumTarget = path.join(tmpDir, "vacuum-escape.db");
+
+      // Act + Assert — both forms rejected by the guard, and (load-bearing)
+      // NO file is written to disk.
+      expect(() => ro.prepare(`VACUUM INTO '${vacuumTarget}'`).all()).toThrow(
+        /read-only connection rejects VACUUM/i
+      );
+      // Comment/whitespace prefix must not bypass the statement-keyword guard.
+      expect(() => ro.prepare(`/* x */\n  -- y\n  vacuum into '${vacuumTarget}'`).all()).toThrow(
+        /read-only connection rejects VACUUM/i
+      );
+      expect(() => ro.exec("VACUUM")).toThrow(/read-only connection rejects VACUUM/i);
+      // Empty statements and multi-statement exec must not hide a later VACUUM.
+      expect(() => ro.exec(`; SELECT 1; VACUUM INTO '${vacuumTarget}'`)).toThrow(
+        /read-only connection rejects VACUUM/i
+      );
+      expect(existsSync(vacuumTarget)).toBe(false);
+
+      ro.close();
+    });
+
+    it("does NOT block VACUUM on a normal read/write connection", () => {
+      // The guard is read-only-only: a writable connection must still VACUUM.
+      seed(dbPath);
+      const rw = openDatabase(dbPath);
+      expect(() => rw.exec("VACUUM")).not.toThrow();
+      rw.close();
+    });
+
     it("throws when opening a nonexistent file (no file/dir creation)", () => {
       // Arrange
       const missing = path.join(tmpDir, "does-not-exist.db");

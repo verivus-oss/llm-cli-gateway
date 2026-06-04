@@ -204,6 +204,19 @@ check. The existing behavioural test ("non-readonly SQL throws") must keep
 passing with at most an error-message assertion update. WAL mode permits one
 writer + concurrent readers across connections in-process.
 
+**Implementation correction [B-review: Mistral security probe].** The
+engine `{ readOnly: true }` mode is stronger than `stmt.readonly` for every
+write to the OPEN database (INSERT/UPDATE/DELETE/DDL, ATTACH-then-write,
+`writable_schema` schema edits — all SQLITE_READONLY) but NOT for
+`VACUUM INTO '<path>'`, which writes a brand-new file and the engine allows.
+`stmt.readonly` returned false for VACUUM and so DID block it — so the bare
+engine connection was momentarily *weaker* for that one statement. Resolved
+in `src/sqlite-driver.ts`: the read-only `GatewayDatabaseImpl` carries a
+`guardReadOnly` check that rejects statement-leading `VACUUM` keywords
+(comment/whitespace/empty-statement-normalised, including later statements in
+`exec`) on both `prepare` and `exec`, restoring "strictly stronger than
+`stmt.readonly`". Probe P7 in the test-veracity audit pins it.
+
 ### B5. Dependency & policy cleanup (the payoff)
 
 - `package.json`: MOVE `better-sqlite3` from `dependencies` to

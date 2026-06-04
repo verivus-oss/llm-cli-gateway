@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync } from "fs";
+import { mkdtempSync, rmSync, existsSync } from "fs";
 import os from "os";
 import path from "path";
 import { createRequire } from "module";
@@ -299,6 +299,24 @@ describe("FlightRecorder migrations (U23 cache columns)", () => {
     expect(() => rec.queryRequests("SELECT COUNT(*) AS c FROM requests")).toThrow(/closed/i);
     // Still throws on repeat calls — no lazy reopen on retry either.
     expect(() => rec.queryRequests("SELECT 1")).toThrow(/closed/i);
+  });
+
+  it("queryRequests refuses VACUUM INTO (filesystem-write disguised as a read)", () => {
+    // B-review security probe: VACUUM INTO writes a new file on disk and is
+    // NOT blocked by node:sqlite's { readOnly: true } — the adapter's
+    // read-only guard restores the protection better-sqlite3's stmt.readonly
+    // gave. Confirm queryRequests rejects it and writes nothing.
+    const rec = new FlightRecorder(dbPath);
+    const escapePath = path.join(tmpDir, "vacuum-escape.db");
+    rec.logStart({ correlationId: "q-vac-1", cli: "claude", model: "sonnet", prompt: "p" });
+    expect(() => rec.queryRequests(`VACUUM INTO '${escapePath}'`)).toThrow(
+      /read-only connection rejects VACUUM/i
+    );
+    expect(() => rec.queryRequests(`; /* bypass */ VACUUM INTO '${escapePath}'`)).toThrow(
+      /read-only connection rejects VACUUM/i
+    );
+    expect(existsSync(escapePath)).toBe(false);
+    rec.close();
   });
 
   it("queryRequests refuses non-readonly statements (DELETE … RETURNING)", () => {

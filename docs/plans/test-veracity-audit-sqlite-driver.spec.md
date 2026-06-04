@@ -94,6 +94,7 @@ reality is recorded in the Notes column.
 | **P4** | Consumer WAL pragma → DELETE: `src/flight-recorder.ts:201` AND `src/job-store.ts:178` `PRAGMA journal_mode = WAL` → `= DELETE`. | `npx vitest run src/__tests__/cross-engine-wal.test.ts` then `npx vitest run` (full) | `cross-engine WAL crash-recovery (plan B3/B8) > Direction 2 — rollback: node:sqlite production writer → better-sqlite3 reader > better-sqlite3 recovers WAL-only rows that node:sqlite production modules wrote` — `expected false to be true` at `cross-engine-wal.test.ts:450` (`existsSync(logsPath + "-wal")`: no `-wal` sidecar exists under DELETE journaling). Full suite: **1 test** red (only this one). | 1 | Plan candidate also named the driver test "journal_mode is wal". That driver test (`sqlite-driver.test.ts:252`) issues the pragma **in-test** to validate the *adapter*, so it is INTENTIONALLY insensitive to the consumer pragma and stays green — reality recorded. Direction 2's WAL-nonempty guard is the real consumer-pragma detector. See Finding F-P4. |
 | **P5** | `src/sqlite-driver.ts` `wrapStatement.run`: call `stmt.run(...args)` then `return { changes: 0, lastInsertRowid: 0 }` unconditionally. | `npx vitest run src/__tests__/job-store.test.ts` then `npx vitest run` (full) | Job-store: (1) `JobStore > markOrphanedOnStartup > flips running rows to orphaned and leaves terminal rows alone` — `expect(changes.count).toBe(1)` at `job-store.test.ts:257`. (2) `JobStore > evictExpired > deletes rows whose expires_at is in the past` — `expect(removed).toBe(1)` at `job-store.test.ts:296`. Full suite: **6 tests** red (the 2 job-store `.changes` assertions + driver run-shape tests `sqlite-driver.test.ts:64,82` + cross-engine `result.changes` checks). | 2 (job-store) / 6 (full) | Matches plan candidate. Plan cited `job-store.test.ts:257,295`; the eviction assertion is actually at **:296** (`:295` is the `evictExpired()` call line) — reality recorded. |
 | **P6** | `src/sqlite-driver.ts` `openDatabase`: before constructing `DatabaseSync`, `rmSync(dbPath + "-wal", { force: true })` (WAL-recovery sabotage). | `npx vitest run src/__tests__/cross-engine-wal.test.ts` then `npx vitest run` (full) | `cross-engine WAL crash-recovery (plan B3/B8) > Direction 1 — upgrade: better-sqlite3 writer → node:sqlite production reader/writer > recovers WAL-only rows for logs.db AND jobs.db, then operates normally` — `expect(Number(recoveredReqs[0].c)).toBe(LOG_ROWS)` at `cross-engine-wal.test.ts:287` (deleting the snapshot's `-wal` discards the uncheckpointed rows; recovered count < 60). Full suite: **1 test** red (only Direction 1). | 1 | Matches plan candidate ("the B3 fixture test"). Direction 1 opens the crash snapshot through the production `FlightRecorder`/`SqliteJobStore` (both call `openDatabase`), so the sabotage lands on the production read path; the recovery-delta guard (`:290 toBeGreaterThan(mainOnlyCount)`) is what makes the WAL contribution load-bearing. |
+| **P7** | `src/sqlite-driver.ts` `guardReadOnly`: make it a no-op (`return;`) so the read-only connection no longer rejects `VACUUM`. | `npx vitest run src/__tests__/sqlite-driver.test.ts src/__tests__/flight-recorder.test.ts` | (1) `sqlite-driver adapter > openReadOnly > rejects VACUUM / VACUUM INTO on a read-only connection (writes to disk despite readOnly)` — `expected [Function] to throw /read-only connection rejects VACUUM/i` and `expect(existsSync(vacuumTarget)).toBe(false)` becomes `true` (file escaped to disk) at `sqlite-driver.test.ts`. The test includes comment/whitespace prefixes plus an empty-statement/multi-statement `exec` bypass shape (`; SELECT 1; VACUUM INTO ...`). (2) `FlightRecorder ... > queryRequests refuses VACUUM INTO (filesystem-write disguised as a read)` — same, including `; /* bypass */ VACUUM INTO ...`, at `flight-recorder.test.ts`. | 2 | Added in B-review (Mistral security probe): `VACUUM INTO '<path>'` writes a NEW file, which node:sqlite `{ readOnly: true }` does NOT block but better-sqlite3's `stmt.readonly` DID. The guard restores parity; this probe proves the guard is load-bearing (its removal lets a file escape to disk). |
 
 ### Per-probe restoration
 
@@ -106,6 +107,8 @@ After every probe the mutated file(s) were restored with
 - P4 → `cross-engine-wal.test.ts` + `sqlite-driver.test.ts` 20 passed.
 - P5 → `job-store.test.ts` + `sqlite-driver.test.ts` 34 passed.
 - P6 → `sqlite-driver.test.ts` + `cross-engine-wal.test.ts` 20 passed.
+- P7 → `sqlite-driver.test.ts` + `flight-recorder.test.ts` green (probe run
+  in a scratch copy `cp -a`, never the main tree; copy deleted).
 
 Final restoration proof (audit close):
 `npx vitest run src/__tests__/sqlite-driver.test.ts src/__tests__/cross-engine-wal.test.ts`
@@ -126,12 +129,27 @@ because DELETE journaling produces no `-wal` sidecar. No coverage gap:
 the consumer pragma IS pinned, just by a different (and stronger,
 behaviour-level) test than the plan guessed. No probe survived.
 
-**No surviving probes.** All six mutations produced at least one red test
+**F-P7 (security regression caught in B-review, fixed + probed).** Mistral's
+security-beat review found that `VACUUM INTO '<path>'` succeeds on a
+node:sqlite `{ readOnly: true }` connection and writes a new file to disk —
+the engine read-only mode only blocks writes to the OPEN database, not the
+creation of a new file. better-sqlite3's old `stmt.readonly` guard (plan B4)
+returned false for VACUUM and DID block it, so the migrated engine-level
+connection was momentarily *weaker* than the guard it replaced — contradicting
+B4's "strictly stronger" claim. Fixed by `GatewayDatabaseImpl.guardReadOnly`
+(rejects statement-leading `VACUUM` keywords,
+comment/whitespace/empty-statement-normalised and multi-statement aware for
+`exec`) on the read-only connection; ATTACH-then-write and `writable_schema`
+schema edits were already engine-blocked (Mistral verified). Probe P7 pins the
+guard.
+
+**No surviving probes.** All seven mutations produced at least one red test
 at the detector-file scope (P3/P5 additionally fan out across the full
 suite). The new test surface is falsifiable on every probed axis:
-rollback-on-throw, read-only-connection enforcement, bare-named-param
-binding, consumer WAL journaling, `run().changes` pass-through, and
-cross-engine WAL crash recovery (both directions).
+rollback-on-throw, read-only-connection enforcement (incl. the VACUUM
+filesystem-write vector), bare-named-param binding, consumer WAL journaling,
+`run().changes` pass-through, and cross-engine WAL crash recovery (both
+directions).
 
 ## Round expectations
 

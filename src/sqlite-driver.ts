@@ -100,16 +100,112 @@ function wrapStatement(stmt: NodeStatementSync): GatewayStatement {
   };
 }
 
+/**
+ * Return the first keyword for every statement in `sql`, ignoring leading
+ * empty statements, comments, and whitespace. SQLite `exec()` accepts multiple
+ * semicolon-delimited statements, so the read-only guard must inspect each
+ * statement head instead of only the first token in the input.
+ */
+function statementLeadingKeywords(sql: string): string[] {
+  const keywords: string[] = [];
+  let i = 0;
+
+  const skipTrivia = (): void => {
+    for (;;) {
+      while (i < sql.length && /\s|;/.test(sql[i] ?? "")) i++;
+
+      if (sql.startsWith("--", i)) {
+        i += 2;
+        while (i < sql.length && sql[i] !== "\n") i++;
+        continue;
+      }
+
+      if (sql.startsWith("/*", i)) {
+        const end = sql.indexOf("*/", i + 2);
+        i = end === -1 ? sql.length : end + 2;
+        continue;
+      }
+
+      break;
+    }
+  };
+
+  const skipQuoted = (quote: string): void => {
+    i++;
+    while (i < sql.length) {
+      if (sql[i] === quote) {
+        if (sql[i + 1] === quote) {
+          i += 2;
+          continue;
+        }
+        i++;
+        return;
+      }
+      i++;
+    }
+  };
+
+  while (i < sql.length) {
+    skipTrivia();
+    const m = /^[a-zA-Z]+/.exec(sql.slice(i));
+    if (m) {
+      keywords.push(m[0].toUpperCase());
+    }
+
+    while (i < sql.length && sql[i] !== ";") {
+      if (sql.startsWith("--", i)) {
+        i += 2;
+        while (i < sql.length && sql[i] !== "\n") i++;
+      } else if (sql.startsWith("/*", i)) {
+        const end = sql.indexOf("*/", i + 2);
+        i = end === -1 ? sql.length : end + 2;
+      } else if (sql[i] === "'" || sql[i] === '"' || sql[i] === "`") {
+        skipQuoted(sql[i]);
+      } else if (sql[i] === "[") {
+        i++;
+        while (i < sql.length && sql[i] !== "]") i++;
+        if (i < sql.length) i++;
+      } else {
+        i++;
+      }
+    }
+  }
+
+  return keywords;
+}
+
 class GatewayDatabaseImpl implements GatewayDatabase {
   private inTransaction = false;
 
-  constructor(private readonly db: NodeDatabaseSync) {}
+  constructor(
+    private readonly db: NodeDatabaseSync,
+    private readonly readOnly = false
+  ) {}
+
+  /**
+   * Read-only connections reject `VACUUM` (incl. `VACUUM INTO`). The engine's
+   * `{ readOnly: true }` mode blocks every write to the OPEN database
+   * (INSERT/UPDATE/DELETE/DDL, ATTACH-then-write, `writable_schema` schema
+   * edits — all SQLITE_READONLY), but `VACUUM INTO '<path>'` writes a brand
+   * new file on disk and is NOT rejected by the engine. better-sqlite3's old
+   * `stmt.readonly` guard (plan B4) returned false for VACUUM and so DID block
+   * it; without this check the engine connection would be WEAKER than the
+   * guard it replaced for that one statement (found in B-review by Mistral's
+   * security probe). Rejecting VACUUM keeps openReadOnly strictly stronger.
+   */
+  private guardReadOnly(sql: string): void {
+    if (this.readOnly && statementLeadingKeywords(sql).includes("VACUUM")) {
+      throw new Error("read-only connection rejects VACUUM (writes to disk despite readOnly)");
+    }
+  }
 
   exec(sql: string): void {
+    this.guardReadOnly(sql);
     this.db.exec(sql);
   }
 
   prepare(sql: string): GatewayStatement {
+    this.guardReadOnly(sql);
     return wrapStatement(this.db.prepare(sql));
   }
 
@@ -188,15 +284,18 @@ export function openDatabase(dbPath: string): GatewayDatabase {
 
 /**
  * Open a dedicated read-only connection at `dbPath` via
- * `new DatabaseSync(path, { readOnly: true })`. Write attempts fail at the
- * SQLite engine level (SQLITE_READONLY), replacing better-sqlite3's
- * JS-level `stmt.readonly` property check (plan B4) with a strictly stronger
- * engine-level guard.
+ * `new DatabaseSync(path, { readOnly: true })`. Write attempts to the open
+ * database fail at the SQLite engine level (SQLITE_READONLY), replacing
+ * better-sqlite3's JS-level `stmt.readonly` property check (plan B4). The
+ * returned database is constructed with the `readOnly` guard enabled so it
+ * also rejects `VACUUM` — the one statement that writes to disk (a new file)
+ * despite `{ readOnly: true }` and that `stmt.readonly` previously blocked —
+ * keeping this path strictly stronger than the guard it replaced.
  *
  * Does NOT create the directory or file: opening a nonexistent path throws
  * (a read-only connection has nothing to create).
  */
 export function openReadOnly(dbPath: string): GatewayDatabase {
   const { DatabaseSync } = loadNodeSqlite();
-  return new GatewayDatabaseImpl(new DatabaseSync(dbPath, { readOnly: true }));
+  return new GatewayDatabaseImpl(new DatabaseSync(dbPath, { readOnly: true }), true);
 }
