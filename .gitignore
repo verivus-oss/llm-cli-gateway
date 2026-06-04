@@ -19,6 +19,7 @@ build/
 .sqry-cache/
 .preexisting-doctor-index.patch.bak
 .review-unit-*-prompt.md
+docs/personal-mcp/socket-release-assessment-prompt.md
 
 # Local agent/worktree artifacts
 .claude/

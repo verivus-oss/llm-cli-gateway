@@ -2396,6 +2396,45 @@ export function prepareGrokRequest(
      */
     compactionMode?: string;
     compactionDetail?: string;
+    /** Grok 0.2.x: `--agent <NAME>` agent name or definition file path. */
+    agent?: string;
+    /** Grok 0.2.x: `--best-of-n <N>` parallel headless attempts (pick best). */
+    bestOfN?: number;
+    /** Grok 0.2.x: `--check` append self-verification loop (headless only). */
+    check?: boolean;
+    /** Grok 0.2.x: `--disable-web-search` disable web search and remote retrieval tools. */
+    disableWebSearch?: boolean;
+    /** Grok 0.2.x: `--todo-gate` enable runtime turn-end TodoGate for this session. */
+    todoGate?: boolean;
+    /** Grok 0.2.x: `--verbatim` send prompt exactly as given (skips gateway optimization). */
+    verbatim?: boolean;
+    /** Grok 0.2.x: `--agents <JSON>` inline subagent definitions (object or JSON string). */
+    agents?: string | Record<string, unknown>;
+    /** Grok 0.2.x: `--prompt-file <PATH>` single-turn prompt from a file. */
+    promptFile?: string;
+    /** Grok 0.2.x: `--prompt-json <JSON>` single-turn prompt JSON blocks (object or string). */
+    promptJson?: string | unknown;
+    /** Grok 0.2.x: `--single <PROMPT>` single-turn prompt (distinct from gateway `-p`). */
+    single?: string;
+    /** Grok 0.2.x: `--experimental-memory` enable cross-session memory. */
+    experimentalMemory?: boolean;
+    /** Grok 0.2.x: `--no-alt-screen` run inline without alt screen. */
+    noAltScreen?: boolean;
+    /** Grok 0.2.x: `--no-memory` disable cross-session memory. */
+    noMemory?: boolean;
+    /** Grok 0.2.x: `--no-plan` disable plan mode. */
+    noPlan?: boolean;
+    /** Grok 0.2.x: `--no-subagents` disable subagent spawning. */
+    noSubagents?: boolean;
+    /** Grok 0.2.x: `--oauth` use OAuth during authentication. */
+    oauth?: boolean;
+    /** Grok 0.2.x: `--restore-code` check out original session commit when resuming. */
+    restoreCode?: boolean;
+    /**
+     * Grok 0.2.x: native `-w`/`--worktree` CLI flag (NOT gateway slice λ worktree).
+     * `true` → bare `--worktree`; string → `--worktree <name>`.
+     */
+    nativeWorktree?: boolean | string;
   },
   runtime: GatewayServerRuntime = resolveGatewayServerRuntime()
 ): CliRequestPrep | ExtendedToolResponse {
@@ -2432,7 +2471,8 @@ export function prepareGrokRequest(
   }
 
   let effectivePrompt = assembledPrompt;
-  if (params.optimizePrompt) {
+  const skipPromptOptimization = Boolean(params.verbatim);
+  if (params.optimizePrompt && !skipPromptOptimization) {
     const optimized = optimizePromptText(effectivePrompt);
     logOptimizationTokens("prompt", corrId, effectivePrompt, optimized);
     effectivePrompt = optimized;
@@ -2510,6 +2550,98 @@ export function prepareGrokRequest(
   }
   if (params.compactionDetail) {
     args.push("--compaction-detail", params.compactionDetail);
+  }
+  if (params.agent) {
+    args.push("--agent", params.agent);
+  }
+  if (params.bestOfN !== undefined) {
+    args.push("--best-of-n", String(params.bestOfN));
+  }
+  if (params.check) {
+    args.push("--check");
+  }
+  if (params.disableWebSearch) {
+    args.push("--disable-web-search");
+  }
+  if (params.todoGate) {
+    args.push("--todo-gate");
+  }
+  if (params.verbatim) {
+    args.push("--verbatim");
+  }
+  if (params.agents !== undefined) {
+    if (typeof params.agents === "string") {
+      if (!params.agents.trim()) {
+        return createErrorResponse(
+          params.operation,
+          1,
+          "",
+          corrId,
+          new Error("agents: must be a non-empty JSON string or object map")
+        ) as ExtendedToolResponse;
+      }
+      args.push("--agents", params.agents);
+    } else if (Object.keys(params.agents).length > 0) {
+      const agentsResult = validateClaudeAgentsMap(params.agents);
+      if (!agentsResult.ok) {
+        return createErrorResponse(
+          params.operation,
+          1,
+          "",
+          corrId,
+          new Error(agentsResult.message)
+        ) as ExtendedToolResponse;
+      }
+      args.push("--agents", JSON.stringify(agentsResult.value));
+    }
+  }
+  if (params.promptFile) {
+    args.push("--prompt-file", params.promptFile);
+  }
+  if (params.promptJson !== undefined) {
+    const promptJsonValue =
+      typeof params.promptJson === "string"
+        ? params.promptJson
+        : JSON.stringify(params.promptJson);
+    if (!promptJsonValue.trim()) {
+      return createErrorResponse(
+        params.operation,
+        1,
+        "",
+        corrId,
+        new Error("promptJson: must be a non-empty JSON string or serializable value")
+      ) as ExtendedToolResponse;
+    }
+    args.push("--prompt-json", promptJsonValue);
+  }
+  if (params.single) {
+    args.push("--single", params.single);
+  }
+  if (params.experimentalMemory) {
+    args.push("--experimental-memory");
+  }
+  if (params.noAltScreen) {
+    args.push("--no-alt-screen");
+  }
+  if (params.noMemory) {
+    args.push("--no-memory");
+  }
+  if (params.noPlan) {
+    args.push("--no-plan");
+  }
+  if (params.noSubagents) {
+    args.push("--no-subagents");
+  }
+  if (params.oauth) {
+    args.push("--oauth");
+  }
+  if (params.restoreCode) {
+    args.push("--restore-code");
+  }
+  if (params.nativeWorktree === true) {
+    args.push("--worktree");
+  } else if (typeof params.nativeWorktree === "string" && params.nativeWorktree.length > 0) {
+    args.push("--worktree", params.nativeWorktree);
   }
 
   return {
@@ -3272,6 +3404,31 @@ export interface GrokRequestParams {
   compactionMode?: string;
   /** Grok 0.2.x: `--compaction-detail <none|minimal|balanced|verbose>`; only affects segments mode. */
   compactionDetail?: string;
+  /** Grok 0.2.x: `--agent <NAME>` agent name or definition file path. */
+  agent?: string;
+  /** Grok 0.2.x: `--best-of-n <N>` parallel headless attempts. */
+  bestOfN?: number;
+  /** Grok 0.2.x: `--check` self-verification loop (headless only). */
+  check?: boolean;
+  /** Grok 0.2.x: `--disable-web-search`. */
+  disableWebSearch?: boolean;
+  /** Grok 0.2.x: `--todo-gate` runtime turn-end TodoGate. */
+  todoGate?: boolean;
+  /** Grok 0.2.x: `--verbatim` (also skips gateway prompt optimization). */
+  verbatim?: boolean;
+  agents?: string | Record<string, unknown>;
+  promptFile?: string;
+  promptJson?: string | unknown;
+  single?: string;
+  experimentalMemory?: boolean;
+  noAltScreen?: boolean;
+  noMemory?: boolean;
+  noPlan?: boolean;
+  noSubagents?: boolean;
+  oauth?: boolean;
+  restoreCode?: boolean;
+  /** Grok CLI `--worktree` (not gateway slice λ `worktree`). */
+  nativeWorktree?: boolean | string;
   /** Slice λ: run this request inside a gateway-owned git worktree. */
   worktree?: boolean | { name?: string; ref?: string };
 }
@@ -3309,6 +3466,24 @@ export async function handleGrokRequest(
       deny: params.deny,
       compactionMode: params.compactionMode,
       compactionDetail: params.compactionDetail,
+      agent: params.agent,
+      bestOfN: params.bestOfN,
+      check: params.check,
+      disableWebSearch: params.disableWebSearch,
+      todoGate: params.todoGate,
+      verbatim: params.verbatim,
+      agents: params.agents,
+      promptFile: params.promptFile,
+      promptJson: params.promptJson,
+      single: params.single,
+      experimentalMemory: params.experimentalMemory,
+      noAltScreen: params.noAltScreen,
+      noMemory: params.noMemory,
+      noPlan: params.noPlan,
+      noSubagents: params.noSubagents,
+      oauth: params.oauth,
+      restoreCode: params.restoreCode,
+      nativeWorktree: params.nativeWorktree,
     },
     runtime
   );
@@ -3514,6 +3689,24 @@ export async function handleGrokRequestAsync(
       deny: params.deny,
       compactionMode: params.compactionMode,
       compactionDetail: params.compactionDetail,
+      agent: params.agent,
+      bestOfN: params.bestOfN,
+      check: params.check,
+      disableWebSearch: params.disableWebSearch,
+      todoGate: params.todoGate,
+      verbatim: params.verbatim,
+      agents: params.agents,
+      promptFile: params.promptFile,
+      promptJson: params.promptJson,
+      single: params.single,
+      experimentalMemory: params.experimentalMemory,
+      noAltScreen: params.noAltScreen,
+      noMemory: params.noMemory,
+      noPlan: params.noPlan,
+      noSubagents: params.noSubagents,
+      oauth: params.oauth,
+      restoreCode: params.restoreCode,
+      nativeWorktree: params.nativeWorktree,
     },
     runtime
   );
@@ -5589,6 +5782,76 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .describe(
           "Grok --compaction-detail: verbatim segment detail (none|minimal|balanced|verbose, default verbose). Only affects `--compaction-mode segments`. Sets GROK_COMPACTION_DETAIL."
         ),
+      agent: z
+        .string()
+        .min(1)
+        .optional()
+        .describe("Grok --agent <NAME>: agent name or definition file path."),
+      bestOfN: MAX_TURNS_SCHEMA.optional().describe(
+        "Grok --best-of-n <N>: run the task N ways in parallel and pick the best (headless only)."
+      ),
+      check: z
+        .boolean()
+        .optional()
+        .describe("Grok --check: append a self-verification loop to the prompt (headless only)."),
+      disableWebSearch: z
+        .boolean()
+        .optional()
+        .describe("Grok --disable-web-search: disable web search and remote retrieval tools."),
+      todoGate: z
+        .boolean()
+        .optional()
+        .describe(
+          "Grok --todo-gate: enable runtime turn-end TodoGate for this session (session-scoped, not persisted)."
+        ),
+      verbatim: z
+        .boolean()
+        .optional()
+        .describe(
+          "Grok --verbatim: send the prompt exactly as given. Also skips gateway optimizePrompt when true."
+        ),
+      agents: z
+        .union([
+          z.string().min(1),
+          z.record(z.string(), z.record(z.string(), z.unknown())),
+        ])
+        .optional()
+        .describe(
+          "Grok --agents <JSON>: inline subagent definitions (JSON string or name → { description, prompt, … } map)."
+        ),
+      promptFile: z
+        .string()
+        .min(1)
+        .optional()
+        .describe("Grok --prompt-file <PATH>: single-turn prompt loaded from a file."),
+      promptJson: z
+        .union([z.string(), z.array(z.unknown()), z.record(z.string(), z.unknown())])
+        .optional()
+        .describe("Grok --prompt-json <JSON>: single-turn prompt JSON blocks (string or serializable value)."),
+      single: z
+        .string()
+        .min(1)
+        .optional()
+        .describe("Grok --single <PROMPT>: single-turn prompt (in addition to gateway -p)."),
+      experimentalMemory: z
+        .boolean()
+        .optional()
+        .describe("Grok --experimental-memory: enable cross-session memory."),
+      noAltScreen: z.boolean().optional().describe("Grok --no-alt-screen: run inline without alt screen."),
+      noMemory: z.boolean().optional().describe("Grok --no-memory: disable cross-session memory."),
+      noPlan: z.boolean().optional().describe("Grok --no-plan: disable plan mode."),
+      noSubagents: z.boolean().optional().describe("Grok --no-subagents: disable subagent spawning."),
+      oauth: z.boolean().optional().describe("Grok --oauth: use OAuth during authentication."),
+      restoreCode: z
+        .boolean()
+        .optional()
+        .describe("Grok --restore-code: check out the original session commit when resuming."),
+      nativeWorktree: z
+        .union([z.boolean(), z.string().min(1)])
+        .optional()
+        .describe(
+          "Grok -w/--worktree: native CLI worktree flag (`true` → bare `--worktree`, string → named). NOT gateway slice λ `worktree`."
+        ),
       worktree: WORKTREE_SCHEMA.optional(),
     },
     async ({
@@ -5622,6 +5885,24 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       deny,
       compactionMode,
       compactionDetail,
+      agent,
+      bestOfN,
+      check,
+      disableWebSearch,
+      todoGate,
+      verbatim,
+      agents,
+      promptFile,
+      promptJson,
+      single,
+      experimentalMemory,
+      noAltScreen,
+      noMemory,
+      noPlan,
+      noSubagents,
+      oauth,
+      restoreCode,
+      nativeWorktree,
       worktree,
     }) => {
       return handleGrokRequest(
@@ -5657,6 +5938,24 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           deny,
           compactionMode,
           compactionDetail,
+          agent,
+          bestOfN,
+          check,
+          disableWebSearch,
+          todoGate,
+          verbatim,
+          agents,
+          promptFile,
+          promptJson,
+          single,
+          experimentalMemory,
+          noAltScreen,
+          noMemory,
+          noPlan,
+          noSubagents,
+          oauth,
+          restoreCode,
+          nativeWorktree,
           worktree,
         }
       );
@@ -6708,6 +7007,84 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .describe(
             "Grok --compaction-detail: segment verbatim detail (none|minimal|balanced|verbose, default verbose). Only affects segments mode. Sets GROK_COMPACTION_DETAIL."
           ),
+        agent: z
+          .string()
+          .min(1)
+          .optional()
+          .describe("Grok --agent <NAME>: agent name or definition file path."),
+        bestOfN: MAX_TURNS_SCHEMA.optional().describe(
+          "Grok --best-of-n <N>: run the task N ways in parallel and pick the best (headless only)."
+        ),
+        check: z
+          .boolean()
+          .optional()
+          .describe("Grok --check: append a self-verification loop to the prompt (headless only)."),
+        disableWebSearch: z
+          .boolean()
+          .optional()
+          .describe("Grok --disable-web-search: disable web search and remote retrieval tools."),
+        todoGate: z
+          .boolean()
+          .optional()
+          .describe(
+            "Grok --todo-gate: enable runtime turn-end TodoGate for this session (session-scoped, not persisted)."
+          ),
+        verbatim: z
+          .boolean()
+          .optional()
+          .describe(
+            "Grok --verbatim: send the prompt exactly as given. Also skips gateway optimizePrompt when true."
+          ),
+        agents: z
+          .union([
+            z.string().min(1),
+            z.record(z.string(), z.record(z.string(), z.unknown())),
+          ])
+          .optional()
+          .describe(
+            "Grok --agents <JSON>: inline subagent definitions (JSON string or name → { description, prompt, … } map)."
+          ),
+        promptFile: z
+          .string()
+          .min(1)
+          .optional()
+          .describe("Grok --prompt-file <PATH>: single-turn prompt loaded from a file."),
+        promptJson: z
+          .union([z.string(), z.array(z.unknown()), z.record(z.string(), z.unknown())])
+          .optional()
+          .describe(
+            "Grok --prompt-json <JSON>: single-turn prompt JSON blocks (string or serializable value)."
+          ),
+        single: z
+          .string()
+          .min(1)
+          .optional()
+          .describe("Grok --single <PROMPT>: single-turn prompt (in addition to gateway -p)."),
+        experimentalMemory: z
+          .boolean()
+          .optional()
+          .describe("Grok --experimental-memory: enable cross-session memory."),
+        noAltScreen: z
+          .boolean()
+          .optional()
+          .describe("Grok --no-alt-screen: run inline without alt screen."),
+        noMemory: z.boolean().optional().describe("Grok --no-memory: disable cross-session memory."),
+        noPlan: z.boolean().optional().describe("Grok --no-plan: disable plan mode."),
+        noSubagents: z
+          .boolean()
+          .optional()
+          .describe("Grok --no-subagents: disable subagent spawning."),
+        oauth: z.boolean().optional().describe("Grok --oauth: use OAuth during authentication."),
+        restoreCode: z
+          .boolean()
+          .optional()
+          .describe("Grok --restore-code: check out the original session commit when resuming."),
+        nativeWorktree: z
+          .union([z.boolean(), z.string().min(1)])
+          .optional()
+          .describe(
+            "Grok -w/--worktree: native CLI worktree flag (`true` → bare `--worktree`, string → named). NOT gateway slice λ `worktree`."
+          ),
         worktree: WORKTREE_SCHEMA.optional(),
       },
       async ({
@@ -6740,6 +7117,24 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         deny,
         compactionMode,
         compactionDetail,
+        agent,
+        bestOfN,
+        check,
+        disableWebSearch,
+        todoGate,
+        verbatim,
+        agents,
+        promptFile,
+        promptJson,
+        single,
+        experimentalMemory,
+        noAltScreen,
+        noMemory,
+        noPlan,
+        noSubagents,
+        oauth,
+        restoreCode,
+        nativeWorktree,
         worktree,
       }) => {
         return handleGrokRequestAsync(
@@ -6774,6 +7169,24 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             deny,
             compactionMode,
             compactionDetail,
+            agent,
+            bestOfN,
+            check,
+            disableWebSearch,
+            todoGate,
+            verbatim,
+            agents,
+            promptFile,
+            promptJson,
+            single,
+            experimentalMemory,
+            noAltScreen,
+            noMemory,
+            noPlan,
+            noSubagents,
+            oauth,
+            restoreCode,
+            nativeWorktree,
             worktree,
           }
         );

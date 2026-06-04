@@ -91,6 +91,7 @@ const lock = JSON.parse(fs.readFileSync('package-lock.json', 'utf8'));
 const blocked = new Map([
   ['content-type', new Set(['2.0.0'])],
   ['type-is', new Set(['2.1.0'])],
+  ['tar-stream', new Set(['2.2.0', '2.1.4', '2.0.0'])],
 ]);
 const findings = [];
 
@@ -127,6 +128,7 @@ const lock = JSON.parse(fs.readFileSync('package-lock.json', 'utf8'));
 const blocked = new Map([
   ['content-type', new Set(['2.0.0'])],
   ['type-is', new Set(['2.1.0'])],
+  ['tar-stream', new Set(['2.2.0', '2.1.4', '2.0.0'])],
 ]);
 const findings = [];
 
@@ -147,5 +149,49 @@ if (findings.length > 0) {
 console.log('Packed consumer install does not resolve blocked Socket-flagged versions.');
 NODE
 popd >/dev/null
+
+echo "==> shipped dist Socket network heuristic scan"
+npm run build --silent
+node --input-type=module <<'NODE'
+import fs from 'node:fs';
+import path from 'node:path';
+
+const dist = path.resolve('dist');
+const pattern = /\bfetch\b/i;
+const findings = [];
+
+function walk(dir) {
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      if (entry.name === '__tests__') continue;
+      walk(full);
+      continue;
+    }
+    if (!entry.name.endsWith('.js')) continue;
+    const lines = fs.readFileSync(full, 'utf8').split(/\r?\n/);
+    lines.forEach((line, index) => {
+      if (pattern.test(line)) {
+        findings.push(`${path.relative(process.cwd(), full)}:${index + 1}: ${line.trim()}`);
+      }
+    });
+  }
+}
+
+if (!fs.existsSync(dist)) {
+  console.error('dist/ missing; run npm run build before release-security-audit');
+  process.exit(1);
+}
+
+walk(dist);
+
+if (findings.length > 0) {
+  console.error('Literal "fetch" found in shipped dist/*.js (Socket networkAccess heuristic):');
+  for (const finding of findings) console.error(finding);
+  process.exit(1);
+}
+
+console.log('No literal "fetch" in shipped dist/*.js.');
+NODE
 
 echo "Release security audit passed."

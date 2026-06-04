@@ -41,6 +41,7 @@ jobs:
 
       - run: npm ci --ignore-scripts --no-audit --no-fund
       - run: npm run build
+      - run: npm run security:audit
 
       - name: Verify package version matches tag
         if: github.event_name == 'release'

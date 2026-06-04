@@ -223,6 +223,32 @@ describe("REGRESSIONS C — Phase 4 contracts must expose slice α/γ/δ params"
     expect(UPSTREAM_CLI_CONTRACTS.grok.mcpParameters).toContain("maxTurns");
   });
 
+  it("Grok contract exposes 0.2.x headless MCP params", () => {
+    const params = UPSTREAM_CLI_CONTRACTS.grok.mcpParameters;
+    for (const name of [
+      "agent",
+      "bestOfN",
+      "check",
+      "disableWebSearch",
+      "todoGate",
+      "verbatim",
+      "agents",
+      "promptFile",
+      "promptJson",
+      "single",
+      "experimentalMemory",
+      "noAltScreen",
+      "noMemory",
+      "noPlan",
+      "noSubagents",
+      "oauth",
+      "restoreCode",
+      "nativeWorktree",
+    ]) {
+      expect(params).toContain(name);
+    }
+  });
+
   it("Mistral contract exposes slice γ trust + slice δ maxTurns + maxPrice", () => {
     const params = UPSTREAM_CLI_CONTRACTS.mistral.mcpParameters;
     expect(params).toContain("trust");
@@ -298,6 +324,36 @@ describe("REGRESSIONS E — both sync and async tools expose slice fields", () =
     const { shape } = getRegisteredToolSchema(name);
     expect(Object.keys(shape)).toContain("maxTurns");
   });
+
+  it.each(["grok_request", "grok_request_async"])(
+    "%s exposes Grok 0.2.x headless params",
+    name => {
+      const { shape } = getRegisteredToolSchema(name);
+      const fields = Object.keys(shape);
+      for (const param of [
+        "agent",
+        "bestOfN",
+        "check",
+        "disableWebSearch",
+        "todoGate",
+        "verbatim",
+        "agents",
+        "promptFile",
+        "promptJson",
+        "single",
+        "experimentalMemory",
+        "noAltScreen",
+        "noMemory",
+        "noPlan",
+        "noSubagents",
+        "oauth",
+        "restoreCode",
+        "nativeWorktree",
+      ]) {
+        expect(fields).toContain(param);
+      }
+    }
+  );
 
   it.each(["mistral_request", "mistral_request_async"])(
     "%s exposes trust + maxTurns + maxPrice",

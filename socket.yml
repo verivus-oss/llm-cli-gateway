@@ -25,6 +25,11 @@ version: 2
 #     imported or called from upstream-contracts.ts. The wording now uses
 #     "remote retrieval" to avoid that heuristic.
 #
+#     Transitive tar-stream@2.2.0 (better-sqlite3 → prebuild-install → tar-fs)
+#     triggered Socket "Potential vulnerability" (tar path traversal at install
+#     only). v1.17.7+ overrides tar-stream to 3.1.7 and blocks 2.x in the
+#     release security audit.
+#
 #   shellAccess
 #     This alert fires on every module that imports node:child_process, and
 #     because spawning provider CLIs and git is the entire purpose of the package

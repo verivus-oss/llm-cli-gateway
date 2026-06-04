@@ -2,7 +2,9 @@
  * Phase 4 slice δ — Grok `--max-turns` wiring.
  */
 import { describe, expect, it } from "vitest";
+import { optimizePrompt } from "../optimizer.js";
 import { prepareGrokRequest, MAX_TURNS_SCHEMA, MAX_PRICE_SCHEMA } from "../index.js";
+import { validateUpstreamCliArgs } from "../upstream-contracts.js";
 
 function baseParams(extra: Record<string, unknown> = {}) {
   return {
@@ -130,5 +132,100 @@ describe("Grok 0.2.x: --compaction-mode / --compaction-detail wiring", () => {
     if (!("args" in prep)) throw new Error("expected args");
     expect(prep.args).not.toContain("--compaction-mode");
     expect(prep.args).not.toContain("--compaction-detail");
+  });
+});
+
+describe("Grok 0.2.x: headless control flags", () => {
+  it("emits --agent, --best-of-n, --check, --disable-web-search, --todo-gate, --verbatim", () => {
+    const prep = prepareGrokRequest(
+      baseParams({
+        agent: "reviewer",
+        bestOfN: 3,
+        check: true,
+        disableWebSearch: true,
+        todoGate: true,
+        verbatim: true,
+      })
+    );
+    if (!("args" in prep)) throw new Error("expected args");
+    expect(prep.args).toContain("--agent");
+    expect(prep.args).toContain("reviewer");
+    expect(prep.args).toContain("--best-of-n");
+    expect(prep.args).toContain("3");
+    expect(prep.args).toContain("--check");
+    expect(prep.args).toContain("--disable-web-search");
+    expect(prep.args).toContain("--todo-gate");
+    expect(prep.args).toContain("--verbatim");
+  });
+
+  it("does not emit headless flags when omitted", () => {
+    const prep = prepareGrokRequest(baseParams({}));
+    if (!("args" in prep)) throw new Error("expected args");
+    for (const flag of [
+      "--agent",
+      "--best-of-n",
+      "--check",
+      "--disable-web-search",
+      "--todo-gate",
+      "--verbatim",
+    ]) {
+      expect(prep.args).not.toContain(flag);
+    }
+  });
+
+  it("emits Grok 0.2.x help-surface flags (agents, prompt-file, memory, native worktree)", () => {
+    const prep = prepareGrokRequest(
+      baseParams({
+        agents: { reviewer: { description: "review", prompt: "check code" } },
+        promptFile: "/tmp/prompt.md",
+        promptJson: [{ type: "text", text: "hi" }],
+        single: "single-turn",
+        experimentalMemory: true,
+        noAltScreen: true,
+        oauth: true,
+        restoreCode: true,
+        nativeWorktree: "wt-1",
+      })
+    );
+    if (!("args" in prep)) throw new Error("expected args");
+    expect(prep.args).toContain("--agents");
+    expect(prep.args).toContain("--prompt-file");
+    expect(prep.args).toContain("/tmp/prompt.md");
+    expect(prep.args).toContain("--prompt-json");
+    expect(prep.args).toContain("--single");
+    expect(prep.args).toContain("single-turn");
+    expect(prep.args).toContain("--experimental-memory");
+    expect(prep.args).toContain("--no-alt-screen");
+    expect(prep.args).toContain("--oauth");
+    expect(prep.args).toContain("--restore-code");
+    expect(prep.args).toContain("--worktree");
+    expect(prep.args).toContain("wt-1");
+    expect(validateUpstreamCliArgs("grok", prep.args).ok).toBe(true);
+  });
+
+  it("emits bare --worktree when nativeWorktree is true", () => {
+    const prep = prepareGrokRequest(baseParams({ nativeWorktree: true }));
+    if (!("args" in prep)) throw new Error("expected args");
+    const idx = prep.args.indexOf("--worktree");
+    expect(idx).toBeGreaterThan(-1);
+    expect(prep.args[idx + 1]).not.toBe("true");
+  });
+
+  it("skips gateway optimizePrompt when verbatim is true (even if optimizePrompt is true)", () => {
+    const verbose =
+      "Please implement the following feature:\nI would like you to help me with the session management system.";
+    const prepOptimized = prepareGrokRequest(
+      baseParams({ optimizePrompt: true, prompt: verbose })
+    );
+    const prepVerbatim = prepareGrokRequest(
+      baseParams({ optimizePrompt: true, verbatim: true, prompt: verbose })
+    );
+    if (!("effectivePrompt" in prepOptimized) || !("effectivePrompt" in prepVerbatim)) {
+      throw new Error("expected effectivePrompt");
+    }
+    expect(prepOptimized.effectivePrompt).toBe(optimizePrompt(verbose));
+    expect(prepOptimized.effectivePrompt).not.toBe(verbose);
+    expect(prepVerbatim.effectivePrompt).toBe(verbose);
+    expect(prepVerbatim.args).toContain("--verbatim");
   });
 });

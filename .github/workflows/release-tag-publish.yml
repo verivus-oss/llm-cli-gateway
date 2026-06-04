@@ -1,0 +1,56 @@
+# Manual release: merge release commit on main, then run this workflow with tag vX.Y.Z.
+# Verifies npm run check, creates GitHub release (triggers npm-publish + release-installer).
+name: Create release from tag ref
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v1.17.7) — must match package.json on that ref"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  verify-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.tag }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 24
+
+      - name: Verify package version matches tag
+        env:
+          REF_NAME: ${{ inputs.tag }}
+        run: |
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          TAG_VERSION="${REF_NAME#v}"
+          if [ "$PKG_VERSION" != "$TAG_VERSION" ]; then
+            echo "ERROR: package.json ($PKG_VERSION) != tag ($TAG_VERSION)" >&2
+            exit 1
+          fi
+
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - run: npm run check
+
+      - name: Create GitHub release (published)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ inputs.tag }}"
+          VER="${TAG#v}"
+          NOTES="llm-cli-gateway v${VER}. See CHANGELOG.md on this tag for release notes."
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            echo "Release ${TAG} already exists."
+            exit 0
+          fi
+          gh release create "${TAG}" \
+            --title "llm-cli-gateway v${VER}" \
+            --notes "${NOTES}"

@@ -745,6 +745,26 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       // Grok 0.2.x context/compaction controls
       "compactionMode",
       "compactionDetail",
+      // Grok 0.2.x headless controls (advertised on `grok --help`)
+      "agent",
+      "bestOfN",
+      "check",
+      "disableWebSearch",
+      "todoGate",
+      "verbatim",
+      // Grok 0.2.x help-surface flags (contract fixtures in grok-current-help-surface)
+      "agents",
+      "promptFile",
+      "promptJson",
+      "single",
+      "experimentalMemory",
+      "noAltScreen",
+      "noMemory",
+      "noPlan",
+      "noSubagents",
+      "oauth",
+      "restoreCode",
+      "nativeWorktree",
     ],
     flags: {
       "-p": { arity: "one", description: "Prompt text" },
@@ -767,7 +787,10 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         arity: "one",
         description: "Comma-separated disallowed tools",
       },
-      "--resume": { arity: "one", description: "Resume session" },
+      "--resume": {
+        arity: "optional",
+        description: "Resume session by ID, or most recent when omitted",
+      },
       "--continue": { arity: "none", description: "Continue latest session" },
       "--max-turns": {
         arity: "one",
@@ -962,6 +985,30 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         args: ["-p", "hello", "--compaction-mode", "aggressive"],
         expect: "fail",
       },
+      {
+        id: "grok-resume-bare",
+        description: "Grok --resume without session ID is accepted (optional arity)",
+        args: ["-p", "hello", "--resume"],
+        expect: "pass",
+      },
+      {
+        id: "grok-headless-controls",
+        description:
+          "Grok 0.2.x headless flags: agent, best-of-n, check, disable-web-search, todo-gate, verbatim",
+        args: [
+          "-p",
+          "hello",
+          "--agent",
+          "reviewer",
+          "--best-of-n",
+          "3",
+          "--check",
+          "--disable-web-search",
+          "--todo-gate",
+          "--verbatim",
+        ],
+        expect: "pass",
+      },
     ],
   },
   mistral: {
@@ -1002,7 +1049,14 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       "addDir",
     ],
     flags: {
-      "-p": { arity: "one", description: "Prompt text" },
+      "-p": { arity: "one", description: "Prompt text (programmatic mode)" },
+      "--prompt": {
+        arity: "optional",
+        description: "Programmatic prompt (long form of -p; TEXT optional per vibe --help)",
+      },
+      "-v": { arity: "none", description: "Print version (short)" },
+      "--version": { arity: "none", description: "Print version" },
+      "--setup": { arity: "none", description: "Setup API key and exit" },
       "--output": {
         arity: "one",
         values: ["text", "json", "streaming"],
@@ -1020,7 +1074,10 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       // any model call. Removed from the contract, builder, and request schema; the
       // mistral-effort-rejected / mistral-reasoning-effort-rejected fixtures lock it in.
       "--enabled-tools": { arity: "one", description: "Enabled tool" },
-      "--resume": { arity: "one", description: "Resume session" },
+      "--resume": {
+        arity: "optional",
+        description: "Resume session by ID, or interactive picker when omitted",
+      },
       "--continue": { arity: "none", description: "Continue latest session" },
       "--trust": {
         arity: "none",
@@ -1150,6 +1207,20 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         args: ["-p", "hello", "--agent", "auto-approve", "--reasoning-effort", "medium"],
         env: { VIBE_ACTIVE_MODEL: "mistral-medium-3.5" },
         expect: "fail",
+      },
+      {
+        id: "mistral-current-help-surface",
+        description: "Vibe 2.12.x help surface: --prompt, -v, --version, --setup accepted",
+        args: ["--prompt", "hello", "--agent", "auto-approve", "-v", "--version", "--setup"],
+        env: { VIBE_ACTIVE_MODEL: "mistral-medium-3.5" },
+        expect: "pass",
+      },
+      {
+        id: "mistral-resume-bare",
+        description: "Vibe --resume without session ID is accepted (optional arity)",
+        args: ["-p", "hello", "--agent", "auto-approve", "--resume"],
+        env: { VIBE_ACTIVE_MODEL: "mistral-medium-3.5" },
+        expect: "pass",
       },
     ],
   },

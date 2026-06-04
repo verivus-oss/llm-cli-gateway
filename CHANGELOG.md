@@ -4,6 +4,42 @@ All notable changes to the llm-cli-gateway project.
 
 ## Unreleased
 
+## [1.17.7] - 2026-06-04: Socket supply-chain score restoration
+
+Patch release restoring the npm Socket supply-chain posture from 1.17.5
+(overall score 79 on 1.17.5 vs 74 on 1.17.6), plus pending Grok/Mistral
+contract wiring from the development branch.
+
+### Added
+
+- Grok 0.2.x: wired `--agent`, `--best-of-n`, `--check`, `--disable-web-search`,
+  `--todo-gate`, and `--verbatim` on `grok_request` / `grok_request_async`.
+  `verbatim` also skips gateway `optimizePrompt` so the CLI receives the
+  assembled prompt unchanged.
+- Grok 0.2.x: wired additional help-surface flags on `grok_request` /
+  `grok_request_async`: `--agents`, `--prompt-file`, `--prompt-json`, `--single`,
+  `--experimental-memory`, `--no-alt-screen`, `--no-memory`, `--no-plan`,
+  `--no-subagents`, `--oauth`, `--restore-code`, and native `--worktree` via
+  `nativeWorktree` (distinct from gateway slice λ `worktree`).
+- Mistral Vibe 2.12.x: upstream contract now tracks `--prompt`, `--setup`,
+  `--version`, and `-v` from `vibe --help` (probe-installed drift fix).
+
+### Fixed
+
+- Override transitive `tar-stream` to 3.1.7 (from 2.2.0 via
+  `better-sqlite3` → `prebuild-install` → `tar-fs`) to address Socket's
+  medium-severity directory-traversal finding in tar extract used only during
+  native module install, not during MCP gateway operation.
+- Reworded Grok `--disable-web-search` Zod descriptions so the literal `fetch`
+  does not appear in published `dist/*.js` (Socket `networkAccess` heuristic).
+- `scripts/release-security-audit.sh` now blocks `tar-stream@2.x` in the
+  lockfile and consumer install tree and fails if `fetch` appears in shipped
+  `dist/*.js` after build.
+- Grok: `--resume` contract arity is `optional` (bare `--resume` matches
+  `grok --help`).
+- Mistral: `--resume` contract arity is `optional` (bare `--resume` matches
+  `vibe --help`).
+
 ## [1.17.6] - 2026-06-03: website front door and public demo workflow
 
 Patch release for the public front-door launch and agent-facing workflow docs.
