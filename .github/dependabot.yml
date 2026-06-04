@@ -51,6 +51,18 @@ updates:
         update-types:
           - "minor"
           - "patch"
+    # Socket-flagged releases the security audit hard-fails (blocklist in
+    # scripts/release-security-audit.sh) — Dependabot must not keep
+    # proposing them (PR #32 bumped type-is to 2.1.0; the audit rejected it
+    # by design, and 2.1.0 additionally depends on the equally-flagged
+    # content-type ^2.0.0). Ignore EXACTLY the flagged versions so any
+    # future clean release (e.g. a type-is 2.1.1) still surfaces for
+    # review; the audit blocklist remains the hard gate either way.
+    ignore:
+      - dependency-name: "type-is"
+        versions: ["2.1.0"]
+      - dependency-name: "content-type"
+        versions: ["2.0.0"]
 
   - package-ecosystem: "pip"
     directory: "/requirements/ci"
