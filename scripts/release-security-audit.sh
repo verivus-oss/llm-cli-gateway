@@ -83,16 +83,26 @@ if (findings.length > 0) {
 console.log('No production source calls better-sqlite3 db.pragma().');
 NODE
 
-echo "==> shrinkwrap presence + lockfile parity"
+echo "==> shrinkwrap presence + prod-projection parity"
 if [ ! -f npm-shrinkwrap.json ]; then
   echo "npm-shrinkwrap.json missing — consumers would resolve their own (unpinned) transitive versions. Run scripts/pre-release.sh." >&2
   exit 1
 fi
-if ! cmp -s package-lock.json npm-shrinkwrap.json; then
-  echo "npm-shrinkwrap.json differs from package-lock.json — regenerate with scripts/pre-release.sh so the shipped pin set matches the audited lockfile." >&2
+# The shipped shrinkwrap is the PROD-ONLY projection of package-lock.json
+# (dev-only entries + root devDependencies stripped — npm/cli#4323), not a
+# byte-identical copy. Parity = regenerate the expected projection from the
+# current lockfile via the same deterministic generator into a temp file and
+# compare byte-for-byte. Determinism makes this exact; no semantic diff needed.
+EXPECTED_SHRINKWRAP="$(mktemp)"
+trap 'rm -f "${EXPECTED_SHRINKWRAP}"' EXIT
+node scripts/make-prod-shrinkwrap.mjs "${EXPECTED_SHRINKWRAP}" >/dev/null
+if ! cmp -s "${EXPECTED_SHRINKWRAP}" npm-shrinkwrap.json; then
+  echo "npm-shrinkwrap.json is not the prod-only projection of package-lock.json — regenerate with scripts/pre-release.sh (node scripts/make-prod-shrinkwrap.mjs) so the shipped pin set matches the audited lockfile." >&2
   exit 1
 fi
-echo "npm-shrinkwrap.json present and identical to package-lock.json."
+rm -f "${EXPECTED_SHRINKWRAP}"
+trap - EXIT
+echo "npm-shrinkwrap.json present and matches the prod-only projection of package-lock.json."
 
 echo "==> dependency tree policy"
 node --input-type=module <<'NODE'
@@ -149,11 +159,15 @@ const blocked = new Map([
 // arrives via better-sqlite3 → prebuild-install → tar-fs, used solely at
 // install time to extract the prebuilt binding fetched over HTTPS from
 // better-sqlite3's GitHub releases. We ship npm-shrinkwrap.json pinning
-// tar-stream 3.1.7, but npm currently IGNORES published shrinkwraps
-// (npm/cli#7977) — so dependents re-resolve 2.x and we cannot prevent it
-// from this package. The repo's own lockfile check above still hard-fails
-// on these versions. Revisit (remove this advisory carve-out) when
-// npm/cli#7977 is fixed or better-sqlite3 drops prebuild-install.
+// tar-stream 3.1.7. REGISTRY installs DO honour that shrinkwrap (verified
+// via scripts/verify-registry-install.sh against a verdaccio reproduction) —
+// real consumers get 3.1.7. This LOCAL-TARBALL install path, however, IGNORES
+// the nested shrinkwrap (our live repro on npm 11.12.1; npm/cli#5349/#5325
+// class), so it re-resolves 2.x and we cannot prevent it from this package
+// via the tarball channel. The repo's own lockfile check above still
+// hard-fails on these versions. Revisit (remove this advisory carve-out)
+// when better-sqlite3 leaves the prod graph (Phase B / node:sqlite) or npm
+// honours shrinkwraps for local-tarball installs too.
 const consumerAdvisory = new Map([
   ['tar-stream', new Set(['2.2.0', '2.1.4', '2.0.0'])],
 ]);
@@ -182,11 +196,15 @@ if (findings.length > 0) {
 }
 
 if (tarStreamVersions.length > 0 && tarStreamVersions.every(v => v.startsWith('3.'))) {
-  // npm honoured the shipped shrinkwrap — npm/cli#7977 is presumably fixed.
-  console.log(`Packed consumer install resolves tar-stream ${tarStreamVersions.join(', ')} (shrinkwrap honoured — consider removing the advisory carve-out).`);
+  // npm honoured the shrinkwrap even for this local-tarball install — the
+  // local-tarball ignore (npm/cli#5349/#5325 class) is presumably fixed.
+  console.log(`Packed consumer install resolves tar-stream ${tarStreamVersions.join(', ')} (shrinkwrap honoured for local tarball — consider removing the advisory carve-out).`);
 } else {
   for (const advisory of advisories) {
-    console.warn(`ADVISORY (known, upstream, install-time only — npm/cli#7977): ${advisory}`);
+    // Registry installs honour the shrinkwrap (3.1.7 — see
+    // verify-registry-install.sh); this local-tarball path ignores it and
+    // resolves 2.x. Advisory, not fail, until Phase B drops better-sqlite3.
+    console.warn(`ADVISORY (known, upstream, install-time only — local-tarball ignores shrinkwrap, registry honours it): ${advisory}`);
   }
 }
 

@@ -4,6 +4,80 @@ All notable changes to the llm-cli-gateway project.
 
 ## Unreleased
 
+## [1.17.9] - 2026-06-04: prod-only shrinkwrap + registry-fidelity verification
+
+Patch release shipping a prod-only `npm-shrinkwrap.json` and correcting the
+1.17.8 record: registry installs **do** honour the published shrinkwrap (the
+real distribution channel), so consumers of `npm install llm-cli-gateway`
+already get the pinned `tar-stream@3.1.7`. The 1.17.8 changelog called the
+shrinkwrap "inert today because of npm/cli#7977" — that was wrong. npm/cli#7977
+covers a remote-registry edge case; what we actually reproduced on this host
+(npm 11.12.1) is that **local-tarball** installs ignore a nested shrinkwrap
+(npm/cli#5349/#5325 class), while registry installs honour it via the
+packument's `hasShrinkwrap` flag. This release verifies the registry path end
+to end with a verdaccio reproduction.
+
+### Added
+
+- `scripts/make-prod-shrinkwrap.mjs`: deterministic generator that projects
+  `package-lock.json` into a prod-only `npm-shrinkwrap.json` — drops every
+  dev-only (`dev === true`) `packages` entry and deletes the root
+  `devDependencies` field. A byte-identical copy of the lockfile (1.17.8's
+  approach) reified all ~316 packages into consumer trees (npm/cli#4323); the
+  prod-only projection ships ~124 and eliminates the dev-dep bloat for registry
+  consumers. Output is byte-deterministic; the security audit regenerates and
+  compares for parity. `optional` (and any `devOptional`) entries are kept —
+  prod installs need them.
+- `scripts/verify-registry-install.sh`: registry-fidelity gate (run by
+  `scripts/pre-release.sh` and standalone). Publishes the current tree to an
+  ephemeral verdaccio, installs it into a fresh consumer dir, and asserts (a)
+  `tar-stream` resolves to `3.1.7` (shrinkwrap honoured), (b) no dev-dep markers
+  (`vitest`/`typescript`/`eslint`/`prettier`) in the consumer tree, (c) the
+  installed bin prints the expected version, (d) `better-sqlite3` loads from the
+  installed package (binding built through the pinned tar chain). The publish /
+  consumer-install / assertion flow runs entirely against throwaway temp dirs
+  (registry storage, npm cache, userconfig) and the localhost registry — the
+  package under test never reaches the public registry. One exception: the
+  verdaccio bootstrap itself (`npx --yes verdaccio`) resolves through the user's
+  normal npm config and npx cache (unavoidable for an ephemeral tool), touching
+  only verdaccio's own packages. Sets the packument's
+  `_hasShrinkwrap` flag to mirror what npmjs sets at publish (verdaccio does not
+  compute it), so the reproduction faithfully matches the real registry. Logs
+  the observed reified-package count (not hard-asserted in this release).
+
+### Changed
+
+- `scripts/pre-release.sh` / `scripts/refresh-release-lockfile.sh`: replace
+  `cp package-lock.json npm-shrinkwrap.json` with
+  `node scripts/make-prod-shrinkwrap.mjs`; pre-release now also runs
+  `scripts/verify-registry-install.sh` after the shrinkwrap regeneration and the
+  release gate.
+- `scripts/release-security-audit.sh`: the shrinkwrap parity gate no longer does
+  byte-identity against the lockfile (that no longer holds — the shrinkwrap is a
+  prod-only projection). It regenerates the expected projection from
+  `package-lock.json` via the same deterministic generator into a temp file and
+  `cmp -s` against the shipped `npm-shrinkwrap.json`.
+
+### Fixed (record correction)
+
+- The 1.17.8 claim that the shipped shrinkwrap is "inert today because of
+  npm/cli#7977" was incorrect. Registry installs honour it (verified via the new
+  verdaccio reproduction); only **local-tarball** installs ignore it
+  (npm/cli#5349/#5325 class — our live repro). The packed-consumer-install
+  advisory in the audit is requalified accordingly: registry installs get
+  `tar-stream@3.1.7`, local-tarball installs still resolve `tar-stream@2.2.0`,
+  and the advisory (warn, not fail) stays until Phase B drops `better-sqlite3`
+  from the prod graph. The 1.17.8 entry itself is left unedited.
+
+### Known residuals
+
+- Consumer `npm ls` exits ELSPROBLEMS: the pinned `tar-stream@3.1.7` sits
+  outside `tar-fs`'s `^2.1.4` range. Inherent to the out-of-range pin; disappears
+  in 2.0.0 (Phase B / node:sqlite) when the `better-sqlite3 → prebuild-install
+  → tar-fs` chain leaves the prod graph entirely.
+- Local-tarball installs still resolve `tar-stream@2.2.0` (shrinkwrap ignored on
+  that path); the audit's advisory carve-out stays until Phase B.
+
 ## [1.17.8] - 2026-06-04: release-audit integrity fix + shrinkwrap groundwork
 
 Patch release fixing a masking bug in the release security audit and documenting
