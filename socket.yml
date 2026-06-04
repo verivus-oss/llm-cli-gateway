@@ -25,10 +25,15 @@ version: 2
 #     imported or called from upstream-contracts.ts. The wording now uses
 #     "remote retrieval" to avoid that heuristic.
 #
-#     Transitive tar-stream@2.2.0 (better-sqlite3 → prebuild-install → tar-fs)
-#     triggered Socket "Potential vulnerability" (tar path traversal at install
-#     only). v1.17.7+ overrides tar-stream to 3.1.7 and blocks 2.x in the
-#     release security audit.
+#     Historical (resolved in 2.0.0): transitive tar-stream@2.2.0
+#     (better-sqlite3 → prebuild-install → tar-fs) triggered Socket "Potential
+#     vulnerability" (tar path traversal at install only). v1.17.7-1.17.9 worked
+#     around it with a tar-stream 3.1.7 override + prod-only shrinkwrap. As of
+#     2.0.0 the gateway uses Node's built-in `node:sqlite` for persistence;
+#     better-sqlite3 is a devDependency only, so the prod graph has NO native
+#     module and NO tar-stream/prebuild-install/tar-fs install chain. The
+#     release security audit now hard-fails if any of those packages re-enter
+#     the prod graph (and still blocks the flagged tar-stream 2.x versions).
 #
 #   shellAccess
 #     This alert fires on every module that imports node:child_process, and
@@ -69,12 +74,16 @@ version: 2
 #     This is ajv's standard codegen path; no caller-supplied data flows
 #     into the compiled function body.
 #
-#   better-sqlite3 PRAGMA helper
-#     Socket may flag better-sqlite3/lib/methods/pragma.js because it
-#     constructs PRAGMA SQL from its caller-provided `source` string. The
-#     gateway does not call db.pragma() from production code; SQLite setup
-#     uses fixed literal db.exec("PRAGMA ...") statements, and the release
-#     security audit fails future production `.pragma()` calls.
+#   SQLite (node:sqlite) adapter isolation
+#     As of 2.0.0 persistence uses Node's built-in `node:sqlite` module (no
+#     native binding, no install scripts) through a single adapter,
+#     src/sqlite-driver.ts. No `db.pragma()` helper exists on node:sqlite and
+#     the gateway never calls one; SQLite setup uses fixed literal
+#     db.exec("PRAGMA ...") statements. The release security audit hard-fails
+#     if production code references node:sqlite outside the adapter or
+#     reintroduces a `.pragma()` call. (better-sqlite3 — and its
+#     lib/methods/pragma.js that older Socket scans flagged — is now a
+#     devDependency only and is absent from the published prod artifact.)
 
 issueRules:
   # Defaults from Socket. Listed explicitly so future contributors see what
@@ -84,7 +93,7 @@ issueRules:
   didYouMean: true
   installScripts: true
   telemetry: true
-  hasNativeCode: true            # better-sqlite3 — known and expected
+  hasNativeCode: true            # devDependency-only as of 2.0.0 (better-sqlite3); prod artifact has no native code
   shellAccess: false             # reviewed gateway capability; see rationale above
   shellScriptOverride: true
   gitDependency: true

@@ -1,6 +1,6 @@
 {
   "name": "llm-cli-gateway",
-  "version": "1.17.9",
+  "version": "2.0.0",
   "mcpName": "io.github.verivus-oss/llm-cli-gateway",
   "description": "MCP server providing unified access to Claude Code, Codex, Gemini, Grok, and Mistral Vibe CLIs with session management, retry logic, async job orchestration, durable job results, and cross-LLM validation.",
   "license": "MIT",
@@ -40,7 +40,7 @@
     "llm-cli-gateway": "dist/index.js"
   },
   "engines": {
-    "node": ">=20.0.0"
+    "node": ">=24.4.0"
   },
   "files": [
     "dist/**/*.js",
@@ -87,7 +87,6 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
-    "better-sqlite3": "^12.10.0",
     "content-type": "1.0.5",
     "smol-toml": "^1.6.1",
     "type-is": "2.0.1",
@@ -104,6 +103,7 @@
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "@types/better-sqlite3": "^7.6.0",
+    "better-sqlite3": "^12.10.0",
     "@types/node": "^25.9.1",
     "@types/pg": "^8.11.10",
     "@typescript-eslint/eslint-plugin": "^8.59.4",
@@ -120,8 +120,7 @@
   },
   "overrides": {
     "type-is": "2.0.1",
-    "content-type": "1.0.5",
-    "tar-stream": "3.1.7"
+    "content-type": "1.0.5"
   },
   "directories": {
     "doc": "docs"

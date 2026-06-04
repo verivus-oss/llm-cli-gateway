@@ -45,14 +45,22 @@ if (findings.length > 0) {
 console.log('No production source dynamic execution patterns found.');
 NODE
 
-echo "==> sqlite pragma API scan"
+echo "==> sqlite adapter-isolation + pragma API scan"
 node --input-type=module <<'NODE'
 import fs from 'node:fs';
 import path from 'node:path';
 
 const root = path.resolve('src');
-const findings = [];
-const pattern = /\.\s*pragma\s*\(/;
+// The node:sqlite adapter (src/sqlite-driver.ts) MUST be the only production
+// module that touches node:sqlite — every other module talks to SQLite through
+// the adapter's GatewayDatabase/GatewayStatement surface. We also forbid the
+// better-sqlite3 `db.pragma()` helper API anywhere in prod source (it never
+// existed on node:sqlite; a reappearance signals a botched migration).
+const ADAPTER_REL = path.join('src', 'sqlite-driver.ts');
+const nodeSqlitePattern = /["']node:sqlite["']/;
+const pragmaPattern = /\.\s*pragma\s*\(/;
+const nodeSqliteFindings = [];
+const pragmaFindings = [];
 
 function walk(dir) {
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
@@ -63,10 +71,14 @@ function walk(dir) {
       continue;
     }
     if (!/\.[cm]?[jt]s$/.test(entry.name)) continue;
+    const rel = path.relative(process.cwd(), full);
     const lines = fs.readFileSync(full, 'utf8').split(/\r?\n/);
     lines.forEach((line, index) => {
-      if (pattern.test(line)) {
-        findings.push(`${path.relative(process.cwd(), full)}:${index + 1}: ${line.trim()}`);
+      if (nodeSqlitePattern.test(line) && rel !== ADAPTER_REL) {
+        nodeSqliteFindings.push(`${rel}:${index + 1}: ${line.trim()}`);
+      }
+      if (pragmaPattern.test(line)) {
+        pragmaFindings.push(`${rel}:${index + 1}: ${line.trim()}`);
       }
     });
   }
@@ -74,13 +86,19 @@ function walk(dir) {
 
 walk(root);
 
-if (findings.length > 0) {
-  console.error('better-sqlite3 db.pragma() calls found in production source:');
-  for (const finding of findings) console.error(finding);
+if (nodeSqliteFindings.length > 0) {
+  console.error(`node:sqlite referenced outside the adapter (${ADAPTER_REL}) — the adapter must remain the sole node:sqlite touchpoint:`);
+  for (const finding of nodeSqliteFindings) console.error(finding);
   process.exit(1);
 }
 
-console.log('No production source calls better-sqlite3 db.pragma().');
+if (pragmaFindings.length > 0) {
+  console.error('db.pragma() helper API found in production source (not a node:sqlite API):');
+  for (const finding of pragmaFindings) console.error(finding);
+  process.exit(1);
+}
+
+console.log(`node:sqlite confined to the adapter (${ADAPTER_REL}); no db.pragma() helper API in production source.`);
 NODE
 
 echo "==> shrinkwrap presence + prod-projection parity"
@@ -117,6 +135,15 @@ const blocked = new Map([
 const findings = [];
 
 for (const [path, meta] of Object.entries(lock.packages ?? {})) {
+  // PROD-GRAPH tripwire: in 2.0.0 better-sqlite3 is a devDependency, so its
+  // install-time tar-stream@2.2.0 legitimately lives in the lockfile as a
+  // dev-transitive (`dev: true`) — it never reaches consumers (dev deps don't
+  // install transitively, and the prod-only shrinkwrap excludes it). The
+  // blocklist stays as a HARD tripwire for the PROD graph: skip dev-only
+  // entries, fail on any blocked version that is prod or prod-required
+  // (devOptional). This catches the chain re-entering production while not
+  // false-failing on the deliberate devDependency retention.
+  if (meta.dev === true) continue;
   // 'node_modules/x' and 'node_modules/a/node_modules/x' both end in the
   // package name; splitting on '/node_modules/' misses TOP-LEVEL entries
   // (no leading slash before the delimiter) — that bug masked the
@@ -129,7 +156,7 @@ for (const [path, meta] of Object.entries(lock.packages ?? {})) {
 }
 
 if (findings.length > 0) {
-  console.error('Blocked Socket-flagged dependency versions found in lockfile:');
+  console.error('Blocked Socket-flagged dependency versions found in lockfile prod graph:');
   for (const finding of findings) console.error(finding);
   process.exit(1);
 }
@@ -155,38 +182,24 @@ const blocked = new Map([
   ['type-is', new Set(['2.1.0'])],
   ['tar-stream', new Set(['2.2.0', '2.1.4', '2.0.0'])],
 ]);
-// ADVISORY (warn, don't fail) in the CONSUMER tree only: tar-stream 2.x
-// arrives via better-sqlite3 → prebuild-install → tar-fs, used solely at
-// install time to extract the prebuilt binding fetched over HTTPS from
-// better-sqlite3's GitHub releases. We ship npm-shrinkwrap.json pinning
-// tar-stream 3.1.7. REGISTRY installs DO honour that shrinkwrap (verified
-// via scripts/verify-registry-install.sh against a verdaccio reproduction) —
-// real consumers get 3.1.7. This LOCAL-TARBALL install path, however, IGNORES
-// the nested shrinkwrap (our live repro on npm 11.12.1; npm/cli#5349/#5325
-// class), so it re-resolves 2.x and we cannot prevent it from this package
-// via the tarball channel. The repo's own lockfile check above still
-// hard-fails on these versions. Revisit (remove this advisory carve-out)
-// when better-sqlite3 leaves the prod graph (Phase B / node:sqlite) or npm
-// honours shrinkwraps for local-tarball installs too.
-const consumerAdvisory = new Map([
-  ['tar-stream', new Set(['2.2.0', '2.1.4', '2.0.0'])],
-]);
+// 2.0.0: the entire better-sqlite3 → prebuild-install → tar-fs → tar-stream
+// chain left the prod graph (node:sqlite is built into Node). better-sqlite3
+// is a devDependency now and dev deps do not install for consumers, so a
+// packed consumer install must contain NO tar-stream at all — any version,
+// any path, is a hard fail (the advisory carve-out is gone). Blocked versions
+// of content-type/type-is remain hard tripwires via `blocked`.
 const findings = [];
-const advisories = [];
-const tarStreamVersions = [];
+const tarStreamSightings = [];
 
 for (const [path, meta] of Object.entries(lock.packages ?? {})) {
   // Same top-level-entry fix as the repo lockfile check above.
   const name = meta.name ?? path.split(/node_modules\//).pop();
   if (blocked.get(name)?.has(meta.version)) {
-    const line = `${name}@${meta.version} at ${path || '.'}`;
-    if (consumerAdvisory.get(name)?.has(meta.version)) {
-      advisories.push(line);
-    } else {
-      findings.push(line);
-    }
+    findings.push(`${name}@${meta.version} at ${path || '.'}`);
   }
-  if (name === 'tar-stream') tarStreamVersions.push(meta.version);
+  if (name === 'tar-stream') {
+    tarStreamSightings.push(`${meta.version} at ${path || '.'}`);
+  }
 }
 
 if (findings.length > 0) {
@@ -195,20 +208,13 @@ if (findings.length > 0) {
   process.exit(1);
 }
 
-if (tarStreamVersions.length > 0 && tarStreamVersions.every(v => v.startsWith('3.'))) {
-  // npm honoured the shrinkwrap even for this local-tarball install — the
-  // local-tarball ignore (npm/cli#5349/#5325 class) is presumably fixed.
-  console.log(`Packed consumer install resolves tar-stream ${tarStreamVersions.join(', ')} (shrinkwrap honoured for local tarball — consider removing the advisory carve-out).`);
-} else {
-  for (const advisory of advisories) {
-    // Registry installs honour the shrinkwrap (3.1.7 — see
-    // verify-registry-install.sh); this local-tarball path ignores it and
-    // resolves 2.x. Advisory, not fail, until Phase B drops better-sqlite3.
-    console.warn(`ADVISORY (known, upstream, install-time only — local-tarball ignores shrinkwrap, registry honours it): ${advisory}`);
-  }
+if (tarStreamSightings.length > 0) {
+  console.error('tar-stream present in packed consumer install — the better-sqlite3 chain must be gone from the prod graph in 2.0.0:');
+  for (const sighting of tarStreamSightings) console.error(sighting);
+  process.exit(1);
 }
 
-console.log('Packed consumer install policy passed (no blocked versions beyond the documented advisory).');
+console.log('Packed consumer install policy passed (no blocked versions; no tar-stream in the consumer tree).');
 NODE
 popd >/dev/null
 

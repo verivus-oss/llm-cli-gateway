@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Registry-fidelity verification (Phase A / plan A3).
+# Registry-fidelity verification (plan A3, updated for 2.0.0 / plan B5).
 #
 # Local-tarball installs IGNORE a package's nested shrinkwrap (our live repro on
 # npm 11.12.1 — npm/cli#5349/#5325 class), so the packed-consumer-install audit
@@ -7,7 +7,13 @@
 # Real consumers `npm install llm-cli-gateway` from a registry, and registry
 # installs DO honour the published shrinkwrap. This script proves that end to
 # end: publish the current tree to an ephemeral verdaccio, install it fresh from
-# that registry, and assert the four properties the prod-only shrinkwrap buys us.
+# that registry, and assert the properties the prod-only shrinkwrap buys us.
+#
+# 2.0.0 reality (plan B5): node:sqlite is built into Node, better-sqlite3 is a
+# devDependency, and the tar-stream override is gone. The consumer tree must
+# therefore carry NO better-sqlite3, NO tar-stream, NO prebuild-install — no
+# native module and no install scripts at all — and `npm ls` must exit 0 (the
+# out-of-range tar-stream pin that caused ELSPROBLEMS is gone).
 #
 # The publish / consumer-install / assertion flow is scoped to throwaway temp
 # dirs and the localhost verdaccio registry: every npm invocation in that flow
@@ -30,7 +36,15 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${ROOT_DIR}"
 
 EXPECTED_VERSION="$(node -p "require('./package.json').version")"
-EXPECTED_TAR_STREAM="3.1.7"
+# 2.0.0: the consumer tree must contain NONE of these (native module + its
+# install-time tar chain are gone from the prod graph — node:sqlite is built in).
+FORBIDDEN_IN_CONSUMER=(tar-stream better-sqlite3 prebuild-install)
+# Observed reified package count (incl root) = 94 on npm 11.12.1, 2026-06-04
+# (verdaccio repro), asserted as observed ±2 per plan B5 ("Exact numbers
+# asserted in the registry-fidelity check after implementation"). Plan
+# predicted ~92; 94 observed.
+EXPECTED_REIFIED_MIN=92
+EXPECTED_REIFIED_MAX=96
 
 # The shrinkwrap is generated, never committed (a committed prod-only one
 # breaks npm ci). Regenerate it here so the published tree always carries a
@@ -177,8 +191,9 @@ registry=${REGISTRY}
 cache=${NPM_CACHE}
 NPMRC
 npm init -y >/dev/null 2>&1
-# Install our package by name from the registry. Scripts run (better-sqlite3
-# binding must build through the pinned tar chain — assertion (d)).
+# Install our package by name from the registry. In 2.0.0 the prod graph has no
+# install scripts at all (no native module), so this is a pure metadata/extract
+# install — assertions (a)/(d) verify the native chain is absent.
 if ! npm install "llm-cli-gateway@${EXPECTED_VERSION}" \
      --registry "${REGISTRY}" --cache "${NPM_CACHE}" \
      --no-audit --no-fund 2>&1 | sed 's/^/  /'; then
@@ -188,18 +203,20 @@ fi
 PKG_ROOT="node_modules/llm-cli-gateway"
 [ -d "${PKG_ROOT}" ] || fail "installed package dir ${PKG_ROOT} missing"
 
-# --- Assertion (a): tar-stream pinned to 3.1.7 (shrinkwrap honoured) ---------
-# npm may hoist tar-stream to the consumer root or nest it under the package;
-# search both. EVERY resolved tar-stream must be the pinned version.
-echo "==> assertion (a): tar-stream resolves to ${EXPECTED_TAR_STREAM}"
-mapfile -t TAR_STREAM_PJSONS < <(find node_modules -type f -path '*/tar-stream/package.json' 2>/dev/null)
-[ "${#TAR_STREAM_PJSONS[@]}" -gt 0 ] || fail "no tar-stream found in consumer tree (expected the pinned ${EXPECTED_TAR_STREAM})"
-for pj in "${TAR_STREAM_PJSONS[@]}"; do
-  v="$(node -p "require('./${pj}').version")"
-  echo "    ${pj}: ${v}"
-  [ "${v}" = "${EXPECTED_TAR_STREAM}" ] \
-    || fail "tar-stream at ${pj} is ${v}, expected ${EXPECTED_TAR_STREAM} (shrinkwrap pin NOT honoured)"
+# --- Assertion (a): no native module / tar chain in the consumer tree --------
+# 2.0.0: better-sqlite3 is a devDependency and node:sqlite is built into Node,
+# so NONE of better-sqlite3 / tar-stream / prebuild-install may appear anywhere
+# in the consumer tree (hoisted to root OR nested under the package). Finding
+# ANY of them is a failure — the inverse of the Phase A "pinned 3.1.7" check.
+echo "==> assertion (a): no ${FORBIDDEN_IN_CONSUMER[*]} anywhere in the consumer tree"
+for forbidden in "${FORBIDDEN_IN_CONSUMER[@]}"; do
+  mapfile -t HITS < <(find node_modules -type f -path "*/${forbidden}/package.json" 2>/dev/null)
+  if [ "${#HITS[@]}" -gt 0 ]; then
+    for pj in "${HITS[@]}"; do echo "    UNEXPECTED: ${pj}" >&2; done
+    fail "'${forbidden}' present in consumer tree — the prod graph must be free of the native/tar chain in 2.0.0"
+  fi
 done
+echo "    none present (no native module, no tar chain)."
 
 # --- Assertion (b): no dev-dep markers in the consumer tree ------------------
 echo "==> assertion (b): dev deps (vitest, typescript, eslint, prettier) absent"
@@ -219,19 +236,35 @@ echo "    reported: ${BIN_VERSION}"
 [ "${BIN_VERSION}" = "${EXPECTED_VERSION}" ] \
   || fail "bin --version printed '${BIN_VERSION}', expected '${EXPECTED_VERSION}'"
 
-# --- Assertion (d): better-sqlite3 loads from the installed package dir -------
-echo "==> assertion (d): better-sqlite3 binding loads from the installed package"
-( cd "${PKG_ROOT}" && node -e "require('better-sqlite3'); console.log('    better-sqlite3 loaded OK');" ) \
-  || fail "better-sqlite3 failed to load from ${PKG_ROOT} (binding not built through the pinned tar chain)"
+# --- Assertion (d): consumer `npm ls` exits 0 + node:sqlite runtime smoke -----
+# The out-of-range tar-stream pin that caused ELSPROBLEMS is gone, so the
+# consumer's dependency tree is internally consistent: `npm ls` must exit 0.
+echo "==> assertion (d.1): consumer 'npm ls' exits 0 (no ELSPROBLEMS)"
+if ! npm ls --all >/dev/null 2>&1; then
+  echo "--- npm ls output ---" >&2
+  npm ls --all >&2 || true
+  fail "consumer 'npm ls' exited non-zero (dependency tree inconsistent — out-of-range pin or missing dep)"
+fi
+echo "    npm ls exit 0."
 
-# --- Reified-package count (logged, NOT asserted in Phase A) ------------------
+# node:sqlite is what the installed package now uses for persistence. Cheap
+# runtime sanity that the consumer's Node has the built-in module and can open
+# an in-memory DatabaseSync — the engine the prod artifact relies on.
+echo "==> assertion (d.2): node:sqlite runtime available (DatabaseSync opens :memory:)"
+node -e "new (require('node:sqlite').DatabaseSync)(':memory:'); console.log('    node:sqlite DatabaseSync OK');" \
+  || fail "node:sqlite DatabaseSync unavailable on the running Node — engines floor (>=24.4.0) not met"
+
+# --- Reified-package count (asserted as a range; plan B5) ---------------------
 REIFIED_COUNT="$(node -e '
 const fs = require("fs");
 const lock = JSON.parse(fs.readFileSync("package-lock.json", "utf8"));
 console.log(Object.keys(lock.packages ?? {}).length);
-' 2>/dev/null || echo "unknown")"
-echo "==> consumer reified packages (incl root): ${REIFIED_COUNT} (plan predicts ~124; logged, not asserted in Phase A)"
+' 2>/dev/null || echo "0")"
+echo "==> consumer reified packages (incl root): ${REIFIED_COUNT} (observed 94; asserting ${EXPECTED_REIFIED_MIN}-${EXPECTED_REIFIED_MAX})"
+if [ "${REIFIED_COUNT}" -lt "${EXPECTED_REIFIED_MIN}" ] || [ "${REIFIED_COUNT}" -gt "${EXPECTED_REIFIED_MAX}" ]; then
+  fail "consumer reified package count ${REIFIED_COUNT} outside expected range ${EXPECTED_REIFIED_MIN}-${EXPECTED_REIFIED_MAX} (better-sqlite3 prod subtree should be gone)"
+fi
 
 popd >/dev/null
 
-echo "Registry-fidelity verification passed (all four assertions green)."
+echo "Registry-fidelity verification passed (all assertions green)."

@@ -19,15 +19,30 @@ echo "==> regenerate npm-shrinkwrap.json (prod-only; ships in the tarball, pins 
 # Deterministic; the security audit regenerates and compares for parity.
 node scripts/make-prod-shrinkwrap.mjs
 
-echo "==> better-sqlite3 native binding sanity"
-# npm install after an overrides change can re-lay the better-sqlite3 subtree
-# without re-running its install script, leaving no build/Release binding —
-# the whole test suite then fails with "Could not locate the bindings file"
-# (hit during v1.17.7 prep).
-node -e "require('better-sqlite3')" 2>/dev/null || npm rebuild better-sqlite3
-
-echo "==> tar-stream resolution"
-npm ls tar-stream
+echo "==> prod graph is free of the better-sqlite3 / tar chain (2.0.0)"
+# 2.0.0 moved better-sqlite3 to devDependencies and dropped the tar-stream
+# override; node:sqlite is built into Node, so the prod graph carries no native
+# module and no better-sqlite3 → prebuild-install → tar-fs → tar-stream chain.
+# Robust assertion: inspect the GENERATED prod-only shrinkwrap (the exact tree
+# registry consumers receive) rather than `npm ls`, which still shows these as
+# dev-transitives in the repo tree. tar-stream/better-sqlite3/prebuild-install/
+# tar-fs MUST be absent from the prod projection.
+node --input-type=module <<'NODE'
+import fs from 'node:fs';
+const lock = JSON.parse(fs.readFileSync('npm-shrinkwrap.json', 'utf8'));
+const forbidden = new Set(['better-sqlite3', 'prebuild-install', 'tar-fs', 'tar-stream']);
+const found = [];
+for (const [path, meta] of Object.entries(lock.packages ?? {})) {
+  const name = meta.name ?? path.split(/node_modules\//).pop();
+  if (forbidden.has(name)) found.push(`${name}@${meta.version} at ${path || '.'}`);
+}
+if (found.length > 0) {
+  console.error('Forbidden native/tar-chain packages in the prod-only shrinkwrap (should be devDependency-only in 2.0.0):');
+  for (const f of found) console.error(f);
+  process.exit(1);
+}
+console.log('Prod-only shrinkwrap is free of better-sqlite3/prebuild-install/tar-fs/tar-stream.');
+NODE
 
 echo "==> release gate"
 npm run check
@@ -35,9 +50,10 @@ npm run check
 echo "==> registry-fidelity verification (verdaccio publish + fresh consumer install)"
 # Real consumers install from a registry, and registry installs DO honour the
 # shipped shrinkwrap (unlike local-tarball installs). Publish the current tree
-# to an ephemeral verdaccio and assert the consumer gets the pinned tar chain,
-# no dev-dep bloat, a working bin, and a loadable better-sqlite3 binding. Needs
-# the regenerated npm-shrinkwrap.json (above) and the built dist/ (npm check).
+# to an ephemeral verdaccio and assert the consumer tree has no native module
+# or tar chain (no better-sqlite3/tar-stream), no dev-dep bloat, a working bin,
+# a clean `npm ls`, and a working node:sqlite runtime. Needs the regenerated
+# npm-shrinkwrap.json (above) and the built dist/ (npm check).
 bash scripts/verify-registry-install.sh
 
 echo "Pre-release checks passed."

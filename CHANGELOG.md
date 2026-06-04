@@ -4,6 +4,103 @@ All notable changes to the llm-cli-gateway project.
 
 ## Unreleased
 
+## [2.0.0] - 2026-06-04: node:sqlite migration — native module out of the prod graph
+
+Major release. Persistence moves from the native `better-sqlite3` binding to
+Node's built-in `node:sqlite` module behind a thin adapter. The entire
+1.17.6-1.17.8 supply-chain incident class — every one of which traced to
+`better-sqlite3`'s install path (`prebuild-install → tar-fs → tar-stream`),
+not its runtime — is now **structurally** gone: the production dependency
+graph contains zero native modules, zero install scripts, and no
+`prebuild-install`/`tar-fs`/`tar-stream` chain. Verified end to end against a
+verdaccio registry reproduction (`scripts/verify-registry-install.sh`):
+consumer tree reified at 94 packages (down from ~124 in 1.17.9), `npm ls`
+exits 0, and no `better-sqlite3`/`tar-stream`/`prebuild-install` appears
+anywhere in the consumer tree.
+
+### BREAKING
+
+- **`engines.node` is now `>=24.4.0`** (was `>=20.0.0`). Node 20 is EOL
+  (April 2026). The 24.4 floor is required because `node:sqlite`'s
+  `allowBareNamedParameters` defaults to `true` only from Node 24.4 — the
+  persistence layer binds bare `{ id: ... }` objects to `@id` placeholders
+  throughout, and on 24.0-24.3 that would need a per-statement
+  `setAllowBareNamedParameters(true)` call. The adapter unit tests assert
+  bare-name binding works, so a regression in either direction is caught.
+
+### Added
+
+- `src/sqlite-driver.ts`: thin adapter over `node:sqlite`'s `DatabaseSync`.
+  Exports `openDatabase`, `openReadOnly`, and a `GatewayDatabase` /
+  `GatewayStatement` surface (`exec`/`prepare`/`run`/`get`/`all`/
+  `withTransaction`/`close`). It is the ONLY production module that touches
+  `node:sqlite`; the release security audit hard-fails if any other
+  production module references it. Preserves the flight recorder's
+  graceful-degradation path (constructor failure → recorder disabled, gateway
+  still runs).
+- Read-only `queryRequests` connection: `openReadOnly` opens the DB with
+  `{ readOnly: true }`, so write-disguised-as-read SQL fails at the SQLite
+  engine level (`SQLITE_READONLY`). This is **stronger** than the old
+  better-sqlite3 `stmt.readonly` JS-property check it replaces — enforcement
+  is at the engine, not in JavaScript.
+- Cross-engine WAL crash-recovery fixtures in both directions
+  (`src/__tests__/cross-engine-wal.test.ts`): a `better-sqlite3`-written DB
+  (SQLite 3.53.1) with live `-wal`/`-shm` from a simulated unclean stop is
+  opened and exercised under `node:sqlite` (3.51.3), and the reverse for the
+  rollback direction. These gate the "zero data migration" claim across the
+  engine-version skew.
+
+### Changed
+
+- `better-sqlite3` **moved from `dependencies` to `devDependencies`** (same
+  `^12.10.0` range; `@types/better-sqlite3` stays in devDependencies). It is
+  retained at dev time deliberately: two suites seed legacy-schema DB files
+  with it (`src/__tests__/flight-recorder.test.ts`,
+  `src/__tests__/test-veracity-regressions-slice-kappa.test.ts`) to simulate
+  databases written by pre-2.0.0 gateways — that realism is the point, and it
+  makes them standing old-engine-writer → node:sqlite-reader coverage on every
+  CI run — and the cross-engine WAL fixtures need a better-sqlite3 writer.
+  Consumers never see it: devDependencies do not install transitively, and the
+  prod-only shrinkwrap excludes the whole subtree.
+- `flight-recorder.ts` / `job-store.ts` now open SQLite through the adapter
+  (`openDatabase`/`openReadOnly`/`withTransaction`) instead of
+  `require("better-sqlite3")`. SQL, schema, migrations, and pragmas are
+  unchanged.
+- `package.json#overrides`: the `tar-stream` pin is **removed** (the chain
+  that needed it is gone from the prod graph). The `type-is` and `content-type`
+  pins stay — unrelated to this chain.
+- `scripts/release-security-audit.sh`: the `consumerAdvisory` carve-out is
+  **deleted** — blocked `tar-stream` versions are now hard-fail tripwires
+  everywhere (the chain no longer exists in any prod tree). The packed-consumer
+  policy now hard-fails on ANY `tar-stream` in the consumer tree (was an
+  advisory warning). The repo-lockfile tripwire skips dev-only entries so the
+  deliberate devDependency `tar-stream@2.2.0` does not false-fail, while still
+  hard-failing any blocked version that re-enters the prod graph. The
+  better-sqlite3 PRAGMA scan is repointed at the adapter: it now also asserts
+  `node:sqlite` is referenced only by `src/sqlite-driver.ts`.
+- `scripts/pre-release.sh`: the better-sqlite3 native-binding sanity guard is
+  removed (the test suite exercises the binding as a devDep and fails loudly if
+  broken); the `npm ls tar-stream` step is replaced by an absence assertion
+  against the generated prod-only shrinkwrap
+  (`better-sqlite3`/`prebuild-install`/`tar-fs`/`tar-stream` must be absent).
+- `scripts/verify-registry-install.sh`: assertions updated for 2.0.0 —
+  `tar-stream`/`better-sqlite3`/`prebuild-install` must be ABSENT from the
+  consumer tree; consumer `npm ls` must exit 0 (the out-of-range pin that
+  caused ELSPROBLEMS is gone); a `node:sqlite` runtime smoke
+  (`new DatabaseSync(':memory:')`) confirms the engine; and the reified package
+  count is asserted at 94 ±2.
+- README, `socket.yml`, and `docs/personal-mcp/RELEASE_READINESS.md` updated to
+  reflect the node:sqlite reality (no native binding, no install scripts,
+  Node >=24.4.0, adapter-isolation audit replacing the PRAGMA-helper note).
+
+### Rollback
+
+Reverting the 2.0.0 commit re-adds `better-sqlite3` to `dependencies`, the
+`tar-stream` override, and the audit advisory carve-out. DB files are
+compatible in both directions — exactly what the cross-engine WAL fixtures
+prove (the rollback claim inherits that gate; it is not asserted
+independently).
+
 ## [1.17.9] - 2026-06-04: prod-only shrinkwrap + registry-fidelity verification
 
 Patch release shipping a prod-only `npm-shrinkwrap.json` and correcting the
