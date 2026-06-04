@@ -466,7 +466,67 @@ sessions with full round-1 context):**
   test-veracity exemplar format; packed-consumer audit remains meaningful
   under the devDep policy.
 
-**FINAL: Phase A 4/4 unconditional; Phase B 4/4 unconditional.**
+**FINAL (plan): Phase A 4/4 unconditional; Phase B 4/4 unconditional.**
+
+## 9d. Implementation-review log (2026-06-04, post-plan)
+
+**Phase A implementation (shipped as 1.17.9):**
+
+- Round 1 (commit 6c9cb82): Grok UNCONDITIONAL (re-ran the registry gate +
+  full suite; flagged a stale "byte-identical" comment, non-blocking);
+  Mistral UNCONDITIONAL; Gemini UNCONDITIONAL (re-verified the verdaccio
+  `_hasShrinkwrap` fidelity patch against the live npmjs packument and
+  arborist behaviour); Codex BLOCKER — the isolation claim in
+  verify-registry-install.sh/CHANGELOG was overstated (`npx --yes verdaccio`
+  bootstraps through the user's npm config). Fixed (comment/doc-only amend →
+  15a4b4b); round 2: 4/4 UNCONDITIONAL.
+- Post-release incident: the first v1.17.9 release attempt failed ALL FOUR
+  npm-ci workflows — a COMMITTED prod-only shrinkwrap is treated by `npm ci`
+  as the authoritative lockfile (no dev deps → EUSAGE). Plan blind spot
+  (A1/A2 implicitly kept 1.17.8's commit-the-shrinkwrap policy, which only
+  worked because that shrinkwrap was byte-identical). Fix a900b60:
+  npm-shrinkwrap.json is GENERATED at audit/pack/publish time and
+  gitignored; workflows updated. Reviewed: 4/4 UNCONDITIONAL (Codex verified
+  arborist gating, Grok audited all 8 workflows for coverage). Release
+  re-cut at a900b60; npm publish green with provenance; registry-consumer
+  verification: tar-stream@3.1.7 honoured, 124 reified packages (was 316),
+  `npm ls tar-stream` ELSPROBLEMS as documented.
+- The verdaccio reproduction needs a fidelity patch: vanilla verdaccio does
+  not set the packument `_hasShrinkwrap` flag that npm's arborist gates
+  shrinkwrap-honouring on; verify-registry-install.sh sets it post-publish
+  to mirror npmjs (verified empirically both ways).
+
+**Phase B implementation (feat/node-sqlite-2.0.0):**
+
+- Units B1 (adapter, 19a6014), B2 (consumer migration, 2362a4c), B3
+  (cross-engine WAL fixtures, 1576536), B4 (deps/policy/docs/engines,
+  2467149) — each with full local gates (1066 → 1068 tests).
+- B-verify: pre-release gate exit 0; verify-registry-install 2.0.0
+  assertions green (no tar-stream/better-sqlite3/prebuild-install in the
+  consumer tree, consumer `npm ls` exit 0, reified count 94 vs plan's ~92,
+  asserted 92–96); clean `npm ci --ignore-scripts` → prod graph fully
+  functional (suite needs `npm rebuild better-sqlite3` for the dev-only
+  fixture writer — the prod graph itself needs no install scripts).
+- B-audit (ε protocol): docs/plans/test-veracity-audit-sqlite-driver.spec.md
+  — 6/6 mutation probes kill observed tests; findings F-P4 (consumer-pragma
+  detector is the cross-engine WAL guard, not the driver's in-test pragma
+  test) and P5 line drift recorded; auditors 4/4 PASS with independent
+  scratch-copy probe re-runs.
+- B-review round 1 (d959998): Grok UNCONDITIONAL (full B1–B10 checklist,
+  scratch pre-release re-run, P1/P4 re-probes); Mistral UNCONDITIONAL
+  (B6/arithmetic beats; 93 prod entries + consumer root = 94); Codex
+  2 BLOCKERS, both reproduced against built dist: (1) post-close
+  queryRequests lazily REOPENED the read-only connection (fd leak — no
+  closed-state guard); (2) withTransaction set inTransaction before BEGIN,
+  poisoning state into permanent bogus "nested transaction" when BEGIN
+  throws. Fixed in 3744bd9 with regression tests (suite 1068).
+- B-review round 2 (3744bd9): Codex UNCONDITIONAL (re-reproduced both
+  exploits against rebuilt dist — now fail correctly; fd count stays 0);
+  Grok UNCONDITIONAL (delta-verified; confirmed the regression tests fail
+  on pre-fix code; callsite analysis — no legitimate post-close reads);
+  Mistral UNCONDITIONAL. Gemini: B-review pending — provider quota
+  exhausted during the round (account-wide, ~4h reset); seat to be filled
+  before release per the standing Codex+Gemini+Grok minimum.
 
 ## 9c. Approval granularity
 
