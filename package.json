@@ -90,7 +90,7 @@
     "better-sqlite3": "^12.10.0",
     "content-type": "1.0.5",
     "smol-toml": "^1.6.1",
-    "type-is": "2.0.1",
+    "type-is": "2.1.0",
     "zod": "^4.4.3"
   },
   "peerDependencies": {
@@ -119,7 +119,7 @@
     "vitest": "^4.0.18"
   },
   "overrides": {
-    "type-is": "2.0.1",
+    "type-is": "2.1.0",
     "content-type": "1.0.5",
     "tar-stream": "3.1.7"
   },
