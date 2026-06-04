@@ -214,9 +214,7 @@ describe("Grok 0.2.x: headless control flags", () => {
   it("skips gateway optimizePrompt when verbatim is true (even if optimizePrompt is true)", () => {
     const verbose =
       "Please implement the following feature:\nI would like you to help me with the session management system.";
-    const prepOptimized = prepareGrokRequest(
-      baseParams({ optimizePrompt: true, prompt: verbose })
-    );
+    const prepOptimized = prepareGrokRequest(baseParams({ optimizePrompt: true, prompt: verbose }));
     const prepVerbatim = prepareGrokRequest(
       baseParams({ optimizePrompt: true, verbatim: true, prompt: verbose })
     );

@@ -325,35 +325,32 @@ describe("REGRESSIONS E — both sync and async tools expose slice fields", () =
     expect(Object.keys(shape)).toContain("maxTurns");
   });
 
-  it.each(["grok_request", "grok_request_async"])(
-    "%s exposes Grok 0.2.x headless params",
-    name => {
-      const { shape } = getRegisteredToolSchema(name);
-      const fields = Object.keys(shape);
-      for (const param of [
-        "agent",
-        "bestOfN",
-        "check",
-        "disableWebSearch",
-        "todoGate",
-        "verbatim",
-        "agents",
-        "promptFile",
-        "promptJson",
-        "single",
-        "experimentalMemory",
-        "noAltScreen",
-        "noMemory",
-        "noPlan",
-        "noSubagents",
-        "oauth",
-        "restoreCode",
-        "nativeWorktree",
-      ]) {
-        expect(fields).toContain(param);
-      }
+  it.each(["grok_request", "grok_request_async"])("%s exposes Grok 0.2.x headless params", name => {
+    const { shape } = getRegisteredToolSchema(name);
+    const fields = Object.keys(shape);
+    for (const param of [
+      "agent",
+      "bestOfN",
+      "check",
+      "disableWebSearch",
+      "todoGate",
+      "verbatim",
+      "agents",
+      "promptFile",
+      "promptJson",
+      "single",
+      "experimentalMemory",
+      "noAltScreen",
+      "noMemory",
+      "noPlan",
+      "noSubagents",
+      "oauth",
+      "restoreCode",
+      "nativeWorktree",
+    ]) {
+      expect(fields).toContain(param);
     }
-  );
+  });
 
   it.each(["mistral_request", "mistral_request_async"])(
     "%s exposes trust + maxTurns + maxPrice",

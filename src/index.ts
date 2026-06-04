@@ -2600,9 +2600,7 @@ export function prepareGrokRequest(
   }
   if (params.promptJson !== undefined) {
     const promptJsonValue =
-      typeof params.promptJson === "string"
-        ? params.promptJson
-        : JSON.stringify(params.promptJson);
+      typeof params.promptJson === "string" ? params.promptJson : JSON.stringify(params.promptJson);
     if (!promptJsonValue.trim()) {
       return createErrorResponse(
         params.operation,
@@ -5811,10 +5809,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           "Grok --verbatim: send the prompt exactly as given. Also skips gateway optimizePrompt when true."
         ),
       agents: z
-        .union([
-          z.string().min(1),
-          z.record(z.string(), z.record(z.string(), z.unknown())),
-        ])
+        .union([z.string().min(1), z.record(z.string(), z.record(z.string(), z.unknown()))])
         .optional()
         .describe(
           "Grok --agents <JSON>: inline subagent definitions (JSON string or name → { description, prompt, … } map)."
@@ -5827,7 +5822,9 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       promptJson: z
         .union([z.string(), z.array(z.unknown()), z.record(z.string(), z.unknown())])
         .optional()
-        .describe("Grok --prompt-json <JSON>: single-turn prompt JSON blocks (string or serializable value)."),
+        .describe(
+          "Grok --prompt-json <JSON>: single-turn prompt JSON blocks (string or serializable value)."
+        ),
       single: z
         .string()
         .min(1)
@@ -5837,10 +5834,16 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .boolean()
         .optional()
         .describe("Grok --experimental-memory: enable cross-session memory."),
-      noAltScreen: z.boolean().optional().describe("Grok --no-alt-screen: run inline without alt screen."),
+      noAltScreen: z
+        .boolean()
+        .optional()
+        .describe("Grok --no-alt-screen: run inline without alt screen."),
       noMemory: z.boolean().optional().describe("Grok --no-memory: disable cross-session memory."),
       noPlan: z.boolean().optional().describe("Grok --no-plan: disable plan mode."),
-      noSubagents: z.boolean().optional().describe("Grok --no-subagents: disable subagent spawning."),
+      noSubagents: z
+        .boolean()
+        .optional()
+        .describe("Grok --no-subagents: disable subagent spawning."),
       oauth: z.boolean().optional().describe("Grok --oauth: use OAuth during authentication."),
       restoreCode: z
         .boolean()
@@ -7036,10 +7039,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             "Grok --verbatim: send the prompt exactly as given. Also skips gateway optimizePrompt when true."
           ),
         agents: z
-          .union([
-            z.string().min(1),
-            z.record(z.string(), z.record(z.string(), z.unknown())),
-          ])
+          .union([z.string().min(1), z.record(z.string(), z.record(z.string(), z.unknown()))])
           .optional()
           .describe(
             "Grok --agents <JSON>: inline subagent definitions (JSON string or name → { description, prompt, … } map)."
@@ -7068,7 +7068,10 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .boolean()
           .optional()
           .describe("Grok --no-alt-screen: run inline without alt screen."),
-        noMemory: z.boolean().optional().describe("Grok --no-memory: disable cross-session memory."),
+        noMemory: z
+          .boolean()
+          .optional()
+          .describe("Grok --no-memory: disable cross-session memory."),
         noPlan: z.boolean().optional().describe("Grok --no-plan: disable plan mode."),
         noSubagents: z
           .boolean()
