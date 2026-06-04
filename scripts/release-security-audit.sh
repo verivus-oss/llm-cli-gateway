@@ -83,6 +83,17 @@ if (findings.length > 0) {
 console.log('No production source calls better-sqlite3 db.pragma().');
 NODE
 
+echo "==> shrinkwrap presence + lockfile parity"
+if [ ! -f npm-shrinkwrap.json ]; then
+  echo "npm-shrinkwrap.json missing — consumers would resolve their own (unpinned) transitive versions. Run scripts/pre-release.sh." >&2
+  exit 1
+fi
+if ! cmp -s package-lock.json npm-shrinkwrap.json; then
+  echo "npm-shrinkwrap.json differs from package-lock.json — regenerate with scripts/pre-release.sh so the shipped pin set matches the audited lockfile." >&2
+  exit 1
+fi
+echo "npm-shrinkwrap.json present and identical to package-lock.json."
+
 echo "==> dependency tree policy"
 node --input-type=module <<'NODE'
 import fs from 'node:fs';
@@ -96,7 +107,11 @@ const blocked = new Map([
 const findings = [];
 
 for (const [path, meta] of Object.entries(lock.packages ?? {})) {
-  const name = meta.name ?? path.split('/node_modules/').pop();
+  // 'node_modules/x' and 'node_modules/a/node_modules/x' both end in the
+  // package name; splitting on '/node_modules/' misses TOP-LEVEL entries
+  // (no leading slash before the delimiter) — that bug masked the
+  // tar-stream@2.2.0 consumer finding in 1.17.7.
+  const name = meta.name ?? path.split(/node_modules\//).pop();
   const versions = blocked.get(name);
   if (versions?.has(meta.version)) {
     findings.push(`${name}@${meta.version} at ${path || '.'}`);
@@ -130,14 +145,34 @@ const blocked = new Map([
   ['type-is', new Set(['2.1.0'])],
   ['tar-stream', new Set(['2.2.0', '2.1.4', '2.0.0'])],
 ]);
+// ADVISORY (warn, don't fail) in the CONSUMER tree only: tar-stream 2.x
+// arrives via better-sqlite3 → prebuild-install → tar-fs, used solely at
+// install time to extract the prebuilt binding fetched over HTTPS from
+// better-sqlite3's GitHub releases. We ship npm-shrinkwrap.json pinning
+// tar-stream 3.1.7, but npm currently IGNORES published shrinkwraps
+// (npm/cli#7977) — so dependents re-resolve 2.x and we cannot prevent it
+// from this package. The repo's own lockfile check above still hard-fails
+// on these versions. Revisit (remove this advisory carve-out) when
+// npm/cli#7977 is fixed or better-sqlite3 drops prebuild-install.
+const consumerAdvisory = new Map([
+  ['tar-stream', new Set(['2.2.0', '2.1.4', '2.0.0'])],
+]);
 const findings = [];
+const advisories = [];
+const tarStreamVersions = [];
 
 for (const [path, meta] of Object.entries(lock.packages ?? {})) {
-  const name = meta.name ?? path.split('/node_modules/').pop();
-  const versions = blocked.get(name);
-  if (versions?.has(meta.version)) {
-    findings.push(`${name}@${meta.version} at ${path || '.'}`);
+  // Same top-level-entry fix as the repo lockfile check above.
+  const name = meta.name ?? path.split(/node_modules\//).pop();
+  if (blocked.get(name)?.has(meta.version)) {
+    const line = `${name}@${meta.version} at ${path || '.'}`;
+    if (consumerAdvisory.get(name)?.has(meta.version)) {
+      advisories.push(line);
+    } else {
+      findings.push(line);
+    }
   }
+  if (name === 'tar-stream') tarStreamVersions.push(meta.version);
 }
 
 if (findings.length > 0) {
@@ -146,7 +181,16 @@ if (findings.length > 0) {
   process.exit(1);
 }
 
-console.log('Packed consumer install does not resolve blocked Socket-flagged versions.');
+if (tarStreamVersions.length > 0 && tarStreamVersions.every(v => v.startsWith('3.'))) {
+  // npm honoured the shipped shrinkwrap — npm/cli#7977 is presumably fixed.
+  console.log(`Packed consumer install resolves tar-stream ${tarStreamVersions.join(', ')} (shrinkwrap honoured — consider removing the advisory carve-out).`);
+} else {
+  for (const advisory of advisories) {
+    console.warn(`ADVISORY (known, upstream, install-time only — npm/cli#7977): ${advisory}`);
+  }
+}
+
+console.log('Packed consumer install policy passed (no blocked versions beyond the documented advisory).');
 NODE
 popd >/dev/null
 
