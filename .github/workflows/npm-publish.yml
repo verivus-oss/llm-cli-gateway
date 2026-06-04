@@ -41,6 +41,15 @@ jobs:
 
       - run: npm ci --ignore-scripts --no-audit --no-fund
       - run: npm run build
+
+      # The prod-only npm-shrinkwrap.json is generated, never committed (a
+      # committed one is treated as the authoritative lockfile and breaks
+      # every `npm ci`/dev install — no dev deps in it). It must exist
+      # before the security audit (presence + parity gate) and before
+      # pack/publish (ships in the tarball; pins registry consumers'
+      # transitive resolution).
+      - run: node scripts/make-prod-shrinkwrap.mjs
+
       - run: npm run security:audit
 
       - name: Verify package version matches tag

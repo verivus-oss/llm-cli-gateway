@@ -1,6 +1,13 @@
 node_modules/
 dist/
 
+# Prod-only shrinkwrap: GENERATED at pack/publish time by
+# scripts/make-prod-shrinkwrap.mjs and shipped in the npm tarball only.
+# Never commit it: npm ci / npm install treat a present npm-shrinkwrap.json
+# as the authoritative lockfile, and the prod-only projection (no dev deps)
+# breaks every dev/CI install with EUSAGE "lock file out of sync".
+npm-shrinkwrap.json
+
 # MCP Registry publishing
 mcp-publisher
 server.json

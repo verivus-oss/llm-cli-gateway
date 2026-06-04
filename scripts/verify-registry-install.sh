@@ -32,6 +32,11 @@ cd "${ROOT_DIR}"
 EXPECTED_VERSION="$(node -p "require('./package.json').version")"
 EXPECTED_TAR_STREAM="3.1.7"
 
+# The shrinkwrap is generated, never committed (a committed prod-only one
+# breaks npm ci). Regenerate it here so the published tree always carries a
+# fresh projection of the current lockfile — standalone runs included.
+node scripts/make-prod-shrinkwrap.mjs
+
 # Pick a random free port (ask the OS for an ephemeral one, then reuse it).
 PORT="$(node -e 'const net=require("net");const s=net.createServer();s.listen(0,()=>{process.stdout.write(String(s.address().port));s.close();});')"
 REGISTRY="http://localhost:${PORT}"

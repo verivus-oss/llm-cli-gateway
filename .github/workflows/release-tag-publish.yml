@@ -38,6 +38,9 @@ jobs:
           fi
 
       - run: npm ci --ignore-scripts --no-audit --no-fund
+      # `npm run check` ends in security:audit, which gates on the generated
+      # (never committed) prod-only npm-shrinkwrap.json being present.
+      - run: node scripts/make-prod-shrinkwrap.mjs
       - run: npm run check
 
       - name: Create GitHub release (published)

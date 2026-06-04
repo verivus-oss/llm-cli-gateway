@@ -41,6 +41,9 @@ jobs:
       - run: npm run format:check
       - run: npm run test:fuzz
       - run: npm run test:ci
+      # security:audit gates on npm-shrinkwrap.json presence + parity; the
+      # shrinkwrap is generated, never committed (it would break npm ci).
+      - run: node scripts/make-prod-shrinkwrap.mjs
       - run: npm run security:audit
 
   pack-smoke-test:
@@ -57,6 +60,9 @@ jobs:
           cache: 'npm'
       - run: npm ci
       - run: npm run build
+      # Generate the prod-only shrinkwrap so the packed contents match what
+      # an actual publish ships (it is generated, never committed).
+      - run: node scripts/make-prod-shrinkwrap.mjs
       - name: Verify npm pack contents
         run: |
           npm pack --dry-run 2>&1 | tee pack-output.txt

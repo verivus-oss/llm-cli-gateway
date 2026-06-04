@@ -85,7 +85,7 @@ NODE
 
 echo "==> shrinkwrap presence + prod-projection parity"
 if [ ! -f npm-shrinkwrap.json ]; then
-  echo "npm-shrinkwrap.json missing — consumers would resolve their own (unpinned) transitive versions. Run scripts/pre-release.sh." >&2
+  echo "npm-shrinkwrap.json missing — consumers would resolve their own (unpinned) transitive versions. It is generated, never committed: run node scripts/make-prod-shrinkwrap.mjs (pre-release.sh and the CI/publish workflows do this before auditing/packing)." >&2
   exit 1
 fi
 # The shipped shrinkwrap is the PROD-ONLY projection of package-lock.json

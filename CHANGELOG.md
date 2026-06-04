@@ -27,7 +27,14 @@ to end with a verdaccio reproduction.
   prod-only projection ships ~124 and eliminates the dev-dep bloat for registry
   consumers. Output is byte-deterministic; the security audit regenerates and
   compares for parity. `optional` (and any `devOptional`) entries are kept —
-  prod installs need them.
+  prod installs need them. The shrinkwrap is GENERATED at pack/publish time
+  and never committed: a committed npm-shrinkwrap.json is treated by
+  `npm ci`/`npm install` as the authoritative lockfile, and the prod-only
+  projection (no dev deps) breaks every dev/CI install with EUSAGE "lock
+  file out of sync" — discovered when the first 1.17.9 release attempt
+  failed all four `npm ci`-based workflows. `.gitignore` now covers it; the
+  CI, publish, and tag-release workflows generate it just before the
+  security audit / pack / publish steps.
 - `scripts/verify-registry-install.sh`: registry-fidelity gate (run by
   `scripts/pre-release.sh` and standalone). Publishes the current tree to an
   ephemeral verdaccio, installs it into a fresh consumer dir, and asserts (a)
