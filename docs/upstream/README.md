@@ -42,8 +42,19 @@ The detector has two complementary legs (both advisory only):
    the long flags it actually advertises, and reports:
 
    - `extraFlags` / `installed-help-surface-drift`: flags the binary knows
-     about that the contract in `src/upstream-contracts.ts` does not yet allow.
-   - `missingFlags` / `binary-missing-declared-flags`: the reverse (regressions).
+     about that the contract in `src/upstream-contracts.ts` neither declares
+     nor acknowledges.
+   - `missingFlags` / `binary-missing-declared-flags`: the reverse
+     (regressions). Contract flags marked `hiddenFromHelp` (real, accepted,
+     but deliberately absent from the binary's `--help` — e.g. Claude's
+     `--max-turns`) are excluded; if such a flag reappears in the help text
+     the probe emits a stale-marker warning instead.
+   - `acknowledgedExtraFlags`: installed-binary flags listed in the contract's
+     `acknowledgedUpstreamFlags` (upstream-only surface the gateway
+     deliberately never emits — long-form aliases, interactive-only switches).
+     Filtered out of `extraFlags` so genuinely new upstream flags stand out;
+     acknowledged flags that vanish from the help text produce a stale-entry
+     warning. This list is probe-only and never loosens the argv allowlist.
    - Hash + set diffs against the previous help surface snapshot (if any).
 
    This is the primary reliable signal for Grok (vendor channel, high-level

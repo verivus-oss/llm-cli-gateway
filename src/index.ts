@@ -285,8 +285,8 @@ const loadedSkills = loadSkills();
 // system prompt at connection time. Covers key patterns + pointers to L2 resources.
 const SERVER_INSTRUCTIONS = `llm-cli-gateway: Multi-LLM orchestration via MCP.
 
-Tools: claude_request, codex_request, gemini_request, grok_request, mistral_request (sync) | *_request_async (async)
-Validation: validate_with_models, second_opinion, compare_answers, red_team_review, consensus_check, ask_model, synthesize_validation
+Tools: claude_request, codex_request, gemini_request, grok_request, mistral_request (sync) | *_request_async (async) | codex_fork_session (fork a Codex session into a new branch)
+Validation: validate_with_models, second_opinion, compare_answers, red_team_review, consensus_check, ask_model, synthesize_validation, list_available_models | job_status/job_result (validation jobs)
 Jobs: llm_job_status, llm_job_result, llm_job_cancel
 Sessions: session_create, session_list, session_set_active, session_get, session_delete, session_clear_all
 Other: list_models, cli_versions, upstream_contracts (use --probe-installed after CLI upgrades to detect drift), cli_upgrade, approval_list, llm_process_health, llm_request_result (read back any persisted request — sync or async — by correlationId)
@@ -303,7 +303,7 @@ ${loadedSkills.map(s => `- skills://${s.name} — ${s.description}`).join("\n")}
 
 function newGatewayMcpServer(): McpServer {
   return new McpServer(
-    { name: "llm-cli-gateway", version: "1.0.0" },
+    { name: "llm-cli-gateway", version: packageVersion() },
     { instructions: SERVER_INSTRUCTIONS }
   );
 }

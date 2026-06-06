@@ -205,7 +205,7 @@ Opt-in flags (all default off) live under `[cache_awareness]` in `~/.llm-cli-gat
 
 ### Security & Quality
 
-- **Comprehensive Testing**: 900+ tests covering unit, integration, and regression scenarios with real CLI execution
+- **Comprehensive Testing**: 1,000+ tests covering unit, integration, and regression scenarios with real CLI execution
 - **Input Validation**: Zod schemas prevent injection attacks
 - **No Secret Leakage**: Generic session descriptions only (file permissions 0o600)
 - **No ReDoS**: Bounded regex patterns prevent catastrophic backtracking
@@ -344,6 +344,7 @@ The personal-appliance surface exposes simplified validation tools for non-devel
 - `consensus_check`: check whether providers agree with a claim.
 - `ask_model`: ask one provider through the simplified surface.
 - `synthesize_validation`: run an explicit judge model after provider results have been collected.
+- `list_available_models`: list the models each provider CLI exposes through the simplified surface.
 - `job_status` and `job_result`: poll and collect validation job outputs.
 
 The validation report preserves per-provider disagreement. Optional judge synthesis is explicit about which provider produced the judge job.
@@ -358,13 +359,27 @@ Execute a Claude Code request with optional session management.
 
 - `prompt` (string, required): The prompt to send (1-100,000 chars)
 - `model` (string, optional): Model name or alias (use `list_models` for available values; supports `latest`)
-- `outputFormat` (string, optional): Output format ("text" or "json"), default: "text"
+- `outputFormat` (string, optional): Output format (`text|json|stream-json`), default: `stream-json` — the gateway parses NDJSON usage events for token/cost observability; override to `text` only when you want unparsed stdout
 - `sessionId` (string, optional): Specific session ID to use
 - `continueSession` (boolean, optional): Continue the active session
 - `createNewSession` (boolean, optional): Always create a new session
+- `forkSession` (boolean, optional): Fork the resumed session instead of appending to it
 - `allowedTools` (string[], optional): Restrict Claude tools to this allow-list
 - `disallowedTools` (string[], optional): Explicitly deny listed Claude tools
-- `dangerouslySkipPermissions` (boolean, optional): Request CLI-side permission bypass (legacy mode only)
+- `permissionMode` (string, optional): Claude permission mode (`default|acceptEdits|plan|auto|dontAsk|bypassPermissions`); preferred over `dangerouslySkipPermissions`
+- `dangerouslySkipPermissions` (boolean, optional): Deprecated — maps to `permissionMode: "bypassPermissions"`; `permissionMode` wins when both are set
+- `agent` (string, optional): Named sub-agent to run as
+- `agents` (string, optional): Inline agent definitions JSON
+- `systemPrompt` / `appendSystemPrompt` (string, optional): Replace or extend the system prompt
+- `maxBudgetUsd` (number, optional): Budget cap in USD for the request
+- `maxTurns` (integer, optional): Agent-loop turn cap
+- `effort` (string, optional): Reasoning effort (`low|medium|high|xhigh|max`)
+- `fallbackModel` (string, optional): Auto-fallback model when the default is overloaded
+- `jsonSchema` (string, optional): JSON Schema literal constraining structured output
+- `addDir` (string[], optional): Additional workspace directories
+- `noSessionPersistence` (boolean, optional): Ephemeral session (not persisted to disk)
+- `settingSources` / `settings` / `tools` (optional): Setting sources to load, settings JSON path/literal, built-in tool restriction
+- `excludeDynamicSystemPromptSections` (boolean, optional): Trim dynamic system prompt sections
 - `approvalStrategy` (string, optional): `"legacy"` (default) or `"mcp_managed"`
 - `approvalPolicy` (string, optional): `"strict"`, `"balanced"`, or `"permissive"`
 - `mcpServers` (string[], optional): Claude MCP servers to expose (default: `["sqry","exa","ref_tools"]`; `"trstr"` available as opt-in)
@@ -372,6 +387,10 @@ Execute a Claude Code request with optional session management.
 - `optimizePrompt` (boolean, optional): Optimize prompt for token efficiency (44% reduction), default: false
 - `optimizeResponse` (boolean, optional): Optimize response for token efficiency (37% reduction), default: false
 - `correlationId` (string, optional): Request trace ID (auto-generated if omitted)
+- `idleTimeoutMs` (number, optional): Kill a stuck process after output inactivity; 30,000 to 3,600,000 ms
+- `worktree` (boolean|object, optional): Run inside a gateway-owned git worktree (slice λ)
+- `promptParts` (object, optional): Cache-aware structured prompt `{ system?, tools?, context?, task }`; mutually exclusive with `prompt`
+- `forceRefresh` (boolean, optional): Bypass dedup and force a fresh CLI run, default: false
 
 **Response extras:**
 
@@ -397,14 +416,17 @@ Execute a Codex request with optional session tracking.
 **Parameters:**
 
 - `prompt` (string, required): The prompt to send (1-100,000 chars)
-- `model` (string, optional): Model name or alias (use `list_models` for available values; supports `latest`, recommended: `gpt-5.4`)
-- `fullAuto` (boolean, optional): Enable full-auto mode, default: false
+- `model` (string, optional): Model name or alias (use `list_models` for available values; supports `latest`, recommended: `gpt-5.5`)
+- `fullAuto` (boolean, optional): Deprecated — expands to `--sandbox workspace-write` only (current Codex no longer accepts approval-policy flags); prefer `sandboxMode`
+- `sandboxMode` (string, optional): Codex sandbox (`read-only|workspace-write|danger-full-access`)
 - `dangerouslyBypassApprovalsAndSandbox` (boolean, optional): Request Codex bypass flags
 - `approvalStrategy` (string, optional): `"legacy"` (default) or `"mcp_managed"`
 - `approvalPolicy` (string, optional): `"strict"`, `"balanced"`, or `"permissive"`
 - `mcpServers` (string[], optional): MCP servers expected for Codex execution context
 - `sessionId` (string, optional): Session identifier for tracking
+- `resumeLatest` (boolean, optional): Resume the most recent Codex session in the current cwd (`codex exec resume --last`); ignored if `sessionId` is set
 - `createNewSession` (boolean, optional): Always create a new session
+- `forceRefresh` (boolean, optional): Bypass dedup and force a fresh CLI run, default: false
 - `optimizePrompt` (boolean, optional): Optimize prompt for token efficiency, default: false
 - `optimizeResponse` (boolean, optional): Optimize response for token efficiency, default: false
 - `correlationId` (string, optional): Request trace ID (auto-generated if omitted)
@@ -420,11 +442,25 @@ Execute a Codex request with optional session tracking.
 ```json
 {
   "prompt": "Create a REST API endpoint",
-  "model": "gpt-5.4",
-  "fullAuto": true,
+  "model": "gpt-5.5",
+  "sandboxMode": "workspace-write",
   "optimizePrompt": true
 }
 ```
+
+##### `codex_fork_session`
+
+Fork an existing Codex session into a new branch (`codex fork <SESSION_ID|--last> <prompt>`), preserving the original session's history while the fork diverges.
+
+**Parameters:**
+
+- `prompt` (string, required): Prompt text for the forked session (1-100,000 chars)
+- `sessionId` (string, optional): Codex session UUID to fork from (mutually exclusive with `forkLast`)
+- `forkLast` (boolean, optional): Fork the most recent Codex session instead of naming one
+- `model` (string, optional): Model name or alias (e.g. `gpt-5.5`, `latest`)
+- `sandboxMode` (string, optional): Codex sandbox (`read-only|workspace-write|danger-full-access`)
+- `correlationId` (string, optional): Request trace ID (auto-generated if omitted)
+- `idleTimeoutMs` (number, optional): Idle timeout in ms (30s-1h, omit for CLI default)
 
 ##### `gemini_request`
 
@@ -437,7 +473,7 @@ Execute a Gemini CLI request with session support.
 - `sessionId` (string, optional): Session ID to resume
 - `resumeLatest` (boolean, optional): Resume the latest session automatically
 - `createNewSession` (boolean, optional): Always create a new session
-- `approvalMode` (string, optional): Gemini approval mode (`default|auto_edit|yolo`) in legacy mode
+- `approvalMode` (string, optional): Gemini approval mode (`default|auto_edit|yolo|plan`) in legacy mode
 - `approvalStrategy` (string, optional): `"legacy"` (default) or `"mcp_managed"`
 - `approvalPolicy` (string, optional): `"strict"`, `"balanced"`, or `"permissive"`
 - `mcpServers` (string[], optional): Allowed Gemini MCP server names
@@ -778,9 +814,32 @@ List recent MCP-managed approval decisions recorded by the gateway.
 **Parameters:**
 
 - `limit` (number, optional): Max records (1-500), default: 50
-- `cli` (string, optional): Filter by `"claude"`, `"codex"`, or `"gemini"`
+- `cli` (string, optional): Filter by `"claude"`, `"codex"`, `"gemini"`, `"grok"`, or `"mistral"`
 
 Approval records are persisted to `~/.llm-cli-gateway/approvals.jsonl`.
+
+##### `llm_request_result`
+
+Read back any persisted request — sync or async — by its correlation ID. Every response echoes its ID in `structuredContent.correlationId`; pass it here to recover the persisted prompt/response after the inline result is gone. Reads the flight recorder, so it works independently of async-job persistence (returns "not found" when flight recording is disabled).
+
+**Parameters:**
+
+- `correlationId` (string, required): Correlation ID from a prior request
+- `maxChars` (number, optional): Max chars of the persisted response to return (1,000-2,000,000)
+- `includePrompt` (boolean, optional): Include the full persisted prompt text, default: false
+
+##### `llm_process_health`
+
+Report gateway process health: async-job manager state plus the resolved persistence block (`backend`, `dbPath`, config sources). Use it to confirm which config file and SQLite paths the gateway is actually running under.
+
+##### `upstream_contracts`
+
+Return the gateway's declared provider CLI contracts, optionally probing the installed binaries for drift.
+
+**Parameters:**
+
+- `cli` (string, optional): Filter (`claude|codex|gemini|grok|mistral`)
+- `probeInstalled` (boolean, optional, default `false`): Run local `--help` probes and compare advertised flags against the declared contract — strongly recommended after any provider CLI upgrade. The probe reports `missingFlags`, `extraFlags`, `acknowledgedExtraFlags` (known upstream-only flags filtered from `extraFlags`), `discoveredFlags`, and stale-marker `warnings`.
 
 #### Session Management Tools
 
@@ -924,6 +983,9 @@ Plan or run an upgrade for one CLI.
 - Codex latest: `codex update`
 - Codex explicit target: `npm install -g @openai/codex@<target>`
 - Gemini: `npm install -g @google/gemini-cli@<target>`
+- Grok latest: `grok update`
+- Grok explicit target: `grok update --version <target>`
+- Mistral (Vibe): dispatches to the detected installer (`pip`/`uv`/`brew`); errors with guidance when none is detected (Vibe ships no self-update command)
 
 **Example dry run:**
 

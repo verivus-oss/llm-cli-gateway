@@ -1,8 +1,8 @@
 You are working on the llm-cli-gateway MCP server.
 
 CRITICAL: Before making ANY changes to this codebase:
-1. Read BEST_PRACTICES.md or use MCP resource "docs://best-practices"
-2. Follow ALL conventions outlined in BEST_PRACTICES.md
+1. Read docs/guides/BEST_PRACTICES.md
+2. Follow ALL conventions outlined in docs/guides/BEST_PRACTICES.md
 
 Key Rules:
 - Tool names MUST use snake_case (e.g., claude_request, not claudeRequest)
@@ -19,7 +19,7 @@ When adding new tools:
 2. Provide clear descriptions (20+ chars with action words)
 3. Return structured error responses via createErrorResponse()
 4. Add unit AND integration tests
-5. Update BEST_PRACTICES.md if introducing new patterns
+5. Update docs/guides/BEST_PRACTICES.md if introducing new patterns
 
 When adding retry/resilience logic:
 1. Always add jitter to exponential backoff

@@ -1,7 +1,7 @@
 # Provider Support Matrix
 
 Status: Layer 1 evidence record  
-Verified: 2026-05-19  
+Verified: 2026-05-19 (Mistral/Vibe row added 2026-06-07)  
 Method: primary documentation search plus local CLI inspection where available.
 
 This matrix separates inbound MCP hosting from outbound validation. A client can connect to the gateway as an inbound MCP host. A provider runtime can be used by the gateway as an outbound validation provider.
@@ -17,6 +17,7 @@ This matrix separates inbound MCP hosting from outbound validation. A client can
 | Gemini CLI | Inbound CLI MCP host and outbound validation provider | Gemini CLI `mcpServers` supports stdio, SSE, and Streamable HTTP | Verified CLI | Gemini CLI MCP docs and local `gemini --help` |
 | Gemini web | Installer assistant only | No primary consumer Gemini web custom MCP host path verified | Deferred | Gemini Apps connected-apps docs describe fixed connected apps, not custom MCP |
 | Grok | Inbound MCP host and outbound validation provider | Grok custom MCP connectors require a public MCP server URL; gateway can call Grok CLI/API outbound | Verified web and outbound | xAI Grok connectors docs and local `grok --help` |
+| Mistral (Vibe) | Inbound CLI MCP host and outbound validation provider | Vibe CLI manages MCP servers via `vibe mcp`; gateway calls Vibe outbound (`mistral_request`/`mistral_request_async`) | Verified CLI and outbound | Local `vibe --help` and gateway `doctor --json` provider block |
 
 ## Evidence Details
 
@@ -110,6 +111,19 @@ Sources:
 - https://docs.x.ai/grok/connectors
 - https://docs.x.ai/build/overview
 - Local command: `grok --help`
+
+### Mistral (Vibe)
+
+Classification: inbound CLI MCP host and outbound validation provider.
+
+Vibe is Mistral's coding CLI. It manages its own MCP server configuration via `vibe mcp`, so a locally running gateway can be registered as an stdio MCP server for inbound use. Outbound, the gateway drives Vibe headlessly through `mistral_request` / `mistral_request_async` (programmatic mode with `--trust`, `--max-turns`, `--max-price`, `--max-tokens` caps); the provider block in `llm-cli-gateway doctor --json` reports the installed Vibe version, active model, and session-logging state.
+
+MVP implication: Mistral support is CLI-scoped (no public-URL web connector path verified); setup docs can describe local stdio registration only.
+
+Sources:
+
+- Local command: `vibe --help`
+- Local command: `llm-cli-gateway doctor --json` (mistral provider block)
 
 ## Release Rules
 

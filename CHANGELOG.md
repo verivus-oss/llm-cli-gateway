@@ -4,6 +4,32 @@ All notable changes to the llm-cli-gateway project.
 
 ## Unreleased
 
+### Fixed
+
+- Upstream-contract probe drift after the 2026-06 provider CLI upgrades
+  (gemini 0.45.2, grok 0.2.22, vibe 2.14.0): `CliFlagContract.hiddenFromHelp`
+  marks real flags hidden from a binary's `--help` (Claude `--max-turns`), and
+  `CliContract.acknowledgedUpstreamFlags` acknowledges upstream-only flags the
+  gateway never emits (29 Claude, 18 Gemini). Both are probe-only — the argv
+  allowlist is unchanged — with stale-marker warnings in both directions and a
+  new `acknowledgedExtraFlags` probe field. New pure `computeFlagDrift` plus
+  7 unit tests.
+- MCP server version now reports the real package version (was hardcoded
+  `1.0.0`).
+
+### Documentation
+
+- Cross-LLM documentation currency review (Codex + Gemini + Grok + Mistral):
+  README tool reference gains `codex_fork_session`, `llm_request_result`,
+  `llm_process_health`, `upstream_contracts`, and `list_available_models`;
+  `claude_request` parameter list completed (`outputFormat` default is
+  `stream-json`); Codex `fullAuto` documented as deprecated in favour of
+  `sandboxMode`; Gemini approval modes include `plan`; grok/mistral upgrade
+  strategies documented; stale test counts, provider lists, and
+  `BEST_PRACTICES.md` path pointers corrected across README, AGENTS.md,
+  .cursorrules, CLAUDE.md, docs/guides, docs/personal-mcp (Mistral/Vibe row
+  added to the provider support matrix), and docs/upstream.
+
 ## [2.0.0] - 2026-06-04: node:sqlite migration — native module out of the prod graph
 
 Major release. Persistence moves from the native `better-sqlite3` binding to

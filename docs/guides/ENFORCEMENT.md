@@ -8,6 +8,8 @@ This document outlines how to ensure adherence to the best practices defined in 
 
 **Approach:** Expose best practices as an MCP resource so LLMs working on this codebase can reference them.
 
+> **Status: proposed, not implemented.** No `docs://` resource is registered today (`src/resources.ts` serves `sessions://*`, `models://*`, and `metrics://performance`); read `docs/guides/BEST_PRACTICES.md` directly instead. The code below is the design sketch.
+
 **Implementation:**
 
 ```typescript
@@ -324,7 +326,7 @@ function registerToolWithValidation(
 You are working on the llm-cli-gateway MCP server.
 
 CRITICAL: Before making ANY changes to this codebase:
-1. Read the best practices: Use the MCP resource "docs://best-practices"
+1. Read the best practices in docs/guides/BEST_PRACTICES.md
 2. Follow ALL conventions outlined in BEST_PRACTICES.md
 
 Key Rules:
@@ -368,8 +370,8 @@ Test Requirements:
 cat docs/guides/BEST_PRACTICES.md
 ```
 
-Or if you're an LLM working via MCP:
-- Use MCP resource: `docs://best-practices`
+If you're an LLM working via MCP, read `docs/guides/BEST_PRACTICES.md` with your
+file tools (the `docs://best-practices` resource above is still a proposal).
 
 ## Development Workflow
 
@@ -574,7 +576,7 @@ npm run build && npm run lint && npm test
 When an LLM (Claude, Codex, Gemini, Grok, or Mistral) is asked to modify this codebase:
 
 **Before making changes:**
-- [ ] Read `docs://best-practices` MCP resource (or BEST_PRACTICES.md)
+- [ ] Read `docs/guides/BEST_PRACTICES.md`
 - [ ] Check existing code patterns in the relevant file
 - [ ] Verify tool naming convention if adding new tools
 - [ ] Plan tests alongside code changes

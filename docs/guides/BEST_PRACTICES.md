@@ -42,7 +42,7 @@ Single domain focus: CLI gateway orchestration
 **Status:** ✅ Good
 
 Top-level primitives: `prompt:str`, `model:str`, `session_id:str`
-Enums for constraints: `cli:enum(claude|codex|gemini)`
+Enums for constraints: `cli:enum(claude|codex|gemini|grok|mistral)`
 
 **Why:** Avoid nested dictionaries → prevents agent hallucination of keys.
 
@@ -93,7 +93,7 @@ snake_case: `claude_request`, `session_create`, `list_models`
 
 Parent orchestrates children directly:
 ```typescript
-codex_request({prompt:"Implement X",fullAuto:true})
+codex_request({prompt:"Implement X",sandboxMode:"workspace-write"})
 gemini_request({prompt:"Review X"})
 ```
 
@@ -112,11 +112,11 @@ Child cannot orchestrate grandchild:
 // ❌ FAILS: MCP error -32000
 codex_request({
   prompt:"Implement X, then use claude_request for review",
-  fullAuto:true
+  sandboxMode:"workspace-write"
 })
 ```
 
-**Why:** MCP server lifecycle tied to fullAuto context. Nested connections unsupported.
+**Why:** MCP server lifecycle is tied to the spawning context. Nested connections unsupported.
 
 **Discovered:** 2026-01-24 (docs/archive/DOGFOODING_LESSONS.md #4)
 
@@ -128,14 +128,14 @@ codex_request({
 Parent coordinates all levels:
 ```typescript
 // Step 1: Implementation
-impl = codex_request({prompt:"Implement X",fullAuto:true})
+impl = codex_request({prompt:"Implement X",sandboxMode:"workspace-write"})
 
 // Step 2-3: Reviews (parallel)
 review1 = claude_request({prompt:"Review quality",model:"sonnet"})
 review2 = gemini_request({prompt:"Review bugs",model:"gemini-2.5-pro"})
 
 // Step 4: Fixes
-fixes = codex_request({prompt:`Fix:${review1}${review2}`,fullAuto:true})
+fixes = codex_request({prompt:`Fix:${review1}${review2}`,sandboxMode:"workspace-write"})
 ```
 
 **Benefits:**
@@ -409,7 +409,7 @@ Integration: Real MCP server, real CLI calls
 ---
 
 ### Coverage
-**Status:** ✅ Comprehensive (681 tests)
+**Status:** ✅ Comprehensive (1078 tests as of 2.0.0)
 
 - Executor: errors, timeouts, paths
 - Sessions: CRUD, persistence, edge cases, concurrency
@@ -424,7 +424,7 @@ Integration: Real MCP server, real CLI calls
 **Status:** ⚠️ Integration slow (~42s)
 
 Real CLI calls: 2-14s each
-Total: 681 tests in ~90s wall (additional cache-awareness, security-posture, async-job, and persistence suites)
+Total: 1078 tests in ~40s wall as of 2.0.0 (cache-awareness, security-posture, async-job, persistence, sqlite-driver, and cross-engine suites included)
 
 **Options:**
 1. Faster models (haiku, flash)
@@ -464,7 +464,7 @@ Session file cleanup after tests
 **Status:** ✅ Fixed
 
 Previously: CLI_INFO in 2 places
-Now: Single source (`resources.ts`), imported
+Now: Single source (`model-registry.ts`, `getCliInfo`/`getAvailableCliInfo`), imported
 
 **Lesson:** "Single constant in two places isn't good practice" - User
 

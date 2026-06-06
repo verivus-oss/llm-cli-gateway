@@ -7,8 +7,8 @@
 cat docs/guides/BEST_PRACTICES.md
 ```
 
-Or if you're an LLM working via MCP:
-- Use MCP resource: `docs://best-practices`
+If you're an LLM working via MCP, read the same file with your file tools
+(`docs/guides/BEST_PRACTICES.md` — there is no `docs://` MCP resource).
 
 ## Development Workflow
 
@@ -207,7 +207,7 @@ await withRetry(operation, circuitBreaker, { ... });
 
 If you're an LLM being asked to modify this codebase:
 
-1. **First action:** Read `docs://best-practices` MCP resource
+1. **First action:** Read `docs/guides/BEST_PRACTICES.md`
 2. **Verify:** Check if the requested change aligns with best practices
 3. **Plan:** Outline changes and tests before implementing
 4. **Implement:** Follow the patterns in existing code
