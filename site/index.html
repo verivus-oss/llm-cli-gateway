@@ -35,7 +35,7 @@
     "operatingSystem": "Linux, macOS, Windows",
     "url": "https://llm-cli-gateway.dev",
     "downloadUrl": "https://www.npmjs.com/package/llm-cli-gateway",
-    "softwareVersion": "1.17.1",
+    "softwareVersion": "2.0.0",
     "license": "https://opensource.org/licenses/MIT",
     "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
     "author": { "@type": "Organization", "name": "Verivus Pty Ltd", "url": "https://verivus.com" }
@@ -125,11 +125,11 @@
       <div><span class="hp-hero-demo__prompt">$</span> <span class="hp-hero-demo__cmd">npx -y llm-cli-gateway</span></div>
       <div class="hp-hero-demo__success">&nbsp; MCP server connected over stdio</div>
 
-      <div class="hp-hero-demo__gap"><span class="hp-hero-demo__prompt">&gt;</span> <span class="hp-hero-demo__cmd">consensus_check({ models: ["claude", "codex", "gemini"], question })</span></div>
+      <div class="hp-hero-demo__gap"><span class="hp-hero-demo__prompt">&gt;</span> <span class="hp-hero-demo__cmd">consensus_check({ models: ["claude", "codex", "gemini"], claim })</span></div>
       <div class="hp-hero-demo__output">&nbsp; claude_request: accepts with caveat<br>&nbsp; codex_request: flags missing test<br>&nbsp; gemini_request: suggests smaller patch<br>&nbsp; result: disagreement summarized for review</div>
 
       <div class="hp-hero-demo__gap"><span class="hp-hero-demo__prompt">&gt;</span> <span class="hp-hero-demo__cmd">claude_request_async({ prompt, outputFormat: "stream-json" })</span></div>
-      <div class="hp-hero-demo__output">&nbsp; jobId: job_01...<br>&nbsp; status: running<br>&nbsp; persisted: ~/.llm-cli-gateway/logs.db</div>
+      <div class="hp-hero-demo__output">&nbsp; jobId: 1f0c9a2e-…<br>&nbsp; status: running<br>&nbsp; persisted: ~/.llm-cli-gateway/logs.db</div>
 
       <div class="hp-hero-demo__gap"><span class="hp-hero-demo__prompt">&gt;</span> <span class="hp-hero-demo__cmd">llm_job_result({ jobId })</span></div>
       <div class="hp-hero-demo__success">&nbsp; complete - result recovered after gateway restart</div>
@@ -226,7 +226,7 @@
         <div class="footer-col"><h4>Company</h4><ul><li><a href="https://github.com/verivus-oss/llm-cli-gateway">GitHub</a></li><li><a href="https://www.npmjs.com/package/llm-cli-gateway">npm</a></li><li><a href="https://verivus.com">Verivus</a></li></ul></div>
       </div>
     </div>
-    <div class="footer-bottom"><span>© 2026 Verivus Pty Ltd</span><span>llm-cli-gateway v1.17.1</span></div>
+    <div class="footer-bottom"><span>© 2026 Verivus Pty Ltd</span><span>llm-cli-gateway v2.0.0</span></div>
   </footer>
   <div id="copy-announce" aria-live="polite" class="sr-only"></div>
   <script src="/js/theme.js"></script>

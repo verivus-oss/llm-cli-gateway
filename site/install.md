@@ -2,6 +2,9 @@
 
 llm-cli-gateway is a local MCP server that wraps installed coding-agent CLIs.
 
+Requires Node.js >= 24.4.0 (as of 2.0.0 the gateway uses Node's built-in
+`node:sqlite` module — no native bindings, no install scripts).
+
 ## Agent task
 
 Read this file and configure your current MCP client to launch:
@@ -37,7 +40,8 @@ npm install -g @google/gemini-cli
 curl -fsSL https://x.ai/cli/install.sh | bash
 ```
 
-Mistral Vibe ships separately as the `vibe` binary.
+Mistral Vibe ships separately as the `vibe` binary (`pip install mistral-vibe`,
+`uv tool install mistral-vibe`, or `brew install mistral-vibe`).
 
 ## MCP registry
 
