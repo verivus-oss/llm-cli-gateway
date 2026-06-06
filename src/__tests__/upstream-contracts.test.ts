@@ -313,9 +313,10 @@ Options:
       for (const contract of Object.values(UPSTREAM_CLI_CONTRACTS)) {
         const declared = new Set(Object.keys(contract.flags));
         for (const flag of contract.acknowledgedUpstreamFlags ?? []) {
-          expect(declared.has(flag), `${contract.cli}: ${flag} both declared and acknowledged`).toBe(
-            false
-          );
+          expect(
+            declared.has(flag),
+            `${contract.cli}: ${flag} both declared and acknowledged`
+          ).toBe(false);
         }
       }
     });
