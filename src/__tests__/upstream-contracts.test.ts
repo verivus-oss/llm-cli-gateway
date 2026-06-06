@@ -3,10 +3,12 @@ import { createGatewayServer } from "../index.js";
 import {
   UPSTREAM_CLI_CONTRACTS,
   buildUpstreamContractReport,
+  computeFlagDrift,
   validateUpstreamCliEnv,
   validateUpstreamCliArgs,
   extractDiscoveredFlags,
 } from "../upstream-contracts.js";
+import type { CliContract } from "../upstream-contracts.js";
 
 describe("upstream CLI contracts", () => {
   it("accepts a valid Claude argv emitted by the gateway", () => {
@@ -233,6 +235,89 @@ Options:
       expect(flags).toContain("--best-of-n");
       expect(flags).toContain("--resume");
       expect(flags).toContain("--agent");
+    });
+  });
+
+  describe("computeFlagDrift (hidden/acknowledged probe semantics)", () => {
+    const makeContract = (overrides: Partial<CliContract>): CliContract => ({
+      cli: "claude",
+      executable: "fake-cli",
+      upstream: "Fake CLI",
+      helpArgs: [["--help"]],
+      maxPositionals: 0,
+      mcpTools: [],
+      mcpParameters: [],
+      conformanceFixtures: [],
+      flags: {},
+      ...overrides,
+    });
+
+    it("reports a declared flag absent from help as missing", () => {
+      const contract = makeContract({
+        flags: { "--model": { arity: "one", description: "Model" } },
+      });
+      const drift = computeFlagDrift(contract, "Options:\n  --other <X>  Other\n", ["--other"]);
+      expect(drift.missingFlags).toEqual(["--model"]);
+    });
+
+    it("does not report hiddenFromHelp flags as missing", () => {
+      const contract = makeContract({
+        flags: {
+          "--max-turns": { arity: "one", description: "Turn cap", hiddenFromHelp: true },
+        },
+      });
+      const drift = computeFlagDrift(contract, "Options:\n  --model <M>  Model\n", ["--model"]);
+      expect(drift.missingFlags).toEqual([]);
+      expect(drift.warnings).toEqual([]);
+    });
+
+    it("warns when a hiddenFromHelp flag reappears in help (stale marker)", () => {
+      const contract = makeContract({
+        flags: {
+          "--max-turns": { arity: "one", description: "Turn cap", hiddenFromHelp: true },
+        },
+      });
+      const drift = computeFlagDrift(contract, "  --max-turns <N>  Turn cap\n", ["--max-turns"]);
+      expect(drift.missingFlags).toEqual([]);
+      expect(drift.warnings[0]).toMatch(/hiddenFromHelp but now appears/);
+    });
+
+    it("filters acknowledged upstream-only flags out of extraFlags", () => {
+      const contract = makeContract({
+        flags: { "-p": { arity: "one", description: "Prompt" } },
+        acknowledgedUpstreamFlags: ["--prompt", "--debug"],
+      });
+      const drift = computeFlagDrift(contract, "help", ["--prompt", "--debug", "--brand-new"]);
+      expect(drift.extraFlags).toEqual(["--brand-new"]);
+      expect(drift.acknowledgedExtraFlags).toEqual(["--prompt", "--debug"]);
+      expect(drift.warnings).toEqual([]);
+    });
+
+    it("warns when an acknowledged flag vanishes from the installed help (stale entry)", () => {
+      const contract = makeContract({
+        acknowledgedUpstreamFlags: ["--gone-now"],
+      });
+      const drift = computeFlagDrift(contract, "help", []);
+      expect(drift.warnings[0]).toMatch(/--gone-now no longer appears/);
+    });
+
+    it("acknowledgement never affects the argv allowlist", () => {
+      // acknowledgedUpstreamFlags is probe-only: passing such a flag as argv
+      // must still be rejected by validateUpstreamCliArgs.
+      const result = validateUpstreamCliArgs("gemini", ["-p", "hello", "--acp"]);
+      expect(result.ok).toBe(false);
+      expect(result.violations[0]?.message).toMatch(/Unsupported gemini CLI flag/);
+    });
+
+    it("live contracts keep flags and acknowledgements disjoint", () => {
+      for (const contract of Object.values(UPSTREAM_CLI_CONTRACTS)) {
+        const declared = new Set(Object.keys(contract.flags));
+        for (const flag of contract.acknowledgedUpstreamFlags ?? []) {
+          expect(declared.has(flag), `${contract.cli}: ${flag} both declared and acknowledged`).toBe(
+            false
+          );
+        }
+      }
     });
   });
 });

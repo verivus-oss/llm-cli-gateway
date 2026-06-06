@@ -17,6 +17,13 @@ export interface CliFlagContract {
   values?: readonly string[];
   pattern?: RegExp;
   description: string;
+  /**
+   * The flag is real and accepted by the installed binary but deliberately
+   * absent from its --help output, so the installed-binary probe must not
+   * report it under `missingFlags`. If the flag later reappears in the help
+   * text the probe emits a warning so the stale marker gets removed.
+   */
+  hiddenFromHelp?: boolean;
 }
 
 /**
@@ -75,6 +82,16 @@ export interface CliContract {
   resumeMaxPositionals?: number;
   resumeOnlyFlags?: readonly string[];
   resumeForbiddenFlags?: readonly string[];
+  /**
+   * Long flags the installed binary advertises in --help that the gateway
+   * deliberately does NOT emit. These must NOT be added to `flags` — that
+   * record is the argv allowlist enforced by {@link validateUpstreamCliArgs},
+   * and declaring upstream-only flags there would loosen it. Listing them here
+   * instead lets the installed-binary probe filter known surface out of
+   * `extraFlags`, so a genuinely new upstream flag stands out as drift. Stale
+   * entries (no longer in the help text) are reported as probe warnings.
+   */
+  acknowledgedUpstreamFlags?: readonly string[];
   /** Non-mechanical upstream-tracking metadata. See {@link CliUpstreamMetadata}. */
   upstreamMetadata?: CliUpstreamMetadata;
 }
@@ -204,13 +221,19 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         pattern: /^[0-9]+(?:\.[0-9]+)?$/,
         description: "Budget cap in USD",
       },
-      // NOTE: `--probe-installed` reports --max-turns as "missing from binary"
-      // because claude 2.x hides it from the `--help` body. It is nonetheless a
-      // real, accepted flag (verified: `claude --max-turns N --help` parses
-      // without an "unknown option" error, while a genuinely unknown flag errors
-      // loudly). Keep it in the contract; the probe drift here is a known
-      // help-text false-positive, not a removed flag.
-      "--max-turns": { arity: "one", pattern: /^[1-9][0-9]*$/, description: "Turn cap" },
+      // NOTE: claude 2.x hides --max-turns from the `--help` body, but it is a
+      // real, accepted flag — verified on 2.1.167 with an actual run:
+      // `claude -p --max-turns 1` succeeds while `claude -p --not-a-flag`
+      // fails with "error: unknown option". (The older `--max-turns N --help`
+      // parse check no longer discriminates: as of 2.1.167, `--help` succeeds
+      // even with unknown flags present.) `hiddenFromHelp` keeps the probe
+      // from reporting this known help-text gap as missing-flag drift.
+      "--max-turns": {
+        arity: "one",
+        pattern: /^[1-9][0-9]*$/,
+        description: "Turn cap",
+        hiddenFromHelp: true,
+      },
       "--effort": { arity: "one", values: EFFORT_LEVELS, description: "Reasoning effort" },
       "--exclude-dynamic-system-prompt-sections": {
         arity: "none",
@@ -248,6 +271,43 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         description: 'Restrict the available built-in tool set ("" disables all)',
       },
     },
+    // Claude Code 2.1.167 --help surface the gateway deliberately does not
+    // emit. Long-form aliases of declared short flags (--print for -p),
+    // interactive/IDE-only switches, and flags superseded by gateway
+    // parameters (--dangerously-skip-permissions maps to --permission-mode
+    // bypassPermissions via request-helpers). Probe-acknowledgement only —
+    // never an argv allowlist.
+    acknowledgedUpstreamFlags: [
+      "--allow-dangerously-skip-permissions",
+      "--allowed", // alias of --allowed-tools
+      "--bare",
+      "--betas",
+      "--brief",
+      "--chrome",
+      "--dangerously-skip-permissions",
+      "--debug",
+      "--debug-file",
+      "--disable-slash-commands",
+      "--disallowed", // alias of --disallowed-tools
+      "--file",
+      "--from-pr",
+      "--ide",
+      "--include-hook-events",
+      "--mcp-debug",
+      "--name",
+      "--no-chrome",
+      "--plugin-dir",
+      "--plugin-url",
+      "--print", // long form of declared -p
+      "--prompt-suggestions",
+      "--remote-control",
+      "--remote-control-session-name-prefix",
+      "--replay-user-messages",
+      "--resume", // interactive resume; gateway uses --continue/--session-id
+      "--tmux",
+      "--version",
+      "--worktree",
+    ],
     env: {},
     conformanceFixtures: [
       {
@@ -664,6 +724,31 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
           "Auto-approve all actions (gemini -y/--yolo). Functionally equivalent to --approval-mode yolo; the gateway emits at most one of the two.",
       },
     },
+    // Gemini CLI 0.45.x --help surface the gateway deliberately does not
+    // emit. Long-form aliases of declared short flags (--prompt for -p,
+    // --sandbox for -s, --output-format for -o), ACP/extension/session
+    // management, and debug switches. Probe-acknowledgement only — never an
+    // argv allowlist.
+    acknowledgedUpstreamFlags: [
+      "--accept-raw-output-risk",
+      "--acp",
+      "--debug",
+      "--delete-session",
+      "--experimental-acp",
+      "--extensions",
+      "--list-extensions",
+      "--list-sessions",
+      "--output-format", // long form of declared -o
+      "--prompt", // long form of declared -p
+      "--prompt-interactive",
+      "--raw-output",
+      "--sandbox", // long form of declared -s
+      "--screen-reader",
+      "--session-file",
+      "--session-id",
+      "--version",
+      "--worktree",
+    ],
     env: {},
     conformanceFixtures: [
       {
@@ -1442,6 +1527,69 @@ export function extractDiscoveredFlags(helpText: string): readonly string[] {
   return Array.from(discovered).sort();
 }
 
+export interface FlagDriftResult {
+  /** Contract flags absent from the installed binary's help (excluding `hiddenFromHelp` flags). */
+  missingFlags: string[];
+  /** Discovered flags neither declared in the contract nor acknowledged as upstream-only. */
+  extraFlags: readonly string[];
+  /** Discovered flags filtered from `extraFlags` via `acknowledgedUpstreamFlags`. */
+  acknowledgedExtraFlags: readonly string[];
+  /** Stale-marker diagnostics (hiddenFromHelp flag reappeared, acknowledged flag vanished). */
+  warnings: string[];
+}
+
+/**
+ * Pure drift computation between a declared contract and the flag surface
+ * scraped from an installed binary's help output. Split out from
+ * {@link probeInstalledCliContract} so the hidden/acknowledged semantics are
+ * unit-testable without spawning real CLIs.
+ */
+export function computeFlagDrift(
+  contract: CliContract,
+  helpText: string,
+  discoveredFlags: readonly string[]
+): FlagDriftResult {
+  const warnings: string[] = [];
+
+  const missingFlags: string[] = [];
+  for (const [flag, spec] of Object.entries(contract.flags)) {
+    const inHelp = helpText.includes(flag);
+    if (spec.hiddenFromHelp) {
+      if (inHelp) {
+        warnings.push(
+          `${flag} is marked hiddenFromHelp but now appears in ${contract.executable} help output; remove the hiddenFromHelp marker from the contract`
+        );
+      }
+      continue;
+    }
+    if (!inHelp) missingFlags.push(flag);
+  }
+
+  const contractFlagSet = new Set(Object.keys(contract.flags));
+  const acknowledged = new Set(contract.acknowledgedUpstreamFlags ?? []);
+  const extraFlags: string[] = [];
+  const acknowledgedExtraFlags: string[] = [];
+  for (const flag of discoveredFlags) {
+    if (contractFlagSet.has(flag)) continue;
+    if (acknowledged.has(flag)) {
+      acknowledgedExtraFlags.push(flag);
+    } else {
+      extraFlags.push(flag);
+    }
+  }
+
+  const discoveredSet = new Set(discoveredFlags);
+  for (const flag of acknowledged) {
+    if (!discoveredSet.has(flag)) {
+      warnings.push(
+        `acknowledged upstream flag ${flag} no longer appears in ${contract.executable} help output; remove it from acknowledgedUpstreamFlags`
+      );
+    }
+  }
+
+  return { missingFlags, extraFlags, acknowledgedExtraFlags, warnings };
+}
+
 export interface InstalledCliContractProbe {
   cli: CliType;
   executable: string;
@@ -1452,6 +1600,8 @@ export interface InstalledCliContractProbe {
   missingFlags: string[];
   /** Flags present in the installed binary's --help but absent from the declared contract. */
   extraFlags: readonly string[];
+  /** Installed-binary flags acknowledged as upstream-only (filtered from extraFlags). */
+  acknowledgedExtraFlags: readonly string[];
   /** Sorted list of long flags discovered in the help text (for snapshot diffing). */
   discoveredFlags: readonly string[];
   /** Stable hash of the concatenated help output (detects subtle text changes even if flag set is stable). */
@@ -1499,6 +1649,7 @@ export function probeInstalledCliContract(
         checkedHelpCommands: contract.helpArgs,
         missingFlags: [],
         extraFlags: [],
+        acknowledgedExtraFlags: [],
         discoveredFlags: [],
         helpHash: undefined,
         versionHint: undefined,
@@ -1515,10 +1666,9 @@ export function probeInstalledCliContract(
   }
 
   const helpText = outputs.join("\n");
-  const missingFlags = Object.keys(contract.flags).filter(flag => !helpText.includes(flag));
   const discoveredFlags = extractDiscoveredFlags(helpText);
-  const contractFlagSet = new Set(Object.keys(contract.flags));
-  const extraFlags = discoveredFlags.filter(f => !contractFlagSet.has(f));
+  const drift = computeFlagDrift(contract, helpText, discoveredFlags);
+  warnings.push(...drift.warnings);
 
   // Cheap version hint: first line that looks like a version banner
   const versionMatch = helpText.match(/^\s*(?:[A-Za-z][\w .-]+)?v?\d+\.\d+\S*/m);
@@ -1533,8 +1683,9 @@ export function probeInstalledCliContract(
     resolvedArgs,
     available: true,
     checkedHelpCommands: contract.helpArgs,
-    missingFlags,
-    extraFlags,
+    missingFlags: drift.missingFlags,
+    extraFlags: drift.extraFlags,
+    acknowledgedExtraFlags: drift.acknowledgedExtraFlags,
     discoveredFlags,
     helpHash,
     versionHint,
