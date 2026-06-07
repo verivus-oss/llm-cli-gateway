@@ -26,21 +26,46 @@ jobs:
       matrix:
         node-version: [24]
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           # Wipe the auth token from .git/config after checkout so it
           # cannot be picked up by later steps (zizmor artipacked).
           persist-credentials: false
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version: ${{ matrix.node-version }}
-          cache: 'npm'
+          cache: "npm"
       - run: npm ci
       - run: npm run build
       - run: npm run lint
       - run: npm run format:check
       - run: npm run test:fuzz
-      - run: npm run test:ci
+      - name: Run test:ci with process diagnostics
+        run: |
+          set -Eeuo pipefail
+
+          dump_processes() {
+            local label="$1"
+            echo "::group::process diagnostics: ${label}"
+            date -u
+            echo "shell pid=$$ ppid=$PPID"
+            ps -eo pid,ppid,pgid,sid,stat,comm,args | sed -n '1,220p'
+            echo "::endgroup::"
+          }
+
+          on_signal() {
+            local signal="$1"
+            echo "::error::test:ci wrapper received ${signal}"
+            dump_processes "after ${signal}"
+            exit 128
+          }
+
+          trap 'on_signal TERM' TERM
+          trap 'on_signal INT' INT
+          trap 'dump_processes EXIT' EXIT
+
+          dump_processes "before test:ci"
+          npm run test:ci
       # security:audit gates on npm-shrinkwrap.json presence + parity; the
       # shrinkwrap is generated, never committed (it would break npm ci).
       - run: node scripts/make-prod-shrinkwrap.mjs
@@ -51,13 +76,13 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           persist-credentials: false
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version: 24
-          cache: 'npm'
+          cache: "npm"
       - run: npm ci
       - run: npm run build
       # Generate the prod-only shrinkwrap so the packed contents match what
