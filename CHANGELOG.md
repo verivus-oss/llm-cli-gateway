@@ -4,6 +4,17 @@ All notable changes to the llm-cli-gateway project.
 
 ## Unreleased
 
+### Added
+
+- Grok Build 0.2.32 support: new `leaderSocket` parameter on `grok_request` /
+  `grok_request_async` maps to the new `--leader-socket <PATH>` flag (isolated
+  leader process for local/branch Grok builds; default `~/.grok/leader.sock`).
+  Contract declares the flag with arity-one validation plus conformance
+  fixtures. The release's other changes (plugin slash commands in all
+  conversations, ordered rapid prompt submissions, faster grep on large
+  repos) are CLI-internal and inherited automatically. Probe at 0.2.32:
+  missingFlags/warnings clean.
+
 ### Fixed
 
 - Upstream-contract probe drift after the 2026-06 provider CLI upgrades

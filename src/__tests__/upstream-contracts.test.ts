@@ -191,6 +191,49 @@ describe("upstream CLI contracts", () => {
     }
   });
 
+  it("MCP tool callbacks actually forward every contract parameter (sync AND async)", async () => {
+    // Post-Grok-0.2.32 review (Codex finding): `leaderSocket` was present in
+    // the Zod schema, the handler params, and the argv builder — but the MCP
+    // tool callback destructures the inputs explicitly and rebuilds the object
+    // passed to the handler, and that layer silently dropped the param. The
+    // schema-exposure test above cannot catch that class of bug, so this test
+    // asserts every contract mcpParameter name appears in the registered
+    // callback's source for both the sync and async tools.
+    const { AsyncJobManager } = await import("../async-job-manager.js");
+    const { MemoryJobStore } = await import("../job-store.js");
+    const { noopLogger } = await import("../logger.js");
+    const manager = new AsyncJobManager(noopLogger, undefined, new MemoryJobStore());
+    const server = createGatewayServer({
+      asyncJobManager: manager,
+      persistence: {
+        backend: "sqlite",
+        logsDbPath: ":memory:",
+        jobsDbPath: ":memory:",
+        jobRetentionDays: 7,
+        dedupWindowMs: 0,
+        asyncJobsEnabled: true,
+        sources: { configFile: null, envOverrides: [] },
+      },
+    });
+    const registry = (server as unknown as Record<string, Record<string, { handler?: unknown }>>)
+      ._registeredTools;
+
+    for (const contract of Object.values(UPSTREAM_CLI_CONTRACTS)) {
+      for (const toolName of contract.mcpTools) {
+        const tool = registry[toolName];
+        expect(tool, `${toolName} registered`).toBeDefined();
+        expect(typeof tool.handler, `${toolName} handler present`).toBe("function");
+        const callbackSource = String(tool.handler);
+        for (const param of contract.mcpParameters) {
+          expect(
+            callbackSource.includes(param),
+            `${toolName} callback forwards ${param} (schema accepts it but the callback never references it — it would be silently dropped)`
+          ).toBe(true);
+        }
+      }
+    }
+  });
+
   describe("extractDiscoveredFlags (advisory help surface extractor)", () => {
     it("extracts long flags from typical clap-style help", () => {
       const help = `

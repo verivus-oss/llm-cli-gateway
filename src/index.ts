@@ -2431,6 +2431,12 @@ export function prepareGrokRequest(
     /** Grok 0.2.x: `--restore-code` check out original session commit when resuming. */
     restoreCode?: boolean;
     /**
+     * Grok 0.2.32+: `--leader-socket <PATH>` custom leader socket path (default
+     * `~/.grok/leader.sock`). Lets the gateway target an isolated leader process
+     * (e.g. a local/branch Grok build) without colliding with the default one.
+     */
+    leaderSocket?: string;
+    /**
      * Grok 0.2.x: native `-w`/`--worktree` CLI flag (NOT gateway slice λ worktree).
      * `true` → bare `--worktree`; string → `--worktree <name>`.
      */
@@ -2635,6 +2641,9 @@ export function prepareGrokRequest(
   }
   if (params.restoreCode) {
     args.push("--restore-code");
+  }
+  if (params.leaderSocket) {
+    args.push("--leader-socket", params.leaderSocket);
   }
   if (params.nativeWorktree === true) {
     args.push("--worktree");
@@ -3425,6 +3434,8 @@ export interface GrokRequestParams {
   noSubagents?: boolean;
   oauth?: boolean;
   restoreCode?: boolean;
+  /** Grok 0.2.32+: `--leader-socket <PATH>` custom leader socket path. */
+  leaderSocket?: string;
   /** Grok CLI `--worktree` (not gateway slice λ `worktree`). */
   nativeWorktree?: boolean | string;
   /** Slice λ: run this request inside a gateway-owned git worktree. */
@@ -3481,6 +3492,7 @@ export async function handleGrokRequest(
       noSubagents: params.noSubagents,
       oauth: params.oauth,
       restoreCode: params.restoreCode,
+      leaderSocket: params.leaderSocket,
       nativeWorktree: params.nativeWorktree,
     },
     runtime
@@ -3704,6 +3716,7 @@ export async function handleGrokRequestAsync(
       noSubagents: params.noSubagents,
       oauth: params.oauth,
       restoreCode: params.restoreCode,
+      leaderSocket: params.leaderSocket,
       nativeWorktree: params.nativeWorktree,
     },
     runtime
@@ -5849,6 +5862,13 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .boolean()
         .optional()
         .describe("Grok --restore-code: check out the original session commit when resuming."),
+      leaderSocket: z
+        .string()
+        .min(1)
+        .optional()
+        .describe(
+          "Grok 0.2.32+ --leader-socket <PATH>: custom leader socket path (default ~/.grok/leader.sock). Targets an isolated leader process, e.g. a local/branch Grok build; name it ~/.grok/leader-*.sock to keep `grok leader list/kill` discovery working."
+        ),
       nativeWorktree: z
         .union([z.boolean(), z.string().min(1)])
         .optional()
@@ -5905,6 +5925,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       noSubagents,
       oauth,
       restoreCode,
+      leaderSocket,
       nativeWorktree,
       worktree,
     }) => {
@@ -5958,6 +5979,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           noSubagents,
           oauth,
           restoreCode,
+          leaderSocket,
           nativeWorktree,
           worktree,
         }
@@ -7082,6 +7104,13 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .boolean()
           .optional()
           .describe("Grok --restore-code: check out the original session commit when resuming."),
+        leaderSocket: z
+          .string()
+          .min(1)
+          .optional()
+          .describe(
+            "Grok 0.2.32+ --leader-socket <PATH>: custom leader socket path (default ~/.grok/leader.sock). Targets an isolated leader process, e.g. a local/branch Grok build; name it ~/.grok/leader-*.sock to keep `grok leader list/kill` discovery working."
+          ),
         nativeWorktree: z
           .union([z.boolean(), z.string().min(1)])
           .optional()
@@ -7137,6 +7166,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         noSubagents,
         oauth,
         restoreCode,
+        leaderSocket,
         nativeWorktree,
         worktree,
       }) => {
@@ -7189,6 +7219,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             noSubagents,
             oauth,
             restoreCode,
+            leaderSocket,
             nativeWorktree,
             worktree,
           }

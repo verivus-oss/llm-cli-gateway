@@ -211,6 +211,23 @@ describe("Grok 0.2.x: headless control flags", () => {
     expect(prep.args[idx + 1]).not.toBe("true");
   });
 
+  it("emits --leader-socket <PATH> when leaderSocket is set (Grok 0.2.32)", () => {
+    const prep = prepareGrokRequest(
+      baseParams({ leaderSocket: "/home/user/.grok/leader-branch.sock" })
+    );
+    if (!("args" in prep)) throw new Error("expected args");
+    const idx = prep.args.indexOf("--leader-socket");
+    expect(idx).toBeGreaterThan(-1);
+    expect(prep.args[idx + 1]).toBe("/home/user/.grok/leader-branch.sock");
+    expect(validateUpstreamCliArgs("grok", prep.args).ok).toBe(true);
+  });
+
+  it("does not emit --leader-socket when leaderSocket is omitted", () => {
+    const prep = prepareGrokRequest(baseParams({}));
+    if (!("args" in prep)) throw new Error("expected args");
+    expect(prep.args).not.toContain("--leader-socket");
+  });
+
   it("skips gateway optimizePrompt when verbatim is true (even if optimizePrompt is true)", () => {
     const verbose =
       "Please implement the following feature:\nI would like you to help me with the session management system.";

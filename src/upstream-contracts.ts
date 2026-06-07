@@ -849,6 +849,7 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       "noSubagents",
       "oauth",
       "restoreCode",
+      "leaderSocket",
       "nativeWorktree",
     ],
     flags: {
@@ -937,6 +938,12 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       "--restore-code": {
         arity: "none",
         description: "Check out the original session commit when resuming",
+      },
+      // Grok 0.2.32: custom leader socket path for isolated leader processes
+      // (default ~/.grok/leader.sock; propagated via GROK_LEADER_SOCKET).
+      "--leader-socket": {
+        arity: "one",
+        description: "Custom leader socket path (isolated leader, Grok 0.2.32+)",
       },
       "--single": { arity: "one", description: "Single-turn prompt" },
       "--todo-gate": { arity: "none", description: "Enable runtime turn-end TodoGate" },
@@ -1093,6 +1100,18 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
           "--verbatim",
         ],
         expect: "pass",
+      },
+      {
+        id: "grok-leader-socket",
+        description: "Grok 0.2.32: --leader-socket <PATH> is accepted",
+        args: ["-p", "hello", "--leader-socket", "/home/user/.grok/leader-branch.sock"],
+        expect: "pass",
+      },
+      {
+        id: "grok-leader-socket-missing-value",
+        description: "Grok 0.2.32: --leader-socket without a path is rejected (arity one)",
+        args: ["-p", "hello", "--leader-socket"],
+        expect: "fail",
       },
     ],
   },
