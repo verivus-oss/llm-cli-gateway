@@ -7526,7 +7526,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
 
     server.tool(
       "llm_job_result",
-      "Fetch captured stdout/stderr for a gateway async or deferred-sync job by jobId.",
+      "Retrieve captured stdout/stderr for a gateway async or deferred-sync job by jobId.",
       {
         jobId: z.string().describe("Async job ID from *_request_async"),
         maxChars: z

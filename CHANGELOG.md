@@ -4,6 +4,8 @@ All notable changes to the llm-cli-gateway project.
 
 ## Unreleased
 
+## [2.2.0] - 2026-06-07: MCP tool-surface usability — self-describing tools
+
 ### Added
 
 - MCP tool-surface usability (4-seat cross-LLM review): all 37 tools now carry
