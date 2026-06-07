@@ -65,11 +65,30 @@ jobs:
           trap 'dump_processes EXIT' EXIT
 
           dump_processes "before test:ci"
+          trace_prefix="${RUNNER_TEMP:-/tmp}/vitest-signal-trace"
+          rm -f "${trace_prefix}"*
+
           set +e
-          setsid --wait npm run test:ci
+          if command -v strace >/dev/null 2>&1; then
+            setsid --wait strace -ff -tt -o "${trace_prefix}" \
+              -e trace=kill,tgkill,tkill,rt_sigqueueinfo,rt_tgsigqueueinfo \
+              -e signal=all \
+              npm run test:ci
+          else
+            echo "::warning::strace not available; running test:ci without syscall tracing"
+            setsid --wait npm run test:ci
+          fi
           test_status=$?
           set -e
           echo "test:ci exited with status ${test_status}"
+          if compgen -G "${trace_prefix}*" >/dev/null; then
+            echo "::group::signal syscall trace"
+            for trace_file in "${trace_prefix}"*; do
+              echo "--- ${trace_file}"
+              grep -E "SIG|kill|tgkill|rt_sigqueueinfo|rt_tgsigqueueinfo" "${trace_file}" || true
+            done
+            echo "::endgroup::"
+          fi
           dump_processes "after test:ci"
           exit "${test_status}"
       # security:audit gates on npm-shrinkwrap.json presence + parity; the
