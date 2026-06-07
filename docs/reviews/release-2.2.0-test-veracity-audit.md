@@ -66,3 +66,12 @@ mutation (KILL, now genuinely verified), 4/4 pass after revert. Lesson
 recorded: probe runners must assert mutation application (the assert fired
 correctly — the failure was committing the doc before reading the runner
 output).
+
+## Post-release gate correction (Codex finding, LOW)
+
+The P5 row above overclaimed: the test asserted only /VALIDATION/ on
+job_result (not the llm_job_result marker), so P5 killed via the VALIDATION
+assertion alone — Codex proved it by removing only the llm_job_result marker,
+which survived 4/4. Resolution: the test now also asserts /llm_job_result/ on
+job_result's description (parity with job_status), and the finer mutation
+(P5b) was re-run: KILL. Clean tree: 4/4 pass.

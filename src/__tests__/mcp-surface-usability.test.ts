@@ -53,6 +53,7 @@ describe("MCP tool-surface usability (post-usability-review regressions)", () =>
     expect(registry["job_status"].description).toMatch(/VALIDATION/);
     expect(registry["job_status"].description).toMatch(/llm_job_status/);
     expect(registry["job_result"].description).toMatch(/VALIDATION/);
+    expect(registry["job_result"].description).toMatch(/llm_job_result/);
     expect(registry["compare_answers"].description).toMatch(/does not call any provider/i);
   });
 
