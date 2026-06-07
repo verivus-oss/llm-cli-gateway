@@ -357,7 +357,7 @@ Execute a Claude Code request with optional session management.
 
 **Parameters:**
 
-- `prompt` (string, required): The prompt to send (1-100,000 chars)
+- `prompt` (string, optional*): The prompt to send (1-100,000 chars). *Exactly one of `prompt` or `promptParts` is required (mutually exclusive)
 - `model` (string, optional): Model name or alias (use `list_models` for available values; supports `latest`)
 - `outputFormat` (string, optional): Output format (`text|json|stream-json`), default: `stream-json` — the gateway parses NDJSON usage events for token/cost observability; override to `text` only when you want unparsed stdout
 - `sessionId` (string, optional): Specific session ID to use
@@ -387,7 +387,7 @@ Execute a Claude Code request with optional session management.
 - `optimizePrompt` (boolean, optional): Optimize prompt for token efficiency (44% reduction), default: false
 - `optimizeResponse` (boolean, optional): Optimize response for token efficiency (37% reduction), default: false
 - `correlationId` (string, optional): Request trace ID (auto-generated if omitted)
-- `idleTimeoutMs` (number, optional): Kill a stuck process after output inactivity; 30,000 to 3,600,000 ms
+- `idleTimeoutMs` (integer, optional): Kill a stuck process after output inactivity; 30,000 to 3,600,000 ms
 - `worktree` (boolean|object, optional): Run inside a gateway-owned git worktree (slice λ)
 - `promptParts` (object, optional): Cache-aware structured prompt `{ system?, tools?, context?, task }`; mutually exclusive with `prompt`
 - `forceRefresh` (boolean, optional): Bypass dedup and force a fresh CLI run, default: false
@@ -415,7 +415,7 @@ Execute a Codex request with optional session tracking.
 
 **Parameters:**
 
-- `prompt` (string, required): The prompt to send (1-100,000 chars)
+- `prompt` (string, optional*): The prompt to send (1-100,000 chars). *Exactly one of `prompt` or `promptParts` is required (mutually exclusive)
 - `model` (string, optional): Model name or alias (use `list_models` for available values; supports `latest`, recommended: `gpt-5.5`)
 - `fullAuto` (boolean, optional): Deprecated — expands to `--sandbox workspace-write` only (current Codex no longer accepts approval-policy flags); prefer `sandboxMode`
 - `sandboxMode` (string, optional): Codex sandbox (`read-only|workspace-write|danger-full-access`)
@@ -427,10 +427,21 @@ Execute a Codex request with optional session tracking.
 - `resumeLatest` (boolean, optional): Resume the most recent Codex session in the current cwd (`codex exec resume --last`); ignored if `sessionId` is set
 - `createNewSession` (boolean, optional): Always create a new session
 - `forceRefresh` (boolean, optional): Bypass dedup and force a fresh CLI run, default: false
+- `outputFormat` (string, optional): `text` (default) or `json` (`--json` JSONL events for token usage extraction)
+- `outputSchema` (string|object, optional): Codex `--output-schema` — path or inline JSON Schema
+- `workingDir` (string, optional): Working root for this session (`-C`/`--cd`; new sessions only)
+- `addDir` (string[], optional): Additional writable workspace directories (one `--add-dir` per entry; new sessions only)
+- `ephemeral` (boolean, optional): Codex `--ephemeral` (no session persistence)
+- `images` (string[], optional): Image attachments (one `-i <path>` per entry)
+- `profile` (string, optional): Codex `--profile <name>` (new sessions only; ignored with a logged warning on resume)
+- `configOverrides` (object, optional): Codex `-c key=value` overrides
+- `ignoreRules` / `ignoreUserConfig` (boolean, optional): Codex `--ignore-rules` / `--ignore-user-config`
+- `worktree` (boolean|object, optional): Run inside a gateway-owned git worktree (slice λ)
+- `promptParts` (object, optional): Cache-aware structured prompt `{ system?, tools?, context?, task }`; mutually exclusive with `prompt`
 - `optimizePrompt` (boolean, optional): Optimize prompt for token efficiency, default: false
 - `optimizeResponse` (boolean, optional): Optimize response for token efficiency, default: false
 - `correlationId` (string, optional): Request trace ID (auto-generated if omitted)
-- `idleTimeoutMs` (number, optional): Kill a stuck Codex process after output inactivity; 30,000 to 3,600,000 ms
+- `idleTimeoutMs` (integer, optional): Kill a stuck Codex process after output inactivity; 30,000 to 3,600,000 ms
 
 **Response extras:**
 
@@ -468,7 +479,7 @@ Execute a Gemini CLI request with session support.
 
 **Parameters:**
 
-- `prompt` (string, required): The prompt to send (1-100,000 chars)
+- `prompt` (string, optional*): The prompt to send (1-100,000 chars). *Exactly one of `prompt` or `promptParts` is required (mutually exclusive)
 - `model` (string, optional): Model name or alias (use `list_models` for available values; supports `latest`, `pro`, `flash`)
 - `sessionId` (string, optional): Session ID to resume
 - `resumeLatest` (boolean, optional): Resume the latest session automatically
@@ -479,9 +490,19 @@ Execute a Gemini CLI request with session support.
 - `mcpServers` (string[], optional): Allowed Gemini MCP server names
 - `allowedTools` (string[], optional): Restrict Gemini tools to this allow-list
 - `includeDirs` (string[], optional): Additional workspace directories for Gemini
+- `outputFormat` (string, optional): `text` (default), `json` (`-o json`), or `stream-json` (`-o stream-json`, NDJSON with usage extraction)
+- `sandbox` (boolean, optional): Run Gemini in sandbox mode (`-s`)
+- `policyFiles` / `adminPolicyFiles` (string[], optional): Policy / admin-policy file paths (one `--policy`/`--admin-policy` per file; paths must exist)
+- `attachments` (string[], optional): Absolute file paths prepended as `@<path>` tokens to the prompt
+- `skipTrust` (boolean, optional): Emit `--skip-trust` to trust the workspace for this session (required for headless runs in fresh workspaces)
+- `yolo` (boolean, optional): Auto-approve all; equivalent to `approvalMode: "yolo"`. Emits `--yolo` only when `--approval-mode yolo` is not already being emitted (never both)
+- `worktree` (boolean|object, optional): Run inside a gateway-owned git worktree (slice λ)
+- `promptParts` (object, optional): Cache-aware structured prompt `{ system?, tools?, context?, task }`; mutually exclusive with `prompt`
 - `optimizePrompt` (boolean, optional): Optimize prompt for token efficiency, default: false
 - `optimizeResponse` (boolean, optional): Optimize response for token efficiency, default: false
 - `correlationId` (string, optional): Request trace ID (auto-generated if omitted)
+- `idleTimeoutMs` (integer, optional): Kill a stuck process after output inactivity; 30,000 to 3,600,000 ms
+- `forceRefresh` (boolean, optional): Bypass dedup and force a fresh CLI run, default: false
 
 **Response extras:**
 
@@ -505,7 +526,7 @@ Execute a Grok CLI (xAI) request with session support.
 
 **Parameters:**
 
-- `prompt` (string, required): The prompt to send (1-100,000 chars)
+- `prompt` (string, optional*): The prompt to send (1-100,000 chars). *Exactly one of `prompt` or `promptParts` is required (mutually exclusive)
 - `model` (string, optional): Model name or alias (e.g. `grok-build`, `latest`)
 - `outputFormat` (string, optional): `"plain"` (default), `"json"`, or `"streaming-json"`
 - `sessionId` (string, optional): Session ID to resume (`--resume <id>`)
@@ -520,9 +541,35 @@ Execute a Grok CLI (xAI) request with session support.
 - `mcpServers` (string[], optional): MCP server names tracked for approvals (Grok manages its own MCP config via `grok mcp`)
 - `allowedTools` (string[], optional): Allowed built-in tools (passed as `--tools` comma list)
 - `disallowedTools` (string[], optional): Disallowed built-in tools (passed as `--disallowed-tools` comma list)
+- `maxTurns` (integer, optional): Agent-loop iteration cap (`--max-turns`)
+- `workingDir` (string, optional): Working directory for this invocation (`--cwd`)
+- `sandbox` (string, optional): Sandbox profile for filesystem/network access (`--sandbox`, freeform; also via `GROK_SANDBOX`)
+- `rules` (string, optional): Extra rules appended to the system prompt (`--rules`; supports `@file` prefix)
+- `systemPromptOverride` (string, optional): Replace the agent's system prompt entirely
+- `allow` / `deny` (string[], optional): Permission allow/deny rules (one `--allow`/`--deny` per entry)
+- `compactionMode` (string, optional): `summary` (default) `|transcript|segments`
+- `compactionDetail` (string, optional): `none|minimal|balanced|verbose` (segments mode only)
+- `agent` (string, optional): Agent name or definition file path
+- `agents` (string|object, optional): Inline subagent definitions JSON
+- `bestOfN` (integer, optional): Run the task N ways in parallel and pick the best (headless only)
+- `check` (boolean, optional): Append a self-verification loop (headless only)
+- `disableWebSearch` (boolean, optional): Disable web search and remote retrieval tools
+- `todoGate` (boolean, optional): Enable runtime turn-end TodoGate (session-scoped)
+- `verbatim` (boolean, optional): Send the prompt exactly as given (also skips gateway prompt optimisation)
+- `promptFile` / `promptJson` / `single` (optional): Single-turn prompt from a file / JSON blocks / literal
+- `experimentalMemory` / `noMemory` (boolean, optional): Enable/disable cross-session memory
+- `noAltScreen` / `noPlan` / `noSubagents` (boolean, optional): Disable alt screen / plan mode / subagent spawning
+- `oauth` (boolean, optional): Use OAuth during authentication
+- `restoreCode` (boolean, optional): Check out the original session commit when resuming
+- `leaderSocket` (string, optional): Custom leader socket path (`--leader-socket`, Grok 0.2.32+; default `~/.grok/leader.sock`) — targets an isolated leader process, e.g. a local/branch Grok build
+- `nativeWorktree` (boolean|string, optional): Grok's own `--worktree` flag (`true` → bare, string → named); distinct from the gateway `worktree` option
+- `worktree` (boolean|object, optional): Run inside a gateway-owned git worktree (slice λ)
+- `promptParts` (object, optional): Cache-aware structured prompt `{ system?, tools?, context?, task }`; mutually exclusive with `prompt`
 - `optimizePrompt` (boolean, optional): Optimize prompt for token efficiency, default: false
 - `optimizeResponse` (boolean, optional): Optimize response for token efficiency, default: false
 - `correlationId` (string, optional): Request trace ID (auto-generated if omitted)
+- `idleTimeoutMs` (integer, optional): Kill a stuck process after output inactivity; 30,000 to 3,600,000 ms
+- `forceRefresh` (boolean, optional): Bypass dedup and force a fresh CLI run, default: false
 
 **Example:**
 
@@ -776,6 +823,21 @@ Run a Mistral Vibe agentic coding request. Like `grok_request` in shape, but wit
 - `disallowedTools` (string[], optional): Accepted for parity with the other providers; ignored at the CLI boundary with a logged warning.
 - `outputFormat` (string, optional): Vibe 2.x values are `"text"`, `"json"`, or `"streaming"`; legacy aliases `"plain"` and `"stream-json"` are accepted and normalized before spawn.
 - `sessionId` / `resumeLatest` / `createNewSession`: standard session controls. Current Vibe defaults session logging to enabled; if an older config has `[session_logging] enabled = false`, `doctor --json` surfaces an actionable next-action.
+- `trust` (boolean, optional): Emit `--trust` so Vibe trusts the cwd for this invocation only (not persisted; skips the interactive trust prompt)
+- `maxTurns` (integer, optional): Agent-loop iteration cap (`--max-turns`, programmatic mode only)
+- `maxPrice` (number, optional): Interrupt when cumulative cost crosses this USD cap (`--max-price`, programmatic mode only)
+- `maxTokens` (integer, optional): Cap cumulative prompt + completion tokens (`--max-tokens`, programmatic mode only)
+- `workingDir` (string, optional): Change to this directory before running (`--workdir`)
+- `addDir` (string[], optional): Additional writable workspace directories (one `--add-dir` per entry)
+- `approvalStrategy` (string, optional): `"legacy"` (default) or `"mcp_managed"`
+- `approvalPolicy` (string, optional): `"strict"`, `"balanced"`, or `"permissive"`
+- `mcpServers` (string[], optional): MCP server names tracked for approvals (Vibe manages its own MCP config via `vibe mcp`)
+- `worktree` (boolean|object, optional): Run inside a gateway-owned git worktree (slice λ)
+- `promptParts` (object, optional): Cache-aware structured prompt `{ system?, tools?, context?, task }`; mutually exclusive with `prompt`
+- `optimizePrompt` / `optimizeResponse` (boolean, optional): Token-efficiency optimisation, default: false
+- `correlationId` (string, optional): Request trace ID (auto-generated if omitted)
+- `idleTimeoutMs` (integer, optional): Kill a stuck process after output inactivity; 30,000 to 3,600,000 ms
+- `forceRefresh` (boolean, optional): Bypass dedup and force a fresh CLI run, default: false
 
 ##### `claude_request_async` / `codex_request_async` / `gemini_request_async` / `grok_request_async` / `mistral_request_async`
 
