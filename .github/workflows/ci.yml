@@ -71,7 +71,7 @@ jobs:
           set +e
           if command -v strace >/dev/null 2>&1; then
             setsid --wait strace -ff -tt -o "${trace_prefix}" \
-              -e trace=kill,tgkill,tkill,rt_sigqueueinfo,rt_tgsigqueueinfo \
+              -e trace=process,kill,tgkill,tkill,rt_sigqueueinfo,rt_tgsigqueueinfo \
               -e signal=all \
               npm run test:ci
           else
@@ -85,7 +85,7 @@ jobs:
             echo "::group::signal syscall trace"
             for trace_file in "${trace_prefix}"*; do
               echo "--- ${trace_file}"
-              grep -E "SIG|kill|tgkill|rt_sigqueueinfo|rt_tgsigqueueinfo" "${trace_file}" || true
+              grep -E "execve|clone|fork|vfork|SIG|kill|tgkill|rt_sigqueueinfo|rt_tgsigqueueinfo" "${trace_file}" || true
             done
             echo "::endgroup::"
           fi
