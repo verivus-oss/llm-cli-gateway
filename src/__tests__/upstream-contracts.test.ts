@@ -199,6 +199,14 @@ describe("upstream CLI contracts", () => {
     // schema-exposure test above cannot catch that class of bug, so this test
     // asserts every contract mcpParameter name appears in the registered
     // callback's source for both the sync and async tools.
+    //
+    // ≥2 occurrences required, not ≥1: the 2.1.0 release mutation-probe audit
+    // (P8, docs/reviews/release-2.1.0-test-veracity-audit.md) showed that an
+    // includes() check survives removal of the call-object line alone — the
+    // destructuring line still mentions the name while the param is genuinely
+    // dropped. Every callback uses the destructure + rebuilt-object shape, so
+    // a correctly forwarded param appears at least twice (verified: today's
+    // minimum across all tools/params is exactly 2).
     const { AsyncJobManager } = await import("../async-job-manager.js");
     const { MemoryJobStore } = await import("../job-store.js");
     const { noopLogger } = await import("../logger.js");
@@ -225,9 +233,11 @@ describe("upstream CLI contracts", () => {
         expect(typeof tool.handler, `${toolName} handler present`).toBe("function");
         const callbackSource = String(tool.handler);
         for (const param of contract.mcpParameters) {
+          const occurrences = (callbackSource.match(new RegExp(`\\b${param}\\b`, "g")) ?? [])
+            .length;
           expect(
-            callbackSource.includes(param),
-            `${toolName} callback forwards ${param} (schema accepts it but the callback never references it — it would be silently dropped)`
+            occurrences >= 2,
+            `${toolName} callback forwards ${param} (found ${occurrences} reference(s); a forwarded param appears in BOTH the destructure and the rebuilt call object — fewer means it is silently dropped)`
           ).toBe(true);
         }
       }
