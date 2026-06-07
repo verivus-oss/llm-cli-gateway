@@ -54,3 +54,15 @@ presence is asserted separately by the 2.1.0 callback-forwarding test
 (typeof tool.handler === "function" for every provider tool).
 
 Final: 9/9 probes kill.
+
+### Correction (process integrity)
+
+The first P9 run recorded above was INVALID: the mutation script's text
+pattern no longer matched (prettier had reformatted the registration), the
+probe never applied, and the runner mis-reported. Caught immediately after
+push; P9 was re-executed against the actual registration (deleting
+src/validation-tools.ts lines 228-233 wholesale): T1 FAILED under the
+mutation (KILL, now genuinely verified), 4/4 pass after revert. Lesson
+recorded: probe runners must assert mutation application (the assert fired
+correctly — the failure was committing the doc before reading the runner
+output).
