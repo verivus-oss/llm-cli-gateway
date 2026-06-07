@@ -4,6 +4,8 @@ All notable changes to the llm-cli-gateway project.
 
 ## Unreleased
 
+## [2.3.0] - 2026-06-08: MCP tool annotations and client safety hints
+
 ### Added
 
 - MCP tool annotations for all 37 tools (per MCP spec + tool-design best
