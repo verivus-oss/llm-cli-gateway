@@ -4,6 +4,8 @@ All notable changes to the llm-cli-gateway project.
 
 ## Unreleased
 
+## [2.1.0] - 2026-06-07: Grok Build 0.2.32, probe drift acknowledgement, docs currency
+
 ### Added
 
 - Grok Build 0.2.32 support: new `leaderSocket` parameter on `grok_request` /
