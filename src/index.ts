@@ -4662,6 +4662,13 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           "Bypass dedup and force a fresh CLI run even if a recent identical request exists"
         ),
     },
+    {
+      title: "Claude Code request",
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
     async ({
       prompt,
       promptParts,
@@ -5158,6 +5165,13 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         ),
       worktree: WORKTREE_SCHEMA.optional(),
     },
+    {
+      title: "Codex request",
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
     async ({
       prompt,
       promptParts,
@@ -5446,6 +5460,13 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .optional()
         .describe("Idle timeout in ms (min 30s, max 1h, omit=CLI default)"),
     },
+    {
+      title: "Fork Codex session",
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
     async ({
       prompt,
       sessionId,
@@ -5651,6 +5672,13 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           "Emit `--yolo` to auto-approve all actions. Equivalent to approvalMode 'yolo'; routed through the same approval gate. Under mcp_managed the gate still decides."
         ),
       worktree: WORKTREE_SCHEMA.optional(),
+    },
+    {
+      title: "Gemini request",
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: false,
+      openWorldHint: true,
     },
     async ({
       prompt,
@@ -5937,6 +5965,13 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         ),
       worktree: WORKTREE_SCHEMA.optional(),
     },
+    {
+      title: "Grok request",
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
     async ({
       prompt,
       promptParts,
@@ -6165,6 +6200,13 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           "Vibe --add-dir <DIR>: additional writable workspace directories. Each entry is emitted as its own --add-dir instance (Vibe states this flag may be specified multiple times)."
         ),
       worktree: WORKTREE_SCHEMA.optional(),
+    },
+    {
+      title: "Mistral Vibe request",
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: false,
+      openWorldHint: true,
     },
     async ({
       prompt,
@@ -6415,6 +6457,13 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .describe(
             "Bypass dedup and force a fresh CLI run even if a recent identical request exists"
           ),
+      },
+      {
+        title: "Claude Code request (async job)",
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: false,
+        openWorldHint: true,
       },
       async ({
         prompt,
@@ -6747,6 +6796,13 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           ),
         worktree: WORKTREE_SCHEMA.optional(),
       },
+      {
+        title: "Codex request (async job)",
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: false,
+        openWorldHint: true,
+      },
       async ({
         prompt,
         promptParts,
@@ -6916,6 +6972,13 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             "Emit `--yolo` to auto-approve all actions. Equivalent to approvalMode 'yolo'; routed through the same approval gate. Under mcp_managed the gate still decides."
           ),
         worktree: WORKTREE_SCHEMA.optional(),
+      },
+      {
+        title: "Gemini request (async job)",
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: false,
+        openWorldHint: true,
       },
       async ({
         prompt,
@@ -7198,6 +7261,13 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           ),
         worktree: WORKTREE_SCHEMA.optional(),
       },
+      {
+        title: "Grok request (async job)",
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: false,
+        openWorldHint: true,
+      },
       async ({
         prompt,
         promptParts,
@@ -7420,6 +7490,13 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           ),
         worktree: WORKTREE_SCHEMA.optional(),
       },
+      {
+        title: "Mistral Vibe request (async job)",
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: false,
+        openWorldHint: true,
+      },
       async ({
         prompt,
         promptParts,
@@ -7484,6 +7561,13 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       {
         jobId: z.string().describe("Async job ID from *_request_async"),
       },
+      {
+        title: "Async job status",
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
       async ({ jobId }) => {
         const job = asyncJobManager.getJobSnapshot(jobId);
         if (!job) {
@@ -7536,6 +7620,13 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .max(2000000)
           .default(200000)
           .describe("Max chars returned per stream"),
+      },
+      {
+        title: "Async job result",
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
       },
       async ({ jobId, maxChars }) => {
         const result = asyncJobManager.getJobResult(jobId, maxChars);
@@ -7600,6 +7691,13 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       "Cancel a running gateway async or deferred-sync job by jobId.",
       {
         jobId: z.string().describe("Async job ID from *_request_async"),
+      },
+      {
+        title: "Cancel async job",
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: true,
+        openWorldHint: false,
       },
       async ({ jobId }) => {
         const cancel = asyncJobManager.cancelJob(jobId);
@@ -7671,6 +7769,13 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .default(false)
         .describe("Include the full persisted prompt text in the result"),
     },
+    {
+      title: "Persisted request lookup",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
     async ({ correlationId, maxChars, includePrompt }) => {
       const record = readPersistedRequest(flightRecorder, correlationId, {
         maxChars,
@@ -7712,6 +7817,13 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
     "llm_process_health",
     "Report gateway process health: async-job manager state plus the resolved persistence configuration and paths.",
     {},
+    {
+      title: "Gateway process health",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
     async () => {
       const health = asyncJobManager.getJobHealth();
       const persistenceBlock = {
@@ -7762,6 +7874,13 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .optional()
         .describe("Optional CLI filter"),
     },
+    {
+      title: "Approval decisions",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
     async ({ limit, cli }) => {
       const approvals = approvalManager.list(limit, cli);
       return {
@@ -7798,6 +7917,13 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         )
         .describe("CLI filter (claude|codex|gemini|grok|mistral)"),
     },
+    {
+      title: "Provider models",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
     async ({ cli }) => {
       const cliInfo = getAvailableCliInfo();
       const result = cli ? { [cli]: cliInfo[cli] } : cliInfo;
@@ -7815,6 +7941,13 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           z.enum(["claude", "codex", "gemini", "grok", "mistral"]).optional()
         )
         .describe("CLI filter (claude|codex|gemini|grok|mistral)"),
+    },
+    {
+      title: "Provider CLI versions",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
     },
     async ({ cli }) => {
       const versions = await getCliVersions(cli);
@@ -7838,6 +7971,13 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .describe(
           "When true, run local --help probes and compare advertised flags against the declared contract. Strongly recommended after any provider CLI upgrade to detect drift."
         ),
+    },
+    {
+      title: "Provider CLI contracts",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
     },
     async ({ cli, probeInstalled }) => {
       const report = buildUpstreamContractReport({ cli, probeInstalled });
@@ -7866,6 +8006,13 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .max(3_600_000)
         .optional()
         .describe("Upgrade timeout in ms when dryRun=false"),
+    },
+    {
+      title: "Upgrade provider CLI",
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: false,
+      openWorldHint: true,
     },
     async ({ cli, target, dryRun, timeoutMs }) => {
       try {
@@ -7919,6 +8066,13 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       description: z.string().optional().describe("Session description"),
       setAsActive: z.boolean().default(true).describe("Set as active session"),
     },
+    {
+      title: "Create session record",
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: false,
+    },
     async ({ cli, description, setAsActive }) => {
       try {
         const session = await sessionManager.createSession(cli, description);
@@ -7963,6 +8117,13 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       cli: SESSION_PROVIDER_ENUM.optional().describe(
         "CLI filter (claude|codex|gemini|grok|mistral)"
       ),
+    },
+    {
+      title: "List sessions",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
     },
     async ({ cli }) => {
       try {
@@ -8019,6 +8180,13 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       cli: SESSION_PROVIDER_ENUM.describe("CLI type (claude|codex|gemini|grok|mistral)"),
       sessionId: z.string().nullable().describe("Session ID (null to clear)"),
     },
+    {
+      title: "Set active session",
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
     async ({ cli, sessionId }) => {
       try {
         const success = await sessionManager.setActiveSession(cli, sessionId || null);
@@ -8071,6 +8239,13 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
     "Delete a gateway session record by ID (also removes any gateway-owned worktree attached to it).",
     {
       sessionId: z.string().describe("Session ID"),
+    },
+    {
+      title: "Delete session",
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: true,
+      openWorldHint: false,
     },
     async ({ sessionId }) => {
       try {
@@ -8127,6 +8302,13 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
     "Get one gateway session record by session ID, including recent request history when available.",
     {
       sessionId: z.string().describe("Session ID"),
+    },
+    {
+      title: "Get session",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
     },
     async ({ sessionId }) => {
       try {
@@ -8229,6 +8411,13 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       cli: SESSION_PROVIDER_ENUM.optional().describe(
         "CLI filter (claude|codex|gemini|grok|mistral)"
       ),
+    },
+    {
+      title: "Clear sessions",
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: true,
+      openWorldHint: false,
     },
     async ({ cli }) => {
       try {

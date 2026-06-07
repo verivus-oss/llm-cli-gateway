@@ -77,6 +77,13 @@ export function registerValidationTools(server: McpServer, deps: ValidationToolD
         .optional()
         .describe("Optional provider to run an explicit judge synthesis job."),
     },
+    {
+      title: "Multi-model validation",
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
     async ({ question, models, focus, judgeModel }) =>
       textResponse({
         success: true,
@@ -100,6 +107,13 @@ export function registerValidationTools(server: McpServer, deps: ValidationToolD
       question: z.string().optional().describe("Original question, if available."),
       model: providerSchema.default("codex").describe("Provider to ask for the second opinion."),
     },
+    {
+      title: "Second opinion",
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
     async ({ answer, question, model }) =>
       textResponse({
         success: true,
@@ -120,6 +134,13 @@ export function registerValidationTools(server: McpServer, deps: ValidationToolD
     {
       question: z.string().min(1).describe("Question the answers respond to."),
       answers: z.array(z.string().min(1)).min(2).describe("Two or more answers to compare."),
+    },
+    {
+      title: "Compare answers (local)",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
     },
     async ({ question, answers }) =>
       textResponse({
@@ -147,6 +168,13 @@ export function registerValidationTools(server: McpServer, deps: ValidationToolD
         .describe("How aggressively to review."),
       models: providerListSchema.describe("Providers to ask for adversarial review."),
     },
+    {
+      title: "Red-team review",
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
     async ({ content, riskLevel, models }) =>
       textResponse({
         success: true,
@@ -168,6 +196,13 @@ export function registerValidationTools(server: McpServer, deps: ValidationToolD
       claim: z.string().min(1).describe("Claim to check across providers."),
       models: providerListSchema.describe("Providers to ask for agreement or disagreement."),
     },
+    {
+      title: "Consensus check",
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
     async ({ claim, models }) =>
       textResponse({
         success: true,
@@ -187,6 +222,13 @@ export function registerValidationTools(server: McpServer, deps: ValidationToolD
     {
       question: z.string().min(1).describe("Question for one provider."),
       model: providerSchema.default("claude").describe("Provider to ask."),
+    },
+    {
+      title: "Ask one model",
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: false,
+      openWorldHint: true,
     },
     async ({ question, model }) =>
       textResponse({
@@ -212,6 +254,13 @@ export function registerValidationTools(server: McpServer, deps: ValidationToolD
         .describe("Terminal normalized provider results from job_result."),
       judgeModel: providerSchema.default("codex").describe("Provider to run the judge synthesis."),
     },
+    {
+      title: "Synthesize validation",
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
     async ({ question, providerResults, judgeModel }) =>
       textResponse({
         success: true,
@@ -229,6 +278,13 @@ export function registerValidationTools(server: McpServer, deps: ValidationToolD
     "list_available_models",
     "List models and capabilities for every available provider CLI (takes no arguments; complements per-provider list_models).",
     {},
+    {
+      title: "All provider models",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
     async () => textResponse({ success: true, models: getAvailableCliInfo() })
   );
 
@@ -237,6 +293,13 @@ export function registerValidationTools(server: McpServer, deps: ValidationToolD
     "Check a VALIDATION job's status (jobs started by validate_with_models/ask_model/etc.) — distinct from llm_job_status, which tracks provider request jobs.",
     {
       jobId: z.string().min(1).describe("Validation job ID."),
+    },
+    {
+      title: "Validation job status",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
     },
     async ({ jobId }) => {
       const job = deps.asyncJobManager.getJobSnapshot(jobId);
@@ -262,6 +325,13 @@ export function registerValidationTools(server: McpServer, deps: ValidationToolD
         .max(2000000)
         .default(200000)
         .describe("Maximum result size."),
+    },
+    {
+      title: "Validation job result",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
     },
     async ({ jobId, provider, maxChars }) => {
       const result = deps.asyncJobManager.getJobResult(jobId, maxChars);

@@ -91,4 +91,110 @@ describe("MCP tool-surface usability (post-usability-review regressions)", () =>
       expect(registry[absent], `${absent} must NOT be registered on backend=none`).toBeUndefined();
     }
   });
+
+  it("every tool carries annotations: title + behavioural hints (2.3.0 slice)", async () => {
+    const server = await makeServer(true);
+    const registry = (
+      server as unknown as Record<
+        string,
+        Record<
+          string,
+          {
+            annotations?: {
+              title?: string;
+              readOnlyHint?: boolean;
+              destructiveHint?: boolean;
+              idempotentHint?: boolean;
+              openWorldHint?: boolean;
+            };
+          }
+        >
+      >
+    )._registeredTools;
+    const names = Object.keys(registry);
+    expect(names.length).toBeGreaterThanOrEqual(37) /* exact toBe(37) asserted below */;
+    for (const name of names) {
+      const ann = registry[name].annotations;
+      expect(ann, `${name} has annotations`).toBeDefined();
+      expect((ann?.title ?? "").length, `${name} has a display title`).toBeGreaterThan(2);
+      // a tool cannot be both read-only and destructive
+      expect(
+        ann?.readOnlyHint === true && ann?.destructiveHint === true,
+        `${name} readOnly+destructive contradiction`
+      ).toBe(false);
+    }
+    // EXACT set pinning (post-2.3.0-gate Codex finding): derive the actual
+    // sets from the registry and compare them exactly — positive membership
+    // alone would let a future mis-classified or unlisted tool slip through.
+    expect(names.length).toBe(37);
+    const setOf = (pred: (a: NonNullable<(typeof registry)[string]["annotations"]>) => boolean) =>
+      names.filter(n => pred(registry[n].annotations!)).sort();
+    expect(setOf(a => a.readOnlyHint === true)).toEqual(
+      [
+        "approval_list",
+        "cli_versions",
+        "compare_answers",
+        "job_result",
+        "job_status",
+        "list_available_models",
+        "list_models",
+        "llm_job_result",
+        "llm_job_status",
+        "llm_process_health",
+        "llm_request_result",
+        "session_get",
+        "session_list",
+        "upstream_contracts",
+      ].sort()
+    );
+    expect(setOf(a => a.openWorldHint === true)).toEqual(
+      [
+        "claude_request",
+        "claude_request_async",
+        "codex_request",
+        "codex_request_async",
+        "codex_fork_session",
+        "gemini_request",
+        "gemini_request_async",
+        "grok_request",
+        "grok_request_async",
+        "mistral_request",
+        "mistral_request_async",
+        "validate_with_models",
+        "second_opinion",
+        "red_team_review",
+        "consensus_check",
+        "ask_model",
+        "synthesize_validation",
+        "cli_upgrade",
+      ].sort()
+    );
+    expect(setOf(a => a.destructiveHint === true)).toEqual(
+      [
+        // provider-spawning (17)
+        "claude_request",
+        "claude_request_async",
+        "codex_request",
+        "codex_request_async",
+        "codex_fork_session",
+        "gemini_request",
+        "gemini_request_async",
+        "grok_request",
+        "grok_request_async",
+        "mistral_request",
+        "mistral_request_async",
+        "validate_with_models",
+        "second_opinion",
+        "red_team_review",
+        "consensus_check",
+        "ask_model",
+        "synthesize_validation",
+        // gateway-destructive (4)
+        "cli_upgrade",
+        "llm_job_cancel",
+        "session_delete",
+        "session_clear_all",
+      ].sort()
+    );
+  });
 });

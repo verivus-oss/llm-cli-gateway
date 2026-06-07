@@ -4,6 +4,19 @@ All notable changes to the llm-cli-gateway project.
 
 ## Unreleased
 
+### Added
+
+- MCP tool annotations for all 37 tools (per MCP spec + tool-design best
+  practice): display `title` plus `readOnlyHint`/`destructiveHint`/
+  `idempotentHint`/`openWorldHint` on every registration. 14 pure-read tools
+  marked read-only/closed-world; `cli_upgrade`, `session_delete`,
+  `session_clear_all`, `llm_job_cancel` marked destructive; every
+  provider-spawning tool (requests, fork, validation) marked open-world with
+  destructive potential (spawned agentic CLIs can modify the environment).
+  Clients can use the hints for confirmation UX and safe auto-approval. New
+  invariant test pins titles, the exact destructive/read-only/open-world
+  sets, and the readOnly+destructive contradiction ban.
+
 ## [2.2.0] - 2026-06-07: MCP tool-surface usability — self-describing tools
 
 ### Added
@@ -247,7 +260,7 @@ to end with a verdaccio reproduction.
 - Consumer `npm ls` exits ELSPROBLEMS: the pinned `tar-stream@3.1.7` sits
   outside `tar-fs`'s `^2.1.4` range. Inherent to the out-of-range pin; disappears
   in 2.0.0 (Phase B / node:sqlite) when the `better-sqlite3 → prebuild-install
-  → tar-fs` chain leaves the prod graph entirely.
+→ tar-fs` chain leaves the prod graph entirely.
 - Local-tarball installs still resolve `tar-stream@2.2.0` (shrinkwrap ignored on
   that path); the audit's advisory carve-out stays until Phase B.
 
