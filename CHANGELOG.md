@@ -4,6 +4,30 @@ All notable changes to the llm-cli-gateway project.
 
 ## Unreleased
 
+### Added
+
+- MCP tool-surface usability (4-seat cross-LLM review): all 37 tools now carry
+  action descriptions (previously none had tool-level descriptions — clients
+  that rank, search, or defer tools by description saw bare names); sync
+  `*_request` descriptions state the prompt/promptParts exactly-one rule and
+  conditional deferral; `job_status`/`job_result` vs `llm_job_*` and the
+  local-only `compare_answers` are disambiguated; session/`sessionId`
+  describes gain per-provider resume semantics parity.
+
+### Fixed
+
+- Codex gateway-bookkeeping sessions are now created with the reserved `gw-`
+  prefix (4 sites), so resuming a gateway ID fails fast with an actionable
+  error instead of reaching `codex exec resume` and dying with "no rollout
+  found" (root cause of real-world resume failures).
+- Server instructions are now built per-server from the same derived gate as
+  tool registration (backend, asyncJobsEnabled, hasStore()), so a
+  `backend = "none"` gateway no longer advertises unregistered
+  `*_request_async`/`llm_job_*` tools.
+- Sync auto-deferral is disabled when async jobs are unavailable — previously
+  a request could defer into an in-memory job whose polling tools were not
+  registered (dead-end jobId).
+
 ## [2.1.0] - 2026-06-07: Grok Build 0.2.32, probe drift acknowledgement, docs currency
 
 ### Added

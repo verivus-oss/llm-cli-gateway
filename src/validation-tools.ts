@@ -65,6 +65,7 @@ function findHumanReadableReport(value: unknown): string | null {
 export function registerValidationTools(server: McpServer, deps: ValidationToolDeps): void {
   server.tool(
     "validate_with_models",
+    "Ask two or more provider CLIs to independently validate a question. Starts validation jobs — poll with job_status, collect with job_result (not llm_job_*).",
     {
       question: z.string().min(1).describe("Question or content to validate."),
       models: providerListSchema.describe("Providers to ask. Defaults to Claude and Codex."),
@@ -93,6 +94,7 @@ export function registerValidationTools(server: McpServer, deps: ValidationToolD
 
   server.tool(
     "second_opinion",
+    "Ask one provider CLI to review an answer (starts a validation job; poll job_status, collect job_result).",
     {
       answer: z.string().min(1).describe("Answer to review."),
       question: z.string().optional().describe("Original question, if available."),
@@ -114,6 +116,7 @@ export function registerValidationTools(server: McpServer, deps: ValidationToolD
 
   server.tool(
     "compare_answers",
+    "Summarize agreement/differences between caller-provided answers LOCALLY — does not call any provider.",
     {
       question: z.string().min(1).describe("Question the answers respond to."),
       answers: z.array(z.string().min(1)).min(2).describe("Two or more answers to compare."),
@@ -135,6 +138,7 @@ export function registerValidationTools(server: McpServer, deps: ValidationToolD
 
   server.tool(
     "red_team_review",
+    "Challenge a plan, answer, or document for risks and failure modes via provider CLIs (starts validation jobs).",
     {
       content: z.string().min(1).describe("Plan, answer, or document to challenge."),
       riskLevel: z
@@ -159,6 +163,7 @@ export function registerValidationTools(server: McpServer, deps: ValidationToolD
 
   server.tool(
     "consensus_check",
+    "Ask provider CLIs whether they agree or disagree with a claim (starts validation jobs).",
     {
       claim: z.string().min(1).describe("Claim to check across providers."),
       models: providerListSchema.describe("Providers to ask for agreement or disagreement."),
@@ -178,6 +183,7 @@ export function registerValidationTools(server: McpServer, deps: ValidationToolD
 
   server.tool(
     "ask_model",
+    "Ask one provider CLI a question through the simplified validation surface (starts a validation job).",
     {
       question: z.string().min(1).describe("Question for one provider."),
       model: providerSchema.default("claude").describe("Provider to ask."),
@@ -197,6 +203,7 @@ export function registerValidationTools(server: McpServer, deps: ValidationToolD
 
   server.tool(
     "synthesize_validation",
+    "Run an explicit judge model over already-collected validation results to produce a synthesis.",
     {
       question: z.string().min(1).describe("Original request that was validated."),
       providerResults: z
@@ -218,12 +225,16 @@ export function registerValidationTools(server: McpServer, deps: ValidationToolD
       })
   );
 
-  server.tool("list_available_models", {}, async () =>
-    textResponse({ success: true, models: getAvailableCliInfo() })
+  server.tool(
+    "list_available_models",
+    "List models and capabilities for every available provider CLI (takes no arguments; complements per-provider list_models).",
+    {},
+    async () => textResponse({ success: true, models: getAvailableCliInfo() })
   );
 
   server.tool(
     "job_status",
+    "Check a VALIDATION job's status (jobs started by validate_with_models/ask_model/etc.) — distinct from llm_job_status, which tracks provider request jobs.",
     {
       jobId: z.string().min(1).describe("Validation job ID."),
     },
@@ -238,6 +249,7 @@ export function registerValidationTools(server: McpServer, deps: ValidationToolD
 
   server.tool(
     "job_result",
+    "Collect a VALIDATION job's normalized provider output — distinct from llm_job_result, which returns raw provider request job output.",
     {
       jobId: z.string().min(1).describe("Validation job ID."),
       provider: providerSchema

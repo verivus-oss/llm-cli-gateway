@@ -283,16 +283,24 @@ const loadedSkills = loadSkills();
 
 // L1: Compact server instructions (~200 tokens) — injected into every client's
 // system prompt at connection time. Covers key patterns + pointers to L2 resources.
-const SERVER_INSTRUCTIONS = `llm-cli-gateway: Multi-LLM orchestration via MCP.
+// Built per-server so the advertised tool list matches what is actually
+// registered: with persistence.backend = "none" the async/job tools are not
+// registered, and a static inventory would point clients at "tool not found".
+export function buildServerInstructions(asyncJobsEnabled: boolean): string {
+  const asyncToolsNote = asyncJobsEnabled ? " | *_request_async (async)" : "";
+  const jobsLine = asyncJobsEnabled ? "Jobs: llm_job_status, llm_job_result, llm_job_cancel\n" : "";
+  const deferralLine = asyncJobsEnabled
+    ? `- Sync auto-defers at ${SYNC_DEADLINE_MS}ms. Poll deferred jobs via llm_job_status/llm_job_result.`
+    : '- Async jobs are DISABLED (persistence.backend = "none"): *_request_async and llm_job_* tools are not registered, and sync requests run to completion (no auto-deferral).';
+  return `llm-cli-gateway: Multi-LLM orchestration via MCP.
 
-Tools: claude_request, codex_request, gemini_request, grok_request, mistral_request (sync) | *_request_async (async) | codex_fork_session (fork a Codex session into a new branch)
+Tools: claude_request, codex_request, gemini_request, grok_request, mistral_request (sync)${asyncToolsNote} | codex_fork_session (fork a Codex session into a new branch)
 Validation: validate_with_models, second_opinion, compare_answers, red_team_review, consensus_check, ask_model, synthesize_validation, list_available_models | job_status/job_result (validation jobs)
-Jobs: llm_job_status, llm_job_result, llm_job_cancel
-Sessions: session_create, session_list, session_set_active, session_get, session_delete, session_clear_all
+${jobsLine}Sessions: session_create, session_list, session_set_active, session_get, session_delete, session_clear_all
 Other: list_models, cli_versions, upstream_contracts (use --probe-installed after CLI upgrades to detect drift), cli_upgrade, approval_list, llm_process_health, llm_request_result (read back any persisted request — sync or async — by correlationId)
 
 Key behaviors:
-- Sync auto-defers at ${SYNC_DEADLINE_MS}ms. Poll deferred jobs via llm_job_status/llm_job_result.
+${deferralLine}
 - Sessions: Claude --continue, Gemini --resume, Grok --resume/--continue, Mistral --resume/--continue (current Vibe defaults session logging on; doctor flags explicit session_logging.enabled=false), Codex \`exec resume <ID>\` / \`exec resume --last\` (all real CLI continuity). For Codex, sessionId must be a real Codex UUID (from ~/.codex/sessions/); gateway-generated gw-* IDs are rejected.
 - Approval gates: opt-in via approvalStrategy:"mcp_managed".
 - Upstream drift detection: After upgrading any provider CLI (especially grok), use the upstream_contracts tool with probeInstalled: true (or the CLI command "llm-cli-gateway contracts --json --probe-installed"). This is the primary reliable way to detect when an installed binary has gained or lost flags compared to the gateway's declared contract. The probe is safe and read-only.
@@ -300,11 +308,12 @@ Key behaviors:
 
 Skills (full docs via MCP resources):
 ${loadedSkills.map(s => `- skills://${s.name} — ${s.description}`).join("\n")}`;
+}
 
-function newGatewayMcpServer(): McpServer {
+function newGatewayMcpServer(asyncJobsEnabled = true): McpServer {
   return new McpServer(
     { name: "llm-cli-gateway", version: packageVersion() },
-    { instructions: SERVER_INSTRUCTIONS }
+    { instructions: buildServerInstructions(asyncJobsEnabled) }
   );
 }
 
@@ -624,8 +633,19 @@ async function awaitJobOrDefer(
     throw err;
   }
 
-  if (SYNC_DEADLINE_MS === 0) {
-    // Disabled — fall through to direct execution.
+  // Deferral must use the SAME derived gate as tool registration and the
+  // server instructions (backend, asyncJobsEnabled, AND hasStore()): if the
+  // llm_job_* polling tools are not registered, handing the client a deferred
+  // jobId would be a dead end — run to completion instead. A null-store
+  // manager would otherwise still accept in-memory jobs (safeStoreCall
+  // tolerates store === null), making the mismatch reachable.
+  const deferralAvailable =
+    runtime.persistence.backend !== "none" &&
+    runtime.persistence.asyncJobsEnabled &&
+    runtime.asyncJobManager.hasStore();
+  if (SYNC_DEADLINE_MS === 0 || !deferralAvailable) {
+    // Deferral disabled — SYNC_DEADLINE_MS=0 is the explicit opt-out; the
+    // derived gate covers backend=none and storeless runtimes.
     // Note: direct execution bypasses dedup. forceRefresh is implied.
     const command = cli === "mistral" ? "vibe" : cli;
     try {
@@ -4315,13 +4335,21 @@ export async function handleCodexRequestAsync(
       if (activeSession) {
         effectiveSessionId = activeSession.id;
       } else {
-        const newSession = await deps.sessionManager.createSession("codex", "Codex Session");
+        const newSession = await deps.sessionManager.createSession(
+          "codex",
+          "Codex Session",
+          `${GATEWAY_SESSION_PREFIX}${randomUUID()}`
+        );
         effectiveSessionId = newSession.id;
       }
     } else if (params.sessionId) {
       await deps.sessionManager.updateSessionUsage(params.sessionId);
     } else if (params.createNewSession) {
-      const newSession = await deps.sessionManager.createSession("codex", "Codex Session");
+      const newSession = await deps.sessionManager.createSession(
+        "codex",
+        "Codex Session",
+        `${GATEWAY_SESSION_PREFIX}${randomUUID()}`
+      );
       effectiveSessionId = newSession.id;
     }
 
@@ -4449,12 +4477,15 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
   //     accepts registrations that have nowhere to persist results.
   const asyncJobsEnabled =
     persistence.backend !== "none" && persistence.asyncJobsEnabled && asyncJobManager.hasStore();
-  const server = newGatewayMcpServer();
+  // Instructions must reflect the SAME gate as tool registration (incl.
+  // hasStore()), or clients get advertised tools that return "tool not found".
+  const server = newGatewayMcpServer(asyncJobsEnabled);
   registerBaseResources(server, runtime);
   registerValidationTools(server, { asyncJobManager });
 
   server.tool(
     "claude_request",
+    "Run a Claude Code CLI request synchronously (when async jobs are enabled, auto-defers to a pollable job past the sync deadline; otherwise runs to completion). Requires exactly one of prompt or promptParts.",
     {
       prompt: z
         .string()
@@ -4475,8 +4506,18 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .describe(
           "Output format (text|json|stream-json). DEFAULT: stream-json — the gateway parses NDJSON usage events to extract input/output/cache_read/cache_creation tokens + cost + model, persists them to the flight recorder for cache_state aggregates, and still returns the assistant text. Override to 'text' only when you truly want unparsed stdout (loses observability)."
         ),
-      sessionId: z.string().optional().describe("Session ID (uses active if omitted)"),
-      continueSession: z.boolean().default(false).describe("Continue active session"),
+      sessionId: z
+        .string()
+        .optional()
+        .describe(
+          "Gateway session record to associate (uses the active session if omitted). Claude continuity itself is via continueSession (--continue); this ID is gateway bookkeeping, not a Claude-native session."
+        ),
+      continueSession: z
+        .boolean()
+        .default(false)
+        .describe(
+          "Continue the most recent Claude conversation in this cwd (emits --continue; real CLI continuity)."
+        ),
       createNewSession: z.boolean().default(false).describe("Force new session"),
       allowedTools: z
         .array(z.string())
@@ -4975,6 +5016,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
 
   server.tool(
     "codex_request",
+    "Run an OpenAI Codex CLI request synchronously (when async jobs are enabled, auto-defers to a pollable job past the sync deadline; otherwise runs to completion). Requires exactly one of prompt or promptParts.",
     {
       prompt: z
         .string()
@@ -5281,13 +5323,21 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           if (activeSession) {
             effectiveSessionId = activeSession.id;
           } else {
-            const newSession = await sessionManager.createSession("codex", "Codex Session");
+            const newSession = await sessionManager.createSession(
+              "codex",
+              "Codex Session",
+              `${GATEWAY_SESSION_PREFIX}${randomUUID()}`
+            );
             effectiveSessionId = newSession.id;
           }
         } else if (sessionId) {
           await sessionManager.updateSessionUsage(sessionId);
         } else if (createNewSession) {
-          const newSession = await sessionManager.createSession("codex", "Codex Session");
+          const newSession = await sessionManager.createSession(
+            "codex",
+            "Codex Session",
+            `${GATEWAY_SESSION_PREFIX}${randomUUID()}`
+          );
           effectiveSessionId = newSession.id;
         }
 
@@ -5361,6 +5411,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
 
   server.tool(
     "codex_fork_session",
+    "Fork an existing Codex session into a new branch (codex fork <ID|--last>) and run a prompt against the fork without mutating the original.",
     {
       prompt: z
         .string()
@@ -5502,6 +5553,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
 
   server.tool(
     "gemini_request",
+    "Run a Google Gemini CLI request synchronously (when async jobs are enabled, auto-defers to a pollable job past the sync deadline; otherwise runs to completion). Requires exactly one of prompt or promptParts.",
     {
       prompt: z
         .string()
@@ -5518,7 +5570,12 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .describe(
           "Model name or alias (e.g. gemini-3-pro-preview, gemini-2.5-flash, pro, flash, latest)"
         ),
-      sessionId: z.string().optional().describe("Session ID or 'latest'"),
+      sessionId: z
+        .string()
+        .optional()
+        .describe(
+          "Gemini session ID to resume (emits --resume <id>), or 'latest' for the most recent session in this cwd"
+        ),
       resumeLatest: z.boolean().default(false).describe("Resume latest session"),
       createNewSession: z.boolean().default(false).describe("Force new session"),
       approvalMode: z
@@ -5661,6 +5718,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
 
   server.tool(
     "grok_request",
+    "Run an xAI Grok CLI request synchronously (when async jobs are enabled, auto-defers to a pollable job past the sync deadline; otherwise runs to completion). Requires exactly one of prompt or promptParts.",
     {
       prompt: z
         .string()
@@ -5679,7 +5737,9 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       sessionId: z
         .string()
         .optional()
-        .describe("Session ID (user-provided CLI handle for --resume)"),
+        .describe(
+          "Provider-native session ID to resume (emits --resume <id>; use resumeLatest for --continue)"
+        ),
       resumeLatest: z
         .boolean()
         .default(false)
@@ -5993,6 +6053,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
 
   server.tool(
     "mistral_request",
+    "Run a Mistral Vibe CLI request synchronously (when async jobs are enabled, auto-defers to a pollable job past the sync deadline; otherwise runs to completion). Requires exactly one of prompt or promptParts.",
     {
       prompt: z
         .string()
@@ -6179,6 +6240,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
   if (asyncJobsEnabled) {
     server.tool(
       "claude_request_async",
+      "Start a Claude Code CLI request as a durable background job. Poll with llm_job_status, collect with llm_job_result.",
       {
         prompt: z
           .string()
@@ -6199,8 +6261,18 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .describe(
             "Output format (text|json|stream-json). DEFAULT: stream-json — same rationale as claude_request: keeps usage/cache/cost observable for cache_state aggregates. Override to 'text' only when raw stdout is required (loses observability)."
           ),
-        sessionId: z.string().optional().describe("Session ID (uses active if omitted)"),
-        continueSession: z.boolean().default(false).describe("Continue active session"),
+        sessionId: z
+          .string()
+          .optional()
+          .describe(
+            "Gateway session record to associate (uses the active session if omitted). Claude continuity itself is via continueSession (--continue); this ID is gateway bookkeeping, not a Claude-native session."
+          ),
+        continueSession: z
+          .boolean()
+          .default(false)
+          .describe(
+            "Continue the most recent Claude conversation in this cwd (emits --continue; real CLI continuity)."
+          ),
         createNewSession: z.boolean().default(false).describe("Force new session"),
         allowedTools: z
           .array(z.string())
@@ -6555,6 +6627,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
 
     server.tool(
       "codex_request_async",
+      "Start an OpenAI Codex CLI request as a durable background job. Poll with llm_job_status, collect with llm_job_result.",
       {
         prompt: z
           .string()
@@ -6746,6 +6819,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
 
     server.tool(
       "gemini_request_async",
+      "Start a Google Gemini CLI request as a durable background job. Poll with llm_job_status, collect with llm_job_result.",
       {
         prompt: z
           .string()
@@ -6765,7 +6839,9 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         sessionId: z
           .string()
           .optional()
-          .describe("Session ID (user-provided CLI handle for --resume)"),
+          .describe(
+            "Gemini session ID to resume (emits --resume <id>), or 'latest' for the most recent session in this cwd"
+          ),
         resumeLatest: z.boolean().default(false).describe("Resume latest session"),
         createNewSession: z.boolean().default(false).describe("Force new session"),
         approvalMode: z
@@ -6901,6 +6977,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
 
     server.tool(
       "grok_request_async",
+      "Start an xAI Grok CLI request as a durable background job. Poll with llm_job_status, collect with llm_job_result.",
       {
         prompt: z
           .string()
@@ -6919,7 +6996,9 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         sessionId: z
           .string()
           .optional()
-          .describe("Session ID (user-provided CLI handle for --resume)"),
+          .describe(
+            "Provider-native session ID to resume (emits --resume <id>; use resumeLatest for --continue)"
+          ),
         resumeLatest: z
           .boolean()
           .default(false)
@@ -7229,6 +7308,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
 
     server.tool(
       "mistral_request_async",
+      "Start a Mistral Vibe CLI request as a durable background job. Poll with llm_job_status, collect with llm_job_result.",
       {
         prompt: z
           .string()
@@ -7400,6 +7480,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
 
     server.tool(
       "llm_job_status",
+      "Check lifecycle status (running|completed|failed|canceled|orphaned) of a gateway async or deferred-sync job by jobId.",
       {
         jobId: z.string().describe("Async job ID from *_request_async"),
       },
@@ -7445,6 +7526,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
 
     server.tool(
       "llm_job_result",
+      "Fetch captured stdout/stderr for a gateway async or deferred-sync job by jobId.",
       {
         jobId: z.string().describe("Async job ID from *_request_async"),
         maxChars: z
@@ -7515,6 +7597,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
 
     server.tool(
       "llm_job_cancel",
+      "Cancel a running gateway async or deferred-sync job by jobId.",
       {
         jobId: z.string().describe("Async job ID from *_request_async"),
       },
@@ -7568,6 +7651,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
   // query yields no rows and this returns the "not found" shape.
   server.tool(
     "llm_request_result",
+    "Read back any persisted request (sync or async) from the flight recorder by correlationId, including prompt and response.",
     {
       correlationId: z
         .string()
@@ -7624,34 +7708,39 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
     }
   );
 
-  server.tool("llm_process_health", {}, async () => {
-    const health = asyncJobManager.getJobHealth();
-    const persistenceBlock = {
-      backend: persistence.backend,
-      dbPath: persistence.path,
-      dsn: persistence.dsn ? "[redacted]" : null,
-      retentionDays: persistence.retentionDays,
-      dedupWindowMs: persistence.dedupWindowMs,
-      asyncJobsEnabled: persistence.asyncJobsEnabled,
-      acknowledgeEphemeral: persistence.acknowledgeEphemeral,
-      sources: persistence.sources,
-      warning: persistence.asyncJobsEnabled
-        ? null
-        : "Async job persistence is disabled (backend = 'none'). *_request_async tools are NOT registered on this gateway. Set [persistence].backend = 'sqlite' (or 'memory' + acknowledgeEphemeral = true) to enable them.",
-    };
-    return {
-      content: [
-        {
-          type: "text",
-          text: JSON.stringify(
-            { success: true, ...health, persistence: persistenceBlock },
-            null,
-            2
-          ),
-        },
-      ],
-    };
-  });
+  server.tool(
+    "llm_process_health",
+    "Report gateway process health: async-job manager state plus the resolved persistence configuration and paths.",
+    {},
+    async () => {
+      const health = asyncJobManager.getJobHealth();
+      const persistenceBlock = {
+        backend: persistence.backend,
+        dbPath: persistence.path,
+        dsn: persistence.dsn ? "[redacted]" : null,
+        retentionDays: persistence.retentionDays,
+        dedupWindowMs: persistence.dedupWindowMs,
+        asyncJobsEnabled: persistence.asyncJobsEnabled,
+        acknowledgeEphemeral: persistence.acknowledgeEphemeral,
+        sources: persistence.sources,
+        warning: persistence.asyncJobsEnabled
+          ? null
+          : "Async job persistence is disabled (backend = 'none'). *_request_async tools are NOT registered on this gateway. Set [persistence].backend = 'sqlite' (or 'memory' + acknowledgeEphemeral = true) to enable them.",
+      };
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(
+              { success: true, ...health, persistence: persistenceBlock },
+              null,
+              2
+            ),
+          },
+        ],
+      };
+    }
+  );
 
   //──────────────────────────────────────────────────────────────────────────────
   // Approval Audit Tools
@@ -7659,6 +7748,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
 
   server.tool(
     "approval_list",
+    "List recent MCP-managed approval decisions recorded by the gateway (approvalStrategy: mcp_managed).",
     {
       limit: z
         .number()
@@ -7699,6 +7789,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
 
   server.tool(
     "list_models",
+    "List models, aliases, and defaults for one provider CLI (claude|codex|gemini|grok|mistral).",
     {
       cli: z
         .preprocess(
@@ -7716,6 +7807,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
 
   server.tool(
     "cli_versions",
+    "Report installed provider CLI versions, availability, and login status for all five providers or one.",
     {
       cli: z
         .preprocess(
@@ -7732,6 +7824,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
 
   server.tool(
     "upstream_contracts",
+    "Return the gateway's declared provider CLI contracts; with probeInstalled true, diff against installed --help surfaces to detect flag drift.",
     {
       cli: z
         .preprocess(
@@ -7754,6 +7847,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
 
   server.tool(
     "cli_upgrade",
+    "Plan (dryRun, default true) or execute an upgrade for one provider CLI using its native update mechanism.",
     {
       cli: z.enum(["claude", "codex", "gemini", "grok", "mistral"]).describe("CLI to upgrade"),
       target: z
@@ -7819,6 +7913,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
 
   server.tool(
     "session_create",
+    "Create a gateway session record for a provider CLI. NOTE: this is gateway bookkeeping (gw-* ID), not a provider-native session — Codex resume needs a real Codex UUID.",
     {
       cli: SESSION_PROVIDER_ENUM.describe("CLI type (claude|codex|gemini|grok|mistral)"),
       description: z.string().optional().describe("Session description"),
@@ -7863,6 +7958,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
 
   server.tool(
     "session_list",
+    "List gateway session records and the active session per CLI, optionally filtered by CLI.",
     {
       cli: SESSION_PROVIDER_ENUM.optional().describe(
         "CLI filter (claude|codex|gemini|grok|mistral)"
@@ -7918,6 +8014,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
 
   server.tool(
     "session_set_active",
+    "Set or clear the active session for a CLI; the active session is used when a request omits sessionId.",
     {
       cli: SESSION_PROVIDER_ENUM.describe("CLI type (claude|codex|gemini|grok|mistral)"),
       sessionId: z.string().nullable().describe("Session ID (null to clear)"),
@@ -7971,6 +8068,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
 
   server.tool(
     "session_delete",
+    "Delete a gateway session record by ID (also removes any gateway-owned worktree attached to it).",
     {
       sessionId: z.string().describe("Session ID"),
     },
@@ -8026,6 +8124,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
 
   server.tool(
     "session_get",
+    "Get one gateway session record by session ID, including recent request history when available.",
     {
       sessionId: z.string().describe("Session ID"),
     },
@@ -8125,6 +8224,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
 
   server.tool(
     "session_clear_all",
+    "Delete all gateway session records, optionally scoped to one CLI.",
     {
       cli: SESSION_PROVIDER_ENUM.optional().describe(
         "CLI filter (claude|codex|gemini|grok|mistral)"

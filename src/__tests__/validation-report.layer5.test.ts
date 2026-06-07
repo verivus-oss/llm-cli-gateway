@@ -105,8 +105,10 @@ describe("Layer 5 validation report", () => {
   it("returns human-readable report text as MCP content while preserving structuredContent", async () => {
     const handlers = new Map<string, (args: any) => Promise<any>>();
     const server = {
-      tool(name: string, _schema: unknown, handler: (args: any) => Promise<any>) {
-        handlers.set(name, handler);
+      // Registrations use the 4-arg form (name, description, schema, handler);
+      // capture the last argument as the handler to stay form-agnostic.
+      tool(name: string, ...rest: unknown[]) {
+        handlers.set(name, rest[rest.length - 1] as (args: any) => Promise<any>);
       },
     };
     const asyncJobManager = {
