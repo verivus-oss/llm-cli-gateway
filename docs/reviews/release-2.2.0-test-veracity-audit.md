@@ -43,3 +43,14 @@ mutation in the shared tree (handled by re-running from a detached worktree);
 future audits should serialize the executing seat or isolate it in a worktree.
 
 Final verdict: 8/8 probes kill across all primary and contested sub-assertions.
+
+## Gemini seat addendum (ran pre-P5/P8; remaining gap closed)
+
+Gemini's findings overlapped Grok/Mistral (interpolation guard → P8;
+job_result/compare_answers → P5/P6) with one new item: the T1 tool-count floor
+(>= 37) was unprobed. P9 (2026-06-07): delete the entire list_available_models
+registration → T1 KILL (count floor + description loop both bind). Handler
+presence is asserted separately by the 2.1.0 callback-forwarding test
+(typeof tool.handler === "function" for every provider tool).
+
+Final: 9/9 probes kill.
