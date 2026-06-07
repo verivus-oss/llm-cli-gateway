@@ -65,7 +65,13 @@ jobs:
           trap 'dump_processes EXIT' EXIT
 
           dump_processes "before test:ci"
-          npm run test:ci
+          set +e
+          setsid --wait npm run test:ci
+          test_status=$?
+          set -e
+          echo "test:ci exited with status ${test_status}"
+          dump_processes "after test:ci"
+          exit "${test_status}"
       # security:audit gates on npm-shrinkwrap.json presence + parity; the
       # shrinkwrap is generated, never committed (it would break npm ci).
       - run: node scripts/make-prod-shrinkwrap.mjs
