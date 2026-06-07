@@ -11,6 +11,7 @@ import {
   unregisterProcessGroup,
 } from "../executor.js";
 import { spawn } from "child_process";
+import type { ChildProcess } from "child_process";
 import { delimiter, win32 } from "path";
 import { mkdirSync, mkdtempSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
@@ -381,6 +382,17 @@ describe("executeCli", () => {
           resolve();
         });
       });
+    });
+
+    it("should not call ChildProcess.kill for pidless or nonpositive children", () => {
+      const proc = {
+        pid: 0,
+        kill: () => {
+          throw new Error("unsafe pidless kill fallback was called");
+        },
+      } as unknown as ChildProcess;
+
+      expect(killProcessGroup(proc, "SIGTERM")).toBe(false);
     });
   });
 

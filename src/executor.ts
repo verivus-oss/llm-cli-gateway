@@ -397,28 +397,26 @@ export function killAllProcessGroups(): Promise<void> {
  * if the group kill fails (e.g., pid not yet assigned).
  */
 export function killProcessGroup(proc: ChildProcess, signal: NodeJS.Signals): boolean {
-  if (proc.pid) {
-    if (process.platform === "win32") {
-      return killWindowsProcessTree(proc.pid);
-    }
-    try {
-      process.kill(-proc.pid, signal);
-      return true;
-    } catch (err: any) {
-      // ESRCH = process/group already dead — not an error
-      if (err.code !== "ESRCH") {
-        try {
-          return proc.kill(signal);
-        } catch {
-          return false;
-        }
-      }
-      return false;
-    }
+  const pid = proc.pid;
+  if (typeof pid !== "number" || !Number.isInteger(pid) || pid <= 0) {
+    return false;
+  }
+
+  if (process.platform === "win32") {
+    return killWindowsProcessTree(pid);
   }
   try {
-    return proc.kill(signal);
-  } catch {
+    process.kill(-pid, signal);
+    return true;
+  } catch (err: any) {
+    // ESRCH = process/group already dead — not an error
+    if (err.code !== "ESRCH") {
+      try {
+        return proc.kill(signal);
+      } catch {
+        return false;
+      }
+    }
     return false;
   }
 }
