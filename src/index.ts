@@ -15,11 +15,9 @@ import { parseVibeMetaJson } from "./mistral-meta-json-parser.js";
 import { homedir } from "os";
 import {
   CLI_TYPES,
-  PROVIDER_TYPES,
   ISessionManager,
   createSessionManager,
   type CliType,
-  type ProviderType,
 } from "./session-manager.js";
 import {
   createWorktree,
@@ -37,20 +35,10 @@ import {
   loadConfig,
   loadPersistenceConfig,
   loadCacheAwarenessConfig,
-  loadProvidersConfig,
-  isXaiProviderEnabled,
   minStableTokensForModel,
   type PersistenceConfig,
   type CacheAwarenessConfig,
-  type ProvidersConfig,
 } from "./config.js";
-import {
-  createXaiResponse,
-  XaiApiError,
-  type XaiReasoningEffort,
-  type XaiResponsesInputMessage,
-  type XaiResponsesResult,
-} from "./xai-api-provider.js";
 import { DatabaseConnection } from "./db.js";
 import { checkHealth } from "./health.js";
 import {
@@ -307,19 +295,15 @@ const loadedSkills = loadSkills();
 // Built per-server so the advertised tool list matches what is actually
 // registered: with persistence.backend = "none" the async/job tools are not
 // registered, and a static inventory would point clients at "tool not found".
-export function buildServerInstructions(
-  asyncJobsEnabled: boolean,
-  grokApiToolsEnabled = false
-): string {
+export function buildServerInstructions(asyncJobsEnabled: boolean): string {
   const asyncToolsNote = asyncJobsEnabled ? " | *_request_async (async)" : "";
-  const apiToolsNote = grokApiToolsEnabled ? ", grok_api_request" : "";
   const jobsLine = asyncJobsEnabled ? "Jobs: llm_job_status, llm_job_result, llm_job_cancel\n" : "";
   const deferralLine = asyncJobsEnabled
     ? `- Sync auto-defers at ${SYNC_DEADLINE_MS}ms. Poll deferred jobs via llm_job_status/llm_job_result.`
     : '- Async jobs are DISABLED (persistence.backend = "none"): *_request_async and llm_job_* tools are not registered, and sync requests run to completion (no auto-deferral).';
   return `llm-cli-gateway: Multi-LLM orchestration via MCP.
 
-Tools: claude_request, codex_request, gemini_request, grok_request, mistral_request${apiToolsNote} (sync)${asyncToolsNote} | codex_fork_session (fork a Codex session into a new branch)
+Tools: claude_request, codex_request, gemini_request, grok_request, mistral_request (sync)${asyncToolsNote} | codex_fork_session (fork a Codex session into a new branch)
 Validation: validate_with_models, second_opinion, compare_answers, red_team_review, consensus_check, ask_model, synthesize_validation, list_available_models | job_status/job_result (validation jobs)
 ${jobsLine}Sessions: session_create, session_list, session_set_active, session_get, session_delete, session_clear_all
 Other: list_models, cli_versions, upstream_contracts, provider_subcommands_* (read-only subcommand contract/drift introspection), cli_upgrade, approval_list, llm_process_health, llm_request_result (read back any persisted request — sync or async — by correlationId)
@@ -335,10 +319,10 @@ Skills (full docs via MCP resources):
 ${loadedSkills.map(s => `- skills://${s.name} — ${s.description}`).join("\n")}`;
 }
 
-function newGatewayMcpServer(asyncJobsEnabled = true, grokApiToolsEnabled = false): McpServer {
+function newGatewayMcpServer(asyncJobsEnabled = true): McpServer {
   return new McpServer(
     { name: "llm-cli-gateway", version: packageVersion() },
-    { instructions: buildServerInstructions(asyncJobsEnabled, grokApiToolsEnabled) }
+    { instructions: buildServerInstructions(asyncJobsEnabled) }
   );
 }
 
@@ -356,7 +340,6 @@ let flightRecorder: FlightRecorderLike | null = null;
 // structurally impossible.
 let persistenceConfig: PersistenceConfig | null = null;
 let cacheAwarenessConfig: CacheAwarenessConfig | null = null;
-let providersConfig: ProvidersConfig | null = null;
 let jobStore: JobStore | null = null;
 let jobStoreInitialized = false;
 let asyncJobManager: AsyncJobManager | null = null;
@@ -375,11 +358,6 @@ function getPersistenceConfig(runtimeLogger: GatewayLogger = logger): Persistenc
 function getCacheAwarenessConfig(runtimeLogger: GatewayLogger = logger): CacheAwarenessConfig {
   cacheAwarenessConfig ??= loadCacheAwarenessConfig(runtimeLogger);
   return cacheAwarenessConfig;
-}
-
-function getProvidersConfig(runtimeLogger: GatewayLogger = logger): ProvidersConfig {
-  providersConfig ??= loadProvidersConfig(runtimeLogger);
-  return providersConfig;
 }
 
 function getJobStore(runtimeLogger: GatewayLogger = logger): JobStore | null {
@@ -492,11 +470,12 @@ export const WORKTREE_SCHEMA = z
       "see slice λ spec Q4)."
   );
 
-// Session-provider enum includes spawnable CLIs plus API-backed providers.
-// Keep CLI-only surfaces (contracts, status, updater) on CLI_TYPES.
-export const SESSION_PROVIDER_VALUES = PROVIDER_TYPES;
+// U22: Session-provider enum extended to five providers. The storage layer's
+// CLI_TYPES already includes "mistral"; the MCP-tool layer mirrors that here so
+// session_create / session_list / session_clear_all accept the fifth provider.
+export const SESSION_PROVIDER_VALUES = ["claude", "codex", "gemini", "grok", "mistral"] as const;
 export const SESSION_PROVIDER_ENUM = z.enum(SESSION_PROVIDER_VALUES);
-export type SessionProvider = ProviderType;
+export type SessionProvider = (typeof SESSION_PROVIDER_VALUES)[number];
 let activeServer: McpServer | null = null;
 let activeHttpGateway: HttpGatewayHandle | null = null;
 
@@ -511,7 +490,6 @@ export interface GatewayServerDeps {
   logger?: GatewayLogger;
   persistence?: PersistenceConfig;
   cacheAwareness?: CacheAwarenessConfig;
-  providers?: ProvidersConfig;
 }
 
 export interface GatewayServerRuntime {
@@ -525,7 +503,6 @@ export interface GatewayServerRuntime {
   logger: GatewayLogger;
   persistence: PersistenceConfig;
   cacheAwareness: CacheAwarenessConfig;
-  providers: ProvidersConfig;
 }
 
 export function resolveGatewayServerRuntime(
@@ -572,12 +549,7 @@ export function resolveGatewayServerRuntime(
     logger: runtimeLogger,
     persistence: deps.persistence ?? getPersistenceConfig(runtimeLogger),
     cacheAwareness: deps.cacheAwareness ?? getCacheAwarenessConfig(runtimeLogger),
-    providers: deps.providers ?? getProvidersConfig(runtimeLogger),
   };
-}
-
-export function shouldRegisterGrokApiTools(providers: ProvidersConfig): boolean {
-  return isXaiProviderEnabled(providers);
 }
 
 // Per-CLI idle timeouts: kill process if no stdout/stderr activity for this duration.
@@ -3033,402 +3005,6 @@ function buildCliResponse(
   return response;
 }
 
-export interface GrokApiRequestParams {
-  prompt?: string;
-  promptParts?: PromptParts;
-  model?: string;
-  sessionId?: string;
-  createNewSession?: boolean;
-  correlationId?: string;
-  optimizePrompt: boolean;
-  optimizeResponse?: boolean;
-  maxOutputTokens?: number;
-  temperature?: number;
-  topP?: number;
-  reasoningEffort?: XaiReasoningEffort;
-  timeoutMs?: number;
-}
-
-interface GrokApiRequestPrep {
-  corrId: string;
-  effectivePrompt: string;
-  resolvedModel: string;
-  input: string | XaiResponsesInputMessage[];
-  instructions?: string;
-  stablePrefixHash: string | null;
-  stablePrefixTokens: number | null;
-}
-
-function buildXaiPromptPartsUserContent(promptParts: PromptParts): string {
-  const userSections: string[] = [];
-  if (promptParts.tools && promptParts.tools.length > 0) {
-    userSections.push(`<tools>\n${promptParts.tools}\n</tools>`);
-  }
-  if (promptParts.context && promptParts.context.length > 0) {
-    userSections.push(`<context>\n${promptParts.context}\n</context>`);
-  }
-  if (promptParts.task && promptParts.task.length > 0) {
-    userSections.push(promptParts.task);
-  }
-
-  return userSections.join("\n\n");
-}
-
-function buildXaiPromptPartsEffectivePrompt(
-  instructions: string | undefined,
-  userContent: string
-): string {
-  return instructions && instructions.length > 0
-    ? `${instructions}\n\n${userContent}`
-    : userContent;
-}
-
-function prepareGrokApiRequest(
-  params: GrokApiRequestParams,
-  providers: ProvidersConfig
-): GrokApiRequestPrep | ExtendedToolResponse {
-  const corrId = params.correlationId || randomUUID();
-  if (!providers.xai) {
-    return createErrorResponse(
-      "grok_api_request",
-      1,
-      "",
-      corrId,
-      new Error("[providers.xai] is not configured")
-    ) as ExtendedToolResponse;
-  }
-
-  const inputResolution = resolvePromptOrPartsForPrep({
-    prompt: params.prompt,
-    promptParts: params.promptParts,
-    operation: "grok_api_request",
-    correlationId: corrId,
-  });
-  if (!inputResolution.ok) return inputResolution.error;
-
-  const instructions =
-    params.promptParts?.system && params.promptParts.system.length > 0
-      ? params.promptParts.system
-      : undefined;
-  let effectivePrompt = inputResolution.assembledPrompt;
-  let input: string | XaiResponsesInputMessage[];
-  if (params.promptParts) {
-    let userContent = buildXaiPromptPartsUserContent(params.promptParts);
-    if (params.optimizePrompt) {
-      const optimized = optimizePromptText(userContent);
-      logOptimizationTokens("prompt", corrId, userContent, optimized);
-      userContent = optimized;
-    }
-    effectivePrompt = buildXaiPromptPartsEffectivePrompt(instructions, userContent);
-    input = [{ role: "user", content: userContent }];
-  } else {
-    if (params.optimizePrompt) {
-      const optimized = optimizePromptText(effectivePrompt);
-      logOptimizationTokens("prompt", corrId, effectivePrompt, optimized);
-      effectivePrompt = optimized;
-    }
-    input = effectivePrompt;
-  }
-
-  const resolvedModel = params.model ?? providers.xai.defaultModel;
-  if (params.reasoningEffort && !/^grok-4\.3(?:$|[-.])/.test(resolvedModel)) {
-    return createErrorResponse(
-      "grok_api_request",
-      1,
-      "",
-      corrId,
-      new Error("reasoningEffort is currently supported only for xAI model grok-4.3")
-    ) as ExtendedToolResponse;
-  }
-
-  return {
-    corrId,
-    effectivePrompt,
-    resolvedModel,
-    instructions,
-    input,
-    stablePrefixHash: inputResolution.stablePrefixHash,
-    stablePrefixTokens: inputResolution.stablePrefixTokens,
-  };
-}
-
-function usageFromXaiResult(result: XaiResponsesResult): {
-  inputTokens?: number;
-  outputTokens?: number;
-  cacheReadTokens?: number;
-  costUsd?: number;
-} {
-  return {
-    inputTokens: result.usage.inputTokens,
-    outputTokens: result.usage.outputTokens,
-    cacheReadTokens: result.usage.cacheReadTokens,
-    costUsd: result.usage.costUsd,
-  };
-}
-
-async function validateExistingSessionProvider(
-  sessionManager: ISessionManager,
-  sessionId: string | undefined,
-  provider: ProviderType
-): Promise<void> {
-  if (!sessionId) return;
-  const existing = await sessionManager.getSession(sessionId);
-  if (existing && existing.cli !== provider) {
-    throw new Error(
-      `Session ${sessionId} belongs to provider '${existing.cli}', not '${provider}'`
-    );
-  }
-}
-
-function asXaiApiError(error: unknown): XaiApiError | null {
-  if (error instanceof XaiApiError) return error;
-  const cause = (error as { cause?: unknown } | null)?.cause;
-  return cause instanceof XaiApiError ? cause : null;
-}
-
-function buildGrokApiToolResponse(args: {
-  result: XaiResponsesResult;
-  prep: GrokApiRequestPrep;
-  corrId: string;
-  durationMs: number;
-  sessionId?: string;
-  previousResponseId?: string;
-  stalePreviousResponseCleared: boolean;
-  optimizeResponse: boolean;
-}): ExtendedToolResponse {
-  let text = args.result.text;
-  if (args.optimizeResponse) {
-    const optimized = optimizeResponseText(text);
-    logOptimizationTokens("response", args.corrId, text, optimized);
-    text = optimized;
-  }
-
-  const response: ExtendedToolResponse = {
-    content: [{ type: "text", text }],
-    structuredContent: {
-      provider: "grok-api",
-      cli: "grok-api",
-      model: args.result.model || args.prep.resolvedModel,
-      correlationId: args.corrId,
-      sessionId: args.sessionId || null,
-      responseId: args.result.responseId,
-      previousResponseId: args.previousResponseId || null,
-      stalePreviousResponseCleared: args.stalePreviousResponseCleared,
-      status: args.result.status,
-      httpStatus: args.result.httpStatus,
-      durationMs: args.durationMs,
-      ...usageFromXaiResult(args.result),
-      exitCode: 0,
-      retryCount: 0,
-    },
-  };
-  if (args.sessionId) response.sessionId = args.sessionId;
-  return response;
-}
-
-async function resolveGrokApiSession(
-  params: Pick<GrokApiRequestParams, "sessionId" | "createNewSession">,
-  runtime: GatewayServerRuntime
-): Promise<{ sessionId: string; previousResponseId?: string }> {
-  if (params.sessionId) {
-    const existing = await runtime.sessionManager.getSession(params.sessionId);
-    if (existing && existing.cli !== "grok-api") {
-      throw new Error(
-        `Session ${params.sessionId} belongs to provider '${existing.cli}', not 'grok-api'`
-      );
-    }
-    const session =
-      existing ??
-      (await runtime.sessionManager.createSession(
-        "grok-api",
-        "Grok API Session",
-        params.sessionId
-      ));
-    const previous =
-      !params.createNewSession && typeof session.metadata?.xaiPreviousResponseId === "string"
-        ? session.metadata.xaiPreviousResponseId
-        : undefined;
-    return { sessionId: session.id, previousResponseId: previous };
-  }
-
-  if (!params.createNewSession) {
-    const active = await runtime.sessionManager.getActiveSession("grok-api");
-    if (active) {
-      const previous =
-        typeof active.metadata?.xaiPreviousResponseId === "string"
-          ? active.metadata.xaiPreviousResponseId
-          : undefined;
-      return { sessionId: active.id, previousResponseId: previous };
-    }
-  }
-
-  const session = await runtime.sessionManager.createSession(
-    "grok-api",
-    "Grok API Session",
-    `${GATEWAY_SESSION_PREFIX}${randomUUID()}`
-  );
-  return { sessionId: session.id };
-}
-
-export async function handleGrokApiRequest(
-  deps: HandlerDeps,
-  params: GrokApiRequestParams
-): Promise<ExtendedToolResponse> {
-  const runtime = resolveHandlerRuntime(deps);
-  const startTime = Date.now();
-  const prep = prepareGrokApiRequest(params, runtime.providers);
-  if ("content" in prep) return prep;
-  const { corrId } = prep;
-  const xaiConfig = runtime.providers.xai;
-  let durationMs = 0;
-  let wasSuccessful = false;
-
-  if (!xaiConfig) {
-    return createErrorResponse(
-      "grok_api_request",
-      1,
-      "",
-      corrId,
-      new Error("[providers.xai] is not configured")
-    );
-  }
-
-  const apiKey = process.env[xaiConfig.apiKeyEnv]?.trim();
-  if (!apiKey) {
-    return createErrorResponse(
-      "grok_api_request",
-      1,
-      "",
-      corrId,
-      new Error(`xAI API key env var ${xaiConfig.apiKeyEnv} is not set`)
-    );
-  }
-
-  safeFlightStart(
-    {
-      correlationId: corrId,
-      cli: "grok-api",
-      model: prep.resolvedModel,
-      prompt: prep.effectivePrompt,
-      sessionId: params.sessionId,
-      stablePrefixHash: prep.stablePrefixHash ?? undefined,
-      stablePrefixTokens: prep.stablePrefixTokens ?? undefined,
-    },
-    runtime
-  );
-
-  let sessionId: string | undefined;
-  let previousResponseId: string | undefined;
-  let stalePreviousResponseCleared = false;
-
-  try {
-    const session = await resolveGrokApiSession(params, runtime);
-    sessionId = session.sessionId;
-    previousResponseId = session.previousResponseId;
-
-    const call = (prev: string | undefined) =>
-      createXaiResponse(
-        {
-          baseUrl: xaiConfig.baseUrl,
-          apiKey,
-          model: prep.resolvedModel,
-          input: prep.input,
-          instructions: prep.instructions,
-          previousResponseId: prev,
-          maxOutputTokens: params.maxOutputTokens,
-          temperature: params.temperature,
-          topP: params.topP,
-          reasoningEffort: params.reasoningEffort,
-          timeoutMs: params.timeoutMs,
-        },
-        runtime.logger
-      );
-
-    let result: XaiResponsesResult;
-    try {
-      result = await call(previousResponseId);
-    } catch (error) {
-      const xaiError = asXaiApiError(error);
-      if (xaiError?.status === 404 && previousResponseId) {
-        runtime.logger.warn(
-          `[${corrId}] xAI previous_response_id was rejected; clearing stale session metadata and retrying fresh`
-        );
-        await runtime.sessionManager.updateSessionMetadata(sessionId, {
-          xaiPreviousResponseId: null,
-          xaiResponseCreatedAt: null,
-        });
-        stalePreviousResponseCleared = true;
-        previousResponseId = undefined;
-        result = await call(undefined);
-      } else {
-        throw error;
-      }
-    }
-
-    durationMs = Math.max(0, Date.now() - startTime);
-    wasSuccessful = true;
-
-    await runtime.sessionManager.updateSessionMetadata(sessionId, {
-      xaiPreviousResponseId: result.responseId,
-      xaiResponseCreatedAt: new Date().toISOString(),
-      xaiModel: result.model || prep.resolvedModel,
-    });
-    await runtime.sessionManager.updateSessionUsage(sessionId);
-
-    safeFlightComplete(
-      corrId,
-      {
-        response: result.text,
-        durationMs,
-        retryCount: 0,
-        circuitBreakerState: "closed",
-        optimizationApplied: params.optimizePrompt || (params.optimizeResponse ?? false),
-        exitCode: 0,
-        status: "completed",
-        ...usageFromXaiResult(result),
-      },
-      runtime
-    );
-
-    return buildGrokApiToolResponse({
-      result,
-      prep,
-      corrId,
-      durationMs,
-      sessionId,
-      previousResponseId,
-      stalePreviousResponseCleared,
-      optimizeResponse: params.optimizeResponse ?? false,
-    });
-  } catch (error) {
-    durationMs = Math.max(0, Date.now() - startTime);
-    const err = error as Error;
-    const xaiError = asXaiApiError(error);
-    runtime.logger.error(`[${corrId}] grok_api_request failed`, err.message);
-    safeFlightComplete(
-      corrId,
-      {
-        response: xaiError?.responseText ?? "",
-        durationMs,
-        retryCount: 0,
-        circuitBreakerState: "closed",
-        optimizationApplied: false,
-        exitCode: 1,
-        errorMessage: err.message,
-        status: "failed",
-      },
-      runtime
-    );
-    return createErrorResponse("grok_api_request", 1, "", corrId, err);
-  } finally {
-    runtime.performanceMetrics.recordRequest(
-      "grok-api",
-      durationMs || Math.max(0, Date.now() - startTime),
-      wasSuccessful
-    );
-  }
-}
-
 /**
  * Slice 3 helper: compute the cache_ttl_expiring_soon warning for a
  * claude session, if the feature is enabled, the session has prior cache
@@ -4015,13 +3591,6 @@ export async function handleGrokRequest(
       resumeLatest: params.resumeLatest,
       createNewSession: params.createNewSession,
     });
-    if (sessionResult.userProvidedSession) {
-      await validateExistingSessionProvider(
-        deps.sessionManager,
-        sessionResult.effectiveSessionId,
-        "grok"
-      );
-    }
     args.push(...sessionResult.resumeArgs);
 
     let worktreeResolution: ResolvedWorktree = {};
@@ -4229,13 +3798,6 @@ export async function handleGrokRequestAsync(
       resumeLatest: params.resumeLatest,
       createNewSession: params.createNewSession,
     });
-    if (sessionResult.userProvidedSession) {
-      await validateExistingSessionProvider(
-        deps.sessionManager,
-        sessionResult.effectiveSessionId,
-        "grok"
-      );
-    }
     args.push(...sessionResult.resumeArgs);
 
     // Pre-start session I/O (async handlers: prevent orphaned jobs)
@@ -4935,7 +4497,6 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
     persistence,
     flightRecorder,
     cacheAwareness,
-    providers,
   } = runtime;
   // `flightRecorder` is destructured into closure scope so the session_get
   // handler (see ~line 5590) has the FlightRecorderQuery read capability
@@ -4944,7 +4505,6 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
   // `cacheAwareness` is the loaded [cache_awareness] block (config.ts).
   void flightRecorder;
   void cacheAwareness;
-  const grokApiToolsEnabled = shouldRegisterGrokApiTools(providers);
   // Structural invariant: tools register iff ALL THREE conditions hold:
   //   (1) persistence.backend !== "none"  — the operator/config has not
   //       explicitly disabled durable persistence;
@@ -4965,116 +4525,9 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
     persistence.backend !== "none" && persistence.asyncJobsEnabled && asyncJobManager.hasStore();
   // Instructions must reflect the SAME gate as tool registration (incl.
   // hasStore()), or clients get advertised tools that return "tool not found".
-  const server = newGatewayMcpServer(asyncJobsEnabled, grokApiToolsEnabled);
+  const server = newGatewayMcpServer(asyncJobsEnabled);
   registerBaseResources(server, runtime);
   registerValidationTools(server, { asyncJobManager });
-
-  if (grokApiToolsEnabled) {
-    server.tool(
-      "grok_api_request",
-      "Run an xAI Grok API request synchronously through the Responses API. Requires exactly one of prompt or promptParts. Registered only when [providers.xai] is configured and its API-key env var is present.",
-      {
-        prompt: z
-          .string()
-          .min(1, "Prompt cannot be empty")
-          .max(100000, "Prompt too long (max 100k chars)")
-          .optional()
-          .describe("Prompt text for xAI Grok API (mutually exclusive with promptParts)"),
-        promptParts: PromptPartsSchema.optional().describe(
-          "Cache-aware structured prompt: { system?, tools?, context?, task }. Mutually exclusive with prompt. The stable prefix hash is logged for cache_state aggregates; xAI does not receive cache_control hints."
-        ),
-        model: z
-          .string()
-          .min(1)
-          .optional()
-          .describe("xAI model id; defaults to [providers.xai].default_model"),
-        sessionId: z
-          .string()
-          .optional()
-          .describe(
-            "Gateway grok-api session to continue. The gateway stores xAI previous_response_id in session metadata."
-          ),
-        createNewSession: z
-          .boolean()
-          .default(false)
-          .describe(
-            "Start a fresh xAI response chain. With sessionId, ignores any stored previous_response_id for this request."
-          ),
-        correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
-        optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution"),
-        optimizeResponse: z.boolean().default(false).describe("Optimize response output"),
-        maxOutputTokens: MAX_TOKENS_SCHEMA.optional().describe(
-          "xAI Responses API max_output_tokens. Bounded to safe integers ≤ 100000000."
-        ),
-        temperature: z
-          .number()
-          .finite()
-          .min(0)
-          .max(2)
-          .optional()
-          .describe("Sampling temperature passed to xAI Responses API"),
-        topP: z
-          .number()
-          .finite()
-          .min(0)
-          .max(1)
-          .optional()
-          .describe("Nucleus sampling top_p passed to xAI Responses API"),
-        reasoningEffort: z
-          .enum(["none", "low", "medium", "high"])
-          .optional()
-          .describe("xAI Responses API reasoning.effort"),
-        timeoutMs: z
-          .number()
-          .int()
-          .min(30_000)
-          .max(3_600_000)
-          .optional()
-          .describe("HTTP request timeout in ms (min 30s, max 1h, default 10m)"),
-      },
-      {
-        title: "Grok API request",
-        readOnlyHint: false,
-        destructiveHint: false,
-        idempotentHint: false,
-        openWorldHint: true,
-      },
-      async ({
-        prompt,
-        promptParts,
-        model,
-        sessionId,
-        createNewSession,
-        correlationId,
-        optimizePrompt,
-        optimizeResponse,
-        maxOutputTokens,
-        temperature,
-        topP,
-        reasoningEffort,
-        timeoutMs,
-      }) => {
-        return handleGrokApiRequest(
-          { sessionManager, logger, runtime },
-          {
-            prompt,
-            promptParts,
-            model,
-            sessionId,
-            createNewSession,
-            correlationId,
-            optimizePrompt,
-            optimizeResponse,
-            maxOutputTokens,
-            temperature,
-            topP,
-            reasoningEffort,
-            timeoutMs,
-          }
-        );
-      }
-    );
-  }
 
   server.tool(
     "claude_request",
@@ -8432,34 +7885,12 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           ? null
           : "Async job persistence is disabled (backend = 'none'). *_request_async tools are NOT registered on this gateway. Set [persistence].backend = 'sqlite' (or 'memory' + acknowledgeEphemeral = true) to enable them.",
       };
-      const outboundProviders = {
-        xai: providers.xai
-          ? {
-              configured: true,
-              enabled: isXaiProviderEnabled(providers),
-              apiKeyEnv: providers.xai.apiKeyEnv,
-              apiKeyPresent: isXaiProviderEnabled(providers),
-              baseUrl: providers.xai.baseUrl,
-              defaultModel: providers.xai.defaultModel,
-              mode: isXaiProviderEnabled(providers) ? "sync" : "configured-missing-key",
-            }
-          : {
-              configured: false,
-              enabled: false,
-              apiKeyEnv: null,
-              apiKeyPresent: false,
-              baseUrl: null,
-              defaultModel: null,
-              mode: "disabled",
-            },
-        sources: providers.sources,
-      };
       return {
         content: [
           {
             type: "text",
             text: JSON.stringify(
-              { success: true, ...health, persistence: persistenceBlock, outboundProviders },
+              { success: true, ...health, persistence: persistenceBlock },
               null,
               2
             ),
@@ -8831,9 +8262,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
     "session_create",
     "Create a gateway session record for a provider. NOTE: this is gateway bookkeeping (gw-* ID), not a provider-native session — Codex resume needs a real Codex UUID.",
     {
-      cli: SESSION_PROVIDER_ENUM.describe(
-        "Provider type (claude|codex|gemini|grok|mistral|grok-api)"
-      ),
+      cli: SESSION_PROVIDER_ENUM.describe("CLI type (claude|codex|gemini|grok|mistral)"),
       description: z.string().optional().describe("Session description"),
       setAsActive: z.boolean().default(true).describe("Set as active session"),
     },
@@ -8886,7 +8315,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
     "List gateway session records and the active session per provider, optionally filtered by provider.",
     {
       cli: SESSION_PROVIDER_ENUM.optional().describe(
-        "Provider filter (claude|codex|gemini|grok|mistral|grok-api)"
+        "CLI filter (claude|codex|gemini|grok|mistral)"
       ),
     },
     {
@@ -8948,9 +8377,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
     "session_set_active",
     "Set or clear the active session for a provider; the active session is used when a request omits sessionId.",
     {
-      cli: SESSION_PROVIDER_ENUM.describe(
-        "Provider type (claude|codex|gemini|grok|mistral|grok-api)"
-      ),
+      cli: SESSION_PROVIDER_ENUM.describe("CLI type (claude|codex|gemini|grok|mistral)"),
       sessionId: z.string().nullable().describe("Session ID (null to clear)"),
     },
     {
@@ -9182,7 +8609,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
     "Delete all gateway session records, optionally scoped to one provider.",
     {
       cli: SESSION_PROVIDER_ENUM.optional().describe(
-        "Provider filter (claude|codex|gemini|grok|mistral|grok-api)"
+        "CLI filter (claude|codex|gemini|grok|mistral)"
       ),
     },
     {

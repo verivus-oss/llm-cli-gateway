@@ -1,5 +1,5 @@
 import { ISessionManager } from "./session-manager.js";
-import { CLI_TYPES, PROVIDER_TYPES, type CliType, type ProviderType } from "./session-manager.js";
+import { CLI_TYPES, type CliType } from "./session-manager.js";
 import { PerformanceMetrics } from "./metrics.js";
 import { getAvailableCliInfo } from "./model-registry.js";
 import { FlightRecorderQuery } from "./flight-recorder.js";
@@ -165,17 +165,6 @@ export class ResourceProvider {
         },
       },
       {
-        uri: "sessions://grok-api",
-        name: "Grok API Sessions",
-        title: "⚡ Grok API Sessions",
-        description: "List of xAI Grok API conversation sessions",
-        mimeType: "application/json",
-        annotations: {
-          audience: ["user", "assistant"],
-          priority: 0.6,
-        },
-      },
-      {
         uri: "models://claude",
         name: "Claude Models",
         title: "🧠 Claude Models & Capabilities",
@@ -260,14 +249,6 @@ export class ResourceProvider {
     // Session resources
     if (uri === "sessions://all") {
       const sessions = await this.sessionManager.listSessions();
-      const activeSessions = Object.fromEntries(
-        await Promise.all(
-          PROVIDER_TYPES.map(async provider => [
-            provider,
-            (await this.sessionManager.getActiveSession(provider))?.id || null,
-          ])
-        )
-      ) as Record<ProviderType, string | null>;
       return {
         uri,
         mimeType: "application/json",
@@ -281,7 +262,13 @@ export class ResourceProvider {
               createdAt: s.createdAt,
               lastUsedAt: s.lastUsedAt,
             })),
-            activeSessions,
+            activeSessions: {
+              claude: (await this.sessionManager.getActiveSession("claude"))?.id || null,
+              codex: (await this.sessionManager.getActiveSession("codex"))?.id || null,
+              gemini: (await this.sessionManager.getActiveSession("gemini"))?.id || null,
+              grok: (await this.sessionManager.getActiveSession("grok"))?.id || null,
+              mistral: (await this.sessionManager.getActiveSession("mistral"))?.id || null,
+            },
           },
           null,
           2
@@ -372,24 +359,6 @@ export class ResourceProvider {
             total: sessions.length,
             sessions,
             activeSession: (await this.sessionManager.getActiveSession("mistral"))?.id || null,
-          },
-          null,
-          2
-        ),
-      };
-    }
-
-    if (uri === "sessions://grok-api") {
-      const sessions = await this.sessionManager.listSessions("grok-api");
-      return {
-        uri,
-        mimeType: "application/json",
-        text: JSON.stringify(
-          {
-            cli: "grok-api",
-            total: sessions.length,
-            sessions,
-            activeSession: (await this.sessionManager.getActiveSession("grok-api"))?.id || null,
           },
           null,
           2
