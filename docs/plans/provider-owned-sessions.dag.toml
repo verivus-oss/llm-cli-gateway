@@ -1,0 +1,327 @@
+# Implementation plan: treat stored gateway sessions as provider-owned.
+#
+# Goal: make `Session.cli` authoritative for every stored gateway session so
+# a session created for one provider can never be resumed, continued, marked
+# active, or metadata-updated by another provider's request path.
+#
+# Context:
+#   The direct xAI Grok API integration introduced the API-backed provider
+#   type `grok-api` while keeping `grok` as the spawnable Grok CLI provider.
+#   `grok_api_request` already rejects a stored `grok` session and the Grok
+#   CLI paths reject a stored `grok-api` session. Other CLI paths still accept
+#   arbitrary existing session IDs and may update usage or spawn/resume against
+#   a wrong-provider row. This plan closes that namespace gap globally.
+
+[meta]
+name = "provider-owned gateway sessions"
+schema_version = "1.1"
+owner = "verivus-oss"
+slice = "provider-owned-sessions-2026-06-08"
+target_branch = "master"
+providers = ["claude", "codex", "gemini", "grok", "mistral", "grok-api"]
+acceptance_resource = "All request handlers reject existing wrong-provider session IDs before spawning jobs or mutating session usage/metadata; session_create/list/set_active continue to support all ProviderType values; npm run check passes."
+invariant_sources = [
+  "src/session-manager.ts",
+  "src/session-manager-pg.ts",
+  "src/index.ts",
+  "src/request-helpers.ts",
+  "docs/plans/grok-api-provider-design.draft.md",
+]
+predecessor_plan = "docs/plans/grok-api-provider-design.draft.md"
+
+[decision]
+stored_sessions_are_provider_owned = true
+session_cli_field_is_authoritative = true
+nonexistent_session_id_behavior = "preserve_current_handler_semantics"
+wrong_provider_session_id_behavior = "hard_error_before_spawn_or_session_mutation"
+active_session_behavior = "active session rows remain provider-scoped"
+reason = """
+Provider-native session identifiers and gateway API session records are not
+interchangeable. Once `session_create` can create API-backed provider sessions,
+the request surface must treat a stored session row's `cli` value as ownership
+metadata, not advisory labeling. This prevents cross-provider resumes, keeps
+active-session semantics coherent, and avoids mutating metadata such as
+`xaiPreviousResponseId` or `worktreePath` from the wrong provider path.
+"""
+
+[[steps]]
+id = "audit-session-use-sites"
+depends_on = []
+actor = "assistant"
+action = """
+Inventory every request path that accepts or derives a session ID:
+
+  - claude_request
+  - claude_request_async
+  - codex_request
+  - codex_request_async
+  - codex_fork_session, if it touches gateway session records
+  - gemini_request
+  - gemini_request_async
+  - grok_request
+  - grok_request_async
+  - mistral_request
+  - mistral_request_async
+  - grok_api_request
+  - validation/review wrappers that pass through sessionId, if any
+  - worktree reuse via resolveWorktreeForRequest
+
+For each path, classify:
+  1. user-provided provider-native session ID,
+  2. gateway-created `gw-*` bookkeeping session ID,
+  3. active-session fallback,
+  4. createNewSession behavior,
+  5. post-success session row creation/update,
+  6. async pre-start session I/O.
+
+Record which paths already validate ownership and which do not. Do not edit
+code in this step.
+"""
+idempotent = true
+validation = """
+The implementation notes list every session use site and identify whether the
+path should call the new ownership guard, preserve nonexistent-ID behavior, or
+stay CLI-native only with no gateway lookup.
+"""
+
+[[steps]]
+id = "define-ownership-helper"
+depends_on = ["audit-session-use-sites"]
+actor = "assistant"
+action = """
+Add a shared helper in the smallest appropriate module, likely src/index.ts
+unless the audit shows reuse outside index:
+
+  async function getExistingSessionForProvider(
+    sessionManager: ISessionManager,
+    sessionId: string | undefined,
+    provider: ProviderType
+  ): Promise<Session | null>
+
+or equivalent.
+
+Required semantics:
+  - If sessionId is undefined, return null.
+  - If no stored session exists, return null. Existing handlers may still
+    create a session row or pass the provider-native ID through according to
+    current behavior.
+  - If a stored session exists and `session.cli !== provider`, throw a clear
+    error:
+      `Session <id> belongs to provider '<actual>', not '<expected>'`.
+  - If a stored session exists and matches, return it.
+
+Keep the helper provider-generic. Do not special-case only `grok-api`.
+"""
+idempotent = true
+validation = """
+Focused unit tests cover matching provider, missing session, and wrong-provider
+stored session cases. Error text includes both actual and expected provider.
+"""
+
+[[steps]]
+id = "apply-sync-handler-guards"
+depends_on = ["define-ownership-helper"]
+actor = "assistant"
+action = """
+Apply the ownership helper to sync handlers before any spawn/defer path or
+session mutation:
+
+  - claude_request:
+      Validate any effective stored session before emitting `--continue`,
+      `--session-id`, updating usage, or resolving worktree metadata.
+      Active `claude` fallback is already provider-scoped by getActiveSession.
+
+  - codex_request:
+      Validate user-provided sessionId if a stored row exists before
+      `awaitJobOrDefer`. Validate active `codex` fallback remains codex-owned.
+      Preserve the existing reserved `gw-*` rejection for Codex native resume.
+
+  - gemini_request:
+      Validate user-provided resume sessionId if a stored row exists before
+      spawning. Preserve current behavior for unknown provider-native session
+      IDs.
+
+  - grok_request:
+      Replace or retain the existing Grok-specific guard using the shared
+      helper.
+
+  - mistral_request:
+      Validate user-provided resume sessionId if a stored row exists before
+      spawning. Preserve current behavior for unknown provider-native session
+      IDs.
+
+  - grok_api_request:
+      Replace or retain the existing `grok-api` guard using the shared helper.
+
+Do not create phantom sessions before sync CLI failure; preserve existing
+post-success creation semantics.
+"""
+idempotent = false
+validation = """
+New focused tests prove each sync handler returns an error for an existing
+wrong-provider session before the mocked executor/job path is invoked. Existing
+happy-path session tests continue to pass.
+"""
+
+[[steps]]
+id = "apply-async-handler-guards"
+depends_on = ["define-ownership-helper"]
+actor = "assistant"
+action = """
+Apply the same invariant to async handlers before `startJob`:
+
+  - claude_request_async
+  - codex_request_async
+  - gemini_request_async
+  - grok_request_async
+  - mistral_request_async
+
+For each handler, wrong-provider stored session IDs must fail during pre-start
+session I/O. They must not:
+  - call AsyncJobManager.startJob/startJobWithDedup,
+  - update session usage,
+  - create or modify worktree metadata,
+  - write provider-specific metadata.
+
+Keep nonexistent provider-native IDs behavior unchanged where the current
+handler supports native resume by ID.
+"""
+idempotent = false
+validation = """
+Tests spy on AsyncJobManager.startJob/startJobWithDedup and assert it is not
+called when an existing wrong-provider session ID is supplied. Tests also
+assert updateSessionUsage/updateSessionMetadata are not called in that case.
+"""
+
+[[steps]]
+id = "protect-worktree-session-metadata"
+depends_on = ["apply-sync-handler-guards", "apply-async-handler-guards"]
+actor = "assistant"
+action = """
+Review `resolveWorktreeForRequest` call sites after ownership guards are in
+place. The helper reads and writes `session.metadata.worktreePath` by session
+ID, so every caller that passes a session ID must have already validated that
+the session belongs to the request provider.
+
+If any call site can still pass an unvalidated session ID, either:
+  - validate ownership immediately before the call, or
+  - extend `resolveWorktreeForRequest` to accept an optional expected provider
+    and enforce it internally.
+
+Prefer call-site validation if it keeps the helper independent of provider
+semantics and avoids broad refactors.
+"""
+idempotent = true
+validation = """
+A source audit shows no `resolveWorktreeForRequest(..., sessionId, runtime)`
+call can receive an existing wrong-provider session ID. A regression test
+covers at least one worktree-enabled wrong-provider request and proves metadata
+is not written.
+"""
+
+[[steps]]
+id = "session-tools-invariant-tests"
+depends_on = ["define-ownership-helper"]
+actor = "assistant"
+action = """
+Add or update tests for session management tools and stores:
+
+  - session_create can create all ProviderType values, including `grok-api`.
+  - session_set_active rejects a session ID whose stored provider differs from
+    the requested provider.
+  - session_list reports active sessions for all providers.
+  - FileSessionManager and PostgreSQLSessionManager preserve provider values
+    and reject cross-provider active-session assignment.
+
+These tests should document that session rows are provider-owned, while
+unknown provider-native IDs may still be accepted by request handlers that
+support native resume.
+"""
+idempotent = false
+validation = """
+File and PostgreSQL session-manager tests pass. Integration tests cover
+session_set_active cross-provider rejection and include `grok-api`.
+"""
+
+[[steps]]
+id = "backward-compatibility-and-migration-check"
+depends_on = ["session-tools-invariant-tests"]
+actor = "assistant"
+action = """
+Confirm no database migration is required beyond the existing provider-type
+constraint widening:
+
+  - Existing rows already carry one provider in `sessions.cli`.
+  - The new behavior changes request validation, not row shape.
+  - No active_sessions schema change is needed because active rows are already
+    keyed by provider and session managers validate matching provider.
+
+If the audit finds legacy rows with provider labels outside ProviderType,
+handle that as a separate migration plan; do not silently broaden the current
+change.
+"""
+idempotent = true
+validation = """
+The implementation notes explicitly state whether a migration was unnecessary
+or identify a separate follow-up migration plan. Existing migration tests pass.
+"""
+
+[[steps]]
+id = "error-response-and-docs-pass"
+depends_on = ["apply-sync-handler-guards", "apply-async-handler-guards"]
+actor = "assistant"
+action = """
+Normalize user-facing errors and documentation:
+
+  - Wrong-provider session errors should use the same wording across tools.
+  - MCP tool descriptions for sessionId should say gateway stored sessions are
+    provider-owned where helpful.
+  - Server instructions should continue to distinguish CLI-only surfaces from
+    API-backed providers.
+  - Avoid implying that gateway `gw-*` IDs are valid provider-native resume IDs
+    for Codex/Gemini/Grok/Mistral when those CLIs require native IDs.
+
+Keep docs concise; this is an invariant clarification, not a new feature page.
+"""
+idempotent = false
+validation = """
+Tests assert representative error text. `npm run format:check` passes after
+any description/doc edits.
+"""
+
+[[steps]]
+id = "verification-gate"
+depends_on = [
+  "protect-worktree-session-metadata",
+  "session-tools-invariant-tests",
+  "backward-compatibility-and-migration-check",
+  "error-response-and-docs-pass",
+]
+actor = "assistant"
+action = """
+Run the final verification gate:
+
+  npm run build
+  npm test
+  npm run lint
+  npm run format:check
+
+If PostgreSQL tests require optional services unavailable locally, run the
+focused non-PG tests and document the missing service explicitly. When package
+contents are touched, also run:
+
+  npm pack --dry-run --json
+"""
+idempotent = true
+validation = """
+All available gates pass. The final closeout lists exact commands, results,
+and any unavailable optional-service test gap.
+"""
+
+[rollback]
+guidance = """
+If the provider-owned invariant breaks an intentionally supported workflow,
+revert only the request-boundary guards for that provider and add a design
+decision explaining why that provider accepts shared stored session IDs. Do
+not weaken session_set_active store-level provider checks.
+"""
