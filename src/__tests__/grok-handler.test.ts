@@ -1,9 +1,17 @@
 /**
  * Phase 4 slice δ — Grok `--max-turns` wiring.
  */
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { AsyncJobManager } from "../async-job-manager.js";
 import { optimizePrompt } from "../optimizer.js";
-import { prepareGrokRequest, MAX_TURNS_SCHEMA, MAX_PRICE_SCHEMA } from "../index.js";
+import {
+  prepareGrokRequest,
+  handleGrokRequest,
+  handleGrokRequestAsync,
+  MAX_TURNS_SCHEMA,
+  MAX_PRICE_SCHEMA,
+} from "../index.js";
+import type { ISessionManager, Session } from "../session-manager.js";
 import { validateUpstreamCliArgs } from "../upstream-contracts.js";
 
 function baseParams(extra: Record<string, unknown> = {}) {
@@ -13,6 +21,44 @@ function baseParams(extra: Record<string, unknown> = {}) {
     optimizePrompt: false,
     operation: "grok_request",
     ...extra,
+  };
+}
+
+const noopLogger = {
+  info: (..._args: any[]) => {},
+  warn: (..._args: any[]) => {},
+  error: (..._args: any[]) => {},
+  debug: (..._args: any[]) => {},
+};
+
+function mockSession(id: string, cli: Session["cli"]): Session {
+  return {
+    id,
+    cli,
+    createdAt: new Date().toISOString(),
+    lastUsedAt: new Date().toISOString(),
+    description: `${cli} session`,
+  };
+}
+
+function createMockSessionManager(sessions: Map<string, Session>): ISessionManager {
+  return {
+    createSession: vi.fn(async (cli, description, sessionId) => {
+      const session = mockSession(sessionId || `gw-${cli}`, cli);
+      session.description = description;
+      sessions.set(session.id, session);
+      return session;
+    }),
+    getSession: vi.fn(async sessionId => sessions.get(sessionId) || null),
+    listSessions: vi.fn(async cli =>
+      [...sessions.values()].filter(session => !cli || session.cli === cli)
+    ),
+    deleteSession: vi.fn(async sessionId => sessions.delete(sessionId)),
+    setActiveSession: vi.fn(async () => true),
+    getActiveSession: vi.fn(async () => null),
+    updateSessionUsage: vi.fn(async () => {}),
+    updateSessionMetadata: vi.fn(async () => true),
+    clearAllSessions: vi.fn(async () => 0),
   };
 }
 
@@ -90,6 +136,53 @@ describe("Phase 4 slice δ — Grok --max-turns wiring", () => {
     const idx = prep.args.indexOf("--max-turns");
     expect(idx).toBeGreaterThan(-1);
     expect(prep.args[idx + 1]).toBe("12");
+  });
+});
+
+describe("Grok CLI session namespace validation", () => {
+  it("rejects a grok-api session id before sync Grok CLI execution", async () => {
+    const sm = createMockSessionManager(
+      new Map([["api-session", mockSession("api-session", "grok-api")]])
+    );
+
+    const result = await handleGrokRequest(
+      { sessionManager: sm, logger: noopLogger },
+      {
+        prompt: "hello",
+        sessionId: "api-session",
+        resumeLatest: false,
+        createNewSession: false,
+        approvalStrategy: "legacy",
+        optimizePrompt: false,
+      }
+    );
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("not 'grok'");
+  });
+
+  it("rejects a grok-api session id before starting async Grok CLI jobs", async () => {
+    const sm = createMockSessionManager(
+      new Map([["api-session", mockSession("api-session", "grok-api")]])
+    );
+    const asyncJobManager = new AsyncJobManager(noopLogger);
+    const startJobSpy = vi.spyOn(asyncJobManager, "startJob");
+
+    const result = await handleGrokRequestAsync(
+      { sessionManager: sm, asyncJobManager, logger: noopLogger },
+      {
+        prompt: "hello",
+        sessionId: "api-session",
+        resumeLatest: false,
+        createNewSession: false,
+        approvalStrategy: "legacy",
+        optimizePrompt: false,
+      }
+    );
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("not 'grok'");
+    expect(startJobSpy).not.toHaveBeenCalled();
   });
 });
 

@@ -3599,9 +3599,12 @@ export async function handleGeminiRequest(
       resumeLatest: params.resumeLatest,
       createNewSession: params.createNewSession,
     });
-    args.push(...sessionPlan.args);
     const userProvidedSession = sessionPlan.resumed;
     const effectiveSessionIdHint = sessionPlan.resumed ? params.sessionId : undefined;
+    if (effectiveSessionIdHint) {
+      await getExistingSessionForProvider(deps.sessionManager, effectiveSessionIdHint, "gemini");
+    }
+    args.push(...sessionPlan.args);
 
     let worktreeResolution: ResolvedWorktree = {};
     try {
@@ -3783,13 +3786,17 @@ export async function handleGeminiRequestAsync(
       resumeLatest: params.resumeLatest,
       createNewSession: params.createNewSession,
     });
-    args.push(...sessionPlan.args);
 
     // Pre-start session I/O (async handlers: prevent orphaned jobs)
     let effectiveSessionId = sessionPlan.resumed ? params.sessionId : undefined;
+    const existingSession = await getExistingSessionForProvider(
+      deps.sessionManager,
+      effectiveSessionId,
+      "gemini"
+    );
+    args.push(...sessionPlan.args);
     if (effectiveSessionId) {
-      const existing = await deps.sessionManager.getSession(effectiveSessionId);
-      if (!existing) {
+      if (!existingSession) {
         try {
           await deps.sessionManager.createSession("gemini", "Gemini Session", effectiveSessionId);
         } catch {
@@ -4022,6 +4029,13 @@ export async function handleGrokRequest(
       resumeLatest: params.resumeLatest,
       createNewSession: params.createNewSession,
     });
+    if (sessionResult.userProvidedSession) {
+      await getExistingSessionForProvider(
+        deps.sessionManager,
+        sessionResult.effectiveSessionId,
+        "grok"
+      );
+    }
     args.push(...sessionResult.resumeArgs);
 
     let worktreeResolution: ResolvedWorktree = {};
@@ -4229,6 +4243,13 @@ export async function handleGrokRequestAsync(
       resumeLatest: params.resumeLatest,
       createNewSession: params.createNewSession,
     });
+    if (sessionResult.userProvidedSession) {
+      await getExistingSessionForProvider(
+        deps.sessionManager,
+        sessionResult.effectiveSessionId,
+        "grok"
+      );
+    }
     args.push(...sessionResult.resumeArgs);
 
     // Pre-start session I/O (async handlers: prevent orphaned jobs)
@@ -4409,6 +4430,13 @@ export async function handleMistralRequest(
       resumeLatest: params.resumeLatest,
       createNewSession: params.createNewSession,
     });
+    if (sessionResult.userProvidedSession) {
+      await getExistingSessionForProvider(
+        deps.sessionManager,
+        sessionResult.effectiveSessionId,
+        "mistral"
+      );
+    }
     args.push(...sessionResult.resumeArgs);
 
     let worktreeResolution: ResolvedWorktree = {};
@@ -4624,12 +4652,16 @@ export async function handleMistralRequestAsync(
       resumeLatest: params.resumeLatest,
       createNewSession: params.createNewSession,
     });
-    args.push(...sessionResult.resumeArgs);
 
     let effectiveSessionId = sessionResult.effectiveSessionId;
+    const existingSession = await getExistingSessionForProvider(
+      deps.sessionManager,
+      sessionResult.userProvidedSession ? effectiveSessionId : undefined,
+      "mistral"
+    );
+    args.push(...sessionResult.resumeArgs);
     if (sessionResult.userProvidedSession && effectiveSessionId) {
-      const existing = await deps.sessionManager.getSession(effectiveSessionId);
-      if (!existing) {
+      if (!existingSession) {
         try {
           await deps.sessionManager.createSession("mistral", "Mistral Session", effectiveSessionId);
         } catch {
@@ -4749,6 +4781,11 @@ export async function handleCodexRequestAsync(
   }
 ): Promise<ExtendedToolResponse> {
   const runtime = resolveHandlerRuntime(deps);
+  try {
+    await getExistingSessionForProvider(deps.sessionManager, params.sessionId, "codex");
+  } catch (err) {
+    return createErrorResponse("codex_request_async", 1, "", params.correlationId, err as Error);
+  }
   const prep = prepareCodexRequest(
     {
       prompt: params.prompt,
@@ -5377,6 +5414,12 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         useContinue = true;
       }
 
+      try {
+        await getExistingSessionForProvider(sessionManager, effectiveSessionId, "claude");
+      } catch (err) {
+        return createErrorResponse("claude_request", 1, "", corrId, err as Error);
+      }
+
       // Slice 3: if the resolved session has a near-expiry Anthropic
       // cache breakpoint, attach a structured warning (NOT a hard error)
       // to the response. Computed BEFORE safeFlightStart so the current
@@ -5830,6 +5873,11 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       const { corrId, args } = prep;
       let durationMs = 0;
       let wasSuccessful = false;
+      try {
+        await getExistingSessionForProvider(sessionManager, sessionId, "codex");
+      } catch (err) {
+        return createErrorResponse("codex_request", 1, "", corrId, err as Error);
+      }
       safeFlightStart(
         {
           correlationId: corrId,
@@ -6087,6 +6135,11 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           corrId,
           new Error("one of sessionId or forkLast is required")
         );
+      }
+      try {
+        await getExistingSessionForProvider(sessionManager, sessionId, "codex");
+      } catch (err) {
+        return createErrorResponse("codex_fork_session", 1, "", corrId, err as Error);
       }
 
       let forkArgs: string[];
@@ -7153,6 +7206,11 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           if (!useContinue && effectiveSessionId && activeSession?.id === effectiveSessionId) {
             useContinue = true;
           }
+          const existingSession = await getExistingSessionForProvider(
+            sessionManager,
+            effectiveSessionId,
+            "claude"
+          );
           if (useContinue) {
             args.push("--continue");
           } else if (effectiveSessionId) {
@@ -7161,7 +7219,6 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           }
 
           if (effectiveSessionId) {
-            const existingSession = await sessionManager.getSession(effectiveSessionId);
             if (!existingSession) {
               await sessionManager.createSession("claude", "Claude Session", effectiveSessionId);
             }
