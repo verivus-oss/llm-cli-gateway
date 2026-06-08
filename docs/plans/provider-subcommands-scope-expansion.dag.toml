@@ -1,0 +1,513 @@
+# Implementation plan: expand gateway scope to provider CLI subcommands.
+#
+# Goal: make provider subcommand/control-plane surfaces first-class contract
+# citizens across Claude, Codex, Gemini, Grok, and Mistral Vibe without
+# weakening the existing request-tool argv allowlists.
+#
+# Survey baseline from installed CLIs on 2026-06-08:
+#   - Claude Code 2.1.168: subcommands include agents, auth, auto-mode,
+#     doctor, install, mcp, plugin/plugins, project, setup-token, ultrareview,
+#     update/upgrade.
+#   - Codex CLI 0.137.0: subcommands include exec, review, login, logout, mcp,
+#     plugin, mcp-server, app-server, remote-control, completion, update,
+#     doctor, sandbox, debug, apply, resume, archive, unarchive, fork, cloud,
+#     exec-server, features.
+#   - Gemini CLI 0.45.2: subcommands include mcp, extensions/extension,
+#     skills/skill, hooks/hook, gemma, and the default query launcher.
+#   - Grok Build 0.2.33: subcommands include agent, completions, export,
+#     import, inspect, leader, login, logout, mcp, memory, models, plugin,
+#     sessions, setup, ssh, trace, update, version, worktree.
+#   - Mistral Vibe 2.14.0: no explicit top-level subcommand tree in `vibe
+#     --help`; control-plane scope is currently flags and VIBE_* env config.
+#
+# Design stance:
+#   Existing `*_request` and `*_request_async` tools remain model-run surfaces.
+#   Subcommands become a separate contracted control-plane surface, because
+#   login/logout/update/config/server subcommands have different risk profiles
+#   than prompt execution. Do not fold every subcommand flag into the request
+#   tools.
+#
+# Token-efficiency stance:
+#   The subcommand catalog will be large. Default MCP responses must be compact
+#   indexes, not full per-provider help dumps. Agents should drill down through
+#   resource URIs or narrow tools only when a specific provider/command path is
+#   needed.
+
+[meta]
+name = "provider subcommand scope expansion"
+schema_version = "1.1"
+owner = "verivus-oss"
+slice = "provider-subcommands-phase-0"
+target_branch = "master"
+providers = ["claude", "codex", "gemini", "grok", "mistral"]
+acceptance_resource = "Each provider has a versioned subcommand contract tree, installed-help probes detect subcommand drift, and read-only subcommand introspection is exposed through MCP without allowing arbitrary CLI execution."
+invariant_sources = [
+  ".agents/skills/provider-claude/SKILL.md",
+  ".agents/skills/provider-codex/SKILL.md",
+  ".agents/skills/provider-gemini/SKILL.md",
+  ".agents/skills/provider-grok/SKILL.md",
+  ".agents/skills/provider-mistral/SKILL.md",
+  "src/upstream-contracts.ts",
+]
+predecessor_plan = "docs/plans/grok-0.2.33-contract-sync.dag.toml"
+
+[decision]
+expand_scope_to_subcommands = true
+request_tools_remain_prompt_surfaces = true
+first_shipping_slice = "contract_and_readonly_introspection"
+execution_surface_default = "no_arbitrary_subcommand_execution"
+tool_tiering_required = true
+token_efficiency_required = true
+reason = """
+The gateway should intentionally track provider subcommand surfaces for all
+providers, but subcommands include auth, updater, config, server, and local
+state mutation paths. A separate contracted control-plane surface preserves
+the existing safety model while still making upstream drift visible.
+"""
+
+[[steps]]
+id = "audit-installed-subcommand-tree"
+depends_on = []
+actor = "assistant"
+action = """
+For each provider, capture top-level help plus safe subcommand help only:
+
+  claude --help
+  claude <subcommand> --help
+  codex --help
+  codex <subcommand> --help
+  gemini --help
+  gemini <subcommand> --help
+  grok --help
+  grok <subcommand> --help
+  vibe --help
+
+Do not run subcommands without --help. Do not run login, logout, update,
+install, setup, server, sandbox, apply, archive, or restore actions. For
+interactive commands whose --help hangs or starts runtime behavior, record
+that limitation and skip deeper probing.
+
+Persist no raw secrets, account names, local tokens, or machine-specific
+launcher paths. Version strings are acceptable; credential state is not.
+"""
+idempotent = true
+validation = """
+The audit notes include provider version, discovered subcommand names, and a
+safe/unsafe probe status per subcommand. Vibe is explicitly recorded as having
+no discovered subcommand tree at this version.
+"""
+
+[[steps]]
+id = "design-subcommand-contract-types"
+depends_on = ["audit-installed-subcommand-tree"]
+actor = "assistant"
+action = """
+Extend the upstream-contract model without changing existing request argv
+validation:
+
+  interface CliSubcommandContract {
+    commandPath: readonly string[];
+    helpArgs: readonly string[][];
+    flags: Record<string, CliFlagContract>;
+    maxPositionals: number;
+    acknowledgedUpstreamFlags?: readonly string[];
+    aliases?: readonly string[];
+    children?: Record<string, CliSubcommandContract>;
+    risk: CliSubcommandRisk;
+    exposure: CliSubcommandExposure;
+    tier: CliSubcommandTier;
+    tokenCost: "tiny" | "small" | "medium" | "large";
+    summary: string;
+    conformanceFixtures: readonly CliContractFixture[];
+  }
+
+  type CliSubcommandRisk =
+    | "read_only"
+    | "writes_local_config"
+    | "auth"
+    | "network"
+    | "starts_server"
+    | "updates_binary"
+    | "destructive"
+    | "executes_agent";
+
+  type CliSubcommandExposure =
+    | "tracked_only"
+    | "mcp_readonly"
+    | "mcp_requires_approval"
+    | "not_exposed";
+
+  type CliSubcommandTier =
+    | "catalog"
+    | "inspect"
+    | "execute_candidate"
+    | "diagnostic";
+
+Add `subcommands?: Record<string, CliSubcommandContract>` to CliContract.
+Keep `flags` as the top-level request-tool allowlist. The existing
+validateUpstreamCliArgs(cli, args) behavior must remain byte-for-byte
+compatible for current callers.
+
+Token-efficiency requirements:
+  - Every subcommand contract needs a one-line summary for catalog responses.
+  - Full flag maps are returned only by narrow inspect calls/resources.
+  - Raw help text is not stored in snapshots or ordinary MCP responses.
+  - Large provider trees must be paginated or filterable by provider, tier,
+    risk, exposure, or commandPath prefix.
+"""
+idempotent = true
+validation = """
+TypeScript builds and existing upstream-contract tests pass with no behavior
+change. A fixture proves top-level validateUpstreamCliArgs still rejects a
+subcommand-only flag when it is not valid for the prompt execution surface.
+The contract type requires tier, tokenCost, and summary metadata for every
+subcommand.
+"""
+
+[[steps]]
+id = "implement-subcommand-help-probe"
+depends_on = ["design-subcommand-contract-types"]
+actor = "assistant"
+action = """
+Teach probeInstalledCliContract to collect subcommand help surfaces:
+
+  - Walk only declared subcommands from the contract.
+  - Execute only `<executable> ...commandPath --help`.
+  - Extract flags with the existing extractDiscoveredFlags helper.
+  - Compute extraVsContract and missingFromBinary per command path.
+  - Include command path, help hash, probedAt, and drift arrays in snapshots.
+
+Do not auto-discover and recurse into arbitrary commands until the declared
+contract tree exists; declared-first probing avoids accidentally invoking
+runtime behavior or provider-specific aliases that are not safe.
+"""
+idempotent = true
+validation = """
+docs/upstream/snapshots/<provider>.json contains a `subcommands` object with
+per-command help hashes and drift arrays. Existing top-level helpSurface
+fields are unchanged for compatibility. Snapshots store extracted flags,
+hashes, and summaries only; they do not store raw help prose.
+"""
+
+[[steps]]
+id = "seed-provider-subcommand-contracts"
+depends_on = ["implement-subcommand-help-probe"]
+actor = "assistant"
+action = """
+Seed conservative subcommand contracts for all providers.
+
+Claude:
+  - Track read-only/diagnostic help for doctor, mcp, plugin/plugins, agents,
+    auth, project, update/upgrade, install, auto-mode, ultrareview,
+    setup-token.
+  - Default exposure: tracked_only. Consider doctor as mcp_readonly only
+    after verifying it cannot spawn untrusted project stdio servers in the
+    gateway context.
+
+Codex:
+  - Track exec, review, login, logout, mcp, plugin, mcp-server, app-server,
+    remote-control, completion, update, doctor, sandbox, debug, apply, resume,
+    archive, unarchive, fork, cloud, exec-server, features.
+  - Keep exec in the existing request contract. Other command paths start as
+    tracked_only unless explicitly read-only.
+
+Gemini:
+  - Track mcp, extensions/extension, skills/skill, hooks/hook, gemma, and the
+    default launcher help.
+  - Separate deprecated flags and aliases from primary command names.
+
+Grok:
+  - Track agent, completions, export, import, inspect, leader, login, logout,
+    mcp, memory, models, plugin, sessions, setup, ssh, trace, update, version,
+    worktree.
+  - Track nested `agent stdio`, `agent headless`, `agent serve`, and
+    `agent leader` as subcommand-local surfaces, not top-level request flags.
+
+Mistral:
+  - Add an empty subcommands object plus an explicit note/fixture that Vibe
+    2.14.0 exposes no subcommands. Continue watching flags and VIBE_* env.
+
+Initial tiering:
+  - catalog: all declared subcommands, returned as compact rows.
+  - inspect: config/list/show/help surfaces that are safe to inspect.
+  - diagnostic: doctor/version/models/features/status-style surfaces.
+  - execute_candidate: any command that may later run through MCP after
+    approval policy is designed.
+
+Default every command to tracked_only exposure and tokenCost=small unless a
+specific command has been reviewed. Do not mark update/auth/logout/install/
+server/apply/archive/restore as mcp_readonly.
+"""
+idempotent = true
+validation = """
+The installed probe for every provider reports no unclassified subcommand
+drift for the seeded tree. Every seeded subcommand has risk and exposure
+metadata plus tier, tokenCost, and summary metadata.
+"""
+
+[[steps]]
+id = "add-subcommand-validation-api"
+depends_on = ["seed-provider-subcommand-contracts"]
+actor = "assistant"
+action = """
+Add a separate validator for contracted subcommand argv:
+
+  validateUpstreamCliSubcommandArgs(cli, commandPath, args)
+
+Rules:
+  - commandPath must match a declared subcommand contract.
+  - args are validated against that command's flags and positional limit.
+  - top-level global flags are allowed only if explicitly inherited by the
+    subcommand contract.
+  - risk/exposure metadata is returned alongside validation status for MCP
+    policy decisions.
+
+Do not route request-tool args through this validator. Existing request tools
+continue to use validateUpstreamCliArgs.
+"""
+idempotent = true
+validation = """
+Unit tests prove: a valid subcommand flag passes only for its command path;
+the same flag fails on the top-level request contract; unknown subcommand
+paths fail before spawn.
+"""
+
+[[steps]]
+id = "expose-readonly-subcommand-introspection"
+depends_on = ["add-subcommand-validation-api"]
+actor = "assistant"
+action = """
+Expose read-only MCP surfaces for the new contract tree:
+
+  - provider_subcommands_list({ provider? })
+  - provider_subcommand_contract({ provider, commandPath })
+  - provider_subcommand_drift({ provider? })
+  - resource provider_subcommands://catalog
+  - resource provider_subcommands://{provider}/{commandPath}
+
+These surfaces return contract metadata, risk/exposure classification, help
+hashes, and drift summaries. They do not execute provider subcommands.
+
+Tool tiering and token-efficiency:
+  - provider_subcommands_list returns compact rows only:
+    provider, commandPath, aliases, tier, risk, exposure, tokenCost, summary,
+    driftStatus, and resourceUri.
+  - provider_subcommand_contract returns one command path at a time. It may
+    include flags and fixtures, but not sibling command trees unless requested
+    through a separate commandPath prefix filter.
+  - provider_subcommand_drift defaults to driftStatus != "clean"; callers must
+    opt into clean rows.
+  - provider_subcommands://catalog returns the compact catalog and supports
+    provider/tier/risk/exposure filters through URI templates.
+  - provider_subcommands://{provider}/{commandPath} returns the detailed
+    contract for that exact command path.
+  - No tool returns full raw help output by default. If raw help is ever
+    exposed, it must be a debug-only resource with size limits and redaction.
+"""
+idempotent = true
+validation = """
+MCP surface tests verify the tools/resources exist, return redacted structured
+JSON, and never include credential values or local-only launcher paths. Tests
+also assert compact list responses stay below a fixed character budget for the
+installed five-provider catalog.
+"""
+
+[[steps]]
+id = "design-efficient-tool-tiering"
+depends_on = ["expose-readonly-subcommand-introspection"]
+actor = "assistant"
+action = """
+Define the public MCP tool/resource tiers before adding any executable
+control-plane command:
+
+Tier 0: Server instructions
+  - Mention only the existence of provider_subcommands_* tools.
+  - Do not inline provider command inventories into instructions.
+
+Tier 1: Catalog tools/resources
+  - provider_subcommands_list and provider_subcommands://catalog.
+  - Compact, filterable, paginated, and sorted by provider + commandPath.
+  - No flag maps, fixtures, or raw help.
+
+Tier 2: Inspect tools/resources
+  - provider_subcommand_contract and provider_subcommands://{provider}/{path}.
+  - One command path per call, detailed but bounded.
+  - Include a stable `next`/`related` list of resource URIs instead of
+    embedding sibling command details.
+
+Tier 3: Drift and diagnostics
+  - provider_subcommand_drift, scan reports, snapshot summaries.
+  - Default to only non-clean drift rows; full clean catalog requires opt-in.
+
+Tier 4: Execution candidates
+  - Future provider_command_run or provider-specific wrappers.
+  - Never advertised as broadly as request tools until risk review approves
+    a command path.
+
+Include response-size budgets:
+  - Tier 1 list: target <= 12 KiB for all five providers.
+  - Tier 2 inspect: target <= 8 KiB for one command path.
+  - Tier 3 drift: target <= 8 KiB unless caller asks for all clean rows.
+  - Tier 4 execution response: stream or summarize stdout/stderr with
+    explicit truncation metadata.
+"""
+idempotent = true
+validation = """
+The implementation includes tests or fixtures that fail if catalog/list
+responses accidentally inline full subcommand trees or raw help text. Server
+instructions stay compact and do not enumerate every subcommand.
+"""
+
+[[steps]]
+id = "design-controlled-execution-surface"
+depends_on = ["expose-readonly-subcommand-introspection"]
+actor = "assistant"
+action = """
+Design, but do not implement in the first slice, a generic execution tool:
+
+  provider_command_run({
+    provider,
+    commandPath,
+    args,
+    workingDir?,
+    timeoutMs?,
+    approvalStrategy?,
+    dryRun?
+  })
+
+Policy:
+  - exposure=tracked_only: reject with contract metadata.
+  - exposure=mcp_readonly: may run after validation.
+  - exposure=mcp_requires_approval: require mcp_managed approval and include
+    risk metadata in the approval record.
+  - exposure=not_exposed: always reject.
+  - starts_server/update/auth/destructive risks require a specific follow-up
+    design and tests before becoming executable.
+
+The first implementation should favor high-level provider-specific tools for
+common safe flows over unrestricted raw command execution.
+
+Token-efficiency:
+  - dryRun=true returns planned executable, commandPath, args, risk/exposure,
+    approval requirement, and estimated output handling only.
+  - Successful execution returns structured summary first and places large
+    stdout/stderr behind persisted request/job result retrieval.
+  - Long-running command execution must prefer async jobs over sync responses.
+"""
+idempotent = true
+validation = """
+The design doc or implementation notes enumerate which commands can ever run
+through MCP in slice 2 and why. No raw arbitrary subcommand executor ships in
+slice 1.
+"""
+
+[[steps]]
+id = "update-scanner-reports-and-snapshots"
+depends_on = ["expose-readonly-subcommand-introspection"]
+actor = "assistant"
+action = """
+Update scripts/upstream-scan.mjs reports to include:
+
+  - top-level flag drift as today,
+  - subcommand tree summary,
+  - subcommand-local extra/missing flags,
+  - risk/exposure classification counts,
+  - clear next-action text for command paths with drift.
+
+Snapshots should remain stable JSON and avoid storing volatile help prose
+except hashes and extracted flag arrays.
+
+Reports should be token-efficient:
+  - summary table first,
+  - drift rows grouped by provider and command path,
+  - clean command paths collapsed behind counts,
+  - no raw help blocks unless explicitly requested by a future debug flag.
+"""
+idempotent = true
+validation = """
+`npm run upstream:scan -- --provider grok --probe-installed --write-snapshot`
+writes a snapshot with both top-level and subcommand help surfaces. Reports
+are readable and identify command paths, not just provider names.
+"""
+
+[[steps]]
+id = "verification-gate"
+depends_on = [
+  "update-scanner-reports-and-snapshots",
+  "design-controlled-execution-surface",
+]
+actor = "assistant"
+action = """
+Run the full verification gate:
+
+  npm run build
+  npm run upstream:contracts
+  npm run upstream:scan -- --provider claude --probe-installed
+  npm run upstream:scan -- --provider codex --probe-installed
+  npm run upstream:scan -- --provider gemini --probe-installed
+  npm run upstream:scan -- --provider grok --probe-installed
+  npm run upstream:scan -- --provider mistral --probe-installed
+  npm test -- src/__tests__/upstream-contracts.test.ts src/__tests__/upstream-sources.test.ts
+  npm run check
+
+If installed provider binaries are unavailable in CI, tests must separate
+pure contract validation from local-machine probe evidence.
+"""
+idempotent = true
+validation = """
+All pure gates pass. Any local-only probe skips are explicit and do not hide
+contract fixture failures.
+"""
+
+[[steps]]
+id = "multi-provider-review"
+depends_on = ["verification-gate"]
+actor = "assistant"
+action = """
+Run the implement-review-fix workflow with at least Codex and Gemini reviewers.
+Ask reviewers to focus on:
+
+  - accidental arbitrary CLI execution,
+  - auth/update/logout/destructive subcommands becoming executable too early,
+  - top-level request contract regressions,
+  - scanner false negatives for subcommand-local drift,
+  - secret/local-path leakage in snapshots, reports, resources, and logs.
+"""
+idempotent = true
+validation = """
+Reviewers return unconditional APPROVED, or blocking findings are fixed and
+re-reviewed until approved.
+"""
+
+[rollback]
+guidance = """
+The first slice should be mostly additive. To rollback:
+
+  - remove subcommands fields from UPSTREAM_CLI_CONTRACTS,
+  - remove subcommand probe/report output,
+  - remove provider_subcommands MCP tools/resources,
+  - keep existing top-level request contracts unchanged.
+
+Do not rollback unrelated provider request work, sessions, migrations, or
+Grok API provider files in this dirty checkout.
+"""
+
+[risks]
+known = [
+  "Provider subcommands include auth, logout, updater, local config mutation, server startup, sandbox execution, and code-apply paths.",
+  "Some provider help commands may spawn project hooks, stdio servers, or read local config even when invoked as diagnostics.",
+  "A generic raw subcommand executor could become an arbitrary command wrapper if not tightly allowlisted.",
+  "Installed-help probes are local-machine evidence and may differ from CI machines.",
+  "Vibe currently has no subcommands, so the framework must handle an empty subcommand tree without treating it as drift.",
+  "A full five-provider subcommand tree can bloat server instructions, tool schemas, snapshots, and model context if returned wholesale.",
+]
+mitigations = [
+  "Ship contract and read-only introspection first; execution comes in a later slice.",
+  "Require risk and exposure metadata on every declared subcommand.",
+  "Require tier, tokenCost, and compact summary metadata on every declared subcommand.",
+  "Default every command to tracked_only until reviewed.",
+  "Keep request-tool validation separate from subcommand validation.",
+  "Return compact catalogs by default and expose detailed command contracts through narrow resource URIs.",
+  "Keep raw help out of snapshots and ordinary MCP responses; store hashes and extracted flags instead.",
+  "Redact outputs and avoid recording account names, credential state, and machine-specific launcher paths.",
+]
