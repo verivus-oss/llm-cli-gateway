@@ -4,6 +4,67 @@ All notable changes to the llm-cli-gateway project.
 
 ## Unreleased
 
+## [2.4.0] - 2026-06-08: Direct Grok API provider and provider-owned sessions
+
+### Added
+
+- Direct xAI Grok API provider support:
+  - new `ProviderType` split so stored sessions, metrics, flight-recorder rows,
+    and migrations can represent the non-CLI `grok-api` provider alongside the
+    existing CLI providers;
+  - `[providers.xai]` config loading with API-key env indirection and provider
+    enablement gating;
+  - `grok_api_request`, registered only when xAI API config and credentials are
+    present, backed by the xAI Responses API;
+  - xAI response parsing, retry/circuit-breaker handling, usage/cost metadata,
+    and `previous_response_id` session metadata;
+  - focused migration, session-manager, provider-config, and Grok API tests.
+- Provider subcommand contract resources and tooling:
+  - provider subcommand catalog/detail resource generation;
+  - `provider_subcommands_list`, `provider_subcommand_contract`, and
+    `provider_subcommand_drift` surfaces exercised through MCP Inspector.
+- Host auto-upgrade operations:
+  - `scripts/host-upgrade.sh` for staged, atomic npm-based host upgrades with
+    rollback support;
+  - user systemd service/timer units for scheduled gateway auto-upgrade checks.
+- Direct Grok API provider design draft documenting the follow-on async-runner
+  and capability-table design work.
+
+### Fixed
+
+- Provider-owned stored session enforcement now rejects cross-provider reuse for
+  all request handlers, including `claude_request`, `codex_request`,
+  `gemini_request`, `grok_request`, `mistral_request`, their async variants,
+  `codex_fork_session`, and `grok_api_request`.
+- `sessions://all` now reports active sessions across all provider types,
+  including `grok-api`.
+- MCP resource URI schemes now use standards-valid hyphenated forms:
+  `cache-state://...` and `provider-subcommands://...`. MCP Inspector exposed
+  the previous underscore schemes as invalid URL schemes for standard MCP
+  clients. Legacy direct `provider_subcommands://...` reads remain accepted for
+  internal compatibility tests/callers, but advertised resources now use only
+  valid URI schemes.
+- `src/executor.ts` avoids pidless child-process kill attempts.
+
+### Changed
+
+- GitHub Actions pins were refreshed to current pinned action SHAs.
+- Provider subcommand support remains CLI-only where appropriate; the direct
+  API provider is excluded from spawnable-CLI contract paths.
+
+### Verification
+
+- Dirty-tree stack split and release evidence recorded in
+  `docs/reviews/dirty-tree-stack-split-verification-2026-06-08.md`.
+- MCP Inspector smoke covered tools/list, resources/list, read-only tool calls,
+  session lifecycle, direct xAI API registration through a loopback mock, and
+  exhaustive advertised-resource reads.
+- Multi-LLM review completed with Claude, Codex, Gemini, Grok, and Mistral
+  approvals for the main stack and the Inspector-discovered URI-scheme fix.
+- Final merged `master` verification before mirror push:
+  `npm run check` passed, including build, lint, format check, 67 test files /
+  1124 tests, and the release security audit.
+
 ## [2.3.0] - 2026-06-08: MCP tool annotations and client safety hints
 
 ### Added
