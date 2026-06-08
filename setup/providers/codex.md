@@ -17,6 +17,8 @@ Use copy/paste-safe commands and never request OpenAI passwords, API keys, or Co
 
 ## Config Snippet
 
+Sanitized MCP templates are also collected in `setup/assistants/mcp-config-samples.md`.
+
 ```bash
 export LLM_GATEWAY_AUTH_TOKEN="$(cat ~/.llm-cli-gateway/auth-token)"
 codex mcp add llm-cli-gateway --url <gateway-url>/mcp --bearer-token-env-var LLM_GATEWAY_AUTH_TOKEN

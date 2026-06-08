@@ -14,9 +14,11 @@ Claude web is a verified inbound MCP host through remote custom connectors. It c
 
 ## Assistant Instructions
 
-Use doctor JSON fields rather than guessing. If the public URL is missing, HTTP-only, localhost, LAN-only, or unreachable, direct the user back to endpoint exposure setup.
+Use doctor JSON fields rather than guessing. If the public URL is missing, HTTP-only, localhost, LAN-only, or unreachable, follow `setup/assistants/endpoint-exposure-agent-runbook.md` before giving Claude web connector steps.
 
 ## Config Snippet
+
+Sanitized MCP templates are also collected in `setup/assistants/mcp-config-samples.md`.
 
 ```text
 Connector name: llm-cli-gateway

@@ -7,6 +7,8 @@ Use these artifacts as source of truth:
 - Setup UI: `http://127.0.0.1:3333/`
 - Doctor JSON: `llm-cli-gateway doctor --json` or the setup UI `/doctor` output
 - Assistant contract: `setup/assistants/ASSISTANT_CONTRACT.md`
+- HTTPS endpoint runbook: `setup/assistants/endpoint-exposure-agent-runbook.md`
+- MCP config samples: `setup/assistants/mcp-config-samples.md`
 - Provider snippets: `setup/providers/`
 - Machine install plan: `setup/install-plan.dag.toml`
 
@@ -15,7 +17,9 @@ Use these artifacts as source of truth:
 - Do not ask for provider passwords, OAuth tokens, API keys, bearer tokens, tunnel tokens, authorization headers, or credential files.
 - If the user pastes a secret, tell them to rotate it through the provider's official flow and continue only with redacted diagnostics.
 - Use generated snippets from the setup UI. Do not invent JSON, TOML, or headers by memory.
+- If generated snippets are unavailable, adapt sanitized samples from `setup/assistants/mcp-config-samples.md`.
 - When the user needs to set a secret-bearing environment variable such as `LLM_GATEWAY_AUTH_TOKEN`, route through the setup UI's generated snippet. Do not tell the user to run `export TOKEN="..."` inline; that path captures secrets into shell history.
+- For web-hosted MCP clients, ask whether the user wants the managed Cloudflare Quick Tunnel path or a persistent/BYO HTTPS endpoint, and whether the selected provider connector UI is available.
 - Ask for fresh doctor JSON after each setup step.
 - Do not claim a web client is ready unless doctor JSON shows `endpoint_exposure.web_clients_supported: true`. Treat that boolean as the gating field; do not infer readiness from `transport.http.enabled` or `auth.token_configured` alone.
 
@@ -45,10 +49,11 @@ asks to enable cache-awareness features.
 1. Ask which inbound client the user wants to connect and which outbound providers they want for validation.
 2. Ask the user to open the setup UI or paste redacted doctor JSON.
 3. Read `transport`, `auth`, `providers`, and `endpoint_exposure`.
-4. Choose the matching provider page and setup UI snippet.
-5. Give one action at a time.
-6. Verify by asking the connected client: `validate this sentence with two other models: gateway setup works.`
-7. Stop when the selected client can call a validation tool or when doctor JSON identifies a blocker.
+4. If a web-hosted MCP client is selected and `endpoint_exposure.web_clients_supported` is not `true`, follow `setup/assistants/endpoint-exposure-agent-runbook.md`.
+5. Choose the matching provider page and setup UI snippet.
+6. Give one action at a time.
+7. Verify by asking the connected client: `validate this sentence with two other models: gateway setup works.`
+8. Stop when the selected client can call a validation tool or when doctor JSON identifies a blocker.
 
 ## Response Shape
 

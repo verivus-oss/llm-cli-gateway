@@ -14,9 +14,11 @@ Grok is verified as an inbound custom MCP host when the user has connector acces
 
 ## Assistant Instructions
 
-Do not ask for xAI API keys, OAuth tokens, bearer tokens, or credential files. If endpoint exposure is local-only or unreachable, stop before giving web connector steps.
+Do not ask for xAI API keys, OAuth tokens, bearer tokens, or credential files. If endpoint exposure is local-only or unreachable, follow `setup/assistants/endpoint-exposure-agent-runbook.md` before giving web connector steps.
 
 ## Config Snippet
+
+Sanitized MCP templates are also collected in `setup/assistants/mcp-config-samples.md`.
 
 ```text
 Connector name: llm-cli-gateway

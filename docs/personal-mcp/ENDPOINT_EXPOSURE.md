@@ -2,6 +2,11 @@
 
 Status: Layer 3 design and operator guide
 
+Assistant-facing setup instructions live in
+`setup/assistants/endpoint-exposure-agent-runbook.md`. Use that runbook when an LLM agent needs to
+install `cloudflared`, start the managed tunnel, verify doctor output, and generate client setup
+values on the user's behalf.
+
 The gateway has two different endpoint stories:
 
 - Local clients can use stdio or `http://127.0.0.1:<port>/mcp`.

@@ -26,7 +26,7 @@ validation = "doctor JSON exists and contains schema_version = 1.0."
 id = "check-diagnostics"
 depends_on = ["start-gateway"]
 actor = "assistant"
-action = "Read redacted doctor JSON and summarize transport, auth, provider login, and endpoint exposure. Before proposing any web-client setup action, the assistant must inspect `endpoint_exposure.web_clients_supported` and `auth.token_configured`; web-client readiness must not be inferred from `transport.http.enabled` alone. Per-provider readiness is gated by `providers.<name>.cli_available` for each of claude, codex, gemini, grok, and mistral. The doctor report also includes a top-level `cache_awareness` block; its presence is structural and all flags default off in 1.x, so the assistant must not treat it as a missing-config signal."
+action = "Read redacted doctor JSON and summarize transport, auth, provider login, and endpoint exposure. Before proposing any web-client setup action, the assistant must ask whether the user wants managed Cloudflare Quick Tunnel or persistent/BYO HTTPS endpoint, ask whether the selected provider connector UI is available, inspect `endpoint_exposure.web_clients_supported` and `auth.token_configured`, and avoid inferring web-client readiness from `transport.http.enabled` alone. Per-provider readiness is gated by `providers.<name>.cli_available` for each of claude, codex, gemini, grok, and mistral. The doctor report also includes a top-level `cache_awareness` block; its presence is structural and all flags default off in 1.x, so the assistant must not treat it as a missing-config signal."
 idempotent = true
 validation = "No raw tokens, authorization headers, provider credentials, or tunnel tokens are requested or echoed. Assistant explicitly names `endpoint_exposure.web_clients_supported` and `auth.token_configured` when web-client targets are in scope. Assistant does not flag `cache_awareness` as a blocker when the user has not opted into cache-awareness features."
 
@@ -34,15 +34,15 @@ validation = "No raw tokens, authorization headers, provider credentials, or tun
 id = "prepare-endpoint"
 depends_on = ["check-diagnostics"]
 actor = "human_or_command_capable_assistant"
-action = "Use local endpoint for local clients, or configure HTTPS endpoint exposure for web clients."
+action = "Use local endpoint for local clients, or configure HTTPS endpoint exposure for web clients by following setup/assistants/endpoint-exposure-agent-runbook.md. For web clients, check cloudflared availability, install it from an official OS package path when missing, run `llm-cli-gateway tunnel start`, verify with fresh `llm-cli-gateway doctor --json`, and generate client setup values with `llm-cli-gateway print-client-config` plus `llm-cli-gateway chatgpt-url` for ChatGPT. Do not ask for or echo bearer tokens, ChatGPT URLs, tunnel tokens, provider credentials, or authorization headers."
 idempotent = true
-validation = "Local clients have a local MCP URL; web clients require endpoint_exposure.web_clients_supported = true."
+validation = "Local clients have a local MCP URL; web clients require endpoint_exposure.https_configured = true, endpoint_exposure.public_url_configured = true, endpoint_exposure.web_clients_supported = true, and endpoint_exposure.reachable_from_web = reachable when verification is enabled."
 
 [[steps]]
 id = "apply-client-snippet"
 depends_on = ["prepare-endpoint"]
 actor = "human_or_command_capable_assistant"
-action = "Apply the generated setup UI snippet for the selected client. For each outbound provider in scope (claude, codex, gemini, grok, mistral), confirm the corresponding doctor field is healthy: for mistral, additionally check `client_config.vibe_session_logging.session_logging_enabled` before exercising session-continuity flows."
+action = "Apply the generated setup UI snippet for the selected client. If generated output is unavailable, adapt sanitized samples from setup/assistants/mcp-config-samples.md without inserting raw secrets into chat. For each outbound provider in scope (claude, codex, gemini, grok, mistral), confirm the corresponding doctor field is healthy: for mistral, additionally check `client_config.vibe_session_logging.session_logging_enabled` before exercising session-continuity flows."
 idempotent = true
 validation = "Fresh doctor JSON or client listing shows the client configuration is present when the client exposes such evidence. For mistral, `providers.mistral.cli_available` is true and any session-continuity callers see `client_config.vibe_session_logging.session_logging_enabled = true`."
 

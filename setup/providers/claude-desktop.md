@@ -18,6 +18,8 @@ Do not ask the user to hand-edit source code. Prefer generated snippets and back
 
 ## Config Snippet
 
+Sanitized MCP templates are also collected in `setup/assistants/mcp-config-samples.md`.
+
 ```json
 {
   "mcpServers": {

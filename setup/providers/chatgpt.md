@@ -14,9 +14,11 @@ ChatGPT is a verified inbound MCP host with plan limits. Use this path only when
 
 ## Assistant Instructions
 
-Ask only for OS, desired clients, redacted `doctor --json`, and the setup packet from `setup/ui/index.html`. If `web_clients_supported` is not `true`, stop and fix endpoint exposure before giving ChatGPT connection steps.
+Ask only for OS, desired clients, redacted `doctor --json`, and the setup packet from `setup/ui/index.html`. If `web_clients_supported` is not `true`, follow `setup/assistants/endpoint-exposure-agent-runbook.md` before giving ChatGPT connection steps.
 
 ## Config Snippet
+
+Sanitized MCP templates are also collected in `setup/assistants/mcp-config-samples.md`.
 
 ```text
 Name: llm-cli-gateway

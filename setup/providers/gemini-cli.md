@@ -18,6 +18,8 @@ Ask for redacted doctor JSON. Do not request OAuth files, Google account passwor
 
 ## Config Snippet
 
+Sanitized MCP templates are also collected in `setup/assistants/mcp-config-samples.md`.
+
 ```json
 {
   "mcpServers": {

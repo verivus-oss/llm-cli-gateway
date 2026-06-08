@@ -18,6 +18,10 @@ Ask only for:
 - generated setup packet or client snippet produced by the gateway;
 - non-secret error messages from the setup UI, doctor output, or provider CLI.
 
+When generated setup output is unavailable, assistants may adapt sanitized samples from `setup/assistants/mcp-config-samples.md`. Generated snippets remain preferred.
+
+For HTTPS endpoint exposure, assistants may also ask whether the user wants the managed Cloudflare Quick Tunnel path or a persistent/BYO HTTPS endpoint, and whether the selected provider's connector UI is available in the user's account or workspace.
+
 If the user has not provided `doctor --json`, request it before giving provider-specific next steps.
 
 ## What Assistants Must Not Ask For
@@ -39,9 +43,10 @@ If a user shares a secret accidentally, tell them to rotate it using the provide
 2. Ask the user to run the gateway installer or bootstrapper command exactly as documented.
 3. Ask for `doctor --json`.
 4. Read `doctor --json` and choose the next safe step.
-5. Use generated snippets from the gateway rather than hand-written JSON/TOML.
-6. After each step, ask for fresh `doctor --json`.
-7. Stop when the selected client can call a validation tool or when diagnostics identify a concrete blocker.
+5. If the user selected a web-hosted MCP client and endpoint exposure is not ready, follow `setup/assistants/endpoint-exposure-agent-runbook.md`.
+6. Use generated snippets from the gateway rather than hand-written JSON/TOML; if a sample is needed, adapt `setup/assistants/mcp-config-samples.md`.
+7. After each step, ask for fresh `doctor --json`.
+8. Stop when the selected client can call a validation tool or when diagnostics identify a concrete blocker.
 
 Verification must happen through doctor JSON after every setup step. Prose such as "it should be fixed now" is not sufficient.
 
@@ -88,6 +93,8 @@ Commands must be:
 - reversible, with backups before config writes.
 
 Do not tell the user to edit source code. Generated client snippets may be written by the bootstrapper or setup UI, but not by manual code editing.
+
+For HTTPS endpoint exposure on behalf of a user, assistants must follow `setup/assistants/endpoint-exposure-agent-runbook.md`. A command-capable local assistant may run the documented commands after user permission. A remote chat assistant must give one command or UI action at a time and verify with fresh redacted `doctor --json`.
 
 ## Failure Handling
 
