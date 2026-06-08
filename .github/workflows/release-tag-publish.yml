@@ -38,6 +38,11 @@ jobs:
           fi
 
       - run: npm ci --ignore-scripts --no-audit --no-fund
+      # The release gate intentionally installs with lifecycle scripts disabled,
+      # but the full test suite includes legacy/WAL fixtures that use the
+      # dev-only better-sqlite3 writer. Build just that native dev fixture before
+      # `npm run check`; npm-publish.yml still publishes with --ignore-scripts.
+      - run: npm rebuild better-sqlite3
       # `npm run check` ends in security:audit, which gates on the generated
       # (never committed) prod-only npm-shrinkwrap.json being present.
       - run: node scripts/make-prod-shrinkwrap.mjs
