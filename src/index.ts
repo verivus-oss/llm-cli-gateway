@@ -15,9 +15,11 @@ import { parseVibeMetaJson } from "./mistral-meta-json-parser.js";
 import { homedir } from "os";
 import {
   CLI_TYPES,
+  PROVIDER_TYPES,
   ISessionManager,
   createSessionManager,
   type CliType,
+  type ProviderType,
 } from "./session-manager.js";
 import {
   createWorktree,
@@ -470,12 +472,11 @@ export const WORKTREE_SCHEMA = z
       "see slice λ spec Q4)."
   );
 
-// U22: Session-provider enum extended to five providers. The storage layer's
-// CLI_TYPES already includes "mistral"; the MCP-tool layer mirrors that here so
-// session_create / session_list / session_clear_all accept the fifth provider.
-export const SESSION_PROVIDER_VALUES = ["claude", "codex", "gemini", "grok", "mistral"] as const;
+// Session-provider enum includes spawnable CLIs plus API-backed providers.
+// Keep CLI-only surfaces (contracts, status, updater) on CLI_TYPES.
+export const SESSION_PROVIDER_VALUES = PROVIDER_TYPES;
 export const SESSION_PROVIDER_ENUM = z.enum(SESSION_PROVIDER_VALUES);
-export type SessionProvider = (typeof SESSION_PROVIDER_VALUES)[number];
+export type SessionProvider = ProviderType;
 let activeServer: McpServer | null = null;
 let activeHttpGateway: HttpGatewayHandle | null = null;
 
@@ -8262,7 +8263,9 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
     "session_create",
     "Create a gateway session record for a provider. NOTE: this is gateway bookkeeping (gw-* ID), not a provider-native session — Codex resume needs a real Codex UUID.",
     {
-      cli: SESSION_PROVIDER_ENUM.describe("CLI type (claude|codex|gemini|grok|mistral)"),
+      cli: SESSION_PROVIDER_ENUM.describe(
+        "Provider type (claude|codex|gemini|grok|mistral|grok-api)"
+      ),
       description: z.string().optional().describe("Session description"),
       setAsActive: z.boolean().default(true).describe("Set as active session"),
     },
@@ -8315,7 +8318,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
     "List gateway session records and the active session per provider, optionally filtered by provider.",
     {
       cli: SESSION_PROVIDER_ENUM.optional().describe(
-        "CLI filter (claude|codex|gemini|grok|mistral)"
+        "Provider filter (claude|codex|gemini|grok|mistral|grok-api)"
       ),
     },
     {
@@ -8377,7 +8380,9 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
     "session_set_active",
     "Set or clear the active session for a provider; the active session is used when a request omits sessionId.",
     {
-      cli: SESSION_PROVIDER_ENUM.describe("CLI type (claude|codex|gemini|grok|mistral)"),
+      cli: SESSION_PROVIDER_ENUM.describe(
+        "Provider type (claude|codex|gemini|grok|mistral|grok-api)"
+      ),
       sessionId: z.string().nullable().describe("Session ID (null to clear)"),
     },
     {
@@ -8609,7 +8614,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
     "Delete all gateway session records, optionally scoped to one provider.",
     {
       cli: SESSION_PROVIDER_ENUM.optional().describe(
-        "CLI filter (claude|codex|gemini|grok|mistral)"
+        "Provider filter (claude|codex|gemini|grok|mistral|grok-api)"
       ),
     },
     {

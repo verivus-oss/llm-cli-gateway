@@ -1,15 +1,16 @@
 import type { Pool } from "pg";
 import { randomUUID } from "crypto";
-import { Session, CliType } from "./session-manager.js";
+import { Session, ProviderType } from "./session-manager.js";
 
 export type { Logger } from "./logger.js";
 
-const DEFAULT_SESSION_DESCRIPTIONS: Record<CliType, string> = {
+const DEFAULT_SESSION_DESCRIPTIONS: Record<ProviderType, string> = {
   claude: "Claude Session",
   codex: "Codex Session",
   gemini: "Gemini Session",
   grok: "Grok Session",
   mistral: "Mistral Session",
+  "grok-api": "Grok API Session",
 };
 
 /**
@@ -22,7 +23,11 @@ export class PostgreSQLSessionManager {
   /**
    * Create a new session.
    */
-  async createSession(cli: CliType, description?: string, sessionId?: string): Promise<Session> {
+  async createSession(
+    cli: ProviderType,
+    description?: string,
+    sessionId?: string
+  ): Promise<Session> {
     const id = sessionId || randomUUID();
     const sessionDescription = description ?? DEFAULT_SESSION_DESCRIPTIONS[cli];
     const now = new Date().toISOString();
@@ -78,7 +83,7 @@ export class PostgreSQLSessionManager {
   /**
    * List all sessions, optionally filtered by CLI.
    */
-  async listSessions(cli?: CliType): Promise<Session[]> {
+  async listSessions(cli?: ProviderType): Promise<Session[]> {
     const query = cli
       ? `SELECT id, cli, description, metadata, created_at AS "createdAt", last_used_at AS "lastUsedAt"
          FROM sessions
@@ -112,7 +117,7 @@ export class PostgreSQLSessionManager {
    * Set active session for a CLI. The row-level update is serialized by
    * PostgreSQL and the session FK keeps stale IDs from being recorded.
    */
-  async setActiveSession(cli: CliType, sessionId: string | null): Promise<boolean> {
+  async setActiveSession(cli: ProviderType, sessionId: string | null): Promise<boolean> {
     if (sessionId !== null) {
       const session = await this.getSession(sessionId);
       if (!session || session.cli !== cli) {
@@ -134,7 +139,7 @@ export class PostgreSQLSessionManager {
   /**
    * Get active session for a CLI.
    */
-  async getActiveSession(cli: CliType): Promise<Session | null> {
+  async getActiveSession(cli: ProviderType): Promise<Session | null> {
     const result = await this.pool.query<{ session_id: string | null }>(
       "SELECT session_id FROM active_sessions WHERE cli = $1",
       [cli]
@@ -174,7 +179,7 @@ export class PostgreSQLSessionManager {
   /**
    * Clear all sessions, optionally filtered by CLI.
    */
-  async clearAllSessions(cli?: CliType): Promise<number> {
+  async clearAllSessions(cli?: ProviderType): Promise<number> {
     const query = cli ? "DELETE FROM sessions WHERE cli = $1" : "DELETE FROM sessions";
     const result = cli ? await this.pool.query(query, [cli]) : await this.pool.query(query);
 

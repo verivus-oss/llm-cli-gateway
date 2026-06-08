@@ -5,7 +5,7 @@ import { homedir } from "os";
 import { join } from "path";
 import { PostgreSQLSessionManager } from "./session-manager-pg.js";
 import type { Logger } from "./logger.js";
-import { SessionStorage, CliType } from "./session-manager.js";
+import { SessionStorage, ProviderType } from "./session-manager.js";
 import { loadConfig } from "./config.js";
 import { createDatabaseConnection } from "./db.js";
 
@@ -73,7 +73,7 @@ export async function migrateFromFile(
   for (const [cli, sessionId] of Object.entries(fileData.activeSession)) {
     if (sessionId) {
       try {
-        await pgManager.setActiveSession(cli as CliType, sessionId);
+        await pgManager.setActiveSession(cli as ProviderType, sessionId);
         console.error(`✓ Set active session for ${cli}: ${sessionId}`);
       } catch (error) {
         const errorMsg = `Failed to set active session for ${cli}: ${error instanceof Error ? error.message : String(error)}`;

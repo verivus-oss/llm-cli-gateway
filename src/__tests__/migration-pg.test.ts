@@ -1,7 +1,12 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { migrateFromFile } from "../migrate-sessions.js";
 import { PostgreSQLSessionManager } from "../session-manager-pg.js";
-import { FileSessionManager, SessionStorage } from "../session-manager.js";
+import {
+  FileSessionManager,
+  PROVIDER_TYPES,
+  SessionStorage,
+  type ProviderType,
+} from "../session-manager.js";
 import { setupTestDatabase, cleanTestDatabase } from "./setup.js";
 import { writeFileSync, mkdirSync, rmSync } from "fs";
 import { join } from "path";
@@ -93,23 +98,30 @@ describe("Session Migration", () => {
     const fileManager = new FileSessionManager(testFilePath);
     const claudeSession = fileManager.createSession("claude", "Active Claude");
     const codexSession = fileManager.createSession("codex", "Active Codex");
+    const grokApiSession = fileManager.createSession("grok-api", "Active Grok API");
 
     fileManager.setActiveSession("claude", claudeSession.id);
     fileManager.setActiveSession("codex", codexSession.id);
+    fileManager.setActiveSession("grok-api", grokApiSession.id);
 
     await migrateFromFile(testFilePath, pgManager);
 
     const activeClaudeSession = await pgManager.getActiveSession("claude");
     const activeCodexSession = await pgManager.getActiveSession("codex");
+    const activeGrokApiSession = await pgManager.getActiveSession("grok-api");
 
     expect(activeClaudeSession?.id).toBe(claudeSession.id);
     expect(activeCodexSession?.id).toBe(codexSession.id);
+    expect(activeGrokApiSession?.id).toBe(grokApiSession.id);
   });
 
   it("should handle empty sessions file", async () => {
     const emptyStorage: SessionStorage = {
       sessions: {},
-      activeSession: { claude: null, codex: null, gemini: null },
+      activeSession: Object.fromEntries(PROVIDER_TYPES.map(provider => [provider, null])) as Record<
+        ProviderType,
+        string | null
+      >,
     };
     writeFileSync(testFilePath, JSON.stringify(emptyStorage, null, 2));
 
@@ -125,7 +137,7 @@ describe("Session Migration", () => {
     // Create 100 sessions
     const sessionIds: string[] = [];
     for (let i = 0; i < 100; i++) {
-      const cli = ["claude", "codex", "gemini"][i % 3] as "claude" | "codex" | "gemini";
+      const cli = PROVIDER_TYPES[i % PROVIDER_TYPES.length];
       const session = fileManager.createSession(cli, `Session ${i}`);
       sessionIds.push(session.id);
     }
@@ -172,25 +184,37 @@ describe("Session Migration", () => {
     expect(migrated?.lastUsedAt).toBeDefined();
   });
 
-  it("should handle sessions for all CLI types", async () => {
+  it("should handle sessions for all provider types", async () => {
     const fileManager = new FileSessionManager(testFilePath);
     const claudeSession = fileManager.createSession("claude", "Claude");
     const codexSession = fileManager.createSession("codex", "Codex");
     const geminiSession = fileManager.createSession("gemini", "Gemini");
+    const grokSession = fileManager.createSession("grok", "Grok");
+    const mistralSession = fileManager.createSession("mistral", "Mistral");
+    const grokApiSession = fileManager.createSession("grok-api", "Grok API");
 
     await migrateFromFile(testFilePath, pgManager);
 
     expect(await pgManager.getSession(claudeSession.id)).not.toBeNull();
     expect(await pgManager.getSession(codexSession.id)).not.toBeNull();
     expect(await pgManager.getSession(geminiSession.id)).not.toBeNull();
+    expect(await pgManager.getSession(grokSession.id)).not.toBeNull();
+    expect(await pgManager.getSession(mistralSession.id)).not.toBeNull();
+    expect(await pgManager.getSession(grokApiSession.id)).not.toBeNull();
 
     const claudeSessions = await pgManager.listSessions("claude");
     const codexSessions = await pgManager.listSessions("codex");
     const geminiSessions = await pgManager.listSessions("gemini");
+    const grokSessions = await pgManager.listSessions("grok");
+    const mistralSessions = await pgManager.listSessions("mistral");
+    const grokApiSessions = await pgManager.listSessions("grok-api");
 
     expect(claudeSessions.length).toBe(1);
     expect(codexSessions.length).toBe(1);
     expect(geminiSessions.length).toBe(1);
+    expect(grokSessions.length).toBe(1);
+    expect(mistralSessions.length).toBe(1);
+    expect(grokApiSessions.length).toBe(1);
   });
 
   it("should be idempotent when run twice", async () => {

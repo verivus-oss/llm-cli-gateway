@@ -62,21 +62,24 @@ describe("SessionManager", () => {
       expect(activeSession?.id).not.toBe(secondSession.id);
     });
 
-    it("should create sessions for different CLIs independently", () => {
+    it("should create sessions for different providers independently", () => {
       const claudeSession = sessionManager.createSession("claude");
       const codexSession = sessionManager.createSession("codex");
       const geminiSession = sessionManager.createSession("gemini");
       const grokSession = sessionManager.createSession("grok");
+      const grokApiSession = sessionManager.createSession("grok-api");
 
       expect(claudeSession.cli).toBe("claude");
       expect(codexSession.cli).toBe("codex");
       expect(geminiSession.cli).toBe("gemini");
       expect(grokSession.cli).toBe("grok");
+      expect(grokApiSession.cli).toBe("grok-api");
 
       expect(sessionManager.getActiveSession("claude")?.id).toBe(claudeSession.id);
       expect(sessionManager.getActiveSession("codex")?.id).toBe(codexSession.id);
       expect(sessionManager.getActiveSession("gemini")?.id).toBe(geminiSession.id);
       expect(sessionManager.getActiveSession("grok")?.id).toBe(grokSession.id);
+      expect(sessionManager.getActiveSession("grok-api")?.id).toBe(grokApiSession.id);
     });
   });
 
@@ -470,8 +473,15 @@ describe("SessionManager", () => {
 import { SESSION_PROVIDER_VALUES, SESSION_PROVIDER_ENUM, prepareGeminiRequest } from "../index.js";
 
 describe("U22 session-provider enum (Layer 10)", () => {
-  it("includes all five providers, with grok and mistral present", () => {
-    expect(SESSION_PROVIDER_VALUES).toEqual(["claude", "codex", "gemini", "grok", "mistral"]);
+  it("includes all providers, with grok-api distinct from the Grok CLI", () => {
+    expect(SESSION_PROVIDER_VALUES).toEqual([
+      "claude",
+      "codex",
+      "gemini",
+      "grok",
+      "mistral",
+      "grok-api",
+    ]);
   });
 
   it("accepts grok as a valid cli value", () => {
@@ -484,8 +494,8 @@ describe("U22 session-provider enum (Layer 10)", () => {
     expect(parsed.success).toBe(true);
   });
 
-  it("accepts claude, codex, gemini, grok, mistral and rejects unknown providers", () => {
-    for (const provider of ["claude", "codex", "gemini", "grok", "mistral"] as const) {
+  it("accepts known providers and rejects unknown providers", () => {
+    for (const provider of SESSION_PROVIDER_VALUES) {
       expect(SESSION_PROVIDER_ENUM.safeParse(provider).success).toBe(true);
     }
     expect(SESSION_PROVIDER_ENUM.safeParse("openai").success).toBe(false);

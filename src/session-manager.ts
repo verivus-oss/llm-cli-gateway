@@ -20,21 +20,29 @@ import { noopLogger } from "./logger.js";
 
 export const CLI_TYPES = ["claude", "codex", "gemini", "grok", "mistral"] as const;
 export type CliType = (typeof CLI_TYPES)[number];
+export const API_PROVIDER_TYPES = ["grok-api"] as const;
+export type ApiProviderType = (typeof API_PROVIDER_TYPES)[number];
+export const PROVIDER_TYPES = [...CLI_TYPES, ...API_PROVIDER_TYPES] as const;
+export type ProviderType = (typeof PROVIDER_TYPES)[number];
 
-const createEmptyActiveSessions = (): Record<CliType, string | null> =>
-  Object.fromEntries(CLI_TYPES.map(cli => [cli, null])) as Record<CliType, string | null>;
+const createEmptyActiveSessions = (): Record<ProviderType, string | null> =>
+  Object.fromEntries(PROVIDER_TYPES.map(provider => [provider, null])) as Record<
+    ProviderType,
+    string | null
+  >;
 
-const DEFAULT_SESSION_DESCRIPTIONS: Record<CliType, string> = {
+const DEFAULT_SESSION_DESCRIPTIONS: Record<ProviderType, string> = {
   claude: "Claude Session",
   codex: "Codex Session",
   gemini: "Gemini Session",
   grok: "Grok Session",
   mistral: "Mistral Session",
+  "grok-api": "Grok API Session",
 };
 
 export interface Session {
   id: string;
-  cli: CliType;
+  cli: ProviderType;
   createdAt: string;
   lastUsedAt: string;
   description?: string;
@@ -43,7 +51,7 @@ export interface Session {
 
 export interface SessionStorage {
   sessions: Record<string, Session>;
-  activeSession: Record<CliType, string | null>;
+  activeSession: Record<ProviderType, string | null>;
 }
 
 /**
@@ -150,7 +158,7 @@ export class FileSessionManager {
     chmodSync(this.storagePath, 0o600);
   }
 
-  createSession(cli: CliType, description?: string, sessionId?: string): Session {
+  createSession(cli: ProviderType, description?: string, sessionId?: string): Session {
     this.evictExpiredSessions();
     const id = sessionId || randomUUID();
     const sessionDescription = description ?? DEFAULT_SESSION_DESCRIPTIONS[cli];
@@ -183,7 +191,7 @@ export class FileSessionManager {
     return session;
   }
 
-  listSessions(cli?: CliType): Session[] {
+  listSessions(cli?: ProviderType): Session[] {
     this.evictExpiredSessions();
     const sessions = Object.values(this.storage.sessions);
     if (cli) {
@@ -210,7 +218,7 @@ export class FileSessionManager {
     return true;
   }
 
-  setActiveSession(cli: CliType, sessionId: string | null): boolean {
+  setActiveSession(cli: ProviderType, sessionId: string | null): boolean {
     if (sessionId !== null) {
       const session = this.storage.sessions[sessionId];
       if (!session) return false;
@@ -226,7 +234,7 @@ export class FileSessionManager {
     return true;
   }
 
-  getActiveSession(cli: CliType): Session | null {
+  getActiveSession(cli: ProviderType): Session | null {
     const sessionId = this.storage.activeSession[cli];
     if (!sessionId) return null;
     const session = this.storage.sessions[sessionId];
@@ -263,7 +271,7 @@ export class FileSessionManager {
     return true;
   }
 
-  clearAllSessions(cli?: CliType): number {
+  clearAllSessions(cli?: ProviderType): number {
     const sessionsToDelete = cli
       ? Object.values(this.storage.sessions).filter(s => s.cli === cli)
       : Object.values(this.storage.sessions);
@@ -290,18 +298,22 @@ export const SessionManager = FileSessionManager;
  * Callers must always use `await` for uniform handling.
  */
 export interface ISessionManager {
-  createSession(cli: CliType, description?: string, sessionId?: string): Session | Promise<Session>;
+  createSession(
+    cli: ProviderType,
+    description?: string,
+    sessionId?: string
+  ): Session | Promise<Session>;
   getSession(sessionId: string): Session | null | Promise<Session | null>;
-  listSessions(cli?: CliType): Session[] | Promise<Session[]>;
+  listSessions(cli?: ProviderType): Session[] | Promise<Session[]>;
   deleteSession(sessionId: string): boolean | Promise<boolean>;
-  setActiveSession(cli: CliType, sessionId: string | null): boolean | Promise<boolean>;
-  getActiveSession(cli: CliType): Session | null | Promise<Session | null>;
+  setActiveSession(cli: ProviderType, sessionId: string | null): boolean | Promise<boolean>;
+  getActiveSession(cli: ProviderType): Session | null | Promise<Session | null>;
   updateSessionUsage(sessionId: string): void | Promise<void>;
   updateSessionMetadata(
     sessionId: string,
     metadata: Record<string, any>
   ): boolean | Promise<boolean>;
-  clearAllSessions(cli?: CliType): number | Promise<number>;
+  clearAllSessions(cli?: ProviderType): number | Promise<number>;
 }
 
 /**
