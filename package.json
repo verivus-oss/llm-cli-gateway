@@ -46,6 +46,7 @@
     "dist/**/*.js",
     "dist/**/*.d.ts",
     "!dist/__tests__/**",
+    "migrations/**/*.sql",
     "npm-shrinkwrap.json",
     "setup/status.schema.json",
     "README.md",

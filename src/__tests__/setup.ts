@@ -55,7 +55,7 @@ export async function setupTestDatabase(): Promise<{ pool: Pool }> {
           -- Create sessions table
           CREATE TABLE IF NOT EXISTS sessions (
             id TEXT PRIMARY KEY,
-            cli VARCHAR(10) NOT NULL CHECK (cli IN ('claude', 'codex', 'gemini')),
+            cli VARCHAR(32) NOT NULL CHECK (cli IN ('claude', 'codex', 'gemini', 'grok', 'mistral', 'grok-api')),
             description TEXT,
             metadata JSONB DEFAULT '{}'::JSONB,
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -64,7 +64,7 @@ export async function setupTestDatabase(): Promise<{ pool: Pool }> {
 
           -- Create active_sessions table
           CREATE TABLE IF NOT EXISTS active_sessions (
-            cli VARCHAR(10) PRIMARY KEY CHECK (cli IN ('claude', 'codex', 'gemini')),
+            cli VARCHAR(32) PRIMARY KEY CHECK (cli IN ('claude', 'codex', 'gemini', 'grok', 'mistral', 'grok-api')),
             session_id TEXT REFERENCES sessions(id) ON DELETE CASCADE,
             updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
           );
@@ -95,6 +95,19 @@ export async function setupTestDatabase(): Promise<{ pool: Pool }> {
             END IF;
           END;
           $$ LANGUAGE plpgsql;
+
+          -- Normalize legacy provider constraints to the current provider set.
+          ALTER TABLE sessions DROP CONSTRAINT IF EXISTS sessions_cli_check;
+          ALTER TABLE sessions ALTER COLUMN cli TYPE VARCHAR(32);
+          ALTER TABLE sessions
+            ADD CONSTRAINT sessions_cli_check
+            CHECK (cli IN ('claude', 'codex', 'gemini', 'grok', 'mistral', 'grok-api'));
+
+          ALTER TABLE active_sessions DROP CONSTRAINT IF EXISTS active_sessions_cli_check;
+          ALTER TABLE active_sessions ALTER COLUMN cli TYPE VARCHAR(32);
+          ALTER TABLE active_sessions
+            ADD CONSTRAINT active_sessions_cli_check
+            CHECK (cli IN ('claude', 'codex', 'gemini', 'grok', 'mistral', 'grok-api'));
         `;
 
         await client.query(migrationSql);

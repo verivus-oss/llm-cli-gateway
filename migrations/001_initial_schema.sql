@@ -4,7 +4,7 @@
 -- Create sessions table
 CREATE TABLE IF NOT EXISTS sessions (
   id TEXT PRIMARY KEY,
-  cli VARCHAR(10) NOT NULL CHECK (cli IN ('claude', 'codex', 'gemini')),
+  cli VARCHAR(32) NOT NULL CHECK (cli IN ('claude', 'codex', 'gemini', 'grok', 'mistral', 'grok-api')),
   description TEXT,
   metadata JSONB DEFAULT '{}'::JSONB,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -13,7 +13,7 @@ CREATE TABLE IF NOT EXISTS sessions (
 
 -- Create active_sessions table (enforces one active per CLI)
 CREATE TABLE IF NOT EXISTS active_sessions (
-  cli VARCHAR(10) PRIMARY KEY CHECK (cli IN ('claude', 'codex', 'gemini')),
+  cli VARCHAR(32) PRIMARY KEY CHECK (cli IN ('claude', 'codex', 'gemini', 'grok', 'mistral', 'grok-api')),
   session_id TEXT REFERENCES sessions(id) ON DELETE CASCADE,
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );

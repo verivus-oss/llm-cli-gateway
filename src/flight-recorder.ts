@@ -23,10 +23,11 @@ import os from "os";
 import path from "path";
 import { openDatabase, openReadOnly } from "./sqlite-driver.js";
 import type { GatewayDatabase } from "./sqlite-driver.js";
+import type { ProviderType } from "./session-manager.js";
 
 export interface FlightLogStart {
   correlationId: string;
-  cli: "claude" | "codex" | "gemini" | "grok" | "mistral";
+  cli: ProviderType;
   model: string;
   prompt: string;
   system?: string;

@@ -1,4 +1,4 @@
-import { CLI_TYPES, type CliType } from "./session-manager.js";
+import { PROVIDER_TYPES, type ProviderType } from "./session-manager.js";
 
 export interface ToolMetricsSnapshot {
   requestCount: number;
@@ -15,7 +15,7 @@ export interface PerformanceMetricsSnapshot {
   totalFailures: number;
   overallSuccessRate: number;
   overallFailureRate: number;
-  byTool: Record<CliType, ToolMetricsSnapshot>;
+  byTool: Record<ProviderType, ToolMetricsSnapshot>;
   generatedAt: string;
 }
 
@@ -26,19 +26,19 @@ interface ToolMetrics {
   totalResponseTimeMs: number;
 }
 
-const createEmptyMetrics = (): Record<CliType, ToolMetrics> =>
+const createEmptyMetrics = (): Record<ProviderType, ToolMetrics> =>
   Object.fromEntries(
-    CLI_TYPES.map(cli => [
-      cli,
+    PROVIDER_TYPES.map(provider => [
+      provider,
       { requestCount: 0, successCount: 0, failureCount: 0, totalResponseTimeMs: 0 },
     ])
-  ) as Record<CliType, ToolMetrics>;
+  ) as Record<ProviderType, ToolMetrics>;
 
 export class PerformanceMetrics {
-  private metrics: Record<CliType, ToolMetrics> = createEmptyMetrics();
+  private metrics: Record<ProviderType, ToolMetrics> = createEmptyMetrics();
 
-  recordRequest(cli: CliType, durationMs: number, success: boolean): void {
-    const metrics = this.metrics[cli];
+  recordRequest(provider: ProviderType, durationMs: number, success: boolean): void {
+    const metrics = this.metrics[provider];
     metrics.requestCount += 1;
     const normalizedDurationMs = Number.isFinite(durationMs) ? Math.max(0, durationMs) : 0;
     metrics.totalResponseTimeMs += normalizedDurationMs;
@@ -50,13 +50,13 @@ export class PerformanceMetrics {
   }
 
   snapshot(): PerformanceMetricsSnapshot {
-    const byTool = {} as Record<CliType, ToolMetricsSnapshot>;
+    const byTool = {} as Record<ProviderType, ToolMetricsSnapshot>;
     let totalRequests = 0;
     let totalSuccesses = 0;
     let totalFailures = 0;
 
-    for (const cli of CLI_TYPES) {
-      const metrics = this.metrics[cli];
+    for (const provider of PROVIDER_TYPES) {
+      const metrics = this.metrics[provider];
       const averageResponseTimeMs =
         metrics.requestCount > 0 ? metrics.totalResponseTimeMs / metrics.requestCount : 0;
       const successRate =
@@ -64,7 +64,7 @@ export class PerformanceMetrics {
       const failureRate =
         metrics.requestCount > 0 ? metrics.failureCount / metrics.requestCount : 0;
 
-      byTool[cli] = {
+      byTool[provider] = {
         requestCount: metrics.requestCount,
         successCount: metrics.successCount,
         failureCount: metrics.failureCount,

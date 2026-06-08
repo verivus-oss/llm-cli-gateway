@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest";
+import { PROVIDER_TYPES } from "../session-manager.js";
 import { PostgreSQLSessionManager } from "../session-manager-pg.js";
 import { setupTestDatabase, cleanTestDatabase } from "./setup.js";
 
@@ -435,17 +436,23 @@ describe("PostgreSQLSessionManager", () => {
       expect(activeSession?.id).toBe(session3.id);
     });
 
-    it("should handle session creation for all CLI types", async () => {
+    it("should handle session creation for all provider types", async () => {
       const claudeSession = await manager.createSession("claude");
       const codexSession = await manager.createSession("codex");
       const geminiSession = await manager.createSession("gemini");
+      const grokSession = await manager.createSession("grok");
+      const mistralSession = await manager.createSession("mistral");
+      const grokApiSession = await manager.createSession("grok-api");
 
       expect(claudeSession.cli).toBe("claude");
       expect(codexSession.cli).toBe("codex");
       expect(geminiSession.cli).toBe("gemini");
+      expect(grokSession.cli).toBe("grok");
+      expect(mistralSession.cli).toBe("mistral");
+      expect(grokApiSession.cli).toBe("grok-api");
 
       const sessions = await manager.listSessions();
-      expect(sessions.length).toBe(3);
+      expect(sessions.length).toBe(6);
     });
 
     it("should preserve session data integrity across operations", async () => {
@@ -477,7 +484,7 @@ describe("PostgreSQLSessionManager", () => {
       const session = await manager.createSession("claude", "Test Session");
 
       // This is enforced by the database schema and application logic
-      expect(["claude", "codex", "gemini"]).toContain(session.cli);
+      expect(PROVIDER_TYPES).toContain(session.cli);
     });
 
     it("should support JSONB metadata queries", async () => {
