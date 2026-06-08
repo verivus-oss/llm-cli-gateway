@@ -1,0 +1,16 @@
+[Unit]
+Description=llm-cli-gateway host auto-upgrade (stage + apply latest npm release)
+Documentation=file:///srv/repos/internal/verivusai-labs/rvwr/llm-cli-gateway/scripts/host-upgrade.sh
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Installed copy of scripts/host-upgrade.sh (%h = the user's home).
+ExecStart=%h/.local/bin/gateway-host-upgrade auto
+# apply = promote staged build to the live npm global install.
+# Set to "notify" to only stage and leave apply to the operator.
+Environment=GATEWAY_AUTOUPGRADE_MODE=apply
+Nice=10
+# The script self-locks (flock); keep one-shot semantics.
+TimeoutStartSec=600
