@@ -136,6 +136,10 @@ function defaultPersistenceConfigPath(): string {
   );
 }
 
+export function defaultGatewayConfigPath(): string {
+  return defaultPersistenceConfigPath();
+}
+
 /**
  * Read and parse the optional TOML config file. Returns the raw `[persistence]`
  * table (if present) and the file path. Missing file is fine — defaults apply.
@@ -453,4 +457,116 @@ export function minStableTokensForModel(config: CacheAwarenessConfig, modelName:
   if (lower.includes("opus")) return table.opus;
   if (lower.includes("haiku")) return table.haiku;
   return table.default;
+}
+
+//──────────────────────────────────────────────────────────────────────────────
+// Outbound API provider configuration
+//
+// Reads [providers.xai] independently from persistence/cache_awareness. The
+// resolved config never contains provider secret material; it carries only the
+// environment-variable name to read at request time. Schema-invalid provider
+// config disables only that provider and emits a warning. Syntax-invalid TOML
+// keeps the existing whole-file fallback behaviour and returns defaults.
+//──────────────────────────────────────────────────────────────────────────────
+
+export const DEFAULT_XAI_API_KEY_ENV = "XAI_API_KEY";
+export const DEFAULT_XAI_BASE_URL = "https://api.x.ai/v1";
+export const DEFAULT_XAI_MODEL = "grok-build-0.1";
+
+function isHttpsOrLoopbackUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    if (url.protocol === "https:") return true;
+    if (url.protocol !== "http:") return false;
+    return ["localhost", "127.0.0.1", "::1", "[::1]"].includes(url.hostname);
+  } catch {
+    return false;
+  }
+}
+
+const XaiProviderSchema = z
+  .object({
+    api_key_env: z.string().min(1).default(DEFAULT_XAI_API_KEY_ENV),
+    base_url: z
+      .string()
+      .url()
+      .refine(isHttpsOrLoopbackUrl, {
+        message: "base_url must use https unless it targets localhost/loopback for tests",
+      })
+      .default(DEFAULT_XAI_BASE_URL),
+    default_model: z.string().min(1).default(DEFAULT_XAI_MODEL),
+  })
+  .strict();
+
+export interface XaiProviderConfig {
+  apiKeyEnv: string;
+  baseUrl: string;
+  defaultModel: string;
+}
+
+export interface ProvidersConfig {
+  xai: XaiProviderConfig | null;
+  sources: { configFile: string | null };
+}
+
+function readProvidersFile(
+  configPath: string,
+  logger: Logger
+): { raw: unknown; sourcePath: string | null } {
+  if (!existsSync(configPath)) {
+    return { raw: undefined, sourcePath: null };
+  }
+  try {
+    const require = createRequire(import.meta.url);
+    const TOML = require("smol-toml");
+    const text = readFileSync(configPath, "utf-8");
+    const parsed = TOML.parse(text) as Record<string, unknown>;
+    return { raw: parsed?.providers, sourcePath: configPath };
+  } catch (err) {
+    logger.error(`Failed to parse gateway config at ${configPath}; using provider defaults`, err);
+    return { raw: undefined, sourcePath: null };
+  }
+}
+
+export function loadProvidersConfig(logger: Logger = noopLogger): ProvidersConfig {
+  const configPath = defaultGatewayConfigPath();
+  const { raw, sourcePath } = readProvidersFile(configPath, logger);
+  const providers = (raw as Record<string, unknown> | undefined) ?? {};
+  const rawXai = providers.xai;
+
+  if (rawXai === undefined) {
+    return {
+      xai: null,
+      sources: { configFile: sourcePath },
+    };
+  }
+
+  const parsed = XaiProviderSchema.safeParse(rawXai);
+  if (!parsed.success) {
+    logWarn(logger, "Invalid [providers.xai] config; xAI API provider disabled", {
+      error: parsed.error.message,
+    });
+    return {
+      xai: null,
+      sources: { configFile: sourcePath },
+    };
+  }
+
+  return {
+    xai: {
+      apiKeyEnv: parsed.data.api_key_env,
+      baseUrl: parsed.data.base_url,
+      defaultModel: parsed.data.default_model,
+    },
+    sources: { configFile: sourcePath },
+  };
+}
+
+export function isXaiProviderEnabled(
+  config: ProvidersConfig,
+  env: NodeJS.ProcessEnv = process.env
+): boolean {
+  const keyEnv = config.xai?.apiKeyEnv;
+  if (!keyEnv) return false;
+  return typeof env[keyEnv] === "string" && env[keyEnv]!.trim().length > 0;
 }
