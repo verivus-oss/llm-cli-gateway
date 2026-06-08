@@ -1,4 +1,5 @@
 import { ISessionManager } from "./session-manager.js";
+import { CLI_TYPES, PROVIDER_TYPES, type CliType, type ProviderType } from "./session-manager.js";
 import { PerformanceMetrics } from "./metrics.js";
 import { getAvailableCliInfo } from "./model-registry.js";
 import { FlightRecorderQuery } from "./flight-recorder.js";
@@ -12,6 +13,11 @@ import {
   type SessionCacheStats,
 } from "./cache-stats.js";
 import type { CacheAwarenessConfig } from "./config.js";
+import {
+  buildProviderSubcommandsCompactCatalog,
+  getCliSubcommandContract,
+  serializeCliSubcommandContract,
+} from "./upstream-contracts.js";
 
 export interface ResourceDefinition {
   uri: string;
@@ -159,6 +165,17 @@ export class ResourceProvider {
         },
       },
       {
+        uri: "sessions://grok-api",
+        name: "Grok API Sessions",
+        title: "⚡ Grok API Sessions",
+        description: "List of xAI Grok API conversation sessions",
+        mimeType: "application/json",
+        annotations: {
+          audience: ["user", "assistant"],
+          priority: 0.6,
+        },
+      },
+      {
         uri: "models://claude",
         name: "Claude Models",
         title: "🧠 Claude Models & Capabilities",
@@ -224,6 +241,17 @@ export class ResourceProvider {
           priority: 0.9,
         },
       },
+      {
+        uri: "provider_subcommands://catalog",
+        name: "Provider Subcommands Catalog",
+        title: "Provider Subcommands Catalog",
+        description: "Compact read-only catalog of declared provider CLI subcommands",
+        mimeType: "application/json",
+        annotations: {
+          audience: ["user", "assistant"],
+          priority: 0.7,
+        },
+      },
     ];
   }
 
@@ -232,6 +260,14 @@ export class ResourceProvider {
     // Session resources
     if (uri === "sessions://all") {
       const sessions = await this.sessionManager.listSessions();
+      const activeSessions = Object.fromEntries(
+        await Promise.all(
+          PROVIDER_TYPES.map(async provider => [
+            provider,
+            (await this.sessionManager.getActiveSession(provider))?.id || null,
+          ])
+        )
+      ) as Record<ProviderType, string | null>;
       return {
         uri,
         mimeType: "application/json",
@@ -245,13 +281,7 @@ export class ResourceProvider {
               createdAt: s.createdAt,
               lastUsedAt: s.lastUsedAt,
             })),
-            activeSessions: {
-              claude: (await this.sessionManager.getActiveSession("claude"))?.id || null,
-              codex: (await this.sessionManager.getActiveSession("codex"))?.id || null,
-              gemini: (await this.sessionManager.getActiveSession("gemini"))?.id || null,
-              grok: (await this.sessionManager.getActiveSession("grok"))?.id || null,
-              mistral: (await this.sessionManager.getActiveSession("mistral"))?.id || null,
-            },
+            activeSessions,
           },
           null,
           2
@@ -349,6 +379,24 @@ export class ResourceProvider {
       };
     }
 
+    if (uri === "sessions://grok-api") {
+      const sessions = await this.sessionManager.listSessions("grok-api");
+      return {
+        uri,
+        mimeType: "application/json",
+        text: JSON.stringify(
+          {
+            cli: "grok-api",
+            total: sessions.length,
+            sessions,
+            activeSession: (await this.sessionManager.getActiveSession("grok-api"))?.id || null,
+          },
+          null,
+          2
+        ),
+      };
+    }
+
     // Model capability resources
     if (uri === "models://claude") {
       const cliInfo = getAvailableCliInfo();
@@ -403,6 +451,49 @@ export class ResourceProvider {
       };
     }
 
+    if (uri === "provider_subcommands://catalog") {
+      return {
+        uri,
+        mimeType: "application/json",
+        text: JSON.stringify(buildProviderSubcommandsCompactCatalog()),
+      };
+    }
+
+    const subcommandResource = parseProviderSubcommandUri(uri);
+    if (subcommandResource) {
+      const contract = getCliSubcommandContract(
+        subcommandResource.provider,
+        subcommandResource.commandPath
+      );
+      if (!contract) return null;
+      return {
+        uri,
+        mimeType: "application/json",
+        text: JSON.stringify(
+          {
+            schemaVersion: "provider-subcommand-contract.v1",
+            contract: serializeCliSubcommandContract(subcommandResource.provider, contract),
+          },
+          null,
+          2
+        ),
+      };
+    }
+
     return null;
   }
+}
+
+function parseProviderSubcommandUri(
+  uri: string
+): { provider: CliType; commandPath: string[] } | null {
+  const prefix = "provider_subcommands://";
+  if (!uri.startsWith(prefix) || uri === "provider_subcommands://catalog") return null;
+  const rest = uri.slice(prefix.length);
+  const [providerRaw, ...pathParts] = rest.split("/");
+  if (!CLI_TYPES.includes(providerRaw as CliType) || pathParts.length === 0) return null;
+  return {
+    provider: providerRaw as CliType,
+    commandPath: pathParts.map(part => decodeURIComponent(part)).filter(Boolean),
+  };
 }

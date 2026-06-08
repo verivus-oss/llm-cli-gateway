@@ -39,7 +39,7 @@ describe("MCP tool-surface usability (post-usability-review regressions)", () =>
     const registry = (server as unknown as Record<string, Record<string, { description?: string }>>)
       ._registeredTools;
     const names = Object.keys(registry);
-    expect(names.length).toBeGreaterThanOrEqual(37);
+    expect(names.length).toBeGreaterThanOrEqual(40);
     for (const name of names) {
       const desc = registry[name].description ?? "";
       expect(desc.length, `${name} description present and >= 20 chars`).toBeGreaterThanOrEqual(20);
@@ -112,7 +112,7 @@ describe("MCP tool-surface usability (post-usability-review regressions)", () =>
       >
     )._registeredTools;
     const names = Object.keys(registry);
-    expect(names.length).toBeGreaterThanOrEqual(37) /* exact toBe(37) asserted below */;
+    expect(names.length).toBeGreaterThanOrEqual(40) /* exact toBe(40) asserted below */;
     for (const name of names) {
       const ann = registry[name].annotations;
       expect(ann, `${name} has annotations`).toBeDefined();
@@ -126,7 +126,7 @@ describe("MCP tool-surface usability (post-usability-review regressions)", () =>
     // EXACT set pinning (post-2.3.0-gate Codex finding): derive the actual
     // sets from the registry and compare them exactly — positive membership
     // alone would let a future mis-classified or unlisted tool slip through.
-    expect(names.length).toBe(37);
+    expect(names.length).toBe(40);
     const setOf = (pred: (a: NonNullable<(typeof registry)[string]["annotations"]>) => boolean) =>
       names.filter(n => pred(registry[n].annotations!)).sort();
     expect(setOf(a => a.readOnlyHint === true)).toEqual(
@@ -142,6 +142,9 @@ describe("MCP tool-surface usability (post-usability-review regressions)", () =>
         "llm_job_status",
         "llm_process_health",
         "llm_request_result",
+        "provider_subcommand_contract",
+        "provider_subcommand_drift",
+        "provider_subcommands_list",
         "session_get",
         "session_list",
         "upstream_contracts",

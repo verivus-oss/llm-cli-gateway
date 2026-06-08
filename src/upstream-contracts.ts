@@ -70,6 +70,7 @@ export interface CliContract {
   upstream: string;
   helpArgs: string[][];
   flags: Record<string, CliFlagContract>;
+  subcommands?: Record<string, CliSubcommandContract>;
   env?: Record<string, CliFlagContract>;
   mcpTools: readonly string[];
   mcpParameters: readonly string[];
@@ -104,6 +105,42 @@ export interface CliContractFixture {
   expect: "pass" | "fail";
 }
 
+export type CliSubcommandRisk =
+  | "read_only"
+  | "writes_local_config"
+  | "auth"
+  | "network"
+  | "starts_server"
+  | "updates_binary"
+  | "destructive"
+  | "executes_agent";
+
+export type CliSubcommandExposure =
+  | "tracked_only"
+  | "mcp_readonly"
+  | "mcp_requires_approval"
+  | "not_exposed";
+
+export type CliSubcommandTier = "catalog" | "inspect" | "execute_candidate" | "diagnostic";
+
+export type CliSubcommandTokenCost = "tiny" | "small" | "medium" | "large";
+
+export interface CliSubcommandContract {
+  commandPath: readonly string[];
+  helpArgs: readonly string[][];
+  flags: Record<string, CliFlagContract>;
+  maxPositionals: number;
+  acknowledgedUpstreamFlags?: readonly string[];
+  aliases?: readonly string[];
+  children?: Record<string, CliSubcommandContract>;
+  risk: CliSubcommandRisk;
+  exposure: CliSubcommandExposure;
+  tier: CliSubcommandTier;
+  tokenCost: CliSubcommandTokenCost;
+  summary: string;
+  conformanceFixtures: readonly CliContractFixture[];
+}
+
 export interface ContractViolation {
   cli: CliType;
   arg?: string;
@@ -116,6 +153,43 @@ export interface ContractValidationResult {
   violations: ContractViolation[];
 }
 
+export interface SubcommandContractValidationResult extends ContractValidationResult {
+  commandPath: readonly string[];
+  risk?: CliSubcommandRisk;
+  exposure?: CliSubcommandExposure;
+  tier?: CliSubcommandTier;
+}
+
+export interface ProviderSubcommandCatalogRow {
+  provider: CliType;
+  commandPath: readonly string[];
+  aliases: readonly string[];
+  tier: CliSubcommandTier;
+  risk: CliSubcommandRisk;
+  exposure: CliSubcommandExposure;
+  tokenCost: CliSubcommandTokenCost;
+  summary: string;
+  driftStatus: "unknown" | "clean" | "drift";
+  resourceUri: string;
+}
+
+export interface ProviderSubcommandCompactCatalog {
+  schemaVersion: "provider-subcommands-catalog.v1";
+  columns: readonly [
+    "provider",
+    "commandPath",
+    "aliases",
+    "tier",
+    "risk",
+    "exposure",
+    "tokenCost",
+    "summary",
+    "driftStatus",
+    "resourceUri",
+  ];
+  rows: readonly (readonly string[])[];
+}
+
 const PERMISSION_MODES = [
   "default",
   "acceptEdits",
@@ -126,6 +200,55 @@ const PERMISSION_MODES = [
 ] as const;
 
 const EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"] as const;
+
+function scFlag(name: string, arity: CliFlagArity = "optional"): [string, CliFlagContract] {
+  return [
+    name,
+    {
+      arity,
+      description: `Subcommand-local ${name} option tracked for help-surface drift only`,
+    },
+  ];
+}
+
+function scFlags(
+  flags: readonly string[],
+  arityOverrides: Record<string, CliFlagArity> = {}
+): Record<string, CliFlagContract> {
+  return Object.fromEntries(flags.map(flag => scFlag(flag, arityOverrides[flag] ?? "optional")));
+}
+
+function subcommand(
+  commandPath: readonly string[],
+  summary: string,
+  risk: CliSubcommandRisk,
+  flags: readonly string[] = [],
+  options: {
+    aliases?: readonly string[];
+    children?: Record<string, CliSubcommandContract>;
+    tier?: CliSubcommandTier;
+    tokenCost?: CliSubcommandTokenCost;
+    maxPositionals?: number;
+    exposure?: CliSubcommandExposure;
+    flagArities?: Record<string, CliFlagArity>;
+    fixtures?: readonly CliContractFixture[];
+  } = {}
+): CliSubcommandContract {
+  return {
+    commandPath,
+    helpArgs: [["--help"]],
+    flags: scFlags(flags, options.flagArities),
+    maxPositionals: options.maxPositionals ?? 0,
+    aliases: options.aliases ?? [],
+    children: options.children ?? {},
+    risk,
+    exposure: options.exposure ?? "tracked_only",
+    tier: options.tier ?? "catalog",
+    tokenCost: options.tokenCost ?? "small",
+    summary,
+    conformanceFixtures: options.fixtures ?? [],
+  };
+}
 
 export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
   claude: {
@@ -140,6 +263,101 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       watchCategories: ["flags", "output-formats", "permission-modes", "session-resume", "models"],
     },
     helpArgs: [["--help"]],
+    subcommands: {
+      doctor: subcommand(["doctor"], "Run Claude Code diagnostic checks.", "read_only", [], {
+        tier: "diagnostic",
+      }),
+      mcp: subcommand(["mcp"], "Manage Claude MCP server configuration.", "writes_local_config"),
+      plugin: subcommand(["plugin"], "Manage Claude plugins.", "writes_local_config", [], {
+        aliases: ["plugins"],
+      }),
+      plugins: subcommand(
+        ["plugins"],
+        "Alias for Claude plugin management.",
+        "writes_local_config",
+        [],
+        {
+          aliases: ["plugin"],
+        }
+      ),
+      agents: subcommand(
+        ["agents"],
+        "Inspect and manage Claude agent definitions.",
+        "writes_local_config",
+        [
+          "--add-dir",
+          "--agent",
+          "--allow-dangerously-skip-permissions",
+          "--cwd",
+          "--dangerously-skip-permissions",
+          "--effort",
+          "--json",
+          "--mcp-config",
+          "--model",
+          "--permission-mode",
+          "--plugin-dir",
+          "--setting-sources",
+          "--settings",
+          "--strict-mcp-config",
+        ],
+        { tier: "inspect", flagArities: { "--json": "none", "--strict-mcp-config": "none" } }
+      ),
+      auth: subcommand(["auth"], "Manage Claude authentication state.", "auth", [], {
+        exposure: "not_exposed",
+      }),
+      project: subcommand(
+        ["project"],
+        "Manage Claude project configuration.",
+        "writes_local_config"
+      ),
+      update: subcommand(["update"], "Update the Claude Code binary.", "updates_binary", [], {
+        exposure: "not_exposed",
+      }),
+      upgrade: subcommand(
+        ["upgrade"],
+        "Alias for updating the Claude Code binary.",
+        "updates_binary",
+        [],
+        {
+          exposure: "not_exposed",
+        }
+      ),
+      install: subcommand(
+        ["install"],
+        "Install Claude Code shell integrations.",
+        "writes_local_config",
+        ["--force"],
+        {
+          exposure: "not_exposed",
+          flagArities: { "--force": "none" },
+        }
+      ),
+      "auto-mode": subcommand(
+        ["auto-mode"],
+        "Configure Claude auto-mode behavior.",
+        "writes_local_config"
+      ),
+      ultrareview: subcommand(
+        ["ultrareview"],
+        "Run Claude ultrareview diagnostics.",
+        "executes_agent",
+        ["--json", "--timeout"],
+        {
+          tier: "diagnostic",
+          tokenCost: "medium",
+          flagArities: { "--json": "none" },
+        }
+      ),
+      "setup-token": subcommand(
+        ["setup-token"],
+        "Configure Claude setup token authentication.",
+        "auth",
+        [],
+        {
+          exposure: "not_exposed",
+        }
+      ),
+    },
     maxPositionals: 0,
     mcpTools: ["claude_request", "claude_request_async"],
     mcpParameters: [
@@ -437,6 +655,299 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       ["exec", "--help"],
       ["exec", "resume", "--help"],
     ],
+    subcommands: {
+      exec: subcommand(["exec"], "Run Codex in non-interactive execution mode.", "executes_agent", [
+        "--add-dir",
+        "--cd",
+        "--color",
+        "--config",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "--dangerously-bypass-hook-trust",
+        "--disable",
+        "--enable",
+        "--ephemeral",
+        "--ignore-rules",
+        "--ignore-user-config",
+        "--image",
+        "--json",
+        "--local-provider",
+        "--model",
+        "--oss",
+        "--output-last-message",
+        "--output-schema",
+        "--profile",
+        "--sandbox",
+        "--skip-git-repo-check",
+        "--strict-config",
+        "--version",
+      ]),
+      review: subcommand(["review"], "Run Codex code review workflows.", "executes_agent", [
+        "--base",
+        "--commit",
+        "--config",
+        "--disable",
+        "--enable",
+        "--strict-config",
+        "--title",
+        "--uncommitted",
+      ]),
+      login: subcommand(
+        ["login"],
+        "Authenticate Codex CLI.",
+        "auth",
+        [
+          "--config",
+          "--device-auth",
+          "--disable",
+          "--enable",
+          "--with-access-token",
+          "--with-api-key",
+        ],
+        { exposure: "not_exposed" }
+      ),
+      logout: subcommand(
+        ["logout"],
+        "Clear Codex authentication state.",
+        "auth",
+        ["--config", "--disable", "--enable"],
+        { exposure: "not_exposed" }
+      ),
+      mcp: subcommand(["mcp"], "Manage Codex MCP configuration.", "writes_local_config", [
+        "--config",
+        "--disable",
+        "--enable",
+      ]),
+      plugin: subcommand(["plugin"], "Manage Codex plugins.", "writes_local_config", [
+        "--config",
+        "--disable",
+        "--enable",
+      ]),
+      "mcp-server": subcommand(
+        ["mcp-server"],
+        "Start Codex MCP server mode.",
+        "starts_server",
+        ["--config", "--disable", "--enable", "--strict-config"],
+        { exposure: "not_exposed" }
+      ),
+      "app-server": subcommand(
+        ["app-server"],
+        "Start Codex app server mode.",
+        "starts_server",
+        [
+          "--analytics-default-enabled",
+          "--config",
+          "--disable",
+          "--enable",
+          "--listen",
+          "--stdio",
+          "--strict-config",
+          "--ws-audience",
+          "--ws-auth",
+          "--ws-issuer",
+          "--ws-max-clock-skew-seconds",
+          "--ws-shared-secret-file",
+          "--ws-token-file",
+          "--ws-token-sha256",
+        ],
+        { exposure: "not_exposed" }
+      ),
+      "remote-control": subcommand(
+        ["remote-control"],
+        "Inspect or manage Codex remote control state.",
+        "network",
+        ["--config", "--disable", "--enable", "--json"]
+      ),
+      completion: subcommand(
+        ["completion"],
+        "Generate Codex shell completions.",
+        "read_only",
+        ["--config", "--disable", "--enable"],
+        { tier: "inspect" }
+      ),
+      update: subcommand(
+        ["update"],
+        "Update the Codex CLI binary.",
+        "updates_binary",
+        ["--config", "--disable", "--enable"],
+        { exposure: "not_exposed" }
+      ),
+      doctor: subcommand(
+        ["doctor"],
+        "Run Codex diagnostic checks.",
+        "read_only",
+        [
+          "--all",
+          "--ascii",
+          "--config",
+          "--disable",
+          "--enable",
+          "--json",
+          "--no-color",
+          "--summary",
+        ],
+        { tier: "diagnostic" }
+      ),
+      sandbox: subcommand(
+        ["sandbox"],
+        "Run or inspect Codex sandbox behavior.",
+        "executes_agent",
+        [
+          "--cd",
+          "--config",
+          "--disable",
+          "--enable",
+          "--include-managed-config",
+          "--permissions-profile",
+          "--profile",
+        ],
+        { exposure: "not_exposed" }
+      ),
+      debug: subcommand(
+        ["debug"],
+        "Run Codex debugging utilities.",
+        "read_only",
+        ["--config", "--disable", "--enable"],
+        { tier: "diagnostic" }
+      ),
+      apply: subcommand(
+        ["apply"],
+        "Apply a Codex patch to the workspace.",
+        "destructive",
+        ["--config", "--disable", "--enable"],
+        { exposure: "not_exposed" }
+      ),
+      resume: subcommand(
+        ["resume"],
+        "Resume Codex sessions from the interactive CLI.",
+        "executes_agent",
+        [
+          "--add-dir",
+          "--all",
+          "--ask-for-approval",
+          "--cd",
+          "--config",
+          "--dangerously-bypass-approvals-and-sandbox",
+          "--dangerously-bypass-hook-trust",
+          "--disable",
+          "--enable",
+          "--image",
+          "--include-non-interactive",
+          "--last",
+          "--local-provider",
+          "--model",
+          "--no-alt-screen",
+          "--oss",
+          "--profile",
+          "--remote",
+          "--remote-auth-token-env",
+          "--sandbox",
+          "--search",
+          "--strict-config",
+          "--version",
+        ]
+      ),
+      archive: subcommand(
+        ["archive"],
+        "Archive Codex session state.",
+        "writes_local_config",
+        [
+          "--add-dir",
+          "--cd",
+          "--config",
+          "--dangerously-bypass-approvals-and-sandbox",
+          "--dangerously-bypass-hook-trust",
+          "--disable",
+          "--enable",
+          "--image",
+          "--local-provider",
+          "--model",
+          "--oss",
+          "--profile",
+          "--remote",
+          "--remote-auth-token-env",
+          "--sandbox",
+          "--strict-config",
+        ],
+        { exposure: "not_exposed" }
+      ),
+      unarchive: subcommand(
+        ["unarchive"],
+        "Restore archived Codex session state.",
+        "writes_local_config",
+        [
+          "--add-dir",
+          "--cd",
+          "--config",
+          "--dangerously-bypass-approvals-and-sandbox",
+          "--dangerously-bypass-hook-trust",
+          "--disable",
+          "--enable",
+          "--image",
+          "--local-provider",
+          "--model",
+          "--oss",
+          "--profile",
+          "--remote",
+          "--remote-auth-token-env",
+          "--sandbox",
+          "--strict-config",
+        ],
+        { exposure: "not_exposed" }
+      ),
+      fork: subcommand(["fork"], "Fork a Codex session.", "executes_agent", [
+        "--add-dir",
+        "--all",
+        "--ask-for-approval",
+        "--cd",
+        "--config",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "--dangerously-bypass-hook-trust",
+        "--disable",
+        "--enable",
+        "--image",
+        "--last",
+        "--local-provider",
+        "--model",
+        "--no-alt-screen",
+        "--oss",
+        "--profile",
+        "--remote",
+        "--remote-auth-token-env",
+        "--sandbox",
+        "--search",
+        "--strict-config",
+        "--version",
+      ]),
+      cloud: subcommand(["cloud"], "Inspect or manage Codex cloud features.", "network", [
+        "--config",
+        "--disable",
+        "--enable",
+        "--version",
+      ]),
+      "exec-server": subcommand(
+        ["exec-server"],
+        "Start Codex exec server mode.",
+        "starts_server",
+        [
+          "--config",
+          "--disable",
+          "--enable",
+          "--environment-id",
+          "--listen",
+          "--name",
+          "--remote",
+          "--strict-config",
+          "--use-agent-identity-auth",
+        ],
+        { exposure: "not_exposed" }
+      ),
+      features: subcommand(
+        ["features"],
+        "Inspect or configure Codex feature flags.",
+        "writes_local_config",
+        ["--config", "--disable", "--enable"]
+      ),
+    },
     command: { requiredFirstArg: "exec", optionalSecondArg: "resume" },
     maxPositionals: 1,
     resumeMaxPositionals: 2,
@@ -671,6 +1182,74 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       watchCategories: ["flags", "approval-modes", "output-formats", "session-resume"],
     },
     helpArgs: [["--help"]],
+    subcommands: {
+      mcp: subcommand(
+        ["mcp"],
+        "Manage Gemini MCP server configuration.",
+        "writes_local_config",
+        ["--debug"],
+        {
+          flagArities: { "--debug": "none" },
+        }
+      ),
+      extensions: subcommand(
+        ["extensions"],
+        "Manage Gemini extensions.",
+        "writes_local_config",
+        ["--debug"],
+        {
+          aliases: ["extension"],
+          flagArities: { "--debug": "none" },
+        }
+      ),
+      extension: subcommand(
+        ["extension"],
+        "Alias for Gemini extension management.",
+        "writes_local_config",
+        ["--debug"],
+        {
+          aliases: ["extensions"],
+          flagArities: { "--debug": "none" },
+        }
+      ),
+      skills: subcommand(["skills"], "Manage Gemini skills.", "writes_local_config", ["--debug"], {
+        aliases: ["skill"],
+        flagArities: { "--debug": "none" },
+      }),
+      skill: subcommand(
+        ["skill"],
+        "Alias for Gemini skill management.",
+        "writes_local_config",
+        ["--debug"],
+        {
+          aliases: ["skills"],
+          flagArities: { "--debug": "none" },
+        }
+      ),
+      hooks: subcommand(["hooks"], "Manage Gemini hooks.", "writes_local_config", ["--debug"], {
+        aliases: ["hook"],
+        flagArities: { "--debug": "none" },
+      }),
+      hook: subcommand(
+        ["hook"],
+        "Alias for Gemini hook management.",
+        "writes_local_config",
+        ["--debug"],
+        {
+          aliases: ["hooks"],
+          flagArities: { "--debug": "none" },
+        }
+      ),
+      gemma: subcommand(
+        ["gemma"],
+        "Run Gemini Gemma local-model helper surfaces.",
+        "executes_agent",
+        ["--debug"],
+        {
+          flagArities: { "--debug": "none" },
+        }
+      ),
+    },
     maxPositionals: 0,
     mcpTools: ["gemini_request", "gemini_request_async"],
     mcpParameters: [
@@ -800,6 +1379,189 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       watchCategories: ["flags", "permission-modes", "session-resume", "sandbox", "output-formats"],
     },
     helpArgs: [["--help"]],
+    subcommands: {
+      agent: subcommand(
+        ["agent"],
+        "Run Grok agent service helpers.",
+        "executes_agent",
+        [
+          "--agent-profile",
+          "--always-approve",
+          "--cli-chat-proxy-base-url",
+          "--grok-ws-origin",
+          "--grok-ws-url",
+          "--leader",
+          "--leader-socket",
+          "--model",
+          "--no-leader",
+          "--reasoning-effort",
+          "--reauth",
+          "--xai-api-base-url",
+        ],
+        {
+          children: {
+            stdio: subcommand(
+              ["agent", "stdio"],
+              "Run Grok agent stdio mode.",
+              "starts_server",
+              ["--leader-socket"],
+              { exposure: "not_exposed" }
+            ),
+            headless: subcommand(
+              ["agent", "headless"],
+              "Run Grok headless agent mode.",
+              "executes_agent",
+              ["--grok-ws-origin", "--grok-ws-url", "--leader-socket"]
+            ),
+            serve: subcommand(
+              ["agent", "serve"],
+              "Start Grok agent server mode.",
+              "starts_server",
+              [
+                "--bind",
+                "--grok-ws-origin",
+                "--grok-ws-url",
+                "--leader-socket",
+                "--remote",
+                "--secret",
+              ],
+              { exposure: "not_exposed" }
+            ),
+            leader: subcommand(
+              ["agent", "leader"],
+              "Start Grok agent leader mode.",
+              "starts_server",
+              [
+                "--grok-ws-origin",
+                "--grok-ws-url",
+                "--leader-socket",
+                "--no-auto-update",
+                "--no-exit-on-disconnect",
+              ],
+              { exposure: "not_exposed" }
+            ),
+          },
+        }
+      ),
+      completions: subcommand(
+        ["completions"],
+        "Generate Grok shell completions.",
+        "read_only",
+        ["--leader-socket"],
+        { tier: "inspect" }
+      ),
+      export: subcommand(
+        ["export"],
+        "Export Grok session data.",
+        "read_only",
+        ["--clipboard", "--leader-socket"],
+        { tier: "inspect" }
+      ),
+      import: subcommand(["import"], "Import Grok session data.", "writes_local_config", [
+        "--json",
+        "--leader-socket",
+        "--list",
+      ]),
+      inspect: subcommand(
+        ["inspect"],
+        "Inspect Grok local state.",
+        "read_only",
+        ["--json", "--leader-socket"],
+        { tier: "inspect" }
+      ),
+      leader: subcommand(
+        ["leader"],
+        "Manage Grok leader process.",
+        "starts_server",
+        ["--leader-socket"],
+        {
+          exposure: "not_exposed",
+        }
+      ),
+      login: subcommand(
+        ["login"],
+        "Authenticate Grok CLI.",
+        "auth",
+        ["--device-auth", "--leader-socket", "--oauth"],
+        { exposure: "not_exposed" }
+      ),
+      logout: subcommand(
+        ["logout"],
+        "Clear Grok authentication state.",
+        "auth",
+        ["--leader-socket"],
+        {
+          exposure: "not_exposed",
+        }
+      ),
+      mcp: subcommand(["mcp"], "Manage Grok MCP configuration.", "writes_local_config", [
+        "--leader-socket",
+      ]),
+      memory: subcommand(["memory"], "Manage Grok memory state.", "writes_local_config", [
+        "--leader-socket",
+      ]),
+      models: subcommand(
+        ["models"],
+        "Inspect Grok model catalog.",
+        "network",
+        ["--leader-socket"],
+        {
+          tier: "diagnostic",
+        }
+      ),
+      plugin: subcommand(["plugin"], "Manage Grok plugins.", "writes_local_config", [
+        "--leader-socket",
+      ]),
+      sessions: subcommand(
+        ["sessions"],
+        "Inspect Grok sessions.",
+        "read_only",
+        ["--leader-socket"],
+        {
+          tier: "inspect",
+        }
+      ),
+      setup: subcommand(
+        ["setup"],
+        "Configure Grok CLI local setup.",
+        "writes_local_config",
+        ["--leader-socket"],
+        { exposure: "not_exposed" }
+      ),
+      ssh: subcommand(["ssh"], "Manage Grok SSH integration.", "network", ["--leader-socket"]),
+      trace: subcommand(
+        ["trace"],
+        "Inspect Grok trace data.",
+        "read_only",
+        ["--json", "--leader-socket", "--local", "--output"],
+        { tier: "diagnostic" }
+      ),
+      update: subcommand(
+        ["update"],
+        "Update the Grok CLI binary.",
+        "updates_binary",
+        [
+          "--alpha",
+          "--check",
+          "--force-reinstall",
+          "--json",
+          "--leader-socket",
+          "--stable",
+          "--version",
+        ],
+        { exposure: "not_exposed" }
+      ),
+      version: subcommand(
+        ["version"],
+        "Print Grok version information.",
+        "read_only",
+        ["--json", "--leader-socket"],
+        { tier: "diagnostic" }
+      ),
+      worktree: subcommand(["worktree"], "Manage Grok worktree sessions.", "writes_local_config", [
+        "--leader-socket",
+      ]),
+    },
     maxPositionals: 0,
     mcpTools: ["grok_request", "grok_request_async"],
     mcpParameters: [
@@ -1128,6 +1890,7 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       watchCategories: ["flags", "agent-modes", "session-logging", "output-formats", "env-model"],
     },
     helpArgs: [["--help"]],
+    subcommands: {},
     maxPositionals: 0,
     mcpTools: ["mistral_request", "mistral_request_async"],
     mcpParameters: [
@@ -1458,6 +2221,256 @@ export function assertUpstreamCliArgs(cli: CliType, args: readonly string[]): vo
   }
 }
 
+function subcommandKey(commandPath: readonly string[]): string {
+  return commandPath.join(" ");
+}
+
+function subcommandResourceUri(cli: CliType, commandPath: readonly string[]): string {
+  return `provider_subcommands://${cli}/${commandPath.map(encodeURIComponent).join("/")}`;
+}
+
+export function flattenCliSubcommands(
+  subcommands: Record<string, CliSubcommandContract> | undefined
+): CliSubcommandContract[] {
+  const flattened: CliSubcommandContract[] = [];
+  const visit = (node: CliSubcommandContract): void => {
+    flattened.push(node);
+    for (const child of Object.values(node.children ?? {})) visit(child);
+  };
+  for (const node of Object.values(subcommands ?? {})) visit(node);
+  return flattened.sort((a, b) =>
+    subcommandKey(a.commandPath).localeCompare(subcommandKey(b.commandPath))
+  );
+}
+
+export function getCliSubcommandContract(
+  cli: CliType,
+  commandPath: readonly string[]
+): CliSubcommandContract | null {
+  const wanted = subcommandKey(commandPath);
+  return (
+    flattenCliSubcommands(UPSTREAM_CLI_CONTRACTS[cli].subcommands).find(
+      contract => subcommandKey(contract.commandPath) === wanted
+    ) ?? null
+  );
+}
+
+function serializeFlagContract(flag: CliFlagContract): Record<string, unknown> {
+  return {
+    arity: flag.arity,
+    values: flag.values ?? null,
+    pattern: flag.pattern?.source ?? null,
+    description: flag.description,
+    hiddenFromHelp: flag.hiddenFromHelp ?? false,
+  };
+}
+
+export function serializeCliSubcommandContract(
+  cli: CliType,
+  contract: CliSubcommandContract
+): Record<string, unknown> {
+  return {
+    provider: cli,
+    commandPath: contract.commandPath,
+    helpArgs: contract.helpArgs,
+    flags: Object.fromEntries(
+      Object.entries(contract.flags).map(([name, flag]) => [name, serializeFlagContract(flag)])
+    ),
+    maxPositionals: contract.maxPositionals,
+    aliases: contract.aliases ?? [],
+    children: Object.values(contract.children ?? {}).map(child => ({
+      commandPath: child.commandPath,
+      summary: child.summary,
+      resourceUri: subcommandResourceUri(cli, child.commandPath),
+    })),
+    risk: contract.risk,
+    exposure: contract.exposure,
+    tier: contract.tier,
+    tokenCost: contract.tokenCost,
+    summary: contract.summary,
+    conformanceFixtures: contract.conformanceFixtures.map(fixture => ({
+      id: fixture.id,
+      description: fixture.description,
+      expect: fixture.expect,
+    })),
+    resourceUri: subcommandResourceUri(cli, contract.commandPath),
+  };
+}
+
+export function listProviderSubcommands(
+  options: {
+    provider?: CliType;
+    tier?: CliSubcommandTier;
+    risk?: CliSubcommandRisk;
+    exposure?: CliSubcommandExposure;
+    commandPathPrefix?: readonly string[];
+  } = {}
+): ProviderSubcommandCatalogRow[] {
+  const providers = options.provider
+    ? [options.provider]
+    : (Object.keys(UPSTREAM_CLI_CONTRACTS) as CliType[]);
+  const prefix = options.commandPathPrefix ?? [];
+  const rows: ProviderSubcommandCatalogRow[] = [];
+  for (const provider of providers) {
+    for (const contract of flattenCliSubcommands(UPSTREAM_CLI_CONTRACTS[provider].subcommands)) {
+      if (options.tier && contract.tier !== options.tier) continue;
+      if (options.risk && contract.risk !== options.risk) continue;
+      if (options.exposure && contract.exposure !== options.exposure) continue;
+      if (
+        prefix.length > 0 &&
+        !prefix.every((part, index) => contract.commandPath[index] === part)
+      ) {
+        continue;
+      }
+      rows.push({
+        provider,
+        commandPath: contract.commandPath,
+        aliases: contract.aliases ?? [],
+        tier: contract.tier,
+        risk: contract.risk,
+        exposure: contract.exposure,
+        tokenCost: contract.tokenCost,
+        summary:
+          contract.summary.length > 48
+            ? `${contract.summary.slice(0, 45).trimEnd()}...`
+            : contract.summary,
+        driftStatus: "unknown",
+        resourceUri: subcommandResourceUri(provider, contract.commandPath),
+      });
+    }
+  }
+  return rows.sort((a, b) =>
+    `${a.provider}:${subcommandKey(a.commandPath)}`.localeCompare(
+      `${b.provider}:${subcommandKey(b.commandPath)}`
+    )
+  );
+}
+
+export function buildProviderSubcommandsCompactCatalog(
+  options: Parameters<typeof listProviderSubcommands>[0] = {}
+): ProviderSubcommandCompactCatalog {
+  return {
+    schemaVersion: "provider-subcommands-catalog.v1",
+    columns: [
+      "provider",
+      "commandPath",
+      "aliases",
+      "tier",
+      "risk",
+      "exposure",
+      "tokenCost",
+      "summary",
+      "driftStatus",
+      "resourceUri",
+    ],
+    rows: listProviderSubcommands(options).map(row => [
+      row.provider,
+      row.commandPath.join(" "),
+      row.aliases.join(","),
+      row.tier,
+      row.risk,
+      row.exposure,
+      row.tokenCost,
+      row.summary,
+      row.driftStatus,
+      row.resourceUri,
+    ]),
+  };
+}
+
+export function validateUpstreamCliSubcommandArgs(
+  cli: CliType,
+  commandPath: readonly string[],
+  args: readonly string[]
+): SubcommandContractValidationResult {
+  const contract = getCliSubcommandContract(cli, commandPath);
+  const violations: ContractViolation[] = [];
+  if (!contract) {
+    violations.push({
+      cli,
+      message: `${cli} subcommand "${subcommandKey(commandPath)}" is not declared in the upstream subcommand contract`,
+    });
+    return { ok: false, violations, commandPath };
+  }
+
+  const positionals: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    const flag = contract.flags[arg];
+    if (!flag) {
+      if (arg.startsWith("-")) {
+        violations.push({
+          cli,
+          arg,
+          index: i,
+          message: `Unsupported ${cli} subcommand flag "${arg}" for ${subcommandKey(commandPath)}`,
+        });
+      } else {
+        positionals.push(arg);
+      }
+      continue;
+    }
+
+    if (flag.arity === "none") continue;
+
+    if (flag.arity === "one") {
+      const value = args[i + 1];
+      if (value === undefined) {
+        violations.push({
+          cli,
+          arg,
+          index: i,
+          message: `${cli} subcommand flag "${arg}" requires one value`,
+        });
+        continue;
+      }
+      validateFlagValue(cli, arg, flag, value, i + 1, violations);
+      i += 1;
+      continue;
+    }
+
+    if (flag.arity === "optional") {
+      const value = args[i + 1];
+      if (value !== undefined && !value.startsWith("-")) {
+        validateFlagValue(cli, arg, flag, value, i + 1, violations);
+        i += 1;
+      }
+      continue;
+    }
+
+    let consumed = 0;
+    while (i + 1 < args.length && !args[i + 1].startsWith("-")) {
+      validateFlagValue(cli, arg, flag, args[i + 1], i + 1, violations);
+      i += 1;
+      consumed += 1;
+    }
+    if (consumed === 0) {
+      violations.push({
+        cli,
+        arg,
+        index: i,
+        message: `${cli} subcommand flag "${arg}" requires at least one value`,
+      });
+    }
+  }
+
+  if (positionals.length > contract.maxPositionals) {
+    violations.push({
+      cli,
+      message: `${cli} subcommand "${subcommandKey(commandPath)}" has ${positionals.length} positional values; upstream subcommand contract allows ${contract.maxPositionals}`,
+    });
+  }
+
+  return {
+    ok: violations.length === 0,
+    violations,
+    commandPath,
+    risk: contract.risk,
+    exposure: contract.exposure,
+    tier: contract.tier,
+  };
+}
+
 export function validateUpstreamCliEnv(
   cli: CliType,
   env: Record<string, string> | undefined
@@ -1609,6 +2622,70 @@ export function computeFlagDrift(
   return { missingFlags, extraFlags, acknowledgedExtraFlags, warnings };
 }
 
+export function computeSubcommandFlagDrift(
+  contract: CliSubcommandContract,
+  executable: string,
+  helpText: string,
+  discoveredFlags: readonly string[]
+): FlagDriftResult {
+  const warnings: string[] = [];
+
+  const missingFlags: string[] = [];
+  for (const [flag, spec] of Object.entries(contract.flags)) {
+    const inHelp = helpText.includes(flag);
+    if (spec.hiddenFromHelp) {
+      if (inHelp) {
+        warnings.push(
+          `${subcommandKey(contract.commandPath)} ${flag} is marked hiddenFromHelp but now appears in ${executable} help output; remove the hiddenFromHelp marker from the subcommand contract`
+        );
+      }
+      continue;
+    }
+    if (!inHelp) missingFlags.push(flag);
+  }
+
+  const contractFlagSet = new Set(Object.keys(contract.flags));
+  const acknowledged = new Set(contract.acknowledgedUpstreamFlags ?? []);
+  const extraFlags: string[] = [];
+  const acknowledgedExtraFlags: string[] = [];
+  for (const flag of discoveredFlags) {
+    if (contractFlagSet.has(flag)) continue;
+    if (acknowledged.has(flag)) {
+      acknowledgedExtraFlags.push(flag);
+    } else {
+      extraFlags.push(flag);
+    }
+  }
+
+  const discoveredSet = new Set(discoveredFlags);
+  for (const flag of acknowledged) {
+    if (!discoveredSet.has(flag)) {
+      warnings.push(
+        `acknowledged upstream subcommand flag ${flag} no longer appears in ${executable} ${subcommandKey(contract.commandPath)} help output; remove it from acknowledgedUpstreamFlags`
+      );
+    }
+  }
+
+  return { missingFlags, extraFlags, acknowledgedExtraFlags, warnings };
+}
+
+export interface InstalledCliSubcommandProbe {
+  commandPath: readonly string[];
+  checkedHelpCommands: string[][];
+  available: boolean;
+  missingFlags: string[];
+  extraFlags: readonly string[];
+  acknowledgedExtraFlags: readonly string[];
+  discoveredFlags: readonly string[];
+  helpHash?: string;
+  probedAt: string;
+  warnings: string[];
+  risk: CliSubcommandRisk;
+  exposure: CliSubcommandExposure;
+  tier: CliSubcommandTier;
+  summary: string;
+}
+
 export interface InstalledCliContractProbe {
   cli: CliType;
   executable: string;
@@ -1627,6 +2704,8 @@ export interface InstalledCliContractProbe {
   helpHash?: string;
   /** Best-effort version string scraped from the help/version output (if present). */
   versionHint?: string;
+  /** Declared subcommand help surfaces probed via `<executable> ...commandPath --help`. */
+  subcommands: Record<string, InstalledCliSubcommandProbe>;
   /** ISO timestamp when this probe was performed. */
   probedAt: string;
   warnings: string[];
@@ -1672,6 +2751,7 @@ export function probeInstalledCliContract(
         discoveredFlags: [],
         helpHash: undefined,
         versionHint: undefined,
+        subcommands: {},
         probedAt: new Date().toISOString(),
         warnings: [result.error.message],
       };
@@ -1694,6 +2774,7 @@ export function probeInstalledCliContract(
   const versionHint = versionMatch ? versionMatch[0].trim().slice(0, 80) : undefined;
 
   const helpHash = createHash("sha256").update(helpText).digest("hex");
+  const subcommands = probeInstalledCliSubcommands(cli, timeoutMs);
 
   return {
     cli,
@@ -1708,9 +2789,76 @@ export function probeInstalledCliContract(
     discoveredFlags,
     helpHash,
     versionHint,
+    subcommands,
     probedAt: new Date().toISOString(),
     warnings,
   };
+}
+
+function probeInstalledCliSubcommands(
+  cli: CliType,
+  timeoutMs: number
+): Record<string, InstalledCliSubcommandProbe> {
+  const contract = UPSTREAM_CLI_CONTRACTS[cli];
+  const probes: Record<string, InstalledCliSubcommandProbe> = {};
+  for (const sub of flattenCliSubcommands(contract.subcommands)) {
+    const outputs: string[] = [];
+    const warnings: string[] = [];
+    let available = true;
+    const checkedHelpCommands = sub.helpArgs.map(helpArgs => [...sub.commandPath, ...helpArgs]);
+
+    for (const helpArgs of sub.helpArgs) {
+      const args = [...sub.commandPath, ...helpArgs];
+      const extendedPath = getExtendedPath();
+      const env = envWithExtendedPath(process.env, extendedPath);
+      const resolved = resolveCommandForSpawn(contract.executable, args, {
+        envPath: extendedPath,
+      });
+      const result = spawnSync(resolved.command, resolved.args, {
+        encoding: "utf8",
+        timeout: timeoutMs,
+        maxBuffer: 1024 * 1024,
+        env,
+        windowsHide: true,
+        windowsVerbatimArguments: resolved.windowsVerbatimArguments,
+      });
+      if (result.error) {
+        available = false;
+        warnings.push(result.error.message);
+        break;
+      }
+      outputs.push(`${result.stdout ?? ""}\n${result.stderr ?? ""}`);
+      if (result.status !== 0) {
+        warnings.push(
+          `${contract.executable} ${args.join(" ")} exited with status ${result.status}`
+        );
+      }
+    }
+
+    const helpText = outputs.join("\n");
+    const discoveredFlags = available ? extractDiscoveredFlags(helpText) : [];
+    const drift = available
+      ? computeSubcommandFlagDrift(sub, contract.executable, helpText, discoveredFlags)
+      : { missingFlags: [], extraFlags: [], acknowledgedExtraFlags: [], warnings: [] };
+    warnings.push(...drift.warnings);
+    probes[subcommandKey(sub.commandPath)] = {
+      commandPath: sub.commandPath,
+      checkedHelpCommands,
+      available,
+      missingFlags: drift.missingFlags,
+      extraFlags: drift.extraFlags,
+      acknowledgedExtraFlags: drift.acknowledgedExtraFlags,
+      discoveredFlags,
+      helpHash: available ? createHash("sha256").update(helpText).digest("hex") : undefined,
+      probedAt: new Date().toISOString(),
+      warnings,
+      risk: sub.risk,
+      exposure: sub.exposure,
+      tier: sub.tier,
+      summary: sub.summary,
+    };
+  }
+  return probes;
 }
 
 export function buildUpstreamContractReport(
@@ -1748,14 +2896,11 @@ export function buildUpstreamContractReport(
           flags: Object.fromEntries(
             Object.entries(contract.flags).map(([name, flag]) => [
               name,
-              {
-                arity: flag.arity,
-                values: flag.values ?? null,
-                pattern: flag.pattern?.source ?? null,
-                description: flag.description,
-              },
+              serializeFlagContract(flag),
             ])
           ),
+          subcommandCount: flattenCliSubcommands(contract.subcommands).length,
+          subcommandsCatalog: buildProviderSubcommandsCompactCatalog({ provider: cli }),
           env: Object.fromEntries(
             Object.entries(contract.env ?? {}).map(([name, envContract]) => [
               name,

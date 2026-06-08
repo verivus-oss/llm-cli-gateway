@@ -2,11 +2,17 @@ import { describe, expect, it } from "vitest";
 import { createGatewayServer } from "../index.js";
 import {
   UPSTREAM_CLI_CONTRACTS,
+  buildProviderSubcommandsCompactCatalog,
   buildUpstreamContractReport,
   computeFlagDrift,
+  computeSubcommandFlagDrift,
   validateUpstreamCliEnv,
   validateUpstreamCliArgs,
+  validateUpstreamCliSubcommandArgs,
   extractDiscoveredFlags,
+  flattenCliSubcommands,
+  getCliSubcommandContract,
+  listProviderSubcommands,
 } from "../upstream-contracts.js";
 import type { CliContract } from "../upstream-contracts.js";
 
@@ -127,6 +133,209 @@ describe("upstream CLI contracts", () => {
       installedProbe: null,
     });
     expect(JSON.stringify(report)).toContain("VIBE_ACTIVE_MODEL");
+  });
+
+  it("declares subcommand metadata for all providers and an explicit empty Vibe tree", () => {
+    for (const [cli, contract] of Object.entries(UPSTREAM_CLI_CONTRACTS)) {
+      expect(contract.subcommands, `${cli} subcommands field`).toBeDefined();
+      for (const subcommand of flattenCliSubcommands(contract.subcommands)) {
+        expect(subcommand.commandPath.length, `${cli} commandPath`).toBeGreaterThan(0);
+        expect(
+          subcommand.helpArgs.length,
+          `${cli} ${subcommand.commandPath.join(" ")} helpArgs`
+        ).toBeGreaterThan(0);
+        expect(
+          subcommand.summary.length,
+          `${cli} ${subcommand.commandPath.join(" ")} summary`
+        ).toBeGreaterThan(10);
+        expect(subcommand.exposure, `${cli} ${subcommand.commandPath.join(" ")} exposure`).toMatch(
+          /^(tracked_only|mcp_readonly|mcp_requires_approval|not_exposed)$/
+        );
+        expect(subcommand.tier, `${cli} ${subcommand.commandPath.join(" ")} tier`).toMatch(
+          /^(catalog|inspect|execute_candidate|diagnostic)$/
+        );
+        expect(
+          subcommand.tokenCost,
+          `${cli} ${subcommand.commandPath.join(" ")} tokenCost`
+        ).toMatch(/^(tiny|small|medium|large)$/);
+      }
+    }
+    expect(flattenCliSubcommands(UPSTREAM_CLI_CONTRACTS.mistral.subcommands)).toEqual([]);
+  });
+
+  it("validates subcommand argv through a separate API without loosening request argv", () => {
+    const subcommand = validateUpstreamCliSubcommandArgs(
+      "codex",
+      ["review"],
+      ["--base", "origin/master"]
+    );
+    expect(subcommand.ok).toBe(true);
+    expect(subcommand.risk).toBe("executes_agent");
+    expect(subcommand.exposure).toBe("tracked_only");
+
+    const requestSurface = validateUpstreamCliArgs("codex", ["review", "--base", "origin/master"]);
+    expect(requestSurface.ok).toBe(false);
+    expect(requestSurface.violations[0]?.message).toMatch(/must start with "exec"/);
+  });
+
+  it("rejects unknown subcommand paths and subcommand-only flags outside their path", () => {
+    const unknown = validateUpstreamCliSubcommandArgs("grok", ["not-real"], []);
+    expect(unknown.ok).toBe(false);
+    expect(unknown.violations[0]?.message).toMatch(/not declared/);
+
+    const wrongPath = validateUpstreamCliSubcommandArgs("grok", ["models"], ["--json"]);
+    expect(wrongPath.ok).toBe(false);
+    expect(wrongPath.violations[0]?.message).toMatch(/Unsupported grok subcommand flag/);
+
+    const noVibeSubcommands = validateUpstreamCliSubcommandArgs("mistral", ["doctor"], []);
+    expect(noVibeSubcommands.ok).toBe(false);
+    expect(noVibeSubcommands.violations[0]?.message).toMatch(/not declared/);
+  });
+
+  it("builds compact catalog rows and detailed one-command contracts without raw help", () => {
+    const catalog = listProviderSubcommands();
+    const compactCatalog = buildProviderSubcommandsCompactCatalog();
+    const catalogJson = JSON.stringify(compactCatalog);
+    expect(catalog.length).toBeGreaterThan(50);
+    expect(catalogJson.length).toBeLessThan(12 * 1024);
+    expect(catalogJson).not.toMatch(/Usage:|Options:/);
+    expect(compactCatalog.columns).toContain("resourceUri");
+    expect(compactCatalog.columns as readonly string[]).not.toContain("flags");
+
+    const contract = getCliSubcommandContract("grok", ["agent", "serve"]);
+    expect(contract).toBeDefined();
+    const inspectJson = JSON.stringify(contract);
+    expect(inspectJson.length).toBeLessThan(8 * 1024);
+    expect(inspectJson).not.toMatch(/Usage:|Options:/);
+  });
+
+  it("keeps upstream_contracts subcommand data compact by default", () => {
+    const report = buildUpstreamContractReport() as {
+      contracts: Record<
+        string,
+        {
+          subcommandCount: number;
+          subcommandsCatalog: { columns: readonly string[]; rows: readonly unknown[] };
+          subcommands?: unknown;
+        }
+      >;
+    };
+    const reportJson = JSON.stringify(report);
+    expect(reportJson.length).toBeLessThan(70 * 1024);
+    expect(report.contracts.grok.subcommandCount).toBeGreaterThan(20);
+    expect(report.contracts.grok.subcommands).toBeUndefined();
+    expect(report.contracts.grok.subcommandsCatalog.columns).toContain("resourceUri");
+    expect(report.contracts.grok.subcommandsCatalog.columns).not.toContain("flags");
+    expect(reportJson).not.toMatch(/Usage:|Options:/);
+  });
+
+  it("computes subcommand drift without using top-level request flags", () => {
+    const contract = getCliSubcommandContract("grok", ["agent", "serve"]);
+    expect(contract).toBeDefined();
+    const drift = computeSubcommandFlagDrift(
+      contract!,
+      "grok",
+      "Options:\n  --bind <ADDR>\n  --brand-new\n",
+      ["--bind", "--brand-new"]
+    );
+    expect(drift.extraFlags).toEqual(["--brand-new"]);
+    expect(drift.missingFlags).toEqual([
+      "--grok-ws-origin",
+      "--grok-ws-url",
+      "--leader-socket",
+      "--remote",
+      "--secret",
+    ]);
+  });
+
+  it("registers read-only MCP subcommand tools with compact responses", async () => {
+    const { AsyncJobManager } = await import("../async-job-manager.js");
+    const { MemoryJobStore } = await import("../job-store.js");
+    const { noopLogger } = await import("../logger.js");
+    const manager = new AsyncJobManager(noopLogger, undefined, new MemoryJobStore());
+    const server = createGatewayServer({
+      asyncJobManager: manager,
+      persistence: {
+        backend: "sqlite",
+        logsDbPath: ":memory:",
+        jobsDbPath: ":memory:",
+        jobRetentionDays: 7,
+        dedupWindowMs: 0,
+        asyncJobsEnabled: true,
+        sources: { configFile: null, envOverrides: [] },
+      },
+    });
+    const registry = (
+      server as unknown as Record<
+        string,
+        Record<
+          string,
+          { annotations?: { readOnlyHint?: boolean }; handler?: (args: never) => unknown }
+        >
+      >
+    )._registeredTools;
+    for (const name of [
+      "provider_subcommands_list",
+      "provider_subcommand_contract",
+      "provider_subcommand_drift",
+    ]) {
+      expect(registry[name], `${name} registered`).toBeDefined();
+      expect(registry[name].annotations?.readOnlyHint, `${name} read-only`).toBe(true);
+    }
+
+    const listResult = (await registry.provider_subcommands_list.handler?.({
+      provider: "grok",
+    } as never)) as { content: { text: string }[] };
+    const listText = listResult.content[0].text;
+    expect(listText.length).toBeLessThan(12 * 1024);
+    expect(listText).not.toMatch(/Usage:|Options:/);
+    expect(listText).not.toContain('"flags"');
+
+    const inspectResult = (await registry.provider_subcommand_contract.handler?.({
+      provider: "grok",
+      commandPath: ["agent", "serve"],
+    } as never)) as { content: { text: string }[] };
+    const inspectText = inspectResult.content[0].text;
+    expect(inspectText.length).toBeLessThan(8 * 1024);
+    expect(inspectText).toContain('"flags"');
+    expect(inspectText).not.toMatch(/Usage:|Options:/);
+
+    const templates = (
+      server as unknown as Record<
+        string,
+        Record<
+          string,
+          {
+            resourceTemplate: {
+              uriTemplate: { toString: () => string; match: (uri: string) => unknown };
+            };
+          }
+        >
+      >
+    )._registeredResourceTemplates;
+    const template = templates["provider-subcommand-contract"].resourceTemplate.uriTemplate;
+    expect(template.toString()).toBe("provider_subcommands://{provider}/{+commandPath}");
+    expect(template.match("provider_subcommands://grok/models")).not.toBeNull();
+    expect(template.match("provider_subcommands://grok/agent/serve")).not.toBeNull();
+  });
+
+  it("exposes provider_subcommands resources without raw help", async () => {
+    const { ResourceProvider } = await import("../resources.js");
+    const { PerformanceMetrics } = await import("../metrics.js");
+    const sessionManagerStub = {
+      listSessions: async () => [],
+      getActiveSession: async () => null,
+    };
+    const provider = new ResourceProvider(sessionManagerStub as never, new PerformanceMetrics());
+
+    const catalog = await provider.readResource("provider_subcommands://catalog");
+    expect(catalog?.text.length).toBeLessThan(12 * 1024);
+    expect(catalog?.text).not.toMatch(/Usage:|Options:/);
+
+    const detail = await provider.readResource("provider_subcommands://grok/agent/serve");
+    expect(detail?.text.length).toBeLessThan(8 * 1024);
+    expect(detail?.text).toContain('"commandPath"');
+    expect(detail?.text).not.toMatch(/Usage:|Options:/);
   });
 
   it("validates provider-specific env contracts", () => {

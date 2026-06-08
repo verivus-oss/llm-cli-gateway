@@ -119,7 +119,13 @@ function selectProviders(contracts, provider) {
  * does not reimplement any validation. Returns the number of failures.
  */
 function runContractsCheck(machinery, toml) {
-  const { UPSTREAM_CLI_CONTRACTS, validateUpstreamCliArgs, validateUpstreamCliEnv } = machinery;
+  const {
+    UPSTREAM_CLI_CONTRACTS,
+    flattenCliSubcommands,
+    validateUpstreamCliArgs,
+    validateUpstreamCliEnv,
+    validateUpstreamCliSubcommandArgs,
+  } = machinery;
   let failures = 0;
 
   // 1. Bundled conformance fixtures, run through the real validators.
@@ -134,6 +140,24 @@ function runContractsCheck(machinery, toml) {
         console.error(
           `[upstream-scan] FIXTURE FAIL ${cli}/${fixture.id}: expected ${fixture.expect}, got ${ok ? "pass" : "fail"}`
         );
+      }
+    }
+    for (const subcommand of flattenCliSubcommands(contract.subcommands)) {
+      for (const fixture of subcommand.conformanceFixtures) {
+        const args = validateUpstreamCliSubcommandArgs(
+          contract.cli,
+          subcommand.commandPath,
+          fixture.args
+        );
+        const env = validateUpstreamCliEnv(contract.cli, fixture.env);
+        const ok = args.ok && env.ok;
+        const expected = fixture.expect === "pass";
+        if (ok !== expected) {
+          failures++;
+          console.error(
+            `[upstream-scan] SUBCOMMAND FIXTURE FAIL ${cli}/${subcommand.commandPath.join(" ")}/${fixture.id}: expected ${fixture.expect}, got ${ok ? "pass" : "fail"}`
+          );
+        }
       }
     }
   }
@@ -205,7 +229,14 @@ async function fetchSource(url) {
       sha256: createHash("sha256").update(body).digest("hex"),
     };
   } catch (err) {
-    return { url, ok: false, status: 0, bytes: 0, sha256: null, error: String(err?.message ?? err) };
+    return {
+      url,
+      ok: false,
+      status: 0,
+      bytes: 0,
+      sha256: null,
+      error: String(err?.message ?? err),
+    };
   }
 }
 
@@ -231,7 +262,7 @@ function todayStamp() {
   return new Date().toISOString().slice(0, 10);
 }
 
-function renderReport(cli, contract, meta, fetched, findings) {
+function renderReport(cli, contract, meta, fetched, findings, helpProbe = null) {
   const stamp = todayStamp();
   const lines = [];
   lines.push(`# Upstream scan report — ${cli} (${contract.upstream})`);
@@ -253,6 +284,9 @@ function renderReport(cli, contract, meta, fetched, findings) {
   );
   lines.push("");
   lines.push(`- Contract flags tracked: **${Object.keys(contract.flags).length}**`);
+  lines.push(
+    `- Subcommands tracked: **${Object.keys(contract.subcommands ?? {}).length}** top-level`
+  );
   lines.push(`- Conformance fixtures: **${contract.conformanceFixtures.length}**`);
   lines.push(`- Watched categories: ${meta.watchCategories.map(c => `\`${c}\``).join(", ")}`);
   lines.push("");
@@ -263,13 +297,44 @@ function renderReport(cli, contract, meta, fetched, findings) {
     lines.push("| ------ | ------ | ----- | ------------ |");
     for (const f of fetched) {
       const sha = f.sha256 ? f.sha256.slice(0, 12) : "—";
-      const status = f.ok ? `${f.status} OK` : `${f.status || "ERR"}${f.error ? ` (${f.error})` : ""}`;
+      const status = f.ok
+        ? `${f.status} OK`
+        : `${f.status || "ERR"}${f.error ? ` (${f.error})` : ""}`;
       lines.push(`| ${f.url} | ${status} | ${f.bytes} | ${sha} |`);
     }
   } else {
     for (const url of meta.sourceUrls) {
       lines.push(`- ${url} _(not fetched — run with \`--live\`)_`);
     }
+  }
+  lines.push("");
+  if (helpProbe?.subcommands) {
+    const rows = Object.values(helpProbe.subcommands);
+    const driftRows = rows.filter(
+      row => (row.extraFlags?.length ?? 0) > 0 || (row.missingFlags?.length ?? 0) > 0
+    );
+    lines.push("## Declared subcommand help surfaces");
+    lines.push("");
+    lines.push(`- Probed declared command paths: **${rows.length}**`);
+    lines.push(`- Drifted command paths: **${driftRows.length}**`);
+    const counts = new Map();
+    for (const row of rows) counts.set(row.risk, (counts.get(row.risk) ?? 0) + 1);
+    if (counts.size > 0) {
+      lines.push(
+        `- Risk counts: ${[...counts.entries()].map(([risk, count]) => `${risk}=${count}`).join(", ")}`
+      );
+    }
+    if (driftRows.length > 0) {
+      lines.push("");
+      lines.push("| Command path | Extra flags | Missing flags |");
+      lines.push("| ------------ | ----------- | ------------- |");
+      for (const row of driftRows) {
+        lines.push(
+          `| ${row.commandPath.join(" ")} | ${(row.extraFlags ?? []).join(", ") || "—"} | ${(row.missingFlags ?? []).join(", ") || "—"} |`
+        );
+      }
+    }
+    lines.push("");
   }
   lines.push("");
   lines.push("## Findings");
@@ -288,7 +353,9 @@ function renderReport(cli, contract, meta, fetched, findings) {
     "1. If a watched category changed upstream, update the relevant flag/enum in " +
       "`src/upstream-contracts.ts` and add/adjust a conformance fixture."
   );
-  lines.push("2. Mirror any `sourceUrls` / `watchCategories` change into `provider-sources.dag.toml`.");
+  lines.push(
+    "2. Mirror any `sourceUrls` / `watchCategories` change into `provider-sources.dag.toml`."
+  );
   lines.push("3. Re-run `npm run upstream:contracts` to confirm fixtures + TOML-sync pass.");
   lines.push("");
   return lines.join("\n");
@@ -306,7 +373,7 @@ async function runScan(machinery, toml, flags) {
   const report = machinery.buildUpstreamContractReport();
   const providers = selectProviders(UPSTREAM_CLI_CONTRACTS, flags.provider);
 
-  if (flags.writeSnapshot && !flags.live) {
+  if (flags.writeSnapshot && !flags.live && !flags.probeInstalled) {
     console.warn(
       "[upstream-scan] --write-snapshot has no effect without --live (nothing fetched); skipping snapshot writes."
     );
@@ -349,7 +416,9 @@ async function runScan(machinery, toml, flags) {
             message: `Could not fetch ${url} (status ${result.status}${result.error ? `, ${result.error}` : ""}).`,
           });
           criticalCount++;
-          console.warn(`  [live] UNREACHABLE ${url} — advisory failure (does not break default CI).`);
+          console.warn(
+            `  [live] UNREACHABLE ${url} — advisory failure (does not break default CI).`
+          );
         } else {
           const before = priorByUrl.get(url);
           if (before && before.sha256 && before.sha256 !== result.sha256) {
@@ -359,7 +428,9 @@ async function runScan(machinery, toml, flags) {
               message: `Content hash changed for ${url} since last snapshot — review against watched categories: ${meta.watchCategories.join(", ")}.`,
             });
             criticalCount++;
-            console.log(`  [live] CHANGED ${url} (sha ${before.sha256.slice(0, 12)} → ${result.sha256.slice(0, 12)})`);
+            console.log(
+              `  [live] CHANGED ${url} (sha ${before.sha256.slice(0, 12)} → ${result.sha256.slice(0, 12)})`
+            );
           } else {
             console.log(`  [live] ok ${url} (${result.status}, ${result.bytes} bytes)`);
           }
@@ -406,6 +477,40 @@ async function runScan(machinery, toml, flags) {
             console.log(`  [probe] MISSING from binary (vs contract): ${missing.join(", ")}`);
           }
 
+          const subcommands = Object.values(helpProbe.subcommands || {});
+          const subcommandDrift = subcommands.filter(
+            sub => (sub.extraFlags || []).length > 0 || (sub.missingFlags || []).length > 0
+          );
+          if (subcommands.length > 0) {
+            console.log(
+              `  [probe] subcommands: ${subcommands.length} declared path(s), ${subcommandDrift.length} with drift`
+            );
+          }
+          for (const sub of subcommandDrift) {
+            const path = sub.commandPath.join(" ");
+            if ((sub.extraFlags || []).length > 0) {
+              findings.push({
+                severity: "critical",
+                category: "installed-subcommand-help-surface-drift",
+                message: `Installed ${cli} ${path} help advertises ${(sub.extraFlags || []).length} unclassified flag(s): ${sub.extraFlags.slice(0, 8).join(", ")}${sub.extraFlags.length > 8 ? "..." : ""}. Review the subcommand contract before any execution exposure.`,
+              });
+              criticalCount++;
+              console.log(
+                `  [probe] EXTRA SUBCOMMAND FLAGS ${path}: ${sub.extraFlags.slice(0, 6).join(", ")}${sub.extraFlags.length > 6 ? ` (+${sub.extraFlags.length - 6} more)` : ""}`
+              );
+            }
+            if ((sub.missingFlags || []).length > 0) {
+              findings.push({
+                severity: "warning",
+                category: "binary-missing-declared-subcommand-flags",
+                message: `Installed ${cli} ${path} help no longer advertises declared subcommand flag(s): ${sub.missingFlags.join(", ")}.`,
+              });
+              console.log(
+                `  [probe] MISSING SUBCOMMAND FLAGS ${path}: ${sub.missingFlags.join(", ")}`
+              );
+            }
+          }
+
           // Diff vs prior help snapshot (if we have one).
           if (priorHelp && priorHelp.discoveredFlags && Array.isArray(priorHelp.discoveredFlags)) {
             const prevSet = new Set(priorHelp.discoveredFlags);
@@ -434,16 +539,18 @@ async function runScan(machinery, toml, flags) {
             }
           }
         } else {
-          console.log(`  [probe] ${cli} binary not available on this machine (skipped surface diff)`);
+          console.log(
+            `  [probe] ${cli} binary not available on this machine (skipped surface diff)`
+          );
         }
       }
     }
 
-    if (flags.live && flags.writeSnapshot) {
+    if (flags.writeSnapshot && (flags.live || (helpProbe && helpProbe.available))) {
       const snapshotPayload = {
         cli,
         fetchedAt: new Date().toISOString(),
-        sources: fetched,
+        sources: fetched ?? [],
       };
       if (helpProbe && helpProbe.available) {
         snapshotPayload.helpSurface = {
@@ -455,13 +562,31 @@ async function runScan(machinery, toml, flags) {
           extraVsContract: helpProbe.extraFlags || [],
           missingFromBinary: helpProbe.missingFlags || [],
         };
+        snapshotPayload.subcommands = Object.fromEntries(
+          Object.entries(helpProbe.subcommands || {}).map(([path, sub]) => [
+            path,
+            {
+              commandPath: sub.commandPath,
+              probedAt: sub.probedAt,
+              available: sub.available,
+              flags: sub.discoveredFlags || [],
+              helpHash: sub.helpHash || null,
+              extraVsContract: sub.extraFlags || [],
+              missingFromBinary: sub.missingFlags || [],
+              risk: sub.risk,
+              exposure: sub.exposure,
+              tier: sub.tier,
+              summary: sub.summary,
+            },
+          ])
+        );
       }
       const path = writeSnapshot(cli, snapshotPayload);
       console.log(`  [snapshot] wrote ${path}`);
     }
 
     if (flags.writeReport) {
-      const content = renderReport(cli, contract, meta, fetched, findings);
+      const content = renderReport(cli, contract, meta, fetched, findings, helpProbe);
       const path = writeReport(cli, content);
       console.log(`  [report] wrote ${path}`);
     }
