@@ -1512,7 +1512,7 @@ boundary bypass); all are addressed in the two follow-up fix commits.
 Closes the two telemetry gaps that v1.6.0 explicitly deferred: async-path
 flight-recorder integration and Codex parser support for the actual
 `cached_input_tokens` field the current Codex CLI emits. Both ship
-together because they jointly close out `cache_state://*` completeness
+together because they jointly close out `cache-state://*` completeness
 for the async tools and the codex CLI.
 
 ### Added — async-path flight recorder writes
@@ -1552,9 +1552,9 @@ stderr, exitCode }> }` so the manager constructor can write FR
   `{ count: 0, orphaned: [] }` (in-process state can't be orphaned).
   Breaking change to the `JobStore` interface; the `PostgresJobStore`
   stub was updated to match (the impl is still not yet shipped).
-- `cache_state://global`, `cache_state://session/{id}`, and
-  `cache_state://prefix/{hash}` aggregates now include async-job
-  activity. No query changes — `cache_state://*` already didn't filter
+- `cache-state://global`, `cache-state://session/{id}`, and
+  `cache-state://prefix/{hash}` aggregates now include async-job
+  activity. No query changes — `cache-state://*` already didn't filter
   on `asyncJobId`, so the new rows participate naturally.
 
 ### Fixed — Codex parser accepts current CLI's cache-token field
@@ -1585,7 +1585,7 @@ distinguishing `errorMessage`. The underlying `jobs` table in JobStore
 retains the distinct `"canceled"` / `"orphaned"` statuses for
 `getJobSnapshot` callers. External consumers of `~/.llm-cli-gateway/
 logs.db` that filter `status='failed'` will count cancels and boot-time
-orphans as errors; `cache_state://*` aggregation does not distinguish.
+orphans as errors; `cache-state://*` aggregation does not distinguish.
 
 ### No config or schema changes
 
@@ -1647,7 +1647,7 @@ Pure documentation release; zero source-code changes since 1.6.0.
 ### Changed — 12 SKILL.md files current with v1.6.0
 
 - All 12 skills (7 under `skills/`, 5 under `.agents/skills/`) extended
-  with `promptParts`, `cache_state://` MCP resources, and (where the
+  with `promptParts`, `cache-state://` MCP resources, and (where the
   skill's centre of gravity is session continuity) the
   `cache_ttl_expiring_soon` warning. Depth tiered by skill audience:
   multi-llm-orchestration, model-routing, multi-llm-consensus,
@@ -1754,9 +1754,9 @@ Also includes (beyond cache-awareness):
   `requests`, plus `idx_requests_stable_hash`. Legacy rows keep NULL.
 - **Cache-state MCP resources** (read-only, tokens/hashes/aggregates only —
   never raw prompt text):
-  - `cache_state://global` (last 24h aggregates + per-CLI breakdown).
-  - `cache_state://session/{sessionId}` (per-session).
-  - `cache_state://prefix/{hash}` (per-stable-prefix-hash).
+  - `cache-state://global` (last 24h aggregates + per-CLI breakdown).
+  - `cache-state://session/{sessionId}` (per-session).
+  - `cache-state://prefix/{hash}` (per-stable-prefix-hash).
 - **`session_get.cacheState`** projection: compact hit-rate / hit-count /
   cache-token-totals / estimated-savings-USD block, present only when the
   session has prior requests. Omitted entirely (not null, not empty) for

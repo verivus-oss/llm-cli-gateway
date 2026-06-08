@@ -392,7 +392,9 @@ Inspector-discovered defect and fix:
 - Fix: advertise and generate valid hyphenated schemes:
   `cache-state://...` and `provider-subcommands://...`.
 - Compatibility: `ResourceProvider.readResource` still accepts the legacy
-  `provider_subcommands://...` strings for internal callers and older docs.
+  `provider_subcommands://...` strings for internal direct callers and tests.
+  Standard MCP clients should use only the advertised hyphenated schemes because
+  legacy underscore schemes are not valid URL schemes.
 - Re-run result: every URI returned by `resources/list` was read successfully:
   all `skills://*`, `sessions://*`, `models://*`, `metrics://performance`,
   `cache-state://global`, `provider-subcommands://catalog`, and

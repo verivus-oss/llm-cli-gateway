@@ -18,14 +18,14 @@ Three slices shipped together so cache observability data (slice 2) is in place 
 - [x] `src/index.ts` — runtime mutex check at top of every `*_request` / `*_request_async` handler (10 total). NOT Zod `.refine()` — the SDK rejects top-level refines. Uses `resolvePromptOrPartsForPrep()` which returns `createErrorResponse(...)` with the dag-mandated strings.
 - [x] `src/index.ts` — `prepare*Request` functions (Claude, Codex, Gemini, Grok, Mistral) call `resolvePromptInput()`.
 - [x] `src/index.ts` — `safeFlightStart` call sites thread `stablePrefixHash` + `stablePrefixTokens` and use `prep.effectivePrompt`. SYNC path only (async-path FR integration is out of scope per dag step 7 point 5).
-- [x] `src/index.ts` — new MCP resource registrations (`server.registerResource`, with `ResourceTemplate` for templated URIs) for `cache_state://global`, `cache_state://session/{id}`, `cache_state://prefix/{hash}`.
+- [x] `src/index.ts` — new MCP resource registrations (`server.registerResource`, with `ResourceTemplate` for templated URIs) for `cache-state://global`, `cache-state://session/{id}`, `cache-state://prefix/{hash}`.
 - [x] `src/index.ts` — `session_get` handler returns `cacheState` when the session has prior requests (omitted entirely for fresh sessions).
 - [x] `src/index.ts` — `claude_request` / `claude_request_async` emit a `warnings[]` entry when TTL < 30s and `[cache_awareness].warn_on_ttl_expiry = true`. Session resolution moved BEFORE `safeFlightStart` so the warning reads PRIOR rows, not the just-inserted row.
 - [x] `src/prompt-parts.ts` — NEW. Pure `assemble()` + `resolvePromptInput()`.
 - [x] `src/request-helpers.ts` — UNCHANGED for promptParts wiring. Only Mistral-specific Prepare* types live here; the core `prepare*Request` functions are in `src/index.ts`.
 - [x] `src/async-job-manager.ts` — UNCHANGED. Async-path flight-recorder integration is out of scope.
 - [x] `src/flight-recorder.ts` — migration v3 (stable_prefix_hash, stable_prefix_tokens, index) + FlightLogStart extension + read-only `queryRequests()` with `stmt.readonly` guard.
-- [x] `src/resources.ts` — `ResourceProvider` constructor + cache_state read methods. Slice 3 also threads `CacheAwarenessConfig` so `ttlRemainingMs` is populated on `cache_state://session/{id}`.
+- [x] `src/resources.ts` — `ResourceProvider` constructor + cache_state read methods. Slice 3 also threads `CacheAwarenessConfig` so `ttlRemainingMs` is populated on `cache-state://session/{id}`.
 - [x] `src/config.ts` — `CacheAwarenessSchema` + `loadCacheAwarenessConfig` + `minStableTokensForModel` + threaded through `GatewayServerRuntime`.
 - [x] `src/doctor.ts` — `DoctorReport` extended with required `cache_awareness` block (always present, zeroed when deps absent). `printDoctorJson` lazy-loads config + flight recorder best-effort.
 - [x] `setup/status.schema.json` — `cache_awareness` added to root `required` with nested schema (each sub-block `additionalProperties:false`; root unchanged).
@@ -118,4 +118,4 @@ Do NOT roll back by dropping the v3 columns — SQLite ALTER TABLE DROP COLUMN e
 
 ## Acceptance gate
 
-`cache_state://global` returns non-zero `total_hits` within 24h of dogfooding. The block ships dormant; operators flip `warn_on_ttl_expiry = true` and observe behaviour over a few days before any production rollout decision.
+`cache-state://global` returns non-zero `total_hits` within 24h of dogfooding. The block ships dormant; operators flip `warn_on_ttl_expiry = true` and observe behaviour over a few days before any production rollout decision.

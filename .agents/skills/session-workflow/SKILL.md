@@ -1,6 +1,6 @@
 ---
 name: session-workflow
-description: Manage conversation sessions across Claude, Codex, Gemini, Grok, and Mistral. Use for multi-turn conversations, session switching, workspace management. Covers the `session_get.cacheState` projection, cache-aware `promptParts`, and `cache_state://` MCP resources.
+description: Manage conversation sessions across Claude, Codex, Gemini, Grok, and Mistral. Use for multi-turn conversations, session switching, workspace management. Covers the `session_get.cacheState` projection, cache-aware `promptParts`, and `cache-state://` MCP resources.
 metadata:
   author: verivus-oss
   version: "1.6"
@@ -213,9 +213,9 @@ claude_request({
 
 The gateway hashes the stable prefix and writes it to the flight recorder so per-session and per-prefix cache effectiveness is queryable via MCP resources:
 
-- `cache_state://global` — last-24h aggregate hit rate, total hits, estimated savings, with per-CLI breakdown
-- `cache_state://session/{sessionId}` — per-session aggregates (same shape as `session_get.cacheState`)
-- `cache_state://prefix/{hash}` — per-stable-prefix-hash aggregates with CLI × model breakdown
+- `cache-state://global` — last-24h aggregate hit rate, total hits, estimated savings, with per-CLI breakdown
+- `cache-state://session/{sessionId}` — per-session aggregates (same shape as `session_get.cacheState`)
+- `cache-state://prefix/{hash}` — per-stable-prefix-hash aggregates with CLI × model breakdown
 
 ### TTL warning (Claude, opt-in)
 

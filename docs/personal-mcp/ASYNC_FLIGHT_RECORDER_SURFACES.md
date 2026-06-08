@@ -15,7 +15,7 @@ job manager has **zero** flight-recorder calls today: `grep -n
 "FlightLogStart\|safeFlightStart\|logStart\|flightRecorder"
 src/async-job-manager.ts` returns empty.
 
-Consequence: `cache_state://*` resources see only sync-path activity.
+Consequence: `cache-state://*` resources see only sync-path activity.
 Async tools (`*_request_async`) write nothing observable, even when
 `promptParts` was supplied.
 

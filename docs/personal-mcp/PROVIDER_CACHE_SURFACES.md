@@ -192,7 +192,7 @@ Mistral / vibe CLI: same. No cache reporting.
   `AsyncJobManager` now writes `logStart` (with `asyncJobId` set) and
   `logComplete` for `*_request_async` calls, AND covers the sync-deferred
   completion case where the sync handler returns a deferred response
-  before the underlying job terminates. cache_state://* aggregates
+  before the underlying job terminates. cache-state://* aggregates
   therefore include both sync and async row populations.
 - **Slice 3** (TTL tracking): only meaningful for Claude (5min default, 1h
   optional). For other CLIs, `ttlRemainingMs` is null.

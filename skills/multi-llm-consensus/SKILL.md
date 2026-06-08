@@ -189,7 +189,7 @@ codex_request_async({
 // …same promptParts to gemini / grok / mistral
 ```
 
-`prompt` and `promptParts` are mutually exclusive — the runtime returns `provide exactly one of \`prompt\` or \`promptParts\`` if both are supplied. The gateway concatenates in canonical order `system → tools → context → task` and hashes the stable prefix into the flight recorder. After the round, you can read `cache_state://prefix/{hash}` to confirm that every reviewer hit the same prefix and to see CLI × model hit-rate breakdown — useful for spotting "Claude cached, Gemini didn't" anomalies in a consensus round.
+`prompt` and `promptParts` are mutually exclusive — the runtime returns `provide exactly one of \`prompt\` or \`promptParts\`` if both are supplied. The gateway concatenates in canonical order `system → tools → context → task` and hashes the stable prefix into the flight recorder. After the round, you can read `cache-state://prefix/{hash}` to confirm that every reviewer hit the same prefix and to see CLI × model hit-rate breakdown — useful for spotting "Claude cached, Gemini didn't" anomalies in a consensus round.
 
 For re-review rounds (round 2+), keep `system` + `context` identical and mutate only `task` (or append a "previous findings" block to `context`). Holding the prefix stable across rounds is what makes the consensus loop affordable at scale.
 

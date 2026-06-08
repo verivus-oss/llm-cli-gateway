@@ -4,13 +4,13 @@
 # explicitly deferred. After this slice:
 #   1. *_request_async tools write rows to the flight recorder with
 #      stable_prefix_hash / stable_prefix_tokens populated (same shape as the
-#      sync path), so cache_state://* aggregates include async-job activity.
+#      sync path), so cache-state://* aggregates include async-job activity.
 #   2. Codex CLI's actual `cached_input_tokens` field is parsed, so the
 #      cache_read_tokens column starts populating on codex rows.
 #
 # Out of scope for this slice (gated on this slice's data):
 #   - Slice 4 (cache-aware multi-LLM routing) — needs 24h+ of clean
-#     cache_state://global data first; see cache-awareness.dag.toml comments.
+#     cache-state://global data first; see cache-awareness.dag.toml comments.
 #   - Slice 5 (explicit Claude cache_control via stream-json — Branch A) —
 #     separate plan; requires human-in-the-loop live smoke test.
 #
@@ -26,7 +26,7 @@ owner = "werner"
 slice = "cache-awareness-1.5"
 target_branch = "feat/cache-awareness-slice-1.5"
 release_version = "1.7.0"
-acceptance_resource = "cache_state://global aggregates include async-job rows; codex rows show non-NULL cache_read_tokens on cache hits"
+acceptance_resource = "cache-state://global aggregates include async-job rows; codex rows show non-NULL cache_read_tokens on cache hits"
 invariant_sources = [
   "/srv/repos/internal/verivusai-labs/rvwr/CLAUDE.md",
   "/srv/repos/internal/verivusai-labs/rvwr/llm-cli-gateway/docs/guides/BEST_PRACTICES.md",
@@ -600,7 +600,7 @@ action = """
    spawn `node -e "setTimeout(()=>{},10000)"` with idleTimeoutMs=100.
 
 3. src/__tests__/cache-state-resources.test.ts — add new test cases
-   verifying that cache_state://global and cache_state://prefix/{hash}
+   verifying that cache-state://global and cache-state://prefix/{hash}
    correctly aggregate async-job rows after the wiring lands. Seed the
    flight recorder with synthetic rows whose asyncJobId is non-null and
    confirm they appear in the aggregates.
@@ -651,8 +651,8 @@ Confirm by inspection:
   - src/cache-stats.ts queries do not filter by asyncJobId IS NULL, so
     async rows aggregate naturally once they exist.
   - The new test in cache-state-resources.test.ts passes both:
-      (a) cache_state://global total_hits reflects async-row cache reads
-      (b) cache_state://prefix/{hash} returns the async row when its
+      (a) cache-state://global total_hits reflects async-row cache reads
+      (b) cache-state://prefix/{hash} returns the async row when its
           stable_prefix_hash matches
 
 If filtering exists anywhere in cache-stats.ts that would silently exclude
@@ -692,14 +692,14 @@ action = """
      - Codex parser: accepts `cached_input_tokens` (current Codex CLI)
        in addition to the legacy `cache_read_input_tokens`. Cache hits on
        codex rows now populate `cache_read_tokens` in the flight recorder.
-     - cache_state://* MCP resources now include async-job activity.
+     - cache-state://* MCP resources now include async-job activity.
      - Migration impact: none. Schema unchanged from v1.6.x. No config
        changes. No opt-in flag — the behaviour is always on for new
        async-job rows.
 
 3. docs/launch/blog-cache-awareness.md — append a "Slice 1.5 follow-up
    (v1.7.0)" subsection to the "What's next" area noting:
-     - Async-path FR integration shipped — cache_state://* aggregates are
+     - Async-path FR integration shipped — cache-state://* aggregates are
        now complete across sync + async tools.
      - Codex parser fix shipped — cache_read_tokens populated for codex
        rows on cache hits.
