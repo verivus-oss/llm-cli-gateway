@@ -420,6 +420,92 @@ Post-fix verification:
   - Result: passed. Reported package `llm-cli-gateway-2.3.0.tgz`, unpacked
     size `1076065` bytes.
 
+Inspector-discovered fix multi-LLM review:
+
+- Review target:
+  - Initial commit: `9ee61f0 fix: use valid MCP resource URI schemes`.
+  - Corrective follow-up:
+    `f06e502 docs: update MCP resource URI references`.
+  - Final reviewed range: `1f35941..HEAD`.
+  - Exact round-2 review diff:
+    `/tmp/llm-cli-gateway-uri-scheme-review-stack-r2.diff`.
+- Review instructions:
+  - Each reviewer received this verification report plus the exact commit/diff
+    or changed-file list under review.
+  - Each reviewer was instructed to verify claims against code, tests, docs,
+    and persistent evidence rather than relying on summary language.
+  - Providers were given MCP tool access where their CLI accepted it and
+    permissive/full local execution permissions through the gateway approval
+    surface.
+- Round 1 jobs:
+  - Claude:
+    `c22f1222-9665-49ac-9fe1-018924c12428`
+    (`uri-scheme-fix-review-claude-20260608-r1`) - `APPROVED` with
+    non-blocking docs/test observations.
+  - Codex:
+    `4658b5e2-51c1-4e2d-98cb-708ddac774a9`
+    (`uri-scheme-fix-review-codex-20260608-r1`) - `APPROVED` with
+    non-blocking docs drift observation.
+  - Gemini:
+    `f51a0ec8-5d61-42c5-9173-e48d9ced6cff`
+    (`uri-scheme-fix-review-gemini-20260608-r1`) - `NOT APPROVED`.
+  - Grok:
+    `cd6cb1de-5392-4a1f-a2ad-a2653d272a49`
+    (`uri-scheme-fix-review-grok-20260608-r1`) - `APPROVED` with
+    non-blocking docs/asymmetry observations.
+  - Mistral:
+    `68f40df5-154f-45cd-8bc9-8d4a586295bb`
+    (`uri-scheme-fix-review-mistral-20260608-r1`) - `APPROVED`.
+- Round 1 concrete blocker:
+  - Gemini found tracked docs and skills still instructing invalid
+    `cache_state://` and `provider_subcommands://` resource schemes after the
+    code fix.
+  - I verified the finding with
+    `rg -n "cache_state://|provider_subcommands://" ...`.
+- Corrective action:
+  - Committed `f06e502 docs: update MCP resource URI references`.
+  - Updated docs and skills to instruct `cache-state://` and
+    `provider-subcommands://`.
+  - Left remaining invalid-scheme literals only as historical defect evidence,
+    explicit legacy direct-read compatibility tests/code, or frozen flight
+    recorder capture data.
+- Corrective verification:
+  - `npm test -- src/__tests__/upstream-contracts.test.ts src/__tests__/cache-state-resources.test.ts`
+    - Result: passed, 40 tests.
+  - `npm run build`
+    - Result: passed.
+  - `npm run format:check`
+    - Result: passed.
+  - `git diff --check`
+    - Result: passed.
+  - `npm test`
+    - Result: passed, 67 test files, 1124 tests.
+  - `npm run lint`
+    - Result: passed with warnings only, matching known warnings.
+  - `npm pack --dry-run --json`
+    - Result: passed. Reported package `llm-cli-gateway-2.3.0.tgz`, unpacked
+      size `1076065` bytes.
+- Round 2 jobs:
+  - Claude:
+    `51b9e79e-81db-4a05-89a8-a39f027b51d2`
+    (`uri-scheme-fix-review-claude-20260608-r2`) - `APPROVED`.
+  - Codex:
+    `463d5211-8e58-4c62-9888-94f8bc649837`
+    (`uri-scheme-fix-review-codex-20260608-r2`) - `APPROVED`.
+  - Gemini:
+    `43e4a4d3-bfbd-4b9c-9d85-30cdac3206e7`
+    (`uri-scheme-fix-review-gemini-20260608-r2`) - `APPROVED`.
+  - Grok:
+    `1092119f-8114-4a86-b5ba-3909b375fa40`
+    (`uri-scheme-fix-review-grok-20260608-r2`) - `APPROVED`.
+  - Mistral:
+    `b268d5f4-5290-44ce-b8bd-1d3906e3e876`
+    (`uri-scheme-fix-review-mistral-20260608-r2`) - `APPROVED`.
+- Final review outcome:
+  - Claude, Codex, Gemini, Grok, and Mistral all gave unconditional approval
+    of the final two-commit URI-scheme stack.
+  - No unresolved blockers remain from the Inspector-discovered fix review.
+
 ## Final Git Status
 
 ```text
