@@ -4,9 +4,15 @@ import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   loadPersistenceConfig,
+  loadProvidersConfig,
+  isXaiProviderEnabled,
   DEFAULT_JOB_RETENTION_DAYS,
   DEFAULT_DEDUP_WINDOW_MS,
+  DEFAULT_XAI_API_KEY_ENV,
+  DEFAULT_XAI_BASE_URL,
+  DEFAULT_XAI_MODEL,
   type PersistenceConfig,
+  type ProvidersConfig,
 } from "../config.js";
 import { MemoryJobStore, SqliteJobStore, createJobStore, PostgresJobStore } from "../job-store.js";
 import { AsyncJobManager } from "../async-job-manager.js";
@@ -175,6 +181,126 @@ describe("loadPersistenceConfig", () => {
     const cfg = loadPersistenceConfig(noopLogger);
     expect(cfg.retentionDays).toBe(5);
     expect(cfg.sources.envOverrides).toContain("LLM_GATEWAY_JOB_RETENTION_DAYS");
+  });
+});
+
+describe("loadProvidersConfig", () => {
+  let tempDir: string;
+  let stubbedConfig: string | undefined;
+
+  beforeEach(() => {
+    tempDir = mkdtempSync(join(tmpdir(), "providers-config-test-"));
+    stubbedConfig = process.env.LLM_GATEWAY_CONFIG;
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    rmSync(tempDir, { recursive: true, force: true });
+    if (stubbedConfig === undefined) {
+      delete process.env.LLM_GATEWAY_CONFIG;
+    } else {
+      process.env.LLM_GATEWAY_CONFIG = stubbedConfig;
+    }
+  });
+
+  function pointToFile(tomlBody: string): string {
+    const p = join(tempDir, "config.toml");
+    writeFileSync(p, tomlBody);
+    vi.stubEnv("LLM_GATEWAY_CONFIG", p);
+    return p;
+  }
+
+  it("returns disabled xAI defaults when [providers.xai] is absent", () => {
+    pointToFile(["[persistence]", 'backend = "none"', ""].join("\n"));
+    const cfg = loadProvidersConfig(noopLogger);
+    expect(cfg.xai).toBeNull();
+  });
+
+  it("loads [providers.xai] with default API env, base URL, and model", () => {
+    pointToFile(["[providers.xai]", ""].join("\n"));
+    const cfg = loadProvidersConfig(noopLogger);
+    expect(cfg.xai).toEqual({
+      apiKeyEnv: DEFAULT_XAI_API_KEY_ENV,
+      baseUrl: DEFAULT_XAI_BASE_URL,
+      defaultModel: DEFAULT_XAI_MODEL,
+    });
+  });
+
+  it("loads explicit [providers.xai] values without reading key material", () => {
+    pointToFile(
+      [
+        "[providers.xai]",
+        'api_key_env = "CUSTOM_XAI_KEY"',
+        'base_url = "https://example.test/v1"',
+        'default_model = "grok-4.3"',
+        "",
+      ].join("\n")
+    );
+    vi.stubEnv("CUSTOM_XAI_KEY", "secret-value");
+    const cfg = loadProvidersConfig(noopLogger);
+    expect(cfg.xai).toEqual({
+      apiKeyEnv: "CUSTOM_XAI_KEY",
+      baseUrl: "https://example.test/v1",
+      defaultModel: "grok-4.3",
+    });
+    expect(JSON.stringify(cfg)).not.toContain("secret-value");
+  });
+
+  it("gates xAI enablement on the configured env var being non-empty", () => {
+    pointToFile(["[providers.xai]", 'api_key_env = "CUSTOM_XAI_KEY"', ""].join("\n"));
+    const cfg = loadProvidersConfig(noopLogger);
+    expect(isXaiProviderEnabled(cfg, {})).toBe(false);
+    expect(isXaiProviderEnabled(cfg, { CUSTOM_XAI_KEY: "   " })).toBe(false);
+    expect(isXaiProviderEnabled(cfg, { CUSTOM_XAI_KEY: "present" })).toBe(true);
+  });
+
+  it("schema-invalid [providers.xai] disables only the provider", () => {
+    pointToFile(
+      [
+        "[persistence]",
+        'backend = "sqlite"',
+        `path = "${join(tempDir, "jobs.db").replace(/\\/g, "\\\\")}"`,
+        "",
+        "[providers.xai]",
+        "base_url = 42",
+        "",
+      ].join("\n")
+    );
+    vi.stubEnv("LLM_GATEWAY_LOGS_DB", "");
+    vi.stubEnv("LLM_GATEWAY_JOBS_DB", "");
+    const warn = vi.fn();
+    const logger = {
+      info: () => {},
+      error: () => {},
+      debug: () => {},
+      warn,
+    };
+    const providers = loadProvidersConfig(logger);
+    const persistence = loadPersistenceConfig(logger);
+    expect(providers.xai).toBeNull();
+    expect(persistence.backend).toBe("sqlite");
+    expect(persistence.path).toBe(join(tempDir, "jobs.db"));
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringMatching(/Invalid \[providers\.xai\] config/),
+      expect.anything()
+    );
+  });
+
+  it("rejects plaintext non-loopback xAI base URLs", () => {
+    pointToFile(["[providers.xai]", 'base_url = "http://api.example.test/v1"', ""].join("\n"));
+    const warn = vi.fn();
+    const logger = {
+      info: () => {},
+      error: () => {},
+      debug: () => {},
+      warn,
+    };
+    const providers = loadProvidersConfig(logger);
+    expect(providers.xai).toBeNull();
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringMatching(/Invalid \[providers\.xai\] config/),
+      expect.anything()
+    );
   });
 });
 
@@ -397,6 +523,14 @@ describe("createGatewayServer — structural invariant on async tool registratio
     };
   }
 
+  function mkProviders(overrides: Partial<ProvidersConfig> = {}): ProvidersConfig {
+    return {
+      xai: null,
+      sources: { configFile: null },
+      ...overrides,
+    };
+  }
+
   it("registers all 8 async tools when persistence.asyncJobsEnabled AND manager has store", () => {
     const manager = new AsyncJobManager(noopLogger, undefined, new MemoryJobStore());
     const server = createGatewayServer({
@@ -461,5 +595,43 @@ describe("createGatewayServer — structural invariant on async tool registratio
       expect(tools.has(t), `expected ${t} to NOT be registered`).toBe(false);
     }
     expect(tools.has("llm_process_health")).toBe(true);
+  });
+
+  it("registers grok_api_request when xAI config is enabled and leaves async unregistered", () => {
+    vi.stubEnv("XAI_API_KEY", "test-key");
+    const manager = new AsyncJobManager(noopLogger, undefined, new MemoryJobStore());
+    const server = createGatewayServer({
+      asyncJobManager: manager,
+      persistence: mkPersistence({ asyncJobsEnabled: true }),
+      providers: mkProviders({
+        xai: {
+          apiKeyEnv: "XAI_API_KEY",
+          baseUrl: "https://api.x.ai/v1",
+          defaultModel: "grok-build-0.1",
+        },
+      }),
+    });
+    const tools = registeredToolNames(server);
+    expect(tools.has("grok_api_request")).toBe(true);
+    expect(tools.has("grok_api_request_async")).toBe(false);
+  });
+
+  it("does not register grok_api_request when the configured xAI key env var is missing", () => {
+    vi.stubEnv("XAI_API_KEY", "");
+    const manager = new AsyncJobManager(noopLogger, undefined, new MemoryJobStore());
+    const server = createGatewayServer({
+      asyncJobManager: manager,
+      persistence: mkPersistence({ asyncJobsEnabled: true }),
+      providers: mkProviders({
+        xai: {
+          apiKeyEnv: "XAI_API_KEY",
+          baseUrl: "https://api.x.ai/v1",
+          defaultModel: "grok-build-0.1",
+        },
+      }),
+    });
+    const tools = registeredToolNames(server);
+    expect(tools.has("grok_api_request")).toBe(false);
+    expect(tools.has("grok_api_request_async")).toBe(false);
   });
 });
