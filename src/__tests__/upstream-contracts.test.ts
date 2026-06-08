@@ -314,9 +314,9 @@ describe("upstream CLI contracts", () => {
       >
     )._registeredResourceTemplates;
     const template = templates["provider-subcommand-contract"].resourceTemplate.uriTemplate;
-    expect(template.toString()).toBe("provider_subcommands://{provider}/{+commandPath}");
-    expect(template.match("provider_subcommands://grok/models")).not.toBeNull();
-    expect(template.match("provider_subcommands://grok/agent/serve")).not.toBeNull();
+    expect(template.toString()).toBe("provider-subcommands://{provider}/{+commandPath}");
+    expect(template.match("provider-subcommands://grok/models")).not.toBeNull();
+    expect(template.match("provider-subcommands://grok/agent/serve")).not.toBeNull();
   });
 
   it("exposes provider_subcommands resources without raw help", async () => {
@@ -328,14 +328,19 @@ describe("upstream CLI contracts", () => {
     };
     const provider = new ResourceProvider(sessionManagerStub as never, new PerformanceMetrics());
 
-    const catalog = await provider.readResource("provider_subcommands://catalog");
+    const catalog = await provider.readResource("provider-subcommands://catalog");
     expect(catalog?.text.length).toBeLessThan(12 * 1024);
     expect(catalog?.text).not.toMatch(/Usage:|Options:/);
 
-    const detail = await provider.readResource("provider_subcommands://grok/agent/serve");
+    const detail = await provider.readResource("provider-subcommands://grok/agent/serve");
     expect(detail?.text.length).toBeLessThan(8 * 1024);
     expect(detail?.text).toContain('"commandPath"');
     expect(detail?.text).not.toMatch(/Usage:|Options:/);
+
+    const legacyCatalog = await provider.readResource("provider_subcommands://catalog");
+    const legacyDetail = await provider.readResource("provider_subcommands://grok/agent/serve");
+    expect(legacyCatalog).not.toBeNull();
+    expect(legacyDetail).not.toBeNull();
   });
 
   it("validates provider-specific env contracts", () => {

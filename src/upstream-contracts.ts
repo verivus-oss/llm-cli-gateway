@@ -2226,7 +2226,7 @@ function subcommandKey(commandPath: readonly string[]): string {
 }
 
 function subcommandResourceUri(cli: CliType, commandPath: readonly string[]): string {
-  return `provider_subcommands://${cli}/${commandPath.map(encodeURIComponent).join("/")}`;
+  return `provider-subcommands://${cli}/${commandPath.map(encodeURIComponent).join("/")}`;
 }
 
 export function flattenCliSubcommands(
