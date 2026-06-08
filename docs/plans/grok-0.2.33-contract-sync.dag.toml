@@ -1,0 +1,240 @@
+# Implementation plan: Grok Build 0.2.33 contract sync.
+#
+# Goal: update this checkout's xAI Grok CLI evidence and, only if the saved
+# probe shows contract drift, update the gateway's Grok contract. Initial
+# investigation after installing 0.2.33 found no top-level `grok_request`
+# contract drift.
+#
+# Verified on 2026-06-08:
+#   - `grok update --check --json` before install reported:
+#       currentVersion=0.2.32, latestVersion=0.2.33, updateAvailable=true,
+#       channel=stable.
+#   - `grok update --version 0.2.33` installed successfully.
+#   - `grok --version` now reports: grok 0.2.33 (c0ddec061).
+#   - `npm run upstream:scan -- --provider grok --probe-installed` passed.
+#   - `npm run upstream:scan -- --live --provider grok --probe-installed
+#      --fail-on-critical` passed and fetched
+#      https://docs.x.ai/developers/release-notes.md with HTTP 200.
+#   - Top-level `grok --help` still advertises the same watched contract
+#     categories as 0.2.32: flags, permission modes, session resume, sandbox,
+#     and output formats.
+#   - `grok agent --help` exposes additional subcommand-local flags
+#     (`--reauth`, `--agent-profile`, `--leader`, `--no-leader`,
+#     `--grok-ws-origin`, `--grok-ws-url`, `--cli-chat-proxy-base-url`,
+#     `--xai-api-base-url`) that are not part of the gateway's top-level
+#     `grok_request` / `grok_request_async` contract. Intentional expansion
+#     to provider subcommands is tracked separately in:
+#       docs/plans/provider-subcommands-scope-expansion.dag.toml
+
+[meta]
+name = "grok 0.2.33 contract sync"
+schema_version = "1.1"
+owner = "verivus-oss"
+provider = "grok"
+installed_version = "0.2.33"
+installed_build = "c0ddec061"
+previous_version = "0.2.32"
+target_branch = "master"
+successor_plan = "docs/plans/provider-subcommands-scope-expansion.dag.toml"
+acceptance_resource = "docs/upstream/snapshots/grok.json and any Grok contract fixtures accurately reflect the installed 0.2.33 top-level help surface; npm run upstream:contracts and npm test pass."
+invariant_sources = [
+  ".agents/skills/provider-grok/SKILL.md",
+  "src/upstream-contracts.ts",
+  "docs/upstream/provider-sources.dag.toml",
+]
+
+[decision]
+initial_contract_assessment = "no_top_level_drift_detected"
+implementation_mode = "evidence_refresh_first"
+code_change_required = false
+reason = """
+The installed 0.2.33 top-level help surface matches the existing
+UPSTREAM_CLI_CONTRACTS.grok surface under the scanner's watched categories.
+Do not edit src/upstream-contracts.ts just to bump prose from 0.2.32 to
+0.2.33. Edit the contract only if the saved installed probe reports
+extraVsContract or missingFromBinary entries.
+"""
+
+[[steps]]
+id = "capture-installed-version"
+depends_on = []
+actor = "assistant"
+action = """
+Record the installed Grok CLI version and update status:
+
+  grok --version
+  grok update --check --json
+
+Expected state after upgrade:
+  - currentVersion is 0.2.33
+  - latestVersion is 0.2.33
+  - updateAvailable is false
+  - channel is stable
+
+Do not record local binary paths, account names, tokens, or machine-specific
+launcher details in tracked files.
+"""
+idempotent = true
+validation = """
+The command output confirms `grok 0.2.33 (c0ddec061)` and the updater reports
+no available stable update.
+"""
+
+[[steps]]
+id = "refresh-upstream-evidence"
+depends_on = ["capture-installed-version"]
+actor = "assistant"
+action = """
+Refresh Grok upstream evidence using the scanner's write path:
+
+  npm run upstream:scan -- --live --provider grok --probe-installed --write-snapshot --write-report
+
+This updates:
+  - docs/upstream/snapshots/grok.json
+  - docs/upstream/reports/YYYY-MM-DD-grok.md
+
+Keep the snapshot/report evidence-only. If the report shows no critical
+installed-help-surface drift, do not make contract code changes in this step.
+"""
+idempotent = true
+validation = """
+The written snapshot has helpSurface.available=true and reports empty
+extraVsContract and missingFromBinary arrays. The written report contains no
+critical Grok installed-help-surface drift finding.
+"""
+
+[[steps]]
+id = "classify-drift"
+depends_on = ["refresh-upstream-evidence"]
+actor = "assistant"
+action = """
+Inspect the refreshed Grok snapshot and report:
+
+  - docs/upstream/snapshots/grok.json
+  - docs/upstream/reports/YYYY-MM-DD-grok.md
+
+Classify the result:
+  A. no drift:
+     - leave src/upstream-contracts.ts unchanged,
+     - leave Grok tool schemas unchanged,
+     - proceed directly to verification.
+
+  B. extraVsContract non-empty:
+     - each extra top-level flag must be assessed for MCP exposure,
+       argv arity, value enum/pattern, and whether it belongs to
+       grok_request or a subcommand outside current gateway scope.
+
+  C. missingFromBinary non-empty:
+     - remove or deprecate the stale contract flag only after confirming the
+       flag is absent from 0.2.33 top-level help and not hidden behind an
+       alternate help surface.
+"""
+idempotent = true
+validation = """
+The implementation notes state one of: "no contract code changes needed",
+"add flags", or "remove/deprecate flags", with the exact snapshot fields that
+triggered the decision.
+"""
+
+[[steps]]
+id = "update-contract-if-needed"
+depends_on = ["classify-drift"]
+actor = "assistant"
+action = """
+Only run this step if classify-drift selected B or C.
+
+For each top-level Grok drift item:
+  1. Update UPSTREAM_CLI_CONTRACTS.grok in src/upstream-contracts.ts:
+     - flags arity,
+     - enum/pattern values,
+     - mcpParameters when the gateway should expose the flag,
+     - conformanceFixtures proving accept/reject behavior.
+  2. Update prepareGrokRequest and both MCP schemas in src/index.ts when a
+     new exposed parameter is added.
+  3. Add or update focused tests in src/__tests__/grok-handler.test.ts and,
+     for contract-only behavior, src/__tests__/upstream-contracts.test.ts.
+  4. Update docs/upstream/provider-sources.dag.toml only if source URLs,
+     watch categories, or distribution metadata changed.
+
+Do not add subcommand-local `grok agent ...` flags to the top-level
+grok_request contract unless a separate design decision expands gateway
+coverage beyond top-level headless invocations.
+"""
+idempotent = true
+validation = """
+`npm run upstream:contracts` passes, the focused Grok handler/contract tests
+cover the new or removed behavior, and scanner drift arrays are empty after
+re-running the installed probe.
+"""
+
+[[steps]]
+id = "verify-contract-sync"
+depends_on = ["classify-drift", "update-contract-if-needed"]
+actor = "assistant"
+action = """
+Run the verification gate:
+
+  npm run build
+  npm run upstream:contracts
+  npm run upstream:scan -- --provider grok --probe-installed
+  npm test -- src/__tests__/upstream-contracts.test.ts src/__tests__/grok-handler.test.ts
+
+If code changed outside the contract/test files, broaden to:
+
+  npm run check
+"""
+idempotent = true
+validation = """
+All commands pass. If npm run check is skipped because this is evidence-only,
+the final note explicitly says no production code changed and lists the
+focused gates that were run.
+"""
+
+[[steps]]
+id = "review-and-merge-guidance"
+depends_on = ["verify-contract-sync"]
+actor = "assistant"
+action = """
+Prepare a concise closeout for review/merge:
+
+  - installed Grok version and build,
+  - whether contract code changed,
+  - scanner evidence files updated,
+  - verification commands and results,
+  - any subcommand-local flags intentionally left out of top-level contract
+    scope,
+  - explicit note that no secrets, local binary paths, or account names were
+    added to tracked files.
+"""
+idempotent = true
+validation = """
+The closeout gives a maintainer enough information to decide whether this is
+an evidence-only change or a contract implementation change.
+"""
+
+[rollback]
+guidance = """
+If 0.2.33 proves unstable locally, use the vendor updater to reinstall the
+previous stable version:
+
+  grok update --version 0.2.32
+
+Then rerun:
+
+  grok --version
+  npm run upstream:scan -- --provider grok --probe-installed
+
+Do not revert unrelated worktree changes while rolling back the local binary.
+"""
+
+[risks]
+known = [
+  "The scanner currently watches top-level grok --help, not every subcommand help surface.",
+  "The Grok binary is vendor-installed, not pinned through package.json or a public npm package.",
+  "docs/upstream/snapshots/grok.json may not record the binary version unless scanner support is extended.",
+]
+mitigations = [
+  "Keep 0.2.33 sync evidence tied to explicit command output in the review closeout.",
+  "Treat subcommand-local flags as a separate design slice before exposing them through gateway tools.",
+  "Use --probe-installed on every Grok contract sync because the xAI release notes are high-level.",
+]
