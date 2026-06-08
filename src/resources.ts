@@ -59,7 +59,7 @@ export class ResourceProvider {
   }
 
   /**
-   * cache_state://global — aggregates across the entire flight recorder.
+   * cache-state://global — aggregates across the entire flight recorder.
    * Optionally restrict to a recent window via `lastNHours`. Returns
    * tokens/hashes/aggregates ONLY — no prompt text fields. The redaction is
    * structural: the response shape (GlobalCacheStats) has no `prompt`,
@@ -70,7 +70,7 @@ export class ResourceProvider {
   }
 
   /**
-   * cache_state://session/{sessionId} — per-session aggregates. Returns
+   * cache-state://session/{sessionId} — per-session aggregates. Returns
    * empty defaults when the session has no rows. Token/hash fields only.
    *
    * Slice 3: populates `ttlRemainingMs` by applying the configured TTL
@@ -87,7 +87,7 @@ export class ResourceProvider {
   }
 
   /**
-   * cache_state://prefix/{hash} — per-stable-prefix-hash aggregates.
+   * cache-state://prefix/{hash} — per-stable-prefix-hash aggregates.
    * Returns empty defaults for unknown hashes. Token/hash fields only.
    */
   readCacheStateForPrefix(stablePrefixHash: string): PrefixCacheStats {
@@ -231,7 +231,7 @@ export class ResourceProvider {
         },
       },
       {
-        uri: "provider_subcommands://catalog",
+        uri: "provider-subcommands://catalog",
         name: "Provider Subcommands Catalog",
         title: "Provider Subcommands Catalog",
         description: "Compact read-only catalog of declared provider CLI subcommands",
@@ -422,7 +422,7 @@ export class ResourceProvider {
       };
     }
 
-    if (uri === "provider_subcommands://catalog") {
+    if (uri === "provider-subcommands://catalog" || uri === "provider_subcommands://catalog") {
       return {
         uri,
         mimeType: "application/json",
@@ -458,8 +458,12 @@ export class ResourceProvider {
 function parseProviderSubcommandUri(
   uri: string
 ): { provider: CliType; commandPath: string[] } | null {
-  const prefix = "provider_subcommands://";
-  if (!uri.startsWith(prefix) || uri === "provider_subcommands://catalog") return null;
+  const prefix = uri.startsWith("provider-subcommands://")
+    ? "provider-subcommands://"
+    : uri.startsWith("provider_subcommands://")
+      ? "provider_subcommands://"
+      : null;
+  if (!prefix || uri === `${prefix}catalog`) return null;
   const rest = uri.slice(prefix.length);
   const [providerRaw, ...pathParts] = rest.split("/");
   if (!CLI_TYPES.includes(providerRaw as CliType) || pathParts.length === 0) return null;

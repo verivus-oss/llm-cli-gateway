@@ -1413,7 +1413,7 @@ function registerBaseResources(server: McpServer, runtime: GatewayServerRuntime)
   // themselves: those shapes have no prompt/response/system/task fields.
   server.registerResource(
     "cache-state-global",
-    "cache_state://global",
+    "cache-state://global",
     {
       title: "💾 Cache State (Global)",
       description:
@@ -1421,7 +1421,7 @@ function registerBaseResources(server: McpServer, runtime: GatewayServerRuntime)
       mimeType: "application/json",
     },
     async uri => {
-      runtime.logger.debug("Reading cache_state://global resource");
+      runtime.logger.debug("Reading cache-state://global resource");
       const stats = runtime.resourceProvider.readCacheStateGlobal({
         lastNHours: 24,
       });
@@ -1439,7 +1439,7 @@ function registerBaseResources(server: McpServer, runtime: GatewayServerRuntime)
 
   server.registerResource(
     "cache-state-session",
-    new ResourceTemplate("cache_state://session/{sessionId}", { list: undefined }),
+    new ResourceTemplate("cache-state://session/{sessionId}", { list: undefined }),
     {
       title: "💾 Cache State (Session)",
       description: "Per-session cache hit/miss/savings. Tokens/hashes only — no prompt text.",
@@ -1449,7 +1449,7 @@ function registerBaseResources(server: McpServer, runtime: GatewayServerRuntime)
       const sessionId = Array.isArray(variables.sessionId)
         ? variables.sessionId[0]
         : variables.sessionId;
-      runtime.logger.debug(`Reading cache_state://session/${sessionId}`);
+      runtime.logger.debug(`Reading cache-state://session/${sessionId}`);
       const stats = runtime.resourceProvider.readCacheStateSession(String(sessionId));
       return {
         contents: [
@@ -1465,7 +1465,7 @@ function registerBaseResources(server: McpServer, runtime: GatewayServerRuntime)
 
   server.registerResource(
     "cache-state-prefix",
-    new ResourceTemplate("cache_state://prefix/{hash}", { list: undefined }),
+    new ResourceTemplate("cache-state://prefix/{hash}", { list: undefined }),
     {
       title: "💾 Cache State (Prefix)",
       description:
@@ -1474,7 +1474,7 @@ function registerBaseResources(server: McpServer, runtime: GatewayServerRuntime)
     },
     async (uri, variables) => {
       const hash = Array.isArray(variables.hash) ? variables.hash[0] : variables.hash;
-      runtime.logger.debug(`Reading cache_state://prefix/${hash}`);
+      runtime.logger.debug(`Reading cache-state://prefix/${hash}`);
       const stats = runtime.resourceProvider.readCacheStateForPrefix(String(hash));
       return {
         contents: [
@@ -1490,14 +1490,14 @@ function registerBaseResources(server: McpServer, runtime: GatewayServerRuntime)
 
   server.registerResource(
     "provider-subcommands-catalog",
-    "provider_subcommands://catalog",
+    "provider-subcommands://catalog",
     {
       title: "Provider Subcommands Catalog",
       description: "Compact read-only catalog of declared provider CLI subcommands",
       mimeType: "application/json",
     },
     async uri => {
-      runtime.logger.debug("Reading provider_subcommands://catalog resource");
+      runtime.logger.debug("Reading provider-subcommands://catalog resource");
       const contents = await runtime.resourceProvider.readResource(uri.href);
       return { contents: contents ? [contents] : [] };
     }
@@ -1505,7 +1505,7 @@ function registerBaseResources(server: McpServer, runtime: GatewayServerRuntime)
 
   server.registerResource(
     "provider-subcommand-contract",
-    new ResourceTemplate("provider_subcommands://{provider}/{+commandPath}", { list: undefined }),
+    new ResourceTemplate("provider-subcommands://{provider}/{+commandPath}", { list: undefined }),
     {
       title: "Provider Subcommand Contract",
       description: "Detailed read-only contract for one declared provider CLI subcommand",
@@ -1518,7 +1518,7 @@ function registerBaseResources(server: McpServer, runtime: GatewayServerRuntime)
       const commandPath = Array.isArray(variables.commandPath)
         ? variables.commandPath[0]
         : variables.commandPath;
-      runtime.logger.debug(`Reading provider_subcommands://${provider}/${commandPath}`);
+      runtime.logger.debug(`Reading provider-subcommands://${provider}/${commandPath}`);
       const contents = await runtime.resourceProvider.readResource(uri.href);
       return { contents: contents ? [contents] : [] };
     }

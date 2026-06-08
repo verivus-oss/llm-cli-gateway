@@ -261,9 +261,6 @@ Full-stack verification after all five commits:
 - No unresolved implementation blockers.
 - `docs/plans/grok-api-provider-design.draft.md` was intentionally preserved as
   untracked because it was not included in any requested stack layer.
-- This split report is also untracked so the requested five-layer stack remains
-  exactly five commits. It remains persisted at
-  `docs/reviews/dirty-tree-stack-split-verification-2026-06-08.md`.
 - The layer 2/3 boundary keeps the ownership helper in layer 2 for buildable API
   provider code; layer 3 applies the cross-provider enforcement guards broadly.
 
@@ -346,9 +343,83 @@ Final multi-LLM review outcome:
 - Mistral: `APPROVED`
 - No concrete unresolved blockers.
 
+## MCP Inspector Follow-Up
+
+MCP Inspector installation and CLI smoke:
+
+- Installed global package:
+  `@modelcontextprotocol/inspector@0.22.0`.
+- `HOST=127.0.0.1 mcp-inspector --cli node dist/index.js --method tools/list`
+  - Result: passed.
+- `HOST=127.0.0.1 mcp-inspector --cli node dist/index.js --method resources/list`
+  - Result: passed.
+- `HOST=127.0.0.1 mcp-inspector --cli node dist/index.js --method prompts/list`
+  - Result: expected capability absence: MCP `Method not found`.
+- Read-only tool calls through Inspector:
+  - `llm_process_health`: passed.
+  - `list_available_models`: passed.
+  - `cli_versions`: passed globally and per provider.
+  - `upstream_contracts`: passed with and without `probeInstalled=true`.
+  - `provider_subcommands_list`: passed.
+  - `provider_subcommand_contract`: passed for `grok agent headless` and
+    `codex exec`.
+  - `provider_subcommand_drift`: passed for Grok and all providers with
+    `includeClean=true`.
+  - `approval_list --tool-arg limit=5`: passed.
+  - `list_models`: passed for `claude`, `codex`, `gemini`, `grok`,
+    `mistral`.
+  - `cli_upgrade --tool-arg dryRun=true`: passed for all five CLI providers.
+  - `compare_answers`: passed.
+- Session lifecycle through Inspector:
+  - Created a temporary non-active `grok-api` session, read it with
+    `session_get`, then deleted it with `session_delete`.
+  - Result: passed and cleaned up.
+- Direct xAI API provider through Inspector:
+  - Current default config leaves `grok_api_request` intentionally unregistered
+    because `[providers.xai]`/`XAI_API_KEY` are absent.
+  - Positive smoke used a temporary `LLM_GATEWAY_CONFIG`, loopback mock xAI
+    Responses API, and `XAI_API_KEY=inspector-test-key`.
+  - Result: `grok_api_request` registered, returned `inspector mock ok`, and
+    the loopback mock received exactly one request.
+
+Inspector-discovered defect and fix:
+
+- Initial exhaustive advertised-resource read found that
+  `cache_state://global` and `provider_subcommands://catalog` were advertised
+  but unreadable through Inspector with MCP `-32603: Invalid URL`.
+- Cause: underscore characters in the URI scheme are not valid URL schemes for
+  standard MCP clients/SDK URL parsing.
+- Fix: advertise and generate valid hyphenated schemes:
+  `cache-state://...` and `provider-subcommands://...`.
+- Compatibility: `ResourceProvider.readResource` still accepts the legacy
+  `provider_subcommands://...` strings for internal callers and older docs.
+- Re-run result: every URI returned by `resources/list` was read successfully:
+  all `skills://*`, `sessions://*`, `models://*`, `metrics://performance`,
+  `cache-state://global`, `provider-subcommands://catalog`, and
+  `metrics://process-health`.
+
+Post-fix verification:
+
+- `npm test -- src/__tests__/upstream-contracts.test.ts`
+  - Result: passed, 32 tests.
+- `npm test -- src/__tests__/cache-state-resources.test.ts`
+  - Result: passed, 8 tests.
+- `npm run build`
+  - Result: passed.
+- `npm test`
+  - Result: passed, 67 test files, 1124 tests.
+- `npm run lint`
+  - Result: passed with warnings only, matching the known ignored test-file
+    warnings and `src/__tests__/setup.ts`
+    `security/detect-non-literal-fs-filename`.
+- `npm run format:check`
+  - Result: passed.
+- `npm pack --dry-run --json`
+  - Result: passed. Reported package `llm-cli-gateway-2.3.0.tgz`, unpacked
+    size `1076065` bytes.
+
 ## Final Git Status
 
 ```text
 ?? docs/plans/grok-api-provider-design.draft.md
-?? docs/reviews/dirty-tree-stack-split-verification-2026-06-08.md
 ```

@@ -282,8 +282,8 @@ Expose read-only MCP surfaces for the new contract tree:
   - provider_subcommands_list({ provider? })
   - provider_subcommand_contract({ provider, commandPath })
   - provider_subcommand_drift({ provider? })
-  - resource provider_subcommands://catalog
-  - resource provider_subcommands://{provider}/{commandPath}
+  - resource provider-subcommands://catalog
+  - resource provider-subcommands://{provider}/{commandPath}
 
 These surfaces return contract metadata, risk/exposure classification, help
 hashes, and drift summaries. They do not execute provider subcommands.
@@ -297,9 +297,9 @@ Tool tiering and token-efficiency:
     through a separate commandPath prefix filter.
   - provider_subcommand_drift defaults to driftStatus != "clean"; callers must
     opt into clean rows.
-  - provider_subcommands://catalog returns the compact catalog and supports
+  - provider-subcommands://catalog returns the compact catalog and supports
     provider/tier/risk/exposure filters through URI templates.
-  - provider_subcommands://{provider}/{commandPath} returns the detailed
+  - provider-subcommands://{provider}/{commandPath} returns the detailed
     contract for that exact command path.
   - No tool returns full raw help output by default. If raw help is ever
     exposed, it must be a debug-only resource with size limits and redaction.
@@ -325,12 +325,12 @@ Tier 0: Server instructions
   - Do not inline provider command inventories into instructions.
 
 Tier 1: Catalog tools/resources
-  - provider_subcommands_list and provider_subcommands://catalog.
+  - provider_subcommands_list and provider-subcommands://catalog.
   - Compact, filterable, paginated, and sorted by provider + commandPath.
   - No flag maps, fixtures, or raw help.
 
 Tier 2: Inspect tools/resources
-  - provider_subcommand_contract and provider_subcommands://{provider}/{path}.
+  - provider_subcommand_contract and provider-subcommands://{provider}/{path}.
   - One command path per call, detailed but bounded.
   - Include a stable `next`/`related` list of resource URIs instead of
     embedding sibling command details.
