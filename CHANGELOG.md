@@ -4,6 +4,15 @@ All notable changes to the llm-cli-gateway project.
 
 ## Unreleased
 
+## [2.5.0] - 2026-06-08: Remote connector OAuth and workspaces
+
+- Added remote connector OAuth discovery and authorization-code support with
+  hash-only static client/shared-secret configuration, copy-once local secret
+  commands, and OAuth-first ChatGPT setup guidance.
+- Added workspace registry and workspace creation surfaces so provider requests
+  can select registered repo aliases and create local folders/Git repos only
+  under configured allowed roots.
+
 ## [2.4.0] - 2026-06-08: Direct Grok API provider and provider-owned sessions
 
 ### Added

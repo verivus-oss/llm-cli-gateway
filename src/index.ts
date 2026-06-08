@@ -3,7 +3,17 @@
 import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { randomUUID } from "crypto";
-import { existsSync, readFileSync, readdirSync, renameSync, unlinkSync } from "fs";
+import { createRequire } from "module";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync,
+  chmodSync,
+} from "fs";
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
 import { z } from "zod/v3";
@@ -39,6 +49,7 @@ import {
   loadPersistenceConfig,
   loadCacheAwarenessConfig,
   loadProvidersConfig,
+  defaultGatewayConfigPath,
   isXaiProviderEnabled,
   minStableTokensForModel,
   type PersistenceConfig,
@@ -120,7 +131,20 @@ import {
 } from "./cache-stats.js";
 import { getCliVersions, runCliUpgrade } from "./cli-updater.js";
 import { startHttpGateway, type HttpGatewayHandle } from "./http-transport.js";
+import { getRequestContext } from "./request-context.js";
 import { printDoctorJson } from "./doctor.js";
+import {
+  createWorkspace,
+  describeWorkspace,
+  getWorkspace,
+  loadWorkspaceRegistry,
+  registerExistingWorkspace,
+  resolveWorkspaceForProvider,
+  validatePathInsideWorkspace,
+  type EffectiveWorkspace,
+  type WorkspaceRegistry,
+} from "./workspace-registry.js";
+import { generateSecret, hashSecret } from "./oauth.js";
 import { registerValidationTools } from "./validation-tools.js";
 import {
   assertUpstreamCliArgs,
@@ -493,6 +517,13 @@ export const WORKTREE_SCHEMA = z
       "see slice λ spec Q4)."
   );
 
+export const WORKSPACE_ALIAS_SCHEMA = z
+  .string()
+  .min(1)
+  .max(64)
+  .regex(/^[A-Za-z][A-Za-z0-9._-]{0,63}$/)
+  .describe("Registered workspace alias. Remote clients use aliases, not absolute paths.");
+
 // Session-provider enum includes spawnable CLIs plus API-backed providers.
 // Keep CLI-only surfaces (contracts, status, updater) on CLI_TYPES.
 export const SESSION_PROVIDER_VALUES = PROVIDER_TYPES;
@@ -513,6 +544,7 @@ export interface GatewayServerDeps {
   persistence?: PersistenceConfig;
   cacheAwareness?: CacheAwarenessConfig;
   providers?: ProvidersConfig;
+  workspaces?: WorkspaceRegistry;
 }
 
 export interface GatewayServerRuntime {
@@ -527,6 +559,7 @@ export interface GatewayServerRuntime {
   persistence: PersistenceConfig;
   cacheAwareness: CacheAwarenessConfig;
   providers: ProvidersConfig;
+  workspaces: WorkspaceRegistry;
 }
 
 export function resolveGatewayServerRuntime(
@@ -574,6 +607,7 @@ export function resolveGatewayServerRuntime(
     persistence: deps.persistence ?? getPersistenceConfig(runtimeLogger),
     cacheAwareness: deps.cacheAwareness ?? getCacheAwarenessConfig(runtimeLogger),
     providers: deps.providers ?? getProvidersConfig(runtimeLogger),
+    workspaces: deps.workspaces ?? loadWorkspaceRegistry(runtimeLogger),
   };
 }
 
@@ -818,6 +852,8 @@ function buildDeferredToolResponse(
 export interface ResolvedWorktree {
   cwd?: string;
   worktreePath?: string;
+  workspaceAlias?: string;
+  workspaceRoot?: string;
 }
 
 /**
@@ -844,7 +880,8 @@ export interface ResolvedWorktree {
 export async function resolveWorktreeForRequest(
   worktreeOpt: boolean | { name?: string; ref?: string } | undefined,
   sessionId: string | undefined,
-  runtime: GatewayServerRuntime
+  runtime: GatewayServerRuntime,
+  options: { repoRoot?: string; workspaceAlias?: string; workspaceRoot?: string } = {}
 ): Promise<ResolvedWorktree> {
   if (!worktreeOpt) return {};
   const sessionManager = runtime.sessionManager;
@@ -852,12 +889,23 @@ export async function resolveWorktreeForRequest(
     const session = await Promise.resolve(sessionManager.getSession(sessionId));
     const existingPath = session?.metadata?.worktreePath;
     if (typeof existingPath === "string" && existingPath.length > 0) {
-      return { cwd: existingPath, worktreePath: existingPath };
+      return {
+        cwd: existingPath,
+        worktreePath: existingPath,
+        workspaceAlias:
+          typeof session?.metadata?.workspaceAlias === "string"
+            ? session.metadata.workspaceAlias
+            : options.workspaceAlias,
+        workspaceRoot:
+          typeof session?.metadata?.workspaceRoot === "string"
+            ? session.metadata.workspaceRoot
+            : options.workspaceRoot,
+      };
     }
   }
   const name = worktreeOpt === true ? undefined : worktreeOpt.name;
   const ref = worktreeOpt === true ? undefined : worktreeOpt.ref;
-  const repoRoot = process.cwd();
+  const repoRoot = options.repoRoot ?? process.cwd();
   const handle: WorktreeHandle = await createWorktree({
     repoRoot,
     name,
@@ -869,10 +917,98 @@ export async function resolveWorktreeForRequest(
       sessionManager.updateSessionMetadata(sessionId, {
         worktreePath: handle.path,
         worktreeName: handle.name,
+        ...(options.workspaceAlias ? { workspaceAlias: options.workspaceAlias } : {}),
+        ...(options.workspaceRoot ? { workspaceRoot: options.workspaceRoot } : {}),
       })
     );
   }
-  return { cwd: handle.path, worktreePath: handle.path };
+  return {
+    cwd: handle.path,
+    worktreePath: handle.path,
+    workspaceAlias: options.workspaceAlias,
+    workspaceRoot: options.workspaceRoot,
+  };
+}
+
+function isGatewayAppDirCwd(): boolean {
+  return process.cwd() === join(homedir(), ".llm-cli-gateway");
+}
+
+async function resolveWorkspaceAndWorktreeForRequest(args: {
+  provider: CliType;
+  workspace?: string;
+  worktree?: boolean | { name?: string; ref?: string };
+  sessionId?: string;
+  runtime: GatewayServerRuntime;
+  workingDir?: string;
+  addDir?: string[];
+}): Promise<{ cwd?: string; worktreePath?: string; workspace?: EffectiveWorkspace }> {
+  const session = args.sessionId
+    ? await Promise.resolve(args.runtime.sessionManager.getSession(args.sessionId))
+    : null;
+  let workspace: EffectiveWorkspace | undefined;
+  if (
+    args.workspace ||
+    args.runtime.workspaces.defaultAlias ||
+    typeof session?.metadata?.workspaceAlias === "string"
+  ) {
+    workspace = resolveWorkspaceForProvider(
+      args.runtime.workspaces,
+      args.provider,
+      args.workspace,
+      session?.metadata
+    );
+  } else if (isGatewayAppDirCwd()) {
+    throw new Error(
+      "No workspace selected. Configure [workspaces].default or pass a registered workspace alias."
+    );
+  }
+
+  if (!workspace && getRequestContext()?.authKind === "oauth") {
+    throw new Error(
+      "Remote OAuth provider requests require a registered workspace alias or [workspaces].default."
+    );
+  }
+
+  if (
+    !workspace &&
+    (args.workingDir || (args.addDir?.length ?? 0) > 0) &&
+    !args.runtime.workspaces.allowUnregisteredWorkingDir
+  ) {
+    throw new Error(
+      "workingDir/addDir require a registered workspace alias unless [workspaces].allow_unregistered_working_dir is explicitly enabled."
+    );
+  }
+
+  if (workspace) {
+    if (args.workingDir) {
+      validatePathInsideWorkspace(workspace, args.workingDir, "workingDir");
+    }
+    for (const dir of args.addDir ?? []) {
+      validatePathInsideWorkspace(workspace, dir, "addDir");
+    }
+  }
+
+  if (args.worktree) {
+    if (workspace && !workspace.repo.allowWorktree) {
+      throw new Error(`Workspace "${workspace.alias}" does not allow worktree requests`);
+    }
+    const resolved = await resolveWorktreeForRequest(args.worktree, args.sessionId, args.runtime, {
+      repoRoot: workspace?.root,
+      workspaceAlias: workspace?.alias,
+      workspaceRoot: workspace?.root,
+    });
+    return { cwd: resolved.cwd, worktreePath: resolved.worktreePath, workspace };
+  }
+  if (workspace && args.sessionId) {
+    await Promise.resolve(
+      args.runtime.sessionManager.updateSessionMetadata(args.sessionId, {
+        workspaceAlias: workspace.alias,
+        workspaceRoot: workspace.root,
+      })
+    );
+  }
+  return { cwd: workspace?.cwd, workspace };
 }
 
 /**
@@ -892,6 +1028,183 @@ export async function resolveWorktreeForRequest(
  */
 export function formatWorktreePrefix(worktreePath?: string): string {
   return worktreePath ? `[gateway] worktree=${worktreePath}\n` : "";
+}
+
+function workspaceAdminEnabled(): boolean {
+  const scopes = getRequestContext()?.authScopes ?? [];
+  return process.env.LLM_GATEWAY_WORKSPACE_ADMIN === "1" && scopes.includes("workspace:admin");
+}
+
+function registerWorkspaceTools(server: McpServer, runtime: GatewayServerRuntime): void {
+  server.tool(
+    "workspace_list",
+    "List registered workspace aliases and summary metadata. Does not browse files.",
+    {},
+    {
+      title: "List workspaces",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+    async () => {
+      const registry = loadWorkspaceRegistry(runtime.logger);
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify(
+              {
+                success: true,
+                enabled: registry.enabled,
+                default: registry.defaultAlias,
+                workspaces: registry.repos.map(describeWorkspace),
+                allowed_roots: registry.allowedRoots.map(root => ({
+                  alias: root.alias,
+                  path: root.path,
+                  allow_register_existing_git_repos: root.allowRegisterExistingGitRepos,
+                  allow_create_directories: root.allowCreateDirectories,
+                  allow_init_git_repos: root.allowInitGitRepos,
+                  max_create_depth: root.maxCreateDepth,
+                })),
+              },
+              null,
+              2
+            ),
+          },
+        ],
+      };
+    }
+  );
+
+  server.tool(
+    "workspace_get",
+    "Inspect a registered workspace alias. Does not list files.",
+    { alias: WORKSPACE_ALIAS_SCHEMA },
+    {
+      title: "Get workspace",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+    async ({ alias }) => {
+      try {
+        const registry = loadWorkspaceRegistry(runtime.logger);
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify(
+                { success: true, workspace: describeWorkspace(getWorkspace(registry, alias)) },
+                null,
+                2
+              ),
+            },
+          ],
+        };
+      } catch (error) {
+        return createErrorResponse("workspace_get", 1, "", undefined, error as Error);
+      }
+    }
+  );
+
+  server.tool(
+    "workspace_create",
+    "Create a new local folder or git repo under a configured allowed root. Requires LLM_GATEWAY_WORKSPACE_ADMIN=1 and OAuth scope workspace:admin.",
+    {
+      alias: WORKSPACE_ALIAS_SCHEMA,
+      root: WORKSPACE_ALIAS_SCHEMA.describe("Allowed-root alias from workspace_list."),
+      slug: z.string().min(1).max(255).describe("Safe relative path under the allowed root."),
+      kind: z.enum(["folder", "git"]).default("git"),
+      setDefault: z.boolean().default(false),
+    },
+    {
+      title: "Create workspace",
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: false,
+      openWorldHint: false,
+    },
+    async ({ alias, root, slug, kind, setDefault }) => {
+      try {
+        if (!workspaceAdminEnabled()) {
+          throw new Error(
+            "workspace_create requires LLM_GATEWAY_WORKSPACE_ADMIN=1 and OAuth scope workspace:admin"
+          );
+        }
+        const repo = createWorkspace({
+          alias,
+          rootAlias: root,
+          slug,
+          kind,
+          setDefault,
+          logger: runtime.logger,
+        });
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify({ success: true, workspace: describeWorkspace(repo) }, null, 2),
+            },
+          ],
+        };
+      } catch (error) {
+        return createErrorResponse("workspace_create", 1, "", undefined, error as Error);
+      }
+    }
+  );
+
+  server.tool(
+    "workspace_register_existing_repo",
+    "Register an existing local Git repo under an allowed root. Requires LLM_GATEWAY_WORKSPACE_ADMIN=1 and OAuth scope workspace:admin.",
+    {
+      alias: WORKSPACE_ALIAS_SCHEMA,
+      path: z
+        .string()
+        .min(1)
+        .describe("Absolute path to an existing Git repo under an allowed root."),
+      setDefault: z.boolean().default(false),
+    },
+    {
+      title: "Register workspace",
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: false,
+    },
+    async ({ alias, path, setDefault }) => {
+      try {
+        if (!workspaceAdminEnabled()) {
+          throw new Error(
+            "workspace_register_existing_repo requires LLM_GATEWAY_WORKSPACE_ADMIN=1 and OAuth scope workspace:admin"
+          );
+        }
+        const repo = registerExistingWorkspace({
+          alias,
+          repoPath: path,
+          setDefault,
+          logger: runtime.logger,
+        });
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify({ success: true, workspace: describeWorkspace(repo) }, null, 2),
+            },
+          ],
+        };
+      } catch (error) {
+        return createErrorResponse(
+          "workspace_register_existing_repo",
+          1,
+          "",
+          undefined,
+          error as Error
+        );
+      }
+    }
+  );
 }
 
 // Helper function for standardized error responses
@@ -3502,6 +3815,7 @@ export interface GeminiRequestParams {
   skipTrust?: boolean;
   /** Emit `--yolo` (auto-approve all). Equivalent to approvalMode "yolo"; gated identically. */
   yolo?: boolean;
+  workspace?: string;
   /** Slice λ: run this request inside a gateway-owned git worktree. */
   worktree?: boolean | { name?: string; ref?: string };
 }
@@ -3514,6 +3828,7 @@ export interface HandlerDeps {
     error: (...args: any[]) => void;
     debug: (...args: any[]) => void;
   };
+  workspaces?: WorkspaceRegistry;
   runtime?: GatewayServerRuntime;
 }
 
@@ -3537,6 +3852,7 @@ function resolveHandlerRuntime(deps: HandlerDeps): GatewayServerRuntime {
     sessionManager: deps.sessionManager,
     logger: normalizedLogger,
     asyncJobManager: asyncDeps.asyncJobManager,
+    workspaces: deps.workspaces,
   });
 }
 
@@ -3608,11 +3924,14 @@ export async function handleGeminiRequest(
 
     let worktreeResolution: ResolvedWorktree = {};
     try {
-      worktreeResolution = await resolveWorktreeForRequest(
-        params.worktree,
-        effectiveSessionIdHint,
-        runtime
-      );
+      worktreeResolution = await resolveWorkspaceAndWorktreeForRequest({
+        provider: "gemini",
+        workspace: params.workspace,
+        worktree: params.worktree,
+        sessionId: effectiveSessionIdHint,
+        runtime,
+        addDir: params.includeDirs,
+      });
     } catch (err) {
       return createErrorResponse("gemini_request", 1, "", corrId, err as Error);
     }
@@ -3635,6 +3954,7 @@ export async function handleGeminiRequest(
       undefined,
       geminiFrHandoff.flightRecorderEntry,
       geminiFrHandoff.extractUsage,
+      undefined,
       worktreeResolution.cwd
     );
 
@@ -3809,11 +4129,14 @@ export async function handleGeminiRequestAsync(
 
     let worktreeResolution: ResolvedWorktree = {};
     try {
-      worktreeResolution = await resolveWorktreeForRequest(
-        params.worktree,
-        effectiveSessionId,
-        runtime
-      );
+      worktreeResolution = await resolveWorkspaceAndWorktreeForRequest({
+        provider: "gemini",
+        workspace: params.workspace,
+        worktree: params.worktree,
+        sessionId: effectiveSessionId,
+        runtime,
+        addDir: params.includeDirs,
+      });
     } catch (err) {
       return createErrorResponse("gemini_request_async", 1, "", corrId, err as Error);
     }
@@ -3942,6 +4265,7 @@ export interface GrokRequestParams {
   leaderSocket?: string;
   /** Grok CLI `--worktree` (not gateway slice λ `worktree`). */
   nativeWorktree?: boolean | string;
+  workspace?: string;
   /** Slice λ: run this request inside a gateway-owned git worktree. */
   worktree?: boolean | { name?: string; ref?: string };
 }
@@ -4040,11 +4364,14 @@ export async function handleGrokRequest(
 
     let worktreeResolution: ResolvedWorktree = {};
     try {
-      worktreeResolution = await resolveWorktreeForRequest(
-        params.worktree,
-        sessionResult.effectiveSessionId,
-        runtime
-      );
+      worktreeResolution = await resolveWorkspaceAndWorktreeForRequest({
+        provider: "grok",
+        workspace: params.workspace,
+        worktree: params.worktree,
+        sessionId: sessionResult.effectiveSessionId,
+        runtime,
+        workingDir: params.workingDir,
+      });
     } catch (err) {
       return createErrorResponse("grok_request", 1, "", corrId, err as Error);
     }
@@ -4276,11 +4603,14 @@ export async function handleGrokRequestAsync(
 
     let worktreeResolution: ResolvedWorktree = {};
     try {
-      worktreeResolution = await resolveWorktreeForRequest(
-        params.worktree,
-        effectiveSessionId,
-        runtime
-      );
+      worktreeResolution = await resolveWorkspaceAndWorktreeForRequest({
+        provider: "grok",
+        workspace: params.workspace,
+        worktree: params.worktree,
+        sessionId: effectiveSessionId,
+        runtime,
+        workingDir: params.workingDir,
+      });
     } catch (err) {
       return createErrorResponse("grok_request_async", 1, "", corrId, err as Error);
     }
@@ -4369,6 +4699,7 @@ export interface MistralRequestParams {
   workingDir?: string;
   /** Phase 4 slice ζ: Vibe `--add-dir <DIR>` repeatable add-dir parity. */
   addDir?: string[];
+  workspace?: string;
   /** Slice λ: run this request inside a gateway-owned git worktree. */
   worktree?: boolean | { name?: string; ref?: string };
 }
@@ -4441,11 +4772,15 @@ export async function handleMistralRequest(
 
     let worktreeResolution: ResolvedWorktree = {};
     try {
-      worktreeResolution = await resolveWorktreeForRequest(
-        params.worktree,
-        sessionResult.effectiveSessionId,
-        runtime
-      );
+      worktreeResolution = await resolveWorkspaceAndWorktreeForRequest({
+        provider: "mistral",
+        workspace: params.workspace,
+        worktree: params.worktree,
+        sessionId: sessionResult.effectiveSessionId,
+        runtime,
+        workingDir: params.workingDir,
+        addDir: params.addDir,
+      });
     } catch (err) {
       return createErrorResponse("mistral_request", 1, "", corrId, err as Error);
     }
@@ -4681,11 +5016,15 @@ export async function handleMistralRequestAsync(
 
     let worktreeResolution: ResolvedWorktree = {};
     try {
-      worktreeResolution = await resolveWorktreeForRequest(
-        params.worktree,
-        effectiveSessionId,
-        runtime
-      );
+      worktreeResolution = await resolveWorkspaceAndWorktreeForRequest({
+        provider: "mistral",
+        workspace: params.workspace,
+        worktree: params.worktree,
+        sessionId: effectiveSessionId,
+        runtime,
+        workingDir: params.workingDir,
+        addDir: params.addDir,
+      });
     } catch (err) {
       return createErrorResponse("mistral_request_async", 1, "", corrId, err as Error);
     }
@@ -4776,6 +5115,7 @@ export async function handleCodexRequestAsync(
     // Phase 4 slice ζ — Codex working-dir + add-dir parity.
     workingDir?: string;
     addDir?: string[];
+    workspace?: string;
     /** Slice λ: run this request inside a gateway-owned git worktree. */
     worktree?: boolean | { name?: string; ref?: string };
   }
@@ -4872,11 +5212,15 @@ export async function handleCodexRequestAsync(
     // prepCleanup is still owned locally; run it before returning.
     let worktreeResolution: ResolvedWorktree = {};
     try {
-      worktreeResolution = await resolveWorktreeForRequest(
-        params.worktree,
-        effectiveSessionId,
-        runtime
-      );
+      worktreeResolution = await resolveWorkspaceAndWorktreeForRequest({
+        provider: "codex",
+        workspace: params.workspace,
+        worktree: params.worktree,
+        sessionId: effectiveSessionId,
+        runtime,
+        workingDir: params.workingDir,
+        addDir: params.addDir,
+      });
     } catch (err) {
       runPrepCleanupLocally();
       return createErrorResponse("codex_request_async", 1, "", corrId, err as Error);
@@ -4998,6 +5342,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
   const server = newGatewayMcpServer(asyncJobsEnabled, grokApiToolsEnabled);
   registerBaseResources(server, runtime);
   registerValidationTools(server, { asyncJobManager });
+  registerWorkspaceTools(server, runtime);
 
   if (grokApiToolsEnabled) {
     server.tool(
@@ -5251,6 +5596,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .describe(
           'Claude --tools: restrict the available built-in tool set (distinct from allowedTools permission gating). Pass [""] to disable all tools.'
         ),
+      workspace: WORKSPACE_ALIAS_SCHEMA.optional(),
       worktree: WORKTREE_SCHEMA.optional(),
       approvalStrategy: z
         .enum(["legacy", "mcp_managed"])
@@ -5320,6 +5666,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       settingSources,
       settings,
       tools,
+      workspace,
       worktree,
       approvalStrategy,
       approvalPolicy,
@@ -5464,11 +5811,14 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         // session resolution so resume reuse can read metadata.worktreePath.
         let worktreeResolution: ResolvedWorktree = {};
         try {
-          worktreeResolution = await resolveWorktreeForRequest(
+          worktreeResolution = await resolveWorkspaceAndWorktreeForRequest({
+            provider: "claude",
+            workspace,
             worktree,
-            effectiveSessionId,
-            runtime
-          );
+            sessionId: effectiveSessionId,
+            runtime,
+            addDir,
+          });
         } catch (err) {
           return createErrorResponse("claude_request", 1, "", corrId, err as Error);
         }
@@ -5792,6 +6142,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .describe(
           "Codex --add-dir <DIR>: additional writable workspace directories. Emitted once per entry on new sessions only; resume inherits the original session's writable-dir policy."
         ),
+      workspace: WORKSPACE_ALIAS_SCHEMA.optional(),
       worktree: WORKTREE_SCHEMA.optional(),
     },
     {
@@ -5832,6 +6183,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       ignoreRules,
       workingDir,
       addDir,
+      workspace,
       worktree,
     }) => {
       const startTime = Date.now();
@@ -5907,7 +6259,15 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       // the only reuse key.
       let worktreeResolution: ResolvedWorktree = {};
       try {
-        worktreeResolution = await resolveWorktreeForRequest(worktree, sessionId, runtime);
+        worktreeResolution = await resolveWorkspaceAndWorktreeForRequest({
+          provider: "codex",
+          workspace,
+          worktree,
+          sessionId,
+          runtime,
+          workingDir,
+          addDir,
+        });
       } catch (err) {
         return createErrorResponse("codex_request", 1, "", corrId, err as Error);
       }
@@ -6093,6 +6453,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .max(3_600_000)
         .optional()
         .describe("Idle timeout in ms (min 30s, max 1h, omit=CLI default)"),
+      workspace: WORKSPACE_ALIAS_SCHEMA.optional(),
     },
     {
       title: "Fork Codex session",
@@ -6110,6 +6471,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       askForApproval,
       correlationId,
       idleTimeoutMs,
+      workspace,
     }) => {
       const corrId = correlationId || randomUUID();
       const startTime = Date.now();
@@ -6175,6 +6537,12 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       );
 
       try {
+        const worktreeResolution = await resolveWorkspaceAndWorktreeForRequest({
+          provider: "codex",
+          workspace,
+          sessionId,
+          runtime,
+        });
         const result = await awaitJobOrDefer(
           "codex",
           finalArgs,
@@ -6182,7 +6550,13 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           resolveIdleTimeout("codex", idleTimeoutMs),
           undefined,
           false,
-          runtime
+          runtime,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          worktreeResolution.cwd
         );
 
         if (isDeferredResponse(result)) {
@@ -6310,6 +6684,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .describe(
           "Emit `--yolo` to auto-approve all actions. Equivalent to approvalMode 'yolo'; routed through the same approval gate. Under mcp_managed the gate still decides."
         ),
+      workspace: WORKSPACE_ALIAS_SCHEMA.optional(),
       worktree: WORKTREE_SCHEMA.optional(),
     },
     {
@@ -6344,6 +6719,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       attachments,
       skipTrust,
       yolo,
+      workspace,
       worktree,
     }) => {
       return handleGeminiRequest(
@@ -6373,6 +6749,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           attachments,
           skipTrust,
           yolo,
+          workspace,
           worktree,
         }
       );
@@ -6602,6 +6979,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .describe(
           "Grok -w/--worktree: native CLI worktree flag (`true` → bare `--worktree`, string → named). NOT gateway slice λ `worktree`."
         ),
+      workspace: WORKSPACE_ALIAS_SCHEMA.optional(),
       worktree: WORKTREE_SCHEMA.optional(),
     },
     {
@@ -6661,6 +7039,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       restoreCode,
       leaderSocket,
       nativeWorktree,
+      workspace,
       worktree,
     }) => {
       return handleGrokRequest(
@@ -6715,6 +7094,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           restoreCode,
           leaderSocket,
           nativeWorktree,
+          workspace,
           worktree,
         }
       );
@@ -6838,6 +7218,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .describe(
           "Vibe --add-dir <DIR>: additional writable workspace directories. Each entry is emitted as its own --add-dir instance (Vibe states this flag may be specified multiple times)."
         ),
+      workspace: WORKSPACE_ALIAS_SCHEMA.optional(),
       worktree: WORKTREE_SCHEMA.optional(),
     },
     {
@@ -6872,6 +7253,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       maxTokens,
       workingDir,
       addDir,
+      workspace,
       worktree,
     }) => {
       return handleMistralRequest(
@@ -6901,6 +7283,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           maxTokens,
           workingDir,
           addDir,
+          workspace,
           worktree,
         }
       );
@@ -7064,6 +7447,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .describe(
             'Claude --tools: restrict the available built-in tool set (distinct from allowedTools permission gating). Pass [""] to disable all tools.'
           ),
+        workspace: WORKSPACE_ALIAS_SCHEMA.optional(),
         worktree: WORKTREE_SCHEMA.optional(),
         approvalStrategy: z
           .enum(["legacy", "mcp_managed"])
@@ -7132,6 +7516,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         settingSources,
         settings,
         tools,
+        workspace,
         worktree,
         approvalStrategy,
         approvalPolicy,
@@ -7235,11 +7620,14 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           // settled so resume reuse can read metadata.worktreePath.
           let worktreeResolution: ResolvedWorktree = {};
           try {
-            worktreeResolution = await resolveWorktreeForRequest(
+            worktreeResolution = await resolveWorkspaceAndWorktreeForRequest({
+              provider: "claude",
+              workspace,
               worktree,
-              effectiveSessionId,
-              runtime
-            );
+              sessionId: effectiveSessionId,
+              runtime,
+              addDir,
+            });
           } catch (err) {
             return createErrorResponse("claude_request_async", 1, "", corrId, err as Error);
           }
@@ -7437,6 +7825,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .describe(
             "Codex --add-dir <DIR>: additional writable workspace directories (repeat per entry). New sessions only."
           ),
+        workspace: WORKSPACE_ALIAS_SCHEMA.optional(),
         worktree: WORKTREE_SCHEMA.optional(),
       },
       {
@@ -7476,6 +7865,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         ignoreRules,
         workingDir,
         addDir,
+        workspace,
         worktree,
       }) => {
         return handleCodexRequestAsync(
@@ -7510,6 +7900,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             ignoreRules,
             workingDir,
             addDir,
+            workspace,
             worktree,
           }
         );
@@ -7614,6 +8005,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .describe(
             "Emit `--yolo` to auto-approve all actions. Equivalent to approvalMode 'yolo'; routed through the same approval gate. Under mcp_managed the gate still decides."
           ),
+        workspace: WORKSPACE_ALIAS_SCHEMA.optional(),
         worktree: WORKTREE_SCHEMA.optional(),
       },
       {
@@ -7647,6 +8039,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         attachments,
         skipTrust,
         yolo,
+        workspace,
         worktree,
       }) => {
         return handleGeminiRequestAsync(
@@ -7675,6 +8068,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             attachments,
             skipTrust,
             yolo,
+            workspace,
             worktree,
           }
         );
@@ -7902,6 +8296,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .describe(
             "Grok -w/--worktree: native CLI worktree flag (`true` → bare `--worktree`, string → named). NOT gateway slice λ `worktree`."
           ),
+        workspace: WORKSPACE_ALIAS_SCHEMA.optional(),
         worktree: WORKTREE_SCHEMA.optional(),
       },
       {
@@ -7960,6 +8355,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         restoreCode,
         leaderSocket,
         nativeWorktree,
+        workspace,
         worktree,
       }) => {
         return handleGrokRequestAsync(
@@ -8013,6 +8409,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             restoreCode,
             leaderSocket,
             nativeWorktree,
+            workspace,
             worktree,
           }
         );
@@ -8131,6 +8528,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .describe(
             "Vibe --add-dir <DIR>: additional writable workspace directories. Each entry is emitted as its own --add-dir instance."
           ),
+        workspace: WORKSPACE_ALIAS_SCHEMA.optional(),
         worktree: WORKTREE_SCHEMA.optional(),
       },
       {
@@ -8164,6 +8562,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         maxTokens,
         workingDir,
         addDir,
+        workspace,
         worktree,
       }) => {
         return handleMistralRequestAsync(
@@ -8192,6 +8591,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             maxTokens,
             workingDir,
             addDir,
+            workspace,
             worktree,
           }
         );
@@ -9410,6 +9810,225 @@ process.on("SIGINT", () => shutdown("SIGINT"));
 // Server Startup
 //──────────────────────────────────────────────────────────────────────────────
 
+function readMutableGatewayConfig(configPath = defaultGatewayConfigPath()): Record<string, any> {
+  if (!existsSync(configPath)) return {};
+  const require = createRequire(import.meta.url);
+  const TOML = require("smol-toml");
+  return TOML.parse(readFileSync(configPath, "utf8")) as Record<string, any>;
+}
+
+function writeMutableGatewayConfig(
+  data: Record<string, any>,
+  configPath = defaultGatewayConfigPath()
+): void {
+  const require = createRequire(import.meta.url);
+  const TOML = require("smol-toml");
+  mkdirSync(dirname(configPath), { recursive: true, mode: 0o700 });
+  writeFileSync(configPath, TOML.stringify(data), { mode: 0o600 });
+  chmodSync(configPath, 0o600);
+}
+
+function ensureOAuthTable(config: Record<string, any>): Record<string, any> {
+  config.http ??= {};
+  config.http.oauth ??= {};
+  const oauth = config.http.oauth as Record<string, any>;
+  oauth.enabled ??= true;
+  oauth.issuer ??= "auto";
+  oauth.require_pkce ??= true;
+  oauth.registration_policy ??= "static_clients";
+  oauth.allow_public_clients ??= false;
+  oauth.token_ttl_seconds ??= 3600;
+  oauth.clients ??= [];
+  return oauth;
+}
+
+function argValue(args: string[], name: string): string | undefined {
+  const idx = args.indexOf(name);
+  return idx >= 0 ? args[idx + 1] : undefined;
+}
+
+function requireArg(args: string[], name: string): string {
+  const value = argValue(args, name);
+  if (!value) throw new Error(`Missing ${name}`);
+  return value;
+}
+
+function localBaseUrlForPrint(): string {
+  const publicUrl = process.env.LLM_GATEWAY_PUBLIC_URL;
+  if (publicUrl) {
+    try {
+      return new URL(publicUrl).origin;
+    } catch {
+      // fall through
+    }
+  }
+  return `http://${process.env.LLM_GATEWAY_HTTP_HOST ?? "127.0.0.1"}:${process.env.LLM_GATEWAY_HTTP_PORT ?? "3333"}`;
+}
+
+function printJsonLine(value: unknown): void {
+  process.stdout.write(JSON.stringify(value, null, 2) + "\n");
+}
+
+function runOAuthCommand(args: string[]): void {
+  const [scope, action] = args;
+  const config = readMutableGatewayConfig();
+  const oauth = ensureOAuthTable(config);
+  if (scope === "client") {
+    const clients = (Array.isArray(oauth.clients) ? oauth.clients : []) as Array<
+      Record<string, any>
+    >;
+    oauth.clients = clients;
+    if (action === "add") {
+      const clientId = args[2];
+      if (!clientId)
+        throw new Error(
+          "Usage: llm-cli-gateway oauth client add <client-id> --redirect-uri <uri> [--print-once]"
+        );
+      const redirectUri = requireArg(args, "--redirect-uri");
+      const secret = generateSecret();
+      clients.push({
+        client_id: clientId,
+        client_secret_hash: hashSecret(secret),
+        allowed_redirect_uris: [redirectUri],
+        scopes: ["mcp"],
+      });
+      writeMutableGatewayConfig(config);
+      printJsonLine({
+        ok: true,
+        client_id: clientId,
+        ...(args.includes("--print-once") ? { client_secret: secret } : {}),
+        oauth: {
+          issuer: localBaseUrlForPrint(),
+          authorization_url: `${localBaseUrlForPrint()}/oauth/authorize`,
+          token_url: `${localBaseUrlForPrint()}/oauth/token`,
+        },
+        note: args.includes("--print-once")
+          ? "client_secret is shown once; it is stored only as a hash."
+          : "client secret generated and stored only as a hash; rerun rotate --print-once if needed.",
+      });
+      return;
+    }
+    if (action === "list") {
+      printJsonLine({
+        ok: true,
+        clients: clients.map(client => ({
+          client_id: client.client_id,
+          redirect_uris: client.allowed_redirect_uris ?? [],
+          secret_configured: Boolean(client.client_secret_hash),
+        })),
+      });
+      return;
+    }
+    if (action === "rotate") {
+      const clientId = args[2];
+      const client = clients.find(candidate => candidate.client_id === clientId);
+      if (!client) throw new Error(`Unknown OAuth client ${clientId}`);
+      const secret = generateSecret();
+      client.client_secret_hash = hashSecret(secret);
+      writeMutableGatewayConfig(config);
+      printJsonLine({
+        ok: true,
+        client_id: clientId,
+        ...(args.includes("--print-once") ? { client_secret: secret } : {}),
+        note: "Future OAuth exchanges use the rotated secret; already-issued opaque access tokens expire by token TTL or server restart.",
+      });
+      return;
+    }
+    if (action === "revoke") {
+      const clientId = args[2];
+      oauth.clients = clients.filter(client => client.client_id !== clientId);
+      writeMutableGatewayConfig(config);
+      printJsonLine({
+        ok: true,
+        client_id: clientId,
+        note: "Future OAuth exchanges are revoked; already-issued opaque access tokens expire by token TTL or server restart.",
+      });
+      return;
+    }
+  }
+  if (scope === "shared-secret") {
+    if (action === "set" || action === "rotate") {
+      const secret = generateSecret();
+      oauth.registration_policy = "shared_secret";
+      oauth.shared_secret = {
+        enabled: true,
+        secret_hash: hashSecret(secret),
+        prompt_label: "Gateway access code",
+      };
+      writeMutableGatewayConfig(config);
+      printJsonLine({
+        ok: true,
+        shared_secret_enabled: true,
+        ...(args.includes("--print-once") ? { shared_secret: secret } : {}),
+        note: args.includes("--print-once")
+          ? "shared_secret is shown once; it is stored only as a hash."
+          : "shared secret generated and stored only as a hash.",
+      });
+      return;
+    }
+    if (action === "disable") {
+      oauth.shared_secret = { enabled: false, prompt_label: "Gateway access code" };
+      if (oauth.registration_policy === "shared_secret")
+        oauth.registration_policy = "static_clients";
+      writeMutableGatewayConfig(config);
+      printJsonLine({ ok: true, shared_secret_enabled: false });
+      return;
+    }
+  }
+  throw new Error("Usage: llm-cli-gateway oauth client|shared-secret ...");
+}
+
+function runWorkspaceCommand(args: string[]): void {
+  const [action] = args;
+  if (action === "list") {
+    const registry = loadWorkspaceRegistry(logger);
+    printJsonLine({
+      ok: true,
+      default: registry.defaultAlias,
+      workspaces: registry.repos.map(describeWorkspace),
+      allowed_roots: registry.allowedRoots.map(root => ({
+        alias: root.alias,
+        path: root.path,
+        allow_create_directories: root.allowCreateDirectories,
+        allow_init_git_repos: root.allowInitGitRepos,
+      })),
+    });
+    return;
+  }
+  if (action === "create") {
+    const alias = args[1];
+    if (!alias)
+      throw new Error(
+        "Usage: llm-cli-gateway workspace create <alias> --root <root> --slug <slug> --kind folder|git [--default]"
+      );
+    const repo = createWorkspace({
+      alias,
+      rootAlias: requireArg(args, "--root"),
+      slug: requireArg(args, "--slug"),
+      kind: (argValue(args, "--kind") ?? "git") as "folder" | "git",
+      setDefault: args.includes("--default"),
+      logger,
+    });
+    printJsonLine({ ok: true, workspace: describeWorkspace(repo) });
+    return;
+  }
+  if (action === "add") {
+    const alias = args[1];
+    const repoPath = args[2];
+    if (!alias || !repoPath)
+      throw new Error("Usage: llm-cli-gateway workspace add <alias> <path> [--default]");
+    const repo = registerExistingWorkspace({
+      alias,
+      repoPath,
+      setDefault: args.includes("--default"),
+      logger,
+    });
+    printJsonLine({ ok: true, workspace: describeWorkspace(repo) });
+    return;
+  }
+  throw new Error("Usage: llm-cli-gateway workspace list|add|create ...");
+}
+
 async function main() {
   startWindowsBootstrapperSelfHeal();
 
@@ -9425,6 +10044,8 @@ async function main() {
         "",
         "Usage:",
         "  llm-cli-gateway [doctor --json|contracts --json|--transport=http|--version]",
+        "  llm-cli-gateway oauth client add <id> --redirect-uri <uri> [--print-once]",
+        "  llm-cli-gateway workspace list|add|create",
         "",
         "Doctor:",
         "  doctor --json                     # environment, providers, declared contracts",
@@ -9446,6 +10067,14 @@ async function main() {
     }
     process.stderr.write("Only doctor --json is supported in this layer.\n");
     process.exit(2);
+  }
+  if (args[0] === "oauth") {
+    runOAuthCommand(args.slice(1));
+    return;
+  }
+  if (args[0] === "workspace") {
+    runWorkspaceCommand(args.slice(1));
+    return;
   }
   if (args[0] === "contracts") {
     if (args.includes("--json")) {

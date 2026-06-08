@@ -112,7 +112,7 @@ describe("MCP tool-surface usability (post-usability-review regressions)", () =>
       >
     )._registeredTools;
     const names = Object.keys(registry);
-    expect(names.length).toBeGreaterThanOrEqual(40) /* exact toBe(40) asserted below */;
+    expect(names.length).toBeGreaterThanOrEqual(44) /* exact toBe(44) asserted below */;
     for (const name of names) {
       const ann = registry[name].annotations;
       expect(ann, `${name} has annotations`).toBeDefined();
@@ -126,7 +126,7 @@ describe("MCP tool-surface usability (post-usability-review regressions)", () =>
     // EXACT set pinning (post-2.3.0-gate Codex finding): derive the actual
     // sets from the registry and compare them exactly — positive membership
     // alone would let a future mis-classified or unlisted tool slip through.
-    expect(names.length).toBe(40);
+    expect(names.length).toBe(44);
     const setOf = (pred: (a: NonNullable<(typeof registry)[string]["annotations"]>) => boolean) =>
       names.filter(n => pred(registry[n].annotations!)).sort();
     expect(setOf(a => a.readOnlyHint === true)).toEqual(
@@ -148,6 +148,8 @@ describe("MCP tool-surface usability (post-usability-review regressions)", () =>
         "session_get",
         "session_list",
         "upstream_contracts",
+        "workspace_get",
+        "workspace_list",
       ].sort()
     );
     expect(setOf(a => a.openWorldHint === true)).toEqual(
@@ -197,6 +199,7 @@ describe("MCP tool-surface usability (post-usability-review regressions)", () =>
         "llm_job_cancel",
         "session_delete",
         "session_clear_all",
+        "workspace_create",
       ].sort()
     );
   });

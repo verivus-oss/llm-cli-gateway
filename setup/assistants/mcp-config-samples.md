@@ -11,9 +11,9 @@ llm-cli-gateway print-client-config
 
 or the setup UI at `http://127.0.0.1:3333/`.
 
-Never paste expanded bearer tokens, ChatGPT high-entropy URLs, tunnel tokens,
-provider credentials, private keys, or authorization headers into a remote chat.
-Use placeholders or generated local snippets.
+Never paste expanded bearer tokens, OAuth client secrets, tunnel tokens, provider
+credentials, private keys, or authorization headers into a remote chat. Use
+placeholders or generated local snippets.
 
 ## Selection Rules
 
@@ -21,8 +21,8 @@ Use placeholders or generated local snippets.
   command.
 - Local HTTP clients use `http://127.0.0.1:3333/mcp` and bearer auth.
 - Web-hosted clients use a public HTTPS MCP URL verified by `doctor --json`.
-- ChatGPT uses the generated `chatgpt.url`; set Authentication to `No
-Authentication`.
+- ChatGPT uses the verified public `/mcp` URL with OAuth authorization and token
+  URLs from `print-client-config` or the setup UI.
 - Claude web and Grok custom connectors use the public HTTPS MCP URL and bearer
   auth configured inside the provider UI.
 - Mistral Vibe is outbound-only; do not configure it as an inbound MCP client.
@@ -146,12 +146,17 @@ Use only after `doctor --json` shows web-client readiness.
 
 ```text
 Name: llm-cli-gateway
-MCP URL: <chatgpt.url from llm-cli-gateway chatgpt-url>
-Authentication: No Authentication
+MCP URL: <public-https-url>/mcp
+Authentication: OAuth
+Authorization URL: <issuer>/oauth/authorize
+Token URL: <issuer>/oauth/token
+Client ID: chatgpt
+Client Secret: <copy-once local oauth command output>
 ```
 
-The `chatgpt.url` is a credential-like high-entropy URL. A remote assistant may
-ask whether it was generated, but must not ask the user to paste it into chat.
+Create the client secret locally with
+`llm-cli-gateway oauth client add chatgpt --redirect-uri <ChatGPT callback URL> --print-once`.
+Paste the secret only into the provider setup field that asks for it.
 
 ## Claude Web Custom Connector
 

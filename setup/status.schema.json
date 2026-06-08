@@ -11,6 +11,7 @@
     "gateway",
     "transport",
     "auth",
+    "workspaces",
     "providers",
     "endpoint_exposure",
     "client_config",
@@ -70,7 +71,47 @@
       "properties": {
         "required": { "type": "boolean" },
         "token_configured": { "type": "boolean" },
-        "source": { "enum": ["env", "disabled"] }
+        "source": { "enum": ["env", "disabled", "installer-auth-token-file"] },
+        "oauth": {
+          "type": "object",
+          "required": [
+            "enabled",
+            "registration_policy",
+            "clients_configured",
+            "shared_secret_enabled",
+            "pkce_required",
+            "issuer"
+          ],
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "registration_policy": {
+              "enum": ["static_clients", "shared_secret", "open_dev"]
+            },
+            "clients_configured": { "type": "integer", "minimum": 0 },
+            "shared_secret_enabled": { "type": "boolean" },
+            "pkce_required": { "type": "boolean" },
+            "issuer": { "type": ["string", "null"] }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "workspaces": {
+      "type": "object",
+      "required": [
+        "enabled",
+        "default",
+        "repo_count",
+        "allowed_root_count",
+        "gateway_app_dir_is_workspace"
+      ],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "default": { "type": ["string", "null"] },
+        "repo_count": { "type": "integer", "minimum": 0 },
+        "allowed_root_count": { "type": "integer", "minimum": 0 },
+        "gateway_app_dir_is_workspace": { "type": "boolean" }
       },
       "additionalProperties": false
     },

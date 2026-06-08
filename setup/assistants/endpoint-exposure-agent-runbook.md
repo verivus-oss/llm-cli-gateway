@@ -32,7 +32,7 @@ fresh redacted `doctor --json`.
 All assistants must avoid collecting:
 
 - gateway bearer tokens;
-- ChatGPT high-entropy connector URLs;
+- OAuth client secrets and deprecated ChatGPT high-entropy connector URLs;
 - Cloudflare tunnel tokens;
 - provider API keys, OAuth tokens, passwords, or credential files;
 - authorization headers.
@@ -91,6 +91,10 @@ For HTTPS endpoint setup, ask only for:
 - fresh redacted `llm-cli-gateway doctor --json`;
 - generated setup packet from `llm-cli-gateway print-client-config` or the setup
   UI;
+- OAuth readiness from `doctor --json` (`auth.oauth.enabled`,
+  `auth.oauth.registration_policy`, `auth.oauth.clients_configured`);
+- workspace readiness from `doctor --json` (`workspaces.enabled`,
+  `workspaces.default`, `workspaces.repo_count`);
 - non-secret error messages from `cloudflared`, `llm-cli-gateway`, `doctor`, or
   the provider connector UI.
 
@@ -110,6 +114,10 @@ approval is needed, ask the user to approve the OS prompt locally.
 5. Inspect these fields before proposing web-client setup:
    - `transport.http.enabled`
    - `auth.token_configured`
+   - `auth.oauth.enabled`
+   - `auth.oauth.registration_policy`
+   - `workspaces.enabled`
+   - `workspaces.default`
    - `endpoint_exposure.https_configured`
    - `endpoint_exposure.public_url_configured`
    - `endpoint_exposure.mode`
@@ -182,7 +190,6 @@ Expected behavior:
 - starts `cloudflared tunnel --url http://127.0.0.1:3333`;
 - captures the generated `https://*.trycloudflare.com` URL;
 - persists the normalized public `/mcp` URL;
-- creates or refreshes the generated ChatGPT connector URL;
 - enables public URL verification for future doctor runs.
 
 Then verify:
@@ -212,15 +219,16 @@ After endpoint verification, use generated gateway output.
 llm-cli-gateway print-client-config
 ```
 
-For ChatGPT, also use:
+For ChatGPT, create or reuse a static OAuth client locally:
 
 ```bash
-llm-cli-gateway chatgpt-url
+llm-cli-gateway oauth client add chatgpt --redirect-uri <ChatGPT callback URL> --print-once
 ```
 
-ChatGPT setup uses the generated `chatgpt.url` and `Authentication: No
-Authentication`. Treat that URL like a credential. Do not paste it into a remote
-assistant transcript.
+ChatGPT setup uses the verified public `/mcp` URL with `Authentication: OAuth`.
+Use the authorization and token URLs from `print-client-config` or the setup UI.
+The client secret is copy-once local output and must be pasted only into the
+provider setup field that asks for it, never into a remote assistant transcript.
 
 Claude web and Grok custom connector setup use the public HTTPS MCP URL and
 bearer auth configured inside the provider's connector UI. Do not paste the
@@ -239,11 +247,11 @@ If the selected client cannot call a validation tool, ask for fresh redacted
 
 ## Rotation and Shutdown
 
-Rotate the ChatGPT high-entropy URL if it was exposed or if the user wants to
-invalidate the current connector path:
+Rotate any exposed OAuth client secret by creating a replacement client secret
+locally, then restart the gateway if the setup flow instructs it:
 
 ```bash
-llm-cli-gateway chatgpt-url rotate
+llm-cli-gateway oauth client add chatgpt --redirect-uri <ChatGPT callback URL> --print-once
 llm-cli-gateway stop
 llm-cli-gateway start
 ```

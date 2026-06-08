@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -84,7 +85,7 @@ func TestSetPublicURLPersistsForDefaultAndGatewayEnv(t *testing.T) {
 	}
 }
 
-func TestChatGPTConnectorURLUsesNoAuthPath(t *testing.T) {
+func TestPublicURLDoesNotEnableNoAuthChatGPTPath(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	if runtime.GOOS == "windows" {
 		t.Setenv("USERPROFILE", os.Getenv("HOME"))
@@ -94,26 +95,57 @@ func TestChatGPTConnectorURLUsesNoAuthPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SetPublicURL returned error: %v", err)
 	}
-	chatGPTSettings, err := SetChatGPTURLFromPublicURL(settings.PublicURL)
-	if err != nil {
-		t.Fatalf("SetChatGPTURLFromPublicURL returned error: %v", err)
-	}
-	if chatGPTSettings.ChatGPTNoAuthPath == "" {
-		t.Fatal("ChatGPTNoAuthPath is empty")
-	}
-	if chatGPTSettings.ChatGPTConnectorURL != "https://example.trycloudflare.com"+chatGPTSettings.ChatGPTNoAuthPath {
-		t.Fatalf("ChatGPTConnectorURL = %q", chatGPTSettings.ChatGPTConnectorURL)
+	if settings.ChatGPTNoAuthPath != "" {
+		t.Fatalf("ChatGPTNoAuthPath = %q", settings.ChatGPTNoAuthPath)
 	}
 
 	cfg, err := Default()
 	if err != nil {
 		t.Fatalf("Default returned error: %v", err)
 	}
-	if cfg.ChatGPTConnectorURL != chatGPTSettings.ChatGPTConnectorURL {
+	if cfg.ChatGPTConnectorURL != "" {
 		t.Fatalf("cfg.ChatGPTConnectorURL = %q", cfg.ChatGPTConnectorURL)
 	}
-	if !contains(EnvForGateway(cfg, "token"), "LLM_GATEWAY_NO_AUTH_PATHS="+chatGPTSettings.ChatGPTNoAuthPath) {
-		t.Fatalf("EnvForGateway missing ChatGPT no-auth path")
+	for _, item := range EnvForGateway(cfg, "token") {
+		if strings.HasPrefix(item, "LLM_GATEWAY_NO_AUTH_PATHS=") {
+			t.Fatalf("EnvForGateway exposed deprecated no-auth path: %#v", item)
+		}
+	}
+}
+
+func TestDoctorJSONRedactsDeprecatedChatGPTConnectorURL(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	if runtime.GOOS == "windows" {
+		t.Setenv("USERPROFILE", os.Getenv("HOME"))
+	}
+
+	cfg, err := Default()
+	if err != nil {
+		t.Fatalf("Default returned error: %v", err)
+	}
+	if err := writeSettings(cfg.AppDir, Settings{
+		PublicURL:           "https://example.trycloudflare.com/mcp",
+		ChatGPTNoAuthPath:   "/chatgpt/SECRET123/mcp",
+		ChatGPTConnectorURL: "https://example.trycloudflare.com/chatgpt/SECRET123/mcp",
+	}); err != nil {
+		t.Fatalf("writeSettings returned error: %v", err)
+	}
+
+	body, err := DoctorJSON()
+	if err != nil {
+		t.Fatalf("DoctorJSON returned error: %v", err)
+	}
+	if strings.Contains(string(body), "SECRET123") {
+		t.Fatalf("DoctorJSON leaked deprecated no-auth secret: %s", body)
+	}
+	var report map[string]any
+	if err := json.Unmarshal(body, &report); err != nil {
+		t.Fatalf("unmarshal doctor report: %v", err)
+	}
+	transport := report["transport"].(map[string]any)
+	httpReport := transport["http"].(map[string]any)
+	if httpReport["chatgpt_connector_url"] != "<redacted>" {
+		t.Fatalf("chatgpt_connector_url = %v", httpReport["chatgpt_connector_url"])
 	}
 }
 

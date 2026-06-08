@@ -7,7 +7,8 @@ Start with:
 - Setup UI: `http://127.0.0.1:3333/`
 - Provider page: `setup/providers/chatgpt.md`
 - HTTPS endpoint runbook: `setup/assistants/endpoint-exposure-agent-runbook.md`
-- ChatGPT URL: `llm-cli-gateway chatgpt-url`
+- Client setup values: `llm-cli-gateway print-client-config`
+- OAuth client command: `llm-cli-gateway oauth client add chatgpt --redirect-uri <ChatGPT callback URL> --print-once`
 - Doctor JSON: `llm-cli-gateway doctor --json`
 
 ChatGPT is a remote web client. Localhost is not enough. Before giving ChatGPT connector steps, verify doctor JSON shows:
@@ -18,7 +19,7 @@ ChatGPT is a remote web client. Localhost is not enough. Before giving ChatGPT c
 
 If those fields are not ready, follow `setup/assistants/endpoint-exposure-agent-runbook.md` before giving ChatGPT connector steps.
 
-Use the `chatgpt.url` value, not the default bearer-protected `/mcp` URL. Tell the user to set ChatGPT Authentication to `No Authentication`. Never ask the user to paste bearer tokens, authorization headers, tunnel tokens, or the ChatGPT URL into a remote chat transcript.
+Use the verified public `/mcp` URL with ChatGPT Authentication set to `OAuth`. Use the authorization and token URLs from `print-client-config` or the setup UI. Never ask the user to paste bearer tokens, OAuth client secrets, authorization headers, tunnel tokens, or provider credentials into a remote chat transcript.
 
 If the user does not have a plan or workspace that supports custom MCP connectors, label ChatGPT setup as blocked by plan support and offer a local client path such as Codex or Gemini CLI.
 

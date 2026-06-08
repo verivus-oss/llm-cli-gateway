@@ -1,0 +1,470 @@
+# Implementation plan: remote MCP connector OAuth, shared-secret gates, and
+# repo/workspace selection.
+#
+# Goal: make remote web clients such as ChatGPT connect through the protected
+# public /mcp endpoint using standards-shaped MCP OAuth, while keeping access
+# gated by operator-controlled secrets and making provider CLI cwd explicit.
+#
+# Context:
+#   When the gateway runs as a managed HTTP service, its process cwd is the
+#   gateway app directory (normally ~/.llm-cli-gateway, where logs.db lives).
+#   Every spawned provider CLI inherits that cwd unless the request path
+#   resolves a gateway-owned worktree or provider-specific working directory.
+#   Remote clients need a safe way to choose local repos on the machine running
+#   the gateway; they must not get arbitrary filesystem access by path guessing.
+
+[meta]
+name = "remote connector OAuth and workspace selection"
+schema_version = "1.0"
+owner = "verivus-oss"
+slice = "remote-connector-oauth-workspaces-2026-06-08"
+target_branch = "master"
+spec = "docs/plans/remote-connector-oauth-workspaces.spec.md"
+design = "docs/plans/remote-connector-oauth-workspaces.design.md"
+implementation_prompt = "docs/plans/remote-connector-oauth-workspaces.implementation-prompt.md"
+release_checklist = "docs/plans/remote-connector-oauth-workspaces.release-checklist.md"
+acceptance_resource = "Remote connectors can discover OAuth metadata, obtain access tokens only through configured shared-secret or static-client policy, and invoke provider CLIs inside an explicitly selected registered repo/worktree instead of ~/.llm-cli-gateway. Public docs and installer output expose safe setup paths without printing secrets."
+invariant_sources = [
+  "src/http-transport.ts",
+  "src/auth.ts",
+  "src/config.ts",
+  "src/index.ts",
+  "src/request-helpers.ts",
+  "src/worktree-manager.ts",
+  "installer/main.go",
+  "installer/internal/config/config.go",
+  "setup/assistants/endpoint-exposure-agent-runbook.md",
+  "setup/providers/chatgpt.md",
+  "docs/personal-mcp/connect-chatgpt.md",
+]
+
+[decisions]
+oauth_is_default_for_web_connectors = true
+no_auth_chatgpt_path_deprecated = true
+bearer_protected_mcp_remains_supported = true
+shared_secret_must_not_appear_in_url = true
+	remote_path_access_requires_repo_registry = true
+	provider_cwd_must_be_explicit_for_remote_work = true
+	default_gateway_cwd_is_not_a_workspace = "~/.llm-cli-gateway"
+	local_workspace_creation_under_allowed_roots = true
+	repo_clone_from_remote_client = "deferred"
+
+[[steps]]
+id = "baseline-current-connector-and-cwd-behavior"
+depends_on = []
+actor = "assistant"
+action = """
+Capture current behavior before changing code:
+
+  - HTTP /mcp 401 response and WWW-Authenticate headers.
+  - /.well-known/oauth-protected-resource and
+    /.well-known/oauth-authorization-server responses when OAuth is enabled.
+  - /oauth/register, /oauth/authorize, and /oauth/token behavior.
+  - doctor --json endpoint_exposure and auth fields.
+  - managed service cwd and the cwd observed by a spawned provider CLI.
+  - current worktree parameter behavior and provider-specific workingDir/addDir
+    behavior.
+
+Do not print bearer tokens, OAuth client secrets, shared secrets, authorization
+headers, tunnel tokens, or high-entropy connector URLs into tracked files.
+"""
+idempotent = true
+validation = """
+A local baseline note exists in an untracked scratch file or PR description
+draft. It identifies which behavior is already implemented locally and which
+behavior is missing from public release artifacts. No secret values are present.
+"""
+
+[[steps]]
+id = "define-auth-config-model"
+depends_on = ["baseline-current-connector-and-cwd-behavior"]
+actor = "assistant"
+action = """
+Add a typed config model for remote connector auth, loaded from
+~/.llm-cli-gateway/config.toml and env overrides only where safe:
+
+  [http.oauth]
+  enabled = true
+  issuer = "auto"
+  require_pkce = true
+  registration_policy = "static_clients" # static_clients | shared_secret | open_dev
+  allow_public_clients = false
+  token_ttl_seconds = 3600
+
+  [[http.oauth.clients]]
+  client_id = "gtwy-wh3"
+  client_secret_hash = "scrypt:..."
+  allowed_redirect_uris = ["https://chat.openai.com/aip/callback"]
+  scopes = ["mcp"]
+
+  [http.oauth.shared_secret]
+  enabled = false
+  secret_hash = "scrypt:..."
+  prompt_label = "Gateway access code"
+
+Rules:
+  - Defaults keep OAuth off unless installer/bootstrapper enables it for web.
+  - `open_dev` is allowed only for localhost or explicit dev env.
+  - Plaintext secrets are accepted only via one-shot CLI commands and converted
+    to hashes before persistence.
+  - Doctor reports only booleans, policy names, client counts, and redacted
+    issuer URLs.
+"""
+idempotent = false
+validation = """
+Config unit tests cover defaults, valid static clients, valid shared-secret
+mode, invalid plaintext persisted secrets, invalid redirect URIs, and doctor
+redaction. Config parsing errors disable only OAuth and emit a stderr warning.
+"""
+
+[[steps]]
+id = "implement-oauth-server-hardening"
+depends_on = ["define-auth-config-model"]
+actor = "assistant"
+action = """
+Refactor the current OAuth endpoints into a small module, e.g. src/oauth.ts,
+with explicit tests. Required behavior:
+
+  - Protected resource metadata is served at both root and path-specific
+    .well-known URLs.
+  - Authorization server metadata is served at both root and path-specific
+    .well-known URLs.
+  - WWW-Authenticate includes resource_metadata on protected /mcp 401/403
+    responses when OAuth is enabled.
+  - Dynamic registration obeys registration_policy:
+      static_clients: reject DCR with 403 or return only preconfigured clients
+        when the request includes a valid bootstrap shared secret.
+      shared_secret: register ephemeral clients only after secret proof; never
+        place the secret in a URL.
+      open_dev: local/dev only.
+  - Authorization code flow supports PKCE S256 and plain only when explicitly
+    allowed. Default require_pkce=true.
+  - Token exchange validates client_id, redirect_uri, code expiry, single-use
+    code, PKCE verifier, and client_secret when the client is confidential.
+  - Issued access tokens are separate opaque tokens mapped to client id, scope,
+    and expiry in server memory; token values are never logged or returned by
+    doctor.
+  - OAuth errors follow JSON/form redirect conventions without leaking secrets.
+"""
+idempotent = false
+validation = """
+HTTP transport tests cover successful confidential-client flow, failed missing
+client_secret, failed wrong client_secret, failed redirect mismatch, failed
+code replay, failed expired code, failed PKCE mismatch, DCR disabled by
+default, and WWW-Authenticate discovery. Existing bearer-auth MCP client tests
+still pass.
+"""
+
+[[steps]]
+id = "add-secret-management-commands"
+depends_on = ["define-auth-config-model"]
+actor = "assistant"
+action = """
+Extend the bootstrapper/installer CLI with local-only secret management:
+
+  - oauth client add <client-id> [--redirect-uri <uri>] [--print-once]
+  - oauth client list
+  - oauth client rotate <client-id> [--print-once]
+  - oauth client revoke <client-id>
+  - oauth shared-secret set [--print-once]
+  - oauth shared-secret rotate [--print-once]
+  - oauth shared-secret disable
+
+Generated secrets:
+  - Use crypto-random >= 32 bytes.
+  - Store only scrypt/argon2id-compatible salted hashes.
+  - Write config files mode 0600.
+  - Print secret values only on explicit local command output, never doctor,
+    logs, setup packet unless the packet labels it as copy-once local output.
+  - Avoid shell-history patterns that embed secret values in commands.
+  - oauth client revoke/rotate stops future authorization-code exchanges for
+    that client; already-issued opaque access tokens expire by token TTL or
+    server restart.
+"""
+idempotent = false
+validation = """
+Installer tests prove add/list/rotate/revoke mutate config correctly, preserve
+0600 permissions, do not print secret material except when --print-once is
+used, and never write plaintext secrets to config.toml.
+"""
+
+[[steps]]
+id = "define-workspace-registry-config"
+depends_on = ["baseline-current-connector-and-cwd-behavior"]
+actor = "assistant"
+action = """
+Add a typed workspace registry loaded from config.toml:
+
+  [workspaces]
+  default = "gateway"
+  allow_unregistered_working_dir = false
+
+  [[workspaces.repos]]
+  alias = "gateway"
+  path = "/absolute/path/to/llm-cli-gateway"
+  providers = ["claude", "codex", "gemini", "grok", "mistral"]
+  allow_worktree = true
+  allow_add_dir = false
+
+  [[workspaces.allowed_roots]]
+  path = "/absolute/path/to/parent"
+  allow_register_existing_git_repos = true
+  allow_create_directories = true
+  allow_init_git_repos = true
+  max_create_depth = 2
+
+Rules:
+  - Aliases are stable public handles; remote clients should use aliases, not
+    arbitrary absolute paths.
+  - Every repo path must be absolute, realpath-normalized, and an existing git
+    work tree unless it is a newly created folder workspace explicitly marked
+    kind="folder".
+  - Registered repo paths must live under an allowed root unless the config
+    marks them as explicit operator entries.
+  - New workspace creation accepts only an alias plus a relative slug/path
+    segment under an allowed root; absolute paths and path traversal are denied.
+  - New kind="git" workspaces run local `git init` only. Network clone remains
+    deferred and unavailable to remote clients in this slice.
+  - Existing non-empty directories are rejected by create operations; existing
+    Git repos use the explicit register-existing flow.
+  - Symlink escapes, private home dotdirs, .llm-cli-gateway, .ssh, cloud
+    credential dirs, and secret-store dirs are denied by default.
+  - The gateway app dir is never treated as an implicit workspace.
+"""
+idempotent = false
+validation = """
+Config tests cover alias validation, realpath normalization, allowed-root
+membership, symlink escape rejection, non-git path rejection for repo entries,
+folder-kind allowance for created folders, default workspace resolution, denied
+create slugs, existing non-empty create target rejection, local git-init repo
+creation, and denial of ~/.llm-cli-gateway as a repo unless explicitly
+overridden in a dev-only test fixture.
+"""
+
+[[steps]]
+id = "add-workspace-tools-and-resources"
+depends_on = ["define-workspace-registry-config"]
+actor = "assistant"
+action = """
+Expose MCP surfaces for remote clients:
+
+  - workspace_list: list aliases, display names, repo roots, current branch,
+    dirty state summary, and provider support. Do not list files by default.
+  - workspace_get: inspect one alias.
+  - workspace_register_existing_repo: optional and disabled unless
+    allow_register_existing_git_repos=true for the containing root. Requires
+    auth scope `workspace:admin` or local-only bootstrapper path.
+  - workspace_create: optional and disabled unless allow_create_directories=true
+    for the selected root. Requires auth scope `workspace:admin` or local-only
+    bootstrapper path. Inputs are alias, root alias, relative slug, kind
+    folder|git, and optional default flag. kind=git runs local `git init`.
+  - workspace_default_set: optional admin operation.
+
+Resource examples:
+  - workspace://repos
+  - workspace://repos/{alias}
+
+Never expose arbitrary filesystem browse tools through this feature. Repo
+registration and creation must not clone from network in this slice.
+"""
+idempotent = false
+validation = """
+MCP usability tests show tools are present only when the registry feature is
+enabled, redacts or omits denied paths, rejects unregistered aliases, and
+requires admin scope for registration, creation, and default changes. Creation
+tests prove safe relative slugs are accepted under allowed roots, traversal and
+absolute paths are rejected, folder and git kinds work, git kind initializes a
+local repo, and existing non-empty targets are not overwritten.
+"""
+
+[[steps]]
+id = "wire-provider-request-workspace-selection"
+depends_on = ["add-workspace-tools-and-resources"]
+actor = "assistant"
+action = """
+Add a shared workspace request shape to all provider request tools:
+
+  workspace: string optional alias
+  workspacePath: deprecated/admin-only absolute path escape hatch, disabled by
+    default
+
+Resolution order:
+  1. If gateway worktree is requested and session already has worktreePath,
+     reuse it after verifying the session's workspace alias still matches.
+  2. Else if `workspace` is supplied, resolve alias to repo root.
+  3. Else if session metadata has workspace alias, reuse that repo root.
+  4. Else use configured [workspaces].default.
+  5. Else fail with an actionable error rather than spawning in
+     ~/.llm-cli-gateway.
+
+Spawn behavior:
+  - Non-worktree requests spawn provider CLIs with cwd = resolved repo root.
+  - Worktree requests create/reuse worktrees under the resolved repo root and
+    spawn with cwd = worktree path.
+  - Provider-specific workingDir/addDir parameters are validated against the
+    selected workspace policy before being emitted.
+  - Async dedup keys include workspace alias/resolved cwd.
+  - Session metadata records workspaceAlias and workspaceRoot alongside
+    worktreePath when applicable.
+"""
+idempotent = false
+validation = """
+Focused tests prove every provider sync and async path refuses to spawn when no
+workspace can be resolved for remote/web requests, spawns in the selected repo
+root for non-worktree requests, spawns in repo-owned .worktrees for worktree
+requests, persists workspace metadata on sessions, and includes workspace cwd
+in async dedup keys.
+"""
+
+[[steps]]
+id = "doctor-and-setup-output"
+depends_on = [
+  "implement-oauth-server-hardening",
+  "add-secret-management-commands",
+  "wire-provider-request-workspace-selection",
+]
+actor = "assistant"
+action = """
+Update diagnostics and generated setup:
+
+  - doctor.auth.oauth block:
+      enabled, registration_policy, clients_configured count,
+      shared_secret_enabled, pkce_required, issuer, public_metadata_reachable,
+      token_endpoint_reachable, no raw secrets.
+  - doctor.workspaces block:
+      enabled, default alias, repo count, allowed root count, denied reason
+      when no workspace is usable.
+  - print-client-config:
+      ChatGPT uses OAuth, not No Authentication.
+      Include client_id and OAuth URLs.
+      Include client_secret only for local copy-once commands, never generic
+      doctor output.
+  - setup providers/docs:
+      Replace no-auth ChatGPT guidance with OAuth guidance.
+      Preserve bearer-token guidance for local clients that support headers.
+"""
+idempotent = false
+validation = """
+Doctor schema tests pass; setup/status.schema.json accepts new oauth and
+workspaces blocks. Generated setup packet contains no raw bearer token unless
+the operator explicitly invoked a local copy-once secret command.
+"""
+
+[[steps]]
+id = "security-regression-tests"
+depends_on = ["doctor-and-setup-output"]
+actor = "assistant"
+action = """
+Add security-focused regression tests:
+
+  - Secrets are never logged by HTTP transport, doctor, setup UI JSON, or
+    print-client-config default output.
+  - OAuth client secret must not be accepted in query strings.
+  - Authorization endpoint shared-secret mode uses POST form or equivalent
+    body only.
+  - Timing-safe comparison is used for secret verification.
+  - Workspace alias cannot traverse paths or select ~/.llm-cli-gateway.
+  - Workspace creation cannot traverse paths, target denied directories,
+    overwrite existing non-empty directories, or run network clone commands.
+  - Request-supplied absolute workingDir is rejected unless explicitly enabled
+    and under the selected workspace policy.
+  - No-auth ChatGPT path is absent or clearly deprecated when OAuth is enabled.
+"""
+idempotent = false
+validation = """
+New regression suite fails when secret redaction, token verification, path
+normalization, or workspace-policy checks are removed.
+"""
+
+[[steps]]
+id = "migration-and-backward-compatibility"
+depends_on = ["security-regression-tests"]
+actor = "assistant"
+action = """
+Define and implement compatibility behavior:
+
+  - Existing local bearer clients keep working.
+  - Existing no-auth ChatGPT path remains readable for one minor release only
+    if already configured, but doctor emits a warning and setup output prefers
+    OAuth.
+  - New tunnel setup defaults to OAuth.
+  - Existing worktree sessions without workspaceAlias continue by deriving
+    workspaceRoot from worktreePath layout when possible.
+  - Existing sessions without workspace metadata use configured default
+    workspace if one exists; otherwise fail before spawn with an actionable
+    migration message for remote HTTP requests.
+"""
+idempotent = false
+validation = """
+Compatibility tests cover old bearer clients, existing no-auth path warning,
+old worktree sessions, and no-default-workspace failures. Release notes include
+the deprecation window.
+"""
+
+[[steps]]
+id = "full-verification"
+depends_on = ["migration-and-backward-compatibility"]
+actor = "assistant"
+action = """
+Run:
+
+  npm run build
+  npm run lint
+  npm run format:check
+  npm test
+  npm run upstream:contracts
+
+Also run a live local smoke:
+  - Start HTTP gateway with OAuth enabled and one static client.
+  - Start Cloudflare Quick Tunnel or equivalent HTTPS test proxy.
+  - Verify .well-known metadata, registration policy, authorization flow,
+    token exchange, MCP initialize, workspace_list, and one provider request in
+    a registered repo with a harmless prompt.
+"""
+idempotent = true
+validation = """
+All automated gates pass. Smoke output records endpoint status codes and
+workspace alias used, with secrets redacted.
+"""
+
+[[steps]]
+id = "release-prep"
+depends_on = ["full-verification"]
+actor = "assistant"
+action = """
+Prepare a minor release:
+
+  - Bump package version.
+  - Update CHANGELOG and release docs.
+  - Update setup assistant runbooks and provider snippets.
+  - Confirm npm package contains dist, setup schema, docs, socket.yml, and no
+    private machine files.
+  - Push private upstream, mirror to public, create signed GitHub release, and
+    publish npm through the mirror workflow per AGENTS.md.
+"""
+idempotent = false
+validation = """
+Release checklist is complete, public mirror CI passes, npm package provenance
+is present, and the published version exposes OAuth/workspace functionality
+without relying on local workspace symlinks.
+"""
+
+[rollback]
+guidance = """
+Disable remote connector OAuth by setting [http.oauth].enabled = false or
+stopping the tunnel. Local bearer-token clients continue to work. To revoke
+remote access, rotate/revoke OAuth clients and shared secret, rotate the gateway
+bearer token for any already-issued near-term OAuth access tokens, then restart
+the HTTP gateway. To recover from workspace misconfiguration, clear
+[workspaces].default or disable workspace_register tools; requests must fail
+closed instead of spawning in ~/.llm-cli-gateway.
+"""
+
+[risks]
+items = [
+  "Dynamic client registration without a secret would make any party that can reach the public tunnel able to obtain a token. Mitigation: static_clients or shared_secret policy by default; open_dev only for localhost/dev.",
+  "Client-secret support varies by connector UI. Mitigation: support both confidential-client token exchange and interactive shared-secret authorization form, with both keeping secrets out of URLs.",
+  "Quick Tunnel hostnames rotate on restart. Mitigation: doctor and print-client-config must show current issuer and metadata URLs; persistent named tunnels are a separate operator choice.",
+  "Remote clients may ask for arbitrary paths. Mitigation: workspace alias registry and allowed-root checks; no implicit cwd fallback to the gateway app dir.",
+  "Provider CLIs differ in cwd and add-dir semantics. Mitigation: resolve cwd at gateway layer first, validate provider-specific workingDir/addDir against workspace policy before argv emission.",
+]

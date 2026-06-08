@@ -1,8 +1,9 @@
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
-import { mkdtempSync, writeFileSync, chmodSync, rmSync } from "fs";
+import { mkdtempSync, writeFileSync, chmodSync, rmSync, mkdirSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 import { AsyncJobManager } from "../async-job-manager.js";
+import { executeCli } from "../executor.js";
 import type { ISessionManager } from "../session-manager.js";
 import type { Session } from "../session-manager.js";
 
@@ -348,6 +349,58 @@ describe("handleGeminiRequest (sync)", () => {
     expect(result.resumable).toBe(false);
     expect(result.sessionId).toBeUndefined();
     expect(result.structuredContent?.sessionId).toBeNull();
+  });
+
+  it("passes selected workspace cwd as cwd instead of stdin", async () => {
+    const sm = createMockSessionManager();
+    const tempRoot = mkdtempSync(join(tmpdir(), "gemini-workspace-cwd-"));
+    const workspaceRoot = join(tempRoot, "workspace");
+    mkdirSync(workspaceRoot);
+    vi.mocked(executeCli).mockClear();
+
+    try {
+      const result = await handleGeminiRequest(
+        {
+          sessionManager: sm,
+          logger: noopLogger,
+          workspaces: {
+            enabled: true,
+            defaultAlias: null,
+            allowUnregisteredWorkingDir: false,
+            repos: [
+              {
+                alias: "geminiws",
+                path: workspaceRoot,
+                providers: ["gemini"],
+                allowWorktree: false,
+                allowAddDir: false,
+                kind: "folder",
+                operatorEntry: true,
+              },
+            ],
+            allowedRoots: [],
+            sources: { configFile: null },
+          },
+        },
+        {
+          prompt: "hello",
+          workspace: "geminiws",
+          resumeLatest: false,
+          createNewSession: false,
+          approvalStrategy: "legacy",
+          optimizePrompt: false,
+        }
+      );
+
+      expect(result.isError).toBeUndefined();
+      const geminiCall = vi.mocked(executeCli).mock.calls.find(([command]) => command === "gemini");
+      expect(geminiCall).toBeDefined();
+      const options = geminiCall?.[2] as { stdin?: string; cwd?: string } | undefined;
+      expect(options?.stdin).toBeUndefined();
+      expect(options?.cwd).toBe(workspaceRoot);
+    } finally {
+      rmSync(tempRoot, { recursive: true, force: true });
+    }
   });
 });
 

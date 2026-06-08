@@ -172,6 +172,17 @@ describe("Layer 6 doctor report (U20)", () => {
     expect(report.endpoint_exposure.public_url).toContain("safe=ok");
   });
 
+  it("redacts deprecated ChatGPT no-auth connector paths from doctor output", () => {
+    const env: NodeJS.ProcessEnv = {
+      LLM_GATEWAY_PUBLIC_URL: "https://test.example.com/mcp",
+      LLM_GATEWAY_NO_AUTH_PATHS: "/chatgpt/SECRET123/mcp",
+    };
+    const report = createDoctorReport(env);
+
+    expect(report.transport.http.chatgpt_connector_url).toBe("<redacted>");
+    expect(JSON.stringify(report)).not.toContain("SECRET123");
+  });
+
   it("redacts credentials embedded in the URL userinfo component", () => {
     const env: NodeJS.ProcessEnv = {
       LLM_GATEWAY_PUBLIC_URL: "https://user:hunter2@tunnel.example.com/mcp",

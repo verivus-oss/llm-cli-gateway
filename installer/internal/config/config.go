@@ -96,6 +96,7 @@ func ClearPublicURL() error {
 	settings.PublicURL = ""
 	settings.VerifyPublicURL = false
 	settings.ChatGPTConnectorURL = ""
+	settings.ChatGPTNoAuthPath = ""
 	return writeSettings(cfg.AppDir, settings)
 }
 
@@ -287,13 +288,28 @@ func DoctorJSON() ([]byte, error) {
 				"path":                  cfg.HTTPPath,
 				"public_url_configured": publicURL != "",
 				"public_url":            nullableString(redactedPublicURL),
-				"chatgpt_connector_url": nullableString(redactDiagnosticURL(cfg.ChatGPTConnectorURL)),
+				"chatgpt_connector_url": redactedDeprecatedConnectorURL(cfg.ChatGPTConnectorURL),
 			},
 		},
 		"auth": map[string]any{
 			"required":         true,
 			"token_configured": cfg.AuthTokenSet,
 			"source":           "installer-auth-token-file",
+			"oauth": map[string]any{
+				"enabled":               true,
+				"registration_policy":   "static_clients",
+				"clients_configured":    0,
+				"shared_secret_enabled": false,
+				"pkce_required":         true,
+				"issuer":                nullableString(redactedPublicURL),
+			},
+		},
+		"workspaces": map[string]any{
+			"enabled":                      false,
+			"default":                      nil,
+			"repo_count":                   0,
+			"allowed_root_count":           0,
+			"gateway_app_dir_is_workspace": false,
 		},
 		"providers": map[string]any{
 			"claude": providerDoctor("claude", "Claude Code"),
@@ -443,6 +459,13 @@ func redactDiagnosticURL(raw string) string {
 	return strings.ReplaceAll(parsed.String(), "%3Credacted%3E", "<redacted>")
 }
 
+func redactedDeprecatedConnectorURL(raw string) any {
+	if raw == "" {
+		return nil
+	}
+	return "<redacted>"
+}
+
 var sensitiveKeyPattern = regexp.MustCompile(`(?i)auth|bearer|token|secret|credential|password|authorization|signature|api[_-]?key|access[_-]?key|jwt|cookie|session`)
 
 func redactSensitivePairs(value string) string {
@@ -491,9 +514,6 @@ func EnvForGateway(cfg Config, token string) []string {
 	}
 	if cfg.VerifyPublicURL {
 		env = append(env, "LLM_GATEWAY_VERIFY_PUBLIC_URL=1")
-	}
-	if cfg.ChatGPTNoAuthPath != "" {
-		env = append(env, "LLM_GATEWAY_NO_AUTH_PATHS="+cfg.ChatGPTNoAuthPath)
 	}
 	return env
 }

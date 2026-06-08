@@ -44,6 +44,8 @@ Or use directly with `npx` from an MCP client:
 - Supports cache-aware `promptParts`, including explicit Claude `cache_control` when opted in.
 - Can run requests inside gateway-managed git worktrees for isolated multi-agent review and implementation loops.
 - Ships personal-appliance setup surfaces: HTTP transport with bearer-token auth, `doctor --json`, setup UI artifacts, provider setup snippets, Docker fallback, and checked release bundles.
+- Remote web connectors use MCP OAuth discovery and authorization-code setup with static client or shared-secret gates. Client secrets are generated locally, stored only as hashes, and printed only by explicit copy-once commands.
+- Provider CLI requests can select registered workspaces by alias via `workspace`; remote requests should use aliases, not arbitrary filesystem paths. New local folder/Git workspaces can be created only under configured allowed roots.
 
 ## Workflow Assets
 

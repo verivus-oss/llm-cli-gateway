@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { request } from "node:http";
+import { createHash } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod/v3";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -13,7 +15,12 @@ import { startHttpGateway, type HttpGatewayHandle } from "../http-transport.js";
 // CLIs.
 
 const TEST_TOKEN = "test-bearer-XYZ-987"; // gitleaks:allow — deliberate test fixture token, not a real secret
+const TEST_OAUTH_SHARED_SECRET = "oauth-registration-secret-test"; // gitleaks:allow
 const ORIGINAL_ENV = { ...process.env };
+
+function pkceChallenge(verifier: string): string {
+  return createHash("sha256").update(verifier).digest("base64url");
+}
 
 function makeEchoServer(): McpServer {
   const server = new McpServer({ name: "echo-test-server", version: "0.0.1" });
@@ -45,6 +52,33 @@ async function startGateway(): Promise<HttpGatewayHandle> {
   });
 }
 
+function httpGetWithHost(
+  target: URL,
+  hostHeader: string
+): Promise<{ status: number; body: string }> {
+  return new Promise((resolve, reject) => {
+    const req = request(
+      target,
+      {
+        method: "GET",
+        headers: { host: hostHeader },
+      },
+      res => {
+        const chunks: Buffer[] = [];
+        res.on("data", chunk => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
+        res.on("end", () => {
+          resolve({
+            status: res.statusCode ?? 0,
+            body: Buffer.concat(chunks).toString("utf8"),
+          });
+        });
+      }
+    );
+    req.on("error", reject);
+    req.end();
+  });
+}
+
 function parseSseOrJson(body: string): any {
   const trimmed = body.trim();
   if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
@@ -65,6 +99,10 @@ describe("Layer 6 HTTP MCP transport (U20)", () => {
     process.env = { ...ORIGINAL_ENV, LLM_GATEWAY_AUTH_TOKEN: TEST_TOKEN };
     delete process.env.LLM_GATEWAY_AUTH_DISABLED;
     delete process.env.LLM_GATEWAY_NO_AUTH_PATHS;
+    delete process.env.LLM_GATEWAY_OAUTH_ENABLED;
+    delete process.env.LLM_GATEWAY_PUBLIC_URL;
+    delete process.env.LLM_GATEWAY_OAUTH_REGISTRATION_SECRET;
+    delete process.env.LLM_GATEWAY_OAUTH_SHARED_SECRET;
   });
 
   afterEach(async () => {
@@ -87,6 +125,296 @@ describe("Layer 6 HTTP MCP transport (U20)", () => {
     const body = (await response.json()) as { error?: string };
     expect(body.error).toBeDefined();
     expect(body.error).not.toContain(TEST_TOKEN);
+  });
+
+  it("advertises OAuth protected-resource metadata on bearer auth failures when enabled", async () => {
+    process.env.LLM_GATEWAY_OAUTH_ENABLED = "1";
+    process.env.LLM_GATEWAY_PUBLIC_URL = "https://gateway.example.test/mcp";
+    gateway = await startGateway();
+
+    const response = await fetch(gateway.url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} }),
+    });
+
+    expect(response.status).toBe(401);
+    expect(response.headers.get("www-authenticate")).toContain(
+      'resource_metadata="https://gateway.example.test/.well-known/oauth-protected-resource"'
+    );
+  });
+
+  it("serves MCP OAuth discovery metadata and shared-secret dynamic client registration", async () => {
+    process.env.LLM_GATEWAY_OAUTH_ENABLED = "1";
+    process.env.LLM_GATEWAY_PUBLIC_URL = "https://gateway.example.test/mcp";
+    process.env.LLM_GATEWAY_OAUTH_REGISTRATION_SECRET = TEST_OAUTH_SHARED_SECRET;
+    gateway = await startGateway();
+
+    const protectedMetadata = await fetch(
+      new URL("/.well-known/oauth-protected-resource", gateway.url)
+    );
+    expect(protectedMetadata.status).toBe(200);
+    const protectedBody = (await protectedMetadata.json()) as { scopes_supported: string[] };
+    expect(protectedBody).toMatchObject({
+      resource: "https://gateway.example.test/mcp",
+      authorization_servers: ["https://gateway.example.test"],
+      bearer_methods_supported: ["header"],
+    });
+    expect(protectedBody.scopes_supported).toContain("mcp");
+
+    const authorizationMetadata = await fetch(
+      new URL("/.well-known/oauth-authorization-server", gateway.url)
+    );
+    expect(authorizationMetadata.status).toBe(200);
+    await expect(authorizationMetadata.json()).resolves.toMatchObject({
+      issuer: "https://gateway.example.test",
+      authorization_endpoint: "https://gateway.example.test/oauth/authorize",
+      token_endpoint: "https://gateway.example.test/oauth/token",
+      registration_endpoint: "https://gateway.example.test/oauth/register",
+      response_types_supported: ["code"],
+      grant_types_supported: ["authorization_code"],
+    });
+
+    const pathSpecificAuthorizationMetadata = await fetch(
+      new URL("/.well-known/oauth-authorization-server/mcp", gateway.url)
+    );
+    expect(pathSpecificAuthorizationMetadata.status).toBe(200);
+
+    const registration = await fetch(new URL("/oauth/register", gateway.url), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        shared_secret: TEST_OAUTH_SHARED_SECRET,
+        redirect_uris: ["https://chat.openai.com/aip/callback"],
+      }),
+    });
+    expect(registration.status).toBe(201);
+    const body = (await registration.json()) as {
+      client_id?: string;
+      client_secret?: string;
+      token_endpoint_auth_method?: string;
+    };
+    expect(body.client_id).toMatch(/^llm-cli-gateway-/);
+    expect(body.client_secret).toBeDefined();
+    expect(body.token_endpoint_auth_method).toBe("client_secret_post");
+  });
+
+  it("rejects OAuth dynamic registration without the shared registration secret", async () => {
+    process.env.LLM_GATEWAY_OAUTH_ENABLED = "1";
+    process.env.LLM_GATEWAY_PUBLIC_URL = "https://gateway.example.test/mcp";
+    process.env.LLM_GATEWAY_OAUTH_REGISTRATION_SECRET = TEST_OAUTH_SHARED_SECRET;
+    gateway = await startGateway();
+
+    const registration = await fetch(new URL("/oauth/register", gateway.url), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ redirect_uris: ["https://chat.openai.com/aip/callback"] }),
+    });
+    expect(registration.status).toBe(403);
+    await expect(registration.json()).resolves.toMatchObject({ error: "invalid_client" });
+  });
+
+  it("rejects OAuth registration secrets in query strings", async () => {
+    process.env.LLM_GATEWAY_OAUTH_ENABLED = "1";
+    process.env.LLM_GATEWAY_PUBLIC_URL = "https://gateway.example.test/mcp";
+    process.env.LLM_GATEWAY_OAUTH_REGISTRATION_SECRET = TEST_OAUTH_SHARED_SECRET;
+    gateway = await startGateway();
+
+    const url = new URL("/oauth/register", gateway.url);
+    url.searchParams.set("shared_secret", TEST_OAUTH_SHARED_SECRET);
+    const registration = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ redirect_uris: ["https://chat.openai.com/aip/callback"] }),
+    });
+    expect(registration.status).toBe(400);
+    await expect(registration.json()).resolves.toMatchObject({ error: "invalid_request" });
+  });
+
+  it("does not derive public OAuth issuer metadata from hostile Host headers", async () => {
+    process.env.LLM_GATEWAY_OAUTH_ENABLED = "1";
+    gateway = await startGateway();
+
+    const response = await httpGetWithHost(
+      new URL("/.well-known/oauth-authorization-server", gateway.url),
+      "evil.example"
+    );
+    expect(response.status).toBe(503);
+    expect(response.body).not.toContain("evil.example");
+  });
+
+  it("does not redirect OAuth authorization errors to unregistered redirect URIs", async () => {
+    process.env.LLM_GATEWAY_OAUTH_ENABLED = "1";
+    process.env.LLM_GATEWAY_PUBLIC_URL = "https://gateway.example.test/mcp";
+    gateway = await startGateway();
+
+    const authorizeUrl = new URL("/oauth/authorize", gateway.url);
+    authorizeUrl.searchParams.set("response_type", "code");
+    authorizeUrl.searchParams.set("client_id", "unknown-client");
+    authorizeUrl.searchParams.set("redirect_uri", "https://attacker.example/callback");
+    const authorize = await fetch(authorizeUrl, { redirect: "manual" });
+
+    expect(authorize.status).toBe(400);
+    expect(authorize.headers.get("location")).toBeNull();
+    await expect(authorize.json()).resolves.toMatchObject({ error: "invalid_request" });
+  });
+
+  it("exchanges an OAuth authorization code for a scoped token accepted by MCP", async () => {
+    process.env.LLM_GATEWAY_OAUTH_ENABLED = "1";
+    process.env.LLM_GATEWAY_PUBLIC_URL = "https://gateway.example.test/mcp";
+    process.env.LLM_GATEWAY_OAUTH_REGISTRATION_SECRET = TEST_OAUTH_SHARED_SECRET;
+    gateway = await startGateway();
+
+    const registration = await fetch(new URL("/oauth/register", gateway.url), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        shared_secret: TEST_OAUTH_SHARED_SECRET,
+        redirect_uris: ["https://chat.openai.com/aip/callback"],
+      }),
+    });
+    expect(registration.status).toBe(201);
+    const registrationBody = (await registration.json()) as {
+      client_id: string;
+      client_secret: string;
+    };
+
+    const authorizeUrl = new URL("/oauth/authorize", gateway.url);
+    authorizeUrl.searchParams.set("response_type", "code");
+    authorizeUrl.searchParams.set("client_id", registrationBody.client_id);
+    authorizeUrl.searchParams.set("redirect_uri", "https://chat.openai.com/aip/callback");
+    authorizeUrl.searchParams.set("state", "state-123");
+    authorizeUrl.searchParams.set("scope", "mcp");
+    authorizeUrl.searchParams.set("code_challenge", pkceChallenge("unit-test-verifier"));
+    authorizeUrl.searchParams.set("code_challenge_method", "S256");
+    const authorize = await fetch(authorizeUrl, { redirect: "manual" });
+    expect(authorize.status).toBe(302);
+    const location = authorize.headers.get("location");
+    expect(location).toBeDefined();
+    const redirect = new URL(location!);
+    expect(redirect.origin + redirect.pathname).toBe("https://chat.openai.com/aip/callback");
+    expect(redirect.searchParams.get("state")).toBe("state-123");
+    const code = redirect.searchParams.get("code");
+    expect(code).toBeDefined();
+
+    const tokenResponse = await fetch(new URL("/oauth/token", gateway.url), {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "authorization_code",
+        code: code!,
+        client_id: registrationBody.client_id,
+        client_secret: registrationBody.client_secret,
+        redirect_uri: "https://chat.openai.com/aip/callback",
+        code_verifier: "unit-test-verifier",
+      }),
+    });
+    expect(tokenResponse.status).toBe(200);
+    const tokenBody = (await tokenResponse.json()) as {
+      access_token: string;
+      token_type: string;
+      expires_in: number;
+      scope: string;
+    };
+    expect(tokenBody).toMatchObject({
+      token_type: "Bearer",
+      expires_in: 3600,
+      scope: "mcp",
+    });
+    expect(tokenBody.access_token).toMatch(/^oauth_/);
+    expect(tokenBody.access_token).not.toBe(TEST_TOKEN);
+
+    const mcpResponse = await fetch(
+      gateway.url,
+      withAuth(tokenBody.access_token, {
+        method: "POST",
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "initialize",
+          params: {
+            protocolVersion: "2025-06-18",
+            capabilities: {},
+            clientInfo: { name: "oauth-test", version: "0.0.1" },
+          },
+        }),
+      })
+    );
+    expect(mcpResponse.status).toBe(200);
+  });
+
+  it("rejects OAuth authorization scopes not granted to the client", async () => {
+    process.env.LLM_GATEWAY_OAUTH_ENABLED = "1";
+    process.env.LLM_GATEWAY_PUBLIC_URL = "https://gateway.example.test/mcp";
+    process.env.LLM_GATEWAY_OAUTH_REGISTRATION_SECRET = TEST_OAUTH_SHARED_SECRET;
+    gateway = await startGateway();
+
+    const registration = await fetch(new URL("/oauth/register", gateway.url), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        shared_secret: TEST_OAUTH_SHARED_SECRET,
+        redirect_uris: ["https://chat.openai.com/aip/callback"],
+      }),
+    });
+    const registrationBody = (await registration.json()) as {
+      client_id: string;
+      client_secret: string;
+    };
+
+    const authorizeUrl = new URL("/oauth/authorize", gateway.url);
+    authorizeUrl.searchParams.set("response_type", "code");
+    authorizeUrl.searchParams.set("client_id", registrationBody.client_id);
+    authorizeUrl.searchParams.set("redirect_uri", "https://chat.openai.com/aip/callback");
+    authorizeUrl.searchParams.set("scope", "mcp workspace:admin");
+    authorizeUrl.searchParams.set("code_challenge", pkceChallenge("unit-test-verifier"));
+    authorizeUrl.searchParams.set("code_challenge_method", "S256");
+    const authorize = await fetch(authorizeUrl, { redirect: "manual" });
+
+    expect(authorize.status).toBe(302);
+    const redirect = new URL(authorize.headers.get("location")!);
+    expect(redirect.searchParams.get("error")).toBe("invalid_scope");
+    expect(redirect.searchParams.get("code")).toBeNull();
+  });
+
+  it("rejects OAuth token exchange with a wrong client secret", async () => {
+    process.env.LLM_GATEWAY_OAUTH_ENABLED = "1";
+    process.env.LLM_GATEWAY_PUBLIC_URL = "https://gateway.example.test/mcp";
+    process.env.LLM_GATEWAY_OAUTH_REGISTRATION_SECRET = TEST_OAUTH_SHARED_SECRET;
+    gateway = await startGateway();
+
+    const registration = await fetch(new URL("/oauth/register", gateway.url), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        shared_secret: TEST_OAUTH_SHARED_SECRET,
+        redirect_uris: ["https://chat.openai.com/aip/callback"],
+      }),
+    });
+    const registrationBody = (await registration.json()) as { client_id: string };
+
+    const authorizeUrl = new URL("/oauth/authorize", gateway.url);
+    authorizeUrl.searchParams.set("response_type", "code");
+    authorizeUrl.searchParams.set("client_id", registrationBody.client_id);
+    authorizeUrl.searchParams.set("redirect_uri", "https://chat.openai.com/aip/callback");
+    authorizeUrl.searchParams.set("code_challenge", pkceChallenge("unit-test-verifier"));
+    authorizeUrl.searchParams.set("code_challenge_method", "S256");
+    const authorize = await fetch(authorizeUrl, { redirect: "manual" });
+    const code = new URL(authorize.headers.get("location")!).searchParams.get("code");
+
+    const tokenResponse = await fetch(new URL("/oauth/token", gateway.url), {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "authorization_code",
+        code: code!,
+        client_id: registrationBody.client_id,
+        client_secret: "bad",
+        redirect_uri: "https://chat.openai.com/aip/callback",
+      }),
+    });
+    expect(tokenResponse.status).toBe(400);
+    await expect(tokenResponse.json()).resolves.toMatchObject({ error: "invalid_grant" });
   });
 
   it("rejects requests with an incorrect bearer token", async () => {

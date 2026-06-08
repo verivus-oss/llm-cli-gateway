@@ -7,10 +7,10 @@ ChatGPT is a verified inbound MCP host with plan limits. Use this path only when
 ## Human Instructions
 
 1. Run `llm-cli-gateway tunnel start` or configure a public HTTPS reverse proxy.
-2. Run `llm-cli-gateway chatgpt-url` or `llm-cli-gateway print-client-config`.
-3. In ChatGPT connector/app settings, add the generated `chatgpt.url`.
-4. Set Authentication to `No Authentication`.
-5. Do not paste the ChatGPT URL, bearer token, tunnel tokens, or provider credentials into a remote chat transcript.
+2. Run `llm-cli-gateway oauth client add chatgpt --redirect-uri <ChatGPT callback URL> --print-once`.
+3. Run `llm-cli-gateway print-client-config`.
+4. In ChatGPT connector/app settings, use the `/mcp` URL and OAuth authorization/token URLs from the setup packet.
+5. Paste the client secret only into the local connector setup field that asks for it. Do not paste the secret, bearer token, tunnel tokens, or provider credentials into a remote chat transcript.
 
 ## Assistant Instructions
 
@@ -22,8 +22,12 @@ Sanitized MCP templates are also collected in `setup/assistants/mcp-config-sampl
 
 ```text
 Name: llm-cli-gateway
-MCP URL: <chatgpt.url>
-Authentication: No Authentication
+MCP URL: <oauth url ending /mcp>
+Authentication: OAuth
+Authorization URL: <issuer>/oauth/authorize
+Token URL: <issuer>/oauth/token
+Client ID: chatgpt
+Client Secret: <copy-once local output>
 ```
 
 ## Verification
@@ -32,4 +36,4 @@ In ChatGPT, ask: `validate this sentence with two other models: The gateway is c
 
 ## Known Limitations
 
-Plan access and connector UI names can vary. Gemini web status does not affect ChatGPT setup. The default `/mcp` URL is still bearer-protected; ChatGPT uses a separate high-entropy URL because its connector setup may not support arbitrary static Authorization headers. Never include ChatGPT URLs, bearer tokens, tunnel tokens, provider credentials, or authorization headers in assistant prompts.
+Plan access and connector UI names can vary. Gemini web status does not affect ChatGPT setup. The default `/mcp` URL remains bearer-protected for clients that support headers and supports OAuth for remote web connectors. Older high-entropy no-auth ChatGPT URLs are deprecated. Never include client secrets, bearer tokens, tunnel tokens, provider credentials, or authorization headers in assistant prompts.

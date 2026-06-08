@@ -5,6 +5,8 @@ import { createRequire } from "module";
 import { z } from "zod/v3";
 import type { Logger } from "./logger.js";
 import { logWarn, noopLogger } from "./logger.js";
+import type { RemoteOAuthConfig, OAuthRegistrationPolicy } from "./auth.js";
+import { hashSecret, isSecretHash } from "./oauth.js";
 
 // Zod schemas for configuration validation
 const DatabaseUrlSchema = z
@@ -160,6 +162,28 @@ function readPersistenceFile(
   } catch (err) {
     logger.error(`Failed to parse gateway config at ${configPath}; using defaults`, err);
     return { raw: undefined, sourcePath: null };
+  }
+}
+
+function readGatewayTomlFile(
+  configPath: string,
+  logger: Logger,
+  fallbackLabel: string
+): { parsed: Record<string, unknown> | null; sourcePath: string | null } {
+  if (!existsSync(configPath)) {
+    return { parsed: null, sourcePath: null };
+  }
+  try {
+    const require = createRequire(import.meta.url);
+    const TOML = require("smol-toml");
+    const text = readFileSync(configPath, "utf-8");
+    return { parsed: TOML.parse(text) as Record<string, unknown>, sourcePath: configPath };
+  } catch (err) {
+    logger.error(
+      `Failed to parse gateway config at ${configPath}; using ${fallbackLabel} defaults`,
+      err
+    );
+    return { parsed: null, sourcePath: null };
   }
 }
 
@@ -569,4 +593,169 @@ export function isXaiProviderEnabled(
   const keyEnv = config.xai?.apiKeyEnv;
   if (!keyEnv) return false;
   return typeof env[keyEnv] === "string" && env[keyEnv]!.trim().length > 0;
+}
+
+//──────────────────────────────────────────────────────────────────────────────
+// Remote connector OAuth configuration
+//──────────────────────────────────────────────────────────────────────────────
+
+const OAuthRegistrationPolicySchema = z.enum(["static_clients", "shared_secret", "open_dev"]);
+
+const OAuthClientSchema = z
+  .object({
+    client_id: z.string().min(1),
+    client_secret_hash: z.string().optional(),
+    allowed_redirect_uris: z.array(z.string().url()).default([]),
+    scopes: z.array(z.string().min(1)).default(["mcp"]),
+  })
+  .strict();
+
+const OAuthSharedSecretSchema = z
+  .object({
+    enabled: z.boolean().default(false),
+    secret_hash: z.string().optional(),
+    prompt_label: z.string().min(1).default("Gateway access code"),
+  })
+  .strict();
+
+const OAuthConfigSchema = z
+  .object({
+    enabled: z.boolean().default(false),
+    issuer: z.string().min(1).default("auto"),
+    require_pkce: z.boolean().default(true),
+    allow_plain_pkce: z.boolean().default(false),
+    registration_policy: OAuthRegistrationPolicySchema.default("static_clients"),
+    allow_public_clients: z.boolean().default(false),
+    token_ttl_seconds: z.number().int().positive().default(3600),
+    clients: z.array(OAuthClientSchema).default([]),
+    shared_secret: OAuthSharedSecretSchema.optional(),
+  })
+  .strict();
+
+function disabledOAuthConfig(
+  sourcePath: string | null = null,
+  envOverrides: string[] = []
+): RemoteOAuthConfig {
+  return {
+    enabled: false,
+    issuer: "auto",
+    requirePkce: true,
+    allowPlainPkce: false,
+    registrationPolicy: "static_clients",
+    allowPublicClients: false,
+    tokenTtlSeconds: 3600,
+    clients: [],
+    sharedSecret: null,
+    sources: { configFile: sourcePath, envOverrides },
+  };
+}
+
+function isSafeRedirectUri(uri: string): boolean {
+  return isHttpsOrLoopbackUrl(uri);
+}
+
+export function loadRemoteOAuthConfig(
+  logger: Logger = noopLogger,
+  env: NodeJS.ProcessEnv = process.env
+): RemoteOAuthConfig {
+  const configPath = defaultGatewayConfigPath();
+  const { parsed: configFile, sourcePath } = readGatewayTomlFile(configPath, logger, "OAuth");
+  const rawHttp = (configFile?.http as Record<string, unknown> | undefined) ?? {};
+  const rawOAuth = (rawHttp.oauth as Record<string, unknown> | undefined) ?? {};
+  const envOverrides: string[] = [];
+  const merged: Record<string, unknown> = { ...rawOAuth };
+
+  if (env.LLM_GATEWAY_OAUTH_ENABLED !== undefined) {
+    merged.enabled = env.LLM_GATEWAY_OAUTH_ENABLED === "1";
+    envOverrides.push("LLM_GATEWAY_OAUTH_ENABLED");
+  }
+  if (env.LLM_GATEWAY_OAUTH_REGISTRATION_SECRET || env.LLM_GATEWAY_OAUTH_SHARED_SECRET) {
+    const rawSecret =
+      env.LLM_GATEWAY_OAUTH_REGISTRATION_SECRET || env.LLM_GATEWAY_OAUTH_SHARED_SECRET;
+    merged.registration_policy = "shared_secret";
+    merged.shared_secret = {
+      enabled: true,
+      // Env-only compatibility path: plaintext is converted to a hash in memory
+      // and never written back to config.
+      secret_hash: rawSecret ? hashSecret(rawSecret) : undefined,
+      prompt_label: "Gateway access code",
+    };
+    envOverrides.push(
+      env.LLM_GATEWAY_OAUTH_REGISTRATION_SECRET
+        ? "LLM_GATEWAY_OAUTH_REGISTRATION_SECRET"
+        : "LLM_GATEWAY_OAUTH_SHARED_SECRET"
+    );
+  }
+
+  const parsed = OAuthConfigSchema.safeParse(merged);
+  if (!parsed.success) {
+    logWarn(logger, "Invalid [http.oauth] config; remote OAuth disabled", {
+      error: parsed.error.message,
+    });
+    return disabledOAuthConfig(sourcePath, envOverrides);
+  }
+  const data = parsed.data;
+  if (data.issuer !== "auto" && !isHttpsOrLoopbackUrl(data.issuer)) {
+    logWarn(logger, "Invalid [http.oauth].issuer; remote OAuth disabled");
+    return disabledOAuthConfig(sourcePath, envOverrides);
+  }
+  for (const client of data.clients) {
+    if (!data.allow_public_clients && !client.client_secret_hash) {
+      logWarn(logger, "OAuth client secret hash is required when public clients are disabled", {
+        client_id: client.client_id,
+      });
+      return disabledOAuthConfig(sourcePath, envOverrides);
+    }
+    if (client.client_secret_hash && !isSecretHash(client.client_secret_hash)) {
+      logWarn(logger, "Invalid OAuth client secret hash; remote OAuth disabled", {
+        client_id: client.client_id,
+      });
+      return disabledOAuthConfig(sourcePath, envOverrides);
+    }
+    if (
+      client.allowed_redirect_uris.length === 0 ||
+      client.allowed_redirect_uris.some(uri => !isSafeRedirectUri(uri))
+    ) {
+      logWarn(logger, "Invalid OAuth client redirect URI; remote OAuth disabled", {
+        client_id: client.client_id,
+      });
+      return disabledOAuthConfig(sourcePath, envOverrides);
+    }
+  }
+  if (data.shared_secret?.enabled) {
+    if (!data.shared_secret.secret_hash || !isSecretHash(data.shared_secret.secret_hash)) {
+      logWarn(logger, "Invalid [http.oauth.shared_secret] secret_hash; remote OAuth disabled");
+      return disabledOAuthConfig(sourcePath, envOverrides);
+    }
+  }
+  if (data.registration_policy === "open_dev" && env.LLM_GATEWAY_OAUTH_OPEN_DEV !== "1") {
+    logWarn(
+      logger,
+      "[http.oauth].registration_policy='open_dev' is intended for localhost/dev only"
+    );
+  }
+
+  return {
+    enabled: data.enabled,
+    issuer: data.issuer,
+    requirePkce: data.require_pkce,
+    allowPlainPkce: data.allow_plain_pkce,
+    registrationPolicy: data.registration_policy as OAuthRegistrationPolicy,
+    allowPublicClients: data.allow_public_clients,
+    tokenTtlSeconds: data.token_ttl_seconds,
+    clients: data.clients.map(client => ({
+      clientId: client.client_id,
+      clientSecretHash: client.client_secret_hash ?? null,
+      allowedRedirectUris: client.allowed_redirect_uris,
+      scopes: client.scopes,
+    })),
+    sharedSecret: data.shared_secret
+      ? {
+          enabled: data.shared_secret.enabled,
+          secretHash: data.shared_secret.secret_hash ?? null,
+          promptLabel: data.shared_secret.prompt_label,
+        }
+      : null,
+    sources: { configFile: sourcePath, envOverrides },
+  };
 }

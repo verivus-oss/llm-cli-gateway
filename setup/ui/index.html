@@ -277,7 +277,7 @@
         setValue("exposureState", exposure.mode || "unknown", exposure.mode === "tunnel" || exposure.mode === "byo_reverse_proxy" ? "good" : "warn");
         setValue("webState", exposure.web_clients_supported ? "ready" : "not ready", exposure.web_clients_supported ? "good" : "bad");
         renderProviders(json.providers || {});
-        renderClients(endpoint, exposure);
+        renderClients(endpoint, exposure, json.auth?.oauth || {});
         renderPacket(json, endpoint);
       }
 
@@ -301,7 +301,7 @@
           .join("");
       }
 
-      function renderClients(endpoint, exposure) {
+      function renderClients(endpoint, exposure, oauth) {
         const webReady = exposure.web_clients_supported === true;
         el("clientGrid").innerHTML = clients
           .map(([name, href, note]) => {
@@ -309,15 +309,44 @@
             return `<article class="provider">
               <h3>${escapeHtml(name)}</h3>
               <p class="small">${escapeHtml(note)}</p>
-              <pre>${escapeHtml(snippetFor(name, endpoint, disabled))}</pre>
+              <pre>${escapeHtml(snippetFor(name, endpoint, disabled, oauth))}</pre>
             </article>`;
           })
           .join("");
       }
 
-      function snippetFor(name, endpoint, blocked) {
+      function oauthIssuer(endpoint, oauth) {
+        const configured = oauth?.issuer;
+        const httpPath = lastDoctor?.transport?.http?.path || "/mcp";
+        if (configured && configured !== endpoint) return configured.replace(/\/+$/, "");
+        try {
+          const url = new URL(endpoint);
+          if (url.pathname.endsWith(httpPath)) {
+            url.pathname = url.pathname.slice(0, -httpPath.length) || "/";
+          }
+          url.search = "";
+          url.hash = "";
+          return url.toString().replace(/\/+$/, "");
+        } catch {
+          return "<issuer>";
+        }
+      }
+
+      function snippetFor(name, endpoint, blocked, oauth) {
         if (blocked) return "Run endpoint exposure verification before using this web client.";
         const tokenFile = "~/.llm-cli-gateway/auth-token";
+        if (name === "ChatGPT") {
+          const issuer = oauthIssuer(endpoint, oauth);
+          return [
+            `MCP URL: ${endpoint}`,
+            "Authentication: OAuth",
+            `Authorization URL: ${issuer}/oauth/authorize`,
+            `Token URL: ${issuer}/oauth/token`,
+            "Client ID: chatgpt",
+            "Client Secret: <copy-once local oauth command output>",
+            "Create the secret locally with: llm-cli-gateway oauth client add chatgpt --redirect-uri <ChatGPT callback URL> --print-once",
+          ].join("\n");
+        }
         if (name === "Codex") {
           return [
             `export LLM_GATEWAY_AUTH_TOKEN="$(cat ${tokenFile})"`,
@@ -341,6 +370,7 @@
       }
 
       function renderPacket(json, endpoint) {
+        const issuer = oauthIssuer(endpoint, json.auth?.oauth || {});
         const packet = {
           product: "llm-cli-gateway personal MCP setup",
           generated_at: new Date().toISOString(),
@@ -349,6 +379,20 @@
             required: json.auth?.required,
             token_configured: json.auth?.token_configured,
             token_value: "redacted",
+            oauth: {
+              enabled: json.auth?.oauth?.enabled,
+              issuer,
+              authorization_url: `${issuer}/oauth/authorize`,
+              token_url: `${issuer}/oauth/token`,
+              registration_url: `${issuer}/oauth/register`,
+              client_secret: "<copy-once local oauth command output only>",
+            },
+          },
+          chatgpt: {
+            mcp_url: endpoint,
+            authentication: "OAuth",
+            client_id: "chatgpt",
+            client_secret: "<copy-once local oauth command output only>",
           },
           endpoint_exposure: json.endpoint_exposure,
           providers: json.providers,

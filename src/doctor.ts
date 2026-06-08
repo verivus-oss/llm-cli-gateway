@@ -15,7 +15,12 @@ import {
 } from "./provider-status.js";
 import { CLAUDE_MCP_SERVER_NAMES } from "./claude-mcp-config.js";
 import type { FlightRecorderQuery } from "./flight-recorder.js";
-import { loadCacheAwarenessConfig, type CacheAwarenessConfig } from "./config.js";
+import {
+  loadCacheAwarenessConfig,
+  loadRemoteOAuthConfig,
+  type CacheAwarenessConfig,
+} from "./config.js";
+import { loadWorkspaceRegistry } from "./workspace-registry.js";
 import { computeGlobalCacheStats } from "./cache-stats.js";
 import { FlightRecorder, resolveFlightRecorderDbPath } from "./flight-recorder.js";
 import { buildUpstreamContractReport } from "./upstream-contracts.js";
@@ -264,6 +269,21 @@ export interface DoctorReport {
     required: boolean;
     token_configured: boolean;
     source: string;
+    oauth: {
+      enabled: boolean;
+      registration_policy: string;
+      clients_configured: number;
+      shared_secret_enabled: boolean;
+      pkce_required: boolean;
+      issuer: string | null;
+    };
+  };
+  workspaces: {
+    enabled: boolean;
+    default: string | null;
+    repo_count: number;
+    allowed_root_count: number;
+    gateway_app_dir_is_workspace: boolean;
   };
   providers: Record<
     "claude" | "codex" | "gemini" | "grok" | "mistral",
@@ -354,15 +374,7 @@ function chatGPTConnectorUrl(env: NodeJS.ProcessEnv, rawPublicUrl: string | null
     .map(value => value.trim())
     .find(value => value.startsWith("/") && !value.includes("?") && !value.includes("#"));
   if (!rawPublicUrl || !path) return null;
-  try {
-    const url = new URL(rawPublicUrl);
-    url.pathname = path;
-    url.search = "";
-    url.hash = "";
-    return redactDiagnosticUrl(url.toString());
-  } catch {
-    return null;
-  }
+  return "<redacted>";
 }
 
 export interface CreateDoctorReportOptions {
@@ -458,6 +470,8 @@ export function createDoctorReport(
     : { env: envOrOptions };
   const env: NodeJS.ProcessEnv = opts.env ?? process.env;
   const auth = loadAuthConfig(env);
+  const oauth = loadRemoteOAuthConfig(undefined, env);
+  const workspaceRegistry = loadWorkspaceRegistry();
   const transport = defaultTransport(env);
   const rawPublicUrl = env.LLM_GATEWAY_PUBLIC_URL || null;
   const publicUrl = redactDiagnosticUrl(rawPublicUrl);
@@ -516,6 +530,26 @@ export function createDoctorReport(
       required: auth.required,
       token_configured: auth.tokenConfigured,
       source: auth.source,
+      oauth: {
+        enabled: oauth.enabled,
+        registration_policy: oauth.registrationPolicy,
+        clients_configured: oauth.clients.length,
+        shared_secret_enabled: Boolean(oauth.sharedSecret?.enabled),
+        pkce_required: oauth.requirePkce,
+        issuer:
+          oauth.issuer === "auto"
+            ? publicUrl
+            : redactDiagnosticUrl(oauth.issuer === "auto" ? null : oauth.issuer),
+      },
+    },
+    workspaces: {
+      enabled: workspaceRegistry.enabled,
+      default: workspaceRegistry.defaultAlias,
+      repo_count: workspaceRegistry.repos.length,
+      allowed_root_count: workspaceRegistry.allowedRoots.length,
+      gateway_app_dir_is_workspace: workspaceRegistry.repos.some(
+        repo => repo.path === join(homedir(), ".llm-cli-gateway")
+      ),
     },
     providers: {
       claude: doctorProviderStatus(providerStatuses.claude),

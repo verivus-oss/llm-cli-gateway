@@ -58,7 +58,7 @@ func run(args []string) error {
 		}
 		fmt.Println(string(body))
 		return nil
-	case "contracts":
+	case "contracts", "oauth", "workspace":
 		return nodeGatewayCommand(args)
 	case "start":
 		cfg, token, err := config.Ensure()
@@ -103,35 +103,36 @@ func run(args []string) error {
 		if err != nil {
 			return err
 		}
-		if _, _, err := config.EnsureChatGPTNoAuthPath(); err != nil {
-			return err
-		}
 		cfg, err = config.Default()
 		if err != nil {
 			return err
-		}
-		if cfg.PublicURL != "" && cfg.ChatGPTConnectorURL == "" {
-			if _, err := config.SetChatGPTURLFromPublicURL(cfg.PublicURL); err != nil {
-				return err
-			}
-			cfg, err = config.Default()
-			if err != nil {
-				return err
-			}
 		}
 		endpoint := "http://" + cfg.HTTPHost + ":" + cfg.HTTPPort + cfg.HTTPPath
 		if cfg.PublicURL != "" {
 			endpoint = cfg.PublicURL
 		}
+		issuer := strings.TrimSuffix(endpoint, cfg.HTTPPath)
 		return printJSON(map[string]any{
 			"ok":                    true,
 			"transport":             "streamable_http",
 			"url":                   endpoint,
 			"local_url":             "http://" + cfg.HTTPHost + ":" + cfg.HTTPPort + cfg.HTTPPath,
 			"web_clients_supported": cfg.PublicURL != "" && strings.HasPrefix(cfg.PublicURL, "https://"),
-			"chatgpt":               chatGPTConfig(cfg),
-			"headers":               map[string]string{"Authorization": "Bearer <redacted>"},
-			"notes":                 []string{"Use the ChatGPT URL with Authentication: No Authentication. Use the bearer-protected URL only for clients that support Authorization headers."},
+			"oauth": map[string]any{
+				"enabled":                true,
+				"authorization_url":      issuer + "/oauth/authorize",
+				"token_url":              issuer + "/oauth/token",
+				"registration_url":       issuer + "/oauth/register",
+				"protected_resource_url": issuer + "/.well-known/oauth-protected-resource",
+				"client_secret":          "<copy-once local oauth command output only>",
+			},
+			"chatgpt": map[string]any{
+				"url":                    endpoint,
+				"authentication":         "OAuth",
+				"deprecated_no_auth_url": deprecatedNoAuthURL(cfg.ChatGPTConnectorURL),
+			},
+			"headers": map[string]string{"Authorization": "Bearer <redacted>"},
+			"notes":   []string{"Use OAuth for ChatGPT and other remote web connectors. Use bearer Authorization headers only for local clients that support custom headers. Secrets are printed only by local copy-once oauth commands."},
 		})
 	case "setup-ui":
 		return setupui.Listen("127.0.0.1:3340")
@@ -156,6 +157,8 @@ Commands:
   setup                Create local config and auth token
   doctor               Print desktop gateway diagnostics as JSON
   contracts            Run installed gateway CLI contract diagnostics
+  oauth                Manage OAuth clients/shared secret through the installed gateway
+  workspace            Manage registered workspaces through the installed gateway
   start                Start the managed local HTTP gateway
   stop                 Stop the managed local HTTP gateway
   status               Print managed gateway process status
@@ -221,18 +224,9 @@ func tunnelCommand(args []string) error {
 		if _, _, err := config.Ensure(); err != nil {
 			return err
 		}
-		_, pathChanged, err := config.EnsureChatGPTNoAuthPath()
-		if err != nil {
-			return err
-		}
 		cfg, token, err := config.Ensure()
 		if err != nil {
 			return err
-		}
-		if pathChanged {
-			if err := process.Stop(cfg); err != nil {
-				return err
-			}
 		}
 		gatewayStatus, err := process.Start(cfg, token)
 		if err != nil {
@@ -242,16 +236,12 @@ func tunnelCommand(args []string) error {
 		if err != nil {
 			return err
 		}
-		chatGPTSettings, err := config.SetChatGPTURLFromPublicURL(tunnelStatus.PublicURL)
-		if err != nil {
-			return err
-		}
 		return printJSON(map[string]any{
 			"ok":      true,
 			"gateway": gatewayStatus,
 			"tunnel":  tunnelStatus,
-			"chatgpt": chatGPTSettingsJSON(chatGPTSettings),
-			"next":    "Use chatgpt.url in ChatGPT with Authentication: No Authentication. Run print-client-config to view both connector URLs.",
+			"chatgpt": chatGPTConfig(cfg),
+			"next":    "Use print-client-config for OAuth connector URLs. Run oauth client add <id> --redirect-uri <uri> --print-once locally to create a client secret.",
 		})
 	case "status":
 		cfg, err := config.Default()
@@ -308,16 +298,12 @@ func publicURLCommand(args []string) error {
 	if err != nil {
 		return err
 	}
-	chatGPTSettings, err := config.SetChatGPTURLFromPublicURL(settings.PublicURL)
-	if err != nil {
-		return err
-	}
 	return printJSON(map[string]any{
 		"ok":                true,
 		"public_url":        settings.PublicURL,
 		"verify_public_url": settings.VerifyPublicURL,
-		"chatgpt":           chatGPTSettingsJSON(chatGPTSettings),
-		"next":              "Run stop, start, then doctor --json. Use chatgpt.url in ChatGPT with Authentication: No Authentication.",
+		"chatgpt":           chatGPTConfigFromSettings(settings),
+		"next":              "Run stop, start, then doctor --json. Use print-client-config and oauth client add for OAuth connector setup.",
 	})
 }
 
@@ -325,14 +311,10 @@ func chatGPTURLCommand(args []string) error {
 	if len(args) > 0 {
 		switch args[0] {
 		case "rotate":
-			settings, err := config.RotateChatGPTURL()
-			if err != nil {
-				return err
-			}
 			return printJSON(map[string]any{
-				"ok":      true,
-				"chatgpt": chatGPTSettingsJSON(settings),
-				"next":    "Run stop then start, or rerun tunnel start, so the gateway serves the rotated path.",
+				"ok":      false,
+				"chatgpt": map[string]any{"url": nil, "authentication": "OAuth", "deprecated_no_auth_url": nil},
+				"error":   "chatgpt-url rotate is deprecated; use oauth client add <id> --redirect-uri <uri> --print-once",
 			})
 		case "clear":
 			if err := config.ClearChatGPTURL(); err != nil {
@@ -340,8 +322,8 @@ func chatGPTURLCommand(args []string) error {
 			}
 			return printJSON(map[string]any{
 				"ok":      true,
-				"chatgpt": map[string]any{"url": nil, "auth": "none"},
-				"next":    "Run stop then start to relaunch the gateway without the ChatGPT no-auth path.",
+				"chatgpt": map[string]any{"url": nil, "authentication": "OAuth", "deprecated_no_auth_url": nil},
+				"next":    "Run stop then start to relaunch the gateway without any deprecated ChatGPT no-auth path.",
 			})
 		default:
 			return fmt.Errorf("unknown chatgpt-url command %q", args[0])
@@ -350,41 +332,38 @@ func chatGPTURLCommand(args []string) error {
 	if _, _, err := config.Ensure(); err != nil {
 		return err
 	}
-	settings, _, err := config.EnsureChatGPTNoAuthPath()
-	if err != nil {
-		return err
-	}
 	cfg, err := config.Default()
 	if err != nil {
 		return err
 	}
-	if settings.ChatGPTConnectorURL == "" && cfg.PublicURL != "" {
-		settings, err = config.SetChatGPTURLFromPublicURL(cfg.PublicURL)
-		if err != nil {
-			return err
-		}
-	}
 	return printJSON(map[string]any{
 		"ok":      true,
-		"chatgpt": chatGPTSettingsJSON(settings),
-		"next":    "Use chatgpt.url in ChatGPT with Authentication: No Authentication. If url is null, run tunnel start first.",
+		"chatgpt": chatGPTConfig(cfg),
+		"next":    "chatgpt-url is deprecated. Use print-client-config and oauth client add <id> --redirect-uri <uri> --print-once for OAuth setup.",
 	})
 }
 
 func chatGPTConfig(cfg config.Config) map[string]any {
 	return map[string]any{
-		"url":  nullableString(cfg.ChatGPTConnectorURL),
-		"auth": "none",
-		"path": nullableString(cfg.ChatGPTNoAuthPath),
+		"url":                    nullableString(cfg.PublicURL),
+		"authentication":         "OAuth",
+		"deprecated_no_auth_url": deprecatedNoAuthURL(cfg.ChatGPTConnectorURL),
 	}
 }
 
-func chatGPTSettingsJSON(settings config.Settings) map[string]any {
+func chatGPTConfigFromSettings(settings config.Settings) map[string]any {
 	return map[string]any{
-		"url":  nullableString(settings.ChatGPTConnectorURL),
-		"auth": "none",
-		"path": nullableString(settings.ChatGPTNoAuthPath),
+		"url":                    nullableString(settings.PublicURL),
+		"authentication":         "OAuth",
+		"deprecated_no_auth_url": deprecatedNoAuthURL(settings.ChatGPTConnectorURL),
 	}
+}
+
+func deprecatedNoAuthURL(value string) any {
+	if value == "" {
+		return nil
+	}
+	return "<redacted>"
 }
 
 func nullableString(value string) any {
