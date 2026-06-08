@@ -173,9 +173,9 @@ Kills process after 2min inactivity. Exit code 125 (non-transient, no retry).
 
 Three read-only MCP resources expose cache effectiveness from the flight recorder — tokens / hashes / aggregates only, **no prompt or response text**:
 
-- `cache_state://global` — last-24h aggregate hit rate, total hits, estimated savings, per-CLI breakdown
-- `cache_state://session/{sessionId}` — per-session aggregates (also surfaces as `session_get.cacheState` when the session has prior requests)
-- `cache_state://prefix/{hash}` — per-stable-prefix-hash aggregates with CLI × model breakdown
+- `cache-state://global` — last-24h aggregate hit rate, total hits, estimated savings, per-CLI breakdown
+- `cache-state://session/{sessionId}` — per-session aggregates (also surfaces as `session_get.cacheState` when the session has prior requests)
+- `cache-state://prefix/{hash}` — per-stable-prefix-hash aggregates with CLI × model breakdown
 
 The "tokens/hashes only" property is the security guarantee: these resources let an auditor reconstruct "did the model see fresh context or a cached prefix?" without ever exposing prompt or response content. Combine with `approval_list` (which already redacts to a `promptPreview` + `promptSha256`) and `llm_job_status/result` by `correlationId` to reconstruct any past dispatch fully.
 

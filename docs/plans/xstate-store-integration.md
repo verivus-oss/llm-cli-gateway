@@ -78,7 +78,7 @@ Grounded in real extension points in the codebase:
   `xstate_create_store` and `xstate_delete_store`.
 - **Resources** (read-only; state, never content): `agent_state://catalog` and
   `agent_state://{storeId}`, registered in `registerBaseResources` next to the
-  existing `cache_state://*` resources, served through `ResourceProvider`.
+  existing `cache-state://*` resources, served through `ResourceProvider`.
 - **Config**: a new `[agent_state]` block loaded by a separate
   loader/schema in `src/config.ts` (mirrors `loadCacheAwarenessConfig` so a
   malformed block can't break persistence loading), threaded through

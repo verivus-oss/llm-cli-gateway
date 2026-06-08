@@ -320,7 +320,7 @@ tools + resources in src/index.ts.
      - agent_state://catalog  -> list of live instances
        ({ storeId, definitionId, definitionVersion, updatedAt }).
      - agent_state://{storeId} (ResourceTemplate, like
-       cache_state://prefix/{hash}) -> the redacted StoreSnapshot.
+       cache-state://prefix/{hash}) -> the redacted StoreSnapshot.
    Register in registerBaseResources(server, runtime) alongside the
    cache_state resources (src/index.ts ~1349), using the same
    server.registerResource(...) + JSON.stringify(stats, null, 2) shape.

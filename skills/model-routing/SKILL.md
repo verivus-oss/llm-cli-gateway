@@ -89,7 +89,7 @@ codex_request({
 })
 ```
 
-The gateway concatenates in canonical order `system → tools → context → task`, so the stable prefix bytes are byte-identical across the parallel dispatch and across rounds — that raises implicit cache hit rate at each provider with no special-case API contortions. `prompt` and `promptParts` are mutually exclusive (the runtime returns `provide exactly one of \`prompt\` or \`promptParts\`` if both are supplied). The stable prefix hash is recorded in the flight recorder and queryable via `cache_state://prefix/{hash}` so you can verify the prefix actually got shared.
+The gateway concatenates in canonical order `system → tools → context → task`, so the stable prefix bytes are byte-identical across the parallel dispatch and across rounds — that raises implicit cache hit rate at each provider with no special-case API contortions. `prompt` and `promptParts` are mutually exclusive (the runtime returns `provide exactly one of \`prompt\` or \`promptParts\`` if both are supplied). The stable prefix hash is recorded in the flight recorder and queryable via `cache-state://prefix/{hash}` so you can verify the prefix actually got shared.
 
 For short one-off questions, plain `prompt` is fine.
 
@@ -176,4 +176,4 @@ This means:
 - Use `correlationId` on every request for tracing.
 - If a task exceeds 45s, it auto-defers. Check for `status:"deferred"` in responses, then poll every 60s. Results are durable for 30 days (`LLM_GATEWAY_JOB_RETENTION_DAYS`) — re-issuing the same call within the dedup window (`LLM_GATEWAY_DEDUP_WINDOW_MS`, default 1h) reattaches to the live job. Pass `forceRefresh:true` only when inputs actually changed.
 - Use `cli_versions` to inspect installed CLI versions. Use `cli_upgrade` with `dryRun:true` first; run real upgrades only when the caller wants the local CLI updated. Grok self-updates via `grok update`; the same `cli_upgrade` tool routes it for you.
-- For prefix-stable workloads, prefer `promptParts` over `prompt` — same routing rules apply per CLI, but the gateway hashes the stable prefix so you can verify cache effectiveness via `cache_state://global` or `cache_state://prefix/{hash}` (tokens / hashes only, no prompt text).
+- For prefix-stable workloads, prefer `promptParts` over `prompt` — same routing rules apply per CLI, but the gateway hashes the stable prefix so you can verify cache effectiveness via `cache-state://global` or `cache-state://prefix/{hash}` (tokens / hashes only, no prompt text).

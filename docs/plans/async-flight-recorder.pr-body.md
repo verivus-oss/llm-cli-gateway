@@ -3,7 +3,7 @@
 ## Scope
 
 Closes the two telemetry gaps that v1.6.0 explicitly deferred. After this slice,
-`cache_state://*` aggregates include both sync- and async-tool activity, and
+`cache-state://*` aggregates include both sync- and async-tool activity, and
 cache hits on codex rows populate `cache_read_tokens` in the flight recorder.
 
 - **Async-path flight recorder.** `AsyncJobManager` had zero FR calls in v1.6.x.
@@ -67,7 +67,7 @@ reproducibility; not part of the v1.7.0 behaviour change.)
 - [x] `src/__tests__/codex-json-parser.test.ts` — +3 cases for the new field
       preference, dual-field-present preference, legacy fallback.
 - [x] `src/__tests__/cache-state-resources.test.ts` — +2 cases verifying
-      `cache_state://global` and `cache_state://prefix/{hash}` aggregate
+      `cache-state://global` and `cache-state://prefix/{hash}` aggregate
       async-job rows (`asyncJobId` set on the seeded FR row).
 - [x] `src/__tests__/job-store.test.ts` — assertion updated for the new
       `{count, orphaned[]}` shape.
@@ -107,7 +107,7 @@ edits are pure additions.
 ## What's intentionally NOT shipped
 
 - **Slice 4** (cache-aware multi-LLM routing) — gated on 24h+ of
-  `cache_state://global` dogfood data collected AFTER v1.7.0 ships.
+  `cache-state://global` dogfood data collected AFTER v1.7.0 ships.
 - **Slice 5** (explicit Claude `cache_control` injection via stream-json —
   Branch A) — separate plan; requires a live smoke test against the
   Anthropic API with a real account, which is a human-in-the-loop step.
@@ -153,7 +153,7 @@ encoding is a separate audit projection.
 
 ## Acceptance gate
 
-`cache_state://global` should show `total_hits` continuously rising over the
+`cache-state://global` should show `total_hits` continuously rising over the
 24h dogfooding window after v1.7.0 install. Codex rows in particular should
 finally show non-NULL `cache_read_tokens` aggregated under the per-CLI
 breakdown (where the v1.6.x flight-recorder showed claude-only data).

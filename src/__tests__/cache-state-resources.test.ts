@@ -145,7 +145,7 @@ describe("cache_state resources", () => {
     expect(stats.cliBreakdown).toEqual([]);
   });
 
-  // Slice 1.5: cache_state://* must aggregate async-job rows now that
+  // Slice 1.5: cache-state://* must aggregate async-job rows now that
   // AsyncJobManager writes its own logStart/logComplete with asyncJobId set.
   // Seed an async-flavoured row alongside the sync rows in beforeEach and
   // verify that the global + per-prefix aggregates include it.

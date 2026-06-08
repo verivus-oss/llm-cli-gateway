@@ -17,7 +17,7 @@
 # `docs/plans/async-flight-recorder.dag.toml` for that slice's record.
 #
 # Slice 4 (cache-aware multi-LLM routing) is BLOCKED ON OBSERVABILITY DATA.
-# Do not start until 24h+ of `cache_state://global` data has been collected
+# Do not start until 24h+ of `cache-state://global` data has been collected
 # from real use after v1.7.0 ships. The routing slice needs a clean signal
 # of per-provider cache warmth across the prefix space — without 24h+ of
 # dogfood data the routing decisions are guesses.
@@ -430,9 +430,9 @@ resources.ts which only holds read/list logic.
 2. src/index.ts: register three new MCP resources via server.registerResource()
    inside registerBaseResources (alongside existing skill/session/model
    registrations at ~lines 814-1012):
-     URI: cache_state://global               → GlobalCacheStats
-     URI: cache_state://session/{sessionId}  → SessionCacheStats
-     URI: cache_state://prefix/{hash}        → PrefixCacheStats
+     URI: cache-state://global               → GlobalCacheStats
+     URI: cache-state://session/{sessionId}  → SessionCacheStats
+     URI: cache-state://prefix/{hash}        → PrefixCacheStats
    Each handler calls runtime.resourceProvider.readCacheState*().
 
 Resources must redact prompt text (return tokens/hashes/aggregates only).
@@ -495,7 +495,7 @@ In src/cache-stats.ts, add computeTtlRemaining(stats, cli, ttlPolicy):
   - all others: null (we cannot observe their TTL)
 
 Add ttlRemainingMs (nullable) to SessionCacheStats. Surface in
-cache_state://session/{id} and in session_get.cacheState.
+cache-state://session/{id} and in session_get.cacheState.
 """
 idempotent = true
 validation = "Test: session whose lastWriteAt was 4 min ago returns ttlRemainingMs ≈ 60000 with claude default. Test: gemini session returns null ttlRemainingMs (we have no read on it). Test: 1h policy flips the calculation."
@@ -774,7 +774,7 @@ Cross-cutting checklist (verify each touched explicitly):
   [ ] src/index.ts — safeFlightStart call sites (1957, 2244, 2529, 3178,
       3534) thread stablePrefixHash + stablePrefixTokens. SYNC PATH ONLY.
   [ ] src/index.ts — new MCP resource registrations (server.registerResource,
-      NOT .resource()) for cache_state://*.
+      NOT .resource()) for cache-state://*.
   [ ] src/index.ts — session_get handler returns cacheState when present.
   [ ] src/index.ts — claude_request / claude_request_async emit warnings
       array when ttl < 30s and flag enabled.

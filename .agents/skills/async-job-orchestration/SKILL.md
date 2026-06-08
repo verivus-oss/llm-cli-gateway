@@ -1,6 +1,6 @@
 ---
 name: async-job-orchestration
-description: Manage long-running async LLM jobs. Use for tasks >2min, parallel jobs, or non-blocking execution. Covers cache-aware `promptParts`, `cache_state://` MCP resources, and the Claude `cache_ttl_expiring_soon` warning.
+description: Manage long-running async LLM jobs. Use for tasks >2min, parallel jobs, or non-blocking execution. Covers cache-aware `promptParts`, `cache-state://` MCP resources, and the Claude `cache_ttl_expiring_soon` warning.
 metadata:
   author: verivus-oss
   version: "1.6"
@@ -246,15 +246,15 @@ codex_request_async({
 
 The gateway concatenates in canonical order `system → tools → context → task` so parallel async dispatch to multiple CLIs sees byte-identical stable prefix bytes, and re-issues of the same async call (recovery, retry, dedup) keep the same stable-prefix hash. This raises implicit cache hit rate at each provider with no provider-API contortions.
 
-For parallel async fan-out (Pattern: "fire N reviewers, collect when done"), the win is largest — every reviewer shares the prefix, and `cache_state://prefix/{hash}` lets you verify they actually hit cache.
+For parallel async fan-out (Pattern: "fire N reviewers, collect when done"), the win is largest — every reviewer shares the prefix, and `cache-state://prefix/{hash}` lets you verify they actually hit cache.
 
 ### Cache observability resources
 
 Three MCP resources expose cache effectiveness from the flight recorder (tokens / hashes / aggregates only — no prompt or response text):
 
-- `cache_state://global` — last-24h aggregate hit rate, total hits, estimated savings, per-CLI breakdown
-- `cache_state://session/{sessionId}` — per-session aggregates incl. `ttlRemainingMs` for Claude
-- `cache_state://prefix/{hash}` — per-stable-prefix-hash aggregates with CLI × model breakdown
+- `cache-state://global` — last-24h aggregate hit rate, total hits, estimated savings, per-CLI breakdown
+- `cache-state://session/{sessionId}` — per-session aggregates incl. `ttlRemainingMs` for Claude
+- `cache-state://prefix/{hash}` — per-stable-prefix-hash aggregates with CLI × model breakdown
 
 `session_get({sessionId})` also projects a compact `cacheState` block when the session has prior requests (omitted entirely for fresh sessions).
 

@@ -11,7 +11,7 @@ self-contained; do not paste this header.
 Ship the **two tactical follow-ups** to cache-awareness phase 1 (v1.6.0
 already published) that were explicitly deferred out of scope at the time
 and called out in the blog post's "What's next" section. Together they close
-the telemetry-completeness gap for the existing `cache_state://` observability
+the telemetry-completeness gap for the existing `cache-state://` observability
 surface so slice 4 (cache-aware multi-LLM routing) has clean data to build on.
 
 The two pieces of work:
@@ -156,7 +156,7 @@ Create `docs/plans/async-flight-recorder.dag.toml` modeled on
 
 7. `verify-cache-state-now-includes-async` — extend
    `src/__tests__/cache-state-resources.test.ts` (or add a new test) to
-   verify that `cache_state://global` and `cache_state://prefix/{hash}`
+   verify that `cache-state://global` and `cache-state://prefix/{hash}`
    correctly aggregate async-job rows after the wiring lands.
 
 8. `update-docs-and-changelog` — `PROVIDER_CACHE_SURFACES.md` "Implications
@@ -205,7 +205,7 @@ After all 3 review units approve and master is green:
 ## After this slice ships
 
 The natural next slice is **slice 4 (cache-aware multi-LLM routing)**. That
-needs 24+ hours of `cache_state://global` dogfooding data from real use, so
+needs 24+ hours of `cache-state://global` dogfooding data from real use, so
 do not start it the same day as v1.7.0 ships. Note it in
 `docs/plans/cache-awareness.dag.toml`'s comments as "blocked on observability
 data" and leave it for the next session.

@@ -1,6 +1,6 @@
 ---
 name: multi-llm-orchestration
-description: Guide for orchestrating multiple LLMs via the llm-gateway — use when delegating tasks to Codex, Gemini, Grok, or Mistral, running parallel reviews, or managing cross-LLM workflows. Covers cache-aware `promptParts` dispatch and the `cache_state://` MCP resources.
+description: Guide for orchestrating multiple LLMs via the llm-gateway — use when delegating tasks to Codex, Gemini, Grok, or Mistral, running parallel reviews, or managing cross-LLM workflows. Covers cache-aware `promptParts` dispatch and the `cache-state://` MCP resources.
 ---
 
 # Multi-LLM Orchestration
@@ -56,9 +56,9 @@ For one-off questions or short prompts, plain `prompt` is fine — `promptParts`
 
 ### Cache observability (read-only MCP resources)
 
-- `cache_state://global` — last-24h aggregate hit rate, total hits, estimated savings, with per-CLI breakdown.
-- `cache_state://session/{sessionId}` — per-session aggregates, including `ttlRemainingMs` for Claude.
-- `cache_state://prefix/{hash}` — per-stable-prefix-hash aggregates with CLI × model breakdown.
+- `cache-state://global` — last-24h aggregate hit rate, total hits, estimated savings, with per-CLI breakdown.
+- `cache-state://session/{sessionId}` — per-session aggregates, including `ttlRemainingMs` for Claude.
+- `cache-state://prefix/{hash}` — per-stable-prefix-hash aggregates with CLI × model breakdown.
 
 All three return tokens / hashes / aggregates only — no prompt or response text. Read via the MCP `resources/read` flow. `session_get` also projects a compact `cacheState` block when the session has prior requests in the flight recorder; the field is omitted for fresh sessions.
 
