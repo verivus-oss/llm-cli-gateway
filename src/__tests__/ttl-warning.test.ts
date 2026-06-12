@@ -1,11 +1,15 @@
-import { describe, it, expect } from "vitest";
+import { afterEach, describe, it, expect } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createGatewayServer } from "../index.js";
 import { AsyncJobManager } from "../async-job-manager.js";
 import { MemoryJobStore } from "../job-store.js";
 import { noopLogger } from "../logger.js";
 import type { PersistenceConfig, CacheAwarenessConfig } from "../config.js";
 import type { FlightLogStart, FlightLogResult, FlightRecorderLike } from "../flight-recorder.js";
-import { createSessionManager, type ISessionManager } from "../session-manager.js";
+import { FileSessionManager, type ISessionManager } from "../session-manager.js";
+import type { WorkspaceRegistry } from "../workspace-registry.js";
 
 function mkPersistence(): PersistenceConfig {
   return {
@@ -28,6 +32,17 @@ function mkCacheAwareness(overrides: Partial<CacheAwarenessConfig> = {}): CacheA
     minStableTokensForCacheControl: { sonnet: 1024, opus: 4096, haiku: 4096, default: 4096 },
     sources: { configFile: null },
     ...overrides,
+  };
+}
+
+function disabledWorkspaces(): WorkspaceRegistry {
+  return {
+    enabled: false,
+    defaultAlias: null,
+    allowUnregisteredWorkingDir: false,
+    repos: [],
+    allowedRoots: [],
+    sources: { configFile: null },
   };
 }
 
@@ -104,6 +119,15 @@ interface RegisteredTool {
   }>;
 }
 
+const tempSessionDirs: string[] = [];
+
+afterEach(() => {
+  while (tempSessionDirs.length > 0) {
+    const dir = tempSessionDirs.pop();
+    if (dir) rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 async function setup(opts: {
   warnOnTtlExpiry: boolean;
   anthropicTtlSeconds?: 300 | 3600;
@@ -113,7 +137,11 @@ async function setup(opts: {
   sessions: ISessionManager;
 }> {
   const flight = new SeededFlightRecorder();
-  const sessions = await createSessionManager(undefined, undefined, noopLogger);
+  const sessionDir = mkdtempSync(join(tmpdir(), "ttl-warning-sessions-"));
+  tempSessionDirs.push(sessionDir);
+  const sessions = new FileSessionManager(join(sessionDir, "sessions.json"), undefined, {
+    logger: noopLogger,
+  });
   const manager = new AsyncJobManager(noopLogger, undefined, new MemoryJobStore());
   const server = createGatewayServer({
     sessionManager: sessions,
@@ -124,6 +152,7 @@ async function setup(opts: {
       anthropicTtlSeconds: opts.anthropicTtlSeconds ?? 300,
     }),
     flightRecorder: flight,
+    workspaces: disabledWorkspaces(),
   });
   return { server, flight, sessions };
 }
