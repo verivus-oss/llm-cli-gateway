@@ -1,0 +1,878 @@
+# Implementation specification: first-class ACP gateway extension.
+#
+# Scope:
+#   Add Agent Client Protocol (ACP) as a first-class, optional provider
+#   transport behind llm-cli-gateway's existing MCP server. MCP remains the
+#   inbound client protocol. ACP is used to talk to provider agents that expose
+#   an ACP process, starting with read-only smoke and then gated runtime pilots.
+#
+# Acronym note:
+#   This plan targets Agent Client Protocol, the JSON-RPC protocol used by
+#   editors/clients to communicate with coding agents. It does not target
+#   agent-to-agent "Agent Communication Protocol" work unless a provider CLI
+#   explicitly documents that meaning later.
+
+[meta]
+name = "first-class ACP gateway extension"
+schema_version = "1.1"
+owner = "verivus-oss"
+slice = "first-class-acp-gateway-extension-2026-06-12"
+target_branch = "master"
+release_version = "UNSET - assign at ship time"
+predecessor_plan = "docs/plans/acp-provider-transport-research.dag.toml"
+predecessor_report = "docs/research/2026-06-12-acp-provider-transport-feasibility.md"
+acceptance_resource = "llm-cli-gateway exposes ACP capability metadata, validates native ACP process health for supported providers, and can route gated Mistral and Grok request flows through ACP without changing the default CLI transport or weakening current MCP safety boundaries."
+invariant_sources = [
+  "docs/plans/acp-provider-transport-research.dag.toml",
+  "docs/research/2026-06-12-acp-provider-transport-feasibility.md",
+  "docs/upstream/release-targets.md",
+  "src/index.ts",
+  "src/resources.ts",
+  "src/provider-tool-capabilities.ts",
+  "src/upstream-contracts.ts",
+  "src/session-manager.ts",
+  "src/async-job-manager.ts",
+  "src/approval-manager.ts",
+  "src/workspace-registry.ts",
+  "src/worktree-manager.ts",
+  "src/request-helpers.ts",
+  "src/executor.ts",
+  "src/flight-recorder.ts",
+  "src/provider-status.ts",
+  "src/config.ts",
+  "src/doctor.ts",
+]
+
+[decisions]
+protocol_target = "Agent Client Protocol"
+mcp_frontend_remains = true
+acp_is_internal_provider_transport_first = true
+outbound_acp_frontend_deferred = true
+cli_request_tools_remain_stable = true
+default_transport = "cli"
+acp_transport_requires_config_gate = true
+no_direct_provider_acp_exposure = true
+no_arbitrary_provider_subcommands = true
+request_tools_get_optional_transport_selector = true
+provider_capabilities_report_acp_support = true
+provider_contracts_track_acp_entrypoints = true
+read_only_smoke_before_runtime = true
+manual_smoke_is_not_runtime_support = true
+host_services_required_before_write_capable_prompt = true
+permission_callbacks_route_through_approval_manager = true
+provider_native_sessions_are_not_gateway_sessions = true
+gateway_session_ids_remain_gateway_owned = true
+adapter_mediated_support_deferred = true
+vibe_first_then_grok = true
+agy_watchlist = true
+release_must_preserve_existing_cli_behavior = true
+
+[non_goals]
+replace_mcp_server = "The gateway remains an MCP stdio server for clients."
+ship_outbound_acp_server = "Serving llm-cli-gateway itself as an ACP agent is a separate later design."
+wrap_every_provider_immediately = "Only native ACP providers enter runtime pilots in this slice."
+run_adapter_mediated_providers_by_default = "Claude and Codex adapters are tracked but not shipped as runtime support until adapter ownership, install, and safety are resolved."
+grant_write_or_terminal_services_by_default = "ACP HostServices start with deny-by-default read-only behavior."
+expose_raw_acp_json_rpc = "Agents continue using gateway MCP tools and resources, not provider-specific JSON-RPC calls."
+
+[architecture]
+inbound_protocol = "MCP over stdio"
+internal_acp_transport = "JSON-RPC over provider stdio"
+primary_flow = "MCP client -> llm-cli-gateway MCP tool -> provider request router -> ACP client/host layer -> provider ACP agent"
+fallback_flow = "If ACP is disabled, unavailable, unsupported, or unhealthy, request tools use the existing CLI transport unless the caller explicitly required ACP."
+stdout_rule = "Gateway stdout remains reserved for MCP JSON-RPC. Provider ACP stdout is consumed only by the ACP transport and never forwarded to gateway stdout as logs."
+runtime_gate = "ACP runtime routing is disabled unless gateway config enables ACP and enables the provider."
+
+[architecture.module_plan]
+root = "src/acp/"
+types = "Zod-backed ACP protocol schemas, JSON-RPC envelope types, and provider-neutral TypeScript types."
+json_rpc_stdio = "Line-delimited JSON-RPC process transport with request correlation, notification handling, timeout handling, process-exit handling, and stderr capture."
+client = "High-level ACP client for initialize, session/new, session/load, session/prompt, session/cancel, and host callback dispatch."
+process_manager = "Spawn, kill, restart, idle-timeout, cwd, env, and health lifecycle management for provider ACP processes."
+host_services = "Gateway-owned ACP HostServices implementation for filesystem, terminal, MCP, and permission surfaces."
+provider_registry = "Provider-specific ACP entrypoint metadata, target versions, availability checks, and runtime support status."
+smoke_harness = "Read-only initialize plus session/new validation used by doctor, tests, and optional public diagnostics."
+session_map = "Mapping between gateway session rows and provider ACP session IDs without reusing provider IDs as gateway IDs."
+event_normalizer = "Conversion from ACP session/update events into gateway response, async-job, and resource shapes."
+errors = "Typed ACP errors with redacted user-facing messages and detailed debug metadata for stderr logs."
+
+[provider_matrix.mistral]
+display_name = "Mistral Vibe"
+target_version = "vibe 2.14.1 / vibe-acp 2.14.1"
+status = "native_smoke_passed"
+entrypoint = "vibe-acp"
+runtime_priority = 1
+ship_runtime_pilot = true
+notes = "Manual initialize and session/new smoke passed. Use as first native ACP runtime pilot because the ACP executable is explicit and provider-scoped."
+
+[provider_matrix.grok]
+display_name = "xAI Grok CLI"
+target_version = "grok 0.2.50 (cadf94855)"
+status = "native_smoke_passed"
+entrypoint = "grok agent stdio"
+runtime_priority = 2
+ship_runtime_pilot = true
+notes = "Manual initialize and session/new smoke passed with normal user Grok config, temp cwd, and isolated leader socket. Empty-env smoke failed on this host because credential lookup is managed by the installed CLI."
+
+[provider_matrix.codex]
+display_name = "OpenAI Codex CLI"
+target_version = "codex-cli 0.139.0"
+status = "adapter_mediated_deferred"
+entrypoint = "no native ACP entrypoint at target version"
+adapter_candidates = ["zed-industries/codex-acp", "agentclientprotocol/codex-acp"]
+runtime_priority = 0
+ship_runtime_pilot = false
+notes = "Track adapter evidence and Codex native surface drift, but do not label adapter support as native gateway ACP support."
+
+[provider_matrix.claude]
+display_name = "Anthropic Claude Code"
+target_version = "claude 2.1.175"
+status = "adapter_mediated_deferred"
+entrypoint = "no native Claude Code CLI ACP entrypoint at target version"
+adapter_candidates = ["Claude Agent SDK ACP adapter"]
+runtime_priority = 0
+ship_runtime_pilot = false
+notes = "Adapter ownership, permission bridging, and install story must be specified before runtime support."
+
+[provider_matrix.gemini]
+display_name = "Google Antigravity"
+target_version = "agy 1.0.7"
+status = "absent_watchlist"
+entrypoint = "no ACP flag or subcommand at target version"
+runtime_priority = 0
+ship_runtime_pilot = false
+notes = "Legacy Gemini CLI ACP evidence does not transfer to target Antigravity agy. Keep agy on the upstream drift watchlist."
+
+[config]
+default_file = "existing gateway config file"
+schema_owner = "src/config.ts"
+doctor_owner = "src/doctor.ts"
+no_secrets_in_config = true
+
+[config.example.acp]
+enabled = false
+default_transport = "cli"
+smoke_on_startup = false
+process_idle_timeout_ms = 600000
+initialize_timeout_ms = 10000
+session_new_timeout_ms = 10000
+prompt_timeout_ms = 600000
+allow_write_host_services = false
+allow_terminal_host_services = false
+fallback_to_cli_when_unhealthy = true
+
+[config.example.acp.providers.mistral]
+enabled = true
+command = "vibe-acp"
+args = []
+runtime_enabled = false
+
+[config.example.acp.providers.grok]
+enabled = true
+command = "grok"
+args = ["agent", "stdio"]
+runtime_enabled = false
+isolated_leader_socket = true
+
+[api_surface]
+stable_request_tools = [
+  "claude_request",
+  "claude_request_async",
+  "codex_request",
+  "codex_request_async",
+  "gemini_request",
+  "gemini_request_async",
+  "grok_request",
+  "grok_request_async",
+  "mistral_request",
+  "mistral_request_async",
+]
+selector_name = "transport"
+selector_values = ["cli", "acp"]
+selector_default = "cli"
+selector_policy = "Adding transport is backwards-compatible because omitted transport preserves the existing CLI path."
+explicit_require_acp = "transport = 'acp' fails closed if ACP is disabled, unsupported, unhealthy, or not runtime-enabled for the provider."
+implicit_fallback = "transport omitted or transport = 'cli' uses current behavior. ACP is not used implicitly until a later release explicitly changes default_transport."
+diagnostic_surface = "doctor and provider capability resources report ACP availability and smoke status. A public provider_acp_smoke tool may ship only if readOnlyHint is true and it cannot start prompts."
+
+[resources]
+provider_tools = "Extend provider-tools resources with acp.status, acp.entrypoint, acp.protocolVersion, acp.agentInfo, acp.smokeStatus, acp.runtimeEnabled, and acp.lastCheckedAt."
+upstream_contracts = "Track ACP executable names and help probes separately from existing request argv allowlists."
+sessions = "session_get may expose redacted acp metadata for gateway-created ACP sessions."
+cache_state = "No ACP prompt or protocol payload is added to cache-state resources by default."
+
+[session_model]
+gateway_session_id_owner = "llm-cli-gateway"
+provider_acp_session_id_owner = "provider ACP agent"
+do_not_reuse_provider_id_as_gateway_id = true
+active_session_scope = "provider plus transport"
+resume_policy = "A gateway ACP session can resume only through the same provider and ACP transport unless a migration step explicitly supports conversion."
+metadata_fields = [
+  "metadata.acp.provider",
+  "metadata.acp.transport",
+  "metadata.acp.sessionId",
+  "metadata.acp.protocolVersion",
+  "metadata.acp.agentInfo",
+  "metadata.acp.cwd",
+  "metadata.acp.workspaceAlias",
+  "metadata.acp.worktreePath",
+  "metadata.acp.createdAt",
+  "metadata.acp.lastSeenAt",
+]
+
+[host_services]
+owner = "src/acp/host-services.ts"
+default_policy = "deny side effects"
+workspace_boundary = "All filesystem services resolve through the existing workspace registry and worktree manager."
+permission_boundary = "All provider permission callbacks route through ApprovalManager before any side effect is allowed."
+mcp_boundary = "Provider agents do not receive arbitrary gateway internals. Any HostServices MCP bridge is allowlisted and auditable."
+
+[[host_services.phases]]
+id = "phase-0-read-only-smoke"
+filesystem = "disabled"
+terminal = "disabled"
+permissions = "deny"
+mcp = "disabled"
+purpose = "initialize and session/new only; proves protocol health without exposing tools."
+
+[[host_services.phases]]
+id = "phase-1-read-only-files"
+filesystem = "workspace-scoped read-only"
+terminal = "disabled"
+permissions = "deny write and command execution"
+mcp = "disabled or allowlisted read-only diagnostics"
+purpose = "allow provider ACP agents to inspect workspace files without mutations."
+
+[[host_services.phases]]
+id = "phase-2-permission-bridge"
+filesystem = "workspace-scoped read-only plus approved writes if config allows"
+terminal = "disabled by default"
+permissions = "ApprovalManager mediated"
+mcp = "allowlisted"
+purpose = "prove permission callbacks can use the gateway approval surface."
+
+[[host_services.phases]]
+id = "phase-3-write-and-terminal"
+filesystem = "workspace-scoped read/write after approval"
+terminal = "workspace-scoped approved commands only"
+permissions = "ApprovalManager mediated with audit trail"
+mcp = "allowlisted"
+purpose = "future high-trust mode; not required for first runtime pilot."
+
+[security_invariants]
+stdout_reserved_for_mcp = true
+provider_stdout_is_protocol_only = true
+provider_stderr_logged_through_gateway_logger = true
+no_prompt_payloads_in_default_logs = true
+json_rpc_bodies_redacted_in_flight_recorder_by_default = true
+no_arbitrary_subcommand_execution = true
+no_shell_eval_for_entrypoints = true
+workspace_required_for_filesystem_host_services = true
+write_host_services_disabled_by_default = true
+terminal_host_services_disabled_by_default = true
+approval_manager_required_for_provider_permissions = true
+resources_redact_local_paths_and_auth_state = true
+adapter_support_requires_separate_threat_model = true
+
+[observability]
+flight_recorder_events = [
+  "acp.process.spawn",
+  "acp.process.exit",
+  "acp.initialize.start",
+  "acp.initialize.success",
+  "acp.initialize.failure",
+  "acp.session.new.start",
+  "acp.session.new.success",
+  "acp.session.prompt.start",
+  "acp.session.prompt.update",
+  "acp.session.prompt.success",
+  "acp.session.prompt.failure",
+  "acp.permission.requested",
+  "acp.permission.approved",
+  "acp.permission.denied",
+]
+metrics = [
+  "acp_smoke_success_total",
+  "acp_smoke_failure_total",
+  "acp_prompt_success_total",
+  "acp_prompt_failure_total",
+  "acp_process_restart_total",
+  "acp_request_timeout_total",
+]
+redaction = "Log method names, provider, session mapping IDs, durations, and error classes. Do not log prompt text, file contents, tokens, credential paths, or full JSON-RPC payloads by default."
+
+[failure_policy]
+unsupported_provider = "transport = 'acp' returns a clear unsupported-provider error."
+disabled_global_gate = "transport = 'acp' returns a clear ACP disabled error."
+disabled_provider_gate = "transport = 'acp' returns a clear provider ACP disabled error."
+unhealthy_smoke = "Explicit ACP requests fail closed unless fallbackToCli is explicitly allowed for that request in a later design."
+process_exit_mid_prompt = "Async jobs receive a terminal provider process error; sync requests return a structured error."
+json_rpc_timeout = "Cancel pending request, tear down or quarantine process, and report timeout without retrying unsafe prompt side effects automatically."
+permission_denied = "Return provider-visible denial and gateway-visible denial reason without executing the side effect."
+
+[test_matrix.unit]
+json_rpc_transport = [
+  "parses fragmented newline-delimited messages",
+  "correlates responses by id",
+  "dispatches notifications",
+  "surfaces JSON-RPC errors",
+  "times out pending requests",
+  "rejects writes after process exit",
+]
+schemas = [
+  "initialize request and response",
+  "session/new request and response",
+  "session/load request and response",
+  "session/prompt request and response",
+  "session/update notification variants used by target providers",
+  "permission callback request and response",
+]
+host_services = [
+  "denies filesystem writes by default",
+  "denies terminal by default",
+  "resolves read paths under workspace root",
+  "rejects path traversal outside workspace",
+  "routes permission decisions through ApprovalManager",
+]
+session_map = [
+  "creates gateway-owned session IDs",
+  "stores provider ACP session IDs only in metadata",
+  "rejects cross-provider resume",
+  "rejects cross-transport resume unless explicitly supported",
+]
+
+[test_matrix.integration]
+mock_acp_agent = [
+  "initialize plus session/new smoke",
+  "successful prompt with session/update notifications",
+  "prompt cancellation",
+  "process crash during initialize",
+  "process crash during prompt",
+  "permission request denied by default",
+]
+installed_provider_smoke = [
+  "vibe-acp initialize and session/new when installed",
+  "grok agent stdio initialize and session/new when installed and configured",
+]
+gateway_tools = [
+  "mistral_request transport=cli remains unchanged",
+  "grok_request transport=cli remains unchanged",
+  "mistral_request transport=acp fails closed when ACP disabled",
+  "grok_request transport=acp fails closed when provider runtime disabled",
+  "async jobs record ACP terminal failures correctly",
+]
+resources = [
+  "provider-tools resources include ACP fields",
+  "resources redact local path and auth details",
+  "doctor reports ACP target versions and smoke status",
+]
+
+[release_gates]
+local_commands = [
+  "python3 -c \"import pathlib,tomllib; tomllib.load(pathlib.Path('docs/plans/first-class-acp-gateway-extension.dag.toml').open('rb'))\"",
+  "npm run build",
+  "npm run lint",
+  "npm test",
+  "npm run upstream:contracts",
+]
+optional_live_commands = [
+  "vibe-acp --version",
+  "vibe-acp --help",
+  "grok --version",
+  "grok agent stdio --help",
+  "llm-cli-gateway doctor --json with ACP smoke enabled in a disposable workspace",
+]
+ci_expectation = "All public mirror checks remain green before any release tag."
+publish_rule = "Do not publish runtime ACP support until the native provider pilots pass the test matrix and docs explain transport selection for LLM agents."
+
+[agent_docs_required]
+target_audience = "LLM agents using llm-cli-gateway through MCP tools"
+minimum_coverage = [
+  "What ACP is and is not in this gateway",
+  "How to discover provider ACP capability through provider-tools resources",
+  "How to keep using default CLI transport",
+  "How to request ACP transport explicitly when enabled",
+  "How sessions map across gateway sessions and provider ACP sessions",
+  "How fallback and failure modes behave",
+  "Provider-specific instructions for Mistral Vibe, Grok, Codex, Claude, and Antigravity agy",
+]
+provider_doc_rules = [
+  "Mistral docs identify vibe-acp as native ACP and first pilot.",
+  "Grok docs identify grok agent stdio as native ACP and second pilot.",
+  "Codex docs label ACP as adapter-mediated and deferred at codex-cli 0.139.0.",
+  "Claude docs label ACP as adapter-mediated and deferred at claude 2.1.175.",
+  "Antigravity docs state agy 1.0.7 has no ACP surface and remains a watchlist item.",
+]
+
+[rollout]
+phase_0 = "Capability metadata and read-only smoke only; no prompt routing."
+phase_1 = "Mistral ACP runtime pilot behind global and provider config gates."
+phase_2 = "Grok ACP runtime pilot behind global and provider config gates."
+phase_3 = "Async-job parity, provider resources, and agent-facing docs."
+phase_4 = "Decide whether default_transport can ever become acp for selected providers; requires a new plan."
+
+[open_questions]
+provider_process_reuse = "Should ACP provider processes be per request, per gateway session, per workspace, or pooled by provider/workspace?"
+host_filesystem_contract = "Which ACP filesystem methods are required by vibe-acp and grok agent stdio before prompt routing is useful?"
+permission_granularity = "Can provider permission callbacks be mapped cleanly to existing ApprovalManager request types, or is a new approval kind needed?"
+streaming_shape = "Which ACP session/update variants need to map to current sync responses versus async job logs?"
+adapter_install_story = "Should adapter-mediated providers ever be bundled, discovered, or left entirely user-installed?"
+default_transport_future = "What evidence would justify changing provider defaults from cli to acp?"
+
+[[steps]]
+id = "freeze-contract-and-non-goals"
+depends_on = []
+actor = "assistant"
+action = """
+Freeze the extension contract before implementation:
+
+  - MCP remains the client-facing gateway protocol.
+  - ACP is an internal provider transport.
+  - Existing request tools keep CLI behavior by default.
+  - Native ACP support is separate from adapter-mediated support.
+  - HostServices side effects are deny-by-default until permission bridging is
+    implemented and tested.
+
+Record the decisions in docs and in provider capability metadata.
+"""
+idempotent = true
+validation = """
+Spec, implementation notes, and docs all use Agent Client Protocol terminology
+consistently and state that Agent Communication Protocol is out of scope. No
+new public tool exposes raw ACP JSON-RPC.
+"""
+
+[[steps]]
+id = "add-acp-config-schema"
+depends_on = ["freeze-contract-and-non-goals"]
+actor = "assistant"
+action = """
+Extend gateway configuration with an [acp] section and provider-specific ACP
+settings. Add Zod validation for:
+
+  - global enabled flag,
+  - default transport,
+  - smoke and prompt timeouts,
+  - idle timeout,
+  - allow_write_host_services,
+  - allow_terminal_host_services,
+  - per-provider command and args,
+  - per-provider runtime_enabled flag.
+
+Reject shell strings that require parsing. Store commands as executable plus
+argv array only.
+"""
+idempotent = false
+validation = """
+Unit tests cover default config, explicit disabled config, provider override
+config, invalid default transport, invalid timeout, and rejected shell-style
+entrypoint strings. Existing config tests continue to pass.
+"""
+
+[[steps]]
+id = "extend-provider-capability-metadata"
+depends_on = ["add-acp-config-schema"]
+actor = "assistant"
+action = """
+Extend provider_tool_capabilities with an ACP section for every provider:
+
+  - status,
+  - native versus adapter-mediated classification,
+  - target version,
+  - entrypoint,
+  - runtimeEnabled,
+  - smokeSupported,
+  - smokeStatus,
+  - caveats,
+  - docs reference.
+
+Keep agy explicit: target Antigravity agy 1.0.7 has no ACP surface, even
+though legacy Gemini CLI evidence exists elsewhere.
+"""
+idempotent = false
+validation = """
+provider_tool_capabilities tests assert all five CLI providers have ACP fields.
+Codex and Claude are adapter_mediated_deferred, agy is absent_watchlist,
+Mistral and Grok are native candidates, and no adapter is labeled native.
+"""
+
+[[steps]]
+id = "track-acp-upstream-contracts"
+depends_on = ["extend-provider-capability-metadata"]
+actor = "assistant"
+action = """
+Add ACP-specific upstream contract checks without changing request argv
+allowlists:
+
+  - vibe-acp --version and --help probe metadata,
+  - grok agent stdio --help probe metadata,
+  - agy absence/watchlist evidence,
+  - codex and claude native absence evidence,
+  - adapter evidence as documentation only.
+
+Keep these probes safe and read-only.
+"""
+idempotent = false
+validation = """
+npm run upstream:contracts passes offline. Live probe mode reports ACP
+entrypoint drift separately from request-tool command drift.
+"""
+
+[[steps]]
+id = "build-json-rpc-stdio-transport"
+depends_on = ["track-acp-upstream-contracts"]
+actor = "assistant"
+action = """
+Implement src/acp/json-rpc-stdio.ts:
+
+  - spawn-safe stdio wiring is supplied by process_manager,
+  - newline-delimited JSON-RPC parsing,
+  - response correlation by id,
+  - notification dispatch,
+  - error response handling,
+  - request timeouts,
+  - process-exit propagation to pending requests,
+  - stderr forwarding through the gateway logger,
+  - no console.log or stdout logging.
+"""
+idempotent = false
+validation = """
+Focused unit tests simulate fragmented messages, batched pending requests,
+notifications, JSON-RPC errors, invalid JSON, timeout, and process exit. Tests
+prove no gateway stdout writes occur.
+"""
+
+[[steps]]
+id = "define-acp-protocol-types"
+depends_on = ["build-json-rpc-stdio-transport"]
+actor = "assistant"
+action = """
+Implement src/acp/types.ts with Zod schemas and explicit TypeScript return
+types for the ACP methods required by this slice:
+
+  - initialize,
+  - session/new,
+  - session/load if needed for resume,
+  - session/prompt,
+  - session/cancel,
+  - session/update notifications,
+  - permission callbacks,
+  - minimal HostServices requests.
+
+Prefer tolerant parsing for provider-specific metadata while keeping required
+fields strict.
+"""
+idempotent = false
+validation = """
+Schema tests cover valid Mistral and Grok smoke responses captured from local
+validation, missing required fields, provider-specific extra fields, and
+unknown notification variants.
+"""
+
+[[steps]]
+id = "implement-acp-client-core"
+depends_on = ["define-acp-protocol-types"]
+actor = "assistant"
+action = """
+Implement src/acp/client.ts as the protocol wrapper used by gateway code:
+
+  - initialize once per process,
+  - create or load ACP sessions,
+  - send prompts,
+  - cancel prompts,
+  - surface updates through callbacks,
+  - dispatch provider calls back into HostServices,
+  - normalize errors into gateway error classes.
+
+The client must not know provider-specific spawn commands.
+"""
+idempotent = false
+validation = """
+Mock-agent integration tests prove initialize/session-new/session-prompt flows
+work through the client and that protocol errors become structured gateway
+errors with redacted messages.
+"""
+
+[[steps]]
+id = "add-acp-process-manager"
+depends_on = ["implement-acp-client-core"]
+actor = "assistant"
+action = """
+Implement src/acp/process-manager.ts:
+
+  - resolve provider entrypoints from config and provider registry,
+  - spawn without shell,
+  - set cwd to the resolved workspace or safe temp directory,
+  - apply minimal environment inheritance,
+  - support provider-specific isolation such as Grok leader socket isolation,
+  - enforce initialize and idle timeouts,
+  - kill processes on gateway shutdown,
+  - quarantine crashed processes until recreated.
+"""
+idempotent = false
+validation = """
+Tests assert argv is passed without shell parsing, cwd is controlled,
+provider-specific env isolation can be applied, idle timeout kills the process,
+and crashed process state is reported to callers.
+"""
+
+[[steps]]
+id = "add-read-only-smoke-harness"
+depends_on = ["add-acp-process-manager"]
+actor = "assistant"
+action = """
+Implement src/acp/smoke-harness.ts and wire it to doctor/capability reporting.
+The smoke must do only:
+
+  - spawn provider ACP process,
+  - initialize,
+  - session/new in a disposable workspace or safe temp cwd,
+  - capture protocolVersion and agentInfo,
+  - terminate the process.
+
+Do not send prompts, do not expose filesystem services, and do not request
+terminal access in the smoke path.
+"""
+idempotent = false
+validation = """
+Mock smoke tests pass. Installed-provider smoke tests are opt-in and skip when
+vibe-acp or grok is missing. Doctor reports last smoke status without leaking
+account IDs, credential paths, temp paths, or raw JSON-RPC payloads.
+"""
+
+[[steps]]
+id = "define-host-services-boundary"
+depends_on = ["add-read-only-smoke-harness"]
+actor = "assistant"
+action = """
+Implement the HostServices skeleton with deny-by-default behavior:
+
+  - filesystem read methods are unavailable until phase 1,
+  - filesystem write methods are denied,
+  - terminal methods are denied,
+  - permission requests are denied until ApprovalManager bridge exists,
+  - MCP host calls are unavailable unless allowlisted.
+
+Make unsupported HostServices requests visible to the provider as denied or
+unsupported responses, not process crashes.
+"""
+idempotent = false
+validation = """
+Provider callback tests prove every side-effect-capable host request is denied
+by default and that denial is returned through valid ACP JSON-RPC.
+"""
+
+[[steps]]
+id = "implement-permission-bridge"
+depends_on = ["define-host-services-boundary"]
+actor = "assistant"
+action = """
+Bridge ACP permission callbacks to ApprovalManager:
+
+  - map provider permission request type, target path/command, and summary to
+    an approval request,
+  - preserve provider and gateway session context,
+  - deny on timeout or malformed request,
+  - record approval decisions in existing audit surfaces,
+  - keep write and terminal approvals disabled unless config allows the host
+    service category.
+"""
+idempotent = false
+validation = """
+Tests cover approve, deny, timeout, malformed permission request, disabled
+write service, disabled terminal service, and audit event creation.
+"""
+
+[[steps]]
+id = "implement-session-map"
+depends_on = ["implement-permission-bridge"]
+actor = "assistant"
+action = """
+Implement src/acp/session-map.ts and integrate with session-manager:
+
+  - create gateway sessions with normal gw-* IDs,
+  - store provider ACP session IDs only in metadata,
+  - include provider, transport, protocolVersion, agentInfo, cwd, workspace,
+    and worktree metadata,
+  - validate provider and transport ownership before resume,
+  - preserve active-session behavior by provider and transport.
+"""
+idempotent = false
+validation = """
+Session tests prove ACP sessions cannot be resumed through the wrong provider
+or CLI transport, provider ACP IDs are not accepted as gateway IDs, and existing
+CLI session behavior remains unchanged.
+"""
+
+[[steps]]
+id = "normalize-session-updates"
+depends_on = ["implement-session-map"]
+actor = "assistant"
+action = """
+Implement src/acp/event-normalizer.ts:
+
+  - convert ACP session/update notifications to gateway progress events,
+  - accumulate final text for sync responses,
+  - stream updates into async job logs,
+  - preserve structured tool/permission events where useful,
+  - redact or summarize file content events according to gateway policy.
+"""
+idempotent = false
+validation = """
+Mock prompt tests verify final sync text, async log updates, permission event
+recording, cancellation updates, and redaction of sensitive event payloads.
+"""
+
+[[steps]]
+id = "pilot-mistral-acp-runtime"
+depends_on = ["normalize-session-updates"]
+actor = "assistant"
+action = """
+Add gated ACP routing to mistral_request and mistral_request_async:
+
+  - accept optional transport selector with default cli,
+  - require [acp].enabled and [acp.providers.mistral].runtime_enabled,
+  - use vibe-acp entrypoint from config/registry,
+  - create/load ACP session mapping,
+  - send prompt through ACP,
+  - map final response and usage where available,
+  - preserve existing Vibe CLI path when transport is omitted or cli.
+"""
+idempotent = false
+validation = """
+Tests prove CLI transport remains byte-for-byte compatible at the handler
+contract level, ACP disabled fails closed, mock Mistral ACP prompt succeeds,
+async Mistral ACP jobs complete, and session metadata records provider ACP
+session information.
+"""
+
+[[steps]]
+id = "pilot-grok-acp-runtime"
+depends_on = ["pilot-mistral-acp-runtime"]
+actor = "assistant"
+action = """
+Add gated ACP routing to grok_request and grok_request_async:
+
+  - accept optional transport selector with default cli,
+  - require [acp].enabled and [acp.providers.grok].runtime_enabled,
+  - use grok agent stdio entrypoint from config/registry,
+  - apply isolated leader socket behavior,
+  - create/load ACP session mapping,
+  - send prompt through ACP,
+  - preserve existing Grok CLI path when transport is omitted or cli.
+"""
+idempotent = false
+validation = """
+Tests prove current Grok CLI behavior remains unchanged, ACP disabled fails
+closed, mock Grok ACP prompt succeeds, async Grok ACP jobs complete, and empty
+environment credential assumptions are not introduced by gateway code.
+"""
+
+[[steps]]
+id = "integrate-async-jobs"
+depends_on = ["pilot-grok-acp-runtime"]
+actor = "assistant"
+action = """
+Make ACP prompt execution work through AsyncJobManager:
+
+  - record provider and transport in job metadata,
+  - propagate cancellation to ACP session/cancel where supported,
+  - terminate provider process on hard cancellation,
+  - record terminal errors consistently with CLI jobs,
+  - preserve dedup behavior where prompt/session/workspace inputs match.
+"""
+idempotent = false
+validation = """
+Async tests cover success, cancellation, timeout, process crash, dedup behavior,
+and job_result shape for ACP-backed Mistral and Grok mock providers.
+"""
+
+[[steps]]
+id = "integrate-resources-and-doctor"
+depends_on = ["integrate-async-jobs"]
+actor = "assistant"
+action = """
+Expose ACP state through existing resource and diagnostic surfaces:
+
+  - provider-tools resources include ACP capability and runtime gate fields,
+  - doctor --json includes ACP availability and smoke status,
+  - upstream contract output includes ACP entrypoint drift,
+  - session_get includes redacted ACP metadata for ACP sessions.
+"""
+idempotent = false
+validation = """
+Resource snapshot tests and doctor tests assert ACP fields for all providers,
+including agy absence/watchlist and adapter-mediated Claude/Codex labels.
+"""
+
+[[steps]]
+id = "add-agent-facing-docs"
+depends_on = ["integrate-resources-and-doctor"]
+actor = "assistant"
+action = """
+Add LLM-agent-oriented documentation for using ACP through the gateway:
+
+  - explain that agents still call MCP tools,
+  - show provider capability discovery,
+  - show transport selection for Mistral and Grok,
+  - show default CLI behavior,
+  - explain failure and fallback rules,
+  - explain gateway sessions versus provider ACP sessions,
+  - cover every target CLI: Claude, Codex, Antigravity agy, Grok, and Mistral.
+
+The docs must not tell users to call raw provider ACP JSON-RPC.
+"""
+idempotent = false
+validation = """
+Docs include a provider-by-provider how-to-use section aimed at LLM agents.
+Each provider section states native, adapter-mediated, absent, or watchlist
+status for the exact target CLI version and includes the expected gateway tool
+usage pattern.
+"""
+
+[[steps]]
+id = "validate-with-multi-llm-review"
+depends_on = ["add-agent-facing-docs"]
+actor = "assistant"
+action = """
+Run gateway LLM validation after implementation:
+
+  - Claude: safety, HostServices, and permission bridge review,
+  - Codex: codebase integration and test adequacy review,
+  - Gemini or Antigravity-capable reviewer: provider status and agy watchlist
+    wording review,
+  - Grok: native ACP runtime and failure-mode review,
+  - Mistral: vibe-acp runtime and docs review.
+
+Record reviewer verdicts and fix material findings before release.
+"""
+idempotent = true
+validation = """
+Validation notes include reviewer job IDs, verdicts, material findings, and
+fix commits or explicit deferred blockers. Any unresolved release blocker
+prevents publish.
+"""
+
+[[steps]]
+id = "release-gate-and-publish-readiness"
+depends_on = ["validate-with-multi-llm-review"]
+actor = "assistant"
+action = """
+Before publishing ACP runtime support:
+
+  - run npm run build,
+  - run npm run lint,
+  - run npm test,
+  - run npm run upstream:contracts,
+  - run optional live smoke on installed vibe-acp and grok when available,
+  - push private upstream and public mirror,
+  - confirm public mirror CI is green,
+  - ensure docs/upstream/release-targets.md includes version plus SHA where
+    provider binaries report one.
+"""
+idempotent = true
+validation = """
+The release candidate has clean private and public branches, green CI, passing
+local gates, documented provider target versions, and no runtime ACP support
+enabled by default.
+"""
