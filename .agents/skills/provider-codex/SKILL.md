@@ -38,6 +38,32 @@ metadata is authoritative; the TOML is scanner input only.
 - `npm run upstream:scan -- --live` reports a change on the Codex release notes
   or changelog.
 
+## How LLM agents should use Codex through the gateway
+
+1. Discover the live gateway/provider surface before relying on Codex-specific
+   controls:
+   ```
+   provider_tool_capabilities({cli:"codex"})
+   ```
+   For a cached read-only resource, use `provider-tools://codex`.
+2. Use `codex_request` for normal implementation/review turns,
+   `codex_request_async` for long-running work, and `codex_fork_session` when a
+   real Codex session needs to branch.
+3. Omit `model` unless the caller explicitly asked for a specific variant; the
+   gateway resolves the configured Codex default/profile.
+4. Include `fullAuto:true` when Codex must edit files or run shell commands.
+   Pair it with `approvalStrategy:"mcp_managed"` for the gateway approval gate.
+5. Do not pass Claude-style `allowedTools` or `disallowedTools`; Codex does not
+   expose those request fields through the gateway. `mcpServers` is approval
+   tracking only because Codex owns its MCP configuration.
+6. Use `sandboxMode`, `askForApproval`, `profile`, `configOverrides`, images,
+   `outputFormat`, and `outputSchema` only as reported by
+   `provider_tool_capabilities`.
+7. Codex continuity is real through `codex exec resume`: pass a real Codex UUID
+   from `~/.codex/sessions/`, or `resumeLatest:true`. Gateway `gw-*` IDs are not
+   Codex sessions, and `fullAuto:true` is dropped on resume because Codex
+   inherits the original session approval policy.
+
 ## Scan for upstream change
 
 ```bash

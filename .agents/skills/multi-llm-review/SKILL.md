@@ -41,6 +41,24 @@ list_models()
 
 Otherwise omit `model` and proceed.
 
+### 1a. Discover Provider Capabilities
+
+Before applying provider-specific controls such as tool allowlists, MCP server
+fields, session resume, media skills, or output formats, ask the gateway for the
+provider surface:
+
+```
+provider_tool_capabilities({cli:"claude"})
+provider_tool_capabilities({cli:"codex"})
+provider_tool_capabilities({cli:"gemini"})
+provider_tool_capabilities({cli:"grok"})
+provider_tool_capabilities({cli:"mistral"})
+```
+
+Use the reported `unsupportedInputs` and `controls` instead of assuming all
+CLIs share Claude's tool names or MCP semantics. The same data is available as
+`provider-tools://{provider}` resources.
+
 ### 2. Send Parallel Reviews
 
 Sync tools auto-defer at 45s — if response contains `status:"deferred"`, poll `jobId` via `llm_job_status` every 60s, fetch with `llm_job_result`.
@@ -101,6 +119,7 @@ claude_request_async({prompt:"Review all TS files in src/ for architecture/quali
 codex_request_async({prompt:"Check all TS files in src/ for logic bugs/test gaps... End with APPROVED or NOT APPROVED with findings.",fullAuto:true,approvalStrategy:"mcp_managed",optimizePrompt:true,correlationId:"review-bugs"})
 gemini_request_async({prompt:"Security audit all TS files in src/... End with APPROVED or NOT APPROVED with findings.",approvalStrategy:"mcp_managed",correlationId:"review-security"})
 grok_request_async({prompt:"Independent diversity review of all TS files in src/... End with APPROVED or NOT APPROVED with findings.",approvalStrategy:"mcp_managed",correlationId:"review-grok"})
+mistral_request_async({prompt:"Independent Vibe review of all TS files in src/... End with APPROVED or NOT APPROVED with findings.",approvalStrategy:"mcp_managed",correlationId:"review-mistral"})
 ```
 
 Poll with `llm_job_status` every 60s, retrieve with `llm_job_result` when terminal. Jobs are durable — if your polling wrapper times out, re-issue the same call (the gateway auto-dedups onto the live job) or fetch by `jobId` later (default 30-day retention).
@@ -118,7 +137,11 @@ These patterns undermine review quality and trigger review integrity warnings:
 
 - **Don't inline code in `<code>` blocks** — provide file paths and let reviewers read files directly
 - **Don't suppress tools** — never include "do not run tools" or "respond only based on code provided" in review prompts
-- **Don't use `allowedTools:[]`** for reviews — reviewers need at minimum `["Read", "Grep", "Glob"]` to verify claims
+- **Don't use `allowedTools:[]`** for reviews — reviewers need tool access to
+  verify claims
+- **Don't copy tool names between providers** — Claude's `Read` / `Grep` /
+  `Glob` names are not Grok, Codex, Gemini, or Vibe allowlist names. Check
+  `provider_tool_capabilities` first, or omit provider tool allowlists.
 - **Do provide file paths** — `"Review changes in src/auth.ts"` instead of dumping file contents
 
 ## Iteration Loop (mandatory)
@@ -137,11 +160,14 @@ Reviews are not one-shot. The caller runs this loop:
 ## Tips
 
 - Always use `optimizePrompt:true` and `optimizeResponse:true`
-- Use sessions for iterative reviews (review → fix → re-review). Claude/Gemini/Grok carry real CLI continuity; Codex is bookkeeping only
+- Use sessions for iterative reviews (review → fix → re-review). Claude,
+  Codex, Gemini, Grok, and Mistral carry real provider continuity when their
+  provider-specific session rules are satisfied
 - For security-sensitive: `approvalPolicy:"strict"` (in addition to default `mcp_managed`)
 - Include file paths and line numbers for actionable feedback
 - If CLI unavailable, skip gracefully and note gap
-- Use all four async variants for true parallel reviews when you want Grok's independent perspective
+- Use all five async variants for true parallel reviews when you want Grok's
+  independent perspective and Mistral Vibe's fifth review
 - Pass `sessionId` to `gemini_request_async` / `grok_request_async` for resumable follow-up
 - Check for `status:"deferred"` in sync responses — poll `jobId` every 60s if present
 - Gateway `mcpServers` default to `["sqry"]`; add `exa`, `ref_tools`, or `trstr` only when the review needs those capabilities

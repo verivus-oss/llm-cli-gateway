@@ -36,6 +36,35 @@ metadata is authoritative; the TOML is scanner input only.
 - A `mistral` request fails the upstream contract check before spawn.
 - `npm run upstream:scan -- --live` reports a change on the Vibe releases page.
 
+## How LLM agents should use Mistral Vibe through the gateway
+
+1. Discover the live gateway/provider surface before relying on Vibe-specific
+   controls:
+   ```
+   provider_tool_capabilities({cli:"mistral"})
+   ```
+   For a cached read-only resource, use `provider-tools://mistral`.
+2. Use `mistral_request` for normal turns and `mistral_request_async` for
+   long-running review, analysis, or fifth-perspective checks. Sync calls may
+   auto-defer; poll `llm_job_status` and fetch with `llm_job_result` when that
+   happens.
+3. Omit `model` unless the caller explicitly asked for a specific variant; the
+   gateway selects the resolved model through `VIBE_ACTIVE_MODEL`.
+4. The gateway emits `--agent <mode>` explicitly and defaults programmatic
+   callers to `auto-approve`. Use `permissionMode:"plan"` or another supported
+   Vibe mode when you need stricter behaviour.
+5. `allowedTools` maps to repeated `--enabled-tools` flags. `disallowedTools`
+   is accepted for caller parity but ignored because Vibe has no deny-list flag.
+6. `mcpServers` is approval tracking only; Vibe owns its MCP configuration.
+7. Vibe supports output format, trust, working directory/additional directories,
+   workspace/worktree, session, and max-turn/price/token controls as reported
+   by `provider_tool_capabilities`. It does not support gateway
+   `effort` / `reasoningEffort`.
+8. Vibe continuity is real via `sessionId`, `resumeLatest`, and
+   `createNewSession`. Current Vibe defaults session logging on; check
+   `doctor --json` for an explicit `[session_logging] enabled = false` warning
+   before assuming continuity transcripts are retained.
+
 ## Scan for upstream change
 
 ```bash

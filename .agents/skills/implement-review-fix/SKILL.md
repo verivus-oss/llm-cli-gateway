@@ -70,6 +70,11 @@ codex_request({prompt:"Implement [feature]. Requirements:\n- [req 1]\n- [req 2]\
 
 Send to reviewers in parallel. Reviewers **must have tool access** to read files and verify claims — never use `allowedTools:[]` or include tool-suppression language in review prompts. `mcp_managed` removes Claude/Gemini approval prompts; Codex also requires `fullAuto:true`.
 
+Before adding provider-specific controls, check `provider_tool_capabilities` for
+that provider. Do not copy Claude tool names into Grok, Gemini, Codex, or Vibe
+requests; omit allowlists unless the capability record says the provider
+supports the exact native tool names you intend to use.
+
 **Claude — Quality:**
 ```
 claude_request({prompt:"Review changes in [path]. Read the files directly. Check:\n- Code quality/maintainability\n- Project conventions\n- Error handling\n- Documentation gaps\nList issues with severity and fixes. End with APPROVED or NOT APPROVED with findings.",allowedTools:["Read","Grep","Glob"],approvalStrategy:"mcp_managed",optimizePrompt:true,optimizeResponse:true})
@@ -91,7 +96,9 @@ Sync tools auto-defer at 45s — if response contains `status:"deferred"`, poll 
 
 ## Step 3: Fix
 
-Consolidate findings, send to Codex. Re-state context (no CLI continuity):
+Consolidate findings, send to Codex. Use `resumeLatest:true` or a real Codex
+session UUID when you want Codex CLI continuity; otherwise re-state problem
+context inline:
 
 ```
 codex_request({prompt:"Fix issues in [path]:\n\n1. [Critical] [desc]\n2. [High] [desc]\n3. [Medium] [desc]\n\nApply fixes and update tests.",fullAuto:true,approvalStrategy:"mcp_managed",optimizePrompt:true})

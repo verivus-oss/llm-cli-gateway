@@ -36,6 +36,31 @@ metadata is authoritative; the TOML is scanner input only.
 - A `claude` request fails the upstream contract check before spawn.
 - `npm run upstream:scan -- --live` reports a change on the Claude changelog.
 
+## How LLM agents should use Claude through the gateway
+
+1. Discover the live gateway/provider surface before relying on provider-specific
+   controls:
+   ```
+   provider_tool_capabilities({cli:"claude"})
+   ```
+   For a cached read-only resource, use `provider-tools://claude`.
+2. Use `claude_request` for normal turns and `claude_request_async` for
+   long-running review, implementation, or analysis. Sync calls may auto-defer;
+   poll `llm_job_status` and fetch with `llm_job_result` when that happens.
+3. Omit `model` unless the caller explicitly asked for a specific variant; the
+   gateway resolves the configured Claude default.
+4. For review or code-reading tasks, keep tool access available. Claude supports
+   `allowedTools`, `disallowedTools`, and `tools`, but do not pass an empty
+   allowlist for reviews.
+5. Use `mcpServers` only for gateway-known MCP servers, and set
+   `strictMcpConfig:true` when missing MCP access should fail fast.
+6. Prefer `approvalStrategy:"mcp_managed"` over raw
+   `dangerouslySkipPermissions`; the gateway approval gate runs before Claude's
+   permissive execution mode is applied.
+7. Use `createNewSession`, `sessionId`, or `continueSession` for real Claude
+   continuity. Claude also supports structured output via `outputFormat` and
+   `jsonSchema`.
+
 ## Scan for upstream change
 
 ```bash

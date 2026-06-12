@@ -44,11 +44,16 @@ All `[cache_awareness]` flags default off in 1.x, so a block with an empty
 default. Ignore the block for install purposes unless the user explicitly
 asks to enable cache-awareness features.
 
+`doctor --json` also includes `provider_capabilities`, a compact capability
+summary for outbound providers. Check it before claiming a request field,
+tool allowlist, approval mode, session behavior, or provider-native tool is
+supported; unsupported/degraded inputs are listed per provider.
+
 ## Workflow
 
 1. Ask which inbound client the user wants to connect and which outbound providers they want for validation.
 2. Ask the user to open the setup UI or paste redacted doctor JSON.
-3. Read `transport`, `auth`, `providers`, and `endpoint_exposure`.
+3. Read `transport`, `auth`, `providers`, `provider_capabilities`, and `endpoint_exposure`.
 4. If a web-hosted MCP client is selected and `endpoint_exposure.web_clients_supported` is not `true`, follow `setup/assistants/endpoint-exposure-agent-runbook.md`.
 5. Choose the matching provider page and setup UI snippet.
 6. Give one action at a time.

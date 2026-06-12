@@ -50,6 +50,7 @@ describe("MCP Server Integration", () => {
       expect(toolNames).toContain("codex_request");
       expect(toolNames).toContain("gemini_request");
       expect(toolNames).toContain("list_models");
+      expect(toolNames).toContain("provider_tool_capabilities");
       expect(toolNames).toContain("cli_versions");
       expect(toolNames).toContain("cli_upgrade");
 
@@ -92,6 +93,24 @@ describe("MCP Server Integration", () => {
 
       expect(listModelsTool).toBeDefined();
       expect(listModelsTool?.inputSchema).toBeDefined();
+    });
+
+    it("should have correct schema for provider_tool_capabilities", async () => {
+      const result = await client.listTools();
+      const tool = result.tools.find(t => t.name === "provider_tool_capabilities");
+
+      expect(tool).toBeDefined();
+      expect(tool?.inputSchema).toBeDefined();
+      expect(Object.keys((tool?.inputSchema as any).properties)).toEqual(
+        expect.arrayContaining([
+          "cli",
+          "includeSkills",
+          "includeProviderTools",
+          "includeUnsupported",
+          "includePaths",
+          "refresh",
+        ])
+      );
     });
   });
 
@@ -147,6 +166,33 @@ describe("MCP Server Integration", () => {
       const models = JSON.parse(content.text);
       expect(models.gemini).toBeDefined();
       expect(models.claude).toBeUndefined();
+    });
+  });
+
+  describe("provider_tool_capabilities tool", () => {
+    it("should return provider tool capabilities for a selected CLI", async () => {
+      const result = (await client.callTool({
+        name: "provider_tool_capabilities",
+        arguments: { cli: "grok" },
+      })) as CallToolResult;
+
+      const content = result.content[0];
+      const capabilities = JSON.parse(content.text);
+      expect(capabilities.grok.schemaVersion).toBe("provider-tool-capabilities.v2");
+      expect(capabilities.grok.controls.allowlist.cliFlag).toBe("--tools");
+      expect(capabilities.claude).toBeUndefined();
+    });
+
+    it("should support grok_api provider filtering", async () => {
+      const result = (await client.callTool({
+        name: "provider_tool_capabilities",
+        arguments: { cli: "grok_api", includeSkills: false },
+      })) as CallToolResult;
+
+      const content = result.content[0];
+      const capabilities = JSON.parse(content.text);
+      expect(capabilities.grok_api.providerKind).toBe("api");
+      expect(capabilities.grok).toBeUndefined();
     });
   });
 

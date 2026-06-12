@@ -136,10 +136,39 @@ describe("Layer 6 doctor report (U20)", () => {
     expect(report.providers.gemini).toBeDefined();
     expect(report.providers.grok).toBeDefined();
     expect(report.providers.mistral).toBeDefined();
+    expect(report.provider_capabilities.schema_version).toBe("provider-tool-capabilities.v2");
+    expect(report.provider_capabilities.providers.grok_api.provider_kind).toBe("api");
     expect(report.client_config.vibe_session_logging).toBeDefined();
     expect(typeof report.client_config.vibe_session_logging.session_logging_enabled).toBe(
       "boolean"
     );
+  });
+
+  it("includes a compact provider capability summary without raw discovery paths", () => {
+    const report: DoctorReport = createDoctorReport({});
+
+    expect(report.provider_capabilities.tool).toBe("provider_tool_capabilities");
+    expect(report.provider_capabilities.resources.catalog).toBe("provider-tools://catalog");
+    expect(report.provider_capabilities.resources.providers).toMatchObject({
+      claude: "provider-tools://claude",
+      codex: "provider-tools://codex",
+      gemini: "provider-tools://gemini",
+      grok: "provider-tools://grok",
+      grok_api: "provider-tools://grok_api",
+      mistral: "provider-tools://mistral",
+    });
+    expect(report.provider_capabilities.providers.grok.supported_features).toEqual(
+      expect.arrayContaining(["toolAllowDenyControls", "promptControl", "compactionControls"])
+    );
+    expect(report.provider_capabilities.providers.grok_api.gateway_request_tools).toEqual([]);
+    expect(report.provider_capabilities.providers.grok_api.unsupported_inputs).toEqual(
+      expect.arrayContaining(["allowedTools/disallowedTools", "workspace/worktree"])
+    );
+    expect(report.provider_capabilities.providers.mistral.supported_features).toEqual(
+      expect.arrayContaining(["enabledToolAllowlist", "trustControl"])
+    );
+    expect(JSON.stringify(report.provider_capabilities)).not.toContain(`${tmpdir()}/`);
+    expect(JSON.stringify(report.provider_capabilities)).not.toContain("/home/");
   });
 
   it("flags HTTP transport without auth token as not ok and surfaces an actionable next action", () => {

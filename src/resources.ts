@@ -18,6 +18,12 @@ import {
   getCliSubcommandContract,
   serializeCliSubcommandContract,
 } from "./upstream-contracts.js";
+import {
+  getOneProviderToolCapabilities,
+  getProviderToolCapabilities,
+  providerCapabilityIds,
+  type ProviderCapabilityId,
+} from "./provider-tool-capabilities.js";
 
 export interface ResourceDefinition {
   uri: string;
@@ -241,6 +247,28 @@ export class ResourceProvider {
           priority: 0.7,
         },
       },
+      {
+        uri: "provider-tools://catalog",
+        name: "Provider Tool Capabilities Catalog",
+        title: "Provider Tool Capabilities Catalog",
+        description: "Read-only catalog of gateway tool controls and discovered provider skills",
+        mimeType: "application/json",
+        annotations: {
+          audience: ["user", "assistant"],
+          priority: 0.8,
+        },
+      },
+      ...providerCapabilityIds().map(cli => ({
+        uri: `provider-tools://${cli}`,
+        name: `${cli} Tool Capabilities`,
+        title: `${cli} Tool Capabilities`,
+        description: `Gateway tool controls and discovered local skills for ${cli}`,
+        mimeType: "application/json",
+        annotations: {
+          audience: ["user", "assistant"] as ("user" | "assistant")[],
+          priority: 0.8,
+        },
+      })),
     ];
   }
 
@@ -430,6 +458,27 @@ export class ResourceProvider {
       };
     }
 
+    if (uri === "provider-tools://catalog" || uri === "provider_tools://catalog") {
+      return {
+        uri,
+        mimeType: "application/json",
+        text: JSON.stringify(getProviderToolCapabilities(), null, 2),
+      };
+    }
+
+    const providerToolsResource = parseProviderToolsUri(uri);
+    if (providerToolsResource) {
+      return {
+        uri,
+        mimeType: "application/json",
+        text: JSON.stringify(
+          getOneProviderToolCapabilities(providerToolsResource.provider),
+          null,
+          2
+        ),
+      };
+    }
+
     const subcommandResource = parseProviderSubcommandUri(uri);
     if (subcommandResource) {
       const contract = getCliSubcommandContract(
@@ -471,4 +520,16 @@ function parseProviderSubcommandUri(
     provider: providerRaw as CliType,
     commandPath: pathParts.map(part => decodeURIComponent(part)).filter(Boolean),
   };
+}
+
+function parseProviderToolsUri(uri: string): { provider: ProviderCapabilityId } | null {
+  const prefix = uri.startsWith("provider-tools://")
+    ? "provider-tools://"
+    : uri.startsWith("provider_tools://")
+      ? "provider_tools://"
+      : null;
+  if (!prefix || uri === `${prefix}catalog`) return null;
+  const provider = uri.slice(prefix.length);
+  if (!providerCapabilityIds().includes(provider as ProviderCapabilityId)) return null;
+  return { provider: provider as ProviderCapabilityId };
 }

@@ -62,6 +62,8 @@ The next documentation focus is provider-specific skill and DAG-TOML pairs for e
 - Security CI runs actionlint, zizmor, shellcheck, typos, osv-scanner, gitleaks, and lychee.
 - GitHub release installer artifacts are checksummed and signed with Sigstore keyless signing.
 - npm releases use provenance through OIDC trusted publishing.
+- The npm package intentionally ships a generated, prod-only `npm-shrinkwrap.json` so registry installs resolve the audited release tree. Release gates regenerate it from `package-lock.json`, compare for parity, and run a registry-fidelity consumer install before publishing.
+- Socket behavioural alerts are documented in [`socket.yml`](./socket.yml) and under "Security Considerations" below. `shellAccess` and `shrinkwrap` are reviewed package capabilities/configuration for this CLI appliance, not hidden install behaviour.
 
 ## Personal MCP Appliance
 
@@ -167,6 +169,7 @@ docker compose -f docker/personal.compose.yml run --rm doctor
 - **SQLite Flight Recorder**: Every request/response logged to `~/.llm-cli-gateway/logs.db` with correlation IDs, token usage, duration, retry counts, and circuit breaker state. Browse with [Datasette](https://datasette.io/): `datasette ~/.llm-cli-gateway/logs.db`
 - **Structured Metadata**: Tool responses include machine-readable `structuredContent` (model, cli, correlationId, sessionId, durationMs, token counts)
 - **Cache observability resources**: `cache-state://global`, `cache-state://session/{id}`, and `cache-state://prefix/{hash}` MCP resources return aggregate cache hit/miss/savings — tokens and hashes only, no prompt text. `session_get` includes a `cacheState` block when the session has prior requests.
+- **Provider capability inventory**: `provider_tool_capabilities` and `provider-tools://catalog` expose the gateway request fields, supported/degraded provider controls, local skill/tool discovery, and safe config-surface hints for Claude Code, Codex CLI, Gemini/Antigravity, Grok CLI/API, and Mistral Vibe. `doctor --json` includes a compact `provider_capabilities` summary for setup assistants.
 
 ### Cache-aware operation
 
@@ -1019,6 +1022,42 @@ GEMINI_HISTORY_ROOT=/path/to/.gemini/tmp
 LLM_GATEWAY_DISABLE_MODEL_DISCOVERY=1
 ```
 
+##### `provider_tool_capabilities`
+
+Report the provider tool and feature capability catalog. Use this before
+orchestrating provider-specific requests so callers can distinguish supported
+controls, provider-owned configuration, ignored parity fields, and unsupported
+inputs.
+
+**Parameters:**
+
+- `cli` (string, optional): Provider filter (`"claude"`, `"codex"`, `"gemini"`, `"grok"`, `"grok_api"`, or `"mistral"`)
+- `includeSkills` (boolean, default `true`): Include bounded local skill discovery
+- `includeProviderTools` (boolean, default `true`): Include provider-native tools extracted from discovered skills
+- `includeUnsupported` (boolean, default `true`): Include explicit unsupported/degraded input records
+- `includePaths` (boolean, default `false`): Include raw local filesystem paths in discovery output
+- `refresh` (boolean, default `false`): Bypass the short-lived capability cache
+
+The response schema is `provider-tool-capabilities.v2`. Capability discovery is
+read-only and bounded; raw local paths are redacted unless `includePaths` is
+explicitly true, and secret-bearing auth files are not read.
+
+Equivalent MCP resources:
+
+- `provider-tools://catalog`: full provider catalog
+- `provider-tools://claude`
+- `provider-tools://codex`
+- `provider-tools://gemini`
+- `provider-tools://grok`
+- `provider-tools://grok_api`
+- `provider-tools://mistral`
+
+`doctor --json` also emits a compact `provider_capabilities` block with the
+same schema version, per-provider request tool names, supported feature names,
+unsupported input names, config-surface counts, discovery counts, and resource
+URIs. This block is intended for setup assistants that need a concise capability
+summary without local skill bodies or raw paths.
+
 ##### `cli_versions`
 
 Report installed CLI versions.
@@ -1299,15 +1338,18 @@ The gateway supports concurrent requests across different CLIs. Each request spa
 
 ### Socket alerts — context for reviewers
 
-If you're vetting `llm-cli-gateway` through [Socket](https://socket.dev/npm/package/llm-cli-gateway) or a similar supply-chain scanner, you'll see behavioural alerts and some dependency-ownership alerts. They are accurate descriptions of what the package does and what it depends on. The reviewed `shellAccess` capability is configured in `socket.yml` for repository/PR policy surfaces, but Socket's public package page may still display it for the published npm artifact; the rationale remains documented here and in the package.
+If you're vetting `llm-cli-gateway` through [Socket](https://socket.dev/npm/package/llm-cli-gateway) or a similar supply-chain scanner, you'll see behavioural alerts and some dependency-ownership alerts. They are accurate descriptions of what the package does and what it depends on. The reviewed `shellAccess` and `shrinkwrap` entries are configured in `socket.yml` for repository/PR policy surfaces, but Socket's public package page may still display them for the published npm artifact; the rationale remains documented here and in the package.
 
-| Alert                            | Where                                                                                                                                                                                            | Why it's bounded                                                                                                                                                                                                                                                                                                                                             |
-| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **Network access**               | `src/http-transport.ts` opens an HTTP MCP transport when started via `npm run start:http`. `src/endpoint-exposure.ts` issues a HEAD probe to verify configured public/tunnel URLs. Socket also flagged `dist/upstream-contracts.js` in v1.17.2 from descriptive text, not a network call. | The transport binds to `127.0.0.1` by default and requires `LLM_GATEWAY_AUTH_TOKEN` to be set. The default stdio MCP entry point (`npm start`) opens no sockets. `src/upstream-contracts.ts` stores provider CLI metadata and imports no HTTP client APIs.                                                                                                  |
-| **Shell access**                 | `src/executor.ts` uses `child_process.spawn(cmd, args, …)` to invoke the underlying LLM CLIs.                                                                                                    | `spawn` is called with an argument array and **never** `shell: true`, so there is no shell interpolation path for caller input. The command name is restricted to an allow-list of known CLI binaries (`claude`, `codex`, `agy`, `grok`, `vibe`).                                                                                                         |
-| **Uses eval**                    | None in our source. Transitive: `@modelcontextprotocol/sdk` → `ajv@8` uses `new Function(...)` in `ajv/dist/compile/index.js` to compile JSON Schema validators.                                 | This is ajv's standard codegen path. Only known schemas (defined in our source and the MCP SDK) flow into it; no caller-supplied data ever reaches the compiled function body.                                                                                                                                                                               |
-| **SQLite adapter isolation**     | Persistence uses Node's built-in `node:sqlite` module (no native binding, no install scripts) through a single adapter, `src/sqlite-driver.ts`.                                                  | `node:sqlite` is touched by exactly one production module (the adapter); every other module talks to SQLite through its typed surface. We never call any `db.pragma()` helper (it does not exist on `node:sqlite`); SQLite setup uses fixed literal `db.exec("PRAGMA ...")` statements. `npm run security:audit` fails the release if production code references `node:sqlite` outside the adapter or reintroduces a `.pragma()` call.                                                            |
-| **Dependency ownership**         | A handful of small transitive packages (e.g. `media-typer` via `@modelcontextprotocol/sdk`) trip Socket's "unstable ownership" or "obfuscated code" heuristics.                                  | These are pinned, well-known micro-deps in the Node ecosystem with no known issues. We pin direct override versions of `content-type` and `type-is` in `package.json#overrides`. As of 2.0.0 the prod graph carries no native module (`better-sqlite3` moved to devDependencies; `node:sqlite` is built into Node), eliminating the entire `prebuild-install`/`tar-fs`/`tar-stream` install-time chain. Our earlier direct dependency on `toml@3.0.0` was replaced with `smol-toml`.        |
+The currently flagged surfaces are not new in 2.6.x: the 2.3.0, 2.4.0, 2.5.0, and 2.6.3 npm tarballs all include `npm-shrinkwrap.json`, and all include the same `dist/executor.js` child-process spawn surface used to run provider CLIs. The `socket.yml` policy for 2.4.0, 2.5.0, 2.6.0, and 2.6.3 is materially the same for `shellAccess`; this README now adds the missing shrinkwrap disclosure as well.
+
+| Alert                        | Where                                                                                                                                                                                                                                                                                     | Why it's bounded                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Network access**           | `src/http-transport.ts` opens an HTTP MCP transport when started via `npm run start:http`. `src/endpoint-exposure.ts` issues a HEAD probe to verify configured public/tunnel URLs. Socket also flagged `dist/upstream-contracts.js` in v1.17.2 from descriptive text, not a network call. | The transport binds to `127.0.0.1` by default and requires `LLM_GATEWAY_AUTH_TOKEN` to be set. The default stdio MCP entry point (`npm start`) opens no sockets. `src/upstream-contracts.ts` stores provider CLI metadata and imports no HTTP client APIs.                                                                                                                                                                                                                             |
+| **Shell access**             | `src/executor.ts` uses `child_process.spawn(cmd, args, …)` to invoke the underlying LLM CLIs.                                                                                                                                                                                             | `spawn` is called with an argument array and **never** `shell: true`, so there is no shell interpolation path for caller input. The command name is restricted to an allow-list of known CLI binaries (`claude`, `codex`, `agy`, `grok`, `vibe`).                                                                                                                                                                                                                                      |
+| **Published shrinkwrap**     | The npm artifact includes `npm-shrinkwrap.json`; `package.json#files` includes it and `scripts/make-prod-shrinkwrap.mjs` generates it from `package-lock.json`.                                                                                                                           | This is a CLI/application package. npm documents the shrinkwrap use case for applications, daemons, and command-line tools published through the registry. Our shrinkwrap is a prod-only projection, not a committed full dev lockfile: `scripts/release-security-audit.sh` verifies parity with the audited lockfile, and `scripts/verify-registry-install.sh` proves fresh registry consumers receive no `better-sqlite3`/`prebuild-install`/`tar-fs`/`tar-stream` production chain. |
+| **Uses eval**                | None in our source. Transitive: `@modelcontextprotocol/sdk` → `ajv@8` uses `new Function(...)` in `ajv/dist/compile/index.js` to compile JSON Schema validators.                                                                                                                          | This is ajv's standard codegen path. Only known schemas (defined in our source and the MCP SDK) flow into it; no caller-supplied data ever reaches the compiled function body.                                                                                                                                                                                                                                                                                                         |
+| **SQLite adapter isolation** | Persistence uses Node's built-in `node:sqlite` module (no native binding, no install scripts) through a single adapter, `src/sqlite-driver.ts`.                                                                                                                                           | `node:sqlite` is touched by exactly one production module (the adapter); every other module talks to SQLite through its typed surface. We never call any `db.pragma()` helper (it does not exist on `node:sqlite`); SQLite setup uses fixed literal `db.exec("PRAGMA ...")` statements. `npm run security:audit` fails the release if production code references `node:sqlite` outside the adapter or reintroduces a `.pragma()` call.                                                 |
+| **Dependency ownership**     | A handful of small transitive packages (e.g. `media-typer` via `@modelcontextprotocol/sdk`) trip Socket's "unstable ownership" or "obfuscated code" heuristics.                                                                                                                           | These are pinned, well-known micro-deps in the Node ecosystem with no known issues. We pin direct override versions of `content-type` and `type-is` in `package.json#overrides`. As of 2.0.0 the prod graph carries no native module (`better-sqlite3` moved to devDependencies; `node:sqlite` is built into Node), eliminating the entire `prebuild-install`/`tar-fs`/`tar-stream` install-time chain. Our earlier direct dependency on `toml@3.0.0` was replaced with `smol-toml`.   |
 
 See [`socket.yml`](./socket.yml) for the same context in machine-readable form.
 

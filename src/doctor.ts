@@ -24,6 +24,12 @@ import { loadWorkspaceRegistry } from "./workspace-registry.js";
 import { computeGlobalCacheStats } from "./cache-stats.js";
 import { FlightRecorder, resolveFlightRecorderDbPath } from "./flight-recorder.js";
 import { buildUpstreamContractReport } from "./upstream-contracts.js";
+import {
+  getProviderToolCapabilities,
+  providerCapabilityIds,
+  type ProviderCapabilityId,
+  type ProviderKind,
+} from "./provider-tool-capabilities.js";
 
 export type CliType = "claude" | "codex" | "gemini" | "grok" | "mistral";
 
@@ -53,6 +59,30 @@ export interface CacheAwarenessReport {
         total_cache_read_tokens: number;
       }
     >
+  >;
+}
+
+export interface ProviderCapabilitySummaryReport {
+  schema_version: "provider-tool-capabilities.v2";
+  tool: "provider_tool_capabilities";
+  resources: {
+    catalog: "provider-tools://catalog";
+    providers: Record<ProviderCapabilityId, string>;
+  };
+  cache_ttl_ms: number;
+  providers: Record<
+    ProviderCapabilityId,
+    {
+      provider_kind: ProviderKind;
+      cli_available: boolean;
+      gateway_request_tools: string[];
+      supported_features: string[];
+      unsupported_inputs: string[];
+      config_surface_count: number;
+      discovered_skill_count: number;
+      discovered_provider_tool_count: number;
+      warnings: string[];
+    }
   >;
 }
 
@@ -319,6 +349,7 @@ export interface DoctorReport {
     vibe_session_logging: VibeSessionLoggingStatus;
   };
   cache_awareness: CacheAwarenessReport;
+  provider_capabilities: ProviderCapabilitySummaryReport;
   upstream: {
     note: string;
     recommendation: string;
@@ -461,6 +492,58 @@ function buildCacheAwarenessReport(opts: CreateDoctorReportOptions): CacheAwaren
   };
 }
 
+function buildProviderCapabilitySummary(
+  providerStatuses: Record<CliType, ProviderRuntimeStatus>
+): ProviderCapabilitySummaryReport {
+  const capabilities = getProviderToolCapabilities({
+    includeSkills: true,
+    includeProviderTools: true,
+    includeUnsupported: true,
+    includePaths: false,
+  });
+  const providers = Object.fromEntries(
+    providerCapabilityIds().map(provider => {
+      const capability = capabilities[provider];
+      if (!capability) {
+        throw new Error(`Missing provider capability record for ${provider}`);
+      }
+      const cliAvailable =
+        provider === "grok_api"
+          ? capability.gatewayRequestTools.includes("grok_api_request")
+          : providerStatuses[provider].installed;
+      return [
+        provider,
+        {
+          provider_kind: capability.providerKind,
+          cli_available: cliAvailable,
+          gateway_request_tools: capability.gatewayRequestTools,
+          supported_features: Object.entries(capability.features)
+            .filter(([, feature]) => feature.supported)
+            .map(([name]) => name),
+          unsupported_inputs: capability.unsupportedInputs.map(input => input.input),
+          config_surface_count: capability.configSurfaces.length,
+          discovered_skill_count: capability.discoveredSkills.length,
+          discovered_provider_tool_count: capability.discoveredProviderTools.length,
+          warnings: capability.warnings,
+        },
+      ];
+    })
+  ) as ProviderCapabilitySummaryReport["providers"];
+
+  return {
+    schema_version: "provider-tool-capabilities.v2",
+    tool: "provider_tool_capabilities",
+    resources: {
+      catalog: "provider-tools://catalog",
+      providers: Object.fromEntries(
+        providerCapabilityIds().map(provider => [provider, `provider-tools://${provider}`])
+      ) as Record<ProviderCapabilityId, string>,
+    },
+    cache_ttl_ms: 60_000,
+    providers,
+  };
+}
+
 export function createDoctorReport(
   envOrOptions: NodeJS.ProcessEnv | CreateDoctorReportOptions = process.env
 ): DoctorReport {
@@ -561,6 +644,7 @@ export function createDoctorReport(
     endpoint_exposure: endpointExposure,
     client_config: clientConfigStatus(),
     cache_awareness: buildCacheAwarenessReport(opts),
+    provider_capabilities: buildProviderCapabilitySummary(providerStatuses),
     upstream,
     next_actions: [],
   };

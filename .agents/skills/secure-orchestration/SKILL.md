@@ -125,6 +125,16 @@ Use `approvalStrategy:"mcp_managed"` instead so the gateway scores and gates the
 
 ## Permission Management
 
+Before setting provider-specific tool, MCP, sandbox, or session fields, query:
+
+```
+provider_tool_capabilities({cli:"claude"})
+```
+
+Repeat for `codex`, `gemini`, `grok`, or `mistral` as needed. Use the returned
+`controls` and `unsupportedInputs`; do not infer one provider's permission
+surface from another provider's CLI.
+
 ### Claude MCP servers
 
 ```
@@ -134,7 +144,9 @@ claude_request({prompt:"...",mcpServers:["sqry"],strictMcpConfig:true})
 - `mcpServers` — which to enable (`sqry`, `exa`, `ref_tools`, `trstr`); default is `["sqry"]`
 - `strictMcpConfig:true` — fail if unavailable
 
-For Codex, `mcpServers` is approval tracking only; Codex uses its own MCP configuration. For Gemini, the gateway passes `--allowed-mcp-server-names`, but the servers must already exist in Gemini CLI configuration.
+For Codex, Grok, and Mistral Vibe, `mcpServers` is approval tracking only; each
+provider owns its MCP configuration. For the current Gemini/Antigravity request
+path, non-empty `mcpServers` is rejected.
 
 ### Codex sandboxing
 
@@ -151,11 +163,26 @@ For Codex, `mcpServers` is approval tracking only; Codex uses its own MCP config
 claude_request({prompt:"...",allowedTools:["Read","Grep","Glob"],disallowedTools:["Bash","Write"]})
 ```
 
-**Gemini** — allowlists only:
+**Gemini/Antigravity** — current path rejects non-empty allowlists:
 ```
-gemini_request({prompt:"...",allowedTools:["Read","Grep"]})
+gemini_request({prompt:"...",approvalStrategy:"mcp_managed"})
 ```
-The gateway passes Gemini tool names through to the Gemini CLI; use names supported by the installed Gemini version.
+
+**Grok** — provider-native allowlists only:
+```
+grok_request({prompt:"...",approvalStrategy:"mcp_managed"})
+```
+Do not pass Claude tool names such as `Read`, `Grep`, `Glob`, or `Bash` as Grok
+`allowedTools`; query `provider_tool_capabilities({cli:"grok"})` and use
+discovered provider-native tool names only when you intentionally need an
+allowlist.
+
+**Mistral Vibe** — enabled-tool allowlist only:
+```
+mistral_request({prompt:"...",allowedTools:["<vibe-enabled-tool>"],approvalStrategy:"mcp_managed"})
+```
+`disallowedTools` is accepted for parity but ignored because Vibe has no
+deny-list flag.
 
 ## Idle Timeout as Security Control
 

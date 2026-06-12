@@ -1,0 +1,803 @@
+# Implementation plan: full provider tool/feature capability coverage.
+#
+# Goal: make llm-cli-gateway expose an accurate, machine-readable capability
+# inventory for every provider surface it brokers. The inventory must cover
+# model capability, provider-native tool controls, local skills, MCP/server
+# configuration, multimodal/image/video/document features, web/memory/subagent
+# features, structured output, workspace/session controls, and explicit
+# unsupported/degraded inputs.
+#
+# Motivation:
+#   A provider CLI may expose capabilities through an agent/tool layer that are
+#   not obvious from its model taxonomy. Grok Build is the concrete example:
+#   the coding model is not itself the image model, but the installed Grok CLI
+#   can call Imagine tools (`image_gen`, `image_edit`, etc.) through a local
+#   skill/tool integration. The gateway must surface that local provider-agent
+#   capability directly so orchestrators do not make stale assumptions.
+#
+# Non-goal:
+#   This plan does NOT make the gateway directly execute provider-native tools
+#   such as Grok `image_gen`. Execution still flows through the provider request
+#   tools (`grok_request`, `claude_request`, etc.) unless a later plan designs a
+#   separate, security-reviewed direct-tool bridge.
+
+[meta]
+name = "provider tool and feature capabilities full coverage"
+schema_version = "1.1"
+owner = "verivus-oss"
+slice = "provider-tool-capabilities-full-coverage-2026-06-12"
+target_branch = "master"
+release_version = "UNSET — assign at ship time"
+predecessor_plan = "docs/plans/provider-subcommands-scope-expansion.dag.toml"
+acceptance_resource = "provider_tool_capabilities and provider-tools://* expose a complete, tested capability inventory for every provider surface: Claude Code, Codex CLI, Gemini/Antigravity CLI, Grok CLI, optional Grok API provider, and Mistral Vibe. For each provider, the report separates supported controls, discovered local skills/tools, configured MCP/server surfaces, multimodal/media capabilities, structured output, session/workspace controls, cost/loop controls, and unsupported or degraded inputs."
+invariant_sources = [
+  "src/index.ts",
+  "src/resources.ts",
+  "src/provider-tool-capabilities.ts",
+  "src/model-registry.ts",
+  "src/upstream-contracts.ts",
+  "src/request-helpers.ts",
+  "src/provider-codegen.ts",
+  "src/xai-api-provider.ts",
+  "src/doctor.ts",
+  "README.md",
+  "docs/plans/provider-subcommands-scope-expansion.dag.toml",
+]
+
+[decisions]
+capability_surface_is_read_only = true
+execution_remains_provider_request_based = true
+local_skill_discovery_is_bounded = true
+capability_report_must_distinguish_model_vs_agent_tools = true
+unsupported_inputs_are_first_class = true
+all_sync_and_async_provider_tools_share_one_capability_record = true
+resource_uris = ["provider-tools://catalog", "provider-tools://{provider}"]
+tool_name = "provider_tool_capabilities"
+providers_required = ["claude", "codex", "gemini", "grok", "grok_api", "mistral"]
+
+[coverage_matrix]
+required_categories = [
+  "gateway_request_tools",
+  "model_defaults_and_aliases",
+  "tool_allow_deny_controls",
+  "mcp_server_configuration",
+  "native_skills",
+  "provider_native_tools",
+  "multimodal_inputs",
+  "media_generation_or_editing",
+  "structured_output",
+  "subagents_or_agents",
+  "web_search_or_remote_retrieval",
+  "memory_controls",
+  "workspace_and_worktree_controls",
+  "session_continuity",
+  "approval_and_sandbox_controls",
+  "cost_and_loop_controls",
+  "unsupported_or_degraded_inputs",
+]
+
+[coverage_matrix.claude]
+must_cover = [
+  "claude_request",
+  "claude_request_async",
+  "model/default/alias discovery from model-registry",
+  "allowedTools/disallowedTools/tools",
+  "mcpServers and generated Claude MCP config",
+  "local ~/.claude/skills discovery",
+  "agent/agents",
+  "outputFormat/jsonSchema/stream-json usage parsing",
+  "permissionMode/approvalStrategy/approvalPolicy",
+  "addDir/workspace/worktree",
+  "continueSession/sessionId/forkSession/noSessionPersistence/settings/settingSources",
+  "maxTurns/maxBudgetUsd/effort/fallbackModel",
+]
+
+[coverage_matrix.codex]
+must_cover = [
+  "codex_request",
+  "codex_request_async",
+  "codex_fork_session",
+  "model/default/profile/alias discovery from ~/.codex/config.toml and env",
+  "no gateway allowedTools/disallowedTools support",
+  "Codex-owned MCP configuration and configured MCP servers where discoverable",
+  "local ~/.codex/skills discovery",
+  "images attachments",
+  "outputFormat=json and outputSchema",
+  "sandboxMode/fullAuto/askForApproval/dangerouslyBypassApprovalsAndSandbox",
+  "workingDir/addDir/workspace/worktree",
+  "sessionId/resumeLatest/createNewSession/ephemeral",
+  "profile/configOverrides/ignoreUserConfig/ignoreRules",
+]
+
+[coverage_matrix.gemini]
+must_cover = [
+  "gemini_request",
+  "gemini_request_async",
+  "model/default/alias discovery and observed local history hints",
+  "allowedTools rejected",
+  "mcpServers rejected",
+  "local ~/.gemini/skills discovery",
+  "attachments rejected by current Antigravity path",
+  "outputFormat json/stream-json rejected by current Antigravity path",
+  "sandbox/yolo/approvalMode",
+  "includeDirs/workspace/worktree",
+  "sessionId/resumeLatest/createNewSession",
+  "policyFiles/adminPolicyFiles/skipTrust unsupported",
+]
+
+[coverage_matrix.grok]
+must_cover = [
+  "grok_request",
+  "grok_request_async",
+  "model/default/alias discovery",
+  "allowedTools/disallowedTools",
+  "allow/deny/permissionMode/alwaysApprove",
+  "local ~/.grok/skills and ~/.grok/bundled/skills discovery",
+  "provider-native skill tools including Imagine image_gen/image_edit/image_to_video/reference_to_video",
+  "agent/agents/bestOfN/check/todoGate/noSubagents",
+  "disableWebSearch",
+  "experimentalMemory/noMemory/noPlan/noAltScreen",
+  "promptFile/promptJson/single/verbatim/systemPromptOverride/rules",
+  "outputFormat",
+  "sandbox/workingDir/workspace/worktree/nativeWorktree",
+  "sessionId/resumeLatest/createNewSession/restoreCode/leaderSocket",
+  "maxTurns/effort/reasoningEffort/compactionMode/compactionDetail",
+]
+
+[coverage_matrix.grok_api]
+must_cover = [
+  "grok_api_request when providers.xai.enabled is true",
+  "xAI API model/default capability table",
+  "reasoningEffort/maxOutputTokens/temperature/topP",
+  "sessionId/createNewSession",
+  "no provider-native local skills",
+  "no gateway CLI tool allow/deny controls",
+  "explicit distinction from Grok CLI/Build skill tools",
+  "image generation is not routed through grok_api_request unless a future API provider surface is designed",
+]
+
+[coverage_matrix.mistral]
+must_cover = [
+  "mistral_request",
+  "mistral_request_async",
+  "model/default/env alias discovery via VIBE_ACTIVE_MODEL and ~/.vibe/config.toml",
+  "allowedTools via --enabled-tools",
+  "disallowedTools accepted but ignored",
+  "local ~/.vibe/skills discovery if present",
+  "agent modes default/plan/accept-edits/auto-approve/chat/explore/lean",
+  "outputFormat text/json/streaming aliases",
+  "trust/workingDir/addDir/workspace/worktree",
+  "sessionId/resumeLatest/createNewSession",
+  "maxTurns/maxPrice/maxTokens",
+  "no effort/reasoningEffort support",
+]
+
+# ===========================================================================
+# PHASE 0 — baseline, schema, and taxonomy
+# ===========================================================================
+
+[[steps]]
+id = "baseline-current-capability-surface"
+depends_on = []
+actor = "assistant"
+action = """
+Capture the current public capability surface before changing behavior:
+
+  - `list_models` output for all providers.
+  - `provider_tool_capabilities` output for all providers.
+  - `provider-tools://catalog` and every `provider-tools://{provider}` resource.
+  - `upstream_contracts({ probeInstalled: true })` for installed CLIs.
+  - `provider_subcommands_list` output.
+  - `cli_versions` output.
+  - Request schemas for every provider sync/async tool and `codex_fork_session`.
+
+Store only redacted findings in an untracked note or PR body draft. Do not
+commit local account names, access tokens, auth JSON, session transcript text,
+or full private filesystem inventories. It is acceptable to record provider
+home-relative skill names and capability names.
+"""
+idempotent = true
+validation = """
+Baseline note identifies which categories are already surfaced, partially
+surfaced, missing, or explicitly unsupported for every provider in
+coverage_matrix. No secrets or full raw auth/config files are captured.
+"""
+
+[[steps]]
+id = "define-capability-schema-v2"
+depends_on = ["baseline-current-capability-surface"]
+actor = "assistant"
+action = """
+Replace the ad hoc provider capability shape with an explicit v2 schema in
+src/provider-tool-capabilities.ts.
+
+Required top-level shape:
+
+  {
+    schemaVersion: "provider-tool-capabilities.v2",
+    generatedAt,
+    cli,
+    providerKind: "cli" | "api",
+    gatewayRequestTools: string[],
+    modelInfo,
+    controls,
+    features,
+    discoveredSkills,
+    discoveredProviderTools,
+    configSurfaces,
+    unsupportedInputs,
+    warnings
+  }
+
+Rules:
+  - `modelInfo` reuses `getAvailableCliInfo()` data without duplicating model
+    parsing logic.
+  - `controls` are things the gateway can pass through or reject at request
+    schema/argv time.
+  - `features` are normalized capability categories from coverage_matrix.
+  - `discoveredSkills` are local skill documents, bounded by count and bytes.
+  - `discoveredProviderTools` are extracted provider-native tool names with
+    source skill/path and confidence.
+  - `unsupportedInputs` must be first-class, not buried in prose.
+  - Provider paths must be home-relative when possible, with absolute path
+    output gated behind an explicit `includePaths` request parameter defaulting
+    false.
+"""
+idempotent = false
+validation = """
+TypeScript exports explicit interfaces for every v2 shape. Unit tests assert
+the response includes schemaVersion, every required category, and all six
+provider keys when no cli filter is supplied. TypeScript build passes.
+"""
+
+[[steps]]
+id = "add-capability-query-options"
+depends_on = ["define-capability-schema-v2"]
+actor = "assistant"
+action = """
+Extend `provider_tool_capabilities` inputs:
+
+  - cli?: claude|codex|gemini|grok|grok_api|mistral
+  - includeSkills?: boolean = true
+  - includeProviderTools?: boolean = true
+  - includeUnsupported?: boolean = true
+  - includePaths?: boolean = false
+  - refresh?: boolean = false
+
+Resource reads should use safe defaults equivalent to:
+  includeSkills=true, includeProviderTools=true, includeUnsupported=true,
+  includePaths=false, refresh=false.
+
+The `refresh` option bypasses any capability cache added in later steps.
+"""
+idempotent = false
+validation = """
+MCP schema snapshot/integration tests prove the new options exist, default
+correctly, and filtering does not leak unrequested providers. Path redaction
+tests prove absolute home paths are omitted unless includePaths=true.
+"""
+
+# ===========================================================================
+# PHASE 1 — provider-local discovery
+# ===========================================================================
+
+[[steps]]
+id = "harden-skill-frontmatter-and-tool-extraction"
+depends_on = ["define-capability-schema-v2"]
+actor = "assistant"
+action = """
+Harden local skill parsing:
+
+  - Parse YAML-ish frontmatter enough for `name`, `description`, and nested
+    `metadata.short-description`.
+  - Support folded (`>`, `>-`) and literal (`|`, `|-`) scalar descriptions.
+  - Extract only plausible provider tool identifiers, not every code span.
+  - Keep bounded reads: max skill dirs, max file bytes, max extracted tools.
+  - Emit confidence and extraction reason for each discovered tool:
+      exact-tool-section | known-tool-name | backtick-heuristic | low-confidence
+  - Add per-provider known native tool allow-lists where stable:
+      Grok: image_gen, image_edit, image_to_video, reference_to_video,
+            run_in_background, wait_tasks, get_task_output, spawn_subagent,
+            run_terminal_cmd, read_file, search_replace, todo_write.
+
+Do not parse arbitrary scripts or execute provider CLIs to discover skills.
+"""
+idempotent = false
+validation = """
+Unit fixtures cover plain, quoted, folded, and nested frontmatter. The Grok
+Imagine fixture returns image_gen/image_edit with high confidence. Noise spans
+like `file:line`, `name:`, and `max_results` do not appear as high-confidence
+provider tools unless explicitly known for that provider.
+"""
+
+[[steps]]
+id = "discover-provider-config-surfaces"
+depends_on = ["define-capability-schema-v2"]
+actor = "assistant"
+action = """
+Add bounded, redacted config-surface discovery:
+
+  Claude:
+    - settings paths present/missing.
+    - MCP config generation support from gateway mcpServers.
+    - local skills count.
+
+  Codex:
+    - config.toml present/missing.
+    - profiles names and model values via existing model-registry parsing.
+    - configured MCP server names if present in config, with command/env
+      values redacted.
+
+  Gemini/Antigravity:
+    - settings present/missing.
+    - local skills count.
+    - trusted folders presence only, not contents.
+
+  Grok:
+    - config.toml present/missing.
+    - user and bundled skills count.
+    - MCP config presence via Grok-owned config if safely discoverable.
+    - docs/help surface presence.
+
+  Mistral/Vibe:
+    - config.toml present/missing.
+    - active model source, reusing model-registry.
+    - trusted_folders/session_logging presence only, not secret values.
+    - local skills count if ~/.vibe/skills exists.
+
+All file output is boolean/count/name-only by default; raw paths require
+includePaths=true and still must not include secret/env values.
+"""
+idempotent = false
+validation = """
+Unit tests with temp homes prove each provider reports present/missing config
+surfaces and redacts env/command values. No auth JSON, access token, or secret
+string can appear in serialized capability output.
+"""
+
+[[steps]]
+id = "add-capability-cache"
+depends_on = ["harden-skill-frontmatter-and-tool-extraction", "discover-provider-config-surfaces"]
+actor = "assistant"
+action = """
+Add a short-lived in-memory capability cache, similar to model-registry:
+
+  - Default TTL: 60 seconds.
+  - Cache key includes provider and query options that affect content.
+  - `refresh=true` bypasses cache.
+  - Cache stores only parsed capability metadata, not raw file contents.
+
+Reason: provider capability discovery reads several local directories and may
+be called frequently by remote clients.
+"""
+idempotent = false
+validation = """
+Unit tests prove cache reuse, refresh bypass, and no stale cross-provider
+pollution. Capability cache clear helper exists for tests.
+"""
+
+# ===========================================================================
+# PHASE 2 — per-provider full coverage
+# ===========================================================================
+
+[[steps]]
+id = "cover-claude-capabilities"
+depends_on = ["define-capability-schema-v2", "discover-provider-config-surfaces"]
+actor = "assistant"
+action = """
+Fill Claude capability coverage:
+
+  - gatewayRequestTools: claude_request, claude_request_async.
+  - controls: allowedTools, disallowedTools, tools, permissionMode,
+    approvalStrategy, approvalPolicy, mcpServers, strictMcpConfig.
+  - features:
+      nativeSkills=true, mcpConfig=true, subagents=true,
+      structuredOutput=true, streamJsonUsage=true,
+      workspace=true, worktree=true, sessionContinuity=true,
+      costControls=true, loopControls=true.
+  - configSurfaces: settings/local settings presence, skill count, supported
+    gateway MCP server names.
+  - unsupportedInputs: none for fields currently accepted and emitted; list any
+    accepted-but-no-op or deprecated inputs such as dangerouslySkipPermissions.
+"""
+idempotent = false
+validation = """
+Claude-specific test asserts every coverage_matrix.claude item is represented
+in features, controls, configSurfaces, or unsupportedInputs. Existing Claude
+argv tests still pass.
+"""
+
+[[steps]]
+id = "cover-codex-capabilities"
+depends_on = ["define-capability-schema-v2", "discover-provider-config-surfaces"]
+actor = "assistant"
+action = """
+Fill Codex capability coverage:
+
+  - gatewayRequestTools: codex_request, codex_request_async,
+    codex_fork_session.
+  - controls: sandboxMode, fullAuto, askForApproval,
+    dangerouslyBypassApprovalsAndSandbox, profile, configOverrides,
+    outputSchema, images, workingDir, addDir, workspace, worktree.
+  - features:
+      multimodalInputs=image attachments,
+      structuredOutput=outputSchema,
+      nativeSkills=true,
+      mcpConfig=codex-owned config discovery only,
+      workspace/worktree/sessionContinuity=true,
+      approvalAndSandbox=true.
+  - unsupportedInputs:
+      allowedTools and disallowedTools not present on codex_request;
+      mcpServers accepted only for approval tracking, not Codex config mutation.
+  - configSurfaces:
+      profiles, configured MCP server names, config presence, model defaults.
+"""
+idempotent = false
+validation = """
+Codex-specific tests assert image attachment, outputSchema, profiles, MCP
+server names, and unsupported tool allow/deny semantics are all represented.
+Existing Codex argv and fork-session tests still pass.
+"""
+
+[[steps]]
+id = "cover-gemini-antigravity-capabilities"
+depends_on = ["define-capability-schema-v2", "discover-provider-config-surfaces"]
+actor = "assistant"
+action = """
+Fill Gemini/Antigravity capability coverage:
+
+  - gatewayRequestTools: gemini_request, gemini_request_async.
+  - controls: approvalMode, yolo, sandbox, includeDirs, workspace, worktree,
+    sessionId, resumeLatest.
+  - features:
+      nativeSkills=true,
+      workspace=true,
+      sessionContinuity=true,
+      approvalAndSandbox=true.
+  - unsupportedInputs:
+      allowedTools non-empty rejected,
+      mcpServers non-empty rejected,
+      outputFormat json/stream-json rejected in current Antigravity path,
+      policyFiles/adminPolicyFiles/attachments/skipTrust unsupported.
+  - configSurfaces:
+      local skills, settings presence, observed model hints.
+"""
+idempotent = false
+validation = """
+Gemini-specific tests assert every rejected/unsupported field appears in
+unsupportedInputs with behavior=reject. Existing Gemini handler tests still
+pass.
+"""
+
+[[steps]]
+id = "cover-grok-cli-capabilities"
+depends_on = ["define-capability-schema-v2", "harden-skill-frontmatter-and-tool-extraction"]
+actor = "assistant"
+action = """
+Fill Grok CLI capability coverage:
+
+  - gatewayRequestTools: grok_request, grok_request_async.
+  - controls: allowedTools, disallowedTools, allow, deny, alwaysApprove,
+    permissionMode, approvalStrategy, approvalPolicy.
+  - features:
+      nativeSkills=true,
+      providerNativeTools=true,
+      mediaGenerationOrEditing=true when Imagine tools are discovered,
+      subagents=true,
+      webSearchControl=true,
+      memoryControl=true,
+      workspace/worktree/nativeWorktree=true,
+      sessionContinuity=true,
+      promptControl=true,
+      loopControls=true,
+      compactionControls=true.
+  - discoveredProviderTools:
+      include Grok Imagine tools with source `imagine` and high confidence:
+      image_gen, image_edit, image_to_video, reference_to_video.
+  - configSurfaces:
+      user skills, bundled skills, Grok config presence, docs/help presence,
+      MCP config presence where safely discoverable.
+  - unsupportedInputs:
+      mcpServers approval-tracking-only; not a Grok MCP config mutation.
+"""
+idempotent = false
+validation = """
+Grok-specific tests assert the local Imagine fixture marks
+mediaGenerationOrEditing=true and surfaces image_gen/image_edit as
+provider-native tools. Existing Grok schema/argv/golden tests still pass.
+"""
+
+[[steps]]
+id = "cover-grok-api-capabilities"
+depends_on = ["define-capability-schema-v2"]
+actor = "assistant"
+action = """
+Add an explicit `grok_api` provider capability record for the optional xAI API
+provider path, separate from Grok CLI:
+
+  - gatewayRequestTools: grok_api_request when xAI API provider is enabled,
+    otherwise report disabled with enablement guidance.
+  - controls: reasoningEffort, maxOutputTokens, temperature, topP, timeoutMs,
+    sessionId/createNewSession.
+  - features:
+      apiProvider=true,
+      structuredTextResponses=true,
+      no local native skills,
+      no CLI allow/deny tool controls,
+      no gateway image-generation route in the current API tool.
+  - unsupportedInputs:
+      local skills, CLI flags, allowedTools/disallowedTools, workspace/worktree,
+      and Grok Imagine image generation are not routed through grok_api_request.
+
+This prevents conflating Grok CLI/Build agent skills with xAI API text calls.
+"""
+idempotent = false
+validation = """
+Tests cover xAI API enabled and disabled config. `provider_tool_capabilities`
+can filter `cli: "grok_api"` without affecting `cli: "grok"`.
+"""
+
+[[steps]]
+id = "cover-mistral-vibe-capabilities"
+depends_on = ["define-capability-schema-v2", "discover-provider-config-surfaces"]
+actor = "assistant"
+action = """
+Fill Mistral Vibe capability coverage:
+
+  - gatewayRequestTools: mistral_request, mistral_request_async.
+  - controls: allowedTools, permissionMode/agent mode, outputFormat, trust,
+    maxTurns, maxPrice, maxTokens, workingDir, addDir, workspace, worktree.
+  - features:
+      nativeSkills=true when ~/.vibe/skills exists,
+      enabledToolAllowlist=true,
+      denylist=false/ignored,
+      sessionContinuity=true,
+      workspace=true,
+      costControls=true,
+      loopControls=true,
+      trustControl=true.
+  - unsupportedInputs:
+      disallowedTools ignored,
+      effort/reasoningEffort rejected/not supported,
+      mcpServers approval-tracking-only; not Vibe config mutation.
+  - configSurfaces:
+      active model source, Vibe config presence, session logging status,
+      local skills count.
+"""
+idempotent = false
+validation = """
+Mistral-specific tests assert disallowedTools is represented as ignored, cost
+controls are represented, and active-model config source is included without
+secret/env leakage. Existing Mistral handler tests still pass.
+"""
+
+# ===========================================================================
+# PHASE 3 — resources, docs, doctor, and UX
+# ===========================================================================
+
+[[steps]]
+id = "wire-resources-and-tool-output-v2"
+depends_on = [
+  "cover-claude-capabilities",
+  "cover-codex-capabilities",
+  "cover-gemini-antigravity-capabilities",
+  "cover-grok-cli-capabilities",
+  "cover-grok-api-capabilities",
+  "cover-mistral-vibe-capabilities",
+]
+actor = "assistant"
+action = """
+Wire the v2 capability record through:
+
+  - provider_tool_capabilities tool.
+  - provider-tools://catalog resource.
+  - provider-tools://claude.
+  - provider-tools://codex.
+  - provider-tools://gemini.
+  - provider-tools://grok.
+  - provider-tools://grok_api.
+  - provider-tools://mistral.
+
+Preserve v1-compatible fields for one minor release if needed by existing
+clients, but mark them deprecated in output metadata. Prefer additive changes
+unless an existing field is misleading.
+"""
+idempotent = false
+validation = """
+Resource tests read every provider URI and assert schemaVersion v2, provider
+identity, and all required categories. MCP surface test pins the read-only
+annotation for provider_tool_capabilities.
+"""
+
+[[steps]]
+id = "add-doctor-capability-summary"
+depends_on = ["wire-resources-and-tool-output-v2"]
+actor = "assistant"
+action = """
+Extend doctor --json with a compact provider_capabilities summary:
+
+  - per provider: enabled/available, skill_count, provider_tool_count,
+    unsupported_count, warning_count.
+  - no raw descriptions, prompt text, auth values, or absolute paths.
+  - if Grok Imagine is discovered, include a boolean:
+      grok.imagine_image_tools_available = true.
+
+This is a diagnostic summary only; detailed output remains in
+provider_tool_capabilities and provider-tools://*.
+"""
+idempotent = false
+validation = """
+Doctor tests assert compact summary shape, no secret/path leakage, and Grok
+Imagine boolean behavior with temp-home fixtures.
+"""
+
+[[steps]]
+id = "document-provider-capability-surface"
+depends_on = ["wire-resources-and-tool-output-v2"]
+actor = "assistant"
+action = """
+Update public docs:
+
+  - README utility tools section: provider_tool_capabilities parameters,
+    response categories, and examples.
+  - README resources section: provider-tools://catalog and
+    provider-tools://{provider}.
+  - Add a provider capability matrix covering every provider in this plan.
+  - Explicitly state model-vs-agent-tool distinction, using Grok Build/Imagine
+    as the example.
+  - Document that direct provider-native tool execution is not exposed by this
+    plan; callers invoke provider CLIs through request tools.
+"""
+idempotent = false
+validation = """
+README examples are accurate against the test fixture output. format:check
+passes. No internal-only machine paths or account names are added.
+"""
+
+[[steps]]
+id = "add-setup-and-assistant-guidance"
+depends_on = ["document-provider-capability-surface"]
+actor = "assistant"
+action = """
+Update any assistant/setup guidance that tells clients how to choose a provider:
+
+  - Mention provider_tool_capabilities before assuming a provider cannot do a
+    modality or workflow.
+  - For image/media asks, instruct agents to check Grok CLI provider tools and
+    direct image tool availability before answering based on model taxonomy.
+  - For security-sensitive tasks, instruct agents to check unsupportedInputs
+    before passing allow/deny fields to a provider.
+"""
+idempotent = false
+validation = """
+Search for stale guidance such as "Grok Build cannot generate images" or
+"all CLIs support allowedTools" and replace with capability-query guidance.
+No unsupported provider claims remain in docs/setup.
+"""
+
+# ===========================================================================
+# PHASE 4 — test matrix and release checks
+# ===========================================================================
+
+[[steps]]
+id = "add-complete-test-matrix"
+depends_on = ["wire-resources-and-tool-output-v2", "add-doctor-capability-summary"]
+actor = "assistant"
+action = """
+Add or extend tests:
+
+  - provider-tool-capabilities unit tests:
+      schema v2, filtering, query options, path redaction, cache refresh,
+      no secret leakage, temp-home fixtures for every provider.
+  - per-provider tests matching coverage_matrix.*.
+  - resource tests for provider-tools://catalog and every provider URI.
+  - MCP integration test for tool listing and filtered calls.
+  - doctor test for compact provider_capabilities summary.
+  - regression test: Grok Imagine fixture must surface image_gen and image_edit.
+  - regression test: Gemini unsupported fields are reported as rejected.
+  - regression test: Mistral disallowedTools is reported as ignored.
+  - regression test: Codex allowedTools/disallowedTools are reported as absent,
+    not silently supported.
+"""
+idempotent = false
+validation = """
+Focused test commands pass:
+  npx vitest run src/__tests__/provider-tool-capabilities.test.ts
+  npx vitest run src/__tests__/mcp-surface-usability.test.ts
+  npx vitest run src/__tests__/doctor.test.ts
+  INTEGRATION_TESTS=1 npx vitest run src/__tests__/integration.test.ts
+"""
+
+[[steps]]
+id = "verify-upstream-contract-alignment"
+depends_on = ["add-complete-test-matrix"]
+actor = "assistant"
+action = """
+Run contract alignment checks after implementation:
+
+  - npm run upstream:contracts
+  - provider_tool_capabilities for every provider.
+  - upstream_contracts with probeInstalled=true when local CLIs are available.
+
+Compare capability records to src/upstream-contracts.ts and request schemas.
+If an installed provider advertises a major new feature that the gateway does
+not pass through or report, either add a capability item or add an explicit
+unsupported/deferred entry with rationale.
+"""
+idempotent = true
+validation = """
+No unclassified installed-provider feature remains in the baseline comparison.
+Any upstream drift is either fixed or documented as acknowledged/deferred.
+"""
+
+[[steps]]
+id = "run-release-gates"
+depends_on = ["verify-upstream-contract-alignment", "document-provider-capability-surface"]
+actor = "assistant"
+action = """
+Run release gates:
+
+  - npm run build
+  - npm run lint
+  - npm run format:check
+  - npm test
+  - npm run upstream:contracts
+
+If tests rely on local provider homes, use temp-home fixtures. Do not make the
+suite depend on this machine's installed private skills.
+"""
+idempotent = true
+validation = """
+All release gates pass, or any failure is documented with exact command output,
+root cause, and a follow-up step added before shipping.
+"""
+
+[[steps]]
+id = "write-release-notes"
+depends_on = ["run-release-gates"]
+actor = "assistant"
+action = """
+Prepare release notes/changelog text:
+
+  - New read-only provider capability inventory.
+  - Full coverage across Claude, Codex, Gemini/Antigravity, Grok CLI,
+    Grok API provider, and Mistral Vibe.
+  - Grok Imagine/local skill discovery called out as a corrected behavior.
+  - Explicit unsupported/degraded input reporting.
+  - No direct provider-native tool execution added.
+"""
+idempotent = true
+validation = """
+Release note draft is ready, concise, and contains no internal-only paths,
+account names, or private skill descriptions beyond generic capability names.
+"""
+
+[rollback]
+guidance = """
+This feature is additive and read-only. If capability reporting causes client
+confusion or performance issues, disable only the new discovery paths:
+
+  1. Keep provider request tools unchanged.
+  2. Revert provider_tool_capabilities registration and provider-tools://*
+     resources.
+  3. Leave existing list_models, upstream_contracts, provider_subcommands, and
+     request handlers intact.
+  4. If necessary, keep a minimal stub that returns schemaVersion and
+     unsupported/deferred guidance for one release to avoid hard client breaks.
+"""
+
+[risks]
+known = [
+  "Skill parsing can over-report code spans as tools.",
+  "Provider home directories may contain private paths or config values.",
+  "Installed provider CLI features drift quickly.",
+  "Clients may confuse capability discovery with direct tool execution.",
+  "Optional Grok API provider can be conflated with Grok CLI/Build.",
+]
+mitigations = [
+  "Use bounded parsing, confidence levels, and provider-specific known-tool allow-lists.",
+  "Default to redacted/home-relative paths and never read auth JSON or env secret values.",
+  "Cross-check request schemas, upstream contracts, and installed --help probes.",
+  "Document execution remains through provider request tools.",
+  "Expose grok and grok_api as separate provider records with explicit distinctions.",
+]

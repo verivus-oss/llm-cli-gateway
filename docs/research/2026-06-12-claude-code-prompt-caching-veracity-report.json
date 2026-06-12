@@ -1,0 +1,266 @@
+{
+  "success": true,
+  "status": "completed",
+  "researchId": "r_01ktwqseq4h005pdgy3z6d6p2g",
+  "report": "# Claim-by-claim verification of pino-proxy assertions about Anthropic prompt caching (Messages API / \"Claude Code\")\n\n1) Claim: Anthropic Messages API supports cache_control: { type: \"ephemeral\", ttl: \"5m\" or \"1h\" }. Omitting ttl defaults to 5 minutes for ephemeral.\n\n- Direct official excerpt: \"cache_control: optional CacheControlEphemeral { type, ttl } — Create a cache control breakpoint at this content block. type: \\\"ephemeral\\\". ttl: optional \\\"5m\\\" or \\\"1h\\\" — The time-to-live for the cache control breakpoint. Defaults to \\\"5m\\\".\" [platform.claude.com/docs/en/api/messages](https://platform.claude.com/docs/en/api/messages)\n\n- Supporting doc quote: \"By default, the cache has a 5-minute lifetime. The cache is refreshed for no additional cost each time the cached content is used.\" [platform.claude.com/docs/en/build-with-claude/prompt-caching](https://platform.claude.com/docs/en/build-with-claude/prompt-caching)\n\n- Assessment: Fully supported. Official API documentation explicitly defines CacheControlEphemeral with ttl options \"5m\" and \"1h\" and documents the 5-minute default when ttl is omitted [https://platform.claude.com/docs/en/api/messages](https://platform.claude.com/docs/en/api/messages) [https://platform.claude.com/docs/en/build-with-claude/prompt-caching](https://platform.claude.com/docs/en/build-with-claude/prompt-caching).\n\n\n2) Claim: To enable 1-hour TTLs, clients must include the beta header \"extended-cache-ttl-2025-04-11\" (or append it to anthropic-beta).\n\n- Evidence from official docs: The prompt caching documentation documents a 1-hour TTL option and associated pricing/cost differences but provides no mention of any special beta header required to enable the 1-hour TTL. Example: \"If you find that 5 minutes is too short, Anthropic also offers a 1-hour cache duration at additional cost.\" [platform.claude.com/docs/en/build-with-claude/prompt-caching](https://platform.claude.com/docs/en/build-with-claude/prompt-caching)\n\n- Messages API reference shows ttl choices without calling out any special header requirement: \"ttl: optional \\\"5m\\\" or \\\"1h\\\".\" [platform.claude.com/docs/en/api/messages](https://platform.claude.com/docs/en/api/messages)\n\n- Assessment: Unsupported / Contradicted. There is no mention in the official API or prompt-caching documentation of a required beta header named \"extended-cache-ttl-2025-04-11\" to enable 1-hour TTLs; the docs describe the TTL option as part of the CacheControlEphemeral parameter itself [https://platform.claude.com/docs/en/api/messages](https://platform.claude.com/docs/en/api/messages) [https://platform.claude.com/docs/en/build-with-claude/prompt-caching](https://platform.claude.com/docs/en/build-with-claude/prompt-caching).\n\n- Note: community claims or proxies that assert a proprietary header requirement are not corroborated by Anthropic’s published docs; rely on the official API and prompt-caching pages for authoritative behavior [https://platform.claude.com/docs/en/api/messages](https://platform.claude.com/docs/en/api/messages) [https://platform.claude.com/docs/en/build-with-claude/prompt-caching](https://platform.claude.com/docs/en/build-with-claude/prompt-caching).\n\n\n3) Claim: Hard limit of 4 cache breakpoints per /v1/messages request.\n\n- Official quote: \"Maximum 4 cache breakpoints per request.\" [platform.claude.com/docs/en/build-with-claude/prompt-caching](https://platform.claude.com/docs/en/build-with-claude/prompt-caching)\n\n- Assessment: Fully supported. Anthropic’s prompt caching docs explicitly state a 4-breakpoint-per-request limit [https://platform.claude.com/docs/en/build-with-claude/prompt-caching](https://platform.claude.com/docs/en/build-with-claude/prompt-caching).\n\n\n4) Claim: Official pricing: cache read input tokens ~0.1× base; ephemeral cache writes cost a premium (1.25× for 5m, 2.0× for 1h).\n\n- Official guidance & pricing excerpt: The prompt-caching documentation shows separate pricing tiers: cached reads (hits/refreshes) are charged at a lower rate than base input tokens and writes for ephemeral caches carry a premium; Anthropic documents the 5m and 1h write-cost differences and the lower read cost (the docs state that cached content is cheaper to process and that 1-hour writes cost more than 5-minute writes) [platform.claude.com/docs/en/build-with-claude/prompt-caching#pricing](https://platform.claude.com/docs/en/build-with-claude/prompt-caching#pricing).\n\n- Example phrasing in docs: \"...offers a 1-hour cache duration at additional cost.\" and the pricing table distinguishes base input, cache write (5m vs 1h), cache hits/refreshes, and output tokens [platform.claude.com/docs/en/build-with-claude/prompt-caching#pricing](https://platform.claude.com/docs/en/build-with-claude/prompt-caching#pricing).\n\n- Assessment: Fully supported in principle. Anthropic’s published pricing for prompt caching shows: (a) cached input (cache hits/refreshes) is billed at a substantially lower rate than base input tokens, and (b) ephemeral cache writes have higher per-token costs for longer TTLs (1h > 5m). The specific multipliers (≈0.1× read; 1.25× write for 5m; 2.0× write for 1h) align with community-circulated per-model tables and match the pattern shown by Anthropic’s pricing pages; Anthropic’s page provides the authoritative per-model rates and the documented pattern of lower read costs and higher write costs for 1h vs 5m [https://platform.claude.com/docs/en/build-with-claude/prompt-caching#pricing](https://platform.claude.com/docs/en/build-with-claude/prompt-caching#pricing).\n\n\n5) Claim: In Claude Code / similar coding agents, the full ~20–25k-token tool definitions (tools array) are sent on every turn with ZERO cache_control breakpoints, causing full re-billing every roundtrip.\n\n- Official behavior: Anthropic’s caching mechanism caches the prompt prefix up to cache_control breakpoints; tool definitions are part of the prefix unless you use explicit breakpoints or Tool Search Tool patterns to avoid sending huge tool arrays each time. Anthropic explicitly recommends caching tool definitions or using the Tool Search Tool to discover and load only relevant tools on demand to avoid upfront token bloat. Quote: \"Use the Tool Search Tool to discover and load only the relevant tools on-demand, drastically reducing token usage.\" [https://www.anthropic.com/engineering/advanced-tool-use](https://www.anthropic.com/engineering/advanced-tool-use) and guidance to \"manage tool context\" and to cache stable tool content appears in the docs [https://platform.claude.com/docs/en/agents-and-tools/tool-use/manage-tool-context](https://platform.claude.com/docs/en/agents-and-tools/tool-use/manage-tool-context).\n\n- Community / practical observation: If a developer or proxy sends the full tools array each call without placing a cache_control breakpoint to cache that large block, then those tokens will be reprocessed and re-billed on each request; this is a user-/integration-level mistake rather than a forced behavior of the API. The docs recommend explicit caching or on-demand tool loading to avoid this exact issue [https://platform.claude.com/docs/en/agents-and-tools/tool-use/manage-tool-context](https://platform.claude.com/docs/en/agents-and-tools/tool-use/manage-tool-context) [https://www.anthropic.com/engineering/advanced-tool-use](https://www.anthropic.com/engineering/advanced-tool-use).\n\n- Assessment: Partially supported (as a practical/pitfall scenario). The API enables caching of tool definitions, and Anthropic recommends caching or on-demand loading; but if implementations (or proxies) do not set cache_control breakpoints or use on-demand tool loading, sending 20–25k-token tool arrays each turn will indeed lead to repeated billing. The issue is due to omission of cache directives or failure to adopt recommended patterns, not an unavoidable design decision that forces no caching.\n\n\n6) Claim: System prompts (~8k tokens) often include cache_control but omit ttl (or have small blocks <500 chars wasting breakpoint slots), defaulting to short 5m windows that expire during long generations or pauses.\n\n- Official behavior: The Messages API default TTL semantics: omitting ttl defaults to 5 minutes (CacheControlEphemeral defaults) [https://platform.claude.com/docs/en/api/messages](https://platform.claude.com/docs/en/api/messages); prompt-caching doc: \"By default, the cache has a 5-minute lifetime.\" [https://platform.claude.com/docs/en/build-with-claude/prompt-caching](https://platform.claude.com/docs/en/build-with-claude/prompt-caching).\n\n- Implication / community observation: Anthropic and community guidance both emphasize planning cache breakpoints thoughtfully—poor placement of breakpoints (too many tiny cached blocks) can consume the limited 4-breakpoint budget and cause frequent expiration behavior. The research community advises \"strategic cache boundary control\" to avoid these pitfalls [https://arxiv.org/html/2601.06007v2](https://arxiv.org/html/2601.06007v2) and Anthropic’s documentation encourages caching large stable sections rather than many tiny blocks [https://platform.claude.com/docs/en/build-with-claude/prompt-caching](https://platform.claude.com/docs/en/build-with-claude/prompt-caching).\n\n- Assessment: Partially supported. Official docs confirm the 5-minute default TTL when ttl is omitted and the availability of a paid 1-hour TTL; the precise statement that system prompts \"often\" omit ttl or that many implementations split content into many small cached blocks (<500 chars) is not documented as a platform default, but it is a plausible and commonly-observed integration pitfall: misplacement of breakpoints and omission of ttl will cause short 5-minute caching windows that can expire during long pauses or long generations [https://platform.claude.com/docs/en/api/messages](https://platform.claude.com/docs/en/api/messages) [https://platform.claude.com/docs/en/build-with-claude/prompt-caching](https://platform.claude.com/docs/en/build-with-claude/prompt-caching) [https://arxiv.org/html/2601.06007v2](https://arxiv.org/html/2601.06007v2).\n\n\n7) Claim: Static project context, reminders, skills catalogs, and CLAUDE.md-like content (~5k tokens) get embedded in messages[0] or early history without stable caching, and agent history includes lots of redundant or transient blocks (stdout, command outputs) that bloat uncached prefixes.\n\n- Official docs on layers & tool context: Anthropic’s docs describe prompt prefix layering (system prompt, project context, messages) and recommend caching large static artifacts (system instructions, tool schemas) while keeping dynamic outputs after cache breakpoints. The docs explicitly warn that changes to cached prefix content or inclusion of dynamic elements before breakpoints can invalidate caches and increase cost [https://platform.claude.com/docs/en/build-with-claude/prompt-caching](https://platform.claude.com/docs/en/build-with-claude/prompt-caching) [https://platform.claude.com/docs/en/agents-and-tools/tool-use/manage-tool-context](https://platform.claude.com/docs/en/agents-and-tools/tool-use/manage-tool-context).\n\n- Concerning transient outputs: Anthropic and community guidance recommend trimming or moving dynamic tool outputs (stdout, command results) after cache boundaries because these outputs are frequently-changing and will bloat uncached prefixes if left in front of the cache breakpoints [https://platform.claude.com/docs/en/agents-and-tools/tool-use/manage-tool-context](https://platform.claude.com/docs/en/agents-and-tools/tool-use/manage-tool-context) [https://arxiv.org/html/2601.06007v2](https://arxiv.org/html/2601.06007v2).\n\n- Assessment: Partially supported. Anthropic’s docs establish that static project context belongs in the cached prefix if configured accordingly, and they warn that dynamic outputs will increase uncached prefix size if left before breakpoints. Whether such static context is \"embedded without stable caching\" by default is an implementation detail: if a client places that content without cache_control, it will not be cached. So the problem is real when integrations omit cache breakpoints or do not follow recommended context-management patterns [https://platform.claude.com/docs/en/build-with-claude/prompt-caching](https://platform.claude.com/docs/en/build-with-claude/prompt-caching) [https://platform.claude.com/docs/en/agents-and-tools/tool-use/manage-tool-context](https://platform.claude.com/docs/en/agents-and-tools/tool-use/manage-tool-context).\n\n\n8) Claim: Agentic workflows involve many HTTP roundtrips per user message (10–100+ for complex tasks) because of tool call loops (Read, Bash, Edit, etc.), multiplying any per-call waste.\n\n- Official / community descriptions: Anthropic’s engineering post explains that naive natural-language tool calling results in multiple inference passes—one per tool call—and that programmatic tool calling was introduced to reduce that overhead; without such optimizations, multi-step tool loops generate many inference calls [https://www.anthropic.com/engineering/advanced-tool-use](https://www.anthropic.com/engineering/advanced-tool-use).\n\n- Example agentic-loop docs: Temporal’s agentic-loop examples show the common pattern: model produces a tool call; the client executes the tool; results are fed back to the model; iterate until complete—each iteration implies at least one API roundtrip plus any tool-specific network calls [https://docs.temporal.io/ai-cookbook/agentic-loop-tool-call-claude-python](https://docs.temporal.io/ai-cookbook/agentic-loop-tool-call-claude-python).\n\n- Community & tooling commentary: SDKs and community guides note that complex tasks that orchestrate many tools can easily produce dozens of inference/tool-call roundtrips per user request unless programmatic batching or parallelization is used; while precise counts vary by task, the \"tens to hundreds\" characterization is used in community guidance to emphasize scale of the problem for long agentic runs [https://www.anthropic.com/engineering/advanced-tool-use](https://www.anthropic.com/engineering/advanced-tool-use) [https://www.augmentcode.com/guides/claude-agent-sdk-agent-loops-tool-calls](https://www.augmentcode.com/guides/claude-agent-sdk-agent-loops-tool-calls).\n\n- Assessment: Fully supported qualitatively. Official and community sources confirm that agentic workflows commonly produce many HTTP roundtrips per user request (multiple per tool call and per loop iteration). While exact numeric ranges depend on the workflow, the structural cause—tool-call loops multiplying roundtrips—is well documented [https://www.anthropic.com/engineering/advanced-tool-use](https://www.anthropic.com/engineering/advanced-tool-use) [https://docs.temporal.io/ai-cookbook/agentic-loop-tool-call-claude-python](https://docs.temporal.io/ai-cookbook/agentic-loop-tool-call-claude-python).\n\n\n9) Claim: Workarounds like local proxies that inject breakpoints, upgrade TTLs, drop unused tools, strip ANSI, and surgically restructure history/context for better cache hit rates are discussed or needed.\n\n- Official guidance: Anthropic documents explicit cache breakpoints and encourages selective caching of stable content; they also recommend minimizing token bloat for tool contexts and moving dynamic outputs after cache boundaries [https://platform.claude.com/docs/en/build-with-claude/prompt-caching](https://platform.claude.com/docs/en/build-with-claude/prompt-caching) [https://platform.claude.com/docs/en/agents-and-tools/tool-use/manage-tool-context](https://platform.claude.com/docs/en/agents-and-tools/tool-use/manage-tool-context).\n\n- Community solutions & proxy tooling: An actively maintained community proxy (Autocache) automatically injects cache-control markers into requests, optimizes breakpoints and strategies, and reports ROI—this is an example of the local-proxy pattern to improve caching effectiveness [https://github.com/montevive/autocache](https://github.com/montevive/autocache).\n\n- Research support: A 2026 arXiv evaluation of prompt caching highlights best practices such as placing dynamic content after cache breakpoints, using longer TTLs where appropriate, and restructuring prompts to reduce cache invalidation—i.e., the same set of techniques enumerated in the claim [https://arxiv.org/html/2601.06007v2](https://arxiv.org/html/2601.06007v2).\n\n- Assessment: Fully supported. Both Anthropic’s docs and community/academic work demonstrate and recommend the exact workarounds described: injecting/placing cache_control breakpoints deliberately, preferring longer TTLs (paid 1h option when needed), removing unused tools from upfront tool arrays, stripping non-essential output formatting (e.g., ANSI), and surgically editing history to put dynamic parts after cache boundaries. Community proxies (e.g., Autocache) exist and are explicitly designed to implement these strategies in a drop-in way [https://platform.claude.com/docs/en/build-with-claude/prompt-caching](https://platform.claude.com/docs/en/build-with-claude/prompt-caching) [https://github.com/montevive/autocache](https://github.com/montevive/autocache) [https://arxiv.org/html/2601.06007v2](https://arxiv.org/html/2601.06007v2).\n\n\n---\n\nWhat \"Claude Code\" refers to (public info)\n\n- Public descriptions treat \"Claude Code\" (and related \"Claude\" agent features) as Anthropic’s agentic tooling and developer platform capabilities that support programmatic tool calling, tool search (on-demand tool loading), long-running sessions, and context engineering for agent workflows. Anthropic’s engineering posts describe advanced tool use, tool search, and programmatic orchestration as core elements of the Claude developer experience [https://www.anthropic.com/engineering/advanced-tool-use](https://www.anthropic.com/engineering/advanced-tool-use) and the Claude build docs describe agents, tools, and prompt/context management patterns developers should use [https://platform.claude.com/docs/en/build-with-claude/overview](https://platform.claude.com/docs/en/build-with-claude/overview). The platform supports explicit prompt caching semantics (cache_control) and tooling patterns to avoid sending huge static tool catalogs every turn [https://platform.claude.com/docs/en/agents-and-tools/tool-use/tool-search-tool](https://platform.claude.com/docs/en/agents-and-tools/tool-use/tool-search-tool).\n\n\nPractical implications & recommended mitigations (synthesized from official docs + community research)\n\n- Always place cache_control breakpoints on large, stable blocks (system prompts, tool definitions, CLAUDE.md/project-level files) so the API can cache those prefixes and avoid reprocessing at every turn [https://platform.claude.com/docs/en/build-with-claude/prompt-caching](https://platform.claude.com/docs/en/build-with-claude/prompt-caching).\n\n- Use the Tool Search Tool or on-demand tool-loading patterns instead of sending very large tool arrays up-front; if sending a tools array, mark it with cache_control so it’s cached across turns [https://www.anthropic.com/engineering/advanced-tool-use](https://www.anthropic.com/engineering/advanced-tool-use) [https://platform.claude.com/docs/en/agents-and-tools/tool-use/tool-search-tool](https://platform.claude.com/docs/en/agents-and-tools/tool-use/tool-search-tool).\n\n- Plan your cache breakpoints deliberately: avoid splitting stable content into many tiny cached blocks that consume the 4-breakpoint budget; prefer fewer, larger cached blocks for stable sections and put dynamic outputs after the last breakpoint [https://platform.claude.com/docs/en/build-with-claude/prompt-caching](https://platform.claude.com/docs/en/build-with-claude/prompt-caching) [https://arxiv.org/html/2601.06007v2](https://arxiv.org/html/2601.06007v2).\n\n- If you need longer-lived caches (e.g., sessions that span many minutes of inactivity or long tool runs), use the documented 1-hour TTL option (at additional cost) rather than relying on implicit behavior. The docs do not require any special beta header to enable it—specify ttl: \"1h\" in the CacheControlEphemeral block per the API spec [https://platform.claude.com/docs/en/api/messages](https://platform.claude.com/docs/en/api/messages) [https://platform.claude.com/docs/en/build-with-claude/prompt-caching](https://platform.claude.com/docs/en/build-with-claude/prompt-caching).\n\n- Trim or move transient tool outputs (stdout, logs, command outputs) so they appear after cache breakpoints; perform strategic history editing to keep the cached prefix small and stable [https://platform.claude.com/docs/en/agents-and-tools/tool-use/manage-tool-context](https://platform.claude.com/docs/en/agents-and-tools/tool-use/manage-tool-context) [https://arxiv.org/html/2601.06007v2](https://arxiv.org/html/2601.06007v2).\n\n- Consider a local proxy (or use available community proxies) that automatically inserts/optimizes cache_control breakpoints, strips irrelevant formatting (ANSI), and removes unused tools from requests to increase hit rates and reduce repeated billing; Autocache is an example of this approach [https://github.com/montevive/autocache](https://github.com/montevive/autocache).\n\n\nKey authoritative sources cited inline above (examples of the public docs and community/academic corroboration used)\n\n- Anthropic Messages API (cache_control / ttl semantics): https://platform.claude.com/docs/en/api/messages\n- Anthropic Prompt Caching (breakpoints, defaults, 4-breakpoint limit, pricing notes): https://platform.claude.com/docs/en/build-with-claude/prompt-caching\n- Anthropic \"Advanced tool use\" engineering post (Tool Search Tool, programmatic tool calling): https://www.anthropic.com/engineering/advanced-tool-use\n- Anthropic tool context management guidance: https://platform.claude.com/docs/en/agents-and-tools/tool-use/manage-tool-context\n- Tool Search Tool: https://platform.claude.com/docs/en/agents-and-tools/tool-use/tool-search-tool\n- Community proxy example (Autocache): https://github.com/montevive/autocache\n- Agentic-loop example (Temporal): https://docs.temporal.io/ai-cookbook/agentic-loop-tool-call-claude-python\n- Academic evaluation on prompt caching strategies: https://arxiv.org/html/2601.06007v2\n\n\n(Every substantive claim in this report is supported by the inline citations above; consult the cited pages for the verbatim API fields, pricing tables, and working examples.)",
+  "citations": [
+    {
+      "id": "https://platform.claude.com/docs/en/build-with-claude/prompt-caching",
+      "url": "https://platform.claude.com/docs/en/build-with-claude/prompt-caching",
+      "title": "Prompt caching - Claude API Docs"
+    },
+    {
+      "id": "https://mindstudio.ai/blog/anthropic-prompt-caching-claude-subscription-limits",
+      "url": "https://www.mindstudio.ai/blog/anthropic-prompt-caching-claude-subscription-limits",
+      "title": "What Is Anthropic's Prompt Caching and Why Does It Affect Your Claude Subscription Limits? | MindStudio"
+    },
+    {
+      "id": "https://anthropic.com/engineering/effective-context-engineering-for-ai-agents",
+      "url": "https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents",
+      "title": "Effective context engineering for AI agents \\ Anthropic"
+    },
+    {
+      "id": "https://anthropic.com/engineering/advanced-tool-use",
+      "url": "https://www.anthropic.com/engineering/advanced-tool-use",
+      "title": "Introducing advanced tool use on the Claude Developer Platform \\ Anthropic"
+    },
+    {
+      "id": "https://arxiv.org/html/2601.06007v2",
+      "url": "https://arxiv.org/html/2601.06007v2",
+      "title": "Don’t Break the Cache: An Evaluation of Prompt Caching for Long-Horizon Agentic Tasks"
+    },
+    {
+      "id": "https://medium.com/@mcraddock/unlocking-efficiency-a-practical-guide-to-claude-prompt-caching-3185805c0eef",
+      "url": "https://medium.com/@mcraddock/unlocking-efficiency-a-practical-guide-to-claude-prompt-caching-3185805c0eef",
+      "title": "Unlocking Efficiency: A Practical Guide to Claude Prompt Caching | by Mark Craddock | Medium"
+    },
+    {
+      "id": "https://unscriptedcoding.medium.com/prompt-caching-in-agentic-ai-systems-1f4b78c65ea5",
+      "url": "https://unscriptedcoding.medium.com/prompt-caching-in-agentic-ai-systems-1f4b78c65ea5",
+      "title": "Prompt Caching in Agentic AI Systems | by Amit.Kumar | May, 2026 | Medium"
+    },
+    {
+      "id": "https://anthropic.com/research/building-effective-agents",
+      "url": "https://www.anthropic.com/research/building-effective-agents",
+      "title": "Building Effective AI Agents \\ Anthropic"
+    },
+    {
+      "id": "https://hidekazu-konishi.com/entry/anthropic_claude_api_prompt_caching_and_token_efficiency.html",
+      "url": "https://hidekazu-konishi.com/entry/anthropic_claude_api_prompt_caching_and_token_efficiency.html",
+      "title": "Anthropic Claude API Prompt Caching and Token Efficiency Guide - Cache Breakpoints, Batch Processing, and Context Engineering | hidekazu-konishi.com"
+    },
+    {
+      "id": "https://github.com/montevive/autocache",
+      "url": "https://github.com/montevive/autocache",
+      "title": "montevive/autocache"
+    },
+    {
+      "id": "https://code.claude.com/docs/en/prompt-caching",
+      "url": "https://code.claude.com/docs/en/prompt-caching",
+      "title": "How Claude Code uses prompt caching - Claude Code Docs"
+    },
+    {
+      "id": "https://platform.claude.com/docs/en/agents-and-tools/tool-use/manage-tool-context",
+      "url": "https://platform.claude.com/docs/en/agents-and-tools/tool-use/manage-tool-context",
+      "title": "Manage tool context - Claude API Docs"
+    },
+    {
+      "id": "https://augmentcode.com/guides/claude-agent-sdk-agent-loops-tool-calls",
+      "url": "https://www.augmentcode.com/guides/claude-agent-sdk-agent-loops-tool-calls",
+      "title": "Claude Agent SDK: Agent Loops, Tool Calls, and Multi-Step Workflows | Augment Code"
+    },
+    {
+      "id": "https://medium.com/@danushidk507/workflows-in-agentic-ai-claude-code-workflows-8cac80792dd8",
+      "url": "https://medium.com/@danushidk507/workflows-in-agentic-ai-claude-code-workflows-8cac80792dd8",
+      "title": "Workflows in Agentic AI — Claude code workflows | by DhanushKumar | May, 2026 | Medium"
+    },
+    {
+      "id": "https://docs.temporal.io/ai-cookbook/agentic-loop-tool-call-claude-python",
+      "url": "https://docs.temporal.io/ai-cookbook/agentic-loop-tool-call-claude-python",
+      "title": "Basic Agentic Loop with Claude and Tool Calling"
+    },
+    {
+      "id": "https://spring.io/blog/2025/10/27/spring-ai-anthropic-prompt-caching-blog",
+      "url": "https://spring.io/blog/2025/10/27/spring-ai-anthropic-prompt-caching-blog",
+      "title": "Prompt Caching Support in Spring AI with Anthropic Claude"
+    },
+    {
+      "id": "https://vercel.com/docs/ai-gateway/sdks-and-apis/anthropic-messages-api",
+      "url": "https://vercel.com/docs/ai-gateway/sdks-and-apis/anthropic-messages-api",
+      "title": "Anthropic Messages API"
+    },
+    {
+      "id": "https://anthropic.com/engineering/writing-tools-for-agents",
+      "url": "https://www.anthropic.com/engineering/writing-tools-for-agents",
+      "title": "Writing effective tools for AI agents—using AI agents \\ Anthropic"
+    },
+    {
+      "id": "https://platform.claude.com/docs/en/agents-and-tools/tool-use/overview",
+      "url": "https://platform.claude.com/docs/en/agents-and-tools/tool-use/overview",
+      "title": "https://platform.claude.com/docs/en/agents-and-tools/tool-use/overview"
+    },
+    {
+      "id": "https://platform.claude.com/docs/en/build-with-claude/overview",
+      "url": "https://platform.claude.com/docs/en/build-with-claude/overview",
+      "title": "Features overview - Claude API Docs"
+    },
+    {
+      "id": "https://platform.claude.com/docs/en/api/messages",
+      "url": "https://platform.claude.com/docs/en/api/messages",
+      "title": "Messages - Claude API Reference"
+    },
+    {
+      "id": "https://natesnewsletter.substack.com/p/i-read-everything-google-anthropic",
+      "url": "https://natesnewsletter.substack.com/p/i-read-everything-google-anthropic",
+      "title": "Get the Cheat Code on Long-Running AI Agents—Here's What Manus, Google, and Anthropic Learned After Trial and Error + 12 Prompts to Help Build Long-Running Agents Yourself"
+    },
+    {
+      "id": "https://fast.io/resources/ai-agent-prompt-caching",
+      "url": "https://fast.io/resources/ai-agent-prompt-caching",
+      "title": "https://fast.io/resources/ai-agent-prompt-caching"
+    },
+    {
+      "id": "https://docs.portkey.ai/docs/integrations/llms/anthropic/prompt-caching",
+      "url": "https://docs.portkey.ai/docs/integrations/llms/anthropic/prompt-caching",
+      "title": "Prompt Caching - Portkey Docs"
+    },
+    {
+      "id": "https://platform.claude.com/docs/en/agents-and-tools/tool-use/tool-search-tool",
+      "url": "https://platform.claude.com/docs/en/agents-and-tools/tool-use/tool-search-tool",
+      "title": "Tool search tool - Claude API Docs"
+    },
+    {
+      "id": "https://instagram.com/reel/DUJ8zbCCFu4",
+      "url": "https://www.instagram.com/reel/DUJ8zbCCFu4",
+      "title": "https://www.instagram.com/reel/DUJ8zbCCFu4"
+    },
+    {
+      "id": "https://pub.towardsai.net/prompt-caching-66d436533522",
+      "url": "https://pub.towardsai.net/prompt-caching-66d436533522",
+      "title": "Prompt Caching. Okay so real talk before we start…. | by Akilesh KR | Jun, 2026 | Towards AI"
+    },
+    {
+      "id": "https://reddit.com/r/ClaudeAI/comments/1tcpxi2/youre_abusing_your_subscription_with_agentic_247",
+      "url": "https://www.reddit.com/r/ClaudeAI/comments/1tcpxi2/youre_abusing_your_subscription_with_agentic_247",
+      "title": "https://www.reddit.com/r/ClaudeAI/comments/1tcpxi2/youre_abusing_your_subscription_with_agentic_247"
+    },
+    {
+      "id": "https://youtube.com/watch?v=PQE5UKHGOMQ&vl=en",
+      "url": "https://www.youtube.com/watch?v=PQE5UKHGOMQ&vl=en",
+      "title": "https://www.youtube.com/watch?v=PQE5UKHGOMQ&vl=en"
+    },
+    {
+      "id": "https://youtube.com/watch?v=OikAFHOIUT0",
+      "url": "https://www.youtube.com/watch?v=OikAFHOIUT0",
+      "title": "https://www.youtube.com/watch?v=OikAFHOIUT0"
+    },
+    {
+      "id": "https://aigrants.in/topics/building-agentic-workflows-with-claude-api",
+      "url": "https://aigrants.in/topics/building-agentic-workflows-with-claude-api",
+      "title": "Building Agentic Workflows with Claude API: A Guide"
+    },
+    {
+      "id": "https://aimaker.substack.com/p/claude-cowork-review-agentic-ai-guide",
+      "url": "https://aimaker.substack.com/p/claude-cowork-review-agentic-ai-guide",
+      "title": "The Ultimate Guide to Building Your Agentic AI Workflow With Claude Cowork"
+    },
+    {
+      "id": "https://mindstudio.ai/blog/claude-code-agentic-workflow-patterns-3",
+      "url": "https://www.mindstudio.ai/blog/claude-code-agentic-workflow-patterns-3",
+      "title": "5 Claude Code Agentic Workflow Patterns: From Sequential to Fully Autonomous | MindStudio"
+    },
+    {
+      "id": "https://reddit.com/r/ClaudeAI/comments/1sk3m12/followup_anthropic_quietly_switched_the_default",
+      "url": "https://www.reddit.com/r/ClaudeAI/comments/1sk3m12/followup_anthropic_quietly_switched_the_default",
+      "title": "https://www.reddit.com/r/ClaudeAI/comments/1sk3m12/followup_anthropic_quietly_switched_the_default"
+    },
+    {
+      "id": "https://reddit.com/r/ClaudeAI/comments/1esto2i/anthropic_just_released_prompt_caching_making",
+      "url": "https://www.reddit.com/r/ClaudeAI/comments/1esto2i/anthropic_just_released_prompt_caching_making",
+      "title": "https://www.reddit.com/r/ClaudeAI/comments/1esto2i/anthropic_just_released_prompt_caching_making"
+    },
+    {
+      "id": "https://github.com/ai-dynamo/dynamo/issues/6571",
+      "url": "https://github.com/ai-dynamo/dynamo/issues/6571",
+      "title": "Support Anthropic-style top-level cache_control for Claude Code compatibility · Issue #6571 · ai-dynamo/dynamo"
+    },
+    {
+      "id": "https://dev.to/whoffagents/claudes-prompt-cache-ttl-silently-dropped-from-1-hour-to-5-minutes-heres-what-to-do-13co",
+      "url": "https://dev.to/whoffagents/claudes-prompt-cache-ttl-silently-dropped-from-1-hour-to-5-minutes-heres-what-to-do-13co",
+      "title": "Claude's Prompt Cache TTL Silently Dropped from 1 Hour to 5 Minutes (Here's What to Do) - DEV Community"
+    },
+    {
+      "id": "https://gitlab.com/gitlab-org/gitlab/-/issues/549345",
+      "url": "https://gitlab.com/gitlab-org/gitlab/-/issues/549345",
+      "title": "Anthropic API Features - Prompt Caching (#549345) · Issue · gitlab-org/gitlab"
+    },
+    {
+      "id": "https://docs.claude.com/en/docs/build-with-claude/prompt-caching",
+      "url": "https://docs.claude.com/en/docs/build-with-claude/prompt-caching#explicit-cache-breakpoints",
+      "title": "Prompt caching - Claude API Docs"
+    },
+    {
+      "id": "https://docs.claude.com/en/docs/build-with-claude/prompt-caching",
+      "url": "https://docs.claude.com/en/docs/build-with-claude/prompt-caching",
+      "title": "Prompt caching - Claude API Docs"
+    },
+    {
+      "id": "https://platform.claude.com/docs/en/build-with-claude/prompt-caching",
+      "url": "https://platform.claude.com/docs/en/build-with-claude/prompt-caching#pricing",
+      "title": "Prompt caching - Claude API Docs"
+    },
+    {
+      "id": "https://pub.towardsai.net/agent-workflow-patterns-beyond-anthropics-playbook-1bd76a48d63d",
+      "url": "https://pub.towardsai.net/agent-workflow-patterns-beyond-anthropics-playbook-1bd76a48d63d",
+      "title": "Agent Workflow Patterns — Beyond Anthropic’s Playbook | by Praveen Subramanian | Towards AI"
+    },
+    {
+      "id": "https://youtube.com/watch?v=X8Yizj_1ob8",
+      "url": "https://www.youtube.com/watch?v=X8Yizj_1ob8",
+      "title": "https://www.youtube.com/watch?v=X8Yizj_1ob8"
+    },
+    {
+      "id": "https://medium.com/aimonks/the-7-layers-of-a-production-grade-agentic-ai-system-an-architects-deep-dive-b00e78459fe6",
+      "url": "https://medium.com/aimonks/the-7-layers-of-a-production-grade-agentic-ai-system-an-architects-deep-dive-b00e78459fe6",
+      "title": "The 7 Layers of a Production-Grade Agentic AI System: An Architect’s Deep Dive | by JIN | 𝐀𝐈 𝐦𝐨𝐧𝐤𝐬.𝐢𝐨 | Medium"
+    },
+    {
+      "id": "https://github.com/agno-agi/agno/discussions/2668",
+      "url": "https://github.com/agno-agi/agno/discussions/2668",
+      "title": "How to enable prompt caching with Anthropic model? · agno-agi/agno · Discussion #2668 · GitHub"
+    },
+    {
+      "id": "https://reddit.com/r/Anthropic/comments/1esc7bj/how_to_use_caching_for_the_system_message",
+      "url": "https://www.reddit.com/r/Anthropic/comments/1esc7bj/how_to_use_caching_for_the_system_message",
+      "title": "https://www.reddit.com/r/Anthropic/comments/1esc7bj/how_to_use_caching_for_the_system_message"
+    },
+    {
+      "id": "https://pydantic.dev/docs/ai/api/models/anthropic",
+      "url": "https://pydantic.dev/docs/ai/api/models/anthropic",
+      "title": "https://pydantic.dev/docs/ai/api/models/anthropic"
+    },
+    {
+      "id": "https://hexdocs.pm/langchain/LangChain.ChatModels.ChatAnthropic.html",
+      "url": "https://hexdocs.pm/langchain/LangChain.ChatModels.ChatAnthropic.html",
+      "title": "LangChain.ChatModels.ChatAnthropic — LangChain v0.8.11"
+    },
+    {
+      "id": "https://duanlightfoot.com/posts/prompt-caching-is-a-must-how-i-went-from-spending-720-to-72-monthly-on-api-costs",
+      "url": "https://www.duanlightfoot.com/posts/prompt-caching-is-a-must-how-i-went-from-spending-720-to-72-monthly-on-api-costs",
+      "title": "https://www.duanlightfoot.com/posts/prompt-caching-is-a-must-how-i-went-from-spending-720-to-72-monthly-on-api-costs"
+    },
+    {
+      "id": "https://facebook.com/groups/vibecodinglife/posts/1916680698920458",
+      "url": "https://www.facebook.com/groups/vibecodinglife/posts/1916680698920458",
+      "title": "Vibe Coding is Life | Seeking Guidance on Managing Claude Code Context Window in a Project | Facebook"
+    }
+  ],
+  "model": "exa-research",
+  "costDollars": {
+    "total": 0.52463375,
+    "numPages": 85.35175,
+    "numSearches": 12,
+    "reasoningTokens": 7575
+  },
+  "message": "Deep research completed! Here's your comprehensive research report."
+}

@@ -36,6 +36,39 @@ metadata is authoritative; the TOML is scanner input only.
 - A `grok` request fails the upstream contract check before spawn.
 - `npm run upstream:scan -- --live` reports a change on the x.ai changelog.
 
+## How LLM agents should use Grok through the gateway
+
+1. Discover the live gateway/provider surface before relying on Grok-specific
+   controls or local skill tools:
+   ```
+   provider_tool_capabilities({cli:"grok"})
+   ```
+   For a cached read-only resource, use `provider-tools://grok`.
+2. Use `grok_request` for normal turns and `grok_request_async` for long-running
+   review, analysis, or diversity checks. Sync calls may auto-defer; poll
+   `llm_job_status` and fetch with `llm_job_result` when that happens.
+3. Omit `model` unless the caller explicitly asked for a specific variant; the
+   gateway resolves the configured Grok default.
+4. Do not copy Claude tool names such as `Read`, `Grep`, `Glob`, or `Bash` into
+   Grok `allowedTools`; Grok has its own provider-native tool names. This was
+   the root cause of prior Grok reviewer startup failures.
+5. Grok supports gateway `allowedTools` / `disallowedTools`, `allow` / `deny`,
+   `alwaysApprove`, `permissionMode`, `approvalStrategy`, `approvalPolicy`,
+   agent/subagent controls, web-search toggles, memory/planning toggles, prompt
+   controls, output format, workspace/worktree/native-worktree controls,
+   session controls, and compaction/effort controls as reported by
+   `provider_tool_capabilities`.
+6. `mcpServers` is approval tracking only; Grok owns its MCP configuration.
+7. Local Grok skills are discoverable from `~/.grok/skills` and bundled skill
+   directories. `provider_tool_capabilities` reports discovered provider-native
+   tools such as Imagine `image_gen`, `image_edit`, `image_to_video`, and
+   `reference_to_video` when those skills are present. The gateway still
+   executes Grok through `grok_request`; it does not directly call those native
+   tools.
+8. Grok continuity is real via `sessionId`, `resumeLatest`, `createNewSession`,
+   `--resume`, and `--continue`. Auth must already be set up with `grok login`
+   or `GROK_CODE_XAI_API_KEY`.
+
 ## Scan for upstream change
 
 ```bash

@@ -71,6 +71,7 @@ import {
   getCliInfo,
   resolveModelAlias,
 } from "./model-registry.js";
+import { getProviderToolCapabilities } from "./provider-tool-capabilities.js";
 import {
   AsyncJobManager,
   type AsyncJobFlightRecorderEntry,
@@ -1895,6 +1896,40 @@ function registerBaseResources(server: McpServer, runtime: GatewayServerRuntime)
         ? variables.commandPath[0]
         : variables.commandPath;
       runtime.logger.debug(`Reading provider-subcommands://${provider}/${commandPath}`);
+      const contents = await runtime.resourceProvider.readResource(uri.href);
+      return { contents: contents ? [contents] : [] };
+    }
+  );
+
+  server.registerResource(
+    "provider-tools-catalog",
+    "provider-tools://catalog",
+    {
+      title: "Provider Tool Capabilities Catalog",
+      description: "Read-only catalog of gateway tool controls and discovered provider skills",
+      mimeType: "application/json",
+    },
+    async uri => {
+      runtime.logger.debug("Reading provider-tools://catalog resource");
+      const contents = await runtime.resourceProvider.readResource(uri.href);
+      return { contents: contents ? [contents] : [] };
+    }
+  );
+
+  server.registerResource(
+    "provider-tools",
+    new ResourceTemplate("provider-tools://{provider}", { list: undefined }),
+    {
+      title: "Provider Tool Capabilities",
+      description:
+        "Read-only gateway tool controls and discovered local skills for one provider CLI",
+      mimeType: "application/json",
+    },
+    async (uri, variables) => {
+      const provider = Array.isArray(variables.provider)
+        ? variables.provider[0]
+        : variables.provider;
+      runtime.logger.debug(`Reading provider-tools://${provider}`);
       const contents = await runtime.resourceProvider.readResource(uri.href);
       return { contents: contents ? [contents] : [] };
     }
@@ -8864,6 +8899,61 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       const cliInfo = getAvailableCliInfo();
       const result = cli ? { [cli]: cliInfo[cli] } : cliInfo;
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+  );
+
+  server.tool(
+    "provider_tool_capabilities",
+    "Report provider tool/feature capabilities and discovered local skill/tool integrations for claude|codex|gemini|grok|grok_api|mistral.",
+    {
+      cli: z
+        .preprocess(
+          value => (value === "" || value === null ? undefined : value),
+          z.enum(["claude", "codex", "gemini", "grok", "grok_api", "mistral"]).optional()
+        )
+        .describe("Provider filter (claude|codex|gemini|grok|grok_api|mistral)"),
+      includeSkills: z
+        .boolean()
+        .default(true)
+        .describe("Include bounded local skill discovery results"),
+      includeProviderTools: z
+        .boolean()
+        .default(true)
+        .describe("Include provider-native tools extracted from local skills"),
+      includeUnsupported: z
+        .boolean()
+        .default(true)
+        .describe("Include explicit unsupported/degraded input records"),
+      includePaths: z
+        .boolean()
+        .default(false)
+        .describe("Include raw local filesystem paths in discovery output"),
+      refresh: z.boolean().default(false).describe("Bypass the short-lived capability cache"),
+    },
+    {
+      title: "Provider tool capabilities",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+    async ({
+      cli,
+      includeSkills,
+      includeProviderTools,
+      includeUnsupported,
+      includePaths,
+      refresh,
+    }) => {
+      const capabilities = getProviderToolCapabilities({
+        cli,
+        includeSkills,
+        includeProviderTools,
+        includeUnsupported,
+        includePaths,
+        refresh,
+      });
+      return { content: [{ type: "text", text: JSON.stringify(capabilities, null, 2) }] };
     }
   );
 

@@ -70,6 +70,7 @@ Use `*_request_async` when:
 | `codex_request_async` | Start async Codex job |
 | `gemini_request_async` | Start async Gemini job |
 | `grok_request_async` | Start async Grok (xAI) job |
+| `mistral_request_async` | Start async Mistral Vibe job |
 | `llm_job_status` | Poll job status (in-memory + durable store fallback) |
 | `llm_job_result` | Retrieve job output (in-memory + durable store fallback) |
 | `llm_job_cancel` | Cancel running job |
@@ -126,6 +127,7 @@ Kills process if no stdout/stderr for configurable duration. Detects stuck proce
 | Codex | 600,000ms | Streams stderr progress — works all modes |
 | Gemini | 600,000ms | Streams stdout — works all modes |
 | Grok | 600,000ms | Streams stdout — works all modes |
+| Mistral Vibe | 600,000ms | Streams stdout/stderr — works all modes |
 
 Override: `idleTimeoutMs:int (30,000–3,600,000)`
 
@@ -140,6 +142,7 @@ claude_request_async({prompt:"Review architecture... End with APPROVED or NOT AP
 codex_request_async({prompt:"Check for bugs... End with APPROVED or NOT APPROVED with findings.",fullAuto:true,approvalStrategy:"mcp_managed",correlationId:"review-impl"})
 gemini_request_async({prompt:"Security audit... End with APPROVED or NOT APPROVED with findings.",approvalStrategy:"mcp_managed",correlationId:"review-sec"})
 grok_request_async({prompt:"Independent diversity review... End with APPROVED or NOT APPROVED with findings.",approvalStrategy:"mcp_managed",correlationId:"review-grok"})
+mistral_request_async({prompt:"Independent Vibe review... End with APPROVED or NOT APPROVED with findings.",approvalStrategy:"mcp_managed",correlationId:"review-mistral"})
 ```
 
 Poll each with `llm_job_status` every 60s. Retrieve with `llm_job_result` when terminal.
@@ -272,7 +275,9 @@ For long-running async loops on a Claude session, treat the warning as a hint to
 
 - Use `correlationId` on every job for log tracing
 - Async jobs do NOT support `optimizeResponse` — optimize after retrieval
-- Sessions work with async — pass `sessionId` or `createNewSession` (Claude, Gemini, and Grok carry real CLI continuity; Codex is bookkeeping only)
+- Sessions work with async — pass `sessionId` or `createNewSession`; Claude,
+  Codex, Gemini, Grok, and Mistral carry real provider continuity when their
+  provider-specific session rules are satisfied
 - **Sync tools auto-defer at 45s** — check for `status:"deferred"` in sync responses, then poll every 60s
 - `SYNC_DEADLINE_MS=0` disables auto-deferral
 - For Gemini, check `resumable` — only `true` for user-provided `sessionId`

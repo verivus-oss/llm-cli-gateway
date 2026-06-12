@@ -16,6 +16,7 @@
     "endpoint_exposure",
     "client_config",
     "cache_awareness",
+    "provider_capabilities",
     "upstream",
     "next_actions"
   ],
@@ -289,12 +290,7 @@
         },
         "vibe_session_logging": {
           "type": "object",
-          "required": [
-            "config_path",
-            "config_present",
-            "session_logging_enabled",
-            "note"
-          ],
+          "required": ["config_path", "config_present", "session_logging_enabled", "note"],
           "properties": {
             "config_path": { "type": "string" },
             "config_present": { "type": "boolean" },
@@ -337,6 +333,71 @@
               "hit_rate": { "type": "number" },
               "total_hits": { "type": "integer" },
               "total_cache_read_tokens": { "type": "integer" }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "provider_capabilities": {
+      "type": "object",
+      "required": ["schema_version", "tool", "resources", "cache_ttl_ms", "providers"],
+      "properties": {
+        "schema_version": { "const": "provider-tool-capabilities.v2" },
+        "tool": { "const": "provider_tool_capabilities" },
+        "resources": {
+          "type": "object",
+          "required": ["catalog", "providers"],
+          "properties": {
+            "catalog": { "const": "provider-tools://catalog" },
+            "providers": {
+              "type": "object",
+              "required": ["claude", "codex", "gemini", "grok", "grok_api", "mistral"],
+              "additionalProperties": { "type": "string" }
+            }
+          },
+          "additionalProperties": false
+        },
+        "cache_ttl_ms": { "type": "integer", "minimum": 0 },
+        "providers": {
+          "type": "object",
+          "required": ["claude", "codex", "gemini", "grok", "grok_api", "mistral"],
+          "additionalProperties": {
+            "type": "object",
+            "required": [
+              "provider_kind",
+              "cli_available",
+              "gateway_request_tools",
+              "supported_features",
+              "unsupported_inputs",
+              "config_surface_count",
+              "discovered_skill_count",
+              "discovered_provider_tool_count",
+              "warnings"
+            ],
+            "properties": {
+              "provider_kind": { "enum": ["cli", "api"] },
+              "cli_available": { "type": "boolean" },
+              "gateway_request_tools": {
+                "type": "array",
+                "items": { "type": "string" }
+              },
+              "supported_features": {
+                "type": "array",
+                "items": { "type": "string" }
+              },
+              "unsupported_inputs": {
+                "type": "array",
+                "items": { "type": "string" }
+              },
+              "config_surface_count": { "type": "integer", "minimum": 0 },
+              "discovered_skill_count": { "type": "integer", "minimum": 0 },
+              "discovered_provider_tool_count": { "type": "integer", "minimum": 0 },
+              "warnings": {
+                "type": "array",
+                "items": { "type": "string" }
+              }
             },
             "additionalProperties": false
           }

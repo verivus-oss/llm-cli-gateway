@@ -70,6 +70,12 @@ block when the user explicitly asks about cache awareness, but must not
 treat its presence (or its zeroed defaults) as a missing-config blocker
 during install.
 
+`doctor --json` also emits a top-level `provider_capabilities` block. Use it
+as the compact source of truth for outbound provider request tools, supported
+feature names, unsupported/degraded inputs, and `provider-tools://...` resource
+URIs. Do not infer support for provider-specific request fields from provider
+branding or from another provider's CLI surface.
+
 ## Support-Status Rules
 
 Before giving client-specific setup instructions:

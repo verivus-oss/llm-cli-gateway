@@ -37,6 +37,32 @@ metadata is authoritative; the TOML is scanner input only.
 - A `gemini` request fails the upstream contract check before spawn.
 - `npm run upstream:scan -- --live` reports a change on either Antigravity source.
 
+## How LLM agents should use Gemini/Antigravity through the gateway
+
+1. Discover the live gateway/provider surface before relying on
+   Antigravity-specific controls:
+   ```
+   provider_tool_capabilities({cli:"gemini"})
+   ```
+   For a cached read-only resource, use `provider-tools://gemini`.
+2. Use `gemini_request` for normal turns and `gemini_request_async` for
+   long-running review or analysis. Sync calls may auto-defer; poll
+   `llm_job_status` and fetch with `llm_job_result` when that happens.
+3. Omit `model` unless the caller explicitly asked for a specific variant; the
+   gateway resolves the configured Gemini/Antigravity default.
+4. Do not pass non-empty `allowedTools` or `mcpServers` to the current
+   Antigravity request path; the gateway rejects them. Do not assume old Gemini
+   CLI allowlist semantics apply to `agy`.
+5. Use `approvalStrategy:"mcp_managed"` for autonomous review/analysis. It
+   maps to Antigravity's supported permissive approval mode through the gateway.
+6. `sandbox`, `includeDirs`, `workspace`, `worktree`, `sessionId`,
+   `resumeLatest`, and `createNewSession` are the relevant controls. JSON or
+   stream-json output, attachments, policy files, admin policy files, and
+   `skipTrust` are unsupported/rejected in the current Antigravity path.
+7. For continuity, use your own stable `sessionId` or `resumeLatest:true`.
+   Gateway-generated `gw-*` IDs are bookkeeping IDs and are rejected if replayed
+   as Gemini session IDs; check the response `resumable` field.
+
 ## Scan for upstream change
 
 ```bash

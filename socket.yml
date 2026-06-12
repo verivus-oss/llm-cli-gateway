@@ -35,6 +35,28 @@ version: 2
 #     release security audit now hard-fails if any of those packages re-enter
 #     the prod graph (and still blocks the flagged tar-stream 2.x versions).
 #
+#   shrinkwrap
+#     The published npm package intentionally includes npm-shrinkwrap.json. It
+#     is not an install-script bypass or a hidden dependency surface; it is a
+#     prod-only projection generated from package-lock.json by
+#     scripts/make-prod-shrinkwrap.mjs so registry consumers resolve the same
+#     audited tree we release. scripts/release-security-audit.sh regenerates
+#     that projection and hard-fails on mismatch, and
+#     scripts/verify-registry-install.sh publishes to a temporary registry and
+#     verifies a fresh consumer install has no better-sqlite3, prebuild-install,
+#     tar-fs, or tar-stream production chain.
+#
+#     This is the npm-documented narrow use case for shrinkwrap: applications,
+#     daemons, and command-line tools published through the registry for global
+#     installs or devDependency use. llm-cli-gateway is a CLI/MCP appliance, not
+#     a library whose users need unpinned transitive dependency control.
+#
+#     Historical note: releases that previously reported healthy public Socket
+#     scores, including 2.3.0, 2.4.0, and 2.5.0, also shipped
+#     npm-shrinkwrap.json. The same socket.yml shellAccess policy was present
+#     there too. A public package-page alert on 2.6.x therefore reflects Socket
+#     scoring/rescan behavior, not a newly introduced shrinkwrap or shell path.
+#
 #   shellAccess
 #     This alert fires on every module that imports node:child_process, and
 #     because spawning provider CLIs and git is the entire purpose of the package
@@ -93,8 +115,9 @@ issueRules:
   didYouMean: true
   installScripts: true
   telemetry: true
-  hasNativeCode: true            # devDependency-only as of 2.0.0 (better-sqlite3); prod artifact has no native code
-  shellAccess: false             # reviewed gateway capability; see rationale above
+  hasNativeCode: true # devDependency-only as of 2.0.0 (better-sqlite3); prod artifact has no native code
+  shrinkwrap: false # reviewed published CLI lockfile; see rationale above
+  shellAccess: false # reviewed gateway capability; see rationale above
   shellScriptOverride: true
   gitDependency: true
   httpDependency: true
