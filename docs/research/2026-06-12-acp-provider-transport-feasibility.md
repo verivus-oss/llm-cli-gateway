@@ -18,12 +18,14 @@ The corresponding research DAG is
 ## Initial conclusion
 
 ACP is worth researching, but implementation must be staged and evidence-gated.
-At the current target versions, Mistral Vibe has a confirmed local native ACP
-entrypoint (`vibe-acp`), and Grok has a local `grok agent stdio` transport
-candidate that still needs a JSON-RPC/ACP handshake probe. Claude and Codex
-appear to have adapter-mediated ACP paths in the broader ACP ecosystem. Legacy
-Gemini CLI has ACP evidence, but the gateway target is Google Antigravity
-`agy`, whose installed help does not expose `--acp`.
+At the current target versions, Mistral Vibe and Grok Build both have external
+native ACP evidence. Mistral exposes a local `vibe-acp` entrypoint; Grok exposes
+`grok agent stdio`, which still needs a gateway-owned JSON-RPC/ACP handshake
+probe before we classify it as operationally supported in `llm-cli-gateway`.
+Claude and Codex have adapter-mediated ACP paths in the broader ACP ecosystem,
+not native provider CLI surfaces in the locally targeted CLIs. Legacy Gemini CLI
+has ACP support, but the gateway target is Google Antigravity `agy`, whose
+installed help does not expose `--acp`.
 
 The first safe implementation slice should be capability/contract/reporting
 only, followed by a read-only ACP smoke harness. Write-capable ACP sessions
@@ -34,13 +36,13 @@ should wait for HostServices and governance chokepoints.
 Target versions come from `llm-cli-gateway doctor --json` and
 `docs/upstream/release-targets.md`:
 
-| Provider           | Target CLI       | Local ACP evidence                                                         | Initial status             |
-| ------------------ | ---------------- | -------------------------------------------------------------------------- | -------------------------- |
-| Claude Code        | `claude` 2.1.175 | `claude --help` shows MCP-related flags/subcommands, not native ACP.       | adapter-mediated candidate |
-| Codex CLI          | `codex` 0.139.0  | `codex --help` shows MCP server/app/exec-server surfaces, not native ACP.  | adapter-mediated candidate |
-| Gemini/Antigravity | `agy` 1.0.7      | `agy --help` has no `--acp`; gateway test rejects `--acp` for Antigravity. | absent at target           |
-| Grok CLI           | `grok` 0.2.50    | `grok agent stdio --help` exists and says it runs the agent over stdio.    | native candidate           |
-| Mistral Vibe       | `vibe` 2.14.1    | `vibe-acp --version` reports 2.14.1; `vibe-acp --help` says ACP mode.      | native candidate           |
+| Provider           | Target CLI       | Local ACP evidence                                                         | Initial status                   |
+| ------------------ | ---------------- | -------------------------------------------------------------------------- | -------------------------------- |
+| Claude Code        | `claude` 2.1.175 | `claude --help` shows MCP-related flags/subcommands, not native ACP.       | adapter-mediated only            |
+| Codex CLI          | `codex` 0.139.0  | `codex --help` shows MCP server/app/exec-server surfaces, not native ACP.  | adapter-mediated only            |
+| Gemini/Antigravity | `agy` 1.0.7      | `agy --help` has no `--acp`; gateway test rejects `--acp` for Antigravity. | absent at target                 |
+| Grok CLI           | `grok` 0.2.50    | `grok agent stdio --help` exists and says it runs the agent over stdio.    | native, pending gateway smoke    |
+| Mistral Vibe       | `vibe` 2.14.1    | `vibe-acp --version` reports 2.14.1; `vibe-acp --help` says ACP mode.      | native, pending gateway contract |
 
 Important false-positive guardrails:
 
@@ -55,20 +57,71 @@ Important false-positive guardrails:
 Primary or near-primary sources to carry into the research task:
 
 - Agent Client Protocol docs and registry: `https://agentclientprotocol.com/`.
-- ACP agent registry lists Claude Agent via Zed's SDK adapter, Codex CLI via
-  Zed's adapter, Gemini CLI, and Mistral Vibe.
+- ACP protocol overview:
+  `https://agentclientprotocol.com/protocol/overview`.
+- ACP registry:
+  `https://agentclientprotocol.com/get-started/registry`.
+- ACP agent registry lists Claude Agent, Codex CLI, Gemini CLI, Grok Build, and
+  Mistral Vibe. The registry description distinguishes adapter entries such as
+  Codex CLI from native provider CLIs.
 - ACP repository: `https://github.com/agentclientprotocol/agent-client-protocol`.
 - Codex adapter: `https://github.com/zed-industries/codex-acp`.
 - Claude Agent adapter: `https://github.com/agentclientprotocol/claude-agent-acp`.
-- Mistral Vibe install docs say the installer makes both `vibe` and `vibe-acp`
+- Claude Code CLI community adapters exist, but they do not prove native
+  `claude` CLI ACP support.
+- xAI Grok Build docs state that Grok can be used through ACP in other apps.
+- xAI Grok Build docs: `https://docs.x.ai/build/overview`.
+- Mistral Vibe docs state that Vibe implements ACP and is published in the ACP
+  registry; install docs say the installer makes both `vibe` and `vibe-acp`
   available.
-- Mistral Vibe ACP setup:
-  `https://github.com/mistralai/mistral-vibe/blob/main/docs/acp-setup.md`.
+- Mistral Vibe install docs:
+  `https://docs.mistral.ai/vibe/code/cli/install-setup`.
+- Mistral Vibe surface comparison:
+  `https://docs.mistral.ai/vibe/code/choose-cli-vscode-web-sessions`.
+- Mistral Vibe ACP entrypoint:
+  `https://github.com/mistralai/mistral-vibe/blob/5d2e01a6/vibe/acp/entrypoint.py`.
 - Legacy Gemini CLI ACP docs:
   `https://geminicli.com/docs/cli/acp-mode/`.
-- Antigravity ACP absence is currently supported by local `agy --help` evidence
-  plus community issue evidence; do not treat community issues as official
-  support or official roadmap.
+- Google Gemini CLI ACP docs:
+  `https://github.com/google-gemini/gemini-cli/blob/main/docs/cli/acp-mode.md`.
+- Google Antigravity CLI docs:
+  `https://antigravity.google/docs/cli-using`.
+- Antigravity ACP absence is supported by local `agy --help` evidence, gateway
+  argv validation, and an open community feature request. A third-party
+  `agy-acp` adapter exists, but it wraps `agy -p` and documents limitations such
+  as no streaming and no effective cancel.
+- Antigravity community feature request:
+  `https://github.com/google-antigravity/antigravity-cli/issues/31`.
+- Antigravity third-party adapter evidence:
+  `https://github.com/openabdev/openab/pull/896`.
+
+## Exa fact-check results
+
+Exa was used on 2026-06-12 to check each external claim against official or
+near-primary sources. Local installed-binary claims remain local evidence and are
+not replaced by web sources.
+
+| Claim                                                                                                   | Source class                                                                 | Verdict                                         | Notes                                                                                                                                                                          |
+| ------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- | ----------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| ACP means Agent Client Protocol for this CLI/editor integration work.                                   | Official ACP protocol docs.                                                  | Confirmed.                                      | ACP docs describe client/agent methods, notifications, JSON-RPC 2.0, `initialize`, `session/new`, `session/load`, `session/prompt`, `session/update`, and `session/cancel`.    |
+| ACP is not the same as MCP server mode or provider-native resume.                                       | Official ACP protocol docs plus local CLI help.                              | Confirmed.                                      | ACP has its own client/agent session lifecycle and optional client file/terminal services. MCP can be nested inside ACP initialization, but MCP mode alone is not ACP.         |
+| Mistral Vibe has native ACP support.                                                                    | Official Mistral docs, Mistral repo, ACP registry.                           | Confirmed.                                      | Mistral docs state Vibe implements ACP and is in the registry. Install docs expose `vibe-acp`; repository entrypoint says "Run Mistral Vibe in ACP mode."                      |
+| Grok Build has native ACP support.                                                                      | Official xAI docs, ACP registry, local `grok agent stdio --help`.            | Confirmed externally, not yet gateway-verified. | xAI docs say Grok Build can be used through ACP in other apps. The gateway still needs its own safe initialize/session smoke test against target `grok` 0.2.50.                |
+| Codex has ACP support through an adapter, not native `codex --acp` in our target.                       | ACP registry, Zed `codex-acp` README, local `codex --help`.                  | Confirmed.                                      | Zed's adapter implements ACP around Codex CLI. Our local `codex` target exposes MCP/app-server surfaces, not a native ACP flag.                                                |
+| Claude has ACP support through the Claude Agent SDK adapter, not native `claude` CLI ACP in our target. | ACP registry, `agentclientprotocol/claude-agent-acp`, local `claude --help`. | Confirmed with wording correction.              | The registry-backed adapter is for Claude Agent SDK. Separate community Claude Code CLI adapters exist, but they remain adapter-mediated and require provenance review.        |
+| Legacy Gemini CLI supports ACP.                                                                         | Google Gemini CLI docs/repo and ACP registry.                                | Confirmed.                                      | Gemini CLI docs describe `gemini --acp` using JSON-RPC over stdio.                                                                                                             |
+| Antigravity `agy` target supports native ACP.                                                           | Google Antigravity docs/repo, community issue/adapter, local `agy --help`.   | Not confirmed; current evidence says absent.    | Official Antigravity CLI docs found by Exa do not document ACP. An open issue requests ACP support, and a third-party `agy-acp` adapter wraps `agy -p` with reduced semantics. |
+
+Fact-check corrections applied:
+
+- Grok moved from "local native candidate" to "externally confirmed native
+  candidate, pending gateway smoke verification."
+- Claude wording now separates the ACP registry's Claude Agent SDK adapter from
+  the gateway's target `claude` CLI.
+- Antigravity wording now distinguishes official absence from community feature
+  requests and third-party adapters.
+- The registry list now includes Grok Build and explicitly labels adapter versus
+  native interpretations.
 
 ## Gateway architecture implications
 
@@ -132,10 +185,11 @@ Material reviewer findings:
   protocol meaning is Agent Client Protocol. It emphasized that Vibe's
   `vibe-acp` is a separate stdio JSON-RPC entrypoint and that ACP support must
   not be assumed for other providers.
-- Reviewer disagreement: Gemini identified Grok as native via `grok agent
-stdio`; Mistral treated Grok as MCP-only. Local `grok agent stdio --help`
-  confirms a stdio agent candidate exists, but this report requires a safe ACP
-  initialize/session handshake before classifying it as supported.
+- Reviewer disagreement: Gemini identified Grok as native via
+  `grok agent stdio`; Mistral treated Grok as MCP-only. Exa fact-checking found
+  official xAI documentation for Grok Build ACP support, so the remaining gap is
+  gateway-specific smoke verification against the target CLI, not external ACP
+  support evidence.
 - Claude completed but persisted readback was too large/truncated to extract a
   reliable final verdict, so it is recorded as inconclusive rather than used as
   approval evidence.

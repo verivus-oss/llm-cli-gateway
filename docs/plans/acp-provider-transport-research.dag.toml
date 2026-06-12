@@ -65,11 +65,11 @@ grok_help = "`grok --help` exposes MCP configuration, not native ACP."
 grok_agent_stdio_help = "`grok agent stdio --help` exists and says it runs the agent over stdio; JSON-RPC/ACP handshake still requires verification."
 
 [provider_hypotheses]
-claude = "adapter-mediated ACP only unless current Claude Code gains native ACP surface"
+claude = "adapter-mediated ACP only; registry-backed Claude Agent SDK adapter is distinct from native Claude Code CLI support"
 codex = "adapter-mediated ACP via Zed codex-acp unless current Codex CLI gains native ACP surface"
 gemini = "legacy Gemini CLI has ACP evidence, but target Antigravity agy does not expose ACP"
-grok = "native ACP candidate via grok agent stdio; requires safe initialize/session smoke verification"
-mistral = "native ACP via vibe-acp"
+grok = "native ACP candidate via grok agent stdio; official xAI docs confirm ACP, but gateway support requires safe initialize/session smoke verification"
+mistral = "native ACP via vibe-acp; official Mistral docs and registry confirm ACP"
 
 [[steps]]
 id = "confirm-protocol-scope"
@@ -131,7 +131,7 @@ Collect primary or near-primary source evidence for each provider:
   - Mistral Vibe official install/ACP docs.
   - Zed/agentclientprotocol adapter docs for Claude and Codex.
   - Gemini CLI ACP docs, while separating legacy `gemini` from Antigravity `agy`.
-  - xAI/Grok docs or installed help evidence for ACP absence.
+  - xAI/Grok docs and installed help evidence for native ACP support.
   - Google Antigravity issue/docs evidence for ACP absence if no official docs
     exist yet, labeling it as community/non-authoritative.
 
