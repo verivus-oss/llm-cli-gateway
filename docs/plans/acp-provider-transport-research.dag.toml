@@ -1,0 +1,289 @@
+# Research plan: ACP provider transport feasibility and migration scope.
+#
+# Status: research task created; implementation intentionally out of scope.
+#
+# ACP acronym note:
+#   In coding-agent CLI/editor integration, ACP refers to Agent Client Protocol
+#   (editor/client <-> coding agent, JSON-RPC over stdio or remote transports).
+#   "Agent Communication Protocol" usually refers to agent-to-agent
+#   interoperability work and is not the protocol targeted by this research
+#   unless a provider CLI explicitly documents that meaning.
+
+[meta]
+name = "ACP provider transport feasibility and migration scope"
+schema_version = "1.1"
+owner = "verivus-oss"
+slice = "acp-provider-transport-research-2026-06-12"
+target_branch = "master"
+release_version = "UNSET — research only"
+predecessor_plan = "docs/acp-scope.md"
+acceptance_resource = "A provider-by-provider ACP feasibility matrix, implementation-slice proposal, and validation report prove which target provider CLIs can use Agent Client Protocol natively or through adapters without weakening current MCP request-tool safety."
+invariant_sources = [
+  "docs/acp-scope.md",
+  "docs/upstream/release-targets.md",
+  "src/upstream-contracts.ts",
+  "src/provider-tool-capabilities.ts",
+  "src/index.ts",
+  "src/resources.ts",
+  "src/request-helpers.ts",
+  "src/session-manager.ts",
+  ".agents/skills/provider-claude/SKILL.md",
+  ".agents/skills/provider-codex/SKILL.md",
+  ".agents/skills/provider-gemini/SKILL.md",
+  ".agents/skills/provider-grok/SKILL.md",
+  ".agents/skills/provider-mistral/SKILL.md",
+]
+
+[decisions]
+protocol_target = "Agent Client Protocol"
+agent_communication_protocol_is_out_of_scope_until_provider_evidence_exists = true
+mcp_frontend_remains = true
+acp_is_additive_transport = true
+request_tools_remain_prompt_surfaces = true
+provider_cli_backends_remain_authoritative = true
+no_arbitrary_subcommand_execution = true
+adapter_mediated_acp_must_be_labeled = true
+native_acp_must_be_probed_separately = true
+host_services_required_before_write_capable_acp = true
+governance_required_before_self_modifying_acp_runs = true
+
+[target_provider_versions]
+claude = "2.1.175 (Claude Code)"
+codex = "codex-cli 0.139.0"
+gemini = "Google Antigravity CLI agy 1.0.7"
+grok = "grok 0.2.50 (cadf94855)"
+mistral = "vibe 2.14.1"
+
+[initial_local_evidence]
+vibe_acp_help = "`vibe-acp --version` reports 2.14.1 and `vibe-acp --help` says: Run Mistral Vibe in ACP mode."
+vibe_help = "`vibe --help` exposes normal prompt/programmatic flags, not ACP."
+agy_help = "`agy --help` does not expose --acp at target version 1.0.7."
+gemini_contract = "`src/__tests__/upstream-contracts.test.ts` asserts Antigravity `--acp` is rejected by gateway argv validation."
+codex_help = "`codex --help` exposes MCP server/app/exec-server surfaces, not native ACP."
+claude_help = "`claude --help` exposes MCP surfaces, not native ACP."
+grok_help = "`grok --help` exposes MCP configuration, not native ACP."
+grok_agent_stdio_help = "`grok agent stdio --help` exists and says it runs the agent over stdio; JSON-RPC/ACP handshake still requires verification."
+
+[provider_hypotheses]
+claude = "adapter-mediated ACP only unless current Claude Code gains native ACP surface"
+codex = "adapter-mediated ACP via Zed codex-acp unless current Codex CLI gains native ACP surface"
+gemini = "legacy Gemini CLI has ACP evidence, but target Antigravity agy does not expose ACP"
+grok = "native ACP candidate via grok agent stdio; requires safe initialize/session smoke verification"
+mistral = "native ACP via vibe-acp"
+
+[[steps]]
+id = "confirm-protocol-scope"
+depends_on = []
+actor = "assistant"
+action = """
+Resolve the ACP acronym before any implementation planning:
+
+  - Agent Client Protocol: editor/client to coding-agent protocol, usually
+    JSON-RPC over stdio for local agents.
+  - Agent Communication Protocol: agent-to-agent interoperability family.
+
+Use Agent Client Protocol as the target only if the provider CLI evidence and
+ACP registry/docs point to editor-to-agent coding workflows. Record any provider
+that uses a different ACP meaning as out of scope for this plan.
+"""
+idempotent = true
+validation = """
+Research report states the selected protocol, rejected ambiguity, and links to
+primary protocol docs. It explicitly avoids mixing ACP with MCP, provider-native
+sessions, provider subcommand servers, or agent-to-agent standards.
+"""
+
+[[steps]]
+id = "capture-target-version-evidence"
+depends_on = ["confirm-protocol-scope"]
+actor = "assistant"
+action = """
+For each target provider CLI, capture version and safe help evidence only:
+
+  llm-cli-gateway doctor --json
+  llm-cli-gateway doctor --json provider_capabilities section if needed
+  claude --version && claude --help
+  codex --version && codex --help
+  agy --version && agy --help
+  grok --version && grok --help
+  vibe --version && vibe --help
+  vibe-acp --version && vibe-acp --help
+
+Probe subcommand help only with `--help`; do not run login, update, install,
+server, setup, sandbox, apply, archive, restore, or agent execution actions.
+"""
+idempotent = true
+validation = """
+Research report includes a redacted local-evidence appendix with command names,
+target versions, ACP-related help lines, and explicit "not present" findings
+where applicable. No auth state, account IDs, home paths, tokens, or full raw
+help dumps are committed.
+"""
+
+[[steps]]
+id = "research-primary-sources"
+depends_on = ["capture-target-version-evidence"]
+actor = "assistant"
+action = """
+Collect primary or near-primary source evidence for each provider:
+
+  - Agent Client Protocol official docs and agent registry.
+  - Mistral Vibe official install/ACP docs.
+  - Zed/agentclientprotocol adapter docs for Claude and Codex.
+  - Gemini CLI ACP docs, while separating legacy `gemini` from Antigravity `agy`.
+  - xAI/Grok docs or installed help evidence for ACP absence.
+  - Google Antigravity issue/docs evidence for ACP absence if no official docs
+    exist yet, labeling it as community/non-authoritative.
+
+Prefer official provider docs or repository READMEs. Use community issues only
+to document an evidence gap, not as proof of support.
+"""
+idempotent = true
+validation = """
+Every provider row in the feasibility matrix has source_kind:
+native_official, adapter_official, local_help_only, community_gap_evidence, or
+unknown. Adapter-mediated support is never labeled as native.
+"""
+
+[[steps]]
+id = "build-provider-feasibility-matrix"
+depends_on = ["research-primary-sources"]
+actor = "assistant"
+action = """
+Create docs/research/YYYY-MM-DD-acp-provider-transport-feasibility.md with a
+provider matrix:
+
+  provider
+  target_version
+  executable
+  acp_status = native | adapter_mediated | no_evidence | absent | unknown
+  acp_entrypoint_or_adapter
+  local_evidence
+  external_sources
+  gateway_implication
+  implementation_risk
+  next_probe
+
+Required distinctions:
+  - MCP server mode is not ACP.
+  - Provider-native session resume is not ACP.
+  - Legacy Gemini CLI ACP does not automatically transfer to Antigravity agy.
+  - Zed/third-party adapters do not prove native provider CLI support.
+  - A provider-specific ACP process may own its own auth, tools, sessions, and
+    permission prompts differently from the current prompt request tools.
+"""
+idempotent = true
+validation = """
+Matrix has all five CLI providers and separates native support from adapters.
+The report includes a clear "do not implement yet" section listing unknowns
+that must be closed first.
+"""
+
+[[steps]]
+id = "map-gateway-architecture"
+depends_on = ["build-provider-feasibility-matrix"]
+actor = "assistant"
+action = """
+Map how ACP would fit the gateway without replacing MCP:
+
+  - MCP remains the inbound client API for existing users.
+  - ACP-capable provider agents become an optional provider transport path.
+  - provider_tool_capabilities exposes ACP support fields.
+  - upstream contracts track ACP entrypoints/help surfaces separately from
+    request-tool argv allowlists.
+  - HostServices gates filesystem, terminal, environment, and approval
+    side effects before any write-capable ACP session is exposed.
+  - session-manager maps gateway sessions, provider sessions, and ACP sessions
+    without reusing provider-native IDs as gateway IDs.
+
+Identify exact modules for later implementation, but do not implement them in
+this research slice.
+"""
+idempotent = true
+validation = """
+Architecture section names concrete modules and explicitly preserves current
+request-tool behavior. It includes a non-goal that ACP support must not create
+arbitrary CLI subcommand execution.
+"""
+
+[[steps]]
+id = "validate-with-gateway-llms"
+depends_on = ["map-gateway-architecture"]
+actor = "assistant"
+action = """
+Dispatch independent gateway LLM jobs to validate the research:
+
+  - Claude: architecture and governance fit.
+  - Codex: codebase/module mapping and DAG completeness.
+  - Gemini: current provider/source evidence.
+  - Grok: adversarial validation and false-positive detection.
+  - Mistral: Vibe/vibe-acp evidence and integration risks.
+
+Each reviewer must return APPROVED or NOT APPROVED with concrete findings.
+Record job IDs, verdicts, and material findings in the research report.
+"""
+idempotent = true
+validation = """
+Research report includes all dispatched job IDs, terminal statuses, reviewer
+verdicts, and any unresolved findings. Any NOT APPROVED verdict is either fixed
+in the plan/report or carried as an explicit open blocker.
+"""
+
+[[steps]]
+id = "define-implementation-slices"
+depends_on = ["validate-with-gateway-llms"]
+actor = "assistant"
+action = """
+Define later implementation slices, likely:
+
+  1. Capability-only: expose ACP status in provider_tool_capabilities and
+     provider-tools resources.
+  2. Contract-only: add ACP entrypoint/help tracking to upstream contracts and
+     drift probes.
+  3. Read-only ACP smoke harness: start ACP agent, initialize, create session,
+     then terminate without file writes.
+  4. HostServices boundary: file/terminal/env side-effect mediation.
+  5. Provider pilots: Mistral Vibe native vibe-acp first, then Grok agent stdio
+     only after a safe JSON-RPC/ACP handshake probe confirms protocol shape.
+  6. Adapter pilots: Codex/Claude only if adapter provenance, versioning,
+     licensing, auth, and maintenance responsibilities are accepted.
+  7. Antigravity watchlist: no implementation until native or maintained
+     adapter evidence exists. Grok stays in candidate status until handshake
+     evidence proves its stdio mode is ACP-compatible.
+"""
+idempotent = true
+validation = """
+Implementation slices are independently shippable, ordered by risk, and include
+acceptance tests. First shipping slice does not run write-capable ACP sessions.
+"""
+
+[[steps]]
+id = "finalize-research-task"
+depends_on = ["define-implementation-slices"]
+actor = "assistant"
+action = """
+Commit the DAG and research report after formatting and local validation:
+
+  npx prettier --check docs/plans/acp-provider-transport-research.dag.toml docs/research/YYYY-MM-DD-acp-provider-transport-feasibility.md
+  npm run upstream:contracts
+  git diff --check
+
+This research-only commit must not bump package version, move release tags, or
+change provider runtime behavior.
+"""
+idempotent = true
+validation = """
+Working tree is clean after commit; private upstream and public mirror are
+updated only if requested by the release operator.
+"""
+
+[open_questions]
+questions = [
+  "Should llm-cli-gateway act as an ACP client to provider ACP agents, or expose ACP outward to editor clients as a new frontend?",
+  "What minimum ACP method set is required for a safe smoke harness: initialize, session/new, session/prompt, cancel, session/update?",
+  "Can HostServices mediate provider-owned file edits when the ACP agent expects editor/client-side edit application?",
+  "How should ACP permission prompts map to existing approval-manager decisions?",
+  "Which adapter supply-chain policy applies to zed-industries/codex-acp and claude-agent-acp if used?",
+  "Does Antigravity agy plan native ACP support, and how will the gateway detect it without accepting legacy Gemini CLI assumptions?",
+  "Does Grok agent stdio implement the Agent Client Protocol handshake fully, or is it a provider-specific stdio transport that only resembles ACP?",
+]
