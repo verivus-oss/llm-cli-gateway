@@ -8,8 +8,9 @@ All notable changes to the llm-cli-gateway project.
 
 - Added `docs/upstream/release-targets.md`, a release-by-release provider CLI
   target matrix that records the exact Claude Code, Codex, Antigravity (`agy`),
-  Grok, and Mistral Vibe versions each gateway release was validated against,
-  without implying those versions are pinned dependencies or support bounds.
+  Grok, and Mistral Vibe versions and probed artifact SHA-256 values each
+  gateway release was validated against, without implying those versions are
+  pinned dependencies or support bounds.
 
 ## [2.7.0] - 2026-06-12: Provider capability inventory
 
