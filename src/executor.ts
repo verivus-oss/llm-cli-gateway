@@ -28,6 +28,12 @@ export interface ExecuteResult {
   code: number;
 }
 
+export function providerCommandName(command: string): string {
+  if (command === "gemini") return "agy";
+  if (command === "mistral") return "vibe";
+  return command;
+}
+
 const MAX_OUTPUT_SIZE = 50 * 1024 * 1024;
 const circuitBreakers = new Map<string, ReturnType<typeof createCircuitBreaker>>();
 let cachedNvmPath: string | undefined | null;

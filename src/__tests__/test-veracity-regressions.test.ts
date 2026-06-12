@@ -437,17 +437,7 @@ describe("REGRESSIONS F — every contract flag has at least one passing fixture
           "--ignore-user-config",
           "--ignore-rules",
         ],
-        gemini: [
-          "--model",
-          "--approval-mode",
-          "--allowed-tools",
-          "--allowed-mcp-server-names",
-          "--include-directories",
-          "-s",
-          "--policy",
-          "--admin-policy",
-          "-o",
-        ],
+        gemini: ["--model", "--prompt", "-c"],
         grok: [
           "--model",
           "--output-format",

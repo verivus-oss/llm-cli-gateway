@@ -10,15 +10,15 @@ import type { Session } from "../session-manager.js";
 // Mock executeCli AND getExtendedPath for sync handler tests —
 // getExtendedPath() caches PATH before our shim is added, so both sync
 // handlers (which call executeCli) and async jobs (which call spawn with
-// getExtendedPath()) need the mock to find the gemini shim.
+// getExtendedPath()) need the mock to find the agy shim.
 vi.mock("../executor.js", async importOriginal => {
   const actual = await importOriginal<typeof import("../executor.js")>();
   return {
     ...actual,
     getExtendedPath: vi.fn(() => process.env.PATH || ""),
     executeCli: vi.fn(async (command: string, _args: string[], _options?: any) => {
-      if (command === "gemini") {
-        return { stdout: "mocked gemini response", stderr: "", code: 0 };
+      if (command === "agy") {
+        return { stdout: "mocked antigravity response", stderr: "", code: 0 };
       }
       // Fall through to real implementation for other CLIs
       return actual.executeCli(command, _args, _options);
@@ -26,14 +26,14 @@ vi.mock("../executor.js", async importOriginal => {
   };
 });
 
-// PATH shim: create temp dir with a fake `gemini` script
+// PATH shim: create temp dir with a fake `agy` script
 let shimDir: string;
 let originalPath: string;
 
 beforeAll(() => {
   shimDir = mkdtempSync(join(tmpdir(), "gemini-shim-"));
-  const shimScript = join(shimDir, "gemini");
-  writeFileSync(shimScript, '#!/bin/sh\necho "gemini response: $*"\nexit 0\n');
+  const shimScript = join(shimDir, "agy");
+  writeFileSync(shimScript, '#!/bin/sh\necho "antigravity response: $*"\nexit 0\n');
   chmodSync(shimScript, 0o755);
   originalPath = process.env.PATH || "";
   process.env.PATH = `${shimDir}:${originalPath}`;
@@ -205,12 +205,13 @@ describe("handleGeminiRequestAsync", () => {
     expect(sm.createSession).not.toHaveBeenCalled();
     const args = startJobSpy.mock.calls[0][1];
     expect(args).not.toContain("--session-id");
-    expect(args).not.toContain("--resume");
+    expect(args).not.toContain("--conversation");
+    expect(args).not.toContain("--continue");
 
     ajm.cancelJob(body.job.id);
   });
 
-  it("should pass --resume args for user-provided sessionId", async () => {
+  it("should pass --conversation args for user-provided sessionId", async () => {
     const sm = createMockSessionManager();
     const ajm = new AsyncJobManager(noopLogger);
     const startJobSpy = vi.spyOn(ajm, "startJob");
@@ -229,7 +230,7 @@ describe("handleGeminiRequestAsync", () => {
 
     expect(startJobSpy).toHaveBeenCalled();
     const args = startJobSpy.mock.calls[0][1];
-    expect(args).toContain("--resume");
+    expect(args).toContain("--conversation");
     expect(args).toContain("user-sess-42");
 
     const jobId = startJobSpy.mock.results[0].value.id;
@@ -255,14 +256,15 @@ describe("handleGeminiRequestAsync", () => {
 
     expect(startJobSpy).toHaveBeenCalled();
     const args = startJobSpy.mock.calls[0][1];
-    expect(args).not.toContain("--resume");
+    expect(args).not.toContain("--conversation");
+    expect(args).not.toContain("--continue");
     expect(args).not.toContain("--session-id");
 
     const jobId = startJobSpy.mock.results[0].value.id;
     ajm.cancelJob(jobId);
   });
 
-  it("should pass --resume latest when resumeLatest=true and no sessionId", async () => {
+  it("should pass --continue when resumeLatest=true and no sessionId", async () => {
     const sm = createMockSessionManager();
     const ajm = new AsyncJobManager(noopLogger);
     const startJobSpy = vi.spyOn(ajm, "startJob");
@@ -279,8 +281,7 @@ describe("handleGeminiRequestAsync", () => {
     );
 
     const args = startJobSpy.mock.calls[0][1];
-    expect(args).toContain("--resume");
-    expect(args).toContain("latest");
+    expect(args).toContain("--continue");
 
     const jobId = startJobSpy.mock.results[0].value.id;
     ajm.cancelJob(jobId);
@@ -393,9 +394,9 @@ describe("handleGeminiRequest (sync)", () => {
       );
 
       expect(result.isError).toBeUndefined();
-      const geminiCall = vi.mocked(executeCli).mock.calls.find(([command]) => command === "gemini");
-      expect(geminiCall).toBeDefined();
-      const options = geminiCall?.[2] as { stdin?: string; cwd?: string } | undefined;
+      const agyCall = vi.mocked(executeCli).mock.calls.find(([command]) => command === "agy");
+      expect(agyCall).toBeDefined();
+      const options = agyCall?.[2] as { stdin?: string; cwd?: string } | undefined;
       expect(options?.stdin).toBeUndefined();
       expect(options?.cwd).toBe(workspaceRoot);
     } finally {

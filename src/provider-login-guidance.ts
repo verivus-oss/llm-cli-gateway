@@ -60,22 +60,22 @@ const GUIDANCE: Record<CliType, ProviderLoginGuidance> = {
   },
   gemini: {
     provider: "gemini",
-    displayName: "Gemini CLI",
+    displayName: "Google Antigravity CLI",
     install: {
-      summary: "Install Gemini CLI using Google's npm package or current official installer.",
-      commands: ["npm install -g @google/gemini-cli"],
-      documentationUrl: "https://github.com/google-gemini/gemini-cli",
+      summary: "Install Google Antigravity CLI using Google's current official installer.",
+      commands: ["curl -fsSL https://antigravity.google/cli/install.sh | bash"],
+      documentationUrl: "https://antigravity.google/docs/cli-overview",
     },
     login: {
-      summary: "Run Gemini CLI and complete Google's official sign-in flow when prompted.",
-      commands: ["gemini"],
+      summary: "Run Antigravity CLI and complete Google's official sign-in flow when prompted.",
+      commands: ["agy"],
       credentialHandling:
-        "Let Gemini CLI store credentials in its own local store. Do not paste OAuth files or API keys into chat.",
+        "Let Antigravity store credentials in its own local store. Do not paste OAuth files or API keys into chat.",
     },
     verification: {
-      command: "gemini --version",
+      command: "agy --version",
       expected:
-        "CLI is installed; doctor checks the local Gemini credential store for login evidence",
+        "CLI is installed; doctor checks local Gemini-compatible credential stores for login evidence",
     },
   },
   grok: {

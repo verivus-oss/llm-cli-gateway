@@ -1117,16 +1117,17 @@ export function prepareGeminiHighImpactFlags(
  * Result of resolving Gemini's session strategy.
  */
 export interface GeminiSessionPlan {
-  /** Flag pair to inject into argv (one of `["--resume", id]`, `["--resume", "latest"]`, or `[]`). */
+  /** Flag pair to inject into argv (one of `["--conversation", id]`, `["--continue"]`, or `[]`). */
   args: string[];
-  /** True iff `--resume <id>` was emitted with a user-supplied id. */
+  /** True iff `--conversation <id>` was emitted with a user-supplied id. */
   resumed: boolean;
 }
 
 /**
- * Resolve Gemini session args. Gemini CLI 0.43 exposes `--resume` but not a
- * supported `--session-id` flag for fresh sessions, so new-session requests
- * intentionally emit no session flag and let the CLI create its own session.
+ * Resolve Antigravity session args for the gateway's Gemini-compatible tool
+ * surface. Antigravity exposes `--conversation <id>` and `--continue`, but no
+ * supported fresh session-id flag, so new-session requests intentionally emit
+ * no session flag and let the CLI create its own session.
  */
 export function resolveGeminiSessionPlan(opts: {
   sessionId?: string;
@@ -1136,13 +1137,13 @@ export function resolveGeminiSessionPlan(opts: {
   if (opts.sessionId && !opts.createNewSession) {
     validateSessionId(opts.sessionId);
     return {
-      args: ["--resume", opts.sessionId],
+      args: ["--conversation", opts.sessionId],
       resumed: true,
     };
   }
 
   if (opts.resumeLatest && !opts.createNewSession) {
-    return { args: ["--resume", "latest"], resumed: false };
+    return { args: ["--continue"], resumed: false };
   }
 
   return { args: [], resumed: false };

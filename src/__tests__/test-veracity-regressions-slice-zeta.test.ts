@@ -3,7 +3,7 @@
  * parity across Claude (`--add-dir`), Codex (`-C` + `--add-dir`), Grok
  * (`--cwd`), and Vibe (`--workdir` + `--add-dir`).
  *
- * Gemini's pre-existing `includeDirs` → `--include-directories` wiring is
+ * Gemini-compatible Antigravity `includeDirs` → `--add-dir` wiring is
  * exercised as a regression guard at the end of REGRESSIONS Zε.
  *
  * Every test below is mutation-probe-friendly; the audit spec at
@@ -438,21 +438,14 @@ describe("REGRESSIONS Zε — slice ζ contract entries + fixtures", () => {
     }
   );
 
-  // Regression guard: Gemini's pre-existing includeDirs → --include-directories
-  // round-trip from master MUST stay intact while we're touching adjacent
-  // contract entries. Catches an accidental break to gemini.flags or
-  // gemini.mcpParameters during the slice.
-  it("regression guard: gemini includeDirs / --include-directories still wired", () => {
+  // Regression guard: the Gemini-compatible Antigravity path maps includeDirs
+  // to agy's --add-dir flag.
+  it("regression guard: gemini includeDirs / agy --add-dir still wired", () => {
     expect(UPSTREAM_CLI_CONTRACTS.gemini.mcpParameters).toContain("includeDirs");
-    const flag = UPSTREAM_CLI_CONTRACTS.gemini.flags["--include-directories"];
-    expect(flag, "gemini.flags['--include-directories'] must be registered").toBeDefined();
+    const flag = UPSTREAM_CLI_CONTRACTS.gemini.flags["--add-dir"];
+    expect(flag, "gemini.flags['--add-dir'] must be registered").toBeDefined();
     expect(flag.arity).toBe("one");
-    const validation = validateUpstreamCliArgs("gemini", [
-      "-p",
-      "x",
-      "--include-directories",
-      "/tmp/a",
-    ]);
+    const validation = validateUpstreamCliArgs("gemini", ["--print", "x", "--add-dir", "/tmp/a"]);
     expect(validation.ok, JSON.stringify(validation.violations)).toBe(true);
   });
 });

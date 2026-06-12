@@ -35,7 +35,8 @@ Install whichever provider CLIs you want the gateway to expose:
 ```bash
 npm install -g @anthropic-ai/claude-code
 npm install -g @openai/codex
-npm install -g @google/gemini-cli
+# Gemini provider runs through Google Antigravity CLI (agy):
+curl -fsSL https://antigravity.google/cli/install.sh | bash
 # Grok Build (xAI): https://docs.x.ai/build/overview
 curl -fsSL https://x.ai/cli/install.sh | bash
 ```

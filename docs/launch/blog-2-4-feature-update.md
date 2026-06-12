@@ -1,7 +1,7 @@
 ---
-title: "llm-cli-gateway 2.4.0: direct Grok API, safer MCP tools, and provider-owned sessions"
+title: "llm-cli-gateway 2.5.0: OAuth for remote MCP connectors and safer workspaces"
 published: false
-description: "What changed after the 2.0.0 supply-chain release: direct xAI API support, clearer MCP tool metadata, valid resource URIs, provider-owned sessions, and host auto-upgrade operations."
+description: "What changed after the 2.0.0 supply-chain release: direct Grok API support, provider-owned sessions, MCP OAuth for remote connectors, and workspace aliases for safer provider spawning."
 tags: mcp, ai, node, opensource
 ---
 
@@ -9,15 +9,87 @@ llm-cli-gateway 2.0.0 was the quiet supply-chain release. It moved persistence t
 
 That was intentionally not a flashy release. It was about removing risk.
 
-The releases since then have been about the product surface: making the gateway easier for MCP clients to understand, keeping provider contracts current, and adding a direct xAI API path alongside the existing Grok CLI provider.
+The releases since then have been about the product surface: making the gateway easier for MCP clients to understand, keeping provider contracts current, adding a direct xAI API path alongside the existing Grok CLI provider, and now making remote MCP connector setup use OAuth instead of credential-shaped URL shortcuts.
 
-The short version: `llm-cli-gateway@2.4.0` is now published on npm, the GitHub release has signed installer artifacts, and the gateway has a stronger MCP interface than it had at 2.0.0.
+The short version: `llm-cli-gateway@2.5.0` is now published on npm, the GitHub release has signed installer artifacts, and the gateway has a safer remote-connector story than it had at 2.0.0.
 
-## The gateway now has a direct Grok API provider
+## 2.5.0 adds OAuth for remote MCP connectors
 
-Until now, Grok support meant spawning the `grok` CLI, just like Claude Code, Codex, Gemini, and Mistral Vibe. That still exists. The CLI path is the right tool when you want the upstream agent's file access, terminal behavior, and provider-owned session mechanics.
+The biggest change in 2.5.0 is the remote connector auth model.
 
-2.4.0 adds a separate direct API provider: `grok-api`.
+The gateway now exposes public-ready MCP OAuth metadata and an authorization-code flow for remote MCP clients. That means clients such as ChatGPT custom connectors can discover the authorization server, request a code, exchange it for an opaque bearer token, and call the MCP endpoint without relying on a static bearer header pasted into a provider UI.
+
+The setup shape is deliberately conservative:
+
+- static OAuth clients can be configured with hashed client secrets;
+- dynamic client registration is not open by default;
+- dynamic registration, when enabled, is gated by either explicit public-client policy or a shared registration secret;
+- shared secrets and client secrets are stored only as hashes;
+- secrets are never accepted in query strings;
+- generated client secrets are copy-once local output;
+- doctor, setup JSON, and default CLI output redact secret-bearing fields.
+
+The practical result is that the public `/mcp` endpoint can support remote web connectors through OAuth while local bearer-token clients keep working.
+
+## The old ChatGPT no-auth URL path is deprecated
+
+Earlier HTTP setup work created a separate high-entropy ChatGPT connector URL because ChatGPT connector setup could not rely on arbitrary static Authorization headers.
+
+2.5.0 replaces that new-setup path with OAuth.
+
+The current ChatGPT setup flow is:
+
+```bash
+llm-cli-gateway tunnel start
+llm-cli-gateway oauth client add chatgpt --redirect-uri <ChatGPT callback URL> --print-once
+llm-cli-gateway print-client-config
+```
+
+In ChatGPT, use the verified public `/mcp` URL with `Authentication: OAuth`, plus the authorization and token URLs from `print-client-config` or the setup UI.
+
+The old high-entropy no-auth URL remains treated as deprecated compatibility surface only. New setup docs, the setup UI, and assistant runbooks no longer recommend it. Doctor output also redacts old persisted no-auth connector URLs instead of reconstructing them.
+
+## Workspaces are now registered aliases, not arbitrary paths
+
+Remote MCP clients should not be able to browse or select arbitrary local filesystem paths. 2.5.0 adds a workspace registry so provider requests can target a named workspace alias instead.
+
+The registry supports:
+
+- workspace aliases;
+- configured allowed roots;
+- default workspace selection;
+- provider request `workspace` input across sync and async request tools;
+- session metadata so a selected workspace can carry through provider-owned sessions;
+- workspace-aware async dedup keys, so the same argv in two different workspaces does not collide.
+
+For local administration there are also workspace creation tools, but they are intentionally narrow. A workspace admin can create a new folder or initialize a new local Git repository under a configured allowed root. The gateway rejects absolute remote paths, traversal, denied directory names, symlink escapes, and existing non-empty targets. There is no network clone in this release.
+
+That last point is important. This is not a remote filesystem browser and not a general "clone this URL into my machine" tool. It is a controlled local workspace registry.
+
+## Remote provider requests fail closed before spawning
+
+The security invariant for 2.5.0 is simple: a remote OAuth-authenticated provider request must resolve to a registered workspace before any provider CLI is spawned.
+
+That applies to the normal provider tools:
+
+- `claude_request`
+- `codex_request`
+- `gemini_request`
+- `grok_request`
+- `mistral_request`
+- the async variants
+
+It also applies to `codex_fork_session`, which matters because forking a Codex session is still a provider spawn path.
+
+Local bearer/stdin callers keep the existing local behavior unless they explicitly ask for unsafe `workingDir` or `addDir` values. Remote OAuth callers, by contrast, need an explicit workspace, a session-associated workspace, or a configured default workspace. Otherwise the gateway fails before the child process starts.
+
+That closes off the bad fallback where a remote request silently inherits the gateway process cwd or ends up running in `~/.llm-cli-gateway`.
+
+## 2.4.0 still matters: direct Grok API and provider-owned sessions
+
+The 2.5.0 release builds on the 2.4.0 product work.
+
+2.4.0 added a separate direct API provider for xAI: `grok-api`.
 
 This is not a transport flag on `grok_request`. It is a distinct provider type and a distinct tool, `grok_api_request`, because the API path has a different contract from an agentic CLI:
 
@@ -29,15 +101,9 @@ This is not a transport flag on `grok_request`. It is a distinct provider type a
 
 Configuration is isolated under `[providers.xai]`. The gateway stores the name of the API-key environment variable, not the secret itself. The tool is only registered when `[providers.xai]` is configured and the named environment variable is present.
 
-That matters for MCP clients. A client connected to a gateway without xAI API credentials will not see a dead `grok_api_request` tool that can never work. The tool surface reflects the actual configured runtime.
+Adding `grok-api` also forced a useful cleanup: stored gateway sessions are now owned by a provider, not treated as generic strings that any handler might try to resume.
 
-The API provider also records xAI response metadata in gateway sessions, including the previous response id used for continuation. That gives the direct API path its own session namespace, separate from the existing `grok` CLI sessions.
-
-## Sessions are now provider-owned
-
-Adding `grok-api` forced a useful cleanup: stored gateway sessions needed to be owned by a provider, not treated as generic strings that any handler might try to resume.
-
-The session schema now distinguishes spawnable CLI providers from the wider provider set. The wider `ProviderType` includes:
+The wider provider set now includes:
 
 - `claude`
 - `codex`
@@ -46,21 +112,19 @@ The session schema now distinguishes spawnable CLI providers from the wider prov
 - `mistral`
 - `grok-api`
 
-That change touches the file session manager, PostgreSQL session manager, migrations, metrics, and flight-recorder typing. It also means wrong-provider session reuse is rejected across the request handlers instead of failing later in a provider-specific way.
-
-For example, a `grok-api` session should not be passed to `grok_request`, and a Codex session should not be passed to `claude_request`. 2.4.0 enforces that boundary across the synchronous and asynchronous request tools, plus `codex_fork_session`.
+Wrong-provider session reuse is rejected across request handlers instead of failing later in a provider-specific way. A `grok-api` session should not be passed to `grok_request`, and a Codex session should not be passed to `claude_request`.
 
 This is a boring invariant until it saves you from debugging a bad resume id at the wrong layer.
 
 ## MCP tools are clearer and safer for clients
 
-2.1.0, 2.2.0, and 2.3.0 were mostly about improving the MCP surface itself.
+The 2.1.0, 2.2.0, and 2.3.0 releases were mostly about improving the MCP surface itself.
 
-2.1.0 added Grok Build 0.2.32 support, including the new `leaderSocket` parameter for `grok_request` and `grok_request_async`. It also improved upstream contract drift handling: the gateway can now distinguish hidden upstream flags from true missing flags, and it can acknowledge upstream-only flags that the gateway intentionally does not emit.
+2.1.0 added Grok Build 0.2.32 support, including the `leaderSocket` parameter for `grok_request` and `grok_request_async`. It also improved upstream contract drift handling: the gateway can now distinguish hidden upstream flags from true missing flags, and it can acknowledge upstream-only flags that the gateway intentionally does not emit.
 
-2.2.0 made all 37 tools self-describing. Before that, clients saw tool names and schemas, but not much action-level description. Now the tool descriptions explain what each tool does, when sync requests can defer, why `job_status` differs from `llm_job_status`, and which tools are local-only.
+2.2.0 made all tools self-describing. Before that, clients saw tool names and schemas, but not much action-level description. Now the tool descriptions explain what each tool does, when sync requests can defer, why `job_status` differs from `llm_job_status`, and which tools are local-only.
 
-2.3.0 added MCP tool annotations for all 37 tools:
+2.3.0 added MCP tool annotations:
 
 - display titles;
 - `readOnlyHint`;
@@ -70,7 +134,7 @@ This is a boring invariant until it saves you from debugging a bad resume id at 
 
 Those annotations let MCP clients build better confirmation UX. A read-only local status tool can be treated differently from a provider-spawning request that may cause an agentic CLI to modify files.
 
-The important bit is not that the metadata exists. The important bit is that the metadata is now tested as an invariant: exact read-only, destructive, and open-world sets are pinned, and contradictory read-only plus destructive annotations are rejected.
+The important bit is not that the metadata exists. The important bit is that the metadata is tested as an invariant: exact read-only, destructive, and open-world sets are pinned, and contradictory read-only plus destructive annotations are rejected.
 
 ## Resource URIs now use valid schemes
 
@@ -85,7 +149,7 @@ provider_subcommands://catalog
 
 Those look readable to a human, but underscores are not valid in URI schemes. Standard URL parsing rejected them.
 
-2.4.0 fixes the advertised resources to use hyphenated schemes:
+2.4.0 fixed the advertised resources to use hyphenated schemes:
 
 ```text
 cache-state://global
@@ -101,43 +165,27 @@ After the fix, MCP Inspector successfully read every advertised resource: skills
 
 ## Provider subcommand contracts are visible
 
-The gateway already tracks upstream CLI contracts so it can reject unsupported flags before spawning a provider CLI. 2.4.0 extends the planning and resource side of that work.
+The gateway tracks upstream CLI contracts so it can reject unsupported flags before spawning a provider CLI. 2.4.0 extended the planning and resource side of that work.
 
 There are now provider subcommand catalog and detail resources, plus tools for listing provider subcommands, reading a subcommand contract, and checking drift.
 
-This is still intentionally CLI-only. The new direct `grok-api` provider is not a spawnable CLI and does not belong in the same subcommand contract path. That split is now explicit.
+This is intentionally CLI-only. The direct `grok-api` provider is not a spawnable CLI and does not belong in the same subcommand contract path. That split is explicit.
 
 The practical value: an MCP client can inspect the provider command surface instead of relying only on prose docs or hardcoded assumptions.
 
 ## Host auto-upgrade operations landed
 
-2.4.0 also adds an operational path for machines that run the gateway as a local appliance.
+2.4.0 also added an operational path for machines that run the gateway as a local appliance.
 
-The new `scripts/host-upgrade.sh` stages npm releases into versioned directories, verifies the staged binary, applies upgrades atomically, and supports rollback. There are also user systemd service and timer units for scheduled upgrade checks.
+The `scripts/host-upgrade.sh` flow stages npm releases into versioned directories, verifies the staged binary, applies upgrades atomically, and supports rollback. There are also user systemd service and timer units for scheduled upgrade checks.
 
 This is not a replacement for the signed GitHub installer artifacts. It is for hosts where npm is the chosen install channel and you want a managed, reversible upgrade loop rather than an ad hoc global install command.
-
-## The HTTPS endpoint story is part of setup now
-
-The gateway still starts from a local-first model. Local MCP clients can use stdio, or the HTTP transport at `http://127.0.0.1:3333/mcp` with bearer-token auth.
-
-Web-hosted clients are different. ChatGPT, Claude web, Grok web connectors, and similar MCP hosts connect from provider infrastructure, so `localhost` is not a usable endpoint for them. They need a public HTTPS URL that routes back to the local gateway.
-
-That path is now documented and diagnosed directly by the gateway:
-
-- `doctor --json` reports endpoint exposure state, including whether HTTPS is configured, whether the mode looks like a tunnel or reverse proxy, and whether a public reachability check passed.
-- `llm-cli-gateway tunnel start` manages the Cloudflare Quick Tunnel path: it starts the local gateway if needed, runs `cloudflared tunnel --url http://127.0.0.1:3333`, captures the generated `https://*.trycloudflare.com` URL, and persists the normalized `/mcp` endpoint.
-- `llm-cli-gateway print-client-config` and `llm-cli-gateway chatgpt-url` expose the right setup values for clients.
-
-There is an important auth split here. The normal public `/mcp` endpoint remains bearer-protected for clients that can send an `Authorization` header. ChatGPT connector setup may not support arbitrary static auth headers, so the gateway also creates a separate high-entropy ChatGPT URL. That URL should be treated like a credential and rotated when needed with `llm-cli-gateway chatgpt-url rotate`.
-
-This means the personal-appliance setup is not just "run a local server and hope the web client can reach it." The gateway can now tell you when you are local-only, LAN-only, misconfigured, tunneled, or behind your own HTTPS reverse proxy before you paste anything into a provider UI.
 
 ## What changed from the 2.0.0 story
 
 2.0.0 made the package safer to install.
 
-2.1.0 through 2.4.0 made the gateway better to operate and easier for MCP clients to reason about:
+2.1.0 through 2.5.0 made the gateway better to operate and easier for MCP clients to reason about:
 
 - Grok CLI support stayed current with upstream.
 - Tool descriptions and annotations now describe the real behavior of every MCP tool.
@@ -145,18 +193,30 @@ This means the personal-appliance setup is not just "run a local server and hope
 - Sessions are provider-owned, so cross-provider resume mistakes fail early.
 - Cache and provider-subcommand resources use valid URI schemes.
 - Provider subcommand contracts are inspectable through MCP.
-- HTTPS endpoint exposure and Cloudflare Quick Tunnel setup are documented, diagnosed, and client-config aware.
-- Local host upgrade operations have a staged and rollback-capable path.
+- Remote web connector setup now uses MCP OAuth instead of no-auth connector URLs.
+- Workspace aliases give remote clients a bounded way to select where provider CLIs run.
+- Local workspace creation is constrained to configured allowed roots and local `git init`.
+- Host upgrade operations have a staged and rollback-capable path.
 
 The gateway is still what it has been from the start: one MCP endpoint that wraps provider CLIs and exposes durable jobs, sessions, validation, review, and provider orchestration.
 
-The difference is that the surface is now less ambiguous. Clients can see which tools exist, what they do, how risky they are, which resources can be read, and which provider owns a session.
+The difference is that the surface is now less ambiguous. Clients can see which tools exist, what they do, how risky they are, which resources can be read, which provider owns a session, and which workspace a remote request is allowed to use.
 
 That is the kind of functionality work that matters after the supply-chain story is handled. Fewer surprises at install time, fewer surprises at runtime.
 
+## Release evidence
+
+2.5.0 shipped through the public mirror release path:
+
+- npm publishes with GitHub Actions provenance;
+- release installer artifacts are signed and uploaded;
+- public mirror CI, security, OpenSSF Scorecard, and CodeQL passed on the release commit;
+- the local release gate passed `go test ./...`, `npm run build`, `npm run lint`, `npm run format:check`, `npm test`, and `npm run upstream:contracts`;
+- the full test suite passed at 1,152 tests.
+
 Links:
 
-- Release: https://github.com/verivus-oss/llm-cli-gateway/releases/tag/v2.4.0
+- Release: https://github.com/verivus-oss/llm-cli-gateway/releases/tag/v2.5.0
 - npm: https://www.npmjs.com/package/llm-cli-gateway
 - Site: https://llm-cli-gateway.dev
 

@@ -179,7 +179,7 @@ describe("U23 fix: outputFormat reaches the CLI as a flag", () => {
     expect(prep.args).not.toContain("--json");
   });
 
-  it("prepareGeminiRequest with outputFormat='json' emits -o json (in that order)", () => {
+  it("prepareGeminiRequest with outputFormat='json' rejects the legacy Gemini-only flag", () => {
     // Use the default runtime parameter on the prepare functions (no explicit runtime needed).
     const prep = prepareGeminiRequest(
       {
@@ -191,14 +191,9 @@ describe("U23 fix: outputFormat reaches the CLI as a flag", () => {
       },
       undefined
     );
-    if (!("args" in prep)) throw new Error("expected args");
-    // U21 invariant: prompt comes first as `-p <prompt>` (positions 0, 1).
-    expect(prep.args[0]).toBe("-p");
-    expect(prep.args[1]).toBe("hello");
-    // U23: -o json must appear after the prompt pair and as a contiguous flag/value pair.
-    const oIdx = prep.args.indexOf("-o");
-    expect(oIdx).toBeGreaterThan(1);
-    expect(prep.args[oIdx + 1]).toBe("json");
+    expect("args" in prep).toBe(false);
+    if ("args" in prep) throw new Error("expected error response");
+    expect(prep.content[0].text).toContain("outputFormat");
   });
 
   it("prepareGeminiRequest with outputFormat='text' (default) does NOT emit -o json", () => {
@@ -355,7 +350,7 @@ describe("U23 fix: JSON usage extraction is wired end-to-end", () => {
     expect(skipIdx).toBeGreaterThan(jsonIdx);
   });
 
-  it("prepareGeminiRequest -o json appears after the U27 high-impact flag block", () => {
+  it("prepareGeminiRequest rejects legacy Gemini outputFormat even with agy sandbox enabled", () => {
     // Use the default runtime parameter on the prepare functions (no explicit runtime needed).
     const prep = prepareGeminiRequest(
       {
@@ -368,11 +363,8 @@ describe("U23 fix: JSON usage extraction is wired end-to-end", () => {
       },
       undefined
     );
-    if (!("args" in prep)) throw new Error("expected args");
-    const sIdx = prep.args.indexOf("-s");
-    const oIdx = prep.args.indexOf("-o");
-    expect(sIdx).toBeGreaterThan(1); // after `-p <prompt>`
-    expect(oIdx).toBeGreaterThan(sIdx);
-    expect(prep.args[oIdx + 1]).toBe("json");
+    expect("args" in prep).toBe(false);
+    if ("args" in prep) throw new Error("expected error response");
+    expect(prep.content[0].text).toContain("outputFormat");
   });
 });

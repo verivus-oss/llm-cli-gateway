@@ -1,13 +1,12 @@
 /**
- * U27: Gemini high-impact features.
+ * U27: Gemini-compatible Antigravity high-impact features.
  *
  * Tests the schema additions on `gemini_request` / `gemini_request_async`:
- *   - sandbox → `-s`
- *   - policyFiles → `--policy <path>` (existence-validated)
- *   - adminPolicyFiles → `--admin-policy <path>` (existence-validated)
- *   - attachments → prepended `@<abs-path>` tokens (absolute + existence-validated)
+ *   - sandbox → `--sandbox`
+ *   - policyFiles/adminPolicyFiles/attachments are rejected because agy has
+ *     no matching non-interactive flags
  *   - createNewSession=true → no session flag (NOT `--resume`)
- *   - createNewSession=false + sessionId → `--resume <id>` (preserved behavior)
+ *   - createNewSession=false + sessionId → `--conversation <id>`
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { mkdtempSync, writeFileSync, rmSync } from "fs";
@@ -148,15 +147,15 @@ describe("U27 resolveGeminiSessionPlan", () => {
     expect(plan.resumed).toBe(false);
   });
 
-  it("emits --resume <id> when user supplies sessionId and createNewSession=false", () => {
+  it("emits --conversation <id> when user supplies sessionId and createNewSession=false", () => {
     const plan = resolveGeminiSessionPlan({ sessionId: "user-abc-42" });
-    expect(plan.args).toEqual(["--resume", "user-abc-42"]);
+    expect(plan.args).toEqual(["--conversation", "user-abc-42"]);
     expect(plan.resumed).toBe(true);
   });
 
-  it("emits --resume latest when resumeLatest=true and no sessionId", () => {
+  it("emits --continue when resumeLatest=true and no sessionId", () => {
     const plan = resolveGeminiSessionPlan({ resumeLatest: true });
-    expect(plan.args).toEqual(["--resume", "latest"]);
+    expect(plan.args).toEqual(["--continue"]);
     expect(plan.resumed).toBe(false);
   });
 
@@ -171,84 +170,58 @@ describe("U27 resolveGeminiSessionPlan", () => {
 });
 
 describe("U27 prepareGeminiRequest end-to-end", () => {
-  it("appends -s when sandbox=true", () => {
+  it("appends --sandbox when sandbox=true", () => {
     const prep = prepareGeminiRequest(baseParams({ sandbox: true }));
     if (!("args" in prep)) throw new Error("expected args");
-    expect(prep.args).toContain("-s");
+    expect(prep.args).toContain("--sandbox");
   });
 
-  it("appends --policy <path> for each policy file", () => {
+  it("returns error response when policyFiles is set because agy does not support --policy", () => {
     const prep = prepareGeminiRequest(baseParams({ policyFiles: [realFile1] }));
-    if (!("args" in prep)) throw new Error("expected args");
-    const idx = prep.args.indexOf("--policy");
-    expect(idx).toBeGreaterThan(-1);
-    expect(prep.args[idx + 1]).toBe(realFile1);
-  });
-
-  it("returns error response when policyFiles path is missing", () => {
-    const missing = join(tmp, "nope.json");
-    const prep = prepareGeminiRequest(baseParams({ policyFiles: [missing] }));
-    // Missing path => ExtendedToolResponse (no `args` field).
     expect("args" in prep).toBe(false);
     if ("args" in prep) throw new Error("expected error response");
-    expect(prep.content[0].text).toContain(missing);
     expect(prep.content[0].text).toContain("policyFiles");
+    expect(prep.content[0].text).toContain("Antigravity CLI");
   });
 
-  it("returns error response when adminPolicyFiles path is missing", () => {
-    const missing = join(tmp, "nope-admin.json");
-    const prep = prepareGeminiRequest(baseParams({ adminPolicyFiles: [missing] }));
+  it("returns error response when adminPolicyFiles is set because agy does not support --admin-policy", () => {
+    const prep = prepareGeminiRequest(baseParams({ adminPolicyFiles: [realFile1] }));
     expect("args" in prep).toBe(false);
     if ("args" in prep) throw new Error("expected error response");
-    expect(prep.content[0].text).toContain(missing);
     expect(prep.content[0].text).toContain("adminPolicyFiles");
+    expect(prep.content[0].text).toContain("Antigravity CLI");
   });
 
-  it("prepends attachment tokens to the prompt passed via -p", () => {
-    const prep = prepareGeminiRequest(
-      baseParams({
-        prompt: "describe this",
-        attachments: [realFile1, realFile2],
-      })
-    );
-    if (!("args" in prep)) throw new Error("expected args");
-    expect(prep.args[0]).toBe("-p");
-    expect(prep.args[1]).toBe(`@${realFile1} @${realFile2} describe this`);
-    // Effective prompt mirrors the mutated string.
-    expect(prep.effectivePrompt).toBe(`@${realFile1} @${realFile2} describe this`);
-  });
-
-  it("returns error response for missing attachment paths", () => {
-    const missing = join(tmp, "nope.png");
-    const prep = prepareGeminiRequest(baseParams({ attachments: [missing] }));
+  it("returns error response when attachments are set because agy has no attachment token contract", () => {
+    const prep = prepareGeminiRequest(baseParams({ attachments: [realFile1] }));
     expect("args" in prep).toBe(false);
     if ("args" in prep) throw new Error("expected error response");
-    expect(prep.content[0].text).toContain(missing);
+    expect(prep.content[0].text).toContain("attachments");
+    expect(prep.content[0].text).toContain("Antigravity CLI");
   });
 
-  it("preserves the -p ordering invariant when attachments are present", () => {
+  it("emits agy print-mode args before other flags", () => {
     const prep = prepareGeminiRequest(
       baseParams({
-        attachments: [realFile1],
         model: "flash",
         sandbox: true,
       })
     );
     if (!("args" in prep)) throw new Error("expected args");
-    // -p must still be first; sandbox / model flags come after.
-    expect(prep.args[0]).toBe("-p");
-    expect(prep.args[1].startsWith(`@${realFile1} `)).toBe(true);
+    expect(prep.args[0]).toBe("--print");
+    expect(prep.args[1]).toBe("hello");
     const remainder = prep.args.slice(2);
     expect(remainder).toContain("--model");
-    expect(remainder).toContain("-s");
+    expect(remainder).toContain("--sandbox");
   });
 });
 
-describe("Phase 4 slice γ — Gemini --skip-trust wiring", () => {
-  it("emits --skip-trust when skipTrust=true", () => {
+describe("Phase 4 slice γ — Antigravity rejects Gemini --skip-trust wiring", () => {
+  it("returns an error when skipTrust=true", () => {
     const prep = prepareGeminiRequest(baseParams({ skipTrust: true }));
-    if (!("args" in prep)) throw new Error("expected args");
-    expect(prep.args).toContain("--skip-trust");
+    expect("args" in prep).toBe(false);
+    if ("args" in prep) throw new Error("expected error response");
+    expect(prep.content[0].text).toContain("skipTrust");
   });
 
   it("does NOT emit --skip-trust when skipTrust=false", () => {
@@ -265,28 +238,24 @@ describe("Phase 4 slice γ — Gemini --skip-trust wiring", () => {
 });
 
 describe("Gemini --yolo wiring", () => {
-  it("emits --yolo when yolo=true (legacy, no approvalMode)", () => {
+  it("emits --dangerously-skip-permissions when yolo=true (legacy, no approvalMode)", () => {
     const prep = prepareGeminiRequest(baseParams({ yolo: true }));
     if (!("args" in prep)) throw new Error("expected args");
-    expect(prep.args).toContain("--yolo");
-    // No approval-mode emitted, so --yolo is the sole auto-approve signal.
+    expect(prep.args).toContain("--dangerously-skip-permissions");
+    // No approval-mode emitted, so the agy permission bypass is the sole auto-approve signal.
     expect(prep.args).not.toContain("--approval-mode");
   });
 
-  it("does NOT emit --yolo when yolo is omitted", () => {
+  it("does NOT emit --dangerously-skip-permissions when yolo is omitted", () => {
     const prep = prepareGeminiRequest(baseParams({}));
     if (!("args" in prep)) throw new Error("expected args");
-    expect(prep.args).not.toContain("--yolo");
+    expect(prep.args).not.toContain("--dangerously-skip-permissions");
   });
 
-  it("does NOT double-emit: yolo=true + approvalMode=yolo yields only --approval-mode yolo", () => {
+  it("emits one agy permission bypass for yolo=true + approvalMode=yolo", () => {
     const prep = prepareGeminiRequest(baseParams({ yolo: true, approvalMode: "yolo" }));
     if (!("args" in prep)) throw new Error("expected args");
-    const modeIdx = prep.args.indexOf("--approval-mode");
-    expect(modeIdx).toBeGreaterThan(-1);
-    expect(prep.args[modeIdx + 1]).toBe("yolo");
-    // The single-auto-approve-path invariant: --yolo is suppressed when
-    // --approval-mode yolo already covers it.
-    expect(prep.args).not.toContain("--yolo");
+    expect(prep.args.filter(arg => arg === "--dangerously-skip-permissions")).toHaveLength(1);
+    expect(prep.args).not.toContain("--approval-mode");
   });
 });

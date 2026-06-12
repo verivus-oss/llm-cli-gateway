@@ -4,7 +4,12 @@ import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import type { CliType } from "./session-manager.js";
 import { getProviderLoginGuidance, type ProviderLoginGuidance } from "./provider-login-guidance.js";
-import { envWithExtendedPath, getExtendedPath, resolveCommandForSpawn } from "./executor.js";
+import {
+  envWithExtendedPath,
+  getExtendedPath,
+  providerCommandName,
+  resolveCommandForSpawn,
+} from "./executor.js";
 
 export type ProviderLoginStatus = "authenticated" | "not_authenticated" | "unknown" | "not_checked";
 
@@ -39,9 +44,9 @@ const VERSION_ARGS: Record<CliType, string[]> = {
 export const PROVIDER_COMMANDS: Record<CliType, string> = {
   claude: "claude",
   codex: "codex",
-  gemini: "gemini",
+  gemini: providerCommandName("gemini"),
   grok: "grok",
-  mistral: "vibe",
+  mistral: providerCommandName("mistral"),
 };
 
 const LOGIN_CHECKS: Partial<Record<CliType, string[]>> = {
@@ -100,8 +105,8 @@ export function getProviderRuntimeStatus(provider: CliType): ProviderRuntimeStat
         credentialStore: store,
         detail:
           store === "present"
-            ? `Gemini auth detected via: ${matchedMethods.join(", ")}; contents were not inspected.`
-            : "Gemini CLI is installed, but no credential store or auth env vars were found (oauth_creds.json, GEMINI_API_KEY, GOOGLE_API_KEY, or GOOGLE_CLOUD_PROJECT+GOOGLE_GENAI_USE_VERTEXAI).",
+            ? `Antigravity auth detected via Gemini-compatible stores: ${matchedMethods.join(", ")}; contents were not inspected.`
+            : "Antigravity CLI is installed, but no Gemini-compatible credential store or auth env vars were found (oauth_creds.json, GEMINI_API_KEY, GOOGLE_API_KEY, or GOOGLE_CLOUD_PROJECT+GOOGLE_GENAI_USE_VERTEXAI).",
       },
     };
   }

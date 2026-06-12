@@ -4,6 +4,42 @@ All notable changes to the llm-cli-gateway project.
 
 ## Unreleased
 
+## [2.6.0] - 2026-06-12: Gemini provider on Google Antigravity CLI
+
+### Changed
+
+- **Gemini provider now runs through Google Antigravity CLI (`agy`)** instead of
+  the Google Gemini CLI. `gemini_request` / `gemini_request_async` spawn `agy`;
+  install via `curl -fsSL https://antigravity.google/cli/install.sh | bash`;
+  upgrade via `agy update` (explicit version targets unsupported); session resume
+  via `--conversation <id>` (`sessionId`) or `--continue` (`resumeLatest`). Models
+  pass to `agy --model` (e.g. `gemini-3-pro-preview`, `gemini-2.5-flash`, `pro`,
+  `flash`, `latest`).
+- `gemini_request` parameter surface tightened to Antigravity's capabilities:
+  `approvalMode` accepts only `default` and `yolo` (`auto_edit`/`plan` are
+  rejected); `allowedTools`, `mcpServers`, non-`text` `outputFormat`,
+  `policyFiles`, `adminPolicyFiles`, `attachments`, and `skipTrust` are rejected
+  with an explanatory error (retained in the schema for caller parity).
+  `includeDirs` (`--add-dir`) and `sandbox` (`--sandbox`) remain supported.
+- Customer-facing documentation (README, the llm-cli-gateway.dev site, install
+  guide, dev.to tutorial) and the MCP server instructions string updated to match
+  the Antigravity-backed behavior. Verified by a four-reviewer cross-LLM evidence
+  gate (Codex/Gemini/Grok/Mistral); see
+  `docs/reviews/2026-06-12-customer-docs-antigravity.*`.
+
+### Added
+
+- Reply text is mirrored into MCP `structuredContent.response` on provider tool
+  responses (Issue #1), alongside the unchanged `content[0].text`.
+- Contract-driven code generation for the Grok provider's argv and tool schema
+  (`src/provider-codegen.ts`), proven byte-identical to the prior hand-written
+  surface by golden/parity tests.
+- Async-job stall telemetry (Issue #21).
+
+### Upstream provider maintenance
+
+- Grok Build v0.2.38: local binary upgraded from 0.2.33; full `--probe-installed` contract + subcommand drift scan executed (live source fetch performed in the run that produced the referenced report). 40 top-level flags + 23 subcommand paths all clean (`extraVsContract: []`, `missingFromBinary: []` across the board per the snapshot). Refreshed `docs/upstream/snapshots/grok.json` (new help surface hash capturing 0.2.38 agent subcommand surface) and `docs/upstream/reports/2026-06-09-grok.md`. `UPSTREAM_CLI_CONTRACTS.grok` now has 18 conformance fixtures (added `grok-0.2.38-agent-surface` as a dated top-level example); no flag, enum, arity, permission-mode, sandbox, output-format, or resume-behaviour changes to encode in the primary contract. `npm run upstream:contracts` and targeted grok/upstream tests pass. (Cross-LLM reviews from Claude and Codex independently reproduced the diff, commands, and fixture behaviour via their own tool inspections of the sources.)
+
 ## [2.5.0] - 2026-06-08: Remote connector OAuth and workspaces
 
 - Added remote connector OAuth discovery and authorization-code support with

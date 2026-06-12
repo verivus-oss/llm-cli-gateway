@@ -235,11 +235,13 @@ npm install -g @openai/codex
 codex login
 ```
 
-### Gemini CLI
+### Gemini (Google Antigravity CLI)
+
+The Gemini provider runs through Google Antigravity CLI (`agy`).
 
 ```bash
-npm install -g @google/gemini-cli
-# Or: https://github.com/google-gemini/gemini-cli
+curl -fsSL https://antigravity.google/cli/install.sh | bash
+# Docs: https://antigravity.google/docs/cli-overview
 ```
 
 ### Grok Build CLI (xAI)
@@ -477,7 +479,7 @@ Fork an existing Codex session into a new branch (`codex fork <SESSION_ID|--last
 
 ##### `gemini_request`
 
-Execute a Gemini CLI request with session support.
+Execute a Google Antigravity CLI (`agy`) request with session support.
 
 **Parameters:**
 
@@ -486,18 +488,14 @@ Execute a Gemini CLI request with session support.
 - `sessionId` (string, optional): Session ID to resume
 - `resumeLatest` (boolean, optional): Resume the latest session automatically
 - `createNewSession` (boolean, optional): Always create a new session
-- `approvalMode` (string, optional): Gemini approval mode (`default|auto_edit|yolo|plan`) in legacy mode
+- `approvalMode` (string, optional): Antigravity approval mode in legacy mode. Only `default` (prompted execution) and `yolo` (emits `--dangerously-skip-permissions`) are accepted; `auto_edit` and `plan` are rejected with an error.
 - `approvalStrategy` (string, optional): `"legacy"` (default) or `"mcp_managed"`
 - `approvalPolicy` (string, optional): `"strict"`, `"balanced"`, or `"permissive"`
-- `mcpServers` (string[], optional): Allowed Gemini MCP server names
-- `allowedTools` (string[], optional): Restrict Gemini tools to this allow-list
-- `includeDirs` (string[], optional): Additional workspace directories for Gemini
-- `outputFormat` (string, optional): `text` (default), `json` (`-o json`), or `stream-json` (`-o stream-json`, NDJSON with usage extraction)
-- `sandbox` (boolean, optional): Run Gemini in sandbox mode (`-s`)
-- `policyFiles` / `adminPolicyFiles` (string[], optional): Policy / admin-policy file paths (one `--policy`/`--admin-policy` per file; paths must exist)
-- `attachments` (string[], optional): Absolute file paths prepended as `@<path>` tokens to the prompt
-- `skipTrust` (boolean, optional): Emit `--skip-trust` to trust the workspace for this session (required for headless runs in fresh workspaces)
-- `yolo` (boolean, optional): Auto-approve all; equivalent to `approvalMode: "yolo"`. Emits `--yolo` only when `--approval-mode yolo` is not already being emitted (never both)
+- `includeDirs` (string[], optional): Additional workspace directories (passed as `--add-dir`)
+- `sandbox` (boolean, optional): Run Antigravity in sandbox mode (`--sandbox`)
+- `outputFormat` (string, optional): `text` only. Antigravity print mode emits text; `json` and `stream-json` are rejected.
+- `mcpServers`, `allowedTools`, `policyFiles`, `adminPolicyFiles`, `attachments` (string[], optional) and `skipTrust` (boolean, optional): **Unsupported by Antigravity CLI** — non-empty values (or `skipTrust: true`) are rejected with an explanatory error. Retained in the schema for caller parity.
+- `yolo` (boolean, optional): Auto-approve all; equivalent to `approvalMode: "yolo"`. Emits `--dangerously-skip-permissions`
 - `worktree` (boolean|object, optional): Run inside a gateway-owned git worktree (slice λ)
 - `promptParts` (object, optional): Cache-aware structured prompt `{ system?, tools?, context?, task }`; mutually exclusive with `prompt`
 - `optimizePrompt` (boolean, optional): Optimize prompt for token efficiency, default: false
@@ -1046,7 +1044,7 @@ Plan or run an upgrade for one CLI.
 - Claude explicit target: `claude install <target>`
 - Codex latest: `codex update`
 - Codex explicit target: `npm install -g @openai/codex@<target>`
-- Gemini: `npm install -g @google/gemini-cli@<target>`
+- Gemini latest: `agy update` (Antigravity self-update; explicit version targets are unsupported)
 - Grok latest: `grok update`
 - Grok explicit target: `grok update --version <target>`
 - Mistral (Vibe): dispatches to the detected installer (`pip`/`uv`/`brew`); errors with guidance when none is detected (Vibe ships no self-update command)
@@ -1236,7 +1234,7 @@ Make sure the CLIs are installed and in your PATH:
 ```bash
 which claude
 which codex
-which gemini
+which agy
 ```
 
 The gateway extends PATH to include common locations:
@@ -1253,7 +1251,7 @@ If you encounter permission errors, ensure the CLI tools have proper permissions
 ```bash
 chmod +x $(which claude)
 chmod +x $(which codex)
-chmod +x $(which gemini)
+chmod +x $(which agy)
 ```
 
 ### Session Storage Issues
@@ -1306,7 +1304,7 @@ If you're vetting `llm-cli-gateway` through [Socket](https://socket.dev/npm/pack
 | Alert                            | Where                                                                                                                                                                                            | Why it's bounded                                                                                                                                                                                                                                                                                                                                             |
 | -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | **Network access**               | `src/http-transport.ts` opens an HTTP MCP transport when started via `npm run start:http`. `src/endpoint-exposure.ts` issues a HEAD probe to verify configured public/tunnel URLs. Socket also flagged `dist/upstream-contracts.js` in v1.17.2 from descriptive text, not a network call. | The transport binds to `127.0.0.1` by default and requires `LLM_GATEWAY_AUTH_TOKEN` to be set. The default stdio MCP entry point (`npm start`) opens no sockets. `src/upstream-contracts.ts` stores provider CLI metadata and imports no HTTP client APIs.                                                                                                  |
-| **Shell access**                 | `src/executor.ts` uses `child_process.spawn(cmd, args, …)` to invoke the underlying LLM CLIs.                                                                                                    | `spawn` is called with an argument array and **never** `shell: true`, so there is no shell interpolation path for caller input. The command name is restricted to an allow-list of known CLI binaries (`claude`, `codex`, `gemini`, `grok`, `vibe`).                                                                                                         |
+| **Shell access**                 | `src/executor.ts` uses `child_process.spawn(cmd, args, …)` to invoke the underlying LLM CLIs.                                                                                                    | `spawn` is called with an argument array and **never** `shell: true`, so there is no shell interpolation path for caller input. The command name is restricted to an allow-list of known CLI binaries (`claude`, `codex`, `agy`, `grok`, `vibe`).                                                                                                         |
 | **Uses eval**                    | None in our source. Transitive: `@modelcontextprotocol/sdk` → `ajv@8` uses `new Function(...)` in `ajv/dist/compile/index.js` to compile JSON Schema validators.                                 | This is ajv's standard codegen path. Only known schemas (defined in our source and the MCP SDK) flow into it; no caller-supplied data ever reaches the compiled function body.                                                                                                                                                                               |
 | **SQLite adapter isolation**     | Persistence uses Node's built-in `node:sqlite` module (no native binding, no install scripts) through a single adapter, `src/sqlite-driver.ts`.                                                  | `node:sqlite` is touched by exactly one production module (the adapter); every other module talks to SQLite through its typed surface. We never call any `db.pragma()` helper (it does not exist on `node:sqlite`); SQLite setup uses fixed literal `db.exec("PRAGMA ...")` statements. `npm run security:audit` fails the release if production code references `node:sqlite` outside the adapter or reintroduces a `.pragma()` call.                                                            |
 | **Dependency ownership**         | A handful of small transitive packages (e.g. `media-typer` via `@modelcontextprotocol/sdk`) trip Socket's "unstable ownership" or "obfuscated code" heuristics.                                  | These are pinned, well-known micro-deps in the Node ecosystem with no known issues. We pin direct override versions of `content-type` and `type-is` in `package.json#overrides`. As of 2.0.0 the prod graph carries no native module (`better-sqlite3` moved to devDependencies; `node:sqlite` is built into Node), eliminating the entire `prebuild-install`/`tar-fs`/`tar-stream` install-time chain. Our earlier direct dependency on `toml@3.0.0` was replaced with `smol-toml`.        |

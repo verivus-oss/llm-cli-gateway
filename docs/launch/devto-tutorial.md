@@ -22,8 +22,8 @@ npm install -g @anthropic-ai/claude-code
 npm install -g @openai/codex
 codex login
 
-# Gemini
-npm install -g @google/gemini-cli
+# Gemini (Google Antigravity CLI)
+curl -fsSL https://antigravity.google/cli/install.sh | bash
 ```
 
 You do not need all three. The gateway works with whichever CLIs you have installed.
@@ -87,7 +87,7 @@ Note: `fullAuto: true` is required for Codex. Without it, Codex runs in a restri
 ```json
 gemini_request({
   "prompt": "Security audit of src/auth/: check for injection vulnerabilities, authentication bypasses, data leaks, OWASP Top 10 violations, and crash-causing edge cases. Read the files directly.",
-  "model": "gemini-2.5-pro",
+  "model": "gemini-3-pro-preview",
   "optimizePrompt": true,
   "optimizeResponse": true
 })
@@ -179,7 +179,7 @@ session_create({
 })
 ```
 
-Subsequent `claude_request` calls with `continueSession: true` will use the Claude CLI's `--continue` flag, maintaining real conversation context. Gemini sessions use `--resume` for the same effect.
+Subsequent `claude_request` calls with `continueSession: true` will use the Claude CLI's `--continue` flag, maintaining real conversation context. Gemini (Antigravity) sessions use `--conversation <id>` when you pass `sessionId`, or `--continue` with `resumeLatest`.
 
 ```json
 claude_request({
@@ -205,7 +205,7 @@ The gateway scores the operation's risk and records an approval decision before 
 
 ## What This Is (and Is Not)
 
-**llm-cli-gateway wraps CLI binaries, not APIs.** It spawns `claude`, `codex`, and `gemini` as child processes. You get the full CLI experience: tool use, sandboxing, file access, your existing authentication and billing. There is no API key to configure for the gateway itself.
+**llm-cli-gateway wraps CLI binaries, not APIs.** It spawns `claude`, `codex`, and `agy` (Antigravity, for the Gemini provider) as child processes. You get the full CLI experience: tool use, sandboxing, file access, your existing authentication and billing. There is no API key to configure for the gateway itself.
 
 This means it does not work like LiteLLM or other API proxy tools. It cannot run in a cloud environment without the CLIs installed. It is designed for local development machines where you already have these tools.
 

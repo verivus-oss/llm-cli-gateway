@@ -503,7 +503,7 @@ describe("U22 session-provider enum (Layer 10)", () => {
   });
 });
 
-describe("U21 prepareGeminiRequest args ordering (Layer 9)", () => {
+describe("U21 prepareGeminiRequest agy args ordering (Layer 9)", () => {
   function baseParams() {
     return {
       prompt: "hello world",
@@ -513,32 +513,34 @@ describe("U21 prepareGeminiRequest args ordering (Layer 9)", () => {
     };
   }
 
-  it("emits -p as the first arg, with the prompt immediately after", () => {
+  it("emits --print as the first arg, with the prompt immediately after", () => {
     const prep = prepareGeminiRequest(baseParams());
     // prep is either CliRequestPrep with .args, or an ExtendedToolResponse on
     // approval denial. The legacy path with no MCP-managed approval cannot
     // produce a denial response, so .args must be present.
     expect("args" in prep).toBe(true);
     if (!("args" in prep)) throw new Error("expected args");
-    expect(prep.args[0]).toBe("-p");
+    expect(prep.args[0]).toBe("--print");
     expect(prep.args[1]).toBe("hello world");
   });
 
-  it("places -p prompt before any other flags (model, approval-mode, allowedTools)", () => {
+  it("places --print prompt before other supported agy flags", () => {
     const prep = prepareGeminiRequest({
       ...baseParams(),
       model: "flash",
       approvalMode: "yolo",
-      allowedTools: ["Write"],
+      includeDirs: ["/tmp"],
+      sandbox: true,
     });
     if (!("args" in prep)) throw new Error("expected args");
-    expect(prep.args[0]).toBe("-p");
+    expect(prep.args[0]).toBe("--print");
     expect(prep.args[1]).toBe("hello world");
-    // The remainder must include the flags, but none of them must precede -p.
+    // The remainder must include the flags, but none of them must precede --print.
     const remainder = prep.args.slice(2);
     expect(remainder).toContain("--model");
-    expect(remainder).toContain("--approval-mode");
-    expect(remainder).toContain("--allowed-tools");
+    expect(remainder).toContain("--add-dir");
+    expect(remainder).toContain("--sandbox");
+    expect(remainder).toContain("--dangerously-skip-permissions");
     // Prompt itself must not appear positionally anywhere later.
     expect(remainder).not.toContain("hello world");
   });
@@ -546,8 +548,8 @@ describe("U21 prepareGeminiRequest args ordering (Layer 9)", () => {
   it("never emits the prompt as a positional first argument", () => {
     const prep = prepareGeminiRequest(baseParams());
     if (!("args" in prep)) throw new Error("expected args");
-    // The first arg must be the -p flag, NOT the prompt itself.
+    // The first arg must be the --print flag, NOT the prompt itself.
     expect(prep.args[0]).not.toBe("hello world");
-    expect(prep.args[0]).toBe("-p");
+    expect(prep.args[0]).toBe("--print");
   });
 });

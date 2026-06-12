@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { executeCli } from "./executor.js";
+import { executeCli, providerCommandName } from "./executor.js";
 import type { Logger } from "./logger.js";
 import type { CliType } from "./session-manager.js";
 import { getProviderRuntimeStatus, type ProviderLoginStatus } from "./provider-status.js";
@@ -93,10 +93,7 @@ const VERSION_ARGS: Record<CliType, string[]> = {
   mistral: ["--version"],
 };
 
-const NPM_PACKAGES: Record<Exclude<CliType, "claude" | "grok" | "mistral">, string> = {
-  codex: "@openai/codex",
-  gemini: "@google/gemini-cli",
-};
+const CODEX_NPM_PACKAGE = "@openai/codex";
 
 export function buildCliUpgradePlan(
   cli: CliType,
@@ -164,18 +161,31 @@ export function buildCliUpgradePlan(
     };
   }
 
-  const packageName = cli === "codex" ? NPM_PACKAGES.codex : NPM_PACKAGES.gemini;
+  if (cli === "gemini") {
+    if (normalizedTarget !== "latest") {
+      throw new Error(
+        "Antigravity CLI upgrades support only the 'latest' target via 'agy update'."
+      );
+    }
+    return {
+      cli,
+      target: normalizedTarget,
+      command: "agy",
+      args: ["update"],
+      strategy: "self-update",
+      requiresNetwork: true,
+      note: "Gemini provider requests now run through Google Antigravity CLI (`agy`).",
+    };
+  }
+
   return {
     cli,
     target: normalizedTarget,
     command: "npm",
-    args: ["install", "-g", `${packageName}@${normalizedTarget}`],
+    args: ["install", "-g", `${CODEX_NPM_PACKAGE}@${normalizedTarget}`],
     strategy: "npm-global-install",
     requiresNetwork: true,
-    note:
-      cli === "codex"
-        ? "Explicit Codex targets use the documented npm package path; latest can use 'codex update'."
-        : "Gemini CLI does not expose a self-update command in the gateway-supported CLI surface, so upgrades use npm.",
+    note: "Explicit Codex targets use the documented npm package path; latest can use 'codex update'.",
   };
 }
 
@@ -185,7 +195,7 @@ export async function getCliVersion(cli: CliType): Promise<CliVersionInfo> {
     const status = getProviderRuntimeStatus(cli);
     return {
       cli,
-      command: cli,
+      command: status.command,
       args,
       installed: status.installed,
       version: status.version || undefined,
@@ -274,10 +284,11 @@ function buildMistralUpgradePlan(
 
 async function fallbackCliVersion(cli: CliType, args: string[]): Promise<CliVersionInfo | null> {
   try {
-    const result = await executeCli(cli, args, { timeout: 15_000 });
+    const command = providerCommandName(cli);
+    const result = await executeCli(command, args, { timeout: 15_000 });
     return {
       cli,
-      command: cli,
+      command,
       args,
       installed: true,
       version: extractVersion(result.stdout, result.stderr),

@@ -85,11 +85,11 @@ describe("REGRESSIONS Eα — registered tool outputFormat enum (slice ε)", () 
   );
 });
 
-// ─── REGRESSIONS Eβ — prepareGeminiRequest argv emission ───────────────
+// ─── REGRESSIONS Eβ — Antigravity text-only output guard ───────────────
 //
-// Falsifiability: removing the `outputFormat === "stream-json"` branch
-// fails Eβ-1; changing it to emit a different value fails Eβ-1 and Eβ-4.
-describe("REGRESSIONS Eβ — prepareGeminiRequest emits -o stream-json", () => {
+// Antigravity CLI has no Gemini-compatible `-o` output flag. The gateway keeps
+// the schema enum for compatibility but rejects non-text modes before spawn.
+describe("REGRESSIONS Eβ — prepareGeminiRequest rejects legacy Gemini output modes", () => {
   const baseParams = {
     prompt: "hello",
     approvalStrategy: "legacy" as const,
@@ -97,20 +97,18 @@ describe("REGRESSIONS Eβ — prepareGeminiRequest emits -o stream-json", () => 
     operation: "gemini_request",
   };
 
-  it("emits ['-o','stream-json'] as adjacent tokens when outputFormat=stream-json", () => {
+  it("rejects outputFormat=stream-json before argv emission", () => {
     const prep = prepareGeminiRequest({ ...baseParams, outputFormat: "stream-json" });
-    if (!("args" in prep)) throw new Error("expected args");
-    const idx = prep.args.indexOf("-o");
-    expect(idx).toBeGreaterThan(-1);
-    expect(prep.args[idx + 1]).toBe("stream-json");
+    expect("args" in prep).toBe(false);
+    if ("args" in prep) throw new Error("expected error response");
+    expect(prep.content[0].text).toContain("outputFormat");
   });
 
-  it("still emits ['-o','json'] when outputFormat=json (no regression)", () => {
+  it("rejects outputFormat=json before argv emission", () => {
     const prep = prepareGeminiRequest({ ...baseParams, outputFormat: "json" });
-    if (!("args" in prep)) throw new Error("expected args");
-    const idx = prep.args.indexOf("-o");
-    expect(idx).toBeGreaterThan(-1);
-    expect(prep.args[idx + 1]).toBe("json");
+    expect("args" in prep).toBe(false);
+    if ("args" in prep) throw new Error("expected error response");
+    expect(prep.content[0].text).toContain("outputFormat");
   });
 
   it("emits no -o token at all when outputFormat=text (the default)", () => {
@@ -119,11 +117,8 @@ describe("REGRESSIONS Eβ — prepareGeminiRequest emits -o stream-json", () => 
     expect(prep.args).not.toContain("-o");
   });
 
-  // REGRESSIONS D-style end-to-end: prepare → contract consistency.
-  // The exact regression class that bit slices α/γ/δ — a contract-table
-  // gap masking a real flag we emit.
-  it("argv from prepareGeminiRequest({outputFormat:'stream-json'}) passes validateUpstreamCliArgs", () => {
-    const prep = prepareGeminiRequest({ ...baseParams, outputFormat: "stream-json" });
+  it("argv from prepareGeminiRequest({outputFormat:'text'}) passes validateUpstreamCliArgs", () => {
+    const prep = prepareGeminiRequest({ ...baseParams, outputFormat: "text" });
     if (!("args" in prep)) throw new Error("expected args");
     const validation = validateUpstreamCliArgs("gemini", prep.args);
     expect(validation.ok, JSON.stringify(validation.violations)).toBe(true);
@@ -192,48 +187,34 @@ describe("REGRESSIONS Eδ — extractUsageAndCost routes outputFormat correctly"
   });
 });
 
-// ─── REGRESSIONS Eε — UPSTREAM_CLI_CONTRACTS gemini -o enum + fixture ──
+// ─── REGRESSIONS Eε — UPSTREAM_CLI_CONTRACTS Antigravity output guard ──
 //
-// Falsifiability: removing "stream-json" from the values array, or
-// dropping the conformance fixture, fails the matching assertion.
-describe("REGRESSIONS Eε — gemini contract accepts -o stream-json", () => {
-  it("validateUpstreamCliArgs accepts ['-p','x','-o','stream-json']", () => {
-    const validation = validateUpstreamCliArgs("gemini", ["-p", "x", "-o", "stream-json"]);
-    expect(validation.ok, JSON.stringify(validation.violations)).toBe(true);
-  });
-
-  it("validateUpstreamCliArgs rejects ['-p','x','-o','ndjson'] (still bounded)", () => {
-    const validation = validateUpstreamCliArgs("gemini", ["-p", "x", "-o", "ndjson"]);
+// Antigravity print mode has no `-o`; stale Gemini output flags must remain
+// rejected by the mechanical contract.
+describe("REGRESSIONS Eε — gemini-compatible contract rejects legacy -o output modes", () => {
+  it("validateUpstreamCliArgs rejects ['--print','x','-o','stream-json']", () => {
+    const validation = validateUpstreamCliArgs("gemini", ["--print", "x", "-o", "stream-json"]);
     expect(validation.ok).toBe(false);
   });
 
-  it("contract introspection: gemini.flags['-o'].values includes 'stream-json'", () => {
-    const flag = UPSTREAM_CLI_CONTRACTS.gemini.flags["-o"];
-    expect(flag).toBeDefined();
-    expect(flag.values).toContain("stream-json");
-    expect(flag.values).toContain("json");
+  it("validateUpstreamCliArgs rejects ['--print','x','-o','json']", () => {
+    const validation = validateUpstreamCliArgs("gemini", ["--print", "x", "-o", "json"]);
+    expect(validation.ok).toBe(false);
   });
 
-  // Eε-4: the round-1 Codex audit flagged a real gap here. The presence
-  // check below is necessary but not sufficient — under P-Eε-1 (revert
-  // `gemini.flags["-o"].values` back to `["json"]`) the fixture object
-  // still exists, so a `toContain("gemini-stream-json")` assertion
-  // stayed green even though the contract had silently broken. The
-  // mechanical assertion underneath actually runs the fixture through
-  // `validateUpstreamCliArgs` so the test goes red whenever the contract
-  // and the fixture drift apart.
-  it("gemini-stream-json fixture exists AND mechanically validates against the contract", () => {
-    const fixture = UPSTREAM_CLI_CONTRACTS.gemini.conformanceFixtures.find(
-      f => f.id === "gemini-stream-json"
-    );
-    expect(fixture, "gemini-stream-json fixture must be registered").toBeDefined();
-    expect(fixture?.expect).toBe("pass");
-    expect(fixture?.args).toEqual(["-p", "hello", "-o", "stream-json"]);
+  it("contract introspection: gemini.flags has no legacy '-o' entry", () => {
+    const flag = UPSTREAM_CLI_CONTRACTS.gemini.flags["-o"];
+    expect(flag).toBeUndefined();
+  });
 
-    // Mechanical end-to-end: the fixture must actually pass
-    // validateUpstreamCliArgs. If `stream-json` were removed from the
-    // -o enum (P-Eε-1) this assertion goes red even though the fixture
-    // object still exists in the array — closing the round-1 gap.
+  it("Antigravity minimal fixture exists AND mechanically validates against the contract", () => {
+    const fixture = UPSTREAM_CLI_CONTRACTS.gemini.conformanceFixtures.find(
+      f => f.id === "gemini-minimal"
+    );
+    expect(fixture, "gemini-minimal fixture must be registered").toBeDefined();
+    expect(fixture?.expect).toBe("pass");
+    expect(fixture?.args).toEqual(["--print", "hello"]);
+
     const validation = validateUpstreamCliArgs("gemini", fixture?.args as readonly string[]);
     expect(validation.ok, JSON.stringify(validation.violations)).toBe(true);
   });

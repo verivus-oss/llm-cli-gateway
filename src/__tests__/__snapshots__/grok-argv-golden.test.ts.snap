@@ -1,0 +1,103 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`grok argv golden (pre/post cutover parity) > always-approve path with named worktree string 1`] = `
+[
+  "-p",
+  "PROMPT",
+  "--model",
+  "grok-4",
+  "--always-approve",
+  "--effort",
+  "low",
+  "--allow",
+  "read",
+  "--worktree",
+  "feature-branch",
+]
+`;
+
+exports[`grok argv golden (pre/post cutover parity) > minimal prompt-only request 1`] = `
+[
+  "-p",
+  "PROMPT",
+]
+`;
+
+exports[`grok argv golden (pre/post cutover parity) > no covered flags, only specials 1`] = `
+[
+  "-p",
+  "PROMPT",
+  "--model",
+  "grok-4",
+  "--permission-mode",
+  "plan",
+  "--worktree",
+]
+`;
+
+exports[`grok argv golden (pre/post cutover parity) > permission-mode path with covered flags across every special boundary 1`] = `
+[
+  "-p",
+  "PROMPT",
+  "--model",
+  "grok-4",
+  "--output-format",
+  "json",
+  "--permission-mode",
+  "acceptEdits",
+  "--effort",
+  "high",
+  "--reasoning-effort",
+  "medium",
+  "--tools",
+  "Read,Edit",
+  "--disallowed-tools",
+  "Bash",
+  "--max-turns",
+  "9",
+  "--cwd",
+  "/tmp/wd",
+  "--sandbox",
+  "workspace-write",
+  "--rules",
+  "@rules.md",
+  "--system-prompt-override",
+  "be terse",
+  "--allow",
+  "read",
+  "--allow",
+  "write",
+  "--deny",
+  "exec",
+  "--compaction-mode",
+  "segments",
+  "--compaction-detail",
+  "verbose",
+  "--agent",
+  "reviewer",
+  "--best-of-n",
+  "3",
+  "--check",
+  "--disable-web-search",
+  "--todo-gate",
+  "--verbatim",
+  "--agents",
+  "{"reviewer":{"description":"d","prompt":"p"}}",
+  "--prompt-file",
+  "/tmp/p.txt",
+  "--prompt-json",
+  "[{"type":"text","text":"x"}]",
+  "--single",
+  "one-shot",
+  "--experimental-memory",
+  "--no-alt-screen",
+  "--no-memory",
+  "--no-plan",
+  "--no-subagents",
+  "--oauth",
+  "--restore-code",
+  "--leader-socket",
+  "/run/grok.sock",
+  "--worktree",
+]
+`;

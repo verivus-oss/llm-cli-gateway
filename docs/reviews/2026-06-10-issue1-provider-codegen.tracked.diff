@@ -1,0 +1,453 @@
+diff --git a/src/index.ts b/src/index.ts
+index 94901bd..50d0295 100644
+--- a/src/index.ts
++++ b/src/index.ts
+@@ -154,7 +154,18 @@ import {
+   getCliSubcommandContract,
+   probeInstalledCliContract,
+   serializeCliSubcommandContract,
++  UPSTREAM_CLI_CONTRACTS,
+ } from "./upstream-contracts.js";
++import {
++  buildArgvFromGeneration,
++  deriveZodShapeFromGeneration,
++  GROK_FLAG_GENERATION,
++  GROK_GEN_OUTPUT_FORMAT,
++  GROK_GEN_MAIN,
++  GROK_GEN_PROMPT_FILE,
++  GROK_GEN_SINGLE,
++  GROK_GEN_TAIL,
++} from "./provider-codegen.js";
+ import { entrypointFileURL } from "./entrypoint-url.js";
+ 
+ /**
+@@ -460,6 +471,53 @@ const CLI_TYPE_ENUM = z.enum(CLI_TYPES);
+  * upper bound — no plausible single agent loop exceeds 10k turns or 10k USD.
+  */
+ export const MAX_TURNS_SCHEMA = z.number().int().positive().safe().max(10_000);
++
++/**
++ * grok_request input fields derived from the grok contract + generation table
++ * (see src/provider-codegen.ts). Replaces 30 hand-written covered-flag field
++ * definitions in the tool registration; proven byte-identical (describe +
++ * validation) to the prior hand-written fields by grok-schema-golden.test.ts.
++ * The remaining grok_request fields (prompt, model, session, approval, agents,
++ * promptJson, nativeWorktree, …) stay hand-written — they need bespoke schemas.
++ */
++type GrokGeneratedField =
++  | "outputFormat"
++  | "effort"
++  | "reasoningEffort"
++  | "allowedTools"
++  | "disallowedTools"
++  | "maxTurns"
++  | "workingDir"
++  | "sandbox"
++  | "rules"
++  | "systemPromptOverride"
++  | "allow"
++  | "deny"
++  | "compactionMode"
++  | "compactionDetail"
++  | "agent"
++  | "bestOfN"
++  | "check"
++  | "disableWebSearch"
++  | "todoGate"
++  | "verbatim"
++  | "promptFile"
++  | "single"
++  | "experimentalMemory"
++  | "noAltScreen"
++  | "noMemory"
++  | "noPlan"
++  | "noSubagents"
++  | "oauth"
++  | "restoreCode"
++  | "leaderSocket";
++// Typed with the covered key union (values as ZodTypeAny) so the spread keeps
++// these keys present for the tool callback's destructure; the runtime values
++// come from the contract-derived shape (proven equivalent by the schema golden).
++const GROK_GENERATED_SHAPE = deriveZodShapeFromGeneration(
++  UPSTREAM_CLI_CONTRACTS.grok,
++  GROK_FLAG_GENERATION
++) as unknown as Record<GrokGeneratedField, z.ZodTypeAny>;
+ // Token budgets can legitimately exceed the agent-turn cap by orders of
+ // magnitude. Keep a finite operational guardrail while avoiding the 10k turn
+ // ceiling that would make large-context Vibe sessions unusable.
+@@ -1246,6 +1304,9 @@ function createErrorResponse(
+     content: [{ type: "text" as const, text: errorMessage }],
+     isError: true,
+     structuredContent: {
++      // Issue #1: mirror the error text (see buildCliResponse rationale) so a
++      // structuredContent-preferring client still surfaces the failure detail.
++      response: errorMessage,
+       correlationId: correlationId || null,
+       cli,
+       exitCode: code,
+@@ -2918,71 +2979,25 @@ export function prepareGrokRequest(
+   const effectiveAlwaysApprove =
+     params.approvalStrategy === "mcp_managed" ? true : Boolean(params.alwaysApprove);
+ 
++  // Contract-driven argv assembly. The covered request-level flags are emitted
++  // by `buildArgvFromGeneration` from the grok contract + generation runs (see
++  // src/provider-codegen.ts). The runs are interleaved with the five special
++  // flags (`--model`, permission, `--agents`, `--prompt-json`, `--worktree`)
++  // at their exact original positions, so output is byte-identical to the prior
++  // hand-written block (locked by grok-argv-golden.test.ts). Adding a clean
++  // request flag is now a single generation-table row, not a hand-edited
++  // conditional here.
++  const grokContract = UPSTREAM_CLI_CONTRACTS.grok;
++  const genParams = params as Record<string, unknown>;
+   const args = ["-p", effectivePrompt];
+   if (resolvedModel) args.push("--model", resolvedModel);
+-  if (params.outputFormat) args.push("--output-format", params.outputFormat);
++  args.push(...buildArgvFromGeneration(grokContract, GROK_GEN_OUTPUT_FORMAT, genParams));
+   if (effectiveAlwaysApprove) {
+     args.push("--always-approve");
+   } else if (params.permissionMode) {
+     args.push("--permission-mode", params.permissionMode);
+   }
+-  if (params.effort) args.push("--effort", params.effort);
+-  if (params.reasoningEffort) args.push("--reasoning-effort", params.reasoningEffort);
+-  if (params.allowedTools && params.allowedTools.length > 0) {
+-    args.push("--tools", params.allowedTools.join(","));
+-  }
+-  if (params.disallowedTools && params.disallowedTools.length > 0) {
+-    args.push("--disallowed-tools", params.disallowedTools.join(","));
+-  }
+-  if (params.maxTurns !== undefined) {
+-    args.push("--max-turns", String(params.maxTurns));
+-  }
+-  if (params.workingDir) {
+-    args.push("--cwd", params.workingDir);
+-  }
+-  if (params.sandbox) {
+-    args.push("--sandbox", params.sandbox);
+-  }
+-  if (params.rules) {
+-    args.push("--rules", params.rules);
+-  }
+-  if (params.systemPromptOverride) {
+-    args.push("--system-prompt-override", params.systemPromptOverride);
+-  }
+-  if (params.allow && params.allow.length > 0) {
+-    for (const rule of params.allow) {
+-      args.push("--allow", rule);
+-    }
+-  }
+-  if (params.deny && params.deny.length > 0) {
+-    for (const rule of params.deny) {
+-      args.push("--deny", rule);
+-    }
+-  }
+-  if (params.compactionMode) {
+-    args.push("--compaction-mode", params.compactionMode);
+-  }
+-  if (params.compactionDetail) {
+-    args.push("--compaction-detail", params.compactionDetail);
+-  }
+-  if (params.agent) {
+-    args.push("--agent", params.agent);
+-  }
+-  if (params.bestOfN !== undefined) {
+-    args.push("--best-of-n", String(params.bestOfN));
+-  }
+-  if (params.check) {
+-    args.push("--check");
+-  }
+-  if (params.disableWebSearch) {
+-    args.push("--disable-web-search");
+-  }
+-  if (params.todoGate) {
+-    args.push("--todo-gate");
+-  }
+-  if (params.verbatim) {
+-    args.push("--verbatim");
+-  }
++  args.push(...buildArgvFromGeneration(grokContract, GROK_GEN_MAIN, genParams));
+   if (params.agents !== undefined) {
+     if (typeof params.agents === "string") {
+       if (!params.agents.trim()) {
+@@ -3009,9 +3024,7 @@ export function prepareGrokRequest(
+       args.push("--agents", JSON.stringify(agentsResult.value));
+     }
+   }
+-  if (params.promptFile) {
+-    args.push("--prompt-file", params.promptFile);
+-  }
++  args.push(...buildArgvFromGeneration(grokContract, GROK_GEN_PROMPT_FILE, genParams));
+   if (params.promptJson !== undefined) {
+     const promptJsonValue =
+       typeof params.promptJson === "string" ? params.promptJson : JSON.stringify(params.promptJson);
+@@ -3026,33 +3039,8 @@ export function prepareGrokRequest(
+     }
+     args.push("--prompt-json", promptJsonValue);
+   }
+-  if (params.single) {
+-    args.push("--single", params.single);
+-  }
+-  if (params.experimentalMemory) {
+-    args.push("--experimental-memory");
+-  }
+-  if (params.noAltScreen) {
+-    args.push("--no-alt-screen");
+-  }
+-  if (params.noMemory) {
+-    args.push("--no-memory");
+-  }
+-  if (params.noPlan) {
+-    args.push("--no-plan");
+-  }
+-  if (params.noSubagents) {
+-    args.push("--no-subagents");
+-  }
+-  if (params.oauth) {
+-    args.push("--oauth");
+-  }
+-  if (params.restoreCode) {
+-    args.push("--restore-code");
+-  }
+-  if (params.leaderSocket) {
+-    args.push("--leader-socket", params.leaderSocket);
+-  }
++  args.push(...buildArgvFromGeneration(grokContract, GROK_GEN_SINGLE, genParams));
++  args.push(...buildArgvFromGeneration(grokContract, GROK_GEN_TAIL, genParams));
+   if (params.nativeWorktree === true) {
+     args.push("--worktree");
+   } else if (typeof params.nativeWorktree === "string" && params.nativeWorktree.length > 0) {
+@@ -3309,6 +3297,14 @@ function buildCliResponse(
+   const response: ExtendedToolResponse = {
+     content: [{ type: "text" as const, text: finalStdout }],
+     structuredContent: {
++      // Issue #1: mirror the model reply into structuredContent. These tools
++      // emit structuredContent without declaring an MCP outputSchema, so a
++      // spec-conformant client may treat structuredContent as authoritative and
++      // never surface content[0].text. Carrying the reply here keeps the model
++      // output visible to structuredContent-preferring clients. Holds the same
++      // text as content[0].text (any worktree banner prepended downstream is a
++      // gateway annotation, not model output, and is intentionally not mirrored).
++      response: finalStdout,
+       model: prep.resolvedModel || "default",
+       cli,
+       correlationId: corrId,
+@@ -3521,6 +3517,8 @@ function buildGrokApiToolResponse(args: {
+   const response: ExtendedToolResponse = {
+     content: [{ type: "text", text }],
+     structuredContent: {
++      // Issue #1: mirror the model reply (see buildCliResponse rationale).
++      response: text,
+       provider: "grok-api",
+       cli: "grok-api",
+       model: args.result.model || args.prep.resolvedModel,
+@@ -6774,10 +6772,11 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
+         "Cache-aware structured prompt: { system?, tools?, context?, task }. Mutually exclusive with prompt. Stable parts hash into cache_state for prefix-discipline tracking."
+       ),
+       model: z.string().optional().describe("Model name or alias (e.g. grok-build, latest)"),
+-      outputFormat: z
+-        .enum(["plain", "json", "streaming-json"])
+-        .optional()
+-        .describe("Output format (plain|json|streaming-json). Grok default is plain."),
++      // Covered request flags (outputFormat, effort, sandbox, compaction, the
++      // boolean toggles, …) are derived from the grok contract + generation
++      // table — see GROK_GENERATED_SHAPE / src/provider-codegen.ts. They are
++      // spread in here once instead of hand-listed; order is irrelevant to Zod.
++      ...GROK_GENERATED_SHAPE,
+       sessionId: z
+         .string()
+         .optional()
+@@ -6797,11 +6796,6 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
+         .enum(["default", "acceptEdits", "auto", "dontAsk", "bypassPermissions", "plan"])
+         .optional()
+         .describe("Grok permission mode"),
+-      effort: z
+-        .enum(["low", "medium", "high", "xhigh", "max"])
+-        .optional()
+-        .describe("Grok effort level"),
+-      reasoningEffort: z.string().optional().describe("Reasoning effort for reasoning models"),
+       approvalStrategy: z
+         .enum(["legacy", "mcp_managed"])
+         .default("legacy")
+@@ -6816,14 +6810,6 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
+         .describe(
+           "MCP server names for approval tracking (Grok manages its own MCP config via `grok mcp`)"
+         ),
+-      allowedTools: z
+-        .array(z.string())
+-        .optional()
+-        .describe("Allowed built-in tools (passed as --tools comma list)"),
+-      disallowedTools: z
+-        .array(z.string())
+-        .optional()
+-        .describe("Disallowed built-in tools (passed as --disallowed-tools comma list)"),
+       correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
+       optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution"),
+       optimizeResponse: z.boolean().default(false).describe("Optimize response output"),
+@@ -6840,139 +6826,18 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
+         .describe(
+           "Bypass dedup and force a fresh CLI run even if a recent identical request exists"
+         ),
+-      maxTurns: MAX_TURNS_SCHEMA.optional().describe(
+-        "Grok `--max-turns N`: cap on agent-loop iterations for cost / latency control (Phase 4 slice δ). Bounded to safe integers ≤ 10000."
+-      ),
+-      // Phase 4 slice ζ — Grok working-directory parity.
+-      workingDir: z
+-        .string()
+-        .min(1)
+-        .optional()
+-        .describe(
+-          "Grok --cwd <DIR>: working directory for this invocation. Lets headless callers run Grok against a directory other than the gateway process's cwd."
+-        ),
+-      // Phase 4 slice θ — Grok HIGH parity (sandbox, rules, system-prompt-override, allow, deny).
+-      sandbox: z
+-        .string()
+-        .min(1)
+-        .optional()
+-        .describe(
+-          "Grok --sandbox <PROFILE>: sandbox profile for filesystem and network access. Freeform per `grok --help` (no enum constraint on Grok 0.1.210); also settable via GROK_SANDBOX env var. Caller responsibility to pass a valid profile name."
+-        ),
+-      rules: z
+-        .string()
+-        .min(1)
+-        .optional()
+-        .describe(
+-          "Grok --rules <RULES>: extra rules to append to the system prompt. Supports `@file` prefix per `grok --help` to load from a file; gateway passes the value verbatim and lets Grok parse the prefix."
+-        ),
+-      systemPromptOverride: z
+-        .string()
+-        .min(1)
+-        .optional()
+-        .describe(
+-          "Grok --system-prompt-override <PROMPT>: replace the agent's system prompt entirely. Distinct from Claude's --system-prompt / --append-system-prompt (Grok has only one override flag, not a pair)."
+-        ),
+-      allow: z
+-        .array(z.string())
+-        .optional()
+-        .describe(
+-          'Grok --allow <RULE>: permission allow rules. Each entry is emitted as its own --allow instance (per `grok --help`: "Repeat to add multiple rules").'
+-        ),
+-      deny: z
+-        .array(z.string())
+-        .optional()
+-        .describe(
+-          'Grok --deny <RULE>: permission deny rules. Each entry is emitted as its own --deny instance (per `grok --help`: "Repeat to add multiple rules").'
+-        ),
+-      compactionMode: z
+-        .enum(["summary", "transcript", "segments"])
+-        .optional()
+-        .describe(
+-          "Grok --compaction-mode: summary (default; no pointer) | transcript (points at the raw transcript) | segments (persists per-segment markdown to grep). Sets GROK_COMPACTION_MODE."
+-        ),
+-      compactionDetail: z
+-        .enum(["none", "minimal", "balanced", "verbose"])
+-        .optional()
+-        .describe(
+-          "Grok --compaction-detail: verbatim segment detail (none|minimal|balanced|verbose, default verbose). Only affects `--compaction-mode segments`. Sets GROK_COMPACTION_DETAIL."
+-        ),
+-      agent: z
+-        .string()
+-        .min(1)
+-        .optional()
+-        .describe("Grok --agent <NAME>: agent name or definition file path."),
+-      bestOfN: MAX_TURNS_SCHEMA.optional().describe(
+-        "Grok --best-of-n <N>: run the task N ways in parallel and pick the best (headless only)."
+-      ),
+-      check: z
+-        .boolean()
+-        .optional()
+-        .describe("Grok --check: append a self-verification loop to the prompt (headless only)."),
+-      disableWebSearch: z
+-        .boolean()
+-        .optional()
+-        .describe("Grok --disable-web-search: disable web search and remote retrieval tools."),
+-      todoGate: z
+-        .boolean()
+-        .optional()
+-        .describe(
+-          "Grok --todo-gate: enable runtime turn-end TodoGate for this session (session-scoped, not persisted)."
+-        ),
+-      verbatim: z
+-        .boolean()
+-        .optional()
+-        .describe(
+-          "Grok --verbatim: send the prompt exactly as given. Also skips gateway optimizePrompt when true."
+-        ),
+       agents: z
+         .union([z.string().min(1), z.record(z.string(), z.record(z.string(), z.unknown()))])
+         .optional()
+         .describe(
+           "Grok --agents <JSON>: inline subagent definitions (JSON string or name → { description, prompt, … } map)."
+         ),
+-      promptFile: z
+-        .string()
+-        .min(1)
+-        .optional()
+-        .describe("Grok --prompt-file <PATH>: single-turn prompt loaded from a file."),
+       promptJson: z
+         .union([z.string(), z.array(z.unknown()), z.record(z.string(), z.unknown())])
+         .optional()
+         .describe(
+           "Grok --prompt-json <JSON>: single-turn prompt JSON blocks (string or serializable value)."
+         ),
+-      single: z
+-        .string()
+-        .min(1)
+-        .optional()
+-        .describe("Grok --single <PROMPT>: single-turn prompt (in addition to gateway -p)."),
+-      experimentalMemory: z
+-        .boolean()
+-        .optional()
+-        .describe("Grok --experimental-memory: enable cross-session memory."),
+-      noAltScreen: z
+-        .boolean()
+-        .optional()
+-        .describe("Grok --no-alt-screen: run inline without alt screen."),
+-      noMemory: z.boolean().optional().describe("Grok --no-memory: disable cross-session memory."),
+-      noPlan: z.boolean().optional().describe("Grok --no-plan: disable plan mode."),
+-      noSubagents: z
+-        .boolean()
+-        .optional()
+-        .describe("Grok --no-subagents: disable subagent spawning."),
+-      oauth: z.boolean().optional().describe("Grok --oauth: use OAuth during authentication."),
+-      restoreCode: z
+-        .boolean()
+-        .optional()
+-        .describe("Grok --restore-code: check out the original session commit when resuming."),
+-      leaderSocket: z
+-        .string()
+-        .min(1)
+-        .optional()
+-        .describe(
+-          "Grok 0.2.32+ --leader-socket <PATH>: custom leader socket path (default ~/.grok/leader.sock). Targets an isolated leader process, e.g. a local/branch Grok build; name it ~/.grok/leader-*.sock to keep `grok leader list/kill` discovery working."
+-        ),
+       nativeWorktree: z
+         .union([z.boolean(), z.string().min(1)])
+         .optional()
+diff --git a/src/upstream-contracts.ts b/src/upstream-contracts.ts
+index 635e2dd..fa434e1 100644
+--- a/src/upstream-contracts.ts
++++ b/src/upstream-contracts.ts
+@@ -1420,6 +1420,9 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
+           "--xai-api-base-url",
+         ],
+         {
++          // Grok 0.2.38: expanded agent subcommand surface (profile, reauth, grok-ws-*,
++          // leader/no-leader controls, xai-api-base etc.). Tracked explicitly for
++          // help-surface drift detection in subcommand catalog (probe-installed).
+           children: {
+             stdio: subcommand(
+               ["agent", "stdio"],
+@@ -1902,6 +1905,13 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
+         args: ["-p", "hello", "--leader-socket"],
+         expect: "fail",
+       },
++      {
++        id: "grok-0.2.38-agent-surface",
++        description:
++          "Grok 0.2.38: top-level --agent + --leader-socket co-occurrence accepted (dated example using flags current at 0.2.38; the agent subcommand expansion flags e.g. --agent-profile/--reauth/--grok-ws-* are listed in the subcommand contract declaration for --probe-installed drift tracking and are not part of this primary-path fixture's argv)",
++        args: ["-p", "hello", "--agent", "reviewer", "--leader-socket", "/tmp/leader.sock"],
++        expect: "pass",
++      },
+     ],
+   },
+   mistral: {

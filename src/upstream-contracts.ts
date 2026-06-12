@@ -1189,89 +1189,61 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
   },
   gemini: {
     cli: "gemini",
-    executable: "gemini",
-    upstream: "Google Gemini CLI",
+    executable: "agy",
+    upstream: "Google Antigravity CLI",
     upstreamMetadata: {
       sourceUrls: [
-        "https://geminicli.com/docs/changelogs/",
-        "https://github.com/google-gemini/gemini-cli/releases",
+        "https://antigravity.google/docs/cli-overview",
+        "https://github.com/google-antigravity/antigravity-cli/releases",
       ],
-      packageName: "@google/gemini-cli",
-      repo: "https://github.com/google-gemini/gemini-cli",
-      installDocsUrl: "https://geminicli.com/docs/",
-      releaseChannel: "npm",
-      watchCategories: ["flags", "approval-modes", "output-formats", "session-resume"],
+      repo: "https://github.com/google-antigravity/antigravity-cli",
+      installDocsUrl: "https://antigravity.google/docs/cli-getting-started",
+      releaseChannel: "vendor",
+      watchCategories: ["flags", "permissions", "session-resume", "subcommands"],
     },
     helpArgs: [["--help"]],
     subcommands: {
-      mcp: subcommand(
-        ["mcp"],
-        "Manage Gemini MCP server configuration.",
+      changelog: subcommand(
+        ["changelog"],
+        "Show Antigravity CLI changelog and release notes.",
+        "read_only",
+        [],
+        { tokenCost: "small" }
+      ),
+      install: subcommand(
+        ["install"],
+        "Configure Antigravity CLI environment paths and shell settings.",
         "writes_local_config",
-        ["--debug"],
+        ["--dir", "--skip-aliases", "--skip-path"],
         {
-          flagArities: { "--debug": "none" },
+          flagArities: { "--dir": "one", "--skip-aliases": "none", "--skip-path": "none" },
         }
       ),
-      extensions: subcommand(
-        ["extensions"],
-        "Manage Gemini extensions.",
-        "writes_local_config",
-        ["--debug"],
-        {
-          aliases: ["extension"],
-          flagArities: { "--debug": "none" },
-        }
-      ),
-      extension: subcommand(
-        ["extension"],
-        "Alias for Gemini extension management.",
-        "writes_local_config",
-        ["--debug"],
-        {
-          aliases: ["extensions"],
-          flagArities: { "--debug": "none" },
-        }
-      ),
-      skills: subcommand(["skills"], "Manage Gemini skills.", "writes_local_config", ["--debug"], {
-        aliases: ["skill"],
-        flagArities: { "--debug": "none" },
+      models: subcommand(["models"], "List available Antigravity models.", "read_only", [], {
+        exposure: "mcp_readonly",
+        tokenCost: "small",
       }),
-      skill: subcommand(
-        ["skill"],
-        "Alias for Gemini skill management.",
-        "writes_local_config",
-        ["--debug"],
-        {
-          aliases: ["skills"],
-          flagArities: { "--debug": "none" },
-        }
-      ),
-      hooks: subcommand(["hooks"], "Manage Gemini hooks.", "writes_local_config", ["--debug"], {
-        aliases: ["hook"],
-        flagArities: { "--debug": "none" },
+      plugin: subcommand(["plugin"], "Manage Antigravity plugins.", "writes_local_config", [], {
+        aliases: ["plugins"],
       }),
-      hook: subcommand(
-        ["hook"],
-        "Alias for Gemini hook management.",
+      plugins: subcommand(
+        ["plugins"],
+        "Alias for Antigravity plugin management.",
         "writes_local_config",
-        ["--debug"],
+        [],
         {
-          aliases: ["hooks"],
-          flagArities: { "--debug": "none" },
+          aliases: ["plugin"],
         }
       ),
-      gemma: subcommand(
-        ["gemma"],
-        "Run Gemini Gemma local-model helper surfaces.",
-        "executes_agent",
-        ["--debug"],
-        {
-          flagArities: { "--debug": "none" },
-        }
+      update: subcommand(
+        ["update"],
+        "Update Antigravity CLI to the current release.",
+        "writes_local_config",
+        [],
+        { tokenCost: "small" }
       ),
     },
-    maxPositionals: 0,
+    maxPositionals: 1,
     mcpTools: ["gemini_request", "gemini_request_async"],
     mcpParameters: [
       "prompt",
@@ -1295,96 +1267,65 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       "yolo",
     ],
     flags: {
-      "-p": { arity: "one", description: "Prompt text" },
+      "--print": { arity: "none", description: "Run a single prompt non-interactively" },
+      "-p": { arity: "none", description: "Short alias for --print" },
+      "--prompt": { arity: "none", description: "Alias for --print" },
       "--model": { arity: "one", description: "Model selector" },
-      "--approval-mode": {
-        arity: "one",
-        values: ["default", "auto_edit", "yolo", "plan"],
-        description: "Approval mode",
-      },
-      "--allowed-tools": { arity: "one", description: "Allowed tool" },
-      "--allowed-mcp-server-names": { arity: "one", description: "Allowed MCP server" },
-      "--include-directories": { arity: "one", description: "Included directory" },
-      "-s": { arity: "none", description: "Sandbox mode" },
-      "--policy": { arity: "one", description: "Policy file path" },
-      "--admin-policy": { arity: "one", description: "Admin policy file path" },
-      "-o": {
-        arity: "one",
-        values: ["json", "stream-json"],
-        description: "Output format (Phase 4 slice ε adds stream-json)",
-      },
-      "--resume": { arity: "one", description: "Resume session" },
-      "--skip-trust": {
+      "--add-dir": { arity: "one", description: "Additional workspace directory" },
+      "--sandbox": { arity: "none", description: "Run with terminal sandbox restrictions" },
+      "--dangerously-skip-permissions": {
         arity: "none",
-        description: "Trust workspace for this session (Phase 4 slice γ)",
+        description: "Auto-approve all tool permission requests without prompting",
       },
-      "--yolo": {
-        arity: "none",
-        description:
-          "Auto-approve all actions (gemini -y/--yolo). Functionally equivalent to --approval-mode yolo; the gateway emits at most one of the two.",
-      },
+      "--conversation": { arity: "one", description: "Resume a previous conversation by ID" },
+      "--continue": { arity: "none", description: "Continue the most recent conversation" },
+      "-c": { arity: "none", description: "Short alias for --continue" },
     },
-    // Gemini CLI 0.45.x --help surface the gateway deliberately does not
-    // emit. Long-form aliases of declared short flags (--prompt for -p,
-    // --sandbox for -s, --output-format for -o), ACP/extension/session
-    // management, and debug switches. Probe-acknowledgement only — never an
-    // argv allowlist.
+    // Antigravity CLI flags the gateway deliberately does not emit. These are
+    // probe acknowledgements only — never an argv allowlist.
     acknowledgedUpstreamFlags: [
-      "--accept-raw-output-risk",
-      "--acp",
-      "--debug",
-      "--delete-session",
-      "--experimental-acp",
-      "--extensions",
-      "--list-extensions",
-      "--list-sessions",
-      "--output-format", // long form of declared -o
-      "--prompt", // long form of declared -p
       "--prompt-interactive",
-      "--raw-output",
-      "--sandbox", // long form of declared -s
-      "--screen-reader",
-      "--session-file",
-      "--session-id",
+      "-i",
+      "--print-timeout",
+      "--log-file",
       "--version",
-      "--worktree",
     ],
     env: {},
     conformanceFixtures: [
       {
         id: "gemini-minimal",
-        description: "Minimal prompt request",
-        args: ["-p", "hello"],
+        description: "Minimal Antigravity print-mode prompt request",
+        args: ["--print", "hello"],
         expect: "pass",
       },
       {
         id: "gemini-unsupported-flag",
         description: "Unsupported flag is rejected before spawn",
-        args: ["-p", "hello", "--not-a-gemini-flag"],
+        args: ["--print", "hello", "--not-a-gemini-flag"],
         expect: "fail",
       },
       {
-        id: "gemini-skip-trust",
-        description: "Phase 4 slice γ: --skip-trust is accepted",
-        args: ["-p", "hello", "--skip-trust"],
+        id: "gemini-antigravity-workspace-flags",
+        description: "Antigravity workspace and sandbox flags are accepted",
+        args: ["--print", "hello", "--add-dir", "/tmp", "--sandbox"],
         expect: "pass",
       },
       {
         id: "gemini-yolo",
-        description: "--yolo (auto-approve all) is accepted",
-        args: ["-p", "hello", "--yolo"],
+        description: "Antigravity permission bypass is accepted",
+        args: ["--print", "hello", "--dangerously-skip-permissions"],
         expect: "pass",
       },
       {
-        id: "gemini-stream-json",
-        description: "Phase 4 slice ε: -o stream-json is accepted",
-        args: ["-p", "hello", "-o", "stream-json"],
+        id: "gemini-conversation",
+        description: "Antigravity conversation resume is accepted",
+        args: ["--print", "hello", "--conversation", "user-session"],
         expect: "pass",
       },
       {
-        id: "gemini-output-format-invalid",
-        description: "Phase 4 slice ε: -o ndjson is rejected (not in contract enum)",
-        args: ["-p", "hello", "-o", "ndjson"],
+        id: "gemini-legacy-output-format-rejected",
+        description: "Legacy Gemini JSON output flag is rejected",
+        args: ["--print", "hello", "-o", "json"],
         expect: "fail",
       },
     ],
@@ -1420,6 +1361,9 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
           "--xai-api-base-url",
         ],
         {
+          // Grok 0.2.38: expanded agent subcommand surface (profile, reauth, grok-ws-*,
+          // leader/no-leader controls, xai-api-base etc.). Tracked explicitly for
+          // help-surface drift detection in subcommand catalog (probe-installed).
           children: {
             stdio: subcommand(
               ["agent", "stdio"],
@@ -1901,6 +1845,13 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         description: "Grok 0.2.32: --leader-socket without a path is rejected (arity one)",
         args: ["-p", "hello", "--leader-socket"],
         expect: "fail",
+      },
+      {
+        id: "grok-0.2.38-agent-surface",
+        description:
+          "Grok 0.2.38: top-level --agent + --leader-socket co-occurrence accepted (dated example using flags current at 0.2.38; the agent subcommand expansion flags e.g. --agent-profile/--reauth/--grok-ws-* are listed in the subcommand contract declaration for --probe-installed drift tracking and are not part of this primary-path fixture's argv)",
+        args: ["-p", "hello", "--agent", "reviewer", "--leader-socket", "/tmp/leader.sock"],
+        expect: "pass",
       },
     ],
   },

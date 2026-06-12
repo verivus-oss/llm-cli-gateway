@@ -70,10 +70,10 @@ cadence_days = 7
 [providers.gemini]
 cli = "gemini"
 source_urls = [
-  "https://geminicli.com/docs/changelogs/",
-  "https://github.com/google-gemini/gemini-cli/releases",
+  "https://antigravity.google/docs/cli-overview",
+  "https://github.com/google-antigravity/antigravity-cli/releases",
 ]
-watch_categories = ["flags", "approval-modes", "output-formats", "session-resume"]
+watch_categories = ["flags", "permissions", "session-resume", "subcommands"]
 cadence_days = 7
 
 [providers.grok]

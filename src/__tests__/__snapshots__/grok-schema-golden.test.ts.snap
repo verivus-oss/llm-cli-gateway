@@ -1,0 +1,36 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`grok schema fidelity (pre/post cutover) > covered-field describe text is preserved 1`] = `
+{
+  "agent": "Grok --agent <NAME>: agent name or definition file path.",
+  "allow": "Grok --allow <RULE>: permission allow rules. Each entry is emitted as its own --allow instance (per \`grok --help\`: "Repeat to add multiple rules").",
+  "allowedTools": "Allowed built-in tools (passed as --tools comma list)",
+  "bestOfN": "Grok --best-of-n <N>: run the task N ways in parallel and pick the best (headless only).",
+  "check": "Grok --check: append a self-verification loop to the prompt (headless only).",
+  "compactionDetail": "Grok --compaction-detail: verbatim segment detail (none|minimal|balanced|verbose, default verbose). Only affects \`--compaction-mode segments\`. Sets GROK_COMPACTION_DETAIL.",
+  "compactionMode": "Grok --compaction-mode: summary (default; no pointer) | transcript (points at the raw transcript) | segments (persists per-segment markdown to grep). Sets GROK_COMPACTION_MODE.",
+  "deny": "Grok --deny <RULE>: permission deny rules. Each entry is emitted as its own --deny instance (per \`grok --help\`: "Repeat to add multiple rules").",
+  "disableWebSearch": "Grok --disable-web-search: disable web search and remote retrieval tools.",
+  "disallowedTools": "Disallowed built-in tools (passed as --disallowed-tools comma list)",
+  "effort": "Grok effort level",
+  "experimentalMemory": "Grok --experimental-memory: enable cross-session memory.",
+  "leaderSocket": "Grok 0.2.32+ --leader-socket <PATH>: custom leader socket path (default ~/.grok/leader.sock). Targets an isolated leader process, e.g. a local/branch Grok build; name it ~/.grok/leader-*.sock to keep \`grok leader list/kill\` discovery working.",
+  "maxTurns": "Grok \`--max-turns N\`: cap on agent-loop iterations for cost / latency control (Phase 4 slice δ). Bounded to safe integers ≤ 10000.",
+  "noAltScreen": "Grok --no-alt-screen: run inline without alt screen.",
+  "noMemory": "Grok --no-memory: disable cross-session memory.",
+  "noPlan": "Grok --no-plan: disable plan mode.",
+  "noSubagents": "Grok --no-subagents: disable subagent spawning.",
+  "oauth": "Grok --oauth: use OAuth during authentication.",
+  "outputFormat": "Output format (plain|json|streaming-json). Grok default is plain.",
+  "promptFile": "Grok --prompt-file <PATH>: single-turn prompt loaded from a file.",
+  "reasoningEffort": "Reasoning effort for reasoning models",
+  "restoreCode": "Grok --restore-code: check out the original session commit when resuming.",
+  "rules": "Grok --rules <RULES>: extra rules to append to the system prompt. Supports \`@file\` prefix per \`grok --help\` to load from a file; gateway passes the value verbatim and lets Grok parse the prefix.",
+  "sandbox": "Grok --sandbox <PROFILE>: sandbox profile for filesystem and network access. Freeform per \`grok --help\` (no enum constraint on Grok 0.1.210); also settable via GROK_SANDBOX env var. Caller responsibility to pass a valid profile name.",
+  "single": "Grok --single <PROMPT>: single-turn prompt (in addition to gateway -p).",
+  "systemPromptOverride": "Grok --system-prompt-override <PROMPT>: replace the agent's system prompt entirely. Distinct from Claude's --system-prompt / --append-system-prompt (Grok has only one override flag, not a pair).",
+  "todoGate": "Grok --todo-gate: enable runtime turn-end TodoGate for this session (session-scoped, not persisted).",
+  "verbatim": "Grok --verbatim: send the prompt exactly as given. Also skips gateway optimizePrompt when true.",
+  "workingDir": "Grok --cwd <DIR>: working directory for this invocation. Lets headless callers run Grok against a directory other than the gateway process's cwd.",
+}
+`;

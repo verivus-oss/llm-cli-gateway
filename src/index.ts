@@ -17,7 +17,7 @@ import {
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
 import { z } from "zod/v3";
-import { executeCli, killAllProcessGroups } from "./executor.js";
+import { executeCli, killAllProcessGroups, providerCommandName } from "./executor.js";
 import { parseStreamJson } from "./stream-json-parser.js";
 import { parseCodexJsonStream } from "./codex-json-parser.js";
 import { parseGeminiJson, parseGeminiStreamJson } from "./gemini-json-parser.js";
@@ -154,7 +154,18 @@ import {
   getCliSubcommandContract,
   probeInstalledCliContract,
   serializeCliSubcommandContract,
+  UPSTREAM_CLI_CONTRACTS,
 } from "./upstream-contracts.js";
+import {
+  buildArgvFromGeneration,
+  deriveZodShapeFromGeneration,
+  GROK_FLAG_GENERATION,
+  GROK_GEN_OUTPUT_FORMAT,
+  GROK_GEN_MAIN,
+  GROK_GEN_PROMPT_FILE,
+  GROK_GEN_SINGLE,
+  GROK_GEN_TAIL,
+} from "./provider-codegen.js";
 import { entrypointFileURL } from "./entrypoint-url.js";
 
 /**
@@ -351,7 +362,7 @@ Other: list_models, cli_versions, upstream_contracts, provider_subcommands_* (re
 
 Key behaviors:
 ${deferralLine}
-- Sessions: Claude --continue, Gemini --resume, Grok --resume/--continue, Mistral --resume/--continue (current Vibe defaults session logging on; doctor flags explicit session_logging.enabled=false), Codex \`exec resume <ID>\` / \`exec resume --last\` (all real CLI continuity). For Codex, sessionId must be a real Codex UUID (from ~/.codex/sessions/); gateway-generated gw-* IDs are rejected.
+- Sessions: Claude --continue, Gemini (Antigravity) --conversation <id>/--continue, Grok --resume/--continue, Mistral --resume/--continue (current Vibe defaults session logging on; doctor flags explicit session_logging.enabled=false), Codex \`exec resume <ID>\` / \`exec resume --last\` (all real CLI continuity). For Codex, sessionId must be a real Codex UUID (from ~/.codex/sessions/); gateway-generated gw-* IDs are rejected.
 - Approval gates: opt-in via approvalStrategy:"mcp_managed".
 - Upstream drift detection: After upgrading any provider CLI (especially grok), use upstream_contracts with probeInstalled:true and provider_subcommand_drift for declared subcommand help surfaces. Probes are safe, read-only --help checks.
 - Idle timeout kills stuck processes (default 10min, configurable via idleTimeoutMs).
@@ -460,6 +471,53 @@ const CLI_TYPE_ENUM = z.enum(CLI_TYPES);
  * upper bound — no plausible single agent loop exceeds 10k turns or 10k USD.
  */
 export const MAX_TURNS_SCHEMA = z.number().int().positive().safe().max(10_000);
+
+/**
+ * grok_request input fields derived from the grok contract + generation table
+ * (see src/provider-codegen.ts). Replaces 30 hand-written covered-flag field
+ * definitions in the tool registration; proven byte-identical (describe +
+ * validation) to the prior hand-written fields by grok-schema-golden.test.ts.
+ * The remaining grok_request fields (prompt, model, session, approval, agents,
+ * promptJson, nativeWorktree, …) stay hand-written — they need bespoke schemas.
+ */
+type GrokGeneratedField =
+  | "outputFormat"
+  | "effort"
+  | "reasoningEffort"
+  | "allowedTools"
+  | "disallowedTools"
+  | "maxTurns"
+  | "workingDir"
+  | "sandbox"
+  | "rules"
+  | "systemPromptOverride"
+  | "allow"
+  | "deny"
+  | "compactionMode"
+  | "compactionDetail"
+  | "agent"
+  | "bestOfN"
+  | "check"
+  | "disableWebSearch"
+  | "todoGate"
+  | "verbatim"
+  | "promptFile"
+  | "single"
+  | "experimentalMemory"
+  | "noAltScreen"
+  | "noMemory"
+  | "noPlan"
+  | "noSubagents"
+  | "oauth"
+  | "restoreCode"
+  | "leaderSocket";
+// Typed with the covered key union (values as ZodTypeAny) so the spread keeps
+// these keys present for the tool callback's destructure; the runtime values
+// come from the contract-derived shape (proven equivalent by the schema golden).
+const GROK_GENERATED_SHAPE = deriveZodShapeFromGeneration(
+  UPSTREAM_CLI_CONTRACTS.grok,
+  GROK_FLAG_GENERATION
+) as unknown as Record<GrokGeneratedField, z.ZodTypeAny>;
 // Token budgets can legitimately exceed the agent-turn cap by orders of
 // magnitude. Keep a finite operational guardrail while avoiding the 10k turn
 // ceiling that would make large-context Vibe sessions unusable.
@@ -720,7 +778,7 @@ async function awaitJobOrDefer(
     // Deferral disabled — SYNC_DEADLINE_MS=0 is the explicit opt-out; the
     // derived gate covers backend=none and storeless runtimes.
     // Note: direct execution bypasses dedup. forceRefresh is implied.
-    const command = cli === "mistral" ? "vibe" : cli;
+    const command = providerCommandName(cli);
     try {
       return await executeCli(command, args, {
         idleTimeout: idleTimeoutMs,
@@ -1246,6 +1304,9 @@ function createErrorResponse(
     content: [{ type: "text" as const, text: errorMessage }],
     isError: true,
     structuredContent: {
+      // Issue #1: mirror the error text (see buildCliResponse rationale) so a
+      // structuredContent-preferring client still surfaces the failure detail.
+      response: errorMessage,
       correlationId: correlationId || null,
       cli,
       exitCode: code,
@@ -2042,7 +2103,7 @@ export function prepareClaudeRequest(
     effectivePrompt = optimized;
   }
 
-  const requestedMcpServers = normalizeMcpServers(params.mcpServers);
+  const requestedMcpServers = params.mcpServers ? [...new Set(params.mcpServers)] : [];
   const mcpConfigResolution = resolveClaudeMcpConfig(
     params.operation,
     corrId,
@@ -2381,7 +2442,7 @@ export function prepareCodexRequest(
     effectivePrompt = optimized;
   }
 
-  const requestedMcpServers = normalizeMcpServers(params.mcpServers);
+  const requestedMcpServers = params.mcpServers ? [...new Set(params.mcpServers)] : [];
 
   let approvalDecision: ApprovalRecord | null = null;
   if (params.approvalStrategy === "mcp_managed") {
@@ -2627,7 +2688,7 @@ export function prepareGeminiRequest(
     effectivePrompt = optimized;
   }
 
-  const requestedMcpServers = normalizeMcpServers(params.mcpServers);
+  const requestedMcpServers = params.mcpServers ? [...new Set(params.mcpServers)] : [];
 
   let approvalDecision: ApprovalRecord | null = null;
   if (params.approvalStrategy === "mcp_managed") {
@@ -2651,86 +2712,61 @@ export function prepareGeminiRequest(
   const effectiveApprovalMode =
     params.approvalStrategy === "mcp_managed" ? "yolo" : params.approvalMode;
 
-  // U27: Validate high-impact policy paths and prepend attachment tokens
-  // BEFORE the `-p` pair is emitted, preserving the U21 ordering invariant.
-  const highImpact = prepareGeminiHighImpactFlags({
-    sandbox: params.sandbox,
-    policyFiles: params.policyFiles,
-    adminPolicyFiles: params.adminPolicyFiles,
-  });
-  if (highImpact.missingPolicyPath) {
-    return createErrorResponse(
+  const unsupported = (field: string, detail: string): ExtendedToolResponse =>
+    createErrorResponse(
       params.operation,
       1,
       "",
       corrId,
-      new Error(
-        `${highImpact.missingPolicyField}: path does not exist: ${highImpact.missingPolicyPath}`
-      )
+      new Error(`${field} is not supported by Antigravity CLI (agy): ${detail}`)
+    );
+
+  if (
+    effectiveApprovalMode &&
+    effectiveApprovalMode !== "default" &&
+    effectiveApprovalMode !== "yolo"
+  ) {
+    return unsupported(
+      "approvalMode",
+      "use 'default' for prompted execution or 'yolo'/yolo=true for --dangerously-skip-permissions"
     );
   }
-
-  if (params.attachments && params.attachments.length > 0) {
-    try {
-      effectivePrompt = prependGeminiAttachments(effectivePrompt, params.attachments);
-    } catch (err) {
-      return createErrorResponse(
-        params.operation,
-        1,
-        "",
-        corrId,
-        err instanceof Error ? err : new Error(String(err))
-      );
-    }
-  }
-
-  // U21: Emit the prompt via -p/--prompt rather than as a positional argument.
-  // Positional prompts depend on Gemini's TTY/mode-detection heuristics; -p is
-  // the documented non-interactive flag and is robust against future CLI mode
-  // changes.
-  const args = ["-p", effectivePrompt];
-  if (resolvedModel) args.push("--model", resolvedModel);
-  if (effectiveApprovalMode) args.push("--approval-mode", effectiveApprovalMode);
-  // `--yolo` is functionally identical to `--approval-mode yolo`; emit it only
-  // when the caller asked for yolo AND we are not already emitting
-  // `--approval-mode yolo` (under mcp_managed the gate forces that mode), so
-  // there is never a redundant double auto-approve flag.
-  if (params.yolo && effectiveApprovalMode !== "yolo") {
-    args.push("--yolo");
-  }
   if (params.allowedTools && params.allowedTools.length > 0) {
-    sanitizeCliArgValues(params.allowedTools, "allowedTools");
-    params.allowedTools.forEach(tool => args.push("--allowed-tools", tool));
+    return unsupported("allowedTools", "agy has no non-interactive allowed-tools flag");
   }
   if (requestedMcpServers.length > 0) {
-    sanitizeCliArgValues(requestedMcpServers, "mcpServers");
-    requestedMcpServers.forEach(serverName => args.push("--allowed-mcp-server-names", serverName));
+    return unsupported(
+      "mcpServers",
+      "agy has no non-interactive allowed MCP server allowlist flag"
+    );
   }
+  if (params.outputFormat && params.outputFormat !== "text") {
+    return unsupported("outputFormat", "agy print mode currently emits text only");
+  }
+  if (params.policyFiles && params.policyFiles.length > 0) {
+    return unsupported("policyFiles", "agy has no --policy flag");
+  }
+  if (params.adminPolicyFiles && params.adminPolicyFiles.length > 0) {
+    return unsupported("adminPolicyFiles", "agy has no --admin-policy flag");
+  }
+  if (params.attachments && params.attachments.length > 0) {
+    return unsupported("attachments", "agy has no documented @path attachment-token contract");
+  }
+  if (params.skipTrust) {
+    return unsupported("skipTrust", "agy has no --skip-trust flag");
+  }
+
+  const args = ["--print", effectivePrompt];
+  if (resolvedModel) args.push("--model", resolvedModel);
   if (params.includeDirs && params.includeDirs.length > 0) {
     sanitizeCliArgValues(params.includeDirs, "includeDirs");
-    params.includeDirs.forEach(dir => args.push("--include-directories", dir));
+    params.includeDirs.forEach(dir => args.push("--add-dir", dir));
   }
-  // U27 high-impact flags (-s / --policy / --admin-policy) appended after the
-  // existing flag set so positional ordering relative to `-p` is preserved.
-  args.push(...highImpact.args);
-  // U23 fix: emit `-o json` when the caller asked for JSON output. The Gemini
-  // JSON parser is otherwise unreachable from the tool surface and the
-  // structured usageMetadata is silently dropped.
-  //
-  // Phase 4 slice ε: same wiring for `-o stream-json` (NDJSON event stream).
-  // Gemini already streams stdout in real-time so the existing 10-minute
-  // idle timeout (CLI_IDLE_TIMEOUTS.gemini) covers both modes without
-  // adjustment — unlike Claude, no `--include-partial-messages` companion
-  // flag is required because Gemini emits assistant `delta` events as part
-  // of the default stream-json shape.
-  if (params.outputFormat === "json") {
-    args.push("-o", "json");
-  } else if (params.outputFormat === "stream-json") {
-    args.push("-o", "stream-json");
+  if (params.sandbox) {
+    args.push("--sandbox");
   }
-  // Phase 4 slice γ: opt-in trust-prompt bypass for fresh workspaces.
-  if (params.skipTrust) {
-    args.push("--skip-trust");
+  if (params.yolo || effectiveApprovalMode === "yolo") {
+    args.push("--dangerously-skip-permissions");
   }
 
   return {
@@ -2918,71 +2954,25 @@ export function prepareGrokRequest(
   const effectiveAlwaysApprove =
     params.approvalStrategy === "mcp_managed" ? true : Boolean(params.alwaysApprove);
 
+  // Contract-driven argv assembly. The covered request-level flags are emitted
+  // by `buildArgvFromGeneration` from the grok contract + generation runs (see
+  // src/provider-codegen.ts). The runs are interleaved with the five special
+  // flags (`--model`, permission, `--agents`, `--prompt-json`, `--worktree`)
+  // at their exact original positions, so output is byte-identical to the prior
+  // hand-written block (locked by grok-argv-golden.test.ts). Adding a clean
+  // request flag is now a single generation-table row, not a hand-edited
+  // conditional here.
+  const grokContract = UPSTREAM_CLI_CONTRACTS.grok;
+  const genParams = params as Record<string, unknown>;
   const args = ["-p", effectivePrompt];
   if (resolvedModel) args.push("--model", resolvedModel);
-  if (params.outputFormat) args.push("--output-format", params.outputFormat);
+  args.push(...buildArgvFromGeneration(grokContract, GROK_GEN_OUTPUT_FORMAT, genParams));
   if (effectiveAlwaysApprove) {
     args.push("--always-approve");
   } else if (params.permissionMode) {
     args.push("--permission-mode", params.permissionMode);
   }
-  if (params.effort) args.push("--effort", params.effort);
-  if (params.reasoningEffort) args.push("--reasoning-effort", params.reasoningEffort);
-  if (params.allowedTools && params.allowedTools.length > 0) {
-    args.push("--tools", params.allowedTools.join(","));
-  }
-  if (params.disallowedTools && params.disallowedTools.length > 0) {
-    args.push("--disallowed-tools", params.disallowedTools.join(","));
-  }
-  if (params.maxTurns !== undefined) {
-    args.push("--max-turns", String(params.maxTurns));
-  }
-  if (params.workingDir) {
-    args.push("--cwd", params.workingDir);
-  }
-  if (params.sandbox) {
-    args.push("--sandbox", params.sandbox);
-  }
-  if (params.rules) {
-    args.push("--rules", params.rules);
-  }
-  if (params.systemPromptOverride) {
-    args.push("--system-prompt-override", params.systemPromptOverride);
-  }
-  if (params.allow && params.allow.length > 0) {
-    for (const rule of params.allow) {
-      args.push("--allow", rule);
-    }
-  }
-  if (params.deny && params.deny.length > 0) {
-    for (const rule of params.deny) {
-      args.push("--deny", rule);
-    }
-  }
-  if (params.compactionMode) {
-    args.push("--compaction-mode", params.compactionMode);
-  }
-  if (params.compactionDetail) {
-    args.push("--compaction-detail", params.compactionDetail);
-  }
-  if (params.agent) {
-    args.push("--agent", params.agent);
-  }
-  if (params.bestOfN !== undefined) {
-    args.push("--best-of-n", String(params.bestOfN));
-  }
-  if (params.check) {
-    args.push("--check");
-  }
-  if (params.disableWebSearch) {
-    args.push("--disable-web-search");
-  }
-  if (params.todoGate) {
-    args.push("--todo-gate");
-  }
-  if (params.verbatim) {
-    args.push("--verbatim");
-  }
+  args.push(...buildArgvFromGeneration(grokContract, GROK_GEN_MAIN, genParams));
   if (params.agents !== undefined) {
     if (typeof params.agents === "string") {
       if (!params.agents.trim()) {
@@ -3009,9 +2999,7 @@ export function prepareGrokRequest(
       args.push("--agents", JSON.stringify(agentsResult.value));
     }
   }
-  if (params.promptFile) {
-    args.push("--prompt-file", params.promptFile);
-  }
+  args.push(...buildArgvFromGeneration(grokContract, GROK_GEN_PROMPT_FILE, genParams));
   if (params.promptJson !== undefined) {
     const promptJsonValue =
       typeof params.promptJson === "string" ? params.promptJson : JSON.stringify(params.promptJson);
@@ -3026,33 +3014,8 @@ export function prepareGrokRequest(
     }
     args.push("--prompt-json", promptJsonValue);
   }
-  if (params.single) {
-    args.push("--single", params.single);
-  }
-  if (params.experimentalMemory) {
-    args.push("--experimental-memory");
-  }
-  if (params.noAltScreen) {
-    args.push("--no-alt-screen");
-  }
-  if (params.noMemory) {
-    args.push("--no-memory");
-  }
-  if (params.noPlan) {
-    args.push("--no-plan");
-  }
-  if (params.noSubagents) {
-    args.push("--no-subagents");
-  }
-  if (params.oauth) {
-    args.push("--oauth");
-  }
-  if (params.restoreCode) {
-    args.push("--restore-code");
-  }
-  if (params.leaderSocket) {
-    args.push("--leader-socket", params.leaderSocket);
-  }
+  args.push(...buildArgvFromGeneration(grokContract, GROK_GEN_SINGLE, genParams));
+  args.push(...buildArgvFromGeneration(grokContract, GROK_GEN_TAIL, genParams));
   if (params.nativeWorktree === true) {
     args.push("--worktree");
   } else if (typeof params.nativeWorktree === "string" && params.nativeWorktree.length > 0) {
@@ -3309,6 +3272,14 @@ function buildCliResponse(
   const response: ExtendedToolResponse = {
     content: [{ type: "text" as const, text: finalStdout }],
     structuredContent: {
+      // Issue #1: mirror the model reply into structuredContent. These tools
+      // emit structuredContent without declaring an MCP outputSchema, so a
+      // spec-conformant client may treat structuredContent as authoritative and
+      // never surface content[0].text. Carrying the reply here keeps the model
+      // output visible to structuredContent-preferring clients. Holds the same
+      // text as content[0].text (any worktree banner prepended downstream is a
+      // gateway annotation, not model output, and is intentionally not mirrored).
+      response: finalStdout,
       model: prep.resolvedModel || "default",
       cli,
       correlationId: corrId,
@@ -3521,6 +3492,8 @@ function buildGrokApiToolResponse(args: {
   const response: ExtendedToolResponse = {
     content: [{ type: "text", text }],
     structuredContent: {
+      // Issue #1: mirror the model reply (see buildCliResponse rationale).
+      response: text,
       provider: "grok-api",
       cli: "grok-api",
       model: args.result.model || args.prep.resolvedModel,
@@ -3908,8 +3881,8 @@ export async function handleGeminiRequest(
   );
 
   try {
-    // Gemini CLI 0.43 supports `--resume`, but not a supported fresh
-    // `--session-id` flag. Fresh sessions emit no session flag.
+    // Antigravity CLI supports `--conversation`, but not a supported fresh
+    // session-id flag. Fresh sessions emit no session flag.
     const sessionPlan = resolveGeminiSessionPlan({
       sessionId: params.sessionId,
       resumeLatest: params.resumeLatest,
@@ -3986,9 +3959,9 @@ export async function handleGeminiRequest(
     }
     wasSuccessful = true;
 
-    // Post-success session I/O for explicit resume flows. Fresh Gemini sessions
-    // are owned by the CLI because the current CLI has no supported fresh
-    // session-id flag the gateway can inject.
+    // Post-success session I/O for explicit conversation-resume flows. Fresh
+    // Antigravity sessions are owned by the CLI because it has no supported
+    // fresh session-id flag the gateway can inject.
     let effectiveSessionId = effectiveSessionIdHint;
     if (effectiveSessionId) {
       const existing = await deps.sessionManager.getSession(effectiveSessionId);
@@ -4100,7 +4073,7 @@ export async function handleGeminiRequestAsync(
   const { corrId, args, requestedMcpServers, approvalDecision } = prep;
 
   try {
-    // Gemini CLI 0.43 supports `--resume`, but fresh sessions emit no session flag.
+    // Antigravity CLI supports `--conversation`, but fresh sessions emit no session flag.
     const sessionPlan = resolveGeminiSessionPlan({
       sessionId: params.sessionId,
       resumeLatest: params.resumeLatest,
@@ -6587,14 +6560,14 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
 
   server.tool(
     "gemini_request",
-    "Run a Google Gemini CLI request synchronously (when async jobs are enabled, auto-defers to a pollable job past the sync deadline; otherwise runs to completion). Requires exactly one of prompt or promptParts.",
+    "Run a Google Antigravity CLI (`agy`) request through the Gemini-compatible gateway tool synchronously (when async jobs are enabled, auto-defers to a pollable job past the sync deadline; otherwise runs to completion). Requires exactly one of prompt or promptParts.",
     {
       prompt: z
         .string()
         .min(1, "Prompt cannot be empty")
         .max(100000, "Prompt too long (max 100k chars)")
         .optional()
-        .describe("Prompt text for Gemini (mutually exclusive with promptParts)"),
+        .describe("Prompt text for Antigravity CLI (mutually exclusive with promptParts)"),
       promptParts: PromptPartsSchema.optional().describe(
         "Cache-aware structured prompt: { system?, tools?, context?, task }. Mutually exclusive with prompt. Stable parts hash into cache_state for prefix-discipline tracking."
       ),
@@ -6602,15 +6575,13 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .string()
         .optional()
         .describe(
-          "Model name or alias (e.g. gemini-3-pro-preview, gemini-2.5-flash, pro, flash, latest)"
+          "Model name or alias passed to agy --model (e.g. gemini-3-pro-preview, gemini-2.5-flash, pro, flash, latest)"
         ),
       sessionId: z
         .string()
         .optional()
-        .describe(
-          "Gemini session ID to resume (emits --resume <id>), or 'latest' for the most recent session in this cwd"
-        ),
-      resumeLatest: z.boolean().default(false).describe("Resume latest session"),
+        .describe("Antigravity conversation ID to resume (emits --conversation <id>)"),
+      resumeLatest: z.boolean().default(false).describe("Continue the most recent conversation"),
       createNewSession: z.boolean().default(false).describe("Force new session"),
       approvalMode: z
         .enum(GEMINI_APPROVAL_MODES)
@@ -6626,13 +6597,16 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .describe("Approval policy override"),
       mcpServers: z
         .array(MCP_SERVER_ENUM)
-        .default(["sqry"])
-        .describe("MCP server names passed to Gemini as --allowed-mcp-server-names"),
+        .default([])
+        .describe("Unsupported for Antigravity CLI; non-empty values are rejected"),
       allowedTools: z
         .array(z.string())
         .optional()
-        .describe("Allowed tools (['Write','Edit','Bash'])"),
-      includeDirs: z.array(z.string()).optional().describe("Additional workspace directories"),
+        .describe("Unsupported for Antigravity CLI; non-empty values are rejected"),
+      includeDirs: z
+        .array(z.string())
+        .optional()
+        .describe("Additional workspace directories passed as --add-dir"),
       correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
       optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution"),
       optimizeResponse: z.boolean().default(false).describe("Optimize response output"),
@@ -6658,31 +6632,29 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .enum(["text", "json", "stream-json"])
         .default("text")
         .describe(
-          "Gemini output format. `json` emits `-o json` (single JSON with usageMetadata). `stream-json` emits `-o stream-json` (NDJSON event stream — `init`/`message`/`result` lines, usage extracted from the terminal `result.stats` event). Both report usage to the flight recorder."
+          "Antigravity CLI currently supports text output only through the gateway; json and stream-json are rejected."
         ),
       sandbox: GEMINI_HIGH_IMPACT_PARAMS_SCHEMA.shape.sandbox.describe(
-        "Run Gemini in sandbox mode (-s)"
+        "Run Antigravity in sandbox mode (--sandbox)"
       ),
       policyFiles: GEMINI_HIGH_IMPACT_PARAMS_SCHEMA.shape.policyFiles.describe(
-        "Policy file paths (--policy <path>, one per file). Paths must exist."
+        "Unsupported for Antigravity CLI; non-empty values are rejected."
       ),
       adminPolicyFiles: GEMINI_HIGH_IMPACT_PARAMS_SCHEMA.shape.adminPolicyFiles.describe(
-        "Admin policy file paths (--admin-policy <path>, one per file). Paths must exist."
+        "Unsupported for Antigravity CLI; non-empty values are rejected."
       ),
       attachments: GEMINI_HIGH_IMPACT_PARAMS_SCHEMA.shape.attachments.describe(
-        "Absolute file paths prepended as @<path> tokens to the prompt"
+        "Unsupported for Antigravity CLI; non-empty values are rejected."
       ),
       skipTrust: z
         .boolean()
         .default(false)
-        .describe(
-          "Emit `--skip-trust` so Gemini trusts the workspace for this session and skips the interactive trust prompt (Phase 4 slice γ). Required for headless runs in fresh workspaces."
-        ),
+        .describe("Unsupported for Antigravity CLI; true is rejected."),
       yolo: z
         .boolean()
         .optional()
         .describe(
-          "Emit `--yolo` to auto-approve all actions. Equivalent to approvalMode 'yolo'; routed through the same approval gate. Under mcp_managed the gate still decides."
+          "Emit `--dangerously-skip-permissions` to auto-approve all actions. Routed through the same approval gate. Under mcp_managed the gate still decides."
         ),
       workspace: WORKSPACE_ALIAS_SCHEMA.optional(),
       worktree: WORKTREE_SCHEMA.optional(),
@@ -6774,10 +6746,11 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         "Cache-aware structured prompt: { system?, tools?, context?, task }. Mutually exclusive with prompt. Stable parts hash into cache_state for prefix-discipline tracking."
       ),
       model: z.string().optional().describe("Model name or alias (e.g. grok-build, latest)"),
-      outputFormat: z
-        .enum(["plain", "json", "streaming-json"])
-        .optional()
-        .describe("Output format (plain|json|streaming-json). Grok default is plain."),
+      // Covered request flags (outputFormat, effort, sandbox, compaction, the
+      // boolean toggles, …) are derived from the grok contract + generation
+      // table — see GROK_GENERATED_SHAPE / src/provider-codegen.ts. They are
+      // spread in here once instead of hand-listed; order is irrelevant to Zod.
+      ...GROK_GENERATED_SHAPE,
       sessionId: z
         .string()
         .optional()
@@ -6797,11 +6770,6 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .enum(["default", "acceptEdits", "auto", "dontAsk", "bypassPermissions", "plan"])
         .optional()
         .describe("Grok permission mode"),
-      effort: z
-        .enum(["low", "medium", "high", "xhigh", "max"])
-        .optional()
-        .describe("Grok effort level"),
-      reasoningEffort: z.string().optional().describe("Reasoning effort for reasoning models"),
       approvalStrategy: z
         .enum(["legacy", "mcp_managed"])
         .default("legacy")
@@ -6816,14 +6784,6 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .describe(
           "MCP server names for approval tracking (Grok manages its own MCP config via `grok mcp`)"
         ),
-      allowedTools: z
-        .array(z.string())
-        .optional()
-        .describe("Allowed built-in tools (passed as --tools comma list)"),
-      disallowedTools: z
-        .array(z.string())
-        .optional()
-        .describe("Disallowed built-in tools (passed as --disallowed-tools comma list)"),
       correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
       optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution"),
       optimizeResponse: z.boolean().default(false).describe("Optimize response output"),
@@ -6840,138 +6800,17 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .describe(
           "Bypass dedup and force a fresh CLI run even if a recent identical request exists"
         ),
-      maxTurns: MAX_TURNS_SCHEMA.optional().describe(
-        "Grok `--max-turns N`: cap on agent-loop iterations for cost / latency control (Phase 4 slice δ). Bounded to safe integers ≤ 10000."
-      ),
-      // Phase 4 slice ζ — Grok working-directory parity.
-      workingDir: z
-        .string()
-        .min(1)
-        .optional()
-        .describe(
-          "Grok --cwd <DIR>: working directory for this invocation. Lets headless callers run Grok against a directory other than the gateway process's cwd."
-        ),
-      // Phase 4 slice θ — Grok HIGH parity (sandbox, rules, system-prompt-override, allow, deny).
-      sandbox: z
-        .string()
-        .min(1)
-        .optional()
-        .describe(
-          "Grok --sandbox <PROFILE>: sandbox profile for filesystem and network access. Freeform per `grok --help` (no enum constraint on Grok 0.1.210); also settable via GROK_SANDBOX env var. Caller responsibility to pass a valid profile name."
-        ),
-      rules: z
-        .string()
-        .min(1)
-        .optional()
-        .describe(
-          "Grok --rules <RULES>: extra rules to append to the system prompt. Supports `@file` prefix per `grok --help` to load from a file; gateway passes the value verbatim and lets Grok parse the prefix."
-        ),
-      systemPromptOverride: z
-        .string()
-        .min(1)
-        .optional()
-        .describe(
-          "Grok --system-prompt-override <PROMPT>: replace the agent's system prompt entirely. Distinct from Claude's --system-prompt / --append-system-prompt (Grok has only one override flag, not a pair)."
-        ),
-      allow: z
-        .array(z.string())
-        .optional()
-        .describe(
-          'Grok --allow <RULE>: permission allow rules. Each entry is emitted as its own --allow instance (per `grok --help`: "Repeat to add multiple rules").'
-        ),
-      deny: z
-        .array(z.string())
-        .optional()
-        .describe(
-          'Grok --deny <RULE>: permission deny rules. Each entry is emitted as its own --deny instance (per `grok --help`: "Repeat to add multiple rules").'
-        ),
-      compactionMode: z
-        .enum(["summary", "transcript", "segments"])
-        .optional()
-        .describe(
-          "Grok --compaction-mode: summary (default; no pointer) | transcript (points at the raw transcript) | segments (persists per-segment markdown to grep). Sets GROK_COMPACTION_MODE."
-        ),
-      compactionDetail: z
-        .enum(["none", "minimal", "balanced", "verbose"])
-        .optional()
-        .describe(
-          "Grok --compaction-detail: verbatim segment detail (none|minimal|balanced|verbose, default verbose). Only affects `--compaction-mode segments`. Sets GROK_COMPACTION_DETAIL."
-        ),
-      agent: z
-        .string()
-        .min(1)
-        .optional()
-        .describe("Grok --agent <NAME>: agent name or definition file path."),
-      bestOfN: MAX_TURNS_SCHEMA.optional().describe(
-        "Grok --best-of-n <N>: run the task N ways in parallel and pick the best (headless only)."
-      ),
-      check: z
-        .boolean()
-        .optional()
-        .describe("Grok --check: append a self-verification loop to the prompt (headless only)."),
-      disableWebSearch: z
-        .boolean()
-        .optional()
-        .describe("Grok --disable-web-search: disable web search and remote retrieval tools."),
-      todoGate: z
-        .boolean()
-        .optional()
-        .describe(
-          "Grok --todo-gate: enable runtime turn-end TodoGate for this session (session-scoped, not persisted)."
-        ),
-      verbatim: z
-        .boolean()
-        .optional()
-        .describe(
-          "Grok --verbatim: send the prompt exactly as given. Also skips gateway optimizePrompt when true."
-        ),
       agents: z
         .union([z.string().min(1), z.record(z.string(), z.record(z.string(), z.unknown()))])
         .optional()
         .describe(
           "Grok --agents <JSON>: inline subagent definitions (JSON string or name → { description, prompt, … } map)."
         ),
-      promptFile: z
-        .string()
-        .min(1)
-        .optional()
-        .describe("Grok --prompt-file <PATH>: single-turn prompt loaded from a file."),
       promptJson: z
         .union([z.string(), z.array(z.unknown()), z.record(z.string(), z.unknown())])
         .optional()
         .describe(
           "Grok --prompt-json <JSON>: single-turn prompt JSON blocks (string or serializable value)."
-        ),
-      single: z
-        .string()
-        .min(1)
-        .optional()
-        .describe("Grok --single <PROMPT>: single-turn prompt (in addition to gateway -p)."),
-      experimentalMemory: z
-        .boolean()
-        .optional()
-        .describe("Grok --experimental-memory: enable cross-session memory."),
-      noAltScreen: z
-        .boolean()
-        .optional()
-        .describe("Grok --no-alt-screen: run inline without alt screen."),
-      noMemory: z.boolean().optional().describe("Grok --no-memory: disable cross-session memory."),
-      noPlan: z.boolean().optional().describe("Grok --no-plan: disable plan mode."),
-      noSubagents: z
-        .boolean()
-        .optional()
-        .describe("Grok --no-subagents: disable subagent spawning."),
-      oauth: z.boolean().optional().describe("Grok --oauth: use OAuth during authentication."),
-      restoreCode: z
-        .boolean()
-        .optional()
-        .describe("Grok --restore-code: check out the original session commit when resuming."),
-      leaderSocket: z
-        .string()
-        .min(1)
-        .optional()
-        .describe(
-          "Grok 0.2.32+ --leader-socket <PATH>: custom leader socket path (default ~/.grok/leader.sock). Targets an isolated leader process, e.g. a local/branch Grok build; name it ~/.grok/leader-*.sock to keep `grok leader list/kill` discovery working."
         ),
       nativeWorktree: z
         .union([z.boolean(), z.string().min(1)])
@@ -7909,14 +7748,14 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
 
     server.tool(
       "gemini_request_async",
-      "Start a Google Gemini CLI request as a durable background job. Poll with llm_job_status, collect with llm_job_result.",
+      "Start a Google Antigravity CLI (`agy`) request as a durable background job through the Gemini-compatible gateway tool. Poll with llm_job_status, collect with llm_job_result.",
       {
         prompt: z
           .string()
           .min(1, "Prompt cannot be empty")
           .max(100000, "Prompt too long (max 100k chars)")
           .optional()
-          .describe("Prompt text for Gemini (mutually exclusive with promptParts)"),
+          .describe("Prompt text for Antigravity CLI (mutually exclusive with promptParts)"),
         promptParts: PromptPartsSchema.optional().describe(
           "Cache-aware structured prompt: { system?, tools?, context?, task }. Mutually exclusive with prompt. Stable parts hash into cache_state for prefix-discipline tracking."
         ),
@@ -7924,15 +7763,13 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .string()
           .optional()
           .describe(
-            "Model name or alias (e.g. gemini-3-pro-preview, gemini-2.5-flash, pro, flash, latest)"
+            "Model name or alias passed to agy --model (e.g. gemini-3-pro-preview, gemini-2.5-flash, pro, flash, latest)"
           ),
         sessionId: z
           .string()
           .optional()
-          .describe(
-            "Gemini session ID to resume (emits --resume <id>), or 'latest' for the most recent session in this cwd"
-          ),
-        resumeLatest: z.boolean().default(false).describe("Resume latest session"),
+          .describe("Antigravity conversation ID to resume (emits --conversation <id>)"),
+        resumeLatest: z.boolean().default(false).describe("Continue the most recent conversation"),
         createNewSession: z.boolean().default(false).describe("Force new session"),
         approvalMode: z
           .enum(GEMINI_APPROVAL_MODES)
@@ -7948,13 +7785,16 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .describe("Approval policy override"),
         mcpServers: z
           .array(MCP_SERVER_ENUM)
-          .default(["sqry"])
-          .describe("MCP server names passed to Gemini as --allowed-mcp-server-names"),
+          .default([])
+          .describe("Unsupported for Antigravity CLI; non-empty values are rejected"),
         allowedTools: z
           .array(z.string())
           .optional()
-          .describe("Allowed tools (['Write','Edit','Bash'])"),
-        includeDirs: z.array(z.string()).optional().describe("Additional workspace directories"),
+          .describe("Unsupported for Antigravity CLI; non-empty values are rejected"),
+        includeDirs: z
+          .array(z.string())
+          .optional()
+          .describe("Additional workspace directories passed as --add-dir"),
         correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
         optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution"),
         idleTimeoutMs: z
@@ -7979,31 +7819,29 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .enum(["text", "json", "stream-json"])
           .default("text")
           .describe(
-            "Gemini output format. `json` emits `-o json` (single JSON with usageMetadata). `stream-json` emits `-o stream-json` (NDJSON event stream — `init`/`message`/`result` lines, usage extracted from the terminal `result.stats` event). Both report usage to the flight recorder."
+            "Antigravity CLI currently supports text output only through the gateway; json and stream-json are rejected."
           ),
         sandbox: GEMINI_HIGH_IMPACT_PARAMS_SCHEMA.shape.sandbox.describe(
-          "Run Gemini in sandbox mode (-s)"
+          "Run Antigravity in sandbox mode (--sandbox)"
         ),
         policyFiles: GEMINI_HIGH_IMPACT_PARAMS_SCHEMA.shape.policyFiles.describe(
-          "Policy file paths (--policy <path>, one per file). Paths must exist."
+          "Unsupported for Antigravity CLI; non-empty values are rejected."
         ),
         adminPolicyFiles: GEMINI_HIGH_IMPACT_PARAMS_SCHEMA.shape.adminPolicyFiles.describe(
-          "Admin policy file paths (--admin-policy <path>, one per file). Paths must exist."
+          "Unsupported for Antigravity CLI; non-empty values are rejected."
         ),
         attachments: GEMINI_HIGH_IMPACT_PARAMS_SCHEMA.shape.attachments.describe(
-          "Absolute file paths prepended as @<path> tokens to the prompt"
+          "Unsupported for Antigravity CLI; non-empty values are rejected."
         ),
         skipTrust: z
           .boolean()
           .default(false)
-          .describe(
-            "Emit `--skip-trust` so Gemini trusts the workspace for this session and skips the interactive trust prompt (Phase 4 slice γ). Required for headless runs in fresh workspaces."
-          ),
+          .describe("Unsupported for Antigravity CLI; true is rejected."),
         yolo: z
           .boolean()
           .optional()
           .describe(
-            "Emit `--yolo` to auto-approve all actions. Equivalent to approvalMode 'yolo'; routed through the same approval gate. Under mcp_managed the gate still decides."
+            "Emit `--dangerously-skip-permissions` to auto-approve all actions. Routed through the same approval gate. Under mcp_managed the gate still decides."
           ),
         workspace: WORKSPACE_ALIAS_SCHEMA.optional(),
         worktree: WORKTREE_SCHEMA.optional(),

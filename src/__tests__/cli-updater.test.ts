@@ -18,12 +18,12 @@ describe("cli updater", () => {
     expect(plan.strategy).toBe("self-update");
   });
 
-  it("uses npm global install for Gemini", () => {
+  it("uses agy self-update for Gemini-compatible Antigravity latest", () => {
     const plan = buildCliUpgradePlan("gemini", "latest");
 
-    expect(plan.command).toBe("npm");
-    expect(plan.args).toEqual(["install", "-g", "@google/gemini-cli@latest"]);
-    expect(plan.strategy).toBe("npm-global-install");
+    expect(plan.command).toBe("agy");
+    expect(plan.args).toEqual(["update"]);
+    expect(plan.strategy).toBe("self-update");
   });
 
   it("uses npm global install for explicit Codex targets", () => {
@@ -58,7 +58,7 @@ describe("cli updater", () => {
     const result = await runCliUpgrade({ cli: "gemini", dryRun: true });
 
     expect(result.dryRun).toBe(true);
-    expect(result.plan.command).toBe("npm");
+    expect(result.plan.command).toBe("agy");
     expect(result.stdout).toBeUndefined();
   });
 

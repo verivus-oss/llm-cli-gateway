@@ -4,11 +4,12 @@ import {
   envWithExtendedPath,
   getExtendedPath,
   killProcessGroup,
+  providerCommandName,
   spawnCliProcess,
   unregisterProcessGroup,
 } from "./executor.js";
 import type { Logger } from "./logger.js";
-import { noopLogger } from "./logger.js";
+import { noopLogger, logWarn } from "./logger.js";
 import { ProcessMonitor, type JobHealth } from "./process-monitor.js";
 import { JobStore, computeRequestKey } from "./job-store.js";
 import { NoopFlightRecorder, type FlightRecorderLike } from "./flight-recorder.js";
@@ -20,6 +21,17 @@ const MAX_OUTPUT_SIZE = 50 * 1024 * 1024;
 const JOB_TTL_MS = 60 * 60 * 1000; // 1 hour in-memory retention; durable store has its own (longer) retention
 const EVICTION_INTERVAL_MS = 5 * 60 * 1000; // Check every 5 minutes
 const OUTPUT_FLUSH_INTERVAL_MS = 1000; // Throttle DB writes for streaming stdout/stderr
+
+/**
+ * Issue #21: silent-stall telemetry for long async jobs. A running job that
+ * has produced ZERO stdout bytes after these elapsed marks is almost certainly
+ * stalled (observed repeatedly on claude_request_async with evidence-heavy
+ * prompts). We emit one structured warning per crossed mark so the condition is
+ * measurable in the gateway logs (prompt length, model, elapsed) instead of
+ * surfacing only as a vague "0-byte stdout after N minutes" after the fact.
+ */
+const STALL_CHECK_INTERVAL_MS = 60 * 1000; // sweep every minute for mark accuracy
+const STALL_WARNING_MARKS_MS = [5, 10, 15].map(min => min * 60 * 1000);
 
 function describeProcessLaunchError(
   cli: LlmCli,
@@ -138,6 +150,13 @@ interface AsyncJobRecord {
    * safeFlightComplete, not preempted by the manager's minimal payload.
    */
   flightCompleteArmed?: boolean;
+  /**
+   * Issue #21: index into STALL_WARNING_MARKS_MS of the next stall mark to
+   * warn on. Advanced past every mark already crossed so each mark warns at
+   * most once, even if a sweep is missed. Reset to its max once the job emits
+   * any stdout so a job that finally produces output stops being flagged.
+   */
+  stallWarnIndex?: number;
 }
 
 export interface AsyncJobSnapshot {
@@ -246,6 +265,7 @@ export interface StartJobOutcome {
 export class AsyncJobManager {
   private jobs = new Map<string, AsyncJobRecord>();
   private evictionTimer: ReturnType<typeof setInterval> | null = null;
+  private stallTimer: ReturnType<typeof setInterval> | null = null;
   private processMonitor: ProcessMonitor;
   private store: JobStore | null;
 
@@ -300,6 +320,59 @@ export class AsyncJobManager {
     // Allow the process to exit even if the timer is active
     if (this.evictionTimer.unref) {
       this.evictionTimer.unref();
+    }
+
+    // Issue #21: silent-stall telemetry sweep.
+    this.stallTimer = setInterval(() => this.checkStalledJobs(), STALL_CHECK_INTERVAL_MS);
+    if (this.stallTimer.unref) {
+      this.stallTimer.unref();
+    }
+  }
+
+  /**
+   * Issue #21: warn once per crossed mark for any running job that has emitted
+   * ZERO stdout. Captures prompt length and model (from the opted-in
+   * flight-recorder entry) so a recurring stall class is measurable from logs.
+   * `public` only so tests can drive it deterministically without waiting on
+   * the interval timer.
+   */
+  checkStalledJobs(now: number = Date.now()): void {
+    for (const job of this.jobs.values()) {
+      if (job.status !== "running") continue;
+      // Any stdout at all means the job is alive — stop tracking it.
+      if (Buffer.byteLength(job.stdout) > 0) {
+        job.stallWarnIndex = STALL_WARNING_MARKS_MS.length;
+        continue;
+      }
+      const idx = job.stallWarnIndex ?? 0;
+      if (idx >= STALL_WARNING_MARKS_MS.length) continue;
+      const elapsedMs = now - new Date(job.startedAt).getTime();
+      if (elapsedMs < STALL_WARNING_MARKS_MS[idx]) continue;
+      // Advance past every mark already crossed so a missed sweep doesn't
+      // replay older marks, and each mark warns at most once.
+      let newIdx = idx;
+      while (
+        newIdx < STALL_WARNING_MARKS_MS.length &&
+        elapsedMs >= STALL_WARNING_MARKS_MS[newIdx]
+      ) {
+        newIdx++;
+      }
+      job.stallWarnIndex = newIdx;
+      const crossedMarkMin = Math.round(STALL_WARNING_MARKS_MS[newIdx - 1] / 60000);
+      logWarn(
+        this.logger,
+        `Async job ${job.id} (${job.cli}) has produced no stdout after ~${crossedMarkMin}min — possible silent stall (issue #21)`,
+        {
+          jobId: job.id,
+          cli: job.cli,
+          correlationId: job.correlationId,
+          elapsedMs,
+          stdoutBytes: 0,
+          stderrBytes: Buffer.byteLength(job.stderr),
+          model: job.flightRecorderEntry?.model,
+          promptLength: job.flightRecorderEntry?.prompt?.length,
+        }
+      );
     }
   }
 
@@ -732,9 +805,7 @@ export class AsyncJobManager {
 
     const id = randomUUID();
     const startedAt = new Date().toISOString();
-    // Mistral Vibe ships as the `vibe` binary; the gateway uses `mistral` as the
-    // provider key but spawns `vibe` on the shell.
-    const command = cli === "mistral" ? "vibe" : cli;
+    const command = providerCommandName(cli);
     const baseEnv = envWithExtendedPath(process.env, getExtendedPath());
     const child = spawnCliProcess(command, args, {
       cwd,
