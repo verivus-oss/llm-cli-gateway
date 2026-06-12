@@ -17,13 +17,13 @@ Three slices shipped together so cache observability data (slice 2) is in place 
 - [x] `src/index.ts` — Zod tool schemas updated for every `*_request` and `*_request_async` (10 tools).
 - [x] `src/index.ts` — runtime mutex check at top of every `*_request` / `*_request_async` handler (10 total). NOT Zod `.refine()` — the SDK rejects top-level refines. Uses `resolvePromptOrPartsForPrep()` which returns `createErrorResponse(...)` with the dag-mandated strings.
 - [x] `src/index.ts` — `prepare*Request` functions (Claude, Codex, Gemini, Grok, Mistral) call `resolvePromptInput()`.
-- [x] `src/index.ts` — `safeFlightStart` call sites thread `stablePrefixHash` + `stablePrefixTokens` and use `prep.effectivePrompt`. SYNC path only (async-path FR integration is out of scope per dag step 7 point 5).
+- [x] `src/index.ts` — `safeFlightStart` call sites thread `stablePrefixHash` + `stablePrefixTokens` and use `prep.effectivePrompt`. The original slice kept async flight-recorder integration out of scope; later async-flight-recorder work populated async rows too.
 - [x] `src/index.ts` — new MCP resource registrations (`server.registerResource`, with `ResourceTemplate` for templated URIs) for `cache-state://global`, `cache-state://session/{id}`, `cache-state://prefix/{hash}`.
 - [x] `src/index.ts` — `session_get` handler returns `cacheState` when the session has prior requests (omitted entirely for fresh sessions).
 - [x] `src/index.ts` — `claude_request` / `claude_request_async` emit a `warnings[]` entry when TTL < 30s and `[cache_awareness].warn_on_ttl_expiry = true`. Session resolution moved BEFORE `safeFlightStart` so the warning reads PRIOR rows, not the just-inserted row.
 - [x] `src/prompt-parts.ts` — NEW. Pure `assemble()` + `resolvePromptInput()`.
 - [x] `src/request-helpers.ts` — UNCHANGED for promptParts wiring. Only Mistral-specific Prepare* types live here; the core `prepare*Request` functions are in `src/index.ts`.
-- [x] `src/async-job-manager.ts` — UNCHANGED. Async-path flight-recorder integration is out of scope.
+- [x] `src/async-job-manager.ts` — later async-flight-recorder work added async `logStart` / `logComplete`; slice κ now threads emitted cache-control TTL through that handoff.
 - [x] `src/flight-recorder.ts` — migration v3 (stable_prefix_hash, stable_prefix_tokens, index) + FlightLogStart extension + read-only `queryRequests()` with `stmt.readonly` guard.
 - [x] `src/resources.ts` — `ResourceProvider` constructor + cache_state read methods. Slice 3 also threads `CacheAwarenessConfig` so `ttlRemainingMs` is populated on `cache-state://session/{id}`.
 - [x] `src/config.ts` — `CacheAwarenessSchema` + `loadCacheAwarenessConfig` + `minStableTokensForModel` + threaded through `GatewayServerRuntime`.
@@ -57,16 +57,16 @@ All flags live under `[cache_awareness]` in `~/.llm-cli-gateway/config.toml`. **
 
 | Flag                                                                | Default | What it does                                                                                  |
 |---------------------------------------------------------------------|---------|-----------------------------------------------------------------------------------------------|
-| `emit_anthropic_cache_control`                                      | `false` | Reserved for a future slice (Branch A live-smoke-test follow-up). NOT active in this slice.   |
+| `emit_anthropic_cache_control`                                      | `false` | Default-off. Initially reserved for a future slice; slice κ later verified Claude stream-json cache_control emission and uses this flag for opt-in auto-emission. |
 | `anthropic_ttl_seconds`                                             | `300`   | Enum `300 | 3600`. Drives `computeTtlRemaining` and the TTL warning's expiry window.         |
 | `warn_on_ttl_expiry`                                                | `false` | When true, claude_request[_async] attach a `cache_ttl_expiring_soon` warning if TTL < 30s.    |
-| `[cache_awareness.min_stable_tokens_for_cache_control]` per-family  | sonnet=1024, opus=4096, haiku=4096, default=4096 | Per-model min-token thresholds for the future cache_control emission. Sourced from PROVIDER_CACHE_SURFACES.md. |
+| `[cache_awareness.min_stable_tokens_for_cache_control]` per-family  | sonnet=1024, opus=4096, haiku=4096, default=4096 | Per-model min-token thresholds for opt-in Claude cache_control emission. Sourced from PROVIDER_CACHE_SURFACES.md. |
 
 ## Per-CLI cache_control emission table
 
 | CLI     | Prefix discipline (via `promptParts`) | Explicit `cache_control` emission |
 |---------|---------------------------------------|------------------------------------|
-| claude  | yes                                   | not yet (Branch B; gated on `[cache_awareness].emit_anthropic_cache_control` for a future slice) |
+| claude  | yes                                   | yes for caller `promptParts` content via stream-json stdin, default-off unless explicit `promptParts.cacheControl` or opt-in auto-emission |
 | codex   | yes                                   | n/a (OpenAI implicit cache, no CLI lever) |
 | gemini  | yes                                   | n/a (implicit prefix cache server-side) |
 | grok    | yes                                   | n/a (no surfaced cache lever) |
@@ -76,8 +76,8 @@ All flags live under `[cache_awareness]` in `~/.llm-cli-gateway/config.toml`. **
 
 - **Slice 4** (cache-aware multi-LLM routing) — gated on this slice's observability data.
 - **Slice 5** (explicit cache-resource APIs — Gemini Context Caching, Anthropic 1h beta) — gated on this slice's observability data.
-- **Claude `cache_control` JSON injection** (Branch A): the `claude -p` injection mechanism is unverified. A future slice will land a live smoke test against the Anthropic API and flip Branch A on when verified.
-- **Async-path `stable_prefix_hash` recording**: `src/async-job-manager.ts` has zero flight-recorder integration today. The v3 columns are NOT populated for async-job rows. Tracked separately (`docs/plans/async-flight-recorder.dag.toml`, TBD).
+- **Claude hidden-request cache optimization**: slice κ later verified caller-content `cache_control` JSON injection via `claude -p --input-format stream-json`. The gateway still does not control Claude Code's hidden system/tool/session-wrapper request internals; deeper optimization would require a separate proxy/trust-model design.
+- **Async-path hidden-request parity**: async rows now record flight-recorder metadata, including `stable_prefix_hash` and slice κ cache-control TTL handoff. Remaining hidden-request optimization limits match the sync path: Claude Code's own system/tool/session-wrapper internals are still outside the gateway's normal CLI-wrapper surface.
 - **Codex parser cache-tokens fix**: `src/codex-json-parser.ts` reads Anthropic-style `cache_read_input_tokens` but Codex CLI 0.133.0+ emits `cached_input_tokens`. `cache_read_tokens` therefore stays NULL for codex rows today. Separate follow-up.
 
 ## Invariant statement

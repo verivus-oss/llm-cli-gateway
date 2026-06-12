@@ -42,6 +42,13 @@ export interface FlightLogStart {
    * including pre-κ rows after a v4 migration of a legacy DB.
    */
   cacheControlBlocks?: number;
+  /**
+   * Slice κ v5: TTL seconds actually emitted on gateway-authored
+   * cache_control blocks. Claude CLI κ uses 3600 because 5m blocks are
+   * rejected after Claude Code's own 1h session-wrap blocks. Undefined
+   * for rows where the gateway emitted no cache_control marker.
+   */
+  cacheControlTtlSeconds?: number;
 }
 
 export interface FlightLogResult {
@@ -124,6 +131,22 @@ function ensureCacheControlBlocksColumn(db: GatewayDatabase): void {
   );
   if (!names.has("cache_control_blocks")) {
     db.exec("ALTER TABLE requests ADD COLUMN cache_control_blocks INTEGER");
+  }
+}
+
+/**
+ * Idempotent v5 migration (slice κ follow-up): record the TTL seconds the
+ * gateway actually emitted on cache_control markers. `cache_control_blocks`
+ * alone is enough to identify κ rows, but not enough to report TTL state
+ * without inferring policy from current config.
+ */
+function ensureCacheControlTtlSecondsColumn(db: GatewayDatabase): void {
+  const rows = db.prepare("PRAGMA table_info(requests)").all();
+  const names = new Set<string>(
+    rows.map((row: any) => (row && typeof row.name === "string" ? row.name : ""))
+  );
+  if (!names.has("cache_control_ttl_seconds")) {
+    db.exec("ALTER TABLE requests ADD COLUMN cache_control_ttl_seconds INTEGER");
   }
 }
 
@@ -279,6 +302,14 @@ export class FlightRecorder {
       .prepare("INSERT OR IGNORE INTO _migrations(version, applied_at) VALUES(4, ?)")
       .run(new Date().toISOString());
 
+    // Migration v5: cache_control_ttl_seconds. New rows with emitted
+    // cache_control markers record the actual TTL seconds; legacy rows
+    // remain NULL and cache-state uses a compatibility fallback.
+    ensureCacheControlTtlSecondsColumn(this.db);
+    this.db
+      .prepare("INSERT OR IGNORE INTO _migrations(version, applied_at) VALUES(5, ?)")
+      .run(new Date().toISOString());
+
     if (process.platform !== "win32") {
       try {
         chmodSync(dbPath, 0o600);
@@ -290,10 +321,10 @@ export class FlightRecorder {
     const insertRequest = this.db.prepare(`
       INSERT INTO requests (id, cli, model, prompt, system, session_id, datetime_utc,
                             stable_prefix_hash, stable_prefix_tokens,
-                            cache_control_blocks)
+                            cache_control_blocks, cache_control_ttl_seconds)
       VALUES (@id, @cli, @model, @prompt, @system, @session_id, @datetime_utc,
               @stable_prefix_hash, @stable_prefix_tokens,
-              @cache_control_blocks)
+              @cache_control_blocks, @cache_control_ttl_seconds)
     `);
 
     const insertMetadata = this.db.prepare(`
@@ -313,6 +344,7 @@ export class FlightRecorder {
         stable_prefix_hash: entry.stablePrefixHash ?? null,
         stable_prefix_tokens: entry.stablePrefixTokens ?? null,
         cache_control_blocks: entry.cacheControlBlocks ?? null,
+        cache_control_ttl_seconds: entry.cacheControlTtlSeconds ?? null,
       });
 
       insertMetadata.run({

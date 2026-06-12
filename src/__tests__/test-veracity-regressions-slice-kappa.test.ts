@@ -20,7 +20,7 @@ import { mkdtempSync, rmSync } from "fs";
 import os from "os";
 import path from "path";
 import { createRequire } from "module";
-import { PromptPartsSchema, assembleClaudeCacheBlocks } from "../prompt-parts.js";
+import { PromptPartsSchema, assemble, assembleClaudeCacheBlocks } from "../prompt-parts.js";
 import { prepareClaudeRequest, resolveGatewayServerRuntime } from "../index.js";
 import type { CacheAwarenessConfig } from "../config.js";
 import { DEFAULT_MIN_STABLE_TOKENS_FOR_CACHE_CONTROL } from "../config.js";
@@ -83,9 +83,12 @@ describe("REGRESSIONS Kα — PromptParts.cacheControl + assembleClaudeCacheBloc
     const blocks = r.payload.message.content;
     expect(blocks.length).toBe(4);
     expect(blocks[0].text).toBe("S");
-    expect(blocks[1].text).toBe("T");
-    expect(blocks[2].text).toBe("C");
-    expect(blocks[3].text).toBe("K");
+    expect(blocks[1].text).toBe("\n\nT");
+    expect(blocks[2].text).toBe("\n\nC");
+    expect(blocks[3].text).toBe("\n\nK");
+    expect(blocks.map(b => b.text).join("")).toBe(
+      assemble({ system: "S", tools: "T", context: "C", task: "K" }).text
+    );
     expect(blocks[0].cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
     expect(blocks[1].cache_control).toBeUndefined();
     expect(blocks[2].cache_control).toBeUndefined();
@@ -101,6 +104,18 @@ describe("REGRESSIONS Kα — PromptParts.cacheControl + assembleClaudeCacheBloc
     expect(r.payload.message.content.length).toBe(1);
     expect(r.payload.message.content[0].text).toBe("K");
     expect(r.markedBlockCount).toBe(0);
+  });
+
+  it("assembleClaudeCacheBlocks content concatenates exactly to assemble(parts).text", () => {
+    const parts = {
+      system: "S",
+      tools: "T",
+      context: "C",
+      task: "K",
+      cacheControl: { context: true },
+    };
+    const r = assembleClaudeCacheBlocks(parts);
+    expect(r.payload.message.content.map(b => b.text).join("")).toBe(assemble(parts).text);
   });
 
   it("assembleClaudeCacheBlocks never marks the task block, even when system+tools+context are all marked", () => {
@@ -201,8 +216,9 @@ describe("REGRESSIONS Kβ — prepareClaudeRequest κ branch (slice κ)", () => 
       type: "ephemeral",
       ttl: "1h",
     });
-    expect(payload.message.content[1].text).toBe("K");
+    expect(payload.message.content[1].text).toBe("\n\nK");
     expect(payload.message.content[1].cache_control).toBeUndefined();
+    expect(payload.message.content.map((b: { text: string }) => b.text).join("")).toBe("S\n\nK");
   });
 
   it("Kβ-3: cacheControl set with outputFormat=text returns an actionable error (no silent format coercion)", () => {
@@ -243,13 +259,17 @@ describe("REGRESSIONS Kβ — prepareClaudeRequest κ branch (slice κ)", () => 
     expect(prep.args).not.toContain("--input-format");
   });
 
-  it("Kβ-6: cacheControlBlocks counts only marker-on-non-empty (system marker on empty system → 0)", () => {
+  it("Kβ-6: empty-part cacheControl marker is a no-op and does not activate the κ stdin path", () => {
     const prep = prepareClaudeRequest({
       ...BASE_CLAUDE_PARAMS,
       promptParts: { task: "K", cacheControl: { system: true } },
     } as never);
     if (!("args" in prep)) throw new Error("expected args");
-    expect(prep.cacheControlBlocks).toBe(0);
+    expect(prep.stdinPayload).toBeUndefined();
+    expect(prep.cacheControlBlocks).toBeUndefined();
+    expect(prep.args[0]).toBe("-p");
+    expect(prep.args[1]).toBe("K");
+    expect(prep.warnings?.find(w => w.code === "cache_control_noop")).toBeDefined();
   });
 
   it("Kβ-7: cacheControlBlocks equals the number of marked non-empty blocks", () => {
@@ -264,6 +284,7 @@ describe("REGRESSIONS Kβ — prepareClaudeRequest κ branch (slice κ)", () => 
     } as never);
     if (!("args" in prep)) throw new Error("expected args");
     expect(prep.cacheControlBlocks).toBe(2);
+    expect(prep.cacheControlTtlSeconds).toBe(3600);
   });
 
   it("Kβ-8: κ argv passes validateUpstreamCliArgs AND has the exact pinned shape (contract + structural)", () => {
@@ -443,12 +464,13 @@ describe("REGRESSIONS Kε — flight-recorder cache_control_blocks (slice κ)", 
     }
   }
 
-  it("Kε-1: fresh FR has cache_control_blocks column", () => {
+  it("Kε-1: fresh FR has cache_control_blocks and cache_control_ttl_seconds columns", () => {
     new FlightRecorder(dbPath).close();
     expect(tableColumns(dbPath).has("cache_control_blocks")).toBe(true);
+    expect(tableColumns(dbPath).has("cache_control_ttl_seconds")).toBe(true);
   });
 
-  it("Kε-2: pre-κ DB (v3 schema simulated) gets cache_control_blocks added idempotently with _migrations v4 row", () => {
+  it("Kε-2: pre-κ DB (v3 schema simulated) gets cache_control columns added idempotently with migration rows", () => {
     // Bootstrap a v3-shaped DB (no cache_control_blocks column).
     const seed = new BetterSqlite3(dbPath);
     seed.exec(`
@@ -492,14 +514,17 @@ describe("REGRESSIONS Kε — flight-recorder cache_control_blocks (slice κ)", 
 
     new FlightRecorder(dbPath).close();
     expect(tableColumns(dbPath).has("cache_control_blocks")).toBe(true);
+    expect(tableColumns(dbPath).has("cache_control_ttl_seconds")).toBe(true);
 
     const db = new BetterSqlite3(dbPath);
     const v4Row = db.prepare("SELECT version FROM _migrations WHERE version = 4").get();
+    const v5Row = db.prepare("SELECT version FROM _migrations WHERE version = 5").get();
     db.close();
     expect(v4Row).toBeDefined();
+    expect(v5Row).toBeDefined();
   });
 
-  it("Kε-3: logStart with cacheControlBlocks persists the integer", () => {
+  it("Kε-3: logStart with cacheControlBlocks + cacheControlTtlSeconds persists both integers", () => {
     const rec = new FlightRecorder(dbPath);
     rec.logStart({
       correlationId: "k3-corr-1",
@@ -507,17 +532,22 @@ describe("REGRESSIONS Kε — flight-recorder cache_control_blocks (slice κ)", 
       model: "sonnet",
       prompt: "test",
       cacheControlBlocks: 3,
+      cacheControlTtlSeconds: 3600,
     });
     rec.close();
     const db = new BetterSqlite3(dbPath);
     const row = db
-      .prepare("SELECT cache_control_blocks FROM requests WHERE id = ?")
-      .get("k3-corr-1") as { cache_control_blocks: number | null };
+      .prepare("SELECT cache_control_blocks, cache_control_ttl_seconds FROM requests WHERE id = ?")
+      .get("k3-corr-1") as {
+      cache_control_blocks: number | null;
+      cache_control_ttl_seconds: number | null;
+    };
     db.close();
     expect(row.cache_control_blocks).toBe(3);
+    expect(row.cache_control_ttl_seconds).toBe(3600);
   });
 
-  it("Kε-4: logStart WITHOUT cacheControlBlocks persists NULL (regression for legacy callers)", () => {
+  it("Kε-4: logStart WITHOUT cacheControl metadata persists NULLs (regression for legacy callers)", () => {
     const rec = new FlightRecorder(dbPath);
     rec.logStart({
       correlationId: "k4-corr-1",
@@ -528,21 +558,25 @@ describe("REGRESSIONS Kε — flight-recorder cache_control_blocks (slice κ)", 
     rec.close();
     const db = new BetterSqlite3(dbPath);
     const row = db
-      .prepare("SELECT cache_control_blocks FROM requests WHERE id = ?")
-      .get("k4-corr-1") as { cache_control_blocks: number | null };
+      .prepare("SELECT cache_control_blocks, cache_control_ttl_seconds FROM requests WHERE id = ?")
+      .get("k4-corr-1") as {
+      cache_control_blocks: number | null;
+      cache_control_ttl_seconds: number | null;
+    };
     db.close();
     expect(row.cache_control_blocks).toBeNull();
+    expect(row.cache_control_ttl_seconds).toBeNull();
   });
 
-  it("Kε-5: opening the FR twice does not duplicate the v4 migration row (INSERT OR IGNORE)", () => {
+  it("Kε-5: opening the FR twice does not duplicate cache-control migration rows (INSERT OR IGNORE)", () => {
     new FlightRecorder(dbPath).close();
     new FlightRecorder(dbPath).close();
     const db = new BetterSqlite3(dbPath);
-    const cnt = db.prepare("SELECT COUNT(*) AS n FROM _migrations WHERE version = 4").get() as {
-      n: number;
-    };
+    const cnt = db
+      .prepare("SELECT COUNT(*) AS n FROM _migrations WHERE version IN (4, 5)")
+      .get() as { n: number };
     db.close();
-    expect(cnt.n).toBe(1);
+    expect(cnt.n).toBe(2);
   });
 });
 
@@ -607,8 +641,8 @@ describe("REGRESSIONS Kζ — auto-emit (rec #2) + cacheable-uncached warning (r
     expect(prep.stdinPayload).toBeDefined();
     const payload = JSON.parse(prep.stdinPayload!.trim());
     // Rightmost non-empty stable block is `context` — it must be the marked one.
-    const ctxBlock = payload.message.content.find(
-      (b: { text: string }) => b.text === LARGE_STABLE_BLOCK
+    const ctxBlock = payload.message.content.find((b: { text: string }) =>
+      b.text.endsWith(LARGE_STABLE_BLOCK)
     );
     expect(ctxBlock?.cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
     // System / tools blocks must NOT be marked (only the last stable block).
@@ -616,9 +650,11 @@ describe("REGRESSIONS Kζ — auto-emit (rec #2) + cacheable-uncached warning (r
       payload.message.content.find((b: { text: string }) => b.text === "S-stable")?.cache_control
     ).toBeUndefined();
     expect(
-      payload.message.content.find((b: { text: string }) => b.text === "T-stable")?.cache_control
+      payload.message.content.find((b: { text: string }) => b.text === "\n\nT-stable")
+        ?.cache_control
     ).toBeUndefined();
     expect(prep.cacheControlBlocks).toBe(1);
+    expect(prep.cacheControlTtlSeconds).toBe(3600);
   });
 
   it("Kζ-2: auto-emit DOES NOT fire when emit_anthropic_cache_control is false (regression)", () => {
@@ -760,5 +796,57 @@ describe("REGRESSIONS Kζ — auto-emit (rec #2) + cacheable-uncached warning (r
     if (!("args" in prep)) throw new Error("expected args");
     const ccWarning = prep.warnings?.find(x => x.code === "cacheable_prefix_uncached");
     expect(ccWarning).toBeUndefined();
+  });
+
+  it("Kζ-9: no-op explicit cacheControl does not suppress cacheable-prefix warning", () => {
+    const runtime = resolveGatewayServerRuntime(
+      {
+        cacheAwareness: buildCacheAwareness({ emitAnthropicCacheControl: false }),
+      },
+      { isolateState: true }
+    );
+    const prep = prepareClaudeRequest(
+      {
+        ...BASE_CLAUDE_PARAMS,
+        promptParts: {
+          context: LARGE_STABLE_BLOCK,
+          task: "K",
+          cacheControl: { system: true },
+        },
+      } as never,
+      runtime
+    );
+    if (!("args" in prep)) throw new Error("expected args");
+    expect(prep.stdinPayload).toBeUndefined();
+    expect(prep.warnings?.find(x => x.code === "cache_control_noop")).toBeDefined();
+    expect(prep.warnings?.find(x => x.code === "cacheable_prefix_uncached")).toBeDefined();
+  });
+
+  it("Kζ-10: no-op explicit cacheControl still allows config-driven auto-emission", () => {
+    const runtime = resolveGatewayServerRuntime(
+      {
+        cacheAwareness: buildCacheAwareness({ emitAnthropicCacheControl: true }),
+      },
+      { isolateState: true }
+    );
+    const prep = prepareClaudeRequest(
+      {
+        ...BASE_CLAUDE_PARAMS,
+        promptParts: {
+          context: LARGE_STABLE_BLOCK,
+          task: "K",
+          cacheControl: { system: true },
+        },
+      } as never,
+      runtime
+    );
+    if (!("args" in prep)) throw new Error("expected args");
+    expect(prep.stdinPayload).toBeDefined();
+    const payload = JSON.parse(prep.stdinPayload!.trim());
+    const ctxBlock = payload.message.content.find((b: { text: string }) =>
+      b.text.endsWith(LARGE_STABLE_BLOCK)
+    );
+    expect(ctxBlock?.cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
+    expect(prep.cacheControlBlocks).toBe(1);
   });
 });

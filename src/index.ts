@@ -1406,6 +1406,7 @@ function buildAsyncFlightRecorderHandoff(
     stablePrefixHash?: string | null;
     stablePrefixTokens?: number | null;
     cacheControlBlocks?: number;
+    cacheControlTtlSeconds?: number;
   },
   sessionId: string | undefined,
   outputFormat: string | undefined
@@ -1430,6 +1431,7 @@ function buildAsyncFlightRecorderHandoff(
       stablePrefixHash: prep.stablePrefixHash ?? undefined,
       stablePrefixTokens: prep.stablePrefixTokens ?? undefined,
       cacheControlBlocks: prep.cacheControlBlocks,
+      cacheControlTtlSeconds: prep.cacheControlTtlSeconds,
     },
     extractUsage: (stdout: string) =>
       extractUsageAndCost(cli, stdout, fmt, { sessionId: sid, home }),
@@ -1935,6 +1937,8 @@ interface CliRequestPrep {
    * κ-explicit breakpoints from implicit prefix-cache hits.
    */
   cacheControlBlocks?: number;
+  /** TTL seconds actually emitted on those cache_control markers. */
+  cacheControlTtlSeconds?: number;
   /**
    * Rec #4: structured warnings produced during prep (e.g. cacheable
    * stable prefix without cacheControl). Handlers merge these with any
@@ -2084,7 +2088,20 @@ export function prepareClaudeRequest(
     ccEarly &&
     (ccEarly.system || ccEarly.tools || ccEarly.context)
   );
-  if (params.optimizePrompt && cacheControlRequestedEarly) {
+  const explicitCacheControlBlockCount =
+    params.promptParts && ccEarly
+      ? (ccEarly.system && params.promptParts.system && params.promptParts.system.length > 0
+          ? 1
+          : 0) +
+        (ccEarly.tools && params.promptParts.tools && params.promptParts.tools.length > 0 ? 1 : 0) +
+        (ccEarly.context && params.promptParts.context && params.promptParts.context.length > 0
+          ? 1
+          : 0)
+      : 0;
+  const effectiveExplicitCacheControl = explicitCacheControlBlockCount > 0;
+  const cacheControlNoop = cacheControlRequestedEarly && !effectiveExplicitCacheControl;
+
+  if (params.optimizePrompt && effectiveExplicitCacheControl) {
     return createErrorResponse(
       params.operation,
       1,
@@ -2149,7 +2166,7 @@ export function prepareClaudeRequest(
   // Claude Code's own 1h-marked session-wrap blocks land ahead of them.
   let autoEmittedCacheControlBlock: "system" | "tools" | "context" | null = null;
   if (
-    !cacheControlRequestedEarly &&
+    !effectiveExplicitCacheControl &&
     runtime.cacheAwareness.emitAnthropicCacheControl &&
     !params.optimizePrompt &&
     params.outputFormat === "stream-json" &&
@@ -2186,8 +2203,16 @@ export function prepareClaudeRequest(
   // leave the stable prefix bytes unreused across calls, defeating the
   // point of using `promptParts`.
   const warnings: WarningEntry[] = [];
+  if (cacheControlNoop) {
+    warnings.push({
+      code: "cache_control_noop",
+      message:
+        "promptParts.cacheControl only marked empty or omitted stable parts; no cache_control breakpoint will be emitted from the explicit marker.",
+      reason: "cacheControl marker did not match a non-empty stable block",
+    });
+  }
   if (
-    !cacheControlRequestedEarly &&
+    !effectiveExplicitCacheControl &&
     autoEmittedCacheControlBlock === null &&
     params.promptParts &&
     stablePrefixTokens !== null
@@ -2215,11 +2240,16 @@ export function prepareClaudeRequest(
   // content-blocks payload via stdin. Non-κ callers (no cacheControl,
   // or cacheControl with all flags false) take the existing positional
   // path bit-for-bit. The κ path activates on EITHER an explicit caller
-  // opt-in (`cacheControlRequestedEarly`) OR a gateway-driven auto-emit
-  // (`autoEmittedCacheControlBlock`).
-  const cacheControlRequested = cacheControlRequestedEarly || autoEmittedCacheControlBlock !== null;
+  // opt-in with at least one effective non-empty marker
+  // (`effectiveExplicitCacheControl`) OR a gateway-driven auto-emit
+  // (`autoEmittedCacheControlBlock`). A marker on an empty part is a
+  // no-op warning and leaves the request on the normal path unless auto
+  // emission chooses an eligible stable block.
+  const cacheControlRequested =
+    effectiveExplicitCacheControl || autoEmittedCacheControlBlock !== null;
   let stdinPayload: string | undefined;
   let cacheControlBlocks: number | undefined;
+  let cacheControlTtlSeconds: number | undefined;
 
   if (cacheControlRequested) {
     if (params.outputFormat !== "stream-json") {
@@ -2249,6 +2279,7 @@ export function prepareClaudeRequest(
     const built = assembleClaudeCacheBlocks(effectiveParts);
     stdinPayload = `${JSON.stringify(built.payload)}\n`;
     cacheControlBlocks = built.markedBlockCount;
+    cacheControlTtlSeconds = built.markedBlockCount > 0 ? 3600 : undefined;
   }
 
   const args: string[] = cacheControlRequested
@@ -2351,6 +2382,7 @@ export function prepareClaudeRequest(
     stablePrefixTokens,
     stdinPayload,
     cacheControlBlocks,
+    cacheControlTtlSeconds,
     warnings: warnings.length > 0 ? warnings : undefined,
   };
 }
@@ -5765,6 +5797,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           stablePrefixHash: prep.stablePrefixHash ?? undefined,
           stablePrefixTokens: prep.stablePrefixTokens ?? undefined,
           cacheControlBlocks: prep.cacheControlBlocks,
+          cacheControlTtlSeconds: prep.cacheControlTtlSeconds,
         },
         runtime
       );

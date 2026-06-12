@@ -83,6 +83,8 @@ export interface AsyncJobFlightRecorderEntry {
    * undefined elsewhere so legacy rows stay NULL.
    */
   cacheControlBlocks?: number;
+  /** TTL seconds actually emitted on those cache_control markers. */
+  cacheControlTtlSeconds?: number;
 }
 
 /**
@@ -892,6 +894,7 @@ export class AsyncJobManager {
           stablePrefixHash: flightRecorderEntry.stablePrefixHash,
           stablePrefixTokens: flightRecorderEntry.stablePrefixTokens,
           cacheControlBlocks: flightRecorderEntry.cacheControlBlocks,
+          cacheControlTtlSeconds: flightRecorderEntry.cacheControlTtlSeconds,
         });
       } catch (err) {
         this.logger.error("Async-path flight recorder logStart failed", err);

@@ -41,10 +41,17 @@ class SeededFlightRecorder implements FlightRecorderLike {
     cache_read_tokens: number | null;
     cache_creation_tokens: number | null;
     datetime_utc: string;
+    cache_control_blocks?: number | null;
   }> = [];
 
   /** Seed a synthetic completed request for a given sessionId at a specific time. */
-  seedHit(opts: { sessionId: string; minutesAgo: number; cli?: string; model?: string }): void {
+  seedHit(opts: {
+    sessionId: string;
+    minutesAgo: number;
+    cli?: string;
+    model?: string;
+    cacheControlBlocks?: number;
+  }): void {
     const cli = opts.cli ?? "claude";
     const datetime = new Date(Date.now() - opts.minutesAgo * 60_000).toISOString();
     this.rows.push({
@@ -56,6 +63,7 @@ class SeededFlightRecorder implements FlightRecorderLike {
       cache_read_tokens: 100,
       cache_creation_tokens: 0,
       datetime_utc: datetime,
+      cache_control_blocks: opts.cacheControlBlocks ?? null,
     });
   }
 
@@ -75,6 +83,7 @@ class SeededFlightRecorder implements FlightRecorderLike {
           cache_creation_tokens: r.cache_creation_tokens ?? 0,
           stable_prefix_hash: r.stable_prefix_hash,
           datetime_utc: r.datetime_utc,
+          cache_control_blocks: r.cache_control_blocks ?? null,
         })) as unknown as T[];
     }
     return [] as T[];
@@ -221,6 +230,29 @@ describe("slice 3: cache_ttl_expiring_soon warning", () => {
       approvalStrategy: "legacy",
     });
     const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.warnings).toBeUndefined();
+  });
+
+  it("uses 1-hour TTL override when cache_control_blocks > 0 is found in latest row", async () => {
+    const { server, flight, sessions } = await setup({
+      warnOnTtlExpiry: true,
+      anthropicTtlSeconds: 300, // 5 min policy in config
+    });
+    const sess = await sessions.createSession("claude", "ttl-override-test");
+    // Seed a hit from 10 minutes ago, with explicit cache control block count of 1
+    flight.seedHit({
+      sessionId: sess.id,
+      minutesAgo: 10,
+      cacheControlBlocks: 1,
+    });
+
+    const result = await callTool(server, "claude_request_async", {
+      prompt: "any prompt",
+      approvalStrategy: "legacy",
+      sessionId: sess.id,
+    });
+    const parsed = JSON.parse(result.content[0].text);
+    // Should NOT warn since 10 minutes is well within the 1-hour override window
     expect(parsed.warnings).toBeUndefined();
   });
 });

@@ -4,6 +4,33 @@ All notable changes to the llm-cli-gateway project.
 
 ## Unreleased
 
+## [2.6.3] - 2026-06-12: Claude cache-control veracity and Grok 0.2.50
+
+### Fixed
+
+- Claude `promptParts` cache-control stream-json payloads now preserve the
+  exact assembled prompt bytes: concatenating emitted Claude content blocks
+  matches `assemble(parts).text`, including stable-part separators.
+- Empty or omitted stable-part `cacheControl` markers are now treated as a
+  no-op: they do not force the Claude stdin cache-control path, do not suppress
+  opt-in auto-emission, and return a `cache_control_noop` warning.
+- Flight-recorder rows now persist the actual emitted
+  `cache_control_ttl_seconds`, and cache-state TTL reporting prefers that row
+  value while retaining a 1-hour compatibility fallback for legacy
+  `cache_control_blocks` rows.
+- Provider cache docs now describe the verified Claude stream-json
+  `cache_control` path and the remaining hidden-request limits accurately,
+  including async flight-recorder metadata and slice κ TTL handoff.
+
+### Upstream provider maintenance
+
+- Grok Build stable `0.2.50` contract refresh: `--debug` and `--debug-file`
+  are acknowledged as upstream-only help/probe flags at top level and across
+  subcommands without becoming gateway argv allowlist flags.
+- Declared `grok agent leader --relay-on-demand` on the non-exposed agent
+  leader subcommand, refreshed `docs/upstream/snapshots/grok.json`, and added
+  the 2026-06-12 Grok upstream scan report.
+
 ## [2.6.0] - 2026-06-12: Gemini provider on Google Antigravity CLI
 
 ### Changed

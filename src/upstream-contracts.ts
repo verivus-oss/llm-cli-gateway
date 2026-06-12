@@ -232,6 +232,7 @@ function subcommand(
     exposure?: CliSubcommandExposure;
     flagArities?: Record<string, CliFlagArity>;
     fixtures?: readonly CliContractFixture[];
+    acknowledgedUpstreamFlags?: readonly string[];
   } = {}
 ): CliSubcommandContract {
   return {
@@ -247,8 +248,29 @@ function subcommand(
     tokenCost: options.tokenCost ?? "small",
     summary,
     conformanceFixtures: options.fixtures ?? [],
+    acknowledgedUpstreamFlags: options.acknowledgedUpstreamFlags ?? [],
   };
 }
+
+function acknowledgeSubcommandFlags<T extends Record<string, CliSubcommandContract>>(
+  subcommands: T,
+  flags: readonly string[]
+): T {
+  return Object.fromEntries(
+    Object.entries(subcommands).map(([name, contract]) => [
+      name,
+      {
+        ...contract,
+        acknowledgedUpstreamFlags: Array.from(
+          new Set([...(contract.acknowledgedUpstreamFlags ?? []), ...flags])
+        ),
+        children: acknowledgeSubcommandFlags(contract.children ?? {}, flags),
+      },
+    ])
+  ) as unknown as T;
+}
+
+const GROK_DEBUG_HELP_FLAGS = ["--debug", "--debug-file"] as const;
 
 export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
   claude: {
@@ -1341,193 +1363,201 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       watchCategories: ["flags", "permission-modes", "session-resume", "sandbox", "output-formats"],
     },
     helpArgs: [["--help"]],
-    subcommands: {
-      agent: subcommand(
-        ["agent"],
-        "Run Grok agent service helpers.",
-        "executes_agent",
-        [
-          "--agent-profile",
-          "--always-approve",
-          "--cli-chat-proxy-base-url",
-          "--grok-ws-origin",
-          "--grok-ws-url",
-          "--leader",
-          "--leader-socket",
-          "--model",
-          "--no-leader",
-          "--reasoning-effort",
-          "--reauth",
-          "--xai-api-base-url",
-        ],
-        {
-          // Grok 0.2.38: expanded agent subcommand surface (profile, reauth, grok-ws-*,
-          // leader/no-leader controls, xai-api-base etc.). Tracked explicitly for
-          // help-surface drift detection in subcommand catalog (probe-installed).
-          children: {
-            stdio: subcommand(
-              ["agent", "stdio"],
-              "Run Grok agent stdio mode.",
-              "starts_server",
-              ["--leader-socket"],
-              { exposure: "not_exposed" }
-            ),
-            headless: subcommand(
-              ["agent", "headless"],
-              "Run Grok headless agent mode.",
-              "executes_agent",
-              ["--grok-ws-origin", "--grok-ws-url", "--leader-socket"]
-            ),
-            serve: subcommand(
-              ["agent", "serve"],
-              "Start Grok agent server mode.",
-              "starts_server",
-              [
-                "--bind",
-                "--grok-ws-origin",
-                "--grok-ws-url",
-                "--leader-socket",
-                "--remote",
-                "--secret",
-              ],
-              { exposure: "not_exposed" }
-            ),
-            leader: subcommand(
-              ["agent", "leader"],
-              "Start Grok agent leader mode.",
-              "starts_server",
-              [
-                "--grok-ws-origin",
-                "--grok-ws-url",
-                "--leader-socket",
-                "--no-auto-update",
-                "--no-exit-on-disconnect",
-              ],
-              { exposure: "not_exposed" }
-            ),
-          },
-        }
-      ),
-      completions: subcommand(
-        ["completions"],
-        "Generate Grok shell completions.",
-        "read_only",
-        ["--leader-socket"],
-        { tier: "inspect" }
-      ),
-      export: subcommand(
-        ["export"],
-        "Export Grok session data.",
-        "read_only",
-        ["--clipboard", "--leader-socket"],
-        { tier: "inspect" }
-      ),
-      import: subcommand(["import"], "Import Grok session data.", "writes_local_config", [
-        "--json",
-        "--leader-socket",
-        "--list",
-      ]),
-      inspect: subcommand(
-        ["inspect"],
-        "Inspect Grok local state.",
-        "read_only",
-        ["--json", "--leader-socket"],
-        { tier: "inspect" }
-      ),
-      leader: subcommand(
-        ["leader"],
-        "Manage Grok leader process.",
-        "starts_server",
-        ["--leader-socket"],
-        {
-          exposure: "not_exposed",
-        }
-      ),
-      login: subcommand(
-        ["login"],
-        "Authenticate Grok CLI.",
-        "auth",
-        ["--device-auth", "--leader-socket", "--oauth"],
-        { exposure: "not_exposed" }
-      ),
-      logout: subcommand(
-        ["logout"],
-        "Clear Grok authentication state.",
-        "auth",
-        ["--leader-socket"],
-        {
-          exposure: "not_exposed",
-        }
-      ),
-      mcp: subcommand(["mcp"], "Manage Grok MCP configuration.", "writes_local_config", [
-        "--leader-socket",
-      ]),
-      memory: subcommand(["memory"], "Manage Grok memory state.", "writes_local_config", [
-        "--leader-socket",
-      ]),
-      models: subcommand(
-        ["models"],
-        "Inspect Grok model catalog.",
-        "network",
-        ["--leader-socket"],
-        {
-          tier: "diagnostic",
-        }
-      ),
-      plugin: subcommand(["plugin"], "Manage Grok plugins.", "writes_local_config", [
-        "--leader-socket",
-      ]),
-      sessions: subcommand(
-        ["sessions"],
-        "Inspect Grok sessions.",
-        "read_only",
-        ["--leader-socket"],
-        {
-          tier: "inspect",
-        }
-      ),
-      setup: subcommand(
-        ["setup"],
-        "Configure Grok CLI local setup.",
-        "writes_local_config",
-        ["--leader-socket"],
-        { exposure: "not_exposed" }
-      ),
-      ssh: subcommand(["ssh"], "Manage Grok SSH integration.", "network", ["--leader-socket"]),
-      trace: subcommand(
-        ["trace"],
-        "Inspect Grok trace data.",
-        "read_only",
-        ["--json", "--leader-socket", "--local", "--output"],
-        { tier: "diagnostic" }
-      ),
-      update: subcommand(
-        ["update"],
-        "Update the Grok CLI binary.",
-        "updates_binary",
-        [
-          "--alpha",
-          "--check",
-          "--force-reinstall",
+    subcommands: acknowledgeSubcommandFlags(
+      {
+        agent: subcommand(
+          ["agent"],
+          "Run Grok agent service helpers.",
+          "executes_agent",
+          [
+            "--agent-profile",
+            "--always-approve",
+            "--cli-chat-proxy-base-url",
+            "--grok-ws-origin",
+            "--grok-ws-url",
+            "--leader",
+            "--leader-socket",
+            "--model",
+            "--no-leader",
+            "--reasoning-effort",
+            "--reauth",
+            "--xai-api-base-url",
+          ],
+          {
+            // Grok 0.2.38: expanded agent subcommand surface (profile, reauth, grok-ws-*,
+            // leader/no-leader controls, xai-api-base etc.). Tracked explicitly for
+            // help-surface drift detection in subcommand catalog (probe-installed).
+            children: {
+              stdio: subcommand(
+                ["agent", "stdio"],
+                "Run Grok agent stdio mode.",
+                "starts_server",
+                ["--leader-socket"],
+                { exposure: "not_exposed" }
+              ),
+              headless: subcommand(
+                ["agent", "headless"],
+                "Run Grok headless agent mode.",
+                "executes_agent",
+                ["--grok-ws-origin", "--grok-ws-url", "--leader-socket"]
+              ),
+              serve: subcommand(
+                ["agent", "serve"],
+                "Start Grok agent server mode.",
+                "starts_server",
+                [
+                  "--bind",
+                  "--grok-ws-origin",
+                  "--grok-ws-url",
+                  "--leader-socket",
+                  "--remote",
+                  "--secret",
+                ],
+                { exposure: "not_exposed" }
+              ),
+              leader: subcommand(
+                ["agent", "leader"],
+                "Start Grok agent leader mode.",
+                "starts_server",
+                [
+                  "--grok-ws-origin",
+                  "--grok-ws-url",
+                  "--leader-socket",
+                  "--no-auto-update",
+                  "--no-exit-on-disconnect",
+                  "--relay-on-demand",
+                ],
+                { exposure: "not_exposed" }
+              ),
+            },
+          }
+        ),
+        completions: subcommand(
+          ["completions"],
+          "Generate Grok shell completions.",
+          "read_only",
+          ["--leader-socket"],
+          { tier: "inspect" }
+        ),
+        export: subcommand(
+          ["export"],
+          "Export Grok session data.",
+          "read_only",
+          ["--clipboard", "--leader-socket"],
+          { tier: "inspect" }
+        ),
+        import: subcommand(["import"], "Import Grok session data.", "writes_local_config", [
           "--json",
           "--leader-socket",
-          "--stable",
-          "--version",
-        ],
-        { exposure: "not_exposed" }
-      ),
-      version: subcommand(
-        ["version"],
-        "Print Grok version information.",
-        "read_only",
-        ["--json", "--leader-socket"],
-        { tier: "diagnostic" }
-      ),
-      worktree: subcommand(["worktree"], "Manage Grok worktree sessions.", "writes_local_config", [
-        "--leader-socket",
-      ]),
-    },
+          "--list",
+        ]),
+        inspect: subcommand(
+          ["inspect"],
+          "Inspect Grok local state.",
+          "read_only",
+          ["--json", "--leader-socket"],
+          { tier: "inspect" }
+        ),
+        leader: subcommand(
+          ["leader"],
+          "Manage Grok leader process.",
+          "starts_server",
+          ["--leader-socket"],
+          {
+            exposure: "not_exposed",
+          }
+        ),
+        login: subcommand(
+          ["login"],
+          "Authenticate Grok CLI.",
+          "auth",
+          ["--device-auth", "--leader-socket", "--oauth"],
+          { exposure: "not_exposed" }
+        ),
+        logout: subcommand(
+          ["logout"],
+          "Clear Grok authentication state.",
+          "auth",
+          ["--leader-socket"],
+          {
+            exposure: "not_exposed",
+          }
+        ),
+        mcp: subcommand(["mcp"], "Manage Grok MCP configuration.", "writes_local_config", [
+          "--leader-socket",
+        ]),
+        memory: subcommand(["memory"], "Manage Grok memory state.", "writes_local_config", [
+          "--leader-socket",
+        ]),
+        models: subcommand(
+          ["models"],
+          "Inspect Grok model catalog.",
+          "network",
+          ["--leader-socket"],
+          {
+            tier: "diagnostic",
+          }
+        ),
+        plugin: subcommand(["plugin"], "Manage Grok plugins.", "writes_local_config", [
+          "--leader-socket",
+        ]),
+        sessions: subcommand(
+          ["sessions"],
+          "Inspect Grok sessions.",
+          "read_only",
+          ["--leader-socket"],
+          {
+            tier: "inspect",
+          }
+        ),
+        setup: subcommand(
+          ["setup"],
+          "Configure Grok CLI local setup.",
+          "writes_local_config",
+          ["--leader-socket"],
+          { exposure: "not_exposed" }
+        ),
+        ssh: subcommand(["ssh"], "Manage Grok SSH integration.", "network", ["--leader-socket"]),
+        trace: subcommand(
+          ["trace"],
+          "Inspect Grok trace data.",
+          "read_only",
+          ["--json", "--leader-socket", "--local", "--output"],
+          { tier: "diagnostic" }
+        ),
+        update: subcommand(
+          ["update"],
+          "Update the Grok CLI binary.",
+          "updates_binary",
+          [
+            "--alpha",
+            "--check",
+            "--force-reinstall",
+            "--json",
+            "--leader-socket",
+            "--stable",
+            "--version",
+          ],
+          { exposure: "not_exposed" }
+        ),
+        version: subcommand(
+          ["version"],
+          "Print Grok version information.",
+          "read_only",
+          ["--json", "--leader-socket"],
+          { tier: "diagnostic" }
+        ),
+        worktree: subcommand(
+          ["worktree"],
+          "Manage Grok worktree sessions.",
+          "writes_local_config",
+          ["--leader-socket"]
+        ),
+      },
+      GROK_DEBUG_HELP_FLAGS
+    ),
     maxPositionals: 0,
+    acknowledgedUpstreamFlags: GROK_DEBUG_HELP_FLAGS,
     mcpTools: ["grok_request", "grok_request_async"],
     mcpParameters: [
       "prompt",

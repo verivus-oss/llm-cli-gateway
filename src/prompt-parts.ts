@@ -122,8 +122,10 @@ export interface AssembleClaudeCacheBlocksResult {
 /**
  * Slice κ: build the Claude `--input-format stream-json` payload from
  * a `PromptParts`. Each non-empty part becomes one content block in
- * `system → tools → context → task` order; parts whose name is `true`
- * in `cacheControl` get `cache_control: {type:"ephemeral", ttl:"1h"}`.
+ * `system → tools → context → task` order. Later blocks carry the leading
+ * separators so concatenating all `text` fields exactly matches assemble().
+ * Parts whose name is `true` in `cacheControl` get `cache_control:
+ * {type:"ephemeral", ttl:"1h"}`.
  *
  * Empty parts are skipped (no zero-byte blocks) — a true flag on an
  * empty part is silently a no-op and not counted in `markedBlockCount`.
@@ -142,7 +144,10 @@ export function assembleClaudeCacheBlocks(parts: PromptParts): AssembleClaudeCac
   ];
   for (const [name, value] of stableEntries) {
     if (value === undefined || value.length === 0) continue;
-    const block: ClaudeContentBlock = { type: "text", text: value };
+    const block: ClaudeContentBlock = {
+      type: "text",
+      text: blocks.length > 0 ? `${SEPARATOR}${value}` : value,
+    };
     if (cc[name]) {
       block.cache_control = { type: "ephemeral", ttl: "1h" };
       markedBlockCount += 1;
@@ -150,7 +155,7 @@ export function assembleClaudeCacheBlocks(parts: PromptParts): AssembleClaudeCac
     blocks.push(block);
   }
 
-  blocks.push({ type: "text", text: parts.task });
+  blocks.push({ type: "text", text: blocks.length > 0 ? `${SEPARATOR}${parts.task}` : parts.task });
 
   return {
     payload: {

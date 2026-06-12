@@ -34,6 +34,7 @@ describe("cache-stats", () => {
     cacheRead?: number;
     cacheCreation?: number;
     cacheControlBlocks?: number;
+    cacheControlTtlSeconds?: number;
   }): void {
     rec.logStart({
       correlationId: opts.id,
@@ -44,6 +45,7 @@ describe("cache-stats", () => {
       stablePrefixHash: opts.stableHash,
       stablePrefixTokens: opts.stableHash ? 100 : undefined,
       cacheControlBlocks: opts.cacheControlBlocks,
+      cacheControlTtlSeconds: opts.cacheControlTtlSeconds,
     });
     rec.logComplete(opts.id, {
       response: "r",
@@ -112,6 +114,22 @@ describe("cache-stats", () => {
       // sonnet input $3/M, cache read multiplier 0.1 → saved per token = $3 * 0.9 / 1e6
       // 300 tokens × $3 × 0.9 / 1e6 = 0.00081
       expect(s.estimatedSavingsUsd).toBeCloseTo((300 * 3 * 0.9) / 1e6, 8);
+    });
+
+    it("surfaces latest cache-control block count and recorded TTL seconds for the session", () => {
+      seedRequest({
+        id: "cc-ttl-a",
+        cli: "claude",
+        model: "sonnet",
+        sessionId: "sess-cc-ttl",
+        stableHash: "h-cc-ttl",
+        cacheControlBlocks: 1,
+        cacheControlTtlSeconds: 3600,
+      });
+
+      const s = computeSessionCacheStats(rec, "sess-cc-ttl");
+      expect(s.latestCacheControlBlocks).toBe(1);
+      expect(s.latestCacheControlTtlSeconds).toBe(3600);
     });
 
     it("tolerates only cache misses (NULL or 0 cache tokens) without dividing by zero", () => {
@@ -450,6 +468,36 @@ describe("cache-stats", () => {
       });
       // 1h = 3600s = 3600000ms; elapsed = 240000ms; remaining = 3360000ms.
       expect(ttl).toBe(3_360_000);
+    });
+
+    it("claude recorded cache-control TTL overrides current config policy", () => {
+      const now = 1_700_000_000_000;
+      const lastWrite = new Date(now - 4 * 60_000).toISOString();
+      const stats = {
+        ...makeStats({ cli: "claude", lastRequestAt: lastWrite }),
+        latestCacheControlBlocks: 1,
+        latestCacheControlTtlSeconds: 3600,
+      };
+      const ttl = computeTtlRemaining(stats, "claude", {
+        anthropicTtlSeconds: 300,
+        now: () => now,
+      });
+      expect(ttl).toBe(3_360_000);
+    });
+
+    it("claude legacy cache-control rows fall back to 1-hour TTL when TTL seconds are absent", () => {
+      const now = 1_700_000_000_000;
+      const lastWrite = new Date(now - 10 * 60_000).toISOString();
+      const stats = {
+        ...makeStats({ cli: "claude", lastRequestAt: lastWrite }),
+        latestCacheControlBlocks: 1,
+        latestCacheControlTtlSeconds: null,
+      };
+      const ttl = computeTtlRemaining(stats, "claude", {
+        anthropicTtlSeconds: 300,
+        now: () => now,
+      });
+      expect(ttl).toBe(3_000_000);
     });
 
     it("claude: TTL clamped to 0 when elapsed > policy", () => {

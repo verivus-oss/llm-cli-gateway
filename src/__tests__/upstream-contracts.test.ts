@@ -560,6 +560,19 @@ Options:
       expect(drift.warnings).toEqual([]);
     });
 
+    it("filters acknowledged upstream-only subcommand flags out of extraFlags", () => {
+      const contract = getCliSubcommandContract("grok", ["agent", "leader"]);
+      expect(contract).toBeDefined();
+      const drift = computeSubcommandFlagDrift(contract!, "grok", "help", [
+        "--debug",
+        "--debug-file",
+        "--brand-new",
+      ]);
+      expect(drift.extraFlags).toEqual(["--brand-new"]);
+      expect(drift.acknowledgedExtraFlags).toEqual(["--debug", "--debug-file"]);
+      expect(drift.warnings).toEqual([]);
+    });
+
     it("warns when an acknowledged flag vanishes from the installed help (stale entry)", () => {
       const contract = makeContract({
         acknowledgedUpstreamFlags: ["--gone-now"],
@@ -584,6 +597,15 @@ Options:
             declared.has(flag),
             `${contract.cli}: ${flag} both declared and acknowledged`
           ).toBe(false);
+        }
+        for (const subcommand of flattenCliSubcommands(contract.subcommands)) {
+          const subDeclared = new Set(Object.keys(subcommand.flags));
+          for (const flag of subcommand.acknowledgedUpstreamFlags ?? []) {
+            expect(
+              subDeclared.has(flag),
+              `${contract.cli} ${subcommand.commandPath.join(" ")}: ${flag} both declared and acknowledged`
+            ).toBe(false);
+          }
         }
       }
     });

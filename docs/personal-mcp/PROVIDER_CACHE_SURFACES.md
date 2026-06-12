@@ -1,8 +1,8 @@
 # Provider cache surfaces (gateway → upstream)
 
-**Last reviewed: 2026-05-26.** Re-verify the per-model Anthropic threshold table
-before any release that ships cache_control emission — Anthropic has revised
-these thresholds across model generations and the table moves.
+**Last reviewed: 2026-06-12.** Anthropic's per-model threshold table below was
+last fetched on 2026-05-26; re-verify that table before changing threshold
+defaults because Anthropic has revised it across model generations.
 
 Scope: what each upstream CLI exposes that the gateway can use to influence or
 observe prompt caching. Distinguishes CLI-surfaced field names from the
@@ -12,7 +12,7 @@ underlying API field names — they diverge meaningfully for Codex.
 
 | CLI     | Cache reporting (observed in CLI output)          | Gateway lever for influencing cache             | Notes                                                                  |
 |---------|---------------------------------------------------|-------------------------------------------------|------------------------------------------------------------------------|
-| claude  | `cache_read_input_tokens`, `cache_creation_input_tokens` (via JSON output) | Prefix discipline + `--exclude-dynamic-system-prompt-sections`; `cache_control` injection via stream-json is **probable but unverified** | Anthropic native caching. Per-model min-token thresholds (see table).  |
+| claude  | `cache_read_input_tokens`, `cache_creation_input_tokens` (via JSON output) | Prefix discipline + `--exclude-dynamic-system-prompt-sections`; verified caller-content `cache_control` injection via `--input-format stream-json` for `promptParts` | Anthropic native caching. Per-model min-token thresholds (see table).  |
 | codex   | `cached_input_tokens` (Codex CLI ≥ 0.133.0 emits this in `turn.completed.usage`); underlying OpenAI API uses `usage.prompt_tokens_details.cached_tokens` | Prefix discipline only (no CLI cache-control flag) | OpenAI implicit cache; CLI threshold is set server-side                |
 | gemini  | Not surfaced in CLI output                        | Prefix discipline only                          | Implicit prefix caching server-side; explicit `cachedContents` only via SDK |
 | grok    | Not surfaced in CLI output                        | Prefix discipline only                          | xAI caching, if any, is opaque to the CLI                              |
@@ -73,13 +73,15 @@ Total input = `cache_read + cache_creation + input_tokens`.
 Three candidates evaluated for emitting explicit `cache_control` breakpoints
 from the gateway:
 
-(a) **stdin JSON via `--input-format stream-json`** — Probably viable but
-unverified. The stream-json `SDKUserMessage` shape accepts a `content` array
-of typed blocks (text, image), which on the underlying Anthropic Messages API
-support a per-block `cache_control` field. The CLI documentation does not
-explicitly confirm `cache_control` passes through unchanged. Verifying requires
-a live smoke test against the Anthropic API with an account that has caching
-enabled.
+(a) **stdin JSON via `--input-format stream-json`** — Verified for caller
+`promptParts` content blocks in slice κ. The gateway sends `claude -p
+--input-format stream-json --output-format stream-json
+--include-partial-messages --verbose` and writes an `SDKUserMessage` whose
+text blocks may include `cache_control: {type:"ephemeral", ttl:"1h"}`. The
+live smoke test in `docs/plans/slice-kappa-captures/README.md` observed
+`cache_read_input_tokens` rise from 12,928 to 28,439, `cache_creation_input_tokens`
+fall from 15,523 to 12, and cost fall by roughly 82%, confirming Claude Code
+forwarded the caller block marker to Anthropic.
 
 (b) **`--system-prompt <path>` + appended user message** — Viable as a partial
 mechanism. The system prompt is the natural cacheable boundary. Combined with
@@ -108,17 +110,13 @@ behaviour. The 1-hour TTL is also selectable per-block via
 `cache_control.ttl="1h"` when caller code is constructing the API request
 body directly.
 
-**Decision for slice 1**: ship Branch B (prefix-discipline-only). The gateway
-concatenates `system → tools → context → task` and passes the result as the
-single positional prompt to `claude -p`. The stable prefix bytes precede the
-volatile `task` tail unchanged across calls, so Anthropic's automatic-caching
-breakpoint lands on the same content hash each time. The gateway does NOT
-emit explicit `cache_control` JSON and does NOT route `promptParts.system`
-into `--system-prompt`/`--append-system-prompt` in this slice — the
-injection mechanism is unverified and is gated on a follow-up live smoke
-test against the Anthropic API. The
-`[cache_awareness].emit_anthropic_cache_control` flag stays in config for
-that future slice.
+**Decision history**: slice 1 shipped Branch B (prefix-discipline-only). Slice
+κ subsequently verified and shipped Branch A for Claude caller content only:
+explicit `promptParts.cacheControl` markers and opt-in automatic markers are
+encoded in stream-json stdin. This does not give the gateway control over
+Claude Code's hidden system prompt, tool schema array, session wrapper, or
+other upstream request internals; those remain outside the normal CLI-wrapper
+surface and would require a separate proxy/trust-model design.
 
 `--exclude-dynamic-system-prompt-sections` is recommended in cache-aware mode
 when no custom `--system-prompt` is set — it moves the per-machine sections
@@ -196,3 +194,12 @@ Mistral / vibe CLI: same. No cache reporting.
   therefore include both sync and async row populations.
 - **Slice 3** (TTL tracking): only meaningful for Claude (5min default, 1h
   optional). For other CLIs, `ttlRemainingMs` is null.
+- **Slice κ** (Claude explicit `cache_control`): verified
+  `promptParts.cacheControl` emission through Claude Code stream-json stdin.
+  The gateway marks only non-empty stable `system` / `tools` / `context`
+  blocks, never `task`, and uses `ttl:"1h"` on emitted blocks. The 1h TTL is
+  forced because a failed smoke-test attempt showed Anthropic rejects a 5m
+  caller block after Claude Code's own 1h-marked session-wrap content. The
+  flight recorder records both `cache_control_blocks` and
+  `cache_control_ttl_seconds` so cache-state TTL reporting is based on the row
+  actually written, not only current config.

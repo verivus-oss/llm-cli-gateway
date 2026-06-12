@@ -44,6 +44,17 @@ export interface SessionCacheStats {
    * Computed by computeTtlRemaining(); see ttlPolicy parameter.
    */
   ttlRemainingMs: number | null;
+  /**
+   * Slice κ: number of explicit or auto-emitted cache control blocks on
+   * the latest request in this session.
+   */
+  latestCacheControlBlocks?: number | null;
+  /**
+   * Slice κ v5: TTL seconds recorded for the latest request's emitted
+   * cache_control blocks. Null for rows without gateway-emitted markers
+   * and for legacy rows predating the v5 recorder column.
+   */
+  latestCacheControlTtlSeconds?: number | null;
 }
 
 export interface PrefixCacheStats {
@@ -119,6 +130,7 @@ interface RawRow {
    * pre-v4 rows and on non-Claude / non-κ Claude rows.
    */
   cache_control_blocks?: number | null;
+  cache_control_ttl_seconds?: number | null;
 }
 
 function safeNum(n: number | null | undefined): number {
@@ -138,7 +150,9 @@ export function computeSessionCacheStats(
             COALESCE(cache_read_tokens, 0) AS cache_read_tokens,
             COALESCE(cache_creation_tokens, 0) AS cache_creation_tokens,
             stable_prefix_hash,
-            datetime_utc
+            datetime_utc,
+            cache_control_blocks,
+            cache_control_ttl_seconds
      FROM requests
      WHERE session_id = ?
      ORDER BY datetime_utc DESC`,
@@ -184,6 +198,9 @@ export function computeSessionCacheStats(
     // is left null here. Callers (session_get / cache_state resources)
     // apply the configured TTL policy and set the field.
     ttlRemainingMs: null,
+    latestCacheControlBlocks: rows.length > 0 ? (rows[0].cache_control_blocks ?? null) : null,
+    latestCacheControlTtlSeconds:
+      rows.length > 0 ? (rows[0].cache_control_ttl_seconds ?? null) : null,
   };
 }
 
@@ -224,7 +241,19 @@ export function computeTtlRemaining(
   const lastWriteMs = Date.parse(stats.lastRequestAt);
   if (!Number.isFinite(lastWriteMs)) return null;
   const elapsedMs = nowMs - lastWriteMs;
-  const ttlMs = ttlPolicy.anthropicTtlSeconds * 1000;
+  // Slice κ: if the last request had explicit or auto-emitted cache control
+  // breakpoints, the actual TTL set on the Anthropic cache breakpoint was
+  // 1 hour (3600 seconds), regardless of the configured default policy.
+  const isExplicit =
+    typeof stats.latestCacheControlBlocks === "number" && stats.latestCacheControlBlocks > 0;
+  const recordedTtlSeconds =
+    typeof stats.latestCacheControlTtlSeconds === "number" &&
+    Number.isFinite(stats.latestCacheControlTtlSeconds) &&
+    stats.latestCacheControlTtlSeconds > 0
+      ? stats.latestCacheControlTtlSeconds
+      : null;
+  const ttlSeconds = recordedTtlSeconds ?? (isExplicit ? 3600 : ttlPolicy.anthropicTtlSeconds);
+  const ttlMs = ttlSeconds * 1000;
   return Math.max(0, ttlMs - elapsedMs);
 }
 
@@ -307,7 +336,8 @@ export function computeGlobalCacheStats(
               COALESCE(cache_creation_tokens, 0) AS cache_creation_tokens,
               stable_prefix_hash,
               datetime_utc,
-              cache_control_blocks
+              cache_control_blocks,
+              cache_control_ttl_seconds
        FROM requests
        WHERE datetime_utc >= ?`
     : `SELECT cli, model,
@@ -315,7 +345,8 @@ export function computeGlobalCacheStats(
               COALESCE(cache_creation_tokens, 0) AS cache_creation_tokens,
               stable_prefix_hash,
               datetime_utc,
-              cache_control_blocks
+              cache_control_blocks,
+              cache_control_ttl_seconds
        FROM requests`;
   const rows = sinceIso ? db.queryRequests<RawRow>(sql, sinceIso) : db.queryRequests<RawRow>(sql);
 

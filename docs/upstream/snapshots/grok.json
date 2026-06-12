@@ -1,17 +1,17 @@
 {
   "cli": "grok",
-  "fetchedAt": "2026-06-03T21:58:59.244Z",
+  "fetchedAt": "2026-06-12T03:23:44.256Z",
   "sources": [
     {
       "url": "https://docs.x.ai/developers/release-notes.md",
       "ok": true,
       "status": 200,
-      "bytes": 10700,
-      "sha256": "ece115528941254cbe5135eade396ca3df2ffd193d78e80e36395ec1234d8f99"
+      "bytes": 11698,
+      "sha256": "cfeb634f327be4fd66d003895d8fd52edc74ed7cd1c094ac9a9d8c3160366b64"
     }
   ],
   "helpSurface": {
-    "probedAt": "2026-06-03T21:58:59.244Z",
+    "probedAt": "2026-06-12T03:23:44.256Z",
     "available": true,
     "version": null,
     "flags": [
@@ -25,11 +25,14 @@
       "--compaction-mode",
       "--continue",
       "--cwd",
+      "--debug",
+      "--debug-file",
       "--deny",
       "--disable-web-search",
       "--disallowed-tools",
       "--effort",
       "--experimental-memory",
+      "--leader-socket",
       "--max-turns",
       "--model",
       "--no-alt-screen",
@@ -54,8 +57,490 @@
       "--version",
       "--worktree"
     ],
-    "helpHash": "32a71734ced32c5a93ca7d442c9398d550b4f1833321f0184c63eb48be232225",
+    "helpHash": "d699a1aa963fe025955d9484fb7900cd578e2a1d77ede1abd7d5c713bd2c11fb",
     "extraVsContract": [],
     "missingFromBinary": []
+  },
+  "subcommands": {
+    "agent": {
+      "commandPath": [
+        "agent"
+      ],
+      "probedAt": "2026-06-12T03:23:33.271Z",
+      "available": true,
+      "flags": [
+        "--agent-profile",
+        "--always-approve",
+        "--cli-chat-proxy-base-url",
+        "--debug",
+        "--debug-file",
+        "--grok-ws-origin",
+        "--grok-ws-url",
+        "--leader",
+        "--leader-socket",
+        "--model",
+        "--no-leader",
+        "--reasoning-effort",
+        "--reauth",
+        "--xai-api-base-url"
+      ],
+      "helpHash": "a505b90f2533ecd0f6047defbaa8d35e256afec2bba79da3fb89c2a3dbb5caef",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "risk": "executes_agent",
+      "exposure": "tracked_only",
+      "tier": "catalog",
+      "summary": "Run Grok agent service helpers."
+    },
+    "agent headless": {
+      "commandPath": [
+        "agent",
+        "headless"
+      ],
+      "probedAt": "2026-06-12T03:23:33.748Z",
+      "available": true,
+      "flags": [
+        "--debug",
+        "--debug-file",
+        "--grok-ws-origin",
+        "--grok-ws-url",
+        "--leader-socket"
+      ],
+      "helpHash": "fbf968e92fb37bab034c1b214cf95710c60a7f63f229c48f4b811930f4599579",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "risk": "executes_agent",
+      "exposure": "tracked_only",
+      "tier": "catalog",
+      "summary": "Run Grok headless agent mode."
+    },
+    "agent leader": {
+      "commandPath": [
+        "agent",
+        "leader"
+      ],
+      "probedAt": "2026-06-12T03:23:34.242Z",
+      "available": true,
+      "flags": [
+        "--debug",
+        "--debug-file",
+        "--grok-ws-origin",
+        "--grok-ws-url",
+        "--leader-socket",
+        "--no-auto-update",
+        "--no-exit-on-disconnect",
+        "--relay-on-demand"
+      ],
+      "helpHash": "f151fe8ba8e55d99679fcf977f1ef54e9cccc9c593fbddf55a637cbe9e47cabf",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "risk": "starts_server",
+      "exposure": "not_exposed",
+      "tier": "catalog",
+      "summary": "Start Grok agent leader mode."
+    },
+    "agent serve": {
+      "commandPath": [
+        "agent",
+        "serve"
+      ],
+      "probedAt": "2026-06-12T03:23:34.742Z",
+      "available": true,
+      "flags": [
+        "--bind",
+        "--debug",
+        "--debug-file",
+        "--grok-ws-origin",
+        "--grok-ws-url",
+        "--leader-socket",
+        "--remote",
+        "--secret"
+      ],
+      "helpHash": "586f00b081c8090e945be5a602d66370b3a20c7e4a897814c28d52c0e66b8061",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "risk": "starts_server",
+      "exposure": "not_exposed",
+      "tier": "catalog",
+      "summary": "Start Grok agent server mode."
+    },
+    "agent stdio": {
+      "commandPath": [
+        "agent",
+        "stdio"
+      ],
+      "probedAt": "2026-06-12T03:23:35.242Z",
+      "available": true,
+      "flags": [
+        "--debug",
+        "--debug-file",
+        "--leader-socket"
+      ],
+      "helpHash": "8a3bbedca91397ca22047fdcecb907b0abeae2ccc2a4c5d03ac464a9d427c619",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "risk": "starts_server",
+      "exposure": "not_exposed",
+      "tier": "catalog",
+      "summary": "Run Grok agent stdio mode."
+    },
+    "completions": {
+      "commandPath": [
+        "completions"
+      ],
+      "probedAt": "2026-06-12T03:23:35.776Z",
+      "available": true,
+      "flags": [
+        "--debug",
+        "--debug-file",
+        "--leader-socket"
+      ],
+      "helpHash": "657c5bce73068874e0f732f007a0a469dfd9ae864a2480633c90d1733fd78eb5",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "risk": "read_only",
+      "exposure": "tracked_only",
+      "tier": "inspect",
+      "summary": "Generate Grok shell completions."
+    },
+    "export": {
+      "commandPath": [
+        "export"
+      ],
+      "probedAt": "2026-06-12T03:23:36.272Z",
+      "available": true,
+      "flags": [
+        "--clipboard",
+        "--debug",
+        "--debug-file",
+        "--leader-socket"
+      ],
+      "helpHash": "c68cc33a577dc7a7b53eec76199aab98432ebf3abceb984fd7ce657606c32f37",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "risk": "read_only",
+      "exposure": "tracked_only",
+      "tier": "inspect",
+      "summary": "Export Grok session data."
+    },
+    "import": {
+      "commandPath": [
+        "import"
+      ],
+      "probedAt": "2026-06-12T03:23:36.800Z",
+      "available": true,
+      "flags": [
+        "--debug",
+        "--debug-file",
+        "--json",
+        "--leader-socket",
+        "--list"
+      ],
+      "helpHash": "86c95bbf205b45e51c02d19425709557cc2fa0da82489e20eeef65911d621ad0",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "risk": "writes_local_config",
+      "exposure": "tracked_only",
+      "tier": "catalog",
+      "summary": "Import Grok session data."
+    },
+    "inspect": {
+      "commandPath": [
+        "inspect"
+      ],
+      "probedAt": "2026-06-12T03:23:37.282Z",
+      "available": true,
+      "flags": [
+        "--debug",
+        "--debug-file",
+        "--json",
+        "--leader-socket"
+      ],
+      "helpHash": "efe2189c65f1290e32b7aad290e2f473f5acfa575098fb044a86d78fbda25321",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "risk": "read_only",
+      "exposure": "tracked_only",
+      "tier": "inspect",
+      "summary": "Inspect Grok local state."
+    },
+    "leader": {
+      "commandPath": [
+        "leader"
+      ],
+      "probedAt": "2026-06-12T03:23:37.787Z",
+      "available": true,
+      "flags": [
+        "--debug",
+        "--debug-file",
+        "--leader-socket"
+      ],
+      "helpHash": "443a5a58dc5df448c23b7a9018d0fc88eb803cf0e837139d86f175cd35aa6575",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "risk": "starts_server",
+      "exposure": "not_exposed",
+      "tier": "catalog",
+      "summary": "Manage Grok leader process."
+    },
+    "login": {
+      "commandPath": [
+        "login"
+      ],
+      "probedAt": "2026-06-12T03:23:38.269Z",
+      "available": true,
+      "flags": [
+        "--debug",
+        "--debug-file",
+        "--device-auth",
+        "--leader-socket",
+        "--oauth"
+      ],
+      "helpHash": "01c6675b80506920529ce35310f952702d7bab0dfa2ce3864acd2245bdad0f38",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "risk": "auth",
+      "exposure": "not_exposed",
+      "tier": "catalog",
+      "summary": "Authenticate Grok CLI."
+    },
+    "logout": {
+      "commandPath": [
+        "logout"
+      ],
+      "probedAt": "2026-06-12T03:23:38.769Z",
+      "available": true,
+      "flags": [
+        "--debug",
+        "--debug-file",
+        "--leader-socket"
+      ],
+      "helpHash": "8a907beedb5a97b1efad68b2f6524c86cf70278bf9a8af32fcce64f9d7a2ecee",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "risk": "auth",
+      "exposure": "not_exposed",
+      "tier": "catalog",
+      "summary": "Clear Grok authentication state."
+    },
+    "mcp": {
+      "commandPath": [
+        "mcp"
+      ],
+      "probedAt": "2026-06-12T03:23:39.278Z",
+      "available": true,
+      "flags": [
+        "--debug",
+        "--debug-file",
+        "--leader-socket"
+      ],
+      "helpHash": "d71839f5810a12e6a488f4063b657dc981574d5241b36dac40c2cecf2cd9a38c",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "risk": "writes_local_config",
+      "exposure": "tracked_only",
+      "tier": "catalog",
+      "summary": "Manage Grok MCP configuration."
+    },
+    "memory": {
+      "commandPath": [
+        "memory"
+      ],
+      "probedAt": "2026-06-12T03:23:39.762Z",
+      "available": true,
+      "flags": [
+        "--debug",
+        "--debug-file",
+        "--leader-socket"
+      ],
+      "helpHash": "32daa78312a7574bae6c5158d065ba0d987cb137d5037b4fa98190179141f8fb",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "risk": "writes_local_config",
+      "exposure": "tracked_only",
+      "tier": "catalog",
+      "summary": "Manage Grok memory state."
+    },
+    "models": {
+      "commandPath": [
+        "models"
+      ],
+      "probedAt": "2026-06-12T03:23:40.291Z",
+      "available": true,
+      "flags": [
+        "--debug",
+        "--debug-file",
+        "--leader-socket"
+      ],
+      "helpHash": "97b905b1aab187c66bb1e8ca1e3c77d3e472fbb1ca2bf48e7d4b0b8c36188641",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "risk": "network",
+      "exposure": "tracked_only",
+      "tier": "diagnostic",
+      "summary": "Inspect Grok model catalog."
+    },
+    "plugin": {
+      "commandPath": [
+        "plugin"
+      ],
+      "probedAt": "2026-06-12T03:23:40.777Z",
+      "available": true,
+      "flags": [
+        "--debug",
+        "--debug-file",
+        "--leader-socket"
+      ],
+      "helpHash": "088b43565d1a0340b045a08a097ca963d22735ab60be0dd74fc481ef197cd0d0",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "risk": "writes_local_config",
+      "exposure": "tracked_only",
+      "tier": "catalog",
+      "summary": "Manage Grok plugins."
+    },
+    "sessions": {
+      "commandPath": [
+        "sessions"
+      ],
+      "probedAt": "2026-06-12T03:23:41.261Z",
+      "available": true,
+      "flags": [
+        "--debug",
+        "--debug-file",
+        "--leader-socket"
+      ],
+      "helpHash": "79697113e014f8e9fe0617dacd8fba7493f88c4270fe4f3c5628a77742635bf0",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "risk": "read_only",
+      "exposure": "tracked_only",
+      "tier": "inspect",
+      "summary": "Inspect Grok sessions."
+    },
+    "setup": {
+      "commandPath": [
+        "setup"
+      ],
+      "probedAt": "2026-06-12T03:23:41.753Z",
+      "available": true,
+      "flags": [
+        "--debug",
+        "--debug-file",
+        "--leader-socket"
+      ],
+      "helpHash": "d17e8776ccae46d79fc1afd3d921aba37fa675a3790287568be5cecf5a87cb8e",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "risk": "writes_local_config",
+      "exposure": "not_exposed",
+      "tier": "catalog",
+      "summary": "Configure Grok CLI local setup."
+    },
+    "ssh": {
+      "commandPath": [
+        "ssh"
+      ],
+      "probedAt": "2026-06-12T03:23:42.247Z",
+      "available": true,
+      "flags": [
+        "--debug",
+        "--debug-file",
+        "--leader-socket"
+      ],
+      "helpHash": "9da6889526042700a7620f0eadc5b440f7edfd0d2ce1e8d157cf94d4f5aabf6b",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "risk": "network",
+      "exposure": "tracked_only",
+      "tier": "catalog",
+      "summary": "Manage Grok SSH integration."
+    },
+    "trace": {
+      "commandPath": [
+        "trace"
+      ],
+      "probedAt": "2026-06-12T03:23:42.749Z",
+      "available": true,
+      "flags": [
+        "--debug",
+        "--debug-file",
+        "--json",
+        "--leader-socket",
+        "--local",
+        "--output"
+      ],
+      "helpHash": "8a2d012df6474ce738446150032871b70b8842f07249c8cbff63e33f348c0421",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "risk": "read_only",
+      "exposure": "tracked_only",
+      "tier": "diagnostic",
+      "summary": "Inspect Grok trace data."
+    },
+    "update": {
+      "commandPath": [
+        "update"
+      ],
+      "probedAt": "2026-06-12T03:23:43.265Z",
+      "available": true,
+      "flags": [
+        "--alpha",
+        "--check",
+        "--debug",
+        "--debug-file",
+        "--force-reinstall",
+        "--json",
+        "--leader-socket",
+        "--stable",
+        "--version"
+      ],
+      "helpHash": "6e8133748c9f19919ceef46443dc35df18a0f15cb70e5589d06eac4d8a867359",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "risk": "updates_binary",
+      "exposure": "not_exposed",
+      "tier": "catalog",
+      "summary": "Update the Grok CLI binary."
+    },
+    "version": {
+      "commandPath": [
+        "version"
+      ],
+      "probedAt": "2026-06-12T03:23:43.774Z",
+      "available": true,
+      "flags": [
+        "--debug",
+        "--debug-file",
+        "--json",
+        "--leader-socket"
+      ],
+      "helpHash": "6c378ad86fa4d18155e023eb413fb0b287c019b89731d8edb3f9df5ae4a17f74",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "risk": "read_only",
+      "exposure": "tracked_only",
+      "tier": "diagnostic",
+      "summary": "Print Grok version information."
+    },
+    "worktree": {
+      "commandPath": [
+        "worktree"
+      ],
+      "probedAt": "2026-06-12T03:23:44.256Z",
+      "available": true,
+      "flags": [
+        "--debug",
+        "--debug-file",
+        "--leader-socket"
+      ],
+      "helpHash": "c722e1978eecd664cc786665cd720deee34d1385c4426832e1ec36f8c95163f1",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "risk": "writes_local_config",
+      "exposure": "tracked_only",
+      "tier": "catalog",
+      "summary": "Manage Grok worktree sessions."
+    }
   }
 }
