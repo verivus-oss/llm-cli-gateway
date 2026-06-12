@@ -1,25 +1,35 @@
 # ACP Scope
 
-Status: planning note, implementation pending.
+Status: historical planning note, narrowed by
+`docs/plans/acp-provider-transport-research.dag.toml`,
+`docs/research/2026-06-12-acp-provider-transport-feasibility.md`, and
+`docs/plans/first-class-acp-gateway-extension.dag.toml`.
 
-This document captures the working scope for adding an Agent Communication
-Protocol (ACP) layer to `llm-cli-gateway` while retaining MCP as the frontend
-for existing clients. The goal is not to replace the gateway's current MCP tool
-surface. The goal is to add an agent-host execution path, shared context, and a
-runtime governance layer around the existing multi-provider conductor.
+This document originally captured a broader working scope for adding an ACP
+layer to `llm-cli-gateway` while retaining MCP as the frontend for existing
+clients. Current implementation planning targets Agent Client Protocol as an
+optional internal provider transport behind the MCP gateway, not a replacement
+frontend and not an agent-to-agent Agent Communication Protocol layer. Use the
+current research report and first-class ACP gateway extension DAG as the
+authoritative scope for implementation work.
 
 ## Scope Statement
 
-`llm-cli-gateway` becomes the runtime control plane for hosted agent work:
+Current implementation scope:
 
 - MCP remains the public coordination frontend for current clients.
-- ACP becomes the full-duplex agent transport for hosted agents.
-- HostServices becomes the execution boundary for filesystem, terminal, and
-  other side effects.
-- A shared context hierarchy carries organization, project, task, and run
-  intent into every provider request.
-- Agent-assurance governance wraps the orchestrator and HostServices as a
-  runtime chokepoint.
+- Agent Client Protocol is an additive provider transport for provider agents
+  that expose an ACP process, starting with read-only smoke and gated native
+  pilots.
+- HostServices becomes the execution boundary for filesystem, terminal, MCP,
+  and permission side effects when ACP prompt routing is implemented.
+- Gateway sessions remain gateway-owned; provider ACP session identifiers are
+  stored only as metadata.
+- Adapter-mediated providers and any outbound ACP frontend require separate
+  later plans.
+
+Earlier broader scope retained below is historical context, not a release
+commitment for the first-class ACP provider-transport extension.
 
 The gateway must stay a conductor and runtime. It must not redefine ACP,
 DAG-TOML, agent-assurance kinds, or provider-specific upstream contracts.
@@ -44,15 +54,21 @@ HostServices surface. ACP sessions should map onto gateway job/session
 bookkeeping without requiring provider-native session IDs to become gateway
 IDs.
 
-Expected package shape:
+Historical package sketch, superseded by the module plan in
+`docs/plans/first-class-acp-gateway-extension.dag.toml`:
 
 ```text
 src/acp/
-  client-driver.ts       # ACP and legacy driver boundary
-  host-services.ts       # file, terminal, and environment side-effect surface
-  protocol.ts            # ACP request/response/event types
-  sessions.ts            # hosted-agent session mapping
-  stream.ts              # full-duplex event plumbing
+  types.ts               # ACP JSON-RPC schemas and provider-neutral types
+  json-rpc-stdio.ts      # stdio JSON-RPC transport over already-opened streams
+  client.ts              # protocol wrapper for initialize/session/prompt calls
+  process-manager.ts     # provider ACP process lifecycle
+  host-services.ts       # filesystem, terminal, MCP, and permission boundary
+  provider-registry.ts   # provider entrypoint metadata and runtime gates
+  smoke-harness.ts       # read-only initialize/session-new validation
+  session-map.ts         # gateway session to provider ACP session metadata
+  event-normalizer.ts    # ACP update to gateway response/job event mapping
+  errors.ts              # typed redacted ACP errors
 ```
 
 ### 3. Retain Provider CLIs As Backends

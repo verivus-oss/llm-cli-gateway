@@ -23,6 +23,7 @@ predecessor_plan = "docs/plans/acp-provider-transport-research.dag.toml"
 predecessor_report = "docs/research/2026-06-12-acp-provider-transport-feasibility.md"
 acceptance_resource = "llm-cli-gateway exposes ACP capability metadata, validates native ACP process health for supported providers, and can route gated Mistral and Grok request flows through ACP without changing the default CLI transport or weakening current MCP safety boundaries."
 invariant_sources = [
+  "docs/acp-scope.md",
   "docs/plans/acp-provider-transport-research.dag.toml",
   "docs/research/2026-06-12-acp-provider-transport-feasibility.md",
   "docs/upstream/release-targets.md",
@@ -98,7 +99,7 @@ errors = "Typed ACP errors with redacted user-facing messages and detailed debug
 
 [provider_matrix.mistral]
 display_name = "Mistral Vibe"
-target_version = "vibe 2.14.1 / vibe-acp 2.14.1"
+target_version = "vibe 2.14.1"
 status = "native_smoke_passed"
 entrypoint = "vibe-acp"
 runtime_priority = 1
@@ -264,7 +265,7 @@ stdout_reserved_for_mcp = true
 provider_stdout_is_protocol_only = true
 provider_stderr_logged_through_gateway_logger = true
 no_prompt_payloads_in_default_logs = true
-json_rpc_bodies_redacted_in_flight_recorder_by_default = true
+acp_json_rpc_bodies_must_be_redacted_before_flight_recorder = true
 no_arbitrary_subcommand_execution = true
 no_shell_eval_for_entrypoints = true
 workspace_required_for_filesystem_host_services = true
@@ -300,6 +301,16 @@ metrics = [
   "acp_request_timeout_total",
 ]
 redaction = "Log method names, provider, session mapping IDs, durations, and error classes. Do not log prompt text, file contents, tokens, credential paths, or full JSON-RPC payloads by default."
+
+[flight_recorder_requirements]
+current_state = "The existing flight recorder can persist prompt and response text for current request paths; cache-state resources redact structurally at read time."
+acp_requirement = "ACP implementation must not insert raw ACP JSON-RPC bodies, prompt payloads, file contents, terminal output bodies, or provider credential details into flight-recorder prompt/response fields."
+implementation_options = [
+  "record ACP protocol metadata as redacted event summaries only",
+  "add ACP-specific redaction helpers before any FlightRecorder insert",
+  "store only method names, provider, gateway session ID, redacted provider ACP session ID, duration, status, and error class",
+]
+validation = "Tests must assert raw ACP prompt text and raw JSON-RPC bodies are absent from flight-recorder rows, async job logs, doctor output, and cache-state resources."
 
 [failure_policy]
 unsupported_provider = "transport = 'acp' returns a clear unsupported-provider error."
@@ -369,10 +380,9 @@ resources = [
 
 [release_gates]
 local_commands = [
-  "python3 -c \"import pathlib,tomllib; tomllib.load(pathlib.Path('docs/plans/first-class-acp-gateway-extension.dag.toml').open('rb'))\"",
-  "npm run build",
-  "npm run lint",
-  "npm test",
+  "node -e \"const fs=require('fs'); const toml=require('smol-toml'); toml.parse(fs.readFileSync('docs/plans/first-class-acp-gateway-extension.dag.toml','utf8'))\"",
+  "git diff --check",
+  "npm run check",
   "npm run upstream:contracts",
 ]
 optional_live_commands = [
@@ -519,13 +529,39 @@ entrypoint drift separately from request-tool command drift.
 """
 
 [[steps]]
-id = "build-json-rpc-stdio-transport"
+id = "define-acp-provider-registry-and-errors"
 depends_on = ["track-acp-upstream-contracts"]
+actor = "assistant"
+action = """
+Implement the provider registry and ACP error taxonomy before transport code
+depends on them:
+
+  - src/acp/provider-registry.ts owns provider ACP entrypoint metadata,
+    native versus adapter-mediated status, target-version labels, and
+    runtime gate defaults.
+  - src/acp/errors.ts owns typed ACP errors, provider availability errors,
+    protocol errors, timeout errors, permission-denied errors, and redacted
+    user-facing messages.
+
+The registry is data-only and must not run provider subcommands except through
+explicit safe probes owned by the smoke harness or upstream-contract tools.
+"""
+idempotent = false
+validation = """
+Provider-registry tests assert exact status for Mistral, Grok, Codex, Claude,
+and Antigravity agy. Error tests assert raw JSON-RPC payloads and credential
+paths do not appear in user-facing messages.
+"""
+
+[[steps]]
+id = "build-json-rpc-stdio-transport"
+depends_on = ["define-acp-provider-registry-and-errors"]
 actor = "assistant"
 action = """
 Implement src/acp/json-rpc-stdio.ts:
 
-  - spawn-safe stdio wiring is supplied by process_manager,
+  - spawn-safe stdio wiring is supplied by process_manager; this transport
+    receives already-opened stdio streams and does not spawn processes itself,
   - newline-delimited JSON-RPC parsing,
   - response correlation by id,
   - notification dispatch,
@@ -724,8 +760,34 @@ recording, cancellation updates, and redaction of sensitive event payloads.
 """
 
 [[steps]]
-id = "pilot-mistral-acp-runtime"
+id = "define-acp-flight-recorder-redaction"
 depends_on = ["normalize-session-updates"]
+actor = "assistant"
+action = """
+Make ACP flight-recorder behavior explicit before any runtime prompt pilot:
+
+  - audit current FlightRecorder prompt/response persistence,
+  - choose whether ACP records use existing rows with redacted summaries or a
+    separate event shape,
+  - add helper APIs that accept only redacted ACP metadata,
+  - prevent raw ACP JSON-RPC bodies, prompt text, file contents, terminal
+    output bodies, and credential details from reaching FlightRecorder,
+  - keep cache-state resources structurally redacted.
+
+This step turns the security invariant into implementation work rather than
+assuming the current recorder already provides ACP-body redaction.
+"""
+idempotent = false
+validation = """
+Tests insert ACP prompt/update/error events containing sentinel prompt text,
+JSON-RPC bodies, file contents, terminal output, local paths, and credential
+markers, then assert none of those sentinels appear in flight-recorder rows,
+async job logs, doctor output, provider resources, or cache-state resources.
+"""
+
+[[steps]]
+id = "pilot-mistral-acp-runtime"
+depends_on = ["define-acp-flight-recorder-redaction"]
 actor = "assistant"
 action = """
 Add gated ACP routing to mistral_request and mistral_request_async:
