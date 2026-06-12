@@ -19,13 +19,12 @@ The corresponding research DAG is
 
 ACP is worth researching, but implementation must be staged and evidence-gated.
 At the current target versions, Mistral Vibe and Grok Build both have external
-native ACP evidence. Mistral exposes a local `vibe-acp` entrypoint; Grok exposes
-`grok agent stdio`, which still needs a gateway-owned JSON-RPC/ACP handshake
-probe before we classify it as operationally supported in `llm-cli-gateway`.
-Claude and Codex have adapter-mediated ACP paths in the broader ACP ecosystem,
-not native provider CLI surfaces in the locally targeted CLIs. Legacy Gemini CLI
-has ACP support, but the gateway target is Google Antigravity `agy`, whose
-installed help does not expose `--acp`.
+native ACP evidence and passed a local manual JSON-RPC smoke for `initialize` and
+`session/new`. Mistral exposes a local `vibe-acp` entrypoint; Grok exposes
+`grok agent stdio`. Claude and Codex have adapter-mediated ACP paths in the
+broader ACP ecosystem, not native provider CLI surfaces in the locally targeted
+CLIs. Legacy Gemini CLI has ACP support, but the gateway target is Google
+Antigravity `agy`, whose installed help does not expose `--acp`.
 
 The first safe implementation slice should be capability/contract/reporting
 only, followed by a read-only ACP smoke harness. Write-capable ACP sessions
@@ -36,13 +35,13 @@ should wait for HostServices and governance chokepoints.
 Target versions come from `llm-cli-gateway doctor --json` and
 `docs/upstream/release-targets.md`:
 
-| Provider           | Target CLI       | Local ACP evidence                                                         | Initial status                   |
-| ------------------ | ---------------- | -------------------------------------------------------------------------- | -------------------------------- |
-| Claude Code        | `claude` 2.1.175 | `claude --help` shows MCP-related flags/subcommands, not native ACP.       | adapter-mediated only            |
-| Codex CLI          | `codex` 0.139.0  | `codex --help` shows MCP server/app/exec-server surfaces, not native ACP.  | adapter-mediated only            |
-| Gemini/Antigravity | `agy` 1.0.7      | `agy --help` has no `--acp`; gateway test rejects `--acp` for Antigravity. | absent at target                 |
-| Grok CLI           | `grok` 0.2.50    | `grok agent stdio --help` exists and says it runs the agent over stdio.    | native, pending gateway smoke    |
-| Mistral Vibe       | `vibe` 2.14.1    | `vibe-acp --version` reports 2.14.1; `vibe-acp --help` says ACP mode.      | native, pending gateway contract |
+| Provider           | Target CLI       | Local ACP evidence                                                         | Initial status                  |
+| ------------------ | ---------------- | -------------------------------------------------------------------------- | ------------------------------- |
+| Claude Code        | `claude` 2.1.175 | `claude --help` shows MCP-related flags/subcommands, not native ACP.       | adapter-mediated only           |
+| Codex CLI          | `codex` 0.139.0  | `codex --help` shows MCP server/app/exec-server surfaces, not native ACP.  | adapter-mediated only           |
+| Gemini/Antigravity | `agy` 1.0.7      | `agy --help` has no `--acp`; gateway test rejects `--acp` for Antigravity. | absent at target                |
+| Grok CLI           | `grok` 0.2.50    | `grok agent stdio --help` exists and says it runs the agent over stdio.    | native, manual ACP smoke passed |
+| Mistral Vibe       | `vibe` 2.14.1    | `vibe-acp --version` reports 2.14.1; `vibe-acp --help` says ACP mode.      | native, manual ACP smoke passed |
 
 Important false-positive guardrails:
 
@@ -123,6 +122,43 @@ Fact-check corrections applied:
 - The registry list now includes Grok Build and explicitly labels adapter versus
   native interpretations.
 
+## Local ACP smoke validation
+
+Manual local smoke probes were run on 2026-06-12 against the installed target
+CLIs. The probe sent newline-delimited JSON-RPC over stdio with:
+
+1. `initialize` using protocol version 1, no file read/write capability, no
+   terminal capability, and a gateway smoke-test client identity.
+2. `session/new` with a temporary empty working directory and an empty
+   `mcpServers` list.
+3. No `session/prompt`, tool execution, file operations, terminal operations, or
+   write-capable client services.
+
+| Provider           | Command            | Result                                             | Observed response                                                                                                                                                                                               |
+| ------------------ | ------------------ | -------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Mistral Vibe       | `vibe-acp`         | Passed `initialize` and `session/new`.             | `agentInfo.name` was `@mistralai/mistral-vibe`, `agentInfo.version` was `2.14.1`, `protocolVersion` was `1`, `loadSession` was `true`, embedded context was supported, and `session/new` returned a session ID. |
+| Grok Build         | `grok agent stdio` | Passed `initialize` and `session/new`.             | `protocolVersion` was `1`, `agentVersion` metadata was `0.2.50`, `loadSession` was `true`, embedded context was supported, HTTP/SSE MCP capabilities were advertised, and `session/new` returned a session ID.  |
+| Google Antigravity | `agy --help`       | Native ACP still absent.                           | Help exposes `--print`, `--prompt-interactive`, `--continue`, `--conversation`, sandbox and plugin surfaces, but no `--acp` flag or ACP subcommand.                                                             |
+| Codex CLI          | `codex --help`     | Native ACP still absent at the target CLI surface. | Help exposes `mcp-server`, `app-server`, `remote-control`, and `exec-server`; ACP remains adapter-mediated.                                                                                                     |
+| Claude Code        | `claude --help`    | Native ACP still absent at the target CLI surface. | Help exposes print/stream formats and MCP configuration, but no native ACP mode.                                                                                                                                |
+
+Validation caveats:
+
+- The smoke validates provider-level ACP process shape, not gateway integration.
+  The gateway still needs an automated harness that owns process lifecycle,
+  timeouts, HostServices capability negotiation, and stderr/stdout isolation.
+- `grok agent stdio` could not be smoke-tested under a fully empty environment on
+  this machine because the installed Grok configuration expects managed
+  credential lookup. The successful smoke used the normal user Grok
+  configuration, an empty temporary cwd, and an isolated leader socket.
+- `vibe-acp` could not be smoke-tested with a synthetic `HOME` because the
+  installed launcher resolves its Python package from the normal user-scope
+  environment. The successful smoke used normal user Python/uv paths and an empty
+  temporary cwd.
+- This smoke intentionally did not prove write safety, prompt-turn behavior,
+  permission callbacks, terminal mediation, file edit mediation, cost/usage
+  extraction, or session cleanup semantics.
+
 ## Gateway architecture implications
 
 ACP should be additive:
@@ -150,8 +186,9 @@ ACP should be additive:
 3. Read-only smoke harness: start an ACP process, run initialize/session probe,
    terminate, and assert no file writes.
 4. HostServices slice: file/terminal/env/approval boundary.
-5. Native pilots: Mistral Vibe `vibe-acp` first, then Grok `agent stdio` only
-   after a safe JSON-RPC/ACP handshake confirms protocol shape.
+5. Native pilots: Mistral Vibe `vibe-acp` first, then Grok `agent stdio`; both
+   now have manual `initialize`/`session/new` smoke evidence, but both still need
+   an automated gateway-owned harness before runtime support.
 6. Adapter pilots: Codex/Claude only after adapter versioning, provenance,
    licensing, auth, and maintenance responsibilities are accepted.
 7. Watchlist: Antigravity stays prompt-tool only until native or maintained
@@ -187,9 +224,10 @@ Material reviewer findings:
   not be assumed for other providers.
 - Reviewer disagreement: Gemini identified Grok as native via
   `grok agent stdio`; Mistral treated Grok as MCP-only. Exa fact-checking found
-  official xAI documentation for Grok Build ACP support, so the remaining gap is
-  gateway-specific smoke verification against the target CLI, not external ACP
-  support evidence.
+  official xAI documentation for Grok Build ACP support, and a manual local ACP
+  smoke confirmed `initialize` plus `session/new` against target `grok` 0.2.50.
+  The remaining gap is automated gateway harnessing, not external ACP support
+  evidence.
 - Claude completed but persisted readback was too large/truncated to extract a
   reliable final verdict, so it is recorded as inconclusive rather than used as
   approval evidence.

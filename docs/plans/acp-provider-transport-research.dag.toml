@@ -68,8 +68,8 @@ grok_agent_stdio_help = "`grok agent stdio --help` exists and says it runs the a
 claude = "adapter-mediated ACP only; registry-backed Claude Agent SDK adapter is distinct from native Claude Code CLI support"
 codex = "adapter-mediated ACP via Zed codex-acp unless current Codex CLI gains native ACP surface"
 gemini = "legacy Gemini CLI has ACP evidence, but target Antigravity agy does not expose ACP"
-grok = "native ACP candidate via grok agent stdio; official xAI docs confirm ACP, but gateway support requires safe initialize/session smoke verification"
-mistral = "native ACP via vibe-acp; official Mistral docs and registry confirm ACP"
+grok = "native ACP candidate via grok agent stdio; official xAI docs confirm ACP and manual initialize/session-new smoke passed; automated gateway harness still required"
+mistral = "native ACP via vibe-acp; official Mistral docs and registry confirm ACP and manual initialize/session-new smoke passed; automated gateway harness still required"
 
 [[steps]]
 id = "confirm-protocol-scope"
@@ -243,8 +243,10 @@ Define later implementation slices, likely:
   3. Read-only ACP smoke harness: start ACP agent, initialize, create session,
      then terminate without file writes.
   4. HostServices boundary: file/terminal/env side-effect mediation.
-  5. Provider pilots: Mistral Vibe native vibe-acp first, then Grok agent stdio
-     only after a safe JSON-RPC/ACP handshake probe confirms protocol shape.
+  5. Provider pilots: Mistral Vibe native vibe-acp first, then Grok agent stdio.
+     Manual JSON-RPC initialize/session-new smoke has confirmed both protocol
+     shapes; an automated gateway-owned smoke harness is still required before
+     runtime support.
   6. Adapter pilots: Codex/Claude only if adapter provenance, versioning,
      licensing, auth, and maintenance responsibilities are accepted.
   7. Antigravity watchlist: no implementation until native or maintained
