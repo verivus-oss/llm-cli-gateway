@@ -4,6 +4,52 @@ All notable changes to the llm-cli-gateway project.
 
 ## Unreleased
 
+## [2.7.0] - 2026-06-12: Provider capability inventory
+
+### Added
+
+- Added `provider_tool_capabilities`, a read-only MCP tool that reports the
+  gateway request tools, provider kind, supported controls, feature flags,
+  model info, config-surface hints, local skill discovery, provider-native tool
+  discovery, unsupported/degraded inputs, warnings, and cache metadata for
+  Claude Code, Codex CLI, Gemini/Antigravity (`agy`), Grok CLI, optional
+  `grok_api`, and Mistral Vibe.
+- Added `provider-tools://catalog` and per-provider resources
+  `provider-tools://claude`, `provider-tools://codex`,
+  `provider-tools://gemini`, `provider-tools://grok`,
+  `provider-tools://grok_api`, and `provider-tools://mistral` for clients that
+  prefer resource discovery over tool calls.
+- Added `doctor --json` `provider_capabilities`, a compact setup-assistant
+  summary with schema version, resource URIs, per-provider request tools,
+  supported feature names, unsupported input names, config-surface counts,
+  discovered skill/tool counts, and warnings without raw local paths.
+- Added bounded, redacted local skill/config discovery for provider capability
+  reporting. Grok local/bundled skills can now surface provider-native tools
+  such as Imagine `image_gen`, `image_edit`, `image_to_video`, and
+  `reference_to_video` when present, while keeping execution routed through
+  `grok_request`.
+
+### Changed
+
+- Updated agent skills so LLM agents have provider-specific gateway usage
+  guidance for Claude, Codex, Gemini/Antigravity (`agy`), Grok, and Mistral
+  Vibe, and so orchestration skills check `provider_tool_capabilities` before
+  assuming tool allowlists, MCP-server semantics, sessions, output formats, or
+  provider-native tools.
+- Updated setup assistant guidance and `setup/status.schema.json` so install
+  agents treat `doctor.provider_capabilities` as the compact source of truth
+  for outbound provider capability claims.
+- Documented the intentionally published prod-only `npm-shrinkwrap.json` in
+  README and `socket.yml`, including the release audit and packed-consumer
+  checks that bound the shrinkwrap and shell-spawn Socket alerts.
+
+### Fixed
+
+- Corrected stale internal skill guidance that described Codex continuity as
+  bookkeeping-only, described Gemini allowlists/MCP allowlists as pass-through,
+  omitted Mistral async from async orchestration docs, or encouraged copying
+  Claude tool names into other provider allowlists.
+
 ## [2.6.3] - 2026-06-12: Claude cache-control veracity and Grok 0.2.50
 
 ### Fixed
