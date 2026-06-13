@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseCodexJsonStream } from "../codex-json-parser.js";
+import { parseCodexJsonStream, codexDisplayText, codexFrResponse } from "../codex-json-parser.js";
 
 describe("parseCodexJsonStream", () => {
   it("extracts usage from a complete event stream", () => {
@@ -116,5 +116,106 @@ describe("parseCodexJsonStream", () => {
 
     const result = parseCodexJsonStream(stream);
     expect(result.usage?.cache_read_tokens).toBe(3);
+  });
+
+  // #44: finalMessage is the LAST agent_message. codex `exec` text mode prints
+  // only the final one even when a turn emits several (verified on codex-cli
+  // 0.139.0), so the last message is what reproduces text-mode stdout.
+  it("finalMessage is the last agent_message when a turn emits several", () => {
+    const stream = [
+      `{"type":"thread.started","thread_id":"t-multi"}`,
+      `{"type":"item.completed","item":{"type":"agent_message","text":"ALPHA"}}`,
+      `{"type":"item.completed","item":{"type":"reasoning","text":"ignored"}}`,
+      `{"type":"item.completed","item":{"type":"agent_message","text":"BETA"}}`,
+      `{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}`,
+    ].join("\n");
+
+    expect(parseCodexJsonStream(stream).finalMessage).toBe("BETA");
+  });
+});
+
+describe("codexDisplayText (#44 text-mode reply reconstruction, never raw JSONL)", () => {
+  it("returns a single agent_message verbatim (matches codex text-mode stdout)", () => {
+    const stream = [
+      `{"type":"thread.started","thread_id":"t-1"}`,
+      `{"type":"item.completed","item":{"type":"agent_message","text":"1. a\\n2. b\\n3. c"}}`,
+      `{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":5,"cached_input_tokens":2}}`,
+    ].join("\n");
+
+    expect(codexDisplayText(stream)).toBe("1. a\n2. b\n3. c");
+  });
+
+  it("returns ONLY the final agent_message for a multi-message turn (== text mode)", () => {
+    // Regression guard: codex `exec` text mode prints just the last message.
+    // A naive join of all messages would return "ALPHA\n\nBETA" — wrong.
+    const stream = [
+      `{"type":"item.completed","item":{"type":"agent_message","text":"ALPHA"}}`,
+      `{"type":"item.completed","item":{"type":"agent_message","text":"BETA"}}`,
+      `{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}`,
+    ].join("\n");
+
+    expect(codexDisplayText(stream)).toBe("BETA");
+  });
+
+  it("falls back to the parsed error text on an error turn (no agent_message)", () => {
+    const stream = [
+      `{"type":"thread.started","thread_id":"t-err"}`,
+      `{"type":"turn.failed","error":{"message":"model unavailable"}}`,
+    ].join("\n");
+
+    expect(codexDisplayText(stream)).toBe("model unavailable");
+  });
+
+  it("returns '' (never raw JSONL) for a recognized stream with no reply and no error", () => {
+    // thread/usage events present but no agent_message: emptier beats dumping
+    // the raw event stream at the caller.
+    const stream = [
+      `{"type":"thread.started","thread_id":"t-empty"}`,
+      `{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}`,
+    ].join("\n");
+
+    expect(codexDisplayText(stream)).toBe("");
+  });
+
+  it("surfaces non-JSONL stdout verbatim (e.g. a pre-stream fatal line)", () => {
+    expect(codexDisplayText("fatal: something broke before any event")).toBe(
+      "fatal: something broke before any event"
+    );
+    expect(codexDisplayText("")).toBe("");
+  });
+
+  it("returns '' (never raw JSONL) for a stream of ONLY unhandled event types", () => {
+    // turn.started / item.started are valid codex events the switch ignores.
+    // `sawEvent` must still classify this as a codex stream so it never leaks.
+    const stream = [
+      `{"type":"turn.started","turn_id":"u-1"}`,
+      `{"type":"item.started","item":{"type":"agent_message"}}`,
+    ].join("\n");
+
+    expect(codexDisplayText(stream)).toBe("");
+  });
+
+  it("returns '' (never raw JSONL) even for JSON-object lines that lack a string `type` (schema drift)", () => {
+    // sawEvent is set for ANY parsed JSON object, not only typed events, so a
+    // drifted/typeless event stream still resolves to "" rather than leaking.
+    const stream = [`{"thread_id":"t-drift"}`, `{"foo":"bar","n":1}`].join("\n");
+    expect(codexDisplayText(stream)).toBe("");
+  });
+});
+
+describe("codexFrResponse (#44 flight-recorder response value, shared by sync + async writers)", () => {
+  const stream = [
+    `{"type":"thread.started","thread_id":"t-fr"}`,
+    `{"type":"item.completed","item":{"type":"agent_message","text":"the reply"}}`,
+    `{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":3,"cached_input_tokens":4}}`,
+  ].join("\n");
+
+  it("text mode (default) persists the reconstructed reply, NOT raw JSONL", () => {
+    expect(codexFrResponse("text", stream)).toBe("the reply");
+    expect(codexFrResponse(undefined, stream)).toBe("the reply");
+  });
+
+  it("json mode persists the raw JSONL event stream verbatim (caller asked for it)", () => {
+    expect(codexFrResponse("json", stream)).toBe(stream);
   });
 });

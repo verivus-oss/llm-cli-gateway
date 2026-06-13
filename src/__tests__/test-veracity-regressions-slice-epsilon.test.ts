@@ -185,6 +185,37 @@ describe("REGRESSIONS Eδ — extractUsageAndCost routes outputFormat correctly"
     expect(result.inputTokens).toBeUndefined();
     expect(result.outputTokens).toBeUndefined();
   });
+
+  // #44: codex now always runs with `--json`, so its usage must be extracted
+  // regardless of the caller-facing `outputFormat`. Before #44 the codex branch
+  // was gated on `outputFormat === "json"`, leaving the default `text` path
+  // telemetry-blind. Falsifiability: re-introducing that gate fails the `text`
+  // assertion below.
+  const codexJsonl =
+    `{"type":"thread.started","thread_id":"t-eδ"}` +
+    "\n" +
+    `{"type":"item.completed","item":{"type":"agent_message","text":"hi"}}` +
+    "\n" +
+    `{"type":"turn.completed","usage":{"input_tokens":14112,"output_tokens":17,"cached_input_tokens":4992}}`;
+
+  it("extracts codex usage when outputFormat=text (default path — #44)", () => {
+    const result = extractUsageAndCost("codex", codexJsonl, "text");
+    expect(result.inputTokens).toBe(14112);
+    expect(result.outputTokens).toBe(17);
+    expect(result.cacheReadTokens).toBe(4992);
+  });
+
+  it("extracts codex usage when outputFormat=json (opt-in path — unchanged)", () => {
+    const result = extractUsageAndCost("codex", codexJsonl, "json");
+    expect(result.inputTokens).toBe(14112);
+    expect(result.cacheReadTokens).toBe(4992);
+  });
+
+  it("extracts codex usage even when outputFormat is undefined", () => {
+    const result = extractUsageAndCost("codex", codexJsonl, undefined);
+    expect(result.inputTokens).toBe(14112);
+    expect(result.cacheReadTokens).toBe(4992);
+  });
 });
 
 // ─── REGRESSIONS Eε — UPSTREAM_CLI_CONTRACTS Antigravity output guard ──

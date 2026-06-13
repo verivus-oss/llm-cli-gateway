@@ -436,6 +436,36 @@ describe("REGRESSIONS Kδ — executor + AsyncJobManager stdin (slice κ)", () =
     expect(b.snapshot.id).toBe(a.snapshot.id);
     mgr.cancelJob(a.snapshot.id);
   });
+
+  // #44: codex now emits `--json` on every request, so a text request and a json
+  // request for the same prompt share identical argv. Without outputFormat in the
+  // dedup key they would collide and the second caller would be rendered with the
+  // first job's stored outputFormat (a text caller deduping onto a json job gets
+  // raw JSONL via llm_job_result). outputFormat must therefore split the key.
+  it("#44: dedup key includes outputFormat (codex text vs json with same argv do NOT collide)", () => {
+    const mgr = new AsyncJobManager(noopLogger, undefined, new MemoryJobStore());
+    const a = mgr.startJobWithDedup("codex", ["sleep", "30"], "corr-a", {
+      outputFormat: "json",
+    });
+    const b = mgr.startJobWithDedup("codex", ["sleep", "30"], "corr-b", {
+      outputFormat: "text",
+    });
+    expect(b.deduped).toBe(false);
+    expect(b.snapshot.id).not.toBe(a.snapshot.id);
+    // Same outputFormat: dedup MUST still fire (regression guard).
+    const c = mgr.startJobWithDedup("codex", ["sleep", "30"], "corr-c", {
+      outputFormat: "json",
+    });
+    expect(c.deduped).toBe(true);
+    expect(c.snapshot.id).toBe(a.snapshot.id);
+    // Omitted outputFormat (undefined) is normalised to codex's default "text",
+    // so it dedups with the explicit-text job `b` (not split into a third run).
+    const d = mgr.startJobWithDedup("codex", ["sleep", "30"], "corr-d", {});
+    expect(d.deduped).toBe(true);
+    expect(d.snapshot.id).toBe(b.snapshot.id);
+    mgr.cancelJob(a.snapshot.id);
+    mgr.cancelJob(b.snapshot.id);
+  });
 });
 
 // ─── REGRESSIONS Kε — FlightRecorder migration v4 + writes ────────────

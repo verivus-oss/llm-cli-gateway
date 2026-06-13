@@ -161,8 +161,12 @@ describe("U23 fix: outputFormat reaches the CLI as a flag", () => {
     expect(prep.args).toContain("--json");
   });
 
-  it("prepareCodexRequest with outputFormat='text' (default) does NOT emit --json", () => {
-    // Use the default runtime parameter on the prepare functions (no explicit runtime needed).
+  it("prepareCodexRequest with outputFormat='text' (default) ALSO emits --json (#44: telemetry on every request)", () => {
+    // #44: codex now always runs with `--json` so token/cache usage is recorded
+    // on every request, not just the opt-in `json` path. The wire flag is
+    // decoupled from the caller-facing format — `text` mode still returns the
+    // plain reply because the gateway extracts the agent_message(s) from the
+    // event stream (covered by the codex response-extraction tests below).
     const prep = prepareCodexRequest(
       {
         prompt: "hello",
@@ -176,7 +180,7 @@ describe("U23 fix: outputFormat reaches the CLI as a flag", () => {
       undefined
     );
     if (!("args" in prep)) throw new Error("expected args");
-    expect(prep.args).not.toContain("--json");
+    expect(prep.args).toContain("--json");
   });
 
   it("prepareGeminiRequest with outputFormat='json' rejects the legacy Gemini-only flag", () => {

@@ -176,6 +176,28 @@ describe("U26 — Codex high-impact feature flags", () => {
     });
   });
 
+  describe("#44 — codex always emits --json so telemetry is captured on every request", () => {
+    it("emits --json on a new session in the default (text) output mode", () => {
+      const { args } = callPrepare({ createNewSession: true });
+      expect(args).toContain("--json");
+    });
+
+    it("emits --json on a new session when outputFormat='json' (opt-in path unchanged)", () => {
+      const { args } = callPrepare({ createNewSession: true, outputFormat: "json" });
+      expect(args).toContain("--json");
+    });
+
+    it("emits --json on resume too (telemetry must not depend on session mode)", () => {
+      const RESUME_ID = "01940000-0000-7000-8000-000000000abc"; // real codex UUID, not gw-
+      const { args } = callPrepare({ sessionId: RESUME_ID });
+      expect(args).toContain("resume");
+      expect(args).toContain("--json");
+      // --json is accepted by `codex exec` (and `codex exec resume`); the
+      // mechanical upstream contract must agree.
+      expect(validateUpstreamCliArgs("codex", args).ok).toBe(true);
+    });
+  });
+
   describe("outputSchema temp-file lifecycle", () => {
     it("string outputSchema passes the path verbatim with no temp file", () => {
       const schemaPath = "/some/preexisting/schema.json";

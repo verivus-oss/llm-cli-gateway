@@ -13,6 +13,7 @@ import { noopLogger, logWarn } from "./logger.js";
 import { ProcessMonitor, type JobHealth } from "./process-monitor.js";
 import { JobStore, computeRequestKey } from "./job-store.js";
 import { NoopFlightRecorder, type FlightRecorderLike } from "./flight-recorder.js";
+import { codexFrResponse } from "./codex-json-parser.js";
 
 export type LlmCli = "claude" | "codex" | "gemini" | "grok" | "mistral";
 export type AsyncJobStatus = "running" | "completed" | "failed" | "canceled" | "orphaned";
@@ -487,7 +488,8 @@ export class AsyncJobManager {
     args: string[],
     env?: Record<string, string>,
     stdin?: string,
-    cwd?: string
+    cwd?: string,
+    outputFormat?: string
   ): string {
     // Slice κ: stdin participates in the dedup key. Two Claude requests
     // with identical argv but different cache_control content blocks
@@ -500,9 +502,19 @@ export class AsyncJobManager {
     // the second caller would receive a response executed in the wrong
     // worktree. cwd=undefined preserves the pre-λ key shape — non-λ
     // dedup is unchanged.
+    // #44: outputFormat participates in the key FOR CODEX ONLY. Codex now emits
+    // `--json` on EVERY request, so its text and json modes share identical argv
+    // and would collide on dedup — the second caller would then be rendered with
+    // the first job's stored outputFormat (a text caller deduping onto a json job
+    // gets raw JSONL). Other CLIs already vary their argv by format, so they are
+    // left untouched to preserve their exact pre-#44 key shape (avoids a new
+    // missed-dedup between an omitted and an explicit-default outputFormat). For
+    // codex the default is normalised (undefined === "text") so an omitted format
+    // and an explicit "text" still dedup together; only "json" splits off.
     const extraEnv = canonicaliseEnvForKey(env);
     const withStdin = stdin === undefined ? extraEnv : `${extraEnv}|stdin:${stdin}`;
-    const extra = cwd === undefined ? withStdin : `${withStdin}|cwd:${cwd}`;
+    const withCwd = cwd === undefined ? withStdin : `${withStdin}|cwd:${cwd}`;
+    const extra = cli === "codex" ? `${withCwd}|fmt:${outputFormat ?? "text"}` : withCwd;
     return computeRequestKey(cli, args, extra);
   }
 
@@ -541,7 +553,22 @@ export class AsyncJobManager {
     const durationMs = Math.max(0, Date.now() - new Date(job.startedAt).getTime());
     const usage = finalStatus === "completed" && job.extractUsage ? this.safeExtractUsage(job) : {};
     const isFailure = finalStatus === "failed";
-    const response = isFailure ? job.stderr || job.stdout : job.stdout;
+    // #44: codex always runs with `--json`, so a codex job's stdout is a raw
+    // JSONL event stream on BOTH success and failure. Never persist it raw as the
+    // FR response in text mode (read back by llm_request_result / cache-stats) —
+    // run it through the same codexFrResponse() helper the sync handler uses so
+    // the persisted value is identical and is the reconstructed reply (== text
+    // mode) / parsed error, never raw JSONL. On failure prefer stderr, falling
+    // back to that helper (the JSONL's turn.failed/error text or ""), mirroring
+    // the sync failure path which stores `stderr || ""`. `job.stdout` itself
+    // stays raw for usage extraction (above) and llm_job_result's own conversion.
+    let response: string;
+    if (job.cli === "codex") {
+      const codexText = codexFrResponse(job.outputFormat, job.stdout);
+      response = isFailure ? job.stderr || codexText : codexText;
+    } else {
+      response = isFailure ? job.stderr || job.stdout : job.stdout;
+    }
     const exitCode = job.exitCode ?? (finalStatus === "completed" ? 0 : 1);
     const errorMessage = isFailure
       ? (overrideErrorMessage ?? job.error ?? job.stderr ?? `Exit code ${exitCode}`)
@@ -764,7 +791,7 @@ export class AsyncJobManager {
       extractUsage,
       writeFlightStart,
     } = opts;
-    const requestKey = this.buildRequestKey(cli, args, extraEnv, stdin, cwd);
+    const requestKey = this.buildRequestKey(cli, args, extraEnv, stdin, cwd, outputFormat);
 
     if (!forceRefresh && this.store) {
       try {
@@ -1122,6 +1149,10 @@ export class AsyncJobManager {
 
   getJobOutputFormat(jobId: string): string | undefined {
     return this.jobs.get(jobId)?.outputFormat;
+  }
+
+  getJobCli(jobId: string): LlmCli | undefined {
+    return this.jobs.get(jobId)?.cli;
   }
 
   private snapshot(job: AsyncJobRecord): AsyncJobSnapshot {

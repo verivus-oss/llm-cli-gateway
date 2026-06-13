@@ -19,7 +19,7 @@ import { fileURLToPath } from "url";
 import { z } from "zod/v3";
 import { executeCli, killAllProcessGroups, providerCommandName } from "./executor.js";
 import { parseStreamJson } from "./stream-json-parser.js";
-import { parseCodexJsonStream } from "./codex-json-parser.js";
+import { parseCodexJsonStream, codexDisplayText, codexFrResponse } from "./codex-json-parser.js";
 import { parseGeminiJson, parseGeminiStreamJson } from "./gemini-json-parser.js";
 import { parseVibeMetaJson } from "./mistral-meta-json-parser.js";
 import { homedir } from "os";
@@ -1356,7 +1356,12 @@ export function extractUsageAndCost(
       costUsd: parsed.costUsd ?? undefined,
     };
   }
-  if (cli === "codex" && outputFormat === "json") {
+  // #44: codex now always runs with `--json` (regardless of the caller-facing
+  // `outputFormat`), so `output` is always a JSONL event stream here and usage
+  // is parsed on every request — not just the opt-in `json` path. The parser is
+  // lenient: it returns no `usage` for a text/garbage stream, so this stays safe
+  // even if a non-JSONL string is ever passed in.
+  if (cli === "codex") {
     const parsed = parseCodexJsonStream(output);
     if (!parsed.usage) {
       return {};
@@ -2569,13 +2574,14 @@ export function prepareCodexRequest(
   if (params.dangerouslyBypassApprovalsAndSandbox) {
     args.push("--dangerously-bypass-approvals-and-sandbox");
   }
-  // U23 fix: emit `--json` when the caller asked for JSON output so the
-  // codex-json-parser actually receives JSONL events. This is what makes
-  // extractUsageAndCost() reachable from the tool surface; without it, the
-  // U23 parser is dead code.
-  if (params.outputFormat === "json") {
-    args.push("--json");
-  }
+  // #44: ALWAYS emit `--json` so the codex-json-parser receives JSONL events on
+  // every request — this is what makes extractUsageAndCost() reachable on the
+  // DEFAULT (text) path, not just the opt-in `json` path, so cache/token usage
+  // is recorded for ordinary codex calls. The wire format is decoupled from the
+  // caller-facing format: in `text` mode the gateway parses the agent_message(s)
+  // back out for the response (see buildCliResponse / extractCodexResponseText),
+  // so callers still get the same plain reply; `json` mode returns raw JSONL.
+  args.push("--json");
   args.push("--skip-git-repo-check");
 
   // U26: High-impact feature flags. `--search` is retained as a compatibility
@@ -3317,6 +3323,18 @@ function buildCliResponse(
   warnings?: WarningEntry[]
 ): ExtendedToolResponse {
   let finalStdout = stdout;
+  // #44: codex always runs with `--json` (so usage/cache tokens are always
+  // recorded), but in the default `text` mode the caller expects the plain
+  // reply, not the raw JSONL event stream. codexDisplayText() reconstructs the
+  // final agent_message (== codex text-mode stdout) with a fallback chain that
+  // never leaks raw JSONL. The raw `stdout` is still passed unchanged to
+  // extractUsageAndCost() below, so telemetry is parsed from the events
+  // regardless of this display swap. `json` mode (opt-in) returns raw JSONL.
+  // Done before the optimize / review-integrity steps so they operate on the
+  // human reply.
+  if (cli === "codex" && outputFormat !== "json") {
+    finalStdout = codexDisplayText(stdout);
+  }
   // Skip response optimization for JSON output to prevent corrupting structured data
   if (optimizeResponse && outputFormat !== "json") {
     const optimized = optimizeResponseText(finalStdout);
@@ -6122,14 +6140,16 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .describe(
           "Bypass dedup and force a fresh CLI run even if a recent identical request exists"
         ),
-      // U23: emit `--json` so the codex-json-parser surfaces input/output/cache
-      // tokens (and any cost) through extractUsageAndCost. Without "json", the
-      // parser is unreachable and Codex usage is never reported.
+      // #44: codex always runs with `--json` so token/cache usage is recorded
+      // on every request; this flag only controls the caller-facing response
+      // shape. `text` (default) returns the plain reply (the gateway extracts
+      // the agent_message(s) from the event stream); `json` returns the raw
+      // JSONL event stream verbatim.
       outputFormat: z
         .enum(["text", "json"])
         .default("text")
         .describe(
-          "Codex output format. `json` emits --json (JSONL events) so token usage and cost are parsed and reported in the flight recorder. `text` is the default."
+          "Codex caller-facing output format. Token/cache usage is recorded in the flight recorder regardless. `text` (default) returns the plain reply; `json` returns the raw `--json` JSONL event stream."
         ),
       // U26: high-impact feature flags. All optional.
       outputSchema: z
@@ -6392,10 +6412,17 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
 
         logger.info(`[${corrId}] codex_request completed successfully in ${durationMs}ms`);
         const codexUsage = extractUsageAndCost("codex", stdout, outputFormat);
+        // #44: usage is parsed from the raw JSONL `stdout`, but the FR response
+        // column stores the reconstructed reply (== text-mode stdout) so
+        // read-back surfaces (llm_request_result, cache-stats) get plain text,
+        // not the raw event stream. `json` mode persists the raw JSONL verbatim.
+        // This is the sync-in-time / deferral-disabled writer; the deferred and
+        // pure-async writer is AsyncJobManager.logComplete — both use the same
+        // codexFrResponse() helper so the persisted value agrees byte-for-byte.
         safeFlightComplete(
           corrId,
           {
-            response: stdout,
+            response: codexFrResponse(outputFormat, stdout),
             durationMs,
             retryCount: 0,
             circuitBreakerState: "closed",
@@ -7692,12 +7719,13 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .describe(
             "Bypass dedup and force a fresh CLI run even if a recent identical request exists"
           ),
-        // U23: emit `--json` to enable JSONL event-stream parsing for token usage.
+        // #44: codex always runs with `--json` so usage is recorded regardless;
+        // this flag only controls the caller-facing response shape.
         outputFormat: z
           .enum(["text", "json"])
           .default("text")
           .describe(
-            "Codex output format. `json` emits --json (JSONL events) for token usage extraction."
+            "Codex caller-facing output format. Token/cache usage is recorded in the flight recorder regardless. `text` (default) returns the plain reply; `json` returns the raw `--json` JSONL event stream."
           ),
         // U26: high-impact feature flags. All optional.
         outputSchema: z
@@ -8604,6 +8632,24 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         let parsed: ReturnType<typeof parseStreamJson> | undefined;
         if (outputFormat === "stream-json" && result.stdout) {
           parsed = parseStreamJson(result.stdout);
+        }
+
+        // #44: codex async jobs always run with `--json`, so `result.stdout`
+        // holds the raw JSONL event stream. In the default `text` mode the
+        // caller expects the plain reply (matching the sync path / pre-#44
+        // behaviour), so swap in the reconstructed reply via the SAME helper the
+        // sync path uses (codexDisplayText — final agent_message, never raw
+        // JSONL). `result` is a fresh object from getJobResult (spread of
+        // snapshot() + new strings), so mutating result.stdout cannot alias the
+        // in-memory job record. Token usage was already recorded to the flight
+        // recorder at job completion, so this display swap loses nothing. `json`
+        // mode returns the raw JSONL.
+        if (
+          asyncJobManager.getJobCli(jobId) === "codex" &&
+          outputFormat !== "json" &&
+          result.stdout
+        ) {
+          result.stdout = codexDisplayText(result.stdout);
         }
 
         return {
