@@ -1,0 +1,154 @@
+name: sast
+
+# Open-source SAST replacing GitHub CodeQL. CodeQL's code-scanning/SARIF
+# ingestion needs GitHub Advanced Security (GHAS), which isn't available on
+# this private free-plan org, so we run free OSS analyzers on our own runners
+# instead. Coverage of the former codeql.yml surface:
+#
+#   opengrep     — JS/TS SAST against a vendored, repo-owned ruleset
+#                  (.sast/opengrep). BLOCKING on ERROR-severity findings.
+#   gosec        — Go SAST of installer/. BLOCKING. The initial 22-finding
+#                  backlog was triaged: two were fixed (G114 server timeout,
+#                  G115 tar-mode overflow) and the rest are justified in-line
+#                  with #nosec (argv/no-shell exec, internal/safeJoin'd paths,
+#                  SHA-256-verified downloads, a help-string false positive).
+#                  SARIF is uploaded for review.
+#   govulncheck  — Go reachable stdlib/dependency CVEs in installer/. BLOCKING.
+#
+# Not duplicated here: broad JS/TS pattern linting is already enforced by
+# eslint-plugin-security in `npm run lint` (ci.yml); npm dependency CVEs and
+# secret scanning live in security.yml (osv-scanner, gitleaks).
+#
+# Findings surface as: a failed job (blocking gates), the run log, uploaded
+# SARIF artifacts, and a job summary. Private-repo SARIF upload to the GitHub
+# Security tab is intentionally NOT used — it requires GHAS.
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+  schedule:
+    # Weekly, matching the cadence the retired codeql.yml used.
+    - cron: "26 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sast:
+    name: sast (opengrep + gosec + govulncheck)
+    # SAST is a light PR check, so it runs on GitHub-hosted ubuntu-latest like
+    # its siblings ci.yml and security.yml. The internal self-hosted runner
+    # (workhorse2) is reserved for heavy release builds and is not kept online
+    # for PRs, so targeting it would leave this required check queued forever.
+    # To move SAST onto the internal runner, reuse the release-installer.yml
+    # runner-split expression AND keep a linux self-hosted runner online for PRs.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          # Drop the auth token from .git/config after checkout so it cannot be
+          # picked up by tool installers (zizmor artipacked).
+          persist-credentials: false
+
+      # ---------------------------------------------------------------
+      # JS/TS — Opengrep (LGPL Semgrep CE fork) against vendored rules.
+      # ---------------------------------------------------------------
+      - name: Install Opengrep (SHA256-verified binary)
+        run: |
+          set -euo pipefail
+          VERSION="1.22.0"
+          # SHA256 of the glibc x86_64 release binary, observed from the
+          # published release artifact on 2026-06-13. Update this pin when
+          # bumping VERSION above. Opengrep does not publish a checksum file,
+          # so the hash is captured here directly (same approach as gitleaks
+          # in security.yml).
+          EXPECTED_SHA="45bcd58440e397ed52c50e953ccf5948909ea77087c9186fc7d277216f62e319"
+          curl -fsSL "https://github.com/opengrep/opengrep/releases/download/v${VERSION}/opengrep_manylinux_x86" -o /tmp/opengrep
+          actual="$(sha256sum /tmp/opengrep | awk '{print $1}')"
+          if [ "${actual}" != "${EXPECTED_SHA}" ]; then
+            echo "FAIL: opengrep binary SHA256 mismatch."
+            echo "  expected: ${EXPECTED_SHA}"
+            echo "  actual:   ${actual}"
+            exit 1
+          fi
+          chmod +x /tmp/opengrep
+          /tmp/opengrep --version
+
+      - name: Opengrep SAST gate (JS/TS, src/ excluding tests)
+        run: |
+          set -euo pipefail
+          # Production source only: tests legitimately use fetch()/Math.random()
+          # to exercise the HTTP transport, which the rules forbid in prod code.
+          # --error makes ERROR-severity findings fail the job; warnings are
+          # surfaced by the advisory step below without blocking.
+          /tmp/opengrep scan \
+            --config .sast/opengrep \
+            --exclude='*.test.ts' --exclude='*.spec.ts' --exclude='__tests__' \
+            --severity ERROR --error \
+            --sarif-output opengrep.sarif \
+            src
+
+      - name: Opengrep advisory findings (warnings, non-blocking)
+        if: always()
+        run: |
+          /tmp/opengrep scan \
+            --config .sast/opengrep \
+            --exclude='*.test.ts' --exclude='*.spec.ts' --exclude='__tests__' \
+            src || true
+
+      # ---------------------------------------------------------------
+      # Go — gosec (SAST) + govulncheck (reachable CVEs) on installer/.
+      # ---------------------------------------------------------------
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          # >= go1.26.4 clears the current crypto/x509 + net/textproto stdlib
+          # advisories that govulncheck flags on older toolchains.
+          go-version: "1.26.4"
+
+      - name: Install gosec + govulncheck (pinned)
+        run: |
+          set -euo pipefail
+          go install github.com/securego/gosec/v2/cmd/gosec@v2.27.1
+          go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
+
+      - name: govulncheck (Go reachable CVEs, installer/) — blocking
+        working-directory: installer
+        run: |
+          set -euo pipefail
+          "$(go env GOPATH)/bin/govulncheck" ./...
+
+      - name: gosec (Go SAST, installer/) — blocking
+        id: gosec
+        working-directory: installer
+        run: |
+          set -euo pipefail
+          GOSEC="$(go env GOPATH)/bin/gosec"
+          # Gate: text to the log, fails the step on any unsuppressed finding.
+          "${GOSEC}" -fmt text -exclude-generated ./...
+          # Artifact: only reached when the gate is clean; emit SARIF for review.
+          "${GOSEC}" -fmt sarif -out ../gosec.sarif -exclude-generated ./... || true
+
+      - name: Job summary
+        if: always()
+        run: |
+          {
+            echo "## SAST results"
+            echo ""
+            echo "- **Opengrep (JS/TS)**: blocking gate — see step status above."
+            echo "- **govulncheck (Go)**: blocking gate — see step status above."
+            echo "- **gosec (Go)**: blocking gate — see step status above (findings triaged; #nosec justified in-line)."
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload SARIF artifacts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: sast-sarif
+          path: |
+            opengrep.sarif
+            gosec.sarif
+          if-no-files-found: ignore
+          retention-days: 30

@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [master, main]
   pull_request:
-    branches: [main]
+    branches: [master, main]
 
 # Default to read-only on the GITHUB_TOKEN. Every job below either reads
 # the working tree, builds, lints, or runs tests — none push commits,

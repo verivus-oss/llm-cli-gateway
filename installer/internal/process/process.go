@@ -53,11 +53,13 @@ func Start(cfg config.Config, token string) (status Status, err error) {
 	}
 	logPath := filepath.Join(cfg.AppDir, "gateway.log")
 	errPath := filepath.Join(cfg.AppDir, "gateway.err.log")
+	// #nosec G304 -- logPath is built from the installer-owned AppDir, not user input.
 	stdout, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return Status{}, err
 	}
 	defer closeAndJoinError(stdout, &err)
+	// #nosec G304 -- errPath is built from the installer-owned AppDir, not user input.
 	stderr, err := os.OpenFile(errPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return Status{}, err
@@ -70,6 +72,7 @@ func Start(cfg config.Config, token string) (status Status, err error) {
 		}
 		nodePath = "node"
 	}
+	// #nosec G204 -- argv array, no shell: managed Node runtime + bundled gateway script + literal flag.
 	cmd := exec.Command(nodePath, entry, "--transport=http")
 	cmd.Env = config.EnvForGateway(cfg, token)
 	cmd.Stdout = stdout
@@ -121,11 +124,13 @@ func StartTunnel(cfg config.Config, provider string) (TunnelStatus, error) {
 		return TunnelStatus{}, err
 	}
 	logPath := tunnelLogPath(cfg)
+	// #nosec G304 -- tunnel logPath is built from the installer-owned AppDir, not user input.
 	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return TunnelStatus{}, err
 	}
 
+	// #nosec G204 -- argv array, no shell: cloudflared is a resolved executable path, args are literals + an internally-built local URL.
 	cmd := exec.Command(cloudflared, "tunnel", "--no-autoupdate", "--url", localURL)
 	configureHiddenProcess(cmd)
 	stdout, err := cmd.StdoutPipe()
@@ -331,6 +336,7 @@ func processIsRunning(pid int) bool {
 }
 
 func windowsProcessIsRunning(pid int) bool {
+	// #nosec G204 -- argv array, no shell: fixed "tasklist" with an integer PID formatted into a literal filter; no injectable input.
 	cmd := exec.Command("tasklist", "/FI", fmt.Sprintf("PID eq %d", pid), "/FO", "CSV", "/NH")
 	configureHiddenProcess(cmd)
 	output, err := cmd.Output()
@@ -384,6 +390,7 @@ func waitForHTTPStopped(cfg config.Config, timeout time.Duration) bool {
 
 func cloudflaredExecutable() (string, error) {
 	if configured := strings.TrimSpace(os.Getenv("LLM_GATEWAY_CLOUDFLARED_PATH")); configured != "" {
+		// #nosec G703 -- operator-supplied path to their own cloudflared binary (LLM_GATEWAY_CLOUDFLARED_PATH); a stat of an explicitly configured tool on the operator's own machine, not an untrusted traversal sink.
 		if _, err := os.Stat(configured); err != nil {
 			return "", fmt.Errorf("LLM_GATEWAY_CLOUDFLARED_PATH points to an unavailable file: %w", err)
 		}

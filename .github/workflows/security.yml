@@ -2,8 +2,9 @@ name: security
 
 # Free-OSS security posture. This workflow runs in parallel to ci.yml on
 # the same triggers and is the local equivalent of the GHAS feature set
-# (CodeQL + secret scanning + dependency review) that isn't available on
-# private free-plan orgs.
+# (secret scanning + dependency review) that isn't available on private
+# free-plan orgs. The code-SAST half of GHAS (formerly CodeQL) now lives in
+# sast.yml (opengrep + gosec + govulncheck).
 #
 # Coverage map (matches verivus-oss/agent-assurance's posture):
 #   actionlint      — GHA workflow correctness (broken expressions,
@@ -32,9 +33,9 @@ name: security
 
 on:
   push:
-    branches: [main]
+    branches: [master, main]
   pull_request:
-    branches: [main]
+    branches: [master, main]
   # workflow_dispatch lets a maintainer re-run the suite on demand
   # without pushing — useful when allowlisting a transient CVE or
   # verifying a tool upgrade.

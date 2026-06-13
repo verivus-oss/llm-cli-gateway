@@ -1,3 +1,3 @@
 module github.com/verivus-oss/llm-cli-gateway/installer
 
-go 1.25
+go 1.26.4

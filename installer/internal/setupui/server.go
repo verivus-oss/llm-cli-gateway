@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/verivus-oss/llm-cli-gateway/installer/internal/config"
 )
@@ -37,7 +38,14 @@ func Listen(addr string) error {
 		}
 		_, _ = w.Write(body)
 	})
-	return http.ListenAndServe(addr, mux)
+	// Explicit server with a header-read timeout so a slow client cannot hold
+	// the local setup UI open indefinitely (gosec G114 / Slowloris hardening).
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+	return srv.ListenAndServe()
 }
 
 func readRepoFile(rel string) ([]byte, error) {

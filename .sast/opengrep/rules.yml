@@ -1,0 +1,62 @@
+# Vendored Opengrep (Semgrep-compatible) ruleset for llm-cli-gateway.
+#
+# Why vendored and not a registry pack: the Semgrep registry rules carry the
+# Semgrep Rules License, and the opengrep-rules fork is NOASSERTION-licensed,
+# so we keep a small, repo-owned, high-signal set instead. Broad JS/TS linting
+# is already covered by eslint-plugin-security in `npm run lint`; Go is covered
+# by gosec + govulncheck. These rules gate the gateway-specific risk surface.
+#
+# Severity policy: ERROR fails CI (the pattern must never appear in src/);
+# WARNING is advisory (surfaced in the report/SARIF, does not block).
+rules:
+  - id: no-dynamic-code-eval
+    languages: [typescript, javascript]
+    severity: ERROR
+    message: >
+      Dynamic code execution (eval / new Function) is a code-injection sink and
+      is never required in the gateway. Use static dispatch instead.
+    metadata:
+      category: security
+      cwe: "CWE-95: Improper Neutralization of Directives in Dynamically Evaluated Code"
+      owasp: "A03:2021 - Injection"
+    pattern-either:
+      - pattern: eval(...)
+      - pattern: new Function(...)
+
+  - id: no-shell-true-spawn
+    languages: [typescript, javascript]
+    severity: ERROR
+    message: >
+      Spawning a child process with `shell: true` reintroduces shell injection.
+      The gateway spawns provider CLIs with an argv array and shell:false
+      (the Node default) so untrusted values are never interpreted by a shell.
+    metadata:
+      category: security
+      cwe: "CWE-78: OS Command Injection"
+      owasp: "A03:2021 - Injection"
+    pattern-regex: 'shell\s*:\s*true'
+
+  - id: no-network-fetch-in-src
+    languages: [typescript, javascript]
+    severity: ERROR
+    message: >
+      Network fetch() must not appear in gateway source. Production stays
+      fetch-free (Socket supply-chain posture); the gateway reaches models by
+      shelling out to the provider CLI, never by making its own HTTP calls.
+    metadata:
+      category: security
+      cwe: "CWE-918: Server-Side Request Forgery (SSRF)"
+    pattern-either:
+      - pattern: fetch(...)
+      - pattern: globalThis.fetch(...)
+
+  - id: insecure-randomness
+    languages: [typescript, javascript]
+    severity: WARNING
+    message: >
+      Math.random() is not cryptographically secure. For session IDs, tokens,
+      or any security-relevant value use crypto.randomUUID() / crypto.randomBytes().
+    metadata:
+      category: security
+      cwe: "CWE-338: Use of Cryptographically Weak PRNG"
+    pattern: Math.random(...)

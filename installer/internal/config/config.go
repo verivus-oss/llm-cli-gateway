@@ -229,6 +229,7 @@ func Ensure() (Config, string, error) {
 		return Config{}, "", err
 	}
 	tokenPath := filepath.Join(cfg.AppDir, "auth-token")
+	// #nosec G304 -- tokenPath is the installer-owned AppDir/auth-token path, not user input.
 	token, err := os.ReadFile(tokenPath)
 	if err == nil && len(token) > 0 {
 		cfg.AuthTokenSet = true
@@ -346,6 +347,7 @@ func nodeDoctorJSON(cfg Config) ([]byte, bool) {
 		token = string(raw)
 	}
 
+	// #nosec G204 -- argv array, no shell: managed Node runtime + bundled gateway script + literal subcommand/flag.
 	cmd := exec.Command(nodePath, entry, "doctor", "--json")
 	cmd.Env = EnvForGateway(cfg, token)
 	var stderr bytes.Buffer
@@ -404,6 +406,7 @@ func providerDoctor(provider, displayName string) map[string]any {
 			"summary":  "Install " + displayName + " through the provider's official flow.",
 			"commands": []string{},
 		},
+		// #nosec G101 -- documentation string instructing users NOT to paste credentials; there is no secret value here.
 		"login_guidance": map[string]any{
 			"summary":             "Sign in through " + displayName + "'s official login flow.",
 			"commands":            []string{},

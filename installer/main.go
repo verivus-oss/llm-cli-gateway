@@ -204,6 +204,9 @@ func nodeGatewayCommand(args []string) error {
 	if raw, err := os.ReadFile(filepath.Join(cfg.AppDir, "auth-token")); err == nil {
 		token = string(raw)
 	}
+	// #nosec G702 G204 -- argv array, no shell: nodePath is the managed Node
+	// runtime (or the literal "node"), entry is the bundled gateway script, and
+	// args are forwarded as separate argv elements, never interpolated into a shell.
 	cmd := exec.Command(nodePath, append([]string{entry}, args...)...)
 	cmd.Env = config.EnvForGateway(cfg, token)
 	cmd.Stdout = os.Stdout
@@ -586,6 +589,7 @@ func installBootstrapperSpec(spec bootstrapperSpec, cfg config.Config) (map[stri
 			"note":            "Bootstrapper replacement is staged and will complete after this command exits.",
 		}, nil
 	}
+	// #nosec G302 -- 0o755 is the exec bit required for the downloaded bootstrapper binary, not secret data.
 	if err := os.Chmod(tmp, 0o755); err != nil {
 		_ = os.Remove(tmp)
 		return nil, err
@@ -604,6 +608,7 @@ func installBootstrapperSpec(spec bootstrapperSpec, cfg config.Config) (map[stri
 }
 
 func downloadVerifiedFile(rawURL, expectedSHA, dstPath, label string) (string, error) {
+	// #nosec G304 -- dstPath is an installer-controlled staging path; the payload is SHA-256 verified below before use.
 	file, err := os.Create(dstPath)
 	if err != nil {
 		return "", err
@@ -637,6 +642,7 @@ func downloadBundle(rawURL string, dst io.Writer) error {
 		_, err = io.Copy(dst, source)
 		return err
 	}
+	// #nosec G107 -- release-bundle endpoint; payload integrity is enforced by SHA-256 verification in downloadVerifiedFile.
 	resp, err := http.Get(rawURL)
 	if err != nil {
 		return err
@@ -779,6 +785,7 @@ exit /b 1
 }
 
 func startWindowsSelfReplace(scriptPath string) error {
+	// #nosec G204 -- scriptPath is an installer-generated temp script (written 0o600 above); argv, no shell string.
 	cmd := exec.Command("cmd.exe", "/C", scriptPath)
 	if err := cmd.Start(); err != nil {
 		return err
@@ -810,11 +817,13 @@ func shaFromChecksums(checksums, name string) (string, error) {
 }
 
 func getURL(rawURL string) ([]byte, error) {
+	// #nosec G704 -- installer fetches its own GitHub release assets/checksums; downloaded payloads are SHA-256 verified by the caller.
 	req, err := http.NewRequest(http.MethodGet, rawURL, nil)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("User-Agent", "llm-cli-gateway-bootstrapper/"+releaseVersion)
+	// #nosec G704 -- see above: release-asset fetch, integrity enforced by SHA-256 verification downstream.
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, err
@@ -870,6 +879,7 @@ func extractBundle(bundlePath, dst string) error {
 }
 
 func extractTarGzip(bundlePath, dst string) error {
+	// #nosec G304 -- bundlePath is the SHA-256-verified downloaded bundle.
 	file, err := os.Open(bundlePath)
 	if err != nil {
 		return err
@@ -902,7 +912,10 @@ func extractTarGzip(bundlePath, dst string) error {
 			if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
 				return err
 			}
-			if err := writeFileFromReader(target, reader, os.FileMode(header.Mode)); err != nil {
+			// Mask to permission/sticky bits before the int64->uint32 cast so a
+			// hostile tar header cannot trigger an overflow (gosec G115). Only
+			// the low bits matter; writeFileFromReader masks again with &0o777.
+			if err := writeFileFromReader(target, reader, os.FileMode(header.Mode&0o7777)); err != nil {
 				return err
 			}
 		}
@@ -947,6 +960,7 @@ func writeFileFromReader(path string, reader io.Reader, mode os.FileMode) error 
 	if mode == 0 {
 		mode = 0o600
 	}
+	// #nosec G304 -- path is sanitized by safeJoin (rejects absolute paths, "..", and zip-slip escapes).
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode&0o777)
 	if err != nil {
 		return err
