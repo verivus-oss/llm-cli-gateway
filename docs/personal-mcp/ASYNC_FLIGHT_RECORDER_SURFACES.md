@@ -25,38 +25,41 @@ async-flight-recorder.dag.toml` codifies.
 ## Terminal-state catalogue
 
 Every path that flips `job.status` away from `"running"` must call
-`writeFlightComplete(job, finalStatus)` exactly once. Listed with current
-`src/async-job-manager.ts` line numbers (re-verify before editing):
+`writeFlightComplete(job, finalStatus)` exactly once. Listed by callsite
+shape; use `rg` before relying on exact line numbers:
 
-| # | Trigger                                  | Location (line) | Resulting status | FlightLogResult.status |
+| # | Trigger                                  | Location | Resulting status | FlightLogResult.status |
 |---|------------------------------------------|-----------------|------------------|------------------------|
-| 1 | Clean child exit, exitCode=0             | ~643 (close handler) | `completed` | `completed` |
-| 2 | Clean child exit, exitCode!=0            | ~645 (close handler) | `failed`    | `failed` |
-| 3 | Child error / launch failure             | ~594-610 (error handler) | `failed`    | `failed` |
-| 4 | Idle timeout                             | ~558-579 (resetIdleTimer cb) | `failed` (125) | `failed` |
-| 5 | Output overflow (>50MB)                  | ~781-816 (appendOutput) | `failed` (126) | `failed` |
-| 6 | User cancel (cancelJob)                  | ~687-720 | `canceled`  | `failed` + errorMessage="canceled by caller" |
-| 7 | Dead-process detector (eviction sweep)   | ~228-249 | `failed`    | `failed` |
-| 8 | Exited-without-status mismatch (eviction)| ~250-263 | `failed`    | `failed` |
-| 9 | Orphan-on-startup (constructor boot)     | ~181-190 (calls JobStore.markOrphanedOnStartup) | `orphaned` (in JobStore) | `failed` + errorMessage="orphaned after gateway restart" |
+| 1 | Clean child exit, exitCode=0             | close handler | `completed` | `completed` |
+| 2 | Clean child exit, exitCode!=0            | close handler | `failed`    | `failed` |
+| 3 | Child error / launch failure             | error handler | `failed`    | `failed` |
+| 4 | Idle timeout                             | resetIdleTimer callback | `failed` (125) | `failed` |
+| 5 | Output overflow (>50MB)                  | appendOutput | `failed` (126) | `failed` |
+| 6 | User cancel (cancelJob)                  | cancelJob | `canceled`  | `failed` + errorMessage="canceled by caller" |
+| 7 | Dead-process detector (eviction sweep)   | eviction sweep | `failed`    | `failed` |
+| 8 | Exited-without-status mismatch (eviction)| eviction sweep | `failed`    | `failed` |
+| 9 | Orphan-on-startup (constructor boot)     | constructor boot calls JobStore.markOrphanedOnStartup | `orphaned` (in JobStore) | `completed` when a provider response was already captured in stdout and no failure was recorded; otherwise `failed` + errorMessage="orphaned after gateway restart" |
 
 FlightLogResult.status is only `"completed" | "failed"` (see
-`src/flight-recorder.ts:23-51`). Canceled and orphaned therefore both
-collapse to `"failed"` with a distinguishing `errorMessage`. This is the
-intentional encoding — cache-stats does not currently branch on status
-beyond "completed vs not", and the audit trail value of recording a
-distinguishing message outweighs adding a new schema variant.
+`src/flight-recorder.ts`). Canceled still collapses to `"failed"`
+with a distinguishing `errorMessage`. Boot-time orphan rows are split:
+if stdout already contains a provider response and no failure was recorded,
+the flight-recorder/readback row is completed; otherwise it is failed with
+the orphan restart message.
 
 **Cross-table asymmetry (R2 Grok-F3 clarification):** the underlying
 `jobs` table in JobStore retains the distinct `"canceled"` and
 `"orphaned"` statuses (consumed by `getJobSnapshot` callers and the
-durable-store retention sweep), but the `requests` table in the flight
-recorder sees both as `"failed" + errorMessage`. External consumers
-of `~/.llm-cli-gateway/logs.db` (or future error-rate queries that filter
-`status='failed'`) will count user cancels and boot-time orphans as
-errors. This is documented in CHANGELOG; future work can either widen
-FlightLogResult.status or convert cancel/orphan querying to an
-errorMessage prefix scan.
+durable-store retention sweep). In the `requests` table, canceled jobs still
+read back as `"failed" + errorMessage`, while boot-time orphan rows are split:
+orphans without captured stdout read back as failed, and orphans with captured
+stdout plus no recorded failure read back as completed even though the JobStore
+row remains `orphaned`, because the new gateway cannot reattach the old child
+process. External consumers of `~/.llm-cli-gateway/logs.db` (or future
+error-rate queries that filter `status='failed'`) will count user cancels and
+boot-time orphans without captured stdout as errors. This is documented in
+CHANGELOG; future work can either widen FlightLogResult.status or convert
+cancel/orphan querying to an errorMessage prefix scan.
 
 ## Data contract per callsite
 
@@ -82,7 +85,7 @@ What's already in scope at each point — drives the `flightRecorderEntry`
 | `circuitBreakerState`           | `"closed"` (manager doesn't own a CB) |
 | `optimizationApplied`           | `false` (manager doesn't apply optimisations) |
 | `exitCode`                      | `job.exitCode ?? (completed ? 0 : 1)` |
-| `errorMessage`                  | failure only: `overrideErrorMessage ?? job.error ?? job.stderr ?? "Exit code N"` (R2 Codex-F2: `job.error` is null on most non-zero exits). Per-callsite overrides: cancel → "canceled by caller"; output-overflow → "Output exceeded maximum size (50MB)"; dead-process → "Process no longer exists (dead process detected)"; exited-without-status → "Process exited without proper status transition"; orphan → "orphaned after gateway restart". |
+| `errorMessage`                  | failure only: `overrideErrorMessage ?? job.error ?? job.stderr ?? "Exit code N"` (R2 Codex-F2: `job.error` is null on most non-zero exits). Per-callsite overrides: cancel → "canceled by caller"; output-overflow → "Output exceeded maximum size (50MB)"; dead-process → "Process no longer exists (dead process detected)"; exited-without-status → "Process exited without proper status transition"; orphan failure → "orphaned after gateway restart". Captured-output orphan completions omit `errorMessage`. |
 | `status`                        | derived per the catalogue above |
 | `inputTokens` / `outputTokens` / `cacheReadTokens` / `cacheCreationTokens` / `costUsd` | **Only when `finalStatus === "completed"`** (R2 Grok-F2 / Mistral-F2 clarification) AND `job.extractUsage` is set. For every failure path (catalogue rows 2–9), usage stays undefined even when a partial CLI emit captured tokens before the error. Manager does NOT import `extractUsageAndCost` to avoid `index.ts ↔ async-job-manager.ts` circularity — handlers supply the closure, constructed from primitive locals only (R2 Codex-F5 / Gemini-F3: capturing `params` directly pins large promptParts/attachments for JOB_TTL_MS). |
 
@@ -166,12 +169,11 @@ by caller"`. Rationale:
 
 ## Orphan-on-startup rule
 
-`AsyncJobManager` constructor (lines ~181-190) calls
-`store.markOrphanedOnStartup()`, which today returns only a row count
-(`src/job-store.ts:344-351`). To write FR complete rows for those rows
-with the full sync-helper-equivalent payload (response from
-stderr||stdout, errorMessage with proper fallback, durationMs computed
-from `startedAt`), the method must return enough data per orphan that
+`AsyncJobManager` constructor calls
+`store.markOrphanedOnStartup()`. To write FR complete rows for those rows
+with the full sync-helper-equivalent payload (response from captured stdout
+or failure stderr/stdout, errorMessage with proper fallback, durationMs
+computed from `startedAt`), the method returns enough data per orphan that
 the constructor can populate every field of `FlightLogResult`.
 
 **Interface change** (breaking at the TypeScript level; R2 Codex-F3 /
@@ -197,7 +199,7 @@ markOrphanedOnStartup(): {
 
 Update all three implementations:
 
-- `SqliteJobStore.markOrphanedOnStartup` (`src/job-store.ts:344-351`):
+- `SqliteJobStore.markOrphanedOnStartup` (`src/job-store.ts`):
   do a `SELECT id, correlation_id, started_at, stdout, stderr,
   exit_code FROM jobs WHERE status='running'` BEFORE the UPDATE, then
   run the existing UPDATE. **No transaction wrapper is required** —
@@ -206,25 +208,22 @@ Update all three implementations:
   new jobs can arrive, so the SELECT-then-UPDATE race window is
   closed in practice (no new `status='running'` row can be inserted
   between the two statements during the constructor's run).
-- `MemoryJobStore.markOrphanedOnStartup` (`src/job-store.ts:479+`):
+- `MemoryJobStore.markOrphanedOnStartup` (`src/job-store.ts`):
   iterate `this.rows` and collect rows with `status==="running"` into
   the orphan array (snapshot fields above) before flipping them.
-- `PostgresJobStore` stub (`src/job-store.ts:528+`): mirror the shape;
+- `PostgresJobStore` stub (`src/job-store.ts`): mirror the shape;
   the stub is interface-only today and the rollout is mechanical.
 
-Each iterated orphan triggers one `flightRecorder.logComplete(orphan.correlationId, {
-  response: orphan.stderr || orphan.stdout,
-  durationMs: Math.max(0, Date.now() - new Date(orphan.startedAt).getTime()),
-  retryCount: 0,
-  circuitBreakerState: "closed",
-  optimizationApplied: false,
-  exitCode: orphan.exitCode ?? 1,
-  errorMessage: "orphaned after gateway restart",
-  status: "failed",
-})`. The FR row may not exist (pre-slice-1.5 async jobs never wrote a
-logStart) — the underlying UPDATE has a `WHERE status='started'` guard
-and silently becomes a no-op in that case. That is the correct
-degradation path.
+Each iterated orphan triggers one `flightRecorder.logComplete` call. A
+known successful exit (`exitCode === 0`) or captured stdout with unknown
+exit (`exitCode === null`) writes a completed result with `exitCode: 0`,
+the stdout response, and no orphan error. A known nonzero exit, or a null
+exit with no captured stdout, writes a failed result using `stderr ||
+stdout`, `exitCode: orphan.exitCode ?? 1`, and
+`errorMessage: "orphaned after gateway restart"`. The FR row may not exist
+(pre-slice-1.5 async jobs never wrote a logStart) — the underlying UPDATE
+has a `WHERE status='started'` guard and silently becomes a no-op in that
+case. That is the correct degradation path.
 
 ## Why a closure-based extractUsage instead of `import extractUsageAndCost`
 

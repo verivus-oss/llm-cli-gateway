@@ -3,6 +3,8 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AsyncJobManager } from "../async-job-manager.js";
+import { readPersistedRequest } from "../cache-stats.js";
+import { FlightRecorder } from "../flight-recorder.js";
 import { SqliteJobStore, type JobStore, computeRequestKey } from "../job-store.js";
 
 /**
@@ -124,6 +126,66 @@ describe("AsyncJobManager + JobStore (durability + dedup)", () => {
     const snapshot = fresh.getJobSnapshot("orphan-candidate");
     expect(snapshot?.status).toBe("orphaned");
     expect(snapshot?.error).toContain("Gateway restarted");
+  });
+
+  it("orphaned startup readback preserves captured stdout as completed and no-output rows as restart failures", () => {
+    const rec = new FlightRecorder(join(tempDir, "logs.db"));
+    try {
+      const startedAt = new Date(Date.now() - 5000).toISOString();
+      store.recordStart({
+        id: "captured-output",
+        correlationId: "corr-captured-output",
+        requestKey: "captured-key",
+        cli: "grok",
+        args: ["-p", "review"],
+        startedAt,
+        pid: 123,
+      });
+      store.recordOutput("captured-output", "usable provider response\n", "", false);
+      rec.logStart({
+        correlationId: "corr-captured-output",
+        cli: "grok",
+        model: "default",
+        prompt: "review",
+        asyncJobId: "captured-output",
+      });
+
+      store.recordStart({
+        id: "no-output",
+        correlationId: "corr-no-output",
+        requestKey: "no-output-key",
+        cli: "mistral",
+        args: ["-p", "review"],
+        startedAt,
+        pid: 124,
+      });
+      rec.logStart({
+        correlationId: "corr-no-output",
+        cli: "mistral",
+        model: "default",
+        prompt: "review",
+        asyncJobId: "no-output",
+      });
+
+      const fresh = new AsyncJobManager(undefined, undefined, store, rec);
+
+      expect(fresh.getJobSnapshot("captured-output")?.status).toBe("orphaned");
+      expect(fresh.getJobResult("captured-output")?.stdout).toBe("usable provider response\n");
+      const captured = readPersistedRequest(rec, "corr-captured-output");
+      expect(captured?.status).toBe("completed");
+      expect(captured?.exitCode).toBe(0);
+      expect(captured?.errorMessage).toBeNull();
+      expect(captured?.response).toBe("usable provider response\n");
+
+      expect(fresh.getJobSnapshot("no-output")?.status).toBe("orphaned");
+      const missing = readPersistedRequest(rec, "corr-no-output");
+      expect(missing?.status).toBe("failed");
+      expect(missing?.exitCode).toBe(1);
+      expect(missing?.errorMessage).toBe("orphaned after gateway restart");
+      expect(missing?.response).toBe("");
+    } finally {
+      rec.close();
+    }
   });
 
   it("returns null when looking up a job ID that exists nowhere", () => {

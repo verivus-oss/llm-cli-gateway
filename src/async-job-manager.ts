@@ -12,8 +12,13 @@ import type { Logger } from "./logger.js";
 import { noopLogger, logWarn } from "./logger.js";
 import { ProcessMonitor, type JobHealth } from "./process-monitor.js";
 import { JobStore, computeRequestKey } from "./job-store.js";
-import { NoopFlightRecorder, type FlightRecorderLike } from "./flight-recorder.js";
+import {
+  NoopFlightRecorder,
+  type FlightLogResult,
+  type FlightRecorderLike,
+} from "./flight-recorder.js";
 import { codexFrResponse } from "./codex-json-parser.js";
+import type { OrphanedJobSnapshot } from "./job-store.js";
 
 export type LlmCli = "claude" | "codex" | "gemini" | "grok" | "mistral";
 export type AsyncJobStatus = "running" | "completed" | "failed" | "canceled" | "orphaned";
@@ -296,17 +301,10 @@ export class AsyncJobManager {
         // no-op. Wrapped per-orphan so a single bad row can't tank boot.
         for (const orphan of orphaned) {
           try {
-            const durationMs = Math.max(0, Date.now() - new Date(orphan.startedAt).getTime());
-            this.flightRecorder.logComplete(orphan.correlationId, {
-              response: orphan.stderr || orphan.stdout,
-              durationMs,
-              retryCount: 0,
-              circuitBreakerState: "closed",
-              optimizationApplied: false,
-              exitCode: orphan.exitCode ?? 1,
-              errorMessage: "orphaned after gateway restart",
-              status: "failed",
-            });
+            this.flightRecorder.logComplete(
+              orphan.correlationId,
+              this.buildOrphanFlightResult(orphan)
+            );
           } catch (err) {
             this.logger.error(
               `Async-path FR logComplete for orphaned job ${orphan.id} failed`,
@@ -330,6 +328,36 @@ export class AsyncJobManager {
     if (this.stallTimer.unref) {
       this.stallTimer.unref();
     }
+  }
+
+  private buildOrphanFlightResult(orphan: OrphanedJobSnapshot): FlightLogResult {
+    const durationMs = Math.max(0, Date.now() - new Date(orphan.startedAt).getTime());
+    const hasCapturedStdout = orphan.stdout.length > 0;
+    const hasKnownSuccessfulExit = orphan.exitCode === 0;
+    const hasCapturedResponseWithoutFailure = orphan.exitCode === null && hasCapturedStdout;
+
+    if (hasKnownSuccessfulExit || hasCapturedResponseWithoutFailure) {
+      return {
+        response: orphan.stdout,
+        durationMs,
+        retryCount: 0,
+        circuitBreakerState: "closed",
+        optimizationApplied: false,
+        exitCode: 0,
+        status: "completed",
+      };
+    }
+
+    return {
+      response: orphan.stderr || orphan.stdout,
+      durationMs,
+      retryCount: 0,
+      circuitBreakerState: "closed",
+      optimizationApplied: false,
+      exitCode: orphan.exitCode ?? 1,
+      errorMessage: "orphaned after gateway restart",
+      status: "failed",
+    };
   }
 
   /**

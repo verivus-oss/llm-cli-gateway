@@ -349,12 +349,12 @@ describe("AsyncJobManager + flight-recorder (slice 1.5)", () => {
       expect(fr.completes).toHaveLength(0);
     });
 
-    it("orphan path: store returning a snapshot → one FR logComplete per orphan", () => {
+    it("orphan path: captured stdout is not logged as a provider failure", () => {
       const fr = new CapturingFlightRecorder();
       const startedAt = new Date(Date.now() - 30000).toISOString();
       const fakeStore = {
         markOrphanedOnStartup: () => ({
-          count: 2,
+          count: 4,
           orphaned: [
             {
               id: "j1",
@@ -372,6 +372,22 @@ describe("AsyncJobManager + flight-recorder (slice 1.5)", () => {
               stderr: "boom",
               exitCode: 137,
             },
+            {
+              id: "j3",
+              correlationId: "corr-j3",
+              startedAt,
+              stdout: "partial-before-explicit-failure",
+              stderr: "",
+              exitCode: 2,
+            },
+            {
+              id: "j4",
+              correlationId: "corr-j4",
+              startedAt,
+              stdout: "complete-before-restart",
+              stderr: "",
+              exitCode: 0,
+            },
           ],
         }),
         recordStart: () => {},
@@ -383,16 +399,26 @@ describe("AsyncJobManager + flight-recorder (slice 1.5)", () => {
         close: () => {},
       };
       new AsyncJobManager(noopLogger, undefined, fakeStore as unknown as MemoryJobStore, fr);
-      expect(fr.completes).toHaveLength(2);
+      expect(fr.completes).toHaveLength(4);
       const c1 = fr.completes.find(c => c.correlationId === "corr-j1");
-      expect(c1?.result.status).toBe("failed");
-      expect(c1?.result.errorMessage).toBe("orphaned after gateway restart");
-      expect(c1?.result.response).toBe("partial-out"); // stderr empty → stdout fallback
-      expect(c1?.result.exitCode).toBe(1); // null → fallback
+      expect(c1?.result.status).toBe("completed");
+      expect(c1?.result.errorMessage).toBeUndefined();
+      expect(c1?.result.response).toBe("partial-out");
+      expect(c1?.result.exitCode).toBe(0); // stdout with no recorded failure is output-intact
       const c2 = fr.completes.find(c => c.correlationId === "corr-j2");
       expect(c2?.result.status).toBe("failed");
       expect(c2?.result.response).toBe("boom"); // stderr wins
       expect(c2?.result.exitCode).toBe(137);
+      expect(c2?.result.errorMessage).toBe("orphaned after gateway restart");
+      const c3 = fr.completes.find(c => c.correlationId === "corr-j3");
+      expect(c3?.result.status).toBe("failed");
+      expect(c3?.result.response).toBe("partial-before-explicit-failure");
+      expect(c3?.result.exitCode).toBe(2);
+      const c4 = fr.completes.find(c => c.correlationId === "corr-j4");
+      expect(c4?.result.status).toBe("completed");
+      expect(c4?.result.errorMessage).toBeUndefined();
+      expect(c4?.result.response).toBe("complete-before-restart");
+      expect(c4?.result.exitCode).toBe(0);
       // durationMs derived from seeded startedAt
       expect(c1?.result.durationMs).toBeGreaterThanOrEqual(29000);
     });

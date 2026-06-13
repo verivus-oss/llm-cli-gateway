@@ -11,6 +11,10 @@ All notable changes to the llm-cli-gateway project.
   Grok, and Mistral Vibe versions and probed artifact SHA-256 values each
   gateway release was validated against, without implying those versions are
   pinned dependencies or support bounds.
+- Corrected async flight-recorder documentation for startup orphans: JobStore
+  rows still remain `orphaned`, but flight-recorder/readback rows now preserve
+  captured stdout as `completed` when no failure was recorded; only no-output
+  or explicit-failure orphans read back as failed restart records.
 
 ## [2.7.0] - 2026-06-12: Provider capability inventory
 
