@@ -72,10 +72,18 @@ const ZERO: PricePerMillion = {
  *   - claude: model name contains "sonnet" | "opus" | "haiku".
  *   - codex: model name contains "gpt-5" or "o3" (current OpenAI families).
  *
- * Anything outside these explicit matches returns ZERO. This is a
- * deliberate conservative choice — we'd rather under-report savings on
- * an unrecognised model than over-report on one whose actual pricing we
- * don't know. Update this table when a new model family ships.
+ * For codex (and gemini/grok/mistral) an unrecognised model returns ZERO —
+ * a deliberate conservative choice, since we'd rather under-report savings
+ * on an unrecognised model than over-report on one whose actual pricing we
+ * don't know.
+ *
+ * Claude is the one exception: an unknown / empty / "default" claude model
+ * name falls back to the Sonnet family. The gateway logs claude cache rows
+ * as `resolvedModel || "default"`, so unresolved rows carry the literal
+ * model "default" (and other Claude Code aliases never contain a family
+ * keyword). Returning ZERO for those silently zeroes claude cache savings —
+ * Claude Code's default model is Sonnet, so Sonnet pricing is the correct,
+ * non-zero estimate. Update this table when a new model family ships.
  */
 export function getPricing(
   cli: "claude" | "codex" | "gemini" | "grok" | "mistral",
@@ -86,7 +94,10 @@ export function getPricing(
     if (lower.includes("sonnet")) return ANTHROPIC_SONNET;
     if (lower.includes("opus")) return ANTHROPIC_OPUS;
     if (lower.includes("haiku")) return ANTHROPIC_HAIKU;
-    return ZERO;
+    // Unknown / "default" / empty claude model → Sonnet (Claude Code's
+    // default tier). A reasonable non-zero estimate beats silently
+    // zeroing savings for the most common, family-less row shape.
+    return ANTHROPIC_SONNET;
   }
   if (cli === "codex") {
     if (lower.includes("gpt-5") || lower.includes("o3")) return OPENAI_GPT5;

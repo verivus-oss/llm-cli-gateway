@@ -141,6 +141,21 @@ function isCacheStatsCli(s: string): s is CacheStatsCli {
   return s === "claude" || s === "codex" || s === "gemini" || s === "grok" || s === "mistral";
 }
 
+/**
+ * Normalise a logged `cli` value into a CacheStatsCli bucket, or null if it
+ * does not roll up to one of the five base CLIs.
+ *
+ * The grok HTTP path logs rows with `cli: "grok-api"` and is the only grok
+ * code path that actually parses cache tokens
+ * (`input_tokens_details.cached_tokens`). Those rows must aggregate under the
+ * `grok` bucket — otherwise the one grok path with cache telemetry is
+ * silently dropped from per-CLI and global cache stats.
+ */
+function normalizeCacheStatsCli(s: string): CacheStatsCli | null {
+  if (s === "grok-api") return "grok";
+  return isCacheStatsCli(s) ? s : null;
+}
+
 export function computeSessionCacheStats(
   db: FlightRecorderQuery,
   sessionId: string
@@ -175,9 +190,10 @@ export function computeSessionCacheStats(
     if (reads > 0) hitCount += 1;
     if (row.stable_prefix_hash) prefixSet.add(row.stable_prefix_hash);
     if (!lastAt || row.datetime_utc > lastAt) lastAt = row.datetime_utc;
-    if (cli === null && isCacheStatsCli(row.cli)) cli = row.cli;
-    if (isCacheStatsCli(row.cli)) {
-      estimatedSavingsUsd += estimateCacheSavingsUsd(row.cli, row.model, reads);
+    const rowCli = normalizeCacheStatsCli(row.cli);
+    if (cli === null && rowCli !== null) cli = rowCli;
+    if (rowCli !== null) {
+      estimatedSavingsUsd += estimateCacheSavingsUsd(rowCli, row.model, reads);
     }
   }
 
@@ -288,14 +304,15 @@ export function computePrefixCacheStats(
     if (reads > 0) hitCount += 1;
     if (!firstAt) firstAt = row.datetime_utc;
     lastAt = row.datetime_utc;
-    if (isCacheStatsCli(row.cli)) {
-      estimatedSavingsUsd += estimateCacheSavingsUsd(row.cli, row.model, reads);
-      const key = `${row.cli}::${row.model}`;
+    const rowCli = normalizeCacheStatsCli(row.cli);
+    if (rowCli !== null) {
+      estimatedSavingsUsd += estimateCacheSavingsUsd(rowCli, row.model, reads);
+      const key = `${rowCli}::${row.model}`;
       const entry = cliMap.get(key);
       if (entry) {
         entry.count += 1;
       } else {
-        cliMap.set(key, { cli: row.cli, model: row.model, count: 1 });
+        cliMap.set(key, { cli: rowCli, model: row.model, count: 1 });
       }
     }
   }
@@ -401,8 +418,8 @@ export function computeGlobalCacheStats(
       perPrefix.set(row.stable_prefix_hash, arr);
     }
 
-    if (!isCacheStatsCli(row.cli)) continue;
-    const cli = row.cli;
+    const cli = normalizeCacheStatsCli(row.cli);
+    if (cli === null) continue;
     const savings = estimateCacheSavingsUsd(cli, row.model, reads);
     totalSavings += savings;
     const agg = perCliMap.get(cli) ?? {

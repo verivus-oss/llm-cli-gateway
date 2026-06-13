@@ -27,7 +27,7 @@ describe("cache-stats", () => {
 
   function seedRequest(opts: {
     id: string;
-    cli: "claude" | "codex" | "gemini" | "grok" | "mistral";
+    cli: "claude" | "codex" | "gemini" | "grok" | "mistral" | "grok-api";
     model: string;
     sessionId?: string;
     stableHash?: string;
@@ -235,6 +235,32 @@ describe("cache-stats", () => {
       expect(codex?.totalCacheReadTokens).toBe(200);
       expect(gemini?.requestCount).toBe(1);
       expect(g.estimatedSavingsUsd).toBeGreaterThan(0);
+    });
+
+    // Fix 2: grok HTTP rows are logged with cli "grok-api" — the only grok
+    // path that parses cache tokens. They must roll up under the `grok`
+    // bucket rather than being silently dropped from aggregation.
+    it("grok-api rows aggregate under the grok bucket (Fix 2)", () => {
+      seedRequest({ id: "ga-1", cli: "grok-api", model: "grok-4", cacheRead: 500 });
+      seedRequest({ id: "ga-2", cli: "grok-api", model: "grok-4", cacheRead: 0 });
+      // A native-CLI grok row (no cache telemetry) sharing the same bucket.
+      seedRequest({ id: "gn-1", cli: "grok", model: "grok-4" });
+
+      const g = computeGlobalCacheStats(rec);
+      expect(g.totalRequests).toBe(3);
+      expect(g.totalHits).toBe(1); // only ga-1 has cache_read > 0
+      expect(g.totalCacheReadTokens).toBe(500);
+
+      // No "grok-api" bucket leaks through — everything is under "grok".
+      expect(g.perCli.find(c => (c.cli as string) === "grok-api")).toBeUndefined();
+      const grok = g.perCli.find(c => c.cli === "grok");
+      expect(grok).toBeDefined();
+      expect(grok?.requestCount).toBe(3); // ga-1, ga-2, gn-1 all bucket as grok
+      expect(grok?.hitCount).toBe(1);
+      expect(grok?.totalCacheReadTokens).toBe(500);
+      // grok pricing table is ZERO today, so savings stay 0 even though the
+      // rows are now counted — Fix 2 is about token/hit aggregation, not price.
+      expect(grok?.estimatedSavingsUsd).toBe(0);
     });
 
     // ───────────────────────────────────────────────────────────────────
