@@ -258,9 +258,9 @@ describe("cache-stats", () => {
       expect(grok?.requestCount).toBe(3); // ga-1, ga-2, gn-1 all bucket as grok
       expect(grok?.hitCount).toBe(1);
       expect(grok?.totalCacheReadTokens).toBe(500);
-      // grok pricing table is ZERO today, so savings stay 0 even though the
-      // rows are now counted — Fix 2 is about token/hit aggregation, not price.
-      expect(grok?.estimatedSavingsUsd).toBe(0);
+      // #44: grok now has a pricing table, so the 500 cached read tokens on the
+      // grok-4 row produce non-zero savings: 500 × $1.25 × (1 - 0.16) / 1M.
+      expect(grok?.estimatedSavingsUsd).toBeCloseTo((500 * 1.25 * (1 - 0.16)) / 1_000_000, 10);
     });
 
     // ───────────────────────────────────────────────────────────────────
