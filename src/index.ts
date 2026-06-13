@@ -1394,6 +1394,40 @@ export function extractUsageAndCost(
   if (cli === "mistral") {
     return parseVibeMetaJson(ctx?.home ?? homedir(), ctx?.sessionId);
   }
+  // Grok CLI (`grok_request`): no grok branch by design. The gateway invokes
+  // grok via its HEADLESS `-p` surface (`prepareGrokRequest` builds
+  // `["-p", <prompt>, … --output-format <plain|json|streaming-json>]`), and that
+  // surface emits NO per-request token usage. Verified against the live Grok
+  // Build CLI (2026-06-13):
+  //   - `-p --output-format json`           → {text, stopReason, sessionId, requestId, thought}
+  //   - `-p --output-format streaming-json`  → {type:"thought"|"text"} deltas + a terminal
+  //                                            {type:"end", stopReason, sessionId, requestId}
+  // No input/output/cached/cache_creation fields appear on the `-p` wire, so
+  // extractUsageAndCost (which parses that stdout) correctly returns {} rather
+  // than inventing guessed field names (the #44 caveat trap).
+  //
+  // This is scoped to the `-p` surface, NOT "any grok mode". The ACP transport
+  // surface `grok agent stdio` DOES expose per-request usage: its
+  // `session/prompt` JSON-RPC response `result._meta` carries
+  // `{ inputTokens, outputTokens, cachedReadTokens, reasoningTokens, totalTokens,
+  // modelId }` (live-verified 2026-06-13: inputTokens 11954 / outputTokens 36 /
+  // cachedReadTokens 7639). The gateway does not route grok_request through ACP
+  // today: the Phase A/B ACP transport core (`src/acp/*`) is built and tested but
+  // NOT wired into the request handlers — no production module imports the ACP
+  // client, and grok_request runs `prepareGrokRequest` → the `-p` executor only.
+  // So there is no call site to parse `_meta` yet; when grok is routed over ACP,
+  // extract usage from that `_meta` (cachedReadTokens → cacheReadTokens), NOT here.
+  // Note
+  // `_meta.totalTokens` is the per-turn input+output total — distinct from the
+  // on-disk context-window gauge (`signals.json:contextTokensUsed` /
+  // `contextWindowTokens`); do not treat it as a per-request input count.
+  //
+  // Separately, the opt-in grok-api HTTP path (`src/xai-api-provider.ts`,
+  // bucketed under cli "grok" per #42) DOES extract usage — incl. `cacheReadTokens`
+  // from the xAI Responses `input_tokens_details.cached_tokens` — via
+  // `usageFromXaiResult`, never through this function. There is no `cache_creation`
+  // to add there: the xAI Responses usage object has no cache-write field (caching
+  // is automatic and writes are unbilled).
   return {};
 }
 

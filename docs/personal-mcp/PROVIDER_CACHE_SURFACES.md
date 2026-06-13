@@ -1,6 +1,6 @@
 # Provider cache surfaces (gateway → upstream)
 
-**Last reviewed: 2026-06-12.** Anthropic's per-model threshold table below was
+**Last reviewed: 2026-06-13.** Anthropic's per-model threshold table below was
 last fetched on 2026-05-26; re-verify that table before changing threshold
 defaults because Anthropic has revised it across model generations.
 
@@ -15,7 +15,7 @@ underlying API field names — they diverge meaningfully for Codex.
 | claude  | `cache_read_input_tokens`, `cache_creation_input_tokens` (via JSON output) | Prefix discipline + `--exclude-dynamic-system-prompt-sections`; verified caller-content `cache_control` injection via `--input-format stream-json` for `promptParts` | Anthropic native caching. Per-model min-token thresholds (see table).  |
 | codex   | `cached_input_tokens` (Codex CLI ≥ 0.133.0 emits this in `turn.completed.usage`); underlying OpenAI API uses `usage.prompt_tokens_details.cached_tokens` | Prefix discipline only (no CLI cache-control flag) | OpenAI implicit cache; CLI threshold is set server-side                |
 | gemini  | Not surfaced in CLI output                        | Prefix discipline only                          | Implicit prefix caching server-side; explicit `cachedContents` only via SDK |
-| grok    | Not surfaced in CLI output                        | Prefix discipline only                          | xAI caching, if any, is opaque to the CLI                              |
+| grok    | Headless `-p`: none (verified 2026-06-13). ACP `agent stdio`: full per-request usage incl. cache reads (see below) | Prefix discipline only | Gateway invokes the `-p` surface, which emits no usage. The ACP surface and the opt-in grok-api HTTP path both DO report cached-read tokens — see below. |
 | mistral | Not surfaced in CLI output                        | Prefix discipline only                          | Vibe CLI does not surface cache stats                                  |
 
 "Prefix discipline only" means: the gateway can improve cache hit rate by
@@ -161,10 +161,77 @@ Explicit `cachedContents` resources are available via the Vertex SDK but not
 via the `gemini` CLI's `-p`/`--prompt` flow. Future cache-resource API work is
 gated on this slice's data.
 
-Grok CLI: no `cache_*` field appears in its stream-json output as of `grok` v
-shipped at writing. Implicit caching, if any, is opaque.
+Grok has two distinct surfaces, and they differ. The gateway's `grok_request`
+uses the **headless `-p` surface** (`prepareGrokRequest` builds
+`["-p", <prompt>, … --output-format <plain|json|streaming-json>]`).
 
-Mistral / vibe CLI: same. No cache reporting.
+**Headless `-p`: no per-request usage.** Verified against the live Grok Build CLI
+on 2026-06-13:
+
+- `grok -p --output-format json "…"` → `{text, stopReason, sessionId, requestId,
+  thought}`. No token fields.
+- `grok -p --output-format streaming-json` → `{"type":"thought"|"text"}` deltas
+  plus a terminal `{"type":"end", stopReason, sessionId, requestId}`. No usage
+  event, even under multi-tool-call prompts.
+- On disk (`~/.grok/sessions/<cwd>/<id>/`) `signals.json` carries a context-window
+  gauge (`contextTokensUsed` / `contextWindowTokens`) — a session-cumulative
+  figure, not a per-request input/output/cache breakdown.
+
+Consequently `extractUsageAndCost("grok", …)`, which parses the `-p` stdout,
+intentionally returns `{}` (no parser branch — see the documented comment in
+`src/index.ts`), pinned by the falsifiable Eθ regressions in
+`src/__tests__/test-veracity-regressions-slice-epsilon.test.ts`. grok-CLI
+flight-recorder rows leave the cache columns NULL on the `-p` path rather than
+inventing guessed field names.
+
+**ACP `agent stdio`: full per-request usage, incl. cache reads.** The
+`grok agent stdio` transport (JSON-RPC over stdio) DOES expose usage. A live ACP
+`session/prompt` round-trip on 2026-06-13 returned, in the response
+`result._meta`:
+
+```json
+{
+  "stopReason": "end_turn",
+  "_meta": {
+    "sessionId": "019ec082-…", "requestId": "13f4812f-…", "promptId": "13f4812f-…",
+    "modelId": "grok-composer-2.5-fast",
+    "inputTokens": 11954, "outputTokens": 36,
+    "cachedReadTokens": 7639, "reasoningTokens": 0, "totalTokens": 11990
+  }
+}
+```
+
+So grok-CLI telemetry is not impossible — it is gated on the **ACP transport
+migration**. The Phase A/B ACP transport core (`src/acp/*`) is built and tested
+in this repo, but it is not yet wired into the request handlers (no production
+module imports the ACP client; `grok_request` still runs the `-p` executor), so
+no provider is routed over ACP today. When grok is routed over ACP, extract usage
+from this `_meta`:
+`cachedReadTokens → cache_read_tokens`, `inputTokens`/`outputTokens` direct;
+there is no cache-write field. `_meta.totalTokens` is the per-turn
+input+output total — NOT the `signals.json` context-window gauge; do not use it
+as a per-request input count. Until then the `-p` path stays usage-less.
+
+### grok-api HTTP path (distinct from the CLI)
+
+The opt-in `grok-api` provider (`src/xai-api-provider.ts`, bucketed under cli
+`grok` per #42) calls the xAI Responses API directly and DOES surface usage. Its
+`usage` object exposes `input_tokens`, `output_tokens`, `total_tokens`,
+`input_tokens_details.cached_tokens` (cache **reads**), and `cost_in_usd_ticks`
+(source: <https://docs.x.ai/developers/advanced-api-usage/prompt-caching/usage-and-pricing>,
+fetched 2026-06-13). The provider already extracts `cacheReadTokens` from
+`input_tokens_details.cached_tokens` / `prompt_tokens_details.cached_tokens` and
+threads it to the flight recorder via `usageFromXaiResult` — never through
+`extractUsageAndCost`. Cache hits are reachable because the gateway chains via
+`previous_response_id` + `store:true`, a documented xAI sticky-routing mechanism.
+
+There is **no `cache_creation` token to extract** for grok-api: the xAI Responses
+usage object has no cache-write field. xAI prompt caching is automatic and cache
+writes are unbilled and unreported — only the cache-**read** `cached_tokens`
+appears (unlike Anthropic, which distinguishes `cache_creation_input_tokens` from
+`cache_read_input_tokens`). This matches the OpenAI/Codex model documented above.
+
+Mistral / vibe CLI: no cache reporting.
 
 ## Implications for slice 1 / 2 / 3
 

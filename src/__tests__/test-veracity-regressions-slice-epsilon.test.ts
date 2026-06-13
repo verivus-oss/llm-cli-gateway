@@ -218,6 +218,75 @@ describe("REGRESSIONS Eδ — extractUsageAndCost routes outputFormat correctly"
   });
 });
 
+// ─── REGRESSIONS Eθ — grok `-p` headless surface emits no per-request usage ──
+//
+// Scope: the gateway invokes grok via its HEADLESS `-p` surface (prepareGrokRequest
+// builds `["-p", <prompt>, … --output-format …]`), which is what extractUsageAndCost
+// parses. That surface emits no per-request usage — verified against the live Grok
+// Build CLI (2026-06-13); these are the EXACT real captures. (The ACP `grok agent
+// stdio` surface DOES expose usage in its `session/prompt` `_meta`, but the gateway
+// does not route grok over ACP today, so it never reaches extractUsageAndCost — see
+// the comment in src/index.ts.)
+//
+// Falsifiability: if someone adds a speculative grok `--json` usage branch to
+// extractUsageAndCost that guesses at field names (the #44 caveat trap), it would
+// pull non-usage fields (text/stopReason/sessionId/totalTokens) into the usage shape
+// and break these `toEqual({})` assertions. The grok-api HTTP path (cli "grok",
+// xai-api-provider) is a SEPARATE code path that never routes through this function.
+describe("REGRESSIONS Eθ — grok `-p` headless output carries no per-request usage", () => {
+  // Real `grok --output-format json -p "…"` stdout. No token fields exist.
+  const grokJson = JSON.stringify({
+    text: "hello world",
+    stopReason: "EndTurn",
+    sessionId: "019ec06f-ea71-7cd0-905d-691215c0440d",
+    requestId: "33b49a2c-efc9-4051-ac24-381990f6c248",
+    thought: 'The user wants me to reply with exactly "hello world".',
+  });
+
+  // Real `grok --output-format streaming-json` event stream. The terminal
+  // `end` event carries stopReason/sessionId/requestId — but no usage.
+  const grokStreamingJson =
+    JSON.stringify({ type: "thought", data: "hello" }) +
+    "\n" +
+    JSON.stringify({ type: "text", data: "hello" }) +
+    "\n" +
+    JSON.stringify({ type: "text", data: " world" }) +
+    "\n" +
+    JSON.stringify({
+      type: "end",
+      stopReason: "EndTurn",
+      sessionId: "019ec070-26ab-7fa3-b66b-72fc6964f250",
+      requestId: "64625ea0-6292-4dd1-9f43-263084223516",
+    }) +
+    "\n";
+
+  it("returns no usage for grok json output", () => {
+    expect(extractUsageAndCost("grok", grokJson, "json")).toEqual({});
+  });
+
+  it("returns no usage for grok streaming-json output", () => {
+    expect(extractUsageAndCost("grok", grokStreamingJson, "streaming-json")).toEqual({});
+  });
+
+  it("returns no usage for grok plain output (default) and unknown formats", () => {
+    expect(extractUsageAndCost("grok", "hello world", "plain")).toEqual({});
+    expect(extractUsageAndCost("grok", grokJson, undefined)).toEqual({});
+  });
+
+  // Guard against a future parser leaking grok's cumulative context gauge
+  // (totalTokens / contextTokensUsed) as if it were per-request input tokens.
+  it("does not surface grok's cumulative context-window gauge as per-request usage", () => {
+    const withContextGauge = JSON.stringify({
+      type: "end",
+      stopReason: "EndTurn",
+      sessionId: "s",
+      requestId: "r",
+      _meta: { totalTokens: 15395 },
+    });
+    expect(extractUsageAndCost("grok", withContextGauge, "streaming-json")).toEqual({});
+  });
+});
+
 // ─── REGRESSIONS Eε — UPSTREAM_CLI_CONTRACTS Antigravity output guard ──
 //
 // Antigravity print mode has no `-o`; stale Gemini output flags must remain
