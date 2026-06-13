@@ -596,6 +596,199 @@ export function isXaiProviderEnabled(
 }
 
 //──────────────────────────────────────────────────────────────────────────────
+// ACP (Agent Client Protocol) transport configuration
+//
+// Reads the [acp] block (and [acp.providers.<name>] sub-tables) from the same
+// ~/.llm-cli-gateway/config.toml file as [persistence]/[cache_awareness], but
+// uses a SEPARATE loader and schema so a malformed [acp] block never breaks
+// other config loaders. All behaviour ships dormant: enabled=false, every
+// provider runtime gate off, write/terminal host services off, and
+// default_transport stays "cli" so existing CLI request paths are unchanged.
+//
+// SECURITY: provider entrypoints are stored as an executable plus an argv array
+// only. Shell-style command strings (anything that requires shell parsing —
+// spaces, pipes, redirects, command substitution, globbing, etc.) are rejected
+// at validation time so the gateway can spawn without a shell. No secret
+// material is ever stored here.
+//──────────────────────────────────────────────────────────────────────────────
+
+export const ACP_TRANSPORTS = ["cli", "acp"] as const;
+export type AcpTransport = (typeof ACP_TRANSPORTS)[number];
+
+export const DEFAULT_ACP_PROCESS_IDLE_TIMEOUT_MS = 600000; // 10 minutes
+export const DEFAULT_ACP_INITIALIZE_TIMEOUT_MS = 10000;
+export const DEFAULT_ACP_SESSION_NEW_TIMEOUT_MS = 10000;
+export const DEFAULT_ACP_PROMPT_TIMEOUT_MS = 600000; // 10 minutes
+
+/**
+ * Characters that imply a string must be interpreted by a shell rather than
+ * spawned directly as an executable. Their presence in a `command` is a hard
+ * validation error — entrypoints are never passed through a shell.
+ */
+// eslint-disable-next-line no-control-regex
+const SHELL_METACHARACTERS = /[\s|&;<>(){}$`"'\\*?[\]~#! ]/;
+
+function isSafeExecutable(value: string): boolean {
+  if (value.length === 0) return false;
+  return !SHELL_METACHARACTERS.test(value);
+}
+
+const SafeExecutableSchema = z
+  .string()
+  .min(1)
+  .refine(isSafeExecutable, {
+    message:
+      "ACP provider command must be a bare executable name or path with no shell metacharacters " +
+      "(no spaces, quotes, pipes, redirects, globs, or command substitution); pass arguments via 'args'",
+  });
+
+const SafeArgSchema = z.string();
+
+const AcpProviderSchema = z
+  .object({
+    enabled: z.boolean().default(false),
+    command: SafeExecutableSchema,
+    args: z.array(SafeArgSchema).default([]),
+    runtime_enabled: z.boolean().default(false),
+    isolated_leader_socket: z.boolean().default(false),
+  })
+  .strict();
+
+const AcpConfigSchema = z
+  .object({
+    enabled: z.boolean().default(false),
+    default_transport: z.enum(ACP_TRANSPORTS).default("cli"),
+    smoke_on_startup: z.boolean().default(false),
+    process_idle_timeout_ms: z
+      .number()
+      .int()
+      .positive()
+      .default(DEFAULT_ACP_PROCESS_IDLE_TIMEOUT_MS),
+    initialize_timeout_ms: z.number().int().positive().default(DEFAULT_ACP_INITIALIZE_TIMEOUT_MS),
+    session_new_timeout_ms: z.number().int().positive().default(DEFAULT_ACP_SESSION_NEW_TIMEOUT_MS),
+    prompt_timeout_ms: z.number().int().positive().default(DEFAULT_ACP_PROMPT_TIMEOUT_MS),
+    allow_write_host_services: z.boolean().default(false),
+    allow_terminal_host_services: z.boolean().default(false),
+    fallback_to_cli_when_unhealthy: z.boolean().default(true),
+    providers: z.record(z.string(), AcpProviderSchema).default({}),
+  })
+  .strict();
+
+export interface AcpProviderConfig {
+  enabled: boolean;
+  command: string;
+  args: string[];
+  runtimeEnabled: boolean;
+  isolatedLeaderSocket: boolean;
+}
+
+export interface AcpConfig {
+  enabled: boolean;
+  defaultTransport: AcpTransport;
+  smokeOnStartup: boolean;
+  processIdleTimeoutMs: number;
+  initializeTimeoutMs: number;
+  sessionNewTimeoutMs: number;
+  promptTimeoutMs: number;
+  allowWriteHostServices: boolean;
+  allowTerminalHostServices: boolean;
+  fallbackToCliWhenUnhealthy: boolean;
+  providers: Record<string, AcpProviderConfig>;
+  /** Audit trail: file the config was loaded from (or null if defaults). */
+  sources: { configFile: string | null };
+}
+
+function defaultAcpConfig(sourcePath: string | null): AcpConfig {
+  return {
+    enabled: false,
+    defaultTransport: "cli",
+    smokeOnStartup: false,
+    processIdleTimeoutMs: DEFAULT_ACP_PROCESS_IDLE_TIMEOUT_MS,
+    initializeTimeoutMs: DEFAULT_ACP_INITIALIZE_TIMEOUT_MS,
+    sessionNewTimeoutMs: DEFAULT_ACP_SESSION_NEW_TIMEOUT_MS,
+    promptTimeoutMs: DEFAULT_ACP_PROMPT_TIMEOUT_MS,
+    allowWriteHostServices: false,
+    allowTerminalHostServices: false,
+    fallbackToCliWhenUnhealthy: true,
+    providers: {},
+    sources: { configFile: sourcePath },
+  };
+}
+
+function readAcpFile(
+  configPath: string,
+  logger: Logger
+): { raw: unknown; sourcePath: string | null } {
+  if (!existsSync(configPath)) {
+    return { raw: undefined, sourcePath: null };
+  }
+  try {
+    const require = createRequire(import.meta.url);
+    const TOML = require("smol-toml");
+    const text = readFileSync(configPath, "utf-8");
+    const parsed = TOML.parse(text) as Record<string, unknown>;
+    return { raw: parsed?.acp, sourcePath: configPath };
+  } catch (err) {
+    logger.error(`Failed to parse gateway config at ${configPath}; using acp defaults`, err);
+    return { raw: undefined, sourcePath: null };
+  }
+}
+
+/**
+ * Load [acp] from ~/.llm-cli-gateway/config.toml (override via $LLM_GATEWAY_CONFIG).
+ *
+ * Defaults are fully dormant: ACP disabled, default_transport "cli", every
+ * provider runtime gate off, write/terminal host services off. Syntax-invalid
+ * TOML keeps the whole-file fallback (defaults). Schema-invalid [acp] config
+ * THROWS — a malformed ACP block (e.g. a shell-style command, invalid transport,
+ * or non-positive timeout) is a hard error so misconfiguration cannot silently
+ * spawn the wrong process or run with the wrong gate.
+ */
+export function loadAcpConfig(logger: Logger = noopLogger): AcpConfig {
+  const configPath = defaultGatewayConfigPath();
+  const { raw, sourcePath } = readAcpFile(configPath, logger);
+
+  if (raw === undefined) {
+    return defaultAcpConfig(sourcePath);
+  }
+
+  let parsed;
+  try {
+    parsed = AcpConfigSchema.parse(raw);
+  } catch (err) {
+    throw new Error(`Invalid [acp] config: ${err instanceof Error ? err.message : String(err)}`, {
+      cause: err,
+    });
+  }
+
+  const providers: Record<string, AcpProviderConfig> = {};
+  for (const [name, p] of Object.entries(parsed.providers)) {
+    providers[name] = {
+      enabled: p.enabled,
+      command: p.command,
+      args: p.args,
+      runtimeEnabled: p.runtime_enabled,
+      isolatedLeaderSocket: p.isolated_leader_socket,
+    };
+  }
+
+  return {
+    enabled: parsed.enabled,
+    defaultTransport: parsed.default_transport,
+    smokeOnStartup: parsed.smoke_on_startup,
+    processIdleTimeoutMs: parsed.process_idle_timeout_ms,
+    initializeTimeoutMs: parsed.initialize_timeout_ms,
+    sessionNewTimeoutMs: parsed.session_new_timeout_ms,
+    promptTimeoutMs: parsed.prompt_timeout_ms,
+    allowWriteHostServices: parsed.allow_write_host_services,
+    allowTerminalHostServices: parsed.allow_terminal_host_services,
+    fallbackToCliWhenUnhealthy: parsed.fallback_to_cli_when_unhealthy,
+    providers,
+    sources: { configFile: sourcePath },
+  };
+}
+
+//──────────────────────────────────────────────────────────────────────────────
 // Remote connector OAuth configuration
 //──────────────────────────────────────────────────────────────────────────────
 

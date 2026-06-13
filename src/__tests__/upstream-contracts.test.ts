@@ -1,11 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { createGatewayServer } from "../index.js";
 import {
+  ACP_ENTRYPOINT_CONTRACTS,
   UPSTREAM_CLI_CONTRACTS,
   buildProviderSubcommandsCompactCatalog,
   buildUpstreamContractReport,
   computeFlagDrift,
   computeSubcommandFlagDrift,
+  probeInstalledAcpEntrypoint,
   validateUpstreamCliEnv,
   validateUpstreamCliArgs,
   validateUpstreamCliSubcommandArgs,
@@ -15,6 +17,7 @@ import {
   listProviderSubcommands,
 } from "../upstream-contracts.js";
 import type { CliContract } from "../upstream-contracts.js";
+import type { CliType } from "../session-manager.js";
 
 describe("upstream CLI contracts", () => {
   it("accepts a valid Claude argv emitted by the gateway", () => {
@@ -607,6 +610,137 @@ Options:
             ).toBe(false);
           }
         }
+      }
+    });
+  });
+
+  describe("ACP upstream entrypoint contracts (track-acp-upstream-contracts)", () => {
+    const ALL_PROVIDERS: readonly CliType[] = ["claude", "codex", "gemini", "grok", "mistral"];
+
+    it("declares an ACP entrypoint contract for every provider with the matrix status", () => {
+      const expected: Record<CliType, string> = {
+        mistral: "native",
+        grok: "native",
+        codex: "adapter_mediated_deferred",
+        claude: "adapter_mediated_deferred",
+        gemini: "absent_watchlist",
+      };
+      for (const cli of ALL_PROVIDERS) {
+        const acp = ACP_ENTRYPOINT_CONTRACTS[cli];
+        expect(acp, `${cli} ACP contract missing`).toBeDefined();
+        expect(acp.cli).toBe(cli);
+        expect(acp.status, `${cli} ACP status`).toBe(expected[cli]);
+      }
+    });
+
+    it("pins native entrypoints to vibe-acp and `grok agent stdio`, no adapter labelled native", () => {
+      expect(ACP_ENTRYPOINT_CONTRACTS.mistral.executable).toBe("vibe-acp");
+      expect(ACP_ENTRYPOINT_CONTRACTS.mistral.entrypointArgs).toEqual([]);
+      expect(ACP_ENTRYPOINT_CONTRACTS.grok.executable).toBe("grok");
+      expect(ACP_ENTRYPOINT_CONTRACTS.grok.entrypointArgs).toEqual(["agent", "stdio"]);
+
+      // codex/claude adapters are documentation only, never native.
+      expect(ACP_ENTRYPOINT_CONTRACTS.codex.status).not.toBe("native");
+      expect(ACP_ENTRYPOINT_CONTRACTS.claude.status).not.toBe("native");
+      expect((ACP_ENTRYPOINT_CONTRACTS.codex.adapterCandidates ?? []).length).toBeGreaterThan(0);
+      expect((ACP_ENTRYPOINT_CONTRACTS.claude.adapterCandidates ?? []).length).toBeGreaterThan(0);
+    });
+
+    it("keeps agy on the watchlist with no ACP surface at agy 1.0.7", () => {
+      const agy = ACP_ENTRYPOINT_CONTRACTS.gemini;
+      expect(agy.status).toBe("absent_watchlist");
+      expect(agy.executable).toBe("agy");
+      expect(agy.targetVersion).toContain("1.0.7");
+      expect(agy.entrypointArgs).toEqual([]);
+      expect(agy.probeArgs).toEqual([]);
+    });
+
+    it("only native providers declare a read-only probe, and probes never start the live ACP process", () => {
+      for (const cli of ALL_PROVIDERS) {
+        const acp = ACP_ENTRYPOINT_CONTRACTS[cli];
+        if (acp.status === "native") {
+          expect(acp.probeArgs.length, `${cli} native must declare a probe`).toBeGreaterThan(0);
+          // Every native probe must be a read-only --version/--help variant —
+          // never the bare live entrypoint (no probe equals the entrypoint args).
+          for (const probe of acp.probeArgs) {
+            expect(
+              probe.some(a => a === "--version" || a === "--help"),
+              `${cli} probe ${probe.join(" ")} must be read-only`
+            ).toBe(true);
+            expect(
+              JSON.stringify(probe),
+              `${cli} probe must not be the bare live entrypoint`
+            ).not.toBe(JSON.stringify(acp.entrypointArgs));
+          }
+        } else {
+          expect(acp.probeArgs, `${cli} non-native must not declare a live probe`).toEqual([]);
+        }
+      }
+    });
+
+    it("does NOT widen any request argv allowlist (entrypoint args are not accepted as request flags)", () => {
+      // The Grok ACP entrypoint is `agent stdio`. Feeding those tokens as
+      // request argv must still be rejected by the request validator — ACP
+      // tracking is a separate surface.
+      const result = validateUpstreamCliArgs("grok", ["-p", "hello", "agent", "stdio"]);
+      expect(result.ok).toBe(false);
+    });
+
+    it("surfaces ACP entrypoint metadata in the report under acpEntrypoint, separate from request flags", () => {
+      const report = buildUpstreamContractReport() as {
+        contracts: Record<string, { acpEntrypoint?: Record<string, unknown>; flags: unknown }>;
+      };
+      for (const cli of ALL_PROVIDERS) {
+        const acp = report.contracts[cli].acpEntrypoint;
+        expect(acp, `${cli} report acpEntrypoint`).toBeDefined();
+        expect(acp?.status).toBe(ACP_ENTRYPOINT_CONTRACTS[cli].status);
+        expect(acp?.native).toBe(ACP_ENTRYPOINT_CONTRACTS[cli].status === "native");
+      }
+      expect(report.contracts.mistral.acpEntrypoint?.native).toBe(true);
+      expect(report.contracts.gemini.acpEntrypoint?.native).toBe(false);
+    });
+
+    it("emits acpInstalledProbe separately from request-tool installedProbe only when probing", () => {
+      const noProbe = buildUpstreamContractReport() as Record<string, unknown>;
+      expect(noProbe.acpInstalledProbe).toBeNull();
+      expect(noProbe.installedProbe).toBeNull();
+
+      const probed = buildUpstreamContractReport({ cli: "codex", probeInstalled: true }) as {
+        acpInstalledProbe: Record<string, { status: string; available: boolean | null }>;
+        installedProbe: Record<string, unknown>;
+      };
+      // Distinct top-level keys: ACP drift never masquerades as request drift.
+      expect(probed.acpInstalledProbe).not.toBeNull();
+      expect(probed.installedProbe).not.toBeNull();
+      expect(probed.acpInstalledProbe).not.toBe(probed.installedProbe);
+      // Codex has no native ACP entrypoint -> nothing to probe -> available null.
+      expect(probed.acpInstalledProbe.codex.status).toBe("adapter_mediated_deferred");
+      expect(probed.acpInstalledProbe.codex.available).toBeNull();
+    });
+
+    it("probeInstalledAcpEntrypoint does not spawn anything for adapter/absent providers", () => {
+      for (const cli of ["codex", "claude", "gemini"] as const) {
+        const probe = probeInstalledAcpEntrypoint(cli);
+        expect(probe.available, `${cli} should not be probed`).toBeNull();
+        expect(probe.entrypointDrift, `${cli} has no native entrypoint to drift`).toBe(false);
+        expect(probe.checkedProbeCommands).toEqual([]);
+      }
+    });
+
+    it("probeInstalledAcpEntrypoint reports native entrypoint drift when the binary is absent", () => {
+      // Probe a native provider that resolves to a non-existent binary path by
+      // temporarily pointing the executable at a name that cannot resolve.
+      const original = ACP_ENTRYPOINT_CONTRACTS.mistral.executable;
+      try {
+        (ACP_ENTRYPOINT_CONTRACTS.mistral as { executable: string }).executable =
+          "vibe-acp-nonexistent-binary-xyz";
+        const probe = probeInstalledAcpEntrypoint("mistral");
+        expect(probe.status).toBe("native");
+        expect(probe.available).toBe(false);
+        expect(probe.entrypointDrift).toBe(true);
+        expect(probe.warnings.length).toBeGreaterThan(0);
+      } finally {
+        (ACP_ENTRYPOINT_CONTRACTS.mistral as { executable: string }).executable = original;
       }
     });
   });

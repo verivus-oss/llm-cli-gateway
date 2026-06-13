@@ -7,6 +7,7 @@ import {
   clearProviderToolCapabilitiesCache,
   getProviderToolCapabilities,
   providerCapabilityIds,
+  type ProviderCapabilityId,
 } from "../provider-tool-capabilities.js";
 import { SessionManager } from "../session-manager.js";
 import { PerformanceMetrics } from "../metrics.js";
@@ -472,5 +473,93 @@ describe("provider tool capabilities", () => {
       expect(contents?.mimeType).toBe("application/json");
       expect(parsed.schemaVersion).toBe("provider-tool-capabilities.v2");
     }
+  });
+
+  describe("ACP capability metadata", () => {
+    const cliProviders: ProviderCapabilityId[] = ["claude", "codex", "gemini", "grok", "mistral"];
+
+    it("attaches a fully populated ACP section to every CLI provider", () => {
+      const capabilities = getProviderToolCapabilities();
+      for (const providerId of cliProviders) {
+        const acp = capabilities[providerId]?.acp;
+        expect(acp, `${providerId} must have an acp section`).toBeDefined();
+        expect(typeof acp?.status).toBe("string");
+        expect(typeof acp?.mediation).toBe("string");
+        expect(typeof acp?.targetVersion).toBe("string");
+        expect(acp?.targetVersion.length).toBeGreaterThan(0);
+        expect(typeof acp?.runtimeEnabled).toBe("boolean");
+        expect(typeof acp?.smokeSupported).toBe("boolean");
+        expect(typeof acp?.smokeStatus).toBe("string");
+        expect(Array.isArray(acp?.caveats)).toBe(true);
+        expect(acp?.docs).toBe("docs/plans/first-class-acp-gateway-extension.dag.toml");
+      }
+    });
+
+    it("classifies Codex and Claude as adapter_mediated_deferred without a native entrypoint", () => {
+      const capabilities = getProviderToolCapabilities();
+      for (const providerId of ["codex", "claude"] as ProviderCapabilityId[]) {
+        const acp = capabilities[providerId]?.acp;
+        expect(acp?.status).toBe("adapter_mediated_deferred");
+        expect(acp?.mediation).toBe("adapter_mediated");
+        expect(acp?.entrypoint).toBeNull();
+        expect(acp?.smokeSupported).toBe(false);
+        expect(acp?.smokeStatus).toBe("unsupported");
+      }
+    });
+
+    it("keeps agy (gemini) absent_watchlist with no ACP entrypoint", () => {
+      const acp = getProviderToolCapabilities("gemini").gemini?.acp;
+      expect(acp?.status).toBe("absent_watchlist");
+      expect(acp?.mediation).toBe("none");
+      expect(acp?.targetVersion).toBe("agy 1.0.7");
+      expect(acp?.entrypoint).toBeNull();
+    });
+
+    it("classifies Mistral and Grok as native ACP candidates with argv-array entrypoints", () => {
+      const mistral = getProviderToolCapabilities("mistral").mistral?.acp;
+      expect(mistral?.status).toBe("native_smoke_passed");
+      expect(mistral?.mediation).toBe("native");
+      expect(mistral?.entrypoint).toEqual({ command: "vibe-acp", args: [] });
+      expect(mistral?.smokeSupported).toBe(true);
+
+      const grok = getProviderToolCapabilities("grok").grok?.acp;
+      expect(grok?.status).toBe("native_smoke_passed");
+      expect(grok?.mediation).toBe("native");
+      expect(grok?.entrypoint).toEqual({ command: "grok", args: ["agent", "stdio"] });
+      expect(grok?.smokeSupported).toBe(true);
+    });
+
+    it("never labels an adapter-mediated provider as native and keeps runtime routing off", () => {
+      const capabilities = getProviderToolCapabilities();
+      for (const providerId of providerCapabilityIds()) {
+        const acp = capabilities[providerId]?.acp;
+        if (acp?.mediation === "adapter_mediated") {
+          expect(acp.status).not.toBe("native_smoke_passed");
+          expect(acp.status).not.toBe("native_candidate");
+        }
+        // Phase-0 capability metadata: no provider is runtime-enabled yet.
+        expect(acp?.runtimeEnabled).toBe(false);
+      }
+    });
+
+    it("stores ACP entrypoints as executable plus argv array, never a shell string", () => {
+      const capabilities = getProviderToolCapabilities();
+      for (const providerId of providerCapabilityIds()) {
+        const entrypoint = capabilities[providerId]?.acp.entrypoint;
+        if (!entrypoint) continue;
+        expect(entrypoint.command).not.toMatch(/\s/);
+        expect(Array.isArray(entrypoint.args)).toBe(true);
+      }
+    });
+
+    it("returns deep-cloned ACP metadata so callers cannot mutate shared state", () => {
+      const first = getProviderToolCapabilities("grok").grok?.acp;
+      first?.caveats.push("mutation");
+      first?.entrypoint?.args.push("--injected");
+      clearProviderToolCapabilitiesCache();
+      const second = getProviderToolCapabilities("grok").grok?.acp;
+      expect(second?.caveats).not.toContain("mutation");
+      expect(second?.entrypoint?.args).toEqual(["agent", "stdio"]);
+    });
   });
 });

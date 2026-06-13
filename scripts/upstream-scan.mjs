@@ -121,6 +121,7 @@ function selectProviders(contracts, provider) {
 function runContractsCheck(machinery, toml) {
   const {
     UPSTREAM_CLI_CONTRACTS,
+    ACP_ENTRYPOINT_CONTRACTS,
     flattenCliSubcommands,
     validateUpstreamCliArgs,
     validateUpstreamCliEnv,
@@ -167,6 +168,39 @@ function runContractsCheck(machinery, toml) {
   if (report.schemaVersion !== "upstream-cli-contracts.v1") {
     failures++;
     console.error(`[upstream-scan] REPORT FAIL: unexpected schemaVersion ${report.schemaVersion}`);
+  }
+
+  // 2b. ACP entrypoint contracts exist for every provider and are mirrored in
+  //     the report under a key distinct from request-tool data. This is
+  //     offline and network-free — no provider process is spawned.
+  const acpContracts = ACP_ENTRYPOINT_CONTRACTS ?? {};
+  for (const cli of Object.keys(UPSTREAM_CLI_CONTRACTS)) {
+    const acp = acpContracts[cli];
+    if (!acp) {
+      failures++;
+      console.error(`[upstream-scan] ACP FAIL ${cli}: missing ACP entrypoint contract`);
+      continue;
+    }
+    const reportAcp = report.contracts?.[cli]?.acpEntrypoint;
+    if (!reportAcp || reportAcp.status !== acp.status) {
+      failures++;
+      console.error(
+        `[upstream-scan] ACP FAIL ${cli}: report acpEntrypoint missing or status drift (contract=${acp.status}, report=${reportAcp?.status ?? "—"})`
+      );
+    }
+    // Native providers must declare a safe non-server probe; adapter/absent
+    // providers must NOT (there is no safe native probe to run).
+    const hasProbe = (acp.probeArgs ?? []).length > 0;
+    if (acp.status === "native" && !hasProbe) {
+      failures++;
+      console.error(`[upstream-scan] ACP FAIL ${cli}: native entrypoint declares no read-only probe`);
+    }
+    if (acp.status !== "native" && hasProbe) {
+      failures++;
+      console.error(
+        `[upstream-scan] ACP FAIL ${cli}: non-native entrypoint (${acp.status}) must not declare a live probe`
+      );
+    }
   }
 
   // 3. TOML scanner input stays in sync with the CliContract metadata.
@@ -369,7 +403,8 @@ function writeReport(cli, content) {
 }
 
 async function runScan(machinery, toml, flags) {
-  const { UPSTREAM_CLI_CONTRACTS, probeInstalledCliContract } = machinery;
+  const { UPSTREAM_CLI_CONTRACTS, probeInstalledCliContract, probeInstalledAcpEntrypoint } =
+    machinery;
   const report = machinery.buildUpstreamContractReport();
   const providers = selectProviders(UPSTREAM_CLI_CONTRACTS, flags.provider);
 
@@ -542,6 +577,37 @@ async function runScan(machinery, toml, flags) {
           console.log(
             `  [probe] ${cli} binary not available on this machine (skipped surface diff)`
           );
+        }
+      }
+    }
+
+    // ACP entrypoint drift — reported SEPARATELY from request-tool command
+    // drift above. Read-only `--version` / `--help` probes only; the live ACP
+    // process is never started.
+    if (flags.probeInstalled && typeof probeInstalledAcpEntrypoint === "function") {
+      let acpProbe = null;
+      try {
+        acpProbe = probeInstalledAcpEntrypoint(cli);
+      } catch (e) {
+        console.warn(`  [acp-probe] failed for ${cli}: ${e?.message ?? e}`);
+      }
+      if (acpProbe) {
+        const entry = [acpProbe.executable, ...acpProbe.entrypointArgs].join(" ").trim();
+        if (acpProbe.status !== "native") {
+          console.log(
+            `  [acp-probe] ${cli}: ${acpProbe.status} (${acpProbe.targetVersion}) — no native entrypoint to probe`
+          );
+        } else if (acpProbe.available === true) {
+          console.log(
+            `  [acp-probe] ${cli}: native ACP entrypoint \`${entry}\` present (probed ${acpProbe.checkedProbeCommands.length} read-only command(s))`
+          );
+        } else {
+          findings.push({
+            severity: "warning",
+            category: "acp-entrypoint-drift",
+            message: `Declared native ACP entrypoint \`${entry}\` did not respond to read-only probes on this machine (${acpProbe.warnings.join("; ") || "no probe succeeded"}). This is ACP entrypoint drift, distinct from request-tool command drift.`,
+          });
+          console.log(`  [acp-probe] ENTRYPOINT DRIFT ${cli}: native entrypoint not reachable`);
         }
       }
     }

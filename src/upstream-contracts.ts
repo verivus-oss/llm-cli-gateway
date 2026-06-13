@@ -190,6 +190,140 @@ export interface ProviderSubcommandCompactCatalog {
   rows: readonly (readonly string[])[];
 }
 
+// ---------------------------------------------------------------------------
+// ACP (Agent Client Protocol) upstream entrypoint tracking.
+//
+// This is deliberately a SEPARATE surface from the request argv allowlists
+// above (`UPSTREAM_CLI_CONTRACTS[*].flags` / `.subcommands`). ACP entrypoints
+// are NOT request-tool commands; tracking them here must never widen what
+// `validateUpstreamCliArgs` / `validateUpstreamCliSubcommandArgs` accept. The
+// probes are read-only `--version` / `--help` checks only — never the live ACP
+// process (`vibe-acp` with no args, `grok agent stdio`), which would start a
+// server. Drift is reported under its own report key so ACP entrypoint changes
+// are visible independently of request-tool command drift.
+// ---------------------------------------------------------------------------
+
+/**
+ * Native: the provider CLI ships a first-class ACP process entrypoint at the
+ * target version. Adapter-mediated: ACP exists only via a separately-owned
+ * adapter and is deferred (NOT native gateway support). Absent: no ACP surface
+ * at the target version; kept on the upstream drift watchlist.
+ */
+export type AcpEntrypointStatus = "native" | "adapter_mediated_deferred" | "absent_watchlist";
+
+export interface AcpEntrypointContract {
+  /** Canonical CliType this ACP entrypoint belongs to. */
+  cli: CliType;
+  /** Human label for the provider's ACP surface. */
+  displayName: string;
+  /** Native vs adapter-mediated vs absent classification at the target version. */
+  status: AcpEntrypointStatus;
+  /**
+   * Executable invoked for the ACP process when status is native. For
+   * adapter/absent providers this is the executable that was probed for the
+   * absence/adapter evidence (e.g. the CLI itself), never a fabricated command.
+   */
+  executable: string;
+  /**
+   * argv (array only — never a shell string) that launches the provider ACP
+   * process. Empty for adapter/absent providers that have no native entrypoint.
+   * This is documentation/probe metadata; it is NOT an argv allowlist.
+   */
+  entrypointArgs: readonly string[];
+  /** Target provider version this ACP evidence was captured against. */
+  targetVersion: string;
+  /**
+   * Safe, read-only probe argv variants to confirm the ACP entrypoint exists
+   * without starting the live ACP process. Each entry is a full argv array
+   * (e.g. `["--version"]`, `["agent", "stdio", "--help"]`). Empty when there is
+   * no safe non-server probe (adapter/absent providers).
+   */
+  probeArgs: readonly (readonly string[])[];
+  /**
+   * For adapter-mediated providers: separately-owned adapter candidates. These
+   * are documentation only and are never treated as native gateway ACP support.
+   */
+  adapterCandidates?: readonly string[];
+  /** Evidence / caveat note carried into the contract report (no secrets). */
+  evidence: string;
+  /** Agent-facing docs reference for the ACP transport decision. */
+  docsRef: string;
+}
+
+/**
+ * ACP entrypoint contracts for every provider CLI. Mirrors the provider matrix
+ * in docs/plans/first-class-acp-gateway-extension.dag.toml. Data-only: nothing
+ * here executes a subcommand. Probes run ONLY through
+ * {@link probeInstalledAcpEntrypoint}, which restricts itself to the read-only
+ * `probeArgs` declared here.
+ */
+export const ACP_ENTRYPOINT_CONTRACTS: Record<CliType, AcpEntrypointContract> = {
+  mistral: {
+    cli: "mistral",
+    displayName: "Mistral Vibe",
+    status: "native",
+    executable: "vibe-acp",
+    entrypointArgs: [],
+    targetVersion: "vibe 2.14.1",
+    probeArgs: [["--version"], ["--help"]],
+    evidence:
+      "Native ACP executable vibe-acp; manual initialize + session/new smoke passed. First runtime pilot.",
+    docsRef: "docs/plans/first-class-acp-gateway-extension.dag.toml#provider_matrix.mistral",
+  },
+  grok: {
+    cli: "grok",
+    displayName: "xAI Grok CLI",
+    status: "native",
+    executable: "grok",
+    entrypointArgs: ["agent", "stdio"],
+    targetVersion: "grok 0.2.50 (cadf94855)",
+    // `grok agent stdio --help` is a safe help probe; bare `grok agent stdio`
+    // starts the live ACP server and is intentionally NOT probed here.
+    probeArgs: [["agent", "stdio", "--help"]],
+    evidence:
+      "Native ACP via `grok agent stdio`; initialize + session/new smoke passed with isolated leader socket. Second runtime pilot.",
+    docsRef: "docs/plans/first-class-acp-gateway-extension.dag.toml#provider_matrix.grok",
+  },
+  codex: {
+    cli: "codex",
+    displayName: "OpenAI Codex CLI",
+    status: "adapter_mediated_deferred",
+    executable: "codex",
+    entrypointArgs: [],
+    targetVersion: "codex-cli 0.139.0",
+    probeArgs: [],
+    adapterCandidates: ["zed-industries/codex-acp", "agentclientprotocol/codex-acp"],
+    evidence:
+      "No native ACP entrypoint at codex-cli 0.139.0. Adapter evidence tracked as documentation only; not native gateway ACP support.",
+    docsRef: "docs/plans/first-class-acp-gateway-extension.dag.toml#provider_matrix.codex",
+  },
+  claude: {
+    cli: "claude",
+    displayName: "Anthropic Claude Code",
+    status: "adapter_mediated_deferred",
+    executable: "claude",
+    entrypointArgs: [],
+    targetVersion: "claude 2.1.175",
+    probeArgs: [],
+    adapterCandidates: ["Claude Agent SDK ACP adapter"],
+    evidence:
+      "No native Claude Code CLI ACP entrypoint at claude 2.1.175. Adapter ownership/permission bridging unresolved; deferred.",
+    docsRef: "docs/plans/first-class-acp-gateway-extension.dag.toml#provider_matrix.claude",
+  },
+  gemini: {
+    cli: "gemini",
+    displayName: "Google Antigravity",
+    status: "absent_watchlist",
+    executable: "agy",
+    entrypointArgs: [],
+    targetVersion: "agy 1.0.7",
+    probeArgs: [],
+    evidence:
+      "agy 1.0.7 has no ACP flag or subcommand. Legacy Gemini CLI ACP evidence does not transfer. Watchlist item.",
+    docsRef: "docs/plans/first-class-acp-gateway-extension.dag.toml#provider_matrix.gemini",
+  },
+};
+
 const PERMISSION_MODES = [
   "default",
   "acceptEdits",
@@ -2869,6 +3003,128 @@ function probeInstalledCliSubcommands(
   return probes;
 }
 
+/**
+ * Outcome of a read-only ACP entrypoint probe for one provider. Reported under
+ * a SEPARATE report key from request-tool command drift so an ACP entrypoint
+ * change (e.g. `vibe-acp` disappearing, `grok agent stdio --help` failing, or
+ * a previously-absent provider sprouting an ACP surface) is visible on its own.
+ */
+export interface InstalledAcpEntrypointProbe {
+  cli: CliType;
+  status: AcpEntrypointStatus;
+  executable: string;
+  entrypointArgs: readonly string[];
+  targetVersion: string;
+  /** Full argv arrays that were probed (read-only `--version` / `--help` only). */
+  checkedProbeCommands: readonly (readonly string[])[];
+  /**
+   * Native providers: true when at least one read-only probe resolved and ran.
+   * Adapter/absent providers have no native probe, so this is null (not a
+   * failure — there is nothing to probe).
+   */
+  available: boolean | null;
+  /**
+   * Native-provider entrypoint drift signal: true when the entrypoint is
+   * declared native but NO declared probe succeeded on this machine (binary
+   * missing or probe failing). Always false for non-native providers and for
+   * native providers whose probe ran. Distinct from request-tool drift.
+   */
+  entrypointDrift: boolean;
+  warnings: string[];
+  probedAt: string;
+}
+
+/**
+ * Read-only probe of a provider's ACP entrypoint. Only ever runs the declared
+ * `probeArgs` (`--version` / `--help` variants); never the bare live ACP
+ * process. Adapter-mediated and absent providers are reported without spawning
+ * anything (there is no safe native probe to run).
+ */
+export function probeInstalledAcpEntrypoint(
+  cli: CliType,
+  timeoutMs = 5_000
+): InstalledAcpEntrypointProbe {
+  const contract = ACP_ENTRYPOINT_CONTRACTS[cli];
+  const warnings: string[] = [];
+  const checkedProbeCommands = contract.probeArgs.map(args => [...args]);
+
+  // Adapter-mediated / absent providers: no native entrypoint to probe.
+  if (contract.status !== "native" || contract.probeArgs.length === 0) {
+    return {
+      cli,
+      status: contract.status,
+      executable: contract.executable,
+      entrypointArgs: contract.entrypointArgs,
+      targetVersion: contract.targetVersion,
+      checkedProbeCommands,
+      available: null,
+      entrypointDrift: false,
+      warnings,
+      probedAt: new Date().toISOString(),
+    };
+  }
+
+  let anyProbeSucceeded = false;
+  for (const probeArgs of contract.probeArgs) {
+    const extendedPath = getExtendedPath();
+    const env = envWithExtendedPath(process.env, extendedPath);
+    const resolved = resolveCommandForSpawn(contract.executable, [...probeArgs], {
+      envPath: extendedPath,
+    });
+    const result = spawnSync(resolved.command, resolved.args, {
+      encoding: "utf8",
+      timeout: timeoutMs,
+      maxBuffer: 1024 * 1024,
+      env,
+      windowsHide: true,
+      windowsVerbatimArguments: resolved.windowsVerbatimArguments,
+    });
+    if (result.error) {
+      warnings.push(
+        `${contract.executable} ${probeArgs.join(" ")} unavailable: ${result.error.message}`
+      );
+      continue;
+    }
+    anyProbeSucceeded = true;
+    if (result.status !== 0) {
+      warnings.push(
+        `${contract.executable} ${probeArgs.join(" ")} exited with status ${result.status}`
+      );
+    }
+  }
+
+  return {
+    cli,
+    status: contract.status,
+    executable: contract.executable,
+    entrypointArgs: contract.entrypointArgs,
+    targetVersion: contract.targetVersion,
+    checkedProbeCommands,
+    available: anyProbeSucceeded,
+    entrypointDrift: !anyProbeSucceeded,
+    warnings,
+    probedAt: new Date().toISOString(),
+  };
+}
+
+/**
+ * Serialize an ACP entrypoint contract into the upstream contract report. Pure
+ * metadata; carries no secrets, paths, or raw probe output.
+ */
+function serializeAcpEntrypointContract(contract: AcpEntrypointContract): Record<string, unknown> {
+  return {
+    status: contract.status,
+    native: contract.status === "native",
+    executable: contract.executable,
+    entrypointArgs: contract.entrypointArgs,
+    targetVersion: contract.targetVersion,
+    probeArgs: contract.probeArgs.map(args => [...args]),
+    adapterCandidates: contract.adapterCandidates ?? [],
+    evidence: contract.evidence,
+    docsRef: contract.docsRef,
+  };
+}
+
 export function buildUpstreamContractReport(
   options: {
     cli?: CliType;
@@ -2928,6 +3184,10 @@ export function buildUpstreamContractReport(
             description: fixture.description,
             expect: fixture.expect,
           })),
+          // ACP entrypoint metadata is tracked SEPARATELY from the request argv
+          // allowlist (flags/subcommands) above. It never widens what the
+          // request validators accept.
+          acpEntrypoint: serializeAcpEntrypointContract(ACP_ENTRYPOINT_CONTRACTS[cli]),
         },
       ];
     })
@@ -2939,6 +3199,12 @@ export function buildUpstreamContractReport(
     contracts,
     installedProbe: options.probeInstalled
       ? Object.fromEntries(selected.map(cli => [cli, probeInstalledCliContract(cli)]))
+      : null,
+    // ACP entrypoint drift is surfaced under its own key, distinct from the
+    // request-tool `installedProbe` above, so ACP changes never masquerade as
+    // request-tool command drift (or vice versa).
+    acpInstalledProbe: options.probeInstalled
+      ? Object.fromEntries(selected.map(cli => [cli, probeInstalledAcpEntrypoint(cli)]))
       : null,
   };
 }

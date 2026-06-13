@@ -2,8 +2,14 @@
 
 Status: historical planning note, narrowed by
 `docs/plans/acp-provider-transport-research.dag.toml`,
-`docs/research/2026-06-12-acp-provider-transport-feasibility.md`, and
-`docs/plans/first-class-acp-gateway-extension.dag.toml`.
+`docs/research/2026-06-12-acp-provider-transport-feasibility.md`,
+`docs/plans/first-class-acp-gateway-extension.dag.toml`, and the frozen contract
+in `docs/acp-contract.md`.
+
+For the authoritative frozen decisions and non-goals (MCP stays the frontend,
+Agent Client Protocol is an internal provider transport, Agent Communication
+Protocol is out of scope, HostServices are deny-by-default, and no public tool
+exposes raw ACP JSON-RPC), see `docs/acp-contract.md`.
 
 This document originally captured a broader working scope for adding an ACP
 layer to `llm-cli-gateway` while retaining MCP as the frontend for existing

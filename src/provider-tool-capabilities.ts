@@ -75,6 +75,55 @@ export interface ProviderFeatureCapability {
   values?: string[];
 }
 
+/**
+ * ACP = Agent Client Protocol (provider-side stdio JSON-RPC transport).
+ * This is distinct from the Agent Communication Protocol, which is out of scope.
+ * The status taxonomy is intentionally closed so capability tests can assert
+ * the exact classification of each provider.
+ */
+export type ProviderAcpStatus =
+  | "native_smoke_passed"
+  | "native_candidate"
+  | "adapter_mediated_deferred"
+  | "absent_watchlist"
+  | "not_applicable";
+
+/**
+ * How ACP support is (or would be) mediated for a provider. No adapter-backed
+ * provider may ever be labelled `native`.
+ */
+export type ProviderAcpMediation = "native" | "adapter_mediated" | "none";
+
+export type ProviderAcpSmokeStatus = "passed" | "not_run" | "unsupported";
+
+export interface ProviderAcpCapability {
+  /** Closed-taxonomy ACP status for this provider at the target version. */
+  status: ProviderAcpStatus;
+  /** Native vs adapter-mediated classification. Adapters are never `native`. */
+  mediation: ProviderAcpMediation;
+  /** Provider CLI version this ACP assessment was made against. */
+  targetVersion: string;
+  /**
+   * ACP entrypoint as an executable plus argv array, or null when no native
+   * ACP entrypoint exists at the target version. No shell strings are stored.
+   */
+  entrypoint: { command: string; args: string[] } | null;
+  /**
+   * Whether ACP runtime routing is currently enabled for this provider. This is
+   * static phase-0 capability metadata; runtime routing stays disabled until a
+   * later rollout phase explicitly enables it behind config gates.
+   */
+  runtimeEnabled: boolean;
+  /** Whether a read-only initialize + session/new smoke is supported. */
+  smokeSupported: boolean;
+  /** Result of the read-only ACP smoke harness for this provider. */
+  smokeStatus: ProviderAcpSmokeStatus;
+  /** Human-readable caveats for LLM agents reading capability resources. */
+  caveats: string[];
+  /** Documentation reference (path or plan id) for deeper ACP context. */
+  docs: string;
+}
+
 export type ProviderFeatureMap = Record<string, ProviderFeatureCapability>;
 
 export interface ProviderCapabilityControls {
@@ -85,6 +134,112 @@ export interface ProviderCapabilityControls {
   [name: string]: ProviderToolControl;
 }
 
+/**
+ * Frozen ACP (Agent Client Protocol) classification for a provider.
+ *
+ * "ACP" here means Agent Client Protocol, the JSON-RPC protocol clients use to
+ * talk to coding agents. It is NOT the agent-to-agent "Agent Communication
+ * Protocol", which is explicitly out of scope for this slice.
+ *
+ * This is the frozen contract surface only: native versus adapter-mediated
+ * versus absent classification plus the frozen non-goals. The richer runtime
+ * ACP capability fields (status, entrypoint, protocolVersion, smokeStatus, ...)
+ * are added by the later extend-provider-capability-metadata step and are
+ * intentionally not declared here.
+ */
+export type AcpFrozenClassification =
+  | "native_candidate"
+  | "adapter_mediated_deferred"
+  | "absent_watchlist";
+
+export interface AcpProviderContract {
+  classification: AcpFrozenClassification;
+  /** Human-facing one-line summary of the frozen classification. */
+  summary: string;
+}
+
+export interface AcpContractMetadata {
+  /** Always "Agent Client Protocol" — never "Agent Communication Protocol". */
+  protocol: "Agent Client Protocol";
+  /** The acronym meaning that is explicitly out of scope for this slice. */
+  outOfScope: "Agent Communication Protocol";
+  /** MCP stays the client-facing gateway protocol. */
+  mcpFrontendRemains: true;
+  /** ACP is used only as an internal provider transport in this slice. */
+  acpIsInternalProviderTransport: true;
+  /** Existing request tools keep CLI behavior by default. */
+  defaultTransport: "cli";
+  /** HostServices side effects are deny-by-default until the bridge ships. */
+  hostServicesDenyByDefault: true;
+  /** No new public tool exposes raw ACP JSON-RPC. */
+  noRawAcpJsonRpcTool: true;
+  /** Adapter-mediated support is never labeled as native gateway ACP support. */
+  adapterSupportIsNotNative: true;
+  /** Authoritative frozen-contract document. */
+  contractDoc: "docs/acp-contract.md";
+  /** Frozen non-goals for this slice. */
+  nonGoals: readonly string[];
+  /** Per-provider frozen classification. */
+  providers: Readonly<Record<ProviderCapabilityId, AcpProviderContract>>;
+}
+
+/**
+ * Frozen ACP extension contract (Agent Client Protocol).
+ *
+ * Recorded here so provider capability metadata and the frozen-contract doc
+ * (`docs/acp-contract.md`) cannot drift. This is data-only; reading it never
+ * runs a provider subcommand.
+ */
+export const ACP_CONTRACT: AcpContractMetadata = {
+  protocol: "Agent Client Protocol",
+  outOfScope: "Agent Communication Protocol",
+  mcpFrontendRemains: true,
+  acpIsInternalProviderTransport: true,
+  defaultTransport: "cli",
+  hostServicesDenyByDefault: true,
+  noRawAcpJsonRpcTool: true,
+  adapterSupportIsNotNative: true,
+  contractDoc: "docs/acp-contract.md",
+  nonGoals: [
+    "Replace the MCP server.",
+    "Ship an outbound ACP server or frontend in this slice.",
+    "Wrap every provider immediately.",
+    "Run adapter-mediated providers by default.",
+    "Grant write or terminal HostServices by default.",
+    "Expose raw ACP JSON-RPC to agents.",
+    "Implement any agent-to-agent Agent Communication Protocol layer.",
+  ],
+  providers: {
+    mistral: {
+      classification: "native_candidate",
+      summary: "Mistral Vibe exposes native ACP via vibe-acp; first runtime pilot candidate.",
+    },
+    grok: {
+      classification: "native_candidate",
+      summary:
+        "xAI Grok CLI exposes native ACP via grok agent stdio; second runtime pilot candidate.",
+    },
+    codex: {
+      classification: "adapter_mediated_deferred",
+      summary:
+        "OpenAI Codex CLI has no native ACP entrypoint at the target version; adapter-mediated and deferred.",
+    },
+    claude: {
+      classification: "adapter_mediated_deferred",
+      summary:
+        "Anthropic Claude Code has no native ACP entrypoint at the target version; adapter-mediated and deferred.",
+    },
+    gemini: {
+      classification: "absent_watchlist",
+      summary: "Google Antigravity agy 1.0.7 has no ACP surface; watchlist item only.",
+    },
+    grok_api: {
+      classification: "absent_watchlist",
+      summary: "Grok API is an HTTP provider with no ACP process transport; watchlist item only.",
+    },
+  },
+};
+
 export interface ProviderToolCapabilities {
   schemaVersion: "provider-tool-capabilities.v2";
   generatedAt: string;
@@ -93,6 +248,13 @@ export interface ProviderToolCapabilities {
   gatewayRequestTools: string[];
   modelInfo: CliInfo | GrokApiModelInfo;
   summary: string;
+  /**
+   * Frozen ACP (Agent Client Protocol) classification for this provider.
+   * Recorded by the freeze-contract step; richer runtime ACP fields are added
+   * later by extend-provider-capability-metadata.
+   */
+  acpContract: AcpProviderContract;
+  acp: ProviderAcpCapability;
   controls: ProviderCapabilityControls;
   features: ProviderFeatureMap;
   discoveredSkills: ProviderSkillCapability[];
@@ -157,6 +319,109 @@ interface ProviderCapabilityStaticDefinition {
   controls: ProviderCapabilityControls;
   features: ProviderFeatureMap;
   unsupportedInputs: ProviderUnsupportedInput[];
+}
+
+const ACP_DOCS_REFERENCE = "docs/plans/first-class-acp-gateway-extension.dag.toml";
+
+/**
+ * Static, phase-0 ACP capability metadata per provider. Sourced from the ACP
+ * extension provider_matrix. `runtimeEnabled` is false for every provider here:
+ * ACP runtime routing is gated off until a later rollout phase enables it.
+ * Entrypoints are stored only as executable + argv arrays (no shell strings).
+ */
+const ACP_CAPABILITIES: Record<ProviderCapabilityId, ProviderAcpCapability> = {
+  mistral: {
+    status: "native_smoke_passed",
+    mediation: "native",
+    targetVersion: "vibe 2.14.1",
+    entrypoint: { command: "vibe-acp", args: [] },
+    runtimeEnabled: false,
+    smokeSupported: true,
+    smokeStatus: "passed",
+    caveats: [
+      "Native ACP via the provider-scoped vibe-acp executable; first runtime pilot.",
+      "Runtime routing stays disabled until ACP is enabled in gateway config.",
+    ],
+    docs: ACP_DOCS_REFERENCE,
+  },
+  grok: {
+    status: "native_smoke_passed",
+    mediation: "native",
+    targetVersion: "grok 0.2.50 (cadf94855)",
+    entrypoint: { command: "grok", args: ["agent", "stdio"] },
+    runtimeEnabled: false,
+    smokeSupported: true,
+    smokeStatus: "passed",
+    caveats: [
+      "Native ACP via grok agent stdio; second runtime pilot.",
+      "Credential lookup is owned by the installed CLI; empty-env smoke is not expected to pass.",
+      "Runtime routing stays disabled until ACP is enabled in gateway config.",
+    ],
+    docs: ACP_DOCS_REFERENCE,
+  },
+  codex: {
+    status: "adapter_mediated_deferred",
+    mediation: "adapter_mediated",
+    targetVersion: "codex-cli 0.139.0",
+    entrypoint: null,
+    runtimeEnabled: false,
+    smokeSupported: false,
+    smokeStatus: "unsupported",
+    caveats: [
+      "No native ACP entrypoint at the target version; ACP would be adapter-mediated.",
+      "Adapter support requires a separate threat model and is never labelled native gateway ACP support.",
+    ],
+    docs: ACP_DOCS_REFERENCE,
+  },
+  claude: {
+    status: "adapter_mediated_deferred",
+    mediation: "adapter_mediated",
+    targetVersion: "claude 2.1.175",
+    entrypoint: null,
+    runtimeEnabled: false,
+    smokeSupported: false,
+    smokeStatus: "unsupported",
+    caveats: [
+      "No native Claude Code CLI ACP entrypoint at the target version; ACP would be adapter-mediated.",
+      "Adapter ownership, permission bridging, and install story must be specified before runtime support.",
+    ],
+    docs: ACP_DOCS_REFERENCE,
+  },
+  gemini: {
+    status: "absent_watchlist",
+    mediation: "none",
+    targetVersion: "agy 1.0.7",
+    entrypoint: null,
+    runtimeEnabled: false,
+    smokeSupported: false,
+    smokeStatus: "unsupported",
+    caveats: [
+      "Antigravity agy 1.0.7 has no ACP flag or subcommand.",
+      "Legacy Gemini CLI ACP evidence does not transfer to agy; kept on the upstream drift watchlist.",
+    ],
+    docs: ACP_DOCS_REFERENCE,
+  },
+  grok_api: {
+    status: "not_applicable",
+    mediation: "none",
+    targetVersion: "xAI Responses API",
+    entrypoint: null,
+    runtimeEnabled: false,
+    smokeSupported: false,
+    smokeStatus: "unsupported",
+    caveats: ["ACP is a CLI-stdio transport; the HTTP API provider has no ACP surface."],
+    docs: ACP_DOCS_REFERENCE,
+  },
+};
+
+function cloneAcpCapability(acp: ProviderAcpCapability): ProviderAcpCapability {
+  return {
+    ...acp,
+    entrypoint: acp.entrypoint
+      ? { command: acp.entrypoint.command, args: [...acp.entrypoint.args] }
+      : null,
+    caveats: [...acp.caveats],
+  };
 }
 
 const PROVIDER_CAPABILITY_IDS = [...CLI_TYPES, "grok_api"] as const;
@@ -830,6 +1095,8 @@ function buildOneProviderToolCapabilities(
     gatewayRequestTool: gatewayRequestTools[0] ?? definition.gatewayRequestTools[0],
     modelInfo: getModelInfo(cli, query.refresh),
     summary: definition.summary,
+    acpContract: { ...ACP_CONTRACT.providers[cli] },
+    acp: cloneAcpCapability(ACP_CAPABILITIES[cli]),
     controls: cloneControls(definition.controls),
     features,
     discoveredSkills,
