@@ -67,10 +67,16 @@ jobs:
       - name: Verify package contents
         run: npm pack --dry-run
 
+      # `dry-run` is a boolean input. Comparing it to the string 'true'
+      # silently breaks: GitHub coerces `true == 'true'` to `1 == NaN` -> false,
+      # so the dry-run step was always skipped and the real publish always ran
+      # (a `dry-run=true` dispatch published for real). Gate on the boolean
+      # directly. On a `release` event `inputs.dry-run` is null (falsy), so the
+      # real publish runs and the dry-run step is skipped — the intended behavior.
       - name: Publish (dry run)
-        if: inputs.dry-run == 'true'
+        if: ${{ inputs.dry-run }}
         run: npm publish --dry-run --ignore-scripts
 
       - name: Publish
-        if: inputs.dry-run != 'true'
+        if: ${{ !inputs.dry-run }}
         run: npm publish --ignore-scripts
