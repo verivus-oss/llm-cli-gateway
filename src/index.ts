@@ -132,7 +132,7 @@ import {
 } from "./cache-stats.js";
 import { getCliVersions, runCliUpgrade } from "./cli-updater.js";
 import { startHttpGateway, type HttpGatewayHandle } from "./http-transport.js";
-import { getRequestContext } from "./request-context.js";
+import { getRequestContext, resolveOwnerPrincipal, principalCanAccess } from "./request-context.js";
 import { printDoctorJson } from "./doctor.js";
 import {
   createWorkspace,
@@ -9383,13 +9383,21 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
     },
     async ({ cli }) => {
       try {
-        const sessions = await sessionManager.listSessions(cli);
+        // F3b: only surface sessions the caller owns (legacy-unowned → local only).
+        const caller = resolveOwnerPrincipal(getRequestContext());
+        const sessions = (await sessionManager.listSessions(cli)).filter(s =>
+          principalCanAccess(s.ownerPrincipal, caller)
+        );
         const activeSessions = Object.fromEntries(
           await Promise.all(
-            SESSION_PROVIDER_VALUES.map(async provider => [
-              provider,
-              await sessionManager.getActiveSession(provider),
-            ])
+            SESSION_PROVIDER_VALUES.map(async provider => {
+              const active = await sessionManager.getActiveSession(provider);
+              // Hide an active session pointer the caller is not allowed to see.
+              return [
+                provider,
+                active && principalCanAccess(active.ownerPrincipal, caller) ? active : null,
+              ];
+            })
           )
         ) as Record<SessionProvider, Awaited<ReturnType<ISessionManager["getActiveSession"]>>>;
 
@@ -9447,6 +9455,30 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
     },
     async ({ cli, sessionId }) => {
       try {
+        // F3b: a caller may only point the active pointer at a session it owns.
+        // Clearing (null) is always allowed.
+        if (sessionId) {
+          const caller = resolveOwnerPrincipal(getRequestContext());
+          const target = await sessionManager.getSession(sessionId);
+          if (!target || !principalCanAccess(target.ownerPrincipal, caller)) {
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: JSON.stringify(
+                    {
+                      success: false,
+                      error: "Session not found or does not belong to the specified provider",
+                    },
+                    null,
+                    2
+                  ),
+                },
+              ],
+              isError: true,
+            };
+          }
+        }
         const success = await sessionManager.setActiveSession(cli, sessionId || null);
 
         if (!success) {
@@ -9508,7 +9540,10 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
     async ({ sessionId }) => {
       try {
         const session = await sessionManager.getSession(sessionId);
-        if (!session) {
+        // F3b: own-or-not-found. A session the caller does not own is reported
+        // as "not found" — same response as an unknown id (no existence oracle).
+        const caller = resolveOwnerPrincipal(getRequestContext());
+        if (!session || !principalCanAccess(session.ownerPrincipal, caller)) {
           return {
             content: [
               {
@@ -9571,8 +9606,9 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
     async ({ sessionId }) => {
       try {
         const session = await sessionManager.getSession(sessionId);
-
-        if (!session) {
+        // F3b: own-or-not-found (no existence oracle for other principals' ids).
+        const caller = resolveOwnerPrincipal(getRequestContext());
+        if (!session || !principalCanAccess(session.ownerPrincipal, caller)) {
           return {
             content: [
               {
@@ -9679,7 +9715,15 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
     },
     async ({ cli }) => {
       try {
-        const count = await sessionManager.clearAllSessions(cli);
+        // F3b: clear only the caller's own sessions, not other principals'.
+        const caller = resolveOwnerPrincipal(getRequestContext());
+        const owned = (await sessionManager.listSessions(cli)).filter(s =>
+          principalCanAccess(s.ownerPrincipal, caller)
+        );
+        let count = 0;
+        for (const s of owned) {
+          if (await sessionManager.deleteSession(s.id)) count++;
+        }
         logger.info(`Cleared ${count} sessions${cli ? ` for ${cli}` : ""}`);
 
         return {

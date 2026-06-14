@@ -39,6 +39,21 @@ export function resolveOwnerPrincipal(ctx: GatewayRequestContext | undefined): s
   return "local";
 }
 
+/**
+ * F3b: ownership access decision. A caller may access a row iff it owns the row,
+ * or the row is legacy-unowned (`null`/absent owner) AND the caller is the local
+ * principal. Legacy-unowned rows are therefore visible only to local/stdio — a
+ * remote OAuth client never sees pre-isolation rows it did not create. In the
+ * default single-user local deployment every row is `"local"`-owned or
+ * legacy-`null` and the caller is `"local"`, so nothing is hidden (no behaviour
+ * change); isolation only takes effect once distinct remote principals exist.
+ */
+export function principalCanAccess(rowOwner: string | null | undefined, caller: string): boolean {
+  if (rowOwner === caller) return true;
+  if ((rowOwner === null || rowOwner === undefined) && caller === "local") return true;
+  return false;
+}
+
 export function runWithRequestContext<T>(
   context: GatewayRequestContext,
   callback: () => T | Promise<T>
