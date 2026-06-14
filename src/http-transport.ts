@@ -119,6 +119,25 @@ export async function startHttpGateway(options: HttpTransportOptions): Promise<H
   const sessions = new Map<string, SessionEntry>();
   const token = getRequiredBearerToken();
   const oauthConfig = loadRemoteOAuthConfig(logger);
+  // F17: fail closed. A config that lets an unauthenticated party obtain a token
+  // — public clients (no client secret) or open_dev dynamic registration — must
+  // not be reachable from off-host. The actual listen address is the gate (the
+  // Host header is not trusted; see registrationAllowedByPolicy). Bind to
+  // loopback and front the gateway with an authenticating proxy, or use
+  // registration_policy=static_clients with confidential client secrets.
+  if (
+    oauthConfig.enabled &&
+    (oauthConfig.allowPublicClients || oauthConfig.registrationPolicy === "open_dev") &&
+    !isLocalHost(host)
+  ) {
+    throw new Error(
+      `Refusing to start: remote OAuth with ${
+        oauthConfig.allowPublicClients ? "public clients" : "open_dev registration"
+      } is exposed on a non-loopback bind (host=${host}). Bind LLM_GATEWAY_HTTP_HOST to 127.0.0.1 ` +
+        `and front the gateway with an authenticating proxy, or switch to ` +
+        `registration_policy=static_clients with confidential client secrets.`
+    );
+  }
   const oauthServer = oauthConfig.enabled
     ? new OAuthServer({ protectedPath: path, config: oauthConfig, logger })
     : null;

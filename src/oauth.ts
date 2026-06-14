@@ -342,8 +342,11 @@ export class OAuthServer {
   private registrationAllowedByPolicy(req: IncomingMessage, params: URLSearchParams): boolean {
     const policy = this.opts.config.registrationPolicy;
     if (policy === "open_dev") {
-      const host = firstHeader(req.headers.host) ?? "";
-      return isLocalHost(host) || process.env.LLM_GATEWAY_OAUTH_OPEN_DEV === "1";
+      // F17: never infer "local" from the Host header — it is attacker-controlled,
+      // so a remote request with `Host: localhost` would otherwise pass. open_dev
+      // dynamic registration requires an explicit operator opt-in, and the HTTP
+      // transport additionally refuses to expose this config on a non-loopback bind.
+      return process.env.LLM_GATEWAY_OAUTH_OPEN_DEV === "1";
     }
     if (policy === "static_clients") return false;
     const supplied = params.get("shared_secret") ?? params.get("registration_secret");

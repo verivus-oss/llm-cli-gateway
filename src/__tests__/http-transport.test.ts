@@ -1,6 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { request } from "node:http";
 import { createHash } from "node:crypto";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod/v3";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -104,6 +107,97 @@ describe("Layer 6 HTTP MCP transport (U20)", () => {
     delete process.env.LLM_GATEWAY_PUBLIC_URL;
     delete process.env.LLM_GATEWAY_OAUTH_REGISTRATION_SECRET;
     delete process.env.LLM_GATEWAY_OAUTH_SHARED_SECRET;
+    delete process.env.LLM_GATEWAY_CONFIG;
+    delete process.env.LLM_GATEWAY_OAUTH_OPEN_DEV;
+    delete process.env.LLM_GATEWAY_HTTP_HOST;
+  });
+
+  function writeOAuthConfig(lines: string[]): string {
+    const dir = mkdtempSync(join(tmpdir(), "f17-oauth-"));
+    const cfg = join(dir, "config.toml");
+    writeFileSync(cfg, lines.join("\n"));
+    process.env.LLM_GATEWAY_CONFIG = cfg;
+    return dir;
+  }
+
+  it("refuses to start public-client OAuth on a non-loopback bind (F17)", async () => {
+    const dir = writeOAuthConfig([
+      "[http.oauth]",
+      "enabled = true",
+      "allow_public_clients = true",
+      "",
+    ]);
+    try {
+      await expect(
+        startHttpGateway({
+          host: "0.0.0.0",
+          port: 0,
+          path: "/mcp",
+          createGatewayServer: () => makeEchoServer(),
+        })
+      ).rejects.toThrow(/Refusing to start/i);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("allows public-client OAuth on a loopback bind (F17)", async () => {
+    const dir = writeOAuthConfig([
+      "[http.oauth]",
+      "enabled = true",
+      "allow_public_clients = true",
+      "",
+    ]);
+    try {
+      gateway = await startHttpGateway({
+        host: "127.0.0.1",
+        port: 0,
+        path: "/mcp",
+        createGatewayServer: () => makeEchoServer(),
+      });
+      expect(gateway.url).toContain("127.0.0.1");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("open_dev registration is env-gated, not Host-header inferred (F17)", async () => {
+    const dir = writeOAuthConfig([
+      "[http.oauth]",
+      "enabled = true",
+      'registration_policy = "open_dev"',
+      "",
+    ]);
+    process.env.LLM_GATEWAY_PUBLIC_URL = "https://gateway.example.test/mcp";
+    try {
+      // Loopback bind so the F17 fail-closed guard does not trip.
+      gateway = await startHttpGateway({
+        host: "127.0.0.1",
+        port: 0,
+        path: "/mcp",
+        createGatewayServer: () => makeEchoServer(),
+      });
+      const body = JSON.stringify({ redirect_uris: ["https://chat.openai.com/aip/callback"] });
+      // Without the explicit operator opt-in, registration is refused — the Host
+      // header (whatever fetch sends) is no longer trusted to mean "local".
+      const denied = await fetch(new URL("/oauth/register", gateway.url), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body,
+      });
+      expect(denied.status).toBe(403);
+
+      // With the explicit opt-in, the same request is accepted.
+      process.env.LLM_GATEWAY_OAUTH_OPEN_DEV = "1";
+      const allowed = await fetch(new URL("/oauth/register", gateway.url), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body,
+      });
+      expect(allowed.status).toBe(201);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   afterEach(async () => {
