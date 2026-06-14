@@ -127,6 +127,8 @@ interface AsyncJobRecord {
   exited: boolean;
   metricsRecorded: boolean;
   outputFormat?: string;
+  /** F3: ownership principal that created the job (null for legacy rows). */
+  ownerPrincipal?: string | null;
   resetIdleTimer?: () => void;
   clearIdleTimer?: () => void;
   cleanupGroup?: () => void;
@@ -753,11 +755,23 @@ export class AsyncJobManager {
       exited: row.status !== "running",
       metricsRecorded: true,
       outputFormat: row.outputFormat ?? undefined,
+      ownerPrincipal: row.ownerPrincipal,
       outputDirty: false,
       lastOutputFlushAt: Date.now(),
     };
     this.jobs.set(jobId, reconstituted);
     return reconstituted;
+  }
+
+  /**
+   * F3b: ownership principal of a job (in-memory or hydrated from the store).
+   * Returns undefined when the job does not exist; null/undefined owner means a
+   * legacy-unowned row. Used by the llm_job_* handlers to enforce isolation.
+   */
+  getJobOwner(jobId: string): string | null | undefined {
+    let job = this.jobs.get(jobId);
+    if (!job) job = this.hydrateFromStore(jobId) ?? undefined;
+    return job?.ownerPrincipal;
   }
 
   /**
@@ -887,9 +901,13 @@ export class AsyncJobManager {
       if (child.pid) unregisterProcessGroup(child.pid);
     };
 
+    // F3: ownership principal from the request context ambient at job creation
+    // (synchronous with the tool handler). stdio / boot-time paths → "local".
+    const ownerPrincipal = resolveOwnerPrincipal(getRequestContext());
     const job: AsyncJobRecord = {
       id,
       cli,
+      ownerPrincipal,
       args: [...args],
       requestKey,
       correlationId,
@@ -932,10 +950,7 @@ export class AsyncJobManager {
         outputFormat,
         startedAt,
         pid: child.pid ?? null,
-        // F3: stamp the ownership principal from the request context that is
-        // ambient at job creation (synchronous with the tool handler). stdio /
-        // boot-time orphan paths have no context → "local".
-        ownerPrincipal: resolveOwnerPrincipal(getRequestContext()),
+        ownerPrincipal,
       })
     );
     // Slice 1.5: only opt-in callers (pure async handlers) write logStart

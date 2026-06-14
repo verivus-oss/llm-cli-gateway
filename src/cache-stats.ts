@@ -532,6 +532,8 @@ export interface PersistedRequestRecord {
   prompt?: string;
   /** Parsed thinking blocks (claude), or null. */
   thinkingBlocks: string[] | null;
+  /** F3: ownership principal of the request (null for legacy rows). */
+  ownerPrincipal: string | null;
 }
 
 export interface ReadPersistedRequestOptions {
@@ -562,6 +564,7 @@ interface PersistedRequestRawRow {
   async_job_id: string | null;
   status: string | null;
   thinking_blocks: string | null;
+  owner_principal: string | null;
 }
 
 function parseThinkingBlocks(raw: string | null): string[] | null {
@@ -589,7 +592,7 @@ export function readPersistedRequest(
   const rows = db.queryRequests<PersistedRequestRawRow>(
     `SELECT r.id, r.cli, r.model, r.prompt, r.response, r.session_id,
             r.datetime_utc, r.duration_ms, r.input_tokens, r.output_tokens,
-            r.cache_read_tokens, r.cache_creation_tokens,
+            r.cache_read_tokens, r.cache_creation_tokens, r.owner_principal,
             m.retry_count, m.circuit_breaker_state, m.cost_usd,
             m.exit_code, m.error_message, m.async_job_id, m.status,
             m.thinking_blocks
@@ -631,6 +634,7 @@ export function readPersistedRequest(
     responseTruncated,
     response,
     thinkingBlocks: parseThinkingBlocks(row.thinking_blocks),
+    ownerPrincipal: row.owner_principal,
   };
 
   if (opts.includePrompt) {

@@ -8575,7 +8575,10 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       },
       async ({ jobId }) => {
         const job = asyncJobManager.getJobSnapshot(jobId);
-        if (!job) {
+        // F3b: own-or-not-found. A job owned by another principal is reported as
+        // "not found" — identical to an unknown jobId (no existence oracle).
+        const caller = resolveOwnerPrincipal(getRequestContext());
+        if (!job || !principalCanAccess(asyncJobManager.getJobOwner(jobId), caller)) {
           return {
             content: [
               {
@@ -8635,7 +8638,9 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       },
       async ({ jobId, maxChars }) => {
         const result = asyncJobManager.getJobResult(jobId, maxChars);
-        if (!result) {
+        // F3b: own-or-not-found (no cross-principal readback of job output).
+        const caller = resolveOwnerPrincipal(getRequestContext());
+        if (!result || !principalCanAccess(asyncJobManager.getJobOwner(jobId), caller)) {
           return {
             content: [
               {
@@ -8723,6 +8728,31 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         openWorldHint: false,
       },
       async ({ jobId }) => {
+        // F3b: a caller may only cancel a job it owns; another principal's job
+        // is reported as "not found" rather than cancelled.
+        const caller = resolveOwnerPrincipal(getRequestContext());
+        if (
+          asyncJobManager.getJobSnapshot(jobId) &&
+          !principalCanAccess(asyncJobManager.getJobOwner(jobId), caller)
+        ) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify(
+                  {
+                    success: false,
+                    jobId,
+                    reason: "Job not found",
+                  },
+                  null,
+                  2
+                ),
+              },
+            ],
+            isError: true,
+          };
+        }
         const cancel = asyncJobManager.cancelJob(jobId);
         if (!cancel.canceled) {
           return {
@@ -8804,7 +8834,10 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         maxChars,
         includePrompt,
       });
-      if (!record) {
+      // F3b: own-or-not-found. A persisted request owned by another principal is
+      // reported as absent — no cross-principal prompt/response readback.
+      const caller = resolveOwnerPrincipal(getRequestContext());
+      if (!record || !principalCanAccess(record.ownerPrincipal, caller)) {
         return {
           content: [
             {
