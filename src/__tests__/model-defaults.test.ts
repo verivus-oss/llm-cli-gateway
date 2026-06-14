@@ -66,3 +66,45 @@ describe("provider default model handling", () => {
     expect("mistralEnv" in mistral && mistral.mistralEnv).toEqual({});
   });
 });
+
+describe("F15b: claude mcp_managed permission mode", () => {
+  const original = process.env.LLM_GATEWAY_APPROVAL_ALLOW_BYPASS;
+
+  afterEach(() => {
+    if (original === undefined) {
+      delete process.env.LLM_GATEWAY_APPROVAL_ALLOW_BYPASS;
+    } else {
+      process.env.LLM_GATEWAY_APPROVAL_ALLOW_BYPASS = original;
+    }
+  });
+
+  function managedClaudeArgs(): string[] {
+    const prep = prepareClaudeRequest({
+      prompt: "summarize this document",
+      outputFormat: "text",
+      dangerouslySkipPermissions: false,
+      approvalStrategy: "mcp_managed",
+      strictMcpConfig: false,
+      optimizePrompt: false,
+      operation: "claude_request",
+    });
+    if (!("args" in prep)) throw new Error("expected an approved request prep with args");
+    return prep.args;
+  }
+
+  it("defaults to acceptEdits (not bypassPermissions) without the operator opt-in", () => {
+    delete process.env.LLM_GATEWAY_APPROVAL_ALLOW_BYPASS;
+    const args = managedClaudeArgs();
+    const idx = args.indexOf("--permission-mode");
+    expect(idx).toBeGreaterThanOrEqual(0);
+    expect(args[idx + 1]).toBe("acceptEdits");
+    expect(args).not.toContain("bypassPermissions");
+  });
+
+  it("escalates to bypassPermissions only with LLM_GATEWAY_APPROVAL_ALLOW_BYPASS", () => {
+    process.env.LLM_GATEWAY_APPROVAL_ALLOW_BYPASS = "1";
+    const args = managedClaudeArgs();
+    const idx = args.indexOf("--permission-mode");
+    expect(args[idx + 1]).toBe("bypassPermissions");
+  });
+});

@@ -78,7 +78,12 @@ import {
   type AsyncJobUsageExtractor,
 } from "./async-job-manager.js";
 import { createJobStore, type JobStore } from "./job-store.js";
-import { ApprovalManager, ApprovalPolicy, ApprovalRecord } from "./approval-manager.js";
+import {
+  ApprovalManager,
+  ApprovalPolicy,
+  ApprovalRecord,
+  bypassAllowedByOperator,
+} from "./approval-manager.js";
 import { checkReviewIntegrity, ReviewIntegrityResult } from "./review-integrity.js";
 import {
   buildClaudeMcpConfig,
@@ -2383,7 +2388,14 @@ export function prepareClaudeRequest(
     args.push("--disallowed-tools", ...params.disallowedTools);
   }
   if (params.approvalStrategy === "mcp_managed") {
-    args.push("--permission-mode", "bypassPermissions");
+    // F15b: mcp_managed no longer force-bypasses permissions for every request.
+    // Default to acceptEdits — auto-accept file edits for headless operation
+    // while leaving Bash and other dangerous tools gated. Full bypassPermissions
+    // (unsandboxed) requires the explicit operator opt-in
+    // (LLM_GATEWAY_APPROVAL_ALLOW_BYPASS), the same switch F15a uses to permit
+    // bypass requests through the approval gate.
+    const managedMode = bypassAllowedByOperator() ? "bypassPermissions" : "acceptEdits";
+    args.push("--permission-mode", managedMode);
   } else {
     const permFlags = resolveClaudePermissionFlags({
       permissionMode: params.permissionMode,

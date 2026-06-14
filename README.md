@@ -1160,7 +1160,7 @@ await callTool("session_delete", {
   ```bash
   LLM_GATEWAY_APPROVAL_POLICY=strict node dist/index.js
   ```
-- `LLM_GATEWAY_APPROVAL_ALLOW_BYPASS`: Under `approvalStrategy:"mcp_managed"`, a full permission / sandbox bypass request (e.g. `dangerouslyBypassApprovalsAndSandbox`, `dangerouslySkipPermissions`) is **denied by default** regardless of approval score. Set to `1`/`true` to let the operator opt back in. Sandboxed auto modes (e.g. codex `--sandbox workspace-write`) are unaffected.
+- `LLM_GATEWAY_APPROVAL_ALLOW_BYPASS`: Under `approvalStrategy:"mcp_managed"`, a full permission / sandbox bypass request (e.g. `dangerouslyBypassApprovalsAndSandbox`, `dangerouslySkipPermissions`) is **denied by default** regardless of approval score, **and** `mcp_managed` no longer force-bypasses the provider: Claude defaults to `--permission-mode acceptEdits` (auto-accept file edits, still gate Bash and other dangerous tools) instead of `bypassPermissions`. Set to `1`/`true` to let the operator opt back in (permits bypass requests and restores `bypassPermissions` for Claude under `mcp_managed`). Sandboxed auto modes (e.g. codex `--sandbox workspace-write`) are unaffected.
   ```bash
   LLM_GATEWAY_APPROVAL_ALLOW_BYPASS=1 node dist/index.js
   ```

@@ -59,7 +59,7 @@ function parsePolicy(policy?: ApprovalPolicy): ApprovalPolicy {
 // deny-by-default escalation — the heuristic score must not be able to approve
 // it. Operators opt back in explicitly. `decide()` is only ever reached on the
 // `approvalStrategy:"mcp_managed"` path.
-function bypassAllowedByOperator(env: NodeJS.ProcessEnv = process.env): boolean {
+export function bypassAllowedByOperator(env: NodeJS.ProcessEnv = process.env): boolean {
   const raw = (env.LLM_GATEWAY_APPROVAL_ALLOW_BYPASS || "").trim().toLowerCase();
   return raw === "1" || raw === "true" || raw === "yes" || raw === "on";
 }
