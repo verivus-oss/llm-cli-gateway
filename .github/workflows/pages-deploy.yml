@@ -24,7 +24,13 @@ jobs:
     # Pages project. The private dev repo skips this job (the secret is not, and
     # must not be, present there).
     if: github.repository == 'verivus-oss/llm-cli-gateway'
-    runs-on: ubuntu-latest
+    # MUST run on the self-hosted runner: the Cloudflare token is IP-allowlist
+    # restricted (a deliberate control), so it only works from a trusted egress
+    # IP. GitHub-hosted runners are rejected with Cloudflare error 9109. The
+    # workhorse2-oss runner sits on an allowlisted IP. If it is offline at
+    # release time the deploy job queues until it comes back up; bring the runner
+    # online to drain it (see release-flow notes).
+    runs-on: [self-hosted, workhorse2]
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
