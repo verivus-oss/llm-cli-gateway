@@ -2,6 +2,7 @@ import { createHash, randomBytes, randomUUID, scryptSync, timingSafeEqual } from
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { URLSearchParams } from "node:url";
 import type { Logger } from "./logger.js";
+import { readCappedRawBody, maxOAuthBodyBytes } from "./request-limits.js";
 import {
   issueOAuthAccessToken,
   timingSafeStringEqual,
@@ -158,12 +159,7 @@ function extractStringArray(value: unknown, params: URLSearchParams, key: string
 }
 
 async function readRawBody(req: IncomingMessage): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const chunks: Buffer[] = [];
-    req.on("data", chunk => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
-    req.on("error", reject);
-    req.on("end", () => resolve(chunks.length ? Buffer.concat(chunks).toString("utf8") : ""));
-  });
+  return readCappedRawBody(req, maxOAuthBodyBytes());
 }
 
 async function readOAuthBody(req: IncomingMessage): Promise<OAuthRequestBody> {

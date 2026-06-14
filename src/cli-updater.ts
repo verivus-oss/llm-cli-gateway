@@ -330,11 +330,21 @@ export async function runCliUpgrade(params: {
   };
 }
 
+// Allow only a bare semver-ish version or a simple dist-tag. The target is
+// interpolated into package-manager install specs (e.g. `@openai/codex@<target>`
+// for `npm install -g`), so characters that change *which* package resolves --
+// `:` (npm alias `pkg@npm:other`, git+ssh), `/` (scoped names, URLs/paths),
+// `@` (alias separators) -- must be rejected to prevent arbitrary-package
+// installation via cli_upgrade.
+const UPGRADE_TARGET_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+
 function normalizeTarget(target: string): string {
   const normalized = target.trim();
-  if (!normalized || normalized.startsWith("-") || /[\u0000-\u001f\u007f\s]/.test(normalized)) {
+  if (!UPGRADE_TARGET_PATTERN.test(normalized)) {
     throw new Error(
-      "Upgrade target must be a non-empty package tag or version without whitespace and cannot start with '-'"
+      "Upgrade target must be a bare version or dist-tag (letters, digits, '.', '_', '-'; " +
+        "1-64 chars; must start alphanumeric). Package specifiers, aliases, URLs, and paths " +
+        "(containing ':', '/', or '@') are not allowed."
     );
   }
   return normalized;

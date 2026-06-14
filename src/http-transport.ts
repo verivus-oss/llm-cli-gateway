@@ -8,6 +8,7 @@ import type { GatewayServerDeps } from "./index.js";
 import { loadRemoteOAuthConfig } from "./config.js";
 import { OAuthServer, oauthBaseUrlFromRequest } from "./oauth.js";
 import { runWithRequestContext, type GatewayRequestContext } from "./request-context.js";
+import { readCappedRawBody, maxHttpBodyBytes } from "./request-limits.js";
 
 export interface HttpTransportOptions {
   host?: string;
@@ -44,23 +45,8 @@ function firstHeader(value: string | string[] | undefined): string | undefined {
   return Array.isArray(value) ? value[0] : value;
 }
 
-function readRawBody(req: IncomingMessage): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const chunks: Buffer[] = [];
-    req.on("data", chunk => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
-    req.on("error", reject);
-    req.on("end", () => {
-      if (chunks.length === 0) {
-        resolve("");
-        return;
-      }
-      resolve(Buffer.concat(chunks).toString("utf8"));
-    });
-  });
-}
-
 async function readBody(req: IncomingMessage): Promise<unknown> {
-  const raw = await readRawBody(req);
+  const raw = await readCappedRawBody(req, maxHttpBodyBytes());
   if (!raw) return undefined;
   try {
     return JSON.parse(raw);
@@ -277,7 +263,12 @@ export async function startHttpGateway(options: HttpTransportOptions): Promise<H
     } catch (error) {
       logger.error("HTTP transport request failed", error);
       if (!res.headersSent) {
-        jsonError(res, 500, "Internal server error");
+        const statusCode = (error as { statusCode?: number } | null)?.statusCode;
+        if (statusCode === 413) {
+          jsonError(res, 413, "Payload too large");
+        } else {
+          jsonError(res, 500, "Internal server error");
+        }
       } else {
         res.end();
       }

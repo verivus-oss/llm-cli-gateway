@@ -128,6 +128,24 @@ describe("Layer 6 HTTP MCP transport (U20)", () => {
     expect(body.error).not.toContain(TEST_TOKEN);
   });
 
+  it("rejects oversized request bodies with 413 instead of buffering them (F1)", async () => {
+    process.env.LLM_GATEWAY_MAX_HTTP_BODY_BYTES = "1024";
+    gateway = await startGateway();
+    const oversized = JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { padding: "x".repeat(5000) },
+    });
+    const response = await fetch(
+      gateway.url,
+      withAuth(TEST_TOKEN, { method: "POST", body: oversized })
+    );
+    expect(response.status).toBe(413);
+    const body = (await response.json()) as { error?: string };
+    expect(body.error).toMatch(/too large/i);
+  });
+
   it("advertises OAuth protected-resource metadata on bearer auth failures when enabled", async () => {
     process.env.LLM_GATEWAY_OAUTH_ENABLED = "1";
     process.env.LLM_GATEWAY_PUBLIC_URL = "https://gateway.example.test/mcp";

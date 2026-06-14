@@ -54,6 +54,35 @@ describe("cli updater", () => {
     expect(() => buildCliUpgradePlan("gemini", "--global")).toThrow("Upgrade target");
   });
 
+  it("rejects targets that could install a different package (F2)", () => {
+    // npm alias / git+ssh / scoped name / URL / path specifiers must not reach
+    // `@openai/codex@<target>`; each contains ':' '/' or '@'.
+    for (const malicious of [
+      "npm:evil-package",
+      "npm:evil@1.0.0",
+      "git+ssh://git@evil.example/x.git",
+      "1.0.0/../../evil",
+      "@scope/evil",
+      "https://evil.example/x.tgz",
+      "file:/etc/passwd",
+    ]) {
+      expect(() => buildCliUpgradePlan("codex", malicious)).toThrow("Upgrade target");
+    }
+  });
+
+  it("still accepts legitimate versions and dist-tags", () => {
+    expect(buildCliUpgradePlan("codex", "1.2.3-beta.1").args).toEqual([
+      "install",
+      "-g",
+      "@openai/codex@1.2.3-beta.1",
+    ]);
+    expect(buildCliUpgradePlan("codex", "next").args).toEqual([
+      "install",
+      "-g",
+      "@openai/codex@next",
+    ]);
+  });
+
   it("does not execute commands for dry runs", async () => {
     const result = await runCliUpgrade({ cli: "gemini", dryRun: true });
 

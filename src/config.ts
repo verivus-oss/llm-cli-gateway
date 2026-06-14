@@ -626,7 +626,7 @@ export const DEFAULT_ACP_PROMPT_TIMEOUT_MS = 600000; // 10 minutes
  * validation error — entrypoints are never passed through a shell.
  */
 // eslint-disable-next-line no-control-regex
-const SHELL_METACHARACTERS = /[\s|&;<>(){}$`"'\\*?[\]~#! ]/;
+const SHELL_METACHARACTERS = /[\s|&;<>(){}$`"'\\*?[\]~#!\0]/;
 
 function isSafeExecutable(value: string): boolean {
   if (value.length === 0) return false;
