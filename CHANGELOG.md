@@ -4,6 +4,51 @@ All notable changes to the llm-cli-gateway project.
 
 ## Unreleased
 
+## [2.9.0] - 2026-06-14: MCP-surface red-team remediation
+
+This release remediates all 17 findings of a multi-LLM red-team of the gateway's
+external and internal MCP surface. Every change is material only in the opt-in
+remote/OAuth/multi-tenant modes or under `approvalStrategy:"mcp_managed"`; the
+default local-stdio path is unaffected. Provider CLI release targets are
+unchanged from 2.8.0 (see `docs/upstream/release-targets.md`).
+
+### Security
+
+- Per-principal isolation (F3): `session_*`, `llm_job_*`, and
+  `llm_request_result` now resolve a calling owner principal and enforce
+  own-or-not-found access, so one OAuth client can no longer read or mutate
+  another client's sessions, jobs, or persisted request results. Owner columns
+  are additive and nullable; legacy unowned rows remain accessible to local
+  callers. The shared static bearer is one principal by design.
+- Built-in OAuth server hardening (F14): the authorization-code flow gains an
+  opt-in human-consent gate (dedicated consent password, default off) and a
+  trusted-principal-header seam so a proxy front door can attribute requests
+  without the gateway shipping any identity-provider configuration.
+- Approval-gate hard boundary (F15): under `approvalStrategy:"mcp_managed"` a
+  full permission/sandbox bypass request is now denied by default regardless of
+  heuristic score, and the managed strategy no longer force-sets each provider's
+  most-permissive mode. See "Changed" for the per-provider defaults.
+- Secret redaction (F4): prompts and responses are redacted before they are
+  written to the flight-recorder database.
+- Remote-exposure fail-closed (F17): a remotely-exposed open OAuth configuration
+  refuses to start, and the `Host` header is no longer trusted for loopback
+  determination.
+- MCP surface hardening (F1/F2/F10): request bodies are capped to prevent a
+  memory DoS, `cli_upgrade` targets are clamped to block arbitrary-package
+  installation, and a committed NUL byte in `config.ts` (which rendered the file
+  binary and invisible to gitleaks/SAST/grep) was removed.
+
+### Changed
+
+- Under `approvalStrategy:"mcp_managed"`, every provider now defaults to an
+  accept-edits-level mode (auto-accept file edits, dangerous tools still gated)
+  instead of full auto-approve: Claude `--permission-mode acceptEdits`, Grok
+  `--permission-mode acceptEdits`, Mistral `--agent accept-edits`, and Gemini
+  prompted `default` (the `agy` CLI has no accept-edits rung, so without the
+  opt-in Gemini cannot auto-approve mutating tools under `mcp_managed`). Each
+  escalates to its full auto-approve mode only when the operator sets
+  `LLM_GATEWAY_APPROVAL_ALLOW_BYPASS`. The `legacy` strategy is unchanged.
+
 ## [2.8.0] - 2026-06-14: HTTP workspace gating and ACP transport
 
 ### Added

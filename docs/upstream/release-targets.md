@@ -30,6 +30,26 @@ claim installed-binary compatibility for that provider in the release notes.
 
 ## Current release baseline
 
+### v2.9.0 - 2026-06-14
+
+Re-probed from the local release validation environment for the
+`llm-cli-gateway@2.9.0` candidate. Every provider CLI version **and** artifact
+SHA-256 is byte-identical to the 2.8.0 baseline below — no provider CLI changed
+between 2.8.0 and 2.9.0 (a security-remediation release), so the 2.8.0 table is
+the authoritative baseline for 2.9.0 as well. Re-verified on this host:
+
+| Provider           | Executable | Probed CLI version        | Artifact SHA-256                                                   |
+| ------------------ | ---------- | ------------------------- | ------------------------------------------------------------------ |
+| Claude Code        | `claude`   | `2.1.177 (Claude Code)`   | `ff41753634b20c869ef6a32a20863521b33d4186ac0d6a49379ab48a48395ee7` |
+| Codex CLI          | `codex`    | `codex-cli 0.139.0`       | `0729aedf4fe72971d81ef6803c817b850d711254d3c82ecc756a52f3b533c9f8` |
+| Gemini/Antigravity | `agy`      | `1.0.8`                   | `945f02621361c8fae77c1edab68f0d5f9f74bf9010e39f2d2573df90ff0be41b` |
+| Grok CLI           | `grok`     | `grok 0.2.51 (f4f85a649)` | `52916267aa2f7868c23a6dd7847dfe066e39a52b8ffd216380186397ea7d0075` |
+| Mistral Vibe       | `vibe`     | `vibe 2.14.1`             | `d12d6f5ede1b6618fcb1548ce3d17a8233cc4d2b4e27d4ca69d1a820811b3651` |
+
+Launcher / wrapper evidence (also unchanged from 2.8.0): Codex JS launcher
+`d3be844c45c4fd89392536e56e1010963f94785592596b50cd0c45bb8a341406`; Mistral Vibe
+console entry point `9be660837475ac2f83bc8e64e9a0b471d2b79a1f24a3aa968a1d78103c1b84e0`.
+
 ### v2.8.0 - 2026-06-14
 
 Collected with `llm-cli-gateway doctor --json` from the local release
