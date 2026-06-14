@@ -35,6 +35,12 @@ jobs:
       - name: Mint read-only App token (branch-protection read)
         id: app-token
         if: github.repository == 'verivus-oss/llm-cli-gateway'
+        # Resilient: if the App can't mint a token (e.g. not yet installed on
+        # this repo) the run still proceeds — repo_token is then empty and
+        # Scorecard falls back to GITHUB_TOKEN (Branch-Protection reverts to -1
+        # rather than failing the whole workflow). Self-heals once the App is
+        # installed on the repo.
+        continue-on-error: true
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0
         with:
           app-id: ${{ secrets.MIRROR_APP_ID }}
