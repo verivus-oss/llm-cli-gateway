@@ -24,6 +24,7 @@ import path from "path";
 import { openDatabase, openReadOnly } from "./sqlite-driver.js";
 import type { GatewayDatabase } from "./sqlite-driver.js";
 import { redactSecrets, isRedactionEnabled } from "./secret-redaction.js";
+import { getRequestContext, resolveOwnerPrincipal } from "./request-context.js";
 import type { ProviderType } from "./session-manager.js";
 
 export interface FlightLogStart {
@@ -50,6 +51,12 @@ export interface FlightLogStart {
    * for rows where the gateway emitted no cache_control marker.
    */
   cacheControlTtlSeconds?: number;
+  /**
+   * F3: ownership principal of the request. Defaults to the principal resolved
+   * from the request context ambient at `logStart` when omitted; legacy rows
+   * (and pre-migration DBs) keep NULL.
+   */
+  ownerPrincipal?: string | null;
 }
 
 export interface FlightLogResult {
@@ -92,6 +99,21 @@ function ensureRequestsCacheColumns(db: GatewayDatabase): void {
   }
   if (!names.has("cache_creation_tokens")) {
     db.exec("ALTER TABLE requests ADD COLUMN cache_creation_tokens INTEGER");
+  }
+}
+
+/**
+ * F3: idempotent add of the `owner_principal` column to a pre-existing requests
+ * table. Fresh tables already include it via CREATE TABLE. Legacy rows keep
+ * NULL (treated as legacy-unowned by enforcement).
+ */
+function ensureRequestsOwnerColumn(db: GatewayDatabase): void {
+  const rows = db.prepare("PRAGMA table_info(requests)").all();
+  const names = new Set<string>(
+    rows.map((row: any) => (row && typeof row.name === "string" ? row.name : ""))
+  );
+  if (!names.has("owner_principal")) {
+    db.exec("ALTER TABLE requests ADD COLUMN owner_principal TEXT");
   }
 }
 
@@ -251,7 +273,8 @@ export class FlightRecorder {
         input_tokens INTEGER,
         output_tokens INTEGER,
         cache_read_tokens INTEGER,
-        cache_creation_tokens INTEGER
+        cache_creation_tokens INTEGER,
+        owner_principal TEXT
       );
 
       CREATE TABLE IF NOT EXISTS gateway_metadata (
@@ -314,6 +337,13 @@ export class FlightRecorder {
       .prepare("INSERT OR IGNORE INTO _migrations(version, applied_at) VALUES(5, ?)")
       .run(new Date().toISOString());
 
+    // Migration v6 (F3): owner_principal on the requests table. New rows are
+    // stamped with the request's ownership principal; legacy rows keep NULL.
+    ensureRequestsOwnerColumn(this.db);
+    this.db
+      .prepare("INSERT OR IGNORE INTO _migrations(version, applied_at) VALUES(6, ?)")
+      .run(new Date().toISOString());
+
     if (process.platform !== "win32") {
       try {
         chmodSync(dbPath, 0o600);
@@ -325,10 +355,10 @@ export class FlightRecorder {
     const insertRequest = this.db.prepare(`
       INSERT INTO requests (id, cli, model, prompt, system, session_id, datetime_utc,
                             stable_prefix_hash, stable_prefix_tokens,
-                            cache_control_blocks, cache_control_ttl_seconds)
+                            cache_control_blocks, cache_control_ttl_seconds, owner_principal)
       VALUES (@id, @cli, @model, @prompt, @system, @session_id, @datetime_utc,
               @stable_prefix_hash, @stable_prefix_tokens,
-              @cache_control_blocks, @cache_control_ttl_seconds)
+              @cache_control_blocks, @cache_control_ttl_seconds, @owner_principal)
     `);
 
     const insertMetadata = this.db.prepare(`
@@ -349,6 +379,8 @@ export class FlightRecorder {
         stable_prefix_tokens: entry.stablePrefixTokens ?? null,
         cache_control_blocks: entry.cacheControlBlocks ?? null,
         cache_control_ttl_seconds: entry.cacheControlTtlSeconds ?? null,
+        // F3: stamp the owner from the entry, else the ambient request context.
+        owner_principal: entry.ownerPrincipal ?? resolveOwnerPrincipal(getRequestContext()),
       });
 
       insertMetadata.run({

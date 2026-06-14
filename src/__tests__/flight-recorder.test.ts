@@ -4,6 +4,7 @@ import os from "os";
 import path from "path";
 import { createRequire } from "module";
 import { FlightRecorder, NoopFlightRecorder } from "../flight-recorder.js";
+import { runWithRequestContext } from "../request-context.js";
 
 const require = createRequire(import.meta.url);
 const BetterSqlite3 = require("better-sqlite3");
@@ -209,6 +210,38 @@ describe("FlightRecorder migrations (U23 cache columns)", () => {
     const row = db.prepare("SELECT prompt FROM requests WHERE id = ?").get("corr-plain") as any;
     db.close();
     expect(row.prompt).toBe(prompt);
+  });
+
+  it("v6 (F3): adds owner_principal column on a fresh DB", () => {
+    new FlightRecorder(dbPath).close();
+    expect(tableColumns(dbPath).has("owner_principal")).toBe(true);
+  });
+
+  it("F3: stamps owner_principal from the ambient request context on logStart", () => {
+    const rec = new FlightRecorder(dbPath);
+    runWithRequestContext(
+      { transport: "http", authScopes: [], authPrincipal: "user-bob@example.com" },
+      () => rec.logStart({ correlationId: "owned-1", cli: "claude", model: "sonnet", prompt: "hi" })
+    );
+    rec.close();
+    const db = new BetterSqlite3(dbPath);
+    const row = db
+      .prepare("SELECT owner_principal FROM requests WHERE id = ?")
+      .get("owned-1") as any;
+    db.close();
+    expect(row.owner_principal).toBe("user-bob@example.com");
+  });
+
+  it("F3: defaults owner_principal to 'local' with no request context", () => {
+    const rec = new FlightRecorder(dbPath);
+    rec.logStart({ correlationId: "owned-local", cli: "claude", model: "sonnet", prompt: "hi" });
+    rec.close();
+    const db = new BetterSqlite3(dbPath);
+    const row = db
+      .prepare("SELECT owner_principal FROM requests WHERE id = ?")
+      .get("owned-local") as any;
+    db.close();
+    expect(row.owner_principal).toBe("local");
   });
 
   it("v3: adds stable_prefix_hash / stable_prefix_tokens and index on fresh DB", () => {
