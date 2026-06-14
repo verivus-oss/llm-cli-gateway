@@ -1,0 +1,54 @@
+# Deploy the static marketing site (site/) to its Cloudflare Pages project on
+# every published release. llm-cli-gateway.dev is a DIRECT-UPLOAD Pages project
+# (not git-connected), so nothing rebuilds it automatically — this workflow is
+# what keeps the live site in lock-step with each release.
+#
+# The site version is bumped in `site/index.html` during release prep
+# (scripts/sync-site-version.mjs, run by scripts/pre-release.sh) and pinned by
+# src/__tests__/site-version.test.ts, so by the time a release exists the
+# checked-out site/ already carries the right version; the --check step here is
+# a belt-and-braces assertion before publishing.
+name: Deploy site to Cloudflare Pages
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    # Only the public mirror holds the CLOUDFLARE_API_TOKEN secret and owns the
+    # Pages project. The private dev repo skips this job (the secret is not, and
+    # must not be, present there).
+    if: github.repository == 'verivus-oss/llm-cli-gateway'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          # On a release, check out the released tag so the deployed site/ matches
+          # exactly what was published. On manual dispatch, use the branch ref.
+          ref: ${{ github.event.release.tag_name || github.ref }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6 # zizmor: ignore[cache-poisoning]
+        # Why the ignore: zizmor flags setup-node on any release-triggered
+        # workflow regardless of whether caching is on. We do NOT set `cache:`,
+        # so no cache is read or written and the poisoned-cache vector does not
+        # exist. Same rationale as npm-publish.yml.
+        with:
+          node-version: 24
+
+      - name: Verify site version matches package.json
+        run: node scripts/sync-site-version.mjs --check
+
+      - name: Deploy site/ to Cloudflare Pages (production)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          # Not a secret — the account that owns the Pages project.
+          CLOUDFLARE_ACCOUNT_ID: "6e2be897d28f85da0d0551a8b462f851"
+        # --branch=main maps to the production domain (llm-cli-gateway.dev); the
+        # git branch would otherwise be published as a preview alias.
+        run: npx -y wrangler@4.100.0 pages deploy site --project-name=llm-cli-gateway --branch=main --commit-dirty=true
