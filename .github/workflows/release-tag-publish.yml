@@ -10,12 +10,19 @@ on:
         required: true
         type: string
 
+# Least-privilege default: the workflow floor is read-only; the one job that
+# creates the release escalates to contents:write at the job level. A top-level
+# write would grant write to every step (checkout, npm ci, the build) that only
+# needs to read — the pattern OpenSSF Scorecard's Token-Permissions check flags.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   verify-and-release:
     runs-on: ubuntu-latest
+    permissions:
+      # `gh release create` (below) needs write; nothing else in this job does.
+      contents: write
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
