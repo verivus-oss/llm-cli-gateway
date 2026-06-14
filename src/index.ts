@@ -2822,8 +2822,20 @@ export function prepareGeminiRequest(
     }
   }
 
+  // F15b: under mcp_managed, gemini (agy) no longer force-emits
+  // --dangerously-skip-permissions (full yolo) for every request. The agy
+  // headless surface has no accept-edits middle rung — only prompted `default`
+  // or full bypass — so the safe default is `default` (no auto-approve flag).
+  // Full yolo requires the explicit operator opt-in
+  // (LLM_GATEWAY_APPROVAL_ALLOW_BYPASS), the same switch F15a/F15b use elsewhere.
+  // Trade-off: without the opt-in, gemini cannot auto-approve mutating tools
+  // under mcp_managed (agy offers no safe-headless middle mode).
   const effectiveApprovalMode =
-    params.approvalStrategy === "mcp_managed" ? "yolo" : params.approvalMode;
+    params.approvalStrategy === "mcp_managed"
+      ? bypassAllowedByOperator()
+        ? "yolo"
+        : "default"
+      : params.approvalMode;
 
   const unsupported = (field: string, detail: string): ExtendedToolResponse =>
     createErrorResponse(
@@ -3064,8 +3076,12 @@ export function prepareGrokRequest(
     }
   }
 
-  const effectiveAlwaysApprove =
-    params.approvalStrategy === "mcp_managed" ? true : Boolean(params.alwaysApprove);
+  // F15b: under mcp_managed, grok no longer force-emits --always-approve
+  // (auto-approve of *every* tool execution) for every request. Default to
+  // --permission-mode acceptEdits (auto-accept file edits; dangerous ops stay
+  // gated); escalate to --always-approve only with the explicit operator opt-in
+  // (LLM_GATEWAY_APPROVAL_ALLOW_BYPASS), the same switch F15a/F15b use elsewhere.
+  const managedGrokBypass = params.approvalStrategy === "mcp_managed" && bypassAllowedByOperator();
 
   // Contract-driven argv assembly. The covered request-level flags are emitted
   // by `buildArgvFromGeneration` from the grok contract + generation runs (see
@@ -3080,7 +3096,13 @@ export function prepareGrokRequest(
   const args = ["-p", effectivePrompt];
   if (resolvedModel) args.push("--model", resolvedModel);
   args.push(...buildArgvFromGeneration(grokContract, GROK_GEN_OUTPUT_FORMAT, genParams));
-  if (effectiveAlwaysApprove) {
+  if (params.approvalStrategy === "mcp_managed") {
+    if (managedGrokBypass) {
+      args.push("--always-approve");
+    } else {
+      args.push("--permission-mode", "acceptEdits");
+    }
+  } else if (Boolean(params.alwaysApprove)) {
     args.push("--always-approve");
   } else if (params.permissionMode) {
     args.push("--permission-mode", params.permissionMode);
@@ -3244,12 +3266,16 @@ export function prepareMistralRequest(
     }
   }
 
-  // Under mcp_managed, force --agent auto-approve so the approval gate's
-  // verdict carries through to the CLI invocation (mirrors Grok's --always-approve
-  // forcing under mcp_managed).
+  // F15b: under mcp_managed, mistral (vibe) no longer force-sets --agent
+  // auto-approve (vibe's "previous YOLO behavior") for every request. Default to
+  // --agent accept-edits (auto-accept file edits; dangerous ops stay gated);
+  // escalate to auto-approve only with the explicit operator opt-in
+  // (LLM_GATEWAY_APPROVAL_ALLOW_BYPASS), the same switch F15a/F15b use elsewhere.
   const effectivePermissionMode: MistralAgentMode =
     params.approvalStrategy === "mcp_managed"
-      ? "auto-approve"
+      ? bypassAllowedByOperator()
+        ? "auto-approve"
+        : "accept-edits"
       : (params.permissionMode ?? "auto-approve");
 
   const prep = buildMistralCliInvocation({
@@ -3337,7 +3363,9 @@ export function buildMistralRetryPrep(
     outputFormat: params.outputFormat,
     permissionMode:
       params.approvalStrategy === "mcp_managed"
-        ? "auto-approve"
+        ? bypassAllowedByOperator()
+          ? "auto-approve"
+          : "accept-edits"
         : (params.permissionMode ?? "auto-approve"),
     allowedTools: params.allowedTools,
     disallowedTools: params.disallowedTools,

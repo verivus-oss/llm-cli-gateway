@@ -1160,7 +1160,13 @@ await callTool("session_delete", {
   ```bash
   LLM_GATEWAY_APPROVAL_POLICY=strict node dist/index.js
   ```
-- `LLM_GATEWAY_APPROVAL_ALLOW_BYPASS`: Under `approvalStrategy:"mcp_managed"`, a full permission / sandbox bypass request (e.g. `dangerouslyBypassApprovalsAndSandbox`, `dangerouslySkipPermissions`) is **denied by default** regardless of approval score, **and** `mcp_managed` no longer force-bypasses the provider: Claude defaults to `--permission-mode acceptEdits` (auto-accept file edits, still gate Bash and other dangerous tools) instead of `bypassPermissions`. Set to `1`/`true` to let the operator opt back in (permits bypass requests and restores `bypassPermissions` for Claude under `mcp_managed`). Sandboxed auto modes (e.g. codex `--sandbox workspace-write`) are unaffected.
+- `LLM_GATEWAY_APPROVAL_ALLOW_BYPASS`: Under `approvalStrategy:"mcp_managed"`, a full permission / sandbox bypass request (e.g. `dangerouslyBypassApprovalsAndSandbox`, `dangerouslySkipPermissions`) is **denied by default** regardless of approval score, **and** `mcp_managed` no longer force-bypasses any provider — each defaults to an auto-accept-edits-level mode (auto-accept file edits, still gate Bash and other dangerous tools) instead of full auto-approve:
+  - **Claude** → `--permission-mode acceptEdits` (was `bypassPermissions`)
+  - **Grok** → `--permission-mode acceptEdits` (was `--always-approve`)
+  - **Mistral (Vibe)** → `--agent accept-edits` (was `--agent auto-approve`)
+  - **Gemini (Antigravity)** → `default` / prompted, i.e. **no** `--dangerously-skip-permissions` (the `agy` CLI has no accept-edits middle rung, so the safe default is prompted execution; without the opt-in, Gemini cannot auto-approve mutating tools under `mcp_managed`)
+
+  Set to `1`/`true` to let the operator opt back in: this permits bypass requests through the approval gate **and** restores each provider's full auto-approve mode under `mcp_managed` (Claude `bypassPermissions`, Grok `--always-approve`, Mistral `--agent auto-approve`, Gemini `--dangerously-skip-permissions`). Sandboxed auto modes (e.g. codex `--sandbox workspace-write`) are unaffected.
   ```bash
   LLM_GATEWAY_APPROVAL_ALLOW_BYPASS=1 node dist/index.js
   ```
