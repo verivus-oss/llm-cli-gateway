@@ -1160,6 +1160,10 @@ await callTool("session_delete", {
   ```bash
   LLM_GATEWAY_APPROVAL_POLICY=strict node dist/index.js
   ```
+- `LLM_GATEWAY_APPROVAL_ALLOW_BYPASS`: Under `approvalStrategy:"mcp_managed"`, a full permission / sandbox bypass request (e.g. `dangerouslyBypassApprovalsAndSandbox`, `dangerouslySkipPermissions`) is **denied by default** regardless of approval score. Set to `1`/`true` to let the operator opt back in. Sandboxed auto modes (e.g. codex `--sandbox workspace-write`) are unaffected.
+  ```bash
+  LLM_GATEWAY_APPROVAL_ALLOW_BYPASS=1 node dist/index.js
+  ```
 - `LLM_GATEWAY_CONFIG`: Path to the gateway TOML config (default: `~/.llm-cli-gateway/config.toml`). See **Persistence configuration** above for the `[persistence]` schema.
 - `LLM_GATEWAY_LOGS_DB`: **Deprecated** — overrides `[persistence].path` and selects `backend = "sqlite"` (or `backend = "none"` when set to `none`). Emits a deprecation warning at startup; migrate to `config.toml`.
   ```bash

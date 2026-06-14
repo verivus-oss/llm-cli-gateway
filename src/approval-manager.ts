@@ -55,6 +55,15 @@ function parsePolicy(policy?: ApprovalPolicy): ApprovalPolicy {
   return "balanced";
 }
 
+// F15: under MCP-managed approval, a full permission / sandbox bypass is a
+// deny-by-default escalation — the heuristic score must not be able to approve
+// it. Operators opt back in explicitly. `decide()` is only ever reached on the
+// `approvalStrategy:"mcp_managed"` path.
+function bypassAllowedByOperator(env: NodeJS.ProcessEnv = process.env): boolean {
+  const raw = (env.LLM_GATEWAY_APPROVAL_ALLOW_BYPASS || "").trim().toLowerCase();
+  return raw === "1" || raw === "true" || raw === "yes" || raw === "on";
+}
+
 function promptPreview(prompt: string): string {
   if (process.env.APPROVAL_LOG_PROMPTS === "1") {
     return prompt.replace(/\s+/g, " ").trim().slice(0, 280);
@@ -174,10 +183,26 @@ export class ApprovalManager {
       }
     }
 
+    // F15: deny-by-default for full permission/sandbox bypass under MCP-managed
+    // approval, regardless of score, unless the operator explicitly opted in.
+    // (`fullAuto` — e.g. codex `--sandbox workspace-write` — is sandboxed and
+    // stays score-governed; only the unsandboxed bypass is hard-denied.)
+    const bypassDeniedByDefault = request.bypassRequested && !bypassAllowedByOperator();
+    if (bypassDeniedByDefault) {
+      reasons.push(
+        "Full permission/sandbox bypass denied by default under MCP-managed approval " +
+          "(set LLM_GATEWAY_APPROVAL_ALLOW_BYPASS=1 to permit)"
+      );
+    }
+
     // Balanced policy allows routine full-auto requests with standard MCP servers,
     // while still denying bypass/sensitive combinations.
     const threshold = policy === "strict" ? 2 : policy === "balanced" ? 5 : 7;
-    const status: ApprovalStatus = score <= threshold ? "approved" : "denied";
+    const status: ApprovalStatus = bypassDeniedByDefault
+      ? "denied"
+      : score <= threshold
+        ? "approved"
+        : "denied";
 
     const record: ApprovalRecord = {
       id: randomUUID(),

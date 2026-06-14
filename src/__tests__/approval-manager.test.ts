@@ -15,6 +15,7 @@ describe("ApprovalManager", () => {
     logPath = join(testDir, "approvals.jsonl");
     originalPolicy = process.env.LLM_GATEWAY_APPROVAL_POLICY;
     delete process.env.LLM_GATEWAY_APPROVAL_POLICY;
+    delete process.env.LLM_GATEWAY_APPROVAL_ALLOW_BYPASS;
   });
 
   afterEach(() => {
@@ -23,6 +24,7 @@ describe("ApprovalManager", () => {
     } else {
       process.env.LLM_GATEWAY_APPROVAL_POLICY = originalPolicy;
     }
+    delete process.env.LLM_GATEWAY_APPROVAL_ALLOW_BYPASS;
     rmSync(testDir, { recursive: true, force: true });
   });
 
@@ -100,6 +102,36 @@ describe("ApprovalManager", () => {
 
     expect(decision.status).toBe("approved");
     expect(decision.score).toBe(5);
+  });
+
+  it("denies a bypass request by default under MCP-managed approval, even on permissive policy (F15)", () => {
+    const manager = new ApprovalManager(logPath);
+    const decision = manager.decide({
+      cli: "codex",
+      operation: "codex_request",
+      prompt: "Summarize this document",
+      bypassRequested: true,
+      fullAuto: false,
+      requestedMcpServers: ["sqry"],
+      policy: "permissive", // threshold 7; score would otherwise approve
+    });
+    expect(decision.status).toBe("denied");
+    expect(decision.reasons.join(" ")).toMatch(/bypass denied by default/i);
+  });
+
+  it("permits a bypass request only with the explicit operator opt-in (F15)", () => {
+    process.env.LLM_GATEWAY_APPROVAL_ALLOW_BYPASS = "1";
+    const manager = new ApprovalManager(logPath);
+    const decision = manager.decide({
+      cli: "codex",
+      operation: "codex_request",
+      prompt: "Summarize this document",
+      bypassRequested: true,
+      fullAuto: false,
+      requestedMcpServers: ["sqry"],
+      policy: "permissive",
+    });
+    expect(decision.status).toBe("approved");
   });
 
   it("denies bypass plus full-auto even with minimal MCP servers", () => {
