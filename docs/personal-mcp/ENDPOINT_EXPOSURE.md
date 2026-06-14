@@ -9,16 +9,19 @@ values on the user's behalf.
 
 The gateway has two different endpoint stories:
 
-- Local clients can use stdio or `http://127.0.0.1:<port>/mcp`.
-- Web clients need a public HTTPS MCP URL that routes to the local gateway.
+- Local clients that need unrestricted machine-local filesystem access should use stdio.
+- HTTP clients can use `http://127.0.0.1:<port>/mcp`, but provider execution over HTTP must resolve a registered workspace alias, session workspace, or `[workspaces].default`.
+- Web clients need a public HTTPS MCP URL that routes to the local gateway and the same registered workspace boundary applies.
 
 Local success is not enough for ChatGPT, Claude web, or Grok custom connectors. Those clients connect from provider infrastructure, so `doctor --json` must show an HTTPS public URL before setup docs claim web-client readiness.
+
+Remote clients pass relative `workingDir`, `addDir`, and include-directory values inside the selected workspace. Disabling HTTP auth, using a generated no-auth connector path, or setting `[workspaces].allow_unregistered_working_dir` does not permit arbitrary HTTP/tunnel filesystem paths.
 
 ## Modes
 
 `doctor --json` reports `endpoint_exposure.mode`:
 
-- `local_only`: localhost-only gateway. Use this for stdio, Codex CLI, Gemini CLI, or local testing.
+- `local_only`: localhost-only gateway. Use stdio for unrestricted local filesystem access, or HTTP for workspace-registered local testing.
 - `lan`: gateway listens on a LAN interface, but there is no public HTTPS URL.
 - `tunnel`: public HTTPS URL appears to be provided by a tunnel service such as Cloudflare Tunnel, Tailscale Funnel, or ngrok.
 - `byo_reverse_proxy`: public HTTPS URL is configured and does not match a known tunnel hostname.

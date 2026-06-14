@@ -8,7 +8,7 @@ Start here:
 - Assistant prompt path: `setup/assistants/gemini-install-prompt.md`
 - Provider snippet path: `setup/providers/gemini-cli.md`
 
-Gemini CLI is a local inbound MCP client and outbound validation provider. Gemini web is not verified as an inbound custom MCP host for this MVP.
+Gemini CLI is a local inbound MCP client and outbound validation provider. Gemini web is not verified as an inbound custom MCP host for this MVP. Use stdio for unrestricted local filesystem paths; HTTP provider execution must use a registered workspace alias, session workspace, or configured default.
 
 ## Steps
 
@@ -22,6 +22,8 @@ gemini mcp list
 ```
 
 4. Do not paste the expanded bearer token into a remote chat.
+
+For HTTP provider calls, pass relative include directories inside the selected workspace. Auth-disabled and no-auth connector HTTP paths do not bypass workspace registration.
 
 ## Verification
 

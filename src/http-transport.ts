@@ -208,7 +208,7 @@ export async function startHttpGateway(options: HttpTransportOptions): Promise<H
         return;
       }
 
-      let requestContext: GatewayRequestContext = { authScopes: [] };
+      let requestContext: GatewayRequestContext = { authScopes: [], transport: "http" };
       if (!noAuthPath) {
         const auth = authorizeBearerRequest(req, token);
         if (!auth.ok) {
@@ -216,6 +216,7 @@ export async function startHttpGateway(options: HttpTransportOptions): Promise<H
           return;
         }
         requestContext = {
+          transport: "http",
           authKind: auth.kind,
           authScopes: auth.scopes ?? [],
           authClientId: auth.clientId,

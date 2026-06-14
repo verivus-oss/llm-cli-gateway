@@ -8,7 +8,7 @@ Start here:
 - Assistant prompt path: `setup/assistants/codex-install-prompt.md`
 - Provider snippet path: `setup/providers/codex.md`
 
-Codex can be a local inbound MCP client and an outbound validation provider.
+Codex can be a local inbound MCP client and an outbound validation provider. Use stdio when Codex needs unrestricted local filesystem paths. The HTTP setup below must use registered workspace aliases, session workspace metadata, or a configured default for provider execution.
 
 ## Steps
 
@@ -23,6 +23,8 @@ codex mcp list
 ```
 
 4. Keep the token export local to the Codex shell. Do not paste the expanded token into chat.
+
+For HTTP provider calls, pass relative `workingDir` and `addDir` values inside the selected workspace. `[workspaces].allow_unregistered_working_dir` is not an HTTP bypass.
 
 ## Verification
 

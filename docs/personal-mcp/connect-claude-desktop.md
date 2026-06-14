@@ -8,7 +8,7 @@ Start here:
 - Assistant prompt path: `setup/assistants/claude-install-prompt.md`
 - Provider snippet path: `setup/providers/claude-desktop.md`
 
-Claude Desktop can use a remote connector path when available, or a local setup path. The setup UI is the source of the snippet to use.
+Claude Desktop can use a remote connector path when available, or a local setup path. Use stdio for unrestricted machine-local filesystem access. HTTP provider execution, including local HTTP, must use a registered workspace alias, session workspace, or configured default workspace.
 
 ## Steps
 

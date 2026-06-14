@@ -1023,19 +1023,13 @@ async function resolveWorkspaceAndWorktreeForRequest(args: {
     );
   }
 
-  if (!workspace && getRequestContext()?.authKind === "oauth") {
-    throw new Error(
-      "Remote OAuth provider requests require a registered workspace alias or [workspaces].default."
-    );
-  }
+  const requestContext = getRequestContext();
+  const isRemoteTransport =
+    requestContext?.transport === "http" || requestContext?.authKind === "oauth";
 
-  if (
-    !workspace &&
-    (args.workingDir || (args.addDir?.length ?? 0) > 0) &&
-    !args.runtime.workspaces.allowUnregisteredWorkingDir
-  ) {
+  if (!workspace && isRemoteTransport) {
     throw new Error(
-      "workingDir/addDir require a registered workspace alias unless [workspaces].allow_unregistered_working_dir is explicitly enabled."
+      "Remote HTTP provider requests require a registered workspace alias, session workspace, or [workspaces].default."
     );
   }
 

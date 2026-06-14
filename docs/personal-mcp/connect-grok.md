@@ -10,6 +10,8 @@ Start here:
 
 Grok custom connectors require a public MCP server URL. Continue with inbound Grok setup only when doctor JSON shows `endpoint_exposure.web_clients_supported: true`.
 
+Provider execution from Grok custom connectors must use a registered workspace alias, session workspace, or configured default workspace. Pass relative paths inside that workspace; tunnel headers and auth mode do not downgrade HTTP to local trust.
+
 ## Steps
 
 1. Open the setup UI and load doctor JSON.

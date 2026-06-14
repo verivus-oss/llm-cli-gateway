@@ -10,6 +10,8 @@ Start here:
 
 Claude web connects from Anthropic infrastructure, so a localhost URL is not enough. Continue only when doctor JSON shows a public HTTPS URL and `endpoint_exposure.web_clients_supported` is `true`.
 
+Provider execution from Claude web must use a registered workspace alias, session workspace, or configured default workspace. Pass relative paths inside that workspace.
+
 ## Steps
 
 1. Open the setup UI and load doctor JSON.

@@ -5,6 +5,11 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createGatewayServer } from "../index.js";
 import { runWithRequestContext } from "../request-context.js";
+import { AsyncJobManager } from "../async-job-manager.js";
+import { MemoryJobStore } from "../job-store.js";
+import { noopLogger } from "../logger.js";
+import { FileSessionManager } from "../session-manager.js";
+import type { PersistenceConfig } from "../config.js";
 import type { WorkspaceRegistry } from "../workspace-registry.js";
 import {
   loadWorkspaceRegistry,
@@ -45,6 +50,51 @@ function disabledWorkspaces(): WorkspaceRegistry {
   };
 }
 
+function disabledWorkspacesWith(
+  overrides: Partial<Pick<WorkspaceRegistry, "allowUnregisteredWorkingDir">>
+): WorkspaceRegistry {
+  return { ...disabledWorkspaces(), ...overrides };
+}
+
+function mkPersistence(): PersistenceConfig {
+  return {
+    backend: "memory",
+    path: null,
+    dsn: null,
+    retentionDays: 30,
+    dedupWindowMs: 0,
+    acknowledgeEphemeral: true,
+    asyncJobsEnabled: true,
+    sources: { configFile: null, envOverrides: [] },
+  };
+}
+
+class ThrowingAsyncJobManager extends AsyncJobManager {
+  override startJob(
+    ..._args: Parameters<AsyncJobManager["startJob"]>
+  ): ReturnType<AsyncJobManager["startJob"]> {
+    throw new Error("spawn sentinel");
+  }
+}
+
+function createAsyncGatewayServer(
+  workspaces: WorkspaceRegistry,
+  asyncJobManager: AsyncJobManager = new AsyncJobManager(
+    noopLogger,
+    undefined,
+    new MemoryJobStore()
+  )
+) {
+  return createGatewayServer({
+    workspaces,
+    sessionManager: new FileSessionManager(join(tempRootForShims, "sessions.json")),
+    asyncJobManager,
+    persistence: mkPersistence(),
+  });
+}
+
+let tempRootForShims = "";
+
 describe("workspace registry", () => {
   let tempDir: string;
   let repoRoot: string;
@@ -53,6 +103,7 @@ describe("workspace registry", () => {
   beforeEach(() => {
     process.env = { ...ORIGINAL_ENV };
     tempDir = mkdtempSync(join(tmpdir(), "workspace-registry-test-"));
+    tempRootForShims = tempDir;
     repoRoot = join(tempDir, "repo");
     execFileSync("mkdir", ["-p", repoRoot]);
     initGitRepo(repoRoot);
@@ -154,10 +205,35 @@ describe("workspace registry", () => {
     expect(registry.enabled).toBe(false);
   });
 
-  it("provider tools reject unregistered workingDir path selection by default", async () => {
-    const server = createGatewayServer({ workspaces: disabledWorkspaces() });
+  it("local stdio/no-context provider tools allow unregistered addDir past workspace gating", async () => {
+    const server = createAsyncGatewayServer(
+      disabledWorkspaces(),
+      new ThrowingAsyncJobManager(noopLogger, undefined, new MemoryJobStore())
+    );
 
-    const result = await registeredTools(server).codex_request.handler(
+    const result = await registeredTools(server).claude_request_async.handler(
+      {
+        prompt: "hello",
+        addDir: [tempDir],
+        approvalStrategy: "legacy",
+        optimizePrompt: false,
+      },
+      {}
+    );
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0]?.text).toContain("spawn sentinel");
+    expect(result.content[0]?.text).not.toContain("Remote HTTP provider requests require");
+    expect(result.content[0]?.text).not.toContain("workingDir/addDir require");
+  });
+
+  it("local stdio/no-context provider tools allow unregistered workingDir past workspace gating", async () => {
+    const server = createAsyncGatewayServer(
+      disabledWorkspaces(),
+      new ThrowingAsyncJobManager(noopLogger, undefined, new MemoryJobStore())
+    );
+
+    const result = await registeredTools(server).codex_request_async.handler(
       {
         prompt: "hello",
         workingDir: tempDir,
@@ -168,15 +244,23 @@ describe("workspace registry", () => {
     );
 
     expect(result.isError).toBe(true);
-    expect(result.content[0]?.text).toContain("workingDir/addDir require a registered workspace");
+    expect(result.content[0]?.text).toContain("spawn sentinel");
+    expect(result.content[0]?.text).not.toContain("Remote HTTP provider requests require");
+    expect(result.content[0]?.text).not.toContain("workingDir/addDir require");
   });
 
-  it("remote OAuth provider tools require a registered workspace by default", async () => {
-    const server = createGatewayServer({ workspaces: disabledWorkspaces() });
+  it.each([
+    ["gateway bearer", { transport: "http", authKind: "gateway_bearer", authScopes: ["mcp"] }],
+    ["auth disabled", { transport: "http", authKind: "disabled", authScopes: [] }],
+    ["configured no-auth path", { transport: "http", authScopes: [] }],
+    ["OAuth HTTP", { transport: "http", authKind: "oauth", authScopes: ["mcp"] }],
+    ["legacy OAuth context", { authKind: "oauth", authScopes: ["mcp"] }],
+  ] as const)(
+    "remote %s provider tools require a registered workspace by default",
+    async (_label, context) => {
+      const server = createGatewayServer({ workspaces: disabledWorkspaces() });
 
-    const result = await runWithRequestContext(
-      { authKind: "oauth", authScopes: ["mcp"], authClientId: "remote-client" },
-      () =>
+      const result = await runWithRequestContext(context, () =>
         registeredTools(server).codex_request.handler(
           {
             prompt: "hello",
@@ -185,17 +269,59 @@ describe("workspace registry", () => {
           },
           {}
         )
-    );
+      );
 
-    expect(result.isError).toBe(true);
-    expect(result.content[0]?.text).toContain("Remote OAuth provider requests require");
-  });
+      expect(result.isError).toBe(true);
+      expect(result.content[0]?.text).toContain("Remote HTTP provider requests require");
+    }
+  );
 
-  it("remote OAuth codex_fork_session requires a registered workspace by default", async () => {
+  it("allow_unregistered_working_dir does not bypass remote HTTP workspace gating", async () => {
     const server = createGatewayServer({ workspaces: disabledWorkspaces() });
 
     const result = await runWithRequestContext(
-      { authKind: "oauth", authScopes: ["mcp"], authClientId: "remote-client" },
+      { transport: "http", authKind: "gateway_bearer", authScopes: [] },
+      () =>
+        registeredTools(server).codex_request.handler(
+          {
+            prompt: "hello",
+            workingDir: tempDir,
+            approvalStrategy: "legacy",
+            optimizePrompt: false,
+          },
+          {}
+        )
+    );
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0]?.text).toContain("Remote HTTP provider requests require");
+
+    const allowUnregisteredServer = createGatewayServer({
+      workspaces: disabledWorkspacesWith({ allowUnregisteredWorkingDir: true }),
+    });
+    const stillRejected = await runWithRequestContext(
+      { transport: "http", authKind: "gateway_bearer", authScopes: [] },
+      () =>
+        registeredTools(allowUnregisteredServer).codex_request.handler(
+          {
+            prompt: "hello",
+            workingDir: tempDir,
+            approvalStrategy: "legacy",
+            optimizePrompt: false,
+          },
+          {}
+        )
+    );
+
+    expect(stillRejected.isError).toBe(true);
+    expect(stillRejected.content[0]?.text).toContain("Remote HTTP provider requests require");
+  });
+
+  it("remote HTTP codex_fork_session requires a registered workspace by default", async () => {
+    const server = createGatewayServer({ workspaces: disabledWorkspaces() });
+
+    const result = await runWithRequestContext(
+      { transport: "http", authKind: "gateway_bearer", authScopes: ["mcp"] },
       () =>
         registeredTools(server).codex_fork_session.handler(
           {
@@ -207,7 +333,40 @@ describe("workspace registry", () => {
     );
 
     expect(result.isError).toBe(true);
-    expect(result.content[0]?.text).toContain("Remote OAuth provider requests require");
+    expect(result.content[0]?.text).toContain("Remote HTTP provider requests require");
+  });
+
+  it("remote HTTP gating covers all provider sync and async request tools before spawn", async () => {
+    const server = createAsyncGatewayServer(disabledWorkspaces());
+    const tools = registeredTools(server);
+    const toolArgs = {
+      prompt: "hello",
+      approvalStrategy: "legacy",
+      optimizePrompt: false,
+    };
+
+    for (const toolName of [
+      "claude_request",
+      "codex_request",
+      "gemini_request",
+      "grok_request",
+      "mistral_request",
+      "claude_request_async",
+      "codex_request_async",
+      "gemini_request_async",
+      "grok_request_async",
+      "mistral_request_async",
+    ]) {
+      const result = await runWithRequestContext(
+        { transport: "http", authKind: "gateway_bearer", authScopes: [] },
+        () => tools[toolName].handler(toolArgs, {})
+      );
+
+      expect(result.isError, `${toolName} should fail closed`).toBe(true);
+      expect(result.content[0]?.text, `${toolName} error`).toContain(
+        "Remote HTTP provider requests require"
+      );
+    }
   });
 
   it("workspace admin tools require an OAuth workspace admin scope", async () => {

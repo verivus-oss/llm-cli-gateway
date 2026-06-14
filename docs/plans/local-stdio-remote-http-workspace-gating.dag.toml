@@ -1,0 +1,376 @@
+[meta]
+title = "Local stdio vs remote HTTP workspace gating"
+status = "planned"
+schema_version = "1.0"
+source_spec = "docs/plans/local-stdio-remote-http-workspace-gating.spec.md"
+date = "2026-06-14"
+target_branch = "master"
+summary = "Make transport origin explicit so local stdio keeps unrestricted local filesystem behavior while every HTTP/tunnel MCP provider execution fails closed unless it resolves a registered workspace, default workspace, or session workspace."
+
+affected_runtime_surfaces = [
+  "claude_request",
+  "claude_request_async",
+  "codex_request",
+  "codex_request_async",
+  "gemini_request",
+  "gemini_request_async",
+  "grok_request",
+  "grok_request_async",
+  "mistral_request",
+  "mistral_request_async",
+  "codex_fork_session",
+]
+
+source_files_to_inspect = [
+  "src/request-context.ts",
+  "src/http-transport.ts",
+  "src/index.ts",
+  "src/workspace-registry.ts",
+  "src/__tests__/workspace-registry.test.ts",
+  "src/__tests__/http-transport.test.ts",
+  "README.md",
+  "docs/personal-mcp/PRODUCT_CONTRACT.md",
+  "docs/personal-mcp/ENDPOINT_EXPOSURE.md",
+  "docs/personal-mcp/connect-chatgpt.md",
+  "docs/personal-mcp/connect-claude.md",
+  "docs/personal-mcp/connect-claude-desktop.md",
+  "docs/personal-mcp/connect-codex.md",
+  "docs/personal-mcp/connect-gemini-cli.md",
+  "docs/personal-mcp/connect-grok.md",
+]
+
+[non_goals]
+items = [
+  "Do not change provider CLI sandbox semantics, approval semantics, or upstream CLI argument contracts.",
+  "Do not add a new general-purpose HTTP bypass for arbitrary filesystem paths.",
+  "Do not infer trust from Host, loopback addresses, X-Forwarded-* headers, tunnel headers, or bearer-vs-OAuth auth kind.",
+  "Do not change workspace admin authorization. Workspace mutation remains gated by LLM_GATEWAY_WORKSPACE_ADMIN=1 plus the workspace:admin OAuth scope.",
+  "Do not include async orphan restart/readback behavior from issue #39.",
+]
+
+[security_notes]
+fail_closed_http = true
+notes = [
+  "Every HTTP MCP request is remote-capable, including bearer, OAuth, auth-disabled, and configured no-auth connector paths.",
+  "HTTP provider execution must require a registered workspace alias, session workspace metadata, or [workspaces].default before spawning any provider CLI.",
+  "[workspaces].allow_unregistered_working_dir must remain a stdio/local legacy setting only and must not bypass HTTP/tunnel workspace gating.",
+  "Do not use Host, localhost, loopback bind address, X-Forwarded-* headers, tunnel headers, or auth kind to downgrade an HTTP request to local trust.",
+  "Path validation for selected workspaces must keep rejecting escaping workingDir, addDir, includeDirs, and worktree requests.",
+]
+
+[review_gate]
+required_after_implementation = true
+instructions = [
+  "Run the cross-LLM review only after implementation and local verification are complete.",
+  "Reviewers must inspect src/request-context.ts, src/http-transport.ts, src/index.ts, src/workspace-registry.ts, workspace/http tests, README.md, and docs/personal-mcp docs directly.",
+  "Reviewers must verify code, docs, and tests themselves and must not rely on the implementer's summary.",
+  "Reviewers must explicitly check that HTTP behavior fails closed and that stdio/no-context local behavior remains unrestricted for unregistered workingDir/addDir.",
+  "Reviewers must check codex_fork_session as well as all sync and async provider request tools.",
+]
+
+[[nodes]]
+id = "baseline-read-and-map-current-policy"
+status = "planned"
+description = """
+Read the source spec and current implementation. Confirm the old split:
+request contexts have auth fields but no transport marker, HTTP transport builds
+contexts in bearer/OAuth/disabled/no-auth flows, and resolveWorkspaceAndWorktreeForRequest
+currently gates remote behavior on OAuth auth kind plus a global unregistered
+workingDir/addDir check.
+"""
+dependencies = []
+expected_files_touched = []
+acceptance_criteria = [
+  "Implementation owner can point to every runWithRequestContext call in src/http-transport.ts.",
+  "Implementation owner can point to the OAuth-only guard and allow_unregistered_working_dir guard in src/index.ts.",
+  "Implementation owner has identified provider sync/async handlers and codex_fork_session as affected surfaces.",
+]
+verification_commands = [
+  "rg -n \"runWithRequestContext|GatewayRequestContext\" src/http-transport.ts src/request-context.ts",
+  "rg -n \"resolveWorkspaceAndWorktreeForRequest|authKind|allowUnregisteredWorkingDir|codex_fork_session\" src/index.ts",
+]
+
+[[nodes]]
+id = "tests-first-transport-context-and-http-gating"
+status = "planned"
+description = """
+Update regression tests before implementation where practical. The focused tests
+should assert the desired new behavior and fail on the current code: local
+stdio/no request context accepts unregistered workingDir/addDir past workspace
+gating, while HTTP transport contexts reject provider execution without a
+workspace/default/session workspace regardless of bearer, OAuth, auth-disabled,
+or no-auth connector path.
+"""
+dependencies = ["baseline-read-and-map-current-policy"]
+expected_files_touched = [
+  "src/__tests__/workspace-registry.test.ts",
+  "src/__tests__/http-transport.test.ts",
+]
+acceptance_criteria = [
+  "No-context local codex_request with unregistered workingDir no longer expects the old workspace-registration error.",
+  "No-context local provider request with unregistered addDir succeeds past workspace gating or fails only at later mocked/provider execution boundaries.",
+  "HTTP request context with authKind = gateway_bearer and transport = http rejects provider execution without workspace/default/session workspace.",
+  "HTTP request context with authKind = disabled and transport = http rejects provider execution without workspace/default/session workspace.",
+  "HTTP request context with transport = http and no authKind rejects provider execution without workspace/default/session workspace, matching configured no-auth connector paths.",
+  "OAuth HTTP still rejects provider execution without workspace/default/session workspace, but expected error text names HTTP/remote workspace registration rather than OAuth specifically.",
+  "codex_fork_session rejects remote HTTP without workspace/default/session workspace.",
+  "Registered workspace aliases still reject escaping workingDir and addDir.",
+  "[workspaces].allow_unregistered_working_dir = true does not bypass the HTTP workspace requirement.",
+  "Workspace admin tools still require LLM_GATEWAY_WORKSPACE_ADMIN=1 and workspace:admin scope.",
+]
+verification_commands = [
+  "npx vitest run src/__tests__/workspace-registry.test.ts src/__tests__/http-transport.test.ts",
+]
+
+[[nodes]]
+id = "extend-request-context-transport-marker"
+status = "planned"
+description = """
+Extend GatewayRequestContext with transport?: \"stdio\" | \"http\". Keep authScopes
+required. Absence of request context remains the current stdio/internal case;
+if future stdio code wraps requests in context, it must use transport = \"stdio\".
+"""
+dependencies = ["tests-first-transport-context-and-http-gating"]
+expected_files_touched = [
+  "src/request-context.ts",
+]
+acceptance_criteria = [
+  "GatewayRequestContext exposes transport?: \"stdio\" | \"http\".",
+  "Existing authKind, authScopes, and authClientId behavior remains compatible.",
+  "TypeScript callers can construct old contexts until HTTP transport is updated.",
+]
+verification_commands = [
+  "npm run build",
+]
+
+[[nodes]]
+id = "mark-all-http-mcp-contexts"
+status = "planned"
+description = """
+Set transport = \"http\" for every HTTP MCP request context in src/http-transport.ts.
+This includes bearer-token requests, OAuth-token requests as returned by
+authorizeBearerRequest, auth-disabled requests, and configured no-auth connector
+paths. DELETE/health/OAuth metadata paths do not spawn providers, but every MCP
+request passed to StreamableHTTPServerTransport through runWithRequestContext
+must carry the HTTP marker.
+"""
+dependencies = ["extend-request-context-transport-marker"]
+expected_files_touched = [
+  "src/http-transport.ts",
+  "src/__tests__/http-transport.test.ts",
+]
+acceptance_criteria = [
+  "Initial no-auth requestContext is { authScopes: [], transport: \"http\" } or equivalent.",
+  "Authenticated requestContext preserves authKind, authScopes, authClientId, and adds transport: \"http\".",
+  "HTTP session initialize and subsequent session requests both run with a transport-marked context.",
+  "Tests directly observe context transport from a tool call over bearer HTTP.",
+  "Tests directly observe context transport from a configured no-auth connector path.",
+]
+verification_commands = [
+  "npx vitest run src/__tests__/http-transport.test.ts",
+  "npm run build",
+]
+
+[[nodes]]
+id = "replace-oauth-guard-with-transport-gating"
+status = "planned"
+description = """
+Replace the OAuth-only remote workspace guard in resolveWorkspaceAndWorktreeForRequest
+with a transport-based predicate. The resolver should treat
+getRequestContext()?.transport === \"http\" as remote. During migration it may
+also treat authKind === \"oauth\" as remote for backward compatibility, but the
+security decision must be transport based once HTTP contexts are marked.
+"""
+dependencies = ["mark-all-http-mcp-contexts"]
+expected_files_touched = [
+  "src/index.ts",
+  "src/__tests__/workspace-registry.test.ts",
+]
+acceptance_criteria = [
+  "Remote predicate is based on requestContext?.transport === \"http\".",
+  "HTTP provider execution without workspace/default/session workspace throws before provider spawn.",
+  "Error text names remote HTTP/workspace registration and does not imply OAuth is the only remote case.",
+  "Bearer HTTP, OAuth HTTP, auth-disabled HTTP, and no-auth connector HTTP are all covered by the same policy.",
+  "No trust inference is added from Host, loopback, X-Forwarded-* headers, tunnel headers, or auth kind.",
+]
+verification_commands = [
+  "npx vitest run src/__tests__/workspace-registry.test.ts src/__tests__/http-transport.test.ts",
+  "npm run build",
+]
+
+[[nodes]]
+id = "preserve-stdio-unregistered-local-behavior"
+status = "planned"
+description = """
+Adjust the unregistered workingDir/addDir guard so local stdio/no-context calls
+are not forced to register workspaces before using local absolute workingDir or
+addDir. Explicit workspace aliases, defaults, worktrees, session workspace
+metadata, provider argument sanitization, and registered-workspace validation
+must continue to work as before.
+"""
+dependencies = ["replace-oauth-guard-with-transport-gating"]
+expected_files_touched = [
+  "src/index.ts",
+  "src/__tests__/workspace-registry.test.ts",
+]
+acceptance_criteria = [
+  "No request context is treated as local stdio/internal, not remote.",
+  "transport = \"stdio\" is treated as local if future callers provide it.",
+  "Local no-context unregistered workingDir/addDir does not fail at workspace registration gate.",
+  "isGatewayAppDirCwd safeguard still requires a workspace/default when the gateway app dir would otherwise be the provider cwd.",
+  "Selected registered workspaces still validate relative workingDir/addDir paths and reject escapes.",
+]
+verification_commands = [
+  "npx vitest run src/__tests__/workspace-registry.test.ts",
+  "npm run build",
+]
+
+[[nodes]]
+id = "close-allow-unregistered-http-bypass"
+status = "planned"
+description = """
+Ensure [workspaces].allow_unregistered_working_dir cannot bypass HTTP/tunnel
+workspace gating. The setting may remain for local stdio legacy behavior only,
+but it must not allow arbitrary HTTP workingDir/addDir/includeDirs/worktree
+provider execution outside a selected registered workspace.
+"""
+dependencies = ["preserve-stdio-unregistered-local-behavior"]
+expected_files_touched = [
+  "src/index.ts",
+  "src/__tests__/workspace-registry.test.ts",
+]
+acceptance_criteria = [
+  "HTTP transport with allow_unregistered_working_dir = true still rejects provider execution without workspace/default/session workspace.",
+  "HTTP transport with allow_unregistered_working_dir = true and arbitrary workingDir rejects before provider spawn.",
+  "Local stdio/no-context behavior remains compatible with the legacy setting.",
+  "Docs later describe allow_unregistered_working_dir as stdio/local legacy only.",
+]
+verification_commands = [
+  "npx vitest run src/__tests__/workspace-registry.test.ts",
+]
+
+[[nodes]]
+id = "cover-provider-tools-and-codex-fork"
+status = "planned"
+description = """
+Audit all provider execution call sites to ensure every sync and async provider
+request tool plus codex_fork_session uses the same workspace resolution policy
+before spawning a provider CLI. Add tests or table-driven assertions where the
+current coverage would not catch a missing resolver call.
+"""
+dependencies = ["close-allow-unregistered-http-bypass"]
+expected_files_touched = [
+  "src/index.ts",
+  "src/__tests__/workspace-registry.test.ts",
+]
+acceptance_criteria = [
+  "claude_request and claude_request_async are covered.",
+  "codex_request and codex_request_async are covered.",
+  "gemini_request and gemini_request_async are covered.",
+  "grok_request and grok_request_async are covered.",
+  "mistral_request and mistral_request_async are covered.",
+  "codex_fork_session is covered.",
+  "No provider spawn path accepts an HTTP request without selected workspace/default/session workspace.",
+]
+verification_commands = [
+  "rg -n \"resolveWorkspaceAndWorktreeForRequest\" src/index.ts",
+  "npx vitest run src/__tests__/workspace-registry.test.ts",
+]
+
+[[nodes]]
+id = "docs-stdio-vs-http-workspace-language"
+status = "planned"
+description = """
+Update README and personal-MCP docs to clarify transport behavior. Stdio is the
+recommended unrestricted local development transport. HTTP/tunnel clients are
+remote-capable and must use registered workspace aliases, a configured default,
+or session workspace metadata for provider execution. Remote clients pass
+relative paths inside the selected workspace.
+"""
+dependencies = ["cover-provider-tools-and-codex-fork"]
+expected_files_touched = [
+  "README.md",
+  "docs/personal-mcp/PRODUCT_CONTRACT.md",
+  "docs/personal-mcp/ENDPOINT_EXPOSURE.md",
+  "docs/personal-mcp/connect-chatgpt.md",
+  "docs/personal-mcp/connect-claude.md",
+  "docs/personal-mcp/connect-claude-desktop.md",
+  "docs/personal-mcp/connect-codex.md",
+  "docs/personal-mcp/connect-gemini-cli.md",
+  "docs/personal-mcp/connect-grok.md",
+]
+acceptance_criteria = [
+  "Stdio examples state stdio is the local unrestricted path for machine-local development access.",
+  "HTTP/tunnel examples state provider execution requires registered workspace aliases/defaults/session workspace.",
+  "Workspace registry docs describe aliases as the remote filesystem boundary.",
+  "Docs do not suggest disabling auth or using no-auth connector paths as a filesystem bypass.",
+  "Docs state allow_unregistered_working_dir is not an HTTP/tunnel bypass.",
+]
+verification_commands = [
+  "npm run format:check",
+]
+
+[[nodes]]
+id = "focused-verification"
+status = "planned"
+description = """
+Run focused verification for the policy slice after code and docs are updated.
+This gate is expected before broader repository checks.
+"""
+dependencies = ["docs-stdio-vs-http-workspace-language"]
+expected_files_touched = []
+acceptance_criteria = [
+  "Focused workspace registry tests pass.",
+  "Focused HTTP transport tests pass.",
+  "Build passes after type changes.",
+]
+verification_commands = [
+  "npx vitest run src/__tests__/workspace-registry.test.ts src/__tests__/http-transport.test.ts",
+  "npm run build",
+]
+
+[[nodes]]
+id = "repo-verification"
+status = "planned"
+description = """
+Run repository-level verification after focused tests pass. Run the full test
+suite if the implementation touches shared request handling or if focused tests
+do not exercise all changed code paths.
+"""
+dependencies = ["focused-verification"]
+expected_files_touched = []
+acceptance_criteria = [
+  "Lint passes.",
+  "Formatting check passes.",
+  "Full npm test is run if appropriate for the shared resolver/transport change, or the reason for not running it is documented.",
+]
+verification_commands = [
+  "npm run lint",
+  "npm run format:check",
+  "npm test",
+]
+
+[[nodes]]
+id = "cross-llm-review-gate"
+status = "planned"
+description = """
+After implementation and verification, run a separate cross-LLM review gate.
+The review is not a substitute for local tests. Reviewers must inspect code,
+docs, and tests directly and verify the security policy from source rather than
+from summaries.
+"""
+dependencies = ["repo-verification"]
+expected_files_touched = [
+  "docs/plans/local-stdio-remote-http-workspace-gating.review-report.md",
+]
+acceptance_criteria = [
+  "Review prompt includes source spec path, this DAG path, and all affected runtime surfaces.",
+  "Reviewers directly inspect request-context, HTTP transport, index resolver/provider paths, workspace registry, focused tests, README, and personal-MCP docs.",
+  "Reviewers explicitly answer whether HTTP fails closed for bearer, OAuth, auth-disabled, and no-auth connector paths.",
+  "Reviewers explicitly answer whether local stdio/no-context unrestricted behavior is preserved for unregistered workingDir/addDir.",
+  "Reviewers explicitly answer whether allow_unregistered_working_dir cannot bypass HTTP/tunnel workspace gating.",
+  "Review findings are recorded in a review report before merge.",
+]
+verification_commands = [
+  "Use gtwy async review tools or equivalent cross-LLM review workflow after implementation.",
+]

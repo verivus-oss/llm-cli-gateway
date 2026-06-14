@@ -1,6 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 
 export interface GatewayRequestContext {
+  transport?: "stdio" | "http";
   authKind?: "disabled" | "gateway_bearer" | "oauth";
   authScopes: string[];
   authClientId?: string;

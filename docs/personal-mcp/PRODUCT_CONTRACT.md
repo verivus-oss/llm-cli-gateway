@@ -34,6 +34,8 @@ The MVP assumes a single trusted user. It still treats local secrets as sensitiv
 - Provider credentials must not leave user-owned storage.
 - Bearer tokens, provider credentials, tunnel tokens, and authorization headers must be redacted from logs, diagnostics, assistant packets, and setup exports.
 - Remote web clients require HTTPS at the tunnel, proxy, or hosting boundary.
+- Workspace aliases are the remote filesystem boundary. HTTP MCP requests, including tunneled HTTPS, bearer-token HTTP, OAuth HTTP, auth-disabled HTTP, and generated no-auth connector paths, must resolve a registered workspace alias, session workspace, or configured default before provider execution.
+- Stdio is the unrestricted local development transport for machine-local filesystem paths. `[workspaces].allow_unregistered_working_dir` is local/stdio legacy behavior and is not an HTTP or tunnel bypass.
 - Setup flows must not ask users to paste provider passwords, raw credential files, or unrelated config into a remote chat.
 - Setup steps must be idempotent and recoverable without hand-editing code.
 

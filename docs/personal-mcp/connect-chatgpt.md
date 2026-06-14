@@ -10,6 +10,8 @@ Start here:
 
 ChatGPT is a remote web client. Use this guide only when the setup UI shows a public HTTPS MCP URL and `endpoint_exposure.web_clients_supported` is `true`.
 
+Provider execution from ChatGPT must use a registered workspace alias, session workspace, or configured default workspace. Pass relative paths inside that workspace; no-auth connector paths and auth changes are not filesystem bypasses.
+
 ## Steps
 
 1. Run `llm-cli-gateway tunnel start`.

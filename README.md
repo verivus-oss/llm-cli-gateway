@@ -45,7 +45,7 @@ Or use directly with `npx` from an MCP client:
 - Can run requests inside gateway-managed git worktrees for isolated multi-agent review and implementation loops.
 - Ships personal-appliance setup surfaces: HTTP transport with bearer-token auth, `doctor --json`, setup UI artifacts, provider setup snippets, Docker fallback, and checked release bundles.
 - Remote web connectors use MCP OAuth discovery and authorization-code setup with static client or shared-secret gates. Client secrets are generated locally, stored only as hashes, and printed only by explicit copy-once commands.
-- Provider CLI requests can select registered workspaces by alias via `workspace`; remote requests should use aliases, not arbitrary filesystem paths. New local folder/Git workspaces can be created only under configured allowed roots.
+- Provider CLI requests can select registered workspaces by alias via `workspace`; every HTTP/tunnel request must use a registered alias, session workspace, or `[workspaces].default` before provider execution. Local unrestricted filesystem access is the stdio transport.
 
 ## Workflow Assets
 
@@ -337,6 +337,8 @@ For clients that already support local stdio MCP servers, add a configuration li
 }
 ```
 
+Stdio is the recommended path for unrestricted machine-local development access. HTTP MCP, including localhost HTTP and tunneled HTTPS, is treated as remote-capable for provider execution: provider tools must resolve a registered workspace alias, a session workspace, or `[workspaces].default` before spawning a CLI. Remote clients should pass relative `workingDir`, `addDir`, and include-directory values inside the selected workspace; disabling auth or using a no-auth connector path is not a filesystem bypass.
+
 This generic stdio example is not provider-support verification for the Personal MCP Appliance. Client-specific setup guides for ChatGPT, Claude web, Claude Desktop, Codex, Gemini CLI, Gemini web, and Grok remain gated by the provider-support matrix in [docs/personal-mcp/PRODUCT_CONTRACT.md](docs/personal-mcp/PRODUCT_CONTRACT.md).
 
 ### Available Tools
@@ -398,6 +400,8 @@ Execute a Claude Code request with optional session management.
 - `worktree` (boolean|object, optional): Run inside a gateway-owned git worktree (slice λ)
 - `promptParts` (object, optional): Cache-aware structured prompt `{ system?, tools?, context?, task }`; mutually exclusive with `prompt`
 - `forceRefresh` (boolean, optional): Bypass dedup and force a fresh CLI run, default: false
+
+Workspace boundary: stdio callers may use machine-local paths directly. HTTP/tunnel callers must pass `workspace` or rely on a configured default/session workspace; path fields are then validated relative to that workspace. `[workspaces].allow_unregistered_working_dir` is a stdio/local legacy setting and does not allow arbitrary HTTP working directories or additional directories.
 
 **Response extras:**
 

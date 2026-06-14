@@ -6,6 +6,7 @@ import { z } from "zod/v3";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { startHttpGateway, type HttpGatewayHandle } from "../http-transport.js";
+import { getRequestContext } from "../request-context.js";
 
 // Layer 6 / U20: HTTP MCP transport coverage with mocked gateway server.
 //
@@ -26,7 +27,7 @@ function makeEchoServer(): McpServer {
   const server = new McpServer({ name: "echo-test-server", version: "0.0.1" });
   server.tool("echo", { value: z.string().describe("Value to echo back.") }, async ({ value }) => ({
     content: [{ type: "text" as const, text: `echo:${value}` }],
-    structuredContent: { value },
+    structuredContent: { value, requestContext: getRequestContext() ?? null },
   }));
   return server;
 }
@@ -459,6 +460,88 @@ describe("Layer 6 HTTP MCP transport (U20)", () => {
       }),
     });
     expect(connectorResponse.status).toBe(200);
+  });
+
+  it("marks bearer HTTP tool-call request contexts with transport=http", async () => {
+    gateway = await startGateway();
+    const transport = new StreamableHTTPClientTransport(new URL(gateway.url), {
+      requestInit: { headers: { authorization: `Bearer ${TEST_TOKEN}` } },
+    });
+    const client = new Client({ name: "context-test-client", version: "0.0.1" }, {});
+
+    try {
+      await client.connect(transport);
+      const callResult = await client.callTool({
+        name: "echo",
+        arguments: { value: "context" },
+      });
+      const structured = callResult.structuredContent as {
+        requestContext?: { transport?: string; authKind?: string; authScopes?: string[] };
+      };
+      expect(structured.requestContext).toMatchObject({
+        transport: "http",
+        authKind: "gateway_bearer",
+        authScopes: [],
+      });
+    } finally {
+      await client.close();
+      await transport.close();
+    }
+  });
+
+  it("marks auth-disabled HTTP tool-call request contexts with transport=http", async () => {
+    process.env.LLM_GATEWAY_AUTH_DISABLED = "1";
+    delete process.env.LLM_GATEWAY_AUTH_TOKEN;
+    gateway = await startGateway();
+    const transport = new StreamableHTTPClientTransport(new URL(gateway.url));
+    const client = new Client({ name: "disabled-auth-context-test", version: "0.0.1" }, {});
+
+    try {
+      await client.connect(transport);
+      const callResult = await client.callTool({
+        name: "echo",
+        arguments: { value: "context" },
+      });
+      const structured = callResult.structuredContent as {
+        requestContext?: { transport?: string; authKind?: string; authScopes?: string[] };
+      };
+      expect(structured.requestContext).toMatchObject({
+        transport: "http",
+        authKind: "disabled",
+        authScopes: [],
+      });
+    } finally {
+      await client.close();
+      await transport.close();
+    }
+  });
+
+  it("marks configured no-auth connector request contexts with transport=http", async () => {
+    process.env.LLM_GATEWAY_NO_AUTH_PATHS = "/chatgpt/unit-test/mcp";
+    gateway = await startGateway();
+    const transport = new StreamableHTTPClientTransport(
+      new URL("/chatgpt/unit-test/mcp", gateway.url)
+    );
+    const client = new Client({ name: "no-auth-context-test", version: "0.0.1" }, {});
+
+    try {
+      await client.connect(transport);
+      const callResult = await client.callTool({
+        name: "echo",
+        arguments: { value: "context" },
+      });
+      const structured = callResult.structuredContent as {
+        requestContext?: { transport?: string; authKind?: string; authScopes?: string[] };
+      };
+      expect(structured.requestContext).toMatchObject({
+        transport: "http",
+        authScopes: [],
+      });
+      expect(structured.requestContext?.authKind).toBeUndefined();
+    } finally {
+      await client.close();
+      await transport.close();
+    }
   });
 
   it("returns 503 when HTTP transport is started without LLM_GATEWAY_AUTH_TOKEN", async () => {
