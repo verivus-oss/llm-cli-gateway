@@ -25,12 +25,33 @@ jobs:
         with:
           persist-credentials: false
 
+      # Mint a SHORT-LIVED (1h), read-only App token so Scorecard's
+      # Branch-Protection check can read the protection rules (the default
+      # GITHUB_TOKEN cannot, which left that check at -1). Down-scoped to
+      # administration+metadata read ONLY, even though the App can do more —
+      # this is the org's standard pattern (see verivus-oss/sqry), and is far
+      # safer than a long-lived PAT. Only the mirror holds MIRROR_APP_*; the
+      # private dev repo skips this and Scorecard falls back to GITHUB_TOKEN.
+      - name: Mint read-only App token (branch-protection read)
+        id: app-token
+        if: github.repository == 'verivus-oss/llm-cli-gateway'
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0
+        with:
+          app-id: ${{ secrets.MIRROR_APP_ID }}
+          private-key: ${{ secrets.MIRROR_APP_PRIVATE_KEY }}
+          owner: verivus-oss
+          repositories: llm-cli-gateway
+          permission-administration: read
+          permission-metadata: read
+
       - name: Run Scorecard
         uses: ossf/scorecard-action@4eaacf0543bb3f2c246792bd56e8cdeffafb205a  # v2.4.3
         with:
           results_file: results.sarif
           results_format: sarif
           publish_results: true
+          # Empty on the private repo (step skipped) -> action uses GITHUB_TOKEN.
+          repo_token: ${{ steps.app-token.outputs.token }}
 
       - name: Upload SARIF artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7
