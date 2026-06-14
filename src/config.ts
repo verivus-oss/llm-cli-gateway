@@ -820,6 +820,9 @@ const OAuthConfigSchema = z
     registration_policy: OAuthRegistrationPolicySchema.default("static_clients"),
     allow_public_clients: z.boolean().default(false),
     token_ttl_seconds: z.number().int().positive().default(3600),
+    // F14b: opt-in human-consent gate before /oauth/authorize issues a code.
+    require_consent: z.boolean().default(false),
+    consent_secret_hash: z.string().optional(),
     clients: z.array(OAuthClientSchema).default([]),
     shared_secret: OAuthSharedSecretSchema.optional(),
   })
@@ -837,6 +840,8 @@ function disabledOAuthConfig(
     registrationPolicy: "static_clients",
     allowPublicClients: false,
     tokenTtlSeconds: 3600,
+    requireConsent: false,
+    consentSecretHash: null,
     clients: [],
     sharedSecret: null,
     sources: { configFile: sourcePath, envOverrides },
@@ -878,6 +883,16 @@ export function loadRemoteOAuthConfig(
         ? "LLM_GATEWAY_OAUTH_REGISTRATION_SECRET"
         : "LLM_GATEWAY_OAUTH_SHARED_SECRET"
     );
+  }
+  if (env.LLM_GATEWAY_OAUTH_REQUIRE_CONSENT !== undefined) {
+    merged.require_consent = env.LLM_GATEWAY_OAUTH_REQUIRE_CONSENT === "1";
+    envOverrides.push("LLM_GATEWAY_OAUTH_REQUIRE_CONSENT");
+  }
+  if (env.LLM_GATEWAY_OAUTH_CONSENT_SECRET) {
+    // Env-only compatibility path: plaintext hashed in memory, never persisted.
+    merged.consent_secret_hash = hashSecret(env.LLM_GATEWAY_OAUTH_CONSENT_SECRET);
+    merged.require_consent = merged.require_consent ?? true;
+    envOverrides.push("LLM_GATEWAY_OAUTH_CONSENT_SECRET");
   }
 
   const parsed = OAuthConfigSchema.safeParse(merged);
@@ -927,6 +942,16 @@ export function loadRemoteOAuthConfig(
       "[http.oauth].registration_policy='open_dev' is intended for localhost/dev only"
     );
   }
+  // F14b: the consent gate cannot fail closed without a credential to verify.
+  if (data.require_consent) {
+    if (!data.consent_secret_hash || !isSecretHash(data.consent_secret_hash)) {
+      logWarn(
+        logger,
+        "[http.oauth].require_consent is set but consent_secret_hash is missing/invalid; remote OAuth disabled"
+      );
+      return disabledOAuthConfig(sourcePath, envOverrides);
+    }
+  }
 
   return {
     enabled: data.enabled,
@@ -936,6 +961,8 @@ export function loadRemoteOAuthConfig(
     registrationPolicy: data.registration_policy as OAuthRegistrationPolicy,
     allowPublicClients: data.allow_public_clients,
     tokenTtlSeconds: data.token_ttl_seconds,
+    requireConsent: data.require_consent,
+    consentSecretHash: data.consent_secret_hash ?? null,
     clients: data.clients.map(client => ({
       clientId: client.client_id,
       clientSecretHash: client.client_secret_hash ?? null,

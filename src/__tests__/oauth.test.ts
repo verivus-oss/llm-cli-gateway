@@ -58,6 +58,32 @@ describe("remote OAuth config and secrets", () => {
     expect(config.clients[0]?.clientSecretHash).toBe(secretHash);
   });
 
+  it("disables OAuth when require_consent is set without a consent secret (F14b)", () => {
+    writeFileSync(
+      configPath,
+      ["[http.oauth]", "enabled = true", "require_consent = true", ""].join("\n")
+    );
+    expect(loadRemoteOAuthConfig().enabled).toBe(false);
+  });
+
+  it("loads the consent gate with a valid consent_secret_hash (F14b)", () => {
+    const consentHash = hashSecret("approve-me");
+    writeFileSync(
+      configPath,
+      [
+        "[http.oauth]",
+        "enabled = true",
+        "require_consent = true",
+        `consent_secret_hash = "${consentHash}"`,
+        "",
+      ].join("\n")
+    );
+    const config = loadRemoteOAuthConfig();
+    expect(config.enabled).toBe(true);
+    expect(config.requireConsent).toBe(true);
+    expect(config.consentSecretHash).toBe(consentHash);
+  });
+
   it("disables OAuth when a persisted client secret is plaintext", () => {
     writeFileSync(
       configPath,

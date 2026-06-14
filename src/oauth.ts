@@ -103,6 +103,31 @@ function firstHeader(value: string | string[] | undefined): string | undefined {
   return Array.isArray(value) ? value[0] : value;
 }
 
+const HTML_ESCAPES: Record<string, string> = {
+  "&": "&amp;",
+  "<": "&lt;",
+  ">": "&gt;",
+  '"': "&quot;",
+  "'": "&#39;",
+};
+
+function escapeHtml(value: string): string {
+  return value.replace(/[&<>"']/g, char => HTML_ESCAPES[char] ?? char);
+}
+
+function readCookie(req: IncomingMessage, name: string): string | null {
+  const header = firstHeader(req.headers.cookie);
+  if (!header) return null;
+  for (const part of header.split(";")) {
+    const idx = part.indexOf("=");
+    if (idx < 0) continue;
+    if (part.slice(0, idx).trim() === name) {
+      return decodeURIComponent(part.slice(idx + 1).trim());
+    }
+  }
+  return null;
+}
+
 function methodNotAllowed(res: ServerResponse): void {
   res.writeHead(405, { allow: "GET, POST", "content-type": "application/json" });
   res.end(JSON.stringify({ error: "Method not allowed" }));
@@ -448,6 +473,21 @@ export class OAuthServer {
       res.end();
       return;
     }
+    // F14b: human-consent gate. The request is fully validated above; before
+    // minting a code, require the operator to authenticate + approve. A bad
+    // request never reaches here (it 302s an OAuth error), so the consent page
+    // only renders for legitimate grant requests.
+    if (this.opts.config.requireConsent) {
+      const isSubmission = req.method === "POST" && params.get("gw_consent") === "1";
+      if (!isSubmission) {
+        this.renderConsentPage(res, params, clientId, requestedScopes);
+        return;
+      }
+      if (!this.verifyConsent(req, params)) {
+        this.renderConsentPage(res, params, clientId, requestedScopes, "Incorrect access code.");
+        return;
+      }
+    }
     this.pruneExpiredCodes();
     const code = randomUUID();
     this.codes.set(code, {
@@ -463,6 +503,70 @@ export class OAuthServer {
     if (state) target.searchParams.set("state", state);
     res.writeHead(302, { location: target.toString() });
     res.end();
+  }
+
+  /** F14b: verify the consent form's CSRF token (double-submit) + access code. */
+  private verifyConsent(req: IncomingMessage, params: URLSearchParams): boolean {
+    const cookie = readCookie(req, "gw_oauth_csrf");
+    const formCsrf = params.get("gw_csrf");
+    if (!cookie || !formCsrf || !timingSafeStringEqual(cookie, formCsrf)) return false;
+    const secret = params.get("consent_secret") ?? "";
+    const hash = this.opts.config.consentSecretHash;
+    return Boolean(hash && secret && verifySecret(secret, hash));
+  }
+
+  /** F14b: render the operator consent form, carrying the validated OAuth params. */
+  private renderConsentPage(
+    res: ServerResponse,
+    params: URLSearchParams,
+    clientId: string,
+    requestedScopes: string[],
+    error?: string
+  ): void {
+    const csrf = randomUUID();
+    const carried: Array<[string, string | null]> = [
+      ["response_type", params.get("response_type")],
+      ["client_id", clientId],
+      ["redirect_uri", params.get("redirect_uri")],
+      ["scope", params.get("scope")],
+      ["state", params.get("state")],
+      ["code_challenge", params.get("code_challenge")],
+      ["code_challenge_method", params.get("code_challenge_method")],
+      ["gw_consent", "1"],
+      ["gw_csrf", csrf],
+    ];
+    const hidden = carried
+      .filter(([, value]) => value != null && value !== "")
+      .map(
+        ([key, value]) =>
+          `<input type="hidden" name="${escapeHtml(key)}" value="${escapeHtml(String(value))}">`
+      )
+      .join("\n      ");
+    const scopeList = requestedScopes.map(escapeHtml).join(", ");
+    const errorBlock = error ? `<p class="err">${escapeHtml(error)}</p>` : "";
+    const html = `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Authorize access</title>
+<style>body{font-family:system-ui,sans-serif;max-width:32rem;margin:3rem auto;padding:0 1rem}
+.box{border:1px solid #ddd;border-radius:8px;padding:1.5rem}label{display:block;margin:.75rem 0 .25rem}
+input[type=password]{width:100%;padding:.5rem;box-sizing:border-box}button{margin-top:1rem;padding:.6rem 1.2rem}
+.err{color:#b00020}.muted{color:#555;font-size:.9rem}</style></head>
+<body><div class="box"><h2>Authorize access</h2>
+<p>Application <strong>${escapeHtml(clientId)}</strong> is requesting access to: <strong>${scopeList}</strong>.</p>
+${errorBlock}
+<form method="post" autocomplete="off">
+      ${hidden}
+      <label for="consent_secret">Gateway access code</label>
+      <input id="consent_secret" type="password" name="consent_secret" required autofocus>
+      <button type="submit">Approve</button>
+</form>
+<p class="muted">Only approve if you initiated this connection.</p></div></body></html>`;
+    res.writeHead(200, {
+      "content-type": "text/html; charset=utf-8",
+      "set-cookie": `gw_oauth_csrf=${csrf}; HttpOnly; SameSite=Lax; Path=/oauth`,
+      "cache-control": "no-store",
+    });
+    res.end(html);
   }
 
   private async handleToken(req: IncomingMessage, res: ServerResponse): Promise<void> {

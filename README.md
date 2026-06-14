@@ -1168,6 +1168,10 @@ await callTool("session_delete", {
   ```bash
   LLM_GATEWAY_TRUSTED_PRINCIPAL_HEADER=x-gateway-principal node dist/index.js
   ```
+- `LLM_GATEWAY_OAUTH_REQUIRE_CONSENT` / `LLM_GATEWAY_OAUTH_CONSENT_SECRET`: Opt-in human-consent gate for the built-in OAuth server. When enabled (`REQUIRE_CONSENT=1`, or implied by setting `CONSENT_SECRET`), `/oauth/authorize` renders an operator approval page (CSRF-protected) and issues an authorization code **only** after the dedicated consent password is entered — instead of auto-issuing. `CONSENT_SECRET` is the plaintext password (hashed in memory; or persist a `consent_secret_hash` in `[http.oauth]`). Off by default; remote OAuth refuses to enable consent without a secret to verify.
+  ```bash
+  LLM_GATEWAY_OAUTH_REQUIRE_CONSENT=1 LLM_GATEWAY_OAUTH_CONSENT_SECRET='choose-a-strong-code' node dist/index.js
+  ```
 - `LLM_GATEWAY_CONFIG`: Path to the gateway TOML config (default: `~/.llm-cli-gateway/config.toml`). See **Persistence configuration** above for the `[persistence]` schema.
 - `LLM_GATEWAY_LOGS_DB`: **Deprecated** — overrides `[persistence].path` and selects `backend = "sqlite"` (or `backend = "none"` when set to `none`). Emits a deprecation warning at startup; migrate to `config.toml`.
   ```bash

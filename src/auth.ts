@@ -39,6 +39,10 @@ export interface RemoteOAuthConfig {
   registrationPolicy: OAuthRegistrationPolicy;
   allowPublicClients: boolean;
   tokenTtlSeconds: number;
+  /** F14b: require an operator consent step before /oauth/authorize issues a code. */
+  requireConsent: boolean;
+  /** F14b: scrypt hash of the dedicated consent password (verified on the consent form). */
+  consentSecretHash: string | null;
   clients: RemoteOAuthClientConfig[];
   sharedSecret: RemoteOAuthSharedSecretConfig | null;
   sources: { configFile: string | null; envOverrides: string[] };

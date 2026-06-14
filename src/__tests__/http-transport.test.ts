@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { hashSecret } from "../oauth.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod/v3";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -111,6 +112,8 @@ describe("Layer 6 HTTP MCP transport (U20)", () => {
     delete process.env.LLM_GATEWAY_OAUTH_OPEN_DEV;
     delete process.env.LLM_GATEWAY_HTTP_HOST;
     delete process.env.LLM_GATEWAY_TRUSTED_PRINCIPAL_HEADER;
+    delete process.env.LLM_GATEWAY_OAUTH_REQUIRE_CONSENT;
+    delete process.env.LLM_GATEWAY_OAUTH_CONSENT_SECRET;
   });
 
   function writeOAuthConfig(lines: string[]): string {
@@ -199,6 +202,136 @@ describe("Layer 6 HTTP MCP transport (U20)", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  // F14b consent-gate fixtures: a registered confidential client + consent secret.
+  function startConsentGateway(): Promise<HttpGatewayHandle> {
+    const dir = mkdtempSync(join(tmpdir(), "f14b-consent-"));
+    const cfg = join(dir, "config.toml");
+    writeFileSync(
+      cfg,
+      [
+        "[http.oauth]",
+        "enabled = true",
+        "require_consent = true",
+        `consent_secret_hash = "${hashSecret("approve-me")}"`,
+        "",
+        "[[http.oauth.clients]]",
+        'client_id = "test-client"',
+        `client_secret_hash = "${hashSecret("client-secret")}"`,
+        'allowed_redirect_uris = ["https://app.example/cb"]',
+        'scopes = ["mcp"]',
+        "",
+      ].join("\n")
+    );
+    process.env.LLM_GATEWAY_CONFIG = cfg;
+    process.env.LLM_GATEWAY_PUBLIC_URL = "https://gw.example.test/mcp";
+    return startGateway();
+  }
+
+  function authorizeQuery(challenge: string): URLSearchParams {
+    return new URLSearchParams({
+      response_type: "code",
+      client_id: "test-client",
+      redirect_uri: "https://app.example/cb",
+      code_challenge: challenge,
+      code_challenge_method: "S256",
+      scope: "mcp",
+      state: "xyz",
+    });
+  }
+
+  it("renders a consent page instead of issuing a code when require_consent is set (F14b)", async () => {
+    gateway = await startConsentGateway();
+    const { challenge } = { challenge: pkceChallenge("verifier-" + "a".repeat(48)) };
+    const res = await fetch(
+      new URL(`/oauth/authorize?${authorizeQuery(challenge).toString()}`, gateway.url),
+      { redirect: "manual" }
+    );
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("text/html");
+    expect(res.headers.get("set-cookie") ?? "").toContain("gw_oauth_csrf=");
+    const html = await res.text();
+    expect(html).toContain("Authorize access");
+    expect(html).toContain("test-client");
+    // No authorization code is issued on the GET render.
+    expect(html).not.toContain("code=");
+  });
+
+  it("issues a code only after a valid consent submission (F14b)", async () => {
+    gateway = await startConsentGateway();
+    const challenge = pkceChallenge("verifier-" + "b".repeat(48));
+    const page = await fetch(
+      new URL(`/oauth/authorize?${authorizeQuery(challenge).toString()}`, gateway.url),
+      { redirect: "manual" }
+    );
+    const csrf = /gw_oauth_csrf=([^;]+)/.exec(page.headers.get("set-cookie") ?? "")?.[1] ?? "";
+    expect(csrf).not.toBe("");
+
+    const form = authorizeQuery(challenge);
+    form.set("gw_consent", "1");
+    form.set("gw_csrf", csrf);
+    form.set("consent_secret", "approve-me");
+    const approved = await fetch(new URL("/oauth/authorize", gateway.url), {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        cookie: `gw_oauth_csrf=${csrf}`,
+      },
+      body: form.toString(),
+      redirect: "manual",
+    });
+    expect(approved.status).toBe(302);
+    const location = approved.headers.get("location") ?? "";
+    expect(location).toContain("https://app.example/cb?");
+    expect(location).toContain("code=");
+  });
+
+  it("rejects a consent submission with the wrong access code (F14b)", async () => {
+    gateway = await startConsentGateway();
+    const challenge = pkceChallenge("verifier-" + "c".repeat(48));
+    const page = await fetch(
+      new URL(`/oauth/authorize?${authorizeQuery(challenge).toString()}`, gateway.url),
+      { redirect: "manual" }
+    );
+    const csrf = /gw_oauth_csrf=([^;]+)/.exec(page.headers.get("set-cookie") ?? "")?.[1] ?? "";
+
+    const form = authorizeQuery(challenge);
+    form.set("gw_consent", "1");
+    form.set("gw_csrf", csrf);
+    form.set("consent_secret", "wrong-code");
+    const rejected = await fetch(new URL("/oauth/authorize", gateway.url), {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        cookie: `gw_oauth_csrf=${csrf}`,
+      },
+      body: form.toString(),
+      redirect: "manual",
+    });
+    // Re-renders the consent page (no redirect, no code).
+    expect(rejected.status).toBe(200);
+    expect(await rejected.text()).toContain("Incorrect access code");
+  });
+
+  it("rejects a consent submission with a mismatched CSRF token (F14b)", async () => {
+    gateway = await startConsentGateway();
+    const challenge = pkceChallenge("verifier-" + "d".repeat(48));
+    const form = authorizeQuery(challenge);
+    form.set("gw_consent", "1");
+    form.set("gw_csrf", "attacker-supplied");
+    form.set("consent_secret", "approve-me");
+    const res = await fetch(new URL("/oauth/authorize", gateway.url), {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        cookie: `gw_oauth_csrf=different-cookie-value`,
+      },
+      body: form.toString(),
+      redirect: "manual",
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("location")).toBeNull();
   });
 
   afterEach(async () => {
