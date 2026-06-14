@@ -4,6 +4,13 @@
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
+echo "==> sync static site version to package.json (site/index.html)"
+# The marketing site carries hard-coded version strings; keep them in lock-step
+# with package.json so the site never drifts behind a release. The companion
+# test (site-version.test.ts) makes a mismatch a red build in `npm run check`
+# below. Deploy the result with scripts/deploy-site.sh after publishing.
+node scripts/sync-site-version.mjs
+
 echo "==> npm install (apply overrides; package-lock.json is the source of truth)"
 # Remove the shrinkwrap first: when npm-shrinkwrap.json exists npm treats it
 # as authoritative and lets package-lock.json go stale. The shrinkwrap is then
