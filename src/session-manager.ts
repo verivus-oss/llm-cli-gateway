@@ -17,6 +17,7 @@ import { DEFAULT_SESSION_TTL_SECONDS } from "./config.js";
 import type { DatabaseConnection } from "./db.js";
 import type { Logger } from "./logger.js";
 import { noopLogger } from "./logger.js";
+import { getRequestContext, resolveOwnerPrincipal } from "./request-context.js";
 
 export const CLI_TYPES = ["claude", "codex", "gemini", "grok", "mistral"] as const;
 export type CliType = (typeof CLI_TYPES)[number];
@@ -47,6 +48,12 @@ export interface Session {
   lastUsedAt: string;
   description?: string;
   metadata?: Record<string, any>;
+  /**
+   * F3: ownership principal that created the session. Stamped from the request
+   * context ambient at creation; `"local"` for stdio. Absent on legacy records
+   * (treated as legacy-unowned by F3b enforcement).
+   */
+  ownerPrincipal?: string | null;
 }
 
 export interface SessionStorage {
@@ -168,6 +175,9 @@ export class FileSessionManager {
       createdAt: new Date().toISOString(),
       lastUsedAt: new Date().toISOString(),
       description: sessionDescription,
+      // F3: stamp the owner from the request context ambient at creation
+      // (synchronous with the tool handler). stdio → "local".
+      ownerPrincipal: resolveOwnerPrincipal(getRequestContext()),
     };
 
     this.storage.sessions[id] = session;

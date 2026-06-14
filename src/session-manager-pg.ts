@@ -1,6 +1,7 @@
 import type { Pool } from "pg";
 import { randomUUID } from "crypto";
 import { Session, ProviderType } from "./session-manager.js";
+import { getRequestContext, resolveOwnerPrincipal } from "./request-context.js";
 
 export type { Logger } from "./logger.js";
 
@@ -31,15 +32,17 @@ export class PostgreSQLSessionManager {
     const id = sessionId || randomUUID();
     const sessionDescription = description ?? DEFAULT_SESSION_DESCRIPTIONS[cli];
     const now = new Date().toISOString();
+    // F3: stamp the owner from the request context ambient at creation.
+    const ownerPrincipal = resolveOwnerPrincipal(getRequestContext());
 
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
 
       await client.query(
-        `INSERT INTO sessions (id, cli, description, created_at, last_used_at)
-         VALUES ($1, $2, $3, $4, $5)`,
-        [id, cli, sessionDescription, now, now]
+        `INSERT INTO sessions (id, cli, description, created_at, last_used_at, owner_principal)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [id, cli, sessionDescription, now, now, ownerPrincipal]
       );
 
       await client.query(
@@ -57,6 +60,7 @@ export class PostgreSQLSessionManager {
         createdAt: now,
         lastUsedAt: now,
         description: sessionDescription,
+        ownerPrincipal,
       };
     } catch (error) {
       await client.query("ROLLBACK");
@@ -71,7 +75,7 @@ export class PostgreSQLSessionManager {
    */
   async getSession(sessionId: string): Promise<Session | null> {
     const result = await this.pool.query<Session>(
-      `SELECT id, cli, description, metadata, created_at AS "createdAt", last_used_at AS "lastUsedAt"
+      `SELECT id, cli, description, metadata, created_at AS "createdAt", last_used_at AS "lastUsedAt", owner_principal AS "ownerPrincipal"
        FROM sessions
        WHERE id = $1`,
       [sessionId]
@@ -85,11 +89,11 @@ export class PostgreSQLSessionManager {
    */
   async listSessions(cli?: ProviderType): Promise<Session[]> {
     const query = cli
-      ? `SELECT id, cli, description, metadata, created_at AS "createdAt", last_used_at AS "lastUsedAt"
+      ? `SELECT id, cli, description, metadata, created_at AS "createdAt", last_used_at AS "lastUsedAt", owner_principal AS "ownerPrincipal"
          FROM sessions
          WHERE cli = $1
          ORDER BY last_used_at DESC`
-      : `SELECT id, cli, description, metadata, created_at AS "createdAt", last_used_at AS "lastUsedAt"
+      : `SELECT id, cli, description, metadata, created_at AS "createdAt", last_used_at AS "lastUsedAt", owner_principal AS "ownerPrincipal"
          FROM sessions
          ORDER BY last_used_at DESC`;
 

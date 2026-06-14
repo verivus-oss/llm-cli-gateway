@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { FileSessionManager } from "../session-manager.js";
+import { runWithRequestContext } from "../request-context.js";
 import { existsSync, mkdirSync, rmSync, readFileSync, statSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
@@ -35,6 +36,19 @@ describe("SessionManager", () => {
       expect(session.description).toBe("Test session");
       expect(session.createdAt).toBeDefined();
       expect(session.lastUsedAt).toBeDefined();
+    });
+
+    it("stamps ownerPrincipal 'local' when created with no request context (F3)", () => {
+      const session = sessionManager.createSession("claude", "Local session");
+      expect(session.ownerPrincipal).toBe("local");
+    });
+
+    it("stamps the ambient request-context principal as the owner (F3)", () => {
+      const session = runWithRequestContext(
+        { transport: "http", authScopes: [], authPrincipal: "user-alice@example.com" },
+        () => sessionManager.createSession("codex", "Owned session")
+      );
+      expect(session.ownerPrincipal).toBe("user-alice@example.com");
     });
 
     it("should create a session with custom ID", () => {
