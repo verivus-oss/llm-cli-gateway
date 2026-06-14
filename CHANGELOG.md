@@ -4,17 +4,42 @@ All notable changes to the llm-cli-gateway project.
 
 ## Unreleased
 
+## [2.8.0] - 2026-06-14: HTTP workspace gating and ACP transport
+
+### Added
+
+- Added ACP gateway extension foundations, including the contract, config and
+  capability surface, and transport core.
+- Added provider CLI release-target evidence for release validation: exact
+  probed Claude Code, Codex, Antigravity (`agy`), Grok, and Mistral Vibe
+  versions plus artifact SHA-256 values.
+- Added Gemini, Grok, and Mistral pricing families and Codex token/cache usage
+  telemetry extraction.
+
+### Changed
+
+- HTTP and tunnel provider execution now uses explicit request transport
+  metadata and requires a registered workspace, default workspace, or session
+  workspace before spawning a provider across sync/async request tools and
+  `codex_fork_session`. Local stdio keeps the prior unrestricted
+  `workingDir`/`addDir` behavior.
+- Replaced the OAuth-only remote workspace guard with transport-based HTTP
+  workspace gating, so bearer, OAuth, auth-disabled, and configured no-auth
+  connector HTTP paths all fail closed before provider spawn.
+- Replaced CodeQL with the OSS SAST workflow using OpenGrep, gosec, and
+  govulncheck.
+
+### Fixed
+
+- Corrected Claude default pricing/cache classification and Grok API pricing
+  bucket handling.
+- Preserved captured async orphan readbacks as completed flight-recorder rows
+  when stdout was captured and no failure was recorded.
+
 ### Documentation
 
-- Added `docs/upstream/release-targets.md`, a release-by-release provider CLI
-  target matrix that records the exact Claude Code, Codex, Antigravity (`agy`),
-  Grok, and Mistral Vibe versions and probed artifact SHA-256 values each
-  gateway release was validated against, without implying those versions are
-  pinned dependencies or support bounds.
-- Corrected async flight-recorder documentation for startup orphans: JobStore
-  rows still remain `orphaned`, but flight-recorder/readback rows now preserve
-  captured stdout as `completed` when no failure was recorded; only no-output
-  or explicit-failure orphans read back as failed restart records.
+- Documented Grok CLI prompt-surface telemetry limitations.
+- Documented ACP gateway extension research, design, and smoke validation.
 
 ## [2.7.0] - 2026-06-12: Provider capability inventory
 
