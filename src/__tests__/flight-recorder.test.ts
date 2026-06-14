@@ -150,6 +150,67 @@ describe("FlightRecorder migrations (U23 cache columns)", () => {
     expect(row.cache_creation_tokens).toBe(7);
   });
 
+  it("F4: redacts recognisable secrets from stored prompt/system/response", () => {
+    const rec = new FlightRecorder(dbPath, { redactSecrets: true });
+    rec.logStart({
+      correlationId: "corr-redact",
+      cli: "claude",
+      model: "sonnet",
+      prompt: "use sk-ant-abcdefghijklmnopqrstuvwx to call the API",
+      system: "Authorization: Bearer abcdef0123456789ghijkl",
+    });
+    rec.logComplete("corr-redact", {
+      response: "your key AKIA1234567890ABCDEF is configured",
+      durationMs: 1,
+      retryCount: 0,
+      circuitBreakerState: "closed",
+      optimizationApplied: false,
+      exitCode: 0,
+      status: "completed",
+    });
+    rec.close();
+
+    const db = new BetterSqlite3(dbPath);
+    const row = db
+      .prepare("SELECT prompt, system, response FROM requests WHERE id = ?")
+      .get("corr-redact") as any;
+    db.close();
+
+    expect(row.prompt).not.toContain("sk-ant-");
+    expect(row.prompt).toContain("[REDACTED]");
+    expect(row.system).toBe("Authorization: Bearer [REDACTED]");
+    expect(row.response).not.toContain("AKIA1234567890ABCDEF");
+    expect(row.response).toContain("[REDACTED]");
+  });
+
+  it("F4: stores content verbatim when redaction is disabled", () => {
+    const rec = new FlightRecorder(dbPath, { redactSecrets: false });
+    rec.logStart({
+      correlationId: "corr-raw",
+      cli: "claude",
+      model: "sonnet",
+      prompt: "sk-ant-abcdefghijklmnopqrstuvwx",
+    });
+    rec.close();
+
+    const db = new BetterSqlite3(dbPath);
+    const row = db.prepare("SELECT prompt FROM requests WHERE id = ?").get("corr-raw") as any;
+    db.close();
+    expect(row.prompt).toBe("sk-ant-abcdefghijklmnopqrstuvwx");
+  });
+
+  it("F4: leaves ordinary prompts unchanged under redaction", () => {
+    const rec = new FlightRecorder(dbPath, { redactSecrets: true });
+    const prompt = "Refactor the parser and add tests for the edge cases.";
+    rec.logStart({ correlationId: "corr-plain", cli: "claude", model: "sonnet", prompt });
+    rec.close();
+
+    const db = new BetterSqlite3(dbPath);
+    const row = db.prepare("SELECT prompt FROM requests WHERE id = ?").get("corr-plain") as any;
+    db.close();
+    expect(row.prompt).toBe(prompt);
+  });
+
   it("v3: adds stable_prefix_hash / stable_prefix_tokens and index on fresh DB", () => {
     new FlightRecorder(dbPath).close();
     const cols = tableColumns(dbPath);

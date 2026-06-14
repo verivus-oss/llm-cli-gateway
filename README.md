@@ -1168,6 +1168,11 @@ await callTool("session_delete", {
   # Disable durable persistence (also disables *_request_async tools)
   LLM_GATEWAY_LOGS_DB=none node dist/index.js
   ```
+- `LLM_GATEWAY_REDACT_LOGGED_SECRETS`: Redact recognisable secrets (provider/cloud/VCS keys, bearer tokens, JWTs, PEM private keys, `key=value` secret assignments) from the prompt/system/response copies written to the flight-recorder log. **Enabled by default**; set to `0`/`false`/`off`/`no` to store content verbatim. Only the audit log is affected — live sync responses and async `llm_job_result` output are never altered.
+  ```bash
+  # Opt out of flight-recorder secret redaction
+  LLM_GATEWAY_REDACT_LOGGED_SECRETS=0 node dist/index.js
+  ```
 
 ### CLI-Specific Settings
 

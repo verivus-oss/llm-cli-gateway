@@ -24,6 +24,10 @@ paths = [
   '''package-lock\.json$''',
   '''integrations/llm-plugin/dist/.*''',
   '''integrations/llm-plugin/.*\.egg-info/.*''',
+  # The secret-redaction unit test exists ONLY to exercise the redactor
+  # against deliberately fake provider/cloud/VCS keys, JWTs, and PEM blocks
+  # (F4). Every literal in it is a fixture, never a real secret.
+  '''src/__tests__/secret-redaction\.test\.ts$''',
 ]
 
 # Regex-scope allowlist: specific secret patterns that gitleaks would

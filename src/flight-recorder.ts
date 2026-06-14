@@ -23,6 +23,7 @@ import os from "os";
 import path from "path";
 import { openDatabase, openReadOnly } from "./sqlite-driver.js";
 import type { GatewayDatabase } from "./sqlite-driver.js";
+import { redactSecrets, isRedactionEnabled } from "./secret-redaction.js";
 import type { ProviderType } from "./session-manager.js";
 
 export interface FlightLogStart {
@@ -216,11 +217,14 @@ export class FlightRecorder {
   /** Set by close(); guards queryRequests from lazily reopening the RO connection. */
   private closed = false;
   private readonly dbPath: string;
+  /** F4: redact recognisable secrets from prompt/system/response before write. */
+  private readonly redactEnabled: boolean;
   private insertStartTxn: (entry: FlightLogStart) => void;
   private updateCompleteTxn: (correlationId: string, result: FlightLogResult) => void;
 
-  constructor(dbPath: string) {
+  constructor(dbPath: string, options: { redactSecrets?: boolean } = {}) {
     this.dbPath = dbPath;
+    this.redactEnabled = options.redactSecrets ?? isRedactionEnabled();
     // openDatabase owns parent-directory creation (mkdirSync recursive), so the
     // recorder no longer does its own mkdir. Any open/DDL failure throws and is
     // caught by createFlightRecorder → NoopFlightRecorder (graceful degradation).
@@ -412,11 +416,25 @@ export class FlightRecorder {
   }
 
   logStart(entry: FlightLogStart): void {
-    this.insertStartTxn(entry);
+    this.insertStartTxn(this.redactEnabled ? this.redactStart(entry) : entry);
   }
 
   logComplete(correlationId: string, result: FlightLogResult): void {
-    this.updateCompleteTxn(correlationId, result);
+    this.updateCompleteTxn(correlationId, this.redactEnabled ? this.redactResult(result) : result);
+  }
+
+  /** Redact secrets from the persisted prompt/system copy (audit log only). */
+  private redactStart(entry: FlightLogStart): FlightLogStart {
+    return {
+      ...entry,
+      prompt: redactSecrets(entry.prompt),
+      system: entry.system ? redactSecrets(entry.system) : entry.system,
+    };
+  }
+
+  /** Redact secrets from the persisted response copy (audit log only). */
+  private redactResult(result: FlightLogResult): FlightLogResult {
+    return { ...result, response: redactSecrets(result.response) };
   }
 
   /**
