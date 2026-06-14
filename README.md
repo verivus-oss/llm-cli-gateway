@@ -1164,6 +1164,10 @@ await callTool("session_delete", {
   ```bash
   LLM_GATEWAY_APPROVAL_ALLOW_BYPASS=1 node dist/index.js
   ```
+- `LLM_GATEWAY_TRUSTED_PRINCIPAL_HEADER`: Name of an HTTP header carrying the authenticated user identity asserted by a **trusted front door** (any identity-aware reverse proxy / IdP). When set, the gateway adopts that header value as the request's ownership principal — but **only** for requests authenticated with the gateway's own static bearer token (i.e. the trusted upstream proxy), never from an arbitrary remote client. Off by default; IdP-agnostic. Lets a proxy-fronted multi-user deployment carry per-user identity into the gateway.
+  ```bash
+  LLM_GATEWAY_TRUSTED_PRINCIPAL_HEADER=x-gateway-principal node dist/index.js
+  ```
 - `LLM_GATEWAY_CONFIG`: Path to the gateway TOML config (default: `~/.llm-cli-gateway/config.toml`). See **Persistence configuration** above for the `[persistence]` schema.
 - `LLM_GATEWAY_LOGS_DB`: **Deprecated** — overrides `[persistence].path` and selects `backend = "sqlite"` (or `backend = "none"` when set to `none`). Emits a deprecation warning at startup; migrate to `config.toml`.
   ```bash

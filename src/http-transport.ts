@@ -3,7 +3,12 @@ import { randomUUID } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
-import { authorizeBearerRequest, getRequiredBearerToken, writeAuthFailure } from "./auth.js";
+import {
+  authorizeBearerRequest,
+  getRequiredBearerToken,
+  resolveTrustedPrincipal,
+  writeAuthFailure,
+} from "./auth.js";
 import type { GatewayServerDeps } from "./index.js";
 import { loadRemoteOAuthConfig } from "./config.js";
 import { OAuthServer, oauthBaseUrlFromRequest } from "./oauth.js";
@@ -220,11 +225,17 @@ export async function startHttpGateway(options: HttpTransportOptions): Promise<H
           writeAuthFailure(res, auth, resourceMetadataUrl ? { resourceMetadataUrl } : {});
           return;
         }
+        // F14: behind a trusted front door (static-bearer caller + opt-in header),
+        // adopt the user identity the proxy asserted as the ownership principal;
+        // otherwise the principal is the OAuth client id (undefined for the
+        // shared static bearer / disabled auth).
+        const trustedPrincipal = resolveTrustedPrincipal(req, auth);
         requestContext = {
           transport: "http",
           authKind: auth.kind,
           authScopes: auth.scopes ?? [],
           authClientId: auth.clientId,
+          authPrincipal: trustedPrincipal ?? auth.clientId,
         };
       }
 

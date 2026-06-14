@@ -5,6 +5,14 @@ export interface GatewayRequestContext {
   authKind?: "disabled" | "gateway_bearer" | "oauth";
   authScopes: string[];
   authClientId?: string;
+  /**
+   * F14: the authenticated caller identity used as the ownership principal
+   * (consumed by F3 per-principal isolation). For OAuth callers this is the
+   * client id; behind a trusted front door (the trusted-principal-header seam)
+   * it is the user identity the proxy asserted. Undefined for the shared static
+   * bearer / disabled auth, where there is no distinct principal.
+   */
+  authPrincipal?: string;
 }
 
 const requestContext = new AsyncLocalStorage<GatewayRequestContext>();

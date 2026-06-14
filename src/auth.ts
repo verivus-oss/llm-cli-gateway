@@ -150,6 +150,34 @@ export function authorizeBearerRequest(
   return { ok: false, status: 401, message: "Unauthorized" };
 }
 
+// F14 trusted-principal-header seam. An identity-aware front door (any IdP)
+// authenticates the user and forwards their identity in a header, then proxies
+// to the gateway as the shared static bearer. We trust that header ONLY when the
+// caller authenticated as the gateway's own static bearer (`gateway_bearer`) —
+// i.e. it came from the trusted upstream, not an arbitrary remote client — and
+// only when the operator has named the header (opt-in). The value is sanitised
+// to a conservative principal charset to avoid log/identity injection.
+const TRUSTED_PRINCIPAL_PATTERN = /^[A-Za-z0-9._@:+=/-]{1,256}$/;
+
+export function trustedPrincipalHeaderName(env: NodeJS.ProcessEnv = process.env): string | null {
+  const raw = (env.LLM_GATEWAY_TRUSTED_PRINCIPAL_HEADER || "").trim().toLowerCase();
+  return raw || null;
+}
+
+export function resolveTrustedPrincipal(
+  req: IncomingMessage,
+  auth: AuthResult,
+  env: NodeJS.ProcessEnv = process.env
+): string | undefined {
+  const headerName = trustedPrincipalHeaderName(env);
+  if (!headerName || auth.kind !== "gateway_bearer") return undefined;
+  const raw = req.headers[headerName];
+  const value = Array.isArray(raw) ? raw[0] : raw;
+  if (!value) return undefined;
+  const trimmed = value.trim();
+  return TRUSTED_PRINCIPAL_PATTERN.test(trimmed) ? trimmed : undefined;
+}
+
 export function writeAuthFailure(
   res: ServerResponse,
   result: AuthResult,

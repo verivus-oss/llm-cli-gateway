@@ -110,6 +110,7 @@ describe("Layer 6 HTTP MCP transport (U20)", () => {
     delete process.env.LLM_GATEWAY_CONFIG;
     delete process.env.LLM_GATEWAY_OAUTH_OPEN_DEV;
     delete process.env.LLM_GATEWAY_HTTP_HOST;
+    delete process.env.LLM_GATEWAY_TRUSTED_PRINCIPAL_HEADER;
   });
 
   function writeOAuthConfig(lines: string[]): string {
@@ -595,6 +596,59 @@ describe("Layer 6 HTTP MCP transport (U20)", () => {
         authKind: "gateway_bearer",
         authScopes: [],
       });
+    } finally {
+      await client.close();
+      await transport.close();
+    }
+  });
+
+  it("adopts a trusted front-door principal under the static bearer when the seam is on (F14)", async () => {
+    process.env.LLM_GATEWAY_TRUSTED_PRINCIPAL_HEADER = "x-gateway-principal";
+    gateway = await startGateway();
+    const transport = new StreamableHTTPClientTransport(new URL(gateway.url), {
+      requestInit: {
+        headers: {
+          authorization: `Bearer ${TEST_TOKEN}`,
+          "x-gateway-principal": "user-alice@example.com",
+        },
+      },
+    });
+    const client = new Client({ name: "principal-on-test", version: "0.0.1" }, {});
+    try {
+      await client.connect(transport);
+      const callResult = await client.callTool({ name: "echo", arguments: { value: "ctx" } });
+      const structured = callResult.structuredContent as {
+        requestContext?: { authKind?: string; authPrincipal?: string };
+      };
+      expect(structured.requestContext).toMatchObject({
+        authKind: "gateway_bearer",
+        authPrincipal: "user-alice@example.com",
+      });
+    } finally {
+      await client.close();
+      await transport.close();
+    }
+  });
+
+  it("ignores a forwarded principal header when the seam is off (F14)", async () => {
+    // No LLM_GATEWAY_TRUSTED_PRINCIPAL_HEADER configured.
+    gateway = await startGateway();
+    const transport = new StreamableHTTPClientTransport(new URL(gateway.url), {
+      requestInit: {
+        headers: {
+          authorization: `Bearer ${TEST_TOKEN}`,
+          "x-gateway-principal": "spoofed-identity",
+        },
+      },
+    });
+    const client = new Client({ name: "principal-off-test", version: "0.0.1" }, {});
+    try {
+      await client.connect(transport);
+      const callResult = await client.callTool({ name: "echo", arguments: { value: "ctx" } });
+      const structured = callResult.structuredContent as {
+        requestContext?: { authPrincipal?: string };
+      };
+      expect(structured.requestContext?.authPrincipal).toBeUndefined();
     } finally {
       await client.close();
       await transport.close();
