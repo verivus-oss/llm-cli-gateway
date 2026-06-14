@@ -27,6 +27,8 @@ export interface JobRecord {
   finishedAt: string | null;
   pid: number | null;
   expiresAt: string;
+  /** F3: ownership principal that created the job (null for legacy rows). */
+  ownerPrincipal: string | null;
 }
 
 export function resolveJobStoreDbPath(): string | null {
@@ -86,7 +88,21 @@ function rowToRecord(row: any): JobRecord {
     finishedAt: row.finished_at,
     pid: row.pid,
     expiresAt: row.expires_at,
+    ownerPrincipal: row.owner_principal ?? null,
   };
+}
+
+/**
+ * F3: idempotent add of the `owner_principal` column to a pre-existing jobs
+ * table (fresh tables already include it via CREATE TABLE). Safe to call on
+ * every open; ALTER is skipped when the column already exists.
+ */
+function ensureJobsOwnerColumn(db: GatewayDatabase): void {
+  const cols = db.prepare("PRAGMA table_info(jobs)").all() as Array<{ name?: string }>;
+  const hasOwner = cols.some(col => col?.name === "owner_principal");
+  if (!hasOwner) {
+    db.exec("ALTER TABLE jobs ADD COLUMN owner_principal TEXT");
+  }
 }
 
 /**
@@ -103,6 +119,7 @@ export interface JobStore {
     outputFormat?: string;
     startedAt: string;
     pid: number | null;
+    ownerPrincipal?: string | null;
   }): void;
   recordOutput(id: string, stdout: string, stderr: string, outputTruncated: boolean): void;
   recordComplete(input: {
@@ -195,13 +212,18 @@ export class SqliteJobStore implements JobStore {
         started_at TEXT NOT NULL,
         finished_at TEXT,
         pid INTEGER,
-        expires_at TEXT NOT NULL
+        expires_at TEXT NOT NULL,
+        owner_principal TEXT
       );
       CREATE INDEX IF NOT EXISTS idx_jobs_request_key ON jobs(request_key);
       CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
       CREATE INDEX IF NOT EXISTS idx_jobs_expires_at ON jobs(expires_at);
       CREATE INDEX IF NOT EXISTS idx_jobs_request_key_finished ON jobs(request_key, finished_at);
     `);
+
+    // F3: idempotent migration — add owner_principal to a pre-existing jobs
+    // table. Legacy rows keep NULL (treated as legacy-unowned by enforcement).
+    ensureJobsOwnerColumn(this.db);
 
     if (process.platform !== "win32") {
       try {
@@ -217,10 +239,10 @@ export class SqliteJobStore implements JobStore {
     this.insertStmt = this.db.prepare(`
       INSERT INTO jobs (id, correlation_id, request_key, cli, args_json, output_format,
                         status, exit_code, stdout, stderr, output_truncated, error,
-                        started_at, finished_at, pid, expires_at)
+                        started_at, finished_at, pid, expires_at, owner_principal)
       VALUES (@id, @correlation_id, @request_key, @cli, @args_json, @output_format,
               @status, @exit_code, @stdout, @stderr, @output_truncated, @error,
-              @started_at, @finished_at, @pid, @expires_at)
+              @started_at, @finished_at, @pid, @expires_at, @owner_principal)
     `);
 
     this.updateOutputStmt = this.db.prepare(`
@@ -283,6 +305,7 @@ export class SqliteJobStore implements JobStore {
     outputFormat?: string;
     startedAt: string;
     pid: number | null;
+    ownerPrincipal?: string | null;
   }): void {
     this.insertStmt.run({
       id: input.id,
@@ -295,13 +318,14 @@ export class SqliteJobStore implements JobStore {
       exit_code: null,
       stdout: "",
       stderr: "",
-      output_truncated: 0,
       error: null,
+      output_truncated: 0,
       started_at: input.startedAt,
       finished_at: null,
       pid: input.pid,
       // Running jobs never expire — only completed/failed/canceled do.
       expires_at: FAR_FUTURE_ISO,
+      owner_principal: input.ownerPrincipal ?? null,
     });
   }
 
@@ -449,6 +473,7 @@ export class MemoryJobStore implements JobStore {
     outputFormat?: string;
     startedAt: string;
     pid: number | null;
+    ownerPrincipal?: string | null;
   }): void {
     this.rows.set(input.id, {
       id: input.id,
@@ -467,6 +492,7 @@ export class MemoryJobStore implements JobStore {
       finishedAt: null,
       pid: input.pid,
       expiresAt: FAR_FUTURE_ISO,
+      ownerPrincipal: input.ownerPrincipal ?? null,
     });
   }
 

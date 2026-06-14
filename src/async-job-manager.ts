@@ -19,6 +19,7 @@ import {
 } from "./flight-recorder.js";
 import { codexFrResponse } from "./codex-json-parser.js";
 import type { OrphanedJobSnapshot } from "./job-store.js";
+import { getRequestContext, resolveOwnerPrincipal } from "./request-context.js";
 
 export type LlmCli = "claude" | "codex" | "gemini" | "grok" | "mistral";
 export type AsyncJobStatus = "running" | "completed" | "failed" | "canceled" | "orphaned";
@@ -931,6 +932,10 @@ export class AsyncJobManager {
         outputFormat,
         startedAt,
         pid: child.pid ?? null,
+        // F3: stamp the ownership principal from the request context that is
+        // ambient at job creation (synchronous with the tool handler). stdio /
+        // boot-time orphan paths have no context → "local".
+        ownerPrincipal: resolveOwnerPrincipal(getRequestContext()),
       })
     );
     // Slice 1.5: only opt-in callers (pure async handlers) write logStart

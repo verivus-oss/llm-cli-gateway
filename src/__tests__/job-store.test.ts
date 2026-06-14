@@ -1,6 +1,7 @@
 import { mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
+import { createRequire } from "module";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   SqliteJobStore,
@@ -88,6 +89,88 @@ describe("JobStore", () => {
       // expiresAt = finishedAt + retentionMs
       const expectedExpiry = Date.parse(finishedAt) + resolveJobRetentionMs();
       expect(Date.parse(row!.expiresAt)).toBeCloseTo(expectedExpiry, -3);
+    });
+  });
+
+  describe("owner principal (F3)", () => {
+    it("stamps and returns the owner principal on recordStart", () => {
+      store.recordStart({
+        id: "job-owned",
+        correlationId: "c",
+        requestKey: computeRequestKey("claude", ["-p", "x"]),
+        cli: "claude",
+        args: ["-p", "x"],
+        startedAt: new Date().toISOString(),
+        pid: 1,
+        ownerPrincipal: "user-alice@example.com",
+      });
+      expect(store.getById("job-owned")?.ownerPrincipal).toBe("user-alice@example.com");
+    });
+
+    it("defaults the owner principal to null when omitted (legacy-unowned)", () => {
+      store.recordStart({
+        id: "job-unowned",
+        correlationId: "c",
+        requestKey: computeRequestKey("claude", ["-p", "y"]),
+        cli: "claude",
+        args: ["-p", "y"],
+        startedAt: new Date().toISOString(),
+        pid: 1,
+      });
+      expect(store.getById("job-unowned")?.ownerPrincipal).toBeNull();
+    });
+
+    it("migrates a pre-existing jobs table by adding owner_principal (NULL for legacy rows)", () => {
+      const require = createRequire(import.meta.url);
+      const BetterSqlite3 = require("better-sqlite3");
+      const legacyDir = mkdtempSync(join(tmpdir(), "job-store-legacy-"));
+      const legacyPath = join(legacyDir, "jobs.db");
+      const seed = new BetterSqlite3(legacyPath);
+      seed.exec(`
+        CREATE TABLE jobs (
+          id TEXT PRIMARY KEY, correlation_id TEXT NOT NULL, request_key TEXT NOT NULL,
+          cli TEXT NOT NULL, args_json TEXT NOT NULL, output_format TEXT, status TEXT NOT NULL,
+          exit_code INTEGER, stdout TEXT, stderr TEXT, output_truncated INTEGER NOT NULL DEFAULT 0,
+          error TEXT, started_at TEXT NOT NULL, finished_at TEXT, pid INTEGER, expires_at TEXT NOT NULL
+        );
+      `);
+      seed
+        .prepare(
+          `INSERT INTO jobs (id, correlation_id, request_key, cli, args_json, status, started_at, expires_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run(
+          "legacy-1",
+          "c",
+          "k",
+          "claude",
+          "[]",
+          "completed",
+          new Date().toISOString(),
+          "9999-12-31T23:59:59.999Z"
+        );
+      seed.close();
+
+      const migrated = new SqliteJobStore(legacyPath);
+      try {
+        // Legacy row survives migration; owner is NULL (legacy-unowned).
+        expect(migrated.getById("legacy-1")?.ownerPrincipal).toBeNull();
+        // New inserts after migration can carry an owner.
+        migrated.recordStart({
+          id: "new-1",
+          correlationId: "c",
+          requestKey: "k2",
+          cli: "claude",
+          args: [],
+          startedAt: new Date().toISOString(),
+          pid: null,
+          ownerPrincipal: "bob",
+        });
+        expect(migrated.getById("new-1")?.ownerPrincipal).toBe("bob");
+      } finally {
+        migrated.close();
+        rmSync(legacyDir, { recursive: true, force: true });
+      }
     });
   });
 
