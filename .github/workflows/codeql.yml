@@ -1,0 +1,74 @@
+# CodeQL (advanced / file-based). The mirror previously ran CodeQL via "default
+# setup" (a repo setting with no workflow file), which OpenSSF Scorecard's SAST
+# check cannot see — it parses workflow files for `github/codeql-action`. This
+# advanced workflow represents the same CodeQL analysis as a file so Scorecard
+# credits it. The OSS suite in sast.yml (opengrep + gosec + govulncheck) stays
+# the primary gate; CodeQL is the Scorecard-recognised tool.
+#
+# IMPORTANT: GitHub does not allow CodeQL "default setup" and an advanced
+# workflow on the same repo at once. Default setup must be DISABLED on the mirror
+# (Settings -> Code security -> Code scanning -> CodeQL -> switch to Advanced /
+# disable default) or these runs error with a conflict.
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "27 3 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    # CodeQL is free on the PUBLIC mirror; the private dev repo has no GitHub
+    # Advanced Security, so skip it there (its default branch is `master`, so the
+    # triggers above don't fire there anyway — this is belt and braces).
+    if: github.repository == 'verivus-oss/llm-cli-gateway'
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      packages: read
+      actions: read
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: javascript-typescript
+            build-mode: none
+          - language: python
+            build-mode: none
+          - language: go
+            build-mode: manual
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+
+      - if: matrix.language == 'go'
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          # Lock-step with installer/go.mod (1.26.4).
+          go-version: "1.26.4"
+          cache: false
+
+      - uses: github/codeql-action/init@e46ed2cbd01164d986452f91f178727624ae40d7 # v4.35.3
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+
+      # Go uses manual build-mode: build the installer module between init and
+      # analyze so CodeQL traces it. The Go module lives in installer/, which the
+      # autobuilder may not locate from the repo root, so build it explicitly.
+      - if: matrix.language == 'go'
+        working-directory: installer
+        run: go build ./...
+
+      - uses: github/codeql-action/analyze@e46ed2cbd01164d986452f91f178727624ae40d7 # v4.35.3
+        with:
+          category: "/language:${{ matrix.language }}"
