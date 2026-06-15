@@ -670,7 +670,9 @@ export function enabledApiProviders(
   env: NodeJS.ProcessEnv = process.env
 ): ApiProviderRuntime[] {
   const runtimes: ApiProviderRuntime[] = [];
-  for (const provider of Object.values(config.providers)) {
+  // Defensive: tolerate a ProvidersConfig built before the `providers` map
+  // existed (older callers / test mocks pass only { xai, sources }).
+  for (const provider of Object.values(config.providers ?? {})) {
     if (!isApiProviderEnabled(provider, env)) continue;
     runtimes.push({
       name: provider.name,

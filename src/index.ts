@@ -51,11 +51,20 @@ import {
   loadProvidersConfig,
   defaultGatewayConfigPath,
   isXaiProviderEnabled,
+  enabledApiProviders,
   minStableTokensForModel,
   type PersistenceConfig,
   type CacheAwarenessConfig,
   type ProvidersConfig,
+  type ApiProviderRuntime,
 } from "./config.js";
+import {
+  createApiProvider,
+  runApiRequest,
+  type ApiProvider,
+  type ApiRequest,
+} from "./api-provider.js";
+import { prepareApiRequest, ApiModelNotAllowedError } from "./api-request.js";
 import {
   createXaiResponse,
   XaiApiError,
@@ -868,6 +877,99 @@ async function awaitJobOrDefer(
     deferred: true,
     jobId: job.id,
     cli,
+    correlationId: corrId,
+    message: `Execution exceeded sync deadline (${SYNC_DEADLINE_MS}ms). Poll with llm_job_status, collect with llm_job_result.`,
+  };
+}
+
+/**
+ * Slice 2: the http sibling of `awaitJobOrDefer`. `awaitJobOrDefer` is CLI-only
+ * (asserts argv/env, spawns a process); this one routes an `ApiRequest` through
+ * `AsyncJobManager.startHttpJob` instead, sharing the SAME sync-deadline → defer
+ * → poll semantics and the same deferral gate.
+ */
+async function awaitApiJobOrDefer(
+  provider: ApiProvider,
+  apiRequest: ApiRequest,
+  corrId: string,
+  runtime: GatewayServerRuntime = resolveGatewayServerRuntime(),
+  onComplete?: () => void,
+  flightRecorderEntry?: AsyncJobFlightRecorderEntry,
+  extractUsage?: AsyncJobUsageExtractor
+): Promise<{ stdout: string; stderr: string; code: number } | DeferredJobResponse> {
+  let onCompleteOwnedByCaller = onComplete !== undefined;
+  const consumeOnComplete = (): void => {
+    if (!onCompleteOwnedByCaller || !onComplete) return;
+    onCompleteOwnedByCaller = false;
+    try {
+      onComplete();
+    } catch (err) {
+      runtime.logger.error(`awaitApiJobOrDefer onComplete (${provider.name}) threw`, err);
+    }
+  };
+
+  const deferralAvailable =
+    runtime.persistence.backend !== "none" &&
+    runtime.persistence.asyncJobsEnabled &&
+    runtime.asyncJobManager.hasStore();
+
+  if (SYNC_DEADLINE_MS === 0 || !deferralAvailable) {
+    // No deferral available — run the HTTP request inline to completion.
+    try {
+      const result = await runApiRequest(provider, apiRequest, runtime.logger);
+      return { stdout: result.text, stderr: "", code: 0 };
+    } catch (err) {
+      return { stdout: "", stderr: (err as Error).message, code: 1 };
+    } finally {
+      consumeOnComplete();
+    }
+  }
+
+  let outcome;
+  try {
+    outcome = runtime.asyncJobManager.startHttpJob({
+      provider,
+      apiRequest,
+      correlationId: corrId,
+      onComplete,
+      flightRecorderEntry,
+      extractUsage,
+    });
+    onCompleteOwnedByCaller = false;
+  } catch (err) {
+    consumeOnComplete();
+    throw err;
+  }
+
+  const job = outcome.snapshot;
+  if (outcome.deduped) {
+    runtime.logger.info(
+      `[${corrId}] api request deduped onto job ${job.id} (original corrId=${outcome.originalCorrelationId})`
+    );
+  }
+  const deadline = Date.now() + SYNC_DEADLINE_MS;
+  while (Date.now() < deadline) {
+    const snapshot = runtime.asyncJobManager.getJobSnapshot(job.id);
+    if (snapshot && snapshot.status !== "running") {
+      const result = runtime.asyncJobManager.getJobResult(job.id);
+      if (!result) return { stdout: "", stderr: "Job result unavailable", code: 1 };
+      return {
+        stdout: result.stdout,
+        stderr: result.stderr || result.error || "",
+        code: result.exitCode ?? 1,
+      };
+    }
+    await new Promise(resolve => setTimeout(resolve, SYNC_POLL_INTERVAL_MS));
+  }
+
+  runtime.asyncJobManager.armFlightCompleteForDeferral(job.id);
+  runtime.logger.info(
+    `[${corrId}] ${provider.name} sync deadline exceeded (${SYNC_DEADLINE_MS}ms), deferring to async job ${job.id}`
+  );
+  return {
+    deferred: true,
+    jobId: job.id,
+    cli: provider.name,
     correlationId: corrId,
     message: `Execution exceeded sync deadline (${SYNC_DEADLINE_MS}ms). Poll with llm_job_status, collect with llm_job_result.`,
   };
@@ -3932,6 +4034,185 @@ export async function handleGrokApiRequest(
   }
 }
 
+//──────────────────────────────────────────────────────────────────────────────
+// Slice 2: generic API-provider request tools (api_<name>_request[_async]).
+//──────────────────────────────────────────────────────────────────────────────
+
+interface ApiProviderToolParams {
+  prompt?: string;
+  system?: string;
+  model?: string;
+  correlationId?: string;
+  maxOutputTokens?: number;
+  temperature?: number;
+  topP?: number;
+  reasoningEffort?: "none" | "low" | "medium" | "high";
+  timeoutMs?: number;
+}
+
+/** Build the canonical ApiRequest + provider adapter for a tool call. */
+function buildApiProviderCall(
+  providerRuntime: ApiProviderRuntime,
+  params: ApiProviderToolParams
+): { provider: ApiProvider; apiRequest: ApiRequest } {
+  const apiRequest = prepareApiRequest(providerRuntime, {
+    prompt: params.prompt ?? "",
+    system: params.system,
+    model: params.model,
+    maxOutputTokens: params.maxOutputTokens,
+    temperature: params.temperature,
+    topP: params.topP,
+    reasoningEffort: params.reasoningEffort,
+    timeoutMs: params.timeoutMs,
+  });
+  const provider = createApiProvider(providerRuntime.name, providerRuntime.kind);
+  return { provider, apiRequest };
+}
+
+function buildApiSuccessResponse(
+  text: string,
+  corrId: string,
+  providerName: string
+): ExtendedToolResponse {
+  return {
+    content: [{ type: "text" as const, text }],
+    structuredContent: {
+      response: text,
+      correlationId: corrId,
+      cli: providerName,
+      exitCode: 0,
+    },
+  };
+}
+
+/** Sync `api_<name>_request`: assemble → run (sync deadline → defer) → format. */
+export async function handleApiProviderRequest(
+  runtimeArg: GatewayServerRuntime,
+  providerRuntime: ApiProviderRuntime,
+  params: ApiProviderToolParams
+): Promise<ExtendedToolResponse> {
+  const toolName = `api_${providerRuntime.name}_request`;
+  const corrId = params.correlationId ?? randomUUID();
+  const startTime = Date.now();
+  let wasSuccessful = false;
+  try {
+    if (!params.prompt || params.prompt.trim().length === 0) {
+      return createErrorResponse(toolName, 1, "prompt is required and cannot be empty", corrId);
+    }
+    const { provider, apiRequest } = buildApiProviderCall(providerRuntime, params);
+    const result = await awaitApiJobOrDefer(provider, apiRequest, corrId, runtimeArg);
+    if (isDeferredResponse(result)) return buildDeferredToolResponse(result);
+    if (result.code !== 0) {
+      return createErrorResponse(toolName, result.code, result.stderr, corrId);
+    }
+    wasSuccessful = true;
+    return buildApiSuccessResponse(result.stdout, corrId, providerRuntime.name);
+  } catch (err) {
+    if (err instanceof ApiModelNotAllowedError) {
+      return createErrorResponse(toolName, 1, err.message, corrId, err);
+    }
+    return createErrorResponse(toolName, 1, "", corrId, err as Error);
+  } finally {
+    runtimeArg.performanceMetrics.recordRequest(
+      providerRuntime.name,
+      Math.max(0, Date.now() - startTime),
+      wasSuccessful
+    );
+  }
+}
+
+/** Async `api_<name>_request_async`: start the http job, return its jobId. */
+export function handleApiProviderRequestAsync(
+  runtimeArg: GatewayServerRuntime,
+  providerRuntime: ApiProviderRuntime,
+  params: ApiProviderToolParams
+): ExtendedToolResponse {
+  const toolName = `api_${providerRuntime.name}_request_async`;
+  const corrId = params.correlationId ?? randomUUID();
+  try {
+    if (!params.prompt || params.prompt.trim().length === 0) {
+      return createErrorResponse(toolName, 1, "prompt is required and cannot be empty", corrId);
+    }
+    const { provider, apiRequest } = buildApiProviderCall(providerRuntime, params);
+    const outcome = runtimeArg.asyncJobManager.startHttpJob({
+      provider,
+      apiRequest,
+      correlationId: corrId,
+      writeFlightStart: true,
+    });
+    return buildDeferredToolResponse({
+      deferred: true,
+      jobId: outcome.snapshot.id,
+      cli: providerRuntime.name,
+      correlationId: corrId,
+      message: outcome.deduped
+        ? `Deduped onto existing job ${outcome.snapshot.id}. Poll with llm_job_status.`
+        : `Started async job ${outcome.snapshot.id}. Poll with llm_job_status, collect with llm_job_result.`,
+    });
+  } catch (err) {
+    if (err instanceof ApiModelNotAllowedError) {
+      return createErrorResponse(toolName, 1, err.message, corrId, err);
+    }
+    return createErrorResponse(toolName, 1, "", corrId, err as Error);
+  }
+}
+
+const ApiReasoningEffortSchema = z.enum(["none", "low", "medium", "high"]);
+
+/**
+ * Register `api_<name>_request` (+ `_async` when async jobs are enabled) for
+ * every enabled API provider. Gated on `enabledApiProviders` exactly as the
+ * grok_api tool is gated on `isXaiProviderEnabled` — so this registers nothing
+ * unless a `[providers.<name>]` is configured AND enabled (ships dormant).
+ */
+export function registerApiProviderTools(
+  server: McpServer,
+  runtime: GatewayServerRuntime,
+  providers: ProvidersConfig,
+  asyncJobsEnabled: boolean
+): string[] {
+  const registered: string[] = [];
+  const inputSchema = {
+    prompt: z.string().min(1).max(100000).optional().describe("Prompt text for the API provider"),
+    system: z.string().max(100000).optional().describe("Optional system instruction"),
+    model: z
+      .string()
+      .min(1)
+      .optional()
+      .describe("Model id; defaults to the provider default_model"),
+    correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
+    maxOutputTokens: z.number().int().positive().max(100000000).optional(),
+    temperature: z.number().finite().min(0).max(2).optional(),
+    topP: z.number().finite().min(0).max(1).optional(),
+    reasoningEffort: ApiReasoningEffortSchema.optional(),
+    timeoutMs: z.number().int().min(30_000).max(3_600_000).optional(),
+  };
+
+  for (const providerRuntime of enabledApiProviders(providers)) {
+    const name = providerRuntime.name;
+    server.tool(
+      `api_${name}_request`,
+      `Run a request against the "${name}" API provider (kind: ${providerRuntime.kind}) synchronously. Registered only when [providers.${name}] is configured and enabled.`,
+      inputSchema,
+      { title: `${name} API request`, readOnlyHint: false, openWorldHint: true },
+      async params => handleApiProviderRequest(runtime, providerRuntime, params)
+    );
+    registered.push(`api_${name}_request`);
+
+    if (asyncJobsEnabled) {
+      server.tool(
+        `api_${name}_request_async`,
+        `Start an async request against the "${name}" API provider; returns a jobId to poll with llm_job_status.`,
+        inputSchema,
+        { title: `${name} API request (async)`, readOnlyHint: false, openWorldHint: true },
+        async params => handleApiProviderRequestAsync(runtime, providerRuntime, params)
+      );
+      registered.push(`api_${name}_request_async`);
+    }
+  }
+  return registered;
+}
+
 /**
  * Slice 3 helper: compute the cache_ttl_expiring_soon warning for a
  * claude session, if the feature is enabled, the session has prior cache
@@ -5530,6 +5811,12 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
   registerBaseResources(server, runtime);
   registerValidationTools(server, { asyncJobManager });
   registerWorkspaceTools(server, runtime);
+  // Slice 2: per-provider api_<name>_request tools. Dormant unless a
+  // [providers.<name>] is configured + enabled (enabledApiProviders gate).
+  const apiProviderTools = registerApiProviderTools(server, runtime, providers, asyncJobsEnabled);
+  if (apiProviderTools.length > 0) {
+    runtime.logger.info(`Registered API provider tools: ${apiProviderTools.join(", ")}`);
+  }
 
   if (grokApiToolsEnabled) {
     server.tool(
