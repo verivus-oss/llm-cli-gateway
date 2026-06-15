@@ -30,6 +30,14 @@ claim installed-binary compatibility for that provider in the release notes.
 
 ## Current release baseline
 
+### v2.10.0 - 2026-06-15
+
+A security-only release (per-principal isolation on the `*_request` handlers,
+workspace/worktree resolvers, and `sessions://*` resources). No provider CLI
+changed between 2.9.0 and 2.10.0, so the 2.9.0 table below — itself byte-identical
+to the 2.8.0 baseline — remains the authoritative provider-compatibility baseline
+for 2.10.0.
+
 ### v2.9.0 - 2026-06-14
 
 Re-probed from the local release validation environment for the

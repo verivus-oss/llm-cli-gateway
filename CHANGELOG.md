@@ -4,6 +4,46 @@ All notable changes to the llm-cli-gateway project.
 
 ## Unreleased
 
+## [2.10.0] - 2026-06-15: Per-principal isolation on the request handlers
+
+A follow-up to the 2.9.0 per-principal isolation (F3): the ownership model was
+enforced on the `session_*` / `llm_*` bookkeeping tools but **not** on the
+`*_request` execution handlers, the workspace/worktree resolvers, or the
+`sessions://*` resources. An adversarial multi-LLM review of the 2.9.0 surface
+found two HIGH cross-principal bugs reachable in the opt-in remote/OAuth
+multi-tenant modes; this release closes them. The default local-stdio and shared
+static-bearer paths collapse to a single principal and are unaffected (no
+behaviour change). Provider CLI release targets are unchanged from 2.8.0/2.9.0
+(see `docs/upstream/release-targets.md`).
+
+### Security
+
+- Cross-principal session takeover (F3b, request handlers):
+  `getExistingSessionForProvider` now rejects a caller-supplied session id owned
+  by a different principal — the ownership check is ordered before the
+  provider-type comparison, so a foreign session never leaks its provider. This
+  is the choke point for every `*_request` / `*_request_async` handler (claude,
+  codex, gemini, grok, mistral, grok-api) and `codex_fork_session`. Previously a
+  remote principal could resume or read another principal's conversation by
+  supplying its session id.
+- Global active-session pointer is now owner-filtered at every request-handler
+  adoption site (and in the codex async path, which bypassed the choke point),
+  so a no-`sessionId` request can no longer adopt and resume another principal's
+  active session.
+- Workspace-isolation bypass (F3b, resolvers): `resolveWorktreeForRequest` and
+  `resolveWorkspaceAndWorktreeForRequest` ignore a referenced session the caller
+  does not own, so a foreign session's metadata can no longer select the
+  workspace/worktree working directory or satisfy the remote "registered
+  workspace" gate.
+- `sessions://*` resources are now owner-filtered: `sessions://all` and the five
+  per-provider session resources return only the caller's own rows and active
+  pointer, closing the session-id/metadata enumeration vector.
+
+### Tests
+
+- Adds `src/__tests__/f3b-request-handler-isolation.test.ts` (cross-principal
+  deny-path coverage for the request handlers and the `sessions://*` resources).
+
 ## [2.9.0] - 2026-06-14: MCP-surface red-team remediation
 
 This release remediates all 17 findings of a multi-LLM red-team of the gateway's
