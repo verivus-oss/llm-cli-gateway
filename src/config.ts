@@ -7,6 +7,8 @@ import type { Logger } from "./logger.js";
 import { logWarn, noopLogger } from "./logger.js";
 import type { RemoteOAuthConfig, OAuthRegistrationPolicy } from "./auth.js";
 import { hashSecret, isSecretHash } from "./oauth.js";
+import { isHttpsOrLoopbackUrl, isLoopbackUrl } from "./api-http.js";
+import type { ApiProviderKind } from "./api-provider.js";
 
 // Zod schemas for configuration validation
 const DatabaseUrlSchema = z
@@ -497,17 +499,6 @@ export const DEFAULT_XAI_API_KEY_ENV = "XAI_API_KEY";
 export const DEFAULT_XAI_BASE_URL = "https://api.x.ai/v1";
 export const DEFAULT_XAI_MODEL = "grok-build-0.1";
 
-function isHttpsOrLoopbackUrl(value: string): boolean {
-  try {
-    const url = new URL(value);
-    if (url.protocol === "https:") return true;
-    if (url.protocol !== "http:") return false;
-    return ["localhost", "127.0.0.1", "::1", "[::1]"].includes(url.hostname);
-  } catch {
-    return false;
-  }
-}
-
 const XaiProviderSchema = z
   .object({
     api_key_env: z.string().min(1).default(DEFAULT_XAI_API_KEY_ENV),
@@ -528,8 +519,49 @@ export interface XaiProviderConfig {
   defaultModel: string;
 }
 
+// Slice 0: generic `[providers.<name>]` config. `kind` selects the adapter; a
+// missing `api_key_env` is allowed only for keyless-local providers (see
+// isApiProviderEnabled). Strict so typos surface as a disabled-provider warning
+// rather than being silently ignored.
+const ApiProviderSchema = z
+  .object({
+    kind: z.enum(["openai-compatible", "anthropic", "xai-responses"]),
+    base_url: z.string().url().refine(isHttpsOrLoopbackUrl, {
+      message: "base_url must use https unless it targets localhost/loopback",
+    }),
+    api_key_env: z.string().min(1).optional(),
+    default_model: z.string().min(1),
+    models: z.array(z.string().min(1)).nonempty().optional(),
+  })
+  .strict();
+
+export interface ApiProviderConfig {
+  name: string;
+  kind: ApiProviderKind;
+  /** Env var name to read the key from at request time; null = keyless-local. */
+  apiKeyEnv: string | null;
+  baseUrl: string;
+  defaultModel: string;
+  /** Optional model allowlist; undefined = no restriction. */
+  models?: string[];
+}
+
+/** An enabled provider with its API key resolved from the environment. */
+export interface ApiProviderRuntime {
+  name: string;
+  kind: ApiProviderKind;
+  baseUrl: string;
+  defaultModel: string;
+  models?: string[];
+  /** Resolved key — empty string for a keyless-local provider. */
+  apiKey: string;
+}
+
 export interface ProvidersConfig {
+  /** Back-compat: the xAI provider, also present in `providers["xai"]`. */
   xai: XaiProviderConfig | null;
+  /** All configured API providers keyed by config name (incl. xai). */
+  providers: Record<string, ApiProviderConfig>;
   sources: { configFile: string | null };
 }
 
@@ -555,35 +587,101 @@ function readProvidersFile(
 export function loadProvidersConfig(logger: Logger = noopLogger): ProvidersConfig {
   const configPath = defaultGatewayConfigPath();
   const { raw, sourcePath } = readProvidersFile(configPath, logger);
-  const providers = (raw as Record<string, unknown> | undefined) ?? {};
-  const rawXai = providers.xai;
+  const rawProviders = (raw as Record<string, unknown> | undefined) ?? {};
+  const providers: Record<string, ApiProviderConfig> = {};
 
-  if (rawXai === undefined) {
-    return {
-      xai: null,
-      sources: { configFile: sourcePath },
-    };
+  // xAI keeps its dedicated schema (defaults + no required `kind`) so existing
+  // `[providers.xai]` configs continue to load unchanged.
+  let xai: XaiProviderConfig | null = null;
+  const rawXai = rawProviders.xai;
+  if (rawXai !== undefined) {
+    const parsed = XaiProviderSchema.safeParse(rawXai);
+    if (parsed.success) {
+      xai = {
+        apiKeyEnv: parsed.data.api_key_env,
+        baseUrl: parsed.data.base_url,
+        defaultModel: parsed.data.default_model,
+      };
+      providers.xai = {
+        name: "xai",
+        kind: "xai-responses",
+        apiKeyEnv: parsed.data.api_key_env,
+        baseUrl: parsed.data.base_url,
+        defaultModel: parsed.data.default_model,
+      };
+    } else {
+      logWarn(logger, "Invalid [providers.xai] config; xAI API provider disabled", {
+        error: parsed.error.message,
+      });
+    }
   }
 
-  const parsed = XaiProviderSchema.safeParse(rawXai);
-  if (!parsed.success) {
-    logWarn(logger, "Invalid [providers.xai] config; xAI API provider disabled", {
-      error: parsed.error.message,
-    });
-    return {
-      xai: null,
-      sources: { configFile: sourcePath },
-    };
-  }
-
-  return {
-    xai: {
-      apiKeyEnv: parsed.data.api_key_env,
+  // Every other `[providers.<name>]` entry parses with the generic schema.
+  // Failure isolation: a malformed single provider disables only itself (warn),
+  // never the whole map, never persistence.
+  for (const [name, rawProvider] of Object.entries(rawProviders)) {
+    if (name === "xai") continue;
+    const parsed = ApiProviderSchema.safeParse(rawProvider);
+    if (!parsed.success) {
+      logWarn(logger, `Invalid [providers.${name}] config; API provider disabled`, {
+        error: parsed.error.message,
+      });
+      continue;
+    }
+    providers[name] = {
+      name,
+      kind: parsed.data.kind,
+      apiKeyEnv: parsed.data.api_key_env ?? null,
       baseUrl: parsed.data.base_url,
       defaultModel: parsed.data.default_model,
-    },
-    sources: { configFile: sourcePath },
-  };
+      models: parsed.data.models ? [...parsed.data.models] : undefined,
+    };
+  }
+
+  return { xai, providers, sources: { configFile: sourcePath } };
+}
+
+/**
+ * Resolve a provider's API key from the environment, or `null` when it is not
+ * set. Empty/whitespace-only values count as unset.
+ */
+function resolveProviderKey(apiKeyEnv: string | null, env: NodeJS.ProcessEnv): string | null {
+  if (!apiKeyEnv) return null;
+  const value = env[apiKeyEnv];
+  return typeof value === "string" && value.trim().length > 0 ? value : null;
+}
+
+/**
+ * A provider is enabled when its key is present, OR — the keyless-local
+ * exception — it is an `openai-compatible` provider on a loopback `base_url`
+ * (Ollama/llama.cpp need no key). Everything else with an empty key is disabled.
+ */
+export function isApiProviderEnabled(
+  provider: ApiProviderConfig,
+  env: NodeJS.ProcessEnv = process.env
+): boolean {
+  if (resolveProviderKey(provider.apiKeyEnv, env) !== null) return true;
+  return provider.kind === "openai-compatible" && isLoopbackUrl(provider.baseUrl);
+}
+
+/** The enabled API providers with keys resolved (empty string for keyless). */
+export function enabledApiProviders(
+  config: ProvidersConfig,
+  env: NodeJS.ProcessEnv = process.env
+): ApiProviderRuntime[] {
+  const runtimes: ApiProviderRuntime[] = [];
+  for (const provider of Object.values(config.providers)) {
+    if (!isApiProviderEnabled(provider, env)) continue;
+    runtimes.push({
+      name: provider.name,
+      kind: provider.kind,
+      baseUrl: provider.baseUrl,
+      defaultModel: provider.defaultModel,
+      models: provider.models,
+      apiKey: resolveProviderKey(provider.apiKeyEnv, env) ?? "",
+    });
+  }
+  return runtimes;
 }
 
 export function isXaiProviderEnabled(
