@@ -10,6 +10,9 @@ import type { PersistenceConfig } from "./config.js";
 
 export type JobStoreStatus = "running" | "completed" | "failed" | "canceled" | "orphaned";
 
+/** Slice 1: how a job executes — a spawned CLI subprocess, or an HTTP request. */
+export type JobTransport = "process" | "http";
+
 export interface JobRecord {
   id: string;
   correlationId: string;
@@ -29,6 +32,15 @@ export interface JobRecord {
   expiresAt: string;
   /** F3: ownership principal that created the job (null for legacy rows). */
   ownerPrincipal: string | null;
+  /** Slice 1: 'process' (default, legacy rows) or 'http' for API-provider jobs. */
+  transport: JobTransport;
+  /** Slice 1: real HTTP status for http jobs; null for process jobs. Never overloads exitCode. */
+  httpStatus: number | null;
+  /**
+   * Slice 1: canonical API request JSON for http jobs (argv is meaningless for
+   * them). Null for process jobs, whose argv lives in `argsJson`.
+   */
+  payloadJson: string | null;
 }
 
 export function resolveJobStoreDbPath(): string | null {
@@ -89,6 +101,9 @@ function rowToRecord(row: any): JobRecord {
     pid: row.pid,
     expiresAt: row.expires_at,
     ownerPrincipal: row.owner_principal ?? null,
+    transport: (row.transport as JobTransport) ?? "process",
+    httpStatus: row.http_status ?? null,
+    payloadJson: row.payload_json ?? null,
   };
 }
 
@@ -102,6 +117,27 @@ function ensureJobsOwnerColumn(db: GatewayDatabase): void {
   const hasOwner = cols.some(col => col?.name === "owner_principal");
   if (!hasOwner) {
     db.exec("ALTER TABLE jobs ADD COLUMN owner_principal TEXT");
+  }
+}
+
+/**
+ * Slice 1: idempotent migration adding the http-transport columns to a
+ * pre-existing jobs table. Legacy rows backfill `transport='process'` (the
+ * column DEFAULT); `http_status`/`payload_json` stay NULL. MUST run before any
+ * prepared statement is compiled — the INSERT/UPDATE column lists bind at
+ * prepare time.
+ */
+function ensureJobsTransportColumns(db: GatewayDatabase): void {
+  const cols = db.prepare("PRAGMA table_info(jobs)").all() as Array<{ name?: string }>;
+  const names = new Set(cols.map(col => col?.name));
+  if (!names.has("transport")) {
+    db.exec("ALTER TABLE jobs ADD COLUMN transport TEXT NOT NULL DEFAULT 'process'");
+  }
+  if (!names.has("http_status")) {
+    db.exec("ALTER TABLE jobs ADD COLUMN http_status INTEGER");
+  }
+  if (!names.has("payload_json")) {
+    db.exec("ALTER TABLE jobs ADD COLUMN payload_json TEXT");
   }
 }
 
@@ -120,6 +156,10 @@ export interface JobStore {
     startedAt: string;
     pid: number | null;
     ownerPrincipal?: string | null;
+    /** Slice 1: defaults to 'process'. */
+    transport?: JobTransport;
+    /** Slice 1: canonical API request JSON for http jobs (null/undefined for process). */
+    payloadJson?: string | null;
   }): void;
   recordOutput(id: string, stdout: string, stderr: string, outputTruncated: boolean): void;
   recordComplete(input: {
@@ -131,6 +171,8 @@ export interface JobStore {
     outputTruncated: boolean;
     error: string | null;
     finishedAt: string;
+    /** Slice 1: real HTTP status for http jobs; null for process jobs. */
+    httpStatus?: number | null;
   }): void;
   getById(id: string): JobRecord | null;
   findByRequestKey(requestKey: string): JobRecord | null;
@@ -163,6 +205,9 @@ export interface OrphanedJobSnapshot {
   stdout: string;
   stderr: string;
   exitCode: number | null;
+  /** Slice 1: so a force-orphaned http row produces a faithful flight-recorder complete. */
+  transport: JobTransport;
+  httpStatus: number | null;
 }
 
 /**
@@ -213,7 +258,10 @@ export class SqliteJobStore implements JobStore {
         finished_at TEXT,
         pid INTEGER,
         expires_at TEXT NOT NULL,
-        owner_principal TEXT
+        owner_principal TEXT,
+        transport TEXT NOT NULL DEFAULT 'process',
+        http_status INTEGER,
+        payload_json TEXT
       );
       CREATE INDEX IF NOT EXISTS idx_jobs_request_key ON jobs(request_key);
       CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
@@ -224,6 +272,9 @@ export class SqliteJobStore implements JobStore {
     // F3: idempotent migration — add owner_principal to a pre-existing jobs
     // table. Legacy rows keep NULL (treated as legacy-unowned by enforcement).
     ensureJobsOwnerColumn(this.db);
+    // Slice 1: idempotent migration for the http-transport columns. MUST run
+    // before the prepared statements below bind to the column list.
+    ensureJobsTransportColumns(this.db);
 
     if (process.platform !== "win32") {
       try {
@@ -239,10 +290,12 @@ export class SqliteJobStore implements JobStore {
     this.insertStmt = this.db.prepare(`
       INSERT INTO jobs (id, correlation_id, request_key, cli, args_json, output_format,
                         status, exit_code, stdout, stderr, output_truncated, error,
-                        started_at, finished_at, pid, expires_at, owner_principal)
+                        started_at, finished_at, pid, expires_at, owner_principal,
+                        transport, http_status, payload_json)
       VALUES (@id, @correlation_id, @request_key, @cli, @args_json, @output_format,
               @status, @exit_code, @stdout, @stderr, @output_truncated, @error,
-              @started_at, @finished_at, @pid, @expires_at, @owner_principal)
+              @started_at, @finished_at, @pid, @expires_at, @owner_principal,
+              @transport, @http_status, @payload_json)
     `);
 
     this.updateOutputStmt = this.db.prepare(`
@@ -253,7 +306,8 @@ export class SqliteJobStore implements JobStore {
     this.updateCompleteStmt = this.db.prepare(`
       UPDATE jobs SET status = @status, exit_code = @exit_code, stdout = @stdout, stderr = @stderr,
                       output_truncated = @output_truncated, error = @error,
-                      finished_at = @finished_at, expires_at = @expires_at
+                      finished_at = @finished_at, expires_at = @expires_at,
+                      http_status = @http_status
       WHERE id = @id
     `);
 
@@ -277,7 +331,7 @@ export class SqliteJobStore implements JobStore {
     // status='running' row can be inserted between this SELECT and the
     // UPDATE below.
     this.selectRunningOrphansStmt = this.db.prepare(`
-      SELECT id, correlation_id, started_at, stdout, stderr, exit_code
+      SELECT id, correlation_id, started_at, stdout, stderr, exit_code, transport, http_status
       FROM jobs WHERE status = 'running'
     `);
 
@@ -306,6 +360,8 @@ export class SqliteJobStore implements JobStore {
     startedAt: string;
     pid: number | null;
     ownerPrincipal?: string | null;
+    transport?: JobTransport;
+    payloadJson?: string | null;
   }): void {
     this.insertStmt.run({
       id: input.id,
@@ -326,6 +382,9 @@ export class SqliteJobStore implements JobStore {
       // Running jobs never expire — only completed/failed/canceled do.
       expires_at: FAR_FUTURE_ISO,
       owner_principal: input.ownerPrincipal ?? null,
+      transport: input.transport ?? "process",
+      http_status: null,
+      payload_json: input.payloadJson ?? null,
     });
   }
 
@@ -353,6 +412,7 @@ export class SqliteJobStore implements JobStore {
     outputTruncated: boolean;
     error: string | null;
     finishedAt: string;
+    httpStatus?: number | null;
   }): void {
     const expiresAt = new Date(Date.parse(input.finishedAt) + this.retentionMs).toISOString();
     this.updateCompleteStmt.run({
@@ -365,6 +425,7 @@ export class SqliteJobStore implements JobStore {
       error: input.error,
       finished_at: input.finishedAt,
       expires_at: expiresAt,
+      http_status: input.httpStatus ?? null,
     });
   }
 
@@ -408,6 +469,8 @@ export class SqliteJobStore implements JobStore {
       stdout: string | null;
       stderr: string | null;
       exit_code: number | null;
+      transport: string | null;
+      http_status: number | null;
     }>;
     const orphaned: OrphanedJobSnapshot[] = rows.map(row => ({
       id: row.id,
@@ -416,6 +479,8 @@ export class SqliteJobStore implements JobStore {
       stdout: row.stdout ?? "",
       stderr: row.stderr ?? "",
       exitCode: row.exit_code,
+      transport: (row.transport as JobTransport) ?? "process",
+      httpStatus: row.http_status ?? null,
     }));
     const result = this.markOrphanedStmt.run(now, expiresAt);
     return { count: Number(result.changes), orphaned };
@@ -474,6 +539,8 @@ export class MemoryJobStore implements JobStore {
     startedAt: string;
     pid: number | null;
     ownerPrincipal?: string | null;
+    transport?: JobTransport;
+    payloadJson?: string | null;
   }): void {
     this.rows.set(input.id, {
       id: input.id,
@@ -493,6 +560,9 @@ export class MemoryJobStore implements JobStore {
       pid: input.pid,
       expiresAt: FAR_FUTURE_ISO,
       ownerPrincipal: input.ownerPrincipal ?? null,
+      transport: input.transport ?? "process",
+      httpStatus: null,
+      payloadJson: input.payloadJson ?? null,
     });
   }
 
@@ -513,6 +583,7 @@ export class MemoryJobStore implements JobStore {
     outputTruncated: boolean;
     error: string | null;
     finishedAt: string;
+    httpStatus?: number | null;
   }): void {
     const row = this.rows.get(input.id);
     if (!row) return;
@@ -524,6 +595,7 @@ export class MemoryJobStore implements JobStore {
     row.error = input.error;
     row.finishedAt = input.finishedAt;
     row.expiresAt = new Date(Date.parse(input.finishedAt) + this.retentionMs).toISOString();
+    if (input.httpStatus !== undefined) row.httpStatus = input.httpStatus;
   }
 
   getById(id: string): JobRecord | null {

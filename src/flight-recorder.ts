@@ -73,6 +73,12 @@ export interface FlightLogResult {
   optimizationApplied: boolean;
   thinkingBlocks?: string[];
   exitCode: number;
+  /**
+   * Slice 1: real HTTP status for `transport='http'` jobs (429/503/…), so the
+   * true outcome is observable separately from the 0/1 `exitCode`. Undefined
+   * for process jobs; persisted to the `http_status` requests column.
+   */
+  httpStatus?: number;
   errorMessage?: string;
   status: "completed" | "failed";
 }
@@ -154,6 +160,22 @@ function ensureCacheControlBlocksColumn(db: GatewayDatabase): void {
   );
   if (!names.has("cache_control_blocks")) {
     db.exec("ALTER TABLE requests ADD COLUMN cache_control_blocks INTEGER");
+  }
+}
+
+/**
+ * Slice 1: idempotent migration adding `http_status` to a pre-existing
+ * `gateway_metadata` table. Holds the real HTTP status (429/503/…) for
+ * `transport='http'` jobs, distinct from the 0/1 `exit_code`. Process-job rows
+ * keep NULL.
+ */
+function ensureMetadataHttpStatusColumn(db: GatewayDatabase): void {
+  const rows = db.prepare("PRAGMA table_info(gateway_metadata)").all();
+  const names = new Set<string>(
+    rows.map((row: any) => (row && typeof row.name === "string" ? row.name : ""))
+  );
+  if (!names.has("http_status")) {
+    db.exec("ALTER TABLE gateway_metadata ADD COLUMN http_status INTEGER");
   }
 }
 
@@ -286,6 +308,7 @@ export class FlightRecorder {
         optimization_applied INTEGER DEFAULT 0,
         thinking_blocks TEXT,
         exit_code INTEGER,
+        http_status INTEGER,
         error_message TEXT,
         async_job_id TEXT,
         status TEXT NOT NULL DEFAULT 'started'
@@ -340,6 +363,8 @@ export class FlightRecorder {
     // Migration v6 (F3): owner_principal on the requests table. New rows are
     // stamped with the request's ownership principal; legacy rows keep NULL.
     ensureRequestsOwnerColumn(this.db);
+    // Slice 1: http_status on gateway_metadata for transport='http' jobs.
+    ensureMetadataHttpStatusColumn(this.db);
     this.db
       .prepare("INSERT OR IGNORE INTO _migrations(version, applied_at) VALUES(6, ?)")
       .run(new Date().toISOString());
@@ -409,6 +434,7 @@ export class FlightRecorder {
           optimization_applied = @optimization_applied,
           thinking_blocks = @thinking_blocks,
           exit_code = @exit_code,
+          http_status = @http_status,
           error_message = @error_message,
           status = @status
       WHERE request_id = @id AND status = 'started'
@@ -440,6 +466,7 @@ export class FlightRecorder {
           optimization_applied: result.optimizationApplied ? 1 : 0,
           thinking_blocks: thinkingBlocks,
           exit_code: result.exitCode,
+          http_status: result.httpStatus ?? null,
           error_message: result.errorMessage ?? null,
           status: result.status,
         });

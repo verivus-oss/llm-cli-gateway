@@ -352,14 +352,15 @@ export function resetApiProviderBreakers(): void {
 export async function runApiRequest(
   provider: ApiProvider,
   req: ApiRequest,
-  logger: Logger = noopLogger
+  logger: Logger = noopLogger,
+  opts: { signal?: AbortSignal } = {}
 ): Promise<ApiResult> {
   const url = provider.endpointUrl(req.baseUrl);
   const body = provider.buildBody(req);
   const headers = provider.authHeaders(req.apiKey);
   const timeoutMs = req.timeoutMs ?? DEFAULT_API_TIMEOUT_MS;
   const response = await withRetry(
-    () => postJson(url, body, headers, timeoutMs),
+    () => postJson(url, body, headers, timeoutMs, undefined, opts.signal),
     getProviderBreaker(provider.name, logger),
     {
       initialDelay: 1_000,

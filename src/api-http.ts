@@ -109,12 +109,20 @@ export function postJson(
   body: unknown,
   headers: Record<string, string>,
   timeoutMs: number,
-  extractErrorMessage: (status: number, responseBody: string) => string = defaultErrorMessage
+  extractErrorMessage: (status: number, responseBody: string) => string = defaultErrorMessage,
+  signal?: AbortSignal
 ): Promise<ApiHttpResponse> {
   const payload = JSON.stringify(body);
   const requester = url.protocol === "https:" ? httpsRequest : httpRequest;
 
   return new Promise((resolve, reject) => {
+    // Slice 1: cancel support. An already-aborted signal rejects immediately;
+    // otherwise destroy the request on abort so the AbortController in the job
+    // record can cancel an in-flight provider call.
+    if (signal?.aborted) {
+      reject(new ApiHttpError("API request aborted", null, "", "ABORT_ERR"));
+      return;
+    }
     const req = requester(
       url,
       {
@@ -153,6 +161,11 @@ export function postJson(
     req.on("timeout", () => {
       req.destroy(new ApiHttpError("API request timed out", null, "", "ETIMEDOUT"));
     });
+    const onAbort = (): void => {
+      req.destroy(new ApiHttpError("API request aborted", null, "", "ABORT_ERR"));
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+    req.on("close", () => signal?.removeEventListener("abort", onAbort));
     req.on("error", reject);
     req.end(payload);
   });

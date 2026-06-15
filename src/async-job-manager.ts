@@ -18,10 +18,42 @@ import {
   type FlightRecorderLike,
 } from "./flight-recorder.js";
 import { codexFrResponse } from "./codex-json-parser.js";
-import type { OrphanedJobSnapshot } from "./job-store.js";
+import type { JobTransport, OrphanedJobSnapshot } from "./job-store.js";
 import { getRequestContext, resolveOwnerPrincipal } from "./request-context.js";
+import {
+  runApiRequest,
+  ApiHttpError,
+  type ApiProvider,
+  type ApiRequest,
+  type ApiResult,
+} from "./api-provider.js";
+
+/**
+ * Slice 1: pull the real HTTP status out of a (possibly circuit-breaker-wrapped)
+ * runApiRequest rejection. withRetry surfaces the original ApiHttpError as
+ * `.cause`, so check both the error and its cause.
+ */
+function extractApiHttpStatus(error: unknown): number | null {
+  for (const candidate of [error, (error as { cause?: unknown })?.cause]) {
+    if (candidate instanceof ApiHttpError && typeof candidate.status === "number") {
+      return candidate.status;
+    }
+    const status = (candidate as { status?: unknown })?.status;
+    if (typeof status === "number") return status;
+  }
+  return null;
+}
 
 export type LlmCli = "claude" | "codex" | "gemini" | "grok" | "mistral";
+
+/**
+ * Slice 1: the record/manager-facing provider id. CLI jobs carry an `LlmCli`;
+ * http jobs carry an arbitrary `[providers.<name>]` key. `LlmCli` itself stays
+ * narrow so `providerCommandName`/`spawnCliProcess`/`buildProviderArgs` are
+ * unaffected — only the job record widens. Every LlmCli-specific use of a job's
+ * `cli` is guarded by `transport === "process"` first.
+ */
+export type JobProvider = LlmCli | (string & {});
 export type AsyncJobStatus = "running" | "completed" | "failed" | "canceled" | "orphaned";
 
 const MAX_OUTPUT_SIZE = 50 * 1024 * 1024;
@@ -110,7 +142,7 @@ export type AsyncJobUsageExtractor = (stdout: string) => {
 
 interface AsyncJobRecord {
   id: string;
-  cli: LlmCli;
+  cli: JobProvider;
   args: string[];
   requestKey: string;
   correlationId: string;
@@ -124,6 +156,18 @@ interface AsyncJobRecord {
   canceled: boolean;
   error: string | null;
   process: ChildProcess | null; // null when reconstituted from persistence (orphan/historical)
+  /**
+   * Slice 1: transport family. 'process' jobs carry a live `process`/`pid` and
+   * the idle/stall/process-group machinery; 'http' jobs carry an `abort` handle
+   * and `httpStatus`, never a pid or process group.
+   */
+  transport: JobTransport;
+  /** Slice 1: AbortController for http jobs (null for process jobs). */
+  abort: AbortController | null;
+  /** Slice 1: real HTTP status for http jobs (null for process jobs). */
+  httpStatus: number | null;
+  /** Slice 1: canonical API request JSON persisted for http jobs (null for process). */
+  payloadJson?: string | null;
   exited: boolean;
   metricsRecorded: boolean;
   outputFormat?: string;
@@ -172,7 +216,7 @@ interface AsyncJobRecord {
 
 export interface AsyncJobSnapshot {
   id: string;
-  cli: LlmCli;
+  cli: JobProvider;
   status: AsyncJobStatus;
   startedAt: string;
   finishedAt: string | null;
@@ -284,7 +328,7 @@ export class AsyncJobManager {
 
   constructor(
     private logger: Logger = noopLogger,
-    private onJobComplete?: (cli: LlmCli, durationMs: number, success: boolean) => void,
+    private onJobComplete?: (cli: JobProvider, durationMs: number, success: boolean) => void,
     store: JobStore | null = null,
     flightRecorder: FlightRecorderLike = new NoopFlightRecorder()
   ) {
@@ -358,6 +402,9 @@ export class AsyncJobManager {
       circuitBreakerState: "closed",
       optimizationApplied: false,
       exitCode: orphan.exitCode ?? 1,
+      // Slice 1: an in-flight http row never settled, so httpStatus is typically
+      // null here; thread it through so the orphan complete stays faithful.
+      httpStatus: orphan.transport === "http" ? (orphan.httpStatus ?? undefined) : undefined,
       errorMessage: "orphaned after gateway restart",
       status: "failed",
     };
@@ -549,6 +596,235 @@ export class AsyncJobManager {
     return computeRequestKey(cli, args, extra);
   }
 
+  /**
+   * Slice 1: dedup key for an http job. Namespaced by `http:<provider>` so it is
+   * disjoint from every argv (process) key, and hashed over the FULLY canonical
+   * request — including topP and previousResponseId — so two xAI turns with
+   * identical messages but a different continuation never dedup to one job. The
+   * apiKey is deliberately excluded (it is a secret and constant across calls).
+   */
+  private buildHttpRequestKey(providerName: string, req: ApiRequest): string {
+    const canonical = {
+      transport: "http",
+      provider: providerName,
+      baseUrl: req.baseUrl,
+      model: req.model,
+      messages: req.messages,
+      temperature: req.temperature ?? null,
+      topP: req.topP ?? null,
+      reasoningEffort: req.reasoningEffort ?? null,
+      maxOutputTokens: req.maxOutputTokens ?? null,
+      previousResponseId: req.previousResponseId ?? null,
+    };
+    return computeRequestKey(`http:${providerName}`, [], JSON.stringify(canonical));
+  }
+
+  /**
+   * Shared dedup-reuse path for BOTH transports: return a deduped outcome when a
+   * recent matching job exists, else null. Keeps process and http dedup on one
+   * runtime path (the only difference is how `requestKey` was computed).
+   */
+  private tryReuseDedupedJob(
+    requestKey: string,
+    correlationId: string,
+    label: string,
+    onComplete?: () => void
+  ): StartJobOutcome | null {
+    if (!this.store) return null;
+    try {
+      const existing = this.store.findByRequestKey(requestKey);
+      if (!existing) return null;
+      // Prefer the in-memory record if we still have it (live process/abort, timers).
+      let record = this.jobs.get(existing.id);
+      if (!record) record = this.hydrateFromStore(existing.id) ?? undefined;
+      if (!record) return null;
+      this.logger.info(`Job ${existing.id} reused via dedup for ${label}`, {
+        correlationId,
+        originalCorrelationId: record.correlationId,
+        status: record.status,
+      });
+      // U26: the new request's per-request resources are not consumed by the
+      // deduped job — release its cleanup now to avoid an orphaned temp file.
+      if (onComplete) {
+        try {
+          onComplete();
+        } catch (err) {
+          this.logger.error("dedup onComplete cleanup threw", err);
+        }
+      }
+      return {
+        snapshot: this.snapshot(record),
+        deduped: true,
+        originalCorrelationId: record.correlationId,
+      };
+    } catch (err) {
+      this.logger.error("dedup lookup failed; proceeding with fresh run", err);
+      return null;
+    }
+  }
+
+  /**
+   * Slice 1: start an HTTP API-provider request as a first-class AsyncJobRecord.
+   * The job flows through the same record map, store, snapshot, dedup, cancel,
+   * orphan, and flight-recorder machinery as process jobs — it just carries an
+   * `AbortController` instead of a `ChildProcess` and never arms the
+   * idle/stall/process-group timers. Ships dormant (no tool calls it until
+   * Slice 2).
+   */
+  startHttpJob(params: {
+    provider: ApiProvider;
+    apiRequest: ApiRequest;
+    correlationId: string;
+    forceRefresh?: boolean;
+    onComplete?: () => void;
+    writeFlightStart?: boolean;
+    flightRecorderEntry?: AsyncJobFlightRecorderEntry;
+    extractUsage?: AsyncJobUsageExtractor;
+  }): StartJobOutcome {
+    const {
+      provider,
+      apiRequest,
+      correlationId,
+      forceRefresh,
+      onComplete,
+      writeFlightStart,
+      flightRecorderEntry,
+      extractUsage,
+    } = params;
+    const requestKey = this.buildHttpRequestKey(provider.name, apiRequest);
+
+    if (!forceRefresh) {
+      const reused = this.tryReuseDedupedJob(requestKey, correlationId, provider.name, onComplete);
+      if (reused) return reused;
+    }
+
+    const id = randomUUID();
+    const startedAt = new Date().toISOString();
+    const abort = new AbortController();
+    const ownerPrincipal = resolveOwnerPrincipal(getRequestContext());
+    // SECURITY: never persist the apiKey (a secret) to the durable jobs DB.
+    // Store ONLY the canonical request fields (the same material the dedup key
+    // hashes), so a logs.db leak never discloses provider credentials — mirrors
+    // the config layer's secrets-stay-in-env posture.
+    const payloadJson = JSON.stringify({
+      baseUrl: apiRequest.baseUrl,
+      model: apiRequest.model,
+      messages: apiRequest.messages,
+      maxOutputTokens: apiRequest.maxOutputTokens,
+      temperature: apiRequest.temperature,
+      topP: apiRequest.topP,
+      reasoningEffort: apiRequest.reasoningEffort,
+      previousResponseId: apiRequest.previousResponseId,
+    });
+
+    const job: AsyncJobRecord = {
+      id,
+      cli: provider.name,
+      args: [],
+      requestKey,
+      correlationId,
+      status: "running",
+      startedAt,
+      finishedAt: null,
+      exitCode: null,
+      stdout: "",
+      stderr: "",
+      outputTruncated: false,
+      canceled: false,
+      error: null,
+      process: null,
+      transport: "http",
+      abort,
+      httpStatus: null,
+      payloadJson,
+      exited: false,
+      metricsRecorded: false,
+      ownerPrincipal,
+      onComplete,
+      onCompleteFired: false,
+      outputDirty: false,
+      lastOutputFlushAt: Date.now(),
+      flightRecorderEntry,
+      extractUsage,
+      flightRecorderComplete: false,
+      flightCompleteArmed: writeFlightStart === true,
+    };
+
+    this.jobs.set(id, job);
+    this.safeStoreCall("recordStart", () =>
+      this.store!.recordStart({
+        id,
+        correlationId,
+        requestKey,
+        cli: provider.name,
+        args: [],
+        startedAt,
+        pid: null,
+        ownerPrincipal,
+        transport: "http",
+        payloadJson,
+      })
+    );
+    if (writeFlightStart && flightRecorderEntry) {
+      try {
+        this.flightRecorder.logStart({
+          correlationId,
+          cli: provider.name,
+          model: flightRecorderEntry.model,
+          prompt: flightRecorderEntry.prompt,
+          sessionId: flightRecorderEntry.sessionId,
+          asyncJobId: id,
+        });
+      } catch (err) {
+        this.logger.error("Async-path flight recorder logStart failed", err);
+      }
+    }
+    this.logger.info(`Job ${id} started for ${provider.name} (http)`, { correlationId });
+
+    // Fire the request; settle on the shared terminal helpers. No idle/stall/
+    // process-group timers are armed (those are pid-based).
+    runApiRequest(provider, apiRequest, this.logger, { signal: abort.signal })
+      .then(result => this.finalizeHttpJob(job, result, null))
+      .catch(error => this.finalizeHttpJob(job, null, error as Error));
+
+    return { snapshot: this.snapshot(job), deduped: false };
+  }
+
+  /**
+   * Slice 1: settle an http job through the SAME terminal helpers as the process
+   * close handler (emitMetrics → persistComplete → writeFlightComplete →
+   * fireOnComplete). exitCode is 0/1 only; the real HTTP status goes to
+   * `httpStatus`. A job already canceled (abort) is left terminal.
+   */
+  private finalizeHttpJob(
+    job: AsyncJobRecord,
+    result: ApiResult | null,
+    error: Error | null
+  ): void {
+    if (job.status !== "running") return; // canceled or already settled
+    if (result) {
+      job.status = "completed";
+      job.stdout = result.text;
+      job.httpStatus = result.httpStatus;
+      job.exitCode = 0;
+    } else {
+      job.status = "failed";
+      const status = extractApiHttpStatus(error);
+      job.httpStatus = status;
+      const message = error?.message ?? "API request failed";
+      job.stderr = message;
+      job.error = message;
+      job.exitCode = 1;
+    }
+    job.finishedAt = new Date().toISOString();
+    job.exited = true;
+    job.abort = null; // request settled — no live handle to cancel
+    this.emitMetrics(job);
+    this.persistComplete(job);
+    this.writeFlightComplete(job, job.status === "completed" ? "completed" : "failed");
+    this.fireOnComplete(job);
+  }
+
   private fireOnComplete(job: AsyncJobRecord): void {
     if (job.onCompleteFired) return;
     if (!job.onComplete) return;
@@ -594,7 +870,10 @@ export class AsyncJobManager {
     // the sync failure path which stores `stderr || ""`. `job.stdout` itself
     // stays raw for usage extraction (above) and llm_job_result's own conversion.
     let response: string;
-    if (job.cli === "codex") {
+    // Slice 1: the codex `--json` JSONL reconstruction is process-only. An http
+    // job's stdout is already ApiResult.text — never run it through codexFrResponse
+    // (guard on transport so a provider that happens to be named "codex" can't trip it).
+    if (job.transport === "process" && job.cli === "codex") {
       const codexText = codexFrResponse(job.outputFormat, job.stdout);
       response = isFailure ? job.stderr || codexText : codexText;
     } else {
@@ -613,6 +892,8 @@ export class AsyncJobManager {
         circuitBreakerState: "closed",
         optimizationApplied: false,
         exitCode,
+        // Slice 1: the real HTTP status lives in its own field — exitCode stays 0/1.
+        httpStatus: job.transport === "http" ? (job.httpStatus ?? undefined) : undefined,
         errorMessage,
         status: finalStatus,
         inputTokens: usage.inputTokens,
@@ -707,6 +988,7 @@ export class AsyncJobManager {
         outputTruncated: job.outputTruncated,
         error: job.error,
         finishedAt: job.finishedAt!,
+        httpStatus: job.httpStatus,
       })
     );
   }
@@ -736,10 +1018,14 @@ export class AsyncJobManager {
       }
     })();
 
+    // Slice 1: branch on transport. http rows persist canonical request JSON in
+    // payload_json (argv is meaningless), so don't treat args_json as their
+    // payload; they reconstitute with process=null AND abort=null (the live
+    // AbortController did not survive the restart → force-orphanable).
     const reconstituted: AsyncJobRecord = {
       id: row.id,
-      cli: row.cli as LlmCli,
-      args,
+      cli: row.cli as JobProvider,
+      args: row.transport === "http" ? [] : args,
       requestKey: row.requestKey,
       correlationId: row.correlationId,
       status: row.status as AsyncJobStatus,
@@ -752,6 +1038,10 @@ export class AsyncJobManager {
       canceled: row.status === "canceled",
       error: row.error,
       process: null,
+      transport: row.transport,
+      abort: null,
+      httpStatus: row.httpStatus,
+      payloadJson: row.payloadJson,
       exited: row.status !== "running",
       metricsRecorded: true,
       outputFormat: row.outputFormat ?? undefined,
@@ -836,43 +1126,9 @@ export class AsyncJobManager {
     } = opts;
     const requestKey = this.buildRequestKey(cli, args, extraEnv, stdin, cwd, outputFormat);
 
-    if (!forceRefresh && this.store) {
-      try {
-        const existing = this.store.findByRequestKey(requestKey);
-        if (existing) {
-          // Prefer the in-memory record if we still have it (live process, idle timers, etc).
-          let record = this.jobs.get(existing.id);
-          if (!record) {
-            record = this.hydrateFromStore(existing.id) ?? undefined;
-          }
-          if (record) {
-            this.logger.info(`Job ${existing.id} reused via dedup for ${cli}`, {
-              correlationId,
-              originalCorrelationId: record.correlationId,
-              status: record.status,
-            });
-            // U26 fix: the caller's per-request resources (e.g. outputSchema temp
-            // file) are NOT consumed by the deduped job, which reuses its own
-            // original resources. Release the new request's cleanup immediately
-            // to avoid an orphaned temp file. The original job's onComplete (if
-            // any) remains attached to that original job record.
-            if (onComplete) {
-              try {
-                onComplete();
-              } catch (err) {
-                this.logger.error("dedup onComplete cleanup threw", err);
-              }
-            }
-            return {
-              snapshot: this.snapshot(record),
-              deduped: true,
-              originalCorrelationId: record.correlationId,
-            };
-          }
-        }
-      } catch (err) {
-        this.logger.error("dedup lookup failed; proceeding with fresh run", err);
-      }
+    if (!forceRefresh) {
+      const reused = this.tryReuseDedupedJob(requestKey, correlationId, cli, onComplete);
+      if (reused) return reused;
     }
 
     const id = randomUUID();
@@ -921,6 +1177,9 @@ export class AsyncJobManager {
       canceled: false,
       error: null,
       process: child,
+      transport: "process",
+      abort: null,
+      httpStatus: null,
       exited: false,
       metricsRecorded: false,
       outputFormat,
@@ -1131,6 +1390,28 @@ export class AsyncJobManager {
       return { canceled: false, reason: `Job is already ${job.status}` };
     }
 
+    // Slice 1: http jobs cancel by aborting the in-flight request, not by
+    // signalling a process. A reconstituted http row has no live abort handle
+    // (the AbortController did not survive the restart) → refuse.
+    if (job.transport === "http") {
+      if (!job.abort) {
+        return {
+          canceled: false,
+          reason: "Job has no live request (orphaned from prior gateway run)",
+        };
+      }
+      job.canceled = true;
+      job.status = "canceled";
+      job.finishedAt = new Date().toISOString();
+      job.abort.abort();
+      this.logger.info(`Job ${jobId} canceled (http)`, { correlationId: job.correlationId });
+      this.emitMetrics(job);
+      this.persistComplete(job);
+      this.writeFlightComplete(job, "failed", "canceled by caller");
+      this.fireOnComplete(job);
+      return { canceled: true };
+    }
+
     // Reconstituted (orphaned) jobs have no live process to signal — refuse cancel.
     if (!job.process) {
       return {
@@ -1199,7 +1480,7 @@ export class AsyncJobManager {
     return this.jobs.get(jobId)?.outputFormat;
   }
 
-  getJobCli(jobId: string): LlmCli | undefined {
+  getJobCli(jobId: string): JobProvider | undefined {
     return this.jobs.get(jobId)?.cli;
   }
 
