@@ -1,5 +1,6 @@
-import { ISessionManager } from "./session-manager.js";
+import { ISessionManager, type Session } from "./session-manager.js";
 import { CLI_TYPES, PROVIDER_TYPES, type CliType, type ProviderType } from "./session-manager.js";
+import { getRequestContext, principalCanAccess, resolveOwnerPrincipal } from "./request-context.js";
 import { PerformanceMetrics } from "./metrics.js";
 import { getAvailableCliInfo } from "./model-registry.js";
 import { FlightRecorderQuery } from "./flight-recorder.js";
@@ -272,17 +273,34 @@ export class ResourceProvider {
     ];
   }
 
+  /**
+   * F3b: restrict a session list to the rows the current request's principal may
+   * access (legacy-unowned rows are visible to the local principal only). The
+   * `sessions://*` resources are served on the same multi-transport server as the
+   * tools, so an unfiltered list would let a remote principal enumerate another
+   * principal's session ids and metadata.
+   */
+  private ownedSessions(sessions: Session[]): Session[] {
+    const caller = resolveOwnerPrincipal(getRequestContext());
+    return sessions.filter(s => principalCanAccess(s.ownerPrincipal, caller));
+  }
+
+  /** F3b: the active-session id for a provider, or null if the caller may not see it. */
+  private async ownedActiveId(provider: ProviderType): Promise<string | null> {
+    const active = await Promise.resolve(this.sessionManager.getActiveSession(provider));
+    if (!active) return null;
+    const caller = resolveOwnerPrincipal(getRequestContext());
+    return principalCanAccess(active.ownerPrincipal, caller) ? active.id : null;
+  }
+
   // Read a specific resource by URI
   async readResource(uri: string): Promise<ResourceContents | null> {
     // Session resources
     if (uri === "sessions://all") {
-      const sessions = await this.sessionManager.listSessions();
+      const sessions = this.ownedSessions(await this.sessionManager.listSessions());
       const activeSessions = Object.fromEntries(
         await Promise.all(
-          PROVIDER_TYPES.map(async provider => [
-            provider,
-            (await this.sessionManager.getActiveSession(provider))?.id || null,
-          ])
+          PROVIDER_TYPES.map(async provider => [provider, await this.ownedActiveId(provider)])
         )
       ) as Record<ProviderType, string | null>;
       return {
@@ -307,7 +325,7 @@ export class ResourceProvider {
     }
 
     if (uri === "sessions://claude") {
-      const sessions = await this.sessionManager.listSessions("claude");
+      const sessions = this.ownedSessions(await this.sessionManager.listSessions("claude"));
       return {
         uri,
         mimeType: "application/json",
@@ -316,7 +334,7 @@ export class ResourceProvider {
             cli: "claude",
             total: sessions.length,
             sessions,
-            activeSession: (await this.sessionManager.getActiveSession("claude"))?.id || null,
+            activeSession: await this.ownedActiveId("claude"),
           },
           null,
           2
@@ -325,7 +343,7 @@ export class ResourceProvider {
     }
 
     if (uri === "sessions://codex") {
-      const sessions = await this.sessionManager.listSessions("codex");
+      const sessions = this.ownedSessions(await this.sessionManager.listSessions("codex"));
       return {
         uri,
         mimeType: "application/json",
@@ -334,7 +352,7 @@ export class ResourceProvider {
             cli: "codex",
             total: sessions.length,
             sessions,
-            activeSession: (await this.sessionManager.getActiveSession("codex"))?.id || null,
+            activeSession: await this.ownedActiveId("codex"),
           },
           null,
           2
@@ -343,7 +361,7 @@ export class ResourceProvider {
     }
 
     if (uri === "sessions://gemini") {
-      const sessions = await this.sessionManager.listSessions("gemini");
+      const sessions = this.ownedSessions(await this.sessionManager.listSessions("gemini"));
       return {
         uri,
         mimeType: "application/json",
@@ -352,7 +370,7 @@ export class ResourceProvider {
             cli: "gemini",
             total: sessions.length,
             sessions,
-            activeSession: (await this.sessionManager.getActiveSession("gemini"))?.id || null,
+            activeSession: await this.ownedActiveId("gemini"),
           },
           null,
           2
@@ -361,7 +379,7 @@ export class ResourceProvider {
     }
 
     if (uri === "sessions://grok") {
-      const sessions = await this.sessionManager.listSessions("grok");
+      const sessions = this.ownedSessions(await this.sessionManager.listSessions("grok"));
       return {
         uri,
         mimeType: "application/json",
@@ -370,7 +388,7 @@ export class ResourceProvider {
             cli: "grok",
             total: sessions.length,
             sessions,
-            activeSession: (await this.sessionManager.getActiveSession("grok"))?.id || null,
+            activeSession: await this.ownedActiveId("grok"),
           },
           null,
           2
@@ -379,7 +397,7 @@ export class ResourceProvider {
     }
 
     if (uri === "sessions://mistral") {
-      const sessions = await this.sessionManager.listSessions("mistral");
+      const sessions = this.ownedSessions(await this.sessionManager.listSessions("mistral"));
       return {
         uri,
         mimeType: "application/json",
@@ -388,7 +406,7 @@ export class ResourceProvider {
             cli: "mistral",
             total: sessions.length,
             sessions,
-            activeSession: (await this.sessionManager.getActiveSession("mistral"))?.id || null,
+            activeSession: await this.ownedActiveId("mistral"),
           },
           null,
           2

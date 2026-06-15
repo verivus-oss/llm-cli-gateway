@@ -950,7 +950,10 @@ export async function resolveWorktreeForRequest(
   if (!worktreeOpt) return {};
   const sessionManager = runtime.sessionManager;
   if (sessionId) {
-    const session = await Promise.resolve(sessionManager.getSession(sessionId));
+    // F3b: only a session the caller owns may steer worktree reuse; a foreign
+    // session is treated as absent so its worktreePath cannot become this
+    // request's cwd.
+    const session = await getCallerOwnedSession(sessionManager, sessionId);
     const existingPath = session?.metadata?.worktreePath;
     if (typeof existingPath === "string" && existingPath.length > 0) {
       return {
@@ -1007,9 +1010,11 @@ async function resolveWorkspaceAndWorktreeForRequest(args: {
   workingDir?: string;
   addDir?: string[];
 }): Promise<{ cwd?: string; worktreePath?: string; workspace?: EffectiveWorkspace }> {
-  const session = args.sessionId
-    ? await Promise.resolve(args.runtime.sessionManager.getSession(args.sessionId))
-    : null;
+  // F3b: ignore a referenced session the caller does not own so its workspace/
+  // worktree metadata cannot select another principal's workspace — the remote
+  // "registered workspace" gate below must not be satisfiable by a foreign
+  // session's metadata.
+  const session = await getCallerOwnedSession(args.runtime.sessionManager, args.sessionId);
   let workspace: EffectiveWorkspace | undefined;
   if (
     args.workspace ||
@@ -3604,6 +3609,47 @@ function usageFromXaiResult(result: XaiResponsesResult): {
   };
 }
 
+/**
+ * F3b: a session row is accessible to the current request iff the caller's
+ * principal owns it (or it is legacy-unowned and the caller is local). Shared by
+ * the request-execution helpers below, mirroring the ownership gate the
+ * session and job bookkeeping tools already apply.
+ */
+function callerCanAccessSession(session: Pick<Session, "ownerPrincipal">): boolean {
+  return principalCanAccess(session.ownerPrincipal, resolveOwnerPrincipal(getRequestContext()));
+}
+
+/**
+ * F3b: own-or-not-found fetch. Returns the session only when the caller may
+ * access it; a foreign session is reported as `null` (no existence oracle) so
+ * callers fall back to "no existing session" rather than resuming or reading
+ * another principal's session/metadata.
+ */
+async function getCallerOwnedSession(
+  sessionManager: ISessionManager,
+  sessionId: string | undefined
+): Promise<Session | null> {
+  if (!sessionId) return null;
+  const existing = await Promise.resolve(sessionManager.getSession(sessionId));
+  if (!existing || !callerCanAccessSession(existing)) return null;
+  return existing;
+}
+
+/**
+ * F3b: own-or-not-found active-session pointer. The active pointer is global per
+ * provider (not principal-scoped), so a no-`sessionId` request must not adopt a
+ * pointer the caller does not own — otherwise principal A's plain request would
+ * resume principal B's active session.
+ */
+async function getCallerOwnedActiveSession(
+  sessionManager: ISessionManager,
+  provider: ProviderType
+): Promise<Session | null> {
+  const active = await Promise.resolve(sessionManager.getActiveSession(provider));
+  if (!active || !callerCanAccessSession(active)) return null;
+  return active;
+}
+
 async function getExistingSessionForProvider(
   sessionManager: ISessionManager,
   sessionId: string | undefined,
@@ -3611,7 +3657,18 @@ async function getExistingSessionForProvider(
 ): Promise<Session | null> {
   if (!sessionId) return null;
   const existing = await sessionManager.getSession(sessionId);
-  if (existing && existing.cli !== provider) {
+  if (!existing) return null;
+  // F3b: a caller-supplied sessionId that resolves to a session owned by a
+  // different principal is an authorization failure — never resume, read, or
+  // disclose its provider. Checked before the provider-type comparison so a
+  // foreign session never leaks its `cli`. UUID session ids are unguessable so
+  // the existence signal is not a usable oracle, and sessions://* id leakage is
+  // closed separately; throwing matches the provider-mismatch contract every
+  // call site already handles.
+  if (!callerCanAccessSession(existing)) {
+    throw new Error(`Session ${sessionId} is not accessible`);
+  }
+  if (existing.cli !== provider) {
     throw new Error(
       `Session ${sessionId} belongs to provider '${existing.cli}', not '${provider}'`
     );
@@ -3692,7 +3749,7 @@ async function resolveGrokApiSession(
   }
 
   if (!params.createNewSession) {
-    const active = await runtime.sessionManager.getActiveSession("grok-api");
+    const active = await getCallerOwnedActiveSession(runtime.sessionManager, "grok-api");
     if (active) {
       const previous =
         typeof active.metadata?.xaiPreviousResponseId === "string"
@@ -5311,7 +5368,7 @@ export async function handleCodexRequestAsync(
     // Pre-start session I/O (async handlers: prevent orphaned jobs)
     let effectiveSessionId = params.sessionId;
     if (!params.createNewSession && !params.sessionId) {
-      const activeSession = await deps.sessionManager.getActiveSession("codex");
+      const activeSession = await getCallerOwnedActiveSession(deps.sessionManager, "codex");
       if (activeSession) {
         effectiveSessionId = activeSession.id;
       } else {
@@ -5323,6 +5380,10 @@ export async function handleCodexRequestAsync(
         effectiveSessionId = newSession.id;
       }
     } else if (params.sessionId) {
+      // F3b: this async path does not route through getExistingSessionForProvider,
+      // so reject a caller-supplied sessionId owned by another principal before it
+      // is resumed (via `codex exec resume`) or usage-bumped.
+      await getExistingSessionForProvider(deps.sessionManager, params.sessionId, "codex");
       await deps.sessionManager.updateSessionUsage(params.sessionId);
     } else if (params.createNewSession) {
       const newSession = await deps.sessionManager.createSession(
@@ -5872,7 +5933,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       // effectiveSessionId as the user-provided sessionId.
       let activeSession: Awaited<ReturnType<ISessionManager["getActiveSession"]>> | null = null;
       try {
-        activeSession = await sessionManager.getActiveSession("claude");
+        activeSession = await getCallerOwnedActiveSession(sessionManager, "claude");
       } catch (err) {
         logger.warn(
           `[${corrId}] sessionManager.getActiveSession failed (non-fatal): ${(err as Error).message}`
@@ -6456,7 +6517,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         // Track session usage
         let effectiveSessionId = sessionId;
         if (!createNewSession && !sessionId) {
-          const activeSession = await sessionManager.getActiveSession("codex");
+          const activeSession = await getCallerOwnedActiveSession(sessionManager, "codex");
           if (activeSession) {
             effectiveSessionId = activeSession.id;
           } else {
@@ -7584,7 +7645,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           // Session management (before job start for async)
           let effectiveSessionId = sessionId;
           let useContinue = continueSession;
-          const activeSession = await sessionManager.getActiveSession("claude");
+          const activeSession = await getCallerOwnedActiveSession(sessionManager, "claude");
 
           if (!createNewSession && !continueSession && !sessionId && activeSession) {
             effectiveSessionId = activeSession.id;
