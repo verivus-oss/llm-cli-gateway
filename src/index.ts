@@ -5809,7 +5809,12 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
   // hasStore()), or clients get advertised tools that return "tool not found".
   const server = newGatewayMcpServer(asyncJobsEnabled, grokApiToolsEnabled);
   registerBaseResources(server, runtime);
-  registerValidationTools(server, { asyncJobManager });
+  // Slice 3: enabled API providers can act as validation reviewers/judges. The
+  // orchestrator dispatches them through startHttpJob; CLI providers keep argv.
+  registerValidationTools(server, {
+    asyncJobManager,
+    apiProviders: enabledApiProviders(providers),
+  });
   registerWorkspaceTools(server, runtime);
   // Slice 2: per-provider api_<name>_request tools. Dormant unless a
   // [providers.<name>] is configured + enabled (enabledApiProviders gate).

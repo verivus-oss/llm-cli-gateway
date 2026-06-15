@@ -1,6 +1,12 @@
-import type { AsyncJobResult, AsyncJobSnapshot } from "./async-job-manager.js";
+import type { AsyncJobResult, AsyncJobSnapshot, JobProvider } from "./async-job-manager.js";
 
-export type ValidationProvider = "claude" | "codex" | "gemini" | "grok" | "mistral";
+/**
+ * Slice 3: a validation reviewer is a spawnable CLI OR an enabled API provider
+ * (an arbitrary `[providers.<name>]` key). Widened to `JobProvider` so API
+ * providers can act as reviewers; the orchestrator branches CLI-vs-API on the
+ * configured api-provider set, not on this type.
+ */
+export type ValidationProvider = JobProvider;
 
 export type NormalizedValidationStatus =
   | "running"

@@ -1,6 +1,7 @@
 import { z } from "zod/v3";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { AsyncJobManager } from "./async-job-manager.js";
+import { CLI_TYPES } from "./session-manager.js";
 import { getAvailableCliInfo } from "./model-registry.js";
 import {
   collectValidationJobResult,
@@ -13,26 +14,36 @@ export interface ValidationToolDeps extends ValidationOrchestratorDeps {
   asyncJobManager: AsyncJobManager;
 }
 
-const providerSchema = z.enum(["claude", "codex", "gemini", "grok", "mistral"]);
-const providerListSchema = z.array(providerSchema).min(1).default(["claude", "codex"]);
-const normalizedProviderResultSchema = z.object({
-  provider: providerSchema,
-  model: z.string().nullable(),
-  status: z.enum(["running", "completed", "failed", "canceled", "orphaned", "skipped"]),
-  verdict: z.string().nullable(),
-  rationale: z.string().nullable(),
-  risks: z.array(z.string()).default([]),
-  rawJobReference: z
-    .object({
-      jobId: z.string(),
-      correlationId: z.string(),
-      statusTool: z.literal("job_status"),
-      resultTool: z.literal("job_result"),
-    })
-    .nullable(),
-  error: z.string().nullable(),
-  warning: z.string().optional(),
-});
+/**
+ * Slice 3: build the validation provider enum from the live enabled set — the
+ * five CLIs plus every enabled API provider name. Pre-Slice-3 callers (no
+ * apiProviders) get exactly the original five-CLI enum.
+ */
+export function buildValidationSchemas(deps: ValidationToolDeps) {
+  const apiNames = (deps.apiProviders ?? []).map(p => p.name);
+  const allowed = [...CLI_TYPES, ...apiNames] as [string, ...string[]];
+  const providerSchema = z.enum(allowed);
+  const providerListSchema = z.array(providerSchema).min(1).default(["claude", "codex"]);
+  const normalizedProviderResultSchema = z.object({
+    provider: providerSchema,
+    model: z.string().nullable(),
+    status: z.enum(["running", "completed", "failed", "canceled", "orphaned", "skipped"]),
+    verdict: z.string().nullable(),
+    rationale: z.string().nullable(),
+    risks: z.array(z.string()).default([]),
+    rawJobReference: z
+      .object({
+        jobId: z.string(),
+        correlationId: z.string(),
+        statusTool: z.literal("job_status"),
+        resultTool: z.literal("job_result"),
+      })
+      .nullable(),
+    error: z.string().nullable(),
+    warning: z.string().optional(),
+  });
+  return { providerSchema, providerListSchema, normalizedProviderResultSchema };
+}
 
 function textResponse(body: unknown) {
   const text = responseText(body);
@@ -63,6 +74,8 @@ function findHumanReadableReport(value: unknown): string | null {
 }
 
 export function registerValidationTools(server: McpServer, deps: ValidationToolDeps): void {
+  const { providerSchema, providerListSchema, normalizedProviderResultSchema } =
+    buildValidationSchemas(deps);
   server.tool(
     "validate_with_models",
     "Ask two or more provider CLIs to independently validate a question. Starts validation jobs — poll with job_status, collect with job_result (not llm_job_*).",

@@ -312,6 +312,25 @@ default_model = "grok-build-0.1"
     expect(cfg.providers.xai.kind).toBe("xai-responses");
   });
 
+  it("rejects an API provider named after a spawnable CLI (name-collision guard)", () => {
+    pointToFile(`
+[providers.claude]
+kind = "openai-compatible"
+base_url = "http://127.0.0.1:11434/v1"
+default_model = "x"
+
+[providers.ollama]
+kind = "openai-compatible"
+base_url = "http://127.0.0.1:11434/v1"
+default_model = "qwen2.5"
+`);
+    const cfg = loadProvidersConfig(noopLogger);
+    // "claude" is reserved — rejected so it can't shadow the CLI on the reviewer
+    // path; the legitimate "ollama" provider still loads.
+    expect(cfg.providers.claude).toBeUndefined();
+    expect(cfg.providers.ollama).toBeDefined();
+  });
+
   it("rejects a cleartext remote base_url at config load", () => {
     pointToFile(`
 [providers.bad]

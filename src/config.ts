@@ -495,6 +495,16 @@ export function minStableTokensForModel(config: CacheAwarenessConfig, modelName:
 // keeps the existing whole-file fallback behaviour and returns defaults.
 //──────────────────────────────────────────────────────────────────────────────
 
+// Spawnable CLI provider names reserved against API-provider name collisions.
+// Mirrors session-manager.CLI_TYPES (inlined to avoid an import cycle).
+const RESERVED_CLI_PROVIDER_NAMES: readonly string[] = [
+  "claude",
+  "codex",
+  "gemini",
+  "grok",
+  "mistral",
+];
+
 export const DEFAULT_XAI_API_KEY_ENV = "XAI_API_KEY";
 export const DEFAULT_XAI_BASE_URL = "https://api.x.ai/v1";
 export const DEFAULT_XAI_MODEL = "grok-build-0.1";
@@ -621,6 +631,19 @@ export function loadProvidersConfig(logger: Logger = noopLogger): ProvidersConfi
   // never the whole map, never persistence.
   for (const [name, rawProvider] of Object.entries(rawProviders)) {
     if (name === "xai") continue;
+    // An API provider MUST NOT be named after a spawnable CLI. Otherwise it would
+    // shadow that CLI on the validation reviewer path (matched by name) and
+    // confuse metrics/catalogs. Reject the collision with a warning rather than
+    // silently letting an HTTP endpoint impersonate `claude`/`codex`/etc.
+    // (Inlined rather than importing CLI_TYPES from session-manager, which
+    // imports from this module — avoids a value-import cycle. Keep in sync.)
+    if (RESERVED_CLI_PROVIDER_NAMES.includes(name)) {
+      logWarn(
+        logger,
+        `[providers.${name}] is rejected: "${name}" is a reserved CLI provider name and cannot be used for an API provider`
+      );
+      continue;
+    }
     const parsed = ApiProviderSchema.safeParse(rawProvider);
     if (!parsed.success) {
       logWarn(logger, `Invalid [providers.${name}] config; API provider disabled`, {
