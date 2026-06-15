@@ -1,18 +1,9 @@
 import type { Pool } from "pg";
 import { randomUUID } from "crypto";
-import { Session, ProviderType } from "./session-manager.js";
+import { Session, ProviderType, defaultSessionDescription } from "./session-manager.js";
 import { getRequestContext, resolveOwnerPrincipal } from "./request-context.js";
 
 export type { Logger } from "./logger.js";
-
-const DEFAULT_SESSION_DESCRIPTIONS: Record<ProviderType, string> = {
-  claude: "Claude Session",
-  codex: "Codex Session",
-  gemini: "Gemini Session",
-  grok: "Grok Session",
-  mistral: "Mistral Session",
-  "grok-api": "Grok API Session",
-};
 
 /**
  * PostgreSQL-backed session manager. PostgreSQL is the source of truth and
@@ -30,7 +21,7 @@ export class PostgreSQLSessionManager {
     sessionId?: string
   ): Promise<Session> {
     const id = sessionId || randomUUID();
-    const sessionDescription = description ?? DEFAULT_SESSION_DESCRIPTIONS[cli];
+    const sessionDescription = description ?? defaultSessionDescription(cli);
     const now = new Date().toISOString();
     // F3: stamp the owner from the request context ambient at creation.
     const ownerPrincipal = resolveOwnerPrincipal(getRequestContext());

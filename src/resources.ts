@@ -548,6 +548,9 @@ function parseProviderToolsUri(uri: string): { provider: ProviderCapabilityId } 
       : null;
   if (!prefix || uri === `${prefix}catalog`) return null;
   const provider = uri.slice(prefix.length);
-  if (!providerCapabilityIds().includes(provider as ProviderCapabilityId)) return null;
+  // Only known capability ids back a `provider-tools://<id>` resource; an
+  // arbitrary (Slice 0.5) API id is a valid ProviderCapabilityId but has no
+  // resource until it is registered, so reject anything outside the known set.
+  if (!(providerCapabilityIds() as readonly string[]).includes(provider)) return null;
   return { provider: provider as ProviderCapabilityId };
 }

@@ -255,6 +255,10 @@ describe("Session Migration", () => {
     await migrateFromFile(testFilePath, pgManager);
 
     const migrated = await pgManager.getSession(session.id);
-    expect(migrated?.metadata).toBeUndefined();
+    // The PostgreSQL backend represents "no metadata" as the column default
+    // (`metadata JSONB DEFAULT '{}'`), so a migrated session with no file-side
+    // metadata round-trips as an empty object rather than `undefined` (the file
+    // backend's representation). Either way it carries no caller metadata.
+    expect(migrated?.metadata).toEqual({});
   });
 });

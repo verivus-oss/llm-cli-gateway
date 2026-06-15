@@ -30,6 +30,47 @@ delete process.env.LLM_GATEWAY_JOBS_DB;
 
 let testPool: Pool | null = null;
 
+// Cumulative session schema for the test database — the end state of
+// migrations/001..005 applied in order. This is inlined (not loaded from the
+// migration files) because migration 003's `ALTER COLUMN cli TYPE` cannot run
+// against the `session_summary` view that 001 creates; the test DB therefore
+// materialises the final column definitions directly and omits that view, which
+// no test exercises. Keep this in lockstep with migrations/*.sql:
+//   003/005 → the open-API-provider CHECK (cli format guard, not a fixed enum)
+//   004     → the owner_principal column
+const SESSION_SCHEMA_SQL = `
+  CREATE TABLE IF NOT EXISTS sessions (
+    id TEXT PRIMARY KEY,
+    cli VARCHAR(32) NOT NULL CHECK (cli ~ '^[A-Za-z][A-Za-z0-9._-]*$'),
+    description TEXT,
+    metadata JSONB DEFAULT '{}'::JSONB,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_used_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    owner_principal TEXT
+  );
+
+  CREATE TABLE IF NOT EXISTS active_sessions (
+    cli VARCHAR(32) PRIMARY KEY CHECK (cli ~ '^[A-Za-z][A-Za-z0-9._-]*$'),
+    session_id TEXT REFERENCES sessions(id) ON DELETE CASCADE,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_sessions_cli ON sessions(cli);
+  CREATE INDEX IF NOT EXISTS idx_sessions_last_used_at ON sessions(last_used_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_sessions_metadata ON sessions USING GIN(metadata);
+  CREATE INDEX IF NOT EXISTS idx_sessions_cli_last_used ON sessions(cli, last_used_at DESC);
+
+  -- Reconcile a pre-existing test database created before the open-name CHECK
+  -- (migration 005). DROP + ADD is idempotent and admits arbitrary API names.
+  ALTER TABLE sessions ADD COLUMN IF NOT EXISTS owner_principal TEXT;
+  ALTER TABLE sessions DROP CONSTRAINT IF EXISTS sessions_cli_check;
+  ALTER TABLE sessions
+    ADD CONSTRAINT sessions_cli_check CHECK (cli ~ '^[A-Za-z][A-Za-z0-9._-]*$');
+  ALTER TABLE active_sessions DROP CONSTRAINT IF EXISTS active_sessions_cli_check;
+  ALTER TABLE active_sessions
+    ADD CONSTRAINT active_sessions_cli_check CHECK (cli ~ '^[A-Za-z][A-Za-z0-9._-]*$');
+`;
+
 /**
  * Mock logger for tests
  */
@@ -51,66 +92,7 @@ export async function setupTestDatabase(): Promise<{ pool: Pool }> {
       // Serialize schema bootstrap across parallel Vitest workers/processes.
       await client.query("SELECT pg_advisory_lock($1)", [MIGRATION_LOCK_KEY]);
       try {
-        const migrationSql = `
-          -- Create sessions table
-          CREATE TABLE IF NOT EXISTS sessions (
-            id TEXT PRIMARY KEY,
-            cli VARCHAR(32) NOT NULL CHECK (cli IN ('claude', 'codex', 'gemini', 'grok', 'mistral', 'grok-api')),
-            description TEXT,
-            metadata JSONB DEFAULT '{}'::JSONB,
-            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-            last_used_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-          );
-
-          -- Create active_sessions table
-          CREATE TABLE IF NOT EXISTS active_sessions (
-            cli VARCHAR(32) PRIMARY KEY CHECK (cli IN ('claude', 'codex', 'gemini', 'grok', 'mistral', 'grok-api')),
-            session_id TEXT REFERENCES sessions(id) ON DELETE CASCADE,
-            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-          );
-
-          -- Indexes
-          CREATE INDEX IF NOT EXISTS idx_sessions_cli ON sessions(cli);
-          CREATE INDEX IF NOT EXISTS idx_sessions_last_used_at ON sessions(last_used_at DESC);
-          CREATE INDEX IF NOT EXISTS idx_sessions_metadata ON sessions USING GIN(metadata);
-          CREATE INDEX IF NOT EXISTS idx_sessions_cli_last_used ON sessions(cli, last_used_at DESC);
-
-          -- Normalize legacy UUID schemas to opaque string IDs for compatibility.
-          DO $$
-          BEGIN
-            IF EXISTS (
-              SELECT 1
-              FROM information_schema.columns
-              WHERE table_schema = 'public'
-                AND table_name = 'sessions'
-                AND column_name = 'id'
-                AND udt_name = 'uuid'
-            ) THEN
-              ALTER TABLE active_sessions DROP CONSTRAINT IF EXISTS active_sessions_session_id_fkey;
-              ALTER TABLE sessions ALTER COLUMN id TYPE TEXT USING id::text;
-              ALTER TABLE active_sessions ALTER COLUMN session_id TYPE TEXT USING session_id::text;
-              ALTER TABLE active_sessions
-                ADD CONSTRAINT active_sessions_session_id_fkey
-                FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE;
-            END IF;
-          END;
-          $$ LANGUAGE plpgsql;
-
-          -- Normalize legacy provider constraints to the current provider set.
-          ALTER TABLE sessions DROP CONSTRAINT IF EXISTS sessions_cli_check;
-          ALTER TABLE sessions ALTER COLUMN cli TYPE VARCHAR(32);
-          ALTER TABLE sessions
-            ADD CONSTRAINT sessions_cli_check
-            CHECK (cli IN ('claude', 'codex', 'gemini', 'grok', 'mistral', 'grok-api'));
-
-          ALTER TABLE active_sessions DROP CONSTRAINT IF EXISTS active_sessions_cli_check;
-          ALTER TABLE active_sessions ALTER COLUMN cli TYPE VARCHAR(32);
-          ALTER TABLE active_sessions
-            ADD CONSTRAINT active_sessions_cli_check
-            CHECK (cli IN ('claude', 'codex', 'gemini', 'grok', 'mistral', 'grok-api'));
-        `;
-
-        await client.query(migrationSql);
+        await client.query(SESSION_SCHEMA_SQL);
       } finally {
         await client.query("SELECT pg_advisory_unlock($1)", [MIGRATION_LOCK_KEY]);
       }

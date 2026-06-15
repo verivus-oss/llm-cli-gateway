@@ -38,7 +38,16 @@ export class PerformanceMetrics {
   private metrics: Record<ProviderType, ToolMetrics> = createEmptyMetrics();
 
   recordRequest(provider: ProviderType, durationMs: number, success: boolean): void {
-    const metrics = this.metrics[provider];
+    // Slice 0.5: the known CLI/API providers are pre-populated, but an arbitrary
+    // `[providers.<name>]` (kind:"api") id may flow through here once API
+    // providers are registered. Lazily create its bucket so the open
+    // `ProviderType` never indexes an undefined entry.
+    const metrics = (this.metrics[provider] ??= {
+      requestCount: 0,
+      successCount: 0,
+      failureCount: 0,
+      totalResponseTimeMs: 0,
+    });
     metrics.requestCount += 1;
     const normalizedDurationMs = Number.isFinite(durationMs) ? Math.max(0, durationMs) : 0;
     metrics.totalResponseTimeMs += normalizedDurationMs;
@@ -55,7 +64,10 @@ export class PerformanceMetrics {
     let totalSuccesses = 0;
     let totalFailures = 0;
 
-    for (const provider of PROVIDER_TYPES) {
+    // Iterate the actual recorded keys (the pre-populated registered set plus
+    // any lazily-added API providers) rather than only PROVIDER_TYPES, so an
+    // arbitrary API provider's metrics are not silently dropped from the snapshot.
+    for (const provider of Object.keys(this.metrics) as ProviderType[]) {
       const metrics = this.metrics[provider];
       const averageResponseTimeMs =
         metrics.requestCount > 0 ? metrics.totalResponseTimeMs / metrics.requestCount : 0;

@@ -21,7 +21,23 @@ export interface ProviderToolControl {
   behavior: string;
 }
 
-export type ProviderCapabilityId = CliType | "grok_api";
+/**
+ * Providers with static capability metadata baked into this module
+ * (`TOOL_CONTROLS`, `ACP_CAPABILITIES`, `ACP_CONTRACT.providers`). Closed on
+ * purpose so those total maps stay exhaustive and capability tests can assert
+ * the exact classification of each provider.
+ */
+export type KnownProviderCapabilityId = CliType | "grok_api";
+
+/**
+ * Slice 0.5 — provider-identity widening. A capability id is any known provider
+ * OR an arbitrary `[providers.<name>]` (kind:"api") id. The `(string & {})`
+ * member keeps the known literals in autocomplete while giving generic API
+ * providers a type-level home in the capability/catalog surfaces. Lookups for an
+ * id without static metadata are rejected at runtime (see
+ * `buildOneProviderToolCapabilities`); no such id is registered yet (dormant).
+ */
+export type ProviderCapabilityId = KnownProviderCapabilityId | (string & {});
 export type ProviderKind = "cli" | "api";
 export type UnsupportedInputBehavior =
   | "reject"
@@ -179,8 +195,8 @@ export interface AcpContractMetadata {
   contractDoc: "docs/acp-contract.md";
   /** Frozen non-goals for this slice. */
   nonGoals: readonly string[];
-  /** Per-provider frozen classification. */
-  providers: Readonly<Record<ProviderCapabilityId, AcpProviderContract>>;
+  /** Per-provider frozen classification (known providers only). */
+  providers: Readonly<Record<KnownProviderCapabilityId, AcpProviderContract>>;
 }
 
 /**
@@ -329,7 +345,7 @@ const ACP_DOCS_REFERENCE = "docs/plans/first-class-acp-gateway-extension.dag.tom
  * ACP runtime routing is gated off until a later rollout phase enables it.
  * Entrypoints are stored only as executable + argv arrays (no shell strings).
  */
-const ACP_CAPABILITIES: Record<ProviderCapabilityId, ProviderAcpCapability> = {
+const ACP_CAPABILITIES: Record<KnownProviderCapabilityId, ProviderAcpCapability> = {
   mistral: {
     status: "native_smoke_passed",
     mediation: "native",
@@ -424,9 +440,22 @@ function cloneAcpCapability(acp: ProviderAcpCapability): ProviderAcpCapability {
   };
 }
 
-const PROVIDER_CAPABILITY_IDS = [...CLI_TYPES, "grok_api"] as const;
+const PROVIDER_CAPABILITY_IDS: readonly KnownProviderCapabilityId[] = [
+  ...CLI_TYPES,
+  "grok_api",
+] as const;
 
-const KNOWN_PROVIDER_TOOLS: Partial<Record<ProviderCapabilityId, readonly string[]>> = {
+/**
+ * Narrowing guard: true when `cli` has static capability metadata in this
+ * module. An arbitrary `[providers.<name>]` (kind:"api") id widened in by Slice
+ * 0.5 is a valid `ProviderCapabilityId` but has no static metadata yet, so
+ * lookups reject it explicitly rather than indexing `undefined`.
+ */
+function isKnownProviderCapabilityId(cli: ProviderCapabilityId): cli is KnownProviderCapabilityId {
+  return (PROVIDER_CAPABILITY_IDS as readonly string[]).includes(cli);
+}
+
+const KNOWN_PROVIDER_TOOLS: Partial<Record<KnownProviderCapabilityId, readonly string[]>> = {
   grok: [
     "image_gen",
     "image_edit",
@@ -456,7 +485,7 @@ const NOISE_TOOL_IDENTIFIERS = new Set([
   "short_description",
 ]);
 
-const TOOL_CONTROLS: Record<ProviderCapabilityId, ProviderCapabilityStaticDefinition> = {
+const TOOL_CONTROLS: Record<KnownProviderCapabilityId, ProviderCapabilityStaticDefinition> = {
   claude: {
     providerKind: "cli",
     gatewayRequestTools: ["claude_request", "claude_request_async"],
@@ -1058,7 +1087,7 @@ export function clearProviderToolCapabilitiesCache(): void {
   capabilityCache = new Map();
 }
 
-export function providerCapabilityIds(): readonly ProviderCapabilityId[] {
+export function providerCapabilityIds(): readonly KnownProviderCapabilityId[] {
   return PROVIDER_CAPABILITY_IDS;
 }
 
@@ -1067,6 +1096,14 @@ function buildOneProviderToolCapabilities(
   query: NormalizedProviderCapabilityQuery
 ): ProviderToolCapabilities {
   const warnings: string[] = [];
+  if (!isKnownProviderCapabilityId(cli)) {
+    // Defensive under the Slice 0.5 open id: no generic API provider is
+    // registered yet, so there is no static capability metadata to return.
+    throw new Error(
+      `No tool-capability metadata for provider "${cli}". ` +
+        `Known providers: ${PROVIDER_CAPABILITY_IDS.join(", ")}.`
+    );
+  }
   const definition = TOOL_CONTROLS[cli];
   const discoveredSkills =
     query.includeSkills && cli !== "grok_api" ? discoverSkills(cli, warnings, query) : [];
@@ -1268,7 +1305,10 @@ function cloneControls(controls: ProviderCapabilityControls): ProviderCapability
   ) as ProviderCapabilityControls;
 }
 
-function getModelInfo(cli: ProviderCapabilityId, refresh: boolean): CliInfo | GrokApiModelInfo {
+function getModelInfo(
+  cli: KnownProviderCapabilityId,
+  refresh: boolean
+): CliInfo | GrokApiModelInfo {
   if (cli !== "grok_api") {
     return getAvailableCliInfo(refresh)[cli];
   }
@@ -1289,7 +1329,7 @@ function getModelInfo(cli: ProviderCapabilityId, refresh: boolean): CliInfo | Gr
 }
 
 function discoverConfigSurfaces(
-  cli: ProviderCapabilityId,
+  cli: KnownProviderCapabilityId,
   query: NormalizedProviderCapabilityQuery,
   discoveredSkills: ProviderSkillCapability[]
 ): ProviderConfigSurface[] {
@@ -1366,7 +1406,7 @@ function discoverConfigSurfaces(
 }
 
 function extractProviderTools(
-  cli: ProviderCapabilityId,
+  cli: KnownProviderCapabilityId,
   skills: ProviderSkillCapability[]
 ): ProviderNativeToolCapability[] {
   if (cli === "grok_api") return [];
@@ -1389,7 +1429,7 @@ function extractProviderTools(
 }
 
 function providerToolConfidence(
-  cli: ProviderCapabilityId,
+  cli: KnownProviderCapabilityId,
   toolName: string,
   reason: ProviderToolExtractionReason | undefined
 ): ProviderToolConfidence {
@@ -1399,7 +1439,7 @@ function providerToolConfidence(
   return "low";
 }
 
-function isKnownProviderTool(cli: ProviderCapabilityId, toolName: string): boolean {
+function isKnownProviderTool(cli: KnownProviderCapabilityId, toolName: string): boolean {
   return KNOWN_PROVIDER_TOOLS[cli]?.includes(toolName) ?? false;
 }
 
@@ -1637,7 +1677,10 @@ function extractFirstHeading(content: string): string | undefined {
   return match?.[1]?.trim();
 }
 
-function extractDeclaredTools(cli: ProviderCapabilityId, content: string): ExtractedDeclaredTools {
+function extractDeclaredTools(
+  cli: KnownProviderCapabilityId,
+  content: string
+): ExtractedDeclaredTools {
   const tools = new Map<string, ProviderToolExtractionReason>();
   for (const identifier of extractToolSectionIdentifiers(content)) {
     addToolHint(tools, cli, identifier, "exact-tool-section");
@@ -1680,7 +1723,7 @@ function extractToolSectionIdentifiers(content: string): string[] {
 
 function addToolHint(
   tools: Map<string, ProviderToolExtractionReason>,
-  cli: ProviderCapabilityId,
+  cli: KnownProviderCapabilityId,
   identifier: string,
   reason: ProviderToolExtractionReason
 ): void {
@@ -1691,7 +1734,7 @@ function addToolHint(
   tools.set(identifier, reason);
 }
 
-function isPlausibleToolIdentifier(cli: ProviderCapabilityId, identifier: string): boolean {
+function isPlausibleToolIdentifier(cli: KnownProviderCapabilityId, identifier: string): boolean {
   if (isKnownProviderTool(cli, identifier)) return true;
   if (identifier.includes(":")) return false;
   if (NOISE_TOOL_IDENTIFIERS.has(identifier)) return false;

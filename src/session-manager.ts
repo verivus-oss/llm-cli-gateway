@@ -21,18 +21,58 @@ import { getRequestContext, resolveOwnerPrincipal } from "./request-context.js";
 
 export const CLI_TYPES = ["claude", "codex", "gemini", "grok", "mistral"] as const;
 export type CliType = (typeof CLI_TYPES)[number];
+
+/**
+ * Known API-backed provider ids baked into the in-tree config. `grok-api` is
+ * the HTTP provider that predates Slice 0.5. Kept as a literal tuple so the
+ * *registered* provider set (PROVIDER_TYPES, the session-provider zod enum, the
+ * Postgres seed list) stays precise. Arbitrary names are admitted by the TYPE
+ * below, not by this tuple.
+ */
 export const API_PROVIDER_TYPES = ["grok-api"] as const;
-export type ApiProviderType = (typeof API_PROVIDER_TYPES)[number];
+export type KnownApiProviderType = (typeof API_PROVIDER_TYPES)[number];
+
+/**
+ * Slice 0.5 — provider-identity widening (locked decision B: arbitrary names).
+ *
+ * An API provider id is any `[providers.<name>]` config key, tagged
+ * `kind:"api"`. The `(string & {})` member admits arbitrary names while
+ * preserving editor autocomplete for the known literals. This widening is
+ * deliberately identity-layer only: `CliType`/`LlmCli` and every CLI call site
+ * (spawn argv, `providerCommandName`, ACP) stay narrow, and no API provider is
+ * registered yet — the open type ships dormant.
+ */
+export type ApiProviderType = KnownApiProviderType | (string & {});
+
+/** A provider id: a spawnable CLI, or an (open) API-backed provider. */
+export type ProviderType = CliType | ApiProviderType;
+
+/** Provider transport family. CLIs spawn subprocesses; api providers are HTTP. */
+export type ProviderKind = "cli" | "api";
+
+/**
+ * The registered provider set — the five CLIs plus the known API providers.
+ * Used to build the default per-provider maps and the session-provider zod
+ * enum. Arbitrary API ids are valid `ProviderType`s but are not members of this
+ * tuple until a provider is configured.
+ */
 export const PROVIDER_TYPES = [...CLI_TYPES, ...API_PROVIDER_TYPES] as const;
-export type ProviderType = (typeof PROVIDER_TYPES)[number];
 
-const createEmptyActiveSessions = (): Record<ProviderType, string | null> =>
-  Object.fromEntries(PROVIDER_TYPES.map(provider => [provider, null])) as Record<
-    ProviderType,
-    string | null
-  >;
+/** True when `provider` is one of the spawnable CLIs (narrowing guard). */
+export function isCliType(provider: string): provider is CliType {
+  return (CLI_TYPES as readonly string[]).includes(provider);
+}
 
-const DEFAULT_SESSION_DESCRIPTIONS: Record<ProviderType, string> = {
+/**
+ * The `kind` tag for a provider id: spawnable CLIs are `"cli"`, everything else
+ * (grok-api and any arbitrary `[providers.<name>]` key) is `"api"`. This is the
+ * single source of truth for the kind:"api" tagging the Slice 0.5 widening adds.
+ */
+export function providerKind(provider: ProviderType): ProviderKind {
+  return isCliType(provider) ? "cli" : "api";
+}
+
+const KNOWN_SESSION_DESCRIPTIONS: Partial<Record<ProviderType, string>> = {
   claude: "Claude Session",
   codex: "Codex Session",
   gemini: "Gemini Session",
@@ -40,6 +80,21 @@ const DEFAULT_SESSION_DESCRIPTIONS: Record<ProviderType, string> = {
   mistral: "Mistral Session",
   "grok-api": "Grok API Session",
 };
+
+/**
+ * Default human-readable description for a new session. Falls back to a derived
+ * label for arbitrary API providers so the open `ProviderType` never yields an
+ * `undefined` description.
+ */
+export function defaultSessionDescription(provider: ProviderType): string {
+  return KNOWN_SESSION_DESCRIPTIONS[provider] ?? `${provider} Session`;
+}
+
+const createEmptyActiveSessions = (): Record<ProviderType, string | null> =>
+  Object.fromEntries(PROVIDER_TYPES.map(provider => [provider, null])) as Record<
+    ProviderType,
+    string | null
+  >;
 
 export interface Session {
   id: string;
@@ -168,7 +223,7 @@ export class FileSessionManager {
   createSession(cli: ProviderType, description?: string, sessionId?: string): Session {
     this.evictExpiredSessions();
     const id = sessionId || randomUUID();
-    const sessionDescription = description ?? DEFAULT_SESSION_DESCRIPTIONS[cli];
+    const sessionDescription = description ?? defaultSessionDescription(cli);
     const session: Session = {
       id,
       cli,
