@@ -552,6 +552,47 @@ Logging at error points
 
 ---
 
+## Configuring an API provider (`base_url` includes the version segment)
+
+Each adapter appends only the **bare endpoint path** to `base_url` —
+`chat/completions` (openai-compatible), `messages` (anthropic), `responses`
+(xai-responses). So `base_url` **must include any version prefix** the vendor
+requires; otherwise the request 404s. Verified live against each vendor:
+
+```toml
+[providers.anthropic]                          # Claude — kind "anthropic"
+kind = "anthropic"
+base_url = "https://api.anthropic.com/v1"       # -> /v1/messages  (NOT https://api.anthropic.com)
+api_key_env = "ANTHROPIC_API_KEY"
+default_model = "claude-haiku-4-5-20251001"
+
+[providers.openai]                              # GPT/codex — kind "openai-compatible"
+kind = "openai-compatible"
+base_url = "https://api.openai.com/v1"          # -> /v1/chat/completions
+api_key_env = "OPENAI_API_KEY"
+default_model = "gpt-4o-mini"
+
+[providers.xai]                                 # Grok — kind "xai-responses"
+base_url = "https://api.x.ai/v1"                # -> /v1/responses
+api_key_env = "XAI_API_KEY"
+default_model = "grok-3"
+
+[providers.mistralapi]                          # Mistral — kind "openai-compatible"
+kind = "openai-compatible"
+base_url = "https://api.mistral.ai/v1"          # -> /v1/chat/completions
+api_key_env = "MISTRAL_API_KEY"
+default_model = "mistral-small-latest"
+
+[providers.ollama]                              # local, keyless (loopback exception)
+kind = "openai-compatible"
+base_url = "http://127.0.0.1:11434/v1"
+default_model = "qwen2.5-coder:32b"
+```
+
+An API provider **cannot be named after a CLI** (`claude`, `codex`, `gemini`,
+`grok`, `mistral`) — such a config block is rejected at load to avoid shadowing
+the CLI on the reviewer path. Use a vendor name (`anthropic`, `openai`, …).
+
 ## API providers as code generators (Slice 4)
 
 API-endpoint providers (`[providers.<name>]`, `kind = "api"`) are **reviewers and
