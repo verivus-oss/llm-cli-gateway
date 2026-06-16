@@ -44,10 +44,25 @@ import type {
 import type { Logger } from "../logger.js";
 import { noopLogger } from "../logger.js";
 
+/**
+ * A `session/request_permission` decider (the Slice B3 ApprovalManager bridge).
+ * When omitted, the host denies every permission by cancelling the turn.
+ */
+export type AcpPermissionDecider = (
+  request: RequestPermissionRequest,
+  context: HostCallbackContext
+) => Promise<RequestPermissionResponse>;
+
 /** Construction options for {@link GatewayHostServices}. */
 export interface GatewayHostServicesOptions {
   /** Gateway logger (stderr sink). Defaults to a no-op. */
   readonly logger?: Logger;
+  /**
+   * Optional permission decider (the ApprovalManager bridge). When provided,
+   * `session/request_permission` routes through it; when omitted, every
+   * permission is denied by cancelling the turn (the deny-by-default floor).
+   */
+  readonly permissionDecider?: AcpPermissionDecider;
 }
 
 /**
@@ -60,9 +75,11 @@ export interface GatewayHostServicesOptions {
  */
 export class GatewayHostServices implements HostServices {
   private readonly logger: Logger;
+  private readonly permissionDecider?: AcpPermissionDecider;
 
   constructor(options: GatewayHostServicesOptions = {}) {
     this.logger = options.logger ?? noopLogger;
+    this.permissionDecider = options.permissionDecider;
   }
 
   /**
@@ -108,6 +125,11 @@ export class GatewayHostServices implements HostServices {
     request: RequestPermissionRequest,
     context: HostCallbackContext
   ): Promise<RequestPermissionResponse> {
+    // Slice B3: when a permission decider (ApprovalManager bridge) is wired,
+    // route through it. Otherwise deny-by-default by cancelling the turn.
+    if (this.permissionDecider) {
+      return this.permissionDecider(request, context);
+    }
     this.logger.info("acp.permission.denied", {
       provider: context.provider,
       reason: "no_approval_bridge",
