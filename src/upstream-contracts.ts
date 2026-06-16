@@ -328,12 +328,12 @@ export const ACP_ENTRYPOINT_CONTRACTS: Record<CliType, AcpEntrypointContract> = 
     status: "native",
     executable: "devin",
     entrypointArgs: ["acp"],
-    targetVersion: "devin CLI (cli.devin.ai)",
+    targetVersion: "devin 2026.5.26-8 (1a388fa9)",
     // `devin --version` is the safe probe; bare `devin acp` starts the live ACP
     // server over stdio and is intentionally NOT probed here.
     probeArgs: [["--version"]],
     evidence:
-      "Native ACP entrypoint `devin acp` (stdio JSON-RPC). Registered as a candidate in Slice D0; manual initialize + session/new smoke and the runtime pilot land in Slice D1.",
+      'Native ACP entrypoint `devin acp` (stdio JSON-RPC). Slice D1 manual initialize + session/new smoke passed (protocolVersion 1, agent "Affogato", session created). Third native runtime pilot; routing stays config-gated.',
     docsRef: "docs/plans/devin-integration-scoping.md",
   },
 };

@@ -256,7 +256,7 @@ export const ACP_CONTRACT: AcpContractMetadata = {
     devin: {
       classification: "native_candidate",
       summary:
-        "Cognition Devin CLI exposes a native ACP server via `devin acp` (stdio); runtime pilot pending a smoke (Slice D1).",
+        "Cognition Devin CLI exposes a native ACP server via `devin acp` (stdio); Slice D1 initialize + session/new smoke passed (protocolVersion 1, third runtime pilot). Runtime routing stays config-gated.",
     },
   },
 };
@@ -434,15 +434,15 @@ const ACP_CAPABILITIES: Record<KnownProviderCapabilityId, ProviderAcpCapability>
     docs: ACP_DOCS_REFERENCE,
   },
   devin: {
-    status: "native_candidate",
+    status: "native_smoke_passed",
     mediation: "native",
-    targetVersion: "devin CLI (cli.devin.ai)",
+    targetVersion: "devin 2026.5.26-8 (1a388fa9)",
     entrypoint: { command: "devin", args: ["acp"] },
     runtimeEnabled: false,
     smokeSupported: true,
-    smokeStatus: "not_run",
+    smokeStatus: "passed",
     caveats: [
-      "Native ACP via `devin acp` (stdio JSON-RPC); smoke + runtime pilot land in Slice D1.",
+      'Native ACP via `devin acp` (stdio JSON-RPC); Slice D1 initialize + session/new smoke passed (protocolVersion 1, agent "Affogato").',
       "Credentials come from `devin auth login` or WINDSURF_API_KEY; empty-env smoke is not expected to pass.",
       "Runtime routing stays disabled until ACP is enabled in gateway config.",
     ],

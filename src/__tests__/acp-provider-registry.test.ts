@@ -25,7 +25,7 @@ describe("acp provider registry", () => {
     codex: "adapter_mediated_deferred",
     claude: "adapter_mediated_deferred",
     gemini: "absent_watchlist",
-    devin: "native_candidate",
+    devin: "native_smoke_passed",
   };
 
   const expectedSupportKind: Record<string, AcpSupportKind> = {
@@ -75,9 +75,12 @@ describe("acp provider registry", () => {
     const grok = getAcpProviderEntry("grok");
     expect(grok.entrypoint).toEqual({ command: "grok", args: ["agent", "stdio"] });
 
+    const devin = getAcpProviderEntry("devin");
+    expect(devin.entrypoint).toEqual({ command: "devin", args: ["acp"] });
+
     // Structural guarantee for no_shell_eval_for_entrypoints: args is an array,
     // and the command contains no shell metacharacters.
-    for (const provider of ["mistral", "grok"] as const) {
+    for (const provider of ["mistral", "grok", "devin"] as const) {
       const entrypoint = getAcpProviderEntry(provider).entrypoint;
       expect(entrypoint).not.toBeNull();
       expect(Array.isArray(entrypoint?.args)).toBe(true);
@@ -94,8 +97,8 @@ describe("acp provider registry", () => {
     }
   });
 
-  it("returns native runtime pilots in priority order (mistral first, then grok)", () => {
-    expect(getRuntimePilotProviders()).toEqual(["mistral", "grok"]);
+  it("returns native runtime pilots in priority order (mistral, grok, then devin)", () => {
+    expect(getRuntimePilotProviders()).toEqual(["mistral", "grok", "devin"]);
   });
 
   it("identifies native ACP providers correctly", () => {

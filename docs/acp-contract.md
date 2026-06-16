@@ -88,14 +88,16 @@ classification does not pre-empt them.
 | ---------------------- | ------------------------ | ------------------------- | ------------------------ |
 | Mistral Vibe           | vibe 2.14.1              | native_candidate          | `vibe-acp`               |
 | xAI Grok CLI           | grok 0.2.50 (cadf94855)  | native_candidate          | `grok agent stdio`       |
+| Cognition Devin CLI    | devin 2026.5.26-8 (1a388fa9) | native_candidate      | `devin acp`              |
 | OpenAI Codex CLI       | codex-cli 0.139.0        | adapter_mediated_deferred | none at target version   |
 | Anthropic Claude Code  | claude 2.1.175           | adapter_mediated_deferred | none at target version   |
 | Google Antigravity agy | agy 1.0.7                | absent_watchlist          | none at target version   |
 
 Notes:
 
-- Mistral and Grok are native ACP runtime-pilot candidates in this slice; their
-  runtime routing stays behind global and per-provider config gates.
+- Mistral, Grok and Devin are native ACP runtime-pilot candidates (Devin's
+  `initialize` + `session/new` smoke passed in Slice D1); their runtime routing
+  stays behind global and per-provider config gates.
 - Codex and Claude are adapter-mediated and deferred at their target CLI
   versions; adapter evidence is documentation only and never native support.
 - Antigravity `agy` 1.0.7 has no ACP surface. Legacy Gemini CLI ACP evidence

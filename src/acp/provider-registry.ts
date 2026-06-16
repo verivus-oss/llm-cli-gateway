@@ -176,18 +176,18 @@ const ACP_PROVIDER_REGISTRY: Readonly<Record<CliType, AcpProviderRegistryEntry>>
   devin: Object.freeze({
     provider: "devin",
     displayName: "Cognition Devin CLI",
-    status: "native_candidate",
+    status: "native_smoke_passed",
     supportKind: "native",
-    targetVersion: "devin CLI (cli.devin.ai)",
+    targetVersion: "devin 2026.5.26-8 (1a388fa9)",
     entrypoint: Object.freeze({ command: "devin", args: Object.freeze(["acp"]) }),
     runtimeEnabledDefault: false,
-    // Slice D0 registers the native entrypoint as a candidate; the manual
-    // initialize + session/new smoke and the runtime pilot land in Slice D1.
-    shipRuntimePilot: false,
-    runtimePriority: 0,
+    // Slice D1: manual initialize + session/new smoke passed against the
+    // installed CLI (protocolVersion 1, agent "Affogato", session created).
+    shipRuntimePilot: true,
+    runtimePriority: 3,
     adapterCandidates: Object.freeze([]),
     caveat:
-      "Native ACP entrypoint `devin acp` (stdio JSON-RPC). Smoke not yet run; runtime pilot deferred to Slice D1. Credentials come from `devin auth login` or WINDSURF_API_KEY.",
+      "Native ACP entrypoint `devin acp` (stdio JSON-RPC). Manual initialize + session/new smoke passed with the installed CLI managing credentials (`devin auth login`; WINDSURF_API_KEY for empty-env); empty-env smoke is expected to fail. Third native runtime pilot; runtime routing stays config-gated.",
   }),
 });
 

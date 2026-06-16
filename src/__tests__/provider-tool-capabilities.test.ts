@@ -523,7 +523,7 @@ describe("provider tool capabilities", () => {
       expect(acp?.entrypoint).toBeNull();
     });
 
-    it("classifies Mistral and Grok as native ACP candidates with argv-array entrypoints", () => {
+    it("classifies Mistral, Grok and Devin as native ACP candidates with argv-array entrypoints", () => {
       const mistral = getProviderToolCapabilities("mistral").mistral?.acp;
       expect(mistral?.status).toBe("native_smoke_passed");
       expect(mistral?.mediation).toBe("native");
@@ -535,6 +535,12 @@ describe("provider tool capabilities", () => {
       expect(grok?.mediation).toBe("native");
       expect(grok?.entrypoint).toEqual({ command: "grok", args: ["agent", "stdio"] });
       expect(grok?.smokeSupported).toBe(true);
+
+      const devin = getProviderToolCapabilities("devin").devin?.acp;
+      expect(devin?.status).toBe("native_smoke_passed");
+      expect(devin?.mediation).toBe("native");
+      expect(devin?.entrypoint).toEqual({ command: "devin", args: ["acp"] });
+      expect(devin?.smokeSupported).toBe(true);
     });
 
     it("never labels an adapter-mediated provider as native and keeps runtime routing off", () => {
