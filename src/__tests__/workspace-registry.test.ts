@@ -115,6 +115,30 @@ describe("workspace registry", () => {
     process.env = { ...ORIGINAL_ENV };
   });
 
+  it("Slice 4: an API provider never resolves to a workspace/worktree", () => {
+    writeFileSync(
+      configPath,
+      [
+        "[workspaces]",
+        'default = "gateway"',
+        "",
+        "[[workspaces.repos]]",
+        'alias = "gateway"',
+        `path = "${repoRoot}"`,
+        'providers = ["claude", "codex"]',
+        "allow_worktree = true",
+        "",
+      ].join("\n")
+    );
+    const registry = loadWorkspaceRegistry(undefined, configPath);
+    // API providers (kind:"api") are reviewers/generators only — they must never
+    // receive a worktree. The registry is CliType-only, so an API provider name
+    // is rejected rather than handed a filesystem workspace.
+    expect(() => resolveWorkspaceForProvider(registry, "ollama" as any, "gateway")).toThrow(
+      /does not allow provider "ollama"/
+    );
+  });
+
   it("loads repo aliases, normalizes paths, and resolves provider cwd", () => {
     writeFileSync(
       configPath,

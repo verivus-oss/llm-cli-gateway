@@ -27,6 +27,29 @@ export interface PrepareApiRequestParams {
   previousResponseId?: string;
 }
 
+export interface ApiProviderCatalogEntry {
+  name: string;
+  providerKind: "api";
+  kind: ApiProviderRuntime["kind"];
+  defaultModel: string;
+  models: string[] | null;
+}
+
+/**
+ * Slice 5: the discovery/catalog projection of an enabled API provider, tagged
+ * `providerKind:"api"`. Shared by `list_available_models` and the
+ * `llm_process_health` outbound-providers block so both expose the same shape.
+ */
+export function apiProviderCatalogEntry(runtime: ApiProviderRuntime): ApiProviderCatalogEntry {
+  return {
+    name: runtime.name,
+    providerKind: "api",
+    kind: runtime.kind,
+    defaultModel: runtime.defaultModel,
+    models: runtime.models ?? null,
+  };
+}
+
 export class ApiModelNotAllowedError extends Error {
   constructor(
     readonly provider: string,

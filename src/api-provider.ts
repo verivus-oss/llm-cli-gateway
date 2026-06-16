@@ -348,6 +348,15 @@ export function resetApiProviderBreakers(): void {
   breakers.clear();
 }
 
+/**
+ * Slice 5: current circuit-breaker state for a provider, or "CLOSED" when no
+ * request has created a breaker yet (the default/healthy state). Used by
+ * `llm_process_health`'s outbound-providers block.
+ */
+export function apiProviderBreakerState(name: string): string {
+  return breakers.get(name)?.state ?? "CLOSED";
+}
+
 /** Execute an API request: build → post (retry + breaker) → parse. */
 export async function runApiRequest(
   provider: ApiProvider,

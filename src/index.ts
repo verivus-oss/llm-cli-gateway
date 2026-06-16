@@ -61,10 +61,15 @@ import {
 import {
   createApiProvider,
   runApiRequest,
+  apiProviderBreakerState,
   type ApiProvider,
   type ApiRequest,
 } from "./api-provider.js";
-import { prepareApiRequest, ApiModelNotAllowedError } from "./api-request.js";
+import {
+  prepareApiRequest,
+  apiProviderCatalogEntry,
+  ApiModelNotAllowedError,
+} from "./api-request.js";
 import {
   createXaiResponse,
   XaiApiError,
@@ -9308,6 +9313,12 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
               defaultModel: null,
               mode: "disabled",
             },
+        // Slice 5: enabled generic API providers + their circuit-breaker state.
+        apiProviders: enabledApiProviders(providers).map(p => ({
+          ...apiProviderCatalogEntry(p),
+          baseUrl: p.baseUrl,
+          breakerState: apiProviderBreakerState(p.name),
+        })),
         sources: providers.sources,
       };
       return {

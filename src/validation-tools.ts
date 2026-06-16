@@ -3,6 +3,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { AsyncJobManager } from "./async-job-manager.js";
 import { CLI_TYPES } from "./session-manager.js";
 import { getAvailableCliInfo } from "./model-registry.js";
+import { apiProviderCatalogEntry } from "./api-request.js";
 import {
   collectValidationJobResult,
   startJudgeSynthesis,
@@ -298,7 +299,17 @@ export function registerValidationTools(server: McpServer, deps: ValidationToolD
       idempotentHint: true,
       openWorldHint: false,
     },
-    async () => textResponse({ success: true, models: getAvailableCliInfo() })
+    async () => {
+      // Slice 5: enabled API providers, clearly tagged providerKind:"api". OMIT
+      // the field entirely when none are enabled so the catalog response is
+      // byte-identical to pre-Slice-5 when the feature is dormant.
+      const apiProviders = (deps.apiProviders ?? []).map(apiProviderCatalogEntry);
+      return textResponse({
+        success: true,
+        models: getAvailableCliInfo(),
+        ...(apiProviders.length > 0 ? { apiProviders } : {}),
+      });
+    }
   );
 
   server.tool(

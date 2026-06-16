@@ -549,3 +549,30 @@ Logging at error points
 - Mastering Session State Persistence (SparkCo AI, 2025)
 - Vitest Best Practices (CursorRules)
 - Error Handling in CLI Tools (Medium, 2025)
+
+---
+
+## API providers as code generators (Slice 4)
+
+API-endpoint providers (`[providers.<name>]`, `kind = "api"`) are **reviewers and
+code generators only — never appliers**. They emit text (a review, or generated
+code / a unified diff); they never touch the filesystem, never get write access,
+and never receive a git worktree (they are absent from `workspace-registry.ts`,
+which is `CliType`-only by construction). The agentic tool-execution loop stays
+out of scope for HTTP providers.
+
+The generate→apply flow is **orchestration Pattern 3** (the parent coordinates
+all levels), not a new gateway primitive:
+
+1. `api_<name>_request` (or `_async`) — ask the API model to generate the code
+   or a unified diff. A useful prompt convention is to ask for a single fenced
+   code block or a `diff`-fenced unified diff so the output is easy to apply.
+2. `codex_request` / `claude_request` — hand the generated patch to a **CLI**
+   provider running in a worktree to apply it (the CLI owns filesystem writes).
+3. Verify with tests.
+
+Because API providers are stateless single-shot (the xAI Responses adapter keeps
+`previous_response_id` via session metadata; OpenAI-compatible / Anthropic
+adapters store nothing), resend the full context each call. Keep any
+output-contract parsing on the orchestrator side — it is advisory, never enforced
+by the gateway.
