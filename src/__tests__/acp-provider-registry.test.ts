@@ -25,6 +25,7 @@ describe("acp provider registry", () => {
     codex: "adapter_mediated_deferred",
     claude: "adapter_mediated_deferred",
     gemini: "absent_watchlist",
+    devin: "native_candidate",
   };
 
   const expectedSupportKind: Record<string, AcpSupportKind> = {
@@ -33,6 +34,7 @@ describe("acp provider registry", () => {
     codex: "adapter_mediated",
     claude: "adapter_mediated",
     gemini: "none",
+    devin: "native",
   };
 
   for (const provider of CLI_TYPES) {

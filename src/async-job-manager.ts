@@ -44,7 +44,7 @@ function extractApiHttpStatus(error: unknown): number | null {
   return null;
 }
 
-export type LlmCli = "claude" | "codex" | "gemini" | "grok" | "mistral";
+export type LlmCli = "claude" | "codex" | "gemini" | "grok" | "mistral" | "devin";
 
 /**
  * Slice 1: the record/manager-facing provider id. CLI jobs carry an `LlmCli`;

@@ -91,6 +91,7 @@ const VERSION_ARGS: Record<CliType, string[]> = {
   gemini: ["--version"],
   grok: ["--version"],
   mistral: ["--version"],
+  devin: ["--version"],
 };
 
 const CODEX_NPM_PACKAGE = "@openai/codex";
@@ -161,6 +162,21 @@ export function buildCliUpgradePlan(
     };
   }
 
+  if (cli === "devin") {
+    if (normalizedTarget !== "latest") {
+      throw new Error("Devin CLI upgrades support only the 'latest' target via 'devin update'.");
+    }
+    return {
+      cli,
+      target: normalizedTarget,
+      command: "devin",
+      args: ["update"],
+      strategy: "self-update",
+      requiresNetwork: true,
+      note: "Devin CLI self-updates via 'devin update' (use --force to reinstall the latest).",
+    };
+  }
+
   if (cli === "gemini") {
     if (normalizedTarget !== "latest") {
       throw new Error(
@@ -221,7 +237,7 @@ export async function getCliVersion(cli: CliType): Promise<CliVersionInfo> {
 }
 
 export async function getCliVersions(cli?: CliType): Promise<CliVersionInfo[]> {
-  const clis: CliType[] = cli ? [cli] : ["claude", "codex", "gemini", "grok", "mistral"];
+  const clis: CliType[] = cli ? [cli] : ["claude", "codex", "gemini", "grok", "mistral", "devin"];
   return Promise.all(clis.map(item => getCliVersion(item)));
 }
 

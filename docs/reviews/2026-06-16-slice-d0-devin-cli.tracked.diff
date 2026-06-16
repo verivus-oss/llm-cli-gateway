@@ -1,0 +1,1297 @@
+diff --git a/docs/upstream/provider-sources.dag.toml b/docs/upstream/provider-sources.dag.toml
+index 3c33dbc..478a443 100644
+--- a/docs/upstream/provider-sources.dag.toml
++++ b/docs/upstream/provider-sources.dag.toml
+@@ -29,7 +29,7 @@ owner = "verivus-oss"
+ mechanical_source_of_truth = "src/upstream-contracts.ts (UPSTREAM_CLI_CONTRACTS)"
+ scanner = "scripts/upstream-scan.mjs"
+ # Providers are keyed by canonical CliType only.
+-providers = ["claude", "codex", "gemini", "grok", "mistral"]
++providers = ["claude", "codex", "gemini", "grok", "mistral", "devin"]
+ 
+ [scan_policy]
+ # Global defaults for --live scans. Per-provider blocks may override cadence.
+@@ -99,3 +99,17 @@ watch_categories = [
+   "env-model",
+ ]
+ cadence_days = 7
++
++[providers.devin]
++cli = "devin"
++source_urls = [
++  "https://cli.devin.ai/docs/reference/commands",
++  "https://docs.devin.ai/cli",
++]
++watch_categories = [
++  "flags",
++  "subcommands",
++  "permission-modes",
++  "acp-entrypoint",
++]
++cadence_days = 7
+diff --git a/src/__tests__/acp-provider-registry.test.ts b/src/__tests__/acp-provider-registry.test.ts
+index 204ad0d..7139db1 100644
+--- a/src/__tests__/acp-provider-registry.test.ts
++++ b/src/__tests__/acp-provider-registry.test.ts
+@@ -25,6 +25,7 @@ describe("acp provider registry", () => {
+     codex: "adapter_mediated_deferred",
+     claude: "adapter_mediated_deferred",
+     gemini: "absent_watchlist",
++    devin: "native_candidate",
+   };
+ 
+   const expectedSupportKind: Record<string, AcpSupportKind> = {
+@@ -33,6 +34,7 @@ describe("acp provider registry", () => {
+     codex: "adapter_mediated",
+     claude: "adapter_mediated",
+     gemini: "none",
++    devin: "native",
+   };
+ 
+   for (const provider of CLI_TYPES) {
+diff --git a/src/__tests__/devin-handler.test.ts b/src/__tests__/devin-handler.test.ts
+new file mode 100644
+index 0000000..f40ac3d
+--- /dev/null
++++ b/src/__tests__/devin-handler.test.ts
+@@ -0,0 +1,112 @@
++/**
++ * Slice D0 — Devin CLI handler tests.
++ *
++ * These exercise the pure argv builder `prepareDevinRequest` (no I/O): headless
++ * print mode (`devin -p <prompt>`), the optional `--model` / `--permission-mode`
++ * / `--prompt-file` flags, prompt-optimization, and the empty-prompt guard.
++ * Session resume args (`--resume` / `--continue`) are appended by the handler
++ * via resolveGrokSessionArgs and covered by that helper's own tests.
++ */
++import { describe, it, expect } from "vitest";
++import { prepareDevinRequest } from "../index.js";
++
++// prepareDevinRequest ignores its runtime arg (prefixed `_runtime`); a `never`
++// cast satisfies the signature without constructing a full GatewayServerRuntime.
++const RUNTIME = {} as never;
++
++function prep(params: {
++  prompt?: string;
++  model?: string;
++  permissionMode?: "normal" | "dangerous" | "bypass";
++  promptFile?: string;
++  optimizePrompt?: boolean;
++}): { args: string[] } | { content: unknown } {
++  return prepareDevinRequest(
++    {
++      prompt: params.prompt,
++      model: params.model,
++      permissionMode: params.permissionMode,
++      promptFile: params.promptFile,
++      optimizePrompt: params.optimizePrompt ?? false,
++      operation: "devin_request",
++    },
++    RUNTIME
++  ) as { args: string[] } | { content: unknown };
++}
++
++function argsOf(result: { args: string[] } | { content: unknown }): string[] {
++  if (!("args" in result)) {
++    throw new Error("expected a successful prep with argv, got an error response");
++  }
++  return result.args;
++}
++
++describe("Slice D0 prepareDevinRequest — headless argv", () => {
++  it("emits the prompt via `-p` in print mode (first two argv slots)", () => {
++    const args = argsOf(prep({ prompt: "hello devin" }));
++    expect(args[0]).toBe("-p");
++    expect(args[1]).toBe("hello devin");
++  });
++
++  it("returns an error response (not argv) when the prompt is empty", () => {
++    const result = prep({ prompt: "   " });
++    expect("args" in result).toBe(false);
++    expect("content" in result).toBe(true);
++  });
++
++  it("returns an error response when the prompt is omitted entirely", () => {
++    const result = prep({});
++    expect("args" in result).toBe(false);
++  });
++
++  it("emits `--model <resolved>` when a model is supplied", () => {
++    const args = argsOf(prep({ prompt: "x", model: "opus" }));
++    const idx = args.indexOf("--model");
++    expect(idx).toBeGreaterThan(-1);
++    expect(args[idx + 1]).toBeTruthy();
++  });
++
++  it("does NOT emit `--model` when no model is supplied (devin has no default)", () => {
++    const args = argsOf(prep({ prompt: "x" }));
++    expect(args).not.toContain("--model");
++  });
++
++  it("emits `--permission-mode <mode>` when set", () => {
++    const args = argsOf(prep({ prompt: "x", permissionMode: "bypass" }));
++    const idx = args.indexOf("--permission-mode");
++    expect(idx).toBeGreaterThan(-1);
++    expect(args[idx + 1]).toBe("bypass");
++  });
++
++  it("does NOT emit `--permission-mode` when unset", () => {
++    const args = argsOf(prep({ prompt: "x" }));
++    expect(args).not.toContain("--permission-mode");
++  });
++
++  it("emits `--prompt-file <path>` when set", () => {
++    const args = argsOf(prep({ prompt: "x", promptFile: "/tmp/p.txt" }));
++    const idx = args.indexOf("--prompt-file");
++    expect(idx).toBeGreaterThan(-1);
++    expect(args[idx + 1]).toBe("/tmp/p.txt");
++  });
++
++  it("emits only `-p <prompt>` when no optional flags are supplied", () => {
++    const args = argsOf(prep({ prompt: "just a prompt" }));
++    expect(args).toEqual(["-p", "just a prompt"]);
++  });
++
++  it("rewrites the prompt text when optimizePrompt is true", () => {
++    // Use a prompt the optimizer measurably shrinks (collapses whitespace).
++    const raw = "please    do      the     thing";
++    const args = argsOf(prep({ prompt: raw, optimizePrompt: true }));
++    expect(args[0]).toBe("-p");
++    expect(args[1]).not.toBe(raw);
++    expect(args[1].length).toBeLessThanOrEqual(raw.length);
++  });
++
++  it("leaves the prompt verbatim when optimizePrompt is false", () => {
++    const raw = "please    do      the     thing";
++    const args = argsOf(prep({ prompt: raw, optimizePrompt: false }));
++    expect(args[1]).toBe(raw);
++  });
++});
+diff --git a/src/__tests__/mcp-surface-usability.test.ts b/src/__tests__/mcp-surface-usability.test.ts
+index ce7e6ed..49ede61 100644
+--- a/src/__tests__/mcp-surface-usability.test.ts
++++ b/src/__tests__/mcp-surface-usability.test.ts
+@@ -126,7 +126,7 @@ describe("MCP tool-surface usability (post-usability-review regressions)", () =>
+     // EXACT set pinning (post-2.3.0-gate Codex finding): derive the actual
+     // sets from the registry and compare them exactly — positive membership
+     // alone would let a future mis-classified or unlisted tool slip through.
+-    expect(names.length).toBe(45);
++    expect(names.length).toBe(47);
+     const setOf = (pred: (a: NonNullable<(typeof registry)[string]["annotations"]>) => boolean) =>
+       names.filter(n => pred(registry[n].annotations!)).sort();
+     expect(setOf(a => a.readOnlyHint === true)).toEqual(
+@@ -160,6 +160,8 @@ describe("MCP tool-surface usability (post-usability-review regressions)", () =>
+         "codex_request",
+         "codex_request_async",
+         "codex_fork_session",
++        "devin_request",
++        "devin_request_async",
+         "gemini_request",
+         "gemini_request_async",
+         "grok_request",
+@@ -177,12 +179,14 @@ describe("MCP tool-surface usability (post-usability-review regressions)", () =>
+     );
+     expect(setOf(a => a.destructiveHint === true)).toEqual(
+       [
+-        // provider-spawning (17)
++        // provider-spawning (19)
+         "claude_request",
+         "claude_request_async",
+         "codex_request",
+         "codex_request_async",
+         "codex_fork_session",
++        "devin_request",
++        "devin_request_async",
+         "gemini_request",
+         "gemini_request_async",
+         "grok_request",
+diff --git a/src/__tests__/provider-tool-capabilities.test.ts b/src/__tests__/provider-tool-capabilities.test.ts
+index 9922378..4711843 100644
+--- a/src/__tests__/provider-tool-capabilities.test.ts
++++ b/src/__tests__/provider-tool-capabilities.test.ts
+@@ -91,6 +91,7 @@ describe("provider tool capabilities", () => {
+     expect(Object.keys(capabilities).sort()).toEqual([
+       "claude",
+       "codex",
++      "devin",
+       "gemini",
+       "grok",
+       "grok_api",
+@@ -476,7 +477,14 @@ describe("provider tool capabilities", () => {
+   });
+ 
+   describe("ACP capability metadata", () => {
+-    const cliProviders: ProviderCapabilityId[] = ["claude", "codex", "gemini", "grok", "mistral"];
++    const cliProviders: ProviderCapabilityId[] = [
++      "claude",
++      "codex",
++      "gemini",
++      "grok",
++      "mistral",
++      "devin",
++    ];
+ 
+     it("attaches a fully populated ACP section to every CLI provider", () => {
+       const capabilities = getProviderToolCapabilities();
+diff --git a/src/__tests__/session-manager.test.ts b/src/__tests__/session-manager.test.ts
+index 4abdc4f..73f446f 100644
+--- a/src/__tests__/session-manager.test.ts
++++ b/src/__tests__/session-manager.test.ts
+@@ -494,6 +494,7 @@ describe("U22 session-provider enum (Layer 10)", () => {
+       "gemini",
+       "grok",
+       "mistral",
++      "devin",
+       "grok-api",
+     ]);
+   });
+diff --git a/src/acp/provider-registry.ts b/src/acp/provider-registry.ts
+index 3e439e8..0baf49f 100644
+--- a/src/acp/provider-registry.ts
++++ b/src/acp/provider-registry.ts
+@@ -31,6 +31,9 @@ import type { CliType } from "../session-manager.js";
+  */
+ export type AcpProviderStatus =
+   | "native_smoke_passed"
++  // Native ACP entrypoint exists but the read-only smoke has not been run yet
++  // (e.g. Devin `devin acp`, registered in Slice D0; smoke + pilot in D1).
++  | "native_candidate"
+   | "adapter_mediated_deferred"
+   | "absent_watchlist";
+ 
+@@ -170,6 +173,22 @@ const ACP_PROVIDER_REGISTRY: Readonly<Record<CliType, AcpProviderRegistryEntry>>
+     caveat:
+       "No ACP flag or subcommand at the target version. Legacy Gemini CLI ACP evidence does not transfer to Antigravity agy. Watchlist only.",
+   }),
++  devin: Object.freeze({
++    provider: "devin",
++    displayName: "Cognition Devin CLI",
++    status: "native_candidate",
++    supportKind: "native",
++    targetVersion: "devin CLI (cli.devin.ai)",
++    entrypoint: Object.freeze({ command: "devin", args: Object.freeze(["acp"]) }),
++    runtimeEnabledDefault: false,
++    // Slice D0 registers the native entrypoint as a candidate; the manual
++    // initialize + session/new smoke and the runtime pilot land in Slice D1.
++    shipRuntimePilot: false,
++    runtimePriority: 0,
++    adapterCandidates: Object.freeze([]),
++    caveat:
++      "Native ACP entrypoint `devin acp` (stdio JSON-RPC). Smoke not yet run; runtime pilot deferred to Slice D1. Credentials come from `devin auth login` or WINDSURF_API_KEY.",
++  }),
+ });
+ 
+ /**
+diff --git a/src/async-job-manager.ts b/src/async-job-manager.ts
+index fe7a692..e414e87 100644
+--- a/src/async-job-manager.ts
++++ b/src/async-job-manager.ts
+@@ -44,7 +44,7 @@ function extractApiHttpStatus(error: unknown): number | null {
+   return null;
+ }
+ 
+-export type LlmCli = "claude" | "codex" | "gemini" | "grok" | "mistral";
++export type LlmCli = "claude" | "codex" | "gemini" | "grok" | "mistral" | "devin";
+ 
+ /**
+  * Slice 1: the record/manager-facing provider id. CLI jobs carry an `LlmCli`;
+diff --git a/src/cli-updater.ts b/src/cli-updater.ts
+index f0f4f72..92c3f96 100644
+--- a/src/cli-updater.ts
++++ b/src/cli-updater.ts
+@@ -91,6 +91,7 @@ const VERSION_ARGS: Record<CliType, string[]> = {
+   gemini: ["--version"],
+   grok: ["--version"],
+   mistral: ["--version"],
++  devin: ["--version"],
+ };
+ 
+ const CODEX_NPM_PACKAGE = "@openai/codex";
+@@ -161,6 +162,21 @@ export function buildCliUpgradePlan(
+     };
+   }
+ 
++  if (cli === "devin") {
++    if (normalizedTarget !== "latest") {
++      throw new Error("Devin CLI upgrades support only the 'latest' target via 'devin update'.");
++    }
++    return {
++      cli,
++      target: normalizedTarget,
++      command: "devin",
++      args: ["update"],
++      strategy: "self-update",
++      requiresNetwork: true,
++      note: "Devin CLI self-updates via 'devin update' (use --force to reinstall the latest).",
++    };
++  }
++
+   if (cli === "gemini") {
+     if (normalizedTarget !== "latest") {
+       throw new Error(
+@@ -221,7 +237,7 @@ export async function getCliVersion(cli: CliType): Promise<CliVersionInfo> {
+ }
+ 
+ export async function getCliVersions(cli?: CliType): Promise<CliVersionInfo[]> {
+-  const clis: CliType[] = cli ? [cli] : ["claude", "codex", "gemini", "grok", "mistral"];
++  const clis: CliType[] = cli ? [cli] : ["claude", "codex", "gemini", "grok", "mistral", "devin"];
+   return Promise.all(clis.map(item => getCliVersion(item)));
+ }
+ 
+diff --git a/src/config.ts b/src/config.ts
+index 4205d83..fdc80aa 100644
+--- a/src/config.ts
++++ b/src/config.ts
+@@ -503,6 +503,7 @@ const RESERVED_CLI_PROVIDER_NAMES: readonly string[] = [
+   "gemini",
+   "grok",
+   "mistral",
++  "devin",
+ ];
+ 
+ export const DEFAULT_XAI_API_KEY_ENV = "XAI_API_KEY";
+diff --git a/src/doctor.ts b/src/doctor.ts
+index 2ff9461..6b49b20 100644
+--- a/src/doctor.ts
++++ b/src/doctor.ts
+@@ -31,7 +31,7 @@ import {
+   type ProviderKind,
+ } from "./provider-tool-capabilities.js";
+ 
+-export type CliType = "claude" | "codex" | "gemini" | "grok" | "mistral";
++export type CliType = "claude" | "codex" | "gemini" | "grok" | "mistral" | "devin";
+ 
+ /**
+  * Slice 3 cross-cutting: doctor report block summarising the gateway's
+diff --git a/src/index.ts b/src/index.ts
+index be55df2..6a482ab 100644
+--- a/src/index.ts
++++ b/src/index.ts
+@@ -724,7 +724,7 @@ interface DeferredJobResponse {
+  * Returns the job result if it finishes in time, or a deferral marker.
+  */
+ async function awaitJobOrDefer(
+-  cli: "claude" | "codex" | "gemini" | "grok" | "mistral",
++  cli: "claude" | "codex" | "gemini" | "grok" | "mistral" | "devin",
+   args: string[],
+   corrId: string,
+   idleTimeoutMs?: number,
+@@ -1437,7 +1437,7 @@ function createErrorResponse(
+ }
+ 
+ export function extractUsageAndCost(
+-  cli: "claude" | "codex" | "gemini" | "grok" | "mistral",
++  cli: "claude" | "codex" | "gemini" | "grok" | "mistral" | "devin",
+   output: string,
+   outputFormat?: string,
+   /**
+@@ -1550,7 +1550,7 @@ export function extractUsageAndCost(
+  * or `prep` — so retention on AsyncJobRecord is O(constant).
+  */
+ function buildAsyncFlightRecorderHandoff(
+-  cliName: "claude" | "codex" | "gemini" | "grok" | "mistral",
++  cliName: "claude" | "codex" | "gemini" | "grok" | "mistral" | "devin",
+   prep: {
+     effectivePrompt: string;
+     resolvedModel?: string;
+@@ -3491,7 +3491,7 @@ export function buildMistralRetryPrep(
+ }
+ 
+ function buildCliResponse(
+-  cli: "claude" | "codex" | "gemini" | "grok" | "mistral",
++  cli: "claude" | "codex" | "gemini" | "grok" | "mistral" | "devin",
+   stdout: string,
+   optimizeResponse: boolean,
+   corrId: string,
+@@ -5137,6 +5137,329 @@ export async function handleGrokRequestAsync(
+   }
+ }
+ 
++//──────────────────────────────────────────────────────────────────────────────
++// Slice D0: Devin CLI provider (devin_request / devin_request_async).
++//──────────────────────────────────────────────────────────────────────────────
++
++export interface DevinRequestParams {
++  prompt?: string;
++  model?: string;
++  permissionMode?: "normal" | "dangerous" | "bypass";
++  promptFile?: string;
++  sessionId?: string;
++  resumeLatest?: boolean;
++  createNewSession?: boolean;
++  correlationId?: string;
++  optimizePrompt: boolean;
++  optimizeResponse?: boolean;
++  idleTimeoutMs?: number;
++  forceRefresh?: boolean;
++}
++
++/** Build the headless Devin CLI argv (print mode). Pure, no I/O. */
++export function prepareDevinRequest(
++  params: {
++    prompt?: string;
++    model?: string;
++    permissionMode?: string;
++    promptFile?: string;
++    correlationId?: string;
++    optimizePrompt: boolean;
++    operation: string;
++  },
++  _runtime: GatewayServerRuntime
++): CliRequestPrep | ExtendedToolResponse {
++  const corrId = params.correlationId ?? randomUUID();
++  let prompt = (params.prompt ?? "").trim();
++  if (!prompt) {
++    return createErrorResponse(
++      params.operation,
++      1,
++      "prompt is required and cannot be empty",
++      corrId
++    );
++  }
++  if (params.optimizePrompt) prompt = optimizePromptText(prompt);
++  const resolvedModel = resolveModelAlias("devin", params.model, getCliInfo());
++  // Headless print mode: `devin -p <prompt>`. Session resume args are appended
++  // by the handler via resolveGrokSessionArgs (identical --resume/--continue).
++  const args: string[] = ["-p", prompt];
++  if (resolvedModel) args.push("--model", resolvedModel);
++  if (params.permissionMode) args.push("--permission-mode", params.permissionMode);
++  if (params.promptFile) args.push("--prompt-file", params.promptFile);
++  return {
++    corrId,
++    effectivePrompt: prompt,
++    resolvedModel,
++    requestedMcpServers: [],
++    approvalDecision: null,
++    args,
++    stablePrefixHash: null,
++    stablePrefixTokens: null,
++  };
++}
++
++export async function handleDevinRequest(
++  deps: HandlerDeps,
++  params: DevinRequestParams
++): Promise<ExtendedToolResponse> {
++  const runtime = resolveHandlerRuntime(deps);
++  const startTime = Date.now();
++  const prep = prepareDevinRequest(
++    {
++      prompt: params.prompt,
++      model: params.model,
++      permissionMode: params.permissionMode,
++      promptFile: params.promptFile,
++      correlationId: params.correlationId,
++      optimizePrompt: params.optimizePrompt,
++      operation: "devin_request",
++    },
++    runtime
++  );
++  if (!("args" in prep)) return prep;
++  const { corrId, args } = prep;
++  let durationMs = 0;
++  let wasSuccessful = false;
++  safeFlightStart(
++    {
++      correlationId: corrId,
++      cli: "devin",
++      model: prep.resolvedModel || "default",
++      prompt: prep.effectivePrompt,
++      sessionId: params.sessionId,
++    },
++    runtime
++  );
++  try {
++    const sessionResult = resolveGrokSessionArgs({
++      sessionId: params.sessionId,
++      resumeLatest: params.resumeLatest,
++      createNewSession: params.createNewSession,
++    });
++    if (sessionResult.userProvidedSession) {
++      await getExistingSessionForProvider(
++        deps.sessionManager,
++        sessionResult.effectiveSessionId,
++        "devin"
++      );
++    }
++    args.push(...sessionResult.resumeArgs);
++
++    const devinFrHandoff = buildAsyncFlightRecorderHandoff(
++      "devin",
++      prep,
++      params.sessionId,
++      undefined
++    );
++    const result = await awaitJobOrDefer(
++      "devin",
++      args,
++      corrId,
++      resolveIdleTimeout("devin", params.idleTimeoutMs),
++      undefined,
++      params.forceRefresh,
++      runtime,
++      undefined,
++      undefined,
++      devinFrHandoff.flightRecorderEntry,
++      devinFrHandoff.extractUsage
++    );
++    if (isDeferredResponse(result)) {
++      return buildDeferredToolResponse(result, sessionResult.effectiveSessionId);
++    }
++    const { stdout, stderr, code } = result;
++    durationMs = Math.max(0, Date.now() - startTime);
++    if (code !== 0) {
++      safeFlightComplete(
++        corrId,
++        {
++          response: stderr || "",
++          durationMs,
++          retryCount: 0,
++          circuitBreakerState: "closed",
++          optimizationApplied: false,
++          exitCode: code,
++          errorMessage: stderr || `Exit code ${code}`,
++          status: "failed",
++        },
++        runtime
++      );
++      return createErrorResponse("devin", code, stderr, corrId);
++    }
++    wasSuccessful = true;
++
++    let effectiveSessionId = sessionResult.effectiveSessionId;
++    if (sessionResult.userProvidedSession && effectiveSessionId) {
++      const existing = await deps.sessionManager.getSession(effectiveSessionId);
++      if (!existing) {
++        try {
++          await deps.sessionManager.createSession("devin", "Devin Session", effectiveSessionId);
++        } catch {
++          const rechecked = await deps.sessionManager.getSession(effectiveSessionId);
++          if (!rechecked) throw new Error(`Failed to create or find session ${effectiveSessionId}`);
++        }
++      }
++      await deps.sessionManager.updateSessionUsage(effectiveSessionId);
++    } else if (!params.createNewSession && !effectiveSessionId) {
++      const newSession = await deps.sessionManager.createSession(
++        "devin",
++        "Devin Session",
++        `${GATEWAY_SESSION_PREFIX}${randomUUID()}`
++      );
++      effectiveSessionId = newSession.id;
++    }
++
++    const response = buildCliResponse(
++      "devin",
++      stdout,
++      params.optimizeResponse ?? false,
++      corrId,
++      effectiveSessionId,
++      prep,
++      durationMs,
++      sessionResult.userProvidedSession
++    );
++    safeFlightComplete(
++      corrId,
++      {
++        response: stdout,
++        durationMs,
++        retryCount: 0,
++        circuitBreakerState: "closed",
++        optimizationApplied: params.optimizePrompt || (params.optimizeResponse ?? false),
++        exitCode: 0,
++        status: "completed",
++      },
++      runtime
++    );
++    return response;
++  } catch (error) {
++    const elapsedMs = Math.max(0, Date.now() - startTime);
++    safeFlightComplete(
++      corrId,
++      {
++        response: "",
++        durationMs: elapsedMs,
++        retryCount: 0,
++        circuitBreakerState: "closed",
++        optimizationApplied: false,
++        exitCode: 1,
++        errorMessage: (error as Error).message,
++        status: "failed",
++      },
++      runtime
++    );
++    return createErrorResponse("devin", 1, "", corrId, error as Error);
++  } finally {
++    runtime.performanceMetrics.recordRequest(
++      "devin",
++      Math.max(0, durationMs || Date.now() - startTime),
++      wasSuccessful
++    );
++  }
++}
++
++export async function handleDevinRequestAsync(
++  deps: AsyncHandlerDeps,
++  params: Omit<DevinRequestParams, "optimizeResponse">
++): Promise<ExtendedToolResponse> {
++  const runtime = resolveHandlerRuntime(deps);
++  const prep = prepareDevinRequest(
++    {
++      prompt: params.prompt,
++      model: params.model,
++      permissionMode: params.permissionMode,
++      promptFile: params.promptFile,
++      correlationId: params.correlationId,
++      optimizePrompt: params.optimizePrompt,
++      operation: "devin_request_async",
++    },
++    runtime
++  );
++  if (!("args" in prep)) return prep;
++  const { corrId, args } = prep;
++  try {
++    const sessionResult = resolveGrokSessionArgs({
++      sessionId: params.sessionId,
++      resumeLatest: params.resumeLatest,
++      createNewSession: params.createNewSession,
++    });
++    if (sessionResult.userProvidedSession) {
++      await getExistingSessionForProvider(
++        deps.sessionManager,
++        sessionResult.effectiveSessionId,
++        "devin"
++      );
++    }
++    args.push(...sessionResult.resumeArgs);
++
++    let effectiveSessionId = sessionResult.effectiveSessionId;
++    if (sessionResult.userProvidedSession && effectiveSessionId) {
++      const existing = await deps.sessionManager.getSession(effectiveSessionId);
++      if (!existing) {
++        try {
++          await deps.sessionManager.createSession("devin", "Devin Session", effectiveSessionId);
++        } catch {
++          const rechecked = await deps.sessionManager.getSession(effectiveSessionId);
++          if (!rechecked) throw new Error(`Failed to create or find session ${effectiveSessionId}`);
++        }
++      }
++      await deps.sessionManager.updateSessionUsage(effectiveSessionId);
++    } else if (!params.createNewSession && !effectiveSessionId) {
++      const newSession = await deps.sessionManager.createSession(
++        "devin",
++        "Devin Session",
++        `${GATEWAY_SESSION_PREFIX}${randomUUID()}`
++      );
++      effectiveSessionId = newSession.id;
++    }
++
++    assertUpstreamCliArgs("devin", args);
++    assertUpstreamCliEnv("devin", undefined);
++    const devinAsyncFrHandoff = buildAsyncFlightRecorderHandoff(
++      "devin",
++      prep,
++      effectiveSessionId,
++      undefined
++    );
++    const job = deps.asyncJobManager.startJob(
++      "devin",
++      args,
++      corrId,
++      undefined,
++      resolveIdleTimeout("devin", params.idleTimeoutMs),
++      undefined,
++      params.forceRefresh,
++      undefined,
++      undefined,
++      devinAsyncFrHandoff.flightRecorderEntry,
++      devinAsyncFrHandoff.extractUsage,
++      true
++    );
++    deps.logger.info(`[${corrId}] devin_request_async started job ${job.id}`);
++    return {
++      content: [
++        {
++          type: "text" as const,
++          text: JSON.stringify(
++            {
++              success: true,
++              job,
++              sessionId: effectiveSessionId || null,
++              resumable: sessionResult.userProvidedSession,
++            },
++            null,
++            2
++          ),
++        },
++      ],
++    };
++  } catch (error) {
++    return createErrorResponse("devin_request_async", 1, "", corrId, error as Error);
++  }
++}
++
+ export interface MistralRequestParams {
+   prompt?: string;
+   promptParts?: PromptParts;
+@@ -7461,6 +7784,97 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
+     }
+   );
+ 
++  //──────────────────────────────────────────────────────────────────────────────
++  // Devin CLI Tool (Slice D0)
++  //──────────────────────────────────────────────────────────────────────────────
++  server.tool(
++    "devin_request",
++    "Run a Cognition Devin CLI request synchronously (auto-defers to a pollable job past the sync deadline when async jobs are enabled; otherwise runs to completion). Headless print mode (`devin -p`).",
++    {
++      prompt: z
++        .string()
++        .min(1, "Prompt cannot be empty")
++        .max(100000, "Prompt too long (max 100k chars)")
++        .optional()
++        .describe("Prompt text for Devin CLI"),
++      model: z.string().optional().describe("Model name or alias (e.g. opus, latest)"),
++      permissionMode: z
++        .enum(["normal", "dangerous", "bypass"])
++        .optional()
++        .describe("Devin CLI permission mode (--permission-mode)"),
++      promptFile: z
++        .string()
++        .optional()
++        .describe("Load the initial prompt from a file (--prompt-file)"),
++      sessionId: z
++        .string()
++        .optional()
++        .describe(
++          "Devin session ID to resume (emits --resume <id>; use resumeLatest for --continue)"
++        ),
++      resumeLatest: z
++        .boolean()
++        .default(false)
++        .describe("Resume the most recent Devin session in cwd (--continue)"),
++      createNewSession: z.boolean().default(false).describe("Force a new session"),
++      correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
++      optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution"),
++      optimizeResponse: z.boolean().default(false).describe("Optimize response output"),
++      idleTimeoutMs: z
++        .number()
++        .int()
++        .min(30_000)
++        .max(3_600_000)
++        .optional()
++        .describe("Idle timeout in ms (min 30s, max 1h, omit=CLI default)"),
++      forceRefresh: z
++        .boolean()
++        .default(false)
++        .describe(
++          "Bypass dedup and force a fresh CLI run even if a recent identical request exists"
++        ),
++    },
++    {
++      title: "Devin CLI request",
++      readOnlyHint: false,
++      destructiveHint: true,
++      idempotentHint: false,
++      openWorldHint: true,
++    },
++    async ({
++      prompt,
++      model,
++      permissionMode,
++      promptFile,
++      sessionId,
++      resumeLatest,
++      createNewSession,
++      correlationId,
++      optimizePrompt,
++      optimizeResponse,
++      idleTimeoutMs,
++      forceRefresh,
++    }) => {
++      return handleDevinRequest(
++        { sessionManager, logger, runtime },
++        {
++          prompt,
++          model,
++          permissionMode,
++          promptFile,
++          sessionId,
++          resumeLatest,
++          createNewSession,
++          correlationId,
++          optimizePrompt,
++          optimizeResponse,
++          idleTimeoutMs,
++          forceRefresh,
++        }
++      );
++    }
++  );
++
+   //──────────────────────────────────────────────────────────────────────────────
+   // Mistral Vibe Tool
+   //──────────────────────────────────────────────────────────────────────────────
+@@ -8776,6 +9190,89 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
+       }
+     );
+ 
++    server.tool(
++      "devin_request_async",
++      "Start a Cognition Devin CLI request as a durable background job. Poll with llm_job_status, collect with llm_job_result.",
++      {
++        prompt: z
++          .string()
++          .min(1, "Prompt cannot be empty")
++          .max(100000, "Prompt too long (max 100k chars)")
++          .optional()
++          .describe("Prompt text for Devin CLI"),
++        model: z.string().optional().describe("Model name or alias (e.g. opus, latest)"),
++        permissionMode: z
++          .enum(["normal", "dangerous", "bypass"])
++          .optional()
++          .describe("Devin CLI permission mode (--permission-mode)"),
++        promptFile: z
++          .string()
++          .optional()
++          .describe("Load the initial prompt from a file (--prompt-file)"),
++        sessionId: z
++          .string()
++          .optional()
++          .describe("Devin session ID to resume (--resume <id>; use resumeLatest for --continue)"),
++        resumeLatest: z
++          .boolean()
++          .default(false)
++          .describe("Resume the most recent Devin session in cwd (--continue)"),
++        createNewSession: z.boolean().default(false).describe("Force a new session"),
++        correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
++        optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution"),
++        idleTimeoutMs: z
++          .number()
++          .int()
++          .min(30_000)
++          .max(3_600_000)
++          .optional()
++          .describe("Idle timeout in ms (min 30s, max 1h, omit=CLI default)"),
++        forceRefresh: z
++          .boolean()
++          .default(false)
++          .describe(
++            "Bypass dedup and force a fresh CLI run even if a recent identical request exists"
++          ),
++      },
++      {
++        title: "Devin CLI request (async)",
++        readOnlyHint: false,
++        destructiveHint: true,
++        idempotentHint: false,
++        openWorldHint: true,
++      },
++      async ({
++        prompt,
++        model,
++        permissionMode,
++        promptFile,
++        sessionId,
++        resumeLatest,
++        createNewSession,
++        correlationId,
++        optimizePrompt,
++        idleTimeoutMs,
++        forceRefresh,
++      }) => {
++        return handleDevinRequestAsync(
++          { sessionManager, asyncJobManager, logger, runtime },
++          {
++            prompt,
++            model,
++            permissionMode,
++            promptFile,
++            sessionId,
++            resumeLatest,
++            createNewSession,
++            correlationId,
++            optimizePrompt,
++            idleTimeoutMs,
++            forceRefresh,
++          }
++        );
++      }
++    );
++
+     server.tool(
+       "mistral_request_async",
+       "Start a Mistral Vibe CLI request as a durable background job. Poll with llm_job_status, collect with llm_job_result.",
+diff --git a/src/model-registry.ts b/src/model-registry.ts
+index 1bc60c7..b081759 100644
+--- a/src/model-registry.ts
++++ b/src/model-registry.ts
+@@ -91,6 +91,19 @@ const FALLBACK_INFO: CliInfoMap = {
+     },
+     modelOrder: ["mistral-medium-3.5", "devstral-small"],
+   },
++  devin: {
++    // Devin CLI is multi-model and selects its own default; do not hardcode a
++    // `defaultModel` here. The `--model` flag passes a model name through; these
++    // are doc-derived hints (build.devin.ai / cli.devin.ai), not a verified list.
++    description:
++      "Cognition's Devin CLI - agentic coding agent that runs in your terminal, multi-model, with handoff to cloud Devin",
++    models: {
++      opus: "Anthropic Opus frontier model exposed by Devin CLI (e.g. --model opus).",
++      "gpt-5.5": "OpenAI GPT frontier model exposed by Devin CLI.",
++      "swe-1.6": "Cognition's SWE-1.6 model (also reachable via the /fast slash command).",
++    },
++    modelOrder: ["opus", "gpt-5.5", "swe-1.6"],
++  },
+ };
+ 
+ const MODEL_CACHE_TTL_MS = 2 * 60 * 1000;
+@@ -123,6 +136,7 @@ export function getAvailableCliInfo(forceRefresh = false): CliInfoMap {
+     gemini: filterUnverifiedModelHints(info.gemini),
+     grok: filterUnverifiedModelHints(info.grok),
+     mistral: filterUnverifiedModelHints(info.mistral),
++    devin: filterUnverifiedModelHints(info.devin),
+   };
+ }
+ 
+@@ -176,6 +190,7 @@ function buildCliInfo(): CliInfoMap {
+     gemini: cloneInfo(FALLBACK_INFO.gemini),
+     grok: cloneInfo(FALLBACK_INFO.grok),
+     mistral: cloneInfo(FALLBACK_INFO.mistral),
++    devin: cloneInfo(FALLBACK_INFO.devin),
+   };
+ 
+   applyClaudeOverrides(info.claude);
+diff --git a/src/provider-login-guidance.ts b/src/provider-login-guidance.ts
+index c735656..4ad612e 100644
+--- a/src/provider-login-guidance.ts
++++ b/src/provider-login-guidance.ts
+@@ -124,6 +124,28 @@ const GUIDANCE: Record<CliType, ProviderLoginGuidance> = {
+         "Vibe CLI is installed; doctor checks ~/.vibe/config.toml for an explicit session_logging.enabled=false override",
+     },
+   },
++  devin: {
++    provider: "devin",
++    displayName: "Devin CLI",
++    install: {
++      summary: "Install Devin CLI using Cognition's current official installer.",
++      commands: [
++        "curl -fsSL https://cli.devin.ai/install.sh | bash",
++        "irm https://static.devin.ai/cli/setup.ps1 | iex",
++      ],
++      documentationUrl: "https://docs.devin.ai/cli",
++    },
++    login: {
++      summary: "Sign in through Devin CLI's official browser OAuth flow.",
++      commands: ["devin auth login", "devin auth login --force-manual-token-flow"],
++      credentialHandling:
++        "Let Devin store credentials via `devin auth login` (or WINDSURF_API_KEY for ACP). Do not paste Devin tokens or cog_* keys into the gateway or a remote chat.",
++    },
++    verification: {
++      command: "devin auth status",
++      expected: "CLI is installed and `devin auth status` reports an authenticated session",
++    },
++  },
+ };
+ 
+ export function getProviderLoginGuidance(provider: CliType): ProviderLoginGuidance {
+diff --git a/src/provider-status.ts b/src/provider-status.ts
+index 2fdb8e2..890129a 100644
+--- a/src/provider-status.ts
++++ b/src/provider-status.ts
+@@ -30,13 +30,15 @@ export interface ProviderRuntimeStatus {
+   guidance: ProviderLoginGuidance;
+ }
+ 
+-const PROVIDERS: CliType[] = ["claude", "codex", "gemini", "grok", "mistral"];
++const PROVIDERS: CliType[] = ["claude", "codex", "gemini", "grok", "mistral", "devin"];
+ const VERSION_ARGS: Record<CliType, string[]> = {
+   claude: ["--version"],
+   codex: ["--version"],
+   gemini: ["--version"],
+   grok: ["--version"],
+   mistral: ["--version"],
++  // `devin version` ≡ `devin --version` (cli.devin.ai).
++  devin: ["--version"],
+ };
+ 
+ // Mistral Vibe ships as the `vibe` binary (PyPI package mistral-vibe); the gateway
+@@ -47,6 +49,7 @@ export const PROVIDER_COMMANDS: Record<CliType, string> = {
+   gemini: providerCommandName("gemini"),
+   grok: "grok",
+   mistral: providerCommandName("mistral"),
++  devin: providerCommandName("devin"),
+ };
+ 
+ const LOGIN_CHECKS: Partial<Record<CliType, string[]>> = {
+@@ -54,6 +57,8 @@ const LOGIN_CHECKS: Partial<Record<CliType, string[]>> = {
+   codex: ["login", "status"],
+   grok: ["inspect", "--json"],
+   mistral: ["auth", "status"],
++  // `devin auth status` — non-interactive auth check (cli.devin.ai).
++  devin: ["auth", "status"],
+ };
+ 
+ export function listProviderRuntimeStatuses(): Record<CliType, ProviderRuntimeStatus> {
+diff --git a/src/provider-tool-capabilities.ts b/src/provider-tool-capabilities.ts
+index 21a8658..b1fca2f 100644
+--- a/src/provider-tool-capabilities.ts
++++ b/src/provider-tool-capabilities.ts
+@@ -253,6 +253,11 @@ export const ACP_CONTRACT: AcpContractMetadata = {
+       classification: "absent_watchlist",
+       summary: "Grok API is an HTTP provider with no ACP process transport; watchlist item only.",
+     },
++    devin: {
++      classification: "native_candidate",
++      summary:
++        "Cognition Devin CLI exposes a native ACP server via `devin acp` (stdio); runtime pilot pending a smoke (Slice D1).",
++    },
+   },
+ };
+ 
+@@ -428,6 +433,21 @@ const ACP_CAPABILITIES: Record<KnownProviderCapabilityId, ProviderAcpCapability>
+     caveats: ["ACP is a CLI-stdio transport; the HTTP API provider has no ACP surface."],
+     docs: ACP_DOCS_REFERENCE,
+   },
++  devin: {
++    status: "native_candidate",
++    mediation: "native",
++    targetVersion: "devin CLI (cli.devin.ai)",
++    entrypoint: { command: "devin", args: ["acp"] },
++    runtimeEnabled: false,
++    smokeSupported: true,
++    smokeStatus: "not_run",
++    caveats: [
++      "Native ACP via `devin acp` (stdio JSON-RPC); smoke + runtime pilot land in Slice D1.",
++      "Credentials come from `devin auth login` or WINDSURF_API_KEY; empty-env smoke is not expected to pass.",
++      "Runtime routing stays disabled until ACP is enabled in gateway config.",
++    ],
++    docs: ACP_DOCS_REFERENCE,
++  },
+ };
+ 
+ function cloneAcpCapability(acp: ProviderAcpCapability): ProviderAcpCapability {
+@@ -1052,6 +1072,66 @@ const TOOL_CONTROLS: Record<KnownProviderCapabilityId, ProviderCapabilityStaticD
+       },
+     ],
+   },
++  devin: {
++    providerKind: "cli",
++    gatewayRequestTools: ["devin_request", "devin_request_async"],
++    summary:
++      "Cognition Devin CLI runs an agentic coding session; the gateway passes the prompt, model, permission mode, and session resume. Devin owns its own tools, MCP, skills, and rules.",
++    controls: {
++      allowlist: {
++        supported: false,
++        behavior:
++          "Devin CLI has no per-request tool allow-list flag; tool gating is via permission modes.",
++      },
++      denylist: {
++        supported: false,
++        behavior: "Devin CLI has no per-request tool deny-list flag.",
++      },
++      mcpServers: {
++        supported: false,
++        requestField: "mcpServers",
++        behavior:
++          "Accepted for approval tracking only; Devin manages its own MCP config via `devin mcp`.",
++      },
++      nativeSkills: {
++        supported: false,
++        behavior:
++          "Devin manages its own skills (`devin skills`); the gateway does not discover them.",
++      },
++      permissionMode: {
++        supported: true,
++        requestField: "permissionMode",
++        cliFlag: "--permission-mode",
++        behavior: "Maps to Devin CLI --permission-mode (normal|dangerous|bypass).",
++      },
++      promptControl: {
++        supported: true,
++        requestField: "promptFile",
++        cliFlag: "--prompt-file",
++        behavior: "Loads the initial prompt from a file.",
++      },
++      session: {
++        supported: true,
++        requestField: "sessionId/resumeLatest/createNewSession",
++        cliFlag: "--resume/--continue",
++        behavior:
++          "Resumes a Devin CLI session (--resume <id>) or the most recent in cwd (--continue).",
++      },
++    },
++    features: baseFeatures({
++      sessionContinuity: true,
++      approvalAndSandboxControls: true,
++      promptControl: true,
++    }),
++    unsupportedInputs: [
++      {
++        input: "mcpServers",
++        behavior: "approval_tracking_only",
++        details:
++          "Accepted only for gateway approval tracking; Devin owns MCP config via `devin mcp`.",
++      },
++    ],
++  },
+ };
+ 
+ let capabilityCache = new Map<string, { loadedAt: number; value: ProviderToolCapabilities }>();
+@@ -1194,6 +1274,10 @@ function skillRoots(cli: CliType): SkillRoot[] {
+       ];
+     case "mistral":
+       return [{ path: path.join(home, ".vibe", "skills"), source: "user" }];
++    case "devin":
++      // Devin owns its skills via `devin skills`; the gateway does not discover
++      // them (nativeSkills:false in TOOL_CONTROLS), so no roots are scanned.
++      return [];
+   }
+ }
+ 
+@@ -1401,6 +1485,13 @@ function discoverConfigSurfaces(
+     case "mistral":
+       addVibeConfigSurfaces(surfaces, query);
+       break;
++    case "devin":
++      // Devin owns its own config (`devin mcp`, `devin skills`); the gateway
++      // discovers no Devin config files (nativeSkills:false, mcpServers:false in
++      // TOOL_CONTROLS), so there are no gateway-managed config surfaces to add.
++      // Explicit no-op case (mirrors the skillRoots `devin` case) rather than a
++      // silent fall-through.
++      break;
+   }
+   return surfaces;
+ }
+diff --git a/src/session-manager.ts b/src/session-manager.ts
+index 9f30c78..b1365b4 100644
+--- a/src/session-manager.ts
++++ b/src/session-manager.ts
+@@ -19,7 +19,7 @@ import type { Logger } from "./logger.js";
+ import { noopLogger } from "./logger.js";
+ import { getRequestContext, resolveOwnerPrincipal } from "./request-context.js";
+ 
+-export const CLI_TYPES = ["claude", "codex", "gemini", "grok", "mistral"] as const;
++export const CLI_TYPES = ["claude", "codex", "gemini", "grok", "mistral", "devin"] as const;
+ export type CliType = (typeof CLI_TYPES)[number];
+ 
+ /**
+diff --git a/src/upstream-contracts.ts b/src/upstream-contracts.ts
+index 8057406..f8a01ea 100644
+--- a/src/upstream-contracts.ts
++++ b/src/upstream-contracts.ts
+@@ -322,6 +322,20 @@ export const ACP_ENTRYPOINT_CONTRACTS: Record<CliType, AcpEntrypointContract> =
+       "agy 1.0.7 has no ACP flag or subcommand. Legacy Gemini CLI ACP evidence does not transfer. Watchlist item.",
+     docsRef: "docs/plans/first-class-acp-gateway-extension.dag.toml#provider_matrix.gemini",
+   },
++  devin: {
++    cli: "devin",
++    displayName: "Cognition Devin CLI",
++    status: "native",
++    executable: "devin",
++    entrypointArgs: ["acp"],
++    targetVersion: "devin CLI (cli.devin.ai)",
++    // `devin --version` is the safe probe; bare `devin acp` starts the live ACP
++    // server over stdio and is intentionally NOT probed here.
++    probeArgs: [["--version"]],
++    evidence:
++      "Native ACP entrypoint `devin acp` (stdio JSON-RPC). Registered as a candidate in Slice D0; manual initialize + session/new smoke and the runtime pilot land in Slice D1.",
++    docsRef: "docs/plans/devin-integration-scoping.md",
++  },
+ };
+ 
+ const PERMISSION_MODES = [
+@@ -2233,6 +2247,94 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
+       },
+     ],
+   },
++  devin: {
++    cli: "devin",
++    executable: "devin",
++    upstream: "Cognition Devin CLI",
++    upstreamMetadata: {
++      sourceUrls: ["https://cli.devin.ai/docs/reference/commands", "https://docs.devin.ai/cli"],
++      packageName: "devin",
++      installDocsUrl: "https://docs.devin.ai/cli",
++      releaseChannel: "vendor",
++      watchCategories: ["flags", "subcommands", "permission-modes", "acp-entrypoint"],
++    },
++    helpArgs: [["--help"]],
++    subcommands: {},
++    maxPositionals: 0,
++    mcpTools: ["devin_request", "devin_request_async"],
++    mcpParameters: [
++      "prompt",
++      "model",
++      "permissionMode",
++      "sessionId",
++      "resumeLatest",
++      "createNewSession",
++      "promptFile",
++    ],
++    // The gateway emits headless print-mode argv only, and only the flags below.
++    // `-p` always carries the prompt (arity one); session continuity uses the
++    // shared --resume/--continue surface (resolveGrokSessionArgs).
++    flags: {
++      "-p": {
++        arity: "one",
++        description: "Print response and exit (non-interactive); prompt value",
++      },
++      "--model": { arity: "one", description: "AI model for this session" },
++      "--permission-mode": {
++        arity: "one",
++        values: ["normal", "dangerous", "bypass"],
++        description: "Permission mode",
++      },
++      "--prompt-file": { arity: "one", description: "Load the initial prompt from a file" },
++      "--resume": { arity: "one", description: "Resume a specific session by ID" },
++      "--continue": { arity: "none", description: "Resume the most recent session in cwd" },
++    },
++    env: {},
++    conformanceFixtures: [
++      {
++        id: "devin-minimal",
++        description: "Minimal print-mode prompt request",
++        args: ["-p", "hello"],
++        expect: "pass",
++      },
++      {
++        id: "devin-unsupported-flag",
++        description: "Unsupported flag is rejected before spawn",
++        args: ["-p", "hello", "--not-a-devin-flag"],
++        expect: "fail",
++      },
++      {
++        id: "devin-model",
++        description: "--model is accepted",
++        args: ["-p", "hello", "--model", "opus"],
++        expect: "pass",
++      },
++      {
++        id: "devin-permission-mode",
++        description: "Valid --permission-mode accepted",
++        args: ["-p", "hello", "--permission-mode", "bypass"],
++        expect: "pass",
++      },
++      {
++        id: "devin-permission-mode-invalid",
++        description: "Invalid --permission-mode value rejected by contract",
++        args: ["-p", "hello", "--permission-mode", "yolo"],
++        expect: "fail",
++      },
++      {
++        id: "devin-prompt-file",
++        description: "--prompt-file is accepted",
++        args: ["-p", "hello", "--prompt-file", "/tmp/prompt.txt"],
++        expect: "pass",
++      },
++      {
++        id: "devin-resume",
++        description: "Resume by session id accepted",
++        args: ["-p", "hello", "--resume", "abc12345"],
++        expect: "pass",
++      },
++    ],
++  },
+ };
+ 
+ export function validateUpstreamCliArgs(

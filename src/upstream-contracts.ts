@@ -322,6 +322,20 @@ export const ACP_ENTRYPOINT_CONTRACTS: Record<CliType, AcpEntrypointContract> = 
       "agy 1.0.7 has no ACP flag or subcommand. Legacy Gemini CLI ACP evidence does not transfer. Watchlist item.",
     docsRef: "docs/plans/first-class-acp-gateway-extension.dag.toml#provider_matrix.gemini",
   },
+  devin: {
+    cli: "devin",
+    displayName: "Cognition Devin CLI",
+    status: "native",
+    executable: "devin",
+    entrypointArgs: ["acp"],
+    targetVersion: "devin CLI (cli.devin.ai)",
+    // `devin --version` is the safe probe; bare `devin acp` starts the live ACP
+    // server over stdio and is intentionally NOT probed here.
+    probeArgs: [["--version"]],
+    evidence:
+      "Native ACP entrypoint `devin acp` (stdio JSON-RPC). Registered as a candidate in Slice D0; manual initialize + session/new smoke and the runtime pilot land in Slice D1.",
+    docsRef: "docs/plans/devin-integration-scoping.md",
+  },
 };
 
 const PERMISSION_MODES = [
@@ -2229,6 +2243,94 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         description: "Vibe --resume without session ID is accepted (optional arity)",
         args: ["-p", "hello", "--agent", "auto-approve", "--resume"],
         env: { VIBE_ACTIVE_MODEL: "mistral-medium-3.5" },
+        expect: "pass",
+      },
+    ],
+  },
+  devin: {
+    cli: "devin",
+    executable: "devin",
+    upstream: "Cognition Devin CLI",
+    upstreamMetadata: {
+      sourceUrls: ["https://cli.devin.ai/docs/reference/commands", "https://docs.devin.ai/cli"],
+      packageName: "devin",
+      installDocsUrl: "https://docs.devin.ai/cli",
+      releaseChannel: "vendor",
+      watchCategories: ["flags", "subcommands", "permission-modes", "acp-entrypoint"],
+    },
+    helpArgs: [["--help"]],
+    subcommands: {},
+    maxPositionals: 0,
+    mcpTools: ["devin_request", "devin_request_async"],
+    mcpParameters: [
+      "prompt",
+      "model",
+      "permissionMode",
+      "sessionId",
+      "resumeLatest",
+      "createNewSession",
+      "promptFile",
+    ],
+    // The gateway emits headless print-mode argv only, and only the flags below.
+    // `-p` always carries the prompt (arity one); session continuity uses the
+    // shared --resume/--continue surface (resolveGrokSessionArgs).
+    flags: {
+      "-p": {
+        arity: "one",
+        description: "Print response and exit (non-interactive); prompt value",
+      },
+      "--model": { arity: "one", description: "AI model for this session" },
+      "--permission-mode": {
+        arity: "one",
+        values: ["normal", "dangerous", "bypass"],
+        description: "Permission mode",
+      },
+      "--prompt-file": { arity: "one", description: "Load the initial prompt from a file" },
+      "--resume": { arity: "one", description: "Resume a specific session by ID" },
+      "--continue": { arity: "none", description: "Resume the most recent session in cwd" },
+    },
+    env: {},
+    conformanceFixtures: [
+      {
+        id: "devin-minimal",
+        description: "Minimal print-mode prompt request",
+        args: ["-p", "hello"],
+        expect: "pass",
+      },
+      {
+        id: "devin-unsupported-flag",
+        description: "Unsupported flag is rejected before spawn",
+        args: ["-p", "hello", "--not-a-devin-flag"],
+        expect: "fail",
+      },
+      {
+        id: "devin-model",
+        description: "--model is accepted",
+        args: ["-p", "hello", "--model", "opus"],
+        expect: "pass",
+      },
+      {
+        id: "devin-permission-mode",
+        description: "Valid --permission-mode accepted",
+        args: ["-p", "hello", "--permission-mode", "bypass"],
+        expect: "pass",
+      },
+      {
+        id: "devin-permission-mode-invalid",
+        description: "Invalid --permission-mode value rejected by contract",
+        args: ["-p", "hello", "--permission-mode", "yolo"],
+        expect: "fail",
+      },
+      {
+        id: "devin-prompt-file",
+        description: "--prompt-file is accepted",
+        args: ["-p", "hello", "--prompt-file", "/tmp/prompt.txt"],
+        expect: "pass",
+      },
+      {
+        id: "devin-resume",
+        description: "Resume by session id accepted",
+        args: ["-p", "hello", "--resume", "abc12345"],
         expect: "pass",
       },
     ],

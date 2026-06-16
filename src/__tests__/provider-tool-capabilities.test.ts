@@ -91,6 +91,7 @@ describe("provider tool capabilities", () => {
     expect(Object.keys(capabilities).sort()).toEqual([
       "claude",
       "codex",
+      "devin",
       "gemini",
       "grok",
       "grok_api",
@@ -476,7 +477,14 @@ describe("provider tool capabilities", () => {
   });
 
   describe("ACP capability metadata", () => {
-    const cliProviders: ProviderCapabilityId[] = ["claude", "codex", "gemini", "grok", "mistral"];
+    const cliProviders: ProviderCapabilityId[] = [
+      "claude",
+      "codex",
+      "gemini",
+      "grok",
+      "mistral",
+      "devin",
+    ];
 
     it("attaches a fully populated ACP section to every CLI provider", () => {
       const capabilities = getProviderToolCapabilities();

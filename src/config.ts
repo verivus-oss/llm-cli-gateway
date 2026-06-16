@@ -503,6 +503,7 @@ const RESERVED_CLI_PROVIDER_NAMES: readonly string[] = [
   "gemini",
   "grok",
   "mistral",
+  "devin",
 ];
 
 export const DEFAULT_XAI_API_KEY_ENV = "XAI_API_KEY";

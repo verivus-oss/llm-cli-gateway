@@ -31,7 +31,7 @@ import {
   type ProviderKind,
 } from "./provider-tool-capabilities.js";
 
-export type CliType = "claude" | "codex" | "gemini" | "grok" | "mistral";
+export type CliType = "claude" | "codex" | "gemini" | "grok" | "mistral" | "devin";
 
 /**
  * Slice 3 cross-cutting: doctor report block summarising the gateway's

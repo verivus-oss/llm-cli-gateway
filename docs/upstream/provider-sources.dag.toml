@@ -29,7 +29,7 @@ owner = "verivus-oss"
 mechanical_source_of_truth = "src/upstream-contracts.ts (UPSTREAM_CLI_CONTRACTS)"
 scanner = "scripts/upstream-scan.mjs"
 # Providers are keyed by canonical CliType only.
-providers = ["claude", "codex", "gemini", "grok", "mistral"]
+providers = ["claude", "codex", "gemini", "grok", "mistral", "devin"]
 
 [scan_policy]
 # Global defaults for --live scans. Per-provider blocks may override cadence.
@@ -97,5 +97,19 @@ watch_categories = [
   "session-logging",
   "output-formats",
   "env-model",
+]
+cadence_days = 7
+
+[providers.devin]
+cli = "devin"
+source_urls = [
+  "https://cli.devin.ai/docs/reference/commands",
+  "https://docs.devin.ai/cli",
+]
+watch_categories = [
+  "flags",
+  "subcommands",
+  "permission-modes",
+  "acp-entrypoint",
 ]
 cadence_days = 7

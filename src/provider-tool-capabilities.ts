@@ -253,6 +253,11 @@ export const ACP_CONTRACT: AcpContractMetadata = {
       classification: "absent_watchlist",
       summary: "Grok API is an HTTP provider with no ACP process transport; watchlist item only.",
     },
+    devin: {
+      classification: "native_candidate",
+      summary:
+        "Cognition Devin CLI exposes a native ACP server via `devin acp` (stdio); runtime pilot pending a smoke (Slice D1).",
+    },
   },
 };
 
@@ -426,6 +431,21 @@ const ACP_CAPABILITIES: Record<KnownProviderCapabilityId, ProviderAcpCapability>
     smokeSupported: false,
     smokeStatus: "unsupported",
     caveats: ["ACP is a CLI-stdio transport; the HTTP API provider has no ACP surface."],
+    docs: ACP_DOCS_REFERENCE,
+  },
+  devin: {
+    status: "native_candidate",
+    mediation: "native",
+    targetVersion: "devin CLI (cli.devin.ai)",
+    entrypoint: { command: "devin", args: ["acp"] },
+    runtimeEnabled: false,
+    smokeSupported: true,
+    smokeStatus: "not_run",
+    caveats: [
+      "Native ACP via `devin acp` (stdio JSON-RPC); smoke + runtime pilot land in Slice D1.",
+      "Credentials come from `devin auth login` or WINDSURF_API_KEY; empty-env smoke is not expected to pass.",
+      "Runtime routing stays disabled until ACP is enabled in gateway config.",
+    ],
     docs: ACP_DOCS_REFERENCE,
   },
 };
@@ -1052,6 +1072,66 @@ const TOOL_CONTROLS: Record<KnownProviderCapabilityId, ProviderCapabilityStaticD
       },
     ],
   },
+  devin: {
+    providerKind: "cli",
+    gatewayRequestTools: ["devin_request", "devin_request_async"],
+    summary:
+      "Cognition Devin CLI runs an agentic coding session; the gateway passes the prompt, model, permission mode, and session resume. Devin owns its own tools, MCP, skills, and rules.",
+    controls: {
+      allowlist: {
+        supported: false,
+        behavior:
+          "Devin CLI has no per-request tool allow-list flag; tool gating is via permission modes.",
+      },
+      denylist: {
+        supported: false,
+        behavior: "Devin CLI has no per-request tool deny-list flag.",
+      },
+      mcpServers: {
+        supported: false,
+        requestField: "mcpServers",
+        behavior:
+          "Accepted for approval tracking only; Devin manages its own MCP config via `devin mcp`.",
+      },
+      nativeSkills: {
+        supported: false,
+        behavior:
+          "Devin manages its own skills (`devin skills`); the gateway does not discover them.",
+      },
+      permissionMode: {
+        supported: true,
+        requestField: "permissionMode",
+        cliFlag: "--permission-mode",
+        behavior: "Maps to Devin CLI --permission-mode (normal|dangerous|bypass).",
+      },
+      promptControl: {
+        supported: true,
+        requestField: "promptFile",
+        cliFlag: "--prompt-file",
+        behavior: "Loads the initial prompt from a file.",
+      },
+      session: {
+        supported: true,
+        requestField: "sessionId/resumeLatest/createNewSession",
+        cliFlag: "--resume/--continue",
+        behavior:
+          "Resumes a Devin CLI session (--resume <id>) or the most recent in cwd (--continue).",
+      },
+    },
+    features: baseFeatures({
+      sessionContinuity: true,
+      approvalAndSandboxControls: true,
+      promptControl: true,
+    }),
+    unsupportedInputs: [
+      {
+        input: "mcpServers",
+        behavior: "approval_tracking_only",
+        details:
+          "Accepted only for gateway approval tracking; Devin owns MCP config via `devin mcp`.",
+      },
+    ],
+  },
 };
 
 let capabilityCache = new Map<string, { loadedAt: number; value: ProviderToolCapabilities }>();
@@ -1194,6 +1274,10 @@ function skillRoots(cli: CliType): SkillRoot[] {
       ];
     case "mistral":
       return [{ path: path.join(home, ".vibe", "skills"), source: "user" }];
+    case "devin":
+      // Devin owns its skills via `devin skills`; the gateway does not discover
+      // them (nativeSkills:false in TOOL_CONTROLS), so no roots are scanned.
+      return [];
   }
 }
 
@@ -1400,6 +1484,13 @@ function discoverConfigSurfaces(
       break;
     case "mistral":
       addVibeConfigSurfaces(surfaces, query);
+      break;
+    case "devin":
+      // Devin owns its own config (`devin mcp`, `devin skills`); the gateway
+      // discovers no Devin config files (nativeSkills:false, mcpServers:false in
+      // TOOL_CONTROLS), so there are no gateway-managed config surfaces to add.
+      // Explicit no-op case (mirrors the skillRoots `devin` case) rather than a
+      // silent fall-through.
       break;
   }
   return surfaces;

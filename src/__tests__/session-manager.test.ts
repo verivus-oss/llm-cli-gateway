@@ -494,6 +494,7 @@ describe("U22 session-provider enum (Layer 10)", () => {
       "gemini",
       "grok",
       "mistral",
+      "devin",
       "grok-api",
     ]);
   });

@@ -724,7 +724,7 @@ interface DeferredJobResponse {
  * Returns the job result if it finishes in time, or a deferral marker.
  */
 async function awaitJobOrDefer(
-  cli: "claude" | "codex" | "gemini" | "grok" | "mistral",
+  cli: "claude" | "codex" | "gemini" | "grok" | "mistral" | "devin",
   args: string[],
   corrId: string,
   idleTimeoutMs?: number,
@@ -1437,7 +1437,7 @@ function createErrorResponse(
 }
 
 export function extractUsageAndCost(
-  cli: "claude" | "codex" | "gemini" | "grok" | "mistral",
+  cli: "claude" | "codex" | "gemini" | "grok" | "mistral" | "devin",
   output: string,
   outputFormat?: string,
   /**
@@ -1550,7 +1550,7 @@ export function extractUsageAndCost(
  * or `prep` — so retention on AsyncJobRecord is O(constant).
  */
 function buildAsyncFlightRecorderHandoff(
-  cliName: "claude" | "codex" | "gemini" | "grok" | "mistral",
+  cliName: "claude" | "codex" | "gemini" | "grok" | "mistral" | "devin",
   prep: {
     effectivePrompt: string;
     resolvedModel?: string;
@@ -3491,7 +3491,7 @@ export function buildMistralRetryPrep(
 }
 
 function buildCliResponse(
-  cli: "claude" | "codex" | "gemini" | "grok" | "mistral",
+  cli: "claude" | "codex" | "gemini" | "grok" | "mistral" | "devin",
   stdout: string,
   optimizeResponse: boolean,
   corrId: string,
@@ -5134,6 +5134,329 @@ export async function handleGrokRequestAsync(
     };
   } catch (error) {
     return createErrorResponse("grok_request_async", 1, "", corrId, error as Error);
+  }
+}
+
+//──────────────────────────────────────────────────────────────────────────────
+// Slice D0: Devin CLI provider (devin_request / devin_request_async).
+//──────────────────────────────────────────────────────────────────────────────
+
+export interface DevinRequestParams {
+  prompt?: string;
+  model?: string;
+  permissionMode?: "normal" | "dangerous" | "bypass";
+  promptFile?: string;
+  sessionId?: string;
+  resumeLatest?: boolean;
+  createNewSession?: boolean;
+  correlationId?: string;
+  optimizePrompt: boolean;
+  optimizeResponse?: boolean;
+  idleTimeoutMs?: number;
+  forceRefresh?: boolean;
+}
+
+/** Build the headless Devin CLI argv (print mode). Pure, no I/O. */
+export function prepareDevinRequest(
+  params: {
+    prompt?: string;
+    model?: string;
+    permissionMode?: string;
+    promptFile?: string;
+    correlationId?: string;
+    optimizePrompt: boolean;
+    operation: string;
+  },
+  _runtime: GatewayServerRuntime
+): CliRequestPrep | ExtendedToolResponse {
+  const corrId = params.correlationId ?? randomUUID();
+  let prompt = (params.prompt ?? "").trim();
+  if (!prompt) {
+    return createErrorResponse(
+      params.operation,
+      1,
+      "prompt is required and cannot be empty",
+      corrId
+    );
+  }
+  if (params.optimizePrompt) prompt = optimizePromptText(prompt);
+  const resolvedModel = resolveModelAlias("devin", params.model, getCliInfo());
+  // Headless print mode: `devin -p <prompt>`. Session resume args are appended
+  // by the handler via resolveGrokSessionArgs (identical --resume/--continue).
+  const args: string[] = ["-p", prompt];
+  if (resolvedModel) args.push("--model", resolvedModel);
+  if (params.permissionMode) args.push("--permission-mode", params.permissionMode);
+  if (params.promptFile) args.push("--prompt-file", params.promptFile);
+  return {
+    corrId,
+    effectivePrompt: prompt,
+    resolvedModel,
+    requestedMcpServers: [],
+    approvalDecision: null,
+    args,
+    stablePrefixHash: null,
+    stablePrefixTokens: null,
+  };
+}
+
+export async function handleDevinRequest(
+  deps: HandlerDeps,
+  params: DevinRequestParams
+): Promise<ExtendedToolResponse> {
+  const runtime = resolveHandlerRuntime(deps);
+  const startTime = Date.now();
+  const prep = prepareDevinRequest(
+    {
+      prompt: params.prompt,
+      model: params.model,
+      permissionMode: params.permissionMode,
+      promptFile: params.promptFile,
+      correlationId: params.correlationId,
+      optimizePrompt: params.optimizePrompt,
+      operation: "devin_request",
+    },
+    runtime
+  );
+  if (!("args" in prep)) return prep;
+  const { corrId, args } = prep;
+  let durationMs = 0;
+  let wasSuccessful = false;
+  safeFlightStart(
+    {
+      correlationId: corrId,
+      cli: "devin",
+      model: prep.resolvedModel || "default",
+      prompt: prep.effectivePrompt,
+      sessionId: params.sessionId,
+    },
+    runtime
+  );
+  try {
+    const sessionResult = resolveGrokSessionArgs({
+      sessionId: params.sessionId,
+      resumeLatest: params.resumeLatest,
+      createNewSession: params.createNewSession,
+    });
+    if (sessionResult.userProvidedSession) {
+      await getExistingSessionForProvider(
+        deps.sessionManager,
+        sessionResult.effectiveSessionId,
+        "devin"
+      );
+    }
+    args.push(...sessionResult.resumeArgs);
+
+    const devinFrHandoff = buildAsyncFlightRecorderHandoff(
+      "devin",
+      prep,
+      params.sessionId,
+      undefined
+    );
+    const result = await awaitJobOrDefer(
+      "devin",
+      args,
+      corrId,
+      resolveIdleTimeout("devin", params.idleTimeoutMs),
+      undefined,
+      params.forceRefresh,
+      runtime,
+      undefined,
+      undefined,
+      devinFrHandoff.flightRecorderEntry,
+      devinFrHandoff.extractUsage
+    );
+    if (isDeferredResponse(result)) {
+      return buildDeferredToolResponse(result, sessionResult.effectiveSessionId);
+    }
+    const { stdout, stderr, code } = result;
+    durationMs = Math.max(0, Date.now() - startTime);
+    if (code !== 0) {
+      safeFlightComplete(
+        corrId,
+        {
+          response: stderr || "",
+          durationMs,
+          retryCount: 0,
+          circuitBreakerState: "closed",
+          optimizationApplied: false,
+          exitCode: code,
+          errorMessage: stderr || `Exit code ${code}`,
+          status: "failed",
+        },
+        runtime
+      );
+      return createErrorResponse("devin", code, stderr, corrId);
+    }
+    wasSuccessful = true;
+
+    let effectiveSessionId = sessionResult.effectiveSessionId;
+    if (sessionResult.userProvidedSession && effectiveSessionId) {
+      const existing = await deps.sessionManager.getSession(effectiveSessionId);
+      if (!existing) {
+        try {
+          await deps.sessionManager.createSession("devin", "Devin Session", effectiveSessionId);
+        } catch {
+          const rechecked = await deps.sessionManager.getSession(effectiveSessionId);
+          if (!rechecked) throw new Error(`Failed to create or find session ${effectiveSessionId}`);
+        }
+      }
+      await deps.sessionManager.updateSessionUsage(effectiveSessionId);
+    } else if (!params.createNewSession && !effectiveSessionId) {
+      const newSession = await deps.sessionManager.createSession(
+        "devin",
+        "Devin Session",
+        `${GATEWAY_SESSION_PREFIX}${randomUUID()}`
+      );
+      effectiveSessionId = newSession.id;
+    }
+
+    const response = buildCliResponse(
+      "devin",
+      stdout,
+      params.optimizeResponse ?? false,
+      corrId,
+      effectiveSessionId,
+      prep,
+      durationMs,
+      sessionResult.userProvidedSession
+    );
+    safeFlightComplete(
+      corrId,
+      {
+        response: stdout,
+        durationMs,
+        retryCount: 0,
+        circuitBreakerState: "closed",
+        optimizationApplied: params.optimizePrompt || (params.optimizeResponse ?? false),
+        exitCode: 0,
+        status: "completed",
+      },
+      runtime
+    );
+    return response;
+  } catch (error) {
+    const elapsedMs = Math.max(0, Date.now() - startTime);
+    safeFlightComplete(
+      corrId,
+      {
+        response: "",
+        durationMs: elapsedMs,
+        retryCount: 0,
+        circuitBreakerState: "closed",
+        optimizationApplied: false,
+        exitCode: 1,
+        errorMessage: (error as Error).message,
+        status: "failed",
+      },
+      runtime
+    );
+    return createErrorResponse("devin", 1, "", corrId, error as Error);
+  } finally {
+    runtime.performanceMetrics.recordRequest(
+      "devin",
+      Math.max(0, durationMs || Date.now() - startTime),
+      wasSuccessful
+    );
+  }
+}
+
+export async function handleDevinRequestAsync(
+  deps: AsyncHandlerDeps,
+  params: Omit<DevinRequestParams, "optimizeResponse">
+): Promise<ExtendedToolResponse> {
+  const runtime = resolveHandlerRuntime(deps);
+  const prep = prepareDevinRequest(
+    {
+      prompt: params.prompt,
+      model: params.model,
+      permissionMode: params.permissionMode,
+      promptFile: params.promptFile,
+      correlationId: params.correlationId,
+      optimizePrompt: params.optimizePrompt,
+      operation: "devin_request_async",
+    },
+    runtime
+  );
+  if (!("args" in prep)) return prep;
+  const { corrId, args } = prep;
+  try {
+    const sessionResult = resolveGrokSessionArgs({
+      sessionId: params.sessionId,
+      resumeLatest: params.resumeLatest,
+      createNewSession: params.createNewSession,
+    });
+    if (sessionResult.userProvidedSession) {
+      await getExistingSessionForProvider(
+        deps.sessionManager,
+        sessionResult.effectiveSessionId,
+        "devin"
+      );
+    }
+    args.push(...sessionResult.resumeArgs);
+
+    let effectiveSessionId = sessionResult.effectiveSessionId;
+    if (sessionResult.userProvidedSession && effectiveSessionId) {
+      const existing = await deps.sessionManager.getSession(effectiveSessionId);
+      if (!existing) {
+        try {
+          await deps.sessionManager.createSession("devin", "Devin Session", effectiveSessionId);
+        } catch {
+          const rechecked = await deps.sessionManager.getSession(effectiveSessionId);
+          if (!rechecked) throw new Error(`Failed to create or find session ${effectiveSessionId}`);
+        }
+      }
+      await deps.sessionManager.updateSessionUsage(effectiveSessionId);
+    } else if (!params.createNewSession && !effectiveSessionId) {
+      const newSession = await deps.sessionManager.createSession(
+        "devin",
+        "Devin Session",
+        `${GATEWAY_SESSION_PREFIX}${randomUUID()}`
+      );
+      effectiveSessionId = newSession.id;
+    }
+
+    assertUpstreamCliArgs("devin", args);
+    assertUpstreamCliEnv("devin", undefined);
+    const devinAsyncFrHandoff = buildAsyncFlightRecorderHandoff(
+      "devin",
+      prep,
+      effectiveSessionId,
+      undefined
+    );
+    const job = deps.asyncJobManager.startJob(
+      "devin",
+      args,
+      corrId,
+      undefined,
+      resolveIdleTimeout("devin", params.idleTimeoutMs),
+      undefined,
+      params.forceRefresh,
+      undefined,
+      undefined,
+      devinAsyncFrHandoff.flightRecorderEntry,
+      devinAsyncFrHandoff.extractUsage,
+      true
+    );
+    deps.logger.info(`[${corrId}] devin_request_async started job ${job.id}`);
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: JSON.stringify(
+            {
+              success: true,
+              job,
+              sessionId: effectiveSessionId || null,
+              resumable: sessionResult.userProvidedSession,
+            },
+            null,
+            2
+          ),
+        },
+      ],
+    };
+  } catch (error) {
+    return createErrorResponse("devin_request_async", 1, "", corrId, error as Error);
   }
 }
 
@@ -7462,6 +7785,97 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
   );
 
   //──────────────────────────────────────────────────────────────────────────────
+  // Devin CLI Tool (Slice D0)
+  //──────────────────────────────────────────────────────────────────────────────
+  server.tool(
+    "devin_request",
+    "Run a Cognition Devin CLI request synchronously (auto-defers to a pollable job past the sync deadline when async jobs are enabled; otherwise runs to completion). Headless print mode (`devin -p`).",
+    {
+      prompt: z
+        .string()
+        .min(1, "Prompt cannot be empty")
+        .max(100000, "Prompt too long (max 100k chars)")
+        .optional()
+        .describe("Prompt text for Devin CLI"),
+      model: z.string().optional().describe("Model name or alias (e.g. opus, latest)"),
+      permissionMode: z
+        .enum(["normal", "dangerous", "bypass"])
+        .optional()
+        .describe("Devin CLI permission mode (--permission-mode)"),
+      promptFile: z
+        .string()
+        .optional()
+        .describe("Load the initial prompt from a file (--prompt-file)"),
+      sessionId: z
+        .string()
+        .optional()
+        .describe(
+          "Devin session ID to resume (emits --resume <id>; use resumeLatest for --continue)"
+        ),
+      resumeLatest: z
+        .boolean()
+        .default(false)
+        .describe("Resume the most recent Devin session in cwd (--continue)"),
+      createNewSession: z.boolean().default(false).describe("Force a new session"),
+      correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
+      optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution"),
+      optimizeResponse: z.boolean().default(false).describe("Optimize response output"),
+      idleTimeoutMs: z
+        .number()
+        .int()
+        .min(30_000)
+        .max(3_600_000)
+        .optional()
+        .describe("Idle timeout in ms (min 30s, max 1h, omit=CLI default)"),
+      forceRefresh: z
+        .boolean()
+        .default(false)
+        .describe(
+          "Bypass dedup and force a fresh CLI run even if a recent identical request exists"
+        ),
+    },
+    {
+      title: "Devin CLI request",
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
+    async ({
+      prompt,
+      model,
+      permissionMode,
+      promptFile,
+      sessionId,
+      resumeLatest,
+      createNewSession,
+      correlationId,
+      optimizePrompt,
+      optimizeResponse,
+      idleTimeoutMs,
+      forceRefresh,
+    }) => {
+      return handleDevinRequest(
+        { sessionManager, logger, runtime },
+        {
+          prompt,
+          model,
+          permissionMode,
+          promptFile,
+          sessionId,
+          resumeLatest,
+          createNewSession,
+          correlationId,
+          optimizePrompt,
+          optimizeResponse,
+          idleTimeoutMs,
+          forceRefresh,
+        }
+      );
+    }
+  );
+
+  //──────────────────────────────────────────────────────────────────────────────
   // Mistral Vibe Tool
   //──────────────────────────────────────────────────────────────────────────────
 
@@ -8771,6 +9185,89 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             nativeWorktree,
             workspace,
             worktree,
+          }
+        );
+      }
+    );
+
+    server.tool(
+      "devin_request_async",
+      "Start a Cognition Devin CLI request as a durable background job. Poll with llm_job_status, collect with llm_job_result.",
+      {
+        prompt: z
+          .string()
+          .min(1, "Prompt cannot be empty")
+          .max(100000, "Prompt too long (max 100k chars)")
+          .optional()
+          .describe("Prompt text for Devin CLI"),
+        model: z.string().optional().describe("Model name or alias (e.g. opus, latest)"),
+        permissionMode: z
+          .enum(["normal", "dangerous", "bypass"])
+          .optional()
+          .describe("Devin CLI permission mode (--permission-mode)"),
+        promptFile: z
+          .string()
+          .optional()
+          .describe("Load the initial prompt from a file (--prompt-file)"),
+        sessionId: z
+          .string()
+          .optional()
+          .describe("Devin session ID to resume (--resume <id>; use resumeLatest for --continue)"),
+        resumeLatest: z
+          .boolean()
+          .default(false)
+          .describe("Resume the most recent Devin session in cwd (--continue)"),
+        createNewSession: z.boolean().default(false).describe("Force a new session"),
+        correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
+        optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution"),
+        idleTimeoutMs: z
+          .number()
+          .int()
+          .min(30_000)
+          .max(3_600_000)
+          .optional()
+          .describe("Idle timeout in ms (min 30s, max 1h, omit=CLI default)"),
+        forceRefresh: z
+          .boolean()
+          .default(false)
+          .describe(
+            "Bypass dedup and force a fresh CLI run even if a recent identical request exists"
+          ),
+      },
+      {
+        title: "Devin CLI request (async)",
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: false,
+        openWorldHint: true,
+      },
+      async ({
+        prompt,
+        model,
+        permissionMode,
+        promptFile,
+        sessionId,
+        resumeLatest,
+        createNewSession,
+        correlationId,
+        optimizePrompt,
+        idleTimeoutMs,
+        forceRefresh,
+      }) => {
+        return handleDevinRequestAsync(
+          { sessionManager, asyncJobManager, logger, runtime },
+          {
+            prompt,
+            model,
+            permissionMode,
+            promptFile,
+            sessionId,
+            resumeLatest,
+            createNewSession,
+            correlationId,
+            optimizePrompt,
+            idleTimeoutMs,
+            forceRefresh,
           }
         );
       }

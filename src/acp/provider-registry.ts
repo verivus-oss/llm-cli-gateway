@@ -31,6 +31,9 @@ import type { CliType } from "../session-manager.js";
  */
 export type AcpProviderStatus =
   | "native_smoke_passed"
+  // Native ACP entrypoint exists but the read-only smoke has not been run yet
+  // (e.g. Devin `devin acp`, registered in Slice D0; smoke + pilot in D1).
+  | "native_candidate"
   | "adapter_mediated_deferred"
   | "absent_watchlist";
 
@@ -169,6 +172,22 @@ const ACP_PROVIDER_REGISTRY: Readonly<Record<CliType, AcpProviderRegistryEntry>>
     adapterCandidates: Object.freeze([]),
     caveat:
       "No ACP flag or subcommand at the target version. Legacy Gemini CLI ACP evidence does not transfer to Antigravity agy. Watchlist only.",
+  }),
+  devin: Object.freeze({
+    provider: "devin",
+    displayName: "Cognition Devin CLI",
+    status: "native_candidate",
+    supportKind: "native",
+    targetVersion: "devin CLI (cli.devin.ai)",
+    entrypoint: Object.freeze({ command: "devin", args: Object.freeze(["acp"]) }),
+    runtimeEnabledDefault: false,
+    // Slice D0 registers the native entrypoint as a candidate; the manual
+    // initialize + session/new smoke and the runtime pilot land in Slice D1.
+    shipRuntimePilot: false,
+    runtimePriority: 0,
+    adapterCandidates: Object.freeze([]),
+    caveat:
+      "Native ACP entrypoint `devin acp` (stdio JSON-RPC). Smoke not yet run; runtime pilot deferred to Slice D1. Credentials come from `devin auth login` or WINDSURF_API_KEY.",
   }),
 });
 

@@ -91,6 +91,19 @@ const FALLBACK_INFO: CliInfoMap = {
     },
     modelOrder: ["mistral-medium-3.5", "devstral-small"],
   },
+  devin: {
+    // Devin CLI is multi-model and selects its own default; do not hardcode a
+    // `defaultModel` here. The `--model` flag passes a model name through; these
+    // are doc-derived hints (build.devin.ai / cli.devin.ai), not a verified list.
+    description:
+      "Cognition's Devin CLI - agentic coding agent that runs in your terminal, multi-model, with handoff to cloud Devin",
+    models: {
+      opus: "Anthropic Opus frontier model exposed by Devin CLI (e.g. --model opus).",
+      "gpt-5.5": "OpenAI GPT frontier model exposed by Devin CLI.",
+      "swe-1.6": "Cognition's SWE-1.6 model (also reachable via the /fast slash command).",
+    },
+    modelOrder: ["opus", "gpt-5.5", "swe-1.6"],
+  },
 };
 
 const MODEL_CACHE_TTL_MS = 2 * 60 * 1000;
@@ -123,6 +136,7 @@ export function getAvailableCliInfo(forceRefresh = false): CliInfoMap {
     gemini: filterUnverifiedModelHints(info.gemini),
     grok: filterUnverifiedModelHints(info.grok),
     mistral: filterUnverifiedModelHints(info.mistral),
+    devin: filterUnverifiedModelHints(info.devin),
   };
 }
 
@@ -176,6 +190,7 @@ function buildCliInfo(): CliInfoMap {
     gemini: cloneInfo(FALLBACK_INFO.gemini),
     grok: cloneInfo(FALLBACK_INFO.grok),
     mistral: cloneInfo(FALLBACK_INFO.mistral),
+    devin: cloneInfo(FALLBACK_INFO.devin),
   };
 
   applyClaudeOverrides(info.claude);

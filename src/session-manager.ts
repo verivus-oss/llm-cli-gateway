@@ -19,7 +19,7 @@ import type { Logger } from "./logger.js";
 import { noopLogger } from "./logger.js";
 import { getRequestContext, resolveOwnerPrincipal } from "./request-context.js";
 
-export const CLI_TYPES = ["claude", "codex", "gemini", "grok", "mistral"] as const;
+export const CLI_TYPES = ["claude", "codex", "gemini", "grok", "mistral", "devin"] as const;
 export type CliType = (typeof CLI_TYPES)[number];
 
 /**

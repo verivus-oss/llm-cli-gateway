@@ -30,13 +30,15 @@ export interface ProviderRuntimeStatus {
   guidance: ProviderLoginGuidance;
 }
 
-const PROVIDERS: CliType[] = ["claude", "codex", "gemini", "grok", "mistral"];
+const PROVIDERS: CliType[] = ["claude", "codex", "gemini", "grok", "mistral", "devin"];
 const VERSION_ARGS: Record<CliType, string[]> = {
   claude: ["--version"],
   codex: ["--version"],
   gemini: ["--version"],
   grok: ["--version"],
   mistral: ["--version"],
+  // `devin version` ≡ `devin --version` (cli.devin.ai).
+  devin: ["--version"],
 };
 
 // Mistral Vibe ships as the `vibe` binary (PyPI package mistral-vibe); the gateway
@@ -47,6 +49,7 @@ export const PROVIDER_COMMANDS: Record<CliType, string> = {
   gemini: providerCommandName("gemini"),
   grok: "grok",
   mistral: providerCommandName("mistral"),
+  devin: providerCommandName("devin"),
 };
 
 const LOGIN_CHECKS: Partial<Record<CliType, string[]>> = {
@@ -54,6 +57,8 @@ const LOGIN_CHECKS: Partial<Record<CliType, string[]>> = {
   codex: ["login", "status"],
   grok: ["inspect", "--json"],
   mistral: ["auth", "status"],
+  // `devin auth status` — non-interactive auth check (cli.devin.ai).
+  devin: ["auth", "status"],
 };
 
 export function listProviderRuntimeStatuses(): Record<CliType, ProviderRuntimeStatus> {

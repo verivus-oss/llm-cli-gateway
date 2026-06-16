@@ -124,6 +124,28 @@ const GUIDANCE: Record<CliType, ProviderLoginGuidance> = {
         "Vibe CLI is installed; doctor checks ~/.vibe/config.toml for an explicit session_logging.enabled=false override",
     },
   },
+  devin: {
+    provider: "devin",
+    displayName: "Devin CLI",
+    install: {
+      summary: "Install Devin CLI using Cognition's current official installer.",
+      commands: [
+        "curl -fsSL https://cli.devin.ai/install.sh | bash",
+        "irm https://static.devin.ai/cli/setup.ps1 | iex",
+      ],
+      documentationUrl: "https://docs.devin.ai/cli",
+    },
+    login: {
+      summary: "Sign in through Devin CLI's official browser OAuth flow.",
+      commands: ["devin auth login", "devin auth login --force-manual-token-flow"],
+      credentialHandling:
+        "Let Devin store credentials via `devin auth login` (or WINDSURF_API_KEY for ACP). Do not paste Devin tokens or cog_* keys into the gateway or a remote chat.",
+    },
+    verification: {
+      command: "devin auth status",
+      expected: "CLI is installed and `devin auth status` reports an authenticated session",
+    },
+  },
 };
 
 export function getProviderLoginGuidance(provider: CliType): ProviderLoginGuidance {

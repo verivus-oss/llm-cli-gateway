@@ -126,7 +126,7 @@ describe("MCP tool-surface usability (post-usability-review regressions)", () =>
     // EXACT set pinning (post-2.3.0-gate Codex finding): derive the actual
     // sets from the registry and compare them exactly — positive membership
     // alone would let a future mis-classified or unlisted tool slip through.
-    expect(names.length).toBe(45);
+    expect(names.length).toBe(47);
     const setOf = (pred: (a: NonNullable<(typeof registry)[string]["annotations"]>) => boolean) =>
       names.filter(n => pred(registry[n].annotations!)).sort();
     expect(setOf(a => a.readOnlyHint === true)).toEqual(
@@ -160,6 +160,8 @@ describe("MCP tool-surface usability (post-usability-review regressions)", () =>
         "codex_request",
         "codex_request_async",
         "codex_fork_session",
+        "devin_request",
+        "devin_request_async",
         "gemini_request",
         "gemini_request_async",
         "grok_request",
@@ -177,12 +179,14 @@ describe("MCP tool-surface usability (post-usability-review regressions)", () =>
     );
     expect(setOf(a => a.destructiveHint === true)).toEqual(
       [
-        // provider-spawning (17)
+        // provider-spawning (19)
         "claude_request",
         "claude_request_async",
         "codex_request",
         "codex_request_async",
         "codex_fork_session",
+        "devin_request",
+        "devin_request_async",
         "gemini_request",
         "gemini_request_async",
         "grok_request",
