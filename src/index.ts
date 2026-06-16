@@ -5144,7 +5144,7 @@ export async function handleGrokRequestAsync(
 export interface DevinRequestParams {
   prompt?: string;
   model?: string;
-  permissionMode?: "normal" | "dangerous" | "bypass";
+  permissionMode?: "normal" | "auto" | "dangerous" | "yolo" | "bypass";
   promptFile?: string;
   sessionId?: string;
   resumeLatest?: boolean;
@@ -7799,9 +7799,11 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .describe("Prompt text for Devin CLI"),
       model: z.string().optional().describe("Model name or alias (e.g. opus, latest)"),
       permissionMode: z
-        .enum(["normal", "dangerous", "bypass"])
+        .enum(["normal", "auto", "dangerous", "yolo", "bypass"])
         .optional()
-        .describe("Devin CLI permission mode (--permission-mode)"),
+        .describe(
+          "Devin CLI permission mode (--permission-mode). normal (alias auto) auto-approves read-only tools; dangerous (aliases yolo, bypass) auto-approves all."
+        ),
       promptFile: z
         .string()
         .optional()

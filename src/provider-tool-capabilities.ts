@@ -1102,7 +1102,8 @@ const TOOL_CONTROLS: Record<KnownProviderCapabilityId, ProviderCapabilityStaticD
         supported: true,
         requestField: "permissionMode",
         cliFlag: "--permission-mode",
-        behavior: "Maps to Devin CLI --permission-mode (normal|dangerous|bypass).",
+        behavior:
+          "Maps to Devin CLI --permission-mode: normal (alias auto) auto-approves read-only tools; dangerous (aliases yolo, bypass) auto-approves all.",
       },
       promptControl: {
         supported: true,

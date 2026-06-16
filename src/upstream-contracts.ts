@@ -2282,8 +2282,10 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       "--model": { arity: "one", description: "AI model for this session" },
       "--permission-mode": {
         arity: "one",
-        values: ["normal", "dangerous", "bypass"],
-        description: "Permission mode",
+        // Verified against devin 2026.5.26-8: `normal (auto)`, `dangerous (yolo, bypass)`.
+        values: ["normal", "auto", "dangerous", "yolo", "bypass"],
+        description:
+          "Permission mode (normal/auto = read-only auto-approve; dangerous/yolo/bypass = approve all)",
       },
       "--prompt-file": { arity: "one", description: "Load the initial prompt from a file" },
       "--resume": { arity: "one", description: "Resume a specific session by ID" },
@@ -2311,14 +2313,26 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       },
       {
         id: "devin-permission-mode",
-        description: "Valid --permission-mode accepted",
+        description: "Valid --permission-mode accepted (dangerous alias bypass)",
         args: ["-p", "hello", "--permission-mode", "bypass"],
+        expect: "pass",
+      },
+      {
+        id: "devin-permission-mode-auto",
+        description: "Valid --permission-mode alias 'auto' (= normal) accepted",
+        args: ["-p", "hello", "--permission-mode", "auto"],
+        expect: "pass",
+      },
+      {
+        id: "devin-permission-mode-yolo",
+        description: "Valid --permission-mode alias 'yolo' (= dangerous) accepted",
+        args: ["-p", "hello", "--permission-mode", "yolo"],
         expect: "pass",
       },
       {
         id: "devin-permission-mode-invalid",
         description: "Invalid --permission-mode value rejected by contract",
-        args: ["-p", "hello", "--permission-mode", "yolo"],
+        args: ["-p", "hello", "--permission-mode", "ludicrous"],
         expect: "fail",
       },
       {
