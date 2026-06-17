@@ -63,4 +63,16 @@ echo "==> registry-fidelity verification (verdaccio publish + fresh consumer ins
 # npm-shrinkwrap.json (above) and the built dist/ (npm check).
 bash scripts/verify-registry-install.sh
 
+echo "==> strip internal MCP names + verify the packed tarball is clean"
+# MUST be the FINAL steps. verify-registry-install.sh above does an UNFLAGGED
+# `npm publish` to Verdaccio, which runs prepublishOnly (`npm run build && npm
+# test`) and rebuilds dist — a strip placed before it would be clobbered (and
+# would publish unstripped dist to Verdaccio). The Verdaccio publish legitimately
+# tests the FULL dist (dependency/shrinkwrap fidelity, not name-stripping), so an
+# unstripped Verdaccio publish is correct; we strip + verify only here, last, on
+# the genuinely shipped bytes. (CI's npm-publish.yml runs the same two steps after
+# its own security:audit.)
+node scripts/strip-internal-mcp.mjs
+node scripts/verify-no-internal-mcp.mjs
+
 echo "Pre-release checks passed."

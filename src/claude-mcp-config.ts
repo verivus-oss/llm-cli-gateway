@@ -2,7 +2,6 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
-  readdirSync,
   writeFileSync,
   renameSync,
   openSync,
@@ -13,15 +12,19 @@ import {
 import { homedir } from "os";
 import { dirname, join } from "path";
 import { parse as parseToml } from "smol-toml";
+import type { ClaudeServerDef } from "./mcp-registry.js";
+import { INTERNAL_MCP_REGISTRY } from "./mcp-registry.js";
 
-export const CLAUDE_MCP_SERVER_NAMES = ["sqry", "exa", "ref_tools", "trstr"] as const;
-export type ClaudeMcpServerName = (typeof CLAUDE_MCP_SERVER_NAMES)[number];
+// The internal MCP names + their host commands/env rules live solely in
+// `mcp-registry.ts` (the single release-strip target). This module owns the
+// generic config-generation orchestration; it never hardcodes a server name.
+export { CLAUDE_MCP_SERVER_NAMES } from "./mcp-registry.js";
 
-interface ClaudeServerDef {
-  command: string;
-  args: string[];
-  env?: Record<string, string>;
-}
+// Server names are open strings: the request schemas accept arbitrary names, the
+// registry resolves the gateway-known ones, and unknown names fall back to Codex
+// config (or are reported `missing`). A const-tuple union would force an
+// exhaustive `switch` and reject the stripped public build's open inputs.
+export type ClaudeMcpServerName = string;
 
 interface CodexServerDef {
   command?: string;
@@ -90,88 +93,42 @@ function readCodexServerConfig(server: ClaudeMcpServerName): CodexServerDef {
   }
 }
 
-function findInstalledExaEntrypoint(): string | null {
-  const nvmVersionsDir = join(homedir(), ".nvm", "versions", "node");
-  if (!existsSync(nvmVersionsDir)) {
-    return null;
-  }
-
-  let versions: string[] = [];
-  try {
-    versions = readdirSync(nvmVersionsDir);
-  } catch {
-    return null;
-  }
-
-  const candidates: string[] = [];
-  for (const version of versions) {
-    const entrypoint = join(
-      nvmVersionsDir,
-      version,
-      "lib",
-      "node_modules",
-      "exa-mcp-server",
-      ".smithery",
-      "stdio",
-      "index.cjs"
-    );
-    if (existsSync(entrypoint)) {
-      candidates.push(entrypoint);
-    }
-  }
-
-  if (candidates.length === 0) {
-    return null;
-  }
-
-  candidates.sort((a, b) => b.localeCompare(a, undefined, { numeric: true, sensitivity: "base" }));
-  return candidates[0];
-}
-
-function defaultServerDef(server: ClaudeMcpServerName): ClaudeServerDef {
-  switch (server) {
-    case "sqry":
-      return { command: join(homedir(), ".local", "bin", "sqry-mcp"), args: [] };
-    case "trstr":
-      return { command: join(homedir(), ".local", "bin", "trstr-mcp"), args: [] };
-    case "exa": {
-      const exaEntrypoint = findInstalledExaEntrypoint();
-      if (exaEntrypoint) {
-        return { command: "node", args: [exaEntrypoint] };
-      }
-      return { command: "npx", args: ["-y", "exa-mcp-server"] };
-    }
-    case "ref_tools":
-      return { command: "npx", args: ["-y", "ref-tools-mcp"] };
-    default: {
-      const _exhaustive: never = server;
-      throw new Error(`Unknown MCP server: ${_exhaustive}`);
-    }
-  }
-}
-
+// Generic resolver: merge Codex-config overrides over the registry default,
+// forward/require the registry's env vars, and report `missing` (null) when a
+// required credential is absent or an unknown name has no Codex fallback. All
+// server-specific knowledge comes from `INTERNAL_MCP_REGISTRY`; this function
+// hardcodes no name.
 function toClaudeServerDef(server: ClaudeMcpServerName): ClaudeServerDef | null {
+  const entry = INTERNAL_MCP_REGISTRY[server];
   const codexDef = readCodexServerConfig(server);
-  const fallback = defaultServerDef(server);
-  const command = codexDef.command || fallback.command;
-  const args = codexDef.args || fallback.args || [];
-  const env: Record<string, string> = {};
+  const fallback: Partial<ClaudeServerDef> = entry ? entry.defaultDef() : {};
 
+  const command = codexDef.command || fallback.command;
+  if (!command) {
+    // Unknown server with no Codex config and no registry fallback → missing.
+    return null;
+  }
+  const args = codexDef.args || fallback.args || [];
+
+  const env: Record<string, string> = {};
   if (codexDef.env) {
     Object.assign(env, codexDef.env);
   }
 
-  if (server === "exa" && process.env.EXA_API_KEY) {
-    env.EXA_API_KEY = process.env.EXA_API_KEY;
-  }
-
-  if (server === "ref_tools" && process.env.REF_API_KEY) {
-    env.REF_API_KEY = process.env.REF_API_KEY;
-  }
-
-  // sqry should always be usable without env, but exa/ref_tools typically need credentials.
-  if ((server === "exa" && !env.EXA_API_KEY) || (server === "ref_tools" && !env.REF_API_KEY)) {
-    return null;
+  if (entry) {
+    for (const key of entry.forwardEnv ?? []) {
+      const value = process.env[key];
+      if (value) {
+        env[key] = value;
+      }
+    }
+    // Required credentials may come from Codex config env or process.env;
+    // absence marks the server `missing` rather than enabling it credential-less.
+    for (const key of entry.requireEnv ?? []) {
+      if (!env[key]) {
+        return null;
+      }
+    }
   }
 
   return {

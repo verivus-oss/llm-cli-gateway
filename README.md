@@ -391,7 +391,7 @@ Execute a Claude Code request with optional session management.
 - `excludeDynamicSystemPromptSections` (boolean, optional): Trim dynamic system prompt sections
 - `approvalStrategy` (string, optional): `"legacy"` (default) or `"mcp_managed"`
 - `approvalPolicy` (string, optional): `"strict"`, `"balanced"`, or `"permissive"`
-- `mcpServers` (string[], optional): Claude MCP servers to expose (default: `["sqry","exa","ref_tools"]`; `"trstr"` available as opt-in)
+- `mcpServers` (string[], optional): Names of MCP servers to expose to Claude (default: none). The gateway resolves each name to a launch command from its local registry / Codex MCP config; unknown names are reported as unavailable. Configure the servers your deployment uses in the gateway environment.
 - `strictMcpConfig` (boolean, optional): Require Claude to use only supplied MCP config, default: true (request fails if any requested server is unavailable)
 - `optimizePrompt` (boolean, optional): Optimize prompt for token efficiency (44% reduction), default: false
 - `optimizeResponse` (boolean, optional): Optimize response for token efficiency (37% reduction), default: false
@@ -861,7 +861,7 @@ Async request tools accept the same approval strategy fields as their sync varia
 
 - `approvalStrategy`: `"legacy"` (default) or `"mcp_managed"`
 - `approvalPolicy`: `"strict"|"balanced"|"permissive"` override
-- `mcpServers`: Requested MCP servers (`sqry`, `exa`, `ref_tools`, `trstr`)
+- `mcpServers`: Names of requested MCP servers, resolved against the gateway's local registry / Codex MCP config
 - `claude_request_async` also supports `strictMcpConfig` and fails fast when requested servers are unavailable
 
 ##### `llm_job_status`

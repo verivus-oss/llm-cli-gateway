@@ -226,4 +226,32 @@ command = "/opt/trstr-mcp"
     expect(result.enabled).toEqual(["exa", "ref_tools"]);
     expect(result.missing).toEqual([]);
   });
+
+  // Schema widening (ClaudeMcpServerName → string) lets arbitrary names reach the
+  // resolver. An unknown name with no registry entry and no Codex config has no
+  // launch command → reported `missing` (never throws). This is also the
+  // stripped-build path, where the registry is empty so EVERY name is "unknown".
+  it("reports an unknown server name with no codex config as missing (no throw)", () => {
+    const result = buildClaudeMcpConfig(["totally_unknown_server"]);
+    expect(result.enabled).toEqual([]);
+    expect(result.missing).toEqual(["totally_unknown_server"]);
+  });
+
+  // An unknown name DOES become usable if Codex config supplies a command —
+  // unknown → codex-config-or-missing, per the resolver contract.
+  it("enables an unknown server name when codex config supplies a command", () => {
+    writeCodexConfig(`
+[mcp_servers.custom_thing]
+command = "/opt/custom-thing-mcp"
+args = ["--stdio"]
+`);
+
+    const result = buildClaudeMcpConfig(["custom_thing"]);
+    expect(result.enabled).toEqual(["custom_thing"]);
+    expect(result.missing).toEqual([]);
+
+    const parsed = JSON.parse(readFileSync(result.path, "utf-8"));
+    expect(parsed.mcpServers.custom_thing.command).toBe("/opt/custom-thing-mcp");
+    expect(parsed.mcpServers.custom_thing.args).toEqual(["--stdio"]);
+  });
 });

@@ -52,6 +52,18 @@ jobs:
 
       - run: npm run security:audit
 
+      # Strip internal MCP server names from the build, THEN verify the packed
+      # tarball is clean. This runs as an explicit step (NOT a package.json
+      # lifecycle hook) because publish below uses `--ignore-scripts`, which would
+      # skip any prepack/prepare hook. It is positioned after security:audit
+      # (whose internal `npm run build` is the last dist rebuild) and before
+      # pack/publish, so no rebuild re-introduces the names before publish.
+      - name: Strip internal MCP names from dist
+        run: node scripts/strip-internal-mcp.mjs
+
+      - name: Verify no internal MCP names in the packed tarball
+        run: node scripts/verify-no-internal-mcp.mjs
+
       - name: Verify package version matches tag
         if: github.event_name == 'release'
         env:

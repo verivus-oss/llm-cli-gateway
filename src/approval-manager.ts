@@ -4,6 +4,7 @@ import { homedir } from "os";
 import { dirname, join } from "path";
 import type { Logger } from "./logger.js";
 import { noopLogger } from "./logger.js";
+import { INTERNAL_MCP_REGISTRY } from "./mcp-registry.js";
 import type { ReviewIntegrityResult } from "./review-integrity.js";
 import { isReviewContext } from "./review-integrity.js";
 
@@ -115,14 +116,15 @@ export class ApprovalManager {
       reasons.push("Request combines full permission bypass with full-auto execution");
     }
 
-    if (request.requestedMcpServers.includes("exa")) {
-      score += 2;
-      reasons.push("Request enables external web/company research MCP (exa)");
-    }
-
-    if (request.requestedMcpServers.includes("ref_tools")) {
-      score += 1;
-      reasons.push("Request enables documentation retrieval MCP (ref_tools)");
+    // Per-server approval weights live in the MCP registry (the single strip
+    // target). Iterate registry entries in declaration order so scoring is
+    // deterministic and each requested server is counted at most once; a
+    // stripped public build has an empty registry → no per-server weight.
+    for (const [name, entry] of Object.entries(INTERNAL_MCP_REGISTRY)) {
+      if (entry.approval && request.requestedMcpServers.includes(name)) {
+        score += entry.approval.score;
+        reasons.push(entry.approval.reason);
+      }
     }
 
     if (request.allowedTools && request.allowedTools.length === 0) {

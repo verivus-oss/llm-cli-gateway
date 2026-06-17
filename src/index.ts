@@ -486,7 +486,16 @@ function getApprovalManager(runtimeLogger: GatewayLogger = logger): ApprovalMana
   return approvalManager;
 }
 
-const MCP_SERVER_ENUM = z.enum(CLAUDE_MCP_SERVER_NAMES);
+// Element schema for `mcpServers` arrays, evaluated at registration time against
+// the imported registry names. A dev build has the full list → a closed enum
+// (rejects typos). A stripped public build has an empty list → an open
+// `z.string()` (accepts arbitrary names, since the provider CLIs own their own
+// MCP config). `z.enum([])` is illegal, so the empty case must branch to string.
+function mcpServerEnum(): z.ZodTypeAny {
+  return CLAUDE_MCP_SERVER_NAMES.length > 0
+    ? z.enum(CLAUDE_MCP_SERVER_NAMES as [string, ...string[]])
+    : z.string();
+}
 const CLI_TYPE_ENUM = z.enum(CLI_TYPES);
 
 /**
@@ -1706,7 +1715,9 @@ function createApprovalDeniedResponse(
 
 function normalizeMcpServers(mcpServers?: ClaudeMcpServerName[]): ClaudeMcpServerName[] {
   if (!mcpServers || mcpServers.length === 0) {
-    return ["sqry"];
+    // No implicit internal default: callers opt into MCP servers explicitly, and
+    // the stripped public build has no internal names to default to.
+    return [];
   }
   return [...new Set(mcpServers)];
 }
@@ -6515,10 +6526,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .enum(["strict", "balanced", "permissive"])
         .optional()
         .describe("Approval policy override"),
-      mcpServers: z
-        .array(MCP_SERVER_ENUM)
-        .default(["sqry"])
-        .describe("MCP servers exposed to Claude"),
+      mcpServers: z.array(mcpServerEnum()).default([]).describe("MCP servers exposed to Claude"),
       strictMcpConfig: z
         .boolean()
         .default(false)
@@ -6959,8 +6967,8 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .optional()
         .describe("Approval policy override"),
       mcpServers: z
-        .array(MCP_SERVER_ENUM)
-        .default(["sqry"])
+        .array(mcpServerEnum())
+        .default([])
         .describe("MCP server names for approval tracking (Codex manages its own MCP config)"),
       sessionId: z
         .string()
@@ -7542,7 +7550,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .optional()
         .describe("Approval policy override"),
       mcpServers: z
-        .array(MCP_SERVER_ENUM)
+        .array(mcpServerEnum())
         .default([])
         .describe("Unsupported for Antigravity CLI; non-empty values are rejected"),
       allowedTools: z
@@ -7731,8 +7739,8 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .optional()
         .describe("Approval policy override"),
       mcpServers: z
-        .array(MCP_SERVER_ENUM)
-        .default(["sqry"])
+        .array(mcpServerEnum())
+        .default([])
         .describe(
           "MCP server names for approval tracking (Grok manages its own MCP config via `grok mcp`)"
         ),
@@ -8056,8 +8064,8 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .optional()
         .describe("Approval policy override"),
       mcpServers: z
-        .array(MCP_SERVER_ENUM)
-        .default(["sqry"])
+        .array(mcpServerEnum())
+        .default([])
         .describe(
           "MCP server names for approval tracking (Vibe manages its own MCP config via `vibe mcp`)"
         ),
@@ -8359,10 +8367,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .enum(["strict", "balanced", "permissive"])
           .optional()
           .describe("Approval policy override"),
-        mcpServers: z
-          .array(MCP_SERVER_ENUM)
-          .default(["sqry"])
-          .describe("MCP servers exposed to Claude"),
+        mcpServers: z.array(mcpServerEnum()).default([]).describe("MCP servers exposed to Claude"),
         strictMcpConfig: z
           .boolean()
           .default(false)
@@ -8656,8 +8661,8 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .optional()
           .describe("Approval policy override"),
         mcpServers: z
-          .array(MCP_SERVER_ENUM)
-          .default(["sqry"])
+          .array(mcpServerEnum())
+          .default([])
           .describe("MCP server names for approval tracking (Codex manages its own MCP config)"),
         sessionId: z
           .string()
@@ -8848,7 +8853,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .optional()
           .describe("Approval policy override"),
         mcpServers: z
-          .array(MCP_SERVER_ENUM)
+          .array(mcpServerEnum())
           .default([])
           .describe("Unsupported for Antigravity CLI; non-empty values are rejected"),
         allowedTools: z
@@ -9028,8 +9033,8 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .optional()
           .describe("Approval policy override"),
         mcpServers: z
-          .array(MCP_SERVER_ENUM)
-          .default(["sqry"])
+          .array(mcpServerEnum())
+          .default([])
           .describe(
             "MCP server names for approval tracking (Grok manages its own MCP config via `grok mcp`)"
           ),
@@ -9452,8 +9457,8 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .optional()
           .describe("Approval policy override"),
         mcpServers: z
-          .array(MCP_SERVER_ENUM)
-          .default(["sqry"])
+          .array(mcpServerEnum())
+          .default([])
           .describe(
             "MCP server names for approval tracking (Vibe manages its own MCP config via `vibe mcp`)"
           ),

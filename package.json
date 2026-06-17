@@ -123,7 +123,8 @@
   "overrides": {
     "body-parser": "2.2.2",
     "type-is": "2.0.1",
-    "content-type": "1.0.5"
+    "content-type": "1.0.5",
+    "hono": "^4.12.25"
   },
   "directories": {
     "doc": "docs"

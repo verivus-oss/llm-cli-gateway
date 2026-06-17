@@ -164,6 +164,45 @@ if (findings.length > 0) {
 console.log('Lockfile does not contain blocked Socket-flagged dependency versions.');
 NODE
 
+echo "==> hono floor tripwire"
+node --input-type=module <<'NODE'
+import fs from 'node:fs';
+
+// hono ships transitively via @modelcontextprotocol/sdk. 4.12.22 and below carry
+// known advisories (SNYK-JS-HONO-*; fix line = upgrade to 4.12.25+). A
+// package.json#overrides pin (hono ^4.12.25) raises the floor; this tripwire
+// fails the release if anything regresses below it. Mirrors the blocked-version
+// checks above but as a minimum-version floor rather than a blocklist.
+const FLOOR = [4, 12, 25];
+function below(version) {
+  const parts = version.split('.').map(n => parseInt(n, 10));
+  for (let i = 0; i < FLOOR.length; i++) {
+    const v = parts[i] ?? 0;
+    if (v < FLOOR[i]) return true;
+    if (v > FLOOR[i]) return false;
+  }
+  return false; // equal → at floor, allowed
+}
+
+const lock = JSON.parse(fs.readFileSync('package-lock.json', 'utf8'));
+const findings = [];
+for (const [path, meta] of Object.entries(lock.packages ?? {})) {
+  const name = meta.name ?? path.split(/node_modules\//).pop();
+  if (name !== 'hono' || typeof meta.version !== 'string') continue;
+  if (below(meta.version)) {
+    findings.push(`hono@${meta.version} at ${path || '.'}`);
+  }
+}
+
+if (findings.length > 0) {
+  console.error(`hono below the ${FLOOR.join('.')} security floor (advisory regression — keep the package.json overrides pin):`);
+  for (const finding of findings) console.error(finding);
+  process.exit(1);
+}
+
+console.log(`hono is at or above the ${FLOOR.join('.')} security floor.`);
+NODE
+
 echo "==> packed consumer install policy"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "${TMP_DIR}"' EXIT

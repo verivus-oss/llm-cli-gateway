@@ -3,6 +3,7 @@ import { mkdtempSync, readFileSync, rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 import { ApprovalManager } from "../approval-manager.js";
+import { INTERNAL_MCP_REGISTRY } from "../mcp-registry.js";
 import { checkReviewIntegrity } from "../review-integrity.js";
 
 describe("ApprovalManager", () => {
@@ -506,6 +507,89 @@ describe("ApprovalManager", () => {
       expect(decision.promptPreview).toBe("[redacted]");
       // SHA-256 should still be a valid 64-char hex string
       expect(decision.promptSha256).toMatch(/^[a-f0-9]{64}$/);
+    });
+  });
+
+  describe("registry-driven MCP scoring", () => {
+    it("applies the registry approval weights/reasons for known servers (exa +2, ref_tools +1)", () => {
+      const manager = new ApprovalManager(logPath);
+      const decision = manager.decide({
+        cli: "codex",
+        operation: "codex_request",
+        prompt: "Summarize this document",
+        bypassRequested: false,
+        fullAuto: false,
+        requestedMcpServers: ["sqry", "exa", "ref_tools"],
+      });
+
+      // sqry carries no weight; exa +2 and ref_tools +1.
+      expect(decision.score).toBe(3);
+      expect(decision.reasons).toContain("Request enables external web/company research MCP (exa)");
+      expect(decision.reasons).toContain("Request enables documentation retrieval MCP (ref_tools)");
+    });
+
+    it("scores each requested server at most once, in registry declaration order", () => {
+      const manager = new ApprovalManager(logPath);
+      const decision = manager.decide({
+        cli: "codex",
+        operation: "codex_request",
+        prompt: "Summarize this document",
+        bypassRequested: false,
+        fullAuto: false,
+        requestedMcpServers: ["exa", "exa", "ref_tools"],
+      });
+
+      // Duplicate "exa" counted once; exa reason precedes ref_tools reason.
+      expect(decision.score).toBe(3);
+      const exaIdx = decision.reasons.indexOf(
+        "Request enables external web/company research MCP (exa)"
+      );
+      const refIdx = decision.reasons.indexOf(
+        "Request enables documentation retrieval MCP (ref_tools)"
+      );
+      expect(exaIdx).toBeGreaterThanOrEqual(0);
+      expect(refIdx).toBeGreaterThan(exaIdx);
+    });
+
+    it("adds no per-server weight for an unknown server name", () => {
+      const manager = new ApprovalManager(logPath);
+      const decision = manager.decide({
+        cli: "codex",
+        operation: "codex_request",
+        prompt: "Summarize this document",
+        bypassRequested: false,
+        fullAuto: false,
+        requestedMcpServers: ["some_unknown_server"],
+      });
+
+      expect(decision.score).toBe(0);
+      expect(decision.reasons).toEqual([]);
+    });
+
+    it("adds no per-server weight when the registry is empty (stripped public build)", () => {
+      // Simulate the stripped build, where INTERNAL_MCP_REGISTRY is {}. Scoring
+      // iterates the live registry, so an empty registry yields zero MCP weight
+      // even for names that score in a dev build.
+      const saved = { ...INTERNAL_MCP_REGISTRY };
+      for (const key of Object.keys(INTERNAL_MCP_REGISTRY)) {
+        delete INTERNAL_MCP_REGISTRY[key];
+      }
+      try {
+        const manager = new ApprovalManager(logPath);
+        const decision = manager.decide({
+          cli: "codex",
+          operation: "codex_request",
+          prompt: "Summarize this document",
+          bypassRequested: false,
+          fullAuto: false,
+          requestedMcpServers: ["exa", "ref_tools"],
+        });
+
+        expect(decision.score).toBe(0);
+        expect(decision.reasons).toEqual([]);
+      } finally {
+        Object.assign(INTERNAL_MCP_REGISTRY, saved);
+      }
     });
   });
 });
