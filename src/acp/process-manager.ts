@@ -371,6 +371,8 @@ export class AcpProcessManager {
       callbacks: options.callbacks,
       idleTimeoutMs: options.idleTimeoutMs ?? this.config.processIdleTimeoutMs,
       initializeTimeoutMs: this.config.initializeTimeoutMs,
+      sessionNewTimeoutMs: this.config.sessionNewTimeoutMs,
+      promptTimeoutMs: this.config.promptTimeoutMs,
       onTerminal: m => this.live.delete(m),
     });
     this.live.add(managed);
@@ -416,6 +418,8 @@ interface ManagedProcessImplOptions {
   readonly callbacks?: AcpClientCallbacks;
   readonly idleTimeoutMs: number;
   readonly initializeTimeoutMs: number;
+  readonly sessionNewTimeoutMs?: number;
+  readonly promptTimeoutMs?: number;
   readonly onTerminal: (self: ManagedProcessImpl) => void;
 }
 
@@ -486,10 +490,14 @@ class ManagedProcessImpl implements ManagedAcpProcess {
       hostServices: options.hostServices,
       callbacks: options.callbacks,
       logger: this.logger,
-      // The manager owns the configured initialize timeout; it is the only
-      // bounded ACP call the manager drives directly. Per-session/prompt
-      // timeouts are applied by higher layers when they call the client.
-      timeouts: { initializeMs: options.initializeTimeoutMs },
+      // Apply the configured ACP timeouts to the client so session/new and
+      // prompt calls are bounded by the operator's [acp] settings, not just the
+      // transport default.
+      timeouts: {
+        initializeMs: options.initializeTimeoutMs,
+        sessionNewMs: options.sessionNewTimeoutMs,
+        promptMs: options.promptTimeoutMs,
+      },
     });
 
     // Wire process exit -> transport teardown + quarantine. Both `exit` and

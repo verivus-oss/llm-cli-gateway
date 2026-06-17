@@ -49,6 +49,7 @@ import {
   loadPersistenceConfig,
   loadCacheAwarenessConfig,
   loadProvidersConfig,
+  loadAcpConfig,
   defaultGatewayConfigPath,
   isXaiProviderEnabled,
   enabledApiProviders,
@@ -57,7 +58,10 @@ import {
   type CacheAwarenessConfig,
   type ProvidersConfig,
   type ApiProviderRuntime,
+  type AcpConfig,
 } from "./config.js";
+import { runAcpRequest, type AcpFlightSink } from "./acp/runtime.js";
+import { isAcpError } from "./acp/errors.js";
 import {
   createApiProvider,
   runApiRequest,
@@ -413,6 +417,7 @@ let flightRecorder: FlightRecorderLike | null = null;
 let persistenceConfig: PersistenceConfig | null = null;
 let cacheAwarenessConfig: CacheAwarenessConfig | null = null;
 let providersConfig: ProvidersConfig | null = null;
+let acpConfig: AcpConfig | null = null;
 let jobStore: JobStore | null = null;
 let jobStoreInitialized = false;
 let asyncJobManager: AsyncJobManager | null = null;
@@ -426,6 +431,11 @@ function getFlightRecorder(runtimeLogger: GatewayLogger = logger): FlightRecorde
 function getPersistenceConfig(runtimeLogger: GatewayLogger = logger): PersistenceConfig {
   persistenceConfig ??= loadPersistenceConfig(runtimeLogger);
   return persistenceConfig;
+}
+
+function getAcpConfig(runtimeLogger: GatewayLogger = logger): AcpConfig {
+  acpConfig ??= loadAcpConfig(runtimeLogger);
+  return acpConfig;
 }
 
 function getCacheAwarenessConfig(runtimeLogger: GatewayLogger = logger): CacheAwarenessConfig {
@@ -622,6 +632,7 @@ export interface GatewayServerDeps {
   persistence?: PersistenceConfig;
   cacheAwareness?: CacheAwarenessConfig;
   providers?: ProvidersConfig;
+  acpConfig?: AcpConfig;
   workspaces?: WorkspaceRegistry;
 }
 
@@ -637,6 +648,7 @@ export interface GatewayServerRuntime {
   persistence: PersistenceConfig;
   cacheAwareness: CacheAwarenessConfig;
   providers: ProvidersConfig;
+  acpConfig: AcpConfig;
   workspaces: WorkspaceRegistry;
 }
 
@@ -685,6 +697,7 @@ export function resolveGatewayServerRuntime(
     persistence: deps.persistence ?? getPersistenceConfig(runtimeLogger),
     cacheAwareness: deps.cacheAwareness ?? getCacheAwarenessConfig(runtimeLogger),
     providers: deps.providers ?? getProvidersConfig(runtimeLogger),
+    acpConfig: deps.acpConfig ?? getAcpConfig(runtimeLogger),
     workspaces: deps.workspaces ?? loadWorkspaceRegistry(runtimeLogger),
   };
 }
@@ -707,6 +720,62 @@ const CLI_IDLE_TIMEOUTS: Record<string, number | undefined> = {
 function resolveIdleTimeout(cli: string, override?: number): number | undefined {
   if (override !== undefined) return override;
   return CLI_IDLE_TIMEOUTS[cli];
+}
+
+/**
+ * Slice B7: route a request through a provider's native ACP transport. Reached
+ * only when a `*_request` tool is called with `transport: "acp"`. Fails closed
+ * (a clear error) when ACP or the provider's runtime is not enabled in config;
+ * the existing CLI transport is used for the default `transport: "cli"`.
+ */
+export async function runAcpTransport(
+  deps: HandlerDeps,
+  params: {
+    provider: CliType;
+    prompt?: string;
+    model?: string;
+    sessionId?: string;
+    correlationId?: string;
+  }
+): Promise<ExtendedToolResponse> {
+  const runtime = resolveHandlerRuntime(deps);
+  const operation = `${params.provider}_request`;
+  const corrId = params.correlationId ?? randomUUID();
+  const prompt = (params.prompt ?? "").trim();
+  if (!prompt) {
+    return createErrorResponse(operation, 1, "prompt is required and cannot be empty", corrId);
+  }
+  try {
+    const result = await runAcpRequest(
+      {
+        config: runtime.acpConfig,
+        sessionManager: runtime.sessionManager,
+        approvalManager: runtime.approvalManager,
+        flightRecorder: runtime.flightRecorder as AcpFlightSink,
+        logger: runtime.logger,
+      },
+      {
+        provider: params.provider,
+        prompt,
+        model: params.model,
+        sessionId: params.sessionId,
+        correlationId: corrId,
+      }
+    );
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: `[gateway] transport=acp session=${result.gatewaySessionId}\n${result.text}`,
+        },
+      ],
+    };
+  } catch (err) {
+    if (isAcpError(err)) {
+      return createErrorResponse(operation, 1, err.userMessage, corrId);
+    }
+    return createErrorResponse(operation, 1, "", corrId, err as Error);
+  }
 }
 
 const SYNC_POLL_INTERVAL_MS = 1_000;
@@ -4672,6 +4741,7 @@ export interface GrokRequestParams {
   promptParts?: PromptParts;
   model?: string;
   outputFormat?: string;
+  transport?: "cli" | "acp";
   sessionId?: string;
   resumeLatest: boolean;
   createNewSession: boolean;
@@ -4743,6 +4813,16 @@ export async function handleGrokRequest(
   deps: HandlerDeps,
   params: GrokRequestParams
 ): Promise<ExtendedToolResponse> {
+  // Slice B7: route through the native ACP transport when explicitly selected.
+  if (params.transport === "acp") {
+    return runAcpTransport(deps, {
+      provider: "grok",
+      prompt: params.prompt,
+      model: params.model,
+      sessionId: params.sessionId,
+      correlationId: params.correlationId,
+    });
+  }
   const runtime = resolveHandlerRuntime(deps);
   const startTime = Date.now();
   const prep = prepareGrokRequest(
@@ -5146,6 +5226,7 @@ export interface DevinRequestParams {
   model?: string;
   permissionMode?: "normal" | "auto" | "dangerous" | "yolo" | "bypass";
   promptFile?: string;
+  transport?: "cli" | "acp";
   sessionId?: string;
   resumeLatest?: boolean;
   createNewSession?: boolean;
@@ -5203,6 +5284,16 @@ export async function handleDevinRequest(
   deps: HandlerDeps,
   params: DevinRequestParams
 ): Promise<ExtendedToolResponse> {
+  // Slice B7: route through the native ACP transport when explicitly selected.
+  if (params.transport === "acp") {
+    return runAcpTransport(deps, {
+      provider: "devin",
+      prompt: params.prompt,
+      model: params.model,
+      sessionId: params.sessionId,
+      correlationId: params.correlationId,
+    });
+  }
   const runtime = resolveHandlerRuntime(deps);
   const startTime = Date.now();
   const prep = prepareDevinRequest(
@@ -5465,6 +5556,7 @@ export interface MistralRequestParams {
   promptParts?: PromptParts;
   model?: string;
   outputFormat?: string;
+  transport?: "cli" | "acp";
   sessionId?: string;
   resumeLatest: boolean;
   createNewSession: boolean;
@@ -5500,6 +5592,16 @@ export async function handleMistralRequest(
   deps: HandlerDeps,
   params: MistralRequestParams
 ): Promise<ExtendedToolResponse> {
+  // Slice B7: route through the native ACP transport when explicitly selected.
+  if (params.transport === "acp") {
+    return runAcpTransport(deps, {
+      provider: "mistral",
+      prompt: params.prompt,
+      model: params.model,
+      sessionId: params.sessionId,
+      correlationId: params.correlationId,
+    });
+  }
   const runtime = resolveHandlerRuntime(deps);
   const startTime = Date.now();
   const prep = prepareMistralRequest(
@@ -7590,6 +7692,12 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         "Cache-aware structured prompt: { system?, tools?, context?, task }. Mutually exclusive with prompt. Stable parts hash into cache_state for prefix-discipline tracking."
       ),
       model: z.string().optional().describe("Model name or alias (e.g. grok-build, latest)"),
+      transport: z
+        .enum(["cli", "acp"])
+        .default("cli")
+        .describe(
+          "Transport: 'cli' (default) runs the Grok CLI; 'acp' routes through `grok agent stdio` when [acp].enabled and the provider's runtime_enabled are set (fails closed otherwise)."
+        ),
       // Covered request flags (outputFormat, effort, sandbox, compaction, the
       // boolean toggles, …) are derived from the grok contract + generation
       // table — see GROK_GENERATED_SHAPE / src/provider-codegen.ts. They are
@@ -7676,6 +7784,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       prompt,
       promptParts,
       model,
+      transport,
       outputFormat,
       sessionId,
       resumeLatest,
@@ -7731,6 +7840,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           prompt,
           promptParts,
           model,
+          transport,
           outputFormat,
           sessionId,
           resumeLatest,
@@ -7798,6 +7908,12 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .optional()
         .describe("Prompt text for Devin CLI"),
       model: z.string().optional().describe("Model name or alias (e.g. opus, latest)"),
+      transport: z
+        .enum(["cli", "acp"])
+        .default("cli")
+        .describe(
+          "Transport: 'cli' (default) runs the Devin CLI; 'acp' routes through `devin acp` when [acp].enabled and the provider's runtime_enabled are set (fails closed otherwise)."
+        ),
       permissionMode: z
         .enum(["normal", "auto", "dangerous", "yolo", "bypass"])
         .optional()
@@ -7846,6 +7962,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
     async ({
       prompt,
       model,
+      transport,
       permissionMode,
       promptFile,
       sessionId,
@@ -7862,6 +7979,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         {
           prompt,
           model,
+          transport,
           permissionMode,
           promptFile,
           sessionId,
@@ -7899,6 +8017,12 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .optional()
         .describe(
           "Model alias (e.g. mistral-medium-3.5, latest). Resolved alias is injected via VIBE_ACTIVE_MODEL env var; Vibe has no --model flag."
+        ),
+      transport: z
+        .enum(["cli", "acp"])
+        .default("cli")
+        .describe(
+          "Transport: 'cli' (default) runs the Vibe CLI; 'acp' routes through `vibe-acp` when [acp].enabled and the provider's runtime_enabled are set (fails closed otherwise)."
         ),
       outputFormat: z
         .enum(["text", "plain", "json", "streaming", "stream-json"])
@@ -8008,6 +8132,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       prompt,
       promptParts,
       model,
+      transport,
       outputFormat,
       sessionId,
       resumeLatest,
@@ -8038,6 +8163,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           prompt,
           promptParts,
           model,
+          transport,
           outputFormat,
           sessionId,
           resumeLatest,

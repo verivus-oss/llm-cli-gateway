@@ -1,0 +1,223 @@
+/**
+ * ACP runtime — the gated path that routes a request through a provider's
+ * native ACP transport (plan steps `pilot-mistral-acp-runtime` /
+ * `pilot-grok-acp-runtime`, extended to Devin).
+ *
+ * This is the single place the foundation modules are assembled into a live
+ * prompt round-trip. It is reached ONLY when a request explicitly selects
+ * `transport: "acp"` AND both config gates are on; otherwise the caller uses
+ * the existing CLI transport. The runtime fails closed:
+ *
+ *   - `[acp].enabled` off                    → {@link AcpDisabledError}
+ *   - provider `runtime_enabled` off / absent → {@link ProviderRuntimeDisabledError}
+ *
+ * Flow: deny-by-default HostServices (with the ApprovalManager permission
+ * bridge) → spawn + initialize via the process manager → gateway-owned session
+ * (create or scope-checked resume) → `session/new`/`session/load` → `prompt`
+ * with `session/update` streamed through the event normalizer → redacted
+ * flight-recorder rows → accumulated final text. The provider process is always
+ * torn down.
+ */
+
+import { AcpEventNormalizer } from "./event-normalizer.js";
+import {
+  AcpDisabledError,
+  AcpError,
+  AcpProtocolError,
+  ProviderRuntimeDisabledError,
+  isAcpError,
+} from "./errors.js";
+import { buildAcpFlightResult, buildAcpFlightStart } from "./flight-redaction.js";
+import { GatewayHostServices } from "./host-services.js";
+import { createAcpPermissionDecider } from "./permission-bridge.js";
+import { AcpProcessManager, type AcpSpawnFn, type ProcessEnv } from "./process-manager.js";
+import { createAcpSession, recordAcpSessionInfo, resolveAcpResume } from "./session-map.js";
+import type { ContentBlock } from "./types.js";
+import type { ApprovalCli, ApprovalManager } from "../approval-manager.js";
+import type { AcpConfig } from "../config.js";
+import type { FlightLogResult, FlightLogStart } from "../flight-recorder.js";
+import type { Logger } from "../logger.js";
+import { noopLogger } from "../logger.js";
+import type { CliType, ISessionManager } from "../session-manager.js";
+
+/** Minimal flight-recorder surface the runtime writes to (logStart/logComplete). */
+export interface AcpFlightSink {
+  logStart(entry: FlightLogStart): void;
+  logComplete(correlationId: string, result: FlightLogResult): void;
+}
+
+/** Dependencies for {@link runAcpRequest}. */
+export interface AcpRuntimeDeps {
+  readonly config: AcpConfig;
+  readonly sessionManager: ISessionManager;
+  readonly approvalManager: ApprovalManager;
+  readonly flightRecorder?: AcpFlightSink;
+  readonly logger?: Logger;
+  /** Injectable spawner (tests). Defaults to the process manager's shell:false spawn. */
+  readonly spawn?: AcpSpawnFn;
+  readonly baseEnv?: ProcessEnv;
+  /** Injectable clock (ms) for deterministic durations. */
+  readonly now?: () => number;
+}
+
+/** A single ACP prompt request. */
+export interface AcpRunRequest {
+  readonly provider: CliType;
+  readonly prompt: string;
+  readonly model?: string;
+  /** Gateway gw-* session id to resume; omit to create a fresh ACP session. */
+  readonly sessionId?: string;
+  readonly cwd?: string;
+  readonly correlationId: string;
+}
+
+/** Successful ACP run outcome. */
+export interface AcpRunResult {
+  readonly text: string;
+  readonly gatewaySessionId: string;
+  readonly protocolVersion: number | null;
+  readonly durationMs: number;
+}
+
+/**
+ * Route a request through a provider's native ACP transport. Throws a typed
+ * {@link AcpError} on a closed gate, a failed resume, or a provider/protocol
+ * failure; always tears down the provider process.
+ */
+export async function runAcpRequest(
+  deps: AcpRuntimeDeps,
+  req: AcpRunRequest
+): Promise<AcpRunResult> {
+  const logger = deps.logger ?? noopLogger;
+  const now = deps.now ?? Date.now;
+  const startedAt = now();
+  const elapsed = (): number => Math.max(0, now() - startedAt);
+
+  // Fail closed on the config gates BEFORE any process work.
+  if (!deps.config.enabled) {
+    throw new AcpDisabledError({ provider: req.provider });
+  }
+  const providerConfig = deps.config.providers[req.provider];
+  if (!providerConfig?.runtimeEnabled) {
+    throw new ProviderRuntimeDisabledError(req.provider, { provider: req.provider });
+  }
+
+  // Deny-by-default host services with the ApprovalManager permission bridge.
+  const permissionDecider = createAcpPermissionDecider({
+    approvalManager: deps.approvalManager,
+    provider: req.provider as ApprovalCli,
+    allowWrite: deps.config.allowWriteHostServices,
+    allowTerminal: deps.config.allowTerminalHostServices,
+    logger,
+  });
+  const hostServices = new GatewayHostServices({ logger, permissionDecider });
+
+  const manager = new AcpProcessManager({
+    config: deps.config,
+    logger,
+    spawn: deps.spawn,
+    baseEnv: deps.baseEnv,
+  });
+  const normalizer = new AcpEventNormalizer();
+
+  // Resolve the gateway session: scope-checked resume, or a fresh gateway id.
+  let gatewaySessionId: string;
+  let resumeProviderSessionId: string | null = null;
+  if (req.sessionId) {
+    const resume = await resolveAcpResume(deps.sessionManager, req.sessionId, req.provider);
+    if (!resume.ok) {
+      throw new AcpProtocolError(`ACP session resume failed (${resume.reason}).`, {
+        provider: req.provider,
+        debug: { reason: resume.reason },
+      });
+    }
+    gatewaySessionId = req.sessionId;
+    resumeProviderSessionId = resume.providerSessionId;
+  } else {
+    gatewaySessionId = await createAcpSession(deps.sessionManager, {
+      provider: req.provider,
+      cwd: req.cwd,
+    });
+  }
+
+  const promptBlocks: ContentBlock[] = [{ type: "text", text: req.prompt }];
+  deps.flightRecorder?.logStart(
+    buildAcpFlightStart({
+      correlationId: req.correlationId,
+      provider: req.provider,
+      model: req.model ?? "default",
+      prompt: promptBlocks,
+      gatewaySessionId,
+    })
+  );
+
+  let proc: Awaited<ReturnType<AcpProcessManager["start"]>> | null = null;
+  try {
+    proc = await manager.start({
+      provider: req.provider,
+      cwd: req.cwd,
+      hostServices,
+      callbacks: { onSessionUpdate: update => normalizer.handle(update) },
+    });
+    const cwd = proc.resolved.cwd;
+    const init = proc.client.agentInfo;
+
+    // Create or resume the provider ACP session.
+    let providerSessionId: string;
+    if (resumeProviderSessionId) {
+      await proc.client.loadSession({ sessionId: resumeProviderSessionId, cwd, mcpServers: [] });
+      providerSessionId = resumeProviderSessionId;
+    } else {
+      const session = await proc.client.newSession({ cwd, mcpServers: [] });
+      providerSessionId = session.sessionId;
+      await recordAcpSessionInfo(deps.sessionManager, gatewaySessionId, {
+        providerSessionId,
+        protocolVersion: init?.protocolVersion,
+        agentName: init?.agentInfo?.name,
+        agentVersion: init?.agentInfo?.version,
+      });
+    }
+
+    await proc.client.prompt({ sessionId: providerSessionId, prompt: promptBlocks });
+    const text = normalizer.finalText;
+    const durationMs = elapsed();
+
+    deps.flightRecorder?.logComplete(
+      req.correlationId,
+      buildAcpFlightResult({ responseText: text, durationMs, status: "completed", exitCode: 0 })
+    );
+    logger.info("acp.request.success", { provider: req.provider, durationMs });
+    return {
+      text,
+      gatewaySessionId,
+      protocolVersion: init?.protocolVersion ?? null,
+      durationMs,
+    };
+  } catch (err) {
+    const durationMs = elapsed();
+    deps.flightRecorder?.logComplete(
+      req.correlationId,
+      buildAcpFlightResult({
+        responseText: "",
+        durationMs,
+        status: "failed",
+        exitCode: 1,
+        errorMessage: isAcpError(err) ? err.userMessage : "ACP request failed.",
+      })
+    );
+    logger.error("acp.request.failure", {
+      provider: req.provider,
+      durationMs,
+      errorClass: err instanceof Error ? err.name : "unknown",
+    });
+    throw err instanceof AcpError
+      ? err
+      : new AcpProtocolError("ACP request failed unexpectedly.", {
+          provider: req.provider,
+          debug: { errorClass: err instanceof Error ? err.name : "unknown" },
+        });
+  } finally {
+    proc?.shutdown("SIGTERM");
+    manager.shutdownAll("SIGKILL");
+  }
+}
