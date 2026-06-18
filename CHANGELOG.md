@@ -4,6 +4,63 @@ All notable changes to the llm-cli-gateway project.
 
 ## Unreleased
 
+## [2.11.0] - 2026-06-18: API providers, Devin, ACP runtime, and a strip-at-publish internal-MCP boundary
+
+The accumulated work since 2.10.0: a generic HTTP API-provider surface, a sixth
+CLI provider (Devin), the Phase B ACP runtime (gated, dormant by default), and a
+release-time strip that keeps gateway-internal MCP server names out of the
+published npm artifact. Default local-stdio behaviour is unchanged; the new
+API/ACP surfaces are opt-in. Every change in this release was landed via PR with
+green CI and an adversarial multi-LLM review.
+
+### Added
+
+- **API providers (Slices 0–5).** An `ApiProvider` interface with OpenAI /
+  Anthropic / xAI adapters, a generic `api_<name>_request[_async]` tool surface,
+  an `HttpJobRunner` that treats HTTP calls as first-class async jobs, API-provider
+  discovery/catalog, and the ability to use API providers as validation
+  reviewers/judges. Open-string provider-identity widening (`kind:"api"`).
+- **Devin (Slices D0–D1).** Devin as a sixth gateway provider —
+  `devin_request[_async]` — with permission-mode aliases corrected against the
+  real CLI and a passing native-ACP smoke (third ACP runtime pilot).
+- **ACP runtime, Phase B (Slices B1–B7).** Read-only smoke harness,
+  deny-by-default HostServices boundary, permission bridge to ApprovalManager,
+  session map, session/update event normalizer, flight-recorder redaction, and
+  gated runtime pilots (Mistral + Grok + Devin) for first live ACP prompt routing.
+  Dormant by default.
+- **`agent_browser` internal MCP.** A fifth internal MCP registry entry
+  (browser-automation, `agent-browser mcp --tools core`) for local/dev use,
+  PATH-gated (reported `missing` until the binary is installed) and scored `+4`
+  under MCP-managed approval. Stripped from the published artifact like the other
+  internal names.
+
+### Changed
+
+- **Strip internal MCP names from the published artifact.** Gateway-internal MCP
+  server names and host commands are centralised in `src/mcp-registry.ts` and
+  stripped at release time, so the published tarball contains zero internal names.
+  Enforced by an explicit, non-bypassable tarball token-guard
+  (`scripts/verify-no-internal-mcp.mjs`). `ClaudeMcpServerName` widens to `string`
+  and the request `mcpServers` schemas accept arbitrary names; no implicit default
+  server is injected.
+- **Vibe `permissionMode` accepts any `--agent` name.** Replaces the closed
+  agent-mode enum (which had stale `chat`/`explore`/`lean` values) with an open
+  string — Vibe owns its agent registry (builtins plus install-gated and custom
+  agents), so the gateway passes the name through and lets Vibe validate it.
+- **Gemini `mcpServers` accepted for approval tracking.** `gemini_request` no
+  longer rejects non-empty `mcpServers`; the names feed the approval policy but are
+  never passed to the Antigravity CLI (which manages its own MCP configuration).
+
+### Security / supply chain
+
+- `hono` pinned to `^4.12.25` via `overrides` (clears the advisories on 4.12.22),
+  with a hono-floor tripwire in the release security audit.
+
+### Deps
+
+- Dev-dependency bumps (keeps `type-is@2.1.0` out via the `body-parser` floor) and
+  a `github/codeql-action` group bump.
+
 ## [2.10.0] - 2026-06-15: Per-principal isolation on the request handlers
 
 A follow-up to the 2.9.0 per-principal isolation (F3): the ownership model was
