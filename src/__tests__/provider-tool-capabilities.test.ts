@@ -181,7 +181,7 @@ describe("provider tool capabilities", () => {
     expect(capabilities.gemini?.unsupportedInputs).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ input: "allowedTools", behavior: "reject" }),
-        expect.objectContaining({ input: "mcpServers", behavior: "reject" }),
+        expect.objectContaining({ input: "mcpServers", behavior: "approval_tracking_only" }),
         expect.objectContaining({ input: "outputFormat=json/stream-json", behavior: "reject" }),
         expect.objectContaining({
           input: "policyFiles/adminPolicyFiles/skipTrust",

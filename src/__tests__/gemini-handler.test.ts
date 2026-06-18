@@ -176,6 +176,17 @@ describe("U27 prepareGeminiRequest end-to-end", () => {
     expect(prep.args).toContain("--sandbox");
   });
 
+  it("accepts mcpServers for approval tracking without emitting them to agy argv", () => {
+    const prep = prepareGeminiRequest(baseParams({ mcpServers: ["sqry"] }));
+    if (!("args" in prep)) throw new Error("expected args, not a rejection");
+
+    // Tracked for the approval policy...
+    expect(prep.requestedMcpServers).toEqual(["sqry"]);
+    // ...but never passed to the Antigravity CLI (it owns its own MCP config).
+    expect(prep.args).not.toContain("sqry");
+    expect(prep.args.join(" ")).not.toMatch(/mcp/i);
+  });
+
   it("returns error response when policyFiles is set because agy does not support --policy", () => {
     const prep = prepareGeminiRequest(baseParams({ policyFiles: [realFile1] }));
     expect("args" in prep).toBe(false);

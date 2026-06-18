@@ -3050,12 +3050,10 @@ export function prepareGeminiRequest(
   if (params.allowedTools && params.allowedTools.length > 0) {
     return unsupported("allowedTools", "agy has no non-interactive allowed-tools flag");
   }
-  if (requestedMcpServers.length > 0) {
-    return unsupported(
-      "mcpServers",
-      "agy has no non-interactive allowed MCP server allowlist flag"
-    );
-  }
+  // mcpServers are accepted for approval tracking only: Antigravity (agy) owns
+  // its own MCP configuration, so the gateway never emits an MCP allowlist to
+  // agy argv — it records `requestedMcpServers` (returned below) for the approval
+  // policy and otherwise ignores them. (Previously rejected non-empty values.)
   if (params.outputFormat && params.outputFormat !== "text") {
     return unsupported("outputFormat", "agy print mode currently emits text only");
   }
@@ -7551,7 +7549,9 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       mcpServers: z
         .array(mcpServerEnum())
         .default([])
-        .describe("Unsupported for Antigravity CLI; non-empty values are rejected"),
+        .describe(
+          "MCP server names accepted for approval tracking only; Antigravity manages its own MCP configuration."
+        ),
       allowedTools: z
         .array(z.string())
         .optional()
@@ -8854,7 +8854,9 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         mcpServers: z
           .array(mcpServerEnum())
           .default([])
-          .describe("Unsupported for Antigravity CLI; non-empty values are rejected"),
+          .describe(
+            "MCP server names accepted for approval tracking only; Antigravity manages its own MCP configuration."
+          ),
         allowedTools: z
           .array(z.string())
           .optional()

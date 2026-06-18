@@ -715,7 +715,7 @@ const TOOL_CONTROLS: Record<KnownProviderCapabilityId, ProviderCapabilityStaticD
     providerKind: "cli",
     gatewayRequestTools: ["gemini_request", "gemini_request_async"],
     summary:
-      "Antigravity/Gemini owns its runtime tool catalog; this gateway rejects non-empty tool allow-list and MCP-server inputs for that CLI.",
+      "Antigravity/Gemini owns its runtime tool catalog and MCP configuration; this gateway rejects non-empty tool allow-list inputs and tracks requested MCP servers for approvals.",
     controls: {
       allowlist: {
         supported: false,
@@ -730,7 +730,8 @@ const TOOL_CONTROLS: Record<KnownProviderCapabilityId, ProviderCapabilityStaticD
       mcpServers: {
         supported: false,
         requestField: "mcpServers",
-        behavior: "Non-empty values are rejected; Antigravity CLI manages tool access itself.",
+        behavior:
+          "Accepted for approval tracking only; Antigravity manages its own MCP configuration outside the gateway.",
       },
       nativeSkills: {
         supported: true,
@@ -773,8 +774,8 @@ const TOOL_CONTROLS: Record<KnownProviderCapabilityId, ProviderCapabilityStaticD
       },
       {
         input: "mcpServers",
-        behavior: "reject",
-        details: "Non-empty mcpServers values are rejected for the current Antigravity path.",
+        behavior: "approval_tracking_only",
+        details: "Accepted only for gateway approval tracking; Antigravity owns MCP configuration.",
       },
       {
         input: "attachments",
