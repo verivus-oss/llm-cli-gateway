@@ -28,11 +28,6 @@ green CI and an adversarial multi-LLM review.
   session map, session/update event normalizer, flight-recorder redaction, and
   gated runtime pilots (Mistral + Grok + Devin) for first live ACP prompt routing.
   Dormant by default.
-- **`agent_browser` internal MCP.** A fifth internal MCP registry entry
-  (browser-automation, `agent-browser mcp --tools core`) for local/dev use,
-  PATH-gated (reported `missing` until the binary is installed) and scored `+4`
-  under MCP-managed approval. Stripped from the published artifact like the other
-  internal names.
 
 ### Changed
 
