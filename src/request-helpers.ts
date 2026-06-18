@@ -191,21 +191,28 @@ export function resolveMistralSessionArgs(opts: {
 
 /**
  * Vibe-specific permission mode mapping. Vibe replaces Grok's `--always-approve`
- * with an `--agent <mode>` enum. When the caller does not set a permissionMode,
+ * with an `--agent <name>` selector. When the caller does not set a permissionMode,
  * the gateway emits `--agent auto-approve` explicitly: omitting the flag would
  * let Vibe pick its own default which may not be auto-approve, surprising
  * programmatic callers.
+ *
+ * `--agent` takes an ARBITRARY name: Vibe resolves it against its own agent
+ * registry — the always-available builtins below, plus install-gated builtins
+ * (e.g. `lean`) and custom agents from `~/.vibe/agents/<name>.toml`. So the
+ * gateway accepts any string and lets Vibe validate availability, rather than
+ * pinning a closed list that would reject valid install-gated/custom agents.
+ * The builtins are kept only for documentation and the request schema's example
+ * text. (Verified against the installed Vibe 2.16.1 `BUILTIN_AGENTS`: `chat` is
+ * not a selectable primary builtin and `explore` is a subagent, so neither is
+ * listed; `lean` is an install-gated primary agent that callers may still pass.)
  */
-export const MISTRAL_AGENT_MODES = [
+export const MISTRAL_BUILTIN_AGENT_MODES = [
   "default",
   "plan",
   "accept-edits",
   "auto-approve",
-  "chat",
-  "explore",
-  "lean",
 ] as const;
-export type MistralAgentMode = (typeof MISTRAL_AGENT_MODES)[number];
+export type MistralAgentMode = string;
 export const MISTRAL_DEFAULT_AGENT_MODE: MistralAgentMode = "auto-approve";
 
 export interface PrepareMistralRequestInput {

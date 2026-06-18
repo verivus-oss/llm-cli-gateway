@@ -938,7 +938,8 @@ const TOOL_CONTROLS: Record<KnownProviderCapabilityId, ProviderCapabilityStaticD
       permissionMode: {
         supported: true,
         requestField: "permissionMode",
-        behavior: "Passes Vibe agent modes such as plan, auto-approve, chat, explore, and lean.",
+        behavior:
+          "Passes any Vibe --agent name through (builtins like plan/auto-approve, plus install-gated and custom agents).",
       },
       outputFormat: {
         supported: true,

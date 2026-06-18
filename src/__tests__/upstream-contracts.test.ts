@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { createGatewayServer } from "../index.js";
 import {
@@ -136,6 +137,53 @@ describe("upstream CLI contracts", () => {
       installedProbe: null,
     });
     expect(JSON.stringify(report)).toContain("VIBE_ACTIVE_MODEL");
+  });
+
+  it("acknowledges Vibe's upstream-only --auto-approve shortcut without allowing it", () => {
+    expect(UPSTREAM_CLI_CONTRACTS.mistral.acknowledgedUpstreamFlags).toContain("--auto-approve");
+
+    const result = validateUpstreamCliArgs("mistral", ["-p", "hello", "--auto-approve"]);
+    expect(result.ok).toBe(false);
+    expect(result.violations[0]?.message).toMatch(/Unsupported mistral CLI flag/);
+  });
+
+  it("ignores wrapped help fragments when extracting advertised flags", () => {
+    const helpText = [
+      "options:",
+      "  -p, --prompt [TEXT]   Run in programmatic mode. Tool approval follows the selected",
+      "                        --agent (or config); pass --auto-",
+      "                        approve to allow all tool calls.",
+      "  --agent NAME          Agent to use.",
+      "  --auto-approve        Shortcut for --agent auto-approve.",
+    ].join("\n");
+
+    expect(extractDiscoveredFlags(helpText)).toEqual(["--agent", "--auto-approve", "--prompt"]);
+  });
+
+  it("keeps public Mistral permission mode descriptions listing the real builtins only", () => {
+    // The stale seven-mode string must never reappear: chat/explore/lean are not
+    // selectable primary builtins. The four real builtins stay documented as the
+    // example set even though --agent is open (install-gated/custom names allowed).
+    const staleSevenModePattern =
+      /default\s*\|\s*plan\s*\|\s*accept-edits\s*\|\s*auto-approve\s*\|\s*chat\s*\|\s*explore\s*\|\s*lean/;
+    const builtinFourPattern = /default\s*\|\s*plan\s*\|\s*accept-edits\s*\|\s*auto-approve/;
+    const readme = readFileSync("README.md", "utf8");
+    const index = readFileSync("src/index.ts", "utf8");
+
+    expect(readme).not.toMatch(staleSevenModePattern);
+    expect(index).not.toMatch(staleSevenModePattern);
+    expect(readme).toMatch(builtinFourPattern);
+    expect(index).toMatch(builtinFourPattern);
+  });
+
+  it("accepts arbitrary Vibe --agent names (install-gated builtins + custom agents)", () => {
+    // Vibe resolves --agent against its own registry, so the gateway must not pin
+    // a closed value set — `lean` (install-gated builtin) and custom agent names
+    // are valid argv. (Regression guard: a fixed `values` list rejected `lean`.)
+    for (const agent of ["lean", "my-custom-agent", "explore"]) {
+      const result = validateUpstreamCliArgs("mistral", ["-p", "hello", "--agent", agent]);
+      expect(result.ok, `--agent ${agent}`).toBe(true);
+    }
   });
 
   it("declares subcommand metadata for all providers and an explicit empty Vibe tree", () => {

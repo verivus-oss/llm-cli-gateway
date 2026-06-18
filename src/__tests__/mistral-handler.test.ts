@@ -2,14 +2,14 @@
  * U22 — Mistral Vibe handler tests.
  *
  * These tests exercise the pure helpers in request-helpers.ts (the parts that
- * matter for U22's five hard divergences) — model-via-env, --agent enum,
+ * matter for U22's five hard divergences) — model-via-env, --agent passthrough,
  * --enabled-tools allowlist, and the silent-ignore of disallowedTools.
  */
 import { describe, it, expect } from "vitest";
 import {
   prepareMistralRequest,
   resolveMistralSessionArgs,
-  MISTRAL_AGENT_MODES,
+  MISTRAL_BUILTIN_AGENT_MODES,
   MISTRAL_DEFAULT_AGENT_MODE,
 } from "../request-helpers.js";
 
@@ -39,7 +39,15 @@ describe("U22 prepareMistralRequest — Vibe divergences", () => {
     expect(MISTRAL_DEFAULT_AGENT_MODE).toBe("auto-approve");
   });
 
-  it.each(MISTRAL_AGENT_MODES)("maps permissionMode=%s onto --agent %s", mode => {
+  it.each(MISTRAL_BUILTIN_AGENT_MODES)("maps permissionMode=%s onto --agent %s", mode => {
+    const result = prepareMistralRequest({ prompt: "x", permissionMode: mode });
+    const agentIdx = result.args.indexOf("--agent");
+    expect(result.args[agentIdx + 1]).toBe(mode);
+  });
+
+  // Vibe --agent accepts arbitrary names (install-gated builtins like `lean`,
+  // custom agents from ~/.vibe/agents); the gateway passes them through.
+  it.each(["lean", "my-custom-agent"])("passes through non-builtin --agent name %s", mode => {
     const result = prepareMistralRequest({ prompt: "x", permissionMode: mode });
     const agentIdx = result.args.indexOf("--agent");
     expect(result.args[agentIdx + 1]).toBe(mode);

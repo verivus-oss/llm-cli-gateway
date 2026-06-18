@@ -2087,8 +2087,11 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       },
       "--agent": {
         arity: "one",
-        values: ["default", "plan", "accept-edits", "auto-approve", "chat", "explore", "lean"],
-        description: "Agent/permission mode",
+        // No fixed value set: Vibe resolves `--agent <name>` against its own
+        // registry (builtins default/plan/accept-edits/auto-approve, install-gated
+        // builtins like `lean`, and custom agents from ~/.vibe/agents). Pinning a
+        // closed list here would reject valid install-gated/custom agents.
+        description: "Agent/permission mode (builtin, install-gated, or custom agent name)",
       },
       // NOTE: vibe has no reasoning-effort surface. `--effort` / `--reasoning-effort`
       // were declared speculatively (mirroring Grok) in the provider-modernisation
@@ -2133,6 +2136,11 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
           "Additional writable workspace directory (Phase 4 slice ζ; repeat once per directory)",
       },
     },
+    // `--auto-approve` exists in Vibe's help as a shortcut for `--agent auto-approve`.
+    // The gateway never emits it (it maps permissionMode → `--agent <mode>`), so it is
+    // acknowledged-but-not-allowed: drift detection keeps it from being flagged as a
+    // new upstream flag while validateUpstreamCliArgs still rejects it as caller argv.
+    acknowledgedUpstreamFlags: ["--auto-approve"],
     env: {
       VIBE_ACTIVE_MODEL: {
         arity: "one",
@@ -2811,6 +2819,9 @@ export function extractDiscoveredFlags(helpText: string): readonly string[] {
     for (const match of declaration.matchAll(longRe)) {
       const name = `--${match[1].toLowerCase().replace(/_/g, "-")}`;
       if (name === "--help") continue;
+      // Skip wrapped help fragments: a line-broken "--auto-\n approve" yields a
+      // trailing-dash token (`--auto-`) that is not a real flag.
+      if (name.endsWith("-")) continue;
       discovered.add(name);
     }
   }

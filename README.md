@@ -278,8 +278,10 @@ Vibe-specific notes:
   `VIBE_MODELS`, injects `VIBE_ACTIVE_MODEL` only when a model is explicitly
   requested or Vibe config needs recovery, and retries once after a
   model-not-found failure with refreshed discovery.
-- **`permissionMode` accepts** `default | plan | accept-edits | auto-approve |
-chat | explore | lean` and emits `--agent <mode>`. The gateway's
+- **`permissionMode` is the Vibe `--agent` name.** Builtins are
+  `default | plan | accept-edits | auto-approve`; Vibe also accepts install-gated
+  builtins (e.g. `lean`) and custom agents from `~/.vibe/agents`, so any name is
+  passed through and Vibe validates availability. The gateway's
   programmatic-mode default is `auto-approve`; pick a stricter mode
   explicitly if you need approval gates.
 - **`allowedTools` is allow-list only** — the gateway emits one
@@ -825,7 +827,7 @@ consumes       = ["OUT:mcp-reconnected"]
 Run a Mistral Vibe agentic coding request. Like `grok_request` in shape, but with Vibe's specific surface:
 
 - `model` (string, optional): Vibe model alias (for example `mistral-medium-3.5` or `latest`). The resolved value is injected via the `VIBE_ACTIVE_MODEL` environment variable; omit it to let the gateway discover Vibe config and avoid stale hardcoded defaults.
-- `permissionMode`: `default | plan | accept-edits | auto-approve | chat | explore | lean` — emitted as `--agent <mode>`. Defaults to `auto-approve` in programmatic mode.
+- `permissionMode`: the Vibe `--agent` name — builtins `default | plan | accept-edits | auto-approve`, or any install-gated/custom agent. Emitted as `--agent <name>`. Defaults to `auto-approve` in programmatic mode.
 - `allowedTools` (string[], optional): One `--enabled-tools <tool>` flag per entry (allow-list only).
 - `disallowedTools` (string[], optional): Accepted for parity with the other providers; ignored at the CLI boundary with a logged warning.
 - `outputFormat` (string, optional): Vibe 2.x values are `"text"`, `"json"`, or `"streaming"`; legacy aliases `"plain"` and `"stream-json"` are accepted and normalized before spawn.

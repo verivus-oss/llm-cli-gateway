@@ -115,7 +115,6 @@ import {
   resolveCodexSessionArgs,
   sanitizeCliArgValues,
   prepareMistralRequest as buildMistralCliInvocation,
-  MISTRAL_AGENT_MODES,
   type MistralAgentMode,
   GATEWAY_SESSION_PREFIX,
   resolveClaudePermissionFlags,
@@ -8050,10 +8049,10 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .describe("Resume most recent Vibe session in cwd (--continue)"),
       createNewSession: z.boolean().default(false).describe("Force new session"),
       permissionMode: z
-        .enum(MISTRAL_AGENT_MODES)
+        .string()
         .optional()
         .describe(
-          "Vibe agent mode (default|plan|accept-edits|auto-approve|chat|explore|lean). Defaults to auto-approve for programmatic use."
+          "Vibe --agent name. Builtins: default|plan|accept-edits|auto-approve; Vibe also accepts install-gated builtins (e.g. lean) and custom agents from ~/.vibe/agents, so any name is passed through. Defaults to auto-approve for programmatic use."
         ),
       approvalStrategy: z
         .enum(["legacy", "mcp_managed"])
@@ -9443,10 +9442,10 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .describe("Resume most recent Vibe session in cwd (--continue)"),
         createNewSession: z.boolean().default(false).describe("Force new session"),
         permissionMode: z
-          .enum(MISTRAL_AGENT_MODES)
+          .string()
           .optional()
           .describe(
-            "Vibe agent mode (default|plan|accept-edits|auto-approve|chat|explore|lean). Defaults to auto-approve for programmatic use."
+            "Vibe --agent name. Builtins: default|plan|accept-edits|auto-approve; Vibe also accepts install-gated builtins (e.g. lean) and custom agents from ~/.vibe/agents, so any name is passed through. Defaults to auto-approve for programmatic use."
           ),
         approvalStrategy: z
           .enum(["legacy", "mcp_managed"])
