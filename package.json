@@ -88,7 +88,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
-    "body-parser": "2.2.2",
+    "body-parser": "2.3.0",
     "content-type": "1.0.5",
     "smol-toml": "^1.6.1",
     "type-is": "2.0.1",
@@ -121,7 +121,7 @@
     "vitest": "^4.0.18"
   },
   "overrides": {
-    "body-parser": "2.2.2",
+    "body-parser": "2.3.0",
     "type-is": "2.0.1",
     "content-type": "1.0.5",
     "hono": "^4.12.25"
