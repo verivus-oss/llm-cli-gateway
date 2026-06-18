@@ -1,6 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
-import { join } from "path";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "fs";
+import { delimiter, join } from "path";
 import { tmpdir } from "os";
 import { buildClaudeMcpConfig } from "../claude-mcp-config.js";
 
@@ -253,5 +261,61 @@ args = ["--stdio"]
     const parsed = JSON.parse(readFileSync(result.path, "utf-8"));
     expect(parsed.mcpServers.custom_thing.command).toBe("/opt/custom-thing-mcp");
     expect(parsed.mcpServers.custom_thing.args).toEqual(["--stdio"]);
+  });
+
+  // agent_browser is PATH-gated (requireCommandOnPath, no npx fallback): it is
+  // only enabled when the `agent-browser` binary is installed.
+  it("marks agent_browser missing when agent-browser is not on PATH", () => {
+    const originalPath = process.env.PATH;
+    process.env.PATH = join(testHome, "empty-bin"); // contains no agent-browser
+    try {
+      const result = buildClaudeMcpConfig(["agent_browser"]);
+      expect(result.enabled).toEqual([]);
+      expect(result.missing).toEqual(["agent_browser"]);
+    } finally {
+      process.env.PATH = originalPath;
+    }
+  });
+
+  it("enables agent_browser with `agent-browser mcp --tools core` when it is on PATH", () => {
+    const binDir = join(testHome, "bin");
+    mkdirSync(binDir, { recursive: true });
+    const exe = join(binDir, "agent-browser");
+    writeFileSync(exe, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    chmodSync(exe, 0o755);
+
+    const originalPath = process.env.PATH;
+    process.env.PATH = `${binDir}${delimiter}${originalPath ?? ""}`;
+    try {
+      const result = buildClaudeMcpConfig(["agent_browser"]);
+      expect(result.enabled).toEqual(["agent_browser"]);
+      expect(result.missing).toEqual([]);
+
+      const parsed = JSON.parse(readFileSync(result.path, "utf-8"));
+      expect(parsed.mcpServers.agent_browser.command).toBe("agent-browser");
+      expect(parsed.mcpServers.agent_browser.args).toEqual(["mcp", "--tools", "core"]);
+    } finally {
+      process.env.PATH = originalPath;
+    }
+  });
+
+  it("enables agent_browser via a Codex config command even when not on PATH", () => {
+    writeCodexConfig(`
+[mcp_servers.agent_browser]
+command = "/opt/agent-browser"
+args = ["mcp", "--tools", "core"]
+`);
+    const originalPath = process.env.PATH;
+    process.env.PATH = join(testHome, "empty-bin");
+    try {
+      const result = buildClaudeMcpConfig(["agent_browser"]);
+      expect(result.enabled).toEqual(["agent_browser"]);
+      expect(result.missing).toEqual([]);
+
+      const parsed = JSON.parse(readFileSync(result.path, "utf-8"));
+      expect(parsed.mcpServers.agent_browser.command).toBe("/opt/agent-browser");
+    } finally {
+      process.env.PATH = originalPath;
+    }
   });
 });

@@ -1,4 +1,6 @@
 import {
+  accessSync,
+  constants,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -10,7 +12,7 @@ import {
   chmodSync,
 } from "fs";
 import { homedir } from "os";
-import { dirname, join } from "path";
+import { delimiter, dirname, join } from "path";
 import { parse as parseToml } from "smol-toml";
 import type { ClaudeServerDef } from "./mcp-registry.js";
 import { INTERNAL_MCP_REGISTRY } from "./mcp-registry.js";
@@ -93,11 +95,40 @@ function readCodexServerConfig(server: ClaudeMcpServerName): CodexServerDef {
   }
 }
 
+// Generic PATH probe (no server names): true when `command` is an executable
+// absolute/relative path, or resolves on PATH for a bare command name.
+function commandExists(command: string): boolean {
+  if (command.includes("/") || command.includes("\\")) {
+    try {
+      accessSync(command, constants.X_OK);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  const pathEnv = process.env.PATH || "";
+  const extensions =
+    process.platform === "win32" ? (process.env.PATHEXT || ".EXE;.CMD;.BAT;.COM").split(";") : [""];
+
+  for (const dir of pathEnv.split(delimiter).filter(Boolean)) {
+    for (const ext of extensions) {
+      try {
+        accessSync(join(dir, `${command}${ext}`), constants.X_OK);
+        return true;
+      } catch {
+        // Continue checking PATH candidates.
+      }
+    }
+  }
+  return false;
+}
+
 // Generic resolver: merge Codex-config overrides over the registry default,
-// forward/require the registry's env vars, and report `missing` (null) when a
-// required credential is absent or an unknown name has no Codex fallback. All
-// server-specific knowledge comes from `INTERNAL_MCP_REGISTRY`; this function
-// hardcodes no name.
+// forward/require the registry's env vars, gate PATH-only servers on the binary
+// being installed, and report `missing` (null) when a required credential or
+// command is absent or an unknown name has no Codex fallback. All server-specific
+// knowledge comes from `INTERNAL_MCP_REGISTRY`; this function hardcodes no name.
 function toClaudeServerDef(server: ClaudeMcpServerName): ClaudeServerDef | null {
   const entry = INTERNAL_MCP_REGISTRY[server];
   const codexDef = readCodexServerConfig(server);
@@ -128,6 +159,11 @@ function toClaudeServerDef(server: ClaudeMcpServerName): ClaudeServerDef | null 
       if (!env[key]) {
         return null;
       }
+    }
+    // PATH-gated server with no Codex-supplied command: require the binary on
+    // PATH (the registry default has no npx fallback), else report `missing`.
+    if (entry.requireCommandOnPath && !codexDef.command && !commandExists(command)) {
+      return null;
     }
   }
 

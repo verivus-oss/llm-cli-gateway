@@ -52,6 +52,13 @@ export interface RegistryEntry {
    */
   requireEnv?: readonly string[];
   /**
+   * When true, the resolved command must exist on PATH (unless Codex config
+   * supplies an explicit command) or the server is reported `missing`. For
+   * PATH-gated local servers that have no `npx` fallback (e.g. `agent_browser`),
+   * so the gateway never writes a config pointing at an absent binary.
+   */
+  requireCommandOnPath?: boolean;
+  /**
    * Approval-risk scoring applied by ApprovalManager when this server is
    * requested. Omit for zero-risk servers (e.g. `sqry`, `trstr`).
    */
@@ -120,6 +127,13 @@ export const INTERNAL_MCP_REGISTRY: Record<string, RegistryEntry> = {
   },
   trstr: {
     defaultDef: () => ({ command: join(homedir(), ".local", "bin", "trstr-mcp"), args: [] }),
+  },
+  agent_browser: {
+    // Local browser-automation MCP. No npx fallback — it must be installed on
+    // PATH, so it is reported `missing` until `agent-browser` is available.
+    defaultDef: () => ({ command: "agent-browser", args: ["mcp", "--tools", "core"] }),
+    requireCommandOnPath: true,
+    approval: { score: 4, reason: "Request enables browser automation MCP (agent_browser)" },
   },
 };
 

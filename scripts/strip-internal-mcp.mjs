@@ -52,6 +52,7 @@ export interface RegistryEntry {
     defaultDef: () => ClaudeServerDef;
     forwardEnv?: readonly string[];
     requireEnv?: readonly string[];
+    requireCommandOnPath?: boolean;
     approval?: {
         score: number;
         reason: string;

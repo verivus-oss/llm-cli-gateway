@@ -27,7 +27,13 @@ describe("INTERNAL_MCP_REGISTRY", () => {
   });
 
   it("exposes exactly the gateway-known server names, derived from the registry", () => {
-    expect(Object.keys(INTERNAL_MCP_REGISTRY)).toEqual(["sqry", "exa", "ref_tools", "trstr"]);
+    expect(Object.keys(INTERNAL_MCP_REGISTRY)).toEqual([
+      "sqry",
+      "exa",
+      "ref_tools",
+      "trstr",
+      "agent_browser",
+    ]);
     // CLAUDE_MCP_SERVER_NAMES is the keys of the registry — they can never drift.
     expect([...CLAUDE_MCP_SERVER_NAMES]).toEqual(Object.keys(INTERNAL_MCP_REGISTRY));
   });
@@ -47,6 +53,19 @@ describe("INTERNAL_MCP_REGISTRY", () => {
     expect(INTERNAL_MCP_REGISTRY.sqry.approval).toBeUndefined();
     expect(INTERNAL_MCP_REGISTRY.trstr.approval).toBeUndefined();
     expect(INTERNAL_MCP_REGISTRY.sqry.requireEnv).toBeUndefined();
+  });
+
+  it("agent_browser is a PATH-gated local server with browser-automation approval weight", () => {
+    const ab = INTERNAL_MCP_REGISTRY.agent_browser;
+    expect(ab.defaultDef()).toEqual({ command: "agent-browser", args: ["mcp", "--tools", "core"] });
+    expect(ab.requireCommandOnPath).toBe(true);
+    // No npx fallback and no credential env — availability is purely "is it on PATH".
+    expect(ab.requireEnv).toBeUndefined();
+    expect(ab.forwardEnv).toBeUndefined();
+    expect(ab.approval).toEqual({
+      score: 4,
+      reason: "Request enables browser automation MCP (agent_browser)",
+    });
   });
 
   it("exa requires + forwards EXA_API_KEY and scores +2", () => {

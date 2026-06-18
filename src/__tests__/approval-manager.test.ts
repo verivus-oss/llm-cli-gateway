@@ -528,6 +528,21 @@ describe("ApprovalManager", () => {
       expect(decision.reasons).toContain("Request enables documentation retrieval MCP (ref_tools)");
     });
 
+    it("scores agent_browser at +4 (browser automation) from the registry", () => {
+      const manager = new ApprovalManager(logPath);
+      const decision = manager.decide({
+        cli: "claude",
+        operation: "claude_request",
+        prompt: "Summarize this document",
+        bypassRequested: false,
+        fullAuto: false,
+        requestedMcpServers: ["sqry", "agent_browser"],
+      });
+
+      expect(decision.score).toBe(4);
+      expect(decision.reasons).toContain("Request enables browser automation MCP (agent_browser)");
+    });
+
     it("scores each requested server at most once, in registry declaration order", () => {
       const manager = new ApprovalManager(logPath);
       const decision = manager.decide({
