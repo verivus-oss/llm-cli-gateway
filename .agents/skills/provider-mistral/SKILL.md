@@ -1,9 +1,9 @@
 ---
 name: provider-mistral
-description: Track and maintain the upstream Mistral Vibe CLI contract. Use when Mistral ships a Vibe release, when a `vibe` flag/agent-mode/output-format/session-logging/env-model behaviour changes, or when an upstream scan flags drift. Process guidance only — `src/upstream-contracts.ts` is the mechanical source of truth.
+description: Track and maintain the upstream Mistral Vibe CLI contract. Use when Mistral ships a Vibe release, when a `vibe` flag/agent-mode/output-format/session-logging/env-model/subcommand behaviour changes, or when an upstream scan flags drift. Process guidance only — `src/upstream-contracts.ts` is the mechanical source of truth.
 metadata:
   author: verivus-oss
-  version: "1.0"
+  version: "1.2"
 ---
 
 # Provider: Mistral Vibe CLI
@@ -88,6 +88,7 @@ A failed fetch is advisory (exit 0) unless `--fail-on-critical` is passed.
 
 ## Mistral-specific notes (see the contract for exact rules)
 
+- Tested against vibe 2.16.1 (ACP targetVersion).
 - Model is selected via the `VIBE_ACTIVE_MODEL` env var (validated by the env contract), not a `--model` flag.
 - Permission/agent modes are emitted as `--agent <mode>` from a closed enum; the gateway defaults programmatic callers to `auto-approve`.
 - `--output` formats (`text`, `json`, `streaming`) are a closed enum; `--max-price` is decimal-only (no scientific notation) to match `MAX_PRICE_SCHEMA`.

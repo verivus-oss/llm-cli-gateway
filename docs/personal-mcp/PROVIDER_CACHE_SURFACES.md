@@ -15,7 +15,7 @@ underlying API field names — they diverge meaningfully for Codex.
 | claude  | `cache_read_input_tokens`, `cache_creation_input_tokens` (via JSON output) | Prefix discipline + `--exclude-dynamic-system-prompt-sections`; verified caller-content `cache_control` injection via `--input-format stream-json` for `promptParts` | Anthropic native caching. Per-model min-token thresholds (see table).  |
 | codex   | `cached_input_tokens` (Codex CLI ≥ 0.133.0 emits this in `turn.completed.usage`); underlying OpenAI API uses `usage.prompt_tokens_details.cached_tokens` | Prefix discipline only (no CLI cache-control flag) | OpenAI implicit cache; CLI threshold is set server-side                |
 | gemini  | Not surfaced in CLI output                        | Prefix discipline only                          | Implicit prefix caching server-side; explicit `cachedContents` only via SDK |
-| grok    | Headless `-p`: none (verified 2026-06-13). ACP `agent stdio`: full per-request usage incl. cache reads (see below) | Prefix discipline only | Gateway invokes the `-p` surface, which emits no usage. The ACP surface and the opt-in grok-api HTTP path both DO report cached-read tokens — see below. |
+| grok    | Headless `-p`: none (verified 2026-06-13). ACP `agent stdio`: full per-request usage incl. cache reads (see below) | Prefix discipline + opt-in compaction controls | Gateway invokes the `-p` surface, which emits no usage. Compaction changes context shape; the ACP surface and the opt-in grok-api HTTP path both DO report cached-read tokens — see below. |
 | mistral | Not surfaced in CLI output                        | Prefix discipline only                          | Vibe CLI does not surface cache stats                                  |
 
 "Prefix discipline only" means: the gateway can improve cache hit rate by
@@ -270,3 +270,76 @@ Mistral / vibe CLI: no cache reporting.
   flight recorder records both `cache_control_blocks` and
   `cache_control_ttl_seconds` so cache-state TTL reporting is based on the row
   actually written, not only current config.
+
+## Using the cache levers from the gateway (Grok compaction + Claude cacheControl)
+
+The gateway exposes the provider levers directly so callers (and internal code) can direct cache behaviour where supported. These are **not** unified under one abstraction (per cross-LLM reviews: Claude's explicit breakpoint is semantically different from Grok's lossy context compaction). Use the provider-specific fields.
+
+### Grok compaction (context management)
+Available on `grok_request` / `grok_request_async`.
+
+```ts
+grok_request({
+  promptParts: { system: "...", context: "...", task: "..." },
+  compactionMode: "segments",     // summary | transcript | segments
+  compactionDetail: "balanced",   // none | minimal | balanced | verbose (only for segments)
+  // ...
+})
+```
+
+Emitted: `--compaction-mode segments --compaction-detail balanced`
+
+- `segments`: persists per-segment markdown (grep-friendly).
+- Only useful on headless paths. Main `-p` path often has no usage telemetry; ACP / grok-api paths do.
+- Not an explicit cache breakpoint; do not expect it to appear in `cache_read_tokens` on the CLI `-p` surface.
+
+### Claude cacheControl (explicit Anthropic prefix cache)
+Available on `claude_request` / `claude_request_async`. Requires `outputFormat: "stream-json"`.
+
+```ts
+claude_request({
+  promptParts: {
+    system: "You are ...",
+    tools: "You can ...",
+    context: "Full file dump here...",
+    task: "Now refactor the auth module.",
+    cacheControl: { system: true, context: true }  // task is never marked
+  },
+  outputFormat: "stream-json",
+  // ...
+})
+```
+
+Gateway emits:
+- `["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--include-partial-messages", "--verbose", ...]`
+- Stdin payload (one NDJSON line):
+
+```json
+{"type":"user","message":{"role":"user","content":[
+  {"type":"text","text":"You are ...","cache_control":{"type":"ephemeral","ttl":"1h"}},
+  {"type":"text","text":"\n\nYou can ..."},
+  {"type":"text","text":"\n\nFull file dump here...","cache_control":{"type":"ephemeral","ttl":"1h"}},
+  {"type":"text","text":"\n\nNow refactor the auth module."}
+]}}
+```
+
+`task` is never given `cache_control`. Empty parts with `true` are skipped (no-op warning).
+
+Auto-emit (when `[cache_awareness].emit_anthropic_cache_control=true` and prefix >= per-model threshold) marks the rightmost stable block automatically.
+
+See exact shape and tests in `src/prompt-parts.ts:135` (`assembleClaudeCacheBlocks`) and `src/__tests__/test-veracity-regressions-slice-kappa.test.ts`.
+
+### Prefix discipline (all providers)
+Use `promptParts` (without `cacheControl`) for byte-identical stable prefixes on any CLI. The gateway hashes the prefix and records it for `cache-state://prefix/{hash}` observability. This is the only reliable lever for Codex/Gemini/Mistral today.
+
+```ts
+claude_request({ promptParts: { system: S, context: C, task: T } })  // stable S+C
+```
+
+### Recommendations from cross-LLM review
+- Keep levers provider-specific; do not force a single `CacheDirective` abstraction that conflates breakpoint vs. compaction.
+- Measure reuse before auto-applying directives (write cost vs. read savings).
+- Prefer docs + examples over new public surface until data shows demand.
+- Grok compaction telemetry is currently weak on the primary CLI path.
+
+For full observability use `cache-state://*` and `session_get(...).cacheState`.

@@ -99,7 +99,7 @@ errors = "Typed ACP errors with redacted user-facing messages and detailed debug
 
 [provider_matrix.mistral]
 display_name = "Mistral Vibe"
-target_version = "vibe 2.14.1"
+target_version = "vibe 2.16.1"
 status = "native_smoke_passed"
 entrypoint = "vibe-acp"
 runtime_priority = 1
@@ -108,7 +108,7 @@ notes = "Manual initialize and session/new smoke passed. Use as first native ACP
 
 [provider_matrix.grok]
 display_name = "xAI Grok CLI"
-target_version = "grok 0.2.50 (cadf94855)"
+target_version = "grok 0.2.56 (4d4448c98)"
 status = "native_smoke_passed"
 entrypoint = "grok agent stdio"
 runtime_priority = 2
@@ -117,7 +117,7 @@ notes = "Manual initialize and session/new smoke passed with normal user Grok co
 
 [provider_matrix.codex]
 display_name = "OpenAI Codex CLI"
-target_version = "codex-cli 0.139.0"
+target_version = "codex-cli 0.140.0"
 status = "adapter_mediated_deferred"
 entrypoint = "no native ACP entrypoint at target version"
 adapter_candidates = ["zed-industries/codex-acp", "agentclientprotocol/codex-acp"]
@@ -127,7 +127,7 @@ notes = "Track adapter evidence and Codex native surface drift, but do not label
 
 [provider_matrix.claude]
 display_name = "Anthropic Claude Code"
-target_version = "claude 2.1.175"
+target_version = "claude 2.1.181"
 status = "adapter_mediated_deferred"
 entrypoint = "no native Claude Code CLI ACP entrypoint at target version"
 adapter_candidates = ["Claude Agent SDK ACP adapter"]
@@ -137,12 +137,21 @@ notes = "Adapter ownership, permission bridging, and install story must be speci
 
 [provider_matrix.gemini]
 display_name = "Google Antigravity"
-target_version = "agy 1.0.7"
+target_version = "agy 1.0.9"
 status = "absent_watchlist"
 entrypoint = "no ACP flag or subcommand at target version"
 runtime_priority = 0
 ship_runtime_pilot = false
 notes = "Legacy Gemini CLI ACP evidence does not transfer to target Antigravity agy. Keep agy on the upstream drift watchlist."
+
+[provider_matrix.devin]
+display_name = "Cognition Devin CLI"
+target_version = "devin 2026.7.19 (a64a20ba)"
+status = "native_smoke_passed"
+entrypoint = "devin acp"
+runtime_priority = 3
+ship_runtime_pilot = true
+notes = "Manual initialize and session/new smoke passed (protocolVersion 1, agent Affogato, session created). Third native ACP runtime pilot; runtime routing stays config-gated."
 
 [config]
 default_file = "existing gateway config file"
@@ -187,6 +196,8 @@ stable_request_tools = [
   "grok_request_async",
   "mistral_request",
   "mistral_request_async",
+  "devin_request",
+  "devin_request_async",
 ]
 selector_name = "transport"
 selector_values = ["cli", "acp"]
@@ -404,14 +415,15 @@ minimum_coverage = [
   "How to request ACP transport explicitly when enabled",
   "How sessions map across gateway sessions and provider ACP sessions",
   "How fallback and failure modes behave",
-  "Provider-specific instructions for Mistral Vibe, Grok, Codex, Claude, and Antigravity agy",
+  "Provider-specific instructions for Mistral Vibe, Grok, Devin, Codex, Claude, and Antigravity agy",
 ]
 provider_doc_rules = [
   "Mistral docs identify vibe-acp as native ACP and first pilot.",
   "Grok docs identify grok agent stdio as native ACP and second pilot.",
-  "Codex docs label ACP as adapter-mediated and deferred at codex-cli 0.139.0.",
-  "Claude docs label ACP as adapter-mediated and deferred at claude 2.1.175.",
-  "Antigravity docs state agy 1.0.7 has no ACP surface and remains a watchlist item.",
+  "Devin docs identify devin acp as native ACP and third pilot.",
+  "Codex docs label ACP as adapter-mediated and deferred at codex-cli 0.140.0.",
+  "Claude docs label ACP as adapter-mediated and deferred at claude 2.1.181.",
+  "Antigravity docs state agy 1.0.9 has no ACP surface and remains a watchlist item.",
 ]
 
 [rollout]
@@ -496,14 +508,14 @@ Extend provider_tool_capabilities with an ACP section for every provider:
   - caveats,
   - docs reference.
 
-Keep agy explicit: target Antigravity agy 1.0.7 has no ACP surface, even
+Keep agy explicit: target Antigravity agy 1.0.9 has no ACP surface, even
 though legacy Gemini CLI evidence exists elsewhere.
 """
 idempotent = false
 validation = """
-provider_tool_capabilities tests assert all five CLI providers have ACP fields.
+provider_tool_capabilities tests assert all six CLI providers have ACP fields.
 Codex and Claude are adapter_mediated_deferred, agy is absent_watchlist,
-Mistral and Grok are native candidates, and no adapter is labeled native.
+Mistral, Grok, and Devin are native candidates, and no adapter is labeled native.
 """
 
 [[steps]]
@@ -548,8 +560,8 @@ explicit safe probes owned by the smoke harness or upstream-contract tools.
 """
 idempotent = false
 validation = """
-Provider-registry tests assert exact status for Mistral, Grok, Codex, Claude,
-and Antigravity agy. Error tests assert raw JSON-RPC payloads and credential
+Provider-registry tests assert exact status for Mistral, Grok, Devin, Codex,
+Claude, and Antigravity agy. Error tests assert raw JSON-RPC payloads and credential
 paths do not appear in user-facing messages.
 """
 

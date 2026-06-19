@@ -17,7 +17,7 @@ const RUNTIME = {} as never;
 function prep(params: {
   prompt?: string;
   model?: string;
-  permissionMode?: "normal" | "auto" | "dangerous" | "yolo" | "bypass";
+  permissionMode?: "auto" | "smart" | "dangerous";
   promptFile?: string;
   optimizePrompt?: boolean;
 }): { args: string[] } | { content: unknown } {
@@ -72,10 +72,10 @@ describe("Slice D0 prepareDevinRequest — headless argv", () => {
   });
 
   it("emits `--permission-mode <mode>` when set", () => {
-    const args = argsOf(prep({ prompt: "x", permissionMode: "bypass" }));
+    const args = argsOf(prep({ prompt: "x", permissionMode: "smart" }));
     const idx = args.indexOf("--permission-mode");
     expect(idx).toBeGreaterThan(-1);
-    expect(args[idx + 1]).toBe("bypass");
+    expect(args[idx + 1]).toBe("smart");
   });
 
   it("does NOT emit `--permission-mode` when unset", () => {
@@ -83,10 +83,9 @@ describe("Slice D0 prepareDevinRequest — headless argv", () => {
     expect(args).not.toContain("--permission-mode");
   });
 
-  // Verified against devin 2026.5.26-8: the CLI accepts `normal (auto)` and
-  // `dangerous (yolo, bypass)`. The gateway forwards each alias verbatim.
-  it.each(["normal", "auto", "dangerous", "yolo", "bypass"] as const)(
-    "forwards the CLI-valid permission-mode alias %s verbatim",
+  // Verified against devin 2026.7.19 (a64a20ba): modes are `auto`, `smart`, `dangerous`.
+  it.each(["auto", "smart", "dangerous"] as const)(
+    "forwards the CLI-valid permission-mode %s verbatim",
     mode => {
       const args = argsOf(prep({ prompt: "x", permissionMode: mode }));
       const idx = args.indexOf("--permission-mode");

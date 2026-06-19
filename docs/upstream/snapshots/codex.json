@@ -1,0 +1,612 @@
+{
+  "cli": "codex",
+  "fetchedAt": "2026-06-18T21:19:08.322Z",
+  "sources": [],
+  "helpSurface": {
+    "probedAt": "2026-06-18T21:19:08.321Z",
+    "available": true,
+    "version": null,
+    "flags": [
+      "--add-dir",
+      "--all",
+      "--cd",
+      "--color",
+      "--config",
+      "--dangerously-bypass-approvals-and-sandbox",
+      "--dangerously-bypass-hook-trust",
+      "--disable",
+      "--enable",
+      "--ephemeral",
+      "--ignore-rules",
+      "--ignore-user-config",
+      "--image",
+      "--json",
+      "--last",
+      "--local-provider",
+      "--model",
+      "--oss",
+      "--output-last-message",
+      "--output-schema",
+      "--profile",
+      "--sandbox",
+      "--skip-git-repo-check",
+      "--strict-config",
+      "--version"
+    ],
+    "helpHash": "a0758ed066eec3d6650b430f53ba2dcc177eb9cd8f66f1c0c56a3b5a64b5b339",
+    "extraVsContract": [],
+    "missingFromBinary": []
+  },
+  "subcommands": {
+    "app-server": {
+      "commandPath": [
+        "app-server"
+      ],
+      "probedAt": "2026-06-18T21:19:07.722Z",
+      "available": true,
+      "flags": [
+        "--analytics-default-enabled",
+        "--config",
+        "--disable",
+        "--enable",
+        "--listen",
+        "--stdio",
+        "--strict-config",
+        "--ws-audience",
+        "--ws-auth",
+        "--ws-issuer",
+        "--ws-max-clock-skew-seconds",
+        "--ws-shared-secret-file",
+        "--ws-token-file",
+        "--ws-token-sha256"
+      ],
+      "helpHash": "aeddb81bcc227080fd1d4d22b10f9470b623fb55b220e5877b6a9da9ac104b3c",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "risk": "starts_server",
+      "exposure": "not_exposed",
+      "tier": "catalog",
+      "summary": "Start Codex app server mode."
+    },
+    "apply": {
+      "commandPath": [
+        "apply"
+      ],
+      "probedAt": "2026-06-18T21:19:07.748Z",
+      "available": true,
+      "flags": [
+        "--config",
+        "--disable",
+        "--enable"
+      ],
+      "helpHash": "1242d2db6292cd23786b4946f8c7b0fc6edfc3cd1683a98f11202510e703a42e",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "risk": "destructive",
+      "exposure": "not_exposed",
+      "tier": "catalog",
+      "summary": "Apply a Codex patch to the workspace."
+    },
+    "archive": {
+      "commandPath": [
+        "archive"
+      ],
+      "probedAt": "2026-06-18T21:19:07.775Z",
+      "available": true,
+      "flags": [
+        "--add-dir",
+        "--cd",
+        "--config",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "--dangerously-bypass-hook-trust",
+        "--disable",
+        "--enable",
+        "--image",
+        "--local-provider",
+        "--model",
+        "--oss",
+        "--profile",
+        "--remote",
+        "--remote-auth-token-env",
+        "--sandbox",
+        "--strict-config"
+      ],
+      "helpHash": "f078c26deb2cf967e8e6aae39183d83722f2ddd7a7d7df2884fc7b2d27cff359",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "risk": "writes_local_config",
+      "exposure": "not_exposed",
+      "tier": "catalog",
+      "summary": "Archive Codex session state."
+    },
+    "cloud": {
+      "commandPath": [
+        "cloud"
+      ],
+      "probedAt": "2026-06-18T21:19:07.801Z",
+      "available": true,
+      "flags": [
+        "--config",
+        "--disable",
+        "--enable",
+        "--version"
+      ],
+      "helpHash": "d4e307ab316fe29787a649213d3bd4836db1afd23484ea15ae7ab4d6c375a366",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "risk": "network",
+      "exposure": "tracked_only",
+      "tier": "catalog",
+      "summary": "Inspect or manage Codex cloud features."
+    },
+    "completion": {
+      "commandPath": [
+        "completion"
+      ],
+      "probedAt": "2026-06-18T21:19:07.829Z",
+      "available": true,
+      "flags": [
+        "--config",
+        "--disable",
+        "--enable"
+      ],
+      "helpHash": "6767d45f7d664f6a34c424cc84a5f8b5818d0d21e830905f85fd975e97f0a057",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "risk": "read_only",
+      "exposure": "tracked_only",
+      "tier": "inspect",
+      "summary": "Generate Codex shell completions."
+    },
+    "debug": {
+      "commandPath": [
+        "debug"
+      ],
+      "probedAt": "2026-06-18T21:19:07.857Z",
+      "available": true,
+      "flags": [
+        "--config",
+        "--disable",
+        "--enable"
+      ],
+      "helpHash": "f4f7f6ff8dff8fc223f681284ad192487704a9ce772e88758a3b20f2c2514211",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "risk": "read_only",
+      "exposure": "tracked_only",
+      "tier": "diagnostic",
+      "summary": "Run Codex debugging utilities."
+    },
+    "doctor": {
+      "commandPath": [
+        "doctor"
+      ],
+      "probedAt": "2026-06-18T21:19:07.884Z",
+      "available": true,
+      "flags": [
+        "--all",
+        "--ascii",
+        "--config",
+        "--disable",
+        "--enable",
+        "--json",
+        "--no-color",
+        "--summary"
+      ],
+      "helpHash": "cdb25b4451267406d0d8e277e75c3921d640e11cfa0bff53c096fa220463be86",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "risk": "read_only",
+      "exposure": "tracked_only",
+      "tier": "diagnostic",
+      "summary": "Run Codex diagnostic checks."
+    },
+    "exec": {
+      "commandPath": [
+        "exec"
+      ],
+      "probedAt": "2026-06-18T21:19:07.912Z",
+      "available": true,
+      "flags": [
+        "--add-dir",
+        "--cd",
+        "--color",
+        "--config",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "--dangerously-bypass-hook-trust",
+        "--disable",
+        "--enable",
+        "--ephemeral",
+        "--ignore-rules",
+        "--ignore-user-config",
+        "--image",
+        "--json",
+        "--local-provider",
+        "--model",
+        "--oss",
+        "--output-last-message",
+        "--output-schema",
+        "--profile",
+        "--sandbox",
+        "--skip-git-repo-check",
+        "--strict-config",
+        "--version"
+      ],
+      "helpHash": "da7f8d58749fb3084723cded1620d133235a090ebe5ee412ef404f171415d434",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "risk": "executes_agent",
+      "exposure": "tracked_only",
+      "tier": "catalog",
+      "summary": "Run Codex in non-interactive execution mode."
+    },
+    "exec resume": {
+      "commandPath": [
+        "exec",
+        "resume"
+      ],
+      "probedAt": "2026-06-18T21:19:07.938Z",
+      "available": true,
+      "flags": [
+        "--all",
+        "--config",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "--dangerously-bypass-hook-trust",
+        "--disable",
+        "--enable",
+        "--ephemeral",
+        "--ignore-rules",
+        "--ignore-user-config",
+        "--image",
+        "--json",
+        "--last",
+        "--model",
+        "--output-last-message",
+        "--output-schema",
+        "--skip-git-repo-check",
+        "--strict-config"
+      ],
+      "helpHash": "2fb5070886a2e64bd4d18db982096c2d3f295afd207bd50a1a8981aaa9148158",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "risk": "executes_agent",
+      "exposure": "tracked_only",
+      "tier": "catalog",
+      "summary": "Resume Codex sessions from the interactive CLI."
+    },
+    "exec review": {
+      "commandPath": [
+        "exec",
+        "review"
+      ],
+      "probedAt": "2026-06-18T21:19:07.965Z",
+      "available": true,
+      "flags": [
+        "--base",
+        "--commit",
+        "--config",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "--dangerously-bypass-hook-trust",
+        "--disable",
+        "--enable",
+        "--ephemeral",
+        "--ignore-rules",
+        "--ignore-user-config",
+        "--json",
+        "--model",
+        "--output-last-message",
+        "--output-schema",
+        "--skip-git-repo-check",
+        "--strict-config",
+        "--title",
+        "--uncommitted"
+      ],
+      "helpHash": "60cf6f4eaf5bf09f8a691a695f9a06f905d6bfb3c6412562279b50612672c2e3",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "risk": "executes_agent",
+      "exposure": "tracked_only",
+      "tier": "catalog",
+      "summary": "Run Codex code review workflows."
+    },
+    "exec-server": {
+      "commandPath": [
+        "exec-server"
+      ],
+      "probedAt": "2026-06-18T21:19:07.992Z",
+      "available": true,
+      "flags": [
+        "--config",
+        "--disable",
+        "--enable",
+        "--environment-id",
+        "--listen",
+        "--name",
+        "--remote",
+        "--strict-config",
+        "--use-agent-identity-auth"
+      ],
+      "helpHash": "fafa5d052856a381de54525e55b099ece4ae893b61800af3e760abf4d6a67c2a",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "risk": "starts_server",
+      "exposure": "not_exposed",
+      "tier": "catalog",
+      "summary": "Start Codex exec server mode."
+    },
+    "features": {
+      "commandPath": [
+        "features"
+      ],
+      "probedAt": "2026-06-18T21:19:08.018Z",
+      "available": true,
+      "flags": [
+        "--config",
+        "--disable",
+        "--enable"
+      ],
+      "helpHash": "fd238f4ed1b5a5975472b1bafb8300d8e547403cf621d0047d247c3b64e0e508",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "risk": "writes_local_config",
+      "exposure": "tracked_only",
+      "tier": "catalog",
+      "summary": "Inspect or configure Codex feature flags."
+    },
+    "fork": {
+      "commandPath": [
+        "fork"
+      ],
+      "probedAt": "2026-06-18T21:19:08.046Z",
+      "available": true,
+      "flags": [
+        "--add-dir",
+        "--all",
+        "--ask-for-approval",
+        "--cd",
+        "--config",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "--dangerously-bypass-hook-trust",
+        "--disable",
+        "--enable",
+        "--image",
+        "--last",
+        "--local-provider",
+        "--model",
+        "--no-alt-screen",
+        "--oss",
+        "--profile",
+        "--remote",
+        "--remote-auth-token-env",
+        "--sandbox",
+        "--search",
+        "--strict-config",
+        "--version"
+      ],
+      "helpHash": "f2276e202447690196caf39f56254a3a42c94df6a76bf271909357b52e71b8e8",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "risk": "executes_agent",
+      "exposure": "tracked_only",
+      "tier": "catalog",
+      "summary": "Fork a Codex session."
+    },
+    "login": {
+      "commandPath": [
+        "login"
+      ],
+      "probedAt": "2026-06-18T21:19:08.073Z",
+      "available": true,
+      "flags": [
+        "--config",
+        "--device-auth",
+        "--disable",
+        "--enable",
+        "--with-access-token",
+        "--with-api-key"
+      ],
+      "helpHash": "92b59bdace262549c63f4225f89c659fc48beffafd60226983d50e7ee3dd600c",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "risk": "auth",
+      "exposure": "not_exposed",
+      "tier": "catalog",
+      "summary": "Authenticate Codex CLI."
+    },
+    "logout": {
+      "commandPath": [
+        "logout"
+      ],
+      "probedAt": "2026-06-18T21:19:08.100Z",
+      "available": true,
+      "flags": [
+        "--config",
+        "--disable",
+        "--enable"
+      ],
+      "helpHash": "d3b52918046a86dc5b0da0106121ca9daf83384a0ccdae3cbbdf6f93ad8b7a7a",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "risk": "auth",
+      "exposure": "not_exposed",
+      "tier": "catalog",
+      "summary": "Clear Codex authentication state."
+    },
+    "mcp": {
+      "commandPath": [
+        "mcp"
+      ],
+      "probedAt": "2026-06-18T21:19:08.127Z",
+      "available": true,
+      "flags": [
+        "--config",
+        "--disable",
+        "--enable"
+      ],
+      "helpHash": "c3a6874a64da9472b97fdc47ed5dde511150aab6accb808a30953f14e69d6a52",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "risk": "writes_local_config",
+      "exposure": "tracked_only",
+      "tier": "catalog",
+      "summary": "Manage Codex MCP configuration."
+    },
+    "mcp-server": {
+      "commandPath": [
+        "mcp-server"
+      ],
+      "probedAt": "2026-06-18T21:19:08.154Z",
+      "available": true,
+      "flags": [
+        "--config",
+        "--disable",
+        "--enable",
+        "--strict-config"
+      ],
+      "helpHash": "2fd3e8fec2e4dbf1c4731e59733968f522d6228d14fac87d8eb4e35f5133cc11",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "risk": "starts_server",
+      "exposure": "not_exposed",
+      "tier": "catalog",
+      "summary": "Start Codex MCP server mode."
+    },
+    "plugin": {
+      "commandPath": [
+        "plugin"
+      ],
+      "probedAt": "2026-06-18T21:19:08.181Z",
+      "available": true,
+      "flags": [
+        "--config",
+        "--disable",
+        "--enable"
+      ],
+      "helpHash": "4597fbf5d3746597df5499c25c3a0de55d89eb4e36b84a59acc1bdd7857e0e2e",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "risk": "writes_local_config",
+      "exposure": "tracked_only",
+      "tier": "catalog",
+      "summary": "Manage Codex plugins."
+    },
+    "remote-control": {
+      "commandPath": [
+        "remote-control"
+      ],
+      "probedAt": "2026-06-18T21:19:08.209Z",
+      "available": true,
+      "flags": [
+        "--config",
+        "--disable",
+        "--enable",
+        "--json"
+      ],
+      "helpHash": "436e157992666b41ed8d1ee1f2f466d1531c61fca13794857be03fa77e196992",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "risk": "network",
+      "exposure": "tracked_only",
+      "tier": "catalog",
+      "summary": "Inspect or manage Codex remote control state."
+    },
+    "review": {
+      "commandPath": [
+        "review"
+      ],
+      "probedAt": "2026-06-18T21:19:08.238Z",
+      "available": true,
+      "flags": [
+        "--base",
+        "--commit",
+        "--config",
+        "--disable",
+        "--enable",
+        "--strict-config",
+        "--title",
+        "--uncommitted"
+      ],
+      "helpHash": "fc02e73477306269139f9e013ba626932e936e3c151d2031a3bca742f5c400fd",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "risk": "executes_agent",
+      "exposure": "tracked_only",
+      "tier": "catalog",
+      "summary": "Run Codex code review workflows."
+    },
+    "sandbox": {
+      "commandPath": [
+        "sandbox"
+      ],
+      "probedAt": "2026-06-18T21:19:08.267Z",
+      "available": true,
+      "flags": [
+        "--cd",
+        "--config",
+        "--disable",
+        "--enable",
+        "--include-managed-config",
+        "--permissions-profile",
+        "--profile"
+      ],
+      "helpHash": "fd0f40b6bc5e9bfd64b2f94c91d3e57de4ec52b2af997d400dbb06296b6f2afd",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "risk": "executes_agent",
+      "exposure": "not_exposed",
+      "tier": "catalog",
+      "summary": "Run or inspect Codex sandbox behavior."
+    },
+    "unarchive": {
+      "commandPath": [
+        "unarchive"
+      ],
+      "probedAt": "2026-06-18T21:19:08.294Z",
+      "available": true,
+      "flags": [
+        "--add-dir",
+        "--cd",
+        "--config",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "--dangerously-bypass-hook-trust",
+        "--disable",
+        "--enable",
+        "--image",
+        "--local-provider",
+        "--model",
+        "--oss",
+        "--profile",
+        "--remote",
+        "--remote-auth-token-env",
+        "--sandbox",
+        "--strict-config"
+      ],
+      "helpHash": "a15d70bdb6745fc5aca1c4ca8ae3cba001406f04792e6ce61b8be5e55c46dcc5",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "risk": "writes_local_config",
+      "exposure": "not_exposed",
+      "tier": "catalog",
+      "summary": "Restore archived Codex session state."
+    },
+    "update": {
+      "commandPath": [
+        "update"
+      ],
+      "probedAt": "2026-06-18T21:19:08.321Z",
+      "available": true,
+      "flags": [
+        "--config",
+        "--disable",
+        "--enable"
+      ],
+      "helpHash": "0af2ebbf91ab75c1595b57618278999f9eace34f8181d9495da38ae15d0949f6",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "risk": "updates_binary",
+      "exposure": "not_exposed",
+      "tier": "catalog",
+      "summary": "Update the Codex CLI binary."
+    }
+  }
+}

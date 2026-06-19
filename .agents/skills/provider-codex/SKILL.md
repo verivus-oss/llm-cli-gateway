@@ -1,9 +1,9 @@
 ---
 name: provider-codex
-description: Track and maintain the upstream OpenAI Codex CLI contract. Use when OpenAI ships a Codex release, when a `codex exec` flag/sandbox/approval/resume behaviour changes, or when an upstream scan flags drift. Process guidance only — `src/upstream-contracts.ts` is the mechanical source of truth.
+description: Track and maintain the upstream OpenAI Codex CLI contract. Use when OpenAI ships a Codex release, when a `codex exec` flag/sandbox/approval/resume/subcommand behaviour changes, or when an upstream scan flags drift. Process guidance only — `src/upstream-contracts.ts` is the mechanical source of truth.
 metadata:
   author: verivus-oss
-  version: "1.0"
+  version: "1.2"
 ---
 
 # Provider: OpenAI Codex CLI
@@ -87,8 +87,12 @@ A failed fetch is advisory (exit 0) unless `--fail-on-critical` is passed.
 
 ## Codex-specific notes (see the contract for exact rules)
 
+- Tested against codex-cli 0.140.0 (ACP targetVersion).
 - argv must start with `exec`; `exec resume` enters resume context.
-- `--last` is resume-only; `--sandbox` / `--ask-for-approval` / `--full-auto` / `--search` are forbidden on resume.
-- `--output-schema` and `-c key=value` are accepted on resume (codex-cli 0.133.0+).
+- `--last` is resume-only; `--sandbox` / `--ask-for-approval` / `--full-auto` / `--search` are forbidden on resume (per resumeForbiddenFlags).
+- `--output-schema`, `-c key=value`, `--ephemeral`, safety bypasses (on review), `--json` etc. are accepted on resume/review (codex-cli 0.140.0). Example (resume):
+  ```
+  codex exec resume --ephemeral --json <UUID> "follow up"
+  ```
 - Sandbox and approval values are closed enums — extend the enum in the contract.
 - Continuity is real via `codex exec resume <UUID>` / `--last`; `sessionId` must be a real Codex UUID (gateway `gw-*` IDs rejected).

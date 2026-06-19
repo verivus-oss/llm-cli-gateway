@@ -264,7 +264,7 @@ export const ACP_ENTRYPOINT_CONTRACTS: Record<CliType, AcpEntrypointContract> = 
     status: "native",
     executable: "vibe-acp",
     entrypointArgs: [],
-    targetVersion: "vibe 2.14.1",
+    targetVersion: "vibe 2.16.1",
     probeArgs: [["--version"], ["--help"]],
     evidence:
       "Native ACP executable vibe-acp; manual initialize + session/new smoke passed. First runtime pilot.",
@@ -276,12 +276,12 @@ export const ACP_ENTRYPOINT_CONTRACTS: Record<CliType, AcpEntrypointContract> = 
     status: "native",
     executable: "grok",
     entrypointArgs: ["agent", "stdio"],
-    targetVersion: "grok 0.2.50 (cadf94855)",
+    targetVersion: "grok 0.2.56 (4d4448c98)",
     // `grok agent stdio --help` is a safe help probe; bare `grok agent stdio`
     // starts the live ACP server and is intentionally NOT probed here.
     probeArgs: [["agent", "stdio", "--help"]],
     evidence:
-      "Native ACP via `grok agent stdio`; initialize + session/new smoke passed with isolated leader socket. Second runtime pilot.",
+      "Native ACP via `grok agent stdio`; initialize + session/new smoke passed with isolated leader socket. Second runtime pilot. Bumped for 0.2.56.",
     docsRef: "docs/plans/first-class-acp-gateway-extension.dag.toml#provider_matrix.grok",
   },
   codex: {
@@ -290,11 +290,11 @@ export const ACP_ENTRYPOINT_CONTRACTS: Record<CliType, AcpEntrypointContract> = 
     status: "adapter_mediated_deferred",
     executable: "codex",
     entrypointArgs: [],
-    targetVersion: "codex-cli 0.139.0",
+    targetVersion: "codex-cli 0.140.0",
     probeArgs: [],
     adapterCandidates: ["zed-industries/codex-acp", "agentclientprotocol/codex-acp"],
     evidence:
-      "No native ACP entrypoint at codex-cli 0.139.0. Adapter evidence tracked as documentation only; not native gateway ACP support.",
+      "No native ACP entrypoint at codex-cli 0.140.0. Adapter evidence tracked as documentation only; not native gateway ACP support.",
     docsRef: "docs/plans/first-class-acp-gateway-extension.dag.toml#provider_matrix.codex",
   },
   claude: {
@@ -303,11 +303,11 @@ export const ACP_ENTRYPOINT_CONTRACTS: Record<CliType, AcpEntrypointContract> = 
     status: "adapter_mediated_deferred",
     executable: "claude",
     entrypointArgs: [],
-    targetVersion: "claude 2.1.175",
+    targetVersion: "claude 2.1.181",
     probeArgs: [],
     adapterCandidates: ["Claude Agent SDK ACP adapter"],
     evidence:
-      "No native Claude Code CLI ACP entrypoint at claude 2.1.175. Adapter ownership/permission bridging unresolved; deferred.",
+      "No native Claude Code CLI ACP entrypoint at claude 2.1.181. Adapter ownership/permission bridging unresolved; deferred.",
     docsRef: "docs/plans/first-class-acp-gateway-extension.dag.toml#provider_matrix.claude",
   },
   gemini: {
@@ -316,10 +316,10 @@ export const ACP_ENTRYPOINT_CONTRACTS: Record<CliType, AcpEntrypointContract> = 
     status: "absent_watchlist",
     executable: "agy",
     entrypointArgs: [],
-    targetVersion: "agy 1.0.7",
+    targetVersion: "agy 1.0.9",
     probeArgs: [],
     evidence:
-      "agy 1.0.7 has no ACP flag or subcommand. Legacy Gemini CLI ACP evidence does not transfer. Watchlist item.",
+      "agy 1.0.9 has no ACP flag or subcommand. Legacy Gemini CLI ACP evidence does not transfer. Watchlist item.",
     docsRef: "docs/plans/first-class-acp-gateway-extension.dag.toml#provider_matrix.gemini",
   },
   devin: {
@@ -328,13 +328,13 @@ export const ACP_ENTRYPOINT_CONTRACTS: Record<CliType, AcpEntrypointContract> = 
     status: "native",
     executable: "devin",
     entrypointArgs: ["acp"],
-    targetVersion: "devin 2026.5.26-8 (1a388fa9)",
+    targetVersion: "devin 2026.7.19 (a64a20ba)",
     // `devin --version` is the safe probe; bare `devin acp` starts the live ACP
     // server over stdio and is intentionally NOT probed here.
     probeArgs: [["--version"]],
     evidence:
       'Native ACP entrypoint `devin acp` (stdio JSON-RPC). Slice D1 manual initialize + session/new smoke passed (protocolVersion 1, agent "Affogato", session created). Third native runtime pilot; routing stays config-gated.',
-    docsRef: "docs/plans/devin-integration-scoping.md",
+    docsRef: "docs/plans/first-class-acp-gateway-extension.dag.toml#provider_matrix.devin",
   },
 };
 
@@ -457,6 +457,7 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         [
           "--add-dir",
           "--agent",
+          "--all",
           "--allow-dangerously-skip-permissions",
           "--cwd",
           "--dangerously-skip-permissions",
@@ -668,6 +669,7 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
     acknowledgedUpstreamFlags: [
       "--allow-dangerously-skip-permissions",
       "--allowed", // alias of --allowed-tools
+      "--ax-screen-reader",
       "--bare",
       "--betas",
       "--brief",
@@ -692,6 +694,7 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       "--remote-control-session-name-prefix",
       "--replay-user-messages",
       "--resume", // interactive resume; gateway uses --continue/--session-id
+      "--safe-mode",
       "--tmux",
       "--version",
       "--worktree",
@@ -862,25 +865,22 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
               "Resume Codex sessions from the interactive CLI.",
               "executes_agent",
               [
-                "--add-dir",
                 "--all",
-                "--cd",
                 "--config",
                 "--dangerously-bypass-approvals-and-sandbox",
                 "--dangerously-bypass-hook-trust",
                 "--disable",
                 "--enable",
+                "--ephemeral",
+                "--ignore-rules",
+                "--ignore-user-config",
                 "--image",
-                "--include-non-interactive",
+                "--json",
                 "--last",
-                "--local-provider",
                 "--model",
-                "--no-alt-screen",
-                "--oss",
-                "--profile",
-                "--remote",
-                "--remote-auth-token-env",
-                "--sandbox",
+                "--output-last-message",
+                "--output-schema",
+                "--skip-git-repo-check",
                 "--strict-config",
               ]
             ),
@@ -892,8 +892,18 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
                 "--base",
                 "--commit",
                 "--config",
+                "--dangerously-bypass-approvals-and-sandbox",
+                "--dangerously-bypass-hook-trust",
                 "--disable",
                 "--enable",
+                "--ephemeral",
+                "--ignore-rules",
+                "--ignore-user-config",
+                "--json",
+                "--model",
+                "--output-last-message",
+                "--output-schema",
+                "--skip-git-repo-check",
                 "--strict-config",
                 "--title",
                 "--uncommitted",
@@ -1587,6 +1597,23 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
           ["--leader-socket"],
           { tier: "inspect" }
         ),
+        dashboard: subcommand(
+          ["dashboard"],
+          "Open the Agent Dashboard view at startup.",
+          "read_only",
+          ["--leader-socket"],
+          {
+            tier: "inspect",
+            fixtures: [
+              {
+                id: "grok-dashboard",
+                description: "grok dashboard subcommand (leader socket passthrough)",
+                args: ["--leader-socket", "/tmp/dash.sock"],
+                expect: "pass",
+              },
+            ],
+          }
+        ),
         export: subcommand(
           ["export"],
           "Export Grok session data.",
@@ -2241,7 +2268,7 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       },
       {
         id: "mistral-current-help-surface",
-        description: "Vibe 2.12.x help surface: --prompt, -v, --version, --setup accepted",
+        description: "Vibe 2.16.1 help surface: --prompt, -v, --version, --setup accepted",
         args: ["--prompt", "hello", "--agent", "auto-approve", "-v", "--version", "--setup"],
         env: { VIBE_ACTIVE_MODEL: "mistral-medium-3.5" },
         expect: "pass",
@@ -2290,15 +2317,26 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       "--model": { arity: "one", description: "AI model for this session" },
       "--permission-mode": {
         arity: "one",
-        // Verified against devin 2026.5.26-8: `normal (auto)`, `dangerous (yolo, bypass)`.
-        values: ["normal", "auto", "dangerous", "yolo", "bypass"],
+        // Verified against devin 2026.7.19 (a64a20ba): `auto`, `smart`, `dangerous`.
+        values: ["auto", "smart", "dangerous"],
         description:
-          "Permission mode (normal/auto = read-only auto-approve; dangerous/yolo/bypass = approve all)",
+          "Permission mode (auto = read-only auto-approve; smart = additionally auto-runs safe actions per fast model; dangerous = approve all)",
       },
       "--prompt-file": { arity: "one", description: "Load the initial prompt from a file" },
       "--resume": { arity: "one", description: "Resume a specific session by ID" },
       "--continue": { arity: "none", description: "Resume the most recent session in cwd" },
     },
+    // Devin flags the gateway deliberately does not emit (or are for interactive/cloud use).
+    // Probe acknowledgement only.
+    acknowledgedUpstreamFlags: [
+      "--agent-config",
+      "--config",
+      "--export",
+      "--print",
+      "--respect-workspace-trust",
+      "--sandbox",
+      "--version",
+    ],
     env: {},
     conformanceFixtures: [
       {
@@ -2321,20 +2359,20 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       },
       {
         id: "devin-permission-mode",
-        description: "Valid --permission-mode accepted (dangerous alias bypass)",
-        args: ["-p", "hello", "--permission-mode", "bypass"],
+        description: "Valid --permission-mode 'dangerous' accepted",
+        args: ["-p", "hello", "--permission-mode", "dangerous"],
         expect: "pass",
       },
       {
         id: "devin-permission-mode-auto",
-        description: "Valid --permission-mode alias 'auto' (= normal) accepted",
+        description: "Valid --permission-mode 'auto' accepted",
         args: ["-p", "hello", "--permission-mode", "auto"],
         expect: "pass",
       },
       {
-        id: "devin-permission-mode-yolo",
-        description: "Valid --permission-mode alias 'yolo' (= dangerous) accepted",
-        args: ["-p", "hello", "--permission-mode", "yolo"],
+        id: "devin-permission-mode-smart",
+        description: "Valid --permission-mode 'smart' accepted",
+        args: ["-p", "hello", "--permission-mode", "smart"],
         expect: "pass",
       },
       {

@@ -1,9 +1,9 @@
 ---
 name: provider-claude
-description: Track and maintain the upstream Claude Code CLI contract. Use when Anthropic ships a Claude Code release, when a `claude` flag/output/permission behaviour changes, or when an upstream scan flags drift. Process guidance only — `src/upstream-contracts.ts` is the mechanical source of truth.
+description: Track and maintain the upstream Claude Code CLI contract. Use when Anthropic ships a Claude Code release, when a `claude` flag/output/permission/subcommand behaviour changes, or when an upstream scan flags drift. Process guidance only — `src/upstream-contracts.ts` is the mechanical source of truth.
 metadata:
   author: verivus-oss
-  version: "1.0"
+  version: "1.2"
 ---
 
 # Provider: Claude Code CLI
@@ -90,8 +90,13 @@ never breaks the default release gate.
 
 ## Claude-specific notes (see the contract for exact rules)
 
+- Tested against claude 2.1.181 (ACP targetVersion).
 - `-p` has `optional` arity: standalone in slice κ stdin mode, legacy `-p <prompt>` otherwise.
 - `stream-json` output requires `--verbose` alongside `--print`; the gateway emits them together.
 - `--input-format stream-json` carries caller `cache_control` breakpoints.
 - Permission modes and reasoning-effort levels are closed enums — extend the enum in the contract, not here.
+- `agents --all` (with `--json`) includes completed background sessions (2.1.181+). Example:
+  ```
+  claude agents --json --all
+  ```
 - Continuity is real via `--continue` / `--session-id`.

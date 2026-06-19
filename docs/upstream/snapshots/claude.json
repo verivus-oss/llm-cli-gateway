@@ -1,0 +1,291 @@
+{
+  "cli": "claude",
+  "fetchedAt": "2026-06-18T21:19:07.540Z",
+  "sources": [],
+  "helpSurface": {
+    "probedAt": "2026-06-18T21:19:07.539Z",
+    "available": true,
+    "version": null,
+    "flags": [
+      "--add-dir",
+      "--agent",
+      "--agents",
+      "--allow-dangerously-skip-permissions",
+      "--allowed",
+      "--allowed-tools",
+      "--append-system-prompt",
+      "--ax-screen-reader",
+      "--bare",
+      "--betas",
+      "--brief",
+      "--chrome",
+      "--continue",
+      "--dangerously-skip-permissions",
+      "--debug",
+      "--debug-file",
+      "--disable-slash-commands",
+      "--disallowed",
+      "--disallowed-tools",
+      "--effort",
+      "--exclude-dynamic-system-prompt-sections",
+      "--fallback-model",
+      "--file",
+      "--fork-session",
+      "--from-pr",
+      "--ide",
+      "--include-hook-events",
+      "--include-partial-messages",
+      "--input-format",
+      "--json-schema",
+      "--max-budget-usd",
+      "--mcp-config",
+      "--mcp-debug",
+      "--model",
+      "--name",
+      "--no-chrome",
+      "--no-session-persistence",
+      "--output-format",
+      "--permission-mode",
+      "--plugin-dir",
+      "--plugin-url",
+      "--print",
+      "--prompt-suggestions",
+      "--remote-control",
+      "--remote-control-session-name-prefix",
+      "--replay-user-messages",
+      "--resume",
+      "--safe-mode",
+      "--session-id",
+      "--setting-sources",
+      "--settings",
+      "--strict-mcp-config",
+      "--system-prompt",
+      "--tmux",
+      "--tools",
+      "--verbose",
+      "--version",
+      "--worktree"
+    ],
+    "helpHash": "be2ba7d04d33d1a3d105806e06e364ddf45bf04e671bf88e3a954988fe5d0270",
+    "extraVsContract": [],
+    "missingFromBinary": []
+  },
+  "subcommands": {
+    "agents": {
+      "commandPath": [
+        "agents"
+      ],
+      "probedAt": "2026-06-18T21:19:05.596Z",
+      "available": true,
+      "flags": [
+        "--add-dir",
+        "--agent",
+        "--all",
+        "--allow-dangerously-skip-permissions",
+        "--cwd",
+        "--dangerously-skip-permissions",
+        "--effort",
+        "--json",
+        "--mcp-config",
+        "--model",
+        "--permission-mode",
+        "--plugin-dir",
+        "--setting-sources",
+        "--settings",
+        "--strict-mcp-config"
+      ],
+      "helpHash": "40c006a7e2049321d81d8c8db9d1ebc3419d811276fea504751d43f4acf0ba80",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "risk": "writes_local_config",
+      "exposure": "tracked_only",
+      "tier": "inspect",
+      "summary": "Inspect and manage Claude agent definitions."
+    },
+    "auth": {
+      "commandPath": [
+        "auth"
+      ],
+      "probedAt": "2026-06-18T21:19:05.759Z",
+      "available": true,
+      "flags": [],
+      "helpHash": "bc651a5ac897fc64c101365e18bf8b91514d5311178305375467cbc466f02972",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "risk": "auth",
+      "exposure": "not_exposed",
+      "tier": "catalog",
+      "summary": "Manage Claude authentication state."
+    },
+    "auto-mode": {
+      "commandPath": [
+        "auto-mode"
+      ],
+      "probedAt": "2026-06-18T21:19:05.923Z",
+      "available": true,
+      "flags": [],
+      "helpHash": "4de38be3402b3d42e350e1c4aeb3e69de3282b16d2f73ad33782c43fa191757b",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "risk": "writes_local_config",
+      "exposure": "tracked_only",
+      "tier": "catalog",
+      "summary": "Configure Claude auto-mode behavior."
+    },
+    "doctor": {
+      "commandPath": [
+        "doctor"
+      ],
+      "probedAt": "2026-06-18T21:19:06.087Z",
+      "available": true,
+      "flags": [],
+      "helpHash": "983ac24ae6da693c1610cc66b867d44274c30feeb3088d6384d1fd4582eb1fcf",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "risk": "read_only",
+      "exposure": "tracked_only",
+      "tier": "diagnostic",
+      "summary": "Run Claude Code diagnostic checks."
+    },
+    "install": {
+      "commandPath": [
+        "install"
+      ],
+      "probedAt": "2026-06-18T21:19:06.248Z",
+      "available": true,
+      "flags": [
+        "--force"
+      ],
+      "helpHash": "4ad9e987882643d5c22364af1644eefe711770936a8bb02f30315b980c40ec53",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "risk": "writes_local_config",
+      "exposure": "not_exposed",
+      "tier": "catalog",
+      "summary": "Install Claude Code shell integrations."
+    },
+    "mcp": {
+      "commandPath": [
+        "mcp"
+      ],
+      "probedAt": "2026-06-18T21:19:06.412Z",
+      "available": true,
+      "flags": [],
+      "helpHash": "94c6edd7160597a4aca1b9fba4a1bcee71b7fb770749713685685984c7724c37",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "risk": "writes_local_config",
+      "exposure": "tracked_only",
+      "tier": "catalog",
+      "summary": "Manage Claude MCP server configuration."
+    },
+    "plugin": {
+      "commandPath": [
+        "plugin"
+      ],
+      "probedAt": "2026-06-18T21:19:06.576Z",
+      "available": true,
+      "flags": [],
+      "helpHash": "40b49d5c6e85314d2fe62675b1941d55749f922a373364fe3726e38120d3f85e",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "risk": "writes_local_config",
+      "exposure": "tracked_only",
+      "tier": "catalog",
+      "summary": "Manage Claude plugins."
+    },
+    "plugins": {
+      "commandPath": [
+        "plugins"
+      ],
+      "probedAt": "2026-06-18T21:19:06.737Z",
+      "available": true,
+      "flags": [],
+      "helpHash": "40b49d5c6e85314d2fe62675b1941d55749f922a373364fe3726e38120d3f85e",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "risk": "writes_local_config",
+      "exposure": "tracked_only",
+      "tier": "catalog",
+      "summary": "Alias for Claude plugin management."
+    },
+    "project": {
+      "commandPath": [
+        "project"
+      ],
+      "probedAt": "2026-06-18T21:19:06.896Z",
+      "available": true,
+      "flags": [],
+      "helpHash": "f11126e66a4726b498cd18098faeccb70bae06939f19da456f2f4453b481e1e3",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "risk": "writes_local_config",
+      "exposure": "tracked_only",
+      "tier": "catalog",
+      "summary": "Manage Claude project configuration."
+    },
+    "setup-token": {
+      "commandPath": [
+        "setup-token"
+      ],
+      "probedAt": "2026-06-18T21:19:07.059Z",
+      "available": true,
+      "flags": [],
+      "helpHash": "b545e6f499482ee9854ed2a673686180f175b6d2151f56b300e7382b98c7efbc",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "risk": "auth",
+      "exposure": "not_exposed",
+      "tier": "catalog",
+      "summary": "Configure Claude setup token authentication."
+    },
+    "ultrareview": {
+      "commandPath": [
+        "ultrareview"
+      ],
+      "probedAt": "2026-06-18T21:19:07.222Z",
+      "available": true,
+      "flags": [
+        "--json",
+        "--timeout"
+      ],
+      "helpHash": "3a14a12c451dc51c04b06d0a10f1056b5460adf6118646aa32600cdf0a52872f",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "risk": "executes_agent",
+      "exposure": "tracked_only",
+      "tier": "diagnostic",
+      "summary": "Run Claude ultrareview diagnostics."
+    },
+    "update": {
+      "commandPath": [
+        "update"
+      ],
+      "probedAt": "2026-06-18T21:19:07.381Z",
+      "available": true,
+      "flags": [],
+      "helpHash": "48859a9514d9d28a94ad11638d5a1497ac55ab7e8930ee050576ee59ec3e087c",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "risk": "updates_binary",
+      "exposure": "not_exposed",
+      "tier": "catalog",
+      "summary": "Update the Claude Code binary."
+    },
+    "upgrade": {
+      "commandPath": [
+        "upgrade"
+      ],
+      "probedAt": "2026-06-18T21:19:07.539Z",
+      "available": true,
+      "flags": [],
+      "helpHash": "48859a9514d9d28a94ad11638d5a1497ac55ab7e8930ee050576ee59ec3e087c",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "risk": "updates_binary",
+      "exposure": "not_exposed",
+      "tier": "catalog",
+      "summary": "Alias for updating the Claude Code binary."
+    }
+  }
+}

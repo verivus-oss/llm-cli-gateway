@@ -188,17 +188,47 @@ Every `*_request` and `*_request_async` tool accepts an optional `promptParts` f
 
 `prompt` and `promptParts` are mutually exclusive — pass exactly one.
 
-Per-CLI capability matrix:
+Per-CLI capability matrix (prefix discipline is automatic via `promptParts` for all; explicit levers are provider-specific):
 
-| CLI     | Prefix discipline (auto via `promptParts`) | Explicit `cache_control` emission                                            |
-| ------- | ------------------------------------------ | ---------------------------------------------------------------------------- |
-| claude  | yes                                        | yes, opt-in via `promptParts.cacheControl` and `outputFormat: "stream-json"` |
-| codex   | yes                                        | n/a (OpenAI implicit cache, no CLI lever)                                    |
-| gemini  | yes                                        | n/a (implicit prefix cache server-side)                                      |
-| grok    | yes                                        | n/a (no surfaced cache lever)                                                |
-| mistral | yes                                        | n/a (no surfaced cache lever)                                                |
+| CLI     | Prefix discipline | Explicit lever(s) |
+| ------- | ----------------- | ----------------- |
+| claude  | yes               | `promptParts.cacheControl` + `outputFormat: "stream-json"` (Anthropic `cache_control` breakpoints on stable blocks; `ttl="1h"` forced) |
+| codex   | yes               | none (OpenAI implicit) |
+| gemini  | yes               | none (implicit server-side) |
+| grok    | yes               | `compactionMode` / `compactionDetail` (context compaction: `summary|transcript|segments`; `segments` writes per-segment markdown) |
+| mistral | yes               | none (implicit) |
 
-Opt-in flags (all default off) live under `[cache_awareness]` in `~/.llm-cli-gateway/config.toml`. See `docs/personal-mcp/PROVIDER_CACHE_SURFACES.md` for the per-model minimum cacheable token thresholds and field-name divergences.
+**Claude example (explicit cacheControl)**
+
+```ts
+claude_request({
+  promptParts: {
+    system: "You are a helpful code reviewer.",
+    context: "<long stable file dump>",
+    task: "Review the diff.",
+    cacheControl: { system: true, context: true }  // task is never marked
+  },
+  outputFormat: "stream-json"
+})
+```
+
+Gateway emits the `stream-json` stdin path with `cache_control: {type:"ephemeral", ttl:"1h"}` on marked blocks only.
+
+**Grok example (compaction)**
+
+```ts
+grok_request({
+  promptParts: { system: "...", context: "...", task: "..." },
+  compactionMode: "segments",
+  compactionDetail: "balanced"
+})
+```
+
+Emits `--compaction-mode segments --compaction-detail balanced`.
+
+See `docs/personal-mcp/PROVIDER_CACHE_SURFACES.md` for full surfaces, telemetry differences (e.g. Grok `-p` vs ACP), exact stream-json payload shapes, and cross-LLM review notes.
+
+Opt-in flags (all default off) live under `[cache_awareness]` in `~/.llm-cli-gateway/config.toml`.
 
 ### Reliability & Performance
 

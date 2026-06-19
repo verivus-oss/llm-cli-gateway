@@ -217,6 +217,36 @@ The gateway hashes the stable prefix and writes it to the flight recorder so per
 - `cache-state://session/{sessionId}` — per-session aggregates (same shape as `session_get.cacheState`)
 - `cache-state://prefix/{hash}` — per-stable-prefix-hash aggregates with CLI × model breakdown
 
+### Provider-specific cache direction examples
+
+**Claude (explicit cacheControl)**
+
+```
+claude_request({
+  promptParts: {
+    system: "<stable>",
+    context: "<large stable context>",
+    task: "Now add metrics.",
+    cacheControl: { system: true, context: true }
+  },
+  outputFormat: "stream-json",
+  sessionId: savedSessionId
+})
+```
+
+**Grok (compaction)**
+
+```
+grok_request({
+  promptParts: { system: "<stable>", context: "...", task: "..." },
+  compactionMode: "segments",
+  compactionDetail: "balanced",
+  sessionId: savedSessionId
+})
+```
+
+See `docs/personal-mcp/PROVIDER_CACHE_SURFACES.md` for exact stream-json payload shape, telemetry differences, and the full matrix. Prefix discipline (`promptParts` without cacheControl) works for all CLIs.
+
 ### TTL warning (Claude, opt-in)
 
 With `[cache_awareness] warn_on_ttl_expiry = true` in `~/.llm-cli-gateway/config.toml`, a resumed Claude turn whose prior `lastRequestAt` is within 30 s of the cache TTL returns:

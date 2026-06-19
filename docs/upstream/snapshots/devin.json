@@ -1,0 +1,28 @@
+{
+  "cli": "devin",
+  "fetchedAt": "2026-06-18T21:19:08.420Z",
+  "sources": [],
+  "helpSurface": {
+    "probedAt": "2026-06-18T21:19:08.416Z",
+    "available": true,
+    "version": null,
+    "flags": [
+      "--agent-config",
+      "--config",
+      "--continue",
+      "--export",
+      "--model",
+      "--permission-mode",
+      "--print",
+      "--prompt-file",
+      "--respect-workspace-trust",
+      "--resume",
+      "--sandbox",
+      "--version"
+    ],
+    "helpHash": "bb7f7afb4f6d38e06fa42e1370377077a7383db60d258326fbdfa6f845fe4973",
+    "extraVsContract": [],
+    "missingFromBinary": []
+  },
+  "subcommands": {}
+}

@@ -1,17 +1,9 @@
 {
   "cli": "grok",
-  "fetchedAt": "2026-06-12T03:23:44.256Z",
-  "sources": [
-    {
-      "url": "https://docs.x.ai/developers/release-notes.md",
-      "ok": true,
-      "status": 200,
-      "bytes": 11698,
-      "sha256": "cfeb634f327be4fd66d003895d8fd52edc74ed7cd1c094ac9a9d8c3160366b64"
-    }
-  ],
+  "fetchedAt": "2026-06-18T21:11:35.937Z",
+  "sources": [],
   "helpSurface": {
-    "probedAt": "2026-06-12T03:23:44.256Z",
+    "probedAt": "2026-06-18T21:11:35.901Z",
     "available": true,
     "version": null,
     "flags": [
@@ -57,7 +49,7 @@
       "--version",
       "--worktree"
     ],
-    "helpHash": "d699a1aa963fe025955d9484fb7900cd578e2a1d77ede1abd7d5c713bd2c11fb",
+    "helpHash": "6e7f56cf49ad1921900472f8ee1643af3a2a16c48c0026c240319b5f4024a820",
     "extraVsContract": [],
     "missingFromBinary": []
   },
@@ -66,7 +58,7 @@
       "commandPath": [
         "agent"
       ],
-      "probedAt": "2026-06-12T03:23:33.271Z",
+      "probedAt": "2026-06-18T21:11:35.101Z",
       "available": true,
       "flags": [
         "--agent-profile",
@@ -84,7 +76,7 @@
         "--reauth",
         "--xai-api-base-url"
       ],
-      "helpHash": "a505b90f2533ecd0f6047defbaa8d35e256afec2bba79da3fb89c2a3dbb5caef",
+      "helpHash": "3aa516d1a2f59b93f3a459dee3ef2e13d49b18e39af29f12fe90710217495b27",
       "extraVsContract": [],
       "missingFromBinary": [],
       "risk": "executes_agent",
@@ -97,7 +89,7 @@
         "agent",
         "headless"
       ],
-      "probedAt": "2026-06-12T03:23:33.748Z",
+      "probedAt": "2026-06-18T21:11:35.137Z",
       "available": true,
       "flags": [
         "--debug",
@@ -106,7 +98,7 @@
         "--grok-ws-url",
         "--leader-socket"
       ],
-      "helpHash": "fbf968e92fb37bab034c1b214cf95710c60a7f63f229c48f4b811930f4599579",
+      "helpHash": "ad01f94e43b2c23fcc8659b416f2c3a46b8e11489e4e32ee39039478c6bef4f2",
       "extraVsContract": [],
       "missingFromBinary": [],
       "risk": "executes_agent",
@@ -119,7 +111,7 @@
         "agent",
         "leader"
       ],
-      "probedAt": "2026-06-12T03:23:34.242Z",
+      "probedAt": "2026-06-18T21:11:35.171Z",
       "available": true,
       "flags": [
         "--debug",
@@ -131,7 +123,7 @@
         "--no-exit-on-disconnect",
         "--relay-on-demand"
       ],
-      "helpHash": "f151fe8ba8e55d99679fcf977f1ef54e9cccc9c593fbddf55a637cbe9e47cabf",
+      "helpHash": "cabb8548a6031dfd532d453e9aa2d3f4881aa15c399ac584cc77ad78707a4371",
       "extraVsContract": [],
       "missingFromBinary": [],
       "risk": "starts_server",
@@ -144,7 +136,7 @@
         "agent",
         "serve"
       ],
-      "probedAt": "2026-06-12T03:23:34.742Z",
+      "probedAt": "2026-06-18T21:11:35.208Z",
       "available": true,
       "flags": [
         "--bind",
@@ -156,7 +148,7 @@
         "--remote",
         "--secret"
       ],
-      "helpHash": "586f00b081c8090e945be5a602d66370b3a20c7e4a897814c28d52c0e66b8061",
+      "helpHash": "420017368f71cb24763a15f73b0d5a7d162788439f8e23256851e038fc145892",
       "extraVsContract": [],
       "missingFromBinary": [],
       "risk": "starts_server",
@@ -169,14 +161,14 @@
         "agent",
         "stdio"
       ],
-      "probedAt": "2026-06-12T03:23:35.242Z",
+      "probedAt": "2026-06-18T21:11:35.243Z",
       "available": true,
       "flags": [
         "--debug",
         "--debug-file",
         "--leader-socket"
       ],
-      "helpHash": "8a3bbedca91397ca22047fdcecb907b0abeae2ccc2a4c5d03ac464a9d427c619",
+      "helpHash": "057b98d76709c0e4f986373403c056cfa75e08e07e88952ca1cfaf2090c49095",
       "extraVsContract": [],
       "missingFromBinary": [],
       "risk": "starts_server",
@@ -188,14 +180,14 @@
       "commandPath": [
         "completions"
       ],
-      "probedAt": "2026-06-12T03:23:35.776Z",
+      "probedAt": "2026-06-18T21:11:35.277Z",
       "available": true,
       "flags": [
         "--debug",
         "--debug-file",
         "--leader-socket"
       ],
-      "helpHash": "657c5bce73068874e0f732f007a0a469dfd9ae864a2480633c90d1733fd78eb5",
+      "helpHash": "31a1be5d931a3234cc27868eb9d32ba1f68df59f6ad799772ccfa227a937aceb",
       "extraVsContract": [],
       "missingFromBinary": [],
       "risk": "read_only",
@@ -203,11 +195,30 @@
       "tier": "inspect",
       "summary": "Generate Grok shell completions."
     },
+    "dashboard": {
+      "commandPath": [
+        "dashboard"
+      ],
+      "probedAt": "2026-06-18T21:11:35.313Z",
+      "available": true,
+      "flags": [
+        "--debug",
+        "--debug-file",
+        "--leader-socket"
+      ],
+      "helpHash": "b1c8012a0988e753da5bf16ba5727a2fa97bebd36869f789f2cef213ccb0f424",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "risk": "read_only",
+      "exposure": "tracked_only",
+      "tier": "inspect",
+      "summary": "Open the Agent Dashboard view at startup."
+    },
     "export": {
       "commandPath": [
         "export"
       ],
-      "probedAt": "2026-06-12T03:23:36.272Z",
+      "probedAt": "2026-06-18T21:11:35.348Z",
       "available": true,
       "flags": [
         "--clipboard",
@@ -215,7 +226,7 @@
         "--debug-file",
         "--leader-socket"
       ],
-      "helpHash": "c68cc33a577dc7a7b53eec76199aab98432ebf3abceb984fd7ce657606c32f37",
+      "helpHash": "03caa59f80d17240eaf95dff7e5a374eada4e18773762acf1acbd89cd77ece29",
       "extraVsContract": [],
       "missingFromBinary": [],
       "risk": "read_only",
@@ -227,7 +238,7 @@
       "commandPath": [
         "import"
       ],
-      "probedAt": "2026-06-12T03:23:36.800Z",
+      "probedAt": "2026-06-18T21:11:35.382Z",
       "available": true,
       "flags": [
         "--debug",
@@ -236,7 +247,7 @@
         "--leader-socket",
         "--list"
       ],
-      "helpHash": "86c95bbf205b45e51c02d19425709557cc2fa0da82489e20eeef65911d621ad0",
+      "helpHash": "4b94f8bb8c76b74e9d8c7847939d394154359f17c99c1b1b3e4368bc0ee76dfc",
       "extraVsContract": [],
       "missingFromBinary": [],
       "risk": "writes_local_config",
@@ -248,7 +259,7 @@
       "commandPath": [
         "inspect"
       ],
-      "probedAt": "2026-06-12T03:23:37.282Z",
+      "probedAt": "2026-06-18T21:11:35.416Z",
       "available": true,
       "flags": [
         "--debug",
@@ -256,7 +267,7 @@
         "--json",
         "--leader-socket"
       ],
-      "helpHash": "efe2189c65f1290e32b7aad290e2f473f5acfa575098fb044a86d78fbda25321",
+      "helpHash": "8218b7005fb645a989dc7605d07ae99ba910bd8153de76df384ea92ce9c95307",
       "extraVsContract": [],
       "missingFromBinary": [],
       "risk": "read_only",
@@ -268,14 +279,14 @@
       "commandPath": [
         "leader"
       ],
-      "probedAt": "2026-06-12T03:23:37.787Z",
+      "probedAt": "2026-06-18T21:11:35.451Z",
       "available": true,
       "flags": [
         "--debug",
         "--debug-file",
         "--leader-socket"
       ],
-      "helpHash": "443a5a58dc5df448c23b7a9018d0fc88eb803cf0e837139d86f175cd35aa6575",
+      "helpHash": "48380b801c545facb176c333dfe47d7f6bc531c18e91ac3d65900a3daef7943f",
       "extraVsContract": [],
       "missingFromBinary": [],
       "risk": "starts_server",
@@ -287,7 +298,7 @@
       "commandPath": [
         "login"
       ],
-      "probedAt": "2026-06-12T03:23:38.269Z",
+      "probedAt": "2026-06-18T21:11:35.486Z",
       "available": true,
       "flags": [
         "--debug",
@@ -296,7 +307,7 @@
         "--leader-socket",
         "--oauth"
       ],
-      "helpHash": "01c6675b80506920529ce35310f952702d7bab0dfa2ce3864acd2245bdad0f38",
+      "helpHash": "f88f91a8ca47a3619e2b3abc439c002df03b546bcfaa431652edab7e264f08e5",
       "extraVsContract": [],
       "missingFromBinary": [],
       "risk": "auth",
@@ -308,14 +319,14 @@
       "commandPath": [
         "logout"
       ],
-      "probedAt": "2026-06-12T03:23:38.769Z",
+      "probedAt": "2026-06-18T21:11:35.523Z",
       "available": true,
       "flags": [
         "--debug",
         "--debug-file",
         "--leader-socket"
       ],
-      "helpHash": "8a907beedb5a97b1efad68b2f6524c86cf70278bf9a8af32fcce64f9d7a2ecee",
+      "helpHash": "3dc6c9ac5a53fb73fd3abc09a09efa68b6dfaaeb434988ac908603e7bcfc4b65",
       "extraVsContract": [],
       "missingFromBinary": [],
       "risk": "auth",
@@ -327,14 +338,14 @@
       "commandPath": [
         "mcp"
       ],
-      "probedAt": "2026-06-12T03:23:39.278Z",
+      "probedAt": "2026-06-18T21:11:35.557Z",
       "available": true,
       "flags": [
         "--debug",
         "--debug-file",
         "--leader-socket"
       ],
-      "helpHash": "d71839f5810a12e6a488f4063b657dc981574d5241b36dac40c2cecf2cd9a38c",
+      "helpHash": "3e67e78636d4adbb3f53b494ead191d540f2628155bf49b0d183b33139b6104f",
       "extraVsContract": [],
       "missingFromBinary": [],
       "risk": "writes_local_config",
@@ -346,14 +357,14 @@
       "commandPath": [
         "memory"
       ],
-      "probedAt": "2026-06-12T03:23:39.762Z",
+      "probedAt": "2026-06-18T21:11:35.592Z",
       "available": true,
       "flags": [
         "--debug",
         "--debug-file",
         "--leader-socket"
       ],
-      "helpHash": "32daa78312a7574bae6c5158d065ba0d987cb137d5037b4fa98190179141f8fb",
+      "helpHash": "f9e46ecf5734e9aecae21bff067db2667561f2c07c8b7844752c47c32dfc4a3e",
       "extraVsContract": [],
       "missingFromBinary": [],
       "risk": "writes_local_config",
@@ -365,14 +376,14 @@
       "commandPath": [
         "models"
       ],
-      "probedAt": "2026-06-12T03:23:40.291Z",
+      "probedAt": "2026-06-18T21:11:35.627Z",
       "available": true,
       "flags": [
         "--debug",
         "--debug-file",
         "--leader-socket"
       ],
-      "helpHash": "97b905b1aab187c66bb1e8ca1e3c77d3e472fbb1ca2bf48e7d4b0b8c36188641",
+      "helpHash": "3ef9acb4dd1a15b90f51c80b38dc93a3cf9ee1bb81cb083db4091c2fa04c50b6",
       "extraVsContract": [],
       "missingFromBinary": [],
       "risk": "network",
@@ -384,14 +395,14 @@
       "commandPath": [
         "plugin"
       ],
-      "probedAt": "2026-06-12T03:23:40.777Z",
+      "probedAt": "2026-06-18T21:11:35.663Z",
       "available": true,
       "flags": [
         "--debug",
         "--debug-file",
         "--leader-socket"
       ],
-      "helpHash": "088b43565d1a0340b045a08a097ca963d22735ab60be0dd74fc481ef197cd0d0",
+      "helpHash": "8ad52f19d4c8a69775545013f3f61af0f1444976261177fb9ed6b6ff290f70ad",
       "extraVsContract": [],
       "missingFromBinary": [],
       "risk": "writes_local_config",
@@ -403,14 +414,14 @@
       "commandPath": [
         "sessions"
       ],
-      "probedAt": "2026-06-12T03:23:41.261Z",
+      "probedAt": "2026-06-18T21:11:35.697Z",
       "available": true,
       "flags": [
         "--debug",
         "--debug-file",
         "--leader-socket"
       ],
-      "helpHash": "79697113e014f8e9fe0617dacd8fba7493f88c4270fe4f3c5628a77742635bf0",
+      "helpHash": "dfee729c94c507dcfaebf086b75ced0731aace43ace9e535075b8f1064d32985",
       "extraVsContract": [],
       "missingFromBinary": [],
       "risk": "read_only",
@@ -422,14 +433,14 @@
       "commandPath": [
         "setup"
       ],
-      "probedAt": "2026-06-12T03:23:41.753Z",
+      "probedAt": "2026-06-18T21:11:35.731Z",
       "available": true,
       "flags": [
         "--debug",
         "--debug-file",
         "--leader-socket"
       ],
-      "helpHash": "d17e8776ccae46d79fc1afd3d921aba37fa675a3790287568be5cecf5a87cb8e",
+      "helpHash": "24e748b31306d3d34a3a2475b3f2106c25de2d7cd92916e9534a93fb8331d60f",
       "extraVsContract": [],
       "missingFromBinary": [],
       "risk": "writes_local_config",
@@ -441,14 +452,14 @@
       "commandPath": [
         "ssh"
       ],
-      "probedAt": "2026-06-12T03:23:42.247Z",
+      "probedAt": "2026-06-18T21:11:35.765Z",
       "available": true,
       "flags": [
         "--debug",
         "--debug-file",
         "--leader-socket"
       ],
-      "helpHash": "9da6889526042700a7620f0eadc5b440f7edfd0d2ce1e8d157cf94d4f5aabf6b",
+      "helpHash": "2f14aafa1d5bf6a6cfc1f69ead0ff150f8fd10107495ca5743d82d6d16fddf4c",
       "extraVsContract": [],
       "missingFromBinary": [],
       "risk": "network",
@@ -460,7 +471,7 @@
       "commandPath": [
         "trace"
       ],
-      "probedAt": "2026-06-12T03:23:42.749Z",
+      "probedAt": "2026-06-18T21:11:35.800Z",
       "available": true,
       "flags": [
         "--debug",
@@ -470,7 +481,7 @@
         "--local",
         "--output"
       ],
-      "helpHash": "8a2d012df6474ce738446150032871b70b8842f07249c8cbff63e33f348c0421",
+      "helpHash": "71b59a3637e05a6e5705de2acf28efd8b998acfdf53c4d406fd34b9bfe725a5a",
       "extraVsContract": [],
       "missingFromBinary": [],
       "risk": "read_only",
@@ -482,7 +493,7 @@
       "commandPath": [
         "update"
       ],
-      "probedAt": "2026-06-12T03:23:43.265Z",
+      "probedAt": "2026-06-18T21:11:35.834Z",
       "available": true,
       "flags": [
         "--alpha",
@@ -495,7 +506,7 @@
         "--stable",
         "--version"
       ],
-      "helpHash": "6e8133748c9f19919ceef46443dc35df18a0f15cb70e5589d06eac4d8a867359",
+      "helpHash": "ecdf2a599cd19e5593adde54866826d688baa4f45ec1bdcc3258bb192f31be17",
       "extraVsContract": [],
       "missingFromBinary": [],
       "risk": "updates_binary",
@@ -507,7 +518,7 @@
       "commandPath": [
         "version"
       ],
-      "probedAt": "2026-06-12T03:23:43.774Z",
+      "probedAt": "2026-06-18T21:11:35.867Z",
       "available": true,
       "flags": [
         "--debug",
@@ -515,7 +526,7 @@
         "--json",
         "--leader-socket"
       ],
-      "helpHash": "6c378ad86fa4d18155e023eb413fb0b287c019b89731d8edb3f9df5ae4a17f74",
+      "helpHash": "0e2b707034bac7a8e912a4109ab93ce1b6797537143211cbceb430356def3f21",
       "extraVsContract": [],
       "missingFromBinary": [],
       "risk": "read_only",
@@ -527,14 +538,14 @@
       "commandPath": [
         "worktree"
       ],
-      "probedAt": "2026-06-12T03:23:44.256Z",
+      "probedAt": "2026-06-18T21:11:35.901Z",
       "available": true,
       "flags": [
         "--debug",
         "--debug-file",
         "--leader-socket"
       ],
-      "helpHash": "c722e1978eecd664cc786665cd720deee34d1385c4426832e1ec36f8c95163f1",
+      "helpHash": "7675aabb893861eeabe40d4212939bdbe5f486def398007b34ba06c691b6c074",
       "extraVsContract": [],
       "missingFromBinary": [],
       "risk": "writes_local_config",

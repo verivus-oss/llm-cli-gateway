@@ -5232,7 +5232,7 @@ export async function handleGrokRequestAsync(
 export interface DevinRequestParams {
   prompt?: string;
   model?: string;
-  permissionMode?: "normal" | "auto" | "dangerous" | "yolo" | "bypass";
+  permissionMode?: "auto" | "smart" | "dangerous";
   promptFile?: string;
   transport?: "cli" | "acp";
   sessionId?: string;
@@ -5250,7 +5250,7 @@ export function prepareDevinRequest(
   params: {
     prompt?: string;
     model?: string;
-    permissionMode?: string;
+    permissionMode?: DevinRequestParams["permissionMode"];
     promptFile?: string;
     correlationId?: string;
     optimizePrompt: boolean;
@@ -7922,10 +7922,10 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           "Transport: 'cli' (default) runs the Devin CLI; 'acp' routes through `devin acp` when [acp].enabled and the provider's runtime_enabled are set (fails closed otherwise)."
         ),
       permissionMode: z
-        .enum(["normal", "auto", "dangerous", "yolo", "bypass"])
+        .enum(["auto", "smart", "dangerous"])
         .optional()
         .describe(
-          "Devin CLI permission mode (--permission-mode). normal (alias auto) auto-approves read-only tools; dangerous (aliases yolo, bypass) auto-approves all."
+          "Devin CLI permission mode (--permission-mode). auto auto-approves read-only tools; smart additionally auto-runs actions a fast model judges safe; dangerous auto-approves all."
         ),
       promptFile: z
         .string()
@@ -9336,9 +9336,9 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .describe("Prompt text for Devin CLI"),
         model: z.string().optional().describe("Model name or alias (e.g. opus, latest)"),
         permissionMode: z
-          .enum(["normal", "dangerous", "bypass"])
+          .enum(["auto", "smart", "dangerous"])
           .optional()
-          .describe("Devin CLI permission mode (--permission-mode)"),
+          .describe("Devin CLI permission mode (--permission-mode). auto, smart, or dangerous."),
         promptFile: z
           .string()
           .optional()

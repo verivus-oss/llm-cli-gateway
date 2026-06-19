@@ -663,12 +663,20 @@ Options:
   });
 
   describe("ACP upstream entrypoint contracts (track-acp-upstream-contracts)", () => {
-    const ALL_PROVIDERS: readonly CliType[] = ["claude", "codex", "gemini", "grok", "mistral"];
+    const ALL_PROVIDERS: readonly CliType[] = [
+      "claude",
+      "codex",
+      "devin",
+      "gemini",
+      "grok",
+      "mistral",
+    ];
 
     it("declares an ACP entrypoint contract for every provider with the matrix status", () => {
       const expected: Record<CliType, string> = {
         mistral: "native",
         grok: "native",
+        devin: "native",
         codex: "adapter_mediated_deferred",
         claude: "adapter_mediated_deferred",
         gemini: "absent_watchlist",
@@ -686,6 +694,8 @@ Options:
       expect(ACP_ENTRYPOINT_CONTRACTS.mistral.entrypointArgs).toEqual([]);
       expect(ACP_ENTRYPOINT_CONTRACTS.grok.executable).toBe("grok");
       expect(ACP_ENTRYPOINT_CONTRACTS.grok.entrypointArgs).toEqual(["agent", "stdio"]);
+      expect(ACP_ENTRYPOINT_CONTRACTS.devin.executable).toBe("devin");
+      expect(ACP_ENTRYPOINT_CONTRACTS.devin.entrypointArgs).toEqual(["acp"]);
 
       // codex/claude adapters are documentation only, never native.
       expect(ACP_ENTRYPOINT_CONTRACTS.codex.status).not.toBe("native");
@@ -694,11 +704,11 @@ Options:
       expect((ACP_ENTRYPOINT_CONTRACTS.claude.adapterCandidates ?? []).length).toBeGreaterThan(0);
     });
 
-    it("keeps agy on the watchlist with no ACP surface at agy 1.0.7", () => {
+    it("keeps agy on the watchlist with no ACP surface at agy 1.0.9", () => {
       const agy = ACP_ENTRYPOINT_CONTRACTS.gemini;
       expect(agy.status).toBe("absent_watchlist");
       expect(agy.executable).toBe("agy");
-      expect(agy.targetVersion).toContain("1.0.7");
+      expect(agy.targetVersion).toContain("1.0.9");
       expect(agy.entrypointArgs).toEqual([]);
       expect(agy.probeArgs).toEqual([]);
     });

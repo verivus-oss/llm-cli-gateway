@@ -30,8 +30,13 @@ docs/personal-mcp/socket-release-assessment-prompt.md
 
 # Local agent/worktree artifacts
 .claude/
+.gateway/
 .worktrees/
 .r3-poll.mjs
+
+# Host-specific restart/deployment notes for this private checkout.
+.agents/skills/gateway-restart-surfaces/
+docs/plans/hybrid-multi-agent-playbook-evolution.dag.toml
 
 # Internal agent working guide — internal repo/release context, must not ship
 AGENTS.md

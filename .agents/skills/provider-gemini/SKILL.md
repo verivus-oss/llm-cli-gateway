@@ -1,9 +1,9 @@
 ---
 name: provider-gemini
-description: Track and maintain the gateway's Gemini-compatible Google Antigravity CLI contract. Use when Google ships an Antigravity CLI release, when an `agy` flag/permission/session behaviour changes, or when an upstream scan flags drift. Process guidance only — `src/upstream-contracts.ts` is the mechanical source of truth.
+description: Track and maintain the gateway's Gemini-compatible Google Antigravity CLI contract. Use when Google ships an Antigravity CLI release, when an `agy` flag/permission/session/subcommand behaviour changes, or when an upstream scan flags drift. Process guidance only — `src/upstream-contracts.ts` is the mechanical source of truth.
 metadata:
   author: verivus-oss
-  version: "1.0"
+  version: "1.2"
 ---
 
 # Provider: Google Antigravity CLI
@@ -87,6 +87,7 @@ is set.
 
 ## Antigravity-specific notes (see the contract for exact rules)
 
+- Tested against agy 1.0.9 (ACP targetVersion).
 - The public MCP tool names stay `gemini_request` / `gemini_request_async`, but
   the spawned executable is `agy`.
 - Antigravity print mode uses `--print <prompt-as-positional>`, not Gemini's
