@@ -83,7 +83,7 @@ describe("Slice D0 prepareDevinRequest — headless argv", () => {
     expect(args).not.toContain("--permission-mode");
   });
 
-  // Verified against devin 2026.7.19 (a64a20ba): modes are `auto`, `smart`, `dangerous`.
+  // Verified against devin 2026.7.23 (3bd47f77): modes are `auto`, `smart`, `dangerous`.
   it.each(["auto", "smart", "dangerous"] as const)(
     "forwards the CLI-valid permission-mode %s verbatim",
     mode => {

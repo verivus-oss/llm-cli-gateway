@@ -2,16 +2,18 @@
 
 All notable changes to the llm-cli-gateway project.
 
-## Unreleased
+## [2.11.1] - 2026-06-22: Provider contract refresh and stable upstream scans
 
 ### Changed
 
-- **Upstream contracts refreshed for all providers.** After the Grok 0.2.56 update, live `--probe-installed` probes were run for the remaining CLIs. Synced contract surfaces and bumped ACP `targetVersion` pins:
-  - claude → 2.1.181 (added `--ax-screen-reader`, `--safe-mode` to acknowledged flags; `agents --all` to subcommand contract)
-  - codex → 0.140.0 (aligned `exec resume` / `exec review` / top-level `review` flag lists with current advertised surfaces)
-  - gemini (agy) → 1.0.9
-  - mistral (vibe) → 2.16.1
-  - devin → 2026.7.19 (a64a20ba) (added new flags to `acknowledgedUpstreamFlags`)
+- **Upstream contracts refreshed for all providers.** Live `--probe-installed` probes were run across the installed provider CLIs. Synced contract surfaces and bumped ACP `targetVersion` pins:
+  - claude → 2.1.185 (added `--ax-screen-reader`, `--safe-mode` to acknowledged flags; `agents --all` to subcommand contract)
+  - codex → 0.141.0 (aligned `exec resume` / `exec review` / top-level `review` flag lists with current advertised surfaces)
+  - gemini (agy) → 1.0.10
+  - grok → 0.2.60 (474c2bbfc)
+  - mistral (vibe) → 2.17.1
+  - devin → 2026.7.23 (3bd47f77) (added new flags to `acknowledgedUpstreamFlags`)
+- **Mistral upstream scan source stabilized.** The scanner now tracks GitHub's latest-release API for Mistral Vibe instead of the volatile HTML releases page, so `--live --fail-on-critical` no longer trips on release-page chrome/hash churn.
 - **Provider skill docs updated.** All five `.agents/skills/provider-*` files bumped to metadata version 1.2. Descriptions now call out `/subcommand` behaviour changes; added current-version "Tested against" notes and usage examples for the cache levers (Grok compaction, Claude `cacheControl`).
 - **Cache usage documentation expanded with concrete examples.** Added exact parameters, emitted CLI flags, and stream-json payload shapes for Grok `compactionMode`/`compactionDetail` and Claude `promptParts.cacheControl` (including the `assembleClaudeCacheBlocks` NDJSON structure with `cache_control: {type:"ephemeral", ttl:"1h"}`) to:
   - `docs/personal-mcp/PROVIDER_CACHE_SURFACES.md`

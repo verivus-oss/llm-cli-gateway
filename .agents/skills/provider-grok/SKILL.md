@@ -65,7 +65,7 @@ metadata is authoritative; the TOML is scanner input only.
    `reference_to_video` when those skills are present. The gateway still
    executes Grok through `grok_request`; it does not directly call those native
    tools.
-8. The full subcommand surface (including `agent/*`, `update`, `worktree`, `dashboard`, `login`, etc.) is exposed via `provider_subcommands_list`, `provider_subcommand_contract`, and `provider_subcommand_drift` for inspection and drift monitoring. `dashboard` (grok 0.2.56 (4d4448c98)+) is catalogued as read-only/inspect.
+8. The full subcommand surface (including `agent/*`, `update`, `worktree`, `dashboard`, `login`, etc.) is exposed via `provider_subcommands_list`, `provider_subcommand_contract`, and `provider_subcommand_drift` for inspection and drift monitoring. `dashboard` (grok 0.2.60 (474c2bbfc)+) is catalogued as read-only/inspect.
 9. Grok continuity is real via `sessionId`, `resumeLatest`, `createNewSession`,
    `--resume`, and `--continue`. Auth must already be set up with `grok login`
    or `GROK_CODE_XAI_API_KEY`.
@@ -99,12 +99,12 @@ A failed fetch is advisory (exit 0) unless `--fail-on-critical` is passed.
 
 ## Grok-specific notes (see the contract for exact rules)
 
-- Tested against grok 0.2.56 (4d4448c98) (ACP targetVersion).
+- Tested against grok 0.2.60 (474c2bbfc) (ACP targetVersion).
 - `--sandbox` is freeform passthrough (no `values` enum) per `grok --help`; `--permission-mode` / `--effort` / `--output-format` are closed enums.
 - `--allow` / `--deny` / `--rules` repeat once per rule.
 - Continuity is real via `--resume` / `--continue`; auth must be set up first (`grok login` OAuth or `GROK_CODE_XAI_API_KEY`).
 - No cache statistics are surfaced by the Grok CLI.
-- `dashboard` subcommand is tracked (read_only risk, inspect tier, tracked_only exposure) in the subcommand catalog and `--probe-installed` drift detection. It opens the central Agent Dashboard view (grok 0.2.56 (4d4448c98)+). Example:
+- `dashboard` subcommand is tracked (read_only risk, inspect tier, tracked_only exposure) in the subcommand catalog and `--probe-installed` drift detection. It opens the central Agent Dashboard view (grok 0.2.60 (474c2bbfc)+). Example:
   ```
   provider_subcommand_contract({provider:"grok", commandPath:["dashboard"]})
   ```

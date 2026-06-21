@@ -87,10 +87,10 @@ A failed fetch is advisory (exit 0) unless `--fail-on-critical` is passed.
 
 ## Codex-specific notes (see the contract for exact rules)
 
-- Tested against codex-cli 0.140.0 (ACP targetVersion).
+- Tested against codex-cli 0.141.0 (ACP targetVersion).
 - argv must start with `exec`; `exec resume` enters resume context.
 - `--last` is resume-only; `--sandbox` / `--ask-for-approval` / `--full-auto` / `--search` are forbidden on resume (per resumeForbiddenFlags).
-- `--output-schema`, `-c key=value`, `--ephemeral`, safety bypasses (on review), `--json` etc. are accepted on resume/review (codex-cli 0.140.0). Example (resume):
+- `--output-schema`, `-c key=value`, `--ephemeral`, safety bypasses (on review), `--json` etc. are accepted on resume/review (codex-cli 0.141.0). Example (resume):
   ```
   codex exec resume --ephemeral --json <UUID> "follow up"
   ```

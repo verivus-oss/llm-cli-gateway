@@ -90,12 +90,12 @@ never breaks the default release gate.
 
 ## Claude-specific notes (see the contract for exact rules)
 
-- Tested against claude 2.1.181 (ACP targetVersion).
+- Tested against claude 2.1.185 (ACP targetVersion).
 - `-p` has `optional` arity: standalone in slice κ stdin mode, legacy `-p <prompt>` otherwise.
 - `stream-json` output requires `--verbose` alongside `--print`; the gateway emits them together.
 - `--input-format stream-json` carries caller `cache_control` breakpoints.
 - Permission modes and reasoning-effort levels are closed enums — extend the enum in the contract, not here.
-- `agents --all` (with `--json`) includes completed background sessions (2.1.181+). Example:
+- `agents --all` (with `--json`) includes completed background sessions (2.1.185+). Example:
   ```
   claude agents --json --all
   ```

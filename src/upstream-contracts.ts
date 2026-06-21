@@ -264,7 +264,7 @@ export const ACP_ENTRYPOINT_CONTRACTS: Record<CliType, AcpEntrypointContract> = 
     status: "native",
     executable: "vibe-acp",
     entrypointArgs: [],
-    targetVersion: "vibe 2.16.1",
+    targetVersion: "vibe 2.17.1",
     probeArgs: [["--version"], ["--help"]],
     evidence:
       "Native ACP executable vibe-acp; manual initialize + session/new smoke passed. First runtime pilot.",
@@ -276,12 +276,12 @@ export const ACP_ENTRYPOINT_CONTRACTS: Record<CliType, AcpEntrypointContract> = 
     status: "native",
     executable: "grok",
     entrypointArgs: ["agent", "stdio"],
-    targetVersion: "grok 0.2.56 (4d4448c98)",
+    targetVersion: "grok 0.2.60 (474c2bbfc)",
     // `grok agent stdio --help` is a safe help probe; bare `grok agent stdio`
     // starts the live ACP server and is intentionally NOT probed here.
     probeArgs: [["agent", "stdio", "--help"]],
     evidence:
-      "Native ACP via `grok agent stdio`; initialize + session/new smoke passed with isolated leader socket. Second runtime pilot. Bumped for 0.2.56.",
+      "Native ACP via `grok agent stdio`; initialize + session/new smoke passed with isolated leader socket. Second runtime pilot. Bumped for 0.2.60.",
     docsRef: "docs/plans/first-class-acp-gateway-extension.dag.toml#provider_matrix.grok",
   },
   codex: {
@@ -290,11 +290,11 @@ export const ACP_ENTRYPOINT_CONTRACTS: Record<CliType, AcpEntrypointContract> = 
     status: "adapter_mediated_deferred",
     executable: "codex",
     entrypointArgs: [],
-    targetVersion: "codex-cli 0.140.0",
+    targetVersion: "codex-cli 0.141.0",
     probeArgs: [],
     adapterCandidates: ["zed-industries/codex-acp", "agentclientprotocol/codex-acp"],
     evidence:
-      "No native ACP entrypoint at codex-cli 0.140.0. Adapter evidence tracked as documentation only; not native gateway ACP support.",
+      "No native ACP entrypoint at codex-cli 0.141.0. Adapter evidence tracked as documentation only; not native gateway ACP support.",
     docsRef: "docs/plans/first-class-acp-gateway-extension.dag.toml#provider_matrix.codex",
   },
   claude: {
@@ -303,11 +303,11 @@ export const ACP_ENTRYPOINT_CONTRACTS: Record<CliType, AcpEntrypointContract> = 
     status: "adapter_mediated_deferred",
     executable: "claude",
     entrypointArgs: [],
-    targetVersion: "claude 2.1.181",
+    targetVersion: "claude 2.1.185",
     probeArgs: [],
     adapterCandidates: ["Claude Agent SDK ACP adapter"],
     evidence:
-      "No native Claude Code CLI ACP entrypoint at claude 2.1.181. Adapter ownership/permission bridging unresolved; deferred.",
+      "No native Claude Code CLI ACP entrypoint at claude 2.1.185. Adapter ownership/permission bridging unresolved; deferred.",
     docsRef: "docs/plans/first-class-acp-gateway-extension.dag.toml#provider_matrix.claude",
   },
   gemini: {
@@ -316,10 +316,10 @@ export const ACP_ENTRYPOINT_CONTRACTS: Record<CliType, AcpEntrypointContract> = 
     status: "absent_watchlist",
     executable: "agy",
     entrypointArgs: [],
-    targetVersion: "agy 1.0.9",
+    targetVersion: "agy 1.0.10",
     probeArgs: [],
     evidence:
-      "agy 1.0.9 has no ACP flag or subcommand. Legacy Gemini CLI ACP evidence does not transfer. Watchlist item.",
+      "agy 1.0.10 has no ACP flag or subcommand. Legacy Gemini CLI ACP evidence does not transfer. Watchlist item.",
     docsRef: "docs/plans/first-class-acp-gateway-extension.dag.toml#provider_matrix.gemini",
   },
   devin: {
@@ -328,7 +328,7 @@ export const ACP_ENTRYPOINT_CONTRACTS: Record<CliType, AcpEntrypointContract> = 
     status: "native",
     executable: "devin",
     entrypointArgs: ["acp"],
-    targetVersion: "devin 2026.7.19 (a64a20ba)",
+    targetVersion: "devin 2026.7.23 (3bd47f77)",
     // `devin --version` is the safe probe; bare `devin acp` starts the live ACP
     // server over stdio and is intentionally NOT probed here.
     probeArgs: [["--version"]],
@@ -1878,25 +1878,34 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         description: "Custom leader socket path (isolated leader, Grok 0.2.32+)",
       },
       "--single": { arity: "one", description: "Single-turn prompt" },
-      "--todo-gate": { arity: "none", description: "Enable runtime turn-end TodoGate" },
+      "--todo-gate": {
+        arity: "none",
+        description:
+          "Enable runtime turn-end TodoGate (accepted at 0.2.60+ but hidden from --help)",
+        hiddenFromHelp: true,
+      },
       "--verbatim": { arity: "none", description: "Send prompt exactly as given" },
       "--version": { arity: "none", description: "Print version" },
       "--worktree": {
         arity: "optional",
         description: "Start the session in a new git worktree, optionally named",
       },
-      // Grok 0.2.x context/compaction controls (both enum, env-backed):
+      // Grok 0.2.x context/compaction controls (both enum, env-backed).
+      // As of 0.2.60 these are accepted by the runtime but omitted from --help
+      // output; mark hiddenFromHelp so the installed probe does not flag drift.
       "--compaction-mode": {
         arity: "one",
         values: ["summary", "transcript", "segments"],
         description:
           "Compaction mode (default summary; sets GROK_COMPACTION_MODE). `segments` persists per-segment markdown.",
+        hiddenFromHelp: true,
       },
       "--compaction-detail": {
         arity: "one",
         values: ["none", "minimal", "balanced", "verbose"],
         description:
           "Segment verbatim detail (default verbose; sets GROK_COMPACTION_DETAIL). Only affects `--compaction-mode segments`.",
+        hiddenFromHelp: true,
       },
     },
     env: {},
@@ -2065,7 +2074,7 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
     executable: "vibe",
     upstream: "Mistral Vibe CLI",
     upstreamMetadata: {
-      sourceUrls: ["https://github.com/mistralai/mistral-vibe/releases"],
+      sourceUrls: ["https://api.github.com/repos/mistralai/mistral-vibe/releases/latest"],
       packageName: "mistral-vibe",
       repo: "https://github.com/mistralai/mistral-vibe",
       installDocsUrl: "https://github.com/mistralai/mistral-vibe#installation",
@@ -2163,11 +2172,12 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
           "Additional writable workspace directory (Phase 4 slice ζ; repeat once per directory)",
       },
     },
-    // `--auto-approve` exists in Vibe's help as a shortcut for `--agent auto-approve`.
-    // The gateway never emits it (it maps permissionMode → `--agent <mode>`), so it is
-    // acknowledged-but-not-allowed: drift detection keeps it from being flagged as a
-    // new upstream flag while validateUpstreamCliArgs still rejects it as caller argv.
-    acknowledgedUpstreamFlags: ["--auto-approve"],
+    // These exist in Vibe's help but are not gateway request-time surfaces.
+    // `--auto-approve` / `--yolo` are shortcuts for `--agent auto-approve`, and
+    // `--check-upgrade` prompts for a binary update. Keep them acknowledged but
+    // absent from the argv allowlist so drift detection stays quiet while
+    // validateUpstreamCliArgs still rejects them as caller argv.
+    acknowledgedUpstreamFlags: ["--auto-approve", "--check-upgrade", "--yolo"],
     env: {
       VIBE_ACTIVE_MODEL: {
         arity: "one",
@@ -2268,10 +2278,27 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       },
       {
         id: "mistral-current-help-surface",
-        description: "Vibe 2.16.1 help surface: --prompt, -v, --version, --setup accepted",
+        description:
+          "Vibe 2.17.1 request-time help surface: --prompt, -v, --version, --setup accepted",
         args: ["--prompt", "hello", "--agent", "auto-approve", "-v", "--version", "--setup"],
         env: { VIBE_ACTIVE_MODEL: "mistral-medium-3.5" },
         expect: "pass",
+      },
+      {
+        id: "mistral-yolo-shortcut-rejected",
+        description:
+          "Vibe 2.17.1 advertises --yolo as a shortcut, but the gateway keeps using explicit --agent auto-approve",
+        args: ["-p", "hello", "--yolo"],
+        env: { VIBE_ACTIVE_MODEL: "mistral-medium-3.5" },
+        expect: "fail",
+      },
+      {
+        id: "mistral-check-upgrade-rejected",
+        description:
+          "Vibe 2.17.1 advertises --check-upgrade, but gateway request validation rejects update-prompt flags",
+        args: ["--check-upgrade"],
+        env: { VIBE_ACTIVE_MODEL: "mistral-medium-3.5" },
+        expect: "fail",
       },
       {
         id: "mistral-resume-bare",
@@ -2317,7 +2344,7 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       "--model": { arity: "one", description: "AI model for this session" },
       "--permission-mode": {
         arity: "one",
-        // Verified against devin 2026.7.19 (a64a20ba): `auto`, `smart`, `dangerous`.
+        // Verified against devin 2026.7.23 (3bd47f77): `auto`, `smart`, `dangerous`.
         values: ["auto", "smart", "dangerous"],
         description:
           "Permission mode (auto = read-only auto-approve; smart = additionally auto-runs safe actions per fast model; dangerous = approve all)",

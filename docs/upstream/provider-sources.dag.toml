@@ -90,7 +90,7 @@ cadence_days = 7
 
 [providers.mistral]
 cli = "mistral"
-source_urls = ["https://github.com/mistralai/mistral-vibe/releases"]
+source_urls = ["https://api.github.com/repos/mistralai/mistral-vibe/releases/latest"]
 watch_categories = [
   "flags",
   "agent-modes",

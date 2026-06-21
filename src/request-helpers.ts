@@ -202,7 +202,7 @@ export function resolveMistralSessionArgs(opts: {
  * gateway accepts any string and lets Vibe validate availability, rather than
  * pinning a closed list that would reject valid install-gated/custom agents.
  * The builtins are kept only for documentation and the request schema's example
- * text. (Verified against the installed Vibe 2.16.1 `BUILTIN_AGENTS`: `chat` is
+ * text. (Verified against the installed Vibe 2.17.1 `BUILTIN_AGENTS`: `chat` is
  * not a selectable primary builtin and `explore` is a subagent, so neither is
  * listed; `lean` is an install-gated primary agent that callers may still pass.)
  */

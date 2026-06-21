@@ -87,7 +87,7 @@ is set.
 
 ## Antigravity-specific notes (see the contract for exact rules)
 
-- Tested against agy 1.0.9 (ACP targetVersion).
+- Tested against agy 1.0.10 (ACP targetVersion).
 - The public MCP tool names stay `gemini_request` / `gemini_request_async`, but
   the spawned executable is `agy`.
 - Antigravity print mode uses `--print <prompt-as-positional>`, not Gemini's

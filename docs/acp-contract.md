@@ -87,12 +87,12 @@ classification does not pre-empt them.
 
 | Provider               | Target CLI version       | Frozen ACP classification | Native entrypoint        |
 | ---------------------- | ------------------------ | ------------------------- | ------------------------ |
-| Mistral Vibe           | vibe 2.16.1              | native_candidate          | `vibe-acp`               |
-| xAI Grok CLI           | grok 0.2.56 (4d4448c98)  | native_candidate          | `grok agent stdio`       |
-| Cognition Devin CLI    | devin 2026.7.19 (a64a20ba) | native_candidate      | `devin acp`              |
-| OpenAI Codex CLI       | codex-cli 0.140.0        | adapter_mediated_deferred | none at target version   |
-| Anthropic Claude Code  | claude 2.1.181           | adapter_mediated_deferred | none at target version   |
-| Google Antigravity agy | agy 1.0.9                | absent_watchlist          | none at target version   |
+| Mistral Vibe           | vibe 2.17.1              | native_candidate          | `vibe-acp`               |
+| xAI Grok CLI           | grok 0.2.60 (474c2bbfc)  | native_candidate          | `grok agent stdio`       |
+| Cognition Devin CLI    | devin 2026.7.23 (3bd47f77) | native_candidate      | `devin acp`              |
+| OpenAI Codex CLI       | codex-cli 0.141.0        | adapter_mediated_deferred | none at target version   |
+| Anthropic Claude Code  | claude 2.1.185           | adapter_mediated_deferred | none at target version   |
+| Google Antigravity agy | agy 1.0.10                | absent_watchlist          | none at target version   |
 
 Notes:
 
@@ -101,7 +101,7 @@ Notes:
   stays behind global and per-provider config gates.
 - Codex and Claude are adapter-mediated and deferred at their target CLI
   versions; adapter evidence is documentation only and never native support.
-- Antigravity `agy` 1.0.9 has no ACP surface. Legacy Gemini CLI ACP evidence
+- Antigravity `agy` 1.0.10 has no ACP surface. Legacy Gemini CLI ACP evidence
   does not transfer to `agy`, so `agy` stays a watchlist item.
 
 ## Authoritative references

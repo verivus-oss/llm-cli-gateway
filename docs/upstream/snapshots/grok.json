@@ -1,9 +1,9 @@
 {
   "cli": "grok",
-  "fetchedAt": "2026-06-18T21:11:35.937Z",
+  "fetchedAt": "2026-06-21T20:54:08.667Z",
   "sources": [],
   "helpSurface": {
-    "probedAt": "2026-06-18T21:11:35.901Z",
+    "probedAt": "2026-06-21T20:54:08.631Z",
     "available": true,
     "version": null,
     "flags": [
@@ -13,8 +13,6 @@
       "--always-approve",
       "--best-of-n",
       "--check",
-      "--compaction-detail",
-      "--compaction-mode",
       "--continue",
       "--cwd",
       "--debug",
@@ -43,13 +41,12 @@
       "--sandbox",
       "--single",
       "--system-prompt-override",
-      "--todo-gate",
       "--tools",
       "--verbatim",
       "--version",
       "--worktree"
     ],
-    "helpHash": "6e7f56cf49ad1921900472f8ee1643af3a2a16c48c0026c240319b5f4024a820",
+    "helpHash": "d277cef465079ef5523cb500709c72451585666ed320c3405d8f0e06ddeac719",
     "extraVsContract": [],
     "missingFromBinary": []
   },
@@ -58,7 +55,7 @@
       "commandPath": [
         "agent"
       ],
-      "probedAt": "2026-06-18T21:11:35.101Z",
+      "probedAt": "2026-06-21T20:54:07.836Z",
       "available": true,
       "flags": [
         "--agent-profile",
@@ -89,7 +86,7 @@
         "agent",
         "headless"
       ],
-      "probedAt": "2026-06-18T21:11:35.137Z",
+      "probedAt": "2026-06-21T20:54:07.871Z",
       "available": true,
       "flags": [
         "--debug",
@@ -111,7 +108,7 @@
         "agent",
         "leader"
       ],
-      "probedAt": "2026-06-18T21:11:35.171Z",
+      "probedAt": "2026-06-21T20:54:07.906Z",
       "available": true,
       "flags": [
         "--debug",
@@ -136,7 +133,7 @@
         "agent",
         "serve"
       ],
-      "probedAt": "2026-06-18T21:11:35.208Z",
+      "probedAt": "2026-06-21T20:54:07.941Z",
       "available": true,
       "flags": [
         "--bind",
@@ -161,7 +158,7 @@
         "agent",
         "stdio"
       ],
-      "probedAt": "2026-06-18T21:11:35.243Z",
+      "probedAt": "2026-06-21T20:54:07.976Z",
       "available": true,
       "flags": [
         "--debug",
@@ -180,7 +177,7 @@
       "commandPath": [
         "completions"
       ],
-      "probedAt": "2026-06-18T21:11:35.277Z",
+      "probedAt": "2026-06-21T20:54:08.011Z",
       "available": true,
       "flags": [
         "--debug",
@@ -199,7 +196,7 @@
       "commandPath": [
         "dashboard"
       ],
-      "probedAt": "2026-06-18T21:11:35.313Z",
+      "probedAt": "2026-06-21T20:54:08.045Z",
       "available": true,
       "flags": [
         "--debug",
@@ -218,7 +215,7 @@
       "commandPath": [
         "export"
       ],
-      "probedAt": "2026-06-18T21:11:35.348Z",
+      "probedAt": "2026-06-21T20:54:08.079Z",
       "available": true,
       "flags": [
         "--clipboard",
@@ -238,7 +235,7 @@
       "commandPath": [
         "import"
       ],
-      "probedAt": "2026-06-18T21:11:35.382Z",
+      "probedAt": "2026-06-21T20:54:08.114Z",
       "available": true,
       "flags": [
         "--debug",
@@ -259,7 +256,7 @@
       "commandPath": [
         "inspect"
       ],
-      "probedAt": "2026-06-18T21:11:35.416Z",
+      "probedAt": "2026-06-21T20:54:08.148Z",
       "available": true,
       "flags": [
         "--debug",
@@ -279,7 +276,7 @@
       "commandPath": [
         "leader"
       ],
-      "probedAt": "2026-06-18T21:11:35.451Z",
+      "probedAt": "2026-06-21T20:54:08.184Z",
       "available": true,
       "flags": [
         "--debug",
@@ -298,7 +295,7 @@
       "commandPath": [
         "login"
       ],
-      "probedAt": "2026-06-18T21:11:35.486Z",
+      "probedAt": "2026-06-21T20:54:08.217Z",
       "available": true,
       "flags": [
         "--debug",
@@ -319,7 +316,7 @@
       "commandPath": [
         "logout"
       ],
-      "probedAt": "2026-06-18T21:11:35.523Z",
+      "probedAt": "2026-06-21T20:54:08.251Z",
       "available": true,
       "flags": [
         "--debug",
@@ -338,7 +335,7 @@
       "commandPath": [
         "mcp"
       ],
-      "probedAt": "2026-06-18T21:11:35.557Z",
+      "probedAt": "2026-06-21T20:54:08.286Z",
       "available": true,
       "flags": [
         "--debug",
@@ -357,7 +354,7 @@
       "commandPath": [
         "memory"
       ],
-      "probedAt": "2026-06-18T21:11:35.592Z",
+      "probedAt": "2026-06-21T20:54:08.319Z",
       "available": true,
       "flags": [
         "--debug",
@@ -376,7 +373,7 @@
       "commandPath": [
         "models"
       ],
-      "probedAt": "2026-06-18T21:11:35.627Z",
+      "probedAt": "2026-06-21T20:54:08.354Z",
       "available": true,
       "flags": [
         "--debug",
@@ -395,7 +392,7 @@
       "commandPath": [
         "plugin"
       ],
-      "probedAt": "2026-06-18T21:11:35.663Z",
+      "probedAt": "2026-06-21T20:54:08.391Z",
       "available": true,
       "flags": [
         "--debug",
@@ -414,7 +411,7 @@
       "commandPath": [
         "sessions"
       ],
-      "probedAt": "2026-06-18T21:11:35.697Z",
+      "probedAt": "2026-06-21T20:54:08.427Z",
       "available": true,
       "flags": [
         "--debug",
@@ -433,7 +430,7 @@
       "commandPath": [
         "setup"
       ],
-      "probedAt": "2026-06-18T21:11:35.731Z",
+      "probedAt": "2026-06-21T20:54:08.460Z",
       "available": true,
       "flags": [
         "--debug",
@@ -452,7 +449,7 @@
       "commandPath": [
         "ssh"
       ],
-      "probedAt": "2026-06-18T21:11:35.765Z",
+      "probedAt": "2026-06-21T20:54:08.495Z",
       "available": true,
       "flags": [
         "--debug",
@@ -471,7 +468,7 @@
       "commandPath": [
         "trace"
       ],
-      "probedAt": "2026-06-18T21:11:35.800Z",
+      "probedAt": "2026-06-21T20:54:08.526Z",
       "available": true,
       "flags": [
         "--debug",
@@ -493,7 +490,7 @@
       "commandPath": [
         "update"
       ],
-      "probedAt": "2026-06-18T21:11:35.834Z",
+      "probedAt": "2026-06-21T20:54:08.561Z",
       "available": true,
       "flags": [
         "--alpha",
@@ -518,7 +515,7 @@
       "commandPath": [
         "version"
       ],
-      "probedAt": "2026-06-18T21:11:35.867Z",
+      "probedAt": "2026-06-21T20:54:08.596Z",
       "available": true,
       "flags": [
         "--debug",
@@ -538,7 +535,7 @@
       "commandPath": [
         "worktree"
       ],
-      "probedAt": "2026-06-18T21:11:35.901Z",
+      "probedAt": "2026-06-21T20:54:08.631Z",
       "available": true,
       "flags": [
         "--debug",
