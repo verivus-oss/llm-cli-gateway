@@ -998,7 +998,8 @@ async function awaitApiJobOrDefer(
   runtime: GatewayServerRuntime = resolveGatewayServerRuntime(),
   onComplete?: () => void,
   flightRecorderEntry?: AsyncJobFlightRecorderEntry,
-  extractUsage?: AsyncJobUsageExtractor
+  extractUsage?: AsyncJobUsageExtractor,
+  forceRefresh?: boolean
 ): Promise<ApiJobSuccess | DeferredJobResponse> {
   let onCompleteOwnedByCaller = onComplete !== undefined;
   const consumeOnComplete = (): void => {
@@ -1053,6 +1054,7 @@ async function awaitApiJobOrDefer(
       onComplete,
       flightRecorderEntry,
       extractUsage,
+      forceRefresh,
     });
     onCompleteOwnedByCaller = false;
   } catch (err) {
@@ -4180,6 +4182,8 @@ export async function handleGrokApiRequest(
 
 interface ApiProviderToolParams {
   prompt?: string;
+  /** Slice 2: cache-aware structured prompt, mutually exclusive with `prompt`. */
+  promptParts?: PromptParts;
   system?: string;
   model?: string;
   correlationId?: string;
@@ -4188,16 +4192,79 @@ interface ApiProviderToolParams {
   topP?: number;
   reasoningEffort?: "none" | "low" | "medium" | "high";
   timeoutMs?: number;
+  /** Slice 2: optimize the prompt before sending. */
+  optimizePrompt?: boolean;
+  /** Slice 2: optimize the response text (sync path only). */
+  optimizeResponse?: boolean;
+  /** Slice 2: bypass dedup and force a fresh request. */
+  forceRefresh?: boolean;
 }
 
-/** Build the canonical ApiRequest + provider adapter for a tool call. */
+/**
+ * Slice 2: shared prompt/parts resolution + optimizePrompt for the generic api
+ * tools. Mirrors prepareGrokApiRequest: enforces `prompt` XOR `promptParts`
+ * dynamically at prep (not in the static JSON schema), builds the user content
+ * (parts → tagged sections) and system, applies optimizePrompt, and returns the
+ * flight-recorder-facing effective prompt plus cache-prefix hints.
+ */
+function resolveApiProviderInput(
+  params: ApiProviderToolParams,
+  toolName: string,
+  corrId: string
+):
+  | {
+      ok: true;
+      userContent: string;
+      system: string | undefined;
+      effectivePrompt: string;
+      optimizationApplied: boolean;
+      stablePrefixHash: string | null;
+      stablePrefixTokens: number | null;
+    }
+  | { ok: false; error: ExtendedToolResponse } {
+  const inputResolution = resolvePromptOrPartsForPrep({
+    prompt: params.prompt,
+    promptParts: params.promptParts,
+    operation: toolName,
+    correlationId: corrId,
+  });
+  if (!inputResolution.ok) return { ok: false, error: inputResolution.error };
+
+  const system =
+    params.promptParts?.system && params.promptParts.system.length > 0
+      ? params.promptParts.system
+      : params.system;
+  let userContent = params.promptParts
+    ? buildXaiPromptPartsUserContent(params.promptParts)
+    : (params.prompt ?? "");
+  let optimizationApplied = false;
+  if (params.optimizePrompt) {
+    const optimized = optimizePromptText(userContent);
+    logOptimizationTokens("prompt", corrId, userContent, optimized);
+    userContent = optimized;
+    optimizationApplied = true;
+  }
+  return {
+    ok: true,
+    userContent,
+    system,
+    effectivePrompt: buildXaiPromptPartsEffectivePrompt(system, userContent),
+    optimizationApplied,
+    stablePrefixHash: inputResolution.stablePrefixHash,
+    stablePrefixTokens: inputResolution.stablePrefixTokens,
+  };
+}
+
+/** Build the canonical ApiRequest + provider adapter from resolved input. */
 function buildApiProviderCall(
   providerRuntime: ApiProviderRuntime,
-  params: ApiProviderToolParams
+  params: ApiProviderToolParams,
+  userContent: string,
+  system: string | undefined
 ): { provider: ApiProvider; apiRequest: ApiRequest } {
   const apiRequest = prepareApiRequest(providerRuntime, {
-    prompt: params.prompt ?? "",
-    system: params.system,
+    prompt: userContent,
+    system,
     model: params.model,
     maxOutputTokens: params.maxOutputTokens,
     temperature: params.temperature,
@@ -4252,10 +4319,16 @@ export async function handleApiProviderRequest(
   const startTime = Date.now();
   let wasSuccessful = false;
   try {
-    if (!params.prompt || params.prompt.trim().length === 0) {
-      return createErrorResponse(toolName, 1, "prompt is required and cannot be empty", corrId);
-    }
-    const { provider, apiRequest } = buildApiProviderCall(providerRuntime, params);
+    // Slice 2: prompt XOR promptParts + optimizePrompt resolved here (dynamic,
+    // not static schema), replacing the prompt-only required-check.
+    const resolved = resolveApiProviderInput(params, toolName, corrId);
+    if (!resolved.ok) return resolved.error;
+    const { provider, apiRequest } = buildApiProviderCall(
+      providerRuntime,
+      params,
+      resolved.userContent,
+      resolved.system
+    );
 
     // Slice 1: own the flight-recorder logStart here (the sync handler is the
     // upstream writer). The manager writes logComplete ONLY if the request
@@ -4264,15 +4337,19 @@ export async function handleApiProviderRequest(
     // safeFlightComplete calls below — identical to the grok_api ownership model.
     const flightRecorderEntry: AsyncJobFlightRecorderEntry = {
       model: apiRequest.model,
-      prompt: params.prompt,
+      prompt: resolved.effectivePrompt,
+      stablePrefixHash: resolved.stablePrefixHash ?? undefined,
+      stablePrefixTokens: resolved.stablePrefixTokens ?? undefined,
     };
     safeFlightStart(
       {
         correlationId: corrId,
         cli: providerRuntime.name,
         model: apiRequest.model,
-        prompt: params.prompt,
-        system: params.system,
+        prompt: resolved.effectivePrompt,
+        system: resolved.system,
+        stablePrefixHash: resolved.stablePrefixHash ?? undefined,
+        stablePrefixTokens: resolved.stablePrefixTokens ?? undefined,
       },
       runtimeArg
     );
@@ -4283,7 +4360,9 @@ export async function handleApiProviderRequest(
       corrId,
       runtimeArg,
       undefined,
-      flightRecorderEntry
+      flightRecorderEntry,
+      undefined,
+      params.forceRefresh
     );
     if (isDeferredResponse(result)) return buildDeferredToolResponse(result);
 
@@ -4296,7 +4375,7 @@ export async function handleApiProviderRequest(
           durationMs,
           retryCount: 0,
           circuitBreakerState: "closed",
-          optimizationApplied: false,
+          optimizationApplied: resolved.optimizationApplied,
           exitCode: result.code,
           httpStatus: result.httpStatus ?? undefined,
           errorMessage: result.stderr,
@@ -4310,14 +4389,20 @@ export async function handleApiProviderRequest(
       });
     }
     wasSuccessful = true;
+    let text = result.stdout;
+    if (params.optimizeResponse) {
+      const optimized = optimizeResponseText(text);
+      logOptimizationTokens("response", corrId, text, optimized);
+      text = optimized;
+    }
     safeFlightComplete(
       corrId,
       {
-        response: result.stdout,
+        response: text,
         durationMs,
         retryCount: 0,
         circuitBreakerState: "closed",
-        optimizationApplied: false,
+        optimizationApplied: resolved.optimizationApplied || (params.optimizeResponse ?? false),
         exitCode: 0,
         httpStatus: result.httpStatus ?? undefined,
         status: "completed",
@@ -4328,7 +4413,7 @@ export async function handleApiProviderRequest(
       },
       runtimeArg
     );
-    return buildApiSuccessResponse(result.stdout, corrId, providerRuntime.name, {
+    return buildApiSuccessResponse(text, corrId, providerRuntime.name, {
       model: result.model,
       httpStatus: result.httpStatus,
       responseId: result.responseId,
@@ -4357,19 +4442,30 @@ export function handleApiProviderRequestAsync(
   const toolName = `api_${providerRuntime.name}_request_async`;
   const corrId = params.correlationId ?? randomUUID();
   try {
-    if (!params.prompt || params.prompt.trim().length === 0) {
-      return createErrorResponse(toolName, 1, "prompt is required and cannot be empty", corrId);
-    }
-    const { provider, apiRequest } = buildApiProviderCall(providerRuntime, params);
+    const resolved = resolveApiProviderInput(params, toolName, corrId);
+    if (!resolved.ok) return resolved.error;
+    const { provider, apiRequest } = buildApiProviderCall(
+      providerRuntime,
+      params,
+      resolved.userContent,
+      resolved.system
+    );
     // Slice 1: pure-async path — the manager owns BOTH logStart (writeFlightStart)
     // and the terminal logComplete (armed by writeFlightStart), populating usage
-    // from the captured apiUsage.
+    // from the captured apiUsage. (optimizeResponse is N/A on the async path: the
+    // response is collected later via llm_job_result.)
     const outcome = runtimeArg.asyncJobManager.startHttpJob({
       provider,
       apiRequest,
       correlationId: corrId,
       writeFlightStart: true,
-      flightRecorderEntry: { model: apiRequest.model, prompt: params.prompt ?? "" },
+      forceRefresh: params.forceRefresh,
+      flightRecorderEntry: {
+        model: apiRequest.model,
+        prompt: resolved.effectivePrompt,
+        stablePrefixHash: resolved.stablePrefixHash ?? undefined,
+        stablePrefixTokens: resolved.stablePrefixTokens ?? undefined,
+      },
     });
     return buildDeferredToolResponse({
       deferred: true,
@@ -4404,7 +4500,15 @@ export function registerApiProviderTools(
 ): string[] {
   const registered: string[] = [];
   const inputSchema = {
-    prompt: z.string().min(1).max(100000).optional().describe("Prompt text for the API provider"),
+    prompt: z
+      .string()
+      .min(1)
+      .max(100000)
+      .optional()
+      .describe("Prompt text (mutually exclusive with promptParts)"),
+    promptParts: PromptPartsSchema.optional().describe(
+      "Cache-aware structured prompt { system?, tools?, context?, task }; mutually exclusive with prompt"
+    ),
     system: z.string().max(100000).optional().describe("Optional system instruction"),
     model: z
       .string()
@@ -4417,6 +4521,12 @@ export function registerApiProviderTools(
     topP: z.number().finite().min(0).max(1).optional(),
     reasoningEffort: ApiReasoningEffortSchema.optional(),
     timeoutMs: z.number().int().min(30_000).max(3_600_000).optional(),
+    optimizePrompt: z.boolean().optional().describe("Optimize the prompt before sending"),
+    optimizeResponse: z
+      .boolean()
+      .optional()
+      .describe("Optimize the response text (sync path only)"),
+    forceRefresh: z.boolean().optional().describe("Bypass dedup and force a fresh request"),
   };
 
   for (const providerRuntime of enabledApiProviders(providers)) {

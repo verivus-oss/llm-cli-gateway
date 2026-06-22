@@ -438,3 +438,113 @@ describe("Slice 1 — api provider telemetry parity", () => {
     expect(c.httpStatus).toBe(400);
   });
 });
+
+// Slice 2 — schema parity: promptParts (XOR prompt), optimize*, forceRefresh.
+describe("Slice 2 — api provider schema parity", () => {
+  let tempDir: string;
+  let sessionManager: FileSessionManager;
+  let runtime: GatewayServerRuntime;
+  let closeServer: (() => Promise<void>) | null = null;
+  let lastBody: any;
+  let hits: number;
+
+  function buildRuntime(baseUrl: string): GatewayServerRuntime {
+    const metrics = new PerformanceMetrics();
+    const recorder = new NoopFlightRecorder();
+    const asyncJobManager = new AsyncJobManager(
+      noopLogger,
+      undefined,
+      new MemoryJobStore(),
+      recorder
+    );
+    return resolveGatewayServerRuntime(
+      {
+        sessionManager,
+        asyncJobManager,
+        approvalManager: new ApprovalManager(undefined, noopLogger),
+        performanceMetrics: metrics,
+        resourceProvider: new ResourceProvider(sessionManager, metrics, recorder),
+        flightRecorder: recorder,
+        logger: noopLogger,
+        persistence: mkPersistence(),
+        providers: mkProviders(baseUrl),
+      },
+      { isolateState: true }
+    );
+  }
+
+  async function startServer(): Promise<string> {
+    const server = createServer(async (req, res) => {
+      hits += 1;
+      const chunks: Buffer[] = [];
+      for await (const c of req) chunks.push(Buffer.from(c));
+      lastBody = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ model: "qwen2.5", choices: [{ message: { content: "ok" } }] }));
+    });
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    const addr = server.address();
+    if (!addr || typeof addr === "string") throw new Error("no port");
+    closeServer = () => new Promise(r => server.close(() => r()));
+    return `http://127.0.0.1:${addr.port}/v1`;
+  }
+
+  const rt = (baseUrl: string): ApiProviderRuntime => ({
+    name: "ollama",
+    kind: "openai-compatible",
+    baseUrl,
+    defaultModel: "qwen2.5",
+    apiKey: "",
+  });
+
+  beforeEach(() => {
+    resetApiProviderBreakers();
+    hits = 0;
+    tempDir = mkdtempSync(join(tmpdir(), "api-schema-"));
+    sessionManager = new FileSessionManager(join(tempDir, "sessions.json"));
+  });
+
+  afterEach(async () => {
+    if (closeServer) await closeServer();
+    closeServer = null;
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it("assembles promptParts into system + tagged user content", async () => {
+    const baseUrl = await startServer();
+    runtime = buildRuntime(baseUrl);
+    const res = await handleApiProviderRequest(runtime, rt(baseUrl), {
+      promptParts: { system: "be terse", tools: "T", context: "C", task: "do it" },
+    });
+    expect(res.isError).toBeFalsy();
+    expect(lastBody.messages).toEqual([
+      { role: "system", content: "be terse" },
+      { role: "user", content: "<tools>\nT\n</tools>\n\n<context>\nC\n</context>\n\ndo it" },
+    ]);
+  });
+
+  it("rejects prompt + promptParts together, and neither", async () => {
+    runtime = buildRuntime("http://127.0.0.1:1/v1");
+    const both = await handleApiProviderRequest(runtime, rt("http://127.0.0.1:1/v1"), {
+      prompt: "hi",
+      promptParts: { task: "x" },
+    });
+    expect(both.isError).toBe(true);
+    expect(both.content[0].text).toMatch(/exactly one of/);
+    const neither = await handleApiProviderRequest(runtime, rt("http://127.0.0.1:1/v1"), {});
+    expect(neither.isError).toBe(true);
+    expect(neither.content[0].text).toMatch(/one of .*is required/);
+  });
+
+  it("forceRefresh bypasses dedup (server hit twice instead of once)", async () => {
+    const baseUrl = await startServer();
+    runtime = buildRuntime(baseUrl);
+    // Two identical requests: the second dedups onto the first → server hit once.
+    await handleApiProviderRequest(runtime, rt(baseUrl), { prompt: "same" });
+    await handleApiProviderRequest(runtime, rt(baseUrl), { prompt: "same" });
+    expect(hits).toBe(1);
+    // forceRefresh on an identical request bypasses dedup → a fresh server hit.
+    await handleApiProviderRequest(runtime, rt(baseUrl), { prompt: "same", forceRefresh: true });
+    expect(hits).toBe(2);
+  });
+});
