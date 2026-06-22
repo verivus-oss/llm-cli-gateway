@@ -667,3 +667,137 @@ describe("Slice 3 — api provider continuity + sessions", () => {
     expect(values).toContain("grok-api"); // known api-provider type preserved
   });
 });
+
+// Slice 4a — server-side-id continuation on the generic handler (xai-responses).
+describe("Slice 4a — api provider server-side-id continuation", () => {
+  let tempDir: string;
+  let sessionManager: FileSessionManager;
+  let runtime: GatewayServerRuntime;
+  let closeServer: (() => Promise<void>) | null = null;
+  let lastBody: any;
+
+  function buildRuntime(): GatewayServerRuntime {
+    const metrics = new PerformanceMetrics();
+    const recorder = new NoopFlightRecorder();
+    const asyncJobManager = new AsyncJobManager(
+      noopLogger,
+      undefined,
+      new MemoryJobStore(),
+      recorder
+    );
+    return resolveGatewayServerRuntime(
+      {
+        sessionManager,
+        asyncJobManager,
+        approvalManager: new ApprovalManager(undefined, noopLogger),
+        performanceMetrics: metrics,
+        resourceProvider: new ResourceProvider(sessionManager, metrics, recorder),
+        flightRecorder: recorder,
+        logger: noopLogger,
+        persistence: mkPersistence(),
+        providers: { xai: null, providers: {}, sources: { configFile: null } },
+      },
+      { isolateState: true }
+    );
+  }
+
+  // Loopback xAI-Responses server; `handler(body, res)` controls the reply.
+  async function startXai(handler: (body: any, res: ServerResponse) => void): Promise<string> {
+    const server = createServer(async (req, res) => {
+      const chunks: Buffer[] = [];
+      for await (const c of req) chunks.push(Buffer.from(c));
+      lastBody = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      handler(lastBody, res);
+    });
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    const addr = server.address();
+    if (!addr || typeof addr === "string") throw new Error("no port");
+    closeServer = () => new Promise(r => server.close(() => r()));
+    return `http://127.0.0.1:${addr.port}`;
+  }
+
+  const xaiReply = (id: string, text: string) =>
+    JSON.stringify({
+      id,
+      status: "completed",
+      model: "grok-4",
+      output: [{ type: "message", content: [{ type: "output_text", text }] }],
+      usage: { input_tokens: 5, output_tokens: 3 },
+    });
+
+  const xaiRt = (baseUrl: string): ApiProviderRuntime => ({
+    name: "xai",
+    kind: "xai-responses",
+    baseUrl,
+    defaultModel: "grok-4",
+    apiKey: "k",
+  });
+
+  beforeEach(() => {
+    resetApiProviderBreakers();
+    tempDir = mkdtempSync(join(tmpdir(), "api-ssid-"));
+    sessionManager = new FileSessionManager(join(tempDir, "sessions.json"));
+  });
+
+  afterEach(async () => {
+    if (closeServer) await closeServer();
+    closeServer = null;
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it("threads + persists previousResponseId across turns", async () => {
+    let n = 0;
+    const baseUrl = await startXai((_body, res) => {
+      n += 1;
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(xaiReply(`resp-${n}`, `reply-${n}`));
+    });
+    runtime = buildRuntime();
+
+    // Turn 1: no stored handle → no previous_response_id sent; handle persisted.
+    const r1 = await handleApiProviderRequest(runtime, xaiRt(baseUrl), {
+      prompt: "hi",
+      sessionId: "x1",
+    });
+    expect(r1.isError).toBeFalsy();
+    expect(lastBody.previous_response_id).toBeUndefined();
+    expect((r1.structuredContent as any).responseId).toBe("resp-1");
+    expect((r1.structuredContent as any).previousResponseId).toBeNull();
+
+    // Turn 2: same session → the stored handle is threaded, and the new one saved.
+    const r2 = await handleApiProviderRequest(runtime, xaiRt(baseUrl), {
+      prompt: "more",
+      sessionId: "x1",
+    });
+    expect(lastBody.previous_response_id).toBe("resp-1");
+    expect((r2.structuredContent as any).previousResponseId).toBe("resp-1");
+    expect((r2.structuredContent as any).responseId).toBe("resp-2");
+  });
+
+  it("self-heals a stale previousResponseId on 404 (clear + retry fresh)", async () => {
+    const baseUrl = await startXai((body, res) => {
+      if (body.previous_response_id) {
+        // Stale handle → xAI 404.
+        res.writeHead(404, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: { message: "previous response not found" } }));
+        return;
+      }
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(xaiReply("fresh-1", "recovered"));
+    });
+    runtime = buildRuntime();
+    // Pre-seed a session carrying a stale handle.
+    sessionManager.createSession("xai", "Xai", "x9");
+    sessionManager.updateSessionMetadata("x9", { apiPreviousResponseId: "stale-id" });
+
+    const r = await handleApiProviderRequest(runtime, xaiRt(baseUrl), {
+      prompt: "go",
+      sessionId: "x9",
+    });
+    expect(r.isError).toBeFalsy();
+    expect((r.structuredContent as any).stalePreviousResponseCleared).toBe(true);
+    expect((r.structuredContent as any).responseId).toBe("fresh-1");
+    // The stale handle was cleared, then the retry persisted the fresh one.
+    expect(sessionManager.getSession("x9")?.metadata?.apiPreviousResponseId).toBe("fresh-1");
+  });
+});

@@ -80,6 +80,8 @@ export interface ApiResult {
   httpStatus: number;
   /** xAI Responses returns an id used as the next `previous_response_id`. */
   responseId?: string | null;
+  /** Slice 4: provider response status (xAI `status`), surfaced by grok_api. */
+  status?: string | null;
 }
 
 export interface ApiProvider {
@@ -310,6 +312,7 @@ export class XaiResponsesProvider implements ApiProvider {
     const usage = parsed?.usage ?? {};
     return {
       responseId: typeof parsed?.id === "string" ? parsed.id : null,
+      status: typeof parsed?.status === "string" ? parsed.status : null,
       model: typeof parsed?.model === "string" ? parsed.model : "unknown",
       text: extractXaiResponseText(parsed),
       usage: {

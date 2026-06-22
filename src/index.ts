@@ -67,6 +67,7 @@ import {
   runApiRequest,
   apiProviderBreakerState,
   type ApiProvider,
+  type ApiContinuity,
   type ApiRequest,
   type ApiUsage,
 } from "./api-provider.js";
@@ -1001,6 +1002,8 @@ interface ApiJobSuccess {
   httpStatus?: number | null;
   responseId?: string | null;
   model?: string;
+  /** Slice 4: provider response status (xAI), inline path only. */
+  status?: string | null;
   errorBody?: string;
 }
 
@@ -1012,7 +1015,13 @@ async function awaitApiJobOrDefer(
   onComplete?: () => void,
   flightRecorderEntry?: AsyncJobFlightRecorderEntry,
   extractUsage?: AsyncJobUsageExtractor,
-  forceRefresh?: boolean
+  forceRefresh?: boolean,
+  /**
+   * Slice 4: run the request inline to completion (never defer). Used for
+   * server-side-id providers so the continuation handle is always available
+   * in-handler to persist + 404-retry, matching grok_api's always-inline path.
+   */
+  forceInline?: boolean
 ): Promise<ApiJobSuccess | DeferredJobResponse> {
   let onCompleteOwnedByCaller = onComplete !== undefined;
   const consumeOnComplete = (): void => {
@@ -1030,8 +1039,8 @@ async function awaitApiJobOrDefer(
     runtime.persistence.asyncJobsEnabled &&
     runtime.asyncJobManager.hasStore();
 
-  if (SYNC_DEADLINE_MS === 0 || !deferralAvailable) {
-    // No deferral available — run the HTTP request inline to completion.
+  if (SYNC_DEADLINE_MS === 0 || !deferralAvailable || forceInline) {
+    // No deferral (or forced inline) — run the HTTP request to completion here.
     try {
       const result = await runApiRequest(provider, apiRequest, runtime.logger);
       return {
@@ -1042,6 +1051,7 @@ async function awaitApiJobOrDefer(
         httpStatus: result.httpStatus,
         responseId: result.responseId ?? null,
         model: result.model,
+        status: result.status ?? null,
       };
     } catch (err) {
       // Unwrap the (possibly circuit-breaker-wrapped) rejection so status/body
@@ -4285,10 +4295,19 @@ function resolveApiProviderInput(
  */
 async function resolveApiSession(
   providerName: string,
-  params: { sessionId?: string },
+  continuity: ApiContinuity,
+  params: { sessionId?: string; createNewSession?: boolean },
   runtime: GatewayServerRuntime
-): Promise<{ sessionId: string }> {
+): Promise<{ sessionId: string; previousResponseId?: string }> {
   const label = `${providerName} API Session`;
+  // Slice 4: only server-side-id providers carry a continuation handle; stateless
+  // sessions are pure bookkeeping and never read/store one.
+  const readPrev = (s: Session): string | undefined =>
+    continuity === "server-side-id" &&
+    !params.createNewSession &&
+    typeof s.metadata?.apiPreviousResponseId === "string"
+      ? s.metadata.apiPreviousResponseId
+      : undefined;
 
   // Explicit sessionId → reuse the owned session (own-or-not-found F3 guard) or
   // create it under that id.
@@ -4301,13 +4320,18 @@ async function resolveApiSession(
     const session =
       existing ??
       (await runtime.sessionManager.createSession(providerName, label, params.sessionId));
-    return { sessionId: session.id };
+    return { sessionId: session.id, previousResponseId: readPrev(session) };
   }
 
-  // createNewSession (no sessionId) → a fresh gateway session. (Implicit
-  // active-session reuse is intentionally NOT done for the api tool in pt.1;
-  // sessions are explicit. The shared helper re-gains it in Slice 4 when
-  // server-side-id always resolves.)
+  // Server-side-id (no sessionId) reuses the caller's active session so the
+  // continuation handle persists across turns — like resolveGrokApiSession.
+  // Stateless never reaches here without createNewSession (sessions are explicit),
+  // so there is no implicit-reuse surprise for stateless callers.
+  if (continuity === "server-side-id" && !params.createNewSession) {
+    const active = await getCallerOwnedActiveSession(runtime.sessionManager, providerName);
+    if (active) return { sessionId: active.id, previousResponseId: readPrev(active) };
+  }
+
   const session = await runtime.sessionManager.createSession(
     providerName,
     label,
@@ -4348,6 +4372,10 @@ function buildApiSuccessResponse(
     responseId?: string | null;
     usage?: ApiUsage;
     sessionId?: string;
+    /** Slice 4: server-side-id continuation surface (parity with grok_api). */
+    previousResponseId?: string;
+    stalePreviousResponseCleared?: boolean;
+    status?: string | null;
   }
 ): ExtendedToolResponse {
   const usage = telemetry?.usage;
@@ -4361,6 +4389,9 @@ function buildApiSuccessResponse(
       correlationId: corrId,
       sessionId: telemetry?.sessionId ?? null,
       responseId: telemetry?.responseId ?? null,
+      previousResponseId: telemetry?.previousResponseId ?? null,
+      stalePreviousResponseCleared: telemetry?.stalePreviousResponseCleared ?? false,
+      status: telemetry?.status ?? undefined,
       httpStatus: telemetry?.httpStatus ?? undefined,
       inputTokens: usage?.inputTokens,
       outputTokens: usage?.outputTokens,
@@ -4395,15 +4426,27 @@ export async function handleApiProviderRequest(
       resolved.system
     );
 
-    // Slice 3 (pt.1): resolve/track a session when the caller opts in. Stateless
-    // providers without session params keep the pre-Slice-3 sessionless path. The
-    // session is touched (updateSessionUsage) so reuse keeps it alive past the
-    // TTL, matching the CLI/grok handlers. Server-side-id continuation is Slice 4.
-    const wantsSession = params.sessionId !== undefined || params.createNewSession === true;
+    // Slice 3/4: resolve/track a session when the caller opts in, or ALWAYS for a
+    // server-side-id provider (which needs the continuation handle). The session is
+    // touched (updateSessionUsage) so reuse keeps it alive past the TTL. Stateless
+    // providers without session params stay sessionless and never get a handle.
+    const serverSide = provider.continuity === "server-side-id";
+    const wantsSession =
+      serverSide || params.sessionId !== undefined || params.createNewSession === true;
     let sessionId: string | undefined;
+    let previousResponseId: string | undefined;
     if (wantsSession) {
-      sessionId = (await resolveApiSession(providerRuntime.name, params, runtimeArg)).sessionId;
+      const session = await resolveApiSession(
+        providerRuntime.name,
+        provider.continuity,
+        params,
+        runtimeArg
+      );
+      sessionId = session.sessionId;
+      previousResponseId = session.previousResponseId;
       await runtimeArg.sessionManager.updateSessionUsage(sessionId);
+      // server-side-id only: thread the stored handle so the provider continues.
+      if (previousResponseId) apiRequest.previousResponseId = previousResponseId;
     }
 
     // Slice 1: own the flight-recorder logStart here (the sync handler is the
@@ -4432,7 +4475,7 @@ export async function handleApiProviderRequest(
       runtimeArg
     );
 
-    const result = await awaitApiJobOrDefer(
+    let result = await awaitApiJobOrDefer(
       provider,
       apiRequest,
       corrId,
@@ -4440,8 +4483,44 @@ export async function handleApiProviderRequest(
       undefined,
       flightRecorderEntry,
       undefined,
-      params.forceRefresh
+      params.forceRefresh,
+      serverSide // forceInline: server-side-id resolves in-handler for continuation
     );
+
+    // Slice 4: server-side-id stale-handle self-heal. A 404 on a turn that sent a
+    // previousResponseId means the handle expired — clear it and retry fresh
+    // (one retry, inline), matching grok_api. forceInline guarantees a
+    // non-deferred result so this branch is reachable.
+    let stalePreviousResponseCleared = false;
+    if (
+      serverSide &&
+      !isDeferredResponse(result) &&
+      result.code !== 0 &&
+      result.httpStatus === 404 &&
+      sessionId &&
+      previousResponseId
+    ) {
+      await runtimeArg.sessionManager.updateSessionMetadata(sessionId, {
+        apiPreviousResponseId: null,
+        apiResponseCreatedAt: null,
+      });
+      apiRequest.previousResponseId = undefined;
+      previousResponseId = undefined;
+      stalePreviousResponseCleared = true;
+      const retry = await awaitApiJobOrDefer(
+        provider,
+        apiRequest,
+        corrId,
+        runtimeArg,
+        undefined,
+        flightRecorderEntry,
+        undefined,
+        true,
+        serverSide
+      );
+      if (!isDeferredResponse(retry)) result = retry;
+    }
+
     if (isDeferredResponse(result)) return buildDeferredToolResponse(result, sessionId);
 
     const durationMs = Math.max(0, Date.now() - startTime);
@@ -4467,6 +4546,14 @@ export async function handleApiProviderRequest(
       });
     }
     wasSuccessful = true;
+    // Slice 4: persist the new continuation handle for server-side-id providers so
+    // the next turn in this session continues server-side.
+    if (serverSide && sessionId && result.responseId) {
+      await runtimeArg.sessionManager.updateSessionMetadata(sessionId, {
+        apiPreviousResponseId: result.responseId,
+        apiResponseCreatedAt: new Date().toISOString(),
+      });
+    }
     let text = result.stdout;
     if (params.optimizeResponse) {
       const optimized = optimizeResponseText(text);
@@ -4497,6 +4584,9 @@ export async function handleApiProviderRequest(
       responseId: result.responseId,
       usage: result.usage,
       sessionId,
+      previousResponseId,
+      stalePreviousResponseCleared,
+      status: result.status,
     });
   } catch (err) {
     if (err instanceof ApiModelNotAllowedError) {
