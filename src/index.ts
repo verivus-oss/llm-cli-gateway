@@ -68,6 +68,7 @@ import {
   apiProviderBreakerState,
   type ApiProvider,
   type ApiRequest,
+  type ApiUsage,
 } from "./api-provider.js";
 import {
   prepareApiRequest,
@@ -92,6 +93,8 @@ import {
 import { getProviderToolCapabilities } from "./provider-tool-capabilities.js";
 import {
   AsyncJobManager,
+  extractApiHttpStatus,
+  extractApiErrorBody,
   type AsyncJobFlightRecorderEntry,
   type AsyncJobUsageExtractor,
 } from "./async-job-manager.js";
@@ -970,6 +973,24 @@ async function awaitJobOrDefer(
  * `AsyncJobManager.startHttpJob` instead, sharing the SAME sync-deadline → defer
  * → poll semantics and the same deferral gate.
  */
+/**
+ * Slice 1 (telemetry parity): the success shape returned by awaitApiJobOrDefer.
+ * Carries the structured `ApiResult` telemetry (usage/httpStatus/responseId/
+ * model) so the caller can write a rich flight-recorder logComplete and tool
+ * response instead of only `.text`. `errorBody` carries the vendor error body
+ * (ApiHttpError.responseText) on the inline-failure path.
+ */
+interface ApiJobSuccess {
+  stdout: string;
+  stderr: string;
+  code: number;
+  usage?: ApiUsage;
+  httpStatus?: number | null;
+  responseId?: string | null;
+  model?: string;
+  errorBody?: string;
+}
+
 async function awaitApiJobOrDefer(
   provider: ApiProvider,
   apiRequest: ApiRequest,
@@ -978,7 +999,7 @@ async function awaitApiJobOrDefer(
   onComplete?: () => void,
   flightRecorderEntry?: AsyncJobFlightRecorderEntry,
   extractUsage?: AsyncJobUsageExtractor
-): Promise<{ stdout: string; stderr: string; code: number } | DeferredJobResponse> {
+): Promise<ApiJobSuccess | DeferredJobResponse> {
   let onCompleteOwnedByCaller = onComplete !== undefined;
   const consumeOnComplete = (): void => {
     if (!onCompleteOwnedByCaller || !onComplete) return;
@@ -999,9 +1020,25 @@ async function awaitApiJobOrDefer(
     // No deferral available — run the HTTP request inline to completion.
     try {
       const result = await runApiRequest(provider, apiRequest, runtime.logger);
-      return { stdout: result.text, stderr: "", code: 0 };
+      return {
+        stdout: result.text,
+        stderr: "",
+        code: 0,
+        usage: result.usage,
+        httpStatus: result.httpStatus,
+        responseId: result.responseId ?? null,
+        model: result.model,
+      };
     } catch (err) {
-      return { stdout: "", stderr: (err as Error).message, code: 1 };
+      // Unwrap the (possibly circuit-breaker-wrapped) rejection so status/body
+      // match the deferred path, which uses the same helpers.
+      return {
+        stdout: "",
+        stderr: (err as Error).message,
+        code: 1,
+        httpStatus: extractApiHttpStatus(err) ?? undefined,
+        errorBody: extractApiErrorBody(err),
+      };
     } finally {
       consumeOnComplete();
     }
@@ -1039,6 +1076,13 @@ async function awaitApiJobOrDefer(
         stdout: result.stdout,
         stderr: result.stderr || result.error || "",
         code: result.exitCode ?? 1,
+        // Slice 1: surface the http telemetry the manager captured so the
+        // caller's tool response/flight-complete match the inline path.
+        usage: result.apiUsage,
+        httpStatus: result.httpStatus,
+        responseId: result.responseId,
+        model: result.model,
+        errorBody: result.errorBody,
       };
     }
     await new Promise(resolve => setTimeout(resolve, SYNC_POLL_INTERVAL_MS));
@@ -1058,7 +1102,7 @@ async function awaitApiJobOrDefer(
 }
 
 function isDeferredResponse(
-  result: { stdout: string; stderr: string; code: number } | DeferredJobResponse
+  result: ApiJobSuccess | DeferredJobResponse
 ): result is DeferredJobResponse {
   return "deferred" in result && result.deferred === true;
 }
@@ -1460,7 +1504,13 @@ function createErrorResponse(
   code: number,
   stderr: string,
   correlationId?: string,
-  error?: Error
+  error?: Error,
+  /**
+   * Slice 1: structured detail for HTTP API-provider failures so a
+   * structuredContent-preferring client sees the real HTTP status and the
+   * vendor error body, not just the generic message. Omitted for CLI errors.
+   */
+  apiError?: { httpStatus?: number | null; responseBody?: string }
 ) {
   let errorMessage = `Error executing ${cli} CLI`;
   const isLaunchExit = code === 127 || code === -4058;
@@ -1509,6 +1559,14 @@ function createErrorResponse(
               : isLaunchExit
                 ? "spawn_error"
                 : "cli_error",
+      // Slice 1: structured HTTP failure detail (undefined keys omitted by
+      // JSON serialization, so CLI error rows are unchanged).
+      ...(apiError
+        ? {
+            httpStatus: apiError.httpStatus ?? undefined,
+            responseBody: apiError.responseBody,
+          }
+        : {}),
     },
   };
 }
@@ -4154,14 +4212,30 @@ function buildApiProviderCall(
 function buildApiSuccessResponse(
   text: string,
   corrId: string,
-  providerName: string
+  providerName: string,
+  /** Slice 1: structured telemetry from the ApiResult (parity with grok_api). */
+  telemetry?: {
+    model?: string;
+    httpStatus?: number | null;
+    responseId?: string | null;
+    usage?: ApiUsage;
+  }
 ): ExtendedToolResponse {
+  const usage = telemetry?.usage;
   return {
     content: [{ type: "text" as const, text }],
     structuredContent: {
       response: text,
-      correlationId: corrId,
+      provider: providerName,
       cli: providerName,
+      model: telemetry?.model,
+      correlationId: corrId,
+      responseId: telemetry?.responseId ?? null,
+      httpStatus: telemetry?.httpStatus ?? undefined,
+      inputTokens: usage?.inputTokens,
+      outputTokens: usage?.outputTokens,
+      cacheReadTokens: usage?.cacheReadTokens,
+      costUsd: usage?.costUsd,
       exitCode: 0,
     },
   };
@@ -4182,13 +4256,84 @@ export async function handleApiProviderRequest(
       return createErrorResponse(toolName, 1, "prompt is required and cannot be empty", corrId);
     }
     const { provider, apiRequest } = buildApiProviderCall(providerRuntime, params);
-    const result = await awaitApiJobOrDefer(provider, apiRequest, corrId, runtimeArg);
+
+    // Slice 1: own the flight-recorder logStart here (the sync handler is the
+    // upstream writer). The manager writes logComplete ONLY if the request
+    // defers (armFlightCompleteForDeferral, using the captured apiUsage); a
+    // request that completes inline or within the deadline is closed by the
+    // safeFlightComplete calls below — identical to the grok_api ownership model.
+    const flightRecorderEntry: AsyncJobFlightRecorderEntry = {
+      model: apiRequest.model,
+      prompt: params.prompt,
+    };
+    safeFlightStart(
+      {
+        correlationId: corrId,
+        cli: providerRuntime.name,
+        model: apiRequest.model,
+        prompt: params.prompt,
+        system: params.system,
+      },
+      runtimeArg
+    );
+
+    const result = await awaitApiJobOrDefer(
+      provider,
+      apiRequest,
+      corrId,
+      runtimeArg,
+      undefined,
+      flightRecorderEntry
+    );
     if (isDeferredResponse(result)) return buildDeferredToolResponse(result);
+
+    const durationMs = Math.max(0, Date.now() - startTime);
     if (result.code !== 0) {
-      return createErrorResponse(toolName, result.code, result.stderr, corrId);
+      safeFlightComplete(
+        corrId,
+        {
+          response: result.errorBody ?? "",
+          durationMs,
+          retryCount: 0,
+          circuitBreakerState: "closed",
+          optimizationApplied: false,
+          exitCode: result.code,
+          httpStatus: result.httpStatus ?? undefined,
+          errorMessage: result.stderr,
+          status: "failed",
+        },
+        runtimeArg
+      );
+      return createErrorResponse(toolName, result.code, result.stderr, corrId, undefined, {
+        httpStatus: result.httpStatus,
+        responseBody: result.errorBody,
+      });
     }
     wasSuccessful = true;
-    return buildApiSuccessResponse(result.stdout, corrId, providerRuntime.name);
+    safeFlightComplete(
+      corrId,
+      {
+        response: result.stdout,
+        durationMs,
+        retryCount: 0,
+        circuitBreakerState: "closed",
+        optimizationApplied: false,
+        exitCode: 0,
+        httpStatus: result.httpStatus ?? undefined,
+        status: "completed",
+        inputTokens: result.usage?.inputTokens,
+        outputTokens: result.usage?.outputTokens,
+        cacheReadTokens: result.usage?.cacheReadTokens,
+        costUsd: result.usage?.costUsd,
+      },
+      runtimeArg
+    );
+    return buildApiSuccessResponse(result.stdout, corrId, providerRuntime.name, {
+      model: result.model,
+      httpStatus: result.httpStatus,
+      responseId: result.responseId,
+      usage: result.usage,
+    });
   } catch (err) {
     if (err instanceof ApiModelNotAllowedError) {
       return createErrorResponse(toolName, 1, err.message, corrId, err);
@@ -4216,11 +4361,15 @@ export function handleApiProviderRequestAsync(
       return createErrorResponse(toolName, 1, "prompt is required and cannot be empty", corrId);
     }
     const { provider, apiRequest } = buildApiProviderCall(providerRuntime, params);
+    // Slice 1: pure-async path — the manager owns BOTH logStart (writeFlightStart)
+    // and the terminal logComplete (armed by writeFlightStart), populating usage
+    // from the captured apiUsage.
     const outcome = runtimeArg.asyncJobManager.startHttpJob({
       provider,
       apiRequest,
       correlationId: corrId,
       writeFlightStart: true,
+      flightRecorderEntry: { model: apiRequest.model, prompt: params.prompt ?? "" },
     });
     return buildDeferredToolResponse({
       deferred: true,

@@ -107,5 +107,8 @@ export function prepareApiRequest(
     reasoningEffort: params.reasoningEffort,
     timeoutMs: params.timeoutMs,
     previousResponseId: params.previousResponseId,
+    // Slice 1: provider-level capability (never a caller param) → opt the
+    // openai-compatible adapter into usage:{include:true} when configured.
+    usageInclude: runtime.usageInclude,
   };
 }

@@ -543,6 +543,11 @@ const ApiProviderSchema = z
     api_key_env: z.string().min(1).optional(),
     default_model: z.string().min(1),
     models: z.array(z.string().min(1)).nonempty().optional(),
+    // Slice 1 (telemetry parity): opt the openai-compatible adapter into the
+    // OpenRouter `usage: { include: true }` body flag so token/cost usage is
+    // returned in the response. Capability-typed (not name-branched) so strict
+    // OpenAI-compatible servers that reject the field stay unaffected by default.
+    usage_include: z.boolean().optional(),
   })
   .strict();
 
@@ -555,6 +560,8 @@ export interface ApiProviderConfig {
   defaultModel: string;
   /** Optional model allowlist; undefined = no restriction. */
   models?: string[];
+  /** Slice 1: emit `usage:{include:true}` (OpenRouter token/cost reporting). */
+  usageInclude?: boolean;
 }
 
 /** An enabled provider with its API key resolved from the environment. */
@@ -564,6 +571,8 @@ export interface ApiProviderRuntime {
   baseUrl: string;
   defaultModel: string;
   models?: string[];
+  /** Slice 1: emit `usage:{include:true}` (OpenRouter token/cost reporting). */
+  usageInclude?: boolean;
   /** Resolved key — empty string for a keyless-local provider. */
   apiKey: string;
 }
@@ -659,6 +668,7 @@ export function loadProvidersConfig(logger: Logger = noopLogger): ProvidersConfi
       baseUrl: parsed.data.base_url,
       defaultModel: parsed.data.default_model,
       models: parsed.data.models ? [...parsed.data.models] : undefined,
+      usageInclude: parsed.data.usage_include,
     };
   }
 
@@ -704,6 +714,7 @@ export function enabledApiProviders(
       baseUrl: provider.baseUrl,
       defaultModel: provider.defaultModel,
       models: provider.models,
+      usageInclude: provider.usageInclude,
       apiKey: resolveProviderKey(provider.apiKeyEnv, env) ?? "",
     });
   }

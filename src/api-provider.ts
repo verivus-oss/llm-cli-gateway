@@ -44,6 +44,13 @@ export interface ApiRequest {
   timeoutMs?: number;
   /** xAI Responses only: server-side continuation handle. */
   previousResponseId?: string;
+  /**
+   * Slice 1: openai-compatible only — emit `usage: { include: true }` so
+   * providers that gate usage reporting behind it (OpenRouter) return token
+   * counts and cost. Off by default; set from the provider's `usage_include`
+   * config so strict OpenAI-compatible servers are unaffected.
+   */
+  usageInclude?: boolean;
 }
 
 export interface ApiUsage {
@@ -113,6 +120,9 @@ export class OpenAiCompatibleProvider implements ApiProvider {
     if (req.maxOutputTokens !== undefined) body.max_tokens = req.maxOutputTokens;
     if (req.temperature !== undefined) body.temperature = req.temperature;
     if (req.topP !== undefined) body.top_p = req.topP;
+    // Slice 1: opt-in usage accounting (OpenRouter). Capability-gated via config
+    // so strict OpenAI-compatible servers never see an unexpected field.
+    if (req.usageInclude) body.usage = { include: true };
     return body;
   }
 
@@ -130,6 +140,10 @@ export class OpenAiCompatibleProvider implements ApiProvider {
         inputTokens: firstNumber(usage.prompt_tokens, usage.input_tokens),
         outputTokens: firstNumber(usage.completion_tokens, usage.output_tokens),
         cacheReadTokens: firstNumber(usage?.prompt_tokens_details?.cached_tokens),
+        // Slice 1: OpenRouter returns end-to-end cost in `usage.cost` (USD) when
+        // usage accounting is enabled (see usage_include). Absent on plain
+        // OpenAI-compatible servers → stays undefined.
+        costUsd: firstNumber(usage.cost),
         raw: usage,
       },
       raw: parsed,

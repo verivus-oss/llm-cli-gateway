@@ -27,7 +27,11 @@ import {
 import { AsyncJobManager } from "../async-job-manager.js";
 import { resetApiProviderBreakers } from "../api-provider.js";
 import { MemoryJobStore } from "../job-store.js";
-import { NoopFlightRecorder } from "../flight-recorder.js";
+import {
+  NoopFlightRecorder,
+  type FlightLogStart,
+  type FlightLogResult,
+} from "../flight-recorder.js";
 import { FileSessionManager } from "../session-manager.js";
 import { PerformanceMetrics } from "../metrics.js";
 import { ResourceProvider } from "../resources.js";
@@ -279,5 +283,158 @@ describe("Slice 2 — registration gating", () => {
     };
     const out = registerApiProviderTools(srv as any, runtimeStub, providers, false);
     expect(out).toEqual(["api_ollama_request"]);
+  });
+});
+
+// Slice 1 — telemetry parity: the generic api_<name>_request path must now write
+// a flight-recorder logStart + logComplete (with usage + httpStatus), surface that
+// telemetry in structuredContent, honour the usage_include capability, and
+// propagate the HTTP status + vendor error body on failure.
+class CapturingFlightRecorder extends NoopFlightRecorder {
+  starts: FlightLogStart[] = [];
+  completes: Array<{ correlationId: string; result: FlightLogResult }> = [];
+  logStart(entry: FlightLogStart): void {
+    this.starts.push(entry);
+  }
+  logComplete(correlationId: string, result: FlightLogResult): void {
+    this.completes.push({ correlationId, result });
+  }
+}
+
+describe("Slice 1 — api provider telemetry parity", () => {
+  let tempDir: string;
+  let sessionManager: FileSessionManager;
+  let recorder: CapturingFlightRecorder;
+  let runtime: GatewayServerRuntime;
+  let closeServer: (() => Promise<void>) | null = null;
+  let lastBody: any;
+
+  function buildRuntime(baseUrl: string): GatewayServerRuntime {
+    const metrics = new PerformanceMetrics();
+    recorder = new CapturingFlightRecorder();
+    const asyncJobManager = new AsyncJobManager(
+      noopLogger,
+      undefined,
+      new MemoryJobStore(),
+      recorder
+    );
+    return resolveGatewayServerRuntime(
+      {
+        sessionManager,
+        asyncJobManager,
+        approvalManager: new ApprovalManager(undefined, noopLogger),
+        performanceMetrics: metrics,
+        resourceProvider: new ResourceProvider(sessionManager, metrics, recorder),
+        flightRecorder: recorder,
+        logger: noopLogger,
+        persistence: mkPersistence(),
+        providers: mkProviders(baseUrl),
+      },
+      { isolateState: true }
+    );
+  }
+
+  async function startServer(
+    handler: (req: IncomingMessage, res: ServerResponse, body: any) => void
+  ): Promise<string> {
+    const server = createServer(async (req, res) => {
+      const chunks: Buffer[] = [];
+      for await (const c of req) chunks.push(Buffer.from(c));
+      lastBody = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      handler(req, res, lastBody);
+    });
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    const addr = server.address();
+    if (!addr || typeof addr === "string") throw new Error("no port");
+    closeServer = () => new Promise(r => server.close(() => r()));
+    return `http://127.0.0.1:${addr.port}/v1`;
+  }
+
+  const rt = (baseUrl: string, over: Partial<ApiProviderRuntime> = {}): ApiProviderRuntime => ({
+    name: "ollama",
+    kind: "openai-compatible",
+    baseUrl,
+    defaultModel: "qwen2.5",
+    apiKey: "",
+    ...over,
+  });
+
+  beforeEach(() => {
+    resetApiProviderBreakers();
+    tempDir = mkdtempSync(join(tmpdir(), "api-telemetry-"));
+    sessionManager = new FileSessionManager(join(tempDir, "sessions.json"));
+  });
+
+  afterEach(async () => {
+    if (closeServer) await closeServer();
+    closeServer = null;
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it("records usage + httpStatus in the flight recorder and the tool response", async () => {
+    const baseUrl = await startServer((_req, res) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(
+        JSON.stringify({
+          model: "qwen2.5",
+          choices: [{ message: { content: "hi" } }],
+          usage: { prompt_tokens: 11, completion_tokens: 7, cost: 0.0009 },
+        })
+      );
+    });
+    runtime = buildRuntime(baseUrl);
+    const res = await handleApiProviderRequest(runtime, rt(baseUrl), { prompt: "ping" });
+
+    expect(res.isError).toBeFalsy();
+    const sc = res.structuredContent as any;
+    expect(sc.model).toBe("qwen2.5");
+    expect(sc.httpStatus).toBe(200);
+    expect(sc.inputTokens).toBe(11);
+    expect(sc.outputTokens).toBe(7);
+    expect(sc.costUsd).toBe(0.0009);
+
+    // Exactly one start + one complete (no double-write between handler and manager).
+    expect(recorder.starts).toHaveLength(1);
+    expect(recorder.starts[0].cli).toBe("ollama");
+    expect(recorder.completes).toHaveLength(1);
+    const c = recorder.completes[0].result;
+    expect(c.status).toBe("completed");
+    expect(c.httpStatus).toBe(200);
+    expect(c.inputTokens).toBe(11);
+    expect(c.outputTokens).toBe(7);
+    expect(c.costUsd).toBe(0.0009);
+  });
+
+  it("emits usage:{include:true} only when the provider opts in", async () => {
+    const baseUrl = await startServer((_req, res) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ choices: [{ message: { content: "x" } }] }));
+    });
+    runtime = buildRuntime(baseUrl);
+
+    await handleApiProviderRequest(runtime, rt(baseUrl, { usageInclude: true }), { prompt: "on" });
+    expect(lastBody.usage).toEqual({ include: true });
+
+    await handleApiProviderRequest(runtime, rt(baseUrl), { prompt: "off" });
+    expect(lastBody.usage).toBeUndefined();
+  });
+
+  it("propagates httpStatus + vendor error body on an HTTP failure", async () => {
+    const baseUrl = await startServer((_req, res) => {
+      // 400 is non-transient → no retry/circuit churn → deterministic, fast.
+      res.writeHead(400, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: { message: "bad-request-detail" } }));
+    });
+    runtime = buildRuntime(baseUrl);
+    const res = await handleApiProviderRequest(runtime, rt(baseUrl), { prompt: "p" });
+
+    expect(res.isError).toBe(true);
+    const sc = res.structuredContent as any;
+    expect(sc.httpStatus).toBe(400);
+    expect(sc.responseBody).toContain("bad-request-detail");
+
+    const c = recorder.completes.at(-1)!.result;
+    expect(c.status).toBe("failed");
+    expect(c.httpStatus).toBe(400);
   });
 });

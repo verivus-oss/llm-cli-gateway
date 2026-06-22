@@ -87,8 +87,15 @@ function dispatchProviderJob(
   if (api) {
     const apiProvider = createApiProvider(api.name, api.kind);
     const apiRequest = prepareApiRequest(api, { prompt });
-    return deps.asyncJobManager.startHttpJob({ provider: apiProvider, apiRequest, correlationId })
-      .snapshot;
+    // Slice 1: reviewer http jobs are pure-async (the orchestrator polls the
+    // snapshot), so the manager owns logStart + the usage-bearing logComplete.
+    return deps.asyncJobManager.startHttpJob({
+      provider: apiProvider,
+      apiRequest,
+      correlationId,
+      writeFlightStart: true,
+      flightRecorderEntry: { model: apiRequest.model, prompt },
+    }).snapshot;
   }
   return deps.asyncJobManager.startJob(
     provider as "claude" | "codex" | "gemini" | "grok" | "mistral",

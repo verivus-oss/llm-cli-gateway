@@ -26,6 +26,7 @@ import {
   type ApiProvider,
   type ApiRequest,
   type ApiResult,
+  type ApiUsage,
 } from "./api-provider.js";
 
 /**
@@ -33,7 +34,7 @@ import {
  * runApiRequest rejection. withRetry surfaces the original ApiHttpError as
  * `.cause`, so check both the error and its cause.
  */
-function extractApiHttpStatus(error: unknown): number | null {
+export function extractApiHttpStatus(error: unknown): number | null {
   for (const candidate of [error, (error as { cause?: unknown })?.cause]) {
     if (candidate instanceof ApiHttpError && typeof candidate.status === "number") {
       return candidate.status;
@@ -42,6 +43,20 @@ function extractApiHttpStatus(error: unknown): number | null {
     if (typeof status === "number") return status;
   }
   return null;
+}
+
+/**
+ * Slice 1: pull the vendor error body out of a (possibly circuit-breaker-
+ * wrapped) runApiRequest rejection — same `.cause` unwrap as
+ * `extractApiHttpStatus`.
+ */
+export function extractApiErrorBody(error: unknown): string | undefined {
+  for (const candidate of [error, (error as { cause?: unknown })?.cause]) {
+    if (candidate instanceof ApiHttpError && candidate.responseText) {
+      return candidate.responseText;
+    }
+  }
+  return undefined;
 }
 
 export type LlmCli = "claude" | "codex" | "gemini" | "grok" | "mistral" | "devin";
@@ -166,6 +181,21 @@ interface AsyncJobRecord {
   abort: AbortController | null;
   /** Slice 1: real HTTP status for http jobs (null for process jobs). */
   httpStatus: number | null;
+  /**
+   * Slice 1 (telemetry parity): structured usage from the http ApiResult,
+   * captured directly in finalizeHttpJob (HTTP usage is on the parsed result,
+   * NOT in stdout, so the stdout-based `extractUsage` cannot recover it).
+   * IN-MEMORY ONLY — not persisted to jobs.db, so a job reconstituted from the
+   * store after a restart reports no usage (acceptable for v1; a jobs-table
+   * usage migration is deferred to a later slice).
+   */
+  apiUsage?: ApiUsage;
+  /** Slice 1: xAI-style continuation handle from the http result (in-memory). */
+  apiResponseId?: string | null;
+  /** Slice 1: resolved model echoed by the provider (in-memory). */
+  apiModel?: string;
+  /** Slice 1: vendor error body (ApiHttpError.responseText) on http failure (in-memory). */
+  apiErrorBody?: string;
   /** Slice 1: canonical API request JSON persisted for http jobs (null for process). */
   payloadJson?: string | null;
   exited: boolean;
@@ -234,6 +264,18 @@ export interface AsyncJobResult extends AsyncJobSnapshot {
   stderr: string;
   stdoutTruncated: boolean;
   stderrTruncated: boolean;
+  /**
+   * Slice 1: structured http telemetry, present only for `transport:'http'`
+   * jobs still resident in memory (captured in finalizeHttpJob). Lets the sync
+   * caller (awaitApiJobOrDefer) surface usage/httpStatus in the tool response
+   * for a job that completed within the sync deadline. Undefined for process
+   * jobs and for http jobs reconstituted from the store.
+   */
+  apiUsage?: ApiUsage;
+  httpStatus?: number | null;
+  responseId?: string | null;
+  model?: string;
+  errorBody?: string;
 }
 
 /**
@@ -807,6 +849,12 @@ export class AsyncJobManager {
       job.stdout = result.text;
       job.httpStatus = result.httpStatus;
       job.exitCode = 0;
+      // Slice 1: capture structured usage/continuation directly off the result
+      // so writeFlightComplete (and getJobResult) can surface them without a
+      // stdout re-parse.
+      job.apiUsage = result.usage;
+      job.apiResponseId = result.responseId ?? null;
+      job.apiModel = result.model;
     } else {
       job.status = "failed";
       const status = extractApiHttpStatus(error);
@@ -815,6 +863,9 @@ export class AsyncJobManager {
       job.stderr = message;
       job.error = message;
       job.exitCode = 1;
+      // Slice 1: preserve the vendor error body so the deferred-completed path
+      // can surface it identically to the inline path (unwraps `.cause`).
+      job.apiErrorBody = extractApiErrorBody(error);
     }
     job.finishedAt = new Date().toISOString();
     job.exited = true;
@@ -858,7 +909,18 @@ export class AsyncJobManager {
     if (!job.flightCompleteArmed) return;
     if (job.flightRecorderComplete) return; // already wrote successfully
     const durationMs = Math.max(0, Date.now() - new Date(job.startedAt).getTime());
-    const usage = finalStatus === "completed" && job.extractUsage ? this.safeExtractUsage(job) : {};
+    // Slice 1: http usage comes from the captured ApiResult (apiUsage), NOT the
+    // stdout-based extractUsage (which is JSONL-oriented and would return {} for
+    // an http job whose stdout is plain ApiResult.text). Process jobs keep the
+    // extractUsage path untouched.
+    const usage =
+      finalStatus !== "completed"
+        ? {}
+        : job.transport === "http"
+          ? this.httpUsage(job)
+          : job.extractUsage
+            ? this.safeExtractUsage(job)
+            : {};
     const isFailure = finalStatus === "failed";
     // #44: codex always runs with `--json`, so a codex job's stdout is a raw
     // JSONL event stream on BOTH success and failure. Never persist it raw as the
@@ -921,6 +983,22 @@ export class AsyncJobManager {
       this.logger.error(`Job ${job.id} extractUsage threw`, err);
       return {};
     }
+  }
+
+  /**
+   * Slice 1: project the http job's captured ApiResult usage onto the
+   * flight-recorder usage shape. (ApiUsage has no cacheCreationTokens; left
+   * undefined so the FR row keeps it NULL.)
+   */
+  private httpUsage(job: AsyncJobRecord): ReturnType<AsyncJobUsageExtractor> {
+    const u = job.apiUsage;
+    if (!u) return {};
+    return {
+      inputTokens: u.inputTokens,
+      outputTokens: u.outputTokens,
+      cacheReadTokens: u.cacheReadTokens,
+      costUsd: u.costUsd,
+    };
   }
 
   /**
@@ -1377,6 +1455,16 @@ export class AsyncJobManager {
       stderr: stderr.text,
       stdoutTruncated: stdout.truncated,
       stderrTruncated: stderr.truncated,
+      // Slice 1: structured http telemetry (in-memory http jobs only).
+      ...(job.transport === "http"
+        ? {
+            apiUsage: job.apiUsage,
+            httpStatus: job.httpStatus,
+            responseId: job.apiResponseId,
+            model: job.apiModel,
+            errorBody: job.apiErrorBody,
+          }
+        : {}),
     };
   }
 
