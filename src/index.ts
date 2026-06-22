@@ -627,6 +627,19 @@ export const WORKSPACE_ALIAS_SCHEMA = z
 // Keep CLI-only surfaces (contracts, status, updater) on CLI_TYPES.
 export const SESSION_PROVIDER_VALUES = PROVIDER_TYPES;
 export const SESSION_PROVIDER_ENUM = z.enum(SESSION_PROVIDER_VALUES);
+
+/**
+ * Slice 3 (pt.1): the provider list the session_* management tools accept — the
+ * static CLI + grok-api set PLUS enabled generic API provider names, so sessions
+ * created by api_<name>_request can be listed/activated/deleted via these tools.
+ */
+export function sessionProviderValuesFor(providers: ProvidersConfig): string[] {
+  // Deduped: a configured api provider name could (in principle) coincide with a
+  // static entry; keep the list unique so the enum/iteration carry no duplicates.
+  return [
+    ...new Set([...SESSION_PROVIDER_VALUES, ...enabledApiProviders(providers).map(p => p.name)]),
+  ];
+}
 export type SessionProvider = ProviderType;
 let activeServer: McpServer | null = null;
 let activeHttpGateway: HttpGatewayHandle | null = null;
@@ -4198,6 +4211,10 @@ interface ApiProviderToolParams {
   optimizeResponse?: boolean;
   /** Slice 2: bypass dedup and force a fresh request. */
   forceRefresh?: boolean;
+  /** Slice 3 (pt.1): gateway session to resolve/track (bookkeeping; sync only). */
+  sessionId?: string;
+  /** Slice 3 (pt.1): force a fresh session instead of reusing the active one. */
+  createNewSession?: boolean;
 }
 
 /**
@@ -4255,6 +4272,50 @@ function resolveApiProviderInput(
   };
 }
 
+/**
+ * Slice 3 (pt.1): resolve/create the gateway session for a generic api_<name>
+ * request. Generalizes the session-resolution half of resolveGrokApiSession over
+ * any provider name, with the SAME own-or-not-found F3 guards
+ * (getExistingSessionForProvider / getCallerOwnedActiveSession). Pure bookkeeping
+ * (active/owner pointer) — NO continuation handle and NO conversation content is
+ * stored (invariant preserved). Server-side-id continuation (previousResponseId
+ * thread/persist + inline 404-retry + deferred-completion hook) is deferred to
+ * Slice 4, where it folds into the grok unification that supplies the
+ * inline-await + retry machinery (see design §7/§12).
+ */
+async function resolveApiSession(
+  providerName: string,
+  params: { sessionId?: string },
+  runtime: GatewayServerRuntime
+): Promise<{ sessionId: string }> {
+  const label = `${providerName} API Session`;
+
+  // Explicit sessionId → reuse the owned session (own-or-not-found F3 guard) or
+  // create it under that id.
+  if (params.sessionId) {
+    const existing = await getExistingSessionForProvider(
+      runtime.sessionManager,
+      params.sessionId,
+      providerName
+    );
+    const session =
+      existing ??
+      (await runtime.sessionManager.createSession(providerName, label, params.sessionId));
+    return { sessionId: session.id };
+  }
+
+  // createNewSession (no sessionId) → a fresh gateway session. (Implicit
+  // active-session reuse is intentionally NOT done for the api tool in pt.1;
+  // sessions are explicit. The shared helper re-gains it in Slice 4 when
+  // server-side-id always resolves.)
+  const session = await runtime.sessionManager.createSession(
+    providerName,
+    label,
+    `${GATEWAY_SESSION_PREFIX}${randomUUID()}`
+  );
+  return { sessionId: session.id };
+}
+
 /** Build the canonical ApiRequest + provider adapter from resolved input. */
 function buildApiProviderCall(
   providerRuntime: ApiProviderRuntime,
@@ -4280,16 +4341,17 @@ function buildApiSuccessResponse(
   text: string,
   corrId: string,
   providerName: string,
-  /** Slice 1: structured telemetry from the ApiResult (parity with grok_api). */
+  /** Slice 1/3: structured telemetry from the ApiResult (parity with grok_api). */
   telemetry?: {
     model?: string;
     httpStatus?: number | null;
     responseId?: string | null;
     usage?: ApiUsage;
+    sessionId?: string;
   }
 ): ExtendedToolResponse {
   const usage = telemetry?.usage;
-  return {
+  const response: ExtendedToolResponse = {
     content: [{ type: "text" as const, text }],
     structuredContent: {
       response: text,
@@ -4297,6 +4359,7 @@ function buildApiSuccessResponse(
       cli: providerName,
       model: telemetry?.model,
       correlationId: corrId,
+      sessionId: telemetry?.sessionId ?? null,
       responseId: telemetry?.responseId ?? null,
       httpStatus: telemetry?.httpStatus ?? undefined,
       inputTokens: usage?.inputTokens,
@@ -4306,6 +4369,8 @@ function buildApiSuccessResponse(
       exitCode: 0,
     },
   };
+  if (telemetry?.sessionId) response.sessionId = telemetry.sessionId;
+  return response;
 }
 
 /** Sync `api_<name>_request`: assemble → run (sync deadline → defer) → format. */
@@ -4330,6 +4395,17 @@ export async function handleApiProviderRequest(
       resolved.system
     );
 
+    // Slice 3 (pt.1): resolve/track a session when the caller opts in. Stateless
+    // providers without session params keep the pre-Slice-3 sessionless path. The
+    // session is touched (updateSessionUsage) so reuse keeps it alive past the
+    // TTL, matching the CLI/grok handlers. Server-side-id continuation is Slice 4.
+    const wantsSession = params.sessionId !== undefined || params.createNewSession === true;
+    let sessionId: string | undefined;
+    if (wantsSession) {
+      sessionId = (await resolveApiSession(providerRuntime.name, params, runtimeArg)).sessionId;
+      await runtimeArg.sessionManager.updateSessionUsage(sessionId);
+    }
+
     // Slice 1: own the flight-recorder logStart here (the sync handler is the
     // upstream writer). The manager writes logComplete ONLY if the request
     // defers (armFlightCompleteForDeferral, using the captured apiUsage); a
@@ -4338,6 +4414,7 @@ export async function handleApiProviderRequest(
     const flightRecorderEntry: AsyncJobFlightRecorderEntry = {
       model: apiRequest.model,
       prompt: resolved.effectivePrompt,
+      sessionId,
       stablePrefixHash: resolved.stablePrefixHash ?? undefined,
       stablePrefixTokens: resolved.stablePrefixTokens ?? undefined,
     };
@@ -4348,6 +4425,7 @@ export async function handleApiProviderRequest(
         model: apiRequest.model,
         prompt: resolved.effectivePrompt,
         system: resolved.system,
+        sessionId,
         stablePrefixHash: resolved.stablePrefixHash ?? undefined,
         stablePrefixTokens: resolved.stablePrefixTokens ?? undefined,
       },
@@ -4364,7 +4442,7 @@ export async function handleApiProviderRequest(
       undefined,
       params.forceRefresh
     );
-    if (isDeferredResponse(result)) return buildDeferredToolResponse(result);
+    if (isDeferredResponse(result)) return buildDeferredToolResponse(result, sessionId);
 
     const durationMs = Math.max(0, Date.now() - startTime);
     if (result.code !== 0) {
@@ -4418,6 +4496,7 @@ export async function handleApiProviderRequest(
       httpStatus: result.httpStatus,
       responseId: result.responseId,
       usage: result.usage,
+      sessionId,
     });
   } catch (err) {
     if (err instanceof ApiModelNotAllowedError) {
@@ -4527,6 +4606,14 @@ export function registerApiProviderTools(
       .optional()
       .describe("Optimize the response text (sync path only)"),
     forceRefresh: z.boolean().optional().describe("Bypass dedup and force a fresh request"),
+    sessionId: z
+      .string()
+      .optional()
+      .describe("Gateway session to resolve/track (sync tool; reuse keeps it alive)"),
+    createNewSession: z
+      .boolean()
+      .optional()
+      .describe("Force a fresh session instead of reusing the active one"),
   };
 
   for (const providerRuntime of enabledApiProviders(providers)) {
@@ -10639,11 +10726,21 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
   // Session Management Tools
   //──────────────────────────────────────────────────────────────────────────────
 
+  // Slice 3 (pt.1): build the session-tool provider enum dynamically so the
+  // session_* tools also accept enabled generic API provider names (e.g.
+  // "openrouter"), not just the static CLI + grok-api set. Sessions created by
+  // api_<name>_request can then be listed/activated/deleted via these tools.
+  const sessionProviderValues = sessionProviderValuesFor(providers);
+  const sessionProviderEnum =
+    sessionProviderValues.length > SESSION_PROVIDER_VALUES.length
+      ? z.enum(sessionProviderValues as [string, ...string[]])
+      : SESSION_PROVIDER_ENUM;
+
   server.tool(
     "session_create",
     "Create a gateway session record for a provider. NOTE: this is gateway bookkeeping (gw-* ID), not a provider-native session — Codex resume needs a real Codex UUID.",
     {
-      cli: SESSION_PROVIDER_ENUM.describe(
+      cli: sessionProviderEnum.describe(
         "Provider type (claude|codex|gemini|grok|mistral|grok-api)"
       ),
       description: z.string().optional().describe("Session description"),
@@ -10697,9 +10794,9 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
     "session_list",
     "List gateway session records and the active session per provider, optionally filtered by provider.",
     {
-      cli: SESSION_PROVIDER_ENUM.optional().describe(
-        "Provider filter (claude|codex|gemini|grok|mistral|grok-api)"
-      ),
+      cli: sessionProviderEnum
+        .optional()
+        .describe("Provider filter (claude|codex|gemini|grok|mistral|grok-api)"),
     },
     {
       title: "List sessions",
@@ -10717,7 +10814,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         );
         const activeSessions = Object.fromEntries(
           await Promise.all(
-            SESSION_PROVIDER_VALUES.map(async provider => {
+            sessionProviderValues.map(async provider => {
               const active = await sessionManager.getActiveSession(provider);
               // Hide an active session pointer the caller is not allowed to see.
               return [
@@ -10746,7 +10843,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
                   total: sessionList.length,
                   sessions: sessionList,
                   activeSessions: Object.fromEntries(
-                    SESSION_PROVIDER_VALUES.map(provider => [
+                    sessionProviderValues.map(provider => [
                       provider,
                       activeSessions[provider]?.id || null,
                     ])
@@ -10768,7 +10865,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
     "session_set_active",
     "Set or clear the active session for a provider; the active session is used when a request omits sessionId.",
     {
-      cli: SESSION_PROVIDER_ENUM.describe(
+      cli: sessionProviderEnum.describe(
         "Provider type (claude|codex|gemini|grok|mistral|grok-api)"
       ),
       sessionId: z.string().nullable().describe("Session ID (null to clear)"),
@@ -11029,9 +11126,9 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
     "session_clear_all",
     "Delete all gateway session records, optionally scoped to one provider.",
     {
-      cli: SESSION_PROVIDER_ENUM.optional().describe(
-        "Provider filter (claude|codex|gemini|grok|mistral|grok-api)"
-      ),
+      cli: sessionProviderEnum
+        .optional()
+        .describe("Provider filter (claude|codex|gemini|grok|mistral|grok-api)"),
     },
     {
       title: "Clear sessions",

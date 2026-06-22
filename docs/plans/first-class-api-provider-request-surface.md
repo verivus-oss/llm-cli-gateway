@@ -12,7 +12,7 @@ xAI Responses) to full parity with the CLI request tools, and collapse the diver
 The motivating goal: run a **cross-LLM review + implementation cascade** on cheap
 hosted models (OpenRouter et al.) — cheap panel for first-pass review/draft, escalate to
 premier only on disagreement. The gateway already orchestrates multi-model review; what's
-missing is a *first-class, audited, schema-complete request surface* for HTTP providers so
+missing is a _first-class, audited, schema-complete request surface_ for HTTP providers so
 they can drive **implementation**, not just sit on the review panel.
 
 ## 1. Current state (verified)
@@ -22,7 +22,7 @@ What already exists and works:
 - **Generic tool family** — `registerApiProviderTools()` (`src/index.ts:4440`) auto-registers
   `api_<name>_request` + `api_<name>_request_async` for every enabled `[providers.<name>]`.
   Schema `ApiProviderToolParams` (`src/index.ts:4313`): `prompt, system, model, correlationId,
-  maxOutputTokens, temperature, topP, reasoningEffort, timeoutMs`.
+maxOutputTokens, temperature, topP, reasoningEffort, timeoutMs`.
 - **HTTP execution path** — `runApiRequest()` (`src/api-provider.ts:361`, sync, retry +
   per-provider circuit breaker) and `AsyncJobManager.startHttpJob()` (`src/async-job-manager.ts:675`,
   async, dedup + SQLite persistence + AbortController cancellation + orphan-marking).
@@ -30,30 +30,30 @@ What already exists and works:
   (`src/api-provider.ts:100/157/251`), `createApiProvider(name, kind)` factory.
 - **Sync→defer** — `awaitApiJobOrDefer()` (`src/index.ts:979`) mirrors the CLI 45s
   `SYNC_DEADLINE_MS` defer-to-async behaviour.
-- **Validation panel** — the *one* place API providers are already first-class peers:
+- **Validation panel** — the _one_ place API providers are already first-class peers:
   `dispatchProviderJob()` (`src/validation-orchestrator.ts:80`) routes reviewers to
   `startHttpJob` vs `startJob` by `findApiReviewer()` name lookup.
 - **Bespoke xAI** — `grok_api_request` (`src/index.ts:3896`/`6816`) has flight recording +
   server-side session continuity, but runs on the **legacy** `createXaiResponse()`
-  (`src/xai-api-provider.ts`), *separate* from the `XaiResponsesProvider` adapter.
+  (`src/xai-api-provider.ts`), _separate_ from the `XaiResponsesProvider` adapter.
 
 ## 2. The gap (parity deficit)
 
-| # | Gap | Today | Target |
-|---|-----|-------|--------|
-| G1 | Flight recording on generic sync handler | absent (`handleApiProviderRequest`) | `safeFlightStart`/`safeFlightComplete` like CLI/grok_api |
-| G2 | Token/cost capture for HTTP jobs | `ApiResult.usage` parsed, never persisted | usage threaded to flight-recorder + cost report |
-| ~~G3~~ | ~~Async HTTP metrics~~ | **ALREADY DONE** — `finalizeHttpJob→emitMetrics→onJobComplete→recordRequest` (`async-job-manager.ts:823`, `index.ts:473`); sync handler also records in `finally`. Dropped per round-1 review. | — |
-| G4 | Session/continuity | xai-only (`xaiPreviousResponseId`) | capability-typed continuity for all kinds (incl. session-tool enum widening, §7) |
-| G5 | Structured error propagation | error body **is** parsed into `ApiHttpError.message` (`api-http.ts:153`); generic tools surface it only as `stderr`/`message`, not structuredContent/job record | thread structured/raw error into generic responses + job records |
-| G6 | Schema parity | 9 fields | + promptParts, sessionId, optimize*, outputFormat, forceRefresh, idleTimeout |
-| G7 | Duplicate xAI implementations | legacy + adapter | one adapter; `grok_api_request` reimplemented on unified path |
-| G8 | Model registry | API models absent from `list_models`/`getCliInfo` | API `defaultModel`+`models[]` surfaced |
-| G9 | `provider-tool-capabilities` | grok_api only | per-kind capability entries |
-| G10 | `doctor` health | CLI-only providers block | API key + endpoint-reachability check |
-| G11 | `provider-status` / `login-guidance` | CLI-only | API key-presence status + key-acquisition guidance |
-| G12 | `resources` (`models://`, `sessions://`) | CLI-only | API model resources; sessions only if continuity tracked |
-| G13 | Naming/type drift | `api_<name>_request` vs `grok_api_request`; `"grok-api"` vs `"grok_api"` | normalized canonical naming |
+| #      | Gap                                      | Today                                                                                                                                                                                          | Target                                                                           |
+| ------ | ---------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
+| G1     | Flight recording on generic sync handler | absent (`handleApiProviderRequest`)                                                                                                                                                            | `safeFlightStart`/`safeFlightComplete` like CLI/grok_api                         |
+| G2     | Token/cost capture for HTTP jobs         | `ApiResult.usage` parsed, never persisted                                                                                                                                                      | usage threaded to flight-recorder + cost report                                  |
+| ~~G3~~ | ~~Async HTTP metrics~~                   | **ALREADY DONE** — `finalizeHttpJob→emitMetrics→onJobComplete→recordRequest` (`async-job-manager.ts:823`, `index.ts:473`); sync handler also records in `finally`. Dropped per round-1 review. | —                                                                                |
+| G4     | Session/continuity                       | xai-only (`xaiPreviousResponseId`)                                                                                                                                                             | capability-typed continuity for all kinds (incl. session-tool enum widening, §7) |
+| G5     | Structured error propagation             | error body **is** parsed into `ApiHttpError.message` (`api-http.ts:153`); generic tools surface it only as `stderr`/`message`, not structuredContent/job record                                | thread structured/raw error into generic responses + job records                 |
+| G6     | Schema parity                            | 9 fields                                                                                                                                                                                       | + promptParts, sessionId, optimize\*, outputFormat, forceRefresh, idleTimeout    |
+| G7     | Duplicate xAI implementations            | legacy + adapter                                                                                                                                                                               | one adapter; `grok_api_request` reimplemented on unified path                    |
+| G8     | Model registry                           | API models absent from `list_models`/`getCliInfo`                                                                                                                                              | API `defaultModel`+`models[]` surfaced                                           |
+| G9     | `provider-tool-capabilities`             | grok_api only                                                                                                                                                                                  | per-kind capability entries                                                      |
+| G10    | `doctor` health                          | CLI-only providers block                                                                                                                                                                       | API key + endpoint-reachability check                                            |
+| G11    | `provider-status` / `login-guidance`     | CLI-only                                                                                                                                                                                       | API key-presence status + key-acquisition guidance                               |
+| G12    | `resources` (`models://`, `sessions://`) | CLI-only                                                                                                                                                                                       | API model resources; sessions only if continuity tracked                         |
+| G13    | Naming/type drift                        | `api_<name>_request` vs `grok_api_request`; `"grok-api"` vs `"grok_api"`                                                                                                                       | normalized canonical naming                                                      |
 
 ## 3. Principles
 
@@ -88,28 +88,28 @@ runApiRequest → adapter.buildBody/parseResult → api-http.postJson (node:http
 
 Replace the thin `ApiProviderToolParams` with a parity schema. Canonical fields:
 
-| Field | Type | Notes |
-|---|---|---|
-| `prompt` | string 1..100k | XOR `promptParts` (reuse `PromptPartsSchema`) |
-| `promptParts` | PromptPartsSchema | parity with CLI tools |
-| `system` | string ≤100k | mapped per-adapter (top-level for Anthropic/xAI, system msg for OpenAI) |
-| `model` | string | defaults to provider `defaultModel`; checked against `models[]` allowlist |
-| `sessionId` | string | active-session resolution; continuity per §7 |
-| `createNewSession` / `continueSession` | bool | continuity-capable providers only |
-| `maxOutputTokens` `temperature` `topP` `reasoningEffort` | sampling | already present |
-| `outputFormat` | `text`\|`json` | `json` = return raw provider JSON in structuredContent |
-| `optimizePrompt` / `optimizeResponse` | bool | reuse `src/optimizer.ts` |
-| `forceRefresh` | bool | bypass dedup |
-| `timeoutMs` / `idleTimeoutMs` | int 30s..1h | wall vs idle |
-| `correlationId` | string | auto `randomUUID()` if omitted |
+| Field                                                    | Type              | Notes                                                                     |
+| -------------------------------------------------------- | ----------------- | ------------------------------------------------------------------------- |
+| `prompt`                                                 | string 1..100k    | XOR `promptParts` (reuse `PromptPartsSchema`)                             |
+| `promptParts`                                            | PromptPartsSchema | parity with CLI tools                                                     |
+| `system`                                                 | string ≤100k      | mapped per-adapter (top-level for Anthropic/xAI, system msg for OpenAI)   |
+| `model`                                                  | string            | defaults to provider `defaultModel`; checked against `models[]` allowlist |
+| `sessionId`                                              | string            | active-session resolution; continuity per §7                              |
+| `createNewSession` / `continueSession`                   | bool              | continuity-capable providers only                                         |
+| `maxOutputTokens` `temperature` `topP` `reasoningEffort` | sampling          | already present                                                           |
+| `outputFormat`                                           | `text`\|`json`    | `json` = return raw provider JSON in structuredContent                    |
+| `optimizePrompt` / `optimizeResponse`                    | bool              | reuse `src/optimizer.ts`                                                  |
+| `forceRefresh`                                           | bool              | bypass dedup                                                              |
+| `timeoutMs` / `idleTimeoutMs`                            | int 30s..1h       | wall vs idle                                                              |
+| `correlationId`                                          | string            | auto `randomUUID()` if omitted                                            |
 
 The `prompt` XOR `promptParts` constraint is enforced **dynamically at the prep boundary**
-(matching the CLI tools, e.g. `index.ts:2260`), *not* as a static JSON-Schema `oneOf` — static
+(matching the CLI tools, e.g. `index.ts:2260`), _not_ as a static JSON-Schema `oneOf` — static
 XOR degrades MCP client-side tool discovery.
 
 Fields with no HTTP analogue are intentionally absent: `allowedTools`/`disallowedTools`,
 `permissionMode`, `approvalStrategy`/`approvalPolicy`, `mcpServers`, `agents`, sandbox modes,
-worktree flags. (This is *why* API reviewers are exempt from `review-integrity` — no
+worktree flags. (This is _why_ API reviewers are exempt from `review-integrity` — no
 tool-suppression surface. Keep that exemption; revisit only if an agentic HTTP adapter ever
 gains an `allowedTools` surface.)
 
@@ -117,7 +117,7 @@ gains an `allowedTools` surface.)
 
 Make `handleApiProviderRequest` / `handleApiProviderRequestAsync` match `grok_api_request`.
 **Round-1 review made clear this is wider than the two handlers** — `ApiResult` is discarded
-at *four* sites before any FR/response write, so all four must change together:
+at _four_ sites before any FR/response write, so all four must change together:
 
 1. **Stop discarding `ApiResult`.** Today `awaitApiJobOrDefer` (`index.ts:979`) — both the
    inline no-defer path (`~1006`) and the deferred path — and `buildApiSuccessResponse`
@@ -125,7 +125,7 @@ at *four* sites before any FR/response write, so all four must change together:
    Thread the full `ApiResult` through to the response builder and FR write. Parity with
    `buildGrokApiToolResponse` (`index.ts:4059`) requires the richer structuredContent.
 2. **Flight start** — build `FlightLogStart { correlationId, cli: provider.name, model, prompt,
-   system, sessionId, asyncJobId, ownerPrincipal }`; call `safeFlightStart` before dispatch in
+system, sessionId, asyncJobId, ownerPrincipal }`; call `safeFlightStart` before dispatch in
    **both** generic handlers **and** in the validation dispatch (`validation-orchestrator.ts:90`,
    which today passes no `flightRecorderEntry`) — else reviewer/async API jobs stay FR-less.
 3. **Usage capture.** `ApiResult.usage` carries `inputTokens/outputTokens/cacheReadTokens/costUsd`.
@@ -134,7 +134,7 @@ at *four* sites before any FR/response write, so all four must change together:
    `result.usage` onto the in-memory job; `writeFlightComplete` reads it directly (no stdout
    re-parse). This is additive and does **not** touch the process/CLI extractor path.
    **Persistence decision (required):** the `jobs` table (`job-store.ts:244`) and `AsyncJobRecord`
-   have no usage columns — a reconstituted/orphan-swept HTTP job loses usage. *Recommend:*
+   have no usage columns — a reconstituted/orphan-swept HTTP job loses usage. _Recommend:_
    accept in-memory-only usage for v1 (FR row is written before GC in the common path) and
    document the reconstitution-loss edge; defer a `jobs` usage-column migration to a later slice.
 4. **OpenRouter usage opt-in is capability-typed, not name-branched.** OpenRouter needs
@@ -163,7 +163,7 @@ Continuity is **capability-typed on the adapter** (`ApiProvider.continuity`):
   now generalized).
 - **`stateless-resend`** (OpenAI-compatible: OpenRouter, vLLM, Ollama, OpenAI): `/chat/completions`
   has no server continuation. Sessions still exist for **active-session tracking, worktree/
-  workspace binding, and principal ownership**, but carry *no* continuation handle and *no*
+  workspace binding, and principal ownership**, but carry _no_ continuation handle and _no_
   conversation content (invariant preserved). Multi-turn = caller resends history (or, future
   opt-in, a bounded transcript cache held **outside** the default session store, explicitly
   flagged). For the review/implementation cascade, calls are one-shot, so this is sufficient.
@@ -171,12 +171,30 @@ Continuity is **capability-typed on the adapter** (`ApiProvider.continuity`):
 
 `prepareApiRequest` consults the capability to decide whether to inject `previousResponseId`.
 
-**Two structural changes round-1 review surfaced (this is *not* just "alias grok_api"):**
+**Delivery split (post-implementation review of PR #105).** Slice 3 ships in two parts:
+
+- **pt.1 (PR #105):** the `continuity` capability declared on the adapters; the shared
+  `resolveApiSession` (session resolve/create/track + `updateSessionUsage`, with the same
+  F3 own-or-not-found guards); **stateless-resend** session tracking on the sync
+  `api_<name>_request` (sessionId surfaced incl. on the deferred response, no continuation
+  handle, no conversation content); and the **dynamic session-tool enum** (the `session_*`
+  management tools accept enabled api provider names).
+- **pt.2 / Slice 4:** **server-side-id continuation** — threading `previousResponseId`,
+  persisting the handle, inline _clear-and-retry_ on 404, and the deferred-completion
+  session-update hook. Round-1 review of #105 (Codex + Grok) confirmed these are only
+  correct with the grok-unification inline-await + retry machinery on the async-capable
+  generic path; wiring them separately in pt.1 ships throwaway, half-correct behaviour
+  (no 404 retry, continuity silently lost on deferral). So pt.1 declares the capability and
+  does correct stateless tracking; server-side-id continuation is built **once**, correctly,
+  in Slice 4.
+
+**Two structural changes round-1 review surfaced (this is _not_ just "alias grok_api"):**
+
 - **Session-tool enum is static.** `session_create`/`session_list`/`session_set_active` validate
   the provider against `SESSION_PROVIDER_ENUM`, built from static `PROVIDER_TYPES` (CLIs +
   `grok-api` only, `session-manager.ts:67`, `index.ts:630/11243`). Generic API provider names
   cannot reach the session tools until this enum is built dynamically. **Build from
-  `[...PROVIDER_TYPES, ...enabledApiProviders.map(p=>p.name)]` deduped** — *not* from `CLI_TYPES`
+  `[...PROVIDER_TYPES, ...enabledApiProviders.map(p=>p.name)]` deduped** — _not_ from `CLI_TYPES`
   alone, which would drop the existing `grok-api` known API type (`PROVIDER_TYPES` already
   includes it, `session-manager.ts:67`). Note the name-mapping caveat: `[providers.xai]` registers
   under config name `xai` (`config.ts:617`) while the grok_api session path keys on id `grok-api`
@@ -202,7 +220,7 @@ Continuity is **capability-typed on the adapter** (`ApiProvider.continuity`):
   names (`config.ts:500/642`), so a provider literally named `grok_api` is currently accepted and
   would collide with a retained `grok_api_request` alias. Also, **no alias machinery exists** —
   `grok_api_request` is hand-registered outside `registerApiProviderTools` (`index.ts:6816`).
-  *Recommended default: KEEP `api_<name>_request`* (zero churn, no caller breakage). Treat the
+  _Recommended default: KEEP `api_<name>_request`_ (zero churn, no caller breakage). Treat the
   `api_`-prefix drop as an **optional, separately-gated** step that, if taken, must: (a) extend
   the reserved-name set to cover existing API aliases, (b) add real alias machinery + a
   deprecation window for current `api_*_request` callers, (c) normalize the provider-type token
@@ -258,15 +276,16 @@ Per the surface audit, a first-class HTTP provider must appear in:
 
 ## 12. Phased delivery
 
-| Slice | Content | Closes | Risk |
-|---|---|---|---|
-| 1 | Telemetry parity: thread full `ApiResult` through `awaitApiJobOrDefer` (inline+deferred) + response builders + both generic handlers **and validation dispatch**; direct usage field on HTTP job; OpenRouter `usageInclude` capability; widen `getPricing`; structured error propagation | G1,G2,G5 | **med** |
-| 2 | Schema parity: `ApiProviderRequestParams` (promptParts XOR at prep, sessionId, optimize*, outputFormat, forceRefresh, idleTimeout) | G6 | low |
-| 3 | Capability-typed continuity (server-side-id / stateless / none) **+ dynamic session-tool enum** + extract grok session helpers | G4 | **med-high** (couples with Slice 4) |
-| 4 | Adapter unification + grok_api logic extraction onto unified path; naming decision (default: keep `api_` prefix) | G7,G13 | **high** |
-| 5 | Model registry + `list_models` surfacing (+ pricing table if not done in S1) | G8 | low |
-| 6 | Peripheral surfaces: doctor / status / login-guidance / capabilities / resources | G9–G12 | low |
-| 7 | Hardening: mutation-probe audit, docs, CHANGELOG, README provider section | — | low |
+| Slice     | Content                                                                                                                                                                                                                                                                                  | Closes       | Risk     |
+| --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------ | -------- |
+| 1         | Telemetry parity: thread full `ApiResult` through `awaitApiJobOrDefer` (inline+deferred) + response builders + both generic handlers **and validation dispatch**; direct usage field on HTTP job; OpenRouter `usageInclude` capability; widen `getPricing`; structured error propagation | G1,G2,G5     | **med**  |
+| 2         | Schema parity: `ApiProviderRequestParams` (promptParts XOR at prep, sessionId, optimize\*, outputFormat, forceRefresh, idleTimeout)                                                                                                                                                      | G6           | low      |
+| 3a (#105) | Continuity capability on adapters + stateless session tracking (`resolveApiSession` + `updateSessionUsage`, sessionId on deferred response) + **dynamic session-tool enum**                                                                                                              | G4 (partial) | med      |
+| 3b/4      | **server-side-id continuation** (thread/persist `previousResponseId`, inline 404 clear-and-retry, deferred-completion hook) folded into adapter unification + grok extraction                                                                                                            | G4,G7,G13    | **high** |
+| 4         | Adapter unification + grok*api logic extraction onto unified path; naming decision (default: keep `api*` prefix)                                                                                                                                                                         | G7,G13       | **high** |
+| 5         | Model registry + `list_models` surfacing (+ pricing table if not done in S1)                                                                                                                                                                                                             | G8           | low      |
+| 6         | Peripheral surfaces: doctor / status / login-guidance / capabilities / resources                                                                                                                                                                                                         | G9–G12       | low      |
+| 7         | Hardening: mutation-probe audit, docs, CHANGELOG, README provider section                                                                                                                                                                                                                | —            | low      |
 
 Slices 3 and 4 are coupled (both touch grok session extraction) — sequence 3→4 or merge them.
 G3 is already implemented (see §2). Each slice independently shippable; each gets Codex +
@@ -286,18 +305,18 @@ Round 2 pending re-dispatch to the same reviewers.
 
 ## 13. Open decisions (recommendations inline)
 
-1. **Tool naming** — *recommend* **keep `api_<name>_request`** (current behaviour, zero churn,
+1. **Tool naming** — _recommend_ **keep `api_<name>_request`** (current behaviour, zero churn,
    no caller breakage; consistent with §8). Dropping the `api_` prefix → `<name>_request` is an
    **optional, separately-gated** future step requiring real alias machinery (none exists today —
    `grok_api_request` is hand-registered, `index.ts:6818`), an extended reserved-name set, and a
    deprecation window for existing `api_*_request` callers. This is the only externally-visible
-   break, so it is explicitly *deferred*, not bundled.
-2. **Stateless multi-turn** — *recommend* caller-resend only (preserves the no-conversation
+   break, so it is explicitly _deferred_, not bundled.
+2. **Stateless multi-turn** — _recommend_ caller-resend only (preserves the no-conversation
    invariant); defer any gateway-side transcript cache to a later opt-in slice.
-3. **Cost source** — *recommend* prefer provider-returned `usage.cost` (OpenRouter
+3. **Cost source** — _recommend_ prefer provider-returned `usage.cost` (OpenRouter
    `usage:{include:true}`), fall back to a model-pricing table wired into the existing cost
    report (#42).
-4. **Endpoint reachability in doctor** — *recommend* opt-in (off by default) to avoid a
+4. **Endpoint reachability in doctor** — _recommend_ opt-in (off by default) to avoid a
    network call + token spend on every `doctor` run.
 
 ---

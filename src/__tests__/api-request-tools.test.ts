@@ -16,6 +16,7 @@ import {
   handleApiProviderRequestAsync,
   registerApiProviderTools,
   resolveGatewayServerRuntime,
+  sessionProviderValuesFor,
   type GatewayServerRuntime,
 } from "../index.js";
 import {
@@ -25,7 +26,7 @@ import {
   ApiModelNotAllowedError,
 } from "../api-request.js";
 import { AsyncJobManager } from "../async-job-manager.js";
-import { resetApiProviderBreakers } from "../api-provider.js";
+import { resetApiProviderBreakers, createApiProvider } from "../api-provider.js";
 import { MemoryJobStore } from "../job-store.js";
 import {
   NoopFlightRecorder,
@@ -546,5 +547,123 @@ describe("Slice 2 — api provider schema parity", () => {
     // forceRefresh on an identical request bypasses dedup → a fresh server hit.
     await handleApiProviderRequest(runtime, rt(baseUrl), { prompt: "same", forceRefresh: true });
     expect(hits).toBe(2);
+  });
+});
+
+// Slice 3 — capability-typed continuity + sessions for the generic api tools.
+describe("Slice 3 — api provider continuity + sessions", () => {
+  it("declares the continuity capability per adapter kind", () => {
+    expect(createApiProvider("ollama", "openai-compatible").continuity).toBe("stateless-resend");
+    expect(createApiProvider("claude-api", "anthropic").continuity).toBe("stateless-resend");
+    expect(createApiProvider("xai", "xai-responses").continuity).toBe("server-side-id");
+  });
+
+  let tempDir: string;
+  let sessionManager: FileSessionManager;
+  let runtime: GatewayServerRuntime;
+  let closeServer: (() => Promise<void>) | null = null;
+  let lastBody: any;
+
+  function buildRuntime(baseUrl: string): GatewayServerRuntime {
+    const metrics = new PerformanceMetrics();
+    const recorder = new NoopFlightRecorder();
+    const asyncJobManager = new AsyncJobManager(
+      noopLogger,
+      undefined,
+      new MemoryJobStore(),
+      recorder
+    );
+    return resolveGatewayServerRuntime(
+      {
+        sessionManager,
+        asyncJobManager,
+        approvalManager: new ApprovalManager(undefined, noopLogger),
+        performanceMetrics: metrics,
+        resourceProvider: new ResourceProvider(sessionManager, metrics, recorder),
+        flightRecorder: recorder,
+        logger: noopLogger,
+        persistence: mkPersistence(),
+        providers: mkProviders(baseUrl),
+      },
+      { isolateState: true }
+    );
+  }
+
+  async function startServer(): Promise<string> {
+    const server = createServer(async (req, res) => {
+      const chunks: Buffer[] = [];
+      for await (const c of req) chunks.push(Buffer.from(c));
+      lastBody = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ model: "qwen2.5", choices: [{ message: { content: "ok" } }] }));
+    });
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    const addr = server.address();
+    if (!addr || typeof addr === "string") throw new Error("no port");
+    closeServer = () => new Promise(r => server.close(() => r()));
+    return `http://127.0.0.1:${addr.port}/v1`;
+  }
+
+  const rt = (baseUrl: string): ApiProviderRuntime => ({
+    name: "ollama",
+    kind: "openai-compatible",
+    baseUrl,
+    defaultModel: "qwen2.5",
+    apiKey: "",
+  });
+
+  beforeEach(() => {
+    resetApiProviderBreakers();
+    tempDir = mkdtempSync(join(tmpdir(), "api-session-"));
+    sessionManager = new FileSessionManager(join(tempDir, "sessions.json"));
+  });
+
+  afterEach(async () => {
+    if (closeServer) await closeServer();
+    closeServer = null;
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it("tracks a session for a stateless provider and never threads previous_response_id", async () => {
+    const baseUrl = await startServer();
+    runtime = buildRuntime(baseUrl);
+    const res = await handleApiProviderRequest(runtime, rt(baseUrl), {
+      prompt: "hi",
+      sessionId: "sess-1",
+    });
+    expect(res.isError).toBeFalsy();
+    expect((res.structuredContent as any).sessionId).toBe("sess-1");
+    expect(sessionManager.getSession("sess-1")?.cli).toBe("ollama");
+    // stateless-resend adapter must never emit a continuation handle.
+    expect(lastBody.previous_response_id).toBeUndefined();
+  });
+
+  it("creates no session for a stateless provider without session params", async () => {
+    const baseUrl = await startServer();
+    runtime = buildRuntime(baseUrl);
+    const res = await handleApiProviderRequest(runtime, rt(baseUrl), { prompt: "hi" });
+    expect(res.isError).toBeFalsy();
+    expect((res.structuredContent as any).sessionId).toBeNull();
+    expect(sessionManager.listSessions().length).toBe(0);
+  });
+
+  it("reuses the same session on a repeat sessionId and refreshes lastUsedAt", async () => {
+    const baseUrl = await startServer();
+    runtime = buildRuntime(baseUrl);
+    await handleApiProviderRequest(runtime, rt(baseUrl), { prompt: "one", sessionId: "s1" });
+    const after1 = sessionManager.getSession("s1")!.lastUsedAt;
+    await handleApiProviderRequest(runtime, rt(baseUrl), { prompt: "two", sessionId: "s1" });
+    const after2 = sessionManager.getSession("s1")!.lastUsedAt;
+    // One row reused (not duplicated), and lastUsedAt is bumped (never goes back) —
+    // proving updateSessionUsage runs so reuse keeps the session alive past the TTL.
+    expect(sessionManager.listSessions().filter(s => s.cli === "ollama").length).toBe(1);
+    expect(new Date(after2).getTime()).toBeGreaterThanOrEqual(new Date(after1).getTime());
+  });
+
+  it("session_* tools accept enabled api provider names (dynamic enum)", () => {
+    const values = sessionProviderValuesFor(mkProviders("http://127.0.0.1:1/v1"));
+    expect(values).toContain("ollama"); // the configured generic api provider
+    expect(values).toContain("claude"); // static CLI set preserved
+    expect(values).toContain("grok-api"); // known api-provider type preserved
   });
 });

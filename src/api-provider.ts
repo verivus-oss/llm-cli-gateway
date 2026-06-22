@@ -26,6 +26,17 @@ import {
 
 export type ApiProviderKind = "openai-compatible" | "anthropic" | "xai-responses";
 
+/**
+ * Slice 3: how an adapter supports multi-turn continuity.
+ * - `server-side-id`: the provider returns a continuation handle the gateway
+ *   threads back as `previousResponseId` (xAI Responses). Real server-side state.
+ * - `stateless-resend`: `/chat/completions`-style — no server continuation; the
+ *   caller resends the full history. Sessions still track active/owner/worktree
+ *   but store NO conversation content (invariant preserved).
+ * - `none`: continuity params are rejected.
+ */
+export type ApiContinuity = "server-side-id" | "stateless-resend" | "none";
+
 export interface ApiChatMessage {
   role: "system" | "user" | "assistant";
   content: string;
@@ -75,6 +86,8 @@ export interface ApiProvider {
   /** Config key, e.g. "ollama", "openai", "xai". */
   readonly name: string;
   readonly kind: ApiProviderKind;
+  /** Slice 3: multi-turn continuity model (see ApiContinuity). */
+  readonly continuity: ApiContinuity;
   /** Endpoint URL with the https-or-loopback guard applied. */
   endpointUrl(baseUrl: string): URL;
   buildBody(req: ApiRequest): Record<string, unknown>;
@@ -106,6 +119,7 @@ function firstNumber(...candidates: unknown[]): number | undefined {
 
 export class OpenAiCompatibleProvider implements ApiProvider {
   readonly kind = "openai-compatible" as const;
+  readonly continuity = "stateless-resend" as const;
   constructor(readonly name: string) {}
 
   endpointUrl(baseUrl: string): URL {
@@ -170,6 +184,7 @@ const DEFAULT_ANTHROPIC_MAX_TOKENS = 4096;
 
 export class AnthropicProvider implements ApiProvider {
   readonly kind = "anthropic" as const;
+  readonly continuity = "stateless-resend" as const;
   constructor(
     readonly name: string,
     private readonly anthropicVersion: string = DEFAULT_ANTHROPIC_VERSION
@@ -264,6 +279,7 @@ function extractXaiResponseText(parsed: any): string {
 
 export class XaiResponsesProvider implements ApiProvider {
   readonly kind = "xai-responses" as const;
+  readonly continuity = "server-side-id" as const;
   constructor(readonly name: string) {}
 
   endpointUrl(baseUrl: string): URL {
