@@ -211,10 +211,63 @@ export interface OrphanedJobSnapshot {
 }
 
 /**
+ * Cross-LLM validation receipts (Phase 0): a link from a validation run to one
+ * provider (or judge) job that carries its actual output.
+ */
+export interface ValidationRunLink {
+  provider: string;
+  jobId: string;
+  correlationId: string;
+}
+
+/**
+ * Durable record of a cross-LLM validation run, keyed by `validationId`. This is
+ * the mapping the receipt feature needs: `validationId` did not previously
+ * survive the transient kickoff response. Written once at kickoff; `status` and
+ * `judgeLink` mutate as the run reaches its terminal state.
+ */
+export interface ValidationRunRecord {
+  validationId: string;
+  ownerPrincipal: string;
+  intent: string;
+  createdAt: string;
+  /** Owner-scoped serialized request (question/content/focus/riskLevel/modelList/judge plan). */
+  requestJson: string;
+  providerLinks: ValidationRunLink[];
+  judgeLink: ValidationRunLink | null;
+  status: "running" | "finalized";
+}
+
+/**
+ * The validation-run persistence surface. Only an actually-durable, implemented
+ * backend provides it (today `SqliteJobStore`). `MemoryJobStore`
+ * (process-lifetime) and `PostgresJobStore` (unimplemented stub) deliberately do
+ * NOT implement it, so under those backends no run row is ever written: the
+ * durability gate is enforced by the absence of this capability, not by a flag.
+ */
+export interface ValidationRunStore {
+  /** Insert the run row once at kickoff. Idempotent on validation_id (INSERT OR IGNORE). */
+  recordValidationRun(run: ValidationRunRecord): void;
+  getValidationRun(validationId: string): ValidationRunRecord | null;
+  setValidationJudgeLink(validationId: string, judgeLink: ValidationRunLink): void;
+  setValidationRunStatus(validationId: string, status: ValidationRunRecord["status"]): void;
+}
+
+/** True when a job store also persists validation runs (only SqliteJobStore today). */
+export function isValidationRunStore(store: unknown): store is ValidationRunStore {
+  return (
+    typeof store === "object" &&
+    store !== null &&
+    typeof (store as ValidationRunStore).recordValidationRun === "function" &&
+    typeof (store as ValidationRunStore).getValidationRun === "function"
+  );
+}
+
+/**
  * SQLite-backed job store. Default backend for production. Durable across
  * gateway restarts; safe for single-instance deployments.
  */
-export class SqliteJobStore implements JobStore {
+export class SqliteJobStore implements JobStore, ValidationRunStore {
   private db: GatewayDatabase;
   private retentionMs: number;
   private dedupWindowMs: number;
@@ -267,6 +320,24 @@ export class SqliteJobStore implements JobStore {
       CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
       CREATE INDEX IF NOT EXISTS idx_jobs_expires_at ON jobs(expires_at);
       CREATE INDEX IF NOT EXISTS idx_jobs_request_key_finished ON jobs(request_key, finished_at);
+    `);
+
+    // Cross-LLM validation receipts (Phase 0): durable validation-run identity.
+    // Same idempotent CREATE TABLE IF NOT EXISTS idiom as the jobs table (NOT the
+    // flight recorder's versioned _migrations system). App-side ISO timestamps;
+    // owner_principal indexed for owner-scoped lookups.
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS validation_runs (
+        validation_id TEXT PRIMARY KEY,
+        owner_principal TEXT NOT NULL,
+        intent TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        request_json TEXT NOT NULL,
+        provider_links TEXT NOT NULL,
+        judge_link TEXT,
+        status TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_validation_runs_owner ON validation_runs(owner_principal);
     `);
 
     // F3: idempotent migration — add owner_principal to a pre-existing jobs
@@ -495,12 +566,90 @@ export class SqliteJobStore implements JobStore {
     return Number(result.changes);
   }
 
+  // --- ValidationRunStore (cross-LLM validation receipts, Phase 0) ---
+
+  recordValidationRun(run: ValidationRunRecord): void {
+    // INSERT OR IGNORE: kickoff writes once; a re-run with the same validation_id
+    // (a randomUUID collision is effectively impossible, but the guard keeps the
+    // write idempotent and race-safe) is a no-op rather than an overwrite.
+    this.db
+      .prepare(
+        `INSERT OR IGNORE INTO validation_runs
+           (validation_id, owner_principal, intent, created_at, request_json,
+            provider_links, judge_link, status)
+         VALUES (@validation_id, @owner_principal, @intent, @created_at, @request_json,
+                 @provider_links, @judge_link, @status)`
+      )
+      .run({
+        validation_id: run.validationId,
+        owner_principal: run.ownerPrincipal,
+        intent: run.intent,
+        created_at: run.createdAt,
+        request_json: run.requestJson,
+        provider_links: JSON.stringify(run.providerLinks),
+        judge_link: run.judgeLink ? JSON.stringify(run.judgeLink) : null,
+        status: run.status,
+      });
+  }
+
+  getValidationRun(validationId: string): ValidationRunRecord | null {
+    const row = this.db
+      .prepare(`SELECT * FROM validation_runs WHERE validation_id = ?`)
+      .get(validationId);
+    return row ? rowToValidationRunRecord(row) : null;
+  }
+
+  setValidationJudgeLink(validationId: string, judgeLink: ValidationRunLink): void {
+    this.db
+      .prepare(`UPDATE validation_runs SET judge_link = ? WHERE validation_id = ?`)
+      .run(JSON.stringify(judgeLink), validationId);
+  }
+
+  setValidationRunStatus(validationId: string, status: ValidationRunRecord["status"]): void {
+    this.db
+      .prepare(`UPDATE validation_runs SET status = ? WHERE validation_id = ?`)
+      .run(status, validationId);
+  }
+
   close(): void {
     try {
       this.db.close();
     } catch (err) {
       this.logger.error("SqliteJobStore close failed", err);
     }
+  }
+}
+
+function rowToValidationRunRecord(row: any): ValidationRunRecord {
+  return {
+    validationId: row.validation_id,
+    ownerPrincipal: row.owner_principal,
+    intent: row.intent,
+    createdAt: row.created_at,
+    requestJson: row.request_json,
+    providerLinks: parseLinks(row.provider_links) ?? [],
+    judgeLink: parseLink(row.judge_link),
+    status: row.status as ValidationRunRecord["status"],
+  };
+}
+
+function parseLinks(value: unknown): ValidationRunLink[] | null {
+  if (typeof value !== "string" || value.length === 0) return null;
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? (parsed as ValidationRunLink[]) : null;
+  } catch {
+    return null;
+  }
+}
+
+function parseLink(value: unknown): ValidationRunLink | null {
+  if (typeof value !== "string" || value.length === 0) return null;
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === "object" ? (parsed as ValidationRunLink) : null;
+  } catch {
+    return null;
   }
 }
 

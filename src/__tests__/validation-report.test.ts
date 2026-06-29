@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildValidationReport } from "../validation-report.js";
+import { buildValidationReport, deriveValidationRunStatus } from "../validation-report.js";
 import type { NormalizedValidationResult, ValidationProvider } from "../validation-normalizer.js";
 
 // Layer 6 / U20: validation report structuredContent coverage.
@@ -36,6 +36,105 @@ function result(
     warning: overrides.warning,
   };
 }
+
+describe("cross-LLM validation receipts Phase 0: deriveValidationRunStatus", () => {
+  it("returns not_started for no results", () => {
+    expect(deriveValidationRunStatus([], "not_requested")).toBe("not_started");
+  });
+
+  it("returns not_started when every provider was skipped (run never started)", () => {
+    expect(
+      deriveValidationRunStatus(
+        [
+          result({ provider: "claude", status: "skipped" }),
+          result({ provider: "codex", status: "skipped" }),
+        ],
+        "not_requested"
+      )
+    ).toBe("not_started");
+  });
+
+  it("returns running at kickoff when dispatched jobs are still running", () => {
+    expect(
+      deriveValidationRunStatus(
+        [
+          result({ provider: "claude", status: "running" }),
+          result({ provider: "codex", status: "running" }),
+        ],
+        "not_requested"
+      )
+    ).toBe("running");
+  });
+
+  it("returns partial when a dispatched job is running and another was skipped", () => {
+    expect(
+      deriveValidationRunStatus(
+        [
+          result({ provider: "claude", status: "running" }),
+          result({ provider: "codex", status: "skipped" }),
+        ],
+        "not_requested"
+      )
+    ).toBe("partial");
+  });
+
+  it("returns completed only when every dispatched provider job is terminal", () => {
+    expect(
+      deriveValidationRunStatus(
+        [
+          result({ provider: "claude", status: "completed" }),
+          result({ provider: "codex", status: "failed" }),
+        ],
+        "not_requested"
+      )
+    ).toBe("completed");
+  });
+
+  it("treats a skipped provider as terminal so it does not block completion", () => {
+    expect(
+      deriveValidationRunStatus(
+        [
+          result({ provider: "claude", status: "completed" }),
+          result({ provider: "codex", status: "skipped" }),
+        ],
+        "skipped"
+      )
+    ).toBe("completed");
+  });
+
+  it("stays non-terminal while a requested judge synthesis is still running", () => {
+    expect(
+      deriveValidationRunStatus(
+        [
+          result({ provider: "claude", status: "completed" }),
+          result({ provider: "codex", status: "completed" }),
+        ],
+        "running"
+      )
+    ).toBe("running");
+    expect(
+      deriveValidationRunStatus(
+        [
+          result({ provider: "claude", status: "completed" }),
+          result({ provider: "codex", status: "completed" }),
+        ],
+        "waiting_for_provider_results"
+      )
+    ).toBe("running");
+  });
+
+  it("returns completed when providers are terminal and the judge has finished", () => {
+    expect(
+      deriveValidationRunStatus(
+        [
+          result({ provider: "claude", status: "completed" }),
+          result({ provider: "codex", status: "completed" }),
+        ],
+        "completed"
+      )
+    ).toBe("completed");
+  });
+});
 
 describe("Layer 6 validation report structuredContent (U20)", () => {
   it("reports high confidence for two completed agreeing providers", () => {

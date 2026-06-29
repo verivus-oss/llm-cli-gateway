@@ -11,7 +11,13 @@ import {
   type NormalizedValidationResult,
   type ValidationProvider,
 } from "./validation-normalizer.js";
-import { buildValidationReport, type ValidationReport } from "./validation-report.js";
+import {
+  buildValidationReport,
+  deriveValidationRunStatus,
+  type ValidationReport,
+} from "./validation-report.js";
+import type { ValidationRunLink, ValidationRunStore } from "./job-store.js";
+import { getRequestContext, principalCanAccess, resolveOwnerPrincipal } from "./request-context.js";
 import {
   buildJudgePrompt,
   buildValidationPrompt,
@@ -36,6 +42,14 @@ export interface ValidationOrchestratorDeps {
    * pre-Slice-3 CLI-only behaviour.
    */
   apiProviders?: ApiProviderRuntime[];
+  /**
+   * Cross-LLM validation receipts (Phase 0): when present (durable sqlite backend
+   * with an attached store), `startValidationRun` persists a `validation_runs`
+   * row at kickoff and `startJudgeSynthesis` links the judge job back into it.
+   * Absent under non-durable backends, where no run row is ever written, so the
+   * caller still gets a `validationId` but no durable, retrievable run.
+   */
+  validationRunStore?: ValidationRunStore | null;
 }
 
 /** Slice 3: the enabled API-provider runtime for `provider`, or null (a CLI). */
@@ -117,7 +131,7 @@ export interface StartValidationInput {
 export interface ValidationRunReport {
   success: boolean;
   validationId: string;
-  status: "running" | "partial" | "not_started";
+  status: "running" | "partial" | "not_started" | "completed";
   startedAt: string;
   intent: ValidationIntent;
   originalRequest: {
@@ -128,7 +142,7 @@ export interface ValidationRunReport {
   modelList: ValidationProvider[];
   results: NormalizedValidationResult[];
   synthesis: {
-    status: "not_requested" | "waiting_for_provider_results" | "running" | "skipped";
+    status: "not_requested" | "waiting_for_provider_results" | "running" | "skipped" | "completed";
     judgeModel: ValidationProvider | null;
     rawJobReference: NormalizedValidationResult["rawJobReference"];
     note: string;
@@ -154,10 +168,29 @@ export function startValidationRun(
   const providers = uniqueProviders(input.providers);
   const results = providers.map(provider => startProviderJob(deps, provider, prompt, validationId));
   const runningCount = results.filter(result => result.status === "running").length;
-  const skippedCount = results.filter(result => result.status === "skipped").length;
   const synthesis = plannedJudgeSynthesis(input);
-  const status: ValidationRunReport["status"] =
-    runningCount === 0 ? "not_started" : skippedCount > 0 ? "partial" : "running";
+  // Phase 0: derive via the shared helper so the run-level status can reach the
+  // terminal `completed` value once results are collected. For kickoff inputs
+  // (running/skipped results, non-terminal synthesis) this is identical to the
+  // previous `runningCount === 0 ? not_started : skipped > 0 ? partial : running`.
+  const status: ValidationRunReport["status"] = deriveValidationRunStatus(
+    results,
+    synthesis.status
+  );
+
+  // Cross-LLM validation receipts (Phase 0): persist durable run identity before
+  // returning, mapping validationId -> the provider jobs that carry the outputs.
+  // Only happens under a durable backend (validationRunStore present). Persistence
+  // failure must not break kickoff: the caller still gets the validationId.
+  persistValidationRun(deps, {
+    validationId,
+    startedAt,
+    intent: input.intent,
+    input,
+    providers,
+    results,
+  });
+
   const reportInput = {
     validationId,
     status,
@@ -194,6 +227,13 @@ export function startJudgeSynthesis(
     question: string;
     providerResults: NormalizedValidationResult[];
     judgeProvider: ValidationProvider;
+    /**
+     * Cross-LLM validation receipts (Phase 0): the run this judge belongs to.
+     * When supplied and the run exists and is owned by the caller, the judge job
+     * is linked back into the durable run (`judge_link`). Absent or unowned: no
+     * mutation, behaviour is exactly as before.
+     */
+    validationId?: string;
   }
 ): ValidationRunReport["synthesis"] {
   const pending = input.providerResults.find(
@@ -237,6 +277,7 @@ export function startJudgeSynthesis(
     }),
     `validation-judge-${randomUUID()}-${input.judgeProvider}`
   );
+  linkJudgeJob(deps, input.validationId, input.judgeProvider, snapshot);
   return {
     status: "running",
     judgeModel: input.judgeProvider,
@@ -304,6 +345,83 @@ function plannedJudgeSynthesis(input: StartValidationInput): ValidationRunReport
     rawJobReference: null,
     note: "Collect provider results first, then call synthesize_validation with those results.",
   };
+}
+
+/**
+ * Cross-LLM validation receipts (Phase 0): link the judge job into its durable
+ * run. No-op when no run store is wired, the run is unknown, or the run is owned
+ * by a different principal (own-or-not-found: never mutate another caller's run).
+ * Swallows persistence errors so a storage hiccup never breaks synthesis.
+ */
+function linkJudgeJob(
+  deps: ValidationOrchestratorDeps,
+  validationId: string | undefined,
+  provider: ValidationProvider,
+  snapshot: AsyncJobSnapshot
+): void {
+  const store = deps.validationRunStore;
+  if (!store || !validationId) return;
+  try {
+    const run = store.getValidationRun(validationId);
+    if (!run) return;
+    if (!principalCanAccess(run.ownerPrincipal, resolveOwnerPrincipal(getRequestContext()))) return;
+    store.setValidationJudgeLink(validationId, {
+      provider: String(provider),
+      jobId: snapshot.id,
+      correlationId: snapshot.correlationId,
+    });
+  } catch {
+    // Graceful degradation: a persistence hiccup must not fail synthesis.
+  }
+}
+
+/**
+ * Cross-LLM validation receipts (Phase 0): write the durable `validation_runs`
+ * row at kickoff. No-op when no durable run store is wired (non-sqlite backend).
+ * Swallows persistence errors so a storage hiccup never breaks the kickoff.
+ */
+function persistValidationRun(
+  deps: ValidationOrchestratorDeps,
+  args: {
+    validationId: string;
+    startedAt: string;
+    intent: ValidationIntent;
+    input: StartValidationInput;
+    providers: ValidationProvider[];
+    results: NormalizedValidationResult[];
+  }
+): void {
+  const store = deps.validationRunStore;
+  if (!store) return;
+  try {
+    const providerLinks: ValidationRunLink[] = args.results
+      .filter(result => result.rawJobReference !== null)
+      .map(result => ({
+        provider: String(result.provider),
+        jobId: result.rawJobReference!.jobId,
+        correlationId: result.rawJobReference!.correlationId,
+      }));
+    store.recordValidationRun({
+      validationId: args.validationId,
+      ownerPrincipal: resolveOwnerPrincipal(getRequestContext()),
+      intent: args.intent,
+      createdAt: args.startedAt,
+      requestJson: JSON.stringify({
+        question: args.input.question,
+        content: args.input.content,
+        focus: args.input.focus,
+        riskLevel: args.input.riskLevel,
+        modelList: args.providers,
+        judgeProvider: args.input.judgeProvider ?? null,
+      }),
+      providerLinks,
+      judgeLink: null,
+      status: "running",
+    });
+  } catch {
+    // Graceful degradation: a persistence hiccup must not fail the validation
+    // kickoff. The validationId is still returned; the run simply is not durable.
+  }
 }
 
 function buildProviderArgs(provider: ValidationProvider, prompt: string): string[] {

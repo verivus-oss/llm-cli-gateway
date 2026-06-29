@@ -5,7 +5,7 @@ export type ValidationReportConfidence = "none" | "low" | "medium" | "high";
 
 export interface ValidationReportInput {
   validationId: string;
-  status: "running" | "partial" | "not_started";
+  status: "running" | "partial" | "not_started" | "completed";
   startedAt: string;
   intent: ValidationIntent;
   originalRequest: {
@@ -16,7 +16,7 @@ export interface ValidationReportInput {
   modelList: ValidationProvider[];
   results: NormalizedValidationResult[];
   synthesis: {
-    status: "not_requested" | "waiting_for_provider_results" | "running" | "skipped";
+    status: "not_requested" | "waiting_for_provider_results" | "running" | "skipped" | "completed";
     judgeModel: ValidationProvider | null;
     rawJobReference: NormalizedValidationResult["rawJobReference"];
     note: string;
@@ -100,6 +100,46 @@ export function buildValidationReport(input: ValidationReportInput): ValidationR
     humanReadable: renderHumanReport(structuredContent),
     structuredContent,
   };
+}
+
+/**
+ * Cross-LLM validation receipts (Phase 0): derive the run-level report status,
+ * including the terminal `completed` value that the kickoff path never produced.
+ *
+ * A run is `completed` (terminal) when at least one provider job was dispatched
+ * (i.e. not every result is `skipped`), every dispatched provider job is in a
+ * terminal state (`completed | failed | canceled | orphaned`), and any requested
+ * judge synthesis is no longer pending (`running` / `waiting_for_provider_results`
+ * keep the run non-terminal). `skipped` results are themselves terminal and do
+ * not block completion, but a run where EVERY provider was skipped never started
+ * and stays `not_started`.
+ *
+ * For the kickoff inputs (results are only `running` or `skipped`, synthesis is
+ * `not_requested` / `waiting_for_provider_results`) this reproduces the previous
+ * `runningCount === 0 ? not_started : skipped > 0 ? partial : running` formula
+ * exactly; it only adds `completed` once results are collected and terminal.
+ */
+export function deriveValidationRunStatus(
+  results: NormalizedValidationResult[],
+  synthesisStatus: ValidationReportInput["synthesis"]["status"]
+): ValidationReportInput["status"] {
+  if (results.length === 0) return "not_started";
+  const dispatched = results.filter(result => result.status !== "skipped");
+  if (dispatched.length === 0) return "not_started";
+  const allDispatchedTerminal = dispatched.every(
+    result =>
+      result.status === "completed" ||
+      result.status === "failed" ||
+      result.status === "canceled" ||
+      result.status === "orphaned"
+  );
+  const hasSkipped = results.some(result => result.status === "skipped");
+  const judgePending =
+    synthesisStatus === "running" || synthesisStatus === "waiting_for_provider_results";
+  if (!allDispatchedTerminal || judgePending) {
+    return hasSkipped ? "partial" : "running";
+  }
+  return "completed";
 }
 
 function summarizeDisagreement(

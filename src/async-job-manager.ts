@@ -11,14 +11,14 @@ import {
 import type { Logger } from "./logger.js";
 import { noopLogger, logWarn } from "./logger.js";
 import { ProcessMonitor, type JobHealth } from "./process-monitor.js";
-import { JobStore, computeRequestKey } from "./job-store.js";
+import { JobStore, computeRequestKey, isValidationRunStore } from "./job-store.js";
 import {
   NoopFlightRecorder,
   type FlightLogResult,
   type FlightRecorderLike,
 } from "./flight-recorder.js";
 import { codexFrResponse } from "./codex-json-parser.js";
-import type { JobTransport, OrphanedJobSnapshot } from "./job-store.js";
+import type { JobTransport, OrphanedJobSnapshot, ValidationRunStore } from "./job-store.js";
 import { getRequestContext, resolveOwnerPrincipal } from "./request-context.js";
 import {
   runApiRequest,
@@ -508,6 +508,17 @@ export class AsyncJobManager {
    */
   hasStore(): boolean {
     return this.store !== null;
+  }
+
+  /**
+   * Cross-LLM validation receipts (Phase 0): the validation-run persistence
+   * surface IFF the attached store is an actually-durable, implemented backend
+   * that provides it (today SqliteJobStore). Returns null when there is no store
+   * or the store is MemoryJobStore / PostgresJobStore, so the receipt feature is
+   * gated by capability: under a non-durable backend no run row is ever written.
+   */
+  getValidationRunStore(): ValidationRunStore | null {
+    return this.store && isValidationRunStore(this.store) ? this.store : null;
   }
 
   private emitMetrics(job: AsyncJobRecord): void {

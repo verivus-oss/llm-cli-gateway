@@ -4,6 +4,7 @@ import type { AsyncJobManager } from "./async-job-manager.js";
 import { CLI_TYPES } from "./session-manager.js";
 import { getAvailableCliInfo } from "./model-registry.js";
 import { apiProviderCatalogEntry } from "./api-request.js";
+import { getRequestContext, principalCanAccess, resolveOwnerPrincipal } from "./request-context.js";
 import {
   collectValidationJobResult,
   startJudgeSynthesis,
@@ -267,6 +268,12 @@ export function registerValidationTools(server: McpServer, deps: ValidationToolD
         .min(1)
         .describe("Terminal normalized provider results from job_result."),
       judgeModel: providerSchema.default("codex").describe("Provider to run the judge synthesis."),
+      validationId: z
+        .string()
+        .optional()
+        .describe(
+          "Optional run id (from the kickoff response) to link this judge job back into the durable validation run."
+        ),
     },
     {
       title: "Synthesize validation",
@@ -275,7 +282,7 @@ export function registerValidationTools(server: McpServer, deps: ValidationToolD
       idempotentHint: false,
       openWorldHint: true,
     },
-    async ({ question, providerResults, judgeModel }) =>
+    async ({ question, providerResults, judgeModel, validationId }) =>
       textResponse({
         success: true,
         tool: "synthesize_validation",
@@ -284,6 +291,7 @@ export function registerValidationTools(server: McpServer, deps: ValidationToolD
           question,
           providerResults,
           judgeProvider: judgeModel,
+          validationId,
         }),
       })
   );
@@ -326,8 +334,12 @@ export function registerValidationTools(server: McpServer, deps: ValidationToolD
       openWorldHint: false,
     },
     async ({ jobId }) => {
+      // F3b owner check (cross-LLM validation receipts §5a): own-or-not-found.
+      // A job owned by another principal is reported as absent, mirroring the
+      // llm_job_status path; previously this surface had no ownership check.
       const job = deps.asyncJobManager.getJobSnapshot(jobId);
-      if (!job) {
+      const caller = resolveOwnerPrincipal(getRequestContext());
+      if (!job || !principalCanAccess(deps.asyncJobManager.getJobOwner(jobId), caller)) {
         return textResponse({ success: false, error: "Job not found", jobId });
       }
       return textResponse({ success: true, job });
@@ -358,8 +370,12 @@ export function registerValidationTools(server: McpServer, deps: ValidationToolD
       openWorldHint: false,
     },
     async ({ jobId, provider, maxChars }) => {
+      // F3b owner check (cross-LLM validation receipts §5a): own-or-not-found.
+      // A job owned by another principal is reported as absent, mirroring the
+      // llm_job_result path; previously this surface had no ownership check.
       const result = deps.asyncJobManager.getJobResult(jobId, maxChars);
-      if (!result) {
+      const caller = resolveOwnerPrincipal(getRequestContext());
+      if (!result || !principalCanAccess(deps.asyncJobManager.getJobOwner(jobId), caller)) {
         return textResponse({ success: false, error: "Job not found", jobId });
       }
       return textResponse({

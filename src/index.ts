@@ -6685,9 +6685,17 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
   registerBaseResources(server, runtime);
   // Slice 3: enabled API providers can act as validation reviewers/judges. The
   // orchestrator dispatches them through startHttpJob; CLI providers keep argv.
+  // Cross-LLM validation receipts (Phase 0): pass the durable validation-run
+  // store ONLY under an implemented durable backend (today sqlite) with a store
+  // that actually attached at runtime. getValidationRunStore() returns null for a
+  // null store or the ephemeral memory / unimplemented postgres stores, so under
+  // any non-durable backend no validation_runs row is ever written, by
+  // construction (the same gate style as *_request_async tool registration).
   registerValidationTools(server, {
     asyncJobManager,
     apiProviders: enabledApiProviders(providers),
+    validationRunStore:
+      persistence.backend === "sqlite" ? asyncJobManager.getValidationRunStore() : null,
   });
   registerWorkspaceTools(server, runtime);
   // Slice 2: per-provider api_<name>_request tools. Dormant unless a
