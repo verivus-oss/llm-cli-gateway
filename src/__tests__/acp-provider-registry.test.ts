@@ -46,10 +46,10 @@ describe("acp provider registry", () => {
     });
   }
 
-  it("targets Antigravity agy 1.0.10 for gemini and keeps it on the watchlist with no entrypoint", () => {
+  it("targets Antigravity agy 1.0.13 for gemini and keeps it on the watchlist with no entrypoint", () => {
     const gemini = getAcpProviderEntry("gemini");
     expect(gemini.displayName).toBe("Google Antigravity");
-    expect(gemini.targetVersion).toBe("agy 1.0.10");
+    expect(gemini.targetVersion).toBe("agy 1.0.13");
     expect(gemini.status).toBe("absent_watchlist");
     expect(gemini.supportKind).toBe("none");
     expect(gemini.entrypoint).toBeNull();

@@ -460,6 +460,9 @@ export const GROK_FLAG_GENERATION: readonly FlagGenerationMeta[] = [
  * - `--agents`        JSON string-or-map with validation.
  * - `--prompt-json`   JSON serialisation + non-empty validation.
  * - `--worktree`      boolean-or-string (bare flag vs `--worktree <name>`).
+ * - `--worktree-ref`  emitted only alongside `--worktree` (cross-flag guard).
+ * - `--fork-session`  boolean flag emitted next to the worktree/session block.
+ * - `--json-schema`   JSON string-or-object serialisation (Grok structured output).
  * - `-p` / `--resume` / `--continue` prompt positional + session args, assembled
  *                       outside the flag block.
  */
@@ -470,6 +473,9 @@ export const UNGENERATED_GROK_FLAGS: readonly string[] = [
   "--agents",
   "--prompt-json",
   "--worktree",
+  "--worktree-ref",
+  "--fork-session",
+  "--json-schema",
   "-p",
   "--resume",
   "--continue",

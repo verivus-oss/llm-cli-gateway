@@ -247,7 +247,7 @@ export const ACP_CONTRACT: AcpContractMetadata = {
     },
     gemini: {
       classification: "absent_watchlist",
-      summary: "Google Antigravity agy 1.0.10 has no ACP surface; watchlist item only.",
+      summary: "Google Antigravity agy 1.0.13 has no ACP surface; watchlist item only.",
     },
     grok_api: {
       classification: "absent_watchlist",
@@ -368,7 +368,7 @@ const ACP_CAPABILITIES: Record<KnownProviderCapabilityId, ProviderAcpCapability>
   grok: {
     status: "native_smoke_passed",
     mediation: "native",
-    targetVersion: "grok 0.2.60 (474c2bbfc)",
+    targetVersion: "grok 0.2.73 (9ff14c43bb)",
     entrypoint: { command: "grok", args: ["agent", "stdio"] },
     runtimeEnabled: false,
     smokeSupported: true,
@@ -383,7 +383,7 @@ const ACP_CAPABILITIES: Record<KnownProviderCapabilityId, ProviderAcpCapability>
   codex: {
     status: "adapter_mediated_deferred",
     mediation: "adapter_mediated",
-    targetVersion: "codex-cli 0.141.0",
+    targetVersion: "codex-cli 0.142.4",
     entrypoint: null,
     runtimeEnabled: false,
     smokeSupported: false,
@@ -397,7 +397,7 @@ const ACP_CAPABILITIES: Record<KnownProviderCapabilityId, ProviderAcpCapability>
   claude: {
     status: "adapter_mediated_deferred",
     mediation: "adapter_mediated",
-    targetVersion: "claude 2.1.185",
+    targetVersion: "claude 2.1.195",
     entrypoint: null,
     runtimeEnabled: false,
     smokeSupported: false,
@@ -411,13 +411,13 @@ const ACP_CAPABILITIES: Record<KnownProviderCapabilityId, ProviderAcpCapability>
   gemini: {
     status: "absent_watchlist",
     mediation: "none",
-    targetVersion: "agy 1.0.10",
+    targetVersion: "agy 1.0.13",
     entrypoint: null,
     runtimeEnabled: false,
     smokeSupported: false,
     smokeStatus: "unsupported",
     caveats: [
-      "Antigravity agy 1.0.10 has no ACP flag or subcommand.",
+      "Antigravity agy 1.0.13 has no ACP flag or subcommand.",
       "Legacy Gemini CLI ACP evidence does not transfer to agy; kept on the upstream drift watchlist.",
     ],
     docs: ACP_DOCS_REFERENCE,
@@ -436,7 +436,7 @@ const ACP_CAPABILITIES: Record<KnownProviderCapabilityId, ProviderAcpCapability>
   devin: {
     status: "native_smoke_passed",
     mediation: "native",
-    targetVersion: "devin 2026.7.23 (3bd47f77)",
+    targetVersion: "devin 2026.8.18 (16737566)",
     entrypoint: { command: "devin", args: ["acp"] },
     runtimeEnabled: false,
     smokeSupported: true,

@@ -139,6 +139,14 @@ export interface CliSubcommandContract {
   tokenCost: CliSubcommandTokenCost;
   summary: string;
   conformanceFixtures: readonly CliContractFixture[];
+  /**
+   * The subcommand's `--help` probe legitimately exits non-zero on the
+   * installed binary (e.g. it uses Go's `flag` package, which prints "Usage of
+   * <cmd>:" to stderr and exits 2 for `--help`). When true, a non-zero exit
+   * status from the help probe is NOT reported as a drift warning. A genuine
+   * spawn failure (`result.error`) still marks the subcommand unavailable.
+   */
+  helpProbeExitTolerant?: boolean;
 }
 
 export interface ContractViolation {
@@ -276,12 +284,12 @@ export const ACP_ENTRYPOINT_CONTRACTS: Record<CliType, AcpEntrypointContract> = 
     status: "native",
     executable: "grok",
     entrypointArgs: ["agent", "stdio"],
-    targetVersion: "grok 0.2.60 (474c2bbfc)",
+    targetVersion: "grok 0.2.73 (9ff14c43bb)",
     // `grok agent stdio --help` is a safe help probe; bare `grok agent stdio`
     // starts the live ACP server and is intentionally NOT probed here.
     probeArgs: [["agent", "stdio", "--help"]],
     evidence:
-      "Native ACP via `grok agent stdio`; initialize + session/new smoke passed with isolated leader socket. Second runtime pilot. Bumped for 0.2.60.",
+      "Native ACP via `grok agent stdio`; initialize + session/new smoke passed with isolated leader socket. Second runtime pilot. Entrypoint re-probed clean at 0.2.73.",
     docsRef: "docs/plans/first-class-acp-gateway-extension.dag.toml#provider_matrix.grok",
   },
   codex: {
@@ -290,11 +298,11 @@ export const ACP_ENTRYPOINT_CONTRACTS: Record<CliType, AcpEntrypointContract> = 
     status: "adapter_mediated_deferred",
     executable: "codex",
     entrypointArgs: [],
-    targetVersion: "codex-cli 0.141.0",
+    targetVersion: "codex-cli 0.142.4",
     probeArgs: [],
     adapterCandidates: ["zed-industries/codex-acp", "agentclientprotocol/codex-acp"],
     evidence:
-      "No native ACP entrypoint at codex-cli 0.141.0. Adapter evidence tracked as documentation only; not native gateway ACP support.",
+      "No native ACP entrypoint at codex-cli 0.142.4. Adapter evidence tracked as documentation only; not native gateway ACP support.",
     docsRef: "docs/plans/first-class-acp-gateway-extension.dag.toml#provider_matrix.codex",
   },
   claude: {
@@ -303,11 +311,11 @@ export const ACP_ENTRYPOINT_CONTRACTS: Record<CliType, AcpEntrypointContract> = 
     status: "adapter_mediated_deferred",
     executable: "claude",
     entrypointArgs: [],
-    targetVersion: "claude 2.1.185",
+    targetVersion: "claude 2.1.195",
     probeArgs: [],
     adapterCandidates: ["Claude Agent SDK ACP adapter"],
     evidence:
-      "No native Claude Code CLI ACP entrypoint at claude 2.1.185. Adapter ownership/permission bridging unresolved; deferred.",
+      "No native Claude Code CLI ACP entrypoint at claude 2.1.195. Adapter ownership/permission bridging unresolved; deferred.",
     docsRef: "docs/plans/first-class-acp-gateway-extension.dag.toml#provider_matrix.claude",
   },
   gemini: {
@@ -316,10 +324,10 @@ export const ACP_ENTRYPOINT_CONTRACTS: Record<CliType, AcpEntrypointContract> = 
     status: "absent_watchlist",
     executable: "agy",
     entrypointArgs: [],
-    targetVersion: "agy 1.0.10",
+    targetVersion: "agy 1.0.13",
     probeArgs: [],
     evidence:
-      "agy 1.0.10 has no ACP flag or subcommand. Legacy Gemini CLI ACP evidence does not transfer. Watchlist item.",
+      "agy 1.0.13 has no ACP flag or subcommand. Legacy Gemini CLI ACP evidence does not transfer. Watchlist item.",
     docsRef: "docs/plans/first-class-acp-gateway-extension.dag.toml#provider_matrix.gemini",
   },
   devin: {
@@ -328,7 +336,7 @@ export const ACP_ENTRYPOINT_CONTRACTS: Record<CliType, AcpEntrypointContract> = 
     status: "native",
     executable: "devin",
     entrypointArgs: ["acp"],
-    targetVersion: "devin 2026.7.23 (3bd47f77)",
+    targetVersion: "devin 2026.8.18 (16737566)",
     // `devin --version` is the safe probe; bare `devin acp` starts the live ACP
     // server over stdio and is intentionally NOT probed here.
     probeArgs: [["--version"]],
@@ -381,6 +389,7 @@ function subcommand(
     flagArities?: Record<string, CliFlagArity>;
     fixtures?: readonly CliContractFixture[];
     acknowledgedUpstreamFlags?: readonly string[];
+    helpProbeExitTolerant?: boolean;
   } = {}
 ): CliSubcommandContract {
   return {
@@ -397,6 +406,7 @@ function subcommand(
     summary,
     conformanceFixtures: options.fixtures ?? [],
     acknowledgedUpstreamFlags: options.acknowledgedUpstreamFlags ?? [],
+    ...(options.helpProbeExitTolerant ? { helpProbeExitTolerant: true } : {}),
   };
 }
 
@@ -660,18 +670,20 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         description: 'Restrict the available built-in tool set ("" disables all)',
       },
     },
-    // Claude Code 2.1.167 --help surface the gateway deliberately does not
+    // Claude Code 2.1.195 --help surface the gateway deliberately does not
     // emit. Long-form aliases of declared short flags (--print for -p),
-    // interactive/IDE-only switches, and flags superseded by gateway
-    // parameters (--dangerously-skip-permissions maps to --permission-mode
-    // bypassPermissions via request-helpers). Probe-acknowledgement only —
-    // never an argv allowlist.
+    // interactive/IDE-only switches, background-agent launchers, and flags
+    // superseded by gateway parameters (--dangerously-skip-permissions maps to
+    // --permission-mode bypassPermissions via request-helpers). Probe-
+    // acknowledgement only, never an argv allowlist.
     acknowledgedUpstreamFlags: [
       "--allow-dangerously-skip-permissions",
       "--allowed", // alias of --allowed-tools
       "--ax-screen-reader",
+      "--background", // 2.1.195: start the session as a background agent
       "--bare",
       "--betas",
+      "--bg", // 2.1.195: short form of --background
       "--brief",
       "--chrome",
       "--dangerously-skip-permissions",
@@ -683,7 +695,6 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       "--from-pr",
       "--ide",
       "--include-hook-events",
-      "--mcp-debug",
       "--name",
       "--no-chrome",
       "--plugin-dir",
@@ -800,6 +811,13 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
           "--verbose",
         ],
         expect: "pass",
+      },
+      {
+        id: "claude-background-acknowledged-not-emitted",
+        description:
+          "Claude 2.1.195 advertises --bg/--background (background agent), but the gateway acknowledges them without emitting; caller argv is rejected",
+        args: ["-p", "hello", "--background"],
+        expect: "fail",
       },
     ],
   },
@@ -1420,7 +1438,10 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         "Update Antigravity CLI to the current release.",
         "writes_local_config",
         [],
-        { tokenCost: "small" }
+        // `agy update` uses Go's flag package: `agy update --help` prints
+        // "Usage of update:" to stderr and exits 2 (no parseable flag list).
+        // Tolerate the non-zero help-probe exit so it is not reported as drift.
+        { tokenCost: "small", helpProbeExitTolerant: true }
       ),
     },
     maxPositionals: 1,
@@ -1445,6 +1466,9 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       "skipTrust",
       // Auto-approve-all ergonomic alias (equivalent to approvalMode "yolo")
       "yolo",
+      // Antigravity 1.0.13 wired project-selection flags
+      "project",
+      "newProject",
     ],
     flags: {
       "--print": { arity: "none", description: "Run a single prompt non-interactively" },
@@ -1460,16 +1484,20 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       "--conversation": { arity: "one", description: "Resume a previous conversation by ID" },
       "--continue": { arity: "none", description: "Continue the most recent conversation" },
       "-c": { arity: "none", description: "Short alias for --continue" },
+      // Antigravity 1.0.13: project selection for the CLI session (now wired).
+      "--project": { arity: "one", description: "Antigravity project ID for this session" },
+      "--new-project": {
+        arity: "none",
+        description: "Create a new Antigravity project for this session",
+      },
     },
-    // Antigravity CLI flags the gateway deliberately does not emit. These are
-    // probe acknowledgements only — never an argv allowlist.
-    acknowledgedUpstreamFlags: [
-      "--prompt-interactive",
-      "-i",
-      "--print-timeout",
-      "--log-file",
-      "--version",
-    ],
+    // Antigravity CLI long flags the gateway deliberately does not emit, as
+    // advertised by `agy --help` on 1.0.13. Probe acknowledgements only, never
+    // an argv allowlist. (`-i` is a short alias of --prompt-interactive and
+    // `--version` is a top-level command not listed in --help; neither is
+    // parsed by the long-flag probe, so both were dropped to keep the probe
+    // quiet.) `--project` / `--new-project` graduated to the flags allowlist.
+    acknowledgedUpstreamFlags: ["--log-file", "--print-timeout", "--prompt-interactive"],
     env: {},
     conformanceFixtures: [
       {
@@ -1507,6 +1535,18 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         description: "Legacy Gemini JSON output flag is rejected",
         args: ["--print", "hello", "-o", "json"],
         expect: "fail",
+      },
+      {
+        id: "gemini-project-wired",
+        description: "Antigravity 1.0.13: --project <ID> is wired",
+        args: ["--print", "hello", "--project", "proj-123"],
+        expect: "pass",
+      },
+      {
+        id: "gemini-new-project-wired",
+        description: "Antigravity 1.0.13: --new-project is wired",
+        args: ["--print", "hello", "--new-project"],
+        expect: "pass",
       },
     ],
   },
@@ -1692,7 +1732,54 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
           ["--leader-socket"],
           { exposure: "not_exposed" }
         ),
-        ssh: subcommand(["ssh"], "Manage Grok SSH integration.", "network", ["--leader-socket"]),
+        ssh: subcommand(["ssh"], "Manage Grok SSH integration.", "network", ["--leader-socket"], {
+          // Grok 0.2.73: `grok ssh --help` inherits the full global agent flag
+          // surface (it launches an agent session over SSH). The gateway never
+          // emits `grok ssh`, so acknowledge the inherited flags to keep the
+          // subcommand drift probe quiet without widening any argv allowlist.
+          // (--debug / --debug-file are merged in via GROK_DEBUG_HELP_FLAGS.)
+          acknowledgedUpstreamFlags: [
+            "--agent",
+            "--agents",
+            "--allow",
+            "--always-approve",
+            "--best-of-n",
+            "--check",
+            "--continue",
+            "--cwd",
+            "--deny",
+            "--disable-web-search",
+            "--disallowed-tools",
+            "--effort",
+            "--experimental-memory",
+            "--fork-session",
+            "--json-schema",
+            "--max-turns",
+            "--model",
+            "--no-alt-screen",
+            "--no-memory",
+            "--no-plan",
+            "--no-subagents",
+            "--oauth",
+            "--output-format",
+            "--permission-mode",
+            "--prompt-file",
+            "--prompt-json",
+            "--reasoning-effort",
+            "--restore-code",
+            "--resume",
+            "--rules",
+            "--sandbox",
+            "--session-id",
+            "--single",
+            "--system-prompt-override",
+            "--tools",
+            "--verbatim",
+            "--version",
+            "--worktree",
+            "--worktree-ref",
+          ],
+        }),
         trace: subcommand(
           ["trace"],
           "Inspect Grok trace data.",
@@ -1732,7 +1819,14 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       GROK_DEBUG_HELP_FLAGS
     ),
     maxPositionals: 0,
-    acknowledgedUpstreamFlags: GROK_DEBUG_HELP_FLAGS,
+    // Grok 0.2.73: `--fork-session`, `--json-schema`, and `--worktree-ref` are
+    // now wired through the request path (see flags + prepareGrokRequest), so
+    // they live in the argv allowlist, not here. `--session-id` is advertised
+    // but intentionally NOT wired: the gateway owns grok session-id lifecycle
+    // (it generates and tracks IDs), so letting a caller inject a specific
+    // new-conversation UUID would collide with that tracking and with the
+    // cross-principal session-isolation guarantees. Acknowledge-only.
+    acknowledgedUpstreamFlags: [...GROK_DEBUG_HELP_FLAGS, "--session-id"],
     mcpTools: ["grok_request", "grok_request_async"],
     mcpParameters: [
       "prompt",
@@ -1783,6 +1877,10 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       "restoreCode",
       "leaderSocket",
       "nativeWorktree",
+      // Grok 0.2.73 wired parity flags
+      "worktreeRef",
+      "forkSession",
+      "jsonSchema",
     ],
     flags: {
       "-p": { arity: "one", description: "Prompt text" },
@@ -1889,6 +1987,24 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       "--worktree": {
         arity: "optional",
         description: "Start the session in a new git worktree, optionally named",
+      },
+      // Grok 0.2.73: branch/tag/commit to base the worktree on (with --worktree;
+      // defaults to current HEAD). Gateway emits it only alongside nativeWorktree.
+      "--worktree-ref": {
+        arity: "one",
+        description: "Git ref to base the worktree on (requires --worktree)",
+      },
+      // Grok 0.2.73: when resuming, create a new session ID instead of reusing
+      // the original (mirrors Claude --fork-session).
+      "--fork-session": {
+        arity: "none",
+        description: "Fork the resumed session into a new session ID",
+      },
+      // Grok 0.2.73: constrain output to a JSON Schema (implies --output-format
+      // json). Mirrors Claude/Codex structured-output parity.
+      "--json-schema": {
+        arity: "one",
+        description: "JSON Schema literal constraining structured output (implies json output)",
       },
       // Grok 0.2.x context/compaction controls (both enum, env-backed).
       // As of 0.2.60 these are accepted by the runtime but omitted from --help
@@ -2066,6 +2182,37 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
           "Grok 0.2.38: top-level --agent + --leader-socket co-occurrence accepted (dated example using flags current at 0.2.38; the agent subcommand expansion flags e.g. --agent-profile/--reauth/--grok-ws-* are listed in the subcommand contract declaration for --probe-installed drift tracking and are not part of this primary-path fixture's argv)",
         args: ["-p", "hello", "--agent", "reviewer", "--leader-socket", "/tmp/leader.sock"],
         expect: "pass",
+      },
+      {
+        id: "grok-json-schema-wired",
+        description:
+          "Grok 0.2.73: --json-schema <SCHEMA> is wired (structured output, implies json)",
+        args: [
+          "-p",
+          "hello",
+          "--json-schema",
+          '{"type":"object","properties":{"name":{"type":"string"}}}',
+        ],
+        expect: "pass",
+      },
+      {
+        id: "grok-fork-session-wired",
+        description: "Grok 0.2.73: --fork-session is wired (fork resumed session into a new ID)",
+        args: ["-p", "hello", "--resume", "sess-1", "--fork-session"],
+        expect: "pass",
+      },
+      {
+        id: "grok-worktree-ref-wired",
+        description: "Grok 0.2.73: --worktree-ref <REF> is wired (with --worktree)",
+        args: ["-p", "hello", "--worktree", "--worktree-ref", "main"],
+        expect: "pass",
+      },
+      {
+        id: "grok-session-id-acknowledged-not-emitted",
+        description:
+          "Grok 0.2.73 advertises --session-id, but the gateway owns session-id lifecycle and does not emit it; caller argv is rejected",
+        args: ["-p", "hello", "--session-id", "11111111-1111-1111-1111-111111111111"],
+        expect: "fail",
       },
     ],
   },
@@ -3162,7 +3309,7 @@ function probeInstalledCliSubcommands(
         break;
       }
       outputs.push(`${result.stdout ?? ""}\n${result.stderr ?? ""}`);
-      if (result.status !== 0) {
+      if (result.status !== 0 && !sub.helpProbeExitTolerant) {
         warnings.push(
           `${contract.executable} ${args.join(" ")} exited with status ${result.status}`
         );

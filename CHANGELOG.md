@@ -11,6 +11,13 @@ All notable changes to the llm-cli-gateway project.
 - **New `validation-receipt://{validationId}` MCP resource** with the same own-or-not-found owner scoping.
 - **Durable run identity (prerequisite).** `validation_runs` (plus a `validation_run_jobs` reverse index) persists each run's `validationId`, owner principal, and provider/judge job links at kickoff. The report and synthesis status enums gained a terminal `completed` value.
 - The receipt tool, the resource, and the run/receipt tables exist ONLY under an implemented durable backend (today `sqlite`) with a store attached at runtime; under `memory` / `postgres` / `none` no run/receipt row is written and the tool/resource are not registered (the caller still receives a `validationId` at kickoff). Silent loss is impossible by construction.
+- **Grok structured-output and session/worktree parity (Grok 0.2.73).** `grok_request` / `grok_request_async` gained `jsonSchema` (emits `--json-schema`, constrains output to a JSON Schema, implies json output), `forkSession` (emits `--fork-session`, forks a resumed session into a new ID), and `worktreeRef` (emits `--worktree-ref <REF>`; requires `nativeWorktree`, else rejected). Grok `--session-id` remains intentionally unwired (the gateway owns session-id lifecycle and cross-principal isolation).
+- **Antigravity project selection (agy 1.0.13).** `gemini_request` / `gemini_request_async` gained `project` (emits `--project <ID>`) and `newProject` (emits `--new-project`); the two are mutually exclusive (rejected if both set).
+
+### Changed
+
+- **Upstream contracts refreshed to the installed provider versions.** Live `--probe-installed` probes were re-run across all six provider CLIs; ACP `targetVersion` pins bumped to claude 2.1.195, codex-cli 0.142.4, agy 1.0.13, grok 0.2.73, and devin 2026.8.18 (mistral vibe 2.17.1 unchanged), kept in sync across `upstream-contracts`, `provider-tool-capabilities`, and the ACP `provider-registry`. Acknowledged newly-advertised flags (claude `--bg`/`--background`); dropped stale acknowledgements (claude `--mcp-debug`, agy `-i`/`--version`); and acknowledged grok's `ssh` subcommand inheriting the global agent flag surface.
+- **`agy update` help-probe drift silenced.** `agy update --help` uses Go's `flag` package (prints "Usage of update:" and exits 2). A new `helpProbeExitTolerant` subcommand-contract marker treats that legitimate non-zero help exit as clean rather than reporting it as drift.
 
 ### Fixed
 

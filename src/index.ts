@@ -3072,6 +3072,16 @@ export function prepareGeminiRequest(
      * auto-approve path. Default undefined.
      */
     yolo?: boolean;
+    /**
+     * Antigravity 1.0.13: `--project <ID>` selects the project for this CLI
+     * session. Mutually exclusive with `newProject`.
+     */
+    project?: string;
+    /**
+     * Antigravity 1.0.13: `--new-project` creates a new project for this
+     * session. Mutually exclusive with `project`.
+     */
+    newProject?: boolean;
   },
   runtime: GatewayServerRuntime = resolveGatewayServerRuntime()
 ): CliRequestPrep | ExtendedToolResponse {
@@ -3203,6 +3213,21 @@ export function prepareGeminiRequest(
   if (params.yolo || effectiveApprovalMode === "yolo") {
     args.push("--dangerously-skip-permissions");
   }
+  if (params.project !== undefined && params.newProject) {
+    return createErrorResponse(
+      params.operation,
+      1,
+      "",
+      corrId,
+      new Error("project and newProject are mutually exclusive")
+    ) as ExtendedToolResponse;
+  }
+  if (params.project !== undefined && params.project !== "") {
+    args.push("--project", params.project);
+  }
+  if (params.newProject) {
+    args.push("--new-project");
+  }
 
   return {
     corrId,
@@ -3320,6 +3345,24 @@ export function prepareGrokRequest(
      * `true` → bare `--worktree`; string → `--worktree <name>`.
      */
     nativeWorktree?: boolean | string;
+    /**
+     * Grok 0.2.73: `--worktree-ref <REF>` (branch/tag/commit to base the native
+     * worktree on). Only valid with `nativeWorktree`; emitting it without a
+     * worktree is rejected (mirrors the grok CLI requirement).
+     */
+    worktreeRef?: string;
+    /**
+     * Grok 0.2.73: `--fork-session`. When resuming (`--resume`/`--continue`),
+     * fork into a new session ID instead of reusing the original. Mirrors
+     * Claude's `forkSession`.
+     */
+    forkSession?: boolean;
+    /**
+     * Grok 0.2.73: `--json-schema <SCHEMA>` constrains output to a JSON Schema
+     * (implies grok `--output-format json`). Accepts a literal string or an
+     * object (serialized). Mirrors Claude/Codex structured-output parity.
+     */
+    jsonSchema?: string | Record<string, unknown>;
   },
   runtime: GatewayServerRuntime = resolveGatewayServerRuntime()
 ): CliRequestPrep | ExtendedToolResponse {
@@ -3461,10 +3504,42 @@ export function prepareGrokRequest(
   }
   args.push(...buildArgvFromGeneration(grokContract, GROK_GEN_SINGLE, genParams));
   args.push(...buildArgvFromGeneration(grokContract, GROK_GEN_TAIL, genParams));
+  const hasNativeWorktree =
+    params.nativeWorktree === true ||
+    (typeof params.nativeWorktree === "string" && params.nativeWorktree.length > 0);
   if (params.nativeWorktree === true) {
     args.push("--worktree");
   } else if (typeof params.nativeWorktree === "string" && params.nativeWorktree.length > 0) {
     args.push("--worktree", params.nativeWorktree);
+  }
+  if (params.worktreeRef !== undefined && params.worktreeRef !== "") {
+    if (!hasNativeWorktree) {
+      return createErrorResponse(
+        params.operation,
+        1,
+        "",
+        corrId,
+        new Error("worktreeRef: requires nativeWorktree (grok --worktree-ref needs --worktree)")
+      ) as ExtendedToolResponse;
+    }
+    args.push("--worktree-ref", params.worktreeRef);
+  }
+  if (params.forkSession) {
+    args.push("--fork-session");
+  }
+  if (params.jsonSchema !== undefined) {
+    const schemaArg =
+      typeof params.jsonSchema === "string" ? params.jsonSchema : JSON.stringify(params.jsonSchema);
+    if (!schemaArg.trim()) {
+      return createErrorResponse(
+        params.operation,
+        1,
+        "",
+        corrId,
+        new Error("jsonSchema: must be a non-empty JSON Schema string or object")
+      ) as ExtendedToolResponse;
+    }
+    args.push("--json-schema", schemaArg);
   }
 
   return {
@@ -4835,6 +4910,10 @@ export interface GeminiRequestParams {
   skipTrust?: boolean;
   /** Emit `--yolo` (auto-approve all). Equivalent to approvalMode "yolo"; gated identically. */
   yolo?: boolean;
+  /** Antigravity 1.0.13 `--project <ID>`: select the project for this session. */
+  project?: string;
+  /** Antigravity 1.0.13 `--new-project`: create a new project for this session. */
+  newProject?: boolean;
   workspace?: string;
   /** Slice λ: run this request inside a gateway-owned git worktree. */
   worktree?: boolean | { name?: string; ref?: string };
@@ -4903,6 +4982,8 @@ export async function handleGeminiRequest(
       attachments: params.attachments,
       skipTrust: params.skipTrust,
       yolo: params.yolo,
+      project: params.project,
+      newProject: params.newProject,
     },
     runtime
   );
@@ -5112,6 +5193,8 @@ export async function handleGeminiRequestAsync(
       attachments: params.attachments,
       skipTrust: params.skipTrust,
       yolo: params.yolo,
+      project: params.project,
+      newProject: params.newProject,
     },
     runtime
   );
@@ -5286,6 +5369,12 @@ export interface GrokRequestParams {
   leaderSocket?: string;
   /** Grok CLI `--worktree` (not gateway slice λ `worktree`). */
   nativeWorktree?: boolean | string;
+  /** Grok 0.2.73 `--worktree-ref <REF>`: git ref for the native worktree (requires nativeWorktree). */
+  worktreeRef?: string;
+  /** Grok 0.2.73 `--fork-session`: fork the resumed session into a new ID. */
+  forkSession?: boolean;
+  /** Grok 0.2.73 `--json-schema`: constrain output to a JSON Schema (string or object). */
+  jsonSchema?: string | Record<string, unknown>;
   workspace?: string;
   /** Slice λ: run this request inside a gateway-owned git worktree. */
   worktree?: boolean | { name?: string; ref?: string };
@@ -5353,6 +5442,9 @@ export async function handleGrokRequest(
       restoreCode: params.restoreCode,
       leaderSocket: params.leaderSocket,
       nativeWorktree: params.nativeWorktree,
+      worktreeRef: params.worktreeRef,
+      forkSession: params.forkSession,
+      jsonSchema: params.jsonSchema,
     },
     runtime
   );
@@ -5587,6 +5679,9 @@ export async function handleGrokRequestAsync(
       restoreCode: params.restoreCode,
       leaderSocket: params.leaderSocket,
       nativeWorktree: params.nativeWorktree,
+      worktreeRef: params.worktreeRef,
+      forkSession: params.forkSession,
+      jsonSchema: params.jsonSchema,
     },
     runtime
   );
@@ -8091,6 +8186,19 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .describe(
           "Emit `--dangerously-skip-permissions` to auto-approve all actions. Routed through the same approval gate. Under mcp_managed the gate still decides."
         ),
+      project: z
+        .string()
+        .min(1)
+        .optional()
+        .describe(
+          "Antigravity 1.0.13 --project <ID>: select the project for this session. Mutually exclusive with newProject."
+        ),
+      newProject: z
+        .boolean()
+        .optional()
+        .describe(
+          "Antigravity 1.0.13 --new-project: create a new project for this session. Mutually exclusive with project."
+        ),
       workspace: WORKSPACE_ALIAS_SCHEMA.optional(),
       worktree: WORKTREE_SCHEMA.optional(),
     },
@@ -8126,6 +8234,8 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       attachments,
       skipTrust,
       yolo,
+      project,
+      newProject,
       workspace,
       worktree,
     }) => {
@@ -8156,6 +8266,8 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           attachments,
           skipTrust,
           yolo,
+          project,
+          newProject,
           workspace,
           worktree,
         }
@@ -8259,6 +8371,25 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .describe(
           "Grok -w/--worktree: native CLI worktree flag (`true` → bare `--worktree`, string → named). NOT gateway slice λ `worktree`."
         ),
+      worktreeRef: z
+        .string()
+        .min(1)
+        .optional()
+        .describe(
+          "Grok 0.2.73 --worktree-ref <REF>: git ref (branch/tag/commit) to base the native worktree on. Requires nativeWorktree."
+        ),
+      forkSession: z
+        .boolean()
+        .optional()
+        .describe(
+          "Grok 0.2.73 --fork-session: when resuming (--resume/--continue), fork into a new session ID instead of reusing the original."
+        ),
+      jsonSchema: z
+        .union([z.string().min(1), z.record(z.string(), z.unknown())])
+        .optional()
+        .describe(
+          "Grok 0.2.73 --json-schema: constrain output to a JSON Schema (string literal or object; implies json output)."
+        ),
       workspace: WORKSPACE_ALIAS_SCHEMA.optional(),
       worktree: WORKTREE_SCHEMA.optional(),
     },
@@ -8320,6 +8451,9 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       restoreCode,
       leaderSocket,
       nativeWorktree,
+      worktreeRef,
+      forkSession,
+      jsonSchema,
       workspace,
       worktree,
     }) => {
@@ -8376,6 +8510,9 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           restoreCode,
           leaderSocket,
           nativeWorktree,
+          worktreeRef,
+          forkSession,
+          jsonSchema,
           workspace,
           worktree,
         }
@@ -9395,6 +9532,19 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .describe(
             "Emit `--dangerously-skip-permissions` to auto-approve all actions. Routed through the same approval gate. Under mcp_managed the gate still decides."
           ),
+        project: z
+          .string()
+          .min(1)
+          .optional()
+          .describe(
+            "Antigravity 1.0.13 --project <ID>: select the project for this session. Mutually exclusive with newProject."
+          ),
+        newProject: z
+          .boolean()
+          .optional()
+          .describe(
+            "Antigravity 1.0.13 --new-project: create a new project for this session. Mutually exclusive with project."
+          ),
         workspace: WORKSPACE_ALIAS_SCHEMA.optional(),
         worktree: WORKTREE_SCHEMA.optional(),
       },
@@ -9429,6 +9579,8 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         attachments,
         skipTrust,
         yolo,
+        project,
+        newProject,
         workspace,
         worktree,
       }) => {
@@ -9458,6 +9610,8 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             attachments,
             skipTrust,
             yolo,
+            project,
+            newProject,
             workspace,
             worktree,
           }
@@ -9686,6 +9840,25 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .describe(
             "Grok -w/--worktree: native CLI worktree flag (`true` → bare `--worktree`, string → named). NOT gateway slice λ `worktree`."
           ),
+        worktreeRef: z
+          .string()
+          .min(1)
+          .optional()
+          .describe(
+            "Grok 0.2.73 --worktree-ref <REF>: git ref (branch/tag/commit) to base the native worktree on. Requires nativeWorktree."
+          ),
+        forkSession: z
+          .boolean()
+          .optional()
+          .describe(
+            "Grok 0.2.73 --fork-session: when resuming (--resume/--continue), fork into a new session ID instead of reusing the original."
+          ),
+        jsonSchema: z
+          .union([z.string().min(1), z.record(z.string(), z.unknown())])
+          .optional()
+          .describe(
+            "Grok 0.2.73 --json-schema: constrain output to a JSON Schema (string literal or object; implies json output)."
+          ),
         workspace: WORKSPACE_ALIAS_SCHEMA.optional(),
         worktree: WORKTREE_SCHEMA.optional(),
       },
@@ -9745,6 +9918,9 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         restoreCode,
         leaderSocket,
         nativeWorktree,
+        worktreeRef,
+        forkSession,
+        jsonSchema,
         workspace,
         worktree,
       }) => {
@@ -9799,6 +9975,9 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             restoreCode,
             leaderSocket,
             nativeWorktree,
+            worktreeRef,
+            forkSession,
+            jsonSchema,
             workspace,
             worktree,
           }

@@ -704,11 +704,11 @@ Options:
       expect((ACP_ENTRYPOINT_CONTRACTS.claude.adapterCandidates ?? []).length).toBeGreaterThan(0);
     });
 
-    it("keeps agy on the watchlist with no ACP surface at agy 1.0.10", () => {
+    it("keeps agy on the watchlist with no ACP surface at agy 1.0.13", () => {
       const agy = ACP_ENTRYPOINT_CONTRACTS.gemini;
       expect(agy.status).toBe("absent_watchlist");
       expect(agy.executable).toBe("agy");
-      expect(agy.targetVersion).toContain("1.0.10");
+      expect(agy.targetVersion).toContain("1.0.13");
       expect(agy.entrypointArgs).toEqual([]);
       expect(agy.probeArgs).toEqual([]);
     });
