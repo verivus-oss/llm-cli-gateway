@@ -63,6 +63,15 @@ updates:
         versions: ["2.1.0"]
       - dependency-name: "content-type"
         versions: ["2.0.0"]
+      # body-parser 2.3.0 transitively pulls the flagged type-is 2.1.0 +
+      # content-type 2.0.0; the direct ignores above do not stop a parent
+      # package from re-introducing them, so the npm-minor-patch group PR
+      # kept recurring and failing the packed-consumer audit (PRs
+      # #24 / #110 / #118 / #120). Ignore the exact flagged body-parser
+      # version; a later release resolving to clean type-is/content-type
+      # still surfaces for review, and the audit blocklist stays the hard gate.
+      - dependency-name: "body-parser"
+        versions: ["2.3.0"]
 
   - package-ecosystem: "pip"
     directory: "/requirements/ci"
