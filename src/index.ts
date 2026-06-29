@@ -68,7 +68,9 @@ import {
   apiProviderBreakerState,
   type ApiProvider,
   type ApiContinuity,
+  type ApiChatMessage,
   type ApiRequest,
+  type ApiResult,
   type ApiUsage,
 } from "./api-provider.js";
 import {
@@ -76,13 +78,6 @@ import {
   apiProviderCatalogEntry,
   ApiModelNotAllowedError,
 } from "./api-request.js";
-import {
-  createXaiResponse,
-  XaiApiError,
-  type XaiReasoningEffort,
-  type XaiResponsesInputMessage,
-  type XaiResponsesResult,
-} from "./xai-api-provider.js";
 import { DatabaseConnection } from "./db.js";
 import { checkHealth } from "./health.js";
 import {
@@ -3868,7 +3863,7 @@ export interface GrokApiRequestParams {
   maxOutputTokens?: number;
   temperature?: number;
   topP?: number;
-  reasoningEffort?: XaiReasoningEffort;
+  reasoningEffort?: "none" | "low" | "medium" | "high";
   timeoutMs?: number;
 }
 
@@ -3876,7 +3871,7 @@ interface GrokApiRequestPrep {
   corrId: string;
   effectivePrompt: string;
   resolvedModel: string;
-  input: string | XaiResponsesInputMessage[];
+  input: string | ApiChatMessage[];
   instructions?: string;
   stablePrefixHash: string | null;
   stablePrefixTokens: number | null;
@@ -3934,7 +3929,7 @@ function prepareGrokApiRequest(
       ? params.promptParts.system
       : undefined;
   let effectivePrompt = inputResolution.assembledPrompt;
-  let input: string | XaiResponsesInputMessage[];
+  let input: string | ApiChatMessage[];
   if (params.promptParts) {
     let userContent = buildXaiPromptPartsUserContent(params.promptParts);
     if (params.optimizePrompt) {
@@ -3975,7 +3970,7 @@ function prepareGrokApiRequest(
   };
 }
 
-function usageFromXaiResult(result: XaiResponsesResult): {
+function usageFromXaiResult(result: ApiResult): {
   inputTokens?: number;
   outputTokens?: number;
   cacheReadTokens?: number;
@@ -4056,14 +4051,25 @@ async function getExistingSessionForProvider(
   return existing;
 }
 
-function asXaiApiError(error: unknown): XaiApiError | null {
-  if (error instanceof XaiApiError) return error;
-  const cause = (error as { cause?: unknown } | null)?.cause;
-  return cause instanceof XaiApiError ? cause : null;
+/** Slice 4b: build the xAI-Responses messages from grok's prep (system → instructions). */
+function grokInputToMessages(
+  input: string | ApiChatMessage[],
+  instructions?: string
+): ApiChatMessage[] {
+  const messages: ApiChatMessage[] = [];
+  if (instructions && instructions.length > 0) {
+    messages.push({ role: "system", content: instructions });
+  }
+  if (typeof input === "string") {
+    messages.push({ role: "user", content: input });
+  } else {
+    messages.push(...input);
+  }
+  return messages;
 }
 
 function buildGrokApiToolResponse(args: {
-  result: XaiResponsesResult;
+  result: ApiResult;
   prep: GrokApiRequestPrep;
   corrId: string;
   durationMs: number;
@@ -4209,14 +4215,19 @@ export async function handleGrokApiRequest(
     sessionId = session.sessionId;
     previousResponseId = session.previousResponseId;
 
+    // Slice 4b: route through the shared XaiResponsesProvider adapter +
+    // runApiRequest (node:https, retry, circuit breaker) instead of the legacy
+    // createXaiResponse. grok keeps its "grok-api" identity (session id, metadata
+    // key, response shape); only the duplicate HTTP client is removed.
+    const grokProvider = createApiProvider("grok-api", "xai-responses");
     const call = (prev: string | undefined) =>
-      createXaiResponse(
+      runApiRequest(
+        grokProvider,
         {
           baseUrl: xaiConfig.baseUrl,
           apiKey,
           model: prep.resolvedModel,
-          input: prep.input,
-          instructions: prep.instructions,
+          messages: grokInputToMessages(prep.input, prep.instructions),
           previousResponseId: prev,
           maxOutputTokens: params.maxOutputTokens,
           temperature: params.temperature,
@@ -4227,12 +4238,11 @@ export async function handleGrokApiRequest(
         runtime.logger
       );
 
-    let result: XaiResponsesResult;
+    let result: ApiResult;
     try {
       result = await call(previousResponseId);
     } catch (error) {
-      const xaiError = asXaiApiError(error);
-      if (xaiError?.status === 404 && previousResponseId) {
+      if (extractApiHttpStatus(error) === 404 && previousResponseId) {
         runtime.logger.warn(
           `[${corrId}] xAI previous_response_id was rejected; clearing stale session metadata and retrying fresh`
         );
@@ -4286,12 +4296,11 @@ export async function handleGrokApiRequest(
   } catch (error) {
     durationMs = Math.max(0, Date.now() - startTime);
     const err = error as Error;
-    const xaiError = asXaiApiError(error);
     runtime.logger.error(`[${corrId}] grok_api_request failed`, err.message);
     safeFlightComplete(
       corrId,
       {
-        response: xaiError?.responseText ?? "",
+        response: extractApiErrorBody(error) ?? "",
         durationMs,
         retryCount: 0,
         circuitBreakerState: "closed",

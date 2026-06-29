@@ -249,7 +249,8 @@ export class AnthropicProvider implements ApiProvider {
 }
 
 //──────────────────────────────────────────────────────────────────────────────
-// xAI Responses (/responses) — generic twin of the legacy createXaiResponse.
+// xAI Responses (/responses) — the adapter that backs both api_<xai>_request and
+// grok_api_request (Slice 4b collapsed the legacy createXaiResponse into this).
 //──────────────────────────────────────────────────────────────────────────────
 
 function normalizeXaiCostUsd(usage: any): number | undefined {

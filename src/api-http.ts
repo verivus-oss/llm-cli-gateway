@@ -1,8 +1,8 @@
 /**
  * Shared HTTP primitives for API-endpoint providers (Slice 0).
  *
- * Extracted from `xai-api-provider.ts` so every adapter (OpenAI-compatible,
- * Anthropic, xAI Responses) shares one `node:http`/`node:https` client with the
+ * The single HTTP client every adapter (OpenAI-compatible, Anthropic, xAI
+ * Responses) shares — one `node:http`/`node:https` client with the
  * same 50MB response cap, timeout handling, and https-or-loopback guard. Staying
  * on `node:https` (never `fetch`/axios) is what keeps the Socket/`fetch`-token
  * release audit green — see the release-security-audit `dist` scan.
