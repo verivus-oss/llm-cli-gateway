@@ -173,6 +173,7 @@ import {
 } from "./workspace-registry.js";
 import { generateSecret, hashSecret } from "./oauth.js";
 import { registerValidationTools } from "./validation-tools.js";
+import { currentCaller, resolveValidationReceipt } from "./validation-receipt.js";
 import {
   assertUpstreamCliArgs,
   assertUpstreamCliEnv,
@@ -2246,6 +2247,43 @@ function registerBaseResources(server: McpServer, runtime: GatewayServerRuntime)
       return { contents: contents ? [contents] : [] };
     }
   );
+
+  // Cross-LLM validation receipts (Phase 3): expose the receipt as an MCP
+  // resource, registered ONLY under the durable gate (sqlite + an attached run
+  // store), the same gate as the validation_receipt tool. Same own-or-not-found
+  // owner scoping: an unknown / unowned / not-yet-terminal id returns the
+  // corresponding status object rather than another principal's data.
+  const validationReceiptStore =
+    runtime.persistence.backend === "sqlite"
+      ? runtime.asyncJobManager.getValidationRunStore()
+      : null;
+  if (validationReceiptStore) {
+    server.registerResource(
+      "validation-receipt",
+      new ResourceTemplate("validation-receipt://{validationId}", { list: undefined }),
+      {
+        title: "Validation Receipt",
+        description: "Immutable receipt of a terminal cross-LLM validation run (own-or-not-found).",
+        mimeType: "application/json",
+      },
+      async (uri, variables) => {
+        const validationId = Array.isArray(variables.validationId)
+          ? variables.validationId[0]
+          : variables.validationId;
+        runtime.logger.debug(`Reading validation-receipt://${validationId}`);
+        const result = resolveValidationReceipt(
+          { asyncJobManager: runtime.asyncJobManager, validationRunStore: validationReceiptStore },
+          String(validationId),
+          { caller: currentCaller() }
+        );
+        return {
+          contents: [
+            { uri: uri.href, mimeType: "application/json", text: JSON.stringify(result, null, 2) },
+          ],
+        };
+      }
+    );
+  }
 }
 
 //──────────────────────────────────────────────────────────────────────────────

@@ -231,7 +231,7 @@ function recommendationFor(
   return "Completed provider outputs show no normalized verdict disagreement; review rationales and risks before acting.";
 }
 
-function renderHumanReport(content: ValidationReport["structuredContent"]): string {
+export function renderHumanReport(content: ValidationReport["structuredContent"]): string {
   const lines = [
     `Validation report ${content.validationId}`,
     `Status: ${content.status}`,

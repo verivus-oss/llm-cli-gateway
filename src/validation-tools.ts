@@ -6,6 +6,12 @@ import { getAvailableCliInfo } from "./model-registry.js";
 import { apiProviderCatalogEntry } from "./api-request.js";
 import { getRequestContext, principalCanAccess, resolveOwnerPrincipal } from "./request-context.js";
 import {
+  currentCaller,
+  eagerMintFromJobId,
+  eagerMintFromValidationId,
+  resolveValidationReceipt,
+} from "./validation-receipt.js";
+import {
   collectValidationJobResult,
   startJudgeSynthesis,
   startValidationRun,
@@ -282,18 +288,26 @@ export function registerValidationTools(server: McpServer, deps: ValidationToolD
       idempotentHint: false,
       openWorldHint: true,
     },
-    async ({ question, providerResults, judgeModel, validationId }) =>
-      textResponse({
+    async ({ question, providerResults, judgeModel, validationId }) => {
+      const synthesis = startJudgeSynthesis(deps, {
+        question,
+        providerResults,
+        judgeProvider: judgeModel,
+        validationId,
+      });
+      // Phase 2: auto-mint convenience. If the run is already terminal (e.g. the
+      // judge was skipped, or it had already completed), mint the receipt now
+      // rather than requiring a separate validation_receipt call. A still-running
+      // judge leaves the run non-terminal, so this is a no-op until the judge's
+      // result is collected (where the job_result eager hook mints it).
+      if (validationId) eagerMintFromValidationId(deps, validationId);
+      return textResponse({
         success: true,
         tool: "synthesize_validation",
         readMostly: true,
-        synthesis: startJudgeSynthesis(deps, {
-          question,
-          providerResults,
-          judgeProvider: judgeModel,
-          validationId,
-        }),
-      })
+        synthesis,
+      });
+    }
   );
 
   server.tool(
@@ -378,6 +392,11 @@ export function registerValidationTools(server: McpServer, deps: ValidationToolD
       if (!result || !principalCanAccess(deps.asyncJobManager.getJobOwner(jobId), caller)) {
         return textResponse({ success: false, error: "Job not found", jobId });
       }
+      // Cross-LLM validation receipts (Phase 1): eager mint. If this job is the
+      // one that just made its validation run terminal, mint the receipt now,
+      // while the linked job outputs still exist (they are evicted after the
+      // retention window). Best-effort; never affects the job_result response.
+      eagerMintFromJobId(deps, jobId);
       return textResponse({
         success: true,
         result,
@@ -388,4 +407,58 @@ export function registerValidationTools(server: McpServer, deps: ValidationToolD
       });
     }
   );
+
+  // Cross-LLM validation receipts (Phase 1): the validation_receipt tool is
+  // registered ONLY under the durable gate (a validation run store is wired,
+  // which index.ts passes only for sqlite + an attached store). Under
+  // memory/postgres/none the tool is absent, so a receipt that cannot be durably
+  // retrieved is impossible by construction.
+  if (deps.validationRunStore) {
+    server.tool(
+      "validation_receipt",
+      "Retrieve the immutable receipt of a terminal cross-LLM validation run by validationId. Returns minted | pending | expired_unminted | not_found (own-or-not-found).",
+      {
+        validationId: z
+          .string()
+          .min(1)
+          .describe(
+            "The run-level validationId from a validation kickoff response (not a job/correlation id)."
+          ),
+        format: z
+          .enum(["json", "markdown"])
+          .default("json")
+          .describe(
+            "Response format. markdown returns the human-readable rendering (derived on read, never stored or hashed)."
+          ),
+        includeRawResponses: z
+          .boolean()
+          .default(false)
+          .describe(
+            "Inline full provider answer text (read-time only; pulled live per job under the same owner check; never persisted or hashed)."
+          ),
+      },
+      {
+        title: "Validation receipt",
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+      async ({ validationId, format, includeRawResponses }) => {
+        const result = resolveValidationReceipt(deps, validationId, {
+          caller: currentCaller(),
+          includeRawResponses,
+        });
+        // Phase 2: markdown is a read-time rendering of the stored
+        // structuredContent (renderHumanReport), never stored, never hashed.
+        if (format === "markdown" && result.status === "minted") {
+          return {
+            content: [{ type: "text" as const, text: result.receipt.humanReadable }],
+            structuredContent: result as unknown as Record<string, unknown>,
+          };
+        }
+        return textResponse(result);
+      }
+    );
+  }
 }

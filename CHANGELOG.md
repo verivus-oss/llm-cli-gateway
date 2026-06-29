@@ -2,6 +2,24 @@
 
 All notable changes to the llm-cli-gateway project.
 
+## [Unreleased]: Cross-LLM validation receipts
+
+### Added
+
+- **Durable, owner-scoped receipts for cross-LLM validation runs.** A terminal validation run (every dispatched provider job terminal, and the judge if one was requested) mints exactly one immutable `validation_receipts` row enveloping the existing `validation-report.v1` structuredContent, with a deterministic `canonical_sha256` over the canonical serialization (recursively sorted object keys, preserved array order, UTF-8; the re-derived `humanReadable` is excluded). Minting is eager (the first time a run is observed terminal, via the `job_result` collection hook and `synthesize_validation`), so a receipt is captured before job rows are evicted; an explicit read is the fallback.
+- **New `validation_receipt` tool.** Retrieves a receipt by `validationId` with own-or-not-found ownership: `minted` | `pending` | `expired_unminted` | `not_found`. `format: "json" | "markdown"` (markdown is a read-time rendering, never stored or hashed). `includeRawResponses` inlines full provider answer text as a read-time-only expansion pulled live per job under the same owner check (never persisted, never hashed).
+- **New `validation-receipt://{validationId}` MCP resource** with the same own-or-not-found owner scoping.
+- **Durable run identity (prerequisite).** `validation_runs` (plus a `validation_run_jobs` reverse index) persists each run's `validationId`, owner principal, and provider/judge job links at kickoff. The report and synthesis status enums gained a terminal `completed` value.
+- The receipt tool, the resource, and the run/receipt tables exist ONLY under an implemented durable backend (today `sqlite`) with a store attached at runtime; under `memory` / `postgres` / `none` no run/receipt row is written and the tool/resource are not registered (the caller still receives a `validationId` at kickoff). Silent loss is impossible by construction.
+
+### Fixed
+
+- **Cross-principal read hole on the validation collection tools.** `job_status` / `job_result` now apply the `principalCanAccess` owner check that the `llm_job_*` paths already enforce; a job owned by another principal is reported as not found.
+
+### Not yet implemented (reserved)
+
+- Cryptographic signing and hash chaining. The `prev_sha256` / `seq` / `signature` columns are reserved (NULL); the canonical byte definition they will build on is fixed now. Semantic enrichment (`key_points`, `evidence_cited`, `uncertainty_signals`, numeric per-model confidence) is deferred to `validation-receipt.v2` (no extraction source exists today).
+
 ## [2.11.1] - 2026-06-22: Provider contract refresh and stable upstream scans
 
 ### Changed

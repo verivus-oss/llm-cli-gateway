@@ -239,11 +239,37 @@ export interface ValidationRunRecord {
 }
 
 /**
- * The validation-run persistence surface. Only an actually-durable, implemented
- * backend provides it (today `SqliteJobStore`). `MemoryJobStore`
+ * Cross-LLM validation receipts (Phase 1): the immutable, owner-scoped receipt of
+ * a terminal validation run, enveloping the captured `validation-report.v1`
+ * structuredContent. One row per terminal run; written once, never updated.
+ */
+export interface ValidationReceiptRecord {
+  validationId: string;
+  ownerPrincipal: string;
+  mintedAt: string;
+  schemaVersion: string;
+  /** The captured `validation-report.v1` structuredContent, serialized. Immutable. */
+  reportJson: string;
+  /** SHA-256 over the canonical serialization of reportJson. */
+  canonicalSha256: string;
+  /** Reserved for hash chaining; NULL in v1. */
+  prevSha256: string | null;
+  /** Reserved for hash chaining; NULL in v1. */
+  seq: number | null;
+  /** Reserved for signing; NULL in v1. */
+  signature: string | null;
+  /** Denormalized for querying. */
+  models: string[];
+  hasMaterialDisagreement: boolean;
+  confidence: string;
+}
+
+/**
+ * The validation-run + receipt persistence surface. Only an actually-durable,
+ * implemented backend provides it (today `SqliteJobStore`). `MemoryJobStore`
  * (process-lifetime) and `PostgresJobStore` (unimplemented stub) deliberately do
- * NOT implement it, so under those backends no run row is ever written: the
- * durability gate is enforced by the absence of this capability, not by a flag.
+ * NOT implement it, so under those backends no run/receipt row is ever written:
+ * the durability gate is enforced by the absence of this capability, not a flag.
  */
 export interface ValidationRunStore {
   /** Insert the run row once at kickoff. Idempotent on validation_id (INSERT OR IGNORE). */
@@ -251,6 +277,11 @@ export interface ValidationRunStore {
   getValidationRun(validationId: string): ValidationRunRecord | null;
   setValidationJudgeLink(validationId: string, judgeLink: ValidationRunLink): void;
   setValidationRunStatus(validationId: string, status: ValidationRunRecord["status"]): void;
+  /** Reverse lookup for eager mint: which run owns this provider/judge job, if any. */
+  getValidationRunIdByJobId(jobId: string): string | null;
+  /** Insert the immutable receipt once. Idempotent on validation_id (INSERT OR IGNORE). */
+  recordValidationReceipt(receipt: ValidationReceiptRecord): void;
+  getValidationReceipt(validationId: string): ValidationReceiptRecord | null;
 }
 
 /** True when a job store also persists validation runs (only SqliteJobStore today). */
@@ -259,7 +290,8 @@ export function isValidationRunStore(store: unknown): store is ValidationRunStor
     typeof store === "object" &&
     store !== null &&
     typeof (store as ValidationRunStore).recordValidationRun === "function" &&
-    typeof (store as ValidationRunStore).getValidationRun === "function"
+    typeof (store as ValidationRunStore).getValidationRun === "function" &&
+    typeof (store as ValidationRunStore).recordValidationReceipt === "function"
   );
 }
 
@@ -338,6 +370,34 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
         status TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_validation_runs_owner ON validation_runs(owner_principal);
+    `);
+
+    // Cross-LLM validation receipts (Phase 1): reverse index (job_id -> run) for
+    // eager mint when a provider/judge job result is collected, and the immutable
+    // receipts table (one row per terminal run). Same idempotent idiom; receipts
+    // indexed on owner_principal for owner-scoped queries.
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS validation_run_jobs (
+        job_id TEXT PRIMARY KEY,
+        validation_id TEXT NOT NULL,
+        role TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_validation_run_jobs_run ON validation_run_jobs(validation_id);
+      CREATE TABLE IF NOT EXISTS validation_receipts (
+        validation_id TEXT PRIMARY KEY,
+        owner_principal TEXT NOT NULL,
+        minted_at TEXT NOT NULL,
+        schema_version TEXT NOT NULL,
+        report_json TEXT NOT NULL,
+        canonical_sha256 TEXT NOT NULL,
+        prev_sha256 TEXT,
+        seq INTEGER,
+        signature TEXT,
+        models TEXT NOT NULL,
+        has_material_disagreement INTEGER NOT NULL,
+        confidence TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_validation_receipts_owner ON validation_receipts(owner_principal);
     `);
 
     // F3: idempotent migration — add owner_principal to a pre-existing jobs
@@ -590,6 +650,27 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
         judge_link: run.judgeLink ? JSON.stringify(run.judgeLink) : null,
         status: run.status,
       });
+    // Populate the reverse index so eager mint can resolve the run from a
+    // collected provider job id. INSERT OR IGNORE keeps it idempotent.
+    for (const link of run.providerLinks) {
+      this.linkRunJob(run.validationId, link.jobId, "provider");
+    }
+  }
+
+  private linkRunJob(validationId: string, jobId: string, role: "provider" | "judge"): void {
+    this.db
+      .prepare(
+        `INSERT OR IGNORE INTO validation_run_jobs (job_id, validation_id, role)
+         VALUES (?, ?, ?)`
+      )
+      .run(jobId, validationId, role);
+  }
+
+  getValidationRunIdByJobId(jobId: string): string | null {
+    const row = this.db
+      .prepare(`SELECT validation_id FROM validation_run_jobs WHERE job_id = ?`)
+      .get(jobId) as { validation_id?: string } | undefined;
+    return row?.validation_id ?? null;
   }
 
   getValidationRun(validationId: string): ValidationRunRecord | null {
@@ -603,12 +684,50 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
     this.db
       .prepare(`UPDATE validation_runs SET judge_link = ? WHERE validation_id = ?`)
       .run(JSON.stringify(judgeLink), validationId);
+    this.linkRunJob(validationId, judgeLink.jobId, "judge");
   }
 
   setValidationRunStatus(validationId: string, status: ValidationRunRecord["status"]): void {
     this.db
       .prepare(`UPDATE validation_runs SET status = ? WHERE validation_id = ?`)
       .run(status, validationId);
+  }
+
+  recordValidationReceipt(receipt: ValidationReceiptRecord): void {
+    // INSERT OR IGNORE: the receipt is immutable and minted exactly once. A
+    // concurrent or repeat mint for the same validation_id is a no-op; callers
+    // re-read to get the authoritative stored row.
+    this.db
+      .prepare(
+        `INSERT OR IGNORE INTO validation_receipts
+           (validation_id, owner_principal, minted_at, schema_version, report_json,
+            canonical_sha256, prev_sha256, seq, signature, models,
+            has_material_disagreement, confidence)
+         VALUES (@validation_id, @owner_principal, @minted_at, @schema_version, @report_json,
+                 @canonical_sha256, @prev_sha256, @seq, @signature, @models,
+                 @has_material_disagreement, @confidence)`
+      )
+      .run({
+        validation_id: receipt.validationId,
+        owner_principal: receipt.ownerPrincipal,
+        minted_at: receipt.mintedAt,
+        schema_version: receipt.schemaVersion,
+        report_json: receipt.reportJson,
+        canonical_sha256: receipt.canonicalSha256,
+        prev_sha256: receipt.prevSha256,
+        seq: receipt.seq,
+        signature: receipt.signature,
+        models: JSON.stringify(receipt.models),
+        has_material_disagreement: receipt.hasMaterialDisagreement ? 1 : 0,
+        confidence: receipt.confidence,
+      });
+  }
+
+  getValidationReceipt(validationId: string): ValidationReceiptRecord | null {
+    const row = this.db
+      .prepare(`SELECT * FROM validation_receipts WHERE validation_id = ?`)
+      .get(validationId);
+    return row ? rowToValidationReceiptRecord(row) : null;
   }
 
   close(): void {
@@ -633,6 +752,23 @@ function rowToValidationRunRecord(row: any): ValidationRunRecord {
   };
 }
 
+function rowToValidationReceiptRecord(row: any): ValidationReceiptRecord {
+  return {
+    validationId: row.validation_id,
+    ownerPrincipal: row.owner_principal,
+    mintedAt: row.minted_at,
+    schemaVersion: row.schema_version,
+    reportJson: row.report_json,
+    canonicalSha256: row.canonical_sha256,
+    prevSha256: row.prev_sha256 ?? null,
+    seq: row.seq ?? null,
+    signature: row.signature ?? null,
+    models: parseStringArray(row.models),
+    hasMaterialDisagreement: Boolean(row.has_material_disagreement),
+    confidence: row.confidence,
+  };
+}
+
 function parseLinks(value: unknown): ValidationRunLink[] | null {
   if (typeof value !== "string" || value.length === 0) return null;
   try {
@@ -640,6 +776,16 @@ function parseLinks(value: unknown): ValidationRunLink[] | null {
     return Array.isArray(parsed) ? (parsed as ValidationRunLink[]) : null;
   } catch {
     return null;
+  }
+}
+
+function parseStringArray(value: unknown): string[] {
+  if (typeof value !== "string" || value.length === 0) return [];
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? (parsed as string[]) : [];
+  } catch {
+    return [];
   }
 }
 

@@ -43,3 +43,7 @@ AGENTS.md
 
 # Local MCP client configs may contain machine paths, account IDs, and secret refs.
 windows-mcp-config-with-gateway.json
+
+# Stray pnpm artifacts (this repo uses npm; reject reviewer-tool drift)
+pnpm-lock.yaml
+pnpm-workspace.yaml
