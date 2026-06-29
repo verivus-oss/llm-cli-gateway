@@ -116,10 +116,7 @@ export type CliSubcommandRisk =
   | "executes_agent";
 
 export type CliSubcommandExposure =
-  | "tracked_only"
-  | "mcp_readonly"
-  | "mcp_requires_approval"
-  | "not_exposed";
+  "tracked_only" | "mcp_readonly" | "mcp_requires_approval" | "not_exposed";
 
 export type CliSubcommandTier = "catalog" | "inspect" | "execute_candidate" | "diagnostic";
 

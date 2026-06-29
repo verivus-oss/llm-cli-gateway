@@ -112,7 +112,7 @@ describe("MCP tool-surface usability (post-usability-review regressions)", () =>
       >
     )._registeredTools;
     const names = Object.keys(registry);
-    expect(names.length).toBeGreaterThanOrEqual(44) /* exact toBe(44) asserted below */;
+    expect(names.length).toBeGreaterThanOrEqual(44); /* exact toBe(44) asserted below */
     for (const name of names) {
       const ann = registry[name].annotations;
       expect(ann, `${name} has annotations`).toBeDefined();

@@ -1,11 +1,7 @@
 import type { NormalizedValidationResult } from "./validation-normalizer.js";
 
 export type ValidationIntent =
-  | "validate"
-  | "second_opinion"
-  | "red_team"
-  | "consensus"
-  | "ask_model";
+  "validate" | "second_opinion" | "red_team" | "consensus" | "ask_model";
 
 interface BasePromptInput {
   intent: ValidationIntent;

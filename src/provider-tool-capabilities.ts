@@ -40,17 +40,10 @@ export type KnownProviderCapabilityId = CliType | "grok_api";
 export type ProviderCapabilityId = KnownProviderCapabilityId | (string & {});
 export type ProviderKind = "cli" | "api";
 export type UnsupportedInputBehavior =
-  | "reject"
-  | "ignored"
-  | "not_supported"
-  | "approval_tracking_only"
-  | "deprecated";
+  "reject" | "ignored" | "not_supported" | "approval_tracking_only" | "deprecated";
 export type ProviderToolConfidence = "high" | "medium" | "low";
 export type ProviderToolExtractionReason =
-  | "exact-tool-section"
-  | "known-tool-name"
-  | "backtick-heuristic"
-  | "low-confidence";
+  "exact-tool-section" | "known-tool-name" | "backtick-heuristic" | "low-confidence";
 
 export interface ProviderSkillCapability {
   name: string;
@@ -164,9 +157,7 @@ export interface ProviderCapabilityControls {
  * intentionally not declared here.
  */
 export type AcpFrozenClassification =
-  | "native_candidate"
-  | "adapter_mediated_deferred"
-  | "absent_watchlist";
+  "native_candidate" | "adapter_mediated_deferred" | "absent_watchlist";
 
 export interface AcpProviderContract {
   classification: AcpFrozenClassification;

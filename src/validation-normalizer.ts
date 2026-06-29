@@ -9,12 +9,7 @@ import type { AsyncJobResult, AsyncJobSnapshot, JobProvider } from "./async-job-
 export type ValidationProvider = JobProvider;
 
 export type NormalizedValidationStatus =
-  | "running"
-  | "completed"
-  | "failed"
-  | "canceled"
-  | "orphaned"
-  | "skipped";
+  "running" | "completed" | "failed" | "canceled" | "orphaned" | "skipped";
 
 export interface RawJobReference {
   jobId: string;

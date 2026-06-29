@@ -1,11 +1,7 @@
 import { spawnSync } from "node:child_process";
 
 export type EndpointExposureMode =
-  | "local_only"
-  | "lan"
-  | "tunnel"
-  | "byo_reverse_proxy"
-  | "misconfigured";
+  "local_only" | "lan" | "tunnel" | "byo_reverse_proxy" | "misconfigured";
 export type EndpointReachability = "not_checked" | "reachable" | "unreachable";
 
 export interface EndpointExposureReport {

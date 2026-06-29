@@ -442,11 +442,9 @@ describe("AcpClient host callback dispatch", () => {
 
   it("grants permission when HostServices approves (selected option)", async () => {
     const agent = new MockAgent();
-    const requestPermission = vi.fn(
-      async (): Promise<RequestPermissionResponse> => ({
-        outcome: { outcome: "selected", optionId: "allow" },
-      })
-    );
+    const requestPermission = vi.fn(async (): Promise<RequestPermissionResponse> => ({
+      outcome: { outcome: "selected", optionId: "allow" },
+    }));
     createClient(agent, { hostServices: { requestPermission } });
 
     const replies: JsonRpcFrame[] = [];

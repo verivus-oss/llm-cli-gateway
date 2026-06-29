@@ -124,9 +124,7 @@ function parseRequest(requestJson: string): {
 }
 
 type MintOutcome =
-  | { kind: "minted"; record: ValidationReceiptRecord }
-  | { kind: "pending" }
-  | { kind: "evicted" };
+  { kind: "minted"; record: ValidationReceiptRecord } | { kind: "pending" } | { kind: "evicted" };
 
 /**
  * Mint the receipt iff the run is terminal and all linked jobs are still

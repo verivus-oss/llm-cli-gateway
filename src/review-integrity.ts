@@ -1,7 +1,5 @@
 export type ReviewIntegrityViolationType =
-  | "empty_allowed_tools"
-  | "critical_tools_disallowed"
-  | "tool_suppression";
+  "empty_allowed_tools" | "critical_tools_disallowed" | "tool_suppression";
 
 export interface ReviewIntegrityViolation {
   type: ReviewIntegrityViolationType;

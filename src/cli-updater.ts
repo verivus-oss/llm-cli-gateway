@@ -24,11 +24,7 @@ export interface CliUpgradePlan {
   command: string;
   args: string[];
   strategy:
-    | "self-update"
-    | "npm-global-install"
-    | "pip-install"
-    | "uv-tool-upgrade"
-    | "brew-upgrade";
+    "self-update" | "npm-global-install" | "pip-install" | "uv-tool-upgrade" | "brew-upgrade";
   requiresNetwork: boolean;
   note?: string;
 }
