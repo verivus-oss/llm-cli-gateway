@@ -1,0 +1,492 @@
+# Implementation plan: cross-LLM validation receipts.
+#
+# Goal: persist and later retrieve an immutable, owner-scoped receipt of a
+# completed cross-LLM validation run, keyed by `validationId`, enveloping the
+# existing `validation-report.v1` artifact, so a run can be audited and the
+# receipt can later become a signed, hash-chained record.
+#
+# Context:
+#   The corrective-program spec is docs/plans/cross-llm-validation-receipts.draft.md
+#   (draft 2026-06-29). It supersedes the "Structured Deliberation Receipts"
+#   proposal after a code-grounded review (Claude) and an adversarial cross-LLM
+#   gate (Codex gpt-5.4, Grok, Mistral) that verified every claim against source.
+#   Three load-bearing facts shape this DAG, each verified in code:
+#     1. The validation tools are asynchronous fan-out, not synchronous
+#        deliberations: `startValidationRun` returns with provider jobs still
+#        `running`, so no answers exist at call time. A receipt minted at kickoff
+#        captures nothing.
+#     2. There is no single correlation id for a run. Each provider job has its
+#        own `correlationId` (`validation-<validationId>-<provider>`); the run is
+#        keyed by a separate `validationId = randomUUID()`.
+#     3. `validationId` is not durably stored anywhere today. Making run identity
+#        durable is the foundational prerequisite and is Phase 0.
+#   Two further facts: the fan-out reviewers never see each other's output
+#   (every reviewer prompt says "You are one independent reviewer ... Do not
+#   claim consensus"); the one exception is the optional judge synthesis, which
+#   DOES see the collected provider results (buildJudgePrompt embeds them), so
+#   the artifact is a validation receipt over independent reviews plus an
+#   optional output-aware judge, not a peer-visible deliberation. And a
+#   structured artifact already exists (`validation-report.v1`) which the receipt
+#   envelopes rather than reinvents.
+
+[meta]
+name = "cross-LLM validation receipts"
+schema_version = "1.1"
+owner = "verivus-oss"
+slice = "cross-llm-validation-receipts-2026-06-29"
+target_branch = "master"
+providers = ["claude", "codex", "gemini", "grok", "mistral", "grok-api"]
+acceptance_resource = """
+A terminal cross-LLM validation run mints exactly one immutable, owner-scoped
+`validation_receipts` row enveloping the run's `validation-report.v1`
+structuredContent with a deterministic `canonical_sha256`; the `validation_receipt`
+tool returns minted / pending / expired_unminted / not_found with own-or-not-found
+ownership; durable artifacts and tool registration exist only under an
+implemented durable backend (today sqlite) AND a store that attached at runtime;
+the pre-existing `job_status` / `job_result` cross-principal hole is closed; and
+`npm run check` passes.
+"""
+invariant_sources = [
+  "docs/plans/cross-llm-validation-receipts.draft.md",
+  "src/validation-orchestrator.ts",
+  "src/validation-report.ts",
+  "src/validation-normalizer.ts",
+  "src/validation-tools.ts",
+  "src/validation-prompts.ts",
+  "src/job-store.ts",
+  "src/config.ts",
+  "src/request-context.ts",
+  "src/index.ts",
+  "src/resources.ts",
+]
+predecessor_plan = "docs/plans/cross-llm-validation-receipts.draft.md"
+
+[decision]
+receipt_is_minted_only_at_terminal_run = true
+receipt_is_immutable_no_update_path = true
+mint_is_eager_at_first_terminal_observation = true
+mint_on_read_is_fallback_only = true
+run_identity_key = "validationId"
+report_envelope = "validation-report.v1 structuredContent (machine-readable only; humanReadable re-derived on read, never stored, never hashed)"
+durability_gate = "config-AND-runtime: persistence.backend === 'sqlite' AND a job store that actually attached at runtime; NOT persistence.asyncJobsEnabled"
+ownership_model = "own-or-not-found, mirroring llm_request_result (resolveOwnerPrincipal + principalCanAccess)"
+canonical_hash = "SHA-256 over canonicalised report_json (sorted keys, no insignificant whitespace, UTF-8, fixed array order); humanReadable excluded"
+signing_and_chaining = "NOT implemented in v1; prev_sha256 / seq / signature columns reserved (NULL) and canonical bytes defined now"
+semantic_enrichment = "DEFERRED to validation-receipt.v2 (no data source exists today)"
+compare_answers_excluded = "local-only, status local_summary_only, no provider calls, nothing to receipt"
+reason = """
+The validation surface is asynchronous fan-out over independent reviewers with
+no shared run identity and no terminal report state. A durable receipt is only
+meaningful once (a) run identity is persisted at kickoff, (b) the report can
+represent a terminal run, and (c) the mint happens while the linked provider
+job outputs still exist. Eager mint-at-first-terminal-observation beats the job
+retention window; immutability plus a single defined mint point resolves the
+idempotency conflict in the superseded proposal; and the durable-backend gate
+makes silent loss impossible by construction. That gate reuses the same
+CONSTRUCTION the job store uses for `*_request_async` (gate tool registration on
+store availability), but with a STRICTER predicate: `*_request_async` registers
+whenever a store is attached, which includes the ephemeral `memory` store under
+`asyncJobsEnabled` (`src/config.ts:327`); receipts additionally require a durable
+implemented backend (sqlite today), so they do not register under `memory`.
+"""
+
+[[steps]]
+id = "audit-validation-surface"
+depends_on = []
+actor = "assistant"
+action = """
+Inventory the validation run lifecycle and its durability/ownership seams. Do
+NOT edit code in this step. Record, with file:line evidence:
+
+  1. Run identity: where `validationId` is generated (`startValidationRun`,
+     `src/validation-orchestrator.ts`) and every place it is returned but not
+     persisted.
+  2. Job linkage: how each provider job correlation id is formed
+     (`validation-<validationId>-<provider>`) and how the judge job correlation
+     id is formed in `startJudgeSynthesis`.
+  3. Report shape: the `validation-report.v1` `status` enum and the synthesis
+     status enum, confirming neither can represent a terminal run today, and how
+     `buildValidationReport` derives status.
+  4. Persistence home: the `SqliteJobStore` schema-setup site and its idempotent
+     `CREATE TABLE IF NOT EXISTS` + `PRAGMA table_info` migration pattern; the
+     job retention/eviction sites; the `MemoryJobStore` process-lifetime nature;
+     the `PostgresJobStore` stub.
+  5. Gating: `loadPersistenceConfig` / `asyncJobsEnabled`, `createJobStore`,
+     `getJobStore`'s null collapse, and the exact registration sites that gate
+     `*_request_async` versus the unconditionally-registered validation start and
+     `job_*` tools in `src/index.ts`.
+  6. Ownership: `resolveOwnerPrincipal` / `principalCanAccess`
+     (`src/request-context.ts`) and the `llm_request_result` own-or-not-found
+     precedent; confirm the validation `job_status` / `job_result` tools omit
+     that check (the §5a hole).
+
+Reconcile every finding against the citations in the corrective spec
+(`docs/plans/cross-llm-validation-receipts.draft.md`) and flag any line drift.
+"""
+idempotent = true
+validation = """
+The implementation notes list each seam with current file:line evidence, confirm
+or correct every spec citation, and explicitly state (a) that no terminal report
+state exists yet, (b) the chosen durability gate, and (c) that `job_status` /
+`job_result` lack the principal check the `llm_job_*` paths enforce.
+"""
+
+[[steps]]
+id = "report-terminal-status"
+depends_on = ["audit-validation-surface"]
+actor = "assistant"
+action = """
+Phase 0. Teach `validation-report.v1` to represent a finished run. Today its
+`status` enum is only `running | partial | not_started`
+(`src/validation-report.ts`) and `buildValidationReport` never derives a
+completed state (`src/validation-orchestrator.ts`); the synthesis status enum is
+`not_requested | waiting_for_provider_results | running | skipped`.
+
+  - Extend the report `status` and the synthesis `status` with terminal
+    value(s) (e.g. `completed`).
+  - Teach `buildValidationReport` (and the orchestrator status derivation) to
+    emit the terminal value when every provider job is terminal and, if a judge
+    was requested, the judge job is terminal.
+  - Decide and record whether this is a backward-compatible additive bump to
+    `validation-report.v1` or a new `validation-report.v2`; the receipt's
+    `schema_version` records which. Default: additive bump kept as
+    `validation-report.v1` if no existing consumer breaks; otherwise `v2`.
+
+Do NOT mint anything yet. This step only makes a terminal report representable.
+"""
+idempotent = false
+validation = """
+Unit tests prove `buildValidationReport` emits the terminal status only when all
+provider jobs (and any requested judge) are terminal, and continues to emit
+running/partial/not_started otherwise. The schema-version decision is recorded in
+the verification notes. `npm run build` passes.
+"""
+
+[[steps]]
+id = "durable-validation-runs"
+depends_on = ["audit-validation-surface"]
+actor = "assistant"
+action = """
+Phase 0. Persist run identity at kickoff. Add a `validation_runs` table to the
+`SqliteJobStore` schema setup (the job-store DB is the home; the provider
+outputs that a receipt envelopes are fetched from the job store by jobId, and
+validation runs already depend on the async job manager). Follow the job store's
+own pattern: idempotent `CREATE TABLE IF NOT EXISTS`, app-side ISO timestamps via
+`new Date().toISOString()`, and an index on `owner_principal` plus the PK. Do NOT
+use the flight recorder's `_migrations` system, and do NOT hand-roll
+`DEFAULT CURRENT_TIMESTAMP` / `AUTOINCREMENT`.
+
+Columns (written once at kickoff; `status` mutable to terminal):
+  validation_id   TEXT PRIMARY KEY
+  owner_principal TEXT NOT NULL   -- resolveOwnerPrincipal(getRequestContext())
+  intent          TEXT NOT NULL   -- validate|consensus|red_team|second_opinion|ask_model
+  created_at      TEXT NOT NULL   -- app-side ISO string
+  request_json    TEXT NOT NULL   -- owner-scoped question/content/focus/riskLevel/modelList/judge plan
+  provider_links  TEXT NOT NULL   -- JSON [{provider, jobId, correlationId}]
+  judge_link      TEXT            -- JSON {provider, jobId, correlationId} or NULL
+  status          TEXT NOT NULL   -- running | finalized
+
+`startValidationRun` writes the row before returning, stamping
+`owner_principal` from the request context. Expose a typed read/update API on the
+job store (get-run-by-id, set provider/judge links, set status) for later steps.
+
+Durability gate: gate the table creation on an implemented durable backend AND a
+store that attached at runtime. Do NOT gate on `asyncJobsEnabled` (true for
+`memory` and `postgres` too, but `memory` is process-lifetime only and
+`PostgresJobStore` throws). Today the gate is `persistence.backend === 'sqlite'`
+plus a non-null attached store; extend to Postgres when a real store lands. Under
+`memory` / `postgres` / `none` no `validation_runs` row is written.
+`validationId` is still returned in every kickoff response regardless of backend.
+"""
+idempotent = false
+validation = """
+Tests prove: a sqlite-backed run writes exactly one `validation_runs` row at
+kickoff with the resolved owner principal and the provider job links; under
+`memory`/`none` no row is written but `validationId` is still returned; the table
+uses CREATE TABLE IF NOT EXISTS (re-open is a no-op). `npm run build` passes.
+"""
+
+[[steps]]
+id = "thread-validationid-synthesis"
+depends_on = ["durable-validation-runs"]
+actor = "assistant"
+action = """
+Phase 0. Thread an optional `validationId` through `synthesize_validation`
+(`src/validation-tools.ts`) and `startJudgeSynthesis`
+(`src/validation-orchestrator.ts`), which lack it today. When supplied and the
+run exists and is owned by the caller, link the judge job back into the run
+(`judge_link`) so the judge result is part of the run's terminal set. When
+absent, behaviour is unchanged. Keep the `compare_answers` exclusion: it makes no
+provider calls (`status: "local_summary_only"`) and is never receipted.
+"""
+idempotent = false
+validation = """
+Tests prove: `synthesize_validation` with a known owned `validationId` writes
+`judge_link` on the run; with an unknown or unowned id it does not mutate another
+principal's run; with no id it behaves exactly as today. `npm run build` passes.
+"""
+
+[[steps]]
+id = "job-tools-owner-check"
+depends_on = ["audit-validation-surface"]
+actor = "assistant"
+action = """
+Phase 0, prerequisite security fix (§5a, surfaced by the gate). The validation
+collection tools `job_status` / `job_result` (`src/validation-tools.ts`) call
+`getJobSnapshot` / `getJobResult` without the `principalCanAccess` check the
+`llm_job_*` paths enforce. This is a pre-existing cross-principal hole on the
+exact surface the receipt feature reads from. Apply the owner check: a job owned
+by a different principal returns the same not-found shape these tools already use
+for a missing job (own-or-not-found, never another principal's data), mirroring
+`llm_request_result`. The receipt read path (later steps) must apply the same
+owner check on every linked job it reads.
+"""
+idempotent = false
+validation = """
+Tests prove `job_status` / `job_result` return not-found for a job owned by a
+different principal and unchanged behaviour for an owned or legacy-unowned-local
+job. A regression test covers the local single-user default (no behaviour change).
+`npm run build` passes.
+"""
+
+[[steps]]
+id = "receipts-table-and-mint"
+depends_on = ["report-terminal-status", "durable-validation-runs", "thread-validationid-synthesis"]
+actor = "assistant"
+action = """
+Phase 1. Add the immutable `validation_receipts` table (job-store DB, same
+idempotent pattern, index on `owner_principal` + PK), one row per terminal run:
+  validation_id             TEXT PRIMARY KEY REFERENCES validation_runs(validation_id)
+  owner_principal           TEXT NOT NULL
+  minted_at                 TEXT NOT NULL   -- app-side ISO
+  schema_version            TEXT NOT NULL   -- 'validation-receipt.v1'
+  report_json               TEXT NOT NULL   -- captured validation-report.v1 structuredContent, immutable
+  canonical_sha256          TEXT NOT NULL   -- digest over canonical serialization of report_json
+  prev_sha256               TEXT            -- reserved for chaining; NULL in v1
+  seq                       INTEGER         -- reserved for chaining; NULL in v1
+  signature                 TEXT            -- reserved for signing; NULL in v1
+  models                    TEXT NOT NULL   -- denormalized JSON array for querying
+  has_material_disagreement INTEGER NOT NULL -- 0/1 from disagreements.hasMaterialDisagreement
+  confidence                TEXT NOT NULL   -- none|low|medium|high
+
+Mint logic (eager, race-guarded):
+  - A run is terminal when every provider job is terminal
+    (completed|failed|canceled|orphaned|skipped) and, if a judge was requested,
+    the judge job is terminal.
+  - The gateway mints eagerly the FIRST time it observes the run reach terminal,
+    which it already passes through during result collection (`job_result`) and
+    `synthesize_validation`, while the linked job outputs are guaranteed to still
+    exist (they are evicted after the retention window, so mint-on-read alone
+    would silently fail once jobs are gone).
+  - Minting builds the report from the collected terminal results (reusing
+    `buildValidationReport`), captures its `structuredContent` as `report_json`,
+    computes `canonical_sha256` (next step's serializer), and writes ONE row.
+  - Immutable: re-mint is INSERT-OR-IGNORE on the `validation_id` PK; an existing
+    row is returned byte-for-byte. No UPDATE path. Guard the first-terminal mint
+    against races.
+"""
+idempotent = false
+validation = """
+Tests prove: the row is written exactly once at first terminal observation; a
+second mint attempt is a no-op and returns the identical stored row; the report
+captured is the terminal `validation-report.v1` structuredContent; the
+denormalized columns match `disagreements.hasMaterialDisagreement` and the
+confidence bucket; and a concurrent double-mint yields a single row. `npm run
+build` passes.
+"""
+
+[[steps]]
+id = "canonical-hash"
+depends_on = ["receipts-table-and-mint"]
+actor = "assistant"
+action = """
+Phase 1. Define and implement the canonical serialization that
+`canonical_sha256` covers. It hashes EXACTLY the persisted `report_json` (the
+`validation-report.v1` structuredContent), serialized with sorted object keys, no
+insignificant whitespace, UTF-8, and the fixed array order arrays already have in
+`validation-report.v1`. The re-derived `humanReadable` is NOT part of the hash
+input. This is the byte definition a future hash chain (`prev_sha256` + monotonic
+`seq`) and signature will build on; implement only the digest now.
+"""
+idempotent = false
+validation = """
+Tests prove: the digest is stable across key-insertion-order permutations of the
+same structuredContent; it changes when any hashed field changes; it is unchanged
+by adding/removing the derived `humanReadable`; and re-serializing a stored row
+reproduces its `canonical_sha256` (tamper-detection). `npm run build` passes.
+"""
+
+[[steps]]
+id = "validation-receipt-tool"
+depends_on = ["receipts-table-and-mint", "canonical-hash", "job-tools-owner-check"]
+actor = "assistant"
+action = """
+Phase 1. Add the `validation_receipt` MCP tool (JSON only this phase). Params:
+  validationId: string (required; the run-level id, not a correlationId)
+  format?: "json" | "markdown" (default json; markdown is Phase 2)
+  includeRawResponses?: boolean (default false)
+
+Behaviour (own-or-not-found, mirroring `llm_request_result`):
+  - Resolve caller principal. A run owned by another principal returns
+    `not_found`, never another principal's data.
+  - If a receipt row exists: return `{status:"minted", receipt, mintedAt}`.
+  - Else if the run is terminal: mint (reusing the eager path), store, return
+    `minted`. If terminal but the linked jobs were already evicted before any
+    mint: return `{status:"expired_unminted"}`.
+  - Else if the run exists but is not terminal: `{status:"pending", run}`.
+  - Else: `{status:"not_found"}`.
+  - `includeRawResponses` is a READ-TIME expansion only: raw provider text pulled
+    live per linked `jobId` under the same owner check, returned in a separate
+    `rawResponses` field, NOT inside `report`, NOT part of `report_json`, NOT
+    covered by `canonical_sha256`. If linked jobs are evicted the expansion is
+    simply absent; the minted receipt is unaffected.
+
+Durability gate: register `validation_receipt` ONLY under the same durable gate
+as the tables (sqlite + attached store). Under `memory` / `postgres` / `none` the
+tool is not registered; its absence makes silent loss impossible by construction.
+This is the same CONSTRUCTION the job store uses for `*_request_async` (gate
+registration on store availability) but a STRICTER predicate: `*_request_async`
+also registers under the ephemeral `memory` store, whereas receipts require a
+durable implemented backend (sqlite today).
+"""
+idempotent = false
+validation = """
+Tests prove every status branch: minted (existing row returned verbatim), mint-on
+-read for a terminal-but-unminted run, pending for a non-terminal run,
+expired_unminted when linked jobs are evicted before any mint, not_found for an
+unknown id, and not_found (never data) for a run owned by another principal.
+`includeRawResponses` returns raw text only for owned still-present jobs and never
+mutates `report_json` / `canonical_sha256`. The tool is absent under non-durable
+backends. `npm run build` passes.
+"""
+
+[[steps]]
+id = "phase2-markdown-and-automint"
+depends_on = ["validation-receipt-tool"]
+actor = "assistant"
+action = """
+Phase 2. Two conveniences over Phase 1:
+  - `format:"markdown"` renders the receipt on READ via `renderHumanReport`
+    (re-derived, never stored, never hashed).
+  - `synthesize_validation`, when invoked with a linked `validationId` and all
+    providers (and the judge) terminal, MAY auto-mint the receipt, a convenience
+    over an explicit `validation_receipt` call, using the same eager,
+    race-guarded mint path.
+"""
+idempotent = false
+validation = """
+Tests prove markdown is derived from the stored structuredContent and is byte
+-identical to `renderHumanReport` over that content; auto-mint on
+`synthesize_validation` produces the same single immutable row as the explicit
+tool path. `npm run build` passes.
+"""
+
+[[steps]]
+id = "phase3-mcp-resource"
+depends_on = ["validation-receipt-tool"]
+actor = "assistant"
+action = """
+Phase 3. Expose `validation-receipt://{validationId}` through `src/resources.ts`
+(which today already serves the `sessions://`, `models://`, `metrics://`,
+`cache-state://`, `provider-subcommands://catalog`, and `provider-tools://catalog`
+resource families; add `validation-receipt://` alongside them). Same
+own-or-not-found owner scoping as the tool. Returns the receipt for a terminal
+run, or not-found for an unknown / unowned / not-yet-terminal id. Register under
+the same durable gate.
+"""
+idempotent = false
+validation = """
+Tests prove the resource returns the minted receipt for an owned terminal run and
+not-found for unknown/unowned/non-terminal ids, and is absent under non-durable
+backends. `npm run build` passes.
+"""
+
+[[steps]]
+id = "docs-and-changelog"
+depends_on = ["validation-receipt-tool"]
+actor = "assistant"
+action = """
+Document the feature without overstating it. Update the MCP tool description for
+`validation_receipt`, README/best-practices where validation tools are listed,
+and CHANGELOG. State plainly what v1 does NOT add: signing/chaining (columns
+reserved only), and semantic enrichment (`key_points`, `evidence_cited`,
+`uncertainty_signals`, numeric per-model confidence), deferred to
+`validation-receipt.v2` because no extraction source exists. Keep docs concise.
+"""
+idempotent = false
+validation = """
+`npm run format:check` passes after doc edits; docs state the reserved-not
+-implemented status of signing/chaining and the enrichment deferral; no doc
+claims a capability the code does not ship.
+"""
+
+[[steps]]
+id = "verification-gate"
+depends_on = [
+  "report-terminal-status",
+  "thread-validationid-synthesis",
+  "job-tools-owner-check",
+  "canonical-hash",
+  "validation-receipt-tool",
+  "phase2-markdown-and-automint",
+  "phase3-mcp-resource",
+  "docs-and-changelog",
+]
+actor = "assistant"
+action = """
+Run the final verification gate and capture exact commands + results in
+docs/plans/cross-llm-validation-receipts.verification.md:
+
+  npm run build
+  npm test
+  npm run lint
+  npm run format:check
+  npm run check
+
+If PostgreSQL or other optional-service tests are unavailable locally, run the
+focused non-PG tests and document the missing service explicitly. The release
+security audit must still hard-fail if `node:sqlite` is referenced outside
+`src/sqlite-driver.ts`, so all new SQLite access goes through that adapter.
+"""
+idempotent = true
+validation = """
+All available gates pass. The verification notes list exact commands, results,
+the test counts before/after, and any unavailable optional-service gap. New
+SQLite access is confirmed to route only through `src/sqlite-driver.ts`.
+"""
+
+[[steps]]
+id = "cross-llm-review-gate"
+depends_on = ["verification-gate"]
+actor = "assistant"
+action = """
+Run the adversarial cross-LLM review gate on the implemented diff. Dispatch
+Codex, Gemini, and Grok via the gateway with full access and MCP tool access.
+Give each reviewer: the corrective-program spec
+(docs/plans/cross-llm-validation-receipts.draft.md), this DAG, the verification
+notes, and the exact changed-file list / diff. Reviewers MUST verify every claim
+against code and docs, not against Claude's summary. If Claude disagrees with a
+finding, respond with code/doc evidence, not assertion. Iterate until each gives
+UNCONDITIONAL APPROVAL or names a concrete, unresolvable blocker. Do not request
+approval on intent, plan-compliance, or "should be fixed" language. Record
+dispatch ids, per-round findings, fixes, and final endings in the verification
+notes.
+"""
+idempotent = true
+validation = """
+The verification notes record Codex/Gemini/Grok dispatch ids, each round's
+findings and the code/doc-evidenced responses or fixes, and a final
+UNCONDITIONAL APPROVAL from each reviewer (or a concrete documented blocker).
+Approval is based on inspected code, tests, and docs.
+"""
+
+[rollback]
+guidance = """
+The feature is additive and gated. To disable: do not register the
+`validation_receipt` tool / resource and do not create the `validation_runs` /
+`validation_receipts` tables; the validation tools revert to their pre-receipt
+behaviour and `validationId` is still returned at kickoff. The §5a `job_status` /
+`job_result` owner check is a security fix and must NOT be rolled back. The
+report terminal-status enum extension is backward-compatible; if a consumer
+breaks, pin it as `validation-report.v2` rather than reverting the terminal state.
+"""

@@ -31,10 +31,17 @@ implement. The three load-bearing mismatches, each verified in code:
 
 Two more facts shape the design:
 
-4. Models never see each other's output. Every reviewer prompt says "You are one
-   independent reviewer ... Do not claim consensus" (`src/validation-prompts.ts:21-23`).
-   There is no deliberation, only independent review plus an optional judge
-   synthesis. The artifact is named accordingly: a validation receipt.
+4. The fan-out reviewers never see each other's output. Every reviewer prompt
+   says "You are one independent reviewer ... Do not claim consensus"
+   (`src/validation-prompts.ts:21-23`), and no peer outputs are passed to a
+   reviewer. The one exception is the OPTIONAL judge synthesis: `buildJudgePrompt`
+   embeds the collected provider results verbatim
+   (`JSON.stringify(input.providerResults)`, `src/validation-prompts.ts:64-77`)
+   and `startJudgeSynthesis` passes the completed provider results into it
+   (`src/validation-orchestrator.ts:231-237`), so the judge does see the prior
+   model outputs. There is no peer-visible deliberation among reviewers, only
+   independent review plus an optional, output-aware judge synthesis. The
+   artifact is named accordingly: a validation receipt.
 5. A structured, versioned artifact already exists: `validation-report.v1`
    (`src/validation-report.ts:26-102`) with `perModelOutputs`, `disagreements`,
    `finalRecommendation`, `confidence` (a bucket: none/low/medium/high),
@@ -100,15 +107,24 @@ registration on an actually-durable, implemented backend, which today means
 gate to it. For `memory`, `postgres`, and `none`, the tables are not created and
 the tool is not registered. The gate is config-AND-runtime, not config alone:
 `createJobStore` can fail and `getJobStore` collapses that to `null`
-(`src/index.ts:462`), after which async tools are not registered
-(`src/index.ts:7055`). The receipt tool and tables follow the same rule: a
+(`src/index.ts:461`), after which async tools are not registered (the
+`asyncJobsEnabled` gate is computed at `src/index.ts:6680-6681` with a
+`hasStore()` check and applied at `src/index.ts:8649`). The receipt tool and
+tables follow the same rule: a
 durable implemented backend AND a store that actually attached at runtime. The
-tool's absence makes silent loss impossible by construction, the same invariant
-the job store already follows for `*_request_async`.
+tool's absence makes silent loss impossible by construction. This reuses the same
+CONSTRUCTION the job store already uses for `*_request_async` (gate tool
+registration on store availability so silent in-memory loss is impossible), but
+with a STRICTER predicate: `*_request_async` registers whenever a store is
+attached, which under `asyncJobsEnabled` includes the ephemeral `memory` store
+(`src/config.ts:327`, `createJobStore` returns `MemoryJobStore` for `memory`,
+`src/job-store.ts`, runtime gate `... && asyncJobManager.hasStore()` at
+`src/index.ts:6680-6681`); receipts additionally require a durable implemented
+backend (sqlite today), so they do NOT register under `memory`.
 
 Note on scope: `validationId` is still returned in every kickoff response
 regardless of backend (the validation start / `job_*` tools are registered
-unconditionally today, `src/index.ts:7063`). Only the DURABLE artifacts gate on
+unconditionally today via `registerValidationTools`, `src/index.ts:6688`). Only the DURABLE artifacts gate on
 sqlite + attached store: under `memory` / `postgres` / `none` no
 `validation_runs` row is written and `validation_receipt` is not registered. So
 callers always get an id, but a persisted, retrievable receipt exists only under
@@ -182,7 +198,8 @@ type ValidationReceiptResult =
 Behavior:
 - Resolve the caller principal and apply own-or-not-found: a run owned by another
   principal returns `not_found`, never another principal's data. This mirrors
-  `llm_request_result` (`src/index.ts:10976-11003`,
+  `llm_request_result` (`src/index.ts:10269-10330`, owner check at
+  `src/index.ts:10305-10306`;
   `principalCanAccess`/`resolveOwnerPrincipal` in `src/request-context.ts`).
 - If a receipt row exists: return it (`minted`).
 - Else if the run is terminal: mint, store, return (`minted`).
@@ -283,8 +300,11 @@ the hash input (it is a derived rendering). `canonical_sha256` is the SHA-256 of
 those bytes. This gives per-row tamper detection in v1 without any signing, and
 fixes the byte definition that a future hash chain (`prev_sha256` + monotonic
 `seq`) and signature will build on. This is the honest version of the original
-`receipt_hash?` placeholder, which on a mutable, idempotently-rewritten row was
-not preparation for anything (`docs/agent-assurance-runtime-conformance.md:46-89,122-131`).
+`receipt_hash?` placeholder from the superseded "Structured Deliberation
+Receipts" proposal, which on a mutable, idempotently-rewritten row was not
+preparation for anything. (Note: the assertion-bundle / Merkle-linkage hashing
+in `docs/agent-assurance-runtime-conformance.md` is a separate, unrelated
+governance mechanism and is not the basis for this receipt hash.)
 
 What v1 does NOT add: `key_points`, `evidence_cited`, `uncertainty_signals`,
 numeric per-model confidence, `has_evidence_citations`. All require extraction
@@ -308,7 +328,9 @@ not hand-roll a bare `CREATE TABLE` with `DEFAULT CURRENT_TIMESTAMP` and
 ## 8. MCP resource (later phase)
 
 `validation-receipt://{validationId}` exposed through `src/resources.ts`
-(which today serves sessions/models/metrics only). Same own-or-not-found owner
+(which today serves `sessions://`, `models://`, `metrics://`, `cache-state://`,
+and the `provider-subcommands://catalog` / `provider-tools://catalog` resource
+families, `src/resources.ts:104-263`). Same own-or-not-found owner
 scoping as the tool. Returns the receipt for a terminal run, or a not-found for
 an unknown/unowned/not-yet-terminal id.
 
