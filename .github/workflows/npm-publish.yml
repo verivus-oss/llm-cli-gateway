@@ -17,6 +17,7 @@ permissions:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    environment: npm-publish
     permissions:
       contents: read
       id-token: write
@@ -38,6 +39,31 @@ jobs:
         with:
           node-version: 24
           registry-url: "https://registry.npmjs.org"
+
+      - name: Log in to Azure with GitHub OIDC
+        uses: Azure/login@93381592711f247e165c389ebb30b596c84cdc48 # v3.0.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Fetch npm publish token from Azure Key Vault
+        uses: Azure/cli@9fe27e8f2d4177d9755d43d94f89e79f065ef883 # v3.0.0
+        env:
+          AZURE_CORE_OUTPUT: none
+        with:
+          inlineScript: |
+            set -euo pipefail
+            token="$(az keyvault secret show \
+              --vault-name "${{ vars.AZURE_KEY_VAULT_NAME }}" \
+              --name "${{ vars.AZURE_KEY_VAULT_NPM_TOKEN_SECRET_NAME }}" \
+              --query value -o tsv)"
+            if [ -z "${token}" ]; then
+              echo "ERROR: Azure Key Vault returned an empty npm publish token" >&2
+              exit 1
+            fi
+            printf 'NODE_AUTH_TOKEN=%s\n' "${token}" >> "${GITHUB_ENV}"
+            unset token
 
       - run: npm ci --ignore-scripts --no-audit --no-fund
       - run: npm run build
