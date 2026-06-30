@@ -37,6 +37,26 @@ export type ApiProviderKind = "openai-compatible" | "anthropic" | "xai-responses
  */
 export type ApiContinuity = "server-side-id" | "stateless-resend" | "none";
 
+/**
+ * Slice 6: pure mapping from provider kind to its continuity model, without
+ * instantiating an adapter. Lets the capability/resource surfaces gate session
+ * continuity per kind (a kind whose continuity is `none` is not continuity
+ * tracked). Keep in sync with the adapter `continuity` fields below.
+ */
+export function apiContinuityForKind(kind: ApiProviderKind): ApiContinuity {
+  switch (kind) {
+    case "xai-responses":
+      return "server-side-id";
+    case "openai-compatible":
+    case "anthropic":
+      return "stateless-resend";
+    default: {
+      const exhaustive: never = kind;
+      throw new Error(`Unknown api provider kind: ${String(exhaustive)}`);
+    }
+  }
+}
+
 export interface ApiChatMessage {
   role: "system" | "user" | "assistant";
   content: string;

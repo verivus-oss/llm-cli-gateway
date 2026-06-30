@@ -9,6 +9,7 @@ import {
   createDoctorReport,
   type DoctorReport,
 } from "../doctor.js";
+import type { ApiProviderConfig, ProvidersConfig } from "../config.js";
 
 // Layer 6 / U20: doctor JSON schema shape + secret redaction coverage.
 //
@@ -410,5 +411,123 @@ describe("U27 checkGeminiConfig", () => {
     expect(report.client_config.gemini_config.mcp_reconciliation.whitelisted).toEqual(
       expect.any(Array)
     );
+  });
+});
+
+// Slice 6: doctor api_providers health block. Dormant byte-identical (omitted
+// when no API providers are enabled); reports key presence + endpoint shape +
+// login guidance, never the key value. Reachability is null unless the opt-in
+// probe ran.
+describe("Slice 6 — doctor api_providers block", () => {
+  const ORIGINAL = { ...process.env };
+  const KEY_ENV = "OPENROUTER_API_KEY_SLICE6";
+
+  afterEach(() => {
+    delete process.env[KEY_ENV];
+    Object.assign(process.env, ORIGINAL);
+  });
+
+  const keyless: ApiProviderConfig = {
+    name: "ollama",
+    kind: "openai-compatible",
+    apiKeyEnv: null,
+    baseUrl: "http://127.0.0.1:11434/v1",
+    defaultModel: "qwen2.5",
+    models: ["qwen2.5", "llama3.3"],
+  };
+  const keyed: ApiProviderConfig = {
+    name: "openrouter",
+    kind: "openai-compatible",
+    apiKeyEnv: KEY_ENV,
+    baseUrl: "https://openrouter.ai/api/v1",
+    defaultModel: "x-ai/grok-2",
+    models: ["x-ai/grok-2"],
+  };
+  const providersOf = (...entries: ApiProviderConfig[]): ProvidersConfig => ({
+    xai: null,
+    providers: Object.fromEntries(entries.map(e => [e.name, e])),
+    sources: { configFile: null },
+  });
+
+  it("omits api_providers entirely when no providersConfig is supplied (byte-identical)", () => {
+    const report = createDoctorReport({});
+    expect("api_providers" in report).toBe(false);
+    validateAgainstSchema(report, schema, "doctor");
+  });
+
+  it("omits api_providers when a providersConfig has no enabled providers", () => {
+    const report = createDoctorReport({
+      env: process.env,
+      providersConfig: providersOf(),
+    });
+    expect("api_providers" in report).toBe(false);
+    // A keyed provider whose env var is unset is disabled, so still omitted.
+    const report2 = createDoctorReport({
+      env: process.env,
+      providersConfig: providersOf(keyed),
+    });
+    expect("api_providers" in report2).toBe(false);
+  });
+
+  it("surfaces an enabled keyless-local provider with reachable=null by default", () => {
+    const report = createDoctorReport({
+      env: process.env,
+      providersConfig: providersOf(keyless),
+    });
+    validateAgainstSchema(report, schema, "doctor");
+    expect(report.api_providers?.enabled_count).toBe(1);
+    const entry = report.api_providers?.providers.ollama;
+    expect(entry?.kind).toBe("openai-compatible");
+    expect(entry?.api_key_env).toBeNull();
+    expect(entry?.api_key_present).toBe(false);
+    expect(entry?.reachable).toBeNull();
+    expect(entry?.login_guidance.apiKeyEnv).toBeNull();
+    expect(entry?.models).toEqual(["qwen2.5", "llama3.3"]);
+  });
+
+  it("reports api_key_present and never leaks the key value for a keyed provider", () => {
+    process.env[KEY_ENV] = "sk-secret-slice6-doctor";
+    const report = createDoctorReport({
+      env: process.env,
+      providersConfig: providersOf(keyed),
+    });
+    validateAgainstSchema(report, schema, "doctor");
+    const entry = report.api_providers?.providers.openrouter;
+    expect(entry?.api_key_present).toBe(true);
+    expect(entry?.api_key_env).toBe(KEY_ENV);
+    expect(entry?.login_guidance.summary).toContain(KEY_ENV);
+    expect(JSON.stringify(report)).not.toContain("sk-secret-slice6-doctor");
+  });
+
+  it("redacts userinfo embedded in base_url across the whole api_providers block", () => {
+    process.env[KEY_ENV] = "sk-secret-slice6-doctor";
+    const leaky: ApiProviderConfig = {
+      name: "leaky",
+      kind: "openai-compatible",
+      apiKeyEnv: KEY_ENV,
+      baseUrl: "https://leakyuser:sekretpw@proxy.example/v1",
+      defaultModel: "m1",
+    };
+    const report = createDoctorReport({
+      env: process.env,
+      providersConfig: providersOf(leaky),
+    });
+    validateAgainstSchema(report, schema, "doctor");
+    const blob = JSON.stringify(report.api_providers);
+    expect(blob).not.toContain("sekretpw");
+    expect(blob).not.toContain("leakyuser");
+    expect(report.api_providers?.providers.leaky.base_url).toContain("proxy.example");
+    expect(report.api_providers?.providers.leaky.login_guidance.baseUrl).toContain("proxy.example");
+  });
+
+  it("honours precomputed reachability from the opt-in probe", () => {
+    const report = createDoctorReport({
+      env: process.env,
+      providersConfig: providersOf(keyless),
+      apiReachability: { ollama: { reachable: false, error: "ECONNREFUSED" } },
+    });
+    validateAgainstSchema(report, schema, "doctor");
+    expect(report.api_providers?.providers.ollama.reachable).toBe(false);
+    expect(report.api_providers?.providers.ollama.reachability_error).toBe("ECONNREFUSED");
   });
 });

@@ -4,6 +4,8 @@ import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import type { CliType } from "./session-manager.js";
 import { getProviderLoginGuidance, type ProviderLoginGuidance } from "./provider-login-guidance.js";
+import { apiProviderKeyPresent, isApiProviderEnabled, type ApiProviderConfig } from "./config.js";
+import { redactDiagnosticUrl } from "./endpoint-exposure.js";
 import {
   envWithExtendedPath,
   getExtendedPath,
@@ -28,6 +30,45 @@ export interface ProviderRuntimeStatus {
     detail: string;
   };
   guidance: ProviderLoginGuidance;
+}
+
+/**
+ * Slice 6: status of a generic `[providers.<name>]` (kind:"api") provider.
+ * Unlike a CLI provider there is no spawnable binary or version, so "status" is
+ * whether the provider is enabled and whether its API key resolves. Reachability
+ * is layered on top by the opt-in doctor probe (kept out of this pure projection
+ * so it spends no network). The key value is never exposed, only its presence.
+ */
+export interface ApiProviderRuntimeStatus {
+  provider: string;
+  kind: ApiProviderConfig["kind"];
+  baseUrl: string;
+  defaultModel: string;
+  models: string[] | null;
+  /** Env var the key is read from, or null for a keyless-local provider. */
+  apiKeyEnv: string | null;
+  /** Whether the configured key env var resolves to a non-empty value. */
+  apiKeyPresent: boolean;
+  /** Whether the provider is enabled (key present, or keyless-local loopback). */
+  enabled: boolean;
+}
+
+export function getApiProviderStatus(
+  provider: ApiProviderConfig,
+  env: NodeJS.ProcessEnv = process.env
+): ApiProviderRuntimeStatus {
+  return {
+    provider: provider.name,
+    kind: provider.kind,
+    // Redact any userinfo / sensitive query params before surfacing the URL on a
+    // diagnostic surface: base_url is config-supplied and could carry credentials.
+    baseUrl: redactDiagnosticUrl(provider.baseUrl) ?? provider.baseUrl,
+    defaultModel: provider.defaultModel,
+    models: provider.models ?? null,
+    apiKeyEnv: provider.apiKeyEnv,
+    apiKeyPresent: apiProviderKeyPresent(provider, env),
+    enabled: isApiProviderEnabled(provider, env),
+  };
 }
 
 const PROVIDERS: CliType[] = ["claude", "codex", "gemini", "grok", "mistral", "devin"];

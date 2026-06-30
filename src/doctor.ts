@@ -9,16 +9,24 @@ import {
   type EndpointExposureReport,
 } from "./endpoint-exposure.js";
 import {
+  getApiProviderStatus,
   listProviderRuntimeStatuses,
   type ProviderLoginStatus,
   type ProviderRuntimeStatus,
 } from "./provider-status.js";
+import {
+  getApiProviderLoginGuidance,
+  type ApiProviderLoginGuidance,
+} from "./provider-login-guidance.js";
 import { CLAUDE_MCP_SERVER_NAMES } from "./claude-mcp-config.js";
 import type { FlightRecorderQuery } from "./flight-recorder.js";
 import {
+  enabledApiProviders,
   loadCacheAwarenessConfig,
+  loadProvidersConfig,
   loadRemoteOAuthConfig,
   type CacheAwarenessConfig,
+  type ProvidersConfig,
 } from "./config.js";
 import { loadWorkspaceRegistry } from "./workspace-registry.js";
 import { computeGlobalCacheStats } from "./cache-stats.js";
@@ -26,7 +34,7 @@ import { FlightRecorder, resolveFlightRecorderDbPath } from "./flight-recorder.j
 import { buildUpstreamContractReport } from "./upstream-contracts.js";
 import {
   getProviderToolCapabilities,
-  providerCapabilityIds,
+  knownProviderCapabilityIds,
   type ProviderCapabilityId,
   type ProviderKind,
 } from "./provider-tool-capabilities.js";
@@ -84,6 +92,34 @@ export interface ProviderCapabilitySummaryReport {
       warnings: string[];
     }
   >;
+}
+
+/**
+ * Slice 6: per-API-provider health entry. Reports key presence + endpoint
+ * shape; never the key value. `reachable` stays null unless the opt-in
+ * `--probe-api-providers` reachability probe ran.
+ */
+export interface ApiProviderHealthEntry {
+  name: string;
+  kind: "openai-compatible" | "anthropic" | "xai-responses";
+  base_url: string;
+  default_model: string;
+  models: string[] | null;
+  /** The env var the key is read from, or null for a keyless-local provider. */
+  api_key_env: string | null;
+  /** Whether the configured key env var resolves to a non-empty value. */
+  api_key_present: boolean;
+  /** null = not probed; true/false = opt-in reachability probe result. */
+  reachable: boolean | null;
+  /** Set only when a reachability probe ran and failed. */
+  reachability_error?: string;
+  /** How to obtain/configure the key for this provider (no secret material). */
+  login_guidance: ApiProviderLoginGuidance;
+}
+
+export interface ApiProviderHealthReport {
+  enabled_count: number;
+  providers: Record<string, ApiProviderHealthEntry>;
 }
 
 export interface VibeSessionLoggingStatus {
@@ -350,6 +386,14 @@ export interface DoctorReport {
   };
   cache_awareness: CacheAwarenessReport;
   provider_capabilities: ProviderCapabilitySummaryReport;
+  /**
+   * Slice 6: health of enabled generic `[providers.<name>]` (kind:"api")
+   * providers. OMITTED entirely when none are enabled, so a CLI-only gateway's
+   * report is byte-identical to before. `reachable` is null unless the doctor
+   * was run with `--probe-api-providers` (the reachability probe is opt-in and
+   * off by default; a normal run spends no network or tokens).
+   */
+  api_providers?: ApiProviderHealthReport;
   upstream: {
     note: string;
     recommendation: string;
@@ -427,6 +471,57 @@ export interface CreateDoctorReportOptions {
    * spawns the real provider CLIs.
    */
   probeUpstream?: boolean;
+  /**
+   * Slice 6: resolved API-provider config. When present and at least one
+   * provider is enabled, the report gains the `api_providers` block. When
+   * absent, the block is omitted (byte-identical CLI-only report).
+   */
+  providersConfig?: ProvidersConfig;
+  /**
+   * Slice 6: precomputed reachability results keyed by provider name, supplied
+   * by `printDoctorJson` only when the opt-in `--probe-api-providers` flag is
+   * set. `createDoctorReport` itself never opens a socket: when this is absent,
+   * every entry's `reachable` is null.
+   */
+  apiReachability?: Record<string, { reachable: boolean; error?: string }>;
+}
+
+/**
+ * Slice 6: build the api_providers health block from the resolved providers
+ * config. Returns undefined when no API providers are enabled so the caller can
+ * OMIT the key entirely (dormant byte-identical). Reads only key presence + the
+ * env var name; never the key value. Reachability is whatever the caller
+ * precomputed (null when the opt-in probe did not run).
+ */
+function buildApiProviderHealthReport(
+  opts: CreateDoctorReportOptions,
+  env: NodeJS.ProcessEnv
+): ApiProviderHealthReport | undefined {
+  const config = opts.providersConfig;
+  if (!config) return undefined;
+  const providers: Record<string, ApiProviderHealthEntry> = {};
+  // Delegate the status projection to provider-status and the credential
+  // guidance to provider-login-guidance, so doctor stays a thin consumer.
+  for (const providerConfig of Object.values(config.providers)) {
+    const status = getApiProviderStatus(providerConfig, env);
+    if (!status.enabled) continue;
+    const probe = opts.apiReachability?.[status.provider];
+    providers[status.provider] = {
+      name: status.provider,
+      kind: status.kind,
+      base_url: status.baseUrl,
+      default_model: status.defaultModel,
+      models: status.models,
+      api_key_env: status.apiKeyEnv,
+      api_key_present: status.apiKeyPresent,
+      reachable: probe ? probe.reachable : null,
+      ...(probe?.error ? { reachability_error: probe.error } : {}),
+      login_guidance: getApiProviderLoginGuidance(providerConfig),
+    };
+  }
+  const names = Object.keys(providers);
+  if (names.length === 0) return undefined;
+  return { enabled_count: names.length, providers };
 }
 
 /**
@@ -502,7 +597,7 @@ function buildProviderCapabilitySummary(
     includePaths: false,
   });
   const providers = Object.fromEntries(
-    providerCapabilityIds().map(provider => {
+    knownProviderCapabilityIds().map(provider => {
       const capability = capabilities[provider];
       if (!capability) {
         throw new Error(`Missing provider capability record for ${provider}`);
@@ -536,7 +631,7 @@ function buildProviderCapabilitySummary(
     resources: {
       catalog: "provider-tools://catalog",
       providers: Object.fromEntries(
-        providerCapabilityIds().map(provider => [provider, `provider-tools://${provider}`])
+        knownProviderCapabilityIds().map(provider => [provider, `provider-tools://${provider}`])
       ) as Record<ProviderCapabilityId, string>,
     },
     cache_ttl_ms: 60_000,
@@ -649,6 +744,13 @@ export function createDoctorReport(
     next_actions: [],
   };
 
+  // Slice 6: attach the api_providers block only when at least one API provider
+  // is enabled, so a CLI-only gateway's report is byte-identical to before.
+  const apiProviders = buildApiProviderHealthReport(opts, env);
+  if (apiProviders) {
+    report.api_providers = apiProviders;
+  }
+
   if (transport === "http" && auth.required && !auth.tokenConfigured) {
     report.ok = false;
     report.next_actions.push("Set LLM_GATEWAY_AUTH_TOKEN before starting HTTP transport.");
@@ -699,13 +801,16 @@ export function createDoctorReport(
   return report;
 }
 
-export function printDoctorJson(opts: { probeUpstream?: boolean } = {}): void {
+export async function printDoctorJson(
+  opts: { probeUpstream?: boolean; probeApiProviders?: boolean } = {}
+): Promise<void> {
   // Load cache-awareness config + open the flight recorder so the doctor
-  // command can populate cache_awareness.last_24h. Both are best-effort —
+  // command can populate cache_awareness.last_24h. Both are best-effort:
   // failures degrade to the zeroed block (buildCacheAwarenessReport
   // handles missing deps).
   let cacheAwareness: CacheAwarenessConfig | undefined;
   let flightRecorder: FlightRecorder | undefined;
+  let providersConfig: ProvidersConfig | undefined;
   try {
     cacheAwareness = loadCacheAwarenessConfig();
   } catch {
@@ -717,11 +822,27 @@ export function printDoctorJson(opts: { probeUpstream?: boolean } = {}): void {
   } catch {
     // ignore
   }
+  try {
+    providersConfig = loadProvidersConfig();
+  } catch {
+    // ignore
+  }
+  // Slice 6: the reachability probe is opt-in. A normal `doctor --json` run
+  // spends no network or tokens; only `--probe-api-providers` opens a socket.
+  let apiReachability: Record<string, { reachable: boolean; error?: string }> | undefined;
+  if (opts.probeApiProviders && providersConfig) {
+    apiReachability = {};
+    for (const runtime of enabledApiProviders(providersConfig)) {
+      apiReachability[runtime.name] = await probeApiProviderReachability(runtime.baseUrl);
+    }
+  }
   const report = createDoctorReport({
     env: process.env,
     cacheAwareness,
     flightRecorder,
     probeUpstream: opts.probeUpstream,
+    providersConfig,
+    apiReachability,
   });
   process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
   if (flightRecorder) {
@@ -731,6 +852,41 @@ export function printDoctorJson(opts: { probeUpstream?: boolean } = {}): void {
       // best effort
     }
   }
+}
+
+/**
+ * Slice 6: opt-in reachability probe for an API-provider base URL. Issues a
+ * bare GET and treats ANY HTTP response (including 401/404) as reachable: the
+ * goal is connectivity, not auth or token spend. No request body, no API key,
+ * no completion call. https for remote, http for loopback test endpoints.
+ */
+export async function probeApiProviderReachability(
+  baseUrl: string,
+  timeoutMs = 5_000
+): Promise<{ reachable: boolean; error?: string }> {
+  let url: URL;
+  try {
+    url = new URL(baseUrl);
+  } catch {
+    return { reachable: false, error: "invalid base_url" };
+  }
+  const transport =
+    url.protocol === "http:" ? await import("node:http") : await import("node:https");
+  return new Promise(resolve => {
+    const request = transport.request(url, { method: "GET", timeout: timeoutMs }, response => {
+      // Any status code means the endpoint answered: drain and resolve.
+      response.resume();
+      resolve({ reachable: true });
+    });
+    request.on("timeout", () => {
+      request.destroy();
+      resolve({ reachable: false, error: `timed out after ${timeoutMs}ms` });
+    });
+    request.on("error", err => {
+      resolve({ reachable: false, error: err instanceof Error ? err.message : String(err) });
+    });
+    request.end();
+  });
 }
 
 function isCreateDoctorReportOptions(

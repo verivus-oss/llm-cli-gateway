@@ -13,7 +13,14 @@ import {
   type PrefixCacheStats,
   type SessionCacheStats,
 } from "./cache-stats.js";
-import type { CacheAwarenessConfig } from "./config.js";
+import {
+  enabledApiProviders,
+  type ApiProviderRuntime,
+  type CacheAwarenessConfig,
+  type ProvidersConfig,
+} from "./config.js";
+import { apiContinuityForKind } from "./api-provider.js";
+import { apiProviderCatalogEntry } from "./api-request.js";
 import {
   buildProviderSubcommandsCompactCatalog,
   getCliSubcommandContract,
@@ -57,12 +64,27 @@ export class ResourceProvider {
     // TTL policy applied to ttlRemainingMs on session-scoped reads.
     // When absent, the default Anthropic 5-min TTL applies (matches the
     // 1.x default of `[cache_awareness].anthropic_ttl_seconds = 300`).
-    private cacheAwareness: CacheAwarenessConfig | null = null
+    private cacheAwareness: CacheAwarenessConfig | null = null,
+    // Slice 6: resolved API-provider config. When present, enabled
+    // [providers.<name>] (kind:"api") providers gain `models://<name>` and (for
+    // continuity-tracked kinds) `sessions://<name>` resources. Null/absent keeps
+    // the resource set byte-identical to the CLI-only surface.
+    private providers: ProvidersConfig | null = null
   ) {}
 
   /** Read-only flight-recorder accessor for cache-state resource readers. */
   getFlightRecorderQuery(): FlightRecorderQuery {
     return this.flightRecorder;
+  }
+
+  /** Slice 6: the enabled generic API providers (empty when none/unconfigured). */
+  private apiRuntimes(): ApiProviderRuntime[] {
+    return this.providers ? enabledApiProviders(this.providers) : [];
+  }
+
+  /** Slice 6: enabled API providers whose kind supports multi-turn continuity. */
+  private continuityTrackedApiRuntimes(): ApiProviderRuntime[] {
+    return this.apiRuntimes().filter(rt => apiContinuityForKind(rt.kind) !== "none");
   }
 
   /**
@@ -171,6 +193,20 @@ export class ResourceProvider {
           priority: 0.6,
         },
       },
+      // Slice 6: sessions:// for enabled API providers whose kind is
+      // continuity-tracked. Empty (byte-identical) when no API providers are
+      // enabled or none of their kinds support continuity.
+      ...this.continuityTrackedApiRuntimes().map(rt => ({
+        uri: `sessions://${rt.name}`,
+        name: `${rt.name} Sessions`,
+        title: `${rt.name} Sessions`,
+        description: `List of ${rt.name} API provider conversation sessions`,
+        mimeType: "application/json",
+        annotations: {
+          audience: ["user", "assistant"] as ("user" | "assistant")[],
+          priority: 0.6,
+        },
+      })),
       {
         uri: "models://claude",
         name: "Claude Models",
@@ -226,6 +262,19 @@ export class ResourceProvider {
           priority: 0.8,
         },
       },
+      // Slice 6: models:// for every enabled API provider. Empty
+      // (byte-identical) when no API providers are enabled.
+      ...this.apiRuntimes().map(rt => ({
+        uri: `models://${rt.name}`,
+        name: `${rt.name} Models`,
+        title: `${rt.name} Models & Capabilities`,
+        description: `Configured ${rt.name} API provider model catalog`,
+        mimeType: "application/json",
+        annotations: {
+          audience: ["user", "assistant"] as ("user" | "assistant")[],
+          priority: 0.8,
+        },
+      })),
       {
         uri: "metrics://performance",
         name: "Performance Metrics",
@@ -458,6 +507,46 @@ export class ResourceProvider {
         mimeType: "application/json",
         text: JSON.stringify(cliInfo.mistral, null, 2),
       };
+    }
+
+    // Slice 6: models://<api-provider> returns the catalog projection of an
+    // enabled generic API provider (apiProviderCatalogEntry strips the resolved
+    // key). Placed after the static CLI handlers so a config-guarded name
+    // collision resolves to the CLI.
+    if (uri.startsWith("models://")) {
+      const runtime = this.apiRuntimes().find(rt => `models://${rt.name}` === uri);
+      if (runtime) {
+        return {
+          uri,
+          mimeType: "application/json",
+          text: JSON.stringify(apiProviderCatalogEntry(runtime), null, 2),
+        };
+      }
+    }
+
+    // Slice 6: sessions://<api-provider> uses the same owner-filtered shape as
+    // the CLI session resources, only for continuity-tracked API kinds.
+    if (uri.startsWith("sessions://")) {
+      const runtime = this.continuityTrackedApiRuntimes().find(
+        rt => `sessions://${rt.name}` === uri
+      );
+      if (runtime) {
+        const sessions = this.ownedSessions(await this.sessionManager.listSessions(runtime.name));
+        return {
+          uri,
+          mimeType: "application/json",
+          text: JSON.stringify(
+            {
+              cli: runtime.name,
+              total: sessions.length,
+              sessions,
+              activeSession: await this.ownedActiveId(runtime.name),
+            },
+            null,
+            2
+          ),
+        };
+      }
     }
 
     if (uri === "metrics://performance") {

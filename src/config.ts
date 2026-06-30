@@ -698,6 +698,20 @@ export function isApiProviderEnabled(
   return provider.kind === "openai-compatible" && isLoopbackUrl(provider.baseUrl);
 }
 
+/**
+ * Slice 6: whether a provider's API key is resolvable from the environment,
+ * reported by doctor / provider-status / login-guidance without exposing the
+ * value. A keyless-local provider (apiKeyEnv null) reports `false` here even
+ * though it is still enabled (see the loopback exception in
+ * `isApiProviderEnabled`).
+ */
+export function apiProviderKeyPresent(
+  provider: ApiProviderConfig,
+  env: NodeJS.ProcessEnv = process.env
+): boolean {
+  return resolveProviderKey(provider.apiKeyEnv, env) !== null;
+}
+
 /** The enabled API providers with keys resolved (empty string for keyless). */
 export function enabledApiProviders(
   config: ProvidersConfig,

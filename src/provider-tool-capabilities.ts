@@ -5,7 +5,13 @@ import { parse as parseToml } from "smol-toml";
 import { CLAUDE_MCP_SERVER_NAMES } from "./claude-mcp-config.js";
 import { getAvailableCliInfo, type CliInfo } from "./model-registry.js";
 import { CLI_TYPES, type CliType } from "./session-manager.js";
-import { isXaiProviderEnabled, loadProvidersConfig } from "./config.js";
+import {
+  enabledApiProviders,
+  isXaiProviderEnabled,
+  loadProvidersConfig,
+  type ApiProviderRuntime,
+} from "./config.js";
+import { apiContinuityForKind } from "./api-provider.js";
 
 const MAX_SKILLS_PER_DIR = 100;
 const MAX_SKILL_BYTES = 64 * 1024;
@@ -1139,7 +1145,7 @@ export function getProviderToolCapabilities(
   queryOrCli: ProviderCapabilityQuery | ProviderCapabilityId = {}
 ): ProviderToolCapabilitiesMap {
   const query = normalizeQuery(queryOrCli);
-  const providers = query.cli ? [query.cli] : PROVIDER_CAPABILITY_IDS;
+  const providers = query.cli ? [query.cli] : allProviderCapabilityIds();
   const entries = providers.map(provider => [
     provider,
     getOneProviderToolCapabilities(provider, query),
@@ -1174,7 +1180,38 @@ export function _getCapabilityCacheForTest(): Map<
   return CAPABILITY_CACHE;
 }
 
-export function providerCapabilityIds(): readonly KnownProviderCapabilityId[] {
+/**
+ * Slice 6: the names of enabled generic `[providers.<name>]` (kind:"api")
+ * providers, which gain capability metadata built on demand. Empty when none
+ * are enabled, so the full capability surface stays byte-identical to the
+ * CLI-only set when dormant.
+ */
+function enabledApiCapabilityIds(): string[] {
+  return enabledApiProviders(loadProvidersConfig()).map(provider => provider.name);
+}
+
+/**
+ * The complete set of capability ids: the static known providers plus any
+ * enabled generic API providers (deduped, known providers first). Drives both
+ * the unfiltered capability map and the `provider-tools://<id>` allowlist.
+ */
+function allProviderCapabilityIds(): ProviderCapabilityId[] {
+  return [
+    ...new Set<ProviderCapabilityId>([...PROVIDER_CAPABILITY_IDS, ...enabledApiCapabilityIds()]),
+  ];
+}
+
+export function providerCapabilityIds(): readonly ProviderCapabilityId[] {
+  return allProviderCapabilityIds();
+}
+
+/**
+ * The static known capability ids (the six CLI providers plus grok_api), with
+ * no dynamic generic API providers folded in. Callers that index CLI-keyed maps
+ * (e.g. the doctor `provider_capabilities` summary) must use this, not the
+ * widened `providerCapabilityIds()`.
+ */
+export function knownProviderCapabilityIds(): readonly KnownProviderCapabilityId[] {
   return PROVIDER_CAPABILITY_IDS;
 }
 
@@ -1184,12 +1221,19 @@ function buildOneProviderToolCapabilities(
 ): ProviderToolCapabilities {
   const warnings: string[] = [];
   if (!isKnownProviderCapabilityId(cli)) {
-    // Defensive under the Slice 0.5 open id: no generic API provider is
-    // registered yet, so there is no static capability metadata to return.
-    throw new Error(
-      `No tool-capability metadata for provider "${cli}". ` +
-        `Known providers: ${PROVIDER_CAPABILITY_IDS.join(", ")}.`
+    // Slice 6: a generic `[providers.<name>]` (kind:"api") id has no static
+    // metadata; build it on demand from the enabled provider's runtime config.
+    // A genuinely unknown / disabled id still has no metadata and is rejected.
+    const runtime = enabledApiProviders(loadProvidersConfig()).find(
+      provider => provider.name === cli
     );
+    if (!runtime) {
+      throw new Error(
+        `No tool-capability metadata for provider "${cli}". ` +
+          `Known providers: ${allProviderCapabilityIds().join(", ")}.`
+      );
+    }
+    return buildApiProviderToolCapabilities(runtime, query);
   }
   const definition = TOOL_CONTROLS[cli];
   const discoveredSkills =
@@ -1228,6 +1272,202 @@ function buildOneProviderToolCapabilities(
     configSurfaces: discoverConfigSurfaces(cli, query, discoveredSkills),
     unsupportedInputs: query.includeUnsupported ? [...definition.unsupportedInputs] : [],
     warnings,
+    metadata: {
+      deprecatedFields: {
+        gatewayRequestTool: "Use gatewayRequestTools instead.",
+      },
+      cacheTtlMs: CAPABILITY_CACHE_TTL_MS,
+    },
+  };
+}
+
+/**
+ * Slice 6: build the controls/features metadata for a generic API provider
+ * from its runtime kind. API providers support model selection, sampling,
+ * max-output, timeout and (per-kind) reasoning + continuity; they never expose
+ * tool allow/deny lists, MCP servers, local skills, or workspace/worktree
+ * controls (those are CLI-only). xAI Responses forwards reasoning.effort; the
+ * other kinds accept the schema field but ignore it.
+ */
+function apiProviderCapabilityDefinition(
+  runtime: ApiProviderRuntime
+): ProviderCapabilityStaticDefinition {
+  const { name, kind } = runtime;
+  const forwardsReasoning = kind === "xai-responses";
+  const continuity = apiContinuityForKind(kind);
+  const continuityTracked = continuity !== "none";
+  return {
+    providerKind: "api",
+    gatewayRequestTools: [`api_${name}_request`],
+    summary:
+      `Generic ${kind} API provider "${name}" configured through [providers.${name}]. ` +
+      "HTTP request tool only: no local CLI tools, skills, MCP servers, or workspaces.",
+    controls: {
+      allowlist: {
+        supported: false,
+        behavior: `api_${name}_request has no CLI tool allow-list input.`,
+      },
+      denylist: {
+        supported: false,
+        behavior: `api_${name}_request has no CLI tool deny-list input.`,
+      },
+      mcpServers: {
+        supported: false,
+        behavior: "API requests do not configure or expose MCP servers.",
+      },
+      nativeSkills: {
+        supported: false,
+        behavior: "API requests do not read local provider skills.",
+      },
+      reasoningEffort: forwardsReasoning
+        ? {
+            supported: true,
+            requestField: "reasoningEffort",
+            behavior: "Passed to the xAI Responses API reasoning.effort field.",
+          }
+        : {
+            supported: false,
+            requestField: "reasoningEffort",
+            behavior: `Accepted by the schema but ignored by the ${kind} adapter.`,
+          },
+      maxOutputTokens: {
+        supported: true,
+        requestField: "maxOutputTokens",
+        behavior: "Bounds the provider API max output tokens.",
+      },
+      sampling: {
+        supported: true,
+        requestField: "temperature/topP",
+        behavior: "Sampling controls are passed through to the provider API.",
+      },
+      timeout: {
+        supported: true,
+        requestField: "timeoutMs",
+        behavior: "Bounds the API HTTP request timeout.",
+      },
+      session: continuityTracked
+        ? {
+            supported: true,
+            requestField: "sessionId/createNewSession",
+            behavior:
+              continuity === "server-side-id"
+                ? "Gateway stores the provider continuation handle (previous_response_id) in session metadata."
+                : "Gateway tracks the session (active/owner); stateless adapters resend prior context caller-side without storing conversation content.",
+          }
+        : {
+            supported: false,
+            requestField: "sessionId/createNewSession",
+            behavior: "This provider kind does not support multi-turn continuity.",
+          },
+    },
+    features: baseFeatures({
+      apiProvider: true,
+      structuredTextResponses: true,
+      sessionContinuity: continuityTracked,
+    }),
+    unsupportedInputs: [
+      {
+        input: "localSkills",
+        behavior: "not_supported",
+        details: `api_${name}_request does not inspect local CLI skills.`,
+      },
+      {
+        input: "allowedTools/disallowedTools",
+        behavior: "not_supported",
+        details: "Tool allow/deny controls are CLI-only and are not routed to the API.",
+      },
+      {
+        input: "workspace/worktree",
+        behavior: "not_supported",
+        details: "API providers have no local workspace or worktree controls.",
+      },
+    ],
+  };
+}
+
+/** Slice 6: discovery/model projection for a generic API provider. */
+function apiProviderModelInfo(runtime: ApiProviderRuntime): GrokApiModelInfo {
+  const list =
+    runtime.models && runtime.models.length > 0 ? runtime.models : [runtime.defaultModel];
+  const models: Record<string, string> = {};
+  for (const model of list) {
+    models[model] =
+      model === runtime.defaultModel ? "Configured default model" : "Configured allowlisted model";
+  }
+  if (!(runtime.defaultModel in models)) {
+    models[runtime.defaultModel] = "Configured default model (always permitted)";
+  }
+  return {
+    description: `Generic ${runtime.kind} API provider configured through [providers.${runtime.name}].`,
+    models,
+    defaultModel: runtime.defaultModel,
+    defaultModelSource: `[providers.${runtime.name}].default_model`,
+  };
+}
+
+/**
+ * Slice 6: config-surface projection for a generic API provider. Reports only
+ * whether a key is resolved (never the value or the env var name's contents).
+ */
+function apiProviderConfigSurfaces(runtime: ApiProviderRuntime): ProviderConfigSurface[] {
+  return [
+    {
+      name: `providers.${runtime.name}`,
+      kind: "gateway",
+      present: true,
+      details: `Generic ${runtime.kind} API provider; secret key material is read only from the named environment variable at request time.`,
+    },
+    {
+      name: `${runtime.name}_api_key`,
+      kind: "env",
+      present: runtime.apiKey.length > 0,
+      details:
+        "Reports only whether an API key is resolved (keyless-local providers report false); never the value.",
+    },
+  ];
+}
+
+/**
+ * Slice 6: assemble the full capability record for a generic API provider,
+ * replacing the former unreachable defensive throw. ACP is not applicable to
+ * an HTTP provider (no stdio process transport).
+ */
+function buildApiProviderToolCapabilities(
+  runtime: ApiProviderRuntime,
+  query: NormalizedProviderCapabilityQuery
+): ProviderToolCapabilities {
+  const definition = apiProviderCapabilityDefinition(runtime);
+  return {
+    schemaVersion: "provider-tool-capabilities.v2",
+    generatedAt: new Date().toISOString(),
+    cli: runtime.name,
+    providerKind: "api",
+    gatewayRequestTools: [...definition.gatewayRequestTools],
+    gatewayRequestTool: definition.gatewayRequestTools[0],
+    modelInfo: apiProviderModelInfo(runtime),
+    summary: definition.summary,
+    acpContract: {
+      classification: "absent_watchlist",
+      summary: `${runtime.name} is an HTTP API provider with no ACP process transport; watchlist item only.`,
+    },
+    acp: {
+      status: "not_applicable",
+      mediation: "none",
+      targetVersion: `${runtime.kind} API`,
+      entrypoint: null,
+      runtimeEnabled: false,
+      smokeSupported: false,
+      smokeStatus: "unsupported",
+      caveats: ["ACP is a CLI-stdio transport; the HTTP API provider has no ACP surface."],
+      docs: ACP_DOCS_REFERENCE,
+    },
+    controls: cloneControls(definition.controls),
+    features: { ...definition.features },
+    discoveredSkills: [],
+    discoveredProviderTools: [],
+    configSurfaces: apiProviderConfigSurfaces(runtime),
+    unsupportedInputs: query.includeUnsupported ? [...definition.unsupportedInputs] : [],
+    warnings: [],
     metadata: {
       deprecatedFields: {
         gatewayRequestTool: "Use gatewayRequestTools instead.",

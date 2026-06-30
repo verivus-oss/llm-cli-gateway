@@ -405,6 +405,71 @@
       },
       "additionalProperties": false
     },
+    "api_providers": {
+      "type": "object",
+      "description": "Slice 6: health of enabled [providers.<name>] (kind:api) providers. OMITTED entirely when none are enabled (dormant byte-identical).",
+      "required": ["enabled_count", "providers"],
+      "properties": {
+        "enabled_count": { "type": "integer", "minimum": 1 },
+        "providers": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "required": [
+              "name",
+              "kind",
+              "base_url",
+              "default_model",
+              "models",
+              "api_key_env",
+              "api_key_present",
+              "reachable",
+              "login_guidance"
+            ],
+            "properties": {
+              "name": { "type": "string" },
+              "kind": { "enum": ["openai-compatible", "anthropic", "xai-responses"] },
+              "base_url": { "type": "string" },
+              "default_model": { "type": "string" },
+              "models": {
+                "type": ["array", "null"],
+                "items": { "type": "string" }
+              },
+              "api_key_env": { "type": ["string", "null"] },
+              "api_key_present": { "type": "boolean" },
+              "reachable": { "type": ["boolean", "null"] },
+              "reachability_error": { "type": "string" },
+              "login_guidance": {
+                "type": "object",
+                "required": [
+                  "provider",
+                  "displayName",
+                  "kind",
+                  "baseUrl",
+                  "apiKeyEnv",
+                  "summary",
+                  "steps",
+                  "credentialHandling"
+                ],
+                "properties": {
+                  "provider": { "type": "string" },
+                  "displayName": { "type": "string" },
+                  "kind": { "enum": ["openai-compatible", "anthropic", "xai-responses"] },
+                  "baseUrl": { "type": "string" },
+                  "apiKeyEnv": { "type": ["string", "null"] },
+                  "summary": { "type": "string" },
+                  "steps": { "type": "array", "items": { "type": "string" } },
+                  "credentialHandling": { "type": "string" }
+                },
+                "additionalProperties": false
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
+    },
     "upstream": {
       "type": "object",
       "required": [

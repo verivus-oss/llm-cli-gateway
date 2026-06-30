@@ -707,7 +707,8 @@ export function resolveGatewayServerRuntime(
             runtimeSessionManager,
             runtimePerformanceMetrics,
             runtimeFlightRecorder,
-            deps.cacheAwareness ?? getCacheAwarenessConfig(runtimeLogger)
+            deps.cacheAwareness ?? getCacheAwarenessConfig(runtimeLogger),
+            deps.providers ?? getProvidersConfig(runtimeLogger)
           )
         : resourceProvider),
     db: "db" in deps ? (deps.db ?? null) : db,
@@ -11028,16 +11029,30 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
     }
   );
 
+  // Slice 6: the capability filter accepts the six CLI providers, the static
+  // grok_api id, AND any enabled generic API provider name, so
+  // provider_tool_capabilities can report API providers the same way list_models
+  // does. Built at registration from the resolved providers config; deduped and
+  // byte-identical to the static set when no API providers are enabled.
+  const providerToolCapabilitiesFilterValues = [
+    ...new Set<string>([
+      ...CLI_TYPES,
+      "grok_api",
+      ...enabledApiProviders(providers).map(p => p.name),
+    ]),
+  ] as [string, ...string[]];
   server.tool(
     "provider_tool_capabilities",
-    "Report provider tool/feature capabilities and discovered local skill/tool integrations for claude|codex|gemini|grok|mistral|devin|grok_api.",
+    "Report provider tool/feature capabilities and discovered local skill/tool integrations for claude|codex|gemini|grok|mistral|devin|grok_api, or an enabled API provider name.",
     {
       cli: z
         .preprocess(
           value => (value === "" || value === null ? undefined : value),
-          z.enum(["claude", "codex", "gemini", "grok", "mistral", "devin", "grok_api"]).optional()
+          z.enum(providerToolCapabilitiesFilterValues).optional()
         )
-        .describe("Provider filter (claude|codex|gemini|grok|mistral|devin|grok_api)"),
+        .describe(
+          "Provider filter (claude|codex|gemini|grok|mistral|devin|grok_api, or an enabled API provider name)"
+        ),
       includeSkills: z
         .boolean()
         .default(true)
@@ -11844,7 +11859,8 @@ async function initializeSessionManager(): Promise<void> {
     sessionManager,
     performanceMetrics,
     getFlightRecorder(logger),
-    getCacheAwarenessConfig(logger)
+    getCacheAwarenessConfig(logger),
+    getProvidersConfig(logger)
   );
 }
 
@@ -12203,7 +12219,8 @@ async function main() {
   if (args[0] === "doctor") {
     if (args.includes("--json")) {
       const probeUpstream = args.includes("--probe-upstream") || args.includes("--probe-installed");
-      printDoctorJson({ probeUpstream });
+      const probeApiProviders = args.includes("--probe-api-providers");
+      await printDoctorJson({ probeUpstream, probeApiProviders });
       return;
     }
     process.stderr.write("Only doctor --json is supported in this layer.\n");

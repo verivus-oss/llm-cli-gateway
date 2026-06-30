@@ -1,4 +1,6 @@
 import type { CliType } from "./session-manager.js";
+import type { ApiProviderConfig } from "./config.js";
+import { redactDiagnosticUrl } from "./endpoint-exposure.js";
 
 export interface ProviderLoginGuidance {
   provider: CliType;
@@ -154,4 +156,54 @@ export function getProviderLoginGuidance(provider: CliType): ProviderLoginGuidan
 
 export function getAllProviderLoginGuidance(): Record<CliType, ProviderLoginGuidance> {
   return { ...GUIDANCE };
+}
+
+/**
+ * Slice 6: login guidance for a generic `[providers.<name>]` (kind:"api")
+ * provider. Unlike a CLI there is nothing to install or browser-login: the
+ * caller just sets the configured key env var (or nothing, for a keyless-local
+ * loopback provider). Reports the env var NAME and base_url only, never a key.
+ */
+export interface ApiProviderLoginGuidance {
+  provider: string;
+  displayName: string;
+  kind: ApiProviderConfig["kind"];
+  baseUrl: string;
+  /** Env var the key is read from, or null for a keyless-local provider. */
+  apiKeyEnv: string | null;
+  summary: string;
+  steps: string[];
+  credentialHandling: string;
+}
+
+export function getApiProviderLoginGuidance(provider: ApiProviderConfig): ApiProviderLoginGuidance {
+  const keyless = provider.apiKeyEnv === null;
+  // Redact any userinfo / sensitive query params before surfacing the URL: this
+  // guidance is a diagnostic surface and base_url is config-supplied, so it could
+  // carry credentials that must not be echoed.
+  const baseUrl = redactDiagnosticUrl(provider.baseUrl) ?? provider.baseUrl;
+  const summary = keyless
+    ? `Keyless-local API provider "${provider.name}" (kind: ${provider.kind}); no credential is required for its loopback endpoint.`
+    : `API provider "${provider.name}" (kind: ${provider.kind}) authenticates with a key read from the ${provider.apiKeyEnv} environment variable.`;
+  const steps = keyless
+    ? [
+        `Ensure the local endpoint at ${baseUrl} is running (e.g. Ollama or llama.cpp).`,
+        `No API key is needed; the provider is enabled as soon as the loopback endpoint is reachable.`,
+      ]
+    : [
+        `Obtain an API key from the provider that serves ${baseUrl}.`,
+        `Export it as ${provider.apiKeyEnv} in the gateway's environment (the value is read only at request time).`,
+        `Confirm [providers.${provider.name}] in the gateway config points at the intended base_url and default_model.`,
+      ];
+  return {
+    provider: provider.name,
+    displayName: provider.name,
+    kind: provider.kind,
+    baseUrl,
+    apiKeyEnv: provider.apiKeyEnv,
+    summary,
+    steps,
+    credentialHandling:
+      "Set the API key only via the named environment variable. Do not paste the key into the gateway config, prompts, or a remote chat.",
+  };
 }
