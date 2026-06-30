@@ -634,4 +634,98 @@ describe("createGatewayServer — structural invariant on async tool registratio
     expect(tools.has("grok_api_request")).toBe(false);
     expect(tools.has("grok_api_request_async")).toBe(false);
   });
+
+  // Regression: llm_process_health must report the EFFECTIVE async state
+  // (config flag AND hasStore()), not the raw configured intent. A backend
+  // whose durable store fails to open (backend='postgres', which always throws,
+  // or a sqlite DB that fails to open) is caught in getJobStore() and nulls the
+  // store, so async tools are not registered, and health must not claim they
+  // are.
+  async function readHealthPersistence(
+    server: ReturnType<typeof createGatewayServer>
+  ): Promise<{ backend: string; asyncJobsEnabled: boolean; warning: string | null }> {
+    const reg = (
+      server as unknown as Record<
+        string,
+        Record<
+          string,
+          {
+            handler?: (a: unknown, b: unknown) => Promise<{ content: Array<{ text: string }> }>;
+            callback?: (a: unknown, b: unknown) => Promise<{ content: Array<{ text: string }> }>;
+          }
+        >
+      >
+    )[REGISTRY_KEY];
+    const tool = reg["llm_process_health"];
+    const fn = tool.handler ?? tool.callback;
+    if (!fn) throw new Error("llm_process_health not registered");
+    const result = await fn({}, {});
+    return JSON.parse(result.content[0].text).persistence;
+  }
+
+  it("llm_process_health reports asyncJobsEnabled=false when the durable store failed to open (backend != 'none')", async () => {
+    // Post-catch runtime: getJobStore() caught a store-open error (e.g.
+    // backend='postgres', whose store constructor always throws) and nulled the
+    // store. The config flag says enabled; the effective state is not.
+    const manager = new AsyncJobManager(noopLogger, undefined, null);
+    const server = createGatewayServer({
+      asyncJobManager: manager,
+      persistence: mkPersistence({
+        backend: "postgres",
+        dsn: "postgresql://x",
+        asyncJobsEnabled: true,
+      }),
+    });
+    // Existing invariant: no async tools registered without a store.
+    const tools = registeredToolNames(server);
+    for (const t of ASYNC_TOOL_NAMES) {
+      expect(tools.has(t), `expected ${t} to NOT be registered`).toBe(false);
+    }
+    // New: health reports the effective state, not the config intent.
+    const p = await readHealthPersistence(server);
+    expect(p.backend).toBe("postgres");
+    expect(p.asyncJobsEnabled).toBe(false);
+    expect(p.warning).toMatch(/failed to open/i);
+  });
+
+  it("llm_process_health reports asyncJobsEnabled=true with no warning when a store is attached", async () => {
+    const manager = new AsyncJobManager(noopLogger, undefined, new MemoryJobStore());
+    const server = createGatewayServer({
+      asyncJobManager: manager,
+      persistence: mkPersistence({ backend: "sqlite", path: ":memory:", asyncJobsEnabled: true }),
+    });
+    const p = await readHealthPersistence(server);
+    expect(p.asyncJobsEnabled).toBe(true);
+    expect(p.warning).toBeNull();
+  });
+
+  it("llm_process_health keeps the backend='none' disabled warning", async () => {
+    const manager = new AsyncJobManager(noopLogger, undefined, null);
+    const server = createGatewayServer({
+      asyncJobManager: manager,
+      persistence: mkPersistence({ backend: "none", asyncJobsEnabled: false }),
+    });
+    const p = await readHealthPersistence(server);
+    expect(p.asyncJobsEnabled).toBe(false);
+    expect(p.warning).toMatch(/backend = 'none'/);
+  });
+
+  it("llm_process_health reports asyncJobsEnabled=false for backend='none' even if the flag is lied true AND a store is attached", async () => {
+    // Mirrors the registration gate's structural guarantee (backend='none' wins
+    // regardless of other fields). Health must match: report effective=false,
+    // not the raw config flag, for the same injected-inconsistent config the
+    // "caller lies about flag" registration test above covers.
+    const manager = new AsyncJobManager(noopLogger, undefined, new MemoryJobStore());
+    const server = createGatewayServer({
+      asyncJobManager: manager,
+      persistence: mkPersistence({ backend: "none", asyncJobsEnabled: true }),
+    });
+    const tools = registeredToolNames(server);
+    for (const t of ASYNC_TOOL_NAMES) {
+      expect(tools.has(t), `expected ${t} to NOT be registered`).toBe(false);
+    }
+    const p = await readHealthPersistence(server);
+    expect(p.asyncJobsEnabled).toBe(false);
+    expect(p.warning).toMatch(/backend = 'none'/);
+  });
 });

@@ -1723,12 +1723,15 @@ export function extractUsageAndCost(
   // `session/prompt` JSON-RPC response `result._meta` carries
   // `{ inputTokens, outputTokens, cachedReadTokens, reasoningTokens, totalTokens,
   // modelId }` (live-verified 2026-06-13: inputTokens 11954 / outputTokens 36 /
-  // cachedReadTokens 7639). The gateway does not route grok_request through ACP
-  // today: the Phase A/B ACP transport core (`src/acp/*`) is built and tested but
-  // NOT wired into the request handlers — no production module imports the ACP
-  // client, and grok_request runs `prepareGrokRequest` → the `-p` executor only.
-  // So there is no call site to parse `_meta` yet; when grok is routed over ACP,
-  // extract usage from that `_meta` (cachedReadTokens → cacheReadTokens), NOT here.
+  // cachedReadTokens 7639). As of Slice B7, grok_request CAN route over ACP when
+  // the caller sets `transport: "acp"` (handleGrokRequest), and the ACP client IS
+  // a production import (`src/acp/process-manager.ts` imports `AcpClient`). What is
+  // NOT yet wired is ACP-side usage extraction: `runAcpRequest` builds its flight
+  // result via `buildAcpFlightResult` with no token fields (`src/acp/runtime.ts`),
+  // so `_meta` usage never reaches the flight recorder. The default `cli` transport
+  // still runs `prepareGrokRequest` → the `-p` executor (no usage on that wire). So
+  // there is no call site that parses `_meta` usage yet; when the ACP path threads
+  // usage, extract it from `_meta` (cachedReadTokens → cacheReadTokens), NOT here.
   // Note
   // `_meta.totalTokens` is the per-turn input+output total — distinct from the
   // on-disk context-window gauge (`signals.json:contextTokensUsed` /
@@ -10850,18 +10853,34 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
     },
     async () => {
       const health = asyncJobManager.getJobHealth();
+      // Report the EFFECTIVE async state, not the configured intent. When a
+      // durable store fails to open (backend = 'postgres', which is not yet
+      // implemented and always throws, or a sqlite DB that fails to open),
+      // getJobStore() catches the error and nulls the store, so the
+      // *_request_async / llm_job_* tools are NOT registered. This MUST mirror
+      // the registration gate (the `asyncJobsEnabled` derived in
+      // createGatewayServer): backend !== 'none' AND the config flag AND
+      // hasStore(). Surfacing the raw persistence.asyncJobsEnabled flag here
+      // would claim async is on while no async tools exist (including the
+      // inconsistent injected {backend:'none', asyncJobsEnabled:true} + store
+      // case the registration gate structurally rejects).
+      const storeAttached = asyncJobManager.hasStore();
+      const asyncJobsEffective =
+        persistence.backend !== "none" && persistence.asyncJobsEnabled && storeAttached;
       const persistenceBlock = {
         backend: persistence.backend,
         dbPath: persistence.path,
         dsn: persistence.dsn ? "[redacted]" : null,
         retentionDays: persistence.retentionDays,
         dedupWindowMs: persistence.dedupWindowMs,
-        asyncJobsEnabled: persistence.asyncJobsEnabled,
+        asyncJobsEnabled: asyncJobsEffective,
         acknowledgeEphemeral: persistence.acknowledgeEphemeral,
         sources: persistence.sources,
-        warning: persistence.asyncJobsEnabled
+        warning: asyncJobsEffective
           ? null
-          : "Async job persistence is disabled (backend = 'none'). *_request_async tools are NOT registered on this gateway. Set [persistence].backend = 'sqlite' (or 'memory' + acknowledgeEphemeral = true) to enable them.",
+          : persistence.backend === "none"
+            ? "Async job persistence is disabled (backend = 'none'). *_request_async tools are NOT registered on this gateway. Set [persistence].backend = 'sqlite' (or 'memory' + acknowledgeEphemeral = true) to enable them."
+            : `Async job persistence is configured (backend = '${persistence.backend}') but the durable job store failed to open, so *_request_async tools are NOT registered on this gateway. Check gateway startup logs for the store-open error.`,
       };
       const outboundProviders = {
         xai: providers.xai

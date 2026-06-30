@@ -7,10 +7,13 @@
  * `datetime_utc`, etc.).
  *
  * COALESCE / NULL handling: rows from before the v3 migration have NULL
- * for stable_prefix_*. Rows from CLIs whose parser does not surface cache
- * tokens (gemini, grok, mistral, and codex until its parser is fixed)
- * have NULL for cache_read_tokens / cache_creation_tokens. All aggregates
- * tolerate NULL via COALESCE(col, 0) — never divides by zero.
+ * for stable_prefix_*. claude and codex surface cache tokens (codex always
+ * emits JSONL usage, parsed on every request, mapping cached_input_tokens to
+ * cache_read_tokens). gemini, grok, and mistral do not surface cache tokens on
+ * their current gateway surfaces (grok's ACP `_meta` carries them but is not yet
+ * threaded into the flight recorder), so their rows have NULL for
+ * cache_read_tokens / cache_creation_tokens. All aggregates tolerate NULL via
+ * COALESCE(col, 0), never dividing by zero.
  */
 
 import type { FlightRecorderQuery } from "./flight-recorder.js";
