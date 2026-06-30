@@ -155,6 +155,7 @@ import { getCliVersions, runCliUpgrade } from "./cli-updater.js";
 import { startHttpGateway, type HttpGatewayHandle } from "./http-transport.js";
 import { getRequestContext, resolveOwnerPrincipal, principalCanAccess } from "./request-context.js";
 import { printDoctorJson } from "./doctor.js";
+import { redactDiagnosticUrl } from "./endpoint-exposure.js";
 import {
   createWorkspace,
   describeWorkspace,
@@ -10890,7 +10891,9 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
               enabled: isXaiProviderEnabled(providers),
               apiKeyEnv: providers.xai.apiKeyEnv,
               apiKeyPresent: isXaiProviderEnabled(providers),
-              baseUrl: providers.xai.baseUrl,
+              // Redact any userinfo / sensitive query params: base_url is
+              // config-supplied and this is a diagnostic surface.
+              baseUrl: redactDiagnosticUrl(providers.xai.baseUrl) ?? providers.xai.baseUrl,
               defaultModel: providers.xai.defaultModel,
               mode: isXaiProviderEnabled(providers) ? "sync" : "configured-missing-key",
             }
@@ -10906,7 +10909,8 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         // Slice 5: enabled generic API providers + their circuit-breaker state.
         apiProviders: enabledApiProviders(providers).map(p => ({
           ...apiProviderCatalogEntry(p),
-          baseUrl: p.baseUrl,
+          // Redact base_url userinfo on this diagnostic surface (see Slice 6).
+          baseUrl: redactDiagnosticUrl(p.baseUrl) ?? p.baseUrl,
           breakerState: apiProviderBreakerState(p.name),
         })),
         sources: providers.sources,

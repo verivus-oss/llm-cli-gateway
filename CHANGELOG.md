@@ -4,6 +4,11 @@ All notable changes to the llm-cli-gateway project.
 
 ## [Unreleased]
 
+### Security
+
+- **`llm_process_health` now redacts `base_url` userinfo.** The outbound-providers health block surfaces each API provider's `base_url`, which is config-supplied and may legally carry URL userinfo (`https://user:pass@host/v1`). Both the dedicated `xai` block and the generic `apiProviders` array now run `base_url` through `redactDiagnosticUrl` (stripping `username`/`password` and sensitive query params) before emitting it, matching the redaction already applied on the `doctor` and login-guidance surfaces. The live request path and circuit breakers are unaffected.
+- **`redactDiagnosticUrl` now leaves clean URLs byte-identical.** When a URL has nothing to redact (no userinfo, no sensitive query/hash params), the helper returns the caller's exact bytes instead of the URL parser's canonicalized form (lowercased host, dropped default port, normalized path/encoding). This keeps non-secret `base_url` / public-URL values unchanged on every diagnostic surface (`doctor`, login-guidance, `llm_process_health`).
+
 ### Added
 
 - **Doctor, status, login-guidance, tool-capabilities, and resources now surface enabled API providers (Slice 6).** The five peripheral discovery surfaces were CLI-only; they now report enabled `[providers.<name>]` (kind:`api`) providers too, staying byte-identical when none are enabled:

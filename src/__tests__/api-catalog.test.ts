@@ -168,3 +168,67 @@ describe("Slice 5 — API provider catalog", () => {
     expect(() => dormant.parse({ cli: "claude" })).not.toThrow();
   });
 });
+
+// Slice 6 follow-up: llm_process_health is a diagnostic surface that emits each
+// provider's base_url. base_url is config-supplied and may carry URL userinfo,
+// so it must be redacted here too (the Slice 6 redaction pass covered doctor /
+// login-guidance but not this Slice 5 surface).
+async function processHealthText(server: ReturnType<typeof createGatewayServer>): Promise<string> {
+  const reg = (server as unknown as Record<string, Record<string, unknown>>)._registeredTools;
+  const tool = reg["llm_process_health"] as {
+    handler?: (a: unknown, b: unknown) => Promise<{ content: Array<{ text: string }> }>;
+    callback?: (a: unknown, b: unknown) => Promise<{ content: Array<{ text: string }> }>;
+  };
+  const fn = tool.handler ?? tool.callback;
+  if (!fn) throw new Error("llm_process_health not registered");
+  const result = await fn({}, {});
+  return result.content[0].text;
+}
+
+describe("Slice 6 follow-up: llm_process_health base_url redaction", () => {
+  const XAI_KEY = "PH_XAI_KEY";
+  const GEN_KEY = "PH_GEN_KEY";
+
+  it("redacts base_url userinfo for both the xai block and generic apiProviders", async () => {
+    process.env[XAI_KEY] = "xai-secret";
+    process.env[GEN_KEY] = "gen-secret";
+    try {
+      const providers: ProvidersConfig = {
+        xai: {
+          apiKeyEnv: XAI_KEY,
+          baseUrl: "https://xaiuser:xaipw@xai.example/v1",
+          defaultModel: "grok-4",
+        },
+        providers: {
+          xai: {
+            name: "xai",
+            kind: "xai-responses",
+            apiKeyEnv: XAI_KEY,
+            baseUrl: "https://xaiuser:xaipw@xai.example/v1",
+            defaultModel: "grok-4",
+          },
+          gen: {
+            name: "gen",
+            kind: "openai-compatible",
+            apiKeyEnv: GEN_KEY,
+            baseUrl: "https://genuser:genpw@gen.example/v1",
+            defaultModel: "m1",
+          },
+        },
+        sources: { configFile: null },
+      };
+      const text = await processHealthText(makeServer(providers));
+      // Neither the xai dedicated block nor the generic apiProviders array may
+      // echo userinfo; the host/scheme/path stay intact.
+      expect(text).not.toContain("xaipw");
+      expect(text).not.toContain("xaiuser");
+      expect(text).not.toContain("genpw");
+      expect(text).not.toContain("genuser");
+      expect(text).toContain("xai.example");
+      expect(text).toContain("gen.example");
+    } finally {
+      delete process.env[XAI_KEY];
+      delete process.env[GEN_KEY];
+    }
+  });
+});

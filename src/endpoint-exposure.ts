@@ -108,14 +108,31 @@ export function redactDiagnosticUrl(rawUrl: string | null): string | null {
     value.replace(new RegExp(`((${sensitiveKeyPattern.source})=)[^&\\s#]+`, "gi"), "$1<redacted>");
   try {
     const url = new URL(rawUrl);
-    if (url.username) url.username = "<redacted>";
-    if (url.password) url.password = "<redacted>";
+    let redacted = false;
+    if (url.username) {
+      url.username = "<redacted>";
+      redacted = true;
+    }
+    if (url.password) {
+      url.password = "<redacted>";
+      redacted = true;
+    }
     for (const key of Array.from(url.searchParams.keys())) {
       if (sensitiveKeyPattern.test(key)) {
         url.searchParams.set(key, "<redacted>");
+        redacted = true;
       }
     }
-    url.hash = redactSensitivePairs(url.hash);
+    const redactedHash = redactSensitivePairs(url.hash);
+    if (redactedHash !== url.hash) {
+      url.hash = redactedHash;
+      redacted = true;
+    }
+    // When there was nothing to redact, return the caller's exact bytes rather
+    // than the URL-parser's canonicalized form (lowercased host, dropped default
+    // port, normalized path/encoding). This keeps clean URLs byte-identical on
+    // the diagnostic surfaces (doctor / login-guidance / llm_process_health).
+    if (!redacted) return rawUrl;
     return url.toString().replace(/%3Credacted%3E/gi, "<redacted>");
   } catch {
     return redactSensitivePairs(rawUrl.replace(/(https?:\/\/)[^/@]+@/gi, "$1<redacted>@"));
