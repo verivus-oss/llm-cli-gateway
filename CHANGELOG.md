@@ -2,6 +2,12 @@
 
 All notable changes to the llm-cli-gateway project.
 
+## [2.12.1] - 2026-06-30: fast-uri transitive vulnerability remediation
+
+### Security
+
+- Pinned transitive runtime dependency `fast-uri` to `3.1.3` via `overrides`, replacing the previously shipped `3.1.2` selected through `@modelcontextprotocol/sdk` -> `ajv`. This patch release exists specifically to clear the newly disclosed `fast-uri` advisory affecting `>=2.3.1 <3.1.3` while preserving the 2.12.0 feature surface.
+
 ## [2.12.0] - 2026-06-30: Validation receipts, API-provider parity, and a gateway usability pass
 
 ### Added

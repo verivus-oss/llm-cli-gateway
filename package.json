@@ -1,6 +1,6 @@
 {
   "name": "llm-cli-gateway",
-  "version": "2.12.0",
+  "version": "2.12.1",
   "mcpName": "io.github.verivus-oss/llm-cli-gateway",
   "description": "MCP server providing unified access to Claude Code, Codex, Gemini, Grok, Mistral Vibe, and Devin CLIs with session management, retry logic, async job orchestration, durable job results, and cross-LLM validation.",
   "license": "MIT",
@@ -130,6 +130,7 @@
     "body-parser": "2.2.2",
     "type-is": "2.0.1",
     "content-type": "1.0.5",
+    "fast-uri": "3.1.3",
     "hono": "^4.12.25"
   },
   "directories": {
