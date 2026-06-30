@@ -108,10 +108,33 @@ jobs:
       - name: Verify npm auth (dry run)
         if: ${{ inputs['dry-run'] }}
         run: |
-          # `npm publish --dry-run` still fails when the exact version already
-          # exists on npm, so a manual smoke test validates registry auth
-          # explicitly and relies on the pack step above for tarball contents.
-          npm whoami >/dev/null
+          # A dry-run against the real version still fails once that version is
+          # already published, so exercise auth and publish permissions against
+          # a throwaway prerelease in an isolated temp copy instead.
+          tmpdir="$(mktemp -d)"
+          trap 'rm -rf "${tmpdir}"' EXIT
+          rsync -a --exclude .git ./ "${tmpdir}/"
+          dry_run_version="$(node -p "const p=require('./package.json'); `${p.version}-dryrun.${process.env.GITHUB_RUN_ID}`")"
+          node - "${tmpdir}" "${dry_run_version}" <<'NODE'
+          const fs = require("fs");
+          const path = require("path");
+
+          const dir = process.argv[2];
+          const version = process.argv[3];
+
+          for (const rel of ["package.json", "npm-shrinkwrap.json"]) {
+            const file = path.join(dir, rel);
+            const json = JSON.parse(fs.readFileSync(file, "utf8"));
+            if (typeof json.version === "string") {
+              json.version = version;
+            }
+            if (json.packages && json.packages[""] && typeof json.packages[""].version === "string") {
+              json.packages[""].version = version;
+            }
+            fs.writeFileSync(file, `${JSON.stringify(json, null, 2)}\n`);
+          }
+          NODE
+          npm publish --dry-run --ignore-scripts "${tmpdir}"
 
       - name: Publish
         if: ${{ !inputs['dry-run'] }}
