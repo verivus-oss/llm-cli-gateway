@@ -10977,16 +10977,26 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
   // List Models Tool
   //──────────────────────────────────────────────────────────────────────────────
 
+  // Slice 5: the `cli` filter accepts the six CLI providers AND any enabled
+  // generic API provider name, so `list_models` can surface API providers the
+  // same way `list_available_models` and the llm_process_health block do. The
+  // enum is built at registration from the resolved providers config. CLI names
+  // are matched first (a config-guarded name collision resolves to the CLI).
+  const listModelsFilterValues = [
+    ...new Set([...CLI_TYPES, ...enabledApiProviders(providers).map(p => p.name)]),
+  ] as [string, ...string[]];
   server.tool(
     "list_models",
-    "List models, aliases, and defaults for one provider CLI (claude|codex|gemini|grok|mistral|devin), or omit cli to list all providers.",
+    "List models, aliases, and defaults for one provider (claude|codex|gemini|grok|mistral|devin, or an enabled API provider name), or omit cli to list all providers. API providers are returned under an `apiProviders` array.",
     {
       cli: z
         .preprocess(
           value => (value === "" || value === null ? undefined : value),
-          CLI_TYPE_ENUM.optional()
+          z.enum(listModelsFilterValues).optional()
         )
-        .describe("CLI filter (claude|codex|gemini|grok|mistral|devin)"),
+        .describe(
+          "Provider filter (claude|codex|gemini|grok|mistral|devin, or an enabled API provider name)"
+        ),
     },
     {
       title: "Provider models",
@@ -10997,7 +11007,23 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
     },
     async ({ cli }) => {
       const cliInfo = getAvailableCliInfo();
-      const result = cli ? { [cli]: cliInfo[cli] } : cliInfo;
+      const apiRuntimes = enabledApiProviders(providers);
+      let result: Record<string, unknown>;
+      if (cli && (CLI_TYPES as readonly string[]).includes(cli)) {
+        // CLI filter: unchanged shape.
+        result = { [cli]: cliInfo[cli as CliType] };
+      } else if (cli) {
+        // API-provider-name filter: the dynamic enum guarantees a match unless
+        // the provider was disabled between registration and this call.
+        const runtime = apiRuntimes.find(p => p.name === cli);
+        result = { apiProviders: runtime ? [apiProviderCatalogEntry(runtime)] : [] };
+      } else {
+        // List-all: CLI providers as before, plus an `apiProviders` array.
+        // OMIT the field entirely when none are enabled so the response is
+        // byte-identical to pre-Slice-5 output when the feature is dormant.
+        const apiProviders = apiRuntimes.map(apiProviderCatalogEntry);
+        result = { ...cliInfo, ...(apiProviders.length > 0 ? { apiProviders } : {}) };
+      }
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
     }
   );

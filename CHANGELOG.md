@@ -2,6 +2,12 @@
 
 All notable changes to the llm-cli-gateway project.
 
+## [Unreleased]
+
+### Added
+
+- **`list_models` now surfaces enabled API providers (Slice 5).** When one or more `[providers.<name>]` API providers are enabled, `list_models` returns them under an `apiProviders` array (each tagged `providerKind:"api"` with `defaultModel` and the optional model allowlist), mirroring `list_available_models` and the `llm_process_health` outbound block. The `cli` filter accepts an enabled API provider name in addition to the six CLI providers. The field is omitted entirely when no API providers are enabled, so dormant output is byte-identical to before.
+
 ## [2.12.1] - 2026-06-30: fast-uri transitive vulnerability remediation
 
 ### Security
