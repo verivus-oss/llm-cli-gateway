@@ -134,7 +134,7 @@ jobs:
             fs.writeFileSync(file, `${JSON.stringify(json, null, 2)}\n`);
           }
           NODE
-          npm publish --dry-run --ignore-scripts "${tmpdir}"
+          npm publish --dry-run --ignore-scripts --tag dry-run "${tmpdir}"
 
       - name: Publish
         if: ${{ !inputs['dry-run'] }}
