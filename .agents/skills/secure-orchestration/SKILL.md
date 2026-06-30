@@ -29,7 +29,7 @@ Apply these on every dispatch unless the caller has explicitly overridden a rule
 | Sensitive keywords | +3 | `delete`, `destroy`, `wipe`, `exfiltrate`, `credential`, `token`, `password`, `secret` |
 | Full auto | +2 | `fullAuto:true` (Codex) |
 | Bypass + full-auto | +2 | Both requested together |
-| Exa MCP server | +2 | Web search via `mcpServers:["exa"]` |
+| Weighted MCP server | varies | Per-server approval weights from the host's MCP registry (e.g. a web-search server) add to the score |
 | Review tool suppression | +4 | Tool-suppression language detected in review context (e.g., "do not run tools") |
 | Empty allowedTools (review) | +6 | `allowedTools:[]` in review context — reviewers need tool access |
 | Critical tools disallowed (review) | +6 | Review context with `Read`, `Grep`, `Glob`, or `Bash` in `disallowedTools` |
@@ -96,7 +96,7 @@ approval_list({limit:50})
 
 Returns:
 ```json
-{"approvals":[{"id":"appr-...","ts":"...","status":"approved","policy":"balanced","cli":"claude","operation":"claude_request","score":0,"reasons":[],"promptPreview":"Refactor the auth...","promptSha256":"a1b2c3...","requestedMcpServers":["sqry","exa"]}]}
+{"approvals":[{"id":"appr-...","ts":"...","status":"approved","policy":"balanced","cli":"claude","operation":"claude_request","score":0,"reasons":[],"promptPreview":"Refactor the auth...","promptSha256":"a1b2c3...","requestedMcpServers":["example-server"]}]}
 ```
 
 Filter: `approval_list({limit:50,cli:"codex"})`
@@ -138,11 +138,11 @@ surface from another provider's CLI.
 ### Claude MCP servers
 
 ```
-claude_request({prompt:"...",mcpServers:["sqry"],strictMcpConfig:true})
+claude_request({prompt:"...",mcpServers:["<server-name>"],strictMcpConfig:true})
 ```
 
-- `mcpServers` — which to enable (`sqry`, `exa`, `ref_tools`, `trstr`); default is `["sqry"]`
-- `strictMcpConfig:true` — fail if unavailable
+- `mcpServers`: the MCP server names to enable for this request (the available set depends on the host's Claude MCP configuration)
+- `strictMcpConfig:true`: fail if a requested server is unavailable
 
 For Codex, Grok, and Mistral Vibe, `mcpServers` is approval tracking only; each
 provider owns its MCP configuration. For the current Gemini/Antigravity request

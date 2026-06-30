@@ -40,6 +40,27 @@ const PATTERNS = [
   /agent-browser/,
 ];
 
+// Host-internal leak guard for shipped skills. Only caller-facing skills are
+// listed in package.json `files`; operator/maintainer skills (provider-* contract
+// guides, gateway-restart-surfaces) reference host paths/services and the source
+// tree and must NEVER ship. If one is accidentally added to `files`, these
+// patterns fail the gate. Scoped to .agents/skills/ tarball entries so compiled
+// dist code is not falsely flagged. Case-insensitive.
+const SKILL_HOST_INTERNAL_PATTERNS = [
+  /\/opt\/nodejs/i,
+  /systemd|systemctl|journalctl/i,
+  /\/srv\/repos/i,
+  // Gateway-internal source identifiers that only the maintainer/contract skills
+  // reference. Deliberately NOT a generic `src/*.ts` match: caller-facing skills
+  // legitimately use example prompts like "review src/auth.ts".
+  /src\/upstream-contracts/i,
+  /\bUPSTREAM_CLI_CONTRACTS\b/,
+  /\bvalidateUpstreamCliArgs\b/,
+  /kasselman/i,
+  /\.service\b/i,
+  /127\.0\.0\.1:\d/,
+];
+
 function walk(dir, files = []) {
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
     const full = join(dir, entry.name);
@@ -83,10 +104,20 @@ try {
       continue; // unreadable/binary — none expected in this package
     }
     const rel = relative(extractDir, file);
+    const isShippedSkill = /[/\\]\.agents[/\\]skills[/\\]/.test(rel);
     content.split(/\r?\n/).forEach((line, index) => {
       for (const pattern of PATTERNS) {
         if (pattern.test(line)) {
           findings.push(`${rel}:${index + 1}: matches ${pattern} :: ${line.trim().slice(0, 160)}`);
+        }
+      }
+      if (isShippedSkill) {
+        for (const pattern of SKILL_HOST_INTERNAL_PATTERNS) {
+          if (pattern.test(line)) {
+            findings.push(
+              `${rel}:${index + 1}: shipped skill leaks host-internal token ${pattern} :: ${line.trim().slice(0, 160)}`
+            );
+          }
         }
       }
     });

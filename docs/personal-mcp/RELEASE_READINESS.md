@@ -228,7 +228,7 @@ and were verified by:
 - Security/SCA: `npm run security:audit` clean.
 - Upstream contracts: `npm run upstream:contracts` clean (offline fixtures +
   report + TOML-sync).
-- Unit + integration: 1078 tests pass via `npx vitest run` (count as of 2.0.0).
+- Unit + integration: 1789 tests pass via `npx vitest run` (count as of 2.12.0).
 - Release pipeline: `.github/workflows/release-installer.yml` builds
   platform binaries on the Linux self-hosted runner plus GitHub-hosted
   Windows/macOS runners; the final packaging job produces combined

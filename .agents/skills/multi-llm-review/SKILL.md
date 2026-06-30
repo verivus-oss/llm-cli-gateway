@@ -170,5 +170,5 @@ Reviews are not one-shot. The caller runs this loop:
   independent perspective and Mistral Vibe's fifth review
 - Pass `sessionId` to `gemini_request_async` / `grok_request_async` for resumable follow-up
 - Check for `status:"deferred"` in sync responses — poll `jobId` every 60s if present
-- Gateway `mcpServers` default to `["sqry"]`; add `exa`, `ref_tools`, or `trstr` only when the review needs those capabilities
+- Gateway `mcpServers` default to the host's configured Claude MCP set; pass explicit server names only when the review needs those capabilities
 - **Re-issuing after a polling timeout is safe** — auto-dedup (default 1 h window, `LLM_GATEWAY_DEDUP_WINDOW_MS`) reattaches the new call to the existing job. Use `forceRefresh:true` only when inputs genuinely changed

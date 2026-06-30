@@ -378,14 +378,15 @@ export function buildServerInstructions(
     : '- Async jobs are DISABLED (persistence.backend = "none"): *_request_async and llm_job_* tools are not registered, and sync requests run to completion (no auto-deferral).';
   return `llm-cli-gateway: Multi-LLM orchestration via MCP.
 
-Tools: claude_request, codex_request, gemini_request, grok_request, mistral_request${apiToolsNote} (sync)${asyncToolsNote} | codex_fork_session (fork a Codex session into a new branch)
+Tools: claude_request, codex_request, gemini_request, grok_request, mistral_request, devin_request${apiToolsNote} (sync)${asyncToolsNote} | codex_fork_session (fork a Codex session into a new branch)
 Validation: validate_with_models, second_opinion, compare_answers, red_team_review, consensus_check, ask_model, synthesize_validation, list_available_models | job_status/job_result (validation jobs)
 ${jobsLine}Sessions: session_create, session_list, session_set_active, session_get, session_delete, session_clear_all
-Other: list_models, cli_versions, upstream_contracts, provider_subcommands_* (read-only subcommand contract/drift introspection), cli_upgrade, approval_list, llm_process_health, llm_request_result (read back any persisted request — sync or async — by correlationId)
+Other: list_models, provider_tool_capabilities, cli_versions, upstream_contracts, provider_subcommands_* (read-only subcommand contract/drift introspection), cli_upgrade, approval_list, llm_process_health, llm_request_result (read back any persisted request, sync or async, by correlationId)
+Workspaces: workspace_create, workspace_list, workspace_get, workspace_register_existing_repo
 
 Key behaviors:
 ${deferralLine}
-- Sessions: Claude --continue, Gemini (Antigravity) --conversation <id>/--continue, Grok --resume/--continue, Mistral --resume/--continue (current Vibe defaults session logging on; doctor flags explicit session_logging.enabled=false), Codex \`exec resume <ID>\` / \`exec resume --last\` (all real CLI continuity). For Codex, sessionId must be a real Codex UUID (from ~/.codex/sessions/); gateway-generated gw-* IDs are rejected.
+- Sessions: Claude --continue, Gemini (Antigravity) --conversation <id>/--continue, Grok --resume/--continue, Mistral --resume/--continue (current Vibe defaults session logging on; doctor flags explicit session_logging.enabled=false), Codex \`exec resume <ID>\` / \`exec resume --last\`, Devin --resume <id>/--continue (all real CLI continuity). For Codex, sessionId must be a real Codex UUID (from ~/.codex/sessions/); gateway-generated gw-* IDs are rejected.
 - Approval gates: opt-in via approvalStrategy:"mcp_managed".
 - Upstream drift detection: After upgrading any provider CLI (especially grok), use upstream_contracts with probeInstalled:true and provider_subcommand_drift for declared subcommand help surfaces. Probes are safe, read-only --help checks.
 - Idle timeout kills stuck processes (default 10min, configurable via idleTimeoutMs).
@@ -1520,7 +1521,7 @@ function registerWorkspaceTools(server: McpServer, runtime: GatewayServerRuntime
 }
 
 // Helper function for standardized error responses
-function createErrorResponse(
+export function createErrorResponse(
   cli: string,
   code: number,
   stderr: string,
@@ -1536,20 +1537,49 @@ function createErrorResponse(
   let errorMessage = `Error executing ${cli} CLI`;
   const isLaunchExit = code === 127 || code === -4058;
 
+  // The executor rejects with this exact message when a CLI floods stdout/stderr
+  // past the 50MB cap (src/executor.ts). Detect it so the caller gets an
+  // actionable category + remediation instead of a generic spawn_error. The
+  // executor Error string is left untouched (it is asserted elsewhere).
+  const isOutputOverflow = Boolean(error) && /Output exceeded maximum size/i.test(error!.message);
+
+  // Auth/login failures surface as a non-zero exit with a recognizable stderr
+  // substring (or as a spawn-adjacent error). Match conservatively so a genuine
+  // auth failure gets per-CLI remediation rather than a bare exit code.
+  const authProbe = `${error?.message ?? ""}\n${stderr ?? ""}`;
+  const isAuthError =
+    /not logged in|please run .*login|unauthorized|\b401\b|authentication failed|invalid api key|no api key|expired token|re-?authenticate/i.test(
+      authProbe
+    );
+  const authRemediation: Record<string, string> = {
+    claude: "Run `claude login` (or set ANTHROPIC_API_KEY) and retry.",
+    codex: "Run `codex login` and retry.",
+    gemini: "Re-authenticate the Antigravity `agy` CLI and retry.",
+    grok: "Run `grok login` (or re-authenticate) and retry.",
+    mistral: "Run `vibe --setup` (or re-authenticate) and retry.",
+    devin: "Run `devin auth login` (or set WINDSURF_API_KEY) and retry.",
+  };
+
   if (error) {
     // Command not found or spawn error
     errorMessage += `:\n${error.message}`;
     if (error.message.includes("ENOENT")) {
       errorMessage += `\n\nThe '${cli}' command was not found. Please ensure ${cli} CLI is installed and in your PATH.`;
+    } else if (/EACCES|EPERM/.test(error.message)) {
+      errorMessage += `\n\nThe '${cli}' binary is not executable or permission was denied (EACCES/EPERM). Check its file permissions and PATH.`;
+    } else if (isOutputOverflow) {
+      errorMessage += `\n\nThe ${cli} output exceeded the 50MB cap. Narrow the request, ask for structured/JSON output, or split the work into smaller calls.`;
     }
     logger.error(`[${correlationId || "unknown"}] ${cli} CLI execution failed:`, error.message);
   } else if (code === 124) {
     // Wall-clock timeout
     errorMessage += `: Command timed out\n${stderr}`;
+    errorMessage += `\n\nIncrease timeoutMs, or use the *_request_async variant and poll with llm_job_status / llm_job_result.`;
     logger.error(`[${correlationId || "unknown"}] ${cli} CLI timed out`);
   } else if (code === 125) {
     // Idle timeout (stuck process)
     errorMessage += `: Process killed due to inactivity\n${stderr}`;
+    errorMessage += `\n\nThe CLI may have been awaiting interactive approval. Pass a non-interactive permission/approval option, or raise idleTimeoutMs.`;
     logger.error(`[${correlationId || "unknown"}] ${cli} CLI killed due to inactivity`);
   } else if (isLaunchExit) {
     errorMessage += `:\n${stderr || `The '${cli}' command was not found. Install the ${cli} CLI and make sure it is on PATH.`}`;
@@ -1557,7 +1587,15 @@ function createErrorResponse(
   } else if (code !== 0) {
     // Other non-zero exit code
     errorMessage += ` (exit code ${code}):\n${stderr}`;
+    if (!stderr || stderr.trim().length === 0) {
+      errorMessage += `\n\nNo error output was captured. The CLI may not be authenticated, may be awaiting interactive input, or may have rejected an unsupported flag. Re-run with DEBUG=1 for more detail.`;
+    }
     logger.error(`[${correlationId || "unknown"}] ${cli} CLI failed with exit code ${code}`);
+  }
+
+  // Append per-CLI auth remediation when the failure looks like an auth problem.
+  if (isAuthError) {
+    errorMessage += `\n\n${authRemediation[cli] ?? `Re-authenticate the ${cli} CLI and retry.`}`;
   }
 
   return {
@@ -1570,16 +1608,19 @@ function createErrorResponse(
       correlationId: correlationId || null,
       cli,
       exitCode: code,
-      errorCategory:
-        code === 124
+      errorCategory: isAuthError
+        ? "auth_error"
+        : code === 124
           ? "timeout"
           : code === 125
             ? "idle_timeout"
-            : error
-              ? "spawn_error"
-              : isLaunchExit
+            : isOutputOverflow
+              ? "output_overflow"
+              : error
                 ? "spawn_error"
-                : "cli_error",
+                : isLaunchExit
+                  ? "spawn_error"
+                  : "cli_error",
       // Slice 1: structured HTTP failure detail (undefined keys omitted by
       // JSON serialization, so CLI error rows are unchanged).
       ...(apiError
@@ -1610,7 +1651,11 @@ export function extractUsageAndCost(
   cacheCreationTokens?: number;
   costUsd?: number;
 } {
-  if (cli === "claude" && outputFormat === "stream-json") {
+  // Claude usage/cost is carried in the terminal `type:"result"` event, which is
+  // a single JSON object in `--output-format json` and the last NDJSON line in
+  // `stream-json`. parseStreamJson handles both (it scans lines for the result
+  // event), so json-mode requests no longer silently lose all telemetry.
+  if (cli === "claude" && (outputFormat === "stream-json" || outputFormat === "json")) {
     const parsed = parseStreamJson(output);
     if (!parsed.usage) {
       return { costUsd: parsed.costUsd ?? undefined };
@@ -2346,7 +2391,10 @@ function resolvePromptOrPartsForPrep(args: {
       stablePrefixTokens: number | null;
     }
   | { ok: false; error: ExtendedToolResponse } {
-  const hasPrompt = typeof args.prompt === "string" && args.prompt.length > 0;
+  // Treat a whitespace-only prompt as absent so it is rejected here with the
+  // clear "prompt or promptParts is required" message, rather than passing a
+  // blank prompt to the CLI (the ACP path already trims-and-rejects).
+  const hasPrompt = typeof args.prompt === "string" && args.prompt.trim().length > 0;
   const hasParts = args.promptParts !== undefined;
   if (hasPrompt && hasParts) {
     return {
@@ -3758,7 +3806,7 @@ export function buildMistralRetryPrep(
   });
 }
 
-function buildCliResponse(
+export function buildCliResponse(
   cli: "claude" | "codex" | "gemini" | "grok" | "mistral" | "devin",
   stdout: string,
   optimizeResponse: boolean,
@@ -3802,9 +3850,54 @@ function buildCliResponse(
     finalStdout += `\n\n⚠️ Review Integrity Warnings (score: ${prep.reviewIntegrity.totalScore}):\n${warnings}`;
   }
 
+  // Additive result-health signals (no hard failure; the reply is still
+  // returned). These guard against the silent-success class the project has
+  // hit before (a clean exit 0 that actually carried a failed/empty result).
+  const derivedWarnings: WarningEntry[] = [];
+  const extraStructured: Record<string, unknown> = {};
+
+  // Rec #1: Claude exits 0 even when the terminal result carries
+  // is_error:true (e.g. error_max_turns, error_during_execution). The signal
+  // lives in the result event for both json and stream-json; parseStreamJson is
+  // lenient on plain text (returns isError:false), so this never false-fires.
+  let claudeResultError = false;
+  if (cli === "claude") {
+    const parsedResult = parseStreamJson(stdout);
+    if (parsedResult.isError) {
+      claudeResultError = true;
+      extraStructured.resultIsError = true;
+      derivedWarnings.push({
+        code: "claude_result_error",
+        message:
+          "Claude exited 0 but the result event reported is_error:true (e.g. max-turns or mid-run error). The returned text may be partial.",
+      });
+    }
+  }
+
+  // Rec #3: surface the real Codex session UUID (thread_id) so callers can
+  // resume/fork without filesystem access. Purely additive field.
+  if (cli === "codex") {
+    const parsedCodex = parseCodexJsonStream(stdout);
+    if (parsedCodex.threadId) {
+      extraStructured.codexSessionId = parsedCodex.threadId;
+    }
+  }
+
+  // Rec #6: a clean exit with empty assistant output is reported as success
+  // today. Flag it as a warning (not an error). Skip when the Claude is_error
+  // signal already fired so the two do not double-warn on the same result.
+  if (!claudeResultError && finalStdout.trim().length === 0) {
+    extraStructured.emptyOutput = true;
+    derivedWarnings.push({
+      code: "empty_output",
+      message: `${cli} exited 0 but produced no assistant output. The request may have been a no-op, hit a guardrail, or awaited input.`,
+    });
+  }
+
   const response: ExtendedToolResponse = {
     content: [{ type: "text" as const, text: finalStdout }],
     structuredContent: {
+      ...extraStructured,
       // Issue #1: mirror the model reply into structuredContent. These tools
       // emit structuredContent without declaring an MCP outputSchema, so a
       // spec-conformant client may treat structuredContent as authoritative and
@@ -3845,8 +3938,9 @@ function buildCliResponse(
   if (prep.reviewIntegrity && prep.reviewIntegrity.violations.length > 0) {
     response.reviewIntegrity = prep.reviewIntegrity;
   }
-  if (warnings && warnings.length > 0) {
-    response.warnings = warnings;
+  const allWarnings = [...(warnings ?? []), ...derivedWarnings];
+  if (allWarnings.length > 0) {
+    response.warnings = allWarnings;
   }
   return response;
 }
@@ -4807,11 +4901,39 @@ export function registerApiProviderTools(
       .optional()
       .describe("Model id; defaults to the provider default_model"),
     correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
-    maxOutputTokens: z.number().int().positive().max(100000000).optional(),
-    temperature: z.number().finite().min(0).max(2).optional(),
-    topP: z.number().finite().min(0).max(1).optional(),
-    reasoningEffort: ApiReasoningEffortSchema.optional(),
-    timeoutMs: z.number().int().min(30_000).max(3_600_000).optional(),
+    maxOutputTokens: z
+      .number()
+      .int()
+      .positive()
+      .max(100000000)
+      .optional()
+      .describe(
+        "Max output tokens. Bounded to safe integers <= 100000000. Anthropic-kind api providers default max output to 4096 tokens unless maxOutputTokens is set."
+      ),
+    temperature: z
+      .number()
+      .finite()
+      .min(0)
+      .max(2)
+      .optional()
+      .describe("Sampling temperature passed to the provider API"),
+    topP: z
+      .number()
+      .finite()
+      .min(0)
+      .max(1)
+      .optional()
+      .describe("Nucleus sampling top_p passed to the provider API"),
+    reasoningEffort: ApiReasoningEffortSchema.optional().describe(
+      "Reasoning effort (none|low|medium|high). Only forwarded by the xai adapter; ignored by other provider kinds."
+    ),
+    timeoutMs: z
+      .number()
+      .int()
+      .min(30_000)
+      .max(3_600_000)
+      .optional()
+      .describe("HTTP request timeout in ms (min 30s, max 1h, default 10m)"),
     optimizePrompt: z.boolean().optional().describe("Optimize the prompt before sending"),
     optimizeResponse: z
       .boolean()
@@ -4821,18 +4943,22 @@ export function registerApiProviderTools(
     sessionId: z
       .string()
       .optional()
-      .describe("Gateway session to resolve/track (sync tool; reuse keeps it alive)"),
+      .describe(
+        "Gateway session to resolve/track (sync tool; reuse keeps it alive). On the async api handler sessionId and createNewSession are currently inert."
+      ),
     createNewSession: z
       .boolean()
       .optional()
-      .describe("Force a fresh session instead of reusing the active one"),
+      .describe(
+        "Force a fresh session instead of reusing the active one. On the async api handler sessionId and createNewSession are currently inert."
+      ),
   };
 
   for (const providerRuntime of enabledApiProviders(providers)) {
     const name = providerRuntime.name;
     server.tool(
       `api_${name}_request`,
-      `Run a request against the "${name}" API provider (kind: ${providerRuntime.kind}) synchronously. Registered only when [providers.${name}] is configured and enabled.`,
+      `Run a request against the "${name}" API provider (kind: ${providerRuntime.kind}) synchronously. Registered only when [providers.${name}] is configured and enabled. OpenRouter-kind providers require usage_include=true in their provider config for cost reporting.`,
       inputSchema,
       { title: `${name} API request`, readOnlyHint: false, openWorldHint: true },
       async params => handleApiProviderRequest(runtime, providerRuntime, params)
@@ -4842,7 +4968,7 @@ export function registerApiProviderTools(
     if (asyncJobsEnabled) {
       server.tool(
         `api_${name}_request_async`,
-        `Start an async request against the "${name}" API provider; returns a jobId to poll with llm_job_status.`,
+        `Start an async request against the "${name}" API provider; returns a jobId to poll with llm_job_status. OpenRouter-kind providers require usage_include=true in their provider config for cost reporting.`,
         inputSchema,
         { title: `${name} API request (async)`, readOnlyHint: false, openWorldHint: true },
         async params => handleApiProviderRequestAsync(runtime, providerRuntime, params)
@@ -6981,7 +7107,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .string()
         .optional()
         .describe(
-          "Gateway session record to associate (uses the active session if omitted). Claude continuity itself is via continueSession (--continue); this ID is gateway bookkeeping, not a Claude-native session."
+          "On a fresh request this id is emitted as Claude --session-id <uuid> (must be a valid UUID that does not already exist). Resume the latest cwd conversation with continueSession:true. gw-* ids are not valid Claude --session-id values."
         ),
       continueSession: z
         .boolean()
@@ -7025,11 +7151,15 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       systemPrompt: z
         .string()
         .optional()
-        .describe("Claude --system-prompt: replace the system prompt entirely."),
+        .describe(
+          "Claude --system-prompt: replace the system prompt entirely. Mutually exclusive with appendSystemPrompt."
+        ),
       appendSystemPrompt: z
         .string()
         .optional()
-        .describe("Claude --append-system-prompt: append to the existing system prompt."),
+        .describe(
+          "Claude --append-system-prompt: append to the existing system prompt. Mutually exclusive with systemPrompt."
+        ),
       maxBudgetUsd: z
         .number()
         .positive()
@@ -7063,7 +7193,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .union([z.string(), z.record(z.string(), z.unknown())])
         .optional()
         .describe(
-          "Claude --json-schema: JSON Schema literal (NOT a path) constraining structured output. Object values are JSON.stringify-d; string values are passed verbatim. Use with outputFormat='json'."
+          "Claude --json-schema: JSON Schema literal (NOT a path) constraining structured output. Object values are JSON.stringify-d; string values are passed verbatim. Use with outputFormat='json'. Set outputFormat:json so the gateway treats the reply as structured output (skips response optimization and warning injection); the default output format is not json, so pass it explicitly."
         ),
       // Phase 4 slice ζ — Claude additional-workspace-dirs parity
       addDir: z
@@ -7104,11 +7234,15 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       approvalStrategy: z
         .enum(["legacy", "mcp_managed"])
         .default("legacy")
-        .describe("Approval strategy"),
+        .describe(
+          "Approval strategy: legacy (default) lets the provider CLI's own flags decide; mcp_managed routes the run through the gateway approval gate (required for approvalPolicy and approval_list). Under mcp_managed the caller's permissionMode/alwaysApprove may be overridden by the gate."
+        ),
       approvalPolicy: z
         .enum(["strict", "balanced", "permissive"])
         .optional()
-        .describe("Approval policy override"),
+        .describe(
+          "Approval policy when approvalStrategy is mcp_managed: strict|balanced|permissive (default balanced). Ignored under legacy strategy."
+        ),
       mcpServers: z.array(mcpServerEnum()).default([]).describe("MCP servers exposed to Claude"),
       strictMcpConfig: z
         .boolean()
@@ -7123,7 +7257,9 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .min(30_000)
         .max(3_600_000)
         .optional()
-        .describe("Idle timeout in ms (min 30s, max 1h, omit=CLI default)"),
+        .describe(
+          "Idle timeout in ms (min 30s, max 1h, omit=CLI default). Idle enforcement applies only when outputFormat is stream-json; it is ignored for text/json."
+        ),
       forceRefresh: z
         .boolean()
         .default(false)
@@ -7514,7 +7650,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       promptParts: PromptPartsSchema.optional().describe(
         "Cache-aware structured prompt: { system?, tools?, context?, task }. Mutually exclusive with prompt. Stable parts hash into cache_state for prefix-discipline tracking."
       ),
-      model: z.string().optional().describe("Model name or alias (e.g. gpt-5.4, latest)"),
+      model: z.string().optional().describe("Model name or alias (e.g. gpt-5.5, gpt-5.4, latest)"),
       fullAuto: z
         .boolean()
         .default(false)
@@ -7524,7 +7660,9 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       sandboxMode: z
         .enum(CODEX_SANDBOX_MODES)
         .optional()
-        .describe("Codex --sandbox: read-only|workspace-write|danger-full-access."),
+        .describe(
+          "Codex --sandbox. Omit = Codex exec built-in default (read-only; cannot write files). Pass workspace-write to let Codex edit files in the working dir, or danger-full-access for unrestricted access."
+        ),
       askForApproval: z
         .enum(CODEX_ASK_FOR_APPROVAL_MODES)
         .optional()
@@ -7544,11 +7682,15 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       approvalStrategy: z
         .enum(["legacy", "mcp_managed"])
         .default("legacy")
-        .describe("Approval strategy"),
+        .describe(
+          "Approval strategy: legacy (default) lets the provider CLI's own flags decide; mcp_managed routes the run through the gateway approval gate (required for approvalPolicy and approval_list). Under mcp_managed the caller's permissionMode/alwaysApprove may be overridden by the gate."
+        ),
       approvalPolicy: z
         .enum(["strict", "balanced", "permissive"])
         .optional()
-        .describe("Approval policy override"),
+        .describe(
+          "Approval policy when approvalStrategy is mcp_managed: strict|balanced|permissive (default balanced). Ignored under legacy strategy."
+        ),
       mcpServers: z
         .array(mcpServerEnum())
         .default([])
@@ -7557,13 +7699,13 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .string()
         .optional()
         .describe(
-          "Codex session UUID to resume via `codex exec resume <ID>`. Must be a real Codex session ID (from `~/.codex/sessions/` or the `codex resume` picker). Gateway-generated `gw-*` IDs are rejected."
+          "Codex session UUID to resume via `codex exec resume <ID>`. Must be a real Codex session ID (from `~/.codex/sessions/` or the `codex resume` picker). Gateway-generated `gw-*` IDs are rejected. For a brand-new session no resumable sessionId is returned; continue with resumeLatest:true or a real Codex UUID."
         ),
       resumeLatest: z
         .boolean()
         .default(false)
         .describe(
-          "Resume the most recent Codex session in the current cwd via `codex exec resume --last`. Ignored if sessionId is set."
+          "Resume the most recent Codex session via `codex exec resume --last`. Ignored if sessionId is set. A brand-new session returns no resumable sessionId; continue with resumeLatest:true or a real Codex UUID."
         ),
       createNewSession: z.boolean().default(false).describe("Force a fresh session (no resume)"),
       correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
@@ -7823,7 +7965,26 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             },
             runtime
           );
-          return createErrorResponse("codex", code, stderr, corrId);
+          // Codex reports failures (turn.failed / error events) on the JSONL
+          // stdout stream; on a non-zero exit stderr is often empty. Fall back
+          // to the reconstructed display text (never raw JSONL) so the caller
+          // sees the real reason instead of a bare exit code. Add a resume hint
+          // when a by-id resume/fork looks like it missed its session.
+          const codexErrorDetail =
+            stderr && stderr.trim().length > 0 ? stderr : codexDisplayText(stdout);
+          const codexResumeHint =
+            sessionId &&
+            /not found|no such|unknown session|does not exist|invalid session/i.test(
+              codexErrorDetail
+            )
+              ? `\n\nSession ${sessionId} could not be resumed. Codex session IDs are UUIDs under ~/.codex/sessions/; verify the id, omit sessionId, or set createNewSession:true.`
+              : "";
+          return createErrorResponse(
+            "codex",
+            code,
+            `${codexErrorDetail}${codexResumeHint}`,
+            corrId
+          );
         }
         wasSuccessful = true;
 
@@ -7948,7 +8109,9 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       sandboxMode: z
         .enum(CODEX_SANDBOX_MODES)
         .optional()
-        .describe("Codex --sandbox: read-only|workspace-write|danger-full-access."),
+        .describe(
+          "Codex --sandbox. Omit = Codex exec built-in default (read-only; cannot write files). Pass workspace-write to let Codex edit files in the working dir, or danger-full-access for unrestricted access."
+        ),
       askForApproval: z
         .enum(CODEX_ASK_FOR_APPROVAL_MODES)
         .optional()
@@ -8076,7 +8239,26 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         const { stdout, stderr, code } = result;
         durationMs = Math.max(0, Date.now() - startTime);
         if (code !== 0) {
-          return createErrorResponse("codex", code, stderr, corrId);
+          // Codex reports failures (turn.failed / error events) on the JSONL
+          // stdout stream; on a non-zero exit stderr is often empty. Fall back
+          // to the reconstructed display text (never raw JSONL) so the caller
+          // sees the real reason instead of a bare exit code. Add a resume hint
+          // when a by-id resume/fork looks like it missed its session.
+          const codexErrorDetail =
+            stderr && stderr.trim().length > 0 ? stderr : codexDisplayText(stdout);
+          const codexResumeHint =
+            sessionId &&
+            /not found|no such|unknown session|does not exist|invalid session/i.test(
+              codexErrorDetail
+            )
+              ? `\n\nSession ${sessionId} could not be resumed. Codex session IDs are UUIDs under ~/.codex/sessions/; verify the id, omit sessionId, or set createNewSession:true.`
+              : "";
+          return createErrorResponse(
+            "codex",
+            code,
+            `${codexErrorDetail}${codexResumeHint}`,
+            corrId
+          );
         }
         wasSuccessful = true;
         return {
@@ -8117,21 +8299,34 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       sessionId: z
         .string()
         .optional()
-        .describe("Antigravity conversation ID to resume (emits --conversation <id>)"),
-      resumeLatest: z.boolean().default(false).describe("Continue the most recent conversation"),
+        .describe(
+          "Antigravity conversation ID to resume (emits --conversation <id>). agy owns conversation ids; a fresh request returns no resumable sessionId, continue via resumeLatest:true."
+        ),
+      resumeLatest: z
+        .boolean()
+        .default(false)
+        .describe(
+          "Continue the most recent conversation. agy owns conversation ids; a fresh request returns no resumable sessionId, continue via resumeLatest:true."
+        ),
       createNewSession: z.boolean().default(false).describe("Force new session"),
       approvalMode: z
         .enum(GEMINI_APPROVAL_MODES)
         .optional()
-        .describe("Approval: default|auto_edit|yolo|plan"),
+        .describe(
+          "Approval mode. Only default (prompted) and yolo (auto-approve all, emits --dangerously-skip-permissions) work with the Antigravity agy headless path; auto_edit and plan are rejected at request time (agy has no headless accept-edits/plan mode)."
+        ),
       approvalStrategy: z
         .enum(["legacy", "mcp_managed"])
         .default("legacy")
-        .describe("Approval strategy"),
+        .describe(
+          "Approval strategy: legacy (default) lets the provider CLI's own flags decide; mcp_managed routes the run through the gateway approval gate (required for approvalPolicy and approval_list). Under mcp_managed the caller's permissionMode/alwaysApprove may be overridden by the gate."
+        ),
       approvalPolicy: z
         .enum(["strict", "balanced", "permissive"])
         .optional()
-        .describe("Approval policy override"),
+        .describe(
+          "Approval policy when approvalStrategy is mcp_managed: strict|balanced|permissive (default balanced). Ignored under legacy strategy."
+        ),
       mcpServers: z
         .array(mcpServerEnum())
         .default([])
@@ -8171,7 +8366,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .enum(["text", "json", "stream-json"])
         .default("text")
         .describe(
-          "Antigravity CLI currently supports text output only through the gateway; json and stream-json are rejected."
+          "Output format. The Antigravity agy headless path emits text only; json and stream-json are rejected at request time. Per-request token usage and cost are therefore not available for gemini."
         ),
       sandbox: GEMINI_HIGH_IMPACT_PARAMS_SCHEMA.shape.sandbox.describe(
         "Run Antigravity in sandbox mode (--sandbox)"
@@ -8317,12 +8512,14 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .string()
         .optional()
         .describe(
-          "Provider-native session ID to resume (emits --resume <id>; use resumeLatest for --continue)"
+          "Provider-native session ID to resume (emits --resume <id>; use resumeLatest for --continue). Note: the gw-* id minted for a brand-new session is not resumable via sessionId; continue with resumeLatest:true."
         ),
       resumeLatest: z
         .boolean()
         .default(false)
-        .describe("Resume most recent Grok session in cwd (--continue)"),
+        .describe(
+          "Resume most recent Grok session in cwd (--continue). Note: the gw-* id minted for a brand-new session is not resumable via sessionId; continue with resumeLatest:true."
+        ),
       createNewSession: z.boolean().default(false).describe("Force new session"),
       alwaysApprove: z
         .boolean()
@@ -8331,15 +8528,19 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       permissionMode: z
         .enum(["default", "acceptEdits", "auto", "dontAsk", "bypassPermissions", "plan"])
         .optional()
-        .describe("Grok permission mode"),
+        .describe("Grok permission mode: default|acceptEdits|auto|dontAsk|bypassPermissions|plan."),
       approvalStrategy: z
         .enum(["legacy", "mcp_managed"])
         .default("legacy")
-        .describe("Approval strategy"),
+        .describe(
+          "Approval strategy: legacy (default) lets the provider CLI's own flags decide; mcp_managed routes the run through the gateway approval gate (required for approvalPolicy and approval_list). Under mcp_managed the caller's permissionMode/alwaysApprove may be overridden by the gate."
+        ),
       approvalPolicy: z
         .enum(["strict", "balanced", "permissive"])
         .optional()
-        .describe("Approval policy override"),
+        .describe(
+          "Approval policy when approvalStrategy is mcp_managed: strict|balanced|permissive (default balanced). Ignored under legacy strategy."
+        ),
       mcpServers: z
         .array(mcpServerEnum())
         .default([])
@@ -8355,7 +8556,9 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .min(30_000)
         .max(3_600_000)
         .optional()
-        .describe("Idle timeout in ms (min 30s, max 1h, omit=CLI default)"),
+        .describe(
+          "Idle timeout in ms (min 30s, max 1h). Omit = gateway default of 600000ms (10 min) with no output before the process is killed."
+        ),
       forceRefresh: z
         .boolean()
         .default(false)
@@ -8397,7 +8600,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .union([z.string().min(1), z.record(z.string(), z.unknown())])
         .optional()
         .describe(
-          "Grok 0.2.73 --json-schema: constrain output to a JSON Schema (string literal or object; implies json output)."
+          "Grok 0.2.73 --json-schema: constrain output to a JSON Schema (string literal or object; implies json output). Set outputFormat:json so the gateway treats the reply as structured output (skips response optimization and warning injection); the default output format is not json, so pass it explicitly."
         ),
       workspace: WORKSPACE_ALIAS_SCHEMA.optional(),
       worktree: WORKTREE_SCHEMA.optional(),
@@ -8541,7 +8744,9 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .min(1, "Prompt cannot be empty")
         .max(100000, "Prompt too long (max 100k chars)")
         .optional()
-        .describe("Prompt text for Devin CLI"),
+        .describe(
+          "Prompt text for Devin CLI. Required in practice; promptFile is additive (loads an initial prompt from a file)."
+        ),
       model: z.string().optional().describe("Model name or alias (e.g. opus, latest)"),
       transport: z
         .enum(["cli", "acp"])
@@ -8553,7 +8758,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .enum(["auto", "smart", "dangerous"])
         .optional()
         .describe(
-          "Devin CLI permission mode (--permission-mode). auto auto-approves read-only tools; smart additionally auto-runs actions a fast model judges safe; dangerous auto-approves all."
+          "Devin CLI permission mode (--permission-mode). auto auto-approves read-only tools; smart additionally auto-runs actions a fast model judges safe; dangerous auto-approves all. When omitted, Devin uses its own headless default; pass auto or smart for unattended runs."
         ),
       promptFile: z
         .string()
@@ -8563,12 +8768,14 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .string()
         .optional()
         .describe(
-          "Devin session ID to resume (emits --resume <id>; use resumeLatest for --continue)"
+          "Devin session ID to resume (emits --resume <id>; use resumeLatest for --continue). Note: the gw-* id minted for a brand-new session is not resumable via sessionId; continue with resumeLatest:true."
         ),
       resumeLatest: z
         .boolean()
         .default(false)
-        .describe("Resume the most recent Devin session in cwd (--continue)"),
+        .describe(
+          "Resume the most recent Devin session in cwd (--continue). Note: the gw-* id minted for a brand-new session is not resumable via sessionId; continue with resumeLatest:true."
+        ),
       createNewSession: z.boolean().default(false).describe("Force a new session"),
       correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
       optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution"),
@@ -8636,7 +8843,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
 
   server.tool(
     "mistral_request",
-    "Run a Mistral Vibe CLI request synchronously (when async jobs are enabled, auto-defers to a pollable job past the sync deadline; otherwise runs to completion). Requires exactly one of prompt or promptParts.",
+    "Run a Mistral Vibe CLI request synchronously (when async jobs are enabled, auto-defers to a pollable job past the sync deadline; otherwise runs to completion). Requires exactly one of prompt or promptParts. Defaults to --agent auto-approve (unattended tool execution); pass permissionMode plan or accept-edits for safer runs.",
     {
       prompt: z
         .string()
@@ -8669,12 +8876,14 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .string()
         .optional()
         .describe(
-          "Session ID (user-provided CLI handle for --resume). Current Vibe defaults session logging on; doctor flags explicit [session_logging] enabled = false."
+          "Session ID (user-provided CLI handle for --resume). Current Vibe defaults session logging on; doctor flags explicit [session_logging] enabled = false. Note: the gw-* id minted for a brand-new session is not resumable via sessionId; continue with resumeLatest:true."
         ),
       resumeLatest: z
         .boolean()
         .default(false)
-        .describe("Resume most recent Vibe session in cwd (--continue)"),
+        .describe(
+          "Resume most recent Vibe session in cwd (--continue). Note: the gw-* id minted for a brand-new session is not resumable via sessionId; continue with resumeLatest:true."
+        ),
       createNewSession: z.boolean().default(false).describe("Force new session"),
       permissionMode: z
         .string()
@@ -8685,11 +8894,15 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       approvalStrategy: z
         .enum(["legacy", "mcp_managed"])
         .default("legacy")
-        .describe("Approval strategy"),
+        .describe(
+          "Approval strategy: legacy (default) lets the provider CLI's own flags decide; mcp_managed routes the run through the gateway approval gate (required for approvalPolicy and approval_list). Under mcp_managed the caller's permissionMode/alwaysApprove may be overridden by the gate."
+        ),
       approvalPolicy: z
         .enum(["strict", "balanced", "permissive"])
         .optional()
-        .describe("Approval policy override"),
+        .describe(
+          "Approval policy when approvalStrategy is mcp_managed: strict|balanced|permissive (default balanced). Ignored under legacy strategy."
+        ),
       mcpServers: z
         .array(mcpServerEnum())
         .default([])
@@ -8866,7 +9079,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .string()
           .optional()
           .describe(
-            "Gateway session record to associate (uses the active session if omitted). Claude continuity itself is via continueSession (--continue); this ID is gateway bookkeeping, not a Claude-native session."
+            "On a fresh request this id is emitted as Claude --session-id <uuid> (must be a valid UUID that does not already exist). Resume the latest cwd conversation with continueSession:true. gw-* ids are not valid Claude --session-id values."
           ),
         continueSession: z
           .boolean()
@@ -8910,11 +9123,15 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         systemPrompt: z
           .string()
           .optional()
-          .describe("Claude --system-prompt: replace the system prompt entirely."),
+          .describe(
+            "Claude --system-prompt: replace the system prompt entirely. Mutually exclusive with appendSystemPrompt."
+          ),
         appendSystemPrompt: z
           .string()
           .optional()
-          .describe("Claude --append-system-prompt: append to the existing system prompt."),
+          .describe(
+            "Claude --append-system-prompt: append to the existing system prompt. Mutually exclusive with systemPrompt."
+          ),
         maxBudgetUsd: z
           .number()
           .positive()
@@ -8948,7 +9165,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .union([z.string(), z.record(z.string(), z.unknown())])
           .optional()
           .describe(
-            "Claude --json-schema: JSON Schema literal (NOT a path) constraining structured output. Object values are JSON.stringify-d; string values are passed verbatim. Use with outputFormat='json'."
+            "Claude --json-schema: JSON Schema literal (NOT a path) constraining structured output. Object values are JSON.stringify-d; string values are passed verbatim. Use with outputFormat='json'. Set outputFormat:json so the gateway treats the reply as structured output (skips response optimization and warning injection); the default output format is not json, so pass it explicitly."
           ),
         // Phase 4 slice ζ — Claude additional-workspace-dirs parity
         addDir: z
@@ -8989,11 +9206,15 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         approvalStrategy: z
           .enum(["legacy", "mcp_managed"])
           .default("legacy")
-          .describe("Approval strategy"),
+          .describe(
+            "Approval strategy: legacy (default) lets the provider CLI's own flags decide; mcp_managed routes the run through the gateway approval gate (required for approvalPolicy and approval_list). Under mcp_managed the caller's permissionMode/alwaysApprove may be overridden by the gate."
+          ),
         approvalPolicy: z
           .enum(["strict", "balanced", "permissive"])
           .optional()
-          .describe("Approval policy override"),
+          .describe(
+            "Approval policy when approvalStrategy is mcp_managed: strict|balanced|permissive (default balanced). Ignored under legacy strategy."
+          ),
         mcpServers: z.array(mcpServerEnum()).default([]).describe("MCP servers exposed to Claude"),
         strictMcpConfig: z
           .boolean()
@@ -9007,7 +9228,9 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .min(30_000)
           .max(3_600_000)
           .optional()
-          .describe("Idle timeout in ms (min 30s, max 1h, omit=CLI default)"),
+          .describe(
+            "Idle timeout in ms (min 30s, max 1h, omit=CLI default). Idle enforcement applies only when outputFormat is stream-json; it is ignored for text/json."
+          ),
         forceRefresh: z
           .boolean()
           .default(false)
@@ -9252,7 +9475,10 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         promptParts: PromptPartsSchema.optional().describe(
           "Cache-aware structured prompt: { system?, tools?, context?, task }. Mutually exclusive with prompt. Stable parts hash into cache_state for prefix-discipline tracking."
         ),
-        model: z.string().optional().describe("Model name or alias (e.g. gpt-5.4, latest)"),
+        model: z
+          .string()
+          .optional()
+          .describe("Model name or alias (e.g. gpt-5.5, gpt-5.4, latest)"),
         fullAuto: z
           .boolean()
           .default(false)
@@ -9262,7 +9488,9 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         sandboxMode: z
           .enum(CODEX_SANDBOX_MODES)
           .optional()
-          .describe("Codex --sandbox: read-only|workspace-write|danger-full-access."),
+          .describe(
+            "Codex --sandbox. Omit = Codex exec built-in default (read-only; cannot write files). Pass workspace-write to let Codex edit files in the working dir, or danger-full-access for unrestricted access."
+          ),
         askForApproval: z
           .enum(CODEX_ASK_FOR_APPROVAL_MODES)
           .optional()
@@ -9282,11 +9510,15 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         approvalStrategy: z
           .enum(["legacy", "mcp_managed"])
           .default("legacy")
-          .describe("Approval strategy"),
+          .describe(
+            "Approval strategy: legacy (default) lets the provider CLI's own flags decide; mcp_managed routes the run through the gateway approval gate (required for approvalPolicy and approval_list). Under mcp_managed the caller's permissionMode/alwaysApprove may be overridden by the gate."
+          ),
         approvalPolicy: z
           .enum(["strict", "balanced", "permissive"])
           .optional()
-          .describe("Approval policy override"),
+          .describe(
+            "Approval policy when approvalStrategy is mcp_managed: strict|balanced|permissive (default balanced). Ignored under legacy strategy."
+          ),
         mcpServers: z
           .array(mcpServerEnum())
           .default([])
@@ -9295,13 +9527,13 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .string()
           .optional()
           .describe(
-            "Codex session UUID to resume via `codex exec resume <ID>`. Must be a real Codex session ID (from `~/.codex/sessions/` or the `codex resume` picker). Gateway-generated `gw-*` IDs are rejected."
+            "Codex session UUID to resume via `codex exec resume <ID>`. Must be a real Codex session ID (from `~/.codex/sessions/` or the `codex resume` picker). Gateway-generated `gw-*` IDs are rejected. For a brand-new session no resumable sessionId is returned; continue with resumeLatest:true or a real Codex UUID."
           ),
         resumeLatest: z
           .boolean()
           .default(false)
           .describe(
-            "Resume the most recent Codex session in the current cwd via `codex exec resume --last`. Ignored if sessionId is set."
+            "Resume the most recent Codex session via `codex exec resume --last`. Ignored if sessionId is set. A brand-new session returns no resumable sessionId; continue with resumeLatest:true or a real Codex UUID."
           ),
         createNewSession: z.boolean().default(false).describe("Force a fresh session (no resume)"),
         correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
@@ -9464,21 +9696,34 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         sessionId: z
           .string()
           .optional()
-          .describe("Antigravity conversation ID to resume (emits --conversation <id>)"),
-        resumeLatest: z.boolean().default(false).describe("Continue the most recent conversation"),
+          .describe(
+            "Antigravity conversation ID to resume (emits --conversation <id>). agy owns conversation ids; a fresh request returns no resumable sessionId, continue via resumeLatest:true."
+          ),
+        resumeLatest: z
+          .boolean()
+          .default(false)
+          .describe(
+            "Continue the most recent conversation. agy owns conversation ids; a fresh request returns no resumable sessionId, continue via resumeLatest:true."
+          ),
         createNewSession: z.boolean().default(false).describe("Force new session"),
         approvalMode: z
           .enum(GEMINI_APPROVAL_MODES)
           .optional()
-          .describe("Approval: default|auto_edit|yolo|plan"),
+          .describe(
+            "Approval mode. Only default (prompted) and yolo (auto-approve all, emits --dangerously-skip-permissions) work with the Antigravity agy headless path; auto_edit and plan are rejected at request time (agy has no headless accept-edits/plan mode)."
+          ),
         approvalStrategy: z
           .enum(["legacy", "mcp_managed"])
           .default("legacy")
-          .describe("Approval strategy"),
+          .describe(
+            "Approval strategy: legacy (default) lets the provider CLI's own flags decide; mcp_managed routes the run through the gateway approval gate (required for approvalPolicy and approval_list). Under mcp_managed the caller's permissionMode/alwaysApprove may be overridden by the gate."
+          ),
         approvalPolicy: z
           .enum(["strict", "balanced", "permissive"])
           .optional()
-          .describe("Approval policy override"),
+          .describe(
+            "Approval policy when approvalStrategy is mcp_managed: strict|balanced|permissive (default balanced). Ignored under legacy strategy."
+          ),
         mcpServers: z
           .array(mcpServerEnum())
           .default([])
@@ -9517,7 +9762,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .enum(["text", "json", "stream-json"])
           .default("text")
           .describe(
-            "Antigravity CLI currently supports text output only through the gateway; json and stream-json are rejected."
+            "Output format. The Antigravity agy headless path emits text only; json and stream-json are rejected at request time. Per-request token usage and cost are therefore not available for gemini."
           ),
         sandbox: GEMINI_HIGH_IMPACT_PARAMS_SCHEMA.shape.sandbox.describe(
           "Run Antigravity in sandbox mode (--sandbox)"
@@ -9650,12 +9895,14 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .string()
           .optional()
           .describe(
-            "Provider-native session ID to resume (emits --resume <id>; use resumeLatest for --continue)"
+            "Provider-native session ID to resume (emits --resume <id>; use resumeLatest for --continue). Note: the gw-* id minted for a brand-new session is not resumable via sessionId; continue with resumeLatest:true."
           ),
         resumeLatest: z
           .boolean()
           .default(false)
-          .describe("Resume most recent Grok session in cwd (--continue)"),
+          .describe(
+            "Resume most recent Grok session in cwd (--continue). Note: the gw-* id minted for a brand-new session is not resumable via sessionId; continue with resumeLatest:true."
+          ),
         createNewSession: z.boolean().default(false).describe("Force new session"),
         alwaysApprove: z
           .boolean()
@@ -9664,7 +9911,9 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         permissionMode: z
           .enum(["default", "acceptEdits", "auto", "dontAsk", "bypassPermissions", "plan"])
           .optional()
-          .describe("Grok permission mode"),
+          .describe(
+            "Grok permission mode: default|acceptEdits|auto|dontAsk|bypassPermissions|plan."
+          ),
         effort: z
           .enum(["low", "medium", "high", "xhigh", "max"])
           .optional()
@@ -9673,11 +9922,15 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         approvalStrategy: z
           .enum(["legacy", "mcp_managed"])
           .default("legacy")
-          .describe("Approval strategy"),
+          .describe(
+            "Approval strategy: legacy (default) lets the provider CLI's own flags decide; mcp_managed routes the run through the gateway approval gate (required for approvalPolicy and approval_list). Under mcp_managed the caller's permissionMode/alwaysApprove may be overridden by the gate."
+          ),
         approvalPolicy: z
           .enum(["strict", "balanced", "permissive"])
           .optional()
-          .describe("Approval policy override"),
+          .describe(
+            "Approval policy when approvalStrategy is mcp_managed: strict|balanced|permissive (default balanced). Ignored under legacy strategy."
+          ),
         mcpServers: z
           .array(mcpServerEnum())
           .default([])
@@ -9700,7 +9953,9 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .min(30_000)
           .max(3_600_000)
           .optional()
-          .describe("Idle timeout in ms (min 30s, max 1h, omit=CLI default)"),
+          .describe(
+            "Idle timeout in ms (min 30s, max 1h). Omit = gateway default of 600000ms (10 min) with no output before the process is killed."
+          ),
         forceRefresh: z
           .boolean()
           .default(false)
@@ -9866,7 +10121,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .union([z.string().min(1), z.record(z.string(), z.unknown())])
           .optional()
           .describe(
-            "Grok 0.2.73 --json-schema: constrain output to a JSON Schema (string literal or object; implies json output)."
+            "Grok 0.2.73 --json-schema: constrain output to a JSON Schema (string literal or object; implies json output). Set outputFormat:json so the gateway treats the reply as structured output (skips response optimization and warning injection); the default output format is not json, so pass it explicitly."
           ),
         workspace: WORKSPACE_ALIAS_SCHEMA.optional(),
         worktree: WORKTREE_SCHEMA.optional(),
@@ -10003,12 +10258,16 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .min(1, "Prompt cannot be empty")
           .max(100000, "Prompt too long (max 100k chars)")
           .optional()
-          .describe("Prompt text for Devin CLI"),
+          .describe(
+            "Prompt text for Devin CLI. Required in practice; promptFile is additive (loads an initial prompt from a file)."
+          ),
         model: z.string().optional().describe("Model name or alias (e.g. opus, latest)"),
         permissionMode: z
           .enum(["auto", "smart", "dangerous"])
           .optional()
-          .describe("Devin CLI permission mode (--permission-mode). auto, smart, or dangerous."),
+          .describe(
+            "Devin CLI permission mode (--permission-mode). auto, smart, or dangerous. When omitted, Devin uses its own headless default; pass auto or smart for unattended runs."
+          ),
         promptFile: z
           .string()
           .optional()
@@ -10016,11 +10275,15 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         sessionId: z
           .string()
           .optional()
-          .describe("Devin session ID to resume (--resume <id>; use resumeLatest for --continue)"),
+          .describe(
+            "Devin session ID to resume (--resume <id>; use resumeLatest for --continue). Note: the gw-* id minted for a brand-new session is not resumable via sessionId; continue with resumeLatest:true."
+          ),
         resumeLatest: z
           .boolean()
           .default(false)
-          .describe("Resume the most recent Devin session in cwd (--continue)"),
+          .describe(
+            "Resume the most recent Devin session in cwd (--continue). Note: the gw-* id minted for a brand-new session is not resumable via sessionId; continue with resumeLatest:true."
+          ),
         createNewSession: z.boolean().default(false).describe("Force a new session"),
         correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
         optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution"),
@@ -10106,12 +10369,14 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .string()
           .optional()
           .describe(
-            "Session ID (user-provided CLI handle for --resume). Current Vibe defaults session logging on; doctor flags explicit [session_logging] enabled = false."
+            "Session ID (user-provided CLI handle for --resume). Current Vibe defaults session logging on; doctor flags explicit [session_logging] enabled = false. Note: the gw-* id minted for a brand-new session is not resumable via sessionId; continue with resumeLatest:true."
           ),
         resumeLatest: z
           .boolean()
           .default(false)
-          .describe("Resume most recent Vibe session in cwd (--continue)"),
+          .describe(
+            "Resume most recent Vibe session in cwd (--continue). Note: the gw-* id minted for a brand-new session is not resumable via sessionId; continue with resumeLatest:true."
+          ),
         createNewSession: z.boolean().default(false).describe("Force new session"),
         permissionMode: z
           .string()
@@ -10122,11 +10387,15 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         approvalStrategy: z
           .enum(["legacy", "mcp_managed"])
           .default("legacy")
-          .describe("Approval strategy"),
+          .describe(
+            "Approval strategy: legacy (default) lets the provider CLI's own flags decide; mcp_managed routes the run through the gateway approval gate (required for approvalPolicy and approval_list). Under mcp_managed the caller's permissionMode/alwaysApprove may be overridden by the gate."
+          ),
         approvalPolicy: z
           .enum(["strict", "balanced", "permissive"])
           .optional()
-          .describe("Approval policy override"),
+          .describe(
+            "Approval policy when approvalStrategy is mcp_managed: strict|balanced|permissive (default balanced). Ignored under legacy strategy."
+          ),
         mcpServers: z
           .array(mcpServerEnum())
           .default([])
@@ -10691,14 +10960,14 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
 
   server.tool(
     "list_models",
-    "List models, aliases, and defaults for one provider CLI (claude|codex|gemini|grok|mistral).",
+    "List models, aliases, and defaults for one provider CLI (claude|codex|gemini|grok|mistral|devin), or omit cli to list all providers.",
     {
       cli: z
         .preprocess(
           value => (value === "" || value === null ? undefined : value),
-          z.enum(["claude", "codex", "gemini", "grok", "mistral"]).optional()
+          CLI_TYPE_ENUM.optional()
         )
-        .describe("CLI filter (claude|codex|gemini|grok|mistral)"),
+        .describe("CLI filter (claude|codex|gemini|grok|mistral|devin)"),
     },
     {
       title: "Provider models",
@@ -10716,14 +10985,14 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
 
   server.tool(
     "provider_tool_capabilities",
-    "Report provider tool/feature capabilities and discovered local skill/tool integrations for claude|codex|gemini|grok|grok_api|mistral.",
+    "Report provider tool/feature capabilities and discovered local skill/tool integrations for claude|codex|gemini|grok|mistral|devin|grok_api.",
     {
       cli: z
         .preprocess(
           value => (value === "" || value === null ? undefined : value),
-          z.enum(["claude", "codex", "gemini", "grok", "grok_api", "mistral"]).optional()
+          z.enum(["claude", "codex", "gemini", "grok", "mistral", "devin", "grok_api"]).optional()
         )
-        .describe("Provider filter (claude|codex|gemini|grok|grok_api|mistral)"),
+        .describe("Provider filter (claude|codex|gemini|grok|mistral|devin|grok_api)"),
       includeSkills: z
         .boolean()
         .default(true)
@@ -10771,14 +11040,14 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
 
   server.tool(
     "cli_versions",
-    "Report installed provider CLI versions, availability, and login status for all five providers or one.",
+    "Report installed provider CLI versions, availability, and login status for all six providers (claude|codex|gemini|grok|mistral|devin) or one.",
     {
       cli: z
         .preprocess(
           value => (value === "" || value === null ? undefined : value),
-          z.enum(["claude", "codex", "gemini", "grok", "mistral"]).optional()
+          CLI_TYPE_ENUM.optional()
         )
-        .describe("CLI filter (claude|codex|gemini|grok|mistral)"),
+        .describe("CLI filter (claude|codex|gemini|grok|mistral|devin)"),
     },
     {
       title: "Provider CLI versions",
@@ -10802,7 +11071,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           value => (value === "" || value === null ? undefined : value),
           CLI_TYPE_ENUM.optional()
         )
-        .describe("CLI filter (claude|codex|gemini|grok|mistral)"),
+        .describe("CLI filter (claude|codex|gemini|grok|mistral|devin)"),
       probeInstalled: z
         .boolean()
         .default(false)
@@ -10832,7 +11101,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           value => (value === "" || value === null ? undefined : value),
           CLI_TYPE_ENUM.optional()
         )
-        .describe("Optional provider filter (claude|codex|gemini|grok|mistral)"),
+        .describe("Optional provider filter (claude|codex|gemini|grok|mistral|devin)"),
       tier: z
         .enum(["catalog", "inspect", "execute_candidate", "diagnostic"])
         .optional()
@@ -10889,7 +11158,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
     "provider_subcommand_contract",
     "Return the detailed read-only contract for exactly one declared provider CLI subcommand.",
     {
-      provider: CLI_TYPE_ENUM.describe("Provider (claude|codex|gemini|grok|mistral)"),
+      provider: CLI_TYPE_ENUM.describe("Provider (claude|codex|gemini|grok|mistral|devin)"),
       commandPath: z.array(z.string().min(1)).min(1).describe("Command path segments"),
     },
     {
@@ -10923,7 +11192,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           value => (value === "" || value === null ? undefined : value),
           CLI_TYPE_ENUM.optional()
         )
-        .describe("Optional provider filter (claude|codex|gemini|grok|mistral)"),
+        .describe("Optional provider filter (claude|codex|gemini|grok|mistral|devin)"),
       includeClean: z
         .boolean()
         .default(false)
@@ -10981,7 +11250,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
     "cli_upgrade",
     "Plan (dryRun, default true) or execute an upgrade for one provider CLI using its native update mechanism.",
     {
-      cli: z.enum(["claude", "codex", "gemini", "grok", "mistral"]).describe("CLI to upgrade"),
+      cli: CLI_TYPE_ENUM.describe("CLI to upgrade (claude|codex|gemini|grok|mistral|devin)"),
       target: z
         .string()
         .min(1)
@@ -11062,7 +11331,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
 
   server.tool(
     "session_create",
-    "Create a gateway session record for a provider. NOTE: this is gateway bookkeeping (gw-* ID), not a provider-native session — Codex resume needs a real Codex UUID.",
+    "Create a gateway session record for a provider. NOTE: this is gateway bookkeeping (a plain UUID), not a provider-native session; Codex resume needs a real Codex UUID.",
     {
       cli: sessionProviderEnum.describe(
         "Provider type (claude|codex|gemini|grok|mistral|grok-api)"

@@ -1,8 +1,8 @@
 {
   "name": "llm-cli-gateway",
-  "version": "2.11.1",
+  "version": "2.12.0",
   "mcpName": "io.github.verivus-oss/llm-cli-gateway",
-  "description": "MCP server providing unified access to Claude Code, Codex, Gemini, Grok, and Mistral Vibe CLIs with session management, retry logic, async job orchestration, durable job results, and cross-LLM validation.",
+  "description": "MCP server providing unified access to Claude Code, Codex, Gemini, Grok, Mistral Vibe, and Devin CLIs with session management, retry logic, async job orchestration, durable job results, and cross-LLM validation.",
   "license": "MIT",
   "author": "VerivusAI Labs (https://github.com/verivus-oss)",
   "repository": {
@@ -52,7 +52,13 @@
     "README.md",
     "CHANGELOG.md",
     "socket.yml",
-    "LICENSE"
+    "LICENSE",
+    ".agents/skills/async-job-orchestration/SKILL.md",
+    ".agents/skills/multi-llm-review/SKILL.md",
+    ".agents/skills/session-workflow/SKILL.md",
+    ".agents/skills/secure-orchestration/SKILL.md",
+    ".agents/skills/implement-review-fix/SKILL.md",
+    ".agents/skills/public-demo-session/SKILL.md"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",

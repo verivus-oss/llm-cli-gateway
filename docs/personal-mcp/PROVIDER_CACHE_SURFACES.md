@@ -214,8 +214,8 @@ as a per-request input count. Until then the `-p` path stays usage-less.
 
 ### grok-api HTTP path (distinct from the CLI)
 
-The opt-in `grok-api` provider (`src/xai-api-provider.ts`, bucketed under cli
-`grok` per #42) calls the xAI Responses API directly and DOES surface usage. Its
+The opt-in `grok-api` provider (the xAI Responses adapter in `src/api-provider.ts`,
+bucketed under cli `grok` per #42) calls the xAI Responses API directly and DOES surface usage. Its
 `usage` object exposes `input_tokens`, `output_tokens`, `total_tokens`,
 `input_tokens_details.cached_tokens` (cache **reads**), and `cost_in_usd_ticks`
 (source: <https://docs.x.ai/developers/advanced-api-usage/prompt-caching/usage-and-pricing>,

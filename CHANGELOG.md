@@ -2,7 +2,7 @@
 
 All notable changes to the llm-cli-gateway project.
 
-## [Unreleased]: Cross-LLM validation receipts
+## [2.12.0] - 2026-06-30: Validation receipts, API-provider parity, and a gateway usability pass
 
 ### Added
 
@@ -13,15 +13,30 @@ All notable changes to the llm-cli-gateway project.
 - The receipt tool, the resource, and the run/receipt tables exist ONLY under an implemented durable backend (today `sqlite`) with a store attached at runtime; under `memory` / `postgres` / `none` no run/receipt row is written and the tool/resource are not registered (the caller still receives a `validationId` at kickoff). Silent loss is impossible by construction.
 - **Grok structured-output and session/worktree parity (Grok 0.2.73).** `grok_request` / `grok_request_async` gained `jsonSchema` (emits `--json-schema`, constrains output to a JSON Schema, implies json output), `forkSession` (emits `--fork-session`, forks a resumed session into a new ID), and `worktreeRef` (emits `--worktree-ref <REF>`; requires `nativeWorktree`, else rejected). Grok `--session-id` remains intentionally unwired (the gateway owns session-id lifecycle and cross-principal isolation).
 - **Antigravity project selection (agy 1.0.13).** `gemini_request` / `gemini_request_async` gained `project` (emits `--project <ID>`) and `newProject` (emits `--new-project`); the two are mutually exclusive (rejected if both set).
+- **API-provider unification: the generic `api_<name>_request` surface reaches CLI-tool parity (Slices 1-4b).** Telemetry parity (per-request usage/cost), schema parity (`promptParts`, `optimizePrompt`, `optimizeResponse`, `forceRefresh`, `sessionId`, `createNewSession`), capability-typed continuity with gateway sessions (`ApiContinuity` = `server-side-id` | `stateless-resend` | `none`), and server-side-id continuation on the generic handler. The legacy standalone `xai-api-provider` module was removed; the grok-api HTTP path now runs through the shared `api-provider` / `api-http` adapter (externally-observable response shape unchanged).
+- **OpenRouter usage accounting.** New optional provider config key `usage_include` opts the OpenAI-compatible adapter into `usage: { include: true }` so token counts and end-to-end `usage.cost` (USD) are returned; off by default so strict OpenAI-compatible servers are unaffected.
+- **Caller-facing skills now ship in the npm package.** The published gateway serves six caller skills (`async-job-orchestration`, `multi-llm-review`, `session-workflow`, `secure-orchestration`, `implement-review-fix`, `public-demo-session`); previously `.agents` was excluded from `package.json` `files`, so every install served zero skills. Operator/maintainer skills (the `provider-*` contract guides, `gateway-restart-surfaces`) stay out of the tarball, and the release tarball guard now scans shipped skills for host-internal leaks.
 
 ### Changed
 
 - **Upstream contracts refreshed to the installed provider versions.** Live `--probe-installed` probes were re-run across all six provider CLIs; ACP `targetVersion` pins bumped to claude 2.1.195, codex-cli 0.142.4, agy 1.0.13, grok 0.2.73, and devin 2026.8.18 (mistral vibe 2.17.1 unchanged), kept in sync across `upstream-contracts`, `provider-tool-capabilities`, and the ACP `provider-registry`. Acknowledged newly-advertised flags (claude `--bg`/`--background`); dropped stale acknowledgements (claude `--mcp-debug`, agy `-i`/`--version`); and acknowledged grok's `ssh` subcommand inheriting the global agent flag surface.
 - **`agy update` help-probe drift silenced.** `agy update --help` uses Go's `flag` package (prints "Usage of update:" and exits 2). A new `helpProbeExitTolerant` subcommand-contract marker treats that legitimate non-zero help exit as clean rather than reporting it as drift.
+- **Devin is now visible across discovery.** Devin was a fully registered request tool but omitted from the server instructions and rejected by the `list_models`, `cli_versions`, `cli_upgrade`, and `provider_tool_capabilities` enums; those now include devin (pure widening), and the stale "five providers" describe/description text was refreshed.
+- **Request tool and parameter descriptions sharpened for usability.** Clarified Codex `sandboxMode` (omit = read-only), Gemini `approvalMode`/`outputFormat` (only default/yolo and text work on the agy headless path), `approvalStrategy`/`approvalPolicy` semantics, `idleTimeoutMs` (gateway 10-min idle kill; Claude stream-json only), `jsonSchema` (set `outputFormat:json`), session-resume rules (gw-* fresh-session ids are not resumable; use `resumeLatest`), the generic API params, and the mistral/devin permission defaults.
+
+### Reliability and error guidance
+
+- **Result-health guards against silent success.** A Claude run that exits 0 but reports `is_error:true` (e.g. `error_max_turns`) now carries a `claude_result_error` warning and a `resultIsError` signal (the text is still returned); an exit-0 run with empty assistant output emits an `empty_output` warning. Claude `--output-format json` telemetry (usage/cost) is now parsed (it was previously dropped), and the real Codex session UUID is surfaced as `codexSessionId` so callers can resume/fork without filesystem access.
+- **Actionable error remediation.** `createErrorResponse` now detects auth/login failures and appends per-CLI remediation (`errorCategory: auth_error`), categorizes the 50MB output overflow as `output_overflow`, adds async-retry guidance on wall-clock timeout (124) and an interactive/idle hint on idle timeout (125), enriches Codex failures from the JSONL stream when stderr is empty (with a resume-not-found hint), and adds a fallback hint when a non-zero exit captured no stderr.
+- A whitespace-only prompt is now rejected at the prep boundary instead of being passed to the CLI.
 
 ### Fixed
 
 - **Cross-principal read hole on the validation collection tools.** `job_status` / `job_result` now apply the `principalCanAccess` owner check that the `llm_job_*` paths already enforce; a job owned by another principal is reported as not found.
+
+### Deps
+
+- npm-minor-patch group: `smol-toml` 1.6.1 to 1.7.0 (runtime), `pg` 8.21.0 to 8.22.0, plus devDeps `@types/node` to 26.0.1, `@typescript-eslint/{eslint-plugin,parser}` 8.61.1 to 8.62.1, `eslint` 10.5.0 to 10.6.0, `prettier` 3.8.4 to 3.9.3. CI: `zizmor` 1.25.2 to 1.26.1, github-actions group bumps. Dependabot now ignores `body-parser` 2.3.0 (it transitively pulled the Socket-flagged `type-is` 2.1.0 / `content-type` 2.0.0 that the release audit blocks).
 
 ### Not yet implemented (reserved)
 

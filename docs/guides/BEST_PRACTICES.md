@@ -42,7 +42,7 @@ Single domain focus: CLI gateway orchestration
 **Status:** ✅ Good
 
 Top-level primitives: `prompt:str`, `model:str`, `session_id:str`
-Enums for constraints: `cli:enum(claude|codex|gemini|grok|mistral)`
+Enums for constraints: `cli:enum(claude|codex|gemini|grok|mistral|devin)`
 
 **Why:** Avoid nested dictionaries → prevents agent hallucination of keys.
 
@@ -345,6 +345,15 @@ Behaviour gated by `[cache_awareness]` in
 slice-3 `cache_ttl_expiring_soon` warning off the response payload's
 `warnings` array.
 
+The same `structuredContent.warnings` array surfaces other non-fatal
+signals worth inspecting: `claude_result_error` (Claude reported an
+in-band error result) and `empty_output` (the CLI exited cleanly but
+produced no content). Codex responses also echo `codexSessionId` in
+`structuredContent` when a real Codex session UUID is available, which is
+the value to pass back as `sessionId` (or via `resumeLatest`) to resume.
+Per-CLI auth and timeout failures return actionable remediation in the
+error message rather than a bare "not found".
+
 ---
 
 ### Security
@@ -409,7 +418,7 @@ Integration: Real MCP server, real CLI calls
 ---
 
 ### Coverage
-**Status:** ✅ Comprehensive (1078 tests as of 2.0.0)
+**Status:** ✅ Comprehensive (1789 tests as of 2.12.0)
 
 - Executor: errors, timeouts, paths
 - Sessions: CRUD, persistence, edge cases, concurrency
@@ -424,7 +433,7 @@ Integration: Real MCP server, real CLI calls
 **Status:** ⚠️ Integration slow (~42s)
 
 Real CLI calls: 2-14s each
-Total: 1078 tests in ~40s wall as of 2.0.0 (cache-awareness, security-posture, async-job, persistence, sqlite-driver, and cross-engine suites included)
+Total: 1789 tests in ~47s wall as of 2.12.0 (cache-awareness, security-posture, async-job, persistence, sqlite-driver, and cross-engine suites included)
 
 **Options:**
 1. Faster models (haiku, flash)

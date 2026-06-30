@@ -86,7 +86,7 @@ claude_request_async({prompt:"Analyze src/ for type safety...",approvalStrategy:
 
 Response:
 ```json
-{"success":true,"job":{"id":"job-abc123","cli":"claude","status":"running","startedAt":"..."},"sessionId":"...","approval":null,"mcpServers":{"requested":["sqry"]}}
+{"success":true,"job":{"id":"job-abc123","cli":"claude","status":"running","startedAt":"..."},"sessionId":"...","approval":null,"mcpServers":{"requested":["example-server"]}}
 ```
 
 - Gemini async responses also include `resumable:true|false`; only user-provided Gemini `sessionId` values are resumable
