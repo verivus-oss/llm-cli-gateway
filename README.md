@@ -1046,7 +1046,7 @@ List available models for each CLI.
 
 **Parameters:**
 
-- `cli` (string, optional): Specific CLI to list models for ("claude", "codex", "gemini", "grok", "mistral", "devin")
+- `cli` (string, optional): Specific provider to list models for (`"claude"`, `"codex"`, `"gemini"`, `"grok"`, `"mistral"`, `"devin"`, or an enabled API provider name). When one or more `[providers.<name>]` API providers are enabled, the unfiltered response also carries an `apiProviders` array (each entry tagged `providerKind: "api"`); see [API providers (HTTP)](#api-providers-http).
 
 **Response includes:**
 
@@ -1094,7 +1094,7 @@ inputs.
 
 **Parameters:**
 
-- `cli` (string, optional): Provider filter (`"claude"`, `"codex"`, `"gemini"`, `"grok"`, `"mistral"`, `"devin"`, or `"grok_api"`)
+- `cli` (string, optional): Provider filter (`"claude"`, `"codex"`, `"gemini"`, `"grok"`, `"mistral"`, `"devin"`, `"grok_api"`, or an enabled API provider name)
 - `includeSkills` (boolean, default `true`): Include bounded local skill discovery
 - `includeProviderTools` (boolean, default `true`): Include provider-native tools extracted from discovered skills
 - `includeUnsupported` (boolean, default `true`): Include explicit unsupported/degraded input records
@@ -1115,12 +1115,15 @@ Equivalent MCP resources:
 - `provider-tools://grok_api`
 - `provider-tools://mistral`
 - `provider-tools://devin`
+- `provider-tools://<api-provider>` for each enabled `[providers.<name>]` API provider
 
 `doctor --json` also emits a compact `provider_capabilities` block with the
 same schema version, per-provider request tool names, supported feature names,
 unsupported input names, config-surface counts, discovery counts, and resource
 URIs. This block is intended for setup assistants that need a concise capability
-summary without local skill bodies or raw paths.
+summary without local skill bodies or raw paths. When API providers are enabled,
+`doctor --json` additionally emits an `api_providers` health block; see
+[API providers (HTTP)](#api-providers-http).
 
 ##### `cli_versions`
 
@@ -1162,6 +1165,73 @@ Plan or run an upgrade for one CLI.
   "dryRun": true
 }
 ```
+
+## API providers (HTTP)
+
+In addition to the spawnable CLI tools, the gateway can route requests to first-class **HTTP/API providers** (OpenRouter and other OpenAI-compatible endpoints, the Anthropic Messages API, and the xAI Responses API). These use Node's built-in HTTP client (`node:https`, or `node:http` for loopback endpoints) rather than spawning a CLI, and they run through the same request/job/validation/flight-recorder machinery as the CLI tools, so they reach parity for sessions, async jobs, dedup, retries, usage/cost capture, and cross-LLM validation.
+
+### Configuring a provider
+
+API providers are declared as `[providers.<name>]` blocks in `~/.llm-cli-gateway/config.toml` (override with `LLM_GATEWAY_CONFIG`). The `<name>` becomes the provider's identity across every tool and resource and **must not** collide with a spawnable CLI name (`claude`, `codex`, `gemini`, `grok`, `mistral`, `devin`); a collision is rejected with a warning and the provider is disabled.
+
+```toml
+# OpenRouter (OpenAI-compatible). The key is read from the named env var at
+# request time and is never written to config, logs, the flight recorder, or
+# the dedup key.
+[providers.openrouter]
+kind = "openai-compatible"                 # "openai-compatible" | "anthropic" | "xai-responses"
+base_url = "https://openrouter.ai/api/v1"
+api_key_env = "OPENROUTER_API_KEY"         # env var NAME, not the key itself
+default_model = "x-ai/grok-2"
+models = ["x-ai/grok-2", "anthropic/claude-sonnet-4.6"]   # optional allowlist: an explicit model must be listed (omit model to use default_model)
+usage_include = true                       # OpenRouter token/cost reporting (usage:{include:true})
+
+# Keyless-local: an openai-compatible provider on a loopback base_url (Ollama,
+# llama.cpp) is enabled with no api_key_env at all.
+[providers.ollama]
+kind = "openai-compatible"
+base_url = "http://127.0.0.1:11434/v1"
+default_model = "qwen2.5"
+```
+
+A provider is **enabled** when its `api_key_env` resolves to a non-empty value, OR it is a keyless-local `openai-compatible` provider on a loopback `base_url`. `base_url` must use `https` unless it targets localhost/loopback. A **schema-invalid** single `[providers.<name>]` block disables only itself (with a warning) and leaves the other providers untouched; a TOML **syntax** error anywhere in the file is different, it makes the whole config fall back to defaults.
+
+The pre-existing `[providers.xai]` block keeps its dedicated `grok_api_request` tool and xAI identity. It is also exposed through the generic surface like any other enabled provider, so a configured xAI key registers **both** `grok_api_request` and the generic `api_xai_request` (and the `xai` entry appears in `apiProviders`, `models://xai`, etc.).
+
+### Request tools
+
+For each enabled provider, the gateway registers `api_<name>_request` (and `api_<name>_request_async` when async jobs are enabled). They accept the same shape as the CLI request tools:
+
+- `prompt` (or the cache-aware `promptParts` `{ system?, tools?, context?, task }`, mutually exclusive), optional `system`
+- `model` (omit to use `default_model`; an explicit value is rejected if outside a configured `models` allowlist), `maxOutputTokens`, `temperature`, `topP`
+- `reasoningEffort` (`none|low|medium|high`): forwarded only by the `xai-responses` adapter; accepted but ignored by the other kinds
+- `timeoutMs`, `optimizePrompt`, `optimizeResponse`, `forceRefresh`, `correlationId`
+- `sessionId` / `createNewSession` for continuity on the synchronous `api_<name>_request` (see below); on the async variant they are currently inert
+
+Responses (and the 50 MB output cap, dedup window, cancellation, retention) behave exactly as for the CLI tools, and HTTP requests are logged to the flight recorder with status/usage/cost like everything else.
+
+### Continuity
+
+Continuity is capability-typed per provider kind and never stores conversation content in the session record (the gateway's no-transcript-in-sessions invariant holds):
+
+- **`xai-responses`** uses real server-side continuation: the gateway persists the provider's `previous_response_id` in session metadata and threads it back on resume, self-healing on a stale-handle 404.
+- **`openai-compatible`** and **`anthropic`** are stateless-resend: the session tracks active/owner state for principal isolation, but the caller resends prior context (no server-side conversation handle exists).
+
+### Discovery surfaces
+
+Enabled API providers appear, alongside the CLI providers, across the discovery surfaces. The model, capability, doctor, and resource surfaces below **omit** their API field entirely when no API providers are enabled, so their output is byte-identical to before; `llm_process_health` is the exception (it always carries an `apiProviders` array that is simply empty when none are enabled):
+
+- **`list_models`** / **`list_available_models`**: an `apiProviders` array tagged `providerKind: "api"` with `defaultModel` and the optional allowlist, omitted entirely when no API providers are enabled.
+- **`llm_process_health`**: an always-present `outboundProviders.apiProviders` array (empty when none are enabled) carrying the same projection plus each provider's circuit-breaker state.
+- **`provider_tool_capabilities`**: per-`api`-kind capability metadata. Model + sampling + (for `xai-responses`) reasoning + continuity are supported; allow/deny tool lists, MCP servers, local skills, and workspace/worktree controls are not (those are CLI-only).
+- **`doctor --json`**: an `api_providers` health block (kind, `base_url`, `default_model`, models, the key env var name, whether the key is present, and login guidance), omitted entirely when none are enabled. The optional flag `doctor --json --probe-api-providers` adds a per-provider endpoint-reachability result (a bare `GET`, treating any HTTP response as reachable). The probe is **opt-in and off by default**: a normal `doctor` run opens no socket and spends no tokens (`reachable` stays `null`).
+- **MCP resources**: `models://<provider>` for every enabled provider and `sessions://<provider>` for continuity-tracked kinds, plus `provider-tools://<provider>`. The `provider-subcommands://` resources stay CLI-only (API providers have no subcommands).
+
+The API key value is never emitted on any of these surfaces (only the env var name and a presence boolean). Because `base_url` is config-supplied and may legally carry URL userinfo, the diagnostic surfaces (`doctor`, login guidance) redact any embedded credentials before displaying it; the actual request path and the reachability probe still use the original configured URL.
+
+### Security note
+
+The resolved API key is excluded from `payloadJson`, the dedup key, logs, and the flight recorder. However, the **request prompt is persisted in plaintext** in the async job store (the SQLite file at `[persistence].path`, default `~/.llm-cli-gateway/logs.db`) and is not covered by secret redaction. This mirrors the CLI tools, whose prompt is persisted in `argsJson` whenever it is passed as a command argument (a few CLI paths instead stream the prompt over stdin and so do not persist it). Treat the job store as sensitive at rest. See [Security Considerations](#security-considerations).
 
 ## Session Management
 
@@ -1418,6 +1488,8 @@ The gateway supports concurrent requests across different CLIs. Each request spa
 ## Security Considerations
 
 - **Input Validation**: All prompts are validated (min 1 char, max 100k chars)
+- **API-provider keys**: For `[providers.<name>]` HTTP providers, the gateway reads the key from the named environment variable at request time only. The resolved key is excluded from the persisted `payloadJson`, the dedup key, logs, and the flight recorder, and is never surfaced on the discovery/diagnostic surfaces (which report only the env var name and a presence boolean). `base_url` userinfo is redacted on the diagnostic surfaces. See [API providers (HTTP)](#api-providers-http).
+- **Prompt persistence at rest**: Async job rows store the request **prompt in plaintext** (HTTP `payloadJson`, and CLI `argsJson` whenever the prompt is passed as a command argument rather than streamed over stdin); this is not covered by secret redaction. The SQLite job-store file (default `~/.llm-cli-gateway/logs.db`, configurable via `[persistence].path`) is `chmod`ed to `0o600` on non-Windows hosts; treat it as sensitive and scope/rotate it like any prompt log. Set `[persistence].backend = "none"` to disable the async job store entirely (the `*_request_async` / `llm_job_*` tools are then not registered).
 - **Command Execution**: Uses `spawn` with separate arguments (not shell execution)
 - **No Eval**: No dynamic code evaluation in our source (see "Socket alerts" below for the transitive `ajv` codegen case)
 - **Sandboxing**: Consider running in containers for production use
