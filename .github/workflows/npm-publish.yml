@@ -106,9 +106,9 @@ jobs:
         run: npm pack --dry-run
 
       - name: Publish (dry run)
-        if: inputs.dry-run == 'true'
+        if: ${{ inputs['dry-run'] }}
         run: npm publish --dry-run --ignore-scripts
 
       - name: Publish
-        if: inputs.dry-run != 'true'
+        if: ${{ !inputs['dry-run'] }}
         run: npm publish --ignore-scripts
