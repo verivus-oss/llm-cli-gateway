@@ -105,9 +105,13 @@ jobs:
       - name: Verify package contents
         run: npm pack --dry-run
 
-      - name: Publish (dry run)
+      - name: Verify npm auth (dry run)
         if: ${{ inputs['dry-run'] }}
-        run: npm publish --dry-run --ignore-scripts
+        run: |
+          # `npm publish --dry-run` still fails when the exact version already
+          # exists on npm, so a manual smoke test validates registry auth
+          # explicitly and relies on the pack step above for tarball contents.
+          npm whoami >/dev/null
 
       - name: Publish
         if: ${{ !inputs['dry-run'] }}
