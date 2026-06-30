@@ -51,12 +51,14 @@ jobs:
         uses: Azure/cli@9fe27e8f2d4177d9755d43d94f89e79f065ef883 # v3.0.0
         env:
           AZURE_CORE_OUTPUT: none
+          AZURE_KEY_VAULT_NAME: ${{ vars.AZURE_KEY_VAULT_NAME }}
+          AZURE_KEY_VAULT_NPM_TOKEN_SECRET_NAME: ${{ vars.AZURE_KEY_VAULT_NPM_TOKEN_SECRET_NAME }}
         with:
           inlineScript: |
             set -euo pipefail
             token="$(az keyvault secret show \
-              --vault-name "${{ vars.AZURE_KEY_VAULT_NAME }}" \
-              --name "${{ vars.AZURE_KEY_VAULT_NPM_TOKEN_SECRET_NAME }}" \
+              --vault-name "${AZURE_KEY_VAULT_NAME}" \
+              --name "${AZURE_KEY_VAULT_NPM_TOKEN_SECRET_NAME}" \
               --query value -o tsv)"
             if [ -z "${token}" ]; then
               echo "ERROR: Azure Key Vault returned an empty npm publish token" >&2
