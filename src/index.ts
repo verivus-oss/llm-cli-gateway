@@ -14,7 +14,7 @@ import {
   writeFileSync,
   chmodSync,
 } from "fs";
-import { dirname, join } from "path";
+import { basename, dirname, isAbsolute, join, relative } from "path";
 import { fileURLToPath } from "url";
 import { z } from "zod/v3";
 import { executeCli, killAllProcessGroups, providerCommandName } from "./executor.js";
@@ -28,6 +28,8 @@ import {
   PROVIDER_TYPES,
   ISessionManager,
   createSessionManager,
+  callerIsRemote,
+  remoteSafeSession,
   type CliType,
   type ProviderType,
   type Session,
@@ -1423,7 +1425,14 @@ async function resolveWorkspaceAndWorktreeForRequest(args: {
       workspaceAlias: workspace?.alias,
       workspaceRoot: workspace?.root,
     });
-    return { cwd: resolved.cwd, worktreePath: resolved.worktreePath, workspace };
+    // The persisted metadata + spawn cwd keep the absolute worktree path (resume
+    // needs it), but the RESPONSE-facing display path must not leak the operator's
+    // local absolute layout to a remote client. Return a workspace-relative label
+    // for remote HTTP/OAuth callers; local callers still get the absolute path.
+    const displayWorktreePath = isRemoteTransport
+      ? remoteSafeWorktreePath(resolved.worktreePath, workspace?.root)
+      : resolved.worktreePath;
+    return { cwd: resolved.cwd, worktreePath: displayWorktreePath, workspace };
   }
   if (workspace && args.sessionId) {
     await Promise.resolve(
@@ -1453,6 +1462,25 @@ async function resolveWorkspaceAndWorktreeForRequest(args: {
  */
 export function formatWorktreePrefix(worktreePath?: string): string {
   return worktreePath ? `[gateway] worktree=${worktreePath}\n` : "";
+}
+
+/**
+ * Project an absolute worktree path to a remote-client-safe label: a path
+ * relative to the workspace root (e.g. `.worktrees/<id>`), or the basename when
+ * the root is unknown, so no operator-local absolute path is disclosed to a
+ * remote HTTP/OAuth caller. The absolute path is still used internally for the
+ * spawn cwd and persisted session metadata (resume).
+ */
+export function remoteSafeWorktreePath(
+  worktreePath?: string,
+  workspaceRoot?: string
+): string | undefined {
+  if (!worktreePath) return worktreePath;
+  if (workspaceRoot) {
+    const rel = relative(workspaceRoot, worktreePath);
+    if (rel && !rel.startsWith("..") && !isAbsolute(rel)) return rel;
+  }
+  return basename(worktreePath);
 }
 
 function workspaceAdminEnabled(): boolean {
@@ -12759,7 +12787,9 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
                 {
                   success: true,
                   session: {
-                    ...session,
+                    // Remote callers get a path-redacted view; local operators
+                    // keep absolute paths for administration.
+                    ...(callerIsRemote() ? remoteSafeSession(session) : session),
                     isActive: activeSession?.id === session.id,
                     ...(cacheState ? { cacheState } : {}),
                   },
@@ -13055,6 +13085,20 @@ function validateCliRedirectUri(uri: string): void {
   );
 }
 
+/**
+ * Validate an OAuth client id at `oauth client add` time. The id is echoed
+ * verbatim in doctor / connector-setup / setup-UI output, so restrict it to a
+ * safe charset (letters, digits, dot, underscore, hyphen) to prevent log/prompt
+ * injection or shell-surprising values leaking into copy-safe surfaces.
+ */
+function validateCliClientId(clientId: string): void {
+  if (!/^[A-Za-z0-9._-]{1,128}$/.test(clientId)) {
+    throw new Error(
+      `Invalid client-id "${clientId}": use 1-128 chars of letters, digits, dot, underscore, or hyphen.`
+    );
+  }
+}
+
 function hostIsLoopback(hostname: string): boolean {
   const h = hostname.toLowerCase();
   return h === "localhost" || h === "127.0.0.1" || h === "::1" || h === "[::1]";
@@ -13104,6 +13148,7 @@ function runOAuthCommand(args: string[]): void {
         throw new Error(
           "Usage: llm-cli-gateway oauth client add <client-id> --redirect-uri <uri> [--print-once]"
         );
+      validateCliClientId(clientId);
       const redirectUri = requireArg(args, "--redirect-uri");
       // Validate the redirect URI BEFORE writing config so a scheme-less or
       // malformed value never lands in ~/.llm-cli-gateway/config.toml.

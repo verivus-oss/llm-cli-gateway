@@ -577,6 +577,7 @@ export function buildRemoteHttpOAuthReadiness(
       status,
       issues,
       workspace: input.workspace,
+      endpointReachability: e.reachable_from_web,
     }),
   };
 }
@@ -592,6 +593,7 @@ function remoteReadinessNextActions(
     status: RemoteOAuthConfigDiagnostics["status"];
     issues: string[];
     workspace: RemoteSafeWorkspaceSummary;
+    endpointReachability: EndpointExposureReport["reachable_from_web"];
   }
 ): string[] {
   switch (stage) {
@@ -645,13 +647,22 @@ function remoteReadinessNextActions(
         "No workspace is available for remote provider execution. Register a repo and set it as the default: add a [[workspaces.repos]] entry with [workspaces].default in ~/.llm-cli-gateway/config.toml, or run `llm-cli-gateway workspace add <alias> <absolute-repo-path> --default` when an allowed root is configured.",
         "Remote clients then select the workspace by alias; local absolute paths are never accepted from remote clients.",
       ];
-    case "ready":
-      return [
+    case "ready": {
+      const readyActions = [
         ctx.workspace.default
           ? `Remote connector is ready. Remote provider calls use the default workspace "${ctx.workspace.default}" unless a registered alias is supplied.`
           : "Remote connector is ready. Remote provider calls must supply a registered workspace alias; set a default with `llm-cli-gateway workspace add <alias> <path> --default` to make one implicit.",
         "Paste only copy-safe connector fields (MCP URL, authorization URL, token URL, client id) into the remote connector UI.",
       ];
+      // "ready" means configuration is complete. Reachability is an opt-in probe;
+      // when it has not run, say so rather than implying the endpoint was verified.
+      if (ctx.endpointReachability === "not_checked") {
+        readyActions.push(
+          "Config is complete but public reachability was not verified. Set LLM_GATEWAY_VERIFY_PUBLIC_URL=1 and re-run doctor --json to confirm the public URL is reachable from the web."
+        );
+      }
+      return readyActions;
+    }
     default:
       return [];
   }

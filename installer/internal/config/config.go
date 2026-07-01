@@ -195,6 +195,13 @@ func NormalizePublicURL(rawURL, defaultPath string) (string, error) {
 	if parsed.Scheme != "https" {
 		return "", errors.New("public URL must use https:// for ChatGPT and other web clients")
 	}
+	// Strip credential-bearing / non-canonical components at store time: a public
+	// MCP URL must never carry userinfo, query, or fragment. This prevents a
+	// secret-bearing URL (e.g. https://user:pass@host/mcp?token=SECRET) from being
+	// persisted and later echoed by public-url / print-client-config / doctor.
+	parsed.User = nil
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
 	if parsed.Path == "" || parsed.Path == "/" {
 		parsed.Path = defaultPath
 	}
@@ -344,14 +351,28 @@ func JoinBaseAndPath(baseOrigin, path string) string {
 	return base + path
 }
 
-// remoteOAuthOrigin derives the scheme://host[:port] origin from a (redacted)
-// public URL, stripping the MCP path suffix if present and any trailing slash.
-// Empty when no public URL.
-func remoteOAuthOrigin(redactedPublicURL, httpPath string) string {
-	if redactedPublicURL == "" {
+// ToOrigin mirrors toOrigin in src/remote-url.ts: reduce any URL to its origin
+// (scheme://host[:port]), dropping userinfo, path, query, and fragment so no
+// credential-bearing or path material leaks into constructed URLs and so OAuth
+// endpoints cannot diverge from the Node runtime (which builds from URL origin,
+// not string trimming). Empty on parse failure or missing scheme/host.
+func ToOrigin(rawURL string) string {
+	if rawURL == "" {
 		return ""
 	}
-	return strings.TrimRight(strings.TrimSuffix(redactedPublicURL, httpPath), "/")
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return ""
+	}
+	return u.Scheme + "://" + u.Host
+}
+
+// remoteOAuthOrigin derives the scheme://host[:port] origin from a (redacted)
+// public URL via true URL parsing (not path-suffix trimming), so a public URL
+// whose path differs from the MCP path, or that carries userinfo/query, still
+// yields a correct, credential-free origin. Empty when no public URL.
+func remoteOAuthOrigin(redactedPublicURL, _httpPath string) string {
+	return ToOrigin(redactedPublicURL)
 }
 
 // OAuthURLs builds the canonical OAuth endpoint URLs from a base origin. Kept in

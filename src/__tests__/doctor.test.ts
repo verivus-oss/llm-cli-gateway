@@ -741,6 +741,20 @@ describe("remote_http_oauth readiness projection", () => {
     expect(r.workspace.aliases).toEqual(["gateway"]);
   });
 
+  it("ready without a reachability check adds a verify caveat (does not overclaim)", () => {
+    const verified = buildRemoteHttpOAuthReadiness(readyInput());
+    expect(verified.stage).toBe("ready");
+    // Default readyInput endpoint is reachable -> no caveat.
+    expect(verified.next_actions.join(" ")).not.toContain("LLM_GATEWAY_VERIFY_PUBLIC_URL");
+
+    const unverified = buildRemoteHttpOAuthReadiness(
+      readyInput({ endpoint: endpoint({ reachable_from_web: "not_checked" }) })
+    );
+    expect(unverified.stage).toBe("ready");
+    expect(unverified.next_actions.join(" ")).toContain("LLM_GATEWAY_VERIFY_PUBLIC_URL");
+    expect(unverified.next_actions.join(" ").toLowerCase()).toContain("not verified");
+  });
+
   it("reports consent_required from runtime OAuth config", () => {
     const r = buildRemoteHttpOAuthReadiness(
       readyInput({

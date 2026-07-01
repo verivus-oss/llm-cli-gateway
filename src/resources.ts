@@ -1,4 +1,9 @@
-import { ISessionManager, type Session } from "./session-manager.js";
+import {
+  ISessionManager,
+  callerIsRemote,
+  remoteSafeSession,
+  type Session,
+} from "./session-manager.js";
 import { CLI_TYPES, PROVIDER_TYPES, type CliType, type ProviderType } from "./session-manager.js";
 import { getRequestContext, principalCanAccess, resolveOwnerPrincipal } from "./request-context.js";
 import { PerformanceMetrics } from "./metrics.js";
@@ -337,7 +342,10 @@ export class ResourceProvider {
    */
   private ownedSessions(sessions: Session[]): Session[] {
     const caller = resolveOwnerPrincipal(getRequestContext());
-    return sessions.filter(s => principalCanAccess(s.ownerPrincipal, caller));
+    const owned = sessions.filter(s => principalCanAccess(s.ownerPrincipal, caller));
+    // Remote callers must not learn local absolute paths via session metadata
+    // (worktreePath/workspaceRoot); redact them for the remote-facing resources.
+    return callerIsRemote() ? owned.map(remoteSafeSession) : owned;
   }
 
   /** F3b: the active-session id for a provider, or null if the caller may not see it. */

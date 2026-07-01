@@ -15,10 +15,12 @@ import {
   describeWorkspace,
   describeWorkspaceRemote,
   loadWorkspaceRegistry,
+  registerExistingWorkspace,
   remoteSafeWorkspaceSummary,
   resolveWorkspaceForProvider,
   validatePathInsideWorkspace,
 } from "../workspace-registry.js";
+import { remoteSafeWorktreePath } from "../index.js";
 
 const ORIGINAL_ENV = { ...process.env };
 
@@ -581,6 +583,64 @@ describe("workspace registry", () => {
       expect(get.isError).toBeFalsy();
       expect(getText).not.toContain(repoRoot);
       expect(JSON.parse(getText).workspace.path).toBeUndefined();
+    });
+  });
+
+  describe("registerExistingWorkspace is not a filesystem existence oracle", () => {
+    it("rejects an out-of-root path with a generic, path-free error before any FS probe", () => {
+      writeFileSync(
+        configPath,
+        [
+          "[workspaces]",
+          "",
+          "[[workspaces.allowed_roots]]",
+          `path = "${repoRoot}"`,
+          "allow_register_existing_git_repos = true",
+          "",
+        ].join("\n")
+      );
+      // A path OUTSIDE the allowed root: whether it exists or not, the error must
+      // be identical and must not echo the probed path (no existence oracle).
+      const secretPath = "/root/.ssh/id_rsa_secret_dir";
+      let msg = "";
+      try {
+        registerExistingWorkspace({ alias: "probe", repoPath: secretPath, configPath });
+      } catch (err) {
+        msg = err instanceof Error ? err.message : String(err);
+      }
+      expect(msg).toMatch(/No allowed root permits/i);
+      expect(msg).not.toContain(secretPath);
+      expect(msg).not.toContain("does not exist");
+
+      // A non-existent path that IS under the allowed root also yields no path echo
+      // in the generic pre-check (it fails the FS probe next, but the arbitrary
+      // out-of-root oracle is closed).
+      let msg2 = "";
+      try {
+        registerExistingWorkspace({
+          alias: "probe2",
+          repoPath: join(repoRoot, "does-not-exist-xyz"),
+          configPath,
+        });
+      } catch (err) {
+        msg2 = err instanceof Error ? err.message : String(err);
+      }
+      expect(msg2.length).toBeGreaterThan(0);
+    });
+  });
+
+  describe("remoteSafeWorktreePath", () => {
+    it("reduces an absolute worktree path to a workspace-relative label", () => {
+      expect(remoteSafeWorktreePath("/home/op/repo/.worktrees/abc", "/home/op/repo")).toBe(
+        join(".worktrees", "abc")
+      );
+    });
+    it("falls back to basename when the root is unknown or outside", () => {
+      expect(remoteSafeWorktreePath("/home/op/repo/.worktrees/abc")).toBe("abc");
+      expect(remoteSafeWorktreePath("/home/op/repo/.worktrees/abc", "/other/root")).toBe("abc");
+    });
+    it("passes through undefined", () => {
+      expect(remoteSafeWorktreePath(undefined, "/x")).toBeUndefined();
     });
   });
 });

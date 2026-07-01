@@ -189,6 +189,51 @@ describe("Layer 6 HTTP MCP transport (U20)", () => {
     }
   });
 
+  it("refuses public-client OAuth on a loopback bind fronted by a public URL (F17 tunnel hardening)", async () => {
+    const dir = writeOAuthConfig([
+      "[http.oauth]",
+      "enabled = true",
+      "allow_public_clients = true",
+      "",
+    ]);
+    process.env.LLM_GATEWAY_PUBLIC_URL = "https://gw.example.trycloudflare.com/mcp";
+    try {
+      await expect(
+        startHttpGateway({
+          host: "127.0.0.1",
+          port: 0,
+          path: "/mcp",
+          createGatewayServer: () => makeEchoServer(),
+        })
+      ).rejects.toThrow(/Refusing to start/i);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses open_dev OAuth on a loopback bind fronted by a tunnel provider (F17 tunnel hardening)", async () => {
+    const dir = writeOAuthConfig([
+      "[http.oauth]",
+      "enabled = true",
+      'registration_policy = "open_dev"',
+      "",
+    ]);
+    process.env.LLM_GATEWAY_OAUTH_OPEN_DEV = "1";
+    process.env.LLM_GATEWAY_TUNNEL_PROVIDER = "gw.example.trycloudflare.com";
+    try {
+      await expect(
+        startHttpGateway({
+          host: "127.0.0.1",
+          port: 0,
+          path: "/mcp",
+          createGatewayServer: () => makeEchoServer(),
+        })
+      ).rejects.toThrow(/Refusing to start/i);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("open_dev registration is env-gated, not Host-header inferred (F17)", async () => {
     const dir = writeOAuthConfig([
       "[http.oauth]",
@@ -196,9 +241,10 @@ describe("Layer 6 HTTP MCP transport (U20)", () => {
       'registration_policy = "open_dev"',
       "",
     ]);
-    process.env.LLM_GATEWAY_PUBLIC_URL = "https://gateway.example.test/mcp";
+    // Pure loopback with no public URL / tunnel: open_dev is allowed to start
+    // (the F17 hardening only fails closed when publicly exposed), and the OAuth
+    // issuer origin falls back to the loopback Host header.
     try {
-      // Loopback bind so the F17 fail-closed guard does not trip.
       gateway = await startHttpGateway({
         host: "127.0.0.1",
         port: 0,

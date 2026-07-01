@@ -72,6 +72,17 @@ describe.skipIf(!existsSync(entrypoint))("CLI oauth client + connector setup", (
     expect(readFileSync(cfg, "utf8")).not.toContain("client_id");
   });
 
+  it("oauth client add rejects an unsafe client id before writing config", () => {
+    const cfg = freshConfig();
+    const result = run(
+      ["oauth", "client", "add", "bad id;rm -rf", "--redirect-uri", "https://chatgpt.com/cb"],
+      { LLM_GATEWAY_CONFIG: cfg }
+    );
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toMatch(/client-id/i);
+    expect(readFileSync(cfg, "utf8")).not.toContain("client_secret_hash");
+  });
+
   it("oauth client add rejects an http non-loopback redirect URI (matches runtime policy)", () => {
     const cfg = freshConfig();
     const result = run(

@@ -463,12 +463,28 @@ export function registerExistingWorkspace(input: {
   if (registry.repos.some(repo => repo.alias === alias)) {
     throw new WorkspaceRegistryError(`Workspace alias "${alias}" already exists`);
   }
+  // Fail closed BEFORE any filesystem probe: a candidate path that is not,
+  // by string containment, under an allowed root that permits registering
+  // existing repos is rejected with a generic, path-free error. This prevents a
+  // remote (admin-scoped) caller from using the differentiated realExistingPath
+  // errors ("does not exist: <path>", "not a Git repo") as a filesystem
+  // existence oracle to map the operator's local layout with arbitrary paths.
+  const genericDenied = new WorkspaceRegistryError(
+    "No allowed root permits registering a Git repository at the requested path."
+  );
+  if (!path.isAbsolute(input.repoPath)) throw genericDenied;
+  const candidateReal = path.resolve(expandHome(input.repoPath));
+  const permittingRoot = registry.allowedRoots.find(
+    candidate => candidate.allowRegisterExistingGitRepos && isUnder(candidate.path, candidateReal)
+  );
+  if (!permittingRoot) throw genericDenied;
   const real = realExistingPath(input.repoPath);
   if (!isGitRepo(real)) throw new WorkspaceRegistryError("Existing workspace must be a Git repo");
-  const root = registry.allowedRoots.find(candidate => isUnder(candidate.path, real));
-  if (!root?.allowRegisterExistingGitRepos) {
-    throw new WorkspaceRegistryError("No allowed root permits registering this Git repo");
-  }
+  // Re-check after realpath so a symlink under an allowed root cannot escape it.
+  const root = registry.allowedRoots.find(
+    candidate => candidate.allowRegisterExistingGitRepos && isUnder(candidate.path, real)
+  );
+  if (!root) throw genericDenied;
   const workspaces = ((raw.workspaces as Record<string, unknown> | undefined) ?? {}) as Record<
     string,
     unknown

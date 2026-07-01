@@ -107,26 +107,31 @@ func run(args []string) error {
 		if err != nil {
 			return err
 		}
-		endpoint := "http://" + cfg.HTTPHost + ":" + cfg.HTTPPort + cfg.HTTPPath
+		localURL := "http://" + cfg.HTTPHost + ":" + cfg.HTTPPort + cfg.HTTPPath
+		endpoint := localURL
 		if cfg.PublicURL != "" {
 			endpoint = cfg.PublicURL
 		}
-		issuer := strings.TrimRight(strings.TrimSuffix(endpoint, cfg.HTTPPath), "/")
-		oauth := config.OAuthURLs(issuer)
+		// Build every emitted URL from the clean origin (scheme://host[:port]) so
+		// no userinfo/query/fragment or non-canonical path from a public URL can
+		// leak or point a connector at the wrong endpoint. Matches src/remote-url.ts.
+		origin := config.ToOrigin(endpoint)
+		mcpURL := config.JoinBaseAndPath(origin, cfg.HTTPPath)
+		oauth := config.OAuthURLs(origin)
 		oauth["enabled"] = true
 		oauth["client_secret"] = "<copy-once local oauth command output only>"
 		return printJSON(map[string]any{
 			"ok":                    true,
 			"transport":             "streamable_http",
-			"url":                   endpoint,
-			"local_url":             "http://" + cfg.HTTPHost + ":" + cfg.HTTPPort + cfg.HTTPPath,
+			"url":                   mcpURL,
+			"local_url":             localURL,
 			"web_clients_supported": cfg.PublicURL != "" && strings.HasPrefix(cfg.PublicURL, "https://"),
 			"oauth":                 oauth,
 			// OAuth-first: the deprecated no-auth connector URL is intentionally
 			// omitted here. It is available only via the explicit legacy path
 			// (`chatgpt-url` command / `connector setup --include-legacy-no-auth`).
 			"chatgpt": map[string]any{
-				"url":            endpoint,
+				"url":            mcpURL,
 				"authentication": "OAuth",
 			},
 			"headers": map[string]string{"Authorization": "Bearer <redacted>"},

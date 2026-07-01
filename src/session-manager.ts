@@ -1,6 +1,12 @@
 import { randomUUID } from "crypto";
 import { homedir } from "os";
-import { join, dirname } from "path";
+import {
+  join,
+  dirname,
+  relative as pathRelative,
+  isAbsolute as pathIsAbsolute,
+  basename as pathBasename,
+} from "path";
 import {
   existsSync,
   mkdirSync,
@@ -111,6 +117,38 @@ export interface Session {
 export interface SessionStorage {
   sessions: Record<string, Session>;
   activeSession: Record<ProviderType, string | null>;
+}
+
+/**
+ * Project a session for a remote HTTP/OAuth caller: strip local absolute paths
+ * from metadata (`workspaceRoot`, and `worktreePath` reduced to a
+ * workspace-relative label) so a remote client cannot learn the operator's local
+ * filesystem layout via `session_get` or the `sessions://*` resources. The
+ * stored session keeps the absolute paths (resume needs them); this returns a
+ * shallow copy for the caller-facing surface only. `workspaceAlias` is retained
+ * (an alias, not a path).
+ */
+export function remoteSafeSession(session: Session): Session {
+  const metadata = session.metadata;
+  if (!metadata) return session;
+  const next: Record<string, any> = { ...metadata };
+  if (typeof next.worktreePath === "string") {
+    const root = typeof next.workspaceRoot === "string" ? next.workspaceRoot : undefined;
+    const rel = root ? pathRelative(root, next.worktreePath) : "";
+    next.worktreePath =
+      rel && !rel.startsWith("..") && !pathIsAbsolute(rel) ? rel : pathBasename(next.worktreePath);
+  }
+  if (typeof next.workspaceRoot === "string") delete next.workspaceRoot;
+  return { ...session, metadata: next };
+}
+
+/**
+ * Whether the ambient request is a remote HTTP/OAuth caller (as opposed to a
+ * local stdio operator). Used to decide when to apply `remoteSafeSession`.
+ */
+export function callerIsRemote(): boolean {
+  const ctx = getRequestContext();
+  return ctx?.transport === "http" || ctx?.authKind === "oauth";
 }
 
 /**
