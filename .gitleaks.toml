@@ -28,6 +28,11 @@ paths = [
   # against deliberately fake provider/cloud/VCS keys, JWTs, and PEM blocks
   # (F4). Every literal in it is a fixture, never a real secret.
   '''src/__tests__/secret-redaction\.test\.ts$''',
+  # The gateway-logger redaction unit test asserts the central stderr logger
+  # scrubs message strings, structured args, and nested Error name/stack
+  # values. Every literal (fake api_key=, xai-, Bearer, etc.) is a deliberate
+  # fixture that exists only to be redacted; there is no real secret.
+  '''src/__tests__/gateway-logger\.test\.ts$''',
 ]
 
 # Regex-scope allowlist: specific secret patterns that gitleaks would
