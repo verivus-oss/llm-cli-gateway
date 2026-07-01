@@ -30,6 +30,7 @@ import {
   type CliType,
   type KnownApiProviderType,
 } from "./provider-types.js";
+import { getAllProviderDefinitions } from "./provider-definitions.js";
 
 export { API_PROVIDER_TYPES, CLI_TYPES, type CliType, type KnownApiProviderType };
 
@@ -73,14 +74,14 @@ export function providerKind(provider: ProviderType): ProviderKind {
   return isCliType(provider) ? "cli" : "api";
 }
 
+// Session labels for the spawnable CLIs are DERIVED from the provider
+// definition registry (`sessionLabel`), not owned here: session-manager keeps
+// no separate provider list. Only the API-provider labels (no registry entry
+// yet) stay local.
 const KNOWN_SESSION_DESCRIPTIONS: Partial<Record<ProviderType, string>> = {
-  claude: "Claude Session",
-  codex: "Codex Session",
-  gemini: "Gemini Session",
-  grok: "Grok Session",
-  mistral: "Mistral Session",
-  devin: "Devin Session",
-  cursor: "Cursor Session",
+  ...(Object.fromEntries(
+    getAllProviderDefinitions().map(def => [def.id, def.sessionLabel])
+  ) as Record<CliType, string>),
   "grok-api": "Grok API Session",
 };
 

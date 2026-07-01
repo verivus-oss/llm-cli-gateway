@@ -1,6 +1,9 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import type { CliType } from "./session-manager.js";
+// Provider identity (CliType, and the CLI provider list this file keys its
+// Record<CliType, ...> contracts by) comes from the provider definition
+// registry, not a hand-maintained list here. See src/provider-definitions.ts.
+import type { CliType } from "./provider-definitions.js";
 import { envWithExtendedPath, getExtendedPath, resolveCommandForSpawn } from "./executor.js";
 
 /**

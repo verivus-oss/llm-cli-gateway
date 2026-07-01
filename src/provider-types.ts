@@ -1,3 +1,11 @@
+/**
+ * The canonical CLI provider enum. This tuple is the ENUM SOURCE for provider
+ * identity: `src/provider-definitions.ts` keys its registry off it
+ * (`satisfies Record<CliType, ProviderDefinition>`), so every provider surface
+ * derives from here. This file is on the `provider:surfaces:check` allowlist
+ * because it is the one sanctioned place that spells the provider names out.
+ * Do not copy this list into any other module; import the registry instead.
+ */
 export const CLI_TYPES = [
   "claude",
   "codex",

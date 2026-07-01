@@ -4,7 +4,9 @@ import path from "path";
 import { parse as parseToml } from "smol-toml";
 import { CLAUDE_MCP_SERVER_NAMES } from "./claude-mcp-config.js";
 import { getAvailableCliInfo, type CliInfo } from "./model-registry.js";
-import { CLI_TYPES, type CliType } from "./session-manager.js";
+// Provider identity (the CLI provider list + CliType) is imported from the
+// provider definition registry, not owned here. See src/provider-definitions.ts.
+import { CLI_TYPES, type CliType } from "./provider-definitions.js";
 import {
   enabledApiProviders,
   isXaiProviderEnabled,
