@@ -393,6 +393,35 @@ describe("workspace registry", () => {
     }
   });
 
+  it("workspace MCP tools reject stdio/no-context callers", async () => {
+    const server = createGatewayServer({ workspaces: disabledWorkspaces() });
+    const tools = registeredTools(server);
+
+    for (const [toolName, args] of [
+      ["workspace_list", {}],
+      ["workspace_get", { alias: "missing" }],
+      ["workspace_create", { alias: "newrepo", root: "allowed", slug: "newrepo" }],
+      ["workspace_register_existing_repo", { alias: "newrepo", path: tempDir }],
+    ] as const) {
+      const result = await tools[toolName].handler(args, {});
+      expect(result.isError, `${toolName} should reject stdio/no-context callers`).toBe(true);
+      expect(result.content[0]?.text).toContain("only for remote HTTP/OAuth workspace clients");
+      expect(result.content[0]?.text).toContain("pass workingDir/addDir/includeDirs directly");
+    }
+  });
+
+  it("workspace_list remains available to remote HTTP callers", async () => {
+    const server = createGatewayServer({ workspaces: disabledWorkspaces() });
+
+    const result = await runWithRequestContext(
+      { transport: "http", authKind: "gateway_bearer", authScopes: ["mcp"] },
+      () => registeredTools(server).workspace_list.handler({}, {})
+    );
+
+    expect(result.isError).not.toBe(true);
+    expect(result.content[0]?.text).toContain('"success": true');
+  });
+
   it("workspace admin tools require an OAuth workspace admin scope", async () => {
     process.env.LLM_GATEWAY_WORKSPACE_ADMIN = "1";
     const server = createGatewayServer({ workspaces: disabledWorkspaces() });
@@ -406,7 +435,14 @@ describe("workspace registry", () => {
     };
     const withoutScope = await registeredTools(server).workspace_create.handler(args, {});
     expect(withoutScope.isError).toBe(true);
-    expect(withoutScope.content[0]?.text).toContain("workspace:admin");
+    expect(withoutScope.content[0]?.text).toContain("only for remote HTTP/OAuth");
+
+    const remoteWithoutScope = await runWithRequestContext(
+      { authKind: "oauth", authScopes: ["mcp"], authClientId: "non-admin-client" },
+      () => registeredTools(server).workspace_create.handler(args, {})
+    );
+    expect(remoteWithoutScope.isError).toBe(true);
+    expect(remoteWithoutScope.content[0]?.text).toContain("workspace:admin");
 
     const withScope = await runWithRequestContext(
       { authKind: "oauth", authScopes: ["workspace:admin"], authClientId: "admin-client" },

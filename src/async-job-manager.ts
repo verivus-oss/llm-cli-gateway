@@ -19,7 +19,7 @@ import {
 } from "./flight-recorder.js";
 import { codexFrResponse } from "./codex-json-parser.js";
 import type { JobTransport, OrphanedJobSnapshot, ValidationRunStore } from "./job-store.js";
-import { getRequestContext, resolveOwnerPrincipal } from "./request-context.js";
+import { getRequestContext, resolveOwnerPrincipal, principalCanAccess } from "./request-context.js";
 import {
   runApiRequest,
   ApiHttpError,
@@ -28,6 +28,7 @@ import {
   type ApiResult,
   type ApiUsage,
 } from "./api-provider.js";
+import { type JobLimitsConfig } from "./config.js";
 
 /**
  * Slice 1: pull the real HTTP status out of a (possibly circuit-breaker-wrapped)
@@ -69,12 +70,244 @@ export type LlmCli = "claude" | "codex" | "gemini" | "grok" | "mistral" | "devin
  * `cli` is guarded by `transport === "process"` first.
  */
 export type JobProvider = LlmCli | (string & {});
-export type AsyncJobStatus = "running" | "completed" | "failed" | "canceled" | "orphaned";
+export type AsyncJobStatus =
+  "queued" | "running" | "completed" | "failed" | "canceled" | "orphaned";
+
+export function isAsyncJobInProgress(status: AsyncJobStatus): boolean {
+  return status === "queued" || status === "running";
+}
 
 const MAX_OUTPUT_SIZE = 50 * 1024 * 1024;
 const JOB_TTL_MS = 60 * 60 * 1000; // 1 hour in-memory retention; durable store has its own (longer) retention
 const EVICTION_INTERVAL_MS = 5 * 60 * 1000; // Check every 5 minutes
 const OUTPUT_FLUSH_INTERVAL_MS = 1000; // Throttle DB writes for streaming stdout/stderr
+
+/**
+ * Issue #130: limits used when an AsyncJobManager is constructed WITHOUT an
+ * explicit limits config (e.g. `new AsyncJobManager()` in tests, or legacy
+ * callers). These preserve the pre-#130 behaviour exactly: effectively
+ * unbounded running/queue capacity, the historical 1h in-memory TTL, and the
+ * historical 50MB output cap. Production wiring (index.ts) always passes the
+ * conservative, operator-tunable [limits] config instead.
+ */
+const DEFAULT_MANAGER_JOB_LIMITS: JobLimitsConfig = {
+  maxRunningJobs: 1_000_000,
+  maxRunningJobsPerProvider: 1_000_000,
+  maxQueuedJobs: 1_000_000,
+  queueTimeoutMs: 10 * 60 * 1000,
+  completedJobMemoryTtlMs: JOB_TTL_MS,
+  maxJobOutputBytes: MAX_OUTPUT_SIZE,
+};
+
+/**
+ * Issue #130: format an output-byte cap for the overflow error message. Chosen
+ * so the default 50MB cap renders as "50MB" (the exact string asserted by
+ * existing flight-recorder / quality-pass tests); smaller custom caps render as
+ * KB or a raw byte count.
+ */
+function formatByteCap(bytes: number): string {
+  if (bytes > 0 && bytes % (1024 * 1024) === 0) return `${bytes / (1024 * 1024)}MB`;
+  if (bytes > 0 && bytes % 1024 === 0) return `${bytes / 1024}KB`;
+  return `${bytes} bytes`;
+}
+
+/**
+ * Issue #130: thrown when a new job (async, deferred-sync, or direct-sync)
+ * cannot be admitted because the global/per-provider running limit is saturated
+ * AND the queue is full (or the caller opts out of queueing). Carries a
+ * `retryable` marker so the tool layer can render a consistent, retry-safe
+ * saturation response rather than a generic spawn failure. Never wraps or
+ * exposes prompt/output material.
+ */
+export class JobSaturationError extends Error {
+  readonly retryable = true;
+  constructor(
+    readonly provider: string,
+    readonly detail: string
+  ) {
+    super(`Gateway is at capacity for ${provider}: ${detail}`);
+    this.name = "JobSaturationError";
+  }
+}
+
+/** A granted execution slot. `release()` is idempotent. */
+interface LimiterPermit {
+  release(): void;
+}
+
+interface LimiterQueueEntry {
+  provider: string;
+  onGrant: (permit: LimiterPermit) => void;
+  timer: ReturnType<typeof setTimeout>;
+}
+
+export interface JobLimiterSnapshot {
+  maxRunning: number;
+  maxRunningPerProvider: number;
+  maxQueued: number;
+  running: number;
+  queued: number;
+  runningByProvider: Record<string, number>;
+  queuedByProvider: Record<string, number>;
+  /** Cumulative counters since process start. */
+  rejected: number;
+  timedOut: number;
+  /** True iff a further immediate acquire would have to queue or be rejected. */
+  saturated: boolean;
+}
+
+/**
+ * Issue #130: a small in-process running-limit + FIFO queue owned by
+ * AsyncJobManager. It gates BOTH process (CLI) and HTTP API job execution plus
+ * the direct-sync execution fallback so no provider process or outbound request
+ * is created before a permit is held.
+ *
+ * Fairness: `pump()` scans the queue in FIFO order and grants the first waiter
+ * whose per-provider limit is not saturated, so a provider blocked on its own
+ * cap never head-of-line-blocks a different, runnable provider, while same
+ * provider waiters still start in arrival order.
+ */
+class JobLimiter {
+  private runningGlobal = 0;
+  private runningByProvider = new Map<string, number>();
+  private queue: LimiterQueueEntry[] = [];
+  private queuedByProvider = new Map<string, number>();
+  private rejectedCount = 0;
+  private timedOutCount = 0;
+
+  constructor(
+    private cfg: {
+      maxRunningJobs: number;
+      maxRunningJobsPerProvider: number;
+      maxQueuedJobs: number;
+      queueTimeoutMs: number;
+    },
+    private logger: Logger
+  ) {}
+
+  private canRunNow(provider: string): boolean {
+    if (this.runningGlobal >= this.cfg.maxRunningJobs) return false;
+    if ((this.runningByProvider.get(provider) ?? 0) >= this.cfg.maxRunningJobsPerProvider) {
+      return false;
+    }
+    return true;
+  }
+
+  private grant(provider: string): LimiterPermit {
+    this.runningGlobal++;
+    this.runningByProvider.set(provider, (this.runningByProvider.get(provider) ?? 0) + 1);
+    let released = false;
+    return {
+      release: () => {
+        if (released) return;
+        released = true;
+        this.runningGlobal = Math.max(0, this.runningGlobal - 1);
+        const n = (this.runningByProvider.get(provider) ?? 1) - 1;
+        if (n <= 0) this.runningByProvider.delete(provider);
+        else this.runningByProvider.set(provider, n);
+        this.pump();
+      },
+    };
+  }
+
+  /**
+   * Try to admit a job for `provider`.
+   *  - "granted": a permit is returned inline; the caller may spawn immediately.
+   *  - "queued":  the caller was enqueued; `onGrant` fires later when capacity
+   *    frees, or `onTimeout` fires if the queue wait exceeds queue_timeout_ms.
+   *    `cancel()` removes a still-queued entry (returns true iff it was removed
+   *    before being granted/timed out).
+   *  - "rejected": the running limit is saturated and the queue is full.
+   */
+  acquire(
+    provider: string,
+    onGrant: (permit: LimiterPermit) => void,
+    onTimeout: () => void
+  ):
+    | { state: "granted"; permit: LimiterPermit }
+    | { state: "queued"; cancel: () => boolean }
+    | { state: "rejected" } {
+    if (this.canRunNow(provider)) {
+      return { state: "granted", permit: this.grant(provider) };
+    }
+    if (this.queue.length >= this.cfg.maxQueuedJobs) {
+      this.rejectedCount++;
+      return { state: "rejected" };
+    }
+    const entry: LimiterQueueEntry = {
+      provider,
+      onGrant,
+      timer: setTimeout(() => {
+        if (this.removeEntry(entry)) {
+          this.timedOutCount++;
+          onTimeout();
+        }
+      }, this.cfg.queueTimeoutMs),
+    };
+    if (entry.timer.unref) entry.timer.unref();
+    this.queue.push(entry);
+    this.queuedByProvider.set(provider, (this.queuedByProvider.get(provider) ?? 0) + 1);
+    return {
+      state: "queued",
+      cancel: () => this.removeEntry(entry),
+    };
+  }
+
+  private removeEntry(entry: LimiterQueueEntry): boolean {
+    const idx = this.queue.indexOf(entry);
+    if (idx < 0) return false;
+    this.queue.splice(idx, 1);
+    clearTimeout(entry.timer);
+    const n = (this.queuedByProvider.get(entry.provider) ?? 1) - 1;
+    if (n <= 0) this.queuedByProvider.delete(entry.provider);
+    else this.queuedByProvider.set(entry.provider, n);
+    return true;
+  }
+
+  private pump(): void {
+    let progressed = true;
+    while (progressed) {
+      progressed = false;
+      for (let i = 0; i < this.queue.length; i++) {
+        const entry = this.queue[i];
+        if (!this.canRunNow(entry.provider)) continue;
+        this.removeEntry(entry);
+        const permit = this.grant(entry.provider);
+        try {
+          entry.onGrant(permit);
+        } catch (err) {
+          this.logger.error("JobLimiter onGrant callback threw; releasing permit", err);
+          permit.release();
+        }
+        progressed = true;
+        break; // queue mutated and counters changed; restart the scan
+      }
+    }
+  }
+
+  snapshot(): JobLimiterSnapshot {
+    const hasProviderBackpressure = [...this.queuedByProvider.keys()].some(
+      provider => (this.runningByProvider.get(provider) ?? 0) >= this.cfg.maxRunningJobsPerProvider
+    );
+    const queueFullUnderPressure =
+      this.queue.length > 0 && this.queue.length >= this.cfg.maxQueuedJobs;
+    return {
+      maxRunning: this.cfg.maxRunningJobs,
+      maxRunningPerProvider: this.cfg.maxRunningJobsPerProvider,
+      maxQueued: this.cfg.maxQueuedJobs,
+      running: this.runningGlobal,
+      queued: this.queue.length,
+      runningByProvider: Object.fromEntries(this.runningByProvider),
+      queuedByProvider: Object.fromEntries(this.queuedByProvider),
+      rejected: this.rejectedCount,
+      timedOut: this.timedOutCount,
+      saturated:
+        this.runningGlobal >= this.cfg.maxRunningJobs ||
+        hasProviderBackpressure ||
+        queueFullUnderPressure,
+    };
+  }
+}
 
 /**
  * Issue #21: silent-stall telemetry for long async jobs. A running job that
@@ -206,6 +439,19 @@ interface AsyncJobRecord {
   resetIdleTimer?: () => void;
   clearIdleTimer?: () => void;
   cleanupGroup?: () => void;
+  /**
+   * Issue #130: the running-slot permit held while this job executes. Released
+   * exactly once (idempotently) via releaseJobPermit on any terminal transition
+   * (completed/failed/canceled/orphaned/output-overflow). Undefined while the
+   * job is queued (no permit yet) or after release.
+   */
+  limiterPermit?: LimiterPermit;
+  /**
+   * Issue #130: for a job still waiting in the limiter queue (status
+   * "queued"), removes it from the queue. Returns true iff it was removed
+   * before the limiter granted or timed it out. Cleared once the job launches.
+   */
+  queueCancel?: () => boolean;
   /**
    * U26 fix: fired exactly once when the job reaches a terminal state
    * (completed/failed/canceled/orphaned), regardless of exit path. Used to
@@ -368,15 +614,35 @@ export class AsyncJobManager {
 
   private flightRecorder: FlightRecorderLike;
 
+  /** Issue #130: resolved host-protection limits (defaults preserve pre-#130 behaviour). */
+  private readonly limits: JobLimitsConfig;
+  private readonly limiter: JobLimiter;
+  /** Issue #130: configurable in-memory retention + output cap (durable store keeps its own retention). */
+  private readonly completedJobMemoryTtlMs: number;
+  private readonly maxJobOutputBytes: number;
+
   constructor(
     private logger: Logger = noopLogger,
     private onJobComplete?: (cli: JobProvider, durationMs: number, success: boolean) => void,
     store: JobStore | null = null,
-    flightRecorder: FlightRecorderLike = new NoopFlightRecorder()
+    flightRecorder: FlightRecorderLike = new NoopFlightRecorder(),
+    limits: JobLimitsConfig = DEFAULT_MANAGER_JOB_LIMITS
   ) {
     this.processMonitor = new ProcessMonitor(logger);
     this.store = store;
     this.flightRecorder = flightRecorder;
+    this.limits = limits;
+    this.completedJobMemoryTtlMs = limits.completedJobMemoryTtlMs;
+    this.maxJobOutputBytes = limits.maxJobOutputBytes;
+    this.limiter = new JobLimiter(
+      {
+        maxRunningJobs: limits.maxRunningJobs,
+        maxRunningJobsPerProvider: limits.maxRunningJobsPerProvider,
+        maxQueuedJobs: limits.maxQueuedJobs,
+        queueTimeoutMs: limits.queueTimeoutMs,
+      },
+      logger
+    );
 
     if (this.store) {
       try {
@@ -579,9 +845,9 @@ export class AsyncJobManager {
     }
 
     for (const [id, job] of this.jobs) {
-      if (job.status !== "running" && job.finishedAt) {
+      if (job.status !== "running" && job.status !== "queued" && job.finishedAt) {
         const finishedMs = new Date(job.finishedAt).getTime();
-        if (now - finishedMs > JOB_TTL_MS) {
+        if (now - finishedMs > this.completedJobMemoryTtlMs) {
           this.jobs.delete(id);
           evicted++;
         }
@@ -646,7 +912,14 @@ export class AsyncJobManager {
     const withStdin = stdin === undefined ? extraEnv : `${extraEnv}|stdin:${stdin}`;
     const withCwd = cwd === undefined ? withStdin : `${withStdin}|cwd:${cwd}`;
     const extra = cli === "codex" ? `${withCwd}|fmt:${outputFormat ?? "text"}` : withCwd;
-    return computeRequestKey(cli, args, extra);
+    // Issue #130: scope the dedup key by the owning principal for
+    // remote/authenticated callers so two distinct principals issuing identical
+    // requests never collide onto (and read) one another's job. Local stdio
+    // (principal "local") keeps the exact pre-#130 key shape, so local dedup and
+    // any pre-upgrade store rows remain byte-compatible.
+    const principal = resolveOwnerPrincipal(getRequestContext());
+    const scoped = principal === "local" ? extra : `${extra}|principal:${principal}`;
+    return computeRequestKey(cli, args, scoped);
   }
 
   /**
@@ -657,6 +930,10 @@ export class AsyncJobManager {
    * apiKey is deliberately excluded (it is a secret and constant across calls).
    */
   private buildHttpRequestKey(providerName: string, req: ApiRequest): string {
+    // Issue #130: scope the http dedup key by the owning principal for
+    // remote/authenticated callers (see buildRequestKey). Local stdio keeps the
+    // exact pre-#130 canonical shape (principal key omitted) for compatibility.
+    const principal = resolveOwnerPrincipal(getRequestContext());
     const canonical = {
       transport: "http",
       provider: providerName,
@@ -668,6 +945,7 @@ export class AsyncJobManager {
       reasoningEffort: req.reasoningEffort ?? null,
       maxOutputTokens: req.maxOutputTokens ?? null,
       previousResponseId: req.previousResponseId ?? null,
+      ...(principal === "local" ? {} : { principal }),
     };
     return computeRequestKey(`http:${providerName}`, [], JSON.stringify(canonical));
   }
@@ -691,6 +969,20 @@ export class AsyncJobManager {
       let record = this.jobs.get(existing.id);
       if (!record) record = this.hydrateFromStore(existing.id) ?? undefined;
       if (!record) return null;
+      // Issue #130 (defense-in-depth): even though the dedup key is now
+      // principal-scoped, never hand back a record the current caller cannot
+      // access (e.g. a legacy/pre-upgrade row whose key predates scoping, or a
+      // remote caller matching a legacy-unowned row it does not own). Refuse
+      // reuse and fall through to a fresh run so no cross-principal result is
+      // exposed.
+      const caller = resolveOwnerPrincipal(getRequestContext());
+      if (!principalCanAccess(record.ownerPrincipal, caller)) {
+        this.logger.debug(
+          `Dedup reuse refused for ${label}: caller cannot access job ${existing.id}`,
+          { correlationId }
+        );
+        return null;
+      }
       this.logger.info(`Job ${existing.id} reused via dedup for ${label}`, {
         correlationId,
         originalCorrelationId: record.correlationId,
@@ -776,7 +1068,10 @@ export class AsyncJobManager {
       args: [],
       requestKey,
       correlationId,
-      status: "running",
+      // Issue #130: created "queued"; flipped to "running" by launch() the
+      // instant a limiter permit is held. No outbound request is made before
+      // that point.
+      status: "queued",
       startedAt,
       finishedAt: null,
       exitCode: null,
@@ -804,6 +1099,37 @@ export class AsyncJobManager {
     };
 
     this.jobs.set(id, job);
+
+    // Issue #130: fire the outbound request only once a limiter permit is held.
+    const launch = (permit: LimiterPermit): void => {
+      job.limiterPermit = permit;
+      job.queueCancel = undefined;
+      // Canceled/aborted while queued before this grant landed: return the permit.
+      if (job.status !== "queued") {
+        this.releaseJobPermit(job);
+        return;
+      }
+      job.status = "running";
+      // Fire the request; settle on the shared terminal helpers. No idle/stall/
+      // process-group timers are armed (those are pid-based).
+      runApiRequest(provider, apiRequest, this.logger, { signal: abort.signal })
+        .then(result => this.finalizeHttpJob(job, result, null))
+        .catch(error => this.finalizeHttpJob(job, null, error as Error));
+    };
+
+    const acq = this.limiter.acquire(
+      provider.name,
+      permit => launch(permit),
+      () => this.failQueuedJob(job, "queue wait timed out before a run slot was free")
+    );
+    if (acq.state === "rejected") {
+      this.jobs.delete(id);
+      throw new JobSaturationError(
+        provider.name,
+        `running limit (${this.limits.maxRunningJobs} global / ${this.limits.maxRunningJobsPerProvider} per provider) reached and the queue is full (max ${this.limits.maxQueuedJobs}); retry shortly`
+      );
+    }
+
     this.safeStoreCall("recordStart", () =>
       this.store!.recordStart({
         id,
@@ -832,13 +1158,16 @@ export class AsyncJobManager {
         this.logger.error("Async-path flight recorder logStart failed", err);
       }
     }
-    this.logger.info(`Job ${id} started for ${provider.name} (http)`, { correlationId });
 
-    // Fire the request; settle on the shared terminal helpers. No idle/stall/
-    // process-group timers are armed (those are pid-based).
-    runApiRequest(provider, apiRequest, this.logger, { signal: abort.signal })
-      .then(result => this.finalizeHttpJob(job, result, null))
-      .catch(error => this.finalizeHttpJob(job, null, error as Error));
+    if (acq.state === "granted") {
+      this.logger.info(`Job ${id} started for ${provider.name} (http)`, { correlationId });
+      launch(acq.permit);
+    } else {
+      job.queueCancel = acq.cancel;
+      this.logger.info(`Job ${id} queued for ${provider.name} (http, limiter saturated)`, {
+        correlationId,
+      });
+    }
 
     return { snapshot: this.snapshot(job), deduped: false };
   }
@@ -888,6 +1217,12 @@ export class AsyncJobManager {
   }
 
   private fireOnComplete(job: AsyncJobRecord): void {
+    // Issue #130: releasing the running slot is the FIRST thing every terminal
+    // transition does. fireOnComplete is invoked at every terminal site
+    // (completed/failed/canceled/orphaned/idle-timeout/output-overflow), and
+    // releaseJobPermit is idempotent, so the permit is released exactly once
+    // regardless of which callback fires first or how many fire.
+    this.releaseJobPermit(job);
     if (job.onCompleteFired) return;
     if (!job.onComplete) return;
     job.onCompleteFired = true;
@@ -896,6 +1231,14 @@ export class AsyncJobManager {
     } catch (err) {
       this.logger.error(`Job ${job.id} onComplete hook threw`, err);
     }
+  }
+
+  /** Issue #130: release a job's running-slot permit exactly once. */
+  private releaseJobPermit(job: AsyncJobRecord): void {
+    const permit = job.limiterPermit;
+    if (!permit) return;
+    job.limiterPermit = undefined;
+    permit.release();
   }
 
   /**
@@ -1027,7 +1370,7 @@ export class AsyncJobManager {
     if (!job) return;
     if (job.flightCompleteArmed) return; // pure async already armed
     job.flightCompleteArmed = true;
-    if (job.status === "running") return;
+    if (isAsyncJobInProgress(job.status)) return;
     // Job already terminal — the close handler's writeFlightComplete
     // saw flightCompleteArmed=false and skipped. Write now to recover.
     const finalStatus = job.status === "completed" ? "completed" : "failed";
@@ -1063,14 +1406,16 @@ export class AsyncJobManager {
 
   private persistComplete(job: AsyncJobRecord): void {
     if (!this.store) return;
-    if (job.status === "running") return;
+    // Never persist a non-terminal job as complete. "queued" (issue #130) is
+    // pre-execution, exactly like "running": neither has a terminal row to write.
+    if (job.status === "running" || job.status === "queued") return;
     if (!job.finishedAt) return;
     // Make sure the latest output is captured in the same row update.
     job.outputDirty = false;
     this.safeStoreCall("recordComplete", () =>
       this.store!.recordComplete({
         id: job.id,
-        status: job.status === "running" ? "failed" : job.status,
+        status: job.status === "running" || job.status === "queued" ? "failed" : job.status,
         exitCode: job.exitCode,
         stdout: job.stdout,
         stderr: job.stderr,
@@ -1222,29 +1567,6 @@ export class AsyncJobManager {
 
     const id = randomUUID();
     const startedAt = new Date().toISOString();
-    const command = providerCommandName(cli);
-    const baseEnv = envWithExtendedPath(process.env, getExtendedPath());
-    const child = spawnCliProcess(command, args, {
-      cwd,
-      stdio: stdin === undefined ? ["ignore", "pipe", "pipe"] : ["pipe", "pipe", "pipe"],
-      env: { ...baseEnv, ...(extraEnv ?? {}) },
-    });
-    if (stdin !== undefined && child.stdin) {
-      try {
-        child.stdin.write(stdin);
-      } catch (err) {
-        this.logger.error(`Job ${id} failed to write stdin payload`, err);
-      }
-      child.stdin.end();
-    }
-
-    // Single cleanup flag to prevent double-unregister
-    let groupCleaned = false;
-    const cleanupGroup = () => {
-      if (groupCleaned) return;
-      groupCleaned = true;
-      if (child.pid) unregisterProcessGroup(child.pid);
-    };
 
     // F3: ownership principal from the request context ambient at job creation
     // (synchronous with the tool handler). stdio / boot-time paths → "local".
@@ -1256,7 +1578,10 @@ export class AsyncJobManager {
       args: [...args],
       requestKey,
       correlationId,
-      status: "running",
+      // Issue #130: created "queued"; flipped to "running" by launch() the
+      // instant a limiter permit is held (immediately for a granted job, or
+      // later when queued capacity frees).
+      status: "queued",
       startedAt,
       finishedAt: null,
       exitCode: null,
@@ -1265,14 +1590,13 @@ export class AsyncJobManager {
       outputTruncated: false,
       canceled: false,
       error: null,
-      process: child,
+      process: null,
       transport: "process",
       abort: null,
       httpStatus: null,
       exited: false,
       metricsRecorded: false,
       outputFormat,
-      cleanupGroup,
       onComplete,
       onCompleteFired: false,
       outputDirty: false,
@@ -1286,8 +1610,56 @@ export class AsyncJobManager {
       // armFlightCompleteForDeferral when awaitJobOrDefer decides to defer.
       flightCompleteArmed: writeFlightStart === true,
     };
-
     this.jobs.set(id, job);
+
+    // Issue #130: spawn + wire the child process. Run inline when the limiter
+    // grants a permit immediately, or from the limiter's onGrant callback when
+    // the job first had to queue. Never spawns before a permit is held.
+    const launch = (permit: LimiterPermit): void => {
+      job.limiterPermit = permit;
+      job.queueCancel = undefined;
+      // If the job was canceled/failed while queued (e.g. queue timeout, or a
+      // client cancel) before this grant landed, do not spawn; hand the permit
+      // straight back.
+      if (job.status !== "queued") {
+        this.releaseJobPermit(job);
+        return;
+      }
+      job.status = "running";
+      try {
+        this.launchProcessJob(job, { cli, args, cwd, stdin, extraEnv, idleTimeoutMs });
+      } catch (err) {
+        const launchError = describeProcessLaunchError(cli, err as Error);
+        job.status = "failed";
+        job.exitCode = launchError.exitCode;
+        job.error = launchError.message;
+        job.stderr = launchError.message;
+        job.finishedAt = new Date().toISOString();
+        job.exited = true;
+        this.logger.error(`Job ${id} failed to spawn: ${launchError.message}`, { correlationId });
+        this.emitMetrics(job);
+        this.persistComplete(job);
+        this.writeFlightComplete(job, "failed");
+        this.fireOnComplete(job);
+      }
+    };
+
+    const acq = this.limiter.acquire(
+      cli,
+      permit => launch(permit),
+      () => this.failQueuedJob(job, "queue wait timed out before a run slot was free")
+    );
+    if (acq.state === "rejected") {
+      this.jobs.delete(id);
+      throw new JobSaturationError(
+        cli,
+        `running limit (${this.limits.maxRunningJobs} global / ${this.limits.maxRunningJobsPerProvider} per provider) reached and the queue is full (max ${this.limits.maxQueuedJobs}); retry shortly`
+      );
+    }
+
+    // Admitted (running or queued): record ONE store row + optional logStart.
+    // pid is null here (unknown until spawn); it is lifecycle-irrelevant (all
+    // pid-based checks use the in-memory job.process handle set at launch).
     this.safeStoreCall("recordStart", () =>
       this.store!.recordStart({
         id,
@@ -1297,7 +1669,7 @@ export class AsyncJobManager {
         args: [...args],
         outputFormat,
         startedAt,
-        pid: child.pid ?? null,
+        pid: null,
         ownerPrincipal,
       })
     );
@@ -1323,7 +1695,64 @@ export class AsyncJobManager {
         this.logger.error("Async-path flight recorder logStart failed", err);
       }
     }
-    this.logger.info(`Job ${id} started for ${cli}`, { correlationId });
+
+    if (acq.state === "granted") {
+      this.logger.info(`Job ${id} started for ${cli}`, { correlationId });
+      launch(acq.permit);
+    } else {
+      job.queueCancel = acq.cancel;
+      this.logger.info(`Job ${id} queued for ${cli} (limiter saturated)`, { correlationId });
+    }
+
+    return { snapshot: this.snapshot(job), deduped: false };
+  }
+
+  /**
+   * Issue #130: spawn the child CLI and wire its lifecycle for an already
+   * admitted (permit-held) process job. Extracted from startJobWithDedup so it
+   * can run either inline (limiter granted immediately) or deferred (limiter
+   * granted after queueing). Throws if spawnCliProcess itself throws; the caller
+   * finalizes the job and releases the permit in that case.
+   */
+  private launchProcessJob(
+    job: AsyncJobRecord,
+    spawn: {
+      cli: LlmCli;
+      args: string[];
+      cwd?: string;
+      stdin?: string;
+      extraEnv?: Record<string, string>;
+      idleTimeoutMs?: number;
+    }
+  ): void {
+    const { cli, args, cwd, stdin, extraEnv, idleTimeoutMs } = spawn;
+    const id = job.id;
+    const correlationId = job.correlationId;
+    const command = providerCommandName(cli);
+    const baseEnv = envWithExtendedPath(process.env, getExtendedPath());
+    const child = spawnCliProcess(command, args, {
+      cwd,
+      stdio: stdin === undefined ? ["ignore", "pipe", "pipe"] : ["pipe", "pipe", "pipe"],
+      env: { ...baseEnv, ...(extraEnv ?? {}) },
+    });
+    job.process = child;
+    if (stdin !== undefined && child.stdin) {
+      try {
+        child.stdin.write(stdin);
+      } catch (err) {
+        this.logger.error(`Job ${id} failed to write stdin payload`, err);
+      }
+      child.stdin.end();
+    }
+
+    // Single cleanup flag to prevent double-unregister
+    let groupCleaned = false;
+    const cleanupGroup = () => {
+      if (groupCleaned) return;
+      groupCleaned = true;
+      if (child.pid) unregisterProcessGroup(child.pid);
+    };
+    job.cleanupGroup = cleanupGroup;
 
     // Idle timeout: kill process if no output activity for idleTimeoutMs
     let idleTimerId: ReturnType<typeof setTimeout> | undefined;
@@ -1433,8 +1862,32 @@ export class AsyncJobManager {
       );
       this.fireOnComplete(job);
     });
+  }
 
-    return { snapshot: this.snapshot(job), deduped: false };
+  /**
+   * Issue #130: terminate a job that is still waiting in the limiter queue
+   * (never spawned a process / made a request). Used for queue-wait timeout.
+   * Marks the job failed with a deterministic saturation/timeout error and
+   * runs the standard terminal path (metrics, persist, flight-complete,
+   * onComplete). Holds no permit, so releaseJobPermit is a no-op.
+   */
+  private failQueuedJob(job: AsyncJobRecord, reason: string): void {
+    if (job.status !== "queued") return;
+    job.queueCancel = undefined;
+    job.status = "failed";
+    // EX_TEMPFAIL (75): a deterministic "temporary failure, safe to retry" code
+    // distinct from spawn/timeout/idle exit codes already in use.
+    job.exitCode = 75;
+    job.error = `Gateway is at capacity for ${job.cli}: ${reason}`;
+    job.finishedAt = new Date().toISOString();
+    job.exited = true;
+    this.logger.info(`Job ${job.id} failed while queued: ${reason}`, {
+      correlationId: job.correlationId,
+    });
+    this.emitMetrics(job);
+    this.persistComplete(job);
+    this.writeFlightComplete(job, "failed", job.error);
+    this.fireOnComplete(job);
   }
 
   getJobSnapshot(jobId: string): AsyncJobSnapshot | null {
@@ -1483,6 +1936,26 @@ export class AsyncJobManager {
     const job = this.jobs.get(jobId);
     if (!job) {
       return { canceled: false, reason: "Job not found" };
+    }
+
+    // Issue #130: a job still waiting in the limiter queue has no process or
+    // in-flight request yet. Remove it from the queue (releasing the queue slot
+    // and its wait timer) and mark it canceled without ever spawning.
+    if (job.status === "queued") {
+      job.queueCancel?.();
+      job.queueCancel = undefined;
+      job.canceled = true;
+      job.status = "canceled";
+      job.finishedAt = new Date().toISOString();
+      job.exited = true;
+      this.logger.info(`Job ${jobId} canceled while queued`, {
+        correlationId: job.correlationId,
+      });
+      this.emitMetrics(job);
+      this.persistComplete(job);
+      this.writeFlightComplete(job, "failed", "canceled by caller");
+      this.fireOnComplete(job);
+      return { canceled: true };
     }
 
     if (job.status !== "running") {
@@ -1575,6 +2048,52 @@ export class AsyncJobManager {
     };
   }
 
+  /**
+   * Issue #130: acquire a running-slot permit for the DIRECT-SYNC execution
+   * fallback (index.ts calls executeCli itself instead of going through a job
+   * record when deferral is disabled/unavailable). Resolves with a permit the
+   * caller MUST release when the process exits; rejects with a JobSaturationError
+   * when the limit is saturated and the queue is full or the queue wait times
+   * out. This puts the sync bypass under the exact same host-protection envelope
+   * as async/deferred jobs.
+   */
+  acquireProcessSlot(provider: string): Promise<{ release: () => void }> {
+    return new Promise((resolve, reject) => {
+      const acq = this.limiter.acquire(
+        provider,
+        permit => resolve(permit),
+        () =>
+          reject(
+            new JobSaturationError(
+              provider,
+              "queue wait timed out before a run slot was free; retry shortly"
+            )
+          )
+      );
+      if (acq.state === "granted") {
+        resolve(acq.permit);
+      } else if (acq.state === "rejected") {
+        reject(
+          new JobSaturationError(
+            provider,
+            `running limit (${this.limits.maxRunningJobs} global / ${this.limits.maxRunningJobsPerProvider} per provider) reached and the queue is full (max ${this.limits.maxQueuedJobs}); retry shortly`
+          )
+        );
+      }
+      // queued: resolves via onGrant (a slot freed) or rejects via onTimeout.
+    });
+  }
+
+  /** Issue #130: current limiter state for /healthz and llm_process_health. */
+  getLimiterSnapshot(): JobLimiterSnapshot {
+    return this.limiter.snapshot();
+  }
+
+  /** Issue #130: the effective (redaction-safe) job-execution limits. */
+  getConfiguredLimits(): JobLimitsConfig {
+    return { ...this.limits };
+  }
+
   getJobOutputFormat(jobId: string): string | undefined {
     return this.jobs.get(jobId)?.outputFormat;
   }
@@ -1602,12 +2121,15 @@ export class AsyncJobManager {
 
   private appendOutput(job: AsyncJobRecord, stream: "stdout" | "stderr", chunk: Buffer): void {
     const totalBytes = Buffer.byteLength(job.stdout) + Buffer.byteLength(job.stderr) + chunk.length;
-    if (totalBytes > MAX_OUTPUT_SIZE) {
+    if (totalBytes > this.maxJobOutputBytes) {
       job.outputTruncated = true;
       if (job.status === "running") {
+        // Issue #130: the cap is configurable via [limits].max_job_output_bytes;
+        // the message renders "50MB" at the default cap (asserted by tests).
+        const overflowMsg = `Output exceeded maximum size (${formatByteCap(this.maxJobOutputBytes)})`;
         job.status = "failed";
         job.exitCode = 126;
-        job.error = "Output exceeded maximum size (50MB)";
+        job.error = overflowMsg;
         job.finishedAt = new Date().toISOString();
         job.clearIdleTimer?.();
         if (job.process) {
@@ -1618,7 +2140,7 @@ export class AsyncJobManager {
         });
         this.emitMetrics(job);
         this.persistComplete(job);
-        this.writeFlightComplete(job, "failed", "Output exceeded maximum size (50MB)");
+        this.writeFlightComplete(job, "failed", overflowMsg);
         this.fireOnComplete(job);
         if (job.process) {
           setTimeout(() => {

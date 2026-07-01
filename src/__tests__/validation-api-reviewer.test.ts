@@ -17,6 +17,7 @@ import type { ApiProviderRuntime } from "../config.js";
 const ollama: ApiProviderRuntime = {
   name: "ollama",
   kind: "openai-compatible",
+  apiKeyEnv: null,
   baseUrl: "http://127.0.0.1:11434/v1",
   defaultModel: "qwen2.5",
   apiKey: "",

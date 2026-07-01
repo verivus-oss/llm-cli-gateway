@@ -200,6 +200,26 @@ describe("Slice 6: provider-tool-capabilities api-kind metadata", () => {
     expect(getProviderToolCapabilities().localproxy?.providerKind).toBe("api");
   });
 
+  it("uses a supplied providersConfig instead of reloading global config", () => {
+    const runtimeOnly: ApiProviderConfig = {
+      name: "runtimeonly",
+      kind: "openai-compatible",
+      apiKeyEnv: null,
+      baseUrl: "http://127.0.0.1:11434/v1",
+      defaultModel: "qwen2.5",
+    };
+    const providersConfig = providersOf(runtimeOnly);
+
+    expect([...providerCapabilityIds(providersConfig)]).toContain("runtimeonly");
+    const caps = getOneProviderToolCapabilities("runtimeonly", {
+      refresh: true,
+      providersConfig,
+    });
+    expect(caps.providerKind).toBe("api");
+    expect(caps.gatewayRequestTools).toEqual(["api_runtimeonly_request"]);
+    expect(getProviderToolCapabilities({ providersConfig }).runtimeonly?.providerKind).toBe("api");
+  });
+
   it("forwards reasoning.effort only for the xai-responses kind", () => {
     process.env[XAI_KEY] = "sk-xai-caps-secret";
     writeConfig(
@@ -216,6 +236,10 @@ describe("Slice 6: provider-tool-capabilities api-kind metadata", () => {
     expect(caps.providerKind).toBe("api");
     expect(caps.controls.reasoningEffort.supported).toBe(true);
     expect(caps.controls.session.supported).toBe(true);
+    expect(caps.configSurfaces.find(s => s.name === "api_key_env")).toMatchObject({
+      entries: [XAI_KEY],
+      present: true,
+    });
     // No resolved key value anywhere in the serialized capability record.
     expect(JSON.stringify(caps)).not.toContain("sk-xai-caps-secret");
   });
@@ -288,5 +312,29 @@ describe("Slice 6: resources models:// and sessions:// for API providers", () =>
     const provider = makeProvider(providersOf(KEYLESS_OLLAMA));
     // The CLI_TYPES guard must still reject an API provider name here.
     expect(await provider.readResource("provider-subcommands://ollama/run")).toBeNull();
+  });
+
+  it("lists and reads provider-tools://<provider> from injected providers config", async () => {
+    const runtimeOnly: ApiProviderConfig = {
+      name: "runtimeonly",
+      kind: "openai-compatible",
+      apiKeyEnv: null,
+      baseUrl: "http://127.0.0.1:11434/v1",
+      defaultModel: "qwen2.5",
+    };
+    const provider = makeProvider(providersOf(runtimeOnly));
+    const uris = provider.listResources().map(r => r.uri);
+    expect(uris).toContain("provider-tools://runtimeonly");
+
+    const resource = await provider.readResource("provider-tools://runtimeonly");
+    expect(resource).not.toBeNull();
+    expect(JSON.parse(resource!.text)).toMatchObject({
+      cli: "runtimeonly",
+      providerKind: "api",
+      gatewayRequestTools: ["api_runtimeonly_request"],
+    });
+
+    const catalog = await provider.readResource("provider-tools://catalog");
+    expect(JSON.parse(catalog!.text).runtimeonly.providerKind).toBe("api");
   });
 });

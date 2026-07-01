@@ -1,0 +1,476 @@
+# Implementation plan: harden HTTP MCP session lifecycle and async/sync
+# execution backpressure after issue #130.
+#
+# Goal: prevent HTTP clients, async jobs, and sync fallback paths from driving
+# unbounded memory, process, CPU, or provider-request growth. The plan also
+# tightens dedup ownership, defines limit failure modes, and adds observability
+# so operators can see saturation before the host is unhealthy.
+
+[meta]
+name = "http-session-async-backpressure-hardening"
+schema_version = "1.0"
+owner = "verivus-oss"
+slice = "issue-130-memory-backpressure-2026-07-01"
+target_branch = "master"
+issue = "https://github.com/verivusai-labs/llm-cli-gateway/issues/130"
+status = "planned"
+created = "2026-07-01"
+acceptance_resource = "HTTP MCP sessions have bounded lifecycle and caps; async process/API jobs and direct sync fallback share configurable global and per-provider concurrency limits; dedup reuse is principal-safe; completed in-memory job retention is configurable; health surfaces expose session/job/limiter/memory pressure; focused tests and npm run check pass."
+
+source_files_to_inspect = [
+  "src/http-transport.ts",
+  "src/async-job-manager.ts",
+  "src/index.ts",
+  "src/config.ts",
+  "src/request-context.ts",
+  "src/__tests__/http-transport.test.ts",
+  "src/__tests__/async-job-manager.test.ts",
+  "src/__tests__/api-request-tools.test.ts",
+  "src/__tests__/api-slice6.test.ts",
+  "src/__tests__/api-catalog.test.ts",
+]
+
+[reviewed_findings]
+issue_created_aest = "2026-07-01T10:16:57+10:00"
+issue_status_at_triage = "open, labelled bug, no assignee, no comments"
+reviewers = ["claude", "gemini", "mistral"]
+blocked_reviewers = ["grok: provider account returned 403 spending-limit before producing review"]
+consensus = "Core issue is valid, but the original draft needed corrected line references, completed wording, DoS framing, explicit sync-scope handling, and clearer failure modes."
+
+[current_evidence]
+http_sessions_map = "src/http-transport.ts:124 creates sessions = new Map<string, SessionEntry>()"
+http_sessions_insert = "src/http-transport.ts:165 stores a new gateway server and transport per initialized session"
+http_sessions_cleanup = "src/http-transport.ts:150-158 closeSession deletes explicit sessions; src/http-transport.ts:168-172 deletes on transport.onclose"
+healthz_surface = "src/http-transport.ts:187-190 only returns { ok: true, sessions: sessions.size }"
+http_api_job_start = "src/async-job-manager.ts:839 starts runApiRequest immediately"
+process_job_start = "src/async-job-manager.ts:1227 starts spawnCliProcess immediately"
+sync_direct_bypass = "src/index.ts:909-915 calls executeCli directly when SYNC_DEADLINE_MS=0 or async deferral is unavailable"
+output_cap_definition = "src/async-job-manager.ts:74 defines MAX_OUTPUT_SIZE = 50MB"
+job_memory_ttl_definition = "src/async-job-manager.ts:75 defines JOB_TTL_MS = 1 hour in-memory retention"
+output_cap_enforcement = "src/async-job-manager.ts:1603-1645 enforces stdout/stderr combined cap and fails the job on overflow"
+dedup_reuse_path = "src/async-job-manager.ts:680-714 reuses jobs by requestKey before ownerPrincipal is resolved for a new job"
+result_owner_check = "src/index.ts:10864 checks principalCanAccess(record.ownerPrincipal, caller) when reading request results"
+
+[non_goals]
+items = [
+  "Do not replace durable job/session persistence in this slice.",
+  "Do not introduce distributed multi-process scheduling; limits are per gateway process.",
+  "Do not remove sync request support. Bring it under shared limits or document and gate any remaining bypass explicitly.",
+  "Do not change provider CLI argument contracts except where a queued/rejected request returns before provider spawn.",
+  "Do not expose prompt text, stdout/stderr contents, bearer tokens, OAuth tokens, or API keys through new health metrics.",
+]
+
+[decisions]
+http_session_limits_are_enabled_by_default = true
+http_session_idle_ttl_is_configurable = true
+http_session_max_count_is_configurable = true
+job_execution_limits_cover_process_http_api_and_sync_direct_paths = true
+limit_exhaustion_response = "reject new work with a structured error; HTTP transport should map session/request saturation to 429 where applicable"
+dedup_key_must_be_principal_scoped_for_remote_or_authenticated_callers = true
+dedup_reuse_must_not_bypass_result_ownership = true
+completed_job_memory_ttl_is_configurable = true
+durable_store_retention_remains_separate = true
+health_metrics_must_be_redacted_and_prompt_free = true
+
+[config_model]
+new_or_extended_keys = [
+  "http.max_sessions",
+  "http.session_idle_ttl_ms",
+  "http.session_reaper_interval_ms",
+  "limits.max_running_jobs",
+  "limits.max_running_jobs_per_provider",
+  "limits.max_queued_jobs",
+  "limits.queue_timeout_ms",
+  "limits.completed_job_memory_ttl_ms",
+  "limits.max_job_output_bytes",
+]
+default_policy = """
+Choose conservative defaults that protect the host without surprising local
+stdio development: HTTP sessions should have a finite idle TTL and max count;
+job execution should have finite global and per-provider running limits; queues
+should have bounded length and bounded wait time; completed in-memory jobs
+should age out faster than durable store rows.
+"""
+
+[security_notes]
+threats = [
+  "Memory exhaustion DoS from repeated HTTP MCP session initialization without DELETE.",
+  "CPU/process-table/provider-capacity DoS from unlimited async CLI/API jobs.",
+  "Host protection bypass when sync direct execution uses executeCli outside the async manager.",
+  "Cross-principal data exposure if dedup reuses a job created by a different owner principal.",
+  "Retry storms if saturated requests fail ambiguously or after partially spawning work.",
+]
+requirements = [
+  "All limit failures must happen before creating a provider process or outbound provider request when possible.",
+  "Remote/authenticated dedup identity must include the effective owner principal or be rejected when the caller cannot access the original owner.",
+  "Health surfaces must report counts, ages, queue depth, saturation, and process memory without user prompt/output material.",
+  "Session idle timers and reaper intervals must be cancelled on explicit close and server shutdown.",
+]
+
+[test_matrix.unit]
+http_transport = [
+  "creates no more than http.max_sessions live sessions; excess initialize request returns a structured saturation error",
+  "expires an idle session after http.session_idle_ttl_ms and closes its transport/server exactly once",
+  "does not expire a session with recent activity before idle TTL",
+  "cancels idle timers on explicit DELETE and transport.onclose",
+  "healthz includes sessions.current, sessions.max, sessions.oldestAgeMs, sessions.idleTtlMs, and saturation without secrets",
+]
+async_job_manager = [
+  "process jobs do not call spawnCliProcess when global running limit is saturated and queue is full",
+  "process jobs are queued when capacity is unavailable and max_queued_jobs permits it",
+  "queued process jobs start in FIFO order when capacity frees",
+  "per-provider limit blocks a saturated provider while another provider can still run",
+  "HTTP API jobs do not call runApiRequest until limiter capacity is acquired",
+  "canceled queued jobs are removed without spawning a process or making an API request",
+  "queue timeout marks the job failed with a deterministic saturation/timeout error",
+  "completed in-memory jobs are evicted after completed_job_memory_ttl_ms while durable rows remain readable through the store path",
+  "max_job_output_bytes is configurable and still fails running jobs before stdout/stderr exceed the configured cap",
+  "dedup lookup includes owner principal or rejects reuse when caller cannot access the existing job owner",
+]
+sync_execution = [
+  "SYNC_DEADLINE_MS=0 direct executeCli path acquires the same process limiter before spawn",
+  "storeless or backend=none deferral-unavailable path acquires the same process limiter before spawn",
+  "sync requests receive structured saturation errors instead of spawning outside limits",
+]
+config = [
+  "defaults parse when new limit keys are absent",
+  "invalid negative or zero limit values are rejected with clear config errors",
+  "env overrides, if supported, preserve existing config precedence and never expose secret values",
+]
+
+[test_matrix.integration]
+http_mcp = [
+  "multiple initialized HTTP sessions above the configured cap fail without growing the sessions Map",
+  "idle session reaping reduces /healthz sessions.current without requiring client DELETE",
+  "active HTTP MCP requests update last activity and are not reaped mid-request",
+  "HTTP request saturation maps to 429 or an MCP structured error that clients can retry safely",
+]
+gateway_tools = [
+  "llm_process_health reports runningJobs, queuedJobs, perProvider running/queued counts, limiter saturation, parent process rss/heap, and HTTP session caps/ages",
+  "provider request tools return a consistent saturation error for async, deferred sync, and direct sync paths",
+  "llm_request_result refuses cross-principal deduped result access and still permits owner access",
+]
+regression = [
+  "existing happy-path async process jobs still complete",
+  "existing happy-path HTTP API provider jobs still complete",
+  "existing bearer/OAuth HTTP auth behavior is unchanged except for new session/job saturation errors",
+  "workspace gating behavior from docs/plans/local-stdio-remote-http-workspace-gating.dag.toml remains unchanged",
+]
+
+[release_gates]
+local_commands = [
+  "node -e \"const fs=require('fs'); const toml=require('smol-toml'); toml.parse(fs.readFileSync('docs/plans/http-session-async-backpressure-hardening.dag.toml','utf8')); console.log('DAG TOML parse ok')\"",
+  "npx vitest run src/__tests__/http-transport.test.ts src/__tests__/async-job-manager.test.ts src/__tests__/api-request-tools.test.ts",
+  "npx vitest run src/__tests__/mcp-surface-usability.test.ts src/__tests__/workspace-registry.test.ts",
+  "npm run build",
+  "npm run lint",
+  "npm test",
+  "npm run format:check",
+]
+
+[review_gate]
+required_after_implementation = true
+instructions = [
+  "Run cross-LLM review after implementation and local verification.",
+  "Reviewers must inspect src/http-transport.ts, src/async-job-manager.ts, src/index.ts, config parsing, and focused tests directly.",
+  "Reviewers must verify sync direct execution is covered by the same limiter semantics as async jobs.",
+  "Reviewers must verify dedup cannot expose one principal's result to another principal.",
+  "Reviewers must verify health metrics are useful and do not expose prompt, stdout/stderr content, auth tokens, or API keys.",
+]
+
+[[steps]]
+id = "baseline-and-reproduce-issue-130"
+depends_on = []
+actor = "assistant"
+action = """
+Capture current behavior and write failing characterization tests where safe.
+Confirm the corrected line references in [current_evidence], identify all code
+paths that create HTTP sessions, start async process jobs, start HTTP API jobs,
+and call executeCli directly from sync fallback.
+
+Do not change runtime behavior in this step except for pending tests.
+"""
+idempotent = true
+expected_files_touched = [
+  "src/__tests__/http-transport.test.ts",
+  "src/__tests__/async-job-manager.test.ts",
+  "src/__tests__/api-request-tools.test.ts",
+]
+validation = """
+Focused failing tests demonstrate unbounded HTTP session creation, immediate
+job spawn/request execution without a limiter, and direct sync execution outside
+AsyncJobManager when deferral is unavailable.
+"""
+
+[[steps]]
+id = "add-limit-config-surface"
+depends_on = ["baseline-and-reproduce-issue-130"]
+actor = "assistant"
+action = """
+Extend config loading with typed limits and defaults:
+
+  [http]
+  max_sessions
+  session_idle_ttl_ms
+  session_reaper_interval_ms
+
+  [limits]
+  max_running_jobs
+  max_running_jobs_per_provider
+  max_queued_jobs
+  queue_timeout_ms
+  completed_job_memory_ttl_ms
+  max_job_output_bytes
+
+Keep defaults backwards-compatible for stdio while giving HTTP and async/server
+operation finite protections. Report effective values in doctor/process-health
+without exposing secrets.
+"""
+idempotent = false
+expected_files_touched = [
+  "src/config.ts",
+  "src/index.ts",
+  "src/__tests__/config.test.ts",
+]
+validation = """
+Config tests cover defaults, valid custom values, invalid negative/zero values,
+and redacted reporting of effective limits. npm run build passes.
+"""
+
+[[steps]]
+id = "bound-http-session-lifecycle"
+depends_on = ["add-limit-config-surface"]
+actor = "assistant"
+action = """
+Add HTTP session lifecycle management in src/http-transport.ts:
+
+  - track createdAt and lastActivityAt per session;
+  - enforce max_sessions before creating a new gateway server/transport;
+  - update lastActivityAt on every MCP session request;
+  - reap sessions idle longer than session_idle_ttl_ms;
+  - close transport and gateway server exactly once on reaper, DELETE,
+    transport.onclose, and gateway shutdown;
+  - return a retryable saturation response when max_sessions is reached.
+
+The reaper must not depend on clients sending DELETE.
+"""
+idempotent = false
+expected_files_touched = [
+  "src/http-transport.ts",
+  "src/__tests__/http-transport.test.ts",
+]
+validation = """
+HTTP transport tests prove session cap rejection, idle reaping, activity refresh,
+timer cleanup, transport.onclose cleanup, DELETE cleanup, and improved /healthz
+session metrics.
+"""
+
+[[steps]]
+id = "introduce-job-limiter"
+depends_on = ["add-limit-config-surface"]
+actor = "assistant"
+action = """
+Add a small in-process limiter/queue owned by AsyncJobManager. It must support:
+
+  - global running limit;
+  - per-provider running limit;
+  - bounded queue length;
+  - bounded queue wait timeout;
+  - cancel/removal of queued jobs;
+  - metrics for running, queued, rejected, timed-out, and saturated state.
+
+The limiter should not spawn a child process or start runApiRequest until it has
+capacity. Failure mode for full queues should be deterministic and prompt-free.
+"""
+idempotent = false
+expected_files_touched = [
+  "src/async-job-manager.ts",
+  "src/__tests__/async-job-manager.test.ts",
+]
+validation = """
+AsyncJobManager tests prove queued process jobs, queued HTTP API jobs, global
+limit behavior, per-provider behavior, queue full rejection, queue timeout,
+cancellation before start, and metric snapshots.
+"""
+
+[[steps]]
+id = "route-process-and-http-api-jobs-through-limiter"
+depends_on = ["introduce-job-limiter"]
+actor = "assistant"
+action = """
+Move both process jobs and HTTP API jobs behind the limiter:
+
+  - process transport must delay spawnCliProcess until a permit is acquired;
+  - HTTP API transport must delay runApiRequest until a permit is acquired;
+  - terminal completion, failure, cancellation, and output overflow must release
+    permits exactly once;
+  - queued jobs must still be persisted/readable as queued or running according
+    to the existing job-result contract.
+"""
+idempotent = false
+expected_files_touched = [
+  "src/async-job-manager.ts",
+  "src/__tests__/async-job-manager.test.ts",
+  "src/__tests__/api-request-tools.test.ts",
+]
+validation = """
+Focused tests prove no provider process/API request starts before capacity,
+permits release on every terminal path, and existing happy-path jobs still
+complete with persisted results.
+"""
+
+[[steps]]
+id = "cover-sync-direct-execution"
+depends_on = ["introduce-job-limiter"]
+actor = "assistant"
+action = """
+Bring direct sync execution under the same host-protection envelope. The branch
+at src/index.ts:909-915 must not call executeCli unless a process-provider
+permit has been acquired. If the limiter rejects or times out, return the same
+structured saturation error as async/deferred paths.
+
+This step covers SYNC_DEADLINE_MS=0 and deferral-unavailable runtimes where the
+async manager has no durable store.
+"""
+idempotent = false
+expected_files_touched = [
+  "src/index.ts",
+  "src/__tests__/api-request-tools.test.ts",
+  "src/__tests__/async-job-manager.test.ts",
+]
+validation = """
+Tests force SYNC_DEADLINE_MS=0 or a storeless runtime and prove executeCli is
+not invoked when the process limiter is saturated. Happy-path sync execution
+still works when capacity is available.
+"""
+
+[[steps]]
+id = "make-dedup-principal-safe"
+depends_on = ["introduce-job-limiter"]
+actor = "assistant"
+action = """
+Close the cross-principal dedup gap. Either include the effective owner
+principal in the requestKey for remote/authenticated requests or make
+tryReuseDedupedJob verify that the current principal can access the existing
+record before returning it. The chosen behavior must be consistent for process
+and HTTP API jobs and must preserve local unauthenticated stdio dedup where no
+principal exists.
+"""
+idempotent = false
+expected_files_touched = [
+  "src/async-job-manager.ts",
+  "src/index.ts",
+  "src/__tests__/async-job-manager.test.ts",
+  "src/__tests__/api-request-tools.test.ts",
+]
+validation = """
+Tests prove a second principal cannot dedup onto or read a first principal's
+job result, while the original owner can still dedup/read and local no-principal
+stdio dedup remains compatible.
+"""
+
+[[steps]]
+id = "configure-memory-retention-and-output-cap"
+depends_on = ["add-limit-config-surface", "introduce-job-limiter"]
+actor = "assistant"
+action = """
+Replace hardcoded in-memory job TTL and output cap constants with resolved
+runtime limits. Keep durable store retention independent. Preserve the existing
+overflow behavior: mark outputTruncated, fail the running job, terminate the
+process if present, persist completion, and release limiter capacity.
+"""
+idempotent = false
+expected_files_touched = [
+  "src/async-job-manager.ts",
+  "src/config.ts",
+  "src/__tests__/async-job-manager.test.ts",
+]
+validation = """
+Tests prove completed in-memory records evict according to configured TTL,
+durable results remain readable, lower max_job_output_bytes triggers overflow
+failure, and overflow releases limiter capacity exactly once.
+"""
+
+[[steps]]
+id = "extend-observability-surfaces"
+depends_on = [
+  "bound-http-session-lifecycle",
+  "route-process-and-http-api-jobs-through-limiter",
+  "configure-memory-retention-and-output-cap",
+]
+actor = "assistant"
+action = """
+Extend /healthz and llm_process_health with prompt-free operational metrics:
+
+  - HTTP session current/max/oldest age/idle TTL/reaper enabled/saturation;
+  - running and queued job counts globally and per provider;
+  - limiter capacity and saturation counters;
+  - parent process RSS, heapUsed, heapTotal, external memory;
+  - configured in-memory job TTL and max output bytes.
+
+Do not include prompt text, stdout/stderr, session IDs unless already exposed by
+the existing diagnostic surface, bearer tokens, OAuth tokens, API keys, or raw
+provider request bodies.
+"""
+idempotent = false
+expected_files_touched = [
+  "src/http-transport.ts",
+  "src/async-job-manager.ts",
+  "src/index.ts",
+  "src/__tests__/http-transport.test.ts",
+  "src/__tests__/api-slice6.test.ts",
+]
+validation = """
+Tests assert the new metrics exist, update under saturation, include parent
+memory usage, and do not serialize prompt/output/token-like fields.
+"""
+
+[[steps]]
+id = "document-failure-modes-and-operator-controls"
+depends_on = [
+  "bound-http-session-lifecycle",
+  "route-process-and-http-api-jobs-through-limiter",
+  "cover-sync-direct-execution",
+  "extend-observability-surfaces",
+]
+actor = "assistant"
+action = """
+Document the operator-facing controls and failure modes:
+
+  - HTTP session cap and idle TTL behavior;
+  - limiter queue/rejection behavior;
+  - sync direct execution protection;
+  - completed in-memory retention vs durable store retention;
+  - output overflow behavior;
+  - health/process-health metrics and redaction guarantees.
+"""
+idempotent = false
+expected_files_touched = [
+  "README.md",
+  "docs/personal-mcp/ENDPOINT_EXPOSURE.md",
+  "docs/personal-mcp/PRODUCT_CONTRACT.md",
+]
+validation = """
+Docs name the new config keys, defaults, retryable saturation behavior, and
+redaction guarantees without exposing internal machine paths or secrets.
+"""
+
+[[steps]]
+id = "final-verification-and-review"
+depends_on = [
+  "document-failure-modes-and-operator-controls",
+  "make-dedup-principal-safe",
+]
+actor = "assistant"
+action = """
+Run the full verification set and then request cross-LLM review. The review
+packet must include this DAG, issue #130, the local test output, and the
+implementation diff. Reviewers must verify actual source and tests rather than
+the implementer's summary.
+"""
+idempotent = true
+expected_files_touched = []
+validation = """
+All release_gates.local_commands pass. Cross-LLM review returns unconditional
+approval or every remaining blocker is documented with a concrete follow-up.
+"""

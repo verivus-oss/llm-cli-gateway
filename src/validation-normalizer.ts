@@ -36,12 +36,16 @@ export function normalizeStartedJob(
   snapshot: AsyncJobSnapshot,
   warning?: string
 ): NormalizedValidationResult {
+  // Issue #130: a job may be admitted as "queued" (waiting for a limiter run
+  // slot) before it starts. To a validation caller that is indistinguishable
+  // from "running": both mean "in progress, poll later".
+  const inProgress = snapshot.status === "running" || snapshot.status === "queued";
   return {
     provider,
     model,
-    status: snapshot.status,
-    verdict: snapshot.status === "running" ? "pending" : null,
-    rationale: snapshot.status === "running" ? "Provider job is running asynchronously." : null,
+    status: snapshot.status === "queued" ? "running" : snapshot.status,
+    verdict: inProgress ? "pending" : null,
+    rationale: inProgress ? "Provider job is running asynchronously." : null,
     risks: [],
     rawJobReference: {
       jobId: snapshot.id,
@@ -80,7 +84,9 @@ export function normalizeJobResult(
   return {
     provider,
     model,
-    status: result.status,
+    // Issue #130: a terminal result is never "queued"; coerce defensively so
+    // the normalized status stays within NormalizedValidationStatus.
+    status: result.status === "queued" ? "running" : result.status,
     verdict: inferVerdict(output, result.status),
     rationale: output ? excerpt(output, 1800) : error,
     risks: extractRisks(output, error),

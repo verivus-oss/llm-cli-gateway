@@ -663,6 +663,86 @@ describe("createGatewayServer — structural invariant on async tool registratio
     return JSON.parse(result.content[0].text).persistence;
   }
 
+  async function readHealthFull(
+    server: ReturnType<typeof createGatewayServer>
+  ): Promise<Record<string, any>> {
+    const reg = (
+      server as unknown as Record<
+        string,
+        Record<
+          string,
+          {
+            handler?: (a: unknown, b: unknown) => Promise<{ content: Array<{ text: string }> }>;
+            callback?: (a: unknown, b: unknown) => Promise<{ content: Array<{ text: string }> }>;
+          }
+        >
+      >
+    )[REGISTRY_KEY];
+    const tool = reg["llm_process_health"];
+    const fn = tool.handler ?? tool.callback;
+    if (!fn) throw new Error("llm_process_health not registered");
+    const result = await fn({}, {});
+    return JSON.parse(result.content[0].text);
+  }
+
+  it("llm_process_health reports issue #130 backpressure metrics (jobs, http caps, parent memory) without secrets", async () => {
+    const manager = new AsyncJobManager(noopLogger, undefined, new MemoryJobStore());
+    const server = createGatewayServer({
+      asyncJobManager: manager,
+      persistence: mkPersistence({ backend: "memory", acknowledgeEphemeral: true }),
+    });
+    const health = await readHealthFull(server);
+    const bp = health.backpressure;
+    expect(bp).toBeDefined();
+    // Job limiter metrics.
+    expect(typeof bp.jobs.running).toBe("number");
+    expect(typeof bp.jobs.queued).toBe("number");
+    expect(bp.jobs.runningByProvider).toBeDefined();
+    expect(bp.jobs.queuedByProvider).toBeDefined();
+    expect(typeof bp.jobs.maxRunning).toBe("number");
+    expect(typeof bp.jobs.saturated).toBe("boolean");
+    expect(typeof bp.jobs.completedJobMemoryTtlMs).toBe("number");
+    expect(typeof bp.jobs.maxJobOutputBytes).toBe("number");
+    // HTTP session caps (stdio path: not active, configured caps only).
+    expect(bp.httpSessions.active).toBe(false);
+    expect(typeof bp.httpSessions.max).toBe("number");
+    expect(typeof bp.httpSessions.idleTtlMs).toBe("number");
+    // Parent-process memory.
+    expect(bp.memory.rss).toBeGreaterThan(0);
+    expect(bp.memory.heapUsed).toBeGreaterThan(0);
+    // Redaction: nothing prompt/token/secret-shaped in the backpressure block.
+    const raw = JSON.stringify(bp);
+    expect(raw).not.toMatch(/prompt|bearer|api[_-]?key|authorization|secret/i);
+  });
+
+  it("llm_process_health reports saturation when a provider is queued at its per-provider cap", async () => {
+    const manager = new AsyncJobManager(noopLogger, undefined, new MemoryJobStore(), undefined, {
+      maxRunningJobs: 10,
+      maxRunningJobsPerProvider: 1,
+      maxQueuedJobs: 5,
+      queueTimeoutMs: 10_000,
+      completedJobMemoryTtlMs: 60 * 60 * 1000,
+      maxJobOutputBytes: 50 * 1024 * 1024,
+    });
+    const running = manager.startJob("sleep" as any, ["2"], "corr-running");
+    const queued = manager.startJob("sleep" as any, ["3"], "corr-queued");
+    const server = createGatewayServer({
+      asyncJobManager: manager,
+      persistence: mkPersistence({ backend: "memory", acknowledgeEphemeral: true }),
+    });
+
+    try {
+      const health = await readHealthFull(server);
+
+      expect(health.backpressure.jobs.running).toBe(1);
+      expect(health.backpressure.jobs.queued).toBe(1);
+      expect(health.backpressure.jobs.saturated).toBe(true);
+    } finally {
+      manager.cancelJob(queued.id);
+      manager.cancelJob(running.id);
+    }
+  });
+
   it("llm_process_health reports asyncJobsEnabled=false when the durable store failed to open (backend != 'none')", async () => {
     // Post-catch runtime: getJobStore() caught a store-open error (e.g.
     // backend='postgres', whose store constructor always throws) and nulled the

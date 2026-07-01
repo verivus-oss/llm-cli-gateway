@@ -347,6 +347,152 @@ export function loadPersistenceConfig(logger: Logger = noopLogger): PersistenceC
 }
 
 //──────────────────────────────────────────────────────────────────────────────
+// Host-protection limits (issue #130)
+//
+// Reads the [http] (session lifecycle) and [limits] (async/sync job execution
+// backpressure) tables from the same ~/.llm-cli-gateway/config.toml file, using
+// a SEPARATE loader/schema so a malformed limits block never breaks persistence
+// loading and vice versa. Defaults are conservative but chosen NOT to surprise
+// local stdio development: they only bite genuinely pathological session/job
+// growth. [http] is read with passthrough() because that table also carries the
+// [http.oauth] sub-table owned by loadRemoteOAuthConfig; we own only the three
+// session-lifecycle scalar keys here.
+//──────────────────────────────────────────────────────────────────────────────
+
+export const DEFAULT_HTTP_MAX_SESSIONS = 100;
+export const DEFAULT_HTTP_SESSION_IDLE_TTL_MS = 30 * 60 * 1000; // 30 minutes
+export const DEFAULT_HTTP_SESSION_REAPER_INTERVAL_MS = 60 * 1000; // 1 minute
+
+export const DEFAULT_MAX_RUNNING_JOBS = 32;
+export const DEFAULT_MAX_RUNNING_JOBS_PER_PROVIDER = 16;
+export const DEFAULT_MAX_QUEUED_JOBS = 128;
+export const DEFAULT_QUEUE_TIMEOUT_MS = 120000; // 2 minutes
+export const DEFAULT_COMPLETED_JOB_MEMORY_TTL_MS = 60 * 60 * 1000; // 1 hour (durable store keeps its own, longer, retention)
+export const DEFAULT_MAX_JOB_OUTPUT_BYTES = 50 * 1024 * 1024; // 50MB
+
+// [http] carries the [http.oauth] sub-table (owned by loadRemoteOAuthConfig) plus
+// possibly other keys, so tolerate unknown keys via passthrough(). Only the three
+// session-lifecycle scalars below are owned/validated here.
+const HttpSessionLimitsSchema = z
+  .object({
+    max_sessions: z.number().int().positive().default(DEFAULT_HTTP_MAX_SESSIONS),
+    session_idle_ttl_ms: z.number().int().positive().default(DEFAULT_HTTP_SESSION_IDLE_TTL_MS),
+    session_reaper_interval_ms: z
+      .number()
+      .int()
+      .positive()
+      .default(DEFAULT_HTTP_SESSION_REAPER_INTERVAL_MS),
+  })
+  .passthrough();
+
+// [limits] is fully owned here, so it is strict: a typo'd key is a hard error
+// rather than a silently-ignored misconfiguration.
+const JobLimitsSchema = z
+  .object({
+    max_running_jobs: z.number().int().positive().default(DEFAULT_MAX_RUNNING_JOBS),
+    max_running_jobs_per_provider: z
+      .number()
+      .int()
+      .positive()
+      .default(DEFAULT_MAX_RUNNING_JOBS_PER_PROVIDER),
+    max_queued_jobs: z.number().int().positive().default(DEFAULT_MAX_QUEUED_JOBS),
+    queue_timeout_ms: z.number().int().positive().default(DEFAULT_QUEUE_TIMEOUT_MS),
+    completed_job_memory_ttl_ms: z
+      .number()
+      .int()
+      .positive()
+      .default(DEFAULT_COMPLETED_JOB_MEMORY_TTL_MS),
+    max_job_output_bytes: z.number().int().positive().default(DEFAULT_MAX_JOB_OUTPUT_BYTES),
+  })
+  .strict();
+
+export interface HttpSessionLimitsConfig {
+  maxSessions: number;
+  sessionIdleTtlMs: number;
+  sessionReaperIntervalMs: number;
+}
+
+export interface JobLimitsConfig {
+  maxRunningJobs: number;
+  maxRunningJobsPerProvider: number;
+  maxQueuedJobs: number;
+  queueTimeoutMs: number;
+  completedJobMemoryTtlMs: number;
+  maxJobOutputBytes: number;
+}
+
+export interface GatewayLimitsConfig {
+  http: HttpSessionLimitsConfig;
+  jobs: JobLimitsConfig;
+  /** Audit trail: file the config was loaded from (or null if defaults). */
+  sources: { configFile: string | null };
+}
+
+export const DEFAULT_HTTP_SESSION_LIMITS: HttpSessionLimitsConfig = {
+  maxSessions: DEFAULT_HTTP_MAX_SESSIONS,
+  sessionIdleTtlMs: DEFAULT_HTTP_SESSION_IDLE_TTL_MS,
+  sessionReaperIntervalMs: DEFAULT_HTTP_SESSION_REAPER_INTERVAL_MS,
+};
+
+export const DEFAULT_JOB_LIMITS: JobLimitsConfig = {
+  maxRunningJobs: DEFAULT_MAX_RUNNING_JOBS,
+  maxRunningJobsPerProvider: DEFAULT_MAX_RUNNING_JOBS_PER_PROVIDER,
+  maxQueuedJobs: DEFAULT_MAX_QUEUED_JOBS,
+  queueTimeoutMs: DEFAULT_QUEUE_TIMEOUT_MS,
+  completedJobMemoryTtlMs: DEFAULT_COMPLETED_JOB_MEMORY_TTL_MS,
+  maxJobOutputBytes: DEFAULT_MAX_JOB_OUTPUT_BYTES,
+};
+
+/**
+ * Load [http] session-lifecycle limits and [limits] job-execution backpressure
+ * from ~/.llm-cli-gateway/config.toml (override via $LLM_GATEWAY_CONFIG).
+ *
+ * Defaults apply when the tables/keys are absent. Syntax-invalid TOML keeps the
+ * whole-file fallback (defaults). Schema-invalid values (negative/zero/non-int)
+ * THROW a clear config error: a bad limit must not silently fall back to an
+ * unbounded or surprising value.
+ */
+export function loadLimitsConfig(logger: Logger = noopLogger): GatewayLimitsConfig {
+  const configPath = defaultGatewayConfigPath();
+  const { parsed, sourcePath } = readGatewayTomlFile(configPath, logger, "limits");
+  const rawHttp = (parsed?.http as Record<string, unknown> | undefined) ?? {};
+  const rawLimits = (parsed?.limits as Record<string, unknown> | undefined) ?? {};
+
+  let httpParsed;
+  try {
+    httpParsed = HttpSessionLimitsSchema.parse(rawHttp);
+  } catch (err) {
+    throw new Error(
+      `Invalid [http] session-limit config: ${err instanceof Error ? err.message : String(err)}`
+    );
+  }
+
+  let limitsParsed;
+  try {
+    limitsParsed = JobLimitsSchema.parse(rawLimits);
+  } catch (err) {
+    throw new Error(`Invalid [limits] config: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
+  return {
+    http: {
+      maxSessions: httpParsed.max_sessions,
+      sessionIdleTtlMs: httpParsed.session_idle_ttl_ms,
+      sessionReaperIntervalMs: httpParsed.session_reaper_interval_ms,
+    },
+    jobs: {
+      maxRunningJobs: limitsParsed.max_running_jobs,
+      maxRunningJobsPerProvider: limitsParsed.max_running_jobs_per_provider,
+      maxQueuedJobs: limitsParsed.max_queued_jobs,
+      queueTimeoutMs: limitsParsed.queue_timeout_ms,
+      completedJobMemoryTtlMs: limitsParsed.completed_job_memory_ttl_ms,
+      maxJobOutputBytes: limitsParsed.max_job_output_bytes,
+    },
+    sources: { configFile: sourcePath },
+  };
+}
+
+//──────────────────────────────────────────────────────────────────────────────
 // Cache-awareness configuration
 //
 // Reads the [cache_awareness] block from the same ~/.llm-cli-gateway/config.toml
@@ -568,6 +714,8 @@ export interface ApiProviderConfig {
 export interface ApiProviderRuntime {
   name: string;
   kind: ApiProviderKind;
+  /** Env var name to read the key from at request time; null = keyless-local. */
+  apiKeyEnv: string | null;
   baseUrl: string;
   defaultModel: string;
   models?: string[];
@@ -725,6 +873,7 @@ export function enabledApiProviders(
     runtimes.push({
       name: provider.name,
       kind: provider.kind,
+      apiKeyEnv: provider.apiKeyEnv,
       baseUrl: provider.baseUrl,
       defaultModel: provider.defaultModel,
       models: provider.models,

@@ -17,6 +17,7 @@ import type { ApiProviderRuntime, PersistenceConfig, ProvidersConfig } from "../
 const runtime = (over: Partial<ApiProviderRuntime> = {}): ApiProviderRuntime => ({
   name: "ollama",
   kind: "openai-compatible",
+  apiKeyEnv: null,
   baseUrl: "http://127.0.0.1:11434/v1",
   defaultModel: "qwen2.5",
   apiKey: "",
@@ -78,6 +79,21 @@ async function listModels(
   const tool = listModelsTool(server);
   const fn = tool.handler ?? tool.callback;
   if (!fn) throw new Error("list_models not registered");
+  const result = await fn(args, {});
+  return JSON.parse(result.content[0].text);
+}
+
+async function providerToolCapabilities(
+  server: ReturnType<typeof createGatewayServer>,
+  args: Record<string, unknown> = {}
+): Promise<Record<string, unknown>> {
+  const reg = (server as unknown as Record<string, Record<string, unknown>>)._registeredTools;
+  const tool = reg["provider_tool_capabilities"] as {
+    handler?: (a: unknown, b: unknown) => Promise<{ content: Array<{ text: string }> }>;
+    callback?: (a: unknown, b: unknown) => Promise<{ content: Array<{ text: string }> }>;
+  };
+  const fn = tool.handler ?? tool.callback;
+  if (!fn) throw new Error("provider_tool_capabilities not registered");
   const result = await fn(args, {});
   return JSON.parse(result.content[0].text);
 }
@@ -166,6 +182,16 @@ describe("Slice 5 — API provider catalog", () => {
     const dormant = listModelsTool(makeServer(mkProviders(false))).inputSchema!;
     expect(() => dormant.parse({ cli: "ollama" })).toThrow(); // not enabled => not in the enum
     expect(() => dormant.parse({ cli: "claude" })).not.toThrow();
+  });
+
+  it("provider_tool_capabilities resolves enabled API provider names from the server runtime", async () => {
+    const server = makeServer(mkProviders(true));
+    const result = await providerToolCapabilities(server, { cli: "ollama" });
+    expect(result.ollama).toMatchObject({
+      cli: "ollama",
+      providerKind: "api",
+      gatewayRequestTools: ["api_ollama_request"],
+    });
   });
 });
 

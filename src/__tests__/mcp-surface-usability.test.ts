@@ -57,11 +57,92 @@ describe("MCP tool-surface usability (post-usability-review regressions)", () =>
     expect(registry["compare_answers"].description).toMatch(/does not call any provider/i);
   });
 
+  it("workspace tools are described as remote-only and not a stdio path-access fallback", async () => {
+    const server = await makeServer(true);
+    const registry = (server as unknown as Record<string, Record<string, { description?: string }>>)
+      ._registeredTools;
+
+    for (const name of [
+      "workspace_list",
+      "workspace_get",
+      "workspace_create",
+      "workspace_register_existing_repo",
+    ]) {
+      const desc = registry[name].description ?? "";
+      expect(desc, `${name} must say it is for remote workspaces`).toMatch(/remote HTTP\/OAuth/i);
+      expect(desc, `${name} must warn stdio callers away`).toMatch(/stdio\/local/i);
+      expect(desc, `${name} must not be a path-access repair tool`).toMatch(/not|do not/i);
+    }
+  });
+
+  it("provider path fields warn stdio callers not to use workspace tools as a fallback", async () => {
+    const server = await makeServer(true);
+    const registry = (
+      server as unknown as Record<string, Record<string, { inputSchema?: unknown }>>
+    )._registeredTools;
+    const shapeFor = (
+      name: string
+    ): Record<string, { _def?: { description?: string; innerType?: unknown } }> => {
+      const schema = registry[name].inputSchema as {
+        _def?: { shape?: () => Record<string, unknown> };
+      };
+      return (schema._def?.shape?.() ?? {}) as Record<
+        string,
+        { _def?: { description?: string; innerType?: unknown } }
+      >;
+    };
+
+    for (const [toolName, fieldName] of [
+      ["claude_request", "addDir"],
+      ["claude_request_async", "addDir"],
+      ["codex_request", "workingDir"],
+      ["codex_request", "addDir"],
+      ["codex_request_async", "workingDir"],
+      ["codex_request_async", "addDir"],
+      ["gemini_request", "includeDirs"],
+      ["gemini_request_async", "includeDirs"],
+      ["grok_request_async", "workingDir"],
+      ["mistral_request", "workingDir"],
+      ["mistral_request", "addDir"],
+      ["mistral_request_async", "workingDir"],
+      ["mistral_request_async", "addDir"],
+    ]) {
+      const desc = shapeFor(toolName)[fieldName]?._def?.description ?? "";
+      expect(desc, `${toolName}.${fieldName} must mention stdio/local`).toMatch(/stdio\/local/i);
+      expect(desc, `${toolName}.${fieldName} must reject workspace fallback`).toMatch(
+        /do not call workspace_\*/i
+      );
+    }
+
+    for (const toolName of [
+      "claude_request",
+      "claude_request_async",
+      "codex_request",
+      "codex_request_async",
+      "codex_fork_session",
+      "gemini_request",
+      "gemini_request_async",
+      "grok_request",
+      "grok_request_async",
+      "mistral_request",
+      "mistral_request_async",
+    ]) {
+      const desc = shapeFor(toolName).workspace?._def?.description ?? "";
+      expect(desc, `${toolName}.workspace must be remote-only`).toMatch(/remote HTTP\/OAuth/i);
+      expect(desc, `${toolName}.workspace must warn stdio callers away`).toMatch(/stdio\/local/i);
+      expect(desc, `${toolName}.workspace must reject workspace fallback`).toMatch(
+        /do not use this field/i
+      );
+    }
+  });
+
   it("server instructions advertise async/job tools only when they are registered", () => {
     const withAsync = buildServerInstructions(true);
     expect(withAsync).toContain("*_request_async");
     expect(withAsync).toContain("llm_job_status");
     expect(withAsync).toContain("auto-defers");
+    expect(withAsync).toContain("do not use workspace_*");
+    expect(withAsync).toContain("Stdio/local provider calls may pass local workingDir");
     expect(withAsync).not.toContain("${SYNC_DEADLINE_MS}"); // interpolation regression guard
 
     const withoutAsync = buildServerInstructions(false);

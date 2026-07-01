@@ -176,6 +176,23 @@ describe("v2.12.0 behavioral: createErrorResponse remediation + categories (#2, 
     expect(res.content[0].text).toContain("50MB");
   });
 
+  it("categorizes a JobSaturationError as a retryable 'saturated' backpressure error (issue #130)", async () => {
+    const { JobSaturationError } = await import("../async-job-manager.js");
+    const res = createErrorResponse(
+      "claude",
+      1,
+      "",
+      "c1",
+      new JobSaturationError("claude", "running limit reached and the queue is full; retry shortly")
+    );
+    expect(res.structuredContent?.errorCategory).toBe("saturated");
+    expect(res.structuredContent?.retryable).toBe(true);
+    expect(res.content[0].text).toMatch(/at capacity/i);
+    expect(res.content[0].text).toMatch(/retry/i);
+    // Must not be misclassified as a provider/CLI failure.
+    expect(res.content[0].text).not.toContain("Error executing");
+  });
+
   it("adds async-retry guidance on wall-clock timeout (124)", () => {
     const res = createErrorResponse("codex", 124, "", "c1");
     expect(res.structuredContent?.errorCategory).toBe("timeout");

@@ -11,6 +11,28 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { startHttpGateway, type HttpGatewayHandle } from "../http-transport.js";
 import { getRequestContext } from "../request-context.js";
+import type { HttpSessionLimitsConfig } from "../config.js";
+
+// Issue #130: helpers for the HTTP session-lifecycle tests.
+function httpLimits(overrides: Partial<HttpSessionLimitsConfig> = {}): HttpSessionLimitsConfig {
+  return {
+    maxSessions: 100,
+    sessionIdleTtlMs: 1_800_000,
+    sessionReaperIntervalMs: 60_000,
+    ...overrides,
+  };
+}
+
+const INITIALIZE_BODY = JSON.stringify({
+  jsonrpc: "2.0",
+  id: 1,
+  method: "initialize",
+  params: {
+    protocolVersion: "2025-06-18",
+    capabilities: {},
+    clientInfo: { name: "lifecycle-test", version: "0.0.1" },
+  },
+});
 
 // Layer 6 / U20: HTTP MCP transport coverage with mocked gateway server.
 //
@@ -854,14 +876,34 @@ describe("Layer 6 HTTP MCP transport (U20)", () => {
     expect(response.status).toBe(503);
   });
 
-  it("serves /healthz without auth and reports the live session count", async () => {
+  it("serves /healthz without auth and reports bounded session + memory metrics", async () => {
     gateway = await startGateway();
     const healthUrl = new URL("/healthz", gateway.url).toString();
     const response = await fetch(healthUrl);
     expect(response.status).toBe(200);
-    const body = (await response.json()) as { ok: boolean; sessions: number };
+    const body = (await response.json()) as {
+      ok: boolean;
+      sessions: {
+        current: number;
+        max: number;
+        oldestAgeMs: number;
+        idleTtlMs: number;
+        reaperIntervalMs: number;
+        saturated: boolean;
+      };
+      memory: { rss: number; heapUsed: number; heapTotal: number; external: number };
+    };
     expect(body.ok).toBe(true);
-    expect(body.sessions).toBe(0);
+    // Issue #130: session metrics are a nested object, not a bare count.
+    expect(body.sessions.current).toBe(0);
+    expect(body.sessions.max).toBeGreaterThan(0);
+    expect(body.sessions.idleTtlMs).toBeGreaterThan(0);
+    expect(body.sessions.saturated).toBe(false);
+    expect(body.memory.rss).toBeGreaterThan(0);
+    expect(body.memory.heapUsed).toBeGreaterThan(0);
+    // Redaction: no prompt/response/token/secret material on this surface.
+    const raw = JSON.stringify(body);
+    expect(raw).not.toMatch(/authorization|bearer|api[_-]?key|token/i);
   });
 
   it("returns 404 for unknown paths on the gateway host", async () => {
@@ -982,5 +1024,243 @@ describe("Layer 6 HTTP MCP transport (U20)", () => {
     expect(message.jsonrpc).toBe("2.0");
     expect(message.result).toBeDefined();
     expect(message.result.serverInfo).toBeDefined();
+  });
+
+  //────────────────────────────────────────────────────────────────────────────
+  // Issue #130: bounded HTTP session lifecycle
+  //────────────────────────────────────────────────────────────────────────────
+
+  async function rawInitialize(
+    gw: HttpGatewayHandle
+  ): Promise<{ status: number; sessionId: string | null; retryAfter: string | null }> {
+    const res = await fetch(
+      gw.url,
+      withAuth(TEST_TOKEN, { method: "POST", body: INITIALIZE_BODY })
+    );
+    await res.text(); // drain
+    return {
+      status: res.status,
+      sessionId: res.headers.get("mcp-session-id"),
+      retryAfter: res.headers.get("retry-after"),
+    };
+  }
+
+  async function healthz(gw: HttpGatewayHandle): Promise<any> {
+    const res = await fetch(new URL("/healthz", gw.url).toString());
+    return res.json();
+  }
+
+  it("creates no more than http.max_sessions live sessions; excess returns a 429 saturation error", async () => {
+    gateway = await startHttpGateway({
+      host: "127.0.0.1",
+      port: 0,
+      path: "/mcp",
+      createGatewayServer: () => makeEchoServer(),
+      httpLimits: httpLimits({ maxSessions: 1 }),
+    });
+
+    const first = await rawInitialize(gateway);
+    expect(first.status).toBe(200);
+    expect(first.sessionId).toBeTruthy();
+
+    const second = await rawInitialize(gateway);
+    expect(second.status).toBe(429);
+    expect(second.retryAfter).toBe("5");
+    expect(gateway.sessionCount()).toBe(1);
+
+    const health = await healthz(gateway);
+    expect(health.sessions.current).toBe(1);
+    expect(health.sessions.max).toBe(1);
+    expect(health.sessions.saturated).toBe(true);
+  });
+
+  it("bounds an initialize burst without DELETE to http.max_sessions and bounded RSS growth", async () => {
+    const beforeRss = process.memoryUsage().rss;
+    gateway = await startHttpGateway({
+      host: "127.0.0.1",
+      port: 0,
+      path: "/mcp",
+      createGatewayServer: () => makeEchoServer(),
+      httpLimits: httpLimits({ maxSessions: 4 }),
+    });
+
+    const results = await Promise.all(Array.from({ length: 24 }, () => rawInitialize(gateway!)));
+    const ok = results.filter(r => r.status === 200);
+    const rejected = results.filter(r => r.status === 429);
+    const health = await healthz(gateway);
+    const afterRss = process.memoryUsage().rss;
+
+    expect(ok).toHaveLength(4);
+    expect(rejected).toHaveLength(20);
+    expect(gateway.sessionCount()).toBe(4);
+    expect(health.sessions.current).toBe(4);
+    expect(health.sessions.max).toBe(4);
+    expect(health.sessions.saturated).toBe(true);
+    // This is not a micro-benchmark; it catches accidental unbounded per-init
+    // allocation while leaving room for normal V8 heap growth in CI.
+    expect(afterRss - beforeRss).toBeLessThan(128 * 1024 * 1024);
+  });
+
+  it("counts pending initialize requests toward http.max_sessions", async () => {
+    let releaseConnect!: () => void;
+    const connectGate = new Promise<void>(resolve => {
+      releaseConnect = resolve;
+    });
+    let firstConnectStarted!: () => void;
+    const firstConnect = new Promise<void>(resolve => {
+      firstConnectStarted = resolve;
+    });
+    let connectCalls = 0;
+    gateway = await startHttpGateway({
+      host: "127.0.0.1",
+      port: 0,
+      path: "/mcp",
+      createGatewayServer: () => {
+        const server = makeEchoServer();
+        const connect = server.connect.bind(server);
+        server.connect = async transport => {
+          connectCalls++;
+          firstConnectStarted();
+          await connectGate;
+          return connect(transport);
+        };
+        return server;
+      },
+      httpLimits: httpLimits({ maxSessions: 1 }),
+    });
+
+    const first = rawInitialize(gateway);
+    await firstConnect;
+
+    const second = await rawInitialize(gateway);
+    releaseConnect();
+    const firstResult = await first;
+
+    expect(firstResult.status).toBe(200);
+    expect(second.status).toBe(429);
+    expect(gateway.sessionCount()).toBe(1);
+    expect(connectCalls).toBe(1);
+  });
+
+  it("releases pending initialize capacity if gateway server creation fails", async () => {
+    let calls = 0;
+    gateway = await startHttpGateway({
+      host: "127.0.0.1",
+      port: 0,
+      path: "/mcp",
+      createGatewayServer: () => {
+        calls++;
+        if (calls === 1) throw new Error("boom before connect");
+        return makeEchoServer();
+      },
+      httpLimits: httpLimits({ maxSessions: 1 }),
+    });
+
+    const failed = await rawInitialize(gateway);
+    const retry = await rawInitialize(gateway);
+
+    expect(failed.status).toBe(500);
+    expect(retry.status).toBe(200);
+    expect(gateway.sessionCount()).toBe(1);
+  });
+
+  it("releases pending initialize capacity if gateway server connect fails", async () => {
+    let calls = 0;
+    gateway = await startHttpGateway({
+      host: "127.0.0.1",
+      port: 0,
+      path: "/mcp",
+      createGatewayServer: () => {
+        calls++;
+        const server = makeEchoServer();
+        if (calls === 1) {
+          server.connect = async () => {
+            throw new Error("boom during connect");
+          };
+        }
+        return server;
+      },
+      httpLimits: httpLimits({ maxSessions: 1 }),
+    });
+
+    const failed = await rawInitialize(gateway);
+    const retry = await rawInitialize(gateway);
+
+    expect(failed.status).toBe(500);
+    expect(retry.status).toBe(200);
+    expect(gateway.sessionCount()).toBe(1);
+  });
+
+  it("reaps an idle session without a client DELETE and reduces /healthz sessions.current", async () => {
+    gateway = await startHttpGateway({
+      host: "127.0.0.1",
+      port: 0,
+      path: "/mcp",
+      createGatewayServer: () => makeEchoServer(),
+      httpLimits: httpLimits({ sessionIdleTtlMs: 80, sessionReaperIntervalMs: 30 }),
+    });
+    const init = await rawInitialize(gateway);
+    expect(init.status).toBe(200);
+    expect(gateway.sessionCount()).toBe(1);
+
+    // No DELETE sent: the reaper must close it once idle beyond the TTL.
+    await new Promise(resolve => setTimeout(resolve, 400));
+    expect(gateway.sessionCount()).toBe(0);
+    const health = await healthz(gateway);
+    expect(health.sessions.current).toBe(0);
+  });
+
+  it("does not reap a session with recent activity before the idle TTL", async () => {
+    gateway = await startHttpGateway({
+      host: "127.0.0.1",
+      port: 0,
+      path: "/mcp",
+      createGatewayServer: () => makeEchoServer(),
+      httpLimits: httpLimits({ sessionIdleTtlMs: 5000, sessionReaperIntervalMs: 20 }),
+    });
+    const init = await rawInitialize(gateway);
+    expect(init.status).toBe(200);
+    // Well past several reaper intervals but well under the idle TTL.
+    await new Promise(resolve => setTimeout(resolve, 200));
+    expect(gateway.sessionCount()).toBe(1);
+  });
+
+  it("closes a session on explicit DELETE and stops tracking it", async () => {
+    gateway = await startHttpGateway({
+      host: "127.0.0.1",
+      port: 0,
+      path: "/mcp",
+      createGatewayServer: () => makeEchoServer(),
+      httpLimits: httpLimits({ maxSessions: 5 }),
+    });
+    const init = await rawInitialize(gateway);
+    expect(init.sessionId).toBeTruthy();
+    expect(gateway.sessionCount()).toBe(1);
+
+    const del = await fetch(
+      gateway.url,
+      withAuth(TEST_TOKEN, {
+        method: "DELETE",
+        headers: { "mcp-session-id": init.sessionId! },
+      })
+    );
+    expect(del.status).toBe(204);
+    expect(gateway.sessionCount()).toBe(0);
+  });
+
+  it("cancels the idle reaper on gateway close so no timer outlives the server", async () => {
+    const gw = await startHttpGateway({
+      host: "127.0.0.1",
+      port: 0,
+      path: "/mcp",
+      createGatewayServer: () => makeEchoServer(),
+      httpLimits: httpLimits({ sessionIdleTtlMs: 10, sessionReaperIntervalMs: 10 }),
+    });
+    await rawInitialize(gw);
+    await gw.close();
+    // After close the sessions are gone and the reaper is cancelled; waiting a
+    // few reaper intervals must not throw or resurrect state.
+    await new Promise(resolve => setTimeout(resolve, 60));
+    expect(gw.sessionCount()).toBe(0);
   });
 });

@@ -234,7 +234,7 @@ Opt-in flags (all default off) live under `[cache_awareness]` in `~/.llm-cli-gat
 
 - **Retry Logic**: Exponential backoff with circuit breaker for transient failures
 - **Atomic File Writes**: Process-specific temp files with fsync for data integrity
-- **Memory Limits**: 50MB cap on CLI output prevents DoS attacks
+- **Host-protection backpressure**: bounded HTTP session lifecycle (max sessions + idle reaper), global and per-provider job-execution limits with a bounded FIFO queue, and a configurable per-job output cap (default 50MB). See [Host-protection limits](#host-protection-limits-http-and-limits).
 - **NVM Path Caching**: Eliminates I/O overhead on every request
 - **Long-Running Jobs**: Non-time-bound async execution via `*_request_async` + polling tools
 
@@ -665,6 +665,61 @@ Legacy environment variables (deprecated; emit a warning at startup):
 - `LLM_GATEWAY_DEDUP_WINDOW_MS` — overrides `dedupWindowMs`.
 - `LLM_GATEWAY_ACKNOWLEDGE_EPHEMERAL` — `1`/`true`/`yes` sets `acknowledgeEphemeral = true`.
 
+##### Host-protection limits (`[http]` and `[limits]`)
+
+The gateway bounds HTTP session growth and async/sync job execution so a burst of
+clients or requests cannot drive unbounded memory, process, CPU, or provider-request
+growth. All keys live in the same `~/.llm-cli-gateway/config.toml`; defaults are
+conservative but chosen not to surprise local stdio development.
+
+```toml
+[http]                              # HTTP MCP transport session lifecycle
+max_sessions = 100                  # max concurrent live sessions; excess initialize returns HTTP 429
+session_idle_ttl_ms = 1800000       # 30 min: reap a session idle longer than this (no client DELETE needed)
+session_reaper_interval_ms = 60000  # 1 min: how often the idle reaper sweeps
+
+[limits]                            # async + sync job-execution backpressure (per gateway process)
+max_running_jobs = 32               # global concurrent running jobs (process CLI + HTTP API)
+max_running_jobs_per_provider = 16  # per-provider concurrent running jobs
+max_queued_jobs = 128               # bounded wait queue; a full queue rejects new work
+queue_timeout_ms = 120000           # 2 min: max time a job waits in the queue before failing
+completed_job_memory_ttl_ms = 3600000  # 1 h: in-memory retention for finished jobs (durable rows kept separately)
+max_job_output_bytes = 52428800     # 50 MB: per-job stdout+stderr cap
+```
+
+Failure modes (all deterministic and safe to retry):
+
+- **HTTP session cap reached**: the initialize request returns `429` with `Retry-After: 5` and a structured `{ error, code: "session_capacity", retryable: true }` body. No new session is created.
+- **Idle HTTP session**: the reaper closes it (transport + gateway server) once idle past `session_idle_ttl_ms`, independent of the client sending `DELETE`. A session with an in-flight request is never reaped mid-request.
+- **Job limiter saturated**: when the running limit is reached and the queue is full, `*_request` / `*_request_async` and the direct-sync fallback return a retryable `saturated` error (`structuredContent.errorCategory = "saturated"`, `retryable: true`). Nothing is spawned. When the queue has room the job waits (FIFO, per-provider fair) up to `queue_timeout_ms`, then fails with the same category.
+- **Sync direct execution**: the `SYNC_DEADLINE_MS=0` and storeless/`backend="none"` paths acquire the same process permit before spawning, so no execution bypasses the limiter.
+- **Output overflow**: a job whose combined stdout+stderr exceeds `max_job_output_bytes` is failed (exit code 126), its process terminated, its completion persisted, and its run slot released.
+- **In-memory vs durable retention**: `completed_job_memory_ttl_ms` only ages finished jobs out of the in-memory map; the durable job store keeps its own (longer) `[persistence].retentionDays` retention, so results stay readable via `llm_job_result` / `llm_request_result` after in-memory eviction.
+
+Live counters are exposed on `GET /healthz` (unauthenticated, HTTP transport) and via the `llm_process_health` tool `backpressure` block: session current/max/oldest-age/idle-TTL/saturation, running and queued job counts globally and per provider, limiter saturation counters, configured TTL/output caps, and parent-process RSS/heap. These surfaces report **counts, ages, and bytes only**, never prompt text, response content, tokens, session IDs, bearer/OAuth tokens, API keys, or machine secrets.
+
+For production user services, pair the in-process limits above with systemd's
+outer guardrails so an unexpected bug, provider CLI leak, or evaluation burst
+cannot consume the host:
+
+```bash
+systemctl --user edit llm-cli-gateway.service
+```
+
+```ini
+[Service]
+MemoryMax=2G
+TasksMax=512
+```
+
+Choose values for your workload: `MemoryMax` should cover the gateway process,
+the configured `max_running_jobs` provider children, and normal output buffering;
+`TasksMax` should exceed the process/thread count implied by `max_running_jobs`
+plus the HTTP server and SQLite work, but still be far below host exhaustion. If
+systemd terminates the service at those limits, durable jobs can be inspected
+after restart and `llm_process_health.backpressure` should be used to tune
+`[http]`, `[limits]`, `MemoryMax`, and `TasksMax` together.
+
 ##### Per-project isolation
 
 By default, **all gateway data is global per user**, not per project. With no overrides, every Claude Code window — across every repo — spawns its own gateway subprocess but they all read and write the same files:
@@ -925,7 +980,7 @@ Async request tools accept the same approval strategy fields as their sync varia
 
 ##### `llm_job_status`
 
-Return lifecycle status (`running`, `completed`, `failed`, `canceled`) and metadata for an async job.
+Return lifecycle status (`queued`, `running`, `completed`, `failed`, `canceled`, `orphaned`) and metadata for an async job.
 
 ##### `llm_job_result`
 

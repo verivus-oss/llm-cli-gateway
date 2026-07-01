@@ -29,6 +29,7 @@ import {
 import {
   getOneProviderToolCapabilities,
   getProviderToolCapabilities,
+  knownProviderCapabilityIds,
   providerCapabilityIds,
   type ProviderCapabilityId,
 } from "./provider-tool-capabilities.js";
@@ -85,6 +86,11 @@ export class ResourceProvider {
   /** Slice 6: enabled API providers whose kind supports multi-turn continuity. */
   private continuityTrackedApiRuntimes(): ApiProviderRuntime[] {
     return this.apiRuntimes().filter(rt => apiContinuityForKind(rt.kind) !== "none");
+  }
+
+  /** Capability ids backed by this resource provider's resolved provider config. */
+  private providerCapabilityIds(): readonly ProviderCapabilityId[] {
+    return this.providers ? providerCapabilityIds(this.providers) : knownProviderCapabilityIds();
   }
 
   /**
@@ -308,7 +314,7 @@ export class ResourceProvider {
           priority: 0.8,
         },
       },
-      ...providerCapabilityIds().map(cli => ({
+      ...this.providerCapabilityIds().map(cli => ({
         uri: `provider-tools://${cli}`,
         name: `${cli} Tool Capabilities`,
         title: `${cli} Tool Capabilities`,
@@ -569,17 +575,23 @@ export class ResourceProvider {
       return {
         uri,
         mimeType: "application/json",
-        text: JSON.stringify(getProviderToolCapabilities(), null, 2),
+        text: JSON.stringify(
+          getProviderToolCapabilities({ providersConfig: this.providers ?? undefined }),
+          null,
+          2
+        ),
       };
     }
 
-    const providerToolsResource = parseProviderToolsUri(uri);
+    const providerToolsResource = parseProviderToolsUri(uri, this.providerCapabilityIds());
     if (providerToolsResource) {
       return {
         uri,
         mimeType: "application/json",
         text: JSON.stringify(
-          getOneProviderToolCapabilities(providerToolsResource.provider),
+          getOneProviderToolCapabilities(providerToolsResource.provider, {
+            providersConfig: this.providers ?? undefined,
+          }),
           null,
           2
         ),
@@ -629,7 +641,10 @@ function parseProviderSubcommandUri(
   };
 }
 
-function parseProviderToolsUri(uri: string): { provider: ProviderCapabilityId } | null {
+function parseProviderToolsUri(
+  uri: string,
+  providerIds: readonly ProviderCapabilityId[]
+): { provider: ProviderCapabilityId } | null {
   const prefix = uri.startsWith("provider-tools://")
     ? "provider-tools://"
     : uri.startsWith("provider_tools://")
@@ -640,6 +655,6 @@ function parseProviderToolsUri(uri: string): { provider: ProviderCapabilityId } 
   // Only known capability ids back a `provider-tools://<id>` resource; an
   // arbitrary (Slice 0.5) API id is a valid ProviderCapabilityId but has no
   // resource until it is registered, so reject anything outside the known set.
-  if (!(providerCapabilityIds() as readonly string[]).includes(provider)) return null;
+  if (!(providerIds as readonly string[]).includes(provider)) return null;
   return { provider: provider as ProviderCapabilityId };
 }

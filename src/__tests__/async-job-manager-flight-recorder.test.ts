@@ -1,12 +1,14 @@
 import { describe, it, expect } from "vitest";
 import {
   AsyncJobManager,
+  isAsyncJobInProgress,
   type AsyncJobFlightRecorderEntry,
   type AsyncJobUsageExtractor,
   type LlmCli,
 } from "../async-job-manager.js";
 import { MemoryJobStore } from "../job-store.js";
 import { noopLogger } from "../logger.js";
+import type { JobLimitsConfig } from "../config.js";
 import type { FlightLogStart, FlightLogResult, FlightRecorderLike } from "../flight-recorder.js";
 
 /**
@@ -65,7 +67,7 @@ function waitForJobDone(manager: AsyncJobManager, jobId: string, timeoutMs = 500
     const deadline = Date.now() + timeoutMs;
     const check = () => {
       const s = manager.getJobSnapshot(jobId);
-      if (s && s.status !== "running") return resolve();
+      if (s && !isAsyncJobInProgress(s.status)) return resolve();
       if (Date.now() > deadline) return reject(new Error("waitForJobDone timed out"));
       setTimeout(check, 50);
     };
@@ -97,6 +99,18 @@ const fakeUsage: AsyncJobUsageExtractor = () => ({
   cacheCreationTokens: 0,
   costUsd: 0.001,
 });
+
+function limiterLimits(overrides: Partial<JobLimitsConfig> = {}): JobLimitsConfig {
+  return {
+    maxRunningJobs: 1,
+    maxRunningJobsPerProvider: 1,
+    maxQueuedJobs: 5,
+    queueTimeoutMs: 10_000,
+    completedJobMemoryTtlMs: 60 * 60 * 1000,
+    maxJobOutputBytes: 50 * 1024 * 1024,
+    ...overrides,
+  };
+}
 
 describe("AsyncJobManager + flight-recorder (slice 1.5)", () => {
   describe("logStart opt-in (case a / a2 / i)", () => {
@@ -183,6 +197,34 @@ describe("AsyncJobManager + flight-recorder (slice 1.5)", () => {
       manager.armFlightCompleteForDeferral(outcome.snapshot.id);
       expect(fr.completes).toHaveLength(1);
       expect(fr.completes[0].correlationId).toBe("corr-a4");
+    });
+
+    it("armFlightCompleteForDeferral while queued waits for a terminal transition", async () => {
+      const fr = new CapturingFlightRecorder();
+      const manager = new AsyncJobManager(
+        noopLogger,
+        undefined,
+        new MemoryJobStore(),
+        fr,
+        limiterLimits()
+      );
+      const running = manager.startJobWithDedup("sleep" as LlmCli, ["2"], "corr-running");
+      const queued = manager.startJobWithDedup("echo" as LlmCli, ["queued"], "corr-queued", {
+        writeFlightStart: false,
+        flightRecorderEntry: entry(),
+        extractUsage: fakeUsage,
+      });
+
+      expect(manager.getJobSnapshot(queued.snapshot.id)?.status).toBe("queued");
+      manager.armFlightCompleteForDeferral(queued.snapshot.id);
+      expect(fr.completes).toHaveLength(0);
+
+      manager.cancelJob(running.snapshot.id);
+      await waitForJobDone(manager, queued.snapshot.id);
+      await tick();
+      expect(fr.completes).toHaveLength(1);
+      expect(fr.completes[0].correlationId).toBe("corr-queued");
+      expect(fr.completes[0].result.status).toBe("completed");
     });
 
     it("writes nothing when flightRecorderEntry is omitted (regression guard for case i)", async () => {

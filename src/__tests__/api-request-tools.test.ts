@@ -48,6 +48,7 @@ import type {
 const ollamaRuntime = (over: Partial<ApiProviderRuntime> = {}): ApiProviderRuntime => ({
   name: "ollama",
   kind: "openai-compatible",
+  apiKeyEnv: null,
   baseUrl: "http://127.0.0.1:1/v1",
   defaultModel: "qwen2.5",
   apiKey: "",
@@ -179,6 +180,7 @@ describe("Slice 2 — api provider request handlers (loopback)", () => {
     const providerRuntime: ApiProviderRuntime = {
       name: "ollama",
       kind: "openai-compatible",
+      apiKeyEnv: null,
       baseUrl,
       defaultModel: "qwen2.5",
       apiKey: "",
@@ -194,6 +196,7 @@ describe("Slice 2 — api provider request handlers (loopback)", () => {
     const providerRuntime: ApiProviderRuntime = {
       name: "ollama",
       kind: "openai-compatible",
+      apiKeyEnv: null,
       baseUrl: "http://127.0.0.1:1/v1",
       defaultModel: "qwen2.5",
       apiKey: "",
@@ -216,6 +219,7 @@ describe("Slice 2 — api provider request handlers (loopback)", () => {
     const providerRuntime: ApiProviderRuntime = {
       name: "ollama",
       kind: "openai-compatible",
+      apiKeyEnv: null,
       baseUrl,
       defaultModel: "qwen2.5",
       apiKey: "",
@@ -354,6 +358,7 @@ describe("Slice 1 — api provider telemetry parity", () => {
   const rt = (baseUrl: string, over: Partial<ApiProviderRuntime> = {}): ApiProviderRuntime => ({
     name: "ollama",
     kind: "openai-compatible",
+    apiKeyEnv: null,
     baseUrl,
     defaultModel: "qwen2.5",
     apiKey: "",
@@ -493,6 +498,7 @@ describe("Slice 2 — api provider schema parity", () => {
   const rt = (baseUrl: string): ApiProviderRuntime => ({
     name: "ollama",
     kind: "openai-compatible",
+    apiKeyEnv: null,
     baseUrl,
     defaultModel: "qwen2.5",
     apiKey: "",
@@ -607,6 +613,7 @@ describe("Slice 3 — api provider continuity + sessions", () => {
   const rt = (baseUrl: string): ApiProviderRuntime => ({
     name: "ollama",
     kind: "openai-compatible",
+    apiKeyEnv: null,
     baseUrl,
     defaultModel: "qwen2.5",
     apiKey: "",
@@ -728,6 +735,7 @@ describe("Slice 4a — api provider server-side-id continuation", () => {
   const xaiRt = (baseUrl: string): ApiProviderRuntime => ({
     name: "xai",
     kind: "xai-responses",
+    apiKeyEnv: "XAI_API_KEY",
     baseUrl,
     defaultModel: "grok-4",
     apiKey: "k",

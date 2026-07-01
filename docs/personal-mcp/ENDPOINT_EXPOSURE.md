@@ -123,6 +123,36 @@ For web-client setup, `endpoint_exposure` should show:
 
 If reachability is `not_checked`, assistant-led setup must ask the user to run a fresh doctor command with verification enabled before claiming the endpoint is ready for web clients.
 
+## Session and job backpressure (issue #130)
+
+When the gateway is exposed over HTTP, it bounds session and job growth so a
+misbehaving or hostile client cannot exhaust host memory, the process table, CPU,
+or provider capacity. All limits are per gateway process and configured under
+`[http]` and `[limits]` in `~/.llm-cli-gateway/config.toml` (see the README
+"Host-protection limits" section for the full key list and defaults).
+
+Operator-facing behavior:
+
+- **Session cap**: at most `[http].max_sessions` concurrent HTTP MCP sessions.
+  A further `initialize` returns `429` with `Retry-After: 5` and a JSON body
+  `{ error, code: "session_capacity", retryable: true }`. Clients should back off
+  and retry, or close idle sessions with an MCP `DELETE`.
+- **Idle reaping**: a session idle longer than `[http].session_idle_ttl_ms` is
+  closed automatically by the reaper (interval `session_reaper_interval_ms`),
+  even if the client never sends `DELETE`. A session with a request in flight is
+  never reaped mid-request.
+- **Job limiter**: async and sync provider execution shares a global limit
+  (`[limits].max_running_jobs`), a per-provider limit
+  (`max_running_jobs_per_provider`), and a bounded FIFO queue (`max_queued_jobs`,
+  `queue_timeout_ms`). A saturated gateway returns a retryable `saturated` error
+  (`structuredContent.errorCategory = "saturated"`); nothing is spawned outside
+  the limit.
+- **Health/metrics**: `GET /healthz` (unauthenticated) and the `llm_process_health`
+  tool report live session caps/ages, running/queued job counts (global and per
+  provider), limiter saturation, configured caps, and parent-process memory.
+  These surfaces expose **counts, ages, and bytes only**: no prompt text, response
+  content, tokens, session IDs, bearer/OAuth tokens, API keys, or machine paths.
+
 ## Failure Handling
 
 - If mode is `local_only`, use local clients only or configure a tunnel.

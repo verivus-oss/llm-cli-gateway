@@ -1,0 +1,385 @@
+# Implementation plan: fix issue #130 backpressure follow-up review findings.
+#
+# Goal: complete the issue #130 hardening branch by fixing the queued-job sync
+# semantics, deferral flight-recorder handoff, HTTP initialize/session race
+# coverage, limiter saturation metrics, and missing regression tests found by
+# local review and cross-provider review attempts.
+
+[meta]
+name = "issue-130-backpressure-followup-fixes"
+schema_version = "1.0"
+owner = "verivus-oss"
+slice = "issue-130-followup-2026-07-01"
+target_branch = "master"
+base_plan = "docs/plans/http-session-async-backpressure-hardening.dag.toml"
+verification_packet = "docs/reviews/issue-130-hardening-dag-verification.md"
+status = "planned"
+created = "2026-07-01"
+acceptance_resource = "Queued jobs are treated as in-progress by sync/deferred paths; deferral flight-recorder ownership is not armed as a failed completion while a job is queued; HTTP session initialize and concurrent-session races are covered; limiter saturation metrics reflect global and per-provider saturation; focused tests plus build/lint/full test gates pass."
+
+source_files_to_inspect = [
+  "src/index.ts",
+  "src/async-job-manager.ts",
+  "src/http-transport.ts",
+  "src/config.ts",
+  "src/request-context.ts",
+  "src/validation-normalizer.ts",
+  "src/__tests__/async-job-manager-limiter.test.ts",
+  "src/__tests__/async-job-manager-http-limiter.test.ts",
+  "src/__tests__/async-job-manager-dedup-isolation.test.ts",
+  "src/__tests__/http-transport.test.ts",
+  "src/__tests__/api-request-tools.test.ts",
+  "src/__tests__/persistence-config.test.ts",
+  "docs/reviews/issue-130-hardening-dag-verification.md",
+]
+
+[review_context]
+local_review = "NOT APPROVED: queued jobs are treated as terminal in sync/deferred loops; armFlightCompleteForDeferral also treats queued as terminal; initialize path lacks the same in-flight guard as established sessions; limiter saturated metric only reports global saturation."
+mistral_review = "APPROVED with test-gap suggestions, but did not catch queued-sync handling. Use it only as supplemental evidence."
+antigravity_review = "No usable review output from agy; final stdio-gateway attempt failed after inspecting the wrong runtime package path."
+
+[confirmed_findings]
+queued_status_is_new = "src/async-job-manager.ts defines AsyncJobStatus including queued."
+sync_process_loop_terminal_check = "src/index.ts polls getJobSnapshot and currently treats status != running as complete."
+sync_api_loop_terminal_check = "src/index.ts uses the same status != running terminal predicate for API-provider jobs."
+deferral_arm_terminal_check = "src/async-job-manager.ts armFlightCompleteForDeferral returns only for running and treats every other status as terminal."
+http_existing_session_inflight_guard = "src/http-transport.ts increments inFlight only for requests with an existing mcp-session-id."
+http_initialize_path = "src/http-transport.ts creates a new session and calls handleRequest for initialize without the existing-session inFlight wrapper."
+limiter_saturated_metric = "src/async-job-manager.ts JobLimiter.snapshot currently computes saturated from the global running count only."
+
+[non_goals]
+items = [
+  "Do not redesign the issue #130 limiter from scratch.",
+  "Do not change provider CLI contracts or model selection.",
+  "Do not change durable job-store schema unless a focused test proves it is required.",
+  "Do not change auth/OAuth behavior except where required to exercise principal-scoped dedup tests.",
+  "Do not include prompt text, stdout/stderr contents, bearer tokens, OAuth tokens, API keys, or machine-local private paths in shipped docs.",
+]
+
+[decisions]
+queued_is_in_progress_for_polling = true
+queued_must_not_emit_failed_flight_complete = true
+initialize_request_counts_as_in_flight = true
+session_cap_must_be_race_resistant = true
+saturation_metric_must_include_provider_cap = true
+tests_must_fail_without_the_fix = true
+
+[state_model]
+in_progress_job_statuses = ["queued", "running"]
+terminal_job_statuses = ["completed", "failed", "canceled", "orphaned"]
+sync_polling_rule = "Only terminal statuses complete inline. Queued and running continue polling until the sync deadline; if the deadline expires, return a deferred job reference."
+flight_recorder_rule = "armFlightCompleteForDeferral must only write immediately when the job is already terminal. Queued and running jobs wait for their later terminal transition."
+http_session_rule = "The initialize request that creates a session must hold an in-flight guard from the moment the session becomes visible until handleRequest settles."
+
+[test_matrix.unit]
+sync_deferred = [
+  "process sync request whose async job starts queued must not return a failed empty result before the sync deadline",
+  "process sync request whose async job remains queued until the sync deadline returns a deferred jobId and later completes through normal polling",
+  "API-provider sync request with a queued HTTP job follows the same queued-as-in-progress behavior",
+  "armFlightCompleteForDeferral called while a job is queued does not write a failed flight-recorder completion",
+]
+http_transport = [
+  "initialize request that creates a session is protected by inFlight and is not reaped while handleRequest is still running",
+  "failed or thrown initialize does not leave an unreapable session entry",
+  "concurrent initialize attempts cannot exceed http.max_sessions even when session insertion is delayed",
+  "concurrent requests on one established session keep inFlight non-negative and refresh lastActivityAt after the last request settles",
+]
+limiter_metrics = [
+  "saturated is true when global running capacity is full",
+  "saturated is true when any provider has queued work because its per-provider running capacity is full",
+  "saturated is false when there is spare global and per-provider capacity and no queue pressure",
+  "runningByProvider and queuedByProvider remain prompt-free provider-count maps",
+]
+dedup_and_persistence = [
+  "queued timeout with a store persists failed status, exitCode 75, and a retryable saturation error",
+  "principal captured at job creation remains the owner even if request context changes before completion",
+  "different principals cannot dedup onto a queued, running, or completed job owned by another principal",
+]
+
+[release_gates]
+local_commands = [
+  "node -e \"const fs=require('fs'); const toml=require('smol-toml'); toml.parse(fs.readFileSync('docs/plans/issue-130-backpressure-followup-fixes.dag.toml','utf8')); console.log('follow-up DAG TOML parse ok')\"",
+  "npx vitest run src/__tests__/async-job-manager-limiter.test.ts src/__tests__/async-job-manager-http-limiter.test.ts src/__tests__/async-job-manager-dedup-isolation.test.ts",
+  "npx vitest run src/__tests__/http-transport.test.ts src/__tests__/api-request-tools.test.ts src/__tests__/persistence-config.test.ts",
+  "npm run build",
+  "npm run lint",
+  "npm test",
+  "npm run format:check",
+]
+
+[review_gate]
+required_after_implementation = true
+instructions = [
+  "Ask reviewers to inspect actual source and tests directly through the registered llm-cli-gateway workspace alias.",
+  "Every review prompt must mention queued-as-in-progress semantics and armFlightCompleteForDeferral explicitly.",
+  "Do not count provider runs that cannot read the repo or return empty stdout/stderr as approvals.",
+  "Require final verdicts to end with APPROVED or NOT APPROVED with findings.",
+]
+
+[[steps]]
+id = "baseline-review-findings"
+depends_on = []
+actor = "assistant"
+action = """
+Re-read the current issue #130 implementation and pin exact line references for
+the follow-up fixes. Confirm the current behavior for queued jobs in both sync
+poll loops, confirm armFlightCompleteForDeferral's treatment of queued, inspect
+HTTP initialize session creation, and inspect JobLimiter.snapshot saturation.
+
+Do not edit runtime behavior in this step.
+"""
+idempotent = true
+expected_files_touched = []
+validation = """
+Notes identify the exact predicates and helper functions that must change:
+sync process polling, sync API polling, deferral flight-recorder arming,
+HTTP initialize session tracking, and limiter saturation metric calculation.
+"""
+
+[[steps]]
+id = "add-failing-queued-sync-tests"
+depends_on = ["baseline-review-findings"]
+actor = "assistant"
+action = """
+Add tests that reproduce the queued-as-terminal regression before changing the
+implementation. Cover both process and HTTP API sync/deferred paths:
+
+  - a job admitted as queued must not be treated as a terminal result;
+  - a queued job that remains queued until SYNC_DEADLINE_MS expires must return
+    a deferred response;
+  - a queued job that later runs and completes must be retrievable normally;
+  - armFlightCompleteForDeferral called while queued must not write a failed
+    completion row.
+
+Use small limiter values and deterministic fake providers/processes. Avoid real
+provider CLI calls.
+"""
+idempotent = false
+expected_files_touched = [
+  "src/__tests__/async-job-manager-limiter.test.ts",
+  "src/__tests__/async-job-manager-http-limiter.test.ts",
+  "src/__tests__/api-request-tools.test.ts",
+  "src/__tests__/persistence-config.test.ts",
+]
+validation = """
+Focused tests fail on the current branch for queued jobs being treated as
+terminal or flight-recorder completion being written before terminal status.
+"""
+
+[[steps]]
+id = "fix-queued-as-in-progress"
+depends_on = ["add-failing-queued-sync-tests"]
+actor = "assistant"
+action = """
+Introduce or reuse a single helper that classifies AsyncJobStatus as
+in-progress or terminal. Apply it everywhere sync/deferred logic currently
+checks only status != running:
+
+  - process sync polling in src/index.ts;
+  - HTTP API-provider sync polling in src/index.ts;
+  - armFlightCompleteForDeferral in src/async-job-manager.ts;
+  - any test helper or validation normalizer that accidentally treats queued as
+    terminal.
+
+Queued and running are in-progress. completed, failed, canceled, and orphaned
+are terminal.
+"""
+idempotent = false
+expected_files_touched = [
+  "src/index.ts",
+  "src/async-job-manager.ts",
+  "src/validation-normalizer.ts",
+  "src/__tests__/async-job-manager-limiter.test.ts",
+  "src/__tests__/async-job-manager-http-limiter.test.ts",
+  "src/__tests__/api-request-tools.test.ts",
+  "src/__tests__/persistence-config.test.ts",
+]
+validation = """
+Queued sync/deferred tests pass. Existing async happy-path tests still pass.
+Flight-recorder tests prove queued jobs do not emit failed completion rows until
+they actually reach a terminal status.
+"""
+
+[[steps]]
+id = "add-http-session-race-tests"
+depends_on = ["baseline-review-findings"]
+actor = "assistant"
+action = """
+Add HTTP transport tests for initialize and concurrency races:
+
+  - a delayed initialize request that has made its session visible is not reaped
+    while handleRequest is still in flight;
+  - initialize failure or thrown handleRequest does not leave an unreapable
+    session entry;
+  - concurrent initialize requests cannot grow sessions beyond max_sessions;
+  - concurrent established-session requests keep inFlight balanced and refresh
+    lastActivityAt after the last request settles.
+
+Use a controlled McpServer/transport test seam rather than real provider CLIs.
+"""
+idempotent = false
+expected_files_touched = [
+  "src/__tests__/http-transport.test.ts",
+]
+validation = """
+At least one new HTTP transport test fails on the current branch if initialize
+requests are not counted as in-flight or if max_sessions has a concurrency race.
+"""
+
+[[steps]]
+id = "fix-http-initialize-session-guard"
+depends_on = ["add-http-session-race-tests"]
+actor = "assistant"
+action = """
+Refactor HTTP session tracking so the initialize request uses the same activity
+and inFlight accounting as established-session requests once a session entry is
+visible. The implementation must:
+
+  - avoid double SessionEntry objects for one transport;
+  - increment inFlight before or immediately when the session becomes visible;
+  - decrement inFlight in a finally block after initialize handleRequest settles;
+  - refresh lastActivityAt on completion;
+  - remove failed initialize sessions when the transport/session cannot be used;
+  - keep closeSession idempotent for DELETE, onclose, idle reaper, and shutdown.
+
+If exact in-flight accounting during the pre-session part of initialize is not
+possible with the SDK callback ordering, document the limitation in a code
+comment and enforce max_sessions with a pending-initialize reservation counter.
+"""
+idempotent = false
+expected_files_touched = [
+  "src/http-transport.ts",
+  "src/__tests__/http-transport.test.ts",
+]
+validation = """
+HTTP race tests pass. Existing OAuth/auth/session lifecycle tests continue to
+pass. /healthz sessions.current and sessions.saturated remain accurate during
+and after initialize.
+"""
+
+[[steps]]
+id = "add-limiter-saturation-metric-tests"
+depends_on = ["baseline-review-findings"]
+actor = "assistant"
+action = """
+Add tests proving limiter saturated metrics reflect both global and
+per-provider pressure. Include a scenario where global capacity remains
+available but one provider is saturated and has queued work.
+"""
+idempotent = false
+expected_files_touched = [
+  "src/__tests__/async-job-manager-limiter.test.ts",
+  "src/__tests__/persistence-config.test.ts",
+  "src/__tests__/http-transport.test.ts",
+]
+validation = """
+Metric tests fail on the current branch if saturated only checks the global
+running count.
+"""
+
+[[steps]]
+id = "fix-limiter-saturation-metrics"
+depends_on = ["add-limiter-saturation-metric-tests"]
+actor = "assistant"
+action = """
+Update JobLimiter.snapshot so saturated means a new immediate acquire would
+queue or reject for some currently pressured dimension. At minimum, saturated
+must be true when:
+
+  - runningGlobal >= maxRunningJobs;
+  - any provider has running count >= maxRunningJobsPerProvider and queued work;
+  - the queue is full while there is queued work or pressure.
+
+Keep the metric prompt-free and stable for /healthz and llm_process_health.
+"""
+idempotent = false
+expected_files_touched = [
+  "src/async-job-manager.ts",
+  "src/__tests__/async-job-manager-limiter.test.ts",
+  "src/__tests__/persistence-config.test.ts",
+  "src/__tests__/http-transport.test.ts",
+]
+validation = """
+Limiter metric tests pass. /healthz and llm_process_health tests assert
+saturated true under provider-only pressure and false when capacity is truly
+available.
+"""
+
+[[steps]]
+id = "close-secondary-test-gaps"
+depends_on = [
+  "fix-queued-as-in-progress",
+  "fix-http-initialize-session-guard",
+  "fix-limiter-saturation-metrics",
+]
+actor = "assistant"
+action = """
+Add or extend tests for the secondary review gaps that are cheap and
+high-value:
+
+  - queued timeout with a durable or memory store persists failed status,
+    exitCode 75, and the saturation error;
+  - ownerPrincipal is captured at job creation and remains authoritative even
+    if ambient request context changes before completion;
+  - cross-principal dedup refusal works for queued, running, and completed rows;
+  - docs or tool descriptions mention queued as a visible in-progress status
+    wherever status values are enumerated.
+"""
+idempotent = false
+expected_files_touched = [
+  "src/__tests__/async-job-manager-limiter.test.ts",
+  "src/__tests__/async-job-manager-dedup-isolation.test.ts",
+  "src/__tests__/persistence-config.test.ts",
+  "src/index.ts",
+  "README.md",
+  "docs/personal-mcp/PRODUCT_CONTRACT.md",
+]
+validation = """
+Focused tests pass and any user-visible status documentation includes queued
+or clearly maps queued to running/pending where the external contract requires
+that normalization.
+"""
+
+[[steps]]
+id = "run-focused-and-release-gates"
+depends_on = ["close-secondary-test-gaps"]
+actor = "assistant"
+action = """
+Run the focused gates first, then the full release gates. Investigate any
+failure rather than documenting it away. The previous ttl-warning test failure
+must either be made deterministic or explicitly excluded only with a separate,
+reviewed test-environment fix.
+"""
+idempotent = true
+expected_files_touched = []
+validation = """
+All release_gates.local_commands pass, including npm test and format:check.
+The worktree contains only intended source, test, and documentation changes.
+"""
+
+[[steps]]
+id = "cross-review-and-record-results"
+depends_on = ["run-focused-and-release-gates"]
+actor = "assistant"
+action = """
+Run cross-review through providers that can actually inspect the registered
+workspace. Record only usable reviews:
+
+  - reviewer accessed the correct llm-cli-gateway checkout;
+  - reviewer inspected source/tests directly;
+  - reviewer produced non-empty findings or an explicit approval;
+  - reviewer ended with APPROVED or NOT APPROVED with findings.
+
+If Antigravity/Gemini still exits with empty output or inspects the installed
+package instead of the workspace, mark it as unusable and do not count it as an
+approval.
+"""
+idempotent = true
+expected_files_touched = [
+  "docs/reviews/issue-130-hardening-dag-verification.md",
+]
+validation = """
+The verification packet is updated with exact commands, pass/fail results, and
+usable cross-review verdicts. Any NOT APPROVED finding either has a fix commit
+or a new concrete follow-up plan.
+"""

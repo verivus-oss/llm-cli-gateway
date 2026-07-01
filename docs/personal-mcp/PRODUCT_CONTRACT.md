@@ -38,6 +38,7 @@ The MVP assumes a single trusted user. It still treats local secrets as sensitiv
 - Stdio is the unrestricted local development transport for machine-local filesystem paths. `[workspaces].allow_unregistered_working_dir` is local/stdio legacy behavior and is not an HTTP or tunnel bypass.
 - Setup flows must not ask users to paste provider passwords, raw credential files, or unrelated config into a remote chat.
 - Setup steps must be idempotent and recoverable without hand-editing code.
+- Host protection is a contract, not best-effort. The gateway bounds HTTP MCP session growth (`[http].max_sessions`, idle TTL, reaper) and async/sync job execution (`[limits]` global + per-provider running limits, bounded queue, per-job output cap), per gateway process. Saturation returns a deterministic, retryable error (HTTP `429` for sessions; `errorCategory: "saturated"` for jobs); no execution bypasses the limiter, including the `SYNC_DEADLINE_MS=0` and storeless direct-sync paths. Dedup is principal-scoped so one caller can never reuse or read another principal's job. Health surfaces (`/healthz`, `llm_process_health`) report counts, ages, queue depth, limiter saturation, and process memory only, never prompt/response content, tokens, session IDs, credentials, or machine paths.
 
 ## Client and Provider Model
 

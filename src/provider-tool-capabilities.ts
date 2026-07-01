@@ -10,6 +10,7 @@ import {
   isXaiProviderEnabled,
   loadProvidersConfig,
   type ApiProviderRuntime,
+  type ProvidersConfig,
 } from "./config.js";
 import { apiContinuityForKind } from "./api-provider.js";
 
@@ -305,6 +306,11 @@ export interface ProviderCapabilityQuery {
   includeUnsupported?: boolean;
   includePaths?: boolean;
   refresh?: boolean;
+  /**
+   * Resolved gateway provider config for this runtime. When omitted, capability
+   * helpers load the default config for backwards compatibility.
+   */
+  providersConfig?: ProvidersConfig;
 }
 
 export type ProviderToolCapabilitiesMap = Partial<
@@ -328,6 +334,7 @@ interface NormalizedProviderCapabilityQuery {
   includeUnsupported: boolean;
   includePaths: boolean;
   refresh: boolean;
+  providersConfig?: ProvidersConfig;
 }
 
 interface ProviderCapabilityStaticDefinition {
@@ -1145,7 +1152,7 @@ export function getProviderToolCapabilities(
   queryOrCli: ProviderCapabilityQuery | ProviderCapabilityId = {}
 ): ProviderToolCapabilitiesMap {
   const query = normalizeQuery(queryOrCli);
-  const providers = query.cli ? [query.cli] : allProviderCapabilityIds();
+  const providers = query.cli ? [query.cli] : allProviderCapabilityIds(query.providersConfig);
   const entries = providers.map(provider => [
     provider,
     getOneProviderToolCapabilities(provider, query),
@@ -1186,8 +1193,14 @@ export function _getCapabilityCacheForTest(): Map<
  * are enabled, so the full capability surface stays byte-identical to the
  * CLI-only set when dormant.
  */
-function enabledApiCapabilityIds(): string[] {
-  return enabledApiProviders(loadProvidersConfig()).map(provider => provider.name);
+function providersConfigForQuery(query: NormalizedProviderCapabilityQuery): ProvidersConfig {
+  return query.providersConfig ?? loadProvidersConfig();
+}
+
+function enabledApiCapabilityIds(providersConfig?: ProvidersConfig): string[] {
+  return enabledApiProviders(providersConfig ?? loadProvidersConfig()).map(
+    provider => provider.name
+  );
 }
 
 /**
@@ -1195,14 +1208,19 @@ function enabledApiCapabilityIds(): string[] {
  * enabled generic API providers (deduped, known providers first). Drives both
  * the unfiltered capability map and the `provider-tools://<id>` allowlist.
  */
-function allProviderCapabilityIds(): ProviderCapabilityId[] {
+function allProviderCapabilityIds(providersConfig?: ProvidersConfig): ProviderCapabilityId[] {
   return [
-    ...new Set<ProviderCapabilityId>([...PROVIDER_CAPABILITY_IDS, ...enabledApiCapabilityIds()]),
+    ...new Set<ProviderCapabilityId>([
+      ...PROVIDER_CAPABILITY_IDS,
+      ...enabledApiCapabilityIds(providersConfig),
+    ]),
   ];
 }
 
-export function providerCapabilityIds(): readonly ProviderCapabilityId[] {
-  return allProviderCapabilityIds();
+export function providerCapabilityIds(
+  providersConfig?: ProvidersConfig
+): readonly ProviderCapabilityId[] {
+  return allProviderCapabilityIds(providersConfig);
 }
 
 /**
@@ -1224,13 +1242,13 @@ function buildOneProviderToolCapabilities(
     // Slice 6: a generic `[providers.<name>]` (kind:"api") id has no static
     // metadata; build it on demand from the enabled provider's runtime config.
     // A genuinely unknown / disabled id still has no metadata and is rejected.
-    const runtime = enabledApiProviders(loadProvidersConfig()).find(
+    const runtime = enabledApiProviders(providersConfigForQuery(query)).find(
       provider => provider.name === cli
     );
     if (!runtime) {
       throw new Error(
         `No tool-capability metadata for provider "${cli}". ` +
-          `Known providers: ${allProviderCapabilityIds().join(", ")}.`
+          `Known providers: ${allProviderCapabilityIds(query.providersConfig).join(", ")}.`
       );
     }
     return buildApiProviderToolCapabilities(runtime, query);
@@ -1243,7 +1261,7 @@ function buildOneProviderToolCapabilities(
     : [];
   const features = { ...definition.features };
   const gatewayRequestTools =
-    cli === "grok_api" && !isXaiProviderEnabled(loadProvidersConfig())
+    cli === "grok_api" && !isXaiProviderEnabled(providersConfigForQuery(query))
       ? []
       : [...definition.gatewayRequestTools];
   if (cli === "grok") {
@@ -1261,7 +1279,7 @@ function buildOneProviderToolCapabilities(
     providerKind: definition.providerKind,
     gatewayRequestTools,
     gatewayRequestTool: gatewayRequestTools[0] ?? definition.gatewayRequestTools[0],
-    modelInfo: getModelInfo(cli, query.refresh),
+    modelInfo: getModelInfo(cli, query),
     summary: definition.summary,
     acpContract: { ...ACP_CONTRACT.providers[cli] },
     acp: cloneAcpCapability(ACP_CAPABILITIES[cli]),
@@ -1407,7 +1425,7 @@ function apiProviderModelInfo(runtime: ApiProviderRuntime): GrokApiModelInfo {
 
 /**
  * Slice 6: config-surface projection for a generic API provider. Reports only
- * whether a key is resolved (never the value or the env var name's contents).
+ * whether a key is resolved plus the configured env var name (never the value).
  */
 function apiProviderConfigSurfaces(runtime: ApiProviderRuntime): ProviderConfigSurface[] {
   return [
@@ -1418,11 +1436,12 @@ function apiProviderConfigSurfaces(runtime: ApiProviderRuntime): ProviderConfigS
       details: `Generic ${runtime.kind} API provider; secret key material is read only from the named environment variable at request time.`,
     },
     {
-      name: `${runtime.name}_api_key`,
+      name: "api_key_env",
       kind: "env",
       present: runtime.apiKey.length > 0,
+      entries: runtime.apiKeyEnv ? [runtime.apiKeyEnv] : [],
       details:
-        "Reports only whether an API key is resolved (keyless-local providers report false); never the value.",
+        "Reports only the configured environment variable name and whether a key is resolved (keyless-local providers report false); never the value.",
     },
   ];
 }
@@ -1572,6 +1591,7 @@ function normalizeQuery(
     includeUnsupported: query.includeUnsupported ?? true,
     includePaths: query.includePaths ?? false,
     refresh: query.refresh ?? false,
+    providersConfig: query.providersConfig,
   };
 }
 
@@ -1585,7 +1605,35 @@ function capabilityCacheKey(
     includeProviderTools: query.includeProviderTools,
     includeUnsupported: query.includeUnsupported,
     includePaths: query.includePaths,
+    providersConfig: query.providersConfig ? providerConfigCacheKey(query.providersConfig) : null,
   });
+}
+
+function providerConfigCacheKey(config: ProvidersConfig): unknown {
+  return {
+    xai: config.xai
+      ? {
+          apiKeyEnv: config.xai.apiKeyEnv,
+          baseUrl: config.xai.baseUrl,
+          defaultModel: config.xai.defaultModel,
+        }
+      : null,
+    providers: Object.fromEntries(
+      Object.entries(config.providers ?? {})
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([name, provider]) => [
+          name,
+          {
+            kind: provider.kind,
+            apiKeyEnv: provider.apiKeyEnv,
+            baseUrl: provider.baseUrl,
+            defaultModel: provider.defaultModel,
+            models: provider.models ?? null,
+            usageInclude: provider.usageInclude ?? null,
+          },
+        ])
+    ),
+  };
 }
 
 function baseFeatures(overrides: Record<string, boolean>): ProviderFeatureMap {
@@ -1638,13 +1686,13 @@ function cloneControls(controls: ProviderCapabilityControls): ProviderCapability
 
 function getModelInfo(
   cli: KnownProviderCapabilityId,
-  refresh: boolean
+  query: NormalizedProviderCapabilityQuery
 ): CliInfo | GrokApiModelInfo {
   if (cli !== "grok_api") {
-    return getAvailableCliInfo(refresh)[cli];
+    return getAvailableCliInfo(query.refresh)[cli];
   }
 
-  const providers = loadProvidersConfig();
+  const providers = providersConfigForQuery(query);
   const enabled = isXaiProviderEnabled(providers);
   const defaultModel = providers.xai?.defaultModel;
   return {
@@ -1665,7 +1713,7 @@ function discoverConfigSurfaces(
   discoveredSkills: ProviderSkillCapability[]
 ): ProviderConfigSurface[] {
   if (cli === "grok_api") {
-    const providers = loadProvidersConfig();
+    const providers = providersConfigForQuery(query);
     return [
       {
         name: "providers.xai",

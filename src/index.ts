@@ -50,6 +50,7 @@ import {
   loadCacheAwarenessConfig,
   loadProvidersConfig,
   loadAcpConfig,
+  loadLimitsConfig,
   defaultGatewayConfigPath,
   isXaiProviderEnabled,
   enabledApiProviders,
@@ -59,6 +60,7 @@ import {
   type ProvidersConfig,
   type ApiProviderRuntime,
   type AcpConfig,
+  type GatewayLimitsConfig,
 } from "./config.js";
 import { runAcpRequest, type AcpFlightSink } from "./acp/runtime.js";
 import { isAcpError } from "./acp/errors.js";
@@ -89,6 +91,8 @@ import {
 import { getProviderToolCapabilities } from "./provider-tool-capabilities.js";
 import {
   AsyncJobManager,
+  JobSaturationError,
+  isAsyncJobInProgress,
   extractApiHttpStatus,
   extractApiErrorBody,
   type AsyncJobFlightRecorderEntry,
@@ -383,12 +387,13 @@ Tools: claude_request, codex_request, gemini_request, grok_request, mistral_requ
 Validation: validate_with_models, second_opinion, compare_answers, red_team_review, consensus_check, ask_model, synthesize_validation, list_available_models | job_status/job_result (validation jobs)
 ${jobsLine}Sessions: session_create, session_list, session_set_active, session_get, session_delete, session_clear_all
 Other: list_models, provider_tool_capabilities, cli_versions, upstream_contracts, provider_subcommands_* (read-only subcommand contract/drift introspection), cli_upgrade, approval_list, llm_process_health, llm_request_result (read back any persisted request, sync or async, by correlationId)
-Workspaces: workspace_create, workspace_list, workspace_get, workspace_register_existing_repo
+Workspaces: workspace_create, workspace_list, workspace_get, workspace_register_existing_repo (remote HTTP/OAuth workspace registry only; do not use workspace_* to fix stdio/local provider path access)
 
 Key behaviors:
 ${deferralLine}
 - Sessions: Claude --continue, Gemini (Antigravity) --conversation <id>/--continue, Grok --resume/--continue, Mistral --resume/--continue (current Vibe defaults session logging on; doctor flags explicit session_logging.enabled=false), Codex \`exec resume <ID>\` / \`exec resume --last\`, Devin --resume <id>/--continue (all real CLI continuity). For Codex, sessionId must be a real Codex UUID (from ~/.codex/sessions/); gateway-generated gw-* IDs are rejected.
 - Approval gates: opt-in via approvalStrategy:"mcp_managed".
+- Stdio/local provider calls may pass local workingDir/addDir/includeDirs directly. Workspace aliases are for remote HTTP/OAuth calls and must not be used as a fallback after a stdio provider path error.
 - Upstream drift detection: After upgrading any provider CLI (especially grok), use upstream_contracts with probeInstalled:true and provider_subcommand_drift for declared subcommand help surfaces. Probes are safe, read-only --help checks.
 - Idle timeout kills stuck processes (default 10min, configurable via idleTimeoutMs).
 
@@ -419,6 +424,7 @@ let persistenceConfig: PersistenceConfig | null = null;
 let cacheAwarenessConfig: CacheAwarenessConfig | null = null;
 let providersConfig: ProvidersConfig | null = null;
 let acpConfig: AcpConfig | null = null;
+let limitsConfig: GatewayLimitsConfig | null = null;
 let jobStore: JobStore | null = null;
 let jobStoreInitialized = false;
 let asyncJobManager: AsyncJobManager | null = null;
@@ -432,6 +438,13 @@ function getFlightRecorder(runtimeLogger: GatewayLogger = logger): FlightRecorde
 function getPersistenceConfig(runtimeLogger: GatewayLogger = logger): PersistenceConfig {
   persistenceConfig ??= loadPersistenceConfig(runtimeLogger);
   return persistenceConfig;
+}
+
+// Issue #130: resolved host-protection limits ([http] session lifecycle +
+// [limits] job backpressure). Cached like the other config loaders.
+function getLimitsConfig(runtimeLogger: GatewayLogger = logger): GatewayLimitsConfig {
+  limitsConfig ??= loadLimitsConfig(runtimeLogger);
+  return limitsConfig;
 }
 
 function getAcpConfig(runtimeLogger: GatewayLogger = logger): AcpConfig {
@@ -473,7 +486,9 @@ function newAsyncJobManager(
       metrics.recordRequest(cli, durationMs, success);
     },
     store,
-    fr
+    fr,
+    // Issue #130: gate all job execution on the operator-tunable [limits] block.
+    getLimitsConfig(runtimeLogger).jobs
   );
 }
 
@@ -620,7 +635,25 @@ export const WORKSPACE_ALIAS_SCHEMA = z
   .min(1)
   .max(64)
   .regex(/^[A-Za-z][A-Za-z0-9._-]{0,63}$/)
-  .describe("Registered workspace alias. Remote clients use aliases, not absolute paths.");
+  .describe(
+    "Registered workspace alias for remote HTTP/OAuth provider calls. Stdio/local callers should not use workspace_* tools to fix provider path access; pass local workingDir/addDir/includeDirs directly."
+  );
+
+const PROVIDER_WORKSPACE_FIELD_DESCRIPTION =
+  "Registered workspace alias for remote HTTP/OAuth provider calls. Do not use this field, workspace_list, or workspace_register_existing_repo as a fallback for stdio/local provider path access; pass workingDir/addDir/includeDirs directly instead.";
+
+const LOCAL_WORKING_DIR_FIELD_SUFFIX =
+  " Stdio/local callers may pass local paths directly. Remote HTTP/OAuth callers must use relative paths inside a selected registered workspace. Do not call workspace_* tools to fix stdio/local provider path access.";
+
+const LOCAL_ADD_DIR_FIELD_SUFFIX =
+  " Stdio/local callers may pass local paths directly. Remote HTTP/OAuth callers must use relative paths inside a selected registered workspace. Do not call workspace_* tools to fix stdio/local provider path access.";
+
+const LOCAL_INCLUDE_DIRS_FIELD_SUFFIX =
+  " Stdio/local callers may pass local paths directly. Remote HTTP/OAuth callers must use relative paths inside a selected registered workspace. Do not call workspace_* tools to fix stdio/local provider path access.";
+
+function providerWorkspaceAliasSchema(): z.ZodOptional<typeof WORKSPACE_ALIAS_SCHEMA> {
+  return WORKSPACE_ALIAS_SCHEMA.describe(PROVIDER_WORKSPACE_FIELD_DESCRIPTION).optional();
+}
 
 // Session-provider enum includes spawnable CLIs plus API-backed providers.
 // Keep CLI-only surfaces (contracts, status, updater) on CLI_TYPES.
@@ -888,10 +921,22 @@ async function awaitJobOrDefer(
     runtime.persistence.asyncJobsEnabled &&
     runtime.asyncJobManager.hasStore();
   if (SYNC_DEADLINE_MS === 0 || !deferralAvailable) {
-    // Deferral disabled — SYNC_DEADLINE_MS=0 is the explicit opt-out; the
+    // Deferral disabled: SYNC_DEADLINE_MS=0 is the explicit opt-out; the
     // derived gate covers backend=none and storeless runtimes.
     // Note: direct execution bypasses dedup. forceRefresh is implied.
     const command = providerCommandName(cli);
+    // Issue #130: the direct-sync fallback must acquire a process permit before
+    // spawning, so it shares the exact same host-protection envelope (global +
+    // per-provider running limit, bounded queue) as async/deferred jobs. A
+    // saturation rejection surfaces as JobSaturationError, mapped by the tool
+    // layer to the same retryable saturation response as the other paths.
+    let slot;
+    try {
+      slot = await runtime.asyncJobManager.acquireProcessSlot(cli);
+    } catch (err) {
+      consumeOnComplete();
+      throw err;
+    }
     try {
       return await executeCli(command, args, {
         idleTimeout: idleTimeoutMs,
@@ -901,8 +946,9 @@ async function awaitJobOrDefer(
         cwd,
       });
     } finally {
-      // Direct-execution path completes inline; release per-request resources
-      // (e.g. outputSchema temp files) here.
+      // Release the run slot and per-request resources (outputSchema temp
+      // files) as soon as the inline execution settles.
+      slot.release();
       consumeOnComplete();
     }
   }
@@ -945,7 +991,7 @@ async function awaitJobOrDefer(
 
   while (Date.now() < deadline) {
     const snapshot = runtime.asyncJobManager.getJobSnapshot(job.id);
-    if (snapshot && snapshot.status !== "running") {
+    if (snapshot && !isAsyncJobInProgress(snapshot.status)) {
       // Job finished within deadline — extract result
       const result = runtime.asyncJobManager.getJobResult(job.id);
       if (!result) {
@@ -1039,7 +1085,17 @@ async function awaitApiJobOrDefer(
     runtime.asyncJobManager.hasStore();
 
   if (SYNC_DEADLINE_MS === 0 || !deferralAvailable || forceInline) {
-    // No deferral (or forced inline) — run the HTTP request to completion here.
+    // No deferral (or forced inline): run the HTTP request to completion here.
+    // Issue #130: gate the inline outbound request on the same limiter as async/
+    // deferred jobs so an unbounded burst of inline API calls cannot exhaust
+    // provider capacity outside the backpressure envelope.
+    let slot;
+    try {
+      slot = await runtime.asyncJobManager.acquireProcessSlot(provider.name);
+    } catch (err) {
+      consumeOnComplete();
+      throw err;
+    }
     try {
       const result = await runApiRequest(provider, apiRequest, runtime.logger);
       return {
@@ -1063,6 +1119,7 @@ async function awaitApiJobOrDefer(
         errorBody: extractApiErrorBody(err),
       };
     } finally {
+      slot.release();
       consumeOnComplete();
     }
   }
@@ -1093,7 +1150,7 @@ async function awaitApiJobOrDefer(
   const deadline = Date.now() + SYNC_DEADLINE_MS;
   while (Date.now() < deadline) {
     const snapshot = runtime.asyncJobManager.getJobSnapshot(job.id);
-    if (snapshot && snapshot.status !== "running") {
+    if (snapshot && !isAsyncJobInProgress(snapshot.status)) {
       const result = runtime.asyncJobManager.getJobResult(job.id);
       if (!result) return { stdout: "", stderr: "Job result unavailable", code: 1 };
       return {
@@ -1350,10 +1407,18 @@ function workspaceAdminEnabled(): boolean {
   return process.env.LLM_GATEWAY_WORKSPACE_ADMIN === "1" && scopes.includes("workspace:admin");
 }
 
+function assertWorkspaceToolCaller(toolName: string): void {
+  const context = getRequestContext();
+  if (context?.transport === "http" || context?.authKind === "oauth") return;
+  throw new Error(
+    `${toolName} is only for remote HTTP/OAuth workspace clients. Stdio/local provider calls must not use workspace_* tools for path access; pass workingDir/addDir/includeDirs directly on the provider request instead.`
+  );
+}
+
 function registerWorkspaceTools(server: McpServer, runtime: GatewayServerRuntime): void {
   server.tool(
     "workspace_list",
-    "List registered workspace aliases and summary metadata. Does not browse files.",
+    "List registered workspace aliases for remote HTTP/OAuth provider calls. Does not browse files. Stdio/local callers should not use workspace_* tools to fix provider path access; pass local workingDir/addDir/includeDirs directly.",
     {},
     {
       title: "List workspaces",
@@ -1363,38 +1428,43 @@ function registerWorkspaceTools(server: McpServer, runtime: GatewayServerRuntime
       openWorldHint: false,
     },
     async () => {
-      const registry = loadWorkspaceRegistry(runtime.logger);
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify(
-              {
-                success: true,
-                enabled: registry.enabled,
-                default: registry.defaultAlias,
-                workspaces: registry.repos.map(describeWorkspace),
-                allowed_roots: registry.allowedRoots.map(root => ({
-                  alias: root.alias,
-                  path: root.path,
-                  allow_register_existing_git_repos: root.allowRegisterExistingGitRepos,
-                  allow_create_directories: root.allowCreateDirectories,
-                  allow_init_git_repos: root.allowInitGitRepos,
-                  max_create_depth: root.maxCreateDepth,
-                })),
-              },
-              null,
-              2
-            ),
-          },
-        ],
-      };
+      try {
+        assertWorkspaceToolCaller("workspace_list");
+        const registry = loadWorkspaceRegistry(runtime.logger);
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify(
+                {
+                  success: true,
+                  enabled: registry.enabled,
+                  default: registry.defaultAlias,
+                  workspaces: registry.repos.map(describeWorkspace),
+                  allowed_roots: registry.allowedRoots.map(root => ({
+                    alias: root.alias,
+                    path: root.path,
+                    allow_register_existing_git_repos: root.allowRegisterExistingGitRepos,
+                    allow_create_directories: root.allowCreateDirectories,
+                    allow_init_git_repos: root.allowInitGitRepos,
+                    max_create_depth: root.maxCreateDepth,
+                  })),
+                },
+                null,
+                2
+              ),
+            },
+          ],
+        };
+      } catch (error) {
+        return createErrorResponse("workspace_list", 1, "", undefined, error as Error);
+      }
     }
   );
 
   server.tool(
     "workspace_get",
-    "Inspect a registered workspace alias. Does not list files.",
+    "Inspect a registered remote HTTP/OAuth workspace alias. Does not list files. Not needed for stdio/local provider calls; do not use workspace_* tools to fix local path access.",
     { alias: WORKSPACE_ALIAS_SCHEMA },
     {
       title: "Get workspace",
@@ -1405,6 +1475,7 @@ function registerWorkspaceTools(server: McpServer, runtime: GatewayServerRuntime
     },
     async ({ alias }) => {
       try {
+        assertWorkspaceToolCaller("workspace_get");
         const registry = loadWorkspaceRegistry(runtime.logger);
         return {
           content: [
@@ -1426,7 +1497,7 @@ function registerWorkspaceTools(server: McpServer, runtime: GatewayServerRuntime
 
   server.tool(
     "workspace_create",
-    "Create a new local folder or git repo under a configured allowed root. Requires LLM_GATEWAY_WORKSPACE_ADMIN=1 and OAuth scope workspace:admin.",
+    "Create a remote HTTP/OAuth workspace alias by creating a new local folder or git repo under a configured allowed root. Not for stdio/local provider path access. Requires LLM_GATEWAY_WORKSPACE_ADMIN=1 and OAuth scope workspace:admin.",
     {
       alias: WORKSPACE_ALIAS_SCHEMA,
       root: WORKSPACE_ALIAS_SCHEMA.describe("Allowed-root alias from workspace_list."),
@@ -1443,6 +1514,7 @@ function registerWorkspaceTools(server: McpServer, runtime: GatewayServerRuntime
     },
     async ({ alias, root, slug, kind, setDefault }) => {
       try {
+        assertWorkspaceToolCaller("workspace_create");
         if (!workspaceAdminEnabled()) {
           throw new Error(
             "workspace_create requires LLM_GATEWAY_WORKSPACE_ADMIN=1 and OAuth scope workspace:admin"
@@ -1472,7 +1544,7 @@ function registerWorkspaceTools(server: McpServer, runtime: GatewayServerRuntime
 
   server.tool(
     "workspace_register_existing_repo",
-    "Register an existing local Git repo under an allowed root. Requires LLM_GATEWAY_WORKSPACE_ADMIN=1 and OAuth scope workspace:admin.",
+    "Register an existing local Git repo as a remote HTTP/OAuth workspace alias. Not for stdio/local provider path access. Requires LLM_GATEWAY_WORKSPACE_ADMIN=1 and OAuth scope workspace:admin.",
     {
       alias: WORKSPACE_ALIAS_SCHEMA,
       path: z
@@ -1490,6 +1562,7 @@ function registerWorkspaceTools(server: McpServer, runtime: GatewayServerRuntime
     },
     async ({ alias, path, setDefault }) => {
       try {
+        assertWorkspaceToolCaller("workspace_register_existing_repo");
         if (!workspaceAdminEnabled()) {
           throw new Error(
             "workspace_register_existing_repo requires LLM_GATEWAY_WORKSPACE_ADMIN=1 and OAuth scope workspace:admin"
@@ -1536,6 +1609,29 @@ export function createErrorResponse(
    */
   apiError?: { httpStatus?: number | null; responseBody?: string }
 ) {
+  // Issue #130: a JobSaturationError is a host-protection backpressure signal,
+  // NOT a provider/CLI failure. Render it as a distinct, retryable category with
+  // a prompt-free message consistent across async, deferred-sync, and direct-sync
+  // paths so clients can back off and retry safely.
+  if (error instanceof JobSaturationError) {
+    const satMessage =
+      `${error.message}. The gateway is protecting the host from process/request ` +
+      `overload; this is transient. Retry after a short delay, or reduce concurrent requests.`;
+    logger.error(`[${correlationId || "unknown"}] ${cli} rejected: gateway at capacity`);
+    return {
+      content: [{ type: "text" as const, text: satMessage }],
+      isError: true,
+      structuredContent: {
+        response: satMessage,
+        correlationId: correlationId || null,
+        cli,
+        exitCode: code,
+        errorCategory: "saturated",
+        retryable: true,
+      },
+    };
+  }
+
   let errorMessage = `Error executing ${cli} CLI`;
   const isLaunchExit = code === 127 || code === -4058;
 
@@ -7205,7 +7301,8 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .array(z.string())
         .optional()
         .describe(
-          "Claude --add-dir: additional directories the CLI is allowed to read/write beyond the process cwd. Each entry is emitted as its own --add-dir instance."
+          "Claude --add-dir: additional directories the CLI is allowed to read/write beyond the process cwd. Each entry is emitted as its own --add-dir instance." +
+            LOCAL_ADD_DIR_FIELD_SUFFIX
         ),
       // Claude session / settings / tools surface (2.x)
       noSessionPersistence: z
@@ -7234,7 +7331,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .describe(
           'Claude --tools: restrict the available built-in tool set (distinct from allowedTools permission gating). Pass [""] to disable all tools.'
         ),
-      workspace: WORKSPACE_ALIAS_SCHEMA.optional(),
+      workspace: providerWorkspaceAliasSchema(),
       worktree: WORKTREE_SCHEMA.optional(),
       approvalStrategy: z
         .enum(["legacy", "mcp_managed"])
@@ -7784,15 +7881,17 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .min(1)
         .optional()
         .describe(
-          "Codex -C/--cd <DIR>: working root for this session. Emitted on new sessions only; resume inherits the original session's cwd via CODEX_RESUME_FILTERED_FLAGS."
+          "Codex -C/--cd <DIR>: working root for this session. Emitted on new sessions only; resume inherits the original session's cwd via CODEX_RESUME_FILTERED_FLAGS." +
+            LOCAL_WORKING_DIR_FIELD_SUFFIX
         ),
       addDir: z
         .array(z.string())
         .optional()
         .describe(
-          "Codex --add-dir <DIR>: additional writable workspace directories. Emitted once per entry on new sessions only; resume inherits the original session's writable-dir policy."
+          "Codex --add-dir <DIR>: additional writable workspace directories. Emitted once per entry on new sessions only; resume inherits the original session's writable-dir policy." +
+            LOCAL_ADD_DIR_FIELD_SUFFIX
         ),
-      workspace: WORKSPACE_ALIAS_SCHEMA.optional(),
+      workspace: providerWorkspaceAliasSchema(),
       worktree: WORKTREE_SCHEMA.optional(),
     },
     {
@@ -8131,7 +8230,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .max(3_600_000)
         .optional()
         .describe("Idle timeout in ms (min 30s, max 1h, omit=CLI default)"),
-      workspace: WORKSPACE_ALIAS_SCHEMA.optional(),
+      workspace: providerWorkspaceAliasSchema(),
     },
     {
       title: "Fork Codex session",
@@ -8345,7 +8444,9 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       includeDirs: z
         .array(z.string())
         .optional()
-        .describe("Additional workspace directories passed as --add-dir"),
+        .describe(
+          "Additional workspace directories passed as --add-dir." + LOCAL_INCLUDE_DIRS_FIELD_SUFFIX
+        ),
       correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
       optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution"),
       optimizeResponse: z.boolean().default(false).describe("Optimize response output"),
@@ -8408,7 +8509,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .describe(
           "Antigravity 1.0.13 --new-project: create a new project for this session. Mutually exclusive with project."
         ),
-      workspace: WORKSPACE_ALIAS_SCHEMA.optional(),
+      workspace: providerWorkspaceAliasSchema(),
       worktree: WORKTREE_SCHEMA.optional(),
     },
     {
@@ -8607,7 +8708,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .describe(
           "Grok 0.2.73 --json-schema: constrain output to a JSON Schema (string literal or object; implies json output). Set outputFormat:json so the gateway treats the reply as structured output (skips response optimization and warning injection); the default output format is not json, so pass it explicitly."
         ),
-      workspace: WORKSPACE_ALIAS_SCHEMA.optional(),
+      workspace: providerWorkspaceAliasSchema(),
       worktree: WORKTREE_SCHEMA.optional(),
     },
     {
@@ -8963,15 +9064,17 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .min(1)
         .optional()
         .describe(
-          "Vibe --workdir <DIR>: change to this directory before running. Single value (Vibe accepts one --workdir per invocation)."
+          "Vibe --workdir <DIR>: change to this directory before running. Single value (Vibe accepts one --workdir per invocation)." +
+            LOCAL_WORKING_DIR_FIELD_SUFFIX
         ),
       addDir: z
         .array(z.string())
         .optional()
         .describe(
-          "Vibe --add-dir <DIR>: additional writable workspace directories. Each entry is emitted as its own --add-dir instance (Vibe states this flag may be specified multiple times)."
+          "Vibe --add-dir <DIR>: additional writable workspace directories. Each entry is emitted as its own --add-dir instance (Vibe states this flag may be specified multiple times)." +
+            LOCAL_ADD_DIR_FIELD_SUFFIX
         ),
-      workspace: WORKSPACE_ALIAS_SCHEMA.optional(),
+      workspace: providerWorkspaceAliasSchema(),
       worktree: WORKTREE_SCHEMA.optional(),
     },
     {
@@ -9177,7 +9280,8 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .array(z.string())
           .optional()
           .describe(
-            "Claude --add-dir: additional directories the CLI is allowed to read/write beyond the process cwd. Each entry is emitted as its own --add-dir instance."
+            "Claude --add-dir: additional directories the CLI is allowed to read/write beyond the process cwd. Each entry is emitted as its own --add-dir instance." +
+              LOCAL_ADD_DIR_FIELD_SUFFIX
           ),
         // Claude session / settings / tools surface (2.x)
         noSessionPersistence: z
@@ -9206,7 +9310,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .describe(
             'Claude --tools: restrict the available built-in tool set (distinct from allowedTools permission gating). Pass [""] to disable all tools.'
           ),
-        workspace: WORKSPACE_ALIAS_SCHEMA.optional(),
+        workspace: providerWorkspaceAliasSchema(),
         worktree: WORKTREE_SCHEMA.optional(),
         approvalStrategy: z
           .enum(["legacy", "mcp_managed"])
@@ -9589,15 +9693,17 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .min(1)
           .optional()
           .describe(
-            "Codex -C/--cd <DIR>: working root for this session. New sessions only; resume inherits the original session's cwd."
+            "Codex -C/--cd <DIR>: working root for this session. New sessions only; resume inherits the original session's cwd." +
+              LOCAL_WORKING_DIR_FIELD_SUFFIX
           ),
         addDir: z
           .array(z.string())
           .optional()
           .describe(
-            "Codex --add-dir <DIR>: additional writable workspace directories (repeat per entry). New sessions only."
+            "Codex --add-dir <DIR>: additional writable workspace directories (repeat per entry). New sessions only." +
+              LOCAL_ADD_DIR_FIELD_SUFFIX
           ),
-        workspace: WORKSPACE_ALIAS_SCHEMA.optional(),
+        workspace: providerWorkspaceAliasSchema(),
         worktree: WORKTREE_SCHEMA.optional(),
       },
       {
@@ -9742,7 +9848,10 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         includeDirs: z
           .array(z.string())
           .optional()
-          .describe("Additional workspace directories passed as --add-dir"),
+          .describe(
+            "Additional workspace directories passed as --add-dir." +
+              LOCAL_INCLUDE_DIRS_FIELD_SUFFIX
+          ),
         correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
         optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution"),
         idleTimeoutMs: z
@@ -9804,7 +9913,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .describe(
             "Antigravity 1.0.13 --new-project: create a new project for this session. Mutually exclusive with project."
           ),
-        workspace: WORKSPACE_ALIAS_SCHEMA.optional(),
+        workspace: providerWorkspaceAliasSchema(),
         worktree: WORKTREE_SCHEMA.optional(),
       },
       {
@@ -9976,7 +10085,8 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .min(1)
           .optional()
           .describe(
-            "Grok --cwd <DIR>: working directory for this invocation. Lets headless callers run Grok against a directory other than the gateway process's cwd."
+            "Grok --cwd <DIR>: working directory for this invocation. Lets headless callers run Grok against a directory other than the gateway process's cwd." +
+              LOCAL_WORKING_DIR_FIELD_SUFFIX
           ),
         // Phase 4 slice θ — Grok HIGH parity (sandbox, rules, system-prompt-override, allow, deny).
         sandbox: z
@@ -10128,7 +10238,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .describe(
             "Grok 0.2.73 --json-schema: constrain output to a JSON Schema (string literal or object; implies json output). Set outputFormat:json so the gateway treats the reply as structured output (skips response optimization and warning injection); the default output format is not json, so pass it explicitly."
           ),
-        workspace: WORKSPACE_ALIAS_SCHEMA.optional(),
+        workspace: providerWorkspaceAliasSchema(),
         worktree: WORKTREE_SCHEMA.optional(),
       },
       {
@@ -10455,15 +10565,17 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .min(1)
           .optional()
           .describe(
-            "Vibe --workdir <DIR>: change to this directory before running. Single value per invocation."
+            "Vibe --workdir <DIR>: change to this directory before running. Single value per invocation." +
+              LOCAL_WORKING_DIR_FIELD_SUFFIX
           ),
         addDir: z
           .array(z.string())
           .optional()
           .describe(
-            "Vibe --add-dir <DIR>: additional writable workspace directories. Each entry is emitted as its own --add-dir instance."
+            "Vibe --add-dir <DIR>: additional writable workspace directories. Each entry is emitted as its own --add-dir instance." +
+              LOCAL_ADD_DIR_FIELD_SUFFIX
           ),
-        workspace: WORKSPACE_ALIAS_SCHEMA.optional(),
+        workspace: providerWorkspaceAliasSchema(),
         worktree: WORKTREE_SCHEMA.optional(),
       },
       {
@@ -10535,7 +10647,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
 
     server.tool(
       "llm_job_status",
-      "Check lifecycle status (running|completed|failed|canceled|orphaned) of a gateway async or deferred-sync job by jobId.",
+      "Check lifecycle status (queued|running|completed|failed|canceled|orphaned) of a gateway async or deferred-sync job by jobId.",
       {
         jobId: z.string().describe("Async job ID from *_request_async"),
       },
@@ -10915,12 +11027,60 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         })),
         sources: providers.sources,
       };
+      // Issue #130: backpressure + host-protection observability. Prompt-free:
+      // counts, ages, queue depth, limiter saturation, configured caps, and
+      // parent-process memory only. No prompt/response/token/secret material.
+      const limiter = asyncJobManager.getLimiterSnapshot();
+      const jobLimits = asyncJobManager.getConfiguredLimits();
+      const httpLimits = getLimitsConfig().http;
+      const mem = process.memoryUsage();
+      const backpressure = {
+        jobs: {
+          running: limiter.running,
+          queued: limiter.queued,
+          runningByProvider: limiter.runningByProvider,
+          queuedByProvider: limiter.queuedByProvider,
+          maxRunning: limiter.maxRunning,
+          maxRunningPerProvider: limiter.maxRunningPerProvider,
+          maxQueued: limiter.maxQueued,
+          rejected: limiter.rejected,
+          timedOut: limiter.timedOut,
+          saturated: limiter.saturated,
+          completedJobMemoryTtlMs: jobLimits.completedJobMemoryTtlMs,
+          maxJobOutputBytes: jobLimits.maxJobOutputBytes,
+        },
+        // HTTP session caps/ages when the HTTP transport is active; configured
+        // caps only (no live sessions) under stdio.
+        httpSessions: activeHttpGateway
+          ? { active: true, ...activeHttpGateway.sessionHealth() }
+          : {
+              active: false,
+              current: 0,
+              max: httpLimits.maxSessions,
+              oldestAgeMs: 0,
+              idleTtlMs: httpLimits.sessionIdleTtlMs,
+              reaperIntervalMs: httpLimits.sessionReaperIntervalMs,
+              saturated: false,
+            },
+        memory: {
+          rss: mem.rss,
+          heapUsed: mem.heapUsed,
+          heapTotal: mem.heapTotal,
+          external: mem.external,
+        },
+      };
       return {
         content: [
           {
             type: "text",
             text: JSON.stringify(
-              { success: true, ...health, persistence: persistenceBlock, outboundProviders },
+              {
+                success: true,
+                ...health,
+                backpressure,
+                persistence: persistenceBlock,
+                outboundProviders,
+              },
               null,
               2
             ),
@@ -11097,6 +11257,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         includeUnsupported,
         includePaths,
         refresh,
+        providersConfig: providers,
       });
       return { content: [{ type: "text", text: JSON.stringify(capabilities, null, 2) }] };
     }
