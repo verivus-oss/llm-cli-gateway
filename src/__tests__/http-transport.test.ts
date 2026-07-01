@@ -272,7 +272,13 @@ describe("Layer 6 HTTP MCP transport (U20)", () => {
     );
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toContain("text/html");
-    expect(res.headers.get("set-cookie") ?? "").toContain("gw_oauth_csrf=");
+    const cookie = res.headers.get("set-cookie") ?? "";
+    expect(cookie).toContain("gw_oauth_csrf=");
+    expect(cookie).toContain("HttpOnly");
+    expect(cookie).toContain("Secure");
+    expect(cookie).toContain("SameSite=Lax");
+    expect(cookie).toContain("Path=/oauth");
+    expect(cookie).toContain("Max-Age=300");
     const html = await res.text();
     expect(html).toContain("Authorize access");
     expect(html).toContain("test-client");

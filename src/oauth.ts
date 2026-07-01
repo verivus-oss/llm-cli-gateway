@@ -128,6 +128,11 @@ function readCookie(req: IncomingMessage, name: string): string | null {
   return null;
 }
 
+function oauthCsrfCookie(csrf: string): string {
+  const maxAgeSeconds = Math.floor(OAUTH_CODE_TTL_MS / 1000);
+  return `gw_oauth_csrf=${csrf}; HttpOnly; Secure; SameSite=Lax; Path=/oauth; Max-Age=${maxAgeSeconds}`;
+}
+
 function methodNotAllowed(res: ServerResponse): void {
   res.writeHead(405, { allow: "GET, POST", "content-type": "application/json" });
   res.end(JSON.stringify({ error: "Method not allowed" }));
@@ -563,7 +568,7 @@ ${errorBlock}
 <p class="muted">Only approve if you initiated this connection.</p></div></body></html>`;
     res.writeHead(200, {
       "content-type": "text/html; charset=utf-8",
-      "set-cookie": `gw_oauth_csrf=${csrf}; HttpOnly; SameSite=Lax; Path=/oauth`,
+      "set-cookie": oauthCsrfCookie(csrf),
       "cache-control": "no-store",
     });
     res.end(html);

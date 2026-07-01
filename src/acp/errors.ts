@@ -40,12 +40,9 @@ export type AcpErrorKind =
  * safe to apply to debug strings before they reach a log sink.
  */
 export function redactAcpMessage(input: string): string {
-  let out = input;
-
   // Collapse any JSON-looking object/array body to a placeholder so raw
   // JSON-RPC bodies and prompt payloads never leak through messages.
-  out = out.replace(/\{[\s\S]*?\}/g, "<redacted-json>");
-  out = out.replace(/\[[\s\S]*?\]/g, "<redacted-json>");
+  let out = redactJsonLikeBodies(input);
 
   // Bearer tokens / api keys.
   out = out.replace(/\b(bearer|token|api[_-]?key|secret)\b\s*[:=]?\s*\S+/gi, "$1 <redacted>");
@@ -70,6 +67,74 @@ export function redactAcpMessage(input: string): string {
   out = out.replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, "<redacted-email>");
 
   return out;
+}
+
+function redactJsonLikeBodies(input: string): string {
+  let out = "";
+  let cursor = 0;
+  let bodyStart = -1;
+  let stack: string[] = [];
+  let inString = false;
+  let escaped = false;
+
+  for (let index = 0; index < input.length; index += 1) {
+    const char = input.charAt(index);
+
+    if (bodyStart === -1) {
+      const close = char === "{" ? "}" : char === "[" ? "]" : "";
+      if (!close) continue;
+
+      bodyStart = index;
+      stack = [close];
+      inString = false;
+      escaped = false;
+      continue;
+    }
+
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (char === "\\") {
+      escaped = inString;
+      continue;
+    }
+    if (char === '"') {
+      inString = !inString;
+      continue;
+    }
+    if (inString) continue;
+
+    const nestedClose = char === "{" ? "}" : char === "[" ? "]" : "";
+    if (nestedClose) {
+      stack.push(nestedClose);
+      continue;
+    }
+
+    if (char !== stack[stack.length - 1]) continue;
+
+    stack.pop();
+    if (stack.length > 0) continue;
+
+    out += input.slice(cursor, bodyStart);
+    out += "<redacted-json>";
+    cursor = index + 1;
+    bodyStart = -1;
+  }
+
+  if (bodyStart !== -1 && isLikelyJsonPayload(input.slice(bodyStart))) {
+    out += input.slice(cursor, bodyStart);
+    out += "<redacted-json>";
+    cursor = input.length;
+  }
+
+  return cursor === 0 ? input : out + input.slice(cursor);
+}
+
+function isLikelyJsonPayload(span: string): boolean {
+  return /"(?:jsonrpc|method|params|prompt|content|body|token|secret|api[_-]?key|credential|auth|cwd|path|[A-Za-z0-9_-]+)"\s*:/i.test(
+    span
+  );
 }
 
 /**

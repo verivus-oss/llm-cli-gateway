@@ -64,6 +64,7 @@ import {
 } from "./config.js";
 import { runAcpRequest, type AcpFlightSink } from "./acp/runtime.js";
 import { isAcpError } from "./acp/errors.js";
+import { redactSecrets } from "./secret-redaction.js";
 import {
   createApiProvider,
   runApiRequest,
@@ -230,24 +231,68 @@ type ExtendedToolResponse = {
 };
 
 // Simple logger that writes to stderr (stdout is used for MCP protocol)
-const logger = {
-  info: (message: string, ...args: any[]) => {
-    console.error(`[INFO] ${new Date().toISOString()} - ${message}`, ...args);
+export const logger = {
+  info: (message: string, ...args: unknown[]) => {
+    console.error(formatLogLine("INFO", message), ...args.map(sanitizeLogArg));
   },
-  warn: (message: string, ...args: any[]) => {
-    console.error(`[WARN] ${new Date().toISOString()} - ${message}`, ...args);
+  warn: (message: string, ...args: unknown[]) => {
+    console.error(formatLogLine("WARN", message), ...args.map(sanitizeLogArg));
   },
-  error: (message: string, ...args: any[]) => {
-    console.error(`[ERROR] ${new Date().toISOString()} - ${message}`, ...args);
+  error: (message: string, ...args: unknown[]) => {
+    console.error(formatLogLine("ERROR", message), ...args.map(sanitizeLogArg));
   },
-  debug: (message: string, ...args: any[]) => {
+  debug: (message: string, ...args: unknown[]) => {
     if (process.env.DEBUG) {
-      console.error(`[DEBUG] ${new Date().toISOString()} - ${message}`, ...args);
+      console.error(formatLogLine("DEBUG", message), ...args.map(sanitizeLogArg));
     }
   },
 };
 
 type GatewayLogger = typeof logger;
+
+function formatLogLine(level: string, message: string): string {
+  return `[${level}] ${new Date().toISOString()} - ${redactSecrets(message)}`;
+}
+
+function sanitizeLogArg(value: unknown): unknown {
+  return sanitizeLogValue(value, new WeakSet<object>(), 0);
+}
+
+function sanitizeLogValue(value: unknown, seen: WeakSet<object>, depth: number): unknown {
+  if (typeof value === "string") {
+    return redactSecrets(value);
+  }
+  if (value instanceof Error) {
+    return sanitizeLogError(value);
+  }
+  if (Array.isArray(value)) {
+    if (depth >= 4) return "[Array]";
+    return value.map(item => sanitizeLogValue(item, seen, depth + 1));
+  }
+  if (value !== null && typeof value === "object") {
+    if (seen.has(value)) return "[Circular]";
+    if (depth >= 4) return "[Object]";
+    seen.add(value);
+    const out: Record<string, unknown> = {};
+    for (const [key, inner] of Object.entries(value as Record<string, unknown>)) {
+      out[key] = sanitizeLogValue(inner, seen, depth + 1);
+    }
+    seen.delete(value);
+    return out;
+  }
+  return value;
+}
+
+function sanitizeLogError(error: Error): Record<string, string> {
+  const out: Record<string, string> = {
+    name: redactSecrets(error.name),
+    message: redactSecrets(error.message),
+  };
+  if (error.stack) {
+    out.stack = redactSecrets(error.stack);
+  }
+  return out;
+}
 
 function startWindowsBootstrapperSelfHeal(): void {
   if (process.platform !== "win32") return;
@@ -4386,7 +4431,7 @@ export async function handleGrokApiRequest(
       1,
       "",
       corrId,
-      new Error(`xAI API key env var ${xaiConfig.apiKeyEnv} is not set`)
+      new Error("xAI API key is not configured")
     );
   }
 

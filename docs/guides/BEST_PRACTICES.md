@@ -172,6 +172,40 @@ fixes = codex_request({prompt:`Fix:${review1}${review2}`,sandboxMode:"workspace-
 
 ---
 
+### Review Gate Standard
+**Status:** Production standard
+
+Cross-LLM review is an evidence gate, not a summary check.
+
+**Dispatch requirements:**
+- Use the local stdio `gtwy` MCP surface for gateway-orchestrated reviews.
+- Launch reviewers with full non-interactive verification permissions and MCP
+  tool access. Reviewers need to read files, inspect neighboring code, run or
+  inspect tests/builds, and use code-search, docs lookup, and web/search tools
+  where relevant.
+- Poll async reviewer jobs no more than once every 90 seconds. Do not cancel
+  reviewers for being slow; wait for terminal status unless the user explicitly
+  asks to stop them.
+- A partial-access or empty-output review is not approval. Treat it as a
+  dispatch failure unless the user explicitly accepts the limitation.
+
+**Evidence packet:**
+- Provide the verification report used as the corrective-program spec.
+- Provide the exact commit/diff range or uncommitted changed-file list.
+- Provide the relevant plan/DAG step, issue/PR references, invariants, and local
+  gate outputs.
+- Tell reviewers that the report is a claim, not evidence. They must verify
+  against actual code, tests, docs, and upstream documentation.
+
+**Approval requirements:**
+- Reviewers may approve only after inspecting code/tests/docs directly.
+- Findings and rebuttals must cite `file:line`, command/test evidence, or doc
+  URLs. Assertion, intent, or "should be fixed" language is not evidence.
+- Iterate until every reviewer gives unconditional approval, or a concrete
+  blocker remains after evidence-based rebuttal.
+
+---
+
 ### Future Improvements
 Potential autonomous multi-level:
 1. Batch request tool (multi-sub-requests)

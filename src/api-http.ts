@@ -69,8 +69,8 @@ export function isLoopbackUrl(value: string): boolean {
  * `ApiHttpError` when an adapter is pointed at a cleartext remote endpoint.
  */
 export function buildEndpointUrl(baseUrl: string, path: string): URL {
-  const trimmedBase = baseUrl.replace(/\/+$/, "");
-  const trimmedPath = path.replace(/^\/+/, "");
+  const trimmedBase = stripTrailingSlashChars(baseUrl);
+  const trimmedPath = stripLeadingSlashChars(path);
   const url = new URL(`${trimmedBase}/${trimmedPath}`);
   if (
     url.protocol !== "https:" &&
@@ -81,6 +81,22 @@ export function buildEndpointUrl(baseUrl: string, path: string): URL {
     );
   }
   return url;
+}
+
+function stripTrailingSlashChars(value: string): string {
+  let end = value.length;
+  while (end > 0 && value.charCodeAt(end - 1) === 47) {
+    end -= 1;
+  }
+  return value.slice(0, end);
+}
+
+function stripLeadingSlashChars(value: string): string {
+  let start = 0;
+  while (start < value.length && value.charCodeAt(start) === 47) {
+    start += 1;
+  }
+  return value.slice(start);
 }
 
 /** Retryable-transport classifier shared by every adapter's `isTransient`. */

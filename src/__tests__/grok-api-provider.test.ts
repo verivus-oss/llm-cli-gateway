@@ -344,6 +344,27 @@ describe("grok_api_request", () => {
     expect(result.content[0].text).toContain("not 'grok-api'");
   });
 
+  it("reports a missing xAI key without leaking the configured env var name", async () => {
+    vi.stubEnv("XAI_API_KEY", "");
+    const server = await startServer((_req, res) => writeJson(res, 500, {}));
+    closeServer = server.close;
+    runtime = buildRuntime(server.baseUrl);
+
+    const result = await handleGrokApiRequest(
+      { sessionManager, logger: noopLogger, runtime },
+      {
+        prompt: "hello",
+        optimizePrompt: false,
+        correlationId: "corr-grok-api-missing-key",
+      }
+    );
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("xAI API key is not configured");
+    expect(result.content[0].text).not.toContain("XAI_API_KEY");
+    expect(result.structuredContent?.response).not.toContain("XAI_API_KEY");
+  });
+
   it("rejects reasoningEffort on models without xAI support before calling HTTP", async () => {
     let called = false;
     const server = await startServer((_req, res) => {

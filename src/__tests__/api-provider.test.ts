@@ -22,7 +22,7 @@ import {
   DEFAULT_ANTHROPIC_VERSION,
   type ApiRequest,
 } from "../api-provider.js";
-import { ApiHttpError } from "../api-http.js";
+import { ApiHttpError, buildEndpointUrl } from "../api-http.js";
 import {
   loadProvidersConfig,
   isApiProviderEnabled,
@@ -61,6 +61,12 @@ describe("Slice 0 — ApiProvider adapters", () => {
         temperature: 0.2,
         top_p: 0.9,
       });
+    });
+
+    it("normalizes repeated base/path slashes without regex trimming", () => {
+      expect(
+        buildEndpointUrl("https://api.example.com/v1///", "///chat/completions").toString()
+      ).toBe("https://api.example.com/v1/chat/completions");
     });
 
     it("parses choices + usage", () => {

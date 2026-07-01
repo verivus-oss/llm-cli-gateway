@@ -35,6 +35,43 @@ describe("redactAcpMessage", () => {
     expect(out).toContain("<redacted-json>");
   });
 
+  it("strips nested JSON bodies without leaking trailing prompt fields", () => {
+    const out = redactAcpMessage(
+      'agent said {"outer":{"message":"ok"},"params":{"prompt":"leak this prompt text"}}'
+    );
+    expect(out).not.toContain("leak this prompt text");
+    expect(out).not.toContain("prompt");
+    expect(out).toBe("agent said <redacted-json>");
+  });
+
+  it("ignores JSON delimiters inside quoted strings while redacting the whole body", () => {
+    const out = redactAcpMessage('agent said {"message":"}","prompt":"leak this prompt text"}');
+    expect(out).not.toContain("leak this prompt text");
+    expect(out).not.toContain("prompt");
+    expect(out).toBe("agent said <redacted-json>");
+  });
+
+  it("handles unmatched JSON delimiters without over-redacting", () => {
+    const input = `${"{".repeat(1000)} keep this status`;
+    expect(redactAcpMessage(input)).toBe(input);
+  });
+
+  it("redacts truncated JSON-RPC-like payloads instead of leaking prompt text", () => {
+    const out = redactAcpMessage(
+      'agent said {"jsonrpc":"2.0","params":{"prompt":"leak this prompt text"}'
+    );
+    expect(out).not.toContain("leak this prompt text");
+    expect(out).not.toContain("jsonrpc");
+    expect(out).toBe("agent said <redacted-json>");
+  });
+
+  it("handles large unmatched delimiter runs in linear time", () => {
+    const input = `${"{".repeat(200_000)} keep this status`;
+    const started = performance.now();
+    expect(redactAcpMessage(input)).toBe(input);
+    expect(performance.now() - started).toBeLessThan(250);
+  });
+
   it("strips absolute credential paths", () => {
     const out = redactAcpMessage(`failed reading ${CREDENTIAL_PATH}`);
     expect(out).not.toContain(CREDENTIAL_PATH);

@@ -2,6 +2,32 @@
 
 All notable changes to the llm-cli-gateway project.
 
+## [2.13.1] - 2026-07-01: code-scanning hardening and review-gate discipline
+
+### Security
+
+- **CodeQL remediation for URL, ReDoS, logging, and OAuth cookie alerts.**
+  API endpoint joining no longer uses slash-trimming regexes; ACP message
+  redaction now uses a stack-based single-pass JSON payload scanner with
+  truncated structured-payload fallback; central gateway stderr logging redacts
+  message strings, structured args, and nested `Error` name/message/stack
+  values; the xAI missing-key error no longer leaks the configured env var name;
+  and OAuth consent CSRF cookies now include `HttpOnly`, `Secure`,
+  `SameSite=Lax`, `Path=/oauth`, and `Max-Age=300`.
+- **Regression coverage for the fixed alert surfaces.** Added focused tests for
+  endpoint slash normalization, nested and truncated ACP payload redaction,
+  logger redaction before stderr output, generic xAI missing-key messaging, and
+  complete OAuth CSRF cookie attributes.
+
+### Docs
+
+- **Standardized cross-LLM review validation.** The shipped multi-LLM review
+  skill and best-practices guide now require the stdio gateway surface, no
+  provider model nomination, full non-interactive verification access,
+  90-second polling, exact evidence packets, no cancellation of slow reviewers,
+  evidence-based rebuttals, and iteration until unconditional approval or a
+  concrete blocker.
+
 ## [2.13.0] - 2026-07-01: Cursor Agent CLI provider
 
 ### Added

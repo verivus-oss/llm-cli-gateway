@@ -121,7 +121,9 @@ describe("Slice 6: provider-login-guidance getApiProviderLoginGuidance", () => {
     expect(guidance.apiKeyEnv).toBe("OPENROUTER_API_KEY");
     expect(guidance.summary).toContain("OPENROUTER_API_KEY");
     expect(guidance.steps.some(s => s.includes("OPENROUTER_API_KEY"))).toBe(true);
-    expect(guidance.steps.some(s => s.includes("https://openrouter.ai/api/v1"))).toBe(true);
+    expect(guidance.steps).toContain(
+      "Obtain an API key from the provider that serves https://openrouter.ai/api/v1."
+    );
     expect(guidance.credentialHandling.toLowerCase()).toContain("do not paste");
   });
 });
