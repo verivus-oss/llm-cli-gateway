@@ -14,6 +14,7 @@
     "workspaces",
     "providers",
     "endpoint_exposure",
+    "remote_http_oauth",
     "client_config",
     "cache_awareness",
     "provider_capabilities",
@@ -219,6 +220,80 @@
             "checked_url": { "type": ["string", "null"] },
             "status_code": { "type": ["integer", "null"] },
             "error": { "type": ["string", "null"] }
+          },
+          "additionalProperties": false
+        },
+        "next_actions": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "remote_http_oauth": {
+      "type": "object",
+      "description": "Stable readiness projection for the preferred remote connector path (public HTTPS URL + /mcp + OAuth + registered/default workspace). Secret-free.",
+      "required": [
+        "ready",
+        "stage",
+        "public_url",
+        "mcp_url",
+        "auth_mode",
+        "oauth",
+        "workspace",
+        "next_actions"
+      ],
+      "properties": {
+        "ready": { "type": "boolean" },
+        "stage": {
+          "enum": [
+            "not_started",
+            "missing_public_url",
+            "endpoint_unreachable",
+            "oauth_disabled",
+            "unsafe_oauth_config",
+            "missing_oauth_client",
+            "missing_workspace",
+            "ready"
+          ]
+        },
+        "public_url": { "type": ["string", "null"] },
+        "mcp_url": { "type": ["string", "null"] },
+        "auth_mode": { "enum": ["oauth", "bearer_token", "none"] },
+        "oauth": {
+          "type": "object",
+          "required": [
+            "enabled",
+            "issuer",
+            "authorization_url",
+            "token_url",
+            "registration_policy",
+            "clients_configured",
+            "consent_required"
+          ],
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "issuer": { "type": ["string", "null"] },
+            "authorization_url": { "type": ["string", "null"] },
+            "token_url": { "type": ["string", "null"] },
+            "registration_policy": {
+              "enum": ["static_clients", "shared_secret", "open_dev"]
+            },
+            "clients_configured": { "type": "integer", "minimum": 0 },
+            "consent_required": { "type": "boolean" }
+          },
+          "additionalProperties": false
+        },
+        "workspace": {
+          "type": "object",
+          "required": ["ready", "default", "aliases"],
+          "properties": {
+            "ready": { "type": "boolean" },
+            "default": { "type": ["string", "null"] },
+            "aliases": {
+              "type": "array",
+              "items": { "type": "string" }
+            }
           },
           "additionalProperties": false
         },

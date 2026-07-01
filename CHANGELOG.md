@@ -2,6 +2,49 @@
 
 All notable changes to the llm-cli-gateway project.
 
+## [2.13.2] - 2026-07-01: remote HTTP + OAuth connector UX and hardening
+
+### Added
+
+- **`remote_http_oauth` readiness projection in `doctor --json`.** A stable,
+  ordered 8-stage decision tree (`not_started`, `missing_public_url`,
+  `endpoint_unreachable`, `oauth_disabled`, `unsafe_oauth_config`,
+  `missing_oauth_client`, `missing_workspace`, `ready`) with deterministic,
+  secret-free `next_actions`, the copy-safe connector URLs, `oauth.consent_required`,
+  and a path-free workspace summary. Validated by `setup/status.schema.json`.
+- **`llm-cli-gateway connector setup` command.** Emits a copy-safe JSON connector
+  packet (MCP URL, authorization URL, token URL, client id, workspace guidance)
+  plus a human summary, reusing the readiness projection. The deprecated no-auth
+  connector URL is omitted unless `--include-legacy-no-auth` is passed.
+- **Centralized remote URL construction (`src/remote-url.ts`).** doctor, the
+  connector packet, the CLI OAuth output, the installer, and the runtime OAuth
+  well-known metadata + `WWW-Authenticate` challenge all derive URLs from one
+  helper so they cannot drift.
+
+### Changed
+
+- **OAuth-first remote connector docs and setup UI.** The ChatGPT guide,
+  endpoint-exposure runbook, `ENDPOINT_EXPOSURE.md`, and setup UI lead with the
+  OAuth path keyed on `remote_http_oauth.stage`; the no-auth connector is
+  compatibility-only. `oauth client add` validates the redirect URI and client
+  id before writing, refuses duplicate ids, and labels copy-once secret output.
+
+### Security
+
+- **F17 hardening.** The unsafe-OAuth (public clients / `open_dev`) start gate
+  now fails closed when the gateway is publicly exposed via a public URL or
+  tunnel, not only on a non-loopback bind.
+- **No local-path disclosure to remote clients.** Remote MCP `workspace_*`
+  tools, `session_get`, `sessions://*` resources, and worktree response paths
+  are path-redacted for remote HTTP/OAuth callers (local operators keep absolute
+  paths; resume metadata is unaffected). `workspace_register_existing_repo` no
+  longer acts as a filesystem existence oracle.
+- **Installer URL redaction.** The Go installer derives OAuth/MCP URLs from a
+  clean origin and strips userinfo/query/fragment from the stored public URL, so
+  no credential-bearing URL is emitted.
+- **gitleaks allowlist** now covers the `gateway-logger` redaction test fixtures
+  (deliberate fake tokens), restoring a green secret-scan gate.
+
 ## [2.13.1] - 2026-07-01: code-scanning hardening and review-gate discipline
 
 ### Security

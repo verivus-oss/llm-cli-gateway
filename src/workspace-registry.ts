@@ -463,12 +463,28 @@ export function registerExistingWorkspace(input: {
   if (registry.repos.some(repo => repo.alias === alias)) {
     throw new WorkspaceRegistryError(`Workspace alias "${alias}" already exists`);
   }
+  // Fail closed BEFORE any filesystem probe: a candidate path that is not,
+  // by string containment, under an allowed root that permits registering
+  // existing repos is rejected with a generic, path-free error. This prevents a
+  // remote (admin-scoped) caller from using the differentiated realExistingPath
+  // errors ("does not exist: <path>", "not a Git repo") as a filesystem
+  // existence oracle to map the operator's local layout with arbitrary paths.
+  const genericDenied = new WorkspaceRegistryError(
+    "No allowed root permits registering a Git repository at the requested path."
+  );
+  if (!path.isAbsolute(input.repoPath)) throw genericDenied;
+  const candidateReal = path.resolve(expandHome(input.repoPath));
+  const permittingRoot = registry.allowedRoots.find(
+    candidate => candidate.allowRegisterExistingGitRepos && isUnder(candidate.path, candidateReal)
+  );
+  if (!permittingRoot) throw genericDenied;
   const real = realExistingPath(input.repoPath);
   if (!isGitRepo(real)) throw new WorkspaceRegistryError("Existing workspace must be a Git repo");
-  const root = registry.allowedRoots.find(candidate => isUnder(candidate.path, real));
-  if (!root?.allowRegisterExistingGitRepos) {
-    throw new WorkspaceRegistryError("No allowed root permits registering this Git repo");
-  }
+  // Re-check after realpath so a symlink under an allowed root cannot escape it.
+  const root = registry.allowedRoots.find(
+    candidate => candidate.allowRegisterExistingGitRepos && isUnder(candidate.path, real)
+  );
+  if (!root) throw genericDenied;
   const workspaces = ((raw.workspaces as Record<string, unknown> | undefined) ?? {}) as Record<
     string,
     unknown
@@ -505,6 +521,57 @@ export function createTempWorkspaceConfig(contents: string): string {
   const configPath = path.join(dir, "config.toml");
   writeFileSync(configPath, contents, { mode: 0o600 });
   return configPath;
+}
+
+/**
+ * Remote-client-safe view of the workspace registry for setup/diagnostics
+ * surfaces. Reports only what a remote connector needs to select a workspace
+ * (default alias, registered aliases, counts, readiness) and DELIBERATELY omits
+ * local absolute paths, git branch/dirty state, and per-repo provider policy.
+ *
+ * This is separate from `describeWorkspace`, which intentionally exposes local
+ * paths for the local, operator-administrative `workspace list` output. Remote
+ * setup output must use THIS summary so a connector packet never leaks local
+ * filesystem layout.
+ *
+ * `ready` is true when a remote provider call can resolve a workspace without
+ * further operator action: either a `[workspaces].default` is set, or at least
+ * one repo is registered (so a connector can pass a registered alias). Allowed
+ * roots alone do not make it ready, since a repo must be created/registered
+ * first.
+ */
+export interface RemoteSafeWorkspaceSummary {
+  ready: boolean;
+  default: string | null;
+  aliases: string[];
+  repo_count: number;
+  allowed_root_count: number;
+}
+
+export function remoteSafeWorkspaceSummary(
+  registry: WorkspaceRegistry
+): RemoteSafeWorkspaceSummary {
+  return {
+    ready: registry.defaultAlias !== null || registry.repos.length > 0,
+    default: registry.defaultAlias,
+    aliases: registry.repos.map(repo => repo.alias),
+    repo_count: registry.repos.length,
+    allowed_root_count: registry.allowedRoots.length,
+  };
+}
+
+/**
+ * Remote-client-safe per-repo view: everything a remote HTTP/OAuth caller needs
+ * to select and understand a workspace (alias, kind, providers, capability
+ * flags, git branch/dirty) but WITHOUT the local absolute `path`. Used by the
+ * remote-only `workspace_list` / `workspace_get` / `workspace_create` /
+ * `workspace_register_existing_repo` MCP tool responses. The local operator CLI
+ * (`workspace list`) keeps `describeWorkspace`, which includes the path.
+ */
+export function describeWorkspaceRemote(repo: WorkspaceRepo): Record<string, unknown> {
+  const full = describeWorkspace(repo);
+  delete full.path;
+  return full;
 }
 
 export function describeWorkspace(repo: WorkspaceRepo): Record<string, unknown> {

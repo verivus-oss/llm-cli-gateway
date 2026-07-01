@@ -1,5 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { FileSessionManager } from "../session-manager.js";
+import {
+  FileSessionManager,
+  remoteSafeSession,
+  callerIsRemote,
+  type Session,
+} from "../session-manager.js";
 import { runWithRequestContext } from "../request-context.js";
 import { existsSync, mkdirSync, rmSync, readFileSync, statSync } from "fs";
 import { join } from "path";
@@ -567,5 +572,50 @@ describe("U21 prepareGeminiRequest agy args ordering (Layer 9)", () => {
     // The first arg must be the --print flag, NOT the prompt itself.
     expect(prep.args[0]).not.toBe("hello world");
     expect(prep.args[0]).toBe("--print");
+  });
+});
+
+describe("remoteSafeSession + callerIsRemote", () => {
+  const baseSession: Session = {
+    id: "gw-1",
+    cli: "claude",
+    createdAt: "2026-07-01T00:00:00.000Z",
+    lastUsedAt: "2026-07-01T00:00:00.000Z",
+    metadata: {
+      model: "opus",
+      workspaceAlias: "gateway",
+      workspaceRoot: "/home/operator/src/prod",
+      worktreePath: "/home/operator/src/prod/.worktrees/abc123",
+    },
+  };
+
+  it("strips workspaceRoot and reduces worktreePath to a relative label, keeping alias", () => {
+    const safe = remoteSafeSession(baseSession);
+    expect(safe.metadata?.workspaceRoot).toBeUndefined();
+    expect(safe.metadata?.worktreePath).toBe(join(".worktrees", "abc123"));
+    expect(safe.metadata?.workspaceAlias).toBe("gateway");
+    expect(safe.metadata?.model).toBe("opus");
+    // No absolute operator path anywhere in the projection.
+    const blob = JSON.stringify(safe);
+    expect(blob).not.toContain("/home/operator");
+    // The original session object is not mutated.
+    expect(baseSession.metadata?.workspaceRoot).toBe("/home/operator/src/prod");
+  });
+
+  it("returns the session unchanged when there is no metadata", () => {
+    const s: Session = { id: "x", cli: "codex", createdAt: "t", lastUsedAt: "t" };
+    expect(remoteSafeSession(s)).toBe(s);
+  });
+
+  it("callerIsRemote reflects the ambient request transport", () => {
+    expect(callerIsRemote()).toBe(false);
+    const remote = runWithRequestContext({ authKind: "oauth", authScopes: [] }, () =>
+      callerIsRemote()
+    );
+    expect(remote).toBe(true);
+    const httpRemote = runWithRequestContext({ transport: "http", authScopes: [] }, () =>
+      callerIsRemote()
+    );
+    expect(httpRemote).toBe(true);
   });
 });
