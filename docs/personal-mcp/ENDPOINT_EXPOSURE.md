@@ -112,6 +112,26 @@ Do not paste tunnel tokens, bearer tokens, provider credentials, or authorizatio
 Do not use `localhost`, `127.0.0.1`, `0.0.0.0`, or private LAN IP addresses as the public URL for
 web clients; doctor reports those as local-only or LAN endpoints even when they use HTTPS.
 
+## Remote connector readiness (OAuth-first)
+
+OAuth is the recommended remote connector path: a public HTTPS URL, the `/mcp`
+endpoint, OAuth, and a registered/default workspace. `doctor --json` reports a
+single ordered readiness projection at `remote_http_oauth`:
+
+- `remote_http_oauth.stage` is one of `not_started`, `missing_public_url`,
+  `endpoint_unreachable`, `oauth_disabled`, `unsafe_oauth_config`,
+  `missing_oauth_client`, `missing_workspace`, `ready`. The first failing gate is
+  the reported stage; `remote_http_oauth.next_actions` names the minimal next step.
+- `remote_http_oauth.mcp_url`, `.oauth.issuer`, `.oauth.authorization_url`, and
+  `.oauth.token_url` are the exact copy-safe URLs (also printed by
+  `llm-cli-gateway connector setup`). They are built from the same helper the
+  running server uses for its OAuth well-known metadata, so they never drift.
+- `remote_http_oauth.workspace` reports readiness, the default alias, and the
+  registered aliases (no local paths) that remote provider calls can select.
+
+Inspect `remote_http_oauth.stage` first, then fall back to the raw
+`endpoint_exposure` fields below for endpoint detail.
+
 ## Verification
 
 For web-client setup, `endpoint_exposure` should show:
@@ -122,6 +142,8 @@ For web-client setup, `endpoint_exposure` should show:
 - `reachable_from_web: "reachable"` after `LLM_GATEWAY_VERIFY_PUBLIC_URL=1`
 
 If reachability is `not_checked`, assistant-led setup must ask the user to run a fresh doctor command with verification enabled before claiming the endpoint is ready for web clients.
+
+The deprecated no-auth connector path (a generated high-entropy URL that bypasses authentication) is compatibility-only and is not the recommended path for new setups. `llm-cli-gateway connector setup` omits it unless `--include-legacy-no-auth` is passed, and it is never a filesystem bypass: remote provider execution still requires a registered workspace alias, a session workspace, or `[workspaces].default`.
 
 ## Session and job backpressure (issue #130)
 
