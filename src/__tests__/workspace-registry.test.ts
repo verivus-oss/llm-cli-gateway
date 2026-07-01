@@ -13,6 +13,7 @@ import type { PersistenceConfig } from "../config.js";
 import type { WorkspaceRegistry } from "../workspace-registry.js";
 import {
   describeWorkspace,
+  describeWorkspaceRemote,
   loadWorkspaceRegistry,
   remoteSafeWorkspaceSummary,
   resolveWorkspaceForProvider,
@@ -518,6 +519,68 @@ describe("workspace registry", () => {
       const admin = describeWorkspace(registry.repos[0]);
       expect(admin.path).toBe(repoRoot);
       expect(JSON.stringify(admin)).toContain(repoRoot);
+    });
+
+    it("describeWorkspaceRemote drops the local path but keeps alias/kind/providers", () => {
+      writeRegistry();
+      const registry = loadWorkspaceRegistry(undefined, configPath);
+      const remote = describeWorkspaceRemote(registry.repos[0]);
+      expect(remote.path).toBeUndefined();
+      expect(remote.alias).toBe("gateway");
+      expect(remote.kind).toBe("git");
+      expect(remote.providers).toEqual(["claude", "codex"]);
+      expect(JSON.stringify(remote)).not.toContain(repoRoot);
+    });
+  });
+
+  describe("remote workspace MCP tools do not leak local paths", () => {
+    it("workspace_list and workspace_get omit local absolute paths for remote callers", async () => {
+      writeFileSync(
+        configPath,
+        [
+          "[workspaces]",
+          'default = "gateway"',
+          "",
+          "[[workspaces.repos]]",
+          'alias = "gateway"',
+          `path = "${repoRoot}"`,
+          'providers = ["claude", "codex"]',
+          "",
+          "[[workspaces.allowed_roots]]",
+          `path = "${repoRoot}"`,
+          "allow_create_directories = true",
+          "",
+        ].join("\n")
+      );
+      process.env.LLM_GATEWAY_CONFIG = configPath;
+      const server = createAsyncGatewayServer(disabledWorkspaces());
+      const oauthCtx = {
+        authKind: "oauth" as const,
+        authScopes: [],
+        authClientId: "remote-client",
+      };
+
+      const list = await runWithRequestContext(oauthCtx, () =>
+        registeredTools(server).workspace_list.handler({}, {})
+      );
+      const listText = list.content[0]?.text ?? "";
+      expect(list.isError).toBeFalsy();
+      expect(listText).not.toContain(repoRoot);
+      expect(listText).not.toContain(tempDir);
+      const listJson = JSON.parse(listText);
+      expect(listJson.workspaces[0].alias).toBe("gateway");
+      expect(listJson.workspaces[0].path).toBeUndefined();
+      // allowed_roots must not expose the local path either.
+      expect(listJson.allowed_roots[0].path).toBeUndefined();
+      expect(listJson.allowed_roots[0].alias).toBeDefined();
+
+      const get = await runWithRequestContext(oauthCtx, () =>
+        registeredTools(server).workspace_get.handler({ alias: "gateway" }, {})
+      );
+      const getText = get.content[0]?.text ?? "";
+      expect(get.isError).toBeFalsy();
+      expect(getText).not.toContain(repoRoot);
+      expect(JSON.parse(getText).workspace.path).toBeUndefined();
     });
   });
 });

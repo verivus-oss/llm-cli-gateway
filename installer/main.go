@@ -58,7 +58,7 @@ func run(args []string) error {
 		}
 		fmt.Println(string(body))
 		return nil
-	case "contracts", "oauth", "workspace":
+	case "contracts", "oauth", "workspace", "connector":
 		return nodeGatewayCommand(args)
 	case "start":
 		cfg, token, err := config.Ensure()
@@ -122,10 +122,12 @@ func run(args []string) error {
 			"local_url":             "http://" + cfg.HTTPHost + ":" + cfg.HTTPPort + cfg.HTTPPath,
 			"web_clients_supported": cfg.PublicURL != "" && strings.HasPrefix(cfg.PublicURL, "https://"),
 			"oauth":                 oauth,
+			// OAuth-first: the deprecated no-auth connector URL is intentionally
+			// omitted here. It is available only via the explicit legacy path
+			// (`chatgpt-url` command / `connector setup --include-legacy-no-auth`).
 			"chatgpt": map[string]any{
-				"url":                    endpoint,
-				"authentication":         "OAuth",
-				"deprecated_no_auth_url": deprecatedNoAuthURL(cfg.ChatGPTConnectorURL),
+				"url":            endpoint,
+				"authentication": "OAuth",
 			},
 			"headers": map[string]string{"Authorization": "Bearer <redacted>"},
 			"notes": []string{

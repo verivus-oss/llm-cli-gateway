@@ -544,6 +544,20 @@ export function remoteSafeWorkspaceSummary(
   };
 }
 
+/**
+ * Remote-client-safe per-repo view: everything a remote HTTP/OAuth caller needs
+ * to select and understand a workspace (alias, kind, providers, capability
+ * flags, git branch/dirty) but WITHOUT the local absolute `path`. Used by the
+ * remote-only `workspace_list` / `workspace_get` / `workspace_create` /
+ * `workspace_register_existing_repo` MCP tool responses. The local operator CLI
+ * (`workspace list`) keeps `describeWorkspace`, which includes the path.
+ */
+export function describeWorkspaceRemote(repo: WorkspaceRepo): Record<string, unknown> {
+  const full = describeWorkspace(repo);
+  delete full.path;
+  return full;
+}
+
 export function describeWorkspace(repo: WorkspaceRepo): Record<string, unknown> {
   let branch: string | null = null;
   let dirty = false;

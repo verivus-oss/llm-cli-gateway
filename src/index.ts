@@ -170,6 +170,7 @@ import {
 import {
   createWorkspace,
   describeWorkspace,
+  describeWorkspaceRemote,
   getWorkspace,
   loadWorkspaceRegistry,
   registerExistingWorkspace,
@@ -1492,10 +1493,10 @@ function registerWorkspaceTools(server: McpServer, runtime: GatewayServerRuntime
                   success: true,
                   enabled: registry.enabled,
                   default: registry.defaultAlias,
-                  workspaces: registry.repos.map(describeWorkspace),
+                  // Remote-only tool: emit aliases + capability flags, never local paths.
+                  workspaces: registry.repos.map(describeWorkspaceRemote),
                   allowed_roots: registry.allowedRoots.map(root => ({
                     alias: root.alias,
-                    path: root.path,
                     allow_register_existing_git_repos: root.allowRegisterExistingGitRepos,
                     allow_create_directories: root.allowCreateDirectories,
                     allow_init_git_repos: root.allowInitGitRepos,
@@ -1534,7 +1535,10 @@ function registerWorkspaceTools(server: McpServer, runtime: GatewayServerRuntime
             {
               type: "text" as const,
               text: JSON.stringify(
-                { success: true, workspace: describeWorkspace(getWorkspace(registry, alias)) },
+                {
+                  success: true,
+                  workspace: describeWorkspaceRemote(getWorkspace(registry, alias)),
+                },
                 null,
                 2
               ),
@@ -1584,7 +1588,11 @@ function registerWorkspaceTools(server: McpServer, runtime: GatewayServerRuntime
           content: [
             {
               type: "text" as const,
-              text: JSON.stringify({ success: true, workspace: describeWorkspace(repo) }, null, 2),
+              text: JSON.stringify(
+                { success: true, workspace: describeWorkspaceRemote(repo) },
+                null,
+                2
+              ),
             },
           ],
         };
@@ -1630,7 +1638,11 @@ function registerWorkspaceTools(server: McpServer, runtime: GatewayServerRuntime
           content: [
             {
               type: "text" as const,
-              text: JSON.stringify({ success: true, workspace: describeWorkspace(repo) }, null, 2),
+              text: JSON.stringify(
+                { success: true, workspace: describeWorkspaceRemote(repo) },
+                null,
+                2
+              ),
             },
           ],
         };
@@ -13032,11 +13044,15 @@ function validateCliRedirectUri(uri: string): void {
       `Invalid --redirect-uri "${uri}": it must be an absolute URL with a scheme (e.g. https://chatgpt.com/connector/callback).`
     );
   }
-  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
-    throw new Error(
-      `Invalid --redirect-uri "${uri}": scheme must be https (or http only for localhost testing).`
-    );
-  }
+  if (parsed.protocol === "https:") return;
+  // Mirror the runtime redirect-URI policy (isHttpsOrLoopbackUrl): http is only
+  // accepted for loopback (local testing). Rejecting http non-loopback here means
+  // `oauth client add` never writes a redirect the runtime would later reject and
+  // fail the whole OAuth config closed.
+  if (parsed.protocol === "http:" && hostIsLoopback(parsed.hostname)) return;
+  throw new Error(
+    `Invalid --redirect-uri "${uri}": must be https:// (or http:// only for localhost/loopback). The gateway rejects http non-loopback redirect URIs at runtime.`
+  );
 }
 
 function hostIsLoopback(hostname: string): boolean {

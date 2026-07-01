@@ -72,6 +72,27 @@ describe.skipIf(!existsSync(entrypoint))("CLI oauth client + connector setup", (
     expect(readFileSync(cfg, "utf8")).not.toContain("client_id");
   });
 
+  it("oauth client add rejects an http non-loopback redirect URI (matches runtime policy)", () => {
+    const cfg = freshConfig();
+    const result = run(
+      ["oauth", "client", "add", "chatgpt", "--redirect-uri", "http://evil.example.com/cb"],
+      { LLM_GATEWAY_CONFIG: cfg }
+    );
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toMatch(/https|loopback|localhost/i);
+    expect(readFileSync(cfg, "utf8")).not.toContain("client_id");
+  });
+
+  it("oauth client add accepts an http localhost redirect URI (local testing)", () => {
+    const cfg = freshConfig();
+    const result = run(
+      ["oauth", "client", "add", "localtest", "--redirect-uri", "http://localhost:8080/cb"],
+      { LLM_GATEWAY_CONFIG: cfg }
+    );
+    expect(result.status).toBe(0);
+    expect(readFileSync(cfg, "utf8")).toContain("localtest");
+  });
+
   it("oauth client add prints the copy-once secret only with --print-once", () => {
     const cfg = freshConfig();
     const noFlag = run(
