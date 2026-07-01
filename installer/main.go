@@ -111,7 +111,7 @@ func run(args []string) error {
 		if cfg.PublicURL != "" {
 			endpoint = cfg.PublicURL
 		}
-		issuer := strings.TrimSuffix(endpoint, cfg.HTTPPath)
+		issuer := strings.TrimRight(strings.TrimSuffix(endpoint, cfg.HTTPPath), "/")
 		oauth := config.OAuthURLs(issuer)
 		oauth["enabled"] = true
 		oauth["client_secret"] = "<copy-once local oauth command output only>"

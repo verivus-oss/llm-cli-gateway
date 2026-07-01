@@ -330,24 +330,40 @@ func DoctorJSON() ([]byte, error) {
 	return json.MarshalIndent(report, "", "  ")
 }
 
+// JoinBaseAndPath mirrors joinBaseAndPath in src/remote-url.ts: it trims trailing
+// slashes from the base origin and guarantees a single leading slash on the path
+// so the Go installer produces byte-identical URLs to the Node gateway even when
+// the origin carries a stray trailing slash (which would otherwise yield a
+// double-slash URL). This keeps the installer from drifting from the shared
+// remote-url helper.
+func JoinBaseAndPath(baseOrigin, path string) string {
+	base := strings.TrimRight(baseOrigin, "/")
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	return base + path
+}
+
 // remoteOAuthOrigin derives the scheme://host[:port] origin from a (redacted)
-// public URL, stripping the MCP path suffix if present. Empty when no public URL.
+// public URL, stripping the MCP path suffix if present and any trailing slash.
+// Empty when no public URL.
 func remoteOAuthOrigin(redactedPublicURL, httpPath string) string {
 	if redactedPublicURL == "" {
 		return ""
 	}
-	return strings.TrimSuffix(redactedPublicURL, httpPath)
+	return strings.TrimRight(strings.TrimSuffix(redactedPublicURL, httpPath), "/")
 }
 
 // OAuthURLs builds the canonical OAuth endpoint URLs from a base origin. Kept in
-// one place so print-client-config and the fallback doctor cannot drift from the
-// Node gateway's remote-url helper (which uses the same path suffixes).
+// one place, and using JoinBaseAndPath so print-client-config and the fallback
+// doctor cannot drift from the Node gateway's remote-url helper (same path
+// suffixes, same trailing-slash normalization).
 func OAuthURLs(origin string) map[string]any {
 	return map[string]any{
-		"authorization_url":      origin + "/oauth/authorize",
-		"token_url":              origin + "/oauth/token",
-		"registration_url":       origin + "/oauth/register",
-		"protected_resource_url": origin + "/.well-known/oauth-protected-resource",
+		"authorization_url":      JoinBaseAndPath(origin, "/oauth/authorize"),
+		"token_url":              JoinBaseAndPath(origin, "/oauth/token"),
+		"registration_url":       JoinBaseAndPath(origin, "/oauth/register"),
+		"protected_resource_url": JoinBaseAndPath(origin, "/.well-known/oauth-protected-resource"),
 	}
 }
 
@@ -361,10 +377,10 @@ func remoteHTTPOAuthFallback(cfg Config, redactedPublicURL string, httpsConfigur
 	var mcpURL, issuer, authURL, tokenURL any
 	stage := "missing_public_url"
 	if origin != "" && httpsConfigured {
-		mcpURL = origin + cfg.HTTPPath
+		mcpURL = JoinBaseAndPath(origin, cfg.HTTPPath)
 		issuer = origin
-		authURL = origin + "/oauth/authorize"
-		tokenURL = origin + "/oauth/token"
+		authURL = JoinBaseAndPath(origin, "/oauth/authorize")
+		tokenURL = JoinBaseAndPath(origin, "/oauth/token")
 		// The bootstrapper fallback never has a configured OAuth client.
 		stage = "missing_oauth_client"
 	}

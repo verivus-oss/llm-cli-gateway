@@ -149,6 +149,23 @@ func TestDoctorJSONRedactsDeprecatedChatGPTConnectorURL(t *testing.T) {
 	}
 }
 
+func TestOAuthURLsNormalizeTrailingSlash(t *testing.T) {
+	// A trailing-slash origin must not yield a double-slash URL: the installer
+	// must match src/remote-url.ts joinBaseAndPath (no drift).
+	for _, origin := range []string{"https://example.com", "https://example.com/"} {
+		urls := OAuthURLs(origin)
+		if urls["authorization_url"] != "https://example.com/oauth/authorize" {
+			t.Fatalf("authorization_url = %v for origin %q", urls["authorization_url"], origin)
+		}
+		if urls["protected_resource_url"] != "https://example.com/.well-known/oauth-protected-resource" {
+			t.Fatalf("protected_resource_url = %v for origin %q", urls["protected_resource_url"], origin)
+		}
+	}
+	if got := JoinBaseAndPath("https://example.com/", "/mcp"); got != "https://example.com/mcp" {
+		t.Fatalf("JoinBaseAndPath double-slash: %q", got)
+	}
+}
+
 func TestDoctorJSONFallbackIncludesRemoteHTTPOAuth(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	if runtime.GOOS == "windows" {
