@@ -161,6 +161,12 @@ import { startHttpGateway, type HttpGatewayHandle } from "./http-transport.js";
 import { getRequestContext, resolveOwnerPrincipal, principalCanAccess } from "./request-context.js";
 import { printDoctorJson } from "./doctor.js";
 import { redactDiagnosticUrl } from "./endpoint-exposure.js";
+import { buildRemoteConnectorUrls } from "./remote-url.js";
+import {
+  gatherConnectorSetupPacket,
+  renderConnectorSetupSummary,
+  type ConnectorSetupOptions,
+} from "./connector-setup.js";
 import {
   createWorkspace,
   describeWorkspace,
@@ -13009,6 +13015,64 @@ function printJsonLine(value: unknown): void {
   process.stdout.write(JSON.stringify(value, null, 2) + "\n");
 }
 
+/** Config changes are read at startup; the running HTTP server needs a restart. */
+const OAUTH_RESTART_NOTE =
+  "Restart the gateway HTTP transport for this change to take effect (OAuth config is loaded at startup).";
+
+/**
+ * Validate a connector redirect URI before it is written to config: it must be
+ * an absolute URL with an http/https scheme. Throws with actionable guidance.
+ */
+function validateCliRedirectUri(uri: string): void {
+  let parsed: URL;
+  try {
+    parsed = new URL(uri);
+  } catch {
+    throw new Error(
+      `Invalid --redirect-uri "${uri}": it must be an absolute URL with a scheme (e.g. https://chatgpt.com/connector/callback).`
+    );
+  }
+  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+    throw new Error(
+      `Invalid --redirect-uri "${uri}": scheme must be https (or http only for localhost testing).`
+    );
+  }
+}
+
+function hostIsLoopback(hostname: string): boolean {
+  const h = hostname.toLowerCase();
+  return h === "localhost" || h === "127.0.0.1" || h === "::1" || h === "[::1]";
+}
+
+/** True when the redirect URI targets localhost/loopback. */
+function redirectLooksLocalhost(uri: string): boolean {
+  try {
+    return hostIsLoopback(new URL(uri).hostname);
+  } catch {
+    return false;
+  }
+}
+
+/** True when a public (non-loopback) URL is configured for the gateway. */
+function publicUrlIsRemote(env: NodeJS.ProcessEnv = process.env): boolean {
+  const publicUrl = env.LLM_GATEWAY_PUBLIC_URL;
+  if (!publicUrl) return false;
+  try {
+    return !hostIsLoopback(new URL(publicUrl).hostname);
+  } catch {
+    return false;
+  }
+}
+
+/** Copy-safe connector URLs for CLI output, via the shared URL helpers. */
+function cliConnectorUrls(): ReturnType<typeof buildRemoteConnectorUrls> {
+  return buildRemoteConnectorUrls({
+    baseOrigin: localBaseUrlForPrint(),
+    mcpPath: process.env.LLM_GATEWAY_HTTP_PATH || "/mcp",
+    oauthEnabled: true,
+  });
+}
+
 function runOAuthCommand(args: string[]): void {
   const [scope, action] = args;
   const config = readMutableGatewayConfig();
@@ -13025,35 +13089,66 @@ function runOAuthCommand(args: string[]): void {
           "Usage: llm-cli-gateway oauth client add <client-id> --redirect-uri <uri> [--print-once]"
         );
       const redirectUri = requireArg(args, "--redirect-uri");
+      // Validate the redirect URI BEFORE writing config so a scheme-less or
+      // malformed value never lands in ~/.llm-cli-gateway/config.toml.
+      validateCliRedirectUri(redirectUri);
+      // Duplicate client ids must go through an explicit rotate/update path so an
+      // `add` never silently overwrites an existing client's secret/redirects.
+      if (clients.some(candidate => candidate.client_id === clientId)) {
+        throw new Error(
+          `OAuth client "${clientId}" already exists. Use \`llm-cli-gateway oauth client rotate ${clientId} --print-once\` to issue a new secret, or revoke it first.`
+        );
+      }
+      const warnings: string[] = [];
+      // Soft warning (not a hard failure so local testing stays possible): a
+      // localhost redirect paired with a public connector is usually a mistake.
+      if (redirectLooksLocalhost(redirectUri) && publicUrlIsRemote()) {
+        warnings.push(
+          "The redirect URI is localhost but a public URL is configured; remote connectors usually need the provider's public callback URL."
+        );
+      }
       const secret = generateSecret();
       clients.push({
         client_id: clientId,
+        // Only the scrypt hash is persisted; the plaintext secret is never written.
         client_secret_hash: hashSecret(secret),
         allowed_redirect_uris: [redirectUri],
         scopes: ["mcp"],
       });
       writeMutableGatewayConfig(config);
+      const printOnce = args.includes("--print-once");
+      const urls = cliConnectorUrls();
       printJsonLine({
         ok: true,
         client_id: clientId,
-        ...(args.includes("--print-once") ? { client_secret: secret } : {}),
-        oauth: {
-          issuer: localBaseUrlForPrint(),
-          authorization_url: `${localBaseUrlForPrint()}/oauth/authorize`,
-          token_url: `${localBaseUrlForPrint()}/oauth/token`,
+        redirect_uri: redirectUri,
+        // The plaintext secret is emitted ONLY on the explicit copy-once flag,
+        // and only here at creation time; it is never stored or reprinted.
+        ...(printOnce ? { client_secret: secret, client_secret_copy_once: true } : {}),
+        connector: {
+          mcp_url: urls.mcpUrl,
+          auth_mode: "oauth",
+          authorization_url: urls.authorizationUrl,
+          token_url: urls.tokenUrl,
+          client_id: clientId,
         },
-        note: args.includes("--print-once")
-          ? "client_secret is shown once; it is stored only as a hash."
-          : "client secret generated and stored only as a hash; rerun rotate --print-once if needed.",
+        ...(warnings.length ? { warnings } : {}),
+        note: printOnce
+          ? "client_secret is shown once and stored only as a hash. Copy it into the connector UI now; it cannot be recovered later. " +
+            OAUTH_RESTART_NOTE
+          : "client secret generated and stored only as a hash. Re-run with --print-once (or `oauth client rotate --print-once`) to reveal a secret. " +
+            OAUTH_RESTART_NOTE,
       });
       return;
     }
     if (action === "list") {
+      // List shows redacted metadata only: never a secret or a secret hash.
       printJsonLine({
         ok: true,
         clients: clients.map(client => ({
           client_id: client.client_id,
           redirect_uris: client.allowed_redirect_uris ?? [],
+          scopes: client.scopes ?? ["mcp"],
           secret_configured: Boolean(client.client_secret_hash),
         })),
       });
@@ -13066,11 +13161,24 @@ function runOAuthCommand(args: string[]): void {
       const secret = generateSecret();
       client.client_secret_hash = hashSecret(secret);
       writeMutableGatewayConfig(config);
+      const printOnce = args.includes("--print-once");
       printJsonLine({
         ok: true,
         client_id: clientId,
-        ...(args.includes("--print-once") ? { client_secret: secret } : {}),
-        note: "Future OAuth exchanges use the rotated secret; already-issued opaque access tokens expire by token TTL or server restart.",
+        // Copy-once: the NEW plaintext secret is emitted only with --print-once.
+        // The stored client metadata remains redacted (hash only, never printed).
+        ...(printOnce ? { client_secret: secret, client_secret_copy_once: true } : {}),
+        client: {
+          client_id: client.client_id,
+          redirect_uris: client.allowed_redirect_uris ?? [],
+          secret_configured: true,
+        },
+        note:
+          (printOnce
+            ? "New client_secret is shown once; copy it into the connector UI now. "
+            : "New secret generated and stored only as a hash; re-run with --print-once to reveal it. ") +
+          "Future OAuth exchanges use the rotated secret; already-issued opaque access tokens expire by token TTL or server restart. " +
+          OAUTH_RESTART_NOTE,
       });
       return;
     }
@@ -13081,7 +13189,9 @@ function runOAuthCommand(args: string[]): void {
       printJsonLine({
         ok: true,
         client_id: clientId,
-        note: "Future OAuth exchanges are revoked; already-issued opaque access tokens expire by token TTL or server restart.",
+        note:
+          "Future OAuth exchanges are revoked; already-issued opaque access tokens expire by token TTL or server restart. " +
+          OAUTH_RESTART_NOTE,
       });
       return;
     }
@@ -13099,10 +13209,12 @@ function runOAuthCommand(args: string[]): void {
       printJsonLine({
         ok: true,
         shared_secret_enabled: true,
-        ...(args.includes("--print-once") ? { shared_secret: secret } : {}),
-        note: args.includes("--print-once")
-          ? "shared_secret is shown once; it is stored only as a hash."
-          : "shared secret generated and stored only as a hash.",
+        ...(args.includes("--print-once") ? { shared_secret: secret, shared_secret_copy_once: true } : {}),
+        note:
+          (args.includes("--print-once")
+            ? "shared_secret is shown once; it is stored only as a hash. "
+            : "shared secret generated and stored only as a hash; re-run with --print-once to reveal it. ") +
+          OAUTH_RESTART_NOTE,
       });
       return;
     }
@@ -13116,6 +13228,27 @@ function runOAuthCommand(args: string[]): void {
     }
   }
   throw new Error("Usage: llm-cli-gateway oauth client|shared-secret ...");
+}
+
+/**
+ * `connector setup`: emit a copy-safe remote connector setup packet (JSON to
+ * stdout) plus a human summary (stderr). Reuses the doctor remote_http_oauth
+ * readiness so its stage/URLs/next_actions match `doctor --json`. Never prints
+ * secrets; the deprecated no-auth URL appears only with --include-legacy-no-auth.
+ */
+function runConnectorCommand(args: string[]): void {
+  const [action] = args;
+  if (action !== "setup") {
+    throw new Error("Usage: llm-cli-gateway connector setup [--client-id <id>] [--include-legacy-no-auth]");
+  }
+  const options: ConnectorSetupOptions = {
+    clientId: argValue(args, "--client-id"),
+    includeLegacyNoAuth: args.includes("--include-legacy-no-auth"),
+  };
+  const packet = gatherConnectorSetupPacket(options);
+  // Human summary to stderr so stdout stays a clean, pipeable JSON packet.
+  process.stderr.write(renderConnectorSetupSummary(packet) + "\n");
+  printJsonLine(packet);
 }
 
 function runWorkspaceCommand(args: string[]): void {
@@ -13185,7 +13318,15 @@ async function main() {
         "Usage:",
         "  llm-cli-gateway [doctor --json|contracts --json|--transport=http|--version]",
         "  llm-cli-gateway oauth client add <id> --redirect-uri <uri> [--print-once]",
+        "  llm-cli-gateway connector setup [--client-id <id>] [--include-legacy-no-auth]",
         "  llm-cli-gateway workspace list|add|create",
+        "",
+        "Remote connector (recommended OAuth path):",
+        "  1. Set LLM_GATEWAY_PUBLIC_URL to a public https URL (tunnel/reverse proxy).",
+        "  2. oauth client add <id> --redirect-uri <connector-callback> --print-once",
+        "  3. workspace add <alias> <absolute-repo-path> --default",
+        "  4. connector setup      # copy-safe fields to paste into the connector UI",
+        "  Inspect readiness first: doctor --json  ->  remote_http_oauth.stage",
         "",
         "Doctor:",
         "  doctor --json                     # environment, providers, declared contracts",
@@ -13211,6 +13352,10 @@ async function main() {
   }
   if (args[0] === "oauth") {
     runOAuthCommand(args.slice(1));
+    return;
+  }
+  if (args[0] === "connector") {
+    runConnectorCommand(args.slice(1));
     return;
   }
   if (args[0] === "workspace") {

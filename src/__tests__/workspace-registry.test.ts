@@ -12,7 +12,9 @@ import { FileSessionManager } from "../session-manager.js";
 import type { PersistenceConfig } from "../config.js";
 import type { WorkspaceRegistry } from "../workspace-registry.js";
 import {
+  describeWorkspace,
   loadWorkspaceRegistry,
+  remoteSafeWorkspaceSummary,
   resolveWorkspaceForProvider,
   validatePathInsideWorkspace,
 } from "../workspace-registry.js";
@@ -450,5 +452,72 @@ describe("workspace registry", () => {
     );
     expect(withScope.isError).toBe(true);
     expect(withScope.content[0]?.text).not.toContain("requires LLM_GATEWAY_WORKSPACE_ADMIN=1");
+  });
+
+  describe("remoteSafeWorkspaceSummary", () => {
+    function writeRegistry(): void {
+      writeFileSync(
+        configPath,
+        [
+          "[workspaces]",
+          'default = "gateway"',
+          "",
+          "[[workspaces.repos]]",
+          'alias = "gateway"',
+          `path = "${repoRoot}"`,
+          'providers = ["claude", "codex"]',
+          "allow_worktree = true",
+          "",
+        ].join("\n")
+      );
+    }
+
+    it("exposes default alias, aliases, and readiness without local paths", () => {
+      writeRegistry();
+      const registry = loadWorkspaceRegistry(undefined, configPath);
+      const summary = remoteSafeWorkspaceSummary(registry);
+
+      expect(summary.ready).toBe(true);
+      expect(summary.default).toBe("gateway");
+      expect(summary.aliases).toEqual(["gateway"]);
+      expect(summary.repo_count).toBe(1);
+
+      // The remote-safe summary must NOT leak the local absolute repo path.
+      const serialized = JSON.stringify(summary);
+      expect(serialized).not.toContain(repoRoot);
+      expect(serialized).not.toContain(tempDir);
+      expect(Object.keys(summary)).not.toContain("path");
+    });
+
+    it("is not ready when no default and no registered repos exist", () => {
+      writeFileSync(
+        configPath,
+        [
+          "[workspaces]",
+          "",
+          "[[workspaces.allowed_roots]]",
+          `path = "${repoRoot}"`,
+          "allow_create_directories = true",
+          "",
+        ].join("\n")
+      );
+      const registry = loadWorkspaceRegistry(undefined, configPath);
+      const summary = remoteSafeWorkspaceSummary(registry);
+      expect(summary.ready).toBe(false);
+      expect(summary.default).toBeNull();
+      expect(summary.aliases).toEqual([]);
+      expect(summary.allowed_root_count).toBe(1);
+    });
+
+    it("admin describeWorkspace still exposes local paths for operator output", () => {
+      writeRegistry();
+      const registry = loadWorkspaceRegistry(undefined, configPath);
+      // The admin projection is intentionally different: it DOES include the path
+      // so local `workspace list` keeps working. This guards against a refactor
+      // that accidentally routes remote output through describeWorkspace.
+      const admin = describeWorkspace(registry.repos[0]);
+      expect(admin.path).toBe(repoRoot);
+      expect(JSON.stringify(admin)).toContain(repoRoot);
+    });
   });
 });

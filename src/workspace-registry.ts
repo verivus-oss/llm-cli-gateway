@@ -507,6 +507,43 @@ export function createTempWorkspaceConfig(contents: string): string {
   return configPath;
 }
 
+/**
+ * Remote-client-safe view of the workspace registry for setup/diagnostics
+ * surfaces. Reports only what a remote connector needs to select a workspace
+ * (default alias, registered aliases, counts, readiness) and DELIBERATELY omits
+ * local absolute paths, git branch/dirty state, and per-repo provider policy.
+ *
+ * This is separate from `describeWorkspace`, which intentionally exposes local
+ * paths for the local, operator-administrative `workspace list` output. Remote
+ * setup output must use THIS summary so a connector packet never leaks local
+ * filesystem layout.
+ *
+ * `ready` is true when a remote provider call can resolve a workspace without
+ * further operator action: either a `[workspaces].default` is set, or at least
+ * one repo is registered (so a connector can pass a registered alias). Allowed
+ * roots alone do not make it ready, since a repo must be created/registered
+ * first.
+ */
+export interface RemoteSafeWorkspaceSummary {
+  ready: boolean;
+  default: string | null;
+  aliases: string[];
+  repo_count: number;
+  allowed_root_count: number;
+}
+
+export function remoteSafeWorkspaceSummary(
+  registry: WorkspaceRegistry
+): RemoteSafeWorkspaceSummary {
+  return {
+    ready: registry.defaultAlias !== null || registry.repos.length > 0,
+    default: registry.defaultAlias,
+    aliases: registry.repos.map(repo => repo.alias),
+    repo_count: registry.repos.length,
+    allowed_root_count: registry.allowedRoots.length,
+  };
+}
+
 export function describeWorkspace(repo: WorkspaceRepo): Record<string, unknown> {
   let branch: string | null = null;
   let dirty = false;

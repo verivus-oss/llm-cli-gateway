@@ -21,14 +21,21 @@ import {
 import { CLAUDE_MCP_SERVER_NAMES } from "./claude-mcp-config.js";
 import type { FlightRecorderQuery } from "./flight-recorder.js";
 import {
+  diagnoseRemoteOAuthConfig,
   enabledApiProviders,
   loadCacheAwarenessConfig,
   loadProvidersConfig,
-  loadRemoteOAuthConfig,
   type CacheAwarenessConfig,
   type ProvidersConfig,
+  type RemoteOAuthConfigDiagnostics,
 } from "./config.js";
-import { loadWorkspaceRegistry } from "./workspace-registry.js";
+import type { AuthConfig } from "./auth.js";
+import {
+  loadWorkspaceRegistry,
+  remoteSafeWorkspaceSummary,
+  type RemoteSafeWorkspaceSummary,
+} from "./workspace-registry.js";
+import { buildRemoteConnectorUrls, resolveConfiguredRemoteOrigin } from "./remote-url.js";
 import { computeGlobalCacheStats } from "./cache-stats.js";
 import { FlightRecorder, resolveFlightRecorderDbPath } from "./flight-recorder.js";
 import { buildUpstreamContractReport } from "./upstream-contracts.js";
@@ -376,6 +383,14 @@ export interface DoctorReport {
     }
   >;
   endpoint_exposure: EndpointExposureReport;
+  /**
+   * Stable readiness projection for the preferred remote connector path
+   * (public HTTPS URL + /mcp + OAuth + registered/default workspace). Combines
+   * endpoint-exposure, OAuth config, OAuth metadata URLs, client registration,
+   * and workspace readiness into an ordered decision tree so an operator or
+   * setup assistant sees the single next blocking action. Contains no secrets.
+   */
+  remote_http_oauth: RemoteHttpOAuthReadiness;
   client_config: {
     claude_desktop_config_present: boolean;
     codex_config_present: boolean;
@@ -407,6 +422,260 @@ export interface DoctorReport {
     probe_report?: ReturnType<typeof import("./upstream-contracts.js").buildUpstreamContractReport>;
   };
   next_actions: string[];
+}
+
+/**
+ * Stable, ordered readiness stages for the remote HTTP + OAuth connector path.
+ * The order encodes the decision tree: the first failing gate is the reported
+ * stage, so the operator always sees the single next blocking action. These
+ * values are a stable contract consumed by the setup UI, setup assistants, the
+ * installer, docs, and tests; do not renumber or rename them.
+ */
+export type RemoteHttpOAuthStage =
+  | "not_started"
+  | "missing_public_url"
+  | "endpoint_unreachable"
+  | "oauth_disabled"
+  | "unsafe_oauth_config"
+  | "missing_oauth_client"
+  | "missing_workspace"
+  | "ready";
+
+export const REMOTE_HTTP_OAUTH_STAGES: readonly RemoteHttpOAuthStage[] = [
+  "not_started",
+  "missing_public_url",
+  "endpoint_unreachable",
+  "oauth_disabled",
+  "unsafe_oauth_config",
+  "missing_oauth_client",
+  "missing_workspace",
+  "ready",
+] as const;
+
+export interface RemoteHttpOAuthReadiness {
+  ready: boolean;
+  stage: RemoteHttpOAuthStage;
+  /** Redacted public URL (LLM_GATEWAY_PUBLIC_URL), or null when unset. */
+  public_url: string | null;
+  /** Full MCP endpoint URL a connector talks to, or null when no public URL. */
+  mcp_url: string | null;
+  /** Effective authentication mode a remote connector would use. */
+  auth_mode: "oauth" | "bearer_token" | "none";
+  oauth: {
+    enabled: boolean;
+    /** OAuth issuer origin (redacted), or null when OAuth is off / no URL. */
+    issuer: string | null;
+    authorization_url: string | null;
+    token_url: string | null;
+    registration_policy: string;
+    clients_configured: number;
+    consent_required: boolean;
+  };
+  workspace: {
+    ready: boolean;
+    default: string | null;
+    aliases: string[];
+  };
+  /** Deterministic, secret-free next actions for the current stage. */
+  next_actions: string[];
+}
+
+/**
+ * Inputs for the pure readiness builder. Kept normalized (no fs/env access) so
+ * the decision tree is directly unit-testable and so both doctor and the
+ * connector setup command feed it identical data.
+ */
+export interface RemoteHttpOAuthReadinessInput {
+  oauthDiag: Pick<RemoteOAuthConfigDiagnostics, "status" | "config" | "issues">;
+  workspace: RemoteSafeWorkspaceSummary;
+  auth: AuthConfig;
+  transport: "stdio" | "http";
+  /** Redacted public URL. */
+  publicUrl: string | null;
+  endpoint: EndpointExposureReport;
+  mcpPath: string;
+}
+
+/**
+ * Pure decision tree for remote HTTP + OAuth readiness. All URL construction is
+ * delegated to remote-url.ts so doctor, the setup packet, the setup UI, and the
+ * runtime metadata endpoints cannot drift. Never emits secret material.
+ */
+export function buildRemoteHttpOAuthReadiness(
+  input: RemoteHttpOAuthReadinessInput
+): RemoteHttpOAuthReadiness {
+  const { config: oauth, status, issues } = input.oauthDiag;
+  const e = input.endpoint;
+
+  const baseOrigin = resolveConfiguredRemoteOrigin({
+    issuer: oauth.issuer === "auto" ? null : redactDiagnosticUrl(oauth.issuer),
+    publicUrl: input.publicUrl,
+  });
+  const urls = buildRemoteConnectorUrls({
+    baseOrigin,
+    mcpPath: input.mcpPath,
+    oauthEnabled: oauth.enabled,
+  });
+
+  // A usable public endpoint means a configured, HTTPS, publicly-routed URL.
+  const hasValidPublicHttpsUrl =
+    e.public_url_configured &&
+    e.https_configured &&
+    (e.mode === "tunnel" || e.mode === "byo_reverse_proxy");
+  const oauthNotEnabled = status === "absent" || status === "disabled";
+  const oauthUnsafeForRemote =
+    status === "malformed" ||
+    (oauth.enabled && (oauth.allowPublicClients || oauth.registrationPolicy === "open_dev"));
+
+  let stage: RemoteHttpOAuthStage;
+  if (!e.public_url_configured && input.transport !== "http" && status === "absent") {
+    stage = "not_started";
+  } else if (!hasValidPublicHttpsUrl) {
+    stage = "missing_public_url";
+  } else if (e.reachable_from_web === "unreachable") {
+    stage = "endpoint_unreachable";
+  } else if (oauthNotEnabled) {
+    stage = "oauth_disabled";
+  } else if (oauthUnsafeForRemote) {
+    stage = "unsafe_oauth_config";
+  } else if (oauth.registrationPolicy === "static_clients" && oauth.clients.length === 0) {
+    stage = "missing_oauth_client";
+  } else if (!input.workspace.ready) {
+    stage = "missing_workspace";
+  } else {
+    stage = "ready";
+  }
+
+  const authMode: RemoteHttpOAuthReadiness["auth_mode"] = oauth.enabled
+    ? "oauth"
+    : input.auth.required && input.auth.tokenConfigured
+      ? "bearer_token"
+      : "none";
+
+  return {
+    ready: stage === "ready",
+    stage,
+    public_url: input.publicUrl,
+    mcp_url: urls.mcpUrl,
+    auth_mode: authMode,
+    oauth: {
+      enabled: oauth.enabled,
+      issuer: urls.issuer,
+      authorization_url: urls.authorizationUrl,
+      token_url: urls.tokenUrl,
+      registration_policy: oauth.registrationPolicy,
+      clients_configured: oauth.clients.length,
+      consent_required: oauth.requireConsent,
+    },
+    workspace: {
+      ready: input.workspace.ready,
+      default: input.workspace.default,
+      aliases: input.workspace.aliases,
+    },
+    next_actions: remoteReadinessNextActions(stage, { oauth, status, issues, workspace: input.workspace }),
+  };
+}
+
+/**
+ * Deterministic, secret-free next actions keyed by readiness stage. Commands use
+ * angle-bracket placeholders (never real values) and never echo secrets.
+ */
+function remoteReadinessNextActions(
+  stage: RemoteHttpOAuthStage,
+  ctx: {
+    oauth: RemoteOAuthConfigDiagnostics["config"];
+    status: RemoteOAuthConfigDiagnostics["status"];
+    issues: string[];
+    workspace: RemoteSafeWorkspaceSummary;
+  }
+): string[] {
+  switch (stage) {
+    case "not_started":
+      return [
+        "Remote HTTP + OAuth setup has not started. Start an HTTPS tunnel or reverse proxy and set LLM_GATEWAY_PUBLIC_URL to the public https URL.",
+        "Then register an OAuth client: llm-cli-gateway oauth client add <client-id> --redirect-uri <connector-callback> --print-once",
+      ];
+    case "missing_public_url":
+      return [
+        "Set LLM_GATEWAY_PUBLIC_URL to a public https URL (tunnel or reverse proxy), not localhost or a LAN address.",
+        "Re-run: llm-cli-gateway doctor --json",
+      ];
+    case "endpoint_unreachable":
+      return [
+        "The public MCP URL is configured but not reachable from the web. Fix tunnel/reverse-proxy routing, then re-run: llm-cli-gateway doctor --json",
+      ];
+    case "oauth_disabled":
+      return [
+        "OAuth is the recommended remote connector authentication mode. Enable it by registering a client: llm-cli-gateway oauth client add <client-id> --redirect-uri <connector-callback> --print-once",
+      ];
+    case "unsafe_oauth_config": {
+      const reasons: string[] = [];
+      if (ctx.status === "malformed") {
+        reasons.push(
+          ...(ctx.issues.length
+            ? ctx.issues
+            : ["The [http.oauth] config is invalid; fix it and re-run doctor --json."])
+        );
+      } else {
+        if (ctx.oauth.allowPublicClients) {
+          reasons.push(
+            "OAuth allow_public_clients is enabled on a public endpoint. Use confidential clients: registration_policy=static_clients with a client secret."
+          );
+        }
+        if (ctx.oauth.registrationPolicy === "open_dev") {
+          reasons.push(
+            "OAuth registration_policy=open_dev is unsafe on a public endpoint. Switch to static_clients with confidential client secrets."
+          );
+        }
+      }
+      reasons.push("Re-run: llm-cli-gateway doctor --json");
+      return reasons;
+    }
+    case "missing_oauth_client":
+      return [
+        "OAuth is enabled but no client is registered. Add one: llm-cli-gateway oauth client add <client-id> --redirect-uri <connector-callback> --print-once",
+      ];
+    case "missing_workspace":
+      return [
+        "No workspace is available for remote provider execution. Register a repo and set it as the default: add a [[workspaces.repos]] entry with [workspaces].default in ~/.llm-cli-gateway/config.toml, or run `llm-cli-gateway workspace add <alias> <absolute-repo-path> --default` when an allowed root is configured.",
+        "Remote clients then select the workspace by alias; local absolute paths are never accepted from remote clients.",
+      ];
+    case "ready":
+      return [
+        ctx.workspace.default
+          ? `Remote connector is ready. Remote provider calls use the default workspace "${ctx.workspace.default}" unless a registered alias is supplied.`
+          : "Remote connector is ready. Remote provider calls must supply a registered workspace alias; set a default with `llm-cli-gateway workspace add <alias> <path> --default` to make one implicit.",
+        "Paste only copy-safe connector fields (MCP URL, authorization URL, token URL, client id) into the remote connector UI.",
+      ];
+    default:
+      return [];
+  }
+}
+
+/**
+ * Assemble readiness inputs from the live environment/config and run the pure
+ * builder. Reused by the connector setup command so its readiness/next_actions
+ * are byte-identical to doctor's.
+ */
+export function gatherRemoteHttpOAuthReadiness(
+  env: NodeJS.ProcessEnv = process.env
+): RemoteHttpOAuthReadiness {
+  const oauthDiag = diagnoseRemoteOAuthConfig(undefined, env);
+  const workspace = remoteSafeWorkspaceSummary(loadWorkspaceRegistry());
+  const auth = loadAuthConfig(env);
+  const transport = defaultTransport(env);
+  const publicUrl = redactDiagnosticUrl(env.LLM_GATEWAY_PUBLIC_URL || null);
+  const endpoint = createEndpointExposureReport(env, publicUrl);
+  const mcpPath = env.LLM_GATEWAY_HTTP_PATH || "/mcp";
+  return buildRemoteHttpOAuthReadiness({
+    oauthDiag,
+    workspace,
+    auth,
+    transport,
+    publicUrl,
+    endpoint,
+    mcpPath,
+  });
 }
 
 function packageVersion(): string {
@@ -647,7 +916,8 @@ export function createDoctorReport(
     : { env: envOrOptions };
   const env: NodeJS.ProcessEnv = opts.env ?? process.env;
   const auth = loadAuthConfig(env);
-  const oauth = loadRemoteOAuthConfig(undefined, env);
+  const oauthDiag = diagnoseRemoteOAuthConfig(undefined, env);
+  const oauth = oauthDiag.config;
   const workspaceRegistry = loadWorkspaceRegistry();
   const transport = defaultTransport(env);
   const rawPublicUrl = env.LLM_GATEWAY_PUBLIC_URL || null;
@@ -732,6 +1002,15 @@ export function createDoctorReport(
       CLI_TYPES.map(provider => [provider, doctorProviderStatus(providerStatuses[provider])])
     ) as DoctorReport["providers"],
     endpoint_exposure: endpointExposure,
+    remote_http_oauth: buildRemoteHttpOAuthReadiness({
+      oauthDiag,
+      workspace: remoteSafeWorkspaceSummary(workspaceRegistry),
+      auth,
+      transport,
+      publicUrl,
+      endpoint: endpointExposure,
+      mcpPath: env.LLM_GATEWAY_HTTP_PATH || "/mcp",
+    }),
     client_config: clientConfigStatus(),
     cache_awareness: buildCacheAwarenessReport(opts),
     provider_capabilities: buildProviderCapabilitySummary(providerStatuses),
