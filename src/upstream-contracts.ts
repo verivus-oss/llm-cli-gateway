@@ -269,8 +269,9 @@ export const ACP_ENTRYPOINT_CONTRACTS: Record<CliType, AcpEntrypointContract> = 
     status: "native",
     executable: "vibe-acp",
     entrypointArgs: [],
-    targetVersion: "vibe 2.17.1",
+    targetVersion: "vibe 2.18.3",
     probeArgs: [["--version"], ["--help"]],
+    // phase-5/8: replace limited-support label with discovered capability fact
     evidence:
       "Native ACP executable vibe-acp; manual initialize + session/new smoke passed. First runtime pilot.",
     docsRef: "docs/plans/first-class-acp-gateway-extension.dag.toml#provider_matrix.mistral",
@@ -281,17 +282,19 @@ export const ACP_ENTRYPOINT_CONTRACTS: Record<CliType, AcpEntrypointContract> = 
     status: "native",
     executable: "grok",
     entrypointArgs: ["agent", "stdio"],
-    targetVersion: "grok 0.2.73 (9ff14c43bb)",
+    targetVersion: "grok 0.2.77 (44e77bec3a)",
     // `grok agent stdio --help` is a safe help probe; bare `grok agent stdio`
     // starts the live ACP server and is intentionally NOT probed here.
     probeArgs: [["agent", "stdio", "--help"]],
+    // phase-5/8: replace limited-support label with discovered capability fact
     evidence:
-      "Native ACP via `grok agent stdio`; initialize + session/new smoke passed with isolated leader socket. Second runtime pilot. Entrypoint re-probed clean at 0.2.73.",
+      "Native ACP via `grok agent stdio`; initialize + session/new smoke passed with isolated leader socket. Second runtime pilot. Entrypoint re-probed clean at 0.2.77.",
     docsRef: "docs/plans/first-class-acp-gateway-extension.dag.toml#provider_matrix.grok",
   },
   codex: {
     cli: "codex",
     displayName: "OpenAI Codex CLI",
+    // phase-5/8: replace limited-support label with discovered capability fact
     status: "adapter_mediated_deferred",
     executable: "codex",
     entrypointArgs: [],
@@ -305,26 +308,28 @@ export const ACP_ENTRYPOINT_CONTRACTS: Record<CliType, AcpEntrypointContract> = 
   claude: {
     cli: "claude",
     displayName: "Anthropic Claude Code",
+    // phase-5/8: replace limited-support label with discovered capability fact
     status: "adapter_mediated_deferred",
     executable: "claude",
     entrypointArgs: [],
-    targetVersion: "claude 2.1.195",
+    targetVersion: "claude 2.1.198",
     probeArgs: [],
     adapterCandidates: ["Claude Agent SDK ACP adapter"],
     evidence:
-      "No native Claude Code CLI ACP entrypoint at claude 2.1.195. Adapter ownership/permission bridging unresolved; deferred.",
+      "No native Claude Code CLI ACP entrypoint at claude 2.1.198. Adapter ownership/permission bridging unresolved; deferred.",
     docsRef: "docs/plans/first-class-acp-gateway-extension.dag.toml#provider_matrix.claude",
   },
   gemini: {
     cli: "gemini",
     displayName: "Google Antigravity",
+    // phase-5/8: replace limited-support label with discovered capability fact
     status: "absent_watchlist",
     executable: "agy",
     entrypointArgs: [],
-    targetVersion: "agy 1.0.13",
+    targetVersion: "agy 1.0.14",
     probeArgs: [],
     evidence:
-      "agy 1.0.13 has no ACP flag or subcommand. Legacy Gemini CLI ACP evidence does not transfer. Watchlist item.",
+      "agy 1.0.14 has no ACP flag or subcommand. Legacy Gemini CLI ACP evidence does not transfer. Watchlist item.",
     docsRef: "docs/plans/first-class-acp-gateway-extension.dag.toml#provider_matrix.gemini",
   },
   devin: {
@@ -337,6 +342,7 @@ export const ACP_ENTRYPOINT_CONTRACTS: Record<CliType, AcpEntrypointContract> = 
     // `devin --version` is the safe probe; bare `devin acp` starts the live ACP
     // server over stdio and is intentionally NOT probed here.
     probeArgs: [["--version"]],
+    // phase-5/8: replace limited-support label with discovered capability fact
     evidence:
       'Native ACP entrypoint `devin acp` (stdio JSON-RPC). Slice D1 manual initialize + session/new smoke passed (protocolVersion 1, agent "Affogato", session created). Third native runtime pilot; routing stays config-gated.',
     docsRef: "docs/plans/first-class-acp-gateway-extension.dag.toml#provider_matrix.devin",
@@ -349,6 +355,7 @@ export const ACP_ENTRYPOINT_CONTRACTS: Record<CliType, AcpEntrypointContract> = 
     entrypointArgs: ["acp"],
     targetVersion: "cursor-agent 2026.06.29-2ad2186",
     probeArgs: [["acp", "--help"]],
+    // phase-5/8: replace limited-support label with discovered capability fact
     evidence:
       "Native hidden ACP entrypoint `cursor-agent acp` (stdio JSON-RPC). `cursor-agent acp --help` was verified locally; manual initialize + session/new smoke passed locally (protocolVersion 1, session created; no agentInfo returned). Runtime routing stays config-gated.",
     docsRef: "docs/plans/first-class-acp-gateway-extension.dag.toml#provider_matrix.cursor",
@@ -679,7 +686,7 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         description: 'Restrict the available built-in tool set ("" disables all)',
       },
     },
-    // Claude Code 2.1.195 --help surface the gateway deliberately does not
+    // Claude Code 2.1.198 --help surface the gateway deliberately does not
     // emit. Long-form aliases of declared short flags (--print for -p),
     // interactive/IDE-only switches, background-agent launchers, and flags
     // superseded by gateway parameters (--dangerously-skip-permissions maps to
@@ -689,10 +696,10 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       "--allow-dangerously-skip-permissions",
       "--allowed", // alias of --allowed-tools
       "--ax-screen-reader",
-      "--background", // 2.1.195: start the session as a background agent
+      "--background", // 2.1.198: start the session as a background agent
       "--bare",
       "--betas",
-      "--bg", // 2.1.195: short form of --background
+      "--bg", // 2.1.198: short form of --background
       "--brief",
       "--chrome",
       "--dangerously-skip-permissions",
@@ -824,7 +831,7 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       {
         id: "claude-background-acknowledged-not-emitted",
         description:
-          "Claude 2.1.195 advertises --bg/--background (background agent), but the gateway acknowledges them without emitting; caller argv is rejected",
+          "Claude 2.1.198 advertises --bg/--background (background agent), but the gateway acknowledges them without emitting; caller argv is rejected",
         args: ["-p", "hello", "--background"],
         expect: "fail",
       },
@@ -1475,7 +1482,7 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       "skipTrust",
       // Auto-approve-all ergonomic alias (equivalent to approvalMode "yolo")
       "yolo",
-      // Antigravity 1.0.13 wired project-selection flags
+      // Antigravity 1.0.14 wired project-selection flags
       "project",
       "newProject",
     ],
@@ -1493,7 +1500,7 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       "--conversation": { arity: "one", description: "Resume a previous conversation by ID" },
       "--continue": { arity: "none", description: "Continue the most recent conversation" },
       "-c": { arity: "none", description: "Short alias for --continue" },
-      // Antigravity 1.0.13: project selection for the CLI session (now wired).
+      // Antigravity 1.0.14: project selection for the CLI session (now wired).
       "--project": { arity: "one", description: "Antigravity project ID for this session" },
       "--new-project": {
         arity: "none",
@@ -1501,7 +1508,7 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       },
     },
     // Antigravity CLI long flags the gateway deliberately does not emit, as
-    // advertised by `agy --help` on 1.0.13. Probe acknowledgements only, never
+    // advertised by `agy --help` on 1.0.14. Probe acknowledgements only, never
     // an argv allowlist. (`-i` is a short alias of --prompt-interactive and
     // `--version` is a top-level command not listed in --help; neither is
     // parsed by the long-flag probe, so both were dropped to keep the probe
@@ -1547,13 +1554,13 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       },
       {
         id: "gemini-project-wired",
-        description: "Antigravity 1.0.13: --project <ID> is wired",
+        description: "Antigravity 1.0.14: --project <ID> is wired",
         args: ["--print", "hello", "--project", "proj-123"],
         expect: "pass",
       },
       {
         id: "gemini-new-project-wired",
-        description: "Antigravity 1.0.13: --new-project is wired",
+        description: "Antigravity 1.0.14: --new-project is wired",
         args: ["--print", "hello", "--new-project"],
         expect: "pass",
       },
@@ -1742,7 +1749,7 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
           { exposure: "not_exposed" }
         ),
         ssh: subcommand(["ssh"], "Manage Grok SSH integration.", "network", ["--leader-socket"], {
-          // Grok 0.2.73: `grok ssh --help` inherits the full global agent flag
+          // Grok 0.2.77: `grok ssh --help` inherits the full global agent flag
           // surface (it launches an agent session over SSH). The gateway never
           // emits `grok ssh`, so acknowledge the inherited flags to keep the
           // subcommand drift probe quiet without widening any argv allowlist.
@@ -1828,7 +1835,7 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       GROK_DEBUG_HELP_FLAGS
     ),
     maxPositionals: 0,
-    // Grok 0.2.73: `--fork-session`, `--json-schema`, and `--worktree-ref` are
+    // Grok 0.2.77: `--fork-session`, `--json-schema`, and `--worktree-ref` are
     // now wired through the request path (see flags + prepareGrokRequest), so
     // they live in the argv allowlist, not here. `--session-id` is advertised
     // but intentionally NOT wired: the gateway owns grok session-id lifecycle
@@ -1886,7 +1893,7 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       "restoreCode",
       "leaderSocket",
       "nativeWorktree",
-      // Grok 0.2.73 wired parity flags
+      // Grok 0.2.77 wired parity flags
       "worktreeRef",
       "forkSession",
       "jsonSchema",
@@ -1997,19 +2004,19 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         arity: "optional",
         description: "Start the session in a new git worktree, optionally named",
       },
-      // Grok 0.2.73: branch/tag/commit to base the worktree on (with --worktree;
+      // Grok 0.2.77: branch/tag/commit to base the worktree on (with --worktree;
       // defaults to current HEAD). Gateway emits it only alongside nativeWorktree.
       "--worktree-ref": {
         arity: "one",
         description: "Git ref to base the worktree on (requires --worktree)",
       },
-      // Grok 0.2.73: when resuming, create a new session ID instead of reusing
+      // Grok 0.2.77: when resuming, create a new session ID instead of reusing
       // the original (mirrors Claude --fork-session).
       "--fork-session": {
         arity: "none",
         description: "Fork the resumed session into a new session ID",
       },
-      // Grok 0.2.73: constrain output to a JSON Schema (implies --output-format
+      // Grok 0.2.77: constrain output to a JSON Schema (implies --output-format
       // json). Mirrors Claude/Codex structured-output parity.
       "--json-schema": {
         arity: "one",
@@ -2195,7 +2202,7 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       {
         id: "grok-json-schema-wired",
         description:
-          "Grok 0.2.73: --json-schema <SCHEMA> is wired (structured output, implies json)",
+          "Grok 0.2.77: --json-schema <SCHEMA> is wired (structured output, implies json)",
         args: [
           "-p",
           "hello",
@@ -2206,20 +2213,20 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       },
       {
         id: "grok-fork-session-wired",
-        description: "Grok 0.2.73: --fork-session is wired (fork resumed session into a new ID)",
+        description: "Grok 0.2.77: --fork-session is wired (fork resumed session into a new ID)",
         args: ["-p", "hello", "--resume", "sess-1", "--fork-session"],
         expect: "pass",
       },
       {
         id: "grok-worktree-ref-wired",
-        description: "Grok 0.2.73: --worktree-ref <REF> is wired (with --worktree)",
+        description: "Grok 0.2.77: --worktree-ref <REF> is wired (with --worktree)",
         args: ["-p", "hello", "--worktree", "--worktree-ref", "main"],
         expect: "pass",
       },
       {
         id: "grok-session-id-acknowledged-not-emitted",
         description:
-          "Grok 0.2.73 advertises --session-id, but the gateway owns session-id lifecycle and does not emit it; caller argv is rejected",
+          "Grok 0.2.77 advertises --session-id, but the gateway owns session-id lifecycle and does not emit it; caller argv is rejected",
         args: ["-p", "hello", "--session-id", "11111111-1111-1111-1111-111111111111"],
         expect: "fail",
       },
@@ -2435,7 +2442,7 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       {
         id: "mistral-current-help-surface",
         description:
-          "Vibe 2.17.1 request-time help surface: --prompt, -v, --version, --setup accepted",
+          "Vibe 2.18.3 request-time help surface: --prompt, -v, --version, --setup accepted",
         args: ["--prompt", "hello", "--agent", "auto-approve", "-v", "--version", "--setup"],
         env: { VIBE_ACTIVE_MODEL: "mistral-medium-3.5" },
         expect: "pass",
@@ -2443,7 +2450,7 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       {
         id: "mistral-yolo-shortcut-rejected",
         description:
-          "Vibe 2.17.1 advertises --yolo as a shortcut, but the gateway keeps using explicit --agent auto-approve",
+          "Vibe 2.18.3 advertises --yolo as a shortcut, but the gateway keeps using explicit --agent auto-approve",
         args: ["-p", "hello", "--yolo"],
         env: { VIBE_ACTIVE_MODEL: "mistral-medium-3.5" },
         expect: "fail",
@@ -2451,7 +2458,7 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       {
         id: "mistral-check-upgrade-rejected",
         description:
-          "Vibe 2.17.1 advertises --check-upgrade, but gateway request validation rejects update-prompt flags",
+          "Vibe 2.18.3 advertises --check-upgrade, but gateway request validation rejects update-prompt flags",
         args: ["--check-upgrade"],
         env: { VIBE_ACTIVE_MODEL: "mistral-medium-3.5" },
         expect: "fail",

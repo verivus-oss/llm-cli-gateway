@@ -76,7 +76,7 @@ devin_cli_commands = "https://docs.devin.ai/cli/reference/commands"
 agent_client_protocol_schema = "https://agentclientprotocol.com/protocol/schema"
 
 [source_evidence.local_versions]
-claude = "Claude Code 2.1.197"
+claude = "Claude Code 2.1.198"
 codex = "codex-cli 0.142.4"
 gemini = "agy 1.0.14"
 grok = "grok 0.2.77 (44e77bec3a)"
@@ -245,7 +245,7 @@ security_requirements = [
 
 [providers.claude]
 display_name = "Anthropic Claude Code"
-local_version = "Claude Code 2.1.197"
+local_version = "Claude Code 2.1.198"
 executables = ["claude"]
 native_acp_entrypoint = ""
 native_acp_evidence = "No native Claude Code ACP subcommand or flag was found in installed help or official CLI reference. Complete gateway coverage is therefore CLI-first, with ACP reporting accurately saying no native entrypoint is advertised."

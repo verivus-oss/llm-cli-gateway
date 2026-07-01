@@ -528,7 +528,7 @@ describe("provider tool capabilities", () => {
       const acp = getProviderToolCapabilities("gemini").gemini?.acp;
       expect(acp?.status).toBe("absent_watchlist");
       expect(acp?.mediation).toBe("none");
-      expect(acp?.targetVersion).toBe("agy 1.0.13");
+      expect(acp?.targetVersion).toBe("agy 1.0.14");
       expect(acp?.entrypoint).toBeNull();
     });
 

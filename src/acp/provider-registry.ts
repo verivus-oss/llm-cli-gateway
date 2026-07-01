@@ -108,12 +108,13 @@ const ACP_PROVIDER_REGISTRY: Readonly<Record<CliType, AcpProviderRegistryEntry>>
     displayName: "Mistral Vibe",
     status: "native_smoke_passed",
     supportKind: "native",
-    targetVersion: "vibe 2.17.1",
+    targetVersion: "vibe 2.18.3",
     entrypoint: Object.freeze({ command: "vibe-acp", args: Object.freeze([]) }),
     runtimeEnabledDefault: false,
     shipRuntimePilot: true,
     runtimePriority: 1,
     adapterCandidates: Object.freeze([]),
+    // phase-5/8: replace limited-support label with discovered capability fact
     caveat:
       "Native ACP entrypoint vibe-acp. Manual initialize and session/new smoke passed. First native runtime pilot; runtime routing stays config-gated.",
   }),
@@ -122,18 +123,20 @@ const ACP_PROVIDER_REGISTRY: Readonly<Record<CliType, AcpProviderRegistryEntry>>
     displayName: "xAI Grok CLI",
     status: "native_smoke_passed",
     supportKind: "native",
-    targetVersion: "grok 0.2.73 (9ff14c43bb)",
+    targetVersion: "grok 0.2.77 (44e77bec3a)",
     entrypoint: Object.freeze({ command: "grok", args: Object.freeze(["agent", "stdio"]) }),
     runtimeEnabledDefault: false,
     shipRuntimePilot: true,
     runtimePriority: 2,
     adapterCandidates: Object.freeze([]),
+    // phase-5/8: replace limited-support label with discovered capability fact
     caveat:
       "Native ACP entrypoint grok agent stdio. Manual smoke passed with the installed CLI managing credentials; empty-env smoke is expected to fail. Second native runtime pilot; runtime routing stays config-gated.",
   }),
   codex: Object.freeze({
     provider: "codex",
     displayName: "OpenAI Codex CLI",
+    // phase-5/8: replace limited-support label with discovered capability fact
     status: "adapter_mediated_deferred",
     supportKind: "adapter_mediated",
     targetVersion: "codex-cli 0.142.4",
@@ -148,9 +151,10 @@ const ACP_PROVIDER_REGISTRY: Readonly<Record<CliType, AcpProviderRegistryEntry>>
   claude: Object.freeze({
     provider: "claude",
     displayName: "Anthropic Claude Code",
+    // phase-5/8: replace limited-support label with discovered capability fact
     status: "adapter_mediated_deferred",
     supportKind: "adapter_mediated",
-    targetVersion: "claude 2.1.195",
+    targetVersion: "claude 2.1.198",
     entrypoint: null,
     runtimeEnabledDefault: false,
     shipRuntimePilot: false,
@@ -162,9 +166,10 @@ const ACP_PROVIDER_REGISTRY: Readonly<Record<CliType, AcpProviderRegistryEntry>>
   gemini: Object.freeze({
     provider: "gemini",
     displayName: "Google Antigravity",
+    // phase-5/8: replace limited-support label with discovered capability fact
     status: "absent_watchlist",
     supportKind: "none",
-    targetVersion: "agy 1.0.13",
+    targetVersion: "agy 1.0.14",
     entrypoint: null,
     runtimeEnabledDefault: false,
     shipRuntimePilot: false,
@@ -186,6 +191,7 @@ const ACP_PROVIDER_REGISTRY: Readonly<Record<CliType, AcpProviderRegistryEntry>>
     shipRuntimePilot: true,
     runtimePriority: 3,
     adapterCandidates: Object.freeze([]),
+    // phase-5/8: replace limited-support label with discovered capability fact
     caveat:
       "Native ACP entrypoint `devin acp` (stdio JSON-RPC). Manual initialize + session/new smoke passed with the installed CLI managing credentials (`devin auth login`; WINDSURF_API_KEY for empty-env); empty-env smoke is expected to fail. Third native runtime pilot; runtime routing stays config-gated.",
   }),
@@ -200,6 +206,7 @@ const ACP_PROVIDER_REGISTRY: Readonly<Record<CliType, AcpProviderRegistryEntry>>
     shipRuntimePilot: true,
     runtimePriority: 4,
     adapterCandidates: Object.freeze([]),
+    // phase-5/8: replace limited-support label with discovered capability fact
     caveat:
       "Native ACP entrypoint `cursor-agent acp` (stdio JSON-RPC) is available as a hidden advanced command. Manual initialize + session/new smoke passed locally (protocolVersion 1, session created; no agentInfo returned). Fourth native runtime pilot; runtime routing stays config-gated.",
   }),

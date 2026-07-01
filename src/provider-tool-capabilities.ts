@@ -245,7 +245,7 @@ export const ACP_CONTRACT: AcpContractMetadata = {
     },
     gemini: {
       classification: "absent_watchlist",
-      summary: "Google Antigravity agy 1.0.13 has no ACP surface; watchlist item only.",
+      summary: "Google Antigravity agy 1.0.14 has no ACP surface; watchlist item only.",
     },
     grok_api: {
       classification: "absent_watchlist",
@@ -363,7 +363,7 @@ const ACP_CAPABILITIES: Record<KnownProviderCapabilityId, ProviderAcpCapability>
   mistral: {
     status: "native_smoke_passed",
     mediation: "native",
-    targetVersion: "vibe 2.17.1",
+    targetVersion: "vibe 2.18.3",
     entrypoint: { command: "vibe-acp", args: [] },
     runtimeEnabled: false,
     smokeSupported: true,
@@ -377,7 +377,7 @@ const ACP_CAPABILITIES: Record<KnownProviderCapabilityId, ProviderAcpCapability>
   grok: {
     status: "native_smoke_passed",
     mediation: "native",
-    targetVersion: "grok 0.2.73 (9ff14c43bb)",
+    targetVersion: "grok 0.2.77 (44e77bec3a)",
     entrypoint: { command: "grok", args: ["agent", "stdio"] },
     runtimeEnabled: false,
     smokeSupported: true,
@@ -406,7 +406,7 @@ const ACP_CAPABILITIES: Record<KnownProviderCapabilityId, ProviderAcpCapability>
   claude: {
     status: "adapter_mediated_deferred",
     mediation: "adapter_mediated",
-    targetVersion: "claude 2.1.195",
+    targetVersion: "claude 2.1.198",
     entrypoint: null,
     runtimeEnabled: false,
     smokeSupported: false,
@@ -420,13 +420,13 @@ const ACP_CAPABILITIES: Record<KnownProviderCapabilityId, ProviderAcpCapability>
   gemini: {
     status: "absent_watchlist",
     mediation: "none",
-    targetVersion: "agy 1.0.13",
+    targetVersion: "agy 1.0.14",
     entrypoint: null,
     runtimeEnabled: false,
     smokeSupported: false,
     smokeStatus: "unsupported",
     caveats: [
-      "Antigravity agy 1.0.13 has no ACP flag or subcommand.",
+      "Antigravity agy 1.0.14 has no ACP flag or subcommand.",
       "Legacy Gemini CLI ACP evidence does not transfer to agy; kept on the upstream drift watchlist.",
     ],
     docs: ACP_DOCS_REFERENCE,
