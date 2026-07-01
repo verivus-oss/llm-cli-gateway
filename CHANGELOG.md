@@ -4,8 +4,11 @@ All notable changes to the llm-cli-gateway project.
 
 ## [Unreleased]
 
+## [2.12.2] - 2026-07-01: backpressure hardening and release-gate stability
+
 ### Security
 
+- **HTTP/session and async-job backpressure hardening for issue #130.** HTTP MCP session initialization is now bounded before gateway session creation, including concurrent initialize bursts and `createGatewayServer()` / `server.connect()` failure cleanup. Async process/API jobs now share bounded global, per-provider, and queue caps; queued jobs are treated as in-progress by sync/deferred paths; direct sync and inline API execution are covered by the same limiter; and `/healthz` / `llm_process_health` expose prompt-free session, queue, limiter, and memory pressure metrics. The release includes deterministic regression coverage for HTTP initialize bursts, pending-initialize accounting, queued deferral behavior, and async job caps.
 - **`llm_process_health` now redacts `base_url` userinfo.** The outbound-providers health block surfaces each API provider's `base_url`, which is config-supplied and may legally carry URL userinfo (`https://user:pass@host/v1`). Both the dedicated `xai` block and the generic `apiProviders` array now run `base_url` through `redactDiagnosticUrl` (stripping `username`/`password` and sensitive query params) before emitting it, matching the redaction already applied on the `doctor` and login-guidance surfaces. The live request path and circuit breakers are unaffected.
 - **`redactDiagnosticUrl` now leaves clean URLs byte-identical.** When a URL has nothing to redact (no userinfo, no sensitive query/hash params), the helper returns the caller's exact bytes instead of the URL parser's canonicalized form (lowercased host, dropped default port, normalized path/encoding). This keeps non-secret `base_url` / public-URL values unchanged on every diagnostic surface (`doctor`, login-guidance, `llm_process_health`).
 
@@ -17,6 +20,10 @@ All notable changes to the llm-cli-gateway project.
   - `provider_tool_capabilities` now builds real per-`api`-kind metadata on demand instead of the former unreachable defensive throw: API providers support model + sampling + (xai-responses) reasoning + continuity, and never expose allow/deny lists, MCP servers, local skills, or workspace/worktree controls. The capability filter enum, the `provider-tools://<id>` resource allowlist, and the capability-id set widen together to include enabled API provider names.
   - `models://<api-provider>` resources are exposed for every enabled API provider, and `sessions://<api-provider>` for continuity-tracked kinds. The `CLI_TYPES` guard on the `provider-subcommands://` resources is unchanged, so API providers stay correctly excluded there.
 - **`list_models` now surfaces enabled API providers (Slice 5).** When one or more `[providers.<name>]` API providers are enabled, `list_models` returns them under an `apiProviders` array (each tagged `providerKind:"api"` with `defaultModel` and the optional model allowlist), mirroring `list_available_models` and the `llm_process_health` outbound block. The `cli` filter accepts an enabled API provider name in addition to the six CLI providers. The field is omitted entirely when no API providers are enabled, so dormant output is byte-identical to before.
+
+### CI
+
+- **Lychee no longer fails release/security CI on GitHub's unauthenticated latest-release API.** The link-rot gate now excludes `https://api.github.com/repos/*/*/releases/latest`, matching the upstream-scan model where these advisory release metadata URLs are verified separately and GitHub Actions 403/rate-limit responses should not block an otherwise clean release.
 
 ## [2.12.1] - 2026-06-30: fast-uri transitive vulnerability remediation
 
