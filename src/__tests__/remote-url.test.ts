@@ -70,7 +70,11 @@ describe("remote-url helpers", () => {
   });
 
   it("preserves a custom MCP path", () => {
-    const urls = buildRemoteConnectorUrls({ baseOrigin: BASE, mcpPath: "/gateway", oauthEnabled: true });
+    const urls = buildRemoteConnectorUrls({
+      baseOrigin: BASE,
+      mcpPath: "/gateway",
+      oauthEnabled: true,
+    });
     expect(urls.mcpUrl).toBe(`${BASE}/gateway`);
   });
 
@@ -80,7 +84,9 @@ describe("remote-url helpers", () => {
     expect(urls.authorizationUrl).toBe(`${BASE}${OAUTH_AUTHORIZE_PATH}`);
     expect(urls.tokenUrl).toBe(`${BASE}${OAUTH_TOKEN_PATH}`);
     expect(urls.registrationUrl).toBe(`${BASE}${OAUTH_REGISTER_PATH}`);
-    expect(urls.protectedResourceMetadataUrl).toBe(`${BASE}${OAUTH_PROTECTED_RESOURCE_METADATA_PATH}`);
+    expect(urls.protectedResourceMetadataUrl).toBe(
+      `${BASE}${OAUTH_PROTECTED_RESOURCE_METADATA_PATH}`
+    );
   });
 });
 

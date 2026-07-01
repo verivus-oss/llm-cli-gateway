@@ -1347,7 +1347,9 @@ export function diagnoseRemoteOAuthConfig(
       config: disabledOAuthConfig(sourcePath, envOverrides),
       status: "malformed",
       configured: true,
-      issues: ["The [http.oauth] config is invalid (schema validation failed); remote OAuth is disabled."],
+      issues: [
+        "The [http.oauth] config is invalid (schema validation failed); remote OAuth is disabled.",
+      ],
     };
   }
 

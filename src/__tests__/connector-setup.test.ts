@@ -10,7 +10,9 @@ import type { RemoteOAuthConfig } from "../auth.js";
 
 const BASE = "https://gw.example.trycloudflare.com";
 
-function readyReadiness(overrides: Partial<RemoteHttpOAuthReadiness> = {}): RemoteHttpOAuthReadiness {
+function readyReadiness(
+  overrides: Partial<RemoteHttpOAuthReadiness> = {}
+): RemoteHttpOAuthReadiness {
   return {
     ready: true,
     stage: "ready",
@@ -76,7 +78,11 @@ describe("connector setup packet", () => {
       readiness: readyReadiness(),
       oauth: oauthCfg({
         consentSecretHash: "scrypt:N=32768,r=8,p=1:c2FsdA:c29tZWhhc2g",
-        sharedSecret: { enabled: true, secretHash: "scrypt:N=32768,r=8,p=1:c2FsdA:c2hhcmVk", promptLabel: "x" },
+        sharedSecret: {
+          enabled: true,
+          secretHash: "scrypt:N=32768,r=8,p=1:c2FsdA:c2hhcmVk",
+          promptLabel: "x",
+        },
       }),
     });
     const blob = JSON.stringify(packet);
@@ -126,7 +132,11 @@ describe("connector setup packet", () => {
   });
 
   it("carries the readiness stage and next_actions verbatim (single source of truth)", () => {
-    const readiness = readyReadiness({ stage: "missing_oauth_client", ready: false, next_actions: ["do X"] });
+    const readiness = readyReadiness({
+      stage: "missing_oauth_client",
+      ready: false,
+      next_actions: ["do X"],
+    });
     const packet = buildConnectorSetupPacket({ readiness, oauth: oauthCfg({ clients: [] }) });
     expect(packet.stage).toBe("missing_oauth_client");
     expect(packet.ready).toBe(false);

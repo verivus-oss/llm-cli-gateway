@@ -83,7 +83,15 @@ describe.skipIf(!existsSync(entrypoint))("CLI oauth client + connector setup", (
 
     const cfg2 = freshConfig();
     const withFlag = run(
-      ["oauth", "client", "add", "chatgpt", "--redirect-uri", "https://chatgpt.com/cb", "--print-once"],
+      [
+        "oauth",
+        "client",
+        "add",
+        "chatgpt",
+        "--redirect-uri",
+        "https://chatgpt.com/cb",
+        "--print-once",
+      ],
       { LLM_GATEWAY_CONFIG: cfg2 }
     );
     const packet = JSON.parse(withFlag.stdout);
@@ -128,9 +136,20 @@ describe.skipIf(!existsSync(entrypoint))("CLI oauth client + connector setup", (
 
   it("oauth client list shows redacted metadata only (no secret or hash)", () => {
     const cfg = freshConfig();
-    run(["oauth", "client", "add", "chatgpt", "--redirect-uri", "https://chatgpt.com/cb", "--print-once"], {
-      LLM_GATEWAY_CONFIG: cfg,
-    });
+    run(
+      [
+        "oauth",
+        "client",
+        "add",
+        "chatgpt",
+        "--redirect-uri",
+        "https://chatgpt.com/cb",
+        "--print-once",
+      ],
+      {
+        LLM_GATEWAY_CONFIG: cfg,
+      }
+    );
     const list = run(["oauth", "client", "list"], { LLM_GATEWAY_CONFIG: cfg });
     expect(list.status).toBe(0);
     expect(list.stdout).not.toContain("scrypt:");

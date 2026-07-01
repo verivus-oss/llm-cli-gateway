@@ -611,7 +611,11 @@ describe("remote_http_oauth readiness projection", () => {
   it("is not_started with no public URL, stdio transport, and no OAuth config", () => {
     const r = buildRemoteHttpOAuthReadiness(
       readyInput({
-        oauthDiag: { status: "absent", config: oauthCfg({ enabled: false, clients: [] }), issues: [] },
+        oauthDiag: {
+          status: "absent",
+          config: oauthCfg({ enabled: false, clients: [] }),
+          issues: [],
+        },
         transport: "stdio",
         publicUrl: null,
         endpoint: endpoint({
@@ -685,7 +689,11 @@ describe("remote_http_oauth readiness projection", () => {
   it("is unsafe_oauth_config when public clients are enabled on a public endpoint", () => {
     const r = buildRemoteHttpOAuthReadiness(
       readyInput({
-        oauthDiag: { status: "enabled", config: oauthCfg({ allowPublicClients: true }), issues: [] },
+        oauthDiag: {
+          status: "enabled",
+          config: oauthCfg({ allowPublicClients: true }),
+          issues: [],
+        },
       })
     );
     expect(r.stage).toBe("unsafe_oauth_config");
@@ -706,7 +714,13 @@ describe("remote_http_oauth readiness projection", () => {
   it("is missing_workspace when OAuth is ready but no workspace is available", () => {
     const r = buildRemoteHttpOAuthReadiness(
       readyInput({
-        workspace: { ready: false, default: null, aliases: [], repo_count: 0, allowed_root_count: 0 },
+        workspace: {
+          ready: false,
+          default: null,
+          aliases: [],
+          repo_count: 0,
+          allowed_root_count: 0,
+        },
       })
     );
     expect(r.stage).toBe("missing_workspace");
@@ -732,7 +746,10 @@ describe("remote_http_oauth readiness projection", () => {
       readyInput({
         oauthDiag: {
           status: "enabled",
-          config: oauthCfg({ requireConsent: true, consentSecretHash: "scrypt:N=32768,r=8,p=1:c2FsdA:aGFzaA" }),
+          config: oauthCfg({
+            requireConsent: true,
+            consentSecretHash: "scrypt:N=32768,r=8,p=1:c2FsdA:aGFzaA",
+          }),
           issues: [],
         },
       })
@@ -743,23 +760,59 @@ describe("remote_http_oauth readiness projection", () => {
   it("produces deterministic, secret-free next_actions for every stage", () => {
     const scenarios: RemoteHttpOAuthReadinessInput[] = [
       readyInput({
-        oauthDiag: { status: "absent", config: oauthCfg({ enabled: false, clients: [] }), issues: [] },
+        oauthDiag: {
+          status: "absent",
+          config: oauthCfg({ enabled: false, clients: [] }),
+          issues: [],
+        },
         transport: "stdio",
         publicUrl: null,
-        endpoint: endpoint({ mode: "local_only", public_url_configured: false, public_url: null, https_configured: false }),
+        endpoint: endpoint({
+          mode: "local_only",
+          public_url_configured: false,
+          public_url: null,
+          https_configured: false,
+        }),
       }),
-      readyInput({ publicUrl: null, endpoint: endpoint({ mode: "local_only", public_url_configured: false, public_url: null, https_configured: false }) }),
+      readyInput({
+        publicUrl: null,
+        endpoint: endpoint({
+          mode: "local_only",
+          public_url_configured: false,
+          public_url: null,
+          https_configured: false,
+        }),
+      }),
       readyInput({ endpoint: endpoint({ reachable_from_web: "unreachable" }) }),
-      readyInput({ oauthDiag: { status: "disabled", config: oauthCfg({ enabled: false }), issues: [] } }),
-      readyInput({ oauthDiag: { status: "enabled", config: oauthCfg({ allowPublicClients: true }), issues: [] } }),
-      readyInput({ oauthDiag: { status: "enabled", config: oauthCfg({ clients: [] }), issues: [] } }),
-      readyInput({ workspace: { ready: false, default: null, aliases: [], repo_count: 0, allowed_root_count: 0 } }),
+      readyInput({
+        oauthDiag: { status: "disabled", config: oauthCfg({ enabled: false }), issues: [] },
+      }),
+      readyInput({
+        oauthDiag: {
+          status: "enabled",
+          config: oauthCfg({ allowPublicClients: true }),
+          issues: [],
+        },
+      }),
+      readyInput({
+        oauthDiag: { status: "enabled", config: oauthCfg({ clients: [] }), issues: [] },
+      }),
+      readyInput({
+        workspace: {
+          ready: false,
+          default: null,
+          aliases: [],
+          repo_count: 0,
+          allowed_root_count: 0,
+        },
+      }),
       readyInput(),
     ];
     // OAuth access tokens are `oauth_` + 43-char base64url; require a long token
     // body so the readiness stage names (oauth_disabled, unsafe_oauth_config) do
     // not falsely trip the secret detector.
-    const secretPattern = /scrypt:|Bearer\s|oauth_[A-Za-z0-9_-]{20,}|client_secret=|consent_secret=/;
+    const secretPattern =
+      /scrypt:|Bearer\s|oauth_[A-Za-z0-9_-]{20,}|client_secret=|consent_secret=/;
     for (const input of scenarios) {
       const r = buildRemoteHttpOAuthReadiness(input);
       // Determinism: identical inputs yield identical output.
@@ -776,8 +829,10 @@ describe("remote_http_oauth readiness projection", () => {
 
   it("schema rejects an unknown readiness stage value", () => {
     const stageSchema = (
-      (schema.properties as Record<string, JsonSchemaNode>).remote_http_oauth
-        .properties as Record<string, JsonSchemaNode>
+      (schema.properties as Record<string, JsonSchemaNode>).remote_http_oauth.properties as Record<
+        string,
+        JsonSchemaNode
+      >
     ).stage;
     expect(() => validateAgainstSchema("bogus_stage", stageSchema, "stage")).toThrow();
     // And accepts every declared stage.

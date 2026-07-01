@@ -14,10 +14,7 @@
 // then it is clearly labelled deprecated.
 //──────────────────────────────────────────────────────────────────────────────
 
-import {
-  gatherRemoteHttpOAuthReadiness,
-  type RemoteHttpOAuthReadiness,
-} from "./doctor.js";
+import { gatherRemoteHttpOAuthReadiness, type RemoteHttpOAuthReadiness } from "./doctor.js";
 import { diagnoseRemoteOAuthConfig } from "./config.js";
 import type { RemoteOAuthConfig } from "./auth.js";
 import { joinBaseAndPath, resolveConfiguredRemoteOrigin } from "./remote-url.js";
@@ -130,7 +127,9 @@ export function legacyNoAuthConnectorUrl(env: NodeJS.ProcessEnv = process.env): 
     .map(value => value.trim())
     .find(value => value.startsWith("/") && !value.includes("?") && !value.includes("#"));
   if (!noAuthPath) return null;
-  const baseOrigin = resolveConfiguredRemoteOrigin({ publicUrl: env.LLM_GATEWAY_PUBLIC_URL ?? null });
+  const baseOrigin = resolveConfiguredRemoteOrigin({
+    publicUrl: env.LLM_GATEWAY_PUBLIC_URL ?? null,
+  });
   if (!baseOrigin) return null;
   return joinBaseAndPath(baseOrigin, noAuthPath);
 }

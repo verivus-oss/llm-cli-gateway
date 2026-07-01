@@ -572,7 +572,12 @@ export function buildRemoteHttpOAuthReadiness(
       default: input.workspace.default,
       aliases: input.workspace.aliases,
     },
-    next_actions: remoteReadinessNextActions(stage, { oauth, status, issues, workspace: input.workspace }),
+    next_actions: remoteReadinessNextActions(stage, {
+      oauth,
+      status,
+      issues,
+      workspace: input.workspace,
+    }),
   };
 }
 

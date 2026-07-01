@@ -13209,7 +13209,9 @@ function runOAuthCommand(args: string[]): void {
       printJsonLine({
         ok: true,
         shared_secret_enabled: true,
-        ...(args.includes("--print-once") ? { shared_secret: secret, shared_secret_copy_once: true } : {}),
+        ...(args.includes("--print-once")
+          ? { shared_secret: secret, shared_secret_copy_once: true }
+          : {}),
         note:
           (args.includes("--print-once")
             ? "shared_secret is shown once; it is stored only as a hash. "
@@ -13239,7 +13241,9 @@ function runOAuthCommand(args: string[]): void {
 function runConnectorCommand(args: string[]): void {
   const [action] = args;
   if (action !== "setup") {
-    throw new Error("Usage: llm-cli-gateway connector setup [--client-id <id>] [--include-legacy-no-auth]");
+    throw new Error(
+      "Usage: llm-cli-gateway connector setup [--client-id <id>] [--include-legacy-no-auth]"
+    );
   }
   const options: ConnectorSetupOptions = {
     clientId: argValue(args, "--client-id"),
