@@ -149,6 +149,76 @@ func TestDoctorJSONRedactsDeprecatedChatGPTConnectorURL(t *testing.T) {
 	}
 }
 
+func TestDoctorJSONFallbackIncludesRemoteHTTPOAuth(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	if runtime.GOOS == "windows" {
+		t.Setenv("USERPROFILE", os.Getenv("HOME"))
+	}
+	cfg, err := Default()
+	if err != nil {
+		t.Fatalf("Default returned error: %v", err)
+	}
+	if err := writeSettings(cfg.AppDir, Settings{
+		PublicURL: "https://example.trycloudflare.com/mcp",
+	}); err != nil {
+		t.Fatalf("writeSettings returned error: %v", err)
+	}
+
+	body, err := DoctorJSON()
+	if err != nil {
+		t.Fatalf("DoctorJSON returned error: %v", err)
+	}
+	var report map[string]any
+	if err := json.Unmarshal(body, &report); err != nil {
+		t.Fatalf("unmarshal doctor report: %v", err)
+	}
+	remote, ok := report["remote_http_oauth"].(map[string]any)
+	if !ok {
+		t.Fatalf("remote_http_oauth block missing from fallback doctor report")
+	}
+	// With a public HTTPS URL but no configured client, the fallback stage is
+	// missing_oauth_client (the next blocking action).
+	if remote["stage"] != "missing_oauth_client" {
+		t.Fatalf("stage = %v, want missing_oauth_client", remote["stage"])
+	}
+	if remote["auth_mode"] != "oauth" {
+		t.Fatalf("auth_mode = %v, want oauth", remote["auth_mode"])
+	}
+	if remote["mcp_url"] != "https://example.trycloudflare.com/mcp" {
+		t.Fatalf("mcp_url = %v", remote["mcp_url"])
+	}
+	oauth := remote["oauth"].(map[string]any)
+	if oauth["authorization_url"] != "https://example.trycloudflare.com/oauth/authorize" {
+		t.Fatalf("authorization_url = %v", oauth["authorization_url"])
+	}
+	// Never a secret or hash in the readiness block.
+	if strings.Contains(string(body), "scrypt:") || strings.Contains(string(body), "client_secret_hash") {
+		t.Fatalf("remote_http_oauth leaked secret material: %s", body)
+	}
+}
+
+func TestDoctorJSONFallbackRemoteHTTPOAuthMissingPublicURL(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	if runtime.GOOS == "windows" {
+		t.Setenv("USERPROFILE", os.Getenv("HOME"))
+	}
+	body, err := DoctorJSON()
+	if err != nil {
+		t.Fatalf("DoctorJSON returned error: %v", err)
+	}
+	var report map[string]any
+	if err := json.Unmarshal(body, &report); err != nil {
+		t.Fatalf("unmarshal doctor report: %v", err)
+	}
+	remote := report["remote_http_oauth"].(map[string]any)
+	if remote["stage"] != "missing_public_url" {
+		t.Fatalf("stage = %v, want missing_public_url", remote["stage"])
+	}
+	if remote["mcp_url"] != nil {
+		t.Fatalf("mcp_url should be null without a public URL, got %v", remote["mcp_url"])
+	}
+}
+
 func TestNormalizePublicURLRequiresHTTPS(t *testing.T) {
 	if _, err := NormalizePublicURL("http://127.0.0.1:3333/mcp", "/mcp"); err == nil {
 		t.Fatal("expected http URL to be rejected")

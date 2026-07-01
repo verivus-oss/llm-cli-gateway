@@ -112,27 +112,26 @@ func run(args []string) error {
 			endpoint = cfg.PublicURL
 		}
 		issuer := strings.TrimSuffix(endpoint, cfg.HTTPPath)
+		oauth := config.OAuthURLs(issuer)
+		oauth["enabled"] = true
+		oauth["client_secret"] = "<copy-once local oauth command output only>"
 		return printJSON(map[string]any{
 			"ok":                    true,
 			"transport":             "streamable_http",
 			"url":                   endpoint,
 			"local_url":             "http://" + cfg.HTTPHost + ":" + cfg.HTTPPort + cfg.HTTPPath,
 			"web_clients_supported": cfg.PublicURL != "" && strings.HasPrefix(cfg.PublicURL, "https://"),
-			"oauth": map[string]any{
-				"enabled":                true,
-				"authorization_url":      issuer + "/oauth/authorize",
-				"token_url":              issuer + "/oauth/token",
-				"registration_url":       issuer + "/oauth/register",
-				"protected_resource_url": issuer + "/.well-known/oauth-protected-resource",
-				"client_secret":          "<copy-once local oauth command output only>",
-			},
+			"oauth":                 oauth,
 			"chatgpt": map[string]any{
 				"url":                    endpoint,
 				"authentication":         "OAuth",
 				"deprecated_no_auth_url": deprecatedNoAuthURL(cfg.ChatGPTConnectorURL),
 			},
 			"headers": map[string]string{"Authorization": "Bearer <redacted>"},
-			"notes":   []string{"Use OAuth for ChatGPT and other remote web connectors. Use bearer Authorization headers only for local clients that support custom headers. Secrets are printed only by local copy-once oauth commands."},
+			"notes": []string{
+				"Preferred remote setup: run `llm-cli-gateway connector setup` (or `doctor --json` -> remote_http_oauth) for the copy-safe OAuth connector fields.",
+				"Use OAuth for ChatGPT and other remote web connectors. Use bearer Authorization headers only for local clients that support custom headers. Secrets are printed only by local copy-once oauth commands.",
+			},
 		})
 	case "setup-ui":
 		return setupui.Listen("127.0.0.1:3340")

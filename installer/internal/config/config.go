@@ -319,6 +319,7 @@ func DoctorJSON() ([]byte, error) {
 			"grok":   providerDoctor("grok", "Grok CLI"),
 		},
 		"endpoint_exposure": endpointExposureDoctor(cfg, publicURL, redactedPublicURL, httpsConfigured),
+		"remote_http_oauth": remoteHTTPOAuthFallback(cfg, redactedPublicURL, httpsConfigured),
 		"client_config": map[string]any{
 			"claude_desktop_config_present": false,
 			"codex_config_present":          false,
@@ -327,6 +328,84 @@ func DoctorJSON() ([]byte, error) {
 		"next_actions": nextActions(cfg.AuthTokenSet, publicURL, httpsConfigured),
 	}
 	return json.MarshalIndent(report, "", "  ")
+}
+
+// remoteOAuthOrigin derives the scheme://host[:port] origin from a (redacted)
+// public URL, stripping the MCP path suffix if present. Empty when no public URL.
+func remoteOAuthOrigin(redactedPublicURL, httpPath string) string {
+	if redactedPublicURL == "" {
+		return ""
+	}
+	return strings.TrimSuffix(redactedPublicURL, httpPath)
+}
+
+// OAuthURLs builds the canonical OAuth endpoint URLs from a base origin. Kept in
+// one place so print-client-config and the fallback doctor cannot drift from the
+// Node gateway's remote-url helper (which uses the same path suffixes).
+func OAuthURLs(origin string) map[string]any {
+	return map[string]any{
+		"authorization_url":      origin + "/oauth/authorize",
+		"token_url":              origin + "/oauth/token",
+		"registration_url":       origin + "/oauth/register",
+		"protected_resource_url": origin + "/.well-known/oauth-protected-resource",
+	}
+}
+
+// remoteHTTPOAuthFallback synthesizes the remote_http_oauth readiness block for
+// the bootstrapper-fallback doctor (used only before the Node gateway is
+// installed; once installed, the Node doctor's authoritative block passes
+// through). It never emits secrets. The fallback has no OAuth clients and no
+// workspace, so the readiness stage is at best missing_oauth_client.
+func remoteHTTPOAuthFallback(cfg Config, redactedPublicURL string, httpsConfigured bool) map[string]any {
+	origin := remoteOAuthOrigin(redactedPublicURL, cfg.HTTPPath)
+	var mcpURL, issuer, authURL, tokenURL any
+	stage := "missing_public_url"
+	if origin != "" && httpsConfigured {
+		mcpURL = origin + cfg.HTTPPath
+		issuer = origin
+		authURL = origin + "/oauth/authorize"
+		tokenURL = origin + "/oauth/token"
+		// The bootstrapper fallback never has a configured OAuth client.
+		stage = "missing_oauth_client"
+	}
+	return map[string]any{
+		"ready":      false,
+		"stage":      stage,
+		"public_url": nullableString(redactedPublicURL),
+		"mcp_url":    mcpURL,
+		"auth_mode":  "oauth",
+		"oauth": map[string]any{
+			"enabled":             true,
+			"issuer":              issuer,
+			"authorization_url":   authURL,
+			"token_url":           tokenURL,
+			"registration_policy": "static_clients",
+			"clients_configured":  0,
+			"consent_required":    false,
+		},
+		"workspace": map[string]any{
+			"ready":   false,
+			"default": nil,
+			"aliases": []string{},
+		},
+		"next_actions": remoteFallbackNextActions(stage),
+	}
+}
+
+func remoteFallbackNextActions(stage string) []string {
+	switch stage {
+	case "missing_public_url":
+		return []string{
+			"Set LLM_GATEWAY_PUBLIC_URL to a public https URL (tunnel or reverse proxy), not localhost or a LAN address.",
+		}
+	case "missing_oauth_client":
+		return []string{
+			"Register an OAuth client: llm-cli-gateway oauth client add <client-id> --redirect-uri <connector-callback> --print-once",
+			"Then run: llm-cli-gateway connector setup",
+		}
+	default:
+		return []string{}
+	}
 }
 
 func nodeDoctorJSON(cfg Config) ([]byte, bool) {

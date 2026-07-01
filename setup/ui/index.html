@@ -155,6 +155,67 @@
         color: var(--muted);
         font-size: 12px;
       }
+      .badge {
+        display: inline-block;
+        padding: 3px 10px;
+        border-radius: 999px;
+        font-size: 12px;
+        font-weight: 650;
+        border: 1px solid var(--line);
+      }
+      .badge.good {
+        background: #e6f4ec;
+        border-color: #bfe3cf;
+      }
+      .badge.warn {
+        background: #fdf1e0;
+        border-color: #f0d5a8;
+      }
+      .badge.bad {
+        background: #fbe9e7;
+        border-color: #f2c2bd;
+      }
+      .kv {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 8px 0;
+        border-bottom: 1px solid var(--line);
+      }
+      .kv:last-child {
+        border-bottom: none;
+      }
+      .kv .label {
+        flex: 0 0 150px;
+      }
+      .kv .field {
+        flex: 1 1 auto;
+        overflow-wrap: anywhere;
+        font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      }
+      .kv button {
+        min-height: 30px;
+        flex: 0 0 auto;
+      }
+      ul.actions-list {
+        margin: 8px 0 0;
+        padding-left: 18px;
+      }
+      ul.actions-list li {
+        margin: 4px 0;
+      }
+      details.legacy {
+        margin-top: 12px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        padding: 8px 12px;
+        background: #fbfcfd;
+      }
+      details.legacy summary {
+        cursor: pointer;
+        color: var(--muted);
+        font-size: 13px;
+      }
       @media (max-width: 860px) {
         header {
           align-items: flex-start;
@@ -200,6 +261,30 @@
             <span class="value" id="webState">Not loaded</span>
           </div>
         </div>
+      </section>
+      <section class="panel" id="remotePanel">
+        <h2>Remote connector (OAuth, recommended)</h2>
+        <div class="small" style="margin-bottom: 10px">
+          The preferred remote path: public HTTPS URL, <code>/mcp</code>, OAuth, and a
+          registered/default workspace. This view is driven by
+          <code>remote_http_oauth</code>; you do not need to read raw doctor JSON.
+        </div>
+        <div style="margin-bottom: 12px">
+          <span class="label">Readiness stage</span>
+          <div style="margin-top: 6px"><span class="badge warn" id="remoteStage">not loaded</span></div>
+        </div>
+        <div id="remoteFields"></div>
+        <div id="remoteWorkspace" style="margin-top: 12px"></div>
+        <div id="remoteActions" style="margin-top: 12px"></div>
+        <details class="legacy">
+          <summary>Legacy no-auth connector (deprecated, compatibility-only)</summary>
+          <p class="small">
+            The no-auth connector URL bypasses authentication and is not recommended for
+            new setups. It is never shown here. If you must retrieve it for an existing
+            deployment, run <code>llm-cli-gateway connector setup --include-legacy-no-auth</code>
+            locally and do not share the URL.
+          </p>
+        </details>
       </section>
       <section class="grid">
         <div class="panel stack">
@@ -271,14 +356,66 @@
         lastDoctor = json;
         const http = json.transport?.http || {};
         const exposure = json.endpoint_exposure || {};
+        const remote = json.remote_http_oauth || {};
         const endpoint = http.public_url || `http://${http.host || "127.0.0.1"}:${http.port || 3333}${http.path || "/mcp"}`;
         setValue("gatewayUrl", endpoint, http.public_url ? "good" : "warn");
         setValue("authState", json.auth?.token_configured ? "token configured" : "token missing", json.auth?.token_configured ? "good" : "bad");
         setValue("exposureState", exposure.mode || "unknown", exposure.mode === "tunnel" || exposure.mode === "byo_reverse_proxy" ? "good" : "warn");
         setValue("webState", exposure.web_clients_supported ? "ready" : "not ready", exposure.web_clients_supported ? "good" : "bad");
+        renderRemoteConnector(remote);
         renderProviders(json.providers || {});
-        renderClients(endpoint, exposure, json.auth?.oauth || {});
-        renderPacket(json, endpoint);
+        renderClients(endpoint, exposure, remote);
+        renderPacket(json, endpoint, remote);
+      }
+
+      const stageBadgeClass = stage => {
+        if (stage === "ready") return "good";
+        if (stage === "not_started" || stage === "missing_public_url") return "warn";
+        return "bad";
+      };
+
+      // Build a labelled field row. Copy button is shown only for copy-safe
+      // fields that are present. Secrets are never passed here.
+      function copyFieldRow(label, value, copyable) {
+        if (value === null || value === undefined || value === "") {
+          return `<div class="kv"><span class="label">${escapeHtml(label)}</span><span class="field small">not available yet</span></div>`;
+        }
+        const btn = copyable
+          ? `<button class="secondary copy-field" data-copy="${escapeHtml(value)}">Copy</button>`
+          : "";
+        return `<div class="kv"><span class="label">${escapeHtml(label)}</span><span class="field">${escapeHtml(value)}</span>${btn}</div>`;
+      }
+
+      function renderRemoteConnector(remote) {
+        const stage = remote.stage || "not_loaded";
+        const stageNode = el("remoteStage");
+        stageNode.textContent = stage + (remote.ready ? " (ready)" : "");
+        stageNode.className = `badge ${stageBadgeClass(stage)}`;
+
+        const oauth = remote.oauth || {};
+        // Copy buttons ONLY for copy-safe connector fields. No secrets are ever
+        // rendered: the client secret is a copy-once local CLI value, not shown.
+        const rows = [
+          copyFieldRow("MCP URL", remote.mcp_url, true),
+          copyFieldRow("Authentication", remote.auth_mode, false),
+          copyFieldRow("Authorization URL", oauth.authorization_url, true),
+          copyFieldRow("Token URL", oauth.token_url, true),
+          `<div class="kv"><span class="label">Client secret</span><span class="field small">Copy-once local value. Create it with <code>llm-cli-gateway oauth client add &lt;id&gt; --redirect-uri &lt;callback&gt; --print-once</code>; never shown here.</span></div>`,
+        ];
+        el("remoteFields").innerHTML = rows.join("");
+
+        const ws = remote.workspace || {};
+        const aliases = Array.isArray(ws.aliases) ? ws.aliases : [];
+        el("remoteWorkspace").innerHTML =
+          `<span class="label">Workspace</span>` +
+          `<div style="margin-top:6px"><span class="badge ${ws.ready ? "good" : "bad"}">${ws.ready ? "ready" : "not ready"}</span>` +
+          ` <span class="small">default: ${escapeHtml(ws.default || "none")}; aliases: ${aliases.length ? escapeHtml(aliases.join(", ")) : "none"}</span></div>` +
+          `<div class="small" style="margin-top:4px">Remote clients select a workspace by alias; local paths are never shown or accepted.</div>`;
+
+        const actions = Array.isArray(remote.next_actions) ? remote.next_actions : [];
+        el("remoteActions").innerHTML = actions.length
+          ? `<span class="label">Next actions</span><ul class="actions-list">${actions.map(a => `<li>${escapeHtml(a)}</li>`).join("")}</ul>`
+          : "";
       }
 
       function setValue(id, value, cls) {
@@ -301,7 +438,7 @@
           .join("");
       }
 
-      function renderClients(endpoint, exposure, oauth) {
+      function renderClients(endpoint, exposure, remote) {
         const webReady = exposure.web_clients_supported === true;
         el("clientGrid").innerHTML = clients
           .map(([name, href, note]) => {
@@ -309,42 +446,26 @@
             return `<article class="provider">
               <h3>${escapeHtml(name)}</h3>
               <p class="small">${escapeHtml(note)}</p>
-              <pre>${escapeHtml(snippetFor(name, endpoint, disabled, oauth))}</pre>
+              <pre>${escapeHtml(snippetFor(name, endpoint, disabled, remote))}</pre>
             </article>`;
           })
           .join("");
       }
 
-      function oauthIssuer(endpoint, oauth) {
-        const configured = oauth?.issuer;
-        const httpPath = lastDoctor?.transport?.http?.path || "/mcp";
-        if (configured && configured !== endpoint) return configured.replace(/\/+$/, "");
-        try {
-          const url = new URL(endpoint);
-          if (url.pathname.endsWith(httpPath)) {
-            url.pathname = url.pathname.slice(0, -httpPath.length) || "/";
-          }
-          url.search = "";
-          url.hash = "";
-          return url.toString().replace(/\/+$/, "");
-        } catch {
-          return "<issuer>";
-        }
-      }
-
-      function snippetFor(name, endpoint, blocked, oauth) {
+      function snippetFor(name, endpoint, blocked, remote) {
         if (blocked) return "Run endpoint exposure verification before using this web client.";
         const tokenFile = "~/.llm-cli-gateway/auth-token";
         if (name === "ChatGPT") {
-          const issuer = oauthIssuer(endpoint, oauth);
+          const oauth = remote?.oauth || {};
+          // Source the exact URLs from remote_http_oauth (single source of truth).
           return [
-            `MCP URL: ${endpoint}`,
+            `MCP URL: ${remote?.mcp_url || endpoint}`,
             "Authentication: OAuth",
-            `Authorization URL: ${issuer}/oauth/authorize`,
-            `Token URL: ${issuer}/oauth/token`,
-            "Client ID: chatgpt",
+            `Authorization URL: ${oauth.authorization_url || "<run: llm-cli-gateway connector setup>"}`,
+            `Token URL: ${oauth.token_url || "<run: llm-cli-gateway connector setup>"}`,
+            "Client ID: <from `llm-cli-gateway connector setup`>",
             "Client Secret: <copy-once local oauth command output>",
-            "Create the secret locally with: llm-cli-gateway oauth client add chatgpt --redirect-uri <ChatGPT callback URL> --print-once",
+            "Create the secret locally with: llm-cli-gateway oauth client add <id> --redirect-uri <ChatGPT callback URL> --print-once",
           ].join("\n");
         }
         if (name === "Codex") {
@@ -369,30 +490,27 @@
         return `MCP URL: ${endpoint}\nAuth: configure bearer token in the client UI; do not paste raw tokens into remote chat.`;
       }
 
-      function renderPacket(json, endpoint) {
-        const issuer = oauthIssuer(endpoint, json.auth?.oauth || {});
+      function renderPacket(json, endpoint, remote) {
+        const r = remote || json.remote_http_oauth || {};
+        const oauth = r.oauth || {};
         const packet = {
           product: "llm-cli-gateway personal MCP setup",
           generated_at: new Date().toISOString(),
           gateway_url: endpoint,
-          auth: {
-            required: json.auth?.required,
-            token_configured: json.auth?.token_configured,
-            token_value: "redacted",
-            oauth: {
-              enabled: json.auth?.oauth?.enabled,
-              issuer,
-              authorization_url: `${issuer}/oauth/authorize`,
-              token_url: `${issuer}/oauth/token`,
-              registration_url: `${issuer}/oauth/register`,
-              client_secret: "<copy-once local oauth command output only>",
-            },
-          },
-          chatgpt: {
-            mcp_url: endpoint,
-            authentication: "OAuth",
-            client_id: "chatgpt",
+          // Remote connector fields are copied verbatim from remote_http_oauth
+          // (the doctor readiness projection), so the UI cannot drift from the
+          // running server. No secrets are included.
+          remote_http_oauth: {
+            ready: r.ready ?? false,
+            stage: r.stage || "unknown",
+            auth_mode: r.auth_mode || "unknown",
+            mcp_url: r.mcp_url ?? null,
+            authorization_url: oauth.authorization_url ?? null,
+            token_url: oauth.token_url ?? null,
+            consent_required: oauth.consent_required ?? false,
             client_secret: "<copy-once local oauth command output only>",
+            workspace: r.workspace || null,
+            next_actions: r.next_actions || [],
           },
           endpoint_exposure: json.endpoint_exposure,
           providers: json.providers,
@@ -421,6 +539,21 @@
       el("copyPacket").addEventListener("click", async () => {
         if (!lastDoctor) parseDoctor();
         await navigator.clipboard.writeText(el("packetOutput").textContent);
+      });
+      // Per-field copy buttons for copy-safe connector fields only.
+      el("remoteFields").addEventListener("click", async event => {
+        const target = event.target.closest("button.copy-field");
+        if (!target) return;
+        try {
+          await navigator.clipboard.writeText(target.getAttribute("data-copy") || "");
+          const previous = target.textContent;
+          target.textContent = "Copied";
+          setTimeout(() => {
+            target.textContent = previous;
+          }, 1200);
+        } catch (error) {
+          alert(error.message);
+        }
       });
     </script>
   </body>
