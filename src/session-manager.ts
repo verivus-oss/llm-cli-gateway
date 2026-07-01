@@ -18,19 +18,14 @@ import type { DatabaseConnection } from "./db.js";
 import type { Logger } from "./logger.js";
 import { noopLogger } from "./logger.js";
 import { getRequestContext, resolveOwnerPrincipal } from "./request-context.js";
+import {
+  API_PROVIDER_TYPES,
+  CLI_TYPES,
+  type CliType,
+  type KnownApiProviderType,
+} from "./provider-types.js";
 
-export const CLI_TYPES = ["claude", "codex", "gemini", "grok", "mistral", "devin"] as const;
-export type CliType = (typeof CLI_TYPES)[number];
-
-/**
- * Known API-backed provider ids baked into the in-tree config. `grok-api` is
- * the HTTP provider that predates Slice 0.5. Kept as a literal tuple so the
- * *registered* provider set (PROVIDER_TYPES, the session-provider zod enum, the
- * Postgres seed list) stays precise. Arbitrary names are admitted by the TYPE
- * below, not by this tuple.
- */
-export const API_PROVIDER_TYPES = ["grok-api"] as const;
-export type KnownApiProviderType = (typeof API_PROVIDER_TYPES)[number];
+export { API_PROVIDER_TYPES, CLI_TYPES, type CliType, type KnownApiProviderType };
 
 /**
  * Slice 0.5 — provider-identity widening (locked decision B: arbitrary names).
@@ -51,7 +46,7 @@ export type ProviderType = CliType | ApiProviderType;
 export type ProviderKind = "cli" | "api";
 
 /**
- * The registered provider set — the five CLIs plus the known API providers.
+ * The registered provider set — the spawnable CLIs plus the known API providers.
  * Used to build the default per-provider maps and the session-provider zod
  * enum. Arbitrary API ids are valid `ProviderType`s but are not members of this
  * tuple until a provider is configured.
@@ -78,6 +73,8 @@ const KNOWN_SESSION_DESCRIPTIONS: Partial<Record<ProviderType, string>> = {
   gemini: "Gemini Session",
   grok: "Grok Session",
   mistral: "Mistral Session",
+  devin: "Devin Session",
+  cursor: "Cursor Session",
   "grok-api": "Grok API Session",
 };
 

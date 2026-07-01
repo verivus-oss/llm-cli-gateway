@@ -60,7 +60,7 @@ export function extractApiErrorBody(error: unknown): string | undefined {
   return undefined;
 }
 
-export type LlmCli = "claude" | "codex" | "gemini" | "grok" | "mistral" | "devin";
+export type LlmCli = "claude" | "codex" | "gemini" | "grok" | "mistral" | "devin" | "cursor";
 
 /**
  * Slice 1: the record/manager-facing provider id. CLI jobs carry an `LlmCli`;

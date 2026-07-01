@@ -161,7 +161,7 @@ describe("Slice 3 — API providers as validation reviewers", () => {
     expect(providerSchema.safeParse("ollama").success).toBe(true);
     expect(providerSchema.safeParse("not-a-provider").success).toBe(false);
 
-    // With no apiProviders, only the five CLIs are accepted (pre-Slice-3 shape).
+    // With no apiProviders, only the registered CLIs are accepted (pre-Slice-3 shape).
     const { providerSchema: cliOnly } = buildValidationSchemas({ asyncJobManager: {} as any });
     expect(cliOnly.safeParse("ollama").success).toBe(false);
     expect(cliOnly.safeParse("grok").success).toBe(true);
@@ -175,5 +175,15 @@ describe("Slice 3 — API providers as validation reviewers", () => {
     );
     expect(fake.startJobCalls).toEqual(["claude", "codex"]);
     expect(fake.startHttpCalls).toEqual([]);
+  });
+
+  it("dispatches Cursor as a CLI validation reviewer with cursor-agent print args", () => {
+    const fake = makeManager();
+    const report = startValidationRun(
+      { asyncJobManager: fake.manager as any, getProviderRuntimeStatus: cliInstalled },
+      { intent: "validate", question: "q", providers: ["cursor"] }
+    );
+    expect(fake.startJobCalls).toEqual(["cursor"]);
+    expect(report.results[0].status).toBe("running");
   });
 });

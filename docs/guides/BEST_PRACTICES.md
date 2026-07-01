@@ -42,7 +42,7 @@ Single domain focus: CLI gateway orchestration
 **Status:** ✅ Good
 
 Top-level primitives: `prompt:str`, `model:str`, `session_id:str`
-Enums for constraints: `cli:enum(claude|codex|gemini|grok|mistral|devin)`
+Enums for constraints: `cli:enum(claude|codex|gemini|grok|mistral|devin|cursor)`
 
 **Why:** Avoid nested dictionaries → prevents agent hallucination of keys.
 

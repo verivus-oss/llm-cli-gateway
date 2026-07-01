@@ -91,6 +91,7 @@ describe("provider tool capabilities", () => {
     expect(Object.keys(capabilities).sort()).toEqual([
       "claude",
       "codex",
+      "cursor",
       "devin",
       "gemini",
       "grok",
@@ -112,6 +113,14 @@ describe("provider tool capabilities", () => {
     expect(capabilities.mistral.controls.denylist.behavior).toContain("ignored");
     expect(capabilities.grok_api.providerKind).toBe("api");
     expect(capabilities.grok_api.gatewayRequestTools).toEqual([]);
+    expect(capabilities.cursor.controls.permissionMode.behavior).toContain("approvalStrategy");
+    expect(capabilities.cursor.controls.workspace.behavior).toContain("registered workspace");
+    expect(capabilities.cursor.controls.session.behavior).toContain("gw-*");
+    expect(
+      capabilities.cursor.unsupportedInputs.some(input =>
+        input.details.includes("rejected instead of silently ignored")
+      )
+    ).toBe(true);
   });
 
   it("covers Claude, Codex, and Gemini request-schema capabilities", () => {
@@ -523,7 +532,7 @@ describe("provider tool capabilities", () => {
       expect(acp?.entrypoint).toBeNull();
     });
 
-    it("classifies Mistral, Grok and Devin as native ACP candidates with argv-array entrypoints", () => {
+    it("classifies native ACP candidates with argv-array entrypoints", () => {
       const mistral = getProviderToolCapabilities("mistral").mistral?.acp;
       expect(mistral?.status).toBe("native_smoke_passed");
       expect(mistral?.mediation).toBe("native");
@@ -541,6 +550,13 @@ describe("provider tool capabilities", () => {
       expect(devin?.mediation).toBe("native");
       expect(devin?.entrypoint).toEqual({ command: "devin", args: ["acp"] });
       expect(devin?.smokeSupported).toBe(true);
+
+      const cursor = getProviderToolCapabilities("cursor").cursor?.acp;
+      expect(cursor?.status).toBe("native_smoke_passed");
+      expect(cursor?.mediation).toBe("native");
+      expect(cursor?.entrypoint).toEqual({ command: "cursor-agent", args: ["acp"] });
+      expect(cursor?.smokeSupported).toBe(true);
+      expect(cursor?.smokeStatus).toBe("passed");
     });
 
     it("never labels an adapter-mediated provider as native and keeps runtime routing off", () => {

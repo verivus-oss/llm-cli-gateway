@@ -243,9 +243,17 @@ describe("ACP smoke harness — eligibleSmokeProviders", () => {
 
   it("includes only native-ACP providers that are per-provider enabled", () => {
     const config = makeConfig();
+    config.providers.cursor = {
+      enabled: true,
+      command: "cursor-agent",
+      args: ["acp"],
+      runtimeEnabled: false,
+      isolatedLeaderSocket: false,
+    };
     const eligible = eligibleSmokeProviders(config);
     expect(eligible).toContain("mistral");
     expect(eligible).toContain("grok");
+    expect(eligible).toContain("cursor");
   });
 
   it("excludes a provider that is present but per-provider disabled", () => {

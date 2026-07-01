@@ -18,7 +18,7 @@ import {
   listProviderSubcommands,
 } from "../upstream-contracts.js";
 import type { CliContract } from "../upstream-contracts.js";
-import type { CliType } from "../session-manager.js";
+import { CLI_TYPES, type CliType } from "../provider-types.js";
 
 describe("upstream CLI contracts", () => {
   it("accepts a valid Claude argv emitted by the gateway", () => {
@@ -663,14 +663,7 @@ Options:
   });
 
   describe("ACP upstream entrypoint contracts (track-acp-upstream-contracts)", () => {
-    const ALL_PROVIDERS: readonly CliType[] = [
-      "claude",
-      "codex",
-      "devin",
-      "gemini",
-      "grok",
-      "mistral",
-    ];
+    const ALL_PROVIDERS: readonly CliType[] = CLI_TYPES;
 
     it("declares an ACP entrypoint contract for every provider with the matrix status", () => {
       const expected: Record<CliType, string> = {
@@ -680,6 +673,7 @@ Options:
         codex: "adapter_mediated_deferred",
         claude: "adapter_mediated_deferred",
         gemini: "absent_watchlist",
+        cursor: "native",
       };
       for (const cli of ALL_PROVIDERS) {
         const acp = ACP_ENTRYPOINT_CONTRACTS[cli];
@@ -696,6 +690,8 @@ Options:
       expect(ACP_ENTRYPOINT_CONTRACTS.grok.entrypointArgs).toEqual(["agent", "stdio"]);
       expect(ACP_ENTRYPOINT_CONTRACTS.devin.executable).toBe("devin");
       expect(ACP_ENTRYPOINT_CONTRACTS.devin.entrypointArgs).toEqual(["acp"]);
+      expect(ACP_ENTRYPOINT_CONTRACTS.cursor.executable).toBe("cursor-agent");
+      expect(ACP_ENTRYPOINT_CONTRACTS.cursor.entrypointArgs).toEqual(["acp"]);
 
       // codex/claude adapters are documentation only, never native.
       expect(ACP_ENTRYPOINT_CONTRACTS.codex.status).not.toBe("native");

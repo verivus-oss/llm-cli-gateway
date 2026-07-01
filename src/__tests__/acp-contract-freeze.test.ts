@@ -42,10 +42,11 @@ describe("freeze-contract-and-non-goals: ACP contract metadata", () => {
     );
   });
 
-  it("classifies Mistral, Grok and Devin as native candidates, never adapter as native", () => {
+  it("classifies Mistral, Grok, Devin and Cursor as native candidates, never adapter as native", () => {
     expect(ACP_CONTRACT.providers.mistral.classification).toBe("native_candidate");
     expect(ACP_CONTRACT.providers.grok.classification).toBe("native_candidate");
     expect(ACP_CONTRACT.providers.devin.classification).toBe("native_candidate");
+    expect(ACP_CONTRACT.providers.cursor.classification).toBe("native_candidate");
     expect(ACP_CONTRACT.providers.codex.classification).toBe("adapter_mediated_deferred");
     expect(ACP_CONTRACT.providers.claude.classification).toBe("adapter_mediated_deferred");
     expect(ACP_CONTRACT.providers.gemini.classification).toBe("absent_watchlist");

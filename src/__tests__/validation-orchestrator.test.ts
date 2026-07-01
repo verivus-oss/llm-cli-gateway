@@ -150,6 +150,19 @@ describe("Layer 6 validation orchestrator (U20)", () => {
     expect(report.report.structuredContent.jobIds).toEqual(["job-claude-1", "job-codex-2"]);
   });
 
+  it("builds Cursor validation reviewer jobs with the headless print surface", () => {
+    const fake = makeScriptedManager({});
+    startValidationRun(
+      { asyncJobManager: fake.manager as any, getProviderRuntimeStatus: runtime },
+      { intent: "validate", question: "can cursor review?", providers: ["cursor"] }
+    );
+    expect(fake.startCalls).toHaveLength(1);
+    expect(fake.startCalls[0].cli).toBe("cursor");
+    expect(fake.startCalls[0].args.slice(0, 4)).toEqual(["--print", "--mode", "ask", "--sandbox"]);
+    expect(fake.startCalls[0].args[4]).toBe("enabled");
+    expect(fake.startCalls[0].args.at(-1)).toContain("can cursor review?");
+  });
+
   it("normalizes a completed provider result with a verdict heading", () => {
     const fake = makeScriptedManager({
       claude: {

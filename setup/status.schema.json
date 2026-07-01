@@ -118,7 +118,7 @@
     },
     "providers": {
       "type": "object",
-      "required": ["claude", "codex", "gemini", "grok", "mistral"],
+      "minProperties": 1,
       "additionalProperties": {
         "type": "object",
         "required": [
@@ -353,7 +353,7 @@
             "catalog": { "const": "provider-tools://catalog" },
             "providers": {
               "type": "object",
-              "required": ["claude", "codex", "gemini", "grok", "grok_api", "mistral"],
+              "minProperties": 1,
               "additionalProperties": { "type": "string" }
             }
           },
@@ -362,7 +362,7 @@
         "cache_ttl_ms": { "type": "integer", "minimum": 0 },
         "providers": {
           "type": "object",
-          "required": ["claude", "codex", "gemini", "grok", "grok_api", "mistral"],
+          "minProperties": 1,
           "additionalProperties": {
             "type": "object",
             "required": [

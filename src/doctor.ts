@@ -38,8 +38,7 @@ import {
   type ProviderCapabilityId,
   type ProviderKind,
 } from "./provider-tool-capabilities.js";
-
-export type CliType = "claude" | "codex" | "gemini" | "grok" | "mistral" | "devin";
+import { CLI_TYPES, type CliType } from "./session-manager.js";
 
 /**
  * Slice 3 cross-cutting: doctor report block summarising the gateway's
@@ -352,7 +351,7 @@ export interface DoctorReport {
     gateway_app_dir_is_workspace: boolean;
   };
   providers: Record<
-    "claude" | "codex" | "gemini" | "grok" | "mistral",
+    CliType,
     {
       cli_available: boolean;
       version: string | null;
@@ -729,13 +728,9 @@ export function createDoctorReport(
         repo => repo.path === join(homedir(), ".llm-cli-gateway")
       ),
     },
-    providers: {
-      claude: doctorProviderStatus(providerStatuses.claude),
-      codex: doctorProviderStatus(providerStatuses.codex),
-      gemini: doctorProviderStatus(providerStatuses.gemini),
-      grok: doctorProviderStatus(providerStatuses.grok),
-      mistral: doctorProviderStatus(providerStatuses.mistral),
-    },
+    providers: Object.fromEntries(
+      CLI_TYPES.map(provider => [provider, doctorProviderStatus(providerStatuses[provider])])
+    ) as DoctorReport["providers"],
     endpoint_exposure: endpointExposure,
     client_config: clientConfigStatus(),
     cache_awareness: buildCacheAwarenessReport(opts),

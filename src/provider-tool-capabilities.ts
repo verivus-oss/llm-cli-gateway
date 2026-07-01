@@ -256,6 +256,11 @@ export const ACP_CONTRACT: AcpContractMetadata = {
       summary:
         "Cognition Devin CLI exposes a native ACP server via `devin acp` (stdio); Slice D1 initialize + session/new smoke passed (protocolVersion 1, third runtime pilot). Runtime routing stays config-gated.",
     },
+    cursor: {
+      classification: "native_candidate",
+      summary:
+        "Cursor Agent CLI exposes a hidden native ACP stdio entrypoint via `cursor-agent acp`; initialize + session/new smoke passed locally (protocolVersion 1, session created).",
+    },
   },
 };
 
@@ -448,6 +453,20 @@ const ACP_CAPABILITIES: Record<KnownProviderCapabilityId, ProviderAcpCapability>
     caveats: [
       'Native ACP via `devin acp` (stdio JSON-RPC); Slice D1 initialize + session/new smoke passed (protocolVersion 1, agent "Affogato").',
       "Credentials come from `devin auth login` or WINDSURF_API_KEY; empty-env smoke is not expected to pass.",
+      "Runtime routing stays disabled until ACP is enabled in gateway config.",
+    ],
+    docs: ACP_DOCS_REFERENCE,
+  },
+  cursor: {
+    status: "native_smoke_passed",
+    mediation: "native",
+    targetVersion: "cursor-agent 2026.06.29-2ad2186",
+    entrypoint: { command: "cursor-agent", args: ["acp"] },
+    runtimeEnabled: false,
+    smokeSupported: true,
+    smokeStatus: "passed",
+    caveats: [
+      "Native ACP via hidden `cursor-agent acp` stdio JSON-RPC entrypoint; manual initialize + session/new smoke passed locally (protocolVersion 1, session created; no agentInfo returned).",
       "Runtime routing stays disabled until ACP is enabled in gateway config.",
     ],
     docs: ACP_DOCS_REFERENCE,
@@ -1139,6 +1158,79 @@ const TOOL_CONTROLS: Record<KnownProviderCapabilityId, ProviderCapabilityStaticD
       },
     ],
   },
+  cursor: {
+    providerKind: "cli",
+    gatewayRequestTools: ["cursor_request", "cursor_request_async"],
+    summary:
+      "Cursor Agent CLI runs a headless agentic coding/review session; the gateway passes prompt, model, mode, sandbox/trust controls, workspace roots, and session resume on the CLI transport, with ACP transport gated and fail-closed.",
+    controls: {
+      allowlist: {
+        supported: false,
+        behavior: "Cursor Agent exposes force/auto-review modes, not per-request allow lists.",
+      },
+      denylist: {
+        supported: false,
+        behavior: "Cursor Agent has no per-request deny-list flag on the tracked surface.",
+      },
+      mcpServers: {
+        supported: false,
+        requestField: "mcpServers",
+        behavior:
+          "Cursor manages its own MCP configuration via `cursor-agent mcp`; the gateway does not mutate Cursor MCP config.",
+      },
+      nativeSkills: {
+        supported: false,
+        behavior:
+          "Cursor owns rules/plugins; the gateway does not discover Cursor-native rules as skills.",
+      },
+      permissionMode: {
+        supported: true,
+        requestField: "mode/force/autoReview/sandbox/trust/approvalStrategy/approvalPolicy",
+        cliFlag: "--mode/--force/--auto-review/--sandbox/--trust",
+        behavior:
+          'Cursor supports read-only plan/ask modes, Smart Auto-review, force/yolo, sandbox overrides, and workspace trust in headless mode; under approvalStrategy:"mcp_managed", high-impact force/trust/sandbox-disabled requests are gated by the gateway approval manager.',
+      },
+      promptControl: {
+        supported: true,
+        requestField: "prompt",
+        behavior: "Prompt is passed as the positional prompt to `cursor-agent --print`.",
+      },
+      session: {
+        supported: true,
+        requestField: "sessionId/resumeLatest/createNewSession",
+        cliFlag: "--resume/--continue",
+        behavior:
+          "Resumes a Cursor chat/session (--resume <id>) or the most recent chat (--continue); gateway-created gw-* session ids are tracking ids and are not resumable Cursor chat ids.",
+      },
+      workspace: {
+        supported: true,
+        requestField: "workspace/addDir",
+        cliFlag: "--workspace/--add-dir",
+        behavior:
+          "Sets the Cursor workspace and additional workspace roots; remote HTTP/OAuth callers must use registered workspace aliases/roots rather than raw paths.",
+      },
+    },
+    features: baseFeatures({
+      sessionContinuity: true,
+      approvalAndSandboxControls: true,
+      promptControl: true,
+      workspaceControls: true,
+    }),
+    unsupportedInputs: [
+      {
+        input: "mcpServers",
+        behavior: "not_supported",
+        details:
+          "Cursor owns MCP config via `cursor-agent mcp`; gateway request-time MCP server injection is not implemented.",
+      },
+      {
+        input: 'transport:"acp" with CLI-only options',
+        behavior: "reject",
+        details:
+          "Cursor ACP routing currently accepts prompt/model/session inputs only; mode, outputFormat, workspace, addDir, force, autoReview, sandbox, trust, and prompt/response optimization are rejected instead of silently ignored.",
+      },
+    ],
+  },
 };
 
 /**
@@ -1224,7 +1316,7 @@ export function providerCapabilityIds(
 }
 
 /**
- * The static known capability ids (the six CLI providers plus grok_api), with
+ * The static known capability ids (the spawnable CLI providers plus grok_api), with
  * no dynamic generic API providers folded in. Callers that index CLI-keyed maps
  * (e.g. the doctor `provider_capabilities` summary) must use this, not the
  * widened `providerCapabilityIds()`.
@@ -1543,6 +1635,10 @@ function skillRoots(cli: CliType): SkillRoot[] {
     case "devin":
       // Devin owns its skills via `devin skills`; the gateway does not discover
       // them (nativeSkills:false in TOOL_CONTROLS), so no roots are scanned.
+      return [];
+    case "cursor":
+      // Cursor owns rules/plugins; the gateway does not discover them as
+      // provider-native skills (nativeSkills:false in TOOL_CONTROLS).
       return [];
   }
 }

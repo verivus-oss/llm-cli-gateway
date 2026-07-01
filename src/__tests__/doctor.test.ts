@@ -10,6 +10,8 @@ import {
   type DoctorReport,
 } from "../doctor.js";
 import type { ApiProviderConfig, ProvidersConfig } from "../config.js";
+import { CLI_TYPES } from "../provider-types.js";
+import { knownProviderCapabilityIds } from "../provider-tool-capabilities.js";
 
 // Layer 6 / U20: doctor JSON schema shape + secret redaction coverage.
 //
@@ -132,11 +134,10 @@ describe("Layer 6 doctor report (U20)", () => {
     expect(report.gateway.name).toBe("llm-cli-gateway");
     expect(report.transport.default).toBe("stdio");
     expect(report.endpoint_exposure.mode).toBe("local_only");
-    expect(report.providers.claude.cli_available).toBeDefined();
-    expect(report.providers.codex).toBeDefined();
-    expect(report.providers.gemini).toBeDefined();
-    expect(report.providers.grok).toBeDefined();
-    expect(report.providers.mistral).toBeDefined();
+    for (const provider of CLI_TYPES) {
+      expect(report.providers[provider]).toBeDefined();
+      expect(report.providers[provider].cli_available).toBeDefined();
+    }
     expect(report.provider_capabilities.schema_version).toBe("provider-tool-capabilities.v2");
     expect(report.provider_capabilities.providers.grok_api.provider_kind).toBe("api");
     expect(report.client_config.vibe_session_logging).toBeDefined();
@@ -150,14 +151,11 @@ describe("Layer 6 doctor report (U20)", () => {
 
     expect(report.provider_capabilities.tool).toBe("provider_tool_capabilities");
     expect(report.provider_capabilities.resources.catalog).toBe("provider-tools://catalog");
-    expect(report.provider_capabilities.resources.providers).toMatchObject({
-      claude: "provider-tools://claude",
-      codex: "provider-tools://codex",
-      gemini: "provider-tools://gemini",
-      grok: "provider-tools://grok",
-      grok_api: "provider-tools://grok_api",
-      mistral: "provider-tools://mistral",
-    });
+    for (const provider of knownProviderCapabilityIds()) {
+      expect(report.provider_capabilities.resources.providers[provider]).toBe(
+        `provider-tools://${provider}`
+      );
+    }
     expect(report.provider_capabilities.providers.grok.supported_features).toEqual(
       expect.arrayContaining(["toolAllowDenyControls", "promptControl", "compactionControls"])
     );

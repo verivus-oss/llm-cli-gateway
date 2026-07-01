@@ -41,6 +41,14 @@ describe("cli updater", () => {
     expect(plan.strategy).toBe("self-update");
   });
 
+  it("uses self-update for Cursor Agent latest", () => {
+    const plan = buildCliUpgradePlan("cursor");
+
+    expect(plan.command).toBe("cursor-agent");
+    expect(plan.args).toEqual(["update"]);
+    expect(plan.strategy).toBe("self-update");
+  });
+
   it("uses self-update with explicit version for Grok pinned targets", () => {
     const plan = buildCliUpgradePlan("grok", "0.1.210");
 

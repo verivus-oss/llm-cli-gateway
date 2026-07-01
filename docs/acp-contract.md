@@ -90,14 +90,17 @@ classification does not pre-empt them.
 | Mistral Vibe           | vibe 2.17.1              | native_candidate          | `vibe-acp`               |
 | xAI Grok CLI           | grok 0.2.60 (474c2bbfc)  | native_candidate          | `grok agent stdio`       |
 | Cognition Devin CLI    | devin 2026.7.23 (3bd47f77) | native_candidate      | `devin acp`              |
+| Cursor Agent CLI       | cursor-agent 2026.06.29-2ad2186 | native_candidate | `cursor-agent acp`       |
 | OpenAI Codex CLI       | codex-cli 0.141.0        | adapter_mediated_deferred | none at target version   |
 | Anthropic Claude Code  | claude 2.1.185           | adapter_mediated_deferred | none at target version   |
 | Google Antigravity agy | agy 1.0.10                | absent_watchlist          | none at target version   |
 
 Notes:
 
-- Mistral, Grok and Devin are native ACP runtime-pilot candidates (Devin's
-  `initialize` + `session/new` smoke passed in Slice D1); their runtime routing
+- Mistral, Grok, Devin and Cursor are native ACP candidates. Devin's
+  `initialize` + `session/new` smoke passed in Slice D1; Cursor's
+  `initialize` + `session/new` smoke passed locally with protocolVersion 1 and
+  no agentInfo returned. Runtime routing
   stays behind global and per-provider config gates.
 - Codex and Claude are adapter-mediated and deferred at their target CLI
   versions; adapter evidence is documentation only and never native support.

@@ -14,7 +14,7 @@ import { CLI_TYPES } from "../session-manager.js";
 // Grok, Codex, Claude, and Antigravity agy.
 
 describe("acp provider registry", () => {
-  it("covers exactly the five gateway CLI providers", () => {
+  it("covers exactly the gateway CLI providers", () => {
     const registry = getAcpProviderRegistry();
     expect(Object.keys(registry).sort()).toEqual([...CLI_TYPES].sort());
   });
@@ -26,6 +26,7 @@ describe("acp provider registry", () => {
     claude: "adapter_mediated_deferred",
     gemini: "absent_watchlist",
     devin: "native_smoke_passed",
+    cursor: "native_smoke_passed",
   };
 
   const expectedSupportKind: Record<string, AcpSupportKind> = {
@@ -35,6 +36,7 @@ describe("acp provider registry", () => {
     claude: "adapter_mediated",
     gemini: "none",
     devin: "native",
+    cursor: "native",
   };
 
   for (const provider of CLI_TYPES) {
@@ -78,9 +80,12 @@ describe("acp provider registry", () => {
     const devin = getAcpProviderEntry("devin");
     expect(devin.entrypoint).toEqual({ command: "devin", args: ["acp"] });
 
+    const cursor = getAcpProviderEntry("cursor");
+    expect(cursor.entrypoint).toEqual({ command: "cursor-agent", args: ["acp"] });
+
     // Structural guarantee for no_shell_eval_for_entrypoints: args is an array,
     // and the command contains no shell metacharacters.
-    for (const provider of ["mistral", "grok", "devin"] as const) {
+    for (const provider of ["mistral", "grok", "devin", "cursor"] as const) {
       const entrypoint = getAcpProviderEntry(provider).entrypoint;
       expect(entrypoint).not.toBeNull();
       expect(Array.isArray(entrypoint?.args)).toBe(true);
@@ -97,8 +102,8 @@ describe("acp provider registry", () => {
     }
   });
 
-  it("returns native runtime pilots in priority order (mistral, grok, then devin)", () => {
-    expect(getRuntimePilotProviders()).toEqual(["mistral", "grok", "devin"]);
+  it("returns native runtime pilots in priority order (mistral, grok, devin, then cursor)", () => {
+    expect(getRuntimePilotProviders()).toEqual(["mistral", "grok", "devin", "cursor"]);
   });
 
   it("identifies native ACP providers correctly", () => {
@@ -107,6 +112,7 @@ describe("acp provider registry", () => {
     expect(providerHasNativeAcp("codex")).toBe(false);
     expect(providerHasNativeAcp("claude")).toBe(false);
     expect(providerHasNativeAcp("gemini")).toBe(false);
+    expect(providerHasNativeAcp("cursor")).toBe(true);
   });
 
   it("freezes the registry so consumers cannot mutate metadata", () => {

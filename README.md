@@ -9,9 +9,9 @@
 > _"Without consultation, plans are frustrated, but with many counselors they succeed."_
 > — Proverbs 15:22 (LSB)
 
-A Model Context Protocol (MCP) gateway for running Claude Code, Codex, Gemini, Grok, Mistral (Vibe), and Devin CLIs from one MCP endpoint, with durable async jobs, session continuity, cache-aware prompting, observability, and personal-appliance setup tooling.
+A Model Context Protocol (MCP) gateway for running Claude Code, Codex, Gemini, Grok, Mistral (Vibe), Devin, and Cursor Agent CLIs from one MCP endpoint, with durable async jobs, session continuity, cache-aware prompting, observability, and personal-appliance setup tooling.
 
-**Why developers try it:** one local MCP endpoint for cross-LLM validation, multi-agent coding workflows, and repeatable assistant-led setup across six provider CLIs.
+**Why developers try it:** one local MCP endpoint for cross-LLM validation, multi-agent coding workflows, and repeatable assistant-led setup across registered provider CLIs.
 
 **Current signals:** CI and security workflows pass on `main`, OpenSSF Scorecard is published, OpenSSF Best Practices is passing, releases use Sigstore signing, and the package is MIT licensed.
 
@@ -38,7 +38,7 @@ Or use directly with `npx` from an MCP client:
 
 `llm-cli-gateway` is a single-user MCP gateway for cross-LLM validation and multi-agent coding workflows. It is more than a thin CLI wrapper:
 
-- Runs six provider CLIs through consistent sync and async MCP tools.
+- Runs registered provider CLIs through consistent sync and async MCP tools.
 - Persists long-running jobs, supports restart-safe result collection, deduplication, cancellation, and sync-to-async deferral.
 - Tracks sessions, real CLI resume paths, structured response metadata, and cache telemetry.
 - Supports cache-aware `promptParts`, including explicit Claude `cache_control` when opted in.
@@ -157,7 +157,7 @@ docker compose -f docker/personal.compose.yml run --rm doctor
 
 ### Core Capabilities
 
-- **Multi-LLM Orchestration**: Unified interface for Claude Code, Codex, Gemini, Grok, Mistral (Vibe), and Devin CLIs
+- **Multi-LLM Orchestration**: Unified interface for Claude Code, Codex, Gemini, Grok, Mistral (Vibe), Devin, and Cursor Agent CLIs
 - **Session Management**: Track and resume conversations across all CLIs with persistent storage
 - **Gateway-owned worktrees**: Run any sync or async provider request inside a managed git worktree, with per-session reuse and cleanup
 - **Token Optimization**: Automatic 44% reduction on prompts, 37% on responses (opt-in)
@@ -169,11 +169,11 @@ docker compose -f docker/personal.compose.yml run --rm doctor
 - **SQLite Flight Recorder**: Every request/response logged to `~/.llm-cli-gateway/logs.db` with correlation IDs, token usage, duration, retry counts, and circuit breaker state. Browse with [Datasette](https://datasette.io/): `datasette ~/.llm-cli-gateway/logs.db`
 - **Structured Metadata**: Tool responses include machine-readable `structuredContent` (model, cli, correlationId, sessionId, durationMs, token counts)
 - **Cache observability resources**: `cache-state://global`, `cache-state://session/{id}`, and `cache-state://prefix/{hash}` MCP resources return aggregate cache hit/miss/savings — tokens and hashes only, no prompt text. `session_get` includes a `cacheState` block when the session has prior requests.
-- **Provider capability inventory**: `provider_tool_capabilities` and `provider-tools://catalog` expose the gateway request fields, supported/degraded provider controls, local skill/tool discovery, and safe config-surface hints for Claude Code, Codex CLI, Gemini/Antigravity, Grok CLI/API, Mistral Vibe, and Cognition Devin. `doctor --json` includes a compact `provider_capabilities` summary for setup assistants.
+- **Provider capability inventory**: `provider_tool_capabilities` and `provider-tools://catalog` expose the gateway request fields, supported/degraded provider controls, local skill/tool discovery, and safe config-surface hints for Claude Code, Codex CLI, Gemini/Antigravity, Grok CLI/API, Mistral Vibe, Cognition Devin, and Cursor Agent. `doctor --json` includes a compact `provider_capabilities` summary for setup assistants.
 
 ### Cache-aware operation
 
-Every `*_request` and `*_request_async` tool except `devin_request` / `devin_request_async` accepts an optional `promptParts` field that structures the prompt for better cache hit rates (the Devin headless path takes a plain `prompt` only). The gateway concatenates the parts in canonical order (`system → tools → context → task`) so that the stable prefix bytes precede the volatile task tail unchanged across calls, letting each provider's automatic prompt-caching land on the same content hash each time.
+Every `*_request` and `*_request_async` tool except `devin_request` / `devin_request_async` and `cursor_request` / `cursor_request_async` accepts an optional `promptParts` field that structures the prompt for better cache hit rates (the Devin and Cursor headless paths take a plain `prompt` only). The gateway concatenates the parts in canonical order (`system → tools → context → task`) so that the stable prefix bytes precede the volatile task tail unchanged across calls, letting each provider's automatic prompt-caching land on the same content hash each time.
 
 ```json
 {
@@ -188,7 +188,7 @@ Every `*_request` and `*_request_async` tool except `devin_request` / `devin_req
 
 `prompt` and `promptParts` are mutually exclusive — pass exactly one.
 
-Per-CLI capability matrix (prefix discipline is automatic via `promptParts` for all providers except Devin, which has no `promptParts` surface; explicit levers are provider-specific):
+Per-CLI capability matrix (prefix discipline is automatic via `promptParts` for all providers except Devin and Cursor, which have no `promptParts` surface; explicit levers are provider-specific):
 
 | CLI     | Prefix discipline | Explicit lever(s) |
 | ------- | ----------------- | ----------------- |
@@ -197,6 +197,8 @@ Per-CLI capability matrix (prefix discipline is automatic via `promptParts` for 
 | gemini  | yes               | none (implicit server-side) |
 | grok    | yes               | `compactionMode` / `compactionDetail` (context compaction: `summary|transcript|segments`; `segments` writes per-segment markdown) |
 | mistral | yes               | none (implicit) |
+| devin   | no                | plain `prompt` only |
+| cursor  | no                | plain `prompt` only |
 
 **Claude example (explicit cacheControl)**
 
@@ -960,9 +962,36 @@ Run a Cognition Devin CLI request synchronously (headless print mode, `devin -p`
 - `idleTimeoutMs` (integer, optional): Kill a stuck process after output inactivity; 30,000 to 3,600,000 ms
 - `forceRefresh` (boolean, optional): Bypass dedup and force a fresh CLI run, default: false
 
-##### `claude_request_async` / `codex_request_async` / `gemini_request_async` / `grok_request_async` / `mistral_request_async` / `devin_request_async`
+##### `cursor_request`
 
-Start a long-running Claude, Codex, Gemini, Grok, Mistral, or Devin request without waiting for completion in the same MCP call.
+Run a Cursor Agent CLI request synchronously. Defaults to headless print mode (`cursor-agent --print`) and auto-defers to a pollable job past the sync deadline when async jobs are enabled. Set `transport: "acp"` to use Cursor's native `cursor-agent acp` transport when `[acp]` and `[acp.providers.cursor].runtime_enabled` are enabled; current ACP routing accepts only prompt/model/session inputs and rejects CLI-only options such as `mode`, `workspace`, `sandbox`, `force`, and `trust`.
+
+**Parameters:**
+
+- `prompt` (string, required): Prompt text for Cursor Agent CLI (1-100,000 chars)
+- `model` (string, optional): Model name or alias (for example `gpt-5`, `sonnet-4-thinking`, or `latest`)
+- `mode` (string, optional): Cursor mode, `"plan"` or `"ask"` (`--mode`)
+- `outputFormat` (string, optional): `"text"` (default), `"json"`, or `"stream-json"`
+- `transport` (string, optional): `"cli"` (default) or `"acp"`; ACP fails closed unless enabled in gateway config and rejects unsupported Cursor CLI-only controls instead of dropping them
+- `force` (boolean, optional): Emit `--force` for non-interactive operation
+- `autoReview` (boolean, optional): Emit `--auto-review`
+- `sandbox` (string, optional): `"enabled"` or `"disabled"` (`--sandbox`)
+- `trust` (boolean, optional): Emit `--trust` for this invocation
+- `workspace` (string, optional): Cursor workspace path or name (`--workspace`); remote HTTP/OAuth callers must pass a registered workspace alias, while local stdio callers may pass paths
+- `addDir` (string[], optional): Additional workspace roots (one `--add-dir` per entry); remote HTTP/OAuth callers must use registered workspace roots
+- `sessionId` (string, optional): Cursor chat/session ID to resume (`--resume <id>`). The `gw-*` id minted for a brand-new gateway session is not resumable through `sessionId`; continue with `resumeLatest: true`
+- `resumeLatest` (boolean, optional): Resume the most recent Cursor chat (`--continue`)
+- `createNewSession` (boolean, optional): Force a new session
+- `approvalStrategy` (string, optional): `"legacy"` (default) or `"mcp_managed"`; under MCP-managed approval, high-impact Cursor flags (`force`, `trust`, or `sandbox: "disabled"`) are denied unless bypass approval is explicitly allowed
+- `approvalPolicy` (string, optional): `"strict"`, `"balanced"`, or `"permissive"` override for MCP-managed approval
+- `optimizePrompt` / `optimizeResponse` (boolean, optional): Token-efficiency optimisation, default: false
+- `correlationId` (string, optional): Request trace ID (auto-generated if omitted)
+- `idleTimeoutMs` (integer, optional): Kill a stuck process after output inactivity; 30,000 to 3,600,000 ms
+- `forceRefresh` (boolean, optional): Bypass dedup and force a fresh CLI run, default: false
+
+##### `claude_request_async` / `codex_request_async` / `gemini_request_async` / `grok_request_async` / `mistral_request_async` / `devin_request_async` / `cursor_request_async`
+
+Start a long-running Claude, Codex, Gemini, Grok, Mistral, Devin, or Cursor request without waiting for completion in the same MCP call.
 
 Use this flow when analysis/runtime can exceed client tool-call limits:
 
@@ -1021,7 +1050,7 @@ Return the gateway's declared provider CLI contracts, optionally probing the ins
 
 **Parameters:**
 
-- `cli` (string, optional): Filter (`claude|codex|gemini|grok|mistral|devin`)
+- `cli` (string, optional): Filter (`claude|codex|gemini|grok|mistral|devin|cursor`)
 - `probeInstalled` (boolean, optional, default `false`): Run local `--help` probes and compare advertised flags against the declared contract — strongly recommended after any provider CLI upgrade. The probe reports `missingFlags`, `extraFlags`, `acknowledgedExtraFlags` (known upstream-only flags filtered from `extraFlags`), `discoveredFlags`, and stale-marker `warnings`.
 
 #### Session Management Tools
@@ -1032,7 +1061,7 @@ Create a new session for a specific CLI.
 
 **Parameters:**
 
-- `cli` (string, required): CLI to create session for ("claude", "codex", "gemini", "grok", "mistral", "devin")
+- `cli` (string, required): CLI to create session for ("claude", "codex", "gemini", "grok", "mistral", "devin", "cursor")
 - `description` (string, optional): Description for the session
 - `setAsActive` (boolean, optional): Set as active session, default: true
 
@@ -1052,7 +1081,7 @@ List all sessions, optionally filtered by CLI.
 
 **Parameters:**
 
-- `cli` (string, optional): Filter by CLI ("claude", "codex", "gemini", "grok", "mistral", "devin")
+- `cli` (string, optional): Filter by CLI ("claude", "codex", "gemini", "grok", "mistral", "devin", "cursor")
 
 **Response includes:**
 
@@ -1101,7 +1130,7 @@ List available models for each CLI.
 
 **Parameters:**
 
-- `cli` (string, optional): Specific provider to list models for (`"claude"`, `"codex"`, `"gemini"`, `"grok"`, `"mistral"`, `"devin"`, or an enabled API provider name). When one or more `[providers.<name>]` API providers are enabled, the unfiltered response also carries an `apiProviders` array (each entry tagged `providerKind: "api"`); see [API providers (HTTP)](#api-providers-http).
+- `cli` (string, optional): Specific provider to list models for (`"claude"`, `"codex"`, `"gemini"`, `"grok"`, `"mistral"`, `"devin"`, `"cursor"`, or an enabled API provider name). When one or more `[providers.<name>]` API providers are enabled, the unfiltered response also carries an `apiProviders` array (each entry tagged `providerKind: "api"`); see [API providers (HTTP)](#api-providers-http).
 
 **Response includes:**
 
@@ -1149,7 +1178,7 @@ inputs.
 
 **Parameters:**
 
-- `cli` (string, optional): Provider filter (`"claude"`, `"codex"`, `"gemini"`, `"grok"`, `"mistral"`, `"devin"`, `"grok_api"`, or an enabled API provider name)
+- `cli` (string, optional): Provider filter (`"claude"`, `"codex"`, `"gemini"`, `"grok"`, `"mistral"`, `"devin"`, `"cursor"`, `"grok_api"`, or an enabled API provider name)
 - `includeSkills` (boolean, default `true`): Include bounded local skill discovery
 - `includeProviderTools` (boolean, default `true`): Include provider-native tools extracted from discovered skills
 - `includeUnsupported` (boolean, default `true`): Include explicit unsupported/degraded input records
@@ -1170,6 +1199,7 @@ Equivalent MCP resources:
 - `provider-tools://grok_api`
 - `provider-tools://mistral`
 - `provider-tools://devin`
+- `provider-tools://cursor`
 - `provider-tools://<api-provider>` for each enabled `[providers.<name>]` API provider
 
 `doctor --json` also emits a compact `provider_capabilities` block with the
@@ -1186,7 +1216,7 @@ Report installed CLI versions.
 
 **Parameters:**
 
-- `cli` (string, optional): Specific CLI to inspect ("claude", "codex", "gemini", "grok", "mistral", "devin")
+- `cli` (string, optional): Specific CLI to inspect ("claude", "codex", "gemini", "grok", "mistral", "devin", "cursor")
 
 ##### `cli_upgrade`
 
@@ -1194,7 +1224,7 @@ Plan or run an upgrade for one CLI.
 
 **Parameters:**
 
-- `cli` (string, required): CLI to upgrade ("claude", "codex", "gemini", "grok", "mistral", "devin")
+- `cli` (string, required): CLI to upgrade ("claude", "codex", "gemini", "grok", "mistral", "devin", "cursor")
 - `target` (string, optional): Package tag/version/target, default: `latest`
 - `dryRun` (boolean, optional): Return the upgrade plan without running it, default: `true`
 - `timeoutMs` (number, optional): Upgrade timeout when `dryRun=false`
@@ -1210,6 +1240,7 @@ Plan or run an upgrade for one CLI.
 - Grok explicit target: `grok update --version <target>`
 - Mistral (Vibe): dispatches to the detected installer (`pip`/`uv`/`brew`); errors with guidance when none is detected (Vibe ships no self-update command)
 - Devin latest: `devin update` (self-update; explicit version targets are unsupported)
+- Cursor latest: `cursor-agent update` (self-update; explicit version targets are unsupported)
 
 **Example dry run:**
 
@@ -1227,7 +1258,7 @@ In addition to the spawnable CLI tools, the gateway can route requests to first-
 
 ### Configuring a provider
 
-API providers are declared as `[providers.<name>]` blocks in `~/.llm-cli-gateway/config.toml` (override with `LLM_GATEWAY_CONFIG`). The `<name>` becomes the provider's identity across every tool and resource and **must not** collide with a spawnable CLI name (`claude`, `codex`, `gemini`, `grok`, `mistral`, `devin`); a collision is rejected with a warning and the provider is disabled.
+API providers are declared as `[providers.<name>]` blocks in `~/.llm-cli-gateway/config.toml` (override with `LLM_GATEWAY_CONFIG`). The `<name>` becomes the provider's identity across every tool and resource and **must not** collide with a spawnable CLI name (`claude`, `codex`, `gemini`, `grok`, `mistral`, `devin`, `cursor`); a collision is rejected with a warning and the provider is disabled.
 
 ```toml
 # OpenRouter (OpenAI-compatible). The key is read from the named env var at

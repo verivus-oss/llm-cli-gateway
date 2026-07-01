@@ -9,6 +9,7 @@ import type { RemoteOAuthConfig, OAuthRegistrationPolicy } from "./auth.js";
 import { hashSecret, isSecretHash } from "./oauth.js";
 import { isHttpsOrLoopbackUrl, isLoopbackUrl } from "./api-http.js";
 import type { ApiProviderKind } from "./api-provider.js";
+import { CLI_TYPES } from "./provider-types.js";
 
 // Zod schemas for configuration validation
 const DatabaseUrlSchema = z
@@ -642,15 +643,7 @@ export function minStableTokensForModel(config: CacheAwarenessConfig, modelName:
 //──────────────────────────────────────────────────────────────────────────────
 
 // Spawnable CLI provider names reserved against API-provider name collisions.
-// Mirrors session-manager.CLI_TYPES (inlined to avoid an import cycle).
-const RESERVED_CLI_PROVIDER_NAMES: readonly string[] = [
-  "claude",
-  "codex",
-  "gemini",
-  "grok",
-  "mistral",
-  "devin",
-];
+const RESERVED_CLI_PROVIDER_NAMES: readonly string[] = CLI_TYPES;
 
 export const DEFAULT_XAI_API_KEY_ENV = "XAI_API_KEY";
 export const DEFAULT_XAI_BASE_URL = "https://api.x.ai/v1";
@@ -793,8 +786,6 @@ export function loadProvidersConfig(logger: Logger = noopLogger): ProvidersConfi
     // shadow that CLI on the validation reviewer path (matched by name) and
     // confuse metrics/catalogs. Reject the collision with a warning rather than
     // silently letting an HTTP endpoint impersonate `claude`/`codex`/etc.
-    // (Inlined rather than importing CLI_TYPES from session-manager, which
-    // imports from this module — avoids a value-import cycle. Keep in sync.)
     if (RESERVED_CLI_PROVIDER_NAMES.includes(name)) {
       logWarn(
         logger,

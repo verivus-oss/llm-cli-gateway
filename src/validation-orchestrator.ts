@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { AsyncJobManager, AsyncJobSnapshot } from "./async-job-manager.js";
 import { getProviderRuntimeStatus, type ProviderRuntimeStatus } from "./provider-status.js";
+import type { CliType } from "./provider-types.js";
 import { createApiProvider } from "./api-provider.js";
 import { prepareApiRequest } from "./api-request.js";
 import type { ApiProviderRuntime } from "./config.js";
@@ -82,7 +83,7 @@ function resolveReviewerStatus(
     return { installed: true, version: null, loginStatus: "authenticated", displayName: api.name };
   }
   const runtimeStatus = deps.getProviderRuntimeStatus ?? getProviderRuntimeStatus;
-  return runtimeStatus(provider as "claude" | "codex" | "gemini" | "grok" | "mistral");
+  return runtimeStatus(provider as CliType);
 }
 
 /**
@@ -112,7 +113,7 @@ function dispatchProviderJob(
     }).snapshot;
   }
   return deps.asyncJobManager.startJob(
-    provider as "claude" | "codex" | "gemini" | "grok" | "mistral",
+    provider as CliType,
     buildProviderArgs(provider, prompt),
     correlationId
   );
@@ -431,6 +432,8 @@ function buildProviderArgs(provider: ValidationProvider, prompt: string): string
     // let the user's environment pick the active model.
     return ["-p", prompt];
   }
+  if (provider === "devin") return ["-p", prompt];
+  if (provider === "cursor") return ["--print", "--mode", "ask", "--sandbox", "enabled", prompt];
   if (provider === "codex") return ["exec", "--skip-git-repo-check", prompt];
   return [prompt];
 }

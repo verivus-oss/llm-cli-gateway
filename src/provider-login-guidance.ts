@@ -148,6 +148,26 @@ const GUIDANCE: Record<CliType, ProviderLoginGuidance> = {
       expected: "CLI is installed and `devin auth status` reports an authenticated session",
     },
   },
+  cursor: {
+    provider: "cursor",
+    displayName: "Cursor Agent CLI",
+    install: {
+      summary: "Install Cursor Agent CLI using Cursor's current official installer.",
+      commands: ["cursor-agent update", "cursor-agent --version"],
+      documentationUrl: "https://cursor.com/cli",
+    },
+    login: {
+      summary:
+        "Sign in through Cursor Agent's official login flow, or set CURSOR_API_KEY for headless automation.",
+      commands: ["cursor-agent login", "cursor-agent status"],
+      credentialHandling:
+        "Let Cursor store credentials via `cursor-agent login`, or provide CURSOR_API_KEY in the process environment. Do not paste Cursor API keys into prompts or remote chats.",
+    },
+    verification: {
+      command: "cursor-agent status",
+      expected: "CLI is installed and `cursor-agent status` reports an authenticated account",
+    },
+  },
 };
 
 export function getProviderLoginGuidance(provider: CliType): ProviderLoginGuidance {

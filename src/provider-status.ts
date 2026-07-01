@@ -2,7 +2,7 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
-import type { CliType } from "./session-manager.js";
+import { CLI_TYPES, type CliType } from "./provider-types.js";
 import { getProviderLoginGuidance, type ProviderLoginGuidance } from "./provider-login-guidance.js";
 import { apiProviderKeyPresent, isApiProviderEnabled, type ApiProviderConfig } from "./config.js";
 import { redactDiagnosticUrl } from "./endpoint-exposure.js";
@@ -71,26 +71,20 @@ export function getApiProviderStatus(
   };
 }
 
-const PROVIDERS: CliType[] = ["claude", "codex", "gemini", "grok", "mistral", "devin"];
-const VERSION_ARGS: Record<CliType, string[]> = {
-  claude: ["--version"],
-  codex: ["--version"],
-  gemini: ["--version"],
-  grok: ["--version"],
-  mistral: ["--version"],
-  // `devin version` ≡ `devin --version` (cli.devin.ai).
-  devin: ["--version"],
-};
+const VERSION_ARGS = Object.fromEntries(
+  CLI_TYPES.map(provider => [provider, ["--version"]])
+) as Record<CliType, string[]>;
 
 // Mistral Vibe ships as the `vibe` binary (PyPI package mistral-vibe); the gateway
 // uses `mistral` as the provider key but invokes `vibe` on the shell.
 export const PROVIDER_COMMANDS: Record<CliType, string> = {
-  claude: "claude",
-  codex: "codex",
+  claude: providerCommandName("claude"),
+  codex: providerCommandName("codex"),
   gemini: providerCommandName("gemini"),
-  grok: "grok",
+  grok: providerCommandName("grok"),
   mistral: providerCommandName("mistral"),
   devin: providerCommandName("devin"),
+  cursor: providerCommandName("cursor"),
 };
 
 const LOGIN_CHECKS: Partial<Record<CliType, string[]>> = {
@@ -100,11 +94,12 @@ const LOGIN_CHECKS: Partial<Record<CliType, string[]>> = {
   mistral: ["auth", "status"],
   // `devin auth status` — non-interactive auth check (cli.devin.ai).
   devin: ["auth", "status"],
+  cursor: ["status"],
 };
 
 export function listProviderRuntimeStatuses(): Record<CliType, ProviderRuntimeStatus> {
   return Object.fromEntries(
-    PROVIDERS.map(provider => [provider, getProviderRuntimeStatus(provider)])
+    CLI_TYPES.map(provider => [provider, getProviderRuntimeStatus(provider)])
   ) as Record<CliType, ProviderRuntimeStatus>;
 }
 

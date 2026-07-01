@@ -383,7 +383,7 @@ export function buildServerInstructions(
     : '- Async jobs are DISABLED (persistence.backend = "none"): *_request_async and llm_job_* tools are not registered, and sync requests run to completion (no auto-deferral).';
   return `llm-cli-gateway: Multi-LLM orchestration via MCP.
 
-Tools: claude_request, codex_request, gemini_request, grok_request, mistral_request, devin_request${apiToolsNote} (sync)${asyncToolsNote} | codex_fork_session (fork a Codex session into a new branch)
+Tools: claude_request, codex_request, gemini_request, grok_request, mistral_request, devin_request, cursor_request${apiToolsNote} (sync)${asyncToolsNote} | codex_fork_session (fork a Codex session into a new branch)
 Validation: validate_with_models, second_opinion, compare_answers, red_team_review, consensus_check, ask_model, synthesize_validation, list_available_models | job_status/job_result (validation jobs)
 ${jobsLine}Sessions: session_create, session_list, session_set_active, session_get, session_delete, session_clear_all
 Other: list_models, provider_tool_capabilities, cli_versions, upstream_contracts, provider_subcommands_* (read-only subcommand contract/drift introspection), cli_upgrade, approval_list, llm_process_health, llm_request_result (read back any persisted request, sync or async, by correlationId)
@@ -772,6 +772,7 @@ const CLI_IDLE_TIMEOUTS: Record<string, number | undefined> = {
   gemini: 600_000, // 10 minutes — Gemini streams stdout in real-time
   grok: 600_000, // 10 minutes — Grok streams stderr/stdout activity in headless mode
   mistral: 600_000, // 10 minutes — Vibe streams stdout/stderr in headless mode
+  cursor: 600_000, // 10 minutes — Cursor Agent can stream stdout in print mode
 };
 
 function resolveIdleTimeout(cli: string, override?: number): number | undefined {
@@ -850,7 +851,7 @@ interface DeferredJobResponse {
  * Returns the job result if it finishes in time, or a deferral marker.
  */
 async function awaitJobOrDefer(
-  cli: "claude" | "codex" | "gemini" | "grok" | "mistral" | "devin",
+  cli: CliType,
   args: string[],
   corrId: string,
   idleTimeoutMs?: number,
@@ -1656,6 +1657,7 @@ export function createErrorResponse(
     grok: "Run `grok login` (or re-authenticate) and retry.",
     mistral: "Run `vibe --setup` (or re-authenticate) and retry.",
     devin: "Run `devin auth login` (or set WINDSURF_API_KEY) and retry.",
+    cursor: "Run `cursor-agent login` (or set CURSOR_API_KEY) and retry.",
   };
 
   if (error) {
@@ -1732,7 +1734,7 @@ export function createErrorResponse(
 }
 
 export function extractUsageAndCost(
-  cli: "claude" | "codex" | "gemini" | "grok" | "mistral" | "devin",
+  cli: CliType,
   output: string,
   outputFormat?: string,
   /**
@@ -1852,7 +1854,7 @@ export function extractUsageAndCost(
  * or `prep` — so retention on AsyncJobRecord is O(constant).
  */
 function buildAsyncFlightRecorderHandoff(
-  cliName: "claude" | "codex" | "gemini" | "grok" | "mistral" | "devin",
+  cliName: CliType,
   prep: {
     effectivePrompt: string;
     resolvedModel?: string;
@@ -3908,7 +3910,7 @@ export function buildMistralRetryPrep(
 }
 
 export function buildCliResponse(
-  cli: "claude" | "codex" | "gemini" | "grok" | "mistral" | "devin",
+  cli: CliType,
   stdout: string,
   optimizeResponse: boolean,
   corrId: string,
@@ -6364,6 +6366,486 @@ export async function handleDevinRequestAsync(
   }
 }
 
+//──────────────────────────────────────────────────────────────────────────────
+// Cursor Agent CLI provider (cursor_request / cursor_request_async).
+//──────────────────────────────────────────────────────────────────────────────
+
+export interface CursorRequestParams {
+  prompt?: string;
+  model?: string;
+  mode?: "plan" | "ask";
+  outputFormat?: "text" | "json" | "stream-json";
+  transport?: "cli" | "acp";
+  force?: boolean;
+  autoReview?: boolean;
+  sandbox?: "enabled" | "disabled";
+  trust?: boolean;
+  workspace?: string;
+  addDir?: string[];
+  sessionId?: string;
+  resumeLatest?: boolean;
+  createNewSession?: boolean;
+  approvalStrategy?: "legacy" | "mcp_managed";
+  approvalPolicy?: ApprovalPolicy;
+  correlationId?: string;
+  optimizePrompt: boolean;
+  optimizeResponse?: boolean;
+  idleTimeoutMs?: number;
+  forceRefresh?: boolean;
+}
+
+/** Build the headless Cursor Agent argv (print mode). Pure, no I/O. */
+export function prepareCursorRequest(
+  params: {
+    prompt?: string;
+    model?: string;
+    mode?: CursorRequestParams["mode"];
+    outputFormat?: CursorRequestParams["outputFormat"];
+    force?: boolean;
+    autoReview?: boolean;
+    sandbox?: CursorRequestParams["sandbox"];
+    trust?: boolean;
+    workspace?: string;
+    addDir?: string[];
+    approvalStrategy?: CursorRequestParams["approvalStrategy"];
+    approvalPolicy?: CursorRequestParams["approvalPolicy"];
+    correlationId?: string;
+    optimizePrompt: boolean;
+    operation: string;
+  },
+  runtime: GatewayServerRuntime
+): CliRequestPrep | ExtendedToolResponse {
+  const corrId = params.correlationId ?? randomUUID();
+  let prompt = (params.prompt ?? "").trim();
+  if (!prompt) {
+    return createErrorResponse(
+      params.operation,
+      1,
+      "prompt is required and cannot be empty",
+      corrId
+    );
+  }
+  const reviewIntegrity = checkReviewIntegrity({ prompt });
+  if (reviewIntegrity.violations.length > 0) {
+    runtime.logger.info(
+      `[${corrId}] Review integrity violations detected: ${reviewIntegrity.violations.map(v => v.type).join(", ")}`,
+      {
+        cli: "cursor",
+        operation: params.operation,
+        score: reviewIntegrity.totalScore,
+      }
+    );
+  }
+  const highImpactRequested =
+    Boolean(params.force) || Boolean(params.trust) || params.sandbox === "disabled";
+  let approvalDecision: ApprovalRecord | null = null;
+  if (params.approvalStrategy === "mcp_managed") {
+    approvalDecision = runtime.approvalManager.decide({
+      cli: "cursor",
+      operation: params.operation,
+      prompt,
+      bypassRequested: highImpactRequested,
+      fullAuto: false,
+      requestedMcpServers: [],
+      policy: params.approvalPolicy,
+      metadata: {
+        model: params.model ?? "default",
+        force: Boolean(params.force),
+        trust: Boolean(params.trust),
+        sandbox: params.sandbox ?? null,
+      },
+      reviewIntegrity,
+    });
+    if (approvalDecision.status !== "approved") {
+      return createApprovalDeniedResponse(params.operation, approvalDecision);
+    }
+  }
+  if (params.optimizePrompt) prompt = optimizePromptText(prompt);
+  const resolvedModel = resolveModelAlias("cursor", params.model, getCliInfo());
+  const args: string[] = ["--print"];
+  const outputFormat = params.outputFormat ?? "text";
+  if (outputFormat !== "text") args.push("--output-format", outputFormat);
+  if (resolvedModel) args.push("--model", resolvedModel);
+  if (params.mode) args.push("--mode", params.mode);
+  if (params.force) args.push("--force");
+  if (params.autoReview) args.push("--auto-review");
+  if (params.sandbox) args.push("--sandbox", params.sandbox);
+  if (params.trust) args.push("--trust");
+  if (params.workspace) args.push("--workspace", params.workspace);
+  for (const dir of params.addDir ?? []) args.push("--add-dir", dir);
+  args.push(prompt);
+  return {
+    corrId,
+    effectivePrompt: prompt,
+    resolvedModel,
+    requestedMcpServers: [],
+    approvalDecision,
+    reviewIntegrity,
+    args,
+    stablePrefixHash: null,
+    stablePrefixTokens: null,
+  };
+}
+
+function rejectUnsupportedCursorAcpParams(
+  params: CursorRequestParams,
+  operation: string
+): ExtendedToolResponse | null {
+  const unsupported: string[] = [];
+  if (params.mode) unsupported.push("mode");
+  if (params.outputFormat && params.outputFormat !== "text") unsupported.push("outputFormat");
+  if (params.force) unsupported.push("force");
+  if (params.autoReview) unsupported.push("autoReview");
+  if (params.sandbox) unsupported.push("sandbox");
+  if (params.trust) unsupported.push("trust");
+  if (params.workspace) unsupported.push("workspace");
+  if ((params.addDir ?? []).length > 0) unsupported.push("addDir");
+  if (params.resumeLatest) unsupported.push("resumeLatest");
+  if (params.createNewSession) unsupported.push("createNewSession");
+  if (params.optimizePrompt) unsupported.push("optimizePrompt");
+  if (params.optimizeResponse) unsupported.push("optimizeResponse");
+  if (params.forceRefresh) unsupported.push("forceRefresh");
+  if (unsupported.length === 0) return null;
+  return createErrorResponse(
+    operation,
+    1,
+    "",
+    params.correlationId,
+    new Error(
+      `cursor_request transport=acp does not support these Cursor CLI-only options yet: ${unsupported.join(", ")}. Omit them or use transport=cli.`
+    )
+  );
+}
+
+export async function handleCursorRequest(
+  deps: HandlerDeps,
+  params: CursorRequestParams
+): Promise<ExtendedToolResponse> {
+  if (params.transport === "acp") {
+    const unsupported = rejectUnsupportedCursorAcpParams(params, "cursor_request");
+    if (unsupported) return unsupported;
+    return runAcpTransport(deps, {
+      provider: "cursor",
+      prompt: params.prompt,
+      model: params.model,
+      sessionId: params.sessionId,
+      correlationId: params.correlationId,
+    });
+  }
+  const runtime = resolveHandlerRuntime(deps);
+  const startTime = Date.now();
+  const prep = prepareCursorRequest(
+    {
+      prompt: params.prompt,
+      model: params.model,
+      mode: params.mode,
+      outputFormat: params.outputFormat,
+      force: params.force,
+      autoReview: params.autoReview,
+      sandbox: params.sandbox,
+      trust: params.trust,
+      workspace: params.workspace,
+      addDir: params.addDir,
+      approvalStrategy: params.approvalStrategy,
+      approvalPolicy: params.approvalPolicy,
+      correlationId: params.correlationId,
+      optimizePrompt: params.optimizePrompt,
+      operation: "cursor_request",
+    },
+    runtime
+  );
+  if (!("args" in prep)) return prep;
+  const { corrId, args } = prep;
+  let durationMs = 0;
+  let wasSuccessful = false;
+  safeFlightStart(
+    {
+      correlationId: corrId,
+      cli: "cursor",
+      model: prep.resolvedModel || "default",
+      prompt: prep.effectivePrompt,
+      sessionId: params.sessionId,
+    },
+    runtime
+  );
+  try {
+    const sessionResult = resolveGrokSessionArgs({
+      sessionId: params.sessionId,
+      resumeLatest: params.resumeLatest,
+      createNewSession: params.createNewSession,
+    });
+    if (sessionResult.userProvidedSession) {
+      await getExistingSessionForProvider(
+        deps.sessionManager,
+        sessionResult.effectiveSessionId,
+        "cursor"
+      );
+    }
+    args.splice(args.length - 1, 0, ...sessionResult.resumeArgs);
+
+    let worktreeResolution: Awaited<ReturnType<typeof resolveWorkspaceAndWorktreeForRequest>> = {};
+    try {
+      worktreeResolution = await resolveWorkspaceAndWorktreeForRequest({
+        provider: "cursor",
+        workspace: params.workspace,
+        sessionId: sessionResult.effectiveSessionId,
+        runtime,
+        addDir: params.addDir,
+      });
+    } catch (err) {
+      return createErrorResponse("cursor_request", 1, "", corrId, err as Error);
+    }
+    if (worktreeResolution.workspace && params.workspace) {
+      const workspaceFlagIndex = args.indexOf("--workspace");
+      if (workspaceFlagIndex >= 0 && workspaceFlagIndex + 1 < args.length) {
+        args[workspaceFlagIndex + 1] = worktreeResolution.workspace.cwd;
+      }
+    }
+
+    const cursorFrHandoff = buildAsyncFlightRecorderHandoff(
+      "cursor",
+      prep,
+      params.sessionId,
+      params.outputFormat
+    );
+    const result = await awaitJobOrDefer(
+      "cursor",
+      args,
+      corrId,
+      resolveIdleTimeout("cursor", params.idleTimeoutMs),
+      params.outputFormat,
+      params.forceRefresh,
+      runtime,
+      undefined,
+      undefined,
+      cursorFrHandoff.flightRecorderEntry,
+      cursorFrHandoff.extractUsage,
+      undefined,
+      worktreeResolution.cwd
+    );
+    if (isDeferredResponse(result)) {
+      return buildDeferredToolResponse(result, sessionResult.effectiveSessionId);
+    }
+    const { stdout, stderr, code } = result;
+    durationMs = Math.max(0, Date.now() - startTime);
+    if (code !== 0) {
+      safeFlightComplete(
+        corrId,
+        {
+          response: stderr || "",
+          durationMs,
+          retryCount: 0,
+          circuitBreakerState: "closed",
+          optimizationApplied: false,
+          exitCode: code,
+          errorMessage: stderr || `Exit code ${code}`,
+          status: "failed",
+        },
+        runtime
+      );
+      return createErrorResponse("cursor", code, stderr, corrId);
+    }
+    wasSuccessful = true;
+
+    let effectiveSessionId = sessionResult.effectiveSessionId;
+    if (sessionResult.userProvidedSession && effectiveSessionId) {
+      const existing = await deps.sessionManager.getSession(effectiveSessionId);
+      if (!existing) {
+        try {
+          await deps.sessionManager.createSession("cursor", "Cursor Session", effectiveSessionId);
+        } catch {
+          const rechecked = await deps.sessionManager.getSession(effectiveSessionId);
+          if (!rechecked) throw new Error(`Failed to create or find session ${effectiveSessionId}`);
+        }
+      }
+      await deps.sessionManager.updateSessionUsage(effectiveSessionId);
+    } else if (!params.createNewSession && !effectiveSessionId) {
+      const newSession = await deps.sessionManager.createSession(
+        "cursor",
+        "Cursor Session",
+        `${GATEWAY_SESSION_PREFIX}${randomUUID()}`
+      );
+      effectiveSessionId = newSession.id;
+    }
+
+    const response = buildCliResponse(
+      "cursor",
+      stdout,
+      params.optimizeResponse ?? false,
+      corrId,
+      effectiveSessionId,
+      prep,
+      durationMs,
+      sessionResult.userProvidedSession,
+      params.outputFormat
+    );
+    safeFlightComplete(
+      corrId,
+      {
+        response: stdout,
+        durationMs,
+        retryCount: 0,
+        circuitBreakerState: "closed",
+        optimizationApplied: params.optimizePrompt || (params.optimizeResponse ?? false),
+        exitCode: 0,
+        status: "completed",
+      },
+      runtime
+    );
+    return response;
+  } catch (error) {
+    const elapsedMs = Math.max(0, Date.now() - startTime);
+    safeFlightComplete(
+      corrId,
+      {
+        response: "",
+        durationMs: elapsedMs,
+        retryCount: 0,
+        circuitBreakerState: "closed",
+        optimizationApplied: false,
+        exitCode: 1,
+        errorMessage: (error as Error).message,
+        status: "failed",
+      },
+      runtime
+    );
+    return createErrorResponse("cursor", 1, "", corrId, error as Error);
+  } finally {
+    runtime.performanceMetrics.recordRequest(
+      "cursor",
+      Math.max(0, durationMs || Date.now() - startTime),
+      wasSuccessful
+    );
+  }
+}
+
+export async function handleCursorRequestAsync(
+  deps: AsyncHandlerDeps,
+  params: Omit<CursorRequestParams, "optimizeResponse">
+): Promise<ExtendedToolResponse> {
+  const runtime = resolveHandlerRuntime(deps);
+  const prep = prepareCursorRequest(
+    {
+      prompt: params.prompt,
+      model: params.model,
+      mode: params.mode,
+      outputFormat: params.outputFormat,
+      force: params.force,
+      autoReview: params.autoReview,
+      sandbox: params.sandbox,
+      trust: params.trust,
+      workspace: params.workspace,
+      addDir: params.addDir,
+      approvalStrategy: params.approvalStrategy,
+      approvalPolicy: params.approvalPolicy,
+      correlationId: params.correlationId,
+      optimizePrompt: params.optimizePrompt,
+      operation: "cursor_request_async",
+    },
+    runtime
+  );
+  if (!("args" in prep)) return prep;
+  const { corrId, args } = prep;
+  try {
+    const sessionResult = resolveGrokSessionArgs({
+      sessionId: params.sessionId,
+      resumeLatest: params.resumeLatest,
+      createNewSession: params.createNewSession,
+    });
+    if (sessionResult.userProvidedSession) {
+      await getExistingSessionForProvider(
+        deps.sessionManager,
+        sessionResult.effectiveSessionId,
+        "cursor"
+      );
+    }
+    args.splice(args.length - 1, 0, ...sessionResult.resumeArgs);
+
+    let effectiveSessionId = sessionResult.effectiveSessionId;
+    if (sessionResult.userProvidedSession && effectiveSessionId) {
+      const existing = await deps.sessionManager.getSession(effectiveSessionId);
+      if (!existing) {
+        try {
+          await deps.sessionManager.createSession("cursor", "Cursor Session", effectiveSessionId);
+        } catch {
+          const rechecked = await deps.sessionManager.getSession(effectiveSessionId);
+          if (!rechecked) throw new Error(`Failed to create or find session ${effectiveSessionId}`);
+        }
+      }
+      await deps.sessionManager.updateSessionUsage(effectiveSessionId);
+    } else if (!params.createNewSession && !effectiveSessionId) {
+      const newSession = await deps.sessionManager.createSession(
+        "cursor",
+        "Cursor Session",
+        `${GATEWAY_SESSION_PREFIX}${randomUUID()}`
+      );
+      effectiveSessionId = newSession.id;
+    }
+
+    let worktreeResolution: Awaited<ReturnType<typeof resolveWorkspaceAndWorktreeForRequest>> = {};
+    try {
+      worktreeResolution = await resolveWorkspaceAndWorktreeForRequest({
+        provider: "cursor",
+        workspace: params.workspace,
+        sessionId: effectiveSessionId,
+        runtime,
+        addDir: params.addDir,
+      });
+    } catch (err) {
+      return createErrorResponse("cursor_request_async", 1, "", corrId, err as Error);
+    }
+    if (worktreeResolution.workspace && params.workspace) {
+      const workspaceFlagIndex = args.indexOf("--workspace");
+      if (workspaceFlagIndex >= 0 && workspaceFlagIndex + 1 < args.length) {
+        args[workspaceFlagIndex + 1] = worktreeResolution.workspace.cwd;
+      }
+    }
+
+    assertUpstreamCliArgs("cursor", args);
+    assertUpstreamCliEnv("cursor", undefined);
+    const cursorAsyncFrHandoff = buildAsyncFlightRecorderHandoff(
+      "cursor",
+      prep,
+      effectiveSessionId,
+      params.outputFormat
+    );
+    const job = deps.asyncJobManager.startJob(
+      "cursor",
+      args,
+      corrId,
+      worktreeResolution.cwd,
+      resolveIdleTimeout("cursor", params.idleTimeoutMs),
+      params.outputFormat,
+      params.forceRefresh,
+      undefined,
+      undefined,
+      cursorAsyncFrHandoff.flightRecorderEntry,
+      cursorAsyncFrHandoff.extractUsage,
+      true
+    );
+    deps.logger.info(`[${corrId}] cursor_request_async started job ${job.id}`);
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: JSON.stringify(
+            {
+              success: true,
+              job,
+              sessionId: effectiveSessionId || null,
+              resumable: sessionResult.userProvidedSession,
+            },
+            null,
+            2
+          ),
+        },
+      ],
+    };
+  } catch (error) {
+    return createErrorResponse("cursor_request_async", 1, "", corrId, error as Error);
+  }
+}
+
 export interface MistralRequestParams {
   prompt?: string;
   promptParts?: PromptParts;
@@ -7589,7 +8071,11 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
 
         // Deferred — job still running, return async reference
         if (isDeferredResponse(result)) {
-          return buildDeferredToolResponse(result, effectiveSessionId);
+          const deferred = buildDeferredToolResponse(result, effectiveSessionId);
+          if (warnings.length > 0) {
+            deferred.warnings = warnings;
+          }
+          return deferred;
         }
 
         const { stdout, stderr, code } = result;
@@ -8933,6 +9419,154 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           sessionId,
           resumeLatest,
           createNewSession,
+          correlationId,
+          optimizePrompt,
+          optimizeResponse,
+          idleTimeoutMs,
+          forceRefresh,
+        }
+      );
+    }
+  );
+
+  server.tool(
+    "cursor_request",
+    "Run a Cursor Agent CLI request synchronously (auto-defers to a pollable job past the sync deadline when async jobs are enabled; otherwise runs to completion). Headless print mode (`cursor-agent --print`).",
+    {
+      prompt: z
+        .string()
+        .min(1, "Prompt cannot be empty")
+        .max(100000, "Prompt too long (max 100k chars)")
+        .describe("Prompt text for Cursor Agent CLI"),
+      model: z.string().optional().describe("Model name or alias passed via --model"),
+      mode: z
+        .enum(["plan", "ask"])
+        .optional()
+        .describe("Cursor execution mode: plan (read-only planning) or ask (Q&A/read-only)"),
+      outputFormat: z
+        .enum(["text", "json", "stream-json"])
+        .default("text")
+        .describe("Cursor --output-format for --print mode"),
+      transport: z
+        .enum(["cli", "acp"])
+        .default("cli")
+        .describe(
+          "Transport selector. Default `cli` uses cursor-agent --print. `acp` uses the native cursor-agent acp transport and fails closed unless [acp] and [acp.providers.cursor].runtime_enabled are true."
+        ),
+      force: z
+        .boolean()
+        .default(false)
+        .describe("Emit --force (Cursor yolo mode; auto-allows commands unless explicitly denied)"),
+      autoReview: z
+        .boolean()
+        .default(false)
+        .describe("Emit --auto-review (Cursor Smart Auto classifier for tool calls)"),
+      sandbox: z
+        .enum(["enabled", "disabled"])
+        .optional()
+        .describe("Cursor sandbox mode override (--sandbox enabled|disabled)"),
+      trust: z.boolean().default(false).describe("Trust the workspace in headless mode (--trust)"),
+      workspace: z
+        .string()
+        .optional()
+        .describe(
+          "Workspace directory or saved workspace name (--workspace). Remote HTTP/OAuth callers must pass a registered workspace alias; local stdio callers may pass local Cursor workspace paths."
+        ),
+      addDir: z
+        .array(z.string())
+        .optional()
+        .describe("Additional workspace root directories (--add-dir, repeatable)"),
+      sessionId: z
+        .string()
+        .optional()
+        .describe(
+          "Cursor chat/session ID to resume (emits --resume <id>). Note: the gw-* id minted for a brand-new gateway session is not resumable via sessionId; continue with resumeLatest:true."
+        ),
+      resumeLatest: z
+        .boolean()
+        .default(false)
+        .describe(
+          "Resume the latest Cursor chat (--continue). Note: the gw-* id minted for a brand-new gateway session is not resumable via sessionId; continue with resumeLatest:true."
+        ),
+      createNewSession: z.boolean().default(false).describe("Force a new session"),
+      approvalStrategy: z
+        .enum(["legacy", "mcp_managed"])
+        .default("legacy")
+        .describe(
+          "Approval strategy: legacy (default) lets Cursor's own flags decide; mcp_managed routes high-impact Cursor controls (force, trust, sandbox disabled) through the gateway approval gate."
+        ),
+      approvalPolicy: z
+        .enum(["strict", "balanced", "permissive"])
+        .optional()
+        .describe(
+          "Approval policy when approvalStrategy is mcp_managed: strict|balanced|permissive (default balanced). Ignored under legacy strategy."
+        ),
+      correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
+      optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution"),
+      optimizeResponse: z.boolean().default(false).describe("Optimize response output"),
+      idleTimeoutMs: z
+        .number()
+        .int()
+        .min(30_000)
+        .max(3_600_000)
+        .optional()
+        .describe("Idle timeout in ms (min 30s, max 1h, omit=CLI default)"),
+      forceRefresh: z
+        .boolean()
+        .default(false)
+        .describe(
+          "Bypass dedup and force a fresh CLI run even if a recent identical request exists"
+        ),
+    },
+    {
+      title: "Cursor Agent CLI request",
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
+    async ({
+      prompt,
+      model,
+      mode,
+      outputFormat,
+      transport,
+      force,
+      autoReview,
+      sandbox,
+      trust,
+      workspace,
+      addDir,
+      sessionId,
+      resumeLatest,
+      createNewSession,
+      approvalStrategy,
+      approvalPolicy,
+      correlationId,
+      optimizePrompt,
+      optimizeResponse,
+      idleTimeoutMs,
+      forceRefresh,
+    }) => {
+      return handleCursorRequest(
+        { sessionManager, logger, runtime },
+        {
+          prompt,
+          model,
+          mode,
+          outputFormat,
+          transport,
+          force,
+          autoReview,
+          sandbox,
+          trust,
+          workspace,
+          addDir,
+          sessionId,
+          resumeLatest,
+          createNewSession,
+          approvalStrategy,
+          approvalPolicy,
           correlationId,
           optimizePrompt,
           optimizeResponse,
@@ -10456,6 +11090,145 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
     );
 
     server.tool(
+      "cursor_request_async",
+      "Start a Cursor Agent CLI request as a durable background job. Poll with llm_job_status, collect with llm_job_result.",
+      {
+        prompt: z
+          .string()
+          .min(1, "Prompt cannot be empty")
+          .max(100000, "Prompt too long (max 100k chars)")
+          .describe("Prompt text for Cursor Agent CLI"),
+        model: z.string().optional().describe("Model name or alias passed via --model"),
+        mode: z
+          .enum(["plan", "ask"])
+          .optional()
+          .describe("Cursor execution mode: plan (read-only planning) or ask (Q&A/read-only)"),
+        outputFormat: z
+          .enum(["text", "json", "stream-json"])
+          .default("text")
+          .describe("Cursor --output-format for --print mode"),
+        force: z
+          .boolean()
+          .default(false)
+          .describe(
+            "Emit --force (Cursor yolo mode; auto-allows commands unless explicitly denied)"
+          ),
+        autoReview: z
+          .boolean()
+          .default(false)
+          .describe("Emit --auto-review (Cursor Smart Auto classifier for tool calls)"),
+        sandbox: z
+          .enum(["enabled", "disabled"])
+          .optional()
+          .describe("Cursor sandbox mode override (--sandbox enabled|disabled)"),
+        trust: z.boolean().default(false).describe("Trust the workspace in headless mode"),
+        workspace: z
+          .string()
+          .optional()
+          .describe(
+            "Workspace directory or saved workspace name (--workspace). Remote HTTP/OAuth callers must pass a registered workspace alias; local stdio callers may pass local Cursor workspace paths."
+          ),
+        addDir: z
+          .array(z.string())
+          .optional()
+          .describe("Additional workspace root directories (--add-dir, repeatable)"),
+        sessionId: z
+          .string()
+          .optional()
+          .describe(
+            "Cursor chat/session ID to resume (emits --resume <id>). Note: the gw-* id minted for a brand-new gateway session is not resumable via sessionId; continue with resumeLatest:true."
+          ),
+        resumeLatest: z
+          .boolean()
+          .default(false)
+          .describe(
+            "Resume the latest Cursor chat (--continue). Note: the gw-* id minted for a brand-new gateway session is not resumable via sessionId; continue with resumeLatest:true."
+          ),
+        createNewSession: z.boolean().default(false).describe("Force a new session"),
+        approvalStrategy: z
+          .enum(["legacy", "mcp_managed"])
+          .default("legacy")
+          .describe(
+            "Approval strategy: legacy (default) lets Cursor's own flags decide; mcp_managed routes high-impact Cursor controls (force, trust, sandbox disabled) through the gateway approval gate."
+          ),
+        approvalPolicy: z
+          .enum(["strict", "balanced", "permissive"])
+          .optional()
+          .describe(
+            "Approval policy when approvalStrategy is mcp_managed: strict|balanced|permissive (default balanced). Ignored under legacy strategy."
+          ),
+        correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
+        optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution"),
+        idleTimeoutMs: z
+          .number()
+          .int()
+          .min(30_000)
+          .max(3_600_000)
+          .optional()
+          .describe("Idle timeout in ms (min 30s, max 1h, omit=CLI default)"),
+        forceRefresh: z
+          .boolean()
+          .default(false)
+          .describe(
+            "Bypass dedup and force a fresh CLI run even if a recent identical request exists"
+          ),
+      },
+      {
+        title: "Cursor Agent CLI request (async)",
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: false,
+        openWorldHint: true,
+      },
+      async ({
+        prompt,
+        model,
+        mode,
+        outputFormat,
+        force,
+        autoReview,
+        sandbox,
+        trust,
+        workspace,
+        addDir,
+        sessionId,
+        resumeLatest,
+        createNewSession,
+        approvalStrategy,
+        approvalPolicy,
+        correlationId,
+        optimizePrompt,
+        idleTimeoutMs,
+        forceRefresh,
+      }) => {
+        return handleCursorRequestAsync(
+          { sessionManager, asyncJobManager, logger, runtime },
+          {
+            prompt,
+            model,
+            mode,
+            outputFormat,
+            force,
+            autoReview,
+            sandbox,
+            trust,
+            workspace,
+            addDir,
+            sessionId,
+            resumeLatest,
+            createNewSession,
+            approvalStrategy,
+            approvalPolicy,
+            correlationId,
+            optimizePrompt,
+            idleTimeoutMs,
+            forceRefresh,
+          }
+        );
+      }
+    );
+
+    server.tool(
       "mistral_request_async",
       "Start a Mistral Vibe CLI request as a durable background job. Poll with llm_job_status, collect with llm_job_result.",
       {
@@ -11142,7 +11915,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
   // List Models Tool
   //──────────────────────────────────────────────────────────────────────────────
 
-  // Slice 5: the `cli` filter accepts the six CLI providers AND any enabled
+  // Slice 5: the `cli` filter accepts the spawnable CLI providers AND any enabled
   // generic API provider name, so `list_models` can surface API providers the
   // same way `list_available_models` and the llm_process_health block do. The
   // enum is built at registration from the resolved providers config. CLI names
@@ -11152,7 +11925,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
   ] as [string, ...string[]];
   server.tool(
     "list_models",
-    "List models, aliases, and defaults for one provider (claude|codex|gemini|grok|mistral|devin, or an enabled API provider name), or omit cli to list all providers. API providers are returned under an `apiProviders` array.",
+    "List models, aliases, and defaults for one provider (claude|codex|gemini|grok|mistral|devin|cursor, or an enabled API provider name), or omit cli to list all providers. API providers are returned under an `apiProviders` array.",
     {
       cli: z
         .preprocess(
@@ -11160,7 +11933,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           z.enum(listModelsFilterValues).optional()
         )
         .describe(
-          "Provider filter (claude|codex|gemini|grok|mistral|devin, or an enabled API provider name)"
+          "Provider filter (claude|codex|gemini|grok|mistral|devin|cursor, or an enabled API provider name)"
         ),
     },
     {
@@ -11193,7 +11966,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
     }
   );
 
-  // Slice 6: the capability filter accepts the six CLI providers, the static
+  // Slice 6: the capability filter accepts the spawnable CLI providers, the static
   // grok_api id, AND any enabled generic API provider name, so
   // provider_tool_capabilities can report API providers the same way list_models
   // does. Built at registration from the resolved providers config; deduped and
@@ -11207,7 +11980,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
   ] as [string, ...string[]];
   server.tool(
     "provider_tool_capabilities",
-    "Report provider tool/feature capabilities and discovered local skill/tool integrations for claude|codex|gemini|grok|mistral|devin|grok_api, or an enabled API provider name.",
+    "Report provider tool/feature capabilities and discovered local skill/tool integrations for claude|codex|gemini|grok|mistral|devin|cursor|grok_api, or an enabled API provider name.",
     {
       cli: z
         .preprocess(
@@ -11215,7 +11988,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           z.enum(providerToolCapabilitiesFilterValues).optional()
         )
         .describe(
-          "Provider filter (claude|codex|gemini|grok|mistral|devin|grok_api, or an enabled API provider name)"
+          "Provider filter (claude|codex|gemini|grok|mistral|devin|cursor|grok_api, or an enabled API provider name)"
         ),
       includeSkills: z
         .boolean()
@@ -11265,14 +12038,14 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
 
   server.tool(
     "cli_versions",
-    "Report installed provider CLI versions, availability, and login status for all six providers (claude|codex|gemini|grok|mistral|devin) or one.",
+    "Report installed provider CLI versions, availability, and login status for all registered CLI providers (claude|codex|gemini|grok|mistral|devin|cursor) or one.",
     {
       cli: z
         .preprocess(
           value => (value === "" || value === null ? undefined : value),
           CLI_TYPE_ENUM.optional()
         )
-        .describe("CLI filter (claude|codex|gemini|grok|mistral|devin)"),
+        .describe("CLI filter (claude|codex|gemini|grok|mistral|devin|cursor)"),
     },
     {
       title: "Provider CLI versions",
@@ -11296,7 +12069,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           value => (value === "" || value === null ? undefined : value),
           CLI_TYPE_ENUM.optional()
         )
-        .describe("CLI filter (claude|codex|gemini|grok|mistral|devin)"),
+        .describe("CLI filter (claude|codex|gemini|grok|mistral|devin|cursor)"),
       probeInstalled: z
         .boolean()
         .default(false)
@@ -11326,7 +12099,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           value => (value === "" || value === null ? undefined : value),
           CLI_TYPE_ENUM.optional()
         )
-        .describe("Optional provider filter (claude|codex|gemini|grok|mistral|devin)"),
+        .describe("Optional provider filter (claude|codex|gemini|grok|mistral|devin|cursor)"),
       tier: z
         .enum(["catalog", "inspect", "execute_candidate", "diagnostic"])
         .optional()
@@ -11383,7 +12156,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
     "provider_subcommand_contract",
     "Return the detailed read-only contract for exactly one declared provider CLI subcommand.",
     {
-      provider: CLI_TYPE_ENUM.describe("Provider (claude|codex|gemini|grok|mistral|devin)"),
+      provider: CLI_TYPE_ENUM.describe("Provider (claude|codex|gemini|grok|mistral|devin|cursor)"),
       commandPath: z.array(z.string().min(1)).min(1).describe("Command path segments"),
     },
     {
@@ -11417,7 +12190,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           value => (value === "" || value === null ? undefined : value),
           CLI_TYPE_ENUM.optional()
         )
-        .describe("Optional provider filter (claude|codex|gemini|grok|mistral|devin)"),
+        .describe("Optional provider filter (claude|codex|gemini|grok|mistral|devin|cursor)"),
       includeClean: z
         .boolean()
         .default(false)
@@ -11475,7 +12248,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
     "cli_upgrade",
     "Plan (dryRun, default true) or execute an upgrade for one provider CLI using its native update mechanism.",
     {
-      cli: CLI_TYPE_ENUM.describe("CLI to upgrade (claude|codex|gemini|grok|mistral|devin)"),
+      cli: CLI_TYPE_ENUM.describe("CLI to upgrade (claude|codex|gemini|grok|mistral|devin|cursor)"),
       target: z
         .string()
         .min(1)

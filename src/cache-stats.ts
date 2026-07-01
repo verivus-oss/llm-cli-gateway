@@ -146,7 +146,7 @@ function isCacheStatsCli(s: string): s is CacheStatsCli {
 
 /**
  * Normalise a logged `cli` value into a CacheStatsCli bucket, or null if it
- * does not roll up to one of the five base CLIs.
+ * does not roll up to one of the cache-reporting base CLIs.
  *
  * The grok HTTP path logs rows with `cli: "grok-api"` and is the only grok
  * code path that actually parses cache tokens
@@ -155,7 +155,7 @@ function isCacheStatsCli(s: string): s is CacheStatsCli {
  * silently dropped from per-CLI and global cache stats.
  *
  * Slice 0.5: an arbitrary `[providers.<name>]` (kind:"api") id has no CLI bucket
- * and intentionally rolls up to `null` here (excluded from the five-CLI cache
+ * and intentionally rolls up to `null` here (excluded from the CLI cache
  * aggregates). A first-class per-API-provider cache catalog is deferred to
  * Slice 5; until then this is exclusion-by-design, not a dropped-telemetry bug.
  */

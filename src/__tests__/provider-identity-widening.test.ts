@@ -23,7 +23,7 @@ import { getOneProviderToolCapabilities } from "../provider-tool-capabilities.js
 
 describe("Slice 0.5 provider-identity widening", () => {
   describe("providerKind / isCliType tagging", () => {
-    it("tags the five spawnable CLIs as kind:cli", () => {
+    it("tags the spawnable CLIs as kind:cli", () => {
       for (const cli of CLI_TYPES) {
         expect(providerKind(cli)).toBe("cli");
         expect(isCliType(cli)).toBe(true);

@@ -8,7 +8,7 @@
  */
 import { describe, expect, it } from "vitest";
 
-import { handleDevinRequest, type GatewayServerRuntime } from "../index.js";
+import { handleCursorRequest, handleDevinRequest, type GatewayServerRuntime } from "../index.js";
 import type { AcpConfig, AcpProviderConfig } from "../config.js";
 import type { ISessionManager, ProviderType, Session } from "../session-manager.js";
 
@@ -98,5 +98,23 @@ describe("ACP transport wiring — fail closed", () => {
       optimizePrompt: false,
     });
     expect(JSON.stringify(res)).toContain("prompt is required");
+  });
+
+  it("wires cursor_request transport=acp through the same closed provider gate", async () => {
+    const cursor: AcpProviderConfig = {
+      enabled: true,
+      command: "cursor-agent",
+      args: ["acp"],
+      runtimeEnabled: false,
+      isolatedLeaderSocket: false,
+    };
+    const res = await handleCursorRequest(deps(acpConfig({ providers: { cursor } })), {
+      transport: "acp",
+      prompt: "hi",
+      optimizePrompt: false,
+    });
+    const text = JSON.stringify(res);
+    expect(text).toContain("runtime routing is not enabled");
+    expect(text).toContain("cursor");
   });
 });

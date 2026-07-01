@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { executeCli, providerCommandName } from "./executor.js";
 import type { Logger } from "./logger.js";
-import type { CliType } from "./session-manager.js";
+import { CLI_TYPES, type CliType } from "./provider-types.js";
 import { getProviderRuntimeStatus, type ProviderLoginStatus } from "./provider-status.js";
 import type { ProviderLoginGuidance } from "./provider-login-guidance.js";
 
@@ -81,14 +81,9 @@ export interface CliUpgradeResult {
   exitCode?: number;
 }
 
-const VERSION_ARGS: Record<CliType, string[]> = {
-  claude: ["--version"],
-  codex: ["--version"],
-  gemini: ["--version"],
-  grok: ["--version"],
-  mistral: ["--version"],
-  devin: ["--version"],
-};
+const VERSION_ARGS = Object.fromEntries(
+  CLI_TYPES.map(provider => [provider, ["--version"]])
+) as Record<CliType, string[]>;
 
 const CODEX_NPM_PACKAGE = "@openai/codex";
 
@@ -173,6 +168,23 @@ export function buildCliUpgradePlan(
     };
   }
 
+  if (cli === "cursor") {
+    if (normalizedTarget !== "latest") {
+      throw new Error(
+        "Cursor Agent CLI upgrades support only the 'latest' target via 'cursor-agent update'."
+      );
+    }
+    return {
+      cli,
+      target: normalizedTarget,
+      command: providerCommandName("cursor"),
+      args: ["update"],
+      strategy: "self-update",
+      requiresNetwork: true,
+      note: "Cursor Agent CLI self-updates via 'cursor-agent update'.",
+    };
+  }
+
   if (cli === "gemini") {
     if (normalizedTarget !== "latest") {
       throw new Error(
@@ -233,7 +245,7 @@ export async function getCliVersion(cli: CliType): Promise<CliVersionInfo> {
 }
 
 export async function getCliVersions(cli?: CliType): Promise<CliVersionInfo[]> {
-  const clis: CliType[] = cli ? [cli] : ["claude", "codex", "gemini", "grok", "mistral", "devin"];
+  const clis: readonly CliType[] = cli ? [cli] : CLI_TYPES;
   return Promise.all(clis.map(item => getCliVersion(item)));
 }
 

@@ -2,7 +2,30 @@
 
 All notable changes to the llm-cli-gateway project.
 
-## [Unreleased]
+## [2.13.0] - 2026-07-01: Cursor Agent CLI provider
+
+### Added
+
+- **Cursor Agent CLI (7th gateway provider).** `cursor_request` / `cursor_request_async`
+  drive `cursor-agent --print` headless mode with model selection, `plan`/`ask`
+  mode, output format, force/auto-review/sandbox/trust controls, workspace and
+  extra `--add-dir` roots, and session resume (`--resume`/`--continue`). Cursor
+  has no `promptParts` surface (plain `prompt` only, like Devin) and is not
+  wired for request-time MCP server injection because Cursor owns MCP config via
+  `cursor-agent mcp`. Covered by doctor, provider capability inventory,
+  provider-login guidance, upstream-contract drift detection, and CLI upgrade
+  support (`cursor-agent update`).
+- **Cursor native ACP discovery and gated transport.** The installed Cursor Agent
+  CLI exposes a native `cursor-agent acp` stdio entrypoint; initialize plus
+  `session/new` smoke passed locally. Gateway request tools still default to the
+  CLI headless path. Explicit `transport:"acp"` stays config-gated and rejects
+  unsupported Cursor CLI-only controls instead of silently dropping them.
+- **Cursor review hardening.** Cursor validation reviewers now run through
+  `cursor-agent --print --mode ask --sandbox enabled`; high-impact Cursor flags
+  (`force`, `trust`, `sandbox:"disabled"`) are gated under
+  `approvalStrategy:"mcp_managed"`; remote HTTP/OAuth workspace inputs must use
+  registered workspace aliases/roots; and docs/schema warn that gateway-created
+  `gw-*` ids are not resumable Cursor chat ids.
 
 ## [2.12.2] - 2026-07-01: backpressure hardening and release-gate stability
 

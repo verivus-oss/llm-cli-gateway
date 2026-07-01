@@ -189,6 +189,20 @@ const ACP_PROVIDER_REGISTRY: Readonly<Record<CliType, AcpProviderRegistryEntry>>
     caveat:
       "Native ACP entrypoint `devin acp` (stdio JSON-RPC). Manual initialize + session/new smoke passed with the installed CLI managing credentials (`devin auth login`; WINDSURF_API_KEY for empty-env); empty-env smoke is expected to fail. Third native runtime pilot; runtime routing stays config-gated.",
   }),
+  cursor: Object.freeze({
+    provider: "cursor",
+    displayName: "Cursor Agent CLI",
+    status: "native_smoke_passed",
+    supportKind: "native",
+    targetVersion: "cursor-agent 2026.06.29-2ad2186",
+    entrypoint: Object.freeze({ command: "cursor-agent", args: Object.freeze(["acp"]) }),
+    runtimeEnabledDefault: false,
+    shipRuntimePilot: true,
+    runtimePriority: 4,
+    adapterCandidates: Object.freeze([]),
+    caveat:
+      "Native ACP entrypoint `cursor-agent acp` (stdio JSON-RPC) is available as a hidden advanced command. Manual initialize + session/new smoke passed locally (protocolVersion 1, session created; no agentInfo returned). Fourth native runtime pilot; runtime routing stays config-gated.",
+  }),
 });
 
 /**

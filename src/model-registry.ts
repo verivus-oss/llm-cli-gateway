@@ -2,7 +2,7 @@ import { Dirent, existsSync, readFileSync, readdirSync, statSync } from "fs";
 import { homedir } from "os";
 import path from "path";
 import { parse as parseToml } from "smol-toml";
-import type { CliType } from "./session-manager.js";
+import { CLI_TYPES, type CliType } from "./provider-types.js";
 
 type ModelSource = "fallback" | "observed" | "config" | "env";
 type ModelConfidence = "low" | "medium" | "high";
@@ -104,6 +104,19 @@ const FALLBACK_INFO: CliInfoMap = {
     },
     modelOrder: ["opus", "gpt-5.5", "swe-1.6"],
   },
+  cursor: {
+    // Cursor Agent exposes `--list-models` / `models` for account-specific
+    // discovery, and the CLI selects its own default when no `--model` is
+    // supplied. These fallback hints mirror examples from `cursor-agent --help`.
+    description: "Cursor Agent CLI - agentic coding and review in Cursor's headless terminal agent",
+    models: {
+      "gpt-5": "OpenAI GPT-5 model accepted by Cursor Agent examples.",
+      "sonnet-4-thinking": "Claude Sonnet thinking model accepted by Cursor Agent examples.",
+      "claude-opus-4-8":
+        "Parameterized Claude Opus model family accepted by Cursor Agent examples.",
+    },
+    modelOrder: ["gpt-5", "sonnet-4-thinking", "claude-opus-4-8"],
+  },
 };
 
 const MODEL_CACHE_TTL_MS = 2 * 60 * 1000;
@@ -130,14 +143,9 @@ export function getCliInfo(forceRefresh = false): CliInfoMap {
 
 export function getAvailableCliInfo(forceRefresh = false): CliInfoMap {
   const info = getCliInfo(forceRefresh);
-  return {
-    claude: filterUnverifiedModelHints(info.claude),
-    codex: filterUnverifiedModelHints(info.codex),
-    gemini: filterUnverifiedModelHints(info.gemini),
-    grok: filterUnverifiedModelHints(info.grok),
-    mistral: filterUnverifiedModelHints(info.mistral),
-    devin: filterUnverifiedModelHints(info.devin),
-  };
+  return Object.fromEntries(
+    CLI_TYPES.map(cli => [cli, filterUnverifiedModelHints(info[cli])])
+  ) as CliInfoMap;
 }
 
 export function clearModelRegistryCache(): void {
@@ -184,14 +192,9 @@ export function resolveModelAlias(
 }
 
 function buildCliInfo(): CliInfoMap {
-  const info: CliInfoMap = {
-    claude: cloneInfo(FALLBACK_INFO.claude),
-    codex: cloneInfo(FALLBACK_INFO.codex),
-    gemini: cloneInfo(FALLBACK_INFO.gemini),
-    grok: cloneInfo(FALLBACK_INFO.grok),
-    mistral: cloneInfo(FALLBACK_INFO.mistral),
-    devin: cloneInfo(FALLBACK_INFO.devin),
-  };
+  const info = Object.fromEntries(
+    CLI_TYPES.map(cli => [cli, cloneInfo(FALLBACK_INFO[cli])])
+  ) as CliInfoMap;
 
   applyClaudeOverrides(info.claude);
   applyCodexOverrides(info.codex);

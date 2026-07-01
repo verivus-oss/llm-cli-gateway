@@ -24,8 +24,8 @@ export interface ValidationToolDeps extends ValidationOrchestratorDeps {
 
 /**
  * Slice 3: build the validation provider enum from the live enabled set — the
- * five CLIs plus every enabled API provider name. Pre-Slice-3 callers (no
- * apiProviders) get exactly the original five-CLI enum.
+ * spawnable CLIs plus every enabled API provider name. Pre-Slice-3 callers (no
+ * apiProviders) get the original CLI-only enum shape.
  */
 export function buildValidationSchemas(deps: ValidationToolDeps) {
   const apiNames = (deps.apiProviders ?? []).map(p => p.name);

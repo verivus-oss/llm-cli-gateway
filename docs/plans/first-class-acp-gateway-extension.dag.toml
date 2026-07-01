@@ -153,6 +153,15 @@ runtime_priority = 3
 ship_runtime_pilot = true
 notes = "Manual initialize and session/new smoke passed (protocolVersion 1, agent Affogato, session created). Third native ACP runtime pilot; runtime routing stays config-gated."
 
+[provider_matrix.cursor]
+display_name = "Cursor Agent CLI"
+target_version = "cursor-agent 2026.06.29-2ad2186"
+status = "native_smoke_passed"
+entrypoint = "cursor-agent acp"
+runtime_priority = 4
+ship_runtime_pilot = true
+notes = "Hidden advanced ACP command confirmed with cursor-agent acp --help. Manual initialize + session/new smoke passed locally (protocolVersion 1, session created; no agentInfo returned). Gateway request tools default to the CLI headless print-mode path (cursor_request/cursor_request_async); explicit ACP runtime routing stays config-gated."
+
 [config]
 default_file = "existing gateway config file"
 schema_owner = "src/config.ts"
@@ -198,6 +207,8 @@ stable_request_tools = [
   "mistral_request_async",
   "devin_request",
   "devin_request_async",
+  "cursor_request",
+  "cursor_request_async",
 ]
 selector_name = "transport"
 selector_values = ["cli", "acp"]

@@ -29,7 +29,7 @@ owner = "verivus-oss"
 mechanical_source_of_truth = "src/upstream-contracts.ts (UPSTREAM_CLI_CONTRACTS)"
 scanner = "scripts/upstream-scan.mjs"
 # Providers are keyed by canonical CliType only.
-providers = ["claude", "codex", "gemini", "grok", "mistral", "devin"]
+providers = ["claude", "codex", "gemini", "grok", "mistral", "devin", "cursor"]
 
 [scan_policy]
 # Global defaults for --live scans. Per-provider blocks may override cadence.
@@ -112,4 +112,14 @@ watch_categories = [
   "permission-modes",
   "acp-entrypoint",
 ]
+cadence_days = 7
+
+[providers.cursor]
+cli = "cursor"
+source_urls = [
+  "https://cursor.com/cli",
+  "https://cursor.com/docs/cli/acp",
+  "https://cursor.com/docs/cli/reference/parameters",
+]
+watch_categories = ["flags", "subcommands", "session-resume", "execution-modes", "acp-entrypoint"]
 cadence_days = 7

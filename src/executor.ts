@@ -31,6 +31,7 @@ export interface ExecuteResult {
 export function providerCommandName(command: string): string {
   if (command === "gemini") return "agy";
   if (command === "mistral") return "vibe";
+  if (command === "cursor") return "cursor-agent";
   return command;
 }
 
