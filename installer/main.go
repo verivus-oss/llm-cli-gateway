@@ -58,7 +58,7 @@ func run(args []string) error {
 		}
 		fmt.Println(string(body))
 		return nil
-	case "contracts", "oauth", "workspace":
+	case "contracts", "oauth", "workspace", "connector":
 		return nodeGatewayCommand(args)
 	case "start":
 		cfg, token, err := config.Ensure()
@@ -107,32 +107,38 @@ func run(args []string) error {
 		if err != nil {
 			return err
 		}
-		endpoint := "http://" + cfg.HTTPHost + ":" + cfg.HTTPPort + cfg.HTTPPath
+		localURL := "http://" + cfg.HTTPHost + ":" + cfg.HTTPPort + cfg.HTTPPath
+		endpoint := localURL
 		if cfg.PublicURL != "" {
 			endpoint = cfg.PublicURL
 		}
-		issuer := strings.TrimSuffix(endpoint, cfg.HTTPPath)
+		// Build every emitted URL from the clean origin (scheme://host[:port]) so
+		// no userinfo/query/fragment or non-canonical path from a public URL can
+		// leak or point a connector at the wrong endpoint. Matches src/remote-url.ts.
+		origin := config.ToOrigin(endpoint)
+		mcpURL := config.JoinBaseAndPath(origin, cfg.HTTPPath)
+		oauth := config.OAuthURLs(origin)
+		oauth["enabled"] = true
+		oauth["client_secret"] = "<copy-once local oauth command output only>"
 		return printJSON(map[string]any{
 			"ok":                    true,
 			"transport":             "streamable_http",
-			"url":                   endpoint,
-			"local_url":             "http://" + cfg.HTTPHost + ":" + cfg.HTTPPort + cfg.HTTPPath,
+			"url":                   mcpURL,
+			"local_url":             localURL,
 			"web_clients_supported": cfg.PublicURL != "" && strings.HasPrefix(cfg.PublicURL, "https://"),
-			"oauth": map[string]any{
-				"enabled":                true,
-				"authorization_url":      issuer + "/oauth/authorize",
-				"token_url":              issuer + "/oauth/token",
-				"registration_url":       issuer + "/oauth/register",
-				"protected_resource_url": issuer + "/.well-known/oauth-protected-resource",
-				"client_secret":          "<copy-once local oauth command output only>",
-			},
+			"oauth":                 oauth,
+			// OAuth-first: the deprecated no-auth connector URL is intentionally
+			// omitted here. It is available only via the explicit legacy path
+			// (`chatgpt-url` command / `connector setup --include-legacy-no-auth`).
 			"chatgpt": map[string]any{
-				"url":                    endpoint,
-				"authentication":         "OAuth",
-				"deprecated_no_auth_url": deprecatedNoAuthURL(cfg.ChatGPTConnectorURL),
+				"url":            mcpURL,
+				"authentication": "OAuth",
 			},
 			"headers": map[string]string{"Authorization": "Bearer <redacted>"},
-			"notes":   []string{"Use OAuth for ChatGPT and other remote web connectors. Use bearer Authorization headers only for local clients that support custom headers. Secrets are printed only by local copy-once oauth commands."},
+			"notes": []string{
+				"Preferred remote setup: run `llm-cli-gateway connector setup` (or `doctor --json` -> remote_http_oauth) for the copy-safe OAuth connector fields.",
+				"Use OAuth for ChatGPT and other remote web connectors. Use bearer Authorization headers only for local clients that support custom headers. Secrets are printed only by local copy-once oauth commands.",
+			},
 		})
 	case "setup-ui":
 		return setupui.Listen("127.0.0.1:3340")

@@ -112,6 +112,34 @@ function isLocalHost(host: string): boolean {
   return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1";
 }
 
+function isLoopbackHostname(hostname: string): boolean {
+  const h = hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  return h === "localhost" || h === "::1" || /^127\./.test(h);
+}
+
+/**
+ * Whether the gateway is (or is about to be) reachable from off-host. A public
+ * URL or tunnel provider means the loopback bind is fronted by something that
+ * exposes it publicly, so a loopback bind alone is NOT proof of safety. Used to
+ * fail closed on unsafe OAuth (public clients / open_dev) even when bound to
+ * 127.0.0.1 behind a tunnel (F17 hardening).
+ */
+function isPubliclyExposed(env: NodeJS.ProcessEnv, host: string): boolean {
+  if (!isLocalHost(host)) return true;
+  if (env.LLM_GATEWAY_TUNNEL_PROVIDER && env.LLM_GATEWAY_TUNNEL_PROVIDER.trim().length > 0) {
+    return true;
+  }
+  const publicUrl = env.LLM_GATEWAY_PUBLIC_URL;
+  if (publicUrl && publicUrl.trim().length > 0) {
+    try {
+      if (!isLoopbackHostname(new URL(publicUrl).hostname)) return true;
+    } catch {
+      // Unparseable public URL: treat as not-exposed here; other diagnostics flag it.
+    }
+  }
+  return false;
+}
+
 function requestBaseUrl(req: IncomingMessage): string {
   const configured = process.env.LLM_GATEWAY_PUBLIC_URL;
   if (configured) {
@@ -151,13 +179,16 @@ export async function startHttpGateway(options: HttpTransportOptions): Promise<H
   if (
     oauthConfig.enabled &&
     (oauthConfig.allowPublicClients || oauthConfig.registrationPolicy === "open_dev") &&
-    !isLocalHost(host)
+    isPubliclyExposed(process.env, host)
   ) {
+    const exposure = !isLocalHost(host)
+      ? `a non-loopback bind (host=${host})`
+      : "a public URL / tunnel (LLM_GATEWAY_PUBLIC_URL or LLM_GATEWAY_TUNNEL_PROVIDER)";
     throw new Error(
       `Refusing to start: remote OAuth with ${
         oauthConfig.allowPublicClients ? "public clients" : "open_dev registration"
-      } is exposed on a non-loopback bind (host=${host}). Bind LLM_GATEWAY_HTTP_HOST to 127.0.0.1 ` +
-        `and front the gateway with an authenticating proxy, or switch to ` +
+      } is exposed via ${exposure}. A loopback bind fronted by a public tunnel is still ` +
+        `publicly reachable. Front the gateway with an authenticating proxy, or switch to ` +
         `registration_policy=static_clients with confidential client secrets.`
     );
   }

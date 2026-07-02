@@ -4,12 +4,17 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
+  buildRemoteHttpOAuthReadiness,
   checkGeminiConfig,
   checkVibeSessionLogging,
   createDoctorReport,
   type DoctorReport,
+  type RemoteHttpOAuthReadinessInput,
 } from "../doctor.js";
 import type { ApiProviderConfig, ProvidersConfig } from "../config.js";
+import type { AuthConfig, RemoteOAuthConfig } from "../auth.js";
+import type { EndpointExposureReport } from "../endpoint-exposure.js";
+import type { RemoteSafeWorkspaceSummary } from "../workspace-registry.js";
 import { CLI_TYPES } from "../provider-types.js";
 import { knownProviderCapabilityIds } from "../provider-tool-capabilities.js";
 
@@ -527,5 +532,326 @@ describe("Slice 6 — doctor api_providers block", () => {
     validateAgainstSchema(report, schema, "doctor");
     expect(report.api_providers?.providers.ollama.reachable).toBe(false);
     expect(report.api_providers?.providers.ollama.reachability_error).toBe("ECONNREFUSED");
+  });
+});
+
+// Remote HTTP + OAuth readiness projection (this slice). The stage decision
+// tree is tested against the pure builder so it is hermetic (no fs/env) and the
+// first-blocking-action ordering is exercised directly.
+describe("remote_http_oauth readiness projection", () => {
+  const READY_PUBLIC_URL = "https://gw.example.trycloudflare.com";
+
+  function endpoint(overrides: Partial<EndpointExposureReport> = {}): EndpointExposureReport {
+    return {
+      mode: "tunnel",
+      local_url: "http://127.0.0.1:3333/mcp",
+      public_url_configured: true,
+      public_url: READY_PUBLIC_URL,
+      https_required_for_web: true,
+      https_configured: true,
+      web_clients_supported: true,
+      tunnel_provider: "gw.example.trycloudflare.com",
+      reachable_from_web: "reachable",
+      verification: { method: "not_checked", checked_url: null, status_code: null, error: null },
+      next_actions: [],
+      ...overrides,
+    };
+  }
+
+  function oauthCfg(overrides: Partial<RemoteOAuthConfig> = {}): RemoteOAuthConfig {
+    return {
+      enabled: true,
+      issuer: "auto",
+      requirePkce: true,
+      allowPlainPkce: false,
+      registrationPolicy: "static_clients",
+      allowPublicClients: false,
+      tokenTtlSeconds: 3600,
+      requireConsent: false,
+      consentSecretHash: null,
+      clients: [
+        {
+          clientId: "chatgpt",
+          clientSecretHash: "scrypt:N=32768,r=8,p=1:c2FsdA:aGFzaA",
+          allowedRedirectUris: ["https://chatgpt.com/connector/callback"],
+          scopes: ["mcp"],
+        },
+      ],
+      sharedSecret: null,
+      sources: { configFile: null, envOverrides: [] },
+      ...overrides,
+    };
+  }
+
+  const READY_AUTH: AuthConfig = { required: true, tokenConfigured: true, source: "env" };
+
+  const READY_WORKSPACE: RemoteSafeWorkspaceSummary = {
+    ready: true,
+    default: "gateway",
+    aliases: ["gateway"],
+    repo_count: 1,
+    allowed_root_count: 0,
+  };
+
+  function readyInput(
+    overrides: Partial<RemoteHttpOAuthReadinessInput> = {}
+  ): RemoteHttpOAuthReadinessInput {
+    return {
+      oauthDiag: { status: "enabled", config: oauthCfg(), issues: [] },
+      workspace: READY_WORKSPACE,
+      auth: READY_AUTH,
+      transport: "http",
+      publicUrl: READY_PUBLIC_URL,
+      endpoint: endpoint(),
+      mcpPath: "/mcp",
+      ...overrides,
+    };
+  }
+
+  it("is not_started with no public URL, stdio transport, and no OAuth config", () => {
+    const r = buildRemoteHttpOAuthReadiness(
+      readyInput({
+        oauthDiag: {
+          status: "absent",
+          config: oauthCfg({ enabled: false, clients: [] }),
+          issues: [],
+        },
+        transport: "stdio",
+        publicUrl: null,
+        endpoint: endpoint({
+          mode: "local_only",
+          public_url_configured: false,
+          public_url: null,
+          https_configured: false,
+          web_clients_supported: false,
+          tunnel_provider: null,
+          reachable_from_web: "not_checked",
+        }),
+      })
+    );
+    expect(r.stage).toBe("not_started");
+    expect(r.ready).toBe(false);
+    expect(r.mcp_url).toBeNull();
+  });
+
+  it("is missing_public_url when OAuth is plausible but no public URL is known", () => {
+    const r = buildRemoteHttpOAuthReadiness(
+      readyInput({
+        publicUrl: null,
+        endpoint: endpoint({
+          mode: "local_only",
+          public_url_configured: false,
+          public_url: null,
+          https_configured: false,
+          web_clients_supported: false,
+          tunnel_provider: null,
+        }),
+      })
+    );
+    expect(r.stage).toBe("missing_public_url");
+    // No base origin, so no URLs are emitted (never a partial/malformed URL).
+    expect(r.mcp_url).toBeNull();
+    expect(r.oauth.authorization_url).toBeNull();
+  });
+
+  it("is endpoint_unreachable when a valid public URL fails the reachability probe", () => {
+    const r = buildRemoteHttpOAuthReadiness(
+      readyInput({ endpoint: endpoint({ reachable_from_web: "unreachable" }) })
+    );
+    expect(r.stage).toBe("endpoint_unreachable");
+  });
+
+  it("is oauth_disabled when a public endpoint exists but OAuth is disabled", () => {
+    const r = buildRemoteHttpOAuthReadiness(
+      readyInput({
+        oauthDiag: { status: "disabled", config: oauthCfg({ enabled: false }), issues: [] },
+      })
+    );
+    expect(r.stage).toBe("oauth_disabled");
+    expect(r.auth_mode).not.toBe("oauth");
+    expect(r.oauth.authorization_url).toBeNull();
+  });
+
+  it("is unsafe_oauth_config when the OAuth config is malformed", () => {
+    const r = buildRemoteHttpOAuthReadiness(
+      readyInput({
+        oauthDiag: {
+          status: "malformed",
+          config: oauthCfg({ enabled: false, clients: [] }),
+          issues: ["An OAuth client is missing a client_secret_hash."],
+        },
+      })
+    );
+    expect(r.stage).toBe("unsafe_oauth_config");
+    expect(r.next_actions.join(" ")).toContain("client_secret_hash");
+  });
+
+  it("is unsafe_oauth_config when public clients are enabled on a public endpoint", () => {
+    const r = buildRemoteHttpOAuthReadiness(
+      readyInput({
+        oauthDiag: {
+          status: "enabled",
+          config: oauthCfg({ allowPublicClients: true }),
+          issues: [],
+        },
+      })
+    );
+    expect(r.stage).toBe("unsafe_oauth_config");
+    expect(r.next_actions.join(" ").toLowerCase()).toContain("public");
+  });
+
+  it("is missing_oauth_client when OAuth is enabled with static clients but none configured", () => {
+    const r = buildRemoteHttpOAuthReadiness(
+      readyInput({
+        oauthDiag: { status: "enabled", config: oauthCfg({ clients: [] }), issues: [] },
+      })
+    );
+    expect(r.stage).toBe("missing_oauth_client");
+    // URLs still resolve (the endpoint + OAuth are up); only a client is missing.
+    expect(r.oauth.authorization_url).toBe(`${READY_PUBLIC_URL}/oauth/authorize`);
+  });
+
+  it("is missing_workspace when OAuth is ready but no workspace is available", () => {
+    const r = buildRemoteHttpOAuthReadiness(
+      readyInput({
+        workspace: {
+          ready: false,
+          default: null,
+          aliases: [],
+          repo_count: 0,
+          allowed_root_count: 0,
+        },
+      })
+    );
+    expect(r.stage).toBe("missing_workspace");
+    expect(r.next_actions.join(" ")).toContain("workspace add");
+  });
+
+  it("is ready only when endpoint, OAuth, client, and workspace all pass", () => {
+    const r = buildRemoteHttpOAuthReadiness(readyInput());
+    expect(r.stage).toBe("ready");
+    expect(r.ready).toBe(true);
+    expect(r.auth_mode).toBe("oauth");
+    expect(r.mcp_url).toBe(`${READY_PUBLIC_URL}/mcp`);
+    expect(r.oauth.issuer).toBe(READY_PUBLIC_URL);
+    expect(r.oauth.authorization_url).toBe(`${READY_PUBLIC_URL}/oauth/authorize`);
+    expect(r.oauth.token_url).toBe(`${READY_PUBLIC_URL}/oauth/token`);
+    expect(r.oauth.consent_required).toBe(false);
+    expect(r.workspace.default).toBe("gateway");
+    expect(r.workspace.aliases).toEqual(["gateway"]);
+  });
+
+  it("ready without a reachability check adds a verify caveat (does not overclaim)", () => {
+    const verified = buildRemoteHttpOAuthReadiness(readyInput());
+    expect(verified.stage).toBe("ready");
+    // Default readyInput endpoint is reachable -> no caveat.
+    expect(verified.next_actions.join(" ")).not.toContain("LLM_GATEWAY_VERIFY_PUBLIC_URL");
+
+    const unverified = buildRemoteHttpOAuthReadiness(
+      readyInput({ endpoint: endpoint({ reachable_from_web: "not_checked" }) })
+    );
+    expect(unverified.stage).toBe("ready");
+    expect(unverified.next_actions.join(" ")).toContain("LLM_GATEWAY_VERIFY_PUBLIC_URL");
+    expect(unverified.next_actions.join(" ").toLowerCase()).toContain("not verified");
+  });
+
+  it("reports consent_required from runtime OAuth config", () => {
+    const r = buildRemoteHttpOAuthReadiness(
+      readyInput({
+        oauthDiag: {
+          status: "enabled",
+          config: oauthCfg({
+            requireConsent: true,
+            consentSecretHash: "scrypt:N=32768,r=8,p=1:c2FsdA:aGFzaA",
+          }),
+          issues: [],
+        },
+      })
+    );
+    expect(r.oauth.consent_required).toBe(true);
+  });
+
+  it("produces deterministic, secret-free next_actions for every stage", () => {
+    const scenarios: RemoteHttpOAuthReadinessInput[] = [
+      readyInput({
+        oauthDiag: {
+          status: "absent",
+          config: oauthCfg({ enabled: false, clients: [] }),
+          issues: [],
+        },
+        transport: "stdio",
+        publicUrl: null,
+        endpoint: endpoint({
+          mode: "local_only",
+          public_url_configured: false,
+          public_url: null,
+          https_configured: false,
+        }),
+      }),
+      readyInput({
+        publicUrl: null,
+        endpoint: endpoint({
+          mode: "local_only",
+          public_url_configured: false,
+          public_url: null,
+          https_configured: false,
+        }),
+      }),
+      readyInput({ endpoint: endpoint({ reachable_from_web: "unreachable" }) }),
+      readyInput({
+        oauthDiag: { status: "disabled", config: oauthCfg({ enabled: false }), issues: [] },
+      }),
+      readyInput({
+        oauthDiag: {
+          status: "enabled",
+          config: oauthCfg({ allowPublicClients: true }),
+          issues: [],
+        },
+      }),
+      readyInput({
+        oauthDiag: { status: "enabled", config: oauthCfg({ clients: [] }), issues: [] },
+      }),
+      readyInput({
+        workspace: {
+          ready: false,
+          default: null,
+          aliases: [],
+          repo_count: 0,
+          allowed_root_count: 0,
+        },
+      }),
+      readyInput(),
+    ];
+    // OAuth access tokens are `oauth_` + 43-char base64url; require a long token
+    // body so the readiness stage names (oauth_disabled, unsafe_oauth_config) do
+    // not falsely trip the secret detector.
+    const secretPattern =
+      /scrypt:|Bearer\s|oauth_[A-Za-z0-9_-]{20,}|client_secret=|consent_secret=/;
+    for (const input of scenarios) {
+      const r = buildRemoteHttpOAuthReadiness(input);
+      // Determinism: identical inputs yield identical output.
+      expect(buildRemoteHttpOAuthReadiness(input)).toEqual(r);
+      expect(r.next_actions.length).toBeGreaterThan(0);
+      for (const action of r.next_actions) {
+        expect(typeof action).toBe("string");
+        expect(action).not.toMatch(secretPattern);
+      }
+      // The whole projection never carries secret material.
+      expect(JSON.stringify(r)).not.toMatch(secretPattern);
+    }
+  });
+
+  it("schema rejects an unknown readiness stage value", () => {
+    const stageSchema = (
+      (schema.properties as Record<string, JsonSchemaNode>).remote_http_oauth.properties as Record<
+        string,
+        JsonSchemaNode
+      >
+    ).stage;
+    expect(() => validateAgainstSchema("bogus_stage", stageSchema, "stage")).toThrow();
+    // And accepts every declared stage.
+    for (const stage of stageSchema.enum as string[]) {
+      expect(() => validateAgainstSchema(stage, stageSchema, "stage")).not.toThrow();
+    }
   });
 });

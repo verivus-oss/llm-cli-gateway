@@ -1141,14 +1141,40 @@ function isSafeRedirectUri(uri: string): boolean {
   return isHttpsOrLoopbackUrl(uri);
 }
 
-export function loadRemoteOAuthConfig(
-  logger: Logger = noopLogger,
-  env: NodeJS.ProcessEnv = process.env
-): RemoteOAuthConfig {
-  const configPath = defaultGatewayConfigPath();
-  const { parsed: configFile, sourcePath } = readGatewayTomlFile(configPath, logger, "OAuth");
-  const rawHttp = (configFile?.http as Record<string, unknown> | undefined) ?? {};
-  const rawOAuth = (rawHttp.oauth as Record<string, unknown> | undefined) ?? {};
+/**
+ * Coarse status of the remote OAuth config, used by the doctor readiness
+ * projection to distinguish "operator has not enabled OAuth" from "operator
+ * enabled OAuth but the config is unsafe/malformed". `loadRemoteOAuthConfig`
+ * wraps this and returns only the resolved config for back-compat.
+ *
+ *   - "absent":    no [http.oauth] table and no OAuth env overrides.
+ *   - "disabled":  OAuth config is present but enabled = false.
+ *   - "enabled":   OAuth config is present, enabled, and passed validation.
+ *   - "malformed": OAuth is enabled but failed schema/semantic validation
+ *                  (remote OAuth is therefore disabled at runtime, fail-closed).
+ */
+export type RemoteOAuthConfigStatus = "absent" | "disabled" | "enabled" | "malformed";
+
+export interface RemoteOAuthConfigDiagnostics {
+  config: RemoteOAuthConfig;
+  status: RemoteOAuthConfigStatus;
+  /** True when an [http.oauth] table or OAuth env override is present at all. */
+  configured: boolean;
+  /**
+   * Concise, secret-free descriptions of why an enabled config is malformed.
+   * Empty for "absent"/"disabled"/"enabled". Never contains secret material.
+   */
+  issues: string[];
+}
+
+/**
+ * Apply the OAuth env-var compatibility overrides on top of the raw TOML block.
+ * Returns the merged object plus the list of override names applied.
+ */
+function mergeOAuthEnvOverrides(
+  rawOAuth: Record<string, unknown>,
+  env: NodeJS.ProcessEnv
+): { merged: Record<string, unknown>; envOverrides: string[] } {
   const envOverrides: string[] = [];
   const merged: Record<string, unknown> = { ...rawOAuth };
 
@@ -1183,31 +1209,46 @@ export function loadRemoteOAuthConfig(
     merged.require_consent = merged.require_consent ?? true;
     envOverrides.push("LLM_GATEWAY_OAUTH_CONSENT_SECRET");
   }
+  return { merged, envOverrides };
+}
 
-  const parsed = OAuthConfigSchema.safeParse(merged);
-  if (!parsed.success) {
-    logWarn(logger, "Invalid [http.oauth] config; remote OAuth disabled", {
-      error: parsed.error.message,
-    });
-    return disabledOAuthConfig(sourcePath, envOverrides);
-  }
-  const data = parsed.data;
+/**
+ * Run the semantic (post-schema) validations on a parsed OAuth config. Pushes a
+ * secret-free issue string for each failure. Returns the resolved config on
+ * success, or null when any semantic check failed (fail-closed: caller returns
+ * the disabled config so remote OAuth stays off at runtime).
+ */
+function validateParsedOAuthConfig(
+  data: z.infer<typeof OAuthConfigSchema>,
+  env: NodeJS.ProcessEnv,
+  sourcePath: string | null,
+  envOverrides: string[],
+  logger: Logger,
+  issues: string[]
+): RemoteOAuthConfig | null {
   if (data.issuer !== "auto" && !isHttpsOrLoopbackUrl(data.issuer)) {
     logWarn(logger, "Invalid [http.oauth].issuer; remote OAuth disabled");
-    return disabledOAuthConfig(sourcePath, envOverrides);
+    issues.push("OAuth issuer must be an https:// URL (or a loopback URL for local testing).");
+    return null;
   }
   for (const client of data.clients) {
     if (!data.allow_public_clients && !client.client_secret_hash) {
       logWarn(logger, "OAuth client secret hash is required when public clients are disabled", {
         client_id: client.client_id,
       });
-      return disabledOAuthConfig(sourcePath, envOverrides);
+      issues.push(
+        "An OAuth client is missing a client_secret_hash (required when public clients are disabled). Recreate it with `llm-cli-gateway oauth client add`."
+      );
+      return null;
     }
     if (client.client_secret_hash && !isSecretHash(client.client_secret_hash)) {
       logWarn(logger, "Invalid OAuth client secret hash; remote OAuth disabled", {
         client_id: client.client_id,
       });
-      return disabledOAuthConfig(sourcePath, envOverrides);
+      issues.push(
+        "An OAuth client secret hash is not a valid scrypt hash. Rotate it with `llm-cli-gateway oauth client rotate`."
+      );
+      return null;
     }
     if (
       client.allowed_redirect_uris.length === 0 ||
@@ -1216,13 +1257,19 @@ export function loadRemoteOAuthConfig(
       logWarn(logger, "Invalid OAuth client redirect URI; remote OAuth disabled", {
         client_id: client.client_id,
       });
-      return disabledOAuthConfig(sourcePath, envOverrides);
+      issues.push(
+        "An OAuth client has a missing or non-https/loopback redirect URI. Re-add the client with a valid --redirect-uri."
+      );
+      return null;
     }
   }
   if (data.shared_secret?.enabled) {
     if (!data.shared_secret.secret_hash || !isSecretHash(data.shared_secret.secret_hash)) {
       logWarn(logger, "Invalid [http.oauth.shared_secret] secret_hash; remote OAuth disabled");
-      return disabledOAuthConfig(sourcePath, envOverrides);
+      issues.push(
+        "The OAuth shared-secret hash is missing or invalid. Reset it with `llm-cli-gateway oauth shared-secret set`."
+      );
+      return null;
     }
   }
   if (data.registration_policy === "open_dev" && env.LLM_GATEWAY_OAUTH_OPEN_DEV !== "1") {
@@ -1238,7 +1285,10 @@ export function loadRemoteOAuthConfig(
         logger,
         "[http.oauth].require_consent is set but consent_secret_hash is missing/invalid; remote OAuth disabled"
       );
-      return disabledOAuthConfig(sourcePath, envOverrides);
+      issues.push(
+        "require_consent is set but the consent secret hash is missing or invalid. Set it with `llm-cli-gateway oauth shared-secret set` or LLM_GATEWAY_OAUTH_CONSENT_SECRET."
+      );
+      return null;
     }
   }
 
@@ -1267,4 +1317,68 @@ export function loadRemoteOAuthConfig(
       : null,
     sources: { configFile: sourcePath, envOverrides },
   };
+}
+
+/**
+ * Load and classify the remote OAuth config. Unlike `loadRemoteOAuthConfig`,
+ * this reports WHY OAuth is off so the readiness projection can distinguish a
+ * deliberately-disabled server from a misconfigured one. Never throws and never
+ * emits secret material.
+ */
+export function diagnoseRemoteOAuthConfig(
+  logger: Logger = noopLogger,
+  env: NodeJS.ProcessEnv = process.env
+): RemoteOAuthConfigDiagnostics {
+  const configPath = defaultGatewayConfigPath();
+  const { parsed: configFile, sourcePath } = readGatewayTomlFile(configPath, logger, "OAuth");
+  const rawHttp = (configFile?.http as Record<string, unknown> | undefined) ?? {};
+  const rawOAuth = (rawHttp.oauth as Record<string, unknown> | undefined) ?? {};
+  const { merged, envOverrides } = mergeOAuthEnvOverrides(rawOAuth, env);
+  const configured = Object.keys(rawOAuth).length > 0 || envOverrides.length > 0;
+
+  const parsed = OAuthConfigSchema.safeParse(merged);
+  if (!parsed.success) {
+    logWarn(logger, "Invalid [http.oauth] config; remote OAuth disabled", {
+      error: parsed.error.message,
+    });
+    // A parse failure can only happen when an [http.oauth] table (or override)
+    // exists, since an empty object parses to the all-default disabled config.
+    return {
+      config: disabledOAuthConfig(sourcePath, envOverrides),
+      status: "malformed",
+      configured: true,
+      issues: [
+        "The [http.oauth] config is invalid (schema validation failed); remote OAuth is disabled.",
+      ],
+    };
+  }
+
+  const data = parsed.data;
+  const issues: string[] = [];
+  const built = validateParsedOAuthConfig(data, env, sourcePath, envOverrides, logger, issues);
+  if (!built) {
+    // Semantic validation failed. Only surface it as "malformed" when the
+    // operator actually asked for OAuth (enabled); an enabled=false block with
+    // stale/invalid material is just "disabled".
+    return {
+      config: disabledOAuthConfig(sourcePath, envOverrides),
+      status: data.enabled ? "malformed" : configured ? "disabled" : "absent",
+      configured,
+      issues: data.enabled ? issues : [],
+    };
+  }
+
+  const status: RemoteOAuthConfigStatus = built.enabled
+    ? "enabled"
+    : configured
+      ? "disabled"
+      : "absent";
+  return { config: built, status, configured, issues: [] };
+}
+
+export function loadRemoteOAuthConfig(
+  logger: Logger = noopLogger,
+  env: NodeJS.ProcessEnv = process.env
+): RemoteOAuthConfig {
+  return diagnoseRemoteOAuthConfig(logger, env).config;
 }

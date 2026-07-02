@@ -14,9 +14,10 @@ Provider execution from ChatGPT must use a registered workspace alias, session w
 
 ## Steps
 
+0. Inspect readiness first: `llm-cli-gateway doctor --json` -> `remote_http_oauth.stage`, and follow its `next_actions` until the stage is `ready`.
 1. Run `llm-cli-gateway tunnel start`.
 2. Run `llm-cli-gateway oauth client add chatgpt --redirect-uri <ChatGPT callback URL> --print-once`.
-3. Run `llm-cli-gateway print-client-config`.
+3. Run `llm-cli-gateway connector setup` for the copy-safe connector fields.
 4. In ChatGPT, open the custom MCP connector/app setup flow available for your plan or workspace.
 5. Enter the MCP URL and OAuth authorization/token URLs from the setup packet.
 6. Enter the client ID and copy-once client secret from the local OAuth command.

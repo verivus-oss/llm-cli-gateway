@@ -195,6 +195,13 @@ func NormalizePublicURL(rawURL, defaultPath string) (string, error) {
 	if parsed.Scheme != "https" {
 		return "", errors.New("public URL must use https:// for ChatGPT and other web clients")
 	}
+	// Strip credential-bearing / non-canonical components at store time: a public
+	// MCP URL must never carry userinfo, query, or fragment. This prevents a
+	// secret-bearing URL (e.g. https://user:pass@host/mcp?token=SECRET) from being
+	// persisted and later echoed by public-url / print-client-config / doctor.
+	parsed.User = nil
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
 	if parsed.Path == "" || parsed.Path == "/" {
 		parsed.Path = defaultPath
 	}
@@ -319,6 +326,7 @@ func DoctorJSON() ([]byte, error) {
 			"grok":   providerDoctor("grok", "Grok CLI"),
 		},
 		"endpoint_exposure": endpointExposureDoctor(cfg, publicURL, redactedPublicURL, httpsConfigured),
+		"remote_http_oauth": remoteHTTPOAuthFallback(cfg, redactedPublicURL, httpsConfigured),
 		"client_config": map[string]any{
 			"claude_desktop_config_present": false,
 			"codex_config_present":          false,
@@ -327,6 +335,114 @@ func DoctorJSON() ([]byte, error) {
 		"next_actions": nextActions(cfg.AuthTokenSet, publicURL, httpsConfigured),
 	}
 	return json.MarshalIndent(report, "", "  ")
+}
+
+// JoinBaseAndPath mirrors joinBaseAndPath in src/remote-url.ts: it trims trailing
+// slashes from the base origin and guarantees a single leading slash on the path
+// so the Go installer produces byte-identical URLs to the Node gateway even when
+// the origin carries a stray trailing slash (which would otherwise yield a
+// double-slash URL). This keeps the installer from drifting from the shared
+// remote-url helper.
+func JoinBaseAndPath(baseOrigin, path string) string {
+	base := strings.TrimRight(baseOrigin, "/")
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	return base + path
+}
+
+// ToOrigin mirrors toOrigin in src/remote-url.ts: reduce any URL to its origin
+// (scheme://host[:port]), dropping userinfo, path, query, and fragment so no
+// credential-bearing or path material leaks into constructed URLs and so OAuth
+// endpoints cannot diverge from the Node runtime (which builds from URL origin,
+// not string trimming). Empty on parse failure or missing scheme/host.
+func ToOrigin(rawURL string) string {
+	if rawURL == "" {
+		return ""
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return ""
+	}
+	return u.Scheme + "://" + u.Host
+}
+
+// remoteOAuthOrigin derives the scheme://host[:port] origin from a (redacted)
+// public URL via true URL parsing (not path-suffix trimming), so a public URL
+// whose path differs from the MCP path, or that carries userinfo/query, still
+// yields a correct, credential-free origin. Empty when no public URL.
+func remoteOAuthOrigin(redactedPublicURL, _httpPath string) string {
+	return ToOrigin(redactedPublicURL)
+}
+
+// OAuthURLs builds the canonical OAuth endpoint URLs from a base origin. Kept in
+// one place, and using JoinBaseAndPath so print-client-config and the fallback
+// doctor cannot drift from the Node gateway's remote-url helper (same path
+// suffixes, same trailing-slash normalization).
+func OAuthURLs(origin string) map[string]any {
+	return map[string]any{
+		"authorization_url":      JoinBaseAndPath(origin, "/oauth/authorize"),
+		"token_url":              JoinBaseAndPath(origin, "/oauth/token"),
+		"registration_url":       JoinBaseAndPath(origin, "/oauth/register"),
+		"protected_resource_url": JoinBaseAndPath(origin, "/.well-known/oauth-protected-resource"),
+	}
+}
+
+// remoteHTTPOAuthFallback synthesizes the remote_http_oauth readiness block for
+// the bootstrapper-fallback doctor (used only before the Node gateway is
+// installed; once installed, the Node doctor's authoritative block passes
+// through). It never emits secrets. The fallback has no OAuth clients and no
+// workspace, so the readiness stage is at best missing_oauth_client.
+func remoteHTTPOAuthFallback(cfg Config, redactedPublicURL string, httpsConfigured bool) map[string]any {
+	origin := remoteOAuthOrigin(redactedPublicURL, cfg.HTTPPath)
+	var mcpURL, issuer, authURL, tokenURL any
+	stage := "missing_public_url"
+	if origin != "" && httpsConfigured {
+		mcpURL = JoinBaseAndPath(origin, cfg.HTTPPath)
+		issuer = origin
+		authURL = JoinBaseAndPath(origin, "/oauth/authorize")
+		tokenURL = JoinBaseAndPath(origin, "/oauth/token")
+		// The bootstrapper fallback never has a configured OAuth client.
+		stage = "missing_oauth_client"
+	}
+	return map[string]any{
+		"ready":      false,
+		"stage":      stage,
+		"public_url": nullableString(redactedPublicURL),
+		"mcp_url":    mcpURL,
+		"auth_mode":  "oauth",
+		"oauth": map[string]any{
+			"enabled":             true,
+			"issuer":              issuer,
+			"authorization_url":   authURL,
+			"token_url":           tokenURL,
+			"registration_policy": "static_clients",
+			"clients_configured":  0,
+			"consent_required":    false,
+		},
+		"workspace": map[string]any{
+			"ready":   false,
+			"default": nil,
+			"aliases": []string{},
+		},
+		"next_actions": remoteFallbackNextActions(stage),
+	}
+}
+
+func remoteFallbackNextActions(stage string) []string {
+	switch stage {
+	case "missing_public_url":
+		return []string{
+			"Set LLM_GATEWAY_PUBLIC_URL to a public https URL (tunnel or reverse proxy), not localhost or a LAN address.",
+		}
+	case "missing_oauth_client":
+		return []string{
+			"Register an OAuth client: llm-cli-gateway oauth client add <client-id> --redirect-uri <connector-callback> --print-once",
+			"Then run: llm-cli-gateway connector setup",
+		}
+	default:
+		return []string{}
+	}
 }
 
 func nodeDoctorJSON(cfg Config) ([]byte, bool) {

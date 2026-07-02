@@ -1,0 +1,457 @@
+# Implementation plan: remote HTTP + OAuth UX improvements.
+#
+# Goal: make the preferred remote connector path obvious, diagnosable, and
+# copy-safe: HTTPS public URL, /mcp, OAuth, and an explicit registered
+# workspace/default. Operators should not have to correlate raw doctor JSON,
+# OAuth command output, setup UI status, workspace docs, and legacy ChatGPT
+# no-auth instructions to complete a setup.
+#
+# Security stance:
+#   This is a UX and diagnostics slice. It must not relax HTTP auth, OAuth
+#   policy, remote workspace gating, or secret redaction. New setup artifacts
+#   are client-oriented and copy-safe by default.
+
+[meta]
+name = "remote-http-oauth-ux-improvements"
+schema_version = "1.0"
+owner = "verivus-oss"
+slice = "remote-http-oauth-ux-2026-07-01"
+target_branch = "master"
+status = "planned"
+created = "2026-07-01"
+predecessor_plans = [
+  "docs/plans/remote-connector-oauth-workspaces.dag.toml",
+  "docs/plans/local-stdio-remote-http-workspace-gating.dag.toml",
+]
+acceptance_resource = "A local operator can run one readiness command, follow stable next actions, create or inspect an OAuth client without secret leakage, copy the exact remote connector fields, and confirm which workspace remote provider calls will use. Docs, CLI messaging, doctor JSON, setup UI, and installer output all describe OAuth as the preferred remote path while preserving legacy compatibility."
+
+source_files_to_inspect = [
+  "src/doctor.ts",
+  "src/config.ts",
+  "src/oauth.ts",
+  "src/http-transport.ts",
+  "src/workspace-registry.ts",
+  "src/index.ts",
+  "src/__tests__/doctor.test.ts",
+  "src/__tests__/config.test.ts",
+  "src/__tests__/oauth.test.ts",
+  "src/__tests__/http-transport.test.ts",
+  "src/__tests__/workspace-registry.test.ts",
+  "setup/status.schema.json",
+  "setup/ui/index.html",
+  "installer/main.go",
+  "installer/internal/config/config.go",
+  "setup/assistants/endpoint-exposure-agent-runbook.md",
+  "setup/providers/chatgpt.md",
+  "docs/personal-mcp/ENDPOINT_EXPOSURE.md",
+  "docs/personal-mcp/connect-chatgpt.md",
+]
+
+[goals]
+items = [
+  "Make OAuth the single recommended remote HTTP connector path for new setups.",
+  "Expose a stable remote_http_oauth readiness projection that assistants, UI, tests, and docs can consume.",
+  "Emit a copy-safe connector setup packet with exact URLs, auth mode, client identity, and workspace guidance.",
+  "Improve OAuth client creation and rotation messaging at the one moment copy-once secrets may be printed.",
+  "Surface remote workspace readiness next to OAuth readiness so setup failures point to the correct local action.",
+  "Keep deprecated no-auth connector paths available only as explicit legacy compatibility.",
+]
+
+[non_goals]
+items = [
+  "Do not replace the OAuth server implementation or change opaque access-token semantics.",
+  "Do not relax static-client, shared-secret, PKCE, redirect URI, or consent policy.",
+  "Do not relax remote HTTP workspace gating or allow arbitrary absolute local paths from remote clients.",
+  "Do not add remote filesystem browsing, network clone, or provider credential management.",
+  "Do not print bearer tokens, OAuth access tokens, stored OAuth client secrets, tunnel tokens, consent secrets, provider credentials, or secret hashes in doctor, setup UI, setup packets, logs, or docs examples.",
+  "Do not remove legacy no-auth connector compatibility in this slice.",
+]
+
+[decisions]
+preferred_remote_auth_mode = "oauth"
+preferred_mcp_path = "/mcp"
+setup_artifacts_are_copy_safe_by_default = true
+legacy_no_auth_is_hidden_unless_requested = true
+readiness_stage_enum_is_stable = true
+workspace_aliases_are_shown_to_remote_clients = true
+absolute_workspace_paths_are_operator_admin_output_only = true
+raw_secret_output_requires_copy_once_command = true
+
+[readiness_model]
+json_pointer = "/remote_http_oauth"
+stable_stages = [
+  "not_started",
+  "missing_public_url",
+  "endpoint_unreachable",
+  "oauth_disabled",
+  "unsafe_oauth_config",
+  "missing_oauth_client",
+  "missing_workspace",
+  "ready",
+]
+required_fields = [
+  "ready",
+  "stage",
+  "public_url",
+  "mcp_url",
+  "auth_mode",
+  "oauth.enabled",
+  "oauth.issuer",
+  "oauth.authorization_url",
+  "oauth.token_url",
+  "oauth.registration_policy",
+  "oauth.clients_configured",
+  "oauth.consent_required",
+  "workspace.ready",
+  "workspace.default",
+  "workspace.aliases",
+  "next_actions",
+]
+
+[security_notes]
+requirements = [
+  "Readiness and setup output must be derived from normalized config/runtime metadata, not from string scraping command output.",
+  "Every user-facing setup surface must use the same URL construction helpers as OAuth and HTTP runtime metadata.",
+  "Remote-client-oriented output may show workspace aliases and counts, but not local absolute paths by default.",
+  "Operator-admin output may show local paths only when the command is local and explicitly administrative.",
+  "Copy-once OAuth client secrets may appear only during add/rotate commands with an explicit print-once flag or equivalent current behavior.",
+  "Logs and doctor JSON must not include Authorization headers, bearer tokens, OAuth tokens, raw client secrets, consent/shared secrets, tunnel tokens, provider API keys, or secret hashes.",
+]
+
+[test_matrix.unit]
+doctor = [
+  "remote_http_oauth.stage is missing_public_url when HTTP/OAuth config is otherwise plausible but no public URL is known",
+  "remote_http_oauth.stage is oauth_disabled when a public endpoint exists but OAuth is disabled",
+  "remote_http_oauth.stage is unsafe_oauth_config when issuer, redirect, registration, or PKCE policy is invalid for remote setup",
+  "remote_http_oauth.stage is missing_oauth_client when OAuth is enabled with static clients but no usable client is configured",
+  "remote_http_oauth.stage is missing_workspace when OAuth is ready but no default/session/registered workspace is available for remote provider execution",
+  "remote_http_oauth.stage is ready only when endpoint, OAuth, client, and workspace checks all pass",
+  "next_actions are deterministic, concise, and contain no secrets",
+]
+cli = [
+  "remote connector setup packet includes MCP URL, authorization URL, token URL, auth mode, client id when available, and workspace guidance",
+  "setup packet omits gateway bearer token, OAuth access token, stored client secret, secret hash, consent secret, and tunnel token",
+  "oauth client add validates redirect URI before writing config and prints copy-once checklist only when requested",
+  "oauth client rotate clearly distinguishes new copy-once secret output from stored redacted client metadata",
+  "legacy no-auth connector URL is omitted unless a legacy flag is provided",
+]
+config = [
+  "normalized remote setup projection handles missing config sections without throwing",
+  "malformed OAuth config produces actionable diagnostics while preserving existing runtime fail-closed behavior",
+  "URL normalization preserves path-specific well-known metadata and /mcp path consistency",
+]
+workspace = [
+  "safe workspace summary exposes default alias, aliases, and readiness without local paths",
+  "admin workspace summary can include local paths only through explicit local administrative output",
+]
+
+[test_matrix.integration]
+remote_http = [
+  "OAuth metadata URLs printed by setup match live HTTP well-known and token/authorize endpoints",
+  "401/403 WWW-Authenticate discovery references the same protected-resource metadata URL shown in setup",
+  "remote HTTP provider execution still fails closed without a registered/default/session workspace",
+]
+setup_ui = [
+  "setup UI renders the readiness stage and next actions without requiring raw doctor JSON interpretation",
+  "copy buttons exist only for copy-safe connector fields",
+  "legacy no-auth path is hidden by default and labelled compatibility-only when expanded",
+]
+
+[release_gates]
+local_commands = [
+  "node -e \"const fs=require('fs'); const toml=require('smol-toml'); toml.parse(fs.readFileSync('docs/plans/remote-http-oauth-ux-improvements.dag.toml','utf8')); console.log('DAG TOML parse ok')\"",
+  "npx vitest run src/__tests__/doctor.test.ts src/__tests__/config.test.ts src/__tests__/oauth.test.ts src/__tests__/http-transport.test.ts src/__tests__/workspace-registry.test.ts",
+  "npm run build",
+  "npm run lint",
+  "npm test",
+  "npm run format:check",
+]
+
+[review_gate]
+required_after_implementation = true
+instructions = [
+  "Run cross-LLM review after implementation and local verification.",
+  "Reviewers must inspect doctor/setup JSON, CLI output, setup UI rendering, docs, and HTTP/OAuth runtime URL construction directly.",
+  "Reviewers must verify no new output path leaks bearer tokens, OAuth access tokens, OAuth client secrets, secret hashes, consent/shared secrets, tunnel tokens, provider credentials, Authorization headers, local home paths in remote-client setup output, or prompt content.",
+  "Reviewers must verify deprecated no-auth connector behavior remains compatible but is not the default documented path.",
+  "Reviewers must verify remote workspace gating remains fail-closed for HTTP provider execution.",
+]
+
+[[nodes]]
+id = "phase-0-baseline-current-remote-setup-surfaces"
+phase = "baseline"
+status = "planned"
+description = """
+Map the current remote HTTP + OAuth operator journey before changing behavior.
+Capture what each surface currently says and where values diverge: doctor JSON,
+print-client-config or equivalent commands, oauth client add/rotate output,
+HTTP metadata endpoints, setup UI, installer status, ChatGPT docs, provider
+setup docs, and endpoint exposure runbooks.
+
+Use local scratch notes or PR description drafts only. Do not commit captured
+tokens, secrets, connector URLs with embedded credentials, machine account
+names, or private filesystem paths.
+"""
+dependencies = []
+expected_files_touched = []
+acceptance_criteria = [
+  "Every user-visible remote setup surface is listed with owner file or command.",
+  "The baseline identifies the canonical source for public URL, /mcp URL, issuer, authorization URL, token URL, registration policy, client count, and workspace readiness.",
+  "Known divergences and ambiguous messages are recorded without secret material.",
+  "Legacy no-auth connector references are identified and classified as compatibility docs, command output, or setup UI.",
+]
+verification_commands = [
+  "rg -n \"print-client-config|oauth client|chatgpt-url|no-auth|authorization_url|token_url|remote_http|endpoint_exposure|workspace\" src setup installer docs",
+]
+
+[[nodes]]
+id = "phase-1-documentation-and-message-contract"
+phase = "documentation-and-messaging"
+status = "planned"
+description = """
+Define the user-facing language contract before implementation. The preferred
+path should be described consistently as HTTPS public URL + /mcp + OAuth +
+registered/default workspace. Write stage-specific copy for diagnostics,
+setup packets, setup UI, installer messages, and docs.
+
+The copy should be operational: say what is missing, why it matters, and the
+minimal local command or config action to take next. Avoid long conceptual
+OAuth explanations inside CLI output.
+"""
+dependencies = ["phase-0-baseline-current-remote-setup-surfaces"]
+expected_files_touched = [
+  "setup/assistants/endpoint-exposure-agent-runbook.md",
+  "setup/providers/chatgpt.md",
+  "docs/personal-mcp/ENDPOINT_EXPOSURE.md",
+  "docs/personal-mcp/connect-chatgpt.md",
+]
+acceptance_criteria = [
+  "Docs name OAuth as the recommended remote connector path for new setups.",
+  "Docs mention deprecated no-auth connector URLs only in a short compatibility note.",
+  "Docs and runbooks tell assistants to inspect remote_http_oauth.stage first once that field exists.",
+  "Operator commands in docs do not embed raw secrets in shell history.",
+  "Workspace setup language uses aliases for remote clients and local paths only in operator-admin commands.",
+]
+verification_commands = [
+  "rg -n \"no-auth|chatgpt-url|OAuth|remote_http_oauth|workspace add|workspace create\" setup docs",
+]
+
+[[nodes]]
+id = "phase-2-diagnostics-readiness-projection"
+phase = "diagnostics"
+status = "planned"
+description = """
+Add a stable remote_http_oauth readiness projection to doctor JSON and the
+setup status schema. The projection should combine existing endpoint exposure,
+HTTP transport, OAuth config, OAuth metadata URL, client registration, and
+workspace readiness checks into a small decision tree.
+
+The readiness projection is not an auth decision. Runtime auth and workspace
+gating remain in the existing HTTP/OAuth/workspace code paths.
+"""
+dependencies = ["phase-1-documentation-and-message-contract"]
+expected_files_touched = [
+  "src/doctor.ts",
+  "src/config.ts",
+  "src/oauth.ts",
+  "src/workspace-registry.ts",
+  "setup/status.schema.json",
+  "src/__tests__/doctor.test.ts",
+  "src/__tests__/config.test.ts",
+  "src/__tests__/workspace-registry.test.ts",
+]
+acceptance_criteria = [
+  "doctor --json includes remote_http_oauth with the stable stages from [readiness_model].",
+  "The readiness stage is deterministic and ordered so the first blocking operator action is clear.",
+  "next_actions are stable enough for setup assistants and tests to consume.",
+  "OAuth URLs in doctor are produced by shared helpers also used by runtime metadata endpoints.",
+  "Workspace summary reports readiness, default alias, aliases, and counts without local paths in remote-client output.",
+  "Malformed OAuth config produces unsafe_oauth_config with actionable diagnostics and does not throw uncaught errors.",
+  "The setup status schema validates every new field and rejects unknown stage values.",
+]
+verification_commands = [
+  "npx vitest run src/__tests__/doctor.test.ts src/__tests__/config.test.ts src/__tests__/workspace-registry.test.ts",
+  "npm run build",
+]
+
+[[nodes]]
+id = "phase-3-copy-safe-connector-setup-command"
+phase = "documentation-and-messaging"
+status = "planned"
+description = """
+Extend print-client-config or add a narrow remote connector setup command that
+prints a human summary and JSON packet for a target remote client. The default
+packet should be copy-safe and suitable for pasting into a remote connector UI
+or setup assistant.
+
+Include MCP URL, auth mode, authorization URL, token URL, client id when known,
+whether a copy-once secret is required, and workspace expectation. Exclude all
+raw secret material unless the command is explicitly the one-time secret
+creation/rotation command.
+"""
+dependencies = ["phase-2-diagnostics-readiness-projection"]
+expected_files_touched = [
+  "src/index.ts",
+  "src/oauth.ts",
+  "src/workspace-registry.ts",
+  "installer/main.go",
+  "installer/internal/config/config.go",
+  "src/__tests__/oauth.test.ts",
+  "src/__tests__/doctor.test.ts",
+]
+acceptance_criteria = [
+  "The command emits machine-readable JSON plus a concise human summary.",
+  "The JSON includes enough fields for ChatGPT-style connector setup without reading raw doctor JSON.",
+  "The command reuses remote_http_oauth readiness and next_actions instead of recomputing inconsistent state.",
+  "Stored OAuth client secrets, secret hashes, bearer tokens, OAuth access tokens, consent/shared secrets, tunnel tokens, and provider credentials are absent.",
+  "Legacy no-auth connector URL appears only with an explicit legacy flag and is labelled deprecated or compatibility-only.",
+  "Installer/bootstrapper output points to the same preferred OAuth setup packet.",
+]
+verification_commands = [
+  "npx vitest run src/__tests__/doctor.test.ts src/__tests__/oauth.test.ts",
+  "npm run build",
+]
+
+[[nodes]]
+id = "phase-4-oauth-client-creation-messaging"
+phase = "config-improvements"
+status = "planned"
+description = """
+Improve oauth client add/rotate/list/revoke output and validation so operators
+understand redirect URI, client id, copy-once secret handling, restart or
+reload requirements, public URL assumptions, and the exact connector fields
+that are safe to copy.
+
+This step may add normalized config helpers, but must not change OAuth token
+semantics or registration policy.
+"""
+dependencies = ["phase-2-diagnostics-readiness-projection"]
+expected_files_touched = [
+  "src/index.ts",
+  "src/config.ts",
+  "src/oauth.ts",
+  "src/__tests__/config.test.ts",
+  "src/__tests__/oauth.test.ts",
+]
+acceptance_criteria = [
+  "oauth client add rejects redirect URIs without a scheme before writing config.",
+  "Duplicate client ids require an explicit rotate/update path.",
+  "Remote-only setup warns, without hard-failing local test cases, when a localhost redirect URI looks inconsistent with a public connector.",
+  "Add/rotate output clearly labels copy-once client secret output and never writes plaintext secrets to config.",
+  "List/revoke output shows redacted client metadata only.",
+  "When config changes require restart or reload, command output states that explicitly.",
+]
+verification_commands = [
+  "npx vitest run src/__tests__/config.test.ts src/__tests__/oauth.test.ts",
+  "npm run build",
+]
+
+[[nodes]]
+id = "phase-5-config-normalization-and-url-consistency"
+phase = "config-improvements"
+status = "planned"
+description = """
+Centralize remote URL and OAuth metadata construction so doctor, setup packets,
+setup UI, installer output, HTTP protected-resource metadata, authorization
+server metadata, and WWW-Authenticate discovery cannot drift.
+
+Keep existing config precedence and redaction behavior. Add only the normalized
+projections needed by diagnostics and setup output.
+"""
+dependencies = [
+  "phase-3-copy-safe-connector-setup-command",
+  "phase-4-oauth-client-creation-messaging",
+]
+expected_files_touched = [
+  "src/config.ts",
+  "src/oauth.ts",
+  "src/http-transport.ts",
+  "src/doctor.ts",
+  "src/__tests__/http-transport.test.ts",
+  "src/__tests__/oauth.test.ts",
+  "src/__tests__/doctor.test.ts",
+]
+acceptance_criteria = [
+  "Protected-resource metadata, authorization-server metadata, setup packet URLs, and doctor URLs are identical for the same public URL config.",
+  "Path-specific well-known metadata remains correct for /mcp.",
+  "WWW-Authenticate resource_metadata points to the same protected-resource metadata URL reported by setup output.",
+  "Invalid or missing public URL produces diagnostics instead of partially malformed setup URLs.",
+  "No runtime auth behavior changes except clearer diagnostics and consistent messages.",
+]
+verification_commands = [
+  "npx vitest run src/__tests__/http-transport.test.ts src/__tests__/oauth.test.ts src/__tests__/doctor.test.ts",
+  "npm run build",
+]
+
+[[nodes]]
+id = "phase-6-remote-setup-wizard"
+phase = "remote-setup-wizard"
+status = "planned"
+description = """
+Update setup/ui/index.html with a task-focused remote connector wizard/tab.
+The first screen should show endpoint exposure, OAuth readiness, exact
+copy-safe connector fields, OAuth client secret instructions that point back
+to the local CLI, workspace readiness/default alias, and stage-specific next
+actions.
+
+The wizard should consume remote_http_oauth first and expose raw status only
+as troubleshooting detail. It should not ask users to interpret raw doctor
+JSON for common states.
+"""
+dependencies = [
+  "phase-3-copy-safe-connector-setup-command",
+  "phase-5-config-normalization-and-url-consistency",
+]
+expected_files_touched = [
+  "setup/ui/index.html",
+  "setup/status.schema.json",
+  "installer/main.go",
+  "installer/internal/config/config.go",
+]
+acceptance_criteria = [
+  "Setup UI has a remote connector view organized around readiness stage and next action.",
+  "Copy buttons are present only for copy-safe fields such as MCP URL, authorization URL, token URL, and client id.",
+  "The UI never renders stored secrets, secret hashes, bearer tokens, access tokens, consent secrets, tunnel tokens, provider credentials, or Authorization headers.",
+  "Workspace readiness shows default alias and registered aliases, not local paths, in the remote-client flow.",
+  "Legacy no-auth path is collapsed by default and labelled compatibility-only when expanded.",
+  "Installer status/config output validates against the updated schema.",
+]
+verification_commands = [
+  "npx vitest run src/__tests__/doctor.test.ts",
+  "npm run build",
+]
+
+[[nodes]]
+id = "phase-7-end-to-end-docs-and-regression-gate"
+phase = "release-gate"
+status = "planned"
+description = """
+Run the final release gate for this slice. Verify the full operator journey
+from missing setup through ready setup, including docs, CLI output, doctor JSON,
+HTTP metadata, setup UI rendering, and legacy compatibility.
+"""
+dependencies = [
+  "phase-6-remote-setup-wizard",
+]
+expected_files_touched = [
+  "setup/assistants/endpoint-exposure-agent-runbook.md",
+  "setup/providers/chatgpt.md",
+  "docs/personal-mcp/ENDPOINT_EXPOSURE.md",
+  "docs/personal-mcp/connect-chatgpt.md",
+]
+acceptance_criteria = [
+  "A fresh operator flow can be followed from docs without consulting source code.",
+  "doctor --json, setup command JSON, installer status, and setup UI agree on readiness stage and URLs.",
+  "OAuth happy path, missing-client path, missing-workspace path, and legacy no-auth compatibility path are covered by tests or documented manual checks.",
+  "Remote HTTP provider execution still fails closed without workspace readiness.",
+  "No changed docs or test fixtures include private machine paths, account names, raw secrets, or local-only internal repository names beyond already-public project identifiers.",
+  "All [release_gates].local_commands pass or any skipped command has a documented reason in the PR.",
+]
+verification_commands = [
+  "node -e \"const fs=require('fs'); const toml=require('smol-toml'); toml.parse(fs.readFileSync('docs/plans/remote-http-oauth-ux-improvements.dag.toml','utf8')); console.log('DAG TOML parse ok')\"",
+  "npx vitest run src/__tests__/doctor.test.ts src/__tests__/config.test.ts src/__tests__/oauth.test.ts src/__tests__/http-transport.test.ts src/__tests__/workspace-registry.test.ts",
+  "npm run build",
+  "npm run lint",
+  "npm test",
+  "npm run format:check",
+]

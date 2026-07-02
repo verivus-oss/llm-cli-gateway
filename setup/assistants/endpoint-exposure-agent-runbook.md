@@ -111,7 +111,13 @@ approval is needed, ask the user to approve the OS prompt locally.
 3. Ask whether the selected provider connector UI is available to the user.
 4. Ask for fresh redacted `llm-cli-gateway doctor --json`, or run it locally if
    the assistant has command access.
-5. Inspect these fields before proposing web-client setup:
+5. Inspect `remote_http_oauth.stage` FIRST. It is the single ordered readiness
+   signal for the preferred OAuth connector path; the first failing gate is the
+   reported stage and its `next_actions` name the minimal next step. Only drop to
+   the individual fields below when you need detail:
+   - `remote_http_oauth.stage` and `remote_http_oauth.next_actions`
+   - `remote_http_oauth.mcp_url`, `remote_http_oauth.oauth.authorization_url`, `remote_http_oauth.oauth.token_url`
+   - `remote_http_oauth.workspace.ready`, `remote_http_oauth.workspace.default`, `remote_http_oauth.workspace.aliases`
    - `transport.http.enabled`
    - `auth.token_configured`
    - `auth.oauth.enabled`
@@ -213,11 +219,15 @@ Do not tell the user a web client is ready while reachability is unverified.
 
 ## Generate Client Setup Values
 
-After endpoint verification, use generated gateway output.
+After endpoint verification, use the copy-safe connector setup packet.
 
 ```bash
-llm-cli-gateway print-client-config
+llm-cli-gateway connector setup
 ```
+
+The packet reuses `remote_http_oauth` readiness, so its `stage`, URLs, and
+`next_actions` match `doctor --json`. It contains only copy-safe fields (MCP URL,
+authorization URL, token URL, client id) and never secrets.
 
 For ChatGPT, create or reuse a static OAuth client locally:
 
@@ -225,8 +235,12 @@ For ChatGPT, create or reuse a static OAuth client locally:
 llm-cli-gateway oauth client add chatgpt --redirect-uri <ChatGPT callback URL> --print-once
 ```
 
+Ensure a workspace is registered so remote provider calls resolve: set a
+`[workspaces].default` (or register a repo alias). Remote clients select the
+workspace by alias and never send local absolute paths.
+
 ChatGPT setup uses the verified public `/mcp` URL with `Authentication: OAuth`.
-Use the authorization and token URLs from `print-client-config` or the setup UI.
+Use the authorization and token URLs from `connector setup` or the setup UI.
 The client secret is copy-once local output and must be pasted only into the
 provider setup field that asks for it, never into a remote assistant transcript.
 
