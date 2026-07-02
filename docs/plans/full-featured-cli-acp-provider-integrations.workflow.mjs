@@ -4,7 +4,11 @@
 // Runs in the background. For each phase it: implements (fresh sub-agent) ->
 // runs every gate to green -> runs the cross-LLM review roster (Codex/Grok/
 // Mistral, plus Gemini for non-security phases) -> loops fix rounds until the
-// reviewers raise no blockers (max 3 rounds) -> commits the phase. Phase-9 runs
+// reviewers raise NO blockers -> commits the phase. Review convergence is slow
+// here by design: implementation review can take up to 5 rounds and the phase-8
+// documentation gate up to 15 rounds, so the per-phase round budget is sized to
+// those (MAX_ROUNDS below); the cap is a runaway backstop, not the expected exit.
+// Phase-9 runs
 // the full-diff review plus `npm run check` and stops at "PR ready" (never
 // releases).
 //
@@ -154,6 +158,11 @@ const PHASES = [
 
 const rosterFor = (p) => (p.security ? ['codex', 'grok', 'mistral'] : ['codex', 'grok', 'mistral', 'gemini'])
 
+// Review round budget. Documentation approval historically runs up to ~15 rounds
+// here; implementation review up to ~5. The cap is a runaway backstop; a phase is
+// expected to reach a clean review well before it.
+const maxRoundsFor = (p) => (p.node.includes('docs') ? 15 : 5)
+
 const implPrompt = (p) => `Implement node "${p.node}" of the DAG at ${DAG}. That DAG node (its description, files, acceptance, commands) and the mission brief at ${BRIEF} are the authoritative spec; read the node and the relevant brief sections in full. DO the work; do not describe it.
 
 Files in scope: ${p.files.join(', ')}.
@@ -197,7 +206,8 @@ for (const p of PHASES) {
 
   let round = 0
   let open = []
-  while (round < 3) {
+  const maxRounds = maxRoundsFor(p)
+  while (round < maxRounds) {
     const verdicts = (
       await parallel(
         rosterFor(p).map((cli) => () =>
@@ -208,12 +218,12 @@ for (const p of PHASES) {
     open = verdicts.filter((v) => !v.ranFailed).flatMap((v) => v.blockers || [])
     const approvals = verdicts.filter((v) => v.approved && !v.ranFailed).length
     const failed = verdicts.filter((v) => v.ranFailed).map((v) => v.reviewer)
-    log(`${p.node} review round ${round + 1}: ${approvals}/${verdicts.length} approve, ${open.length} blockers${failed.length ? `, no-verdict from ${failed.join(',')}` : ''}`)
+    log(`${p.node} review round ${round + 1}/${maxRounds}: ${approvals}/${verdicts.length} approve, ${open.length} blockers${failed.length ? `, no-verdict from ${failed.join(',')}` : ''}`)
     if (open.length === 0) break
     await agent(fixPrompt(p, open), { schema: REPORT_SCHEMA, label: `fix:${p.node}:r${round + 1}`, phase: p.title })
     round++
   }
-  if (open.length) log(`WARNING ${p.node}: ${open.length} blocker(s) survived ${round} fix rounds; committing with them recorded as open risk for phase-9.`)
+  if (open.length) log(`WARNING ${p.node}: ${open.length} blocker(s) survived all ${maxRounds} fix rounds; committing with them recorded as open risk for phase-9. This should be rare - investigate as a likely genuine hard blocker.`)
 
   const commit = await agent(commitPrompt(p, open), { label: `commit:${p.node}`, phase: p.title })
   summary.push({ node: p.node, commit: (commit || '').trim(), residualBlockers: open })
@@ -221,26 +231,34 @@ for (const p of PHASES) {
 }
 
 // ---- phase-9: full-diff review + npm run check, stop at PR-ready ----
+// Iterate the full-branch review to a clean pass (up to 5 rounds, same budget as
+// implementation review) rather than a single fix pass.
 phase('phase-9 release-gate')
-const finalReview = (
-  await parallel(
-    ['codex', 'grok', 'mistral'].map((cli) => () =>
-      agent(
-        `Final full-branch cross-LLM review via external ${cli} in ${REPO}. READ-ONLY. The full change set is the diff of the current branch vs master: run \`git -C ${REPO} --no-pager diff master...HEAD --stat\` and save \`git -C ${REPO} --no-pager diff master...HEAD\` to /tmp/ffci-review-final-${cli}.diff. Load ToolSearch select:mcp__gtwy__${cli}_request_async,mcp__gtwy__llm_job_status,mcp__gtwy__llm_request_result,mcp__gtwy__llm_job_cancel . Ask ${cli} (${cli === 'codex' ? 'sandboxMode:read-only, ' : ''}${cli === 'grok' ? 'disableWebSearch:true, ' : ''}correlationId ffci-final-${cli}) to verify the WHOLE integration against actual code/tests/installed-help (${HELP}): DRY single-source-of-truth, grounded capabilities, security invariants, native-ACP only where upstream advertises it (grok/mistral/devin; NOT claude/codex/gemini), docs match shipped surface, and test veracity. Poll status every 90s up to ~10 min; collect via llm_request_result by correlationId; retry once on crash/hang, else ranFailed:true. Return the verdict.`,
-        { schema: VERDICT_SCHEMA, label: `final-review:${cli}`, phase: 'phase-9 release-gate' }
+const FINAL_MAX_ROUNDS = 5
+let finalRound = 0
+let finalOpen = []
+while (finalRound < FINAL_MAX_ROUNDS) {
+  const finalReview = (
+    await parallel(
+      ['codex', 'grok', 'mistral'].map((cli) => () =>
+        agent(
+          `Final full-branch cross-LLM review via external ${cli} in ${REPO}. READ-ONLY. The full change set is the diff of the current branch vs master: run \`git -C ${REPO} --no-pager diff master...HEAD --stat\` and save \`git -C ${REPO} --no-pager diff master...HEAD\` to /tmp/ffci-review-final-${cli}.diff. Load ToolSearch select:mcp__gtwy__${cli}_request_async,mcp__gtwy__llm_job_status,mcp__gtwy__llm_request_result,mcp__gtwy__llm_job_cancel . Ask ${cli} (${cli === 'codex' ? 'sandboxMode:read-only, ' : ''}${cli === 'grok' ? 'disableWebSearch:true, ' : ''}correlationId ffci-final-${cli}-r${finalRound + 1}) to verify the WHOLE integration against actual code/tests/installed-help (${HELP}): DRY single-source-of-truth, grounded capabilities, security invariants, native-ACP only where upstream advertises it (grok/mistral/devin; NOT claude/codex/gemini), docs match shipped surface, and test veracity. Poll status every 90s up to ~10 min; collect via llm_request_result by correlationId; retry once on crash/hang, else ranFailed:true. Return the verdict.`,
+          { schema: VERDICT_SCHEMA, label: `final-review:${cli}:r${finalRound + 1}`, phase: 'phase-9 release-gate' }
+        )
       )
     )
-  )
-).filter(Boolean)
-
-const finalOpen = finalReview.filter((v) => !v.ranFailed).flatMap((v) => v.blockers || [])
-if (finalOpen.length) {
-  log(`phase-9: ${finalOpen.length} full-diff blocker(s); dispatching a final fix pass.`)
+  ).filter(Boolean)
+  finalOpen = finalReview.filter((v) => !v.ranFailed).flatMap((v) => v.blockers || [])
+  const finalApprovals = finalReview.filter((v) => v.approved && !v.ranFailed).length
+  log(`phase-9 full-diff review round ${finalRound + 1}/${FINAL_MAX_ROUNDS}: ${finalApprovals}/${finalReview.length} approve, ${finalOpen.length} blockers`)
+  if (finalOpen.length === 0) break
   await agent(
     `Final-review blockers on the full branch in ${REPO}:\n${JSON.stringify(finalOpen, null, 2)}\nFix the valid ones (grounded; justify any dismissal with a code cite). ${GUARDRAILS}\n${GATES}\nThen commit the fixes (conventional, no Co-Authored-By, no em dash). Do not release.`,
-    { label: 'phase-9:fix', phase: 'phase-9 release-gate' }
+    { label: `phase-9:fix:r${finalRound + 1}`, phase: 'phase-9 release-gate' }
   )
+  finalRound++
 }
+if (finalOpen.length) log(`WARNING phase-9: ${finalOpen.length} blocker(s) survived ${FINAL_MAX_ROUNDS} full-diff review rounds; surfacing in the handoff rather than looping further.`)
 
 const gate = await agent(
   `Run the release gate in ${REPO} and produce the PR-ready handoff. Execute \`npm run check\` (build + lint + format:check + test + security:audit) and \`npm run upstream:contracts\` and \`npm run provider:surfaces:check\`; fix-and-rerun until all green (${GUARDRAILS}). Do NOT release, do NOT push, do NOT open a PR - STOP at "PR ready for review". Return a concise handoff: the branch name, \`git -C ${REPO} --no-pager diff master...HEAD --stat\` inventory, the green gate output (npm test counts), and any residual open risk.`,
