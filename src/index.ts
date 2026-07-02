@@ -2728,6 +2728,47 @@ function resolvePromptOrPartsForPrep(args: {
   };
 }
 
+/**
+ * H1: reject caller-supplied host filesystem paths / plugin loaders for remote
+ * (HTTP/OAuth) principals.
+ *
+ * A remote connector is confined to a registered workspace (it must select one
+ * by alias; see `resolveWorkspaceAndWorktreeForRequest`) and `workingDir`/
+ * `addDir` are already path-confined against that workspace. But the advanced
+ * per-provider path fields (systemPromptFile/appendSystemPromptFile/settings/
+ * config/agentConfig/promptFile/images/outputSchema to READ, debugFile/
+ * outputLastMessage/exportSession to WRITE, pluginDir/pluginUrl to load code)
+ * are pushed to the CLI verbatim, so without this gate a remote principal could
+ * read, write, or execute arbitrary host paths outside its workspace. These
+ * fields have no legitimate remote-connector use, so they are rejected outright
+ * rather than path-confined (confinement cannot be applied safely to a
+ * not-yet-existing write target or to a `--plugin-url`). Local stdio callers are
+ * unaffected: the gate is a no-op unless the active request context is remote.
+ *
+ * Returns an error `ExtendedToolResponse` (matching the prep functions' error
+ * convention) when a restricted field is present on a remote request, else null.
+ */
+function remoteHostPathFieldError(
+  operation: string,
+  corrId: string,
+  fields: Record<string, unknown>
+): ExtendedToolResponse | null {
+  const ctx = getRequestContext();
+  const isRemote = ctx?.transport === "http" || ctx?.authKind === "oauth";
+  if (!isRemote) return null;
+  const present = Object.entries(fields)
+    .filter(([, v]) => (Array.isArray(v) ? v.length > 0 : v !== undefined && v !== null))
+    .map(([k]) => k);
+  if (present.length === 0) return null;
+  return createErrorResponse(
+    operation,
+    1,
+    `Remote HTTP/OAuth requests may not use host-path or plugin fields: ${present.join(", ")}. ` +
+      `These are restricted to local callers; supply content inline or reference a registered workspace.`,
+    corrId
+  );
+}
+
 export function prepareClaudeRequest(
   params: {
     prompt?: string;
@@ -2783,6 +2824,17 @@ export function prepareClaudeRequest(
   const corrId = params.correlationId || randomUUID();
   const cliInfo = getCliInfo();
   const resolvedModel = resolveModelAlias("claude", params.model, cliInfo);
+
+  // H1: remote principals may not hand Claude arbitrary host paths / plugins.
+  const remoteFieldErr = remoteHostPathFieldError(params.operation, corrId, {
+    settings: params.settings,
+    systemPromptFile: params.systemPromptFile,
+    appendSystemPromptFile: params.appendSystemPromptFile,
+    pluginDir: params.pluginDir,
+    pluginUrl: params.pluginUrl,
+    debugFile: params.debugFile,
+  });
+  if (remoteFieldErr) return remoteFieldErr;
 
   const inputResolution = resolvePromptOrPartsForPrep({
     prompt: params.prompt,
@@ -3211,6 +3263,16 @@ export function prepareCodexRequest(
   const corrId = params.correlationId || randomUUID();
   const cliInfo = getCliInfo();
   const resolvedModel = resolveModelAlias("codex", params.model, cliInfo);
+
+  // H1: remote principals may not hand Codex arbitrary host paths. Only the
+  // string (caller-path) form of outputSchema is restricted; an inline object
+  // schema is materialized into a gateway-owned temp file and is safe.
+  const remoteFieldErr = remoteHostPathFieldError(params.operation, corrId, {
+    outputSchema: typeof params.outputSchema === "string" ? params.outputSchema : undefined,
+    images: params.images,
+    outputLastMessage: params.outputLastMessage,
+  });
+  if (remoteFieldErr) return remoteFieldErr;
 
   const inputResolution = resolvePromptOrPartsForPrep({
     prompt: params.prompt,
@@ -3783,6 +3845,19 @@ export function prepareGrokRequest(
   const corrId = params.correlationId || randomUUID();
   const cliInfo = getCliInfo();
   const resolvedModel = resolveModelAlias("grok", params.model, cliInfo);
+
+  // H1: remote principals may not hand Grok arbitrary host paths. promptFile and
+  // leaderSocket are always host paths (a file read / an arbitrary unix-socket
+  // connect); rules (`@file` form) and agent ("name or definition file path")
+  // are host-file read vectors. Rejected for remote callers; local stdio is
+  // unaffected. A remote caller should inline the content instead.
+  const remoteFieldErr = remoteHostPathFieldError(params.operation, corrId, {
+    promptFile: params.promptFile,
+    leaderSocket: params.leaderSocket,
+    rules: params.rules,
+    agent: params.agent,
+  });
+  if (remoteFieldErr) return remoteFieldErr;
 
   const inputResolution = resolvePromptOrPartsForPrep({
     prompt: params.prompt,
@@ -6391,6 +6466,16 @@ export function prepareDevinRequest(
   _runtime: GatewayServerRuntime
 ): CliRequestPrep | ExtendedToolResponse {
   const corrId = params.correlationId ?? randomUUID();
+  // H1: remote principals may not hand Devin arbitrary host paths. Only the
+  // string (caller-path) form of exportSession is a write target; the bare
+  // boolean form is a flag with no caller path and is left alone.
+  const remoteFieldErr = remoteHostPathFieldError(params.operation, corrId, {
+    promptFile: params.promptFile,
+    config: params.config,
+    agentConfig: params.agentConfig,
+    exportSession: typeof params.exportSession === "string" ? params.exportSession : undefined,
+  });
+  if (remoteFieldErr) return remoteFieldErr;
   let prompt = (params.prompt ?? "").trim();
   if (!prompt) {
     return createErrorResponse(
