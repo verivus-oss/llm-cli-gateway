@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 // Provider identity (CliType, and the CLI provider list this file keys its
 // Record<CliType, ...> contracts by) comes from the provider definition
 // registry, not a hand-maintained list here. See src/provider-definitions.ts.
-import type { CliType } from "./provider-definitions.js";
+import { getProviderDefinition, type CliType } from "./provider-definitions.js";
 import { envWithExtendedPath, getExtendedPath, resolveCommandForSpawn } from "./executor.js";
 
 /**
@@ -3723,5 +3723,101 @@ export function buildUpstreamContractReport(
     acpInstalledProbe: options.probeInstalled
       ? Object.fromEntries(selected.map(cli => [cli, probeInstalledAcpEntrypoint(cli)]))
       : null,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Runtime discovery <-> checked-in contract drift (phase-1b).
+//
+// The checked-in `UPSTREAM_CLI_CONTRACTS` is a guardrail/regression fixture, not
+// the only source of truth for installed capability. Phase-1b's runtime
+// discovery (src/provider-capability-discovery.ts) compares what the INSTALLED
+// binary advertises against this contract and reports a mismatch as a DISCOVERY
+// EVENT via {@link computeDiscoveryContractDrift}. This is a PURE comparator: it
+// spawns nothing and does not touch the offline `upstream:contracts` gate or the
+// argv validators, so wiring discovery in cannot loosen or break either.
+// ---------------------------------------------------------------------------
+
+/** Installed-vs-contract drift, expressed as a discovery event. */
+export interface DiscoveryContractDrift {
+  cli: CliType;
+  /** Version string discovered from the installed binary. */
+  version: string;
+  /** Target version the checked-in contract was captured against. */
+  contractTargetVersion: string;
+  versionMatchesContract: boolean;
+  /** Contract flags (non-hidden) absent from the discovered help surface. */
+  missingContractFlags: string[];
+  /** Discovered flags neither in the contract nor acknowledged as upstream-only. */
+  newDiscoveredFlags: string[];
+  discoveredUnmappedCount: number;
+  status: "clean" | "drift" | "degraded";
+}
+
+function extractVersionNumber(text: string): string | null {
+  return /\d+(?:\.\d+)+/.exec(text)?.[0] ?? null;
+}
+
+/**
+ * Compare a discovered capability surface (flag names + version) against the
+ * checked-in contract for a provider. Pure; no spawning. Consumed by
+ * `provider-capability-discovery.ts` so an installed-vs-contract mismatch is
+ * surfaced as a discovery event in cli_versions / provider_tool_capabilities /
+ * upstream_contracts / logs.
+ */
+export function computeDiscoveryContractDrift(
+  cli: CliType,
+  discovered: {
+    version: string;
+    discoveredFlagNames: readonly string[];
+    discoveredUnmappedCount: number;
+    status: "ok" | "degraded" | "error";
+  }
+): DiscoveryContractDrift {
+  const contract = UPSTREAM_CLI_CONTRACTS[cli];
+  const contractTargetVersion = getProviderDefinition(cli).upstreamContract.targetVersion;
+
+  const discoveredSet = new Set(discovered.discoveredFlagNames);
+  const contractFlagSet = new Set(Object.keys(contract.flags));
+  const acknowledged = new Set(contract.acknowledgedUpstreamFlags ?? []);
+
+  const missingContractFlags: string[] = [];
+  for (const [flag, spec] of Object.entries(contract.flags)) {
+    if (spec.hiddenFromHelp) continue;
+    if (!discoveredSet.has(flag)) missingContractFlags.push(flag);
+  }
+
+  const ignored = new Set(["--help", "-h", "--version", "-V"]);
+  const newDiscoveredFlags: string[] = [];
+  for (const flag of discovered.discoveredFlagNames) {
+    if (contractFlagSet.has(flag)) continue;
+    if (acknowledged.has(flag)) continue;
+    if (ignored.has(flag)) continue;
+    newDiscoveredFlags.push(flag);
+  }
+
+  const discoveredNumber = extractVersionNumber(discovered.version);
+  const contractNumber = extractVersionNumber(contractTargetVersion);
+  const versionMatchesContract =
+    discoveredNumber !== null && contractNumber !== null && discoveredNumber === contractNumber;
+
+  let status: DiscoveryContractDrift["status"];
+  if (discovered.status !== "ok") {
+    status = "degraded";
+  } else if (missingContractFlags.length > 0 || newDiscoveredFlags.length > 0) {
+    status = "drift";
+  } else {
+    status = "clean";
+  }
+
+  return {
+    cli,
+    version: discovered.version,
+    contractTargetVersion,
+    versionMatchesContract,
+    missingContractFlags,
+    newDiscoveredFlags,
+    discoveredUnmappedCount: discovered.discoveredUnmappedCount,
+    status,
   };
 }
