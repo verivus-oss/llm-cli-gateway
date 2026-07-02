@@ -273,10 +273,10 @@ code {
   max-width: 920px;
   color: var(--text-100);
   font-family: var(--font-display);
-  font-size: clamp(3rem, 8vw, 6.8rem);
+  font-size: clamp(2.7rem, 5.8vw, 4.9rem);
   font-weight: 700;
   letter-spacing: 0;
-  line-height: 0.94;
+  line-height: 1;
 }
 .hp-hero-main__lede {
   max-width: 820px;
@@ -829,7 +829,7 @@ code {
     padding: calc(64px + 34px) 0 24px;
   }
   .hp-hero-main h1 {
-    font-size: clamp(2.65rem, 16vw, 4.4rem);
+    font-size: clamp(2.2rem, 12vw, 3.35rem);
   }
   .hp-hero-main__actions .btn {
     width: 100%;
