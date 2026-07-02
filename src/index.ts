@@ -12247,7 +12247,21 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         // bare AsyncJobSnapshot, which carries no provider session id / cwd /
         // worktree path, so it needs no equivalent redaction.)
         if (callerIsRemote()) {
+          const leakedId = result.providerSessionId;
           delete result.providerSessionId;
+          // L1: the provider session id is also embedded verbatim in the raw
+          // stream-json stdout (gemini/grok/claude) it was parsed from, so
+          // deleting only the field would leave it trivially readable in
+          // result.stdout. Scrub it from the returned streams too. (Codex stdout
+          // was already swapped to a session-id-free display string above.)
+          if (leakedId) {
+            if (result.stdout && result.stdout.includes(leakedId)) {
+              result.stdout = result.stdout.split(leakedId).join("[redacted-session-id]");
+            }
+            if (result.stderr && result.stderr.includes(leakedId)) {
+              result.stderr = result.stderr.split(leakedId).join("[redacted-session-id]");
+            }
+          }
         }
 
         return {
