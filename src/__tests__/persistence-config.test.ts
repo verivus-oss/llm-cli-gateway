@@ -353,25 +353,23 @@ describe("createJobStore", () => {
     }
   });
 
-  it("createJobStore({backend:'postgres'}) reaches the throwing Postgres stub", () => {
+  it("createJobStore({backend:'postgres'}) requires a non-empty DSN", () => {
     expect(() =>
       createJobStore({
         backend: "postgres",
         path: null,
-        dsn: "postgresql://x@y/z",
+        dsn: "",
         retentionDays: 30,
         dedupWindowMs: 3600000,
         acknowledgeEphemeral: false,
         asyncJobsEnabled: true,
         sources: { configFile: null, envOverrides: [] },
       })
-    ).toThrow(/not yet implemented/);
+    ).toThrow();
   });
 
-  it("PostgresJobStore constructor also throws when called directly", () => {
-    // Belt-and-braces: catches a regression where someone changes the factory
-    // to swallow the throw but leaves the stub class lying around.
-    expect(() => new PostgresJobStore("postgresql://x@y/z")).toThrow(/not yet implemented/);
+  it("PostgresJobStore constructor requires a non-empty DSN", () => {
+    expect(() => new PostgresJobStore("")).toThrow(/non-empty DSN/);
   });
 });
 

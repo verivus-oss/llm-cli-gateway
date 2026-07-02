@@ -647,7 +647,7 @@ The job-store backend is configured by `~/.llm-cli-gateway/config.toml` (overrid
 [persistence]
 backend = "sqlite"                          # "sqlite" | "memory" | "postgres" | "none"
 path = "~/.llm-cli-gateway/logs.db"         # for sqlite
-# dsn = "postgresql://user:pw@host/db"      # for postgres (interface only — impl not yet shipped)
+# dsn = "postgresql://user:pw@host/db"      # for postgres
 retentionDays = 30
 dedupWindowMs = 3600000
 acknowledgeEphemeral = false                # required to enable async tools with memory backend
@@ -656,8 +656,8 @@ acknowledgeEphemeral = false                # required to enable async tools wit
 Backends:
 
 - **`sqlite`** (default) — durable, file-backed. Safe for single-instance deployments.
+- **`postgres`** — durable PostgreSQL-backed async job, dedup, orphan recovery, and validation receipt storage. Use this for multi-instance or service deployments. Requires the optional peer dependency `pg` to be installed alongside the gateway.
 - **`memory`** — in-process Map. Lost on gateway exit. Requires `acknowledgeEphemeral = true` to be loaded. Suitable for tests and ephemeral CI gateways.
-- **`postgres`** — interface only, implementation not yet shipped. Selecting this backend throws at startup.
 - **`none`** — no store. **`*_request_async`, `llm_job_status`, `llm_job_result`, and `llm_job_cancel` are NOT registered on the gateway.** This is a structural invariant: agents that try to call async tools against a gateway with `backend = "none"` get a clean "tool not found" at connect time instead of silent in-memory loss after the 1-hour TTL. Use `llm_process_health` to inspect the resolved persistence state programmatically.
 
 Legacy environment variables (deprecated; emit a warning at startup):
@@ -1575,7 +1575,7 @@ The gateway supports concurrent requests across different CLIs. Each request spa
 
 - **Input Validation**: All prompts are validated (min 1 char, max 100k chars)
 - **API-provider keys**: For `[providers.<name>]` HTTP providers, the gateway reads the key from the named environment variable at request time only. The resolved key is excluded from the persisted `payloadJson`, the dedup key, logs, and the flight recorder, and is never surfaced on the discovery/diagnostic surfaces (which report only the env var name and a presence boolean). `base_url` userinfo is redacted on the diagnostic surfaces. See [API providers (HTTP)](#api-providers-http).
-- **Prompt persistence at rest**: Async job rows store the request **prompt in plaintext** (HTTP `payloadJson`, and CLI `argsJson` whenever the prompt is passed as a command argument rather than streamed over stdin); this is not covered by secret redaction. The SQLite job-store file (default `~/.llm-cli-gateway/logs.db`, configurable via `[persistence].path`) is `chmod`ed to `0o600` on non-Windows hosts; treat it as sensitive and scope/rotate it like any prompt log. Set `[persistence].backend = "none"` to disable the async job store entirely (the `*_request_async` / `llm_job_*` tools are then not registered).
+- **Prompt persistence at rest**: Async job rows store the request **prompt in plaintext** (HTTP `payloadJson`, and CLI `argsJson` whenever the prompt is passed as a command argument rather than streamed over stdin); this is not covered by secret redaction. The SQLite job-store file (default `~/.llm-cli-gateway/logs.db`, configurable via `[persistence].path`) is `chmod`ed to `0o600` on non-Windows hosts; the Postgres backend stores the same fields in database rows. Treat either backend as sensitive and scope/rotate it like any prompt log. Set `[persistence].backend = "none"` to disable the async job store entirely (the `*_request_async` / `llm_job_*` tools are then not registered).
 - **Command Execution**: Uses `spawn` with separate arguments (not shell execution)
 - **No Eval**: No dynamic code evaluation in our source (see "Socket alerts" below for the transitive `ajv` codegen case)
 - **Sandboxing**: Consider running in containers for production use
