@@ -2,7 +2,7 @@
 
 import process from "node:process";
 
-const DEFAULT_SITE_URL = "sc-domain:llm-cli-gateway.dev";
+const DEFAULT_SITE_URL = "https://llm-cli-gateway.dev/";
 const DEFAULT_SITEMAP_URL = "https://llm-cli-gateway.dev/sitemap.xml";
 const DEFAULT_ENDPOINT = "https://searchconsole.googleapis.com/webmasters/v3";
 

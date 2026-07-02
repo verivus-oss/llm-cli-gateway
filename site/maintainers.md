@@ -45,12 +45,12 @@ workflow uses GitHub OIDC and Google Workload Identity Federation to request a
 short-lived token for the
 `llm-cli-gateway-search-submit@verivus-confidential.iam.gserviceaccount.com`
 service account, then submits `https://llm-cli-gateway.dev/sitemap.xml` for the
-`sc-domain:llm-cli-gateway.dev` property.
+`https://llm-cli-gateway.dev/` URL-prefix property.
 
-That service account must remain a verified owner or Full user on the Search
-Console property. The repository stores only non-secret Google project,
-workload-identity, service-account, site, and sitemap identifiers as GitHub
-environment variables.
+The service account is verified with the Google HTML file at
+`/googleb0dea30e179d1a8e.html`. The repository stores only non-secret Google
+project, workload-identity, service-account, site, and sitemap identifiers as
+GitHub environment variables.
 
 Bing submission is automated with IndexNow. The site hosts the public IndexNow
 key file at `/3a9d0d7145a50e273758cb63918b496f.txt`, and the Pages deploy
