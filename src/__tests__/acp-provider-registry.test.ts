@@ -7,6 +7,7 @@ import {
   type AcpProviderStatus,
   type AcpSupportKind,
 } from "../acp/provider-registry.js";
+import { getProviderDefinition } from "../provider-definitions.js";
 import { CLI_TYPES } from "../session-manager.js";
 
 // Step: define-acp-provider-registry-and-errors.
@@ -119,6 +120,22 @@ describe("acp provider registry", () => {
     const registry = getAcpProviderRegistry();
     expect(Object.isFrozen(registry)).toBe(true);
     expect(Object.isFrozen(registry.mistral)).toBe(true);
+  });
+
+  // Phase-5 Deliverable A: the registry entrypoint is SOURCED from
+  // provider-definitions (the DRY single source), never re-spelled here. Mutation
+  // that flips this red: hard-coding a divergent entrypoint literal in the
+  // registry instead of calling acpEntrypointFromDefinition.
+  it("sources every entrypoint from provider-definitions (DRY, no re-spelling)", () => {
+    for (const provider of CLI_TYPES) {
+      const registryEntry = getAcpProviderEntry(provider).entrypoint;
+      const defEntry = getProviderDefinition(provider).acp.entrypoint;
+      if (defEntry === null) {
+        expect(registryEntry).toBeNull();
+      } else {
+        expect(registryEntry).toEqual({ command: defEntry.command, args: [...defEntry.args] });
+      }
+    }
   });
 
   it("carries no secrets or local paths in caveat strings", () => {

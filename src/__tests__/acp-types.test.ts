@@ -15,14 +15,18 @@ import {
   SessionPromptRequestSchema,
   SessionPromptResponseSchema,
   SessionUpdateNotificationSchema,
+  deriveAcpMethodAvailability,
   isUnknownSessionUpdate,
   parseInitializeResponse,
+  parseListSessionsResponse,
   parseReadTextFileRequest,
   parseRequestPermissionRequest,
   parseSessionNewResponse,
   parseSessionPromptResponse,
   parseSessionUpdateNotification,
+  parseSetSessionConfigOptionResponse,
   parseWriteTextFileRequest,
+  sessionResponseMethods,
 } from "../acp/types.js";
 
 // Step: define-acp-protocol-types.
@@ -403,5 +407,196 @@ describe("acp types — redaction discipline on parse failure", () => {
     expect(JSON.stringify(error.debug)).not.toContain(secretPrompt);
     // Debug retains the field-path metadata for diagnosis, not the values.
     expect(error.debug.method).toBe("session/prompt");
+  });
+});
+
+// Phase-5 Deliverable A: method availability is DERIVED from the parsed
+// initialize capability set (a pure function), not a hand-coded provider table.
+describe("acp types: deriveAcpMethodAvailability", () => {
+  const baseline = ["session/new", "session/prompt", "session/cancel", "session/update"];
+
+  it("returns only the baseline methods for a bare initialize response", () => {
+    const methods = deriveAcpMethodAvailability(
+      InitializeResponseSchema.parse({ protocolVersion: 1 })
+    );
+    for (const m of baseline) expect(methods.has(m)).toBe(true);
+    expect(methods.has("session/resume")).toBe(false);
+    expect(methods.has("session/load")).toBe(false);
+    expect(methods.has("authenticate")).toBe(false);
+  });
+
+  it("adds session/load from the loadSession capability", () => {
+    const methods = deriveAcpMethodAvailability(
+      InitializeResponseSchema.parse({
+        protocolVersion: 1,
+        agentCapabilities: { loadSession: true },
+      })
+    );
+    expect(methods.has("session/load")).toBe(true);
+  });
+
+  // Mutation that flips this red: dropping the sessionCapabilities branch in
+  // deriveAcpMethodAvailability so advertised methods are no longer derived.
+  it("adds resume/list/close/delete only when the matching session capability is present", () => {
+    const methods = deriveAcpMethodAvailability(
+      InitializeResponseSchema.parse({
+        protocolVersion: 1,
+        agentCapabilities: {
+          sessionCapabilities: { resume: {}, list: {}, close: {}, delete: null },
+        },
+      })
+    );
+    expect(methods.has("session/resume")).toBe(true);
+    expect(methods.has("session/list")).toBe(true);
+    expect(methods.has("session/close")).toBe(true);
+    // delete is null -> not advertised -> not available.
+    expect(methods.has("session/delete")).toBe(false);
+  });
+
+  it("adds authenticate only when authMethods is non-empty", () => {
+    const none = deriveAcpMethodAvailability(
+      InitializeResponseSchema.parse({ protocolVersion: 1, authMethods: [] })
+    );
+    expect(none.has("authenticate")).toBe(false);
+    const some = deriveAcpMethodAvailability(
+      InitializeResponseSchema.parse({
+        protocolVersion: 1,
+        authMethods: [{ id: "oauth", name: "OAuth" }],
+      })
+    );
+    expect(some.has("authenticate")).toBe(true);
+  });
+
+  it("preserves unknown capability keys via passthrough (never dropped)", () => {
+    const parsed = InitializeResponseSchema.parse({
+      protocolVersion: 1,
+      agentCapabilities: { loadSession: true, vendorExtension: { foo: 1 } },
+    });
+    expect((parsed.agentCapabilities as Record<string, unknown>).vendorExtension).toEqual({
+      foo: 1,
+    });
+  });
+});
+
+describe("acp types: sessionResponseMethods", () => {
+  it("adds set_mode/set_config_option only when modes/configOptions are present", () => {
+    expect([...sessionResponseMethods({})]).toEqual([]);
+    expect([...sessionResponseMethods({ modes: { currentModeId: "code" } })]).toContain(
+      "session/set_mode"
+    );
+    expect([...sessionResponseMethods({ configOptions: [{ configId: "x" }] })]).toContain(
+      "session/set_config_option"
+    );
+  });
+});
+
+// BLOCKER 3 (correctness): response schemas must be strict on the fields the ACP
+// spec marks required, so a malformed response is a protocol error, not a
+// silently-accepted success. Mutation that flips each red: reverting the schema
+// field back to optional/loose (e.g. `sessions: ...optional()`, `configOptions`
+// absent, `SessionInfo` without required cwd). The malformed payload would then
+// parse and these expects flip.
+describe("acp types: strict-but-passthrough required-field validation", () => {
+  it("session/list requires `sessions` and rejects an entry missing required cwd", () => {
+    // Valid: sessions present, each entry has sessionId + cwd (spec-required).
+    const ok = parseListSessionsResponse({
+      sessions: [{ sessionId: "s1", cwd: "/abs/work", title: "t" }],
+    });
+    expect(ok.sessions).toHaveLength(1);
+
+    // Missing `sessions` entirely => protocol error (not an empty success).
+    expect(() => parseListSessionsResponse({ nextCursor: "c" })).toThrow(AcpProtocolError);
+
+    // Entry missing the required `cwd` => protocol error.
+    expect(() => parseListSessionsResponse({ sessions: [{ sessionId: "s1" }] })).toThrow(
+      AcpProtocolError
+    );
+
+    // Vendor extras on entries survive via passthrough.
+    const extra = parseListSessionsResponse({
+      sessions: [{ sessionId: "s1", cwd: "/abs/work", vendorField: 42 }],
+    });
+    expect((extra.sessions[0] as Record<string, unknown>).vendorField).toBe(42);
+  });
+
+  it("session/set_config_option requires `configOptions` with well-formed union entries", () => {
+    // Valid `select` variant: type + currentValue + options are spec-required.
+    // Mutation that flips this red: dropping `currentValue`/`options` from the
+    // select member of SessionConfigOptionSchema (or reverting to the flat
+    // { id, name } shape) would make this well-formed option fail to parse.
+    const ok = parseSetSessionConfigOptionResponse({
+      configOptions: [
+        {
+          type: "select",
+          id: "theme",
+          name: "Theme",
+          currentValue: "dark",
+          options: [{ value: "dark", label: "Dark" }, { value: "light" }],
+          vendorFlag: true,
+        },
+      ],
+    });
+    expect(ok.configOptions).toHaveLength(1);
+    // Vendor extras survive via passthrough.
+    expect((ok.configOptions[0] as Record<string, unknown>).vendorFlag).toBe(true);
+
+    // Valid `boolean` variant: type + boolean currentValue are spec-required.
+    const okBool = parseSetSessionConfigOptionResponse({
+      configOptions: [{ type: "boolean", id: "wrap", name: "Wrap", currentValue: false }],
+    });
+    expect((okBool.configOptions[0] as Record<string, unknown>).currentValue).toBe(false);
+
+    // Missing `configOptions` entirely => protocol error (not an empty success).
+    // Mutation: making `configOptions` optional/nullish would let {} parse.
+    expect(() => parseSetSessionConfigOptionResponse({})).toThrow(AcpProtocolError);
+
+    // Entry missing the discriminant `type` => protocol error (union rejects it).
+    // Mutation: reverting to a flat object schema (no `type` discriminator).
+    expect(() =>
+      parseSetSessionConfigOptionResponse({ configOptions: [{ id: "theme", name: "Theme" }] })
+    ).toThrow(AcpProtocolError);
+
+    // A `select` entry missing the required `currentValue` => protocol error.
+    // Mutation: making `currentValue` optional on the select member.
+    expect(() =>
+      parseSetSessionConfigOptionResponse({
+        configOptions: [
+          { type: "select", id: "theme", name: "Theme", options: [{ value: "dark" }] },
+        ],
+      })
+    ).toThrow(AcpProtocolError);
+  });
+
+  it("config_option_update is a strict known union variant (requires configOptions)", () => {
+    // Valid config_option_update: configOptions array of well-formed union options.
+    const ok = parseSessionUpdateNotification({
+      sessionId: "s1",
+      update: {
+        sessionUpdate: "config_option_update",
+        configOptions: [{ type: "boolean", id: "theme", name: "Theme", currentValue: true }],
+      },
+    });
+    expect((ok.update as Record<string, unknown>).sessionUpdate).toBe("config_option_update");
+
+    // A config_option_update missing its required `configOptions` is rejected as
+    // a KNOWN variant (it does not fall through to the tolerant unknown shape).
+    expect(() =>
+      parseSessionUpdateNotification({
+        sessionId: "s1",
+        update: { sessionUpdate: "config_option_update" },
+      })
+    ).toThrow(AcpProtocolError);
+
+    // A config_option_update whose entry omits the discriminant `type` is a
+    // protocol error. Mutation: reverting to the flat { id, name } shape.
+    expect(() =>
+      parseSessionUpdateNotification({
+        sessionId: "s1",
+        update: {
+          sessionUpdate: "config_option_update",
+          configOptions: [{ id: "theme", name: "Theme" }],
+        },
+      })
+    ).toThrow(AcpProtocolError);
   });
 });

@@ -24,7 +24,7 @@ import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { z } from "zod/v3";
+import { InitializeResponseSchema, type AgentCapabilities } from "./acp/types.js";
 import { envWithExtendedPath, getExtendedPath, resolveCommandForSpawn } from "./executor.js";
 import { type Logger, noopLogger } from "./logger.js";
 import {
@@ -99,6 +99,14 @@ export interface ParsedAcpInitialize {
   readonly promptCapabilities: readonly string[];
   readonly mcpCapabilities: readonly string[];
   readonly sessionCapabilities: readonly string[];
+  /**
+   * The parsed, spec-shaped nested agent capability bag (agentCapabilities), or
+   * null when the agent advertised none. This is the SAME shape the runtime
+   * negotiates via `InitializeResponseSchema`, so method availability is derived
+   * from it with `deriveAcpMethodAvailability` (not from a divergent top-level
+   * shape).
+   */
+  readonly agentCapabilities: AgentCapabilities | null;
   /** Advertised methods that are known to the ACP spec (enabled via generic client). */
   readonly knownMethods: readonly string[];
   /** Advertised methods NOT in the ACP spec (surfaced as discovered-unmapped). */
@@ -246,55 +254,71 @@ export type AcpInitializeParse =
   | { readonly kind: "ok"; readonly value: ParsedAcpInitialize }
   | { readonly kind: "invalid"; readonly reason: string };
 
-// External input (an ACP server's initialize response). Validated with Zod at
-// the boundary. Permissive by construction: capability fields may be an array
-// or an object map; unknown extension keys/methods pass through so
-// discovered-unmapped still captures them.
-const AcpCapabilityListSchema = z
-  .union([z.array(z.unknown()), z.record(z.string(), z.unknown())])
-  .optional();
+/**
+ * Convert a nested capability bag (e.g. `agentCapabilities.promptCapabilities`
+ * or `.sessionCapabilities`) into the list of present capability tokens. A token
+ * is "present" when its value is neither `false`, `null`, nor `undefined`
+ * (booleans that are true, or sub-capability objects). The reserved `_meta` key
+ * is never surfaced as a capability token.
+ */
+function presentCapabilityTokens(bag: Record<string, unknown> | undefined | null): string[] {
+  if (!bag || typeof bag !== "object") return [];
+  return Object.entries(bag)
+    .filter(([key]) => key !== "_meta")
+    .filter(([, value]) => value !== false && value !== null && value !== undefined)
+    .map(([key]) => key);
+}
 
-const AcpInitializeResultSchema = z
-  .object({
-    protocolVersion: z.union([z.number(), z.string()]).optional(),
-    agentInfo: z
-      .object({ name: z.string().optional(), version: z.string().optional() })
-      .passthrough()
-      .optional(),
-    authMethods: AcpCapabilityListSchema,
-    promptCapabilities: AcpCapabilityListSchema,
-    mcpCapabilities: AcpCapabilityListSchema,
-    sessionCapabilities: AcpCapabilityListSchema,
-    methods: z.array(z.unknown()).optional(),
-    availableMethods: z.array(z.unknown()).optional(),
-  })
-  .passthrough();
+/**
+ * Convert the top-level `authMethods` array (per the ACP spec, an array of
+ * `{ id?, name?, ... }`) into display tokens, preferring `id` then `name`.
+ */
+function authMethodTokens(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map(entry => {
+      if (typeof entry === "string") return entry;
+      if (entry && typeof entry === "object") {
+        const record = entry as { id?: unknown; name?: unknown };
+        if (typeof record.id === "string") return record.id;
+        if (typeof record.name === "string") return record.name;
+      }
+      return null;
+    })
+    .filter((entry): entry is string => typeof entry === "string");
+}
 
-function acpListToStrings(value: unknown): string[] {
-  if (Array.isArray(value)) {
-    return value
-      .map(entry =>
-        typeof entry === "string"
-          ? entry
-          : entry &&
-              typeof entry === "object" &&
-              typeof (entry as { name?: unknown }).name === "string"
-            ? (entry as { name: string }).name
-            : null
-      )
-      .filter((entry): entry is string => typeof entry === "string");
-  }
-  if (value && typeof value === "object") {
-    return Object.entries(value as Record<string, unknown>)
-      .filter(([, enabled]) => enabled !== false)
-      .map(([key]) => key);
-  }
-  return [];
+/**
+ * Convert a possibly-array-or-string vendor "methods" list into strings. Only
+ * used for the OPTIONAL vendor-advertised explicit method list (a passthrough
+ * extra); capability derivation itself comes from the typed nested bags.
+ */
+function methodListToStrings(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map(entry =>
+      typeof entry === "string"
+        ? entry
+        : entry &&
+            typeof entry === "object" &&
+            typeof (entry as { name?: unknown }).name === "string"
+          ? (entry as { name: string }).name
+          : null
+    )
+    .filter((entry): entry is string => typeof entry === "string");
 }
 
 /**
  * Parse an ACP `initialize` JSON-RPC response from probe stdout. See
  * {@link AcpInitializeParse} for the tri-state contract.
+ *
+ * Parsing uses the SAME `InitializeResponseSchema` the live runtime negotiates,
+ * so capabilities are read from the spec-shaped nested `agentCapabilities`
+ * (`agentCapabilities.{promptCapabilities,mcpCapabilities,sessionCapabilities,
+ * loadSession}`) plus the top-level `authMethods`, not a divergent top-level
+ * capability shape. Vendor extras (an explicit `methods`/`availableMethods`
+ * list, unknown keys) survive via passthrough and are surfaced as
+ * discovered-unmapped rather than dropped.
  */
 export function parseAcpInitialize(text: string): AcpInitializeParse {
   const trimmed = text.trim();
@@ -319,7 +343,7 @@ export function parseAcpInitialize(text: string): AcpInitializeParse {
       ? (root.result as Record<string, unknown>)
       : root;
 
-  const validated = AcpInitializeResultSchema.safeParse(candidate);
+  const validated = InitializeResponseSchema.safeParse(candidate);
   if (!validated.success) {
     return {
       kind: "invalid",
@@ -327,6 +351,7 @@ export function parseAcpInitialize(text: string): AcpInitializeParse {
     };
   }
   const result = validated.data;
+  const caps = result.agentCapabilities ?? null;
 
   const agentInfo = result.agentInfo
     ? {
@@ -337,24 +362,36 @@ export function parseAcpInitialize(text: string): AcpInitializeParse {
       }
     : null;
 
-  const advertisedMethods = acpListToStrings(result.methods ?? result.availableMethods);
+  // Optional vendor-advertised explicit method list survives via passthrough.
+  const advertisedMethods = methodListToStrings(
+    (candidate as { methods?: unknown }).methods ??
+      (candidate as { availableMethods?: unknown }).availableMethods
+  );
   const knownMethods = advertisedMethods.filter(method => KNOWN_ACP_METHODS.includes(method));
   const extensionMethods = advertisedMethods.filter(method => !KNOWN_ACP_METHODS.includes(method));
 
   const protocolVersion =
-    typeof result.protocolVersion === "number" || typeof result.protocolVersion === "string"
-      ? result.protocolVersion
-      : null;
+    typeof result.protocolVersion === "number" ? result.protocolVersion : null;
+
+  const sessionTokens = presentCapabilityTokens(
+    caps?.sessionCapabilities as Record<string, unknown> | undefined
+  );
+  if (caps?.loadSession === true) sessionTokens.push("load");
 
   return {
     kind: "ok",
     value: {
       protocolVersion,
       agentInfo,
-      authMethods: acpListToStrings(result.authMethods),
-      promptCapabilities: acpListToStrings(result.promptCapabilities),
-      mcpCapabilities: acpListToStrings(result.mcpCapabilities),
-      sessionCapabilities: acpListToStrings(result.sessionCapabilities),
+      authMethods: authMethodTokens(result.authMethods),
+      promptCapabilities: presentCapabilityTokens(
+        caps?.promptCapabilities as Record<string, unknown> | undefined
+      ),
+      mcpCapabilities: presentCapabilityTokens(
+        caps?.mcpCapabilities as Record<string, unknown> | undefined
+      ),
+      sessionCapabilities: sessionTokens,
+      agentCapabilities: caps,
       knownMethods,
       extensionMethods,
       checksum: checksumText(trimmed),

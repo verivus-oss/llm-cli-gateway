@@ -958,6 +958,7 @@ const AcpConfigSchema = z
     prompt_timeout_ms: z.number().int().positive().default(DEFAULT_ACP_PROMPT_TIMEOUT_MS),
     allow_write_host_services: z.boolean().default(false),
     allow_terminal_host_services: z.boolean().default(false),
+    allow_mutating_session_ops: z.boolean().default(false),
     fallback_to_cli_when_unhealthy: z.boolean().default(true),
     providers: z.record(z.string(), AcpProviderSchema).default({}),
   })
@@ -981,6 +982,11 @@ export interface AcpConfig {
   promptTimeoutMs: number;
   allowWriteHostServices: boolean;
   allowTerminalHostServices: boolean;
+  /**
+   * Whether state-mutating ACP admin ops (`session/delete`, `session/set_mode`,
+   * `session/set_config_option`) may be invoked. Deny-by-default.
+   */
+  allowMutatingSessionOps: boolean;
   fallbackToCliWhenUnhealthy: boolean;
   providers: Record<string, AcpProviderConfig>;
   /** Audit trail: file the config was loaded from (or null if defaults). */
@@ -998,6 +1004,7 @@ function defaultAcpConfig(sourcePath: string | null): AcpConfig {
     promptTimeoutMs: DEFAULT_ACP_PROMPT_TIMEOUT_MS,
     allowWriteHostServices: false,
     allowTerminalHostServices: false,
+    allowMutatingSessionOps: false,
     fallbackToCliWhenUnhealthy: true,
     providers: {},
     sources: { configFile: sourcePath },
@@ -1071,6 +1078,7 @@ export function loadAcpConfig(logger: Logger = noopLogger): AcpConfig {
     promptTimeoutMs: parsed.prompt_timeout_ms,
     allowWriteHostServices: parsed.allow_write_host_services,
     allowTerminalHostServices: parsed.allow_terminal_host_services,
+    allowMutatingSessionOps: parsed.allow_mutating_session_ops,
     fallbackToCliWhenUnhealthy: parsed.fallback_to_cli_when_unhealthy,
     providers,
     sources: { configFile: sourcePath },

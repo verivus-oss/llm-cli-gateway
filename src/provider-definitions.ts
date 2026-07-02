@@ -206,6 +206,20 @@ export interface ProviderAcpEntrypoint {
   readonly args: readonly string[];
 }
 
+/** A selectable native ACP agent variant (e.g. Devin `--agent-type review`). */
+export interface ProviderAcpAgentType {
+  readonly id: string;
+  readonly description: string;
+}
+
+/**
+ * Devin's native ACP agent-type values (`devin acp --agent-type <type>`). Single
+ * source of truth for both the request-schema enum and the provider-acp
+ * capability projection.
+ */
+export const DEVIN_ACP_AGENT_TYPES = ["summarizer", "review"] as const;
+export type DevinAcpAgentType = (typeof DEVIN_ACP_AGENT_TYPES)[number];
+
 /** Native ACP metadata for a provider. */
 export interface ProviderAcpMetadata {
   readonly classification: AcpClassification;
@@ -219,6 +233,11 @@ export interface ProviderAcpMetadata {
    * construction (each ends in `--help`/`--version`). Empty for `none`.
    */
   readonly probeArgv: readonly (readonly string[])[];
+  /**
+   * Selectable native ACP agent variants advertised by the entrypoint (Devin
+   * `--agent-type`). Omitted/empty for providers with a single default agent.
+   */
+  readonly agentTypes?: readonly ProviderAcpAgentType[];
   /** Evidence / caveat carried into capability reports (no secrets). */
   readonly evidence: string;
 }
@@ -953,6 +972,18 @@ const PROVIDER_DEFINITIONS = {
       nativeEntrypoint: "devin acp",
       entrypoint: { command: "devin", args: ["acp"] },
       probeArgv: [["acp", "--help"]],
+      agentTypes: [
+        {
+          id: "summarizer",
+          description:
+            "Summarizer agent with no tools; outputs the full summary as text (persisted by a PostAgentIteration cog).",
+        },
+        {
+          id: "review",
+          description:
+            "Code-review agent with read-only + shell tools; reviews diffs for correctness, style, security, performance, and completeness.",
+        },
+      ],
       evidence:
         "Official Devin docs advertise `devin acp` as an ACP stdio server; installed `devin acp --help` confirms it with --agent-type summarizer/review options. `devin acp --help` is the safe probe; bare `devin acp` starts the live server and is never probed.",
     },

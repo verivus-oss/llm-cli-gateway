@@ -46,14 +46,23 @@ Commands:
 
 const GROK_MODELS = `grok-build-0.1\ngrok-4\n`;
 
+// Spec-shaped ACP initialize response: capabilities are NESTED under
+// `agentCapabilities` (agentCapabilities.{promptCapabilities,mcpCapabilities,
+// sessionCapabilities,loadSession}) and `authMethods` is a top-level array of
+// AuthMethod objects, exactly what the runtime negotiates via
+// InitializeResponseSchema. `methods` is a vendor passthrough extra that feeds
+// the discovered known/extension split.
 function grokAcpInitialize(methods: readonly string[], protocolVersion = 1): string {
   return JSON.stringify({
     protocolVersion,
     agentInfo: { name: "Grok", version: "0.2.77" },
-    authMethods: ["oauth"],
-    promptCapabilities: ["text", "image"],
-    mcpCapabilities: ["stdio", "http"],
-    sessionCapabilities: ["new", "load", "cancel"],
+    authMethods: [{ id: "oauth" }],
+    agentCapabilities: {
+      loadSession: true,
+      promptCapabilities: { image: true },
+      mcpCapabilities: { http: true },
+      sessionCapabilities: { resume: {}, list: {} },
+    },
     methods,
   });
 }
@@ -263,7 +272,8 @@ describe("provider-capability-discovery", () => {
     if (truncated.kind === "invalid") expect(truncated.reason).toMatch(/not valid JSON/);
 
     const wrongShape = parseAcpInitialize('{"protocolVersion": {"nested": "object"}}');
-    // protocolVersion must be a number|string; an object fails validation.
+    // protocolVersion must be a non-negative integer (InitializeResponseSchema);
+    // an object fails validation.
     expect(wrongShape.kind).toBe("invalid");
   });
 

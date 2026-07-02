@@ -9,6 +9,7 @@
  * the existing CLI transport. The runtime fails closed:
  *
  *   - `[acp].enabled` off                    → {@link AcpDisabledError}
+ *   - provider `enabled` off / absent         → {@link ProviderAcpDisabledError}
  *   - provider `runtime_enabled` off / absent → {@link ProviderRuntimeDisabledError}
  *
  * Flow: deny-by-default HostServices (with the ApprovalManager permission
@@ -24,6 +25,7 @@ import {
   AcpDisabledError,
   AcpError,
   AcpProtocolError,
+  ProviderAcpDisabledError,
   ProviderRuntimeDisabledError,
   isAcpError,
 } from "./errors.js";
@@ -33,6 +35,7 @@ import { createAcpPermissionDecider } from "./permission-bridge.js";
 import { AcpProcessManager, type AcpSpawnFn, type ProcessEnv } from "./process-manager.js";
 import { createAcpSession, recordAcpSessionInfo, resolveAcpResume } from "./session-map.js";
 import type { ContentBlock } from "./types.js";
+import { DEVIN_ACP_AGENT_TYPES } from "../provider-definitions.js";
 import type { ApprovalCli, ApprovalManager } from "../approval-manager.js";
 import type { AcpConfig } from "../config.js";
 import type { FlightLogResult, FlightLogStart } from "../flight-recorder.js";
@@ -69,6 +72,12 @@ export interface AcpRunRequest {
   readonly sessionId?: string;
   readonly cwd?: string;
   readonly correlationId: string;
+  /**
+   * Devin-only: which ACP agent to run (`devin acp --agent-type <type>`). Ignored
+   * for other providers. A validated enum value (summarizer|review), never
+   * free-form input; appended as fixed argv (no shell interpolation).
+   */
+  readonly agentType?: string;
 }
 
 /** Successful ACP run outcome. */
@@ -98,7 +107,12 @@ export async function runAcpRequest(
     throw new AcpDisabledError({ provider: req.provider });
   }
   const providerConfig = deps.config.providers[req.provider];
-  if (!providerConfig?.runtimeEnabled) {
+  // Fail closed unless the provider is BOTH enabled and runtime-routing enabled.
+  // A provider with enabled=false must never spawn, even if runtime_enabled=true.
+  if (providerConfig?.enabled !== true) {
+    throw new ProviderAcpDisabledError(req.provider, { provider: req.provider });
+  }
+  if (providerConfig?.runtimeEnabled !== true) {
     throw new ProviderRuntimeDisabledError(req.provider, { provider: req.provider });
   }
 
@@ -151,6 +165,16 @@ export async function runAcpRequest(
     })
   );
 
+  // Devin-only: thread a validated `--agent-type` into the spawn argv. The value
+  // must be a known enum member; an unknown value is dropped (never injected as
+  // arbitrary argv). Other providers never receive extra args here.
+  const extraArgs =
+    req.provider === "devin" &&
+    req.agentType !== undefined &&
+    (DEVIN_ACP_AGENT_TYPES as readonly string[]).includes(req.agentType)
+      ? ["--agent-type", req.agentType]
+      : [];
+
   let proc: Awaited<ReturnType<AcpProcessManager["start"]>> | null = null;
   try {
     proc = await manager.start({
@@ -158,6 +182,7 @@ export async function runAcpRequest(
       cwd: req.cwd,
       hostServices,
       callbacks: { onSessionUpdate: update => normalizer.handle(update) },
+      extraArgs,
     });
     const cwd = proc.resolved.cwd;
     const init = proc.client.agentInfo;

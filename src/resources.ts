@@ -39,11 +39,15 @@ import {
   type ProviderCapabilityId,
 } from "./provider-tool-capabilities.js";
 import {
+  generateProviderAcpDescriptors,
   generateResourceDescriptors,
   parseModelsResourceUri,
+  parseProviderAcpResourceUri,
   parseSessionsResourceUri,
 } from "./provider-surface-generator.js";
 import { getProviderDefinition } from "./provider-definitions.js";
+import { buildProviderAcpCapabilityRecord } from "./provider-acp-capabilities.js";
+import type { AcpConfig } from "./config.js";
 import {
   buildProviderDiscoveredView,
   peekProviderCapabilitySet,
@@ -94,7 +98,10 @@ export class ResourceProvider {
     // canned resolution so unit tests never spawn real CLIs.
     private capabilityPeek: (
       id: CliType
-    ) => ResolvedProviderCapability | null = peekProviderCapabilitySet
+    ) => ResolvedProviderCapability | null = peekProviderCapabilitySet,
+    // Phase-5: resolved ACP config. Drives the host-service policy surfaced in
+    // provider-acp://<provider> records. Null keeps the deny-by-default posture.
+    private acpConfig: AcpConfig | null = null
   ) {}
 
   /** Read-only flight-recorder accessor for cache-state resource readers. */
@@ -271,6 +278,21 @@ export class ResourceProvider {
         annotations: {
           audience: ["user", "assistant"] as ("user" | "assistant")[],
           priority: 0.8,
+        },
+      })),
+      // Per-provider provider-acp:// resources for every NATIVE-ACP provider,
+      // generated from the provider definition registry (no hand-spelled names).
+      // Non-native providers (claude/codex/gemini) are intentionally not listed
+      // here, but their non-native record is still readable via readResource.
+      ...generateProviderAcpDescriptors().map(descriptor => ({
+        uri: descriptor.acpUri,
+        name: `${descriptor.displayName} ACP Capabilities`,
+        title: `${descriptor.icon} ${descriptor.displayName} ACP Capabilities`,
+        description: `Native ACP entrypoint, negotiated capabilities, supported session methods, and host-service policy for ${descriptor.displayName}`,
+        mimeType: "application/json",
+        annotations: {
+          audience: ["user", "assistant"] as ("user" | "assistant")[],
+          priority: 0.7,
         },
       })),
     ];
@@ -458,6 +480,25 @@ export class ResourceProvider {
           null,
           2
         ),
+      };
+    }
+
+    // Per-provider provider-acp://<cli> resource. Resolves for ANY provider id
+    // (native or non-native) so a non-native record explicitly states "no native
+    // ACP entrypoint". The discovered initialize capability set comes from the
+    // memo-only capability peek (a read NEVER spawns); absent -> static fallback.
+    const acpProvider = parseProviderAcpResourceUri(uri);
+    if (acpProvider) {
+      const resolved = this.capabilityPeek(acpProvider);
+      const record = buildProviderAcpCapabilityRecord(acpProvider, {
+        discovered: resolved?.set.acpInitialize ?? null,
+        discoveredDegraded: resolved?.degraded ?? false,
+        acpConfig: this.acpConfig,
+      });
+      return {
+        uri,
+        mimeType: "application/json",
+        text: JSON.stringify(record, null, 2),
       };
     }
 

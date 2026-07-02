@@ -293,3 +293,115 @@ describe("phase-2 generated model + session resources", () => {
     ).not.toContain("noresource");
   });
 });
+
+// Phase-5 Deliverable B: provider-acp://<provider> resources. Listed for native
+// providers only (derived from the generator, no hand-spelled names); readable
+// for any provider (non-native -> explicit no-entrypoint record). The read
+// content reprojects from the injected capability peek with NO source edit.
+describe("phase-5 provider-acp capability resources", () => {
+  let tmp: string;
+  let sessions: FileSessionManager;
+  let provider: ResourceProvider;
+
+  beforeEach(() => {
+    tmp = mkdtempSync(join(tmpdir(), "phase5-acp-res-"));
+    sessions = new FileSessionManager(join(tmp, "sessions.json"));
+    provider = new ResourceProvider(sessions, new PerformanceMetrics());
+  });
+  afterEach(() => rmSync(tmp, { recursive: true, force: true }));
+
+  it("lists provider-acp:// for native providers only (grok/mistral/devin/cursor)", () => {
+    const uris = new Set(provider.listResources().map(r => r.uri));
+    for (const p of ["grok", "mistral", "devin", "cursor"]) {
+      expect(uris.has(`provider-acp://${p}`)).toBe(true);
+    }
+    // Non-native providers are NOT advertised as having an ACP surface.
+    for (const p of ["claude", "codex", "gemini"]) {
+      expect(uris.has(`provider-acp://${p}`)).toBe(false);
+    }
+  });
+
+  it("reads a non-native provider-acp record with an explicit no-entrypoint statement", async () => {
+    const res = await runWithRequestContext(ctx(), () =>
+      provider.readResource("provider-acp://claude")
+    );
+    const record = JSON.parse(res!.text) as {
+      native: boolean;
+      nativeEntrypoint: string | null;
+      entrypoint: unknown;
+      supportedSessionMethods: string[];
+    };
+    expect(record.native).toBe(false);
+    expect(record.nativeEntrypoint).toBeNull();
+    expect(record.entrypoint).toBeNull();
+    expect(record.supportedSessionMethods).toEqual([]);
+  });
+
+  // Acceptance #6a: injecting a fake discovered initialize response changes the
+  // resource content WITHOUT any source edit. The fake uses the SPEC shape
+  // (capabilities nested under `agentCapabilities`, `authMethods` as objects),
+  // exactly what the runtime negotiates. Mutations that flip this red: (a)
+  // resources.ts ignoring the capability peek for provider-acp (always static);
+  // (b) reverting parseAcpInitialize to a top-level capability shape (the nested
+  // agentCapabilities would be ignored and session/resume/list would vanish).
+  it("reprojects the grok provider-acp record from an injected discovered set", async () => {
+    const runner: ProbeRunner = async (exe, argv): Promise<ProbeResult> => {
+      const key = `${exe} ${argv.join(" ")}`.trim();
+      if (key === "grok --version") return { stdout: "grok 0.2.77", stderr: "", code: 0 };
+      if (key === "grok agent stdio --help") {
+        return {
+          stdout: JSON.stringify({
+            protocolVersion: 1,
+            agentInfo: { name: "Grok", version: "0.2.77" },
+            agentCapabilities: { sessionCapabilities: { resume: {}, list: {} } },
+            authMethods: [{ id: "oauth" }],
+          }),
+          stderr: "",
+          code: 0,
+        };
+      }
+      return { stdout: "", stderr: "", code: 0 };
+    };
+    const set = await discoverProviderCapabilities(getProviderDefinition("grok"), {
+      runner,
+      gatewayVersion: "test-gw-1.0.0",
+      resolveExecutablePath: () => "/abs/bin/grok",
+    });
+    const resolution: ResolvedProviderCapability = { set, source: "live", degraded: false };
+    const enriched = new ResourceProvider(
+      sessions,
+      new PerformanceMetrics(),
+      undefined,
+      null,
+      null,
+      id => (id === "grok" ? resolution : null)
+    );
+    const res = await runWithRequestContext(ctx(), () =>
+      enriched.readResource("provider-acp://grok")
+    );
+    const record = JSON.parse(res!.text) as {
+      initialize: { source: string } | null;
+      supportedSessionMethods: string[];
+    };
+    expect(record.initialize?.source).toBe("discovered");
+    expect(record.supportedSessionMethods).toContain("session/resume");
+    expect(record.supportedSessionMethods).toContain("session/list");
+    expect(record.supportedSessionMethods).toContain("authenticate");
+  });
+
+  it("degrades a native provider-acp record to static-fallback when discovery is unavailable", async () => {
+    const degraded = new ResourceProvider(
+      sessions,
+      new PerformanceMetrics(),
+      undefined,
+      null,
+      null,
+      () => null
+    );
+    const res = await runWithRequestContext(ctx(), () =>
+      degraded.readResource("provider-acp://grok")
+    );
+    const record = JSON.parse(res!.text) as { initialize: { source: string } | null };
+    expect(record.initialize?.source).toBe("static-fallback");
+  });
+});

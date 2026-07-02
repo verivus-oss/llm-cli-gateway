@@ -132,8 +132,10 @@ export function createAcpPermissionDecider(
     // Deny-by-default for unrecognized/unknown tool kinds: a kind the gateway
     // cannot categorize as a known no-side-effect read MUST NOT be auto-approved
     // by the score-0 heuristic, because it may represent a future side effect.
-    // Only read/search/fetch/think proceed without an explicit config gate;
-    // write/execute proceed only when allowWrite/allowTerminal is set above.
+    // Only read/search/think proceed without an explicit config gate (see
+    // READ_KINDS); `fetch` is NOT in that set, so it categorizes as "other" and
+    // is denied here. write/execute proceed only when allowWrite/allowTerminal
+    // is set above.
     if (category === "other") {
       logger.info("acp.permission.denied", {
         provider: deps.provider,

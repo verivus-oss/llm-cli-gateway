@@ -15,6 +15,7 @@
  * an argv array, never as a shell string.
  */
 
+import { getProviderDefinition } from "../provider-definitions.js";
 import type { CliType } from "../session-manager.js";
 
 /**
@@ -96,6 +97,21 @@ export interface AcpProviderRegistryEntry {
 }
 
 /**
+ * Source a provider's native ACP entrypoint from the single source of truth
+ * (`provider-definitions.ts`), frozen as an {@link AcpEntrypoint}. Returns null
+ * when the provider has no native entrypoint. This is the DRY dedupe: the
+ * registry NEVER re-spells the executable/argv; it derives them from the
+ * definition so a change there flows through automatically.
+ */
+function acpEntrypointFromDefinition(provider: CliType): AcpEntrypoint | null {
+  const entry = getProviderDefinition(provider).acp.entrypoint;
+  if (!entry) {
+    return null;
+  }
+  return Object.freeze({ command: entry.command, args: Object.freeze([...entry.args]) });
+}
+
+/**
  * The frozen ACP provider registry. Keyed by gateway provider type.
  *
  * Note: the `gemini` key targets Google Antigravity `agy`, which has no ACP
@@ -109,7 +125,7 @@ const ACP_PROVIDER_REGISTRY: Readonly<Record<CliType, AcpProviderRegistryEntry>>
     status: "native_smoke_passed",
     supportKind: "native",
     targetVersion: "vibe 2.18.3",
-    entrypoint: Object.freeze({ command: "vibe-acp", args: Object.freeze([]) }),
+    entrypoint: acpEntrypointFromDefinition("mistral"),
     runtimeEnabledDefault: false,
     shipRuntimePilot: true,
     runtimePriority: 1,
@@ -124,7 +140,7 @@ const ACP_PROVIDER_REGISTRY: Readonly<Record<CliType, AcpProviderRegistryEntry>>
     status: "native_smoke_passed",
     supportKind: "native",
     targetVersion: "grok 0.2.77 (44e77bec3a)",
-    entrypoint: Object.freeze({ command: "grok", args: Object.freeze(["agent", "stdio"]) }),
+    entrypoint: acpEntrypointFromDefinition("grok"),
     runtimeEnabledDefault: false,
     shipRuntimePilot: true,
     runtimePriority: 2,
@@ -140,7 +156,7 @@ const ACP_PROVIDER_REGISTRY: Readonly<Record<CliType, AcpProviderRegistryEntry>>
     status: "adapter_mediated_deferred",
     supportKind: "adapter_mediated",
     targetVersion: "codex-cli 0.142.4",
-    entrypoint: null,
+    entrypoint: acpEntrypointFromDefinition("codex"),
     runtimeEnabledDefault: false,
     shipRuntimePilot: false,
     runtimePriority: 0,
@@ -155,7 +171,7 @@ const ACP_PROVIDER_REGISTRY: Readonly<Record<CliType, AcpProviderRegistryEntry>>
     status: "adapter_mediated_deferred",
     supportKind: "adapter_mediated",
     targetVersion: "claude 2.1.198",
-    entrypoint: null,
+    entrypoint: acpEntrypointFromDefinition("claude"),
     runtimeEnabledDefault: false,
     shipRuntimePilot: false,
     runtimePriority: 0,
@@ -170,7 +186,7 @@ const ACP_PROVIDER_REGISTRY: Readonly<Record<CliType, AcpProviderRegistryEntry>>
     status: "absent_watchlist",
     supportKind: "none",
     targetVersion: "agy 1.0.14",
-    entrypoint: null,
+    entrypoint: acpEntrypointFromDefinition("gemini"),
     runtimeEnabledDefault: false,
     shipRuntimePilot: false,
     runtimePriority: 0,
@@ -184,7 +200,7 @@ const ACP_PROVIDER_REGISTRY: Readonly<Record<CliType, AcpProviderRegistryEntry>>
     status: "native_smoke_passed",
     supportKind: "native",
     targetVersion: "devin 2026.8.18 (16737566)",
-    entrypoint: Object.freeze({ command: "devin", args: Object.freeze(["acp"]) }),
+    entrypoint: acpEntrypointFromDefinition("devin"),
     runtimeEnabledDefault: false,
     // Slice D1: manual initialize + session/new smoke passed against the
     // installed CLI (protocolVersion 1, agent "Affogato", session created).
@@ -201,7 +217,7 @@ const ACP_PROVIDER_REGISTRY: Readonly<Record<CliType, AcpProviderRegistryEntry>>
     status: "native_smoke_passed",
     supportKind: "native",
     targetVersion: "cursor-agent 2026.06.29-2ad2186",
-    entrypoint: Object.freeze({ command: "cursor-agent", args: Object.freeze(["acp"]) }),
+    entrypoint: acpEntrypointFromDefinition("cursor"),
     runtimeEnabledDefault: false,
     shipRuntimePilot: true,
     runtimePriority: 4,

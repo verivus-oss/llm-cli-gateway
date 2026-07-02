@@ -160,6 +160,36 @@ describe("ACP runtime — config gates (fail closed)", () => {
       runAcpRequest(d, { provider: "mistral", prompt: "hi", correlationId: "c" })
     ).rejects.toMatchObject({ kind: "provider_runtime_disabled" });
   });
+
+  // BLOCKER 4 (safety): a provider with enabled=false must NEVER spawn, even when
+  // runtime_enabled=true. The runtime requires BOTH gates. Mutation that flips
+  // this red: dropping the `providerConfig.enabled` check in runtime.ts (the
+  // disabled provider would then spawn and this test's no-spawn assertion fails).
+  it("throws ProviderAcpDisabledError and never spawns when enabled=false (runtime_enabled=true)", async () => {
+    let spawned = false;
+    const spawn: AcpSpawnFn = () => {
+      spawned = true;
+      return new FakeAgent();
+    };
+    const d = deps(new FakeAgent(), {
+      spawn,
+      config: makeConfig({
+        providers: {
+          mistral: {
+            enabled: false,
+            command: "vibe-acp",
+            args: [],
+            runtimeEnabled: true,
+            isolatedLeaderSocket: false,
+          },
+        },
+      }),
+    });
+    await expect(
+      runAcpRequest(d, { provider: "mistral", prompt: "hi", correlationId: "c" })
+    ).rejects.toMatchObject({ kind: "provider_acp_disabled" });
+    expect(spawned).toBe(false);
+  });
 });
 
 describe("ACP runtime — happy path", () => {
@@ -247,5 +277,58 @@ describe("ACP runtime — failure handling", () => {
       runAcpRequest(deps(agent), { provider: "mistral", prompt: "x", correlationId: "c7" })
     ).rejects.toBeTruthy();
     expect(agent.killed.length).toBeGreaterThan(0);
+  });
+});
+
+// Phase-5 Deliverable D: Devin --agent-type is threaded into the ACP spawn argv
+// as fixed argv (no shell interpolation). Golden/lifecycle: the request runs and
+// the resolved spawn carries the validated agent type; an unknown value is
+// dropped (never injected).
+describe("ACP runtime: devin --agent-type", () => {
+  function devinDeps(recorded: import("../acp/process-manager.js").ResolvedAcpSpawn[]) {
+    const agent = new FakeAgent();
+    const spawn: AcpSpawnFn = r => {
+      recorded.push(r);
+      return agent;
+    };
+    const config = makeConfig({
+      providers: {
+        devin: {
+          enabled: true,
+          command: "devin",
+          args: ["acp"],
+          runtimeEnabled: true,
+          isolatedLeaderSocket: false,
+        },
+      },
+    });
+    return { agent, spawn, config };
+  }
+
+  it("appends --agent-type <type> to the devin acp spawn argv", async () => {
+    const recorded: import("../acp/process-manager.js").ResolvedAcpSpawn[] = [];
+    const { spawn, config } = devinDeps(recorded);
+    const res = await runAcpRequest(deps(new FakeAgent(), { spawn, config }), {
+      provider: "devin",
+      prompt: "review this",
+      agentType: "review",
+      correlationId: "dv1",
+    });
+    expect(res.text).toBe("Hello world");
+    expect(recorded).toHaveLength(1);
+    expect(recorded[0].command).toBe("devin");
+    expect(recorded[0].args).toEqual(["acp", "--agent-type", "review"]);
+  });
+
+  it("drops an unknown agent-type value (never injects arbitrary argv)", async () => {
+    const recorded: import("../acp/process-manager.js").ResolvedAcpSpawn[] = [];
+    const { spawn, config } = devinDeps(recorded);
+    await runAcpRequest(deps(new FakeAgent(), { spawn, config }), {
+      provider: "devin",
+      prompt: "x",
+      agentType: "rm -rf",
+      correlationId: "dv2",
+    });
+    expect(recorded[0].args).toEqual(["acp"]);
   });
 });

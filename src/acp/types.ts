@@ -156,16 +156,102 @@ export const InitializeRequestSchema = z
 
 export type InitializeRequest = z.infer<typeof InitializeRequestSchema>;
 
+// ---------------------------------------------------------------------------
+// Agent capability set (parsed from the initialize response)
+//
+// Per the ACP spec (https://agentclientprotocol.com/protocol/schema) the agent
+// advertises its supported methods through TYPED capability fields rather than a
+// method list. Each schema below is vendor-tolerant (`.passthrough()`), so an
+// unknown vendor field is PRESERVED on the parsed object (surfaced downstream as
+// discovered-unmapped) rather than dropped or rejected.
+// ---------------------------------------------------------------------------
+
 /**
- * `initialize` response. `protocolVersion` is required and strict.
- * `agentCapabilities`, `agentInfo`, and `authMethods` are tolerant because
- * provider shapes diverge (Mistral nests `agentInfo.{name,version}`; Grok
- * advertises an `agentVersion`/MCP capability bag).
+ * An optional session sub-capability. Per the ACP spec, an object (`{}`) means
+ * the agent supports the method; `null`/omitted both mean it does not. Vendor
+ * extension keys survive via passthrough.
+ */
+const SessionSubCapabilitySchema = z.object({ _meta: MetaSchema }).passthrough().nullish();
+
+/** Prompt content-type capabilities advertised by the agent. */
+export const PromptCapabilitiesSchema = z
+  .object({
+    image: z.boolean().optional(),
+    audio: z.boolean().optional(),
+    embeddedContext: z.boolean().optional(),
+    _meta: MetaSchema,
+  })
+  .passthrough();
+export type PromptCapabilities = z.infer<typeof PromptCapabilitiesSchema>;
+
+/** MCP transport capabilities advertised by the agent. */
+export const McpCapabilitiesSchema = z
+  .object({
+    http: z.boolean().optional(),
+    sse: z.boolean().optional(),
+    _meta: MetaSchema,
+  })
+  .passthrough();
+export type McpCapabilities = z.infer<typeof McpCapabilitiesSchema>;
+
+/** Session lifecycle capabilities advertised by the agent. */
+export const SessionCapabilitiesSchema = z
+  .object({
+    resume: SessionSubCapabilitySchema,
+    list: SessionSubCapabilitySchema,
+    close: SessionSubCapabilitySchema,
+    delete: SessionSubCapabilitySchema,
+    additionalDirectories: SessionSubCapabilitySchema,
+    _meta: MetaSchema,
+  })
+  .passthrough();
+export type SessionCapabilities = z.infer<typeof SessionCapabilitiesSchema>;
+
+/** Authentication-related capabilities advertised by the agent. */
+export const AgentAuthCapabilitiesSchema = z
+  .object({
+    logout: z.object({ _meta: MetaSchema }).passthrough().nullish(),
+    _meta: MetaSchema,
+  })
+  .passthrough();
+export type AgentAuthCapabilities = z.infer<typeof AgentAuthCapabilitiesSchema>;
+
+/** The agent capability bag advertised in the `initialize` response. */
+export const AgentCapabilitiesSchema = z
+  .object({
+    loadSession: z.boolean().optional(),
+    promptCapabilities: PromptCapabilitiesSchema.optional(),
+    mcpCapabilities: McpCapabilitiesSchema.optional(),
+    sessionCapabilities: SessionCapabilitiesSchema.optional(),
+    auth: AgentAuthCapabilitiesSchema.optional(),
+    _meta: MetaSchema,
+  })
+  .passthrough();
+export type AgentCapabilities = z.infer<typeof AgentCapabilitiesSchema>;
+
+/** A single advertised authentication method. */
+export const AuthMethodSchema = z
+  .object({
+    id: z.string().optional(),
+    name: z.string().optional(),
+    description: z.string().nullish(),
+    _meta: MetaSchema,
+  })
+  .passthrough();
+export type AuthMethod = z.infer<typeof AuthMethodSchema>;
+
+/**
+ * `initialize` response. `protocolVersion` is required and strict. Capability
+ * fields (`agentCapabilities`, `authMethods`) are parsed into typed, tolerant
+ * schemas so method availability can be DERIVED from them
+ * ({@link deriveAcpMethodAvailability}); vendor extras survive via passthrough
+ * (Mistral nests `agentInfo.{name,version}`; Grok advertises a flat
+ * `agentVersion` bag).
  */
 export const InitializeResponseSchema = z
   .object({
     protocolVersion: ProtocolVersionSchema,
-    agentCapabilities: z.record(z.unknown()).optional(),
+    agentCapabilities: AgentCapabilitiesSchema.optional(),
     agentInfo: z
       .object({
         name: z.string().optional(),
@@ -173,12 +259,81 @@ export const InitializeResponseSchema = z
       })
       .passthrough()
       .optional(),
-    authMethods: z.array(z.record(z.unknown())).optional(),
+    authMethods: z.array(AuthMethodSchema).optional(),
     _meta: MetaSchema,
   })
   .passthrough();
 
 export type InitializeResponse = z.infer<typeof InitializeResponseSchema>;
+
+// ---------------------------------------------------------------------------
+// Capability-driven method availability (pure derivation)
+// ---------------------------------------------------------------------------
+
+/**
+ * ACP methods every conformant agent MUST support (spec baseline). They are
+ * always available and never gated on an advertised capability.
+ */
+export const BASELINE_ACP_METHODS = [
+  "session/new",
+  "session/prompt",
+  "session/cancel",
+  "session/update",
+] as const;
+
+/** A session sub-capability is "present" (supported) when it is a non-null object. */
+function subCapabilityPresent(value: unknown): boolean {
+  return value !== null && value !== undefined && typeof value === "object";
+}
+
+/**
+ * Derive the set of ACP methods a client may call from the parsed `initialize`
+ * capability set. Pure: no I/O, no provider table, no hand-coded per-provider
+ * branch. Baseline methods are always present; every optional method is added
+ * ONLY when the agent advertised the matching capability.
+ *
+ * Note: `session/set_mode` and `session/set_config_option` are advertised
+ * per-session (via `modes`/`configOptions` on the `session/new` /
+ * `session/load` response), not in `initialize`; augment the initialize-derived
+ * set with {@link sessionResponseMethods} once a session is created/loaded.
+ */
+export function deriveAcpMethodAvailability(init: InitializeResponse): ReadonlySet<string> {
+  const methods = new Set<string>(BASELINE_ACP_METHODS);
+  const caps = init.agentCapabilities;
+  if (caps?.loadSession === true) {
+    methods.add("session/load");
+  }
+  const sc = caps?.sessionCapabilities;
+  if (sc) {
+    if (subCapabilityPresent(sc.resume)) methods.add("session/resume");
+    if (subCapabilityPresent(sc.list)) methods.add("session/list");
+    if (subCapabilityPresent(sc.close)) methods.add("session/close");
+    if (subCapabilityPresent(sc.delete)) methods.add("session/delete");
+  }
+  if (Array.isArray(init.authMethods) && init.authMethods.length > 0) {
+    methods.add("authenticate");
+  }
+  return methods;
+}
+
+/**
+ * Per-session methods advertised on a `session/new` / `session/load` response:
+ * `session/set_mode` when the response carries `modes`, and
+ * `session/set_config_option` when it carries `configOptions`. Pure.
+ */
+export function sessionResponseMethods(response: {
+  readonly modes?: unknown;
+  readonly configOptions?: unknown;
+}): ReadonlySet<string> {
+  const methods = new Set<string>();
+  if (response.modes !== null && response.modes !== undefined) {
+    methods.add("session/set_mode");
+  }
+  if (response.configOptions !== null && response.configOptions !== undefined) {
+    methods.add("session/set_config_option");
+  }
+  return methods;
+}
 
 // ---------------------------------------------------------------------------
 // session/new
@@ -204,7 +359,8 @@ export type SessionNewRequest = z.infer<typeof SessionNewRequestSchema>;
 export const SessionNewResponseSchema = z
   .object({
     sessionId: SessionIdSchema,
-    modes: z.record(z.unknown()).optional(),
+    modes: z.record(z.unknown()).nullish(),
+    configOptions: z.array(z.record(z.unknown())).nullish(),
     _meta: MetaSchema,
   })
   .passthrough();
@@ -229,12 +385,213 @@ export type SessionLoadRequest = z.infer<typeof SessionLoadRequestSchema>;
 /** `session/load` response carries no required fields beyond tolerant extras. */
 export const SessionLoadResponseSchema = z
   .object({
-    modes: z.record(z.unknown()).optional(),
+    modes: z.record(z.unknown()).nullish(),
+    configOptions: z.array(z.record(z.unknown())).nullish(),
     _meta: MetaSchema,
   })
   .passthrough();
 
 export type SessionLoadResponse = z.infer<typeof SessionLoadResponseSchema>;
+
+// ---------------------------------------------------------------------------
+// session/resume, session/list, session/close, session/delete,
+// session/set_mode, session/set_config_option (client -> agent)
+//
+// Each is capability-gated by the client (see AcpClient). The request/response
+// shapes follow the ACP spec; provider extras survive via passthrough.
+// ---------------------------------------------------------------------------
+
+export const SessionResumeRequestSchema = z
+  .object({
+    sessionId: SessionIdSchema,
+    cwd: z.string().min(1),
+    mcpServers: z.array(McpServerSchema).default([]),
+    _meta: MetaSchema,
+  })
+  .passthrough();
+export type SessionResumeRequest = z.infer<typeof SessionResumeRequestSchema>;
+
+/** `session/resume` response mirrors `session/load` (modes/configOptions extras). */
+export const SessionResumeResponseSchema = z
+  .object({
+    modes: z.record(z.unknown()).nullish(),
+    configOptions: z.array(z.record(z.unknown())).nullish(),
+    _meta: MetaSchema,
+  })
+  .passthrough();
+export type SessionResumeResponse = z.infer<typeof SessionResumeResponseSchema>;
+
+/**
+ * ACP `SessionMode`: a mode the agent can operate in. `id` and `name` are
+ * required per the spec; vendor extras survive via passthrough.
+ */
+export const SessionModeSchema = z
+  .object({
+    id: z.string().min(1),
+    name: z.string().min(1),
+    description: z.string().nullish(),
+    _meta: MetaSchema,
+  })
+  .passthrough();
+export type SessionMode = z.infer<typeof SessionModeSchema>;
+
+/**
+ * ACP `SessionModeState` (the `modes` object on a session/new|load response):
+ * `currentModeId` and `availableModes` are BOTH required per the spec. A
+ * `modes` object missing either is rejected rather than accepted as success.
+ */
+export const SessionModeStateSchema = z
+  .object({
+    currentModeId: z.string().min(1),
+    availableModes: z.array(SessionModeSchema),
+    _meta: MetaSchema,
+  })
+  .passthrough();
+export type SessionModeState = z.infer<typeof SessionModeStateSchema>;
+
+/**
+ * ACP `SessionConfigSelectValue`: one selectable value of a `select` config
+ * option. `value` (the value id) is required per the spec; a human-readable
+ * `label`/`description` and vendor extras survive via passthrough.
+ */
+export const SessionConfigSelectValueSchema = z
+  .object({
+    value: z.string().min(1),
+    label: z.string().nullish(),
+    description: z.string().nullish(),
+    _meta: MetaSchema,
+  })
+  .passthrough();
+export type SessionConfigSelectValue = z.infer<typeof SessionConfigSelectValueSchema>;
+
+/**
+ * ACP `SessionConfigOption`: a discriminated union on `type` describing a
+ * config selector and its current state. Shared base fields `id`/`name` are
+ * required (`description`/`category` optional). The `select` variant additionally
+ * requires `currentValue` (a value id string) and `options`; the `boolean`
+ * variant requires a boolean `currentValue`. A payload missing `type` or the
+ * variant's required `currentValue` is rejected rather than accepted as a
+ * success; vendor extras survive via passthrough.
+ */
+export const SessionConfigOptionSchema = z.discriminatedUnion("type", [
+  z
+    .object({
+      type: z.literal("select"),
+      id: z.string().min(1),
+      name: z.string().min(1),
+      description: z.string().nullish(),
+      category: z.string().nullish(),
+      currentValue: z.string().min(1),
+      options: z.array(SessionConfigSelectValueSchema),
+      _meta: MetaSchema,
+    })
+    .passthrough(),
+  z
+    .object({
+      type: z.literal("boolean"),
+      id: z.string().min(1),
+      name: z.string().min(1),
+      description: z.string().nullish(),
+      category: z.string().nullish(),
+      currentValue: z.boolean(),
+      _meta: MetaSchema,
+    })
+    .passthrough(),
+]);
+export type SessionConfigOption = z.infer<typeof SessionConfigOptionSchema>;
+
+/**
+ * ACP `SessionInfo` (a `session/list` entry): `sessionId` and `cwd` are BOTH
+ * required per the spec. An entry missing either is rejected (a malformed list
+ * row is a protocol error, not a silently-accepted success).
+ */
+export const SessionInfoSchema = z
+  .object({
+    sessionId: SessionIdSchema,
+    cwd: z.string().min(1),
+    additionalDirectories: z.array(z.string()).optional(),
+    title: z.string().nullish(),
+    updatedAt: z.string().nullish(),
+    _meta: MetaSchema,
+  })
+  .passthrough();
+export type SessionInfo = z.infer<typeof SessionInfoSchema>;
+
+export const ListSessionsRequestSchema = z
+  .object({
+    cursor: z.string().nullish(),
+    _meta: MetaSchema,
+  })
+  .passthrough();
+export type ListSessionsRequest = z.infer<typeof ListSessionsRequestSchema>;
+
+/**
+ * `session/list` response: `sessions` is REQUIRED per the ACP spec (an array of
+ * {@link SessionInfoSchema} entries). A response omitting `sessions`, or with a
+ * malformed entry, fails to parse instead of being accepted as an empty success.
+ */
+export const ListSessionsResponseSchema = z
+  .object({
+    sessions: z.array(SessionInfoSchema),
+    nextCursor: z.string().nullish(),
+    _meta: MetaSchema,
+  })
+  .passthrough();
+export type ListSessionsResponse = z.infer<typeof ListSessionsResponseSchema>;
+
+export const CloseSessionRequestSchema = z
+  .object({ sessionId: SessionIdSchema, _meta: MetaSchema })
+  .passthrough();
+export type CloseSessionRequest = z.infer<typeof CloseSessionRequestSchema>;
+
+export const CloseSessionResponseSchema = z.object({ _meta: MetaSchema }).passthrough();
+export type CloseSessionResponse = z.infer<typeof CloseSessionResponseSchema>;
+
+export const DeleteSessionRequestSchema = z
+  .object({ sessionId: SessionIdSchema, _meta: MetaSchema })
+  .passthrough();
+export type DeleteSessionRequest = z.infer<typeof DeleteSessionRequestSchema>;
+
+export const DeleteSessionResponseSchema = z.object({ _meta: MetaSchema }).passthrough();
+export type DeleteSessionResponse = z.infer<typeof DeleteSessionResponseSchema>;
+
+export const SetSessionModeRequestSchema = z
+  .object({
+    sessionId: SessionIdSchema,
+    modeId: z.string().min(1),
+    _meta: MetaSchema,
+  })
+  .passthrough();
+export type SetSessionModeRequest = z.infer<typeof SetSessionModeRequestSchema>;
+
+export const SetSessionModeResponseSchema = z.object({ _meta: MetaSchema }).passthrough();
+export type SetSessionModeResponse = z.infer<typeof SetSessionModeResponseSchema>;
+
+export const SetSessionConfigOptionRequestSchema = z
+  .object({
+    sessionId: SessionIdSchema,
+    configId: z.string().min(1),
+    // Per the ACP spec `value` is a SessionConfigValueId (a non-empty string,
+    // the id of the option value to select), not an arbitrary payload.
+    value: z.string().min(1),
+    _meta: MetaSchema,
+  })
+  .passthrough();
+export type SetSessionConfigOptionRequest = z.infer<typeof SetSessionConfigOptionRequestSchema>;
+
+/**
+ * `session/set_config_option` response: `configOptions` (the full set of
+ * options and their current values) is REQUIRED per the ACP spec. A response
+ * omitting it, or carrying a malformed option, fails to parse rather than being
+ * accepted as a success.
+ */
+export const SetSessionConfigOptionResponseSchema = z
+  .object({
+    configOptions: z.array(SessionConfigOptionSchema),
+    _meta: MetaSchema,
+  })
+  .passthrough();
+export type SetSessionConfigOptionResponse = z.infer<typeof SetSessionConfigOptionResponseSchema>;
 
 // ---------------------------------------------------------------------------
 // session/prompt
@@ -355,6 +712,20 @@ const UsageUpdate = z
   .passthrough();
 
 /**
+ * `config_option_update` (ConfigOptionUpdate): the agent reports the full set of
+ * configuration options and their current values. `configOptions` is REQUIRED
+ * per the ACP spec (an array of {@link SessionConfigOptionSchema}); a malformed
+ * update is rejected rather than degrading to the tolerant fallback.
+ */
+const ConfigOptionUpdate = z
+  .object({
+    sessionUpdate: z.literal("config_option_update"),
+    configOptions: z.array(SessionConfigOptionSchema),
+    _meta: MetaSchema,
+  })
+  .passthrough();
+
+/**
  * Strict per-variant schemas keyed by discriminator. When the discriminator is
  * one we recognise, that variant's required fields are enforced. When the
  * discriminator is unrecognised, parsing degrades to a tolerant passthrough so
@@ -371,6 +742,7 @@ const KNOWN_UPDATE_SCHEMAS: Record<string, z.ZodTypeAny> = {
   plan: PlanUpdate,
   available_commands_update: AvailableCommandsUpdate,
   current_mode_update: CurrentModeUpdate,
+  config_option_update: ConfigOptionUpdate,
   usage_update: UsageUpdate,
 };
 
@@ -597,6 +969,57 @@ export function parseWriteTextFileRequest(
 ): WriteTextFileRequest {
   return parseAcp(WriteTextFileRequestSchema, value, {
     method: "fs/write_text_file",
+    provider,
+  });
+}
+
+/** Parse a `session/resume` response. */
+export function parseSessionResumeResponse(
+  value: unknown,
+  provider?: CliType
+): SessionResumeResponse {
+  return parseAcp(SessionResumeResponseSchema, value, { method: "session/resume", provider });
+}
+
+/** Parse a `session/list` response. */
+export function parseListSessionsResponse(
+  value: unknown,
+  provider?: CliType
+): ListSessionsResponse {
+  return parseAcp(ListSessionsResponseSchema, value, { method: "session/list", provider });
+}
+
+/** Parse a `session/close` response. */
+export function parseCloseSessionResponse(
+  value: unknown,
+  provider?: CliType
+): CloseSessionResponse {
+  return parseAcp(CloseSessionResponseSchema, value, { method: "session/close", provider });
+}
+
+/** Parse a `session/delete` response. */
+export function parseDeleteSessionResponse(
+  value: unknown,
+  provider?: CliType
+): DeleteSessionResponse {
+  return parseAcp(DeleteSessionResponseSchema, value, { method: "session/delete", provider });
+}
+
+/** Parse a `session/set_mode` response. */
+export function parseSetSessionModeResponse(
+  value: unknown,
+  provider?: CliType
+): SetSessionModeResponse {
+  return parseAcp(SetSessionModeResponseSchema, value, { method: "session/set_mode", provider });
+}
+
+/** Parse a `session/set_config_option` response. */
+export function parseSetSessionConfigOptionResponse(
+  value: unknown,
+  provider?: CliType
+): SetSessionConfigOptionResponse {
+  return parseAcp(SetSessionConfigOptionResponseSchema, value, {
+    method: "session/set_config_option",
     provider,
   });
 }

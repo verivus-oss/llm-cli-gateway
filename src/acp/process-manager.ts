@@ -142,6 +142,14 @@ export interface StartProviderOptions {
    * A non-positive value disables the idle timer.
    */
   readonly idleTimeoutMs?: number;
+  /**
+   * Extra fixed argv appended to the resolved entrypoint (e.g. Devin
+   * `--agent-type review`). Each element is a literal string spawned with
+   * `shell:false`; no shell interpolation ever occurs. The caller is responsible
+   * for the values being from a validated enum/allowlist, never provider output
+   * or free-form prompt text.
+   */
+  readonly extraArgs?: readonly string[];
 }
 
 /** A live (or terminal) managed provider process plus its protocol surfaces. */
@@ -223,7 +231,8 @@ export function resolveProviderSpawn(
   provider: CliType,
   config: AcpConfig,
   baseEnv: ProcessEnv,
-  cwd?: string
+  cwd?: string,
+  extraArgs: readonly string[] = []
 ): ResolvedAcpSpawn {
   const providerConfig = config.providers[provider];
   const registryEntry = getAcpProviderEntry(provider);
@@ -244,8 +253,12 @@ export function resolveProviderSpawn(
     );
   }
 
+  // Append any caller-supplied fixed argv (e.g. Devin --agent-type). Validated
+  // as strings; spawned with shell:false so no value is ever shell-interpreted.
+  const combinedArgs: readonly string[] = [...args, ...extraArgs];
+
   assertSafeExecutable(command, provider);
-  for (const arg of args) {
+  for (const arg of combinedArgs) {
     if (typeof arg !== "string") {
       throw new ProviderUnavailableError(provider, "ACP args must be strings", { provider });
     }
@@ -261,7 +274,7 @@ export function resolveProviderSpawn(
 
   return {
     command,
-    args: [...args],
+    args: [...combinedArgs],
     cwd: cwd ?? `${tmpdir()}/llm-gateway-acp-${provider}`,
     env: buildProviderEnv(provider, effectiveConfig, baseEnv),
   };
@@ -328,7 +341,13 @@ export class AcpProcessManager {
    * {@link AcpError} is thrown. The returned process is healthy and initialized.
    */
   async start(options: StartProviderOptions): Promise<ManagedAcpProcess> {
-    const resolved = resolveProviderSpawn(options.provider, this.config, this.baseEnv, options.cwd);
+    const resolved = resolveProviderSpawn(
+      options.provider,
+      this.config,
+      this.baseEnv,
+      options.cwd,
+      options.extraArgs
+    );
 
     let child: AcpChildProcess;
     try {
@@ -373,6 +392,7 @@ export class AcpProcessManager {
       initializeTimeoutMs: this.config.initializeTimeoutMs,
       sessionNewTimeoutMs: this.config.sessionNewTimeoutMs,
       promptTimeoutMs: this.config.promptTimeoutMs,
+      allowMutatingSessionOps: this.config.allowMutatingSessionOps,
       onTerminal: m => this.live.delete(m),
     });
     this.live.add(managed);
@@ -420,6 +440,7 @@ interface ManagedProcessImplOptions {
   readonly initializeTimeoutMs: number;
   readonly sessionNewTimeoutMs?: number;
   readonly promptTimeoutMs?: number;
+  readonly allowMutatingSessionOps?: boolean;
   readonly onTerminal: (self: ManagedProcessImpl) => void;
 }
 
@@ -498,6 +519,8 @@ class ManagedProcessImpl implements ManagedAcpProcess {
         sessionNewMs: options.sessionNewTimeoutMs,
         promptMs: options.promptTimeoutMs,
       },
+      // Deny-by-default mutating ACP admin ops unless the operator enabled them.
+      allowMutatingSessionOps: options.allowMutatingSessionOps ?? false,
     });
 
     // Wire process exit -> transport teardown + quarantine. Both `exit` and

@@ -39,6 +39,11 @@ export function sessionsResourceUri(id: CliType): string {
   return `sessions://${id}`;
 }
 
+/** Build the `provider-acp://<id>` resource URI for a provider. */
+export function providerAcpResourceUri(id: CliType): string {
+  return `provider-acp://${id}`;
+}
+
 /** One request-tool descriptor per provider (carries both sync + async). */
 export interface RequestToolDescriptor {
   readonly provider: CliType;
@@ -196,6 +201,53 @@ export function parseSessionsResourceUri(
 ): CliType | null {
   for (const def of defs) {
     if (def.resourcePolicy.exposesSessionsResource && sessionsResourceUri(def.id) === uri) {
+      return def.id;
+    }
+  }
+  return null;
+}
+
+/** Provider-ACP capability descriptor: the `provider-acp://<id>` surface row. */
+export interface ProviderAcpDescriptor {
+  readonly provider: CliType;
+  readonly displayName: string;
+  readonly icon: string;
+  readonly acpUri: string;
+  /** True when the provider declares a native ACP entrypoint in its definition. */
+  readonly nativeAcp: boolean;
+}
+
+/**
+ * One provider-acp capability descriptor for every NATIVE-ACP provider (those
+ * whose definition declares `acp.classification === "native"`). The provider
+ * list is derived from the registry, never hand-spelled.
+ */
+export function generateProviderAcpDescriptors(
+  defs: readonly ProviderDefinition[] = getAllProviderDefinitions()
+): readonly ProviderAcpDescriptor[] {
+  return defs
+    .filter(def => def.acp.classification === "native")
+    .map(def => ({
+      provider: def.id,
+      displayName: def.displayName,
+      icon: def.icon,
+      acpUri: providerAcpResourceUri(def.id),
+      nativeAcp: true,
+    }));
+}
+
+/**
+ * Resolve a `provider-acp://<id>` URI to its provider id, or null. Resolves for
+ * ANY known provider id (native OR non-native) so a non-native record can be
+ * read and explicitly state "no native ACP entrypoint" (anti-masquerade). The
+ * provider id is derived strictly from the registry, never hand-spelled.
+ */
+export function parseProviderAcpResourceUri(
+  uri: string,
+  defs: readonly ProviderDefinition[] = getAllProviderDefinitions()
+): CliType | null {
+  for (const def of defs) {
+    if (providerAcpResourceUri(def.id) === uri) {
       return def.id;
     }
   }

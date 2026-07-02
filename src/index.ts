@@ -93,7 +93,11 @@ import {
   resolveModelAlias,
 } from "./model-registry.js";
 import { getProviderToolCapabilities } from "./provider-tool-capabilities.js";
-import { getProviderDefinition } from "./provider-definitions.js";
+import {
+  getProviderDefinition,
+  DEVIN_ACP_AGENT_TYPES,
+  type DevinAcpAgentType,
+} from "./provider-definitions.js";
 import {
   buildProviderDiscoveredView,
   peekProviderCapabilitySet,
@@ -942,7 +946,9 @@ export function resolveGatewayServerRuntime(
             runtimePerformanceMetrics,
             runtimeFlightRecorder,
             deps.cacheAwareness ?? getCacheAwarenessConfig(runtimeLogger),
-            deps.providers ?? getProvidersConfig(runtimeLogger)
+            deps.providers ?? getProvidersConfig(runtimeLogger),
+            undefined,
+            deps.acpConfig ?? getAcpConfig(runtimeLogger)
           )
         : resourceProvider),
     db: "db" in deps ? (deps.db ?? null) : db,
@@ -994,6 +1000,7 @@ export async function runAcpTransport(
     model?: string;
     sessionId?: string;
     correlationId?: string;
+    agentType?: string;
   }
 ): Promise<ExtendedToolResponse> {
   const runtime = resolveHandlerRuntime(deps);
@@ -1018,6 +1025,7 @@ export async function runAcpTransport(
         model: params.model,
         sessionId: params.sessionId,
         correlationId: corrId,
+        agentType: params.agentType,
       }
     );
     return {
@@ -6259,6 +6267,12 @@ export interface DevinRequestParams {
   respectWorkspaceTrust?: boolean;
   /** Devin `--agent-config <FILE>`: agent config file path. */
   agentConfig?: string;
+  /**
+   * Devin ACP `--agent-type <type>` (summarizer|review). Only applies when
+   * transport=acp; threaded into the `devin acp` spawn argv. Ignored for the CLI
+   * transport.
+   */
+  agentType?: DevinAcpAgentType;
   transport?: "cli" | "acp";
   sessionId?: string;
   resumeLatest?: boolean;
@@ -6344,6 +6358,7 @@ export async function handleDevinRequest(
       model: params.model,
       sessionId: params.sessionId,
       correlationId: params.correlationId,
+      agentType: params.agentType,
     });
   }
   const runtime = resolveHandlerRuntime(deps);
@@ -9692,6 +9707,12 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .string()
         .optional()
         .describe("Agent config file path (Devin --agent-config <FILE>)"),
+      agentType: z
+        .enum(DEVIN_ACP_AGENT_TYPES)
+        .optional()
+        .describe(
+          "ACP agent variant for transport=acp (`devin acp --agent-type`): 'summarizer' (no tools, text summary) or 'review' (read-only + shell code-review). Ignored for the CLI transport."
+        ),
       sessionId: z
         .string()
         .optional()
@@ -9740,6 +9761,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       exportSession,
       respectWorkspaceTrust,
       agentConfig,
+      agentType,
       sessionId,
       resumeLatest,
       createNewSession,
@@ -9762,6 +9784,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           exportSession,
           respectWorkspaceTrust,
           agentConfig,
+          agentType,
           sessionId,
           resumeLatest,
           createNewSession,
@@ -13252,7 +13275,9 @@ async function initializeSessionManager(): Promise<void> {
     performanceMetrics,
     getFlightRecorder(logger),
     getCacheAwarenessConfig(logger),
-    getProvidersConfig(logger)
+    getProvidersConfig(logger),
+    undefined,
+    getAcpConfig(logger)
   );
 }
 
