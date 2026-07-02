@@ -33,6 +33,15 @@ paths = [
   # values. Every literal (fake api_key=, xai-, Bearer, etc.) is a deliberate
   # fixture that exists only to be redacted; there is no real secret.
   '''src/__tests__/gateway-logger\.test\.ts$''',
+  # The branch-review-fixes suite pins the ACP error redactor (L6) against
+  # deliberately fake Google (AIza), GitHub (ghp_), and Slack (xoxb) token
+  # shapes; every literal exists only to be redacted, never a real secret.
+  '''src/__tests__/branch-review-fixes\.test\.ts$''',
+  # The provider-capability-cache suite exercises the capability-set secret
+  # scrubber, so it is built entirely from deliberately fake keys (canonical
+  # AWS example keys AKIA.../ASIA..., gsk_/ghp_/BEARER fixtures, etc.). Every
+  # literal exists only to be scrubbed; there is no real secret.
+  '''src/__tests__/provider-capability-cache\.test\.ts$''',
 ]
 
 # Regex-scope allowlist: specific secret patterns that gitleaks would
