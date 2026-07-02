@@ -190,16 +190,45 @@ function parseGrokModelsText(raw: string): NativeParseResult {
   return { models, defaultModel, unmapped };
 }
 
+/**
+ * Whether a trimmed `agy models` line looks like a real model display label
+ * (e.g. "Gemini 3.5 Flash (Medium)") rather than a header, footer, banner, or
+ * prose line. agy prints display labels, not machine ids, so the id-token
+ * `isPlausibleModelId` gate used for grok/codex does not apply; this is the
+ * label-shaped equivalent. Conservative: it only drops lines that are clearly
+ * not a label so a real, unusually-formatted label is not lost.
+ */
+function isPlausibleModelLabel(label: string): boolean {
+  if (label.length < 2 || label.length > 60) return false;
+  if (label.endsWith(":")) return false; // "Available models:" header
+  if (/^[-*=_#>|]+/.test(label)) return false; // rule / bullet / table banner
+  if (/\s{2,}/.test(label)) return false; // columnar banner spacing
+  if (/https?:\/\//i.test(label)) return false; // footer URL
+  if ((label.match(/\s/g)?.length ?? 0) > 8) return false; // prose sentence
+  return true;
+}
+
 /** Parse `agy models` text: one account model label per line (labels, not ids). */
 function parseAgyModelsText(raw: string): NativeParseResult {
   const models: DiscoveredModel[] = [];
+  const unmapped: DiscoveredUnmapped[] = [];
   for (const line of raw.split(/\r?\n/)) {
     const label = line.trim();
     if (label.length === 0) continue;
     // agy prints display labels ("Gemini 3.5 Flash (Medium)"), not machine ids.
+    // Drop header/prose/footer lines so they do not surface as bogus models.
+    if (!isPlausibleModelLabel(label)) {
+      unmapped.push({
+        kind: "model",
+        raw: label.slice(0, 120),
+        checksum: checksumText(label),
+        reason: "agy models line is not a plausible model label",
+      });
+      continue;
+    }
     models.push({ id: label, label, origin: "account-label", isDefault: false });
   }
-  return { models, defaultModel: null, unmapped: [] };
+  return { models, defaultModel: null, unmapped };
 }
 
 /** Map a model-registry metadata source to a discovered-model origin. */
