@@ -773,7 +773,18 @@ export const SessionUpdateNotificationSchema = z
 
 export type SessionUpdateNotification = z.infer<typeof SessionUpdateNotificationSchema>;
 
-/** Canonical known `sessionUpdate` discriminators, for normalizers. */
+/**
+ * Canonical known `sessionUpdate` discriminators, for normalizers.
+ *
+ * MUST stay in lock-step with {@link KNOWN_UPDATE_SCHEMAS}: every entry here is a
+ * variant whose required fields are strictly validated. A variant listed here
+ * but missing a schema would be reported "known" by {@link isUnknownSessionUpdate}
+ * while the schema layer silently accepts it unvalidated (the two notions must
+ * not disagree). `session_info_update` is intentionally absent: it has no strict
+ * schema and no normalizer handling, so it is treated as a forward-compatible
+ * unknown variant (tolerant passthrough) exactly like any other unrecognised
+ * discriminator.
+ */
 export const KNOWN_SESSION_UPDATE_VARIANTS = [
   "user_message_chunk",
   "agent_message_chunk",
@@ -784,7 +795,6 @@ export const KNOWN_SESSION_UPDATE_VARIANTS = [
   "available_commands_update",
   "current_mode_update",
   "config_option_update",
-  "session_info_update",
   "usage_update",
 ] as const;
 
