@@ -29,6 +29,9 @@ gtwy = "gtwy"           # mcp gateway short name
 sqry = "sqry"           # AST search tool
 exa  = "exa"            # web search tool
 NDJSON = "NDJSON"
+# Deliberate term: the `invokableSubcommand` surface field (camelCase, so it is
+# not covered by the lowercase identifier regex) and the "not invokable" prose.
+invokable = "invokable"
 
 [files]
 extend-exclude = [
