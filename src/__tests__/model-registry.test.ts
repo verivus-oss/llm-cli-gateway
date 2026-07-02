@@ -30,6 +30,7 @@ const ENV_KEYS = [
   "GROK_DEFAULT_MODEL",
   "GROK_MODELS",
   "GROK_MODEL_ALIASES",
+  "GROK_CONFIG_PATH",
   "MISTRAL_DEFAULT_MODEL",
   "MISTRAL_MODELS",
   "MISTRAL_MODEL_ALIASES",
@@ -52,6 +53,7 @@ describe("model registry", () => {
     process.env.CLAUDE_SETTINGS_PATH = join(tempDir, "missing-claude-settings.json");
     process.env.CLAUDE_SETTINGS_LOCAL_PATH = join(tempDir, "missing-claude-local-settings.json");
     process.env.CODEX_CONFIG_PATH = join(tempDir, "missing-codex-config.toml");
+    process.env.GROK_CONFIG_PATH = join(tempDir, "missing-grok-config.toml");
     process.env.GEMINI_SETTINGS_PATH = join(tempDir, "missing-gemini-settings.json");
     process.env.GEMINI_HISTORY_ROOT = join(tempDir, "missing-gemini-history");
     clearModelRegistryCache();
@@ -194,6 +196,35 @@ describe("model registry", () => {
     expect(resolveModelAlias("grok", "default", info)).toBe("grok-team-pin");
   });
 
+  it("reads Grok default and custom models from ~/.grok/config.toml", () => {
+    const configPath = join(tempDir, "grok-config.toml");
+    writeFileSync(
+      configPath,
+      [
+        "[models]",
+        'default = "grok-build"',
+        'reasoning = "grok-reasoning-2"',
+        "",
+        "[ui]",
+        'fork_secondary_model = "grok-fast-1"',
+      ].join("\n")
+    );
+    process.env.GROK_CONFIG_PATH = configPath;
+
+    const info = getCliInfo(true);
+
+    // Configured default is represented (not hardcoded).
+    expect(info.grok.defaultModel).toBe("grok-build");
+    expect(info.grok.defaultModelSource).toContain("[models].default");
+    // Custom model facts from config are surfaced.
+    expect(info.grok.models["grok-reasoning-2"]).toContain("Custom Grok model");
+    expect(info.grok.models["grok-fast-1"]).toContain("fork/secondary");
+    // An explicit env default still wins over the config default.
+    process.env.GROK_DEFAULT_MODEL = "grok-reasoning-2";
+    const withEnv = getCliInfo(true);
+    expect(withEnv.grok.defaultModel).toBe("grok-reasoning-2");
+  });
+
   it("does not hardcode a Mistral default when Vibe has no config", () => {
     const info = getCliInfo(true);
 
@@ -247,6 +278,26 @@ describe("model registry", () => {
 
     expect(info.mistral.defaultModel).toBe("mistral-medium-3.5");
     expect(info.mistral.warnings?.join("\n")).toContain("devstral-medium");
+  });
+
+  // FIX D: readVibeConfig reads `default_agent` and the registry exposes it.
+  // Mutation that flips this red: removing the `default_agent` read in
+  // readVibeConfig (or the `info.defaultAgent = ...` assignment in
+  // applyMistralOverrides).
+  it("reads Vibe default_agent from config and exposes it on the mistral registry", () => {
+    const vibeHome = join(tempDir, "vibe-home");
+    mkdirSync(vibeHome);
+    process.env.VIBE_HOME = vibeHome;
+    writeFileSync(
+      join(vibeHome, "config.toml"),
+      ['active_model = "mistral-medium-3.5"', 'default_agent = "plan"', ""].join("\n")
+    );
+
+    const info = getCliInfo(true);
+    expect(info.mistral.defaultAgent).toBe("plan");
+
+    // It also survives the available-model projection (getAvailableCliInfo).
+    expect(getAvailableCliInfo(true).mistral.defaultAgent).toBe("plan");
   });
 
   it("supports env-driven Mistral aliases", () => {

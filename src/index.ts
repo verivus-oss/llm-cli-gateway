@@ -93,6 +93,13 @@ import {
   resolveModelAlias,
 } from "./model-registry.js";
 import { getProviderToolCapabilities } from "./provider-tool-capabilities.js";
+import { getProviderDefinition } from "./provider-definitions.js";
+import {
+  buildProviderDiscoveredView,
+  peekProviderCapabilitySet,
+  warmProviderCapabilities,
+  type ProviderDiscoveredView,
+} from "./provider-capability-resolver.js";
 import {
   AsyncJobManager,
   JobSaturationError,
@@ -11920,21 +11927,46 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
     async ({ cli }) => {
       const cliInfo = getAvailableCliInfo();
       const apiRuntimes = enabledApiProviders(providers);
+      // Phase-3 additive enrichment: for CLI providers, attach the discovered
+      // live/cached model listing under a top-level `discovered` map (keyed by
+      // provider id) alongside the unchanged static registry entries. Discovery
+      // is a memo-only peek so this never spawns/hangs on the read path; when no
+      // capability set is resolvable the view is source "static-fallback". The
+      // API-provider-filter shape is intentionally left untouched.
+      const buildDiscoveredMap = (
+        clis: readonly CliType[]
+      ): Record<string, ProviderDiscoveredView> => {
+        const out: Record<string, ProviderDiscoveredView> = {};
+        for (const c of clis) {
+          out[c] = buildProviderDiscoveredView(
+            getProviderDefinition(c),
+            cliInfo[c],
+            peekProviderCapabilitySet
+          );
+        }
+        return out;
+      };
       let result: Record<string, unknown>;
       if (cli && (CLI_TYPES as readonly string[]).includes(cli)) {
-        // CLI filter: unchanged shape.
-        result = { [cli]: cliInfo[cli as CliType] };
+        // CLI filter: static entry preserved; discovered listing added additively.
+        result = {
+          [cli]: cliInfo[cli as CliType],
+          discovered: buildDiscoveredMap([cli as CliType]),
+        };
       } else if (cli) {
         // API-provider-name filter: the dynamic enum guarantees a match unless
         // the provider was disabled between registration and this call.
         const runtime = apiRuntimes.find(p => p.name === cli);
         result = { apiProviders: runtime ? [apiProviderCatalogEntry(runtime)] : [] };
       } else {
-        // List-all: CLI providers as before, plus an `apiProviders` array.
-        // OMIT the field entirely when none are enabled so the response is
-        // byte-identical to pre-Slice-5 output when the feature is dormant.
+        // List-all: CLI providers as before, plus the discovered map, plus an
+        // `apiProviders` array. OMIT apiProviders entirely when none are enabled.
         const apiProviders = apiRuntimes.map(apiProviderCatalogEntry);
-        result = { ...cliInfo, ...(apiProviders.length > 0 ? { apiProviders } : {}) };
+        result = {
+          ...cliInfo,
+          discovered: buildDiscoveredMap(CLI_TYPES),
+          ...(apiProviders.length > 0 ? { apiProviders } : {}),
+        };
       }
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
     }
@@ -13346,6 +13378,13 @@ async function main() {
 
   // Initialize session manager first
   await initializeSessionManager();
+
+  // Phase-3: warm the provider capability memo in the background (fire-and-forget)
+  // so the read surfaces (models://<cli>, list_models) can serve live/cached
+  // discovered model listings. Seeds from the on-disk capability cache first to
+  // avoid spawns; never blocks startup and never rejects (each provider is
+  // fault-isolated). Read surfaces peek this memo synchronously.
+  void warmProviderCapabilities({ logger }).catch(() => undefined);
 
   const serverDeps: GatewayServerDeps = {
     sessionManager,

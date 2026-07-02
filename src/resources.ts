@@ -43,6 +43,13 @@ import {
   parseModelsResourceUri,
   parseSessionsResourceUri,
 } from "./provider-surface-generator.js";
+import { getProviderDefinition } from "./provider-definitions.js";
+import {
+  buildProviderDiscoveredView,
+  peekProviderCapabilitySet,
+  type ProviderDiscoveredView,
+  type ResolvedProviderCapability,
+} from "./provider-capability-resolver.js";
 
 export interface ResourceDefinition {
   uri: string;
@@ -80,7 +87,14 @@ export class ResourceProvider {
     // [providers.<name>] (kind:"api") providers gain `models://<name>` and (for
     // continuity-tracked kinds) `sessions://<name>` resources. Null/absent keeps
     // the resource set byte-identical to the CLI-only surface.
-    private providers: ProvidersConfig | null = null
+    private providers: ProvidersConfig | null = null,
+    // Phase-3: memo-only capability peek used to enrich models://<cli> with the
+    // live/cached discovered listing. Defaults to the process-lifetime resolver
+    // memo (never spawns on the read path); tests inject a fake that returns a
+    // canned resolution so unit tests never spawn real CLIs.
+    private capabilityPeek: (
+      id: CliType
+    ) => ResolvedProviderCapability | null = peekProviderCapabilitySet
   ) {}
 
   /** Read-only flight-recorder accessor for cache-state resource readers. */
@@ -347,10 +361,20 @@ export class ResourceProvider {
     const modelProvider = parseModelsResourceUri(uri);
     if (modelProvider) {
       const cliInfo = getAvailableCliInfo();
+      // Additive phase-3 enrichment: keep the static registry entry as the base
+      // (nothing regresses) and attach the discovered live/cached listing under
+      // `discovered` with an explicit source marker + degraded flag. Discovery is
+      // a memo-only peek here, so a read never spawns or hangs; when nothing is
+      // resolvable the view degrades to source "static-fallback" (null listing).
+      const discovered: ProviderDiscoveredView = buildProviderDiscoveredView(
+        getProviderDefinition(modelProvider),
+        cliInfo[modelProvider],
+        this.capabilityPeek
+      );
       return {
         uri,
         mimeType: "application/json",
-        text: JSON.stringify(cliInfo[modelProvider], null, 2),
+        text: JSON.stringify({ ...cliInfo[modelProvider], discovered }, null, 2),
       };
     }
 

@@ -18,6 +18,15 @@ import {
 } from "../provider-surface-generator.js";
 import { runWithRequestContext, type GatewayRequestContext } from "../request-context.js";
 import { registerBaseResources, type GatewayServerRuntime } from "../index.js";
+import {
+  discoverProviderCapabilities,
+  type ProbeResult,
+  type ProbeRunner,
+} from "../provider-capability-discovery.js";
+import type {
+  CapabilityResolutionSource,
+  ResolvedProviderCapability,
+} from "../provider-capability-resolver.js";
 
 // Phase-2: model and session resources are generated from the provider
 // definition registry, not hand-spelled per provider. These tests pin the
@@ -98,6 +107,73 @@ describe("phase-2 generated model + session resources", () => {
       expect(modelsRes).not.toBeNull();
       expect(JSON.parse(modelsRes!.text)).toHaveProperty("description");
     }
+  });
+
+  // FIX A (read side): models://<cli> enriches its output with the discovered
+  // live listing when a capability set is resolvable (injected fake peek: no
+  // real spawn). The static entry is preserved (nothing regresses).
+  // Mutation that flips this red: reverting resources.ts to
+  // `JSON.stringify(cliInfo[modelProvider])` (dropping the `discovered` field).
+  it("models://<cli> includes the discovered live listing when a set is injected", async () => {
+    const runner: ProbeRunner = async (exe, argv): Promise<ProbeResult> => {
+      const key = `${exe} ${argv.join(" ")}`.trim();
+      if (key === "codex --version") return { stdout: "codex 0.142.5", stderr: "", code: 0 };
+      if (key === "codex debug models") {
+        return {
+          stdout: JSON.stringify({
+            models: [{ slug: "gpt-5.5", display_name: "GPT-5.5", visibility: "list" }],
+          }),
+          stderr: "",
+          code: 0,
+        };
+      }
+      return { stdout: "", stderr: "", code: 0 };
+    };
+    const set = await discoverProviderCapabilities(getProviderDefinition("codex"), {
+      runner,
+      gatewayVersion: "test-gw-1.0.0",
+      resolveExecutablePath: () => "/abs/bin/codex",
+    });
+    const resolution: ResolvedProviderCapability = { set, source: "live", degraded: false };
+    const enriched = new ResourceProvider(
+      sessions,
+      new PerformanceMetrics(),
+      undefined,
+      null,
+      null,
+      id => (id === "codex" ? resolution : null)
+    );
+    const res = await runWithRequestContext(ctx(), () => enriched.readResource("models://codex"));
+    const parsed = JSON.parse(res!.text) as {
+      description?: string;
+      discovered: { source: CapabilityResolutionSource; listing: { models: { id: string }[] } };
+    };
+    expect(parsed).toHaveProperty("description"); // static base preserved
+    expect(parsed.discovered.source).toBe("live");
+    expect(parsed.discovered.listing.models.some(m => m.id === "gpt-5.5")).toBe(true);
+  });
+
+  // FIX A (degrade): with no resolvable capability set, models://<cli> falls back
+  // to static with source="static-fallback" and a null listing (never throws).
+  // Mutation that flips this red: making buildProviderDiscoveredView return a
+  // non-"static-fallback" source (or throw) when peek returns null.
+  it("models://<cli> degrades to static-fallback when discovery is unavailable", async () => {
+    const degraded = new ResourceProvider(
+      sessions,
+      new PerformanceMetrics(),
+      undefined,
+      null,
+      null,
+      () => null
+    );
+    const res = await runWithRequestContext(ctx(), () => degraded.readResource("models://codex"));
+    const parsed = JSON.parse(res!.text) as {
+      description?: string;
+      discovered: { source: CapabilityResolutionSource; listing: unknown };
+    };
+    expect(parsed).toHaveProperty("description");
+    expect(parsed.discovered.source).toBe("static-fallback");
+    expect(parsed.discovered.listing).toBeNull();
   });
 
   // Acceptance 3: per-provider sessions:// stays owner-scoped.

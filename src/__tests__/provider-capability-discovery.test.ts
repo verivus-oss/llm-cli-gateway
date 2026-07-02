@@ -209,6 +209,35 @@ describe("provider-capability-discovery", () => {
     expect(set.degradedReason).toMatch(/model catalog probe failed/);
   });
 
+  // FIX B: a model-catalog command that exits non-zero (or emits only stderr) is
+  // NOT a catalog. Its stderr (often an auth/account error carrying an email)
+  // must never become modelCatalog.raw; discovery degrades instead.
+  // Mutation that flips this red: dropping the `result.code === 0 && stdout...`
+  // guard in provider-capability-discovery.ts (reverting to
+  // `modelRaw = result.stdout || result.stderr`).
+  it("does not treat a non-zero model-catalog probe (stderr-only) as a catalog", async () => {
+    const def = getProviderDefinition("grok");
+    const runner: ProbeRunner = async (exe, argv): Promise<ProbeResult> => {
+      const key = `${exe} ${argv.join(" ")}`.trim();
+      if (key === "grok --version") return { stdout: "grok 0.2.77", stderr: "", code: 0 };
+      if (key === "grok models") {
+        // Auth failure: nothing on stdout, an account id on stderr, exit 2.
+        return { stdout: "", stderr: "Not logged in: user@example.com", code: 2 };
+      }
+      return { stdout: "", stderr: "", code: 0 };
+    };
+    const set = await discoverProviderCapabilities(def, {
+      runner,
+      gatewayVersion: "test-gw-1.0.0",
+      resolveExecutablePath: () => "/abs/bin/grok",
+    });
+    expect(set.modelCatalog.raw).toBeNull();
+    expect(set.status).toBe("degraded");
+    expect(set.degradedReason).toMatch(/model catalog probe unusable/);
+    // The account id from stderr never reaches the discovered set.
+    expect(JSON.stringify(set)).not.toContain("user@example.com");
+  });
+
   it("returns an error set when the version (identity) probe fails", async () => {
     const def = getProviderDefinition("grok");
     const set = await discoverProviderCapabilities(

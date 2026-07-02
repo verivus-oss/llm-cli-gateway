@@ -481,9 +481,28 @@ export async function discoverProviderCapabilities(
   if (md.strategy === "native-command" && md.argv.length > 0) {
     try {
       const result = await runner(def.primaryExecutable, md.argv);
-      modelRaw = result.stdout || result.stderr;
-      modelChecksum = checksumText(modelRaw);
-      evidence.push(`model-catalog: ${def.primaryExecutable} ${md.argv.join(" ")}`);
+      // SECURITY/correctness: only treat output as a catalog when the command
+      // SUCCEEDED (exit 0) AND emitted non-empty stdout. A non-zero exit or
+      // stdout-empty/stderr-only result is NOT a model catalog: it is typically
+      // an auth/account error whose stderr (an email/account id) would otherwise
+      // be parsed into "models". Record it as degraded evidence; leave modelRaw
+      // null so the parser never sees it.
+      const stdout = result.stdout ?? "";
+      if (result.code === 0 && stdout.trim().length > 0) {
+        modelRaw = stdout;
+        modelChecksum = checksumText(modelRaw);
+        evidence.push(`model-catalog: ${def.primaryExecutable} ${md.argv.join(" ")}`);
+      } else {
+        degraded = true;
+        const why = stdout.trim().length === 0 ? "empty stdout" : "stderr-only output";
+        degradedReason = `model catalog probe unusable (exit ${result.code}, ${why}); not treated as a catalog`;
+        evidence.push(
+          `model-catalog: ${def.primaryExecutable} ${md.argv.join(" ")} (exit ${result.code}; ignored)`
+        );
+        logger.debug(`capability discovery: ${def.id} model catalog probe unusable`, {
+          degradedReason,
+        });
+      }
     } catch (err) {
       degraded = true;
       degradedReason = `model catalog probe failed: ${err instanceof Error ? err.message : String(err)}`;

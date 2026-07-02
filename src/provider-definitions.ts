@@ -85,11 +85,76 @@ export interface ProviderProbe {
   readonly executable?: string;
 }
 
+/**
+ * How the native model-listing stdout (when a command exists) is parsed into a
+ * catalog. A CLOSED union: the model-discovery module dispatches on it with an
+ * exhaustive `assertNever` switch, so adding a provider whose native output needs
+ * a new dialect fails the build until a parser is written.
+ *  - `codex-debug-json`: `codex debug models` JSON (`{models:[{slug,...}]}`).
+ *  - `grok-models-text`: `grok models` text (`Default model: X` + `* id (default)`).
+ *  - `agy-models-text`: `agy models` text (one account model label per line).
+ *  - `config-or-env`: no native listing; models come from config/env (mistral, devin).
+ *  - `curated-catalog`: the CLI owns selection; the gateway keeps a curated
+ *    alias/id catalog as an accurate fallback (claude, cursor).
+ */
+export type ModelCatalogParseFormat =
+  "codex-debug-json" | "grok-models-text" | "agy-models-text" | "config-or-env" | "curated-catalog";
+
+/**
+ * What the gateway relies on when no live catalog command is available.
+ *  - `live-catalog-primary`: the native command is the authoritative live catalog.
+ *  - `config-active-model`: env/config active model is the source of truth (mistral).
+ *  - `cli-owned-surface-only`: the CLI owns selection; surface `--model` controls,
+ *    never a hardcoded account-specific list (devin).
+ *  - `curated-static-catalog`: curated aliases/ids/effort/fallback chains (claude, cursor).
+ */
+export type ModelFallbackPolicy =
+  | "live-catalog-primary"
+  | "config-active-model"
+  | "cli-owned-surface-only"
+  | "curated-static-catalog";
+
+/**
+ * A read-only config/env source of model facts. Documentation + inspection order
+ * only; it names env vars / config fields, never a secret value.
+ */
+export interface ProviderModelConfigSource {
+  readonly kind: "env" | "config-file";
+  /** env var names (kind `env`) or inspected config fields (kind `config-file`). */
+  readonly keys: readonly string[];
+  /** home-relative config path for kind `config-file`; omitted for `env`. */
+  readonly path?: string;
+  readonly note: string;
+}
+
+/**
+ * Structured, evidence-grounded model facts a provider exposes. Every value
+ * traces to installed `--help`/`--version` or a docs URL in `docs.primary`.
+ */
+export interface ProviderModelFacts {
+  /** Effort/reasoning levels the CLI accepts (empty when none are exposed). */
+  readonly effortLevels: readonly string[];
+  /** True when the CLI accepts an automatic fallback-model chain. */
+  readonly supportsFallbackModelChain: boolean;
+  /** Model aliases the CLI documents in help (alias -> latest of a family). */
+  readonly aliases: readonly string[];
+  /** Agent/permission profiles that stand in for model selection (vibe --agent). */
+  readonly agentProfiles: readonly string[];
+}
+
 /** Model-discovery strategy plus its (safe, read-only) command evidence. */
 export interface ProviderModelDiscovery {
   readonly strategy: ModelDiscoveryStrategy;
   /** argv for `native-command`; empty for other strategies. */
   readonly argv: readonly string[];
+  /** Parse dialect for native-command stdout (or the no-native placeholder). */
+  readonly parse: ModelCatalogParseFormat;
+  /** What the gateway falls back to when there is no live catalog. */
+  readonly fallbackPolicy: ModelFallbackPolicy;
+  /** Read-only config/env sources of model facts (names only, never values). */
+  readonly configSources: readonly ProviderModelConfigSource[];
+  /** Structured, evidence-grounded model facts (effort, aliases, profiles). */
+  readonly facts: ProviderModelFacts;
   /** Grounding evidence (docs/help). Contains no secrets. */
   readonly evidence: string;
 }
@@ -269,8 +334,32 @@ const PROVIDER_DEFINITIONS = {
       modelDiscovery: {
         strategy: "static-catalog",
         argv: [],
+        parse: "curated-catalog",
+        fallbackPolicy: "curated-static-catalog",
+        configSources: [
+          {
+            kind: "env",
+            keys: ["CLAUDE_DEFAULT_MODEL", "CLAUDE_MODELS", "CLAUDE_MODEL_ALIASES"],
+            note: "Gateway env overrides for the Claude default model, extra models, and aliases.",
+          },
+          {
+            kind: "config-file",
+            path: ".claude/settings.json",
+            keys: ["model", "model.name"],
+            note: "Claude settings.json / settings.local.json default model.",
+          },
+        ],
+        facts: {
+          // claude --help: `--effort <level>` enumerates (low, medium, high, xhigh, max).
+          effortLevels: ["low", "medium", "high", "xhigh", "max"],
+          // claude --help: `--fallback-model <model>` accepts a comma-separated chain.
+          supportsFallbackModelChain: true,
+          // claude --help: aliases 'fable', 'opus', 'sonnet' (plus full ids like 'claude-fable-5').
+          aliases: ["fable", "opus", "sonnet"],
+          agentProfiles: [],
+        },
         evidence:
-          "Claude Code has no read-only model-listing command; aliases (opus/sonnet/haiku), full ids, effort levels, and --fallback-model chains come from the CLI reference and are curated as an accurate catalog.",
+          "Claude Code has no read-only model-listing command; aliases ('fable'/'opus'/'sonnet') and full ids ('claude-fable-5'), --effort levels (low/medium/high/xhigh/max), and --fallback-model comma-separated chains come from claude --help and the CLI reference, curated as an accurate catalog.",
       },
       sessionContinuity: {
         continue: true,
@@ -351,8 +440,30 @@ const PROVIDER_DEFINITIONS = {
       modelDiscovery: {
         strategy: "native-command",
         argv: ["debug", "models"],
+        parse: "codex-debug-json",
+        fallbackPolicy: "live-catalog-primary",
+        configSources: [
+          {
+            kind: "config-file",
+            path: ".codex/config.toml",
+            keys: ["model", "profiles.*.model", "notice.model_migrations"],
+            note: "Codex config default model, profile model overrides, and migration targets.",
+          },
+          {
+            kind: "env",
+            keys: ["CODEX_DEFAULT_MODEL", "CODEX_MODELS"],
+            note: "Gateway env overrides for the Codex default model and extra models.",
+          },
+        ],
+        facts: {
+          // codex debug models JSON supported_reasoning_levels: low/medium/high/xhigh.
+          effortLevels: ["low", "medium", "high", "xhigh"],
+          supportsFallbackModelChain: false,
+          aliases: [],
+          agentProfiles: [],
+        },
         evidence:
-          "codex debug models lists the live Codex model catalog; OSS/local-provider (ollama, lmstudio) paths and config profile overrides remain visible.",
+          "codex debug models renders the raw model catalog as JSON ({models:[{slug,display_name,visibility,supported_in_api,supported_reasoning_levels}]}); visibility list vs hide distinguishes the live catalog, and the model-registry bundled fallback stays the offline/bundled catalog.",
       },
       sessionContinuity: {
         continue: false,
@@ -457,7 +568,29 @@ const PROVIDER_DEFINITIONS = {
       modelDiscovery: {
         strategy: "native-command",
         argv: ["models"],
-        evidence: "agy models is the account-aware model discovery command (agy --help lists it).",
+        parse: "agy-models-text",
+        fallbackPolicy: "live-catalog-primary",
+        configSources: [
+          {
+            kind: "config-file",
+            path: ".gemini/settings.json",
+            keys: ["model", "model.name", "selectedModel", "defaultModel"],
+            note: "Antigravity settings.json default/selected model.",
+          },
+          {
+            kind: "env",
+            keys: ["GEMINI_DEFAULT_MODEL", "GEMINI_MODELS"],
+            note: "Gateway env overrides for the Gemini default model and extra models.",
+          },
+        ],
+        facts: {
+          effortLevels: [],
+          supportsFallbackModelChain: false,
+          aliases: ["flash", "pro"],
+          agentProfiles: [],
+        },
+        evidence:
+          "agy models is the primary account-aware model discovery command (agy --help lists it); it prints one account model label per line (e.g. 'Gemini 3.5 Flash (Medium)').",
       },
       sessionContinuity: {
         continue: true,
@@ -534,8 +667,30 @@ const PROVIDER_DEFINITIONS = {
       modelDiscovery: {
         strategy: "native-command",
         argv: ["models"],
+        parse: "grok-models-text",
+        fallbackPolicy: "live-catalog-primary",
+        configSources: [
+          {
+            kind: "config-file",
+            path: ".grok/config.toml",
+            keys: ["models.default", "models", "ui.fork_secondary_model"],
+            note: "Grok config.toml configured default ([models].default) and custom model facts.",
+          },
+          {
+            kind: "env",
+            keys: ["GROK_DEFAULT_MODEL", "GROK_MODELS"],
+            note: "Gateway env overrides for the Grok default model and extra models.",
+          },
+        ],
+        facts: {
+          // grok --help: `--effort <LEVEL>` [possible values: low, medium, high, xhigh, max].
+          effortLevels: ["low", "medium", "high", "xhigh", "max"],
+          supportsFallbackModelChain: false,
+          aliases: [],
+          agentProfiles: [],
+        },
         evidence:
-          "grok models lists the CLI-local catalog; ~/.grok/config.toml custom models and the configured default model are additional facts. Native Grok Build API models are catalogued separately.",
+          "grok models lists the CLI-local catalog ('Default model: X' then '* id (default)'/'- id' lines); ~/.grok/config.toml [models].default and custom model facts are additional. Native Grok Build API models are catalogued separately.",
       },
       sessionContinuity: {
         continue: true,
@@ -612,8 +767,31 @@ const PROVIDER_DEFINITIONS = {
       modelDiscovery: {
         strategy: "config-inspection",
         argv: [],
+        parse: "config-or-env",
+        fallbackPolicy: "config-active-model",
+        configSources: [
+          {
+            kind: "env",
+            keys: ["VIBE_ACTIVE_MODEL", "MISTRAL_DEFAULT_MODEL", "VIBE_MODELS"],
+            note: "Vibe active model via env; there is NO --model flag (VIBE_* overrides config).",
+          },
+          {
+            kind: "config-file",
+            path: ".vibe/config.toml",
+            keys: ["active_model", "default_agent", "models"],
+            note: "Vibe config.toml active_model, default_agent, and custom models.",
+          },
+        ],
+        facts: {
+          effortLevels: [],
+          supportsFallbackModelChain: false,
+          aliases: [],
+          // vibe --help: --agent NAME (builtin: default, plan, accept-edits, auto-approve,
+          // or custom from ~/.vibe/agents/NAME.toml).
+          agentProfiles: ["default", "plan", "accept-edits", "auto-approve", "custom"],
+        },
         evidence:
-          "VIBE_ACTIVE_MODEL and config.toml active_model/default_agent are the source of truth for Mistral model ids and agent profiles (default, plan, accept-edits, auto-approve, custom).",
+          "Vibe has NO --model flag; the active model is selected via VIBE_ACTIVE_MODEL and config.toml active_model. default_agent plus --agent profiles (default, plan, accept-edits, auto-approve, or custom from ~/.vibe/agents/NAME.toml) are the vibe --help agent-profile facts.",
       },
       sessionContinuity: {
         continue: true,
@@ -717,8 +895,24 @@ const PROVIDER_DEFINITIONS = {
       modelDiscovery: {
         strategy: "config-inspection",
         argv: [],
+        parse: "config-or-env",
+        fallbackPolicy: "cli-owned-surface-only",
+        configSources: [
+          {
+            kind: "env",
+            keys: ["DEVIN_MODEL"],
+            note: "devin --help: --model <MODEL> reads [env: DEVIN_MODEL]. Account decides availability.",
+          },
+        ],
+        facts: {
+          effortLevels: [],
+          supportsFallbackModelChain: false,
+          // devin --help --model examples ('opus', 'codex'); documented convenience aliases only.
+          aliases: ["opus", "codex"],
+          agentProfiles: [],
+        },
         evidence:
-          "Devin exposes CLI --model and /model facts plus ACP mode/model config options discovered from initialize/session responses; account capabilities decide available models, so none are hardcoded.",
+          "Devin exposes --model <MODEL> (e.g. 'claude-sonnet-4', 'claude-opus-4.6', 'opus', 'codex'; [env: DEVIN_MODEL]); the CLI owns model selection and the account decides available models, so no static account-specific list is hardcoded.",
       },
       sessionContinuity: {
         continue: true,
@@ -801,6 +995,15 @@ const PROVIDER_DEFINITIONS = {
       modelDiscovery: {
         strategy: "static-catalog",
         argv: [],
+        parse: "curated-catalog",
+        fallbackPolicy: "curated-static-catalog",
+        configSources: [],
+        facts: {
+          effortLevels: [],
+          supportsFallbackModelChain: false,
+          aliases: [],
+          agentProfiles: [],
+        },
         evidence:
           "Cursor is maintain-only in this initiative; the CLI owns model selection and the gateway keeps a curated catalog. No new model-discovery capability is added here.",
       },

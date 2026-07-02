@@ -71,8 +71,8 @@ export interface ParsedSubcommand {
  * excerpt, a checksum, and a concrete reason so it is auditable, never hidden.
  */
 export interface DiscoveredUnmapped {
-  /** What kind of surface this was: a flag, a subcommand, or an ACP method. */
-  readonly kind: "flag" | "subcommand" | "acp-method";
+  /** What kind of surface this was: a flag, subcommand, ACP method, or model. */
+  readonly kind: "flag" | "subcommand" | "acp-method" | "model";
   /** Raw help excerpt (a line or fragment) that triggered the record. */
   readonly raw: string;
   /** Checksum of `raw`. */

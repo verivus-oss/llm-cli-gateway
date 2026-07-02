@@ -135,14 +135,19 @@ export function assertProviderProjectionsProducible(
   }
   producible.add("sessionsResource");
 
-  if (def.discovery.modelDiscovery.evidence.trim().length === 0) {
+  const md = def.discovery.modelDiscovery;
+  if (md.evidence.trim().length === 0) {
     fail("modelDiscovery", "modelDiscovery.evidence is required");
   }
-  if (
-    def.discovery.modelDiscovery.strategy === "native-command" &&
-    def.discovery.modelDiscovery.argv.length === 0
-  ) {
-    fail("modelDiscovery", "native-command strategy requires a non-empty argv");
+  if (md.strategy === "native-command") {
+    if (md.argv.length === 0) {
+      fail("modelDiscovery", "native-command strategy requires a non-empty argv");
+    }
+    if (md.parse === "config-or-env" || md.parse === "curated-catalog") {
+      fail("modelDiscovery", "native-command strategy requires a native parse dialect");
+    }
+  } else if (md.argv.length !== 0) {
+    fail("modelDiscovery", "non-native strategy must have an empty argv");
   }
   producible.add("modelDiscovery");
 
