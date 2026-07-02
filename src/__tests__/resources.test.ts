@@ -404,4 +404,72 @@ describe("phase-5 provider-acp capability resources", () => {
     const record = JSON.parse(res!.text) as { initialize: { source: string } | null };
     expect(record.initialize?.source).toBe("static-fallback");
   });
+
+  // Phase-5 acceptance #4: prove the LIVE MCP server (registerBaseResources in
+  // index.ts) - not just ResourceProvider.listResources - registers
+  // provider-acp://<provider> so an MCP client can DISCOVER and READ the
+  // negotiated ACP capability set. Native providers are listed via a static URI
+  // (driven from generateProviderAcpDescriptors, no hand-spelled names); the
+  // provider-acp://{provider} template serves the read path for any provider so a
+  // non-native read still returns its honest native: false record.
+  // Red-flip: deleting the generateProviderAcpDescriptors registration loop drops
+  // the static native URIs (list assertions fail); deleting the template drops
+  // the claude read path (the non-native read assertion fails).
+  it("registerBaseResources registers provider-acp:// for native providers and a read path for any provider", async () => {
+    type ReadHandler = (
+      uri: { href: string },
+      variables?: Record<string, unknown>
+    ) => Promise<{ contents: { text: string }[] }>;
+    const registered: { name: string; uri: unknown; handler: ReadHandler }[] = [];
+    const fakeServer = {
+      registerResource(name: string, uri: unknown, _meta: unknown, handler: unknown): void {
+        registered.push({ name, uri, handler: handler as ReadHandler });
+      },
+    };
+    const noopLogger = { info() {}, debug() {}, warn() {}, error() {} };
+    const runtime = {
+      resourceProvider: provider,
+      logger: noopLogger,
+      persistence: { backend: "none" },
+    } as unknown as GatewayServerRuntime;
+
+    registerBaseResources(fakeServer as never, runtime);
+
+    // Native providers are LISTED via a static provider-acp://<provider> URI.
+    const staticUris = new Set(
+      registered.filter(r => typeof r.uri === "string").map(r => r.uri as string)
+    );
+    for (const p of ["grok", "mistral", "devin", "cursor"]) {
+      expect(staticUris.has(`provider-acp://${p}`)).toBe(true);
+    }
+    // Non-native providers are NOT advertised as having a native ACP entrypoint.
+    for (const p of ["claude", "codex", "gemini"]) {
+      expect(staticUris.has(`provider-acp://${p}`)).toBe(false);
+    }
+    // Registration names are derived from the provider id (not hand-spelled).
+    expect(registered.find(r => r.uri === "provider-acp://grok")?.name).toBe("grok-provider-acp");
+
+    // Native read path: the static grok registration returns the native record.
+    const grokReg = registered.find(r => r.uri === "provider-acp://grok")!;
+    const grokRes = await runWithRequestContext(ctx(), () =>
+      grokReg.handler({ href: "provider-acp://grok" })
+    );
+    const grokRecord = JSON.parse(grokRes.contents[0].text) as { native: boolean };
+    expect(grokRecord.native).toBe(true);
+
+    // Non-native read path: the provider-acp://{provider} template serves claude
+    // and returns the honest native: false record (anti-masquerade preserved).
+    const templateReg = registered.find(
+      r => r.name === "provider-acp" && typeof r.uri !== "string"
+    )!;
+    const claudeRes = await runWithRequestContext(ctx(), () =>
+      templateReg.handler({ href: "provider-acp://claude" }, { provider: "claude" })
+    );
+    const claudeRecord = JSON.parse(claudeRes.contents[0].text) as {
+      native: boolean;
+      nativeEntrypoint: string | null;
+    };
+    expect(claudeRecord.native).toBe(false);
+    expect(claudeRecord.nativeEntrypoint).toBeNull();
+  });
 });

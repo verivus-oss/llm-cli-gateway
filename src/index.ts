@@ -42,7 +42,10 @@ import {
   type WorktreeHandle,
 } from "./worktree-manager.js";
 import { ResourceProvider } from "./resources.js";
-import { generateResourceDescriptors } from "./provider-surface-generator.js";
+import {
+  generateResourceDescriptors,
+  generateProviderAcpDescriptors,
+} from "./provider-surface-generator.js";
 import { PerformanceMetrics } from "./metrics.js";
 import {
   estimateTokens,
@@ -2527,6 +2530,55 @@ export function registerBaseResources(server: McpServer, runtime: GatewayServerR
         ? variables.provider[0]
         : variables.provider;
       runtime.logger.debug(`Reading provider-tools://${provider}`);
+      const contents = await runtime.resourceProvider.readResource(uri.href);
+      return { contents: contents ? [contents] : [] };
+    }
+  );
+
+  // Per-provider provider-acp://<provider> resources (phase-5 acceptance #4).
+  // LISTED for NATIVE-ACP providers only, driven from the provider-definition
+  // registry via generateProviderAcpDescriptors() (no hand-spelled names). Each
+  // read delegates to runtime.resourceProvider.readResource, which returns the
+  // negotiated `initialize` capability set (or the static-fallback record). The
+  // non-native record (native: false) is intentionally NOT listed here but is
+  // still readable through the provider-acp://{provider} template below, so a
+  // read of e.g. provider-acp://claude still returns the honest no-native record.
+  for (const descriptor of generateProviderAcpDescriptors()) {
+    server.registerResource(
+      `${descriptor.provider}-provider-acp`,
+      descriptor.acpUri,
+      {
+        title: `${descriptor.icon} ${descriptor.displayName} ACP Capabilities`,
+        description: `Native ACP entrypoint, negotiated capabilities, supported session methods, and host-service policy for ${descriptor.displayName}`,
+        mimeType: "application/json",
+      },
+      async uri => {
+        runtime.logger.debug(`Reading ${descriptor.acpUri} resource`);
+        const contents = await runtime.resourceProvider.readResource(uri.href);
+        return { contents: contents ? [contents] : [] };
+      }
+    );
+  }
+
+  // Read path for ANY provider-acp://<provider> (native OR non-native). The
+  // template is not listed (list: undefined) so it adds no native-entrypoint
+  // masquerade; it exists so a read of a non-native provider (claude/codex/
+  // gemini) still resolves to its honest native: false record. Native providers
+  // match their static registration above; the template serves the rest.
+  server.registerResource(
+    "provider-acp",
+    new ResourceTemplate("provider-acp://{provider}", { list: undefined }),
+    {
+      title: "Provider ACP Capabilities",
+      description:
+        "Read-only negotiated ACP capability record for one provider CLI (native: false for providers with no native ACP entrypoint)",
+      mimeType: "application/json",
+    },
+    async (uri, variables) => {
+      const provider = Array.isArray(variables.provider)
+        ? variables.provider[0]
+        : variables.provider;
+      runtime.logger.debug(`Reading provider-acp://${provider}`);
       const contents = await runtime.resourceProvider.readResource(uri.href);
       return { contents: contents ? [contents] : [] };
     }

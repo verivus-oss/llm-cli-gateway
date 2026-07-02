@@ -249,6 +249,26 @@ Opt-in flags (all default off) live under `[cache_awareness]` in `~/.llm-cli-gat
 - **Type Safety**: Strict TypeScript with comprehensive error handling
 - **Supply-chain hardening**: a dedicated `.github/workflows/security.yml` runs actionlint, zizmor, shellcheck, typos, osv-scanner, gitleaks, and lychee on every push and PR (see `SECURITY.md` for the threat model)
 
+## Provider capability surface
+
+Every provider is reachable through the same request, session, job, and validation machinery, but the underlying CLIs differ in what they natively expose. The table records what actually shipped per provider; discover the live surface at runtime with `provider_tool_capabilities`, `list_models`, and the `provider-acp://<provider>` / `provider-tools://<provider>` resources.
+
+| Provider | CLI request tools | Native ACP | Live model discovery | Admin surface |
+| --- | --- | --- | --- | --- |
+| Claude Code (`claude`) | `claude_request` / `_async` | None (CLI-first; no ACP entrypoint at claude 2.1.198) | model aliases, reasoning-effort levels, fallback model | read-only via `provider_admin_list` / `provider_admin_run` |
+| OpenAI Codex (`codex`) | `codex_request` / `_async`, `codex_fork_session` | None (codex-cli 0.142.4 advertises mcp-server / app-server transports, not native ACP) | `codex debug models` | read-only via `provider_admin_list` / `provider_admin_run` |
+| Gemini / Antigravity (`gemini`, `agy`) | `gemini_request` / `_async` | None (agy 1.0.14 exposes no ACP entrypoint; legacy Gemini CLI ACP evidence does not transfer) | `agy models` | read-only via `provider_admin_list` / `provider_admin_run` |
+| xAI Grok (`grok`) | `grok_request` (sync `transport: "acp"`) / `_async` | Native via `grok agent stdio` | `grok models` + `~/.grok/config.toml` | read-only via `provider_admin_list` / `provider_admin_run` |
+| Mistral Vibe (`mistral`) | `mistral_request` (sync `transport: "acp"`) / `_async` | Native via `vibe-acp` | Vibe config plus the `VIBE_ACTIVE_MODEL` active model and agent profiles | read-only via `provider_admin_list` / `provider_admin_run` |
+| Cognition Devin (`devin`) | `devin_request` (sync `transport: "acp"`, `agentType: summarizer\|review`) / `_async` | Native via `devin acp` | `--model` / `DEVIN_MODEL` | read-only via `provider_admin_list` / `provider_admin_run` |
+| Cursor Agent (`cursor`) | `cursor_request` (sync `transport: "acp"`) / `_async` | Native via `cursor-agent acp` (companion-owned) | model aliases | read-only via `provider_admin_list` / `provider_admin_run` |
+
+- **Native ACP** is reported honestly. `grok`, `mistral`, `devin`, and `cursor` expose a native ACP entrypoint, so `provider-acp://<provider>` carries the negotiated `initialize` capability set and the derived session-method availability, and the sync `*_request` accepts `transport: "acp"` (fails closed unless `[acp]` and the provider's `runtime_enabled` gate are set). ACP routing is sync-only: the `*_request_async` variants always run the CLI transport and do not accept `transport: "acp"` (nor Devin's `agentType`); async ACP parity is a later phase. `claude`, `codex`, and `gemini` have no native ACP entrypoint at their target CLI versions; their `provider-acp://` records report `native: false` with no methods and no adapter-as-native masquerade, and they expose no `transport: "acp"` selector.
+- **Resources** are generated from the provider registry for every CLI provider: `models://<provider>`, `sessions://<provider>`, `provider-acp://<provider>`, `provider-tools://<provider>`, and `provider-subcommands://<provider>`.
+- **Model discovery** is live and account-aware: the discovery listed above reaches `models://<provider>` and `list_models`, degrading to static registry facts when a live probe is unavailable (a resource read never spawns a CLI).
+- **Admin surfaces** are discovery-driven and output-redacted. `provider_admin_list` and `provider_admin_run` are read-only for every provider. State-mutating admin operations are exposed only through `provider_admin_mutate`, gated behind `[admin] allow_mutating_cli_admin_ops`, the remote `cli:admin` scope, an approval gate, and an audit record. Mutating ACP session operations are likewise gated behind `[acp] allow_mutating_session_ops`.
+- **Validation** commands work across every provider: `validate_with_models`, `second_opinion`, `compare_answers`, `red_team_review`, `consensus_check`, `ask_model`, and `synthesize_validation`, with durable signed receipts via `validation_receipt` and the `validation-receipt://{validationId}` resource.
+
 ## Prerequisites
 
 **Node.js >= 24.4.0** is required (`engines.node` in `package.json`). The gateway uses Node's built-in `node:sqlite` module for persistence — there is no native binding to compile and no install scripts run. The 24.4 floor is where `allowBareNamedParameters` defaults to `true`, which the persistence layer relies on.
@@ -574,6 +594,7 @@ Execute a Grok CLI (xAI) request with session support.
 
 - `prompt` (string, optional*): The prompt to send (1-100,000 chars). *Exactly one of `prompt` or `promptParts` is required (mutually exclusive)
 - `model` (string, optional): Model name or alias (e.g. `grok-build`, `latest`)
+- `transport` (string, optional): `"cli"` (default) runs the Grok CLI; `"acp"` routes through Grok's native `grok agent stdio` transport when `[acp].enabled` and the provider's `runtime_enabled` are set (fails closed otherwise). Sync-only: `grok_request_async` always runs the CLI transport and does not accept `transport`
 - `outputFormat` (string, optional): `"plain"` (default), `"json"`, or `"streaming-json"`
 - `sessionId` (string, optional): Session ID to resume (`--resume <id>`)
 - `resumeLatest` (boolean, optional): Resume the most recent session in the current cwd (`--continue`)
@@ -922,6 +943,7 @@ consumes       = ["OUT:mcp-reconnected"]
 Run a Mistral Vibe agentic coding request. Like `grok_request` in shape, but with Vibe's specific surface:
 
 - `model` (string, optional): Vibe model alias (for example `mistral-medium-3.5` or `latest`). The resolved value is injected via the `VIBE_ACTIVE_MODEL` environment variable; omit it to let the gateway discover Vibe config and avoid stale hardcoded defaults.
+- `transport` (string, optional): `"cli"` (default) runs the Vibe CLI; `"acp"` routes through Vibe's native `vibe-acp` transport when `[acp].enabled` and the provider's `runtime_enabled` are set (fails closed otherwise). Sync-only: `mistral_request_async` always runs the CLI transport and does not accept `transport`
 - `permissionMode`: the Vibe `--agent` name — builtins `default | plan | accept-edits | auto-approve`, or any install-gated/custom agent. Emitted as `--agent <name>`. Defaults to `auto-approve` in programmatic mode.
 - `allowedTools` (string[], optional): One `--enabled-tools <tool>` flag per entry (allow-list only).
 - `disallowedTools` (string[], optional): Accepted for parity with the other providers; ignored at the CLI boundary with a logged warning.
@@ -951,7 +973,8 @@ Run a Cognition Devin CLI request synchronously (headless print mode, `devin -p`
 
 - `prompt` (string, optional*): Prompt text for Devin CLI (1-100,000 chars). Required in practice; `promptFile` is additive
 - `model` (string, optional): Model name or alias (e.g. `opus`, `latest`)
-- `transport` (string, optional): `"cli"` (default) runs the Devin CLI; `"acp"` routes through `devin acp` when `[acp].enabled` and the provider's `runtime_enabled` are set (fails closed otherwise)
+- `transport` (string, optional): `"cli"` (default) runs the Devin CLI; `"acp"` routes through Devin's native `devin acp` transport when `[acp].enabled` and the provider's `runtime_enabled` are set (fails closed otherwise). Sync-only: `devin_request_async` always runs the CLI transport and accepts neither `transport` nor `agentType`
+- `agentType` (string, optional): ACP agent variant for `transport: "acp"` (`devin acp --agent-type`): `"summarizer"` (no tools, text summary) or `"review"` (read-only plus shell code-review); ignored for the CLI transport
 - `permissionMode` (string, optional): Devin CLI permission mode (`--permission-mode`): `auto` (auto-approves read-only tools), `smart` (also auto-runs actions a fast model judges safe), `dangerous` (auto-approves all). Omit to use Devin's headless default
 - `promptFile` (string, optional): Load the initial prompt from a file (`--prompt-file`)
 - `sessionId` (string, optional): Devin session ID to resume (`--resume <id>`). The `gw-*` id minted for a brand-new session is not resumable via `sessionId`; continue with `resumeLatest: true`
@@ -972,7 +995,7 @@ Run a Cursor Agent CLI request synchronously. Defaults to headless print mode (`
 - `model` (string, optional): Model name or alias (for example `gpt-5`, `sonnet-4-thinking`, or `latest`)
 - `mode` (string, optional): Cursor mode, `"plan"` or `"ask"` (`--mode`)
 - `outputFormat` (string, optional): `"text"` (default), `"json"`, or `"stream-json"`
-- `transport` (string, optional): `"cli"` (default) or `"acp"`; ACP fails closed unless enabled in gateway config and rejects unsupported Cursor CLI-only controls instead of dropping them
+- `transport` (string, optional): `"cli"` (default) or `"acp"`; ACP fails closed unless enabled in gateway config and rejects unsupported Cursor CLI-only controls instead of dropping them. Sync-only: `cursor_request_async` always runs the CLI transport and does not accept `transport`
 - `force` (boolean, optional): Emit `--force` for non-interactive operation
 - `autoReview` (boolean, optional): Emit `--auto-review`
 - `sandbox` (string, optional): `"enabled"` or `"disabled"` (`--sandbox`)
