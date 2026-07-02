@@ -5,12 +5,52 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ResourceProvider } from "../resources.js";
 import {
   clearProviderToolCapabilitiesCache,
+  getOneProviderToolCapabilities,
   getProviderToolCapabilities,
   providerCapabilityIds,
   type ProviderCapabilityId,
 } from "../provider-tool-capabilities.js";
+import type { AcpConfig } from "../config.js";
 import { SessionManager } from "../session-manager.js";
 import { PerformanceMetrics } from "../metrics.js";
+
+/**
+ * Build a minimal resolved AcpConfig for capability tests. `enabled` is the
+ * global `[acp].enabled` gate; `providers` supplies per-provider enabled /
+ * runtimeEnabled gates. Timeout/host-service fields are irrelevant to
+ * runtimeEnabled derivation and use inert defaults.
+ */
+function makeAcpConfig(
+  enabled: boolean,
+  providers: Record<string, { enabled: boolean; runtimeEnabled: boolean }>
+): AcpConfig {
+  return {
+    enabled,
+    defaultTransport: "cli",
+    smokeOnStartup: false,
+    processIdleTimeoutMs: 1000,
+    initializeTimeoutMs: 1000,
+    sessionNewTimeoutMs: 1000,
+    promptTimeoutMs: 1000,
+    allowWriteHostServices: false,
+    allowTerminalHostServices: false,
+    allowMutatingSessionOps: false,
+    fallbackToCliWhenUnhealthy: true,
+    providers: Object.fromEntries(
+      Object.entries(providers).map(([name, gates]) => [
+        name,
+        {
+          enabled: gates.enabled,
+          command: name,
+          args: [],
+          runtimeEnabled: gates.runtimeEnabled,
+          isolatedLeaderSocket: false,
+        },
+      ])
+    ),
+    sources: { configFile: null },
+  };
+}
 
 describe("provider tool capabilities", () => {
   let tempDir: string;
@@ -559,7 +599,7 @@ describe("provider tool capabilities", () => {
       expect(cursor?.smokeStatus).toBe("passed");
     });
 
-    it("never labels an adapter-mediated provider as native and keeps runtime routing off", () => {
+    it("never labels an adapter-mediated provider as native and defaults runtime routing off", () => {
       const capabilities = getProviderToolCapabilities();
       for (const providerId of providerCapabilityIds()) {
         const acp = capabilities[providerId]?.acp;
@@ -567,9 +607,54 @@ describe("provider tool capabilities", () => {
           expect(acp.status).not.toBe("native_smoke_passed");
           expect(acp.status).not.toBe("native_candidate");
         }
-        // Phase-0 capability metadata: no provider is runtime-enabled yet.
+        // No acpConfig threaded in -> runtimeEnabled resolves to the safe default (off).
         expect(acp?.runtimeEnabled).toBe(false);
       }
+    });
+
+    it("labels runtimeEnabled as the default (off) for native providers when no ACP config is resolved", () => {
+      const grok = getProviderToolCapabilities("grok").grok?.acp;
+      expect(grok?.runtimeEnabled).toBe(false);
+      expect(grok?.caveats.some(c => c.includes("safe default (off)"))).toBe(true);
+    });
+
+    it("derives runtimeEnabled from the resolved ACP config for a native provider", () => {
+      // All three gates on -> runtime routing is live for grok.
+      const enabledConfig = makeAcpConfig(true, {
+        grok: { enabled: true, runtimeEnabled: true },
+      });
+      const enabled = getOneProviderToolCapabilities("grok", { acpConfig: enabledConfig }).acp;
+      expect(enabled.runtimeEnabled).toBe(true);
+      // A config was resolved, so the "safe default" caveat is NOT appended.
+      expect(enabled.caveats.some(c => c.includes("safe default (off)"))).toBe(false);
+
+      // Any gate off -> runtime routing stays off.
+      clearProviderToolCapabilitiesCache();
+      const providerRuntimeOff = getOneProviderToolCapabilities("grok", {
+        acpConfig: makeAcpConfig(true, { grok: { enabled: true, runtimeEnabled: false } }),
+      }).acp;
+      expect(providerRuntimeOff.runtimeEnabled).toBe(false);
+
+      clearProviderToolCapabilitiesCache();
+      const providerDisabled = getOneProviderToolCapabilities("grok", {
+        acpConfig: makeAcpConfig(true, { grok: { enabled: false, runtimeEnabled: true } }),
+      }).acp;
+      expect(providerDisabled.runtimeEnabled).toBe(false);
+
+      clearProviderToolCapabilitiesCache();
+      const globalDisabled = getOneProviderToolCapabilities("grok", {
+        acpConfig: makeAcpConfig(false, { grok: { enabled: true, runtimeEnabled: true } }),
+      }).acp;
+      expect(globalDisabled.runtimeEnabled).toBe(false);
+    });
+
+    it("never marks an adapter-mediated provider runtime-enabled even with a config block", () => {
+      // claude has no native ACP entrypoint; a stray config block must not enable it.
+      const claude = getOneProviderToolCapabilities("claude", {
+        acpConfig: makeAcpConfig(true, { claude: { enabled: true, runtimeEnabled: true } }),
+      }).acp;
+      expect(claude.mediation).toBe("adapter_mediated");
+      expect(claude.runtimeEnabled).toBe(false);
     });
 
     it("stores ACP entrypoints as executable plus argv array, never a shell string", () => {

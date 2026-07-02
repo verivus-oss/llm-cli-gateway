@@ -461,7 +461,10 @@ export class ResourceProvider {
         uri,
         mimeType: "application/json",
         text: JSON.stringify(
-          getProviderToolCapabilities({ providersConfig: this.providers ?? undefined }),
+          getProviderToolCapabilities({
+            providersConfig: this.providers ?? undefined,
+            acpConfig: this.acpConfig ?? undefined,
+          }),
           null,
           2
         ),
@@ -476,6 +479,7 @@ export class ResourceProvider {
         text: JSON.stringify(
           getOneProviderToolCapabilities(providerToolsResource.provider, {
             providersConfig: this.providers ?? undefined,
+            acpConfig: this.acpConfig ?? undefined,
           }),
           null,
           2

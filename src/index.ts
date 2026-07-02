@@ -12629,6 +12629,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         includePaths,
         refresh,
         providersConfig: providers,
+        acpConfig: runtime.acpConfig,
       });
       return { content: [{ type: "text", text: JSON.stringify(capabilities, null, 2) }] };
     }
