@@ -9112,12 +9112,19 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             runtime
           );
           // Codex reports failures (turn.failed / error events) on the JSONL
-          // stdout stream; on a non-zero exit stderr is often empty. Fall back
-          // to the reconstructed display text (never raw JSONL) so the caller
-          // sees the real reason instead of a bare exit code. Add a resume hint
+          // stdout stream; on a non-zero exit stderr is often empty. Prefer the
+          // parsed failure reason (the turn.failed/error text) over the
+          // reconstructed agent message, so the caller sees the real reason and
+          // not a partial reply Codex printed before failing; fall back to the
+          // display text (never raw JSONL) then the exit code. Add a resume hint
           // when a by-id resume/fork looks like it missed its session.
+          const parsedCodexError = parseCodexJsonStream(stdout).error;
           const codexErrorDetail =
-            stderr && stderr.trim().length > 0 ? stderr : codexDisplayText(stdout);
+            stderr && stderr.trim().length > 0
+              ? stderr
+              : parsedCodexError && parsedCodexError.trim().length > 0
+                ? parsedCodexError
+                : codexDisplayText(stdout);
           const codexResumeHint =
             sessionId &&
             /not found|no such|unknown session|does not exist|invalid session/i.test(
@@ -9392,12 +9399,19 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         durationMs = Math.max(0, Date.now() - startTime);
         if (code !== 0) {
           // Codex reports failures (turn.failed / error events) on the JSONL
-          // stdout stream; on a non-zero exit stderr is often empty. Fall back
-          // to the reconstructed display text (never raw JSONL) so the caller
-          // sees the real reason instead of a bare exit code. Add a resume hint
+          // stdout stream; on a non-zero exit stderr is often empty. Prefer the
+          // parsed failure reason (the turn.failed/error text) over the
+          // reconstructed agent message, so the caller sees the real reason and
+          // not a partial reply Codex printed before failing; fall back to the
+          // display text (never raw JSONL) then the exit code. Add a resume hint
           // when a by-id resume/fork looks like it missed its session.
+          const parsedCodexError = parseCodexJsonStream(stdout).error;
           const codexErrorDetail =
-            stderr && stderr.trim().length > 0 ? stderr : codexDisplayText(stdout);
+            stderr && stderr.trim().length > 0
+              ? stderr
+              : parsedCodexError && parsedCodexError.trim().length > 0
+                ? parsedCodexError
+                : codexDisplayText(stdout);
           const codexResumeHint =
             sessionId &&
             /not found|no such|unknown session|does not exist|invalid session/i.test(
