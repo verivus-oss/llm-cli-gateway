@@ -53,32 +53,80 @@ jobs:
       - name: Verify site version matches package.json
         run: node scripts/sync-site-version.mjs --check
 
-      - name: Log in to Azure with GitHub OIDC
-        uses: Azure/login@93381592711f247e165c389ebb30b596c84cdc48 # v3.0.0
-        with:
-          client-id: ${{ vars.AZURE_CLIENT_ID }}
-          tenant-id: ${{ vars.AZURE_TENANT_ID }}
-          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
-
       - name: Fetch Cloudflare Pages token from Azure Key Vault
-        uses: Azure/cli@9fe27e8f2d4177d9755d43d94f89e79f065ef883 # v3.0.0
         env:
-          AZURE_CORE_OUTPUT: none
+          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
           AZURE_KEY_VAULT_NAME: ${{ vars.AZURE_KEY_VAULT_NAME }}
           AZURE_KEY_VAULT_CLOUDFLARE_TOKEN_SECRET_NAME: ${{ vars.AZURE_KEY_VAULT_CLOUDFLARE_TOKEN_SECRET_NAME }}
-        with:
-          inlineScript: |
-            set -euo pipefail
-            token="$(az keyvault secret show \
-              --vault-name "${AZURE_KEY_VAULT_NAME}" \
-              --name "${AZURE_KEY_VAULT_CLOUDFLARE_TOKEN_SECRET_NAME}" \
-              --query value -o tsv)"
-            if [ -z "${token}" ]; then
-              echo "ERROR: Azure Key Vault returned an empty Cloudflare Pages token" >&2
-              exit 1
-            fi
-            printf 'CLOUDFLARE_API_TOKEN=%s\n' "${token}" >> "${GITHUB_ENV}"
-            unset token
+        run: |
+          node --input-type=module <<'NODE'
+          import fs from "node:fs";
+
+          const required = [
+            "ACTIONS_ID_TOKEN_REQUEST_TOKEN",
+            "ACTIONS_ID_TOKEN_REQUEST_URL",
+            "AZURE_CLIENT_ID",
+            "AZURE_TENANT_ID",
+            "AZURE_KEY_VAULT_NAME",
+            "AZURE_KEY_VAULT_CLOUDFLARE_TOKEN_SECRET_NAME",
+            "GITHUB_ENV",
+          ];
+          for (const name of required) {
+            if (!process.env[name]) {
+              throw new Error(`Missing required environment variable: ${name}`);
+            }
+          }
+
+          const oidcUrl = new URL(process.env.ACTIONS_ID_TOKEN_REQUEST_URL);
+          oidcUrl.searchParams.set("audience", "api://AzureADTokenExchange");
+          const oidcResponse = await fetch(oidcUrl, {
+            headers: { Authorization: `Bearer ${process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN}` },
+          });
+          if (!oidcResponse.ok) {
+            throw new Error(`GitHub OIDC token request failed: HTTP ${oidcResponse.status}`);
+          }
+          const { value: clientAssertion } = await oidcResponse.json();
+
+          const tokenBody = new URLSearchParams({
+            client_id: process.env.AZURE_CLIENT_ID,
+            scope: "https://vault.azure.net/.default",
+            grant_type: "client_credentials",
+            client_assertion_type: "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
+            client_assertion: clientAssertion,
+          });
+          const aadResponse = await fetch(
+            `https://login.microsoftonline.com/${process.env.AZURE_TENANT_ID}/oauth2/v2.0/token`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/x-www-form-urlencoded" },
+              body: tokenBody,
+            },
+          );
+          if (!aadResponse.ok) {
+            const detail = await aadResponse.text();
+            throw new Error(`Azure token exchange failed: HTTP ${aadResponse.status}: ${detail}`);
+          }
+          const { access_token: vaultToken } = await aadResponse.json();
+
+          const secretUrl = new URL(
+            `https://${process.env.AZURE_KEY_VAULT_NAME}.vault.azure.net/secrets/${process.env.AZURE_KEY_VAULT_CLOUDFLARE_TOKEN_SECRET_NAME}`,
+          );
+          secretUrl.searchParams.set("api-version", "7.4");
+          const secretResponse = await fetch(secretUrl, {
+            headers: { Authorization: `Bearer ${vaultToken}` },
+          });
+          if (!secretResponse.ok) {
+            throw new Error(`Key Vault secret fetch failed: HTTP ${secretResponse.status}`);
+          }
+          const { value: token } = await secretResponse.json();
+          if (!token) {
+            throw new Error("Azure Key Vault returned an empty Cloudflare Pages token");
+          }
+
+          console.log(`::add-mask::${token}`);
+          fs.appendFileSync(process.env.GITHUB_ENV, `CLOUDFLARE_API_TOKEN=${token}\n`);
+          NODE
 
       - name: Deploy site/ to Cloudflare Pages (production)
         env:
