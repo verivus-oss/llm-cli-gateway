@@ -1,0 +1,107 @@
+name: LLM provider token smoke
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    if: github.repository == 'verivus-oss/llm-cli-gateway'
+    environment: llm-api-providers-llm-cli-gateway
+    permissions:
+      contents: read
+      id-token: write
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 24
+
+      - name: Fetch provider tokens from Azure Key Vault
+        env:
+          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          AZURE_KEY_VAULT_NAME: ${{ vars.AZURE_KEY_VAULT_NAME }}
+        run: |
+          node .github/scripts/fetch-azure-keyvault-secrets.mjs \
+            OPENAI_API_KEY=forge-openai-api-key \
+            ANTHROPIC_API_KEY=forge-anthropic-api-key \
+            GOOGLE_API_KEY=forge-google-api-key \
+            GEMINI_API_KEY=forge-google-api-key \
+            MISTRAL_API_KEY=forge-mistral-api-key \
+            XAI_API_KEY=forge-xai-api-key \
+            EXA_API_KEY=forge-exa-api-key \
+            REF_API_KEY=forge-reftools-api-key \
+            NVIDIA_API_KEY=NVIDIA-build-api \
+            MERCURY_API_KEY=forge-mercury-api-key
+
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - run: npm run build
+
+      - name: Verify provider keys are wired without vendor calls
+        env:
+          LLM_GATEWAY_CONFIG: ${{ runner.temp }}/llm-provider-smoke.toml
+        run: |
+          cat > "${LLM_GATEWAY_CONFIG}" <<'TOML'
+          [providers.openai]
+          kind = "openai-compatible"
+          base_url = "https://api.openai.com/v1"
+          api_key_env = "OPENAI_API_KEY"
+          default_model = "gpt-4o-mini"
+
+          [providers.anthropic]
+          kind = "anthropic"
+          base_url = "https://api.anthropic.com/v1"
+          api_key_env = "ANTHROPIC_API_KEY"
+          default_model = "claude-haiku-4-5-20251001"
+
+          [providers.xai]
+          base_url = "https://api.x.ai/v1"
+          api_key_env = "XAI_API_KEY"
+          default_model = "grok-3"
+
+          [providers.mistralapi]
+          kind = "openai-compatible"
+          base_url = "https://api.mistral.ai/v1"
+          api_key_env = "MISTRAL_API_KEY"
+          default_model = "mistral-small-latest"
+          TOML
+
+          node dist/index.js doctor --json > "${RUNNER_TEMP}/doctor.json"
+          node --input-type=module <<'NODE'
+          import fs from "node:fs";
+
+          const report = JSON.parse(fs.readFileSync(`${process.env.RUNNER_TEMP}/doctor.json`, "utf8"));
+          const providers = report.api_providers?.providers ?? {};
+          const expectedProviders = ["openai", "anthropic", "xai", "mistralapi"];
+          for (const name of expectedProviders) {
+            if (providers[name]?.api_key_present !== true) {
+              throw new Error(`Provider ${name} did not report api_key_present=true`);
+            }
+          }
+
+          const expectedEnv = [
+            "OPENAI_API_KEY",
+            "ANTHROPIC_API_KEY",
+            "GOOGLE_API_KEY",
+            "GEMINI_API_KEY",
+            "MISTRAL_API_KEY",
+            "XAI_API_KEY",
+            "EXA_API_KEY",
+            "REF_API_KEY",
+            "NVIDIA_API_KEY",
+            "MERCURY_API_KEY",
+          ];
+          for (const name of expectedEnv) {
+            if (!process.env[name]) {
+              throw new Error(`Missing expected exported provider env var: ${name}`);
+            }
+          }
+          console.log(`Verified ${expectedProviders.length} gateway API providers and ${expectedEnv.length} provider token env vars without calling vendor APIs.`);
+          NODE

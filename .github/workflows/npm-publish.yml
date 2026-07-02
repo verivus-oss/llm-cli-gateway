@@ -22,14 +22,14 @@ jobs:
       contents: read
       id-token: write
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           # Drop the auth token from .git/config after checkout (zizmor
           # artipacked). `npm publish` uses NODE_AUTH_TOKEN, not git
           # credentials, so this is safe.
           persist-credentials: false
 
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6 # zizmor: ignore[cache-poisoning]
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6 # zizmor: ignore[cache-poisoning]
         # Why the ignore: zizmor's cache-poisoning audit flags setup-node
         # on any `release: published` trigger regardless of whether cache
         # is enabled. We do NOT set `cache:` here — no cache is read or
@@ -40,32 +40,13 @@ jobs:
           node-version: 24
           registry-url: "https://registry.npmjs.org"
 
-      - name: Log in to Azure with GitHub OIDC
-        uses: Azure/login@93381592711f247e165c389ebb30b596c84cdc48 # v3.0.0
-        with:
-          client-id: ${{ vars.AZURE_CLIENT_ID }}
-          tenant-id: ${{ vars.AZURE_TENANT_ID }}
-          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
-
       - name: Fetch npm publish token from Azure Key Vault
-        uses: Azure/cli@9fe27e8f2d4177d9755d43d94f89e79f065ef883 # v3.0.0
         env:
-          AZURE_CORE_OUTPUT: none
+          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
           AZURE_KEY_VAULT_NAME: ${{ vars.AZURE_KEY_VAULT_NAME }}
           AZURE_KEY_VAULT_NPM_TOKEN_SECRET_NAME: ${{ vars.AZURE_KEY_VAULT_NPM_TOKEN_SECRET_NAME }}
-        with:
-          inlineScript: |
-            set -euo pipefail
-            token="$(az keyvault secret show \
-              --vault-name "${AZURE_KEY_VAULT_NAME}" \
-              --name "${AZURE_KEY_VAULT_NPM_TOKEN_SECRET_NAME}" \
-              --query value -o tsv)"
-            if [ -z "${token}" ]; then
-              echo "ERROR: Azure Key Vault returned an empty npm publish token" >&2
-              exit 1
-            fi
-            printf 'NODE_AUTH_TOKEN=%s\n' "${token}" >> "${GITHUB_ENV}"
-            unset token
+        run: node .github/scripts/fetch-azure-keyvault-secrets.mjs NODE_AUTH_TOKEN="${AZURE_KEY_VAULT_NPM_TOKEN_SECRET_NAME}"
 
       - run: npm ci --ignore-scripts --no-audit --no-fund
       - run: npm run build
