@@ -68,3 +68,9 @@ jobs:
         # --branch=main maps to the production domain (llm-cli-gateway.dev); the
         # git branch would otherwise be published as a preview alias.
         run: npx -y wrangler@4.100.0 pages deploy site --project-name=llm-cli-gateway --branch=main --commit-dirty=true
+
+      - name: Submit deployed URLs to Bing IndexNow
+        # Search indexing should be observable, but a transient search-provider
+        # outage must not block the production site deploy.
+        continue-on-error: true
+        run: node scripts/submit-indexnow.mjs

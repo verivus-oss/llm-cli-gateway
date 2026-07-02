@@ -20,6 +20,8 @@
   "retrieval": {
     "llmsTxt": "https://llm-cli-gateway.dev/llms.txt",
     "install": "https://llm-cli-gateway.dev/install.md",
-    "sitemap": "https://llm-cli-gateway.dev/sitemap.md"
+    "sitemap": "https://llm-cli-gateway.dev/sitemap.md",
+    "sitemapXml": "https://llm-cli-gateway.dev/sitemap.xml",
+    "robots": "https://llm-cli-gateway.dev/robots.txt"
   }
 }

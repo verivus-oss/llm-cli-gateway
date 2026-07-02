@@ -34,6 +34,20 @@ and deploys the production branch as `main`.
 The deploy runs on the trusted self-hosted runner because the Cloudflare token is
 restricted to an allowlisted egress IP.
 
+## Search Indexing
+
+The public site publishes `robots.txt` and `sitemap.xml` so Google, Bing, and
+other crawlers can discover the current canonical URLs.
+
+Google sitemap submission is managed through Google Search Console. Google no
+longer supports unauthenticated sitemap ping submissions, so direct automation
+requires a verified Search Console property and an OAuth or service-account path
+outside the repository.
+
+Bing submission is automated with IndexNow. The site hosts the public IndexNow
+key file at `/3a9d0d7145a50e273758cb63918b496f.txt`, and the Pages deploy
+workflow submits the URLs from `site/sitemap.xml` after each production deploy.
+
 ## LLM Provider Token Smoke
 
 The LLM provider token smoke workflow is manual only. It fetches provider token

@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://llm-cli-gateway.dev/sitemap.xml
