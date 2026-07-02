@@ -38,6 +38,39 @@ import { discoverProviderModels, type DiscoveredModelListing } from "./provider-
 import type { CliInfo } from "./model-registry.js";
 import { noopLogger, type Logger } from "./logger.js";
 
+/**
+ * Max age of an on-disk capability cache entry that the resolver will SEED from
+ * without re-discovering. The seed path (unlike a fresh discovery) does not
+ * recompute the composite cache key, so without this bound a provider CLI that
+ * was upgraded or moved after the cache was written would be served from the
+ * stale entry indefinitely, even across restarts. Once an entry ages past the
+ * TTL the resolver falls through to a fresh discovery, which recomputes the key
+ * and rewrites the cache (auto-invalidating on any drift). Overridable via
+ * LLM_GATEWAY_CAPABILITY_CACHE_TTL_MS; a value <= 0 disables seeding entirely,
+ * forcing a fresh discovery on every process start.
+ */
+const DEFAULT_CAPABILITY_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
+
+function capabilityCacheTtlMs(): number {
+  const raw = process.env.LLM_GATEWAY_CAPABILITY_CACHE_TTL_MS;
+  if (raw === undefined) return DEFAULT_CAPABILITY_CACHE_TTL_MS;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) ? parsed : DEFAULT_CAPABILITY_CACHE_TTL_MS;
+}
+
+/**
+ * True when a cached entry is recent enough to seed from without re-discovery.
+ * An unparseable `cachedAt` is treated as stale so a corrupt timestamp forces a
+ * fresh discovery rather than serving an unbounded-age entry.
+ */
+function isCacheSeedFresh(cachedAt: string): boolean {
+  const ttl = capabilityCacheTtlMs();
+  if (ttl <= 0) return false;
+  const cachedAtMs = Date.parse(cachedAt);
+  if (!Number.isFinite(cachedAtMs)) return false;
+  return Date.now() - cachedAtMs <= ttl;
+}
+
 /** Where the capability set backing a read came from. */
 export type CapabilityResolutionSource = "live" | "cache" | "static-fallback";
 
@@ -113,10 +146,13 @@ export async function resolveProviderCapabilitySet(
       return injected;
     }
 
-    // Seed from a VALID on-disk cache entry to avoid an initial spawn.
+    // Seed from a VALID, non-expired on-disk cache entry to avoid an initial
+    // spawn. The TTL bounds staleness: an aged-out entry falls through to a
+    // fresh discovery (which recomputes the cache key and auto-invalidates on a
+    // provider CLI upgrade/move), so a stale set is never served indefinitely.
     if (!options.forceRefresh) {
       const cached = readCapabilityCache(def.id);
-      if (cached && cached.capabilitySet.status !== "error") {
+      if (cached && cached.capabilitySet.status !== "error" && isCacheSeedFresh(cached.cachedAt)) {
         const resolution: ResolvedProviderCapability = {
           set: cached.capabilitySet,
           source: "cache",
