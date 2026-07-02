@@ -9,9 +9,11 @@
 > _"Without consultation, plans are frustrated, but with many counselors they succeed."_
 > — Proverbs 15:22 (LSB)
 
-A Model Context Protocol (MCP) gateway for running Claude Code, Codex, Gemini/Antigravity, Grok Build, Mistral Vibe, Cognition Devin, Cursor Agent, and configured HTTP API providers from one MCP endpoint, with durable async jobs, session continuity, cache-aware prompting, observability, and personal-appliance setup tooling.
+**Cross-model review without rebuilding your agent stack.**
 
-**Why developers try it:** one local MCP endpoint for cross-LLM validation, multi-agent coding workflows, and repeatable assistant-led setup across registered provider CLIs and API-token LLMs.
+`llm-cli-gateway` gives any MCP client one local-first gateway for Claude Code, Codex, Gemini/Antigravity, Grok Build, Mistral Vibe, Cognition Devin, Cursor Agent, and configured HTTP API providers, while preserving native CLI sessions, local credentials, durable async jobs, validation receipts, and review workflows.
+
+**Why developers try it:** any connected client can ask other models for a second opinion, run implementation/review loops, collect durable job results, and route API-token LLMs without turning local coding agents into a generic chat proxy.
 
 **Current signals:** CI and security workflows pass on `main`, OpenSSF Scorecard is published, OpenSSF Best Practices is passing, releases use Sigstore signing, and the package is MIT licensed.
 

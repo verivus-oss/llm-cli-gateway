@@ -3,19 +3,19 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>llm-cli-gateway - one MCP endpoint for coding agents and API LLMs</title>
+    <title>llm-cli-gateway - cross-model review without rebuilding your agent stack</title>
     <meta
       name="description"
-      content="Run registered coding-agent CLIs and optional HTTP API providers from one MCP endpoint, local over stdio or remote over HTTP behind a bearer token or OAuth, with durable async jobs, sessions, per-principal isolation, and review tools."
+      content="Give any MCP client durable access to Claude Code, Codex, Gemini, Grok, Mistral Vibe, Devin, Cursor Agent, and API-token LLMs without losing native sessions, local credentials, or cross-model review workflows."
     />
     <link rel="canonical" href="https://llm-cli-gateway.dev/" />
     <link rel="icon" href="/images/llmcligwlogov7-y-tm.png" />
     <meta property="og:site_name" content="llm-cli-gateway" />
     <meta property="og:type" content="website" />
-    <meta property="og:title" content="One MCP endpoint for coding-agent CLIs and API LLMs." />
+    <meta property="og:title" content="Cross-model review without rebuilding your agent stack." />
     <meta
       property="og:description"
-      content="A gateway for Claude Code, Codex, Gemini/Antigravity, Grok Build, Mistral Vibe, Devin, Cursor Agent, and optional HTTP API providers."
+      content="One local-first MCP gateway for native coding-agent CLIs, API-token LLMs, durable async jobs, and consensus/review tools."
     />
     <meta property="og:url" content="https://llm-cli-gateway.dev/" />
     <meta property="og:image" content="https://llm-cli-gateway.dev/images/social-card.png" />
@@ -23,10 +23,10 @@
     <meta property="og:image:height" content="630" />
     <meta property="og:image:alt" content="llm-cli-gateway social preview" />
     <meta name="twitter:card" content="summary_large_image" />
-    <meta name="twitter:title" content="One MCP endpoint for coding-agent CLIs and API LLMs." />
+    <meta name="twitter:title" content="Cross-model review without rebuilding your agent stack." />
     <meta
       name="twitter:description"
-      content="Run registered coding-agent CLIs and optional HTTP API providers from one MCP gateway, local over stdio or remote over HTTP behind real auth."
+      content="Keep native CLI sessions, route API-provider LLMs safely, and give any MCP client durable cross-model review tools."
     />
     <meta name="twitter:image" content="https://llm-cli-gateway.dev/images/social-card.png" />
     <meta name="twitter:image:alt" content="llm-cli-gateway social preview" />
@@ -39,7 +39,7 @@
         "@context": "https://schema.org",
         "@type": "SoftwareApplication",
         "name": "llm-cli-gateway",
-        "description": "MCP server providing unified access to Claude Code, Codex, Gemini/Antigravity, Grok Build, Mistral Vibe, Devin, Cursor Agent, and optional HTTP API providers, locally over stdio or remotely over HTTP behind a bearer token or OAuth.",
+        "description": "Local-first MCP gateway for cross-model review across Claude Code, Codex, Gemini/Antigravity, Grok Build, Mistral Vibe, Devin, Cursor Agent, and optional HTTP API providers without giving up native CLI sessions or durable jobs.",
         "applicationCategory": "DeveloperApplication",
         "operatingSystem": "Linux, macOS, Windows",
         "url": "https://llm-cli-gateway.dev",
@@ -121,9 +121,36 @@
     </nav>
 
     <main id="main-content" class="hp-page hp-page--picking">
-      <h1 class="sr-only">
-        llm-cli-gateway - one MCP gateway for coding agents and API LLMs, local or remote
-      </h1>
+      <section class="hp-hero-main" aria-labelledby="hp-main-title">
+        <div class="hp-hero-main__eyebrow">Local-first MCP gateway for coding agents</div>
+        <h1 id="hp-main-title">Cross-model review without rebuilding your agent stack.</h1>
+        <p class="hp-hero-main__lede">
+          Give ChatGPT, Claude, Codex, Gemini CLI, Grok, Vibe, Devin, Cursor, or any MCP client one
+          gateway that can ask the other models, preserve native CLI sessions, survive long jobs,
+          and keep provider credentials where they already live.
+        </p>
+        <div class="hp-hero-main__actions">
+          <a class="btn btn-primary" href="/install.md">Install with an agent</a>
+          <a class="btn btn-outline" href="https://github.com/verivus-oss/llm-cli-gateway"
+            >View GitHub</a
+          >
+        </div>
+        <div class="hp-hero-main__proof" aria-label="Primary capabilities">
+          <span>7 native CLI providers</span>
+          <span>API-token LLM routing</span>
+          <span>SQLite or Postgres jobs</span>
+          <span>Bearer or OAuth HTTP</span>
+        </div>
+        <div class="hp-hero-main__terminal" aria-label="Gateway usage example">
+          <div><span class="hp-term__prompt">&gt;</span> consensus_check({ models, claim })</div>
+          <div class="hp-term__muted">
+            claude_request: catches missing migration rollback<br />
+            codex_request: flags test gap in auth boundary<br />
+            gemini_request: suggests smaller deployment slice<br />
+            validation_receipt: durable evidence, retrievable after restart
+          </div>
+        </div>
+      </section>
 
       <div class="hp-picker">
         <div class="hp-picker__prompt">
@@ -132,15 +159,15 @@
         <div class="hp-picker__options" role="group" aria-label="Choose a view">
           <button type="button" class="hp-picker__option" data-variant="install">
             <span class="hp-picker__option-name">install</span>
-            <span class="hp-picker__option-desc">Show me how to connect an MCP client</span>
+            <span class="hp-picker__option-desc">Connect your first MCP client</span>
           </button>
           <button type="button" class="hp-picker__option" data-variant="demo">
             <span class="hp-picker__option-name">demo</span>
-            <span class="hp-picker__option-desc">Show me the gateway running</span>
+            <span class="hp-picker__option-desc">See the gateway running</span>
           </button>
           <button type="button" class="hp-picker__option" data-variant="compare">
             <span class="hp-picker__option-name">compare</span>
-            <span class="hp-picker__option-desc">Show me why wrap CLIs instead of APIs</span>
+            <span class="hp-picker__option-desc">Why preserve native CLIs</span>
           </button>
         </div>
         <span class="hp-picker__cursor" aria-hidden="true">&#9608;</span>
@@ -296,30 +323,48 @@
 
       <section class="hp-section">
         <div class="hp-what">
+          <div class="hp-section__label">Why It Exists</div>
           <p class="hp-what__desc">
-            A Model Context Protocol (MCP) gateway for running Claude Code, Codex CLI,
-            Gemini/Antigravity, Grok Build, Mistral Vibe, Cognition Devin, Cursor Agent, and
-            optional HTTP API providers from one MCP endpoint, with durable async jobs, session
-            continuity, cache-aware prompting, observability, and personal-appliance setup tooling.
+            Coding agents are strongest when they keep their native tools: Claude Code's MCP
+            selection, Codex's real resume IDs, Gemini/Antigravity's local runtime, Grok Build,
+            Vibe, Devin, Cursor Agent, and API-provider LLMs. `llm-cli-gateway` puts those behind
+            one MCP surface without flattening them into a generic chat proxy.
           </p>
           <p class="hp-what__desc hp-what__desc--secondary">
-            Why developers try it: one MCP endpoint for cross-LLM validation, multi-agent coding
-            workflows, and repeatable assistant-led setup across registered coding-agent CLIs and
-            API providers.
+            The practical payoff: any connected client can ask other models for a second opinion,
+            run implementation/review loops, collect durable job results, and retrieve validation
+            receipts after the gateway restarts.
           </p>
-          <p class="hp-what__desc hp-what__desc--secondary">
-            Local by default over stdio. As of 2.9.0 it also runs remotely over HTTP behind a static
-            bearer token or a built-in OAuth 2.0 server (PKCE on by default, an opt-in human-consent
-            gate, and a trusted-principal-header seam for your own identity proxy), with every
-            session, job, and stored request owned by a principal so one caller never sees another's
-            work, remote calls refused unless a workspace is registered, and a dangerous
-            configuration that fails closed rather than serving open.
-          </p>
-          <p class="hp-what__desc hp-what__desc--secondary">
-            Current signals: CI and security workflows pass on main, OpenSSF Scorecard is published,
-            OpenSSF Best Practices is passing, releases use Sigstore signing, and the package is MIT
-            licensed.
-          </p>
+          <div class="hp-outcomes" aria-label="Product outcomes">
+            <div class="hp-outcome">
+              <h2>Review before you ship</h2>
+              <p>
+                Consensus, red-team, compare, and second-opinion tools turn model disagreement into
+                an artifact you can inspect.
+              </p>
+            </div>
+            <div class="hp-outcome">
+              <h2>Keep native agent behavior</h2>
+              <p>
+                Provider CLIs keep their auth stores, local file access, resume semantics, tool
+                execution, and model-specific controls.
+              </p>
+            </div>
+            <div class="hp-outcome">
+              <h2>Run it like infrastructure</h2>
+              <p>
+                Async jobs persist to SQLite by default or Postgres for service deployments, with
+                per-principal isolation over HTTP.
+              </p>
+            </div>
+            <div class="hp-outcome">
+              <h2>Add API models safely</h2>
+              <p>
+                OpenAI-compatible, Anthropic, and xAI-style providers read keys from named
+                environment variables at request time.
+              </p>
+            </div>
+          </div>
           <div class="hp-what__queries">
             <div class="hp-what__query">
               <span class="hp-what__query-name">claude_request</span
