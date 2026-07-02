@@ -86,10 +86,27 @@ export function categorizeToolCall(toolCall: Record<string, unknown>): AcpPermis
   return "other";
 }
 
-/** True when the option is an agent-offered "allow" (ACP kind `allow_*`). */
-function isAllowOption(option: PermissionOption): boolean {
-  const kind = typeof option.kind === "string" ? option.kind.toLowerCase() : "";
-  return kind.startsWith("allow");
+/**
+ * Select a SINGLE-USE allow option, never a persistent (`allow_always`) one.
+ *
+ * `ApprovalManager.decide` authorizes exactly one action, so the bridge must
+ * express that as a one-time allow. Selecting `allow_always` (which the agent
+ * may list first) would let the agent record a standing grant and stop sending
+ * `session/request_permission` for that tool kind, defeating the per-action
+ * gate after a single approval. We therefore prefer an explicit `allow_once`
+ * and otherwise accept only a non-`always` allow variant; when the agent offers
+ * only persistent allow options we return undefined so the caller denies
+ * (fail-closed) rather than granting a standing permission.
+ */
+function selectSingleUseAllow(options: PermissionOption[]): PermissionOption | undefined {
+  const kindOf = (o: PermissionOption): string =>
+    typeof o.kind === "string" ? o.kind.toLowerCase() : "";
+  const allowOnce = options.find(o => kindOf(o) === "allow_once");
+  if (allowOnce) return allowOnce;
+  return options.find(o => {
+    const kind = kindOf(o);
+    return kind.startsWith("allow") && !kind.includes("always");
+  });
 }
 
 /** The cancelled (deny) ACP outcome. */
@@ -132,8 +149,10 @@ export function createAcpPermissionDecider(
     // Deny-by-default for unrecognized/unknown tool kinds: a kind the gateway
     // cannot categorize as a known no-side-effect read MUST NOT be auto-approved
     // by the score-0 heuristic, because it may represent a future side effect.
-    // Only read/search/fetch/think proceed without an explicit config gate;
-    // write/execute proceed only when allowWrite/allowTerminal is set above.
+    // Only read/search/think proceed without an explicit config gate (see
+    // READ_KINDS); `fetch` is NOT in that set, so it categorizes as "other" and
+    // is denied here. write/execute proceed only when allowWrite/allowTerminal
+    // is set above.
     if (category === "other") {
       logger.info("acp.permission.denied", {
         provider: deps.provider,
@@ -176,13 +195,15 @@ export function createAcpPermissionDecider(
       return CANCELLED;
     }
 
-    // 3. Express approval ONLY by selecting an agent-offered allow option.
-    const allow = request.options.find(isAllowOption);
+    // 3. Express approval ONLY by selecting an agent-offered SINGLE-USE allow
+    // option. A one-time ApprovalManager decision must never be mapped to a
+    // persistent `allow_always` grant (that would bypass all future gating).
+    const allow = selectSingleUseAllow(request.options);
     if (!allow) {
       logger.info("acp.permission.denied", {
         provider: deps.provider,
         category,
-        reason: "no_allow_option",
+        reason: "no_single_use_allow_option",
       });
       return CANCELLED;
     }

@@ -219,3 +219,23 @@ describe("codexFrResponse (#44 flight-recorder response value, shared by sync + 
     expect(codexFrResponse("json", stream)).toBe(stream);
   });
 });
+
+describe("parseCodexJsonStream — stopReason (phase 7)", () => {
+  it("surfaces a stop reason only when turn.completed carries one", () => {
+    const stream = [
+      `{"type":"thread.started","thread_id":"t-x"}`,
+      `{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1},"stop_reason":"completed"}`,
+    ].join("\n");
+    // Mutation that flips this red: removing the defensive stop_reason/reason
+    // extraction in the turn.completed branch.
+    expect(parseCodexJsonStream(stream).stopReason).toBe("completed");
+  });
+
+  it("leaves stopReason undefined for a normal stream (codex -p capability fact)", () => {
+    const stream = [
+      `{"type":"thread.started","thread_id":"t-y"}`,
+      `{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}`,
+    ].join("\n");
+    expect(parseCodexJsonStream(stream).stopReason).toBeUndefined();
+  });
+});

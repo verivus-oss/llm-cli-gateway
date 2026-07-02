@@ -9,6 +9,7 @@
  * the existing CLI transport. The runtime fails closed:
  *
  *   - `[acp].enabled` off                    → {@link AcpDisabledError}
+ *   - provider `enabled` off / absent         → {@link ProviderAcpDisabledError}
  *   - provider `runtime_enabled` off / absent → {@link ProviderRuntimeDisabledError}
  *
  * Flow: deny-by-default HostServices (with the ApprovalManager permission
@@ -24,6 +25,7 @@ import {
   AcpDisabledError,
   AcpError,
   AcpProtocolError,
+  ProviderAcpDisabledError,
   ProviderRuntimeDisabledError,
   isAcpError,
 } from "./errors.js";
@@ -33,6 +35,7 @@ import { createAcpPermissionDecider } from "./permission-bridge.js";
 import { AcpProcessManager, type AcpSpawnFn, type ProcessEnv } from "./process-manager.js";
 import { createAcpSession, recordAcpSessionInfo, resolveAcpResume } from "./session-map.js";
 import type { ContentBlock } from "./types.js";
+import { DEVIN_ACP_AGENT_TYPES } from "../provider-definitions.js";
 import type { ApprovalCli, ApprovalManager } from "../approval-manager.js";
 import type { AcpConfig } from "../config.js";
 import type { FlightLogResult, FlightLogStart } from "../flight-recorder.js";
@@ -69,6 +72,12 @@ export interface AcpRunRequest {
   readonly sessionId?: string;
   readonly cwd?: string;
   readonly correlationId: string;
+  /**
+   * Devin-only: which ACP agent to run (`devin acp --agent-type <type>`). Ignored
+   * for other providers. A validated enum value (summarizer|review), never
+   * free-form input; appended as fixed argv (no shell interpolation).
+   */
+  readonly agentType?: string;
 }
 
 /** Successful ACP run outcome. */
@@ -77,6 +86,49 @@ export interface AcpRunResult {
   readonly gatewaySessionId: string;
   readonly protocolVersion: number | null;
   readonly durationMs: number;
+  /**
+   * The terminal stop reason from the ACP `session/prompt` response (e.g.
+   * `end_turn`, `refusal`, `cancelled`, `max_tokens`), or null when the provider
+   * omits one. Surfaced so a refused/cancelled/truncated turn that produced no
+   * text is not indistinguishable from a normal empty answer at the caller.
+   */
+  readonly stopReason: string | null;
+}
+
+/** Per-request token usage lifted from an ACP `session/prompt` response `_meta`. */
+export interface AcpPromptUsage {
+  inputTokens?: number;
+  outputTokens?: number;
+  cacheReadTokens?: number;
+}
+
+/**
+ * Phase 7 / acceptance #1: extract per-request token usage from an ACP
+ * `session/prompt` response `_meta`.
+ *
+ * Field names are the live-verified grok `agent stdio` shape captured on
+ * 2026-06-13 (documented in docs/personal-mcp/PROVIDER_CACHE_SURFACES.md):
+ * `inputTokens`, `outputTokens`, and `cachedReadTokens` (cache READS). They are
+ * read defensively: only finite numeric fields are lifted, so a provider whose
+ * ACP `_meta` omits usage (or names it differently) yields `{}` rather than a
+ * fabricated count, and the flight-recorder columns stay NULL (typed capability
+ * fact). `totalTokens` is deliberately NOT surfaced: the same capture pins it as
+ * the per-turn input+output SUM, never a per-request input count, so lifting it
+ * as usage would double-count.
+ */
+export function extractAcpPromptUsage(meta: unknown): AcpPromptUsage {
+  if (!meta || typeof meta !== "object" || Array.isArray(meta)) return {};
+  const record = meta as Record<string, unknown>;
+  const num = (value: unknown): number | undefined =>
+    typeof value === "number" && Number.isFinite(value) ? value : undefined;
+  const usage: AcpPromptUsage = {};
+  const inputTokens = num(record.inputTokens);
+  if (inputTokens !== undefined) usage.inputTokens = inputTokens;
+  const outputTokens = num(record.outputTokens);
+  if (outputTokens !== undefined) usage.outputTokens = outputTokens;
+  const cacheReadTokens = num(record.cachedReadTokens);
+  if (cacheReadTokens !== undefined) usage.cacheReadTokens = cacheReadTokens;
+  return usage;
 }
 
 /**
@@ -98,7 +150,12 @@ export async function runAcpRequest(
     throw new AcpDisabledError({ provider: req.provider });
   }
   const providerConfig = deps.config.providers[req.provider];
-  if (!providerConfig?.runtimeEnabled) {
+  // Fail closed unless the provider is BOTH enabled and runtime-routing enabled.
+  // A provider with enabled=false must never spawn, even if runtime_enabled=true.
+  if (providerConfig?.enabled !== true) {
+    throw new ProviderAcpDisabledError(req.provider, { provider: req.provider });
+  }
+  if (providerConfig?.runtimeEnabled !== true) {
     throw new ProviderRuntimeDisabledError(req.provider, { provider: req.provider });
   }
 
@@ -151,6 +208,16 @@ export async function runAcpRequest(
     })
   );
 
+  // Devin-only: thread a validated `--agent-type` into the spawn argv. The value
+  // must be a known enum member; an unknown value is dropped (never injected as
+  // arbitrary argv). Other providers never receive extra args here.
+  const extraArgs =
+    req.provider === "devin" &&
+    req.agentType !== undefined &&
+    (DEVIN_ACP_AGENT_TYPES as readonly string[]).includes(req.agentType)
+      ? ["--agent-type", req.agentType]
+      : [];
+
   let proc: Awaited<ReturnType<AcpProcessManager["start"]>> | null = null;
   try {
     proc = await manager.start({
@@ -158,6 +225,7 @@ export async function runAcpRequest(
       cwd: req.cwd,
       hostServices,
       callbacks: { onSessionUpdate: update => normalizer.handle(update) },
+      extraArgs,
     });
     const cwd = proc.resolved.cwd;
     const init = proc.client.agentInfo;
@@ -178,13 +246,36 @@ export async function runAcpRequest(
       });
     }
 
-    await proc.client.prompt({ sessionId: providerSessionId, prompt: promptBlocks });
+    const promptResult = await proc.client.prompt({
+      sessionId: providerSessionId,
+      prompt: promptBlocks,
+    });
+    // Phase 7: ACP carries the stop reason on the session/prompt response (not a
+    // session/update), so record it through the normalizer's completion event.
+    normalizer.completeWith(promptResult.stopReason);
     const text = normalizer.finalText;
     const durationMs = elapsed();
 
+    // Phase 7 / acceptance #1: lift per-request token usage from the ACP
+    // `session/prompt` response `_meta` (grok's live-verified shape). Absent for
+    // providers whose ACP transport omits usage → columns stay NULL, never faked.
+    const usage = extractAcpPromptUsage(promptResult._meta);
+
     deps.flightRecorder?.logComplete(
       req.correlationId,
-      buildAcpFlightResult({ responseText: text, durationMs, status: "completed", exitCode: 0 })
+      buildAcpFlightResult({
+        responseText: text,
+        durationMs,
+        status: "completed",
+        exitCode: 0,
+        // Phase 7: persist the provider session id (resume) + stop reason.
+        providerSessionId,
+        stopReason: normalizer.stopReason,
+        // Phase 7 / acceptance #1: per-request usage from `_meta` (when emitted).
+        inputTokens: usage.inputTokens,
+        outputTokens: usage.outputTokens,
+        cacheReadTokens: usage.cacheReadTokens,
+      })
     );
     logger.info("acp.request.success", { provider: req.provider, durationMs });
     return {
@@ -192,6 +283,7 @@ export async function runAcpRequest(
       gatewaySessionId,
       protocolVersion: init?.protocolVersion ?? null,
       durationMs,
+      stopReason: normalizer.stopReason ?? null,
     };
   } catch (err) {
     const durationMs = elapsed();

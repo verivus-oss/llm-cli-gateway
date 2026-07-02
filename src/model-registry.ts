@@ -24,6 +24,11 @@ export interface CliInfo {
   aliases?: Record<string, string>;
   modelMetadata?: Record<string, ModelMetadata>;
   warnings?: string[];
+  /**
+   * Provider default agent/permission profile, when the provider selects a model
+   * surface via an agent rather than a model id (Mistral/Vibe `default_agent`).
+   */
+  defaultAgent?: string;
 }
 
 export type CliInfoMap = Record<CliType, CliInfo>;
@@ -218,6 +223,7 @@ function cloneInfo(source: CliInfo): CliInfo {
     aliases: source.aliases ? { ...source.aliases } : undefined,
     modelMetadata: source.modelMetadata ? { ...source.modelMetadata } : {},
     warnings: source.warnings ? [...source.warnings] : [],
+    defaultAgent: source.defaultAgent,
   };
 
   Object.keys(cloned.models).forEach(model => {
@@ -535,6 +541,10 @@ function applyGeminiOverrides(info: CliInfo): void {
 function applyGrokOverrides(info: CliInfo): void {
   const envDefault = process.env.GROK_DEFAULT_MODEL;
 
+  // ~/.grok/config.toml carries the configured default ([models].default) and any
+  // custom model facts. Config is read first so an explicit env default still wins.
+  applyGrokConfig(info);
+
   addEnvModels(info, "GROK_MODELS");
   addEnvAliases(info, "grok", "GROK_MODEL_ALIASES");
   addGlobalEnvAliases(info, "grok");
@@ -546,8 +556,57 @@ function applyGrokOverrides(info: CliInfo): void {
   info.modelOrder = buildOrder(info, info.defaultModel);
 }
 
+function applyGrokConfig(info: CliInfo): void {
+  const configPath = process.env.GROK_CONFIG_PATH || path.join(homedir(), ".grok", "config.toml");
+  if (!existsSync(configPath)) {
+    return;
+  }
+
+  try {
+    const parsed = parseToml(readFileSync(configPath, "utf-8"));
+
+    // The Grok config nests model facts under [models]: `default` is the
+    // configured default; any additional string entries are custom model ids.
+    const models = readRecordProperty(parsed, "models");
+    Object.entries(models).forEach(([key, value]) => {
+      if (typeof value !== "string") {
+        return;
+      }
+      if (key === "default") {
+        setDefaultModel(info, value, `${configPath} [models].default`, "config");
+        return;
+      }
+      addModel(info, value, `Custom Grok model from config.toml [models].${key}`, {
+        source: "config",
+        sourceDetail: `${configPath} [models].${key}`,
+        confidence: "medium",
+      });
+    });
+
+    // A configured secondary/fork model is an additional model fact.
+    const ui = readRecordProperty(parsed, "ui");
+    const forkModel = readStringProperty(ui, "fork_secondary_model");
+    if (forkModel) {
+      addModel(info, forkModel, "Configured Grok fork/secondary model", {
+        source: "config",
+        sourceDetail: `${configPath} [ui].fork_secondary_model`,
+        confidence: "medium",
+      });
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    addWarning(info, `Could not parse Grok config ${configPath}: ${message}`);
+  }
+}
+
 function applyMistralOverrides(info: CliInfo): void {
   const vibeConfig = readVibeConfig(info);
+
+  // Vibe selects a permission/agent profile via `default_agent`. Surface it as a
+  // model fact so the discovered listing / registry exposes it in production.
+  if (vibeConfig.defaultAgent) {
+    info.defaultAgent = vibeConfig.defaultAgent;
+  }
 
   addVibeModelEntries(info, parseVibeModels(process.env.VIBE_MODELS, "VIBE_MODELS"), "env");
   addVibeModelEntries(info, vibeConfig.models, "config");
@@ -596,6 +655,8 @@ interface VibeModelEntry {
 
 interface VibeConfigDiscovery {
   activeModel?: string;
+  /** Vibe `default_agent` config fact (agent/permission profile selection). */
+  defaultAgent?: string;
   models: VibeModelEntry[];
   source: string;
 }
@@ -614,6 +675,10 @@ function readVibeConfig(info: CliInfo): VibeConfigDiscovery {
     const activeModel = readStringProperty(parsed, "active_model");
     if (activeModel) {
       result.activeModel = activeModel.trim();
+    }
+    const defaultAgent = readStringProperty(parsed, "default_agent");
+    if (defaultAgent) {
+      result.defaultAgent = defaultAgent.trim();
     }
     result.models = parseVibeModelArray(readRecordOrArrayProperty(parsed, "models"), configPath);
   } catch (error) {

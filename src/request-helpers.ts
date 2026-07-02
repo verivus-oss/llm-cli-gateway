@@ -425,6 +425,160 @@ export type CodexSandboxMode = (typeof CODEX_SANDBOX_MODES)[number];
 export const CODEX_ASK_FOR_APPROVAL_MODES = ["untrusted", "on-request", "never"] as const;
 export type CodexAskForApproval = (typeof CODEX_ASK_FOR_APPROVAL_MODES)[number];
 
+/**
+ * Codex local OSS provider selector (for `--local-provider <p>`, used with
+ * `--oss`). Values verified against `codex exec --help` (lmstudio | ollama).
+ */
+export const CODEX_LOCAL_PROVIDERS = ["lmstudio", "ollama"] as const;
+export type CodexLocalProvider = (typeof CODEX_LOCAL_PROVIDERS)[number];
+
+/**
+ * Codex color mode (for `--color <mode>`). Values verified against
+ * `codex exec --help` (always | never | auto).
+ */
+export const CODEX_COLOR_MODES = ["always", "never", "auto"] as const;
+export type CodexColorMode = (typeof CODEX_COLOR_MODES)[number];
+
+/**
+ * Closed taxonomy for a must_cover CLI flag the gateway intentionally does NOT
+ * wire as a passthrough request field.
+ *   - "interactive-only": only meaningful in an attached TTY / interactive
+ *     session, incompatible with the headless run mode the gateway drives.
+ *   - "gateway-managed": manages detached/remote/background sessions that
+ *     conflict with the gateway's own async-job + session model.
+ *   - "admin-deferred": an admin/remote surface deferred to a later phase, or a
+ *     flag not present in the installed headless help.
+ */
+export type UnexposedFlagReason = "interactive-only" | "gateway-managed" | "admin-deferred";
+
+export interface UnexposedCliFlag {
+  flag: string;
+  reason: UnexposedFlagReason;
+  detail: string;
+}
+
+/**
+ * Phase 4 Part A: Claude `must_cover` flags that are deliberately NOT exposed as
+ * passthrough request fields. The DRY contract forbids silent omission, so each
+ * omission is recorded here (typed capability fact) and asserted by
+ * `provider-part-a-flag-classification.test.ts`.
+ */
+export const CLAUDE_UNEXPOSED_CLI_FLAGS: readonly UnexposedCliFlag[] = [
+  {
+    flag: "--tmux",
+    reason: "interactive-only",
+    detail:
+      "Creates an attached tmux/iTerm2 session for a worktree (requires --worktree); incompatible with headless --print.",
+  },
+  {
+    flag: "--background",
+    reason: "gateway-managed",
+    detail:
+      "Starts a detached background agent (managed via `claude agents`); conflicts with the gateway's own async-job model.",
+  },
+  {
+    flag: "--remote-control",
+    reason: "gateway-managed",
+    detail:
+      "Starts an interactive Remote Control session; a stateful/remote surface deferred to the gateway-managed transport.",
+  },
+  {
+    flag: "--remote",
+    reason: "admin-deferred",
+    detail:
+      "No bare --remote exists in installed Claude help; the only remote surface is --remote-control (gateway-managed).",
+  },
+  {
+    flag: "--worktree",
+    reason: "gateway-managed",
+    detail:
+      "claude --help advertises -w, --worktree [name], but gateway worktrees are owned by slice λ (worktree-manager); the native --worktree is intentionally never emitted so the gateway owns the checkout lifecycle.",
+  },
+  {
+    flag: "--resume",
+    reason: "gateway-managed",
+    detail:
+      "claude --help advertises -r, --resume [value] for interactive resume; the gateway session model maps continuity onto --continue (continueSession) and --session-id (sessionId), so the raw --resume passthrough is intentionally not wired.",
+  },
+] as const;
+
+/**
+ * Phase 4 Part A: Codex `must_cover` flags deliberately NOT exposed as
+ * passthrough request fields. Same DRY contract as the Claude list above.
+ */
+export const CODEX_UNEXPOSED_CLI_FLAGS: readonly UnexposedCliFlag[] = [
+  {
+    flag: "--remote",
+    reason: "admin-deferred",
+    detail:
+      "TUI-only (top-level `codex` help, not `codex exec`): connects the TUI to a remote app-server endpoint; not a headless exec flag.",
+  },
+  {
+    flag: "--remote-auth-token-env",
+    reason: "admin-deferred",
+    detail:
+      "TUI-only companion to --remote (bearer-token env var for the remote app-server websocket); not a headless exec flag.",
+  },
+  {
+    flag: "--ask-for-approval",
+    reason: "admin-deferred",
+    detail:
+      "Removed from the installed `codex exec` upstream: current codex exec no longer accepts --ask-for-approval. The askForApproval MCP input is retained for back-compat but warns and emits no argv (accepted-but-ignored); classified here because the flag is not present in the installed headless help.",
+  },
+  {
+    flag: "--search",
+    reason: "admin-deferred",
+    detail:
+      "Removed from the installed `codex exec` upstream: current codex exec no longer accepts --search. The search MCP input is retained for back-compat but warns and emits no argv (accepted-but-ignored); classified here because the flag is not present in the installed headless help.",
+  },
+] as const;
+
+/**
+ * Phase 4 Part B: Gemini (Antigravity `agy`) `must_cover` flags deliberately
+ * NOT exposed as passthrough request fields. Same DRY contract as the Claude /
+ * Codex lists above: every non-wired must_cover flag carries a typed capability
+ * fact with a closed-taxonomy reason (asserted by
+ * `provider-part-b-flag-classification.test.ts`). These are also carried in the
+ * gemini contract's `acknowledgedUpstreamFlags` for drift-probe quieting; this
+ * list adds the human-readable classification + rationale. (`--print-timeout`
+ * graduated to a wired request field, so it is no longer listed here.)
+ */
+export const GEMINI_UNEXPOSED_CLI_FLAGS: readonly UnexposedCliFlag[] = [
+  {
+    flag: "--prompt-interactive",
+    reason: "interactive-only",
+    detail:
+      "Runs an initial prompt then continues in an attached interactive session (short alias -i); incompatible with the headless --print run mode the gateway drives.",
+  },
+  {
+    flag: "--log-file",
+    reason: "admin-deferred",
+    detail:
+      "Overrides agy's internal CLI log file path (a diagnostic/maintenance surface); the gateway flight recorder is the request-logging surface, so this is deferred to a later admin phase.",
+  },
+] as const;
+
+/**
+ * Phase 4 Part B: Mistral (Vibe) `must_cover` flags deliberately NOT exposed as
+ * passthrough request fields. Both are setup/maintenance operations, not
+ * headless run flags, and are deferred to the phase-6 admin surface. Same DRY
+ * contract as the lists above.
+ */
+export const MISTRAL_UNEXPOSED_CLI_FLAGS: readonly UnexposedCliFlag[] = [
+  {
+    flag: "--setup",
+    reason: "admin-deferred",
+    detail:
+      "Vibe `--setup` configures the API key and exits; a credential/setup maintenance op, not a headless run flag. Deferred to the phase-6 admin surface.",
+  },
+  {
+    flag: "--check-upgrade",
+    reason: "admin-deferred",
+    detail:
+      "Vibe `--check-upgrade` checks for a Vibe update, prompts to install, and exits; a maintenance op, not a headless run flag. Deferred to the phase-6 admin surface.",
+  },
+] as const;
+
 export interface CodexSandboxFlagsInput {
   /** Modern: explicit sandbox mode. */
   sandboxMode?: CodexSandboxMode;
@@ -685,6 +839,73 @@ export interface ClaudeHighImpactFlagsInput {
    * tools per `claude --help`. An empty array emits nothing.
    */
   tools?: string[];
+  // Phase 4 Part A: remaining headless-safe Claude CLI modifiers (traced to
+  // `claude --help`). Interactive-only (`--tmux`) and gateway-managed
+  // (`--background`, `--remote-control`) flags are intentionally NOT here; see
+  // the provider capability facts + tests for that classification.
+  /**
+   * Claude `--include-hook-events`: include all hook lifecycle events in the
+   * output stream. Only meaningful with `--output-format=stream-json` (the
+   * gateway's default output format), per `claude --help`.
+   */
+  includeHookEvents?: boolean;
+  /**
+   * Claude `--replay-user-messages`: re-emit user messages from stdin back on
+   * stdout for acknowledgment. Only works with `--input-format=stream-json`
+   * AND `--output-format=stream-json` (the slice κ cacheControl path), per
+   * `claude --help`.
+   */
+  replayUserMessages?: boolean;
+  /**
+   * Claude `--system-prompt-file <path>`: replace the system prompt from a
+   * file (path variant of `--system-prompt`, advertised in the `--bare` help
+   * text as `--system-prompt[-file]`). Passed through verbatim as a path.
+   */
+  systemPromptFile?: string;
+  /**
+   * Claude `--append-system-prompt-file <path>`: append a system prompt from a
+   * file (path variant of `--append-system-prompt`, advertised in the `--bare`
+   * help text as `--append-system-prompt[-file]`). Passed through verbatim.
+   */
+  appendSystemPromptFile?: string;
+  /**
+   * Claude `--name <name>`: set a display name for this session. Pure
+   * per-run modifier, safe in headless `--print` mode.
+   */
+  name?: string;
+  /**
+   * Claude `--plugin-dir <path>`: load a plugin from a directory or `.zip` for
+   * this session only (repeatable). One `--plugin-dir` instance per entry.
+   */
+  pluginDir?: string[];
+  /**
+   * Claude `--plugin-url <url>`: load a plugin `.zip` from a URL for this
+   * session only (repeatable). One `--plugin-url` instance per entry.
+   */
+  pluginUrl?: string[];
+  /**
+   * Claude `--safe-mode`: start with all customizations disabled (for
+   * troubleshooting a broken config). Explicit opt-in; never defaulted on.
+   */
+  safeMode?: boolean;
+  /**
+   * Claude `--bare`: minimal mode (skip hooks, LSP, plugin sync, attribution,
+   * auto-memory, keychain reads, and CLAUDE.md auto-discovery). Explicit
+   * opt-in; never defaulted on.
+   */
+  bare?: boolean;
+  /**
+   * Claude `-d, --debug [filter]`: enable debug mode with optional category
+   * filter (e.g. "api,hooks"). `true` emits a bare `--debug`; a string emits
+   * `--debug <filter>`. Debug output goes to stderr only, so it does not
+   * pollute the parsed stdout stream.
+   */
+  debug?: string | boolean;
+  /**
+   * Claude `--debug-file <path>`: write debug logs to a specific file path
+   * (implicitly enables debug mode). Passed through verbatim.
+   */
+  debugFile?: string;
 }
 
 /**
@@ -750,6 +971,49 @@ export function prepareClaudeHighImpactFlags(input: ClaudeHighImpactFlagsInput):
     // Single variadic flag (mirrors --allowed-tools emission). `[""]` → `--tools ""`
     // which disables all built-in tools per `claude --help`.
     args.push("--tools", ...input.tools);
+  }
+
+  // Phase 4 Part A: additional headless-safe modifiers.
+  if (input.includeHookEvents) {
+    args.push("--include-hook-events");
+  }
+  if (input.replayUserMessages) {
+    args.push("--replay-user-messages");
+  }
+  if (input.systemPromptFile !== undefined) {
+    args.push("--system-prompt-file", input.systemPromptFile);
+  }
+  if (input.appendSystemPromptFile !== undefined) {
+    args.push("--append-system-prompt-file", input.appendSystemPromptFile);
+  }
+  if (input.name !== undefined) {
+    args.push("--name", input.name);
+  }
+  if (input.pluginDir && input.pluginDir.length > 0) {
+    for (const dir of input.pluginDir) {
+      args.push("--plugin-dir", dir);
+    }
+  }
+  if (input.pluginUrl && input.pluginUrl.length > 0) {
+    for (const url of input.pluginUrl) {
+      args.push("--plugin-url", url);
+    }
+  }
+  if (input.safeMode) {
+    args.push("--safe-mode");
+  }
+  if (input.bare) {
+    args.push("--bare");
+  }
+  if (input.debug !== undefined && input.debug !== false) {
+    if (typeof input.debug === "string") {
+      args.push("--debug", input.debug);
+    } else {
+      args.push("--debug");
+    }
+  }
+  if (input.debugFile !== undefined) {
+    args.push("--debug-file", input.debugFile);
   }
 
   return args;
@@ -874,6 +1138,11 @@ export const CODEX_HIGH_IMPACT_PARAMS_SCHEMA = z.object({
   images: z.array(z.string()).optional(),
   ignoreUserConfig: z.boolean().optional(),
   ignoreRules: z.boolean().optional(),
+  // Phase 4 Part A: feature toggles. `--enable`/`--disable` are equivalent to
+  // `-c features.<name>=true|false`, and `-c` is accepted on `codex exec
+  // resume`, so these are safe in both new and resume branches.
+  enable: z.array(z.string()).optional(),
+  disable: z.array(z.string()).optional(),
 });
 
 export interface CodexHighImpactFlagsInput {
@@ -885,6 +1154,16 @@ export interface CodexHighImpactFlagsInput {
   images?: string[];
   ignoreUserConfig?: boolean;
   ignoreRules?: boolean;
+  /**
+   * Codex `--enable <FEATURE>` (repeatable): enable a feature for this run
+   * (equivalent to `-c features.<name>=true`). Emitted once per entry.
+   */
+  enable?: string[];
+  /**
+   * Codex `--disable <FEATURE>` (repeatable): disable a feature for this run
+   * (equivalent to `-c features.<name>=false`). Emitted once per entry.
+   */
+  disable?: string[];
 }
 
 export interface CodexHighImpactFlagsResult {
@@ -952,6 +1231,19 @@ export function prepareCodexHighImpactFlags(
 
   if (input.ignoreRules) {
     args.push("--ignore-rules");
+  }
+
+  // Phase 4 Part A: feature toggles (repeatable). One flag instance per entry
+  // so each feature name is its own argv token.
+  if (input.enable && input.enable.length > 0) {
+    for (const feature of input.enable) {
+      args.push("--enable", feature);
+    }
+  }
+  if (input.disable && input.disable.length > 0) {
+    for (const feature of input.disable) {
+      args.push("--disable", feature);
+    }
   }
 
   return {

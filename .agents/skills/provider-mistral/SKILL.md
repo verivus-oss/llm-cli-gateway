@@ -88,7 +88,7 @@ A failed fetch is advisory (exit 0) unless `--fail-on-critical` is passed.
 
 ## Mistral-specific notes (see the contract for exact rules)
 
-- Tested against vibe 2.17.1 (ACP targetVersion).
+- Tested against vibe 2.18.3. Vibe has a native ACP entrypoint (`vibe-acp`); `mistral_request` accepts `transport:"acp"` and `provider-acp://mistral` reports the negotiated capability set (fails closed unless `[acp]` and the provider `runtime_enabled` gate are set).
 - Model is selected via the `VIBE_ACTIVE_MODEL` env var (validated by the env contract), not a `--model` flag.
 - Permission/agent modes are emitted as `--agent <mode>` from a closed enum; the gateway defaults programmatic callers to `auto-approve`.
 - `--output` formats (`text`, `json`, `streaming`) are a closed enum; `--max-price` is decimal-only (no scientific notation) to match `MAX_PRICE_SCHEMA`.

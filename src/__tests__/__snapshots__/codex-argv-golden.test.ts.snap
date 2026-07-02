@@ -1,0 +1,25 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`codex argv golden (Phase 4 Part A) > emits every wired Part A flag with exact argv on a NEW session 1`] = `
+[
+  "exec",
+  "--dangerously-bypass-hook-trust",
+  "--json",
+  "--skip-git-repo-check",
+  "--oss",
+  "--local-provider",
+  "ollama",
+  "--strict-config",
+  "--color",
+  "never",
+  "--output-last-message",
+  "/tmp/last.txt",
+  "--enable",
+  "feat_a",
+  "--enable",
+  "feat_b",
+  "--disable",
+  "feat_c",
+  "hello codex",
+]
+`;

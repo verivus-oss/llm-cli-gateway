@@ -19,6 +19,7 @@
  */
 import { describe, expect, it } from "vitest";
 import { createGatewayServer, extractUsageAndCost, prepareGeminiRequest } from "../index.js";
+import { parseGrokStreamingJson } from "../grok-json-parser.js";
 import { UPSTREAM_CLI_CONTRACTS, validateUpstreamCliArgs } from "../upstream-contracts.js";
 import { AsyncJobManager } from "../async-job-manager.js";
 import { MemoryJobStore } from "../job-store.js";
@@ -266,6 +267,17 @@ describe("REGRESSIONS Eθ — grok `-p` headless output carries no per-request u
 
   it("returns no usage for grok streaming-json output", () => {
     expect(extractUsageAndCost("grok", grokStreamingJson, "streaming-json")).toEqual({});
+  });
+
+  // B1: the REAL streaming-json capture carries each delta in a `data` field.
+  // Assert the parser concatenates it into the reply text (not just that usage is
+  // absent). Mutation that flips this red: reverting deltaText to omit
+  // `str(event.data)` so the real-shape reply is dropped.
+  it("parses the real-capture streaming-json stream to the expected reply text", () => {
+    const parsed = parseGrokStreamingJson(grokStreamingJson);
+    expect(parsed?.text).toBe("hello world");
+    expect(parsed?.thought).toBe("hello");
+    expect(parsed?.stopReason).toBe("EndTurn");
   });
 
   it("returns no usage for grok plain output (default) and unknown formats", () => {

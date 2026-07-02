@@ -30,6 +30,7 @@ import {
   type CliType,
   type KnownApiProviderType,
 } from "./provider-types.js";
+import { getAllProviderDefinitions } from "./provider-definitions.js";
 
 export { API_PROVIDER_TYPES, CLI_TYPES, type CliType, type KnownApiProviderType };
 
@@ -73,14 +74,14 @@ export function providerKind(provider: ProviderType): ProviderKind {
   return isCliType(provider) ? "cli" : "api";
 }
 
+// Session labels for the spawnable CLIs are DERIVED from the provider
+// definition registry (`sessionLabel`), not owned here: session-manager keeps
+// no separate provider list. Only the API-provider labels (no registry entry
+// yet) stay local.
 const KNOWN_SESSION_DESCRIPTIONS: Partial<Record<ProviderType, string>> = {
-  claude: "Claude Session",
-  codex: "Codex Session",
-  gemini: "Gemini Session",
-  grok: "Grok Session",
-  mistral: "Mistral Session",
-  devin: "Devin Session",
-  cursor: "Cursor Session",
+  ...(Object.fromEntries(
+    getAllProviderDefinitions().map(def => [def.id, def.sessionLabel])
+  ) as Record<CliType, string>),
   "grok-api": "Grok API Session",
 };
 
@@ -132,11 +133,27 @@ export function remoteSafeSession(session: Session): Session {
   const metadata = session.metadata;
   if (!metadata) return session;
   const next: Record<string, any> = { ...metadata };
+  const root = typeof next.workspaceRoot === "string" ? next.workspaceRoot : undefined;
+  const reducePath = (absolute: string): string => {
+    const rel = root ? pathRelative(root, absolute) : "";
+    return rel && !rel.startsWith("..") && !pathIsAbsolute(rel) ? rel : pathBasename(absolute);
+  };
   if (typeof next.worktreePath === "string") {
-    const root = typeof next.workspaceRoot === "string" ? next.workspaceRoot : undefined;
-    const rel = root ? pathRelative(root, next.worktreePath) : "";
-    next.worktreePath =
-      rel && !rel.startsWith("..") && !pathIsAbsolute(rel) ? rel : pathBasename(next.worktreePath);
+    next.worktreePath = reducePath(next.worktreePath);
+  }
+  // Sanitize the nested ACP metadata block for the caller-facing projection: the
+  // provider-owned ACP session id is removed (it stays gateway-internal), and
+  // local absolute paths (`cwd`, `worktreePath`) are reduced to a
+  // workspace-relative label or basename so a remote caller cannot learn the
+  // operator's filesystem layout or the provider session id via `session_get` /
+  // `sessions://*`. STORAGE keeps the full values (resume needs them); only this
+  // shallow-copied projection is sanitized.
+  if (next.acp && typeof next.acp === "object" && !Array.isArray(next.acp)) {
+    const acp: Record<string, any> = { ...(next.acp as Record<string, any>) };
+    if (typeof acp.cwd === "string") acp.cwd = reducePath(acp.cwd);
+    if (typeof acp.worktreePath === "string") acp.worktreePath = reducePath(acp.worktreePath);
+    if ("sessionId" in acp) delete acp.sessionId;
+    next.acp = acp;
   }
   if (typeof next.workspaceRoot === "string") delete next.workspaceRoot;
   return { ...session, metadata: next };

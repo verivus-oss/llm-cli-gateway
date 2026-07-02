@@ -355,7 +355,7 @@ export class OAuthServer {
     return {
       resource: joinBaseAndPath(baseUrl, this.opts.protectedPath),
       authorization_servers: [baseUrl],
-      scopes_supported: ["mcp", "workspace:admin"],
+      scopes_supported: ["mcp", "workspace:admin", "cli:admin"],
       bearer_methods_supported: ["header"],
     };
   }
@@ -374,7 +374,7 @@ export class OAuthServer {
       code_challenge_methods_supported: this.opts.config.allowPlainPkce
         ? ["S256", "plain"]
         : ["S256"],
-      scopes_supported: ["mcp", "workspace:admin"],
+      scopes_supported: ["mcp", "workspace:admin", "cli:admin"],
     };
   }
 

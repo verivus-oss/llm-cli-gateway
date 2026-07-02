@@ -20,6 +20,8 @@ import { z } from "zod/v3";
 import { executeCli, killAllProcessGroups, providerCommandName } from "./executor.js";
 import { parseStreamJson } from "./stream-json-parser.js";
 import { parseCodexJsonStream, codexDisplayText, codexFrResponse } from "./codex-json-parser.js";
+import { grokDisplayText } from "./grok-json-parser.js";
+import { extractProviderOutputMetadata } from "./provider-output-metadata.js";
 import { parseGeminiJson, parseGeminiStreamJson } from "./gemini-json-parser.js";
 import { parseVibeMetaJson } from "./mistral-meta-json-parser.js";
 import { homedir } from "os";
@@ -40,6 +42,10 @@ import {
   type WorktreeHandle,
 } from "./worktree-manager.js";
 import { ResourceProvider } from "./resources.js";
+import {
+  generateResourceDescriptors,
+  generateProviderAcpDescriptors,
+} from "./provider-surface-generator.js";
 import { PerformanceMetrics } from "./metrics.js";
 import {
   estimateTokens,
@@ -52,6 +58,7 @@ import {
   loadCacheAwarenessConfig,
   loadProvidersConfig,
   loadAcpConfig,
+  loadAdminConfig,
   loadLimitsConfig,
   defaultGatewayConfigPath,
   isXaiProviderEnabled,
@@ -62,6 +69,7 @@ import {
   type ProvidersConfig,
   type ApiProviderRuntime,
   type AcpConfig,
+  type AdminConfig,
   type GatewayLimitsConfig,
 } from "./config.js";
 import { runAcpRequest, type AcpFlightSink } from "./acp/runtime.js";
@@ -92,6 +100,18 @@ import {
   resolveModelAlias,
 } from "./model-registry.js";
 import { getProviderToolCapabilities } from "./provider-tool-capabilities.js";
+import {
+  getProviderDefinition,
+  DEVIN_ACP_AGENT_TYPES,
+  type DevinAcpAgentType,
+} from "./provider-definitions.js";
+import {
+  buildProviderDiscoveredView,
+  peekProviderCapabilitySet,
+  warmProviderCapabilities,
+  type ProviderDiscoveredView,
+} from "./provider-capability-resolver.js";
+import { registerProviderAdminTools } from "./provider-admin-tools.js";
 import {
   AsyncJobManager,
   JobSaturationError,
@@ -129,6 +149,8 @@ import {
   GEMINI_APPROVAL_MODES,
   CODEX_SANDBOX_MODES,
   CODEX_ASK_FOR_APPROVAL_MODES,
+  CODEX_LOCAL_PROVIDERS,
+  CODEX_COLOR_MODES,
   CLAUDE_EFFORT_LEVELS,
   prepareClaudeHighImpactFlags,
   validateClaudeAgentsMap,
@@ -142,6 +164,8 @@ import {
   type ClaudePermissionMode,
   type CodexSandboxMode,
   type CodexAskForApproval,
+  type CodexLocalProvider,
+  type CodexColorMode,
   type ClaudeEffortLevel,
   type ClaudeAgentDefinition,
 } from "./request-helpers.js";
@@ -478,6 +502,7 @@ let persistenceConfig: PersistenceConfig | null = null;
 let cacheAwarenessConfig: CacheAwarenessConfig | null = null;
 let providersConfig: ProvidersConfig | null = null;
 let acpConfig: AcpConfig | null = null;
+let adminConfig: AdminConfig | null = null;
 let limitsConfig: GatewayLimitsConfig | null = null;
 let jobStore: JobStore | null = null;
 let jobStoreInitialized = false;
@@ -504,6 +529,11 @@ function getLimitsConfig(runtimeLogger: GatewayLogger = logger): GatewayLimitsCo
 function getAcpConfig(runtimeLogger: GatewayLogger = logger): AcpConfig {
   acpConfig ??= loadAcpConfig(runtimeLogger);
   return acpConfig;
+}
+
+function getAdminConfig(runtimeLogger: GatewayLogger = logger): AdminConfig {
+  adminConfig ??= loadAdminConfig(runtimeLogger);
+  return adminConfig;
 }
 
 function getCacheAwarenessConfig(runtimeLogger: GatewayLogger = logger): CacheAwarenessConfig {
@@ -580,6 +610,140 @@ const CLI_TYPE_ENUM = z.enum(CLI_TYPES);
  * upper bound — no plausible single agent loop exceeds 10k turns or 10k USD.
  */
 export const MAX_TURNS_SCHEMA = z.number().int().positive().safe().max(10_000);
+
+/**
+ * Phase 4 Part A: shared Zod shape for the remaining headless-safe Claude CLI
+ * modifiers, spread into both `claude_request` and `claude_request_async` so the
+ * two schemas can never drift. Every field traces to `claude --help`. Flags that
+ * are interactive-only (`--tmux`) or gateway-managed (`--background`,
+ * `--remote-control`) are deliberately absent (see provider capability facts).
+ */
+const CLAUDE_PART_A_FIELDS = {
+  includeHookEvents: z
+    .boolean()
+    .optional()
+    .describe(
+      "Claude --include-hook-events: include all hook lifecycle events in the output stream. Only takes effect with outputFormat=stream-json (the default)."
+    ),
+  replayUserMessages: z
+    .boolean()
+    .optional()
+    .describe(
+      "Claude --replay-user-messages: re-emit user messages from stdin back on stdout for acknowledgment. Only works with input-format=stream-json and outputFormat=stream-json (the cacheControl path)."
+    ),
+  systemPromptFile: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      "Claude --system-prompt-file: replace the system prompt from a file path (path variant of systemPrompt)."
+    ),
+  appendSystemPromptFile: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      "Claude --append-system-prompt-file: append a system prompt from a file path (path variant of appendSystemPrompt)."
+    ),
+  name: z
+    .string()
+    .min(1)
+    .optional()
+    .describe("Claude --name: display name for this session (shown in pickers/titles)."),
+  pluginDir: z
+    .array(z.string())
+    .optional()
+    .describe(
+      "Claude --plugin-dir: load a plugin from a directory or .zip for this session only. One --plugin-dir instance per entry."
+    ),
+  pluginUrl: z
+    .array(z.string())
+    .optional()
+    .describe(
+      "Claude --plugin-url: load a plugin .zip from a URL for this session only. One --plugin-url instance per entry."
+    ),
+  safeMode: z
+    .boolean()
+    .optional()
+    .describe(
+      "Claude --safe-mode: start with all customizations (CLAUDE.md, skills, plugins, hooks, MCP, commands, agents) disabled for troubleshooting. Explicit opt-in."
+    ),
+  bare: z
+    .boolean()
+    .optional()
+    .describe(
+      "Claude --bare: minimal mode (skip hooks, LSP, plugin sync, attribution, auto-memory, keychain reads, CLAUDE.md auto-discovery). Explicit opt-in."
+    ),
+  debug: z
+    .union([z.string(), z.boolean()])
+    .optional()
+    .describe(
+      'Claude -d/--debug: enable debug mode. true emits a bare --debug; a string emits --debug <filter> (e.g. "api,hooks"). Debug output goes to stderr only.'
+    ),
+  debugFile: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      "Claude --debug-file: write debug logs to a specific file path (enables debug mode)."
+    ),
+};
+
+/**
+ * Phase 4 Part A: shared Zod shape for the remaining `codex exec` flags, spread
+ * into both `codex_request` and `codex_request_async`. Every field traces to
+ * `codex exec --help`. `--remote` / `--remote-auth-token-env` are absent: they
+ * are TUI-only (top-level `codex` help, not `codex exec`) and gateway-managed
+ * (see provider capability facts). `--skip-git-repo-check` is already emitted
+ * unconditionally, so it needs no toggle field.
+ */
+const CODEX_PART_A_FIELDS = {
+  enable: z
+    .array(z.string())
+    .optional()
+    .describe(
+      "Codex --enable <FEATURE> (repeatable): enable a feature for this run (equivalent to -c features.<name>=true). Accepted on resume."
+    ),
+  disable: z
+    .array(z.string())
+    .optional()
+    .describe(
+      "Codex --disable <FEATURE> (repeatable): disable a feature for this run (equivalent to -c features.<name>=false). Accepted on resume."
+    ),
+  strictConfig: z
+    .boolean()
+    .optional()
+    .describe(
+      "Codex --strict-config: error out when config.toml contains fields not recognized by this Codex version. New sessions only."
+    ),
+  oss: z
+    .boolean()
+    .optional()
+    .describe("Codex --oss: use the open-source provider. New sessions only."),
+  localProvider: z
+    .enum(CODEX_LOCAL_PROVIDERS)
+    .optional()
+    .describe(
+      "Codex --local-provider: local OSS provider (lmstudio|ollama), used with oss. New sessions only."
+    ),
+  color: z
+    .enum(CODEX_COLOR_MODES)
+    .optional()
+    .describe("Codex --color: output color mode (always|never|auto). New sessions only."),
+  outputLastMessage: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      "Codex -o/--output-last-message <FILE>: write the agent's last message to a file. New sessions only."
+    ),
+  dangerouslyBypassHookTrust: z
+    .boolean()
+    .optional()
+    .describe(
+      "Codex --dangerously-bypass-hook-trust: run enabled hooks without persisted hook trust for this invocation. DANGEROUS. Explicit opt-in; never defaulted on."
+    ),
+};
 
 /**
  * grok_request input fields derived from the grok contract + generation table
@@ -743,6 +907,7 @@ export interface GatewayServerDeps {
   cacheAwareness?: CacheAwarenessConfig;
   providers?: ProvidersConfig;
   acpConfig?: AcpConfig;
+  adminConfig?: AdminConfig;
   workspaces?: WorkspaceRegistry;
 }
 
@@ -759,6 +924,7 @@ export interface GatewayServerRuntime {
   cacheAwareness: CacheAwarenessConfig;
   providers: ProvidersConfig;
   acpConfig: AcpConfig;
+  adminConfig: AdminConfig;
   workspaces: WorkspaceRegistry;
 }
 
@@ -796,7 +962,9 @@ export function resolveGatewayServerRuntime(
             runtimePerformanceMetrics,
             runtimeFlightRecorder,
             deps.cacheAwareness ?? getCacheAwarenessConfig(runtimeLogger),
-            deps.providers ?? getProvidersConfig(runtimeLogger)
+            deps.providers ?? getProvidersConfig(runtimeLogger),
+            undefined,
+            deps.acpConfig ?? getAcpConfig(runtimeLogger)
           )
         : resourceProvider),
     db: "db" in deps ? (deps.db ?? null) : db,
@@ -809,6 +977,7 @@ export function resolveGatewayServerRuntime(
     cacheAwareness: deps.cacheAwareness ?? getCacheAwarenessConfig(runtimeLogger),
     providers: deps.providers ?? getProvidersConfig(runtimeLogger),
     acpConfig: deps.acpConfig ?? getAcpConfig(runtimeLogger),
+    adminConfig: deps.adminConfig ?? getAdminConfig(runtimeLogger),
     workspaces: deps.workspaces ?? loadWorkspaceRegistry(runtimeLogger),
   };
 }
@@ -848,6 +1017,7 @@ export async function runAcpTransport(
     model?: string;
     sessionId?: string;
     correlationId?: string;
+    agentType?: string;
   }
 ): Promise<ExtendedToolResponse> {
   const runtime = resolveHandlerRuntime(deps);
@@ -872,13 +1042,32 @@ export async function runAcpTransport(
         model: params.model,
         sessionId: params.sessionId,
         correlationId: corrId,
+        agentType: params.agentType,
       }
     );
+    // M4: surface a non-normal terminal stop reason (refusal / cancelled /
+    // max_tokens) or an empty answer so a refused/truncated turn is not returned
+    // as an indistinguishable plain-success. Additive banner; never fails.
+    const stop = result.stopReason;
+    const normalStop = stop === null || stop === "end_turn";
+    let warning: string | null = null;
+    if (!normalStop) {
+      warning =
+        `provider ended the turn with stop_reason=${stop}` +
+        (result.text.trim().length === 0 ? " and produced no output" : "") +
+        "; the response may be partial or refused.";
+    } else if (result.text.trim().length === 0) {
+      warning =
+        "provider produced no assistant output (possible no-op, guardrail, or awaited input).";
+    }
+    const banner =
+      `[gateway] transport=acp session=${result.gatewaySessionId}` +
+      (warning ? `\n[gateway] warning: ${warning}` : "");
     return {
       content: [
         {
           type: "text" as const,
-          text: `[gateway] transport=acp session=${result.gatewaySessionId}\n${result.text}`,
+          text: `${banner}\n${result.text}`,
         },
       ],
     };
@@ -2114,7 +2303,7 @@ function resolveClaudeMcpConfig(
 // MCP Resources
 //──────────────────────────────────────────────────────────────────────────────
 
-function registerBaseResources(server: McpServer, runtime: GatewayServerRuntime): void {
+export function registerBaseResources(server: McpServer, runtime: GatewayServerRuntime): void {
   // Register skill resources (L2: full docs, read on demand)
   for (const skill of loadedSkills) {
     server.registerResource(
@@ -2154,165 +2343,47 @@ function registerBaseResources(server: McpServer, runtime: GatewayServerRuntime)
     }
   );
 
-  // Register Claude sessions resource
-  server.registerResource(
-    "claude-sessions",
-    "sessions://claude",
-    {
-      title: "🤖 Claude Sessions",
-      description: "Claude conversation sessions",
-      mimeType: "application/json",
-    },
-    async uri => {
-      runtime.logger.debug("Reading Claude sessions resource");
-      const contents = await runtime.resourceProvider.readResource(uri.href);
-      return { contents: contents ? [contents] : [] };
+  // Register per-provider sessions:// and models:// resources, generated from
+  // the provider-definition registry (generateResourceDescriptors). Every CLI
+  // provider that exposes the resource is registered here, including devin and
+  // cursor. No provider name is hand-spelled; a new provider definition flows
+  // through automatically. Read handlers delegate to runtime.resourceProvider so
+  // owner-scoping / principal isolation is unchanged. Titles render as
+  // `${icon} ${label}` for a consistent emoji prefix across every provider.
+  for (const descriptor of generateResourceDescriptors()) {
+    if (descriptor.exposesSessionsResource) {
+      server.registerResource(
+        `${descriptor.provider}-sessions`,
+        descriptor.sessionsUri,
+        {
+          title: `${descriptor.icon} ${descriptor.sessionLabel}s`,
+          description: `${descriptor.displayName} conversation sessions`,
+          mimeType: "application/json",
+        },
+        async uri => {
+          runtime.logger.debug(`Reading ${descriptor.sessionsUri} resource`);
+          const contents = await runtime.resourceProvider.readResource(uri.href);
+          return { contents: contents ? [contents] : [] };
+        }
+      );
     }
-  );
-
-  // Register Codex sessions resource
-  server.registerResource(
-    "codex-sessions",
-    "sessions://codex",
-    {
-      title: "💻 Codex Sessions",
-      description: "Codex conversation sessions",
-      mimeType: "application/json",
-    },
-    async uri => {
-      runtime.logger.debug("Reading Codex sessions resource");
-      const contents = await runtime.resourceProvider.readResource(uri.href);
-      return { contents: contents ? [contents] : [] };
+    if (descriptor.exposesModelsResource) {
+      server.registerResource(
+        `${descriptor.provider}-models`,
+        descriptor.modelsUri,
+        {
+          title: `${descriptor.icon} ${descriptor.displayName} Models & Capabilities`,
+          description: `${descriptor.displayName} models and capabilities`,
+          mimeType: "application/json",
+        },
+        async uri => {
+          runtime.logger.debug(`Reading ${descriptor.modelsUri} resource`);
+          const contents = await runtime.resourceProvider.readResource(uri.href);
+          return { contents: contents ? [contents] : [] };
+        }
+      );
     }
-  );
-
-  // Register Gemini sessions resource
-  server.registerResource(
-    "gemini-sessions",
-    "sessions://gemini",
-    {
-      title: "✨ Gemini Sessions",
-      description: "Gemini conversation sessions",
-      mimeType: "application/json",
-    },
-    async uri => {
-      runtime.logger.debug("Reading Gemini sessions resource");
-      const contents = await runtime.resourceProvider.readResource(uri.href);
-      return { contents: contents ? [contents] : [] };
-    }
-  );
-
-  // Register Grok sessions resource
-  server.registerResource(
-    "grok-sessions",
-    "sessions://grok",
-    {
-      title: "⚡ Grok Sessions",
-      description: "Grok conversation sessions",
-      mimeType: "application/json",
-    },
-    async uri => {
-      runtime.logger.debug("Reading Grok sessions resource");
-      const contents = await runtime.resourceProvider.readResource(uri.href);
-      return { contents: contents ? [contents] : [] };
-    }
-  );
-
-  // Register Mistral sessions resource
-  server.registerResource(
-    "mistral-sessions",
-    "sessions://mistral",
-    {
-      title: "🌬 Mistral Sessions",
-      description: "Mistral Vibe conversation sessions",
-      mimeType: "application/json",
-    },
-    async uri => {
-      runtime.logger.debug("Reading Mistral sessions resource");
-      const contents = await runtime.resourceProvider.readResource(uri.href);
-      return { contents: contents ? [contents] : [] };
-    }
-  );
-
-  // Register Claude models resource
-  server.registerResource(
-    "claude-models",
-    "models://claude",
-    {
-      title: "🧠 Claude Models",
-      description: "Claude models and capabilities",
-      mimeType: "application/json",
-    },
-    async uri => {
-      runtime.logger.debug("Reading Claude models resource");
-      const contents = await runtime.resourceProvider.readResource(uri.href);
-      return { contents: contents ? [contents] : [] };
-    }
-  );
-
-  // Register Codex models resource
-  server.registerResource(
-    "codex-models",
-    "models://codex",
-    {
-      title: "🔧 Codex Models",
-      description: "Codex models and capabilities",
-      mimeType: "application/json",
-    },
-    async uri => {
-      runtime.logger.debug("Reading Codex models resource");
-      const contents = await runtime.resourceProvider.readResource(uri.href);
-      return { contents: contents ? [contents] : [] };
-    }
-  );
-
-  // Register Gemini models resource
-  server.registerResource(
-    "gemini-models",
-    "models://gemini",
-    {
-      title: "🌟 Gemini Models",
-      description: "Gemini models and capabilities",
-      mimeType: "application/json",
-    },
-    async uri => {
-      runtime.logger.debug("Reading Gemini models resource");
-      const contents = await runtime.resourceProvider.readResource(uri.href);
-      return { contents: contents ? [contents] : [] };
-    }
-  );
-
-  // Register Grok models resource
-  server.registerResource(
-    "grok-models",
-    "models://grok",
-    {
-      title: "⚡ Grok Models",
-      description: "Grok models and capabilities",
-      mimeType: "application/json",
-    },
-    async uri => {
-      runtime.logger.debug("Reading Grok models resource");
-      const contents = await runtime.resourceProvider.readResource(uri.href);
-      return { contents: contents ? [contents] : [] };
-    }
-  );
-
-  // Register Mistral models resource
-  server.registerResource(
-    "mistral-models",
-    "models://mistral",
-    {
-      title: "🌬 Mistral Models",
-      description: "Mistral Vibe models and capabilities",
-      mimeType: "application/json",
-    },
-    async uri => {
-      runtime.logger.debug("Reading Mistral models resource");
-      const contents = await runtime.resourceProvider.readResource(uri.href);
-      return { contents: contents ? [contents] : [] };
-    }
-  );
+  }
 
   // Register performance metrics resource
   server.registerResource(
@@ -2482,6 +2553,55 @@ function registerBaseResources(server: McpServer, runtime: GatewayServerRuntime)
     }
   );
 
+  // Per-provider provider-acp://<provider> resources (phase-5 acceptance #4).
+  // LISTED for NATIVE-ACP providers only, driven from the provider-definition
+  // registry via generateProviderAcpDescriptors() (no hand-spelled names). Each
+  // read delegates to runtime.resourceProvider.readResource, which returns the
+  // negotiated `initialize` capability set (or the static-fallback record). The
+  // non-native record (native: false) is intentionally NOT listed here but is
+  // still readable through the provider-acp://{provider} template below, so a
+  // read of e.g. provider-acp://claude still returns the honest no-native record.
+  for (const descriptor of generateProviderAcpDescriptors()) {
+    server.registerResource(
+      `${descriptor.provider}-provider-acp`,
+      descriptor.acpUri,
+      {
+        title: `${descriptor.icon} ${descriptor.displayName} ACP Capabilities`,
+        description: `Native ACP entrypoint, negotiated capabilities, supported session methods, and host-service policy for ${descriptor.displayName}`,
+        mimeType: "application/json",
+      },
+      async uri => {
+        runtime.logger.debug(`Reading ${descriptor.acpUri} resource`);
+        const contents = await runtime.resourceProvider.readResource(uri.href);
+        return { contents: contents ? [contents] : [] };
+      }
+    );
+  }
+
+  // Read path for ANY provider-acp://<provider> (native OR non-native). The
+  // template is not listed (list: undefined) so it adds no native-entrypoint
+  // masquerade; it exists so a read of a non-native provider (claude/codex/
+  // gemini) still resolves to its honest native: false record. Native providers
+  // match their static registration above; the template serves the rest.
+  server.registerResource(
+    "provider-acp",
+    new ResourceTemplate("provider-acp://{provider}", { list: undefined }),
+    {
+      title: "Provider ACP Capabilities",
+      description:
+        "Read-only negotiated ACP capability record for one provider CLI (native: false for providers with no native ACP entrypoint)",
+      mimeType: "application/json",
+    },
+    async (uri, variables) => {
+      const provider = Array.isArray(variables.provider)
+        ? variables.provider[0]
+        : variables.provider;
+      runtime.logger.debug(`Reading provider-acp://${provider}`);
+      const contents = await runtime.resourceProvider.readResource(uri.href);
+      return { contents: contents ? [contents] : [] };
+    }
+  );
+
   // Cross-LLM validation receipts (Phase 3): expose the receipt as an MCP
   // resource, registered ONLY under the durable gate (sqlite + an attached run
   // store), the same gate as the validation_receipt tool. Same own-or-not-found
@@ -2626,6 +2746,47 @@ function resolvePromptOrPartsForPrep(args: {
   };
 }
 
+/**
+ * H1: reject caller-supplied host filesystem paths / plugin loaders for remote
+ * (HTTP/OAuth) principals.
+ *
+ * A remote connector is confined to a registered workspace (it must select one
+ * by alias; see `resolveWorkspaceAndWorktreeForRequest`) and `workingDir`/
+ * `addDir` are already path-confined against that workspace. But the advanced
+ * per-provider path fields (systemPromptFile/appendSystemPromptFile/settings/
+ * config/agentConfig/promptFile/images/outputSchema to READ, debugFile/
+ * outputLastMessage/exportSession to WRITE, pluginDir/pluginUrl to load code)
+ * are pushed to the CLI verbatim, so without this gate a remote principal could
+ * read, write, or execute arbitrary host paths outside its workspace. These
+ * fields have no legitimate remote-connector use, so they are rejected outright
+ * rather than path-confined (confinement cannot be applied safely to a
+ * not-yet-existing write target or to a `--plugin-url`). Local stdio callers are
+ * unaffected: the gate is a no-op unless the active request context is remote.
+ *
+ * Returns an error `ExtendedToolResponse` (matching the prep functions' error
+ * convention) when a restricted field is present on a remote request, else null.
+ */
+function remoteHostPathFieldError(
+  operation: string,
+  corrId: string,
+  fields: Record<string, unknown>
+): ExtendedToolResponse | null {
+  const ctx = getRequestContext();
+  const isRemote = ctx?.transport === "http" || ctx?.authKind === "oauth";
+  if (!isRemote) return null;
+  const present = Object.entries(fields)
+    .filter(([, v]) => (Array.isArray(v) ? v.length > 0 : v !== undefined && v !== null))
+    .map(([k]) => k);
+  if (present.length === 0) return null;
+  return createErrorResponse(
+    operation,
+    1,
+    `Remote HTTP/OAuth requests may not use host-path or plugin fields: ${present.join(", ")}. ` +
+      `These are restricted to local callers; supply content inline or reference a registered workspace.`,
+    corrId
+  );
+}
+
 export function prepareClaudeRequest(
   params: {
     prompt?: string;
@@ -2663,12 +2824,35 @@ export function prepareClaudeRequest(
     settingSources?: string;
     settings?: string;
     tools?: string[];
+    // Phase 4 Part A: remaining headless-safe Claude CLI modifiers.
+    includeHookEvents?: boolean;
+    replayUserMessages?: boolean;
+    systemPromptFile?: string;
+    appendSystemPromptFile?: string;
+    name?: string;
+    pluginDir?: string[];
+    pluginUrl?: string[];
+    safeMode?: boolean;
+    bare?: boolean;
+    debug?: string | boolean;
+    debugFile?: string;
   },
   runtime: GatewayServerRuntime = resolveGatewayServerRuntime()
 ): CliRequestPrep | ExtendedToolResponse {
   const corrId = params.correlationId || randomUUID();
   const cliInfo = getCliInfo();
   const resolvedModel = resolveModelAlias("claude", params.model, cliInfo);
+
+  // H1: remote principals may not hand Claude arbitrary host paths / plugins.
+  const remoteFieldErr = remoteHostPathFieldError(params.operation, corrId, {
+    settings: params.settings,
+    systemPromptFile: params.systemPromptFile,
+    appendSystemPromptFile: params.appendSystemPromptFile,
+    pluginDir: params.pluginDir,
+    pluginUrl: params.pluginUrl,
+    debugFile: params.debugFile,
+  });
+  if (remoteFieldErr) return remoteFieldErr;
 
   const inputResolution = resolvePromptOrPartsForPrep({
     prompt: params.prompt,
@@ -2995,6 +3179,17 @@ export function prepareClaudeRequest(
       settingSources: params.settingSources,
       settings: params.settings,
       tools: params.tools,
+      includeHookEvents: params.includeHookEvents,
+      replayUserMessages: params.replayUserMessages,
+      systemPromptFile: params.systemPromptFile,
+      appendSystemPromptFile: params.appendSystemPromptFile,
+      name: params.name,
+      pluginDir: params.pluginDir,
+      pluginUrl: params.pluginUrl,
+      safeMode: params.safeMode,
+      bare: params.bare,
+      debug: params.debug,
+      debugFile: params.debugFile,
     })
   );
 
@@ -3065,12 +3260,37 @@ export function prepareCodexRequest(
     // and writable dirs), so we emit them on NEW sessions only.
     workingDir?: string;
     addDir?: string[];
+    // Phase 4 Part A: remaining `codex exec` flags.
+    // enable/disable are `-c features.*` equivalents (accepted on resume, emitted
+    // in both branches). oss/localProvider/strictConfig/color/outputLastMessage
+    // are provider/output selection flags emitted on NEW sessions only (resume
+    // inherits the original session's provider + output config).
+    enable?: string[];
+    disable?: string[];
+    strictConfig?: boolean;
+    oss?: boolean;
+    localProvider?: CodexLocalProvider;
+    color?: CodexColorMode;
+    outputLastMessage?: string;
+    // Top-level danger flag, emitted unconditionally (mirrors
+    // dangerouslyBypassApprovalsAndSandbox). Never defaulted on.
+    dangerouslyBypassHookTrust?: boolean;
   },
   runtime: GatewayServerRuntime = resolveGatewayServerRuntime()
 ): CodexRequestPrep | ExtendedToolResponse {
   const corrId = params.correlationId || randomUUID();
   const cliInfo = getCliInfo();
   const resolvedModel = resolveModelAlias("codex", params.model, cliInfo);
+
+  // H1: remote principals may not hand Codex arbitrary host paths. Only the
+  // string (caller-path) form of outputSchema is restricted; an inline object
+  // schema is materialized into a gateway-owned temp file and is safe.
+  const remoteFieldErr = remoteHostPathFieldError(params.operation, corrId, {
+    outputSchema: typeof params.outputSchema === "string" ? params.outputSchema : undefined,
+    images: params.images,
+    outputLastMessage: params.outputLastMessage,
+  });
+  if (remoteFieldErr) return remoteFieldErr;
 
   const inputResolution = resolvePromptOrPartsForPrep({
     prompt: params.prompt,
@@ -3163,6 +3383,13 @@ export function prepareCodexRequest(
   if (params.dangerouslyBypassApprovalsAndSandbox) {
     args.push("--dangerously-bypass-approvals-and-sandbox");
   }
+  // Phase 4 Part A: `--dangerously-bypass-hook-trust` is a top-level codex
+  // flag (present in both `codex` and `codex exec` help). Emitted
+  // unconditionally when set, mirroring the bypass flag above. Explicit opt-in;
+  // never defaulted on.
+  if (params.dangerouslyBypassHookTrust) {
+    args.push("--dangerously-bypass-hook-trust");
+  }
   // #44: ALWAYS emit `--json` so the codex-json-parser receives JSONL events on
   // every request — this is what makes extractUsageAndCost() reachable on the
   // DEFAULT (text) path, not just the opt-in `json` path, so cache/token usage
@@ -3193,6 +3420,24 @@ export function prepareCodexRequest(
         args.push("--add-dir", dir);
       }
     }
+    // Phase 4 Part A: provider/output-selection flags. Emitted on NEW sessions
+    // only (like -C / --add-dir / --profile) because `codex exec resume`
+    // inherits the original session's provider + output configuration.
+    if (params.oss) {
+      args.push("--oss");
+    }
+    if (params.localProvider) {
+      args.push("--local-provider", params.localProvider);
+    }
+    if (params.strictConfig) {
+      args.push("--strict-config");
+    }
+    if (params.color) {
+      args.push("--color", params.color);
+    }
+    if (params.outputLastMessage !== undefined) {
+      args.push("--output-last-message", params.outputLastMessage);
+    }
     const high = prepareCodexHighImpactFlags({
       outputSchema: params.outputSchema,
       search: params.search,
@@ -3202,6 +3447,8 @@ export function prepareCodexRequest(
       images: params.images,
       ignoreUserConfig: params.ignoreUserConfig,
       ignoreRules: params.ignoreRules,
+      enable: params.enable,
+      disable: params.disable,
     });
     if (high.missingImagePath) {
       return createErrorResponse(
@@ -3232,6 +3479,8 @@ export function prepareCodexRequest(
       images: params.images,
       ignoreUserConfig: params.ignoreUserConfig,
       ignoreRules: params.ignoreRules,
+      enable: params.enable,
+      disable: params.disable,
     });
     if (high.missingImagePath) {
       return createErrorResponse(
@@ -3319,6 +3568,11 @@ export function prepareGeminiRequest(
      * session. Mutually exclusive with `project`.
      */
     newProject?: boolean;
+    /**
+     * Antigravity `--print-timeout <DURATION>`: print-mode wait timeout as a Go
+     * duration string (e.g. "5m0s", "30s"). Passed through verbatim.
+     */
+    printTimeout?: string;
   },
   runtime: GatewayServerRuntime = resolveGatewayServerRuntime()
 ): CliRequestPrep | ExtendedToolResponse {
@@ -3465,6 +3719,9 @@ export function prepareGeminiRequest(
   if (params.newProject) {
     args.push("--new-project");
   }
+  if (params.printTimeout !== undefined && params.printTimeout !== "") {
+    args.push("--print-timeout", params.printTimeout);
+  }
 
   return {
     corrId,
@@ -3606,6 +3863,19 @@ export function prepareGrokRequest(
   const corrId = params.correlationId || randomUUID();
   const cliInfo = getCliInfo();
   const resolvedModel = resolveModelAlias("grok", params.model, cliInfo);
+
+  // H1: remote principals may not hand Grok arbitrary host paths. promptFile and
+  // leaderSocket are always host paths (a file read / an arbitrary unix-socket
+  // connect); rules (`@file` form) and agent ("name or definition file path")
+  // are host-file read vectors. Rejected for remote callers; local stdio is
+  // unaffected. A remote caller should inline the content instead.
+  const remoteFieldErr = remoteHostPathFieldError(params.operation, corrId, {
+    promptFile: params.promptFile,
+    leaderSocket: params.leaderSocket,
+    rules: params.rules,
+    agent: params.agent,
+  });
+  if (remoteFieldErr) return remoteFieldErr;
 
   const inputResolution = resolvePromptOrPartsForPrep({
     prompt: params.prompt,
@@ -4025,6 +4295,17 @@ export function buildCliResponse(
   if (cli === "codex" && outputFormat !== "json") {
     finalStdout = codexDisplayText(stdout);
   }
+  // Phase 7: grok `--output-format streaming-json` emits raw NDJSON delta
+  // events, which are not a human reply. grokDisplayText() concatenates the
+  // `text` deltas into the final reply (and never leaks raw NDJSON), mirroring
+  // the codex display swap above. `json` mode is returned verbatim (the caller
+  // asked for the raw object) and `plain` is returned unchanged, so this is a
+  // no-op outside streaming-json. Raw `stdout` is still passed unchanged to
+  // extractUsageAndCost() below, so telemetry parsing is unaffected. Done before
+  // the optimize / review-integrity steps so they operate on the human reply.
+  if (cli === "grok") {
+    finalStdout = grokDisplayText(outputFormat, stdout);
+  }
   // Skip response optimization for JSON output to prevent corrupting structured data
   if (optimizeResponse && outputFormat !== "json") {
     const optimized = optimizeResponseText(finalStdout);
@@ -4050,15 +4331,20 @@ export function buildCliResponse(
   const derivedWarnings: WarningEntry[] = [];
   const extraStructured: Record<string, unknown> = {};
 
-  // Rec #1: Claude exits 0 even when the terminal result carries
-  // is_error:true (e.g. error_max_turns, error_during_execution). The signal
-  // lives in the result event for both json and stream-json; parseStreamJson is
-  // lenient on plain text (returns isError:false), so this never false-fires.
-  let claudeResultError = false;
+  // Rec #1: a provider can exit 0 while its terminal result event carries a
+  // failure signal (Claude is_error, Codex turn.failed/error, Gemini result
+  // status:error). Each parser already extracts the signal; surface it as an
+  // additive warning so a clean-exit-that-actually-failed is not reported as a
+  // plain success (the silent-success class the project has hit before). Set for
+  // ANY provider so the empty_output check below does not double-warn.
+  let resultError = false;
   if (cli === "claude") {
+    // The signal lives in the result event for both json and stream-json;
+    // parseStreamJson is lenient on plain text (returns isError:false), so this
+    // never false-fires.
     const parsedResult = parseStreamJson(stdout);
     if (parsedResult.isError) {
-      claudeResultError = true;
+      resultError = true;
       extraStructured.resultIsError = true;
       derivedWarnings.push({
         code: "claude_result_error",
@@ -4069,18 +4355,43 @@ export function buildCliResponse(
   }
 
   // Rec #3: surface the real Codex session UUID (thread_id) so callers can
-  // resume/fork without filesystem access. Purely additive field.
+  // resume/fork without filesystem access. Purely additive field. Also flag a
+  // failed turn (turn.failed / error event) that codex printed before exiting 0.
   if (cli === "codex") {
     const parsedCodex = parseCodexJsonStream(stdout);
     if (parsedCodex.threadId) {
       extraStructured.codexSessionId = parsedCodex.threadId;
     }
+    if (parsedCodex.error) {
+      resultError = true;
+      extraStructured.resultIsError = true;
+      derivedWarnings.push({
+        code: "codex_result_error",
+        message: `Codex exited 0 but reported a failed turn: ${parsedCodex.error}. The returned text may be partial.`,
+      });
+    }
+  }
+
+  // Gemini exits 0 even when the terminal `result` event reports status:"error".
+  // parseGeminiJson/parseGeminiStreamJson map that status into stopReason.
+  if (cli === "gemini") {
+    const parsedGemini =
+      outputFormat === "stream-json" ? parseGeminiStreamJson(stdout) : parseGeminiJson(stdout);
+    if (parsedGemini?.stopReason === "error") {
+      resultError = true;
+      extraStructured.resultIsError = true;
+      derivedWarnings.push({
+        code: "gemini_result_error",
+        message:
+          "Gemini exited 0 but the result event reported status:error. The returned text may be partial.",
+      });
+    }
   }
 
   // Rec #6: a clean exit with empty assistant output is reported as success
-  // today. Flag it as a warning (not an error). Skip when the Claude is_error
+  // today. Flag it as a warning (not an error). Skip when a provider result-error
   // signal already fired so the two do not double-warn on the same result.
-  if (!claudeResultError && finalStdout.trim().length === 0) {
+  if (!resultError && finalStdout.trim().length === 0) {
     extraStructured.emptyOutput = true;
     derivedWarnings.push({
       code: "empty_output",
@@ -5243,6 +5554,11 @@ export interface GeminiRequestParams {
   project?: string;
   /** Antigravity 1.0.13 `--new-project`: create a new project for this session. */
   newProject?: boolean;
+  /**
+   * Antigravity `--print-timeout <DURATION>`: print-mode wait timeout as a Go
+   * duration string (e.g. "5m0s", "30s"). Passed through verbatim.
+   */
+  printTimeout?: string;
   workspace?: string;
   /** Slice λ: run this request inside a gateway-owned git worktree. */
   worktree?: boolean | { name?: string; ref?: string };
@@ -5313,6 +5629,7 @@ export async function handleGeminiRequest(
       yolo: params.yolo,
       project: params.project,
       newProject: params.newProject,
+      printTimeout: params.printTimeout,
     },
     runtime
   );
@@ -5452,6 +5769,9 @@ export async function handleGeminiRequest(
       }
     }
     const geminiUsage = extractUsageAndCost("gemini", stdout, params.outputFormat);
+    // Phase 7: Gemini stream-json carries a session id (init event) + result
+    // status; persist them so a deferred/fresh session stays resumable.
+    const geminiMeta = extractProviderOutputMetadata("gemini", stdout, params.outputFormat);
     safeFlightComplete(
       corrId,
       {
@@ -5468,6 +5788,8 @@ export async function handleGeminiRequest(
         cacheReadTokens: geminiUsage.cacheReadTokens,
         cacheCreationTokens: geminiUsage.cacheCreationTokens,
         costUsd: geminiUsage.costUsd,
+        providerSessionId: geminiMeta.sessionId,
+        stopReason: geminiMeta.stopReason,
       },
       runtime
     );
@@ -5524,6 +5846,7 @@ export async function handleGeminiRequestAsync(
       yolo: params.yolo,
       project: params.project,
       newProject: params.newProject,
+      printTimeout: params.printTimeout,
     },
     runtime
   );
@@ -5918,6 +6241,10 @@ export async function handleGrokRequest(
         first.text = formatWorktreePrefix(worktreeResolution.worktreePath) + first.text;
       }
     }
+    // Phase 7: Grok `-p` json/streaming-json carry a provider session id + stop
+    // reason (but no usage). Persist them so a fresh Grok session stays
+    // resumable even when the gateway session_id column holds a gw-* id.
+    const grokMeta = extractProviderOutputMetadata("grok", stdout, params.outputFormat);
     safeFlightComplete(
       corrId,
       {
@@ -5929,6 +6256,8 @@ export async function handleGrokRequest(
         optimizationApplied: params.optimizePrompt || (params.optimizeResponse ?? false),
         exitCode: 0,
         status: "completed",
+        providerSessionId: grokMeta.sessionId,
+        stopReason: grokMeta.stopReason,
       },
       runtime
     );
@@ -6132,6 +6461,29 @@ export interface DevinRequestParams {
   model?: string;
   permissionMode?: "auto" | "smart" | "dangerous";
   promptFile?: string;
+  /** Devin `--config <PATH>`: config file path. */
+  config?: string;
+  /** Devin `--sandbox`: run the session in a sandbox (bare boolean flag). */
+  sandbox?: boolean;
+  /**
+   * Devin `--export [<PATH>]`: export the session. `true` emits a bare
+   * `--export`; a string emits `--export <path>` (write to that path).
+   */
+  exportSession?: boolean | string;
+  /**
+   * Devin `--respect-workspace-trust [<bool>]`: emits
+   * `--respect-workspace-trust true|false`. Devin defaults this to true for
+   * interactive mode and false for print (non-interactive) mode.
+   */
+  respectWorkspaceTrust?: boolean;
+  /** Devin `--agent-config <FILE>`: agent config file path. */
+  agentConfig?: string;
+  /**
+   * Devin ACP `--agent-type <type>` (summarizer|review). Only applies when
+   * transport=acp; threaded into the `devin acp` spawn argv. Ignored for the CLI
+   * transport.
+   */
+  agentType?: DevinAcpAgentType;
   transport?: "cli" | "acp";
   sessionId?: string;
   resumeLatest?: boolean;
@@ -6150,6 +6502,11 @@ export function prepareDevinRequest(
     model?: string;
     permissionMode?: DevinRequestParams["permissionMode"];
     promptFile?: string;
+    config?: string;
+    sandbox?: boolean;
+    exportSession?: boolean | string;
+    respectWorkspaceTrust?: boolean;
+    agentConfig?: string;
     correlationId?: string;
     optimizePrompt: boolean;
     operation: string;
@@ -6157,6 +6514,16 @@ export function prepareDevinRequest(
   _runtime: GatewayServerRuntime
 ): CliRequestPrep | ExtendedToolResponse {
   const corrId = params.correlationId ?? randomUUID();
+  // H1: remote principals may not hand Devin arbitrary host paths. Only the
+  // string (caller-path) form of exportSession is a write target; the bare
+  // boolean form is a flag with no caller path and is left alone.
+  const remoteFieldErr = remoteHostPathFieldError(params.operation, corrId, {
+    promptFile: params.promptFile,
+    config: params.config,
+    agentConfig: params.agentConfig,
+    exportSession: typeof params.exportSession === "string" ? params.exportSession : undefined,
+  });
+  if (remoteFieldErr) return remoteFieldErr;
   let prompt = (params.prompt ?? "").trim();
   if (!prompt) {
     return createErrorResponse(
@@ -6174,6 +6541,20 @@ export function prepareDevinRequest(
   if (resolvedModel) args.push("--model", resolvedModel);
   if (params.permissionMode) args.push("--permission-mode", params.permissionMode);
   if (params.promptFile) args.push("--prompt-file", params.promptFile);
+  if (params.config) args.push("--config", params.config);
+  // `--sandbox` is a safety control: bare boolean flag, never defaulted on.
+  if (params.sandbox) args.push("--sandbox");
+  // `--export` takes an optional path: `true` -> bare flag; string -> flag + path.
+  if (typeof params.exportSession === "string") {
+    args.push("--export", params.exportSession);
+  } else if (params.exportSession === true) {
+    args.push("--export");
+  }
+  // `--respect-workspace-trust` takes an optional value; emit the explicit bool.
+  if (params.respectWorkspaceTrust !== undefined) {
+    args.push("--respect-workspace-trust", params.respectWorkspaceTrust ? "true" : "false");
+  }
+  if (params.agentConfig) args.push("--agent-config", params.agentConfig);
   return {
     corrId,
     effectivePrompt: prompt,
@@ -6198,6 +6579,7 @@ export async function handleDevinRequest(
       model: params.model,
       sessionId: params.sessionId,
       correlationId: params.correlationId,
+      agentType: params.agentType,
     });
   }
   const runtime = resolveHandlerRuntime(deps);
@@ -6208,6 +6590,11 @@ export async function handleDevinRequest(
       model: params.model,
       permissionMode: params.permissionMode,
       promptFile: params.promptFile,
+      config: params.config,
+      sandbox: params.sandbox,
+      exportSession: params.exportSession,
+      respectWorkspaceTrust: params.respectWorkspaceTrust,
+      agentConfig: params.agentConfig,
       correlationId: params.correlationId,
       optimizePrompt: params.optimizePrompt,
       operation: "devin_request",
@@ -6368,6 +6755,11 @@ export async function handleDevinRequestAsync(
       model: params.model,
       permissionMode: params.permissionMode,
       promptFile: params.promptFile,
+      config: params.config,
+      sandbox: params.sandbox,
+      exportSession: params.exportSession,
+      respectWorkspaceTrust: params.respectWorkspaceTrust,
+      agentConfig: params.agentConfig,
       correlationId: params.correlationId,
       optimizePrompt: params.optimizePrompt,
       operation: "devin_request_async",
@@ -7395,6 +7787,15 @@ export async function handleCodexRequestAsync(
     // Phase 4 slice ζ — Codex working-dir + add-dir parity.
     workingDir?: string;
     addDir?: string[];
+    // Phase 4 Part A: remaining `codex exec` flags.
+    enable?: string[];
+    disable?: string[];
+    strictConfig?: boolean;
+    oss?: boolean;
+    localProvider?: CodexLocalProvider;
+    color?: CodexColorMode;
+    outputLastMessage?: string;
+    dangerouslyBypassHookTrust?: boolean;
     workspace?: string;
     /** Slice λ: run this request inside a gateway-owned git worktree. */
     worktree?: boolean | { name?: string; ref?: string };
@@ -7436,6 +7837,14 @@ export async function handleCodexRequestAsync(
       ignoreRules: params.ignoreRules,
       workingDir: params.workingDir,
       addDir: params.addDir,
+      enable: params.enable,
+      disable: params.disable,
+      strictConfig: params.strictConfig,
+      oss: params.oss,
+      localProvider: params.localProvider,
+      color: params.color,
+      outputLastMessage: params.outputLastMessage,
+      dangerouslyBypassHookTrust: params.dangerouslyBypassHookTrust,
     },
     runtime
   );
@@ -7640,6 +8049,13 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       persistence.backend === "sqlite" ? asyncJobManager.getValidationRunStore() : null,
   });
   registerWorkspaceTools(server, runtime);
+  // Phase 6: provider admin surfaces (read-only + gated mutating). Availability
+  // is projected from runtime discovery; mutating ops are deny-by-default.
+  registerProviderAdminTools(server, {
+    approvalManager: runtime.approvalManager,
+    logger: runtime.logger,
+    allowMutatingCliAdminOps: runtime.adminConfig.allowMutatingCliAdminOps,
+  });
   // Slice 2: per-provider api_<name>_request tools. Dormant unless a
   // [providers.<name>] is configured + enabled (enabledApiProviders gate).
   const apiProviderTools = registerApiProviderTools(server, runtime, providers, asyncJobsEnabled);
@@ -7904,6 +8320,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .describe(
           'Claude --tools: restrict the available built-in tool set (distinct from allowedTools permission gating). Pass [""] to disable all tools.'
         ),
+      ...CLAUDE_PART_A_FIELDS,
       workspace: providerWorkspaceAliasSchema(),
       worktree: WORKTREE_SCHEMA.optional(),
       approvalStrategy: z
@@ -7977,6 +8394,17 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       settingSources,
       settings,
       tools,
+      includeHookEvents,
+      replayUserMessages,
+      systemPromptFile,
+      appendSystemPromptFile,
+      name,
+      pluginDir,
+      pluginUrl,
+      safeMode,
+      bare,
+      debug,
+      debugFile,
       workspace,
       worktree,
       approvalStrategy,
@@ -8034,6 +8462,17 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           settingSources,
           settings,
           tools,
+          includeHookEvents,
+          replayUserMessages,
+          systemPromptFile,
+          appendSystemPromptFile,
+          name,
+          pluginDir,
+          pluginUrl,
+          safeMode,
+          bare,
+          debug,
+          debugFile,
         },
         runtime
       );
@@ -8232,6 +8671,10 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
               optimizationApplied: optimizePrompt || optimizeResponse,
               exitCode: 0,
               status: "completed",
+              // Phase 7: the terminal result event carries the session id +
+              // Anthropic stop_reason; persist both for durable resume/audit.
+              providerSessionId: parsed.sessionId ?? undefined,
+              stopReason: parsed.stopReason ?? undefined,
             },
             runtime
           );
@@ -8255,6 +8698,9 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           }
           return streamResponse;
         }
+        // Phase 7: non-stream claude (json/text). parseStreamJson also scans a
+        // single json result object; plain text yields no fields (capability fact).
+        const claudeMeta = extractProviderOutputMetadata("claude", stdout, outputFormat);
         safeFlightComplete(
           corrId,
           {
@@ -8265,6 +8711,8 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             optimizationApplied: optimizePrompt || optimizeResponse,
             exitCode: 0,
             status: "completed",
+            providerSessionId: claudeMeta.sessionId,
+            stopReason: claudeMeta.stopReason,
           },
           runtime
         );
@@ -8468,6 +8916,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           "Codex --add-dir <DIR>: additional writable workspace directories. Emitted once per entry on new sessions only; resume inherits the original session's writable-dir policy." +
             LOCAL_ADD_DIR_FIELD_SUFFIX
         ),
+      ...CODEX_PART_A_FIELDS,
       workspace: providerWorkspaceAliasSchema(),
       worktree: WORKTREE_SCHEMA.optional(),
     },
@@ -8509,6 +8958,14 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       ignoreRules,
       workingDir,
       addDir,
+      enable,
+      disable,
+      strictConfig,
+      oss,
+      localProvider,
+      color,
+      outputLastMessage,
+      dangerouslyBypassHookTrust,
       workspace,
       worktree,
     }) => {
@@ -8543,6 +9000,14 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           ignoreRules,
           workingDir,
           addDir,
+          enable,
+          disable,
+          strictConfig,
+          oss,
+          localProvider,
+          color,
+          outputLastMessage,
+          dangerouslyBypassHookTrust,
         },
         runtime
       );
@@ -8647,12 +9112,19 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             runtime
           );
           // Codex reports failures (turn.failed / error events) on the JSONL
-          // stdout stream; on a non-zero exit stderr is often empty. Fall back
-          // to the reconstructed display text (never raw JSONL) so the caller
-          // sees the real reason instead of a bare exit code. Add a resume hint
+          // stdout stream; on a non-zero exit stderr is often empty. Prefer the
+          // parsed failure reason (the turn.failed/error text) over the
+          // reconstructed agent message, so the caller sees the real reason and
+          // not a partial reply Codex printed before failing; fall back to the
+          // display text (never raw JSONL) then the exit code. Add a resume hint
           // when a by-id resume/fork looks like it missed its session.
+          const parsedCodexError = parseCodexJsonStream(stdout).error;
           const codexErrorDetail =
-            stderr && stderr.trim().length > 0 ? stderr : codexDisplayText(stdout);
+            stderr && stderr.trim().length > 0
+              ? stderr
+              : parsedCodexError && parsedCodexError.trim().length > 0
+                ? parsedCodexError
+                : codexDisplayText(stdout);
           const codexResumeHint =
             sessionId &&
             /not found|no such|unknown session|does not exist|invalid session/i.test(
@@ -8696,6 +9168,10 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
 
         logger.info(`[${corrId}] codex_request completed successfully in ${durationMs}ms`);
         const codexUsage = extractUsageAndCost("codex", stdout, outputFormat);
+        // Phase 7: capture codex's thread id (session) from the JSONL stream so
+        // the FR row keeps the provider session id. Stop reason is a capability
+        // fact (codex `exec --json` does not emit one), so it stays NULL.
+        const codexMeta = extractProviderOutputMetadata("codex", stdout, outputFormat);
         // #44: usage is parsed from the raw JSONL `stdout`, but the FR response
         // column stores the reconstructed reply (== text-mode stdout) so
         // read-back surfaces (llm_request_result, cache-stats) get plain text,
@@ -8718,6 +9194,8 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             cacheReadTokens: codexUsage.cacheReadTokens,
             cacheCreationTokens: codexUsage.cacheCreationTokens,
             costUsd: codexUsage.costUsd,
+            providerSessionId: codexMeta.sessionId,
+            stopReason: codexMeta.stopReason,
           },
           runtime
         );
@@ -8921,12 +9399,19 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         durationMs = Math.max(0, Date.now() - startTime);
         if (code !== 0) {
           // Codex reports failures (turn.failed / error events) on the JSONL
-          // stdout stream; on a non-zero exit stderr is often empty. Fall back
-          // to the reconstructed display text (never raw JSONL) so the caller
-          // sees the real reason instead of a bare exit code. Add a resume hint
+          // stdout stream; on a non-zero exit stderr is often empty. Prefer the
+          // parsed failure reason (the turn.failed/error text) over the
+          // reconstructed agent message, so the caller sees the real reason and
+          // not a partial reply Codex printed before failing; fall back to the
+          // display text (never raw JSONL) then the exit code. Add a resume hint
           // when a by-id resume/fork looks like it missed its session.
+          const parsedCodexError = parseCodexJsonStream(stdout).error;
           const codexErrorDetail =
-            stderr && stderr.trim().length > 0 ? stderr : codexDisplayText(stdout);
+            stderr && stderr.trim().length > 0
+              ? stderr
+              : parsedCodexError && parsedCodexError.trim().length > 0
+                ? parsedCodexError
+                : codexDisplayText(stdout);
           const codexResumeHint =
             sessionId &&
             /not found|no such|unknown session|does not exist|invalid session/i.test(
@@ -9086,6 +9571,13 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .describe(
           "Antigravity 1.0.13 --new-project: create a new project for this session. Mutually exclusive with project."
         ),
+      printTimeout: z
+        .string()
+        .min(1)
+        .optional()
+        .describe(
+          "Antigravity --print-timeout <DURATION>: print-mode wait timeout as a Go duration string (e.g. '5m0s', '30s')."
+        ),
       workspace: providerWorkspaceAliasSchema(),
       worktree: WORKTREE_SCHEMA.optional(),
     },
@@ -9123,6 +9615,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       yolo,
       project,
       newProject,
+      printTimeout,
       workspace,
       worktree,
     }) => {
@@ -9155,6 +9648,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           yolo,
           project,
           newProject,
+          printTimeout,
           workspace,
           worktree,
         }
@@ -9447,6 +9941,35 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .string()
         .optional()
         .describe("Load the initial prompt from a file (--prompt-file)"),
+      config: z.string().optional().describe("Config file path (Devin --config <PATH>)"),
+      sandbox: z
+        .boolean()
+        .optional()
+        .describe(
+          "Run the Devin session in a sandbox (Devin --sandbox). Safety control: never defaulted on; pass true to opt in."
+        ),
+      exportSession: z
+        .union([z.boolean(), z.string()])
+        .optional()
+        .describe(
+          "Export the session (Devin --export [<PATH>]). true emits a bare --export; a string path emits --export <path>."
+        ),
+      respectWorkspaceTrust: z
+        .boolean()
+        .optional()
+        .describe(
+          "Respect workspace trust (Devin --respect-workspace-trust <bool>). Devin defaults true for interactive and false for print mode; set explicitly to override."
+        ),
+      agentConfig: z
+        .string()
+        .optional()
+        .describe("Agent config file path (Devin --agent-config <FILE>)"),
+      agentType: z
+        .enum(DEVIN_ACP_AGENT_TYPES)
+        .optional()
+        .describe(
+          "ACP agent variant for transport=acp (`devin acp --agent-type`): 'summarizer' (no tools, text summary) or 'review' (read-only + shell code-review). Ignored for the CLI transport."
+        ),
       sessionId: z
         .string()
         .optional()
@@ -9490,6 +10013,12 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       transport,
       permissionMode,
       promptFile,
+      config,
+      sandbox,
+      exportSession,
+      respectWorkspaceTrust,
+      agentConfig,
+      agentType,
       sessionId,
       resumeLatest,
       createNewSession,
@@ -9507,6 +10036,12 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           transport,
           permissionMode,
           promptFile,
+          config,
+          sandbox,
+          exportSession,
+          respectWorkspaceTrust,
+          agentConfig,
+          agentType,
           sessionId,
           resumeLatest,
           createNewSession,
@@ -10035,6 +10570,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .describe(
             'Claude --tools: restrict the available built-in tool set (distinct from allowedTools permission gating). Pass [""] to disable all tools.'
           ),
+        ...CLAUDE_PART_A_FIELDS,
         workspace: providerWorkspaceAliasSchema(),
         worktree: WORKTREE_SCHEMA.optional(),
         approvalStrategy: z
@@ -10107,6 +10643,17 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         settingSources,
         settings,
         tools,
+        includeHookEvents,
+        replayUserMessages,
+        systemPromptFile,
+        appendSystemPromptFile,
+        name,
+        pluginDir,
+        pluginUrl,
+        safeMode,
+        bare,
+        debug,
+        debugFile,
         workspace,
         worktree,
         approvalStrategy,
@@ -10162,6 +10709,17 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             settingSources,
             settings,
             tools,
+            includeHookEvents,
+            replayUserMessages,
+            systemPromptFile,
+            appendSystemPromptFile,
+            name,
+            pluginDir,
+            pluginUrl,
+            safeMode,
+            bare,
+            debug,
+            debugFile,
           },
           runtime
         );
@@ -10428,6 +10986,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             "Codex --add-dir <DIR>: additional writable workspace directories (repeat per entry). New sessions only." +
               LOCAL_ADD_DIR_FIELD_SUFFIX
           ),
+        ...CODEX_PART_A_FIELDS,
         workspace: providerWorkspaceAliasSchema(),
         worktree: WORKTREE_SCHEMA.optional(),
       },
@@ -10468,6 +11027,14 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         ignoreRules,
         workingDir,
         addDir,
+        enable,
+        disable,
+        strictConfig,
+        oss,
+        localProvider,
+        color,
+        outputLastMessage,
+        dangerouslyBypassHookTrust,
         workspace,
         worktree,
       }) => {
@@ -10503,6 +11070,14 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             ignoreRules,
             workingDir,
             addDir,
+            enable,
+            disable,
+            strictConfig,
+            oss,
+            localProvider,
+            color,
+            outputLastMessage,
+            dangerouslyBypassHookTrust,
             workspace,
             worktree,
           }
@@ -10638,6 +11213,13 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .describe(
             "Antigravity 1.0.13 --new-project: create a new project for this session. Mutually exclusive with project."
           ),
+        printTimeout: z
+          .string()
+          .min(1)
+          .optional()
+          .describe(
+            "Antigravity --print-timeout <DURATION>: print-mode wait timeout as a Go duration string (e.g. '5m0s', '30s')."
+          ),
         workspace: providerWorkspaceAliasSchema(),
         worktree: WORKTREE_SCHEMA.optional(),
       },
@@ -10674,6 +11256,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         yolo,
         project,
         newProject,
+        printTimeout,
         workspace,
         worktree,
       }) => {
@@ -10705,6 +11288,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             yolo,
             project,
             newProject,
+            printTimeout,
             workspace,
             worktree,
           }
@@ -11112,6 +11696,29 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .string()
           .optional()
           .describe("Load the initial prompt from a file (--prompt-file)"),
+        config: z.string().optional().describe("Config file path (Devin --config <PATH>)"),
+        sandbox: z
+          .boolean()
+          .optional()
+          .describe(
+            "Run the Devin session in a sandbox (Devin --sandbox). Safety control: never defaulted on; pass true to opt in."
+          ),
+        exportSession: z
+          .union([z.boolean(), z.string()])
+          .optional()
+          .describe(
+            "Export the session (Devin --export [<PATH>]). true emits a bare --export; a string path emits --export <path>."
+          ),
+        respectWorkspaceTrust: z
+          .boolean()
+          .optional()
+          .describe(
+            "Respect workspace trust (Devin --respect-workspace-trust <bool>). Devin defaults true for interactive and false for print mode; set explicitly to override."
+          ),
+        agentConfig: z
+          .string()
+          .optional()
+          .describe("Agent config file path (Devin --agent-config <FILE>)"),
         sessionId: z
           .string()
           .optional()
@@ -11153,6 +11760,11 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         model,
         permissionMode,
         promptFile,
+        config,
+        sandbox,
+        exportSession,
+        respectWorkspaceTrust,
+        agentConfig,
         sessionId,
         resumeLatest,
         createNewSession,
@@ -11168,6 +11780,11 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             model,
             permissionMode,
             promptFile,
+            config,
+            sandbox,
+            exportSession,
+            respectWorkspaceTrust,
+            agentConfig,
             sessionId,
             resumeLatest,
             createNewSession,
@@ -11634,6 +12251,33 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           result.stdout = codexDisplayText(result.stdout);
         }
 
+        // Phase 7 remote-isolation: `providerSessionId` is a provider-owned
+        // session id parsed from the job's stdout for LOCAL resume. A remote
+        // HTTP/OAuth caller must never receive it (this extends the phase-5
+        // `remoteSafeSession` redaction, which only covered `session_get` /
+        // `sessions://*`, to job polling). `result` is a fresh object from
+        // getJobResult, so deleting the field here cannot mutate the stored job
+        // record; storage keeps the id for resume. (`llm_job_status` returns the
+        // bare AsyncJobSnapshot, which carries no provider session id / cwd /
+        // worktree path, so it needs no equivalent redaction.)
+        if (callerIsRemote()) {
+          const leakedId = result.providerSessionId;
+          delete result.providerSessionId;
+          // L1: the provider session id is also embedded verbatim in the raw
+          // stream-json stdout (gemini/grok/claude) it was parsed from, so
+          // deleting only the field would leave it trivially readable in
+          // result.stdout. Scrub it from the returned streams too. (Codex stdout
+          // was already swapped to a session-id-free display string above.)
+          if (leakedId) {
+            if (result.stdout && result.stdout.includes(leakedId)) {
+              result.stdout = result.stdout.split(leakedId).join("[redacted-session-id]");
+            }
+            if (result.stderr && result.stderr.includes(leakedId)) {
+              result.stderr = result.stderr.split(leakedId).join("[redacted-session-id]");
+            }
+          }
+        }
+
         return {
           content: [
             {
@@ -11969,10 +12613,9 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .max(500)
         .default(50)
         .describe("Max number of approval records"),
-      cli: z
-        .enum(["claude", "codex", "gemini", "grok", "mistral"])
-        .optional()
-        .describe("Optional CLI filter"),
+      cli: CLI_TYPE_ENUM.optional().describe(
+        "Optional CLI filter (any gateway CLI provider, derived from CLI_TYPES)"
+      ),
     },
     {
       title: "Approval decisions",
@@ -12037,21 +12680,46 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
     async ({ cli }) => {
       const cliInfo = getAvailableCliInfo();
       const apiRuntimes = enabledApiProviders(providers);
+      // Phase-3 additive enrichment: for CLI providers, attach the discovered
+      // live/cached model listing under a top-level `discovered` map (keyed by
+      // provider id) alongside the unchanged static registry entries. Discovery
+      // is a memo-only peek so this never spawns/hangs on the read path; when no
+      // capability set is resolvable the view is source "static-fallback". The
+      // API-provider-filter shape is intentionally left untouched.
+      const buildDiscoveredMap = (
+        clis: readonly CliType[]
+      ): Record<string, ProviderDiscoveredView> => {
+        const out: Record<string, ProviderDiscoveredView> = {};
+        for (const c of clis) {
+          out[c] = buildProviderDiscoveredView(
+            getProviderDefinition(c),
+            cliInfo[c],
+            peekProviderCapabilitySet
+          );
+        }
+        return out;
+      };
       let result: Record<string, unknown>;
       if (cli && (CLI_TYPES as readonly string[]).includes(cli)) {
-        // CLI filter: unchanged shape.
-        result = { [cli]: cliInfo[cli as CliType] };
+        // CLI filter: static entry preserved; discovered listing added additively.
+        result = {
+          [cli]: cliInfo[cli as CliType],
+          discovered: buildDiscoveredMap([cli as CliType]),
+        };
       } else if (cli) {
         // API-provider-name filter: the dynamic enum guarantees a match unless
         // the provider was disabled between registration and this call.
         const runtime = apiRuntimes.find(p => p.name === cli);
         result = { apiProviders: runtime ? [apiProviderCatalogEntry(runtime)] : [] };
       } else {
-        // List-all: CLI providers as before, plus an `apiProviders` array.
-        // OMIT the field entirely when none are enabled so the response is
-        // byte-identical to pre-Slice-5 output when the feature is dormant.
+        // List-all: CLI providers as before, plus the discovered map, plus an
+        // `apiProviders` array. OMIT apiProviders entirely when none are enabled.
         const apiProviders = apiRuntimes.map(apiProviderCatalogEntry);
-        result = { ...cliInfo, ...(apiProviders.length > 0 ? { apiProviders } : {}) };
+        result = {
+          ...cliInfo,
+          discovered: buildDiscoveredMap(CLI_TYPES),
+          ...(apiProviders.length > 0 ? { apiProviders } : {}),
+        };
       }
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
     }
@@ -12122,6 +12790,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         includePaths,
         refresh,
         providersConfig: providers,
+        acpConfig: runtime.acpConfig,
       });
       return { content: [{ type: "text", text: JSON.stringify(capabilities, null, 2) }] };
     }
@@ -12891,7 +13560,9 @@ async function initializeSessionManager(): Promise<void> {
     performanceMetrics,
     getFlightRecorder(logger),
     getCacheAwarenessConfig(logger),
-    getProvidersConfig(logger)
+    getProvidersConfig(logger),
+    undefined,
+    getAcpConfig(logger)
   );
 }
 
@@ -13463,6 +14134,13 @@ async function main() {
 
   // Initialize session manager first
   await initializeSessionManager();
+
+  // Phase-3: warm the provider capability memo in the background (fire-and-forget)
+  // so the read surfaces (models://<cli>, list_models) can serve live/cached
+  // discovered model listings. Seeds from the on-disk capability cache first to
+  // avoid spawns; never blocks startup and never rejects (each provider is
+  // fault-isolated). Read surfaces peek this memo synchronously.
+  void warmProviderCapabilities({ logger }).catch(() => undefined);
 
   const serverDeps: GatewayServerDeps = {
     sessionManager,

@@ -612,3 +612,71 @@ describe("AsyncJobManager + flight-recorder (slice 1.5)", () => {
     });
   });
 });
+
+describe("AsyncJobManager — provider sessionId + stopReason (phase 7)", () => {
+  const GROK_JSON = JSON.stringify({
+    text: "hi",
+    stopReason: "stop",
+    sessionId: "grok-uuid-7777",
+    requestId: "req-1",
+  });
+
+  function seedCompletedGrokJob(manager: AsyncJobManager, jobId: string): Record<string, unknown> {
+    const internal = manager as unknown as { jobs: Map<string, Record<string, unknown>> };
+    const job: Record<string, unknown> = {
+      id: jobId,
+      cli: "grok",
+      args: [],
+      requestKey: "rk-grok",
+      correlationId: "corr-grok-p7",
+      status: "completed",
+      startedAt: new Date().toISOString(),
+      finishedAt: new Date().toISOString(),
+      exitCode: 0,
+      stdout: GROK_JSON,
+      stderr: "",
+      outputTruncated: false,
+      canceled: false,
+      error: null,
+      process: null,
+      transport: "process",
+      abort: null,
+      httpStatus: null,
+      exited: true,
+      metricsRecorded: true,
+      outputFormat: "json",
+      outputDirty: false,
+      lastOutputFlushAt: Date.now(),
+      flightRecorderEntry: entry(),
+      flightCompleteArmed: true,
+      flightRecorderComplete: false,
+    };
+    internal.jobs.set(jobId, job);
+    return job;
+  }
+
+  it("getJobResult surfaces the provider sessionId + stopReason parsed from stdout", () => {
+    const fr = new CapturingFlightRecorder();
+    const manager = new AsyncJobManager(noopLogger, undefined, new MemoryJobStore(), fr);
+    seedCompletedGrokJob(manager, "job-grok-1");
+    const result = manager.getJobResult("job-grok-1");
+    // Mutation that flips this red: not calling extractProviderOutputMetadata in
+    // getJobResult (a deferred grok job would then lose the id needed to resume).
+    expect(result?.providerSessionId).toBe("grok-uuid-7777");
+    expect(result?.stopReason).toBe("stop");
+  });
+
+  it("writeFlightComplete persists providerSessionId + stopReason to logComplete", () => {
+    const fr = new CapturingFlightRecorder();
+    const manager = new AsyncJobManager(noopLogger, undefined, new MemoryJobStore(), fr);
+    const job = seedCompletedGrokJob(manager, "job-grok-2");
+    (
+      manager as unknown as { writeFlightComplete(j: unknown, s: string): void }
+    ).writeFlightComplete(job, "completed");
+    const c = fr.completes.find(x => x.correlationId === "corr-grok-p7");
+    // Mutation that flips this red: dropping providerSessionId/stopReason from
+    // the logComplete payload in writeFlightComplete.
+    expect(c?.result.providerSessionId).toBe("grok-uuid-7777");
+    expect(c?.result.stopReason).toBe("stop");
+  });
+});

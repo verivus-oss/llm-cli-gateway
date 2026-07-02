@@ -191,3 +191,28 @@ describe("parseGeminiStreamJson", () => {
     expect(result?.usage).toEqual({ input_tokens: 1, output_tokens: 1, cache_read_tokens: 0 });
   });
 });
+
+describe("Gemini sessionId + stopReason (phase 7)", () => {
+  it("extracts session_id from the stream-json init event (previously dropped)", () => {
+    const stdout = [
+      JSON.stringify({ type: "init", session_id: "conv-abc", model: "gemini" }),
+      JSON.stringify({ type: "message", role: "assistant", content: "hi", delta: true }),
+      JSON.stringify({
+        type: "result",
+        status: "success",
+        stats: { input_tokens: 1, output_tokens: 1 },
+      }),
+    ].join("\n");
+
+    const result = parseGeminiStreamJson(stdout);
+    // Mutation that flips this red: removing the init-event session_id branch
+    // in parseGeminiStreamJson (audit: session id was present but dropped).
+    expect(result?.sessionId).toBe("conv-abc");
+    expect(result?.stopReason).toBe("success");
+  });
+
+  it("leaves sessionId undefined for -o json (capability fact: none emitted)", () => {
+    const result = parseGeminiJson(JSON.stringify({ response: "hi" }));
+    expect(result?.sessionId).toBeUndefined();
+  });
+});

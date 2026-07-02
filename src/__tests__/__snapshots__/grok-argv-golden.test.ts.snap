@@ -23,6 +23,17 @@ exports[`grok argv golden (pre/post cutover parity) > minimal prompt-only reques
 ]
 `;
 
+exports[`grok argv golden (pre/post cutover parity) > named worktree with --worktree-ref (cross-flag guard) 1`] = `
+[
+  "-p",
+  "PROMPT",
+  "--worktree",
+  "feat",
+  "--worktree-ref",
+  "main",
+]
+`;
+
 exports[`grok argv golden (pre/post cutover parity) > no covered flags, only specials 1`] = `
 [
   "-p",

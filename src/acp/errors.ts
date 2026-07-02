@@ -25,6 +25,8 @@ export type AcpErrorKind =
   | "provider_acp_unsupported"
   | "provider_runtime_disabled"
   | "provider_unavailable"
+  | "method_unsupported"
+  | "mutating_disabled"
   | "protocol"
   | "timeout"
   | "permission_denied"
@@ -47,6 +49,13 @@ export function redactAcpMessage(input: string): string {
   // Bearer tokens / api keys.
   out = out.replace(/\b(bearer|token|api[_-]?key|secret)\b\s*[:=]?\s*\S+/gi, "$1 <redacted>");
   out = out.replace(/\b(sk|xai|gsk|key)-[A-Za-z0-9_-]{8,}\b/gi, "<redacted-token>");
+  // Provider-specific key/token shapes whose prefix has no separator (so the
+  // hyphenated rule above misses them): Google (`AIza...`), GitHub personal/
+  // OAuth/app/refresh tokens (`ghp_`/`gho_`/`ghu_`/`ghs_`/`ghr_`), and Slack
+  // (`xoxb-`/`xoxp-`/...). These can appear inline in a free-form provider error.
+  out = out.replace(/\bAIza[A-Za-z0-9_-]{10,}/g, "<redacted-token>");
+  out = out.replace(/\bgh[pousr]_[A-Za-z0-9]{20,}\b/g, "<redacted-token>");
+  out = out.replace(/\bxox[baprs]-[A-Za-z0-9-]{10,}\b/gi, "<redacted-token>");
 
   // Windows drive-letter paths (C:\Users\...\credentials.json) and UNC paths
   // (\\server\share\...). Redacted before the POSIX rules so the backslash body
@@ -294,6 +303,48 @@ export class ProviderUnavailableError extends AcpError {
       debug,
     });
     this.name = "ProviderUnavailableError";
+  }
+}
+
+/**
+ * A capability-gated ACP method was called but the agent did NOT advertise it in
+ * its `initialize` / session capability set. This is a precise capability error,
+ * distinct from a generic process/protocol failure: the method simply is not
+ * supported by this provider at runtime.
+ */
+export class AcpMethodUnsupportedError extends AcpError {
+  /** The ACP method that is not advertised. */
+  readonly method: string;
+
+  constructor(provider: CliType, method: string, debug?: AcpErrorDebug) {
+    super(
+      "method_unsupported",
+      `ACP method ${method} is not advertised by provider ${provider}'s capability set; the agent did not declare support for it.`,
+      { provider, debug: { method, ...(debug ?? {}) } }
+    );
+    this.name = "AcpMethodUnsupportedError";
+    this.method = method;
+  }
+}
+
+/**
+ * A state-mutating ACP admin method (`session/delete`, `session/set_mode`,
+ * `session/set_config_option`) was called while the operator's config gate for
+ * mutating session ops is off. Fails closed: mutating ACP ops are never enabled
+ * by default.
+ */
+export class AcpMutatingDisabledError extends AcpError {
+  /** The mutating ACP method that was refused. */
+  readonly method: string;
+
+  constructor(provider: CliType, method: string, debug?: AcpErrorDebug) {
+    super(
+      "mutating_disabled",
+      `ACP mutating session op ${method} is disabled. Set allow_mutating_session_ops=true under [acp] to permit state-mutating ACP admin ops.`,
+      { provider, debug: { method, ...(debug ?? {}) } }
+    );
+    this.name = "AcpMutatingDisabledError";
+    this.method = method;
   }
 }
 

@@ -958,6 +958,7 @@ const AcpConfigSchema = z
     prompt_timeout_ms: z.number().int().positive().default(DEFAULT_ACP_PROMPT_TIMEOUT_MS),
     allow_write_host_services: z.boolean().default(false),
     allow_terminal_host_services: z.boolean().default(false),
+    allow_mutating_session_ops: z.boolean().default(false),
     fallback_to_cli_when_unhealthy: z.boolean().default(true),
     providers: z.record(z.string(), AcpProviderSchema).default({}),
   })
@@ -981,6 +982,11 @@ export interface AcpConfig {
   promptTimeoutMs: number;
   allowWriteHostServices: boolean;
   allowTerminalHostServices: boolean;
+  /**
+   * Whether state-mutating ACP admin ops (`session/delete`, `session/set_mode`,
+   * `session/set_config_option`) may be invoked. Deny-by-default.
+   */
+  allowMutatingSessionOps: boolean;
   fallbackToCliWhenUnhealthy: boolean;
   providers: Record<string, AcpProviderConfig>;
   /** Audit trail: file the config was loaded from (or null if defaults). */
@@ -998,6 +1004,7 @@ function defaultAcpConfig(sourcePath: string | null): AcpConfig {
     promptTimeoutMs: DEFAULT_ACP_PROMPT_TIMEOUT_MS,
     allowWriteHostServices: false,
     allowTerminalHostServices: false,
+    allowMutatingSessionOps: false,
     fallbackToCliWhenUnhealthy: true,
     providers: {},
     sources: { configFile: sourcePath },
@@ -1071,8 +1078,82 @@ export function loadAcpConfig(logger: Logger = noopLogger): AcpConfig {
     promptTimeoutMs: parsed.prompt_timeout_ms,
     allowWriteHostServices: parsed.allow_write_host_services,
     allowTerminalHostServices: parsed.allow_terminal_host_services,
+    allowMutatingSessionOps: parsed.allow_mutating_session_ops,
     fallbackToCliWhenUnhealthy: parsed.fallback_to_cli_when_unhealthy,
     providers,
+    sources: { configFile: sourcePath },
+  };
+}
+
+//──────────────────────────────────────────────────────────────────────────────
+// CLI admin operations configuration ([admin])
+//
+// Gates the phase-6 provider-admin MUTATING surface (mcp add/remove, login/
+// logout, plugin install/remove, session delete/archive, ...). Deny-by-default,
+// parallel to acp.allow_mutating_session_ops: when false, a mutating admin tool
+// call fails closed WITHOUT spawning; when true it routes through the approval
+// manager and is audited. Read-only admin ops are unaffected by this gate.
+//──────────────────────────────────────────────────────────────────────────────
+
+const AdminConfigSchema = z
+  .object({
+    allow_mutating_cli_admin_ops: z.boolean().default(false),
+  })
+  .strict();
+
+export interface AdminConfig {
+  /** Whether mutating provider CLI admin ops may run. Deny-by-default. */
+  allowMutatingCliAdminOps: boolean;
+  /** Audit trail: file the config was loaded from (or null if defaults). */
+  sources: { configFile: string | null };
+}
+
+function defaultAdminConfig(sourcePath: string | null): AdminConfig {
+  return { allowMutatingCliAdminOps: false, sources: { configFile: sourcePath } };
+}
+
+function readAdminFile(
+  configPath: string,
+  logger: Logger
+): { raw: unknown; sourcePath: string | null } {
+  if (!existsSync(configPath)) {
+    return { raw: undefined, sourcePath: null };
+  }
+  try {
+    const require = createRequire(import.meta.url);
+    const TOML = require("smol-toml");
+    const text = readFileSync(configPath, "utf-8");
+    const parsed = TOML.parse(text) as Record<string, unknown>;
+    return { raw: parsed?.admin, sourcePath: configPath };
+  } catch (err) {
+    logger.error(`Failed to parse gateway config at ${configPath}; using admin defaults`, err);
+    return { raw: undefined, sourcePath: null };
+  }
+}
+
+/**
+ * Load [admin] from ~/.llm-cli-gateway/config.toml (override via $LLM_GATEWAY_CONFIG).
+ *
+ * Defaults are fully locked down (mutating CLI admin ops OFF). A syntax-invalid
+ * TOML keeps the whole-file fallback (defaults). A schema-invalid [admin] block
+ * THROWS so a misconfiguration cannot silently flip the mutating gate on.
+ */
+export function loadAdminConfig(logger: Logger = noopLogger): AdminConfig {
+  const configPath = defaultGatewayConfigPath();
+  const { raw, sourcePath } = readAdminFile(configPath, logger);
+  if (raw === undefined) {
+    return defaultAdminConfig(sourcePath);
+  }
+  let parsed;
+  try {
+    parsed = AdminConfigSchema.parse(raw);
+  } catch (err) {
+    throw new Error(`Invalid [admin] config: ${err instanceof Error ? err.message : String(err)}`, {
+      cause: err,
+    });
+  }
+  return {
+    allowMutatingCliAdminOps: parsed.allow_mutating_cli_admin_ops,
     sources: { configFile: sourcePath },
   };
 }
