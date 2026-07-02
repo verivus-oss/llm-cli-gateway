@@ -20,10 +20,13 @@ permissions:
 
 jobs:
   deploy:
-    # Only the public mirror holds the CLOUDFLARE_API_TOKEN secret and owns the
-    # Pages project. The private dev repo skips this job (the secret is not, and
-    # must not be, present there).
+    # Only the public mirror owns the Pages project. The private dev repo skips
+    # this job.
     if: github.repository == 'verivus-oss/llm-cli-gateway'
+    environment: cloudflare-pages-llm-cli-gateway
+    permissions:
+      contents: read
+      id-token: write
     # MUST run on the self-hosted runner: the Cloudflare token is IP-allowlist
     # restricted (a deliberate control), so it only works from a trusted egress
     # IP. GitHub-hosted runners are rejected with Cloudflare error 9109. The
@@ -50,9 +53,35 @@ jobs:
       - name: Verify site version matches package.json
         run: node scripts/sync-site-version.mjs --check
 
+      - name: Log in to Azure with GitHub OIDC
+        uses: Azure/login@93381592711f247e165c389ebb30b596c84cdc48 # v3.0.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Fetch Cloudflare Pages token from Azure Key Vault
+        uses: Azure/cli@9fe27e8f2d4177d9755d43d94f89e79f065ef883 # v3.0.0
+        env:
+          AZURE_CORE_OUTPUT: none
+          AZURE_KEY_VAULT_NAME: ${{ vars.AZURE_KEY_VAULT_NAME }}
+          AZURE_KEY_VAULT_CLOUDFLARE_TOKEN_SECRET_NAME: ${{ vars.AZURE_KEY_VAULT_CLOUDFLARE_TOKEN_SECRET_NAME }}
+        with:
+          inlineScript: |
+            set -euo pipefail
+            token="$(az keyvault secret show \
+              --vault-name "${AZURE_KEY_VAULT_NAME}" \
+              --name "${AZURE_KEY_VAULT_CLOUDFLARE_TOKEN_SECRET_NAME}" \
+              --query value -o tsv)"
+            if [ -z "${token}" ]; then
+              echo "ERROR: Azure Key Vault returned an empty Cloudflare Pages token" >&2
+              exit 1
+            fi
+            printf 'CLOUDFLARE_API_TOKEN=%s\n' "${token}" >> "${GITHUB_ENV}"
+            unset token
+
       - name: Deploy site/ to Cloudflare Pages (production)
         env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           # Not a secret — the account that owns the Pages project.
           CLOUDFLARE_ACCOUNT_ID: "6e2be897d28f85da0d0551a8b462f851"
         # --branch=main maps to the production domain (llm-cli-gateway.dev); the
