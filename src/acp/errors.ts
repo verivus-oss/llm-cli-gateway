@@ -49,6 +49,13 @@ export function redactAcpMessage(input: string): string {
   // Bearer tokens / api keys.
   out = out.replace(/\b(bearer|token|api[_-]?key|secret)\b\s*[:=]?\s*\S+/gi, "$1 <redacted>");
   out = out.replace(/\b(sk|xai|gsk|key)-[A-Za-z0-9_-]{8,}\b/gi, "<redacted-token>");
+  // Provider-specific key/token shapes whose prefix has no separator (so the
+  // hyphenated rule above misses them): Google (`AIza...`), GitHub personal/
+  // OAuth/app/refresh tokens (`ghp_`/`gho_`/`ghu_`/`ghs_`/`ghr_`), and Slack
+  // (`xoxb-`/`xoxp-`/...). These can appear inline in a free-form provider error.
+  out = out.replace(/\bAIza[A-Za-z0-9_-]{10,}/g, "<redacted-token>");
+  out = out.replace(/\bgh[pousr]_[A-Za-z0-9]{20,}\b/g, "<redacted-token>");
+  out = out.replace(/\bxox[baprs]-[A-Za-z0-9-]{10,}\b/gi, "<redacted-token>");
 
   // Windows drive-letter paths (C:\Users\...\credentials.json) and UNC paths
   // (\\server\share\...). Redacted before the POSIX rules so the backslash body
