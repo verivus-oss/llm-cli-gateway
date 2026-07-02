@@ -85,6 +85,33 @@ function deltaThought(event: Record<string, unknown>): string | undefined {
 }
 
 /**
+ * Parse a single JSON object from text that may be wrapped in non-JSON banner
+ * lines. Tries a whole-buffer parse first, then the substring from the first
+ * `{` to the last `}`, so a stray deprecation/warning line does not discard all
+ * telemetry from an otherwise valid object. Rejects arrays. Returns null when no
+ * JSON object can be recovered.
+ */
+function parseTolerantGrokObject(text: string): Record<string, any> | null {
+  try {
+    const v = JSON.parse(text);
+    if (v && typeof v === "object" && !Array.isArray(v)) return v;
+  } catch {
+    // fall through to substring recovery
+  }
+  const start = text.indexOf("{");
+  const end = text.lastIndexOf("}");
+  if (start >= 0 && end > start) {
+    try {
+      const v = JSON.parse(text.slice(start, end + 1));
+      if (v && typeof v === "object" && !Array.isArray(v)) return v;
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+/**
  * Parse Grok `-p --output-format json` output (a single JSON object).
  * Returns `null` when stdout is empty or not a JSON object.
  */
@@ -94,13 +121,8 @@ export function parseGrokJson(stdout: string): GrokJsonParseResult | null {
     return null;
   }
 
-  let parsed: any;
-  try {
-    parsed = JSON.parse(trimmed);
-  } catch {
-    return null;
-  }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+  const parsed = parseTolerantGrokObject(trimmed);
+  if (!parsed) {
     return null;
   }
 

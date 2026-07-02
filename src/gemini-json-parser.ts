@@ -44,20 +44,42 @@ export interface GeminiJsonParseResult {
   stopReason?: string;
 }
 
+/**
+ * Parse a single JSON object from text that may be surrounded by non-JSON
+ * banner/prose lines (deprecation notices, "Ripgrep not available", etc.). A
+ * whole-buffer parse is tried first; on failure the substring from the first
+ * `{` to the last `}` is tried so one stray line no longer discards all
+ * telemetry (usage / session id / stop reason) from an otherwise valid object.
+ * Returns null when no JSON object can be recovered.
+ */
+function parseTolerantJsonObject(text: string): Record<string, any> | null {
+  try {
+    const v = JSON.parse(text);
+    if (v && typeof v === "object") return v;
+  } catch {
+    // fall through to substring recovery
+  }
+  const start = text.indexOf("{");
+  const end = text.lastIndexOf("}");
+  if (start >= 0 && end > start) {
+    try {
+      const v = JSON.parse(text.slice(start, end + 1));
+      if (v && typeof v === "object") return v;
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
 export function parseGeminiJson(stdout: string): GeminiJsonParseResult | null {
   const trimmed = stdout.trim();
   if (!trimmed) {
     return null;
   }
 
-  let parsed: any;
-  try {
-    parsed = JSON.parse(trimmed);
-  } catch {
-    return null;
-  }
-
-  if (!parsed || typeof parsed !== "object") {
+  const parsed = parseTolerantJsonObject(trimmed);
+  if (!parsed) {
     return null;
   }
 
@@ -140,6 +162,14 @@ export function parseGeminiStreamJson(stdout: string): GeminiJsonParseResult | n
       event.role === "assistant" &&
       typeof event.content === "string"
     ) {
+      // The documented wire is delta-only, so we accumulate. Guard against a
+      // build that streams deltas and THEN emits a consolidated full message:
+      // an explicit non-delta marker (delta/is_delta === false) replaces the
+      // accumulation instead of doubling the text. Absent the marker, behaviour
+      // is unchanged (append).
+      if (event.delta === false || event.is_delta === false) {
+        assistantChunks.length = 0;
+      }
       assistantChunks.push(event.content);
       continue;
     }
