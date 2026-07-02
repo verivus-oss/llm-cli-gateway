@@ -137,6 +137,8 @@ import {
   GEMINI_APPROVAL_MODES,
   CODEX_SANDBOX_MODES,
   CODEX_ASK_FOR_APPROVAL_MODES,
+  CODEX_LOCAL_PROVIDERS,
+  CODEX_COLOR_MODES,
   CLAUDE_EFFORT_LEVELS,
   prepareClaudeHighImpactFlags,
   validateClaudeAgentsMap,
@@ -150,6 +152,8 @@ import {
   type ClaudePermissionMode,
   type CodexSandboxMode,
   type CodexAskForApproval,
+  type CodexLocalProvider,
+  type CodexColorMode,
   type ClaudeEffortLevel,
   type ClaudeAgentDefinition,
 } from "./request-helpers.js";
@@ -588,6 +592,140 @@ const CLI_TYPE_ENUM = z.enum(CLI_TYPES);
  * upper bound — no plausible single agent loop exceeds 10k turns or 10k USD.
  */
 export const MAX_TURNS_SCHEMA = z.number().int().positive().safe().max(10_000);
+
+/**
+ * Phase 4 Part A: shared Zod shape for the remaining headless-safe Claude CLI
+ * modifiers, spread into both `claude_request` and `claude_request_async` so the
+ * two schemas can never drift. Every field traces to `claude --help`. Flags that
+ * are interactive-only (`--tmux`) or gateway-managed (`--background`,
+ * `--remote-control`) are deliberately absent (see provider capability facts).
+ */
+const CLAUDE_PART_A_FIELDS = {
+  includeHookEvents: z
+    .boolean()
+    .optional()
+    .describe(
+      "Claude --include-hook-events: include all hook lifecycle events in the output stream. Only takes effect with outputFormat=stream-json (the default)."
+    ),
+  replayUserMessages: z
+    .boolean()
+    .optional()
+    .describe(
+      "Claude --replay-user-messages: re-emit user messages from stdin back on stdout for acknowledgment. Only works with input-format=stream-json and outputFormat=stream-json (the cacheControl path)."
+    ),
+  systemPromptFile: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      "Claude --system-prompt-file: replace the system prompt from a file path (path variant of systemPrompt)."
+    ),
+  appendSystemPromptFile: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      "Claude --append-system-prompt-file: append a system prompt from a file path (path variant of appendSystemPrompt)."
+    ),
+  name: z
+    .string()
+    .min(1)
+    .optional()
+    .describe("Claude --name: display name for this session (shown in pickers/titles)."),
+  pluginDir: z
+    .array(z.string())
+    .optional()
+    .describe(
+      "Claude --plugin-dir: load a plugin from a directory or .zip for this session only. One --plugin-dir instance per entry."
+    ),
+  pluginUrl: z
+    .array(z.string())
+    .optional()
+    .describe(
+      "Claude --plugin-url: fetch a plugin .zip from a URL for this session only. One --plugin-url instance per entry."
+    ),
+  safeMode: z
+    .boolean()
+    .optional()
+    .describe(
+      "Claude --safe-mode: start with all customizations (CLAUDE.md, skills, plugins, hooks, MCP, commands, agents) disabled for troubleshooting. Explicit opt-in."
+    ),
+  bare: z
+    .boolean()
+    .optional()
+    .describe(
+      "Claude --bare: minimal mode (skip hooks, LSP, plugin sync, attribution, auto-memory, keychain reads, CLAUDE.md auto-discovery). Explicit opt-in."
+    ),
+  debug: z
+    .union([z.string(), z.boolean()])
+    .optional()
+    .describe(
+      'Claude -d/--debug: enable debug mode. true emits a bare --debug; a string emits --debug <filter> (e.g. "api,hooks"). Debug output goes to stderr only.'
+    ),
+  debugFile: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      "Claude --debug-file: write debug logs to a specific file path (enables debug mode)."
+    ),
+};
+
+/**
+ * Phase 4 Part A: shared Zod shape for the remaining `codex exec` flags, spread
+ * into both `codex_request` and `codex_request_async`. Every field traces to
+ * `codex exec --help`. `--remote` / `--remote-auth-token-env` are absent: they
+ * are TUI-only (top-level `codex` help, not `codex exec`) and gateway-managed
+ * (see provider capability facts). `--skip-git-repo-check` is already emitted
+ * unconditionally, so it needs no toggle field.
+ */
+const CODEX_PART_A_FIELDS = {
+  enable: z
+    .array(z.string())
+    .optional()
+    .describe(
+      "Codex --enable <FEATURE> (repeatable): enable a feature for this run (equivalent to -c features.<name>=true). Accepted on resume."
+    ),
+  disable: z
+    .array(z.string())
+    .optional()
+    .describe(
+      "Codex --disable <FEATURE> (repeatable): disable a feature for this run (equivalent to -c features.<name>=false). Accepted on resume."
+    ),
+  strictConfig: z
+    .boolean()
+    .optional()
+    .describe(
+      "Codex --strict-config: error out when config.toml contains fields not recognized by this Codex version. New sessions only."
+    ),
+  oss: z
+    .boolean()
+    .optional()
+    .describe("Codex --oss: use the open-source provider. New sessions only."),
+  localProvider: z
+    .enum(CODEX_LOCAL_PROVIDERS)
+    .optional()
+    .describe(
+      "Codex --local-provider: local OSS provider (lmstudio|ollama), used with oss. New sessions only."
+    ),
+  color: z
+    .enum(CODEX_COLOR_MODES)
+    .optional()
+    .describe("Codex --color: output color mode (always|never|auto). New sessions only."),
+  outputLastMessage: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      "Codex -o/--output-last-message <FILE>: write the agent's last message to a file. New sessions only."
+    ),
+  dangerouslyBypassHookTrust: z
+    .boolean()
+    .optional()
+    .describe(
+      "Codex --dangerously-bypass-hook-trust: run enabled hooks without persisted hook trust for this invocation. DANGEROUS. Explicit opt-in; never defaulted on."
+    ),
+};
 
 /**
  * grok_request input fields derived from the grok contract + generation table
@@ -2553,6 +2691,18 @@ export function prepareClaudeRequest(
     settingSources?: string;
     settings?: string;
     tools?: string[];
+    // Phase 4 Part A: remaining headless-safe Claude CLI modifiers.
+    includeHookEvents?: boolean;
+    replayUserMessages?: boolean;
+    systemPromptFile?: string;
+    appendSystemPromptFile?: string;
+    name?: string;
+    pluginDir?: string[];
+    pluginUrl?: string[];
+    safeMode?: boolean;
+    bare?: boolean;
+    debug?: string | boolean;
+    debugFile?: string;
   },
   runtime: GatewayServerRuntime = resolveGatewayServerRuntime()
 ): CliRequestPrep | ExtendedToolResponse {
@@ -2885,6 +3035,17 @@ export function prepareClaudeRequest(
       settingSources: params.settingSources,
       settings: params.settings,
       tools: params.tools,
+      includeHookEvents: params.includeHookEvents,
+      replayUserMessages: params.replayUserMessages,
+      systemPromptFile: params.systemPromptFile,
+      appendSystemPromptFile: params.appendSystemPromptFile,
+      name: params.name,
+      pluginDir: params.pluginDir,
+      pluginUrl: params.pluginUrl,
+      safeMode: params.safeMode,
+      bare: params.bare,
+      debug: params.debug,
+      debugFile: params.debugFile,
     })
   );
 
@@ -2955,6 +3116,21 @@ export function prepareCodexRequest(
     // and writable dirs), so we emit them on NEW sessions only.
     workingDir?: string;
     addDir?: string[];
+    // Phase 4 Part A: remaining `codex exec` flags.
+    // enable/disable are `-c features.*` equivalents (accepted on resume, emitted
+    // in both branches). oss/localProvider/strictConfig/color/outputLastMessage
+    // are provider/output selection flags emitted on NEW sessions only (resume
+    // inherits the original session's provider + output config).
+    enable?: string[];
+    disable?: string[];
+    strictConfig?: boolean;
+    oss?: boolean;
+    localProvider?: CodexLocalProvider;
+    color?: CodexColorMode;
+    outputLastMessage?: string;
+    // Top-level danger flag, emitted unconditionally (mirrors
+    // dangerouslyBypassApprovalsAndSandbox). Never defaulted on.
+    dangerouslyBypassHookTrust?: boolean;
   },
   runtime: GatewayServerRuntime = resolveGatewayServerRuntime()
 ): CodexRequestPrep | ExtendedToolResponse {
@@ -3053,6 +3229,13 @@ export function prepareCodexRequest(
   if (params.dangerouslyBypassApprovalsAndSandbox) {
     args.push("--dangerously-bypass-approvals-and-sandbox");
   }
+  // Phase 4 Part A: `--dangerously-bypass-hook-trust` is a top-level codex
+  // flag (present in both `codex` and `codex exec` help). Emitted
+  // unconditionally when set, mirroring the bypass flag above. Explicit opt-in;
+  // never defaulted on.
+  if (params.dangerouslyBypassHookTrust) {
+    args.push("--dangerously-bypass-hook-trust");
+  }
   // #44: ALWAYS emit `--json` so the codex-json-parser receives JSONL events on
   // every request — this is what makes extractUsageAndCost() reachable on the
   // DEFAULT (text) path, not just the opt-in `json` path, so cache/token usage
@@ -3083,6 +3266,24 @@ export function prepareCodexRequest(
         args.push("--add-dir", dir);
       }
     }
+    // Phase 4 Part A: provider/output-selection flags. Emitted on NEW sessions
+    // only (like -C / --add-dir / --profile) because `codex exec resume`
+    // inherits the original session's provider + output configuration.
+    if (params.oss) {
+      args.push("--oss");
+    }
+    if (params.localProvider) {
+      args.push("--local-provider", params.localProvider);
+    }
+    if (params.strictConfig) {
+      args.push("--strict-config");
+    }
+    if (params.color) {
+      args.push("--color", params.color);
+    }
+    if (params.outputLastMessage !== undefined) {
+      args.push("--output-last-message", params.outputLastMessage);
+    }
     const high = prepareCodexHighImpactFlags({
       outputSchema: params.outputSchema,
       search: params.search,
@@ -3092,6 +3293,8 @@ export function prepareCodexRequest(
       images: params.images,
       ignoreUserConfig: params.ignoreUserConfig,
       ignoreRules: params.ignoreRules,
+      enable: params.enable,
+      disable: params.disable,
     });
     if (high.missingImagePath) {
       return createErrorResponse(
@@ -3122,6 +3325,8 @@ export function prepareCodexRequest(
       images: params.images,
       ignoreUserConfig: params.ignoreUserConfig,
       ignoreRules: params.ignoreRules,
+      enable: params.enable,
+      disable: params.disable,
     });
     if (high.missingImagePath) {
       return createErrorResponse(
@@ -3209,6 +3414,11 @@ export function prepareGeminiRequest(
      * session. Mutually exclusive with `project`.
      */
     newProject?: boolean;
+    /**
+     * Antigravity `--print-timeout <DURATION>`: print-mode wait timeout as a Go
+     * duration string (e.g. "5m0s", "30s"). Passed through verbatim.
+     */
+    printTimeout?: string;
   },
   runtime: GatewayServerRuntime = resolveGatewayServerRuntime()
 ): CliRequestPrep | ExtendedToolResponse {
@@ -3354,6 +3564,9 @@ export function prepareGeminiRequest(
   }
   if (params.newProject) {
     args.push("--new-project");
+  }
+  if (params.printTimeout !== undefined && params.printTimeout !== "") {
+    args.push("--print-timeout", params.printTimeout);
   }
 
   return {
@@ -5133,6 +5346,11 @@ export interface GeminiRequestParams {
   project?: string;
   /** Antigravity 1.0.13 `--new-project`: create a new project for this session. */
   newProject?: boolean;
+  /**
+   * Antigravity `--print-timeout <DURATION>`: print-mode wait timeout as a Go
+   * duration string (e.g. "5m0s", "30s"). Passed through verbatim.
+   */
+  printTimeout?: string;
   workspace?: string;
   /** Slice λ: run this request inside a gateway-owned git worktree. */
   worktree?: boolean | { name?: string; ref?: string };
@@ -5203,6 +5421,7 @@ export async function handleGeminiRequest(
       yolo: params.yolo,
       project: params.project,
       newProject: params.newProject,
+      printTimeout: params.printTimeout,
     },
     runtime
   );
@@ -5414,6 +5633,7 @@ export async function handleGeminiRequestAsync(
       yolo: params.yolo,
       project: params.project,
       newProject: params.newProject,
+      printTimeout: params.printTimeout,
     },
     runtime
   );
@@ -6022,6 +6242,23 @@ export interface DevinRequestParams {
   model?: string;
   permissionMode?: "auto" | "smart" | "dangerous";
   promptFile?: string;
+  /** Devin `--config <PATH>`: config file path. */
+  config?: string;
+  /** Devin `--sandbox`: run the session in a sandbox (bare boolean flag). */
+  sandbox?: boolean;
+  /**
+   * Devin `--export [<PATH>]`: export the session. `true` emits a bare
+   * `--export`; a string emits `--export <path>` (write to that path).
+   */
+  exportSession?: boolean | string;
+  /**
+   * Devin `--respect-workspace-trust [<bool>]`: emits
+   * `--respect-workspace-trust true|false`. Devin defaults this to true for
+   * interactive mode and false for print (non-interactive) mode.
+   */
+  respectWorkspaceTrust?: boolean;
+  /** Devin `--agent-config <FILE>`: agent config file path. */
+  agentConfig?: string;
   transport?: "cli" | "acp";
   sessionId?: string;
   resumeLatest?: boolean;
@@ -6040,6 +6277,11 @@ export function prepareDevinRequest(
     model?: string;
     permissionMode?: DevinRequestParams["permissionMode"];
     promptFile?: string;
+    config?: string;
+    sandbox?: boolean;
+    exportSession?: boolean | string;
+    respectWorkspaceTrust?: boolean;
+    agentConfig?: string;
     correlationId?: string;
     optimizePrompt: boolean;
     operation: string;
@@ -6064,6 +6306,20 @@ export function prepareDevinRequest(
   if (resolvedModel) args.push("--model", resolvedModel);
   if (params.permissionMode) args.push("--permission-mode", params.permissionMode);
   if (params.promptFile) args.push("--prompt-file", params.promptFile);
+  if (params.config) args.push("--config", params.config);
+  // `--sandbox` is a safety control: bare boolean flag, never defaulted on.
+  if (params.sandbox) args.push("--sandbox");
+  // `--export` takes an optional path: `true` -> bare flag; string -> flag + path.
+  if (typeof params.exportSession === "string") {
+    args.push("--export", params.exportSession);
+  } else if (params.exportSession === true) {
+    args.push("--export");
+  }
+  // `--respect-workspace-trust` takes an optional value; emit the explicit bool.
+  if (params.respectWorkspaceTrust !== undefined) {
+    args.push("--respect-workspace-trust", params.respectWorkspaceTrust ? "true" : "false");
+  }
+  if (params.agentConfig) args.push("--agent-config", params.agentConfig);
   return {
     corrId,
     effectivePrompt: prompt,
@@ -6098,6 +6354,11 @@ export async function handleDevinRequest(
       model: params.model,
       permissionMode: params.permissionMode,
       promptFile: params.promptFile,
+      config: params.config,
+      sandbox: params.sandbox,
+      exportSession: params.exportSession,
+      respectWorkspaceTrust: params.respectWorkspaceTrust,
+      agentConfig: params.agentConfig,
       correlationId: params.correlationId,
       optimizePrompt: params.optimizePrompt,
       operation: "devin_request",
@@ -6258,6 +6519,11 @@ export async function handleDevinRequestAsync(
       model: params.model,
       permissionMode: params.permissionMode,
       promptFile: params.promptFile,
+      config: params.config,
+      sandbox: params.sandbox,
+      exportSession: params.exportSession,
+      respectWorkspaceTrust: params.respectWorkspaceTrust,
+      agentConfig: params.agentConfig,
       correlationId: params.correlationId,
       optimizePrompt: params.optimizePrompt,
       operation: "devin_request_async",
@@ -7285,6 +7551,15 @@ export async function handleCodexRequestAsync(
     // Phase 4 slice ζ — Codex working-dir + add-dir parity.
     workingDir?: string;
     addDir?: string[];
+    // Phase 4 Part A: remaining `codex exec` flags.
+    enable?: string[];
+    disable?: string[];
+    strictConfig?: boolean;
+    oss?: boolean;
+    localProvider?: CodexLocalProvider;
+    color?: CodexColorMode;
+    outputLastMessage?: string;
+    dangerouslyBypassHookTrust?: boolean;
     workspace?: string;
     /** Slice λ: run this request inside a gateway-owned git worktree. */
     worktree?: boolean | { name?: string; ref?: string };
@@ -7326,6 +7601,14 @@ export async function handleCodexRequestAsync(
       ignoreRules: params.ignoreRules,
       workingDir: params.workingDir,
       addDir: params.addDir,
+      enable: params.enable,
+      disable: params.disable,
+      strictConfig: params.strictConfig,
+      oss: params.oss,
+      localProvider: params.localProvider,
+      color: params.color,
+      outputLastMessage: params.outputLastMessage,
+      dangerouslyBypassHookTrust: params.dangerouslyBypassHookTrust,
     },
     runtime
   );
@@ -7794,6 +8077,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .describe(
           'Claude --tools: restrict the available built-in tool set (distinct from allowedTools permission gating). Pass [""] to disable all tools.'
         ),
+      ...CLAUDE_PART_A_FIELDS,
       workspace: providerWorkspaceAliasSchema(),
       worktree: WORKTREE_SCHEMA.optional(),
       approvalStrategy: z
@@ -7867,6 +8151,17 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       settingSources,
       settings,
       tools,
+      includeHookEvents,
+      replayUserMessages,
+      systemPromptFile,
+      appendSystemPromptFile,
+      name,
+      pluginDir,
+      pluginUrl,
+      safeMode,
+      bare,
+      debug,
+      debugFile,
       workspace,
       worktree,
       approvalStrategy,
@@ -7924,6 +8219,17 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           settingSources,
           settings,
           tools,
+          includeHookEvents,
+          replayUserMessages,
+          systemPromptFile,
+          appendSystemPromptFile,
+          name,
+          pluginDir,
+          pluginUrl,
+          safeMode,
+          bare,
+          debug,
+          debugFile,
         },
         runtime
       );
@@ -8358,6 +8664,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           "Codex --add-dir <DIR>: additional writable workspace directories. Emitted once per entry on new sessions only; resume inherits the original session's writable-dir policy." +
             LOCAL_ADD_DIR_FIELD_SUFFIX
         ),
+      ...CODEX_PART_A_FIELDS,
       workspace: providerWorkspaceAliasSchema(),
       worktree: WORKTREE_SCHEMA.optional(),
     },
@@ -8399,6 +8706,14 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       ignoreRules,
       workingDir,
       addDir,
+      enable,
+      disable,
+      strictConfig,
+      oss,
+      localProvider,
+      color,
+      outputLastMessage,
+      dangerouslyBypassHookTrust,
       workspace,
       worktree,
     }) => {
@@ -8433,6 +8748,14 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           ignoreRules,
           workingDir,
           addDir,
+          enable,
+          disable,
+          strictConfig,
+          oss,
+          localProvider,
+          color,
+          outputLastMessage,
+          dangerouslyBypassHookTrust,
         },
         runtime
       );
@@ -8976,6 +9299,13 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .describe(
           "Antigravity 1.0.13 --new-project: create a new project for this session. Mutually exclusive with project."
         ),
+      printTimeout: z
+        .string()
+        .min(1)
+        .optional()
+        .describe(
+          "Antigravity --print-timeout <DURATION>: print-mode wait timeout as a Go duration string (e.g. '5m0s', '30s')."
+        ),
       workspace: providerWorkspaceAliasSchema(),
       worktree: WORKTREE_SCHEMA.optional(),
     },
@@ -9013,6 +9343,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       yolo,
       project,
       newProject,
+      printTimeout,
       workspace,
       worktree,
     }) => {
@@ -9045,6 +9376,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           yolo,
           project,
           newProject,
+          printTimeout,
           workspace,
           worktree,
         }
@@ -9337,6 +9669,29 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .string()
         .optional()
         .describe("Load the initial prompt from a file (--prompt-file)"),
+      config: z.string().optional().describe("Config file path (Devin --config <PATH>)"),
+      sandbox: z
+        .boolean()
+        .optional()
+        .describe(
+          "Run the Devin session in a sandbox (Devin --sandbox). Safety control: never defaulted on; pass true to opt in."
+        ),
+      exportSession: z
+        .union([z.boolean(), z.string()])
+        .optional()
+        .describe(
+          "Export the session (Devin --export [<PATH>]). true emits a bare --export; a string path emits --export <path>."
+        ),
+      respectWorkspaceTrust: z
+        .boolean()
+        .optional()
+        .describe(
+          "Respect workspace trust (Devin --respect-workspace-trust <bool>). Devin defaults true for interactive and false for print mode; set explicitly to override."
+        ),
+      agentConfig: z
+        .string()
+        .optional()
+        .describe("Agent config file path (Devin --agent-config <FILE>)"),
       sessionId: z
         .string()
         .optional()
@@ -9380,6 +9735,11 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       transport,
       permissionMode,
       promptFile,
+      config,
+      sandbox,
+      exportSession,
+      respectWorkspaceTrust,
+      agentConfig,
       sessionId,
       resumeLatest,
       createNewSession,
@@ -9397,6 +9757,11 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           transport,
           permissionMode,
           promptFile,
+          config,
+          sandbox,
+          exportSession,
+          respectWorkspaceTrust,
+          agentConfig,
           sessionId,
           resumeLatest,
           createNewSession,
@@ -9925,6 +10290,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .describe(
             'Claude --tools: restrict the available built-in tool set (distinct from allowedTools permission gating). Pass [""] to disable all tools.'
           ),
+        ...CLAUDE_PART_A_FIELDS,
         workspace: providerWorkspaceAliasSchema(),
         worktree: WORKTREE_SCHEMA.optional(),
         approvalStrategy: z
@@ -9997,6 +10363,17 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         settingSources,
         settings,
         tools,
+        includeHookEvents,
+        replayUserMessages,
+        systemPromptFile,
+        appendSystemPromptFile,
+        name,
+        pluginDir,
+        pluginUrl,
+        safeMode,
+        bare,
+        debug,
+        debugFile,
         workspace,
         worktree,
         approvalStrategy,
@@ -10052,6 +10429,17 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             settingSources,
             settings,
             tools,
+            includeHookEvents,
+            replayUserMessages,
+            systemPromptFile,
+            appendSystemPromptFile,
+            name,
+            pluginDir,
+            pluginUrl,
+            safeMode,
+            bare,
+            debug,
+            debugFile,
           },
           runtime
         );
@@ -10318,6 +10706,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             "Codex --add-dir <DIR>: additional writable workspace directories (repeat per entry). New sessions only." +
               LOCAL_ADD_DIR_FIELD_SUFFIX
           ),
+        ...CODEX_PART_A_FIELDS,
         workspace: providerWorkspaceAliasSchema(),
         worktree: WORKTREE_SCHEMA.optional(),
       },
@@ -10358,6 +10747,14 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         ignoreRules,
         workingDir,
         addDir,
+        enable,
+        disable,
+        strictConfig,
+        oss,
+        localProvider,
+        color,
+        outputLastMessage,
+        dangerouslyBypassHookTrust,
         workspace,
         worktree,
       }) => {
@@ -10393,6 +10790,14 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             ignoreRules,
             workingDir,
             addDir,
+            enable,
+            disable,
+            strictConfig,
+            oss,
+            localProvider,
+            color,
+            outputLastMessage,
+            dangerouslyBypassHookTrust,
             workspace,
             worktree,
           }
@@ -10528,6 +10933,13 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .describe(
             "Antigravity 1.0.13 --new-project: create a new project for this session. Mutually exclusive with project."
           ),
+        printTimeout: z
+          .string()
+          .min(1)
+          .optional()
+          .describe(
+            "Antigravity --print-timeout <DURATION>: print-mode wait timeout as a Go duration string (e.g. '5m0s', '30s')."
+          ),
         workspace: providerWorkspaceAliasSchema(),
         worktree: WORKTREE_SCHEMA.optional(),
       },
@@ -10564,6 +10976,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         yolo,
         project,
         newProject,
+        printTimeout,
         workspace,
         worktree,
       }) => {
@@ -10595,6 +11008,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             yolo,
             project,
             newProject,
+            printTimeout,
             workspace,
             worktree,
           }
@@ -11002,6 +11416,29 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .string()
           .optional()
           .describe("Load the initial prompt from a file (--prompt-file)"),
+        config: z.string().optional().describe("Config file path (Devin --config <PATH>)"),
+        sandbox: z
+          .boolean()
+          .optional()
+          .describe(
+            "Run the Devin session in a sandbox (Devin --sandbox). Safety control: never defaulted on; pass true to opt in."
+          ),
+        exportSession: z
+          .union([z.boolean(), z.string()])
+          .optional()
+          .describe(
+            "Export the session (Devin --export [<PATH>]). true emits a bare --export; a string path emits --export <path>."
+          ),
+        respectWorkspaceTrust: z
+          .boolean()
+          .optional()
+          .describe(
+            "Respect workspace trust (Devin --respect-workspace-trust <bool>). Devin defaults true for interactive and false for print mode; set explicitly to override."
+          ),
+        agentConfig: z
+          .string()
+          .optional()
+          .describe("Agent config file path (Devin --agent-config <FILE>)"),
         sessionId: z
           .string()
           .optional()
@@ -11043,6 +11480,11 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         model,
         permissionMode,
         promptFile,
+        config,
+        sandbox,
+        exportSession,
+        respectWorkspaceTrust,
+        agentConfig,
         sessionId,
         resumeLatest,
         createNewSession,
@@ -11058,6 +11500,11 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             model,
             permissionMode,
             promptFile,
+            config,
+            sandbox,
+            exportSession,
+            respectWorkspaceTrust,
+            agentConfig,
             sessionId,
             resumeLatest,
             createNewSession,
@@ -11859,10 +12306,9 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .max(500)
         .default(50)
         .describe("Max number of approval records"),
-      cli: z
-        .enum(["claude", "codex", "gemini", "grok", "mistral"])
-        .optional()
-        .describe("Optional CLI filter"),
+      cli: CLI_TYPE_ENUM.optional().describe(
+        "Optional CLI filter (any gateway CLI provider, derived from CLI_TYPES)"
+      ),
     },
     {
       title: "Approval decisions",

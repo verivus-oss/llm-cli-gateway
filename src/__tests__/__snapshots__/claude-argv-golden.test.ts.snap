@@ -1,0 +1,30 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`claude argv golden (Phase 4 Part A) > emits every wired Part A flag with exact argv (kitchen sink) 1`] = `
+[
+  "-p",
+  "PROMPT",
+  "--include-hook-events",
+  "--replay-user-messages",
+  "--system-prompt-file",
+  "/tmp/sys.txt",
+  "--append-system-prompt-file",
+  "/tmp/append.txt",
+  "--name",
+  "my-session",
+  "--plugin-dir",
+  "/tmp/plugA",
+  "--plugin-dir",
+  "/tmp/plugB.zip",
+  "--plugin-url",
+  "https://example.com/a.zip",
+  "--plugin-url",
+  "https://example.com/b.zip",
+  "--safe-mode",
+  "--bare",
+  "--debug",
+  "api,hooks",
+  "--debug-file",
+  "/tmp/debug.log",
+]
+`;

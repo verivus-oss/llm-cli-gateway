@@ -78,10 +78,9 @@ const ALWAYS_ALLOWLIST = new Set([
  * to still contain and the phase that drains it.
  */
 const LEGACY_ALLOWLIST = {
-  // index.ts still has per-provider request-tool wiring and an approval_list
-  // cli filter that spells out the provider array; phase-4 migrates the request
-  // surface to the generated descriptors.
-  "src/index.ts": { allowedKinds: ["literal-provider-array"], phase: "phase-4" },
+  // Phase 4 Part A drained the last spelled-out provider array from index.ts:
+  // the approval_list `cli` filter now derives from CLI_TYPE_ENUM (z.enum(CLI_TYPES)),
+  // so index.ts no longer needs a literal-provider-array allowance.
 };
 
 function isAlwaysAllowed(relPath) {

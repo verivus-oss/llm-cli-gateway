@@ -688,6 +688,52 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         arity: "variadic",
         description: 'Restrict the available built-in tool set ("" disables all)',
       },
+      // Phase 4 Part A: headless-safe modifiers emitted by
+      // prepareClaudeHighImpactFlags. Each is a genuinely-emitted argv token and
+      // therefore MUST live in this allowlist (not merely acknowledged), else
+      // assertUpstreamCliArgs throws on a real request.
+      "--include-hook-events": {
+        arity: "none",
+        description: "Emit hook lifecycle events into the stream-json output",
+      },
+      "--replay-user-messages": {
+        arity: "none",
+        description: "Replay user messages back on stdout in stream-json mode",
+      },
+      "--system-prompt-file": {
+        arity: "one",
+        description: "Replacement system prompt read from a file path",
+      },
+      "--append-system-prompt-file": {
+        arity: "one",
+        description: "Appended system prompt read from a file path",
+      },
+      "--name": { arity: "one", description: "Session name label" },
+      "--plugin-dir": {
+        arity: "one",
+        description: "Additional plugin directory (repeat once per directory)",
+      },
+      "--plugin-url": {
+        arity: "one",
+        description: "Additional plugin URL (repeat once per URL)",
+      },
+      "--safe-mode": {
+        arity: "none",
+        description: "Start with all customizations disabled (troubleshooting)",
+      },
+      "--bare": {
+        arity: "none",
+        description:
+          "Minimal mode: skip hooks, LSP, plugin sync, attribution, auto-memory, keychain, CLAUDE.md discovery",
+      },
+      "--debug": {
+        arity: "optional",
+        description: "Enable debug mode with an optional category filter (e.g. api,hooks)",
+      },
+      "--debug-file": {
+        arity: "one",
+        description: "Write debug logs to a specific file path (implies debug mode)",
+      },
     },
     // Claude Code 2.1.198 --help surface the gateway deliberately does not
     // emit. Long-form aliases of declared short flags (--print for -p),
@@ -700,31 +746,22 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       "--allowed", // alias of --allowed-tools
       "--ax-screen-reader",
       "--background", // 2.1.198: start the session as a background agent
-      "--bare",
       "--betas",
       "--bg", // 2.1.198: short form of --background
       "--brief",
       "--chrome",
       "--dangerously-skip-permissions",
-      "--debug",
-      "--debug-file",
       "--disable-slash-commands",
       "--disallowed", // alias of --disallowed-tools
       "--file",
       "--from-pr",
       "--ide",
-      "--include-hook-events",
-      "--name",
       "--no-chrome",
-      "--plugin-dir",
-      "--plugin-url",
       "--print", // long form of declared -p
       "--prompt-suggestions",
       "--remote-control",
       "--remote-control-session-name-prefix",
-      "--replay-user-messages",
       "--resume", // interactive resume; gateway uses --continue/--session-id
-      "--safe-mode",
       "--tmux",
       "--version",
       "--worktree",
@@ -789,6 +826,37 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
           "--tools",
           "Read",
           "Edit",
+        ],
+        expect: "pass",
+      },
+      {
+        // Phase 4 Part A: headless-safe modifiers emitted by
+        // prepareClaudeHighImpactFlags. Pins that each genuinely-emitted flag
+        // is accepted by the argv allowlist (guards the BLOCKER 1 class: a flag
+        // left only in acknowledgedUpstreamFlags would fail this fixture).
+        id: "claude-part-a-high-impact-flags",
+        description: "Phase 4 Part A: all wired headless-safe modifier flags accepted together",
+        args: [
+          "-p",
+          "hello",
+          "--include-hook-events",
+          "--replay-user-messages",
+          "--system-prompt-file",
+          "/tmp/sys.txt",
+          "--append-system-prompt-file",
+          "/tmp/append.txt",
+          "--name",
+          "my-session",
+          "--plugin-dir",
+          "/tmp/plugA",
+          "--plugin-url",
+          "https://example.com/a.zip",
+          "--safe-mode",
+          "--bare",
+          "--debug",
+          "api,hooks",
+          "--debug-file",
+          "/tmp/debug.log",
         ],
         expect: "pass",
       },
@@ -1488,6 +1556,7 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       // Antigravity 1.0.14 wired project-selection flags
       "project",
       "newProject",
+      "printTimeout",
     ],
     flags: {
       "--print": { arity: "none", description: "Run a single prompt non-interactively" },
@@ -1509,14 +1578,19 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         arity: "none",
         description: "Create a new Antigravity project for this session",
       },
+      "--print-timeout": {
+        arity: "one",
+        description: "Print-mode wait timeout as a Go duration string (e.g. 5m0s)",
+      },
     },
     // Antigravity CLI long flags the gateway deliberately does not emit, as
     // advertised by `agy --help` on 1.0.14. Probe acknowledgements only, never
     // an argv allowlist. (`-i` is a short alias of --prompt-interactive and
     // `--version` is a top-level command not listed in --help; neither is
     // parsed by the long-flag probe, so both were dropped to keep the probe
-    // quiet.) `--project` / `--new-project` graduated to the flags allowlist.
-    acknowledgedUpstreamFlags: ["--log-file", "--print-timeout", "--prompt-interactive"],
+    // quiet.) `--project` / `--new-project` / `--print-timeout` graduated to the
+    // flags allowlist.
+    acknowledgedUpstreamFlags: ["--log-file", "--prompt-interactive"],
     env: {},
     conformanceFixtures: [
       {
@@ -1565,6 +1639,12 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         id: "gemini-new-project-wired",
         description: "Antigravity 1.0.14: --new-project is wired",
         args: ["--print", "hello", "--new-project"],
+        expect: "pass",
+      },
+      {
+        id: "gemini-print-timeout-wired",
+        description: "Antigravity --print-timeout <DURATION> is wired",
+        args: ["--print", "hello", "--print-timeout", "30s"],
         expect: "pass",
       },
     ],
@@ -2498,6 +2578,11 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       "resumeLatest",
       "createNewSession",
       "promptFile",
+      "config",
+      "sandbox",
+      "exportSession",
+      "respectWorkspaceTrust",
+      "agentConfig",
     ],
     // The gateway emits headless print-mode argv only, and only the flags below.
     // `-p` always carries the prompt (arity one); session continuity uses the
@@ -2516,20 +2601,26 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
           "Permission mode (auto = read-only auto-approve; smart = additionally auto-runs safe actions per fast model; dangerous = approve all)",
       },
       "--prompt-file": { arity: "one", description: "Load the initial prompt from a file" },
+      "--config": { arity: "one", description: "Config file path" },
+      "--sandbox": { arity: "none", description: "Run the session in a sandbox" },
+      "--export": {
+        arity: "optional",
+        description: "Export the session (optional output path; bare flag uses the default)",
+      },
+      "--respect-workspace-trust": {
+        arity: "optional",
+        values: ["true", "false"],
+        description:
+          "Respect workspace trust (defaults true for interactive, false for print mode)",
+      },
+      "--agent-config": { arity: "one", description: "Agent config file path" },
       "--resume": { arity: "one", description: "Resume a specific session by ID" },
       "--continue": { arity: "none", description: "Resume the most recent session in cwd" },
     },
     // Devin flags the gateway deliberately does not emit (or are for interactive/cloud use).
-    // Probe acknowledgement only.
-    acknowledgedUpstreamFlags: [
-      "--agent-config",
-      "--config",
-      "--export",
-      "--print",
-      "--respect-workspace-trust",
-      "--sandbox",
-      "--version",
-    ],
+    // Probe acknowledgement only. (--config/--sandbox/--export/--respect-workspace-trust/
+    // --agent-config graduated to the flags allowlist as wired request fields.)
+    acknowledgedUpstreamFlags: ["--print", "--version"],
     env: {},
     conformanceFixtures: [
       {
@@ -2584,6 +2675,48 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         id: "devin-resume",
         description: "Resume by session id accepted",
         args: ["-p", "hello", "--resume", "abc12345"],
+        expect: "pass",
+      },
+      {
+        id: "devin-config",
+        description: "--config path is accepted",
+        args: ["-p", "hello", "--config", "/tmp/devin.toml"],
+        expect: "pass",
+      },
+      {
+        id: "devin-sandbox",
+        description: "--sandbox (bare flag) is accepted",
+        args: ["-p", "hello", "--sandbox"],
+        expect: "pass",
+      },
+      {
+        id: "devin-export-bare",
+        description: "--export as a bare flag (no path) is accepted",
+        args: ["-p", "hello", "--export"],
+        expect: "pass",
+      },
+      {
+        id: "devin-export-path",
+        description: "--export with an output path is accepted",
+        args: ["-p", "hello", "--export", "/tmp/session.json"],
+        expect: "pass",
+      },
+      {
+        id: "devin-respect-workspace-trust",
+        description: "--respect-workspace-trust with an explicit boolean is accepted",
+        args: ["-p", "hello", "--respect-workspace-trust", "true"],
+        expect: "pass",
+      },
+      {
+        id: "devin-respect-workspace-trust-invalid",
+        description: "--respect-workspace-trust with a non-boolean value is rejected",
+        args: ["-p", "hello", "--respect-workspace-trust", "maybe"],
+        expect: "fail",
+      },
+      {
+        id: "devin-agent-config",
+        description: "--agent-config path is accepted",
+        args: ["-p", "hello", "--agent-config", "/tmp/agent.toml"],
         expect: "pass",
       },
     ],
