@@ -86,6 +86,13 @@ export interface AcpRunResult {
   readonly gatewaySessionId: string;
   readonly protocolVersion: number | null;
   readonly durationMs: number;
+  /**
+   * The terminal stop reason from the ACP `session/prompt` response (e.g.
+   * `end_turn`, `refusal`, `cancelled`, `max_tokens`), or null when the provider
+   * omits one. Surfaced so a refused/cancelled/truncated turn that produced no
+   * text is not indistinguishable from a normal empty answer at the caller.
+   */
+  readonly stopReason: string | null;
 }
 
 /** Per-request token usage lifted from an ACP `session/prompt` response `_meta`. */
@@ -276,6 +283,7 @@ export async function runAcpRequest(
       gatewaySessionId,
       protocolVersion: init?.protocolVersion ?? null,
       durationMs,
+      stopReason: normalizer.stopReason ?? null,
     };
   } catch (err) {
     const durationMs = elapsed();

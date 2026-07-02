@@ -1045,11 +1045,29 @@ export async function runAcpTransport(
         agentType: params.agentType,
       }
     );
+    // M4: surface a non-normal terminal stop reason (refusal / cancelled /
+    // max_tokens) or an empty answer so a refused/truncated turn is not returned
+    // as an indistinguishable plain-success. Additive banner; never fails.
+    const stop = result.stopReason;
+    const normalStop = stop === null || stop === "end_turn";
+    let warning: string | null = null;
+    if (!normalStop) {
+      warning =
+        `provider ended the turn with stop_reason=${stop}` +
+        (result.text.trim().length === 0 ? " and produced no output" : "") +
+        "; the response may be partial or refused.";
+    } else if (result.text.trim().length === 0) {
+      warning =
+        "provider produced no assistant output (possible no-op, guardrail, or awaited input).";
+    }
+    const banner =
+      `[gateway] transport=acp session=${result.gatewaySessionId}` +
+      (warning ? `\n[gateway] warning: ${warning}` : "");
     return {
       content: [
         {
           type: "text" as const,
-          text: `[gateway] transport=acp session=${result.gatewaySessionId}\n${result.text}`,
+          text: `${banner}\n${result.text}`,
         },
       ],
     };
@@ -4313,15 +4331,20 @@ export function buildCliResponse(
   const derivedWarnings: WarningEntry[] = [];
   const extraStructured: Record<string, unknown> = {};
 
-  // Rec #1: Claude exits 0 even when the terminal result carries
-  // is_error:true (e.g. error_max_turns, error_during_execution). The signal
-  // lives in the result event for both json and stream-json; parseStreamJson is
-  // lenient on plain text (returns isError:false), so this never false-fires.
-  let claudeResultError = false;
+  // Rec #1: a provider can exit 0 while its terminal result event carries a
+  // failure signal (Claude is_error, Codex turn.failed/error, Gemini result
+  // status:error). Each parser already extracts the signal; surface it as an
+  // additive warning so a clean-exit-that-actually-failed is not reported as a
+  // plain success (the silent-success class the project has hit before). Set for
+  // ANY provider so the empty_output check below does not double-warn.
+  let resultError = false;
   if (cli === "claude") {
+    // The signal lives in the result event for both json and stream-json;
+    // parseStreamJson is lenient on plain text (returns isError:false), so this
+    // never false-fires.
     const parsedResult = parseStreamJson(stdout);
     if (parsedResult.isError) {
-      claudeResultError = true;
+      resultError = true;
       extraStructured.resultIsError = true;
       derivedWarnings.push({
         code: "claude_result_error",
@@ -4332,18 +4355,43 @@ export function buildCliResponse(
   }
 
   // Rec #3: surface the real Codex session UUID (thread_id) so callers can
-  // resume/fork without filesystem access. Purely additive field.
+  // resume/fork without filesystem access. Purely additive field. Also flag a
+  // failed turn (turn.failed / error event) that codex printed before exiting 0.
   if (cli === "codex") {
     const parsedCodex = parseCodexJsonStream(stdout);
     if (parsedCodex.threadId) {
       extraStructured.codexSessionId = parsedCodex.threadId;
     }
+    if (parsedCodex.error) {
+      resultError = true;
+      extraStructured.resultIsError = true;
+      derivedWarnings.push({
+        code: "codex_result_error",
+        message: `Codex exited 0 but reported a failed turn: ${parsedCodex.error}. The returned text may be partial.`,
+      });
+    }
+  }
+
+  // Gemini exits 0 even when the terminal `result` event reports status:"error".
+  // parseGeminiJson/parseGeminiStreamJson map that status into stopReason.
+  if (cli === "gemini") {
+    const parsedGemini =
+      outputFormat === "stream-json" ? parseGeminiStreamJson(stdout) : parseGeminiJson(stdout);
+    if (parsedGemini?.stopReason === "error") {
+      resultError = true;
+      extraStructured.resultIsError = true;
+      derivedWarnings.push({
+        code: "gemini_result_error",
+        message:
+          "Gemini exited 0 but the result event reported status:error. The returned text may be partial.",
+      });
+    }
   }
 
   // Rec #6: a clean exit with empty assistant output is reported as success
-  // today. Flag it as a warning (not an error). Skip when the Claude is_error
+  // today. Flag it as a warning (not an error). Skip when a provider result-error
   // signal already fired so the two do not double-warn on the same result.
-  if (!claudeResultError && finalStdout.trim().length === 0) {
+  if (!resultError && finalStdout.trim().length === 0) {
     extraStructured.emptyOutput = true;
     derivedWarnings.push({
       code: "empty_output",
