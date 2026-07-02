@@ -749,7 +749,7 @@ code {
   grid-template-columns: repeat(3, minmax(120px, 1fr));
   gap: 42px;
 }
-.footer-col h4 {
+.footer-col h3 {
   color: var(--text-100);
   font-size: 0.8125rem;
   margin-bottom: 10px;

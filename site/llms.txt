@@ -4,11 +4,15 @@
 
 ## Links
 
-- Homepage: https://llm-cli-gateway.dev/
-- Install: https://llm-cli-gateway.dev/install.md
-- Repository: https://github.com/verivus-oss/llm-cli-gateway
-- npm: https://www.npmjs.com/package/llm-cli-gateway
-- MCP Registry name: io.github.verivus-oss/llm-cli-gateway
+- [Homepage](https://llm-cli-gateway.dev/): Product overview, provider matrix, and deployment positioning.
+- [Install guide](https://llm-cli-gateway.dev/install.md): Agent-readable setup instructions for local stdio and remote HTTP gateway use.
+- [Repository](https://github.com/verivus-oss/llm-cli-gateway): Source code, issues, releases, skills, and operational workflows.
+- [npm package](https://www.npmjs.com/package/llm-cli-gateway): Published package for `npx -y llm-cli-gateway`.
+- [Agent metadata](https://llm-cli-gateway.dev/.well-known/agent.json): Structured metadata for MCP clients and retrieval agents.
+- [XML sitemap](https://llm-cli-gateway.dev/sitemap.xml): Search-engine sitemap for public site resources.
+- [Human sitemap](https://llm-cli-gateway.dev/sitemap.md): Markdown index of public resources.
+
+MCP Registry name: `io.github.verivus-oss/llm-cli-gateway`
 
 ## Launch
 
@@ -35,3 +39,7 @@ Transports: stdio (default, local) and HTTP (remote). HTTP binds 127.0.0.1:3333/
 llm-cli-gateway wraps installed provider CLIs and can register configured HTTP API providers. Provider CLIs keep their native credentials, local file access, tool execution, and session semantics. API-provider keys are read from named environment variables at request time and are not written to config, diagnostics, persisted payloads, dedup keys, logs, or the flight recorder. The gateway adds MCP access, async orchestration, durable job state, validation workflows, and approval surfaces.
 
 It runs local-first over stdio, and remotely over HTTP behind real authentication: a static bearer token, a built-in OAuth 2.0 server, or a trusted-principal-header seam for an identity proxy you already run. Every session, job, and stored request is owned by a principal and access is enforced per principal, so one caller never sees another's work; remote provider calls require a registered workspace; and a dangerous OAuth configuration fails closed. The 2.9.0 release remediated all 17 findings of a multi-LLM red-team of the external and internal MCP surface before the remote path was documented as ready.
+
+## Optional
+
+- [Maintainer operations](https://llm-cli-gateway.dev/maintainers.md): Public notes on release credentials, Cloudflare Pages deploys, search indexing, and token smoke workflows.
