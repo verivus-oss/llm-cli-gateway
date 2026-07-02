@@ -174,12 +174,21 @@ const CONFIG_MUTATE_VERBS = new Set([
 /**
  * Classify the risk of a discovered operation NAME within a family, given the
  * family's base risk. Read verbs downgrade to read_only; auth/destructive/config
- * verbs map to their class; unknown verbs inherit the (more conservative) family
- * risk so an unrecognised operation is never silently treated as read-only.
+ * verbs map to their class.
+ *
+ * Unknown verbs: for a discovered SUBcommand (`isSubcommand`), an unknown verb
+ * must NOT inherit a `read_only` family risk. A provider CLI upgrade can add a
+ * mutating subcommand (e.g. `rotate`, `revoke`, `publish`, `rename`) under a
+ * family we classified read-only, and inheriting `read_only` would run it on the
+ * unapproved read path. Such a subcommand is escalated to `writes_local_config`
+ * so it requires approval. A LEAF family (not a subcommand) keeps its declared
+ * risk: the family name is deliberately classified and its read-only leaves
+ * (e.g. `doctor`, `models`) must stay on the read path.
  */
 export function classifyOperationRisk(
   operationName: string,
-  familyRisk: CliSubcommandRisk
+  familyRisk: CliSubcommandRisk,
+  opts: { isSubcommand?: boolean } = {}
 ): CliSubcommandRisk {
   const n = operationName.trim().toLowerCase();
   if (READ_VERBS.has(n)) return "read_only";
@@ -187,6 +196,9 @@ export function classifyOperationRisk(
   if (DESTRUCTIVE_VERBS.has(n)) return "destructive";
   if (STARTS_SERVER_VERBS.has(n)) return "starts_server";
   if (CONFIG_MUTATE_VERBS.has(n)) return "writes_local_config";
+  if (opts.isSubcommand && familyRisk === "read_only") {
+    return "writes_local_config";
+  }
   return familyRisk;
 }
 
@@ -285,7 +297,7 @@ export function projectProviderAdminOperations(
     if (subOps.length > 0) {
       for (const sub of subOps) {
         if (!isSafeAdminToken(sub.name)) continue; // never build argv from junk
-        const risk = classifyOperationRisk(sub.name, baseRisk);
+        const risk = classifyOperationRisk(sub.name, baseRisk, { isSubcommand: true });
         const exposure = adminRiskToExposure(risk);
         ops.push({
           provider: def.id,
@@ -805,6 +817,39 @@ const PROVIDER_ADMIN_ENUM = z.enum(
 );
 
 /**
+ * M2: gate the READ-ONLY admin surface for remote callers.
+ *
+ * `provider_admin_list` and `provider_admin_run` are read-only but still SPAWN
+ * host-global provider CLIs (discovery / `doctor` / `auth status`) and disclose
+ * host auth/config state. A remote HTTP/OAuth principal must therefore satisfy
+ * the same dedicated CLI-admin gate as the mutating path (`LLM_GATEWAY_CLI_ADMIN=1`
+ * + the `cli:admin` OAuth scope); otherwise a remote caller could enumerate and
+ * trigger unbounded host-CLI spawns. Returns a redacted error content block when
+ * a remote caller is not permitted, else null. Local stdio callers are exempt.
+ */
+function remoteReadOnlyAdminGate(
+  toolName: string
+): { content: { type: "text"; text: string }[] } | null {
+  const ctx = getRequestContext();
+  if (isRemoteAdminCaller(ctx) && !remoteCliAdminEnabled(ctx)) {
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify({
+            ok: false,
+            error:
+              `${toolName} is not permitted for remote callers. Set LLM_GATEWAY_CLI_ADMIN=1 ` +
+              `and grant the cli:admin OAuth scope to permit read-only provider admin operations remotely.`,
+          }),
+        },
+      ],
+    };
+  }
+  return null;
+}
+
+/**
  * Register the three provider-admin tools:
  *  - `provider_admin_list`   read-only catalog projected from discovery.
  *  - `provider_admin_run`    execute a read-only admin op (redacted output).
@@ -837,6 +882,8 @@ export function registerProviderAdminTools(
       openWorldHint: false,
     },
     async ({ provider, includeUnavailable }) => {
+      const gate = remoteReadOnlyAdminGate("provider_admin_list");
+      if (gate) return gate;
       // Seed discovery for the requested providers (never throws).
       const targets = provider ? [getProviderDefinition(provider)] : getAllProviderDefinitions();
       await Promise.all(
@@ -881,6 +928,8 @@ export function registerProviderAdminTools(
       openWorldHint: false,
     },
     async ({ provider, operationId }) => {
+      const gate = remoteReadOnlyAdminGate("provider_admin_run");
+      if (gate) return gate;
       const op = await resolveAdminOperation(provider, operationId, runtime.logger);
       if (!op) {
         return {
