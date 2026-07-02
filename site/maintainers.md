@@ -40,9 +40,17 @@ The public site publishes `robots.txt` and `sitemap.xml` so Google, Bing, and
 other crawlers can discover the current canonical URLs.
 
 Google sitemap submission is managed through Google Search Console. Google no
-longer supports unauthenticated sitemap ping submissions, so direct automation
-requires a verified Search Console property and an OAuth or service-account path
-outside the repository.
+longer supports unauthenticated sitemap ping submissions. The Pages deploy
+workflow uses GitHub OIDC and Google Workload Identity Federation to request a
+short-lived token for the
+`llm-cli-gateway-search-submit@verivus-confidential.iam.gserviceaccount.com`
+service account, then submits `https://llm-cli-gateway.dev/sitemap.xml` for the
+`sc-domain:llm-cli-gateway.dev` property.
+
+That service account must remain a verified owner or Full user on the Search
+Console property. The repository stores only non-secret Google project,
+workload-identity, service-account, site, and sitemap identifiers as GitHub
+environment variables.
 
 Bing submission is automated with IndexNow. The site hosts the public IndexNow
 key file at `/3a9d0d7145a50e273758cb63918b496f.txt`, and the Pages deploy

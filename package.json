@@ -87,6 +87,8 @@
     "format": "prettier --write 'src/**/*.ts'",
     "format:check": "prettier --check 'src/**/*.ts'",
     "security:audit": "bash scripts/release-security-audit.sh",
+    "search:google:submit": "node scripts/submit-google-search-console.mjs",
+    "search:google:submit:dry-run": "node scripts/submit-google-search-console.mjs --dry-run",
     "search:submit": "node scripts/submit-indexnow.mjs",
     "search:submit:dry-run": "node scripts/submit-indexnow.mjs --dry-run",
     "check": "npm run build && npm run lint && npm run format:check && npm test && npm run security:audit",
