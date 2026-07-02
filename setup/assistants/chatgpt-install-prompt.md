@@ -23,7 +23,7 @@ Use the verified public `/mcp` URL with ChatGPT Authentication set to `OAuth`. U
 
 If the user does not have a plan or workspace that supports custom MCP connectors, label ChatGPT setup as blocked by plan support and offer a local client path such as Codex or Gemini CLI.
 
-Once ChatGPT can reach the gateway, it can request any of the five outbound validation providers the gateway brokers: Claude Code, Codex CLI, Gemini CLI, Grok CLI/API, and Mistral Vibe CLI. Mistral Vibe is outbound-only; do not configure it as an inbound client. Check `providers.<name>.cli_available` in doctor JSON for each provider the user wants enabled.
+Once ChatGPT can reach the gateway, it can request registered outbound validation providers including Claude Code, Codex CLI, Gemini/Antigravity, Grok CLI/API, Mistral Vibe, Cognition Devin, Cursor Agent, and configured HTTP API providers. Mistral Vibe, Devin, Cursor Agent, and generic API providers are outbound providers, not inbound MCP client setup targets here. Check doctor JSON for each provider the user wants enabled.
 
 Note (v1.6.0): `doctor --json` now always emits a top-level `cache_awareness` block. All `[cache_awareness]` flags default off, so a zeroed block with an empty `enabled_features` list is the expected default. Ignore it for install purposes unless the user explicitly asks to enable cache-awareness features.
 

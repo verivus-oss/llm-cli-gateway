@@ -1,4 +1,11 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { AsyncJobManager } from "../async-job-manager.js";
+import type { PersistenceConfig } from "../config.js";
+import { FlightRecorder } from "../flight-recorder.js";
+import { createGatewayServer } from "../index.js";
 import {
   PostgresJobStore,
   computeRequestKey,
@@ -6,6 +13,8 @@ import {
   type JobStore,
   type ValidationRunStore,
 } from "../job-store.js";
+import { noopLogger } from "../logger.js";
+import { FileSessionManager } from "../session-manager.js";
 import { cleanTestDatabase, setupTestDatabase } from "./setup.js";
 
 const TEST_DATABASE_URL =
@@ -13,10 +22,12 @@ const TEST_DATABASE_URL =
 
 describe("PostgresJobStore", () => {
   let store: JobStore & ValidationRunStore;
+  let tempDir: string;
 
   beforeEach(async () => {
     await setupTestDatabase();
     await cleanTestDatabase();
+    tempDir = mkdtempSync(join(tmpdir(), "pg-job-store-"));
     store = new PostgresJobStore(TEST_DATABASE_URL, undefined, {
       retentionMs: 60_000,
       dedupWindowMs: 60_000,
@@ -25,6 +36,7 @@ describe("PostgresJobStore", () => {
 
   afterEach(() => {
     store.close();
+    rmSync(tempDir, { recursive: true, force: true });
   });
 
   it("round-trips a completed process job", () => {
@@ -187,4 +199,94 @@ describe("PostgresJobStore", () => {
       confidence: "high",
     });
   });
+
+  it("registers and serves validation_receipt through a postgres-backed gateway", async () => {
+    const now = new Date().toISOString();
+    for (const id of ["pg-v-claude", "pg-v-codex"]) {
+      store.recordStart({
+        id,
+        correlationId: `corr-${id}`,
+        requestKey: `key-${id}`,
+        cli: "claude",
+        args: [],
+        startedAt: now,
+        pid: null,
+        ownerPrincipal: "local",
+      });
+      store.recordComplete({
+        id,
+        status: "completed",
+        exitCode: 0,
+        stdout: "Verdict: approve",
+        stderr: "",
+        outputTruncated: false,
+        error: null,
+        finishedAt: now,
+      });
+    }
+    store.recordValidationRun({
+      validationId: "val-pg-tool",
+      ownerPrincipal: "local",
+      intent: "validate",
+      createdAt: now,
+      requestJson: JSON.stringify({
+        question: "Is this safe?",
+        modelList: ["claude", "codex"],
+      }),
+      providerLinks: [
+        { provider: "claude", jobId: "pg-v-claude", correlationId: "corr-pg-v-claude" },
+        { provider: "codex", jobId: "pg-v-codex", correlationId: "corr-pg-v-codex" },
+      ],
+      judgeLink: null,
+      status: "running",
+    });
+    store.setValidationRunStatus("val-pg-tool", "finalized");
+
+    const flight = new FlightRecorder(join(tempDir, "logs.db"));
+    try {
+      const server = createGatewayServer({
+        sessionManager: new FileSessionManager(join(tempDir, "sessions.json")),
+        asyncJobManager: new AsyncJobManager(noopLogger, undefined, store),
+        persistence: postgresPersistence(),
+        flightRecorder: flight,
+      });
+      const tool = registeredTools(server)["validation_receipt"];
+      expect(tool).toBeDefined();
+
+      const result = await tool.handler(
+        { validationId: "val-pg-tool", format: "json", includeRawResponses: false },
+        {}
+      );
+      const body = JSON.parse(result.content[0].text);
+      expect(body.status).toBe("minted");
+      expect(body.receipt.validationId).toBe("val-pg-tool");
+      expect(body.receipt.models).toEqual(["claude", "codex"]);
+    } finally {
+      flight.close();
+    }
+  });
 });
+
+function postgresPersistence(): PersistenceConfig {
+  return {
+    backend: "postgres",
+    path: null,
+    dsn: TEST_DATABASE_URL,
+    retentionDays: 30,
+    dedupWindowMs: 3600000,
+    acknowledgeEphemeral: false,
+    asyncJobsEnabled: true,
+    sources: { configFile: null, envOverrides: [] },
+  };
+}
+
+interface RegisteredTool {
+  handler: (
+    args: Record<string, unknown>,
+    extra?: Record<string, unknown>
+  ) => Promise<{ content: Array<{ type: string; text: string }> }>;
+}
+
+function registeredTools(server: unknown): Record<string, RegisteredTool> {
+  return (server as Record<string, Record<string, RegisteredTool>>)._registeredTools;
+}

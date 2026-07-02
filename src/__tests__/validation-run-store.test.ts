@@ -290,10 +290,9 @@ describe("startJudgeSynthesis judge-link persistence (Phase 0)", () => {
 });
 
 // The durability gate's mechanism: getValidationRunStore() exposes the run store
-// ONLY for an attached durable backend. index.ts wires it to the validation tools
-// via `persistence.backend === "sqlite" ? asyncJobManager.getValidationRunStore() : null`,
-// so this is the load-bearing half of that one-liner (memory/postgres/none can
-// never produce a run store, with or without the redundant backend guard).
+// only for an attached backend that implements ValidationRunStore. index.ts
+// wires that capability directly to the validation tools, so memory/none can
+// never produce a run store.
 describe("AsyncJobManager.getValidationRunStore durability gate (Phase 0)", () => {
   let tempDir: string;
 

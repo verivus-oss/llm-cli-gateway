@@ -51,7 +51,7 @@ Or use directly with `npx` from an MCP client:
 
 The repo ships agent-ready workflow skills under [`.agents/skills`](.agents/skills) for async orchestration, session continuity, multi-LLM review, implement-review-fix loops, and secure approval-gated dispatch. Six caller-facing skills are bundled in the published npm package: `async-job-orchestration`, `multi-llm-review`, `session-workflow`, `secure-orchestration`, `implement-review-fix`, and `public-demo-session`. Machine-readable DAG-TOML plans live under [`docs/plans`](docs/plans) and [`setup/install-plan.dag.toml`](setup/install-plan.dag.toml) for workflows that need deterministic sequencing and verification gates.
 
-The next documentation focus is provider-specific skill and DAG-TOML pairs for each outbound CLI: Claude, Codex, Gemini, Grok, and Mistral Vibe. The implementation plan is tracked in [`docs/plans/provider-workflow-assets.dag.toml`](docs/plans/provider-workflow-assets.dag.toml), with each provider asset expected to cover install/login checks, session behavior, approval modes, cache/telemetry surfaces, failure modes, and a smoke-test gate.
+The next documentation focus is provider-specific skill and DAG-TOML pairs for each outbound CLI: Claude, Codex, Gemini/Antigravity, Grok, Mistral Vibe, Devin, and Cursor Agent. The implementation plan is tracked in [`docs/plans/provider-workflow-assets.dag.toml`](docs/plans/provider-workflow-assets.dag.toml), with each provider asset expected to cover install/login checks, session behavior, approval modes, cache/telemetry surfaces, failure modes, and a smoke-test gate.
 
 ## Trust & Supply Chain
 
@@ -61,7 +61,7 @@ The next documentation focus is provider-specific skill and DAG-TOML pairs for e
 - CI runs build, lint, format, tests, package checks, and npm audit.
 - Security CI runs actionlint, zizmor, shellcheck, typos, osv-scanner, gitleaks, and lychee.
 - GitHub release installer artifacts are checksummed and signed with Sigstore keyless signing.
-- npm releases use provenance through OIDC trusted publishing.
+- npm releases use a generated prod-only shrinkwrap and release security audit; the publish token is fetched at runtime from Azure Key Vault through GitHub OIDC to Entra.
 - The npm package intentionally ships a generated, prod-only `npm-shrinkwrap.json` so registry installs resolve the audited release tree. Release gates regenerate it from `package-lock.json`, compare for parity, and run a registry-fidelity consumer install before publishing.
 - Socket behavioural alerts are documented in [`socket.yml`](./socket.yml) and under "Security Considerations" below. `shellAccess` and `shrinkwrap` are reviewed package capabilities/configuration for this CLI appliance, not hidden install behaviour.
 
@@ -389,7 +389,7 @@ The personal-appliance surface exposes simplified validation tools for non-devel
 - `synthesize_validation`: run an explicit judge model after provider results have been collected.
 - `list_available_models`: list the models each provider CLI exposes through the simplified surface.
 - `job_status` and `job_result`: poll and collect validation job outputs.
-- `validation_receipt`: retrieve the immutable receipt of a terminal cross-LLM validation run by `validationId` (returns `minted | pending | expired_unminted | not_found`, own-or-not-found). `format: "markdown"` renders a human-readable report; `includeRawResponses` inlines provider answer text. Registered only under the durable persistence gate (`backend = "sqlite"` with an attached validation-run store).
+- `validation_receipt`: retrieve the immutable receipt of a terminal cross-LLM validation run by `validationId` (returns `minted | pending | expired_unminted | not_found`, own-or-not-found). `format: "markdown"` renders a human-readable report; `includeRawResponses` inlines provider answer text. Registered only when the attached job store provides the durable validation-run store capability (`sqlite` and `postgres`).
 
 The same receipt is also exposed as the `validation-receipt://{validationId}` MCP resource (same durable gate and own-or-not-found owner scoping).
 
@@ -656,7 +656,7 @@ acknowledgeEphemeral = false                # required to enable async tools wit
 Backends:
 
 - **`sqlite`** (default) — durable, file-backed. Safe for single-instance deployments.
-- **`postgres`** — durable PostgreSQL-backed async job, dedup, orphan recovery, and validation receipt storage. Use this for multi-instance or service deployments. Requires the optional peer dependency `pg` to be installed alongside the gateway.
+- **`postgres`** — durable PostgreSQL-backed async job, dedup, orphan recovery, HTTP job, and validation receipt storage. Use this for multi-instance or service deployments. Requires the optional peer dependency `pg` to be installed alongside the gateway.
 - **`memory`** — in-process Map. Lost on gateway exit. Requires `acknowledgeEphemeral = true` to be loaded. Suitable for tests and ephemeral CI gateways.
 - **`none`** — no store. **`*_request_async`, `llm_job_status`, `llm_job_result`, and `llm_job_cancel` are NOT registered on the gateway.** This is a structural invariant: agents that try to call async tools against a gateway with `backend = "none"` get a clean "tool not found" at connect time instead of silent in-memory loss after the 1-hour TTL. Use `llm_process_health` to inspect the resolved persistence state programmatically.
 
@@ -1317,7 +1317,7 @@ The API key value is never emitted on any of these surfaces (only the env var na
 
 ### Security note
 
-The resolved API key is excluded from `payloadJson`, the dedup key, logs, and the flight recorder. However, the **request prompt is persisted in plaintext** in the async job store (the SQLite file at `[persistence].path`, default `~/.llm-cli-gateway/logs.db`) and is not covered by secret redaction. This mirrors the CLI tools, whose prompt is persisted in `argsJson` whenever it is passed as a command argument (a few CLI paths instead stream the prompt over stdin and so do not persist it). Treat the job store as sensitive at rest. See [Security Considerations](#security-considerations).
+The resolved API key is excluded from `payloadJson`, the dedup key, logs, and the flight recorder. However, the **request prompt is persisted in plaintext** in the async job store (SQLite at `[persistence].path`, default `~/.llm-cli-gateway/logs.db`, or Postgres rows under `backend = "postgres"`) and is not covered by secret redaction. This mirrors the CLI tools, whose prompt is persisted in `argsJson` whenever it is passed as a command argument (a few CLI paths instead stream the prompt over stdin and so do not persist it). Treat the job store as sensitive at rest. See [Security Considerations](#security-considerations).
 
 ## Session Management
 
@@ -1579,7 +1579,7 @@ The gateway supports concurrent requests across different CLIs. Each request spa
 - **Command Execution**: Uses `spawn` with separate arguments (not shell execution)
 - **No Eval**: No dynamic code evaluation in our source (see "Socket alerts" below for the transitive `ajv` codegen case)
 - **Sandboxing**: Consider running in containers for production use
-- **Provenance**: Releases are published with [npm provenance](https://docs.npmjs.com/generating-provenance-statements) via OIDC trusted publishing from GitHub Actions
+- **npm publish control**: npm releases are gated by the generated prod-only shrinkwrap, release security audit, packed-consumer checks, and a publish token fetched at runtime from Azure Key Vault through GitHub OIDC to Entra
 - **Release signing**: GitHub release installer artifacts are signed with Sigstore keyless signing; verify `SHA256SUMS.sigstore.json` before trusting the checksum file
 
 ### Socket alerts — context for reviewers

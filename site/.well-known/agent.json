@@ -1,6 +1,6 @@
 {
   "name": "llm-cli-gateway",
-  "description": "One MCP endpoint for Claude Code, Codex, Gemini, Grok, and Mistral Vibe CLIs. Local over stdio, or remote over HTTP behind a bearer token or OAuth.",
+  "description": "One MCP endpoint for Claude Code, Codex CLI, Gemini/Antigravity, Grok Build, Mistral Vibe, Cognition Devin, Cursor Agent, and optional HTTP API providers. Local over stdio, or remote over HTTP behind a bearer token or OAuth.",
   "url": "https://llm-cli-gateway.dev/",
   "repository": "https://github.com/verivus-oss/llm-cli-gateway",
   "license": "MIT",

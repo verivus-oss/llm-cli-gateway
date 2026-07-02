@@ -15,7 +15,7 @@ If endpoint exposure is not ready, follow `setup/assistants/endpoint-exposure-ag
 
 If the user only wants outbound validation, configure the local Grok CLI/API path through the provider's official login flow and verify `providers.grok` in doctor JSON. Do not ask for xAI API keys, OAuth tokens, auth files, tunnel tokens, bearer tokens, or authorization headers.
 
-The gateway brokers five outbound validation providers: Claude Code, Codex CLI, Gemini CLI, Grok CLI/API, and Mistral Vibe CLI. Mistral Vibe is outbound-only; do not configure it as an inbound client. Check `providers.<name>.cli_available` in doctor JSON for each provider the user wants enabled.
+The gateway brokers registered outbound validation providers including Claude Code, Codex CLI, Gemini/Antigravity, Grok CLI/API, Mistral Vibe, Cognition Devin, Cursor Agent, and configured HTTP API providers. Mistral Vibe, Devin, Cursor Agent, and generic API providers are outbound providers, not inbound MCP client setup targets here. Check doctor JSON for each provider the user wants enabled.
 
 Note (v1.6.0): `doctor --json` now always emits a top-level `cache_awareness` block. All `[cache_awareness]` flags default off, so a zeroed block with an empty `enabled_features` list is the expected default. Ignore it for install purposes unless the user explicitly asks to enable cache-awareness features.
 

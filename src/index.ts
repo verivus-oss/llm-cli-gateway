@@ -2483,14 +2483,11 @@ function registerBaseResources(server: McpServer, runtime: GatewayServerRuntime)
   );
 
   // Cross-LLM validation receipts (Phase 3): expose the receipt as an MCP
-  // resource, registered ONLY under the durable gate (sqlite + an attached run
-  // store), the same gate as the validation_receipt tool. Same own-or-not-found
-  // owner scoping: an unknown / unowned / not-yet-terminal id returns the
-  // corresponding status object rather than another principal's data.
-  const validationReceiptStore =
-    runtime.persistence.backend === "sqlite"
-      ? runtime.asyncJobManager.getValidationRunStore()
-      : null;
+  // resource only when the attached store provides the validation-run surface.
+  // Same own-or-not-found owner scoping: an unknown / unowned / not-yet-terminal
+  // id returns the corresponding status object rather than another principal's
+  // data.
+  const validationReceiptStore = runtime.asyncJobManager.getValidationRunStore();
   if (validationReceiptStore) {
     server.registerResource(
       "validation-receipt",
@@ -7627,17 +7624,14 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
   registerBaseResources(server, runtime);
   // Slice 3: enabled API providers can act as validation reviewers/judges. The
   // orchestrator dispatches them through startHttpJob; CLI providers keep argv.
-  // Cross-LLM validation receipts (Phase 0): pass the durable validation-run
-  // store ONLY under an implemented durable backend (today sqlite) with a store
-  // that actually attached at runtime. getValidationRunStore() returns null for a
-  // null store or the ephemeral memory / unimplemented postgres stores, so under
-  // any non-durable backend no validation_runs row is ever written, by
-  // construction (the same gate style as *_request_async tool registration).
+  // Cross-LLM validation receipts (Phase 0): pass the validation-run store only
+  // when the attached backend implements that capability. Memory and null stores
+  // return null, so under non-durable/no-store backends no validation_runs row is
+  // ever written.
   registerValidationTools(server, {
     asyncJobManager,
     apiProviders: enabledApiProviders(providers),
-    validationRunStore:
-      persistence.backend === "sqlite" ? asyncJobManager.getValidationRunStore() : null,
+    validationRunStore: asyncJobManager.getValidationRunStore(),
   });
   registerWorkspaceTools(server, runtime);
   // Slice 2: per-provider api_<name>_request tools. Dormant unless a
@@ -11832,8 +11826,8 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
     async () => {
       const health = asyncJobManager.getJobHealth();
       // Report the EFFECTIVE async state, not the configured intent. When a
-      // durable store fails to open (backend = 'postgres', which is not yet
-      // implemented and always throws, or a sqlite DB that fails to open),
+      // durable store fails to open (for example a Postgres or SQLite connection
+      // error),
       // getJobStore() catches the error and nulls the store, so the
       // *_request_async / llm_job_* tools are NOT registered. This MUST mirror
       // the registration gate (the `asyncJobsEnabled` derived in

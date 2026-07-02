@@ -10,7 +10,7 @@ doctor_command = "llm-cli-gateway doctor --json"
 id = "choose-targets"
 depends_on = []
 actor = "assistant"
-action = "Ask which inbound client and outbound validation providers the user wants. The gateway brokers five outbound providers: claude, codex, gemini, grok, mistral (Vibe CLI). Inbound clients are a separate set; mistral is outbound-only."
+action = "Ask which inbound client and outbound validation providers the user wants. The gateway brokers registered outbound providers: claude, codex, gemini, grok, mistral, devin, cursor, and configured HTTP API providers. Inbound clients are a separate set; mistral, devin, cursor, and generic API providers are outbound-only here unless a separate inbound path is verified."
 idempotent = true
 validation = "Selected targets map to setup/providers/*.md (including mistral-vibe.md for Mistral) and unsupported targets are labeled deferred."
 

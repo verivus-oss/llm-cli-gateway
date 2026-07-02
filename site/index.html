@@ -4,13 +4,13 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>llm-cli-gateway - one MCP endpoint for coding-agent CLIs</title>
-  <meta name="description" content="Run Claude Code, Codex, Gemini, Grok, and Mistral Vibe from one MCP endpoint, local over stdio or remote over HTTP behind a bearer token or OAuth, with durable async jobs, sessions, per-principal isolation, and review tools.">
+  <meta name="description" content="Run registered coding-agent CLIs and optional HTTP API providers from one MCP endpoint, local over stdio or remote over HTTP behind a bearer token or OAuth, with durable async jobs, sessions, per-principal isolation, and review tools.">
   <link rel="canonical" href="https://llm-cli-gateway.dev/">
   <link rel="icon" href="/images/llmcligwlogov7-y-tm.png">
   <meta property="og:site_name" content="llm-cli-gateway">
   <meta property="og:type" content="website">
   <meta property="og:title" content="One MCP endpoint for the coding-agent CLIs.">
-  <meta property="og:description" content="A gateway for Claude Code, Codex, Gemini, Grok, and Mistral Vibe with async jobs, sessions, consensus checks, remote HTTP access behind OAuth, and signed releases.">
+  <meta property="og:description" content="A gateway for Claude Code, Codex, Gemini/Antigravity, Grok Build, Mistral Vibe, Devin, Cursor Agent, and optional HTTP API providers.">
   <meta property="og:url" content="https://llm-cli-gateway.dev/">
   <meta property="og:image" content="https://llm-cli-gateway.dev/images/social-card.png">
   <meta property="og:image:width" content="1200">
@@ -18,7 +18,7 @@
   <meta property="og:image:alt" content="llm-cli-gateway social preview">
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="One MCP endpoint for the coding-agent CLIs.">
-  <meta name="twitter:description" content="Run five provider CLIs from one MCP gateway, local over stdio or remote over HTTP behind real auth.">
+  <meta name="twitter:description" content="Run registered coding-agent CLIs from one MCP gateway, local over stdio or remote over HTTP behind real auth.">
   <meta name="twitter:image" content="https://llm-cli-gateway.dev/images/social-card.png">
   <meta name="twitter:image:alt" content="llm-cli-gateway social preview">
   <link rel="alternate" type="text/markdown" href="/install.md">
@@ -30,7 +30,7 @@
     "@context": "https://schema.org",
     "@type": "SoftwareApplication",
     "name": "llm-cli-gateway",
-    "description": "MCP server providing unified access to Claude Code, Codex, Gemini, Grok, and Mistral Vibe CLIs, locally over stdio or remotely over HTTP behind a bearer token or OAuth.",
+    "description": "MCP server providing unified access to Claude Code, Codex, Gemini/Antigravity, Grok Build, Mistral Vibe, Devin, Cursor Agent, and optional HTTP API providers, locally over stdio or remotely over HTTP behind a bearer token or OAuth.",
     "applicationCategory": "DeveloperApplication",
     "operatingSystem": "Linux, macOS, Windows",
     "url": "https://llm-cli-gateway.dev",
@@ -97,7 +97,7 @@
         <img src="/images/llmcligwlogov7-y-tm.png" alt="" width="32" height="32">
         <div>
           <div class="hp-hero-install__name">llm-cli-gateway - one MCP gateway for coding-agent CLIs, local or remote</div>
-          <div class="hp-hero-install__meta">Claude Code / Codex / Gemini / Grok / Mistral Vibe - durable async jobs - MIT</div>
+          <div class="hp-hero-install__meta">Claude / Codex / Gemini / Grok / Mistral / Devin / Cursor - durable async jobs - MIT</div>
         </div>
       </div>
 
@@ -132,7 +132,7 @@
       <div class="hp-hero-demo__output">&nbsp; claude_request: accepts with caveat<br>&nbsp; codex_request: flags missing test<br>&nbsp; gemini_request: suggests smaller patch<br>&nbsp; result: disagreement summarized for review</div>
 
       <div class="hp-hero-demo__gap"><span class="hp-hero-demo__prompt">&gt;</span> <span class="hp-hero-demo__cmd">claude_request_async({ prompt, outputFormat: "stream-json" })</span></div>
-      <div class="hp-hero-demo__output">&nbsp; jobId: 1f0c9a2e-…<br>&nbsp; status: running<br>&nbsp; persisted: ~/.llm-cli-gateway/logs.db</div>
+      <div class="hp-hero-demo__output">&nbsp; jobId: 1f0c9a2e-…<br>&nbsp; status: running<br>&nbsp; persisted: SQLite by default, Postgres when configured</div>
 
       <div class="hp-hero-demo__gap"><span class="hp-hero-demo__prompt">&gt;</span> <span class="hp-hero-demo__cmd">llm_job_result({ jobId })</span></div>
       <div class="hp-hero-demo__success">&nbsp; complete - result recovered after gateway restart</div>
@@ -158,7 +158,7 @@
           <span class="hp-hero-compare__output--accent">claude_request</span> keeps Claude Code semantics<br>
           <span class="hp-hero-compare__output--accent">codex_request</span> uses real Codex sessions<br>
           <span class="hp-hero-compare__output--accent">gemini_request</span> uses the installed Antigravity CLI (agy)<br>
-          <span class="hp-hero-compare__output--accent">grok_request</span> and <span class="hp-hero-compare__output--accent">mistral_request</span> follow provider CLIs
+          <span class="hp-hero-compare__output--accent">grok_request</span>, <span class="hp-hero-compare__output--accent">mistral_request</span>, <span class="hp-hero-compare__output--accent">devin_request</span>, and <span class="hp-hero-compare__output--accent">cursor_request</span> follow provider CLIs
         </div>
         <div class="hp-hero-compare__summary">One MCP surface, real local CLIs underneath.</div>
       </div>
@@ -166,14 +166,14 @@
 
     <section class="hp-section">
       <div class="hp-what">
-        <p class="hp-what__desc">A Model Context Protocol (MCP) gateway for running Claude Code, Codex, Gemini, Grok, and Mistral Vibe CLIs from one MCP endpoint, with durable async jobs, session continuity, cache-aware prompting, observability, and personal-appliance setup tooling.</p>
-        <p class="hp-what__desc hp-what__desc--secondary">Why developers try it: one MCP endpoint for cross-LLM validation, multi-agent coding workflows, and repeatable assistant-led setup across five provider CLIs.</p>
+        <p class="hp-what__desc">A Model Context Protocol (MCP) gateway for running Claude Code, Codex CLI, Gemini/Antigravity, Grok Build, Mistral Vibe, Cognition Devin, Cursor Agent, and optional HTTP API providers from one MCP endpoint, with durable async jobs, session continuity, cache-aware prompting, observability, and personal-appliance setup tooling.</p>
+        <p class="hp-what__desc hp-what__desc--secondary">Why developers try it: one MCP endpoint for cross-LLM validation, multi-agent coding workflows, and repeatable assistant-led setup across registered coding-agent CLIs and API providers.</p>
         <p class="hp-what__desc hp-what__desc--secondary">Local by default over stdio. As of 2.9.0 it also runs remotely over HTTP behind a static bearer token or a built-in OAuth 2.0 server (PKCE on by default, an opt-in human-consent gate, and a trusted-principal-header seam for your own identity proxy), with every session, job, and stored request owned by a principal so one caller never sees another's work, remote calls refused unless a workspace is registered, and a dangerous configuration that fails closed rather than serving open.</p>
         <p class="hp-what__desc hp-what__desc--secondary">Current signals: CI and security workflows pass on main, OpenSSF Scorecard is published, OpenSSF Best Practices is passing, releases use Sigstore signing, and the package is MIT licensed.</p>
         <div class="hp-what__queries">
           <div class="hp-what__query"><span class="hp-what__query-name">claude_request</span><span class="hp-what__query-desc">-> Claude Code with sessions and MCP server selection</span></div>
           <div class="hp-what__query"><span class="hp-what__query-name">codex_request</span><span class="hp-what__query-desc">-> OpenAI Codex CLI with real resume IDs</span></div>
-          <div class="hp-what__query"><span class="hp-what__query-name">*_request_async</span><span class="hp-what__query-desc">-> long-running jobs persisted to SQLite</span></div>
+          <div class="hp-what__query"><span class="hp-what__query-name">*_request_async</span><span class="hp-what__query-desc">-> long-running jobs persisted to SQLite or Postgres</span></div>
           <div class="hp-what__query"><span class="hp-what__query-name">consensus_check</span><span class="hp-what__query-desc">-> ask several models and inspect disagreement</span></div>
           <div class="hp-what__query"><span class="hp-what__query-name">session_create</span><span class="hp-what__query-desc">-> reusable provider sessions and worktree-aware flows</span></div>
           <div class="hp-what__query"><span class="hp-what__query-name">approval_list</span><span class="hp-what__query-desc">-> review approval decisions from one place</span></div>
@@ -190,7 +190,7 @@
         <a href="https://github.com/verivus-oss/llm-cli-gateway/actions/workflows/sast.yml" class="hp-assurance__item">SAST</a>
         <a href="https://scorecard.dev/viewer/?uri=github.com/verivus-oss/llm-cli-gateway" class="hp-assurance__item">OpenSSF Scorecard</a>
         <a href="https://www.bestpractices.dev/projects/13025" class="hp-assurance__item">OpenSSF Best Practices</a>
-        <a href="https://www.npmjs.com/package/llm-cli-gateway" class="hp-assurance__item">npm provenance</a>
+        <a href="https://www.npmjs.com/package/llm-cli-gateway" class="hp-assurance__item">npm package</a>
         <a href="https://github.com/verivus-oss/llm-cli-gateway/blob/main/SECURITY.md#release-signing" class="hp-assurance__item">Sigstore</a>
         <a href="https://github.com/verivus-oss/llm-cli-gateway/blob/main/.github/CODEOWNERS" class="hp-assurance__item">CODEOWNERS</a>
         <a href="https://github.com/verivus-oss/llm-cli-gateway/blob/main/.github/dependabot.yml" class="hp-assurance__item">Dependabot</a>
@@ -201,9 +201,9 @@
         <tbody>
           <tr><td>Runtime</td><td>local stdio or remote HTTP</td><td>run on your machine, or expose it behind a bearer token or OAuth</td></tr>
           <tr><td>Remote auth</td><td>bearer or built-in OAuth 2.0</td><td>PKCE, opt-in consent gate, per-principal isolation, fail-closed posture</td></tr>
-          <tr><td>Async jobs</td><td>durable SQLite store</td><td>long calls can survive gateway restarts</td></tr>
+          <tr><td>Async jobs</td><td>SQLite default, Postgres optional</td><td>long calls can survive gateway restarts</td></tr>
           <tr><td>Validation</td><td>cross-model tools</td><td>compare, red-team, second opinion, and consensus workflows</td></tr>
-          <tr><td>Release</td><td>npm provenance + Sigstore</td><td>published artifacts have supply-chain evidence</td></tr>
+          <tr><td>Release</td><td>audited npm package + Sigstore installers</td><td>published artifacts have supply-chain controls</td></tr>
           <tr><td>License</td><td>MIT</td><td>open source and installable without a hosted service</td></tr>
         </tbody>
       </table>
@@ -212,8 +212,8 @@
     <section class="hp-section hp-section--tight">
       <div class="hp-section__label">Integration</div>
       <div class="hp-integration">
-        <div class="hp-integration__row"><span class="hp-integration__label">MCP clients</span><span class="hp-integration__cmd"><a href="/install.md">npx -y llm-cli-gateway</a></span><span class="hp-integration__desc">stdio server for Claude Desktop, Claude Code, Codex, Gemini, and other MCP clients (or <code>--transport=http</code> for remote clients)</span></div>
-        <div class="hp-integration__row"><span class="hp-integration__label">Provider CLIs</span><span class="hp-integration__cmd">claude / codex / agy / grok / vibe</span><span class="hp-integration__desc">uses the tools and credentials you already installed locally</span></div>
+        <div class="hp-integration__row"><span class="hp-integration__label">MCP clients</span><span class="hp-integration__cmd"><a href="/install.md">npx -y llm-cli-gateway</a></span><span class="hp-integration__desc">stdio server for local MCP clients (or <code>--transport=http</code> for remote clients)</span></div>
+        <div class="hp-integration__row"><span class="hp-integration__label">Provider CLIs</span><span class="hp-integration__cmd">claude / codex / agy / grok / vibe / devin / cursor-agent</span><span class="hp-integration__desc">uses the tools and credentials you already installed locally</span></div>
         <div class="hp-integration__row"><span class="hp-integration__label">Registry</span><span class="hp-integration__cmd">io.github.verivus-oss/llm-cli-gateway</span><span class="hp-integration__desc">published to the official MCP Registry</span></div>
       </div>
     </section>
@@ -227,7 +227,7 @@
       </div>
       <div class="footer-links">
         <div class="footer-col"><h4>Product</h4><ul><li><a href="/install.md">Install</a></li><li><a href="https://github.com/verivus-oss/llm-cli-gateway#tools">Tools</a></li><li><a href="https://github.com/verivus-oss/llm-cli-gateway#configuration">Configuration</a></li></ul></div>
-        <div class="footer-col"><h4>Reference</h4><ul><li><a href="/llms.txt">llms.txt</a></li><li><a href="/sitemap.md">Sitemap</a></li><li><a href="/.well-known/agent.json">agent.json</a></li></ul></div>
+        <div class="footer-col"><h4>Reference</h4><ul><li><a href="/llms.txt">llms.txt</a></li><li><a href="/maintainers.md">Maintainers</a></li><li><a href="/sitemap.md">Sitemap</a></li><li><a href="/.well-known/agent.json">agent.json</a></li></ul></div>
         <div class="footer-col"><h4>Company</h4><ul><li><a href="https://github.com/verivus-oss/llm-cli-gateway">GitHub</a></li><li><a href="https://www.npmjs.com/package/llm-cli-gateway">npm</a></li><li><a href="https://verivus.com">Verivus</a></li></ul></div>
       </div>
     </div>

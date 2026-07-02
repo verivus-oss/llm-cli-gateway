@@ -25,16 +25,21 @@ Use these artifacts as source of truth:
 
 ## Providers
 
-The gateway brokers five outbound validation providers:
+The gateway brokers registered outbound validation providers:
 
 - Claude Code (`claude`)
 - Codex CLI (`codex`)
-- Gemini CLI (`gemini`)
-- Grok CLI (`grok`)
+- Gemini/Antigravity (`gemini`)
+- Grok CLI/API (`grok`)
 - Mistral Vibe CLI (`mistral`)
+- Cognition Devin (`devin`)
+- Cursor Agent (`cursor`)
+- configured HTTP API providers (`api_<name>_request`)
 
 Inbound MCP clients (ChatGPT, Claude web, Claude Desktop, Codex, Gemini CLI,
-Grok) are a separate set; Mistral Vibe is outbound-only.
+Grok) are a separate set; Mistral Vibe, Devin, Cursor Agent, and generic HTTP
+API providers are outbound providers here unless a separate inbound path is
+verified.
 
 ## Doctor Report Notes (v1.6.0)
 

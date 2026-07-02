@@ -778,10 +778,9 @@ export class AsyncJobManager {
 
   /**
    * Cross-LLM validation receipts (Phase 0): the validation-run persistence
-   * surface IFF the attached store is an actually-durable, implemented backend
-   * that provides it (today SqliteJobStore). Returns null when there is no store
-   * or the store is MemoryJobStore / PostgresJobStore, so the receipt feature is
-   * gated by capability: under a non-durable backend no run row is ever written.
+   * surface IFF the attached store provides it. Returns null when there is no
+   * store or the store is MemoryJobStore, so the receipt feature is gated by
+   * capability: under a non-durable backend no run row is ever written.
    */
   getValidationRunStore(): ValidationRunStore | null {
     return this.store && isValidationRunStore(this.store) ? this.store : null;
