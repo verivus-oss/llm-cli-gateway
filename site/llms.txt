@@ -22,7 +22,8 @@ Transports: stdio (default, local) and HTTP (remote). HTTP binds 127.0.0.1:3333/
 ## Core tools
 
 - `claude_request`, `codex_request`, `gemini_request`, `grok_request`, `mistral_request`, `devin_request`, `cursor_request`
-- `*_request_async` for registered providers, `codex_fork_session`
+- `api_<name>_request` for configured HTTP API providers, with `api_<name>_request_async` when async jobs are enabled
+- `*_request_async` for registered CLI providers, `codex_fork_session`
 - `llm_job_status`, `llm_job_result`, `llm_job_cancel`, `llm_request_result`
 - `session_create`, `session_list`, `session_set_active`, `session_get`, `session_delete`, `session_clear_all`
 - `workspace_create`, `workspace_list`, `workspace_get`, `workspace_register_existing_repo` (remote calls require a registered workspace)

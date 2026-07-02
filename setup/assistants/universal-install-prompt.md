@@ -36,10 +36,10 @@ The gateway brokers registered outbound validation providers:
 - Cursor Agent (`cursor`)
 - configured HTTP API providers (`api_<name>_request`)
 
-Inbound MCP clients (ChatGPT, Claude web, Claude Desktop, Codex, Gemini CLI,
-Grok) are a separate set; Mistral Vibe, Devin, Cursor Agent, and generic HTTP
-API providers are outbound providers here unless a separate inbound path is
-verified.
+Inbound MCP clients are a separate set. Verified inbound setup pages exist for
+ChatGPT, Claude web, Claude Desktop, Codex, Gemini CLI, Grok, Mistral Vibe,
+Devin, and Cursor. Generic HTTP API providers are outbound validation providers
+only; they are not MCP clients.
 
 ## Doctor Report Notes (v1.6.0)
 

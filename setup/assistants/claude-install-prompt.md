@@ -14,7 +14,7 @@ For Claude web, require a public HTTPS endpoint and fresh doctor JSON showing we
 
 Do not ask for Anthropic account credentials, OAuth tokens, or bearer token values. If local HTTP auth is needed, tell the user to use the generated snippet or the local setup UI.
 
-Outbound validation can target registered providers including Claude Code, Codex CLI, Gemini/Antigravity, Grok CLI/API, Mistral Vibe, Cognition Devin, Cursor Agent, and configured HTTP API providers. Ask which the user wants enabled and check doctor JSON before claiming readiness for any of them. Mistral Vibe, Devin, Cursor Agent, and generic API providers are outbound providers, not inbound MCP client setup targets here.
+Outbound validation can target registered providers including Claude Code, Codex CLI, Gemini/Antigravity, Grok CLI/API, Mistral Vibe, Cognition Devin, Cursor Agent, and configured HTTP API providers. Ask which the user wants enabled and check doctor JSON before claiming readiness for any of them. This prompt is only for Claude inbound setup; if the user also wants Mistral Vibe, Devin, or Cursor as inbound MCP clients, switch to the matching `setup/providers/*.md` page. Generic API providers are outbound-only.
 
 Note (v1.6.0): `doctor --json` now always emits a top-level `cache_awareness` block. All `[cache_awareness]` flags default off, so a zeroed block with an empty `enabled_features` list is the expected default. Ignore it for install purposes unless the user explicitly asks to enable cache-awareness features.
 

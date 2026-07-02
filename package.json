@@ -2,7 +2,7 @@
   "name": "llm-cli-gateway",
   "version": "2.13.2",
   "mcpName": "io.github.verivus-oss/llm-cli-gateway",
-  "description": "MCP server providing unified access to Claude Code, Codex, Gemini, Grok, Mistral Vibe, Devin, and Cursor Agent CLIs with session management, retry logic, async job orchestration, durable job results, and cross-LLM validation.",
+  "description": "MCP server providing unified access to Claude Code, Codex, Gemini, Grok, Mistral Vibe, Devin, Cursor Agent, and HTTP API-provider LLMs with sessions, async jobs, durable results, and cross-LLM validation.",
   "license": "MIT",
   "author": "VerivusAI Labs (https://github.com/verivus-oss)",
   "repository": {

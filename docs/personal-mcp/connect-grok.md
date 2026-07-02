@@ -18,7 +18,7 @@ Provider execution from Grok custom connectors must use a registered workspace a
 2. Confirm the public HTTPS endpoint is reachable from web clients.
 3. In Grok connector settings, add the public HTTPS MCP URL from the setup UI.
 4. Configure auth through the connector UI without pasting raw tokens into chat.
-5. For outbound-only Grok validation, use the official local Grok CLI/API login path and verify `providers.grok` in doctor JSON.
+5. For outbound Grok validation, use the official local Grok CLI/API login path and verify `providers.grok` in doctor JSON.
 
 ## Verification
 

@@ -14,8 +14,9 @@ and the universal install prompt — without developer interpretation.
 
 1. A synthetic but representative doctor JSON was crafted to model a typical
    non-developer state mid-setup: gateway installed in stdio mode, auth token
-   not yet configured, HTTP transport not started, all four provider CLIs
-   reporting login status, web client (ChatGPT Web) selected as the target.
+   not yet configured, HTTP transport not started, the then-current provider
+   CLI set reporting login status, web client (ChatGPT Web) selected as the
+   target.
 2. Two target LLMs were asked to produce ONE next step using the verbatim
    `setup/assistants/universal-install-prompt.md` plus the doctor JSON, each
    role-conditioned for its surface:
