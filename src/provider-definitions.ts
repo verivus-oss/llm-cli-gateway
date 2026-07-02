@@ -349,6 +349,8 @@ const PROVIDER_DEFINITIONS = {
         { argv: ["mcp", "--help"], purpose: "subcommand-help" },
         { argv: ["plugin", "--help"], purpose: "subcommand-help" },
         { argv: ["doctor", "--help"], purpose: "subcommand-help" },
+        // Probe the auth family so `auth status` (read-only) can project.
+        { argv: ["auth", "--help"], purpose: "subcommand-help" },
       ],
       modelDiscovery: {
         strategy: "static-catalog",
@@ -455,6 +457,8 @@ const PROVIDER_DEFINITIONS = {
         { argv: ["exec", "resume", "--help"], purpose: "subcommand-help" },
         { argv: ["mcp", "--help"], purpose: "subcommand-help" },
         { argv: ["doctor", "--help"], purpose: "subcommand-help" },
+        // Probe the login family so `login status` (read-only) can project.
+        { argv: ["login", "--help"], purpose: "subcommand-help" },
       ],
       modelDiscovery: {
         strategy: "native-command",
@@ -512,10 +516,25 @@ const PROVIDER_DEFINITIONS = {
       { family: "debug", safety: "read-only", evidence: "codex debug models" },
       { family: "cloud", safety: "mutating-gated", evidence: "codex cloud list/exec" },
       { family: "apply", safety: "mutating-gated", evidence: "codex apply" },
+      // Codex exposes session administration as TOP-LEVEL subcommands
+      // (resume/archive/delete/unarchive/fork), not a `session` family, so each
+      // must be declared on its own to project from discovered root help.
       {
-        family: "session",
+        family: "resume",
         safety: "mutating-gated",
-        evidence: "codex resume/fork/archive/delete/unarchive",
+        evidence: "codex resume (continue a saved session)",
+      },
+      { family: "archive", safety: "mutating-gated", evidence: "codex archive <session>" },
+      {
+        family: "delete",
+        safety: "mutating-gated",
+        evidence: "codex delete <session> (destructive)",
+      },
+      { family: "unarchive", safety: "mutating-gated", evidence: "codex unarchive <session>" },
+      {
+        family: "fork",
+        safety: "mutating-gated",
+        evidence: "codex fork (executes agent; not exposed)",
       },
       { family: "completion", safety: "read-only", evidence: "codex completion" },
       { family: "update", safety: "mutating-gated", evidence: "codex update" },
@@ -910,6 +929,8 @@ const PROVIDER_DEFINITIONS = {
       subcommandHelp: [
         { argv: ["acp", "--help"], purpose: "subcommand-help" },
         { argv: ["mcp", "--help"], purpose: "subcommand-help" },
+        // Probe the auth family so `auth status` (read-only) can project.
+        { argv: ["auth", "--help"], purpose: "subcommand-help" },
       ],
       modelDiscovery: {
         strategy: "config-inspection",

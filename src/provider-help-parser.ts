@@ -126,6 +126,22 @@ const NUMBER_PLACEHOLDERS =
 /** Value placeholders that read as a path/file argument (still a string type). */
 const PATH_PLACEHOLDERS = /^(file|files|dir|path|dir(ectory)?|glob)$/i;
 
+/**
+ * A subcommand declaration line inside a Commands section. Captures the leading
+ * command NAME even when it is followed by usage arguments. clap/commander emit
+ * `get <name>`, `login [options] <name>`, `add [options] <name> <cmd> [args...]`
+ * with only a SINGLE space before the first usage token, so a name-then-2-spaces
+ * rule would drop every arg-bearing subcommand. Usage tokens are the bracketed /
+ * ellipsis forms only (`<...>`, `[...]`, `...`); a bare word after the name is
+ * NOT a usage arg, so indented example lines such as
+ * `claude mcp add --transport http ...` (single-spaced plain words, no 2-space
+ * description gap) never match. The description, when present, is separated by
+ * 2+ spaces; a bare command with no description matches at end-of-line. A leading
+ * `-` never reaches here (those are parsed as flag declarations upstream).
+ */
+const SUBCOMMAND_LINE =
+  /^([a-zA-Z][a-zA-Z0-9_-]*)((?:\s+(?:<[^<>]*>|\[[^[\]]*\]|\.\.\.))*)(?:\s{2,}(\S.*)?)?$/;
+
 function isDangerous(name: string, description: string): boolean {
   const haystack = `${name} ${description}`.toLowerCase();
   return DANGEROUS_KEYWORDS.some(keyword => haystack.includes(keyword));
@@ -255,15 +271,17 @@ export function parseHelpText(helpText: string): ParsedHelp {
 
     const decl = splitFlagLine(line);
 
-    // Subcommand-section entries: `  name   description` (not starting with `-`).
+    // Subcommand-section entries: `name [usage...]   description` (not starting
+    // with `-`). Handles arg-bearing subcommands (`get <name>`, `login
+    // [options] <name>`) whose usage arg is separated by a single space.
     if (inSubcommandSection && !decl) {
-      const match = /^([a-zA-Z][a-zA-Z0-9_-]*)(?:\s{2,}(.*))?$/.exec(trimmed);
+      const match = SUBCOMMAND_LINE.exec(trimmed);
       if (match) {
         const name = match[1];
         if (name === "help") continue;
         if (!seenSubcommands.has(name)) {
           seenSubcommands.add(name);
-          const description = (match[2] ?? "").trim();
+          const description = (match[3] ?? "").trim();
           subcommands.push({
             name,
             description,

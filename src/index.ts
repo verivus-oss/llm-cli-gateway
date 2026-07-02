@@ -53,6 +53,7 @@ import {
   loadCacheAwarenessConfig,
   loadProvidersConfig,
   loadAcpConfig,
+  loadAdminConfig,
   loadLimitsConfig,
   defaultGatewayConfigPath,
   isXaiProviderEnabled,
@@ -63,6 +64,7 @@ import {
   type ProvidersConfig,
   type ApiProviderRuntime,
   type AcpConfig,
+  type AdminConfig,
   type GatewayLimitsConfig,
 } from "./config.js";
 import { runAcpRequest, type AcpFlightSink } from "./acp/runtime.js";
@@ -104,6 +106,7 @@ import {
   warmProviderCapabilities,
   type ProviderDiscoveredView,
 } from "./provider-capability-resolver.js";
+import { registerProviderAdminTools } from "./provider-admin-tools.js";
 import {
   AsyncJobManager,
   JobSaturationError,
@@ -494,6 +497,7 @@ let persistenceConfig: PersistenceConfig | null = null;
 let cacheAwarenessConfig: CacheAwarenessConfig | null = null;
 let providersConfig: ProvidersConfig | null = null;
 let acpConfig: AcpConfig | null = null;
+let adminConfig: AdminConfig | null = null;
 let limitsConfig: GatewayLimitsConfig | null = null;
 let jobStore: JobStore | null = null;
 let jobStoreInitialized = false;
@@ -520,6 +524,11 @@ function getLimitsConfig(runtimeLogger: GatewayLogger = logger): GatewayLimitsCo
 function getAcpConfig(runtimeLogger: GatewayLogger = logger): AcpConfig {
   acpConfig ??= loadAcpConfig(runtimeLogger);
   return acpConfig;
+}
+
+function getAdminConfig(runtimeLogger: GatewayLogger = logger): AdminConfig {
+  adminConfig ??= loadAdminConfig(runtimeLogger);
+  return adminConfig;
 }
 
 function getCacheAwarenessConfig(runtimeLogger: GatewayLogger = logger): CacheAwarenessConfig {
@@ -893,6 +902,7 @@ export interface GatewayServerDeps {
   cacheAwareness?: CacheAwarenessConfig;
   providers?: ProvidersConfig;
   acpConfig?: AcpConfig;
+  adminConfig?: AdminConfig;
   workspaces?: WorkspaceRegistry;
 }
 
@@ -909,6 +919,7 @@ export interface GatewayServerRuntime {
   cacheAwareness: CacheAwarenessConfig;
   providers: ProvidersConfig;
   acpConfig: AcpConfig;
+  adminConfig: AdminConfig;
   workspaces: WorkspaceRegistry;
 }
 
@@ -961,6 +972,7 @@ export function resolveGatewayServerRuntime(
     cacheAwareness: deps.cacheAwareness ?? getCacheAwarenessConfig(runtimeLogger),
     providers: deps.providers ?? getProvidersConfig(runtimeLogger),
     acpConfig: deps.acpConfig ?? getAcpConfig(runtimeLogger),
+    adminConfig: deps.adminConfig ?? getAdminConfig(runtimeLogger),
     workspaces: deps.workspaces ?? loadWorkspaceRegistry(runtimeLogger),
   };
 }
@@ -7828,6 +7840,13 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       persistence.backend === "sqlite" ? asyncJobManager.getValidationRunStore() : null,
   });
   registerWorkspaceTools(server, runtime);
+  // Phase 6: provider admin surfaces (read-only + gated mutating). Availability
+  // is projected from runtime discovery; mutating ops are deny-by-default.
+  registerProviderAdminTools(server, {
+    approvalManager: runtime.approvalManager,
+    logger: runtime.logger,
+    allowMutatingCliAdminOps: runtime.adminConfig.allowMutatingCliAdminOps,
+  });
   // Slice 2: per-provider api_<name>_request tools. Dormant unless a
   // [providers.<name>] is configured + enabled (enabledApiProviders gate).
   const apiProviderTools = registerApiProviderTools(server, runtime, providers, asyncJobsEnabled);
