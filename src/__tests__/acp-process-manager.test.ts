@@ -253,6 +253,58 @@ describe("AcpProcessManager", () => {
     });
   });
 
+  describe("shutdown SIGKILL escalation", () => {
+    async function startProc(
+      child: FakeChild
+    ): Promise<Awaited<ReturnType<AcpProcessManager["start"]>>> {
+      const { spawn } = recordingSpawn(child);
+      const manager = new AcpProcessManager({
+        config: makeConfig({
+          providers: { mistral: makeProviderConfig({ command: "vibe-acp" }) },
+        }),
+        spawn,
+        logger: makeLogger(),
+        baseEnv: {},
+      });
+      return manager.start({ provider: "mistral", cwd: "/w", hostServices: {} });
+    }
+
+    it("escalates SIGTERM to SIGKILL when the child ignores the graceful signal", async () => {
+      const child = new FakeChild().autoInitialize();
+      const proc = await startProc(child);
+      // Switch to fake timers AFTER initialize so the escalation window is
+      // controllable without perturbing the initialize handshake.
+      vi.useFakeTimers();
+      proc.shutdown("SIGTERM");
+      expect(child.killed).toContain("SIGTERM");
+      expect(child.killed).not.toContain("SIGKILL");
+      // The FakeChild never emits exit (it "ignores" SIGTERM); after the grace
+      // window the manager must force-kill it rather than leak a zombie.
+      vi.advanceTimersByTime(5000);
+      expect(child.killed).toContain("SIGKILL");
+    });
+
+    it("does NOT force-kill when the child exits within the grace window", async () => {
+      const child = new FakeChild().autoInitialize();
+      const proc = await startProc(child);
+      vi.useFakeTimers();
+      proc.shutdown("SIGTERM");
+      child.emitExit(0, "SIGTERM"); // the child honors SIGTERM promptly
+      vi.advanceTimersByTime(5000);
+      expect(child.killed).not.toContain("SIGKILL");
+    });
+
+    it("does not arm a second escalation for a direct SIGKILL", async () => {
+      const child = new FakeChild().autoInitialize();
+      const proc = await startProc(child);
+      vi.useFakeTimers();
+      proc.shutdown("SIGKILL");
+      vi.advanceTimersByTime(5000);
+      // Exactly one SIGKILL (the direct signal), no escalated duplicate.
+      expect(child.killed.filter(s => s === "SIGKILL")).toHaveLength(1);
+    });
+  });
+
   describe("start", () => {
     it("spawns with the controlled cwd and argv and initializes", async () => {
       const child = new FakeChild().autoInitialize();
