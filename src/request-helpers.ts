@@ -879,7 +879,7 @@ export interface ClaudeHighImpactFlagsInput {
    */
   pluginDir?: string[];
   /**
-   * Claude `--plugin-url <url>`: fetch a plugin `.zip` from a URL for this
+   * Claude `--plugin-url <url>`: load a plugin `.zip` from a URL for this
    * session only (repeatable). One `--plugin-url` instance per entry.
    */
   pluginUrl?: string[];

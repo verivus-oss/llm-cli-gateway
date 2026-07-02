@@ -660,7 +660,7 @@ const CLAUDE_PART_A_FIELDS = {
     .array(z.string())
     .optional()
     .describe(
-      "Claude --plugin-url: fetch a plugin .zip from a URL for this session only. One --plugin-url instance per entry."
+      "Claude --plugin-url: load a plugin .zip from a URL for this session only. One --plugin-url instance per entry."
     ),
   safeMode: z
     .boolean()
