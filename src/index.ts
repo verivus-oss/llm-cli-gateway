@@ -20,6 +20,8 @@ import { z } from "zod/v3";
 import { executeCli, killAllProcessGroups, providerCommandName } from "./executor.js";
 import { parseStreamJson } from "./stream-json-parser.js";
 import { parseCodexJsonStream, codexDisplayText, codexFrResponse } from "./codex-json-parser.js";
+import { grokDisplayText } from "./grok-json-parser.js";
+import { extractProviderOutputMetadata } from "./provider-output-metadata.js";
 import { parseGeminiJson, parseGeminiStreamJson } from "./gemini-json-parser.js";
 import { parseVibeMetaJson } from "./mistral-meta-json-parser.js";
 import { homedir } from "os";
@@ -4148,6 +4150,17 @@ export function buildCliResponse(
   if (cli === "codex" && outputFormat !== "json") {
     finalStdout = codexDisplayText(stdout);
   }
+  // Phase 7: grok `--output-format streaming-json` emits raw NDJSON delta
+  // events, which are not a human reply. grokDisplayText() concatenates the
+  // `text` deltas into the final reply (and never leaks raw NDJSON), mirroring
+  // the codex display swap above. `json` mode is returned verbatim (the caller
+  // asked for the raw object) and `plain` is returned unchanged, so this is a
+  // no-op outside streaming-json. Raw `stdout` is still passed unchanged to
+  // extractUsageAndCost() below, so telemetry parsing is unaffected. Done before
+  // the optimize / review-integrity steps so they operate on the human reply.
+  if (cli === "grok") {
+    finalStdout = grokDisplayText(outputFormat, stdout);
+  }
   // Skip response optimization for JSON output to prevent corrupting structured data
   if (optimizeResponse && outputFormat !== "json") {
     const optimized = optimizeResponseText(finalStdout);
@@ -5581,6 +5594,9 @@ export async function handleGeminiRequest(
       }
     }
     const geminiUsage = extractUsageAndCost("gemini", stdout, params.outputFormat);
+    // Phase 7: Gemini stream-json carries a session id (init event) + result
+    // status; persist them so a deferred/fresh session stays resumable.
+    const geminiMeta = extractProviderOutputMetadata("gemini", stdout, params.outputFormat);
     safeFlightComplete(
       corrId,
       {
@@ -5597,6 +5613,8 @@ export async function handleGeminiRequest(
         cacheReadTokens: geminiUsage.cacheReadTokens,
         cacheCreationTokens: geminiUsage.cacheCreationTokens,
         costUsd: geminiUsage.costUsd,
+        providerSessionId: geminiMeta.sessionId,
+        stopReason: geminiMeta.stopReason,
       },
       runtime
     );
@@ -6048,6 +6066,10 @@ export async function handleGrokRequest(
         first.text = formatWorktreePrefix(worktreeResolution.worktreePath) + first.text;
       }
     }
+    // Phase 7: Grok `-p` json/streaming-json carry a provider session id + stop
+    // reason (but no usage). Persist them so a fresh Grok session stays
+    // resumable even when the gateway session_id column holds a gw-* id.
+    const grokMeta = extractProviderOutputMetadata("grok", stdout, params.outputFormat);
     safeFlightComplete(
       corrId,
       {
@@ -6059,6 +6081,8 @@ export async function handleGrokRequest(
         optimizationApplied: params.optimizePrompt || (params.optimizeResponse ?? false),
         exitCode: 0,
         status: "completed",
+        providerSessionId: grokMeta.sessionId,
+        stopReason: grokMeta.stopReason,
       },
       runtime
     );
@@ -8462,6 +8486,10 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
               optimizationApplied: optimizePrompt || optimizeResponse,
               exitCode: 0,
               status: "completed",
+              // Phase 7: the terminal result event carries the session id +
+              // Anthropic stop_reason; persist both for durable resume/audit.
+              providerSessionId: parsed.sessionId ?? undefined,
+              stopReason: parsed.stopReason ?? undefined,
             },
             runtime
           );
@@ -8485,6 +8513,9 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           }
           return streamResponse;
         }
+        // Phase 7: non-stream claude (json/text). parseStreamJson also scans a
+        // single json result object; plain text yields no fields (capability fact).
+        const claudeMeta = extractProviderOutputMetadata("claude", stdout, outputFormat);
         safeFlightComplete(
           corrId,
           {
@@ -8495,6 +8526,8 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             optimizationApplied: optimizePrompt || optimizeResponse,
             exitCode: 0,
             status: "completed",
+            providerSessionId: claudeMeta.sessionId,
+            stopReason: claudeMeta.stopReason,
           },
           runtime
         );
@@ -8943,6 +8976,10 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
 
         logger.info(`[${corrId}] codex_request completed successfully in ${durationMs}ms`);
         const codexUsage = extractUsageAndCost("codex", stdout, outputFormat);
+        // Phase 7: capture codex's thread id (session) from the JSONL stream so
+        // the FR row keeps the provider session id. Stop reason is a capability
+        // fact (codex `exec --json` does not emit one), so it stays NULL.
+        const codexMeta = extractProviderOutputMetadata("codex", stdout, outputFormat);
         // #44: usage is parsed from the raw JSONL `stdout`, but the FR response
         // column stores the reconstructed reply (== text-mode stdout) so
         // read-back surfaces (llm_request_result, cache-stats) get plain text,
@@ -8965,6 +9002,8 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             cacheReadTokens: codexUsage.cacheReadTokens,
             cacheCreationTokens: codexUsage.cacheCreationTokens,
             costUsd: codexUsage.costUsd,
+            providerSessionId: codexMeta.sessionId,
+            stopReason: codexMeta.stopReason,
           },
           runtime
         );
@@ -12011,6 +12050,19 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           result.stdout
         ) {
           result.stdout = codexDisplayText(result.stdout);
+        }
+
+        // Phase 7 remote-isolation: `providerSessionId` is a provider-owned
+        // session id parsed from the job's stdout for LOCAL resume. A remote
+        // HTTP/OAuth caller must never receive it (this extends the phase-5
+        // `remoteSafeSession` redaction, which only covered `session_get` /
+        // `sessions://*`, to job polling). `result` is a fresh object from
+        // getJobResult, so deleting the field here cannot mutate the stored job
+        // record; storage keeps the id for resume. (`llm_job_status` returns the
+        // bare AsyncJobSnapshot, which carries no provider session id / cwd /
+        // worktree path, so it needs no equivalent redaction.)
+        if (callerIsRemote()) {
+          delete result.providerSessionId;
         }
 
         return {

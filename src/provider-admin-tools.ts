@@ -140,7 +140,14 @@ const DESTRUCTIVE_VERBS = new Set([
 // long-running daemon/listener rather than return, so the safety policy maps
 // starts_server -> not_exposed. Discovered subcommands like `mcp serve` inherit
 // this class regardless of the (config-mutating) family they sit under.
-const STARTS_SERVER_VERBS = new Set(["serve", "server", "listen", "daemon", "mcp-server", "app-server"]);
+const STARTS_SERVER_VERBS = new Set([
+  "serve",
+  "server",
+  "listen",
+  "daemon",
+  "mcp-server",
+  "app-server",
+]);
 const CONFIG_MUTATE_VERBS = new Set([
   "add",
   "set",

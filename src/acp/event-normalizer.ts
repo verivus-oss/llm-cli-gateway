@@ -41,6 +41,8 @@ export type AcpProgressEvent =
   | { readonly kind: "plan"; readonly entryCount: number }
   | { readonly kind: "mode"; readonly currentModeId: string }
   | { readonly kind: "usage"; readonly size: number; readonly used: number }
+  | { readonly kind: "session_complete"; readonly stopReason: string }
+  | { readonly kind: "error"; readonly message: string }
   | { readonly kind: "other"; readonly sessionUpdate: string };
 
 /** Field accessor that tolerates the open `ContentBlock` / update shapes. */
@@ -127,6 +129,8 @@ export function normalizeSessionUpdate(notification: SessionUpdateNotification):
  */
 export class AcpEventNormalizer {
   private text = "";
+  private stopReasonValue: string | undefined;
+  private errorValue: string | undefined;
 
   /**
    * Normalize one update, accumulate agent message text, and return the
@@ -140,8 +144,41 @@ export class AcpEventNormalizer {
     return event;
   }
 
+  /**
+   * Record the turn's terminal stop reason. In ACP the stop reason is NOT a
+   * `session/update` variant: it arrives on the `session/prompt` JSON-RPC
+   * response (`SessionPromptResponse.stopReason`). The runtime calls this when
+   * that response returns, so the normalized result carries stop_reason WHERE
+   * upstream supplies it (capability fact: ACP always supplies one, unlike the
+   * CLI `-p` surfaces of some providers). Returns the structured event.
+   */
+  completeWith(stopReason: string): AcpProgressEvent {
+    this.stopReasonValue = stopReason;
+    return { kind: "session_complete", stopReason };
+  }
+
+  /**
+   * Record a turn error (transport failure, agent-reported error, or a
+   * protocol error surfaced by the runtime). Returns the structured event so
+   * it can be streamed/logged without embedding it in the reply text.
+   */
+  error(message: string): AcpProgressEvent {
+    this.errorValue = message;
+    return { kind: "error", message };
+  }
+
   /** The accumulated agent response text for the synchronous reply. */
   get finalText(): string {
     return this.text;
+  }
+
+  /** The terminal stop reason, once {@link completeWith} has been called. */
+  get stopReason(): string | undefined {
+    return this.stopReasonValue;
+  }
+
+  /** The recorded error message, once {@link error} has been called. */
+  get errorMessage(): string | undefined {
+    return this.errorValue;
   }
 }

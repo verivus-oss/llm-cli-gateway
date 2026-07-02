@@ -18,6 +18,7 @@ import {
   type FlightRecorderLike,
 } from "./flight-recorder.js";
 import { codexFrResponse } from "./codex-json-parser.js";
+import { extractProviderOutputMetadata } from "./provider-output-metadata.js";
 import type { JobTransport, OrphanedJobSnapshot, ValidationRunStore } from "./job-store.js";
 import { getRequestContext, resolveOwnerPrincipal, principalCanAccess } from "./request-context.js";
 import {
@@ -522,6 +523,18 @@ export interface AsyncJobResult extends AsyncJobSnapshot {
   responseId?: string | null;
   model?: string;
   errorBody?: string;
+  /**
+   * Phase 7: provider-minted session id parsed from the completed job's stdout
+   * (process jobs), so a deferred/async job can be polled and then resumed with
+   * the real provider session id. Undefined when the provider does not emit one
+   * on its transport (typed capability fact).
+   */
+  providerSessionId?: string;
+  /**
+   * Phase 7: provider terminal stop reason parsed from the completed job's
+   * stdout, WHERE upstream supplies it. Undefined otherwise (capability fact).
+   */
+  stopReason?: string;
 }
 
 /**
@@ -1300,6 +1313,14 @@ export class AsyncJobManager {
       ? (overrideErrorMessage ?? job.error ?? job.stderr ?? `Exit code ${exitCode}`)
       : undefined;
 
+    // Phase 7: persist the provider-minted session id + stop reason so a
+    // deferred/async job stays resumable. Process jobs parse them from stdout;
+    // http jobs carry the continuation handle in apiResponseId instead.
+    const providerMeta =
+      finalStatus === "completed" && job.transport === "process"
+        ? extractProviderOutputMetadata(job.cli, job.stdout, job.outputFormat)
+        : undefined;
+
     try {
       this.flightRecorder.logComplete(job.correlationId, {
         response,
@@ -1317,6 +1338,8 @@ export class AsyncJobManager {
         cacheReadTokens: usage.cacheReadTokens,
         cacheCreationTokens: usage.cacheCreationTokens,
         costUsd: usage.costUsd,
+        providerSessionId: providerMeta?.sessionId,
+        stopReason: providerMeta?.stopReason,
       });
       // Only mark complete on successful write so a thrown logComplete
       // can be retried by the next terminal callback.
@@ -1913,12 +1936,22 @@ export class AsyncJobManager {
     const stdout = truncateText(job.stdout, maxChars);
     const stderr = truncateText(job.stderr, maxChars);
 
+    // Phase 7: parse provider session id + stop reason from a completed process
+    // job's stdout so the poll result carries what a resume needs. Parsed from
+    // the FULL (untruncated) stdout, not the display slice above.
+    const providerMeta =
+      job.transport === "process" && job.status === "completed"
+        ? extractProviderOutputMetadata(job.cli, job.stdout, job.outputFormat)
+        : undefined;
+
     return {
       ...this.snapshot(job),
       stdout: stdout.text,
       stderr: stderr.text,
       stdoutTruncated: stdout.truncated,
       stderrTruncated: stderr.truncated,
+      ...(providerMeta?.sessionId ? { providerSessionId: providerMeta.sessionId } : {}),
+      ...(providerMeta?.stopReason ? { stopReason: providerMeta.stopReason } : {}),
       // Slice 1: structured http telemetry (in-memory http jobs only).
       ...(job.transport === "http"
         ? {

@@ -81,6 +81,22 @@ export interface FlightLogResult {
   httpStatus?: number;
   errorMessage?: string;
   status: "completed" | "failed";
+  /**
+   * Phase 7: the provider-minted session id parsed from the provider's own
+   * output (e.g. a fresh Grok/Claude/Gemini session UUID that the gateway did
+   * not supply). Persisted so a deferred/async job can be resumed with the
+   * real provider session id intact, even when the gateway `session_id` column
+   * holds only a `gw-*` placeholder. Undefined (NULL) when the provider does
+   * not emit one on its transport (typed capability fact, e.g. Mistral `-p`).
+   */
+  providerSessionId?: string;
+  /**
+   * Phase 7: the provider's terminal stop reason WHERE upstream supplies it
+   * (Claude `stop_reason`, Grok `stopReason`, ACP `session/prompt` stopReason,
+   * Gemini result status). Undefined (NULL) when the transport does not emit
+   * one (typed capability fact, e.g. Codex `exec --json` / Mistral `-p`).
+   */
+  stopReason?: string;
 }
 
 interface LoggerLike {
@@ -192,6 +208,27 @@ function ensureCacheControlTtlSecondsColumn(db: GatewayDatabase): void {
   );
   if (!names.has("cache_control_ttl_seconds")) {
     db.exec("ALTER TABLE requests ADD COLUMN cache_control_ttl_seconds INTEGER");
+  }
+}
+
+/**
+ * Phase 7: idempotent v7 migration adding `provider_session_id` and
+ * `stop_reason` to a pre-existing `gateway_metadata` table. These hold the
+ * provider-minted session id and terminal stop reason parsed from provider
+ * output so a deferred/async job can be resumed with the real provider session
+ * id intact. Legacy rows keep NULL; only providers that actually emit the
+ * fields populate them (typed capability fact otherwise).
+ */
+function ensureMetadataProviderSessionColumns(db: GatewayDatabase): void {
+  const rows = db.prepare("PRAGMA table_info(gateway_metadata)").all();
+  const names = new Set<string>(
+    rows.map((row: any) => (row && typeof row.name === "string" ? row.name : ""))
+  );
+  if (!names.has("provider_session_id")) {
+    db.exec("ALTER TABLE gateway_metadata ADD COLUMN provider_session_id TEXT");
+  }
+  if (!names.has("stop_reason")) {
+    db.exec("ALTER TABLE gateway_metadata ADD COLUMN stop_reason TEXT");
   }
 }
 
@@ -311,6 +348,8 @@ export class FlightRecorder {
         http_status INTEGER,
         error_message TEXT,
         async_job_id TEXT,
+        provider_session_id TEXT,
+        stop_reason TEXT,
         status TEXT NOT NULL DEFAULT 'started'
       );
 
@@ -367,6 +406,15 @@ export class FlightRecorder {
     ensureMetadataHttpStatusColumn(this.db);
     this.db
       .prepare("INSERT OR IGNORE INTO _migrations(version, applied_at) VALUES(6, ?)")
+      .run(new Date().toISOString());
+
+    // Migration v7 (phase 7): provider_session_id + stop_reason on
+    // gateway_metadata so a deferred/async job preserves the real provider
+    // session id (needed to resume) and the terminal stop reason. Legacy rows
+    // keep NULL; only providers that emit the fields populate them.
+    ensureMetadataProviderSessionColumns(this.db);
+    this.db
+      .prepare("INSERT OR IGNORE INTO _migrations(version, applied_at) VALUES(7, ?)")
       .run(new Date().toISOString());
 
     if (process.platform !== "win32") {
@@ -436,6 +484,8 @@ export class FlightRecorder {
           exit_code = @exit_code,
           http_status = @http_status,
           error_message = @error_message,
+          provider_session_id = @provider_session_id,
+          stop_reason = @stop_reason,
           status = @status
       WHERE request_id = @id AND status = 'started'
     `);
@@ -468,6 +518,8 @@ export class FlightRecorder {
           exit_code: result.exitCode,
           http_status: result.httpStatus ?? null,
           error_message: result.errorMessage ?? null,
+          provider_session_id: result.providerSessionId ?? null,
+          stop_reason: result.stopReason ?? null,
           status: result.status,
         });
       }

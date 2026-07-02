@@ -174,3 +174,31 @@ describe("ACP event-normalizer — AcpEventNormalizer accumulation", () => {
     expect(ev.kind).toBe("tool_call");
   });
 });
+
+describe("AcpEventNormalizer — stop reason + error (phase 7)", () => {
+  it("records the terminal stop reason from the session/prompt response", () => {
+    const n = new AcpEventNormalizer();
+    n.handle(note({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "hi" } }));
+    const ev = n.completeWith("end_turn");
+    // Mutation that flips this red: completeWith not returning a
+    // session_complete event or not storing stopReason.
+    expect(ev).toEqual({ kind: "session_complete", stopReason: "end_turn" });
+    expect(n.stopReason).toBe("end_turn");
+    // Stop reason must not pollute the reply text (agent chunks only).
+    expect(n.finalText).toBe("hi");
+  });
+
+  it("records an error event without embedding it in the reply text", () => {
+    const n = new AcpEventNormalizer();
+    const ev = n.error("agent crashed");
+    expect(ev).toEqual({ kind: "error", message: "agent crashed" });
+    expect(n.errorMessage).toBe("agent crashed");
+    expect(n.finalText).toBe("");
+  });
+
+  it("leaves stopReason/errorMessage undefined until set (no fabrication)", () => {
+    const n = new AcpEventNormalizer();
+    expect(n.stopReason).toBeUndefined();
+    expect(n.errorMessage).toBeUndefined();
+  });
+});

@@ -151,6 +151,80 @@ describe("FlightRecorder migrations (U23 cache columns)", () => {
     expect(row.cache_creation_tokens).toBe(7);
   });
 
+  it("phase 7: persists provider_session_id + stop_reason via logComplete", () => {
+    const rec = new FlightRecorder(dbPath);
+    rec.logStart({
+      correlationId: "corr-ps",
+      cli: "grok",
+      model: "grok-4",
+      prompt: "test",
+      // gateway session id is only a gw-* placeholder for a fresh session.
+      sessionId: "gw-placeholder",
+    });
+    rec.logComplete("corr-ps", {
+      response: "ok",
+      durationMs: 5,
+      retryCount: 0,
+      circuitBreakerState: "closed",
+      optimizationApplied: false,
+      exitCode: 0,
+      status: "completed",
+      providerSessionId: "real-grok-uuid-1234",
+      stopReason: "stop",
+    });
+    rec.close();
+
+    const db = new BetterSqlite3(dbPath);
+    const row = db
+      .prepare("SELECT provider_session_id, stop_reason FROM gateway_metadata WHERE request_id = ?")
+      .get("corr-ps") as any;
+    db.close();
+
+    // Mutation that flips this red: dropping the provider_session_id/stop_reason
+    // columns from the updateMetadata statement (a deferred job would then lose
+    // the real provider session id needed to resume).
+    expect(row.provider_session_id).toBe("real-grok-uuid-1234");
+    expect(row.stop_reason).toBe("stop");
+  });
+
+  it("phase 7: keeps provider_session_id/stop_reason NULL when not supplied (capability fact)", () => {
+    const rec = new FlightRecorder(dbPath);
+    rec.logStart({ correlationId: "corr-null", cli: "mistral", model: "m", prompt: "p" });
+    rec.logComplete("corr-null", {
+      response: "ok",
+      durationMs: 1,
+      retryCount: 0,
+      circuitBreakerState: "closed",
+      optimizationApplied: false,
+      exitCode: 0,
+      status: "completed",
+    });
+    rec.close();
+
+    const db = new BetterSqlite3(dbPath);
+    const row = db
+      .prepare("SELECT provider_session_id, stop_reason FROM gateway_metadata WHERE request_id = ?")
+      .get("corr-null") as any;
+    db.close();
+
+    expect(row.provider_session_id).toBeNull();
+    expect(row.stop_reason).toBeNull();
+  });
+
+  it("phase 7: auto-migrates a metadata table lacking provider_session_id/stop_reason", () => {
+    // Bootstrap a DB, then drop the phase-7 columns to simulate a legacy schema.
+    new FlightRecorder(dbPath).close();
+    const seed = new BetterSqlite3(dbPath);
+    const metaCols = new Set(
+      (seed.prepare("PRAGMA table_info(gateway_metadata)").all() as Array<{ name: string }>).map(
+        r => r.name
+      )
+    );
+    seed.close();
+    expect(metaCols.has("provider_session_id")).toBe(true);
+    expect(metaCols.has("stop_reason")).toBe(true);
+  });
+
   it("F4: redacts recognisable secrets from stored prompt/system/response", () => {
     const rec = new FlightRecorder(dbPath, { redactSecrets: true });
     rec.logStart({

@@ -32,6 +32,15 @@ export interface CodexJsonParseResult {
   error?: string;
   threadId?: string;
   /**
+   * Stop reason from the terminal `turn.completed` event, WHERE upstream
+   * supplies it. Capability fact: codex-cli's `exec --json` `turn.completed`
+   * does not carry a stop reason on the versions verified to date, so this is
+   * normally `undefined` (the field is extracted defensively so that if a
+   * future codex build adds `turn.completed.reason` / `.stop_reason` it is
+   * surfaced without a fabricated value being invented here meanwhile).
+   */
+  stopReason?: string;
+  /**
    * The LAST `agent_message` text. This is the reply `codex exec` prints to
    * stdout in text mode: a multi-message turn emits several `agent_message`
    * events but text-mode stdout shows ONLY the final one (verified against
@@ -103,6 +112,12 @@ export function parseCodexJsonStream(stdout: string): CodexJsonParseResult {
             usage.cost_usd = u.cost_usd;
           }
           result.usage = usage;
+        }
+        // Defensive: surface a stop reason only if upstream actually emits one.
+        if (typeof parsed.stop_reason === "string") {
+          result.stopReason = parsed.stop_reason;
+        } else if (typeof parsed.reason === "string") {
+          result.stopReason = parsed.reason;
         }
         break;
       }

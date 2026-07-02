@@ -28,6 +28,20 @@ export interface GeminiUsage {
 export interface GeminiJsonParseResult {
   usage?: GeminiUsage;
   response?: string;
+  /**
+   * Session/conversation id. Present in the `stream-json` init event
+   * (`{ "type": "init", "session_id": "..." }`) and extracted here so a
+   * deferred Gemini job keeps the id needed to resume (`--conversation <id>`).
+   * `-o json` (single object) does not emit a session id, so it stays
+   * undefined there (typed capability fact: id absent on that transport).
+   */
+  sessionId?: string;
+  /**
+   * Stop reason mapped from the terminal `result` event `status`
+   * ("success" / "error" / …), WHERE upstream supplies it. Undefined when no
+   * result event carried a status.
+   */
+  stopReason?: string;
 }
 
 export function parseGeminiJson(stdout: string): GeminiJsonParseResult | null {
@@ -51,6 +65,17 @@ export function parseGeminiJson(stdout: string): GeminiJsonParseResult | null {
 
   if (typeof parsed.response === "string") {
     result.response = parsed.response;
+  }
+
+  // Defensive: `-o json` does not emit a session id today, but if a build ever
+  // adds one at the top level, surface it rather than silently dropping it.
+  if (typeof parsed.session_id === "string") {
+    result.sessionId = parsed.session_id;
+  } else if (typeof parsed.sessionId === "string") {
+    result.sessionId = parsed.sessionId;
+  }
+  if (typeof parsed.status === "string") {
+    result.stopReason = parsed.status;
   }
 
   const meta = parsed.usageMetadata;
@@ -103,6 +128,13 @@ export function parseGeminiStreamJson(stdout: string): GeminiJsonParseResult | n
     if (!event || typeof event !== "object") continue;
     sawAnyLine = true;
 
+    // The `init` event carries the session id (previously dropped). Extract it
+    // so a deferred Gemini job retains the id needed to resume the conversation.
+    if (event.type === "init" && typeof event.session_id === "string") {
+      result.sessionId = event.session_id;
+      continue;
+    }
+
     if (
       event.type === "message" &&
       event.role === "assistant" &&
@@ -110,6 +142,12 @@ export function parseGeminiStreamJson(stdout: string): GeminiJsonParseResult | n
     ) {
       assistantChunks.push(event.content);
       continue;
+    }
+
+    if (event.type === "result") {
+      if (typeof event.status === "string") {
+        result.stopReason = event.status;
+      }
     }
 
     if (event.type === "result" && event.stats && typeof event.stats === "object") {

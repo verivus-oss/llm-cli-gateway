@@ -101,8 +101,24 @@ export interface AcpFlightResultParams {
   readonly exitCode: number;
   readonly inputTokens?: number;
   readonly outputTokens?: number;
+  /**
+   * Phase 7 / acceptance #1: cache-READ tokens lifted from the ACP
+   * `session/prompt` response `_meta` (grok `cachedReadTokens`). Undefined when
+   * the provider's ACP transport does not report it (capability fact: the FR
+   * `cache_read_tokens` column stays NULL rather than being fabricated).
+   */
+  readonly cacheReadTokens?: number;
   /** Raw error message; redacted before recording. */
   readonly errorMessage?: string;
+  /**
+   * Phase 7: the provider-minted ACP session id captured from the session
+   * lifecycle (newSession/loadSession), persisted so a deferred/async ACP job
+   * stays resumable. Stored for resume; remote caller-facing surfaces redact it
+   * per phase-5 (not surfaced raw here).
+   */
+  readonly providerSessionId?: string;
+  /** Phase 7: the ACP `session/prompt` response stopReason (always supplied by ACP). */
+  readonly stopReason?: string;
 }
 
 /** Build a flight-recorder result for an ACP request with a summarized response. */
@@ -117,7 +133,10 @@ export function buildAcpFlightResult(params: AcpFlightResultParams): FlightLogRe
     optimizationApplied: false,
     inputTokens: params.inputTokens,
     outputTokens: params.outputTokens,
+    cacheReadTokens: params.cacheReadTokens,
     errorMessage:
       params.errorMessage !== undefined ? redactAcpTextForFlight(params.errorMessage) : undefined,
+    providerSessionId: params.providerSessionId,
+    stopReason: params.stopReason,
   };
 }
