@@ -53,6 +53,10 @@ export interface RequestToolDescriptor {
 export interface ResourceDescriptor {
   readonly provider: CliType;
   readonly displayName: string;
+  /** Short session label (e.g. "Claude Session"); drives the sessions resource name. */
+  readonly sessionLabel: string;
+  /** Emoji icon prefixed to both the sessions:// and models:// resource titles. */
+  readonly icon: string;
   readonly modelsUri: string;
   readonly sessionsUri: string;
   readonly exposesModelsResource: boolean;
@@ -155,11 +159,47 @@ export function generateResourceDescriptors(
   return defs.map(def => ({
     provider: def.id,
     displayName: def.displayName,
+    sessionLabel: def.sessionLabel,
+    icon: def.icon,
     modelsUri: modelsResourceUri(def.id),
     sessionsUri: sessionsResourceUri(def.id),
     exposesModelsResource: def.resourcePolicy.exposesModelsResource,
     exposesSessionsResource: def.resourcePolicy.exposesSessionsResource,
   }));
+}
+
+/**
+ * Resolve a `models://<id>` URI to its provider id, or null. Derives strictly
+ * from the registry (honouring `exposesModelsResource`), so the resource layer
+ * never hand-spells a provider name or a `uri === "models://<name>"` block.
+ */
+export function parseModelsResourceUri(
+  uri: string,
+  defs: readonly ProviderDefinition[] = getAllProviderDefinitions()
+): CliType | null {
+  for (const def of defs) {
+    if (def.resourcePolicy.exposesModelsResource && modelsResourceUri(def.id) === uri) {
+      return def.id;
+    }
+  }
+  return null;
+}
+
+/**
+ * Resolve a `sessions://<id>` URI to its provider id, or null. Derives strictly
+ * from the registry (honouring `exposesSessionsResource`), so the resource layer
+ * never hand-spells a provider name or a `uri === "sessions://<name>"` block.
+ */
+export function parseSessionsResourceUri(
+  uri: string,
+  defs: readonly ProviderDefinition[] = getAllProviderDefinitions()
+): CliType | null {
+  for (const def of defs) {
+    if (def.resourcePolicy.exposesSessionsResource && sessionsResourceUri(def.id) === uri) {
+      return def.id;
+    }
+  }
+  return null;
 }
 
 /** One model-listing row per provider. */

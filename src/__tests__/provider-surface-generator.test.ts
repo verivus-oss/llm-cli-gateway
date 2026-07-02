@@ -65,6 +65,15 @@ describe("provider-surface-generator", () => {
     expect(cursor?.sessionsUri).toBe("sessions://cursor");
   });
 
+  it("resource descriptors carry the provider icon for title rendering", () => {
+    const rows = generateResourceDescriptors();
+    for (const id of CLI_TYPES) {
+      const row = rows.find(r => r.provider === id);
+      expect(row?.icon).toBe(getProviderDefinition(id).icon);
+      expect(row?.icon.length).toBeGreaterThan(0);
+    }
+  });
+
   it("admin descriptors mark read-only families and honest surface kinds", () => {
     const rows = generateAdminToolDescriptors();
     const grok = rows.find(r => r.provider === "grok");

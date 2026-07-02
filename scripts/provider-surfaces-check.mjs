@@ -10,6 +10,10 @@
  *       cursor) instead of deriving from CLI_TYPES / the registry.
  *   (2) manual per-provider resource dispatch blocks of the form
  *       `uri === "sessions://<name>"` or `uri === "models://<name>"`.
+ *   (3) hand-spelled literal resource URIs, i.e. a double-quoted
+ *       `"sessions://<name>"` / `"models://<name>"` string (the
+ *       `server.registerResource(...)` form). These must be built from a
+ *       provider id via the surface generator, never spelled out per provider.
  *
  * ALWAYS_ALLOWLIST names the sanctioned places these tokens may appear: the
  * enum source, the registry, the surface generator, generated snapshots, and
@@ -44,9 +48,19 @@ const MANUAL_RESOURCE_BLOCK = new RegExp(
   `uri\\s*===\\s*"(?:sessions|models)://(?:${PROVIDER_NAME})"`
 );
 
+/**
+ * Pattern (3): a hand-spelled double-quoted literal resource URI, e.g.
+ * `"sessions://claude"` / `"models://grok"` (the registerResource form). The
+ * closing double quote must immediately follow the provider name, so it never
+ * matches `"sessions://all"`, a template string `` `sessions://${...}` ``, or
+ * any other scheme/name.
+ */
+const LITERAL_RESOURCE_URI = new RegExp(`"(?:sessions|models)://(?:${PROVIDER_NAME})"`);
+
 const PATTERNS = [
   { kind: "literal-provider-array", regex: LITERAL_PROVIDER_ARRAY },
   { kind: "manual-resource-block", regex: MANUAL_RESOURCE_BLOCK },
+  { kind: "literal-resource-uri", regex: LITERAL_RESOURCE_URI },
 ];
 
 /**
@@ -64,9 +78,6 @@ const ALWAYS_ALLOWLIST = new Set([
  * to still contain and the phase that drains it.
  */
 const LEGACY_ALLOWLIST = {
-  // resources.ts still dispatches models:// / sessions:// per provider by hand;
-  // phase-2 replaces this with provider-definition driven registration.
-  "src/resources.ts": { allowedKinds: ["manual-resource-block"], phase: "phase-2" },
   // index.ts still has per-provider request-tool wiring and an approval_list
   // cli filter that spells out the provider array; phase-4 migrates the request
   // surface to the generated descriptors.

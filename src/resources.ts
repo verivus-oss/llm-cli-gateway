@@ -38,6 +38,11 @@ import {
   providerCapabilityIds,
   type ProviderCapabilityId,
 } from "./provider-tool-capabilities.js";
+import {
+  generateResourceDescriptors,
+  parseModelsResourceUri,
+  parseSessionsResourceUri,
+} from "./provider-surface-generator.js";
 
 export interface ResourceDefinition {
   uri: string;
@@ -149,61 +154,23 @@ export class ResourceProvider {
           lastModified: new Date().toISOString(),
         },
       },
-      {
-        uri: "sessions://claude",
-        name: "Claude Sessions",
-        title: "🤖 Claude Sessions",
-        description: "List of Claude conversation sessions",
-        mimeType: "application/json",
-        annotations: {
-          audience: ["user", "assistant"],
-          priority: 0.6,
-        },
-      },
-      {
-        uri: "sessions://codex",
-        name: "Codex Sessions",
-        title: "💻 Codex Sessions",
-        description: "List of Codex conversation sessions",
-        mimeType: "application/json",
-        annotations: {
-          audience: ["user", "assistant"],
-          priority: 0.6,
-        },
-      },
-      {
-        uri: "sessions://gemini",
-        name: "Gemini Sessions",
-        title: "✨ Gemini Sessions",
-        description: "List of Gemini conversation sessions",
-        mimeType: "application/json",
-        annotations: {
-          audience: ["user", "assistant"],
-          priority: 0.6,
-        },
-      },
-      {
-        uri: "sessions://grok",
-        name: "Grok Sessions",
-        title: "⚡ Grok Sessions",
-        description: "List of Grok conversation sessions",
-        mimeType: "application/json",
-        annotations: {
-          audience: ["user", "assistant"],
-          priority: 0.6,
-        },
-      },
-      {
-        uri: "sessions://mistral",
-        name: "Mistral Sessions",
-        title: "🌬 Mistral Sessions",
-        description: "List of Mistral Vibe conversation sessions",
-        mimeType: "application/json",
-        annotations: {
-          audience: ["user", "assistant"],
-          priority: 0.6,
-        },
-      },
+      // Per-provider sessions:// resources, generated from the provider
+      // definition registry (via generateResourceDescriptors). Every CLI
+      // provider that exposes a sessions resource gets one row, including devin
+      // and cursor. No provider name is hand-spelled here.
+      ...generateResourceDescriptors()
+        .filter(descriptor => descriptor.exposesSessionsResource)
+        .map(descriptor => ({
+          uri: descriptor.sessionsUri,
+          name: `${descriptor.sessionLabel}s`,
+          title: `${descriptor.icon} ${descriptor.sessionLabel}s`,
+          description: `List of ${descriptor.displayName} conversation sessions`,
+          mimeType: "application/json",
+          annotations: {
+            audience: ["user", "assistant"] as ("user" | "assistant")[],
+            priority: 0.6,
+          },
+        })),
       // Slice 6: sessions:// for enabled API providers whose kind is
       // continuity-tracked. Empty (byte-identical) when no API providers are
       // enabled or none of their kinds support continuity.
@@ -218,61 +185,23 @@ export class ResourceProvider {
           priority: 0.6,
         },
       })),
-      {
-        uri: "models://claude",
-        name: "Claude Models",
-        title: "🧠 Claude Models & Capabilities",
-        description: "Available Claude models and their capabilities",
-        mimeType: "application/json",
-        annotations: {
-          audience: ["user", "assistant"],
-          priority: 0.8,
-        },
-      },
-      {
-        uri: "models://codex",
-        name: "Codex Models",
-        title: "🔧 Codex Models & Capabilities",
-        description: "Available Codex models and their capabilities",
-        mimeType: "application/json",
-        annotations: {
-          audience: ["user", "assistant"],
-          priority: 0.8,
-        },
-      },
-      {
-        uri: "models://gemini",
-        name: "Gemini Models",
-        title: "🌟 Gemini Models & Capabilities",
-        description: "Available Gemini models and their capabilities",
-        mimeType: "application/json",
-        annotations: {
-          audience: ["user", "assistant"],
-          priority: 0.8,
-        },
-      },
-      {
-        uri: "models://grok",
-        name: "Grok Models",
-        title: "⚡ Grok Models & Capabilities",
-        description: "Available Grok models and their capabilities",
-        mimeType: "application/json",
-        annotations: {
-          audience: ["user", "assistant"],
-          priority: 0.8,
-        },
-      },
-      {
-        uri: "models://mistral",
-        name: "Mistral Models",
-        title: "🌬 Mistral Models & Capabilities",
-        description: "Available Mistral Vibe models and their capabilities",
-        mimeType: "application/json",
-        annotations: {
-          audience: ["user", "assistant"],
-          priority: 0.8,
-        },
-      },
+      // Per-provider models:// resources, generated from the provider
+      // definition registry (via generateResourceDescriptors). Every CLI
+      // provider that exposes a models resource gets one row, including devin
+      // and cursor. No provider name is hand-spelled here.
+      ...generateResourceDescriptors()
+        .filter(descriptor => descriptor.exposesModelsResource)
+        .map(descriptor => ({
+          uri: descriptor.modelsUri,
+          name: `${descriptor.displayName} Models`,
+          title: `${descriptor.icon} ${descriptor.displayName} Models & Capabilities`,
+          description: `Available ${descriptor.displayName} models and their capabilities`,
+          mimeType: "application/json",
+          annotations: {
+            audience: ["user", "assistant"] as ("user" | "assistant")[],
+            priority: 0.8,
+          },
+        })),
       // Slice 6: models:// for every enabled API provider. Empty
       // (byte-identical) when no API providers are enabled.
       ...this.apiRuntimes().map(rt => ({
@@ -387,17 +316,23 @@ export class ResourceProvider {
       };
     }
 
-    if (uri === "sessions://claude") {
-      const sessions = this.ownedSessions(await this.sessionManager.listSessions("claude"));
+    // Per-provider sessions://<cli> resource, dispatched generically from the
+    // provider definition registry (parseSessionsResourceUri). Owner-scoping is
+    // preserved: ownedSessions/ownedActiveId filter to the caller's principal.
+    // Placed before the API-provider handler so a config-guarded name collision
+    // resolves to the CLI, mirroring the models:// ordering.
+    const sessionProvider = parseSessionsResourceUri(uri);
+    if (sessionProvider) {
+      const sessions = this.ownedSessions(await this.sessionManager.listSessions(sessionProvider));
       return {
         uri,
         mimeType: "application/json",
         text: JSON.stringify(
           {
-            cli: "claude",
+            cli: sessionProvider,
             total: sessions.length,
             sessions,
-            activeSession: await this.ownedActiveId("claude"),
+            activeSession: await this.ownedActiveId(sessionProvider),
           },
           null,
           2
@@ -405,121 +340,17 @@ export class ResourceProvider {
       };
     }
 
-    if (uri === "sessions://codex") {
-      const sessions = this.ownedSessions(await this.sessionManager.listSessions("codex"));
-      return {
-        uri,
-        mimeType: "application/json",
-        text: JSON.stringify(
-          {
-            cli: "codex",
-            total: sessions.length,
-            sessions,
-            activeSession: await this.ownedActiveId("codex"),
-          },
-          null,
-          2
-        ),
-      };
-    }
-
-    if (uri === "sessions://gemini") {
-      const sessions = this.ownedSessions(await this.sessionManager.listSessions("gemini"));
-      return {
-        uri,
-        mimeType: "application/json",
-        text: JSON.stringify(
-          {
-            cli: "gemini",
-            total: sessions.length,
-            sessions,
-            activeSession: await this.ownedActiveId("gemini"),
-          },
-          null,
-          2
-        ),
-      };
-    }
-
-    if (uri === "sessions://grok") {
-      const sessions = this.ownedSessions(await this.sessionManager.listSessions("grok"));
-      return {
-        uri,
-        mimeType: "application/json",
-        text: JSON.stringify(
-          {
-            cli: "grok",
-            total: sessions.length,
-            sessions,
-            activeSession: await this.ownedActiveId("grok"),
-          },
-          null,
-          2
-        ),
-      };
-    }
-
-    if (uri === "sessions://mistral") {
-      const sessions = this.ownedSessions(await this.sessionManager.listSessions("mistral"));
-      return {
-        uri,
-        mimeType: "application/json",
-        text: JSON.stringify(
-          {
-            cli: "mistral",
-            total: sessions.length,
-            sessions,
-            activeSession: await this.ownedActiveId("mistral"),
-          },
-          null,
-          2
-        ),
-      };
-    }
-
-    // Model capability resources
-    if (uri === "models://claude") {
+    // Per-provider models://<cli> resource, dispatched generically from the
+    // provider definition registry (parseModelsResourceUri). getAvailableCliInfo
+    // is keyed by CliType, so every provider (including devin and cursor) reads
+    // its own catalog with no hand-spelled provider name.
+    const modelProvider = parseModelsResourceUri(uri);
+    if (modelProvider) {
       const cliInfo = getAvailableCliInfo();
       return {
         uri,
         mimeType: "application/json",
-        text: JSON.stringify(cliInfo.claude, null, 2),
-      };
-    }
-
-    if (uri === "models://codex") {
-      const cliInfo = getAvailableCliInfo();
-      return {
-        uri,
-        mimeType: "application/json",
-        text: JSON.stringify(cliInfo.codex, null, 2),
-      };
-    }
-
-    if (uri === "models://gemini") {
-      const cliInfo = getAvailableCliInfo();
-      return {
-        uri,
-        mimeType: "application/json",
-        text: JSON.stringify(cliInfo.gemini, null, 2),
-      };
-    }
-
-    if (uri === "models://grok") {
-      const cliInfo = getAvailableCliInfo();
-      return {
-        uri,
-        mimeType: "application/json",
-        text: JSON.stringify(cliInfo.grok, null, 2),
-      };
-    }
-
-    if (uri === "models://mistral") {
-      const cliInfo = getAvailableCliInfo();
-      return {
-        uri,
-        mimeType: "application/json",
-        text: JSON.stringify(cliInfo.mistral, null, 2),
+        text: JSON.stringify(cliInfo[modelProvider], null, 2),
       };
     }
 

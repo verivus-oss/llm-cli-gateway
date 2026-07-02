@@ -40,6 +40,7 @@ import {
   type WorktreeHandle,
 } from "./worktree-manager.js";
 import { ResourceProvider } from "./resources.js";
+import { generateResourceDescriptors } from "./provider-surface-generator.js";
 import { PerformanceMetrics } from "./metrics.js";
 import {
   estimateTokens,
@@ -2114,7 +2115,7 @@ function resolveClaudeMcpConfig(
 // MCP Resources
 //──────────────────────────────────────────────────────────────────────────────
 
-function registerBaseResources(server: McpServer, runtime: GatewayServerRuntime): void {
+export function registerBaseResources(server: McpServer, runtime: GatewayServerRuntime): void {
   // Register skill resources (L2: full docs, read on demand)
   for (const skill of loadedSkills) {
     server.registerResource(
@@ -2154,165 +2155,47 @@ function registerBaseResources(server: McpServer, runtime: GatewayServerRuntime)
     }
   );
 
-  // Register Claude sessions resource
-  server.registerResource(
-    "claude-sessions",
-    "sessions://claude",
-    {
-      title: "🤖 Claude Sessions",
-      description: "Claude conversation sessions",
-      mimeType: "application/json",
-    },
-    async uri => {
-      runtime.logger.debug("Reading Claude sessions resource");
-      const contents = await runtime.resourceProvider.readResource(uri.href);
-      return { contents: contents ? [contents] : [] };
+  // Register per-provider sessions:// and models:// resources, generated from
+  // the provider-definition registry (generateResourceDescriptors). Every CLI
+  // provider that exposes the resource is registered here, including devin and
+  // cursor. No provider name is hand-spelled; a new provider definition flows
+  // through automatically. Read handlers delegate to runtime.resourceProvider so
+  // owner-scoping / principal isolation is unchanged. Titles render as
+  // `${icon} ${label}` for a consistent emoji prefix across every provider.
+  for (const descriptor of generateResourceDescriptors()) {
+    if (descriptor.exposesSessionsResource) {
+      server.registerResource(
+        `${descriptor.provider}-sessions`,
+        descriptor.sessionsUri,
+        {
+          title: `${descriptor.icon} ${descriptor.sessionLabel}s`,
+          description: `${descriptor.displayName} conversation sessions`,
+          mimeType: "application/json",
+        },
+        async uri => {
+          runtime.logger.debug(`Reading ${descriptor.sessionsUri} resource`);
+          const contents = await runtime.resourceProvider.readResource(uri.href);
+          return { contents: contents ? [contents] : [] };
+        }
+      );
     }
-  );
-
-  // Register Codex sessions resource
-  server.registerResource(
-    "codex-sessions",
-    "sessions://codex",
-    {
-      title: "💻 Codex Sessions",
-      description: "Codex conversation sessions",
-      mimeType: "application/json",
-    },
-    async uri => {
-      runtime.logger.debug("Reading Codex sessions resource");
-      const contents = await runtime.resourceProvider.readResource(uri.href);
-      return { contents: contents ? [contents] : [] };
+    if (descriptor.exposesModelsResource) {
+      server.registerResource(
+        `${descriptor.provider}-models`,
+        descriptor.modelsUri,
+        {
+          title: `${descriptor.icon} ${descriptor.displayName} Models & Capabilities`,
+          description: `${descriptor.displayName} models and capabilities`,
+          mimeType: "application/json",
+        },
+        async uri => {
+          runtime.logger.debug(`Reading ${descriptor.modelsUri} resource`);
+          const contents = await runtime.resourceProvider.readResource(uri.href);
+          return { contents: contents ? [contents] : [] };
+        }
+      );
     }
-  );
-
-  // Register Gemini sessions resource
-  server.registerResource(
-    "gemini-sessions",
-    "sessions://gemini",
-    {
-      title: "✨ Gemini Sessions",
-      description: "Gemini conversation sessions",
-      mimeType: "application/json",
-    },
-    async uri => {
-      runtime.logger.debug("Reading Gemini sessions resource");
-      const contents = await runtime.resourceProvider.readResource(uri.href);
-      return { contents: contents ? [contents] : [] };
-    }
-  );
-
-  // Register Grok sessions resource
-  server.registerResource(
-    "grok-sessions",
-    "sessions://grok",
-    {
-      title: "⚡ Grok Sessions",
-      description: "Grok conversation sessions",
-      mimeType: "application/json",
-    },
-    async uri => {
-      runtime.logger.debug("Reading Grok sessions resource");
-      const contents = await runtime.resourceProvider.readResource(uri.href);
-      return { contents: contents ? [contents] : [] };
-    }
-  );
-
-  // Register Mistral sessions resource
-  server.registerResource(
-    "mistral-sessions",
-    "sessions://mistral",
-    {
-      title: "🌬 Mistral Sessions",
-      description: "Mistral Vibe conversation sessions",
-      mimeType: "application/json",
-    },
-    async uri => {
-      runtime.logger.debug("Reading Mistral sessions resource");
-      const contents = await runtime.resourceProvider.readResource(uri.href);
-      return { contents: contents ? [contents] : [] };
-    }
-  );
-
-  // Register Claude models resource
-  server.registerResource(
-    "claude-models",
-    "models://claude",
-    {
-      title: "🧠 Claude Models",
-      description: "Claude models and capabilities",
-      mimeType: "application/json",
-    },
-    async uri => {
-      runtime.logger.debug("Reading Claude models resource");
-      const contents = await runtime.resourceProvider.readResource(uri.href);
-      return { contents: contents ? [contents] : [] };
-    }
-  );
-
-  // Register Codex models resource
-  server.registerResource(
-    "codex-models",
-    "models://codex",
-    {
-      title: "🔧 Codex Models",
-      description: "Codex models and capabilities",
-      mimeType: "application/json",
-    },
-    async uri => {
-      runtime.logger.debug("Reading Codex models resource");
-      const contents = await runtime.resourceProvider.readResource(uri.href);
-      return { contents: contents ? [contents] : [] };
-    }
-  );
-
-  // Register Gemini models resource
-  server.registerResource(
-    "gemini-models",
-    "models://gemini",
-    {
-      title: "🌟 Gemini Models",
-      description: "Gemini models and capabilities",
-      mimeType: "application/json",
-    },
-    async uri => {
-      runtime.logger.debug("Reading Gemini models resource");
-      const contents = await runtime.resourceProvider.readResource(uri.href);
-      return { contents: contents ? [contents] : [] };
-    }
-  );
-
-  // Register Grok models resource
-  server.registerResource(
-    "grok-models",
-    "models://grok",
-    {
-      title: "⚡ Grok Models",
-      description: "Grok models and capabilities",
-      mimeType: "application/json",
-    },
-    async uri => {
-      runtime.logger.debug("Reading Grok models resource");
-      const contents = await runtime.resourceProvider.readResource(uri.href);
-      return { contents: contents ? [contents] : [] };
-    }
-  );
-
-  // Register Mistral models resource
-  server.registerResource(
-    "mistral-models",
-    "models://mistral",
-    {
-      title: "🌬 Mistral Models",
-      description: "Mistral Vibe models and capabilities",
-      mimeType: "application/json",
-    },
-    async uri => {
-      runtime.logger.debug("Reading Mistral models resource");
-      const contents = await runtime.resourceProvider.readResource(uri.href);
-      return { contents: contents ? [contents] : [] };
-    }
-  );
+  }
 
   // Register performance metrics resource
   server.registerResource(

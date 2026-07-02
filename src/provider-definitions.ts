@@ -211,6 +211,12 @@ export interface ProviderDefinition {
   readonly displayName: string;
   /** Short session label, e.g. "Claude Session" (owned here, used by sessions). */
   readonly sessionLabel: string;
+  /**
+   * Emoji icon prefixed to this provider's resource titles (sessions:// and
+   * models://). One icon per provider, used for BOTH resource types, so the
+   * title surface stays consistent (no per-resource-type divergence).
+   */
+  readonly icon: string;
   /** Every executable the provider ships (first is the primary). */
   readonly executables: readonly string[];
   /** Convenience: `executables[0]`. */
@@ -240,6 +246,7 @@ const PROVIDER_DEFINITIONS = {
     id: "claude",
     displayName: "Anthropic Claude Code",
     sessionLabel: "Claude Session",
+    icon: "🤖",
     executables: ["claude"],
     primaryExecutable: "claude",
     requestSurface: {
@@ -315,6 +322,7 @@ const PROVIDER_DEFINITIONS = {
     id: "codex",
     displayName: "OpenAI Codex CLI",
     sessionLabel: "Codex Session",
+    icon: "💻",
     executables: ["codex"],
     primaryExecutable: "codex",
     requestSurface: {
@@ -420,6 +428,7 @@ const PROVIDER_DEFINITIONS = {
     id: "gemini",
     displayName: "Google Antigravity CLI",
     sessionLabel: "Gemini Session",
+    icon: "✨",
     executables: ["agy"],
     primaryExecutable: "agy",
     requestSurface: {
@@ -496,6 +505,7 @@ const PROVIDER_DEFINITIONS = {
     id: "grok",
     displayName: "xAI Grok Build",
     sessionLabel: "Grok Session",
+    icon: "⚡",
     executables: ["grok"],
     primaryExecutable: "grok",
     requestSurface: {
@@ -583,6 +593,7 @@ const PROVIDER_DEFINITIONS = {
     id: "mistral",
     displayName: "Mistral Vibe",
     sessionLabel: "Mistral Session",
+    icon: "🌬",
     executables: ["vibe", "vibe-acp"],
     primaryExecutable: "vibe",
     requestSurface: {
@@ -684,6 +695,7 @@ const PROVIDER_DEFINITIONS = {
     id: "devin",
     displayName: "Cognition Devin CLI",
     sessionLabel: "Devin Session",
+    icon: "🔷",
     executables: ["devin"],
     primaryExecutable: "devin",
     requestSurface: {
@@ -770,6 +782,7 @@ const PROVIDER_DEFINITIONS = {
     id: "cursor",
     displayName: "Cursor Agent CLI",
     sessionLabel: "Cursor Session",
+    icon: "🖱",
     executables: ["cursor-agent"],
     primaryExecutable: "cursor-agent",
     requestSurface: {

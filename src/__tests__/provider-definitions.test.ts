@@ -27,6 +27,8 @@ describe("provider-definitions registry", () => {
   it("carries every required field group for each provider", () => {
     for (const def of getAllProviderDefinitions()) {
       expect(def.displayName.length).toBeGreaterThan(0);
+      // Every provider carries a non-empty emoji icon for its resource titles.
+      expect(def.icon.length).toBeGreaterThan(0);
       expect(def.executables.length).toBeGreaterThan(0);
       expect(def.primaryExecutable).toBe(def.executables[0]);
       // request transport
