@@ -41,6 +41,7 @@ const NONE_PERSISTENCE: PersistenceConfig = {
   retentionDays: 30,
   dedupWindowMs: 0,
   acknowledgeEphemeral: true,
+  ownsOrphanRecovery: false,
   asyncJobsEnabled: false,
   sources: { configFile: null, envOverrides: [] },
 };

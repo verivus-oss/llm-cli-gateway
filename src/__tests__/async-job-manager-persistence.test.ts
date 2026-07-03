@@ -128,6 +128,29 @@ describe("AsyncJobManager + JobStore (durability + dedup)", () => {
     expect(snapshot?.error).toContain("Gateway restarted");
   });
 
+  it("issue #139: ownsOrphanRecovery=false skips the blanket startup sweep (shared store)", () => {
+    // Seed a 'running' row owned by a DIFFERENT, still-live instance.
+    const t = new Date().toISOString();
+    store.recordStart({
+      id: "other-instance-running",
+      correlationId: "other",
+      requestKey: "k2",
+      cli: "codex",
+      args: ["exec", "hi"],
+      startedAt: t,
+      pid: 1,
+    });
+
+    // A non-owner instance (e.g. an ephemeral stdio spawn on a shared postgres
+    // store) must NOT orphan another instance's in-flight job.
+    const nonOwner = new AsyncJobManager(undefined, undefined, store, undefined, undefined, false);
+    expect(nonOwner.getJobSnapshot("other-instance-running")?.status).toBe("running");
+
+    // The designated owner (default true) still recovers it.
+    const owner = new AsyncJobManager(undefined, undefined, store, undefined, undefined, true);
+    expect(owner.getJobSnapshot("other-instance-running")?.status).toBe("orphaned");
+  });
+
   it("orphaned startup readback preserves captured stdout as completed and no-output rows as restart failures", () => {
     const rec = new FlightRecorder(join(tempDir, "logs.db"));
     try {

@@ -2,6 +2,20 @@
 
 All notable changes to the llm-cli-gateway project.
 
+## [Unreleased]
+
+### Fixed
+
+- **Interim gate for the shared-store startup orphan sweep (#139).** On
+  `backend = "postgres"` the blanket `markOrphanedOnStartup` sweep in the
+  `AsyncJobManager` constructor rewrote every `running` row to `orphaned`, so a
+  fresh instance (especially an ephemeral stdio spawn) transiently orphaned
+  other live instances' in-flight jobs (a `running` -> `orphaned` -> `completed`
+  flap a poller can trip on). New `[persistence].ownsOrphanRecovery` (default
+  `false`) gates the sweep: per-process backends (`sqlite`/`memory`) always
+  sweep as before; a `postgres` instance sweeps only when explicitly designated
+  the recovery owner. The durable per-job instance-lease fix follows.
+
 ## [2.14.0-rc.1] - 2026-07-03: full-featured provider integration + security-review hardening
 
 Release candidate. Every non-Cursor provider (Claude, Codex, Gemini, Grok,

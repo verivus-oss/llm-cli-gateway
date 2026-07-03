@@ -564,6 +564,14 @@ function newAsyncJobManager(
   store: JobStore | null = getJobStore(runtimeLogger),
   fr: FlightRecorderLike = getFlightRecorder(runtimeLogger)
 ): AsyncJobManager {
+  // Issue #139 (interim gate): the blanket startup orphan sweep is only safe
+  // when this instance is the sole owner of the store's 'running' rows. That
+  // holds for per-process backends (sqlite/memory). On a SHARED postgres store
+  // it does NOT, so gate the sweep behind an explicit [persistence].
+  // ownsOrphanRecovery opt-in (default false) so ordinary instances never
+  // orphan another live instance's in-flight jobs.
+  const pc = getPersistenceConfig(runtimeLogger);
+  const ownsOrphanRecovery = pc.backend !== "postgres" || pc.ownsOrphanRecovery;
   return new AsyncJobManager(
     runtimeLogger,
     (cli, durationMs, success) => {
@@ -572,7 +580,8 @@ function newAsyncJobManager(
     store,
     fr,
     // Issue #130: gate all job execution on the operator-tunable [limits] block.
-    getLimitsConfig(runtimeLogger).jobs
+    getLimitsConfig(runtimeLogger).jobs,
+    ownsOrphanRecovery
   );
 }
 

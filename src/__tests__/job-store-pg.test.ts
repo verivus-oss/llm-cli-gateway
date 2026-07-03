@@ -275,6 +275,7 @@ function postgresPersistence(): PersistenceConfig {
     retentionDays: 30,
     dedupWindowMs: 3600000,
     acknowledgeEphemeral: false,
+    ownsOrphanRecovery: false,
     asyncJobsEnabled: true,
     sources: { configFile: null, envOverrides: [] },
   };

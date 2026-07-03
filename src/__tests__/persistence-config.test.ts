@@ -113,6 +113,24 @@ describe("loadPersistenceConfig", () => {
     expect(cfg.asyncJobsEnabled).toBe(true);
   });
 
+  it("issue #139: ownsOrphanRecovery defaults to false and parses from config", () => {
+    pointToMissing();
+    expect(loadPersistenceConfig(noopLogger).ownsOrphanRecovery).toBe(false);
+
+    pointToFile(
+      [
+        "[persistence]",
+        'backend = "postgres"',
+        'dsn = "postgresql://u:p@localhost/db"',
+        "ownsOrphanRecovery = true",
+        "",
+      ].join("\n")
+    );
+    const cfg = loadPersistenceConfig(noopLogger);
+    expect(cfg.backend).toBe("postgres");
+    expect(cfg.ownsOrphanRecovery).toBe(true);
+  });
+
   it("backend=postgres requires dsn", () => {
     pointToFile(["[persistence]", 'backend = "postgres"', ""].join("\n"));
     vi.stubEnv("LLM_GATEWAY_LOGS_DB", "");
@@ -313,6 +331,7 @@ describe("createJobStore", () => {
       retentionDays: 30,
       dedupWindowMs: 3600000,
       acknowledgeEphemeral: false,
+      ownsOrphanRecovery: false,
       asyncJobsEnabled: false,
       sources: { configFile: null, envOverrides: [] },
     });
@@ -327,6 +346,7 @@ describe("createJobStore", () => {
       retentionDays: 30,
       dedupWindowMs: 3600000,
       acknowledgeEphemeral: true,
+      ownsOrphanRecovery: false,
       asyncJobsEnabled: true,
       sources: { configFile: null, envOverrides: [] },
     });
@@ -343,6 +363,7 @@ describe("createJobStore", () => {
         retentionDays: 30,
         dedupWindowMs: 3600000,
         acknowledgeEphemeral: false,
+        ownsOrphanRecovery: false,
         asyncJobsEnabled: true,
         sources: { configFile: null, envOverrides: [] },
       });
@@ -362,6 +383,7 @@ describe("createJobStore", () => {
         retentionDays: 30,
         dedupWindowMs: 3600000,
         acknowledgeEphemeral: false,
+        ownsOrphanRecovery: false,
         asyncJobsEnabled: true,
         sources: { configFile: null, envOverrides: [] },
       })
@@ -515,6 +537,7 @@ describe("createGatewayServer — structural invariant on async tool registratio
       retentionDays: 30,
       dedupWindowMs: 3600000,
       acknowledgeEphemeral: true,
+      ownsOrphanRecovery: false,
       asyncJobsEnabled: true,
       sources: { configFile: null, envOverrides: [] },
       ...overrides,

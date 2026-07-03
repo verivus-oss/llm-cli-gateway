@@ -21,6 +21,7 @@ function persistence(backend: "sqlite" | "memory", path: string | null): Persist
     retentionDays: 30,
     dedupWindowMs: 3600000,
     acknowledgeEphemeral: true,
+    ownsOrphanRecovery: false,
     asyncJobsEnabled: true,
     sources: { configFile: null, envOverrides: [] },
   };
