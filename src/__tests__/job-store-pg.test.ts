@@ -126,29 +126,98 @@ describe("PostgresJobStore", () => {
     expect(row?.httpStatus).toBe(401);
   });
 
-  it("marks running rows orphaned on startup", () => {
-    const startedAt = new Date().toISOString();
-    store.recordStart({
-      id: "pg-running",
-      correlationId: "pg-running-corr",
-      requestKey: "running-key",
-      cli: "mistral",
-      args: ["--prompt", "x"],
-      startedAt,
-      pid: null,
+  it("marks lease-expired (dead-owner) rows orphaned on startup (#139 lease shim)", () => {
+    // #139: markOrphanedOnStartup is now a lease shim. Simulate a dead owner by
+    // constructing the store with an already-expired lease so recordStart writes
+    // lease_deadline in the past; the shim then orphans it.
+    const dead = new PostgresJobStore(TEST_DATABASE_URL, undefined, {
+      retentionMs: 60_000,
+      dedupWindowMs: 60_000,
+      leaseTtlMs: -60_000,
     });
+    try {
+      const startedAt = new Date().toISOString();
+      dead.recordStart({
+        id: "pg-running",
+        correlationId: "pg-running-corr",
+        requestKey: "running-key",
+        cli: "mistral",
+        args: ["--prompt", "x"],
+        startedAt,
+        pid: null,
+      });
 
-    const result = store.markOrphanedOnStartup();
-    expect(result.count).toBe(1);
-    expect(result.orphaned[0]).toMatchObject({
-      id: "pg-running",
-      correlationId: "pg-running-corr",
-      startedAt,
-      stdout: "",
-      stderr: "",
-      transport: "process",
+      const result = dead.markOrphanedOnStartup();
+      expect(result.count).toBe(1);
+      expect(result.orphaned[0]).toMatchObject({
+        id: "pg-running",
+        correlationId: "pg-running-corr",
+        startedAt,
+        stdout: "",
+        stderr: "",
+        transport: "process",
+      });
+      expect(dead.getById("pg-running")?.status).toBe("orphaned");
+      expect(dead.getById("pg-running")?.error).toContain("no longer alive");
+    } finally {
+      dead.close();
+    }
+  });
+
+  it("#139: does NOT orphan a fresh-lease running job; DOES after the lease expires", () => {
+    store.recordStart({
+      id: "pg-live",
+      correlationId: "c",
+      requestKey: "k-live",
+      cli: "claude",
+      args: [],
+      startedAt: new Date().toISOString(),
+      pid: null,
+      ownerInstance: "inst-A",
     });
-    expect(store.getById("pg-running")?.status).toBe("orphaned");
+    store.markRunning("pg-live", { pid: 4321 });
+    expect(store.getById("pg-live")?.status).toBe("running");
+    expect(store.getById("pg-live")?.pid).toBe(4321);
+    // Fresh lease: not swept.
+    expect(store.recoverStaleJobs(90_000, 300_000)).toHaveLength(0);
+    expect(store.getById("pg-live")?.status).toBe("running");
+
+    // A separate dead-owner store writes an expired-lease row that IS swept.
+    const dead = new PostgresJobStore(TEST_DATABASE_URL, undefined, {
+      retentionMs: 60_000,
+      dedupWindowMs: 60_000,
+      leaseTtlMs: -60_000,
+    });
+    try {
+      dead.recordStart({
+        id: "pg-dead",
+        correlationId: "c2",
+        requestKey: "k-dead",
+        cli: "claude",
+        args: [],
+        startedAt: new Date().toISOString(),
+        pid: null,
+        ownerInstance: "inst-B",
+      });
+      const orphaned = dead.recoverStaleJobs(90_000, 300_000);
+      expect(orphaned.map(o => o.id)).toContain("pg-dead");
+      // completion wins over the mistaken orphan (guarded recordComplete)
+      dead.recordComplete({
+        id: "pg-dead",
+        status: "completed",
+        exitCode: 0,
+        stdout: "late",
+        stderr: "",
+        outputTruncated: false,
+        error: null,
+        finishedAt: new Date().toISOString(),
+      });
+      expect(dead.getById("pg-dead")?.status).toBe("completed");
+    } finally {
+      dead.close();
+    }
+    // the live job remained running throughout
+    expect(store.getById("pg-live")?.status).toBe("running");
   });
 
   it("persists validation runs and receipts", () => {

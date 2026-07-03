@@ -9,11 +9,11 @@
 > _"Without consultation, plans are frustrated, but with many counselors they succeed."_
 > — Proverbs 15:22 (LSB)
 
-**Cross-model review without rebuilding your agent stack.**
+**Secure local control plane for AI coding agents.**
 
-`llm-cli-gateway` gives any MCP client one local-first gateway for Claude Code, Codex, Gemini/Antigravity, Grok Build, Mistral Vibe, Cognition Devin, Cursor Agent, and configured HTTP API providers, while preserving native CLI sessions, local credentials, durable async jobs, validation receipts, and review workflows.
+`llm-cli-gateway` lets supported MCP clients operate Claude Code, Codex, Gemini/Antigravity, Grok Build, Mistral Vibe, Cognition Devin, Cursor Agent, and configured HTTP API providers through one user-owned gateway while preserving native CLI sessions, local credentials, durable async jobs, validation receipts, and review workflows.
 
-**Why developers try it:** any connected client can ask other models for a second opinion, run implementation/review loops, collect durable job results, and route API-token LLMs without turning local coding agents into a generic chat proxy.
+**Why developers try it:** use the client you are already in to delegate work to local coding agents, scope remote execution to registered workspaces, gate risky actions, survive disconnects, and collect auditable review evidence without turning those agents into a generic chat proxy.
 
 **Current signals:** CI and security workflows pass on `main`, OpenSSF Scorecard is published, OpenSSF Best Practices is passing, releases use Sigstore signing, and the package is MIT licensed.
 
@@ -38,7 +38,7 @@ Or use directly with `npx` from an MCP client:
 
 ## What It Provides Today
 
-`llm-cli-gateway` is a single-user MCP gateway for cross-LLM validation and multi-agent coding workflows. It is more than a thin CLI wrapper:
+`llm-cli-gateway` is a single-user MCP control plane for operating AI coding agents from supported local or remote clients. It is more than a thin CLI wrapper:
 
 - Runs registered provider CLIs and configured HTTP API providers through consistent sync and async MCP tools.
 - Persists long-running jobs, supports restart-safe result collection, deduplication, cancellation, and sync-to-async deferral.
@@ -69,7 +69,7 @@ The next documentation focus is provider-specific skill and DAG-TOML pairs for e
 
 ## Personal MCP Appliance
 
-The personal-appliance contract keeps that surface intentionally narrow: one trusted user runs the gateway on a machine or volume they own, connects one MCP endpoint, and asks any connected client for cross-LLM validation.
+The personal-appliance contract keeps that surface intentionally narrow: one trusted user runs the gateway on a machine or volume they own, connects one MCP endpoint, and lets supported clients operate local coding agents through workspace-scoped, approval-gated, auditable requests.
 
 The product contract is documented in [docs/personal-mcp/PRODUCT_CONTRACT.md](docs/personal-mcp/PRODUCT_CONTRACT.md). It defines the single-user scope, security posture, target support matrix, and provider-support verification gates. Public setup guides must not claim ChatGPT, Claude web, Claude Desktop, Codex, Gemini CLI, Gemini web, or Grok inbound support until the corresponding provider/client path has been verified.
 
@@ -659,7 +659,7 @@ Every async job is persisted to a job store as it transitions through running �
 
 - **Re-issuing a request is safe.** Identical `*_request` / `*_request_async` calls within the dedup window (default 1 hour) short-circuit onto the existing running or completed job — the caller gets back the same job ID instead of starting a duplicate run. This directly fixes the "agent times out polling, re-issues, and the whole job starts over" failure mode.
 - **`llm_job_status` and `llm_job_result` work across gateway restarts.** Job rows live for 30 days by default; callers can collect results long after the in-memory cache has evicted them.
-- **Jobs running at shutdown are marked `orphaned`** on the next gateway boot (the detached child can't be reattached to). Their captured partial output remains readable.
+- **A job is marked `orphaned` only when its owning gateway instance is provably gone**, never because another instance restarted. Each instance holds a periodic heartbeat lease and stamps every job it owns; the recovery sweep orphans a `queued`/`running` job only when that job's own lease has expired. On a shared store (`backend = "postgres"`) this means a fresh instance never orphans another live instance's in-flight jobs. The captured partial output of a genuinely orphaned job remains readable, and a stale-then-reviving owner that later finishes self-heals to the correct terminal state (issue #139).
 - **Pass `forceRefresh: true`** on any request tool to bypass dedup and force a fresh CLI run.
 
 ##### Persistence configuration
@@ -674,6 +674,18 @@ path = "~/.llm-cli-gateway/logs.db"         # for sqlite
 retentionDays = 30
 dedupWindowMs = 3600000
 acknowledgeEphemeral = false                # required to enable async tools with memory backend
+
+# Issue #139 durable orphan-recovery lease (defaults shown). Each instance
+# advances a per-job lease on every heartbeat; the sweep orphans a job only
+# after its own lease expires, so a fresh instance never orphans another live
+# instance's jobs on a shared store. Validated: leaseTtl >= 2*heartbeat and
+# httpJobGrace >= leaseTtl.
+instanceHeartbeatMs = 15000                 # heartbeat cadence
+instanceLeaseTtlMs = 90000                  # per-job lease TTL (6x heartbeat)
+httpJobGraceMs = 300000                     # extra grace for no-pid http jobs (5 min)
+orphanSweepIntervalMs = 30000               # reaper cadence
+instanceGcMs = 3600000                      # gateway_instances GC horizon
+# ownsOrphanRecovery = false                # DEPRECATED (#139): superseded by the lease; parsed + warned, no longer used
 ```
 
 Backends:

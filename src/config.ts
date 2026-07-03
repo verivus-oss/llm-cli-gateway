@@ -104,6 +104,19 @@ export type PersistenceBackend = (typeof PERSISTENCE_BACKENDS)[number];
 export const DEFAULT_JOB_RETENTION_DAYS = 30;
 export const DEFAULT_DEDUP_WINDOW_MS = 60 * 60 * 1000; // 1 hour
 
+// Issue #139 (durable instance-lease orphan recovery): the lease/heartbeat/sweep
+// knobs. Defaults: heartbeat every 15s; a per-job lease TTL of 90s (6x
+// heartbeat) so up to five consecutive missed heartbeats never orphan a live
+// job; a larger 5-minute grace for no-pid http-transport jobs (their only
+// secondary liveness signal); a 30s reaper cadence; and a 1h GC horizon for the
+// observability-only gateway_instances rows. Zod enforces
+// leaseTtl >= 2*heartbeat and httpJobGrace >= leaseTtl.
+export const DEFAULT_INSTANCE_HEARTBEAT_MS = 15000;
+export const DEFAULT_INSTANCE_LEASE_TTL_MS = 90000;
+export const DEFAULT_HTTP_JOB_GRACE_MS = 300000;
+export const DEFAULT_ORPHAN_SWEEP_INTERVAL_MS = 30000;
+export const DEFAULT_INSTANCE_GC_MS = 3600000;
+
 const PersistenceSchema = z
   .object({
     backend: z.enum(PERSISTENCE_BACKENDS).default("sqlite"),
@@ -112,17 +125,43 @@ const PersistenceSchema = z
     retentionDays: z.number().positive().default(DEFAULT_JOB_RETENTION_DAYS),
     dedupWindowMs: z.number().int().nonnegative().default(DEFAULT_DEDUP_WINDOW_MS),
     acknowledgeEphemeral: z.boolean().default(false),
-    // Issue #139 (interim gate): on a SHARED store (backend = 'postgres'), the
-    // blanket startup orphan sweep (markOrphanedOnStartup) would orphan OTHER
-    // live instances' in-flight jobs, because every instance sees the same
-    // 'running' rows. Default false => a postgres-backed instance does NOT run
-    // the sweep. Set true on exactly ONE long-lived instance (e.g. the http
-    // service) if you want that instance to recover genuinely-orphaned jobs on
-    // its own restart. Ignored for per-process backends (sqlite/memory), which
-    // are never shared and always sweep. Superseded by the durable lease design.
+    // Issue #139 (interim gate, DEPRECATED): superseded by the durable per-job
+    // lease. Still parsed for one release so existing configs do not error, but
+    // it is no longer load-bearing: the lease recovery is safe to run from every
+    // instance (heartbeat and sweep serialize on the job row), so no instance
+    // needs to be the designated sweep "owner". loadPersistenceConfig emits a
+    // one-time deprecation warning when it is set. Will be removed in a later
+    // release. See the durable lease knobs below.
     ownsOrphanRecovery: z.boolean().default(false),
+    // Issue #139 (durable lease): heartbeat/lease/sweep/GC cadences (ms).
+    instanceHeartbeatMs: z.number().int().positive().default(DEFAULT_INSTANCE_HEARTBEAT_MS),
+    instanceLeaseTtlMs: z.number().int().positive().default(DEFAULT_INSTANCE_LEASE_TTL_MS),
+    httpJobGraceMs: z.number().int().positive().default(DEFAULT_HTTP_JOB_GRACE_MS),
+    orphanSweepIntervalMs: z.number().int().positive().default(DEFAULT_ORPHAN_SWEEP_INTERVAL_MS),
+    instanceGcMs: z.number().int().positive().default(DEFAULT_INSTANCE_GC_MS),
   })
-  .strict();
+  .strict()
+  .superRefine((cfg, ctx) => {
+    // A lease must survive at least one missed heartbeat, so require it to be at
+    // least twice the heartbeat cadence; otherwise a single delayed heartbeat
+    // could let another instance sweep a live job.
+    if (cfg.instanceLeaseTtlMs < 2 * cfg.instanceHeartbeatMs) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["instanceLeaseTtlMs"],
+        message: `instanceLeaseTtlMs (${cfg.instanceLeaseTtlMs}) must be >= 2 * instanceHeartbeatMs (${2 * cfg.instanceHeartbeatMs})`,
+      });
+    }
+    // The http grace is an EXTRA hold on top of the lease for no-pid jobs, so it
+    // can never be shorter than the lease itself.
+    if (cfg.httpJobGraceMs < cfg.instanceLeaseTtlMs) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["httpJobGraceMs"],
+        message: `httpJobGraceMs (${cfg.httpJobGraceMs}) must be >= instanceLeaseTtlMs (${cfg.instanceLeaseTtlMs})`,
+      });
+    }
+  });
 
 export interface PersistenceConfig {
   backend: PersistenceBackend;
@@ -132,11 +171,22 @@ export interface PersistenceConfig {
   dedupWindowMs: number;
   acknowledgeEphemeral: boolean;
   /**
-   * Issue #139 (interim gate): whether THIS instance is the designated owner of
-   * the blanket startup orphan sweep on a shared (postgres) store. Default false.
-   * Irrelevant for per-process backends (sqlite/memory). See PersistenceSchema.
+   * Issue #139 (interim gate, DEPRECATED): retained only so old configs still
+   * parse. No longer load-bearing (the durable per-job lease recovery runs
+   * safely from every instance). loadPersistenceConfig warns once when it is
+   * explicitly set. See PersistenceSchema.
    */
   ownsOrphanRecovery: boolean;
+  /** Issue #139 (durable lease): heartbeat cadence in ms. */
+  instanceHeartbeatMs: number;
+  /** Issue #139 (durable lease): per-job fencing lease TTL in ms. */
+  instanceLeaseTtlMs: number;
+  /** Issue #139 (durable lease): extra grace for no-pid http-transport jobs in ms. */
+  httpJobGraceMs: number;
+  /** Issue #139 (durable lease): reaper sweep cadence in ms. */
+  orphanSweepIntervalMs: number;
+  /** Issue #139 (durable lease): gateway_instances GC horizon in ms. */
+  instanceGcMs: number;
   /** True iff async-job tools should be registered on the MCP server. */
   asyncJobsEnabled: boolean;
   /** Audit trail: which inputs (file, env vars) contributed to the resolved config. */
@@ -314,6 +364,15 @@ export function loadPersistenceConfig(logger: Logger = noopLogger): PersistenceC
     sources
   );
 
+  // Issue #139: one-time deprecation warning when the interim gate is set. The
+  // durable lease supersedes it; the value is parsed but no longer load-bearing.
+  if (merged.ownsOrphanRecovery !== undefined) {
+    logWarn(
+      logger,
+      "[persistence].ownsOrphanRecovery is deprecated and no longer used; the durable per-job lease recovery (#139) runs safely from every instance. Remove it from config.toml."
+    );
+  }
+
   let parsed;
   try {
     parsed = PersistenceSchema.parse(merged);
@@ -358,6 +417,11 @@ export function loadPersistenceConfig(logger: Logger = noopLogger): PersistenceC
     dedupWindowMs: parsed.dedupWindowMs,
     acknowledgeEphemeral: parsed.acknowledgeEphemeral,
     ownsOrphanRecovery: parsed.ownsOrphanRecovery,
+    instanceHeartbeatMs: parsed.instanceHeartbeatMs,
+    instanceLeaseTtlMs: parsed.instanceLeaseTtlMs,
+    httpJobGraceMs: parsed.httpJobGraceMs,
+    orphanSweepIntervalMs: parsed.orphanSweepIntervalMs,
+    instanceGcMs: parsed.instanceGcMs,
     asyncJobsEnabled,
     sources,
   };

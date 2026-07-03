@@ -5,6 +5,13 @@ import type { Pool, PoolClient } from "pg";
 
 let pool: Pool | null = null;
 
+/**
+ * #139: the Postgres DB-clock as epoch milliseconds, used inline in the
+ * lease/sweep SQL so the fencing comparison never depends on the client clock
+ * (mirrors the sqlite SQLITE_NOW_MS expression on the other backend).
+ */
+const PG_NOW_MS = "(EXTRACT(EPOCH FROM now()) * 1000)::bigint";
+
 function signal(shared: SharedArrayBuffer, status: number): void {
   const view = new Int32Array(shared);
   Atomics.store(view, 0, status);
@@ -83,12 +90,25 @@ async function init(): Promise<void> {
       owner_principal TEXT,
       transport TEXT NOT NULL DEFAULT 'process',
       http_status INTEGER,
-      payload_json TEXT
+      payload_json TEXT,
+      owner_instance TEXT,
+      lease_deadline BIGINT
     );
     CREATE INDEX IF NOT EXISTS idx_jobs_request_key ON jobs(request_key);
     CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
     CREATE INDEX IF NOT EXISTS idx_jobs_expires_at ON jobs(expires_at);
     CREATE INDEX IF NOT EXISTS idx_jobs_request_key_finished ON jobs(request_key, finished_at);
+
+    CREATE TABLE IF NOT EXISTS gateway_instances (
+      instance_id TEXT PRIMARY KEY,
+      role TEXT,
+      hostname TEXT,
+      pid INTEGER,
+      started_at BIGINT NOT NULL,
+      last_heartbeat BIGINT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_gateway_instances_heartbeat
+      ON gateway_instances(last_heartbeat);
 
     CREATE TABLE IF NOT EXISTS validation_runs (
       validation_id TEXT PRIMARY KEY,
@@ -131,6 +151,14 @@ async function init(): Promise<void> {
   );
   await getPool().query("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS http_status INTEGER");
   await getPool().query("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS payload_json TEXT");
+  // #139: idempotent durable-lease columns for a pre-existing jobs table.
+  await getPool().query("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS owner_instance TEXT");
+  await getPool().query("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS lease_deadline BIGINT");
+  // The owner/status index references owner_instance, so it can only be created
+  // AFTER the ALTER adds that column to a pre-existing (migration-created) table.
+  await getPool().query(
+    "CREATE INDEX IF NOT EXISTS idx_jobs_owner_status ON jobs(owner_instance, status)"
+  );
 }
 
 async function op(method: string, args: any[]): Promise<unknown> {
@@ -140,13 +168,15 @@ async function op(method: string, args: any[]): Promise<unknown> {
       return null;
     case "recordStart": {
       const input = args[0];
+      // #139: persist status='queued' (markRunning flips to 'running' at launch)
+      // with the owner instance stamped and lease_deadline = db_now + leaseTtl.
       await getPool().query(
         `INSERT INTO jobs (id, correlation_id, request_key, cli, args_json, output_format,
                            status, exit_code, stdout, stderr, output_truncated, error,
                            started_at, finished_at, pid, expires_at, owner_principal,
-                           transport, http_status, payload_json)
-         VALUES ($1, $2, $3, $4, $5, $6, 'running', NULL, '', '', FALSE, NULL,
-                 $7, NULL, $8, $9, $10, $11, NULL, $12)`,
+                           transport, http_status, payload_json, owner_instance, lease_deadline)
+         VALUES ($1, $2, $3, $4, $5, $6, 'queued', NULL, '', '', FALSE, NULL,
+                 $7, NULL, $8, $9, $10, $11, NULL, $12, $13, ${PG_NOW_MS} + $14)`,
         [
           input.id,
           input.correlationId,
@@ -160,9 +190,147 @@ async function op(method: string, args: any[]): Promise<unknown> {
           input.ownerPrincipal ?? null,
           input.transport ?? "process",
           input.payloadJson ?? null,
+          input.ownerInstance ?? null,
+          workerData.leaseTtlMs,
         ]
       );
       return null;
+    }
+    case "markRunning": {
+      const [id, opts] = args as [string, { pid: number | null }];
+      // Returns true iff a queued row actually transitioned (rowCount > 0); a
+      // zero-row result means the row was already recovered/terminal and the
+      // caller must fail-close a process launch.
+      const result = await getPool().query(
+        `UPDATE jobs
+         SET status = 'running', pid = $2, lease_deadline = ${PG_NOW_MS} + $3::bigint
+         WHERE id = $1 AND status = 'queued'`,
+        [id, opts?.pid ?? null, workerData.leaseTtlMs]
+      );
+      return (result.rowCount ?? 0) > 0;
+    }
+    case "registerInstance": {
+      const meta = args[0];
+      await getPool().query(
+        `INSERT INTO gateway_instances (instance_id, role, hostname, pid, started_at, last_heartbeat)
+         VALUES ($1, $2, $3, $4, ${PG_NOW_MS}, ${PG_NOW_MS})
+         ON CONFLICT (instance_id) DO UPDATE SET
+           role = EXCLUDED.role, hostname = EXCLUDED.hostname, pid = EXCLUDED.pid,
+           last_heartbeat = EXCLUDED.last_heartbeat`,
+        [meta.instanceId, meta.role ?? null, meta.hostname ?? null, meta.pid ?? null]
+      );
+      return null;
+    }
+    case "heartbeat": {
+      const instanceId = args[0];
+      // Advance the observability row AND the authoritative per-job lease so
+      // heartbeat and sweep are same-row UPDATEs (serialize on the row lock).
+      await withClient(async client => {
+        await client.query("BEGIN");
+        try {
+          await client.query(
+            `UPDATE gateway_instances SET last_heartbeat = ${PG_NOW_MS} WHERE instance_id = $1`,
+            [instanceId]
+          );
+          await client.query(
+            `UPDATE jobs SET lease_deadline = ${PG_NOW_MS} + $2
+             WHERE owner_instance = $1 AND status IN ('queued', 'running')`,
+            [instanceId, workerData.leaseTtlMs]
+          );
+          await client.query("COMMIT");
+        } catch (error: unknown) {
+          await client.query("ROLLBACK");
+          throw error;
+        }
+      });
+      return null;
+    }
+    case "deregisterInstance": {
+      await getPool().query("DELETE FROM gateway_instances WHERE instance_id = $1", [args[0]]);
+      return null;
+    }
+    case "selectStaleProcessCandidates": {
+      // Read-only candidate list for the manager's advisory kill(pid,0) check.
+      const result = await getPool().query(
+        `SELECT j.id AS id, j.pid AS pid, j.transport AS transport,
+                j.owner_instance AS owner_instance, gi.hostname AS hostname
+         FROM jobs j
+         LEFT JOIN gateway_instances gi ON gi.instance_id = j.owner_instance
+         WHERE j.status IN ('queued', 'running')
+           AND j.transport = 'process'
+           AND j.pid IS NOT NULL
+           AND (j.lease_deadline IS NULL OR j.lease_deadline < ${PG_NOW_MS})`
+      );
+      return result.rows.map(r => ({
+        id: r.id,
+        pid: r.pid,
+        transport: r.transport ?? "process",
+        ownerInstance: r.owner_instance ?? null,
+        hostname: r.hostname ?? null,
+      }));
+    }
+    case "recoverStaleJobs": {
+      const [leaseTtlMs, httpJobGraceMs, liveConfirmedIds] = args as [
+        number,
+        number,
+        string[] | undefined,
+      ];
+      const excludeIds = liveConfirmedIds ?? [];
+      // Cutoff for the http grace: db_now (epoch ms) minus the grace window.
+      const httpGraceCutoffMs = "(" + PG_NOW_MS + " - $1::bigint)";
+      return await withClient(async client => {
+        await client.query("BEGIN");
+        try {
+          // (a) Advisory grace: advance the lease by ONE leaseTtl for
+          // pid-confirmed-live rows AND clear the pid, making the grace strictly
+          // one-shot (the next sweep no longer treats it as a process candidate,
+          // so pid reuse cannot strand a row past a single extra leaseTtl).
+          if (excludeIds.length > 0) {
+            await client.query(
+              `UPDATE jobs SET lease_deadline = ${PG_NOW_MS} + $1::bigint, pid = NULL
+               WHERE status IN ('queued', 'running') AND id = ANY($2::text[])`,
+              [leaseTtlMs, excludeIds]
+            );
+          }
+          // (b) Fencing sweep: orphan the remaining expired rows. The http grace
+          // is IN the predicate; started_at is compared to a DB-clock cutoff in
+          // epoch ms. The row lock serializes this against any heartbeat. Params
+          // are numbered from $1 so every declared parameter is referenced (an
+          // unreferenced param makes Postgres reject the statement).
+          const orphan = await client.query(
+            `UPDATE jobs
+             SET status = 'orphaned',
+                 error = COALESCE(error, 'owning gateway instance is no longer alive'),
+                 finished_at = COALESCE(finished_at, $2),
+                 expires_at = $3,
+                 lease_deadline = NULL
+             WHERE status IN ('queued', 'running')
+               AND (lease_deadline IS NULL OR lease_deadline < ${PG_NOW_MS})
+               AND (transport <> 'http'
+                    OR (EXTRACT(EPOCH FROM started_at::timestamptz) * 1000)::bigint < ${httpGraceCutoffMs})
+               AND NOT (id = ANY($4::text[]))
+             RETURNING id, correlation_id, started_at, stdout, stderr, exit_code, transport, http_status`,
+            [
+              httpJobGraceMs,
+              new Date().toISOString(),
+              new Date(Date.now() + workerData.retentionMs).toISOString(),
+              excludeIds,
+            ]
+          );
+          await client.query("COMMIT");
+          return { orphaned: orphan.rows };
+        } catch (error: unknown) {
+          await client.query("ROLLBACK");
+          throw error;
+        }
+      });
+    }
+    case "gcInstances": {
+      const result = await getPool().query(
+        `DELETE FROM gateway_instances WHERE last_heartbeat < ${PG_NOW_MS} - $1::bigint`,
+        [args[0]]
+      );
+      return result.rowCount ?? 0;
     }
     case "recordOutput":
       await getPool().query(
@@ -175,12 +343,15 @@ async function op(method: string, args: any[]): Promise<unknown> {
       const expiresAt = new Date(
         Date.parse(input.finishedAt) + workerData.retentionMs
       ).toISOString();
+      // #139: guarded completion. A terminal result may only land on a still-open
+      // (queued/running) row or a mistakenly-orphaned one; a no-op on an
+      // already-terminal row (last committed terminal state wins).
       await getPool().query(
         `UPDATE jobs
          SET status = $2, exit_code = $3, stdout = $4, stderr = $5,
              output_truncated = $6, error = $7, finished_at = $8,
-             expires_at = $9, http_status = $10
-         WHERE id = $1`,
+             expires_at = $9, http_status = $10, lease_deadline = NULL
+         WHERE id = $1 AND status IN ('queued', 'running', 'orphaned')`,
         [
           input.id,
           input.status,
@@ -202,11 +373,16 @@ async function op(method: string, args: any[]): Promise<unknown> {
     }
     case "findByRequestKey": {
       const cutoff = new Date(Date.now() - workerData.dedupWindowMs).toISOString();
+      // #139: reuse running/completed, or a still-live (lease-valid) queued job;
+      // never an orphaned/canceled/failed row or an expired-lease queued row.
       const result = await getPool().query(
         `SELECT * FROM jobs
          WHERE request_key = $1
            AND started_at >= $2
-           AND status IN ('running', 'completed')
+           AND (
+             status IN ('running', 'completed')
+             OR (status = 'queued' AND lease_deadline IS NOT NULL AND lease_deadline >= ${PG_NOW_MS})
+           )
          ORDER BY started_at DESC
          LIMIT 1`,
         [args[0], cutoff]
