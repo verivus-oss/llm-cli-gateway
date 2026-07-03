@@ -409,10 +409,9 @@ export function registerValidationTools(server: McpServer, deps: ValidationToolD
   );
 
   // Cross-LLM validation receipts (Phase 1): the validation_receipt tool is
-  // registered ONLY under the durable gate (a validation run store is wired,
-  // which index.ts passes only for sqlite + an attached store). Under
-  // memory/postgres/none the tool is absent, so a receipt that cannot be durably
-  // retrieved is impossible by construction.
+  // registered only when a validation-run store is wired. Under memory/none the
+  // tool is absent, so a receipt that cannot be durably retrieved is impossible
+  // by construction.
   if (deps.validationRunStore) {
     server.tool(
       "validation_receipt",

@@ -20,7 +20,7 @@ In scope:
 - **SQL injection / data-tampering** through the flight recorder's `queryRequests()` read surface (`src/flight-recorder.ts`). The surface is gated on `stmt.readonly` and rejects mutating SQL.
 - **Async-job store** integrity: anything that lets an MCP client read or cancel another tenant's jobs, or that bypasses the structural invariant guaranteeing `*_request_async` tools are only registered when a durable store is attached.
 - **Approval-gate bypass**: any path that lets `approvalStrategy: "mcp_managed"` fall through without an approved decision, or any path that lets the gateway report a violated review-integrity result as if compliant.
-- **Supply-chain**: lockfile or `npm publish` provenance issues, missing SHA pins on GHA, leaked tokens in build artifacts, or anything caught by gitleaks / osv-scanner / cargo-audit equivalents.
+- **Supply-chain**: lockfile or `npm publish` control issues, missing SHA pins on GHA, leaked tokens in build artifacts, or anything caught by gitleaks / osv-scanner / cargo-audit equivalents.
 
 Out of scope (please report upstream):
 
@@ -47,7 +47,7 @@ cosign verify-blob SHA256SUMS --bundle SHA256SUMS.sigstore.json \
 sha256sum --check SHA256SUMS
 ```
 
-`npm publish` provenance via the OIDC sigstore path remains the supply-chain integrity gate for the npm artifact.
+The npm artifact is gated by the generated prod-only shrinkwrap, release security audit, packed-consumer checks, and a publish token fetched at runtime from Azure Key Vault through GitHub OIDC to Entra.
 
 ## Threat surfaces NOT covered by automated CI
 

@@ -36,6 +36,14 @@ the shared generation and is maintenance-only.
   discovery-driven; mutating ops require `[admin] allow_mutating_cli_admin_ops`
   and, for remote callers, `LLM_GATEWAY_CLI_ADMIN=1` plus the `cli:admin` OAuth
   scope, routed through the approval manager with a fail-closed pre-spawn audit.
+- **Postgres job store** (`PostgresJobStore`): a durable async-job and
+  validation-run/receipt backend over the `pg` pool, driven through a dedicated
+  worker thread (`postgres-job-store-worker.ts`). Selectable via
+  `persistence.backend = "postgres"`; the ephemeral memory backend deliberately
+  does not implement the validation-run surface.
+- **Search-engine discoverability for the docs site**: Google Search Console
+  and Bing IndexNow submission (`npm run search:*`), plus `sitemap.xml`,
+  `robots.txt`, and `llms.txt`, alongside a marketing-site refresh.
 
 ### Changed
 

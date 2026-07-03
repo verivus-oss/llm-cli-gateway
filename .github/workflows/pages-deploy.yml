@@ -59,74 +59,7 @@ jobs:
           AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
           AZURE_KEY_VAULT_NAME: ${{ vars.AZURE_KEY_VAULT_NAME }}
           AZURE_KEY_VAULT_CLOUDFLARE_TOKEN_SECRET_NAME: ${{ vars.AZURE_KEY_VAULT_CLOUDFLARE_TOKEN_SECRET_NAME }}
-        run: |
-          node --input-type=module <<'NODE'
-          import fs from "node:fs";
-
-          const required = [
-            "ACTIONS_ID_TOKEN_REQUEST_TOKEN",
-            "ACTIONS_ID_TOKEN_REQUEST_URL",
-            "AZURE_CLIENT_ID",
-            "AZURE_TENANT_ID",
-            "AZURE_KEY_VAULT_NAME",
-            "AZURE_KEY_VAULT_CLOUDFLARE_TOKEN_SECRET_NAME",
-            "GITHUB_ENV",
-          ];
-          for (const name of required) {
-            if (!process.env[name]) {
-              throw new Error(`Missing required environment variable: ${name}`);
-            }
-          }
-
-          const oidcUrl = new URL(process.env.ACTIONS_ID_TOKEN_REQUEST_URL);
-          oidcUrl.searchParams.set("audience", "api://AzureADTokenExchange");
-          const oidcResponse = await fetch(oidcUrl, {
-            headers: { Authorization: `Bearer ${process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN}` },
-          });
-          if (!oidcResponse.ok) {
-            throw new Error(`GitHub OIDC token request failed: HTTP ${oidcResponse.status}`);
-          }
-          const { value: clientAssertion } = await oidcResponse.json();
-
-          const tokenBody = new URLSearchParams({
-            client_id: process.env.AZURE_CLIENT_ID,
-            scope: "https://vault.azure.net/.default",
-            grant_type: "client_credentials",
-            client_assertion_type: "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
-            client_assertion: clientAssertion,
-          });
-          const aadResponse = await fetch(
-            `https://login.microsoftonline.com/${process.env.AZURE_TENANT_ID}/oauth2/v2.0/token`,
-            {
-              method: "POST",
-              headers: { "Content-Type": "application/x-www-form-urlencoded" },
-              body: tokenBody,
-            },
-          );
-          if (!aadResponse.ok) {
-            const detail = await aadResponse.text();
-            throw new Error(`Azure token exchange failed: HTTP ${aadResponse.status}: ${detail}`);
-          }
-          const { access_token: vaultToken } = await aadResponse.json();
-
-          const secretUrl = new URL(
-            `https://${process.env.AZURE_KEY_VAULT_NAME}.vault.azure.net/secrets/${process.env.AZURE_KEY_VAULT_CLOUDFLARE_TOKEN_SECRET_NAME}`,
-          );
-          secretUrl.searchParams.set("api-version", "7.4");
-          const secretResponse = await fetch(secretUrl, {
-            headers: { Authorization: `Bearer ${vaultToken}` },
-          });
-          if (!secretResponse.ok) {
-            throw new Error(`Key Vault secret fetch failed: HTTP ${secretResponse.status}`);
-          }
-          const { value: token } = await secretResponse.json();
-          if (!token) {
-            throw new Error("Azure Key Vault returned an empty Cloudflare Pages token");
-          }
-
-          console.log(`::add-mask::${token}`);
-          fs.appendFileSync(process.env.GITHUB_ENV, `CLOUDFLARE_API_TOKEN=${token}\n`);
-          NODE
+        run: node .github/scripts/fetch-azure-keyvault-secrets.mjs CLOUDFLARE_API_TOKEN="${AZURE_KEY_VAULT_CLOUDFLARE_TOKEN_SECRET_NAME}"
 
       - name: Deploy site/ to Cloudflare Pages (production)
         env:
@@ -135,3 +68,32 @@ jobs:
         # --branch=main maps to the production domain (llm-cli-gateway.dev); the
         # git branch would otherwise be published as a preview alias.
         run: npx -y wrangler@4.100.0 pages deploy site --project-name=llm-cli-gateway --branch=main --commit-dirty=true
+
+      - name: Submit deployed URLs to Bing IndexNow
+        # Search indexing should be observable, but a transient search-provider
+        # outage must not block the production site deploy.
+        continue-on-error: true
+        run: node scripts/submit-indexnow.mjs
+
+      - name: Authenticate to Google Cloud for Search Console
+        id: google-auth
+        # Search Console submission is useful release hygiene, but must not block
+        # the production site deploy if Google auth is temporarily unavailable.
+        continue-on-error: true
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+        with:
+          workload_identity_provider: ${{ vars.GOOGLE_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GOOGLE_SERVICE_ACCOUNT_EMAIL }}
+          token_format: access_token
+          access_token_scopes: https://www.googleapis.com/auth/webmasters
+
+      - name: Submit sitemap to Google Search Console
+        # Google can reject submission until the service account has Search
+        # Console access to the verified property; keep deploys moving and make
+        # the failure visible in the workflow logs.
+        continue-on-error: true
+        env:
+          GOOGLE_ACCESS_TOKEN: ${{ steps.google-auth.outputs.access_token }}
+          GOOGLE_SEARCH_CONSOLE_SITE_URL: ${{ vars.GOOGLE_SEARCH_CONSOLE_SITE_URL }}
+          GOOGLE_SEARCH_CONSOLE_SITEMAP_URL: ${{ vars.GOOGLE_SEARCH_CONSOLE_SITEMAP_URL }}
+        run: node scripts/submit-google-search-console.mjs

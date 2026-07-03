@@ -353,25 +353,23 @@ describe("createJobStore", () => {
     }
   });
 
-  it("createJobStore({backend:'postgres'}) reaches the throwing Postgres stub", () => {
+  it("createJobStore({backend:'postgres'}) requires a non-empty DSN", () => {
     expect(() =>
       createJobStore({
         backend: "postgres",
         path: null,
-        dsn: "postgresql://x@y/z",
+        dsn: "",
         retentionDays: 30,
         dedupWindowMs: 3600000,
         acknowledgeEphemeral: false,
         asyncJobsEnabled: true,
         sources: { configFile: null, envOverrides: [] },
       })
-    ).toThrow(/not yet implemented/);
+    ).toThrow();
   });
 
-  it("PostgresJobStore constructor also throws when called directly", () => {
-    // Belt-and-braces: catches a regression where someone changes the factory
-    // to swallow the throw but leaves the stub class lying around.
-    expect(() => new PostgresJobStore("postgresql://x@y/z")).toThrow(/not yet implemented/);
+  it("PostgresJobStore constructor requires a non-empty DSN", () => {
+    expect(() => new PostgresJobStore("")).toThrow(/non-empty DSN/);
   });
 });
 
@@ -637,8 +635,8 @@ describe("createGatewayServer — structural invariant on async tool registratio
 
   // Regression: llm_process_health must report the EFFECTIVE async state
   // (config flag AND hasStore()), not the raw configured intent. A backend
-  // whose durable store fails to open (backend='postgres', which always throws,
-  // or a sqlite DB that fails to open) is caught in getJobStore() and nulls the
+  // whose durable store fails to open (for example a Postgres connection error
+  // or a SQLite DB that fails to open) is caught in getJobStore() and nulls the
   // store, so async tools are not registered, and health must not claim they
   // are.
   async function readHealthPersistence(
@@ -745,8 +743,8 @@ describe("createGatewayServer — structural invariant on async tool registratio
 
   it("llm_process_health reports asyncJobsEnabled=false when the durable store failed to open (backend != 'none')", async () => {
     // Post-catch runtime: getJobStore() caught a store-open error (e.g.
-    // backend='postgres', whose store constructor always throws) and nulled the
-    // store. The config flag says enabled; the effective state is not.
+    // a Postgres connection error) and nulled the store. The config flag says
+    // enabled; the effective state is not.
     const manager = new AsyncJobManager(noopLogger, undefined, null);
     const server = createGatewayServer({
       asyncJobManager: manager,
