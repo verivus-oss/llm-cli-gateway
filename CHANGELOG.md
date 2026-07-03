@@ -4,6 +4,8 @@ All notable changes to the llm-cli-gateway project.
 
 ## [Unreleased]
 
+## [2.14.0] - 2026-07-03
+
 ### Fixed
 
 - **Durable instance-lease orphan recovery (#139).** The blanket
