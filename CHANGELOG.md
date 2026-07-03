@@ -4,6 +4,8 @@ All notable changes to the llm-cli-gateway project.
 
 ## [Unreleased]
 
+## [2.15.0] - 2026-07-03
+
 ### Added
 
 - **Updateable local skill packs.** Gateway startup now loads bundled skills,
