@@ -21,7 +21,9 @@ describe.skipIf(!existsSync(entrypoint))("CLI metadata entrypoint", () => {
   it("--version prints only the package version", () => {
     const result = run(["--version"]);
     expect(result.status).toBe(0);
-    expect(result.stdout.trim()).toMatch(/^\d+\.\d+\.\d+$/);
+    // Bare version, nothing else: a stable x.y.z or an x.y.z-<prerelease> cut
+    // (e.g. 2.14.0-rc.1). The strict prerelease shape matches sync-site-version.mjs.
+    expect(result.stdout.trim()).toMatch(/^\d+\.\d+\.\d+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$/);
     expect(result.stderr).toBe("");
   });
 
