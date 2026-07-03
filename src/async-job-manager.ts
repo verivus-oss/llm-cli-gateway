@@ -934,6 +934,15 @@ export class AsyncJobManager {
     }
   }
 
+  /**
+   * #139: run one orphan sweep synchronously. `public` only so tests can drive
+   * the sweep deterministically without waiting on the reaper interval (mirrors
+   * `checkStalledJobs`). Production code uses the startup call + reaper timer.
+   */
+  runOrphanSweepNow(): void {
+    this.runOrphanSweep();
+  }
+
   /** #139: the periodic orphan reaper. */
   private startReaper(): void {
     this.sweepTimer = setInterval(() => {
@@ -1058,11 +1067,24 @@ export class AsyncJobManager {
    */
   private markRunningDurable(job: AsyncJobRecord, pid: number | null, failClosed = false): void {
     if (!this.store) return;
+    let transitioned = false;
     try {
-      this.store.markRunning(job.id, { pid });
+      transitioned = this.store.markRunning(job.id, { pid });
     } catch (err) {
       if (failClosed) throw err;
       this.logger.error(`#139 markRunning (best-effort) failed for job ${job.id}`, err);
+      return;
+    }
+    // A zero-row transition means the durable row was no longer 'queued' (e.g.
+    // another instance already swept it to 'orphaned' while it waited in the
+    // limiter queue). For a process launch this is fail-closed: refuse to run a
+    // spawned child against a recovered row. http is best-effort (no OS process
+    // to strand; the guarded recordComplete still lands the terminal result over
+    // the orphaned row, so a false here is harmless).
+    if (!transitioned && failClosed) {
+      throw new Error(
+        `#139 markRunning matched no queued row for job ${job.id} (already recovered or terminal); refusing to run a child against a stale durable row`
+      );
     }
   }
 

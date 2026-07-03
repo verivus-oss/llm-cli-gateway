@@ -8,7 +8,7 @@
  * plus the sqlite-driver widening.
  */
 import { mkdtempSync, rmSync } from "fs";
-import { tmpdir } from "os";
+import os, { tmpdir } from "os";
 import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
@@ -547,5 +547,128 @@ describe("#139 AsyncJobManager lease lifecycle (M/N series)", () => {
     // idempotent
     await expect(mgr.dispose()).resolves.toBeUndefined();
     store.close();
+  });
+});
+
+describe("#139 cross-LLM review round-1 regressions", () => {
+  let tmpDir: string;
+  let dbPath: string;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), "orphan139-rvw-"));
+    dbPath = join(tmpDir, "jobs.db");
+  });
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  function setLease(dbp: string, id: string, value: number | null): void {
+    const db = openDatabase(dbp);
+    try {
+      db.prepare("UPDATE jobs SET lease_deadline = ? WHERE id = ?").run(value, id);
+    } finally {
+      db.close();
+    }
+  }
+
+  // Codex/Grok finding: markRunning must report whether it actually
+  // transitioned, so a process launch fail-closes against a recovered row.
+  it("markRunning returns true for a queued row and false once it is orphaned", () => {
+    const store = new SqliteJobStore(dbPath, undefined, { leaseTtlMs: 90000 });
+    try {
+      store.recordStart({
+        id: "j",
+        correlationId: "c",
+        requestKey: "k",
+        cli: "claude",
+        args: [],
+        startedAt: new Date().toISOString(),
+        pid: null,
+        ownerInstance: "inst-A",
+        transport: "process",
+      });
+      expect(store.markRunning("j", { pid: 10 })).toBe(true);
+      // Simulate the row being swept while it was queued: force it orphaned.
+      const db = openDatabase(dbPath);
+      db.prepare("UPDATE jobs SET status='orphaned' WHERE id='j'").run();
+      db.close();
+      expect(store.markRunning("j", { pid: 20 })).toBe(false);
+    } finally {
+      store.close();
+    }
+  });
+
+  // Grok finding: the sqlite sweep must be a single guarded UPDATE...RETURNING;
+  // a fresh-lease row in the same batch is never orphaned, and the returned list
+  // is exactly the rows actually flipped.
+  it("recoverStaleJobs orphans only the expired rows and returns exactly them", () => {
+    const store = new SqliteJobStore(dbPath, undefined, { leaseTtlMs: 90000 });
+    try {
+      for (const id of ["dead", "live"]) {
+        store.recordStart({
+          id,
+          correlationId: `c-${id}`,
+          requestKey: `k-${id}`,
+          cli: "claude",
+          args: [],
+          startedAt: new Date().toISOString(),
+          pid: null,
+          ownerInstance: "inst-A",
+        });
+      }
+      setLease(dbPath, "dead", 1); // expired; "live" keeps its fresh lease
+      const orphaned = store.recoverStaleJobs(90000, 300000);
+      expect(orphaned.map(o => o.id)).toEqual(["dead"]);
+      expect(store.getById("dead")?.status).toBe("orphaned");
+      expect(store.getById("live")?.status).toBe("queued");
+    } finally {
+      store.close();
+    }
+  });
+
+  // Codex/Grok finding: the advisory pid grace must be strictly one-shot. A
+  // live same-host pid buys exactly one extra leaseTtl (advance + clear pid);
+  // the next sweep no longer probes it and orphans it.
+  it("the advisory pid grace is one-shot: advance+clear pid, then orphaned next sweep", () => {
+    const store = new SqliteJobStore(dbPath, undefined, { leaseTtlMs: 90000 });
+    const mgr = new AsyncJobManager(noopLogger, undefined, store);
+    try {
+      // A dead owner's process job whose recorded pid is alive on THIS host.
+      store.registerInstance({
+        instanceId: "dead-owner",
+        role: "stdio",
+        hostname: os.hostname(),
+        pid: process.pid,
+      });
+      store.recordStart({
+        id: "reused",
+        correlationId: "c",
+        requestKey: "k",
+        cli: "claude",
+        args: [],
+        startedAt: new Date().toISOString(),
+        pid: process.pid, // a live same-host pid (kill(pid,0) succeeds)
+        ownerInstance: "dead-owner",
+        transport: "process",
+      });
+      store.markRunning("reused", { pid: process.pid });
+      setLease(dbPath, "reused", 1); // lease expired
+
+      // Sweep 1: pid is alive + same host -> grace (advance lease, clear pid),
+      // NOT orphaned.
+      mgr.runOrphanSweepNow();
+      expect(store.getById("reused")?.status).toBe("running");
+      expect(store.getById("reused")?.pid).toBeNull(); // pid cleared -> one-shot
+      expect(store.getById("reused")?.leaseDeadline).toBeGreaterThan(Date.now());
+
+      // The extra leaseTtl lapses.
+      setLease(dbPath, "reused", 1);
+      // Sweep 2: pid is NULL now, so it is not re-probed and IS orphaned.
+      mgr.runOrphanSweepNow();
+      expect(store.getById("reused")?.status).toBe("orphaned");
+    } finally {
+      mgr.dispose();
+      store.close();
+    }
   });
 });

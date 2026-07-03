@@ -198,13 +198,16 @@ async function op(method: string, args: any[]): Promise<unknown> {
     }
     case "markRunning": {
       const [id, opts] = args as [string, { pid: number | null }];
-      await getPool().query(
+      // Returns true iff a queued row actually transitioned (rowCount > 0); a
+      // zero-row result means the row was already recovered/terminal and the
+      // caller must fail-close a process launch.
+      const result = await getPool().query(
         `UPDATE jobs
-         SET status = 'running', pid = $2, lease_deadline = ${PG_NOW_MS} + $3
+         SET status = 'running', pid = $2, lease_deadline = ${PG_NOW_MS} + $3::bigint
          WHERE id = $1 AND status = 'queued'`,
         [id, opts?.pid ?? null, workerData.leaseTtlMs]
       );
-      return null;
+      return (result.rowCount ?? 0) > 0;
     }
     case "registerInstance": {
       const meta = args[0];
@@ -278,10 +281,13 @@ async function op(method: string, args: any[]): Promise<unknown> {
       return await withClient(async client => {
         await client.query("BEGIN");
         try {
-          // (a) Advisory grace: advance the lease for pid-confirmed-live rows.
+          // (a) Advisory grace: advance the lease by ONE leaseTtl for
+          // pid-confirmed-live rows AND clear the pid, making the grace strictly
+          // one-shot (the next sweep no longer treats it as a process candidate,
+          // so pid reuse cannot strand a row past a single extra leaseTtl).
           if (excludeIds.length > 0) {
             await client.query(
-              `UPDATE jobs SET lease_deadline = ${PG_NOW_MS} + $1::bigint
+              `UPDATE jobs SET lease_deadline = ${PG_NOW_MS} + $1::bigint, pid = NULL
                WHERE status IN ('queued', 'running') AND id = ANY($2::text[])`,
               [leaseTtlMs, excludeIds]
             );

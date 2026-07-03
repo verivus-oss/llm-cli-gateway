@@ -226,3 +226,58 @@ Scenario / regression coverage:
   needs interactive provider auth and is left as a manual post-merge check on the
   serverwide postgres install.
 - `node:sqlite` confirmed referenced only in `src/sqlite-driver.ts` (release audit).
+
+### cross-llm-review-gate
+
+Reviewers: Codex (gpt-5.5), Grok, Mistral (async via gtwy; gemini/agy excluded).
+Each read the ACTUAL tree at commit 3105d74 (not the summary).
+
+**Round 1 dispatch ids**: codex `rvw-139-codex-r1` (job db620608), grok
+`rvw-139-grok-r1` (job d14097b5), mistral `rvw-139-mistral-r1` (job b111d599).
+
+Round 1 findings and dispositions (3 real fixes; 2 rejected):
+
+1. **CONFIRMED (Grok): sqlite sweep was a SELECT-then-blind-UPDATE**, so under
+   shared-file multi-process sqlite a heartbeat/completion landing between the
+   SELECT and the id-keyed flip could be stomped (and it was asymmetric with the
+   guarded PG UPDATE). FIXED: the sqlite sweep is now a SINGLE guarded
+   `UPDATE ... WHERE <lease/http-grace predicate> ... RETURNING` (`orphanExpiredStmt`,
+   src/job-store.ts), re-evaluating the predicate in the same atomic statement
+   that flips the row. No TOCTOU window; symmetric with PG.
+2. **CONFIRMED (Grok + Codex): the advisory `kill(pid,0)` grace was repeatable**,
+   not bounded to one leaseTtl, so a reused-and-alive same-host pid could strand a
+   row indefinitely. FIXED: the advance step now advances the lease by one
+   leaseTtl AND clears the pid (`advanceLeaseStmt` sqlite + the pg advance), so
+   the next sweep no longer treats the row as a process candidate (pid IS NULL)
+   and orphans it once the extended lease lapses. Strictly one-shot.
+3. **CONFIRMED (Codex): process `markRunning` was not fail-closed on a zero-row
+   match.** If a queued row was swept to `orphaned` while it waited in the limiter
+   queue, `markRunning`'s `WHERE id AND status='queued'` matched 0 rows, silently
+   no-oped, and the spawned child ran against an orphaned durable row (re-creating
+   the flap). FIXED: `markRunning` now returns a boolean (transitioned?) across
+   all backends; `markRunningDurable(..., failClosed=true)` (process launch)
+   throws when it returns false, so `launchProcessJob` kills the child and the
+   launch is terminalized. http stays best-effort (no OS process to strand; the
+   guarded `recordComplete`, whose WHERE includes `orphaned`, still lands the
+   terminal result).
+4. **REJECTED (Mistral): "strftime %f produces microseconds".** False: SQLite
+   `%f` is `SS.SSS` (milliseconds, 3 digits), exactly the `toISOString` shape, so
+   the lexical TEXT comparison is correct. Grok independently confirmed the format
+   matches. No change.
+5. **ACCEPTED-AS-KNOWN-LIMITATION (Mistral): http-grace uses client-clock
+   `started_at` vs a DB-clock cutoff, so a skewed client clock shifts the extra
+   http grace window.** This is fail-safe (it can only DELAY orphaning a dead
+   http job, never orphan a live one; the authoritative lease is DB-clock), it is
+   the design's own predicate (`started_at < now - httpJobGrace`), and `started_at`
+   is a client timestamp everywhere in the codebase. Grok judged it tolerable
+   ("5min window tolerates minor skew"). Documented, not changed.
+
+Round-1 fix regression tests added to `orphan-recovery-139.test.ts` (all green):
+markRunning true-then-false contract; recoverStaleJobs orphans only expired rows
+and RETURNs exactly them (guarded flip); the pid grace is one-shot (advance +
+clear pid via a real AsyncJobManager sweep using this process's live pid, then
+orphaned on the next sweep). Added `runOrphanSweepNow()` test hook (public, like
+`checkStalledJobs`). Post-fix gate: `npm test` 2282 pass, `npm run test:pg` 65
+pass, build/lint/format clean.
+
+Round 2 (re-review of the fixes) pending; dispatch ids recorded below.

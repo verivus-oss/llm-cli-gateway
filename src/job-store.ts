@@ -256,10 +256,12 @@ export interface JobStore {
   }): void;
   /**
    * #139: transition a durable `queued` row to `running`, stamp the real child
-   * pid (process transport; null for http), and re-set the lease. No-op WHERE
-   * the row is not `queued` (idempotent / lost-race safe).
+   * pid (process transport; null for http), and re-set the lease. Returns true
+   * iff a queued row actually transitioned; false means the row was no longer
+   * `queued` (e.g. already swept to `orphaned` while it waited in the limiter
+   * queue), which the caller uses to fail-close a process launch.
    */
-  markRunning(id: string, opts: { pid: number | null }): void;
+  markRunning(id: string, opts: { pid: number | null }): boolean;
   /** #139: register this live instance (writes last_heartbeat = DB now). */
   registerInstance(meta: GatewayInstanceMeta): void;
   /**
@@ -452,7 +454,7 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
   private heartbeatJobsStmt: GatewayStatement;
   private deregisterInstanceStmt: GatewayStatement;
   private selectStaleCandidatesStmt: GatewayStatement;
-  private selectExpiredOrphansStmt: GatewayStatement;
+  private orphanExpiredStmt: GatewayStatement;
   private advanceLeaseStmt: GatewayStatement;
   private gcInstancesStmt: GatewayStatement;
 
@@ -702,27 +704,38 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
         AND j.pid IS NOT NULL
         AND (j.lease_deadline IS NULL OR j.lease_deadline < ${SQLITE_NOW_MS})
     `);
-    // The fencing sweep RETURNING the orphaned rows' FR-relevant columns. The
-    // http grace is IN the predicate (a row is never flipped then un-flipped);
-    // db_now is the DB clock. The @exclude_json guard removes advisory-live
-    // (pid-confirmed) ids via json_each; an empty array matches nothing.
-    // The http-grace cutoff is also computed from the DB clock: strftime with
-    // the '%f' (SS.SSS) fractional-seconds format yields exactly the
-    // toISOString shape stored in started_at, so the lexical TEXT comparison is
-    // chronologically correct without trusting the client clock.
-    this.selectExpiredOrphansStmt = this.db.prepare(`
-      SELECT id, correlation_id, started_at, stdout, stderr, exit_code, transport, http_status
-      FROM jobs
+    // The fencing sweep is a SINGLE guarded UPDATE ... RETURNING (not a
+    // SELECT-then-blind-flip): the orphan predicate is re-evaluated in the same
+    // atomic statement that flips the row, so a heartbeat or completion that
+    // lands between candidate selection and the flip can never be stomped (the
+    // WHERE misses it). This mirrors the Postgres path. The http grace is IN the
+    // predicate (a row is never flipped then un-flipped); db_now is the DB clock;
+    // the @exclude_json guard removes advisory-live (pid-confirmed) ids. The
+    // http-grace cutoff is also DB-clock: strftime with the '%f' (SS.SSS,
+    // millisecond) fractional-seconds format yields exactly the toISOString shape
+    // stored in started_at, so the lexical TEXT comparison is chronologically
+    // correct without trusting the client clock.
+    this.orphanExpiredStmt = this.db.prepare(`
+      UPDATE jobs
+      SET status = 'orphaned',
+          error = COALESCE(error, 'owning gateway instance is no longer alive'),
+          finished_at = COALESCE(finished_at, @now_iso),
+          expires_at = @expires_iso,
+          lease_deadline = NULL
       WHERE status IN ('queued', 'running')
         AND (lease_deadline IS NULL OR lease_deadline < ${SQLITE_NOW_MS})
         AND (transport <> 'http'
              OR started_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', @http_grace_modifier))
         AND id NOT IN (SELECT value FROM json_each(@exclude_json))
+      RETURNING id, correlation_id, started_at, stdout, stderr, exit_code, transport, http_status
     `);
-    // Advisory grace: advance the lease by one leaseTtl for pid-confirmed-live
-    // rows (bounded, never-vetoing) so pid reuse cannot strand a row forever.
+    // Advisory grace: advance the lease by ONE leaseTtl for pid-confirmed-live
+    // rows AND clear the pid. Clearing the pid makes the grace strictly one-shot:
+    // on the next sweep the row is no longer a process candidate (pid IS NULL),
+    // so it is not re-probed and is orphaned once the extended lease lapses. This
+    // bounds pid reuse to a single extra leaseTtl (it cannot strand a row).
     this.advanceLeaseStmt = this.db.prepare(`
-      UPDATE jobs SET lease_deadline = ${SQLITE_NOW_MS} + @lease_ttl_ms
+      UPDATE jobs SET lease_deadline = ${SQLITE_NOW_MS} + @lease_ttl_ms, pid = NULL
       WHERE status IN ('queued', 'running')
         AND id IN (SELECT value FROM json_each(@ids_json))
     `);
@@ -775,8 +788,18 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
     });
   }
 
-  markRunning(id: string, opts: { pid: number | null }): void {
-    this.markRunningStmt.run({ id, pid: opts.pid, lease_ttl_ms: this.leaseTtlMs });
+  markRunning(id: string, opts: { pid: number | null }): boolean {
+    // Returns true iff a queued row actually transitioned to running. A zero-row
+    // result means the durable row is no longer queued (e.g. another instance
+    // already swept it to 'orphaned' while it waited in the limiter queue); the
+    // caller uses this to fail-close a process launch rather than run a child
+    // against a recovered row.
+    const result = this.markRunningStmt.run({
+      id,
+      pid: opts.pid,
+      lease_ttl_ms: this.leaseTtlMs,
+    });
+    return Number(result.changes) > 0;
   }
 
   registerInstance(meta: GatewayInstanceMeta): void {
@@ -823,14 +846,21 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
   ): OrphanedJobSnapshot[] {
     const excludeJson = JSON.stringify(liveConfirmedIds);
     const httpGraceModifier = `-${httpJobGraceMs / 1000} seconds`;
-    // One atomic unit: advance the advisory-live rows' lease, snapshot the
-    // remaining expired rows, then flip them to orphaned. withTransaction now
-    // forwards the callback's return value (the orphaned snapshot list).
+    // One atomic unit: advance (+clear pid on) the advisory-live rows, then flip
+    // the remaining expired rows to orphaned with a SINGLE guarded UPDATE ...
+    // RETURNING whose WHERE re-evaluates the lease/http-grace predicate. No
+    // SELECT-then-blind-flip window: a heartbeat or completion that lands before
+    // the flip is not stomped (the predicate simply misses that row).
+    // withTransaction forwards the callback's return value (the orphaned list).
     const run = this.db.withTransaction((): OrphanedJobSnapshot[] => {
       if (liveConfirmedIds.length > 0) {
         this.advanceLeaseStmt.run({ ids_json: excludeJson, lease_ttl_ms: leaseTtlMs });
       }
-      const rows = this.selectExpiredOrphansStmt.all({
+      const nowIso = new Date().toISOString();
+      const expiresAt = new Date(Date.now() + this.retentionMs).toISOString();
+      const rows = this.orphanExpiredStmt.all({
+        now_iso: nowIso,
+        expires_iso: expiresAt,
         http_grace_modifier: httpGraceModifier,
         exclude_json: excludeJson,
       }) as Array<{
@@ -843,23 +873,6 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
         transport: string | null;
         http_status: number | null;
       }>;
-      if (rows.length === 0) return [];
-      const nowIso = new Date().toISOString();
-      const expiresAt = new Date(Date.now() + this.retentionMs).toISOString();
-      const ids = rows.map(r => r.id);
-      // Flip exactly the snapshotted ids (single-writer sqlite: no row can
-      // change status between the SELECT and this UPDATE within the txn).
-      this.db
-        .prepare(
-          `UPDATE jobs
-             SET status = 'orphaned',
-                 error = COALESCE(error, 'owning gateway instance is no longer alive'),
-                 finished_at = COALESCE(finished_at, ?),
-                 expires_at = ?,
-                 lease_deadline = NULL
-           WHERE id IN (SELECT value FROM json_each(?))`
-        )
-        .run(nowIso, expiresAt, JSON.stringify(ids));
       return rows.map(r => ({
         id: r.id,
         correlationId: r.correlation_id,
@@ -1204,12 +1217,13 @@ export class MemoryJobStore implements JobStore {
     });
   }
 
-  markRunning(id: string, opts: { pid: number | null }): void {
+  markRunning(id: string, opts: { pid: number | null }): boolean {
     const row = this.rows.get(id);
-    if (!row || row.status !== "queued") return;
+    if (!row || row.status !== "queued") return false;
     row.status = "running";
     row.pid = opts.pid;
     row.leaseDeadline = Date.now() + this.leaseTtlMs;
+    return true;
   }
 
   // #139: instance registration is a no-op for the in-process store (there is
@@ -1431,8 +1445,8 @@ export class PostgresJobStore implements JobStore, ValidationRunStore {
     this.syncCall("recordStart", input);
   }
 
-  markRunning(id: string, opts: { pid: number | null }): void {
-    this.syncCall("markRunning", id, opts);
+  markRunning(id: string, opts: { pid: number | null }): boolean {
+    return this.syncCall("markRunning", id, opts);
   }
 
   registerInstance(meta: GatewayInstanceMeta): void {
