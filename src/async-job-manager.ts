@@ -639,7 +639,14 @@ export class AsyncJobManager {
     private onJobComplete?: (cli: JobProvider, durationMs: number, success: boolean) => void,
     store: JobStore | null = null,
     flightRecorder: FlightRecorderLike = new NoopFlightRecorder(),
-    limits: JobLimitsConfig = DEFAULT_MANAGER_JOB_LIMITS
+    limits: JobLimitsConfig = DEFAULT_MANAGER_JOB_LIMITS,
+    // Issue #139 (interim gate): whether this instance may run the blanket
+    // startup orphan sweep. Default true preserves single-owner behaviour
+    // (per-process sqlite/memory, and every existing caller/test). The stdio
+    // process-global manager on a SHARED postgres store passes false so it does
+    // NOT orphan other live instances' in-flight jobs. Superseded by the lease
+    // design (durable per-job instance ownership).
+    ownsOrphanRecovery: boolean = true
   ) {
     this.processMonitor = new ProcessMonitor(logger);
     this.store = store;
@@ -657,7 +664,14 @@ export class AsyncJobManager {
       logger
     );
 
-    if (this.store) {
+    if (this.store && !ownsOrphanRecovery) {
+      // Issue #139: a shared-store instance that is NOT the designated recovery
+      // owner must skip the blanket sweep, otherwise it orphans other live
+      // instances' in-flight jobs (transient running->orphaned->completed flap).
+      this.logger.debug(
+        "Skipping startup orphan sweep (ownsOrphanRecovery=false; shared store, not the recovery owner)"
+      );
+    } else if (this.store) {
       try {
         const { count, orphaned } = this.store.markOrphanedOnStartup();
         if (count > 0) {

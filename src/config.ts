@@ -112,6 +112,15 @@ const PersistenceSchema = z
     retentionDays: z.number().positive().default(DEFAULT_JOB_RETENTION_DAYS),
     dedupWindowMs: z.number().int().nonnegative().default(DEFAULT_DEDUP_WINDOW_MS),
     acknowledgeEphemeral: z.boolean().default(false),
+    // Issue #139 (interim gate): on a SHARED store (backend = 'postgres'), the
+    // blanket startup orphan sweep (markOrphanedOnStartup) would orphan OTHER
+    // live instances' in-flight jobs, because every instance sees the same
+    // 'running' rows. Default false => a postgres-backed instance does NOT run
+    // the sweep. Set true on exactly ONE long-lived instance (e.g. the http
+    // service) if you want that instance to recover genuinely-orphaned jobs on
+    // its own restart. Ignored for per-process backends (sqlite/memory), which
+    // are never shared and always sweep. Superseded by the durable lease design.
+    ownsOrphanRecovery: z.boolean().default(false),
   })
   .strict();
 
@@ -122,6 +131,12 @@ export interface PersistenceConfig {
   retentionDays: number;
   dedupWindowMs: number;
   acknowledgeEphemeral: boolean;
+  /**
+   * Issue #139 (interim gate): whether THIS instance is the designated owner of
+   * the blanket startup orphan sweep on a shared (postgres) store. Default false.
+   * Irrelevant for per-process backends (sqlite/memory). See PersistenceSchema.
+   */
+  ownsOrphanRecovery: boolean;
   /** True iff async-job tools should be registered on the MCP server. */
   asyncJobsEnabled: boolean;
   /** Audit trail: which inputs (file, env vars) contributed to the resolved config. */
@@ -342,6 +357,7 @@ export function loadPersistenceConfig(logger: Logger = noopLogger): PersistenceC
     retentionDays: parsed.retentionDays,
     dedupWindowMs: parsed.dedupWindowMs,
     acknowledgeEphemeral: parsed.acknowledgeEphemeral,
+    ownsOrphanRecovery: parsed.ownsOrphanRecovery,
     asyncJobsEnabled,
     sources,
   };

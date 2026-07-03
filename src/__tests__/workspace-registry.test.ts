@@ -69,6 +69,7 @@ function mkPersistence(): PersistenceConfig {
     retentionDays: 30,
     dedupWindowMs: 0,
     acknowledgeEphemeral: true,
+    ownsOrphanRecovery: false,
     asyncJobsEnabled: true,
     sources: { configFile: null, envOverrides: [] },
   };
