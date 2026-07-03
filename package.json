@@ -58,6 +58,7 @@
     ".agents/skills/session-workflow/SKILL.md",
     ".agents/skills/secure-orchestration/SKILL.md",
     ".agents/skills/implement-review-fix/SKILL.md",
+    ".agents/skills/retrospective-walk/SKILL.md",
     ".agents/skills/public-demo-session/SKILL.md"
   ],
   "scripts": {
