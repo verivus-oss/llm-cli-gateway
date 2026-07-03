@@ -25,7 +25,9 @@ placeholders or generated local snippets.
   URLs from `print-client-config` or the setup UI.
 - Claude web and Grok custom connectors use the public HTTPS MCP URL and bearer
   auth configured inside the provider UI.
-- Mistral Vibe is outbound-only; do not configure it as an inbound MCP client.
+- Mistral Vibe, Devin, and Cursor have inbound MCP paths, but each has
+  provider-specific account or local-environment constraints. Keep inbound MCP
+  setup separate from the gateway's outbound validation provider setup.
 
 ## Generic Local Stdio
 
@@ -183,6 +185,50 @@ Authentication: Bearer token configured in Grok connector settings
 ```
 
 Do not configure Grok web with localhost, LAN-only, or HTTP-only URLs.
+
+## Mistral Vibe
+
+Use Vibe's current MCP configuration command or generated config from
+`llm-cli-gateway print-client-config`. Keep bearer tokens local and prefer
+environment-variable-backed snippets when the client supports them.
+
+## Devin Custom MCP
+
+Use only when the account has permission to add custom MCP servers. For a
+gateway running on the user's machine, prefer a public HTTPS HTTP endpoint over
+stdio; stdio inside Devin's managed environment is not the user's local shell.
+
+```text
+Server name: llm-cli-gateway
+Transport: HTTP
+URL: <public-https-url>/mcp
+Authorization header: Bearer <token configured in Devin UI>
+```
+
+Do not paste the bearer token into chat. Configure it only in Devin's MCP
+server settings or through generated local setup output.
+
+## Cursor IDE Or Cursor CLI
+
+Use Cursor's MCP settings or CLI MCP command with either local stdio or local
+HTTP. For HTTP, use the same bearer-header shape as the generic local HTTP
+sample.
+
+```json
+{
+  "mcpServers": {
+    "llm-cli-gateway": {
+      "url": "http://127.0.0.1:3333/mcp",
+      "headers": {
+        "Authorization": "Bearer <token-from-local-secret-store>"
+      }
+    }
+  }
+}
+```
+
+For outbound validation, install and authenticate `cursor-agent`; that is
+separate from configuring Cursor as an MCP client.
 
 ## Verification
 

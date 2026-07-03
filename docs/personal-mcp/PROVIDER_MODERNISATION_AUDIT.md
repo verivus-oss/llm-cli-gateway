@@ -2,14 +2,16 @@
 
 Layer 10 of the cross-LLM validation MVP DAG. This document records the
 rationale behind adding **Mistral Vibe** as the fifth supported provider
-alongside Claude Code, Codex, Gemini, and Grok.
+alongside Claude Code, Codex, Gemini, and Grok. Later provider additions
+(`devin`, `cursor`, and configured HTTP API providers) extend the matrix but
+do not change the original reason Mistral was added.
 
 It is intentionally short: deeper protocol-level work (JSON parity, approval
 parity, per-provider HIGH-impact features) belongs in U23–U27.
 
 ## 1. Five-vendor consensus rationale
 
-The gateway claims to be a *multi-LLM orchestration layer*. Limiting that to
+The gateway claims to be a _multi-LLM orchestration layer_. Limiting that to
 four upstream providers leaves the consensus and red-team tools (`validate_with_models`,
 `consensus_check`, `red_team_review`) systematically blind to any failure mode
 that only the fifth vendor catches.
@@ -21,7 +23,8 @@ Mistral was chosen as the fifth vendor because:
    on PyPI).
 2. Its strengths (open-weights deployment, EU data residency, deterministic
    sampling) are uncorrelated with the four incumbents — so consensus across
-   the full five is a stronger signal than across any four.
+   the original five-provider baseline is a stronger signal than across any
+   four.
 3. Vibe exposes a non-interactive `-p PROMPT` surface that mirrors Grok and
    Claude closely, so the orchestration shape stays uniform.
 
@@ -70,7 +73,7 @@ load-bearing gateway integration point.
 ### 2.3 `--agent <mode>` enum (no `--always-approve`)
 
 - **Upstream**: Vibe's agent mode is selected by `--agent
-  default|plan|accept-edits|auto-approve|chat|explore|lean`. There is no
+default|plan|accept-edits|auto-approve|chat|explore|lean`. There is no
   Grok-style `--always-approve` boolean.
 - **Gateway impact**: `permissionMode` is a typed enum in `mistral_request` /
   `mistral_request_async`. See `MISTRAL_AGENT_MODES` and `prepareMistralRequest`
@@ -93,7 +96,7 @@ load-bearing gateway integration point.
 
 - **Upstream**: there is no `vibe update` command. Vibe ships as the
   `vibe-cli` PyPI package, and is distributed in the wild as `pip install
-  vibe-cli`, `uv tool install vibe-cli`, or `brew install mistral-vibe`.
+vibe-cli`, `uv tool install vibe-cli`, or `brew install mistral-vibe`.
 - **Gateway impact**: `buildCliUpgradePlan("mistral", target)` calls
   `detectMistralInstallMethod` (pip → uv → brew probe) and returns a plan
   that targets the matching package manager. If none is detected, the
@@ -102,24 +105,24 @@ load-bearing gateway integration point.
 
 ## 3. Integration points (file:line evidence)
 
-| Concern | File | Anchor |
-| --- | --- | --- |
-| CLI_TYPES enum | `src/session-manager.ts` | `CLI_TYPES` const includes `"mistral"` |
-| Tool registration | `src/index.ts` | `server.tool("mistral_request", …)` and `mistral_request_async` |
-| Handlers | `src/index.ts` | `handleMistralRequest`, `handleMistralRequestAsync` |
-| Argv/env builder | `src/request-helpers.ts` | `prepareMistralRequest`, `resolveMistralSessionArgs` |
-| Model registry | `src/model-registry.ts` | `FALLBACK_INFO.mistral`, `applyMistralOverrides` |
-| Spawn command rewrite | `src/async-job-manager.ts` | `command = cli === "mistral" ? "vibe" : cli` |
-| Provider status probe | `src/provider-status.ts` | `PROVIDER_COMMANDS`, `mistralCredentialStoreStatus` |
-| Login guidance | `src/provider-login-guidance.ts` | `GUIDANCE.mistral` |
-| CLI upgrade dispatch | `src/cli-updater.ts` | `detectMistralInstallMethod`, `buildMistralUpgradePlan` |
-| Doctor probe | `src/doctor.ts` | `checkVibeSessionLogging`, `parseVibeSessionLoggingEnabled` |
-| MCP resources | `src/resources.ts`, `src/index.ts` | `sessions://mistral`, `models://mistral` |
-| Validation routing | `src/validation-orchestrator.ts` | `buildProviderArgs` Mistral branch |
-| Approval type union | `src/approval-manager.ts` | `ApprovalCli` includes `"mistral"` |
-| Flight recorder type union | `src/flight-recorder.ts` | `FlightLogStart.cli` |
-| Async job manager type union | `src/async-job-manager.ts` | `LlmCli` |
-| Doctor schema | `setup/status.schema.json` | `providers.required` includes `"mistral"`, `client_config.vibe_session_logging` |
+| Concern                      | File                               | Anchor                                                                          |
+| ---------------------------- | ---------------------------------- | ------------------------------------------------------------------------------- |
+| CLI_TYPES enum               | `src/session-manager.ts`           | `CLI_TYPES` const includes `"mistral"`                                          |
+| Tool registration            | `src/index.ts`                     | `server.tool("mistral_request", …)` and `mistral_request_async`                 |
+| Handlers                     | `src/index.ts`                     | `handleMistralRequest`, `handleMistralRequestAsync`                             |
+| Argv/env builder             | `src/request-helpers.ts`           | `prepareMistralRequest`, `resolveMistralSessionArgs`                            |
+| Model registry               | `src/model-registry.ts`            | `FALLBACK_INFO.mistral`, `applyMistralOverrides`                                |
+| Spawn command rewrite        | `src/async-job-manager.ts`         | `command = cli === "mistral" ? "vibe" : cli`                                    |
+| Provider status probe        | `src/provider-status.ts`           | `PROVIDER_COMMANDS`, `mistralCredentialStoreStatus`                             |
+| Login guidance               | `src/provider-login-guidance.ts`   | `GUIDANCE.mistral`                                                              |
+| CLI upgrade dispatch         | `src/cli-updater.ts`               | `detectMistralInstallMethod`, `buildMistralUpgradePlan`                         |
+| Doctor probe                 | `src/doctor.ts`                    | `checkVibeSessionLogging`, `parseVibeSessionLoggingEnabled`                     |
+| MCP resources                | `src/resources.ts`, `src/index.ts` | `sessions://mistral`, `models://mistral`                                        |
+| Validation routing           | `src/validation-orchestrator.ts`   | `buildProviderArgs` Mistral branch                                              |
+| Approval type union          | `src/approval-manager.ts`          | `ApprovalCli` includes `"mistral"`                                              |
+| Flight recorder type union   | `src/flight-recorder.ts`           | `FlightLogStart.cli`                                                            |
+| Async job manager type union | `src/async-job-manager.ts`         | `LlmCli`                                                                        |
+| Doctor schema                | `setup/status.schema.json`         | `providers.required` includes `"mistral"`, `client_config.vibe_session_logging` |
 
 ## 4. Documented assumptions (where Vibe upstream behaviour is uncertain)
 
@@ -138,8 +141,8 @@ Vibe CLI may require revision.
    existing `toml` dep elsewhere — but doctor stays dependency-light here.
 4. **Credential store paths** for the auto-authenticated heuristic:
    `~/.vibe/credentials.json`, `~/.vibe/auth.json`, `~/.config/vibe/credentials.json`.
-5. **CLI binary name**: `vibe`. The gateway uses `mistral` as the *provider
-   key* and spawns `vibe` via `PROVIDER_COMMANDS` and the async-job-manager
+5. **CLI binary name**: `vibe`. The gateway uses `mistral` as the _provider
+   key_ and spawns `vibe` via `PROVIDER_COMMANDS` and the async-job-manager
    rewrite.
 6. **Output usage/cost**: Vibe does not surface token/cost data in stdout
    JSON in any documented form, so `extractUsageAndCost` returns `null` for

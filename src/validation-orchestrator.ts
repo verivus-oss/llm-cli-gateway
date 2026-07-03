@@ -44,11 +44,12 @@ export interface ValidationOrchestratorDeps {
    */
   apiProviders?: ApiProviderRuntime[];
   /**
-   * Cross-LLM validation receipts (Phase 0): when present (durable sqlite backend
-   * with an attached store), `startValidationRun` persists a `validation_runs`
-   * row at kickoff and `startJudgeSynthesis` links the judge job back into it.
-   * Absent under non-durable backends, where no run row is ever written, so the
-   * caller still gets a `validationId` but no durable, retrievable run.
+   * Cross-LLM validation receipts (Phase 0): when present (attached store with
+   * validation-run capability), `startValidationRun` persists a
+   * `validation_runs` row at kickoff and `startJudgeSynthesis` links the judge
+   * job back into it. Absent under non-durable backends, where no run row is ever
+   * written, so the caller still gets a `validationId` but no durable,
+   * retrievable run.
    */
   validationRunStore?: ValidationRunStore | null;
 }

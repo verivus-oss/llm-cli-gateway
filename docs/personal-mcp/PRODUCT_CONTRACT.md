@@ -13,7 +13,7 @@ Primary user workflow:
 3. Ask any client for cross-LLM validation.
 4. The gateway fans out to configured outbound model providers and returns a validation report in the initiating client.
 
-Users do not need every provider UI connected for validation to work. Provider UIs connect to the gateway; the gateway performs cross-model requests through the user's configured provider runtimes or APIs.
+Users do not need every provider UI connected for validation to work. Provider UIs connect to the gateway where that product has a verified inbound MCP path; the gateway performs cross-model requests through the user's configured provider runtimes or APIs.
 
 ## Non-Goals
 
@@ -25,7 +25,7 @@ The MVP is not:
 - A proprietary replacement chat UI.
 - A claim that every provider web product supports inbound custom MCP.
 
-Hosted multi-tenant credential custody is explicitly rejected. Provider credentials must stay in user-owned storage, such as local CLI auth stores, local config, or a user-owned deployment volume.
+Hosted multi-tenant credential custody is explicitly rejected. Provider credentials must stay in user-owned storage, such as local CLI auth stores, environment variables, local config, or a user-owned deployment volume.
 
 ## Security Posture
 
@@ -51,17 +51,21 @@ The same vendor can appear in both roles, but support must be verified per role.
 
 ## Target Support Matrix
 
-| Target | Role in MVP | Connection path | minimum_mvp | support_status | Setup artifact |
-| --- | --- | --- | --- | --- | --- |
-| ChatGPT | Inbound MCP client | Remote MCP over HTTPS | true | verified_chatgpt_web_custom_mcp_with_plan_limits | `setup/providers/chatgpt.md` |
-| Claude web | Inbound MCP client | Remote MCP over HTTPS | true | verified_claude_web_remote_mcp_beta | `setup/providers/claude-web.md` |
-| Claude Desktop | Inbound MCP client and possible local assistant | Remote MCP or stdio | true | verified_claude_desktop_remote_mcp_beta_or_local_stdio | `setup/providers/claude-desktop.md` |
-| Codex | Inbound CLI/IDE client and outbound validation provider | Streamable HTTP or stdio inbound; Codex CLI outbound | true | verified_codex_cli_or_ide_mcp | `setup/providers/codex.md` |
-| Gemini CLI | Inbound CLI client and outbound validation provider | Streamable HTTP or stdio inbound; Gemini CLI outbound | true | verified_gemini_cli_mcp | `setup/providers/gemini-cli.md` |
-| Gemini web | Installer assistant only until inbound support is proven | Unknown or enterprise-only inbound MCP | false | deferred_until_confirmed | `setup/providers/gemini-web-status.md` |
-| Grok | Inbound MCP client and outbound validation provider | Remote MCP over HTTPS or provider CLI/API outbound | false | verified_grok_custom_mcp_public_url_and_outbound_provider | `setup/providers/grok.md` |
+| Target                        | Role in MVP                                                 | Connection path                                                                                        | minimum_mvp | support_status                                            | Setup artifact                           |
+| ----------------------------- | ----------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ | ----------- | --------------------------------------------------------- | ---------------------------------------- |
+| ChatGPT                       | Inbound MCP client                                          | Remote MCP over HTTPS                                                                                  | true        | verified_chatgpt_web_custom_mcp_with_plan_limits          | `setup/providers/chatgpt.md`             |
+| Claude web                    | Inbound MCP client                                          | Remote MCP over HTTPS                                                                                  | true        | verified_claude_web_remote_mcp_beta                       | `setup/providers/claude-web.md`          |
+| Claude Desktop                | Inbound MCP client and possible local assistant             | Remote MCP or stdio                                                                                    | true        | verified_claude_desktop_remote_mcp_beta_or_local_stdio    | `setup/providers/claude-desktop.md`      |
+| Codex                         | Inbound CLI/IDE client and outbound validation provider     | Streamable HTTP or stdio inbound; Codex CLI outbound                                                   | true        | verified_codex_cli_or_ide_mcp                             | `setup/providers/codex.md`               |
+| Gemini CLI                    | Inbound CLI client and outbound validation provider         | Streamable HTTP or stdio inbound; Gemini CLI outbound                                                  | true        | verified_gemini_cli_mcp                                   | `setup/providers/gemini-cli.md`          |
+| Gemini web                    | Installer assistant only until inbound support is proven    | Unknown or enterprise-only inbound MCP                                                                 | false       | deferred_until_confirmed                                  | `setup/providers/gemini-web-status.md`   |
+| Grok                          | Inbound MCP client and outbound validation provider         | Remote MCP over HTTPS or provider CLI/API outbound                                                     | false       | verified_grok_custom_mcp_public_url_and_outbound_provider | `setup/providers/grok.md`                |
+| Mistral Vibe                  | Inbound CLI MCP client and outbound validation provider     | Vibe MCP config inbound; Vibe CLI outbound                                                             | false       | verified_vibe_cli_mcp_and_outbound_provider               | `setup/providers/mistral-vibe.md`        |
+| Devin                         | Inbound MCP client and outbound validation provider         | Devin custom MCP server over HTTP/SSE/stdio where account permissions allow; Devin CLI outbound        | false       | verified_devin_custom_mcp_and_outbound_provider           | `setup/providers/devin.md`               |
+| Cursor                        | Inbound IDE/CLI MCP client and outbound validation provider | Cursor MCP config / Cursor CLI MCP inbound; Cursor Agent CLI outbound                                  | false       | verified_cursor_mcp_and_outbound_provider                 | `setup/providers/cursor.md`              |
+| Configured HTTP API providers | Outbound validation providers only                          | OpenAI-compatible, Anthropic Messages, or xAI Responses adapters configured by env-var-backed API keys | false       | verified_gateway_api_provider_config                      | `site/install.md#api-providers-optional` |
 
-Provider-support verification is recorded in `docs/personal-mcp/PROVIDER_SUPPORT_MATRIX.md`. Minimum-MVP targets are still gated by endpoint exposure and generated setup docs before user-facing setup guides may claim support. Gemini web remains unknown or deferred unless current provider support is confirmed.
+Provider-support verification is recorded in `docs/personal-mcp/PROVIDER_SUPPORT_MATRIX.md`. Minimum-MVP targets are still gated by endpoint exposure and generated setup docs before user-facing setup guides may claim support. Gemini web remains unknown or deferred unless current provider support is confirmed. Mistral Vibe, Devin, Cursor, and configured HTTP API providers are supported outbound validation providers; only their explicitly verified inbound paths should be documented as MCP clients.
 
 ## User-Facing Validation Workflows
 

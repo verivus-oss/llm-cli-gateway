@@ -1,7 +1,9 @@
-import { chmodSync } from "fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync } from "fs";
 import os from "os";
 import path from "path";
 import { createHash } from "crypto";
+import { Worker } from "worker_threads";
+import { fileURLToPath } from "url";
 import { openDatabase } from "./sqlite-driver.js";
 import type { GatewayDatabase, GatewayStatement } from "./sqlite-driver.js";
 import type { Logger } from "./logger.js";
@@ -265,11 +267,11 @@ export interface ValidationReceiptRecord {
 }
 
 /**
- * The validation-run + receipt persistence surface. Only an actually-durable,
- * implemented backend provides it (today `SqliteJobStore`). `MemoryJobStore`
- * (process-lifetime) and `PostgresJobStore` (unimplemented stub) deliberately do
- * NOT implement it, so under those backends no run/receipt row is ever written:
- * the durability gate is enforced by the absence of this capability, not a flag.
+ * The validation-run + receipt persistence surface. Only actually-durable
+ * backends provide it (`SqliteJobStore` and `PostgresJobStore`). `MemoryJobStore`
+ * deliberately does NOT implement it, so under the ephemeral backend no
+ * run/receipt row is ever written: the durability gate is enforced by the
+ * absence of this capability, not a flag.
  */
 export interface ValidationRunStore {
   /** Insert the run row once at kickoff. Idempotent on validation_id (INSERT OR IGNORE). */
@@ -941,45 +943,215 @@ export class MemoryJobStore implements JobStore {
 }
 
 /**
- * Stub for the planned Postgres backend. The interface and config surface ship
- * now so multi-instance deployments can plan around them, but the
- * implementation is intentionally not yet provided — calling code must select
- * `sqlite` or `memory` until a real impl lands.
+ * PostgreSQL-backed job store. The gateway's job-store interface is synchronous
+ * because SQLite is synchronous; Postgres work therefore runs in an internal
+ * worker thread and each call waits for that worker's result. The blocking
+ * section is scoped to the store operation only; provider execution remains
+ * managed by AsyncJobManager's limiter.
  */
-export class PostgresJobStore implements JobStore {
-  constructor(_dsn: string, _logger: Logger = noopLogger) {
-    throw new Error(
-      "PostgresJobStore is not yet implemented. Use backend = 'sqlite' (single-instance) or " +
-        "backend = 'memory' (ephemeral) until the Postgres backend ships."
-    );
+export class PostgresJobStore implements JobStore, ValidationRunStore {
+  private worker: Worker;
+  private tmpDir: string;
+  private nextRequestId = 0;
+  private closed = false;
+
+  constructor(
+    dsn: string,
+    private logger: Logger = noopLogger,
+    options: { retentionMs?: number; dedupWindowMs?: number } = {}
+  ) {
+    if (!dsn) {
+      throw new Error("PostgresJobStore requires a non-empty DSN");
+    }
+    this.tmpDir = mkdtempSync(path.join(os.tmpdir(), "llm-gateway-pg-job-store-"));
+    this.worker = new Worker(resolvePostgresWorkerUrl(), {
+      execArgv: [],
+      workerData: {
+        dsn,
+        retentionMs: options.retentionMs ?? resolveJobRetentionMs(),
+        dedupWindowMs: options.dedupWindowMs ?? resolveDedupWindowMs(),
+        farFutureIso: FAR_FUTURE_ISO,
+        connectionTimeoutMillis: 5000,
+      },
+    });
+    try {
+      this.syncCall("init");
+    } catch (err) {
+      this.closed = true;
+      void this.worker.terminate();
+      rmSync(this.tmpDir, { recursive: true, force: true });
+      throw err;
+    }
   }
-  recordStart(): void {
-    throw new Error("not implemented");
+
+  private syncCall<T>(method: string, ...args: unknown[]): T {
+    if (this.closed && method !== "close") {
+      throw new Error("PostgresJobStore is closed");
+    }
+    const shared = new SharedArrayBuffer(4);
+    const state = new Int32Array(shared);
+    const resultPath = path.join(this.tmpDir, `result-${process.pid}-${++this.nextRequestId}.json`);
+    this.worker.postMessage({ method, args, resultPath, shared });
+    const wait = Atomics.wait(state, 0, 0, method === "init" ? 10_000 : 30_000);
+    if (wait !== "ok" && wait !== "not-equal") {
+      throw new Error(`PostgresJobStore ${method} wait failed: ${wait}`);
+    }
+    if (Atomics.load(state, 0) === 2) {
+      throw new Error(`PostgresJobStore ${method} worker could not write its result`);
+    }
+    let payload: { ok: true; value: T } | { ok: false; error: { message: string; stack?: string } };
+    try {
+      payload = JSON.parse(readFileSync(resultPath, "utf8"));
+    } finally {
+      rmSync(resultPath, { force: true });
+    }
+    if (!payload.ok) {
+      const err = new Error(payload.error.message);
+      if (payload.error.stack) err.stack = payload.error.stack;
+      throw err;
+    }
+    return payload.value;
   }
-  recordOutput(): void {
-    throw new Error("not implemented");
+
+  recordStart(input: {
+    id: string;
+    correlationId: string;
+    requestKey: string;
+    cli: string;
+    args: string[];
+    outputFormat?: string;
+    startedAt: string;
+    pid: number | null;
+    ownerPrincipal?: string | null;
+    transport?: JobTransport;
+    payloadJson?: string | null;
+  }): void {
+    this.syncCall("recordStart", input);
   }
-  recordComplete(): void {
-    throw new Error("not implemented");
+
+  recordOutput(id: string, stdout: string, stderr: string, outputTruncated: boolean): void {
+    this.syncCall("recordOutput", id, stdout, stderr, outputTruncated);
   }
-  getById(): JobRecord | null {
-    throw new Error("not implemented");
+
+  recordComplete(input: {
+    id: string;
+    status: Exclude<JobStoreStatus, "running">;
+    exitCode: number | null;
+    stdout: string;
+    stderr: string;
+    outputTruncated: boolean;
+    error: string | null;
+    finishedAt: string;
+    httpStatus?: number | null;
+  }): void {
+    this.syncCall("recordComplete", input);
   }
-  findByRequestKey(): JobRecord | null {
-    throw new Error("not implemented");
+
+  getById(id: string): JobRecord | null {
+    const row = this.syncCall("getById", id);
+    return row ? rowToRecord(row) : null;
   }
+
+  findByRequestKey(requestKey: string): JobRecord | null {
+    const row = this.syncCall("findByRequestKey", requestKey);
+    return row ? rowToRecord(row) : null;
+  }
+
   markOrphanedOnStartup(): {
     count: number;
     orphaned: Array<OrphanedJobSnapshot>;
   } {
-    throw new Error("not implemented");
+    const result = this.syncCall<{
+      count: number;
+      orphaned: Array<{
+        id: string;
+        correlation_id: string;
+        started_at: string;
+        stdout: string | null;
+        stderr: string | null;
+        exit_code: number | null;
+        transport: string | null;
+        http_status: number | null;
+      }>;
+    }>("markOrphanedOnStartup");
+    return {
+      count: result.count,
+      orphaned: result.orphaned.map(row => ({
+        id: row.id,
+        correlationId: row.correlation_id,
+        startedAt: row.started_at,
+        stdout: row.stdout ?? "",
+        stderr: row.stderr ?? "",
+        exitCode: row.exit_code,
+        transport: (row.transport as JobTransport) ?? "process",
+        httpStatus: row.http_status ?? null,
+      })),
+    };
   }
+
   evictExpired(): number {
-    throw new Error("not implemented");
+    return this.syncCall("evictExpired");
   }
+
+  recordValidationRun(run: ValidationRunRecord): void {
+    this.syncCall("recordValidationRun", run);
+  }
+
+  getValidationRun(validationId: string): ValidationRunRecord | null {
+    const row = this.syncCall("getValidationRun", validationId);
+    return row ? rowToValidationRunRecord(row) : null;
+  }
+
+  setValidationJudgeLink(validationId: string, judgeLink: ValidationRunLink): void {
+    this.syncCall("setValidationJudgeLink", validationId, judgeLink);
+  }
+
+  setValidationRunStatus(validationId: string, status: ValidationRunRecord["status"]): void {
+    this.syncCall("setValidationRunStatus", validationId, status);
+  }
+
+  getValidationRunIdByJobId(jobId: string): string | null {
+    return this.syncCall("getValidationRunIdByJobId", jobId);
+  }
+
+  recordValidationReceipt(receipt: ValidationReceiptRecord): void {
+    this.syncCall("recordValidationReceipt", receipt);
+  }
+
+  getValidationReceipt(validationId: string): ValidationReceiptRecord | null {
+    const row = this.syncCall("getValidationReceipt", validationId);
+    return row ? rowToValidationReceiptRecord(row) : null;
+  }
+
   close(): void {
-    /* no-op */
+    if (this.closed) return;
+    try {
+      this.syncCall("close");
+    } catch (err) {
+      this.logger.error("PostgresJobStore close failed", err);
+    } finally {
+      this.closed = true;
+      void this.worker.terminate();
+      rmSync(this.tmpDir, { recursive: true, force: true });
+    }
   }
+}
+
+function resolvePostgresWorkerUrl(): URL {
+  const sibling = new URL("./postgres-job-store-worker.js", import.meta.url);
+  if (existsSync(fileURLToPath(sibling))) return sibling;
+
+  // Vitest executes TypeScript source directly, while Node workers need a real
+  // JavaScript module. `scripts/test-pg.sh` builds first, so source-mode tests
+  // load the emitted worker from dist/.
+  if (import.meta.url.endsWith("/src/job-store.ts")) {
+    const built = new URL("../dist/postgres-job-store-worker.js", import.meta.url);
+    if (existsSync(fileURLToPath(built))) return built;
+  }
+
+  throw new Error(
+    "PostgresJobStore worker module is missing. Run `npm run build` before using backend = 'postgres'."
+  );
 }
 
 /**
@@ -1001,8 +1173,7 @@ export function createJobStore(
     case "memory":
       return new MemoryJobStore(opts);
     case "postgres":
-      // Throws today; design surface is honest so callers can react.
-      return new PostgresJobStore(config.dsn ?? "", logger);
+      return new PostgresJobStore(config.dsn ?? "", logger, opts);
     case "sqlite":
     default:
       if (!config.path) {

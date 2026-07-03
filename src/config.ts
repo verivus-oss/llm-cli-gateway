@@ -92,7 +92,7 @@ export function loadConfig(): Config {
 //
 // Backends:
 //   - "sqlite":   durable on disk (default).
-//   - "postgres": durable in Postgres (interface only — impl not yet shipped).
+//   - "postgres": durable in Postgres.
 //   - "memory":   in-process MemoryJobStore. Process-lifetime durability only.
 //                 Requires acknowledgeEphemeral=true to register async tools.
 //   - "none":     no store. Async tools are NOT registered.

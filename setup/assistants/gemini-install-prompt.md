@@ -20,7 +20,7 @@ gemini mcp list
 
 Do not ask for Google account passwords, OAuth files, API keys, or bearer token values.
 
-Gemini CLI can also call any of the five outbound validation providers the gateway brokers: Claude Code, Codex CLI, Gemini CLI, Grok CLI/API, and Mistral Vibe CLI. Mistral Vibe is outbound-only — do not configure it as an inbound client. Check `providers.<name>.cli_available` in doctor JSON for each provider the user wants enabled.
+Gemini CLI can also call registered outbound validation providers including Claude Code, Codex CLI, Gemini/Antigravity, Grok CLI/API, Mistral Vibe, Cognition Devin, Cursor Agent, and configured HTTP API providers. This prompt is only for Gemini CLI inbound setup; if the user also wants Mistral Vibe, Devin, or Cursor as inbound MCP clients, switch to the matching `setup/providers/*.md` page. Generic API providers are outbound-only. Check doctor JSON for each provider the user wants enabled.
 
 Note (v1.6.0): `doctor --json` now always emits a top-level `cache_awareness` block. All `[cache_awareness]` flags default off, so a zeroed block with an empty `enabled_features` list is the expected default. Ignore it for install purposes unless the user explicitly asks to enable cache-awareness features.
 

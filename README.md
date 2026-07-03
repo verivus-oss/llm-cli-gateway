@@ -9,9 +9,11 @@
 > _"Without consultation, plans are frustrated, but with many counselors they succeed."_
 > — Proverbs 15:22 (LSB)
 
-A Model Context Protocol (MCP) gateway for running Claude Code, Codex, Gemini, Grok, Mistral (Vibe), Devin, and Cursor Agent CLIs from one MCP endpoint, with durable async jobs, session continuity, cache-aware prompting, observability, and personal-appliance setup tooling.
+**Cross-model review without rebuilding your agent stack.**
 
-**Why developers try it:** one local MCP endpoint for cross-LLM validation, multi-agent coding workflows, and repeatable assistant-led setup across registered provider CLIs.
+`llm-cli-gateway` gives any MCP client one local-first gateway for Claude Code, Codex, Gemini/Antigravity, Grok Build, Mistral Vibe, Cognition Devin, Cursor Agent, and configured HTTP API providers, while preserving native CLI sessions, local credentials, durable async jobs, validation receipts, and review workflows.
+
+**Why developers try it:** any connected client can ask other models for a second opinion, run implementation/review loops, collect durable job results, and route API-token LLMs without turning local coding agents into a generic chat proxy.
 
 **Current signals:** CI and security workflows pass on `main`, OpenSSF Scorecard is published, OpenSSF Best Practices is passing, releases use Sigstore signing, and the package is MIT licensed.
 
@@ -38,7 +40,7 @@ Or use directly with `npx` from an MCP client:
 
 `llm-cli-gateway` is a single-user MCP gateway for cross-LLM validation and multi-agent coding workflows. It is more than a thin CLI wrapper:
 
-- Runs registered provider CLIs through consistent sync and async MCP tools.
+- Runs registered provider CLIs and configured HTTP API providers through consistent sync and async MCP tools.
 - Persists long-running jobs, supports restart-safe result collection, deduplication, cancellation, and sync-to-async deferral.
 - Tracks sessions, real CLI resume paths, structured response metadata, and cache telemetry.
 - Supports cache-aware `promptParts`, including explicit Claude `cache_control` when opted in.
@@ -51,7 +53,7 @@ Or use directly with `npx` from an MCP client:
 
 The repo ships agent-ready workflow skills under [`.agents/skills`](.agents/skills) for async orchestration, session continuity, multi-LLM review, implement-review-fix loops, and secure approval-gated dispatch. Six caller-facing skills are bundled in the published npm package: `async-job-orchestration`, `multi-llm-review`, `session-workflow`, `secure-orchestration`, `implement-review-fix`, and `public-demo-session`. Machine-readable DAG-TOML plans live under [`docs/plans`](docs/plans) and [`setup/install-plan.dag.toml`](setup/install-plan.dag.toml) for workflows that need deterministic sequencing and verification gates.
 
-The next documentation focus is provider-specific skill and DAG-TOML pairs for each outbound CLI: Claude, Codex, Gemini, Grok, and Mistral Vibe. The implementation plan is tracked in [`docs/plans/provider-workflow-assets.dag.toml`](docs/plans/provider-workflow-assets.dag.toml), with each provider asset expected to cover install/login checks, session behavior, approval modes, cache/telemetry surfaces, failure modes, and a smoke-test gate.
+The next documentation focus is provider-specific skill and DAG-TOML pairs for each outbound CLI and API-provider family: Claude, Codex, Gemini/Antigravity, Grok, Mistral Vibe, Devin, Cursor Agent, OpenAI-compatible endpoints, Anthropic Messages, and xAI Responses. The implementation plan is tracked in [`docs/plans/provider-workflow-assets.dag.toml`](docs/plans/provider-workflow-assets.dag.toml), with each provider asset expected to cover install/login checks or token-env checks, session behavior, approval modes, cache/telemetry surfaces, failure modes, and a smoke-test gate.
 
 ## Trust & Supply Chain
 
@@ -61,7 +63,7 @@ The next documentation focus is provider-specific skill and DAG-TOML pairs for e
 - CI runs build, lint, format, tests, package checks, and npm audit.
 - Security CI runs actionlint, zizmor, shellcheck, typos, osv-scanner, gitleaks, and lychee.
 - GitHub release installer artifacts are checksummed and signed with Sigstore keyless signing.
-- npm releases use provenance through OIDC trusted publishing.
+- npm releases use a generated prod-only shrinkwrap and release security audit; the publish token is fetched at runtime from Azure Key Vault through GitHub OIDC to Entra.
 - The npm package intentionally ships a generated, prod-only `npm-shrinkwrap.json` so registry installs resolve the audited release tree. Release gates regenerate it from `package-lock.json`, compare for parity, and run a registry-fidelity consumer install before publishing.
 - Socket behavioural alerts are documented in [`socket.yml`](./socket.yml) and under "Security Considerations" below. `shellAccess` and `shrinkwrap` are reviewed package capabilities/configuration for this CLI appliance, not hidden install behaviour.
 
@@ -190,15 +192,15 @@ Every `*_request` and `*_request_async` tool except `devin_request` / `devin_req
 
 Per-CLI capability matrix (prefix discipline is automatic via `promptParts` for all providers except Devin and Cursor, which have no `promptParts` surface; explicit levers are provider-specific):
 
-| CLI     | Prefix discipline | Explicit lever(s) |
-| ------- | ----------------- | ----------------- |
+| CLI     | Prefix discipline | Explicit lever(s)                                                                                                                      |
+| ------- | ----------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
 | claude  | yes               | `promptParts.cacheControl` + `outputFormat: "stream-json"` (Anthropic `cache_control` breakpoints on stable blocks; `ttl="1h"` forced) |
-| codex   | yes               | none (OpenAI implicit) |
-| gemini  | yes               | none (implicit server-side) |
-| grok    | yes               | `compactionMode` / `compactionDetail` (context compaction: `summary|transcript|segments`; `segments` writes per-segment markdown) |
-| mistral | yes               | none (implicit) |
-| devin   | no                | plain `prompt` only |
-| cursor  | no                | plain `prompt` only |
+| codex   | yes               | none (OpenAI implicit)                                                                                                                 |
+| gemini  | yes               | none (implicit server-side)                                                                                                            |
+| grok    | yes               | `compactionMode` / `compactionDetail` (context compaction: `summary                                                                    | transcript | segments`; `segments` writes per-segment markdown) |
+| mistral | yes               | none (implicit)                                                                                                                        |
+| devin   | no                | plain `prompt` only                                                                                                                    |
+| cursor  | no                | plain `prompt` only                                                                                                                    |
 
 **Claude example (explicit cacheControl)**
 
@@ -208,10 +210,10 @@ claude_request({
     system: "You are a helpful code reviewer.",
     context: "<long stable file dump>",
     task: "Review the diff.",
-    cacheControl: { system: true, context: true }  // task is never marked
+    cacheControl: { system: true, context: true }, // task is never marked
   },
-  outputFormat: "stream-json"
-})
+  outputFormat: "stream-json",
+});
 ```
 
 Gateway emits the `stream-json` stdin path with `cache_control: {type:"ephemeral", ttl:"1h"}` on marked blocks only.
@@ -222,8 +224,8 @@ Gateway emits the `stream-json` stdin path with `cache_control: {type:"ephemeral
 grok_request({
   promptParts: { system: "...", context: "...", task: "..." },
   compactionMode: "segments",
-  compactionDetail: "balanced"
-})
+  compactionDetail: "balanced",
+});
 ```
 
 Emits `--compaction-mode segments --compaction-detail balanced`.
@@ -409,7 +411,7 @@ The personal-appliance surface exposes simplified validation tools for non-devel
 - `synthesize_validation`: run an explicit judge model after provider results have been collected.
 - `list_available_models`: list the models each provider CLI exposes through the simplified surface.
 - `job_status` and `job_result`: poll and collect validation job outputs.
-- `validation_receipt`: retrieve the immutable receipt of a terminal cross-LLM validation run by `validationId` (returns `minted | pending | expired_unminted | not_found`, own-or-not-found). `format: "markdown"` renders a human-readable report; `includeRawResponses` inlines provider answer text. Registered only under the durable persistence gate (`backend = "sqlite"` with an attached validation-run store).
+- `validation_receipt`: retrieve the immutable receipt of a terminal cross-LLM validation run by `validationId` (returns `minted | pending | expired_unminted | not_found`, own-or-not-found). `format: "markdown"` renders a human-readable report; `includeRawResponses` inlines provider answer text. Registered only when the attached job store provides the durable validation-run store capability (`sqlite` and `postgres`).
 
 The same receipt is also exposed as the `validation-receipt://{validationId}` MCP resource (same durable gate and own-or-not-found owner scoping).
 
@@ -668,7 +670,7 @@ The job-store backend is configured by `~/.llm-cli-gateway/config.toml` (overrid
 [persistence]
 backend = "sqlite"                          # "sqlite" | "memory" | "postgres" | "none"
 path = "~/.llm-cli-gateway/logs.db"         # for sqlite
-# dsn = "postgresql://user:pw@host/db"      # for postgres (interface only — impl not yet shipped)
+# dsn = "postgresql://user:pw@host/db"      # for postgres
 retentionDays = 30
 dedupWindowMs = 3600000
 acknowledgeEphemeral = false                # required to enable async tools with memory backend
@@ -677,8 +679,8 @@ acknowledgeEphemeral = false                # required to enable async tools wit
 Backends:
 
 - **`sqlite`** (default) — durable, file-backed. Safe for single-instance deployments.
+- **`postgres`** — durable PostgreSQL-backed async job, dedup, orphan recovery, HTTP job, and validation receipt storage. Use this for multi-instance or service deployments. Requires the optional peer dependency `pg` to be installed alongside the gateway.
 - **`memory`** — in-process Map. Lost on gateway exit. Requires `acknowledgeEphemeral = true` to be loaded. Suitable for tests and ephemeral CI gateways.
-- **`postgres`** — interface only, implementation not yet shipped. Selecting this backend throws at startup.
 - **`none`** — no store. **`*_request_async`, `llm_job_status`, `llm_job_result`, and `llm_job_cancel` are NOT registered on the gateway.** This is a structural invariant: agents that try to call async tools against a gateway with `backend = "none"` get a clean "tool not found" at connect time instead of silent in-memory loss after the 1-hour TTL. Use `llm_process_health` to inspect the resolved persistence state programmatically.
 
 Legacy environment variables (deprecated; emit a warning at startup):
@@ -1340,7 +1342,7 @@ The API key value is never emitted on any of these surfaces (only the env var na
 
 ### Security note
 
-The resolved API key is excluded from `payloadJson`, the dedup key, logs, and the flight recorder. However, the **request prompt is persisted in plaintext** in the async job store (the SQLite file at `[persistence].path`, default `~/.llm-cli-gateway/logs.db`) and is not covered by secret redaction. This mirrors the CLI tools, whose prompt is persisted in `argsJson` whenever it is passed as a command argument (a few CLI paths instead stream the prompt over stdin and so do not persist it). Treat the job store as sensitive at rest. See [Security Considerations](#security-considerations).
+The resolved API key is excluded from `payloadJson`, the dedup key, logs, and the flight recorder. However, the **request prompt is persisted in plaintext** in the async job store (SQLite at `[persistence].path`, default `~/.llm-cli-gateway/logs.db`, or Postgres rows under `backend = "postgres"`) and is not covered by secret redaction. This mirrors the CLI tools, whose prompt is persisted in `argsJson` whenever it is passed as a command argument (a few CLI paths instead stream the prompt over stdin and so do not persist it). Treat the job store as sensitive at rest. See [Security Considerations](#security-considerations).
 
 ## Session Management
 
@@ -1407,9 +1409,11 @@ await callTool("session_delete", {
   - **Gemini (Antigravity)** → `default` / prompted, i.e. **no** `--dangerously-skip-permissions` (the `agy` CLI has no accept-edits middle rung, so the safe default is prompted execution; without the opt-in, Gemini cannot auto-approve mutating tools under `mcp_managed`)
 
   Set to `1`/`true` to let the operator opt back in: this permits bypass requests through the approval gate **and** restores each provider's full auto-approve mode under `mcp_managed` (Claude `bypassPermissions`, Grok `--always-approve`, Mistral `--agent auto-approve`, Gemini `--dangerously-skip-permissions`). Sandboxed auto modes (e.g. codex `--sandbox workspace-write`) are unaffected.
+
   ```bash
   LLM_GATEWAY_APPROVAL_ALLOW_BYPASS=1 node dist/index.js
   ```
+
 - `LLM_GATEWAY_TRUSTED_PRINCIPAL_HEADER`: Name of an HTTP header carrying the authenticated user identity asserted by a **trusted front door** (any identity-aware reverse proxy / IdP). When set, the gateway adopts that header value as the request's ownership principal — but **only** for requests authenticated with the gateway's own static bearer token (i.e. the trusted upstream proxy), never from an arbitrary remote client. Off by default; IdP-agnostic. Lets a proxy-fronted multi-user deployment carry per-user identity into the gateway.
   ```bash
   LLM_GATEWAY_TRUSTED_PRINCIPAL_HEADER=x-gateway-principal node dist/index.js
@@ -1598,11 +1602,11 @@ The gateway supports concurrent requests across different CLIs. Each request spa
 
 - **Input Validation**: All prompts are validated (min 1 char, max 100k chars)
 - **API-provider keys**: For `[providers.<name>]` HTTP providers, the gateway reads the key from the named environment variable at request time only. The resolved key is excluded from the persisted `payloadJson`, the dedup key, logs, and the flight recorder, and is never surfaced on the discovery/diagnostic surfaces (which report only the env var name and a presence boolean). `base_url` userinfo is redacted on the diagnostic surfaces. See [API providers (HTTP)](#api-providers-http).
-- **Prompt persistence at rest**: Async job rows store the request **prompt in plaintext** (HTTP `payloadJson`, and CLI `argsJson` whenever the prompt is passed as a command argument rather than streamed over stdin); this is not covered by secret redaction. The SQLite job-store file (default `~/.llm-cli-gateway/logs.db`, configurable via `[persistence].path`) is `chmod`ed to `0o600` on non-Windows hosts; treat it as sensitive and scope/rotate it like any prompt log. Set `[persistence].backend = "none"` to disable the async job store entirely (the `*_request_async` / `llm_job_*` tools are then not registered).
+- **Prompt persistence at rest**: Async job rows store the request **prompt in plaintext** (HTTP `payloadJson`, and CLI `argsJson` whenever the prompt is passed as a command argument rather than streamed over stdin); this is not covered by secret redaction. The SQLite job-store file (default `~/.llm-cli-gateway/logs.db`, configurable via `[persistence].path`) is `chmod`ed to `0o600` on non-Windows hosts; the Postgres backend stores the same fields in database rows. Treat either backend as sensitive and scope/rotate it like any prompt log. Set `[persistence].backend = "none"` to disable the async job store entirely (the `*_request_async` / `llm_job_*` tools are then not registered).
 - **Command Execution**: Uses `spawn` with separate arguments (not shell execution)
 - **No Eval**: No dynamic code evaluation in our source (see "Socket alerts" below for the transitive `ajv` codegen case)
 - **Sandboxing**: Consider running in containers for production use
-- **Provenance**: Releases are published with [npm provenance](https://docs.npmjs.com/generating-provenance-statements) via OIDC trusted publishing from GitHub Actions
+- **npm publish control**: npm releases are gated by the generated prod-only shrinkwrap, release security audit, packed-consumer checks, and a publish token fetched at runtime from Azure Key Vault through GitHub OIDC to Entra
 - **Release signing**: GitHub release installer artifacts are signed with Sigstore keyless signing; verify `SHA256SUMS.sigstore.json` before trusting the checksum file
 
 ### Socket alerts — context for reviewers

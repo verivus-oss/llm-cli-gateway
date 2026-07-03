@@ -2,15 +2,17 @@
 set -euo pipefail
 
 COMPOSE_FILE="docker/test.compose.yml"
+CONTAINER_CLI="${CONTAINER_CLI:-docker}"
 PG_TEST_FILES=()
 
 cleanup() {
-  docker compose -f "${COMPOSE_FILE}" down || true
+  "${CONTAINER_CLI}" compose -f "${COMPOSE_FILE}" down || true
 }
 
 trap cleanup EXIT INT TERM
 
-docker compose -f "${COMPOSE_FILE}" up -d --wait --wait-timeout 120
+"${CONTAINER_CLI}" compose -f "${COMPOSE_FILE}" up -d --wait --wait-timeout 120
+npm run build
 if [ "$#" -gt 0 ]; then
   PG_TEST_FILES=("$@")
 else
@@ -21,4 +23,4 @@ else
   fi
 fi
 
-PG_TESTS=1 vitest run --no-file-parallelism "${PG_TEST_FILES[@]}"
+PG_TESTS=1 npx --no-install vitest run --no-file-parallelism "${PG_TEST_FILES[@]}"
