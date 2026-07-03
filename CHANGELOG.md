@@ -6,15 +6,41 @@ All notable changes to the llm-cli-gateway project.
 
 ### Fixed
 
-- **Interim gate for the shared-store startup orphan sweep (#139).** On
-  `backend = "postgres"` the blanket `markOrphanedOnStartup` sweep in the
-  `AsyncJobManager` constructor rewrote every `running` row to `orphaned`, so a
-  fresh instance (especially an ephemeral stdio spawn) transiently orphaned
-  other live instances' in-flight jobs (a `running` -> `orphaned` -> `completed`
-  flap a poller can trip on). New `[persistence].ownsOrphanRecovery` (default
-  `false`) gates the sweep: per-process backends (`sqlite`/`memory`) always
-  sweep as before; a `postgres` instance sweeps only when explicitly designated
-  the recovery owner. The durable per-job instance-lease fix follows.
+- **Durable instance-lease orphan recovery (#139).** The blanket
+  `markOrphanedOnStartup` sweep in the `AsyncJobManager` constructor rewrote
+  every `running` row to `orphaned`, so on a SHARED store (`backend =
+  "postgres"`) a fresh instance (especially an ephemeral stdio spawn)
+  transiently orphaned other live instances' in-flight jobs (a `running` ->
+  `orphaned` -> `completed` flap a poller can trip on). The sweep is now a
+  per-job fencing lease: each instance registers a lease and advances a
+  `jobs.lease_deadline` on every heartbeat, and the sweep orphans a
+  `queued`/`running` job only when its own `lease_deadline` has expired, never
+  because a different live instance started. Because heartbeat and sweep are
+  both `UPDATE`s on the same `jobs` rows, they serialize on the row lock
+  (Postgres READ COMMITTED) and are trivially serial under single-writer sqlite,
+  so no job whose owner heartbeated within the lease TTL is ever swept. A
+  genuinely stale-then-reviving owner self-heals to the correct terminal state
+  via the guarded `recordComplete` and a flight-recorder reconcile. The fix is
+  transport-aware (an extra `httpJobGrace` for no-pid http jobs, an advisory
+  never-vetoing `kill(pid,0)` for same-host process jobs), durable-admission is
+  fail-closed (a failed `recordStart`/`registerInstance` fails the request and
+  releases the limiter permit), and graceful shutdown drains in-flight terminal
+  writes before deregistering the lease. Additive schema (`jobs.owner_instance`,
+  `jobs.lease_deadline`, a `gateway_instances` table), auto-created on both
+  sqlite and postgres, no data migration.
+
+### Changed
+
+- **`[persistence].ownsOrphanRecovery` is deprecated (#139).** The interim gate
+  (PR #140) that let one designated `postgres` instance own the blanket startup
+  sweep is superseded by the durable lease above, which is safe to run from
+  every instance. The flag is still parsed (so existing configs do not error)
+  and now emits a one-time deprecation warning; it no longer changes behaviour
+  and will be removed in a later release. New `[persistence]` knobs tune the
+  lease: `instanceHeartbeatMs` (15000), `instanceLeaseTtlMs` (90000),
+  `httpJobGraceMs` (300000), `orphanSweepIntervalMs` (30000), `instanceGcMs`
+  (3600000), validated so `instanceLeaseTtlMs >= 2 * instanceHeartbeatMs` and
+  `httpJobGraceMs >= instanceLeaseTtlMs`.
 
 ## [2.14.0-rc.1] - 2026-07-03: full-featured provider integration + security-review hardening
 

@@ -564,14 +564,12 @@ function newAsyncJobManager(
   store: JobStore | null = getJobStore(runtimeLogger),
   fr: FlightRecorderLike = getFlightRecorder(runtimeLogger)
 ): AsyncJobManager {
-  // Issue #139 (interim gate): the blanket startup orphan sweep is only safe
-  // when this instance is the sole owner of the store's 'running' rows. That
-  // holds for per-process backends (sqlite/memory). On a SHARED postgres store
-  // it does NOT, so gate the sweep behind an explicit [persistence].
-  // ownsOrphanRecovery opt-in (default false) so ordinary instances never
-  // orphan another live instance's in-flight jobs.
+  // Issue #139 (durable lease): the blanket startup orphan sweep is gone. Every
+  // instance registers a lease and runs the per-job fencing sweep, which is safe
+  // on a shared store because heartbeat and sweep serialize on the job row. The
+  // interim ownsOrphanRecovery flag is deprecated (parsed + warned in config.ts)
+  // and no longer load-bearing.
   const pc = getPersistenceConfig(runtimeLogger);
-  const ownsOrphanRecovery = pc.backend !== "postgres" || pc.ownsOrphanRecovery;
   return new AsyncJobManager(
     runtimeLogger,
     (cli, durationMs, success) => {
@@ -581,7 +579,17 @@ function newAsyncJobManager(
     fr,
     // Issue #130: gate all job execution on the operator-tunable [limits] block.
     getLimitsConfig(runtimeLogger).jobs,
-    ownsOrphanRecovery
+    // Deprecated ownsOrphanRecovery slot (ignored by the manager).
+    true,
+    // Issue #139: heartbeat/lease/sweep/GC cadences from [persistence].
+    {
+      instanceHeartbeatMs: pc.instanceHeartbeatMs,
+      instanceLeaseTtlMs: pc.instanceLeaseTtlMs,
+      httpJobGraceMs: pc.httpJobGraceMs,
+      orphanSweepIntervalMs: pc.orphanSweepIntervalMs,
+      instanceGcMs: pc.instanceGcMs,
+      role: process.argv.includes("--transport=http") ? "http" : "stdio",
+    }
   );
 }
 
@@ -1172,7 +1180,9 @@ async function awaitJobOrDefer(
   const deferralAvailable =
     runtime.persistence.backend !== "none" &&
     runtime.persistence.asyncJobsEnabled &&
-    runtime.asyncJobManager.hasStore();
+    // #139: fail-closed — only defer when the manager can actually admit durable
+    // jobs (registration succeeded and the heartbeat lease is healthy).
+    runtime.asyncJobManager.canAdmitDurableJobs();
   if (SYNC_DEADLINE_MS === 0 || !deferralAvailable) {
     // Deferral disabled: SYNC_DEADLINE_MS=0 is the explicit opt-out; the
     // derived gate covers backend=none and storeless runtimes.
@@ -1335,7 +1345,9 @@ async function awaitApiJobOrDefer(
   const deferralAvailable =
     runtime.persistence.backend !== "none" &&
     runtime.persistence.asyncJobsEnabled &&
-    runtime.asyncJobManager.hasStore();
+    // #139: fail-closed — only defer when the manager can actually admit durable
+    // jobs (registration succeeded and the heartbeat lease is healthy).
+    runtime.asyncJobManager.canAdmitDurableJobs();
 
   if (SYNC_DEADLINE_MS === 0 || !deferralAvailable || forceInline) {
     // No deferral (or forced inline): run the HTTP request to completion here.
@@ -13635,6 +13647,20 @@ async function shutdown(signal: string): Promise<void> {
   logger.info(`Received ${signal}, shutting down gracefully...`);
 
   try {
+    // #139: dispose the async job manager FIRST (await, before any process.exit):
+    // stop admission, clear the heartbeat/sweep timers, drain in-flight owned
+    // terminal writes, and deregister this instance's lease only if nothing is
+    // still finalizing. Done before killAllProcessGroups so the manager owns the
+    // orderly drain of the jobs it is tracking.
+    if (asyncJobManager) {
+      try {
+        await asyncJobManager.dispose({ timeoutMs: 5000 });
+        logger.info("Async job manager disposed");
+      } catch (err) {
+        logger.error("Async job manager dispose failed", err);
+      }
+    }
+
     // Kill all active process groups (SIGTERM → wait 3s → SIGKILL)
     await killAllProcessGroups();
     logger.info("All process groups terminated");

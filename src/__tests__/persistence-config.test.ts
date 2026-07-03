@@ -830,3 +830,85 @@ describe("createGatewayServer — structural invariant on async tool registratio
     expect(p.warning).toMatch(/backend = 'none'/);
   });
 });
+
+describe("loadPersistenceConfig #139 durable lease knobs (U15)", () => {
+  let tempDir: string;
+  let stubbedConfig: string | undefined;
+
+  beforeEach(() => {
+    tempDir = mkdtempSync(join(tmpdir(), "persistence-lease-test-"));
+    stubbedConfig = process.env.LLM_GATEWAY_CONFIG;
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    rmSync(tempDir, { recursive: true, force: true });
+    if (stubbedConfig === undefined) delete process.env.LLM_GATEWAY_CONFIG;
+    else process.env.LLM_GATEWAY_CONFIG = stubbedConfig;
+  });
+
+  function pointToFile(tomlBody: string): void {
+    const p = join(tempDir, "config.toml");
+    writeFileSync(p, tomlBody);
+    vi.stubEnv("LLM_GATEWAY_CONFIG", p);
+    vi.stubEnv("LLM_GATEWAY_LOGS_DB", "");
+    vi.stubEnv("LLM_GATEWAY_JOBS_DB", "");
+  }
+
+  it("resolves lease-knob defaults when unset", () => {
+    pointToFile('[persistence]\nbackend = "sqlite"\n');
+    const cfg = loadPersistenceConfig(noopLogger);
+    expect(cfg.instanceHeartbeatMs).toBe(15000);
+    expect(cfg.instanceLeaseTtlMs).toBe(90000);
+    expect(cfg.httpJobGraceMs).toBe(300000);
+    expect(cfg.orphanSweepIntervalMs).toBe(30000);
+    expect(cfg.instanceGcMs).toBe(3600000);
+  });
+
+  it("accepts explicit valid lease knobs", () => {
+    pointToFile(
+      [
+        "[persistence]",
+        'backend = "sqlite"',
+        "instanceHeartbeatMs = 5000",
+        "instanceLeaseTtlMs = 20000",
+        "httpJobGraceMs = 60000",
+        "orphanSweepIntervalMs = 10000",
+        "instanceGcMs = 600000",
+        "",
+      ].join("\n")
+    );
+    const cfg = loadPersistenceConfig(noopLogger);
+    expect(cfg.instanceHeartbeatMs).toBe(5000);
+    expect(cfg.instanceLeaseTtlMs).toBe(20000);
+    expect(cfg.httpJobGraceMs).toBe(60000);
+  });
+
+  it("rejects instanceLeaseTtlMs < 2 * instanceHeartbeatMs", () => {
+    pointToFile(
+      '[persistence]\nbackend = "sqlite"\ninstanceHeartbeatMs = 15000\ninstanceLeaseTtlMs = 20000\n'
+    );
+    expect(() => loadPersistenceConfig(noopLogger)).toThrow(/instanceLeaseTtlMs/);
+  });
+
+  it("rejects httpJobGraceMs < instanceLeaseTtlMs", () => {
+    pointToFile(
+      '[persistence]\nbackend = "sqlite"\ninstanceLeaseTtlMs = 90000\nhttpJobGraceMs = 30000\n'
+    );
+    expect(() => loadPersistenceConfig(noopLogger)).toThrow(/httpJobGraceMs/);
+  });
+
+  it("still parses ownsOrphanRecovery and emits a one-time deprecation warning", () => {
+    pointToFile('[persistence]\nbackend = "sqlite"\nownsOrphanRecovery = true\n');
+    const warnings: string[] = [];
+    const logger = {
+      info: () => {},
+      error: () => {},
+      debug: () => {},
+      warn: (m: string) => warnings.push(m),
+    };
+    const cfg = loadPersistenceConfig(logger);
+    expect(cfg.ownsOrphanRecovery).toBe(true);
+    expect(warnings.some(w => /ownsOrphanRecovery is deprecated/.test(w))).toBe(true);
+  });
+});

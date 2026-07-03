@@ -217,14 +217,24 @@ describe("Slice 1 — http job persistence + orphan + migration (SqliteJobStore)
       requestKey: "k1",
       cli: "ollama",
       args: [],
-      startedAt: new Date().toISOString(),
+      // #139: an http job is only a sweep candidate once it is BOTH lease-expired
+      // AND older than httpJobGrace (default 5min); use an old started_at so the
+      // grace term in the candidate predicate is satisfied.
+      startedAt: new Date(Date.now() - 10 * 60 * 1000).toISOString(),
       pid: null,
       transport: "http",
       payloadJson: JSON.stringify({ model: "m" }),
     });
     store1.close();
 
-    // New gateway boot: a fresh store + manager flips it to orphaned.
+    // #139: the owner crashed, so its lease lapses. Age the lease into the past
+    // (a still-valid lease must NOT be orphaned by a fresh instance; that is the
+    // #139 fix). An http row has no pid, so the lease alone drives recovery.
+    const leaseConn = openDatabase(dbPath);
+    leaseConn.prepare("UPDATE jobs SET lease_deadline = 1 WHERE id = ?").run("job-http-1");
+    leaseConn.close();
+
+    // New gateway boot: a fresh store + manager flips the dead-owner row to orphaned.
     const store2 = new SqliteJobStore(dbPath, mockLogger);
     const mgr = new AsyncJobManager(mockLogger, undefined, store2);
     const row = store2.getById("job-http-1")!;

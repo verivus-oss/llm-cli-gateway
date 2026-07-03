@@ -394,44 +394,61 @@ describe("AsyncJobManager + flight-recorder (slice 1.5)", () => {
     it("orphan path: captured stdout is not logged as a provider failure", () => {
       const fr = new CapturingFlightRecorder();
       const startedAt = new Date(Date.now() - 30000).toISOString();
+      // #139: the ctor now runs the durable lease sweep (recoverStaleJobs) at
+      // startup, not the deprecated markOrphanedOnStartup. This mock returns the
+      // orphaned rows the sweep would have found so the FR-orphan-readback path
+      // is exercised unchanged.
+      const orphanRows = [
+        {
+          id: "j1",
+          correlationId: "corr-j1",
+          startedAt,
+          stdout: "partial-out",
+          stderr: "",
+          exitCode: null,
+          transport: "process" as const,
+          httpStatus: null,
+        },
+        {
+          id: "j2",
+          correlationId: "corr-j2",
+          startedAt,
+          stdout: "",
+          stderr: "boom",
+          exitCode: 137,
+          transport: "process" as const,
+          httpStatus: null,
+        },
+        {
+          id: "j3",
+          correlationId: "corr-j3",
+          startedAt,
+          stdout: "partial-before-explicit-failure",
+          stderr: "",
+          exitCode: 2,
+          transport: "process" as const,
+          httpStatus: null,
+        },
+        {
+          id: "j4",
+          correlationId: "corr-j4",
+          startedAt,
+          stdout: "complete-before-restart",
+          stderr: "",
+          exitCode: 0,
+          transport: "process" as const,
+          httpStatus: null,
+        },
+      ];
       const fakeStore = {
-        markOrphanedOnStartup: () => ({
-          count: 4,
-          orphaned: [
-            {
-              id: "j1",
-              correlationId: "corr-j1",
-              startedAt,
-              stdout: "partial-out",
-              stderr: "",
-              exitCode: null,
-            },
-            {
-              id: "j2",
-              correlationId: "corr-j2",
-              startedAt,
-              stdout: "",
-              stderr: "boom",
-              exitCode: 137,
-            },
-            {
-              id: "j3",
-              correlationId: "corr-j3",
-              startedAt,
-              stdout: "partial-before-explicit-failure",
-              stderr: "",
-              exitCode: 2,
-            },
-            {
-              id: "j4",
-              correlationId: "corr-j4",
-              startedAt,
-              stdout: "complete-before-restart",
-              stderr: "",
-              exitCode: 0,
-            },
-          ],
-        }),
+        registerInstance: () => {},
+        heartbeat: () => {},
+        deregisterInstance: () => {},
+        gcInstances: () => 0,
+        selectStaleProcessCandidates: () => [],
+        recoverStaleJobs: () => orphanRows,
+        markRunning: () => {},
+        markOrphanedOnStartup: () => ({ count: orphanRows.length, orphaned: orphanRows }),
         recordStart: () => {},
         recordOutput: () => {},
         recordComplete: () => {},

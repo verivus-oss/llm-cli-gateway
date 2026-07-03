@@ -10,6 +10,21 @@ import {
   resolveDedupWindowMs,
   resolveJobRetentionMs,
 } from "../job-store.js";
+import { openDatabase } from "../sqlite-driver.js";
+
+/**
+ * #139: force a job's fencing lease into the past on the same DB file, to
+ * simulate the owning instance having died (its heartbeat stopped). Uses a
+ * second connection (WAL + busy_timeout make this safe).
+ */
+function expireLease(dbPath: string, jobId: string): void {
+  const db = openDatabase(dbPath);
+  try {
+    db.prepare("UPDATE jobs SET lease_deadline = 1 WHERE id = ?").run(jobId);
+  } finally {
+    db.close();
+  }
+}
 
 describe("JobStore", () => {
   let tempDir: string;
@@ -180,7 +195,7 @@ describe("JobStore", () => {
       expect(found).toBeNull();
     });
 
-    it("returns a recent running job", () => {
+    it("returns a recent queued job with a live lease (#139: recordStart persists queued)", () => {
       const requestKey = computeRequestKey("grok", ["-p", "test"]);
       store.recordStart({
         id: "j1",
@@ -195,7 +210,10 @@ describe("JobStore", () => {
 
       const found = store.findByRequestKey(requestKey);
       expect(found?.id).toBe("j1");
-      expect(found?.status).toBe("running");
+      // recordStart now persists 'queued'; a live (lease-valid) queued job is
+      // still dedup-eligible.
+      expect(found?.status).toBe("queued");
+      expect(found?.leaseDeadline).not.toBeNull();
     });
 
     it("returns the most recent matching completed job within window", () => {
@@ -304,11 +322,12 @@ describe("JobStore", () => {
     });
   });
 
-  describe("markOrphanedOnStartup", () => {
-    it("flips running rows to orphaned and leaves terminal rows alone", () => {
+  describe("markOrphanedOnStartup (#139: deprecated lease shim)", () => {
+    it("orphans a lease-expired (dead-owner) row and leaves live + terminal rows alone", () => {
       const t = new Date().toISOString();
+      // A job whose owner died: recorded, then its lease is aged into the past.
       store.recordStart({
-        id: "running",
+        id: "dead-owner",
         correlationId: "cr",
         requestKey: "k1",
         cli: "claude",
@@ -316,6 +335,17 @@ describe("JobStore", () => {
         startedAt: t,
         pid: 100,
       });
+      // A job whose owner is still alive (fresh lease): must NOT be swept.
+      store.recordStart({
+        id: "live-owner",
+        correlationId: "cl",
+        requestKey: "k3",
+        cli: "claude",
+        args: ["-p", "alive"],
+        startedAt: t,
+        pid: 102,
+      });
+      // A terminal job: must be left untouched.
       store.recordStart({
         id: "done",
         correlationId: "cd",
@@ -336,17 +366,21 @@ describe("JobStore", () => {
         finishedAt: t,
       });
 
+      expireLease(dbPath, "dead-owner");
+
       const changes = store.markOrphanedOnStartup();
       expect(changes.count).toBe(1);
       expect(changes.orphaned).toHaveLength(1);
       expect(changes.orphaned[0]).toMatchObject({
-        id: "running",
+        id: "dead-owner",
         correlationId: "cr",
         startedAt: t,
       });
 
-      expect(store.getById("running")?.status).toBe("orphaned");
-      expect(store.getById("running")?.error).toContain("Gateway restarted");
+      expect(store.getById("dead-owner")?.status).toBe("orphaned");
+      expect(store.getById("dead-owner")?.error).toContain("no longer alive");
+      // The live-lease job is NOT orphaned (this is the whole #139 fix).
+      expect(store.getById("live-owner")?.status).toBe("queued");
       expect(store.getById("done")?.status).toBe("completed");
     });
   });
@@ -380,7 +414,7 @@ describe("JobStore", () => {
       expect(store.getById("expired")).toBeNull();
     });
 
-    it("keeps running jobs (far-future expiry) untouched", () => {
+    it("keeps non-terminal jobs (far-future expiry) untouched", () => {
       store.recordStart({
         id: "live",
         correlationId: "cl",
@@ -391,7 +425,9 @@ describe("JobStore", () => {
         pid: 1,
       });
       store.evictExpired();
-      expect(store.getById("live")?.status).toBe("running");
+      // recordStart now persists 'queued' (flipped to running by markRunning at
+      // launch); either way evictExpired must not delete a non-terminal row.
+      expect(store.getById("live")?.status).toBe("queued");
     });
   });
 

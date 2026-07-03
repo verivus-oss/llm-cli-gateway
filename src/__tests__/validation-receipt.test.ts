@@ -74,6 +74,9 @@ describe("validation receipt mint + resolve", () => {
       pid: null,
       ownerPrincipal: opts.owner ?? "local",
     });
+    // #139: recordStart now persists 'queued'; flip to 'running' for a running
+    // seed so the durable status matches the real launch flow.
+    store.markRunning(id, { pid: null });
     if (opts.status && opts.status !== "running") {
       store.recordComplete({
         id,
