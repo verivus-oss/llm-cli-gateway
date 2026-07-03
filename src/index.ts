@@ -2607,7 +2607,10 @@ export function registerBaseResources(server: McpServer, runtime: GatewayServerR
   // Same own-or-not-found owner scoping: an unknown / unowned / not-yet-terminal
   // id returns the corresponding status object rather than another principal's
   // data.
-  const validationReceiptStore = runtime.asyncJobManager.getValidationRunStore();
+  // `asyncJobManager` is absent for runtimes without async persistence (e.g.
+  // persistence backend "none", and the provider-surface resource tests), so
+  // guard the optional validation-run surface rather than dereferencing it.
+  const validationReceiptStore = runtime.asyncJobManager?.getValidationRunStore();
   if (validationReceiptStore) {
     server.registerResource(
       "validation-receipt",
