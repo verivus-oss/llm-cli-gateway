@@ -1,0 +1,458 @@
+# Implementation plan: durable instance-lease orphan recovery (GitHub #139).
+#
+# Goal: replace the unscoped blanket startup orphan sweep with a durable,
+# per-job fencing lease so a `queued`/`running` job is orphaned iff its owner is
+# provably not alive, never because a different live instance started. Correct
+# across shared postgres (multi-instance), single postgres, per-process and
+# shared-file sqlite, and the memory backend; transport-agnostic (works for the
+# no-pid http provider transport); backward-compatible; and free of the
+# `running -> orphaned -> completed` flap.
+#
+# Context:
+#   The design spec is docs/plans/issue-139-orphan-recovery.draft.md (v4,
+#   APPROVED). It converged over a 4-round adversarial cross-LLM design gate
+#   (Codex, Grok, Mistral); v4 has unanimous unconditional approval, all on
+#   inspected evidence against the real 9602037 tree. An INTERIM gate already
+#   shipped (PR #140, `[persistence].ownsOrphanRecovery`) which merely stops the
+#   high-churn stdio case on postgres; this plan is the durable fix that
+#   supersedes and then deprecates it.
+#
+#   Load-bearing facts, each verified in code:
+#     1. `markOrphanedOnStartup` is `UPDATE jobs SET status='orphaned' WHERE
+#        status='running'` with no owner/lease scoping (src/job-store.ts:468/477
+#        sqlite; src/postgres-job-store-worker.ts:216-231 worker), run in the
+#        AsyncJobManager constructor (now behind the interim gate).
+#     2. `recordComplete` is keyed `WHERE id=@id` only, no status guard
+#        (src/job-store.ts:440-444), which is why the false orphan self-heals but
+#        also why a naive lease still flaps.
+#     3. `recordStart` hard-codes `status:"running"` (src/job-store.ts:506, :849,
+#        src/postgres-job-store-worker.ts:148); `JobStoreStatus` excludes
+#        `queued` (src/job-store.ts:13); the in-memory machine already has
+#        `queued` (src/async-job-manager.ts:75).
+#     4. The http provider transport persists no pid (pid column empty), so pid
+#        liveness cannot be the primary recovery mechanism.
+#     5. A heartbeat that writes a `gateway_instances` row does NOT serialize
+#        against a sweep that locks `jobs` rows (different tables). The fix puts
+#        the liveness signal ON the job row (`jobs.lease_deadline`) so heartbeat
+#        and sweep are same-row UPDATEs that serialize on the row lock.
+
+[meta]
+name = "durable instance-lease orphan recovery (#139)"
+schema_version = "1.1"
+owner = "verivus-oss"
+slice = "issue-139-orphan-recovery-2026-07-03"
+target_branch = "master"
+issue = "https://github.com/verivus-oss/llm-cli-gateway/issues/139"
+review_providers = ["codex", "grok", "mistral"]  # gemini/agy returns empty on this class of task; do not gate on it
+acceptance_resource = """
+A `queued`/`running` job is orphaned iff its owner's per-job `lease_deadline` has
+expired (or is NULL for a legacy pre-migration row), never because another live
+instance constructed an AsyncJobManager; heartbeat and sweep serialize on the
+job row so no job whose owner heartbeated within `leaseTtl` is ever swept; a
+genuinely stale-then-reviving owner self-heals to the correct terminal state in
+both the job store and the flight recorder; durable admission is fail-closed
+(a failed `recordStart` fails the request and releases the limiter permit);
+graceful shutdown drains in-flight terminal writes before deregister; the
+multi-instance #139 regression and the nested-agent E2E never observe a spurious
+`orphaned`; `npm run check` and `npm run test:pg` pass; the interim
+`ownsOrphanRecovery` flag is deprecated (parsed + warned, no longer load-bearing).
+"""
+invariant_sources = [
+  "docs/plans/issue-139-orphan-recovery.draft.md",
+  "src/job-store.ts",
+  "src/postgres-job-store-worker.ts",
+  "src/async-job-manager.ts",
+  "src/config.ts",
+  "src/sqlite-driver.ts",
+  "src/index.ts",
+  "src/flight-recorder.ts",
+]
+predecessor_plan = "docs/plans/issue-139-orphan-recovery.draft.md"
+test_plan = "docs/plans/issue-139-orphan-recovery.test-plan.md"
+
+[decision]
+liveness_signal = "per-job jobs.lease_deadline advanced by the owner heartbeat; NOT a gateway_instances read in the sweep predicate"
+sweep_predicate = "candidate = status IN ('queued','running') AND (lease_deadline IS NULL OR lease_deadline < db_now) AND (transport <> 'http' OR started_at < db_now - httpJobGrace); the http-grace term is IN the candidate predicate, NOT applied after the terminal write. NULL arm orphans only legacy pre-migration rows. The pid advisory (pid_check) is a per-candidate confirmation applied BEFORE any row is flipped to orphaned."
+serialization = "heartbeat UPDATE and sweep UPDATE both target the same jobs rows, so they serialize on the row lock (Postgres READ COMMITTED) and are trivially serial under single-writer sqlite; no advisory lock or SERIALIZABLE required for correctness"
+record_complete_guard = "UPDATE ... WHERE id=@id AND status IN ('queued','running','orphaned') so a genuine terminal result always wins over a mistaken orphan"
+record_complete_type = "recordComplete.status becomes Exclude<JobStoreStatus,'running'|'queued'>"
+fr_reconcile = "a job FR-logged 'orphaned' that later reaches a real terminal state re-emits logComplete (last-writer-wins) so the audit log converges too"
+transport_aware_ttl = "instanceLeaseTtlMs default 90000 (6x heartbeat) for the lease; separate httpJobGraceMs default 300000 for no-pid http-transport jobs. recoverStaleJobs takes (leaseTtl, httpJobGrace); grace is enforced in candidate selection, never as a post-orphan correction"
+pid_check = "kill(pid,0) is advisory and NEVER vetoing, applied BEFORE the terminal write: for a process-transport candidate with a live same-host pid the sweeper ADVANCES lease_deadline by one leaseTtl (grace) instead of orphaning it; a dead/missing/foreign-host pid falls through to orphaning. Because the grace is one bounded leaseTtl, pid reuse cannot hold a row hostage indefinitely"
+evloop_lag_skip = "the heartbeat timer measures its own hrtime scheduling drift; if drift > HEARTBEAT_MS the sweep is skipped this cycle (blocked loop cannot trust its view of others)"
+fail_closed = "registerInstance, durable recordStart, AND markRunning bypass safeStoreCall (all three are correctness-critical durable writes): on failure the async request fails and the limiter permit + queued entry are released; recordOutput/recordComplete may stay best-effort; sustained heartbeat failure stops admission and stops sweeping (prefer self-exit over proactive cancel)"
+durable_queued = "JobStoreStatus gains 'queued'; recordStart inserts queued + owner_instance + initial lease_deadline; new markRunning(id,{pid}) transitions queued->running and stamps the real pid at launch; recover targets (queued,running); hydration sets exited=false for queued"
+dispose_ordering = "AsyncJobManager.dispose(): stop admission, clearInterval all timers, abort/kill active owned jobs and await the terminal writes their close handlers enqueue (drain AFTER the kills, tracked in a Set<Promise>), then deregisterInstance only if no active owned work remains (else let the lease expire); SIGTERM/SIGINT/http-close await dispose BEFORE process.exit"
+gateway_instances_table = "retained for observability/GC/role only; NOT read by the sweep predicate"
+interim_gate = "[persistence].ownsOrphanRecovery is deprecated once lease recovery lands (parsed + one-time warning, no longer load-bearing) because lease recovery is safe to run from every instance"
+mark_orphaned_shim = "keep markOrphanedOnStartup as a DEPRECATED thin shim delegating to recoverStaleJobs; do NOT preserve blanket-sweep semantics on any production path"
+with_transaction = "widen sqlite-driver withTransaction to forward the callback return value so the sqlite recover path can return the orphaned-row list"
+sqlite_busy = "add PRAGMA busy_timeout in the SqliteJobStore open path + SQLITE_BUSY retry around heartbeat/sweep for the shared-file case"
+db_clock = "per-backend DB clock in the lease/sweep SQL (Postgres now(); sqlite strftime('%s','now')), NOT the client new Date()"
+reason = """
+The blanket sweep is correct only when the store is private to one process. On a
+shared store every instance sees the same running rows, so a fresh instance
+orphans others' live jobs. Instance-id-only recovery cannot recover an
+instance's own jobs after restart (the id changes); pid liveness cannot cover
+the no-pid http transport; a cross-table heartbeat read races the sweep under
+READ COMMITTED. Moving the liveness signal onto the job row as a fencing lease
+makes heartbeat and sweep collide on the same row lock, which is the only
+mechanism that is simultaneously correct under Postgres RC, trivially correct
+under single-writer sqlite, transport-agnostic, and free of the mid-flight flap.
+Everything else (guarded completion, fail-closed admission, durable queued,
+bounded dispose) exists to make that lease safe end to end.
+"""
+
+[[steps]]
+id = "audit-job-store-surface"
+depends_on = []
+actor = "assistant"
+action = """
+Phase 0 baseline. Inventory the real seams and confirm/correct every code
+citation in the v4 spec, writing the result into
+docs/plans/issue-139-orphan-recovery.verification.md under a Phase 0 heading:
+  - job-store.ts: JobStoreStatus (:13), JobStore interface (:147-212),
+    recordComplete type (:169) + SQL (:440-444), recordStart insert (:486/:506),
+    Memory (:819/:849/:921), Postgres proxy + syncCall (:952/:987/:1016),
+    createJobStore (:1162), sqlite DDL/PRAGMA site (:327), findByRequestKey (:452).
+  - postgres-job-store-worker.ts: init/DDL (:66-133), recordStart (:141/:148),
+    recordComplete (:173), markOrphaned (:216-231).
+  - async-job-manager.ts: status type (:75), ctor + interim gate (:637/:664),
+    timers (:688+), recordStart call sites (:1159 http, :1699 process),
+    limiter/permit + queued creation (:1091/:1610), launch flip sites, hydration
+    exited flag (:1515), close handlers (:1851+).
+  - config.ts: PersistenceSchema (:107), PersistenceConfig interface (:127),
+    loader (:303), ownsOrphanRecovery (schema :123 / interface :139, from #140).
+  - sqlite-driver.ts: withTransaction (:225, returns void), no pragmas (:268+).
+  - index.ts: newAsyncJobManager (:561), isolateState null store (:948),
+    shutdown + signal handlers (:13634/:13671).
+Record the current test count and the exact changed-file baseline.
+"""
+idempotent = true
+validation = """
+The verification notes list each seam with confirmed file:line, and flag any
+spec citation that drifted from the real tree. Baseline test count recorded.
+"""
+
+[[steps]]
+id = "schema-status-and-driver"
+depends_on = ["audit-job-store-surface"]
+actor = "assistant"
+action = """
+Foundation. (a) Extend JobStoreStatus with 'queued' (src/job-store.ts:13) and
+change recordComplete's status type to Exclude<JobStoreStatus,'running'|'queued'>
+(:169). (b) Add idempotent DDL in BOTH the SqliteJobStore open path AND the pg
+worker init: jobs.owner_instance TEXT, jobs.lease_deadline (ts), index
+idx_jobs_owner_status(owner_instance,status); new gateway_instances table
+(instance_id PK, role, hostname, pid, started_at, last_heartbeat) + heartbeat
+index. (c) Widen sqlite-driver withTransaction to forward the callback return
+value (src/sqlite-driver.ts:225). (d) Add PRAGMA busy_timeout in the SqliteJobStore
+open path. All SQLite access stays inside src/sqlite-driver.ts (release audit
+hard-fails otherwise).
+"""
+idempotent = false
+validation = """
+npm run build passes. Existing job-store tests pass. A DDL round-trip test
+confirms owner_instance + lease_deadline columns and gateway_instances table
+exist on a fresh sqlite DB and a legacy DB (idempotent ALTER). withTransaction
+returns the callback value (unit test) with existing void callers unaffected.
+"""
+
+[[steps]]
+id = "jobstore-lease-api"
+depends_on = ["schema-status-and-driver"]
+actor = "assistant"
+action = """
+Extend the JobStore interface and implement with EXACT parity across
+SqliteJobStore, MemoryJobStore, and PostgresJobStore (syncCall) + the pg worker
+dispatch cases:
+  - registerInstance(meta), heartbeat(instanceId), deregisterInstance(instanceId)
+  - markRunning(id, { pid }): queued -> running + stamp real pid
+  - recoverStaleJobs(leaseTtl, httpJobGrace, liveConfirmedIds?): the fencing +
+    transport-grace sweep; the http grace is in the candidate predicate and the
+    optional liveConfirmedIds lets the manager exclude pid-confirmed-live process
+    jobs from orphaning (see recover-stale-jobs step)
+  - recordStart inserts status='queued' + owner_instance + initial
+    lease_deadline = db_now + leaseTtl (all three impls)
+  - recordComplete gains the guarded WHERE id=@id AND status IN
+    ('queued','running','orphaned')
+  - findByRequestKey dedup treats a live (lease-valid) queued job as eligible and
+    never dedups onto an orphaned row
+MemoryJobStore: register/heartbeat/deregister are no-ops; it still represents
+queued/markRunning/lease_deadline in memory for parity; recoverStaleJobs keeps
+its per-process no-op.
+"""
+idempotent = false
+validation = """
+Cross-backend matrix tests (memory + sqlite; pg via test:pg) prove parity of the
+new methods; recordStart persists queued with a non-null lease_deadline;
+markRunning transitions to running and stamps pid; guarded recordComplete lands
+even onto an orphaned row; dedup ignores orphaned rows. npm run build passes.
+"""
+
+[[steps]]
+id = "config-lease-knobs"
+depends_on = ["audit-job-store-surface"]
+actor = "assistant"
+action = """
+Add persistence knobs (src/config.ts PersistenceSchema :107, interface :127,
+loader :303): instanceHeartbeatMs (15000), instanceLeaseTtlMs (90000),
+httpJobGraceMs (300000), orphanSweepIntervalMs (30000), instanceGcMs (3600000).
+Zod-validate leaseTtl >= 2*heartbeat and httpJobGrace >= leaseTtl. Deprecate
+ownsOrphanRecovery: keep parsing it, emit a one-time warning, and make it
+non-load-bearing (lease recovery is safe from every instance).
+"""
+idempotent = false
+validation = """
+persistence-config tests: defaults resolve; invalid lease/heartbeat ratios are
+rejected by Zod; ownsOrphanRecovery still parses and emits the deprecation
+warning. npm run build passes.
+"""
+
+[[steps]]
+id = "manager-identity-heartbeat"
+depends_on = ["jobstore-lease-api", "config-lease-knobs"]
+actor = "assistant"
+action = """
+In the AsyncJobManager constructor: generate instanceId, role, hostname, pid;
+call registerInstance SYNCHRONOUSLY before any request can be admitted (writes
+last_heartbeat=now), so recordStart always follows a live instance row
+(register-before-admit invariant). Add an unref'd heartbeat timer (HEARTBEAT_MS)
+that advances jobs.lease_deadline for this instance's queued/running rows and
+measures its own hrtime scheduling drift; if drift > HEARTBEAT_MS, set a flag so
+the sweep skips this cycle. registerInstance and heartbeat do NOT go through
+safeStoreCall.
+"""
+idempotent = false
+validation = """
+Tests: register-before-admit ordering invariant holds; a heartbeat advances
+lease_deadline for owned queued/running rows only; a simulated long drift sets
+the skip flag. isolateState managers (null store) register nothing. npm run build
+passes.
+"""
+
+[[steps]]
+id = "fail-closed-admission"
+depends_on = ["manager-identity-heartbeat"]
+actor = "assistant"
+action = """
+Make durable admission fail-closed: take the durable recordStart AND markRunning
+OUT of safeStoreCall (both are correctness-critical; recordOutput/recordComplete
+may stay best-effort). On recordStart or registerInstance failure, fail the async
+request with an explicit error AND release the limiter permit / remove the queued
+entry so nothing can later launch. On markRunning failure at launch, fail-close
+too: do not run the child as an untracked (durably-queued-but-not-running) job;
+abort the launch and terminalize/release rather than leave a durable row that the
+sweep would see as a stale queued row while the process runs untracked. Enforce
+the durable-admission gate at BOTH the tool-registration check and each startJob*
+site. On N consecutive heartbeat failures: stop admitting, stop sweeping, and
+(preferred) self-exit or clearly mark unhealthy so other instances recover this
+instance's jobs correctly rather than mid-flight.
+"""
+idempotent = false
+validation = """
+Tests: a forced durable recordStart failure fails the request, releases the
+permit, and leaves no in-memory-only running job; a forced markRunning failure at
+launch aborts the launch fail-closed (no untracked running child against a stale
+queued durable row); the admission gate rejects new async work when
+durableAdmission is false; sustained heartbeat failure stops admission + sweeping.
+npm run build passes.
+"""
+
+[[steps]]
+id = "queued-to-running-pid-hydration"
+depends_on = ["jobstore-lease-api", "manager-identity-heartbeat"]
+actor = "assistant"
+action = """
+Wire markRunning(id,{pid}) at the launch sites where the in-memory job flips
+queued->running, stamping the real child pid (needed by the advisory kill(pid,0)
+guard). Fix hydration so a durable queued row rehydrates with exited=false
+(src/async-job-manager.ts:1515, currently exited = status !== 'running').
+"""
+idempotent = false
+validation = """
+Tests: launch transitions the durable row to running and stamps a non-null pid
+for process transport; a hydrated queued row has exited=false; http-transport
+rows keep pid null and rely on httpJobGrace. npm run build passes.
+"""
+
+[[steps]]
+id = "recover-stale-jobs"
+depends_on = ["queued-to-running-pid-hydration", "fail-closed-admission"]
+actor = "assistant"
+action = """
+Implement recoverStaleJobs across sqlite + pg worker (memory stays no-op). The
+transport-aware grace is part of CANDIDATE SELECTION; no row is flipped to
+orphaned before grace is applied (the manager cannot un-orphan a flipped row):
+
+Step 1 (manager, when process-transport candidates may be same-host live): the
+store exposes a candidate SELECT of expired rows; the manager runs the advisory
+kill(pid,0) on same-host process candidates and, for each still-live pid,
+ADVANCES that row's lease_deadline by one leaseTtl (grace) instead of letting it
+be orphaned. It passes the confirmed-live ids to step 2 as an exclusion set. A
+dead/missing/foreign-host pid is not excluded.
+
+Step 2 (store, single guarded statement) orphans only true candidates, with the
+http grace IN the predicate:
+  UPDATE jobs SET status='orphaned',
+      error=COALESCE(error,'owning gateway instance is no longer alive'),
+      finished_at=db_now
+  WHERE status IN ('queued','running')
+    AND (lease_deadline IS NULL OR lease_deadline < db_now)
+    AND (transport <> 'http' OR started_at < db_now - httpJobGrace)
+    AND id <> ALL(:liveConfirmedIds)
+  RETURNING id, correlation_id, cli, owner_principal, transport, pid, http_status;
+(If step 1 found no same-host process candidates, liveConfirmedIds is empty and
+this collapses to the pure fencing + http-grace sweep.) Per-backend db_now
+(Postgres now(); sqlite strftime), NEVER client new Date(); sqlite runs it in one
+withTransaction returning the orphaned list. Emit FR logComplete for recovered
+rows AND reconcile (a recovered job that later completes re-emits FR logComplete,
+last-writer-wins). Run at startup and on an orphanSweepIntervalMs reaper timer;
+add gateway_instances GC (last_heartbeat < now - instanceGc). Convert
+markOrphanedOnStartup to a deprecated shim delegating to recoverStaleJobs
+(single-owner sqlite/memory path).
+"""
+idempotent = false
+validation = """
+Tests (memory/sqlite + pg via test:pg): an expired-lease job is orphaned; a
+fresh-lease job is NOT; a NULL-lease legacy row is orphaned; an http job past
+leaseTtl but within httpJobGrace is NOT orphaned (grace in the predicate, not
+post-hoc), and IS after httpJobGrace; a process candidate with a live same-host
+pid has its lease_deadline ADVANCED (not orphaned) then orphaned after the extra
+leaseTtl; a concurrent heartbeat + sweep leaves a live job running (fencing
+serialization); a mistaken orphan followed by completion yields a single terminal
+completed with no observable orphaned; FR reconciles; the sweep uses the DB clock
+(a clock-skew case fails if new Date() is used). npm run build passes.
+"""
+
+[[steps]]
+id = "dispose-and-shutdown"
+depends_on = ["recover-stale-jobs"]
+actor = "assistant"
+action = """
+Add AsyncJobManager.dispose({ timeoutMs }): stop admission; clearInterval all
+timers (heartbeat, sweep, eviction, stall); abort/kill active owned jobs and
+await the terminal writes their close handlers enqueue into a tracked
+Set<Promise> (drain AFTER the kills), bounded by timeoutMs; then
+deregisterInstance ONLY if no active owned work remains, else skip deregister and
+let the lease expire. Wire dispose into src/index.ts: SIGTERM/SIGINT handlers and
+the http-server close path AWAIT manager.dispose() BEFORE process.exit (no
+synchronous exit before dispose resolves). The stdio path gets the same wiring.
+isolateState (null store) managers dispose as a no-op.
+"""
+idempotent = false
+validation = """
+Tests: dispose clears timers and deregisters only after active jobs terminalize;
+a SIGTERM during an in-flight terminal write does not exit before the write lands
+(no stranded running row); drain timeout skips deregister rather than orphaning
+mid-finalize. npm run build passes.
+"""
+
+[[steps]]
+id = "docs-and-changelog"
+depends_on = ["recover-stale-jobs", "dispose-and-shutdown"]
+actor = "assistant"
+action = """
+Update CHANGELOG.md ([Unreleased] Fixed) and README/config docs: the durable
+instance-lease recovery, the new [persistence] knobs, the ownsOrphanRecovery
+deprecation, and the honest guarantee (no job whose owner heartbeated within
+leaseTtl is ever swept; a stale-then-reviving owner self-heals). Do not use the
+em dash.
+"""
+idempotent = false
+validation = """
+CHANGELOG + README build clean; npm run format:check passes; the deprecation and
+new knobs are documented with defaults.
+"""
+
+[[steps]]
+id = "verification-gate"
+depends_on = [
+  "schema-status-and-driver",
+  "jobstore-lease-api",
+  "config-lease-knobs",
+  "manager-identity-heartbeat",
+  "fail-closed-admission",
+  "queued-to-running-pid-hydration",
+  "recover-stale-jobs",
+  "dispose-and-shutdown",
+  "docs-and-changelog",
+]
+actor = "assistant"
+action = """
+Run the full gate and capture exact commands + results in
+docs/plans/issue-139-orphan-recovery.verification.md, executing every case in
+docs/plans/issue-139-orphan-recovery.test-plan.md:
+  npm run build && npm run lint && npm run format:check
+  npm run provider:surfaces:check
+  npm test
+  npm run test:pg          # spins up PG via scripts/test-pg.sh
+  npm run check
+Also run the two scenario tests explicitly: the multi-instance #139 regression
+and the nested-agent E2E, asserting no spurious orphaned. Confirm all new SQLite
+access routes only through src/sqlite-driver.ts (release audit).
+"""
+idempotent = true
+validation = """
+All gates green (or a documented, justified unavailable-service gap). The notes
+record exact commands, results, before/after test counts, the test-plan case
+matrix with pass/fail, and confirmation that node:sqlite is referenced only in
+src/sqlite-driver.ts.
+"""
+
+[[steps]]
+id = "cross-llm-review-gate"
+depends_on = ["verification-gate"]
+actor = "assistant"
+action = """
+Run the adversarial cross-LLM review gate on the implemented diff. Dispatch
+Codex, Grok, and Mistral via the gateway (async; read verdicts by correlationId
+with llm_request_result; poll ~every 90s; jobs may transiently show orphaned
+under the shared store, read stdout regardless). Gemini/agy returns empty on this
+class of task; do not gate on it. Give each reviewer: the design spec
+(docs/plans/issue-139-orphan-recovery.draft.md), this DAG, the test plan, the
+verification notes, and the exact changed-file list / diff. Reviewers verify
+every claim against code and tests, not against the implementer's summary.
+Iterate until each gives UNCONDITIONAL APPROVAL or a concrete unresolvable
+blocker. Record dispatch ids, per-round findings, fixes, and endings in the
+verification notes.
+"""
+idempotent = true
+validation = """
+The verification notes record Codex/Grok/Mistral dispatch ids, each round's
+findings and the code/test-evidenced responses or fixes, and a final
+UNCONDITIONAL APPROVAL from each substantive reviewer.
+"""
+
+[[steps]]
+id = "pr-and-land"
+depends_on = ["cross-llm-review-gate"]
+actor = "assistant"
+action = """
+Open the PR on the internal repo via werner_veriai (git-as push, gh-as pr
+create; base master). Pre-check the CI-only gates locally first: typos clean, and
+gitleaks-safe (no new high-entropy fixtures). Wait for the four CI checks
+(build-and-test, pack-smoke-test, sast, security) to pass, then merge with
+--merge (NOT --squash). The change is additive and gated; do not admin-bypass.
+"""
+idempotent = false
+validation = """
+PR opened, all four CI checks green, merged via --merge. The interim
+ownsOrphanRecovery deprecation warning appears once at startup; the durable
+recovery is confirmed on the serverwide postgres install after the next build.
+"""
+
+[rollback]
+guidance = """
+The change is additive (new columns, new table, new interface methods, new
+config knobs) and the sweep is gated by the lease. To disable durable recovery
+without reverting schema: keep markOrphanedOnStartup's deprecated shim as a
+no-op and do not start the sweep timer; jobs simply are not auto-recovered
+(same as backend='postgres' with the interim gate off). The interim
+ownsOrphanRecovery flag must remain PARSED (deprecation warning) even if the
+lease path is disabled, so existing configs do not error. Do NOT drop
+owner_instance / lease_deadline / gateway_instances once shipped; a mixed-version
+fleet during a rolling upgrade relies on the additive columns being present.
+The recordComplete guarded WHERE and the fail-closed recordStart are correctness
+fixes and must not be reverted independently.
+"""
