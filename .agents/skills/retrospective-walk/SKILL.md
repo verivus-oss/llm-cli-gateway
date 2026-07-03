@@ -142,7 +142,7 @@ Comment schema:
   "location": {
     "file": "optional path",
     "hunk_range": "optional @@ range",
-    "semantic_unit": "optional sqry node or future semantic id",
+    "semantic_unit": "optional semantic code-search node or future semantic id",
     "line_start": 1,
     "line_end": 2
   },
