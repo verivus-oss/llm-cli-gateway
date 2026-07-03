@@ -2,6 +2,95 @@
 
 All notable changes to the llm-cli-gateway project.
 
+## [2.14.0-rc.1] - 2026-07-03: full-featured provider integration + security-review hardening
+
+Release candidate. Every non-Cursor provider (Claude, Codex, Gemini, Grok,
+Mistral, Devin) becomes a first-class, provider-definition-driven integration,
+and a security review of the change set is folded in. Cursor stays working via
+the shared generation and is maintenance-only.
+
+### Added
+
+- **Provider definitions as the single source of truth** (`src/provider-definitions.ts`):
+  one `ProviderDefinition` per CLI type drives request schemas, resources,
+  discovery, and capabilities, with compile-time exhaustiveness assertions and a
+  `scripts/provider-surfaces-check.mjs` ratchet wired into `npm run check`.
+- **Runtime provider capability discovery with an on-disk cache**: an injectable
+  probe runner (no shell interpolation of caller input), a cache keyed on
+  discovery checksums with a shape-driven secret scrubber and Zod-validated
+  reads, and a TTL that bounds staleness so an upgraded or moved provider CLI is
+  re-discovered instead of served stale.
+- **Registry-generated `models://` and `sessions://` resources** for every
+  provider (Devin and Cursor now first-class), plus **live model discovery**
+  wired into `models://<provider>` and `list_models` via a memoized resolver
+  with a fire-and-forget startup warm (reads never block on a spawn).
+- **Complete CLI request-field coverage** across providers, guarded by
+  upstream-contract and coverage-closure tests; interactive/admin-only flags are
+  represented as typed capability facts rather than silently dropped.
+- **Discovery-driven native ACP surface**: Grok, Mistral, and Devin route
+  natively over ACP when enabled (no masquerade), with capability-gated session
+  methods and state-mutating session ops gated behind
+  `acp.allow_mutating_session_ops`.
+- **Provider admin tools**: `provider_admin_list` / `provider_admin_run`
+  (read-only) and `provider_admin_mutate` (gated). Availability is
+  discovery-driven; mutating ops require `[admin] allow_mutating_cli_admin_ops`
+  and, for remote callers, `LLM_GATEWAY_CLI_ADMIN=1` plus the `cli:admin` OAuth
+  scope, routed through the approval manager with a fail-closed pre-spawn audit.
+
+### Changed
+
+- **Unified provider output/event normalization**: a real Grok JSON parser, and
+  `stopReason`/error signals threaded across the CLI parsers and the ACP event
+  normalizer. The provider-minted session id and terminal stop reason are
+  preserved through the async job and flight recorder so a deferred job resumes
+  with the real provider session id.
+- **`provider_tool_capabilities`** now reports ACP `runtimeEnabled` from the
+  resolved config (previously hardcoded), with entrypoint/version/mediation
+  derived from the registry.
+- Docs: README provider-capability table, per-provider skills refreshed to the
+  installed CLI versions, ACP documented as sync-only for now, and the
+  `provider-acp://` resource registered on the MCP server.
+
+### Fixed
+
+- Codex and Gemini clean exits that actually carried a failed terminal event
+  now surface a warning instead of being reported as a silent empty success;
+  the ACP transport likewise flags a refusal/cancelled/truncated turn.
+- Codex surfaces the real `turn.failed` reason on a non-zero exit instead of a
+  partial agent message.
+- json-mode output parsers tolerate a stray banner line around the JSON object
+  (telemetry is no longer all-or-nothing), and the Gemini stream replaces rather
+  than doubles a consolidated non-delta final message.
+- Implausible `agy models` label lines are filtered instead of surfacing as
+  bogus models in `models://gemini`.
+
+### Security
+
+- **Remote host-path confinement.** Remote HTTP/OAuth callers can no longer hand
+  a provider CLI an arbitrary host path to read, write, or load code from. The
+  advanced path/plugin fields are rejected for remote callers (local stdio is
+  unaffected): `systemPromptFile`/`appendSystemPromptFile`/`settings`/
+  `pluginDir`/`pluginUrl`/`debugFile` (Claude), string `outputSchema`/`images`/
+  `outputLastMessage` (Codex), `promptFile`/`config`/`agentConfig`/string
+  `exportSession` (Devin), and `promptFile`/`leaderSocket`/`rules`/`agent`
+  (Grok). `workingDir`/`addDir`/`includeDirs` remain workspace-confined.
+- **Read-only provider-admin ops** now require the same remote `cli:admin` gate
+  as the mutating path, so a remote caller cannot enumerate or trigger
+  host-global provider-CLI spawns unprivileged.
+- **ACP permission bridge** never turns a single approval into a standing
+  `allow_always` grant (it selects a one-time allow, else denies).
+- **ACP subprocess reaping**: a graceful termination signal escalates to
+  SIGKILL after a grace window so a provider CLI that ignores SIGTERM is not
+  leaked as a zombie.
+- Job results scrub the provider session id from returned streams for remote
+  callers; ACP error redaction covers Google/GitHub/Slack token shapes;
+  `session_info_update` is handled as a forward-compatible unknown ACP variant.
+- CI/release: the Cloudflare Pages token is fetched from Azure Key Vault via
+  GitHub OIDC federation (no stored secret); the release tooling supports
+  prerelease cuts (a prerelease publishes under a side npm dist-tag, never
+  `latest`); typos and gitleaks allowlists cover a deliberate identifier and
+  secret-fixture test files.
+
 ## [2.13.2] - 2026-07-01: remote HTTP + OAuth connector UX and hardening
 
 ### Added
