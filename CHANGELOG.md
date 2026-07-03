@@ -4,6 +4,15 @@ All notable changes to the llm-cli-gateway project.
 
 ## [Unreleased]
 
+### Added
+
+- **Updateable local skill packs.** Gateway startup now loads bundled skills,
+  optional `[skills].paths`, `LLM_GATEWAY_SKILLS_PATH`, and
+  `~/.llm-cli-gateway/skills` with deterministic override precedence. Skill
+  pack roots can include a `skill-pack.json` integrity manifest that pins each
+  loaded `SKILL.md` by SHA-256, allowing operators to update workflow skills
+  outside core gateway npm releases without silent network fetches.
+
 ## [2.14.1] - 2026-07-03
 
 ### Added

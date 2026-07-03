@@ -36,6 +36,21 @@ export interface Config {
   sessionTtl: number; // Session expiration in seconds
 }
 
+const SkillsSchema = z
+  .object({
+    paths: z.array(z.string().min(1)).default([]),
+  })
+  .strict()
+  .default({ paths: [] });
+
+export interface SkillsConfig {
+  paths: string[];
+  sources: {
+    configFile: string | null;
+    envOverrides: string[];
+  };
+}
+
 /**
  * Load configuration from environment variables.
  * Always returns a Config object with base fields.
@@ -208,6 +223,37 @@ function defaultPersistenceConfigPath(): string {
 
 export function defaultGatewayConfigPath(): string {
   return defaultPersistenceConfigPath();
+}
+
+export function loadSkillsConfig(logger: Logger = noopLogger): SkillsConfig {
+  const configPath = defaultGatewayConfigPath();
+  const { parsed, sourcePath } = readGatewayTomlFile(configPath, logger, "skills");
+  const rawSkills = (parsed?.skills as Record<string, unknown> | undefined) ?? {};
+  const sources = {
+    configFile: sourcePath,
+    envOverrides: [] as string[],
+  };
+
+  let skillsParsed;
+  try {
+    skillsParsed = SkillsSchema.parse(rawSkills);
+  } catch (err) {
+    throw new Error(`Invalid [skills] config: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
+  const paths = [...skillsParsed.paths];
+  const envPaths = process.env.LLM_GATEWAY_SKILLS_PATH;
+  if (envPaths !== undefined && envPaths.trim().length > 0) {
+    paths.push(
+      ...envPaths
+        .split(path.delimiter)
+        .map(part => part.trim())
+        .filter(Boolean)
+    );
+    sources.envOverrides.push("LLM_GATEWAY_SKILLS_PATH");
+  }
+
+  return { paths, sources };
 }
 
 /**

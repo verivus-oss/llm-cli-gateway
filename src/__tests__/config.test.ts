@@ -1,11 +1,12 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { tmpdir } from "node:os";
 import {
   loadConfig,
   DEFAULT_SESSION_TTL_SECONDS,
   loadLimitsConfig,
+  loadSkillsConfig,
   DEFAULT_HTTP_MAX_SESSIONS,
   DEFAULT_HTTP_SESSION_IDLE_TTL_MS,
   DEFAULT_MAX_RUNNING_JOBS,
@@ -181,6 +182,52 @@ describe("config", () => {
       created.push(path);
       process.env.LLM_GATEWAY_CONFIG = path;
       expect(() => loadLimitsConfig()).toThrow(/Invalid \[limits\] config/);
+    });
+  });
+
+  describe("loadSkillsConfig", () => {
+    const created: string[] = [];
+
+    afterEach(() => {
+      delete process.env.LLM_GATEWAY_CONFIG;
+      delete process.env.LLM_GATEWAY_SKILLS_PATH;
+      for (const p of created.splice(0)) {
+        rmSync(p, { force: true });
+      }
+    });
+
+    function pointSkillsConfig(tomlBody: string): void {
+      const p = withConfigToml(tomlBody);
+      created.push(p);
+      process.env.LLM_GATEWAY_CONFIG = p;
+    }
+
+    it("loads [skills].paths from config.toml", () => {
+      pointSkillsConfig(
+        ["[skills]", 'paths = ["/opt/gateway-skills", "~/local-skills"]'].join("\n")
+      );
+
+      const cfg = loadSkillsConfig(noopLogger);
+
+      expect(cfg.paths).toEqual(["/opt/gateway-skills", "~/local-skills"]);
+      expect(cfg.sources.configFile).toBe(process.env.LLM_GATEWAY_CONFIG);
+      expect(cfg.sources.envOverrides).toEqual([]);
+    });
+
+    it("appends LLM_GATEWAY_SKILLS_PATH entries using the host delimiter", () => {
+      pointSkillsConfig(["[skills]", 'paths = ["/opt/gateway-skills"]'].join("\n"));
+      process.env.LLM_GATEWAY_SKILLS_PATH = ["/tmp/pack-a", "/tmp/pack-b"].join(delimiter);
+
+      const cfg = loadSkillsConfig(noopLogger);
+
+      expect(cfg.paths).toEqual(["/opt/gateway-skills", "/tmp/pack-a", "/tmp/pack-b"]);
+      expect(cfg.sources.envOverrides).toEqual(["LLM_GATEWAY_SKILLS_PATH"]);
+    });
+
+    it("throws on invalid [skills] config", () => {
+      pointSkillsConfig(["[skills]", 'paths = "/not-an-array"'].join("\n"));
+
+      expect(() => loadSkillsConfig(noopLogger)).toThrow(/Invalid \[skills\] config/);
     });
   });
 

@@ -53,6 +53,40 @@ Or use directly with `npx` from an MCP client:
 
 The repo ships agent-ready workflow skills under [`.agents/skills`](.agents/skills) for async orchestration, session continuity, multi-LLM review, implement-review-fix loops, retrospective evidence walks, and secure approval-gated dispatch. Seven caller-facing skills are bundled in the published npm package: `async-job-orchestration`, `multi-llm-review`, `session-workflow`, `secure-orchestration`, `implement-review-fix`, `retrospective-walk`, and `public-demo-session`. Machine-readable DAG-TOML plans live under [`docs/plans`](docs/plans) and [`setup/install-plan.dag.toml`](setup/install-plan.dag.toml) for workflows that need deterministic sequencing and verification gates.
 
+Skill packs can be updated outside the core npm release by placing skill
+directories in local, operator-controlled paths. The gateway loads bundled
+skills first, then `[skills].paths`, then `LLM_GATEWAY_SKILLS_PATH`, then
+`~/.llm-cli-gateway/skills` when it exists; later roots override earlier skills
+by name. Each skill is a directory containing `SKILL.md`. A root may also carry
+`skill-pack.json` to pin expected `SKILL.md` hashes:
+
+```toml
+[skills]
+paths = ["/opt/llm-cli-gateway/skills"]
+```
+
+```bash
+export LLM_GATEWAY_SKILLS_PATH="/opt/team-skill-pack:/opt/incident-skill-pack"
+```
+
+```json
+{
+  "name": "team-pack",
+  "version": "1.0.0",
+  "skills": [
+    {
+      "name": "incident-retrospective",
+      "sha256": "<sha256 of incident-retrospective/SKILL.md>"
+    }
+  ]
+}
+```
+
+The loader is intentionally local-only: it never fetches remote Markdown at
+startup. To update a pack, install or replace files through your package manager
+or deployment system, then restart the gateway so the advertised `skills://...`
+resources refresh.
+
 The next documentation focus is provider-specific skill and DAG-TOML pairs for each outbound CLI and API-provider family: Claude, Codex, Gemini/Antigravity, Grok, Mistral Vibe, Devin, Cursor Agent, OpenAI-compatible endpoints, Anthropic Messages, and xAI Responses. The implementation plan is tracked in [`docs/plans/provider-workflow-assets.dag.toml`](docs/plans/provider-workflow-assets.dag.toml), with each provider asset expected to cover install/login checks or token-env checks, session behavior, approval modes, cache/telemetry surfaces, failure modes, and a smoke-test gate.
 
 ## Trust & Supply Chain
@@ -1435,6 +1469,7 @@ await callTool("session_delete", {
   LLM_GATEWAY_OAUTH_REQUIRE_CONSENT=1 LLM_GATEWAY_OAUTH_CONSENT_SECRET='choose-a-strong-code' node dist/index.js
   ```
 - `LLM_GATEWAY_CONFIG`: Path to the gateway TOML config (default: `~/.llm-cli-gateway/config.toml`). See **Persistence configuration** above for the `[persistence]` schema.
+- `LLM_GATEWAY_SKILLS_PATH`: Extra local skill-pack roots to load at startup, separated by the host path delimiter (`:` on Linux/macOS, `;` on Windows). These paths are appended after `[skills].paths`; `~/.llm-cli-gateway/skills` still loads last when present.
 - `LLM_GATEWAY_LOGS_DB`: **Deprecated** — overrides `[persistence].path` and selects `backend = "sqlite"` (or `backend = "none"` when set to `none`). Emits a deprecation warning at startup; migrate to `config.toml`.
   ```bash
   # Custom path
