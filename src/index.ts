@@ -8,7 +8,6 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
-  readdirSync,
   renameSync,
   unlinkSync,
   writeFileSync,
@@ -60,6 +59,7 @@ import {
   loadAcpConfig,
   loadAdminConfig,
   loadLimitsConfig,
+  loadSkillsConfig,
   defaultGatewayConfigPath,
   isXaiProviderEnabled,
   enabledApiProviders,
@@ -72,6 +72,7 @@ import {
   type AdminConfig,
   type GatewayLimitsConfig,
 } from "./config.js";
+import { loadGatewaySkills, type SkillEntry } from "./skill-loader.js";
 import { runAcpRequest, type AcpFlightSink } from "./acp/runtime.js";
 import { isAcpError } from "./acp/errors.js";
 import { redactSecrets } from "./secret-redaction.js";
@@ -414,35 +415,13 @@ function packageVersion(): string {
   return "unknown";
 }
 
-interface SkillEntry {
-  name: string;
-  content: string;
-  description: string;
-}
-
-function loadSkills(): SkillEntry[] {
-  const skills: SkillEntry[] = [];
-  try {
-    const dirs = readdirSync(SKILLS_DIR, { withFileTypes: true }).filter(d => d.isDirectory());
-    for (const dir of dirs) {
-      const skillPath = join(SKILLS_DIR, dir.name, "SKILL.md");
-      try {
-        const content = readFileSync(skillPath, "utf-8");
-        // Extract description from YAML frontmatter
-        const descMatch = content.match(/^---[\s\S]*?description:\s*(.+?)$/m);
-        const description = descMatch?.[1]?.trim() || dir.name;
-        skills.push({ name: dir.name, content, description });
-      } catch {
-        // Skill file missing or unreadable — skip silently
-      }
-    }
-  } catch {
-    // Skills directory missing — not fatal
-  }
-  return skills;
-}
-
-const loadedSkills = loadSkills();
+const skillsConfig = loadSkillsConfig(logger);
+const loadedSkills: SkillEntry[] = loadGatewaySkills({
+  bundledSkillsDir: SKILLS_DIR,
+  configuredPaths: skillsConfig.paths,
+  envSkillsPath: undefined,
+  logger,
+});
 
 // L1: Compact server instructions (~200 tokens) — injected into every client's
 // system prompt at connection time. Covers key patterns + pointers to L2 resources.
