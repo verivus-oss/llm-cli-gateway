@@ -23,7 +23,24 @@ const sitePath = join(repoRoot, "site", "index.html");
 
 const version = JSON.parse(readFileSync(pkgPath, "utf8")).version;
 if (!/^\d+\.\d+\.\d+$/.test(version)) {
-  console.error(`Refusing to sync: package.json version "${version}" is not x.y.z`);
+  // The marketing site tracks the latest STABLE release (the npm `latest` tag).
+  // A prerelease (x.y.z-<id>) deliberately does not move `latest`, so it must
+  // not move the site either: skip as a no-op (both write and --check modes)
+  // rather than rewriting the site to an RC string or failing the release gate.
+  // A genuinely malformed version is still a hard error.
+  // Strict semver prerelease: dot-separated non-empty alphanumeric/hyphen
+  // identifiers (rejects `2.14.0-.`, `2.14.0-rc..1`, and other malformed forms,
+  // which fall through to the hard error below).
+  if (/^\d+\.\d+\.\d+-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*$/.test(version)) {
+    console.log(
+      `package.json version "${version}" is a prerelease; the site tracks the ` +
+        `latest stable release, so site/index.html is left untouched.`
+    );
+    process.exit(0);
+  }
+  console.error(
+    `Refusing to sync: package.json version "${version}" is not x.y.z or x.y.z-<prerelease>`
+  );
   process.exit(2);
 }
 

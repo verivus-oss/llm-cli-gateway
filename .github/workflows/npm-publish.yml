@@ -140,4 +140,24 @@ jobs:
 
       - name: Publish
         if: ${{ !inputs['dry-run'] }}
-        run: npm publish --ignore-scripts
+        run: |
+          VERSION="$(node -p "require('./package.json').version")"
+          # A prerelease (x.y.z-<id>.<n>) must NOT take the `latest` dist-tag, or a
+          # plain `npm install llm-cli-gateway` would resolve to the release
+          # candidate. Publish it under a side tag derived from the prerelease
+          # identifier (rc/next/beta/alpha/...); a stable x.y.z publishes to
+          # `latest` as before. The `|| TAG=next` guard keeps an unparseable
+          # prerelease off `latest`.
+          if [[ "$VERSION" == *-* ]]; then
+            TAG="$(printf '%s' "$VERSION" | sed -E 's/^[0-9]+\.[0-9]+\.[0-9]+-([0-9A-Za-z]+).*/\1/')"
+            # Fall back to `next` when the derivation is empty, did not match
+            # (TAG still equals VERSION), OR resolves to `latest` in any case: a
+            # prerelease id of literally `latest` (e.g. 2.14.0-latest[.1]) must
+            # never take the `latest` dist-tag and hijack the default install.
+            { [ -n "$TAG" ] && [ "$TAG" != "$VERSION" ] && [ "${TAG,,}" != latest ]; } || TAG=next
+            echo "Publishing prerelease $VERSION under dist-tag: $TAG"
+            npm publish --ignore-scripts --tag "$TAG"
+          else
+            echo "Publishing stable $VERSION under dist-tag: latest"
+            npm publish --ignore-scripts
+          fi
