@@ -280,4 +280,23 @@ orphaned on the next sweep). Added `runOrphanSweepNow()` test hook (public, like
 `checkStalledJobs`). Post-fix gate: `npm test` 2282 pass, `npm run test:pg` 65
 pass, build/lint/format clean.
 
-Round 2 (re-review of the fixes) pending; dispatch ids recorded below.
+**Round 2 dispatch ids** (re-review of the fix commit 585d189): codex
+`rvw-139-codex-r2` (job 9753914f), grok `rvw-139-grok-r2` (job 32185de7), mistral
+`rvw-139-mistral-r2` (job b4bcb7e4).
+
+**Round 2 outcome: UNANIMOUS UNCONDITIONAL APPROVAL from all three substantive
+reviewers**, each on inspected code evidence:
+- **Codex**: all three fixes hold; independently ran `orphan-recovery-139` (30) +
+  `job-store` (19) + `tsc --noEmit`, and a direct `node:sqlite` probe confirming
+  `.all()` returns rows for `UPDATE ... RETURNING`.
+- **Grok**: exhaustive re-audit citing file:line for each fix; explicitly cleared
+  the follow-on concerns (clearing pid does not harm a live child of THIS
+  instance given heartbeat health gating; the guarded UPDATE...RETURNING is
+  correct under WAL + `busy_timeout` for shared-file sqlite; no
+  OrphanedJobSnapshot / FR logComplete regression). No new defects.
+- **Mistral**: verified all three fixes + ran the full suite (2282 pass);
+  confirmed its own round-1 strftime-microseconds claim was correctly rejected
+  (`%f` is milliseconds, matching `toISOString`).
+
+The cross-LLM review gate is satisfied: all three reviewers give unconditional
+approval on the fixed tree; no open blockers.
