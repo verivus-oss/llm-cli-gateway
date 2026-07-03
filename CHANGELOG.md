@@ -4,6 +4,16 @@ All notable changes to the llm-cli-gateway project.
 
 ## [Unreleased]
 
+## [2.14.1] - 2026-07-03
+
+### Added
+
+- **`retrospective-walk` workflow skill.** Bundles a guided retrospective skill
+  for walking a human or agent through a diff, worktree, commit range, gateway
+  job, or episode reference with structured what/why/who analysis, comment
+  capture as evidence, machine-readable output, and validation-receipt links
+  when an existing receipt-capable validation run is available.
+
 ## [2.14.0] - 2026-07-03
 
 ### Fixed

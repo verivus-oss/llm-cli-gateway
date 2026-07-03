@@ -1,6 +1,6 @@
 {
   "name": "llm-cli-gateway",
-  "version": "2.14.0",
+  "version": "2.14.1",
   "mcpName": "io.github.verivus-oss/llm-cli-gateway",
   "description": "Local-first MCP gateway for cross-model review across native coding-agent CLIs and API-token LLMs with sessions, durable jobs, and validation receipts.",
   "license": "MIT",
@@ -58,6 +58,7 @@
     ".agents/skills/session-workflow/SKILL.md",
     ".agents/skills/secure-orchestration/SKILL.md",
     ".agents/skills/implement-review-fix/SKILL.md",
+    ".agents/skills/retrospective-walk/SKILL.md",
     ".agents/skills/public-demo-session/SKILL.md"
   ],
   "scripts": {
