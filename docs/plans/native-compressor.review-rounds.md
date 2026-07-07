@@ -43,9 +43,36 @@ Findings and dispositions (spec sections cite the round-2 revision):
 | R1-18 | Grok note | "Three narrow wiring points" undersells the surface | ADOPTED: 5.5 replaced with an honest wiring inventory |
 | R1-19 | Mistral note | Divisor table should cite the annex section | ADOPTED: Section 8 cites annex Part 1 section 5 |
 
-## Round 2 (2026-07-08, pending)
+## Round 2 (2026-07-08, spec commit cfdb5a7): UNANIMOUS UNCONDITIONAL APPROVAL
 
-Packet: revised spec (this commit), diff vs eb24a4c, this round log.
-Question to reviewers: verify the round-1 dispositions against the revised
-text and the source, including the R1-12 rebuttal; unconditional approval or
-new concrete blockers.
+Packet: revised spec, diff eb24a4c..cfdb5a7, this round log. Reviewers were
+asked to verify every round-1 disposition against the revised text and the
+source (not the log narrative), including the R1-12 rebuttal.
+
+Verdicts, all "APPROVE (unconditional)":
+
+- Codex (resumed its round-1 session; correlation
+  814a70bc-4e7d-4f1f-a4fa-3cddc9818611): verified R1-1 through R1-7
+  dispositions against text and source; explicitly agrees the R1-12 decode
+  rule is bijective.
+- Gemini (correlation ab8d24c4-6f4c-4562-ae81-e75e95c595d5): verified R1-2,
+  R1-5, R1-8, R1-16 plus spot-checks; endorses the R1-12 rebuttal.
+- Mistral (correlation 182ba27b-db07-4d0f-9df1-91a2a082bec4): verified all
+  six of its round-1 findings resolved; ACCEPTED the R1-12 rebuttal
+  explicitly ("no concrete counterexample exists").
+- Grok: verified all four of its round-1 findings resolved plus systematic
+  spot-checks of every other disposition; agrees the R1-12 rebuttal holds
+  after enumerating candidate counterexample classes. Editorial-only NOTES
+  (decode-rule phrasing, off-by-a-few line numbers covered by the Section 0
+  symbol-governs convention). Evidence: Grok's verdict was produced via the
+  grok CLI directly (full text committed as
+  `native-compressor.review-round2-grok.txt`) because gateway-routed grok
+  jobs hit a grok 0.2.82 worker-handshake flake ("worker quit with fatal:
+  unexpected server response: expect initialized, accepted") that returned
+  silent empty successes for this prompt (gateway job ids 547b2045,
+  52128bce, 41edfd00, plus four direct --prompt-file/--single attempts);
+  a restructured prompt with a pre-generated diff file completed normally.
+
+Gate result: the spec at cfdb5a7 passes the cross-LLM review gate with four
+unconditional approvals. Stage 2 closed; implementation (PR-1) may begin
+against this spec.
