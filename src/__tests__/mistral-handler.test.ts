@@ -31,12 +31,12 @@ describe("U22 prepareMistralRequest — Vibe divergences", () => {
     expect(result.args[1]).toBe("hello there");
   });
 
-  it("defaults to --agent auto-approve in programmatic mode when no permissionMode is set", () => {
+  it("defaults to --agent accept-edits in programmatic mode when no permissionMode is set (#155)", () => {
     const result = prepareMistralRequest({ prompt: "x" });
     const agentIdx = result.args.indexOf("--agent");
     expect(agentIdx).toBeGreaterThan(-1);
-    expect(result.args[agentIdx + 1]).toBe("auto-approve");
-    expect(MISTRAL_DEFAULT_AGENT_MODE).toBe("auto-approve");
+    expect(result.args[agentIdx + 1]).toBe("accept-edits");
+    expect(MISTRAL_DEFAULT_AGENT_MODE).toBe("accept-edits");
   });
 
   it.each(MISTRAL_BUILTIN_AGENT_MODES)("maps permissionMode=%s onto --agent %s", mode => {

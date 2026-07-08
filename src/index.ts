@@ -4143,6 +4143,29 @@ export function prepareGrokRequest(
   };
 }
 
+/**
+ * Resolve Vibe's `--agent` mode for a request (F15b + issue #155).
+ *
+ * The safe default is `accept-edits` (auto-accept file edits; dangerous ops such
+ * as shell stay gated, and in programmatic mode Vibe DENIES rather than blocks on
+ * them). `auto-approve` (Vibe's "YOLO") is reached only deliberately:
+ *  - under `legacy`, when the caller passes an explicit `permissionMode`, or
+ *  - under either strategy, when the operator sets `LLM_GATEWAY_APPROVAL_ALLOW_BYPASS`.
+ *
+ * Under `mcp_managed` the gateway approval gate owns the mode, so a caller mode is
+ * NOT honored; under `legacy` an explicit caller mode wins.
+ */
+export function resolveMistralAgentMode(
+  approvalStrategy: "legacy" | "mcp_managed" | undefined,
+  callerMode: MistralAgentMode | undefined
+): MistralAgentMode {
+  if (approvalStrategy === "mcp_managed") {
+    return bypassAllowedByOperator() ? "auto-approve" : "accept-edits";
+  }
+  if (callerMode !== undefined) return callerMode;
+  return bypassAllowedByOperator() ? "auto-approve" : "accept-edits";
+}
+
 export function prepareMistralRequest(
   params: {
     prompt?: string;
@@ -4239,17 +4262,14 @@ export function prepareMistralRequest(
     }
   }
 
-  // F15b: under mcp_managed, mistral (vibe) no longer force-sets --agent
-  // auto-approve (vibe's "previous YOLO behavior") for every request. Default to
-  // --agent accept-edits (auto-accept file edits; dangerous ops stay gated);
-  // escalate to auto-approve only with the explicit operator opt-in
-  // (LLM_GATEWAY_APPROVAL_ALLOW_BYPASS), the same switch F15a/F15b use elsewhere.
-  const effectivePermissionMode: MistralAgentMode =
-    params.approvalStrategy === "mcp_managed"
-      ? bypassAllowedByOperator()
-        ? "auto-approve"
-        : "accept-edits"
-      : (params.permissionMode ?? "auto-approve");
+  // F15b + #155: vibe defaults to --agent accept-edits (auto-accept edits;
+  // dangerous ops stay gated, and programmatic mode denies rather than hangs on
+  // them). auto-approve (vibe's "YOLO") requires a deliberate opt-in: an explicit
+  // caller permissionMode under legacy, or LLM_GATEWAY_APPROVAL_ALLOW_BYPASS.
+  const effectivePermissionMode: MistralAgentMode = resolveMistralAgentMode(
+    params.approvalStrategy,
+    params.permissionMode
+  );
 
   const prep = buildMistralCliInvocation({
     prompt: effectivePrompt,
@@ -4334,12 +4354,7 @@ export function buildMistralRetryPrep(
     prompt: params.effectivePrompt,
     resolvedModel: recoveryModel,
     outputFormat: params.outputFormat,
-    permissionMode:
-      params.approvalStrategy === "mcp_managed"
-        ? bypassAllowedByOperator()
-          ? "auto-approve"
-          : "accept-edits"
-        : (params.permissionMode ?? "auto-approve"),
+    permissionMode: resolveMistralAgentMode(params.approvalStrategy, params.permissionMode),
     allowedTools: params.allowedTools,
     disallowedTools: params.disallowedTools,
     trust: params.trust,
@@ -7614,7 +7629,7 @@ export async function handleMistralRequest(
     runtime
   );
   deps.logger.info(
-    `[${corrId}] mistral_request invoked with model=${prep.resolvedModel || "default"}, permissionMode=${params.permissionMode || "auto-approve"}, prompt length=${prep.effectivePrompt.length}`
+    `[${corrId}] mistral_request invoked with model=${prep.resolvedModel || "default"}, permissionMode=${resolveMistralAgentMode(params.approvalStrategy, params.permissionMode)}, prompt length=${prep.effectivePrompt.length}`
   );
 
   try {
@@ -10483,7 +10498,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
 
   server.tool(
     "mistral_request",
-    "Run a Mistral Vibe CLI request synchronously (when async jobs are enabled, auto-defers to a pollable job past the sync deadline; otherwise runs to completion). Requires exactly one of prompt or promptParts. Defaults to --agent auto-approve (unattended tool execution); pass permissionMode plan or accept-edits for safer runs.",
+    "Run a Mistral Vibe CLI request synchronously (when async jobs are enabled, auto-defers to a pollable job past the sync deadline; otherwise runs to completion). Requires exactly one of prompt or promptParts. Defaults to --agent accept-edits (auto-accepts file edits; dangerous ops such as shell stay gated); pass permissionMode auto-approve (or set LLM_GATEWAY_APPROVAL_ALLOW_BYPASS) for unattended tool execution.",
     {
       prompt: z
         .string()
@@ -10529,7 +10544,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .string()
         .optional()
         .describe(
-          "Vibe --agent name. Builtins: default|plan|accept-edits|auto-approve; Vibe also accepts install-gated builtins (e.g. lean) and custom agents from ~/.vibe/agents, so any name is passed through. Defaults to auto-approve for programmatic use."
+          "Vibe --agent name. Builtins: default|plan|accept-edits|auto-approve; Vibe also accepts install-gated builtins (e.g. lean) and custom agents from ~/.vibe/agents, so any name is passed through. Defaults to accept-edits; pass auto-approve (or set LLM_GATEWAY_APPROVAL_ALLOW_BYPASS) for unattended tool execution."
         ),
       approvalStrategy: z
         .enum(["legacy", "mcp_managed"])
@@ -12312,7 +12327,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .string()
           .optional()
           .describe(
-            "Vibe --agent name. Builtins: default|plan|accept-edits|auto-approve; Vibe also accepts install-gated builtins (e.g. lean) and custom agents from ~/.vibe/agents, so any name is passed through. Defaults to auto-approve for programmatic use."
+            "Vibe --agent name. Builtins: default|plan|accept-edits|auto-approve; Vibe also accepts install-gated builtins (e.g. lean) and custom agents from ~/.vibe/agents, so any name is passed through. Defaults to accept-edits; pass auto-approve (or set LLM_GATEWAY_APPROVAL_ALLOW_BYPASS) for unattended tool execution."
           ),
         approvalStrategy: z
           .enum(["legacy", "mcp_managed"])
