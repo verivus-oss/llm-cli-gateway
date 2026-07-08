@@ -25,6 +25,9 @@ function fail(): never {
   throw new SyntaxError("json-minify: not valid JSON");
 }
 
+const SIMPLE_ESCAPES = new Set(['"', "\\", "/", "b", "f", "n", "r", "t"]);
+const HEX = /^[0-9a-fA-F]{4}$/;
+
 function copyString(c: Cursor): void {
   const start = c.pos;
   if (c.text[c.pos] !== '"') fail();
@@ -32,6 +35,18 @@ function copyString(c: Cursor): void {
   while (c.pos < c.text.length) {
     const ch = c.text[c.pos];
     if (ch === "\\") {
+      // Validate the escape rather than blindly skipping two chars: an
+      // invalid escape (e.g. \q, or \u with fewer than 4 hex digits) means
+      // this is not valid JSON, so fail to identity. Copying it verbatim
+      // would misclassify near-JSON prose as data and strip its whitespace.
+      const esc = c.text[c.pos + 1];
+      if (esc === undefined) fail();
+      if (esc === "u") {
+        if (!HEX.test(c.text.slice(c.pos + 2, c.pos + 6))) fail();
+        c.pos += 6;
+        continue;
+      }
+      if (!SIMPLE_ESCAPES.has(esc)) fail();
       c.pos += 2;
       continue;
     }

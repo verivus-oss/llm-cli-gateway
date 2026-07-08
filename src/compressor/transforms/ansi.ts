@@ -47,13 +47,14 @@ const DANGEROUS_CSI_FINALS = new Set([
   "s",
   "u",
 ]);
-// Alt-screen and cursor-addressing private modes.
-const DANGEROUS_PRIVATE_MODES = /^\?(?:47|1047|1049)$/;
-
 /**
  * True when the text contains sequences that make lexical stripping unsafe
  * (a terminal UI recording rather than a log): cursor movement, scrolling,
- * erase-in-display, alt-screen private modes, or backspace overwrites.
+ * erase-in-display, any DEC private-mode set/reset (alt-screen and cursor
+ * addressing live here), or backspace overwrites. Private modes are matched
+ * broadly (any `?`-prefixed parameter with an h/l final, including combined
+ * lists like `?1049;25h`) because "correctness beats savings": a private
+ * mode we cannot cheaply prove benign is treated as dangerous (identity).
  * The router calls this during classification (spec 6.2); the transform
  * checks again as defense in depth.
  */
@@ -65,7 +66,7 @@ export function hasDangerousSequences(text: string): boolean {
     const params = match[1];
     const final = match[2];
     if (DANGEROUS_CSI_FINALS.has(final)) return true;
-    if ((final === "h" || final === "l") && DANGEROUS_PRIVATE_MODES.test(params)) {
+    if ((final === "h" || final === "l") && params.includes("?")) {
       return true;
     }
   }
@@ -82,47 +83,54 @@ function stripEscapes(text: string): string {
 }
 
 /**
- * Collapse carriage-return overwrites: for a line with INTERNAL \r
- * characters, keep the final visible frame (the segment after the last \r)
- * and append a counted sentinel. A trailing \r is a CRLF line-ending
- * artifact, not an overwrite, and is preserved as-is.
+ * Compute the visible line produced by carriage-return overwrites. A CR
+ * moves the cursor to column 0 WITHOUT clearing, so each frame's characters
+ * overwrite from column 0 and any columns a later (shorter) frame does not
+ * reach retain the earlier frame's character. E.g. "abcdef\rXY" renders as
+ * "XYcdef", not "XY" (keeping only the last segment would be content loss).
  */
-function collapseCrOverwrites(text: string, counts: MarkerCounts): string {
-  const lines = text.split("\n");
-  const out: string[] = [];
-  for (const line of lines) {
-    const crlf = line.endsWith("\r");
-    const body = crlf ? line.slice(0, -1) : line;
-    if (!body.includes("\r")) {
-      out.push(line);
-      continue;
-    }
-    const frames = body.split("\r");
-    // Empty final frame (e.g. "...\r") keeps the last non-empty frame: the
-    // writer rewound the cursor but had not redrawn yet.
-    let final = frames[frames.length - 1];
-    if (final === "") {
-      for (let i = frames.length - 1; i >= 0; i -= 1) {
-        if (frames[i] !== "") {
-          final = frames[i];
-          break;
-        }
-      }
-    }
-    out.push(crlf ? `${final}\r` : final);
-    out.push(crMarker(frames.length - 1));
-    counts.folded += 1;
+function overlayFrames(frames: string[]): string {
+  const cells: string[] = [];
+  for (const frame of frames) {
+    for (let i = 0; i < frame.length; i += 1) cells[i] = frame[i];
   }
-  return out.join("\n");
+  return cells.join("");
+}
+
+/** Collapse the CR overwrites in one already-escape-stripped line, appending
+ * the counted sentinel when any internal \r was present. */
+function collapseLine(line: string, out: string[], counts: MarkerCounts): void {
+  const crlf = line.endsWith("\r");
+  const body = crlf ? line.slice(0, -1) : line;
+  if (!body.includes("\r")) {
+    out.push(line);
+    return;
+  }
+  const visible = overlayFrames(body.split("\r"));
+  out.push(crlf ? `${visible}\r` : visible);
+  out.push(crMarker(body.split("\r").length - 1));
+  counts.folded += 1;
 }
 
 /**
- * The ANSI route body: strip ECMA-48 sequences and stray C0 controls, then
- * collapse \r overwrites, outside fences only. Callers must have routed
- * through hasDangerousSequences first; this returns the input unchanged if
- * dangerous sequences are present (defense in depth).
+ * The ANSI route body: per line (outside fences), strip ECMA-48 sequences and
+ * stray C0 controls, then collapse \r overwrites. A line containing a backtick
+ * is left byte-identical so inline code spans are never touched (spec 6.7,
+ * the same global protection normalizeWhitespace applies). Callers must have
+ * routed through hasDangerousSequences first; this returns the input unchanged
+ * if dangerous sequences are present (defense in depth).
  */
 export function stripAnsi(text: string, counts: MarkerCounts): string {
   if (hasDangerousSequences(text)) return text;
-  return mapUnfenced(text, segment => collapseCrOverwrites(stripEscapes(segment), counts));
+  return mapUnfenced(text, segment => {
+    const out: string[] = [];
+    for (const line of segment.split("\n")) {
+      if (line.includes("`")) {
+        out.push(line);
+        continue;
+      }
+      collapseLine(stripEscapes(line), out, counts);
+    }
+    return out.join("\n");
+  });
 }

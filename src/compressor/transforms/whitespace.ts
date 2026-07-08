@@ -101,6 +101,14 @@ export function normalizeWhitespace(text: string): string {
 
     const out: string[] = [];
     let blankRun = 0;
+    // Collapse a run of 3+ blank lines to a single blank line, keeping the
+    // FIRST blank line's exact bytes so a CRLF blank ("\r") is not silently
+    // rewritten to a bare LF line (which would corrupt CRLF line endings).
+    const collapse = (): void => {
+      if (blankRun < 3) return;
+      const keep = out[out.length - blankRun];
+      out.splice(out.length - blankRun, blankRun, keep);
+    };
     for (const line of lines) {
       const isBlank = line === "" || line === "\r";
       if (isBlank) {
@@ -108,16 +116,11 @@ export function normalizeWhitespace(text: string): string {
         out.push(line);
         continue;
       }
-      if (blankRun >= 3) {
-        // Collapse the run of 3+ blank lines to a single blank line.
-        out.splice(out.length - blankRun, blankRun, "");
-      }
+      collapse();
       blankRun = 0;
       out.push(line);
     }
-    if (blankRun >= 3) {
-      out.splice(out.length - blankRun, blankRun, "");
-    }
+    collapse();
     return out.join("\n");
   });
 }

@@ -94,6 +94,15 @@ describe("json transform (Tier B, spec 6.3)", () => {
     expect(minifyJson('{"a": 01}')).toBeNull(); // leading zero invalid
   });
 
+  it("rejects invalid string escapes rather than accepting them (impl review B1)", () => {
+    expect(minifyJson('{"a":"\\q"}')).toBeNull(); // \q is not a valid escape
+    expect(minifyJson('{"a":"\\u12"}')).toBeNull(); // short \u
+    expect(minifyJson('{"a":"\\u12zz"}')).toBeNull(); // non-hex \u
+    expect(minifyJson('{"a":"\\')).toBeNull(); // trailing lone backslash
+    // Valid escapes still pass and are preserved byte-for-byte.
+    expect(minifyJson('{ "a": "\\n\\t\\u00e9\\/" }')).toBe('{"a":"\\n\\t\\u00e9\\/"}');
+  });
+
   it("handles duplicate keys without reordering or dropping", () => {
     const min = minifyJson('{"a": 1, "a": 2}');
     expect(min).toBe('{"a":1,"a":2}');
@@ -183,6 +192,28 @@ describe("ansi transform (Tier P + CR fold, spec 6.6)", () => {
     expect(hasDangerousSequences(fixture("ansi-altscreen.txt"))).toBe(true);
     expect(hasDangerousSequences(fixture("ansi-progress.txt"))).toBe(false);
   });
+
+  it("flags combined private-mode params like ?1049;25h as dangerous (impl review B4)", () => {
+    expect(hasDangerousSequences("menu\x1b[?1049;25hbody")).toBe(true);
+    expect(hasDangerousSequences("hide\x1b[?25;1049lshow")).toBe(true);
+  });
+
+  it("CR overlay keeps earlier columns a shorter final frame does not reach (impl review B3)", () => {
+    const counts: MarkerCounts = { folded: 0, escaped: 0 };
+    // "abcdef\rXY" renders as "XYcdef" on a real terminal, not "XY".
+    const out = stripAnsi("abcdef\rXY\n", counts);
+    expect(out).toContain("XYcdef");
+    expect(out).not.toMatch(/^XY\n/);
+  });
+
+  it("does not strip ANSI inside an inline code span (impl review B2)", () => {
+    const counts: MarkerCounts = { folded: 0, escaped: 0 };
+    const src = "log line with \x1b[31mred\x1b[0m color\nand `\x1b[32minline\x1b[0m` code\n";
+    const out = stripAnsi(src, counts);
+    // The bare-prose ANSI is stripped, the inline-code line is byte-identical.
+    expect(out).toContain("log line with red color");
+    expect(out).toContain("and `\x1b[32minline\x1b[0m` code");
+  });
 });
 
 describe("whitespace transform + fence protection (Tier P, spec 6.7)", () => {
@@ -207,6 +238,15 @@ describe("whitespace transform + fence protection (Tier P, spec 6.7)", () => {
     const out = normalizeWhitespace(fixture("gemini-plain.txt"));
     expect(out).not.toMatch(/\n{3,}/);
     expect(out).not.toMatch(/[ \t]+\n/);
+  });
+
+  it("preserves CRLF blank lines when collapsing a blank run (impl review, CRLF)", () => {
+    // A run of 4 CRLF blank lines (\r before each \n) must collapse to a
+    // single CRLF blank line, not a bare LF line.
+    const src = "alpha\r\n\r\n\r\n\r\n\r\nbeta\r\n";
+    const out = normalizeWhitespace(src);
+    expect(out).toContain("alpha\r\n\r\nbeta");
+    expect(out).not.toContain("alpha\r\n\nbeta");
   });
 
   it("preserves trailing whitespace AND blank runs INSIDE a fence byte-for-byte", () => {
