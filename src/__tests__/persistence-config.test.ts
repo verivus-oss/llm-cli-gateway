@@ -113,6 +113,24 @@ describe("loadPersistenceConfig", () => {
     expect(cfg.asyncJobsEnabled).toBe(true);
   });
 
+  it("issue #139: ownsOrphanRecovery defaults to false and parses from config", () => {
+    pointToMissing();
+    expect(loadPersistenceConfig(noopLogger).ownsOrphanRecovery).toBe(false);
+
+    pointToFile(
+      [
+        "[persistence]",
+        'backend = "postgres"',
+        'dsn = "postgresql://u:p@localhost/db"',
+        "ownsOrphanRecovery = true",
+        "",
+      ].join("\n")
+    );
+    const cfg = loadPersistenceConfig(noopLogger);
+    expect(cfg.backend).toBe("postgres");
+    expect(cfg.ownsOrphanRecovery).toBe(true);
+  });
+
   it("backend=postgres requires dsn", () => {
     pointToFile(["[persistence]", 'backend = "postgres"', ""].join("\n"));
     vi.stubEnv("LLM_GATEWAY_LOGS_DB", "");
@@ -313,6 +331,7 @@ describe("createJobStore", () => {
       retentionDays: 30,
       dedupWindowMs: 3600000,
       acknowledgeEphemeral: false,
+      ownsOrphanRecovery: false,
       asyncJobsEnabled: false,
       sources: { configFile: null, envOverrides: [] },
     });
@@ -327,6 +346,7 @@ describe("createJobStore", () => {
       retentionDays: 30,
       dedupWindowMs: 3600000,
       acknowledgeEphemeral: true,
+      ownsOrphanRecovery: false,
       asyncJobsEnabled: true,
       sources: { configFile: null, envOverrides: [] },
     });
@@ -343,6 +363,7 @@ describe("createJobStore", () => {
         retentionDays: 30,
         dedupWindowMs: 3600000,
         acknowledgeEphemeral: false,
+        ownsOrphanRecovery: false,
         asyncJobsEnabled: true,
         sources: { configFile: null, envOverrides: [] },
       });
@@ -353,25 +374,24 @@ describe("createJobStore", () => {
     }
   });
 
-  it("createJobStore({backend:'postgres'}) reaches the throwing Postgres stub", () => {
+  it("createJobStore({backend:'postgres'}) requires a non-empty DSN", () => {
     expect(() =>
       createJobStore({
         backend: "postgres",
         path: null,
-        dsn: "postgresql://x@y/z",
+        dsn: "",
         retentionDays: 30,
         dedupWindowMs: 3600000,
         acknowledgeEphemeral: false,
+        ownsOrphanRecovery: false,
         asyncJobsEnabled: true,
         sources: { configFile: null, envOverrides: [] },
       })
-    ).toThrow(/not yet implemented/);
+    ).toThrow();
   });
 
-  it("PostgresJobStore constructor also throws when called directly", () => {
-    // Belt-and-braces: catches a regression where someone changes the factory
-    // to swallow the throw but leaves the stub class lying around.
-    expect(() => new PostgresJobStore("postgresql://x@y/z")).toThrow(/not yet implemented/);
+  it("PostgresJobStore constructor requires a non-empty DSN", () => {
+    expect(() => new PostgresJobStore("")).toThrow(/non-empty DSN/);
   });
 });
 
@@ -517,6 +537,7 @@ describe("createGatewayServer — structural invariant on async tool registratio
       retentionDays: 30,
       dedupWindowMs: 3600000,
       acknowledgeEphemeral: true,
+      ownsOrphanRecovery: false,
       asyncJobsEnabled: true,
       sources: { configFile: null, envOverrides: [] },
       ...overrides,
@@ -637,8 +658,8 @@ describe("createGatewayServer — structural invariant on async tool registratio
 
   // Regression: llm_process_health must report the EFFECTIVE async state
   // (config flag AND hasStore()), not the raw configured intent. A backend
-  // whose durable store fails to open (backend='postgres', which always throws,
-  // or a sqlite DB that fails to open) is caught in getJobStore() and nulls the
+  // whose durable store fails to open (for example a Postgres connection error
+  // or a SQLite DB that fails to open) is caught in getJobStore() and nulls the
   // store, so async tools are not registered, and health must not claim they
   // are.
   async function readHealthPersistence(
@@ -745,8 +766,8 @@ describe("createGatewayServer — structural invariant on async tool registratio
 
   it("llm_process_health reports asyncJobsEnabled=false when the durable store failed to open (backend != 'none')", async () => {
     // Post-catch runtime: getJobStore() caught a store-open error (e.g.
-    // backend='postgres', whose store constructor always throws) and nulled the
-    // store. The config flag says enabled; the effective state is not.
+    // a Postgres connection error) and nulled the store. The config flag says
+    // enabled; the effective state is not.
     const manager = new AsyncJobManager(noopLogger, undefined, null);
     const server = createGatewayServer({
       asyncJobManager: manager,
@@ -807,5 +828,87 @@ describe("createGatewayServer — structural invariant on async tool registratio
     const p = await readHealthPersistence(server);
     expect(p.asyncJobsEnabled).toBe(false);
     expect(p.warning).toMatch(/backend = 'none'/);
+  });
+});
+
+describe("loadPersistenceConfig #139 durable lease knobs (U15)", () => {
+  let tempDir: string;
+  let stubbedConfig: string | undefined;
+
+  beforeEach(() => {
+    tempDir = mkdtempSync(join(tmpdir(), "persistence-lease-test-"));
+    stubbedConfig = process.env.LLM_GATEWAY_CONFIG;
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    rmSync(tempDir, { recursive: true, force: true });
+    if (stubbedConfig === undefined) delete process.env.LLM_GATEWAY_CONFIG;
+    else process.env.LLM_GATEWAY_CONFIG = stubbedConfig;
+  });
+
+  function pointToFile(tomlBody: string): void {
+    const p = join(tempDir, "config.toml");
+    writeFileSync(p, tomlBody);
+    vi.stubEnv("LLM_GATEWAY_CONFIG", p);
+    vi.stubEnv("LLM_GATEWAY_LOGS_DB", "");
+    vi.stubEnv("LLM_GATEWAY_JOBS_DB", "");
+  }
+
+  it("resolves lease-knob defaults when unset", () => {
+    pointToFile('[persistence]\nbackend = "sqlite"\n');
+    const cfg = loadPersistenceConfig(noopLogger);
+    expect(cfg.instanceHeartbeatMs).toBe(15000);
+    expect(cfg.instanceLeaseTtlMs).toBe(90000);
+    expect(cfg.httpJobGraceMs).toBe(300000);
+    expect(cfg.orphanSweepIntervalMs).toBe(30000);
+    expect(cfg.instanceGcMs).toBe(3600000);
+  });
+
+  it("accepts explicit valid lease knobs", () => {
+    pointToFile(
+      [
+        "[persistence]",
+        'backend = "sqlite"',
+        "instanceHeartbeatMs = 5000",
+        "instanceLeaseTtlMs = 20000",
+        "httpJobGraceMs = 60000",
+        "orphanSweepIntervalMs = 10000",
+        "instanceGcMs = 600000",
+        "",
+      ].join("\n")
+    );
+    const cfg = loadPersistenceConfig(noopLogger);
+    expect(cfg.instanceHeartbeatMs).toBe(5000);
+    expect(cfg.instanceLeaseTtlMs).toBe(20000);
+    expect(cfg.httpJobGraceMs).toBe(60000);
+  });
+
+  it("rejects instanceLeaseTtlMs < 2 * instanceHeartbeatMs", () => {
+    pointToFile(
+      '[persistence]\nbackend = "sqlite"\ninstanceHeartbeatMs = 15000\ninstanceLeaseTtlMs = 20000\n'
+    );
+    expect(() => loadPersistenceConfig(noopLogger)).toThrow(/instanceLeaseTtlMs/);
+  });
+
+  it("rejects httpJobGraceMs < instanceLeaseTtlMs", () => {
+    pointToFile(
+      '[persistence]\nbackend = "sqlite"\ninstanceLeaseTtlMs = 90000\nhttpJobGraceMs = 30000\n'
+    );
+    expect(() => loadPersistenceConfig(noopLogger)).toThrow(/httpJobGraceMs/);
+  });
+
+  it("still parses ownsOrphanRecovery and emits a one-time deprecation warning", () => {
+    pointToFile('[persistence]\nbackend = "sqlite"\nownsOrphanRecovery = true\n');
+    const warnings: string[] = [];
+    const logger = {
+      info: () => {},
+      error: () => {},
+      debug: () => {},
+      warn: (m: string) => warnings.push(m),
+    };
+    const cfg = loadPersistenceConfig(logger);
+    expect(cfg.ownsOrphanRecovery).toBe(true);
+    expect(warnings.some(w => /ownsOrphanRecovery is deprecated/.test(w))).toBe(true);
   });
 });

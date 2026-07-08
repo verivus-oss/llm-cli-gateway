@@ -28,17 +28,17 @@ Every path that flips `job.status` away from `"running"` must call
 `writeFlightComplete(job, finalStatus)` exactly once. Listed by callsite
 shape; use `rg` before relying on exact line numbers:
 
-| # | Trigger                                  | Location | Resulting status | FlightLogResult.status |
-|---|------------------------------------------|-----------------|------------------|------------------------|
-| 1 | Clean child exit, exitCode=0             | close handler | `completed` | `completed` |
-| 2 | Clean child exit, exitCode!=0            | close handler | `failed`    | `failed` |
-| 3 | Child error / launch failure             | error handler | `failed`    | `failed` |
-| 4 | Idle timeout                             | resetIdleTimer callback | `failed` (125) | `failed` |
-| 5 | Output overflow (>50MB)                  | appendOutput | `failed` (126) | `failed` |
-| 6 | User cancel (cancelJob)                  | cancelJob | `canceled`  | `failed` + errorMessage="canceled by caller" |
-| 7 | Dead-process detector (eviction sweep)   | eviction sweep | `failed`    | `failed` |
-| 8 | Exited-without-status mismatch (eviction)| eviction sweep | `failed`    | `failed` |
-| 9 | Orphan-on-startup (constructor boot)     | constructor boot calls JobStore.markOrphanedOnStartup | `orphaned` (in JobStore) | `completed` when a provider response was already captured in stdout and no failure was recorded; otherwise `failed` + errorMessage="orphaned after gateway restart" |
+| #   | Trigger                                   | Location                                              | Resulting status         | FlightLogResult.status                                                                                                                                              |
+| --- | ----------------------------------------- | ----------------------------------------------------- | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | Clean child exit, exitCode=0              | close handler                                         | `completed`              | `completed`                                                                                                                                                         |
+| 2   | Clean child exit, exitCode!=0             | close handler                                         | `failed`                 | `failed`                                                                                                                                                            |
+| 3   | Child error / launch failure              | error handler                                         | `failed`                 | `failed`                                                                                                                                                            |
+| 4   | Idle timeout                              | resetIdleTimer callback                               | `failed` (125)           | `failed`                                                                                                                                                            |
+| 5   | Output overflow (>50MB)                   | appendOutput                                          | `failed` (126)           | `failed`                                                                                                                                                            |
+| 6   | User cancel (cancelJob)                   | cancelJob                                             | `canceled`               | `failed` + errorMessage="canceled by caller"                                                                                                                        |
+| 7   | Dead-process detector (eviction sweep)    | eviction sweep                                        | `failed`                 | `failed`                                                                                                                                                            |
+| 8   | Exited-without-status mismatch (eviction) | eviction sweep                                        | `failed`                 | `failed`                                                                                                                                                            |
+| 9   | Orphan-on-startup (constructor boot)      | constructor boot calls JobStore.markOrphanedOnStartup | `orphaned` (in JobStore) | `completed` when a provider response was already captured in stdout and no failure was recorded; otherwise `failed` + errorMessage="orphaned after gateway restart" |
 
 FlightLogResult.status is only `"completed" | "failed"` (see
 `src/flight-recorder.ts`). Canceled still collapses to `"failed"`
@@ -64,29 +64,30 @@ cancel/orphan querying to an errorMessage prefix scan.
 ## Data contract per callsite
 
 What's already in scope at each point — drives the `flightRecorderEntry`
-+ `extractUsage` plumbing in `StartJobOptions`:
 
-| Field needed by FlightLogStart | At `startJob` time | At terminal time |
-|--------------------------------|--------------------|------------------|
-| `correlationId`                | `correlationId` arg | `job.correlationId` |
-| `cli`                          | `cli` arg | `job.cli` |
-| `model`                        | From caller `prep.resolvedModel` (must thread through `flightRecorderEntry.model`) | n/a |
-| `prompt`                       | From caller `prep.effectivePrompt` (via `flightRecorderEntry.prompt`) | n/a |
-| `sessionId`                    | From caller `params.sessionId` (via `flightRecorderEntry.sessionId`) | n/a |
-| `asyncJobId`                   | The freshly-generated `id` inside `startJobWithDedup` | n/a |
-| `stablePrefixHash`             | `prep.stablePrefixHash` (via `flightRecorderEntry`) | n/a |
-| `stablePrefixTokens`           | `prep.stablePrefixTokens` (via `flightRecorderEntry`) | n/a |
+- `extractUsage` plumbing in `StartJobOptions`:
 
-| Field needed by FlightLogResult | At terminal time |
-|---------------------------------|------------------|
-| `response`                      | `isFailure ? (job.stderr || job.stdout) : job.stdout` (R2 Codex-F2: mirrors sync helpers; stderr is where the useful text lives on launch errors). |
-| `durationMs`                    | `Date.now() - new Date(job.startedAt).getTime()` |
-| `retryCount`                    | `0` (async manager doesn't retry; that's the sync helper's job) |
-| `circuitBreakerState`           | `"closed"` (manager doesn't own a CB) |
-| `optimizationApplied`           | `false` (manager doesn't apply optimisations) |
-| `exitCode`                      | `job.exitCode ?? (completed ? 0 : 1)` |
-| `errorMessage`                  | failure only: `overrideErrorMessage ?? job.error ?? job.stderr ?? "Exit code N"` (R2 Codex-F2: `job.error` is null on most non-zero exits). Per-callsite overrides: cancel → "canceled by caller"; output-overflow → "Output exceeded maximum size (50MB)"; dead-process → "Process no longer exists (dead process detected)"; exited-without-status → "Process exited without proper status transition"; orphan failure → "orphaned after gateway restart". Captured-output orphan completions omit `errorMessage`. |
-| `status`                        | derived per the catalogue above |
+| Field needed by FlightLogStart | At `startJob` time                                                                 | At terminal time    |
+| ------------------------------ | ---------------------------------------------------------------------------------- | ------------------- |
+| `correlationId`                | `correlationId` arg                                                                | `job.correlationId` |
+| `cli`                          | `cli` arg                                                                          | `job.cli`           |
+| `model`                        | From caller `prep.resolvedModel` (must thread through `flightRecorderEntry.model`) | n/a                 |
+| `prompt`                       | From caller `prep.effectivePrompt` (via `flightRecorderEntry.prompt`)              | n/a                 |
+| `sessionId`                    | From caller `params.sessionId` (via `flightRecorderEntry.sessionId`)               | n/a                 |
+| `asyncJobId`                   | The freshly-generated `id` inside `startJobWithDedup`                              | n/a                 |
+| `stablePrefixHash`             | `prep.stablePrefixHash` (via `flightRecorderEntry`)                                | n/a                 |
+| `stablePrefixTokens`           | `prep.stablePrefixTokens` (via `flightRecorderEntry`)                              | n/a                 |
+
+| Field needed by FlightLogResult                                                        | At terminal time                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| -------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `response`                                                                             | `isFailure ? (job.stderr                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |     | job.stdout) : job.stdout` (R2 Codex-F2: mirrors sync helpers; stderr is where the useful text lives on launch errors). |
+| `durationMs`                                                                           | `Date.now() - new Date(job.startedAt).getTime()`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `retryCount`                                                                           | `0` (async manager doesn't retry; that's the sync helper's job)                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `circuitBreakerState`                                                                  | `"closed"` (manager doesn't own a CB)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `optimizationApplied`                                                                  | `false` (manager doesn't apply optimisations)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `exitCode`                                                                             | `job.exitCode ?? (completed ? 0 : 1)`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `errorMessage`                                                                         | failure only: `overrideErrorMessage ?? job.error ?? job.stderr ?? "Exit code N"` (R2 Codex-F2: `job.error` is null on most non-zero exits). Per-callsite overrides: cancel → "canceled by caller"; output-overflow → "Output exceeded maximum size (50MB)"; dead-process → "Process no longer exists (dead process detected)"; exited-without-status → "Process exited without proper status transition"; orphan failure → "orphaned after gateway restart". Captured-output orphan completions omit `errorMessage`.                      |
+| `status`                                                                               | derived per the catalogue above                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | `inputTokens` / `outputTokens` / `cacheReadTokens` / `cacheCreationTokens` / `costUsd` | **Only when `finalStatus === "completed"`** (R2 Grok-F2 / Mistral-F2 clarification) AND `job.extractUsage` is set. For every failure path (catalogue rows 2–9), usage stays undefined even when a partial CLI emit captured tokens before the error. Manager does NOT import `extractUsageAndCost` to avoid `index.ts ↔ async-job-manager.ts` circularity — handlers supply the closure, constructed from primitive locals only (R2 Codex-F5 / Gemini-F3: capturing `params` directly pins large promptParts/attachments for JOB_TTL_MS). |
 
 ### asyncJobId null vs non-null (R2 Mistral-F2 clarification)
@@ -95,17 +96,18 @@ The `asyncJobId` column on `requests` distinguishes how the row was
 initiated:
 
 - `asyncJobId = NULL`: row was written by the sync-path `safeFlightStart`
-  in `src/index.ts` (one of the 5 sync handlers: `claude_request`,
-  `codex_request`, `gemini_request`, `grok_request`, `mistral_request`).
+  in `src/index.ts` (one of the registered sync handlers: `claude_request`,
+  `codex_request`, `gemini_request`, `grok_request`, `mistral_request`,
+  `devin_request`, `cursor_request`, or a configured `api_<name>_request`).
   The sync handler also writes the `logComplete`, UNLESS the underlying
   job was deferred — in which case AsyncJobManager writes the complete
   on terminal state (and the asyncJobId stays NULL on that row because
   no new logStart was written; see "Sync-path responsibility split"
   below).
 - `asyncJobId = <UUID>`: row was written by AsyncJobManager's
-  `writeFlightStart` path, invoked by one of the 5
-  `handle*RequestAsync` handlers via `startJobWithDedup({writeFlightStart:
-  true})`. The UUID matches the AsyncJobManager job id.
+  `writeFlightStart` path, invoked by a registered async request handler via
+  `startJobWithDedup({writeFlightStart: true})`. The UUID matches the
+  AsyncJobManager job id.
 
 Cache-stats aggregation queries do NOT filter by asyncJobId — both row
 types contribute to global / per-prefix totals. The column is preserved
@@ -140,11 +142,11 @@ per-request corrId fan-out.
 
 Two writers, two roles:
 
-| Path                          | Writes `logStart`                       | Writes `logComplete`                                                                          |
-|-------------------------------|-----------------------------------------|-----------------------------------------------------------------------------------------------|
-| Sync handler completes inline | sync handler (`safeFlightStart`)        | sync handler (`safeFlightComplete`); manager's terminal callback is a `WHERE status='started'` no-op |
-| Sync handler defers           | sync handler (`safeFlightStart`)        | **AsyncJobManager.writeFlightComplete** (sync handler returned without writing complete) |
-| `handle*RequestAsync`         | **AsyncJobManager** (writeFlightStart=true) | AsyncJobManager.writeFlightComplete                                                       |
+| Path                          | Writes `logStart`                           | Writes `logComplete`                                                                                 |
+| ----------------------------- | ------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| Sync handler completes inline | sync handler (`safeFlightStart`)            | sync handler (`safeFlightComplete`); manager's terminal callback is a `WHERE status='started'` no-op |
+| Sync handler defers           | sync handler (`safeFlightStart`)            | **AsyncJobManager.writeFlightComplete** (sync handler returned without writing complete)             |
+| `handle*RequestAsync`         | **AsyncJobManager** (writeFlightStart=true) | AsyncJobManager.writeFlightComplete                                                                  |
 
 The `writeFlightStart` flag on `StartJobOptions` toggles whether the
 manager INSERTs a logStart row. Without this distinction, the
@@ -201,7 +203,7 @@ Update all three implementations:
 
 - `SqliteJobStore.markOrphanedOnStartup` (`src/job-store.ts`):
   do a `SELECT id, correlation_id, started_at, stdout, stderr,
-  exit_code FROM jobs WHERE status='running'` BEFORE the UPDATE, then
+exit_code FROM jobs WHERE status='running'` BEFORE the UPDATE, then
   run the existing UPDATE. **No transaction wrapper is required** —
   the local `DatabaseLike` interface (`src/job-store.ts:37-41`) has no
   `transaction` method, and gateway boot is single-threaded before any
@@ -211,8 +213,8 @@ Update all three implementations:
 - `MemoryJobStore.markOrphanedOnStartup` (`src/job-store.ts`):
   iterate `this.rows` and collect rows with `status==="running"` into
   the orphan array (snapshot fields above) before flipping them.
-- `PostgresJobStore` stub (`src/job-store.ts`): mirror the shape;
-  the stub is interface-only today and the rollout is mechanical.
+- `PostgresJobStore`: mirror the same orphan snapshot shape in the durable
+  Postgres backend.
 
 Each iterated orphan triggers one `flightRecorder.logComplete` call. A
 known successful exit (`exitCode === 0`) or captured stdout with unknown

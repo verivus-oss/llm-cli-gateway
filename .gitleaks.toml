@@ -28,6 +28,20 @@ paths = [
   # against deliberately fake provider/cloud/VCS keys, JWTs, and PEM blocks
   # (F4). Every literal in it is a fixture, never a real secret.
   '''src/__tests__/secret-redaction\.test\.ts$''',
+  # The gateway-logger redaction unit test asserts the central stderr logger
+  # scrubs message strings, structured args, and nested Error name/stack
+  # values. Every literal (fake api_key=, xai-, Bearer, etc.) is a deliberate
+  # fixture that exists only to be redacted; there is no real secret.
+  '''src/__tests__/gateway-logger\.test\.ts$''',
+  # The branch-review-fixes suite pins the ACP error redactor (L6) against
+  # deliberately fake Google (AIza), GitHub (ghp_), and Slack (xoxb) token
+  # shapes; every literal exists only to be redacted, never a real secret.
+  '''src/__tests__/branch-review-fixes\.test\.ts$''',
+  # The provider-capability-cache suite exercises the capability-set secret
+  # scrubber, so it is built entirely from deliberately fake keys (canonical
+  # AWS example keys AKIA.../ASIA..., gsk_/ghp_/BEARER fixtures, etc.). Every
+  # literal exists only to be scrubbed; there is no real secret.
+  '''src/__tests__/provider-capability-cache\.test\.ts$''',
   # Native-compressor fixtures: real-shaped provider output samples (logs,
   # pretty JSON, ANSI captures) used to exercise the compressor transforms.
   # No real secrets; deliberate hash-like and control-byte content only.

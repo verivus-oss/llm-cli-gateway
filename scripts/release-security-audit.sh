@@ -257,6 +257,9 @@ console.log('Packed consumer install policy passed (no blocked versions; no tar-
 NODE
 popd >/dev/null
 
+echo "==> packed skill-pack MCP resource smoke"
+node scripts/verify-packed-skill-pack-e2e.mjs
+
 echo "==> shipped dist Socket network heuristic scan"
 npm run build --silent
 node --input-type=module <<'NODE'

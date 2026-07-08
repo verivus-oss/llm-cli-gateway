@@ -127,3 +127,28 @@ describe("parseStreamJson", () => {
     });
   });
 });
+
+describe("parseStreamJson — stopReason (phase 7)", () => {
+  it("extracts stop_reason from the terminal result event", () => {
+    const stream = [
+      '{"type":"system","subtype":"init","session_id":"s-1","model":"claude"}',
+      '{"type":"result","subtype":"success","result":"ok","stop_reason":"end_turn","session_id":"s-1","usage":{"input_tokens":1,"output_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}',
+    ].join("\n");
+    // Mutation that flips this red: dropping stop_reason extraction in the
+    // result-event branch of parseStreamJson.
+    expect(parseStreamJson(stream).stopReason).toBe("end_turn");
+  });
+
+  it("falls back to the assistant message stop_reason when result carries none", () => {
+    const stream = [
+      '{"type":"system","subtype":"init","session_id":"s-2","model":"claude"}',
+      '{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}],"stop_reason":"max_tokens"}}',
+    ].join("\n");
+    expect(parseStreamJson(stream).stopReason).toBe("max_tokens");
+  });
+
+  it("is null when no stop reason is present (capability fact, not fabricated)", () => {
+    const stream = '{"type":"system","subtype":"init","session_id":"s-3","model":"claude"}';
+    expect(parseStreamJson(stream).stopReason).toBeNull();
+  });
+});

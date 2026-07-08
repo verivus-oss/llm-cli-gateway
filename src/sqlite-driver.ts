@@ -48,7 +48,7 @@ export interface GatewayStatement {
 export interface GatewayDatabase {
   exec(sql: string): void;
   prepare(sql: string): GatewayStatement;
-  withTransaction<A extends unknown[]>(fn: (...args: A) => void): (...args: A) => void;
+  withTransaction<A extends unknown[], R = void>(fn: (...args: A) => R): (...args: A) => R;
   close(): void;
 }
 
@@ -221,21 +221,27 @@ class GatewayDatabaseImpl implements GatewayDatabase {
    *
    * A ROLLBACK failure during error handling must not mask the original
    * error: any ROLLBACK throw is swallowed so the caller sees the real cause.
+   *
+   * Return value: the callback's return value is forwarded to the caller (so a
+   * transactional read, e.g. the #139 lease sweep returning the orphaned-row
+   * list, can be expressed as one atomic unit). Existing void callbacks infer
+   * `R = void` and are unaffected.
    */
-  withTransaction<A extends unknown[]>(fn: (...args: A) => void): (...args: A) => void {
-    return (...args: A): void => {
+  withTransaction<A extends unknown[], R = void>(fn: (...args: A) => R): (...args: A) => R {
+    return (...args: A): R => {
       if (this.inTransaction) {
         throw new Error("nested transaction");
       }
       // Mark in-transaction only AFTER BEGIN succeeds: if BEGIN itself throws
       // (e.g. the connection is closed), no transaction was started and the
-      // flag must stay clear — otherwise every later call would die with a
+      // flag must stay clear, otherwise every later call would die with a
       // bogus "nested transaction" (state poisoning; found in B-review).
       this.db.exec("BEGIN");
       this.inTransaction = true;
       try {
-        fn(...args);
+        const result = fn(...args);
         this.db.exec("COMMIT");
+        return result;
       } catch (error) {
         try {
           this.db.exec("ROLLBACK");

@@ -1,0 +1,779 @@
+# Implementation plan: full-featured first-class Cursor provider integration.
+#
+# Purpose:
+#   Make Cursor Agent a complete first-class gateway provider, not a bolted-on
+#   request handler. Every documented Cursor Agent CLI and ACP capability must
+#   have a deliberate gateway behavior: request execution, live model discovery,
+#   sessions, output/event parsing, MCP management, worktrees, plugins, workers,
+#   auth/status/about diagnostics, resources, capability inventory,
+#   upstream-contract checks, validation/review tooling, docs, and runtime
+#   smoke tests.
+#
+# Scope:
+#   This is a production-grade full-integration spec. It is intentionally
+#   broader than "add models://cursor" because the required outcome is a
+#   complete provider surface with no second-class Cursor paths.
+
+[meta]
+name = "cursor-full-featured-first-class-provider"
+schema_version = "1.0"
+owner = "verivus-oss"
+slice = "cursor-first-class-provider-2026-07-01"
+target_branch = "master"
+status = "planned"
+created = "2026-07-01"
+acceptance_resource = "Cursor Agent is represented by one provider definition that drives a full-featured gateway integration: request schemas, live/account-specific model discovery, resources, capability inventory, upstream drift checks, validation/review participation, Cursor MCP management, worktree/plugin/worker surfaces, status/about diagnostics, docs, and complete CLI plus ACP routing without Cursor-specific hardcoded omissions."
+
+[source_evidence]
+exa_queries = [
+  "Cursor Agent CLI documentation parameters models list-models ACP cursor-agent --print --model --output-format --resume --force --auto-review --sandbox --workspace",
+  "Cursor CLI docs headless non interactive mode output json stream-json GitHub Actions MCP worker install status models cursor-agent documentation",
+]
+upstream_urls = [
+  "https://cursor.com/docs/cli/reference/parameters",
+  "https://cursor.com/docs/cli/headless",
+  "https://cursor.com/docs/cli/overview",
+  "https://cursor.com/docs/cli/acp",
+  "https://cursor.com/docs/mcp.md",
+  "https://cursor.com/cli",
+]
+local_runtime_observed = [
+  "cursor-agent --version -> 2026.06.29-2ad2186",
+  "cursor-agent --help exposes --print, --output-format text|json|stream-json, --stream-partial-output, --mode plan|ask, --plan, --resume, --continue, --model, --list-models, --force, --yolo, --auto-review, --sandbox enabled|disabled, --approve-mcps, --trust, --workspace, --add-dir, --plugin-dir, --worktree, --worktree-base, --skip-worktree-setup",
+  "cursor-agent models returns account-specific models and marks current/default entries, for example auto, composer-2.5-fast, gpt-5.5-high, gpt-5.3-codex, claude-opus-4-8 variants, claude-sonnet-5 variants, gemini-3.1-pro, grok-build-0.1, and many parameterized effort/fast/context variants",
+  "cursor-agent --list-models returns the same human-readable account-specific model list as cursor-agent models on this host",
+]
+current_gateway_files = [
+  "src/index.ts",
+  "src/model-registry.ts",
+  "src/resources.ts",
+  "src/provider-tool-capabilities.ts",
+  "src/provider-status.ts",
+  "src/upstream-contracts.ts",
+  "src/acp/provider-registry.ts",
+  "src/acp/transport.ts",
+  "src/__tests__/cursor-handler.test.ts",
+  "src/__tests__/provider-tool-capabilities.test.ts",
+  "src/__tests__/upstream-contracts.test.ts",
+  "src/__tests__/acp-transport-wiring.test.ts",
+  "README.md",
+]
+
+[current_gateway_state]
+implemented = [
+  "cursor_request and cursor_request_async are registered MCP tools.",
+  "CLI transport builds cursor-agent --print argv and passes prompt as the final positional.",
+  "CLI transport supports model, mode, outputFormat, force, autoReview, sandbox, trust, workspace, addDir, sessionId, resumeLatest, and createNewSession.",
+  "model is resolved through resolveModelAlias('cursor', ...) and emitted as --model when present.",
+  "approvalStrategy mcp_managed gates high-impact force, trust, and sandbox disabled requests.",
+  "remote HTTP workspace resolution rewrites registered workspace aliases to local cwd before spawn.",
+  "Cursor ACP provider metadata exists, but runtime routing is currently treated as gated/incomplete.",
+  "Cursor ACP transport currently allows prompt, model, sessionId, and correlationId only; mode, workspace, permission, streaming, MCP, and extension-method parity are missing.",
+  "provider_tool_capabilities includes Cursor and reports controls, unsupported inputs, modelInfo, ACP caveats, and config surfaces.",
+  "list_models includes Cursor via getAvailableCliInfo().",
+  "cli_versions and provider status include Cursor command/status checks.",
+  "upstream contract tracks cursor-agent help flags, acknowledged flags, mcp tool names, and basic conformance fixtures.",
+]
+gaps = [
+  "Cursor model discovery is fallback-only in model-registry.ts; it does not run cursor-agent models or cursor-agent --list-models.",
+  "models://cursor is not registered or readable even though list_models and README imply provider-wide model resource parity.",
+  "Cursor model output parsing is absent; account-specific model names, display names, current/default markers, and parameterized variants are not captured.",
+  "The provider object currently does not generate model resources and discovery uniformly for all providers.",
+  "Cursor live discovery is not cache-aware, timeout-bounded, redacted, or surfaced with source/confidence metadata.",
+  "Cursor output parsers do not fully normalize text/json/stream-json events and usage/result metadata.",
+  "--stream-partial-output, --approve-mcps, --plugin-dir, --worktree, --worktree-base, and --skip-worktree-setup are acknowledged but not request-exposed or policy-gated.",
+  "ACP model/mode config option discovery is not integrated into gateway model discovery.",
+  "ACP permission handling, cancellation, streaming updates, session config, MCP approval behavior, and Cursor extension methods are not implemented as first-class gateway events.",
+  "Docs describe Cursor support but do not specify first-class model discovery, resource parity, or remote workspace constraints in one provider contract.",
+]
+
+[upstream_capability_summary]
+cli_binary = "cursor-agent"
+documented_entrypoints = [
+  "interactive agent mode: cursor-agent [prompt...]",
+  "headless print mode: cursor-agent --print [options] <prompt>",
+  "model listing: cursor-agent models or cursor-agent --list-models",
+  "session resume: cursor-agent ls, cursor-agent resume, cursor-agent --resume [chatId], cursor-agent --continue",
+  "MCP management: cursor-agent mcp list, mcp login, mcp list-tools, mcp enable, mcp disable",
+  "native ACP stdio: cursor-agent acp",
+  "private worker: cursor-agent worker start/debug",
+]
+documented_auth = [
+  "cursor-agent login",
+  "CURSOR_API_KEY or --api-key",
+  "ACP docs mention CURSOR_AUTH_TOKEN or --auth-token, while local 2026.06.29 help does not list --auth-token; record this as an upstream contract discrepancy that must be probed and represented accurately.",
+]
+documented_models = [
+  "Cursor docs expose --model for explicit model selection.",
+  "Cursor docs expose --list-models and models for account-specific discovery.",
+  "Cursor marketing/docs emphasize frontier models from OpenAI, Anthropic, Gemini, Grok, and Cursor/Composer.",
+  "Local model names include simple aliases such as auto and parameterized variants encoded as stable CLI values.",
+]
+documented_modes = [
+  "agent is default full-tool mode",
+  "plan is read-only planning",
+  "ask is read-only Q&A",
+]
+documented_output_formats = [
+  "text",
+  "json",
+  "stream-json",
+]
+documented_safety_controls = [
+  "--force and --yolo allow commands unless explicitly denied",
+  "--auto-review uses Cursor Smart Auto-review",
+  "--sandbox enabled|disabled overrides sandbox mode",
+  "--trust trusts workspace in headless mode",
+  "--approve-mcps automatically approves MCP servers",
+]
+documented_workspace_controls = [
+  "--workspace selects a directory or saved workspace name",
+  "--add-dir adds extra workspace roots",
+  "--worktree creates an isolated git worktree under Cursor's worktree root",
+  "--worktree-base selects the branch/ref for the new worktree",
+  "--skip-worktree-setup skips .cursor/worktrees.json setup scripts",
+]
+documented_acp = [
+  "stdio JSON-RPC 2.0 over newline-delimited JSON",
+  "typical flow initialize, authenticate cursor_login, session/new or session/load, session/prompt, session/update, session/request_permission, session/cancel",
+  "ACP sessions support agent, plan, and ask modes",
+  "permission decisions are allow-once, allow-always, and reject-once",
+  "ACP uses project/user .cursor/mcp.json servers; team-level MCP servers are not supported in ACP mode",
+  "Cursor extension methods include cursor/ask_question, cursor/create_plan, cursor/update_todos, cursor/task, and cursor/generate_image",
+]
+
+[target_provider_contract]
+provider_id = "cursor"
+provider_kind = "cli"
+provider_object_must_be_authoritative = true
+no_new_hardcoded_provider_lists = true
+generated_surfaces = [
+  "MCP request schemas",
+  "list_models and list_available_models",
+  "models://cursor and generated models://<cli> resources for every CLI provider with model metadata",
+  "provider_tool_capabilities",
+  "doctor --json provider_capabilities",
+  "upstream_contracts and drift probes",
+  "cli_versions and login diagnostics",
+  "validation/review provider selection",
+  "Cursor MCP management resources/tools",
+  "Cursor session listing/resume/create-chat surfaces",
+  "Cursor worktree controls",
+  "Cursor plugin loading controls",
+  "Cursor private worker diagnostics and lifecycle controls",
+  "Cursor status/about diagnostics",
+  "README provider sections",
+]
+runtime_modes = [
+  "cli_print",
+  "acp_stdio_full",
+]
+
+[full_featured_integration_contract]
+principle = "Every documented Cursor Agent CLI and ACP capability must be either exposed as a gateway-owned behavior or represented by a tested, explicit security policy that preserves the same operator capability through Cursor's native control plane."
+cli_execution = [
+  "cursor_request and cursor_request_async support headless print mode with prompt, model, outputFormat, streamPartialOutput, mode, plan shorthand, resume, continue, force/yolo, autoReview, sandbox, approveMcps, trust, workspace, addDir, pluginDir, worktree, worktreeBase, and skipWorktreeSetup.",
+  "Every high-impact field has an approval-policy record and is visible in structuredContent.metadata.",
+  "Remote HTTP/OAuth callers get the same capabilities through registered workspace aliases and explicit approval policies; raw local path use is resolved through the workspace registry, not accepted blindly.",
+]
+acp_execution = [
+  "cursor_request transport=acp supports initialize, authentication/pre-authenticated startup, session/new, session/load, session/prompt, session/cancel, config option discovery, model selection, mode selection, streaming updates, permission requests, stop reasons, and error propagation.",
+  "ACP handles Cursor extension methods cursor/ask_question, cursor/create_plan, cursor/update_todos, cursor/task, and cursor/generate_image through typed gateway events and responses.",
+  "ACP maps permission requests to the gateway approval manager with allow-once, allow-always, reject-once, timeout, cancellation, and audit records.",
+]
+model_discovery = [
+  "Live account-specific model discovery is mandatory through cursor-agent models and cursor-agent --list-models.",
+  "ACP config-option model discovery is mandatory and reconciled with CLI model discovery.",
+  "models://cursor, list_models, provider_tool_capabilities, doctor provider_capabilities, and validation/review model selection all consume the same model registry data.",
+]
+mcp_management = [
+  "Expose Cursor MCP status through gateway resources and tools backed by cursor-agent mcp list and cursor-agent mcp list-tools.",
+  "Expose Cursor MCP enable/disable/login flows with explicit policy gates and clear interactive-auth behavior.",
+  "cursor_request approveMcps maps to --approve-mcps with explicit high-impact approval and audit metadata.",
+  "The gateway does not pretend to inject transient MCP servers into Cursor; it manages and reports Cursor's actual .cursor/mcp.json/user MCP state through Cursor's own CLI.",
+]
+session_management = [
+  "Expose Cursor chat/session listing and resume semantics through gateway session APIs without confusing gateway gw-* tracking ids with Cursor chat ids.",
+  "Support cursor-agent ls, cursor-agent resume, cursor-agent create-chat, --resume, and --continue as first-class session operations.",
+]
+workspace_worktree_plugin = [
+  "Support --workspace and --add-dir through local paths for local stdio callers and registered aliases/roots for remote HTTP/OAuth callers.",
+  "Support --worktree, --worktree-base, and --skip-worktree-setup with explicit local-only or managed-approval policy and session/workspace metadata.",
+  "Support --plugin-dir with explicit local-only or managed-approval policy and redacted capability metadata.",
+]
+worker_admin = [
+  "Expose cursor-agent worker debug as a read-only diagnostic surface.",
+  "Expose cursor-agent worker start lifecycle as an explicit administrative operation with policy gating, process tracking, logs, and cancellation.",
+  "Represent worker management address, labels, pool/single-use mode, worker dirs, and auth-token-file handling without exposing token contents.",
+]
+status_about_auth = [
+  "Integrate cursor-agent status --format and about --format into cli_versions, llm_process_health, and doctor diagnostics.",
+  "Represent cursor-agent login/logout/update guidance without printing credentials.",
+  "Probe documented auth surfaces and record discrepancies between docs and installed help in upstream_contracts.",
+]
+output_and_events = [
+  "Normalize text, json, stream-json, partial deltas, tool calls, tool results, assistant chunks, result rows, error rows, and ACP events into structuredContent.",
+  "Persist request metadata, model, session, workspace/worktree, high-impact approvals, MCP approval state, and parser status in the flight recorder without secret leakage.",
+]
+model_discovery_sources_ordered = [
+  "live: cursor-agent models",
+  "live-fallback: cursor-agent --list-models",
+  "config/env overrides declared in gateway provider object",
+  "bundled fallback hints",
+]
+model_discovery_requirements = [
+  "Discovery must be timeout-bounded and cache-aware.",
+  "Discovery must never require a prompt or spend model tokens.",
+  "Discovery must redact auth headers, API keys, home paths where not needed, and any unexpected secret-like output.",
+  "Discovery must preserve Cursor's exact model id value for --model.",
+  "Discovery should capture display name, current/default marker, source, sourceDetail, confidence, and lastSeen.",
+  "Discovery must degrade to fallback hints with a warning when unauthenticated, offline, timed out, or parser output is unknown.",
+]
+
+[security_policy]
+requirements = [
+  "Do not expose CURSOR_API_KEY, CURSOR_AUTH_TOKEN, custom headers, authorization headers, Cursor account tokens, MCP server env values, or raw plugin paths in model/capability resources.",
+  "Do not silently enable --force, --yolo, --sandbox disabled, --approve-mcps, --trust, plugin loading, or worktree creation for remote HTTP/OAuth callers.",
+  "Remote HTTP/OAuth callers must use registered workspace aliases/roots; raw local paths remain local-stdio/operator-only.",
+  "High-impact Cursor controls must be gated through approvalStrategy mcp_managed and policy records, not ad hoc booleans.",
+  "ACP permission requests must be answered through a gateway approval path or fail closed with a concrete error; never block indefinitely.",
+  "Cursor MCP server approval controls must be explicit; this plan must either implement safe request-time MCP handling for Cursor or document the upstream-backed reason Cursor-owned .cursor/mcp.json remains the only supported MCP configuration path.",
+  "Output parsing must respect the gateway output cap and async backpressure limits.",
+]
+
+[model_info_schema]
+required_fields = [
+  "id",
+  "name",
+  "description",
+  "source",
+  "sourceDetail",
+  "confidence",
+  "current",
+  "default",
+]
+optional_fields = [
+  "family",
+  "providerFamily",
+  "reasoningEffort",
+  "contextWindowHint",
+  "fast",
+  "thinking",
+  "maxMode",
+  "parameterized",
+  "rawLine",
+  "lastSeen",
+]
+parser_notes = [
+  "Parse the current local human-readable format: '<id> - <display name>' with optional '(current)' or '(default)' markers.",
+  "Do not strip bracketed parameter overrides from model ids; Cursor accepts parameterized ids as model values.",
+  "Parser design must be forward-compatible with JSON output if Cursor adds --format json to models/about/status.",
+  "Treat 'auto' as Cursor-managed default. The gateway should pass no --model for model=default/latest unless a concrete default id is configured or the user explicitly passes auto.",
+]
+
+[test_matrix.unit]
+model_registry = [
+  "parseCursorModelsText parses id, display name, current marker, default marker, and rawLine from cursor-agent models output",
+  "parseCursorModelsText preserves bracketed parameterized ids",
+  "discoverCursorModels prefers cursor-agent models and falls back to --list-models only on command failure or empty output",
+  "discoverCursorModels maps unauthenticated/offline/timeouts to fallback model hints plus warnings",
+  "getAvailableCliInfo(refresh=true).cursor returns live Cursor models when discovery succeeds",
+  "resolveModelAlias('cursor', 'default') returns undefined unless a configured default exists",
+  "resolveModelAlias('cursor', 'auto') preserves explicit auto when requested by the user",
+]
+resources = [
+  "ResourceProvider.listResources includes models://cursor",
+  "ResourceProvider.readResource('models://cursor') returns the same Cursor modelInfo shape as list_models",
+  "models://cursor is generated from provider metadata and not a one-off registration",
+  "provider-tools://cursor modelInfo includes live discovery source and warning metadata",
+]
+request_schema = [
+  "cursor_request schema exposes supported fields for both CLI and ACP transport",
+  "cursor_request transport=acp supports mode, model, session, workspace/cwd semantics, permission mediation, cancellation, and streaming updates instead of rejecting them as CLI-only",
+  "cursor_request emits --stream-partial-output only with outputFormat=stream-json",
+  "cursor_request emits --approve-mcps only behind an explicit policy gate",
+  "cursor_request supports plugin/worktree flags behind explicit local-only or policy-gated controls, with remote HTTP/OAuth behavior fail-closed",
+  "cursor_request supports cursor worker/admin fields only through separate administrative tools, not hidden prompt-side flags",
+]
+upstream_contracts = [
+  "Cursor upstream contract declares models, --list-models, --stream-partial-output, --approve-mcps, --plugin-dir, --worktree, --worktree-base, --skip-worktree-setup, status --format, about --format, and worker subcommands",
+  "Contract drift probe reads cursor-agent --help and cursor-agent help acp without model-token spend",
+  "Contract fixtures cover accepted and rejected flag combinations without spawning real model calls",
+]
+acp = [
+  "Cursor ACP provider is a first-class runtime surface when cursor-agent acp is installed and authenticated",
+  "ACP model and mode config option discovery is parsed from session config options and reconciled with cursor-agent models discovery",
+  "ACP permission requests route through approval manager with explicit allow-once, allow-always, reject-once, timeout, and cancellation behavior",
+  "Cursor extension methods are classified as blocking or notification and have typed handling implementations",
+  "ACP session/prompt streams assistant output, tool events, todos, plan requests, subagent task notifications, image notifications, stop reasons, and errors into normalized gateway structuredContent",
+  "ACP session/cancel is wired to job cancellation and process/session cleanup",
+]
+mcp_management = [
+  "cursor_mcp_list parses cursor-agent mcp list without leaking env values",
+  "cursor_mcp_list_tools parses cursor-agent mcp list-tools <server> and returns tool names/argument names",
+  "cursor_mcp_enable and cursor_mcp_disable are policy-gated and audit logged",
+  "cursor_mcp_login reports interactive-auth requirements and does not capture credentials",
+  "approveMcps request field emits --approve-mcps only after managed approval",
+]
+session_management = [
+  "cursor_session_list parses cursor-agent ls",
+  "cursor_session_create maps cursor-agent create-chat output to gateway session metadata",
+  "cursor resume/latest behavior distinguishes Cursor chat ids from gw-* tracking ids",
+]
+workspace_worktree_plugin = [
+  "workspace/addDir path resolution uses registered aliases for remote HTTP/OAuth",
+  "worktree/worktreeBase/skipWorktreeSetup emits Cursor flags with policy metadata",
+  "pluginDir emits repeated --plugin-dir only for local or approved managed requests",
+]
+worker_admin = [
+  "cursor_worker_debug parses cursor-agent worker debug --json where available and redacts auth-token-file paths/content appropriately",
+  "cursor_worker_start is administrative, approval-gated, process-tracked, cancellable, and logs lifecycle without token leakage",
+]
+status_about_auth = [
+  "cursor-agent status --format json is parsed when available and falls back to text parsing",
+  "cursor-agent about --format json is parsed when available and falls back to text parsing",
+  "cli_versions, doctor, and llm_process_health expose Cursor auth/version/account readiness without secrets",
+]
+output_parsing = [
+  "text output returns final response",
+  "json output extracts result and model where present",
+  "stream-json output handles system init, assistant deltas, tool_call started/completed, result, and errors",
+  "output parsing preserves structuredContent.response and usage metadata when available",
+]
+
+[test_matrix.integration]
+local_cli = [
+  "cursor-agent --version is captured by cli_versions",
+  "cursor-agent models discovery is exercised with a short timeout and no prompt",
+  "cursor-agent status --format json or text fallback is exercised without secrets",
+  "cursor-agent about --format json or text fallback is exercised without secrets",
+  "cursor-agent mcp list is exercised without exposing MCP env values",
+  "cursor-agent ls and create-chat are exercised when authenticated",
+  "cursor-agent worker debug --json or text fallback is exercised as read-only diagnostics",
+  "cursor_request with model=auto passes --model auto only when explicit auto semantics are selected",
+  "cursor_request without model omits --model and lets Cursor choose",
+  "cursor_request outputFormat=json smoke extracts a response without leaking headers or env",
+  "cursor_request outputFormat=stream-json streamPartialOutput=true smoke parses deltas and final result",
+  "cursor_request mode=ask smoke is read-only and does not require force",
+]
+remote_http = [
+  "remote HTTP/OAuth caller can select a registered workspace alias for Cursor",
+  "remote HTTP/OAuth caller cannot pass raw absolute workspace/addDir paths",
+  "remote HTTP/OAuth caller cannot request force/sandbox-disabled/trust without approvalStrategy mcp_managed policy approval",
+  "remote HTTP/OAuth caller cannot use pluginDir, worktree, approveMcps, or worker lifecycle operations without explicit administrative policy approval",
+]
+validation_review = [
+  "red_team_review and validate_with_models can include cursor as an active provider",
+  "review orchestration receives full prompt evidence and uses cursor_request with explicit workspace/trust controls",
+  "Cursor failures return actionable provider-auth/model-not-found/remediation messages",
+]
+
+[release_gates]
+local_commands = [
+  "node -e \"const fs=require('fs'); const toml=require('smol-toml'); toml.parse(fs.readFileSync('docs/plans/cursor-first-class-provider.dag.toml','utf8')); console.log('DAG TOML parse ok')\"",
+  "npx vitest run src/__tests__/cursor-handler.test.ts src/__tests__/cursor-parser.test.ts src/__tests__/cursor-admin.test.ts src/__tests__/provider-tool-capabilities.test.ts src/__tests__/upstream-contracts.test.ts src/__tests__/mcp-surface-usability.test.ts src/__tests__/acp-transport-wiring.test.ts src/__tests__/acp-provider-registry.test.ts",
+  "npm run build",
+  "npm run lint",
+  "npm test",
+  "npm run format:check",
+]
+manual_smokes = [
+  "cursor-agent --version",
+  "cursor-agent status --format json || cursor-agent status",
+  "cursor-agent about --format json || cursor-agent about",
+  "cursor-agent models",
+  "cursor-agent --list-models",
+  "cursor-agent mcp list",
+  "cursor-agent ls",
+  "cursor-agent worker debug --json || cursor-agent worker debug",
+  "llm-cli-gateway list_models cli=cursor or MCP equivalent",
+  "provider_tool_capabilities cli=cursor refresh=true",
+  "cursor_request prompt='Reply exactly OK' mode=ask model=auto outputFormat=text",
+  "cursor_request prompt='Reply exactly OK' mode=ask outputFormat=stream-json streamPartialOutput=true",
+]
+
+[review_gate]
+required_after_implementation = true
+instructions = [
+  "Use the stdio gateway for all LLM reviews.",
+  "Do not nominate provider models unless the user explicitly asks.",
+  "Provide reviewers with the exact changed-file list, git diff, local test results, Exa source URLs, and local cursor-agent version/model-discovery evidence.",
+  "Reviewers must inspect code and docs directly, not accept summary claims.",
+  "Reviewers must verify Cursor model discovery, models://cursor, provider_tool_capabilities, list_models, validation/review routing, upstream-contract drift coverage, and security gates.",
+  "Iterate until every reviewer gives unconditional approval or a concrete blocker.",
+]
+
+[[nodes]]
+id = "phase-0-baseline-cursor-surfaces"
+phase = "baseline"
+status = "planned"
+description = """
+Map every current Cursor gateway surface and the upstream Cursor CLI facts.
+Capture request tools, async routing, model registry, resources, provider
+capabilities, doctor output, cli_versions, upstream contracts, validation
+orchestration, ACP registry, docs, and tests.
+"""
+dependencies = []
+expected_files_touched = [
+  "docs/reviews/cursor-first-class-provider-baseline.md",
+]
+acceptance_criteria = [
+  "Baseline lists every Cursor surface with file and line references.",
+  "Baseline records Exa source URLs and local cursor-agent --version evidence.",
+  "Baseline records local cursor-agent models and --list-models behavior without committing account secrets.",
+  "Baseline identifies all hardcoded provider lists that omit cursor or devin.",
+]
+verification_commands = [
+  "rg -n \"cursor|models://|provider-tools://|list_models|provider_tool_capabilities|CLI_TYPES|upstream_contracts\" src README.md docs",
+  "cursor-agent --version",
+  "cursor-agent models | sed -n '1,40p'",
+  "cursor-agent --list-models | sed -n '1,40p'",
+]
+
+[[nodes]]
+id = "phase-1-provider-object-generation-contract"
+phase = "architecture"
+status = "planned"
+description = """
+Promote the provider object to the source of truth for model discovery,
+resources, request-schema capabilities, upstream-contract metadata, auth
+diagnostics, and review/validation participation. Cursor should not require a
+separate hardcoded branch to appear in new gateway surfaces.
+"""
+dependencies = ["phase-0-baseline-cursor-surfaces"]
+expected_files_touched = [
+  "src/provider-types.ts",
+  "src/upstream-contracts.ts",
+  "src/provider-tool-capabilities.ts",
+  "src/model-registry.ts",
+  "src/resources.ts",
+]
+acceptance_criteria = [
+  "Provider metadata declares model discovery command(s), parser id, fallback model hints, default semantics, session semantics, auth checks, output modes, and high-impact controls.",
+  "Cursor model/resource/capability exposure is generated from provider metadata.",
+  "No new hardcoded provider list omits Cursor.",
+  "Tests fail if a CLI provider with model discovery lacks a models:// resource.",
+]
+verification_commands = [
+  "npx vitest run src/__tests__/provider-tool-capabilities.test.ts src/__tests__/mcp-surface-usability.test.ts",
+]
+
+[[nodes]]
+id = "phase-2-live-cursor-model-discovery"
+phase = "models"
+status = "planned"
+description = """
+Implement live Cursor model discovery from cursor-agent models, with
+cursor-agent --list-models as a fallback. Parse the account-specific text
+format into structured model metadata while preserving exact model ids for
+--model. Discovery must be cached, bounded, non-token-spending, and safe when
+Cursor is unauthenticated or offline.
+"""
+dependencies = ["phase-1-provider-object-generation-contract"]
+expected_files_touched = [
+  "src/model-registry.ts",
+  "src/provider-status.ts",
+  "src/__tests__/model-registry.test.ts",
+]
+acceptance_criteria = [
+  "Live Cursor models are returned by list_models({cli:'cursor'}) when discovery succeeds.",
+  "Fallback hints remain available when discovery fails.",
+  "current/default markers from Cursor output are preserved.",
+  "Parameterized model ids and simple ids are not mutated.",
+  "Discovery warnings are visible but secret-free.",
+]
+verification_commands = [
+  "npx vitest run src/__tests__/model-registry.test.ts",
+  "cursor-agent models | sed -n '1,20p'",
+]
+
+[[nodes]]
+id = "phase-3-model-resource-parity"
+phase = "resources"
+status = "planned"
+description = """
+Register and serve models://cursor, then remove the static CLI-only resource
+pattern that currently stops at Mistral. The resource provider should support
+all CLI providers with modelInfo, plus enabled API providers, through one code
+path.
+"""
+dependencies = ["phase-2-live-cursor-model-discovery"]
+expected_files_touched = [
+  "src/resources.ts",
+  "src/index.ts",
+  "src/__tests__/mcp-surface-usability.test.ts",
+  "src/__tests__/provider-tool-capabilities.test.ts",
+]
+acceptance_criteria = [
+  "models://cursor appears in resource listing.",
+  "readResource('models://cursor') returns Cursor modelInfo from the same provider registry as list_models.",
+  "Existing models://claude/codex/gemini/grok/mistral behavior is preserved.",
+  "README claims about models://<provider> are true.",
+]
+verification_commands = [
+  "npx vitest run src/__tests__/mcp-surface-usability.test.ts src/__tests__/provider-tool-capabilities.test.ts",
+]
+
+[[nodes]]
+id = "phase-4-cursor-request-surface-parity"
+phase = "request-surface"
+status = "planned"
+description = """
+Decide and implement the first-class Cursor request field set for CLI print
+transport. Existing fields stay compatible. Newly documented Cursor flags must
+be implemented through safe request fields with policy gates where needed, or
+rejected only when the installed upstream Cursor CLI demonstrably lacks the
+capability.
+"""
+dependencies = ["phase-1-provider-object-generation-contract"]
+expected_files_touched = [
+  "src/index.ts",
+  "src/upstream-contracts.ts",
+  "src/provider-tool-capabilities.ts",
+  "src/__tests__/cursor-handler.test.ts",
+  "src/__tests__/upstream-contracts.test.ts",
+]
+acceptance_criteria = [
+  "Supported request fields map exactly to allowed cursor-agent flags.",
+  "--stream-partial-output is exposed and valid only with outputFormat=stream-json.",
+  "--approve-mcps, --plugin-dir, --worktree, --worktree-base, and --skip-worktree-setup are implemented with explicit local-only and/or policy-gated controls.",
+  "High-impact controls remain approval-gated for managed reviews and remote HTTP callers.",
+  "Invalid combinations fail before spawn with actionable errors.",
+]
+verification_commands = [
+  "npx vitest run src/__tests__/cursor-handler.test.ts src/__tests__/upstream-contracts.test.ts",
+]
+
+[[nodes]]
+id = "phase-5-cursor-output-normalization"
+phase = "runtime"
+status = "planned"
+description = """
+Normalize Cursor text, json, and stream-json outputs into the same
+structuredContent contract used by other providers. Capture response text,
+model from system init when available, duration/result status, tool event
+counts, and actionable error classes.
+"""
+dependencies = ["phase-4-cursor-request-surface-parity"]
+expected_files_touched = [
+  "src/cursor-parser.ts",
+  "src/index.ts",
+  "src/__tests__/cursor-parser.test.ts",
+  "src/__tests__/cursor-handler.test.ts",
+]
+acceptance_criteria = [
+  "Text output remains compatible.",
+  "JSON output extracts final result without leaking raw internal events.",
+  "Stream-json output supports system init, assistant chunks, tool_call events, result, and error lines.",
+  "Model-not-found, auth-required, quota/rate-limit, sandbox, and workspace trust errors map to actionable createErrorResponse remediation.",
+]
+verification_commands = [
+  "npx vitest run src/__tests__/cursor-parser.test.ts src/__tests__/cursor-handler.test.ts",
+]
+
+[[nodes]]
+id = "phase-6-acp-cursor-first-class-surface"
+phase = "acp"
+status = "planned"
+description = """
+Promote Cursor ACP support from smoke-only coverage to a full first-class
+runtime surface. ACP must be a production-grade path that exposes the same
+functional capabilities users expect from Cursor Agent, including
+model/mode configuration, session load/new, prompt streaming, permission
+mediation, cancellation, workspace/cwd semantics, MCP approval behavior, and
+Cursor extension methods. Do not silently ignore ACP fields; implement the
+documented Cursor ACP contract and fail closed only on verified upstream
+contract drift with an explicit capability error object.
+"""
+dependencies = ["phase-2-live-cursor-model-discovery", "phase-5-cursor-output-normalization"]
+expected_files_touched = [
+  "src/acp/transport.ts",
+  "src/acp/provider-registry.ts",
+  "src/acp/types.ts",
+  "src/index.ts",
+  "src/__tests__/acp-transport-wiring.test.ts",
+  "src/__tests__/acp-provider-registry.test.ts",
+  "src/__tests__/acp-smoke-harness.test.ts",
+]
+acceptance_criteria = [
+  "ACP is available as a first-class cursor_request transport when cursor-agent acp is present and authenticated.",
+  "ACP session config options for model and mode are parsed, represented, and settable through gateway request fields.",
+  "ACP supports session/new and session/load, and maps gateway session intent to Cursor ACP session semantics without confusing gw-* tracking ids with Cursor chat ids.",
+  "ACP session/prompt streams normalized assistant output, tool events, stop reasons, and errors.",
+  "ACP permission requests route to approval manager and return allow-once, allow-always, or reject-once with timeout/cancel handling.",
+  "cursor/ask_question and cursor/create_plan are handled as blocking methods with typed responses.",
+  "cursor/update_todos, cursor/task, and cursor/generate_image are handled as notifications and represented in structuredContent/events.",
+  "ACP session/cancel integrates with llm_job_cancel and process cleanup.",
+  "ACP MCP server behavior is explicit: use Cursor-owned .cursor/mcp.json, expose approval behavior, and never claim request-time MCP injection is active unless implemented and tested.",
+  "ACP smoke proves initialize, authenticate or pre-authenticated flow, session/new, model/mode config, session/prompt, permission handling, and session/cancel on the installed Cursor CLI.",
+]
+verification_commands = [
+  "npx vitest run src/__tests__/acp-transport-wiring.test.ts src/__tests__/acp-provider-registry.test.ts src/__tests__/acp-smoke-harness.test.ts",
+]
+
+[[nodes]]
+id = "phase-7-cursor-mcp-management-surface"
+phase = "mcp-management"
+status = "planned"
+description = """
+Expose Cursor's native MCP management as a first-class gateway surface backed by
+cursor-agent mcp. This is not transient request-time injection. It is
+operator-visible management and diagnostics for Cursor's actual project/user
+.cursor/mcp.json state, including list, list-tools, enable, disable, login
+status/remediation, and per-request approveMcps behavior.
+"""
+dependencies = ["phase-1-provider-object-generation-contract", "phase-4-cursor-request-surface-parity"]
+expected_files_touched = [
+  "src/index.ts",
+  "src/cursor-admin.ts",
+  "src/provider-tool-capabilities.ts",
+  "src/upstream-contracts.ts",
+  "src/__tests__/cursor-admin.test.ts",
+  "src/__tests__/cursor-handler.test.ts",
+]
+acceptance_criteria = [
+  "Gateway exposes Cursor MCP list and list-tools read-only surfaces.",
+  "Gateway exposes Cursor MCP enable, disable, and login flows with explicit approval/audit behavior.",
+  "Cursor MCP outputs are redacted for env values, API keys, auth headers, and local secret paths.",
+  "approveMcps maps to --approve-mcps in cursor_request with high-impact approval metadata.",
+  "provider_tool_capabilities reports Cursor MCP management as implemented.",
+]
+verification_commands = [
+  "npx vitest run src/__tests__/cursor-admin.test.ts src/__tests__/cursor-handler.test.ts src/__tests__/provider-tool-capabilities.test.ts",
+]
+
+[[nodes]]
+id = "phase-8-cursor-session-worktree-plugin-worker-surfaces"
+phase = "admin-and-workspace"
+status = "planned"
+description = """
+Expose the rest of Cursor's documented operational surface: session listing and
+chat creation, worktree controls, plugin directories, status/about diagnostics,
+and private worker diagnostics/lifecycle. These are first-class gateway
+operations with policy, process tracking, cancellation, and redaction.
+"""
+dependencies = ["phase-1-provider-object-generation-contract", "phase-4-cursor-request-surface-parity"]
+expected_files_touched = [
+  "src/index.ts",
+  "src/cursor-admin.ts",
+  "src/provider-status.ts",
+  "src/process-health.ts",
+  "src/upstream-contracts.ts",
+  "src/__tests__/cursor-admin.test.ts",
+  "src/__tests__/provider-status.test.ts",
+  "src/__tests__/process-health.test.ts",
+]
+acceptance_criteria = [
+  "Gateway exposes Cursor session listing, create-chat, resume, and continue semantics without confusing Cursor chat ids with gateway tracking ids.",
+  "Gateway supports worktree, worktreeBase, and skipWorktreeSetup fields with local-only or policy-gated behavior.",
+  "Gateway supports pluginDir with local-only or policy-gated behavior and redacted metadata.",
+  "Gateway integrates cursor-agent status/about into cli_versions, doctor, and llm_process_health.",
+  "Gateway exposes worker debug as read-only diagnostics.",
+  "Gateway exposes worker start as an administrative, approval-gated, process-tracked, cancellable lifecycle operation.",
+]
+verification_commands = [
+  "npx vitest run src/__tests__/cursor-admin.test.ts src/__tests__/provider-status.test.ts src/__tests__/process-health.test.ts src/__tests__/upstream-contracts.test.ts",
+]
+
+[[nodes]]
+id = "phase-9-validation-review-participation"
+phase = "orchestration"
+status = "planned"
+description = """
+Make Cursor a dependable validation and review participant. The review
+orchestrator should know which Cursor controls are safe by default, when to use
+ask/plan mode, when to request trust/workspace, and how to classify Cursor
+failures.
+"""
+dependencies = [
+  "phase-5-cursor-output-normalization",
+  "phase-6-acp-cursor-first-class-surface",
+  "phase-7-cursor-mcp-management-surface",
+  "phase-8-cursor-session-worktree-plugin-worker-surfaces",
+]
+expected_files_touched = [
+  "src/validation-orchestrator.ts",
+  "src/validation-api-reviewer.ts",
+  "src/provider-tool-capabilities.ts",
+  "src/__tests__/validation-orchestrator.test.ts",
+  "src/__tests__/validation-api-reviewer.test.ts",
+]
+acceptance_criteria = [
+  "Cursor is selectable by validate_with_models, red_team_review, second_opinion, and consensus_check.",
+  "Default review usage avoids force/yolo and uses read-only mode unless a task explicitly requires file edits.",
+  "Review evidence includes Cursor command args, model id, workspace, and output parser status.",
+  "Failures produce concrete remediation: login, model discovery, workspace trust, sandbox, or timeout.",
+]
+verification_commands = [
+  "npx vitest run src/__tests__/validation-orchestrator.test.ts src/__tests__/validation-api-reviewer.test.ts",
+]
+
+[[nodes]]
+id = "phase-10-docs-and-operator-guidance"
+phase = "docs"
+status = "planned"
+description = """
+Update public docs so Cursor is described consistently as a first-class
+provider. Document model discovery, model selection, safety controls, remote
+workspace rules, full ACP functionality, and exact upstream-backed limits.
+"""
+dependencies = [
+  "phase-3-model-resource-parity",
+  "phase-4-cursor-request-surface-parity",
+  "phase-6-acp-cursor-first-class-surface",
+  "phase-7-cursor-mcp-management-surface",
+  "phase-8-cursor-session-worktree-plugin-worker-surfaces",
+  "phase-9-validation-review-participation",
+]
+expected_files_touched = [
+  "README.md",
+  "docs/personal-mcp/PROVIDER_CAPABILITIES.md",
+  "docs/personal-mcp/ENDPOINT_EXPOSURE.md",
+  ".agents/skills/provider-cursor/SKILL.md",
+]
+acceptance_criteria = [
+  "Docs cite Cursor model discovery through list_models and models://cursor.",
+  "Docs explain Cursor model ids are account-specific and may be parameterized.",
+  "Docs distinguish safe read-only ask/plan mode from force/yolo and sandbox-disabled operations.",
+  "Docs cover Cursor MCP management, worktrees, plugins, private workers, sessions, status/about diagnostics, and ACP extension methods.",
+  "Docs explain full Cursor ACP functionality, Cursor MCP ownership via .cursor/mcp.json, and the implemented gateway behavior for request-time MCP handling.",
+  "A provider-cursor skill exists for ongoing upstream drift work.",
+]
+verification_commands = [
+  "rg -n \"cursor|Cursor|models://cursor|--list-models|--stream-partial-output|ACP\" README.md docs .agents/skills",
+  "npm run format:check",
+]
+
+[[nodes]]
+id = "phase-11-release-quality-gate"
+phase = "release"
+status = "planned"
+description = """
+Run the full local gate, cross-LLM review, and release readiness checks. The
+implementation should not ship until Cursor has parity across model discovery,
+resources, capabilities, request handling, and docs.
+"""
+dependencies = [
+  "phase-2-live-cursor-model-discovery",
+  "phase-3-model-resource-parity",
+  "phase-4-cursor-request-surface-parity",
+  "phase-5-cursor-output-normalization",
+  "phase-6-acp-cursor-first-class-surface",
+  "phase-7-cursor-mcp-management-surface",
+  "phase-8-cursor-session-worktree-plugin-worker-surfaces",
+  "phase-9-validation-review-participation",
+  "phase-10-docs-and-operator-guidance",
+]
+expected_files_touched = [
+  "CHANGELOG.md",
+]
+acceptance_criteria = [
+  "All release_gates.local_commands pass.",
+  "Manual Cursor smokes pass or produce documented environment blockers.",
+  "Cross-LLM review approves the implementation with inspected code evidence.",
+  "No internal MCP names, machine paths, auth tokens, or account-specific model dumps are committed.",
+]
+verification_commands = [
+  "npm run check",
+  "bash scripts/pre-release.sh",
+]

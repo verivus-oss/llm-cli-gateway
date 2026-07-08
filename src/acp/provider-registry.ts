@@ -15,6 +15,7 @@
  * an argv array, never as a shell string.
  */
 
+import { getProviderDefinition } from "../provider-definitions.js";
 import type { CliType } from "../session-manager.js";
 
 /**
@@ -96,6 +97,21 @@ export interface AcpProviderRegistryEntry {
 }
 
 /**
+ * Source a provider's native ACP entrypoint from the single source of truth
+ * (`provider-definitions.ts`), frozen as an {@link AcpEntrypoint}. Returns null
+ * when the provider has no native entrypoint. This is the DRY dedupe: the
+ * registry NEVER re-spells the executable/argv; it derives them from the
+ * definition so a change there flows through automatically.
+ */
+function acpEntrypointFromDefinition(provider: CliType): AcpEntrypoint | null {
+  const entry = getProviderDefinition(provider).acp.entrypoint;
+  if (!entry) {
+    return null;
+  }
+  return Object.freeze({ command: entry.command, args: Object.freeze([...entry.args]) });
+}
+
+/**
  * The frozen ACP provider registry. Keyed by gateway provider type.
  *
  * Note: the `gemini` key targets Google Antigravity `agy`, which has no ACP
@@ -108,12 +124,13 @@ const ACP_PROVIDER_REGISTRY: Readonly<Record<CliType, AcpProviderRegistryEntry>>
     displayName: "Mistral Vibe",
     status: "native_smoke_passed",
     supportKind: "native",
-    targetVersion: "vibe 2.17.1",
-    entrypoint: Object.freeze({ command: "vibe-acp", args: Object.freeze([]) }),
+    targetVersion: "vibe 2.18.3",
+    entrypoint: acpEntrypointFromDefinition("mistral"),
     runtimeEnabledDefault: false,
     shipRuntimePilot: true,
     runtimePriority: 1,
     adapterCandidates: Object.freeze([]),
+    // phase-5/8: replace limited-support label with discovered capability fact
     caveat:
       "Native ACP entrypoint vibe-acp. Manual initialize and session/new smoke passed. First native runtime pilot; runtime routing stays config-gated.",
   }),
@@ -122,22 +139,24 @@ const ACP_PROVIDER_REGISTRY: Readonly<Record<CliType, AcpProviderRegistryEntry>>
     displayName: "xAI Grok CLI",
     status: "native_smoke_passed",
     supportKind: "native",
-    targetVersion: "grok 0.2.73 (9ff14c43bb)",
-    entrypoint: Object.freeze({ command: "grok", args: Object.freeze(["agent", "stdio"]) }),
+    targetVersion: "grok 0.2.77 (44e77bec3a)",
+    entrypoint: acpEntrypointFromDefinition("grok"),
     runtimeEnabledDefault: false,
     shipRuntimePilot: true,
     runtimePriority: 2,
     adapterCandidates: Object.freeze([]),
+    // phase-5/8: replace limited-support label with discovered capability fact
     caveat:
       "Native ACP entrypoint grok agent stdio. Manual smoke passed with the installed CLI managing credentials; empty-env smoke is expected to fail. Second native runtime pilot; runtime routing stays config-gated.",
   }),
   codex: Object.freeze({
     provider: "codex",
     displayName: "OpenAI Codex CLI",
+    // phase-5/8: replace limited-support label with discovered capability fact
     status: "adapter_mediated_deferred",
     supportKind: "adapter_mediated",
     targetVersion: "codex-cli 0.142.4",
-    entrypoint: null,
+    entrypoint: acpEntrypointFromDefinition("codex"),
     runtimeEnabledDefault: false,
     shipRuntimePilot: false,
     runtimePriority: 0,
@@ -148,10 +167,11 @@ const ACP_PROVIDER_REGISTRY: Readonly<Record<CliType, AcpProviderRegistryEntry>>
   claude: Object.freeze({
     provider: "claude",
     displayName: "Anthropic Claude Code",
+    // phase-5/8: replace limited-support label with discovered capability fact
     status: "adapter_mediated_deferred",
     supportKind: "adapter_mediated",
-    targetVersion: "claude 2.1.195",
-    entrypoint: null,
+    targetVersion: "claude 2.1.198",
+    entrypoint: acpEntrypointFromDefinition("claude"),
     runtimeEnabledDefault: false,
     shipRuntimePilot: false,
     runtimePriority: 0,
@@ -162,10 +182,11 @@ const ACP_PROVIDER_REGISTRY: Readonly<Record<CliType, AcpProviderRegistryEntry>>
   gemini: Object.freeze({
     provider: "gemini",
     displayName: "Google Antigravity",
+    // phase-5/8: replace limited-support label with discovered capability fact
     status: "absent_watchlist",
     supportKind: "none",
-    targetVersion: "agy 1.0.13",
-    entrypoint: null,
+    targetVersion: "agy 1.0.14",
+    entrypoint: acpEntrypointFromDefinition("gemini"),
     runtimeEnabledDefault: false,
     shipRuntimePilot: false,
     runtimePriority: 0,
@@ -179,13 +200,14 @@ const ACP_PROVIDER_REGISTRY: Readonly<Record<CliType, AcpProviderRegistryEntry>>
     status: "native_smoke_passed",
     supportKind: "native",
     targetVersion: "devin 2026.8.18 (16737566)",
-    entrypoint: Object.freeze({ command: "devin", args: Object.freeze(["acp"]) }),
+    entrypoint: acpEntrypointFromDefinition("devin"),
     runtimeEnabledDefault: false,
     // Slice D1: manual initialize + session/new smoke passed against the
     // installed CLI (protocolVersion 1, agent "Affogato", session created).
     shipRuntimePilot: true,
     runtimePriority: 3,
     adapterCandidates: Object.freeze([]),
+    // phase-5/8: replace limited-support label with discovered capability fact
     caveat:
       "Native ACP entrypoint `devin acp` (stdio JSON-RPC). Manual initialize + session/new smoke passed with the installed CLI managing credentials (`devin auth login`; WINDSURF_API_KEY for empty-env); empty-env smoke is expected to fail. Third native runtime pilot; runtime routing stays config-gated.",
   }),
@@ -195,11 +217,12 @@ const ACP_PROVIDER_REGISTRY: Readonly<Record<CliType, AcpProviderRegistryEntry>>
     status: "native_smoke_passed",
     supportKind: "native",
     targetVersion: "cursor-agent 2026.06.29-2ad2186",
-    entrypoint: Object.freeze({ command: "cursor-agent", args: Object.freeze(["acp"]) }),
+    entrypoint: acpEntrypointFromDefinition("cursor"),
     runtimeEnabledDefault: false,
     shipRuntimePilot: true,
     runtimePriority: 4,
     adapterCandidates: Object.freeze([]),
+    // phase-5/8: replace limited-support label with discovered capability fact
     caveat:
       "Native ACP entrypoint `cursor-agent acp` (stdio JSON-RPC) is available as a hidden advanced command. Manual initialize + session/new smoke passed locally (protocolVersion 1, session created; no agentInfo returned). Fourth native runtime pilot; runtime routing stays config-gated.",
   }),

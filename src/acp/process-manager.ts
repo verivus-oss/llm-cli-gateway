@@ -71,6 +71,14 @@ export type ProcessEnv = Record<string, string | undefined>;
 export type TerminationSignal = "SIGTERM" | "SIGKILL" | "SIGINT" | "SIGHUP";
 
 /**
+ * Grace window between a graceful termination signal (SIGTERM/SIGINT/SIGHUP) and
+ * a forced SIGKILL. A provider CLI that ignores or blocks the graceful signal is
+ * force-killed after this window so it cannot linger as a zombie. Mirrors the
+ * SIGTERM->SIGKILL escalation in executor.ts.
+ */
+const SHUTDOWN_KILL_GRACE_MS = 5000;
+
+/**
  * Minimal child-process surface the manager depends on. A real
  * `ChildProcess` satisfies this; tests provide a fake with the same shape so
  * the full lifecycle is exercised without a real binary.
@@ -142,6 +150,14 @@ export interface StartProviderOptions {
    * A non-positive value disables the idle timer.
    */
   readonly idleTimeoutMs?: number;
+  /**
+   * Extra fixed argv appended to the resolved entrypoint (e.g. Devin
+   * `--agent-type review`). Each element is a literal string spawned with
+   * `shell:false`; no shell interpolation ever occurs. The caller is responsible
+   * for the values being from a validated enum/allowlist, never provider output
+   * or free-form prompt text.
+   */
+  readonly extraArgs?: readonly string[];
 }
 
 /** A live (or terminal) managed provider process plus its protocol surfaces. */
@@ -223,7 +239,8 @@ export function resolveProviderSpawn(
   provider: CliType,
   config: AcpConfig,
   baseEnv: ProcessEnv,
-  cwd?: string
+  cwd?: string,
+  extraArgs: readonly string[] = []
 ): ResolvedAcpSpawn {
   const providerConfig = config.providers[provider];
   const registryEntry = getAcpProviderEntry(provider);
@@ -244,8 +261,12 @@ export function resolveProviderSpawn(
     );
   }
 
+  // Append any caller-supplied fixed argv (e.g. Devin --agent-type). Validated
+  // as strings; spawned with shell:false so no value is ever shell-interpreted.
+  const combinedArgs: readonly string[] = [...args, ...extraArgs];
+
   assertSafeExecutable(command, provider);
-  for (const arg of args) {
+  for (const arg of combinedArgs) {
     if (typeof arg !== "string") {
       throw new ProviderUnavailableError(provider, "ACP args must be strings", { provider });
     }
@@ -261,7 +282,7 @@ export function resolveProviderSpawn(
 
   return {
     command,
-    args: [...args],
+    args: [...combinedArgs],
     cwd: cwd ?? `${tmpdir()}/llm-gateway-acp-${provider}`,
     env: buildProviderEnv(provider, effectiveConfig, baseEnv),
   };
@@ -328,7 +349,13 @@ export class AcpProcessManager {
    * {@link AcpError} is thrown. The returned process is healthy and initialized.
    */
   async start(options: StartProviderOptions): Promise<ManagedAcpProcess> {
-    const resolved = resolveProviderSpawn(options.provider, this.config, this.baseEnv, options.cwd);
+    const resolved = resolveProviderSpawn(
+      options.provider,
+      this.config,
+      this.baseEnv,
+      options.cwd,
+      options.extraArgs
+    );
 
     let child: AcpChildProcess;
     try {
@@ -373,6 +400,7 @@ export class AcpProcessManager {
       initializeTimeoutMs: this.config.initializeTimeoutMs,
       sessionNewTimeoutMs: this.config.sessionNewTimeoutMs,
       promptTimeoutMs: this.config.promptTimeoutMs,
+      allowMutatingSessionOps: this.config.allowMutatingSessionOps,
       onTerminal: m => this.live.delete(m),
     });
     this.live.add(managed);
@@ -420,6 +448,7 @@ interface ManagedProcessImplOptions {
   readonly initializeTimeoutMs: number;
   readonly sessionNewTimeoutMs?: number;
   readonly promptTimeoutMs?: number;
+  readonly allowMutatingSessionOps?: boolean;
   readonly onTerminal: (self: ManagedProcessImpl) => void;
 }
 
@@ -445,6 +474,7 @@ class ManagedProcessImpl implements ManagedAcpProcess {
   private _signal: string | null = null;
   private _terminalError: AcpError | null = null;
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
+  private killTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(options: ManagedProcessImplOptions) {
     this.provider = options.provider;
@@ -498,6 +528,8 @@ class ManagedProcessImpl implements ManagedAcpProcess {
         sessionNewMs: options.sessionNewTimeoutMs,
         promptMs: options.promptTimeoutMs,
       },
+      // Deny-by-default mutating ACP admin ops unless the operator enabled them.
+      allowMutatingSessionOps: options.allowMutatingSessionOps ?? false,
     });
 
     // Wire process exit -> transport teardown + quarantine. Both `exit` and
@@ -578,7 +610,47 @@ class ManagedProcessImpl implements ManagedAcpProcess {
     }
   }
 
+  /**
+   * Arm the SIGTERM->SIGKILL escalation after a graceful termination signal.
+   * If the child has not emitted `exit` within {@link SHUTDOWN_KILL_GRACE_MS},
+   * force-kill it so a provider that ignores the graceful signal cannot linger.
+   * Idempotent (a second graceful signal does not reset the window); the timer
+   * is unref'd so it never keeps the event loop alive, and it is cleared the
+   * moment the child actually exits ({@link handleExit}).
+   */
+  private armKillTimer(): void {
+    if (this.killTimer || SHUTDOWN_KILL_GRACE_MS <= 0) {
+      return;
+    }
+    this.killTimer = setTimeout(() => {
+      this.killTimer = null;
+      try {
+        this.child.kill("SIGKILL");
+        this.logger.info("acp.process.force_killed", {
+          provider: this.provider,
+          pid: this.pid,
+        });
+      } catch (err) {
+        this.logger.error("acp.process.kill_failed", {
+          provider: this.provider,
+          pid: this.pid,
+          errorClass: err instanceof Error ? err.name : "unknown",
+        });
+      }
+    }, SHUTDOWN_KILL_GRACE_MS);
+    this.killTimer.unref?.();
+  }
+
+  private clearKillTimer(): void {
+    if (this.killTimer) {
+      clearTimeout(this.killTimer);
+      this.killTimer = null;
+    }
+  }
+
   private handleExit(code: number | null, signal: TerminationSignal | null): void {
+    // The child exited, so any pending force-kill escalation is moot.
+    this.clearKillTimer();
     if (this._state === "exited" || this._state === "quarantined") {
       // Already terminal (e.g. shutdown initiated). Record exit detail and stop.
       this._exitCode = code;
@@ -660,6 +732,8 @@ class ManagedProcessImpl implements ManagedAcpProcess {
     this.client.notifyProcessExit(error);
     try {
       this.child.kill("SIGTERM");
+      // Escalate to SIGKILL if the half-dead process ignores SIGTERM.
+      this.armKillTimer();
     } catch (err) {
       this.logger.error("acp.process.kill_failed", {
         provider: this.provider,
@@ -692,6 +766,11 @@ class ManagedProcessImpl implements ManagedAcpProcess {
     if (wasRunning) {
       try {
         this.child.kill(signal);
+        // A graceful signal may be ignored by the provider; escalate to SIGKILL
+        // after the grace window. A direct SIGKILL needs no escalation.
+        if (signal !== "SIGKILL") {
+          this.armKillTimer();
+        }
       } catch (err) {
         this.logger.error("acp.process.kill_failed", {
           provider: this.provider,

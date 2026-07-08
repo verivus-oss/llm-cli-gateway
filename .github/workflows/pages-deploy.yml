@@ -20,10 +20,13 @@ permissions:
 
 jobs:
   deploy:
-    # Only the public mirror holds the CLOUDFLARE_API_TOKEN secret and owns the
-    # Pages project. The private dev repo skips this job (the secret is not, and
-    # must not be, present there).
+    # Only the public mirror owns the Pages project. The private dev repo skips
+    # this job.
     if: github.repository == 'verivus-oss/llm-cli-gateway'
+    environment: cloudflare-pages-llm-cli-gateway
+    permissions:
+      contents: read
+      id-token: write
     # MUST run on the self-hosted runner: the Cloudflare token is IP-allowlist
     # restricted (a deliberate control), so it only works from a trusted egress
     # IP. GitHub-hosted runners are rejected with Cloudflare error 9109. The
@@ -50,11 +53,47 @@ jobs:
       - name: Verify site version matches package.json
         run: node scripts/sync-site-version.mjs --check
 
+      - name: Fetch Cloudflare Pages token from Azure Key Vault
+        env:
+          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          AZURE_KEY_VAULT_NAME: ${{ vars.AZURE_KEY_VAULT_NAME }}
+          AZURE_KEY_VAULT_CLOUDFLARE_TOKEN_SECRET_NAME: ${{ vars.AZURE_KEY_VAULT_CLOUDFLARE_TOKEN_SECRET_NAME }}
+        run: node .github/scripts/fetch-azure-keyvault-secrets.mjs CLOUDFLARE_API_TOKEN="${AZURE_KEY_VAULT_CLOUDFLARE_TOKEN_SECRET_NAME}"
+
       - name: Deploy site/ to Cloudflare Pages (production)
         env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           # Not a secret — the account that owns the Pages project.
           CLOUDFLARE_ACCOUNT_ID: "6e2be897d28f85da0d0551a8b462f851"
         # --branch=main maps to the production domain (llm-cli-gateway.dev); the
         # git branch would otherwise be published as a preview alias.
         run: npx -y wrangler@4.100.0 pages deploy site --project-name=llm-cli-gateway --branch=main --commit-dirty=true
+
+      - name: Submit deployed URLs to Bing IndexNow
+        # Search indexing should be observable, but a transient search-provider
+        # outage must not block the production site deploy.
+        continue-on-error: true
+        run: node scripts/submit-indexnow.mjs
+
+      - name: Authenticate to Google Cloud for Search Console
+        id: google-auth
+        # Search Console submission is useful release hygiene, but must not block
+        # the production site deploy if Google auth is temporarily unavailable.
+        continue-on-error: true
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+        with:
+          workload_identity_provider: ${{ vars.GOOGLE_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GOOGLE_SERVICE_ACCOUNT_EMAIL }}
+          token_format: access_token
+          access_token_scopes: https://www.googleapis.com/auth/webmasters
+
+      - name: Submit sitemap to Google Search Console
+        # Google can reject submission until the service account has Search
+        # Console access to the verified property; keep deploys moving and make
+        # the failure visible in the workflow logs.
+        continue-on-error: true
+        env:
+          GOOGLE_ACCESS_TOKEN: ${{ steps.google-auth.outputs.access_token }}
+          GOOGLE_SEARCH_CONSOLE_SITE_URL: ${{ vars.GOOGLE_SEARCH_CONSOLE_SITE_URL }}
+          GOOGLE_SEARCH_CONSOLE_SITEMAP_URL: ${{ vars.GOOGLE_SEARCH_CONSOLE_SITEMAP_URL }}
+        run: node scripts/submit-google-search-console.mjs

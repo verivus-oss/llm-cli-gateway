@@ -11,6 +11,16 @@ import { registerValidationTools } from "../validation-tools.js";
 import { createGatewayServer } from "../index.js";
 import { AsyncJobManager } from "../async-job-manager.js";
 import { getAvailableCliInfo } from "../model-registry.js";
+import { getProviderDefinition } from "../provider-definitions.js";
+import {
+  discoverProviderCapabilities,
+  type ProbeResult,
+  type ProbeRunner,
+} from "../provider-capability-discovery.js";
+import {
+  __resetCapabilityResolverMemoForTest,
+  __seedCapabilityResolverMemoForTest,
+} from "../provider-capability-resolver.js";
 import { noopLogger } from "../logger.js";
 import type { ApiProviderRuntime, PersistenceConfig, ProvidersConfig } from "../config.js";
 
@@ -31,6 +41,7 @@ const NONE_PERSISTENCE: PersistenceConfig = {
   retentionDays: 30,
   dedupWindowMs: 0,
   acknowledgeEphemeral: true,
+  ownsOrphanRecovery: false,
   asyncJobsEnabled: false,
   sources: { configFile: null, envOverrides: [] },
 };
@@ -141,11 +152,20 @@ describe("Slice 5 — API provider catalog", () => {
 
   // Slice 5: list_models surfaces enabled API providers under `apiProviders`,
   // mirroring list_available_models, while staying byte-identical when dormant.
-  it("list_models is byte-identical to getAvailableCliInfo() when no API providers are enabled", async () => {
+  it("list_models keeps the static CLI entries (no apiProviders) when no API providers are enabled", async () => {
     const server = makeServer(mkProviders(false));
     const result = await listModels(server, {});
+    // API-provider surface stays dormant (unchanged Slice 5 guarantee).
     expect("apiProviders" in result).toBe(false);
-    expect(result).toEqual(getAvailableCliInfo());
+    // Phase-3 adds an additive `discovered` map; the static CLI entries are
+    // otherwise byte-identical to getAvailableCliInfo().
+    const { discovered, ...cliEntries } = result as Record<string, unknown>;
+    expect(cliEntries).toEqual(getAvailableCliInfo());
+    // With no discovery warmed in this test process, every provider degrades to
+    // the static fallback marker.
+    expect((discovered as Record<string, { source: string }>).claude.source).toBe(
+      "static-fallback"
+    );
   });
 
   it("list_models (unfiltered) appends an apiProviders array when a provider is enabled, keeping CLI entries", async () => {
@@ -170,8 +190,53 @@ describe("Slice 5 — API provider catalog", () => {
   it("list_models filtered by a CLI type returns only that CLI, no apiProviders", async () => {
     const server = makeServer(mkProviders(true));
     const result = await listModels(server, { cli: "claude" });
-    expect(Object.keys(result)).toEqual(["claude"]);
+    // The static CLI entry plus the additive phase-3 `discovered` map, no more.
+    expect(Object.keys(result).sort()).toEqual(["claude", "discovered"]);
     expect("apiProviders" in result).toBe(false);
+  });
+
+  // FIX A (list_models): the discovered live listing reaches list_models when a
+  // capability set is resolvable. Seed the resolver memo (no real spawn) and
+  // assert the additive `discovered` map carries it.
+  // Mutation that flips this red: reverting the index.ts list_models handler to
+  // omit the `discovered` map.
+  it("list_models surfaces the discovered live listing for a resolvable CLI provider", async () => {
+    __resetCapabilityResolverMemoForTest();
+    const runner: ProbeRunner = async (exe, argv): Promise<ProbeResult> => {
+      const key = `${exe} ${argv.join(" ")}`.trim();
+      if (key === "codex --version") return { stdout: "codex 0.142.5", stderr: "", code: 0 };
+      if (key === "codex debug models") {
+        return {
+          stdout: JSON.stringify({
+            models: [{ slug: "gpt-5.5", display_name: "GPT-5.5", visibility: "list" }],
+          }),
+          stderr: "",
+          code: 0,
+        };
+      }
+      return { stdout: "", stderr: "", code: 0 };
+    };
+    const set = await discoverProviderCapabilities(getProviderDefinition("codex"), {
+      runner,
+      gatewayVersion: "test-gw-1.0.0",
+      resolveExecutablePath: () => "/abs/bin/codex",
+    });
+    __seedCapabilityResolverMemoForTest("codex", { set, source: "live", degraded: false });
+    try {
+      const server = makeServer(mkProviders(false));
+      const result = (await listModels(server, {})) as {
+        discovered: Record<
+          string,
+          { source: string; listing: { models: { id: string }[] } | null }
+        >;
+      };
+      expect(result.discovered.codex.source).toBe("live");
+      expect(result.discovered.codex.listing?.models.some(m => m.id === "gpt-5.5")).toBe(true);
+      // A provider with no seeded set degrades to static-fallback.
+      expect(result.discovered.claude.source).toBe("static-fallback");
+    } finally {
+      __resetCapabilityResolverMemoForTest();
+    }
   });
 
   it("list_models filter enum accepts enabled API provider names and rejects unknown ones", () => {

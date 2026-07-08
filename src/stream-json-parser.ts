@@ -21,6 +21,13 @@ export interface StreamJsonResult {
   durationApiMs: number | null;
   isError: boolean;
   numTurns: number | null;
+  /**
+   * Anthropic stop reason ("end_turn" / "max_tokens" / "tool_use" / …) when
+   * upstream supplies it: preferentially the terminal `result.stop_reason`,
+   * else the last assistant message's `message.stop_reason`. `null` when the
+   * stream carried no stop reason (e.g. an error/partial stream).
+   */
+  stopReason: string | null;
 }
 
 function stringOrNull(value: unknown): string | null {
@@ -95,6 +102,8 @@ export function parseStreamJson(stdout: string): StreamJsonResult {
       durationApiMs: numberOrNull(resultEvent.duration_api_ms),
       isError: resultEvent.is_error === true,
       numTurns: numberOrNull(resultEvent.num_turns),
+      stopReason:
+        stringOrNull(resultEvent.stop_reason) ?? stringOrNull(assistantEvent?.message?.stop_reason),
     };
   }
 
@@ -124,10 +133,11 @@ export function parseStreamJson(stdout: string): StreamJsonResult {
       durationApiMs: null,
       isError: false,
       numTurns: null,
+      stopReason: stringOrNull(message?.stop_reason),
     };
   }
 
-  // No result or assistant event found — return empty
+  // No result or assistant event found: return empty
   return {
     text: "",
     costUsd: null,
@@ -137,5 +147,6 @@ export function parseStreamJson(stdout: string): StreamJsonResult {
     durationApiMs: null,
     isError: false,
     numTurns: null,
+    stopReason: null,
   };
 }

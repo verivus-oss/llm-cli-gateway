@@ -14,7 +14,12 @@ import { PassThrough } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
 
 import type { AcpChildProcess, AcpSpawnFn } from "../acp/process-manager.js";
-import { runAcpRequest, type AcpFlightSink, type AcpRuntimeDeps } from "../acp/runtime.js";
+import {
+  runAcpRequest,
+  extractAcpPromptUsage,
+  type AcpFlightSink,
+  type AcpRuntimeDeps,
+} from "../acp/runtime.js";
 import type { ApprovalManager } from "../approval-manager.js";
 import type { AcpConfig, AcpProviderConfig } from "../config.js";
 import type { ISessionManager, ProviderType, Session } from "../session-manager.js";
@@ -35,6 +40,8 @@ class FakeAgent extends EventEmitter implements AcpChildProcess {
   private buffer = "";
   private readonly handlers = new Map<string, (f: Frame) => void>();
   failPrompt = false;
+  /** Optional `_meta` block echoed on the session/prompt response (B4 usage). */
+  promptMeta: Record<string, unknown> | undefined = undefined;
 
   constructor() {
     super();
@@ -69,7 +76,10 @@ class FakeAgent extends EventEmitter implements AcpChildProcess {
         sessionId: "prov-sess-1",
         update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "world" } },
       });
-      this.reply(f.id, { stopReason: "end_turn" });
+      this.reply(f.id, {
+        stopReason: "end_turn",
+        ...(this.promptMeta ? { _meta: this.promptMeta } : {}),
+      });
     });
   }
 
@@ -160,6 +170,36 @@ describe("ACP runtime — config gates (fail closed)", () => {
       runAcpRequest(d, { provider: "mistral", prompt: "hi", correlationId: "c" })
     ).rejects.toMatchObject({ kind: "provider_runtime_disabled" });
   });
+
+  // BLOCKER 4 (safety): a provider with enabled=false must NEVER spawn, even when
+  // runtime_enabled=true. The runtime requires BOTH gates. Mutation that flips
+  // this red: dropping the `providerConfig.enabled` check in runtime.ts (the
+  // disabled provider would then spawn and this test's no-spawn assertion fails).
+  it("throws ProviderAcpDisabledError and never spawns when enabled=false (runtime_enabled=true)", async () => {
+    let spawned = false;
+    const spawn: AcpSpawnFn = () => {
+      spawned = true;
+      return new FakeAgent();
+    };
+    const d = deps(new FakeAgent(), {
+      spawn,
+      config: makeConfig({
+        providers: {
+          mistral: {
+            enabled: false,
+            command: "vibe-acp",
+            args: [],
+            runtimeEnabled: true,
+            isolatedLeaderSocket: false,
+          },
+        },
+      }),
+    });
+    await expect(
+      runAcpRequest(d, { provider: "mistral", prompt: "hi", correlationId: "c" })
+    ).rejects.toMatchObject({ kind: "provider_acp_disabled" });
+    expect(spawned).toBe(false);
+  });
 });
 
 describe("ACP runtime — happy path", () => {
@@ -193,6 +233,98 @@ describe("ACP runtime — happy path", () => {
     expect(JSON.stringify(starts)).toContain("[acp prompt:");
     expect(JSON.stringify(completes)).toContain("[acp response:");
     expect(JSON.stringify(completes)).not.toContain("Hello world");
+    // Phase 7: the session/prompt stopReason + provider session id are threaded
+    // into the flight-recorder result. Mutation that flips this red: not calling
+    // normalizer.completeWith(promptResult.stopReason) or not passing
+    // providerSessionId/stopReason to buildAcpFlightResult.
+    const complete = completes[0] as { stopReason?: string; providerSessionId?: string };
+    expect(complete.stopReason).toBe("end_turn");
+    expect(typeof complete.providerSessionId).toBe("string");
+    expect(complete.providerSessionId!.length).toBeGreaterThan(0);
+  });
+
+  // B4 (acceptance #1): per-request token usage from the ACP session/prompt
+  // response `_meta` is threaded into the flight-recorder result. Field names are
+  // grok's live-verified `agent stdio` shape (inputTokens / outputTokens /
+  // cachedReadTokens; see docs/personal-mcp/PROVIDER_CACHE_SURFACES.md). Mutation
+  // that flips this red: not calling extractAcpPromptUsage(promptResult._meta) or
+  // not passing inputTokens/outputTokens/cacheReadTokens to buildAcpFlightResult.
+  it("threads per-request token usage from prompt `_meta` into the flight result", async () => {
+    const agent = new FakeAgent();
+    agent.promptMeta = {
+      sessionId: "prov-sess-1",
+      inputTokens: 11954,
+      outputTokens: 36,
+      cachedReadTokens: 7639,
+      reasoningTokens: 0,
+      totalTokens: 11990,
+    };
+    const completes: unknown[] = [];
+    const flightRecorder: AcpFlightSink = {
+      logStart: () => {},
+      logComplete: (_id, r) => completes.push(r),
+    };
+    await runAcpRequest(deps(agent, { flightRecorder }), {
+      provider: "mistral",
+      prompt: "hi",
+      correlationId: "c-usage",
+    });
+    const complete = completes[0] as {
+      inputTokens?: number;
+      outputTokens?: number;
+      cacheReadTokens?: number;
+    };
+    expect(complete.inputTokens).toBe(11954);
+    expect(complete.outputTokens).toBe(36);
+    expect(complete.cacheReadTokens).toBe(7639);
+    // totalTokens is the per-turn input+output SUM (never a per-request input
+    // count), so it must NOT be surfaced as usage. Assert it did not leak in as
+    // inputTokens.
+    expect(complete.inputTokens).not.toBe(11990);
+  });
+
+  // Capability fact: a provider whose ACP `_meta` omits usage yields NO
+  // fabricated counts; the flight columns stay undefined (NULL).
+  it("leaves usage undefined when prompt `_meta` carries no token fields", async () => {
+    const agent = new FakeAgent(); // no promptMeta, reply has no _meta
+    const completes: unknown[] = [];
+    const flightRecorder: AcpFlightSink = {
+      logStart: () => {},
+      logComplete: (_id, r) => completes.push(r),
+    };
+    await runAcpRequest(deps(agent, { flightRecorder }), {
+      provider: "mistral",
+      prompt: "hi",
+      correlationId: "c-no-usage",
+    });
+    const complete = completes[0] as {
+      inputTokens?: number;
+      outputTokens?: number;
+      cacheReadTokens?: number;
+    };
+    expect(complete.inputTokens).toBeUndefined();
+    expect(complete.outputTokens).toBeUndefined();
+    expect(complete.cacheReadTokens).toBeUndefined();
+  });
+});
+
+describe("extractAcpPromptUsage (B4)", () => {
+  it("lifts inputTokens/outputTokens/cachedReadTokens from the grok `_meta` shape", () => {
+    const usage = extractAcpPromptUsage({
+      inputTokens: 11954,
+      outputTokens: 36,
+      cachedReadTokens: 7639,
+      totalTokens: 11990,
+    });
+    expect(usage).toEqual({ inputTokens: 11954, outputTokens: 36, cacheReadTokens: 7639 });
+  });
+
+  it("returns {} for absent, non-object, or non-numeric fields (no fabrication)", () => {
+    expect(extractAcpPromptUsage(undefined)).toEqual({});
+    expect(extractAcpPromptUsage(null)).toEqual({});
+    expect(extractAcpPromptUsage("nope")).toEqual({});
+    expect(extractAcpPromptUsage({ inputTokens: "12" })).toEqual({});
+    expect(extractAcpPromptUsage({ totalTokens: 11990 })).toEqual({});
   });
 });
 
@@ -247,5 +379,58 @@ describe("ACP runtime — failure handling", () => {
       runAcpRequest(deps(agent), { provider: "mistral", prompt: "x", correlationId: "c7" })
     ).rejects.toBeTruthy();
     expect(agent.killed.length).toBeGreaterThan(0);
+  });
+});
+
+// Phase-5 Deliverable D: Devin --agent-type is threaded into the ACP spawn argv
+// as fixed argv (no shell interpolation). Golden/lifecycle: the request runs and
+// the resolved spawn carries the validated agent type; an unknown value is
+// dropped (never injected).
+describe("ACP runtime: devin --agent-type", () => {
+  function devinDeps(recorded: import("../acp/process-manager.js").ResolvedAcpSpawn[]) {
+    const agent = new FakeAgent();
+    const spawn: AcpSpawnFn = r => {
+      recorded.push(r);
+      return agent;
+    };
+    const config = makeConfig({
+      providers: {
+        devin: {
+          enabled: true,
+          command: "devin",
+          args: ["acp"],
+          runtimeEnabled: true,
+          isolatedLeaderSocket: false,
+        },
+      },
+    });
+    return { agent, spawn, config };
+  }
+
+  it("appends --agent-type <type> to the devin acp spawn argv", async () => {
+    const recorded: import("../acp/process-manager.js").ResolvedAcpSpawn[] = [];
+    const { spawn, config } = devinDeps(recorded);
+    const res = await runAcpRequest(deps(new FakeAgent(), { spawn, config }), {
+      provider: "devin",
+      prompt: "review this",
+      agentType: "review",
+      correlationId: "dv1",
+    });
+    expect(res.text).toBe("Hello world");
+    expect(recorded).toHaveLength(1);
+    expect(recorded[0].command).toBe("devin");
+    expect(recorded[0].args).toEqual(["acp", "--agent-type", "review"]);
+  });
+
+  it("drops an unknown agent-type value (never injects arbitrary argv)", async () => {
+    const recorded: import("../acp/process-manager.js").ResolvedAcpSpawn[] = [];
+    const { spawn, config } = devinDeps(recorded);
+    await runAcpRequest(deps(new FakeAgent(), { spawn, config }), {
+      provider: "devin",
+      prompt: "x",
+      agentType: "rm -rf",
+      correlationId: "dv2",
+    });
+    expect(recorded[0].args).toEqual(["acp"]);
   });
 });

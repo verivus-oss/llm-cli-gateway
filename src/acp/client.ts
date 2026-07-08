@@ -39,19 +39,36 @@
  *     marshals the request and the host's decision back onto the wire.
  */
 
-import { AcpError, AcpProtocolError, isAcpError } from "./errors.js";
+import {
+  AcpError,
+  AcpMethodUnsupportedError,
+  AcpMutatingDisabledError,
+  AcpProtocolError,
+  isAcpError,
+} from "./errors.js";
 import type { JsonRpcStdioTransport, JsonRpcId } from "./json-rpc-stdio.js";
 import {
+  deriveAcpMethodAvailability,
+  parseCloseSessionResponse,
+  parseDeleteSessionResponse,
   parseInitializeResponse,
+  parseListSessionsResponse,
   parseReadTextFileRequest,
   parseRequestPermissionRequest,
   parseSessionLoadResponse,
   parseSessionNewResponse,
   parseSessionPromptResponse,
+  parseSessionResumeResponse,
   parseSessionUpdateNotification,
+  parseSetSessionConfigOptionResponse,
+  parseSetSessionModeResponse,
   parseWriteTextFileRequest,
+  sessionResponseMethods,
+  type CloseSessionResponse,
   type ContentBlock,
+  type DeleteSessionResponse,
   type InitializeResponse,
+  type ListSessionsResponse,
   type ReadTextFileRequest,
   type ReadTextFileResponse,
   type RequestPermissionRequest,
@@ -59,7 +76,10 @@ import {
   type SessionLoadResponse,
   type SessionNewResponse,
   type SessionPromptResponse,
+  type SessionResumeResponse,
   type SessionUpdateNotification,
+  type SetSessionConfigOptionResponse,
+  type SetSessionModeResponse,
   type WriteTextFileRequest,
   type WriteTextFileResponse,
 } from "./types.js";
@@ -153,6 +173,13 @@ export interface AcpClientOptions {
   readonly protocolVersion?: number;
   /** Per-method timeouts (ms). 0 / undefined uses the transport default. */
   readonly timeouts?: AcpClientTimeouts;
+  /**
+   * Whether state-mutating ACP admin ops (`session/delete`, `session/set_mode`,
+   * `session/set_config_option`) may be invoked. Deny-by-default: when false (the
+   * default), these ops fail closed with a {@link AcpMutatingDisabledError} even
+   * if the agent advertises them. Sourced from the operator's [acp] config.
+   */
+  readonly allowMutatingSessionOps?: boolean;
 }
 
 /** Per-method ACP timeouts in milliseconds. */
@@ -195,6 +222,32 @@ export interface PromptParams {
   readonly prompt: ReadonlyArray<ContentBlock>;
 }
 
+/** Parameters for resuming an existing ACP session (`session/resume`). */
+export interface ResumeSessionParams extends NewSessionParams {
+  /** Provider-owned ACP session id to resume. */
+  readonly sessionId: string;
+}
+
+/** Parameters for setting a session mode (`session/set_mode`). */
+export interface SetSessionModeParams {
+  readonly sessionId: string;
+  /** The mode id to switch to (from the session's advertised mode state). */
+  readonly modeId: string;
+}
+
+/** Parameters for setting a session config option (`session/set_config_option`). */
+export interface SetSessionConfigOptionParams {
+  readonly sessionId: string;
+  /** The config option id (from the session's advertised config options). */
+  readonly configId: string;
+  /**
+   * The new value for the config option: the id of the value to select. Per the
+   * ACP spec this is a non-empty `SessionConfigValueId` string, not an arbitrary
+   * payload.
+   */
+  readonly value: string;
+}
+
 /**
  * High-level ACP client over a single provider process transport.
  *
@@ -210,9 +263,25 @@ export class AcpClient {
   private readonly logger: Logger;
   private readonly protocolVersion: number;
   private readonly timeouts: AcpClientTimeouts;
+  private readonly allowMutatingSessionOps: boolean;
 
   private initialized = false;
   private initializeResult: InitializeResponse | null = null;
+  /**
+   * Methods the agent advertised as available, derived from the parsed
+   * `initialize` capability set and augmented as sessions are created/loaded
+   * (per-session `modes`/`configOptions` add set_mode/set_config_option). This
+   * is the single runtime source for method availability; there is no
+   * hand-coded per-provider method table.
+   */
+  private methodAvailability = new Set<string>();
+
+  /** Mutating ACP admin methods gated behind the operator config flag. */
+  private static readonly MUTATING_METHODS: ReadonlySet<string> = new Set([
+    "session/delete",
+    "session/set_mode",
+    "session/set_config_option",
+  ]);
 
   constructor(options: AcpClientOptions) {
     this.transport = options.transport;
@@ -222,6 +291,7 @@ export class AcpClient {
     this.logger = options.logger ?? noopLogger;
     this.protocolVersion = options.protocolVersion ?? DEFAULT_ACP_PROTOCOL_VERSION;
     this.timeouts = options.timeouts ?? {};
+    this.allowMutatingSessionOps = options.allowMutatingSessionOps ?? false;
   }
 
   /** Whether {@link initialize} has completed successfully. */
@@ -232,6 +302,19 @@ export class AcpClient {
   /** The parsed `initialize` result once available, else `null`. */
   get agentInfo(): InitializeResponse | null {
     return this.initializeResult;
+  }
+
+  /**
+   * The ACP methods the agent advertised as available at runtime (derived from
+   * the parsed capability set, augmented per-session). Read-only snapshot.
+   */
+  get availableMethods(): ReadonlySet<string> {
+    return new Set(this.methodAvailability);
+  }
+
+  /** Whether the agent advertised support for a given ACP method. */
+  supportsMethod(method: string): boolean {
+    return this.methodAvailability.has(method);
   }
 
   /**
@@ -261,6 +344,10 @@ export class AcpClient {
     const result = parseInitializeResponse(raw, this.provider);
     this.initialized = true;
     this.initializeResult = result;
+    // Derive method availability from the parsed capability set (never a
+    // hand-coded per-provider table). Per-session methods are added later, when a
+    // session/new or session/load response advertises modes/configOptions.
+    this.methodAvailability = new Set(deriveAcpMethodAvailability(result));
     return result;
   }
 
@@ -275,7 +362,9 @@ export class AcpClient {
       { cwd: params.cwd, mcpServers: params.mcpServers ?? [] },
       this.timeouts.sessionNewMs
     );
-    return parseSessionNewResponse(raw, this.provider);
+    const response = parseSessionNewResponse(raw, this.provider);
+    this.augmentSessionMethods(response);
+    return response;
   }
 
   /** Resume an existing provider ACP session by id. */
@@ -290,7 +379,9 @@ export class AcpClient {
       },
       this.timeouts.sessionLoadMs
     );
-    return parseSessionLoadResponse(raw, this.provider);
+    const response = parseSessionLoadResponse(raw, this.provider);
+    this.augmentSessionMethods(response);
+    return response;
   }
 
   /**
@@ -316,6 +407,120 @@ export class AcpClient {
    */
   cancel(sessionId: string): void {
     this.transport.notify("session/cancel", { sessionId });
+  }
+
+  // -------------------------------------------------------------------------
+  // Capability-gated session lifecycle methods (Phase-5 Deliverable C)
+  //
+  // Each method is GATED on the advertised capability set derived from
+  // initialize (+ per-session augmentation). Calling a method the agent did not
+  // advertise throws a precise {@link AcpMethodUnsupportedError}, never a generic
+  // process/protocol failure. State-mutating admin ops (delete/set_mode/
+  // set_config_option) are additionally gated behind the operator config flag and
+  // throw {@link AcpMutatingDisabledError} when it is off (deny-by-default).
+  // -------------------------------------------------------------------------
+
+  /**
+   * Resume an existing provider ACP session (`session/resume`), when advertised.
+   * Distinct from {@link loadSession}: `resume` is gated on the `resume` session
+   * capability; `load` on the top-level `loadSession` capability.
+   */
+  async resumeSession(params: ResumeSessionParams): Promise<SessionResumeResponse> {
+    this.assertMethodAvailable("session/resume");
+    const raw = await this.send(
+      "session/resume",
+      { sessionId: params.sessionId, cwd: params.cwd, mcpServers: params.mcpServers ?? [] },
+      this.timeouts.sessionLoadMs
+    );
+    const response = parseSessionResumeResponse(raw, this.provider);
+    this.augmentSessionMethods(response);
+    return response;
+  }
+
+  /** List provider ACP sessions (`session/list`), when advertised. */
+  async listSessions(params: { cursor?: string } = {}): Promise<ListSessionsResponse> {
+    this.assertMethodAvailable("session/list");
+    const raw = await this.send("session/list", { cursor: params.cursor });
+    return parseListSessionsResponse(raw, this.provider);
+  }
+
+  /** Close a provider ACP session (`session/close`), when advertised. */
+  async closeSession(sessionId: string): Promise<CloseSessionResponse> {
+    this.assertMethodAvailable("session/close");
+    const raw = await this.send("session/close", { sessionId });
+    return parseCloseSessionResponse(raw, this.provider);
+  }
+
+  /**
+   * Delete a provider ACP session (`session/delete`), when advertised AND the
+   * operator enabled mutating session ops. State-mutating admin op: fails closed.
+   */
+  async deleteSession(sessionId: string): Promise<DeleteSessionResponse> {
+    this.assertMethodAvailable("session/delete");
+    const raw = await this.send("session/delete", { sessionId });
+    return parseDeleteSessionResponse(raw, this.provider);
+  }
+
+  /**
+   * Set a session mode (`session/set_mode`), when advertised AND the operator
+   * enabled mutating session ops. State-mutating admin op: fails closed.
+   */
+  async setSessionMode(params: SetSessionModeParams): Promise<SetSessionModeResponse> {
+    this.assertMethodAvailable("session/set_mode");
+    const raw = await this.send("session/set_mode", {
+      sessionId: params.sessionId,
+      modeId: params.modeId,
+    });
+    return parseSetSessionModeResponse(raw, this.provider);
+  }
+
+  /**
+   * Set a session config option (`session/set_config_option`), when advertised
+   * AND the operator enabled mutating session ops. State-mutating admin op:
+   * fails closed.
+   */
+  async setSessionConfigOption(
+    params: SetSessionConfigOptionParams
+  ): Promise<SetSessionConfigOptionResponse> {
+    this.assertMethodAvailable("session/set_config_option");
+    const raw = await this.send("session/set_config_option", {
+      sessionId: params.sessionId,
+      configId: params.configId,
+      value: params.value,
+    });
+    return parseSetSessionConfigOptionResponse(raw, this.provider);
+  }
+
+  /**
+   * Fold per-session advertised methods (set_mode when `modes` is present,
+   * set_config_option when `configOptions` is present) into the availability set.
+   */
+  private augmentSessionMethods(response: {
+    readonly modes?: unknown;
+    readonly configOptions?: unknown;
+  }): void {
+    for (const method of sessionResponseMethods(response)) {
+      this.methodAvailability.add(method);
+    }
+  }
+
+  /**
+   * Enforce capability + mutating-op gates before issuing a gated method.
+   * Order: initialize must be complete; the method must be advertised (else a
+   * precise capability error); mutating admin ops additionally require the
+   * config gate. All checks are pure reads (no side effect, no spawn) so a
+   * refused call never touches the provider.
+   */
+  private assertMethodAvailable(method: string): void {
+    this.assertInitialized(method);
+    if (!this.methodAvailability.has(method)) {
+      throw new AcpMethodUnsupportedError(this.provider, method, {
+        reason: "capability_not_advertised",
+      });
+    }
+    if (AcpClient.MUTATING_METHODS.has(method) && !this.allowMutatingSessionOps) {
+      throw new AcpMutatingDisabledError(this.provider, method, { reason: "config_gate_off" });
+    }
   }
 
   // -------------------------------------------------------------------------

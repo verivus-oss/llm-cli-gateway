@@ -394,44 +394,61 @@ describe("AsyncJobManager + flight-recorder (slice 1.5)", () => {
     it("orphan path: captured stdout is not logged as a provider failure", () => {
       const fr = new CapturingFlightRecorder();
       const startedAt = new Date(Date.now() - 30000).toISOString();
+      // #139: the ctor now runs the durable lease sweep (recoverStaleJobs) at
+      // startup, not the deprecated markOrphanedOnStartup. This mock returns the
+      // orphaned rows the sweep would have found so the FR-orphan-readback path
+      // is exercised unchanged.
+      const orphanRows = [
+        {
+          id: "j1",
+          correlationId: "corr-j1",
+          startedAt,
+          stdout: "partial-out",
+          stderr: "",
+          exitCode: null,
+          transport: "process" as const,
+          httpStatus: null,
+        },
+        {
+          id: "j2",
+          correlationId: "corr-j2",
+          startedAt,
+          stdout: "",
+          stderr: "boom",
+          exitCode: 137,
+          transport: "process" as const,
+          httpStatus: null,
+        },
+        {
+          id: "j3",
+          correlationId: "corr-j3",
+          startedAt,
+          stdout: "partial-before-explicit-failure",
+          stderr: "",
+          exitCode: 2,
+          transport: "process" as const,
+          httpStatus: null,
+        },
+        {
+          id: "j4",
+          correlationId: "corr-j4",
+          startedAt,
+          stdout: "complete-before-restart",
+          stderr: "",
+          exitCode: 0,
+          transport: "process" as const,
+          httpStatus: null,
+        },
+      ];
       const fakeStore = {
-        markOrphanedOnStartup: () => ({
-          count: 4,
-          orphaned: [
-            {
-              id: "j1",
-              correlationId: "corr-j1",
-              startedAt,
-              stdout: "partial-out",
-              stderr: "",
-              exitCode: null,
-            },
-            {
-              id: "j2",
-              correlationId: "corr-j2",
-              startedAt,
-              stdout: "",
-              stderr: "boom",
-              exitCode: 137,
-            },
-            {
-              id: "j3",
-              correlationId: "corr-j3",
-              startedAt,
-              stdout: "partial-before-explicit-failure",
-              stderr: "",
-              exitCode: 2,
-            },
-            {
-              id: "j4",
-              correlationId: "corr-j4",
-              startedAt,
-              stdout: "complete-before-restart",
-              stderr: "",
-              exitCode: 0,
-            },
-          ],
-        }),
+        registerInstance: () => {},
+        heartbeat: () => {},
+        deregisterInstance: () => {},
+        gcInstances: () => 0,
+        selectStaleProcessCandidates: () => [],
+        recoverStaleJobs: () => orphanRows,
+        markRunning: () => {},
+        markOrphanedOnStartup: () => ({ count: orphanRows.length, orphaned: orphanRows }),
         recordStart: () => {},
         recordOutput: () => {},
         recordComplete: () => {},
@@ -610,5 +627,73 @@ describe("AsyncJobManager + flight-recorder (slice 1.5)", () => {
       expect(c!.result.status).toBe("failed");
       expect(c!.result.errorMessage).toBe("Output exceeded maximum size (50MB)");
     });
+  });
+});
+
+describe("AsyncJobManager — provider sessionId + stopReason (phase 7)", () => {
+  const GROK_JSON = JSON.stringify({
+    text: "hi",
+    stopReason: "stop",
+    sessionId: "grok-uuid-7777",
+    requestId: "req-1",
+  });
+
+  function seedCompletedGrokJob(manager: AsyncJobManager, jobId: string): Record<string, unknown> {
+    const internal = manager as unknown as { jobs: Map<string, Record<string, unknown>> };
+    const job: Record<string, unknown> = {
+      id: jobId,
+      cli: "grok",
+      args: [],
+      requestKey: "rk-grok",
+      correlationId: "corr-grok-p7",
+      status: "completed",
+      startedAt: new Date().toISOString(),
+      finishedAt: new Date().toISOString(),
+      exitCode: 0,
+      stdout: GROK_JSON,
+      stderr: "",
+      outputTruncated: false,
+      canceled: false,
+      error: null,
+      process: null,
+      transport: "process",
+      abort: null,
+      httpStatus: null,
+      exited: true,
+      metricsRecorded: true,
+      outputFormat: "json",
+      outputDirty: false,
+      lastOutputFlushAt: Date.now(),
+      flightRecorderEntry: entry(),
+      flightCompleteArmed: true,
+      flightRecorderComplete: false,
+    };
+    internal.jobs.set(jobId, job);
+    return job;
+  }
+
+  it("getJobResult surfaces the provider sessionId + stopReason parsed from stdout", () => {
+    const fr = new CapturingFlightRecorder();
+    const manager = new AsyncJobManager(noopLogger, undefined, new MemoryJobStore(), fr);
+    seedCompletedGrokJob(manager, "job-grok-1");
+    const result = manager.getJobResult("job-grok-1");
+    // Mutation that flips this red: not calling extractProviderOutputMetadata in
+    // getJobResult (a deferred grok job would then lose the id needed to resume).
+    expect(result?.providerSessionId).toBe("grok-uuid-7777");
+    expect(result?.stopReason).toBe("stop");
+  });
+
+  it("writeFlightComplete persists providerSessionId + stopReason to logComplete", () => {
+    const fr = new CapturingFlightRecorder();
+    const manager = new AsyncJobManager(noopLogger, undefined, new MemoryJobStore(), fr);
+    const job = seedCompletedGrokJob(manager, "job-grok-2");
+    (
+      manager as unknown as { writeFlightComplete(j: unknown, s: string): void }
+    ).writeFlightComplete(job, "completed");
+    const c = fr.completes.find(x => x.correlationId === "corr-grok-p7");
+    // Mutation that flips this red: dropping providerSessionId/stopReason from
+    // the logComplete payload in writeFlightComplete.
+    expect(c?.result.providerSessionId).toBe("grok-uuid-7777");
+    expect(c?.result.stopReason).toBe("stop");
   });
 });

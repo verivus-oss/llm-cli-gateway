@@ -24,6 +24,7 @@ build/
 # sqry tool cache (generated per-index; not source)
 .sqry/
 .sqry-cache/
+.sqry-index/
 .preexisting-doctor-index.patch.bak
 .review-unit-*-prompt.md
 docs/personal-mcp/socket-release-assessment-prompt.md
@@ -47,3 +48,4 @@ windows-mcp-config-with-gateway.json
 # Stray pnpm artifacts (this repo uses npm; reject reviewer-tool drift)
 pnpm-lock.yaml
 pnpm-workspace.yaml
+.playwright-mcp/

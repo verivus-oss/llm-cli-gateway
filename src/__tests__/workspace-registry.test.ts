@@ -12,10 +12,15 @@ import { FileSessionManager } from "../session-manager.js";
 import type { PersistenceConfig } from "../config.js";
 import type { WorkspaceRegistry } from "../workspace-registry.js";
 import {
+  describeWorkspace,
+  describeWorkspaceRemote,
   loadWorkspaceRegistry,
+  registerExistingWorkspace,
+  remoteSafeWorkspaceSummary,
   resolveWorkspaceForProvider,
   validatePathInsideWorkspace,
 } from "../workspace-registry.js";
+import { remoteSafeWorktreePath } from "../index.js";
 
 const ORIGINAL_ENV = { ...process.env };
 
@@ -64,6 +69,7 @@ function mkPersistence(): PersistenceConfig {
     retentionDays: 30,
     dedupWindowMs: 0,
     acknowledgeEphemeral: true,
+    ownsOrphanRecovery: false,
     asyncJobsEnabled: true,
     sources: { configFile: null, envOverrides: [] },
   };
@@ -450,5 +456,192 @@ describe("workspace registry", () => {
     );
     expect(withScope.isError).toBe(true);
     expect(withScope.content[0]?.text).not.toContain("requires LLM_GATEWAY_WORKSPACE_ADMIN=1");
+  });
+
+  describe("remoteSafeWorkspaceSummary", () => {
+    function writeRegistry(): void {
+      writeFileSync(
+        configPath,
+        [
+          "[workspaces]",
+          'default = "gateway"',
+          "",
+          "[[workspaces.repos]]",
+          'alias = "gateway"',
+          `path = "${repoRoot}"`,
+          'providers = ["claude", "codex"]',
+          "allow_worktree = true",
+          "",
+        ].join("\n")
+      );
+    }
+
+    it("exposes default alias, aliases, and readiness without local paths", () => {
+      writeRegistry();
+      const registry = loadWorkspaceRegistry(undefined, configPath);
+      const summary = remoteSafeWorkspaceSummary(registry);
+
+      expect(summary.ready).toBe(true);
+      expect(summary.default).toBe("gateway");
+      expect(summary.aliases).toEqual(["gateway"]);
+      expect(summary.repo_count).toBe(1);
+
+      // The remote-safe summary must NOT leak the local absolute repo path.
+      const serialized = JSON.stringify(summary);
+      expect(serialized).not.toContain(repoRoot);
+      expect(serialized).not.toContain(tempDir);
+      expect(Object.keys(summary)).not.toContain("path");
+    });
+
+    it("is not ready when no default and no registered repos exist", () => {
+      writeFileSync(
+        configPath,
+        [
+          "[workspaces]",
+          "",
+          "[[workspaces.allowed_roots]]",
+          `path = "${repoRoot}"`,
+          "allow_create_directories = true",
+          "",
+        ].join("\n")
+      );
+      const registry = loadWorkspaceRegistry(undefined, configPath);
+      const summary = remoteSafeWorkspaceSummary(registry);
+      expect(summary.ready).toBe(false);
+      expect(summary.default).toBeNull();
+      expect(summary.aliases).toEqual([]);
+      expect(summary.allowed_root_count).toBe(1);
+    });
+
+    it("admin describeWorkspace still exposes local paths for operator output", () => {
+      writeRegistry();
+      const registry = loadWorkspaceRegistry(undefined, configPath);
+      // The admin projection is intentionally different: it DOES include the path
+      // so local `workspace list` keeps working. This guards against a refactor
+      // that accidentally routes remote output through describeWorkspace.
+      const admin = describeWorkspace(registry.repos[0]);
+      expect(admin.path).toBe(repoRoot);
+      expect(JSON.stringify(admin)).toContain(repoRoot);
+    });
+
+    it("describeWorkspaceRemote drops the local path but keeps alias/kind/providers", () => {
+      writeRegistry();
+      const registry = loadWorkspaceRegistry(undefined, configPath);
+      const remote = describeWorkspaceRemote(registry.repos[0]);
+      expect(remote.path).toBeUndefined();
+      expect(remote.alias).toBe("gateway");
+      expect(remote.kind).toBe("git");
+      expect(remote.providers).toEqual(["claude", "codex"]);
+      expect(JSON.stringify(remote)).not.toContain(repoRoot);
+    });
+  });
+
+  describe("remote workspace MCP tools do not leak local paths", () => {
+    it("workspace_list and workspace_get omit local absolute paths for remote callers", async () => {
+      writeFileSync(
+        configPath,
+        [
+          "[workspaces]",
+          'default = "gateway"',
+          "",
+          "[[workspaces.repos]]",
+          'alias = "gateway"',
+          `path = "${repoRoot}"`,
+          'providers = ["claude", "codex"]',
+          "",
+          "[[workspaces.allowed_roots]]",
+          `path = "${repoRoot}"`,
+          "allow_create_directories = true",
+          "",
+        ].join("\n")
+      );
+      process.env.LLM_GATEWAY_CONFIG = configPath;
+      const server = createAsyncGatewayServer(disabledWorkspaces());
+      const oauthCtx = {
+        authKind: "oauth" as const,
+        authScopes: [],
+        authClientId: "remote-client",
+      };
+
+      const list = await runWithRequestContext(oauthCtx, () =>
+        registeredTools(server).workspace_list.handler({}, {})
+      );
+      const listText = list.content[0]?.text ?? "";
+      expect(list.isError).toBeFalsy();
+      expect(listText).not.toContain(repoRoot);
+      expect(listText).not.toContain(tempDir);
+      const listJson = JSON.parse(listText);
+      expect(listJson.workspaces[0].alias).toBe("gateway");
+      expect(listJson.workspaces[0].path).toBeUndefined();
+      // allowed_roots must not expose the local path either.
+      expect(listJson.allowed_roots[0].path).toBeUndefined();
+      expect(listJson.allowed_roots[0].alias).toBeDefined();
+
+      const get = await runWithRequestContext(oauthCtx, () =>
+        registeredTools(server).workspace_get.handler({ alias: "gateway" }, {})
+      );
+      const getText = get.content[0]?.text ?? "";
+      expect(get.isError).toBeFalsy();
+      expect(getText).not.toContain(repoRoot);
+      expect(JSON.parse(getText).workspace.path).toBeUndefined();
+    });
+  });
+
+  describe("registerExistingWorkspace is not a filesystem existence oracle", () => {
+    it("rejects an out-of-root path with a generic, path-free error before any FS probe", () => {
+      writeFileSync(
+        configPath,
+        [
+          "[workspaces]",
+          "",
+          "[[workspaces.allowed_roots]]",
+          `path = "${repoRoot}"`,
+          "allow_register_existing_git_repos = true",
+          "",
+        ].join("\n")
+      );
+      // A path OUTSIDE the allowed root: whether it exists or not, the error must
+      // be identical and must not echo the probed path (no existence oracle).
+      const secretPath = "/root/.ssh/id_rsa_secret_dir";
+      let msg = "";
+      try {
+        registerExistingWorkspace({ alias: "probe", repoPath: secretPath, configPath });
+      } catch (err) {
+        msg = err instanceof Error ? err.message : String(err);
+      }
+      expect(msg).toMatch(/No allowed root permits/i);
+      expect(msg).not.toContain(secretPath);
+      expect(msg).not.toContain("does not exist");
+
+      // A non-existent path that IS under the allowed root also yields no path echo
+      // in the generic pre-check (it fails the FS probe next, but the arbitrary
+      // out-of-root oracle is closed).
+      let msg2 = "";
+      try {
+        registerExistingWorkspace({
+          alias: "probe2",
+          repoPath: join(repoRoot, "does-not-exist-xyz"),
+          configPath,
+        });
+      } catch (err) {
+        msg2 = err instanceof Error ? err.message : String(err);
+      }
+      expect(msg2.length).toBeGreaterThan(0);
+    });
+  });
+
+  describe("remoteSafeWorktreePath", () => {
+    it("reduces an absolute worktree path to a workspace-relative label", () => {
+      expect(remoteSafeWorktreePath("/home/op/repo/.worktrees/abc", "/home/op/repo")).toBe(
+        join(".worktrees", "abc")
+      );
+    });
+    it("falls back to basename when the root is unknown or outside", () => {
+      expect(remoteSafeWorktreePath("/home/op/repo/.worktrees/abc")).toBe("abc");
+      expect(remoteSafeWorktreePath("/home/op/repo/.worktrees/abc", "/other/root")).toBe("abc");
+    });
+    it("passes through undefined", () => {
+      expect(remoteSafeWorktreePath(undefined, "/x")).toBeUndefined();
+    });
   });
 });

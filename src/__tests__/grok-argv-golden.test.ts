@@ -89,4 +89,17 @@ describe("grok argv golden (pre/post cutover parity)", () => {
       argsFor({ model: "grok-4", permissionMode: "plan", nativeWorktree: true })
     ).toMatchSnapshot();
   });
+
+  it("named worktree with --worktree-ref (cross-flag guard)", () => {
+    // Phase 4 Part B: worktreeRef is a must_cover flag; it may only emit
+    // alongside nativeWorktree. Mutation flip: dropping the `--worktree-ref`
+    // push, or emitting it without `--worktree`, changes this snapshot.
+    const args = argsFor({ nativeWorktree: "feat", worktreeRef: "main" });
+    expect(args).toMatchSnapshot();
+    const w = args.indexOf("--worktree");
+    expect(w).toBeGreaterThanOrEqual(0);
+    const r = args.indexOf("--worktree-ref");
+    expect(r).toBeGreaterThan(w);
+    expect(args[r + 1]).toBe("main");
+  });
 });

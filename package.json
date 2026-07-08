@@ -1,8 +1,8 @@
 {
   "name": "llm-cli-gateway",
-  "version": "2.13.1",
+  "version": "2.15.0",
   "mcpName": "io.github.verivus-oss/llm-cli-gateway",
-  "description": "MCP server providing unified access to Claude Code, Codex, Gemini, Grok, Mistral Vibe, and Devin CLIs with session management, retry logic, async job orchestration, durable job results, and cross-LLM validation.",
+  "description": "Local-first MCP gateway for cross-model review across native coding-agent CLIs and API-token LLMs with sessions, durable jobs, and validation receipts.",
   "license": "MIT",
   "author": "VerivusAI Labs (https://github.com/verivus-oss)",
   "repository": {
@@ -58,6 +58,7 @@
     ".agents/skills/session-workflow/SKILL.md",
     ".agents/skills/secure-orchestration/SKILL.md",
     ".agents/skills/implement-review-fix/SKILL.md",
+    ".agents/skills/retrospective-walk/SKILL.md",
     ".agents/skills/public-demo-session/SKILL.md"
   ],
   "scripts": {
@@ -82,12 +83,17 @@
     "smoke:cache-control": "node docs/plans/slice-kappa-smoke-test.mjs",
     "upstream:contracts": "node scripts/upstream-scan.mjs --contracts-check",
     "upstream:scan": "node scripts/upstream-scan.mjs",
+    "provider:surfaces:check": "node scripts/provider-surfaces-check.mjs",
     "lint": "eslint src/**/*.ts",
     "lint:fix": "eslint src/**/*.ts --fix",
     "format": "prettier --write 'src/**/*.ts'",
     "format:check": "prettier --check 'src/**/*.ts'",
     "security:audit": "bash scripts/release-security-audit.sh",
-    "check": "npm run build && npm run lint && npm run format:check && npm test && npm run security:audit",
+    "search:google:submit": "node scripts/submit-google-search-console.mjs",
+    "search:google:submit:dry-run": "node scripts/submit-google-search-console.mjs --dry-run",
+    "search:submit": "node scripts/submit-indexnow.mjs",
+    "search:submit:dry-run": "node scripts/submit-indexnow.mjs --dry-run",
+    "check": "npm run build && npm run lint && npm run format:check && npm run provider:surfaces:check && npm test && npm run security:audit",
     "release:build": "bash installer/build-release.sh",
     "release:checksums": "cd installer/dist && sha256sum --check SHA256SUMS",
     "release:docker": "docker compose -f docker/personal.compose.yml build"

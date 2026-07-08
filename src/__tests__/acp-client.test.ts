@@ -4,6 +4,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AcpClient, type AcpClientCallbacks, type HostServices } from "../acp/client.js";
 import {
   AcpError,
+  AcpMethodUnsupportedError,
+  AcpMutatingDisabledError,
   AcpPermissionDeniedError,
   AcpProtocolError,
   AcpTimeoutError,
@@ -122,6 +124,7 @@ function createClient(
     callbacks?: AcpClientCallbacks;
     logger?: Logger;
     timeoutMs?: number;
+    allowMutatingSessionOps?: boolean;
   } = {}
 ): { client: AcpClient; transport: JsonRpcStdioTransport; logger: Logger } {
   const logger = options.logger ?? makeLogger();
@@ -142,6 +145,7 @@ function createClient(
     hostServices: options.hostServices ?? {},
     callbacks: options.callbacks,
     logger,
+    allowMutatingSessionOps: options.allowMutatingSessionOps,
   });
   return { client, transport, logger };
 }
@@ -467,5 +471,156 @@ describe("AcpClient host callback dispatch", () => {
     expect(reply?.result).toMatchObject({
       outcome: { outcome: "selected", optionId: "allow" },
     });
+  });
+});
+
+// Phase-5 Deliverable A + C: capability-gated session lifecycle methods. Method
+// availability is DERIVED from the injected initialize capability set, so the
+// SAME source flips between usable and a precise capability error purely by
+// changing the fake initialize response (acceptance #6b). State-mutating admin
+// ops additionally require the operator config gate (deny-by-default).
+describe("AcpClient capability-gated methods", () => {
+  let stdoutWriteSpy: ReturnType<typeof vi.spyOn>;
+  beforeEach(() => {
+    stdoutWriteSpy = vi.spyOn(process.stdout, "write").mockImplementation((): boolean => true);
+  });
+  afterEach(() => stdoutWriteSpy.mockRestore());
+
+  function initWith(caps: Record<string, unknown>): MockAgent {
+    const agent = new MockAgent();
+    agent.on("initialize", f =>
+      agent.replyResult(f.id, { protocolVersion: 1, agentCapabilities: caps })
+    );
+    return agent;
+  }
+
+  it("allows session/list when advertised and returns the parsed result", async () => {
+    const agent = initWith({ sessionCapabilities: { list: {} } }).on("session/list", f =>
+      agent.replyResult(f.id, {
+        // SessionInfo entries carry the spec-required sessionId + cwd.
+        sessions: [
+          { sessionId: "a", cwd: "/tmp/a" },
+          { sessionId: "b", cwd: "/tmp/b" },
+        ],
+      })
+    );
+    const { client } = createClient(agent);
+    await client.initialize();
+    expect(client.supportsMethod("session/list")).toBe(true);
+    const result = await client.listSessions();
+    expect(result.sessions).toHaveLength(2);
+  });
+
+  // Mutation that flips this red: making assertMethodAvailable a no-op (so an
+  // unadvertised method is sent to the agent instead of failing closed).
+  it("fails a non-advertised method with a precise capability error (not a process failure)", async () => {
+    const agent = initWith({}); // no session capabilities advertised
+    const { client } = createClient(agent);
+    await client.initialize();
+    expect(client.supportsMethod("session/list")).toBe(false);
+    const err = await client.listSessions().catch(e => e);
+    expect(err).toBeInstanceOf(AcpMethodUnsupportedError);
+    expect((err as AcpMethodUnsupportedError).kind).toBe("method_unsupported");
+    expect((err as AcpMethodUnsupportedError).method).toBe("session/list");
+    // The agent never received the unadvertised call.
+    expect(agent.received.some(f => f.method === "session/list")).toBe(false);
+  });
+
+  it("resume is gated on the resume capability (distinct from load)", async () => {
+    const agent = initWith({ loadSession: true }).on("session/resume", f =>
+      agent.replyResult(f.id, {})
+    );
+    const { client } = createClient(agent);
+    await client.initialize();
+    // loadSession advertised, but resume is NOT.
+    expect(client.supportsMethod("session/load")).toBe(true);
+    const err = await client.resumeSession({ sessionId: "s1", cwd: "/tmp/w" }).catch(e => e);
+    expect(err).toBeInstanceOf(AcpMethodUnsupportedError);
+    expect((err as AcpMethodUnsupportedError).method).toBe("session/resume");
+  });
+
+  it("gates session/delete behind the mutating config gate even when advertised", async () => {
+    const agent = initWith({ sessionCapabilities: { delete: {} } }).on("session/delete", f =>
+      agent.replyResult(f.id, {})
+    );
+    // Config gate OFF (default): advertised, yet refused.
+    const { client } = createClient(agent);
+    await client.initialize();
+    expect(client.supportsMethod("session/delete")).toBe(true);
+    const err = await client.deleteSession("s1").catch(e => e);
+    expect(err).toBeInstanceOf(AcpMutatingDisabledError);
+    expect((err as AcpMutatingDisabledError).method).toBe("session/delete");
+    expect(agent.received.some(f => f.method === "session/delete")).toBe(false);
+  });
+
+  it("permits session/delete when advertised AND the mutating gate is on", async () => {
+    const agent = initWith({ sessionCapabilities: { delete: {} } }).on("session/delete", f =>
+      agent.replyResult(f.id, {})
+    );
+    const { client } = createClient(agent, { allowMutatingSessionOps: true });
+    await client.initialize();
+    await expect(client.deleteSession("s1")).resolves.toBeTruthy();
+    expect(agent.received.some(f => f.method === "session/delete")).toBe(true);
+  });
+
+  // Nit: session/set_mode is a MUTATING_METHOD and must fail closed (gate off)
+  // exactly like session/delete, sending NO frame. Mutation that flips this red:
+  // removing "session/set_mode" from AcpClient.MUTATING_METHODS (the call would
+  // then be sent to the agent with the gate off).
+  it("gates session/set_mode behind the mutating config gate even when advertised", async () => {
+    const agent = initWith({})
+      .on("session/new", f =>
+        agent.replyResult(f.id, { sessionId: "s1", modes: { currentModeId: "code" } })
+      )
+      .on("session/set_mode", f => agent.replyResult(f.id, {}));
+    // Config gate OFF (default): advertised via session modes, yet refused.
+    const { client } = createClient(agent);
+    await client.initialize();
+    await client.newSession({ cwd: "/tmp/w" });
+    expect(client.supportsMethod("session/set_mode")).toBe(true);
+    const err = await client.setSessionMode({ sessionId: "s1", modeId: "plan" }).catch(e => e);
+    expect(err).toBeInstanceOf(AcpMutatingDisabledError);
+    expect((err as AcpMutatingDisabledError).method).toBe("session/set_mode");
+    expect(agent.received.some(f => f.method === "session/set_mode")).toBe(false);
+  });
+
+  // Nit: session/set_config_option is a MUTATING_METHOD and must fail closed
+  // (gate off), sending NO frame. Mutation that flips this red: removing
+  // "session/set_config_option" from AcpClient.MUTATING_METHODS.
+  it("gates session/set_config_option behind the mutating config gate even when advertised", async () => {
+    const agent = initWith({})
+      .on("session/new", f =>
+        agent.replyResult(f.id, {
+          sessionId: "s1",
+          configOptions: [{ id: "theme", name: "Theme" }],
+        })
+      )
+      .on("session/set_config_option", f => agent.replyResult(f.id, { configOptions: [] }));
+    // Config gate OFF (default): advertised via session configOptions, yet refused.
+    const { client } = createClient(agent);
+    await client.initialize();
+    await client.newSession({ cwd: "/tmp/w" });
+    expect(client.supportsMethod("session/set_config_option")).toBe(true);
+    const err = await client
+      .setSessionConfigOption({ sessionId: "s1", configId: "theme", value: "dark" })
+      .catch(e => e);
+    expect(err).toBeInstanceOf(AcpMutatingDisabledError);
+    expect((err as AcpMutatingDisabledError).method).toBe("session/set_config_option");
+    expect(agent.received.some(f => f.method === "session/set_config_option")).toBe(false);
+  });
+
+  it("adds set_mode availability from the session/new modes state, gated by config", async () => {
+    const agent = initWith({})
+      .on("session/new", f =>
+        agent.replyResult(f.id, { sessionId: "s1", modes: { currentModeId: "code" } })
+      )
+      .on("session/set_mode", f => agent.replyResult(f.id, {}));
+    const { client } = createClient(agent, { allowMutatingSessionOps: true });
+    await client.initialize();
+    // Before a session exists, set_mode is not yet advertised.
+    expect(client.supportsMethod("session/set_mode")).toBe(false);
+    await client.newSession({ cwd: "/tmp/w" });
+    expect(client.supportsMethod("session/set_mode")).toBe(true);
+    await expect(client.setSessionMode({ sessionId: "s1", modeId: "plan" })).resolves.toBeTruthy();
   });
 });

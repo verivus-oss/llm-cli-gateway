@@ -151,9 +151,20 @@ echo "==> publishing current tree to ${REGISTRY}"
 npm unpublish "llm-cli-gateway@${EXPECTED_VERSION}" \
   --registry "${REGISTRY}" --userconfig "${PUBLISH_NPMRC}" \
   --force >/dev/null 2>&1 || true
+# npm refuses to publish a prerelease (x.y.z-<id>) without an explicit --tag, and
+# a prerelease must never take `latest`. Derive a side tag (rc/next/beta/...) for
+# a prerelease; stable x.y.z uses `latest`. Mirrors the release npm-publish.yml so
+# this verdaccio fidelity check exercises the same dist-tag path.
+if [[ "${EXPECTED_VERSION}" == *-* ]]; then
+  PUBLISH_TAG="$(printf '%s' "${EXPECTED_VERSION}" | sed -E 's/^[0-9]+\.[0-9]+\.[0-9]+-([0-9A-Za-z]+).*/\1/')"
+  { [ -n "${PUBLISH_TAG}" ] && [ "${PUBLISH_TAG}" != "${EXPECTED_VERSION}" ] && [ "${PUBLISH_TAG,,}" != latest ]; } || PUBLISH_TAG=next
+else
+  PUBLISH_TAG=latest
+fi
+echo "    publishing under dist-tag: ${PUBLISH_TAG}"
 # `if !` exempts the pipeline from set -e; pipefail makes it reflect npm's exit.
 if ! npm publish --registry "${REGISTRY}" --userconfig "${PUBLISH_NPMRC}" \
-     --cache "${NPM_CACHE}" --no-git-checks 2>&1 | sed 's/^/  /'; then
+     --tag "${PUBLISH_TAG}" --cache "${NPM_CACHE}" --no-git-checks 2>&1 | sed 's/^/  /'; then
   fail "npm publish to verdaccio failed"
 fi
 

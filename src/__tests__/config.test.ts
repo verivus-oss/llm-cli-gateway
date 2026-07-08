@@ -1,18 +1,22 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { tmpdir } from "node:os";
 import {
   loadConfig,
   DEFAULT_SESSION_TTL_SECONDS,
   loadLimitsConfig,
+  loadSkillsConfig,
   DEFAULT_HTTP_MAX_SESSIONS,
   DEFAULT_HTTP_SESSION_IDLE_TTL_MS,
   DEFAULT_MAX_RUNNING_JOBS,
   DEFAULT_MAX_RUNNING_JOBS_PER_PROVIDER,
   DEFAULT_MAX_JOB_OUTPUT_BYTES,
   DEFAULT_COMPLETED_JOB_MEMORY_TTL_MS,
+  diagnoseRemoteOAuthConfig,
 } from "../config.js";
+import { hashSecret } from "../oauth.js";
+import { noopLogger } from "../logger.js";
 
 /** Write a temp config.toml and point LLM_GATEWAY_CONFIG at it. */
 function withConfigToml(body: string): string {
@@ -178,6 +182,135 @@ describe("config", () => {
       created.push(path);
       process.env.LLM_GATEWAY_CONFIG = path;
       expect(() => loadLimitsConfig()).toThrow(/Invalid \[limits\] config/);
+    });
+  });
+
+  describe("loadSkillsConfig", () => {
+    const created: string[] = [];
+
+    afterEach(() => {
+      delete process.env.LLM_GATEWAY_CONFIG;
+      delete process.env.LLM_GATEWAY_SKILLS_PATH;
+      for (const p of created.splice(0)) {
+        rmSync(p, { force: true });
+      }
+    });
+
+    function pointSkillsConfig(tomlBody: string): void {
+      const p = withConfigToml(tomlBody);
+      created.push(p);
+      process.env.LLM_GATEWAY_CONFIG = p;
+    }
+
+    it("loads [skills].paths from config.toml", () => {
+      pointSkillsConfig(
+        ["[skills]", 'paths = ["/opt/gateway-skills", "~/local-skills"]'].join("\n")
+      );
+
+      const cfg = loadSkillsConfig(noopLogger);
+
+      expect(cfg.paths).toEqual(["/opt/gateway-skills", "~/local-skills"]);
+      expect(cfg.sources.configFile).toBe(process.env.LLM_GATEWAY_CONFIG);
+      expect(cfg.sources.envOverrides).toEqual([]);
+    });
+
+    it("appends LLM_GATEWAY_SKILLS_PATH entries using the host delimiter", () => {
+      pointSkillsConfig(["[skills]", 'paths = ["/opt/gateway-skills"]'].join("\n"));
+      process.env.LLM_GATEWAY_SKILLS_PATH = ["/tmp/pack-a", "/tmp/pack-b"].join(delimiter);
+
+      const cfg = loadSkillsConfig(noopLogger);
+
+      expect(cfg.paths).toEqual(["/opt/gateway-skills", "/tmp/pack-a", "/tmp/pack-b"]);
+      expect(cfg.sources.envOverrides).toEqual(["LLM_GATEWAY_SKILLS_PATH"]);
+    });
+
+    it("throws on invalid [skills] config", () => {
+      pointSkillsConfig(["[skills]", 'paths = "/not-an-array"'].join("\n"));
+
+      expect(() => loadSkillsConfig(noopLogger)).toThrow(/Invalid \[skills\] config/);
+    });
+  });
+
+  describe("diagnoseRemoteOAuthConfig (remote setup projection)", () => {
+    const created: string[] = [];
+    // A clean env without OAuth overrides so the file drives the outcome.
+    function useConfig(body: string): void {
+      const path = withConfigToml(body);
+      created.push(path);
+      process.env.LLM_GATEWAY_CONFIG = path;
+      for (const key of Object.keys(process.env)) {
+        if (key.startsWith("LLM_GATEWAY_OAUTH_")) delete process.env[key];
+      }
+    }
+    afterEach(() => {
+      delete process.env.LLM_GATEWAY_CONFIG;
+      for (const p of created.splice(0)) {
+        rmSync(p, { force: true });
+        rmSync(join(p, ".."), { recursive: true, force: true });
+      }
+    });
+
+    it("handles a missing [http.oauth] section without throwing (status absent)", () => {
+      useConfig("[persistence]\nbackend = 'sqlite'\n");
+      let result!: ReturnType<typeof diagnoseRemoteOAuthConfig>;
+      expect(() => {
+        result = diagnoseRemoteOAuthConfig(noopLogger, process.env);
+      }).not.toThrow();
+      expect(result.status).toBe("absent");
+      expect(result.configured).toBe(false);
+      expect(result.config.enabled).toBe(false);
+      expect(result.issues).toEqual([]);
+    });
+
+    it("reports a deliberately disabled block as disabled, not malformed", () => {
+      useConfig(["[http.oauth]", "enabled = false", ""].join("\n"));
+      const result = diagnoseRemoteOAuthConfig(noopLogger, process.env);
+      expect(result.status).toBe("disabled");
+      expect(result.configured).toBe(true);
+      expect(result.config.enabled).toBe(false);
+    });
+
+    it("produces actionable diagnostics for a malformed enabled config while failing closed", () => {
+      // enabled OAuth with a confidential client that has no secret hash.
+      useConfig(
+        [
+          "[http.oauth]",
+          "enabled = true",
+          "[[http.oauth.clients]]",
+          'client_id = "chatgpt"',
+          'allowed_redirect_uris = ["https://chatgpt.com/connector/callback"]',
+          "",
+        ].join("\n")
+      );
+      const result = diagnoseRemoteOAuthConfig(noopLogger, process.env);
+      expect(result.status).toBe("malformed");
+      // Fail-closed: runtime OAuth is disabled even though the operator asked for it.
+      expect(result.config.enabled).toBe(false);
+      expect(result.issues.length).toBeGreaterThan(0);
+      expect(result.issues.join(" ")).toContain("client_secret_hash");
+      // Diagnostics never echo secret material.
+      expect(result.issues.join(" ")).not.toMatch(/scrypt:/);
+    });
+
+    it("classifies a valid enabled config with a confidential client as enabled", () => {
+      const hash = hashSecret("s3cret-value");
+      useConfig(
+        [
+          "[http.oauth]",
+          "enabled = true",
+          'issuer = "auto"',
+          "[[http.oauth.clients]]",
+          'client_id = "chatgpt"',
+          `client_secret_hash = "${hash}"`,
+          'allowed_redirect_uris = ["https://chatgpt.com/connector/callback"]',
+          "",
+        ].join("\n")
+      );
+      const result = diagnoseRemoteOAuthConfig(noopLogger, process.env);
+      expect(result.status).toBe("enabled");
+      expect(result.config.enabled).toBe(true);
+      expect(result.config.clients).toHaveLength(1);
+      expect(result.config.registrationPolicy).toBe("static_clients");
     });
   });
 });

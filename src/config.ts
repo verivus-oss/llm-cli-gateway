@@ -36,6 +36,21 @@ export interface Config {
   sessionTtl: number; // Session expiration in seconds
 }
 
+const SkillsSchema = z
+  .object({
+    paths: z.array(z.string().min(1)).default([]),
+  })
+  .strict()
+  .default({ paths: [] });
+
+export interface SkillsConfig {
+  paths: string[];
+  sources: {
+    configFile: string | null;
+    envOverrides: string[];
+  };
+}
+
 /**
  * Load configuration from environment variables.
  * Always returns a Config object with base fields.
@@ -92,7 +107,7 @@ export function loadConfig(): Config {
 //
 // Backends:
 //   - "sqlite":   durable on disk (default).
-//   - "postgres": durable in Postgres (interface only — impl not yet shipped).
+//   - "postgres": durable in Postgres.
 //   - "memory":   in-process MemoryJobStore. Process-lifetime durability only.
 //                 Requires acknowledgeEphemeral=true to register async tools.
 //   - "none":     no store. Async tools are NOT registered.
@@ -104,6 +119,19 @@ export type PersistenceBackend = (typeof PERSISTENCE_BACKENDS)[number];
 export const DEFAULT_JOB_RETENTION_DAYS = 30;
 export const DEFAULT_DEDUP_WINDOW_MS = 60 * 60 * 1000; // 1 hour
 
+// Issue #139 (durable instance-lease orphan recovery): the lease/heartbeat/sweep
+// knobs. Defaults: heartbeat every 15s; a per-job lease TTL of 90s (6x
+// heartbeat) so up to five consecutive missed heartbeats never orphan a live
+// job; a larger 5-minute grace for no-pid http-transport jobs (their only
+// secondary liveness signal); a 30s reaper cadence; and a 1h GC horizon for the
+// observability-only gateway_instances rows. Zod enforces
+// leaseTtl >= 2*heartbeat and httpJobGrace >= leaseTtl.
+export const DEFAULT_INSTANCE_HEARTBEAT_MS = 15000;
+export const DEFAULT_INSTANCE_LEASE_TTL_MS = 90000;
+export const DEFAULT_HTTP_JOB_GRACE_MS = 300000;
+export const DEFAULT_ORPHAN_SWEEP_INTERVAL_MS = 30000;
+export const DEFAULT_INSTANCE_GC_MS = 3600000;
+
 const PersistenceSchema = z
   .object({
     backend: z.enum(PERSISTENCE_BACKENDS).default("sqlite"),
@@ -112,8 +140,43 @@ const PersistenceSchema = z
     retentionDays: z.number().positive().default(DEFAULT_JOB_RETENTION_DAYS),
     dedupWindowMs: z.number().int().nonnegative().default(DEFAULT_DEDUP_WINDOW_MS),
     acknowledgeEphemeral: z.boolean().default(false),
+    // Issue #139 (interim gate, DEPRECATED): superseded by the durable per-job
+    // lease. Still parsed for one release so existing configs do not error, but
+    // it is no longer load-bearing: the lease recovery is safe to run from every
+    // instance (heartbeat and sweep serialize on the job row), so no instance
+    // needs to be the designated sweep "owner". loadPersistenceConfig emits a
+    // one-time deprecation warning when it is set. Will be removed in a later
+    // release. See the durable lease knobs below.
+    ownsOrphanRecovery: z.boolean().default(false),
+    // Issue #139 (durable lease): heartbeat/lease/sweep/GC cadences (ms).
+    instanceHeartbeatMs: z.number().int().positive().default(DEFAULT_INSTANCE_HEARTBEAT_MS),
+    instanceLeaseTtlMs: z.number().int().positive().default(DEFAULT_INSTANCE_LEASE_TTL_MS),
+    httpJobGraceMs: z.number().int().positive().default(DEFAULT_HTTP_JOB_GRACE_MS),
+    orphanSweepIntervalMs: z.number().int().positive().default(DEFAULT_ORPHAN_SWEEP_INTERVAL_MS),
+    instanceGcMs: z.number().int().positive().default(DEFAULT_INSTANCE_GC_MS),
   })
-  .strict();
+  .strict()
+  .superRefine((cfg, ctx) => {
+    // A lease must survive at least one missed heartbeat, so require it to be at
+    // least twice the heartbeat cadence; otherwise a single delayed heartbeat
+    // could let another instance sweep a live job.
+    if (cfg.instanceLeaseTtlMs < 2 * cfg.instanceHeartbeatMs) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["instanceLeaseTtlMs"],
+        message: `instanceLeaseTtlMs (${cfg.instanceLeaseTtlMs}) must be >= 2 * instanceHeartbeatMs (${2 * cfg.instanceHeartbeatMs})`,
+      });
+    }
+    // The http grace is an EXTRA hold on top of the lease for no-pid jobs, so it
+    // can never be shorter than the lease itself.
+    if (cfg.httpJobGraceMs < cfg.instanceLeaseTtlMs) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["httpJobGraceMs"],
+        message: `httpJobGraceMs (${cfg.httpJobGraceMs}) must be >= instanceLeaseTtlMs (${cfg.instanceLeaseTtlMs})`,
+      });
+    }
+  });
 
 export interface PersistenceConfig {
   backend: PersistenceBackend;
@@ -122,6 +185,23 @@ export interface PersistenceConfig {
   retentionDays: number;
   dedupWindowMs: number;
   acknowledgeEphemeral: boolean;
+  /**
+   * Issue #139 (interim gate, DEPRECATED): retained only so old configs still
+   * parse. No longer load-bearing (the durable per-job lease recovery runs
+   * safely from every instance). loadPersistenceConfig warns once when it is
+   * explicitly set. See PersistenceSchema.
+   */
+  ownsOrphanRecovery: boolean;
+  /** Issue #139 (durable lease): heartbeat cadence in ms. */
+  instanceHeartbeatMs: number;
+  /** Issue #139 (durable lease): per-job fencing lease TTL in ms. */
+  instanceLeaseTtlMs: number;
+  /** Issue #139 (durable lease): extra grace for no-pid http-transport jobs in ms. */
+  httpJobGraceMs: number;
+  /** Issue #139 (durable lease): reaper sweep cadence in ms. */
+  orphanSweepIntervalMs: number;
+  /** Issue #139 (durable lease): gateway_instances GC horizon in ms. */
+  instanceGcMs: number;
   /** True iff async-job tools should be registered on the MCP server. */
   asyncJobsEnabled: boolean;
   /** Audit trail: which inputs (file, env vars) contributed to the resolved config. */
@@ -143,6 +223,37 @@ function defaultPersistenceConfigPath(): string {
 
 export function defaultGatewayConfigPath(): string {
   return defaultPersistenceConfigPath();
+}
+
+export function loadSkillsConfig(logger: Logger = noopLogger): SkillsConfig {
+  const configPath = defaultGatewayConfigPath();
+  const { parsed, sourcePath } = readGatewayTomlFile(configPath, logger, "skills");
+  const rawSkills = (parsed?.skills as Record<string, unknown> | undefined) ?? {};
+  const sources = {
+    configFile: sourcePath,
+    envOverrides: [] as string[],
+  };
+
+  let skillsParsed;
+  try {
+    skillsParsed = SkillsSchema.parse(rawSkills);
+  } catch (err) {
+    throw new Error(`Invalid [skills] config: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
+  const paths = [...skillsParsed.paths];
+  const envPaths = process.env.LLM_GATEWAY_SKILLS_PATH;
+  if (envPaths !== undefined && envPaths.trim().length > 0) {
+    paths.push(
+      ...envPaths
+        .split(path.delimiter)
+        .map(part => part.trim())
+        .filter(Boolean)
+    );
+    sources.envOverrides.push("LLM_GATEWAY_SKILLS_PATH");
+  }
+
+  return { paths, sources };
 }
 
 /**
@@ -299,6 +410,15 @@ export function loadPersistenceConfig(logger: Logger = noopLogger): PersistenceC
     sources
   );
 
+  // Issue #139: one-time deprecation warning when the interim gate is set. The
+  // durable lease supersedes it; the value is parsed but no longer load-bearing.
+  if (merged.ownsOrphanRecovery !== undefined) {
+    logWarn(
+      logger,
+      "[persistence].ownsOrphanRecovery is deprecated and no longer used; the durable per-job lease recovery (#139) runs safely from every instance. Remove it from config.toml."
+    );
+  }
+
   let parsed;
   try {
     parsed = PersistenceSchema.parse(merged);
@@ -342,6 +462,12 @@ export function loadPersistenceConfig(logger: Logger = noopLogger): PersistenceC
     retentionDays: parsed.retentionDays,
     dedupWindowMs: parsed.dedupWindowMs,
     acknowledgeEphemeral: parsed.acknowledgeEphemeral,
+    ownsOrphanRecovery: parsed.ownsOrphanRecovery,
+    instanceHeartbeatMs: parsed.instanceHeartbeatMs,
+    instanceLeaseTtlMs: parsed.instanceLeaseTtlMs,
+    httpJobGraceMs: parsed.httpJobGraceMs,
+    orphanSweepIntervalMs: parsed.orphanSweepIntervalMs,
+    instanceGcMs: parsed.instanceGcMs,
     asyncJobsEnabled,
     sources,
   };
@@ -1014,6 +1140,7 @@ const AcpConfigSchema = z
     prompt_timeout_ms: z.number().int().positive().default(DEFAULT_ACP_PROMPT_TIMEOUT_MS),
     allow_write_host_services: z.boolean().default(false),
     allow_terminal_host_services: z.boolean().default(false),
+    allow_mutating_session_ops: z.boolean().default(false),
     fallback_to_cli_when_unhealthy: z.boolean().default(true),
     providers: z.record(z.string(), AcpProviderSchema).default({}),
   })
@@ -1037,6 +1164,11 @@ export interface AcpConfig {
   promptTimeoutMs: number;
   allowWriteHostServices: boolean;
   allowTerminalHostServices: boolean;
+  /**
+   * Whether state-mutating ACP admin ops (`session/delete`, `session/set_mode`,
+   * `session/set_config_option`) may be invoked. Deny-by-default.
+   */
+  allowMutatingSessionOps: boolean;
   fallbackToCliWhenUnhealthy: boolean;
   providers: Record<string, AcpProviderConfig>;
   /** Audit trail: file the config was loaded from (or null if defaults). */
@@ -1054,6 +1186,7 @@ function defaultAcpConfig(sourcePath: string | null): AcpConfig {
     promptTimeoutMs: DEFAULT_ACP_PROMPT_TIMEOUT_MS,
     allowWriteHostServices: false,
     allowTerminalHostServices: false,
+    allowMutatingSessionOps: false,
     fallbackToCliWhenUnhealthy: true,
     providers: {},
     sources: { configFile: sourcePath },
@@ -1127,8 +1260,82 @@ export function loadAcpConfig(logger: Logger = noopLogger): AcpConfig {
     promptTimeoutMs: parsed.prompt_timeout_ms,
     allowWriteHostServices: parsed.allow_write_host_services,
     allowTerminalHostServices: parsed.allow_terminal_host_services,
+    allowMutatingSessionOps: parsed.allow_mutating_session_ops,
     fallbackToCliWhenUnhealthy: parsed.fallback_to_cli_when_unhealthy,
     providers,
+    sources: { configFile: sourcePath },
+  };
+}
+
+//──────────────────────────────────────────────────────────────────────────────
+// CLI admin operations configuration ([admin])
+//
+// Gates the phase-6 provider-admin MUTATING surface (mcp add/remove, login/
+// logout, plugin install/remove, session delete/archive, ...). Deny-by-default,
+// parallel to acp.allow_mutating_session_ops: when false, a mutating admin tool
+// call fails closed WITHOUT spawning; when true it routes through the approval
+// manager and is audited. Read-only admin ops are unaffected by this gate.
+//──────────────────────────────────────────────────────────────────────────────
+
+const AdminConfigSchema = z
+  .object({
+    allow_mutating_cli_admin_ops: z.boolean().default(false),
+  })
+  .strict();
+
+export interface AdminConfig {
+  /** Whether mutating provider CLI admin ops may run. Deny-by-default. */
+  allowMutatingCliAdminOps: boolean;
+  /** Audit trail: file the config was loaded from (or null if defaults). */
+  sources: { configFile: string | null };
+}
+
+function defaultAdminConfig(sourcePath: string | null): AdminConfig {
+  return { allowMutatingCliAdminOps: false, sources: { configFile: sourcePath } };
+}
+
+function readAdminFile(
+  configPath: string,
+  logger: Logger
+): { raw: unknown; sourcePath: string | null } {
+  if (!existsSync(configPath)) {
+    return { raw: undefined, sourcePath: null };
+  }
+  try {
+    const require = createRequire(import.meta.url);
+    const TOML = require("smol-toml");
+    const text = readFileSync(configPath, "utf-8");
+    const parsed = TOML.parse(text) as Record<string, unknown>;
+    return { raw: parsed?.admin, sourcePath: configPath };
+  } catch (err) {
+    logger.error(`Failed to parse gateway config at ${configPath}; using admin defaults`, err);
+    return { raw: undefined, sourcePath: null };
+  }
+}
+
+/**
+ * Load [admin] from ~/.llm-cli-gateway/config.toml (override via $LLM_GATEWAY_CONFIG).
+ *
+ * Defaults are fully locked down (mutating CLI admin ops OFF). A syntax-invalid
+ * TOML keeps the whole-file fallback (defaults). A schema-invalid [admin] block
+ * THROWS so a misconfiguration cannot silently flip the mutating gate on.
+ */
+export function loadAdminConfig(logger: Logger = noopLogger): AdminConfig {
+  const configPath = defaultGatewayConfigPath();
+  const { raw, sourcePath } = readAdminFile(configPath, logger);
+  if (raw === undefined) {
+    return defaultAdminConfig(sourcePath);
+  }
+  let parsed;
+  try {
+    parsed = AdminConfigSchema.parse(raw);
+  } catch (err) {
+    throw new Error(`Invalid [admin] config: ${err instanceof Error ? err.message : String(err)}`, {
+      cause: err,
+    });
+  }
+  return {
+    allowMutatingCliAdminOps: parsed.allow_mutating_cli_admin_ops,
     sources: { configFile: sourcePath },
   };
 }
@@ -1197,14 +1404,40 @@ function isSafeRedirectUri(uri: string): boolean {
   return isHttpsOrLoopbackUrl(uri);
 }
 
-export function loadRemoteOAuthConfig(
-  logger: Logger = noopLogger,
-  env: NodeJS.ProcessEnv = process.env
-): RemoteOAuthConfig {
-  const configPath = defaultGatewayConfigPath();
-  const { parsed: configFile, sourcePath } = readGatewayTomlFile(configPath, logger, "OAuth");
-  const rawHttp = (configFile?.http as Record<string, unknown> | undefined) ?? {};
-  const rawOAuth = (rawHttp.oauth as Record<string, unknown> | undefined) ?? {};
+/**
+ * Coarse status of the remote OAuth config, used by the doctor readiness
+ * projection to distinguish "operator has not enabled OAuth" from "operator
+ * enabled OAuth but the config is unsafe/malformed". `loadRemoteOAuthConfig`
+ * wraps this and returns only the resolved config for back-compat.
+ *
+ *   - "absent":    no [http.oauth] table and no OAuth env overrides.
+ *   - "disabled":  OAuth config is present but enabled = false.
+ *   - "enabled":   OAuth config is present, enabled, and passed validation.
+ *   - "malformed": OAuth is enabled but failed schema/semantic validation
+ *                  (remote OAuth is therefore disabled at runtime, fail-closed).
+ */
+export type RemoteOAuthConfigStatus = "absent" | "disabled" | "enabled" | "malformed";
+
+export interface RemoteOAuthConfigDiagnostics {
+  config: RemoteOAuthConfig;
+  status: RemoteOAuthConfigStatus;
+  /** True when an [http.oauth] table or OAuth env override is present at all. */
+  configured: boolean;
+  /**
+   * Concise, secret-free descriptions of why an enabled config is malformed.
+   * Empty for "absent"/"disabled"/"enabled". Never contains secret material.
+   */
+  issues: string[];
+}
+
+/**
+ * Apply the OAuth env-var compatibility overrides on top of the raw TOML block.
+ * Returns the merged object plus the list of override names applied.
+ */
+function mergeOAuthEnvOverrides(
+  rawOAuth: Record<string, unknown>,
+  env: NodeJS.ProcessEnv
+): { merged: Record<string, unknown>; envOverrides: string[] } {
   const envOverrides: string[] = [];
   const merged: Record<string, unknown> = { ...rawOAuth };
 
@@ -1239,31 +1472,46 @@ export function loadRemoteOAuthConfig(
     merged.require_consent = merged.require_consent ?? true;
     envOverrides.push("LLM_GATEWAY_OAUTH_CONSENT_SECRET");
   }
+  return { merged, envOverrides };
+}
 
-  const parsed = OAuthConfigSchema.safeParse(merged);
-  if (!parsed.success) {
-    logWarn(logger, "Invalid [http.oauth] config; remote OAuth disabled", {
-      error: parsed.error.message,
-    });
-    return disabledOAuthConfig(sourcePath, envOverrides);
-  }
-  const data = parsed.data;
+/**
+ * Run the semantic (post-schema) validations on a parsed OAuth config. Pushes a
+ * secret-free issue string for each failure. Returns the resolved config on
+ * success, or null when any semantic check failed (fail-closed: caller returns
+ * the disabled config so remote OAuth stays off at runtime).
+ */
+function validateParsedOAuthConfig(
+  data: z.infer<typeof OAuthConfigSchema>,
+  env: NodeJS.ProcessEnv,
+  sourcePath: string | null,
+  envOverrides: string[],
+  logger: Logger,
+  issues: string[]
+): RemoteOAuthConfig | null {
   if (data.issuer !== "auto" && !isHttpsOrLoopbackUrl(data.issuer)) {
     logWarn(logger, "Invalid [http.oauth].issuer; remote OAuth disabled");
-    return disabledOAuthConfig(sourcePath, envOverrides);
+    issues.push("OAuth issuer must be an https:// URL (or a loopback URL for local testing).");
+    return null;
   }
   for (const client of data.clients) {
     if (!data.allow_public_clients && !client.client_secret_hash) {
       logWarn(logger, "OAuth client secret hash is required when public clients are disabled", {
         client_id: client.client_id,
       });
-      return disabledOAuthConfig(sourcePath, envOverrides);
+      issues.push(
+        "An OAuth client is missing a client_secret_hash (required when public clients are disabled). Recreate it with `llm-cli-gateway oauth client add`."
+      );
+      return null;
     }
     if (client.client_secret_hash && !isSecretHash(client.client_secret_hash)) {
       logWarn(logger, "Invalid OAuth client secret hash; remote OAuth disabled", {
         client_id: client.client_id,
       });
-      return disabledOAuthConfig(sourcePath, envOverrides);
+      issues.push(
+        "An OAuth client secret hash is not a valid scrypt hash. Rotate it with `llm-cli-gateway oauth client rotate`."
+      );
+      return null;
     }
     if (
       client.allowed_redirect_uris.length === 0 ||
@@ -1272,13 +1520,19 @@ export function loadRemoteOAuthConfig(
       logWarn(logger, "Invalid OAuth client redirect URI; remote OAuth disabled", {
         client_id: client.client_id,
       });
-      return disabledOAuthConfig(sourcePath, envOverrides);
+      issues.push(
+        "An OAuth client has a missing or non-https/loopback redirect URI. Re-add the client with a valid --redirect-uri."
+      );
+      return null;
     }
   }
   if (data.shared_secret?.enabled) {
     if (!data.shared_secret.secret_hash || !isSecretHash(data.shared_secret.secret_hash)) {
       logWarn(logger, "Invalid [http.oauth.shared_secret] secret_hash; remote OAuth disabled");
-      return disabledOAuthConfig(sourcePath, envOverrides);
+      issues.push(
+        "The OAuth shared-secret hash is missing or invalid. Reset it with `llm-cli-gateway oauth shared-secret set`."
+      );
+      return null;
     }
   }
   if (data.registration_policy === "open_dev" && env.LLM_GATEWAY_OAUTH_OPEN_DEV !== "1") {
@@ -1294,7 +1548,10 @@ export function loadRemoteOAuthConfig(
         logger,
         "[http.oauth].require_consent is set but consent_secret_hash is missing/invalid; remote OAuth disabled"
       );
-      return disabledOAuthConfig(sourcePath, envOverrides);
+      issues.push(
+        "require_consent is set but the consent secret hash is missing or invalid. Set it with `llm-cli-gateway oauth shared-secret set` or LLM_GATEWAY_OAUTH_CONSENT_SECRET."
+      );
+      return null;
     }
   }
 
@@ -1323,4 +1580,68 @@ export function loadRemoteOAuthConfig(
       : null,
     sources: { configFile: sourcePath, envOverrides },
   };
+}
+
+/**
+ * Load and classify the remote OAuth config. Unlike `loadRemoteOAuthConfig`,
+ * this reports WHY OAuth is off so the readiness projection can distinguish a
+ * deliberately-disabled server from a misconfigured one. Never throws and never
+ * emits secret material.
+ */
+export function diagnoseRemoteOAuthConfig(
+  logger: Logger = noopLogger,
+  env: NodeJS.ProcessEnv = process.env
+): RemoteOAuthConfigDiagnostics {
+  const configPath = defaultGatewayConfigPath();
+  const { parsed: configFile, sourcePath } = readGatewayTomlFile(configPath, logger, "OAuth");
+  const rawHttp = (configFile?.http as Record<string, unknown> | undefined) ?? {};
+  const rawOAuth = (rawHttp.oauth as Record<string, unknown> | undefined) ?? {};
+  const { merged, envOverrides } = mergeOAuthEnvOverrides(rawOAuth, env);
+  const configured = Object.keys(rawOAuth).length > 0 || envOverrides.length > 0;
+
+  const parsed = OAuthConfigSchema.safeParse(merged);
+  if (!parsed.success) {
+    logWarn(logger, "Invalid [http.oauth] config; remote OAuth disabled", {
+      error: parsed.error.message,
+    });
+    // A parse failure can only happen when an [http.oauth] table (or override)
+    // exists, since an empty object parses to the all-default disabled config.
+    return {
+      config: disabledOAuthConfig(sourcePath, envOverrides),
+      status: "malformed",
+      configured: true,
+      issues: [
+        "The [http.oauth] config is invalid (schema validation failed); remote OAuth is disabled.",
+      ],
+    };
+  }
+
+  const data = parsed.data;
+  const issues: string[] = [];
+  const built = validateParsedOAuthConfig(data, env, sourcePath, envOverrides, logger, issues);
+  if (!built) {
+    // Semantic validation failed. Only surface it as "malformed" when the
+    // operator actually asked for OAuth (enabled); an enabled=false block with
+    // stale/invalid material is just "disabled".
+    return {
+      config: disabledOAuthConfig(sourcePath, envOverrides),
+      status: data.enabled ? "malformed" : configured ? "disabled" : "absent",
+      configured,
+      issues: data.enabled ? issues : [],
+    };
+  }
+
+  const status: RemoteOAuthConfigStatus = built.enabled
+    ? "enabled"
+    : configured
+      ? "disabled"
+      : "absent";
+  return { config: built, status, configured, issues: [] };
+}
+
+export function loadRemoteOAuthConfig(
+  logger: Logger = noopLogger,
+  env: NodeJS.ProcessEnv = process.env
+): RemoteOAuthConfig {
+  return diagnoseRemoteOAuthConfig(logger, env).config;
 }

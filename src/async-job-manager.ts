@@ -1,5 +1,7 @@
 import { ChildProcess } from "child_process";
 import { randomUUID } from "crypto";
+import os from "os";
+import { hrtime } from "process";
 import {
   envWithExtendedPath,
   getExtendedPath,
@@ -18,7 +20,13 @@ import {
   type FlightRecorderLike,
 } from "./flight-recorder.js";
 import { codexFrResponse } from "./codex-json-parser.js";
-import type { JobTransport, OrphanedJobSnapshot, ValidationRunStore } from "./job-store.js";
+import { extractProviderOutputMetadata } from "./provider-output-metadata.js";
+import type {
+  JobTransport,
+  OrphanedJobSnapshot,
+  ValidationRunStore,
+  SweepCandidate,
+} from "./job-store.js";
 import { getRequestContext, resolveOwnerPrincipal, principalCanAccess } from "./request-context.js";
 import {
   runApiRequest,
@@ -28,7 +36,46 @@ import {
   type ApiResult,
   type ApiUsage,
 } from "./api-provider.js";
-import { type JobLimitsConfig } from "./config.js";
+import {
+  type JobLimitsConfig,
+  DEFAULT_INSTANCE_HEARTBEAT_MS,
+  DEFAULT_INSTANCE_LEASE_TTL_MS,
+  DEFAULT_HTTP_JOB_GRACE_MS,
+  DEFAULT_ORPHAN_SWEEP_INTERVAL_MS,
+  DEFAULT_INSTANCE_GC_MS,
+} from "./config.js";
+
+/**
+ * #139: runtime lease/heartbeat/sweep cadences threaded into the manager. All
+ * default from the config constants so the huge existing test suite (which
+ * constructs managers without this) keeps working with the production defaults.
+ */
+export interface LeaseRuntimeConfig {
+  instanceHeartbeatMs: number;
+  instanceLeaseTtlMs: number;
+  httpJobGraceMs: number;
+  orphanSweepIntervalMs: number;
+  instanceGcMs: number;
+  /** Instance role label for the gateway_instances row (observability). */
+  role?: string;
+}
+
+const DEFAULT_LEASE_RUNTIME_CONFIG: LeaseRuntimeConfig = {
+  instanceHeartbeatMs: DEFAULT_INSTANCE_HEARTBEAT_MS,
+  instanceLeaseTtlMs: DEFAULT_INSTANCE_LEASE_TTL_MS,
+  httpJobGraceMs: DEFAULT_HTTP_JOB_GRACE_MS,
+  orphanSweepIntervalMs: DEFAULT_ORPHAN_SWEEP_INTERVAL_MS,
+  instanceGcMs: DEFAULT_INSTANCE_GC_MS,
+  role: "gateway",
+};
+
+/**
+ * #139: after this many consecutive heartbeat failures the instance can no
+ * longer trust that its lease is being advanced, so it stops admitting durable
+ * jobs and stops sweeping (prefer self-quiescence over orphaning others on a
+ * stale self-view). See section 5b of the design.
+ */
+const MAX_CONSECUTIVE_HEARTBEAT_FAILURES = 3;
 
 /**
  * Slice 1: pull the real HTTP status out of a (possibly circuit-breaker-wrapped)
@@ -536,6 +583,18 @@ export interface AsyncJobResult extends AsyncJobSnapshot {
   responseId?: string | null;
   model?: string;
   errorBody?: string;
+  /**
+   * Phase 7: provider-minted session id parsed from the completed job's stdout
+   * (process jobs), so a deferred/async job can be polled and then resumed with
+   * the real provider session id. Undefined when the provider does not emit one
+   * on its transport (typed capability fact).
+   */
+  providerSessionId?: string;
+  /**
+   * Phase 7: provider terminal stop reason parsed from the completed job's
+   * stdout, WHERE upstream supplies it. Undefined otherwise (capability fact).
+   */
+  stopReason?: string;
 }
 
 /**
@@ -644,17 +703,55 @@ export class AsyncJobManager {
   private readonly completedJobMemoryTtlMs: number;
   private readonly maxJobOutputBytes: number;
 
+  // #139 durable-lease state.
+  private readonly instanceId: string = randomUUID();
+  private readonly hostname: string = os.hostname();
+  private readonly instancePid: number = process.pid;
+  private readonly lease: LeaseRuntimeConfig;
+  private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  private sweepTimer: ReturnType<typeof setInterval> | null = null;
+  /**
+   * #139: true iff this instance may admit durable async jobs. Set false when
+   * registerInstance fails at construction, or after sustained heartbeat
+   * failure. The tool layer / startJob* sites AND this with hasStore().
+   */
+  private durableAdmission: boolean;
+  private consecutiveHeartbeatFailures = 0;
+  /**
+   * #139: set for one cycle when the heartbeat timer measured excessive
+   * scheduling drift (this event loop was blocked and cannot trust its
+   * wall-clock view of other instances), so the next sweep is skipped.
+   */
+  private skipSweepThisCycle = false;
+  /** #139: monotonic expected fire time of the heartbeat timer (ms). */
+  private nextHeartbeatExpectedAt = 0;
+  private disposed = false;
+  /**
+   * #139: in-flight durable terminal writes, awaited by dispose() before
+   * deregister so a job being finalized is never orphaned mid-write.
+   */
+  private readonly pendingWrites = new Set<Promise<unknown>>();
+
   constructor(
     private logger: Logger = noopLogger,
     private onJobComplete?: (cli: JobProvider, durationMs: number, success: boolean) => void,
     store: JobStore | null = null,
     flightRecorder: FlightRecorderLike = new NoopFlightRecorder(),
-    limits: JobLimitsConfig = DEFAULT_MANAGER_JOB_LIMITS
+    limits: JobLimitsConfig = DEFAULT_MANAGER_JOB_LIMITS,
+    // Issue #139: DEPRECATED and IGNORED. The durable per-job lease recovery is
+    // safe to run from every instance (heartbeat and sweep serialize on the job
+    // row), so no instance needs to be a designated sweep "owner". Retained only
+    // to preserve the positional signature for existing callers.
+    _deprecatedOwnsOrphanRecovery: boolean = true,
+    // Issue #139: heartbeat/lease/sweep/GC cadences. Defaults from config so
+    // existing callers/tests that omit it get the production defaults.
+    leaseConfig: LeaseRuntimeConfig = DEFAULT_LEASE_RUNTIME_CONFIG
   ) {
     this.processMonitor = new ProcessMonitor(logger);
     this.store = store;
     this.flightRecorder = flightRecorder;
     this.limits = limits;
+    this.lease = leaseConfig;
     this.completedJobMemoryTtlMs = limits.completedJobMemoryTtlMs;
     this.maxJobOutputBytes = limits.maxJobOutputBytes;
     this.limiter = new JobLimiter(
@@ -667,31 +764,32 @@ export class AsyncJobManager {
       logger
     );
 
+    // #139: register this instance BEFORE any request can be admitted (the
+    // register-before-admit invariant: a job row can only be written after the
+    // ctor returns, so it always follows a live instance row). registerInstance
+    // is fail-closed (NOT swallowed): on failure durable admission is refused
+    // and no recovery runs, rather than silently admitting untracked work.
+    this.durableAdmission = store !== null;
     if (this.store) {
       try {
-        const { count, orphaned } = this.store.markOrphanedOnStartup();
-        if (count > 0) {
-          this.logger.info(`Marked ${count} in-flight job(s) as orphaned after gateway restart`);
-        }
-        // Slice 1.5: close out the FR row for each orphaned job. The FR
-        // logComplete UPDATE has WHERE status='started' so pre-1.7.0 rows
-        // (where the prior gateway never wrote a logStart) silently
-        // no-op. Wrapped per-orphan so a single bad row can't tank boot.
-        for (const orphan of orphaned) {
-          try {
-            this.flightRecorder.logComplete(
-              orphan.correlationId,
-              this.buildOrphanFlightResult(orphan)
-            );
-          } catch (err) {
-            this.logger.error(
-              `Async-path FR logComplete for orphaned job ${orphan.id} failed`,
-              err
-            );
-          }
-        }
+        this.store.registerInstance({
+          instanceId: this.instanceId,
+          role: this.lease.role ?? "gateway",
+          hostname: this.hostname,
+          pid: this.instancePid,
+        });
       } catch (err) {
-        this.logger.error("markOrphanedOnStartup failed", err);
+        this.durableAdmission = false;
+        this.logger.error(
+          "#139 registerInstance failed; durable async admission is disabled for this instance",
+          err
+        );
+      }
+      if (this.durableAdmission) {
+        // Startup recovery: the lease sweep (NOT the old blanket orphan-all).
+        this.runOrphanSweep();
+        this.startHeartbeat();
+        this.startReaper();
       }
     }
 
@@ -705,6 +803,311 @@ export class AsyncJobManager {
     this.stallTimer = setInterval(() => this.checkStalledJobs(), STALL_CHECK_INTERVAL_MS);
     if (this.stallTimer.unref) {
       this.stallTimer.unref();
+    }
+  }
+
+  /** #139: true iff this instance may admit durable async jobs right now. */
+  canAdmitDurableJobs(): boolean {
+    return this.store !== null && this.durableAdmission;
+  }
+
+  /**
+   * #139: throw a fail-closed admission error when a durable store is attached
+   * but this instance cannot prove its own liveness. A null-store manager
+   * (isolate-mode / tests without persistence) is unaffected.
+   */
+  private assertDurableAdmission(provider: string): void {
+    if (this.store && !this.durableAdmission) {
+      throw new Error(
+        `Durable async admission is disabled for ${provider}: this gateway instance could not register or lost its heartbeat lease. Retry after the gateway recovers.`
+      );
+    }
+  }
+
+  /** #139: register an in-flight async terminal write so dispose() can await it. */
+  private trackPendingWrite(p: Promise<unknown>): void {
+    this.pendingWrites.add(p);
+    void p.finally(() => this.pendingWrites.delete(p));
+  }
+
+  /**
+   * #139: graceful shutdown. (1) stop admission; (2) clear all timers
+   * (heartbeat, sweep, eviction, stall); (3) abort/kill this instance's active
+   * owned jobs and await the terminal writes their close handlers / finalizers
+   * produce (drain AFTER the kills); (4) deregister ONLY when no active owned
+   * work remains, else skip deregister and let the lease expire naturally so a
+   * job still being finalized is never orphaned mid-write by another instance.
+   * Idempotent; a null-store (isolate-mode) manager disposes as a no-op.
+   */
+  async dispose(opts: { timeoutMs?: number } = {}): Promise<void> {
+    const timeoutMs = opts.timeoutMs ?? 5000;
+    if (this.disposed) return;
+    // (1) stop admission before anything else so no new job slips in mid-dispose.
+    this.disposed = true;
+    this.durableAdmission = false;
+    // (2) clear every timer.
+    for (const t of [this.heartbeatTimer, this.sweepTimer, this.evictionTimer, this.stallTimer]) {
+      if (t) clearInterval(t);
+    }
+    this.heartbeatTimer = null;
+    this.sweepTimer = null;
+    this.evictionTimer = null;
+    this.stallTimer = null;
+
+    if (!this.store) return; // isolate-mode / no durable state: nothing to deregister.
+
+    // (3) abort/kill active owned jobs; their close handlers / finalizers run the
+    // synchronous terminal recordComplete when they fire.
+    const active = [...this.jobs.values()].filter(job => isAsyncJobInProgress(job.status));
+    for (const job of active) {
+      try {
+        if (job.transport === "http") {
+          job.abort?.abort();
+        } else if (job.process) {
+          killProcessGroup(job.process, "SIGTERM");
+        }
+      } catch (err) {
+        this.logger.error(`#139 dispose: failed to signal job ${job.id}`, err);
+      }
+    }
+    // Drain (bounded): wait for the killed jobs to reach a terminal state and for
+    // any tracked async terminal writes to settle.
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const stillActive = [...this.jobs.values()].some(job => isAsyncJobInProgress(job.status));
+      if (!stillActive && this.pendingWrites.size === 0) break;
+      await Promise.race([
+        Promise.allSettled([...this.pendingWrites]),
+        new Promise(resolve => setTimeout(resolve, 50)),
+      ]);
+    }
+
+    const stillActive = [...this.jobs.values()].some(job => isAsyncJobInProgress(job.status));
+    if (stillActive) {
+      // (4) do NOT deregister while jobs are still finalizing: let the lease
+      // expire so another instance recovers them correctly rather than a
+      // mid-write orphan.
+      logWarn(
+        this.logger,
+        "#139 dispose timed out with active owned jobs; skipping deregister and letting the lease expire"
+      );
+      return;
+    }
+    try {
+      this.store.deregisterInstance(this.instanceId);
+    } catch (err) {
+      this.logger.error("#139 dispose: deregisterInstance failed", err);
+    }
+  }
+
+  /** #139 test/observability hook: the instance id stamped on this manager's jobs. */
+  getInstanceId(): string {
+    return this.instanceId;
+  }
+
+  /**
+   * #139: the periodic heartbeat. Advances this instance's per-job leases (the
+   * authoritative fencing signal) and refreshes the observability row. Measures
+   * its own scheduling drift; if the loop was blocked longer than one heartbeat
+   * interval, it skips the NEXT sweep (a blocked loop cannot trust its
+   * wall-clock view of other instances). Fail tracking drives fail-closed.
+   */
+  private startHeartbeat(): void {
+    const intervalMs = this.lease.instanceHeartbeatMs;
+    this.nextHeartbeatExpectedAt = Number(hrtime.bigint() / 1_000_000n) + intervalMs;
+    this.heartbeatTimer = setInterval(() => this.onHeartbeatTick(intervalMs), intervalMs);
+    if (this.heartbeatTimer.unref) this.heartbeatTimer.unref();
+  }
+
+  private onHeartbeatTick(intervalMs: number): void {
+    if (this.disposed || !this.store) return;
+    // Scheduling-drift measurement (monotonic clock): if this tick fired far
+    // later than scheduled, the event loop was blocked.
+    const nowMonoMs = Number(hrtime.bigint() / 1_000_000n);
+    const driftMs = nowMonoMs - this.nextHeartbeatExpectedAt;
+    this.nextHeartbeatExpectedAt = nowMonoMs + intervalMs;
+    if (driftMs > intervalMs) {
+      this.skipSweepThisCycle = true;
+      logWarn(
+        this.logger,
+        `#139 heartbeat scheduling drift ${Math.round(driftMs)}ms exceeded interval ${intervalMs}ms; skipping the next orphan sweep`
+      );
+    }
+    try {
+      this.store.heartbeat(this.instanceId);
+      this.consecutiveHeartbeatFailures = 0;
+    } catch (err) {
+      this.consecutiveHeartbeatFailures++;
+      this.logger.error(
+        `#139 heartbeat failed (${this.consecutiveHeartbeatFailures}/${MAX_CONSECUTIVE_HEARTBEAT_FAILURES})`,
+        err
+      );
+      if (this.consecutiveHeartbeatFailures >= MAX_CONSECUTIVE_HEARTBEAT_FAILURES) {
+        // The failure that breaks heartbeats often breaks other writes too, so
+        // prefer self-quiescence: stop admitting durable jobs and stop sweeping.
+        // Other instances will recover this instance's now-stale-lease jobs
+        // correctly once the lease lapses.
+        if (this.durableAdmission) {
+          this.durableAdmission = false;
+          this.logger.error(
+            "#139 sustained heartbeat failure; disabling durable admission and orphan sweeping on this instance"
+          );
+        }
+      }
+    }
+  }
+
+  /**
+   * #139: run one orphan sweep synchronously. `public` only so tests can drive
+   * the sweep deterministically without waiting on the reaper interval (mirrors
+   * `checkStalledJobs`). Production code uses the startup call + reaper timer.
+   */
+  runOrphanSweepNow(): void {
+    this.runOrphanSweep();
+  }
+
+  /** #139: the periodic orphan reaper. */
+  private startReaper(): void {
+    this.sweepTimer = setInterval(() => {
+      this.runOrphanSweep();
+      // Opportunistically GC long-dead observability rows.
+      try {
+        this.store?.gcInstances(this.lease.instanceGcMs);
+      } catch (err) {
+        this.logger.error("#139 gateway_instances GC failed", err);
+      }
+    }, this.lease.orphanSweepIntervalMs);
+    if (this.sweepTimer.unref) this.sweepTimer.unref();
+  }
+
+  /**
+   * #139: the fencing orphan sweep. (1) If a recent heartbeat measured a blocked
+   * loop, skip this cycle. (2) If durable admission was disabled (sustained
+   * heartbeat failure), do not sweep (never orphan on a stale self-view). (3)
+   * Run the advisory kill(pid,0) on same-host process candidates and advance the
+   * lease for the live ones (bounded grace), then (4) run the guarded store
+   * sweep excluding those ids, and (5) emit a flight-recorder completion for
+   * each orphaned row.
+   */
+  private runOrphanSweep(): void {
+    if (!this.store || this.disposed || !this.durableAdmission) return;
+    if (this.skipSweepThisCycle) {
+      this.skipSweepThisCycle = false;
+      return;
+    }
+    const leaseTtl = this.lease.instanceLeaseTtlMs;
+    const httpGrace = this.lease.httpJobGraceMs;
+    let liveConfirmedIds: string[] = [];
+    try {
+      const candidates = this.store.selectStaleProcessCandidates(leaseTtl, httpGrace);
+      liveConfirmedIds = this.confirmLiveProcessCandidates(candidates);
+    } catch (err) {
+      this.logger.error("#139 selecting stale process candidates failed", err);
+    }
+    let orphaned: OrphanedJobSnapshot[];
+    try {
+      orphaned = this.store.recoverStaleJobs(leaseTtl, httpGrace, liveConfirmedIds);
+    } catch (err) {
+      this.logger.error("#139 recoverStaleJobs failed", err);
+      return;
+    }
+    if (orphaned.length > 0) {
+      this.logger.info(
+        `#139 orphaned ${orphaned.length} stale job(s) whose owning instance is gone`
+      );
+    }
+    for (const orphan of orphaned) {
+      try {
+        this.flightRecorder.logComplete(orphan.correlationId, this.buildOrphanFlightResult(orphan));
+      } catch (err) {
+        this.logger.error(`#139 FR logComplete for orphaned job ${orphan.id} failed`, err);
+      }
+    }
+  }
+
+  /**
+   * #139: advisory, never-vetoing liveness confirmation. For each same-host
+   * process candidate with a live pid, return its id (the caller advances its
+   * lease by one leaseTtl instead of orphaning it). A dead/missing pid, or a
+   * foreign/unknown-host candidate, is NOT confirmed and falls through to the
+   * lease decision. Because the grace is one bounded leaseTtl, pid reuse cannot
+   * hold a row hostage indefinitely.
+   */
+  private confirmLiveProcessCandidates(candidates: SweepCandidate[]): string[] {
+    const live: string[] = [];
+    for (const c of candidates) {
+      if (c.transport !== "process" || c.pid == null) continue;
+      // Only pid-check candidates known to be on THIS host; a pid is
+      // meaningless across hosts.
+      if (c.hostname !== null && c.hostname !== this.hostname) continue;
+      if (c.hostname === null) continue; // unknown owner host: do not pid-check
+      try {
+        process.kill(c.pid, 0);
+        live.push(c.id); // signal delivered (or EPERM): the pid is alive
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException).code;
+        if (code === "EPERM") live.push(c.id); // exists but not ours: still alive
+        // ESRCH (or anything else): treat as dead -> fall through to orphaning.
+      }
+    }
+    return live;
+  }
+
+  /**
+   * #139: fail-closed durable recordStart. If the durable row cannot be written,
+   * the acquired running slot / queued entry is released, the in-memory job is
+   * dropped, and the call throws so the request fails, rather than running an
+   * in-memory-only job with no owned durable row (which the sweep could never
+   * see and no other instance could recover).
+   */
+  private recordStartOrFailClosed(
+    job: AsyncJobRecord,
+    acq: { state: "granted"; permit: LimiterPermit } | { state: "queued"; cancel: () => boolean },
+    input: Parameters<JobStore["recordStart"]>[0]
+  ): void {
+    if (!this.store) return;
+    try {
+      this.store.recordStart(input);
+    } catch (err) {
+      if (acq.state === "granted") acq.permit.release();
+      else acq.cancel();
+      this.jobs.delete(job.id);
+      this.logger.error(
+        `#139 durable recordStart failed for job ${job.id}; failing the request (fail-closed)`,
+        err
+      );
+      throw new Error(
+        `Durable job admission failed for ${job.cli}: the job store rejected recordStart`
+      );
+    }
+  }
+
+  /**
+   * #139: durable queued -> running transition + pid stamp. `failClosed` throws
+   * on failure (process launch: a spawned child must never run against a stale
+   * durable 'queued' row); best-effort otherwise (http: no OS process to strand,
+   * the lease keeps the row alive and the guarded recordComplete still lands).
+   */
+  private markRunningDurable(job: AsyncJobRecord, pid: number | null, failClosed = false): void {
+    if (!this.store) return;
+    let transitioned = false;
+    try {
+      transitioned = this.store.markRunning(job.id, { pid });
+    } catch (err) {
+      if (failClosed) throw err;
+      this.logger.error(`#139 markRunning (best-effort) failed for job ${job.id}`, err);
+      return;
+    }
+    // A zero-row transition means the durable row was no longer 'queued' (e.g.
+    // another instance already swept it to 'orphaned' while it waited in the
+    // limiter queue). For a process launch this is fail-closed: refuse to run a
+    // spawned child against a recovered row. http is best-effort (no OS process
+    // to strand; the guarded recordComplete still lands the terminal result over
+    // the orphaned row, so a false here is harmless).
+    if (!transitioned && failClosed) {
+      throw new Error(
+        `#139 markRunning matched no queued row for job ${job.id} (already recovered or terminal); refusing to run a child against a stale durable row`
+      );
     }
   }
 
@@ -804,10 +1207,9 @@ export class AsyncJobManager {
 
   /**
    * Cross-LLM validation receipts (Phase 0): the validation-run persistence
-   * surface IFF the attached store is an actually-durable, implemented backend
-   * that provides it (today SqliteJobStore). Returns null when there is no store
-   * or the store is MemoryJobStore / PostgresJobStore, so the receipt feature is
-   * gated by capability: under a non-durable backend no run row is ever written.
+   * surface IFF the attached store provides it. Returns null when there is no
+   * store or the store is MemoryJobStore, so the receipt feature is gated by
+   * capability: under a non-durable backend no run row is ever written.
    */
   getValidationRunStore(): ValidationRunStore | null {
     return this.store && isValidationRunStore(this.store) ? this.store : null;
@@ -1077,6 +1479,11 @@ export class AsyncJobManager {
       if (reused) return reused;
     }
 
+    // #139: fail-closed admission gate. A dedup reuse above is a read and is
+    // fine, but a NEW durable job must not be admitted when this instance cannot
+    // prove its own liveness (registration failed or sustained heartbeat loss).
+    this.assertDurableAdmission(provider.name);
+
     const id = randomUUID();
     const startedAt = new Date().toISOString();
     const abort = new AbortController();
@@ -1144,11 +1551,21 @@ export class AsyncJobManager {
         return;
       }
       job.status = "running";
+      // #139: flip the durable row queued -> running (http jobs have no pid).
+      // Best-effort here: the row already exists (recordStart) and the lease
+      // keeps it alive; an http row that fails to mark-running still carries a
+      // valid lease, and finalizeHttpJob's recordComplete lands via the guarded
+      // WHERE. The fail-closed contract applies to process launches (a spawned
+      // pid running against a stale durable row); http has no such divergence.
+      this.markRunningDurable(job, null);
       // Fire the request; settle on the shared terminal helpers. No idle/stall/
-      // process-group timers are armed (those are pid-based).
-      runApiRequest(provider, apiRequest, this.logger, { signal: abort.signal })
+      // process-group timers are armed (those are pid-based). #139: track the
+      // settle promise so dispose() can await an in-flight http finalize (and
+      // its terminal recordComplete) before deregistering.
+      const settle = runApiRequest(provider, apiRequest, this.logger, { signal: abort.signal })
         .then(result => this.finalizeHttpJob(job, result, null))
         .catch(error => this.finalizeHttpJob(job, null, error as Error));
+      this.trackPendingWrite(settle);
     };
 
     const acq = this.limiter.acquire(
@@ -1164,20 +1581,22 @@ export class AsyncJobManager {
       );
     }
 
-    this.safeStoreCall("recordStart", () =>
-      this.store!.recordStart({
-        id,
-        correlationId,
-        requestKey,
-        cli: provider.name,
-        args: [],
-        startedAt,
-        pid: null,
-        ownerPrincipal,
-        transport: "http",
-        payloadJson,
-      })
-    );
+    // #139: durable recordStart is fail-closed. If the durable row cannot be
+    // written, the request fails and the acquired slot / queued entry is
+    // released so nothing untracked can later run.
+    this.recordStartOrFailClosed(job, acq, {
+      id,
+      correlationId,
+      requestKey,
+      cli: provider.name,
+      args: [],
+      startedAt,
+      pid: null,
+      ownerPrincipal,
+      ownerInstance: this.instanceId,
+      transport: "http",
+      payloadJson,
+    });
     if (writeFlightStart && flightRecorderEntry) {
       try {
         this.flightRecorder.logStart({
@@ -1334,6 +1753,14 @@ export class AsyncJobManager {
       ? (overrideErrorMessage ?? job.error ?? job.stderr ?? `Exit code ${exitCode}`)
       : undefined;
 
+    // Phase 7: persist the provider-minted session id + stop reason so a
+    // deferred/async job stays resumable. Process jobs parse them from stdout;
+    // http jobs carry the continuation handle in apiResponseId instead.
+    const providerMeta =
+      finalStatus === "completed" && job.transport === "process"
+        ? extractProviderOutputMetadata(job.cli, job.stdout, job.outputFormat)
+        : undefined;
+
     try {
       this.flightRecorder.logComplete(job.correlationId, {
         response,
@@ -1355,6 +1782,8 @@ export class AsyncJobManager {
         cacheReadTokens: usage.cacheReadTokens,
         cacheCreationTokens: usage.cacheCreationTokens,
         costUsd: usage.costUsd,
+        providerSessionId: providerMeta?.sessionId,
+        stopReason: providerMeta?.stopReason,
       });
       // Only mark complete on successful write so a thrown logComplete
       // can be retried by the next terminal callback.
@@ -1514,7 +1943,10 @@ export class AsyncJobManager {
       abort: null,
       httpStatus: row.httpStatus,
       payloadJson: row.payloadJson,
-      exited: row.status !== "running",
+      // #139: a durable 'queued' row is not yet launched, so it has NOT exited
+      // (regression against `exited = status !== "running"`, which would have
+      // marked a durably-queued row exited).
+      exited: row.status !== "running" && row.status !== "queued",
       metricsRecorded: true,
       outputFormat: row.outputFormat ?? undefined,
       compressResponse: row.compressResponse ?? null,
@@ -1615,6 +2047,9 @@ export class AsyncJobManager {
       if (reused) return reused;
     }
 
+    // #139: fail-closed admission gate (see startHttpJob).
+    this.assertDurableAdmission(cli);
+
     const id = randomUUID();
     const startedAt = new Date().toISOString();
 
@@ -1709,22 +2144,21 @@ export class AsyncJobManager {
     }
 
     // Admitted (running or queued): record ONE store row + optional logStart.
-    // pid is null here (unknown until spawn); it is lifecycle-irrelevant (all
-    // pid-based checks use the in-memory job.process handle set at launch).
-    this.safeStoreCall("recordStart", () =>
-      this.store!.recordStart({
-        id,
-        correlationId,
-        requestKey,
-        cli,
-        args: [...args],
-        outputFormat,
-        compressResponse,
-        startedAt,
-        pid: null,
-        ownerPrincipal,
-      })
-    );
+    // pid is null here (unknown until spawn); markRunning stamps the real pid at
+    // launch. #139: durable recordStart is fail-closed (see recordStartOrFailClosed).
+    this.recordStartOrFailClosed(job, acq, {
+      id,
+      correlationId,
+      requestKey,
+      cli,
+      args: [...args],
+      outputFormat,
+      compressResponse,
+      startedAt,
+      pid: null,
+      ownerPrincipal,
+      ownerInstance: this.instanceId,
+    });
     // Slice 1.5: only opt-in callers (pure async handlers) write logStart
     // here. The sync-deferred path passes writeFlightStart=false because
     // the upstream sync handler already wrote a logStart row keyed on the
@@ -1788,6 +2222,29 @@ export class AsyncJobManager {
       env: { ...baseEnv, ...(extraEnv ?? {}) },
     });
     job.process = child;
+    // #139: flip the durable row queued -> running and stamp the REAL child pid
+    // (needed by the advisory kill(pid,0) sweep guard). Fail-closed: if the
+    // durable transition fails we must not leave a spawned child running against
+    // a stale durable 'queued' row (the sweep would treat it as never-launched).
+    // Kill the child and rethrow so the launch() caller terminalizes the job and
+    // releases the permit.
+    try {
+      this.markRunningDurable(job, child.pid ?? null, true);
+    } catch (err) {
+      try {
+        killProcessGroup(child, "SIGKILL");
+      } catch {
+        /* best effort */
+      }
+      if (child.pid) {
+        try {
+          unregisterProcessGroup(child.pid);
+        } catch {
+          /* best effort */
+        }
+      }
+      throw err;
+    }
     if (stdin !== undefined && child.stdin) {
       try {
         child.stdin.write(stdin);
@@ -1965,12 +2422,22 @@ export class AsyncJobManager {
     const stdout = truncateText(job.stdout, maxChars);
     const stderr = truncateText(job.stderr, maxChars);
 
+    // Phase 7: parse provider session id + stop reason from a completed process
+    // job's stdout so the poll result carries what a resume needs. Parsed from
+    // the FULL (untruncated) stdout, not the display slice above.
+    const providerMeta =
+      job.transport === "process" && job.status === "completed"
+        ? extractProviderOutputMetadata(job.cli, job.stdout, job.outputFormat)
+        : undefined;
+
     return {
       ...this.snapshot(job),
       stdout: stdout.text,
       stderr: stderr.text,
       stdoutTruncated: stdout.truncated,
       stderrTruncated: stderr.truncated,
+      ...(providerMeta?.sessionId ? { providerSessionId: providerMeta.sessionId } : {}),
+      ...(providerMeta?.stopReason ? { stopReason: providerMeta.stopReason } : {}),
       // Slice 1: structured http telemetry (in-memory http jobs only).
       ...(job.transport === "http"
         ? {

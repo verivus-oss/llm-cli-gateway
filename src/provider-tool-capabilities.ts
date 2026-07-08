@@ -4,11 +4,14 @@ import path from "path";
 import { parse as parseToml } from "smol-toml";
 import { CLAUDE_MCP_SERVER_NAMES } from "./claude-mcp-config.js";
 import { getAvailableCliInfo, type CliInfo } from "./model-registry.js";
-import { CLI_TYPES, type CliType } from "./session-manager.js";
+// Provider identity (the CLI provider list + CliType) is imported from the
+// provider definition registry, not owned here. See src/provider-definitions.ts.
+import { CLI_TYPES, getProviderDefinition, type CliType } from "./provider-definitions.js";
 import {
   enabledApiProviders,
   isXaiProviderEnabled,
   loadProvidersConfig,
+  type AcpConfig,
   type ApiProviderRuntime,
   type ProvidersConfig,
 } from "./config.js";
@@ -30,7 +33,7 @@ export interface ProviderToolControl {
 
 /**
  * Providers with static capability metadata baked into this module
- * (`TOOL_CONTROLS`, `ACP_CAPABILITIES`, `ACP_CONTRACT.providers`). Closed on
+ * (`TOOL_CONTROLS`, `ACP_RESIDUAL`, `ACP_CONTRACT.providers`). Closed on
  * purpose so those total maps stay exhaustive and capability tests can assert
  * the exact classification of each provider.
  */
@@ -126,8 +129,12 @@ export interface ProviderAcpCapability {
   entrypoint: { command: string; args: string[] } | null;
   /**
    * Whether ACP runtime routing is currently enabled for this provider. This is
-   * static phase-0 capability metadata; runtime routing stays disabled until a
-   * later rollout phase explicitly enables it behind config gates.
+   * NOT a static fact: it is resolved from the operator's gateway `[acp]` config
+   * at read time and mirrors the live runtime gate (`src/acp/runtime.ts`) exactly
+   * (`[acp].enabled` AND the provider's `enabled` AND `runtime_enabled`). A
+   * provider with no native ACP entrypoint is never runtime-enabled. When no
+   * resolved config is available it defaults to the safe value (off) and a caveat
+   * records that the value is the default rather than a config-confirmed state.
    */
   runtimeEnabled: boolean;
   /** Whether a read-only initialize + session/new smoke is supported. */
@@ -226,12 +233,13 @@ export const ACP_CONTRACT: AcpContractMetadata = {
   providers: {
     mistral: {
       classification: "native_candidate",
-      summary: "Mistral Vibe exposes native ACP via vibe-acp; first runtime pilot candidate.",
+      summary:
+        "Mistral Vibe exposes native ACP via vibe-acp; runtime routing is live but config-gated.",
     },
     grok: {
       classification: "native_candidate",
       summary:
-        "xAI Grok CLI exposes native ACP via grok agent stdio; second runtime pilot candidate.",
+        "xAI Grok CLI exposes native ACP via grok agent stdio; runtime routing is live but config-gated.",
     },
     codex: {
       classification: "adapter_mediated_deferred",
@@ -245,7 +253,7 @@ export const ACP_CONTRACT: AcpContractMetadata = {
     },
     gemini: {
       classification: "absent_watchlist",
-      summary: "Google Antigravity agy 1.0.13 has no ACP surface; watchlist item only.",
+      summary: "Google Antigravity agy 1.0.14 has no ACP surface; watchlist item only.",
     },
     grok_api: {
       classification: "absent_watchlist",
@@ -254,7 +262,7 @@ export const ACP_CONTRACT: AcpContractMetadata = {
     devin: {
       classification: "native_candidate",
       summary:
-        "Cognition Devin CLI exposes a native ACP server via `devin acp` (stdio); Slice D1 initialize + session/new smoke passed (protocolVersion 1, third runtime pilot). Runtime routing stays config-gated.",
+        "Cognition Devin CLI exposes a native ACP server via `devin acp` (stdio); Slice D1 initialize + session/new smoke passed (protocolVersion 1). Runtime routing is live but config-gated.",
     },
     cursor: {
       classification: "native_candidate",
@@ -316,6 +324,12 @@ export interface ProviderCapabilityQuery {
    * helpers load the default config for backwards compatibility.
    */
   providersConfig?: ProvidersConfig;
+  /**
+   * Resolved gateway ACP config for this runtime. Drives the config-derived
+   * `acp.runtimeEnabled` for native providers. When omitted, `runtimeEnabled`
+   * defaults to off (safe) and is labelled as the default in the caveats.
+   */
+  acpConfig?: AcpConfig;
 }
 
 export type ProviderToolCapabilitiesMap = Partial<
@@ -340,6 +354,7 @@ interface NormalizedProviderCapabilityQuery {
   includePaths: boolean;
   refresh: boolean;
   providersConfig?: ProvidersConfig;
+  acpConfig?: AcpConfig;
 }
 
 interface ProviderCapabilityStaticDefinition {
@@ -354,132 +369,191 @@ interface ProviderCapabilityStaticDefinition {
 const ACP_DOCS_REFERENCE = "docs/plans/first-class-acp-gateway-extension.dag.toml";
 
 /**
- * Static, phase-0 ACP capability metadata per provider. Sourced from the ACP
- * extension provider_matrix. `runtimeEnabled` is false for every provider here:
- * ACP runtime routing is gated off until a later rollout phase enables it.
- * Entrypoints are stored only as executable + argv arrays (no shell strings).
+ * Config-gated ACP runtime caveat. Native providers can route `transport:"acp"`
+ * only when the operator turns on all three gates (mirrors src/acp/runtime.ts).
  */
-const ACP_CAPABILITIES: Record<KnownProviderCapabilityId, ProviderAcpCapability> = {
+const ACP_RUNTIME_GATE_CAVEAT =
+  "Native ACP runtime routing is config-gated: it is live only when `[acp].enabled` " +
+  "plus this provider's `enabled` and `runtime_enabled` are all set; otherwise " +
+  'transport:"acp" requests fail closed and default requests use the CLI transport.';
+
+/**
+ * Per-provider ACP facts that are genuinely NOT modelled in the provider
+ * registry: the read-only smoke assessment (`smokeSupported`/`smokeStatus`), the
+ * closed-taxonomy `status`, and the human caveats. Everything else on the
+ * emitted {@link ProviderAcpCapability} is DERIVED, not duplicated:
+ *   - `entrypoint` + `targetVersion` come from `provider-definitions.ts`
+ *     (`getProviderDefinition(id).acp` / `.upstreamContract`).
+ *   - `mediation` is projected from the frozen {@link ACP_CONTRACT} classification.
+ *   - `runtimeEnabled` is resolved from the gateway `[acp]` config at read time.
+ *   - `docs` is the shared reference.
+ * See {@link buildAcpCapability}.
+ */
+interface AcpResidualFacts {
+  status: ProviderAcpStatus;
+  smokeSupported: boolean;
+  smokeStatus: ProviderAcpSmokeStatus;
+  caveats: string[];
+}
+
+const ACP_RESIDUAL: Record<KnownProviderCapabilityId, AcpResidualFacts> = {
   mistral: {
     status: "native_smoke_passed",
-    mediation: "native",
-    targetVersion: "vibe 2.17.1",
-    entrypoint: { command: "vibe-acp", args: [] },
-    runtimeEnabled: false,
     smokeSupported: true,
     smokeStatus: "passed",
-    caveats: [
-      "Native ACP via the provider-scoped vibe-acp executable; first runtime pilot.",
-      "Runtime routing stays disabled until ACP is enabled in gateway config.",
-    ],
-    docs: ACP_DOCS_REFERENCE,
+    caveats: ["Native ACP via the provider-scoped vibe-acp executable.", ACP_RUNTIME_GATE_CAVEAT],
   },
   grok: {
     status: "native_smoke_passed",
-    mediation: "native",
-    targetVersion: "grok 0.2.73 (9ff14c43bb)",
-    entrypoint: { command: "grok", args: ["agent", "stdio"] },
-    runtimeEnabled: false,
     smokeSupported: true,
     smokeStatus: "passed",
     caveats: [
-      "Native ACP via grok agent stdio; second runtime pilot.",
+      "Native ACP via grok agent stdio.",
       "Credential lookup is owned by the installed CLI; empty-env smoke is not expected to pass.",
-      "Runtime routing stays disabled until ACP is enabled in gateway config.",
+      ACP_RUNTIME_GATE_CAVEAT,
     ],
-    docs: ACP_DOCS_REFERENCE,
   },
   codex: {
     status: "adapter_mediated_deferred",
-    mediation: "adapter_mediated",
-    targetVersion: "codex-cli 0.142.4",
-    entrypoint: null,
-    runtimeEnabled: false,
     smokeSupported: false,
     smokeStatus: "unsupported",
     caveats: [
       "No native ACP entrypoint at the target version; ACP would be adapter-mediated.",
       "Adapter support requires a separate threat model and is never labelled native gateway ACP support.",
     ],
-    docs: ACP_DOCS_REFERENCE,
   },
   claude: {
     status: "adapter_mediated_deferred",
-    mediation: "adapter_mediated",
-    targetVersion: "claude 2.1.195",
-    entrypoint: null,
-    runtimeEnabled: false,
     smokeSupported: false,
     smokeStatus: "unsupported",
     caveats: [
       "No native Claude Code CLI ACP entrypoint at the target version; ACP would be adapter-mediated.",
       "Adapter ownership, permission bridging, and install story must be specified before runtime support.",
     ],
-    docs: ACP_DOCS_REFERENCE,
   },
   gemini: {
     status: "absent_watchlist",
-    mediation: "none",
-    targetVersion: "agy 1.0.13",
-    entrypoint: null,
-    runtimeEnabled: false,
     smokeSupported: false,
     smokeStatus: "unsupported",
     caveats: [
-      "Antigravity agy 1.0.13 has no ACP flag or subcommand.",
+      "Antigravity agy 1.0.14 has no ACP flag or subcommand.",
       "Legacy Gemini CLI ACP evidence does not transfer to agy; kept on the upstream drift watchlist.",
     ],
-    docs: ACP_DOCS_REFERENCE,
   },
   grok_api: {
     status: "not_applicable",
-    mediation: "none",
-    targetVersion: "xAI Responses API",
-    entrypoint: null,
-    runtimeEnabled: false,
     smokeSupported: false,
     smokeStatus: "unsupported",
     caveats: ["ACP is a CLI-stdio transport; the HTTP API provider has no ACP surface."],
-    docs: ACP_DOCS_REFERENCE,
   },
   devin: {
     status: "native_smoke_passed",
-    mediation: "native",
-    targetVersion: "devin 2026.8.18 (16737566)",
-    entrypoint: { command: "devin", args: ["acp"] },
-    runtimeEnabled: false,
     smokeSupported: true,
     smokeStatus: "passed",
     caveats: [
       'Native ACP via `devin acp` (stdio JSON-RPC); Slice D1 initialize + session/new smoke passed (protocolVersion 1, agent "Affogato").',
       "Credentials come from `devin auth login` or WINDSURF_API_KEY; empty-env smoke is not expected to pass.",
-      "Runtime routing stays disabled until ACP is enabled in gateway config.",
+      ACP_RUNTIME_GATE_CAVEAT,
     ],
-    docs: ACP_DOCS_REFERENCE,
   },
   cursor: {
     status: "native_smoke_passed",
-    mediation: "native",
-    targetVersion: "cursor-agent 2026.06.29-2ad2186",
-    entrypoint: { command: "cursor-agent", args: ["acp"] },
-    runtimeEnabled: false,
     smokeSupported: true,
     smokeStatus: "passed",
     caveats: [
-      "Native ACP via hidden `cursor-agent acp` stdio JSON-RPC entrypoint; manual initialize + session/new smoke passed locally (protocolVersion 1, session created; no agentInfo returned).",
-      "Runtime routing stays disabled until ACP is enabled in gateway config.",
+      "Native ACP via the companion-owned hidden `cursor-agent acp` stdio JSON-RPC entrypoint; manual initialize + session/new smoke passed locally (protocolVersion 1, session created; no agentInfo returned).",
+      ACP_RUNTIME_GATE_CAVEAT,
     ],
-    docs: ACP_DOCS_REFERENCE,
   },
 };
 
-function cloneAcpCapability(acp: ProviderAcpCapability): ProviderAcpCapability {
+/**
+ * Project the native/adapter/none mediation from the frozen ACP contract, the
+ * single source for the three-way distinction (the provider registry's
+ * classification is a binary native/none and cannot tell adapter-mediated apart
+ * from absent). Adapter-backed providers are never `native`.
+ */
+function acpMediationFor(cli: KnownProviderCapabilityId): ProviderAcpMediation {
+  switch (ACP_CONTRACT.providers[cli].classification) {
+    case "native_candidate":
+      return "native";
+    case "adapter_mediated_deferred":
+      return "adapter_mediated";
+    case "absent_watchlist":
+      return "none";
+  }
+}
+
+/**
+ * Source the ACP `entrypoint` and `targetVersion` from the provider registry so
+ * they cannot drift from the single source of truth. `grok_api` is an HTTP API
+ * provider (not a spawnable CLI in the registry), so its facts stay local.
+ */
+function acpRegistryFacts(cli: KnownProviderCapabilityId): {
+  entrypoint: { command: string; args: string[] } | null;
+  targetVersion: string;
+} {
+  if (cli === "grok_api") {
+    return { entrypoint: null, targetVersion: "xAI Responses API" };
+  }
+  const def = getProviderDefinition(cli);
   return {
-    ...acp,
-    entrypoint: acp.entrypoint
-      ? { command: acp.entrypoint.command, args: [...acp.entrypoint.args] }
+    entrypoint: def.acp.entrypoint
+      ? { command: def.acp.entrypoint.command, args: [...def.acp.entrypoint.args] }
       : null,
-    caveats: [...acp.caveats],
+    targetVersion: def.upstreamContract.targetVersion,
+  };
+}
+
+/**
+ * Resolve whether native ACP runtime routing is currently enabled for a provider
+ * from the operator's gateway `[acp]` config. Mirrors the runtime gate in
+ * `src/acp/runtime.ts` EXACTLY: live only when `[acp].enabled` AND the provider
+ * block's `enabled` AND `runtime_enabled` are all set. A non-native provider is
+ * never runtime-enabled (even if an operator adds a stray config block), and an
+ * unavailable config yields the safe default (off).
+ */
+function resolveAcpRuntimeEnabled(
+  cli: KnownProviderCapabilityId,
+  mediation: ProviderAcpMediation,
+  acpConfig: AcpConfig | null | undefined
+): boolean {
+  if (mediation !== "native") return false;
+  if (!acpConfig?.enabled) return false;
+  const providerConfig = acpConfig.providers[cli];
+  return providerConfig?.enabled === true && providerConfig.runtimeEnabled === true;
+}
+
+/**
+ * Build the ACP capability block for one provider. Deep-fresh (no shared arrays)
+ * so callers cannot mutate cached state. `runtimeEnabled` reflects the resolved
+ * gateway config; when no config was threaded in, native providers gain a caveat
+ * marking the value as the safe default rather than a config-confirmed state.
+ */
+function buildAcpCapability(
+  cli: KnownProviderCapabilityId,
+  acpConfig: AcpConfig | null | undefined
+): ProviderAcpCapability {
+  const residual = ACP_RESIDUAL[cli];
+  const mediation = acpMediationFor(cli);
+  const { entrypoint, targetVersion } = acpRegistryFacts(cli);
+  const runtimeEnabled = resolveAcpRuntimeEnabled(cli, mediation, acpConfig);
+  const caveats = [...residual.caveats];
+  if (mediation === "native" && (acpConfig === null || acpConfig === undefined)) {
+    caveats.push(
+      "runtimeEnabled shows the safe default (off): the resolved gateway [acp] config was not available to this capability read."
+    );
+  }
+  return {
+    status: residual.status,
+    mediation,
+    targetVersion,
+    entrypoint,
+    runtimeEnabled,
+    smokeSupported: residual.smokeSupported,
+    smokeStatus: residual.smokeStatus,
+    caveats,
+    docs: ACP_DOCS_REFERENCE,
   };
 }
 
@@ -1374,7 +1448,7 @@ function buildOneProviderToolCapabilities(
     modelInfo: getModelInfo(cli, query),
     summary: definition.summary,
     acpContract: { ...ACP_CONTRACT.providers[cli] },
-    acp: cloneAcpCapability(ACP_CAPABILITIES[cli]),
+    acp: buildAcpCapability(cli, query.acpConfig),
     controls: cloneControls(definition.controls),
     features,
     discoveredSkills,
@@ -1688,6 +1762,7 @@ function normalizeQuery(
     includePaths: query.includePaths ?? false,
     refresh: query.refresh ?? false,
     providersConfig: query.providersConfig,
+    acpConfig: query.acpConfig,
   };
 }
 
@@ -1702,7 +1777,28 @@ function capabilityCacheKey(
     includeUnsupported: query.includeUnsupported,
     includePaths: query.includePaths,
     providersConfig: query.providersConfig ? providerConfigCacheKey(query.providersConfig) : null,
+    acpConfig: query.acpConfig ? acpConfigCacheKey(query.acpConfig) : null,
   });
+}
+
+/**
+ * Cache fingerprint for the ACP config: only the gates that affect
+ * `acp.runtimeEnabled` (global `enabled` plus each provider block's
+ * `enabled`/`runtimeEnabled`), so a config change that flips runtime routing
+ * invalidates the cached capability record.
+ */
+function acpConfigCacheKey(config: AcpConfig): unknown {
+  return {
+    enabled: config.enabled,
+    providers: Object.fromEntries(
+      Object.entries(config.providers)
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([name, provider]) => [
+          name,
+          { enabled: provider.enabled, runtimeEnabled: provider.runtimeEnabled },
+        ])
+    ),
+  };
 }
 
 function providerConfigCacheKey(config: ProvidersConfig): unknown {

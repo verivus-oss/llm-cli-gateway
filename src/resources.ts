@@ -1,4 +1,9 @@
-import { ISessionManager, type Session } from "./session-manager.js";
+import {
+  ISessionManager,
+  callerIsRemote,
+  remoteSafeSession,
+  type Session,
+} from "./session-manager.js";
 import { CLI_TYPES, PROVIDER_TYPES, type CliType, type ProviderType } from "./session-manager.js";
 import { getRequestContext, principalCanAccess, resolveOwnerPrincipal } from "./request-context.js";
 import { PerformanceMetrics } from "./metrics.js";
@@ -33,6 +38,22 @@ import {
   providerCapabilityIds,
   type ProviderCapabilityId,
 } from "./provider-tool-capabilities.js";
+import {
+  generateProviderAcpDescriptors,
+  generateResourceDescriptors,
+  parseModelsResourceUri,
+  parseProviderAcpResourceUri,
+  parseSessionsResourceUri,
+} from "./provider-surface-generator.js";
+import { getProviderDefinition } from "./provider-definitions.js";
+import { buildProviderAcpCapabilityRecord } from "./provider-acp-capabilities.js";
+import type { AcpConfig } from "./config.js";
+import {
+  buildProviderDiscoveredView,
+  peekProviderCapabilitySet,
+  type ProviderDiscoveredView,
+  type ResolvedProviderCapability,
+} from "./provider-capability-resolver.js";
 
 export interface ResourceDefinition {
   uri: string;
@@ -70,7 +91,17 @@ export class ResourceProvider {
     // [providers.<name>] (kind:"api") providers gain `models://<name>` and (for
     // continuity-tracked kinds) `sessions://<name>` resources. Null/absent keeps
     // the resource set byte-identical to the CLI-only surface.
-    private providers: ProvidersConfig | null = null
+    private providers: ProvidersConfig | null = null,
+    // Phase-3: memo-only capability peek used to enrich models://<cli> with the
+    // live/cached discovered listing. Defaults to the process-lifetime resolver
+    // memo (never spawns on the read path); tests inject a fake that returns a
+    // canned resolution so unit tests never spawn real CLIs.
+    private capabilityPeek: (
+      id: CliType
+    ) => ResolvedProviderCapability | null = peekProviderCapabilitySet,
+    // Phase-5: resolved ACP config. Drives the host-service policy surfaced in
+    // provider-acp://<provider> records. Null keeps the deny-by-default posture.
+    private acpConfig: AcpConfig | null = null
   ) {}
 
   /** Read-only flight-recorder accessor for cache-state resource readers. */
@@ -144,61 +175,23 @@ export class ResourceProvider {
           lastModified: new Date().toISOString(),
         },
       },
-      {
-        uri: "sessions://claude",
-        name: "Claude Sessions",
-        title: "🤖 Claude Sessions",
-        description: "List of Claude conversation sessions",
-        mimeType: "application/json",
-        annotations: {
-          audience: ["user", "assistant"],
-          priority: 0.6,
-        },
-      },
-      {
-        uri: "sessions://codex",
-        name: "Codex Sessions",
-        title: "💻 Codex Sessions",
-        description: "List of Codex conversation sessions",
-        mimeType: "application/json",
-        annotations: {
-          audience: ["user", "assistant"],
-          priority: 0.6,
-        },
-      },
-      {
-        uri: "sessions://gemini",
-        name: "Gemini Sessions",
-        title: "✨ Gemini Sessions",
-        description: "List of Gemini conversation sessions",
-        mimeType: "application/json",
-        annotations: {
-          audience: ["user", "assistant"],
-          priority: 0.6,
-        },
-      },
-      {
-        uri: "sessions://grok",
-        name: "Grok Sessions",
-        title: "⚡ Grok Sessions",
-        description: "List of Grok conversation sessions",
-        mimeType: "application/json",
-        annotations: {
-          audience: ["user", "assistant"],
-          priority: 0.6,
-        },
-      },
-      {
-        uri: "sessions://mistral",
-        name: "Mistral Sessions",
-        title: "🌬 Mistral Sessions",
-        description: "List of Mistral Vibe conversation sessions",
-        mimeType: "application/json",
-        annotations: {
-          audience: ["user", "assistant"],
-          priority: 0.6,
-        },
-      },
+      // Per-provider sessions:// resources, generated from the provider
+      // definition registry (via generateResourceDescriptors). Every CLI
+      // provider that exposes a sessions resource gets one row, including devin
+      // and cursor. No provider name is hand-spelled here.
+      ...generateResourceDescriptors()
+        .filter(descriptor => descriptor.exposesSessionsResource)
+        .map(descriptor => ({
+          uri: descriptor.sessionsUri,
+          name: `${descriptor.sessionLabel}s`,
+          title: `${descriptor.icon} ${descriptor.sessionLabel}s`,
+          description: `List of ${descriptor.displayName} conversation sessions`,
+          mimeType: "application/json",
+          annotations: {
+            audience: ["user", "assistant"] as ("user" | "assistant")[],
+            priority: 0.6,
+          },
+        })),
       // Slice 6: sessions:// for enabled API providers whose kind is
       // continuity-tracked. Empty (byte-identical) when no API providers are
       // enabled or none of their kinds support continuity.
@@ -213,61 +206,23 @@ export class ResourceProvider {
           priority: 0.6,
         },
       })),
-      {
-        uri: "models://claude",
-        name: "Claude Models",
-        title: "🧠 Claude Models & Capabilities",
-        description: "Available Claude models and their capabilities",
-        mimeType: "application/json",
-        annotations: {
-          audience: ["user", "assistant"],
-          priority: 0.8,
-        },
-      },
-      {
-        uri: "models://codex",
-        name: "Codex Models",
-        title: "🔧 Codex Models & Capabilities",
-        description: "Available Codex models and their capabilities",
-        mimeType: "application/json",
-        annotations: {
-          audience: ["user", "assistant"],
-          priority: 0.8,
-        },
-      },
-      {
-        uri: "models://gemini",
-        name: "Gemini Models",
-        title: "🌟 Gemini Models & Capabilities",
-        description: "Available Gemini models and their capabilities",
-        mimeType: "application/json",
-        annotations: {
-          audience: ["user", "assistant"],
-          priority: 0.8,
-        },
-      },
-      {
-        uri: "models://grok",
-        name: "Grok Models",
-        title: "⚡ Grok Models & Capabilities",
-        description: "Available Grok models and their capabilities",
-        mimeType: "application/json",
-        annotations: {
-          audience: ["user", "assistant"],
-          priority: 0.8,
-        },
-      },
-      {
-        uri: "models://mistral",
-        name: "Mistral Models",
-        title: "🌬 Mistral Models & Capabilities",
-        description: "Available Mistral Vibe models and their capabilities",
-        mimeType: "application/json",
-        annotations: {
-          audience: ["user", "assistant"],
-          priority: 0.8,
-        },
-      },
+      // Per-provider models:// resources, generated from the provider
+      // definition registry (via generateResourceDescriptors). Every CLI
+      // provider that exposes a models resource gets one row, including devin
+      // and cursor. No provider name is hand-spelled here.
+      ...generateResourceDescriptors()
+        .filter(descriptor => descriptor.exposesModelsResource)
+        .map(descriptor => ({
+          uri: descriptor.modelsUri,
+          name: `${descriptor.displayName} Models`,
+          title: `${descriptor.icon} ${descriptor.displayName} Models & Capabilities`,
+          description: `Available ${descriptor.displayName} models and their capabilities`,
+          mimeType: "application/json",
+          annotations: {
+            audience: ["user", "assistant"] as ("user" | "assistant")[],
+            priority: 0.8,
+          },
+        })),
       // Slice 6: models:// for every enabled API provider. Empty
       // (byte-identical) when no API providers are enabled.
       ...this.apiRuntimes().map(rt => ({
@@ -325,6 +280,21 @@ export class ResourceProvider {
           priority: 0.8,
         },
       })),
+      // Per-provider provider-acp:// resources for every NATIVE-ACP provider,
+      // generated from the provider definition registry (no hand-spelled names).
+      // Non-native providers (claude/codex/gemini) are intentionally not listed
+      // here, but their non-native record is still readable via readResource.
+      ...generateProviderAcpDescriptors().map(descriptor => ({
+        uri: descriptor.acpUri,
+        name: `${descriptor.displayName} ACP Capabilities`,
+        title: `${descriptor.icon} ${descriptor.displayName} ACP Capabilities`,
+        description: `Native ACP entrypoint, negotiated capabilities, supported session methods, and host-service policy for ${descriptor.displayName}`,
+        mimeType: "application/json",
+        annotations: {
+          audience: ["user", "assistant"] as ("user" | "assistant")[],
+          priority: 0.7,
+        },
+      })),
     ];
   }
 
@@ -337,7 +307,10 @@ export class ResourceProvider {
    */
   private ownedSessions(sessions: Session[]): Session[] {
     const caller = resolveOwnerPrincipal(getRequestContext());
-    return sessions.filter(s => principalCanAccess(s.ownerPrincipal, caller));
+    const owned = sessions.filter(s => principalCanAccess(s.ownerPrincipal, caller));
+    // Remote callers must not learn local absolute paths via session metadata
+    // (worktreePath/workspaceRoot); redact them for the remote-facing resources.
+    return callerIsRemote() ? owned.map(remoteSafeSession) : owned;
   }
 
   /** F3b: the active-session id for a provider, or null if the caller may not see it. */
@@ -379,17 +352,23 @@ export class ResourceProvider {
       };
     }
 
-    if (uri === "sessions://claude") {
-      const sessions = this.ownedSessions(await this.sessionManager.listSessions("claude"));
+    // Per-provider sessions://<cli> resource, dispatched generically from the
+    // provider definition registry (parseSessionsResourceUri). Owner-scoping is
+    // preserved: ownedSessions/ownedActiveId filter to the caller's principal.
+    // Placed before the API-provider handler so a config-guarded name collision
+    // resolves to the CLI, mirroring the models:// ordering.
+    const sessionProvider = parseSessionsResourceUri(uri);
+    if (sessionProvider) {
+      const sessions = this.ownedSessions(await this.sessionManager.listSessions(sessionProvider));
       return {
         uri,
         mimeType: "application/json",
         text: JSON.stringify(
           {
-            cli: "claude",
+            cli: sessionProvider,
             total: sessions.length,
             sessions,
-            activeSession: await this.ownedActiveId("claude"),
+            activeSession: await this.ownedActiveId(sessionProvider),
           },
           null,
           2
@@ -397,121 +376,27 @@ export class ResourceProvider {
       };
     }
 
-    if (uri === "sessions://codex") {
-      const sessions = this.ownedSessions(await this.sessionManager.listSessions("codex"));
-      return {
-        uri,
-        mimeType: "application/json",
-        text: JSON.stringify(
-          {
-            cli: "codex",
-            total: sessions.length,
-            sessions,
-            activeSession: await this.ownedActiveId("codex"),
-          },
-          null,
-          2
-        ),
-      };
-    }
-
-    if (uri === "sessions://gemini") {
-      const sessions = this.ownedSessions(await this.sessionManager.listSessions("gemini"));
-      return {
-        uri,
-        mimeType: "application/json",
-        text: JSON.stringify(
-          {
-            cli: "gemini",
-            total: sessions.length,
-            sessions,
-            activeSession: await this.ownedActiveId("gemini"),
-          },
-          null,
-          2
-        ),
-      };
-    }
-
-    if (uri === "sessions://grok") {
-      const sessions = this.ownedSessions(await this.sessionManager.listSessions("grok"));
-      return {
-        uri,
-        mimeType: "application/json",
-        text: JSON.stringify(
-          {
-            cli: "grok",
-            total: sessions.length,
-            sessions,
-            activeSession: await this.ownedActiveId("grok"),
-          },
-          null,
-          2
-        ),
-      };
-    }
-
-    if (uri === "sessions://mistral") {
-      const sessions = this.ownedSessions(await this.sessionManager.listSessions("mistral"));
-      return {
-        uri,
-        mimeType: "application/json",
-        text: JSON.stringify(
-          {
-            cli: "mistral",
-            total: sessions.length,
-            sessions,
-            activeSession: await this.ownedActiveId("mistral"),
-          },
-          null,
-          2
-        ),
-      };
-    }
-
-    // Model capability resources
-    if (uri === "models://claude") {
+    // Per-provider models://<cli> resource, dispatched generically from the
+    // provider definition registry (parseModelsResourceUri). getAvailableCliInfo
+    // is keyed by CliType, so every provider (including devin and cursor) reads
+    // its own catalog with no hand-spelled provider name.
+    const modelProvider = parseModelsResourceUri(uri);
+    if (modelProvider) {
       const cliInfo = getAvailableCliInfo();
+      // Additive phase-3 enrichment: keep the static registry entry as the base
+      // (nothing regresses) and attach the discovered live/cached listing under
+      // `discovered` with an explicit source marker + degraded flag. Discovery is
+      // a memo-only peek here, so a read never spawns or hangs; when nothing is
+      // resolvable the view degrades to source "static-fallback" (null listing).
+      const discovered: ProviderDiscoveredView = buildProviderDiscoveredView(
+        getProviderDefinition(modelProvider),
+        cliInfo[modelProvider],
+        this.capabilityPeek
+      );
       return {
         uri,
         mimeType: "application/json",
-        text: JSON.stringify(cliInfo.claude, null, 2),
-      };
-    }
-
-    if (uri === "models://codex") {
-      const cliInfo = getAvailableCliInfo();
-      return {
-        uri,
-        mimeType: "application/json",
-        text: JSON.stringify(cliInfo.codex, null, 2),
-      };
-    }
-
-    if (uri === "models://gemini") {
-      const cliInfo = getAvailableCliInfo();
-      return {
-        uri,
-        mimeType: "application/json",
-        text: JSON.stringify(cliInfo.gemini, null, 2),
-      };
-    }
-
-    if (uri === "models://grok") {
-      const cliInfo = getAvailableCliInfo();
-      return {
-        uri,
-        mimeType: "application/json",
-        text: JSON.stringify(cliInfo.grok, null, 2),
-      };
-    }
-
-    if (uri === "models://mistral") {
-      const cliInfo = getAvailableCliInfo();
-      return {
-        uri,
-        mimeType: "application/json",
-        text: JSON.stringify(cliInfo.mistral, null, 2),
+        text: JSON.stringify({ ...cliInfo[modelProvider], discovered }, null, 2),
       };
     }
 
@@ -576,7 +461,10 @@ export class ResourceProvider {
         uri,
         mimeType: "application/json",
         text: JSON.stringify(
-          getProviderToolCapabilities({ providersConfig: this.providers ?? undefined }),
+          getProviderToolCapabilities({
+            providersConfig: this.providers ?? undefined,
+            acpConfig: this.acpConfig ?? undefined,
+          }),
           null,
           2
         ),
@@ -591,10 +479,30 @@ export class ResourceProvider {
         text: JSON.stringify(
           getOneProviderToolCapabilities(providerToolsResource.provider, {
             providersConfig: this.providers ?? undefined,
+            acpConfig: this.acpConfig ?? undefined,
           }),
           null,
           2
         ),
+      };
+    }
+
+    // Per-provider provider-acp://<cli> resource. Resolves for ANY provider id
+    // (native or non-native) so a non-native record explicitly states "no native
+    // ACP entrypoint". The discovered initialize capability set comes from the
+    // memo-only capability peek (a read NEVER spawns); absent -> static fallback.
+    const acpProvider = parseProviderAcpResourceUri(uri);
+    if (acpProvider) {
+      const resolved = this.capabilityPeek(acpProvider);
+      const record = buildProviderAcpCapabilityRecord(acpProvider, {
+        discovered: resolved?.set.acpInitialize ?? null,
+        discoveredDegraded: resolved?.degraded ?? false,
+        acpConfig: this.acpConfig,
+      });
+      return {
+        uri,
+        mimeType: "application/json",
+        text: JSON.stringify(record, null, 2),
       };
     }
 

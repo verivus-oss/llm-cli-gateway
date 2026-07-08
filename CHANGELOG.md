@@ -2,6 +2,209 @@
 
 All notable changes to the llm-cli-gateway project.
 
+## [Unreleased]
+
+## [2.15.0] - 2026-07-03
+
+### Added
+
+- **Updateable local skill packs.** Gateway startup now loads bundled skills,
+  optional `[skills].paths`, `LLM_GATEWAY_SKILLS_PATH`, and
+  `~/.llm-cli-gateway/skills` with deterministic override precedence. Skill
+  pack roots can include a `skill-pack.json` integrity manifest that pins each
+  loaded `SKILL.md` by SHA-256, allowing operators to update workflow skills
+  outside core gateway npm releases without silent network fetches.
+
+## [2.14.1] - 2026-07-03
+
+### Added
+
+- **`retrospective-walk` workflow skill.** Bundles a guided retrospective skill
+  for walking a human or agent through a diff, worktree, commit range, gateway
+  job, or episode reference with structured what/why/who analysis, comment
+  capture as evidence, machine-readable output, and validation-receipt links
+  when an existing receipt-capable validation run is available.
+
+## [2.14.0] - 2026-07-03
+
+### Fixed
+
+- **Durable instance-lease orphan recovery (#139).** The blanket
+  `markOrphanedOnStartup` sweep in the `AsyncJobManager` constructor rewrote
+  every `running` row to `orphaned`, so on a SHARED store (`backend =
+  "postgres"`) a fresh instance (especially an ephemeral stdio spawn)
+  transiently orphaned other live instances' in-flight jobs (a `running` ->
+  `orphaned` -> `completed` flap a poller can trip on). The sweep is now a
+  per-job fencing lease: each instance registers a lease and advances a
+  `jobs.lease_deadline` on every heartbeat, and the sweep orphans a
+  `queued`/`running` job only when its own `lease_deadline` has expired, never
+  because a different live instance started. Because heartbeat and sweep are
+  both `UPDATE`s on the same `jobs` rows, they serialize on the row lock
+  (Postgres READ COMMITTED) and are trivially serial under single-writer sqlite,
+  so no job whose owner heartbeated within the lease TTL is ever swept. A
+  genuinely stale-then-reviving owner self-heals to the correct terminal state
+  via the guarded `recordComplete` and a flight-recorder reconcile. The fix is
+  transport-aware (an extra `httpJobGrace` for no-pid http jobs, an advisory
+  never-vetoing `kill(pid,0)` for same-host process jobs), durable-admission is
+  fail-closed (a failed `recordStart`/`registerInstance` fails the request and
+  releases the limiter permit), and graceful shutdown drains in-flight terminal
+  writes before deregistering the lease. Additive schema (`jobs.owner_instance`,
+  `jobs.lease_deadline`, a `gateway_instances` table), auto-created on both
+  sqlite and postgres, no data migration.
+
+### Changed
+
+- **`[persistence].ownsOrphanRecovery` is deprecated (#139).** The interim gate
+  (PR #140) that let one designated `postgres` instance own the blanket startup
+  sweep is superseded by the durable lease above, which is safe to run from
+  every instance. The flag is still parsed (so existing configs do not error)
+  and now emits a one-time deprecation warning; it no longer changes behaviour
+  and will be removed in a later release. New `[persistence]` knobs tune the
+  lease: `instanceHeartbeatMs` (15000), `instanceLeaseTtlMs` (90000),
+  `httpJobGraceMs` (300000), `orphanSweepIntervalMs` (30000), `instanceGcMs`
+  (3600000), validated so `instanceLeaseTtlMs >= 2 * instanceHeartbeatMs` and
+  `httpJobGraceMs >= instanceLeaseTtlMs`.
+
+## [2.14.0-rc.1] - 2026-07-03: full-featured provider integration + security-review hardening
+
+Release candidate. Every non-Cursor provider (Claude, Codex, Gemini, Grok,
+Mistral, Devin) becomes a first-class, provider-definition-driven integration,
+and a security review of the change set is folded in. Cursor stays working via
+the shared generation and is maintenance-only.
+
+### Added
+
+- **Provider definitions as the single source of truth** (`src/provider-definitions.ts`):
+  one `ProviderDefinition` per CLI type drives request schemas, resources,
+  discovery, and capabilities, with compile-time exhaustiveness assertions and a
+  `scripts/provider-surfaces-check.mjs` ratchet wired into `npm run check`.
+- **Runtime provider capability discovery with an on-disk cache**: an injectable
+  probe runner (no shell interpolation of caller input), a cache keyed on
+  discovery checksums with a shape-driven secret scrubber and Zod-validated
+  reads, and a TTL that bounds staleness so an upgraded or moved provider CLI is
+  re-discovered instead of served stale.
+- **Registry-generated `models://` and `sessions://` resources** for every
+  provider (Devin and Cursor now first-class), plus **live model discovery**
+  wired into `models://<provider>` and `list_models` via a memoized resolver
+  with a fire-and-forget startup warm (reads never block on a spawn).
+- **Complete CLI request-field coverage** across providers, guarded by
+  upstream-contract and coverage-closure tests; interactive/admin-only flags are
+  represented as typed capability facts rather than silently dropped.
+- **Discovery-driven native ACP surface**: Grok, Mistral, and Devin route
+  natively over ACP when enabled (no masquerade), with capability-gated session
+  methods and state-mutating session ops gated behind
+  `acp.allow_mutating_session_ops`.
+- **Provider admin tools**: `provider_admin_list` / `provider_admin_run`
+  (read-only) and `provider_admin_mutate` (gated). Availability is
+  discovery-driven; mutating ops require `[admin] allow_mutating_cli_admin_ops`
+  and, for remote callers, `LLM_GATEWAY_CLI_ADMIN=1` plus the `cli:admin` OAuth
+  scope, routed through the approval manager with a fail-closed pre-spawn audit.
+- **Postgres job store** (`PostgresJobStore`): a durable async-job and
+  validation-run/receipt backend over the `pg` pool, driven through a dedicated
+  worker thread (`postgres-job-store-worker.ts`). Selectable via
+  `persistence.backend = "postgres"`; the ephemeral memory backend deliberately
+  does not implement the validation-run surface.
+- **Search-engine discoverability for the docs site**: Google Search Console
+  and Bing IndexNow submission (`npm run search:*`), plus `sitemap.xml`,
+  `robots.txt`, and `llms.txt`, alongside a marketing-site refresh.
+
+### Changed
+
+- **Unified provider output/event normalization**: a real Grok JSON parser, and
+  `stopReason`/error signals threaded across the CLI parsers and the ACP event
+  normalizer. The provider-minted session id and terminal stop reason are
+  preserved through the async job and flight recorder so a deferred job resumes
+  with the real provider session id.
+- **`provider_tool_capabilities`** now reports ACP `runtimeEnabled` from the
+  resolved config (previously hardcoded), with entrypoint/version/mediation
+  derived from the registry.
+- Docs: README provider-capability table, per-provider skills refreshed to the
+  installed CLI versions, ACP documented as sync-only for now, and the
+  `provider-acp://` resource registered on the MCP server.
+
+### Fixed
+
+- Codex and Gemini clean exits that actually carried a failed terminal event
+  now surface a warning instead of being reported as a silent empty success;
+  the ACP transport likewise flags a refusal/cancelled/truncated turn.
+- Codex surfaces the real `turn.failed` reason on a non-zero exit instead of a
+  partial agent message.
+- json-mode output parsers tolerate a stray banner line around the JSON object
+  (telemetry is no longer all-or-nothing), and the Gemini stream replaces rather
+  than doubles a consolidated non-delta final message.
+- Implausible `agy models` label lines are filtered instead of surfacing as
+  bogus models in `models://gemini`.
+
+### Security
+
+- **Remote host-path confinement.** Remote HTTP/OAuth callers can no longer hand
+  a provider CLI an arbitrary host path to read, write, or load code from. The
+  advanced path/plugin fields are rejected for remote callers (local stdio is
+  unaffected): `systemPromptFile`/`appendSystemPromptFile`/`settings`/
+  `pluginDir`/`pluginUrl`/`debugFile` (Claude), string `outputSchema`/`images`/
+  `outputLastMessage` (Codex), `promptFile`/`config`/`agentConfig`/string
+  `exportSession` (Devin), and `promptFile`/`leaderSocket`/`rules`/`agent`
+  (Grok). `workingDir`/`addDir`/`includeDirs` remain workspace-confined.
+- **Read-only provider-admin ops** now require the same remote `cli:admin` gate
+  as the mutating path, so a remote caller cannot enumerate or trigger
+  host-global provider-CLI spawns unprivileged.
+- **ACP permission bridge** never turns a single approval into a standing
+  `allow_always` grant (it selects a one-time allow, else denies).
+- **ACP subprocess reaping**: a graceful termination signal escalates to
+  SIGKILL after a grace window so a provider CLI that ignores SIGTERM is not
+  leaked as a zombie.
+- Job results scrub the provider session id from returned streams for remote
+  callers; ACP error redaction covers Google/GitHub/Slack token shapes;
+  `session_info_update` is handled as a forward-compatible unknown ACP variant.
+- CI/release: the Cloudflare Pages token is fetched from Azure Key Vault via
+  GitHub OIDC federation (no stored secret); the release tooling supports
+  prerelease cuts (a prerelease publishes under a side npm dist-tag, never
+  `latest`); typos and gitleaks allowlists cover a deliberate identifier and
+  secret-fixture test files.
+
+## [2.13.2] - 2026-07-01: remote HTTP + OAuth connector UX and hardening
+
+### Added
+
+- **`remote_http_oauth` readiness projection in `doctor --json`.** A stable,
+  ordered 8-stage decision tree (`not_started`, `missing_public_url`,
+  `endpoint_unreachable`, `oauth_disabled`, `unsafe_oauth_config`,
+  `missing_oauth_client`, `missing_workspace`, `ready`) with deterministic,
+  secret-free `next_actions`, the copy-safe connector URLs, `oauth.consent_required`,
+  and a path-free workspace summary. Validated by `setup/status.schema.json`.
+- **`llm-cli-gateway connector setup` command.** Emits a copy-safe JSON connector
+  packet (MCP URL, authorization URL, token URL, client id, workspace guidance)
+  plus a human summary, reusing the readiness projection. The deprecated no-auth
+  connector URL is omitted unless `--include-legacy-no-auth` is passed.
+- **Centralized remote URL construction (`src/remote-url.ts`).** doctor, the
+  connector packet, the CLI OAuth output, the installer, and the runtime OAuth
+  well-known metadata + `WWW-Authenticate` challenge all derive URLs from one
+  helper so they cannot drift.
+
+### Changed
+
+- **OAuth-first remote connector docs and setup UI.** The ChatGPT guide,
+  endpoint-exposure runbook, `ENDPOINT_EXPOSURE.md`, and setup UI lead with the
+  OAuth path keyed on `remote_http_oauth.stage`; the no-auth connector is
+  compatibility-only. `oauth client add` validates the redirect URI and client
+  id before writing, refuses duplicate ids, and labels copy-once secret output.
+
+### Security
+
+- **F17 hardening.** The unsafe-OAuth (public clients / `open_dev`) start gate
+  now fails closed when the gateway is publicly exposed via a public URL or
+  tunnel, not only on a non-loopback bind.
+- **No local-path disclosure to remote clients.** Remote MCP `workspace_*`
+  tools, `session_get`, `sessions://*` resources, and worktree response paths
+  are path-redacted for remote HTTP/OAuth callers (local operators keep absolute
+  paths; resume metadata is unaffected). `workspace_register_existing_repo` no
+  longer acts as a filesystem existence oracle.
+- **Installer URL redaction.** The Go installer derives OAuth/MCP URLs from a
+  clean origin and strips userinfo/query/fragment from the stored public URL, so
+  no credential-bearing URL is emitted.
+- **gitleaks allowlist** now covers the `gateway-logger` redaction test fixtures
+  (deliberate fake tokens), restoring a green secret-scan gate.
+
 ## [2.13.1] - 2026-07-01: code-scanning hardening and review-gate discipline
 
 ### Security

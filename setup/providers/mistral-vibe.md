@@ -3,10 +3,10 @@
 ## Support Status
 
 Mistral Vibe is a verified outbound validation provider via the local `vibe`
-CLI. It is not currently exposed as an inbound MCP host (Vibe is a coding
-agent, not an MCP client surface). Treat Vibe as the fifth provider that the
-gateway can call for model responses alongside Claude Code, Codex, Gemini, and
-Grok.
+CLI and a verified inbound CLI MCP client through Vibe's MCP server
+configuration. Treat inbound MCP setup and outbound validation as separate
+roles: the inbound path lets Vibe call the gateway, while the outbound path
+lets the gateway call Vibe for model responses.
 
 ## Human Instructions
 
@@ -27,7 +27,11 @@ Grok.
 4. Run `llm-cli-gateway doctor --json` and confirm:
    - `providers.mistral.cli_available` is `true`
    - `client_config.vibe_session_logging.session_logging_enabled` is `true`
-5. (Optional) Pick a non-default model by exporting `VIBE_ACTIVE_MODEL` in
+5. For inbound MCP use, add the gateway to Vibe using Vibe's current MCP
+   configuration command or generated config from
+   `llm-cli-gateway print-client-config`. Prefer generated local snippets over
+   hand-written JSON.
+6. (Optional) Pick a non-default model by exporting `VIBE_ACTIVE_MODEL` in
    the environment that runs the gateway, e.g.
    `export VIBE_ACTIVE_MODEL=mistral-medium-3.5`. Vibe has no `--model`
    flag; the gateway injects the active model via this env var.
@@ -81,12 +85,12 @@ validate this sentence with two other models: gateway setup works.
 
 ## Doctor Field Cross-Reference
 
-| Setup step | Doctor field |
-| --- | --- |
-| Vibe CLI installed | `providers.mistral.cli_available` |
-| Vibe login complete | `providers.mistral.login_present` |
-| Session continuity available | `client_config.vibe_session_logging.session_logging_enabled` |
-| Actionable fix when session logging is off | `next_actions[]` entry beginning `mistral:` |
+| Setup step                                 | Doctor field                                                 |
+| ------------------------------------------ | ------------------------------------------------------------ |
+| Vibe CLI installed                         | `providers.mistral.cli_available`                            |
+| Vibe login complete                        | `providers.mistral.login_present`                            |
+| Session continuity available               | `client_config.vibe_session_logging.session_logging_enabled` |
+| Actionable fix when session logging is off | `next_actions[]` entry beginning `mistral:`                  |
 
 ## Known Limitations
 
@@ -99,5 +103,6 @@ validate this sentence with two other models: gateway setup works.
 - Vibe accepts allow-listed tools via `--enabled-tools` but has no
   deny-tool flag; the gateway accepts `disallowedTools` in the request
   schema for caller symmetry but ignores it for Mistral.
-- Vibe is outbound-only for now. Do not configure it as an inbound MCP
-  host.
+- Keep inbound MCP setup and outbound validation separate. Vibe can call the
+  gateway as an MCP client, and the gateway can call Vibe as an outbound
+  provider, but those are independently verified paths.

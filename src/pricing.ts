@@ -51,6 +51,8 @@
  * make the pricing correct in advance so savings are no longer hard-zeroed.
  */
 
+import type { CliType } from "./provider-types.js";
+
 export interface PricePerMillion {
   inputUsd: number;
   outputUsd: number;
@@ -169,10 +171,7 @@ const ZERO: PricePerMillion = {
  * Claude Code's default model is Sonnet, so Sonnet pricing is the correct,
  * non-zero estimate. Update this table when a new model family ships.
  */
-export function getPricing(
-  cli: "claude" | "codex" | "gemini" | "grok" | "mistral",
-  model: string
-): PricePerMillion {
+export function getPricing(cli: CliType, model: string): PricePerMillion {
   const lower = model.toLowerCase();
   if (cli === "claude") {
     if (lower.includes("sonnet")) return ANTHROPIC_SONNET;
@@ -232,7 +231,7 @@ export function getPricing(
  * of fresh input. Returns 0 for zero cache reads or unknown pricing.
  */
 export function estimateCacheSavingsUsd(
-  cli: "claude" | "codex" | "gemini" | "grok" | "mistral",
+  cli: CliType,
   model: string,
   cacheReadTokens: number
 ): number {

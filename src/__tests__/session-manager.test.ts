@@ -1,5 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { FileSessionManager } from "../session-manager.js";
+import {
+  FileSessionManager,
+  remoteSafeSession,
+  callerIsRemote,
+  type Session,
+} from "../session-manager.js";
 import { runWithRequestContext } from "../request-context.js";
 import { existsSync, mkdirSync, rmSync, readFileSync, statSync } from "fs";
 import { join } from "path";
@@ -567,5 +572,95 @@ describe("U21 prepareGeminiRequest agy args ordering (Layer 9)", () => {
     // The first arg must be the --print flag, NOT the prompt itself.
     expect(prep.args[0]).not.toBe("hello world");
     expect(prep.args[0]).toBe("--print");
+  });
+});
+
+describe("remoteSafeSession + callerIsRemote", () => {
+  const baseSession: Session = {
+    id: "gw-1",
+    cli: "claude",
+    createdAt: "2026-07-01T00:00:00.000Z",
+    lastUsedAt: "2026-07-01T00:00:00.000Z",
+    metadata: {
+      model: "opus",
+      workspaceAlias: "gateway",
+      workspaceRoot: "/home/operator/src/prod",
+      worktreePath: "/home/operator/src/prod/.worktrees/abc123",
+    },
+  };
+
+  it("strips workspaceRoot and reduces worktreePath to a relative label, keeping alias", () => {
+    const safe = remoteSafeSession(baseSession);
+    expect(safe.metadata?.workspaceRoot).toBeUndefined();
+    expect(safe.metadata?.worktreePath).toBe(join(".worktrees", "abc123"));
+    expect(safe.metadata?.workspaceAlias).toBe("gateway");
+    expect(safe.metadata?.model).toBe("opus");
+    // No absolute operator path anywhere in the projection.
+    const blob = JSON.stringify(safe);
+    expect(blob).not.toContain("/home/operator");
+    // The original session object is not mutated.
+    expect(baseSession.metadata?.workspaceRoot).toBe("/home/operator/src/prod");
+  });
+
+  // BLOCKER 1 (security): the nested `metadata.acp` block leaks the operator's
+  // absolute local cwd and the provider-owned ACP session id to remote callers
+  // via `session_get` / `sessions://*`. remoteSafeSession must sanitize them in
+  // the caller-facing projection while STORAGE keeps the full values (resume
+  // needs them). Mutation that flips this red: removing the nested-acp
+  // sanitization block from remoteSafeSession (the leak returns).
+  it("sanitizes nested metadata.acp (cwd/worktreePath reduced, provider sessionId removed)", () => {
+    const acpSession: Session = {
+      id: "gw-acp-1",
+      cli: "grok",
+      createdAt: "2026-07-01T00:00:00.000Z",
+      lastUsedAt: "2026-07-01T00:00:00.000Z",
+      metadata: {
+        workspaceRoot: "/home/operator/src/prod",
+        acp: {
+          provider: "grok",
+          transport: "acp",
+          sessionId: "prov-sess-9f3c-owned-by-provider",
+          cwd: "/home/operator/src/prod/checkout",
+          worktreePath: "/home/operator/src/prod/.worktrees/abc123",
+          createdAt: "2026-07-01T00:00:00.000Z",
+          lastSeenAt: "2026-07-01T00:00:00.000Z",
+        },
+      },
+    };
+
+    const safe = remoteSafeSession(acpSession);
+    const acp = safe.metadata?.acp as Record<string, unknown>;
+    // Provider-owned ACP session id is gone from the projection.
+    expect(acp.sessionId).toBeUndefined();
+    // Absolute local paths are reduced to workspace-relative labels.
+    expect(acp.cwd).toBe("checkout");
+    expect(acp.worktreePath).toBe(join(".worktrees", "abc123"));
+    // No absolute operator path or provider session id anywhere in the blob.
+    const blob = JSON.stringify(safe);
+    expect(blob).not.toContain("/home/operator");
+    expect(blob).not.toContain("prov-sess-9f3c-owned-by-provider");
+
+    // STORAGE (the input session) is untouched, so resume still works.
+    const storedAcp = acpSession.metadata?.acp as Record<string, unknown>;
+    expect(storedAcp.sessionId).toBe("prov-sess-9f3c-owned-by-provider");
+    expect(storedAcp.cwd).toBe("/home/operator/src/prod/checkout");
+    expect(storedAcp.worktreePath).toBe("/home/operator/src/prod/.worktrees/abc123");
+  });
+
+  it("returns the session unchanged when there is no metadata", () => {
+    const s: Session = { id: "x", cli: "codex", createdAt: "t", lastUsedAt: "t" };
+    expect(remoteSafeSession(s)).toBe(s);
+  });
+
+  it("callerIsRemote reflects the ambient request transport", () => {
+    expect(callerIsRemote()).toBe(false);
+    const remote = runWithRequestContext({ authKind: "oauth", authScopes: [] }, () =>
+      callerIsRemote()
+    );
+    expect(remote).toBe(true);
+    const httpRemote = runWithRequestContext({ transport: "http", authScopes: [] }, () =>
+      callerIsRemote()
+    );
+    expect(httpRemote).toBe(true);
   });
 });

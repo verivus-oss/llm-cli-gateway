@@ -9,6 +9,15 @@ import {
   type RemoteOAuthClientConfig,
   type RemoteOAuthConfig,
 } from "./auth.js";
+import {
+  joinBaseAndPath,
+  OAUTH_AUTHORIZE_PATH,
+  OAUTH_TOKEN_PATH,
+  OAUTH_REGISTER_PATH,
+  OAUTH_PROTECTED_RESOURCE_METADATA_PATH,
+  OAUTH_AUTHORIZATION_SERVER_METADATA_PATH,
+  OPENID_CONFIGURATION_PATH,
+} from "./remote-url.js";
 
 export interface OAuthServerOptions {
   protectedPath: string;
@@ -294,21 +303,21 @@ export class OAuthServer {
   }
 
   resourceMetadataUrl(baseUrl: string): string {
-    return `${baseUrl}/.well-known/oauth-protected-resource`;
+    return joinBaseAndPath(baseUrl, OAUTH_PROTECTED_RESOURCE_METADATA_PATH);
   }
 
   isOAuthPath(pathname: string): boolean {
     return (
-      pathname.startsWith("/.well-known/oauth-protected-resource") ||
-      pathname.startsWith("/.well-known/oauth-authorization-server") ||
-      pathname === "/.well-known/openid-configuration" ||
+      pathname.startsWith(OAUTH_PROTECTED_RESOURCE_METADATA_PATH) ||
+      pathname.startsWith(OAUTH_AUTHORIZATION_SERVER_METADATA_PATH) ||
+      pathname === OPENID_CONFIGURATION_PATH ||
       pathname.startsWith("/oauth/")
     );
   }
 
   async handle(ctx: OAuthRequestContext): Promise<boolean> {
     const { req, res, url, baseUrl } = ctx;
-    if (url.pathname.startsWith("/.well-known/oauth-protected-resource")) {
+    if (url.pathname.startsWith(OAUTH_PROTECTED_RESOURCE_METADATA_PATH)) {
       if (req.method !== "GET") {
         methodNotAllowed(res);
         return true;
@@ -317,8 +326,8 @@ export class OAuthServer {
       return true;
     }
     if (
-      url.pathname.startsWith("/.well-known/oauth-authorization-server") ||
-      url.pathname === "/.well-known/openid-configuration"
+      url.pathname.startsWith(OAUTH_AUTHORIZATION_SERVER_METADATA_PATH) ||
+      url.pathname === OPENID_CONFIGURATION_PATH
     ) {
       if (req.method !== "GET") {
         methodNotAllowed(res);
@@ -327,15 +336,15 @@ export class OAuthServer {
       jsonResponse(res, 200, this.authorizationServerMetadata(baseUrl));
       return true;
     }
-    if (url.pathname === "/oauth/register") {
+    if (url.pathname === OAUTH_REGISTER_PATH) {
       await this.handleRegister(req, res);
       return true;
     }
-    if (url.pathname === "/oauth/authorize") {
+    if (url.pathname === OAUTH_AUTHORIZE_PATH) {
       await this.handleAuthorize(req, res);
       return true;
     }
-    if (url.pathname === "/oauth/token") {
+    if (url.pathname === OAUTH_TOKEN_PATH) {
       await this.handleToken(req, res);
       return true;
     }
@@ -344,9 +353,9 @@ export class OAuthServer {
 
   private protectedResourceMetadata(baseUrl: string): Record<string, unknown> {
     return {
-      resource: `${baseUrl}${this.opts.protectedPath}`,
+      resource: joinBaseAndPath(baseUrl, this.opts.protectedPath),
       authorization_servers: [baseUrl],
-      scopes_supported: ["mcp", "workspace:admin"],
+      scopes_supported: ["mcp", "workspace:admin", "cli:admin"],
       bearer_methods_supported: ["header"],
     };
   }
@@ -354,9 +363,9 @@ export class OAuthServer {
   private authorizationServerMetadata(baseUrl: string): Record<string, unknown> {
     return {
       issuer: baseUrl,
-      authorization_endpoint: `${baseUrl}/oauth/authorize`,
-      token_endpoint: `${baseUrl}/oauth/token`,
-      registration_endpoint: `${baseUrl}/oauth/register`,
+      authorization_endpoint: joinBaseAndPath(baseUrl, OAUTH_AUTHORIZE_PATH),
+      token_endpoint: joinBaseAndPath(baseUrl, OAUTH_TOKEN_PATH),
+      registration_endpoint: joinBaseAndPath(baseUrl, OAUTH_REGISTER_PATH),
       response_types_supported: ["code"],
       grant_types_supported: ["authorization_code"],
       token_endpoint_auth_methods_supported: this.opts.config.allowPublicClients
@@ -365,7 +374,7 @@ export class OAuthServer {
       code_challenge_methods_supported: this.opts.config.allowPlainPkce
         ? ["S256", "plain"]
         : ["S256"],
-      scopes_supported: ["mcp", "workspace:admin"],
+      scopes_supported: ["mcp", "workspace:admin", "cli:admin"],
     };
   }
 

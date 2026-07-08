@@ -1,23 +1,26 @@
 # Provider Support Matrix
 
 Status: Layer 1 evidence record  
-Verified: 2026-05-19 (Mistral/Vibe row added 2026-06-07)  
+Verified: 2026-05-19 (Mistral/Vibe row added 2026-06-07; Devin, Cursor, and API-provider rows added 2026-07-02)
 Method: primary documentation search plus local CLI inspection where available.
 
 This matrix separates inbound MCP hosting from outbound validation. A client can connect to the gateway as an inbound MCP host. A provider runtime can be used by the gateway as an outbound validation provider.
 
 ## Summary
 
-| Target | Classification | Verified connection path | MVP gate | Evidence |
-| --- | --- | --- | --- | --- |
-| ChatGPT | Inbound MCP host | ChatGPT web apps/custom MCP; strongest full-MCP path is Business and Enterprise/Edu developer mode | Verified for web with plan limits | OpenAI Apps in ChatGPT and Developer mode docs |
-| Claude web | Inbound MCP host | Remote MCP custom connector | Verified beta | Claude custom connector docs |
-| Claude Desktop | Inbound MCP host | Remote MCP custom connector; local stdio remains a separate desktop mechanism | Verified beta/local | Claude custom connector docs |
-| Codex | Inbound CLI/IDE MCP host and outbound validation provider | Codex CLI/IDE can connect to MCP servers; gateway can call Codex CLI outbound | Verified CLI/IDE | OpenAI Docs MCP quickstart and local `codex --help` |
-| Gemini CLI | Inbound CLI MCP host and outbound validation provider | Gemini CLI `mcpServers` supports stdio, SSE, and Streamable HTTP | Verified CLI | Gemini CLI MCP docs and local `gemini --help` |
-| Gemini web | Installer assistant only | No primary consumer Gemini web custom MCP host path verified | Deferred | Gemini Apps connected-apps docs describe fixed connected apps, not custom MCP |
-| Grok | Inbound MCP host and outbound validation provider | Grok custom MCP connectors require a public MCP server URL; gateway can call Grok CLI/API outbound | Verified web and outbound | xAI Grok connectors docs and local `grok --help` |
-| Mistral (Vibe) | Inbound CLI MCP host and outbound validation provider | Vibe CLI manages MCP servers via `vibe mcp`; gateway calls Vibe outbound (`mistral_request`/`mistral_request_async`) | Verified CLI and outbound | Local `vibe --help` and gateway `doctor --json` provider block |
+| Target                        | Classification                                            | Verified connection path                                                                                                                                              | MVP gate                          | Evidence                                                                                                |
+| ----------------------------- | --------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| ChatGPT                       | Inbound MCP host                                          | ChatGPT web apps/custom MCP; strongest full-MCP path is Business and Enterprise/Edu developer mode                                                                    | Verified for web with plan limits | OpenAI Apps in ChatGPT and Developer mode docs                                                          |
+| Claude web                    | Inbound MCP host                                          | Remote MCP custom connector                                                                                                                                           | Verified beta                     | Claude custom connector docs                                                                            |
+| Claude Desktop                | Inbound MCP host                                          | Remote MCP custom connector; local stdio remains a separate desktop mechanism                                                                                         | Verified beta/local               | Claude custom connector docs                                                                            |
+| Codex                         | Inbound CLI/IDE MCP host and outbound validation provider | Codex CLI/IDE can connect to MCP servers; gateway can call Codex CLI outbound                                                                                         | Verified CLI/IDE                  | OpenAI Docs MCP quickstart and local `codex --help`                                                     |
+| Gemini CLI                    | Inbound CLI MCP host and outbound validation provider     | Gemini CLI `mcpServers` supports stdio, SSE, and Streamable HTTP                                                                                                      | Verified CLI                      | Gemini CLI MCP docs and local `gemini --help`                                                           |
+| Gemini web                    | Installer assistant only                                  | No primary consumer Gemini web custom MCP host path verified                                                                                                          | Deferred                          | Gemini Apps connected-apps docs describe fixed connected apps, not custom MCP                           |
+| Grok                          | Inbound MCP host and outbound validation provider         | Grok custom MCP connectors require a public MCP server URL; gateway can call Grok CLI/API outbound                                                                    | Verified web and outbound         | xAI Grok connectors docs and local `grok --help`                                                        |
+| Mistral (Vibe)                | Inbound CLI MCP host and outbound validation provider     | Vibe CLI manages MCP servers via `vibe mcp`; gateway calls Vibe outbound (`mistral_request`/`mistral_request_async`)                                                  | Verified CLI and outbound         | Local `vibe --help` and gateway `doctor --json` provider block                                          |
+| Devin                         | Inbound MCP host and outbound validation provider         | Devin supports custom MCP servers over stdio, SSE, and HTTP where account permissions allow; gateway calls Devin CLI outbound (`devin_request`/`devin_request_async`) | Verified custom MCP and outbound  | Devin MCP Marketplace docs, Devin MCP docs, Devin release notes, gateway `doctor --json` provider block |
+| Cursor                        | Inbound IDE/CLI MCP host and outbound validation provider | Cursor docs cover MCP server configuration for Cursor and Cursor CLI; gateway calls Cursor Agent CLI outbound (`cursor_request`/`cursor_request_async`)               | Verified IDE/CLI and outbound     | Cursor MCP and Cursor CLI MCP docs, gateway `doctor --json` provider block                              |
+| Configured HTTP API providers | Outbound validation provider                              | Gateway config registers OpenAI-compatible, Anthropic Messages, and xAI Responses adapters backed by API-key env vars                                                 | Verified gateway config path      | `src/api-provider.ts`, `src/config.ts`, README API provider section                                     |
 
 ## Evidence Details
 
@@ -124,6 +127,71 @@ Sources:
 
 - Local command: `vibe --help`
 - Local command: `llm-cli-gateway doctor --json` (mistral provider block)
+
+### Devin
+
+Classification: inbound MCP host with account/permission limits and outbound
+validation provider.
+
+Devin's MCP Marketplace documentation says custom MCP servers can be added by
+organization admins and that Devin supports stdio, SSE, and HTTP transports.
+Its Devin MCP documentation also describes MCP-compatible clients and Devin's
+own hosted MCP server. Separately, the gateway drives the local Devin CLI
+through `devin_request` / `devin_request_async` for outbound validation.
+
+MVP implication: Devin can be documented as an inbound MCP target only when the
+user has the required Devin account permissions and a gateway endpoint reachable
+from the Devin environment. The outbound gateway provider remains the local
+Devin CLI path and must not require pasting Devin API keys or credential files
+into chat.
+
+Sources:
+
+- https://docs.devin.ai/work-with-devin/mcp
+- https://docs.devin.ai/work-with-devin/devin-mcp
+- https://docs.devin.ai/release-notes/2026
+- Gateway command: `llm-cli-gateway doctor --json`
+
+### Cursor
+
+Classification: inbound IDE/CLI MCP host and outbound validation provider.
+
+Cursor's MCP documentation covers connecting Cursor to external tools through
+MCP, and Cursor CLI documentation covers using MCP servers from the CLI. The
+gateway also drives Cursor Agent headlessly through `cursor_request` /
+`cursor_request_async`; that outbound path is separate from configuring Cursor
+as an inbound MCP client.
+
+MVP implication: Cursor setup docs can describe local IDE/CLI MCP registration
+and outbound Cursor Agent validation, but should keep the two roles separate.
+Assistants must use generated config or placeholders rather than asking for raw
+bearer tokens.
+
+Sources:
+
+- https://cursor.com/docs/mcp
+- https://cursor.com/docs/cli/mcp
+- Gateway command: `llm-cli-gateway doctor --json`
+
+### Configured HTTP API providers
+
+Classification: outbound validation providers only.
+
+The gateway can register API-provider tools from `[providers.<name>]` config
+blocks. API keys are read from named environment variables at request time and
+are not stored in gateway config, diagnostics, persisted request payloads,
+dedup keys, logs, or the flight recorder. These providers participate in model
+listing, validation, async jobs, and request-result retrieval, but they are not
+inbound MCP clients.
+
+MVP implication: API-provider docs should show env-var names and generated
+`api_<name>_request` tool names, never raw key values.
+
+Sources:
+
+- `README.md#api-providers-http`
+- `site/install.md#api-providers-optional`
+- `src/api-provider.ts`
 
 ## Release Rules
 

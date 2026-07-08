@@ -92,6 +92,7 @@ function mkPersistence(asyncJobsEnabled = true): PersistenceConfig {
     retentionDays: 30,
     dedupWindowMs: 3_600_000,
     acknowledgeEphemeral: true,
+    ownsOrphanRecovery: false,
     asyncJobsEnabled,
     sources: { configFile: null, envOverrides: [] },
   };

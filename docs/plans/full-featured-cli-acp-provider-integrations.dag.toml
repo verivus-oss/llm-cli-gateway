@@ -1,0 +1,1145 @@
+# Implementation plan: full-featured CLI and ACP provider integrations.
+#
+# Goal:
+#   Audit every non-Cursor provider and turn the gateway provider layer into a
+#   complete, provider-object driven integration surface. Every documented CLI
+#   capability and every native ACP capability exposed by a provider must be
+#   represented by typed gateway behavior, resources, capability metadata,
+#   tests, and docs. Providers without an upstream native ACP entrypoint must
+#   get complete CLI coverage and accurate ACP capability reporting, without
+#   claiming native ACP support.
+
+[meta]
+name = "full-featured-cli-acp-provider-integrations"
+owner = "llm-cli-gateway"
+created = "2026-07-01"
+status = "draft"
+target_branch = "feature/remote-http-oauth-ux-improvements-v2"
+scope = "all non-Cursor CLI providers plus shared provider registry and ACP infrastructure"
+cursor_companion_plan = "docs/plans/cursor-first-class-provider.dag.toml"
+acceptance_resource = "Claude, Codex, Gemini/Antigravity, Grok, Mistral Vibe, and Devin are represented by first-class provider definitions that drive request schemas, resources, model/session discovery, provider capabilities, upstream contract checks, admin subcommands, CLI routing, native ACP routing where upstream exposes it, validation/review participation, docs, and smoke/regression tests."
+
+[audit_method]
+web_evidence_date = "2026-07-01"
+local_help_date = "2026-07-01"
+codebase_evidence_date = "2026-07-01"
+must_use_current_sources = true
+must_probe_installed_cli_help = true
+must_inspect_gateway_code = true
+must_avoid_summary_only_evidence = true
+
+source_queries = [
+  "Claude Code CLI reference official docs",
+  "OpenAI Codex CLI reference official docs",
+  "Google Antigravity CLI overview plugins MCP official docs",
+  "xAI Grok Build CLI ACP official docs",
+  "Mistral Vibe CLI README ACP setup official repository",
+  "Devin CLI commands ACP official docs",
+  "Agent Client Protocol schema official docs",
+]
+
+local_version_commands = [
+  "claude --version",
+  "codex --version",
+  "agy --version",
+  "grok --version",
+  "vibe --version",
+  "devin --version",
+]
+
+local_help_commands = [
+  "claude --help",
+  "codex --help",
+  "codex exec --help",
+  "agy --help",
+  "grok --help",
+  "grok agent --help",
+  "vibe --help",
+  "vibe-acp --help",
+  "devin --help",
+  "devin acp --help",
+]
+
+[source_evidence.urls]
+claude_cli_reference = "https://code.claude.com/docs/en/cli-reference"
+codex_cli_overview = "https://developers.openai.com/codex/cli"
+codex_cli_reference = "https://developers.openai.com/codex/cli/reference"
+antigravity_cli_overview = "https://antigravity.google/docs/cli-overview"
+antigravity_cli_using = "https://antigravity.google/docs/cli-using"
+antigravity_cli_plugins = "https://antigravity.google/docs/cli/plugins"
+antigravity_cli_features = "https://antigravity.google/docs/cli-features"
+grok_build_overview = "https://docs.x.ai/build/overview"
+grok_build_changelog = "https://x.ai/build/changelog"
+grok_build_api_models = "https://docs.x.ai/developers/models"
+mistral_vibe_repo = "https://github.com/mistralai/mistral-vibe"
+devin_cli_commands = "https://docs.devin.ai/cli/reference/commands"
+agent_client_protocol_schema = "https://agentclientprotocol.com/protocol/schema"
+
+[source_evidence.local_versions]
+claude = "Claude Code 2.1.198"
+codex = "codex-cli 0.142.4"
+gemini = "agy 1.0.14"
+grok = "grok 0.2.77 (44e77bec3a)"
+mistral = "vibe 2.18.3"
+devin = "devin 2026.8.18 (16737566)"
+
+[gateway_current_state]
+provider_types_include_all_cli_providers = true
+request_tools_include = [
+  "claude_request",
+  "codex_request",
+  "gemini_request",
+  "grok_request",
+  "mistral_request",
+  "devin_request",
+  "cursor_request",
+]
+async_request_tools_include = [
+  "claude_request_async",
+  "codex_request_async",
+  "gemini_request_async",
+  "grok_request_async",
+  "mistral_request_async",
+  "devin_request_async",
+  "cursor_request_async",
+]
+resource_gap = "src/resources.ts manually lists sessions:// and models:// resources for claude, codex, gemini, grok, and mistral only; devin and cursor request tools exist but their static resources are absent."
+provider_capability_gap = "src/provider-tool-capabilities.ts contains detailed caveats and unsupported-input rows, but provider resources and admin surfaces are not generated from the same provider object."
+acp_gap = "src/acp/ currently has typed protocol infrastructure and native entries for grok, mistral, devin, and cursor, but existing capability text still uses limited-runtime wording and some request paths reject provider-specific ACP controls instead of surfacing the full native protocol."
+upstream_contract_gap = "src/upstream-contracts.ts targets older versions for several providers and includes status labels that describe limited support instead of a full-featured capability contract."
+admin_gap = "provider_subcommands_* exposes read-only contracts, but provider-owned admin commands such as MCP, plugin, auth, sessions, status, cloud, dashboard, workers, sandbox, and diagnostics are not uniformly exposed as typed gateway operations."
+model_gap = "list_models supports all CLI_TYPES, but resource listing and per-provider model discovery are inconsistent, and several providers require live account-specific discovery through their own commands."
+
+[global_full_featured_contract]
+principle = "A provider integration is complete only when documented CLI and native ACP behaviors are discoverable, typed, routable, observable, tested, and documented through one provider definition."
+dry_principle = "Provider and capability data must be declared once. Adding a provider, CLI flag, ACP method, model discovery command, session resource, admin subcommand, or safety mode in the provider definition must automatically update every gateway surface or fail CI with a precise missing-surface error."
+version_upgrade_principle = "Updating any installed provider CLI or ACP server version must be a discovery event, not a coding event. The gateway discovers the new version, help surface, model catalog, subcommands, ACP initialize capabilities, session capabilities, config options, and admin operations, then enables safe supported capabilities automatically."
+
+provider_object_requirements = [
+  "Each provider definition declares executables, command aliases, version probes, model probes, session probes, request transports, native ACP entrypoints, admin subcommands, safety modes, output formats, streaming formats, and docs URLs.",
+  "Provider definitions declare discovery commands and normalization rules, not a hand-coded inventory of every version-specific flag.",
+  "Request tool schemas, async schemas, resource lists, model resources, session resources, provider capability resources, upstream contract reports, and docs tables are generated or checked from discovered provider capabilities.",
+  "No provider-specific one-off omission is allowed unless a typed provider capability says the upstream CLI does not expose that behavior and a test proves the gateway reports that accurately.",
+  "Every provider definition includes a drift probe that compares installed help output with the checked-in contract without spending model tokens.",
+  "Hand-maintained provider allowlists are forbidden outside the provider definition module and generated test snapshots.",
+  "Provider-specific switch statements are forbidden for capability discovery, resource registration, docs generation, and provider tool metadata unless a compile-time exhaustiveness helper proves every provider is covered.",
+  "Every surfaced provider list must be derived from the same provider definition iterator."
+]
+
+automatic_surface_requirements = [
+  "MCP tool registration updates automatically for sync request, async request, admin tools, and smoke/diagnostic tools.",
+  "Tool input schemas update automatically from provider capability descriptors and per-field emitters.",
+  "list_models updates automatically for provider catalog, aliases, defaults, and live model discovery commands.",
+  "provider_tool_capabilities updates automatically for CLI, ACP, admin, model, session, safety, MCP, plugin, and docs capability rows.",
+  "provider_subcommands catalog and drift probes update automatically for every declared admin and request subcommand.",
+  "resources list and read handlers update automatically for models://<provider>, sessions://<provider>, provider-tools://<provider>, provider-subcommands://<provider>, and provider-acp://<provider>.",
+  "server instructions and README provider tables update from generated provider summaries or checked templates.",
+  "tests enumerate provider definitions and fail on missing request tools, async tools, resources, capabilities, admin operations, upstream contracts, docs rows, or validation fixtures.",
+  "release and install diagnostics use provider definitions for provider names, executable names, login hints, versions, and upgrade commands."
+]
+
+[runtime_self_discovery_contract]
+principle = "The gateway should discover what the installed provider can do and expose that discovered surface consistently. Checked-in contracts are guardrails and regression fixtures; they are not the only source of truth for installed capability."
+discovery_times = [
+  "server startup",
+  "explicit provider_capabilities_refresh tool call",
+  "explicit upstream_contracts probeInstalled=true call",
+  "after cli_upgrade succeeds",
+  "when executable path, version output, or help checksum changes",
+]
+cache_key_fields = [
+  "provider id",
+  "executable absolute path",
+  "version string",
+  "help output checksum",
+  "subcommand help checksums",
+  "ACP initialize response checksum",
+  "model catalog checksum",
+  "gateway version",
+]
+cache_storage_policy = [
+  "Cache discovered capabilities on disk under the existing gateway state directory.",
+  "Invalidate cache automatically when any cache key field changes.",
+  "Expose cache age, source, version, and checksum through provider_tool_capabilities and provider-subcommands resources.",
+  "Never cache secrets, auth tokens, OAuth codes, bearer headers, or account identifiers.",
+]
+cli_discovery_inputs = [
+  "--version or version subcommand",
+  "--help",
+  "help <subcommand> or <subcommand> --help",
+  "models or --list-models where available",
+  "doctor/status/about commands where read-only",
+  "completion metadata where useful and safe",
+  "machine-readable JSON modes where upstream provides them",
+]
+acp_discovery_inputs = [
+  "native entrypoint help/version probe",
+  "initialize response protocolVersion",
+  "initialize response agentInfo",
+  "initialize response auth methods",
+  "initialize response promptCapabilities",
+  "initialize response mcpCapabilities",
+  "initialize response sessionCapabilities",
+  "session/new and session/load config options",
+  "available_commands_update notifications",
+  "current_mode_update and config_option_update notifications",
+]
+automatic_enablement_rules = [
+  "Read-only discovered operations are exposed immediately as read-only resources or read-only tools.",
+  "Mutating discovered operations are exposed only when the provider definition marks the command family as safe-to-gate and gateway config enables provider admin mutation.",
+  "New request flags are exposed when the discovery normalizer can infer arity, type, enum values, repeatability, safety class, and argv placement.",
+  "New flags with incomplete discovery metadata are exposed in capability reports as discovered-unmapped, with the raw help excerpt checksum and a concrete mapping reason; they are not silently dropped.",
+  "Native ACP methods advertised by initialize are enabled through the generic ACP client when the method schema is known to the ACP spec.",
+  "Provider-specific ACP extension methods are exposed when the provider definition has an extension namespace normalizer; otherwise they are listed as discovered-unmapped with evidence.",
+]
+dynamic_schema_policy = [
+  "MCP tool schemas are built at server startup from discovered capabilities.",
+  "If capabilities are refreshed while the MCP server is running, changed tool schemas require server restart or an explicit surface reload that re-registers tools safely.",
+  "Resources may reflect refreshed discovered capabilities immediately when their response schema is stable.",
+  "The gateway always exposes discovered capability resources, even when request schemas cannot change until reload.",
+]
+failure_policy = [
+  "Discovery failure degrades to the last valid cached capability set if the executable path and version match.",
+  "If no cache exists, the provider remains available only through a minimal prompt surface with explicit degraded-capability metadata.",
+  "Discovery failures are visible in cli_versions, provider_tool_capabilities, upstream_contracts, and logs.",
+]
+
+cli_execution_requirements = [
+  "Expose every documented non-interactive run flag accepted by the installed CLI as typed request fields or typed config fields.",
+  "Expose interactive-session continuity controls that make sense for automation: continue, resume, fork where available, session id selection, cwd, add-dir or equivalent workspace roots, and output format selection.",
+  "Expose safety controls exactly: sandbox modes, permission modes, approval modes, trust flags, allowed/denied tools, agent profiles, model and effort controls, budget limits, max turns, and tool filters.",
+  "Normalize text, JSON, JSONL, streaming JSON, structured result rows, tool events, usage rows, and provider-specific errors into gateway structuredContent without losing raw diagnostics in logs.",
+  "Preserve provider-owned credential and login flows through typed auth/status diagnostics, never through prompt text guessing."
+]
+
+native_acp_requirements = [
+  "Where the installed provider exposes a native ACP stdio server, gateway transport=acp supports initialize, authenticate or credential discovery, session/new, session/load, session/resume, session/list, session/prompt, session/cancel, session/close, session/delete, session/set_mode, session/set_config_option, session/request_permission, session/update, host fs, host terminal, MCP server descriptors, and stop reasons to the extent advertised by the provider capability response.",
+  "Where a provider does not expose a native ACP entrypoint, gateway reports that fact as an upstream capability fact and still provides complete CLI coverage. It must not label an adapter or a non-native wrapper as native ACP.",
+  "ACP permission requests route through the gateway approval manager with allow-once, allow-always, reject, timeout, cancellation, and audit records.",
+  "ACP client host services are deny-by-default, workspace-scoped, owner-scoped, and redacted. No provider ACP stdout is ever written to gateway stdout.",
+  "ACP session ids remain provider-owned metadata; gateway session ids remain gateway-owned."
+]
+
+resource_requirements = [
+  "sessions://all includes every CLI provider and every continuity-tracked API provider visible to the caller.",
+  "sessions://<provider> exists for every CLI provider, including devin and cursor, and every enabled continuity-tracked API provider.",
+  "models://<provider> exists for every CLI provider, including devin and cursor, and every enabled API provider.",
+  "provider-tools://<provider> and provider-subcommands://<provider>/... exist for every provider in CLI_TYPES.",
+  "ACP capability resources expose native entrypoint, installed probe result, initialize capability response, supported session methods, prompt capabilities, MCP capabilities, auth methods, and host-service policy for each provider."
+]
+
+admin_surface_requirements = [
+  "Read-only operations must be exposed as typed tools/resources when they do not mutate provider state.",
+  "Mutating provider admin operations must require explicit opt-in config, tool annotations, and audit logs.",
+  "Admin operations include auth status/login/logout where scriptable, MCP list/get/add/remove/login/logout/enable/disable where available, model list/debug models, plugin list/install/remove/marketplace operations, session list/archive/delete/export/import, update/doctor/status/about, cloud tasks where available, worktree/dashboard/worker controls where available, and sandbox diagnostics where available.",
+  "Every admin operation is represented by a provider subcommand contract and tested against help output."
+]
+
+security_requirements = [
+  "Provider process spawning never uses shell interpolation.",
+  "Dangerous modes are explicit request fields with names matching upstream risk semantics.",
+  "Credentials are never echoed into MCP responses, docs, logs, plan files, or test snapshots.",
+  "Remote HTTP/OAuth callers must use workspace aliases; local stdio callers may pass local paths directly.",
+  "Provider-owned MCP config mutation must be gated and audited because it changes a provider's tool surface outside the current request."
+]
+
+[providers.claude]
+display_name = "Anthropic Claude Code"
+local_version = "Claude Code 2.1.198"
+executables = ["claude"]
+native_acp_entrypoint = ""
+native_acp_evidence = "No native Claude Code ACP subcommand or flag was found in installed help or official CLI reference. Complete gateway coverage is therefore CLI-first, with ACP reporting accurately saying no native entrypoint is advertised."
+primary_docs = ["https://code.claude.com/docs/en/cli-reference"]
+must_cover_cli_flags = [
+  "--print",
+  "--input-format",
+  "--output-format",
+  "--include-partial-messages",
+  "--include-hook-events",
+  "--replay-user-messages",
+  "--json-schema",
+  "--max-budget-usd",
+  "--max-turns",
+  "--model",
+  "--fallback-model",
+  "--effort",
+  "--permission-mode",
+  "--tools",
+  "--allowedTools",
+  "--disallowedTools",
+  "--mcp-config",
+  "--strict-mcp-config",
+  "--settings",
+  "--setting-sources",
+  "--system-prompt",
+  "--system-prompt-file",
+  "--append-system-prompt",
+  "--append-system-prompt-file",
+  "--add-dir",
+  "--session-id",
+  "--resume",
+  "--continue",
+  "--fork-session",
+  "--name",
+  "--worktree",
+  "--tmux",
+  "--plugin-dir",
+  "--plugin-url",
+  "--safe-mode",
+  "--bare",
+  "--debug",
+  "--debug-file",
+  "--background",
+  "--remote-control",
+  "--remote",
+]
+must_cover_admin_subcommands = [
+  "claude auth login/logout/status",
+  "claude agents",
+  "claude mcp add/list/get/remove/login/logout/enable/disable where help advertises them",
+  "claude plugin and plugins",
+  "claude project purge",
+  "claude doctor",
+  "claude update/upgrade",
+  "claude install",
+  "claude gateway",
+  "claude ultrareview",
+  "claude setup-token",
+  "background session attach/logs/stop/respawn/rm when advertised",
+]
+model_discovery_requirements = [
+  "Support aliases and full model ids from Claude Code CLI docs.",
+  "Expose effort levels and fallback model chains.",
+  "Detect account/runtime model availability without hardcoding stale defaults."
+]
+tests = [
+  "golden argv for every wired request field",
+  "stream-json parser preserves result/error/usage/hook/partial events",
+  "MCP config strictness and tool allow/deny rules are represented",
+  "auth status and doctor read-only admin commands produce redacted structured output",
+]
+
+[providers.codex]
+display_name = "OpenAI Codex CLI"
+local_version = "codex-cli 0.142.4"
+executables = ["codex"]
+native_acp_entrypoint = ""
+native_acp_evidence = "Official OpenAI Codex CLI docs advertise mcp-server and app-server transports, not a native ACP agent entrypoint. Gateway must provide complete CLI and Codex protocol/admin coverage and must not call this native ACP."
+primary_docs = [
+  "https://developers.openai.com/codex/cli",
+  "https://developers.openai.com/codex/cli/reference",
+]
+must_cover_cli_flags = [
+  "--config",
+  "--enable",
+  "--disable",
+  "--strict-config",
+  "--image",
+  "--model",
+  "--oss",
+  "--local-provider",
+  "--profile",
+  "--sandbox",
+  "--dangerously-bypass-approvals-and-sandbox",
+  "--dangerously-bypass-hook-trust",
+  "--cd",
+  "--add-dir",
+  "--ask-for-approval",
+  "--search",
+  "--skip-git-repo-check",
+  "--ephemeral",
+  "--ignore-user-config",
+  "--ignore-rules",
+  "--output-schema",
+  "--json",
+  "--output-last-message",
+  "--color",
+  "--remote",
+  "--remote-auth-token-env",
+]
+must_cover_admin_subcommands = [
+  "codex exec and exec resume",
+  "codex exec review",
+  "codex review",
+  "codex login/logout/status",
+  "codex mcp list/get/add/remove/login/logout",
+  "codex plugin list/add/remove",
+  "codex plugin marketplace list/add/upgrade/remove",
+  "codex mcp-server",
+  "codex app-server",
+  "codex remote-control",
+  "codex app",
+  "codex doctor",
+  "codex features",
+  "codex sandbox",
+  "codex debug models",
+  "codex cloud list/exec",
+  "codex apply",
+  "codex resume/fork/archive/delete/unarchive",
+  "codex completion",
+  "codex update",
+]
+model_discovery_requirements = [
+  "Expose live Codex model catalog through codex debug models where available.",
+  "Represent OSS and local-provider model paths for Ollama and LM Studio.",
+  "Keep model aliases, profiles, and config overrides visible in provider capabilities."
+]
+tests = [
+  "exec argv and exec resume argv golden tests include all current flags",
+  "JSONL parser preserves thread/session ids, final message, usage, and tool events",
+  "mcp/plugin/cloud/admin read-only and mutating gates are represented",
+  "remote app-server and mcp-server are documented as Codex transports, separate from native ACP",
+]
+
+[providers.gemini]
+display_name = "Google Antigravity CLI"
+local_version = "agy 1.0.14"
+executables = ["agy"]
+native_acp_entrypoint = ""
+native_acp_evidence = "Installed agy help and official Antigravity CLI docs do not advertise a native ACP entrypoint. Gateway must provide complete agy CLI coverage and accurate ACP capability reporting."
+primary_docs = [
+  "https://antigravity.google/docs/cli-overview",
+  "https://antigravity.google/docs/cli-using",
+  "https://antigravity.google/docs/cli/plugins",
+  "https://antigravity.google/docs/cli-features",
+]
+must_cover_cli_flags = [
+  "--print",
+  "--prompt",
+  "--prompt-interactive",
+  "--continue",
+  "--conversation",
+  "--project",
+  "--new-project",
+  "--model",
+  "--add-dir",
+  "--sandbox",
+  "--dangerously-skip-permissions",
+  "--print-timeout",
+  "--log-file",
+]
+must_cover_admin_subcommands = [
+  "agy models",
+  "agy plugin list/install/uninstall/enable/disable",
+  "agy plugins alias",
+  "agy changelog",
+  "agy install",
+  "agy update",
+]
+must_cover_tui_slash_surfaces = [
+  "/config",
+  "/settings",
+  "/permissions",
+  "/model",
+  "/keybindings",
+  "/statusline",
+  "/tasks",
+  "/skills",
+  "/mcp",
+  "/agents",
+  "/resume",
+  "/rewind",
+  "/fork",
+  "/clear",
+  "/logout",
+  "/usage",
+]
+model_discovery_requirements = [
+  "Use agy models as the primary account-aware model discovery command.",
+  "Expose project and conversation ids as first-class continuity fields.",
+  "Represent plugin, skill, MCP, hooks, subagent, settings, and sandbox capabilities in provider_tool_capabilities."
+]
+tests = [
+  "agy argv golden tests cover print, conversation, project, add-dir, sandbox, dangerous permissions, and timeout",
+  "agy models parser handles account-specific catalog output",
+  "plugin subcommand contract drift tests cover list/install/uninstall/enable/disable",
+  "resource generation creates sessions://gemini and models://gemini from provider definitions, not manual entries",
+]
+
+[providers.grok]
+display_name = "xAI Grok Build"
+local_version = "grok 0.2.77 (44e77bec3a)"
+executables = ["grok"]
+native_acp_entrypoint = "grok agent stdio"
+native_acp_evidence = "Official xAI docs say Grok Build runs via interactive TUI, headless scripts, or ACP in other apps. Installed help advertises grok agent stdio."
+primary_docs = [
+  "https://docs.x.ai/build/overview",
+  "https://x.ai/build/changelog",
+  "https://docs.x.ai/developers/models",
+]
+must_cover_cli_flags = [
+  "--single",
+  "--prompt-file",
+  "--prompt-json",
+  "--output-format",
+  "--json-schema",
+  "--model",
+  "--effort",
+  "--reasoning-effort",
+  "--max-turns",
+  "--best-of-n",
+  "--check",
+  "--permission-mode",
+  "--always-approve",
+  "--allow",
+  "--deny",
+  "--tools",
+  "--disallowed-tools",
+  "--sandbox",
+  "--cwd",
+  "--rules",
+  "--system-prompt-override",
+  "--agent",
+  "--agents",
+  "--no-subagents",
+  "--disable-web-search",
+  "--experimental-memory",
+  "--no-memory",
+  "--no-plan",
+  "--leader-socket",
+  "--worktree",
+  "--worktree-ref",
+  "--resume",
+  "--continue",
+  "--fork-session",
+  "--restore-code",
+  "--session-id",
+  "--verbatim",
+]
+must_cover_native_acp = [
+  "grok agent stdio initialize/session/new/session/prompt/session/update/session/cancel",
+  "grok agent headless",
+  "grok agent serve",
+  "grok agent leader",
+  "agent-level model, reasoning effort, always approve, agent profile, leader, websocket origin/url, proxy base URLs, debug, and leader socket",
+  "ACP usage updates, tool call events, plan events, available commands, and stop reasons",
+]
+must_cover_admin_subcommands = [
+  "grok models",
+  "grok inspect",
+  "grok mcp",
+  "grok plugin",
+  "grok sessions",
+  "grok export/import",
+  "grok worktree",
+  "grok dashboard",
+  "grok leader",
+  "grok memory",
+  "grok trace",
+  "grok setup",
+  "grok login/logout",
+  "grok update",
+  "grok wrap",
+  "grok completions",
+]
+model_discovery_requirements = [
+  "Use grok models for CLI-local model listing.",
+  "Represent custom ~/.grok/config.toml models, xAI API grok-build-0.1, and configured default model facts.",
+  "Expose native Grok Build API provider models separately from CLI model catalog where configured."
+]
+tests = [
+  "grok argv golden tests cover every documented headless flag and current help drift",
+  "native ACP fake-agent tests cover initialize, session/new, session/prompt, request_permission, session/cancel, and usage updates",
+  "grok agent stdio smoke is read-only and redacted",
+  "admin subcommand contract drift probes cover agent, mcp, sessions, plugin, worktree, dashboard, leader, memory, trace, and update",
+]
+
+[providers.mistral]
+display_name = "Mistral Vibe"
+local_version = "vibe 2.18.3"
+executables = ["vibe", "vibe-acp"]
+native_acp_entrypoint = "vibe-acp"
+native_acp_evidence = "Mistral Vibe README says editors and IDEs that support ACP can use Vibe, and installed vibe-acp help advertises ACP mode."
+primary_docs = ["https://github.com/mistralai/mistral-vibe"]
+must_cover_cli_flags = [
+  "--prompt",
+  "--max-turns",
+  "--max-price",
+  "--max-tokens",
+  "--enabled-tools",
+  "--output",
+  "--agent",
+  "--auto-approve",
+  "--yolo",
+  "--setup",
+  "--check-upgrade",
+  "--workdir",
+  "--add-dir",
+  "--trust",
+  "--continue",
+  "--resume",
+]
+must_cover_native_acp = [
+  "vibe-acp initialize/session/new/session/load/session/prompt/session/update/session/cancel",
+  "vibe-acp setup and version diagnostics",
+  "agent profile selection and session mode/config option exposure through ACP when advertised",
+  "MCP server descriptors for stdio, http, and streamable-http transports",
+  "tool call events for read/write/edit/bash/grep/todo/ask_user_question/task",
+]
+must_cover_admin_subcommands = [
+  "vibe --setup",
+  "vibe --check-upgrade",
+  "VIBE_HOME diagnostics",
+  "configuration file inspection for config.toml",
+  "MCP server configuration projection",
+  "skills discovery projection",
+  "agent profile discovery projection",
+]
+model_discovery_requirements = [
+  "Use VIBE_ACTIVE_MODEL and config.toml active_model/default_agent facts.",
+  "Represent Mistral model ids from config rather than hardcoding one default.",
+  "Expose agent profiles default, plan, accept-edits, auto-approve, and custom agent names."
+]
+tests = [
+  "vibe argv golden tests cover prompt, limits, output, enabled tools, workdir, add-dir, trust, agent, yolo, resume",
+  "native ACP fake-agent tests cover advertised ACP methods and tool event normalization",
+  "MCP/skills/agents config readers are redacted and do not expose secrets",
+  "vibe-acp help probe and version probe are contract tests",
+]
+
+[providers.devin]
+display_name = "Cognition Devin CLI"
+local_version = "devin 2026.8.18 (16737566)"
+executables = ["devin"]
+native_acp_entrypoint = "devin acp"
+native_acp_evidence = "Official Devin docs advertise devin acp as an ACP stdio server and installed help confirms devin acp with agent-type options."
+primary_docs = ["https://docs.devin.ai/cli/reference/commands"]
+must_cover_cli_flags = [
+  "--prompt-file",
+  "--config",
+  "--permission-mode",
+  "--sandbox",
+  "--model",
+  "--print",
+  "--export",
+  "--continue",
+  "--resume",
+  "--respect-workspace-trust",
+  "--agent-config",
+]
+must_cover_native_acp = [
+  "devin acp initialize/session/new/session/load/session/resume/session/prompt/session/update/session/cancel",
+  "devin acp authenticate using host credentials where required",
+  "devin acp --agent-type summarizer",
+  "devin acp --agent-type review",
+  "mode/model/session config option updates",
+  "structured form elicitation and tool-name metadata where advertised by ACP capability response",
+]
+must_cover_admin_subcommands = [
+  "devin auth login/logout/status",
+  "devin mcp add/list/get/remove/login/logout/enable/disable",
+  "devin rules list/show/paths",
+  "devin skills list/show/paths",
+  "devin plugins install/list/info/update/remove",
+  "devin cloud environment/sandbox/build resources",
+  "devin list/ls with JSON and CSV formats",
+  "devin update",
+  "devin version",
+  "devin sandbox setup",
+  "devin setup",
+  "devin uninstall",
+  "devin shell setup",
+]
+model_discovery_requirements = [
+  "Expose CLI --model and /model facts.",
+  "Do not hardcode a static model list when Devin account capabilities decide available models.",
+  "Expose ACP mode and model config options discovered from initialize/session creation responses."
+]
+tests = [
+  "devin argv golden tests cover print, prompt-file, permission modes, sandbox, model, export, resume, respect workspace trust, and agent config",
+  "native ACP fake-agent tests cover auth-required, authenticate, session lifecycle, permission requests, tool events, and cancellation",
+  "devin acp agent-type summarizer and review are represented and help-probed",
+  "MCP/rules/skills/plugins/list admin subcommands have contract and redaction tests",
+]
+
+[shared_provider_registry_design]
+new_or_changed_modules = [
+  "src/provider-definitions.ts",
+  "src/provider-definition-assertions.ts",
+  "src/provider-surface-generator.ts",
+  "src/provider-capability-discovery.ts",
+  "src/provider-capability-cache.ts",
+  "src/provider-help-parser.ts",
+  "src/provider-schema-builder.ts",
+  "src/provider-generated-resources.ts",
+  "src/provider-admin-tools.ts",
+  "src/provider-model-discovery.ts",
+  "src/provider-session-discovery.ts",
+  "src/provider-acp-capabilities.ts",
+  "src/provider-contract-drift.ts",
+  "src/acp/provider-registry.ts",
+  "src/resources.ts",
+  "src/provider-tool-capabilities.ts",
+  "src/upstream-contracts.ts",
+  "src/index.ts",
+]
+source_of_truth = "provider-definitions.ts owns provider identity and discovery strategy. The installed provider executable owns version-specific capabilities; provider-capability-discovery normalizes those capabilities into the active gateway surface."
+non_negotiable_dry_rule = "No gateway surface may keep its own provider list, provider capability matrix, or provider resource matrix. It must import the provider definition registry or a generated projection. CI must prove this."
+generated_or_checked_outputs = [
+  "CLI_TYPE_ENUM and provider listings",
+  "sync and async MCP request tool registration",
+  "provider admin tool registration",
+  "provider request Zod schemas",
+  "provider request argv/env generation descriptors",
+  "request tool capability rows",
+  "models://<provider> resources",
+  "sessions://<provider> resources",
+  "provider-acp://<provider> resources",
+  "provider-subcommands catalog",
+  "provider-tools catalog",
+  "list_models provider rows",
+  "cli_versions provider rows",
+  "cli_upgrade provider rows",
+  "approval/login hints",
+  "server instructions provider inventory",
+  "upstream contract reports",
+  "README provider tables",
+  "provider skill docs",
+]
+compile_time_invariants = [
+  "Every CLI_TYPES member has a provider definition.",
+  "Every provider definition has a discovery strategy for version, root help, subcommand help, model catalog, session catalog, admin commands, and ACP capability probing.",
+  "Every discovered capability has a normalized id, source evidence, version, checksum, safety class, and surface projection.",
+  "Every provider definition produces exactly one sync request tool and one async request tool unless the provider kind explicitly declares no request surface.",
+  "Every provider definition appears in list_models, cli_versions, provider_tool_capabilities, upstream_contracts, provider_subcommands, server instructions, and generated docs.",
+  "Every provider definition has model and session resource policy.",
+  "Every provider definition with resource policy produces listResources and readResource coverage.",
+  "Every provider definition with admin subcommands produces provider_subcommands catalog coverage and provider_admin tool coverage.",
+  "Every provider definition has request transport policy.",
+  "Every native ACP provider has a safe help/version probe distinct from the live server command.",
+  "Every native ACP provider produces provider-acp capability resources and transport=acp schema fields.",
+  "Every non-native ACP provider produces an explicit no-native-ACP capability record without adapter/native ambiguity.",
+  "Every docs URL in provider definitions is covered by a source evidence test fixture or docs validation row.",
+  "No source file outside provider definition tests may contain a literal array of CLI provider names.",
+  "No resource registration may spell out individual CLI providers by hand.",
+  "No capability table may contain a provider key not imported from provider definitions.",
+]
+
+runtime_invariants = [
+  "A provider CLI version change invalidates the old capability cache automatically.",
+  "A provider help checksum change invalidates generated request/admin schemas automatically.",
+  "A provider model catalog checksum change invalidates models://<provider> automatically.",
+  "An ACP initialize capability change invalidates provider-acp://<provider> automatically.",
+  "Newly discovered read-only capabilities appear in capability resources without code edits.",
+  "Newly discovered safely-mappable request fields appear in generated MCP tool schemas after startup or explicit surface reload.",
+  "Newly discovered unmapped fields appear as discovered-unmapped with evidence and do not require source edits to notice.",
+]
+
+[shared_provider_registry_design.forbidden_patterns]
+literal_provider_arrays = [
+  "[\"claude\", \"codex\", \"gemini\", \"grok\", \"mistral\"]",
+  "[\"claude\", \"codex\", \"gemini\", \"grok\", \"mistral\", \"devin\", \"cursor\"]",
+]
+manual_resource_blocks = [
+  "if (uri === \"sessions://claude\")",
+  "if (uri === \"models://claude\")",
+  "duplicated blocks for sessions://codex, sessions://gemini, sessions://grok, sessions://mistral",
+]
+manual_capability_switches = [
+  "provider-specific capability switch without assertNever/exhaustive provider-definition iteration",
+  "provider-specific docs table not generated or checked against provider definitions",
+]
+
+[test_matrix.unit]
+provider_definitions = [
+  "all CLI_TYPES providers have definitions",
+  "all request tools are derived from provider definitions",
+  "all model/session resources are derived from provider definitions",
+  "native ACP providers have entrypoints and non-live probes",
+  "non-native ACP providers report no native entrypoint without adapter masquerading",
+]
+argv_generation = [
+  "claude full flag coverage",
+  "codex full flag coverage",
+  "gemini agy full flag coverage",
+  "grok full flag coverage",
+  "mistral full flag coverage",
+  "devin full flag coverage",
+]
+resources = [
+  "listResources includes sessions://devin and models://devin",
+  "listResources includes sessions://cursor and models://cursor via shared provider generation",
+  "readResource sessions://<provider> applies owner scoping for every provider",
+  "readResource models://<provider> returns live or catalog-backed provider models for every provider",
+]
+acp = [
+  "ACP initialize capability parsing includes auth methods, prompt capabilities, MCP capabilities, and session capabilities",
+  "ACP request_permission maps to approval manager",
+  "ACP session/list/load/resume/close/delete/set_mode/set_config_option are typed even when a provider does not advertise them",
+  "ACP unsupported advertised-missing methods fail with capability errors, not generic process failures",
+]
+admin = [
+  "provider admin read-only tools are annotated readOnlyHint true",
+  "mutating provider admin tools require explicit config gate",
+  "admin command output redacts tokens, API keys, bearer headers, OAuth codes, local credential paths, and account identifiers",
+]
+
+[test_matrix.integration]
+fake_processes = [
+  "fake CLI process records argv/env/cwd for every provider",
+  "fake ACP process drives initialize, auth_required, authenticate, session/new, session/prompt, session/update, session/cancel",
+  "fake admin subcommands return JSON and text variants",
+]
+installed_read_only_smoke = [
+  "claude --help and claude auth status --text or JSON where available",
+  "codex --help, codex exec --help, codex debug models --bundled where available",
+  "agy --help and agy models",
+  "grok --help, grok agent --help, grok models, grok inspect",
+  "vibe --help and vibe-acp --help",
+  "devin --help and devin acp --help",
+]
+native_acp_smoke = [
+  "grok agent stdio initialize and session/new when credentials permit",
+  "vibe-acp initialize and session/new when credentials permit",
+  "devin acp initialize and session/new when credentials permit",
+]
+
+[validation_gates]
+commands = [
+  "npm run format:check",
+  "npm run lint",
+  "npm test",
+  "npm run build",
+  "npm run upstream:contracts",
+  "npm run provider:surfaces:check",
+]
+targeted_tests = [
+  "npx vitest run src/__tests__/resources.test.ts",
+  "npx vitest run src/__tests__/provider-surface-generator.test.ts",
+  "npx vitest run src/__tests__/provider-definition-assertions.test.ts",
+  "npx vitest run src/__tests__/provider-capability-discovery.test.ts src/__tests__/provider-capability-cache.test.ts src/__tests__/provider-schema-builder.test.ts",
+  "npx vitest run src/__tests__/provider-tool-capabilities.test.ts",
+  "npx vitest run src/__tests__/upstream-contracts.test.ts",
+  "npx vitest run src/__tests__/acp-provider-registry.test.ts src/__tests__/acp-client.test.ts src/__tests__/acp-process-manager.test.ts src/__tests__/acp-smoke-harness.test.ts",
+]
+review_standard = "External LLM review must inspect the exact diff, code, docs, and tests. Approval requires code-evidence based acceptance or concrete blockers."
+
+[[nodes]]
+id = "phase-0-source-and-contract-baseline"
+phase = "audit"
+depends_on = []
+description = """
+Capture a reproducible source baseline for all providers. Store installed CLI
+versions, help output checksums, upstream docs URLs, and gateway code locations.
+Update stale upstream contract target versions only after proving installed help
+matches the new fixtures.
+"""
+files = [
+  "src/upstream-contracts.ts",
+  "src/__tests__/upstream-contracts.test.ts",
+  "docs/plans/full-featured-cli-acp-provider-integrations.dag.toml",
+]
+acceptance = [
+  "Every provider has current installed version evidence.",
+  "Every provider has official source URLs recorded.",
+  "Every provider has help-output contract fixtures for current installed help.",
+  "Existing limited-support ACP labels are identified for replacement by capability facts.",
+]
+commands = [
+  "npm run upstream:contracts",
+  "npx vitest run src/__tests__/upstream-contracts.test.ts",
+]
+
+[[nodes]]
+id = "phase-1-provider-definition-source-of-truth"
+phase = "architecture"
+depends_on = ["phase-0-source-and-contract-baseline"]
+description = """
+Create a provider definition module that becomes the single source of truth for
+all CLI provider surfaces. Replace hand-maintained provider lists with generated
+or checked projections from the definitions. This is the DRY enforcement phase:
+after it lands, adding a provider or provider capability anywhere except the
+provider definition is a CI failure.
+"""
+files = [
+  "src/provider-definitions.ts",
+  "src/provider-definition-assertions.ts",
+  "src/provider-surface-generator.ts",
+  "src/provider-types.ts",
+  "src/session-manager.ts",
+  "src/provider-tool-capabilities.ts",
+  "src/upstream-contracts.ts",
+  "src/__tests__/provider-definition-assertions.test.ts",
+  "src/__tests__/provider-surface-generator.test.ts",
+]
+acceptance = [
+  "Every CLI_TYPES member has exactly one provider definition.",
+  "Provider definitions include executable, docs, request transport, model discovery, session discovery, admin subcommands, ACP metadata, and safety policy.",
+  "Build fails if a provider is added without resources, capabilities, upstream contract, and tests.",
+  "Build fails if any core gateway surface owns a separate provider list.",
+  "Generated projections exist for request tools, async request tools, resources, model listing, session listing, provider capabilities, admin tools, upstream contracts, and docs summaries.",
+  "A provider-surface check scans for forbidden manual provider arrays and manual models:// or sessions:// resource blocks.",
+]
+commands = [
+  "npx vitest run src/__tests__/provider-definitions.test.ts src/__tests__/provider-definition-assertions.test.ts src/__tests__/provider-surface-generator.test.ts src/__tests__/provider-tool-capabilities.test.ts",
+  "npm run provider:surfaces:check",
+]
+
+[[nodes]]
+id = "phase-1b-runtime-capability-discovery"
+phase = "discovery"
+depends_on = ["phase-1-provider-definition-source-of-truth"]
+description = """
+Implement runtime capability discovery and caching. The gateway must discover
+installed CLI and ACP capabilities from the executable version, help output,
+model commands, subcommand help, and ACP initialize responses. Version-specific
+capabilities must not be hardcoded into request/resource/admin surfaces.
+"""
+files = [
+  "src/provider-capability-discovery.ts",
+  "src/provider-capability-cache.ts",
+  "src/provider-help-parser.ts",
+  "src/provider-schema-builder.ts",
+  "src/provider-definitions.ts",
+  "src/upstream-contracts.ts",
+  "src/__tests__/provider-capability-discovery.test.ts",
+  "src/__tests__/provider-capability-cache.test.ts",
+  "src/__tests__/provider-schema-builder.test.ts",
+]
+acceptance = [
+  "Startup discovers provider version, root help, subcommand help, model catalog, and ACP capability data where available.",
+  "Discovered capabilities are cached by provider, executable path, version, help checksum, subcommand checksum, ACP initialize checksum, and model checksum.",
+  "Changing only a fake provider version in tests invalidates the old cache and rebuilds projected surfaces without source edits.",
+  "Adding only a fake provider help flag in tests produces a discovered safely-mapped request field when arity/type/safety can be inferred.",
+  "Adding only a fake provider help subcommand in tests produces provider-subcommands and provider-admin projections when safety policy allows it.",
+  "Adding only a fake ACP initialize capability in tests updates provider-acp resources and generic ACP method availability.",
+  "Discovered but unmapped flags and ACP extension methods are reported with evidence, not hidden.",
+]
+commands = [
+  "npx vitest run src/__tests__/provider-capability-discovery.test.ts src/__tests__/provider-capability-cache.test.ts src/__tests__/provider-schema-builder.test.ts",
+  "npm run provider:surfaces:check",
+]
+
+[[nodes]]
+id = "phase-2-generated-model-and-session-resources"
+phase = "resources"
+depends_on = ["phase-1b-runtime-capability-discovery"]
+description = """
+Replace manual models:// and sessions:// resource registration with provider
+definition driven registration. This closes the current resource gap for Devin
+and Cursor and prevents future providers from landing without resources. The
+resource layer must not contain per-provider copies of read/list handlers.
+"""
+files = [
+  "src/resources.ts",
+  "src/model-registry.ts",
+  "src/session-manager.ts",
+  "src/__tests__/resources.test.ts",
+]
+acceptance = [
+  "listResources includes sessions://<provider> for every CLI provider.",
+  "listResources includes models://<provider> for every CLI provider.",
+  "sessions://all and sessions://<provider> remain owner-scoped.",
+  "API provider resources continue to work with configured provider names.",
+  "readResource dispatch is generic for provider resources and does not spell out provider names.",
+  "Adding a fake provider definition in a test produces models://fake and sessions://fake without editing resources.ts.",
+]
+commands = [
+  "npx vitest run src/__tests__/resources.test.ts src/__tests__/session-tools.test.ts",
+]
+
+[[nodes]]
+id = "phase-3-live-model-discovery"
+phase = "models"
+depends_on = ["phase-2-generated-model-and-session-resources"]
+description = """
+Make model discovery provider-aware and account-aware. Use native model-listing
+commands where upstream exposes them, config/catalog inspection where that is
+the provider's source of truth, and accurate fallback metadata where a CLI owns
+model selection internally.
+"""
+files = [
+  "src/model-registry.ts",
+  "src/provider-model-discovery.ts",
+  "src/provider-tool-capabilities.ts",
+  "src/__tests__/model-registry.test.ts",
+]
+acceptance = [
+  "Codex can expose bundled/live debug model catalogs.",
+  "Antigravity uses agy models.",
+  "Grok uses grok models and custom config facts.",
+  "Mistral exposes config/env based active model facts and agent profiles.",
+  "Devin exposes model controls without hardcoding account-specific availability.",
+  "Claude exposes aliases, full ids, effort levels, and fallback chains.",
+]
+commands = [
+  "npx vitest run src/__tests__/model-registry.test.ts src/__tests__/provider-tool-capabilities.test.ts",
+]
+
+[[nodes]]
+id = "phase-4-complete-cli-request-fields"
+phase = "request-tools"
+depends_on = ["phase-1b-runtime-capability-discovery"]
+description = """
+Build each provider request schema and argv builder from discovered CLI
+capabilities. Each mapped field must have Zod validation, upstream arg
+validation, golden argv tests, async parity, and documentation. Newly discovered
+safe fields should become available without source edits after startup or
+surface reload.
+"""
+files = [
+  "src/index.ts",
+  "src/provider-codegen.ts",
+  "src/upstream-contracts.ts",
+  "src/__tests__/*handler*.test.ts",
+  "src/__tests__/*argv*.test.ts",
+]
+acceptance = [
+  "Claude request fields cover documented print, stream, permission, tool, MCP, prompt, session, background, plugin, and worktree flags.",
+  "Codex request fields cover exec, resume, image, model, OSS, sandbox, approval, search, schema, JSON, config, profile, and cwd/add-dir flags.",
+  "Antigravity request fields cover print, prompt-interactive, project, conversation, model, sandbox, add-dir, timeout, and permissions flags.",
+  "Grok request fields cover all current headless flags and session/worktree/leader/subagent controls.",
+  "Mistral request fields cover prompt, limits, output, tools, agent, trust, workdir, add-dir, continue, and resume.",
+  "Devin request fields cover print, prompt-file, permission, sandbox, model, export, continue, resume, workspace trust, and agent-config.",
+]
+commands = [
+  "npm test -- --runInBand",
+]
+
+[[nodes]]
+id = "phase-5-native-acp-full-surface"
+phase = "acp"
+depends_on = ["phase-1b-runtime-capability-discovery"]
+description = """
+Promote native ACP providers to complete protocol surfaces. The gateway must
+route every ACP method advertised by the provider capability response and must
+report precise capability errors for methods the provider does not advertise.
+"""
+files = [
+  "src/acp/types.ts",
+  "src/acp/client.ts",
+  "src/acp/process-manager.ts",
+  "src/acp/provider-registry.ts",
+  "src/acp/event-normalizer.ts",
+  "src/acp/session-map.ts",
+  "src/provider-acp-capabilities.ts",
+  "src/__tests__/acp-*.test.ts",
+]
+acceptance = [
+  "Grok transport=acp supports the full advertised grok agent stdio session lifecycle.",
+  "Mistral transport=acp supports the full advertised vibe-acp session lifecycle.",
+  "Devin transport=acp supports devin acp including agent-type capability selection.",
+  "ACP capability resources expose initialize response details for every native provider.",
+  "ACP method availability is derived from initialize/session capability discovery, not a hand-coded native provider table.",
+  "Changing a fake ACP initialize response in tests changes provider-acp resources and method availability without source edits.",
+  "Permission, terminal, filesystem, MCP, usage, plan, tool, mode, config, cancel, and stop-reason flows are typed and tested.",
+  "Claude, Codex, and Antigravity report no upstream native ACP entrypoint without adapter masquerading.",
+]
+commands = [
+  "npx vitest run src/__tests__/acp-types.test.ts src/__tests__/acp-client.test.ts src/__tests__/acp-process-manager.test.ts src/__tests__/acp-provider-registry.test.ts src/__tests__/acp-event-normalizer.test.ts src/__tests__/acp-session-map.test.ts src/__tests__/acp-smoke-harness.test.ts",
+]
+
+[[nodes]]
+id = "phase-6-provider-admin-surfaces"
+phase = "admin"
+depends_on = ["phase-1b-runtime-capability-discovery"]
+description = """
+Expose provider-owned admin surfaces in a uniform, typed, gated way. Read-only
+diagnostics should be safe and easy to call; mutating operations must require
+explicit config and produce audit records.
+"""
+files = [
+  "src/provider-admin-tools.ts",
+  "src/upstream-contracts.ts",
+  "src/index.ts",
+  "src/__tests__/provider-admin-tools.test.ts",
+]
+acceptance = [
+  "Auth status, model list, doctor/status/about, version, and help probes are exposed as read-only structured tools or resources.",
+  "MCP management commands are exposed for Claude, Codex, Antigravity, Grok, Mistral, and Devin where upstream supports them.",
+  "Plugin and marketplace management commands are exposed for providers that support plugins.",
+  "Session management admin commands are exposed for providers that support session list/export/import/archive/delete/fork.",
+  "Cloud, dashboard, worktree, sandbox, worker, and app-server controls are exposed where upstream supports them.",
+  "Admin command availability is derived from discovered subcommand help and safety policy, not hand-coded provider tables.",
+  "Changing a fake provider subcommand help tree in tests updates provider-subcommands and admin projections without source edits.",
+  "Mutating admin operations are disabled until explicit gateway config enables them.",
+]
+commands = [
+  "npx vitest run src/__tests__/provider-admin-tools.test.ts src/__tests__/upstream-contracts.test.ts",
+]
+
+[[nodes]]
+id = "phase-7-output-and-event-normalization"
+phase = "normalization"
+depends_on = ["phase-4-complete-cli-request-fields", "phase-5-native-acp-full-surface"]
+description = """
+Unify output normalization across CLI and ACP transports while preserving
+provider-specific structured details. Do not reduce rich provider events to
+plain text when structured fields are available.
+"""
+files = [
+  "src/claude-json-parser.ts",
+  "src/codex-json-parser.ts",
+  "src/gemini-json-parser.ts",
+  "src/grok-json-parser.ts",
+  "src/mistral-meta-json-parser.ts",
+  "src/acp/event-normalizer.ts",
+  "src/flight-recorder.ts",
+]
+acceptance = [
+  "Every provider emits final text, structured output, usage, session id, tool events, errors, and stop reasons where upstream supplies them.",
+  "Streaming and JSON outputs are consumed without blocking stdout JSON-RPC.",
+  "Async job deferred responses preserve enough provider metadata to poll, cancel, and resume correctly.",
+]
+commands = [
+  "npx vitest run src/__tests__/*parser*.test.ts src/__tests__/acp-event-normalizer.test.ts src/__tests__/flight-recorder*.test.ts",
+]
+
+[[nodes]]
+id = "phase-8-provider-capability-docs-and-skills"
+phase = "docs"
+depends_on = ["phase-2-generated-model-and-session-resources", "phase-6-provider-admin-surfaces", "phase-7-output-and-event-normalization"]
+description = """
+Update public docs and agent skills so users see the provider surface that the
+gateway actually implements. Docs must distinguish CLI, native ACP, provider
+admin, model discovery, session continuity, and API provider surfaces.
+"""
+files = [
+  "README.md",
+  "CLAUDE.md",
+  ".agents/skills/provider-claude/SKILL.md",
+  ".agents/skills/provider-codex/SKILL.md",
+  ".agents/skills/provider-gemini/SKILL.md",
+  ".agents/skills/provider-grok/SKILL.md",
+  ".agents/skills/provider-mistral/SKILL.md",
+]
+acceptance = [
+  "README lists every provider with CLI, native ACP, resources, model discovery, admin surfaces, and validation commands.",
+  "Provider skills are updated to match current upstream contracts and installed versions.",
+  "Docs contain no limited-runtime wording for native ACP providers once full protocol support is implemented.",
+  "Docs do not claim native ACP support for providers whose upstream CLI does not advertise it.",
+]
+commands = [
+  "npm run format:check",
+  "rg -n \"pilot|deferred|watchlist|not yet|todo|incomplete\" README.md docs .agents/skills || true",
+]
+
+[[nodes]]
+id = "phase-9-cross-llm-review-and-release-gate"
+phase = "validation"
+depends_on = [
+  "phase-3-live-model-discovery",
+  "phase-4-complete-cli-request-fields",
+  "phase-5-native-acp-full-surface",
+  "phase-6-provider-admin-surfaces",
+  "phase-8-provider-capability-docs-and-skills",
+]
+description = """
+Run the standard external review loop over the exact diff. Reviewers must verify
+claims against code, docs, tests, and command output. Fix concrete findings or
+respond with code evidence.
+"""
+files = [
+  "all changed files",
+]
+acceptance = [
+  "Claude review gives unconditional approval or concrete blockers.",
+  "Grok review gives unconditional approval or concrete blockers.",
+  "Cursor review gives unconditional approval or concrete blockers.",
+  "Codex built-in review gives unconditional approval or concrete blockers.",
+  "Every reviewer receives the exact changed-file list and verification report.",
+]
+commands = [
+  "npm run check",
+  "npm run upstream:contracts",
+]

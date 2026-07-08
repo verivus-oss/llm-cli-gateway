@@ -6,6 +6,20 @@ import { AsyncJobManager } from "../async-job-manager.js";
 import { readPersistedRequest } from "../cache-stats.js";
 import { FlightRecorder } from "../flight-recorder.js";
 import { SqliteJobStore, type JobStore, computeRequestKey } from "../job-store.js";
+import { openDatabase } from "../sqlite-driver.js";
+
+/**
+ * #139: force a job's fencing lease into the past on the same DB file, to
+ * simulate the owning gateway instance having died (its heartbeat stopped).
+ */
+function expireLease(dbPath: string, jobId: string): void {
+  const db = openDatabase(dbPath);
+  try {
+    db.prepare("UPDATE jobs SET lease_deadline = 1 WHERE id = ?").run(jobId);
+  } finally {
+    db.close();
+  }
+}
 
 /**
  * These tests focus on the durability + dedup behavior added on top of the
@@ -107,8 +121,8 @@ describe("AsyncJobManager + JobStore (durability + dedup)", () => {
     expect(result?.stdout).toBe("hi from gemini");
   });
 
-  it("markOrphanedOnStartup runs on construction and rewrites running rows", () => {
-    // Seed a 'running' row from a prior gateway run.
+  it("#139: startup lease sweep orphans a dead-owner (lease-expired) row on construction", () => {
+    // Seed a row from a prior gateway run, then age its lease (owner died).
     const t = new Date().toISOString();
     store.recordStart({
       id: "orphan-candidate",
@@ -118,14 +132,41 @@ describe("AsyncJobManager + JobStore (durability + dedup)", () => {
       args: ["exec", "hi"],
       startedAt: t,
       pid: 1,
+      ownerInstance: "prior-instance",
     });
+    expireLease(dbPath, "orphan-candidate");
 
-    // Spin up a fresh manager — its constructor should mark the row orphaned.
+    // Spin up a fresh manager; its constructor runs the lease sweep.
     const fresh = new AsyncJobManager(undefined, undefined, store);
 
     const snapshot = fresh.getJobSnapshot("orphan-candidate");
     expect(snapshot?.status).toBe("orphaned");
-    expect(snapshot?.error).toContain("Gateway restarted");
+    expect(snapshot?.error).toContain("no longer alive");
+  });
+
+  it("#139: a fresh instance does NOT orphan a live-lease job, but DOES once the lease expires", () => {
+    // Seed a row owned by a DIFFERENT, still-live instance (fresh lease).
+    const t = new Date().toISOString();
+    store.recordStart({
+      id: "other-instance-running",
+      correlationId: "other",
+      requestKey: "k2",
+      cli: "codex",
+      args: ["exec", "hi"],
+      startedAt: t,
+      pid: 1,
+      ownerInstance: "live-instance",
+    });
+
+    // A fresh instance (e.g. an ephemeral stdio spawn on a shared postgres store)
+    // must NOT orphan another instance's live-lease job. This is the #139 fix.
+    const b = new AsyncJobManager(undefined, undefined, store);
+    expect(b.getJobSnapshot("other-instance-running")?.status).toBe("queued");
+
+    // Now the owner dies (lease lapses): a subsequent instance's sweep recovers it.
+    expireLease(dbPath, "other-instance-running");
+    const c = new AsyncJobManager(undefined, undefined, store);
+    expect(c.getJobSnapshot("other-instance-running")?.status).toBe("orphaned");
   });
 
   it("orphaned startup readback preserves captured stdout as completed and no-output rows as restart failures", () => {
@@ -166,6 +207,11 @@ describe("AsyncJobManager + JobStore (durability + dedup)", () => {
         prompt: "review",
         asyncJobId: "no-output",
       });
+
+      // #139: both rows' owners are gone, so age their leases into the past; the
+      // fresh manager's startup sweep then orphans them.
+      expireLease(dbPath, "captured-output");
+      expireLease(dbPath, "no-output");
 
       const fresh = new AsyncJobManager(undefined, undefined, store, rec);
 

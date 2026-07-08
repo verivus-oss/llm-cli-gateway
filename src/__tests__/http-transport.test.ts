@@ -12,6 +12,8 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { startHttpGateway, type HttpGatewayHandle } from "../http-transport.js";
 import { getRequestContext } from "../request-context.js";
 import type { HttpSessionLimitsConfig } from "../config.js";
+import { buildRemoteConnectorUrls } from "../remote-url.js";
+import { gatherRemoteHttpOAuthReadiness } from "../doctor.js";
 
 // Issue #130: helpers for the HTTP session-lifecycle tests.
 function httpLimits(overrides: Partial<HttpSessionLimitsConfig> = {}): HttpSessionLimitsConfig {
@@ -187,6 +189,51 @@ describe("Layer 6 HTTP MCP transport (U20)", () => {
     }
   });
 
+  it("refuses public-client OAuth on a loopback bind fronted by a public URL (F17 tunnel hardening)", async () => {
+    const dir = writeOAuthConfig([
+      "[http.oauth]",
+      "enabled = true",
+      "allow_public_clients = true",
+      "",
+    ]);
+    process.env.LLM_GATEWAY_PUBLIC_URL = "https://gw.example.trycloudflare.com/mcp";
+    try {
+      await expect(
+        startHttpGateway({
+          host: "127.0.0.1",
+          port: 0,
+          path: "/mcp",
+          createGatewayServer: () => makeEchoServer(),
+        })
+      ).rejects.toThrow(/Refusing to start/i);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses open_dev OAuth on a loopback bind fronted by a tunnel provider (F17 tunnel hardening)", async () => {
+    const dir = writeOAuthConfig([
+      "[http.oauth]",
+      "enabled = true",
+      'registration_policy = "open_dev"',
+      "",
+    ]);
+    process.env.LLM_GATEWAY_OAUTH_OPEN_DEV = "1";
+    process.env.LLM_GATEWAY_TUNNEL_PROVIDER = "gw.example.trycloudflare.com";
+    try {
+      await expect(
+        startHttpGateway({
+          host: "127.0.0.1",
+          port: 0,
+          path: "/mcp",
+          createGatewayServer: () => makeEchoServer(),
+        })
+      ).rejects.toThrow(/Refusing to start/i);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("open_dev registration is env-gated, not Host-header inferred (F17)", async () => {
     const dir = writeOAuthConfig([
       "[http.oauth]",
@@ -194,9 +241,10 @@ describe("Layer 6 HTTP MCP transport (U20)", () => {
       'registration_policy = "open_dev"',
       "",
     ]);
-    process.env.LLM_GATEWAY_PUBLIC_URL = "https://gateway.example.test/mcp";
+    // Pure loopback with no public URL / tunnel: open_dev is allowed to start
+    // (the F17 hardening only fails closed when publicly exposed), and the OAuth
+    // issuer origin falls back to the loopback Host header.
     try {
-      // Loopback bind so the F17 fail-closed guard does not trip.
       gateway = await startHttpGateway({
         host: "127.0.0.1",
         port: 0,
@@ -1268,5 +1316,92 @@ describe("Layer 6 HTTP MCP transport (U20)", () => {
     // few reaper intervals must not throw or resurrect state.
     await new Promise(resolve => setTimeout(resolve, 60));
     expect(gw.sessionCount()).toBe(0);
+  });
+
+  // Phase 5 (this slice): the setup/diagnostics surfaces and the live runtime
+  // metadata must not drift. Boot a real OAuth-enabled gateway and assert the
+  // served well-known metadata + WWW-Authenticate challenge equal the shared
+  // URL helper AND the doctor readiness projection for the same config.
+  it("well-known metadata + WWW-Authenticate match the shared URL helper and doctor readiness", async () => {
+    const dir = writeOAuthConfig([
+      "[http.oauth]",
+      "enabled = true",
+      "[[http.oauth.clients]]",
+      'client_id = "chatgpt"',
+      `client_secret_hash = "${hashSecret("s3cret")}"`,
+      'allowed_redirect_uris = ["https://chatgpt.com/connector/callback"]',
+      "",
+    ]);
+    process.env.LLM_GATEWAY_PUBLIC_URL = "https://gw.example.test/mcp";
+    try {
+      gateway = await startHttpGateway({
+        host: "127.0.0.1",
+        port: 0,
+        path: "/mcp",
+        createGatewayServer: () => makeEchoServer(),
+      });
+
+      const expected = buildRemoteConnectorUrls({
+        baseOrigin: "https://gw.example.test",
+        mcpPath: "/mcp",
+        oauthEnabled: true,
+      });
+
+      // Protected-resource metadata.
+      const prm = await fetch(new URL("/.well-known/oauth-protected-resource", gateway.url));
+      const prmBody = (await prm.json()) as Record<string, unknown>;
+      expect(prmBody.resource).toBe(expected.mcpUrl);
+      expect(prmBody.authorization_servers).toEqual([expected.issuer]);
+
+      // Authorization-server metadata.
+      const asm = await fetch(new URL("/.well-known/oauth-authorization-server", gateway.url));
+      const asmBody = (await asm.json()) as Record<string, unknown>;
+      expect(asmBody.issuer).toBe(expected.issuer);
+      expect(asmBody.authorization_endpoint).toBe(expected.authorizationUrl);
+      expect(asmBody.token_endpoint).toBe(expected.tokenUrl);
+      expect(asmBody.registration_endpoint).toBe(expected.registrationUrl);
+
+      // 401 WWW-Authenticate resource_metadata points at the SAME protected-resource URL.
+      const denied = await fetch(new URL("/mcp", gateway.url), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} }),
+      });
+      expect(denied.status).toBe(401);
+      const wwwAuth = denied.headers.get("www-authenticate") ?? "";
+      expect(wwwAuth).toContain(`resource_metadata="${expected.protectedResourceMetadataUrl}"`);
+
+      // Doctor readiness reports the identical URLs for the same config.
+      const readiness = gatherRemoteHttpOAuthReadiness(process.env);
+      expect(readiness.mcp_url).toBe(expected.mcpUrl);
+      expect(readiness.oauth.issuer).toBe(expected.issuer);
+      expect(readiness.oauth.authorization_url).toBe(expected.authorizationUrl);
+      expect(readiness.oauth.token_url).toBe(expected.tokenUrl);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("readiness reports missing_public_url (not a malformed URL) when OAuth is enabled without a public URL", () => {
+    const dir = writeOAuthConfig([
+      "[http.oauth]",
+      "enabled = true",
+      "[[http.oauth.clients]]",
+      'client_id = "chatgpt"',
+      `client_secret_hash = "${hashSecret("s3cret")}"`,
+      'allowed_redirect_uris = ["https://chatgpt.com/connector/callback"]',
+      "",
+    ]);
+    delete process.env.LLM_GATEWAY_PUBLIC_URL;
+    try {
+      const readiness = gatherRemoteHttpOAuthReadiness(process.env);
+      expect(readiness.stage).toBe("missing_public_url");
+      // No base origin -> null URLs, never a partially-formed URL.
+      expect(readiness.mcp_url).toBeNull();
+      expect(readiness.oauth.authorization_url).toBeNull();
+      expect(readiness.oauth.token_url).toBeNull();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
