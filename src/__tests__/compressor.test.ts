@@ -214,6 +214,27 @@ describe("ansi transform (Tier P + CR fold, spec 6.6)", () => {
     expect(out).toContain("log line with red color");
     expect(out).toContain("and `\x1b[32minline\x1b[0m` code");
   });
+
+  it("strips a multi-line OSC string as one control sequence (impl review R2-1)", () => {
+    const counts: MarkerCounts = { folded: 0, escaped: 0 };
+    // An OSC 8 hyperlink whose URL contains a newline before the BEL
+    // terminator must be removed whole, not leak its payload line by line.
+    const src = "before\x1b]8;;https://secret.example/a\ncontinued\x07label\x1b]8;;\x07 after\n";
+    const out = stripAnsi(src, counts);
+    expect(out).not.toContain("secret.example");
+    expect(out).not.toContain("\x1b]8");
+    expect(out).toContain("beforelabel after");
+  });
+
+  it("does not corrupt a CR line containing wide characters (impl review R2-2)", () => {
+    const counts: MarkerCounts = { folded: 0, escaped: 0 };
+    // Column overlay by code unit would drop a byte for wide chars, so a
+    // non-ASCII CR line is left byte-identical (content-preserving).
+    const src = "好abc\rXY\n";
+    const out = stripAnsi(src, counts);
+    expect(out).toBe(src); // unchanged: no content loss
+    expect(counts.folded).toBe(0);
+  });
 });
 
 describe("whitespace transform + fence protection (Tier P, spec 6.7)", () => {

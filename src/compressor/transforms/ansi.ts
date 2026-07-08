@@ -82,12 +82,21 @@ function stripEscapes(text: string): string {
     .replace(STRAY_C0, "");
 }
 
+// Column overlay is only safe when every character is one display column
+// wide (7-bit ASCII printable). Wide chars (CJK), zero-width combining marks,
+// and emoji make UTF-16-index overlay lossy, so a CR line containing any
+// non-ASCII byte is left unchanged rather than risk dropping content.
+// \r (frame separator) and \t are allowed alongside printable ASCII; the
+// visible frame characters must all be single-column ASCII.
+const ASCII_ONLY = /^[\x09\x0d\x20-\x7e]*$/;
+
 /**
- * Compute the visible line produced by carriage-return overwrites. A CR
- * moves the cursor to column 0 WITHOUT clearing, so each frame's characters
- * overwrite from column 0 and any columns a later (shorter) frame does not
- * reach retain the earlier frame's character. E.g. "abcdef\rXY" renders as
- * "XYcdef", not "XY" (keeping only the last segment would be content loss).
+ * Compute the visible line produced by carriage-return overwrites on an
+ * ASCII-only line. A CR moves the cursor to column 0 WITHOUT clearing, so each
+ * frame's characters overwrite from column 0 and any columns a later (shorter)
+ * frame does not reach retain the earlier frame's character. E.g.
+ * "abcdef\rXY" renders as "XYcdef", not "XY" (keeping only the last segment
+ * would be content loss).
  */
 function overlayFrames(frames: string[]): string {
   const cells: string[] = [];
@@ -98,7 +107,8 @@ function overlayFrames(frames: string[]): string {
 }
 
 /** Collapse the CR overwrites in one already-escape-stripped line, appending
- * the counted sentinel when any internal \r was present. */
+ * the counted sentinel when any internal \r was present. Non-ASCII bodies are
+ * left byte-identical (overlay by code unit would be column-inaccurate). */
 function collapseLine(line: string, out: string[], counts: MarkerCounts): void {
   const crlf = line.endsWith("\r");
   const body = crlf ? line.slice(0, -1) : line;
@@ -106,30 +116,50 @@ function collapseLine(line: string, out: string[], counts: MarkerCounts): void {
     out.push(line);
     return;
   }
-  const visible = overlayFrames(body.split("\r"));
+  if (!ASCII_ONLY.test(body)) {
+    // Cannot compute display columns cheaply; keep the raw line (identity).
+    out.push(line);
+    return;
+  }
+  const frames = body.split("\r");
+  const visible = overlayFrames(frames);
   out.push(crlf ? `${visible}\r` : visible);
-  out.push(crMarker(body.split("\r").length - 1));
+  out.push(crMarker(frames.length - 1));
   counts.folded += 1;
 }
 
+// Split a segment into alternating [non-code, inline-code, non-code, ...]
+// pieces (odd indices are backtick-delimited spans). Matches the optimizer's
+// inline-code convention so ANSI is stripped only OUTSIDE inline code.
+const INLINE_CODE = /(`[^`]*`)/g;
+
 /**
- * The ANSI route body: per line (outside fences), strip ECMA-48 sequences and
- * stray C0 controls, then collapse \r overwrites. A line containing a backtick
- * is left byte-identical so inline code spans are never touched (spec 6.7,
- * the same global protection normalizeWhitespace applies). Callers must have
- * routed through hasDangerousSequences first; this returns the input unchanged
- * if dangerous sequences are present (defense in depth).
+ * The ANSI route body (outside fenced blocks): strip ECMA-48 sequences and
+ * stray C0 controls OUTSIDE inline code spans, then collapse \r overwrites per
+ * line. Escape-stripping runs over whole non-code pieces (not per line) so a
+ * multi-line OSC/DCS string is matched and removed as one control string.
+ * Inline code spans (backtick-delimited) and lines containing a backtick are
+ * left byte-identical (spec 6.7). Callers must have routed through
+ * hasDangerousSequences first; this returns the input unchanged if dangerous
+ * sequences are present (defense in depth).
  */
 export function stripAnsi(text: string, counts: MarkerCounts): string {
   if (hasDangerousSequences(text)) return text;
   return mapUnfenced(text, segment => {
+    // Strip escapes only in the non-inline-code pieces, over the whole piece
+    // so multi-line string sequences (OSC/DCS) are handled correctly.
+    const stripped = segment
+      .split(INLINE_CODE)
+      .map((piece, i) => (i % 2 === 1 ? piece : stripEscapes(piece)))
+      .join("");
+    // CR-collapse per line; a line carrying inline code is left untouched.
     const out: string[] = [];
-    for (const line of segment.split("\n")) {
+    for (const line of stripped.split("\n")) {
       if (line.includes("`")) {
         out.push(line);
         continue;
       }
-      collapseLine(stripEscapes(line), out, counts);
+      collapseLine(line, out, counts);
     }
     return out.join("\n");
   });
