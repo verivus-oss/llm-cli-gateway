@@ -104,9 +104,10 @@ jobs:
       # ---------------------------------------------------------------
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          # >= go1.26.4 clears the current crypto/x509 + net/textproto stdlib
-          # advisories that govulncheck flags on older toolchains.
-          go-version: "1.26.4"
+          # >= go1.26.5 clears the earlier crypto/x509 + net/textproto stdlib
+          # advisories (fixed in 1.26.4) plus GO-2026-4970 / GO-2026-5856, which
+          # govulncheck flags on older toolchains.
+          go-version: "1.26.5"
 
       - name: Install gosec + govulncheck (pinned)
         run: |
