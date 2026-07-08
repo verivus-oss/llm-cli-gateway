@@ -341,7 +341,7 @@ export const ACP_ENTRYPOINT_CONTRACTS: Record<CliType, AcpEntrypointContract> = 
     status: "native",
     executable: "devin",
     entrypointArgs: ["acp"],
-    targetVersion: "devin 2026.8.18 (16737566)",
+    targetVersion: "devin 3000.1.27 (0d4bf12e)",
     // `devin --version` is the safe probe; bare `devin acp` starts the live ACP
     // server over stdio and is intentionally NOT probed here.
     probeArgs: [["--version"]],
