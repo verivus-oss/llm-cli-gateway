@@ -206,13 +206,15 @@ describe("ansi transform (Tier P + CR fold, spec 6.6)", () => {
     expect(out).not.toMatch(/^XY\n/);
   });
 
-  it("does not strip ANSI inside an inline code span (impl review B2)", () => {
+  it("preserves inline-code visible bytes while stripping embedded control (impl review B2/R3)", () => {
     const counts: MarkerCounts = { folded: 0, escaped: 0 };
     const src = "log line with \x1b[31mred\x1b[0m color\nand `\x1b[32minline\x1b[0m` code\n";
     const out = stripAnsi(src, counts);
-    // The bare-prose ANSI is stripped, the inline-code line is byte-identical.
+    // Control bytes are removed everywhere (control lexing wins on the
+    // terminal route), but the inline code's visible text and backticks stay.
     expect(out).toContain("log line with red color");
-    expect(out).toContain("and `\x1b[32minline\x1b[0m` code");
+    expect(out).toContain("and `inline` code");
+    expect(out).not.toContain("\x1b");
   });
 
   it("strips a multi-line OSC string as one control sequence (impl review R2-1)", () => {
@@ -223,6 +225,17 @@ describe("ansi transform (Tier P + CR fold, spec 6.6)", () => {
     const out = stripAnsi(src, counts);
     expect(out).not.toContain("secret.example");
     expect(out).not.toContain("\x1b]8");
+    expect(out).toContain("beforelabel after");
+  });
+
+  it("strips an OSC string whose payload contains backticks (impl review R3)", () => {
+    const counts: MarkerCounts = { folded: 0, escaped: 0 };
+    // Control lexing wins over inline-code splitting: a backtick inside the
+    // OSC URL must not break the control string into a leaking fragment.
+    const src = "before\x1b]8;;https://secret.example/`token`\x07label\x1b]8;;\x07 after\n";
+    const out = stripAnsi(src, counts);
+    expect(out).not.toContain("secret.example");
+    expect(out).not.toContain("`token`");
     expect(out).toContain("beforelabel after");
   });
 

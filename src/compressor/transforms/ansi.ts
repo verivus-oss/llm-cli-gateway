@@ -128,30 +128,31 @@ function collapseLine(line: string, out: string[], counts: MarkerCounts): void {
   counts.folded += 1;
 }
 
-// Split a segment into alternating [non-code, inline-code, non-code, ...]
-// pieces (odd indices are backtick-delimited spans). Matches the optimizer's
-// inline-code convention so ANSI is stripped only OUTSIDE inline code.
-const INLINE_CODE = /(`[^`]*`)/g;
-
 /**
  * The ANSI route body (outside fenced blocks): strip ECMA-48 sequences and
- * stray C0 controls OUTSIDE inline code spans, then collapse \r overwrites per
- * line. Escape-stripping runs over whole non-code pieces (not per line) so a
- * multi-line OSC/DCS string is matched and removed as one control string.
- * Inline code spans (backtick-delimited) and lines containing a backtick are
- * left byte-identical (spec 6.7). Callers must have routed through
- * hasDangerousSequences first; this returns the input unchanged if dangerous
- * sequences are present (defense in depth).
+ * stray C0 controls over the WHOLE segment, then collapse \r overwrites per
+ * line.
+ *
+ * Precedence (impl review R2/R3): control-sequence lexing wins over markdown
+ * inline-code protection on the terminal route. A control string is matched
+ * and removed as one unit even when its payload contains backticks or spans a
+ * newline (e.g. an OSC 8 hyperlink whose URL holds a backtick), because
+ * leaking hidden terminal-control bytes is worse than losing embedded color
+ * inside a rare inline-code span. The inline code's VISIBLE bytes (its
+ * backticks and text) still survive stripping; only raw embedded control
+ * bytes are removed. Lines carrying a backtick are still exempted from the
+ * per-line CR-collapse so inline-code formatting is not otherwise mangled,
+ * and fenced blocks are wholly untouched (mapUnfenced).
+ *
+ * Callers must have routed through hasDangerousSequences first; this returns
+ * the input unchanged if dangerous sequences are present (defense in depth).
  */
 export function stripAnsi(text: string, counts: MarkerCounts): string {
   if (hasDangerousSequences(text)) return text;
   return mapUnfenced(text, segment => {
-    // Strip escapes only in the non-inline-code pieces, over the whole piece
-    // so multi-line string sequences (OSC/DCS) are handled correctly.
-    const stripped = segment
-      .split(INLINE_CODE)
-      .map((piece, i) => (i % 2 === 1 ? piece : stripEscapes(piece)))
-      .join("");
+    // Whole-segment strip: control strings (OSC/DCS/CSI) are matched as units
+    // regardless of newlines or backticks in their payload.
+    const stripped = stripEscapes(segment);
     // CR-collapse per line; a line carrying inline code is left untouched.
     const out: string[] = [];
     for (const line of stripped.split("\n")) {
