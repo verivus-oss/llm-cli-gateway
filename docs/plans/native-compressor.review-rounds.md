@@ -76,3 +76,59 @@ Verdicts, all "APPROVE (unconditional)":
 Gate result: the spec at cfdb5a7 passes the cross-LLM review gate with four
 unconditional approvals. Stage 2 closed; implementation (PR-1) may begin
 against this spec.
+
+## Implementation review (2026-07-08): four-model, converged to unanimous approval
+
+Adversarial implementation review of the PR-1 code (feat/native-compressor-pr1)
+against the approved spec and the verification report. Reviewers verified
+against the source, not the summary.
+
+Round 1 (impl @1cd09b5 + 45f1362): Codex BLOCKERS (5), Gemini BLOCKERS (3),
+Grok APPROVE (with test-veracity gaps named), Mistral job failed. Findings,
+all fixed:
+- I1 (Codex B1, Gemini): the JSON lexer accepted invalid string escapes.
+  Fixed: copyString validates the escape set + 4-hex \u; invalid -> identity.
+- I2 (Codex B3): CR-overwrite collapse kept only the last segment, losing
+  earlier columns. Fixed: column overlay (later fix I6 added the wide-char
+  guard).
+- I3 (Codex B4): combined DEC private-mode params (?1049;25h) slipped the
+  danger check. Fixed: any ?-prefixed h/l final is dangerous.
+- I4 (Codex B2): the ANSI strip did not protect inline code. Addressed, then
+  refined by I7 below.
+- I5 (Gemini): blank-run collapse hardcoded "", corrupting CRLF blank lines.
+  Fixed: keep the first blank line's bytes.
+- I6 (Codex B5, Gemini, Grok section 8): the Section 9 integration tests were
+  only in throwaway harnesses. Fixed: committed compressor-integration.test.ts
+  (C1 byte-identity, mirror, review-integrity ordering, escape hatch,
+  llm_job_result swap/envelope/parity, dedup-key fold). Each confirmed to bite
+  via mutation probes.
+
+Round 2 (@be4e23b): Gemini APPROVE (unconditional), Mistral APPROVE
+(unconditional), Codex found two new defects introduced by the round-1 ANSI
+fixes:
+- R2-1: per-line strip broke multi-line OSC/DCS handling (payload leak).
+- R2-2: CR overlay indexed by UTF-16 code unit, dropping a byte for wide
+  chars. Both fixed (whole-piece strip; ASCII-only overlay, non-ASCII CR lines
+  left identical).
+
+Round 3 (@15d1ee4): Codex found R3, splitting on inline-code spans before
+stripping let an OSC payload containing a backtick leak. Fixed by control-
+lexing precedence: strip whole segments, inline code's visible bytes survive.
+
+Round 4 (@2857bc4): Codex found R4, the same straddle class via fence
+splitting. Fixed architecturally: the router excludes fenced content from the
+ansi-text route, so stripEscapes always lexes control strings over whole,
+unsplit text; the whole straddle class is eliminated.
+
+Round 5 (@2857bc4): Codex APPROVE (unconditional) after verifying no
+production path can hand stripEscapes a pre-split control string, the R4 case
+routes to plain without leaking, and pure ANSI still strips correctly.
+
+Correlation ids: Codex round-1 1f282f29, round-3 8788ea53, round-4 155e958d,
+round-5 0e20d4ca; Gemini round-1 f1645055, round-2 25c2b6ba; Mistral round-2
+6038dc3e. Grok's fresh re-reviews hit the 0.2.82 worker-handshake flake
+(silent empty successes); its round-1 approval stands and every gap it named
+is addressed. Full suite 1961 green; build, lint, format:check, and the
+release security audit pass.
+
+Gate result: unanimous unconditional approval. PR ready.
