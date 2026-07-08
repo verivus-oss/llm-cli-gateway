@@ -329,10 +329,10 @@ export const ACP_ENTRYPOINT_CONTRACTS: Record<CliType, AcpEntrypointContract> = 
     status: "absent_watchlist",
     executable: "agy",
     entrypointArgs: [],
-    targetVersion: "agy 1.0.14",
+    targetVersion: "agy 1.1.0",
     probeArgs: [],
     evidence:
-      "agy 1.0.14 has no ACP flag or subcommand. Legacy Gemini CLI ACP evidence does not transfer. Watchlist item.",
+      "agy 1.1.0 has no ACP flag or subcommand. Legacy Gemini CLI ACP evidence does not transfer. Watchlist item.",
     docsRef: "docs/plans/first-class-acp-gateway-extension.dag.toml#provider_matrix.gemini",
   },
   devin: {
@@ -1590,7 +1590,12 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
     // parsed by the long-flag probe, so both were dropped to keep the probe
     // quiet.) `--project` / `--new-project` / `--print-timeout` graduated to the
     // flags allowlist.
-    acknowledgedUpstreamFlags: ["--log-file", "--prompt-interactive"],
+    // `--mode` (agy 1.1.0: set the agent execution mode accept-edits|plan) is
+    // advertised by `agy --help` but the gateway does not emit it: yolo maps to
+    // --dangerously-skip-permissions and auto_edit/plan approval modes are
+    // rejected at request time (agy has no gateway-wired headless mode yet).
+    // Acknowledge-only so drift stays quiet without widening the argv allowlist.
+    acknowledgedUpstreamFlags: ["--log-file", "--mode", "--prompt-interactive"],
     env: {},
     conformanceFixtures: [
       {
