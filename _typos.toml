@@ -42,6 +42,7 @@ extend-exclude = [
   # Test fixtures and golden files — intentionally contain odd strings.
   "src/__tests__/**/*.json",
   "src/__tests__/**/*.toml",
+  "src/__tests__/fixtures/**",
 
   # Long-form research / docs trees where "wrong" words are intentional
   # (anti-pattern dictionaries, historical incident logs, etc.).

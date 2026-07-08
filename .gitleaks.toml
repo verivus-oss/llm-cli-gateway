@@ -28,6 +28,10 @@ paths = [
   # against deliberately fake provider/cloud/VCS keys, JWTs, and PEM blocks
   # (F4). Every literal in it is a fixture, never a real secret.
   '''src/__tests__/secret-redaction\.test\.ts$''',
+  # Native-compressor fixtures: real-shaped provider output samples (logs,
+  # pretty JSON, ANSI captures) used to exercise the compressor transforms.
+  # No real secrets; deliberate hash-like and control-byte content only.
+  '''src/__tests__/fixtures/compressor/.*''',
 ]
 
 # Regex-scope allowlist: specific secret patterns that gitleaks would
