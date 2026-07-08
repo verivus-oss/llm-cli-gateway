@@ -52,6 +52,7 @@ import {
 import { getAcpProviderEntry } from "./provider-registry.js";
 import type { AcpConfig, AcpProviderConfig } from "../config.js";
 import { envWithExtendedPath, getExtendedPath } from "../executor.js";
+import { applySpawnEnvIsolation } from "../spawn-env-isolation.js";
 import type { Logger } from "../logger.js";
 import { noopLogger } from "../logger.js";
 import type { CliType } from "../session-manager.js";
@@ -212,7 +213,9 @@ export function buildProviderEnv(
   providerConfig: AcpProviderConfig,
   baseEnv: ProcessEnv
 ): ProcessEnv {
-  const env = envWithExtendedPath(baseEnv, getExtendedPath());
+  // Strip inherited endpoint/proxy redirection vars (opt-in) before the ACP
+  // provider process is spawned, matching the CLI executor's spawn chokepoint.
+  const env = applySpawnEnvIsolation(envWithExtendedPath(baseEnv, getExtendedPath()));
 
   // Provider-specific isolation. Grok supports an isolated "leader socket" so a
   // gateway-spawned agent process does not collide with an interactive user
