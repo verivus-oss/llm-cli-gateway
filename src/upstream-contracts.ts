@@ -285,13 +285,13 @@ export const ACP_ENTRYPOINT_CONTRACTS: Record<CliType, AcpEntrypointContract> = 
     status: "native",
     executable: "grok",
     entrypointArgs: ["agent", "stdio"],
-    targetVersion: "grok 0.2.77 (44e77bec3a)",
+    targetVersion: "grok 0.2.91 (39d0c68723)",
     // `grok agent stdio --help` is a safe help probe; bare `grok agent stdio`
     // starts the live ACP server and is intentionally NOT probed here.
     probeArgs: [["agent", "stdio", "--help"]],
     // phase-5/8: replace limited-support label with discovered capability fact
     evidence:
-      "Native ACP via `grok agent stdio`; initialize + session/new smoke passed with isolated leader socket. Second runtime pilot. Entrypoint re-probed clean at 0.2.77.",
+      "Native ACP via `grok agent stdio`; initialize + session/new smoke passed with isolated leader socket. Second runtime pilot. Entrypoint re-probed clean at 0.2.91.",
     docsRef: "docs/plans/first-class-acp-gateway-extension.dag.toml#provider_matrix.grok",
   },
   codex: {
@@ -1689,6 +1689,7 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
             "--leader-socket",
             "--model",
             "--no-leader",
+            "--plugin-dir",
             "--reasoning-effort",
             "--reauth",
             "--xai-api-base-url",
@@ -1862,11 +1863,11 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
             "--deny",
             "--disable-web-search",
             "--disallowed-tools",
-            "--effort",
             "--experimental-memory",
             "--fork-session",
             "--json-schema",
             "--max-turns",
+            "--minimal",
             "--model",
             "--no-alt-screen",
             "--no-memory",
@@ -1938,7 +1939,9 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
     // (it generates and tracks IDs), so letting a caller inject a specific
     // new-conversation UUID would collide with that tracking and with the
     // cross-principal session-isolation guarantees. Acknowledge-only.
-    acknowledgedUpstreamFlags: [...GROK_DEBUG_HELP_FLAGS, "--session-id"],
+    // `--minimal` is a global grok 0.2.91 flag (root help + `grok ssh`); the
+    // gateway never emits it, so acknowledge-only here too.
+    acknowledgedUpstreamFlags: [...GROK_DEBUG_HELP_FLAGS, "--minimal", "--session-id"],
     mcpTools: ["grok_request", "grok_request_async"],
     mcpParameters: [
       "prompt",
