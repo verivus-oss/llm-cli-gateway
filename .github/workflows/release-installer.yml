@@ -98,11 +98,12 @@ jobs:
 
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          # Track Go 1.26.4 (matches installer/go.mod). govulncheck flagged
-          # crypto/x509 + net/textproto stdlib advisories fixed in 1.26.4, so
-          # the shipped bootstrapper binary must build on >= 1.26.4.
+          # Track Go 1.26.5 (matches installer/go.mod). govulncheck flagged
+          # crypto/x509 + net/textproto stdlib advisories (fixed in 1.26.4) and
+          # later GO-2026-4970 / GO-2026-5856 (fixed in 1.26.5), so the shipped
+          # bootstrapper binary must build on >= 1.26.5.
           # Bump in lock-step with installer/go.mod.
-          go-version: "1.26.4"
+          go-version: "1.26.5"
           # setup-go enables caching by default — explicitly disable on
           # the release path. Without this, zizmor (correctly) flags
           # cache-poisoning.

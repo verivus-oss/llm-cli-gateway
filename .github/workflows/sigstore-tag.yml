@@ -29,9 +29,9 @@ jobs:
 
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          # Lock-step with installer/go.mod (1.26.4) — builds the gitsign tool
+          # Lock-step with installer/go.mod (1.26.5): builds the gitsign tool
           # on a current, CVE-clear stdlib.
-          go-version: "1.26.4"
+          go-version: "1.26.5"
           cache: false
 
       - name: Install gitsign
