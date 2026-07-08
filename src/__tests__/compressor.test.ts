@@ -127,6 +127,21 @@ describe("router (spec 6.2)", () => {
     expect(classify(fixture("ansi-altscreen.txt"))).toBe("identity");
   });
 
+  it("routes mixed fence+ANSI content away from ansi-text (impl review R4)", () => {
+    // An OSC control string whose payload contains a fence marker would
+    // straddle the fence splitter and leak if stripped as fragments. Fenced
+    // content is mixed markdown, not pure terminal, so it must not take the
+    // ansi-text route; the ANSI escapes then pass through as content.
+    const src =
+      "before\x1b]8;;https://secret.example/\n```\nsecret\n```\n\x07label\x1b]8;;\x07 after\n";
+    expect(classify(src)).not.toBe("ansi-text");
+    const r = compressDisplayText(src, OUTBOUND);
+    // The OSC is not partially stripped (its ESC intro survives), so the URL
+    // is not leaked as bare visible text.
+    expect(r.text).toContain("\x1b]8;;https://secret.example/");
+    expect(r.transforms).not.toContain("ansi-strip");
+  });
+
   it("routes repeated-line logs to log", () => {
     expect(classify(fixture("repeated-log.txt"))).toBe("log");
   });

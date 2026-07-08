@@ -17,6 +17,12 @@ export type ContentRoute = "json" | "log" | "ansi-text" | "plain" | "identity";
 // eslint-disable-next-line no-control-regex
 const HAS_ESCAPE = /\x1b/;
 const HAS_INTERNAL_CR = /\r(?!\n|$)/;
+// A fenced code block opener (``` or ~~~, up to 3 leading spaces) anywhere.
+const HAS_FENCE = /^ {0,3}(?:`{3,}|~{3,})/m;
+
+function hasFence(text: string): boolean {
+  return HAS_FENCE.test(text);
+}
 
 /** True when some unfenced run of MIN_RUN+ byte-identical non-blank lines exists. */
 function hasRepeatedRuns(text: string): boolean {
@@ -64,7 +70,14 @@ export function classify(text: string): ContentRoute {
   const internalCr = HAS_INTERNAL_CR.test(text);
   if (escapes || internalCr) {
     if (hasDangerousSequences(text)) return "identity";
-    return "ansi-text";
+    // The ANSI transform lexes control sequences and can only do so correctly
+    // over unsplit text. Fenced code blocks force a split, and a control
+    // string whose payload straddles a fence boundary would either leak
+    // (stripped as fragments) or force touching fenced bytes. That combination
+    // is mixed markdown + terminal content, not the pure terminal/log class
+    // the ANSI transform targets, so route it away from ansi-text (the log /
+    // plain routes never strip ANSI; escape bytes pass through as content).
+    if (!hasFence(text)) return "ansi-text";
   }
   if (isStructuralJson(text)) return "json";
   if (hasRepeatedRuns(text)) return "log";
