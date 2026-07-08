@@ -6,7 +6,12 @@ import { CLAUDE_MCP_SERVER_NAMES } from "./claude-mcp-config.js";
 import { getAvailableCliInfo, type CliInfo } from "./model-registry.js";
 // Provider identity (the CLI provider list + CliType) is imported from the
 // provider definition registry, not owned here. See src/provider-definitions.ts.
-import { CLI_TYPES, getProviderDefinition, type CliType } from "./provider-definitions.js";
+import {
+  CLI_TYPES,
+  getProviderDefinition,
+  PROVIDER_TARGET_VERSIONS,
+  type CliType,
+} from "./provider-definitions.js";
 import {
   enabledApiProviders,
   isXaiProviderEnabled,
@@ -253,7 +258,7 @@ export const ACP_CONTRACT: AcpContractMetadata = {
     },
     gemini: {
       classification: "absent_watchlist",
-      summary: "Google Antigravity agy 1.0.14 has no ACP surface; watchlist item only.",
+      summary: `Google Antigravity ${PROVIDER_TARGET_VERSIONS.gemini} has no ACP surface; watchlist item only.`,
     },
     grok_api: {
       classification: "absent_watchlist",
@@ -436,7 +441,7 @@ const ACP_RESIDUAL: Record<KnownProviderCapabilityId, AcpResidualFacts> = {
     smokeSupported: false,
     smokeStatus: "unsupported",
     caveats: [
-      "Antigravity agy 1.0.14 has no ACP flag or subcommand.",
+      `Antigravity ${PROVIDER_TARGET_VERSIONS.gemini} has no ACP flag or subcommand.`,
       "Legacy Gemini CLI ACP evidence does not transfer to agy; kept on the upstream drift watchlist.",
     ],
   },

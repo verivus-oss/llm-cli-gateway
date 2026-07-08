@@ -325,6 +325,28 @@ export interface ProviderDefinition {
 // a definition missing a required field, fails `npm run build`.
 // ---------------------------------------------------------------------------
 
+/**
+ * Single source of truth for the installed provider CLI version each contract
+ * was last verified against. Stated exactly ONCE here and referenced everywhere
+ * the version is needed: `upstreamContract.targetVersion` and `acp.evidence`
+ * below, the ACP entrypoint contracts (`ACP_ENTRYPOINT_CONTRACTS` in
+ * upstream-contracts.ts), the ACP runtime registry (acp/provider-registry.ts),
+ * and the installed-vs-contract drift check (`discoveryContractDrift`). It is
+ * one installed binary per provider, so the CLI-contract and ACP-entrypoint
+ * evidence share the same verified version by construction. Bump it here (only
+ * here) after re-probing a provider CLI upgrade; the drift probes and surfaces
+ * all follow automatically.
+ */
+export const PROVIDER_TARGET_VERSIONS: Record<CliType, string> = {
+  claude: "claude 2.1.204",
+  codex: "codex-cli 0.143.0",
+  gemini: "agy 1.1.0",
+  grok: "grok 0.2.91 (39d0c68723)",
+  mistral: "vibe 2.19.0",
+  devin: "devin 3000.1.27 (0d4bf12e)",
+  cursor: "cursor-agent 2026.07.01-41b2de7",
+};
+
 const PROVIDER_DEFINITIONS = {
   claude: {
     id: "claude",
@@ -412,8 +434,7 @@ const PROVIDER_DEFINITIONS = {
       nativeEntrypoint: null,
       entrypoint: null,
       probeArgv: [],
-      evidence:
-        "No native Claude Code ACP subcommand or flag in installed help (claude 2.1.198) or the official CLI reference. Coverage is CLI-first; ACP reporting says no native entrypoint is advertised.",
+      evidence: `No native Claude Code ACP subcommand or flag in installed help (${PROVIDER_TARGET_VERSIONS.claude}) or the official CLI reference. Coverage is CLI-first; ACP reporting says no native entrypoint is advertised.`,
     },
     safetyModes: {
       sandbox: false,
@@ -425,7 +446,10 @@ const PROVIDER_DEFINITIONS = {
     outputFormats: ["text", "json", "stream-json"],
     streamingFormats: ["stream-json"],
     resourcePolicy: { exposesModelsResource: true, exposesSessionsResource: true },
-    upstreamContract: { targetVersion: "Claude Code 2.1.198", helpChecksumRef: "claude--help.txt" },
+    upstreamContract: {
+      targetVersion: PROVIDER_TARGET_VERSIONS.claude,
+      helpChecksumRef: "claude--help.txt",
+    },
     capabilityScope: "full",
   },
   codex: {
@@ -549,8 +573,7 @@ const PROVIDER_DEFINITIONS = {
       nativeEntrypoint: null,
       entrypoint: null,
       probeArgv: [],
-      evidence:
-        "codex-cli 0.142.4 advertises mcp-server and app-server transports, not a native ACP agent entrypoint. Third-party adapters exist but are documentation only and are never treated as native gateway ACP.",
+      evidence: `${PROVIDER_TARGET_VERSIONS.codex} advertises mcp-server and app-server transports, not a native ACP agent entrypoint. Third-party adapters exist but are documentation only and are never treated as native gateway ACP.`,
     },
     safetyModes: {
       sandbox: true,
@@ -568,7 +591,7 @@ const PROVIDER_DEFINITIONS = {
     streamingFormats: ["jsonl"],
     resourcePolicy: { exposesModelsResource: true, exposesSessionsResource: true },
     upstreamContract: {
-      targetVersion: "codex-cli 0.142.4",
+      targetVersion: PROVIDER_TARGET_VERSIONS.codex,
       helpChecksumRef: "codex-exec--help.txt",
     },
     capabilityScope: "full",
@@ -656,8 +679,7 @@ const PROVIDER_DEFINITIONS = {
       nativeEntrypoint: null,
       entrypoint: null,
       probeArgv: [],
-      evidence:
-        "agy 1.0.14 has no ACP flag or subcommand in installed help or the Antigravity CLI docs. Legacy Gemini CLI ACP evidence does not transfer. No native entrypoint advertised.",
+      evidence: `${PROVIDER_TARGET_VERSIONS.gemini} has no ACP flag or subcommand in installed help or the Antigravity CLI docs. Legacy Gemini CLI ACP evidence does not transfer. No native entrypoint advertised.`,
     },
     safetyModes: {
       sandbox: true,
@@ -669,7 +691,10 @@ const PROVIDER_DEFINITIONS = {
     outputFormats: ["text"],
     streamingFormats: [],
     resourcePolicy: { exposesModelsResource: true, exposesSessionsResource: true },
-    upstreamContract: { targetVersion: "agy 1.0.14", helpChecksumRef: "agy--help.txt" },
+    upstreamContract: {
+      targetVersion: PROVIDER_TARGET_VERSIONS.gemini,
+      helpChecksumRef: "agy--help.txt",
+    },
     capabilityScope: "full",
   },
   grok: {
@@ -777,7 +802,7 @@ const PROVIDER_DEFINITIONS = {
     streamingFormats: ["json"],
     resourcePolicy: { exposesModelsResource: true, exposesSessionsResource: true },
     upstreamContract: {
-      targetVersion: "grok 0.2.77 (44e77bec3a)",
+      targetVersion: PROVIDER_TARGET_VERSIONS.grok,
       helpChecksumRef: "grok--help.txt",
     },
     capabilityScope: "full",
@@ -904,7 +929,10 @@ const PROVIDER_DEFINITIONS = {
     outputFormats: ["text", "json"],
     streamingFormats: [],
     resourcePolicy: { exposesModelsResource: true, exposesSessionsResource: true },
-    upstreamContract: { targetVersion: "vibe 2.18.3", helpChecksumRef: "vibe--help.txt" },
+    upstreamContract: {
+      targetVersion: PROVIDER_TARGET_VERSIONS.mistral,
+      helpChecksumRef: "vibe--help.txt",
+    },
     capabilityScope: "full",
   },
   devin: {
@@ -1019,7 +1047,7 @@ const PROVIDER_DEFINITIONS = {
     streamingFormats: [],
     resourcePolicy: { exposesModelsResource: true, exposesSessionsResource: true },
     upstreamContract: {
-      targetVersion: "devin 2026.8.18 (16737566)",
+      targetVersion: PROVIDER_TARGET_VERSIONS.devin,
       helpChecksumRef: "devin--help.txt",
     },
     capabilityScope: "full",
@@ -1103,7 +1131,7 @@ const PROVIDER_DEFINITIONS = {
     streamingFormats: ["stream-json"],
     resourcePolicy: { exposesModelsResource: true, exposesSessionsResource: true },
     upstreamContract: {
-      targetVersion: "cursor-agent 2026.06.29-2ad2186",
+      targetVersion: PROVIDER_TARGET_VERSIONS.cursor,
       helpChecksumRef: "cursor-agent--help.txt",
     },
     capabilityScope: "maintain-only",

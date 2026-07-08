@@ -3,6 +3,7 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ResourceProvider } from "../resources.js";
+import { PROVIDER_TARGET_VERSIONS } from "../provider-definitions.js";
 import {
   clearProviderToolCapabilitiesCache,
   getOneProviderToolCapabilities,
@@ -568,7 +569,7 @@ describe("provider tool capabilities", () => {
       const acp = getProviderToolCapabilities("gemini").gemini?.acp;
       expect(acp?.status).toBe("absent_watchlist");
       expect(acp?.mediation).toBe("none");
-      expect(acp?.targetVersion).toBe("agy 1.0.14");
+      expect(acp?.targetVersion).toBe(PROVIDER_TARGET_VERSIONS.gemini);
       expect(acp?.entrypoint).toBeNull();
     });
 

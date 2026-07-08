@@ -15,7 +15,7 @@
  * an argv array, never as a shell string.
  */
 
-import { getProviderDefinition } from "../provider-definitions.js";
+import { getProviderDefinition, PROVIDER_TARGET_VERSIONS } from "../provider-definitions.js";
 import type { CliType } from "../session-manager.js";
 
 /**
@@ -124,7 +124,7 @@ const ACP_PROVIDER_REGISTRY: Readonly<Record<CliType, AcpProviderRegistryEntry>>
     displayName: "Mistral Vibe",
     status: "native_smoke_passed",
     supportKind: "native",
-    targetVersion: "vibe 2.18.3",
+    targetVersion: PROVIDER_TARGET_VERSIONS.mistral,
     entrypoint: acpEntrypointFromDefinition("mistral"),
     runtimeEnabledDefault: false,
     shipRuntimePilot: true,
@@ -139,7 +139,7 @@ const ACP_PROVIDER_REGISTRY: Readonly<Record<CliType, AcpProviderRegistryEntry>>
     displayName: "xAI Grok CLI",
     status: "native_smoke_passed",
     supportKind: "native",
-    targetVersion: "grok 0.2.77 (44e77bec3a)",
+    targetVersion: PROVIDER_TARGET_VERSIONS.grok,
     entrypoint: acpEntrypointFromDefinition("grok"),
     runtimeEnabledDefault: false,
     shipRuntimePilot: true,
@@ -155,7 +155,7 @@ const ACP_PROVIDER_REGISTRY: Readonly<Record<CliType, AcpProviderRegistryEntry>>
     // phase-5/8: replace limited-support label with discovered capability fact
     status: "adapter_mediated_deferred",
     supportKind: "adapter_mediated",
-    targetVersion: "codex-cli 0.142.4",
+    targetVersion: PROVIDER_TARGET_VERSIONS.codex,
     entrypoint: acpEntrypointFromDefinition("codex"),
     runtimeEnabledDefault: false,
     shipRuntimePilot: false,
@@ -170,7 +170,7 @@ const ACP_PROVIDER_REGISTRY: Readonly<Record<CliType, AcpProviderRegistryEntry>>
     // phase-5/8: replace limited-support label with discovered capability fact
     status: "adapter_mediated_deferred",
     supportKind: "adapter_mediated",
-    targetVersion: "claude 2.1.198",
+    targetVersion: PROVIDER_TARGET_VERSIONS.claude,
     entrypoint: acpEntrypointFromDefinition("claude"),
     runtimeEnabledDefault: false,
     shipRuntimePilot: false,
@@ -185,7 +185,7 @@ const ACP_PROVIDER_REGISTRY: Readonly<Record<CliType, AcpProviderRegistryEntry>>
     // phase-5/8: replace limited-support label with discovered capability fact
     status: "absent_watchlist",
     supportKind: "none",
-    targetVersion: "agy 1.0.14",
+    targetVersion: PROVIDER_TARGET_VERSIONS.gemini,
     entrypoint: acpEntrypointFromDefinition("gemini"),
     runtimeEnabledDefault: false,
     shipRuntimePilot: false,
@@ -199,7 +199,7 @@ const ACP_PROVIDER_REGISTRY: Readonly<Record<CliType, AcpProviderRegistryEntry>>
     displayName: "Cognition Devin CLI",
     status: "native_smoke_passed",
     supportKind: "native",
-    targetVersion: "devin 2026.8.18 (16737566)",
+    targetVersion: PROVIDER_TARGET_VERSIONS.devin,
     entrypoint: acpEntrypointFromDefinition("devin"),
     runtimeEnabledDefault: false,
     // Slice D1: manual initialize + session/new smoke passed against the
@@ -216,7 +216,7 @@ const ACP_PROVIDER_REGISTRY: Readonly<Record<CliType, AcpProviderRegistryEntry>>
     displayName: "Cursor Agent CLI",
     status: "native_smoke_passed",
     supportKind: "native",
-    targetVersion: "cursor-agent 2026.06.29-2ad2186",
+    targetVersion: PROVIDER_TARGET_VERSIONS.cursor,
     entrypoint: acpEntrypointFromDefinition("cursor"),
     runtimeEnabledDefault: false,
     shipRuntimePilot: true,
