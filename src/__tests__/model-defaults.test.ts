@@ -216,4 +216,33 @@ describe("F15b: mistral mcp_managed agent mode", () => {
     process.env.LLM_GATEWAY_APPROVAL_ALLOW_BYPASS = "1";
     expect(managedMistralAgent()).toBe("auto-approve");
   });
+
+  function legacyMistralAgent(permissionMode?: string): string {
+    const prep = prepareMistralRequest({
+      prompt: "summarize this document",
+      approvalStrategy: "legacy",
+      permissionMode,
+      optimizePrompt: false,
+      operation: "mistral_request",
+    });
+    if (!("args" in prep)) throw new Error("expected an approved request prep with args");
+    const idx = prep.args.indexOf("--agent");
+    expect(idx).toBeGreaterThanOrEqual(0);
+    return prep.args[idx + 1];
+  }
+
+  it("legacy defaults to --agent accept-edits without the opt-in (#155)", () => {
+    delete process.env.LLM_GATEWAY_APPROVAL_ALLOW_BYPASS;
+    expect(legacyMistralAgent()).toBe("accept-edits");
+  });
+
+  it("legacy escalates to --agent auto-approve only with the operator opt-in (#155)", () => {
+    process.env.LLM_GATEWAY_APPROVAL_ALLOW_BYPASS = "1";
+    expect(legacyMistralAgent()).toBe("auto-approve");
+  });
+
+  it("legacy honors an explicit caller permissionMode even without the opt-in (#155)", () => {
+    delete process.env.LLM_GATEWAY_APPROVAL_ALLOW_BYPASS;
+    expect(legacyMistralAgent("auto-approve")).toBe("auto-approve");
+  });
 });

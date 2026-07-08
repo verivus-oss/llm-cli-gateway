@@ -192,9 +192,9 @@ export function resolveMistralSessionArgs(opts: {
 /**
  * Vibe-specific permission mode mapping. Vibe replaces Grok's `--always-approve`
  * with an `--agent <name>` selector. When the caller does not set a permissionMode,
- * the gateway emits `--agent auto-approve` explicitly: omitting the flag would
- * let Vibe pick its own default which may not be auto-approve, surprising
- * programmatic callers.
+ * the gateway emits `--agent accept-edits` explicitly (see `resolveMistralAgentMode`
+ * for the policy-layer default and the auto-approve opt-in): omitting the flag
+ * would let Vibe pick its own default, surprising programmatic callers.
  *
  * `--agent` takes an ARBITRARY name: Vibe resolves it against its own agent
  * registry — the always-available builtins below, plus install-gated builtins
@@ -213,7 +213,11 @@ export const MISTRAL_BUILTIN_AGENT_MODES = [
   "auto-approve",
 ] as const;
 export type MistralAgentMode = string;
-export const MISTRAL_DEFAULT_AGENT_MODE: MistralAgentMode = "auto-approve";
+// Safe default for the raw argv builder (#155): auto-accept file edits, gate
+// dangerous ops (shell), which Vibe DENIES rather than hangs on in programmatic
+// mode. auto-approve ("YOLO") is only reached via an explicit caller mode or the
+// operator opt-in, resolved one layer up in `resolveMistralAgentMode`.
+export const MISTRAL_DEFAULT_AGENT_MODE: MistralAgentMode = "accept-edits";
 
 export interface PrepareMistralRequestInput {
   prompt: string;
@@ -273,7 +277,7 @@ export interface PrepareMistralRequestResult {
  * Pure helper that builds Vibe's argv and env.
  *
  * - Model is selected via `VIBE_ACTIVE_MODEL` env var (NOT a `--model` flag).
- * - Permission mode emits `--agent <mode>` (defaults to `auto-approve` when unset).
+ * - Permission mode emits `--agent <mode>` (defaults to `accept-edits` when unset).
  * - Allowed tools emit `--enabled-tools <tool>` once per tool (allowlist only).
  * - Output format emits `--output <text|json|streaming>` (legacy gateway
  *   aliases `plain` and `stream-json` are normalized before spawn).

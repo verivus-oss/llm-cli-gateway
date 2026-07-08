@@ -4,6 +4,20 @@ All notable changes to the llm-cli-gateway project.
 
 ## [Unreleased]
 
+### Changed
+
+- **Vibe/Mistral no longer defaults to `--agent auto-approve` (#155).** Under the
+  default `legacy` approval strategy, Vibe was spawned in auto-approve ("YOLO"),
+  auto-executing every tool call including shell. It now defaults to
+  `--agent accept-edits` (auto-accept file edits; dangerous ops such as shell stay
+  gated, and Vibe denies rather than blocks on them in programmatic mode), matching
+  the `mcp_managed` posture and the other providers' non-bypass defaults. This
+  shrinks the blast radius of a prompt-injected tool call. `auto-approve` remains
+  reachable deliberately: pass `permissionMode: "auto-approve"` on the request, or
+  set `LLM_GATEWAY_APPROVAL_ALLOW_BYPASS` operator-wide. **Behaviour change:**
+  `legacy` callers that relied on Vibe running shell unattended will now see the
+  gated op denied unless they adopt one of those opt-ins.
+
 ## [2.15.0] - 2026-07-03
 
 ### Added
@@ -32,7 +46,7 @@ All notable changes to the llm-cli-gateway project.
 - **Durable instance-lease orphan recovery (#139).** The blanket
   `markOrphanedOnStartup` sweep in the `AsyncJobManager` constructor rewrote
   every `running` row to `orphaned`, so on a SHARED store (`backend =
-  "postgres"`) a fresh instance (especially an ephemeral stdio spawn)
+"postgres"`) a fresh instance (especially an ephemeral stdio spawn)
   transiently orphaned other live instances' in-flight jobs (a `running` ->
   `orphaned` -> `completed` flap a poller can trip on). The sweep is now a
   per-job fencing lease: each instance registers a lease and advances a

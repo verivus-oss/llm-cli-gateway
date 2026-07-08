@@ -18,10 +18,10 @@
  *
  * Test-veracity: the explicit per-flag assertions are the oracle. Renaming any
  * emission in `prepareMistralRequest` (e.g. "--enabled-tools" -> "--tools",
- * "--workdir" -> "--cwd", or dropping the default `--agent auto-approve` push)
+ * "--workdir" -> "--cwd", or dropping the default `--agent accept-edits` push)
  * flips this suite red.
  */
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { prepareMistralRequest } from "../index.js";
 
 function argsFor(params: Record<string, unknown>): string[] {
@@ -48,7 +48,24 @@ function count(args: string[], flag: string): number {
 }
 
 describe("mistral argv golden (Phase 4 Part B)", () => {
-  it("minimal request emits -p + prompt and the default --agent auto-approve", () => {
+  // The legacy default is bypass-sensitive (#155); pin the operator opt-in off
+  // so the golden argv is deterministic, and restore it afterward.
+  let savedBypass: string | undefined;
+  beforeEach(() => {
+    savedBypass = process.env.LLM_GATEWAY_APPROVAL_ALLOW_BYPASS;
+    delete process.env.LLM_GATEWAY_APPROVAL_ALLOW_BYPASS;
+  });
+  afterEach(() => {
+    if (savedBypass === undefined) delete process.env.LLM_GATEWAY_APPROVAL_ALLOW_BYPASS;
+    else process.env.LLM_GATEWAY_APPROVAL_ALLOW_BYPASS = savedBypass;
+  });
+
+  it("minimal request emits -p + prompt and the default --agent accept-edits (#155)", () => {
+    expect(argsFor({})).toEqual(["-p", "PROMPT", "--agent", "accept-edits"]);
+  });
+
+  it("legacy default escalates to --agent auto-approve only with the operator opt-in (#155)", () => {
+    process.env.LLM_GATEWAY_APPROVAL_ALLOW_BYPASS = "1";
     expect(argsFor({})).toEqual(["-p", "PROMPT", "--agent", "auto-approve"]);
   });
 
