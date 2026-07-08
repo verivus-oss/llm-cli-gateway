@@ -195,6 +195,47 @@ function ensureCacheControlTtlSecondsColumn(db: GatewayDatabase): void {
   }
 }
 
+/**
+ * Idempotent v7 migration (native compressor PR-1): additive compression_*
+ * telemetry columns on `gateway_metadata` (the table that already carries
+ * `optimization_applied`, which keeps its regex-optimizer meaning and is
+ * never repurposed). All NULL when compression did not run; written via
+ * recordCompressionTelemetry, never via logComplete (compression can run
+ * after completion is finalized: async read-time, and the Claude
+ * stream-json sync path logs completion before buildCliResponse).
+ */
+function ensureCompressionColumns(db: GatewayDatabase): void {
+  const rows = db.prepare("PRAGMA table_info(gateway_metadata)").all();
+  const names = new Set<string>(
+    rows.map((row: any) => (row && typeof row.name === "string" ? row.name : ""))
+  );
+  if (!names.has("compression_route")) {
+    db.exec("ALTER TABLE gateway_metadata ADD COLUMN compression_route TEXT");
+  }
+  if (!names.has("compression_transforms")) {
+    db.exec("ALTER TABLE gateway_metadata ADD COLUMN compression_transforms TEXT");
+  }
+  if (!names.has("compression_original_chars")) {
+    db.exec("ALTER TABLE gateway_metadata ADD COLUMN compression_original_chars INTEGER");
+  }
+  if (!names.has("compression_compressed_chars")) {
+    db.exec("ALTER TABLE gateway_metadata ADD COLUMN compression_compressed_chars INTEGER");
+  }
+  if (!names.has("compression_tokens_saved_est")) {
+    db.exec("ALTER TABLE gateway_metadata ADD COLUMN compression_tokens_saved_est INTEGER");
+  }
+}
+
+/** Compressor facts persisted per request (spec Section 8). Chars are exact;
+ * the token field is the only estimate and is named as one. */
+export interface CompressionTelemetry {
+  route: string;
+  transforms: string[];
+  originalChars: number;
+  compressedChars: number;
+  estimatedTokensSaved: number;
+}
+
 export function resolveFlightRecorderDbPath(): string | null {
   const configured = process.env.LLM_GATEWAY_LOGS_DB;
   if (configured !== undefined) {
@@ -369,6 +410,13 @@ export class FlightRecorder {
       .prepare("INSERT OR IGNORE INTO _migrations(version, applied_at) VALUES(6, ?)")
       .run(new Date().toISOString());
 
+    // Migration v7 (native compressor PR-1): compression_* telemetry columns
+    // on gateway_metadata. NULL when compression never ran for a row.
+    ensureCompressionColumns(this.db);
+    this.db
+      .prepare("INSERT OR IGNORE INTO _migrations(version, applied_at) VALUES(7, ?)")
+      .run(new Date().toISOString());
+
     if (process.platform !== "win32") {
       try {
         chmodSync(dbPath, 0o600);
@@ -482,6 +530,35 @@ export class FlightRecorder {
     this.updateCompleteTxn(correlationId, this.redactEnabled ? this.redactResult(result) : result);
   }
 
+  /**
+   * Record compressor telemetry for an existing row (spec Section 8).
+   * Separate from the status-guarded logComplete UPDATE because compression
+   * can run after completion is finalized (async read-time; Claude
+   * stream-json sync). Write-once: only applies while compression_route is
+   * still NULL, so repeated llm_job_result reads (which recompute
+   * deterministically identical values) keep the first write.
+   */
+  recordCompressionTelemetry(correlationId: string, telemetry: CompressionTelemetry): void {
+    this.db
+      .prepare(
+        `UPDATE gateway_metadata
+         SET compression_route = @route,
+             compression_transforms = @transforms,
+             compression_original_chars = @original_chars,
+             compression_compressed_chars = @compressed_chars,
+             compression_tokens_saved_est = @tokens_saved_est
+         WHERE request_id = @id AND compression_route IS NULL`
+      )
+      .run({
+        id: correlationId,
+        route: telemetry.route,
+        transforms: telemetry.transforms.join(","),
+        original_chars: telemetry.originalChars,
+        compressed_chars: telemetry.compressedChars,
+        tokens_saved_est: telemetry.estimatedTokensSaved,
+      });
+  }
+
   /** Redact secrets from the persisted prompt/system copy (audit log only). */
   private redactStart(entry: FlightLogStart): FlightLogStart {
     return {
@@ -546,6 +623,7 @@ export class FlightRecorder {
 export class NoopFlightRecorder {
   logStart(_entry: FlightLogStart): void {}
   logComplete(_correlationId: string, _result: FlightLogResult): void {}
+  recordCompressionTelemetry(_correlationId: string, _telemetry: CompressionTelemetry): void {}
   queryRequests<T = Record<string, unknown>>(_sql: string, ..._params: unknown[]): T[] {
     return [];
   }

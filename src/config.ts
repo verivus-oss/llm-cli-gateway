@@ -618,6 +618,62 @@ export function loadCacheAwarenessConfig(logger: Logger = noopLogger): CacheAwar
   };
 }
 
+//──────────────────────────────────────────────────────────────────────────────
+// Compression configuration (native compressor PR-1)
+//
+// Reads the [compression] block from the same ~/.llm-cli-gateway/config.toml
+// as the other tables, with its own loader and schema so a malformed
+// [compression] never breaks persistence/limits loading and vice versa.
+// Default is OFF: no caller's returned text changes on upgrade; compression
+// turns on only by explicit opt-in ([compression].enabled or the per-request
+// compressResponse boolean, request wins). See
+// docs/plans/native-compressor.spec.md Section 7.
+//──────────────────────────────────────────────────────────────────────────────
+
+// [compression] is fully owned here, so it is strict: a typo'd key is a hard
+// error rather than a silently-ignored misconfiguration.
+const CompressionSchema = z
+  .object({
+    enabled: z.boolean().default(false),
+  })
+  .strict();
+
+export interface CompressionConfig {
+  enabled: boolean;
+  /** Audit trail: file the config was loaded from (or null if defaults). */
+  sources: { configFile: string | null };
+}
+
+export const DEFAULT_COMPRESSION_CONFIG: CompressionConfig = {
+  enabled: false,
+  sources: { configFile: null },
+};
+
+/**
+ * Load [compression] from ~/.llm-cli-gateway/config.toml (override with
+ * $LLM_GATEWAY_CONFIG). Missing file/table means defaults (off).
+ * Syntax-invalid TOML falls back to defaults; schema-invalid values THROW.
+ */
+export function loadCompressionConfig(logger: Logger = noopLogger): CompressionConfig {
+  const configPath = defaultGatewayConfigPath();
+  const { parsed, sourcePath } = readGatewayTomlFile(configPath, logger, "compression");
+  const raw = (parsed?.compression as Record<string, unknown> | undefined) ?? {};
+
+  let parsedCompression;
+  try {
+    parsedCompression = CompressionSchema.parse(raw);
+  } catch (err) {
+    throw new Error(
+      `Invalid [compression] config: ${err instanceof Error ? err.message : String(err)}`
+    );
+  }
+
+  return {
+    enabled: parsedCompression.enabled,
+    sources: { configFile: sourcePath },
+  };
+}
+
 /**
  * Look up the per-model-family threshold. `modelName` is the user-facing model
  * string (e.g. "claude-sonnet-4-6", "claude-opus-4-7"). Falls back to `default`

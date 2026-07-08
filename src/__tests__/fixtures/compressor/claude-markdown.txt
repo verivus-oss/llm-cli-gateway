@@ -1,0 +1,29 @@
+I reviewed the session manager and found three issues worth fixing.
+
+## Findings
+
+1. The retry loop in `session-manager.ts` re-reads the sessions file on every
+   attempt, which is wasteful under contention.
+2. The atomic-write helper fsyncs the temp file but not the parent directory,
+   so a crash can still lose the rename.
+3. Error messages do not include the session id, which makes correlation hard.
+
+Here is the relevant excerpt:
+
+```ts
+async function persistSessions(sessions: SessionMap): Promise<void> {
+  const tmp = `${SESSIONS_PATH}.${process.pid}.tmp`;
+  await writeFile(tmp, JSON.stringify(sessions, null, 2), { mode: 0o600 });
+  await rename(tmp, SESSIONS_PATH);
+}
+```
+
+Note the two spaces after `JSON.stringify(sessions,` are load-bearing for the
+snapshot test, and the fenced block above must survive byte-for-byte.
+
+
+The fix is straightforward: fsync the directory handle after the rename, and
+thread the session id into every error path.
+
+Overall the module is in good shape; the issues above are the only ones I
+found after reading all call sites.

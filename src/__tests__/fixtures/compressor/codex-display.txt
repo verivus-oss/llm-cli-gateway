@@ -1,0 +1,16 @@
+Implemented the requested change.
+
+- Added the `retryBudget` option to `RetryPolicy` and threaded it through
+  `executeWithRetry` so callers can cap total retry time rather than count.
+- Updated `retry.test.ts` with three new cases: budget exhausted mid-backoff,
+  budget larger than max attempts, and budget of zero (fails fast).
+- All 61 tests in the retry suite pass locally.
+
+Files changed:
+  src/retry.ts
+  src/__tests__/retry.test.ts
+
+Follow-up worth considering: the circuit breaker and the retry budget both
+measure elapsed time from the first attempt, so a caller that sets a budget
+longer than the breaker reset window will see the breaker open first. That
+interaction is documented in the module comment.

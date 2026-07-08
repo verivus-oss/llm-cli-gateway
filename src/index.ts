@@ -44,6 +44,7 @@ import {
   optimizePrompt as optimizePromptText,
   optimizeResponse as optimizeResponseText,
 } from "./optimizer.js";
+import { compressDisplayText, type CompressResult } from "./compressor/index.js";
 import {
   loadConfig,
   loadPersistenceConfig,
@@ -51,12 +52,14 @@ import {
   loadProvidersConfig,
   loadAcpConfig,
   loadLimitsConfig,
+  loadCompressionConfig,
   defaultGatewayConfigPath,
   isXaiProviderEnabled,
   enabledApiProviders,
   minStableTokensForModel,
   type PersistenceConfig,
   type CacheAwarenessConfig,
+  type CompressionConfig,
   type ProvidersConfig,
   type ApiProviderRuntime,
   type AcpConfig,
@@ -228,6 +231,13 @@ type ExtendedToolResponse = {
   reviewIntegrity?: ReviewIntegrityResult;
   /** Slice 3: structured warnings (e.g. cache_ttl_expiring_soon). */
   warnings?: WarningEntry[];
+  /**
+   * Native-compressor result for this response (spec 5.1): carried out of
+   * buildCliResponse so the handler can record telemetry via
+   * recordCompressionTelemetry AFTER its flight-recorder completion write.
+   * Present only when compression ran and changed the text.
+   */
+  compression?: CompressResult;
 };
 
 // Simple logger that writes to stderr (stdout is used for MCP protocol)
@@ -467,6 +477,7 @@ let flightRecorder: FlightRecorderLike | null = null;
 // structurally impossible.
 let persistenceConfig: PersistenceConfig | null = null;
 let cacheAwarenessConfig: CacheAwarenessConfig | null = null;
+let compressionConfig: CompressionConfig | null = null;
 let providersConfig: ProvidersConfig | null = null;
 let acpConfig: AcpConfig | null = null;
 let limitsConfig: GatewayLimitsConfig | null = null;
@@ -500,6 +511,11 @@ function getAcpConfig(runtimeLogger: GatewayLogger = logger): AcpConfig {
 function getCacheAwarenessConfig(runtimeLogger: GatewayLogger = logger): CacheAwarenessConfig {
   cacheAwarenessConfig ??= loadCacheAwarenessConfig(runtimeLogger);
   return cacheAwarenessConfig;
+}
+
+function getCompressionConfig(runtimeLogger: GatewayLogger = logger): CompressionConfig {
+  compressionConfig ??= loadCompressionConfig(runtimeLogger);
+  return compressionConfig;
 }
 
 function getProvidersConfig(runtimeLogger: GatewayLogger = logger): ProvidersConfig {
@@ -732,6 +748,7 @@ export interface GatewayServerDeps {
   logger?: GatewayLogger;
   persistence?: PersistenceConfig;
   cacheAwareness?: CacheAwarenessConfig;
+  compression?: CompressionConfig;
   providers?: ProvidersConfig;
   acpConfig?: AcpConfig;
   workspaces?: WorkspaceRegistry;
@@ -748,6 +765,7 @@ export interface GatewayServerRuntime {
   logger: GatewayLogger;
   persistence: PersistenceConfig;
   cacheAwareness: CacheAwarenessConfig;
+  compression: CompressionConfig;
   providers: ProvidersConfig;
   acpConfig: AcpConfig;
   workspaces: WorkspaceRegistry;
@@ -798,6 +816,7 @@ export function resolveGatewayServerRuntime(
     logger: runtimeLogger,
     persistence: deps.persistence ?? getPersistenceConfig(runtimeLogger),
     cacheAwareness: deps.cacheAwareness ?? getCacheAwarenessConfig(runtimeLogger),
+    compression: deps.compression ?? getCompressionConfig(runtimeLogger),
     providers: deps.providers ?? getProvidersConfig(runtimeLogger),
     acpConfig: deps.acpConfig ?? getAcpConfig(runtimeLogger),
     workspaces: deps.workspaces ?? loadWorkspaceRegistry(runtimeLogger),
@@ -931,7 +950,16 @@ async function awaitJobOrDefer(
    * dedup key (see async-job-manager.buildRequestKey) so two requests
    * with identical argv in different worktrees do not collide.
    */
-  cwd?: string
+  cwd?: string,
+  /**
+   * Native compressor PR-1 (spec 5.2): the sync request's EFFECTIVE
+   * compression decision. Persisted on the deferred job record (and folded
+   * into the dedup key) so a deferred sync request read back via
+   * llm_job_result gets the same treatment the sync return would have.
+   * Ignored by the direct-execute fallback (buildCliResponse compresses
+   * the sync return itself).
+   */
+  compressResponse?: boolean
 ): Promise<{ stdout: string; stderr: string; code: number } | DeferredJobResponse> {
   // U26 fix: ownership of onComplete is a contract. Once this function returns
   // OR throws, the caller MUST consider onComplete consumed — i.e. it has
@@ -1016,6 +1044,7 @@ async function awaitJobOrDefer(
       // sync-deferred case.
       flightRecorderEntry,
       extractUsage,
+      compressResponse,
     });
     // Handoff succeeded: AsyncJobManager owns onComplete (it'll fire via
     // fireOnComplete on terminal status, or run inline immediately for dedup).
@@ -1909,7 +1938,11 @@ function buildAsyncFlightRecorderHandoff(
     cacheControlTtlSeconds?: number;
   },
   sessionId: string | undefined,
-  outputFormat: string | undefined
+  outputFormat: string | undefined,
+  // Native compressor PR-1 (spec C5 parity fix): the enqueue-time
+  // prompt-optimization fact, so the async logComplete stops hardcoding
+  // optimizationApplied: false.
+  optimizationApplied = false
 ): {
   flightRecorderEntry: AsyncJobFlightRecorderEntry;
   extractUsage: AsyncJobUsageExtractor;
@@ -1928,6 +1961,7 @@ function buildAsyncFlightRecorderHandoff(
       model: prep.resolvedModel || "default",
       prompt: prep.effectivePrompt,
       sessionId,
+      optimizationApplied,
       stablePrefixHash: prep.stablePrefixHash ?? undefined,
       stablePrefixTokens: prep.stablePrefixTokens ?? undefined,
       cacheControlBlocks: prep.cacheControlBlocks,
@@ -1958,6 +1992,53 @@ function safeFlightComplete(
     runtime.flightRecorder.logComplete(correlationId, result);
   } catch (error) {
     runtime.logger.error("Flight recorder logComplete failed", error);
+  }
+}
+
+/**
+ * Native compressor (spec Sections 7/5.2): resolve the EFFECTIVE compression
+ * decision once, where the full request is in hand. Request param wins over
+ * [compression].enabled; structured output (outputFormat json or a declared
+ * output schema) always bypasses. Sync handlers pass the result to
+ * buildCliResponse; async enqueue persists it on the job record so
+ * llm_job_result applies the identical transform at read time.
+ */
+export function resolveEffectiveCompression(
+  compression: CompressionConfig,
+  input: {
+    compressResponse?: boolean;
+    outputFormat?: string;
+    outputSchemaDeclared?: boolean;
+  }
+): boolean {
+  const requested = input.compressResponse ?? compression.enabled;
+  if (!requested) return false;
+  if (input.outputFormat === "json") return false;
+  if (input.outputSchemaDeclared) return false;
+  return true;
+}
+
+/**
+ * Record compressor telemetry AFTER the completion write (spec Section 8):
+ * compression_* columns only, write-once, never through logComplete. No-op
+ * when compression did not change the response.
+ */
+function safeRecordCompression(
+  correlationId: string,
+  compression: CompressResult | undefined,
+  runtime: GatewayServerRuntime
+): void {
+  if (!compression) return;
+  try {
+    runtime.flightRecorder.recordCompressionTelemetry(correlationId, {
+      route: compression.route,
+      transforms: compression.transforms,
+      originalChars: compression.originalChars,
+      compressedChars: compression.compressedChars,
+      estimatedTokensSaved: compression.estimatedTokensSaved,
+    });
+  } catch (error) {
+    runtime.logger.error("Flight recorder recordCompressionTelemetry failed", error);
   }
 }
 
@@ -3964,7 +4045,12 @@ export function buildCliResponse(
   durationMs: number,
   resumable?: boolean,
   outputFormat?: string,
-  warnings?: WarningEntry[]
+  warnings?: WarningEntry[],
+  // Native compressor (spec 5.1): the caller-computed EFFECTIVE decision
+  // (request param ?? config, AND outputFormat/output-schema guards already
+  // folded in by resolveEffectiveCompression). Default false: off-path
+  // behavior is byte-identical to pre-compressor builds.
+  compressResponse = false
 ): ExtendedToolResponse {
   let finalStdout = stdout;
   // #44: codex always runs with `--json` (so usage/cache tokens are always
@@ -3984,6 +4070,29 @@ export function buildCliResponse(
     const optimized = optimizeResponseText(finalStdout);
     logOptimizationTokens("response", corrId, finalStdout, optimized);
     finalStdout = optimized;
+  }
+
+  // Native compressor (spec 5.1): exactly one compression call, after the
+  // display swap and optimizeResponse, BEFORE the review-integrity append so
+  // integrity warnings reach the caller verbatim. Both response surfaces
+  // (content[0].text and structuredContent.response) are populated from the
+  // post-compression finalStdout below, so this single site covers both.
+  let compression: CompressResult | undefined;
+  if (compressResponse && outputFormat !== "json") {
+    const compressed = compressDisplayText(finalStdout, {
+      provider: cli,
+      direction: "outbound",
+      outputFormat,
+      // The effective decision already folded the output-schema guard in
+      // (resolveEffectiveCompression); the compressor re-checks outputFormat
+      // as defense in depth.
+      outputSchemaDeclared: false,
+      lossless: true,
+    });
+    if (compressed.text !== finalStdout) {
+      compression = compressed;
+      finalStdout = compressed.text;
+    }
   }
 
   // Append review integrity warnings to response text (skip for JSON output to avoid corruption)
@@ -4073,6 +4182,7 @@ export function buildCliResponse(
           missing: prep.mcpConfig.missing,
         }
       : { requested: prep.requestedMcpServers },
+    ...(compression ? { compression } : {}),
   };
   if (sessionId) {
     response.sessionId = sessionId;
@@ -5177,6 +5287,7 @@ export interface GeminiRequestParams {
   correlationId?: string;
   optimizePrompt: boolean;
   optimizeResponse?: boolean;
+  compressResponse?: boolean;
   idleTimeoutMs?: number;
   forceRefresh?: boolean;
   /**
@@ -5320,11 +5431,17 @@ export async function handleGeminiRequest(
       return createErrorResponse("gemini_request", 1, "", corrId, err as Error);
     }
 
+    const effectiveCompress = resolveEffectiveCompression(runtime.compression, {
+      compressResponse: params.compressResponse,
+      outputFormat: params.outputFormat,
+      outputSchemaDeclared: false,
+    });
     const geminiFrHandoff = buildAsyncFlightRecorderHandoff(
       "gemini",
       prep,
       params.sessionId,
-      params.outputFormat
+      params.outputFormat,
+      params.optimizePrompt
     );
     const result = await awaitJobOrDefer(
       "gemini",
@@ -5339,7 +5456,8 @@ export async function handleGeminiRequest(
       geminiFrHandoff.flightRecorderEntry,
       geminiFrHandoff.extractUsage,
       undefined,
-      worktreeResolution.cwd
+      worktreeResolution.cwd,
+      effectiveCompress
     );
 
     // Deferred — job still running, return async reference
@@ -5397,8 +5515,11 @@ export async function handleGeminiRequest(
       prep,
       durationMs,
       userProvidedSession,
-      params.outputFormat
+      params.outputFormat,
+      undefined,
+      effectiveCompress
     );
+    safeRecordCompression(corrId, response.compression, runtime);
     if (worktreeResolution.worktreePath) {
       const first = response.content[0];
       if (first && first.type === "text") {
@@ -5534,11 +5655,17 @@ export async function handleGeminiRequestAsync(
     assertUpstreamCliEnv("gemini", undefined);
     // Slice 1.5: pure async path — no upstream safeFlightStart, so the
     // manager owns both logStart and logComplete for this corrId.
+    const effectiveCompress = resolveEffectiveCompression(runtime.compression, {
+      compressResponse: params.compressResponse,
+      outputFormat: params.outputFormat,
+      outputSchemaDeclared: false,
+    });
     const geminiAsyncFrHandoff = buildAsyncFlightRecorderHandoff(
       "gemini",
       prep,
       effectiveSessionId,
-      params.outputFormat
+      params.outputFormat,
+      params.optimizePrompt
     );
     const job = deps.asyncJobManager.startJob(
       "gemini",
@@ -5552,7 +5679,9 @@ export async function handleGeminiRequestAsync(
       undefined,
       geminiAsyncFrHandoff.flightRecorderEntry,
       geminiAsyncFrHandoff.extractUsage,
-      true
+      true,
+      undefined,
+      effectiveCompress
     );
     deps.logger.info(`[${corrId}] gemini_request_async started job ${job.id}`);
 
@@ -5605,6 +5734,7 @@ export interface GrokRequestParams {
   correlationId?: string;
   optimizePrompt: boolean;
   optimizeResponse?: boolean;
+  compressResponse?: boolean;
   idleTimeoutMs?: number;
   forceRefresh?: boolean;
   /** Phase 4 slice δ: cap agent-loop iterations via `--max-turns N`. */
@@ -5782,11 +5912,17 @@ export async function handleGrokRequest(
       return createErrorResponse("grok_request", 1, "", corrId, err as Error);
     }
 
+    const effectiveCompress = resolveEffectiveCompression(runtime.compression, {
+      compressResponse: params.compressResponse,
+      outputFormat: params.outputFormat,
+      outputSchemaDeclared: false,
+    });
     const grokFrHandoff = buildAsyncFlightRecorderHandoff(
       "grok",
       prep,
       params.sessionId,
-      params.outputFormat
+      params.outputFormat,
+      params.optimizePrompt
     );
     const result = await awaitJobOrDefer(
       "grok",
@@ -5801,7 +5937,8 @@ export async function handleGrokRequest(
       grokFrHandoff.flightRecorderEntry,
       grokFrHandoff.extractUsage,
       undefined,
-      worktreeResolution.cwd
+      worktreeResolution.cwd,
+      effectiveCompress
     );
 
     // Deferred — job still running, return async reference
@@ -5864,8 +6001,11 @@ export async function handleGrokRequest(
       prep,
       durationMs,
       sessionResult.userProvidedSession,
-      params.outputFormat
+      params.outputFormat,
+      undefined,
+      effectiveCompress
     );
+    safeRecordCompression(corrId, response.compression, runtime);
     if (worktreeResolution.worktreePath) {
       const first = response.content[0];
       if (first && first.type === "text") {
@@ -6027,11 +6167,17 @@ export async function handleGrokRequestAsync(
     // Start job only after all session I/O succeeds
     assertUpstreamCliArgs("grok", args);
     assertUpstreamCliEnv("grok", undefined);
+    const effectiveCompress = resolveEffectiveCompression(runtime.compression, {
+      compressResponse: params.compressResponse,
+      outputFormat: params.outputFormat,
+      outputSchemaDeclared: false,
+    });
     const grokAsyncFrHandoff = buildAsyncFlightRecorderHandoff(
       "grok",
       prep,
       effectiveSessionId,
-      params.outputFormat
+      params.outputFormat,
+      params.optimizePrompt
     );
     const job = deps.asyncJobManager.startJob(
       "grok",
@@ -6045,7 +6191,9 @@ export async function handleGrokRequestAsync(
       undefined,
       grokAsyncFrHandoff.flightRecorderEntry,
       grokAsyncFrHandoff.extractUsage,
-      true
+      true,
+      undefined,
+      effectiveCompress
     );
     deps.logger.info(`[${corrId}] grok_request_async started job ${job.id}`);
 
@@ -6093,6 +6241,7 @@ export interface DevinRequestParams {
   correlationId?: string;
   optimizePrompt: boolean;
   optimizeResponse?: boolean;
+  compressResponse?: boolean;
   idleTimeoutMs?: number;
   forceRefresh?: boolean;
 }
@@ -6197,11 +6346,17 @@ export async function handleDevinRequest(
     }
     args.push(...sessionResult.resumeArgs);
 
+    const effectiveCompress = resolveEffectiveCompression(runtime.compression, {
+      compressResponse: params.compressResponse,
+      outputFormat: undefined,
+      outputSchemaDeclared: false,
+    });
     const devinFrHandoff = buildAsyncFlightRecorderHandoff(
       "devin",
       prep,
       params.sessionId,
-      undefined
+      undefined,
+      params.optimizePrompt
     );
     const result = await awaitJobOrDefer(
       "devin",
@@ -6214,7 +6369,10 @@ export async function handleDevinRequest(
       undefined,
       undefined,
       devinFrHandoff.flightRecorderEntry,
-      devinFrHandoff.extractUsage
+      devinFrHandoff.extractUsage,
+      undefined,
+      undefined,
+      effectiveCompress
     );
     if (isDeferredResponse(result)) {
       return buildDeferredToolResponse(result, sessionResult.effectiveSessionId);
@@ -6269,8 +6427,12 @@ export async function handleDevinRequest(
       effectiveSessionId,
       prep,
       durationMs,
-      sessionResult.userProvidedSession
+      sessionResult.userProvidedSession,
+      undefined,
+      undefined,
+      effectiveCompress
     );
+    safeRecordCompression(corrId, response.compression, runtime);
     safeFlightComplete(
       corrId,
       {
@@ -6368,11 +6530,17 @@ export async function handleDevinRequestAsync(
 
     assertUpstreamCliArgs("devin", args);
     assertUpstreamCliEnv("devin", undefined);
+    const effectiveCompress = resolveEffectiveCompression(runtime.compression, {
+      compressResponse: params.compressResponse,
+      outputFormat: undefined,
+      outputSchemaDeclared: false,
+    });
     const devinAsyncFrHandoff = buildAsyncFlightRecorderHandoff(
       "devin",
       prep,
       effectiveSessionId,
-      undefined
+      undefined,
+      params.optimizePrompt
     );
     const job = deps.asyncJobManager.startJob(
       "devin",
@@ -6386,7 +6554,9 @@ export async function handleDevinRequestAsync(
       undefined,
       devinAsyncFrHandoff.flightRecorderEntry,
       devinAsyncFrHandoff.extractUsage,
-      true
+      true,
+      undefined,
+      effectiveCompress
     );
     deps.logger.info(`[${corrId}] devin_request_async started job ${job.id}`);
     return {
@@ -6435,6 +6605,7 @@ export interface CursorRequestParams {
   correlationId?: string;
   optimizePrompt: boolean;
   optimizeResponse?: boolean;
+  compressResponse?: boolean;
   idleTimeoutMs?: number;
   forceRefresh?: boolean;
 }
@@ -6647,11 +6818,17 @@ export async function handleCursorRequest(
       }
     }
 
+    const effectiveCompress = resolveEffectiveCompression(runtime.compression, {
+      compressResponse: params.compressResponse,
+      outputFormat: params.outputFormat,
+      outputSchemaDeclared: false,
+    });
     const cursorFrHandoff = buildAsyncFlightRecorderHandoff(
       "cursor",
       prep,
       params.sessionId,
-      params.outputFormat
+      params.outputFormat,
+      params.optimizePrompt
     );
     const result = await awaitJobOrDefer(
       "cursor",
@@ -6666,7 +6843,8 @@ export async function handleCursorRequest(
       cursorFrHandoff.flightRecorderEntry,
       cursorFrHandoff.extractUsage,
       undefined,
-      worktreeResolution.cwd
+      worktreeResolution.cwd,
+      effectiveCompress
     );
     if (isDeferredResponse(result)) {
       return buildDeferredToolResponse(result, sessionResult.effectiveSessionId);
@@ -6722,8 +6900,11 @@ export async function handleCursorRequest(
       prep,
       durationMs,
       sessionResult.userProvidedSession,
-      params.outputFormat
+      params.outputFormat,
+      undefined,
+      effectiveCompress
     );
+    safeRecordCompression(corrId, response.compression, runtime);
     safeFlightComplete(
       corrId,
       {
@@ -6848,11 +7029,17 @@ export async function handleCursorRequestAsync(
 
     assertUpstreamCliArgs("cursor", args);
     assertUpstreamCliEnv("cursor", undefined);
+    const effectiveCompress = resolveEffectiveCompression(runtime.compression, {
+      compressResponse: params.compressResponse,
+      outputFormat: params.outputFormat,
+      outputSchemaDeclared: false,
+    });
     const cursorAsyncFrHandoff = buildAsyncFlightRecorderHandoff(
       "cursor",
       prep,
       effectiveSessionId,
-      params.outputFormat
+      params.outputFormat,
+      params.optimizePrompt
     );
     const job = deps.asyncJobManager.startJob(
       "cursor",
@@ -6866,7 +7053,9 @@ export async function handleCursorRequestAsync(
       undefined,
       cursorAsyncFrHandoff.flightRecorderEntry,
       cursorAsyncFrHandoff.extractUsage,
-      true
+      true,
+      undefined,
+      effectiveCompress
     );
     deps.logger.info(`[${corrId}] cursor_request_async started job ${job.id}`);
     return {
@@ -6909,6 +7098,7 @@ export interface MistralRequestParams {
   correlationId?: string;
   optimizePrompt: boolean;
   optimizeResponse?: boolean;
+  compressResponse?: boolean;
   idleTimeoutMs?: number;
   forceRefresh?: boolean;
   /** Phase 4 slice γ: emit `--trust` for fresh-workspace headless runs. */
@@ -7019,11 +7209,17 @@ export async function handleMistralRequest(
       return createErrorResponse("mistral_request", 1, "", corrId, err as Error);
     }
 
+    const effectiveCompress = resolveEffectiveCompression(runtime.compression, {
+      compressResponse: params.compressResponse,
+      outputFormat: params.outputFormat,
+      outputSchemaDeclared: false,
+    });
     const mistralFrHandoff = buildAsyncFlightRecorderHandoff(
       "mistral",
       prep,
       params.sessionId,
-      params.outputFormat
+      params.outputFormat,
+      params.optimizePrompt
     );
     let result = await awaitJobOrDefer(
       "mistral",
@@ -7038,7 +7234,8 @@ export async function handleMistralRequest(
       mistralFrHandoff.flightRecorderEntry,
       mistralFrHandoff.extractUsage,
       undefined,
-      worktreeResolution.cwd
+      worktreeResolution.cwd,
+      effectiveCompress
     );
 
     if (isDeferredResponse(result)) {
@@ -7071,7 +7268,8 @@ export async function handleMistralRequest(
           mistralFrHandoff.flightRecorderEntry,
           mistralFrHandoff.extractUsage,
           undefined,
-          worktreeResolution.cwd
+          worktreeResolution.cwd,
+          effectiveCompress
         );
         if (isDeferredResponse(result)) {
           return buildDeferredToolResponse(result, sessionResult.effectiveSessionId);
@@ -7135,8 +7333,11 @@ export async function handleMistralRequest(
       prep,
       durationMs,
       sessionResult.userProvidedSession,
-      params.outputFormat
+      params.outputFormat,
+      undefined,
+      effectiveCompress
     );
+    safeRecordCompression(corrId, response.compression, runtime);
     if (worktreeResolution.worktreePath) {
       const first = response.content[0];
       if (first && first.type === "text") {
@@ -7265,11 +7466,17 @@ export async function handleMistralRequestAsync(
 
     assertUpstreamCliArgs("mistral", args);
     assertUpstreamCliEnv("mistral", mistralEnv);
+    const effectiveCompress = resolveEffectiveCompression(runtime.compression, {
+      compressResponse: params.compressResponse,
+      outputFormat: params.outputFormat,
+      outputSchemaDeclared: false,
+    });
     const mistralAsyncFrHandoff = buildAsyncFlightRecorderHandoff(
       "mistral",
       prep,
       effectiveSessionId,
-      params.outputFormat
+      params.outputFormat,
+      params.optimizePrompt
     );
     const job = deps.asyncJobManager.startJob(
       "mistral",
@@ -7283,7 +7490,9 @@ export async function handleMistralRequestAsync(
       undefined,
       mistralAsyncFrHandoff.flightRecorderEntry,
       mistralAsyncFrHandoff.extractUsage,
-      true
+      true,
+      undefined,
+      effectiveCompress
     );
     deps.logger.info(`[${corrId}] mistral_request_async started job ${job.id}`);
 
@@ -7334,6 +7543,7 @@ export async function handleCodexRequestAsync(
     createNewSession: boolean;
     correlationId?: string;
     optimizePrompt: boolean;
+    compressResponse?: boolean;
     idleTimeoutMs?: number;
     forceRefresh?: boolean;
     /** U23: when "json", emits Codex `--json` so the parser is reachable. */
@@ -7468,11 +7678,17 @@ export async function handleCodexRequestAsync(
     // registering the record, ownership stays here and we run it in the catch.
     assertUpstreamCliArgs("codex", args);
     assertUpstreamCliEnv("codex", undefined);
+    const effectiveCompress = resolveEffectiveCompression(runtime.compression, {
+      compressResponse: params.compressResponse,
+      outputFormat: params.outputFormat,
+      outputSchemaDeclared: params.outputSchema !== undefined,
+    });
     const codexAsyncFrHandoff = buildAsyncFlightRecorderHandoff(
       "codex",
       prep,
       effectiveSessionId,
-      params.outputFormat
+      params.outputFormat,
+      params.optimizePrompt
     );
     let job;
     try {
@@ -7488,7 +7704,9 @@ export async function handleCodexRequestAsync(
         prepCleanup,
         codexAsyncFrHandoff.flightRecorderEntry,
         codexAsyncFrHandoff.extractUsage,
-        true
+        true,
+        undefined,
+        effectiveCompress
       );
       // Handoff succeeded: AsyncJobManager will fire prepCleanup on terminal
       // status. Release our local ownership claim so the catch path doesn't
@@ -7880,6 +8098,12 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
       optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution"),
       optimizeResponse: z.boolean().default(false).describe("Optimize response output"),
+      compressResponse: z
+        .boolean()
+        .optional()
+        .describe(
+          "Compress the response display text via the native compressor (default: [compression].enabled in config.toml, off unless opted in). Skipped for structured output."
+        ),
       idleTimeoutMs: z
         .number()
         .int()
@@ -7940,6 +8164,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       correlationId,
       optimizePrompt,
       optimizeResponse,
+      compressResponse,
       idleTimeoutMs,
       forceRefresh,
     }) => {
@@ -8092,11 +8317,17 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         // Idle timeout only for stream-json (text/json produce no output until done)
         const effectiveIdleTimeout =
           outputFormat === "stream-json" ? resolveIdleTimeout("claude", idleTimeoutMs) : undefined;
+        const effectiveCompress = resolveEffectiveCompression(runtime.compression, {
+          compressResponse,
+          outputFormat,
+          outputSchemaDeclared: false,
+        });
         const claudeSyncFrHandoff = buildAsyncFlightRecorderHandoff(
           "claude",
           prep,
           effectiveSessionId,
-          outputFormat
+          outputFormat,
+          optimizePrompt
         );
         const result = await awaitJobOrDefer(
           "claude",
@@ -8111,7 +8342,8 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           claudeSyncFrHandoff.flightRecorderEntry,
           claudeSyncFrHandoff.extractUsage,
           prep.stdinPayload,
-          worktreeResolution.cwd
+          worktreeResolution.cwd,
+          effectiveCompress
         );
 
         // Deferred — job still running, return async reference
@@ -8199,8 +8431,10 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             durationMs,
             undefined,
             outputFormat,
-            warnings
+            warnings,
+            effectiveCompress
           );
+          safeRecordCompression(corrId, streamResponse.compression, runtime);
           if (worktreeResolution.worktreePath) {
             const first = streamResponse.content[0];
             if (first && first.type === "text") {
@@ -8232,8 +8466,10 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           durationMs,
           undefined,
           outputFormat,
-          warnings
+          warnings,
+          effectiveCompress
         );
+        safeRecordCompression(corrId, nonStreamResponse.compression, runtime);
         if (worktreeResolution.worktreePath) {
           const first = nonStreamResponse.content[0];
           if (first && first.type === "text") {
@@ -8344,6 +8580,12 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
       optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution"),
       optimizeResponse: z.boolean().default(false).describe("Optimize response output"),
+      compressResponse: z
+        .boolean()
+        .optional()
+        .describe(
+          "Compress the response display text via the native compressor (default: [compression].enabled in config.toml, off unless opted in). Skipped for structured output."
+        ),
       idleTimeoutMs: z
         .number()
         .int()
@@ -8450,6 +8692,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       correlationId,
       optimizePrompt,
       optimizeResponse,
+      compressResponse,
       idleTimeoutMs,
       forceRefresh,
       outputFormat,
@@ -8553,11 +8796,17 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       }
 
       try {
+        const effectiveCompress = resolveEffectiveCompression(runtime.compression, {
+          compressResponse,
+          outputFormat,
+          outputSchemaDeclared: outputSchema !== undefined,
+        });
         const codexSyncFrHandoff = buildAsyncFlightRecorderHandoff(
           "codex",
           prep,
           sessionId,
-          outputFormat
+          outputFormat,
+          optimizePrompt
         );
         const result = await awaitJobOrDefer(
           "codex",
@@ -8572,7 +8821,8 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           codexSyncFrHandoff.flightRecorderEntry,
           codexSyncFrHandoff.extractUsage,
           undefined,
-          worktreeResolution.cwd
+          worktreeResolution.cwd,
+          effectiveCompress
         );
 
         // Deferred — job still running, return async reference. Cleanup
@@ -8684,8 +8934,11 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           prep,
           durationMs,
           undefined,
-          outputFormat
+          outputFormat,
+          undefined,
+          effectiveCompress
         );
+        safeRecordCompression(corrId, codexResponse.compression, runtime);
         if (worktreeResolution.worktreePath) {
           const first = codexResponse.content[0];
           if (first && first.type === "text") {
@@ -8981,6 +9234,12 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
       optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution"),
       optimizeResponse: z.boolean().default(false).describe("Optimize response output"),
+      compressResponse: z
+        .boolean()
+        .optional()
+        .describe(
+          "Compress the response display text via the native compressor (default: [compression].enabled in config.toml, off unless opted in). Skipped for structured output."
+        ),
       idleTimeoutMs: z
         .number()
         .int()
@@ -9187,6 +9446,12 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
       optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution"),
       optimizeResponse: z.boolean().default(false).describe("Optimize response output"),
+      compressResponse: z
+        .boolean()
+        .optional()
+        .describe(
+          "Compress the response display text via the native compressor (default: [compression].enabled in config.toml, off unless opted in). Skipped for structured output."
+        ),
       idleTimeoutMs: z
         .number()
         .int()
@@ -9417,6 +9682,12 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
       optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution"),
       optimizeResponse: z.boolean().default(false).describe("Optimize response output"),
+      compressResponse: z
+        .boolean()
+        .optional()
+        .describe(
+          "Compress the response display text via the native compressor (default: [compression].enabled in config.toml, off unless opted in). Skipped for structured output."
+        ),
       idleTimeoutMs: z
         .number()
         .int()
@@ -9549,6 +9820,12 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
       optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution"),
       optimizeResponse: z.boolean().default(false).describe("Optimize response output"),
+      compressResponse: z
+        .boolean()
+        .optional()
+        .describe(
+          "Compress the response display text via the native compressor (default: [compression].enabled in config.toml, off unless opted in). Skipped for structured output."
+        ),
       idleTimeoutMs: z
         .number()
         .int()
@@ -9709,6 +9986,12 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
       optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution"),
       optimizeResponse: z.boolean().default(false).describe("Optimize response output"),
+      compressResponse: z
+        .boolean()
+        .optional()
+        .describe(
+          "Compress the response display text via the native compressor (default: [compression].enabled in config.toml, off unless opted in). Skipped for structured output."
+        ),
       idleTimeoutMs: z
         .number()
         .int()
@@ -10010,6 +10293,12 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .describe("Restrict Claude to provided MCP config only"),
         correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
         optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution"),
+        compressResponse: z
+          .boolean()
+          .optional()
+          .describe(
+            "Compress the response display text when collected via llm_job_result (native compressor; default: [compression].enabled)."
+          ),
         idleTimeoutMs: z
           .number()
           .int()
@@ -10069,6 +10358,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         strictMcpConfig,
         correlationId,
         optimizePrompt,
+        compressResponse,
         idleTimeoutMs,
         forceRefresh,
       }) => {
@@ -10184,11 +10474,17 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
               : undefined;
           assertUpstreamCliArgs("claude", args);
           assertUpstreamCliEnv("claude", undefined);
+          const effectiveCompress = resolveEffectiveCompression(runtime.compression, {
+            compressResponse,
+            outputFormat,
+            outputSchemaDeclared: false,
+          });
           const claudeAsyncFrHandoff = buildAsyncFlightRecorderHandoff(
             "claude",
             prep,
             effectiveSessionId,
-            outputFormat
+            outputFormat,
+            optimizePrompt
           );
           const job = asyncJobManager.startJob(
             "claude",
@@ -10203,7 +10499,8 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             claudeAsyncFrHandoff.flightRecorderEntry,
             claudeAsyncFrHandoff.extractUsage,
             true,
-            prep.stdinPayload
+            prep.stdinPayload,
+            effectiveCompress
           );
           logger.info(
             `[${corrId}] claude_request_async started job ${job.id}, outputFormat=${outputFormat}`
@@ -10326,6 +10623,12 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         createNewSession: z.boolean().default(false).describe("Force a fresh session (no resume)"),
         correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
         optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution"),
+        compressResponse: z
+          .boolean()
+          .optional()
+          .describe(
+            "Compress the response display text when collected via llm_job_result (native compressor; default: [compression].enabled)."
+          ),
         idleTimeoutMs: z
           .number()
           .int()
@@ -10409,6 +10712,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         createNewSession,
         correlationId,
         optimizePrompt,
+        compressResponse,
         idleTimeoutMs,
         forceRefresh,
         outputFormat,
@@ -10444,6 +10748,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             createNewSession,
             correlationId,
             optimizePrompt,
+            compressResponse,
             idleTimeoutMs,
             forceRefresh,
             outputFormat,
@@ -10533,6 +10838,12 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           ),
         correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
         optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution"),
+        compressResponse: z
+          .boolean()
+          .optional()
+          .describe(
+            "Compress the response display text when collected via llm_job_result (native compressor; default: [compression].enabled)."
+          ),
         idleTimeoutMs: z
           .number()
           .int()
@@ -10617,6 +10928,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         includeDirs,
         correlationId,
         optimizePrompt,
+        compressResponse,
         idleTimeoutMs,
         forceRefresh,
         outputFormat,
@@ -10648,6 +10960,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             includeDirs,
             correlationId,
             optimizePrompt,
+            compressResponse,
             idleTimeoutMs,
             forceRefresh,
             outputFormat,
@@ -10740,6 +11053,12 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .describe("Disallowed built-in tools (passed as --disallowed-tools comma list)"),
         correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
         optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution"),
+        compressResponse: z
+          .boolean()
+          .optional()
+          .describe(
+            "Compress the response display text when collected via llm_job_result (native compressor; default: [compression].enabled)."
+          ),
         idleTimeoutMs: z
           .number()
           .int()
@@ -10946,6 +11265,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         disallowedTools,
         correlationId,
         optimizePrompt,
+        compressResponse,
         idleTimeoutMs,
         forceRefresh,
         maxTurns,
@@ -11003,6 +11323,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             disallowedTools,
             correlationId,
             optimizePrompt,
+            compressResponse,
             idleTimeoutMs,
             forceRefresh,
             maxTurns,
@@ -11081,6 +11402,12 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         createNewSession: z.boolean().default(false).describe("Force a new session"),
         correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
         optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution"),
+        compressResponse: z
+          .boolean()
+          .optional()
+          .describe(
+            "Compress the response display text when collected via llm_job_result (native compressor; default: [compression].enabled)."
+          ),
         idleTimeoutMs: z
           .number()
           .int()
@@ -11112,6 +11439,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         createNewSession,
         correlationId,
         optimizePrompt,
+        compressResponse,
         idleTimeoutMs,
         forceRefresh,
       }) => {
@@ -11127,6 +11455,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             createNewSession,
             correlationId,
             optimizePrompt,
+            compressResponse,
             idleTimeoutMs,
             forceRefresh,
           }
@@ -11204,6 +11533,12 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           ),
         correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
         optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution"),
+        compressResponse: z
+          .boolean()
+          .optional()
+          .describe(
+            "Compress the response display text when collected via llm_job_result (native compressor; default: [compression].enabled)."
+          ),
         idleTimeoutMs: z
           .number()
           .int()
@@ -11243,6 +11578,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         approvalPolicy,
         correlationId,
         optimizePrompt,
+        compressResponse,
         idleTimeoutMs,
         forceRefresh,
       }) => {
@@ -11266,6 +11602,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             approvalPolicy,
             correlationId,
             optimizePrompt,
+            compressResponse,
             idleTimeoutMs,
             forceRefresh,
           }
@@ -11349,6 +11686,12 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           ),
         correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
         optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution"),
+        compressResponse: z
+          .boolean()
+          .optional()
+          .describe(
+            "Compress the response display text when collected via llm_job_result (native compressor; default: [compression].enabled)."
+          ),
         idleTimeoutMs: z
           .number()
           .int()
@@ -11419,6 +11762,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         disallowedTools,
         correlationId,
         optimizePrompt,
+        compressResponse,
         idleTimeoutMs,
         forceRefresh,
         trust,
@@ -11448,6 +11792,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             disallowedTools,
             correlationId,
             optimizePrompt,
+            compressResponse,
             idleTimeoutMs,
             forceRefresh,
             trust,
@@ -11588,6 +11933,41 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           result.stdout = codexDisplayText(result.stdout);
         }
 
+        // Native compressor (spec 5.2): honor the job's PERSISTED effective
+        // enqueue-time decision (config/request/format/schema guards were
+        // folded in at enqueue; legacy NULL rows read back as off). Two
+        // steps, both gated so default behavior is byte-identical to today:
+        // 1. Claude stream-json jobs get the same display treatment the
+        //    codex branch above applies unconditionally: swap the raw NDJSON
+        //    for the parsed prose reply. The `parsed` sibling keeps carrying
+        //    costUsd/usage/model/numTurns, and the raw stream stays
+        //    recoverable via llm_request_result (spec 5.3).
+        // 2. The SAME compressDisplayText the sync path uses runs on the
+        //    display text, then telemetry is recorded write-once against the
+        //    job's correlationId (spec Section 8: read-time recording;
+        //    repeated reads recompute identical values).
+        const compressJob =
+          asyncJobManager.getJobCompressResponse(jobId) && outputFormat !== "json";
+        if (compressJob && result.stdout) {
+          if (outputFormat === "stream-json" && parsed) {
+            result.stdout = parsed.text;
+          }
+          const compressed = compressDisplayText(result.stdout, {
+            provider: asyncJobManager.getJobCli(jobId) ?? "unknown",
+            direction: "outbound",
+            outputFormat,
+            outputSchemaDeclared: false,
+            lossless: true,
+          });
+          if (compressed.text !== result.stdout) {
+            result.stdout = compressed.text;
+            safeRecordCompression(result.correlationId, compressed, runtime);
+          }
+        }
+
+        // Spec 5.4: the envelope is gateway-owned JSON; when compression is
+        // on for this job, serialize it compactly (embedded string values
+        // are preserved byte-for-byte by the serializer either way).
         return {
           content: [
             {
@@ -11599,7 +11979,12 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
                   ...(parsed
                     ? {
                         parsed: {
-                          text: parsed.text,
+                          // With compression on, result.stdout already IS the
+                          // parsed prose (display swap above); repeating it
+                          // here would double the returned text and defeat
+                          // the compressor (spec 5.2). Off-path keeps the
+                          // legacy shape byte-identical.
+                          ...(compressJob ? {} : { text: parsed.text }),
                           costUsd: parsed.costUsd,
                           usage: parsed.usage,
                           model: parsed.model,
@@ -11609,7 +11994,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
                     : {}),
                 },
                 null,
-                2
+                compressJob ? 0 : 2
               ),
             },
           ],

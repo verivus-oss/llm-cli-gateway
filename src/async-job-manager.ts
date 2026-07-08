@@ -372,6 +372,14 @@ export interface AsyncJobFlightRecorderEntry {
   cacheControlBlocks?: number;
   /** TTL seconds actually emitted on those cache_control markers. */
   cacheControlTtlSeconds?: number;
+  /**
+   * Native compressor PR-1 (spec C5 parity fix): the enqueue-time
+   * prompt-optimization fact, threaded through so writeFlightComplete stops
+   * hardcoding `optimizationApplied: false` on async completions.
+   * (optimizeResponse is N/A on the async path; response compression is
+   * recorded separately via recordCompressionTelemetry at read time.)
+   */
+  optimizationApplied?: boolean;
 }
 
 /**
@@ -434,6 +442,12 @@ interface AsyncJobRecord {
   exited: boolean;
   metricsRecorded: boolean;
   outputFormat?: string;
+  /**
+   * Native compressor PR-1 (spec 5.2): effective enqueue-time compression
+   * decision. Persisted alongside output_format; NULL/undefined on legacy
+   * rows means "not requested".
+   */
+  compressResponse?: boolean | null;
   /** F3: ownership principal that created the job (null for legacy rows). */
   ownerPrincipal?: string | null;
   resetIdleTimer?: () => void;
@@ -595,6 +609,15 @@ export interface StartJobOptions {
    * only (see AsyncJobUsageExtractor doc).
    */
   extractUsage?: AsyncJobUsageExtractor;
+  /**
+   * Native compressor PR-1 (spec 5.2): the EFFECTIVE enqueue-time
+   * compression decision (request param ?? config, outputFormat and
+   * output-schema guards already folded in). Persisted on the job record so
+   * llm_job_result applies the identical transform at read time, and folded
+   * into the dedup key so a compression-on request never dedups onto a
+   * compression-off job (or vice versa).
+   */
+  compressResponse?: boolean;
 }
 
 export interface StartJobOutcome {
@@ -697,6 +720,9 @@ export class AsyncJobManager {
         durationMs,
         retryCount: 0,
         circuitBreakerState: "closed",
+        // Orphans are reconstituted from the durable store, which does not
+        // carry the enqueue-time optimization fact; false is the truthful
+        // absent state here (spec C5).
         optimizationApplied: false,
         exitCode: 0,
         status: "completed",
@@ -886,7 +912,8 @@ export class AsyncJobManager {
     env?: Record<string, string>,
     stdin?: string,
     cwd?: string,
-    outputFormat?: string
+    outputFormat?: string,
+    compressResponse?: boolean
   ): string {
     // Slice κ: stdin participates in the dedup key. Two Claude requests
     // with identical argv but different cache_control content blocks
@@ -911,7 +938,14 @@ export class AsyncJobManager {
     const extraEnv = canonicaliseEnvForKey(env);
     const withStdin = stdin === undefined ? extraEnv : `${extraEnv}|stdin:${stdin}`;
     const withCwd = cwd === undefined ? withStdin : `${withStdin}|cwd:${cwd}`;
-    const extra = cli === "codex" ? `${withCwd}|fmt:${outputFormat ?? "text"}` : withCwd;
+    const withFmt = cli === "codex" ? `${withCwd}|fmt:${outputFormat ?? "text"}` : withCwd;
+    // Native compressor PR-1 (spec 5.2): the effective compression decision
+    // participates in the key, following the codex outputFormat precedent
+    // above. Normalised so absent and explicitly-off share the pre-compressor
+    // key shape (no missed-dedup on upgrade); only effective-on splits off,
+    // so a compression-on request never dedups onto a compression-off job's
+    // stored response mode or vice versa.
+    const extra = compressResponse ? `${withFmt}|compress:1` : withFmt;
     // Issue #130: scope the dedup key by the owning principal for
     // remote/authenticated callers so two distinct principals issuing identical
     // requests never collide onto (and read) one another's job. Local stdio
@@ -1306,7 +1340,11 @@ export class AsyncJobManager {
         durationMs,
         retryCount: 0,
         circuitBreakerState: "closed",
-        optimizationApplied: false,
+        // Native compressor PR-1 (spec C5): the real enqueue-time fact,
+        // not a hardcoded false. Response compression never travels through
+        // logComplete (it is recorded via recordCompressionTelemetry at
+        // llm_job_result read time).
+        optimizationApplied: job.flightRecorderEntry.optimizationApplied ?? false,
         exitCode,
         // Slice 1: the real HTTP status lives in its own field — exitCode stays 0/1.
         httpStatus: job.transport === "http" ? (job.httpStatus ?? undefined) : undefined,
@@ -1479,6 +1517,7 @@ export class AsyncJobManager {
       exited: row.status !== "running",
       metricsRecorded: true,
       outputFormat: row.outputFormat ?? undefined,
+      compressResponse: row.compressResponse ?? null,
       ownerPrincipal: row.ownerPrincipal,
       outputDirty: false,
       lastOutputFlushAt: Date.now(),
@@ -1516,7 +1555,8 @@ export class AsyncJobManager {
     flightRecorderEntry?: AsyncJobFlightRecorderEntry,
     extractUsage?: AsyncJobUsageExtractor,
     writeFlightStart?: boolean,
-    stdin?: string
+    stdin?: string,
+    compressResponse?: boolean
   ): AsyncJobSnapshot {
     return this.startJobWithDedup(cli, args, correlationId, {
       cwd,
@@ -1529,6 +1569,7 @@ export class AsyncJobManager {
       flightRecorderEntry,
       extractUsage,
       writeFlightStart,
+      compressResponse,
     }).snapshot;
   }
 
@@ -1557,8 +1598,17 @@ export class AsyncJobManager {
       flightRecorderEntry,
       extractUsage,
       writeFlightStart,
+      compressResponse,
     } = opts;
-    const requestKey = this.buildRequestKey(cli, args, extraEnv, stdin, cwd, outputFormat);
+    const requestKey = this.buildRequestKey(
+      cli,
+      args,
+      extraEnv,
+      stdin,
+      cwd,
+      outputFormat,
+      compressResponse
+    );
 
     if (!forceRefresh) {
       const reused = this.tryReuseDedupedJob(requestKey, correlationId, cli, onComplete);
@@ -1597,6 +1647,7 @@ export class AsyncJobManager {
       exited: false,
       metricsRecorded: false,
       outputFormat,
+      compressResponse: compressResponse ?? null,
       onComplete,
       onCompleteFired: false,
       outputDirty: false,
@@ -1668,6 +1719,7 @@ export class AsyncJobManager {
         cli,
         args: [...args],
         outputFormat,
+        compressResponse,
         startedAt,
         pid: null,
         ownerPrincipal,
@@ -2096,6 +2148,15 @@ export class AsyncJobManager {
 
   getJobOutputFormat(jobId: string): string | undefined {
     return this.jobs.get(jobId)?.outputFormat;
+  }
+
+  /**
+   * Native compressor PR-1 (spec 5.2): the job's persisted effective
+   * compression decision. NULL/undefined (legacy or pre-compressor rows)
+   * means "not requested"; llm_job_result treats only `true` as opt-in.
+   */
+  getJobCompressResponse(jobId: string): boolean {
+    return this.jobs.get(jobId)?.compressResponse === true;
   }
 
   getJobCli(jobId: string): JobProvider | undefined {

@@ -20,6 +20,11 @@ export interface JobRecord {
   cli: string;
   argsJson: string;
   outputFormat?: string | null;
+  /**
+   * Native compressor PR-1 (spec 5.2): effective enqueue-time compression
+   * decision. NULL on legacy/pre-compressor rows means "not requested".
+   */
+  compressResponse?: boolean | null;
   status: JobStoreStatus;
   exitCode: number | null;
   stdout: string;
@@ -90,6 +95,10 @@ function rowToRecord(row: any): JobRecord {
     cli: row.cli,
     argsJson: row.args_json,
     outputFormat: row.output_format ?? null,
+    compressResponse:
+      row.compress_response === null || row.compress_response === undefined
+        ? null
+        : Boolean(row.compress_response),
     status: row.status as JobStoreStatus,
     exitCode: row.exit_code,
     stdout: row.stdout ?? "",
@@ -142,6 +151,20 @@ function ensureJobsTransportColumns(db: GatewayDatabase): void {
 }
 
 /**
+ * Native compressor PR-1 (spec 5.2): idempotent migration adding the
+ * nullable `compress_response` column, mirroring the `output_format`
+ * handling. Legacy rows keep NULL ("not requested"). MUST run before any
+ * prepared statement is compiled.
+ */
+function ensureJobsCompressResponseColumn(db: GatewayDatabase): void {
+  const cols = db.prepare("PRAGMA table_info(jobs)").all() as Array<{ name?: string }>;
+  const names = new Set(cols.map(col => col?.name));
+  if (!names.has("compress_response")) {
+    db.exec("ALTER TABLE jobs ADD COLUMN compress_response INTEGER");
+  }
+}
+
+/**
  * Public surface every backend (sqlite/postgres/memory) must implement. The
  * AsyncJobManager talks to this interface only.
  */
@@ -153,6 +176,8 @@ export interface JobStore {
     cli: string;
     args: string[];
     outputFormat?: string;
+    /** Native compressor PR-1: effective enqueue-time compression decision. */
+    compressResponse?: boolean;
     startedAt: string;
     pid: number | null;
     ownerPrincipal?: string | null;
@@ -333,6 +358,7 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
         cli TEXT NOT NULL,
         args_json TEXT NOT NULL,
         output_format TEXT,
+        compress_response INTEGER,
         status TEXT NOT NULL,
         exit_code INTEGER,
         stdout TEXT,
@@ -406,6 +432,8 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
     // Slice 1: idempotent migration for the http-transport columns. MUST run
     // before the prepared statements below bind to the column list.
     ensureJobsTransportColumns(this.db);
+    // Native compressor PR-1: nullable compress_response column.
+    ensureJobsCompressResponseColumn(this.db);
 
     if (process.platform !== "win32") {
       try {
@@ -420,10 +448,12 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
 
     this.insertStmt = this.db.prepare(`
       INSERT INTO jobs (id, correlation_id, request_key, cli, args_json, output_format,
+                        compress_response,
                         status, exit_code, stdout, stderr, output_truncated, error,
                         started_at, finished_at, pid, expires_at, owner_principal,
                         transport, http_status, payload_json)
       VALUES (@id, @correlation_id, @request_key, @cli, @args_json, @output_format,
+              @compress_response,
               @status, @exit_code, @stdout, @stderr, @output_truncated, @error,
               @started_at, @finished_at, @pid, @expires_at, @owner_principal,
               @transport, @http_status, @payload_json)
@@ -488,6 +518,7 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
     cli: string;
     args: string[];
     outputFormat?: string;
+    compressResponse?: boolean;
     startedAt: string;
     pid: number | null;
     ownerPrincipal?: string | null;
@@ -501,6 +532,8 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
       cli: input.cli,
       args_json: JSON.stringify(input.args),
       output_format: input.outputFormat ?? null,
+      compress_response:
+        input.compressResponse === undefined ? null : input.compressResponse ? 1 : 0,
       status: "running",
       exit_code: null,
       stdout: "",
@@ -831,6 +864,7 @@ export class MemoryJobStore implements JobStore {
     cli: string;
     args: string[];
     outputFormat?: string;
+    compressResponse?: boolean;
     startedAt: string;
     pid: number | null;
     ownerPrincipal?: string | null;
@@ -844,6 +878,7 @@ export class MemoryJobStore implements JobStore {
       cli: input.cli,
       argsJson: JSON.stringify(input.args),
       outputFormat: input.outputFormat ?? null,
+      compressResponse: input.compressResponse ?? null,
       status: "running",
       exitCode: null,
       stdout: "",
