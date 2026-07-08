@@ -301,11 +301,11 @@ export const ACP_ENTRYPOINT_CONTRACTS: Record<CliType, AcpEntrypointContract> = 
     status: "adapter_mediated_deferred",
     executable: "codex",
     entrypointArgs: [],
-    targetVersion: "codex-cli 0.142.4",
+    targetVersion: "codex-cli 0.143.0",
     probeArgs: [],
     adapterCandidates: ["zed-industries/codex-acp", "agentclientprotocol/codex-acp"],
     evidence:
-      "No native ACP entrypoint at codex-cli 0.142.4. Adapter evidence tracked as documentation only; not native gateway ACP support.",
+      "No native ACP entrypoint at codex-cli 0.143.0. Adapter evidence tracked as documentation only; not native gateway ACP support.",
     docsRef: "docs/plans/first-class-acp-gateway-extension.dag.toml#provider_matrix.codex",
   },
   claude: {
@@ -1133,8 +1133,13 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
           "--disable",
           "--enable",
           "--include-managed-config",
-          "--permissions-profile",
+          // codex-cli 0.143.0 renamed --permissions-profile to --permission-profile
+          // and added the --sandbox-state-* inspection/override flags.
+          "--permission-profile",
           "--profile",
+          "--sandbox-state-disable-network",
+          "--sandbox-state-json",
+          "--sandbox-state-readable-root",
         ],
         { exposure: "not_exposed" }
       ),
