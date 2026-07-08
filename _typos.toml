@@ -52,7 +52,11 @@ extend-exclude = [
   "docs/archive/**",
   "docs/personal-mcp/**",
   "docs/reviews/**",
-  "docs/plans/**/*.jsonl",
+  # In-flight design drafts and review logs (per CLAUDE.md): narrative notes
+  # full of correlation ids, hashes, and quoted model output where "wrong"
+  # tokens are intentional (e.g. a hex correlation-id fragment like 25c2b6ba
+  # that typos splits and flags as "ba"). Matches docs/reviews and docs/archive.
+  "docs/plans/**",
   "DOGFOODING_*.md",
   "RELEASE_NOTES_*.md",
 
