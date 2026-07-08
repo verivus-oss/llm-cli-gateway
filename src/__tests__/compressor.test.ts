@@ -209,6 +209,21 @@ describe("whitespace transform + fence protection (Tier P, spec 6.7)", () => {
     expect(out).not.toMatch(/[ \t]+\n/);
   });
 
+  it("preserves trailing whitespace AND blank runs INSIDE a fence byte-for-byte", () => {
+    // A fenced block that itself contains the exact features the transform
+    // strips outside fences: trailing spaces and a 4-blank-line run. These
+    // must survive verbatim, or a normalizeWhitespace-only fence regression
+    // (that the shared mapUnfenced tests would miss) slips through.
+    const fenced = "```\nindented code   \nwith trailing tab\t\n\n\n\n\nafter four blanks\n```";
+    const src = `prose before   \n\n\n\n\n${fenced}\nprose after   \n`;
+    const out = normalizeWhitespace(src);
+    // The entire fenced region is untouched.
+    expect(out).toContain(fenced);
+    // Outside the fence, trailing whitespace and the blank run were normalized.
+    expect(out.startsWith("prose before\n\n")).toBe(true);
+    expect(out).not.toMatch(/prose before[ \t]+\n/);
+  });
+
   it("mapUnfenced never touches lines with inline code", () => {
     const src = "trailing   \n`inline  code  span`   \n";
     const out = normalizeWhitespace(src);
