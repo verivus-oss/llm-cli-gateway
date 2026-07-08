@@ -1,0 +1,22 @@
+Here is the summary you asked for.
+
+The gateway exposes seven provider tools and routes each request through a
+shared preparation step that resolves the model, assembles the prompt, and
+records a flight-recorder row before the child process is spawned. Output is
+captured with a 50MB cap and parsed per provider.
+
+Key observations:
+
+* Session continuity is provider-owned; the gateway only threads identifiers.
+* The retry layer distinguishes transient from permanent failures.
+* Structured output modes bypass response optimization entirely.
+
+Trailing whitespace on the next three lines is intentional for the fixture:
+alpha   
+beta	
+gamma  
+
+
+
+
+Four blank lines above this sentence should collapse to one outside fences.

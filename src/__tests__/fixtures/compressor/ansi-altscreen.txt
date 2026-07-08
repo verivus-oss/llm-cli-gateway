@@ -1,0 +1,5 @@
+launching TUI
+[?1049h[2J[HPqDCS-payload\menu line one
+[3Amenu line two
+[?1049l
+exited

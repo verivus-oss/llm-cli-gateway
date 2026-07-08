@@ -33,6 +33,11 @@ export interface JobRecord {
   cli: string;
   argsJson: string;
   outputFormat?: string | null;
+  /**
+   * Native compressor PR-1 (spec 5.2): effective enqueue-time compression
+   * decision. NULL on legacy/pre-compressor rows means "not requested".
+   */
+  compressResponse?: boolean | null;
   status: JobStoreStatus;
   exitCode: number | null;
   stdout: string;
@@ -127,6 +132,10 @@ function rowToRecord(row: any): JobRecord {
     cli: row.cli,
     argsJson: row.args_json,
     outputFormat: row.output_format ?? null,
+    compressResponse:
+      row.compress_response === null || row.compress_response === undefined
+        ? null
+        : Boolean(row.compress_response),
     status: row.status as JobStoreStatus,
     exitCode: row.exit_code,
     stdout: row.stdout ?? "",
@@ -203,6 +212,20 @@ function ensureJobsLeaseColumns(db: GatewayDatabase): void {
 }
 
 /**
+ * Native compressor PR-1 (spec 5.2): idempotent migration adding the
+ * nullable `compress_response` column, mirroring the `output_format`
+ * handling. Legacy rows keep NULL ("not requested"). MUST run before any
+ * prepared statement is compiled.
+ */
+function ensureJobsCompressResponseColumn(db: GatewayDatabase): void {
+  const cols = db.prepare("PRAGMA table_info(jobs)").all() as Array<{ name?: string }>;
+  const names = new Set(cols.map(col => col?.name));
+  if (!names.has("compress_response")) {
+    db.exec("ALTER TABLE jobs ADD COLUMN compress_response INTEGER");
+  }
+}
+
+/**
  * #139: registration metadata for a live gateway instance. Written to
  * `gateway_instances` at construction (before the manager can admit any job).
  * Retained for observability / GC / role only; the sweep does NOT read it for
@@ -244,6 +267,8 @@ export interface JobStore {
     cli: string;
     args: string[];
     outputFormat?: string;
+    /** Native compressor PR-1: effective enqueue-time compression decision. */
+    compressResponse?: boolean;
     startedAt: string;
     pid: number | null;
     ownerPrincipal?: string | null;
@@ -483,6 +508,7 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
         cli TEXT NOT NULL,
         args_json TEXT NOT NULL,
         output_format TEXT,
+        compress_response INTEGER,
         status TEXT NOT NULL,
         exit_code INTEGER,
         stdout TEXT,
@@ -577,6 +603,8 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
     this.db.exec(
       "CREATE INDEX IF NOT EXISTS idx_jobs_owner_status ON jobs(owner_instance, status)"
     );
+    // Native compressor PR-1: nullable compress_response column.
+    ensureJobsCompressResponseColumn(this.db);
 
     if (process.platform !== "win32") {
       try {
@@ -596,10 +624,12 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
     // insert so a live row NEVER has a NULL deadline.
     this.insertStmt = this.db.prepare(`
       INSERT INTO jobs (id, correlation_id, request_key, cli, args_json, output_format,
+                        compress_response,
                         status, exit_code, stdout, stderr, output_truncated, error,
                         started_at, finished_at, pid, expires_at, owner_principal,
                         transport, http_status, payload_json, owner_instance, lease_deadline)
       VALUES (@id, @correlation_id, @request_key, @cli, @args_json, @output_format,
+              @compress_response,
               'queued', @exit_code, @stdout, @stderr, @output_truncated, @error,
               @started_at, @finished_at, @pid, @expires_at, @owner_principal,
               @transport, @http_status, @payload_json, @owner_instance,
@@ -754,6 +784,7 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
     cli: string;
     args: string[];
     outputFormat?: string;
+    compressResponse?: boolean;
     startedAt: string;
     pid: number | null;
     ownerPrincipal?: string | null;
@@ -768,6 +799,8 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
       cli: input.cli,
       args_json: JSON.stringify(input.args),
       output_format: input.outputFormat ?? null,
+      compress_response:
+        input.compressResponse === undefined ? null : input.compressResponse ? 1 : 0,
       // status is hard-coded 'queued' in the INSERT (see insertStmt).
       exit_code: null,
       stdout: "",
@@ -1182,6 +1215,7 @@ export class MemoryJobStore implements JobStore {
     cli: string;
     args: string[];
     outputFormat?: string;
+    compressResponse?: boolean;
     startedAt: string;
     pid: number | null;
     ownerPrincipal?: string | null;
@@ -1196,6 +1230,7 @@ export class MemoryJobStore implements JobStore {
       cli: input.cli,
       argsJson: JSON.stringify(input.args),
       outputFormat: input.outputFormat ?? null,
+      compressResponse: input.compressResponse ?? null,
       // #139: persist queued (markRunning flips to running at launch).
       status: "queued",
       exitCode: null,

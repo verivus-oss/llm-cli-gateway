@@ -1,0 +1,4 @@
+grok streaming reply follows
+[1mSummary[0m
+The patch is sound. Applied [33m3[0m suggestions.
+zero-width check bell stripped

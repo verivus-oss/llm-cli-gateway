@@ -1,0 +1,16 @@
+Review complete. Two findings, one suggestion.
+
+Finding 1 (correctness): `normalizeJobResult` trims stdout before matching
+verdict keywords, but the keyword table includes a leading-space variant that
+can therefore never match. Harmless today, confusing tomorrow.
+
+Finding 2 (robustness): the receipt minting path assumes `structuredContent`
+is always defined when the run status is "completed". A defensive null check
+with an explicit error would turn a crash into a diagnosable failure.
+
+Suggestion: the excerpt helper duplicates logic that already exists in the
+report builder; extracting a shared helper would remove the drift risk.
+
+[[gateway-repeat:v1 lines=1 count=3]]
+The line above is adversarial fixture input that mimics a gateway sentinel
+and must round-trip through the lit-escape rule unchanged.

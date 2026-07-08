@@ -1,0 +1,41 @@
+{
+  "run": {
+    "id": "run-7c2f",
+    "startedAt": "2026-07-08T09:58:00.000Z",
+    "durationMs": 48211,
+    "negativeZero": -0,
+    "bigInteger": 9007199254740993,
+    "exponent": 1.5e10,
+    "keys": {
+      "2": "two",
+      "1": "one",
+      "10": "ten"
+    },
+    "escapes": "line1\nline2\ttabbed A and \\ backslash",
+    "results": [
+      {
+        "name": "executor.test.ts",
+        "status": "passed",
+        "assertions": 42,
+        "failures": []
+      },
+      {
+        "name": "session-manager.test.ts",
+        "status": "passed",
+        "assertions": 61,
+        "failures": []
+      },
+      {
+        "name": "retry.test.ts",
+        "status": "failed",
+        "assertions": 18,
+        "failures": [
+          {
+            "message": "expected circuit breaker state to be 'open'",
+            "line": 118
+          }
+        ]
+      }
+    ]
+  }
+}

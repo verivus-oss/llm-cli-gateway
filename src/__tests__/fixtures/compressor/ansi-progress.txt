@@ -1,0 +1,7 @@
+Build started
+[32mPASS[0m src/a.test.ts
+[32mPASS[0m src/b.test.ts
+Downloading 0%Downloading 25%Downloading 50%Downloading 75%Downloading 100%
+]8;;https://example.com/run/42\view run]8;;\
+Installing 1/4[2KInstalling 2/4[2KInstalling 3/4[2KInstalling 4/4
+Done in 3.2s

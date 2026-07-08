@@ -1,0 +1,24 @@
+[2026-07-08T10:00:01Z] INFO starting worker pool size=8
+[2026-07-08T10:00:02Z] WARN connection refused, retrying in 250ms
+[2026-07-08T10:00:02Z] WARN connection refused, retrying in 250ms
+[2026-07-08T10:00:02Z] WARN connection refused, retrying in 250ms
+[2026-07-08T10:00:02Z] WARN connection refused, retrying in 250ms
+[2026-07-08T10:00:02Z] WARN connection refused, retrying in 250ms
+[2026-07-08T10:00:02Z] WARN connection refused, retrying in 250ms
+[2026-07-08T10:00:02Z] WARN connection refused, retrying in 250ms
+[2026-07-08T10:00:02Z] WARN connection refused, retrying in 250ms
+[2026-07-08T10:00:02Z] WARN connection refused, retrying in 250ms
+[2026-07-08T10:00:02Z] WARN connection refused, retrying in 250ms
+[2026-07-08T10:00:02Z] WARN connection refused, retrying in 250ms
+[2026-07-08T10:00:02Z] WARN connection refused, retrying in 250ms
+[2026-07-08T10:00:03Z] ERROR TypeError: Cannot read properties of undefined (reading 'flush')
+    at Object.<anonymous> (/app/src/pipeline.ts:214:18)
+    at processTicksAndRejections (node:internal/process/task_queues:95:5)
+[2026-07-08T10:00:03Z] ERROR TypeError: Cannot read properties of undefined (reading 'flush')
+    at Object.<anonymous> (/app/src/pipeline.ts:214:18)
+    at processTicksAndRejections (node:internal/process/task_queues:95:5)
+[2026-07-08T10:00:04Z] INFO worker 3 exited code=1
+[2026-07-08T10:00:04Z] INFO worker 3 exited code=1
+[2026-07-08T10:00:04Z] INFO worker 3 exited code=1
+[2026-07-08T10:00:04Z] INFO worker 3 exited code=1
+[2026-07-08T10:00:05Z] INFO shutting down
