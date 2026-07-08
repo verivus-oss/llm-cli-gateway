@@ -315,11 +315,11 @@ export const ACP_ENTRYPOINT_CONTRACTS: Record<CliType, AcpEntrypointContract> = 
     status: "adapter_mediated_deferred",
     executable: "claude",
     entrypointArgs: [],
-    targetVersion: "claude 2.1.198",
+    targetVersion: "claude 2.1.204",
     probeArgs: [],
     adapterCandidates: ["Claude Agent SDK ACP adapter"],
     evidence:
-      "No native Claude Code CLI ACP entrypoint at claude 2.1.198. Adapter ownership/permission bridging unresolved; deferred.",
+      "No native Claude Code CLI ACP entrypoint at claude 2.1.204. Adapter ownership/permission bridging unresolved; deferred.",
     docsRef: "docs/plans/first-class-acp-gateway-extension.dag.toml#provider_matrix.claude",
   },
   gemini: {
@@ -700,13 +700,21 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         arity: "none",
         description: "Replay user messages back on stdout in stream-json mode",
       },
+      // claude 2.1.204 folds these into the `--system-prompt[-file]` /
+      // `--append-system-prompt[-file]` bracket notation in --help, so the
+      // literal `--system-prompt-file` token no longer appears in the help
+      // text even though the flag is still real, accepted, and emitted by
+      // prepareClaudeHighImpactFlags. hiddenFromHelp keeps the probe from
+      // reporting a false missing-flag drift (mirrors --max-turns).
       "--system-prompt-file": {
         arity: "one",
         description: "Replacement system prompt read from a file path",
+        hiddenFromHelp: true,
       },
       "--append-system-prompt-file": {
         arity: "one",
         description: "Appended system prompt read from a file path",
+        hiddenFromHelp: true,
       },
       "--name": { arity: "one", description: "Session name label" },
       "--plugin-dir": {
@@ -735,7 +743,7 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         description: "Write debug logs to a specific file path (implies debug mode)",
       },
     },
-    // Claude Code 2.1.198 --help surface the gateway deliberately does not
+    // Claude Code 2.1.204 --help surface the gateway deliberately does not
     // emit. Long-form aliases of declared short flags (--print for -p),
     // interactive/IDE-only switches, background-agent launchers, and flags
     // superseded by gateway parameters (--dangerously-skip-permissions maps to
@@ -745,9 +753,9 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       "--allow-dangerously-skip-permissions",
       "--allowed", // alias of --allowed-tools
       "--ax-screen-reader",
-      "--background", // 2.1.198: start the session as a background agent
+      "--background", // 2.1.204: start the session as a background agent
       "--betas",
-      "--bg", // 2.1.198: short form of --background
+      "--bg", // 2.1.204: short form of --background
       "--brief",
       "--chrome",
       "--dangerously-skip-permissions",
@@ -902,7 +910,7 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       {
         id: "claude-background-acknowledged-not-emitted",
         description:
-          "Claude 2.1.198 advertises --bg/--background (background agent), but the gateway acknowledges them without emitting; caller argv is rejected",
+          "Claude 2.1.204 advertises --bg/--background (background agent), but the gateway acknowledges them without emitting; caller argv is rejected",
         args: ["-p", "hello", "--background"],
         expect: "fail",
       },
