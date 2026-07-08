@@ -132,3 +132,28 @@ is addressed. Full suite 1961 green; build, lint, format:check, and the
 release security audit pass.
 
 Gate result: unanimous unconditional approval. PR ready.
+
+## Grok final re-review (2026-07-08, post-merge, grok 0.2.91): APPROVE
+
+Grok's fresh implementation re-reviews during the gate hit the grok 0.2.82
+worker-handshake flake (silent empty successes), so its verdict on the final
+tree never landed before PR #151 merged on the strength of Codex, Gemini, and
+Mistral's unconditional approvals. After grok upgraded to 0.2.91 (which fixes
+the handshake), the full review completed cleanly.
+
+Grok read the spec, the verification report, and the live sources, ran the
+compressor test files (all green), and verified each review-driven fix and all
+seven invariants (C1-C7) against the code with per-site citations: JSON escape
+validation, ANSI column overlay + wide-char ASCII-only guard, whole-segment
+OSC/DCS stripping, combined DEC private-mode detection, CRLF blank-run
+preservation, and the committed integration tests (C1 byte-identity, mirror,
+review-integrity ordering, escape hatch, llm_job_result swap/envelope/parity,
+async dedup fold). Non-blocking NOTES only: the deliberate control-lexing vs
+inline-code precedence on the terminal route, a cosmetic outer-whitespace
+"savings" report on the JSON route, no receipts-specific integration test (C7
+holds by architecture), and no API-provider wiring (per spec Section 3/10).
+
+VERDICT: APPROVE (unconditional).
+
+Review record now complete: all four models (Codex, Gemini, Mistral, Grok)
+have on-record unconditional approval of the final implementation.
