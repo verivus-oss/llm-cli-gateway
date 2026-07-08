@@ -4,6 +4,7 @@ import { delimiter, join, dirname, extname, win32 } from "path";
 import { readdirSync, existsSync } from "fs";
 import { createCircuitBreaker, withRetry } from "./retry.js";
 import type { Logger } from "./logger.js";
+import { applySpawnEnvIsolation } from "./spawn-env-isolation.js";
 
 export interface ExecuteOptions {
   timeout?: number;
@@ -443,11 +444,17 @@ export function spawnCliProcess(
     cwd?: string;
     env: NodeJS.ProcessEnv;
     stdio: SpawnOptions["stdio"];
+    logger?: Logger;
   }
 ): ChildProcess {
+  // Single spawn chokepoint for provider CLIs: strip inherited endpoint/proxy
+  // redirection vars from the FINAL merged env (opt-in). Applying it here, not
+  // at each call site, means an upstream `{ ...process.env, ...env }` re-splat
+  // (e.g. the inline sync path) cannot reintroduce a stripped var.
+  const env = applySpawnEnvIsolation(options.env, options.logger);
   const detached = shouldDetachProviderProcess();
   const resolved = resolveCommandForSpawn(command, args, {
-    envPath: pathValueFromEnv(options.env, process.platform),
+    envPath: pathValueFromEnv(env, process.platform),
   });
   const proc = spawn(resolved.command, resolved.args, {
     cwd: options.cwd,
@@ -455,7 +462,7 @@ export function spawnCliProcess(
     windowsHide: true,
     windowsVerbatimArguments: resolved.windowsVerbatimArguments,
     stdio: options.stdio,
-    env: options.env,
+    env,
   });
   if (proc.pid) registerProcessGroup(proc.pid);
   proc.unref();
@@ -480,6 +487,7 @@ export async function executeCli(
         cwd,
         stdio,
         env: { ...baseEnv, ...(extraEnv ?? {}) },
+        logger: options.logger,
       });
       if (stdin !== undefined && proc.stdin) {
         proc.stdin.write(stdin);
