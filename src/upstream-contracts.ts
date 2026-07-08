@@ -272,7 +272,7 @@ export const ACP_ENTRYPOINT_CONTRACTS: Record<CliType, AcpEntrypointContract> = 
     status: "native",
     executable: "vibe-acp",
     entrypointArgs: [],
-    targetVersion: "vibe 2.18.3",
+    targetVersion: "vibe 2.19.0",
     probeArgs: [["--version"], ["--help"]],
     // phase-5/8: replace limited-support label with discovered capability fact
     evidence:
@@ -2419,11 +2419,13 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       },
     },
     // These exist in Vibe's help but are not gateway request-time surfaces.
-    // `--auto-approve` / `--yolo` are shortcuts for `--agent auto-approve`, and
-    // `--check-upgrade` prompts for a binary update. Keep them acknowledged but
-    // absent from the argv allowlist so drift detection stays quiet while
-    // validateUpstreamCliArgs still rejects them as caller argv.
-    acknowledgedUpstreamFlags: ["--auto-approve", "--check-upgrade", "--yolo"],
+    // `--auto-approve` / `--yolo` are shortcuts for `--agent auto-approve`,
+    // `--check-upgrade` prompts for a binary update, and `--worktree` is Vibe's
+    // native worktree flag (the gateway's slice-λ worktree spawns with cwd and
+    // never emits it). Keep them acknowledged but absent from the argv allowlist
+    // so drift detection stays quiet while validateUpstreamCliArgs still rejects
+    // them as caller argv.
+    acknowledgedUpstreamFlags: ["--auto-approve", "--check-upgrade", "--worktree", "--yolo"],
     env: {
       VIBE_ACTIVE_MODEL: {
         arity: "one",
@@ -2525,7 +2527,7 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       {
         id: "mistral-current-help-surface",
         description:
-          "Vibe 2.18.3 request-time help surface: --prompt, -v, --version, --setup accepted",
+          "Vibe 2.19.0 request-time help surface: --prompt, -v, --version, --setup accepted",
         args: ["--prompt", "hello", "--agent", "auto-approve", "-v", "--version", "--setup"],
         env: { VIBE_ACTIVE_MODEL: "mistral-medium-3.5" },
         expect: "pass",
@@ -2533,7 +2535,7 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       {
         id: "mistral-yolo-shortcut-rejected",
         description:
-          "Vibe 2.18.3 advertises --yolo as a shortcut, but the gateway keeps using explicit --agent auto-approve",
+          "Vibe 2.19.0 advertises --yolo as a shortcut, but the gateway keeps using explicit --agent auto-approve",
         args: ["-p", "hello", "--yolo"],
         env: { VIBE_ACTIVE_MODEL: "mistral-medium-3.5" },
         expect: "fail",
@@ -2541,8 +2543,16 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       {
         id: "mistral-check-upgrade-rejected",
         description:
-          "Vibe 2.18.3 advertises --check-upgrade, but gateway request validation rejects update-prompt flags",
+          "Vibe 2.19.0 advertises --check-upgrade, but gateway request validation rejects update-prompt flags",
         args: ["--check-upgrade"],
+        env: { VIBE_ACTIVE_MODEL: "mistral-medium-3.5" },
+        expect: "fail",
+      },
+      {
+        id: "mistral-worktree-rejected",
+        description:
+          "Vibe 2.19.0 advertises --worktree (native worktree); the gateway uses slice-λ worktree (spawns with cwd) and rejects raw --worktree as caller argv",
+        args: ["-p", "hello", "--worktree", "feature"],
         env: { VIBE_ACTIVE_MODEL: "mistral-medium-3.5" },
         expect: "fail",
       },
