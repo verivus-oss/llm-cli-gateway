@@ -3,7 +3,11 @@ import { createHash } from "node:crypto";
 // Provider identity (CliType, and the CLI provider list this file keys its
 // Record<CliType, ...> contracts by) comes from the provider definition
 // registry, not a hand-maintained list here. See src/provider-definitions.ts.
-import { getProviderDefinition, type CliType } from "./provider-definitions.js";
+import {
+  getProviderDefinition,
+  PROVIDER_TARGET_VERSIONS,
+  type CliType,
+} from "./provider-definitions.js";
 import { envWithExtendedPath, getExtendedPath, resolveCommandForSpawn } from "./executor.js";
 
 /**
@@ -272,7 +276,7 @@ export const ACP_ENTRYPOINT_CONTRACTS: Record<CliType, AcpEntrypointContract> = 
     status: "native",
     executable: "vibe-acp",
     entrypointArgs: [],
-    targetVersion: "vibe 2.19.0",
+    targetVersion: PROVIDER_TARGET_VERSIONS.mistral,
     probeArgs: [["--version"], ["--help"]],
     // phase-5/8: replace limited-support label with discovered capability fact
     evidence:
@@ -285,13 +289,12 @@ export const ACP_ENTRYPOINT_CONTRACTS: Record<CliType, AcpEntrypointContract> = 
     status: "native",
     executable: "grok",
     entrypointArgs: ["agent", "stdio"],
-    targetVersion: "grok 0.2.91 (39d0c68723)",
+    targetVersion: PROVIDER_TARGET_VERSIONS.grok,
     // `grok agent stdio --help` is a safe help probe; bare `grok agent stdio`
     // starts the live ACP server and is intentionally NOT probed here.
     probeArgs: [["agent", "stdio", "--help"]],
     // phase-5/8: replace limited-support label with discovered capability fact
-    evidence:
-      "Native ACP via `grok agent stdio`; initialize + session/new smoke passed with isolated leader socket. Second runtime pilot. Entrypoint re-probed clean at 0.2.91.",
+    evidence: `Native ACP via \`grok agent stdio\`; initialize + session/new smoke passed with isolated leader socket. Second runtime pilot. Entrypoint re-probed clean at ${PROVIDER_TARGET_VERSIONS.grok}.`,
     docsRef: "docs/plans/first-class-acp-gateway-extension.dag.toml#provider_matrix.grok",
   },
   codex: {
@@ -301,11 +304,10 @@ export const ACP_ENTRYPOINT_CONTRACTS: Record<CliType, AcpEntrypointContract> = 
     status: "adapter_mediated_deferred",
     executable: "codex",
     entrypointArgs: [],
-    targetVersion: "codex-cli 0.143.0",
+    targetVersion: PROVIDER_TARGET_VERSIONS.codex,
     probeArgs: [],
     adapterCandidates: ["zed-industries/codex-acp", "agentclientprotocol/codex-acp"],
-    evidence:
-      "No native ACP entrypoint at codex-cli 0.143.0. Adapter evidence tracked as documentation only; not native gateway ACP support.",
+    evidence: `No native ACP entrypoint at ${PROVIDER_TARGET_VERSIONS.codex}. Adapter evidence tracked as documentation only; not native gateway ACP support.`,
     docsRef: "docs/plans/first-class-acp-gateway-extension.dag.toml#provider_matrix.codex",
   },
   claude: {
@@ -315,11 +317,10 @@ export const ACP_ENTRYPOINT_CONTRACTS: Record<CliType, AcpEntrypointContract> = 
     status: "adapter_mediated_deferred",
     executable: "claude",
     entrypointArgs: [],
-    targetVersion: "claude 2.1.204",
+    targetVersion: PROVIDER_TARGET_VERSIONS.claude,
     probeArgs: [],
     adapterCandidates: ["Claude Agent SDK ACP adapter"],
-    evidence:
-      "No native Claude Code CLI ACP entrypoint at claude 2.1.204. Adapter ownership/permission bridging unresolved; deferred.",
+    evidence: `No native Claude Code CLI ACP entrypoint at ${PROVIDER_TARGET_VERSIONS.claude}. Adapter ownership/permission bridging unresolved; deferred.`,
     docsRef: "docs/plans/first-class-acp-gateway-extension.dag.toml#provider_matrix.claude",
   },
   gemini: {
@@ -329,10 +330,9 @@ export const ACP_ENTRYPOINT_CONTRACTS: Record<CliType, AcpEntrypointContract> = 
     status: "absent_watchlist",
     executable: "agy",
     entrypointArgs: [],
-    targetVersion: "agy 1.1.0",
+    targetVersion: PROVIDER_TARGET_VERSIONS.gemini,
     probeArgs: [],
-    evidence:
-      "agy 1.1.0 has no ACP flag or subcommand. Legacy Gemini CLI ACP evidence does not transfer. Watchlist item.",
+    evidence: `${PROVIDER_TARGET_VERSIONS.gemini} has no ACP flag or subcommand. Legacy Gemini CLI ACP evidence does not transfer. Watchlist item.`,
     docsRef: "docs/plans/first-class-acp-gateway-extension.dag.toml#provider_matrix.gemini",
   },
   devin: {
@@ -341,7 +341,7 @@ export const ACP_ENTRYPOINT_CONTRACTS: Record<CliType, AcpEntrypointContract> = 
     status: "native",
     executable: "devin",
     entrypointArgs: ["acp"],
-    targetVersion: "devin 3000.1.27 (0d4bf12e)",
+    targetVersion: PROVIDER_TARGET_VERSIONS.devin,
     // `devin --version` is the safe probe; bare `devin acp` starts the live ACP
     // server over stdio and is intentionally NOT probed here.
     probeArgs: [["--version"]],
@@ -356,7 +356,7 @@ export const ACP_ENTRYPOINT_CONTRACTS: Record<CliType, AcpEntrypointContract> = 
     status: "native",
     executable: "cursor-agent",
     entrypointArgs: ["acp"],
-    targetVersion: "cursor-agent 2026.07.01-41b2de7",
+    targetVersion: PROVIDER_TARGET_VERSIONS.cursor,
     probeArgs: [["acp", "--help"]],
     // phase-5/8: replace limited-support label with discovered capability fact
     evidence:

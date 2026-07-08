@@ -306,10 +306,17 @@ describe("provider-capability-discovery", () => {
 
   it("surfaces installed-vs-contract mismatch as a discovery event", () => {
     const def = getProviderDefinition("grok");
-    return discoverProviderCapabilities(def, baseOptions(grokConfig())).then(set => {
+    // Drive the installed version from the single-source contract version so
+    // this stays a deterministic "installed matches contract" case across
+    // version bumps (the version lives only in PROVIDER_TARGET_VERSIONS).
+    const contractVersion = def.upstreamContract.targetVersion;
+    return discoverProviderCapabilities(
+      def,
+      baseOptions(grokConfig({ "grok --version": contractVersion }))
+    ).then(set => {
       const drift = discoveryContractDrift(set);
       expect(drift.cli).toBe("grok");
-      expect(drift.contractTargetVersion).toBe("grok 0.2.77 (44e77bec3a)");
+      expect(drift.contractTargetVersion).toBe(contractVersion);
       expect(drift.versionMatchesContract).toBe(true);
       expect(["clean", "drift"]).toContain(drift.status);
     });
