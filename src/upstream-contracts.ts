@@ -356,7 +356,7 @@ export const ACP_ENTRYPOINT_CONTRACTS: Record<CliType, AcpEntrypointContract> = 
     status: "native",
     executable: "cursor-agent",
     entrypointArgs: ["acp"],
-    targetVersion: "cursor-agent 2026.06.29-2ad2186",
+    targetVersion: "cursor-agent 2026.07.01-41b2de7",
     probeArgs: [["acp", "--help"]],
     // phase-5/8: replace limited-support label with discovered capability fact
     evidence:
@@ -2816,25 +2816,24 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       "--resume": { arity: "one", description: "Resume a specific Cursor chat/session" },
       "--continue": { arity: "none", description: "Continue the latest Cursor chat" },
     },
+    // Only long flags are tracked: the drift probe's help scanner extracts
+    // `--foo` tokens and skips `--help`, so acknowledging short flags (-H, -p,
+    // -w, -v, -h) or `--help` produces perpetual "no longer appears" stale
+    // warnings even though they are still in `cursor-agent --help`. Keep the
+    // acknowledged list to genuinely-tracked long flags only.
     acknowledgedUpstreamFlags: [
       "--api-key",
       "--header",
-      "-H",
-      "-p",
       "--plan",
       "--yolo",
       "--approve-mcps",
       "--plugin-dir",
       "--worktree",
-      "-w",
       "--worktree-base",
       "--skip-worktree-setup",
       "--stream-partial-output",
       "--list-models",
       "--version",
-      "-v",
-      "--help",
-      "-h",
     ],
     env: {
       CURSOR_API_KEY: {
