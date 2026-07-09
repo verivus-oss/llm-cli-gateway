@@ -1,0 +1,574 @@
+# Least-Cost Routing (LCR) implementation plan.
+# Machine plan derived from the cross-LLM-approved spec
+# docs/plans/least-cost-routing.draft.md. Data-first: every step is idempotent
+# and carries a concrete validation. Dormant by default (mirrors [acp]).
+
+[meta]
+name = "least-cost-routing"
+schema_version = "1.1"
+owner = "gateway-maintainers"
+slice = "least-cost-routing"
+target_branch = "feat/least-cost-routing"
+release_version = "UNSET"
+predecessor_plan = "docs/plans/least-cost-routing.draft.md"
+acceptance_resource = "routing://decisions"
+invariant_sources = [
+  "src/pricing.ts",
+  "src/provider-definitions.ts",
+  "src/provider-types.ts",
+  "src/provider-status.ts",
+  "src/retry.ts",
+  "src/executor.ts",
+  "src/api-provider.ts",
+  "src/async-job-manager.ts",
+  "src/flight-recorder.ts",
+  "src/cache-stats.ts",
+  "src/config.ts",
+  "src/index.ts",
+  "src/validation-orchestrator.ts",
+]
+
+# ---------------------------------------------------------------------------
+# Decisions (flat flags; the frozen shape of the design)
+# ---------------------------------------------------------------------------
+[decisions]
+routing_unit = "candidate"                 # a (provider, model) pair, never a bare provider
+dormant_by_default = true                  # [least_cost].enabled defaults false; tools unregistered when off
+surface = "dedicated_tool"                 # new route_request; NOT a param on existing per-provider tools
+existing_tools_unchanged = true
+pricing_source_of_truth = "src/pricing.ts" # extend, never a second price table
+getPricing_unchanged = true                # ZERO-for-unknown stays for the cache-savings path
+router_price_accessor = "getModelCost"     # new accessor; unknown => exclude, never ZERO-wins
+api_price_source = "published_catalog"     # OpenRouter/xAI catalog rates; NEVER decompose a total costUsd
+estimate_uses = "ranking_and_budget"       # two estimates: shared ranking vs conservative budget bound
+budget_gate = "fail_closed"
+selection = "deterministic_argmin"         # no Math.random/Date.now in the ranker
+quality_floor = "config_tier"              # economy|standard|frontier; caller minTier default standard
+priors = "model_level_economics"           # anonymized; not per-principal cost history
+priors_scope_default = "global"            # global|principal|off
+dispatch = "reuse_existing_path"           # startJob / runApiRequest; LCR selects inputs, does not fork execution
+default_transport_change = "deferred"      # provider:"auto" selector is a later plan, like ACP default_transport
+
+# ---------------------------------------------------------------------------
+# Non-goals (key = reason)
+# ---------------------------------------------------------------------------
+[non_goals]
+not_a_load_balancer = "LCR optimizes cost, not throughput; latency/saturation are eligibility inputs, not the objective."
+not_billing_accurate = "No real tokenizer exists; pre-flight numbers rank candidates, they are never invoices."
+no_automatic_quality_arbitration = "LCR never routes below the caller minTier to save money."
+no_override_of_explicit_provider = "claude_request still goes to claude; LCR is reached only through its own tool."
+no_new_provider_lists = "All enumeration derives from CLI_TYPES + enabledApiProviders(); provider:surfaces:check enforces it."
+not_cross_instance = "Routing decisions are local to one gateway instance."
+no_costUsd_rate_decomposition = "A single total costUsd cannot be split into input/output rates; catalog prices are used instead."
+
+# ---------------------------------------------------------------------------
+# Architecture + module plan (maps spec section 9)
+# ---------------------------------------------------------------------------
+[architecture]
+summary = "A pure selector (least-cost-router.ts) reads price (pricing.ts/getModelCost), capability (provider-definitions.ts), auth (provider-status.ts) and health (retry/executor breaker accessor + getLimiterSnapshot) to pick argmin(estCost) subject to eligibility+tier+budget, then dispatches through the existing handler path. Dormant behind [least_cost]."
+
+[architecture.module_plan]
+pricing = "src/pricing.ts: add getModelCost (output + cache-write pricing, source/asOf, unknown=exclude). getPricing untouched."
+breaker_accessor = "src/executor.ts + src/retry.ts: export per-CLI breaker state (map CliType->executable first); add per-provider capacity helper over getLimiterSnapshot(). NOTE: async CLI jobs spawn via spawnCliProcess and bypass the executor breaker map (it is sync executeCli history only), so the router treats CLI health as breaker-state for the sync path PLUS the per-provider capacity helper and async-job outcomes for the async path; it does not assume the breaker reflects async failures."
+capability_flags = "src/provider-definitions.ts: promote image/attachment, tool-calling, json-schema to explicit requestSurface flags (additive, DRY, surfaces-check-safe)."
+router_core = "src/least-cost-router.ts (NEW): pure pool-build + eligibility + estimator + deterministic ranker + budget gate. No CLI spawn; unit-testable like computeFlagDrift."
+feedback = "src/lcr-priors.ts (NEW, read-only sibling of cache-stats.ts): anonymized per-(provider,model) output-token median/p90; reconciliation of est vs actual."
+config = "src/config.ts: [least_cost] Zod schema + loadLeastCostConfig (throw on schema-invalid, all-off default), threaded through runtime."
+tools = "src/index.ts: register route_request / route_request_async behind the gate; dispatch via existing path; add routing block; add routing:// resources; extend llm_process_health."
+flight_recorder = "src/flight-recorder.ts: additive migration for routed/route_est_cost_usd/route_reason/route_considered/route_reroutes."
+
+# ---------------------------------------------------------------------------
+# Cost-model matrix (per-provider price source + telemetry availability;
+# grounds which providers are LCR-eligible in which phase)
+# ---------------------------------------------------------------------------
+[cost_model.claude]
+price_source = "table"
+reported_cost = "reliable"          # total_cost_usd in stream-json result
+usage = "input/output/cache_read/cache_write"
+lcr_phase = "phase_1"
+
+[cost_model.codex]
+price_source = "table"
+reported_cost = "rare_null"         # codex JSONL rarely emits cost_usd
+usage = "input/output/cache_read/cache_write"
+lcr_phase = "phase_1"
+
+[cost_model.gemini]
+price_source = "table"
+reported_cost = "none"              # text-only path, no cost
+usage = "input/output/cache_read"
+lcr_phase = "phase_1"
+
+[cost_model.grok]
+price_source = "table"
+reported_cost = "none"              # -p wire emits no usage; ACP _meta not threaded to FR
+usage = "none_cli"
+lcr_phase = "phase_1"
+
+[cost_model.mistral]
+price_source = "table"
+reported_cost = "sometimes"         # off-disk vibe meta.json when found
+usage = "input/output"
+lcr_phase = "phase_1"
+
+[cost_model.devin]
+price_source = "unknown"
+reported_cost = "none"
+usage = "none"
+lcr_phase = "excluded"              # unpriced: candidate only via explicit candidates + allow_unpriced
+
+[cost_model.cursor]
+price_source = "unknown"
+reported_cost = "none"
+usage = "none"
+capability_scope = "maintain-only"
+lcr_phase = "excluded"
+
+[cost_model.api_providers]
+price_source = "api_catalog"        # OpenRouter /models prompt/completion prices; xAI published rates
+reported_cost = "when_enabled"      # OpenRouter usage accounting / xAI; used only for reconciliation
+usage = "varies"
+lcr_phase = "phase_2"
+
+# ---------------------------------------------------------------------------
+# Config (mirrors [acp] dormancy)
+# ---------------------------------------------------------------------------
+[config]
+block = "[least_cost]"
+loader = "loadLeastCostConfig"
+missing_block = "all_off_defaults"
+syntactically_broken_toml = "whole_file_fallback_to_defaults"
+schema_invalid = "throw"
+env_overrides = "one_time_deprecation_warning_only"
+
+[config.example]
+least_cost = """
+[least_cost]
+enabled = false
+min_tier = "standard"
+max_cost_usd = 0.50
+default_expected_output_tokens = 800
+budget_output_safety_factor = 1.5
+priors_scope = "global"            # global | principal | off
+allow_unpriced = false
+max_reroutes = 2
+prefer_catalog_price = true
+
+[least_cost.tiers]                 # (provider:family) -> tier; a default ships for every known family
+"claude:haiku" = "economy"
+"claude:sonnet" = "standard"
+"claude:opus" = "frontier"
+
+[least_cost.candidates]
+allow = []                         # empty = all eligible
+deny = []
+"""
+
+# ---------------------------------------------------------------------------
+# API surface
+# ---------------------------------------------------------------------------
+[api_surface]
+new_tools = ["route_request", "route_request_async"]
+existing_tools_touched = "none"
+inputs = "prompt|promptParts, candidates?, minTier?, maxCostUsd?, maxOutputTokens?, expectedOutputTokens?, requiredCapabilities?, allowUnpriced?, budgetWaiver? (explicit acknowledgment to admit an unpriced/over-budget fallback), fallback?, optimizePrompt?, plus common passthroughs"
+output_extra = "routing block: {chosen{provider,model}, tier, estCostUsd, estInputTokens, estOutputTokens, priceAsOf, priceSource, consideredCount, rejected[{candidate,reason}], reroutes}"
+validation_tool_optin = "validate_with_models/second_opinion/ask_model MAY gain select:'cheapest'|'cheapest_per_tier' (default behavior unchanged)"
+
+[resources]
+"routing://decisions" = "recent routing decisions, redacted, read-only, gated behind enabled"
+"routing://priors" = "current per-candidate output-token priors + price asOf, read-only, gated"
+
+# ---------------------------------------------------------------------------
+# Security + correctness invariants (flat true flags)
+# ---------------------------------------------------------------------------
+[security_invariants]
+deterministic_selection = true
+principal_attribution_isolated = true
+priors_are_anonymized_model_economics = true
+unknown_price_never_wins = true
+unpriced_cannot_pass_budget_gate = true
+budget_fails_closed = true
+no_silent_quality_downgrade = true
+honest_cost_labeling = true
+routing_block_and_logs_redacted = true
+getPricing_semantics_unchanged = true
+dormant_by_default = true
+no_hand_maintained_provider_arrays = true
+
+# ---------------------------------------------------------------------------
+# Observability
+# ---------------------------------------------------------------------------
+[observability]
+flight_recorder_columns = ["routed", "route_est_cost_usd", "route_reason", "route_considered", "route_reroutes"]
+metrics = "per-(provider,model): estimate accuracy (est vs actual cost ratio), win counts, reroute rate, output-token priors, catalog-price asOf freshness"
+resources = ["routing://decisions", "routing://priors"]
+doctor = "surface pricing.asOf staleness + per-candidate eligibility (priced? authed? breaker? tier?) + untiered models"
+redaction = "reuse flight-recorder redaction: no secrets, no base_url userinfo, no raw prompts in health surfaces"
+
+[flight_recorder_requirements]
+migration = "additive, nullable columns on gateway_metadata (matches existing additive-migration pattern)"
+reconciliation = "actual cost_usd/output_tokens/model already recorded; no new write path for est-vs-actual"
+
+# ---------------------------------------------------------------------------
+# Failure policy (spec section 10)
+# ---------------------------------------------------------------------------
+[failure_policy]
+missing_or_broken_config = "all_off, log once, tools not registered (no partial routing)"
+all_candidates_unpriced = "NoEligibleCandidate by default; with allow_unpriced still requires explicit budget waiver, else fail closed"
+empty_eligible_pool = "NoEligibleCandidateError naming why each candidate was excluded (auth/breaker/capability/price/tier/budget)"
+transient_failure = "re-select over remaining eligible candidates up to max_reroutes; failed candidate excluded"
+non_transient_failure = "drop candidate, continue; empty pool => NoEligibleCandidateError"
+health_accessor_unavailable = "treat as CLOSED, log degraded-health warning, do not crash routing"
+
+# ---------------------------------------------------------------------------
+# Test matrix
+# ---------------------------------------------------------------------------
+[test_matrix.unit]
+pricing = "getModelCost: output+cache-write pricing, source/asOf, unknown=exclude; getPricing ZERO-for-cache-path unchanged (regression)."
+estimator = "ranking estimate incl cache-write/read terms; budget estimate uses conservative upper bound; unbounded output => budget gate fails."
+eligibility = "auth/breaker/capacity/capability/tier/price filters, each mocked; untiered => excluded."
+ranker = "deterministic argmin + tie-break stable across runs (no Math.random/Date.now)."
+budget = "over-budget => BudgetExceededError; unpriced => cannot pass gate without explicit waiver."
+priors = "anonymized model-level aggregate; priors_scope principal/off honored; no cross-principal leakage."
+config = "loadLeastCostConfig: missing=all-off, schema-invalid=throw, env override warns once."
+
+[test_matrix.integration]
+gated_off = "with enabled=false, route_request/route_request_async are NOT registered."
+gated_on = "with enabled=true, a table-priced CLI request routes to the cheapest tier-eligible candidate and records the routing columns."
+surfaces = "provider:surfaces:check passes (no new hand-maintained provider array)."
+
+# ---------------------------------------------------------------------------
+# Release gates
+# ---------------------------------------------------------------------------
+[release_gates]
+build = "npm run build"
+lint = "npm run lint (0 errors)"
+format = "prettier --check (use ./node_modules/.bin/prettier; npx is RTK-proxied)"
+surfaces = "npm run provider:surfaces:check"
+tests = "npm test (full suite green)"
+security_audit = "npm run security:audit"
+cross_llm_review = "unconditional Codex + Grok + Gemini approval on the diff, evidence-based"
+docs = "agent-facing docs updated (below)"
+
+[agent_docs_required]
+best_practices = "docs/guides/BEST_PRACTICES.md: when to use route_request vs a specific provider tool"
+skill = ".agents/skills/*: least-cost routing usage (minTier/maxCostUsd/candidates), unpriced/budget semantics"
+contract = "docs/least-cost-routing-contract.md: frozen decisions + non-goals + security invariants"
+
+# ---------------------------------------------------------------------------
+# Rollout (spec section 12)
+# ---------------------------------------------------------------------------
+[rollout]
+phase_0 = "getModelCost + per-CLI breaker accessor + per-provider capacity helper + explicit capability flags + pure least-cost-router.ts + unit tests. No tool yet."
+phase_1 = "route_request/route_request_async behind [least_cost].enabled=false; CLI providers with table prices only; routing block + flight-recorder columns."
+phase_2 = "API-provider candidates priced from published catalogs + output-prior feedback aggregator + est-vs-actual reconciliation + routing:// resources."
+phase_3 = "validation-tool select:'cheapest' opt-in; doctor/health eligibility surfacing; reconciliation reporting."
+phase_4 = "DEFERRED (needs a new plan): provider:'auto' selector on per-provider tools and/or default_route. Mirrors ACP default_transport deferral."
+
+# ---------------------------------------------------------------------------
+# Open questions (spec section 11)
+# ---------------------------------------------------------------------------
+[open_questions]
+output_prior_cold_start = "Ship per-family output-token defaults, or require a warm-up window of N samples before trusting a candidate prior?"
+tier_authority = "Are shipped tier assignments sufficient, or should tiers derive from a public benchmark reference kept in provider-definitions later?"
+api_model_discovery = "Does the API candidate pool come from a caller/config allow-list only, or a periodic /models catalog fetch (later phase)?"
+unpriced_cli_providers = "devin/cursor have no table price AND no usage telemetry, so they are excluded from LCR by default (usable only via explicit candidates + allow_unpriced). grok is NOT in this group: it is table-priced (src/pricing.ts GROK_4/GROK_BUILD) and phase_1 eligible; it merely lacks -p usage telemetry, which affects est-vs-actual reconciliation (feedback loop) only, not price-based eligibility. Confirm the devin/cursor exclusion."
+estimate_drift_threshold = "What est-vs-actual accuracy threshold triggers a price/prior refresh or an operator warning?"
+
+# ===========================================================================
+# Steps (dependency-ordered; each idempotent with a concrete validation)
+# ===========================================================================
+
+[[steps]]
+id = "freeze-contract"
+depends_on = []
+actor = "implementer"
+action = """
+Write docs/least-cost-routing-contract.md capturing the cross-LLM-approved frozen
+decisions, non-goals, and security invariants from the draft (house frozen-contract
+style, like docs/acp-contract.md). Reference this DAG.
+"""
+idempotent = true
+validation = "docs/least-cost-routing-contract.md exists, lists the [decisions], [non_goals], and [security_invariants] of this plan, and points at this DAG."
+
+[[steps]]
+id = "extend-pricing-getmodelcost"
+depends_on = ["freeze-contract"]
+actor = "implementer"
+action = """
+In src/pricing.ts add a NEW router-only getModelCost(provider, model): ModelCost
+with { inputUsdPerMTok, outputUsdPerMTok, cacheReadMultiplier, cacheWriteUsdPerMTok
+(default = inputUsd; Anthropic ~1.25x), source: "table"|"api-catalog"|"unknown",
+asOf }. CLI providers resolve from the family table. NEVER derive rates from a total
+costUsd. Unknown => source "unknown" (router excludes it). DO NOT change getPricing
+or estimateCacheSavingsUsd (their ZERO-for-unknown semantics stay for cache-stats).
+"""
+idempotent = true
+validation = "Unit test: getModelCost returns table rates for known families incl outputUsd and cacheWrite; unknown model => source 'unknown'; getPricing still returns ZERO for unknown (regression test unchanged). npm test green for pricing.test.ts."
+
+[[steps]]
+id = "export-cli-breaker-accessor"
+depends_on = ["freeze-contract"]
+actor = "implementer"
+action = """
+In src/executor.ts/src/retry.ts export a per-CLI circuit-breaker state accessor
+(parity with apiProviderBreakerState). Breakers are keyed by resolved
+command/executable (e.g. cursor -> cursor-agent), so the accessor maps CliType to
+its executable before lookup. Do not change breaker behavior.
+"""
+idempotent = true
+validation = "Unit test: accessor returns CLOSED/OPEN/HALF_OPEN for a CliType by mapping to its executable; matches the internal breaker Map. No _request handler still needs to hardcode 'closed' for the router path."
+
+[[steps]]
+id = "capacity-helper"
+depends_on = ["freeze-contract"]
+actor = "implementer"
+action = """
+Add a per-provider capacity helper deriving saturation from
+getLimiterSnapshot().runningByProvider vs maxRunningPerProvider (there is no
+per-provider saturated field; the global saturated flag is only a coarse gate).
+"""
+idempotent = true
+validation = "Unit test: helper reports at-capacity when runningByProvider[p] >= maxRunningPerProvider and available otherwise; uses only exported snapshot fields."
+
+[[steps]]
+id = "promote-capability-flags"
+depends_on = ["freeze-contract"]
+actor = "implementer"
+action = """
+In src/provider-definitions.ts promote implicit capabilities (image/attachment
+acceptance, tool-calling, json-schema) to explicit ProviderRequestSurface flags,
+grounded in installed --help evidence. Additive and DRY.
+"""
+idempotent = true
+validation = "npm run provider:surfaces:check passes; provider-definitions.test.ts asserts the new flags per provider; no new hand-maintained provider array introduced."
+
+[[steps]]
+id = "router-core"
+depends_on = ["extend-pricing-getmodelcost", "export-cli-breaker-accessor", "capacity-helper", "promote-capability-flags"]
+actor = "implementer"
+action = """
+Create src/least-cost-router.ts: a PURE selector. Build the candidate pool from
+new Set([...CLI_TYPES, ...enabledApiProviders().map(p=>p.name)]) crossed with model
+ids. Apply eligibility (auth via provider-status, breaker via new accessor, capacity
+helper, capability flags, tier floor, price known). Compute the RANKING estimate and
+the CONSERVATIVE BUDGET estimate (4.2). argmin(estCost) with deterministic tie-break
+(no Math.random/Date.now). Enforce budget with the budget estimate. Expose
+selectCandidate(request, excluded: Set) so the dispatcher can RE-SELECT over the
+remaining pool after a failure. Encode the budget-waiver rule: an unpriced
+(source "unknown") or over-budget candidate is admissible ONLY when BOTH
+allowUnpriced and budgetWaiver are set, otherwise it fails the budget gate. Honor an
+explicit `fallback` returned only when the eligible pool is empty. No CLI spawn here.
+"""
+idempotent = true
+validation = "Unit tests (mocked SoT): eligibility filters each reject for the right reason; deterministic argmin stable across runs; budget gate fails closed; unpriced/over-budget rejected unless allowUnpriced AND budgetWaiver are both set; untiered excluded; selectCandidate(excluded) returns the next-cheapest; fallback returned only when the pool is empty. least-cost-router.test.ts green."
+
+[[steps]]
+id = "config-least-cost"
+depends_on = ["freeze-contract"]
+actor = "implementer"
+action = """
+In src/config.ts add a [least_cost] Zod schema + loadLeastCostConfig mirroring
+[acp]: enabled default false, min_tier, max_cost_usd, default_expected_output_tokens,
+budget_output_safety_factor, priors_scope enum, allow_unpriced, max_reroutes,
+prefer_catalog_price, [least_cost.tiers], [least_cost.candidates]. Missing => all-off
+defaults; schema-invalid => throw; env overrides warn once. Thread through the runtime.
+"""
+idempotent = true
+validation = "config.test.ts: missing block => enabled false + defaults; schema-invalid => throws 'Invalid [least_cost] config'; broken TOML => all-off; sources audit populated."
+
+[[steps]]
+id = "register-route-tools"
+depends_on = ["router-core", "config-least-cost"]
+actor = "implementer"
+action = """
+In src/index.ts register route_request and route_request_async ONLY when
+[least_cost].enabled is true (mirrors async-jobs gating). Validate inputs with Zod
+(including budgetWaiver). Dispatch the selected (provider, model) through the EXISTING
+handler path (AsyncJobManager.startJob / api-provider.runApiRequest) so retries,
+breakers, principal isolation, and flight recording are identical to a direct call.
+Implement the resilience loop: on a TRANSIENT failure (retry.ts classification) or a
+mid-flight OPEN breaker, re-select via selectCandidate() with the failed candidate
+excluded, up to [least_cost].max_reroutes; on a NON-TRANSIENT failure, drop the
+candidate and continue; when the eligible pool empties use the explicit `fallback` if
+provided, else return NoEligibleCandidateError naming per-candidate reasons; never
+send an unpriced/over-budget route without an explicit budgetWaiver (fail closed).
+Attach the routing block (incl. reroutes and rejected reasons) to the response. Leave
+every per-provider tool untouched.
+"""
+idempotent = true
+validation = "Integration: enabled=false => tools absent; enabled=true => a table-priced CLI request routes to the cheapest tier-eligible candidate with the routing block; a transient first-candidate failure reroutes to the next-cheapest and records reroutes; a non-transient failure drops the candidate; an empty pool returns NoEligibleCandidateError with per-candidate reasons; an unpriced/over-budget fallback WITHOUT budgetWaiver fails closed; direct claude_request behavior unchanged."
+
+[[steps]]
+id = "flight-recorder-migration"
+depends_on = ["register-route-tools"]
+actor = "implementer"
+action = """
+Add nullable columns to gateway_metadata (additive migration): routed,
+route_est_cost_usd, route_reason, route_considered, route_reroutes. Populate them on
+routed requests. Actual cost_usd/output_tokens/model are already recorded.
+"""
+idempotent = true
+validation = "Migration test: fresh + legacy DB open clean; a routed request writes the new columns; llm_request_result surfaces them; existing non-routed rows unaffected."
+
+[[steps]]
+id = "api-catalog-pricing"
+depends_on = ["router-core"]
+actor = "implementer"
+action = """
+Phase 2: source API-provider per-token prices from the published catalog (OpenRouter
+/models prompt/completion prices; xAI published rates) into getModelCost with
+source 'api-catalog' and a refresh asOf. Never decompose a reported total costUsd.
+API candidate pool comes from the caller/config allow-list first.
+"""
+idempotent = true
+validation = "Unit test with a fixture catalog: getModelCost returns api-catalog rates for a known OpenRouter model; a model absent from catalog+table => source 'unknown' (excluded). No code path derives rates from costUsd."
+
+[[steps]]
+id = "feedback-aggregator"
+depends_on = ["flight-recorder-migration", "api-catalog-pricing"]
+actor = "implementer"
+action = """
+Phase 2: add src/lcr-priors.ts, a read-only aggregator (cache-stats.ts pattern)
+computing per-(provider,model) rolling median and p90 output_tokens (feed the ranking
+and budget priors) and est-vs-actual cost reconciliation. Anonymized model-level
+aggregates only; honor priors_scope (global|principal|off) against owner_principal.
+"""
+idempotent = true
+validation = "Unit test: aggregator emits model-level median/p90 only; priors_scope=principal restricts to the caller's owner_principal rows; priors_scope=off disables learning; no cross-principal leakage."
+
+[[steps]]
+id = "routing-resources"
+depends_on = ["feedback-aggregator"]
+actor = "implementer"
+action = """
+Phase 2: expose routing://decisions (recent redacted decisions) and routing://priors
+(current priors + price asOf), read-only, gated behind enabled. Extend
+llm_process_health with per-candidate eligibility.
+"""
+idempotent = true
+validation = "resources.test.ts: both resources present only when enabled; content redacted (no secrets/base_url userinfo/raw prompts); llm_process_health shows candidate eligibility."
+
+[[steps]]
+id = "validation-tool-cheapest"
+depends_on = ["router-core"]
+actor = "implementer"
+action = """
+Phase 3: add an opt-in select:'cheapest'|'cheapest_per_tier' mode to
+validate_with_models/second_opinion/ask_model that fills their target list via the
+LCR selector. Default (explicit provider list) unchanged.
+"""
+idempotent = true
+validation = "validation tests: default behavior byte-identical; select:'cheapest' picks the cheapest eligible provider(s) via the shared selector."
+
+[[steps]]
+id = "doctor-eligibility"
+depends_on = ["routing-resources"]
+actor = "implementer"
+action = """
+Phase 3: surface pricing.asOf staleness and per-candidate eligibility
+(priced?/authed?/breaker?/tier?) + untiered models in doctor/health output.
+"""
+idempotent = true
+validation = "doctor --json includes a least_cost block validated against setup/status.schema.json (extend the schema); untiered models listed."
+
+# Per-phase gates: each phase has its OWN review + release gate so a phase ships
+# independently and its release does not require later-phase work. Ordering is
+# enforced by each phase's review gate depending on the prior phase's release.
+# Terminal sink = release-gate-phase_3 (every deliverable is in its closure).
+
+[[steps]]
+id = "review-gate-phase_0"
+depends_on = ["router-core"]
+actor = "reviewer"
+action = """
+Cross-LLM review gate (Codex read-only + Grok + Gemini) on the phase_0 diff
+(getModelCost, per-CLI breaker accessor, capacity helper, capability flags, the pure
+least-cost-router.ts + its unit tests) against origin/master. Verify every claim
+against code, not narrative; iterate to unconditional approval.
+"""
+idempotent = true
+validation = "Unconditional Codex + Grok + Gemini approval recorded for the phase_0 diff, evidence-based; no open blockers."
+
+[[steps]]
+id = "release-gate-phase_0"
+depends_on = ["review-gate-phase_0"]
+actor = "implementer"
+action = """
+Full gate for phase_0 (internals only, no tool, no behavior change): npm run build,
+lint, prettier --check (./node_modules/.bin/prettier), provider:surfaces:check,
+npm test, security:audit. Merge via PR with green CI checks (no admin bypass).
+"""
+idempotent = true
+validation = "All release_gates green in CI on the phase_0 PR; merged to master; no user-facing surface changed."
+
+[[steps]]
+id = "review-gate-phase_1"
+depends_on = ["flight-recorder-migration", "release-gate-phase_0"]
+actor = "reviewer"
+action = """
+Cross-LLM review gate on the phase_1 diff (config-least-cost, route_request /
+route_request_async behind enabled=false, dispatch + resilience loop incl.
+reroute/fallback/budget-waiver, routing block, flight-recorder migration) against
+origin/master, after phase_0 shipped. Verify against code; iterate to unconditional
+approval.
+"""
+idempotent = true
+validation = "Unconditional Codex + Grok + Gemini approval recorded for the phase_1 diff; no open blockers."
+
+[[steps]]
+id = "release-gate-phase_1"
+depends_on = ["review-gate-phase_1"]
+actor = "implementer"
+action = """
+Full gate for phase_1 + docs (docs/guides/BEST_PRACTICES.md, agent skill,
+docs/least-cost-routing-contract.md). Merge via PR with green CI checks (no admin
+bypass). Ships DORMANT (enabled=false), so no request routes until an operator opts in.
+"""
+idempotent = true
+validation = "All release_gates green on the phase_1 PR; docs updated; merged to master; route tools remain unregistered until [least_cost].enabled=true."
+
+[[steps]]
+id = "review-gate-phase_2"
+depends_on = ["routing-resources", "release-gate-phase_1"]
+actor = "reviewer"
+action = """
+Cross-LLM review gate on the phase_2 diff (api-catalog pricing, output-prior feedback
+aggregator, routing:// resources, est-vs-actual reconciliation) against origin/master,
+after phase_1 shipped. Verify against code; iterate to unconditional approval.
+"""
+idempotent = true
+validation = "Unconditional Codex + Grok + Gemini approval recorded for the phase_2 diff; no open blockers."
+
+[[steps]]
+id = "release-gate-phase_2"
+depends_on = ["review-gate-phase_2"]
+actor = "implementer"
+action = """
+Full gate for phase_2. Merge via PR with green CI checks (no admin bypass).
+"""
+idempotent = true
+validation = "All release_gates green on the phase_2 PR; merged to master."
+
+[[steps]]
+id = "review-gate-phase_3"
+depends_on = ["validation-tool-cheapest", "doctor-eligibility", "release-gate-phase_2"]
+actor = "reviewer"
+action = """
+Cross-LLM review gate on the phase_3 diff (validation-tool select:'cheapest' opt-in,
+doctor/health eligibility surfacing, reconciliation reporting) against origin/master,
+after phase_2 shipped. Verify against code; iterate to unconditional approval.
+"""
+idempotent = true
+validation = "Unconditional Codex + Grok + Gemini approval recorded for the phase_3 diff; no open blockers."
+
+[[steps]]
+id = "release-gate-phase_3"
+depends_on = ["review-gate-phase_3"]
+actor = "implementer"
+action = """
+Full gate for phase_3 (terminal). Merge via PR with green CI checks (no admin bypass).
+phase_4 (provider:'auto' selector) stays DEFERRED to a separate plan.
+"""
+idempotent = true
+validation = "All release_gates green on the phase_3 PR; merged to master; acceptance_resource routing://decisions live behind enabled."
