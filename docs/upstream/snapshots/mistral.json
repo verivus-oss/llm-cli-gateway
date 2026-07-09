@@ -1,17 +1,17 @@
 {
   "cli": "mistral",
-  "fetchedAt": "2026-06-21T23:45:57.364Z",
+  "fetchedAt": "2026-07-09T23:54:26.404Z",
   "sources": [
     {
       "url": "https://api.github.com/repos/mistralai/mistral-vibe/releases/latest",
       "ok": true,
       "status": 200,
-      "bytes": 18709,
-      "sha256": "a6601094dc80f0d6b3f95a1985295da1cb7feb6c60bbd797f2d4a41c53cd9cc6"
+      "bytes": 19996,
+      "sha256": "60142ca56bcdd06ba98901a707ca2a12dc83c6134f3201316552494c163aeb69"
     }
   ],
   "helpSurface": {
-    "probedAt": "2026-06-21T23:45:54.892Z",
+    "probedAt": "2026-07-09T23:54:24.888Z",
     "available": true,
     "version": null,
     "flags": [
@@ -20,6 +20,7 @@
       "--auto-approve",
       "--check-upgrade",
       "--continue",
+      "--disabled-tools",
       "--enabled-tools",
       "--max-price",
       "--max-tokens",
@@ -31,9 +32,10 @@
       "--trust",
       "--version",
       "--workdir",
+      "--worktree",
       "--yolo"
     ],
-    "helpHash": "2c3b255006e80e11da99b45ea22f104263235b857ed36cc5b1e923c118d086d8",
+    "helpHash": "c12e04642b45bb3e33c371c619e626e5ba78439a14c2711b01a3fbd6cac530f4",
     "extraVsContract": [],
     "missingFromBinary": []
   },

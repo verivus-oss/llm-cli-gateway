@@ -2441,12 +2441,21 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
     },
     // These exist in Vibe's help but are not gateway request-time surfaces.
     // `--auto-approve` / `--yolo` are shortcuts for `--agent auto-approve`,
-    // `--check-upgrade` prompts for a binary update, and `--worktree` is Vibe's
+    // `--check-upgrade` prompts for a binary update, `--worktree` is Vibe's
     // native worktree flag (the gateway's slice-λ worktree spawns with cwd and
-    // never emits it). Keep them acknowledged but absent from the argv allowlist
-    // so drift detection stays quiet while validateUpstreamCliArgs still rejects
-    // them as caller argv.
-    acknowledgedUpstreamFlags: ["--auto-approve", "--check-upgrade", "--worktree", "--yolo"],
+    // never emits it), and `--disabled-tools` is the vibe 2.19.1 denylist
+    // counterpart to `--enabled-tools` (the gateway currently accepts
+    // `disallowedTools` but does not emit it at the CLI boundary; see
+    // prepareMistralRequest). Keep them acknowledged but absent from the argv
+    // allowlist so drift detection stays quiet while validateUpstreamCliArgs
+    // still rejects them as caller argv.
+    acknowledgedUpstreamFlags: [
+      "--auto-approve",
+      "--check-upgrade",
+      "--disabled-tools",
+      "--worktree",
+      "--yolo",
+    ],
     env: {
       VIBE_ACTIVE_MODEL: {
         arity: "one",
@@ -2548,7 +2557,7 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       {
         id: "mistral-current-help-surface",
         description:
-          "Vibe 2.19.0 request-time help surface: --prompt, -v, --version, --setup accepted",
+          "Vibe 2.19.1 request-time help surface: --prompt, -v, --version, --setup accepted",
         args: ["--prompt", "hello", "--agent", "auto-approve", "-v", "--version", "--setup"],
         env: { VIBE_ACTIVE_MODEL: "mistral-medium-3.5" },
         expect: "pass",
@@ -2574,6 +2583,14 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         description:
           "Vibe 2.19.0 advertises --worktree (native worktree); the gateway uses slice-λ worktree (spawns with cwd) and rejects raw --worktree as caller argv",
         args: ["-p", "hello", "--worktree", "feature"],
+        env: { VIBE_ACTIVE_MODEL: "mistral-medium-3.5" },
+        expect: "fail",
+      },
+      {
+        id: "mistral-disabled-tools-rejected",
+        description:
+          "Vibe 2.19.1 adds --disabled-tools (denylist counterpart to --enabled-tools); the gateway does not emit it (disallowedTools is accepted but ignored) and rejects raw --disabled-tools as caller argv",
+        args: ["-p", "hello", "--disabled-tools", "shell"],
         env: { VIBE_ACTIVE_MODEL: "mistral-medium-3.5" },
         expect: "fail",
       },
