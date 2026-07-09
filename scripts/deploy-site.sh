@@ -26,11 +26,15 @@ export CLOUDFLARE_ACCOUNT_ID
 echo "==> verifying site version matches package.json"
 node scripts/sync-site-version.mjs --check
 
+echo "==> verifying generated site discovery files"
+node scripts/generate-site-discovery.mjs --check
+node scripts/validate-site-discovery.mjs
+
 if [ -z "${CLOUDFLARE_API_TOKEN:-}" ]; then
-  echo "==> fetching Cloudflare token from Azure Key Vault (verivus-dev-secrets-kv/cloudflare-api-token)"
+  echo "==> fetching Cloudflare Pages token from Azure Key Vault (verivus-dev-secrets-kv/cloudflare-pages-llm-cli-gateway-token)"
   CLOUDFLARE_API_TOKEN="$(az keyvault secret show \
     --vault-name verivus-dev-secrets-kv \
-    --name cloudflare-api-token \
+    --name cloudflare-pages-llm-cli-gateway-token \
     --query value -o tsv)"
 fi
 if [ -z "${CLOUDFLARE_API_TOKEN:-}" ]; then
@@ -40,7 +44,7 @@ fi
 export CLOUDFLARE_API_TOKEN
 
 echo "==> deploying site/ to Pages project '${PROJECT}' (branch ${BRANCH} = production)"
-npx --no-install wrangler pages deploy site \
+npx -y wrangler pages deploy site \
   --project-name="${PROJECT}" \
   --branch="${BRANCH}" \
   --commit-dirty=true

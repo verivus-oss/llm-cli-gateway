@@ -1,0 +1,87 @@
+{
+  "linkset": [
+    {
+      "anchor": "https://llm-cli-gateway.dev",
+      "service-doc": [
+        {
+          "href": "https://llm-cli-gateway.dev/install.md",
+          "type": "text/markdown"
+        },
+        {
+          "href": "https://llm-cli-gateway.dev/docs",
+          "type": "text/html"
+        },
+        {
+          "href": "https://llm-cli-gateway.dev/api",
+          "type": "text/html"
+        },
+        {
+          "href": "https://llm-cli-gateway.dev/developers",
+          "type": "text/html"
+        },
+        {
+          "href": "https://llm-cli-gateway.dev/agents.md",
+          "type": "text/markdown"
+        },
+        {
+          "href": "https://llm-cli-gateway.dev/tools.md",
+          "type": "text/markdown"
+        },
+        {
+          "href": "https://llm-cli-gateway.dev/guides/coding-agent-gateway-technical-guide.md",
+          "type": "text/markdown"
+        },
+        {
+          "href": "https://llm-cli-gateway.dev/workflows/cross-model-review.md",
+          "type": "text/markdown"
+        },
+        {
+          "href": "https://llm-cli-gateway.dev/llms.txt",
+          "type": "text/plain"
+        },
+        {
+          "href": "https://llm-cli-gateway.dev/DISCOVERY.md",
+          "type": "text/markdown"
+        },
+        {
+          "href": "https://llm-cli-gateway.dev/sitemap.md",
+          "type": "text/markdown"
+        },
+        {
+          "href": "https://github.com/verivus-oss/llm-cli-gateway",
+          "type": "text/html"
+        }
+      ],
+      "describedby": [
+        {
+          "href": "https://llm-cli-gateway.dev/.well-known/agent.json",
+          "type": "application/json"
+        },
+        {
+          "href": "https://llm-cli-gateway.dev/.well-known/integrations.json",
+          "type": "application/json"
+        }
+      ],
+      "service-desc": [
+        {
+          "href": "https://llm-cli-gateway.dev/openapi.json",
+          "type": "application/vnd.oai.openapi+json"
+        },
+        {
+          "href": "https://llm-cli-gateway.dev/.well-known/mcp/server-card.json",
+          "type": "application/json"
+        }
+      ],
+      "item": [
+        {
+          "href": "http://127.0.0.1:3333/mcp",
+          "type": "application/json"
+        },
+        {
+          "href": "https://llm-cli-gateway.dev/openapi.json",
+          "type": "application/vnd.oai.openapi+json"
+        }
+      ]
+    }
+  ]
+}

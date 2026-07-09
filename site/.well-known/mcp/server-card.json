@@ -1,0 +1,46 @@
+{
+  "name": "llm-cli-gateway",
+  "version": "2.13.2",
+  "description": "Secure local control plane for AI coding agents. Operate Claude Code, Codex, Gemini/Antigravity, Grok Build, Mistral Vibe, Devin, Cursor Agent, and optional HTTP API providers from supported MCP clients while keeping execution workspace-scoped, approval-gated, durable, and auditable.",
+  "repository": "https://github.com/verivus-oss/llm-cli-gateway",
+  "documentation": "https://llm-cli-gateway.dev/agents.md",
+  "serverUrl": "http://127.0.0.1:3333/mcp",
+  "apiReference": "https://llm-cli-gateway.dev/api",
+  "openapi": "https://llm-cli-gateway.dev/openapi.json",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "llm-cli-gateway",
+      "runtimeHint": "npx"
+    }
+  ],
+  "remotes": [
+    {
+      "transport": "streamable-http",
+      "url": "http://127.0.0.1:3333/mcp",
+      "auth": "bearer_or_oauth2"
+    }
+  ],
+  "tools": [
+    "claude_request",
+    "codex_request",
+    "gemini_request",
+    "grok_request",
+    "mistral_request",
+    "devin_request",
+    "cursor_request",
+    "claude_request_async",
+    "codex_request_async",
+    "gemini_request_async",
+    "grok_request_async",
+    "mistral_request_async",
+    "llm_job_status",
+    "llm_job_result",
+    "session_create",
+    "session_list",
+    "workspace_list",
+    "consensus_check",
+    "red_team_review",
+    "compare_answers"
+  ]
+}

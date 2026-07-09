@@ -1,0 +1,224 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "llm-cli-gateway MCP HTTP API",
+    "version": "2.13.2",
+    "description": "Streamable HTTP MCP endpoint for llm-cli-gateway. Local stdio remains the default; HTTP is opt-in and requires bearer token or OAuth."
+  },
+  "servers": [
+    {
+      "url": "http://127.0.0.1:3333",
+      "description": "Default local HTTP transport"
+    }
+  ],
+  "paths": {
+    "/mcp": {
+      "post": {
+        "operationId": "mcpJsonRpc",
+        "summary": "Send an MCP JSON-RPC request",
+        "description": "Streamable HTTP endpoint used by MCP clients for initialize, tools/list, tools/call, resource reads, and session lifecycle requests.",
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "oauth2": [
+              "mcp:read",
+              "mcp:call"
+            ]
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JsonRpcRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "MCP JSON-RPC response or streamable HTTP response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonRpcResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/JsonError"
+          },
+          "403": {
+            "$ref": "#/components/responses/JsonError"
+          },
+          "429": {
+            "$ref": "#/components/responses/JsonError"
+          }
+        }
+      }
+    },
+    "/healthz": {
+      "get": {
+        "operationId": "healthz",
+        "summary": "Read HTTP gateway health",
+        "description": "Unauthenticated readiness endpoint for local reverse proxies and tunnel monitors.",
+        "responses": {
+          "200": {
+            "description": "Gateway health summary",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "sessions": {
+                      "type": "object"
+                    },
+                    "memory": {
+                      "type": "object"
+                    }
+                  },
+                  "required": [
+                    "ok"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "Static bearer token supplied with LLM_GATEWAY_AUTH_TOKEN."
+      },
+      "oauth2": {
+        "type": "oauth2",
+        "description": "Built-in OAuth 2.0 server with PKCE and scoped tokens.",
+        "flows": {
+          "authorizationCode": {
+            "authorizationUrl": "http://127.0.0.1:3333/oauth/authorize",
+            "tokenUrl": "http://127.0.0.1:3333/oauth/token",
+            "scopes": {
+              "mcp:read": "List tools and read public gateway metadata.",
+              "mcp:call": "Call MCP tools through the gateway.",
+              "workspace:read": "Read registered workspace aliases for remote calls.",
+              "workspace:admin": "Create or register workspace aliases.",
+              "approval:read": "Read MCP-managed approval decisions.",
+              "provider:admin": "Run gated provider administration tools."
+            }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "JsonRpcRequest": {
+        "type": "object",
+        "properties": {
+          "jsonrpc": {
+            "type": "string",
+            "const": "2.0"
+          },
+          "id": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "number"
+              }
+            ]
+          },
+          "method": {
+            "type": "string",
+            "examples": [
+              "initialize",
+              "tools/list",
+              "tools/call"
+            ]
+          },
+          "params": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        },
+        "required": [
+          "jsonrpc",
+          "method"
+        ]
+      },
+      "JsonRpcResponse": {
+        "type": "object",
+        "properties": {
+          "jsonrpc": {
+            "type": "string",
+            "const": "2.0"
+          },
+          "id": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "result": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "error": {
+            "$ref": "#/components/schemas/JsonError"
+          }
+        },
+        "required": [
+          "jsonrpc"
+        ]
+      },
+      "JsonError": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "string"
+          },
+          "code": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "error",
+          "message"
+        ]
+      }
+    },
+    "responses": {
+      "JsonError": {
+        "description": "JSON error response",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/JsonError"
+            }
+          }
+        }
+      }
+    }
+  }
+}

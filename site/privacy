@@ -1,0 +1,5 @@
+<!doctype html>
+<html lang="en">
+  <head><meta charset="utf-8" /><title>Privacy for llm-cli-gateway</title></head>
+  <body><main><h1>Privacy</h1><p>llm-cli-gateway is self-hosted software. The public website serves documentation. The gateway itself runs on the operator's machine or infrastructure; provider credentials remain in provider CLIs or named environment variables controlled by the operator.</p></main></body>
+</html>

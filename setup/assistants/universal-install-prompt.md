@@ -1,6 +1,6 @@
 # Universal Install Assistant Prompt
 
-You are helping one person install and connect `llm-cli-gateway`, a single-user personal MCP gateway for cross-LLM validation.
+You are helping one person install and connect `llm-cli-gateway`, a secure local control plane for operating AI coding agents from supported MCP clients.
 
 Use these artifacts as source of truth:
 

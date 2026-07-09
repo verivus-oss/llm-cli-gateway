@@ -5,12 +5,48 @@
     <lastmod>2026-07-03</lastmod>
   </url>
   <url>
+    <loc>https://llm-cli-gateway.dev/docs</loc>
+    <lastmod>2026-07-04</lastmod>
+  </url>
+  <url>
+    <loc>https://llm-cli-gateway.dev/api</loc>
+    <lastmod>2026-07-04</lastmod>
+  </url>
+  <url>
+    <loc>https://llm-cli-gateway.dev/developers</loc>
+    <lastmod>2026-07-04</lastmod>
+  </url>
+  <url>
+    <loc>https://llm-cli-gateway.dev/openapi.json</loc>
+    <lastmod>2026-07-04</lastmod>
+  </url>
+  <url>
     <loc>https://llm-cli-gateway.dev/install.md</loc>
-    <lastmod>2026-07-03</lastmod>
+    <lastmod>2026-07-04</lastmod>
+  </url>
+  <url>
+    <loc>https://llm-cli-gateway.dev/agents.md</loc>
+    <lastmod>2026-07-04</lastmod>
+  </url>
+  <url>
+    <loc>https://llm-cli-gateway.dev/tools.md</loc>
+    <lastmod>2026-07-04</lastmod>
+  </url>
+  <url>
+    <loc>https://llm-cli-gateway.dev/guides/coding-agent-gateway-technical-guide.md</loc>
+    <lastmod>2026-07-04</lastmod>
+  </url>
+  <url>
+    <loc>https://llm-cli-gateway.dev/workflows/cross-model-review.md</loc>
+    <lastmod>2026-07-04</lastmod>
+  </url>
+  <url>
+    <loc>https://llm-cli-gateway.dev/DISCOVERY.md</loc>
+    <lastmod>2026-07-04</lastmod>
   </url>
   <url>
     <loc>https://llm-cli-gateway.dev/llms.txt</loc>
-    <lastmod>2026-07-03</lastmod>
+    <lastmod>2026-07-04</lastmod>
   </url>
   <url>
     <loc>https://llm-cli-gateway.dev/maintainers.md</loc>
@@ -22,6 +58,42 @@
   </url>
   <url>
     <loc>https://llm-cli-gateway.dev/.well-known/agent.json</loc>
+    <lastmod>2026-07-04</lastmod>
+  </url>
+  <url>
+    <loc>https://llm-cli-gateway.dev/agent.json</loc>
+    <lastmod>2026-07-04</lastmod>
+  </url>
+  <url>
+    <loc>https://llm-cli-gateway.dev/.well-known/integrations.json</loc>
     <lastmod>2026-07-03</lastmod>
+  </url>
+  <url>
+    <loc>https://llm-cli-gateway.dev/.well-known/api-catalog</loc>
+    <lastmod>2026-07-04</lastmod>
+  </url>
+  <url>
+    <loc>https://llm-cli-gateway.dev/.well-known/ai-catalog.json</loc>
+    <lastmod>2026-07-04</lastmod>
+  </url>
+  <url>
+    <loc>https://llm-cli-gateway.dev/.well-known/mcp/server-card.json</loc>
+    <lastmod>2026-07-04</lastmod>
+  </url>
+  <url>
+    <loc>https://llm-cli-gateway.dev/.well-known/mcp.json</loc>
+    <lastmod>2026-07-04</lastmod>
+  </url>
+  <url>
+    <loc>https://llm-cli-gateway.dev/about</loc>
+    <lastmod>2026-07-04</lastmod>
+  </url>
+  <url>
+    <loc>https://llm-cli-gateway.dev/contact</loc>
+    <lastmod>2026-07-04</lastmod>
+  </url>
+  <url>
+    <loc>https://llm-cli-gateway.dev/privacy</loc>
+    <lastmod>2026-07-04</lastmod>
   </url>
 </urlset>

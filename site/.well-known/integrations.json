@@ -1,0 +1,86 @@
+{
+  "version": 3,
+  "summary": "llm-cli-gateway exposes a secure local control plane for AI coding agents over stdio and optional streamable HTTP, with workspace-scoped remote access, approval gates, durable jobs, sessions, and audit receipts.",
+  "credentials": {
+    "llm_gateway_bearer": {
+      "type": "bearer",
+      "label": "llm-cli-gateway bearer token",
+      "generateUrl": "https://llm-cli-gateway.dev/install.md",
+      "setup": "For remote HTTP transport, generate a long random token and start the gateway with LLM_GATEWAY_AUTH_TOKEN set. Remote MCP clients send it as an Authorization: Bearer token."
+    },
+    "llm_gateway_oauth_client": {
+      "type": "oauth2",
+      "label": "llm-cli-gateway OAuth client",
+      "generateUrl": "https://llm-cli-gateway.dev/install.md",
+      "setup": "Enable the built-in OAuth server in ~/.llm-cli-gateway/config.toml, then register a client with llm-cli-gateway oauth client add <id> --redirect-uri <uri>. PKCE is enabled by default."
+    }
+  },
+  "surfaces": [
+    {
+      "slug": "llm-cli-gateway-stdio-mcp",
+      "name": "llm-cli-gateway MCP server (stdio)",
+      "type": "mcp",
+      "docs": "https://llm-cli-gateway.dev/install.md",
+      "transports": ["stdio"],
+      "basis": {
+        "via": "declared",
+        "source": "https://llm-cli-gateway.dev/.well-known/integrations.json"
+      },
+      "auth": {
+        "status": "none",
+        "basis": {
+          "via": "declared",
+          "source": "https://llm-cli-gateway.dev/.well-known/integrations.json"
+        }
+      }
+    },
+    {
+      "slug": "llm-cli-gateway-http-mcp",
+      "name": "llm-cli-gateway MCP server (HTTP)",
+      "type": "mcp",
+      "docs": "https://llm-cli-gateway.dev/install.md",
+      "url": "http://127.0.0.1:3333/mcp",
+      "transports": ["streamable-http"],
+      "basis": {
+        "via": "declared",
+        "source": "https://llm-cli-gateway.dev/.well-known/integrations.json"
+      },
+      "auth": {
+        "status": "required",
+        "entries": [
+          {
+            "use": [
+              {
+                "id": "llm_gateway_bearer",
+                "mechanics": {
+                  "source": "http",
+                  "in": "header",
+                  "headerName": "Authorization",
+                  "scheme": "Bearer"
+                }
+              }
+            ],
+            "basis": {
+              "via": "declared",
+              "source": "https://llm-cli-gateway.dev/.well-known/integrations.json"
+            }
+          },
+          {
+            "use": [
+              {
+                "id": "llm_gateway_oauth_client",
+                "mechanics": {
+                  "source": "well-known"
+                }
+              }
+            ],
+            "basis": {
+              "via": "declared",
+              "source": "https://llm-cli-gateway.dev/.well-known/integrations.json"
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

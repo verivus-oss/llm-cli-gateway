@@ -1,9 +1,10 @@
 # Install llm-cli-gateway
 
-llm-cli-gateway is an MCP server that wraps installed coding-agent CLIs and can
-register HTTP API providers from config. It runs locally over stdio by default,
-and as of 2.9.0 it also runs remotely over HTTP behind a bearer token or a
-built-in OAuth 2.0 server.
+llm-cli-gateway is a secure local control plane for AI coding agents. It wraps
+installed coding-agent CLIs, can register HTTP API providers from config, and
+lets supported MCP clients operate them through one user-owned gateway. It runs
+locally over stdio by default, and as of 2.9.0 it also runs remotely over HTTP
+behind a bearer token or a built-in OAuth 2.0 server.
 
 Requires Node.js >= 24.4.0. The default durable store uses Node's built-in
 `node:sqlite` module — no native bindings, no install scripts. Postgres is
