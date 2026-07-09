@@ -344,7 +344,7 @@ export const PROVIDER_TARGET_VERSIONS: Record<CliType, string> = {
   grok: "grok 0.2.91 (39d0c68723)",
   mistral: "vibe 2.19.0",
   devin: "devin 3000.1.27 (0d4bf12e)",
-  cursor: "cursor-agent 2026.07.01-41b2de7",
+  cursor: "cursor-agent 2026.07.08-0c04a8a",
 };
 
 const PROVIDER_DEFINITIONS = {
