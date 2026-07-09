@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>llm-cli-gateway API reference</title>
+    <meta name="description" content="API reference for llm-cli-gateway MCP tools, Streamable HTTP endpoint, authentication, scopes, and JSON errors." />
+  </head>
+  <body>
+    <main>
+      <h1>llm-cli-gateway API reference</h1>
+      <p>llm-cli-gateway exposes the Model Context Protocol over local stdio by default and over Streamable HTTP at <code>/mcp</code> when the operator starts <code>llm-cli-gateway --transport=http</code>.</p>
+      <h2>Machine-readable API files</h2>
+      <ul>
+        <li><a href="/openapi.json">OpenAPI 3.1 description</a></li>
+        <li><a href="/.well-known/api-catalog">RFC 9727-style API catalog</a></li>
+        <li><a href="/.well-known/mcp/server-card.json">MCP server card</a></li>
+        <li><a href="/tools.md">Runtime-derived MCP tool index</a></li>
+      </ul>
+      <h2>Authentication</h2>
+      <p>HTTP transport supports static bearer tokens and built-in OAuth 2.0 with PKCE. OAuth scopes include <code>mcp:read</code>, <code>mcp:call</code>, <code>workspace:read</code>, <code>workspace:admin</code>, <code>approval:read</code>, and <code>provider:admin</code>.</p>
+      <h2>JSON errors</h2>
+      <p>HTTP API errors are JSON objects with <code>error</code>, <code>code</code>, and <code>message</code> fields. MCP tool errors are returned through normal JSON-RPC error or tool result envelopes.</p>
+      <h2>Endpoints</h2>
+      <ul>
+        <li><code>POST /mcp</code> - MCP JSON-RPC and Streamable HTTP transport.</li>
+        <li><code>GET /healthz</code> - unauthenticated readiness and bounded process-health summary.</li>
+      </ul>
+    </main>
+  </body>
+</html>

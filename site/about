@@ -1,0 +1,5 @@
+<!doctype html>
+<html lang="en">
+  <head><meta charset="utf-8" /><title>About llm-cli-gateway</title></head>
+  <body><main><h1>About llm-cli-gateway</h1><p>llm-cli-gateway is an open-source MCP server from Verivus for operating local AI coding agents and configured API providers through one user-owned control plane.</p><p>Repository: <a href="https://github.com/verivus-oss/llm-cli-gateway">verivus-oss/llm-cli-gateway</a>.</p></main></body>
+</html>

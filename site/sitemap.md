@@ -1,11 +1,29 @@
 # Sitemap
 
 - [/](https://llm-cli-gateway.dev/) - product homepage
+- [/docs](https://llm-cli-gateway.dev/docs) - developer documentation entry point
+- [/api](https://llm-cli-gateway.dev/api) - API reference and scoped permission summary
+- [/developers](https://llm-cli-gateway.dev/developers) - developer portal and quickstart
+- [/openapi.json](https://llm-cli-gateway.dev/openapi.json) - OpenAPI 3.1 description for HTTP MCP transport
 - [/install.md](https://llm-cli-gateway.dev/install.md) - agent-readable install instructions
+- [/agents.md](https://llm-cli-gateway.dev/agents.md) - full agent-facing guide
+- [/tools.md](https://llm-cli-gateway.dev/tools.md) - runtime-derived MCP tool index
+- [/guides/coding-agent-gateway-technical-guide.md](https://llm-cli-gateway.dev/guides/coding-agent-gateway-technical-guide.md) - architecture and implementation guide for coding-agent orchestration
+- [/workflows/cross-model-review.md](https://llm-cli-gateway.dev/workflows/cross-model-review.md) - deterministic cross-model review workflow demo
+- [/DISCOVERY.md](https://llm-cli-gateway.dev/DISCOVERY.md) - discovery route matrix and validation contract
 - [/llms.txt](https://llm-cli-gateway.dev/llms.txt) - compact retrieval entry point
 - [/maintainers.md](https://llm-cli-gateway.dev/maintainers.md) - public maintainer workflow notes
 - [/.well-known/agent.json](https://llm-cli-gateway.dev/.well-known/agent.json) - structured agent metadata
+- [/agent.json](https://llm-cli-gateway.dev/agent.json) - generated compatibility alias for agent metadata
+- [/.well-known/integrations.json](https://llm-cli-gateway.dev/.well-known/integrations.json) - integrations.sh owner declaration
+- [/.well-known/api-catalog](https://llm-cli-gateway.dev/.well-known/api-catalog) - machine-readable service catalog
+- [/.well-known/ai-catalog.json](https://llm-cli-gateway.dev/.well-known/ai-catalog.json) - generated compatibility alias for the API catalog
+- [/.well-known/mcp/server-card.json](https://llm-cli-gateway.dev/.well-known/mcp/server-card.json) - MCP server card
+- [/.well-known/mcp.json](https://llm-cli-gateway.dev/.well-known/mcp.json) - generated compatibility alias for the MCP server card
 - [/robots.txt](https://llm-cli-gateway.dev/robots.txt) - crawler policy and XML sitemap pointer
+- [/about](https://llm-cli-gateway.dev/about) - project trust anchor
+- [/contact](https://llm-cli-gateway.dev/contact) - support and issue routing
+- [/privacy](https://llm-cli-gateway.dev/privacy) - self-hosted privacy note
 - [/sitemap.xml](https://llm-cli-gateway.dev/sitemap.xml) - XML sitemap for search engines
 - [/googleb0dea30e179d1a8e.html](https://llm-cli-gateway.dev/googleb0dea30e179d1a8e.html) - Google Search Console service-account verification
 - [GitHub](https://github.com/verivus-oss/llm-cli-gateway)

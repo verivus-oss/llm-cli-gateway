@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>llm-cli-gateway developers</title>
+    <meta name="description" content="Developer portal for llm-cli-gateway, with quickstart, API references, examples, and support links." />
+  </head>
+  <body>
+    <main>
+      <h1>llm-cli-gateway developers</h1>
+      <p>This developer portal collects the public resources for installing and integrating llm-cli-gateway.</p>
+      <h2>Quickstart</h2>
+      <pre><code>npx -y llm-cli-gateway
+llm-cli-gateway --transport=http</code></pre>
+      <h2>Resources</h2>
+      <ul>
+        <li><a href="/docs">Developer docs</a></li>
+        <li><a href="/api">API reference</a></li>
+        <li><a href="/openapi.json">OpenAPI spec</a></li>
+        <li><a href="/tools.md">MCP tool list</a></li>
+        <li><a href="/guides/coding-agent-gateway-technical-guide.md">Coding-agent gateway technical guide</a></li>
+        <li><a href="/agents.md">Agent onboarding guide</a></li>
+        <li><a href="https://github.com/verivus-oss/llm-cli-gateway">GitHub repository</a></li>
+        <li><a href="https://www.npmjs.com/package/llm-cli-gateway">npm package</a></li>
+      </ul>
+      <h2>Self-serve operation</h2>
+      <p>The package is open source and self-hosted. Provider credentials stay in the installed provider CLIs or in named environment variables for configured API providers.</p>
+    </main>
+  </body>
+</html>
