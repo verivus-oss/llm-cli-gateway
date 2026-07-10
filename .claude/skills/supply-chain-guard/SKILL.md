@@ -46,8 +46,10 @@ npm run supply-chain:scan:check    # --frozen, requires exit 0 (what CI runs)
 ```
 
 Read `report.md` under `.supply-chain/scan-<ts>/`. Exit `0` clean, `2`
-roll-forward/dropped, `3` tag-along / source anomaly / integrity mismatch, `1`
-tool error. If clean, stop; otherwise triage every flagged row.
+roll-forward/dropped, `3` tag-along / source anomaly / integrity mismatch /
+reused-invariant failure (forbidden native-tar chain, blocked version,
+fetch-in-dist), `1` tool error. If clean, stop; otherwise triage every flagged
+row.
 
 ### 2. Research each actionable package with exa
 
