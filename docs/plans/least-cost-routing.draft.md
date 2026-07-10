@@ -1,6 +1,6 @@
 # Least-Cost Routing (LCR) specification (draft)
 
-Status: Reviewed draft, cost-estimation revision (round 2). The base design
+Status: Reviewed draft, cost-estimation revision (Grok + Mistral APPROVED after 2 review rounds; Codex unavailable this session). The base design
 passed the cross-LLM review gate; not yet frozen, not implemented. This revision
 folds in six cost-estimation enhancements aimed at making the cost figure as
 accurate as possible for the providers that do NOT report a dollar cost, grounded
