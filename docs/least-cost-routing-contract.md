@@ -51,8 +51,9 @@ across models than across providers, so LCR never routes a bare provider.
 
 5. **Unknown price never wins.** `source: "unknown"` is a hard eligibility
    signal, not a silent zero. An unpriced candidate is excluded from cost
-   ranking unless `allow_unpriced` is set, and even then it is ranked last and
-   can never satisfy a budget gate. This deliberately does not inherit
+   ranking unless `allow_unpriced` is set, and even then it is ranked strictly
+   last and cannot pass the budget gate without both `allow_unpriced` and an
+   explicit budget waiver (see decision 13). This deliberately does not inherit
    `getPricing`'s ZERO-for-unknown behaviour.
 
 6. **Cost basis is explicit on every figure.** Every recorded or returned cost
