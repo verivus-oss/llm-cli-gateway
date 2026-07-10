@@ -304,4 +304,14 @@ if (findings.length > 0) {
 console.log('No literal "fetch" in shipped dist/*.js.');
 NODE
 
+echo "==> supply-chain guard (prod-closure allowlist / tag-along)"
+# The prod-closure allowlist layer (docs/plans/supply-chain-guard.draft.md).
+# --frozen scores the committed package-lock.json via the shared prodFilter (the
+# same prod projection the shrinkwrap step above regenerates), never a fresh
+# install. It requires exit 0: a tag-along (un-ledgered package), source anomaly,
+# integrity mismatch, unaccepted-version drift, or dropped instance exits non-zero
+# and, under `set -e`, fails the audit until the ledger + baseline are refreshed
+# through the /supply-chain-guard reviewed process.
+node scripts/supply-chain/dep-drift-scan.mjs --frozen
+
 echo "Release security audit passed."

@@ -30,7 +30,10 @@ build/
 docs/personal-mcp/socket-release-assessment-prompt.md
 
 # Local agent/worktree artifacts
-.claude/
+.claude/*
+# Track internal skills (e.g. supply-chain-guard) while ignoring local .claude state.
+!.claude/skills/
+!.claude/skills/**
 .gateway/
 .worktrees/
 .r3-poll.mjs
