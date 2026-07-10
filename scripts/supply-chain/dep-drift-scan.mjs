@@ -55,6 +55,26 @@ const BLOCKED_VERSIONS = new Map([
   ["type-is", new Set(["2.1.0"])],
   ["tar-stream", new Set(["2.2.0", "2.1.4", "2.0.0"])],
 ]);
+const LICENSE_ALLOWLIST_PATH = join(SCRIPT_DIR, "..", "..", "supply-chain", "license-allowlist.json");
+const SOCKET_YML_PATH = join(SCRIPT_DIR, "..", "..", "socket.yml");
+// P2: the reviewed socket.yml issueRules posture. Any deviation (a rule flipped,
+// added, or removed) is a policy-drift finding. Update this map deliberately, in
+// lock-step with a reviewed socket.yml change (same discipline as the hono floor).
+const REQUIRED_SOCKET_POLICY = {
+  malware: true,
+  troll: true,
+  didYouMean: true,
+  installScripts: true,
+  telemetry: true,
+  hasNativeCode: true,
+  shrinkwrap: false,
+  shellAccess: false,
+  shellScriptOverride: true,
+  gitDependency: true,
+  httpDependency: true,
+  invalidPackageJSON: true,
+  unresolvedRequire: true,
+};
 
 // ---------------------------------------------------------------------------
 // Instance construction (pure)
@@ -92,6 +112,8 @@ export function toInstances(packagesMap) {
       version: meta.version ?? null,
       resolved: meta.resolved ?? null,
       integrity: meta.integrity ?? null,
+      // license is a P2 signal; a string SPDX id (or absent) in the lockfile.
+      license: typeof meta.license === "string" ? meta.license : null,
     });
   }
   return instances;
@@ -228,11 +250,68 @@ export function reusedInvariantFindings(freshInstances) {
 }
 
 /**
+ * P2 license allowlist (pure). A prod instance whose `license` is absent or not
+ * an exact member of the allowed set is a license-violation (exit 3). SPDX
+ * expressions that are not verbatim in the allowlist are flagged deliberately, so
+ * a dual-license entry cannot slip a copyleft term in unnoticed.
+ * @param {Array} instances
+ * @param {Set<string>|string[]} allowed allowed SPDX ids
+ */
+export function licenseFindings(instances, allowed) {
+  const set = allowed instanceof Set ? allowed : new Set(allowed ?? []);
+  const findings = [];
+  for (const inst of instances) {
+    if (inst.license === null || inst.license === undefined || !set.has(inst.license)) {
+      findings.push({
+        path: inst.path,
+        name: inst.name,
+        version: inst.version,
+        class: "license-violation",
+        license: inst.license ?? null,
+        exit: 3,
+      });
+    }
+  }
+  return findings;
+}
+
+/**
+ * P2 Socket policy-drift tripwire (pure). Asserts the security-critical
+ * socket.yml `issueRules` stay at their reviewed enforcing values; any deviation
+ * (a rule flipped, added, or removed relative to the expected posture) is a
+ * policy-drift finding (exit 3). This is an offline, deterministic cross-check;
+ * a live Socket-API capability query would need network/credentials and does not
+ * belong in the release gate.
+ * @param {Record<string, boolean>} issueRules parsed from socket.yml
+ * @param {Record<string, boolean>} expected the reviewed posture
+ */
+export function socketPolicyFindings(issueRules, expected) {
+  const findings = [];
+  for (const [rule, want] of Object.entries(expected)) {
+    const got = issueRules?.[rule];
+    if (got !== want) {
+      findings.push({
+        path: "socket.yml",
+        name: `issueRules.${rule}`,
+        version: "-",
+        class: "socket-policy-drift",
+        expected: want,
+        actual: got ?? null,
+        exit: 3,
+      });
+    }
+  }
+  return findings;
+}
+
+/**
  * Classify a whole closure. Pure over injected data, so tests drive it with
  * fixtures. Returns rows, dropped, invariant findings, per-class counts, and the
- * max-severity exit code.
+ * max-severity exit code. `opts.licenseAllowlist` (Set|array) enables the P2
+ * license detector; `opts.extraFindings` folds in repo-level findings (P2 socket
+ * policy, fetch-in-dist) computed by the caller.
  */
-export function classifyClosure(freshInstances, ledger, baseline) {
+export function classifyClosure(freshInstances, ledger, baseline, opts = {}) {
   const ledgerErrors = validateLedger(ledger);
   if (ledgerErrors.length > 0) {
     return { exit: 1, ledgerErrors, rows: [], dropped: [], invariants: [], counts: {} };
@@ -242,7 +321,13 @@ export function classifyClosure(freshInstances, ledger, baseline) {
 
   const rows = freshInstances.map((inst) => ({ ...inst, ...classifyInstance(inst, ledger, index) }));
   const dropped = computeDropped(freshInstances, baselineInstances);
-  const invariants = reusedInvariantFindings(freshInstances);
+  // Invariants: reused (P0/P1) + P2 license allowlist + caller-supplied repo-level
+  // findings (P2 socket policy, fetch-in-dist).
+  const invariants = [
+    ...reusedInvariantFindings(freshInstances),
+    ...(opts.licenseAllowlist ? licenseFindings(freshInstances, opts.licenseAllowlist) : []),
+    ...(opts.extraFindings ?? []),
+  ];
 
   const counts = {};
   for (const r of [...rows, ...dropped, ...invariants]) {
@@ -258,6 +343,29 @@ export function classifyClosure(freshInstances, ledger, baseline) {
 
 function readJson(path) {
   return JSON.parse(readFileSync(path, "utf8"));
+}
+
+/**
+ * Parse the flat `issueRules:` block of socket.yml into { rule: boolean } without
+ * a YAML dependency. Only reads the two-space-indented `key: true|false` lines
+ * under `issueRules:` (comments stripped); anything else is ignored.
+ */
+export function parseSocketIssueRules(text) {
+  const rules = {};
+  const lines = text.split(/\r?\n/);
+  let inBlock = false;
+  for (const line of lines) {
+    if (/^issueRules:\s*$/.test(line)) {
+      inBlock = true;
+      continue;
+    }
+    if (inBlock) {
+      if (/^\S/.test(line)) break; // dedent: end of the issueRules block
+      const m = line.replace(/#.*$/, "").match(/^\s+([A-Za-z][A-Za-z0-9]*):\s*(true|false)\s*$/);
+      if (m) rules[m[1]] = m[2] === "true";
+    }
+  }
+  return rules;
 }
 
 /** --frozen: score the committed package-lock.json via prodFilter (no install). */
@@ -436,19 +544,31 @@ function main(argv) {
   }
   const ledger = readJson(LEDGER_PATH);
   const baseline = readJson(BASELINE_PATH);
-  const result = classifyClosure(freshList, ledger, baseline);
 
-  // fetch-in-dist detector (reused invariant #7). Skipped for --closure fixtures
-  // (offline tests) and when dist/ is absent; folds into the invariant set and
-  // the max-severity exit when it fires.
-  if (result.exit !== 1 && closureIdx === -1) {
-    const distFindings = fetchInDistFindings(REPO_ROOT);
-    if (distFindings.length) {
-      result.invariants.push(...distFindings);
-      for (const d of distFindings) result.counts[d.class] = (result.counts[d.class] ?? 0) + 1;
-      result.exit = Math.max(result.exit, 3);
+  // P2 license allowlist (in-closure detector).
+  const licenseAllowlist = existsSync(LICENSE_ALLOWLIST_PATH)
+    ? new Set(readJson(LICENSE_ALLOWLIST_PATH).allowed ?? [])
+    : null;
+
+  // Repo-level findings folded in as extraFindings. Skipped for --closure
+  // fixtures (offline tests): fetch-in-dist needs a built dist/, and the socket
+  // policy + license checks are repo-scoped. P2 socket policy-drift and the
+  // fetch-in-dist detector both go here.
+  const extraFindings = [];
+  if (closureIdx === -1) {
+    if (existsSync(SOCKET_YML_PATH)) {
+      extraFindings.push(
+        ...socketPolicyFindings(parseSocketIssueRules(readFileSync(SOCKET_YML_PATH, "utf8")), REQUIRED_SOCKET_POLICY)
+      );
     }
+    extraFindings.push(...fetchInDistFindings(REPO_ROOT));
   }
+
+  const result = classifyClosure(freshList, ledger, baseline, {
+    // license allowlist applies only to a real repo closure, not injected fixtures
+    licenseAllowlist: closureIdx === -1 ? licenseAllowlist : null,
+    extraFindings,
+  });
 
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   const outDir = outIdx !== -1 ? resolve(process.cwd(), argv[outIdx + 1]) : join(REPO_ROOT, ".supply-chain", `scan-${stamp}`);

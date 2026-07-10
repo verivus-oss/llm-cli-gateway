@@ -1,0 +1,15 @@
+{
+  "schemaVersion": "license-allowlist.v1",
+  "note": "SPDX license IDs accepted for prod-closure packages. A prod package whose `license` is absent or not an exact member here is a license-violation (exit 3) and must be reviewed before its ID is added. Seeded from the 2.16.0 shipped closure (MIT/ISC/BSD-2-Clause/BSD-3-Clause) plus standard permissive families. SPDX expressions (e.g. \"(MIT OR Apache-2.0)\") are intentionally flagged until reviewed and added verbatim, so a dual-license entry cannot slip a copyleft term in unnoticed.",
+  "allowed": [
+    "0BSD",
+    "Apache-2.0",
+    "BlueOak-1.0.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "CC0-1.0",
+    "ISC",
+    "MIT",
+    "Unlicense"
+  ]
+}

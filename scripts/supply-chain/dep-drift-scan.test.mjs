@@ -13,6 +13,9 @@ import {
   computeDropped,
   reusedInvariantFindings,
   fetchInDistFindings,
+  licenseFindings,
+  socketPolicyFindings,
+  parseSocketIssueRules,
   classifyClosure,
 } from "./dep-drift-scan.mjs";
 
@@ -231,6 +234,78 @@ describe("fetch-in-dist detector (mirrors release-security-audit.sh scope)", () 
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+});
+
+describe("P2 license allowlist", () => {
+  const allowed = new Set(["MIT", "ISC", "BSD-2-Clause", "BSD-3-Clause"]);
+  it("an allowlisted license passes", () => {
+    expect(licenseFindings([inst({ license: "MIT" })], allowed)).toEqual([]);
+  });
+  it("a copyleft / non-allowlisted license is flagged (exit 3)", () => {
+    const f = licenseFindings([inst({ license: "GPL-3.0" })], allowed);
+    expect(f).toHaveLength(1);
+    expect(f[0].class).toBe("license-violation");
+    expect(f[0].exit).toBe(3);
+  });
+  it("a missing license is flagged", () => {
+    expect(licenseFindings([inst({ license: null })], allowed)).toHaveLength(1);
+  });
+  it("an SPDX expression not verbatim in the allowlist is flagged (conservative)", () => {
+    expect(licenseFindings([inst({ license: "(MIT OR GPL-3.0)" })], allowed)).toHaveLength(1);
+  });
+  it("classifyClosure folds a license violation into exit 3", () => {
+    const r = classifyClosure(
+      [inst({ license: "GPL-3.0" })],
+      ledgerOf({ zod: trusted(["4.4.3"]) }),
+      baselineOf([inst()]),
+      { licenseAllowlist: allowed }
+    );
+    expect(r.exit).toBe(3);
+    expect(r.invariants.some((i) => i.class === "license-violation")).toBe(true);
+  });
+  it("without licenseAllowlist opt, no license check runs (backward compatible)", () => {
+    const r = classifyClosure([inst({ license: "GPL-3.0" })], ledgerOf({ zod: trusted(["4.4.3"]) }), baselineOf([inst()]));
+    expect(r.exit).toBe(0);
+  });
+});
+
+describe("P2 socket.yml policy-drift", () => {
+  const expected = { malware: true, shrinkwrap: false, shellAccess: false };
+  it("matching posture -> no findings", () => {
+    expect(socketPolicyFindings({ malware: true, shrinkwrap: false, shellAccess: false }, expected)).toEqual([]);
+  });
+  it("a flipped critical rule -> finding (exit 3)", () => {
+    const f = socketPolicyFindings({ malware: false, shrinkwrap: false, shellAccess: false }, expected);
+    expect(f).toHaveLength(1);
+    expect(f[0].class).toBe("socket-policy-drift");
+    expect(f[0].name).toBe("issueRules.malware");
+    expect(f[0].exit).toBe(3);
+  });
+  it("a missing required rule -> finding", () => {
+    expect(socketPolicyFindings({ shrinkwrap: false, shellAccess: false }, expected)).toHaveLength(1);
+  });
+  it("weakening shellAccess false -> true is drift", () => {
+    const f = socketPolicyFindings({ malware: true, shrinkwrap: false, shellAccess: true }, expected);
+    expect(f.some((x) => x.name === "issueRules.shellAccess")).toBe(true);
+  });
+});
+
+describe("parseSocketIssueRules", () => {
+  it("parses the flat issueRules block, strips comments, stops at dedent", () => {
+    const text = [
+      "version: 2",
+      "issueRules:",
+      "  malware: true # required",
+      "  shrinkwrap: false",
+      "  shellAccess: false",
+      "githubApp:",
+      "  enabled: true",
+    ].join("\n");
+    expect(parseSocketIssueRules(text)).toEqual({ malware: true, shrinkwrap: false, shellAccess: false });
+  });
+  it("returns {} when there is no issueRules block", () => {
+    expect(parseSocketIssueRules("version: 2\ngithubApp:\n  enabled: true")).toEqual({});
   });
 });
 
