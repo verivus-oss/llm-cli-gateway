@@ -39,9 +39,11 @@ The scanner classifies each path-keyed prod **instance**
 
 ## The tool
 
-`scripts/supply-chain/dep-drift-scan.mjs` (npm scripts below). It only writes to
-the ledger/baseline under the explicit `--seed` mode; every other mode reads and
-classifies without touching the ledger, baseline, or working tree.
+`scripts/supply-chain/dep-drift-scan.mjs` (npm scripts below). It writes the
+ledger/baseline only under the explicit `--seed` mode. Every other mode reads and
+classifies, writing only its report (`report.json` / `report.md` / contract
+stubs) to the gitignored `.supply-chain/scan-<timestamp>/` output dir; it never
+modifies the ledger, baseline, lockfiles, or any other committed file.
 
 ```bash
 npm run supply-chain:scan          # local/advisory (fresh resolve in a temp copy; tolerates exit 2)
