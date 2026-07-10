@@ -70,9 +70,11 @@ describe("toInstances", () => {
 });
 
 describe("isExactVersion / validateLedger", () => {
-  it("accepts exact semver incl prerelease/build", () => {
+  it("accepts exact semver incl prerelease, build, and combined", () => {
     expect(isExactVersion("1.2.3")).toBe(true);
     expect(isExactVersion("1.2.3-rc.1")).toBe(true);
+    expect(isExactVersion("1.2.3+build.5")).toBe(true);
+    expect(isExactVersion("1.2.3-rc.1+build.5")).toBe(true);
   });
   it("rejects ranges", () => {
     for (const v of ["^1.2.3", "~1.2.3", "1.x", "*", "1.2.3 || 1.2.4", ">=1.0.0"]) {

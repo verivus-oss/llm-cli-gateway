@@ -32,7 +32,7 @@
 //   --seed          write baseline + ledger from the committed lock (bootstrap).
 //   --out DIR       output directory (default: .supply-chain/scan-<n>).
 
-import { readFileSync, writeFileSync, mkdirSync, mkdtempSync, rmSync, existsSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, mkdtempSync, rmSync, existsSync, readdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -106,7 +106,7 @@ export function instancesFromLock(lock) {
 // Ledger validation (pure)
 // ---------------------------------------------------------------------------
 
-const EXACT_VERSION_RE = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z-.]+)?$/;
+const EXACT_VERSION_RE = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z-.]+)?(?:\+[0-9A-Za-z-.]+)?$/;
 
 /** A ledger `acceptedVersions` member must be an exact semver, never a range. */
 export function isExactVersion(v) {
@@ -333,6 +333,70 @@ function seedFromCommittedLock() {
   return { baselineCount: baseline.instances.length, ledgerCount: Object.keys(packages).length };
 }
 
+/**
+ * Reused invariant #7: the shipped-dist Socket heuristic (mirrors
+ * release-security-audit.sh:263-305). Walks dist/**\/*.js for a literal `fetch`
+ * token. Only meaningful when dist/ exists (a build has run); returns [] when it
+ * is absent (e.g. offline test runs), so it never blocks a dist-less scan.
+ */
+function fetchInDistFindings(repoRoot) {
+  const distDir = join(repoRoot, "dist");
+  if (!existsSync(distDir)) return [];
+  const findings = [];
+  const fetchRe = /\bfetch\b/;
+  const walk = (dir) => {
+    for (const ent of readdirSync(dir, { withFileTypes: true })) {
+      // Mirror release-security-audit.sh scope exactly: skip __tests__ (not
+      // shipped: excluded from the package.json files allowlist) and only .js.
+      if (ent.isDirectory()) {
+        if (ent.name === "__tests__") continue;
+        walk(join(dir, ent.name));
+      } else if (ent.isFile() && ent.name.endsWith(".js") && fetchRe.test(readFileSync(join(dir, ent.name), "utf8"))) {
+        findings.push({ path: join(dir, ent.name).slice(repoRoot.length + 1), name: "dist", version: "-", class: "fetch-in-dist", exit: 3 });
+      }
+    }
+  };
+  walk(distDir);
+  return findings;
+}
+
+/** Write one upgrade+advisory+test contract stub per flagged package. */
+function writeContractStubs(outDir, flagged) {
+  if (flagged.length === 0) return;
+  const dir = join(outDir, "contracts");
+  mkdirSync(dir, { recursive: true });
+  const seen = new Set();
+  for (const f of flagged) {
+    const key = `${f.name}@${f.version}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const safe = `${f.name}@${f.version}`.replace(/[^A-Za-z0-9.@-]+/g, "_");
+    const body = [
+      `# contract: ${f.name}@${f.version}`,
+      ``,
+      `- class: ${f.class}`,
+      `- path: ${f.path}`,
+      ``,
+      `## advisory research (exa)`,
+      `- latest npm version:`,
+      `- GHSA/OSV advisory:`,
+      `- changelog baseline -> resolved:`,
+      `- pulled in by:`,
+      ``,
+      `## upgrade decision`,
+      `- safe-to-upgrade: YES/NO`,
+      `- rationale:`,
+      ``,
+      `## cross-LLM validation`,
+      `- codex:`,
+      `- grok:`,
+      `- mistral:`,
+      ``,
+    ].join("\n");
+    writeFileSync(join(dir, `${safe}.md`), body);
+  }
+}
+
 function renderReportMd(result) {
   const lines = [`# supply-chain guard report`, ``, `verdict exit: ${result.exit}`, ``, `## counts`];
   for (const [k, v] of Object.entries(result.counts)) lines.push(`- ${k}: ${v}`);
@@ -374,10 +438,24 @@ function main(argv) {
   const baseline = readJson(BASELINE_PATH);
   const result = classifyClosure(freshList, ledger, baseline);
 
-  const outDir = outIdx !== -1 ? resolve(process.cwd(), argv[outIdx + 1]) : join(REPO_ROOT, ".supply-chain", "latest");
+  // fetch-in-dist detector (reused invariant #7). Skipped for --closure fixtures
+  // (offline tests) and when dist/ is absent; folds into the invariant set and
+  // the max-severity exit when it fires.
+  if (result.exit !== 1 && closureIdx === -1) {
+    const distFindings = fetchInDistFindings(REPO_ROOT);
+    if (distFindings.length) {
+      result.invariants.push(...distFindings);
+      for (const d of distFindings) result.counts[d.class] = (result.counts[d.class] ?? 0) + 1;
+      result.exit = Math.max(result.exit, 3);
+    }
+  }
+
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const outDir = outIdx !== -1 ? resolve(process.cwd(), argv[outIdx + 1]) : join(REPO_ROOT, ".supply-chain", `scan-${stamp}`);
   mkdirSync(outDir, { recursive: true });
   writeFileSync(join(outDir, "report.json"), JSON.stringify(result, null, 2) + "\n");
   writeFileSync(join(outDir, "report.md"), renderReportMd(result));
+  writeContractStubs(outDir, [...result.rows.filter((r) => r.exit > 0), ...result.dropped, ...result.invariants]);
 
   if (result.exit === 1) process.stderr.write(`[supply-chain-guard] ledger error:\n  ${result.ledgerErrors.join("\n  ")}\n`);
   else process.stderr.write(`[supply-chain-guard] verdict exit ${result.exit}; report at ${outDir}/report.md\n`);
