@@ -4,6 +4,24 @@ All notable changes to the llm-cli-gateway project.
 
 ## [Unreleased]
 
+## [2.16.0] - 2026-07-10
+
+### Added
+
+- **Native outbound display-text compressor, PR-1 (#151).** A built-in,
+  provider-agnostic compressor that shrinks provider display text before it is
+  returned to the caller. It is ANSI- and fence-aware (protects code fences,
+  inline code, OSC sequences, and wide characters from lossy rewriting) and is
+  **off by default**; opt in per the compressor configuration. This is the first
+  slice; response-side wiring and API-provider coverage are named follow-ups.
+- **Site machine-discovery generation (#169).** The machine-readable discovery
+  artifacts under `site/` (`llms.txt`, `.well-known/*`, `tools.md`,
+  `openapi.json`, ...) are now generated from the live MCP tool surface by
+  `scripts/generate-site-discovery.mjs`. Regenerate with `npm run site:generate`;
+  `npm run site:generate:check` + `npm run site:validate` gate them in
+  `npm run check` so the published surface can never silently drift from the
+  tools the server actually exposes.
+
 ### Changed
 
 - **Vibe/Mistral no longer defaults to `--agent auto-approve` (#155).** Under the
@@ -17,6 +35,23 @@ All notable changes to the llm-cli-gateway project.
   set `LLM_GATEWAY_APPROVAL_ALLOW_BYPASS` operator-wide. **Behaviour change:**
   `legacy` callers that relied on Vibe running shell unattended will now see the
   gated op denied unless they adopt one of those opt-ins.
+- **Provider contract and target-version refreshes (#157 through #171).**
+  `PROVIDER_TARGET_VERSIONS` is now the single source of truth for provider
+  target versions (#165), and every provider's declared upstream contract was
+  re-probed against the installed CLI and refreshed: codex-cli 0.144.1, claude
+  2.1.206, grok 0.2.93, gemini/agy 1.1.0, mistral vibe 2.19.1 (with
+  `--disabled-tools` acknowledged, #170), cursor-agent 2026.07.09, and the devin
+  ACP target 3000.1.27. Internal metadata only; no request-time behaviour change.
+
+### Security
+
+- **Opt-in isolation of provider child-process environment (#154).** A new
+  `LLM_GATEWAY_ISOLATE_SPAWN_ENV` opt-in scrubs the spawned provider CLI's
+  environment at the single `spawnCliProcess` chokepoint, shrinking the blast
+  radius of a hostile provider attempting to exfiltrate redirected/inherited
+  environment secrets.
+- **Installer Go toolchain bumped 1.26.4 to 1.26.5 (#166).** Clears a Go stdlib
+  vulnerability (GO-2026-4970) in the shipped installer binaries.
 
 ## [2.15.0] - 2026-07-03
 
