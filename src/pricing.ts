@@ -52,6 +52,14 @@
  */
 
 import type { CliType } from "./provider-types.js";
+import type {
+  ModelCost,
+  TokenCounts,
+  TokenEstimate,
+  CostResult,
+  AccountingMode,
+  PriceSource,
+} from "./least-cost-types.js";
 
 export interface PricePerMillion {
   inputUsd: number;
@@ -241,4 +249,236 @@ export function estimateCacheSavingsUsd(
   // Savings = (fresh-input-cost) - (cache-read-cost) = inputUsd × (1 - mult)
   const savedPerToken = (p.inputUsd * (1 - p.cacheReadMultiplier)) / 1_000_000;
   return cacheReadTokens * savedPerToken;
+}
+
+// ---------------------------------------------------------------------------
+// Least-cost-routing (LCR) accessors: router-only, additive.
+//
+// These sit BESIDE getPricing and share its rate constants (DRY: one price
+// table). Unlike getPricing (whose ZERO-for-unknown / claude-default-to-Sonnet
+// semantics are load-bearing for the cache-savings path and stay untouched),
+// the router surface treats an unresolved family as `source: "unknown"` so an
+// unpriced candidate can never look free and win a route (contract decision 5).
+// See docs/least-cost-routing-contract.md and least-cost-routing.draft.md
+// (sections 4.1, 4.1a, 4.2).
+// ---------------------------------------------------------------------------
+
+/**
+ * Map a concrete model id / alias to a CLI-agnostic pricing family string, or
+ * "unknown" when nothing matches. This is how cursor-agent and devin (which
+ * have NO brand branch in getPricing but run claude/gpt/gemini/... models) get
+ * priced by the family they actually run (contract decision 4).
+ *
+ * Matches mirror getPricing's PRECISE, version-anchored rules so a cheaper
+ * variant (gemini flash-lite, legacy mistral-medium-3) never inherits a pricier
+ * tier. Anthropic (sonnet/opus/haiku) and OpenAI (gpt-5/o3) are matched by
+ * family keyword so a cross-brand run resolves regardless of the invoking CLI.
+ */
+export function modelIdToFamily(model: string): string {
+  const lower = model.toLowerCase();
+
+  // Anthropic / Claude family (also what devin, and cursor-agent --model, run).
+  if (lower.includes("sonnet")) return "claude-sonnet";
+  if (lower.includes("opus")) return "claude-opus";
+  if (lower.includes("haiku")) return "claude-haiku";
+
+  // OpenAI / GPT family (codex, and cursor-agent --model gpt-*).
+  if (lower.includes("gpt-5") || lower.includes("o3")) return "openai-gpt5";
+
+  // Gemini family. Specialty tiers (flash-lite / image / audio / tts) carry
+  // different rates, so gate them out first (they fall through to "unknown")
+  // rather than inheriting a standard tier's price (mirrors getPricing).
+  const geminiSpecialty =
+    lower.includes("lite") ||
+    lower.includes("image") ||
+    lower.includes("audio") ||
+    lower.includes("tts");
+  if (!geminiSpecialty) {
+    if (lower.includes("2.5-flash")) return "gemini-2.5-flash";
+    if (lower.includes("2.5-pro")) return "gemini-2.5-pro";
+    if (lower.includes("gemini-3") && lower.includes("pro")) return "gemini-3-pro";
+  }
+
+  // Grok family. grok-build / grok-code (cheaper coding tier) before flagship.
+  if (lower.includes("grok-build") || lower.includes("grok-code")) return "grok-build";
+  if (lower.includes("grok-4") || lower.includes("grok-3") || lower.includes("grok-latest")) {
+    return "grok-4";
+  }
+
+  // Mistral family. Version-anchored so legacy medium-3 / -latest do not
+  // inherit Medium 3.5's rate.
+  if (lower.includes("devstral-small")) return "mistral-devstral";
+  if (lower.includes("mistral-medium-3.5")) return "mistral-medium";
+
+  return "unknown";
+}
+
+// Resolved-family to rate constant. Reuses the SAME PricePerMillion constants
+// getPricing uses (no second price map, no new numbers).
+const FAMILY_PRICING = new Map<string, PricePerMillion>([
+  ["claude-sonnet", ANTHROPIC_SONNET],
+  ["claude-opus", ANTHROPIC_OPUS],
+  ["claude-haiku", ANTHROPIC_HAIKU],
+  ["openai-gpt5", OPENAI_GPT5],
+  ["gemini-2.5-pro", GEMINI_25_PRO],
+  ["gemini-2.5-flash", GEMINI_FLASH],
+  ["gemini-3-pro", GEMINI_3_PRO],
+  ["grok-4", GROK_4],
+  ["grok-build", GROK_BUILD],
+  ["mistral-medium", MISTRAL_MEDIUM],
+  ["mistral-devstral", MISTRAL_DEVSTRAL],
+]);
+
+/**
+ * Router-only per-candidate cost accessor built beside getPricing. Resolves the
+ * pricing family from the model id (CLI-agnostic, contract decision 4) and
+ * builds a ModelCost from the SAME rate table getPricing uses.
+ *
+ * `provider` is accepted for signature parity with the future api-catalog path
+ * (OpenRouter / xAI resolve per-token rates from a published catalog); the table
+ * path prices purely by resolved family.
+ *
+ * accountingMode is "disjoint" for the claude/anthropic family (input_tokens is
+ * fresh-only, cache read is billed) and "inclusive" otherwise (spec 4.1a).
+ * cacheWriteUsdPerMTok defaults to the input rate: the PricePerMillion table
+ * does not encode a separate cache-creation multiplier yet, so Anthropic's
+ * ~1.25x lands when the table carries it rather than being hardcoded here.
+ *
+ * An unresolved family returns `source: "unknown"` with zeroed rates so the
+ * router EXCLUDES the candidate (contract decision 5). This deliberately does
+ * NOT inherit getPricing's ZERO-that-looks-free behaviour.
+ */
+export function getModelCost(provider: string, model: string): ModelCost {
+  const family = modelIdToFamily(model);
+  const rate = FAMILY_PRICING.get(family);
+  if (rate === undefined) {
+    const unknownSource: PriceSource = "unknown";
+    return {
+      inputUsdPerMTok: 0,
+      outputUsdPerMTok: 0,
+      cacheReadMultiplier: 0,
+      cacheWriteUsdPerMTok: 0,
+      accountingMode: "inclusive",
+      family: "unknown",
+      source: unknownSource,
+      asOf: PRICING_AS_OF,
+    };
+  }
+  const accountingMode: AccountingMode = family.startsWith("claude-") ? "disjoint" : "inclusive";
+  const source: PriceSource = "table";
+  return {
+    inputUsdPerMTok: rate.inputUsd,
+    outputUsdPerMTok: rate.outputUsd,
+    cacheReadMultiplier: rate.cacheReadMultiplier,
+    // Default cache-write to the input rate (see doc note above).
+    cacheWriteUsdPerMTok: rate.inputUsd,
+    accountingMode,
+    family,
+    source,
+    asOf: PRICING_AS_OF,
+  };
+}
+
+/**
+ * Compose a total cost from token counts (or an estimate) and per-token rates,
+ * branching on accountingMode. This is the ONE place the inclusive-vs-disjoint
+ * arithmetic lives, so both the derive path (reported counts) and the
+ * rank/budget path (estimated counts) share an identical mode branch and it can
+ * never drift (contract decision 8).
+ *
+ * `inputIsWholePrompt` distinguishes the two input conventions: a reported
+ * disjoint (Anthropic) count already carries FRESH-only input, whereas a
+ * pre-flight estimate's estInputTokens is the WHOLE prompt and must have the
+ * cache subsets removed to recover fresh (spec 4.2). Inclusive families treat
+ * input as already including the cache-read subset in both conventions.
+ */
+function composeTotalUsd(
+  inputTokens: number,
+  outputTokens: number,
+  cacheReadTokens: number,
+  cacheWriteTokens: number,
+  reasoningTokens: number,
+  modelCost: ModelCost,
+  inputIsWholePrompt: boolean
+): number {
+  const M = 1_000_000;
+  const { inputUsdPerMTok, outputUsdPerMTok, cacheWriteUsdPerMTok, cacheReadMultiplier } =
+    modelCost;
+  // Reasoning/thinking tokens are billed at the output rate (spec 4.1a).
+  const outputCost = ((outputTokens + reasoningTokens) * outputUsdPerMTok) / M;
+  const cacheWriteCost = (cacheWriteTokens * cacheWriteUsdPerMTok) / M;
+
+  if (modelCost.accountingMode === "disjoint") {
+    // Anthropic-style: fresh input billed at base, cache read BILLED at the
+    // discounted rate (not subtracted). Reported input_tokens is already
+    // fresh-only; a whole-prompt estimate removes the cache subsets.
+    const freshTokens = inputIsWholePrompt
+      ? inputTokens - cacheReadTokens - cacheWriteTokens
+      : inputTokens;
+    const freshCost = (freshTokens * inputUsdPerMTok) / M;
+    const cacheReadCost = (cacheReadTokens * inputUsdPerMTok * cacheReadMultiplier) / M;
+    return freshCost + cacheWriteCost + cacheReadCost + outputCost;
+  }
+
+  // inclusive (OpenAI-style): input already INCLUDES the cache-read subset in
+  // both conventions, so the cache read is a DISCOUNT off the base.
+  const baseCost = (inputTokens * inputUsdPerMTok) / M;
+  const cacheReadDiscount = (cacheReadTokens * inputUsdPerMTok * (1 - cacheReadMultiplier)) / M;
+  return baseCost + cacheWriteCost + outputCost - cacheReadDiscount;
+}
+
+/**
+ * The SINGLE pure composer for a candidate's cost, used for BOTH derive
+ * (reported counts) and rank/budget (estimated counts). Precedence, accuracy
+ * descending (spec 4.1a / contract decision 6):
+ *
+ *   1. provider-reported: a dollar cost was reported, use it verbatim (high).
+ *   2. derived-from-tokens: real counts x known rates, per accountingMode, when
+ *      the rate is known (source != "unknown") (high).
+ *   3. pre-flight-estimate: estimated counts x rates; the fallback when no
+ *      counts were reported OR the rate is unknown (low).
+ *
+ * Never decomposes a scalar total into rates (contract decision 7).
+ */
+export function composeCost(
+  counts: TokenCounts | null,
+  estimate: TokenEstimate,
+  modelCost: ModelCost
+): CostResult {
+  // 1. Provider-reported dollar cost is trusted verbatim, regardless of whether
+  //    a table/catalog rate is known for the family.
+  if (counts?.reportedCostUsd != null) {
+    return {
+      costUsd: counts.reportedCostUsd,
+      cost_basis: "provider-reported",
+      confidence: "high",
+    };
+  }
+
+  // 2. Derive from reported token counts when we have a known rate.
+  if (counts != null && modelCost.source !== "unknown") {
+    const costUsd = composeTotalUsd(
+      counts.inputTokens,
+      counts.outputTokens,
+      counts.cacheReadTokens ?? 0,
+      counts.cacheCreationTokens ?? 0,
+      counts.reasoningTokens ?? 0,
+      modelCost,
+      false
+    );
+    return { costUsd, cost_basis: "derived-from-tokens", confidence: "high" };
+  }
+
+  // 3. Pre-flight estimate: no counts, or an unknown rate. Least accurate; the
+  //    estimate's estInputTokens is the WHOLE prompt (inputIsWholePrompt=true).
+  const costUsd = composeTotalUsd(
+    estimate.estInputTokens,
+    estimate.estOutputTokens,
+    estimate.estCacheReadTokens ?? 0,
+    estimate.estCacheWriteTokens ?? 0,
+    0,
+    modelCost,
+    true
+  );
+  return { costUsd, cost_basis: "pre-flight-estimate", confidence: "low" };
 }

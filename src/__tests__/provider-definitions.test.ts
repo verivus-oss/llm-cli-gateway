@@ -126,6 +126,40 @@ describe("provider-definitions registry", () => {
     }
   });
 
+  it("exposes explicit requestSurface capability flags as booleans for every provider", () => {
+    for (const id of CLI_TYPES) {
+      const rs = getProviderDefinition(id).requestSurface;
+      expect(typeof rs.acceptsImages).toBe("boolean");
+      expect(typeof rs.acceptsAttachments).toBe("boolean");
+      expect(typeof rs.toolCalling).toBe("boolean");
+      expect(typeof rs.jsonSchema).toBe("boolean");
+      // Every shipped provider is an agentic tool-calling CLI.
+      expect(rs.toolCalling).toBe(true);
+      // An image is itself an attachment, so image acceptance implies attachments.
+      if (rs.acceptsImages) expect(rs.acceptsAttachments).toBe(true);
+    }
+  });
+
+  it("grounds the promoted capability flags in installed --help evidence", () => {
+    // codex exec ships -i/--image (the findMissingImagePath source) and
+    // --output-schema, so it accepts image attachments and JSON-Schema output.
+    const codex = getProviderDefinition("codex").requestSurface;
+    expect(codex.acceptsImages).toBe(true);
+    expect(codex.acceptsAttachments).toBe(true);
+    expect(codex.jsonSchema).toBe(true);
+
+    // claude has no image flag but ships --json-schema for structured output.
+    const claude = getProviderDefinition("claude").requestSurface;
+    expect(claude.acceptsImages).toBe(false);
+    expect(claude.jsonSchema).toBe(true);
+
+    // grok ships --json-schema; gemini (agy) exposes neither images nor schema.
+    expect(getProviderDefinition("grok").requestSurface.jsonSchema).toBe(true);
+    const gemini = getProviderDefinition("gemini").requestSurface;
+    expect(gemini.acceptsImages).toBe(false);
+    expect(gemini.jsonSchema).toBe(false);
+  });
+
   it("keeps cursor complete but marked maintain-only", () => {
     const cursor = getProviderDefinition("cursor");
     expect(cursor.capabilityScope).toBe("maintain-only");
