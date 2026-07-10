@@ -259,6 +259,29 @@ describe("least-cost-router: selection", () => {
     expect(decision.consideredCount).toBe(2);
   });
 
+  it("ranks an unpriced candidate last so a priced peer wins (allowUnpriced set)", () => {
+    const cheap: Candidate = { provider: "cheap", model: "cheap-haiku-1" };
+    const ghost: Candidate = { provider: "ghost", model: "ghost-model" };
+    const env = makeEnv({
+      providers: ["cheap", "ghost"],
+      models: { cheap: ["cheap-haiku-1"], ghost: ["ghost-model"] },
+      // ghost:ghost-model defaults to UNPRICED (source "unknown"); cheap is priced.
+      costs: { "cheap:cheap-haiku-1": priced("claude-haiku", 0.1, 0.2) },
+    });
+    // Explicitly list both so the untiered/unpriced ghost is admitted into the
+    // eligible pool, forcing the ranking to arbitrate priced vs unpriced.
+    const decision = selectCandidate(
+      { ...REQ, candidates: [cheap, ghost], allowUnpriced: true },
+      env,
+      BASE_CONFIG
+    );
+    // The unpriced ghost composes to $0 but must never win argmin (contract
+    // decision 5, unknown_price_never_wins); the priced haiku is chosen.
+    expect(decision.chosen).toEqual(cheap);
+    expect(decision.priceSource).toBe("table");
+    expect(decision.consideredCount).toBe(2);
+  });
+
   it("is deterministic: stable chosen candidate across repeated identical calls", () => {
     const { env, config } = twoTierPool();
     const first = selectCandidate(REQ, env, config);
@@ -319,7 +342,7 @@ describe("least-cost-router: budget gate", () => {
     expect(decision.rejected.some(r => r.reason === "budget")).toBe(true);
   });
 
-  it("admits an over-budget candidate only with an explicit budgetWaiver", () => {
+  it("fails closed on a normal over-budget priced candidate even with budgetWaiver (spec 4.5)", () => {
     const env = makeEnv({
       providers: ["pricey"],
       models: { pricey: ["pricey-opus-1"] },
@@ -330,8 +353,32 @@ describe("least-cost-router: budget gate", () => {
     const withoutWaiver = selectCandidate(REQ, env, config);
     expect(withoutWaiver.error).toBe("BudgetExceeded");
 
+    // In NORMAL selection an over-budget priced candidate fails closed; the
+    // budget waiver only rescues an explicit fallback (spec 4.7), never the pool.
     const withWaiver = selectCandidate({ ...REQ, budgetWaiver: true }, env, config);
-    expect(withWaiver.chosen).toEqual(PRICEY);
+    expect(withWaiver.chosen).toBeNull();
+    expect(withWaiver.error).toBe("BudgetExceeded");
+  });
+
+  it("admits an over-budget priced fallback under a budgetWaiver (spec 4.7)", () => {
+    const env = makeEnv({
+      providers: ["cheap"],
+      models: { cheap: ["cheap-haiku-1"] },
+      authed: new Set(["fallback"]), // pool provider unauthed -> pool empties; fallback healthy
+      costs: {
+        "cheap:cheap-haiku-1": priced("claude-haiku", 0.1, 0.2),
+        "fallback:fallback-model": priced("claude-opus", 1000, 2000), // priced but over budget
+      },
+    });
+    const fallback: Candidate = { provider: "fallback", model: "fallback-model" };
+    const config: RouterConfig = { ...BASE_CONFIG, maxCostUsd: 0.0001 };
+
+    const withoutWaiver = selectCandidate({ ...REQ, fallback }, env, config);
+    expect(withoutWaiver.chosen).toBeNull();
+    expect(withoutWaiver.error).toBe("BudgetExceeded");
+
+    const withWaiver = selectCandidate({ ...REQ, fallback, budgetWaiver: true }, env, config);
+    expect(withWaiver.chosen).toEqual(fallback);
   });
 
   it("admits an unpriced candidate only when allowUnpriced AND budgetWaiver are both set", () => {

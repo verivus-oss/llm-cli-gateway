@@ -274,7 +274,16 @@ interface RankedCandidate {
   modelCost: ModelCost;
   estInputTokens: number;
   estOutputTokens: number;
+  /** Reported estimate (the composeCost figure); 0 for an unpriced candidate. */
   rankCostUsd: number;
+  /**
+   * Sort key for argmin/tie-break: `rankCostUsd` for priced candidates, but
+   * +Infinity for an unpriced (source "unknown") candidate so it can never be
+   * the argmin (contract decision 5, invariant unknown_price_never_wins). An
+   * unpriced candidate is therefore ranked strictly last and only chosen when no
+   * priced candidate is eligible.
+   */
+  rankKey: number;
   costBasis: CostBasis;
   confidence: Confidence;
 }
@@ -298,6 +307,7 @@ function rankCandidate(
     estInputTokens,
     estOutputTokens,
     rankCostUsd: rankResult.costUsd,
+    rankKey: modelCost.source === "unknown" ? Number.POSITIVE_INFINITY : rankResult.costUsd,
     costBasis: rankResult.cost_basis,
     confidence: rankResult.confidence,
   };
@@ -311,8 +321,9 @@ function preferenceIndex(provider: string, preferenceOrder: readonly string[] | 
 
 /**
  * Deterministic comparator implementing the tie-break chain (4.5.3): lower
- * rankCost, then higher successRate, then lower meanLatencyMs, then lower
- * preferenceOrder index, then lexical `provider/model`.
+ * rankKey (unpriced sorts last via +Infinity), then higher successRate, then
+ * lower meanLatencyMs, then lower preferenceOrder index, then lexical
+ * `provider/model`.
  */
 function compareCandidates(
   a: RankedCandidate,
@@ -320,7 +331,7 @@ function compareCandidates(
   env: RouterEnv,
   config: RouterConfig
 ): number {
-  if (a.rankCostUsd !== b.rankCostUsd) return a.rankCostUsd - b.rankCostUsd;
+  if (a.rankKey !== b.rankKey) return a.rankKey - b.rankKey;
 
   const successA = env.successRate(a.candidate.provider, a.candidate.model);
   const successB = env.successRate(b.candidate.provider, b.candidate.model);
@@ -344,11 +355,22 @@ interface BudgetCheckResult {
   reason?: string;
 }
 
-/** Conservative budget gate (4.2, 4.5.4): fail safe, never silently admit. */
+/**
+ * Conservative budget gate (4.2, 4.5.4, 4.7): fail safe, never silently admit.
+ *
+ * - Unpriced (source "unknown") has no cost upper bound, so it is admissible
+ *   only when the caller sets BOTH allowUnpriced and budgetWaiver (spec 4.5),
+ *   in normal selection or as a fallback.
+ * - A priced over-budget candidate FAILS CLOSED in normal selection (spec 4.5;
+ *   raise maxCostUsd rather than waiving), but an explicit `fallback` may be
+ *   admitted over budget under an explicit budgetWaiver (spec 4.7). `isFallback`
+ *   distinguishes the two.
+ */
 function checkBudget(
   ranked: RankedCandidate,
   req: RouteRequestInput,
-  config: RouterConfig
+  config: RouterConfig,
+  isFallback: boolean
 ): BudgetCheckResult {
   const { modelCost, estInputTokens } = ranked;
   const allowUnpriced = req.allowUnpriced ?? config.allowUnpriced;
@@ -370,7 +392,7 @@ function checkBudget(
   const effectiveMax = req.maxCostUsd ?? config.maxCostUsd;
 
   if (budgetCost > effectiveMax) {
-    if (budgetWaiver) return { ok: true };
+    if (isFallback && budgetWaiver) return { ok: true };
     return { ok: false, reason: "budget" };
   }
   return { ok: true };
@@ -476,7 +498,7 @@ export function selectCandidate(
         req,
         config
       );
-      const budget = checkBudget(fallbackRanked, req, config);
+      const budget = checkBudget(fallbackRanked, req, config, true);
       if (!budget.ok) {
         return {
           chosen: null,
@@ -504,10 +526,11 @@ export function selectCandidate(
   const secondBest = ranked.length > 1 ? ranked[1] : undefined;
   const nearTie =
     secondBest !== undefined &&
-    best.rankCostUsd > 0 &&
-    Math.abs(secondBest.rankCostUsd - best.rankCostUsd) / best.rankCostUsd <= 0.01;
+    Number.isFinite(best.rankKey) &&
+    best.rankKey > 0 &&
+    Math.abs(secondBest.rankKey - best.rankKey) / best.rankKey <= 0.01;
 
-  const budget = checkBudget(best, req, config);
+  const budget = checkBudget(best, req, config, false);
   if (!budget.ok) {
     return {
       chosen: null,

@@ -105,9 +105,13 @@ across models than across providers, so LCR never routes a bare provider.
 13. **Fail closed.** Over-budget, all-unpriced, or empty-eligible-pool returns a
     structured error (`BudgetExceededError` / `NoEligibleCandidateError` naming
     per-candidate exclusion reasons). Routing never falls through to an arbitrary
-    provider. An unpriced or over-budget candidate (including an explicit
-    `fallback`) is admissible only when the caller sets **both** `allow_unpriced`
-    and an explicit budget waiver.
+    provider. An unpriced candidate (unbounded cost) is admissible only when the
+    caller sets **both** `allow_unpriced` and an explicit budget waiver (spec
+    4.5). A priced over-budget candidate fails closed in normal selection (spec
+    4.5); it is admissible only as an explicit `fallback` under an explicit
+    budget waiver (spec 4.7). An unpriced candidate is always ranked strictly
+    last (its unknown price can never win the argmin, invariant
+    `unknown_price_never_wins`).
 
 14. **Dispatch reuses the existing path.** The chosen `(provider, model)` is
     handed to the same handler logic the per-provider tools use
