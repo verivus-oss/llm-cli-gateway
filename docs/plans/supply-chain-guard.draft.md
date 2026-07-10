@@ -12,7 +12,9 @@ Author: design pass after (a) reading the sqry guard's RUNBOOK, SKILL, and the
 three-round cross-LLM review record, and (b) a full inventory of this repo's
 release-time supply-chain surface.
 
-Revision: two cross-LLM review rounds so far. Round 1 (Codex, Grok BLOCKED;
+Revision: four cross-LLM review rounds, to unanimous approval (Codex, Grok,
+Mistral all APPROVED at round 4 on commit `f64b881`, each verified against the
+real lockfile and gate scripts). Round 1 (Codex, Grok BLOCKED;
 Mistral's run was invalidated by a sandbox restriction) moved the trust unit to a
 path-keyed package *instance*, replaced the prose tiers with a classification
 decision table, made the blocking gate require exit `0` against the committed
@@ -256,9 +258,12 @@ path keys) is the pure heart of `scripts/make-prod-shrinkwrap.mjs`. That script,
 as written, hardcodes `LOCKFILE_PATH = join(REPO_ROOT, "package-lock.json")` and
 takes only an output path as `argv[2]` (`make-prod-shrinkwrap.mjs:35-47`), so it
 can only ever read the repo's own lockfile. A prerequisite of P0 is therefore to
-**extract that filter into a pure function** (e.g. `prodFilter(lockObject) ->
-prodClosureInstances`) that both `make-prod-shrinkwrap.mjs` and the scanner
-import; the scanner never shells out to the generator against a temp tree (which
+**extract that filter into a pure function** `prodFilter(lockObject) ->
+filteredPackagesMap` (the generator needs the full filtered `packages` map for
+byte-stable parity; see section 9), which both `make-prod-shrinkwrap.mjs` and the
+scanner import; the scanner then maps that map to classifiable instances via a
+thin `toInstances()` (applying the name-derivation and root-exclusion rules
+below). The scanner never shells out to the generator against a temp tree (which
 would silently read the operator's lockfile, the round-2 blocker). With that
 shared filter:
 
@@ -288,9 +293,11 @@ and the root entry has no `resolved`/`integrity`):
   `meta.name ?? path.split(/node_modules\//).pop()`, the exact single-source form
   the existing gates use (`scripts/pre-release.sh:43`,
   `scripts/release-security-audit.sh:147-151`). The scanner MUST use the
-  `/node_modules\//` regex split, never `split("/node_modules/")`, which drops
-  the leading `node_modules/` off top-level entries and masked the
-  `tar-stream@2.2.0` consumer finding in 1.17.7 (`release-security-audit.sh:147`).
+  `/node_modules\//` regex split, never `split("/node_modules/")`: the plain
+  string split leaves the leading `node_modules/` on top-level entries (the
+  delimiter needs a leading slash), so a "name" of `node_modules/tar-stream`
+  never matches a blocklist, the bug that masked the `tar-stream@2.2.0` consumer
+  finding in 1.17.7 (`release-security-audit.sh:147`).
 - **Root exclusion**: the root entry (path `""`) has no `resolved`/`integrity`
   and is first-party, so it is excluded from the instance set used for
   classification, baseline, and ledger seeding. Without this it would hit row 1
@@ -344,8 +351,11 @@ name level; this fixes a round-3 blocker where a name with two baselined paths
 losing one path would not fire a name-level `dropped` and could exit `0` despite
 a baseline mismatch):
 
-- **dropped**: every baseline INSTANCE (by `path`) that has no matching instance
-  in the fresh closure. It is a mismatch against the committed baseline, so each
+- **dropped**: every baseline INSTANCE whose `path` is absent from the fresh
+  `packages` map (path-keyed, not full-tuple: a same-path instance whose
+  version/integrity changed is a forward-classified row 2/7 case, not a drop, so
+  a change is never double-counted as both drop and mismatch). It is a mismatch
+  against the committed baseline, so each
   dropped instance is exit `2` (not `0`): the blocking gate requires exit `0`, so
   any drop blocks the release until the baseline is refreshed. Refreshing means
   pruning that instance from the baseline, and marking the ledger entry
