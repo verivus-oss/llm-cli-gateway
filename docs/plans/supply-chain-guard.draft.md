@@ -12,15 +12,20 @@ Author: design pass after (a) reading the sqry guard's RUNBOOK, SKILL, and the
 three-round cross-LLM review record, and (b) a full inventory of this repo's
 release-time supply-chain surface.
 
-Revision: round 1 of the cross-LLM review gate (Codex, Grok; Mistral's round-1
-run was invalidated by a sandbox access restriction, re-run in round 2) returned
-BLOCKED with a converging set of design-underspecification findings. This
-revision folds them in: the trust unit is now a path-keyed package *instance*
-(not a bare name), a full classification decision table replaces the prose tiers,
-the blocking gate requires exit `0` against the committed baseline (closing the
-in-range trust window), the resolve mode is fixed per surface, and the grounding
-counts/citations are corrected. See the changelog inline at each section and the
-review record on PR #173.
+Revision: two cross-LLM review rounds so far. Round 1 (Codex, Grok BLOCKED;
+Mistral's run was invalidated by a sandbox restriction) moved the trust unit to a
+path-keyed package *instance*, replaced the prose tiers with a classification
+decision table, made the blocking gate require exit `0` against the committed
+baseline (closing the in-range trust window), fixed the resolve mode per surface,
+and corrected the grounding counts/citations. Round 2 (Mistral APPROVED; Codex,
+Grok BLOCKED, converging) fixed three residual defects, all verified against the
+code: (a) the decision table could not produce a roll-forward for an accepted
+version bump not yet in the baseline (it fell to tag-along), now split with a
+`nameInBaseline` predicate; (b) fresh-resolve could not drive
+`make-prod-shrinkwrap.mjs` on a temp copy because that script hardcodes the repo
+lockfile, now a shared pure `prodFilter` is a P0 prerequisite; (c) a `dropped`
+name exited `0`, now exit `2` so a closure shrink blocks the gate until the
+baseline is pruned. See the review record on PR #173.
 
 Citation base: `2c56762` on `master` (the 2.16.0 release merge). All "today"
 claims below cite files at that base; verify against current `master` before
@@ -71,10 +76,12 @@ the human-readable spec that goes through the review gate first.
 - **Integrity mismatch**: an instance whose `name@version` matches the baseline
   but whose `integrity` differs (registry-immutability break or lock tampering).
   Surfaced regardless of any other verdict.
-- **Dropped**: a ledger/baseline name absent from the fresh closure. On
-  acceptance its ledger entry is marked `revoked` and pruned from the baseline,
-  so a later re-entry of the same name classifies as a tag-along again (not
-  silently re-trusted). Reported, never auto-pruned by the scanner.
+- **Dropped**: a ledger/baseline name absent from the fresh closure (a closure
+  shrink). Because it is a mismatch against the committed baseline it is exit `2`
+  (blocks the gate until resolved), not a silent `0`. On acceptance its ledger
+  entry is marked `state: "revoked"` and pruned from the baseline, so a later
+  re-entry of the same name classifies as a tag-along again (not silently
+  re-trusted). Reported, never auto-pruned by the scanner.
 
 ## 1. Goals
 
@@ -233,57 +240,90 @@ depends on the surface (this fixes a round-1 blocker: a default fresh
 `npm install` inside CI could score a different tree than the committed lock the
 release actually ships):
 
+The prod-closure filter (drop every `dev === true` entry, keep the `node_modules/`
+path keys) is the pure heart of `scripts/make-prod-shrinkwrap.mjs`. That script,
+as written, hardcodes `LOCKFILE_PATH = join(REPO_ROOT, "package-lock.json")` and
+takes only an output path as `argv[2]` (`make-prod-shrinkwrap.mjs:35-47`), so it
+can only ever read the repo's own lockfile. A prerequisite of P0 is therefore to
+**extract that filter into a pure function** (e.g. `prodFilter(lockObject) ->
+prodClosureInstances`) that both `make-prod-shrinkwrap.mjs` and the scanner
+import; the scanner never shells out to the generator against a temp tree (which
+would silently read the operator's lockfile, the round-2 blocker). With that
+shared filter:
+
 - **`--frozen` (the CI / release-gate mode, authoritative there)**: do NOT run
-  `npm install`. Run `scripts/make-prod-shrinkwrap.mjs` against the shrinkwrap
-  that `ci.yml` / `npm-publish.yml` / `pre-release.sh` have *already regenerated*
-  from the committed `package-lock.json`, and classify that. No install, no
-  mutation of the operator's tree at all. This is the tree the release ships, so
-  it is the tree the gate must score.
+  `npm install`. Read the prod-only `npm-shrinkwrap.json` that `ci.yml` /
+  `npm-publish.yml` / `pre-release.sh` have *already regenerated* from the
+  committed `package-lock.json` (or, equivalently, apply `prodFilter` to the
+  committed `package-lock.json`), and classify that. No install, no mutation of
+  the operator's tree. This is the tree the release ships, so it is the tree the
+  gate must score.
 - **Fresh-resolve (the local / pre-release sweep mode)**: to discover drift
   *before* it is committed, copy `package.json` + `package-lock.json` into a
   throwaway temp directory, run `npm install` there (fresh registry resolve,
-  applies `overrides`), run `make-prod-shrinkwrap.mjs` on the temp copy, and
-  classify. The operator's working `package-lock.json`, `npm-shrinkwrap.json`,
-  and `node_modules` are never touched. The temp dir is removed in a `finally`.
+  applies `overrides`), then read the *temp* `package-lock.json` and apply
+  `prodFilter` to it in-process. The operator's working `package-lock.json`,
+  `npm-shrinkwrap.json`, and `node_modules` are never touched. The temp dir is
+  removed in a `finally`.
 
-Either way the scanner parses the resulting prod-only shrinkwrap into instances
+Either way the scanner obtains prod-closure instances
 `{path -> {name, version, resolved, integrity}}` (4.3). The runbook is explicit
 that `--frozen` scores the committed tree while fresh-resolve predicts the next
-resolve; a release gate MUST use `--frozen` (or scan a committed fresh lock), and
-calling a fresh-resolve sweep a faithful gate reproduction is an anti-pattern
-(section 8).
+resolve; a release gate MUST use `--frozen`, and calling a fresh-resolve sweep a
+faithful gate reproduction is an anti-pattern (section 8).
 
 ### 4.3 Classification (decision table)
 
-Each fresh prod-closure instance is classified by looking it up in the committed
-baseline and the ledger. The table is evaluated top to bottom; the first matching
-row wins, so the fail-closed classes (source anomaly, integrity mismatch,
-tag-along) take precedence over roll-forward and clean. "In baseline (exact)"
-means an instance with the same `path`, `name`, `version`, `resolved`, AND
-`integrity`.
+Each fresh prod-closure instance is classified against the committed baseline and
+the ledger. The predicates, per instance:
 
-| # | source == registry? | integrity matches baseline for this name@version? | name in ledger (state=trusted)? | in baseline (exact)? | version in ledger `acceptedVersions`? | class | exit |
-|---|---|---|---|---|---|---|---|
-| 1 | no | - | - | - | - | **source anomaly** | 3 |
-| 2 | yes | no (same name@version, different integrity) | - | - | - | **integrity mismatch** | 3 |
-| 3 | yes | n/a (name@version not in baseline) | no | - | - | **tag-along** | 3 |
-| 4 | yes | n/a | yes | no | no | **tag-along** (`new_to_tree`: ledgered name but version not yet accepted) | 3 |
-| 5 | yes | yes | yes | no | yes | **roll-forward** (accepted version, new instance/path vs baseline) | 2 |
-| 6 | yes | yes | yes | yes | yes | **clean** | 0 |
+- `S` = `resolved` host is `registry.npmjs.org`.
+- `integrityConflict` = the baseline contains this exact `name@version` but with a
+  different `integrity`.
+- `trusted` = the name is in the ledger with `state: "trusted"`.
+- `verAccepted` = the instance `version` is listed in that name's
+  `acceptedVersions`.
+- `nameInBaseline` = the baseline contains at least one instance of this name
+  (at any version/path).
+- `exactBaseline` = an instance with the same `path`, `name`, `version`,
+  `resolved`, AND `integrity` is in the baseline.
 
-Plus two whole-closure classes computed by set difference:
+The table is evaluated top to bottom; the first matching row wins, so the
+fail-closed classes take precedence over roll-forward and clean:
 
-- **new_to_tree** (fail-closed): a name present in the fresh closure but absent
-  from the baseline is always exit `3`, on its own, regardless of ledger state.
-  This is the OR partner of ledger-membership (invariant I3): either detector
-  firing alone blocks.
-- **dropped** (informational, exit contributes `0`): a baseline/ledger name
-  absent from the fresh closure. Reported; on acceptance the human marks the
-  ledger entry `state: "revoked"` and prunes it from the baseline (so a later
-  re-entry re-classifies as tag-along, not silently trusted). Never auto-pruned.
+| # | condition (first match wins) | class | exit |
+|---|---|---|---|
+| 1 | `!S` | **source anomaly** | 3 |
+| 2 | `integrityConflict` | **integrity mismatch** | 3 |
+| 3 | `!trusted` | **tag-along** (name not ledgered / revoked) | 3 |
+| 4 | `!nameInBaseline` | **tag-along** (`new_to_tree`: name absent from baseline) | 3 |
+| 5 | `!verAccepted` | **tag-along** (unaccepted version of a ledgered name) | 3 |
+| 6 | `exactBaseline` | **clean** | 0 |
+| 7 | else (`trusted`, `nameInBaseline`, `verAccepted`, not exact) | **roll-forward** (accepted new version or new path of a baselined name) | 2 |
 
-An instance that matches no row (unresolvable classification) is treated as a
-tag-along (exit `3`), never as clean (invariant I2).
+This resolves the round-2 defect: an accepted version bump of a ledgered name that
+is in the baseline at the old version (so `nameInBaseline` is true) but whose new
+version is not yet baselined falls to row 7 = roll-forward (exit `2`), not
+tag-along. `new_to_tree` is now precisely row 4 (name absent from the baseline
+entirely), distinct from row 5 (unaccepted version of a known name). Both are exit
+`3`; an unaccepted version of a known name is deliberately a full tag-along review,
+not a roll-forward (call this out to operators).
+
+The whole-closure `dropped` class:
+
+- **dropped**: a baseline/ledger name absent from the fresh closure (a closure
+  shrink). It is a mismatch against the committed baseline, so it is exit `2`
+  (not `0`): the blocking gate requires exit `0`, so a drop blocks the release
+  until the human marks the ledger entry `state: "revoked"` and prunes it from the
+  baseline. This keeps "the shipped closure equals the reviewed committed
+  baseline" true and makes a later re-entry classify as a tag-along (row 3/4), not
+  silently re-trusted. Never auto-pruned by the scanner.
+
+An instance that matches no row is impossible (rows 6 and 7 are exhaustive once
+rows 1-5 fail), but a defensive default classifies any such instance as a
+tag-along (exit `3`), never clean (invariant I2). The scanner also rejects a
+ledger `acceptedVersions` entry that is not an exact version (a caret/range/OR),
+so a hand-edit cannot reopen the in-range trust window (I2).
 
 ### 4.4 Detectors (honest about independence)
 
@@ -297,29 +337,30 @@ instance detectors:
    committed baseline is exit `3` on its own. Detectors 1 and 2 are CORRELATED,
    both fire on name-set growth; they are dual evidence combined fail-closed with
    OR (invariant I3), not independent detectors. Keeping both matters because the
-   ledger can lag the baseline (a `revoked` name is still in neither, a bootstrap
-   gap could leave one populated before the other).
+   ledger and baseline can drift apart mid-process (a name revoked in the ledger
+   but not yet pruned from the baseline, or pruned but not yet revoked); either
+   half-done state still resolves fail-closed to exit `3` (rows 3/4 of 4.3).
 3. **Source anomaly** (orthogonal): any non-`registry.npmjs.org` `resolved`,
    flagged even for a ledgered, in-baseline name.
 4. **Integrity mismatch** (orthogonal): a `name@version` that matches the
-   baseline but whose `integrity` differs. This is the genuine third axis a pure
+   baseline but whose `integrity` differs. This is the genuine extra axis a pure
    name/version check misses (registry-immutability break, lock tampering).
 
 Plus, reusing this repo's existing invariants as additional detectors so the
 guard is a superset, not a subset, of today's coverage:
 
-4. **Forbidden native/tar chain** in the prod projection
+5. **Forbidden native/tar chain** in the prod projection
    (`better-sqlite3`/`prebuild-install`/`tar-fs`/`tar-stream`), the same set
    `pre-release.sh:37-52` asserts.
-5. **Blocklisted versions** from `release-security-audit.sh:125-165`
+6. **Blocklisted versions** from `release-security-audit.sh:125-165`
    (`content-type@2.0.0`, `type-is@2.1.0`, and exactly
    `tar-stream@{2.2.0,2.1.4,2.0.0}`) in the prod graph, plus the separate
    any-version `tar-stream` ban from the packed-consumer check (`:206-258`).
-6. **`\bfetch\b` in `dist/`** (the shipped-Socket heuristic,
+7. **`\bfetch\b` in `dist/`** (the shipped-Socket heuristic,
    `release-security-audit.sh:263-305`), included so a single command reproduces
    the whole supply-chain surface locally.
 
-Detectors 4-6 duplicate existing gate checks deliberately: the guard is meant to
+Detectors 5-7 duplicate existing gate checks deliberately: the guard is meant to
 be runnable as a single local pre-flight that mirrors the release gate, and CI
 still runs the originals independently.
 
@@ -331,9 +372,11 @@ mismatch, tag-along, and any reused-invariant failure are `3`; roll-forward is
 
 - `0` clean: every instance matches the committed baseline exactly; no anomaly,
   no invariant tripped.
-- `2` roll-forward only: some ledgered names moved to another accepted version /
-  path vs the baseline, but nothing un-ledgered entered, no `new_to_tree`, no
-  anomaly, no integrity mismatch, no invariant.
+- `2` roll-forward and/or dropped only: some ledgered names moved to another
+  accepted version / path vs the baseline, and/or a baselined name left the
+  closure, but nothing un-ledgered entered, no `new_to_tree`, no anomaly, no
+  integrity mismatch, no invariant. Blocks the gate (which requires `0`) until the
+  baseline is refreshed, since both are baseline mismatches.
 - `3` a tag-along, `new_to_tree`, source anomaly, integrity mismatch, or a
   reused-invariant failure is present.
 - `1` tool error.
@@ -395,11 +438,11 @@ this repo's node + vitest tooling (section 11).
 - Gate wiring (P1): append `supply-chain:scan:check` as a final step of
   `scripts/release-security-audit.sh` so it runs inside `npm run check`,
   `ci.yml`, and `npm-publish.yml` with no new workflow. Because those surfaces
-  already regenerate the shrinkwrap from the committed lock
-  (`ci.yml`, `npm-publish.yml`, `pre-release.sh`), the check runs `--frozen`
-  against that exact artifact, never a fresh resolve, so it always scores the
-  tree the release ships. Report-only in P0 (prints the verdict, does not fail
-  the build), blocking in P1.
+  already regenerate the prod-only `npm-shrinkwrap.json` from the committed lock
+  (`ci.yml`, `npm-publish.yml`, `pre-release.sh`), the check runs `--frozen`,
+  reading that exact artifact (or applying `prodFilter` to the committed lock),
+  never a fresh resolve, so it always scores the tree the release ships.
+  Report-only in P0 (prints the verdict, does not fail the build), blocking in P1.
 
 ## 6. Configuration and gating
 
@@ -495,8 +538,14 @@ through this process (that is what makes it clean, 4.5).
   exact `acceptedVersions` + `state` + rationale).
 - `supply-chain/prod-closure.baseline.json` (committed; exact per-instance
   snapshot: `path`, `name`, `version`, `resolved`, `integrity`).
-- `scripts/supply-chain/dep-drift-scan.mjs` (the scanner; reuses
-  `make-prod-shrinkwrap.mjs` as a library or subprocess).
+- `scripts/make-prod-shrinkwrap.mjs` refactor (P0 prerequisite): extract the pure
+  `prodFilter(lockObject) -> instances` function so both the generator and the
+  scanner import it. The scanner must NOT shell out to the generator against a
+  temp tree (it hardcodes the repo lockfile; `make-prod-shrinkwrap.mjs:35-47`).
+  This refactor is behaviour-preserving for the generator and covered by the
+  existing shrinkwrap-parity gate.
+- `scripts/supply-chain/dep-drift-scan.mjs` (the scanner; imports the shared
+  `prodFilter`, never a subprocess against a temp tree).
 - `scripts/supply-chain/dep-drift-scan.test.mjs` (vitest; offline).
 - `.claude/skills/supply-chain-guard/SKILL.md`.
 - `docs/development/supply-chain-guard/RUNBOOK.md`.
