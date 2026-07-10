@@ -1,5 +1,13 @@
 import { describe, it, expect } from "vitest";
-import { getPricing, estimateCacheSavingsUsd, PRICING_AS_OF } from "../pricing.js";
+import {
+  getPricing,
+  estimateCacheSavingsUsd,
+  PRICING_AS_OF,
+  modelIdToFamily,
+  getModelCost,
+  composeCost,
+} from "../pricing.js";
+import type { TokenCounts, TokenEstimate } from "../least-cost-types.js";
 
 describe("pricing", () => {
   it("PRICING_AS_OF is a recent ISO-ish date string", () => {
@@ -173,6 +181,236 @@ describe("pricing", () => {
     });
     it("gemini 'default' row still 0 (conservative, no model resolved)", () => {
       expect(estimateCacheSavingsUsd("gemini", "default", 9999)).toBe(0);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Least-cost-routing (LCR) accessors: modelIdToFamily / getModelCost /
+  // composeCost. Router-only surface added beside getPricing (sections 4.1,
+  // 4.1a, 4.2). getPricing's ZERO-for-unknown semantics must stay intact.
+  // -------------------------------------------------------------------------
+
+  describe("modelIdToFamily: CLI-agnostic family resolution", () => {
+    it("maps claude ids (what devin / cursor-agent run) to priced families", () => {
+      expect(modelIdToFamily("claude-sonnet-4-5")).toBe("claude-sonnet");
+      expect(modelIdToFamily("claude-opus-4-7")).toBe("claude-opus");
+      expect(modelIdToFamily("claude-haiku-4-5")).toBe("claude-haiku");
+    });
+    it("maps gpt ids (what codex / cursor-agent --model gpt-* run) to openai-gpt5", () => {
+      expect(modelIdToFamily("gpt-5.4")).toBe("openai-gpt5");
+      expect(modelIdToFamily("openai/gpt-5-mini")).toBe("openai-gpt5");
+      expect(modelIdToFamily("o3-2025-01-31")).toBe("openai-gpt5");
+    });
+    it("maps gemini / grok / mistral version-anchored ids to their families", () => {
+      expect(modelIdToFamily("gemini-2.5-flash")).toBe("gemini-2.5-flash");
+      expect(modelIdToFamily("gemini-2.5-pro")).toBe("gemini-2.5-pro");
+      expect(modelIdToFamily("gemini-3-pro-preview")).toBe("gemini-3-pro");
+      expect(modelIdToFamily("grok-4.3")).toBe("grok-4");
+      expect(modelIdToFamily("grok-code-fast-1")).toBe("grok-build");
+      expect(modelIdToFamily("mistral-medium-3.5")).toBe("mistral-medium");
+      expect(modelIdToFamily("devstral-small")).toBe("mistral-devstral");
+    });
+    it("returns 'unknown' for an unrecognised / specialty / bare id", () => {
+      expect(modelIdToFamily("davinci-002")).toBe("unknown");
+      expect(modelIdToFamily("default")).toBe("unknown");
+      expect(modelIdToFamily("")).toBe("unknown");
+      // Specialty gemini tiers are gated out (they carry different rates).
+      expect(modelIdToFamily("gemini-2.5-flash-lite")).toBe("unknown");
+      // Legacy mistral-medium-3 must not resolve to Medium 3.5.
+      expect(modelIdToFamily("mistral-medium-3")).toBe("unknown");
+    });
+  });
+
+  describe("getModelCost: table rates, cacheWrite, accountingMode, family", () => {
+    it("claude (any CLI) resolves to disjoint accounting + full Sonnet rates", () => {
+      // A devin run of claude-sonnet has no getPricing brand branch, but
+      // getModelCost prices it by resolved family (contract decision 4).
+      const mc = getModelCost("devin", "claude-sonnet-4-5");
+      expect(mc.family).toBe("claude-sonnet");
+      expect(mc.inputUsdPerMTok).toBe(3);
+      expect(mc.outputUsdPerMTok).toBe(15);
+      expect(mc.cacheReadMultiplier).toBe(0.1);
+      // cacheWrite defaults to the input rate (table encodes no cache-write mult).
+      expect(mc.cacheWriteUsdPerMTok).toBe(3);
+      expect(mc.accountingMode).toBe("disjoint");
+      expect(mc.source).toBe("table");
+      expect(mc.asOf).toBe(PRICING_AS_OF);
+    });
+    it("codex / gemini / grok / mistral resolve to inclusive accounting", () => {
+      expect(getModelCost("codex", "gpt-5.4").accountingMode).toBe("inclusive");
+      expect(getModelCost("gemini", "gemini-2.5-pro").accountingMode).toBe("inclusive");
+      expect(getModelCost("grok", "grok-4.3").accountingMode).toBe("inclusive");
+      expect(getModelCost("mistral", "mistral-medium-3.5").accountingMode).toBe("inclusive");
+      // A cursor-agent run of gpt-* is priced by the gpt family it runs.
+      const cur = getModelCost("cursor", "gpt-5-mini");
+      expect(cur.family).toBe("openai-gpt5");
+      expect(cur.inputUsdPerMTok).toBe(1.25);
+      expect(cur.outputUsdPerMTok).toBe(10);
+    });
+    it("unknown family => source 'unknown' with zeroed rates (never looks free)", () => {
+      const mc = getModelCost("cursor", "davinci-002");
+      expect(mc.source).toBe("unknown");
+      expect(mc.family).toBe("unknown");
+      expect(mc.inputUsdPerMTok).toBe(0);
+      expect(mc.outputUsdPerMTok).toBe(0);
+      expect(mc.cacheWriteUsdPerMTok).toBe(0);
+    });
+  });
+
+  describe("getPricing regression: ZERO-for-unknown UNCHANGED by the LCR path", () => {
+    // getModelCost's exclude-unknown rule must NOT leak into getPricing, whose
+    // ZERO (and claude-default-to-Sonnet) semantics the cache-savings path needs.
+    it("getPricing still ZERO for an unknown codex model", () => {
+      expect(getPricing("codex", "davinci-002").inputUsd).toBe(0);
+    });
+    it("getPricing still falls claude 'default' back to Sonnet", () => {
+      expect(getPricing("claude", "default").inputUsd).toBe(3);
+    });
+  });
+
+  describe("composeCost: basis matrix (one pure fn drives derive AND rank)", () => {
+    const zeroEstimate: TokenEstimate = { estInputTokens: 0, estOutputTokens: 0 };
+
+    it("provider-reported dollar cost passes through verbatim (high confidence)", () => {
+      const counts: TokenCounts = {
+        inputTokens: 1000,
+        outputTokens: 500,
+        reportedCostUsd: 0.0421,
+      };
+      const mc = getModelCost("claude", "claude-sonnet-4-5");
+      const r = composeCost(counts, zeroEstimate, mc);
+      expect(r.cost_basis).toBe("provider-reported");
+      expect(r.confidence).toBe("high");
+      expect(r.costUsd).toBe(0.0421);
+    });
+
+    it("provider-reported wins even when the rate is unknown", () => {
+      const counts: TokenCounts = { inputTokens: 10, outputTokens: 10, reportedCostUsd: 1.5 };
+      const mc = getModelCost("cursor", "davinci-002"); // source: unknown
+      const r = composeCost(counts, zeroEstimate, mc);
+      expect(r.cost_basis).toBe("provider-reported");
+      expect(r.costUsd).toBe(1.5);
+    });
+
+    it("derived inclusive SUBTRACTS the cache-read discount off the base", () => {
+      // gpt-5.4: input $1.25, output $10, cacheReadMult 0.5. inclusive =>
+      // input includes the cache-read subset, so read is a discount.
+      const mc = getModelCost("codex", "gpt-5.4");
+      const counts: TokenCounts = {
+        inputTokens: 1_000_000,
+        outputTokens: 1_000_000,
+        cacheReadTokens: 400_000,
+        cacheCreationTokens: 100_000,
+      };
+      const expected =
+        (1_000_000 * 1.25) / 1e6 + // base input (includes cache read)
+        (100_000 * 1.25) / 1e6 + // cache write at input rate default
+        (1_000_000 * 10) / 1e6 - // output
+        (400_000 * 1.25 * (1 - 0.5)) / 1e6; // cache-read discount subtracted
+      const r = composeCost(counts, zeroEstimate, mc);
+      expect(r.cost_basis).toBe("derived-from-tokens");
+      expect(r.confidence).toBe("high");
+      expect(r.costUsd).toBeCloseTo(expected, 10);
+    });
+
+    it("derived disjoint BILLS cache_read on fresh-only input (claude)", () => {
+      // claude sonnet: input $3, output $15, cacheReadMult 0.1. disjoint =>
+      // input_tokens is fresh-only; cache read is billed at the discounted rate.
+      const mc = getModelCost("claude", "claude-sonnet-4-5");
+      const counts: TokenCounts = {
+        inputTokens: 1_000_000, // fresh only
+        outputTokens: 1_000_000,
+        cacheReadTokens: 400_000,
+        cacheCreationTokens: 100_000,
+      };
+      const expected =
+        (1_000_000 * 3) / 1e6 + // fresh input
+        (100_000 * 3) / 1e6 + // cache write at input rate default
+        (400_000 * 3 * 0.1) / 1e6 + // cache read BILLED (not subtracted)
+        (1_000_000 * 15) / 1e6; // output
+      const r = composeCost(counts, zeroEstimate, mc);
+      expect(r.cost_basis).toBe("derived-from-tokens");
+      expect(r.costUsd).toBeCloseTo(expected, 10);
+    });
+
+    it("inclusive and disjoint differ for the SAME counts (mode is not blind)", () => {
+      const counts: TokenCounts = {
+        inputTokens: 1_000_000,
+        outputTokens: 0,
+        cacheReadTokens: 500_000,
+      };
+      const incl = getModelCost("codex", "gpt-5.4"); // inclusive, mult 0.5
+      const inclCost = composeCost(counts, zeroEstimate, incl).costUsd;
+      // inclusive: 1.25 - 500k*1.25*0.5/1e6 = 1.25 - 0.3125 = 0.9375
+      expect(inclCost).toBeCloseTo(1.25 - (500_000 * 1.25 * 0.5) / 1e6, 10);
+      const disj = getModelCost("claude", "claude-sonnet-4-5"); // disjoint, mult 0.1
+      const disjCost = composeCost(counts, zeroEstimate, disj).costUsd;
+      // disjoint: fresh 1M*3 + read 500k*3*0.1 = 3 + 0.15 = 3.15
+      expect(disjCost).toBeCloseTo((1_000_000 * 3) / 1e6 + (500_000 * 3 * 0.1) / 1e6, 10);
+    });
+
+    it("reasoningTokens are added at the OUTPUT rate", () => {
+      const mc = getModelCost("grok", "grok-4.3"); // input 1.25, output 2.5, incl
+      const base: TokenCounts = { inputTokens: 0, outputTokens: 0 };
+      const withReasoning: TokenCounts = {
+        inputTokens: 0,
+        outputTokens: 0,
+        reasoningTokens: 200_000,
+      };
+      const baseCost = composeCost(base, zeroEstimate, mc).costUsd;
+      const reasonCost = composeCost(withReasoning, zeroEstimate, mc).costUsd;
+      expect(baseCost).toBe(0);
+      expect(reasonCost).toBeCloseTo((200_000 * 2.5) / 1e6, 10); // billed as output
+    });
+
+    it("unknown rate => pre-flight-estimate with low confidence (falls back)", () => {
+      const mc = getModelCost("cursor", "davinci-002"); // source unknown, zero rates
+      const counts: TokenCounts = { inputTokens: 1000, outputTokens: 1000 };
+      const estimate: TokenEstimate = { estInputTokens: 5000, estOutputTokens: 5000 };
+      const r = composeCost(counts, estimate, mc);
+      expect(r.cost_basis).toBe("pre-flight-estimate");
+      expect(r.confidence).toBe("low");
+      // Zero rates => zero cost, but the BASIS is the observable signal here.
+      expect(r.costUsd).toBe(0);
+    });
+
+    it("no counts => pre-flight-estimate uses the estimate at table rates", () => {
+      const mc = getModelCost("codex", "gpt-5.4"); // inclusive, input 1.25 output 10
+      const estimate: TokenEstimate = {
+        estInputTokens: 2_000_000,
+        estOutputTokens: 500_000,
+        estCacheReadTokens: 1_000_000,
+        estCacheWriteTokens: 200_000,
+      };
+      const expected =
+        (2_000_000 * 1.25) / 1e6 + // whole-prompt input (inclusive)
+        (200_000 * 1.25) / 1e6 + // cache write
+        (500_000 * 10) / 1e6 - // output
+        (1_000_000 * 1.25 * (1 - 0.5)) / 1e6; // cache-read discount
+      const r = composeCost(null, estimate, mc);
+      expect(r.cost_basis).toBe("pre-flight-estimate");
+      expect(r.confidence).toBe("low");
+      expect(r.costUsd).toBeCloseTo(expected, 10);
+    });
+
+    it("disjoint ESTIMATE removes cache subsets from the whole-prompt input", () => {
+      // claude estimate: estInputTokens is whole-prompt; fresh = whole - read - write.
+      const mc = getModelCost("claude", "claude-sonnet-4-5");
+      const estimate: TokenEstimate = {
+        estInputTokens: 1_000_000, // whole prompt
+        estOutputTokens: 100_000,
+        estCacheReadTokens: 300_000,
+        estCacheWriteTokens: 100_000,
+      };
+      const fresh = 1_000_000 - 300_000 - 100_000;
+      const expected =
+        (fresh * 3) / 1e6 +
+        (100_000 * 3) / 1e6 + // cache write
+        (300_000 * 3 * 0.1) / 1e6 + // cache read billed
+        (100_000 * 15) / 1e6; // output
+      const r = composeCost(null, estimate, mc);
+      expect(r.cost_basis).toBe("pre-flight-estimate");
+      expect(r.costUsd).toBeCloseTo(expected, 10);
     });
   });
 });

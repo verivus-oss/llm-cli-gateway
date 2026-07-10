@@ -204,6 +204,17 @@ export interface JobLimiterSnapshot {
 }
 
 /**
+ * Least-cost-routing capacity helper (spec 4.3 item 2). Pure and deterministic:
+ * reports whether a given provider has reached its per-provider running cap in a
+ * limiter snapshot. There is no per-provider `saturated` field on the snapshot
+ * (only a global one), so the router derives capacity from the already-exported
+ * `runningByProvider` count and `maxRunningPerProvider` cap.
+ */
+export function providerAtCapacity(snapshot: JobLimiterSnapshot, provider: string): boolean {
+  return (snapshot.runningByProvider[provider] ?? 0) >= snapshot.maxRunningPerProvider;
+}
+
+/**
  * Issue #130: a small in-process running-limit + FIFO queue owned by
  * AsyncJobManager. It gates BOTH process (CLI) and HTTP API job execution plus
  * the direct-sync execution fallback so no provider process or outbound request

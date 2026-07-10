@@ -281,6 +281,20 @@ export interface ProviderRequestSurface {
   readonly syncToolName: string;
   /** Async request tool name (snake_case), e.g. "claude_request_async". */
   readonly asyncToolName: string;
+  /**
+   * Explicit capability flags promoted from previously-inferred behaviour so
+   * least-cost routing (4.3) reads eligibility from this source of truth rather
+   * than inferring it ad hoc (e.g. via `findMissingImagePath`). Each value is
+   * grounded in the installed CLI `--help` surface, not guessed.
+   */
+  /** Accepts image inputs attached to the prompt (e.g. codex `-i/--image`). */
+  readonly acceptsImages: boolean;
+  /** Accepts non-workspace file/media attachments alongside the prompt. */
+  readonly acceptsAttachments: boolean;
+  /** Exposes agentic tool-calling (allow/deny tool flags, tool permissions). */
+  readonly toolCalling: boolean;
+  /** Supports JSON-Schema-constrained structured output (e.g. `--json-schema`). */
+  readonly jsonSchema: boolean;
 }
 
 /**
@@ -362,6 +376,12 @@ const PROVIDER_DEFINITIONS = {
       acpCapable: false,
       syncToolName: "claude_request",
       asyncToolName: "claude_request_async",
+      // --help: no image/attachment input flag; --allowedTools/--mcp-config
+      // (tool-calling); --json-schema <schema> (structured output).
+      acceptsImages: false,
+      acceptsAttachments: false,
+      toolCalling: true,
+      jsonSchema: true,
     },
     docs: { primary: ["https://code.claude.com/docs/en/cli-reference"] },
     discovery: {
@@ -466,6 +486,13 @@ const PROVIDER_DEFINITIONS = {
       acpCapable: false,
       syncToolName: "codex_request",
       asyncToolName: "codex_request_async",
+      // exec --help: -i/--image <FILE>... attaches image(s) to the prompt
+      // (the source of the findMissingImagePath check); agentic exec tools;
+      // --output-schema <FILE> (JSON Schema for the final response shape).
+      acceptsImages: true,
+      acceptsAttachments: true,
+      toolCalling: true,
+      jsonSchema: true,
     },
     docs: {
       primary: [
@@ -610,6 +637,13 @@ const PROVIDER_DEFINITIONS = {
       acpCapable: false,
       syncToolName: "gemini_request",
       asyncToolName: "gemini_request_async",
+      // agy --help: no image/attachment flag; --dangerously-skip-permissions
+      // gates agentic tool permissions (tool-calling); no JSON-schema flag and
+      // outputFormats is text-only.
+      acceptsImages: false,
+      acceptsAttachments: false,
+      toolCalling: true,
+      jsonSchema: false,
     },
     docs: {
       primary: [
@@ -711,6 +745,12 @@ const PROVIDER_DEFINITIONS = {
       acpCapable: true,
       syncToolName: "grok_request",
       asyncToolName: "grok_request_async",
+      // --help: no explicit image/attachment path flag; --tools/--allowedTools
+      // (tool-calling); --json-schema <SCHEMA> (structured output).
+      acceptsImages: false,
+      acceptsAttachments: false,
+      toolCalling: true,
+      jsonSchema: true,
     },
     docs: {
       primary: [
@@ -821,6 +861,12 @@ const PROVIDER_DEFINITIONS = {
       acpCapable: true,
       syncToolName: "mistral_request",
       asyncToolName: "mistral_request_async",
+      // vibe --help: no image/attachment flag; --enabled-tools/--disabled-tools
+      // (tool-calling); --output {text,json,streaming} carries no schema flag.
+      acceptsImages: false,
+      acceptsAttachments: false,
+      toolCalling: true,
+      jsonSchema: false,
     },
     docs: { primary: ["https://github.com/mistralai/mistral-vibe"] },
     discovery: {
@@ -949,6 +995,12 @@ const PROVIDER_DEFINITIONS = {
       acpCapable: true,
       syncToolName: "devin_request",
       asyncToolName: "devin_request_async",
+      // devin --help: no image/attachment flag; approval modes gate agentic
+      // tools including the exec tool (tool-calling); no JSON-schema flag.
+      acceptsImages: false,
+      acceptsAttachments: false,
+      toolCalling: true,
+      jsonSchema: false,
     },
     docs: { primary: ["https://docs.devin.ai/cli/reference/commands"] },
     discovery: {
@@ -1066,6 +1118,13 @@ const PROVIDER_DEFINITIONS = {
       acpCapable: true,
       syncToolName: "cursor_request",
       asyncToolName: "cursor_request_async",
+      // cursor-agent --help: no image/attachment flag; non-interactive mode has
+      // access to all tools (tool-calling); --output-format json carries no
+      // schema flag.
+      acceptsImages: false,
+      acceptsAttachments: false,
+      toolCalling: true,
+      jsonSchema: false,
     },
     docs: { primary: ["https://docs.cursor.com/en/cli/overview"] },
     discovery: {

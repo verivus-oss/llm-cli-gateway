@@ -2,8 +2,9 @@ import { ChildProcess, spawn, spawnSync, type SpawnOptions } from "child_process
 import { homedir } from "os";
 import { delimiter, join, dirname, extname, win32 } from "path";
 import { readdirSync, existsSync } from "fs";
-import { createCircuitBreaker, withRetry } from "./retry.js";
+import { createCircuitBreaker, withRetry, CircuitBreakerState } from "./retry.js";
 import type { Logger } from "./logger.js";
+import type { CliType } from "./provider-types.js";
 import { applySpawnEnvIsolation } from "./spawn-env-isolation.js";
 
 export interface ExecuteOptions {
@@ -48,6 +49,39 @@ function getCircuitBreaker(command: string) {
   const circuitBreaker = createCircuitBreaker();
   circuitBreakers.set(command, circuitBreaker);
   return circuitBreaker;
+}
+
+/**
+ * Least-cost-routing accessor: the current circuit-breaker state for a CLI
+ * provider, or CLOSED when no request has created a breaker for it yet (the
+ * default healthy state). Parity with `apiProviderBreakerState` in
+ * `api-provider.ts`, so the router can read CLI and API breaker health through
+ * the same shape.
+ *
+ * Per-CLI breakers are keyed by the RESOLVED executable/command, not the
+ * CliType (e.g. `cursor` spawns `cursor-agent`, `gemini` spawns `agy`,
+ * `mistral` spawns `vibe`). The CliType is therefore mapped to its executable
+ * via `providerCommandName` (the same resolution used when spawning) BEFORE the
+ * lookup. Read-only: it never creates or mutates a breaker (unlike
+ * `getCircuitBreaker`), so it does not change breaker behavior.
+ */
+export function cliBreakerState(cli: CliType): CircuitBreakerState {
+  const command = providerCommandName(cli);
+  return circuitBreakers.get(command)?.state ?? CircuitBreakerState.CLOSED;
+}
+
+/** Test-only: clear the per-command circuit breakers (parity with
+ * `resetApiProviderBreakers`). Not used by production code paths. */
+export function resetCliBreakersForTest(): void {
+  circuitBreakers.clear();
+}
+
+/** Test-only: seed a breaker state under a RESOLVED command key so unit tests
+ * can exercise `cliBreakerState`'s CliType->executable mapping without spawning
+ * a real provider CLI. `command` is the executable (e.g. "cursor-agent"), not
+ * the CliType. Not used by production code paths. */
+export function primeCliBreakerStateForTest(command: string, state: CircuitBreakerState): void {
+  getCircuitBreaker(command).state = state;
 }
 
 function getNvmPath(): string | null {
