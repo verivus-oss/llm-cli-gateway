@@ -36,6 +36,24 @@ The scanner classifies each path-keyed prod **instance**
 - **Dropped** (exit 2): a baseline instance whose `path` left the closure. Blocks
   until the baseline is pruned; the ledger name is revoked only when ALL its
   instances are gone.
+- **License-violation** (P2, exit 3): a prod package whose `license` is absent or
+  not an exact member of `supply-chain/license-allowlist.json`. An SPDX
+  expression (e.g. `(MIT OR Apache-2.0)`) that is not in the allowlist verbatim is
+  flagged deliberately, so a dual-license entry cannot slip a copyleft term in.
+  Resolve by reviewing the license and, if acceptable, adding the exact SPDX id to
+  the allowlist.
+- **Socket-policy-drift** (P2, exit 3): a `socket.yml` `issueRules` value that
+  differs from the reviewed enforcing posture (`dep-drift-scan.mjs`
+  `REQUIRED_SOCKET_POLICY`), checked bidirectionally so a flipped, missing, OR
+  newly-added rule all count. Update that map in lock-step with any deliberate,
+  reviewed `socket.yml` change (same discipline as the hono floor). This is an
+  offline, deterministic cross-check; a live Socket-API capability query needs
+  network/credentials and is a separate advisory tool, not part of the gate.
+
+The P2 policy config is required, not optional: in the real-repo (non-`--closure`)
+path, a missing `supply-chain/license-allowlist.json` or `socket.yml` is a
+misconfiguration (exit 1, tool error), never a silently-disabled check, so a
+fail-closed detector cannot be defeated by deleting its config.
 
 ## The tool
 
@@ -167,6 +185,7 @@ committed baseline is refreshed through this process.
 
 - Tool: `scripts/supply-chain/dep-drift-scan.mjs` (tests: `dep-drift-scan.test.mjs`)
 - Ledger + baseline: `supply-chain/prod-closure.{ledger,baseline}.json`
+- License allowlist (P2): `supply-chain/license-allowlist.json`
 - Shared filter: `scripts/make-prod-shrinkwrap.mjs` (`prodFilter`)
 - Release gate: `scripts/release-security-audit.sh`
 - Spec + DAG: `docs/plans/supply-chain-guard.draft.md` / `.dag.toml`
