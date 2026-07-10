@@ -58,12 +58,15 @@ output parsers, `src/provider-status.ts`, and the backpressure work
   `cost_basis: "provider-reported" | "derived-from-tokens" | "pre-flight-estimate"`
   (accuracy descending), plus a confidence band (4.2, 8). Callers and operators
   always know how trustworthy a number is.
-- **Telemetry tier** (per provider, grounds the whole cost model, inventory in
-  4.1a): T1 reports a dollar cost (claude, mistral, xAI-API); T2 reports token
-  counts but no dollar cost, so cost is *derived* (codex, gemini, OpenRouter when
-  `usage.cost` is absent); T3 reports token counts only after wiring not yet done
-  (grok, via un-threaded ACP `_meta`); T4 reports no usage at all, so cost is
-  *always* a pre-flight estimate (cursor, devin).
+- **Telemetry tier** (per provider AND transport, grounds the whole cost model,
+  inventory in 4.1a): T1 reports a dollar cost (claude, mistral, xAI-API); T2
+  reports token counts but no dollar cost, so cost is *derived* (codex, gemini,
+  OpenRouter when `usage.cost` is absent, and grok on the ACP transport, whose
+  `_meta` counts are already threaded); T3 (transport-conditional) is a provider
+  that yields counts on one transport but not another, so its tier depends on how
+  LCR routes it, the sole case today is grok, which is T2 via ACP and T4 via the
+  default `-p` wire; T4 reports no usage at all on any transport, so cost is
+  *always* a pre-flight estimate (cursor, devin, grok-`-p`).
 
 This document uses "ACP" only where it references the existing Agent Client
 Protocol work; LCR is unrelated to ACP.
@@ -312,7 +315,12 @@ deciding whether a derived cost is achievable (see 4.6, phase_2b).
 
 LCR computes TWO estimates per request, for two different purposes.
 
-**Ranking estimate** (orders candidates):
+**Ranking estimate** (orders candidates). The ranking estimate applies the SAME
+per-`accountingMode` composition as the derived path (4.1a), fed by *estimated*
+token counts instead of reported ones (round-2 blocker: ranking must not be
+mode-blind, or disjoint families mis-rank). `estInputTokens` is defined as the
+WHOLE-PROMPT input estimate; the formula converts per mode. `inclusive` mode
+(codex, gemini, xAI, OpenRouter, grok-ACP):
 
 ```
 estCost = estInputTokens      * inputUsdPerMTok      / 1e6
@@ -321,13 +329,31 @@ estCost = estInputTokens      * inputUsdPerMTok      / 1e6
         - estCacheReadTokens  * inputUsdPerMTok * (1 - cacheReadMultiplier) / 1e6
 ```
 
+`disjoint` mode (Anthropic-family): the whole-prompt input splits into fresh +
+cache, and cache-read is BILLED (not subtracted), mirroring the 4.1a disjoint
+derive:
+
+```
+estFresh = estInputTokens - estCacheReadTokens - estCacheWriteTokens
+estCost  = estFresh          * inputUsdPerMTok                      / 1e6
+         + estCacheWriteTokens * cacheWriteUsdPerMTok                / 1e6
+         + estCacheReadTokens  * inputUsdPerMTok * cacheReadMultiplier / 1e6
+         + estOutputTokens     * outputUsdPerMTok                     / 1e6
+```
+
+In practice `composeCost` (4.1a) is the single implementation of both formulas,
+called once with reported counts (derive) and once with estimated counts
+(ranking/budget), so the mode branch can never drift between the two paths. The
+budget estimate (below) uses the same mode branch with its conservative output
+bound.
+
 - `estInputTokens` / `estCacheReadTokens` / `estCacheWriteTokens`: from the token
   estimator (below) plus the caller's cache-control markers. The cache-write term
   is included explicitly (Anthropic charges roughly 1.25x input for cache
   creation), so the formula no longer under-prices cache-creation requests.
 
 **Token estimator (enhancements 2 + 3).** The base heuristic today is
-`estimateTokens = ceil(words * 1.3)` (`src/optimizer.ts:26`), which is badly
+`estimateTokens = ceil(words * 1.3)` (`src/optimizer.ts:27`), which is badly
 biased for code/JSON (denser BPE), CJK, and punctuation-heavy text, exactly the
 inputs a coding gateway sees. Replace it with a layered estimator in a new
 `src/token-estimator.ts`, best available layer wins:
@@ -728,9 +754,12 @@ array (surfaces check).
    `logComplete` derived-cost backfill for T2 rows.
 8a. Provider parsers (enh. 1 wiring + enh. 4): route T2 providers' captured token
    counts through `composeCost` at `extractUsageAndCost`
-   (`src/index.ts:2045`); thread grok ACP `session/prompt` `_meta` token counts
-   in `buildAcpFlightResult` (`src/acp/runtime.ts`) so grok moves T3 to T2.
-   cursor/devin have no parser and remain estimate-only (enh. 6).
+   (`src/index.ts:2045`). Grok ACP `_meta` counts are ALREADY threaded
+   (`src/acp/runtime.ts:262-266`); the remaining work is capturing the dropped
+   `reasoningTokens` there and making LCR route grok via the gated ACP transport
+   to obtain counts (grok-`-p` stays estimate-only). cursor/devin have no parser
+   and remain estimate-only (enh. 6). Also fix the stale "ACP usage not wired"
+   comment at `src/index.ts:2138-2143` so future readers are not misled.
 9. Tests: unit tests for the ranker/eligibility, the layered token-estimator
    (content-type buckets, family multipliers, calibration application), the
    `composeCost` basis matrix (reported/derived/estimate + unknown-rate fallback),
@@ -857,8 +886,6 @@ array (surfaces check).
   `src/gemini-json-parser.ts`, `src/mistral-meta-json-parser.ts`,
   `src/grok-json-parser.ts` (`usageAbsent`), `src/api-provider.ts`, dispatched by
   `extractUsageAndCost` (`src/index.ts:2045`).
-- `src/acp/runtime.ts` (`buildAcpFlightResult`) - where grok ACP `_meta` token
-  counts must be threaded (enh. 4).
 - `src/validation-orchestrator.ts` - existing multi-provider fan-out +
   eligibility filter to generalize.
 - `src/provider-types.ts` (`CLI_TYPES`) + `enabledApiProviders()` - the only
