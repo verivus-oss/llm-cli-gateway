@@ -8,7 +8,7 @@ This file is generated from the gateway's actual MCP `tools/list` response, not 
 npm run site:generate
 ```
 
-- Package: `llm-cli-gateway@2.15.0`
+- Package: `llm-cli-gateway@2.16.0`
 - Tool count: 52
 - Source: runtime MCP tools/list from dist/index.js over in-memory MCP transport
 - Capture command: `node scripts/generate-site-discovery.mjs`

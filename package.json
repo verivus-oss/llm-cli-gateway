@@ -1,6 +1,6 @@
 {
   "name": "llm-cli-gateway",
-  "version": "2.15.0",
+  "version": "2.16.0",
   "mcpName": "io.github.verivus-oss/llm-cli-gateway",
   "description": "Secure local control plane for AI coding agents across supported MCP clients, with workspace-scoped remote access, approval gates, durable jobs, sessions, and audit receipts.",
   "license": "MIT",
