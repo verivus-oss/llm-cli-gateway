@@ -1,0 +1,319 @@
+# Supply-chain guard (dependency drift + tag-along) implementation plan.
+# Machine plan derived from the cross-LLM-approved spec
+# docs/plans/supply-chain-guard.draft.md (4-round unanimous approval: Codex,
+# Grok, Mistral). Data-first: every step is idempotent and carries a concrete
+# validation. Internal-only; nothing here ships in the npm tarball.
+
+[meta]
+name = "supply-chain-guard"
+schema_version = "1.1"
+owner = "gateway-maintainers"
+slice = "supply-chain-guard"
+target_branch = "feat/supply-chain-guard"
+release_version = "UNSET"
+predecessor_plan = "docs/plans/supply-chain-guard.draft.md"
+acceptance_artifact = "supply-chain/prod-closure.baseline.json"
+invariant_sources = [
+  "scripts/make-prod-shrinkwrap.mjs",
+  "scripts/pre-release.sh",
+  "scripts/release-security-audit.sh",
+  "scripts/verify-registry-install.sh",
+  "package.json",
+  "package-lock.json",
+  ".gitignore",
+  ".github/workflows/ci.yml",
+  ".github/workflows/npm-publish.yml",
+  ".github/dependabot.yml",
+  "socket.yml",
+]
+
+# ---------------------------------------------------------------------------
+# Decisions (flat flags; the frozen shape of the approved design)
+# ---------------------------------------------------------------------------
+[decisions]
+trust_unit = "instance"                       # path-keyed lockfile instance, NEVER a bare name
+instance_fields = "path,name,version,resolved,integrity"
+name_derivation = "meta.name ?? path.split(/node_modules\\//).pop()"  # forbid split(\"/node_modules/\")
+root_excluded = true                          # path \"\" has no resolved/integrity; skip in classify/baseline/seed
+ledger_versions = "exact_only"                # acceptedVersions are exact strings; any range => tool error exit 1
+seed_policy = "exact_bootstrap_not_reviewed"  # seed from shipped closure with exact versions, never a caret window
+baseline = "instance_snapshot"                # exact path/name/version/resolved/integrity list
+classification = "decision_table"             # 7-row first-match table (spec 4.3)
+detectors = "ledger_OR_baseline + source + integrity + reused_invariants"  # fail-closed OR, not AND
+dropped = "instance_reverse_diff"             # per-path; exit 2; revoke name only when all its instances gone
+exit_contract = "0_clean/2_rollforward_or_dropped/3_tagalong_anomaly/1_error"
+gate_requires = "exit_0_vs_committed_baseline"  # roll-forward (2) and dropped (2) BLOCK until baseline refreshed
+resolve_mode = "per_surface"                  # --frozen for CI/gate; fresh npm install only local, in a temp copy
+prod_filter = "shared_pure_function"          # prodFilter(lockObject)->filteredPackagesMap; scanner toInstances()
+scanner_language = "mjs"                       # Node + vitest; not bash (sidesteps sqry pipefail bug class)
+never_mutates_tree = true                     # --frozen: no install; fresh: temp copy only; lockfiles untouched
+internal_only = true                          # absent from package.json files; never in the tarball
+license_policy = "deferred_P2"                # no license allowlist in P0/P1
+
+# ---------------------------------------------------------------------------
+# Non-goals (key = reason)
+# ---------------------------------------------------------------------------
+[non_goals]
+not_a_replacement_for_audit = "Adds the missing name/instance allowlist layer; npm audit, osv-scanner, socket.yml, and the version blocklist stay exactly as they are."
+not_a_dep_upgrade_tool = "Intentional upgrades stay with Dependabot; the guard is the release-gate integrity flow."
+no_name_level_trust = "A bare package name is never the trust unit; a version bump is a changed instance, not the same trusted name."
+no_range_trust_window = "acceptedVersions are exact; a caret/tilde/||/* is a malformed-config tool error, so no in-range bump is silently clean."
+not_shipped = "scripts/supply-chain, supply-chain/*.json, docs/development/supply-chain-guard, and .claude/skills/supply-chain-guard are absent from package.json files."
+no_generator_subprocess_on_temp = "make-prod-shrinkwrap.mjs hardcodes the repo lockfile (:35-47); the scanner imports the shared prodFilter, never shells out against a temp tree."
+not_billing_or_capability = "socket.yml keeps capability acceptance; this guard governs the package-name/instance closure, not capabilities."
+
+# ---------------------------------------------------------------------------
+# Architecture + module plan (maps spec section 9)
+# ---------------------------------------------------------------------------
+[architecture]
+summary = "A pure Node scanner (dep-drift-scan.mjs) obtains the prod closure via the shared prodFilter (extracted from make-prod-shrinkwrap.mjs), maps it to root-excluded, name-derived instances, and classifies each against a committed instance baseline + name-keyed ledger through a 7-row decision table, plus an instance-level reverse diff for dropped. Exit 0/2/3 wires into release-security-audit.sh (--frozen) so a tag-along or unreviewed drift fails the release. A skill+runbook orchestrate exa advisory research and mandatory independent cross-LLM validation before any ledger write."
+
+[architecture.module_plan]
+prod_filter = "scripts/make-prod-shrinkwrap.mjs refactored to export prodFilter(lockObject)->filteredPackagesMap (dev===true drop + root devDependencies strip + key order); generator and scanner both import it."
+scanner = "scripts/supply-chain/dep-drift-scan.mjs: toInstances() (name-derivation + root exclusion), 7-row classifier, instance reverse-diff dropped, 4 detectors + reused invariants, exit codes, --frozen vs fresh-temp-copy, ledger exact-version validation."
+tests = "scripts/supply-chain/dep-drift-scan.test.mjs: offline vitest over injected closures (--closure fixture)."
+ledger = "supply-chain/prod-closure.ledger.json (per-name acceptedVersions + state + rationale) and supply-chain/prod-closure.baseline.json (instance snapshot)."
+process = ".claude/skills/supply-chain-guard/SKILL.md + docs/development/supply-chain-guard/RUNBOOK.md + docs/development/supply-chain-guard/ledger/README.md."
+
+# ===========================================================================
+# Phases (each its own cross-LLM review gate, per spec section 13)
+# ===========================================================================
+[phases]
+phase_0 = "Report-only: shared prodFilter refactor + ledger/baseline seed + scanner (classify/detect/exit) + offline tests + non-blocking supply-chain:scan."
+phase_1 = "Blocking + process: SKILL + RUNBOOK + ledger audit-trail; supply-chain:scan:check (--frozen, requires exit 0) appended to release-security-audit.sh."
+phase_2 = "DEFERRED (own plan): license allowlist; optional Socket API capability cross-check; optional /dep-update proactive flow."
+
+# ---------------------------------------------------------------------------
+# Steps
+# ---------------------------------------------------------------------------
+
+[[steps]]
+id = "audit-seams"
+depends_on = []
+actor = "assistant"
+phase = "phase_0"
+action = """
+Phase 0 baseline. Re-confirm against current master (line numbers drift from the
+spec's 2c56762 base) and record in a fresh
+docs/plans/supply-chain-guard.verification.md under a Phase 0 heading:
+  - make-prod-shrinkwrap.mjs: hardcoded LOCKFILE_PATH + argv-output-only
+    (~:35-47), the dev===true drop (~:63), root devDependencies strip (~:65-74),
+    key-order preservation.
+  - name-derivation SoT: pre-release.sh (~:43) and release-security-audit.sh
+    (~:147-151) both use `meta.name ?? path.split(/node_modules\\//).pop()`.
+  - release-security-audit.sh gate seams: npm audit (~:8), byte-parity
+    (~:104-123), version blocklist prod-graph-only (~:125-165), hono floor
+    (~:167-204), packed-consumer any-tar-stream (~:206-258), fetch-in-dist
+    (~:263-305).
+  - verify-registry-install.sh reified-count band (~:42-47).
+  - Record: total lockfile packages entries, non-dev prod count, count with
+    meta.name, and that the root entry lacks resolved/integrity.
+  - package.json files allowlist (proves internal-only).
+"""
+idempotent = true
+validation = """
+verification.md lists each seam with a confirmed current file:line and the exact
+lockfile counts (expected at spec base: 320 total, 93 prod incl root, 0 with
+meta.name, root has no resolved/integrity). Any drift from the spec is flagged.
+"""
+
+[[steps]]
+id = "extract-prod-filter"
+depends_on = ["audit-seams"]
+actor = "assistant"
+phase = "phase_0"
+action = """
+Refactor scripts/make-prod-shrinkwrap.mjs to export a pure
+prodFilter(lockObject) -> filteredPackagesMap (the dev===true drop + root
+devDependencies strip + source-key-order preservation) and have the script's
+main path call it. Behaviour-preserving: the generated npm-shrinkwrap.json must
+be byte-identical to before. Do NOT read the lockfile from inside prodFilter; the
+caller passes the parsed lock object, so the scanner can call it on a temp lock.
+"""
+idempotent = true
+validation = """
+Generating npm-shrinkwrap.json before vs after the refactor is byte-identical
+(cmp -s). `npm run security:audit` shrinkwrap byte-parity check still passes.
+prodFilter is importable and pure (no fs read of a hardcoded path).
+"""
+
+[[steps]]
+id = "seed-ledger-and-baseline"
+depends_on = ["extract-prod-filter"]
+actor = "assistant"
+phase = "phase_0"
+action = """
+Generate supply-chain/prod-closure.baseline.json (instance snapshot:
+path/name/version/resolved/integrity, root excluded, name-derived) and
+supply-chain/prod-closure.ledger.json (one entry per name: acceptedVersions =
+[exact resolved version], source registry.npmjs.org, state trusted, firstVetted/
+lastReviewed today, rationale 'bootstrap from <version> shipped closure, not
+individually reviewed'). EXACT versions only, never a caret. Both committed.
+Add .supply-chain/ to .gitignore.
+"""
+idempotent = true
+validation = """
+baseline.json has one instance per non-root prod node_modules entry (matches the
+Phase 0 count), every resolved is registry.npmjs.org, no root entry. ledger.json
+has one entry per name, every acceptedVersions member is an exact version string,
+all state=trusted. Re-running the seed produces byte-identical files.
+"""
+
+[[steps]]
+id = "implement-scanner"
+depends_on = ["seed-ledger-and-baseline"]
+actor = "assistant"
+phase = "phase_0"
+action = """
+Create scripts/supply-chain/dep-drift-scan.mjs:
+  - toInstances(filteredPackagesMap): derive name via meta.name ??
+    path.split(/node_modules\\//).pop(); EXCLUDE root path \"\".
+  - Ledger pre-validation: any acceptedVersions entry that is not an exact
+    version => exit 1 (malformed config).
+  - Classify each fresh instance by the spec 4.3 first-match table (predicates
+    S / integrityConflict / trusted / verAccepted / nameInBaseline /
+    exactBaseline -> rows 1-7).
+  - dropped: reverse diff over baseline instances by path (missing path => exit
+    2); mark a name revocation-eligible only when all its instances are gone.
+  - Detectors: ledger-membership OR baseline-diff (fail-closed OR), source
+    anomaly, integrity mismatch; plus reused invariants (forbidden native/tar
+    chain, version blocklist, fetch-in-dist).
+  - Exit codes: 0 clean, 2 roll-forward and/or dropped only, 3 any tag-along/
+    new_to_tree/source-anomaly/integrity-mismatch/invariant, 1 error (max
+    severity over all instances).
+  - Modes: --frozen (read regenerated npm-shrinkwrap.json OR prodFilter over the
+    committed package-lock.json; no install) vs default fresh (temp copy of
+    package.json+package-lock.json, npm install there, prodFilter on the temp
+    lock; finally-remove the temp dir; never touch the working tree).
+  - --closure FILE injects a closure fixture (tests). --out DIR for outputs.
+  - Outputs to gitignored .supply-chain/scan-<ts>/: report.json (valid JSON in
+    clean AND populated case), report.md, contracts/<pkg>.md stubs.
+"""
+idempotent = true
+validation = """
+`node scripts/supply-chain/dep-drift-scan.mjs --frozen` on the seeded tree exits
+0 with report.json valid and every instance classified clean. Root is absent from
+classification. A hand-injected caret in acceptedVersions makes it exit 1. The
+working package-lock.json / npm-shrinkwrap.json sha256 are unchanged across a run.
+"""
+
+[[steps]]
+id = "scanner-tests"
+depends_on = ["implement-scanner"]
+actor = "assistant"
+phase = "phase_0"
+action = """
+Create scripts/supply-chain/dep-drift-scan.test.mjs (vitest, fully offline via
+--closure fixtures). Cover EVERY decision-table row and whole-closure class:
+  - row 1 source anomaly (git/http/file resolved) -> 3
+  - row 2 integrity mismatch (same name@version, different integrity) -> 3
+  - row 3 tag-along (name not ledgered / state revoked) -> 3
+  - row 4 new_to_tree (name absent from baseline) -> 3
+  - row 5 unaccepted version of a ledgered name -> 3
+  - row 6 clean (exact baseline match) -> 0
+  - row 7 roll-forward (accepted new version of a baselined name) -> 2
+  - dropped instance (baseline path missing) -> 2; multi-path partial drop still
+    -> 2 (not 0); name revoked only when all instances gone
+  - name derivation: scoped names (@scope/pkg) and the forbidden
+    split(\"/node_modules/\") would misclassify (assert the correct regex form)
+  - malformed acceptedVersions (caret) -> 1
+  - clean whole closure -> 0; report.json valid JSON in the empty case
+"""
+idempotent = true
+validation = """
+`npx vitest run scripts/supply-chain/dep-drift-scan.test.mjs` is green with a case
+per row/class above; all offline (no network, no npm install). Coverage includes
+the multi-path partial-drop and the forbidden-split cases.
+"""
+
+[[steps]]
+id = "wire-report-only-script"
+depends_on = ["scanner-tests"]
+actor = "assistant"
+phase = "phase_0"
+action = """
+Add npm scripts: supply-chain:scan (local/advisory; tolerates exit 2) and
+supply-chain:scan:check (the P1 blocking form: --frozen, requires exit 0). In P0
+do NOT append scan:check to release-security-audit.sh; keep it report-only.
+Document the two modes in the script comments.
+"""
+idempotent = true
+validation = """
+`npm run supply-chain:scan` runs and prints a verdict. supply-chain:scan:check
+exists but is not yet referenced by release-security-audit.sh (grep confirms).
+`npm run check` is unaffected (still green).
+"""
+
+[[steps]]
+id = "review-gate-p0"
+depends_on = ["wire-report-only-script"]
+actor = "assistant"
+phase = "phase_0"
+action = """
+Run the cross-LLM review gate on the P0 code (Codex read-only + Grok + Mistral,
+new sessions, verify against the code and the running tests, not the summary).
+Iterate to unanimous approval or a named blocker. Open the P0 PR on master with
+the two required checks; merge only on green + unanimous approval.
+"""
+idempotent = false
+validation = """
+Unanimous cross-LLM approval recorded (job ids + verdicts). PR green on
+build-and-test + sast + security; merged via PR, never admin bypass.
+"""
+
+[[steps]]
+id = "skill-and-runbook"
+depends_on = ["review-gate-p0"]
+actor = "assistant"
+phase = "phase_1"
+action = """
+Write .claude/skills/supply-chain-guard/SKILL.md (condensed) and
+docs/development/supply-chain-guard/RUNBOOK.md (source of truth) implementing the
+spec section 8 process: scan -> exa advisory research per drifted package ->
+safe-to-upgrade decision + contract -> mandatory independent cross-LLM validation
+(Codex+Grok+Mistral, new sessions, read-only; tag-along needs unanimous) ->
+write exact ledger entry + refresh baseline -> ledger audit-trail. Include the
+anti-patterns list (rubber-stamp, skip advisory, write-before-validation, treat a
+local fresh sweep as the gate, accept a roll-forward without refreshing the
+baseline). Add docs/development/supply-chain-guard/ledger/README.md.
+"""
+idempotent = true
+validation = """
+SKILL.md frontmatter (name, description) is well-formed and the skill is
+discoverable. RUNBOOK flags/exit-codes/paths match the scanner exactly. Both are
+em-dash-clean. Neither is in the package.json files allowlist (internal-only).
+"""
+
+[[steps]]
+id = "wire-blocking-gate"
+depends_on = ["skill-and-runbook"]
+actor = "assistant"
+phase = "phase_1"
+action = """
+Append supply-chain:scan:check (--frozen, requires exit 0) as a final step of
+scripts/release-security-audit.sh, after the existing shrinkwrap byte-parity step
+(so the shrinkwrap is already regenerated from the committed lock). It now runs
+inside npm run check, ci.yml, and npm-publish.yml with no new workflow. Confirm
+the gate scores the committed/regenerated tree (--frozen), never a fresh resolve.
+"""
+idempotent = true
+validation = """
+On a clean seeded tree `npm run security:audit` still passes (exit 0). A test
+fixture that introduces an un-ledgered prod name makes security:audit fail with a
+tag-along verdict (exit 3). The check reads the regenerated shrinkwrap / committed
+lock, never runs npm install.
+"""
+
+[[steps]]
+id = "review-gate-p1"
+depends_on = ["wire-blocking-gate"]
+actor = "assistant"
+phase = "phase_1"
+action = """
+Cross-LLM review gate on P1 (skill/runbook/gate wiring), iterate to unanimous
+approval, open the P1 PR on master, merge on green + unanimous.
+"""
+idempotent = false
+validation = """
+Unanimous approval recorded; PR green on required checks; merged via PR.
+"""
