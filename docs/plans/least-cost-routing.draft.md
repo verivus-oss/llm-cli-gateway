@@ -1,15 +1,24 @@
 # Least-Cost Routing (LCR) specification (draft)
 
-Status: Reviewed draft, cost-estimation revision. The base design passed the
-cross-LLM review gate (Codex, Grok, Gemini unconditional approval over three
-rounds); not yet frozen, not implemented. This revision folds in six
-cost-estimation enhancements aimed at making the cost figure as accurate as
-possible for the providers that do NOT report a dollar cost, grounded in a
-per-provider usage-telemetry inventory (see 4.1a and the tier table): a
-derived-cost path (tokens times rate), input-token self-calibration, a
-content-aware/tokenizer-family estimator, threading grok ACP `_meta` token
-counts, an explicit `cost_basis` + confidence surface, and honest treatment of
-the zero-telemetry providers (cursor, devin). Predecessor
+Status: Reviewed draft, cost-estimation revision (round 2). The base design
+passed the cross-LLM review gate; not yet frozen, not implemented. This revision
+folds in six cost-estimation enhancements aimed at making the cost figure as
+accurate as possible for the providers that do NOT report a dollar cost, grounded
+in a per-provider usage-telemetry inventory (4.1a): a derived-cost path (tokens
+times rate), input-token self-calibration, a content-aware/tokenizer-family
+estimator, transport-aware grok tiering, an explicit `cost_basis` + confidence
+surface, and honest treatment of the zero-telemetry providers (cursor, devin).
+Round-1 cross-LLM review (Grok BLOCKED, Mistral APPROVED) found three
+code-verified corrections, folded in here: (1) grok ACP `_meta` token counts are
+ALREADY threaded on master (`src/acp/runtime.ts:262-266`,
+`src/acp/flight-redaction.ts`), so grok tiering is TRANSPORT-scoped (grok-ACP=T2,
+grok-`-p`=T4, xAI-api=T1), not a "thread the meta" work item; (2) the
+derived-cost formula must be per cache-ACCOUNTING-MODE (Anthropic disjoint
+fresh/create/read per `docs/personal-mcp/PROVIDER_CACHE_SURFACES.md` vs OpenAI
+inclusive), or it undercounts Anthropic-style counts; (3) `getModelCost` must
+price by the RESOLVED underlying model family, not the CLI brand, because
+cursor/devin have no `src/pricing.ts` branch and run other families' models.
+Predecessor
 substrate is the existing per-provider request tools, `src/pricing.ts`,
 `src/optimizer.ts` (`estimateTokens`), `src/flight-recorder.ts`, the provider
 output parsers, `src/provider-status.ts`, and the backpressure work
@@ -175,7 +184,9 @@ interface ModelCost {
   inputUsdPerMTok: number;         // existing inputUsd
   outputUsdPerMTok: number;        // promote existing outputUsd to first-class
   cacheReadMultiplier: number;     // existing; cache-read discount factor
-  cacheWriteUsdPerMTok: number;    // NEW: cache-creation rate (default = inputUsd; Anthropic ~1.25x)
+  cacheWriteUsdPerMTok: number;    // NEW: cache-creation rate (default = inputUsd; Anthropic ~1.25x/2x)
+  accountingMode: "inclusive" | "disjoint"; // NEW (round-1): how input/cache counts split (4.1a)
+  family: string;                  // NEW: resolved pricing family (from modelIdToFamily), CLI-agnostic
   source: "table" | "api-catalog" | "unknown";
   asOf: string;                    // PRICING_AS_OF or per-catalog refresh time
 }
@@ -183,14 +194,21 @@ interface ModelCost {
 
 Rules:
 - `getModelCost(provider, model)` is a NEW router-only accessor built beside
-  `getPricing`. For CLI providers it resolves per-token rates from the family
-  table. For API providers (OpenRouter, xAI, ...) it resolves per-token rates
-  from the provider's **published pricing catalog** (for example OpenRouter's
-  `/models` prompt/completion prices), recorded with `source: "api-catalog"`
-  and a refresh `asOf`. It NEVER derives per-token rates by decomposing a
-  provider-reported total `costUsd`: a single scalar total cannot be split into
-  input and output rates (see 4.6). When neither a table nor a catalog price is
-  available, `source: "unknown"`.
+  `getPricing`. **It prices by the RESOLVED underlying model family, not the CLI
+  brand** (round-1 blocker 3): `getPricing` today has branches only for claude /
+  codex / gemini / grok / mistral (`src/pricing.ts:176-227`) and NO cursor / devin
+  branch, so a brand-keyed lookup returns `ZERO` (then `unknown`) for them
+  forever. But cursor-agent and devin run *other* families' models
+  (cursor-agent `--model` selects claude/gpt/... ; devin runs claude), so
+  `getModelCost` must map the request's resolved model id to a pricing family
+  (a `modelIdToFamily(model)` step, CLI-agnostic) and price that family. For API
+  providers (OpenRouter, xAI, ...) it resolves per-token rates from the
+  provider's **published pricing catalog** (for example OpenRouter's `/models`
+  prompt/completion prices), recorded with `source: "api-catalog"` and a refresh
+  `asOf`. It NEVER derives per-token rates by decomposing a provider-reported
+  total `costUsd`: a single scalar total cannot be split into input and output
+  rates (see 4.6). When no family match and no catalog price exist,
+  `source: "unknown"`.
 - **`source: "unknown"` is a hard eligibility signal, not a silent zero.** A
   candidate whose price is unknown is *excluded* from cost ranking (it can never
   be the argmin) unless the caller sets `allow_unpriced`; even then it is ranked
@@ -216,20 +234,45 @@ one of three composers, in descending accuracy:
    OpenRouter `usage.cost` when `usage.include`.)
 2. **`derived-from-tokens`** (NEW, the key accuracy win): the parser captured
    token *counts* but no dollar cost. Compose the total from the counts and the
-   `getModelCost` rates:
-   ```
-   costUsd = inputTokens        * inputUsdPerMTok      / 1e6
-           + cacheCreationTokens * cacheWriteUsdPerMTok / 1e6
-           + outputTokens        * outputUsdPerMTok     / 1e6
-           - cacheReadTokens      * inputUsdPerMTok * (1 - cacheReadMultiplier) / 1e6
-   ```
-   This is a *measurement* (real counts) at the table/catalog rate, accurate to
-   the price's freshness. It is the exact inverse-safe direction of the
-   forbidden operation: composing a total from KNOWN per-token rates times
-   reported counts is sound; DECOMPOSING a scalar total into unknown rates is not
-   (4.6). Requires `getModelCost(provider, model).source != "unknown"`; if the
-   rate is unknown the figure falls back to basis 3 with a loud low-confidence
-   flag.
+   `getModelCost` rates. **The formula is per cache-ACCOUNTING-MODE** (round-1
+   blocker 2): providers report the input/cache split two incompatible ways, and
+   a single formula undercounts one of them. `getModelCost` carries the model
+   family's `accountingMode`:
+   - **`inclusive`** (OpenAI-style: codex, gemini, xAI, OpenRouter, grok ACP):
+     `inputTokens` already INCLUDES the cached-read subset, so the cache read is a
+     discount off the base:
+     ```
+     costUsd = inputTokens        * inputUsdPerMTok      / 1e6
+             + cacheCreationTokens * cacheWriteUsdPerMTok / 1e6
+             + outputTokens        * outputUsdPerMTok     / 1e6
+             - cacheReadTokens      * inputUsdPerMTok * (1 - cacheReadMultiplier) / 1e6
+     ```
+   - **`disjoint`** (Anthropic-style: `Total input = cache_read + cache_creation
+     + input_tokens`, `input_tokens` is FRESH only, per
+     `docs/personal-mcp/PROVIDER_CACHE_SURFACES.md`):
+     ```
+     costUsd = inputTokens        * inputUsdPerMTok                     / 1e6   // fresh only
+             + cacheCreationTokens * cacheWriteUsdPerMTok                / 1e6
+             + cacheReadTokens     * inputUsdPerMTok * cacheReadMultiplier / 1e6 // read is BILLED, not subtracted
+             + outputTokens        * outputUsdPerMTok                    / 1e6
+     ```
+   Applying the `inclusive` formula to `disjoint` counts never bills the cache-read
+   base and only subtracts a phantom saving, so it undercounts. Note the only
+   `disjoint` provider today (claude) is T1 (`provider-reported`), so the disjoint
+   path bites the **Anthropic-API adapter** (`src/api-provider.ts:251-254`, which
+   currently extracts `cache_read_input_tokens` but NOT `cache_creation_input_tokens`,
+   a gap the derived path exposes) and any future Anthropic-family derived route.
+   This is a *measurement* (real counts) at the table/catalog rate, accurate to the
+   price's freshness, and the inverse-safe direction of the forbidden operation:
+   composing a total from KNOWN rates times reported counts is sound; DECOMPOSING a
+   scalar total into unknown rates is not (4.6). Requires
+   `getModelCost(...).source != "unknown"`; if the rate is unknown the figure falls
+   back to basis 3 with a loud low-confidence flag. **Reasoning tokens**: when a
+   family bills hidden reasoning/thinking tokens as output and reports them
+   separately (grok ACP `_meta` carries `reasoningTokens`, which
+   `extractAcpPromptUsage` (`src/acp/runtime.ts:119`) currently DROPS), the derived
+   total must add them at the output rate, or it undercounts reasoning-heavy runs;
+   capturing that field is a prerequisite for accurate grok-ACP derivation.
 3. **`pre-flight-estimate`**: no token counts were reported (T4 providers, or any
    request before dispatch). Compose from the *token estimate* (4.2) times the
    rate. Least accurate.
@@ -241,19 +284,29 @@ row is stored with `cost_basis: "derived-from-tokens"`, not left as the pre-flig
 estimate. **No code derives cost from tokens today** (only `estimateCacheSavingsUsd`
 computes a cache *savings*, not a total); this path is new.
 
-**Per-provider telemetry inventory (SoT for the tiers; verify at implementation):**
+**Per-provider telemetry inventory (SoT for the tiers; keyed by
+provider+transport, not just provider, per round-1 blocker 1):**
 
-| Provider | `costUsd`? | Token counts? | Basis used | Parser |
-|---|---|---|---|---|
-| claude | yes | yes (+cache r/w) | provider-reported | `stream-json-parser.ts` |
-| mistral | yes | yes (no cache) | provider-reported | `mistral-meta-json-parser.ts` |
-| xAI API | yes | yes (+cache read) | provider-reported | `api-provider.ts` |
-| **codex** | field-only (rare) | **yes (+cache r/w)** | **derived-from-tokens** | `codex-json-parser.ts` |
-| **gemini** | no | **yes (+cache read)** | **derived-from-tokens** | `gemini-json-parser.ts` |
-| OpenRouter/OAI | conditional | yes | reported or derived | `api-provider.ts` |
-| **grok** (`-p`) | no | no (tokens in un-threaded ACP `_meta`) | estimate (T3 until wired, enh. 4) | `grok-json-parser.ts` (`usageAbsent`) |
-| **cursor** | no | no | pre-flight-estimate only (enh. 6) | none (`{}`) |
-| **devin** | no | no | pre-flight-estimate only (enh. 6) | none (`{}`) |
+| Provider (transport) | `costUsd`? | Token counts? | Acct mode | Basis used | Parser |
+|---|---|---|---|---|---|
+| claude (CLI) | yes | yes (+cache r/w) | disjoint | provider-reported | `stream-json-parser.ts` |
+| mistral (CLI) | yes | yes (no cache) | inclusive | provider-reported | `mistral-meta-json-parser.ts` |
+| xAI (API) | yes | yes (+cache read) | inclusive | provider-reported | `api-provider.ts` |
+| **codex** (CLI) | field-only (rare) | **yes (+cache r/w)** | inclusive | reported if present, else **derived** | `codex-json-parser.ts` |
+| **gemini** (CLI) | no | **yes (+cache read)** | inclusive | **derived-from-tokens** | `gemini-json-parser.ts` |
+| OpenRouter/OAI (API) | conditional | yes | inclusive | reported or derived | `api-provider.ts` |
+| Anthropic (API adapter) | no | partial (cache_creation MISSING) | disjoint | derived (incomplete until `cache_creation` extracted) | `api-provider.ts:251-254` |
+| **grok (ACP)** | no | **yes (+cache read; reasoningTokens DROPPED)** | inclusive | **derived-from-tokens** (already threaded, `runtime.ts:262-266`) | `acp/runtime.ts` `extractAcpPromptUsage` |
+| **grok (`-p` default)** | no | **no** (`usageAbsent`) | n/a | pre-flight-estimate only | `grok-json-parser.ts` |
+| **cursor** (CLI) | no | no | per resolved model | pre-flight-estimate only (enh. 6) | none (`{}`) |
+| **devin** (CLI) | no | no | per resolved model | pre-flight-estimate only (enh. 6) | none (`{}`) |
+
+Grok is **transport-scoped**: routing grok via ACP (gated by `[acp].enabled` +
+per-provider `runtime_enabled`; default transport stays `cli`) yields derived
+cost from the already-threaded `_meta`; routing grok via the default `-p`
+transport yields no counts and is estimate-only. LCR therefore reasons about a
+`(provider, transport)` candidate for grok, not just `(provider, model)`, when
+deciding whether a derived cost is achievable (see 4.6, phase_2b).
 
 ### 4.2 Pre-flight cost estimation
 
@@ -292,15 +345,25 @@ inputs a coding gateway sees. Replace it with a layered estimator in a new
    not guessed.
 3. **Self-calibration from the flight recorder (enh. 2, the accuracy multiplier).**
    The recorder already holds *actual* `input_tokens` for a large share of past
-   requests (all T1 + T2 providers: claude, mistral, codex, gemini, xAI,
-   OpenRouter). A read-only aggregator (4.6) fits a correction factor
+   requests (all T1 + T2 rows: claude, mistral, codex, gemini, xAI, OpenRouter,
+   grok-ACP). A read-only aggregator (4.6) fits a correction factor
    `k = median(actual_input_tokens / base_estimate)` bucketed by
    `(content-type, tokenizer-family)`, and the estimator applies `k` to the base.
-   This turns the heuristic into a data-calibrated estimator that improves as the
-   recorder fills, and, crucially, the learned `k` for a family transfers to T4
-   providers of that family (cursor/devin) that have no actuals of their own. The
-   correction is a property of the *content and tokenizer*, never of a principal
-   (7), and honours `priors_scope`.
+   **The bucket key is the resolved MODEL family, never the CLI brand** (round-1
+   note): cursor-agent and devin run models from several families, so a `k`
+   learned for, say, the claude tokenizer is applied to a cursor/devin candidate
+   *whose resolved model is claude-family*, matched via the same
+   `modelIdToFamily` used for pricing (4.1). This is how the calibration transfers
+   to the zero-telemetry providers without conflating a CLI with a tokenizer. Two
+   accounting caveats the aggregator must respect so `k` is not poisoned: (a)
+   `disjoint` families report `input_tokens` as FRESH-only, so their
+   `actual_input` for the ratio must be reconstructed as
+   `fresh + cache_read + cache_creation` to be comparable to the whole-prompt
+   estimate (per-family buckets keep the two modes separate); (b) mistral's
+   `session_*` counts can be cumulative across a multi-turn session, so
+   session-continued rows are excluded from calibration (only fresh-session rows
+   feed `k`). The correction is a property of the *content and tokenizer*, never
+   of a principal (7), and honours `priors_scope`.
 
 Layer 1 is the cold-start floor; 2 and 3 refine it as data accrues. A real BPE
 tokenizer (`gpt-tokenizer`, pure-JS) would make layer 1 exact for the OpenAI
@@ -330,18 +393,27 @@ rather than being silently admitted. This closes the median footgun (a short
 median silently blowing the budget on a large-output request, or a large median
 blocking a genuinely short one).
 
-**Confidence band (enhancement 5).** Every pre-flight estimate carries a
-`confidence` derived from the calibration data: the aggregator (4.6) tracks the
-residual spread (e.g. the interquartile ratio of `actual/estimate`) per
-`(content-type, family)` bucket, and the estimate is returned as a point value
-plus a `[low, high]` band and a coarse `confidence: "high" | "medium" | "low"`.
-A bucket with many samples and tight spread is `high`; a cold-start bucket or a
-T4 provider borrowing another family's factor is `low`. Confidence composes with
-`cost_basis` (4.1a): `provider-reported` is always highest confidence,
-`derived-from-tokens` is high (real counts, rate-fresh), `pre-flight-estimate`
-inherits the band. Near-tie ranking decisions (4.5) whose bands overlap are
-flagged as such and settled by the deterministic tie-break, never presented as
-precise.
+**Confidence band (enhancement 5), with concrete thresholds (round-1 note).** The
+aggregator (4.6) stores, per `(content-type, model-family)` bucket, the sample
+count `n` and the p10 / p50 / p90 of the residual ratio `r = actual/estimate`. The
+returned band is the point estimate scaled by the bucket ratios:
+`[point * (p10/p50), point * (p90/p50)]`. The coarse label is a fixed mapping (a
+config-tunable table, not implementer judgement):
+- `high`: `n >= 30` AND `p90/p10 <= 1.5`.
+- `medium`: `n >= 30` AND `p90/p10 <= 3`, OR `10 <= n < 30`.
+- `low`: `n < 10` (cold start), OR `p90/p10 > 3`, OR a T4 candidate borrowing
+  another family's `k` with no own samples.
+
+Confidence composes with `cost_basis` (4.1a) by taking the MINIMUM of the two:
+`provider-reported` is `high`; `derived-from-tokens` is `high` only when the price
+`asOf` is fresh (a stale `asOf` beyond a configured age demotes it to `medium`,
+since the counts are real but the rate may not be); `pre-flight-estimate` takes
+the band label above. **Confidence is advisory metadata, it does NOT change the
+ranking**: argmin is over the point estimates and ties are settled by the
+deterministic tie-break (4.5); the band is reported so a caller/operator can see
+that a near-tie is uncertain, but LCR never re-orders candidates by confidence
+(that would make routing non-deterministic). Overlapping bands at a near-tie are
+flagged in `routing` as `near_tie: true`.
 
 **Honesty requirement.** With no real tokenizer, pre-flight figures are
 approximations. The response reports the ranking estimate with its full inputs
@@ -455,14 +527,22 @@ Among eligible candidates at or above `minTier`:
   cannot be decomposed into input and output rates); rates come only from the
   table/catalog (4.1). Composing a *total* from reported counts times known rates
   (the derived-cost path above) is the sound, opposite direction and is allowed.
-- **Grok token-count threading (enhancement 4)**: grok emits usage in the ACP
-  `session/prompt` `_meta` (`{inputTokens, outputTokens, cachedReadTokens, ...}`),
-  but `buildAcpFlightResult` (`src/acp/runtime.ts`) does not yet thread it into
-  the flight result, so grok is T3 (priced, but no captured counts). A separate
-  slice threads those `_meta` fields into the recorded row; once wired, grok
-  becomes T2 and its cost is derived like codex/gemini. This is the only provider
-  that moves tiers with modest wiring; cursor and devin capture nothing and stay
-  T4 (enh. 6).
+- **Grok transport-aware derivation (enhancement 4, corrected in round 1)**: grok
+  ACP `session/prompt` `_meta` token counts are ALREADY threaded on master
+  (`extractAcpPromptUsage` -> `buildAcpFlightResult`, `src/acp/runtime.ts:119,262-266`;
+  tests `src/__tests__/acp-runtime.test.ts`), so there is nothing to "thread". The
+  real work is two-fold: (a) `extractAcpPromptUsage` currently DROPS the `_meta`
+  `reasoningTokens` field, so grok-ACP derived cost undercounts reasoning; a small
+  parser addition captures it and the derived formula adds it at the output rate
+  (4.1a). (b) grok yields counts ONLY on the ACP transport, so LCR can derive
+  grok's cost only when it routes grok via ACP, which is gated
+  (`[acp].enabled` + per-provider `runtime_enabled`; default transport `cli`, see
+  `docs/acp-contract.md`). A grok candidate is therefore `(grok, transport)`: on
+  the `-p` default transport grok is estimate-only (T4-like); routing it via ACP
+  makes it T2. LCR treats "can this candidate produce a derived cost" as a
+  transport-dependent property, and does NOT flip the ACP default on to chase
+  cheaper telemetry (that stays operator-gated). cursor and devin capture nothing
+  on any transport and stay estimate-only (enh. 6).
 - These priors are properties of the *model*, not of any principal (see 7):
   they carry no caller-identifying content. The aggregator reads the flight
   recorder's `owner_principal`-stamped rows but emits only anonymized model-level
@@ -604,8 +684,13 @@ array (surfaces check).
    `source`/`asOf`, and `unknown` semantics (no more silent ZERO win). Add a pure
    `composeCost(counts | null, estimate, modelCost) -> { costUsd, cost_basis,
    confidence }` (enh. 1) that produces `provider-reported` (passthrough),
-   `derived-from-tokens` (counts times rate), or `pre-flight-estimate`; forbidden
-   scalar-decomposition never appears.
+   `derived-from-tokens` (counts times rate, branching on
+   `modelCost.accountingMode` = `inclusive|disjoint`, 4.1a), or
+   `pre-flight-estimate`; forbidden scalar-decomposition never appears. Add a
+   CLI-agnostic `modelIdToFamily(model)` used by `getModelCost` for pricing and by
+   the calibrator for bucket keys, so cursor/devin (no brand branch) and any
+   provider running another family's model are priced/calibrated by the resolved
+   family, not the brand.
 1a. New `src/token-estimator.ts` (enh. 2 + 3): the layered estimator, content-type
    classifier + char base, per-tokenizer-family multiplier, and application of the
    calibration factor `k` from the aggregator. Replaces the direct use of
@@ -679,17 +764,25 @@ array (surfaces check).
   pool come from a caller/config allow-list only, or from a periodic
   `models` catalog fetch? (Proposed: allow-list first; catalog fetch is a later
   phase.)
-- **Zero-telemetry providers (devin, cursor), enh. 6**: they capture neither a
-  price-relevant dollar cost nor token counts, so their cost is *always* a
-  `pre-flight-estimate` (T4), even post-hoc, and always lowest-confidence. Two
-  cases: (a) a table price EXISTS for the family, cost is estimate times rate,
-  ranked but flagged `confidence: low`; (b) NO table price, `source: "unknown"`,
-  excluded from ranking unless `allow_unpriced` + budget waiver (10). Note **grok
-  is priced** (a `src/pricing.ts` family exists) and is phase-1 eligible; it is
-  merely T3 until the ACP `_meta` threading (enh. 4) makes it T2. Open question:
-  confirm the T4 flag drives a `confidence: low` downweight in near-tie ranking
-  (never a hard exclusion when a price exists), and confirm the devin/cursor
-  behaviour with the `allow_unpriced` gate.
+- **Zero-telemetry providers (devin, cursor), enh. 6 + round-1 blocker 3**: they
+  capture no token counts, so their cost is *always* a `pre-flight-estimate` (T4),
+  even post-hoc, and always `confidence: low`. Because `src/pricing.ts` has NO
+  cursor/devin branch, whether a candidate is priced at all hinges on the
+  `modelIdToFamily(model)` resolution added to `getModelCost` (4.1): (a) if the
+  resolved underlying model maps to a priced family (cursor-agent/devin running a
+  claude/gpt/... model), cost is estimate times that family's rate, ranked with
+  `confidence: low`; (b) if the model id does not map to any known family,
+  `source: "unknown"`, excluded from ranking unless `allow_unpriced` + budget
+  waiver (10). Open question: how complete must `modelIdToFamily` be, and what is
+  the fallback when cursor/devin do not surface a resolvable model id at all
+  (proposed: treat as `unknown`, i.e. excluded by default)? Confidence never
+  re-orders candidates (4.2), so a low-confidence priced T4 competes on its point
+  estimate.
+- **RESOLVED in round 1 (kept for the record)**: enh. 5 confidence thresholds are
+  now concrete (4.2, the `n`/`p90:p10` table, `asOf`-staleness demotion,
+  advisory-not-ranking rule); the grok tier is transport-scoped (4.1a) and the
+  ACP `_meta` is already threaded, so "thread the meta" is no longer open work
+  (only `reasoningTokens` capture remains, enh. 4).
 - **Real BPE tokenizer (enh. 3)**: ship the calibrated heuristic only, or add an
   OPTIONAL `gpt-tokenizer`-style exact layer for the OpenAI family? A real
   tokenizer is exact but a new prod dependency the shrinkwrap/Socket/tarball gates
@@ -719,9 +812,14 @@ array (surfaces check).
   calibration factor `k` + residual spread feeding the calibrated estimator and
   confidence band (enh. 2/5) + estimate-vs-actual reconciliation split by
   `cost_basis` + `routing://` resources.
-- **phase_2b (enh. 4)**: thread grok ACP `session/prompt` `_meta` token counts
-  into `buildAcpFlightResult`, moving grok T3 to T2 so its cost derives like
-  codex/gemini. Small, isolated; own review gate.
+- **phase_2b (enh. 4, corrected)**: grok ACP `_meta` counts are already threaded,
+  so this slice (i) captures the dropped `reasoningTokens` in
+  `extractAcpPromptUsage` and adds it to the derived formula, and (ii) makes LCR
+  transport-aware for grok, deriving cost only when grok is routed via the
+  operator-gated ACP transport, estimate-only on `-p`. It never flips the ACP
+  default on. Small, isolated; own review gate. Also extract
+  `cache_creation_input_tokens` in the Anthropic-API adapter
+  (`src/api-provider.ts:251-254`) so its `disjoint` derived cost is complete.
 - **phase_3**: validation-tool `select: "cheapest"` opt-in; doctor/health
   eligibility + telemetry-tier + calibration-quality surfacing (enh. 5);
   estimate-vs-actual reconciliation reporting. Optional real-BPE tokenizer layer
@@ -747,8 +845,13 @@ array (surfaces check).
 - `src/flight-recorder.ts` + `src/cache-stats.ts` - telemetry + aggregation
   pattern for priors, calibration, and reconciliation (`input_tokens` /
   `output_tokens` / `cost_usd` columns are the calibration substrate).
-- `src/optimizer.ts` (`estimateTokens`, `ceil(words*1.3)`) - the crude base
+- `src/optimizer.ts:27` (`estimateTokens`, `ceil(words*1.3)`) - the crude base
   heuristic the layered `token-estimator.ts` replaces on the routing path.
+- `src/acp/runtime.ts:119,262-266` (`extractAcpPromptUsage`, `buildAcpFlightResult`)
+  and `src/acp/flight-redaction.ts` - grok ACP `_meta` token counts are ALREADY
+  threaded here (round-1 correction); `reasoningTokens` is the only dropped field.
+- `docs/personal-mcp/PROVIDER_CACHE_SURFACES.md` - the Anthropic disjoint vs OpenAI
+  inclusive cache-accounting SoT for the derived-cost formula (4.1a).
 - Provider output parsers - the token-count / cost SoT per tier (4.1a table):
   `src/stream-json-parser.ts` (claude), `src/codex-json-parser.ts`,
   `src/gemini-json-parser.ts`, `src/mistral-meta-json-parser.ts`,
