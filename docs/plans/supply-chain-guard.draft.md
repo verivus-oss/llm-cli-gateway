@@ -12,6 +12,16 @@ Author: design pass after (a) reading the sqry guard's RUNBOOK, SKILL, and the
 three-round cross-LLM review record, and (b) a full inventory of this repo's
 release-time supply-chain surface.
 
+Revision: round 1 of the cross-LLM review gate (Codex, Grok; Mistral's round-1
+run was invalidated by a sandbox access restriction, re-run in round 2) returned
+BLOCKED with a converging set of design-underspecification findings. This
+revision folds them in: the trust unit is now a path-keyed package *instance*
+(not a bare name), a full classification decision table replaces the prose tiers,
+the blocking gate requires exit `0` against the committed baseline (closing the
+in-range trust window), the resolve mode is fixed per surface, and the grounding
+counts/citations are corrected. See the changelog inline at each section and the
+review record on PR #173.
+
 Citation base: `2c56762` on `master` (the 2.16.0 release merge). All "today"
 claims below cite files at that base; verify against current `master` before
 implementing, as line numbers drift.
@@ -23,28 +33,48 @@ the human-readable spec that goes through the review gate first.
 ## Terminology (read first)
 
 - **Prod closure**: the set of packages a registry consumer of
-  `llm-cli-gateway` actually installs, i.e. every `packages` entry in the
+  `llm-cli-gateway` actually installs, i.e. every `node_modules/...` entry in the
   generated prod-only `npm-shrinkwrap.json` (dev-only entries dropped). This is
-  the byte-deterministic tree `scripts/make-prod-shrinkwrap.mjs` produces, not
-  the ~316-package dev tree in `package-lock.json`.
-- **Ledger**: the committed allowlist of prod-closure packages we have vetted,
-  one entry per package name with an accepted version or range, the expected
-  registry source, and a rationale/date/reviewers. This is the npm analogue of
-  cargo-vet's `supply-chain/config.toml` exemptions. It does not exist today.
-- **Roll-forward** (routine): a package name already in the ledger resolved to a
-  new version. Low-risk trust roll-forward; still checked (an entry is a trust
-  assertion), but the research is "confirm source/maintainer unchanged, no
-  advisory landed."
-- **Tag-along** (real review): a package name that was never in the ledger
-  entered the prod closure. This is the case the operator must not rubber-stamp.
-  It can be a legitimate new transitive dep, or something that slipped in through
-  a caret bump of an intermediate package.
-- **Source anomaly**: any package whose lockfile `resolved` is not the public
-  npm registry (`registry.npmjs.org`), e.g. a git, http tarball, or file
-  source. Always surfaced regardless of any other verdict.
-- **Dropped**: a ledger entry whose package name no longer resolves anywhere in
-  the closure. Prunable, but not blindly (a still-supported prior release may
-  resolve it).
+  the byte-deterministic tree `scripts/make-prod-shrinkwrap.mjs` produces. At the
+  citation base the prod closure is 93 entries including the root (92 non-root
+  `node_modules` instances) out of 320 total `package-lock.json` entries.
+- **Instance** (the trust unit): a single `packages` entry in the lockfile,
+  keyed by its `node_modules/...` path, carrying `name`, `version`, `resolved`,
+  and `integrity`. The guard classifies *instances*, not bare names, because the
+  lockfile is path-keyed (`make-prod-shrinkwrap.mjs:60` preserves those keys) and
+  the same name can appear at multiple paths/versions. Two properties this buys:
+  a version bump is a changed instance (not silently "the same trusted name"),
+  and an `integrity` change on the same `name@version` is detectable.
+- **Ledger**: the committed, human/LLM-reviewed allowlist keyed by package name,
+  recording the accepted exact version(s), expected registry source, rationale,
+  reviewers, and dates. It is the npm analogue of cargo-vet's
+  `supply-chain/config.toml` exemptions and answers "why do we trust this name."
+  It does not exist today.
+- **Baseline**: the committed, machine-generated exact snapshot of the accepted
+  prod closure as a list of instances (`path`, `name`, `version`, `resolved`,
+  `integrity`), `supply-chain/prod-closure.baseline.json`. It is what "clean =
+  exact match" compares against, and the source set for the drift diff. Distinct
+  from the ledger: the baseline is the *what* (exact accepted instances), the
+  ledger is the *why* (per-name rationale + accepted versions).
+- **Roll-forward** (routine): a name in the ledger whose instance differs from
+  the baseline (new version, still within the ledger's accepted set, or a new
+  path for a trusted name). Low-risk, but still a change: exit `2`, and it must be
+  researched and the baseline refreshed before it counts as clean. The research
+  is "confirm source/maintainer unchanged, no advisory landed."
+- **Tag-along** (real review): a name that is not in the ledger, or a name in the
+  fresh closure but not in the baseline (`new_to_tree`). The case the operator
+  must not rubber-stamp; a legitimate new transitive dep, or something slipped in
+  through a caret bump of an intermediate package.
+- **Source anomaly**: any instance whose `resolved` is not the public npm
+  registry (`registry.npmjs.org`), e.g. git, http tarball, or file. Surfaced
+  regardless of any other verdict.
+- **Integrity mismatch**: an instance whose `name@version` matches the baseline
+  but whose `integrity` differs (registry-immutability break or lock tampering).
+  Surfaced regardless of any other verdict.
+- **Dropped**: a ledger/baseline name absent from the fresh closure. On
+  acceptance its ledger entry is marked `revoked` and pruned from the baseline,
+  so a later re-entry of the same name classifies as a tag-along again (not
+  silently re-trusted). Reported, never auto-pruned by the scanner.
 
 ## 1. Goals
 
@@ -52,9 +82,10 @@ the human-readable spec that goes through the review gate first.
    prod-dependency resolution locally and classifies each drifted package so a
    routine trust roll-forward is distinguishable from a brand-new tag-along that
    entered the prod closure.
-2. Guarantee, by construction, that a new (never-ledgered) prod package cannot
-   land silently: at least three independent detectors, and a non-zero exit that
-   can be wired to fail the release gate.
+2. Guarantee, by construction, that a new (never-ledgered) prod package, or any
+   change to an accepted instance, cannot land silently: fail-closed detectors
+   (see 4.4) and a non-zero exit wired to fail the release gate, which requires
+   exit `0` against the committed baseline (section 4.5).
 3. Provide a per-dependency upgrade + advisory + test contract, and a committed
    audit-trail ledger, so every accepted prod package traces to a dated
    rationale and independent validation.
@@ -81,9 +112,14 @@ the human-readable spec that goes through the review gate first.
 ## 3. Background: what exists today (grounding)
 
 The release gate already does a fresh prod resolve and enforces a blocklist plus
-invariants, but has no allowlist of accepted prod packages, so a brand-new
-transitive package with no CVE and no blocklist hit enters the prod closure
-undetected. The relevant machinery, at the citation base:
+invariants, but has no name- or instance-level allowlist of the accepted prod
+closure. The nearest thing is a coarse reified-package *count* band
+(`scripts/verify-registry-install.sh:42-47`, `EXPECTED_REIFIED_MIN=92` /
+`MAX=96`, 94 observed), which runs only on the pre-release/verdaccio path (not in
+`ci.yml` `security:audit`) and which a single new package (92 -> 93) passes
+cleanly. So a brand-new transitive package with no CVE and no blocklist hit
+enters the prod closure undetected by any name check. The relevant machinery, at
+the citation base:
 
 - **`scripts/pre-release.sh`** removes `npm-shrinkwrap.json`, runs `npm install`
   to apply `overrides` against a fresh registry resolve (`:19-20`), regenerates
@@ -95,17 +131,23 @@ undetected. The relevant machinery, at the citation base:
   `package-lock.json`: it drops every `packages` entry with `dev === true`
   (`:63`), strips the root `devDependencies` field (npm/cli#4323), and preserves
   key order with byte-stable formatting. Output is the exact prod closure a
-  registry consumer receives (~124 vs ~316 packages). The guard enumerates this.
+  registry consumer receives (93 entries incl. root at the base, vs 320 total).
+  The guard enumerates this. (Note: the in-repo comments still say "~124 prod",
+  which is stale; the current closure is 92 non-root instances.)
 - **`scripts/release-security-audit.sh`** (`npm run security:audit`) runs, among
   its checks: `npm audit --omit=dev --audit-level=moderate` (`:8`); a shrinkwrap
   prod-projection byte-parity check that regenerates via
-  `make-prod-shrinkwrap.mjs` and `cmp -s` compares (`:104-123`); a dependency
-  blocklist over the prod graph only (`content-type@2.0.0`, `type-is@2.1.0`,
-  `tar-stream@{2.2.0,2.1.4,2.0.0}`, skipping `dev === true`; `:125-165`); a
-  `hono >= 4.12.25` floor (`:167-204`); a packed-consumer install that hard-fails
-  on any `tar-stream` at all (`:206-258`); and a shipped-`dist/` heuristic that
-  fails on any literal `\bfetch\b` (`:263-305`). All blocklist + invariant, no
-  allowlist.
+  `make-prod-shrinkwrap.mjs` and `cmp -s` compares (`:104-123`); a **version**
+  blocklist over the prod graph only (`content-type@2.0.0`, `type-is@2.1.0`, and
+  exactly `tar-stream@{2.2.0,2.1.4,2.0.0}`, skipping `dev === true`; `:125-165`);
+  a `hono >= 4.12.25` floor that does NOT skip dev entries, unlike the blocklist
+  (`:167-204`); a **separate** packed-consumer install that hard-fails on *any*
+  `tar-stream` version at all (`:206-258`, distinct from the versioned blocklist
+  above); and a shipped-`dist/` heuristic that fails on any literal `\bfetch\b`
+  (`:263-305`). All blocklist + invariant + coarse count band, no name/instance
+  allowlist. Critically, the byte-parity check only proves the shrinkwrap matches
+  the *current* `package-lock.json`; both can regenerate to include a new package
+  and still `cmp` equal, so parity is not a drift detector.
 - **`socket.yml`** is a hand-maintained ledger of accepted Socket alerts
   (`networkAccess`, `shellAccess` with the full `child_process` call-site list,
   `usesEval` for an ajv transitive, node:sqlite isolation) with `issueRules`
@@ -131,19 +173,23 @@ new version, or a new package name, into the prod closure between releases.
 
 ## 4. Design
 
-### 4.1 The prod-closure ledger (the trust surface)
+### 4.1 The ledger and the baseline (the trust surface)
 
-A committed `supply-chain/prod-closure.ledger.json` (new directory; the name
-`supply-chain/` mirrors sqry for cross-repo familiarity). Schema, one object per
-prod package name:
+Two committed files under a new `supply-chain/` directory (the name mirrors sqry
+for cross-repo familiarity). The **ledger** is the per-name "why we trust it"
+record; the **baseline** is the exact "what we accepted" snapshot the scanner
+diffs against.
+
+Ledger (`supply-chain/prod-closure.ledger.json`), keyed by package name:
 
 ```jsonc
 {
   "schemaVersion": "prod-closure-ledger.v1",
   "packages": {
     "zod": {
-      "accepted": "^4.4.3",        // semver range or exact; the accepted trust window
+      "acceptedVersions": ["4.4.3"], // EXACT versions, never a caret range (see below)
       "source": "registry.npmjs.org",
+      "state": "trusted",            // "trusted" | "revoked" (revoked on drop; re-entry = tag-along)
       "firstVetted": "2026-07-10",
       "lastReviewed": "2026-07-10",
       "reviewers": ["codex", "grok", "mistral"],  // cross-LLM validators (section 8)
@@ -154,55 +200,110 @@ prod package name:
 }
 ```
 
-- Seeded on first run from the current, already-shipped (therefore
-  vetted-by-having-been-released) prod closure, so day one is not a wall of
-  tag-alongs. The seed rationale records "bootstrap from 2.16.0 shipped closure."
-- First-party (the root package itself) is never ledgered.
-- The ledger is names + ranges + provenance only; it never contains a secret.
+Baseline (`supply-chain/prod-closure.baseline.json`): a machine-generated list of
+the accepted *instances*, exactly as the lockfile keys them, so "clean = exact
+match" is well-defined:
 
-### 4.2 Reproducing the release gate (fresh prod-only shrinkwrap)
+```jsonc
+{
+  "schemaVersion": "prod-closure-baseline.v1",
+  "instances": [
+    { "path": "node_modules/zod", "name": "zod", "version": "4.4.3",
+      "resolved": "https://registry.npmjs.org/zod/-/zod-4.4.3.tgz", "integrity": "sha512-..." }
+    // ... one per prod-closure node_modules instance
+  ]
+}
+```
 
-The scanner produces the same prod closure the release does, then restores the
-tree exactly:
+- **Seed policy (fixes a round-1 blocker)**: seeded on first run from the current
+  shipped closure, but shipping is NOT vetting, so the seed records EXACT resolved
+  versions (`acceptedVersions: ["4.4.3"]`, not `^4.4.3`) and the seed rationale is
+  explicitly "bootstrap from 2.16.0 shipped closure, not individually reviewed."
+  A caret/range accepted-window is never written by the seed; ranges only ever
+  arrive through an explicit, reviewed roll-forward. This prevents day one from
+  baking a wide, unreviewed trust window.
+- First-party (the root package itself) is never ledgered or baselined.
+- Both files are names/versions/provenance only; neither contains a secret.
 
-1. Back up `package-lock.json` and `npm-shrinkwrap.json` (if present) to a
-   scratch dir.
-2. `rm -f npm-shrinkwrap.json`; run `npm install` (fresh registry resolve,
-   applies `overrides`), unless `--frozen` is passed (then use the current lock).
-3. Run `scripts/make-prod-shrinkwrap.mjs` to produce the prod-only shrinkwrap =
-   the authoritative prod closure.
-4. Parse the shrinkwrap `packages` map into `{name -> {version, resolved}}`.
-5. Restore both lockfiles from backup in a `finally` (see 4.6), so the operator's
-   working tree is never left mutated.
+### 4.2 Producing the prod closure (resolve mode is per-surface)
 
-Because the fresh resolve is the sqry "warm the index" concern, the runbook
-notes `--frozen` gives a fast approximate scan (current lock) while the default
-does the full fresh resolve the CI runner would do.
+The scanner produces the exact prod closure the release ships, then parses it
+into instances. There are two resolve modes, and which one is authoritative
+depends on the surface (this fixes a round-1 blocker: a default fresh
+`npm install` inside CI could score a different tree than the committed lock the
+release actually ships):
 
-### 4.3 Classification
+- **`--frozen` (the CI / release-gate mode, authoritative there)**: do NOT run
+  `npm install`. Run `scripts/make-prod-shrinkwrap.mjs` against the shrinkwrap
+  that `ci.yml` / `npm-publish.yml` / `pre-release.sh` have *already regenerated*
+  from the committed `package-lock.json`, and classify that. No install, no
+  mutation of the operator's tree at all. This is the tree the release ships, so
+  it is the tree the gate must score.
+- **Fresh-resolve (the local / pre-release sweep mode)**: to discover drift
+  *before* it is committed, copy `package.json` + `package-lock.json` into a
+  throwaway temp directory, run `npm install` there (fresh registry resolve,
+  applies `overrides`), run `make-prod-shrinkwrap.mjs` on the temp copy, and
+  classify. The operator's working `package-lock.json`, `npm-shrinkwrap.json`,
+  and `node_modules` are never touched. The temp dir is removed in a `finally`.
 
-For each prod-closure package, compared against the ledger:
+Either way the scanner parses the resulting prod-only shrinkwrap into instances
+`{path -> {name, version, resolved, integrity}}` (4.3). The runbook is explicit
+that `--frozen` scores the committed tree while fresh-resolve predicts the next
+resolve; a release gate MUST use `--frozen` (or scan a committed fresh lock), and
+calling a fresh-resolve sweep a faithful gate reproduction is an anti-pattern
+(section 8).
 
-- **roll-forward**: name in ledger, resolved version differs from a recorded
-  exact or is within the accepted range. Tier 2.
-- **tag-along**: name not in ledger. Tier 3.
-- **source anomaly**: `resolved` host is not `registry.npmjs.org` (git/http/file).
-  Tier 3, surfaced even if the name is ledgered.
-- **dropped**: ledger entry whose name is absent from the fresh closure. Tier 0
-  (informational; prunable, not auto-pruned).
-- **clean**: name in ledger, version within the accepted range, registry source.
+### 4.3 Classification (decision table)
 
-### 4.4 The three tag-along detectors (+ reused invariants)
+Each fresh prod-closure instance is classified by looking it up in the committed
+baseline and the ledger. The table is evaluated top to bottom; the first matching
+row wins, so the fail-closed classes (source anomaly, integrity mismatch,
+tag-along) take precedence over roll-forward and clean. "In baseline (exact)"
+means an instance with the same `path`, `name`, `version`, `resolved`, AND
+`integrity`.
 
-The core safety claim, three independent ways so nothing lands silently:
+| # | source == registry? | integrity matches baseline for this name@version? | name in ledger (state=trusted)? | in baseline (exact)? | version in ledger `acceptedVersions`? | class | exit |
+|---|---|---|---|---|---|---|---|
+| 1 | no | - | - | - | - | **source anomaly** | 3 |
+| 2 | yes | no (same name@version, different integrity) | - | - | - | **integrity mismatch** | 3 |
+| 3 | yes | n/a (name@version not in baseline) | no | - | - | **tag-along** | 3 |
+| 4 | yes | n/a | yes | no | no | **tag-along** (`new_to_tree`: ledgered name but version not yet accepted) | 3 |
+| 5 | yes | yes | yes | no | yes | **roll-forward** (accepted version, new instance/path vs baseline) | 2 |
+| 6 | yes | yes | yes | yes | yes | **clean** | 0 |
 
-1. **Ledger membership**: any prod-closure name absent from the ledger is a
-   tag-along.
-2. **Fresh-vs-baseline closure diff**: diff the fresh prod-closure name set
-   against the name set of the last-committed baseline (the closure snapshot
-   stored alongside the ledger, `supply-chain/prod-closure.baseline.json`). New
-   names are reported as `new_to_tree`.
-3. **Source anomaly**: any non-registry `resolved` is flagged.
+Plus two whole-closure classes computed by set difference:
+
+- **new_to_tree** (fail-closed): a name present in the fresh closure but absent
+  from the baseline is always exit `3`, on its own, regardless of ledger state.
+  This is the OR partner of ledger-membership (invariant I3): either detector
+  firing alone blocks.
+- **dropped** (informational, exit contributes `0`): a baseline/ledger name
+  absent from the fresh closure. Reported; on acceptance the human marks the
+  ledger entry `state: "revoked"` and prunes it from the baseline (so a later
+  re-entry re-classifies as tag-along, not silently trusted). Never auto-pruned.
+
+An instance that matches no row (unresolvable classification) is treated as a
+tag-along (exit `3`), never as clean (invariant I2).
+
+### 4.4 Detectors (honest about independence)
+
+The safety claim is fail-closed coverage, not three orthogonal failure domains.
+There are two correlated name-set detectors plus two genuinely orthogonal
+instance detectors:
+
+1. **Ledger membership** (name axis): any prod-closure name absent from the
+   ledger (or `state != trusted`) is a tag-along.
+2. **Baseline diff** (name axis, `new_to_tree`): any fresh name absent from the
+   committed baseline is exit `3` on its own. Detectors 1 and 2 are CORRELATED,
+   both fire on name-set growth; they are dual evidence combined fail-closed with
+   OR (invariant I3), not independent detectors. Keeping both matters because the
+   ledger can lag the baseline (a `revoked` name is still in neither, a bootstrap
+   gap could leave one populated before the other).
+3. **Source anomaly** (orthogonal): any non-`registry.npmjs.org` `resolved`,
+   flagged even for a ledgered, in-baseline name.
+4. **Integrity mismatch** (orthogonal): a `name@version` that matches the
+   baseline but whose `integrity` differs. This is the genuine third axis a pure
+   name/version check misses (registry-immutability break, lock tampering).
 
 Plus, reusing this repo's existing invariants as additional detectors so the
 guard is a superset, not a subset, of today's coverage:
@@ -211,7 +312,9 @@ guard is a superset, not a subset, of today's coverage:
    (`better-sqlite3`/`prebuild-install`/`tar-fs`/`tar-stream`), the same set
    `pre-release.sh:37-52` asserts.
 5. **Blocklisted versions** from `release-security-audit.sh:125-165`
-   (`content-type@2.0.0`, `type-is@2.1.0`, `tar-stream@*`) in the prod graph.
+   (`content-type@2.0.0`, `type-is@2.1.0`, and exactly
+   `tar-stream@{2.2.0,2.1.4,2.0.0}`) in the prod graph, plus the separate
+   any-version `tar-stream` ban from the packed-consumer check (`:206-258`).
 6. **`\bfetch\b` in `dist/`** (the shipped-Socket heuristic,
    `release-security-audit.sh:263-305`), included so a single command reproduces
    the whole supply-chain surface locally.
@@ -220,75 +323,112 @@ Detectors 4-6 duplicate existing gate checks deliberately: the guard is meant to
 be runnable as a single local pre-flight that mirrors the release gate, and CI
 still runs the originals independently.
 
-### 4.5 Exit-code contract and outputs
+### 4.5 Exit-code contract, and what the gate requires
 
-Exit codes (identical scheme to sqry):
+Exit codes are the maximum severity over all instances (source anomaly, integrity
+mismatch, tag-along, and any reused-invariant failure are `3`; roll-forward is
+`2`; otherwise `0`):
 
-- `0` clean: every prod package is ledgered, in range, registry-sourced; no
-  invariant tripped.
-- `2` roll-forward only: some ledgered packages moved version, nothing new
-  entered, no anomaly, no invariant tripped.
-- `3` tag-along and/or source anomaly and/or a reused-invariant failure present.
+- `0` clean: every instance matches the committed baseline exactly; no anomaly,
+  no invariant tripped.
+- `2` roll-forward only: some ledgered names moved to another accepted version /
+  path vs the baseline, but nothing un-ledgered entered, no `new_to_tree`, no
+  anomaly, no integrity mismatch, no invariant.
+- `3` a tag-along, `new_to_tree`, source anomaly, integrity mismatch, or a
+  reused-invariant failure is present.
 - `1` tool error.
+
+**What the blocking gate requires (fixes the round-1 trust-window blocker)**: the
+release-gate form, `supply-chain:scan:check`, requires exit **`0`** against the
+committed baseline, not merely "not 3." A roll-forward (exit `2`) therefore BLOCKS
+the release until the drift has been researched and the committed baseline
+refreshed through the reviewed process (section 8). This is the "no unreviewed
+prod change ships" guarantee and matches cargo-vet's per-version exemption model:
+an in-range caret bump of a ledgered name is not silently clean, it must move the
+committed baseline first. The plain `supply-chain:scan` (local/advisory) form
+tolerates exit `2` so an operator can see roll-forwards without blocking.
 
 Outputs under a gitignored `.supply-chain/scan-<timestamp>/`:
 
-- `report.json` / `report.md`: verdict, per-class counts, drift rows. `report.json`
-  MUST be valid JSON in both the clean (empty) and populated cases.
+- `report.json` / `report.md`: verdict, per-class counts, per-instance drift rows.
+  `report.json` MUST be valid JSON in both the clean (empty) and populated cases.
 - `contracts/<pkg>.md`: one upgrade + advisory + test contract stub per
   actionable package (roll-forward and tag-along).
 - `fresh.shrinkwrap.json` / `baseline.json`: evidence.
 
-### 4.6 Guarded backup/restore (robustness)
+### 4.6 Mutation boundary and robustness
 
-The sqry review spent two of its three rounds on backup/restore robustness under
-`set -euo pipefail` (signal handlers, `trap - EXIT` re-entrancy, idempotent
-guarded restore, valid JSON when empty, tab-`read` sentinel decoding). This spec
-avoids that entire bug class by implementing the scanner in **Node (`.mjs`)**,
-not bash:
+The scanner is implemented in **Node (`.mjs`)**, not bash, which removes the
+`set -euo pipefail` bug class the sqry review spent two rounds on (the
+`grep -c || echo 0` double-count, the `[[ cond ]] && cmd` trailing-return trap,
+tab-`read` field loss). JSON is built with `JSON.stringify`, so the empty-drift
+case cannot emit invalid JSON.
 
-- Backup/restore is a `try { ... } finally { restore(); }`; process-signal safety
-  via a single `process.on("SIGINT"|"SIGTERM"|"exit")` handler that restores once
-  (idempotent guard) and re-raises. No `grep -c || echo 0` double-count, no
-  `[[ cond ]] && cmd` trailing-return trap, no tab-`read` field loss.
-- JSON is built with `JSON.stringify` and validated by construction, so the
-  empty-drift case cannot emit invalid JSON.
+Mutation boundary, stated honestly (fixes a round-1 blocker; the earlier
+"in-place `npm install` then restore lockfiles" plan overpromised tree safety
+because `npm install` also mutates `node_modules`):
+
+- **`--frozen` mode**: performs no install and writes nothing outside the
+  gitignored `.supply-chain/` output dir. Zero mutation of `package-lock.json`,
+  `npm-shrinkwrap.json`, or `node_modules`.
+- **Fresh-resolve mode**: the `npm install` runs inside a throwaway temp copy of
+  `package.json` + `package-lock.json` (4.2), removed in a `finally`. The
+  operator's real `package-lock.json`, `npm-shrinkwrap.json`, and `node_modules`
+  are never touched, so there is nothing to restore in the working tree. A
+  `SIGKILL` during the temp install can leave only the temp dir behind (safe to
+  delete), never a mutated working tree. This is stronger than the sqry
+  in-place-restore approach.
 
 This is a deliberate deviation from the sqry bash implementation, justified by
 this repo's node + vitest tooling (section 11).
 
 ## 5. Surface and wiring into existing gates
 
-- CLI: `node scripts/supply-chain/dep-drift-scan.mjs [--frozen] [--no-install]
+- CLI: `node scripts/supply-chain/dep-drift-scan.mjs [--frozen]
   [--out DIR] [--closure FILE]`. `--closure` injects a prod-closure fixture for
-  the tests (the sqry `--vet-failures` analogue).
-- npm scripts: `supply-chain:scan` (the tool) and `supply-chain:scan:check` (the
-  blocking form used by CI; exits non-zero on `3`).
+  the tests (the sqry `--vet-failures` analogue). `--frozen` scores the current
+  committed/regenerated shrinkwrap (no install); the default fresh-resolve mode
+  runs in a temp copy (4.2).
+- npm scripts: `supply-chain:scan` (local/advisory; tolerates exit `2`) and
+  `supply-chain:scan:check` (the blocking gate form: runs `--frozen` and requires
+  exit `0` against the committed baseline; see 4.5).
 - Gate wiring (P1): append `supply-chain:scan:check` as a final step of
-  `scripts/release-security-audit.sh`, so it runs inside `npm run check`,
-  `ci.yml`, and `npm-publish.yml` with no new workflow. Report-only in P0 (does
-  not fail the build; prints the verdict), blocking in P1.
+  `scripts/release-security-audit.sh` so it runs inside `npm run check`,
+  `ci.yml`, and `npm-publish.yml` with no new workflow. Because those surfaces
+  already regenerate the shrinkwrap from the committed lock
+  (`ci.yml`, `npm-publish.yml`, `pre-release.sh`), the check runs `--frozen`
+  against that exact artifact, never a fresh resolve, so it always scores the
+  tree the release ships. Report-only in P0 (prints the verdict, does not fail
+  the build), blocking in P1.
 
 ## 6. Configuration and gating
 
 - No runtime config; the tool is dev/release tooling only.
 - The ledger and baseline are the only committed state; both are plain JSON,
   reviewed like code.
-- `--frozen` (skip fresh resolve; approximate) and `--no-install` (assume
-  `node_modules` current) are the only speed knobs. Default is the faithful
-  fresh-resolve path.
+- `--frozen` (score the committed/regenerated shrinkwrap; the CI/gate mode) vs
+  the default fresh-resolve-in-temp-copy (the local sweep mode) is the only mode
+  knob (4.2). The gate always uses `--frozen`.
 
 ## 7. Security and correctness invariants
 
-- **I1 Tree never clobbered**: `package-lock.json` and `npm-shrinkwrap.json` are
-  byte-identical before and after any scan, including on SIGINT/SIGTERM
-  (restore-in-`finally` + signal handler). A test asserts sha256 identity.
-- **I2 Fail-closed**: any tag-along, source anomaly, or reused-invariant failure
-  yields exit `3`. An unclassifiable package is treated as a tag-along, never as
-  clean.
-- **I3 No silent new package**: the three independent detectors of 4.4 mean a new
-  prod name is caught by ledger-membership AND baseline-diff; a git/http source is
-  caught by the source-anomaly detector even if the name is ledgered.
+- **I1 Working tree never mutated**: the scanner writes only inside the gitignored
+  `.supply-chain/` output dir. `--frozen` mode performs no install; fresh-resolve
+  mode installs only in a throwaway temp copy (4.6). The operator's
+  `package-lock.json`, `npm-shrinkwrap.json`, and `node_modules` are untouched, so
+  there is nothing to clobber (stronger than the sqry in-place-restore). A test
+  asserts sha256 identity of the working lockfiles across a scan, including on
+  SIGINT/SIGTERM; a `SIGKILL` can leave only a stray temp dir, never a mutated
+  working tree.
+- **I2 Fail-closed**: any source anomaly, integrity mismatch, tag-along,
+  `new_to_tree`, or reused-invariant failure yields exit `3`. An instance matching
+  no decision-table row is treated as a tag-along, never as clean.
+- **I3 No silent new package (fail-closed OR)**: a new prod name is exit `3` if it
+  is caught by ledger-membership **OR** by the baseline diff (`new_to_tree`),
+  either alone; the detectors are combined with OR, not AND, so a gap in one does
+  not create a hole. A non-registry source (source anomaly) and an `integrity`
+  change (integrity mismatch) are each exit `3` independently, even for a
+  ledgered, in-baseline name.
 - **I4 Deterministic + offline tests**: the scanner's classification logic is
   pure over an injected closure (`--closure`); the vitest suite runs with no
   network and no `npm install`.
@@ -329,8 +469,12 @@ process, ported from sqry:
    refuses security reviews and a same-repo `claude_request` reviewer has a
    write-access hazard, so prefer Codex + Grok + Mistral, read-only.)
 5. **Write the ledger entry + refresh the baseline**: add/update the
-   `prod-closure.ledger.json` entry and regenerate
-   `prod-closure.baseline.json` from the accepted closure.
+   `prod-closure.ledger.json` entry (append the newly accepted exact version to
+   `acceptedVersions`; for a dropped name set `state: "revoked"`), then regenerate
+   `prod-closure.baseline.json` from the now-accepted closure so the committed
+   baseline matches the tree the next release will ship. Refreshing the committed
+   baseline is what turns an exit `2` roll-forward into exit `0` (4.5); it is a
+   reviewed commit, not something the scanner does.
 6. **Ledger audit trail**: copy the filled contracts to
    `docs/development/supply-chain-guard/ledger/<YYYY-MM-DD>/<pkg>.md`.
 7. **Commit + land** on `master` with a `build(supply-chain):` or
@@ -339,14 +483,18 @@ process, ported from sqry:
 Anti-patterns the skill must refuse (from sqry): rubber-stamping a tag-along;
 skipping the advisory sweep "because it's just a patch"; writing a ledger entry
 before cross-LLM validation; accepting a reviewer verdict without cited evidence;
-deleting ledger entries to "clean up" (only prune `dropped`, deliberately);
-scanning with `--frozen` and calling it a faithful gate reproduction.
+deleting ledger entries to "clean up" (only prune `dropped` names, deliberately,
+after marking them `revoked`); treating a local fresh-resolve sweep as the
+authoritative gate (the gate scores the committed tree via `--frozen`, 4.2);
+accepting a roll-forward (exit `2`) without refreshing the committed baseline
+through this process (that is what makes it clean, 4.5).
 
 ## 9. Required new files (module plan)
 
-- `supply-chain/prod-closure.ledger.json` (committed; the allowlist).
-- `supply-chain/prod-closure.baseline.json` (committed; last-accepted closure
-  name+version snapshot for the diff detector).
+- `supply-chain/prod-closure.ledger.json` (committed; per-name allowlist with
+  exact `acceptedVersions` + `state` + rationale).
+- `supply-chain/prod-closure.baseline.json` (committed; exact per-instance
+  snapshot: `path`, `name`, `version`, `resolved`, `integrity`).
 - `scripts/supply-chain/dep-drift-scan.mjs` (the scanner; reuses
   `make-prod-shrinkwrap.mjs` as a library or subprocess).
 - `scripts/supply-chain/dep-drift-scan.test.mjs` (vitest; offline).
@@ -359,13 +507,16 @@ scanning with `--frozen` and calling it a faithful gate reproduction.
 
 ## 10. Failure policy
 
-- The scanner never edits the ledger, the baseline, or any lockfile permanently;
-  it only reads and restores. All writes to the ledger/baseline are done by the
-  human/LLM in step 5, reviewed as code.
-- If `npm install` fails during the fresh resolve, exit `1` with the npm error;
-  the `finally` restore still runs.
-- A dropped ledger entry is reported, never auto-removed (a supported prior
-  release may still resolve it).
+- The scanner never edits the ledger, the baseline, the working `package-lock.json`,
+  or `node_modules`; it reads them and (in fresh mode) installs only in a temp
+  copy. All writes to the ledger/baseline are done by the human/LLM in step 5,
+  reviewed as code (the one exception is an explicit `--write-baseline`, open
+  question 4, which still only runs after the ledger is updated).
+- If `npm install` fails during a fresh-resolve sweep, exit `1` with the npm
+  error; the temp dir is still removed in the `finally`.
+- A dropped name is reported, never auto-removed; on acceptance the human marks
+  it `revoked` and prunes the baseline (a supported prior release may still
+  resolve it, so pruning is deliberate).
 
 ## 11. Deltas from the sqry template (honest)
 
@@ -383,32 +534,51 @@ scanning with `--frozen` and calling it a faithful gate reproduction.
    license allowlist), not P0.
 5. **Two-flow split**: sqry pairs the guard with `/dep-update`; this repo has no
    `/dep-update`, so the runbook links Dependabot as the proactive flow instead.
+6. **Instance + integrity, not name.** Because npm has no cargo-vet to resolve
+   trust exactly, this design classifies path-keyed instances with an `integrity`
+   check (4.3, 4.4) rather than cargo-vet's name+version trust surface. This
+   gives npm an integrity/immutability detector cargo-vet does not need (crates.io
+   is content-addressed), and makes "clean = exact committed baseline match" the
+   definition, so no in-range version can be silently trusted.
 
 ## 12. Open questions
 
-1. **Ledger granularity**: name + accepted-range (proposed) vs name + every
-   exact version ever shipped. Range is less churny but a wider trust window;
-   exact-per-version is the closest cargo-vet analogue but grows unbounded.
-   Proposed: accepted-range, with the baseline snapshot recording exact versions
-   for the diff.
-2. **Baseline storage**: a separate `prod-closure.baseline.json` (proposed) vs
-   deriving the baseline from the ledger's accepted ranges. Separate file makes
-   the `new_to_tree` diff exact and cheap.
-3. **CI cost of the fresh resolve**: the default path runs `npm install`; in CI
-   the shrinkwrap is already regenerated by `ci.yml`, so the check step may run
-   `--frozen` against that artifact rather than re-installing. Decide per-surface.
-4. **Overlap with `security:audit`**: detectors 4-6 duplicate existing checks.
-   Keep them (single-command local reproduction) or drop them from the guard and
-   rely on `security:audit` composition. Proposed: keep, documented as intentional.
-5. **Peer/optional deps** (`pg`): not in the default prod closure (optional peer).
-   Decide whether the ledger tracks optional peers separately.
+Resolved in this revision (kept for the record):
+
+- **R1 Ledger granularity**: RESOLVED to exact `acceptedVersions` (never a caret
+  range). Round-1 flagged that a range plus a non-blocking exit `2` bakes a wide
+  trust window; the blocking gate now requires exit `0` and the seed writes exact
+  versions (4.1, 4.5).
+- **R2 Baseline storage**: RESOLVED to a separate instance-level
+  `prod-closure.baseline.json` (`path`/`name`/`version`/`resolved`/`integrity`),
+  so `new_to_tree` and integrity checks are exact (4.1, 4.3).
+- **R3 Resolve mode**: RESOLVED per-surface: CI/publish/`security:audit` use
+  `--frozen` against the already-regenerated shrinkwrap; fresh resolve only for
+  local sweeps, in a temp copy (4.2).
+
+Still open:
+
+1. **Overlap with `security:audit`**: reused detectors 4-6 duplicate existing
+   checks. Keep them (single-command local reproduction) or drop and rely on
+   `security:audit` composition. Proposed: keep, documented as intentional.
+2. **Peer/optional deps** (`pg`, an optional peer at `package.json:113-119`): not
+   in the default prod closure. Decide whether the ledger tracks optional peers
+   separately, or documents them as out of scope.
+3. **`acceptedVersions` growth**: exact-version accepts grow the ledger over time.
+   Decide a pruning policy (e.g. drop versions no supported release resolves),
+   distinct from the `revoked`-on-drop rule for names.
+4. **Baseline refresh authorship**: whether the baseline regeneration in step 5 is
+   a manual `supply-chain:scan --write-baseline` or a hand edit. Proposed: a
+   `--write-baseline` flag that only ever writes after the human has updated the
+   ledger, never from the scanner's classification path.
 
 ## 13. Rollout (phased, each its own gate)
 
-- **P0 (report-only)**: ledger schema + seed from the current shipped closure +
-  baseline snapshot + `dep-drift-scan.mjs` (classification, three detectors, exit
-  codes) + offline vitest suite. Wire as a non-blocking `supply-chain:scan`
-  script. Cross-LLM review gate on the code.
+- **P0 (report-only)**: ledger + exact-version seed + instance baseline snapshot +
+  `dep-drift-scan.mjs` (instance classification per the 4.3 decision table, the
+  4.4 detectors, exit codes) + offline vitest suite covering every decision-table
+  row and both whole-closure classes. Wire as a non-blocking `supply-chain:scan`.
+  Cross-LLM review gate on the code.
 - **P1 (blocking + process)**: SKILL + RUNBOOK + ledger audit-trail; append
   `supply-chain:scan:check` to `release-security-audit.sh` so a tag-along fails
   the release. Cross-LLM review gate.
@@ -424,7 +594,12 @@ same discipline the sqry guard followed (three rounds).
 - Fresh resolve + prod-graph assertion: `scripts/pre-release.sh` (`:19-52`).
 - Prod-closure generator: `scripts/make-prod-shrinkwrap.mjs` (`:63-74`).
 - Existing release gate (blocklist + invariants): `scripts/release-security-audit.sh`
-  (`:8`, `:104-123`, `:125-165`, `:167-204`, `:206-258`, `:263-305`).
+  (`:8` npm audit, `:104-123` byte-parity, `:125-165` version blocklist,
+  `:167-204` hono floor, `:206-258` packed-consumer any-tar-stream, `:263-305`
+  fetch-in-dist).
+- Coarse reified-count band (pre-release only): `scripts/verify-registry-install.sh`
+  (`:42-47`, `EXPECTED_REIFIED_MIN/MAX` 92/96).
+- Optional peer (`pg`): `package.json` (`:113-119`).
 - Accepted-capability ledger: `socket.yml`.
 - Dependabot policy: `.github/dependabot.yml`.
 - CI/publish topology: `.github/workflows/{ci,security,sast,npm-publish}.yml`.
