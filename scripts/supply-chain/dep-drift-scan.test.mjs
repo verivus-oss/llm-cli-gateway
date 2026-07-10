@@ -289,6 +289,12 @@ describe("P2 socket.yml policy-drift", () => {
     const f = socketPolicyFindings({ malware: true, shrinkwrap: false, shellAccess: true }, expected);
     expect(f.some((x) => x.name === "issueRules.shellAccess")).toBe(true);
   });
+  it("an ADDED rule not in the reviewed posture is drift (bidirectional)", () => {
+    const f = socketPolicyFindings({ malware: true, shrinkwrap: false, shellAccess: false, newRisk: false }, expected);
+    expect(f).toHaveLength(1);
+    expect(f[0].name).toBe("issueRules.newRisk");
+    expect(f[0].exit).toBe(3);
+  });
 });
 
 describe("parseSocketIssueRules", () => {

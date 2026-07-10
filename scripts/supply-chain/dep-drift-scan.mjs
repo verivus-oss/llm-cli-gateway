@@ -287,8 +287,10 @@ export function licenseFindings(instances, allowed) {
  */
 export function socketPolicyFindings(issueRules, expected) {
   const findings = [];
+  const rules = issueRules ?? {};
+  // Expected rule flipped or missing.
   for (const [rule, want] of Object.entries(expected)) {
-    const got = issueRules?.[rule];
+    const got = rules[rule];
     if (got !== want) {
       findings.push({
         path: "socket.yml",
@@ -297,6 +299,22 @@ export function socketPolicyFindings(issueRules, expected) {
         class: "socket-policy-drift",
         expected: want,
         actual: got ?? null,
+        exit: 3,
+      });
+    }
+  }
+  // Unexpected rule ADDED to socket.yml (bidirectional check): a new issueRule not
+  // in the reviewed posture is also drift. Pin the full posture, so REQUIRED_SOCKET_
+  // POLICY must be updated in lock-step with any deliberate socket.yml addition.
+  for (const rule of Object.keys(rules)) {
+    if (!(rule in expected)) {
+      findings.push({
+        path: "socket.yml",
+        name: `issueRules.${rule}`,
+        version: "-",
+        class: "socket-policy-drift",
+        expected: null,
+        actual: rules[rule],
         exit: 3,
       });
     }
@@ -545,28 +563,31 @@ function main(argv) {
   const ledger = readJson(LEDGER_PATH);
   const baseline = readJson(BASELINE_PATH);
 
-  // P2 license allowlist (in-closure detector).
-  const licenseAllowlist = existsSync(LICENSE_ALLOWLIST_PATH)
-    ? new Set(readJson(LICENSE_ALLOWLIST_PATH).allowed ?? [])
-    : null;
-
-  // Repo-level findings folded in as extraFindings. Skipped for --closure
-  // fixtures (offline tests): fetch-in-dist needs a built dist/, and the socket
-  // policy + license checks are repo-scoped. P2 socket policy-drift and the
-  // fetch-in-dist detector both go here.
+  // Repo-level P2 detectors (license allowlist, socket policy) + fetch-in-dist.
+  // Skipped for --closure fixtures (offline tests). In the real repo path the
+  // policy config files are REQUIRED: a missing license-allowlist.json or
+  // socket.yml is a misconfiguration (exit 1), never a silently-disabled check,
+  // so the fail-closed detectors cannot be defeated by deleting their config.
+  let licenseAllowlist = null;
   const extraFindings = [];
   if (closureIdx === -1) {
-    if (existsSync(SOCKET_YML_PATH)) {
-      extraFindings.push(
-        ...socketPolicyFindings(parseSocketIssueRules(readFileSync(SOCKET_YML_PATH, "utf8")), REQUIRED_SOCKET_POLICY)
-      );
+    if (!existsSync(LICENSE_ALLOWLIST_PATH)) {
+      process.stderr.write(`[supply-chain-guard] missing ${LICENSE_ALLOWLIST_PATH}; run --seed or restore it.\n`);
+      return 1;
     }
+    if (!existsSync(SOCKET_YML_PATH)) {
+      process.stderr.write(`[supply-chain-guard] missing ${SOCKET_YML_PATH} (Socket policy source).\n`);
+      return 1;
+    }
+    licenseAllowlist = new Set(readJson(LICENSE_ALLOWLIST_PATH).allowed ?? []);
+    extraFindings.push(
+      ...socketPolicyFindings(parseSocketIssueRules(readFileSync(SOCKET_YML_PATH, "utf8")), REQUIRED_SOCKET_POLICY)
+    );
     extraFindings.push(...fetchInDistFindings(REPO_ROOT));
   }
 
   const result = classifyClosure(freshList, ledger, baseline, {
-    // license allowlist applies only to a real repo closure, not injected fixtures
-    licenseAllowlist: closureIdx === -1 ? licenseAllowlist : null,
+    licenseAllowlist,
     extraFindings,
   });
 

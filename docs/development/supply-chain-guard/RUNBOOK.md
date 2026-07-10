@@ -42,12 +42,18 @@ The scanner classifies each path-keyed prod **instance**
   flagged deliberately, so a dual-license entry cannot slip a copyleft term in.
   Resolve by reviewing the license and, if acceptable, adding the exact SPDX id to
   the allowlist.
-- **Socket-policy-drift** (P2, exit 3): a `socket.yml` `issueRules` value changed
-  from its reviewed enforcing posture (the expected map in `dep-drift-scan.mjs`
-  `REQUIRED_SOCKET_POLICY`). Update that map in lock-step with any deliberate,
+- **Socket-policy-drift** (P2, exit 3): a `socket.yml` `issueRules` value that
+  differs from the reviewed enforcing posture (`dep-drift-scan.mjs`
+  `REQUIRED_SOCKET_POLICY`), checked bidirectionally so a flipped, missing, OR
+  newly-added rule all count. Update that map in lock-step with any deliberate,
   reviewed `socket.yml` change (same discipline as the hono floor). This is an
   offline, deterministic cross-check; a live Socket-API capability query needs
   network/credentials and is a separate advisory tool, not part of the gate.
+
+The P2 policy config is required, not optional: in the real-repo (non-`--closure`)
+path, a missing `supply-chain/license-allowlist.json` or `socket.yml` is a
+misconfiguration (exit 1, tool error), never a silently-disabled check, so a
+fail-closed detector cannot be defeated by deleting its config.
 
 ## The tool
 
