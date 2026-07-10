@@ -342,7 +342,7 @@ export const PROVIDER_TARGET_VERSIONS: Record<CliType, string> = {
   codex: "codex-cli 0.144.1",
   gemini: "agy 1.1.0",
   grok: "grok 0.2.93 (f00f96316d)",
-  mistral: "vibe 2.19.0",
+  mistral: "vibe 2.19.1",
   devin: "devin 3000.1.27 (0d4bf12e)",
   cursor: "cursor-agent 2026.07.09-c59fd9a",
 };
