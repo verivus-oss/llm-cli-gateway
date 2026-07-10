@@ -1,6 +1,9 @@
 // Offline unit tests for the supply-chain guard scanner. Pure classification
 // over injected fixtures; no network, no npm install, no filesystem baseline.
 import { describe, it, expect } from "vitest";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import {
   deriveName,
   toInstances,
@@ -9,6 +12,7 @@ import {
   classifyInstance,
   computeDropped,
   reusedInvariantFindings,
+  fetchInDistFindings,
   classifyClosure,
 } from "./dep-drift-scan.mjs";
 
@@ -200,6 +204,33 @@ describe("reused invariants", () => {
   it("blocklisted version -> 3", () => {
     const f = reusedInvariantFindings([inst({ path: "node_modules/type-is", name: "type-is", version: "2.1.0" })]);
     expect(f.some((x) => x.class === "blocked-version")).toBe(true);
+  });
+});
+
+describe("fetch-in-dist detector (mirrors release-security-audit.sh scope)", () => {
+  it("is case-insensitive (Fetch/FETCH) and excludes __tests__", () => {
+    const root = mkdtempSync(join(tmpdir(), "sc-dist-"));
+    try {
+      mkdirSync(join(root, "dist", "__tests__"), { recursive: true });
+      writeFileSync(join(root, "dist", "shipped.js"), "const x = Fetch(url);\n");
+      writeFileSync(join(root, "dist", "__tests__", "t.js"), "await fetch(url);\n");
+      const findings = fetchInDistFindings(root);
+      // Case-insensitive: "Fetch" in the shipped file is caught.
+      expect(findings.some((f) => f.path.endsWith("dist/shipped.js"))).toBe(true);
+      // __tests__ (not shipped) is excluded, matching the audit.
+      expect(findings.some((f) => f.path.includes("__tests__"))).toBe(false);
+      expect(findings.every((f) => f.exit === 3)).toBe(true);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+  it("returns [] when dist/ is absent (dist-less scans do not block)", () => {
+    const root = mkdtempSync(join(tmpdir(), "sc-nodist-"));
+    try {
+      expect(fetchInDistFindings(root)).toEqual([]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 

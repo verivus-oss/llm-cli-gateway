@@ -339,11 +339,11 @@ function seedFromCommittedLock() {
  * token. Only meaningful when dist/ exists (a build has run); returns [] when it
  * is absent (e.g. offline test runs), so it never blocks a dist-less scan.
  */
-function fetchInDistFindings(repoRoot) {
+export function fetchInDistFindings(repoRoot) {
   const distDir = join(repoRoot, "dist");
   if (!existsSync(distDir)) return [];
   const findings = [];
-  const fetchRe = /\bfetch\b/;
+  const fetchRe = /\bfetch\b/i; // case-insensitive, matching release-security-audit.sh:270 exactly
   const walk = (dir) => {
     for (const ent of readdirSync(dir, { withFileTypes: true })) {
       // Mirror release-security-audit.sh scope exactly: skip __tests__ (not
