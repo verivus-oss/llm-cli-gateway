@@ -2,10 +2,14 @@
 # Machine plan derived from the cross-LLM-approved spec
 # docs/plans/least-cost-routing.draft.md. Data-first: every step is idempotent
 # and carries a concrete validation. Dormant by default (mirrors [acp]).
+# Folds in the six cost-estimation enhancements (Grok+Mistral approved): a
+# derived-cost path (composeCost, cost_basis), per-family accountingMode
+# (inclusive|disjoint), modelIdToFamily pricing, a layered token-estimator,
+# input-token self-calibration + confidence bands, and transport-scoped grok.
 
 [meta]
 name = "least-cost-routing"
-schema_version = "1.1"
+schema_version = "1.2"
 owner = "gateway-maintainers"
 slice = "least-cost-routing"
 target_branch = "feat/least-cost-routing"
@@ -26,6 +30,8 @@ invariant_sources = [
   "src/config.ts",
   "src/index.ts",
   "src/validation-orchestrator.ts",
+  "src/optimizer.ts",
+  "src/acp/runtime.ts",
 ]
 
 # ---------------------------------------------------------------------------
@@ -48,6 +54,14 @@ priors = "model_level_economics"           # anonymized; not per-principal cost 
 priors_scope_default = "global"            # global|principal|off
 dispatch = "reuse_existing_path"           # startJob / runApiRequest; LCR selects inputs, does not fork execution
 default_transport_change = "deferred"      # provider:"auto" selector is a later plan, like ACP default_transport
+cost_basis_on_every_figure = true          # provider-reported | derived-from-tokens | pre-flight-estimate (enh 1)
+derived_cost_path = "counts_times_rate"    # T2 providers: total from reported counts x getModelCost rate, NEVER decompose a scalar costUsd
+accounting_mode_split = "per_family"       # inclusive (OpenAI-style) vs disjoint (Anthropic-style) cache accounting (round-1 blocker 2)
+compose_cost_single_impl = true            # one pure composeCost() implements derive AND rank so the mode branch can't drift
+price_by_resolved_family = "modelIdToFamily" # getModelCost prices the resolved model family, not the CLI brand (round-1 blocker 3; cursor/devin)
+token_estimator = "layered_calibrated"     # content-aware base + per-tokenizer-family multiplier + flight-recorder self-calibration (enh 2+3)
+grok_tier = "transport_scoped"             # grok-ACP=T2 (counts already threaded), grok-`-p`=T4 estimate-only, xAI-api=T1 (round-1 blocker 1)
+confidence_band = "advisory_not_ranking"   # enh 5: reported as min(cost_basis, band); never re-orders argmin
 
 # ---------------------------------------------------------------------------
 # Non-goals (key = reason)
@@ -65,68 +79,99 @@ no_costUsd_rate_decomposition = "A single total costUsd cannot be split into inp
 # Architecture + module plan (maps spec section 9)
 # ---------------------------------------------------------------------------
 [architecture]
-summary = "A pure selector (least-cost-router.ts) reads price (pricing.ts/getModelCost), capability (provider-definitions.ts), auth (provider-status.ts) and health (retry/executor breaker accessor + getLimiterSnapshot) to pick argmin(estCost) subject to eligibility+tier+budget, then dispatches through the existing handler path. Dormant behind [least_cost]."
+summary = "A pure selector (least-cost-router.ts) reads price (pricing.ts/getModelCost + composeCost), a layered content-aware token estimate (token-estimator.ts), capability (provider-definitions.ts), auth (provider-status.ts) and health (retry/executor breaker accessor + getLimiterSnapshot) to pick argmin(estCost) subject to eligibility+tier+budget, then dispatches through the existing handler path. Every cost figure carries a cost_basis (provider-reported | derived-from-tokens | pre-flight-estimate) and confidence. Dormant behind [least_cost]."
 
 [architecture.module_plan]
-pricing = "src/pricing.ts: add getModelCost (output + cache-write pricing, source/asOf, unknown=exclude). getPricing untouched."
+pricing = "src/pricing.ts: add getModelCost (output + cache-write pricing, accountingMode inclusive|disjoint, resolved family via modelIdToFamily, source/asOf, unknown=exclude) + a pure composeCost(counts|null, estimate, modelCost) yielding {costUsd, cost_basis, confidence}. getPricing untouched."
+token_estimator = "src/token-estimator.ts (NEW): layered content-aware estimator (content-type char base + per-tokenizer-family multiplier + calibration k hook); replaces optimizer.estimateTokens on the routing path only."
 breaker_accessor = "src/executor.ts + src/retry.ts: export per-CLI breaker state (map CliType->executable first); add per-provider capacity helper over getLimiterSnapshot(). NOTE: async CLI jobs spawn via spawnCliProcess and bypass the executor breaker map (it is sync executeCli history only), so the router treats CLI health as breaker-state for the sync path PLUS the per-provider capacity helper and async-job outcomes for the async path; it does not assume the breaker reflects async failures."
 capability_flags = "src/provider-definitions.ts: promote image/attachment, tool-calling, json-schema to explicit requestSurface flags (additive, DRY, surfaces-check-safe)."
 router_core = "src/least-cost-router.ts (NEW): pure pool-build + eligibility + estimator + deterministic ranker + budget gate. No CLI spawn; unit-testable like computeFlagDrift."
-feedback = "src/lcr-priors.ts (NEW, read-only sibling of cache-stats.ts): anonymized per-(provider,model) output-token median/p90; reconciliation of est vs actual."
+feedback = "src/lcr-priors.ts (NEW, read-only sibling of cache-stats.ts): anonymized per-(provider,model) output-token median/p90 + input-token calibration k (per content-type,family) + residual spread (confidence) + est-vs-actual reconciliation split by cost_basis."
 config = "src/config.ts: [least_cost] Zod schema + loadLeastCostConfig (throw on schema-invalid, all-off default), threaded through runtime."
 tools = "src/index.ts: register route_request / route_request_async behind the gate; dispatch via existing path; add routing block; add routing:// resources; extend llm_process_health."
-flight_recorder = "src/flight-recorder.ts: additive migration for routed/route_est_cost_usd/route_reason/route_considered/route_reroutes."
+flight_recorder = "src/flight-recorder.ts: additive migration for routed/route_est_cost_usd/route_est_confidence/route_reason/route_considered/route_reroutes + request-wide cost_basis; logComplete derived-cost backfill for T2 rows."
+parser_wiring = "src/index.ts extractUsageAndCost (~:2045): route T2 captured counts through composeCost; fix the stale 'ACP usage not wired' comment (~:2138-2143). Grok ACP reasoningTokens capture + Anthropic-API cache_creation extraction land in phase_2b."
 
 # ---------------------------------------------------------------------------
-# Cost-model matrix (per-provider price source + telemetry availability;
-# grounds which providers are LCR-eligible in which phase)
+# Cost-model matrix (per-provider+transport price source, telemetry tier,
+# cache-accounting mode, and cost basis; SoT is spec section 4.1a. Grounds
+# which providers are LCR-eligible in which phase and how their cost is obtained.
+# telemetry_tier: T1 reports $cost, T2 reports token counts (cost is DERIVED),
+# T3 transport-conditional, T4 no usage (pre-flight estimate only).
+# accounting_mode: inclusive (OpenAI-style, input includes cache-read) vs
+# disjoint (Anthropic-style, input is fresh-only + cache-read billed).
 # ---------------------------------------------------------------------------
 [cost_model.claude]
 price_source = "table"
+telemetry_tier = "T1"
 reported_cost = "reliable"          # total_cost_usd in stream-json result
+accounting_mode = "disjoint"        # input_tokens is FRESH only; cache_read billed, not subtracted (4.1a)
+basis = "provider-reported"
 usage = "input/output/cache_read/cache_write"
 lcr_phase = "phase_1"
 
 [cost_model.codex]
 price_source = "table"
-reported_cost = "rare_null"         # codex JSONL rarely emits cost_usd
+telemetry_tier = "T2"
+reported_cost = "rare_null"         # codex JSONL rarely emits cost_usd => cost DERIVED from counts
+accounting_mode = "inclusive"
+basis = "reported_if_present_else_derived"
 usage = "input/output/cache_read/cache_write"
 lcr_phase = "phase_1"
 
 [cost_model.gemini]
 price_source = "table"
-reported_cost = "none"              # text-only path, no cost
+telemetry_tier = "T2"
+reported_cost = "none"              # no $cost; token counts present => cost DERIVED (enh 1)
+accounting_mode = "inclusive"
+basis = "derived-from-tokens"
 usage = "input/output/cache_read"
 lcr_phase = "phase_1"
 
 [cost_model.grok]
 price_source = "table"
-reported_cost = "none"              # -p wire emits no usage; ACP _meta not threaded to FR
-usage = "none_cli"
-lcr_phase = "phase_1"
+telemetry_tier = "T2_acp__T4_cli"   # transport-conditional (round-1 blocker 1)
+reported_cost = "transport_scoped"  # grok-`-p` emits NO usage (T4); grok-ACP _meta counts ARE already threaded (runtime.ts:262-266) => DERIVED (T2)
+accounting_mode = "inclusive"
+basis = "acp_derived_else_estimate"  # reasoningTokens currently DROPPED by extractAcpPromptUsage (enh 4 captures it)
+usage = "acp_meta_only"             # ACP: input/output/cache_read (+reasoningTokens); -p wire: none
+lcr_phase = "phase_1_estimate__phase_2b_derived"  # priced+eligible in phase_1 on estimate; ACP-derived cost lands in phase_2b
 
 [cost_model.mistral]
 price_source = "table"
-reported_cost = "sometimes"         # off-disk vibe meta.json when found
+telemetry_tier = "T1"
+reported_cost = "sometimes"         # off-disk vibe meta.json when found; else derived/estimate
+accounting_mode = "inclusive"       # no cache terms
+basis = "provider-reported"
 usage = "input/output"
 lcr_phase = "phase_1"
 
 [cost_model.devin]
-price_source = "unknown"
+price_source = "resolved_family"    # NO src/pricing.ts brand branch; priced via modelIdToFamily(resolved model) (round-1 blocker 3), else unknown
+telemetry_tier = "T4"
 reported_cost = "none"
+accounting_mode = "per_resolved_family"
+basis = "pre-flight-estimate"       # always estimate (no counts), confidence: low (enh 6)
 usage = "none"
-lcr_phase = "excluded"              # unpriced: candidate only via explicit candidates + allow_unpriced
+lcr_phase = "estimate_only"         # eligible only if resolved family is priced; via explicit candidates + allow_unpriced when unknown
 
 [cost_model.cursor]
-price_source = "unknown"
+price_source = "resolved_family"    # cursor-agent --model runs claude/gpt/...; price the resolved family, not the brand (round-1 blocker 3)
+telemetry_tier = "T4"
 reported_cost = "none"
+accounting_mode = "per_resolved_family"
+basis = "pre-flight-estimate"       # always estimate, confidence: low (enh 6)
 usage = "none"
 capability_scope = "maintain-only"
-lcr_phase = "excluded"
+lcr_phase = "estimate_only"
 
 [cost_model.api_providers]
 price_source = "api_catalog"        # OpenRouter /models prompt/completion prices; xAI published rates
-reported_cost = "when_enabled"      # OpenRouter usage accounting / xAI; used only for reconciliation
+telemetry_tier = "T1_or_T2"         # xAI Responses = T1; OpenRouter with usage.cost = T1, without = T2 (derived)
+reported_cost = "when_enabled"      # OpenRouter usage accounting / xAI; reconciliation + derive
+accounting_mode = "inclusive"
+basis = "reported_or_derived"
 usage = "varies"
 lcr_phase = "phase_2"
 
@@ -171,12 +216,12 @@ deny = []
 new_tools = ["route_request", "route_request_async"]
 existing_tools_touched = "none"
 inputs = "prompt|promptParts, candidates?, minTier?, maxCostUsd?, maxOutputTokens?, expectedOutputTokens?, requiredCapabilities?, allowUnpriced?, budgetWaiver? (explicit acknowledgment to admit an unpriced/over-budget fallback), fallback?, optimizePrompt?, plus common passthroughs"
-output_extra = "routing block: {chosen{provider,model}, tier, estCostUsd, estInputTokens, estOutputTokens, priceAsOf, priceSource, consideredCount, rejected[{candidate,reason}], reroutes}"
+output_extra = "routing block: {chosen{provider,model}, tier, estCostUsd, costBasis, confidence, nearTie, estInputTokens, estOutputTokens, priceAsOf, priceSource, consideredCount, rejected[{candidate,reason}], reroutes}"
 validation_tool_optin = "validate_with_models/second_opinion/ask_model MAY gain select:'cheapest'|'cheapest_per_tier' (default behavior unchanged)"
 
 [resources]
 "routing://decisions" = "recent routing decisions, redacted, read-only, gated behind enabled"
-"routing://priors" = "current per-candidate output-token priors + price asOf, read-only, gated"
+"routing://priors" = "current per-candidate output-token priors + input-token calibration k (+ sample count/quality) + price asOf, read-only, gated"
 
 # ---------------------------------------------------------------------------
 # Security + correctness invariants (flat true flags)
@@ -194,20 +239,26 @@ routing_block_and_logs_redacted = true
 getPricing_semantics_unchanged = true
 dormant_by_default = true
 no_hand_maintained_provider_arrays = true
+cost_basis_labeled_on_every_figure = true    # enh 1
+no_scalar_costUsd_decomposition = true       # derive total from counts x rate; never split a scalar total into rates
+derived_cost_upgrades_recorded_row = true    # T2 rows backfilled to derived-from-tokens post-hoc
+confidence_is_advisory_not_ranking = true    # enh 5; argmin over point estimates only
+calibration_is_anonymized_model_level = true # input-token k keyed by (content-type, resolved family), never per principal
 
 # ---------------------------------------------------------------------------
 # Observability
 # ---------------------------------------------------------------------------
 [observability]
-flight_recorder_columns = ["routed", "route_est_cost_usd", "route_reason", "route_considered", "route_reroutes"]
-metrics = "per-(provider,model): estimate accuracy (est vs actual cost ratio), win counts, reroute rate, output-token priors, catalog-price asOf freshness"
+flight_recorder_columns = ["routed", "route_est_cost_usd", "route_est_confidence", "route_reason", "route_considered", "route_reroutes", "cost_basis"]
+metrics = "per-(provider,model): estimate-vs-actual accuracy split BY cost_basis, win counts, reroute rate, output-token priors, input-token calibration k (+ sample count/residual spread), catalog-price asOf freshness"
 resources = ["routing://decisions", "routing://priors"]
-doctor = "surface pricing.asOf staleness + per-candidate eligibility (priced? authed? breaker? tier?) + untiered models"
+doctor = "surface pricing.asOf staleness + per-provider telemetry tier (T1-T4) + per-candidate eligibility (priced? authed? breaker? tier?) + per-(content-type,family) calibration quality (k, samples, confidence) + untiered models"
 redaction = "reuse flight-recorder redaction: no secrets, no base_url userinfo, no raw prompts in health surfaces"
 
 [flight_recorder_requirements]
-migration = "additive, nullable columns on gateway_metadata (matches existing additive-migration pattern)"
-reconciliation = "actual cost_usd/output_tokens/model already recorded; no new write path for est-vs-actual"
+migration = "additive, nullable columns on gateway_metadata incl route_est_confidence + request-wide cost_basis (matches existing additive-migration pattern)"
+derived_backfill = "logComplete backfills cost_usd + cost_basis='derived-from-tokens' for T2 rows (codex/gemini) from recorded counts x getModelCost/composeCost; T1 rows keep provider-reported"
+reconciliation = "actual cost_usd/output_tokens/model already recorded; reconciliation splits accuracy by cost_basis"
 
 # ---------------------------------------------------------------------------
 # Failure policy (spec section 10)
@@ -224,17 +275,20 @@ health_accessor_unavailable = "treat as CLOSED, log degraded-health warning, do 
 # Test matrix
 # ---------------------------------------------------------------------------
 [test_matrix.unit]
-pricing = "getModelCost: output+cache-write pricing, source/asOf, unknown=exclude; getPricing ZERO-for-cache-path unchanged (regression)."
-estimator = "ranking estimate incl cache-write/read terms; budget estimate uses conservative upper bound; unbounded output => budget gate fails."
+pricing = "getModelCost: output+cache-write pricing, accountingMode + resolved family (modelIdToFamily) fields, source/asOf, unknown=exclude; getPricing ZERO-for-cache-path unchanged (regression); modelIdToFamily maps cursor/devin resolved model ids to a priced family, unknown id => 'unknown'."
+compose_cost = "composeCost basis matrix: provider-reported passthrough; derived-from-tokens with inclusive vs disjoint formulas (disjoint bills cache_read, inclusive subtracts the discount); pre-flight-estimate; unknown-rate => estimate + low-confidence flag; reasoningTokens added at output rate. Same pure fn drives derive AND rank (no branch drift)."
+token_estimator = "layered token-estimator.ts: content-type classifier (prose/code/CJK char bases), per-tokenizer-family multiplier, calibration factor k applied when present (defaults to 1); deterministic over fixture text; layer-1 floor when no data."
+estimator = "ranking estimate is mode-aware (inclusive vs disjoint) via composeCost; budget estimate uses conservative upper bound; unbounded output => budget gate fails."
 eligibility = "auth/breaker/capacity/capability/tier/price filters, each mocked; untiered => excluded."
 ranker = "deterministic argmin + tie-break stable across runs (no Math.random/Date.now)."
 budget = "over-budget => BudgetExceededError; unpriced => cannot pass gate without explicit waiver."
+calibration_confidence = "aggregator: input-token k=median(actual/base) per (content-type,family), residual p10/p50/p90, confidence label mapping (n>=30 & p90:p10<=1.5 => high, etc.); confidence composes as min(cost_basis, band) and never re-orders argmin; disjoint fresh-only counts reconstructed, mistral session-continued rows excluded."
 priors = "anonymized model-level aggregate; priors_scope principal/off honored; no cross-principal leakage."
 config = "loadLeastCostConfig: missing=all-off, schema-invalid=throw, env override warns once."
 
 [test_matrix.integration]
 gated_off = "with enabled=false, route_request/route_request_async are NOT registered."
-gated_on = "with enabled=true, a table-priced CLI request routes to the cheapest tier-eligible candidate and records the routing columns."
+gated_on = "with enabled=true, a table-priced CLI request routes to the cheapest tier-eligible candidate and records the routing columns incl cost_basis; a T2 (codex/gemini) route's cost is upgraded to derived-from-tokens on completion."
 surfaces = "provider:surfaces:check passes (no new hand-maintained provider array)."
 
 # ---------------------------------------------------------------------------
@@ -259,10 +313,11 @@ contract = "docs/least-cost-routing-contract.md: frozen decisions + non-goals + 
 # Rollout (spec section 12)
 # ---------------------------------------------------------------------------
 [rollout]
-phase_0 = "getModelCost + per-CLI breaker accessor + per-provider capacity helper + explicit capability flags + pure least-cost-router.ts + unit tests. No tool yet."
-phase_1 = "route_request/route_request_async behind [least_cost].enabled=false; CLI providers with table prices only; routing block + flight-recorder columns."
-phase_2 = "API-provider candidates priced from published catalogs + output-prior feedback aggregator + est-vs-actual reconciliation + routing:// resources."
-phase_3 = "validation-tool select:'cheapest' opt-in; doctor/health eligibility surfacing; reconciliation reporting."
+phase_0 = "getModelCost + composeCost (enh 1) + modelIdToFamily + layered token-estimator.ts (enh 3, content-aware base + family multipliers, NO calibration yet) + per-CLI breaker accessor + per-provider capacity helper + explicit capability flags + pure least-cost-router.ts + unit tests. No tool yet."
+phase_1 = "route_request/route_request_async behind [least_cost].enabled=false; CLI providers with table prices only; routing block (incl costBasis + confidence); flight-recorder columns incl cost_basis + route_est_confidence; derived-cost backfill on logComplete for T2 providers already emitting counts (codex, gemini); T4 confidence:low for cursor/devin (enh 6)."
+phase_2 = "API-provider candidates priced from published catalogs + feedback aggregator (output priors AND input-token calibration k + residual spread feeding the calibrated estimator and confidence band, enh 2/5) + est-vs-actual reconciliation split by cost_basis + routing:// resources."
+phase_2b = "enh 4 (corrected): capture the dropped reasoningTokens in extractAcpPromptUsage + add it to the derived formula; make LCR transport-aware for grok (derive cost only via the operator-gated ACP transport, estimate-only on -p; never flip the ACP default on); extract cache_creation_input_tokens in the Anthropic-API adapter so its disjoint derived cost is complete. Small, isolated, own gate."
+phase_3 = "validation-tool select:'cheapest' opt-in; doctor/health eligibility + telemetry-tier + calibration-quality surfacing (enh 5); reconciliation reporting. Optional real-BPE tokenizer layer (enh 3, open question) is a candidate slice here if adopted."
 phase_4 = "DEFERRED (needs a new plan): provider:'auto' selector on per-provider tools and/or default_route. Mirrors ACP default_transport deferral."
 
 # ---------------------------------------------------------------------------
@@ -272,8 +327,11 @@ phase_4 = "DEFERRED (needs a new plan): provider:'auto' selector on per-provider
 output_prior_cold_start = "Ship per-family output-token defaults, or require a warm-up window of N samples before trusting a candidate prior?"
 tier_authority = "Are shipped tier assignments sufficient, or should tiers derive from a public benchmark reference kept in provider-definitions later?"
 api_model_discovery = "Does the API candidate pool come from a caller/config allow-list only, or a periodic /models catalog fetch (later phase)?"
-unpriced_cli_providers = "devin/cursor have no table price AND no usage telemetry, so they are excluded from LCR by default (usable only via explicit candidates + allow_unpriced). grok is NOT in this group: it is table-priced (src/pricing.ts GROK_4/GROK_BUILD) and phase_1 eligible; it merely lacks -p usage telemetry, which affects est-vs-actual reconciliation (feedback loop) only, not price-based eligibility. Confirm the devin/cursor exclusion."
-estimate_drift_threshold = "What est-vs-actual accuracy threshold triggers a price/prior refresh or an operator warning?"
+unpriced_cli_providers = "devin/cursor have no src/pricing.ts brand branch AND no usage telemetry; getModelCost prices them via modelIdToFamily(resolved model) when it maps to a priced family (estimate x that rate, confidence:low), else 'unknown' => excluded unless explicit candidates + allow_unpriced + budget waiver (enh 6). grok is NOT in this group: it is table-priced (src/pricing.ts GROK_4/GROK_BUILD) and phase_1 eligible on estimate; its ACP _meta counts are already threaded so it yields DERIVED cost when routed via the gated ACP transport (phase_2b), estimate-only on -p. Confirm the devin/cursor modelIdToFamily fallback."
+estimate_drift_threshold = "What est-vs-actual accuracy threshold (now split by cost_basis) triggers a price/prior refresh or an operator warning?"
+real_bpe_tokenizer = "Ship the calibrated heuristic only, or add an OPTIONAL gpt-tokenizer-style exact layer for the OpenAI family (a new prod dep the shrinkwrap/Socket/tarball gates scrutinise)? Proposed: heuristic+calibration by default; exact layer is an opt-in slice, never a default dependency."
+calibration_cold_start = "How many samples per (content-type,family) bucket before the estimator trusts a learned k over the layer-1/2 default? Proposed: a minimum sample count; below it, confidence:low and the base estimate stands."
+modelIdToFamily_completeness = "How complete must modelIdToFamily be, and what is the fallback when cursor/devin do not surface a resolvable model id at all? Proposed: treat as 'unknown' (excluded by default)."
 
 # ===========================================================================
 # Steps (dependency-ordered; each idempotent with a concrete validation)
@@ -298,13 +356,24 @@ actor = "implementer"
 action = """
 In src/pricing.ts add a NEW router-only getModelCost(provider, model): ModelCost
 with { inputUsdPerMTok, outputUsdPerMTok, cacheReadMultiplier, cacheWriteUsdPerMTok
-(default = inputUsd; Anthropic ~1.25x), source: "table"|"api-catalog"|"unknown",
-asOf }. CLI providers resolve from the family table. NEVER derive rates from a total
-costUsd. Unknown => source "unknown" (router excludes it). DO NOT change getPricing
-or estimateCacheSavingsUsd (their ZERO-for-unknown semantics stay for cache-stats).
+(default = inputUsd; Anthropic ~1.25x), accountingMode: "inclusive"|"disjoint" (enh 1,
+round-1 blocker 2), family: string (resolved pricing family),
+source: "table"|"api-catalog"|"unknown", asOf }. Add a CLI-agnostic
+modelIdToFamily(model) and price by the RESOLVED family, NOT the CLI brand
+(round-1 blocker 3): getPricing has no cursor/devin branch, but they run other
+families' models, so getModelCost maps the resolved model id to a family and prices
+that. Also add a single pure composeCost(counts | null, estimate, modelCost) ->
+{ costUsd, cost_basis, confidence } (enh 1) that yields provider-reported
+(passthrough), derived-from-tokens (counts x rate, branching on accountingMode:
+inclusive subtracts the cache-read discount, disjoint bills cache_read on fresh-only
+input, adds reasoningTokens at the output rate), or pre-flight-estimate; the forbidden
+scalar-total decomposition never appears. NEVER derive rates from a total costUsd.
+Unknown family/catalog => source "unknown" (router excludes it). DO NOT change
+getPricing or estimateCacheSavingsUsd (their ZERO-for-unknown semantics stay for
+cache-stats).
 """
 idempotent = true
-validation = "Unit test: getModelCost returns table rates for known families incl outputUsd and cacheWrite; unknown model => source 'unknown'; getPricing still returns ZERO for unknown (regression test unchanged). npm test green for pricing.test.ts."
+validation = "Unit test: getModelCost returns table rates for known families incl outputUsd, cacheWrite, accountingMode, and resolved family; modelIdToFamily maps a cursor/devin resolved model id to a priced family and an unknown id => 'unknown'; unknown model => source 'unknown'; getPricing still returns ZERO for unknown (regression unchanged). composeCost basis matrix: provider-reported passthrough, derived inclusive vs disjoint (disjoint bills cache_read, inclusive subtracts the discount), reasoningTokens added at output rate, unknown-rate => estimate+low-confidence, one pure fn drives derive AND rank. npm test green for pricing.test.ts."
 
 [[steps]]
 id = "export-cli-breaker-accessor"
@@ -344,15 +413,35 @@ idempotent = true
 validation = "npm run provider:surfaces:check passes; provider-definitions.test.ts asserts the new flags per provider; no new hand-maintained provider array introduced."
 
 [[steps]]
+id = "token-estimator"
+depends_on = ["freeze-contract"]
+actor = "implementer"
+action = """
+Create src/token-estimator.ts (enh 2+3): a PURE layered estimator, best available
+layer wins. Layer 1 content-aware base: a content-type classifier (prose ~chars/4,
+code/JSON/markup ~chars/3 per-language, CJK ~chars/1.5) over the whole prompt. Layer 2
+per-tokenizer-family multiplier keyed off the candidate's resolved family. Layer 3
+applies the calibration factor k from the aggregator when present (phase_2 wires the
+aggregator; phase_0 ships layers 1-2 with a k hook that defaults to 1). Replaces the
+direct optimizer.estimateTokens (ceil(words*1.3)) on the routing path only; the crude
+heuristic stays as the layer-1 floor for other callers. The optional real-BPE layer
+(open question) is a separate gated add-on, NOT a default dependency.
+"""
+idempotent = true
+validation = "Unit test: content-type classifier buckets prose/code/CJK to distinct char bases; per-family multiplier adjusts the base; k applied when supplied, defaults to 1 (no aggregator); deterministic over fixture text (no Math.random/Date.now). token-estimator.test.ts green."
+
+[[steps]]
 id = "router-core"
-depends_on = ["extend-pricing-getmodelcost", "export-cli-breaker-accessor", "capacity-helper", "promote-capability-flags"]
+depends_on = ["extend-pricing-getmodelcost", "token-estimator", "export-cli-breaker-accessor", "capacity-helper", "promote-capability-flags"]
 actor = "implementer"
 action = """
 Create src/least-cost-router.ts: a PURE selector. Build the candidate pool from
 new Set([...CLI_TYPES, ...enabledApiProviders().map(p=>p.name)]) crossed with model
 ids. Apply eligibility (auth via provider-status, breaker via new accessor, capacity
 helper, capability flags, tier floor, price known). Compute the RANKING estimate and
-the CONSERVATIVE BUDGET estimate (4.2). argmin(estCost) with deterministic tie-break
+the CONSERVATIVE BUDGET estimate (4.2) via the SAME pure composeCost (mode-aware,
+inclusive vs disjoint) fed by src/token-estimator.ts, so the ranking and derive paths
+can never drift. argmin(estCost) with deterministic tie-break
 (no Math.random/Date.now). Enforce budget with the budget estimate. Expose
 selectCandidate(request, excluded: Set) so the dispatcher can RE-SELECT over the
 remaining pool after a failure. Encode the budget-waiver rule: an unpriced
@@ -361,7 +450,7 @@ allowUnpriced and budgetWaiver are set, otherwise it fails the budget gate. Hono
 explicit `fallback` returned only when the eligible pool is empty. No CLI spawn here.
 """
 idempotent = true
-validation = "Unit tests (mocked SoT): eligibility filters each reject for the right reason; deterministic argmin stable across runs; budget gate fails closed; unpriced/over-budget rejected unless allowUnpriced AND budgetWaiver are both set; untiered excluded; selectCandidate(excluded) returns the next-cheapest; fallback returned only when the pool is empty. least-cost-router.test.ts green."
+validation = "Unit tests (mocked SoT): eligibility filters each reject for the right reason; ranking estimate is mode-aware (inclusive vs disjoint) via composeCost + token-estimator; deterministic argmin stable across runs; budget gate fails closed; unpriced/over-budget rejected unless allowUnpriced AND budgetWaiver are both set; untiered excluded; selectCandidate(excluded) returns the next-cheapest; fallback returned only when the pool is empty. least-cost-router.test.ts green."
 
 [[steps]]
 id = "config-least-cost"
@@ -405,11 +494,17 @@ depends_on = ["register-route-tools"]
 actor = "implementer"
 action = """
 Add nullable columns to gateway_metadata (additive migration): routed,
-route_est_cost_usd, route_reason, route_considered, route_reroutes. Populate them on
-routed requests. Actual cost_usd/output_tokens/model are already recorded.
+route_est_cost_usd, route_est_confidence (high|medium|low, enh 5), route_reason,
+route_considered, route_reroutes, and a request-wide cost_basis (provider-reported |
+derived-from-tokens | pre-flight-estimate, enh 1). Populate them on routed requests.
+On logComplete, backfill cost_usd + cost_basis='derived-from-tokens' for T2 rows
+(codex, gemini) from the recorded token counts x getModelCost/composeCost; T1 rows keep
+their provider-reported cost. Wire T2 counts through composeCost at extractUsageAndCost
+(src/index.ts:2045) and fix the stale 'ACP usage not wired' comment (src/index.ts:2138-2143).
+Actual cost_usd/output_tokens/model are already recorded.
 """
 idempotent = true
-validation = "Migration test: fresh + legacy DB open clean; a routed request writes the new columns; llm_request_result surfaces them; existing non-routed rows unaffected."
+validation = "Migration test: fresh + legacy DB open clean; a routed request writes the new columns incl cost_basis + route_est_confidence; a T2 request's cost_usd is backfilled at cost_basis='derived-from-tokens' on completion while a T1 row stays 'provider-reported'; llm_request_result surfaces them; existing non-routed rows unaffected."
 
 [[steps]]
 id = "api-catalog-pricing"
@@ -431,23 +526,48 @@ actor = "implementer"
 action = """
 Phase 2: add src/lcr-priors.ts, a read-only aggregator (cache-stats.ts pattern)
 computing per-(provider,model) rolling median and p90 output_tokens (feed the ranking
-and budget priors) and est-vs-actual cost reconciliation. Anonymized model-level
-aggregates only; honor priors_scope (global|principal|off) against owner_principal.
+and budget priors), PLUS (enh 2/5) the input-token calibration factor
+k = median(actual_input_tokens / base_estimate) per (content-type, resolved family),
+its sample count, and the residual p10/p50/p90 of actual/estimate feeding the
+confidence band, and per-(provider,model) est-vs-actual accuracy split BY cost_basis.
+Feed k into token-estimator layer 3. Calibration caveats: reconstruct disjoint-family
+actual_input as fresh+cache_read+cache_creation before the ratio, and exclude mistral
+session-continued (cumulative-count) rows so k is not poisoned. Anonymized model-level
+aggregates only; bucket by resolved family via modelIdToFamily, never the CLI brand;
+honor priors_scope (global|principal|off) against owner_principal.
 """
 idempotent = true
-validation = "Unit test: aggregator emits model-level median/p90 only; priors_scope=principal restricts to the caller's owner_principal rows; priors_scope=off disables learning; no cross-principal leakage."
+validation = "Unit test: aggregator emits model-level median/p90 + calibration k (with sample count + residual p10/p50/p90) + accuracy split by cost_basis; k bucketed by (content-type, resolved family); disjoint actual_input reconstructed as fresh+cache_read+cache_creation; mistral session-continued rows excluded; priors_scope=principal restricts to the caller's owner_principal rows; priors_scope=off disables learning; no cross-principal leakage."
 
 [[steps]]
 id = "routing-resources"
 depends_on = ["feedback-aggregator"]
 actor = "implementer"
 action = """
-Phase 2: expose routing://decisions (recent redacted decisions) and routing://priors
-(current priors + price asOf), read-only, gated behind enabled. Extend
-llm_process_health with per-candidate eligibility.
+Phase 2: expose routing://decisions (recent redacted decisions, each with its
+cost_basis + confidence) and routing://priors (output priors + input-calibration k +
+sample count/quality + price asOf), read-only, gated behind enabled. Extend
+llm_process_health with per-candidate eligibility + per-provider telemetry tier.
 """
 idempotent = true
-validation = "resources.test.ts: both resources present only when enabled; content redacted (no secrets/base_url userinfo/raw prompts); llm_process_health shows candidate eligibility."
+validation = "resources.test.ts: both resources present only when enabled; routing://decisions carries cost_basis + confidence, routing://priors carries k + quality; content redacted (no secrets/base_url userinfo/raw prompts); llm_process_health shows candidate eligibility + telemetry tier."
+
+[[steps]]
+id = "grok-anthropic-derivation"
+depends_on = ["router-core", "flight-recorder-migration"]
+actor = "implementer"
+action = """
+Phase 2b (enh 4, round-1 corrected): grok ACP _meta counts are ALREADY threaded
+(src/acp/runtime.ts:262-266), so the work is (a) capture the dropped reasoningTokens in
+extractAcpPromptUsage (src/acp/runtime.ts:119) and add it to composeCost's derived total
+at the output rate; (b) make LCR transport-aware for grok, deriving cost only when grok
+is routed via the operator-gated ACP transport ([acp].enabled + per-provider
+runtime_enabled; default transport stays cli), estimate-only on -p; NEVER flip the ACP
+default on; (c) extract cache_creation_input_tokens in the Anthropic-API adapter
+(src/api-provider.ts:251-254) so its disjoint derived cost is complete. Small, isolated.
+"""
+idempotent = true
+validation = "Unit test: extractAcpPromptUsage captures reasoningTokens and the derived total adds it at the output rate; a grok candidate is (grok, transport) - derived via ACP, estimate-only via -p, ACP default not flipped; Anthropic-API adapter extracts cache_creation_input_tokens so its disjoint derived cost is complete. acp-runtime + api-provider tests green."
 
 [[steps]]
 id = "validation-tool-cheapest"
@@ -466,11 +586,12 @@ id = "doctor-eligibility"
 depends_on = ["routing-resources"]
 actor = "implementer"
 action = """
-Phase 3: surface pricing.asOf staleness and per-candidate eligibility
-(priced?/authed?/breaker?/tier?) + untiered models in doctor/health output.
+Phase 3: surface pricing.asOf staleness, per-provider telemetry tier (T1-T4),
+per-candidate eligibility (priced?/authed?/breaker?/tier?), per-(content-type,family)
+calibration quality (k, samples, confidence), and untiered models in doctor/health output.
 """
 idempotent = true
-validation = "doctor --json includes a least_cost block validated against setup/status.schema.json (extend the schema); untiered models listed."
+validation = "doctor --json includes a least_cost block (telemetry tiers, calibration quality, pricing.asOf staleness) validated against setup/status.schema.json (extend the schema); untiered models listed."
 
 # Per-phase gates: each phase has its OWN review + release gate so a phase ships
 # independently and its release does not require later-phase work. Ordering is
@@ -483,9 +604,10 @@ depends_on = ["router-core"]
 actor = "reviewer"
 action = """
 Cross-LLM review gate (Codex read-only + Grok + Gemini) on the phase_0 diff
-(getModelCost, per-CLI breaker accessor, capacity helper, capability flags, the pure
-least-cost-router.ts + its unit tests) against origin/master. Verify every claim
-against code, not narrative; iterate to unconditional approval.
+(getModelCost + composeCost + modelIdToFamily, layered token-estimator.ts, per-CLI
+breaker accessor, capacity helper, capability flags, the pure least-cost-router.ts + its
+unit tests) against origin/master. Verify every claim against code, not narrative;
+iterate to unconditional approval.
 """
 idempotent = true
 validation = "Unconditional Codex + Grok + Gemini approval recorded for the phase_0 diff, evidence-based; no open blockers."
@@ -509,7 +631,8 @@ actor = "reviewer"
 action = """
 Cross-LLM review gate on the phase_1 diff (config-least-cost, route_request /
 route_request_async behind enabled=false, dispatch + resilience loop incl.
-reroute/fallback/budget-waiver, routing block, flight-recorder migration) against
+reroute/fallback/budget-waiver, routing block incl costBasis+confidence, flight-recorder
+migration incl cost_basis + route_est_confidence + T2 derived-cost backfill) against
 origin/master, after phase_0 shipped. Verify against code; iterate to unconditional
 approval.
 """
@@ -533,9 +656,10 @@ id = "review-gate-phase_2"
 depends_on = ["routing-resources", "release-gate-phase_1"]
 actor = "reviewer"
 action = """
-Cross-LLM review gate on the phase_2 diff (api-catalog pricing, output-prior feedback
-aggregator, routing:// resources, est-vs-actual reconciliation) against origin/master,
-after phase_1 shipped. Verify against code; iterate to unconditional approval.
+Cross-LLM review gate on the phase_2 diff (api-catalog pricing, feedback aggregator incl
+input-token calibration k + residual spread + confidence band, routing:// resources,
+est-vs-actual reconciliation split by cost_basis) against origin/master, after phase_1
+shipped. Verify against code; iterate to unconditional approval.
 """
 idempotent = true
 validation = "Unconditional Codex + Grok + Gemini approval recorded for the phase_2 diff; no open blockers."
@@ -551,8 +675,33 @@ idempotent = true
 validation = "All release_gates green on the phase_2 PR; merged to master."
 
 [[steps]]
+id = "review-gate-phase_2b"
+depends_on = ["grok-anthropic-derivation", "release-gate-phase_2"]
+actor = "reviewer"
+action = """
+Cross-LLM review gate on the phase_2b diff (grok reasoningTokens capture + transport-aware
+derivation, Anthropic-API cache_creation extraction) against origin/master, after phase_2
+shipped. Verify against code (the _meta is already threaded; confirm the reasoningTokens
+capture and that the ACP default is NOT flipped); iterate to unconditional approval.
+"""
+idempotent = true
+validation = "Unconditional Codex + Grok + Gemini approval recorded for the phase_2b diff; no open blockers; ACP default transport unchanged."
+
+[[steps]]
+id = "release-gate-phase_2b"
+depends_on = ["review-gate-phase_2b"]
+actor = "implementer"
+action = """
+Full gate for phase_2b. Merge via PR with green CI checks (no admin bypass). Ships the
+grok-ACP derived-cost path behind the existing operator ACP gate; grok-`-p` stays
+estimate-only.
+"""
+idempotent = true
+validation = "All release_gates green on the phase_2b PR; merged to master; ACP default transport still cli."
+
+[[steps]]
 id = "review-gate-phase_3"
-depends_on = ["validation-tool-cheapest", "doctor-eligibility", "release-gate-phase_2"]
+depends_on = ["validation-tool-cheapest", "doctor-eligibility", "release-gate-phase_2b"]
 actor = "reviewer"
 action = """
 Cross-LLM review gate on the phase_3 diff (validation-tool select:'cheapest' opt-in,
