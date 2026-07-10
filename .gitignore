@@ -49,3 +49,4 @@ windows-mcp-config-with-gateway.json
 pnpm-lock.yaml
 pnpm-workspace.yaml
 .playwright-mcp/
+.supply-chain/
