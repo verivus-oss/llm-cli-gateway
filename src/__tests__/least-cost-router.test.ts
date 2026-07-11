@@ -58,6 +58,12 @@ interface MockEnvOptions {
   costs: Record<string, ModelCost>;
   successRate?: Record<string, number>;
   meanLatencyMs?: Record<string, number>;
+  /** Layer-3 calibration factor per resolved family (default 1). */
+  calibrationK?: Record<string, number>;
+  /** Learned output-token prior per "provider:model" (median/p90). */
+  outputPrior?: Record<string, { median: number; p90: number }>;
+  /** Calibration confidence band per resolved family (default "low"). */
+  confidenceBand?: Record<string, "high" | "medium" | "low">;
 }
 
 function makeEnv(opts: MockEnvOptions): RouterEnv {
@@ -73,6 +79,10 @@ function makeEnv(opts: MockEnvOptions): RouterEnv {
     successRate: (provider: string, model: string) => opts.successRate?.[key(provider, model)] ?? 0,
     meanLatencyMs: (provider: string, model: string) =>
       opts.meanLatencyMs?.[key(provider, model)] ?? 0,
+    calibrationK: (_prompt: string, family: string) => opts.calibrationK?.[family] ?? 1,
+    outputPrior: (provider: string, model: string) =>
+      opts.outputPrior?.[key(provider, model)] ?? null,
+    confidenceBand: (_prompt: string, family: string) => opts.confidenceBand?.[family] ?? "low",
   };
 }
 
@@ -491,5 +501,55 @@ describe("least-cost-router: fallback", () => {
     expect(breakerDecision.chosen).toBeNull();
     expect(breakerDecision.error).toBe("NoEligibleCandidate");
     expect(breakerDecision.rejected).toContainEqual({ candidate: fallback, reason: "breaker" });
+  });
+});
+
+describe("least-cost-router: output priors + confidence band (phase_2)", () => {
+  it("uses the learned median output prior for the ranking estimate", () => {
+    const env = makeEnv({
+      providers: ["cheap"],
+      models: { cheap: ["cheap-haiku-1"] },
+      costs: { "cheap:cheap-haiku-1": priced("claude-haiku", 1, 1) },
+      outputPrior: { "cheap:cheap-haiku-1": { median: 4000, p90: 4000 } },
+    });
+    const decision = selectCandidate(REQ, env, BASE_CONFIG);
+    // estOutputTokens follows the learned median (4000), not the config default (500).
+    expect(decision.estOutputTokens).toBe(4000);
+  });
+
+  it("prefers the caller's expectedOutputTokens over the learned prior", () => {
+    const env = makeEnv({
+      providers: ["cheap"],
+      models: { cheap: ["cheap-haiku-1"] },
+      costs: { "cheap:cheap-haiku-1": priced("claude-haiku", 1, 1) },
+      outputPrior: { "cheap:cheap-haiku-1": { median: 4000, p90: 8000 } },
+    });
+    const decision = selectCandidate({ ...REQ, expectedOutputTokens: 123 }, env, BASE_CONFIG);
+    expect(decision.estOutputTokens).toBe(123);
+  });
+
+  it("uses the p90 output prior as the conservative budget bound (fails closed when it blows the cap)", () => {
+    const env = makeEnv({
+      providers: ["cheap"],
+      models: { cheap: ["cheap-haiku-1"] },
+      // $10/Mtok output: a p90 of 2,000,000 output tokens => ~$20 budget cost > $1 cap.
+      costs: { "cheap:cheap-haiku-1": priced("claude-haiku", 1, 10) },
+      outputPrior: { "cheap:cheap-haiku-1": { median: 100, p90: 2_000_000 } },
+    });
+    const decision = selectCandidate(REQ, env, BASE_CONFIG);
+    expect(decision.chosen).toBeNull();
+    expect(decision.error).toBe("BudgetExceeded");
+  });
+
+  it("composes confidence as min(cost_basis, band): a pre-flight estimate stays low", () => {
+    const env = makeEnv({
+      providers: ["cheap"],
+      models: { cheap: ["cheap-haiku-1"] },
+      costs: { "cheap:cheap-haiku-1": priced("claude-haiku", 0.1, 0.2) },
+      confidenceBand: { "claude-haiku": "high" },
+    });
+    const decision = selectCandidate(REQ, env, BASE_CONFIG);
+    // cost_basis for a pre-flight estimate is "low", so min(low, high) = low.
+    expect(decision.confidence).toBe("low");
   });
 });

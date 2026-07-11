@@ -329,43 +329,84 @@ const FAMILY_PRICING = new Map<string, PricePerMillion>([
   ["mistral-devstral", MISTRAL_DEVSTRAL],
 ]);
 
-/**
- * Router-only per-candidate cost accessor built beside getPricing. Resolves the
- * pricing family from the model id (CLI-agnostic, contract decision 4) and
- * builds a ModelCost from the SAME rate table getPricing uses.
- *
- * `provider` is accepted for signature parity with the future api-catalog path
- * (OpenRouter / xAI resolve per-token rates from a published catalog); the table
- * path prices purely by resolved family.
- *
- * accountingMode is "disjoint" for the claude/anthropic family (input_tokens is
- * fresh-only, cache read is billed) and "inclusive" otherwise (spec 4.1a).
- * cacheWriteUsdPerMTok defaults to the input rate: the PricePerMillion table
- * does not encode a separate cache-creation multiplier yet, so Anthropic's
- * ~1.25x lands when the table carries it rather than being hardcoded here.
- *
- * An unresolved family returns `source: "unknown"` with zeroed rates so the
- * router EXCLUDES the candidate (contract decision 5). This deliberately does
- * NOT inherit getPricing's ZERO-that-looks-free behaviour.
- */
-export function getModelCost(provider: string, model: string): ModelCost {
-  const family = modelIdToFamily(model);
-  const rate = FAMILY_PRICING.get(family);
-  if (rate === undefined) {
-    const unknownSource: PriceSource = "unknown";
-    return {
-      inputUsdPerMTok: 0,
-      outputUsdPerMTok: 0,
-      cacheReadMultiplier: 0,
-      cacheWriteUsdPerMTok: 0,
-      accountingMode: "inclusive",
-      family: "unknown",
-      source: unknownSource,
-      asOf: PRICING_AS_OF,
-    };
-  }
+// ---------------------------------------------------------------------------
+// API-provider published catalog (phase_2, DAG step api-catalog-pricing).
+//
+// OpenRouter (`/models` prompt/completion prices) and xAI publish PER-TOKEN
+// rates directly, so an API-provider candidate is priced from this catalog with
+// `source: "api-catalog"` rather than the CLI family table. This is a CURATED
+// static snapshot with its own asOf (mirroring the table); a periodic live
+// `/models` fetch is a deferred open question, NOT this phase. The forbidden
+// direction (splitting a reported scalar `costUsd` into rates) never appears:
+// these are published per-token rates, used as-is.
+//
+// Keyed by the LOWERCASED model id the API provider serves (OpenRouter uses
+// "vendor/model" slugs; xAI uses bare model ids). CLI model aliases (sonnet,
+// gpt-5.5, ...) are not catalog keys, so a CLI candidate never resolves here.
+// ---------------------------------------------------------------------------
+
+export const API_CATALOG_AS_OF = "2026-07-11";
+
+/** A published per-token rate for an API-provider model (USD per 1M tokens). */
+export interface ApiCatalogEntry {
+  inputUsdPerMTok: number;
+  outputUsdPerMTok: number;
+  /** Multiplier on input for a cache-read hit; 0 when the vendor bills no discount. */
+  cacheReadMultiplier: number;
+  /** How input/cache split for this model (spec 4.1a). Default inclusive. */
+  accountingMode?: AccountingMode;
+  /** Resolved pricing family label for prior/calibration bucketing (optional). */
+  family?: string;
+}
+
+export type ApiCatalog = ReadonlyMap<string, ApiCatalogEntry>;
+
+// Curated snapshot. Extend as providers/models are added; every entry is a
+// vendor-published per-token rate, never a decomposed total. Anthropic-served
+// models are disjoint; OpenAI/Google/xAI are inclusive.
+export const API_CATALOG: ApiCatalog = new Map<string, ApiCatalogEntry>([
+  // OpenRouter "vendor/model" slugs.
+  [
+    "openai/gpt-5.5",
+    {
+      inputUsdPerMTok: 1.25,
+      outputUsdPerMTok: 10,
+      cacheReadMultiplier: 0.5,
+      family: "openai-gpt5",
+    },
+  ],
+  [
+    "anthropic/claude-sonnet-4.5",
+    {
+      inputUsdPerMTok: 3,
+      outputUsdPerMTok: 15,
+      cacheReadMultiplier: 0.1,
+      accountingMode: "disjoint",
+      family: "claude-sonnet",
+    },
+  ],
+  [
+    "google/gemini-2.5-flash",
+    {
+      inputUsdPerMTok: 0.3,
+      outputUsdPerMTok: 2.5,
+      cacheReadMultiplier: 0.1,
+      family: "gemini-2.5-flash",
+    },
+  ],
+  // xAI published rates (bare model ids served by the xai-responses provider).
+  [
+    "grok-build-0.1",
+    { inputUsdPerMTok: 1, outputUsdPerMTok: 2, cacheReadMultiplier: 0.2, family: "grok-build" },
+  ],
+  [
+    "grok-4",
+    { inputUsdPerMTok: 1.25, outputUsdPerMTok: 2.5, cacheReadMultiplier: 0.16, family: "grok-4" },
+  ],
+]);
+
+function tableModelCost(family: string, rate: PricePerMillion): ModelCost {
   const accountingMode: AccountingMode = family.startsWith("claude-") ? "disjoint" : "inclusive";
-  const source: PriceSource = "table";
   return {
     inputUsdPerMTok: rate.inputUsd,
     outputUsdPerMTok: rate.outputUsd,
@@ -374,9 +415,76 @@ export function getModelCost(provider: string, model: string): ModelCost {
     cacheWriteUsdPerMTok: rate.inputUsd,
     accountingMode,
     family,
-    source,
+    source: "table",
     asOf: PRICING_AS_OF,
   };
+}
+
+function catalogModelCost(model: string, entry: ApiCatalogEntry): ModelCost {
+  const family = entry.family ?? modelIdToFamily(model);
+  return {
+    inputUsdPerMTok: entry.inputUsdPerMTok,
+    outputUsdPerMTok: entry.outputUsdPerMTok,
+    cacheReadMultiplier: entry.cacheReadMultiplier,
+    // Published catalogs list input/output/cache-read but not a separate
+    // cache-write rate, so default it to input (parity with the table path).
+    cacheWriteUsdPerMTok: entry.inputUsdPerMTok,
+    accountingMode: entry.accountingMode ?? "inclusive",
+    family: family === "unknown" ? model.toLowerCase() : family,
+    source: "api-catalog",
+    asOf: API_CATALOG_AS_OF,
+  };
+}
+
+const UNKNOWN_MODEL_COST: ModelCost = {
+  inputUsdPerMTok: 0,
+  outputUsdPerMTok: 0,
+  cacheReadMultiplier: 0,
+  cacheWriteUsdPerMTok: 0,
+  accountingMode: "inclusive",
+  family: "unknown",
+  source: "unknown",
+  asOf: PRICING_AS_OF,
+};
+
+/**
+ * Router-only per-candidate cost accessor built beside getPricing. Two price
+ * sources: the CLI family table (priced by resolved model family, contract
+ * decision 4) and, for API-provider models, the published api-catalog
+ * (`API_CATALOG`). When a model resolves in BOTH, `preferCatalog` (config
+ * `prefer_catalog_price`, default true) decides which wins; otherwise whichever
+ * is present is used.
+ *
+ * accountingMode is "disjoint" for the claude/anthropic family (input_tokens is
+ * fresh-only, cache read is billed) and "inclusive" otherwise (spec 4.1a).
+ * cacheWriteUsdPerMTok defaults to the input rate (the rate sources do not carry
+ * a separate cache-creation number yet).
+ *
+ * An unresolved model returns `source: "unknown"` with zeroed rates so the
+ * router EXCLUDES the candidate (contract decision 5). This deliberately does
+ * NOT inherit getPricing's ZERO-that-looks-free behaviour. NEVER derives rates
+ * from a scalar total (contract decision 7).
+ */
+export function getModelCost(
+  provider: string,
+  model: string,
+  opts?: { catalog?: ApiCatalog; preferCatalog?: boolean }
+): ModelCost {
+  const catalog = opts?.catalog ?? API_CATALOG;
+  const preferCatalog = opts?.preferCatalog ?? true;
+  const catalogEntry = catalog.get(model.toLowerCase());
+  const family = modelIdToFamily(model);
+  const familyRate = FAMILY_PRICING.get(family);
+
+  // Catalog wins when preferred (default) or when it is the only source.
+  if (catalogEntry !== undefined && (preferCatalog || familyRate === undefined)) {
+    return catalogModelCost(model, catalogEntry);
+  }
+  if (familyRate !== undefined) {
+    return tableModelCost(family, familyRate);
+  }
+  // Model in neither catalog nor table.
+  return { ...UNKNOWN_MODEL_COST };
 }
 
 /**

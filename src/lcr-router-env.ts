@@ -34,9 +34,17 @@ import { cliBreakerState } from "./executor.js";
 import { apiProviderBreakerState } from "./api-provider.js";
 import { providerAtCapacity, type JobLimiterSnapshot } from "./async-job-manager.js";
 import { getModelCost } from "./pricing.js";
+import { classifyContent } from "./token-estimator.js";
+import {
+  computeLcrPriorsFromDb,
+  lookupCalibrationK,
+  type LcrPriors,
+  type PriorsScope,
+} from "./lcr-priors.js";
+import type { FlightRecorderQuery } from "./flight-recorder.js";
 import type { PerformanceMetrics } from "./metrics.js";
 import type { ApiProviderRuntime, LeastCostConfig } from "./config.js";
-import type { ModelCost } from "./least-cost-types.js";
+import type { ModelCost, Confidence } from "./least-cost-types.js";
 import type { RouterEnv, RouterConfig, CandidateCapabilities } from "./least-cost-router.js";
 
 const CLI_TYPE_SET: ReadonlySet<string> = new Set<string>(CLI_TYPES);
@@ -69,6 +77,62 @@ export interface RouterEnvDeps {
    * and true for the (already-enabled) API providers; see the module doc.
    */
   isAuthed?: (provider: string) => boolean;
+  /**
+   * Prefer the published api-catalog price over the CLI family table when a
+   * model resolves in both (config `prefer_catalog_price`, default true).
+   */
+  preferCatalogPrice?: boolean;
+  /**
+   * Flight-recorder read handle for the calibration priors (token-estimator
+   * layer 3). Omitted / absent => calibration is neutral (k = 1). Priors are
+   * memoized with a short TTL so routing does not scan the recorder per request.
+   */
+  flightRecorder?: FlightRecorderQuery;
+  /** Learning scope for priors (config `priors_scope`); default global. */
+  priorsScope?: PriorsScope;
+  /** Caller principal for `priors_scope = "principal"` scoping. */
+  ownerPrincipal?: string;
+  /** Test override: supply priors directly, bypassing the recorder + cache. */
+  priors?: LcrPriors;
+}
+
+const EMPTY_PRIORS: LcrPriors = {
+  outputPriors: new Map(),
+  calibration: new Map(),
+  accuracyByBasis: new Map(),
+};
+
+// Priors are expensive to compute (a flight-recorder scan), so memoize them with
+// a short TTL keyed by (scope, principal). The clock read lives in this env seam
+// by design (the ranker stays clock-free). One in-process entry is enough: the
+// router reads priors for one (scope, principal) at a time per request.
+const PRIORS_TTL_MS = 60_000;
+let priorsCacheEntry: { at: number; key: string; priors: LcrPriors } | null = null;
+
+function resolvePriors(deps: RouterEnvDeps): LcrPriors {
+  if (deps.priors) return deps.priors;
+  const scope: PriorsScope = deps.priorsScope ?? "global";
+  if (scope === "off" || !deps.flightRecorder) return EMPTY_PRIORS;
+  const key = `${scope}:${deps.ownerPrincipal ?? ""}`;
+  const now = Date.now();
+  if (
+    priorsCacheEntry &&
+    priorsCacheEntry.key === key &&
+    now - priorsCacheEntry.at < PRIORS_TTL_MS
+  ) {
+    return priorsCacheEntry.priors;
+  }
+  const priors = computeLcrPriorsFromDb(deps.flightRecorder, {
+    priorsScope: scope,
+    ownerPrincipal: deps.ownerPrincipal,
+  });
+  priorsCacheEntry = { at: now, key, priors };
+  return priors;
+}
+
+/** Test-only: clear the memoized priors so a test's injected recorder is re-read. */
+export function resetLcrPriorsCacheForTest(): void {
+  priorsCacheEntry = null;
 }
 
 function candidateCapabilities(provider: string): CandidateCapabilities {
@@ -103,6 +167,8 @@ export function buildRouterEnv(deps: RouterEnvDeps): RouterEnv {
     string,
     { successRate: number; averageResponseTimeMs: number }
   >;
+  // Resolve priors ONCE per build (memoized), so calibrationK is O(1) per candidate.
+  const priors = resolvePriors(deps);
 
   const isAuthed =
     deps.isAuthed ??
@@ -136,13 +202,24 @@ export function buildRouterEnv(deps: RouterEnvDeps): RouterEnv {
       return candidateCapabilities(provider);
     },
     modelCost(provider: string, model: string): ModelCost {
-      return getModelCost(provider, model);
+      return getModelCost(provider, model, { preferCatalog: deps.preferCatalogPrice });
     },
     successRate(provider: string): number {
       return metricsByTool[provider]?.successRate ?? 0;
     },
     meanLatencyMs(provider: string): number {
       return metricsByTool[provider]?.averageResponseTimeMs ?? 0;
+    },
+    calibrationK(prompt: string, family: string): number {
+      return lookupCalibrationK(priors, classifyContent(prompt), family);
+    },
+    outputPrior(provider: string, model: string): { median: number; p90: number } | null {
+      const p = priors.outputPriors.get(`${provider}:${model}`);
+      return p ? { median: p.median, p90: p.p90 } : null;
+    },
+    confidenceBand(prompt: string, family: string): Confidence {
+      const bucket = priors.calibration.get(`${classifyContent(prompt)}:${family}`);
+      return bucket?.confidence ?? "low";
     },
   };
 }

@@ -64,6 +64,26 @@ export interface RouterEnv {
   successRate(provider: string, model: string): number;
   /** Mean latency in ms for tie-break; default 0 is acceptable. */
   meanLatencyMs(provider: string, model: string): number;
+  /**
+   * Learned input-token calibration factor `k` for `(content-type of prompt,
+   * resolved family)` (token-estimator layer 3, spec 4.2). Production reads the
+   * flight-recorder priors; default 1 (neutral, cold-start) is always safe. Feeds
+   * the point estimate only, so determinism is preserved for a fixed env.
+   */
+  calibrationK(prompt: string, family: string): number;
+  /**
+   * Learned output-token prior for `(provider, model)`: `median` feeds the
+   * RANKING output estimate and `p90` the conservative BUDGET bound (spec 4.2,
+   * DAG feedback-aggregator). `null` when no prior exists (cold start): the
+   * caller value or the config default is used instead.
+   */
+  outputPrior(provider: string, model: string): { median: number; p90: number } | null;
+  /**
+   * Advisory calibration confidence band for `(content-type of prompt, family)`
+   * (enhancement 5). Composed as `min(cost_basis, band)` into the reported
+   * confidence; never re-orders the argmin. `"low"` when uncalibrated.
+   */
+  confidenceBand(prompt: string, family: string): Confidence;
 }
 
 /** Per-request capability constraints (4.3.3). */
@@ -286,6 +306,15 @@ interface RankedCandidate {
   rankKey: number;
   costBasis: CostBasis;
   confidence: Confidence;
+  /** Conservative output bound for the budget gate (p90 prior / caller cap / default). */
+  budgetOutputTokens: number;
+}
+
+const CONFIDENCE_ORDER: Record<Confidence, number> = { low: 0, medium: 1, high: 2 };
+
+/** Compose two confidence labels as their minimum (spec 4.2 enh 5: min(cost_basis, band)). */
+function minConfidence(a: Confidence, b: Confidence): Confidence {
+  return CONFIDENCE_ORDER[a] <= CONFIDENCE_ORDER[b] ? a : b;
 }
 
 function rankCandidate(
@@ -293,13 +322,33 @@ function rankCandidate(
   tier: QualityTier | undefined,
   modelCost: ModelCost,
   req: RouteRequestInput,
-  config: RouterConfig
+  config: RouterConfig,
+  env: RouterEnv
 ): RankedCandidate {
   const family =
     modelCost.family !== "unknown" ? modelCost.family : modelIdToFamily(candidate.model);
-  const estInputTokens = estimateInputTokens(req.prompt, { family });
-  const estOutputTokens = req.expectedOutputTokens ?? config.defaultExpectedOutputTokens;
+  // Layer-3 calibration: the env supplies the learned k for this prompt's
+  // content-type and family (1 when uncalibrated). It refines the point estimate
+  // only; the tie-break and budget gate stay deterministic for a fixed env.
+  const calibrationK = env.calibrationK(req.prompt, family);
+  const estInputTokens = estimateInputTokens(req.prompt, { family, calibrationK });
+  // Output-token estimate (spec 4.2 + DAG feedback-aggregator): caller value wins,
+  // else the learned MEDIAN prior for ranking, else the config default. The budget
+  // gate uses the conservative P90 prior (caller cap wins, else p90, else the
+  // default scaled by the safety factor).
+  const prior = env.outputPrior(candidate.provider, candidate.model);
+  const estOutputTokens =
+    req.expectedOutputTokens ??
+    (prior ? Math.max(1, Math.round(prior.median)) : config.defaultExpectedOutputTokens);
+  const budgetOutputTokens =
+    req.maxOutputTokens ??
+    (prior
+      ? Math.max(1, Math.round(prior.p90))
+      : config.defaultExpectedOutputTokens * config.budgetOutputSafetyFactor);
   const rankResult = composeCost(null, { estInputTokens, estOutputTokens }, modelCost);
+  // Reported confidence = min(cost_basis confidence, calibration band). Advisory:
+  // it never re-orders the argmin (which is over rankKey / cost only).
+  const band = env.confidenceBand(req.prompt, family);
   return {
     candidate,
     tier,
@@ -309,7 +358,8 @@ function rankCandidate(
     rankCostUsd: rankResult.costUsd,
     rankKey: modelCost.source === "unknown" ? Number.POSITIVE_INFINITY : rankResult.costUsd,
     costBasis: rankResult.cost_basis,
-    confidence: rankResult.confidence,
+    confidence: minConfidence(rankResult.confidence, band),
+    budgetOutputTokens,
   };
 }
 
@@ -381,11 +431,11 @@ function checkBudget(
     return { ok: false, reason: "budget" };
   }
 
-  const budgetOutput =
-    req.maxOutputTokens ?? config.defaultExpectedOutputTokens * config.budgetOutputSafetyFactor;
+  // Conservative output bound resolved at rank time: caller cap, else the learned
+  // p90 prior, else the config default x safety factor (spec 4.2).
   const budgetResult = composeCost(
     null,
-    { estInputTokens, estOutputTokens: budgetOutput },
+    { estInputTokens, estOutputTokens: ranked.budgetOutputTokens },
     modelCost
   );
   const budgetCost = budgetResult.costUsd;
@@ -496,7 +546,8 @@ export function selectCandidate(
         fbTier.tier,
         fallbackModelCost,
         req,
-        config
+        config,
+        env
       );
       const budget = checkBudget(fallbackRanked, req, config, true);
       if (!budget.ok) {
@@ -519,7 +570,9 @@ export function selectCandidate(
     };
   }
 
-  const ranked = eligible.map(e => rankCandidate(e.candidate, e.tier, e.modelCost, req, config));
+  const ranked = eligible.map(e =>
+    rankCandidate(e.candidate, e.tier, e.modelCost, req, config, env)
+  );
   ranked.sort((a, b) => compareCandidates(a, b, env, config));
 
   const best = ranked[0];
