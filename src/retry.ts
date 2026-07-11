@@ -62,7 +62,7 @@ export interface RetryOptions {
  * @param error The error object.
  * @returns True if the error is considered transient.
  */
-const isDefaultTransient = (error: any): boolean => {
+export const isDefaultTransient = (error: any): boolean => {
   if (!error) {
     return false;
   }

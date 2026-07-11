@@ -10,6 +10,7 @@ import { hashSecret, isSecretHash } from "./oauth.js";
 import { isHttpsOrLoopbackUrl, isLoopbackUrl } from "./api-http.js";
 import type { ApiProviderKind } from "./api-provider.js";
 import { CLI_TYPES } from "./provider-types.js";
+import type { QualityTier } from "./least-cost-types.js";
 
 // Zod schemas for configuration validation
 const DatabaseUrlSchema = z
@@ -797,6 +798,224 @@ export function loadCompressionConfig(logger: Logger = noopLogger): CompressionC
   return {
     enabled: parsedCompression.enabled,
     sources: { configFile: sourcePath },
+  };
+}
+
+//──────────────────────────────────────────────────────────────────────────────
+// Least-cost-routing (LCR) configuration ([least_cost])
+//
+// Reads the [least_cost] block (plus [least_cost.tiers] / [least_cost.candidates]
+// sub-tables) from the same ~/.llm-cli-gateway/config.toml as the other tables,
+// with its own loader + schema so a malformed [least_cost] never breaks the
+// other config loaders. Mirrors [acp] dormancy: enabled=false by default, so the
+// route_request / route_request_async tools are NOT registered until an operator
+// opts in. Missing block => all-off defaults; syntactically-broken TOML =>
+// whole-file fallback to defaults; schema-invalid => THROW so a bad routing
+// config cannot silently ship a surprising default. See
+// docs/least-cost-routing-contract.md and docs/plans/least-cost-routing.dag.toml.
+//──────────────────────────────────────────────────────────────────────────────
+
+export const LEAST_COST_PRIORS_SCOPES = ["global", "principal", "off"] as const;
+export type LeastCostPriorsScope = (typeof LEAST_COST_PRIORS_SCOPES)[number];
+
+export const DEFAULT_LEAST_COST_MAX_COST_USD = 0.5;
+export const DEFAULT_LEAST_COST_EXPECTED_OUTPUT_TOKENS = 800;
+export const DEFAULT_LEAST_COST_BUDGET_SAFETY_FACTOR = 1.5;
+export const DEFAULT_LEAST_COST_MAX_REROUTES = 2;
+
+/**
+ * Shipped default capability tiers, keyed EXACTLY as the router's tier gate looks
+ * them up: `${provider}:${modelIdToFamily(model)}` (see checkTier in
+ * src/least-cost-router.ts and modelIdToFamily in src/pricing.ts). The family
+ * segment is the resolved pricing family (e.g. "claude-sonnet"), NOT the CLI
+ * brand. A default ships for every family the price table knows so no priced CLI
+ * model is silently untiered (contract decision 12, spec 4.4). Operators override
+ * per-key via [least_cost.tiers]; this is config data, not a provider registry
+ * (it spells no forbidden provider-name array; provider:surfaces:check is
+ * unaffected). economy: cheap/coding tiers; standard: mainline; frontier: top.
+ */
+export const DEFAULT_LEAST_COST_TIERS: Readonly<Record<string, QualityTier>> = {
+  "claude:claude-haiku": "economy",
+  "claude:claude-sonnet": "standard",
+  "claude:claude-opus": "frontier",
+  "codex:openai-gpt5": "standard",
+  "gemini:gemini-2.5-flash": "economy",
+  "gemini:gemini-2.5-pro": "standard",
+  "gemini:gemini-3-pro": "frontier",
+  "grok:grok-build": "economy",
+  "grok:grok-4": "standard",
+  "mistral:mistral-devstral": "economy",
+  "mistral:mistral-medium": "standard",
+};
+
+const QualityTierSchema = z.enum(["economy", "standard", "frontier"]);
+
+// [least_cost.candidates] bounds the pool. Strict so a typo'd key is a hard error.
+const LeastCostCandidatesSchema = z
+  .object({
+    allow: z.array(z.string().min(1)).default([]),
+    deny: z.array(z.string().min(1)).default([]),
+  })
+  .strict()
+  .default({ allow: [], deny: [] });
+
+// [least_cost] is fully owned here, so it is strict: a typo'd key is a hard error
+// rather than a silently-ignored misconfiguration. The [least_cost.tiers] record
+// values are tier enums; the keys are arbitrary `provider:family` strings so the
+// record is permissive on keys but strict on values.
+const LeastCostSchema = z
+  .object({
+    enabled: z.boolean().default(false),
+    min_tier: QualityTierSchema.default("standard"),
+    max_cost_usd: z.number().positive().default(DEFAULT_LEAST_COST_MAX_COST_USD),
+    default_expected_output_tokens: z
+      .number()
+      .int()
+      .positive()
+      .default(DEFAULT_LEAST_COST_EXPECTED_OUTPUT_TOKENS),
+    budget_output_safety_factor: z
+      .number()
+      .positive()
+      .default(DEFAULT_LEAST_COST_BUDGET_SAFETY_FACTOR),
+    priors_scope: z.enum(LEAST_COST_PRIORS_SCOPES).default("global"),
+    allow_unpriced: z.boolean().default(false),
+    max_reroutes: z.number().int().nonnegative().default(DEFAULT_LEAST_COST_MAX_REROUTES),
+    prefer_catalog_price: z.boolean().default(true),
+    preference_order: z.array(z.string().min(1)).default([]),
+    tiers: z.record(z.string(), QualityTierSchema).default({}),
+    candidates: LeastCostCandidatesSchema,
+  })
+  .strict();
+
+export interface LeastCostConfig {
+  enabled: boolean;
+  minTier: QualityTier;
+  maxCostUsd: number;
+  defaultExpectedOutputTokens: number;
+  budgetOutputSafetyFactor: number;
+  priorsScope: LeastCostPriorsScope;
+  allowUnpriced: boolean;
+  maxReroutes: number;
+  preferCatalogPrice: boolean;
+  /** Provider preference order for tie-break (spec 4.5); missing providers rank last. */
+  preferenceOrder: string[];
+  /**
+   * Resolved tier map: DEFAULT_LEAST_COST_TIERS merged with any operator
+   * [least_cost.tiers] overrides (operator wins). Keyed `provider:family`.
+   */
+  tiers: Record<string, QualityTier>;
+  candidates: { allow: string[]; deny: string[] };
+  /** Audit trail: which inputs (file, env vars) contributed to the resolved config. */
+  sources: { configFile: string | null; envOverrides: string[] };
+}
+
+export function defaultLeastCostConfig(sourcePath: string | null = null): LeastCostConfig {
+  return {
+    enabled: false,
+    minTier: "standard",
+    maxCostUsd: DEFAULT_LEAST_COST_MAX_COST_USD,
+    defaultExpectedOutputTokens: DEFAULT_LEAST_COST_EXPECTED_OUTPUT_TOKENS,
+    budgetOutputSafetyFactor: DEFAULT_LEAST_COST_BUDGET_SAFETY_FACTOR,
+    priorsScope: "global",
+    allowUnpriced: false,
+    maxReroutes: DEFAULT_LEAST_COST_MAX_REROUTES,
+    preferCatalogPrice: true,
+    preferenceOrder: [],
+    tiers: { ...DEFAULT_LEAST_COST_TIERS },
+    candidates: { allow: [], deny: [] },
+    sources: { configFile: sourcePath, envOverrides: [] },
+  };
+}
+
+function readLeastCostFile(
+  configPath: string,
+  logger: Logger
+): { raw: unknown; sourcePath: string | null } {
+  if (!existsSync(configPath)) {
+    return { raw: undefined, sourcePath: null };
+  }
+  try {
+    const require = createRequire(import.meta.url);
+    const TOML = require("smol-toml");
+    const text = readFileSync(configPath, "utf-8");
+    const parsed = TOML.parse(text) as Record<string, unknown>;
+    return { raw: parsed?.least_cost, sourcePath: configPath };
+  } catch (err) {
+    logger.error(`Failed to parse gateway config at ${configPath}; using least_cost defaults`, err);
+    return { raw: undefined, sourcePath: null };
+  }
+}
+
+/**
+ * Load [least_cost] from ~/.llm-cli-gateway/config.toml (override via
+ * $LLM_GATEWAY_CONFIG).
+ *
+ * Defaults are fully dormant (enabled=false): the route tools stay unregistered
+ * until an operator opts in. A missing block OR syntactically-broken TOML falls
+ * back to all-off defaults. Schema-invalid [least_cost] config THROWS ("Invalid
+ * [least_cost] config: ...") so a malformed routing block (bad tier enum,
+ * negative budget, unknown key) cannot silently route with a surprising default.
+ *
+ * Env-override policy mirrors [acp]: routing is configured only through the TOML
+ * file. `enabled` can never be flipped on by an environment variable (that would
+ * weaken the dormant-by-default invariant). The single recognized env var
+ * `LLM_GATEWAY_LEAST_COST`, if set, is DEPRECATED / unsupported: it emits a
+ * one-time deprecation warning steering the operator to config.toml and is
+ * otherwise ignored.
+ */
+export function loadLeastCostConfig(logger: Logger = noopLogger): LeastCostConfig {
+  const configPath = defaultGatewayConfigPath();
+  const { raw, sourcePath } = readLeastCostFile(configPath, logger);
+  const envOverrides: string[] = [];
+
+  // Deprecated env sentinel: warn once and ignore. Never enables routing.
+  const envSentinel = process.env.LLM_GATEWAY_LEAST_COST;
+  if (envSentinel !== undefined && envSentinel.length > 0) {
+    envOverrides.push("LLM_GATEWAY_LEAST_COST");
+    logWarn(
+      logger,
+      "LLM_GATEWAY_LEAST_COST is not supported and is ignored; configure [least_cost] in " +
+        "~/.llm-cli-gateway/config.toml (routing cannot be enabled via an environment variable)."
+    );
+  }
+
+  if (raw === undefined) {
+    const cfg = defaultLeastCostConfig(sourcePath);
+    cfg.sources.envOverrides = envOverrides;
+    return cfg;
+  }
+
+  let parsed;
+  try {
+    parsed = LeastCostSchema.parse(raw);
+  } catch (err) {
+    throw new Error(
+      `Invalid [least_cost] config: ${err instanceof Error ? err.message : String(err)}`,
+      { cause: err }
+    );
+  }
+
+  // Operator tier overrides win over the shipped defaults; both share the same
+  // `provider:family` key space so an override replaces exactly one entry.
+  const tiers: Record<string, QualityTier> = { ...DEFAULT_LEAST_COST_TIERS, ...parsed.tiers };
+
+  return {
+    enabled: parsed.enabled,
+    minTier: parsed.min_tier,
+    maxCostUsd: parsed.max_cost_usd,
+    defaultExpectedOutputTokens: parsed.default_expected_output_tokens,
+    budgetOutputSafetyFactor: parsed.budget_output_safety_factor,
+    priorsScope: parsed.priors_scope,
+    allowUnpriced: parsed.allow_unpriced,
+    maxReroutes: parsed.max_reroutes,
+    preferCatalogPrice: parsed.prefer_catalog_price,
+    preferenceOrder: [...parsed.preference_order],
+    tiers,
+    candidates: {
+      allow: [...parsed.candidates.allow],
+      deny: [...parsed.candidates.deny],
+    },
+    sources: { configFile: sourcePath, envOverrides },
   };
 }
 

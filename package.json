@@ -60,7 +60,8 @@
     ".agents/skills/secure-orchestration/SKILL.md",
     ".agents/skills/implement-review-fix/SKILL.md",
     ".agents/skills/retrospective-walk/SKILL.md",
-    ".agents/skills/public-demo-session/SKILL.md"
+    ".agents/skills/public-demo-session/SKILL.md",
+    ".agents/skills/least-cost-routing/SKILL.md"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
