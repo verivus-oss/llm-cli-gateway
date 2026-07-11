@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { selectCandidate } from "../least-cost-router.js";
+import { selectCandidate, selectCheapestPerTier } from "../least-cost-router.js";
 import type {
   Candidate,
   CandidateCapabilities,
@@ -551,5 +551,105 @@ describe("least-cost-router: output priors + confidence band (phase_2)", () => {
     const decision = selectCandidate(REQ, env, BASE_CONFIG);
     // cost_basis for a pre-flight estimate is "low", so min(low, high) = low.
     expect(decision.confidence).toBe("low");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// selectCheapestPerTier (LCR phase_3): cheapest eligible candidate per tier.
+// ---------------------------------------------------------------------------
+
+const THREE_TIER_CONFIG: RouterConfig = {
+  minTier: "economy",
+  maxCostUsd: 1,
+  defaultExpectedOutputTokens: 500,
+  budgetOutputSafetyFactor: 2,
+  allowUnpriced: false,
+  tiers: {
+    "econ:claude-haiku": "economy",
+    "alt:claude-haiku": "economy",
+    "std:claude-sonnet": "standard",
+    "front:claude-opus": "frontier",
+  },
+  candidates: { allow: [], deny: [] },
+};
+
+describe("least-cost-router: selectCheapestPerTier", () => {
+  it("returns one decision per tier (cheapest in each), ordered economy→standard→frontier", () => {
+    const env = makeEnv({
+      providers: ["front", "std", "econ"],
+      models: {
+        econ: ["econ-haiku-1"],
+        std: ["std-sonnet-1"],
+        front: ["front-opus-1"],
+      },
+      costs: {
+        "econ:econ-haiku-1": priced("claude-haiku", 0.1, 0.2),
+        "std:std-sonnet-1": priced("claude-sonnet", 3, 6),
+        "front:front-opus-1": priced("claude-opus", 15, 75),
+      },
+    });
+    const decisions = selectCheapestPerTier(REQ, env, THREE_TIER_CONFIG);
+    expect(decisions.map(d => d.tier)).toEqual(["economy", "standard", "frontier"]);
+    expect(decisions.map(d => d.chosen?.provider)).toEqual(["econ", "std", "front"]);
+    // Each decision carries its own estimate metadata (reuses toDecisionFromRanked).
+    for (const d of decisions) {
+      expect(d.chosen).not.toBeNull();
+      expect(typeof d.estCostUsd).toBe("number");
+    }
+  });
+
+  it("picks the cheapest within a tier and breaks exact ties deterministically", () => {
+    // Two economy providers with IDENTICAL cost/metrics: the tie-break chain ends
+    // at lexical provider/model order, so "alt" (alt/...) sorts before "econ".
+    const env = makeEnv({
+      providers: ["econ", "alt", "std"],
+      models: {
+        econ: ["econ-haiku-1"],
+        alt: ["alt-haiku-1"],
+        std: ["std-sonnet-1"],
+      },
+      costs: {
+        "econ:econ-haiku-1": priced("claude-haiku", 0.1, 0.2),
+        "alt:alt-haiku-1": priced("claude-haiku", 0.1, 0.2),
+        "std:std-sonnet-1": priced("claude-sonnet", 3, 6),
+      },
+    });
+    const decisions = selectCheapestPerTier(REQ, env, THREE_TIER_CONFIG);
+    const economy = decisions.find(d => d.tier === "economy");
+    expect(economy?.chosen?.provider).toBe("alt");
+    // Exactly one decision per represented tier, no duplicate tiers.
+    expect(decisions.map(d => d.tier)).toEqual(["economy", "standard"]);
+  });
+
+  it("excludes a tier whose cheapest candidate fails the budget gate (fails closed)", () => {
+    const env = makeEnv({
+      providers: ["econ", "std", "front"],
+      models: {
+        econ: ["econ-haiku-1"],
+        std: ["std-sonnet-1"],
+        front: ["front-opus-1"],
+      },
+      costs: {
+        "econ:econ-haiku-1": priced("claude-haiku", 0.1, 0.2),
+        "std:std-sonnet-1": priced("claude-sonnet", 3, 6),
+        // Absurd output rate: the conservative budget bound blows past maxCostUsd=1.
+        "front:front-opus-1": priced("claude-opus", 1, 100_000_000),
+      },
+    });
+    const decisions = selectCheapestPerTier(REQ, env, THREE_TIER_CONFIG);
+    // frontier is dropped; economy + standard remain.
+    expect(decisions.map(d => d.tier)).toEqual(["economy", "standard"]);
+    expect(decisions.some(d => d.tier === "frontier")).toBe(false);
+  });
+
+  it("returns an empty list when nothing is eligible", () => {
+    const env = makeEnv({
+      providers: ["econ"],
+      models: { econ: ["econ-haiku-1"] },
+      authed: new Set(), // nothing authed
+      costs: { "econ:econ-haiku-1": priced("claude-haiku", 0.1, 0.2) },
+    });
+    const decisions = selectCheapestPerTier(REQ, env, THREE_TIER_CONFIG);
+    expect(decisions).toEqual([]);
   });
 });

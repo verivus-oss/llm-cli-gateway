@@ -9137,6 +9137,11 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
     asyncJobManager,
     apiProviders: enabledApiProviders(providers),
     validationRunStore: asyncJobManager.getValidationRunStore(),
+    // LCR phase_3: use the runtime's shared config/metrics/recorder so the opt-in
+    // select:'cheapest' mode ranks over the same priors + health the route tools do.
+    leastCost: runtime.leastCost,
+    performanceMetrics: runtime.performanceMetrics,
+    flightRecorder: runtime.flightRecorder,
   });
   registerWorkspaceTools(server, runtime);
   // Phase 6: provider admin surfaces (read-only + gated mutating). Availability

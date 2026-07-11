@@ -18,6 +18,7 @@
     "client_config",
     "cache_awareness",
     "provider_capabilities",
+    "least_cost",
     "upstream",
     "next_actions"
   ],
@@ -473,6 +474,73 @@
                 "type": "array",
                 "items": { "type": "string" }
               }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "least_cost": {
+      "type": "object",
+      "description": "LCR phase_3: least-cost-routing eligibility summary. Economics-only and secret-free (model names, pricing families, price provenance, tiers, telemetry tiers, price-table staleness, anonymized calibration buckets). ALWAYS present; compact (empty arrays) when routing is disabled.",
+      "required": ["enabled", "pricing", "providers", "untieredModels", "calibrationQuality"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "pricing": {
+          "type": "object",
+          "required": ["tableAsOf", "apiCatalogAsOf", "staleDays"],
+          "properties": {
+            "tableAsOf": { "type": "string" },
+            "apiCatalogAsOf": { "type": "string" },
+            "staleDays": { "type": "integer", "minimum": 0 }
+          },
+          "additionalProperties": false
+        },
+        "providers": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["provider", "telemetryTier", "candidates"],
+            "properties": {
+              "provider": { "type": "string" },
+              "telemetryTier": { "enum": ["T1", "T2", "T3", "T4"] },
+              "candidates": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": ["model", "family", "priced", "priceSource", "tier"],
+                  "properties": {
+                    "model": { "type": "string" },
+                    "family": { "type": "string" },
+                    "priced": { "type": "boolean" },
+                    "priceSource": { "enum": ["table", "api-catalog", "unknown"] },
+                    "tier": {
+                      "type": ["string", "null"],
+                      "enum": ["economy", "standard", "frontier", null]
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "untieredModels": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "calibrationQuality": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["bucket", "k", "samples", "confidence"],
+            "properties": {
+              "bucket": { "type": "string" },
+              "k": { "type": "number" },
+              "samples": { "type": "integer", "minimum": 0 },
+              "confidence": { "enum": ["high", "medium", "low"] }
             },
             "additionalProperties": false
           }

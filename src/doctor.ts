@@ -21,14 +21,22 @@ import {
 import { CLAUDE_MCP_SERVER_NAMES } from "./claude-mcp-config.js";
 import type { FlightRecorderQuery } from "./flight-recorder.js";
 import {
+  defaultLeastCostConfig,
   diagnoseRemoteOAuthConfig,
   enabledApiProviders,
   loadCacheAwarenessConfig,
+  loadLeastCostConfig,
   loadProvidersConfig,
   type CacheAwarenessConfig,
+  type LeastCostConfig,
   type ProvidersConfig,
   type RemoteOAuthConfigDiagnostics,
 } from "./config.js";
+import { telemetryTierFor, type TelemetryTier } from "./lcr-telemetry.js";
+import { API_CATALOG_AS_OF, PRICING_AS_OF, getModelCost, modelIdToFamily } from "./pricing.js";
+import { computeLcrPriorsFromDb } from "./lcr-priors.js";
+import { getCliInfo } from "./model-registry.js";
+import type { Confidence, PriceSource, QualityTier } from "./least-cost-types.js";
 import type { AuthConfig } from "./auth.js";
 import {
   loadWorkspaceRegistry,
@@ -311,6 +319,69 @@ export function checkGeminiConfig(
   };
 }
 
+/**
+ * LCR phase_3 (DAG step `doctor-eligibility`, `[observability].doctor`):
+ * economics-only eligibility summary for least-cost routing. Prompt-free and
+ * secret-free by construction: it carries only model names, resolved pricing
+ * families, price provenance, capability tiers, telemetry tiers, price-table
+ * staleness, and anonymized (content-type, family) calibration buckets. No raw
+ * prompts, no secrets, no base_url userinfo, no principal.
+ *
+ * ALWAYS present in the report. When `[least_cost].enabled` is false the block
+ * is compact: `enabled:false` plus `pricing` (so operators still see staleness)
+ * and empty `providers` / `untieredModels` / `calibrationQuality` arrays. The
+ * block never spawns a CLI; per-candidate eligibility (priced / tiered /
+ * telemetry) needs no provider process.
+ */
+export interface LeastCostCandidateReport {
+  /** CLI-brand model id / alias from the model registry (getCliInfo). */
+  model: string;
+  /** Resolved pricing family (modelIdToFamily), CLI-agnostic. */
+  family: string;
+  /** True when getModelCost resolved a price (source !== "unknown"). */
+  priced: boolean;
+  /** Price provenance: "table", "api-catalog", or "unknown". */
+  priceSource: PriceSource;
+  /** Capability tier from LeastCostConfig.tiers[`provider:family`], or null (UNTIERED). */
+  tier: QualityTier | null;
+}
+
+export interface LeastCostProviderReport {
+  provider: CliType;
+  /** Per-provider telemetry tier T1-T4 (telemetryTierFor). */
+  telemetryTier: TelemetryTier;
+  candidates: LeastCostCandidateReport[];
+}
+
+/** One anonymized (content-type, family) calibration bucket (spec 4.2 enh 5). */
+export interface LeastCostCalibrationBucketReport {
+  /** Bucket key `"<content-type>:<family>"`. */
+  bucket: string;
+  /** Learned input-token calibration factor `k = median(actual/base)`. */
+  k: number;
+  samples: number;
+  /** Advisory confidence label derived from calibration quality. */
+  confidence: Confidence;
+}
+
+export interface LeastCostReport {
+  enabled: boolean;
+  pricing: {
+    /** CLI family price table timestamp (PRICING_AS_OF). */
+    tableAsOf: string;
+    /** Published API-catalog refresh timestamp (API_CATALOG_AS_OF). */
+    apiCatalogAsOf: string;
+    /** Whole days since the NEWER of the two asOf dates vs the doctor run date (>= 0). */
+    staleDays: number;
+  };
+  /** Per-CLI-provider eligibility candidates. Empty when routing is disabled. */
+  providers: LeastCostProviderReport[];
+  /** `"<provider>:<model>"` for every candidate whose tier is null. */
+  untieredModels: string[];
+  /** Per-bucket calibration quality. Empty when disabled / no learning data. */
+  calibrationQuality: LeastCostCalibrationBucketReport[];
+}
+
 export interface DoctorReport {
   schema_version: "1.0";
   ok: boolean;
@@ -400,6 +471,13 @@ export interface DoctorReport {
   };
   cache_awareness: CacheAwarenessReport;
   provider_capabilities: ProviderCapabilitySummaryReport;
+  /**
+   * LCR phase_3: least-cost-routing eligibility summary (pricing staleness,
+   * per-provider telemetry tier, per-candidate priced/tier, untiered models,
+   * calibration quality). ALWAYS present; compact when routing is disabled.
+   * Economics-only and secret-free (see {@link LeastCostReport}).
+   */
+  least_cost: LeastCostReport;
   /**
    * Slice 6: health of enabled generic `[providers.<name>]` (kind:"api")
    * providers. OMITTED entirely when none are enabled, so a CLI-only gateway's
@@ -768,6 +846,13 @@ export interface CreateDoctorReportOptions {
    * every entry's `reachable` is null.
    */
   apiReachability?: Record<string, { reachable: boolean; error?: string }>;
+  /**
+   * LCR phase_3: resolved least-cost-routing config. Drives the `least_cost`
+   * block (enabled flag, tier map, priors scope, catalog-price preference). When
+   * absent, the all-off `defaultLeastCostConfig()` is used, so the block is still
+   * present in its compact disabled form.
+   */
+  leastCost?: LeastCostConfig;
 }
 
 /**
@@ -871,6 +956,103 @@ function buildCacheAwarenessReport(opts: CreateDoctorReportOptions): CacheAwaren
   };
 }
 
+const MS_PER_DAY = 86_400_000;
+
+/**
+ * Whole days since the NEWER (more recent) of the two price-table `asOf` dates
+ * relative to the doctor run date. Clamped to >= 0 so a future asOf (clock skew)
+ * reads as fresh rather than negative. Reuses the report's own run timestamp.
+ */
+function computePricingStaleDays(runIso: string): number {
+  const run = Date.parse(runIso);
+  const table = Date.parse(PRICING_AS_OF);
+  const catalog = Date.parse(API_CATALOG_AS_OF);
+  const newer = Math.max(table, catalog);
+  if (!Number.isFinite(run) || !Number.isFinite(newer)) return 0;
+  const days = Math.floor((run - newer) / MS_PER_DAY);
+  return days > 0 ? days : 0;
+}
+
+/**
+ * LCR phase_3: build the economics-only `least_cost` eligibility block. Pure over
+ * the model registry (getCliInfo), pricing (getModelCost/modelIdToFamily), the
+ * per-provider telemetry tiers, and the resolved LeastCostConfig; the only I/O is
+ * an optional read-only flight-recorder scan for calibration quality. Never
+ * spawns a CLI. Compact when routing is disabled.
+ */
+function buildLeastCostReport(
+  cfg: LeastCostConfig,
+  generatedAt: string,
+  flightRecorder?: FlightRecorderQuery
+): LeastCostReport {
+  const pricing = {
+    tableAsOf: PRICING_AS_OF,
+    apiCatalogAsOf: API_CATALOG_AS_OF,
+    staleDays: computePricingStaleDays(generatedAt),
+  };
+
+  // Disabled: emit the compact form. pricing still surfaces staleness so an
+  // operator sees drift even with routing off; the eligibility arrays are empty.
+  if (!cfg.enabled) {
+    return { enabled: false, pricing, providers: [], untieredModels: [], calibrationQuality: [] };
+  }
+
+  // Resolved tier map keyed `provider:family`. A Map keeps the lookup off the
+  // dynamic-object-index sink for the arbitrary-string tier keys.
+  const tierMap = new Map<string, QualityTier>(Object.entries(cfg.tiers));
+  const cliInfo = getCliInfo();
+  const providers: LeastCostProviderReport[] = [];
+  const untieredModels: string[] = [];
+
+  for (const provider of CLI_TYPES) {
+    const candidates: LeastCostCandidateReport[] = Object.keys(cliInfo[provider].models).map(
+      model => {
+        const family = modelIdToFamily(model);
+        const cost = getModelCost(provider, model, { preferCatalog: cfg.preferCatalogPrice });
+        const tier = tierMap.get(`${provider}:${family}`) ?? null;
+        if (tier === null) {
+          untieredModels.push(`${provider}:${model}`);
+        }
+        return {
+          model,
+          family,
+          priced: cost.source !== "unknown",
+          priceSource: cost.source,
+          tier,
+        };
+      }
+    );
+    providers.push({
+      provider,
+      telemetryTier: telemetryTierFor(provider),
+      candidates,
+    });
+  }
+
+  // Calibration quality from the flight recorder, scoped by priors_scope. Empty
+  // when there is no recorder, learning is off, or the scan finds no data. The
+  // priors shape is anonymized model-level (content-type:family), never per
+  // principal, so no caller identity can leak here.
+  const calibrationQuality: LeastCostCalibrationBucketReport[] = [];
+  if (flightRecorder && cfg.priorsScope !== "off") {
+    try {
+      const priors = computeLcrPriorsFromDb(flightRecorder, { priorsScope: cfg.priorsScope });
+      for (const [bucket, entry] of priors.calibration) {
+        calibrationQuality.push({
+          bucket,
+          k: entry.k,
+          samples: entry.samples,
+          confidence: entry.confidence,
+        });
+      }
+    } catch {
+      // Best-effort: leave calibrationQuality empty on any read failure.
+    }
+  }
+
+  return { enabled: true, pricing, providers, untieredModels, calibrationQuality };
+}
+
 function buildProviderCapabilitySummary(
   providerStatuses: Record<CliType, ProviderRuntimeStatus>
 ): ProviderCapabilitySummaryReport {
@@ -963,10 +1145,13 @@ export function createDoctorReport(
     upstream.probe_report = probeReport;
   }
 
+  const generatedAt = new Date().toISOString();
+  const leastCostConfig = opts.leastCost ?? defaultLeastCostConfig();
+
   const report: DoctorReport = {
     schema_version: "1.0",
     ok: true,
-    generated_at: new Date().toISOString(),
+    generated_at: generatedAt,
     system: {
       os: platform(),
       arch: arch(),
@@ -1030,6 +1215,7 @@ export function createDoctorReport(
     client_config: clientConfigStatus(),
     cache_awareness: buildCacheAwarenessReport(opts),
     provider_capabilities: buildProviderCapabilitySummary(providerStatuses),
+    least_cost: buildLeastCostReport(leastCostConfig, generatedAt, opts.flightRecorder),
     upstream,
     next_actions: [],
   };
@@ -1101,8 +1287,14 @@ export async function printDoctorJson(
   let cacheAwareness: CacheAwarenessConfig | undefined;
   let flightRecorder: FlightRecorder | undefined;
   let providersConfig: ProvidersConfig | undefined;
+  let leastCost: LeastCostConfig | undefined;
   try {
     cacheAwareness = loadCacheAwarenessConfig();
+  } catch {
+    // ignore
+  }
+  try {
+    leastCost = loadLeastCostConfig();
   } catch {
     // ignore
   }
@@ -1133,6 +1325,7 @@ export async function printDoctorJson(
     probeUpstream: opts.probeUpstream,
     providersConfig,
     apiReachability,
+    leastCost,
   });
   process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
   if (flightRecorder) {
@@ -1190,6 +1383,13 @@ function isCreateDoctorReportOptions(
   if (value === null || typeof value !== "object") return false;
   if (Object.prototype.hasOwnProperty.call(value, "flightRecorder")) {
     const candidate = (value as { flightRecorder?: unknown }).flightRecorder;
+    return candidate === undefined || typeof candidate === "object";
+  }
+  if (Object.prototype.hasOwnProperty.call(value, "leastCost")) {
+    // Same reasoning as flightRecorder: an options object may carry only
+    // `leastCost` (a LeastCostConfig object). A stray env var `leastCost=...`
+    // would be a STRING, so the typeof-object check cannot collide.
+    const candidate = (value as { leastCost?: unknown }).leastCost;
     return candidate === undefined || typeof candidate === "object";
   }
   if (Object.prototype.hasOwnProperty.call(value, "env")) {
