@@ -471,17 +471,27 @@ function toDecisionFromRanked(
   };
 }
 
+interface RankedPool {
+  /** Eligible candidates ranked ascending by the tie-break comparator (4.5.3). */
+  ranked: RankedCandidate[];
+  rejected: RejectedCandidate[];
+}
+
 /**
- * Select the cheapest eligible candidate for a request. Pure: no CLI spawn,
- * no I/O, no clock/random reads. See module doc and contract sections 4.3-4.5,
- * 4.7 for the full algorithm this implements.
+ * Shared pool build + eligibility + rank/sort for {@link selectCandidate} and
+ * {@link selectCheapestPerTier}. Applies the auth/breaker/capacity/capability,
+ * tier, and unpriced-admission filters (4.3), then ranks the survivors ascending
+ * by the deterministic tie-break comparator (4.5.3). It deliberately does NOT
+ * apply the budget gate (callers gate per pick, 4.5.4) and does NOT resolve the
+ * caller `fallback` (that is selectCandidate-only, 4.7), so both callers reuse the
+ * exact same eligibility + ranking.
  */
-export function selectCandidate(
+function buildRankedPool(
   req: RouteRequestInput,
   env: RouterEnv,
   config: RouterConfig,
   excluded?: ReadonlySet<string>
-): RouteDecision {
+): RankedPool {
   const pool = buildPool(req, env, config).filter(c => !excluded?.has(candidateKey(c)));
 
   const rejected: RejectedCandidate[] = [];
@@ -510,7 +520,27 @@ export function selectCandidate(
     eligible.push({ candidate, tier: tierResult.tier, modelCost });
   }
 
-  if (eligible.length === 0) {
+  const ranked = eligible.map(e =>
+    rankCandidate(e.candidate, e.tier, e.modelCost, req, config, env)
+  );
+  ranked.sort((a, b) => compareCandidates(a, b, env, config));
+  return { ranked, rejected };
+}
+
+/**
+ * Select the cheapest eligible candidate for a request. Pure: no CLI spawn,
+ * no I/O, no clock/random reads. See module doc and contract sections 4.3-4.5,
+ * 4.7 for the full algorithm this implements.
+ */
+export function selectCandidate(
+  req: RouteRequestInput,
+  env: RouterEnv,
+  config: RouterConfig,
+  excluded?: ReadonlySet<string>
+): RouteDecision {
+  const { ranked, rejected } = buildRankedPool(req, env, config, excluded);
+
+  if (ranked.length === 0) {
     if (req.fallback) {
       // A caller-pinned fallback bypasses cost RANKING only; it must still pass
       // the eligibility (auth/breaker/capacity/capability, tier) and budget
@@ -570,11 +600,6 @@ export function selectCandidate(
     };
   }
 
-  const ranked = eligible.map(e =>
-    rankCandidate(e.candidate, e.tier, e.modelCost, req, config, env)
-  );
-  ranked.sort((a, b) => compareCandidates(a, b, env, config));
-
   const best = ranked[0];
   const secondBest = ranked.length > 1 ? ranked[1] : undefined;
   const nearTie =
@@ -587,12 +612,53 @@ export function selectCandidate(
   if (!budget.ok) {
     return {
       chosen: null,
-      consideredCount: eligible.length,
+      consideredCount: ranked.length,
       rejected: [...rejected, { candidate: best.candidate, reason: budget.reason as string }],
       reroutes: 0,
       error: "BudgetExceeded",
     };
   }
 
-  return toDecisionFromRanked(best, eligible.length, rejected, nearTie);
+  return toDecisionFromRanked(best, ranked.length, rejected, nearTie);
+}
+
+/**
+ * Select the cheapest eligible candidate in EACH quality tier that has one, as a
+ * list of {@link RouteDecision}s (one per tier, ascending by tier order). Pure,
+ * deterministic, and reuses the SAME eligibility + ranking as
+ * {@link selectCandidate} via {@link buildRankedPool}.
+ *
+ * Because the ranked pool is sorted ascending by the tie-break comparator, the
+ * first candidate encountered for a tier is that tier's cheapest. The budget gate
+ * is applied per pick and FAILS CLOSED per tier (4.5.4): if a tier's cheapest
+ * candidate is over budget, the tier is excluded rather than silently downgraded
+ * to a pricier same-tier candidate, mirroring `selectCandidate`. Untiered
+ * (explicitly-listed) candidates carry no tier bucket and are skipped. Returns an
+ * empty list when nothing is eligible (the caller decides how to fail closed).
+ */
+export function selectCheapestPerTier(
+  req: RouteRequestInput,
+  env: RouterEnv,
+  config: RouterConfig,
+  excluded?: ReadonlySet<string>
+): RouteDecision[] {
+  const { ranked, rejected } = buildRankedPool(req, env, config, excluded);
+
+  const decidedTiers = new Set<QualityTier>();
+  const decisions: RouteDecision[] = [];
+  for (const candidate of ranked) {
+    const tier = candidate.tier;
+    if (tier === undefined) continue;
+    if (decidedTiers.has(tier)) continue;
+    // First (cheapest) candidate seen for this tier resolves it, pass or fail:
+    // the budget gate fails closed per tier (no silent within-tier downgrade).
+    decidedTiers.add(tier);
+    const budget = checkBudget(candidate, req, config, false);
+    if (!budget.ok) continue;
+    decisions.push(toDecisionFromRanked(candidate, ranked.length, rejected, false));
+  }
+
+  return decisions.sort(
+    (a, b) => TIER_ORDER[a.tier as QualityTier] - TIER_ORDER[b.tier as QualityTier]
+  );
 }

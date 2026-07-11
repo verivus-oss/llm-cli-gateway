@@ -83,9 +83,23 @@ When routing is enabled, three read-only surfaces expose how it is behaving
   scopes the learning (or disables it).
 - `llm_process_health` gains a `leastCost` block: per-provider telemetry tier
   (T1..T4) and per-candidate eligibility (priced? / authed? / breaker? / tier?).
+- `doctor --json` gains a `least_cost` block: pricing `asOf` + staleness,
+  per-provider telemetry tier, per-candidate eligibility, untiered models, and
+  per-`(content-type,family)` calibration quality (`k`/samples/confidence).
 
 API-provider models are priced from a published catalog (`prefer_catalog_price`
 picks catalog over the CLI table when both resolve).
+
+## Cheapest-reviewer selection (phase_3)
+
+`validate_with_models`, `red_team_review`, `consensus_check`, `second_opinion`,
+and `ask_model` accept an OPT-IN `select: "cheapest" | "cheapest_per_tier"`. When
+omitted, the explicit `models`/`model` list is used verbatim (default unchanged).
+When set, the reviewer target list is filled via the LCR selector:
+`cheapest` picks the single cheapest eligible provider; `cheapest_per_tier` picks
+the cheapest provider in each quality tier (economy/standard/frontier). It fails
+closed (no jobs started) when `[least_cost].enabled` is false or nothing is
+eligible.
 
 ## Config (operator, `~/.llm-cli-gateway/config.toml`)
 

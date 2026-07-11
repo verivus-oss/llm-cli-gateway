@@ -5,6 +5,17 @@ import { CLI_TYPES } from "./session-manager.js";
 import { getAvailableCliInfo } from "./model-registry.js";
 import { apiProviderCatalogEntry } from "./api-request.js";
 import { getRequestContext, principalCanAccess, resolveOwnerPrincipal } from "./request-context.js";
+import { PerformanceMetrics } from "./metrics.js";
+import { loadLeastCostConfig, type ApiProviderRuntime, type LeastCostConfig } from "./config.js";
+import { buildRouterEnv, toRouterConfig } from "./lcr-router-env.js";
+import {
+  selectCandidate,
+  selectCheapestPerTier,
+  type RouteDecision,
+  type RouteRequestInput,
+} from "./least-cost-router.js";
+import type { FlightRecorderQuery } from "./flight-recorder.js";
+import type { ValidationProvider } from "./validation-normalizer.js";
 import {
   currentCaller,
   eagerMintFromJobId,
@@ -20,6 +31,105 @@ import {
 
 export interface ValidationToolDeps extends ValidationOrchestratorDeps {
   asyncJobManager: AsyncJobManager;
+  /**
+   * Least-cost routing (LCR) phase_3: config for the opt-in
+   * `select: "cheapest" | "cheapest_per_tier"` mode. Loaded from
+   * `~/.llm-cli-gateway/config.toml` when omitted. `enabled=false` (the default)
+   * makes any `select` request fail closed rather than route.
+   */
+  leastCost?: LeastCostConfig;
+  /**
+   * Per-provider metrics feeding the LCR tie-break (success rate, latency). A
+   * fresh, history-free instance is used when omitted: cost ranking (the primary
+   * key) is unaffected, only the secondary tie-break loses historical refinement.
+   */
+  performanceMetrics?: PerformanceMetrics;
+  /** Flight-recorder read handle for LCR calibration priors. Neutral (k=1) when omitted. */
+  flightRecorder?: FlightRecorderQuery;
+}
+
+/** LCR phase_3: the opt-in target-selection modes for the validation tools. */
+type ProviderSelectMode = "cheapest" | "cheapest_per_tier";
+
+const selectSchema = z
+  .enum(["cheapest", "cheapest_per_tier"])
+  .optional()
+  .describe(
+    "Optional least-cost routing: fill the provider target(s) from the LCR selector instead of the explicit list. 'cheapest' picks the single cheapest eligible provider; 'cheapest_per_tier' picks the cheapest in each quality tier. Requires [least_cost].enabled=true; fails closed (no default-list fallback) when disabled or nothing is eligible."
+  );
+
+/** Resolved, closure-captured inputs the LCR selection helper needs. */
+interface LcrSelectionContext {
+  asyncJobManager: AsyncJobManager;
+  apiProviders: ApiProviderRuntime[];
+  leastCost: LeastCostConfig;
+  performanceMetrics: PerformanceMetrics;
+  flightRecorder?: FlightRecorderQuery;
+}
+
+function selectorFailureMessage(decision: RouteDecision): string {
+  const reasons = decision.rejected.map(
+    r => `${r.candidate.provider}/${r.candidate.model}: ${r.reason}`
+  );
+  const detail = reasons.length > 0 ? ` Rejections: ${reasons.join("; ")}.` : "";
+  return `least-cost routing found no eligible provider (${decision.error ?? "NoEligibleCandidate"}); no fallback to the default provider list (fail closed).${detail}`;
+}
+
+type SelectionResult = { ok: true; providers: ValidationProvider[] } | { ok: false; error: string };
+
+/**
+ * LCR phase_3: map a `select` mode to a concrete validation provider list via the
+ * PURE selector. Fails closed (never returns the default list) when routing is
+ * disabled or nothing is eligible. `singleProvider` tools always take the single
+ * cheapest overall; only the multi-provider tools fan out per tier.
+ */
+function resolveSelectedProviders(
+  ctx: LcrSelectionContext,
+  prompt: string,
+  mode: ProviderSelectMode,
+  singleProvider: boolean
+): SelectionResult {
+  if (!ctx.leastCost.enabled) {
+    return {
+      ok: false,
+      error:
+        "select requires least-cost routing; set [least_cost].enabled=true in ~/.llm-cli-gateway/config.toml (no fallback to the default provider list).",
+    };
+  }
+  const env = buildRouterEnv({
+    performanceMetrics: ctx.performanceMetrics,
+    limiterSnapshot: ctx.asyncJobManager.getLimiterSnapshot(),
+    apiProviders: ctx.apiProviders,
+    preferCatalogPrice: ctx.leastCost.preferCatalogPrice,
+    flightRecorder: ctx.flightRecorder,
+    priorsScope: ctx.leastCost.priorsScope,
+    ownerPrincipal: resolveOwnerPrincipal(getRequestContext()),
+  });
+  const config = toRouterConfig(ctx.leastCost);
+  const req: RouteRequestInput = { prompt };
+
+  if (singleProvider || mode === "cheapest") {
+    const decision = selectCandidate(req, env, config);
+    if (!decision.chosen) return { ok: false, error: selectorFailureMessage(decision) };
+    return { ok: true, providers: [decision.chosen.provider as ValidationProvider] };
+  }
+
+  const decisions = selectCheapestPerTier(req, env, config);
+  const seen = new Set<string>();
+  const providers: ValidationProvider[] = [];
+  for (const decision of decisions) {
+    if (!decision.chosen || seen.has(decision.chosen.provider)) continue;
+    seen.add(decision.chosen.provider);
+    providers.push(decision.chosen.provider as ValidationProvider);
+  }
+  if (providers.length === 0) {
+    return {
+      ok: false,
+      error:
+        "least-cost routing found no eligible provider for select='cheapest_per_tier' (fail closed).",
+    };
+  }
+  return { ok: true, providers };
 }
 
 /**
@@ -84,6 +194,16 @@ function findHumanReadableReport(value: unknown): string | null {
 export function registerValidationTools(server: McpServer, deps: ValidationToolDeps): void {
   const { providerSchema, providerListSchema, normalizedProviderResultSchema } =
     buildValidationSchemas(deps);
+  // LCR phase_3: resolve the least-cost inputs once at registration. Config is
+  // read from disk only when the runtime did not inject it; metrics default to a
+  // fresh (history-free) instance so cost ranking still works without wiring.
+  const selectionContext: LcrSelectionContext = {
+    asyncJobManager: deps.asyncJobManager,
+    apiProviders: deps.apiProviders ?? [],
+    leastCost: deps.leastCost ?? loadLeastCostConfig(),
+    performanceMetrics: deps.performanceMetrics ?? new PerformanceMetrics(),
+    flightRecorder: deps.flightRecorder,
+  };
   server.tool(
     "validate_with_models",
     "Ask two or more provider CLIs to independently validate a question. Starts validation jobs — poll with job_status, collect with job_result (not llm_job_*).",
@@ -97,6 +217,7 @@ export function registerValidationTools(server: McpServer, deps: ValidationToolD
       judgeModel: providerSchema
         .optional()
         .describe("Optional provider to run an explicit judge synthesis job."),
+      select: selectSchema,
     },
     {
       title: "Multi-model validation",
@@ -105,19 +226,32 @@ export function registerValidationTools(server: McpServer, deps: ValidationToolD
       idempotentHint: false,
       openWorldHint: true,
     },
-    async ({ question, models, focus, judgeModel }) =>
-      textResponse({
+    async ({ question, models, focus, judgeModel, select }) => {
+      let providers = models;
+      if (select) {
+        const resolved = resolveSelectedProviders(selectionContext, question, select, false);
+        if (!resolved.ok) {
+          return textResponse({
+            success: false,
+            tool: "validate_with_models",
+            error: resolved.error,
+          });
+        }
+        providers = resolved.providers;
+      }
+      return textResponse({
         success: true,
         tool: "validate_with_models",
         readMostly: true,
         report: startValidationRun(deps, {
           intent: "validate",
           question,
-          providers: models,
+          providers,
           focus,
           judgeProvider: judgeModel,
         }),
-      })
+      });
+    }
   );
 
   server.tool(
@@ -127,6 +261,7 @@ export function registerValidationTools(server: McpServer, deps: ValidationToolD
       answer: z.string().min(1).describe("Answer to review."),
       question: z.string().optional().describe("Original question, if available."),
       model: providerSchema.default("codex").describe("Provider to ask for the second opinion."),
+      select: selectSchema,
     },
     {
       title: "Second opinion",
@@ -135,8 +270,16 @@ export function registerValidationTools(server: McpServer, deps: ValidationToolD
       idempotentHint: false,
       openWorldHint: true,
     },
-    async ({ answer, question, model }) =>
-      textResponse({
+    async ({ answer, question, model, select }) => {
+      let providers: ValidationProvider[] = [model];
+      if (select) {
+        const resolved = resolveSelectedProviders(selectionContext, answer, select, true);
+        if (!resolved.ok) {
+          return textResponse({ success: false, tool: "second_opinion", error: resolved.error });
+        }
+        providers = resolved.providers;
+      }
+      return textResponse({
         success: true,
         tool: "second_opinion",
         readMostly: true,
@@ -144,9 +287,10 @@ export function registerValidationTools(server: McpServer, deps: ValidationToolD
           intent: "second_opinion",
           question,
           content: answer,
-          providers: [model],
+          providers,
         }),
-      })
+      });
+    }
   );
 
   server.tool(
@@ -188,6 +332,7 @@ export function registerValidationTools(server: McpServer, deps: ValidationToolD
         .default("normal")
         .describe("How aggressively to review."),
       models: providerListSchema.describe("Providers to ask for adversarial review."),
+      select: selectSchema,
     },
     {
       title: "Red-team review",
@@ -196,18 +341,27 @@ export function registerValidationTools(server: McpServer, deps: ValidationToolD
       idempotentHint: false,
       openWorldHint: true,
     },
-    async ({ content, riskLevel, models }) =>
-      textResponse({
+    async ({ content, riskLevel, models, select }) => {
+      let providers = models;
+      if (select) {
+        const resolved = resolveSelectedProviders(selectionContext, content, select, false);
+        if (!resolved.ok) {
+          return textResponse({ success: false, tool: "red_team_review", error: resolved.error });
+        }
+        providers = resolved.providers;
+      }
+      return textResponse({
         success: true,
         tool: "red_team_review",
         readMostly: true,
         report: startValidationRun(deps, {
           intent: "red_team",
           content,
-          providers: models,
+          providers,
           riskLevel,
         }),
-      })
+      });
+    }
   );
 
   server.tool(
@@ -216,6 +370,7 @@ export function registerValidationTools(server: McpServer, deps: ValidationToolD
     {
       claim: z.string().min(1).describe("Claim to check across providers."),
       models: providerListSchema.describe("Providers to ask for agreement or disagreement."),
+      select: selectSchema,
     },
     {
       title: "Consensus check",
@@ -224,17 +379,26 @@ export function registerValidationTools(server: McpServer, deps: ValidationToolD
       idempotentHint: false,
       openWorldHint: true,
     },
-    async ({ claim, models }) =>
-      textResponse({
+    async ({ claim, models, select }) => {
+      let providers = models;
+      if (select) {
+        const resolved = resolveSelectedProviders(selectionContext, claim, select, false);
+        if (!resolved.ok) {
+          return textResponse({ success: false, tool: "consensus_check", error: resolved.error });
+        }
+        providers = resolved.providers;
+      }
+      return textResponse({
         success: true,
         tool: "consensus_check",
         readMostly: true,
         report: startValidationRun(deps, {
           intent: "consensus",
           content: claim,
-          providers: models,
+          providers,
         }),
-      })
+      });
+    }
   );
 
   server.tool(
@@ -243,6 +407,7 @@ export function registerValidationTools(server: McpServer, deps: ValidationToolD
     {
       question: z.string().min(1).describe("Question for one provider."),
       model: providerSchema.default("claude").describe("Provider to ask."),
+      select: selectSchema,
     },
     {
       title: "Ask one model",
@@ -251,17 +416,26 @@ export function registerValidationTools(server: McpServer, deps: ValidationToolD
       idempotentHint: false,
       openWorldHint: true,
     },
-    async ({ question, model }) =>
-      textResponse({
+    async ({ question, model, select }) => {
+      let providers: ValidationProvider[] = [model];
+      if (select) {
+        const resolved = resolveSelectedProviders(selectionContext, question, select, true);
+        if (!resolved.ok) {
+          return textResponse({ success: false, tool: "ask_model", error: resolved.error });
+        }
+        providers = resolved.providers;
+      }
+      return textResponse({
         success: true,
         tool: "ask_model",
         readMostly: true,
         report: startValidationRun(deps, {
           intent: "ask_model",
           question,
-          providers: [model],
+          providers,
         }),
-      })
+      });
+    }
   );
 
   server.tool(

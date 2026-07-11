@@ -61,6 +61,14 @@
             ],
             "default": "claude",
             "description": "Provider to ask."
+          },
+          "select": {
+            "type": "string",
+            "enum": [
+              "cheapest",
+              "cheapest_per_tier"
+            ],
+            "description": "Optional least-cost routing: fill the provider target(s) from the LCR selector instead of the explicit list. 'cheapest' picks the single cheapest eligible provider; 'cheapest_per_tier' picks the cheapest in each quality tier. Requires [least_cost].enabled=true; fails closed (no default-list fallback) when disabled or nothing is eligible."
           }
         },
         "required": [
@@ -1615,6 +1623,14 @@
               "codex"
             ],
             "description": "Providers to ask for agreement or disagreement."
+          },
+          "select": {
+            "type": "string",
+            "enum": [
+              "cheapest",
+              "cheapest_per_tier"
+            ],
+            "description": "Optional least-cost routing: fill the provider target(s) from the LCR selector instead of the explicit list. 'cheapest' picks the single cheapest eligible provider; 'cheapest_per_tier' picks the cheapest in each quality tier. Requires [least_cost].enabled=true; fails closed (no default-list fallback) when disabled or nothing is eligible."
           }
         },
         "required": [
@@ -4418,6 +4434,14 @@
               "codex"
             ],
             "description": "Providers to ask for adversarial review."
+          },
+          "select": {
+            "type": "string",
+            "enum": [
+              "cheapest",
+              "cheapest_per_tier"
+            ],
+            "description": "Optional least-cost routing: fill the provider target(s) from the LCR selector instead of the explicit list. 'cheapest' picks the single cheapest eligible provider; 'cheapest_per_tier' picks the cheapest in each quality tier. Requires [least_cost].enabled=true; fails closed (no default-list fallback) when disabled or nothing is eligible."
           }
         },
         "required": [
@@ -4455,6 +4479,14 @@
             ],
             "default": "codex",
             "description": "Provider to ask for the second opinion."
+          },
+          "select": {
+            "type": "string",
+            "enum": [
+              "cheapest",
+              "cheapest_per_tier"
+            ],
+            "description": "Optional least-cost routing: fill the provider target(s) from the LCR selector instead of the explicit list. 'cheapest' picks the single cheapest eligible provider; 'cheapest_per_tier' picks the cheapest in each quality tier. Requires [least_cost].enabled=true; fails closed (no default-list fallback) when disabled or nothing is eligible."
           }
         },
         "required": [
@@ -4831,6 +4863,14 @@
           "judgeModel": {
             "$ref": "#/properties/models/items",
             "description": "Optional provider to run an explicit judge synthesis job."
+          },
+          "select": {
+            "type": "string",
+            "enum": [
+              "cheapest",
+              "cheapest_per_tier"
+            ],
+            "description": "Optional least-cost routing: fill the provider target(s) from the LCR selector instead of the explicit list. 'cheapest' picks the single cheapest eligible provider; 'cheapest_per_tier' picks the cheapest in each quality tier. Requires [least_cost].enabled=true; fails closed (no default-list fallback) when disabled or nothing is eligible."
           }
         },
         "required": [

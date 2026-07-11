@@ -11,7 +11,10 @@ import {
   type DoctorReport,
   type RemoteHttpOAuthReadinessInput,
 } from "../doctor.js";
-import type { ApiProviderConfig, ProvidersConfig } from "../config.js";
+import type { ApiProviderConfig, LeastCostConfig, ProvidersConfig } from "../config.js";
+import { defaultLeastCostConfig } from "../config.js";
+import { PRICING_AS_OF, API_CATALOG_AS_OF } from "../pricing.js";
+import type { FlightRecorderQuery } from "../flight-recorder.js";
 import type { AuthConfig, RemoteOAuthConfig } from "../auth.js";
 import type { EndpointExposureReport } from "../endpoint-exposure.js";
 import type { RemoteSafeWorkspaceSummary } from "../workspace-registry.js";
@@ -853,5 +856,161 @@ describe("remote_http_oauth readiness projection", () => {
     for (const stage of stageSchema.enum as string[]) {
       expect(() => validateAgainstSchema(stage, stageSchema, "stage")).not.toThrow();
     }
+  });
+});
+
+// LCR phase_3 (DAG step doctor-eligibility, [observability].doctor): the
+// least_cost eligibility block in doctor --json.
+describe("LCR phase_3 doctor least_cost block", () => {
+  beforeEach(() => {
+    clearGatewayEnv();
+  });
+  afterEach(() => {
+    clearGatewayEnv();
+    Object.assign(process.env, ORIGINAL_ENV);
+  });
+
+  // One flight-recorder row that yields a single (content-type, family)
+  // calibration bucket for the claude-sonnet family. queryRequests is the only
+  // method computeLcrPriorsFromDb touches.
+  function fakeRecorderWithOneRow(): FlightRecorderQuery {
+    return {
+      queryRequests<T = Record<string, unknown>>(): T[] {
+        return [
+          {
+            cli: "claude",
+            model: "sonnet",
+            prompt: "please summarize the following text about routing economics and cost",
+            input_tokens: 120,
+            output_tokens: 60,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+            cost_basis: "provider-reported",
+            owner_principal: null,
+            session_id: null,
+            datetime_utc: "2026-07-01T00:00:00Z",
+            cost_usd: 0.01,
+            route_est_cost_usd: 0.009,
+          },
+        ] as unknown as T[];
+      },
+    } as unknown as FlightRecorderQuery;
+  }
+
+  function enabledConfig(overrides: Partial<LeastCostConfig> = {}): LeastCostConfig {
+    return { ...defaultLeastCostConfig(), enabled: true, ...overrides };
+  }
+
+  it("emits a schema-valid least_cost block with pricing asOf + staleness", () => {
+    const report = createDoctorReport({ leastCost: enabledConfig() });
+    const lcSchema = (schema.properties as Record<string, JsonSchemaNode>).least_cost;
+    validateAgainstSchema(report.least_cost, lcSchema, "doctor.least_cost");
+    // The whole report still validates too (least_cost is now required).
+    validateAgainstSchema(report, schema, "doctor");
+
+    expect(report.least_cost.enabled).toBe(true);
+    expect(report.least_cost.pricing.tableAsOf).toBe(PRICING_AS_OF);
+    expect(report.least_cost.pricing.apiCatalogAsOf).toBe(API_CATALOG_AS_OF);
+    expect(report.least_cost.pricing.staleDays).toBeGreaterThanOrEqual(0);
+    expect(Number.isInteger(report.least_cost.pricing.staleDays)).toBe(true);
+  });
+
+  it("surfaces per-provider telemetry tiers for every CLI provider", () => {
+    const report = createDoctorReport({ leastCost: enabledConfig() });
+    const seen = new Map(report.least_cost.providers.map(p => [p.provider, p]));
+    for (const provider of CLI_TYPES) {
+      expect(seen.has(provider), `${provider} present`).toBe(true);
+    }
+    // Telemetry tiers match lcr-telemetry: claude/mistral T1, codex/gemini T2,
+    // grok T3, devin/cursor T4.
+    expect(seen.get("claude")?.telemetryTier).toBe("T1");
+    expect(seen.get("mistral")?.telemetryTier).toBe("T1");
+    expect(seen.get("codex")?.telemetryTier).toBe("T2");
+    expect(seen.get("gemini")?.telemetryTier).toBe("T2");
+    expect(seen.get("grok")?.telemetryTier).toBe("T3");
+    expect(seen.get("devin")?.telemetryTier).toBe("T4");
+    expect(seen.get("cursor")?.telemetryTier).toBe("T4");
+  });
+
+  it("marks per-candidate priced/priceSource/family/tier and collects untiered models", () => {
+    const report = createDoctorReport({ leastCost: enabledConfig() });
+    const claude = report.least_cost.providers.find(p => p.provider === "claude");
+    const sonnet = claude?.candidates.find(c => c.model === "sonnet");
+    expect(sonnet).toBeDefined();
+    expect(sonnet?.family).toBe("claude-sonnet");
+    expect(sonnet?.priced).toBe(true);
+    expect(sonnet?.priceSource).toBe("table");
+    expect(sonnet?.tier).toBe("standard");
+
+    // A model with no shipped tier default surfaces tier:null AND appears in
+    // untieredModels. Devin's swe-1.6 resolves to family "unknown" (no tier).
+    const devin = report.least_cost.providers.find(p => p.provider === "devin");
+    const swe = devin?.candidates.find(c => c.model === "swe-1.6");
+    expect(swe?.tier).toBeNull();
+    expect(swe?.priced).toBe(false);
+    expect(swe?.priceSource).toBe("unknown");
+    expect(report.least_cost.untieredModels).toContain("devin:swe-1.6");
+    // Every untiered entry corresponds to a candidate whose tier is null.
+    for (const entry of report.least_cost.untieredModels) {
+      const [prov, model] = entry.split(":");
+      const cand = report.least_cost.providers
+        .find(p => p.provider === prov)
+        ?.candidates.find(c => c.model === model);
+      expect(cand?.tier, `${entry} tier null`).toBeNull();
+    }
+  });
+
+  it("populates calibrationQuality from the flight recorder when routing is enabled", () => {
+    const report = createDoctorReport({
+      leastCost: enabledConfig({ priorsScope: "global" }),
+      flightRecorder: fakeRecorderWithOneRow(),
+    });
+    const lcSchema = (schema.properties as Record<string, JsonSchemaNode>).least_cost;
+    validateAgainstSchema(report.least_cost, lcSchema, "doctor.least_cost");
+
+    expect(report.least_cost.calibrationQuality.length).toBeGreaterThan(0);
+    const bucket = report.least_cost.calibrationQuality.find(b =>
+      b.bucket.endsWith(":claude-sonnet")
+    );
+    expect(bucket).toBeDefined();
+    expect(bucket?.samples).toBe(1);
+    expect(typeof bucket?.k).toBe("number");
+    expect(["high", "medium", "low"]).toContain(bucket?.confidence);
+  });
+
+  it("keeps calibrationQuality empty when priors_scope is off", () => {
+    const report = createDoctorReport({
+      leastCost: enabledConfig({ priorsScope: "off" }),
+      flightRecorder: fakeRecorderWithOneRow(),
+    });
+    expect(report.least_cost.calibrationQuality).toEqual([]);
+  });
+
+  it("emits a valid compact block (empty arrays) when routing is disabled", () => {
+    // No leastCost option => defaultLeastCostConfig() (enabled:false).
+    const report = createDoctorReport({});
+    const lcSchema = (schema.properties as Record<string, JsonSchemaNode>).least_cost;
+    validateAgainstSchema(report.least_cost, lcSchema, "doctor.least_cost");
+    validateAgainstSchema(report, schema, "doctor");
+
+    expect(report.least_cost.enabled).toBe(false);
+    // pricing.asOf staleness is still surfaced so operators see drift.
+    expect(report.least_cost.pricing.tableAsOf).toBe(PRICING_AS_OF);
+    expect(report.least_cost.pricing.apiCatalogAsOf).toBe(API_CATALOG_AS_OF);
+    expect(report.least_cost.providers).toEqual([]);
+    expect(report.least_cost.untieredModels).toEqual([]);
+    expect(report.least_cost.calibrationQuality).toEqual([]);
+  });
+
+  it("carries no secrets, prompts, or filesystem paths in the least_cost block", () => {
+    const report = createDoctorReport({
+      leastCost: enabledConfig(),
+      flightRecorder: fakeRecorderWithOneRow(),
+    });
+    const serialized = JSON.stringify(report.least_cost);
+    // The fake row's prompt text must never leak into the economics block.
+    expect(serialized).not.toContain("summarize the following text");
+    expect(serialized).not.toContain("/home/");
+    expect(serialized).not.toContain(`${tmpdir()}/`);
   });
 });
