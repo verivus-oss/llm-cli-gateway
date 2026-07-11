@@ -452,6 +452,13 @@ export type AsyncJobUsageExtractor = (stdout: string) => {
   cacheReadTokens?: number;
   cacheCreationTokens?: number;
   costUsd?: number;
+  /**
+   * Cost basis label (provider-reported | derived-from-tokens |
+   * pre-flight-estimate) for the recorded cost. Set by the index.ts handoff so a
+   * T2 provider's derived-from-tokens backfill lands on the async/deferred
+   * completion path, not just the sync routed path (LCR phase_1).
+   */
+  costBasis?: string;
 };
 
 interface AsyncJobRecord {
@@ -1793,6 +1800,9 @@ export class AsyncJobManager {
         cacheReadTokens: usage.cacheReadTokens,
         cacheCreationTokens: usage.cacheCreationTokens,
         costUsd: usage.costUsd,
+        // LCR phase_1: the process extractUsage handoff labels cost_basis (T2
+        // derived-from-tokens backfill); http/{} usage carries none.
+        costBasis: (usage as { costBasis?: string }).costBasis,
         providerSessionId: providerMeta?.sessionId,
         stopReason: providerMeta?.stopReason,
       });

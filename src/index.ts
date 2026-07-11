@@ -22,6 +22,7 @@ import {
   providerCommandName,
   cliBreakerState,
 } from "./executor.js";
+import { isDefaultTransient } from "./retry.js";
 import { parseStreamJson } from "./stream-json-parser.js";
 import { parseCodexJsonStream, codexDisplayText, codexFrResponse } from "./codex-json-parser.js";
 import { grokDisplayText } from "./grok-json-parser.js";
@@ -90,6 +91,7 @@ import {
   type Candidate,
   type RouteRequestInput,
   type RouteDecision,
+  type RejectedCandidate,
   type RequiredCapabilities as RouterRequiredCapabilities,
 } from "./least-cost-router.js";
 import { loadGatewaySkills, type SkillEntry } from "./skill-loader.js";
@@ -2225,9 +2227,10 @@ function buildAsyncFlightRecorderHandoff(
   const fmt = outputFormat;
   const sid = sessionId;
   const home = homedir();
+  const model = prep.resolvedModel || "default";
   return {
     flightRecorderEntry: {
-      model: prep.resolvedModel || "default",
+      model,
       prompt: prep.effectivePrompt,
       sessionId,
       optimizationApplied,
@@ -2236,8 +2239,15 @@ function buildAsyncFlightRecorderHandoff(
       cacheControlBlocks: prep.cacheControlBlocks,
       cacheControlTtlSeconds: prep.cacheControlTtlSeconds,
     },
-    extractUsage: (stdout: string) =>
-      extractUsageAndCost(cli, stdout, fmt, { sessionId: sid, home }),
+    // The async/deferred completion (AsyncJobManager.logComplete) writes whatever
+    // this returns. Label cost_basis here so a T2 provider (codex/gemini) that
+    // reports counts but no dollar cost gets its cost DERIVED and stamped
+    // derived-from-tokens on completion, for BOTH routed and direct async jobs.
+    extractUsage: (stdout: string) => {
+      const usage = extractUsageAndCost(cli, stdout, fmt, { sessionId: sid, home });
+      const { costUsd, costBasis } = deriveCostBasis(cli, model, usage);
+      return { ...usage, costUsd, costBasis };
+    },
   };
 }
 
@@ -5958,6 +5968,13 @@ export async function handleGeminiRequest(
       }
     }
     const geminiUsage = extractUsageAndCost("gemini", stdout, params.outputFormat);
+    // LCR: label cost_basis (gemini is T2, so a counts-only completion is
+    // derived-from-tokens); parity with the async/deferred handoff.
+    const { costUsd: geminiCostUsd, costBasis: geminiCostBasis } = deriveCostBasis(
+      "gemini",
+      prep.resolvedModel || "default",
+      geminiUsage
+    );
     // Phase 7: Gemini stream-json carries a session id (init event) + result
     // status; persist them so a deferred/fresh session stays resumable.
     const geminiMeta = extractProviderOutputMetadata("gemini", stdout, params.outputFormat);
@@ -5976,7 +5993,8 @@ export async function handleGeminiRequest(
         outputTokens: geminiUsage.outputTokens,
         cacheReadTokens: geminiUsage.cacheReadTokens,
         cacheCreationTokens: geminiUsage.cacheCreationTokens,
-        costUsd: geminiUsage.costUsd,
+        costUsd: geminiCostUsd,
+        costBasis: geminiCostBasis,
         providerSessionId: geminiMeta.sessionId,
         stopReason: geminiMeta.stopReason,
       },
@@ -8505,7 +8523,7 @@ async function dispatchRoutedCli(
     const meta = extractProviderOutputMetadata(cli, stdout, outputFormat);
     // Label the recorded cost with its basis and, for a T2 provider that
     // reported counts but no dollar cost, backfill the derived cost.
-    const { costUsd: recordedCostUsd, costBasis } = deriveRoutedCost(
+    const { costUsd: recordedCostUsd, costBasis } = deriveCostBasis(
       cli,
       prep.resolvedModel || "default",
       usage
@@ -8613,20 +8631,22 @@ function routeCandidateKey(c: { provider: string; model: string }): string {
  * mid-flight breaker trip or a timeout/connection-reset marker is transient;
  * everything else (auth, ENOENT, a plain provider error) is non-transient.
  */
-function isTransientRouteFailure(
-  runtime: GatewayServerRuntime,
-  provider: string,
-  response: ExtendedToolResponse
-): boolean {
-  if (isCliTypeValue(provider)) {
-    if (cliBreakerState(provider) !== "CLOSED") return true;
-  } else if (apiProviderBreakerState(provider) !== "CLOSED") {
-    return true;
-  }
-  const text = response.content.map(c => c.text).join(" ");
-  return /\b(ETIMEDOUT|ECONNRESET|ECONNREFUSED|EPIPE|timed? ?out|exit code 124|429|503|saturat)/i.test(
-    text
-  );
+export function isTransientRouteFailure(provider: string, response: ExtendedToolResponse): boolean {
+  // A mid-flight breaker trip is transient (spec 4.7).
+  const breakerOpen = isCliTypeValue(provider)
+    ? cliBreakerState(provider) !== "CLOSED"
+    : apiProviderBreakerState(provider) !== "CLOSED";
+  if (breakerOpen) return true;
+  // Reuse retry.ts's classification (the DAG's "retry.ts classification") against
+  // the recorded exit code: 124 (wall-clock timeout) is transient; 125 (idle
+  // timeout) and ENOENT are not.
+  const sc = response.structuredContent as
+    { exitCode?: number; errorCategory?: string } | undefined;
+  if (isDefaultTransient({ code: sc?.exitCode })) return true;
+  // Network-level transient codes surface in the error text / category (not as a
+  // numeric exit code), so scan for the same codes retry.ts treats as transient.
+  const haystack = `${response.content.map(c => c.text).join(" ")} ${sc?.errorCategory ?? ""}`;
+  return /\b(ETIMEDOUT|ECONNRESET|ECONNREFUSED|EPIPE)\b/i.test(haystack);
 }
 
 /**
@@ -8675,14 +8695,16 @@ function buildRoutingBlock(decision: RouteDecision, reroutes: number): RouteResp
 }
 
 /**
- * Label a completed routed request's cost with its basis (contract decision 6):
- * a provider-reported dollar cost stays provider-reported; a T2 provider that
+ * Label a completed request's cost with its basis (contract decision 6): a
+ * provider-reported dollar cost stays provider-reported; a T2 provider that
  * reported token counts but no cost has its cost DERIVED from counts x
  * getModelCost rate (cost_basis derived-from-tokens); otherwise the recorded row
- * carries no derived cost (its pre-flight estimate already reached the caller in
- * the routing block). Never decomposes a scalar total (contract decision 7).
+ * carries no derived cost. Never decomposes a scalar total (contract decision 7).
+ * Used on every completion path (sync direct handlers, the routed dispatch, and
+ * the shared async/deferred handoff extractor) so T2 rows are backfilled
+ * uniformly, not only on the sync routed path.
  */
-function deriveRoutedCost(
+export function deriveCostBasis(
   provider: string,
   resolvedModel: string,
   usage: {
@@ -8756,22 +8778,50 @@ interface RouteToolParams {
   forceRefresh?: boolean;
 }
 
-/** A structured routing error (fail-closed: no dispatch happened). */
+/** Merge dispatch-time failures into a decision's rejected list (deduped by key). */
+function withDispatchRejections(
+  decision: RouteDecision,
+  dispatchRejections: readonly RejectedCandidate[]
+): RouteDecision {
+  if (dispatchRejections.length === 0) return decision;
+  const seen = new Set(decision.rejected.map(r => routeCandidateKey(r.candidate)));
+  const extra = dispatchRejections.filter(r => !seen.has(routeCandidateKey(r.candidate)));
+  return { ...decision, rejected: [...decision.rejected, ...extra] };
+}
+
+/**
+ * A structured routing error (fail closed). Reached when the eligible pool is
+ * empty at selection OR emptied by dispatch failures. `lastFailure` (if any) is
+ * the most recent provider error, appended as a diagnostic tail so the caller
+ * keeps the concrete failure detail without the router silently returning it as
+ * if it were a normal response.
+ */
 function routeErrorResponse(
   decision: RouteDecision,
   reroutes: number,
-  corrId: string
+  corrId: string,
+  lastFailure?: ExtendedToolResponse | null
 ): ExtendedToolResponse {
   const reasons = decision.rejected
     .map(r => `${routeCandidateKey(r.candidate)} (${r.reason})`)
     .join(", ");
   const kind = decision.error ?? "NoEligibleCandidate";
-  const message =
+  const base =
     kind === "BudgetExceeded"
       ? `route_request: no candidate fits the budget. Rejected: ${reasons || "none eligible"}.`
       : `route_request: no eligible candidate. Rejected: ${reasons || "empty pool"}.`;
-  const resp = createErrorResponse("route_request", 1, message, corrId) as ExtendedToolResponse;
-  return attachRouting(resp, buildRoutingBlock(decision, reroutes));
+  const diag = lastFailure?.content?.[0]?.text
+    ? `\nLast dispatch failure: ${lastFailure.content[0].text}`
+    : "";
+  const resp = createErrorResponse(
+    "route_request",
+    1,
+    `${base}${diag}`,
+    corrId
+  ) as ExtendedToolResponse;
+  // Preserve the explicit error kind even when dispatch failures were merged in
+  // (a NoEligibleCandidate after dispatch drops is not a BudgetExceeded).
+  return attachRouting(resp, buildRoutingBlock({ ...decision, error: kind }, reroutes));
 }
 
 /**
@@ -8791,6 +8841,10 @@ async function runRouteRequest(
   const { env, routerConfig, req } = buildRouteContext(runtime, params);
 
   const excluded = new Set<string>();
+  // Candidates that failed AT DISPATCH (not at selection), with why. Merged into
+  // the final structured error so an empty-after-failures pool still names every
+  // exclusion (spec 4.7), not just the raw provider error.
+  const dispatchRejections: RejectedCandidate[] = [];
   let reroutes = 0;
   let transientReroutes = 0;
   let lastFailure: ExtendedToolResponse | null = null;
@@ -8803,19 +8857,28 @@ async function runRouteRequest(
     const decision = selectCandidate(req, env, routerConfig, excluded);
     lastDecision = decision;
     if (!decision.chosen) {
-      // Fail closed. If a candidate already failed, surface that; else the
-      // structured no-eligible/over-budget error.
-      if (lastFailure) {
-        return attachRouting(lastFailure, buildRoutingBlock(decision, reroutes));
-      }
-      return routeErrorResponse(decision, reroutes, corrId);
+      // Fail closed with a STRUCTURED error that names every exclusion, including
+      // the candidates that failed at dispatch (spec 4.7). The last provider
+      // error text is attached as a diagnostic tail.
+      return routeErrorResponse(
+        withDispatchRejections(decision, dispatchRejections),
+        reroutes,
+        corrId,
+        lastFailure
+      );
     }
     const chosen = decision.chosen;
+    // Each dispatch attempt gets its OWN correlation id so a rerouted winner's
+    // flight-recorder row never collides with an earlier failed attempt's row
+    // (a reused id leaves the winner's logComplete unwritten, since logComplete
+    // only updates a still-'started' row). The caller's id is honored on the
+    // first attempt (the common no-reroute path).
+    const attemptCorrId = i === 0 ? corrId : randomUUID();
     const dispatchParams: RoutedDispatchParams = {
       prompt: params.prompt,
       promptParts: params.promptParts,
       model: chosen.model,
-      correlationId: corrId,
+      correlationId: attemptCorrId,
       optimizePrompt: params.optimizePrompt ?? false,
       optimizeResponse: params.optimizeResponse ?? false,
       compressResponse: params.compressResponse,
@@ -8824,15 +8887,21 @@ async function runRouteRequest(
     const result = await dispatchRoutedRequest(runtime, chosen, dispatchParams);
 
     if (!result.isError) {
-      recordRoutingDecision(runtime, corrId, decision, reroutes);
+      recordRoutingDecision(runtime, attemptCorrId, decision, reroutes);
       return attachRouting(result, buildRoutingBlock(decision, reroutes));
     }
 
-    // Failure: exclude this candidate and decide whether to keep re-selecting.
+    // Failure: exclude this candidate, record why, and decide whether to keep
+    // re-selecting.
     lastFailure = result;
+    const transient = isTransientRouteFailure(chosen.provider, result);
     excluded.add(routeCandidateKey(chosen));
+    dispatchRejections.push({
+      candidate: chosen,
+      reason: transient ? "dispatch-failed:transient" : "dispatch-failed:non-transient",
+    });
     reroutes++;
-    if (isTransientRouteFailure(runtime, chosen.provider, result)) {
+    if (transient) {
       transientReroutes++;
       if (transientReroutes > cfg.maxReroutes) {
         return attachRouting(result, buildRoutingBlock(decision, reroutes));
@@ -8841,9 +8910,14 @@ async function runRouteRequest(
     // Non-transient (or transient within budget): loop to re-select.
   }
 
-  // Exhausted the safety bound: return the last failure (or a synthetic error).
-  if (lastFailure && lastDecision) {
-    return attachRouting(lastFailure, buildRoutingBlock(lastDecision, reroutes));
+  // Exhausted the safety bound (defensive; the pool shrinks on every failure).
+  if (lastDecision) {
+    return routeErrorResponse(
+      withDispatchRejections(lastDecision, dispatchRejections),
+      reroutes,
+      corrId,
+      lastFailure
+    );
   }
   return createErrorResponse("route_request", 1, "route_request: routing did not converge", corrId);
 }
@@ -9793,6 +9867,19 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
               `[${corrId}] stream-json cost=$${parsed.costUsd}, model=${parsed.model}, turns=${parsed.numTurns}`
             );
           }
+          // LCR: label cost_basis. Claude is T1, so a reported total_cost_usd is
+          // provider-reported; a rare missing cost with counts is derived-from-tokens.
+          const { costUsd: claudeCostUsd, costBasis: claudeCostBasis } = deriveCostBasis(
+            "claude",
+            prep.resolvedModel || "default",
+            {
+              inputTokens: parsed.usage?.inputTokens,
+              outputTokens: parsed.usage?.outputTokens,
+              cacheReadTokens: parsed.usage?.cacheReadInputTokens || undefined,
+              cacheCreationTokens: parsed.usage?.cacheCreationInputTokens || undefined,
+              costUsd: parsed.costUsd ?? undefined,
+            }
+          );
           safeFlightComplete(
             corrId,
             {
@@ -9804,7 +9891,8 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
               durationMs,
               retryCount: 0,
               circuitBreakerState: "closed",
-              costUsd: parsed.costUsd ?? undefined,
+              costUsd: claudeCostUsd,
+              costBasis: claudeCostBasis,
               optimizationApplied: optimizePrompt || optimizeResponse,
               exitCode: 0,
               status: "completed",
@@ -10323,6 +10411,14 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
 
         logger.info(`[${corrId}] codex_request completed successfully in ${durationMs}ms`);
         const codexUsage = extractUsageAndCost("codex", stdout, outputFormat);
+        // LCR: label cost_basis (codex is T2, so a counts-only completion is
+        // derived-from-tokens; a rare reported cost_usd stays provider-reported);
+        // parity with the async/deferred handoff.
+        const { costUsd: codexCostUsd, costBasis: codexCostBasis } = deriveCostBasis(
+          "codex",
+          prep.resolvedModel || "default",
+          codexUsage
+        );
         // Phase 7: capture codex's thread id (session) from the JSONL stream so
         // the FR row keeps the provider session id. Stop reason is a capability
         // fact (codex `exec --json` does not emit one), so it stays NULL.
@@ -10348,7 +10444,8 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             outputTokens: codexUsage.outputTokens,
             cacheReadTokens: codexUsage.cacheReadTokens,
             cacheCreationTokens: codexUsage.cacheCreationTokens,
-            costUsd: codexUsage.costUsd,
+            costUsd: codexCostUsd,
+            costBasis: codexCostBasis,
             providerSessionId: codexMeta.sessionId,
             stopReason: codexMeta.stopReason,
           },
