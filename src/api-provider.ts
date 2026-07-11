@@ -88,6 +88,7 @@ export interface ApiUsage {
   inputTokens?: number;
   outputTokens?: number;
   cacheReadTokens?: number;
+  cacheCreationTokens?: number;
   costUsd?: number;
   raw?: unknown;
 }
@@ -252,6 +253,10 @@ export class AnthropicProvider implements ApiProvider {
         inputTokens: firstNumber(usage.input_tokens),
         outputTokens: firstNumber(usage.output_tokens),
         cacheReadTokens: firstNumber(usage.cache_read_input_tokens),
+        // Anthropic is disjoint: input_tokens is fresh-only and cache creation is
+        // billed separately, so lift cache_creation_input_tokens to complete the
+        // disjoint derived cost (LCR phase_2b).
+        cacheCreationTokens: firstNumber(usage.cache_creation_input_tokens),
         raw: usage,
       },
       raw: parsed,

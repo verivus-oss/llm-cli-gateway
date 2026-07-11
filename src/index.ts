@@ -2172,13 +2172,14 @@ export function extractUsageAndCost(
   // modelId }` (live-verified 2026-06-13: inputTokens 11954 / outputTokens 36 /
   // cachedReadTokens 7639). As of Slice B7, grok_request CAN route over ACP when
   // the caller sets `transport: "acp"` (handleGrokRequest), and the ACP client IS
-  // a production import (`src/acp/process-manager.ts` imports `AcpClient`). What is
-  // NOT yet wired is ACP-side usage extraction: `runAcpRequest` builds its flight
-  // result via `buildAcpFlightResult` with no token fields (`src/acp/runtime.ts`),
-  // so `_meta` usage never reaches the flight recorder. The default `cli` transport
-  // still runs `prepareGrokRequest` → the `-p` executor (no usage on that wire). So
-  // there is no call site that parses `_meta` usage yet; when the ACP path threads
-  // usage, extract it from `_meta` (cachedReadTokens → cacheReadTokens), NOT here.
+  // a production import (`src/acp/process-manager.ts` imports `AcpClient`). ACP-side
+  // usage IS wired in `runAcpRequest` (`src/acp/runtime.ts`): `extractAcpPromptUsage`
+  // lifts `_meta` input/output/cachedReadTokens (+ reasoningTokens as of LCR
+  // phase_2b) and `buildAcpFlightResult` records them, with the ACP-routed cost
+  // DERIVED via composeCost (reasoning at the output rate). That derivation is
+  // transport-scoped to the ACP path; the default `cli` transport still runs
+  // `prepareGrokRequest` → the `-p` executor, which emits NO usage on that wire, so
+  // this function (which parses the `-p` stdout) correctly returns `{}` for grok.
   // Note
   // `_meta.totalTokens` is the per-turn input+output total — distinct from the
   // on-disk context-window gauge (`signals.json:contextTokensUsed` /
@@ -5485,6 +5486,10 @@ export async function handleApiProviderRequest(
         inputTokens: result.usage?.inputTokens,
         outputTokens: result.usage?.outputTokens,
         cacheReadTokens: result.usage?.cacheReadTokens,
+        // LCR phase_2b: record Anthropic-API cache-creation on the sync-inline
+        // path too (the deferred path threads it via httpUsage), so the disjoint
+        // token record is complete on both.
+        cacheCreationTokens: result.usage?.cacheCreationTokens,
         costUsd: result.usage?.costUsd,
       },
       runtimeArg

@@ -326,6 +326,87 @@ describe("extractAcpPromptUsage (B4)", () => {
     expect(extractAcpPromptUsage({ inputTokens: "12" })).toEqual({});
     expect(extractAcpPromptUsage({ totalTokens: 11990 })).toEqual({});
   });
+
+  // LCR phase_2b: reasoningTokens is a first-class defensively-lifted field, so a
+  // grok `_meta` that reports thinking tokens carries them through to cost
+  // derivation. Mutation that flips this red: not lifting record.reasoningTokens.
+  it("lifts reasoningTokens from a `_meta` that reports it", () => {
+    const usage = extractAcpPromptUsage({
+      inputTokens: 1000,
+      outputTokens: 200,
+      cachedReadTokens: 50,
+      reasoningTokens: 400,
+    });
+    expect(usage).toEqual({
+      inputTokens: 1000,
+      outputTokens: 200,
+      cacheReadTokens: 50,
+      reasoningTokens: 400,
+    });
+  });
+
+  it("omits reasoningTokens when non-finite or absent (no fabrication)", () => {
+    expect(extractAcpPromptUsage({ inputTokens: 10, reasoningTokens: "400" })).toEqual({
+      inputTokens: 10,
+    });
+    expect(extractAcpPromptUsage({ inputTokens: 10 }).reasoningTokens).toBeUndefined();
+  });
+});
+
+describe("ACP runtime: LCR phase_2b derived cost", () => {
+  // The ACP path derives a per-request cost from the reported token counts (only
+  // the ACP transport reports usage; the grok `-p` sync path stays estimate-only).
+  // reasoningTokens is folded into costUsd at the OUTPUT rate by composeCost, so a
+  // turn that reports thinking tokens costs strictly more than the same counts
+  // with reasoningTokens=0. Mutation that flips this red: not computing costUsd,
+  // or dropping usage.reasoningTokens from the composeCost counts.
+  function grokConfig(): AcpConfig {
+    return makeConfig({ providers: { grok: provider("grok-acp", true) } });
+  }
+
+  async function costFor(reasoningTokens: number): Promise<{
+    costUsd?: number;
+    costBasis?: string;
+  }> {
+    const agent = new FakeAgent();
+    agent.promptMeta = {
+      sessionId: "prov-sess-1",
+      inputTokens: 1000,
+      outputTokens: 200,
+      cachedReadTokens: 0,
+      reasoningTokens,
+    };
+    const completes: unknown[] = [];
+    const flightRecorder: AcpFlightSink = {
+      logStart: () => {},
+      logComplete: (_id, r) => completes.push(r),
+    };
+    await runAcpRequest(deps(agent, { flightRecorder, config: grokConfig() }), {
+      provider: "grok",
+      model: "grok-4",
+      prompt: "hi",
+      correlationId: `c-cost-${reasoningTokens}`,
+    });
+    return completes[0] as { costUsd?: number; costBasis?: string };
+  }
+
+  it("derives costUsd from ACP token counts (derived-from-tokens basis)", async () => {
+    const c = await costFor(0);
+    expect(typeof c.costUsd).toBe("number");
+    expect(c.costUsd!).toBeGreaterThan(0);
+    expect(c.costBasis).toBe("derived-from-tokens");
+  });
+
+  it("folds reasoningTokens into costUsd at the output rate (strictly higher)", async () => {
+    const withReasoning = await costFor(400);
+    const withoutReasoning = await costFor(0);
+    expect(withReasoning.costUsd!).toBeGreaterThan(withoutReasoning.costUsd!);
+  });
+
+  it("does NOT flip the ACP default transport (config stays cli)", () => {
+    expect(makeConfig().defaultTransport).toBe("cli");
+    expect(grokConfig().defaultTransport).toBe("cli");
+  });
 });
 
 describe("ACP runtime — resume scope", () => {

@@ -119,6 +119,15 @@ export interface AcpFlightResultParams {
   readonly providerSessionId?: string;
   /** Phase 7: the ACP `session/prompt` response stopReason (always supplied by ACP). */
   readonly stopReason?: string;
+  /**
+   * LCR phase_2b: the per-request cost derived from the ACP-reported token counts
+   * (reasoningTokens folded into the output-rate term by composeCost). Undefined
+   * when no known rate resolved or the provider reported no usage, leaving the FR
+   * `cost_usd` column NULL rather than fabricating a figure.
+   */
+  readonly costUsd?: number;
+  /** LCR phase_2b: how `costUsd` was derived (composeCost cost_basis), for the `cost_basis` column. */
+  readonly costBasis?: string;
 }
 
 /** Build a flight-recorder result for an ACP request with a summarized response. */
@@ -138,5 +147,7 @@ export function buildAcpFlightResult(params: AcpFlightResultParams): FlightLogRe
       params.errorMessage !== undefined ? redactAcpTextForFlight(params.errorMessage) : undefined,
     providerSessionId: params.providerSessionId,
     stopReason: params.stopReason,
+    costUsd: params.costUsd,
+    costBasis: params.costBasis,
   };
 }
