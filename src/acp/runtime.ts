@@ -39,6 +39,7 @@ import { DEVIN_ACP_AGENT_TYPES } from "../provider-definitions.js";
 import type { ApprovalCli, ApprovalManager } from "../approval-manager.js";
 import type { AcpConfig } from "../config.js";
 import type { FlightLogResult, FlightLogStart } from "../flight-recorder.js";
+import { composeCost, getModelCost } from "../pricing.js";
 import type { Logger } from "../logger.js";
 import { noopLogger } from "../logger.js";
 import type { CliType, ISessionManager } from "../session-manager.js";
@@ -100,6 +101,7 @@ export interface AcpPromptUsage {
   inputTokens?: number;
   outputTokens?: number;
   cacheReadTokens?: number;
+  reasoningTokens?: number;
 }
 
 /**
@@ -128,6 +130,8 @@ export function extractAcpPromptUsage(meta: unknown): AcpPromptUsage {
   if (outputTokens !== undefined) usage.outputTokens = outputTokens;
   const cacheReadTokens = num(record.cachedReadTokens);
   if (cacheReadTokens !== undefined) usage.cacheReadTokens = cacheReadTokens;
+  const reasoningTokens = num(record.reasoningTokens);
+  if (reasoningTokens !== undefined) usage.reasoningTokens = reasoningTokens;
   return usage;
 }
 
@@ -261,6 +265,35 @@ export async function runAcpRequest(
     // providers whose ACP transport omits usage → columns stay NULL, never faked.
     const usage = extractAcpPromptUsage(promptResult._meta);
 
+    // LCR phase_2b: derive a per-request cost from the ACP-reported token counts.
+    // This is inherently transport-scoped: only the ACP path reports usage, so
+    // only the ACP path derives a cost (the grok `-p` sync path returns no usage
+    // and stays estimate-only). reasoningTokens is folded into the derived cost
+    // at the output rate (composeCost); the flight recorder has no separate
+    // reasoning-tokens column. The cost is derived only when a known rate exists
+    // (modelCost.source !== "unknown") and at least one of input/output is
+    // present, so a provider whose `_meta` omits usage leaves cost_usd NULL.
+    let costUsd: number | undefined;
+    let costBasis: string | undefined;
+    const modelCost = getModelCost(req.provider, req.model ?? "default");
+    if (
+      modelCost.source !== "unknown" &&
+      (usage.inputTokens !== undefined || usage.outputTokens !== undefined)
+    ) {
+      const composed = composeCost(
+        {
+          inputTokens: usage.inputTokens ?? 0,
+          outputTokens: usage.outputTokens ?? 0,
+          cacheReadTokens: usage.cacheReadTokens,
+          reasoningTokens: usage.reasoningTokens,
+        },
+        { estInputTokens: 0, estOutputTokens: 0 },
+        modelCost
+      );
+      costUsd = composed.costUsd;
+      costBasis = composed.cost_basis;
+    }
+
     deps.flightRecorder?.logComplete(
       req.correlationId,
       buildAcpFlightResult({
@@ -275,6 +308,9 @@ export async function runAcpRequest(
         inputTokens: usage.inputTokens,
         outputTokens: usage.outputTokens,
         cacheReadTokens: usage.cacheReadTokens,
+        // LCR phase_2b: derived cost (reasoningTokens folded in at output rate).
+        costUsd,
+        costBasis,
       })
     );
     logger.info("acp.request.success", { provider: req.provider, durationMs });

@@ -1829,8 +1829,10 @@ export class AsyncJobManager {
 
   /**
    * Slice 1: project the http job's captured ApiResult usage onto the
-   * flight-recorder usage shape. (ApiUsage has no cacheCreationTokens; left
-   * undefined so the FR row keeps it NULL.)
+   * flight-recorder usage shape. LCR phase_2b: ApiUsage now carries
+   * cacheCreationTokens (Anthropic `cache_creation_input_tokens`), threaded here
+   * so the `cache_creation_tokens` column is populated for Anthropic-API rows;
+   * providers that never report it leave it undefined (FR row stays NULL).
    */
   private httpUsage(job: AsyncJobRecord): ReturnType<AsyncJobUsageExtractor> {
     const u = job.apiUsage;
@@ -1839,6 +1841,7 @@ export class AsyncJobManager {
       inputTokens: u.inputTokens,
       outputTokens: u.outputTokens,
       cacheReadTokens: u.cacheReadTokens,
+      cacheCreationTokens: u.cacheCreationTokens,
       costUsd: u.costUsd,
     };
   }

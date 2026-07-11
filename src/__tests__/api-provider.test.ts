@@ -134,6 +134,27 @@ describe("Slice 0 — ApiProvider adapters", () => {
       expect(r.usage.cacheReadTokens).toBe(2);
     });
 
+    // LCR phase_2b: Anthropic is disjoint (input_tokens is fresh-only,
+    // cache_creation_input_tokens is billed separately), so cacheCreationTokens
+    // must be lifted for the disjoint derived cost to be complete. Mutation that
+    // flips this red: dropping cacheCreationTokens from the Anthropic parseResult.
+    it("extracts cache_creation_input_tokens into usage.cacheCreationTokens", () => {
+      const r = p.parseResult(
+        200,
+        JSON.stringify({
+          model: "claude",
+          content: [{ type: "text", text: "a" }],
+          usage: {
+            input_tokens: 7,
+            output_tokens: 3,
+            cache_read_input_tokens: 2,
+            cache_creation_input_tokens: 5,
+          },
+        })
+      );
+      expect(r.usage.cacheCreationTokens).toBe(5);
+    });
+
     it("sets x-api-key + anthropic-version headers", () => {
       expect(p.authHeaders("k")).toEqual({
         "x-api-key": "k",
