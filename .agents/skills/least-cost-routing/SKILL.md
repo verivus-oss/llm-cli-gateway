@@ -68,6 +68,25 @@ pre-flight-estimate`), `confidence`, `nearTie`, `estInputTokens`,
   remaining pool up to `[least_cost].max_reroutes`. Non-transient failures drop
   the candidate and continue.
 
+## Observability (phase_2)
+
+When routing is enabled, three read-only surfaces expose how it is behaving
+(all economics-only, no prompts/secrets/principal):
+
+- `routing://decisions` (MCP resource): the recent routed decisions, each with
+  `provider`/`model`, `estCostUsd`, `costBasis`, `confidence`, `reason`,
+  `considered`, `reroutes`, `at`.
+- `routing://priors` (MCP resource): the learned per-`(provider,model)`
+  output-token priors (median/p90/samples), the per-`(content-type,family)`
+  input calibration `k` + sample count + confidence, and `priceAsOf`. Priors are
+  anonymized model-level economics; `priors_scope` (`global | principal | off`)
+  scopes the learning (or disables it).
+- `llm_process_health` gains a `leastCost` block: per-provider telemetry tier
+  (T1..T4) and per-candidate eligibility (priced? / authed? / breaker? / tier?).
+
+API-provider models are priced from a published catalog (`prefer_catalog_price`
+picks catalog over the CLI table when both resolve).
+
 ## Config (operator, `~/.llm-cli-gateway/config.toml`)
 
 ```toml
