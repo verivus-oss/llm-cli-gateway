@@ -58,6 +58,8 @@ interface MockEnvOptions {
   costs: Record<string, ModelCost>;
   successRate?: Record<string, number>;
   meanLatencyMs?: Record<string, number>;
+  /** Layer-3 calibration factor per resolved family (default 1). */
+  calibrationK?: Record<string, number>;
 }
 
 function makeEnv(opts: MockEnvOptions): RouterEnv {
@@ -73,6 +75,7 @@ function makeEnv(opts: MockEnvOptions): RouterEnv {
     successRate: (provider: string, model: string) => opts.successRate?.[key(provider, model)] ?? 0,
     meanLatencyMs: (provider: string, model: string) =>
       opts.meanLatencyMs?.[key(provider, model)] ?? 0,
+    calibrationK: (_prompt: string, family: string) => opts.calibrationK?.[family] ?? 1,
   };
 }
 

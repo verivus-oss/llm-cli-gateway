@@ -8937,6 +8937,11 @@ function buildRouteContext(
       limiterSnapshot: runtime.asyncJobManager.getLimiterSnapshot(),
       apiProviders: enabledApiProviders(runtime.providers),
       preferCatalogPrice: runtime.leastCost.preferCatalogPrice,
+      // Calibration priors (token-estimator layer 3): read from the flight
+      // recorder, scoped per config; principal scope uses the caller's principal.
+      flightRecorder: runtime.flightRecorder,
+      priorsScope: runtime.leastCost.priorsScope,
+      ownerPrincipal: resolveOwnerPrincipal(getRequestContext()),
     }),
     routerConfig: toRouterConfig(runtime.leastCost),
     req: {

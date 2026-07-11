@@ -64,6 +64,13 @@ export interface RouterEnv {
   successRate(provider: string, model: string): number;
   /** Mean latency in ms for tie-break; default 0 is acceptable. */
   meanLatencyMs(provider: string, model: string): number;
+  /**
+   * Learned input-token calibration factor `k` for `(content-type of prompt,
+   * resolved family)` (token-estimator layer 3, spec 4.2). Production reads the
+   * flight-recorder priors; default 1 (neutral, cold-start) is always safe. Feeds
+   * the point estimate only, so determinism is preserved for a fixed env.
+   */
+  calibrationK(prompt: string, family: string): number;
 }
 
 /** Per-request capability constraints (4.3.3). */
@@ -293,11 +300,16 @@ function rankCandidate(
   tier: QualityTier | undefined,
   modelCost: ModelCost,
   req: RouteRequestInput,
-  config: RouterConfig
+  config: RouterConfig,
+  env: RouterEnv
 ): RankedCandidate {
   const family =
     modelCost.family !== "unknown" ? modelCost.family : modelIdToFamily(candidate.model);
-  const estInputTokens = estimateInputTokens(req.prompt, { family });
+  // Layer-3 calibration: the env supplies the learned k for this prompt's
+  // content-type and family (1 when uncalibrated). It refines the point estimate
+  // only; the tie-break and budget gate stay deterministic for a fixed env.
+  const calibrationK = env.calibrationK(req.prompt, family);
+  const estInputTokens = estimateInputTokens(req.prompt, { family, calibrationK });
   const estOutputTokens = req.expectedOutputTokens ?? config.defaultExpectedOutputTokens;
   const rankResult = composeCost(null, { estInputTokens, estOutputTokens }, modelCost);
   return {
@@ -496,7 +508,8 @@ export function selectCandidate(
         fbTier.tier,
         fallbackModelCost,
         req,
-        config
+        config,
+        env
       );
       const budget = checkBudget(fallbackRanked, req, config, true);
       if (!budget.ok) {
@@ -519,7 +532,9 @@ export function selectCandidate(
     };
   }
 
-  const ranked = eligible.map(e => rankCandidate(e.candidate, e.tier, e.modelCost, req, config));
+  const ranked = eligible.map(e =>
+    rankCandidate(e.candidate, e.tier, e.modelCost, req, config, env)
+  );
   ranked.sort((a, b) => compareCandidates(a, b, env, config));
 
   const best = ranked[0];
