@@ -658,5 +658,52 @@ all levels), not a new gateway primitive:
 Because API providers are stateless single-shot (the xAI Responses adapter keeps
 `previous_response_id` via session metadata; OpenAI-compatible / Anthropic
 adapters store nothing), resend the full context each call. Keep any
-output-contract parsing on the orchestrator side — it is advisory, never enforced
+output-contract parsing on the orchestrator side, it is advisory, never enforced
 by the gateway.
+
+## Least-cost routing: `route_request` vs a specific provider tool
+
+`route_request` / `route_request_async` (phase_1) pick the **cheapest eligible
+`(provider, model)`** that still meets your quality tier, capability, and budget
+constraints, then dispatch through the same path a direct call uses. They are
+**dormant by default**: the tools are registered only when `[least_cost].enabled
+= true` in `~/.llm-cli-gateway/config.toml`, so nothing routes until an operator
+opts in.
+
+**Reach for a specific provider tool (`claude_request`, `codex_request`, ...) when:**
+
+- You need a *particular* model or provider (a Claude review, a Codex
+  implementation, a provider-specific flag like `--sandbox` or an mcp server).
+- You are resuming a session or working in a worktree. `route_request` runs
+  **fresh, one-shot** requests in phase_1; it does not thread a `sessionId`,
+  `workspace`, or `worktree` (that is deliberate: no cross-principal handle is
+  ever routed).
+- Multi-LLM orchestration where each seat is a *named* model (see Pattern 3).
+
+**Reach for `route_request` when:**
+
+- The task is model-agnostic and you want the cheapest capable model for it
+  ("summarize this", "answer this question"), subject to a floor.
+- You want a hard budget cap: pass `maxCostUsd`; an over-budget or all-unpriced
+  pool **fails closed** with a structured `routing.error`
+  (`BudgetExceeded` / `NoEligibleCandidate`) rather than silently picking
+  something.
+- You want a minimum quality tier: `minTier` (`economy | standard | frontier`,
+  default `standard`). LCR never routes below it to save money.
+
+**Reading the result.** Every routed response carries a `routing` block (in
+`structuredContent.routing`, plus a one-line `[routing] ...` banner in the text):
+the `chosen` candidate, `estCostUsd` with its `costBasis`
+(`provider-reported | derived-from-tokens | pre-flight-estimate`) and
+`confidence`, `priceAsOf` / `priceSource`, `consideredCount`, the per-candidate
+`rejected` reasons, and `reroutes`. `estCostUsd` is always an **estimate**
+labelled with its inputs, never a billed cost.
+
+**Knobs (config + per-request).** `candidates` restricts the pool to an explicit
+`(provider, model)[]` (and whitelists otherwise-untiered / maintain-only
+candidates); `allowUnpriced` + `budgetWaiver` are BOTH required to admit an
+unpriced candidate, which still ranks strictly last; `fallback` is used only when
+the eligible pool is empty. Unknown-priced candidates never win the argmin.
+Transient failures (breaker trip / timeout) re-select over the remaining pool up
+to `[least_cost].max_reroutes`; non-transient failures drop the candidate and
+continue. See `docs/least-cost-routing-contract.md`.
