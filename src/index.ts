@@ -8936,6 +8936,7 @@ function buildRouteContext(
       performanceMetrics: runtime.performanceMetrics,
       limiterSnapshot: runtime.asyncJobManager.getLimiterSnapshot(),
       apiProviders: enabledApiProviders(runtime.providers),
+      preferCatalogPrice: runtime.leastCost.preferCatalogPrice,
     }),
     routerConfig: toRouterConfig(runtime.leastCost),
     req: {

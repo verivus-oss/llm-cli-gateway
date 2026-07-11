@@ -69,6 +69,11 @@ export interface RouterEnvDeps {
    * and true for the (already-enabled) API providers; see the module doc.
    */
   isAuthed?: (provider: string) => boolean;
+  /**
+   * Prefer the published api-catalog price over the CLI family table when a
+   * model resolves in both (config `prefer_catalog_price`, default true).
+   */
+  preferCatalogPrice?: boolean;
 }
 
 function candidateCapabilities(provider: string): CandidateCapabilities {
@@ -136,7 +141,7 @@ export function buildRouterEnv(deps: RouterEnvDeps): RouterEnv {
       return candidateCapabilities(provider);
     },
     modelCost(provider: string, model: string): ModelCost {
-      return getModelCost(provider, model);
+      return getModelCost(provider, model, { preferCatalog: deps.preferCatalogPrice });
     },
     successRate(provider: string): number {
       return metricsByTool[provider]?.successRate ?? 0;
