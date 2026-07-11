@@ -69,6 +69,14 @@ export interface FlightLogResult {
   retryCount: number;
   circuitBreakerState: string;
   costUsd?: number;
+  /**
+   * LCR phase_1: how `costUsd` was derived for this row (e.g.
+   * 'provider-reported' when upstream reported it, 'derived-from-tokens' when
+   * the gateway computed it from token counts). Persisted to the `cost_basis`
+   * requests column; the derivation logic lives in index.ts. Undefined (NULL)
+   * for rows with no known basis.
+   */
+  costBasis?: string;
   approvalDecision?: string;
   optimizationApplied: boolean;
   thinkingBlocks?: string[];
@@ -263,6 +271,52 @@ function ensureCompressionColumns(db: GatewayDatabase): void {
   }
 }
 
+/**
+ * Idempotent v9 migration (LCR phase_1): add `cost_basis` to a pre-existing
+ * `requests` table. Records how the row's cost_usd was derived (e.g.
+ * 'provider-reported' vs 'derived-from-tokens'); the derivation logic lives in
+ * index.ts, not here. Legacy rows keep NULL.
+ */
+function ensureRequestsCostBasisColumn(db: GatewayDatabase): void {
+  const rows = db.prepare("PRAGMA table_info(requests)").all();
+  const names = new Set<string>(
+    rows.map((row: any) => (row && typeof row.name === "string" ? row.name : ""))
+  );
+  if (!names.has("cost_basis")) {
+    db.exec("ALTER TABLE requests ADD COLUMN cost_basis TEXT");
+  }
+}
+
+/**
+ * Idempotent v10 migration (LCR phase_1): additive least-cost-routing telemetry
+ * columns on `gateway_metadata`. All NULL when the request was not routed by the
+ * least-cost router; written post-hoc via recordRouting (never logComplete).
+ */
+function ensureMetadataRoutingColumns(db: GatewayDatabase): void {
+  const rows = db.prepare("PRAGMA table_info(gateway_metadata)").all();
+  const names = new Set<string>(
+    rows.map((row: any) => (row && typeof row.name === "string" ? row.name : ""))
+  );
+  if (!names.has("routed")) {
+    db.exec("ALTER TABLE gateway_metadata ADD COLUMN routed INTEGER");
+  }
+  if (!names.has("route_est_cost_usd")) {
+    db.exec("ALTER TABLE gateway_metadata ADD COLUMN route_est_cost_usd REAL");
+  }
+  if (!names.has("route_est_confidence")) {
+    db.exec("ALTER TABLE gateway_metadata ADD COLUMN route_est_confidence TEXT");
+  }
+  if (!names.has("route_reason")) {
+    db.exec("ALTER TABLE gateway_metadata ADD COLUMN route_reason TEXT");
+  }
+  if (!names.has("route_considered")) {
+    db.exec("ALTER TABLE gateway_metadata ADD COLUMN route_considered INTEGER");
+  }
+  if (!names.has("route_reroutes")) {
+    db.exec("ALTER TABLE gateway_metadata ADD COLUMN route_reroutes INTEGER");
+  }
+}
+
 /** Compressor facts persisted per request (spec Section 8). Chars are exact;
  * the token field is the only estimate and is named as one. */
 export interface CompressionTelemetry {
@@ -271,6 +325,19 @@ export interface CompressionTelemetry {
   originalChars: number;
   compressedChars: number;
   estimatedTokensSaved: number;
+}
+
+/**
+ * LCR phase_1: least-cost-routing facts persisted per request via recordRouting.
+ * All fields optional/nullable; the router populates what it knows. The
+ * derivation logic lives in index.ts, not here.
+ */
+export interface RoutingRecord {
+  estCostUsd?: number | null;
+  estConfidence?: string | null;
+  reason?: string | null;
+  considered?: number | null;
+  reroutes?: number | null;
 }
 
 export function resolveFlightRecorderDbPath(): string | null {
@@ -374,7 +441,8 @@ export class FlightRecorder {
         output_tokens INTEGER,
         cache_read_tokens INTEGER,
         cache_creation_tokens INTEGER,
-        owner_principal TEXT
+        owner_principal TEXT,
+        cost_basis TEXT
       );
 
       CREATE TABLE IF NOT EXISTS gateway_metadata (
@@ -391,6 +459,12 @@ export class FlightRecorder {
         async_job_id TEXT,
         provider_session_id TEXT,
         stop_reason TEXT,
+        routed INTEGER,
+        route_est_cost_usd REAL,
+        route_est_confidence TEXT,
+        route_reason TEXT,
+        route_considered INTEGER,
+        route_reroutes INTEGER,
         status TEXT NOT NULL DEFAULT 'started'
       );
 
@@ -465,6 +539,22 @@ export class FlightRecorder {
       .prepare("INSERT OR IGNORE INTO _migrations(version, applied_at) VALUES(8, ?)")
       .run(new Date().toISOString());
 
+    // Migration v9 (LCR phase_1): cost_basis on the requests table. New rows
+    // record how cost_usd was derived (provider-reported vs derived-from-tokens);
+    // legacy rows keep NULL.
+    ensureRequestsCostBasisColumn(this.db);
+    this.db
+      .prepare("INSERT OR IGNORE INTO _migrations(version, applied_at) VALUES(9, ?)")
+      .run(new Date().toISOString());
+
+    // Migration v10 (LCR phase_1): route_* least-cost-routing telemetry columns
+    // on gateway_metadata. NULL when the request was not routed; written post-hoc
+    // via recordRouting.
+    ensureMetadataRoutingColumns(this.db);
+    this.db
+      .prepare("INSERT OR IGNORE INTO _migrations(version, applied_at) VALUES(10, ?)")
+      .run(new Date().toISOString());
+
     if (process.platform !== "win32") {
       try {
         chmodSync(dbPath, 0o600);
@@ -517,7 +607,8 @@ export class FlightRecorder {
           input_tokens = @input_tokens,
           output_tokens = @output_tokens,
           cache_read_tokens = @cache_read_tokens,
-          cache_creation_tokens = @cache_creation_tokens
+          cache_creation_tokens = @cache_creation_tokens,
+          cost_basis = @cost_basis
       WHERE id = @id
     `);
 
@@ -553,6 +644,7 @@ export class FlightRecorder {
           output_tokens: result.outputTokens ?? null,
           cache_read_tokens: result.cacheReadTokens ?? null,
           cache_creation_tokens: result.cacheCreationTokens ?? null,
+          cost_basis: result.costBasis ?? null,
         });
 
         updateMetadata.run({
@@ -608,6 +700,34 @@ export class FlightRecorder {
         original_chars: telemetry.originalChars,
         compressed_chars: telemetry.compressedChars,
         tokens_saved_est: telemetry.estimatedTokensSaved,
+      });
+  }
+
+  /**
+   * Record least-cost-routing telemetry for an existing row (LCR phase_1).
+   * Separate from logComplete because routing facts can be known at a different
+   * point than completion; mirrors recordCompressionTelemetry's post-hoc UPSERT.
+   * Sets `routed = 1` plus the five route_* columns from the RoutingRecord.
+   */
+  recordRouting(correlationId: string, routing: RoutingRecord): void {
+    this.db
+      .prepare(
+        `UPDATE gateway_metadata
+         SET routed = 1,
+             route_est_cost_usd = @est_cost_usd,
+             route_est_confidence = @est_confidence,
+             route_reason = @reason,
+             route_considered = @considered,
+             route_reroutes = @reroutes
+         WHERE request_id = @id`
+      )
+      .run({
+        id: correlationId,
+        est_cost_usd: routing.estCostUsd ?? null,
+        est_confidence: routing.estConfidence ?? null,
+        reason: routing.reason ?? null,
+        considered: routing.considered ?? null,
+        reroutes: routing.reroutes ?? null,
       });
   }
 
@@ -676,6 +796,7 @@ export class NoopFlightRecorder {
   logStart(_entry: FlightLogStart): void {}
   logComplete(_correlationId: string, _result: FlightLogResult): void {}
   recordCompressionTelemetry(_correlationId: string, _telemetry: CompressionTelemetry): void {}
+  recordRouting(_correlationId: string, _routing: RoutingRecord): void {}
   queryRequests<T = Record<string, unknown>>(_sql: string, ..._params: unknown[]): T[] {
     return [];
   }

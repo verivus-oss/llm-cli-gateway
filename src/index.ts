@@ -16,7 +16,12 @@ import {
 import { basename, dirname, isAbsolute, join, relative } from "path";
 import { fileURLToPath } from "url";
 import { z } from "zod/v3";
-import { executeCli, killAllProcessGroups, providerCommandName } from "./executor.js";
+import {
+  executeCli,
+  killAllProcessGroups,
+  providerCommandName,
+  cliBreakerState,
+} from "./executor.js";
 import { parseStreamJson } from "./stream-json-parser.js";
 import { parseCodexJsonStream, codexDisplayText, codexFrResponse } from "./codex-json-parser.js";
 import { grokDisplayText } from "./grok-json-parser.js";
@@ -61,6 +66,7 @@ import {
   loadAdminConfig,
   loadLimitsConfig,
   loadCompressionConfig,
+  loadLeastCostConfig,
   loadSkillsConfig,
   defaultGatewayConfigPath,
   isXaiProviderEnabled,
@@ -74,7 +80,18 @@ import {
   type AcpConfig,
   type AdminConfig,
   type GatewayLimitsConfig,
+  type LeastCostConfig,
 } from "./config.js";
+import { buildRouterEnv, toRouterConfig } from "./lcr-router-env.js";
+import { getModelCost, composeCost } from "./pricing.js";
+import type { TokenCounts, CostBasis } from "./least-cost-types.js";
+import {
+  selectCandidate,
+  type Candidate,
+  type RouteRequestInput,
+  type RouteDecision,
+  type RequiredCapabilities as RouterRequiredCapabilities,
+} from "./least-cost-router.js";
 import { loadGatewaySkills, type SkillEntry } from "./skill-loader.js";
 import { runAcpRequest, type AcpFlightSink } from "./acp/runtime.js";
 import { isAcpError } from "./acp/errors.js";
@@ -265,6 +282,14 @@ type ExtendedToolResponse = {
   reviewIntegrity?: ReviewIntegrityResult;
   /** Slice 3: structured warnings (e.g. cache_ttl_expiring_soon). */
   warnings?: WarningEntry[];
+  /**
+   * Least-cost routing decision block (phase_1). Present only on responses from
+   * route_request / route_request_async: which candidate was chosen, the cost
+   * estimate and its basis/confidence, and per-candidate rejection reasons. It
+   * is an ESTIMATE labelled with its inputs, never a billed cost (contract:
+   * honest cost labelling).
+   */
+  routing?: RouteResponseBlock;
   /**
    * Native-compressor result for this response (spec 5.1): carried out of
    * buildCliResponse so the handler can record telemetry via
@@ -490,6 +515,7 @@ let flightRecorder: FlightRecorderLike | null = null;
 let persistenceConfig: PersistenceConfig | null = null;
 let cacheAwarenessConfig: CacheAwarenessConfig | null = null;
 let compressionConfig: CompressionConfig | null = null;
+let leastCostConfig: LeastCostConfig | null = null;
 let providersConfig: ProvidersConfig | null = null;
 let acpConfig: AcpConfig | null = null;
 let adminConfig: AdminConfig | null = null;
@@ -534,6 +560,11 @@ function getCacheAwarenessConfig(runtimeLogger: GatewayLogger = logger): CacheAw
 function getCompressionConfig(runtimeLogger: GatewayLogger = logger): CompressionConfig {
   compressionConfig ??= loadCompressionConfig(runtimeLogger);
   return compressionConfig;
+}
+
+function getLeastCostConfig(runtimeLogger: GatewayLogger = logger): LeastCostConfig {
+  leastCostConfig ??= loadLeastCostConfig(runtimeLogger);
+  return leastCostConfig;
 }
 
 function getProvidersConfig(runtimeLogger: GatewayLogger = logger): ProvidersConfig {
@@ -922,6 +953,7 @@ export interface GatewayServerDeps {
   acpConfig?: AcpConfig;
   adminConfig?: AdminConfig;
   workspaces?: WorkspaceRegistry;
+  leastCost?: LeastCostConfig;
 }
 
 export interface GatewayServerRuntime {
@@ -940,6 +972,7 @@ export interface GatewayServerRuntime {
   acpConfig: AcpConfig;
   adminConfig: AdminConfig;
   workspaces: WorkspaceRegistry;
+  leastCost: LeastCostConfig;
 }
 
 export function resolveGatewayServerRuntime(
@@ -994,6 +1027,7 @@ export function resolveGatewayServerRuntime(
     acpConfig: deps.acpConfig ?? getAcpConfig(runtimeLogger),
     adminConfig: deps.adminConfig ?? getAdminConfig(runtimeLogger),
     workspaces: deps.workspaces ?? loadWorkspaceRegistry(runtimeLogger),
+    leastCost: deps.leastCost ?? getLeastCostConfig(runtimeLogger),
   };
 }
 
@@ -2274,6 +2308,25 @@ function safeRecordCompression(
     });
   } catch (error) {
     runtime.logger.error("Flight recorder recordCompressionTelemetry failed", error);
+  }
+}
+
+/**
+ * Persist the least-cost routing decision columns (routed + route_est_*) on the
+ * flight-recorder row, post-hoc like compression telemetry. Best-effort; the
+ * routing block is always returned to the caller regardless. Only lands for a
+ * routed request whose row has been written (an inline completion); a deferred
+ * route still returns the block in its response.
+ */
+function safeRecordRouting(
+  correlationId: string,
+  routing: Parameters<FlightRecorderLike["recordRouting"]>[1],
+  runtime: GatewayServerRuntime
+): void {
+  try {
+    runtime.flightRecorder.recordRouting(correlationId, routing);
+  } catch (error) {
+    runtime.logger.error("Flight recorder recordRouting failed", error);
   }
 }
 
@@ -8221,6 +8274,726 @@ export async function handleCodexRequestAsync(
 }
 
 //──────────────────────────────────────────────────────────────────────────────
+// Least-cost routing (LCR) dispatch + resilience loop (phase_1)
+//
+// route_request / route_request_async pick the cheapest eligible (provider,
+// model) via the PURE selector (least-cost-router.selectCandidate over a
+// production RouterEnv), then dispatch through the SAME primitives a direct
+// per-provider call uses: prepare<Cli>Request builds argv, awaitJobOrDefer runs
+// it (identical retries, breakers, dedup, principal isolation, flight
+// recording), and buildCliResponse shapes the reply. LCR selects inputs; it
+// never forks execution (contract decision 14).
+//
+// Phase_1 scope: fresh one-shot requests only. route_request does not thread a
+// caller sessionId / workspace / worktree, so no foreign principal handle is
+// ever routed (principal-isolation invariant holds by construction); session
+// and worktree continuity through routing is a later phase. The response
+// carries a `routing` block (chosen candidate, cost estimate + basis/confidence,
+// per-candidate rejection reasons, reroutes).
+//──────────────────────────────────────────────────────────────────────────────
+
+/** The `routing` block attached to a route_request response (contract 5). */
+export interface RouteResponseBlock {
+  chosen: { provider: string; model: string } | null;
+  tier?: string;
+  estCostUsd?: number;
+  costBasis?: string;
+  confidence?: string;
+  nearTie?: boolean;
+  estInputTokens?: number;
+  estOutputTokens?: number;
+  priceAsOf?: string;
+  priceSource?: string;
+  consideredCount: number;
+  rejected: { candidate: { provider: string; model: string }; reason: string }[];
+  reroutes: number;
+  error?: string;
+}
+
+/** Common inputs for a single routed dispatch (post-selection). */
+interface RoutedDispatchParams {
+  prompt?: string;
+  promptParts?: PromptParts;
+  model: string;
+  correlationId: string;
+  optimizePrompt: boolean;
+  optimizeResponse: boolean;
+  compressResponse?: boolean;
+  forceRefresh?: boolean;
+}
+
+/**
+ * Per-provider telemetry-rich output format for a routed request: stream-json
+ * where the gateway parses usage/cost from it (claude/gemini), plain text
+ * otherwise. Callers of route_request do not choose a format; the router picks
+ * the one that yields the best cost telemetry for the flight recorder.
+ */
+function routedOutputFormat(provider: string): "text" | "json" | "stream-json" {
+  return provider === "claude" || provider === "gemini" ? "stream-json" : "text";
+}
+
+/** Build the prepare result for a routed CLI request (fills provider defaults). */
+function prepareRoutedCli(
+  runtime: GatewayServerRuntime,
+  cli: CliType,
+  params: RoutedDispatchParams,
+  outputFormat: "text" | "json" | "stream-json"
+): CliRequestPrep | ExtendedToolResponse {
+  const base = {
+    prompt: params.prompt,
+    promptParts: params.promptParts,
+    model: params.model,
+    correlationId: params.correlationId,
+    optimizePrompt: params.optimizePrompt,
+    operation: "route_request",
+    outputFormat,
+  };
+  switch (cli) {
+    case "claude": {
+      const p = {
+        ...base,
+        dangerouslySkipPermissions: false,
+        approvalStrategy: "legacy" as const,
+        strictMcpConfig: false,
+      };
+      return prepareClaudeRequest(p, runtime);
+    }
+    case "codex": {
+      const p = {
+        ...base,
+        // codex accepts text|json only (no stream-json); routedOutputFormat
+        // returns "text" for codex, so this narrowing is always valid.
+        outputFormat: outputFormat as "text" | "json",
+        fullAuto: false,
+        dangerouslyBypassApprovalsAndSandbox: false,
+        approvalStrategy: "legacy" as const,
+      };
+      return prepareCodexRequest(p, runtime);
+    }
+    case "gemini": {
+      const p = { ...base, approvalStrategy: "legacy" as const };
+      return prepareGeminiRequest(p, runtime);
+    }
+    case "grok": {
+      const p = { ...base, approvalStrategy: "legacy" as const };
+      return prepareGrokRequest(p, runtime);
+    }
+    case "mistral": {
+      const p = { ...base, approvalStrategy: "legacy" as const };
+      return prepareMistralRequest(p, runtime);
+    }
+    case "devin": {
+      const p = { ...base };
+      return prepareDevinRequest(p, runtime);
+    }
+    case "cursor": {
+      const p = { ...base };
+      return prepareCursorRequest(p, runtime);
+    }
+    default: {
+      const exhaustive: never = cli;
+      return exhaustive;
+    }
+  }
+}
+
+/**
+ * Dispatch a routed request to a spawnable CLI provider, reusing the exact same
+ * prepare / execute / respond primitives the direct per-provider tools use. One
+ * uniform completion path (extractUsageAndCost + buildCliResponse) covers every
+ * CLI, with claude stream-json parsed for its text via parseStreamJson.
+ */
+async function dispatchRoutedCli(
+  runtime: GatewayServerRuntime,
+  cli: CliType,
+  params: RoutedDispatchParams
+): Promise<ExtendedToolResponse> {
+  const startTime = Date.now();
+  let durationMs = 0;
+  let wasSuccessful = false;
+  const outputFormat = routedOutputFormat(cli);
+  const prep = prepareRoutedCli(runtime, cli, params, outputFormat);
+  if (!("args" in prep)) return prep;
+  const { corrId, args } = prep;
+  const prepCleanup =
+    "cleanup" in prep && typeof prep.cleanup === "function"
+      ? (prep.cleanup as () => void)
+      : undefined;
+
+  safeFlightStart(
+    {
+      correlationId: corrId,
+      cli,
+      model: prep.resolvedModel || "default",
+      prompt: prep.effectivePrompt,
+      stablePrefixHash: prep.stablePrefixHash ?? undefined,
+      stablePrefixTokens: prep.stablePrefixTokens ?? undefined,
+    },
+    runtime
+  );
+
+  try {
+    const effectiveCompress = resolveEffectiveCompression(runtime.compression, {
+      compressResponse: params.compressResponse,
+      outputFormat,
+      outputSchemaDeclared: false,
+    });
+    const frHandoff = buildAsyncFlightRecorderHandoff(
+      cli,
+      prep,
+      undefined,
+      outputFormat,
+      params.optimizePrompt
+    );
+    const result = await awaitJobOrDefer(
+      cli,
+      args,
+      corrId,
+      resolveIdleTimeout(cli, undefined),
+      outputFormat,
+      params.forceRefresh,
+      runtime,
+      undefined,
+      prepCleanup,
+      frHandoff.flightRecorderEntry,
+      frHandoff.extractUsage,
+      prep.stdinPayload,
+      undefined,
+      effectiveCompress
+    );
+
+    if (isDeferredResponse(result)) {
+      return buildDeferredToolResponse(result, undefined);
+    }
+
+    const { stdout, stderr, code } = result;
+    durationMs = Math.max(0, Date.now() - startTime);
+
+    if (code !== 0) {
+      safeFlightComplete(
+        corrId,
+        {
+          response: stderr || "",
+          durationMs,
+          retryCount: 0,
+          circuitBreakerState: "closed",
+          optimizationApplied: params.optimizePrompt || params.optimizeResponse,
+          exitCode: code,
+          errorMessage: stderr || `Exit code ${code}`,
+          status: "failed",
+        },
+        runtime
+      );
+      return createErrorResponse(cli, code, stderr, corrId);
+    }
+    wasSuccessful = true;
+
+    // claude stream-json carries usage/cost + text in NDJSON; all other CLIs go
+    // through the shared extractUsageAndCost parser and return stdout verbatim.
+    const claudeStream = cli === "claude" && outputFormat === "stream-json";
+    const parsedClaude = claudeStream ? parseStreamJson(stdout) : null;
+    const responseText = parsedClaude ? parsedClaude.text : stdout;
+    const usage = parsedClaude
+      ? {
+          inputTokens: parsedClaude.usage?.inputTokens,
+          outputTokens: parsedClaude.usage?.outputTokens,
+          cacheReadTokens: parsedClaude.usage?.cacheReadInputTokens || undefined,
+          cacheCreationTokens: parsedClaude.usage?.cacheCreationInputTokens || undefined,
+          costUsd: parsedClaude.costUsd ?? undefined,
+        }
+      : extractUsageAndCost(cli, stdout, outputFormat);
+    const meta = extractProviderOutputMetadata(cli, stdout, outputFormat);
+    // Label the recorded cost with its basis and, for a T2 provider that
+    // reported counts but no dollar cost, backfill the derived cost.
+    const { costUsd: recordedCostUsd, costBasis } = deriveRoutedCost(
+      cli,
+      prep.resolvedModel || "default",
+      usage
+    );
+    safeFlightComplete(
+      corrId,
+      {
+        response: cli === "codex" ? codexFrResponse(outputFormat, stdout) : responseText,
+        durationMs,
+        retryCount: 0,
+        circuitBreakerState: "closed",
+        optimizationApplied: params.optimizePrompt || params.optimizeResponse,
+        exitCode: 0,
+        status: "completed",
+        inputTokens: usage.inputTokens,
+        outputTokens: usage.outputTokens,
+        cacheReadTokens: usage.cacheReadTokens,
+        cacheCreationTokens: usage.cacheCreationTokens,
+        costUsd: recordedCostUsd,
+        costBasis,
+        providerSessionId: parsedClaude ? (parsedClaude.sessionId ?? undefined) : meta.sessionId,
+        stopReason: parsedClaude ? (parsedClaude.stopReason ?? undefined) : meta.stopReason,
+      },
+      runtime
+    );
+    const response = buildCliResponse(
+      cli,
+      responseText,
+      params.optimizeResponse,
+      corrId,
+      undefined,
+      prep,
+      durationMs,
+      undefined,
+      outputFormat,
+      undefined,
+      effectiveCompress
+    );
+    safeRecordCompression(corrId, response.compression, runtime);
+    return response;
+  } catch (error) {
+    const elapsedMs = Math.max(0, Date.now() - startTime);
+    safeFlightComplete(
+      corrId,
+      {
+        response: "",
+        durationMs: elapsedMs,
+        retryCount: 0,
+        circuitBreakerState: "closed",
+        optimizationApplied: params.optimizePrompt || params.optimizeResponse,
+        exitCode: 1,
+        errorMessage: (error as Error).message,
+        status: "failed",
+      },
+      runtime
+    );
+    return createErrorResponse(cli, 1, "", corrId, error as Error);
+  } finally {
+    const finalizedDurationMs = Math.max(0, durationMs || Date.now() - startTime);
+    runtime.performanceMetrics.recordRequest(cli, finalizedDurationMs, wasSuccessful);
+  }
+}
+
+/** Dispatch a routed request to the chosen candidate (CLI or enabled API provider). */
+async function dispatchRoutedRequest(
+  runtime: GatewayServerRuntime,
+  chosen: Candidate,
+  params: RoutedDispatchParams
+): Promise<ExtendedToolResponse> {
+  if (isCliTypeValue(chosen.provider)) {
+    return dispatchRoutedCli(runtime, chosen.provider, params);
+  }
+  const api = enabledApiProviders(runtime.providers).find(p => p.name === chosen.provider);
+  if (!api) {
+    return createErrorResponse(
+      "route_request",
+      1,
+      `Routed provider '${chosen.provider}' is not an enabled API provider`,
+      params.correlationId
+    );
+  }
+  const apiParams = {
+    prompt: params.prompt,
+    promptParts: params.promptParts,
+    model: chosen.model,
+    correlationId: params.correlationId,
+    optimizePrompt: params.optimizePrompt,
+    optimizeResponse: params.optimizeResponse,
+    compressResponse: params.compressResponse,
+  };
+  return handleApiProviderRequest(runtime, api, apiParams);
+}
+
+function isCliTypeValue(provider: string): provider is CliType {
+  return (CLI_TYPES as readonly string[]).includes(provider);
+}
+
+function routeCandidateKey(c: { provider: string; model: string }): string {
+  return `${c.provider}:${c.model}`;
+}
+
+/**
+ * Classify a failed routed dispatch as transient (worth re-selecting toward the
+ * max_reroutes budget) vs non-transient (drop the candidate and continue). A
+ * mid-flight breaker trip or a timeout/connection-reset marker is transient;
+ * everything else (auth, ENOENT, a plain provider error) is non-transient.
+ */
+function isTransientRouteFailure(
+  runtime: GatewayServerRuntime,
+  provider: string,
+  response: ExtendedToolResponse
+): boolean {
+  if (isCliTypeValue(provider)) {
+    if (cliBreakerState(provider) !== "CLOSED") return true;
+  } else if (apiProviderBreakerState(provider) !== "CLOSED") {
+    return true;
+  }
+  const text = response.content.map(c => c.text).join(" ");
+  return /\b(ETIMEDOUT|ECONNRESET|ECONNREFUSED|EPIPE|timed? ?out|exit code 124|429|503|saturat)/i.test(
+    text
+  );
+}
+
+/**
+ * Attach the routing block to a response so the CLIENT actually sees it: MCP
+ * only surfaces `content` / `structuredContent`, so the block goes into
+ * structuredContent (machine-readable) AND a one-line banner is prepended to the
+ * text (human-readable). `response.routing` is also set for typed/in-process use.
+ */
+function attachRouting(
+  response: ExtendedToolResponse,
+  block: RouteResponseBlock
+): ExtendedToolResponse {
+  response.routing = block;
+  response.structuredContent = { ...(response.structuredContent ?? {}), routing: block };
+  const chosen = block.chosen ? `${block.chosen.provider}/${block.chosen.model}` : "none";
+  const cost = block.estCostUsd !== undefined ? `~$${block.estCostUsd.toFixed(6)}` : "unpriced";
+  const basis = block.costBasis ? ` (${block.costBasis}, ${block.confidence})` : "";
+  const banner = `[routing] chosen=${chosen} est=${cost}${basis} considered=${block.consideredCount} reroutes=${block.reroutes}`;
+  const first = response.content[0];
+  if (first && first.type === "text") {
+    first.text = `${banner}\n${first.text}`;
+  } else {
+    response.content.unshift({ type: "text" as const, text: banner });
+  }
+  return response;
+}
+
+/** Build the routing block from a decision, overriding the reroute count. */
+function buildRoutingBlock(decision: RouteDecision, reroutes: number): RouteResponseBlock {
+  return {
+    chosen: decision.chosen ? { ...decision.chosen } : null,
+    tier: decision.tier,
+    estCostUsd: decision.estCostUsd,
+    costBasis: decision.costBasis,
+    confidence: decision.confidence,
+    nearTie: decision.nearTie,
+    estInputTokens: decision.estInputTokens,
+    estOutputTokens: decision.estOutputTokens,
+    priceAsOf: decision.priceAsOf,
+    priceSource: decision.priceSource,
+    consideredCount: decision.consideredCount,
+    rejected: decision.rejected.map(r => ({ candidate: { ...r.candidate }, reason: r.reason })),
+    reroutes,
+    error: decision.error,
+  };
+}
+
+/**
+ * Label a completed routed request's cost with its basis (contract decision 6):
+ * a provider-reported dollar cost stays provider-reported; a T2 provider that
+ * reported token counts but no cost has its cost DERIVED from counts x
+ * getModelCost rate (cost_basis derived-from-tokens); otherwise the recorded row
+ * carries no derived cost (its pre-flight estimate already reached the caller in
+ * the routing block). Never decomposes a scalar total (contract decision 7).
+ */
+function deriveRoutedCost(
+  provider: string,
+  resolvedModel: string,
+  usage: {
+    inputTokens?: number;
+    outputTokens?: number;
+    cacheReadTokens?: number;
+    cacheCreationTokens?: number;
+    costUsd?: number;
+  }
+): { costUsd?: number; costBasis?: CostBasis } {
+  if (usage.costUsd != null) {
+    return { costUsd: usage.costUsd, costBasis: "provider-reported" };
+  }
+  const hasCounts = usage.inputTokens != null || usage.outputTokens != null;
+  if (hasCounts) {
+    const modelCost = getModelCost(provider, resolvedModel);
+    if (modelCost.source !== "unknown") {
+      const counts: TokenCounts = {
+        inputTokens: usage.inputTokens ?? 0,
+        outputTokens: usage.outputTokens ?? 0,
+        cacheReadTokens: usage.cacheReadTokens,
+        cacheCreationTokens: usage.cacheCreationTokens,
+      };
+      const composed = composeCost(counts, { estInputTokens: 0, estOutputTokens: 0 }, modelCost);
+      return { costUsd: composed.costUsd, costBasis: composed.cost_basis };
+    }
+  }
+  return {};
+}
+
+/** Persist the routing decision columns for a routed request that dispatched. */
+function recordRoutingDecision(
+  runtime: GatewayServerRuntime,
+  correlationId: string,
+  decision: RouteDecision,
+  reroutes: number
+): void {
+  const reason = decision.chosen
+    ? `cheapest${decision.nearTie ? ":near-tie" : ""}`
+    : (decision.error ?? "no-eligible");
+  safeRecordRouting(
+    correlationId,
+    {
+      estCostUsd: decision.estCostUsd ?? null,
+      estConfidence: decision.confidence ?? null,
+      reason,
+      considered: decision.consideredCount,
+      reroutes,
+    },
+    runtime
+  );
+}
+
+/** Input surface of the route_request / route_request_async tools (phase_1). */
+interface RouteToolParams {
+  prompt?: string;
+  promptParts?: PromptParts;
+  candidates?: Candidate[];
+  minTier?: "economy" | "standard" | "frontier";
+  maxCostUsd?: number;
+  maxOutputTokens?: number;
+  expectedOutputTokens?: number;
+  requiredCapabilities?: RouterRequiredCapabilities;
+  allowUnpriced?: boolean;
+  budgetWaiver?: boolean;
+  fallback?: Candidate;
+  optimizePrompt?: boolean;
+  optimizeResponse?: boolean;
+  compressResponse?: boolean;
+  correlationId?: string;
+  forceRefresh?: boolean;
+}
+
+/** A structured routing error (fail-closed: no dispatch happened). */
+function routeErrorResponse(
+  decision: RouteDecision,
+  reroutes: number,
+  corrId: string
+): ExtendedToolResponse {
+  const reasons = decision.rejected
+    .map(r => `${routeCandidateKey(r.candidate)} (${r.reason})`)
+    .join(", ");
+  const kind = decision.error ?? "NoEligibleCandidate";
+  const message =
+    kind === "BudgetExceeded"
+      ? `route_request: no candidate fits the budget. Rejected: ${reasons || "none eligible"}.`
+      : `route_request: no eligible candidate. Rejected: ${reasons || "empty pool"}.`;
+  const resp = createErrorResponse("route_request", 1, message, corrId) as ExtendedToolResponse;
+  return attachRouting(resp, buildRoutingBlock(decision, reroutes));
+}
+
+/**
+ * Run the full route_request lifecycle: select the cheapest eligible candidate,
+ * dispatch it, and on failure re-select over the remaining pool. Transient
+ * failures (breaker trip, timeout) re-route up to [least_cost].max_reroutes;
+ * non-transient failures drop the candidate and continue until the pool empties;
+ * an empty/over-budget pool fails closed with a structured routing error. The
+ * winning (or terminal) response carries the routing block.
+ */
+async function runRouteRequest(
+  runtime: GatewayServerRuntime,
+  params: RouteToolParams
+): Promise<ExtendedToolResponse> {
+  const corrId = params.correlationId ?? randomUUID();
+  const cfg = runtime.leastCost;
+  const { env, routerConfig, req } = buildRouteContext(runtime, params);
+
+  const excluded = new Set<string>();
+  let reroutes = 0;
+  let transientReroutes = 0;
+  let lastFailure: ExtendedToolResponse | null = null;
+  let lastDecision: RouteDecision | null = null;
+
+  // The pool shrinks by one on every failure (excluded grows), so the loop
+  // always terminates; the +2 headroom guards against an off-by-one only.
+  const maxIterations = env.providers().length * 8 + cfg.maxReroutes + 2;
+  for (let i = 0; i < maxIterations; i++) {
+    const decision = selectCandidate(req, env, routerConfig, excluded);
+    lastDecision = decision;
+    if (!decision.chosen) {
+      // Fail closed. If a candidate already failed, surface that; else the
+      // structured no-eligible/over-budget error.
+      if (lastFailure) {
+        return attachRouting(lastFailure, buildRoutingBlock(decision, reroutes));
+      }
+      return routeErrorResponse(decision, reroutes, corrId);
+    }
+    const chosen = decision.chosen;
+    const dispatchParams: RoutedDispatchParams = {
+      prompt: params.prompt,
+      promptParts: params.promptParts,
+      model: chosen.model,
+      correlationId: corrId,
+      optimizePrompt: params.optimizePrompt ?? false,
+      optimizeResponse: params.optimizeResponse ?? false,
+      compressResponse: params.compressResponse,
+      forceRefresh: params.forceRefresh,
+    };
+    const result = await dispatchRoutedRequest(runtime, chosen, dispatchParams);
+
+    if (!result.isError) {
+      recordRoutingDecision(runtime, corrId, decision, reroutes);
+      return attachRouting(result, buildRoutingBlock(decision, reroutes));
+    }
+
+    // Failure: exclude this candidate and decide whether to keep re-selecting.
+    lastFailure = result;
+    excluded.add(routeCandidateKey(chosen));
+    reroutes++;
+    if (isTransientRouteFailure(runtime, chosen.provider, result)) {
+      transientReroutes++;
+      if (transientReroutes > cfg.maxReroutes) {
+        return attachRouting(result, buildRoutingBlock(decision, reroutes));
+      }
+    }
+    // Non-transient (or transient within budget): loop to re-select.
+  }
+
+  // Exhausted the safety bound: return the last failure (or a synthetic error).
+  if (lastFailure && lastDecision) {
+    return attachRouting(lastFailure, buildRoutingBlock(lastDecision, reroutes));
+  }
+  return createErrorResponse("route_request", 1, "route_request: routing did not converge", corrId);
+}
+
+/** Shared selection context for the sync and async route tools. */
+function buildRouteContext(
+  runtime: GatewayServerRuntime,
+  params: RouteToolParams
+): {
+  env: ReturnType<typeof buildRouterEnv>;
+  routerConfig: ReturnType<typeof toRouterConfig>;
+  req: RouteRequestInput;
+} {
+  return {
+    env: buildRouterEnv({
+      performanceMetrics: runtime.performanceMetrics,
+      limiterSnapshot: runtime.asyncJobManager.getLimiterSnapshot(),
+      apiProviders: enabledApiProviders(runtime.providers),
+    }),
+    routerConfig: toRouterConfig(runtime.leastCost),
+    req: {
+      prompt: params.prompt ?? "",
+      candidates: params.candidates,
+      minTier: params.minTier,
+      maxCostUsd: params.maxCostUsd,
+      expectedOutputTokens: params.expectedOutputTokens,
+      maxOutputTokens: params.maxOutputTokens,
+      requiredCapabilities: params.requiredCapabilities,
+      allowUnpriced: params.allowUnpriced,
+      budgetWaiver: params.budgetWaiver,
+      fallback: params.fallback,
+    },
+  };
+}
+
+/**
+ * Async dispatch of a routed request to a spawnable CLI provider: prepare argv,
+ * enqueue via AsyncJobManager.startJob (immediate job handle, identical to a
+ * *_request_async tool), and return the handle. No sync reroute is possible on
+ * this path, so route_request_async performs a single selection + async
+ * dispatch of the winner (phase_1).
+ */
+async function dispatchRoutedCliAsync(
+  runtime: GatewayServerRuntime,
+  cli: CliType,
+  params: RoutedDispatchParams
+): Promise<ExtendedToolResponse> {
+  const outputFormat = routedOutputFormat(cli);
+  const prep = prepareRoutedCli(runtime, cli, params, outputFormat);
+  if (!("args" in prep)) return prep;
+  const { corrId, args } = prep;
+  const prepCleanup =
+    "cleanup" in prep && typeof prep.cleanup === "function"
+      ? (prep.cleanup as () => void)
+      : undefined;
+  try {
+    const effectiveCompress = resolveEffectiveCompression(runtime.compression, {
+      compressResponse: params.compressResponse,
+      outputFormat,
+      outputSchemaDeclared: false,
+    });
+    const frHandoff = buildAsyncFlightRecorderHandoff(
+      cli,
+      prep,
+      undefined,
+      outputFormat,
+      params.optimizePrompt
+    );
+    const job = runtime.asyncJobManager.startJob(
+      cli,
+      args,
+      corrId,
+      undefined,
+      resolveIdleTimeout(cli, undefined),
+      outputFormat,
+      params.forceRefresh,
+      undefined,
+      prepCleanup,
+      frHandoff.flightRecorderEntry,
+      frHandoff.extractUsage,
+      true,
+      prep.stdinPayload,
+      effectiveCompress
+    );
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: JSON.stringify({ success: true, job, sessionId: null }, null, 2),
+        },
+      ],
+    };
+  } catch (error) {
+    return createErrorResponse("route_request_async", 1, "", corrId, error as Error);
+  }
+}
+
+/**
+ * Async route: select the cheapest eligible candidate synchronously, then
+ * enqueue it for background execution and return a pollable job handle plus the
+ * routing block. Fail-closed on an empty/over-budget pool.
+ */
+async function runRouteRequestAsync(
+  runtime: GatewayServerRuntime,
+  params: RouteToolParams
+): Promise<ExtendedToolResponse> {
+  const corrId = params.correlationId ?? randomUUID();
+  const { env, routerConfig, req } = buildRouteContext(runtime, params);
+  const decision = selectCandidate(req, env, routerConfig);
+  if (!decision.chosen) {
+    return routeErrorResponse(decision, 0, corrId);
+  }
+  const chosen = decision.chosen;
+  const dispatchParams: RoutedDispatchParams = {
+    prompt: params.prompt,
+    promptParts: params.promptParts,
+    model: chosen.model,
+    correlationId: corrId,
+    optimizePrompt: params.optimizePrompt ?? false,
+    optimizeResponse: params.optimizeResponse ?? false,
+    compressResponse: params.compressResponse,
+    forceRefresh: params.forceRefresh,
+  };
+  let result: ExtendedToolResponse;
+  if (isCliTypeValue(chosen.provider)) {
+    result = await dispatchRoutedCliAsync(runtime, chosen.provider, dispatchParams);
+  } else {
+    const api = enabledApiProviders(runtime.providers).find(p => p.name === chosen.provider);
+    if (!api) {
+      return createErrorResponse(
+        "route_request_async",
+        1,
+        `Routed provider '${chosen.provider}' is not an enabled API provider`,
+        corrId
+      );
+    }
+    result = await handleApiProviderRequestAsync(runtime, api, {
+      prompt: params.prompt,
+      promptParts: params.promptParts,
+      model: chosen.model,
+      correlationId: corrId,
+      optimizePrompt: params.optimizePrompt ?? false,
+      optimizeResponse: params.optimizeResponse ?? false,
+    });
+  }
+  recordRoutingDecision(runtime, corrId, decision, 0);
+  return attachRouting(result, buildRoutingBlock(decision, 0));
+}
+
+//──────────────────────────────────────────────────────────────────────────────
 // Claude Code Tool
 //──────────────────────────────────────────────────────────────────────────────
 
@@ -8291,6 +9064,126 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
   const apiProviderTools = registerApiProviderTools(server, runtime, providers, asyncJobsEnabled);
   if (apiProviderTools.length > 0) {
     runtime.logger.info(`Registered API provider tools: ${apiProviderTools.join(", ")}`);
+  }
+
+  // ─── Least-cost routing (LCR) tools ──────────────────────────────────────
+  // Dormant by default (contract decision 1): route_request / route_request_async
+  // are registered ONLY when [least_cost].enabled is true, mirroring the async-jobs
+  // and [acp] gating. Nothing routes until an operator opts in.
+  if (runtime.leastCost.enabled) {
+    const RouteCandidateShape = z.object({
+      provider: z.string().min(1).describe("A CLI_TYPES member or an enabled API-provider name."),
+      model: z.string().min(1).describe("A concrete model id/alias that provider can serve."),
+    });
+    const RouteRequiredCapabilitiesShape = z
+      .object({
+        images: z.boolean().optional(),
+        attachments: z.boolean().optional(),
+        toolCalling: z.boolean().optional(),
+        jsonSchema: z.boolean().optional(),
+        outputFormat: z.string().optional(),
+        effort: z.string().optional(),
+      })
+      .describe(
+        "Hard capability constraints; a candidate missing any required capability is excluded."
+      );
+    const routeInputShape = {
+      prompt: z
+        .string()
+        .min(1)
+        .max(100000)
+        .optional()
+        .describe("Prompt text to route (mutually exclusive with promptParts)."),
+      promptParts: PromptPartsSchema.optional().describe(
+        "Cache-aware structured prompt (mutually exclusive with prompt)."
+      ),
+      candidates: z
+        .array(RouteCandidateShape)
+        .optional()
+        .describe(
+          "Explicit (provider, model) pool to restrict routing to; also whitelists untiered / maintain-only candidates. Empty/omitted = all eligible."
+        ),
+      minTier: z
+        .enum(["economy", "standard", "frontier"])
+        .optional()
+        .describe(
+          "Minimum quality tier floor (default from config, usually 'standard'). No silent downgrade below it."
+        ),
+      maxCostUsd: z
+        .number()
+        .positive()
+        .optional()
+        .describe(
+          "Per-request budget cap (USD). Over-budget fails closed unless waived via an explicit fallback + budgetWaiver."
+        ),
+      maxOutputTokens: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe("Caller output cap; bounds the conservative budget estimate."),
+      expectedOutputTokens: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe("Expected output tokens for the ranking estimate (default from config)."),
+      requiredCapabilities: RouteRequiredCapabilitiesShape.optional(),
+      allowUnpriced: z
+        .boolean()
+        .optional()
+        .describe(
+          "Admit unpriced (source 'unknown') candidates. They still rank strictly last and cannot pass the budget gate without budgetWaiver."
+        ),
+      budgetWaiver: z
+        .boolean()
+        .optional()
+        .describe(
+          "Explicit acknowledgment to admit an unpriced or over-budget fallback candidate (with allowUnpriced / fallback)."
+        ),
+      fallback: RouteCandidateShape.optional().describe(
+        "A pinned (provider, model) used only when the eligible pool is empty; bypasses cost ranking but still passes eligibility + budget (unless budgetWaiver)."
+      ),
+      optimizePrompt: z
+        .boolean()
+        .optional()
+        .describe("Apply prompt token optimization before dispatch."),
+      optimizeResponse: z.boolean().optional().describe("Apply response token optimization."),
+      compressResponse: z
+        .boolean()
+        .optional()
+        .describe("Apply the native display-text compressor to the response."),
+      correlationId: z.string().optional().describe("Caller-supplied correlation id for tracing."),
+      forceRefresh: z
+        .boolean()
+        .optional()
+        .describe("Bypass the async dedup window for this request."),
+    };
+    const routeAnnotations = {
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: false,
+      openWorldHint: true,
+    };
+    server.tool(
+      "route_request",
+      "Least-cost routing: pick the cheapest eligible (provider, model) candidate that meets the caller's quality tier, capability, and budget constraints, then dispatch it through the normal provider path. Returns the provider response plus a `routing` block (chosen candidate, cost estimate + basis/confidence, rejections, reroutes). Registered only when [least_cost].enabled is true.",
+      routeInputShape,
+      { title: "Least-cost route (sync)", ...routeAnnotations },
+      async params => runRouteRequest(runtime, params as RouteToolParams)
+    );
+    let registeredRouteTools = "route_request";
+    if (asyncJobsEnabled) {
+      server.tool(
+        "route_request_async",
+        "Async least-cost routing: select the cheapest eligible (provider, model) candidate synchronously, enqueue it for background execution, and return a pollable job handle plus the `routing` block. Poll with llm_job_status, collect with llm_job_result. Registered only when [least_cost].enabled is true and async jobs are enabled.",
+        routeInputShape,
+        { title: "Least-cost route (async)", ...routeAnnotations },
+        async params => runRouteRequestAsync(runtime, params as RouteToolParams)
+      );
+      registeredRouteTools += ", route_request_async";
+    }
+    runtime.logger.info(`Registered least-cost routing tools: ${registeredRouteTools}`);
   }
 
   if (grokApiToolsEnabled) {
