@@ -385,7 +385,12 @@ export class ResourceProvider {
    */
   private readRoutingPriors(): RoutingPriorsPayload {
     const scope = this.leastCost?.priorsScope ?? "off";
-    const priors = computeLcrPriorsFromDb(this.flightRecorder, { priorsScope: scope });
+    // For priors_scope = "principal" the aggregator needs the caller's principal,
+    // otherwise it scopes to nothing and returns empty. Global/off ignore it.
+    const priors = computeLcrPriorsFromDb(this.flightRecorder, {
+      priorsScope: scope,
+      ownerPrincipal: resolveOwnerPrincipal(getRequestContext()),
+    });
     return {
       priorsScope: scope,
       priceAsOf: { table: PRICING_AS_OF, apiCatalog: API_CATALOG_AS_OF },

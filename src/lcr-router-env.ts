@@ -44,7 +44,7 @@ import {
 import type { FlightRecorderQuery } from "./flight-recorder.js";
 import type { PerformanceMetrics } from "./metrics.js";
 import type { ApiProviderRuntime, LeastCostConfig } from "./config.js";
-import type { ModelCost } from "./least-cost-types.js";
+import type { ModelCost, Confidence } from "./least-cost-types.js";
 import type { RouterEnv, RouterConfig, CandidateCapabilities } from "./least-cost-router.js";
 
 const CLI_TYPE_SET: ReadonlySet<string> = new Set<string>(CLI_TYPES);
@@ -212,6 +212,14 @@ export function buildRouterEnv(deps: RouterEnvDeps): RouterEnv {
     },
     calibrationK(prompt: string, family: string): number {
       return lookupCalibrationK(priors, classifyContent(prompt), family);
+    },
+    outputPrior(provider: string, model: string): { median: number; p90: number } | null {
+      const p = priors.outputPriors.get(`${provider}:${model}`);
+      return p ? { median: p.median, p90: p.p90 } : null;
+    },
+    confidenceBand(prompt: string, family: string): Confidence {
+      const bucket = priors.calibration.get(`${classifyContent(prompt)}:${family}`);
+      return bucket?.confidence ?? "low";
     },
   };
 }
