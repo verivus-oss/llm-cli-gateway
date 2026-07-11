@@ -22,8 +22,12 @@ import {
   enabledApiProviders,
   type ApiProviderRuntime,
   type CacheAwarenessConfig,
+  type LeastCostConfig,
   type ProvidersConfig,
 } from "./config.js";
+import { computeLcrPriorsFromDb } from "./lcr-priors.js";
+import { telemetryTierFor } from "./lcr-telemetry.js";
+import { PRICING_AS_OF, API_CATALOG_AS_OF } from "./pricing.js";
 import { apiContinuityForKind } from "./api-provider.js";
 import { apiProviderCatalogEntry } from "./api-request.js";
 import {
@@ -101,8 +105,20 @@ export class ResourceProvider {
     ) => ResolvedProviderCapability | null = peekProviderCapabilitySet,
     // Phase-5: resolved ACP config. Drives the host-service policy surfaced in
     // provider-acp://<provider> records. Null keeps the deny-by-default posture.
-    private acpConfig: AcpConfig | null = null
+    private acpConfig: AcpConfig | null = null,
+    // LCR phase_2: resolved least-cost config. Appended LAST + optional so every
+    // existing caller (index.ts included) compiles unchanged. The routing://
+    // resources are DORMANT unless `leastCost?.enabled === true`: when absent or
+    // disabled they are neither listed nor readable (readResource returns null),
+    // mirroring the [least_cost] all-off default. index.ts must thread the
+    // resolved LeastCostConfig here to actually surface them.
+    private leastCost: LeastCostConfig | undefined = undefined
   ) {}
+
+  /** LCR phase_2: true only when routing resources should be exposed. */
+  private routingResourcesEnabled(): boolean {
+    return this.leastCost?.enabled === true;
+  }
 
   /** Read-only flight-recorder accessor for cache-state resource readers. */
   getFlightRecorderQuery(): FlightRecorderQuery {
@@ -295,7 +311,97 @@ export class ResourceProvider {
           priority: 0.7,
         },
       })),
+      // LCR phase_2: routing://decisions + routing://priors are listed ONLY when
+      // least-cost routing is enabled. Absent/disabled keeps the resource set
+      // byte-identical to the pre-LCR surface (dormant by default).
+      ...(this.routingResourcesEnabled()
+        ? [
+            {
+              uri: "routing://decisions",
+              name: "Routing Decisions",
+              title: "Least-Cost Routing Decisions",
+              description:
+                "Recent redacted least-cost routing decisions (provider/model/tier/est cost/confidence)",
+              mimeType: "application/json",
+              annotations: {
+                audience: ["user", "assistant"] as ("user" | "assistant")[],
+                priority: 0.7,
+              },
+            },
+            {
+              uri: "routing://priors",
+              name: "Routing Priors",
+              title: "Least-Cost Routing Priors",
+              description:
+                "Learned output-token priors + input-token calibration (k, samples, quality) + price asOf",
+              mimeType: "application/json",
+              annotations: {
+                audience: ["user", "assistant"] as ("user" | "assistant")[],
+                priority: 0.7,
+              },
+            },
+          ]
+        : []),
     ];
+  }
+
+  /**
+   * routing://decisions: the most recent routed decisions (up to 50), REDACTED
+   * by construction. Only routing economics fields are projected (no
+   * prompt/response/system text, no secrets, no base_url userinfo, no
+   * principal). Reads through the flight recorder read-only path over routed
+   * rows.
+   */
+  private readRoutingDecisions(): RoutingDecision[] {
+    const rows = this.flightRecorder.queryRequests<RoutingDecisionRow>(
+      `SELECT r.cli, r.model, r.datetime_utc, r.cost_basis,
+              m.route_est_cost_usd, m.route_est_confidence, m.route_reason,
+              m.route_considered, m.route_reroutes
+       FROM requests r
+       LEFT JOIN gateway_metadata m ON m.request_id = r.id
+       WHERE m.routed = 1
+       ORDER BY r.datetime_utc DESC
+       LIMIT 50`
+    );
+    return rows.map(row => ({
+      provider: row.cli,
+      model: row.model,
+      tier: telemetryTierFor(row.cli),
+      estCostUsd: row.route_est_cost_usd ?? null,
+      costBasis: row.cost_basis ?? null,
+      confidence: row.route_est_confidence ?? null,
+      reason: row.route_reason ?? null,
+      considered: row.route_considered ?? null,
+      reroutes: row.route_reroutes ?? null,
+      at: row.datetime_utc,
+    }));
+  }
+
+  /**
+   * routing://priors: the learned economics priors (already anonymized to
+   * model-level by computeLcrPriorsFromDb; the LcrPriors shape carries no
+   * principal field). Adds a `priceAsOf` marker so a consumer knows the vintage
+   * of the pricing table / API catalog the router prices against.
+   */
+  private readRoutingPriors(): RoutingPriorsPayload {
+    const scope = this.leastCost?.priorsScope ?? "off";
+    const priors = computeLcrPriorsFromDb(this.flightRecorder, { priorsScope: scope });
+    return {
+      priorsScope: scope,
+      priceAsOf: { table: PRICING_AS_OF, apiCatalog: API_CATALOG_AS_OF },
+      outputPriors: Array.from(priors.outputPriors, ([key, prior]) => ({
+        candidate: key,
+        median: prior.median,
+        p90: prior.p90,
+        samples: prior.samples,
+      })),
+      calibration: Array.from(priors.calibration, ([key, bucket]) => ({
+        bucket: key,
+        k: bucket.k,
+        samples: bucket.samples,
+        confidence: bucket.confidence,
+      })),
+    };
   }
 
   /**
@@ -440,6 +546,25 @@ export class ResourceProvider {
       }
     }
 
+    // LCR phase_2: routing:// resources are readable ONLY when enabled; when
+    // dormant they fall through and readResource returns null (never leaks).
+    if (this.routingResourcesEnabled()) {
+      if (uri === "routing://decisions") {
+        return {
+          uri,
+          mimeType: "application/json",
+          text: JSON.stringify({ decisions: this.readRoutingDecisions() }, null, 2),
+        };
+      }
+      if (uri === "routing://priors") {
+        return {
+          uri,
+          mimeType: "application/json",
+          text: JSON.stringify(this.readRoutingPriors(), null, 2),
+        };
+      }
+    }
+
     if (uri === "metrics://performance") {
       return {
         uri,
@@ -529,6 +654,41 @@ export class ResourceProvider {
 
     return null;
   }
+}
+
+/** Raw joined row shape read by readRoutingDecisions (routed rows only). */
+interface RoutingDecisionRow {
+  cli: string;
+  model: string;
+  datetime_utc: string;
+  cost_basis: string | null;
+  route_est_cost_usd: number | null;
+  route_est_confidence: string | null;
+  route_reason: string | null;
+  route_considered: number | null;
+  route_reroutes: number | null;
+}
+
+/** One redacted routing decision surfaced by routing://decisions. */
+export interface RoutingDecision {
+  provider: string;
+  model: string;
+  tier: string;
+  estCostUsd: number | null;
+  costBasis: string | null;
+  confidence: string | null;
+  reason: string | null;
+  considered: number | null;
+  reroutes: number | null;
+  at: string;
+}
+
+/** The routing://priors payload (anonymized, model-level, with price vintage). */
+export interface RoutingPriorsPayload {
+  priorsScope: string;
+  priceAsOf: { table: string; apiCatalog: string };
+  outputPriors: Array<{ candidate: string; median: number; p90: number; samples: number }>;
+  calibration: Array<{ bucket: string; k: number; samples: number; confidence: string }>;
 }
 
 function parseProviderSubcommandUri(

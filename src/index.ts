@@ -84,7 +84,8 @@ import {
   type LeastCostConfig,
 } from "./config.js";
 import { buildRouterEnv, toRouterConfig } from "./lcr-router-env.js";
-import { getModelCost, composeCost } from "./pricing.js";
+import { getModelCost, composeCost, modelIdToFamily } from "./pricing.js";
+import { telemetryTierFor } from "./lcr-telemetry.js";
 import type { TokenCounts, CostBasis } from "./least-cost-types.js";
 import {
   selectCandidate,
@@ -1013,7 +1014,8 @@ export function resolveGatewayServerRuntime(
             deps.cacheAwareness ?? getCacheAwarenessConfig(runtimeLogger),
             deps.providers ?? getProvidersConfig(runtimeLogger),
             undefined,
-            deps.acpConfig ?? getAcpConfig(runtimeLogger)
+            deps.acpConfig ?? getAcpConfig(runtimeLogger),
+            deps.leastCost ?? getLeastCostConfig(runtimeLogger)
           )
         : resourceProvider),
     db: "db" in deps ? (deps.db ?? null) : db,
@@ -13975,6 +13977,48 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           external: mem.external,
         },
       };
+      // LCR (phase_2): per-provider telemetry tier + per-candidate eligibility
+      // (priced? / authed? / breaker? / tier?). Prompt-free, economics only.
+      // Dormant-by-default: a compact { enabled: false } when routing is off.
+      const leastCostBlock = ((): Record<string, unknown> => {
+        const lc = runtime.leastCost;
+        if (!lc.enabled) return { enabled: false };
+        const env = buildRouterEnv({
+          performanceMetrics: runtime.performanceMetrics,
+          limiterSnapshot: runtime.asyncJobManager.getLimiterSnapshot(),
+          apiProviders: enabledApiProviders(runtime.providers),
+          preferCatalogPrice: lc.preferCatalogPrice,
+        });
+        const providerHealth = env.providers().map(provider => ({
+          provider,
+          telemetryTier: telemetryTierFor(provider),
+          authed: env.isAuthed(provider),
+          breakerState: env.breakerState(provider),
+          atCapacity: env.atCapacity(provider),
+          candidates: env.models(provider).map(model => {
+            const mc = env.modelCost(provider, model);
+            const family = modelIdToFamily(model);
+            const tier = lc.tiers[`${provider}:${family}`];
+            return {
+              model,
+              family: mc.family,
+              priced: mc.source !== "unknown",
+              priceSource: mc.source,
+              tier: tier ?? null,
+            };
+          }),
+        }));
+        return {
+          enabled: true,
+          minTier: lc.minTier,
+          maxCostUsd: lc.maxCostUsd,
+          priorsScope: lc.priorsScope,
+          preferCatalogPrice: lc.preferCatalogPrice,
+          allowUnpriced: lc.allowUnpriced,
+          maxReroutes: lc.maxReroutes,
+          providers: providerHealth,
+        };
+      })();
       return {
         content: [
           {
@@ -13986,6 +14030,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
                 backpressure,
                 persistence: persistenceBlock,
                 outboundProviders,
+                leastCost: leastCostBlock,
               },
               null,
               2
@@ -14960,7 +15005,8 @@ async function initializeSessionManager(): Promise<void> {
     getCacheAwarenessConfig(logger),
     getProvidersConfig(logger),
     undefined,
-    getAcpConfig(logger)
+    getAcpConfig(logger),
+    getLeastCostConfig(logger)
   );
 }
 
