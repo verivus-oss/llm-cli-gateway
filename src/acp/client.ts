@@ -85,6 +85,7 @@ import {
 } from "./types.js";
 import type { Logger } from "../logger.js";
 import { noopLogger } from "../logger.js";
+import { gatewayVersion } from "../provider-capability-discovery.js";
 import type { CliType } from "../session-manager.js";
 
 /** Default ACP protocol version advertised by the client to the agent. */
@@ -331,6 +332,13 @@ export class AcpClient {
 
     const params = {
       protocolVersion: this.protocolVersion,
+      // Mistral Vibe forwards this identity as request metadata and rejects
+      // empty values. Supplying the gateway identity also makes the ACP
+      // handshake conformant for agents that require client metadata.
+      clientInfo: {
+        name: "llm-cli-gateway",
+        version: gatewayVersion(),
+      },
       clientCapabilities: {
         fs: {
           readTextFile: options.readTextFile ?? false,

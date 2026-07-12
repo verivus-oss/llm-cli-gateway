@@ -195,6 +195,7 @@ describe("AcpClient", () => {
     const initReq = agent.received.find(f => f.method === "initialize");
     expect(initReq?.params).toMatchObject({
       protocolVersion: 1,
+      clientInfo: { name: "llm-cli-gateway", version: expect.any(String) },
       clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
     });
     // No gateway stdout writes occurred.

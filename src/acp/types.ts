@@ -146,9 +146,19 @@ export const ClientCapabilitiesSchema = z
   })
   .passthrough();
 
+/** Identity of the ACP client initiating the handshake. */
+export const ClientInfoSchema = z
+  .object({
+    name: z.string().min(1),
+    version: z.string().min(1),
+    title: z.string().min(1).optional(),
+  })
+  .passthrough();
+
 export const InitializeRequestSchema = z
   .object({
     protocolVersion: ProtocolVersionSchema,
+    clientInfo: ClientInfoSchema.optional(),
     clientCapabilities: ClientCapabilitiesSchema.optional(),
     _meta: MetaSchema,
   })
