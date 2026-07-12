@@ -403,6 +403,19 @@ describe("upstream CLI contracts", () => {
     expect(result.violations[0]?.message).toMatch(/Unsupported codex CLI environment variable/);
   });
 
+  it("rejects whitespace and Unicode control characters in Vibe model selectors", () => {
+    for (const model of [
+      "contains space",
+      "contains\u0000nul",
+      "contains\u007fdel",
+      "contains\u0085c1",
+    ]) {
+      const result = validateUpstreamCliEnv("mistral", { VIBE_ACTIVE_MODEL: model });
+      expect(result.ok, JSON.stringify(model)).toBe(false);
+      expect(result.violations[0]?.message).toMatch(/does not match required shape/);
+    }
+  });
+
   it("runs bundled static conformance fixtures mechanically", () => {
     for (const [cli, contract] of Object.entries(UPSTREAM_CLI_CONTRACTS)) {
       for (const fixture of contract.conformanceFixtures) {

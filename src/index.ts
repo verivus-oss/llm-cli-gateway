@@ -181,8 +181,6 @@ import {
   prepareCodexHighImpactFlags,
   prepareCodexForkRequest,
   CODEX_CONFIG_OVERRIDES_SCHEMA,
-  prepareGeminiHighImpactFlags,
-  prependGeminiAttachments,
   resolveGeminiSessionPlan,
   GEMINI_HIGH_IMPACT_PARAMS_SCHEMA,
   type ClaudePermissionMode,
@@ -581,7 +579,7 @@ function getJobStore(runtimeLogger: GatewayLogger = logger): JobStore | null {
   try {
     jobStore = createJobStore(getPersistenceConfig(runtimeLogger), runtimeLogger);
   } catch (err) {
-    runtimeLogger.error("Failed to open durable job store; async tools will be unavailable", err);
+    runtimeLogger.error("Failed to open configured durable job store", err);
     jobStore = null;
   }
   return jobStore;
@@ -4109,7 +4107,7 @@ export function prepareGrokRequest(
     } else {
       args.push("--permission-mode", "acceptEdits");
     }
-  } else if (Boolean(params.alwaysApprove)) {
+  } else if (params.alwaysApprove) {
     args.push("--always-approve");
   } else if (params.permissionMode) {
     args.push("--permission-mode", params.permissionMode);
@@ -5939,7 +5937,7 @@ export async function handleGeminiRequest(
     // Post-success session I/O for explicit conversation-resume flows. Fresh
     // Antigravity sessions are owned by the CLI because it has no supported
     // fresh session-id flag the gateway can inject.
-    let effectiveSessionId = effectiveSessionIdHint;
+    const effectiveSessionId = effectiveSessionIdHint;
     if (effectiveSessionId) {
       const existing = await deps.sessionManager.getSession(effectiveSessionId);
       if (!existing) {
@@ -6077,7 +6075,7 @@ export async function handleGeminiRequestAsync(
     });
 
     // Pre-start session I/O (async handlers: prevent orphaned jobs)
-    let effectiveSessionId = sessionPlan.resumed ? params.sessionId : undefined;
+    const effectiveSessionId = sessionPlan.resumed ? params.sessionId : undefined;
     const existingSession = await getExistingSessionForProvider(
       deps.sessionManager,
       effectiveSessionId,
@@ -8238,33 +8236,26 @@ export async function handleCodexRequestAsync(
       params.outputFormat,
       params.optimizePrompt
     );
-    let job;
-    try {
-      job = deps.asyncJobManager.startJob(
-        "codex",
-        args,
-        corrId,
-        worktreeResolution.cwd,
-        resolveIdleTimeout("codex", params.idleTimeoutMs),
-        params.outputFormat,
-        params.forceRefresh,
-        undefined,
-        prepCleanup,
-        codexAsyncFrHandoff.flightRecorderEntry,
-        codexAsyncFrHandoff.extractUsage,
-        true,
-        undefined,
-        effectiveCompress
-      );
-      // Handoff succeeded: AsyncJobManager will fire prepCleanup on terminal
-      // status. Release our local ownership claim so the catch path doesn't
-      // double-fire.
-      prepCleanupOwnedHere = false;
-    } catch (startErr) {
-      // startJob never stored the record → manager won't call onComplete. We
-      // still own the cleanup; let the outer catch run it.
-      throw startErr;
-    }
+    const job = deps.asyncJobManager.startJob(
+      "codex",
+      args,
+      corrId,
+      worktreeResolution.cwd,
+      resolveIdleTimeout("codex", params.idleTimeoutMs),
+      params.outputFormat,
+      params.forceRefresh,
+      undefined,
+      prepCleanup,
+      codexAsyncFrHandoff.flightRecorderEntry,
+      codexAsyncFrHandoff.extractUsage,
+      true,
+      undefined,
+      effectiveCompress
+    );
+    // Handoff succeeded: AsyncJobManager will fire prepCleanup on terminal
+    // status. Release our local ownership claim so the outer catch does not
+    // double-fire it if a later response-building step fails.
+    prepCleanupOwnedHere = false;
     deps.logger.info(`[${corrId}] codex_request_async started job ${job.id}`);
 
     const asyncResponse: Record<string, unknown> = {
@@ -10302,7 +10293,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       // in-handler session resolution prior to spawn (session lookup is
       // lazy via `codex exec resume`), so the user-supplied sessionId is
       // the only reuse key.
-      let worktreeResolution: ResolvedWorktree = {};
+      let worktreeResolution: ResolvedWorktree;
       try {
         worktreeResolution = await resolveWorkspaceAndWorktreeForRequest({
           provider: "codex",
@@ -13885,34 +13876,32 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
     },
     async () => {
       const health = asyncJobManager.getJobHealth();
-      // Report the EFFECTIVE async state, not the configured intent. When a
-      // durable store fails to open (for example a Postgres or SQLite connection
-      // error),
-      // getJobStore() catches the error and nulls the store, so the
-      // *_request_async / llm_job_* tools are NOT registered. This MUST mirror
-      // the registration gate (the `asyncJobsEnabled` derived in
-      // createGatewayServer): backend !== 'none' AND the config flag AND
-      // hasStore(). Surfacing the raw persistence.asyncJobsEnabled flag here
-      // would claim async is on while no async tools exist (including the
-      // inconsistent injected {backend:'none', asyncJobsEnabled:true} + store
-      // case the registration gate structurally rejects).
+      // Report configured, attached, and currently admissible state separately.
+      // A store can remain attached while its heartbeat circuit is fail-closed;
+      // reporting that state as enabled would hide an async outage from callers.
       const storeAttached = asyncJobManager.hasStore();
-      const asyncJobsEffective =
-        persistence.backend !== "none" && persistence.asyncJobsEnabled && storeAttached;
+      const durableAdmission = asyncJobManager.getDurableAdmissionHealth();
+      const asyncJobsConfigured = persistence.backend !== "none" && persistence.asyncJobsEnabled;
+      const asyncJobsEffective = asyncJobsConfigured && storeAttached && durableAdmission.admitting;
       const persistenceBlock = {
         backend: persistence.backend,
         dbPath: persistence.path,
         dsn: persistence.dsn ? "[redacted]" : null,
         retentionDays: persistence.retentionDays,
         dedupWindowMs: persistence.dedupWindowMs,
+        asyncJobsConfigured,
+        storeAttached,
         asyncJobsEnabled: asyncJobsEffective,
+        durableAdmission,
         acknowledgeEphemeral: persistence.acknowledgeEphemeral,
         sources: persistence.sources,
         warning: asyncJobsEffective
           ? null
           : persistence.backend === "none"
             ? "Async job persistence is disabled (backend = 'none'). *_request_async tools are NOT registered on this gateway. Set [persistence].backend = 'sqlite' (or 'memory' + acknowledgeEphemeral = true) to enable them."
-            : `Async job persistence is configured (backend = '${persistence.backend}') but the durable job store failed to open, so *_request_async tools are NOT registered on this gateway. Check gateway startup logs for the store-open error.`,
+            : !storeAttached
+              ? `Async job persistence is configured (backend = '${persistence.backend}') but the durable job store failed to open, so *_request_async / llm_job_* tools are NOT registered on this gateway. Check gateway startup logs for the store-open error.`
+              : "Async job persistence is attached but durable admission is temporarily disabled while its heartbeat lease recovers. Existing async tools fail closed until admission is restored.",
       };
       const outboundProviders = {
         xai: providers.xai
@@ -15060,13 +15049,18 @@ function registerHealthResource(server: McpServer): void {
       mimeType: "application/json",
     },
     async uri => {
-      const health = getAsyncJobManager().getJobHealth();
+      const manager = getAsyncJobManager();
+      const health = manager.getJobHealth();
       return {
         contents: [
           {
             uri: uri.href,
             mimeType: "application/json",
-            text: JSON.stringify(health, null, 2),
+            text: JSON.stringify(
+              { ...health, durableAdmission: manager.getDurableAdmissionHealth() },
+              null,
+              2
+            ),
           },
         ],
       };
@@ -15079,7 +15073,14 @@ function registerHealthResource(server: McpServer): void {
 // Graceful Shutdown
 //──────────────────────────────────────────────────────────────────────────────
 
-async function shutdown(signal: string): Promise<void> {
+let shutdownPromise: Promise<void> | null = null;
+
+function shutdown(signal: string, exitCode = 0): Promise<void> {
+  shutdownPromise ??= performShutdown(signal, exitCode);
+  return shutdownPromise;
+}
+
+async function performShutdown(signal: string, exitCode: number): Promise<void> {
   logger.info(`Received ${signal}, shutting down gracefully...`);
 
   try {
@@ -15113,6 +15114,13 @@ async function shutdown(signal: string): Promise<void> {
       activeServer = null;
     }
 
+    if (jobStore) {
+      jobStore.close();
+      logger.info("Durable job store closed");
+      jobStore = null;
+      jobStoreInitialized = false;
+    }
+
     if (db) {
       await db.disconnect();
       logger.info("Database connections closed");
@@ -15123,7 +15131,7 @@ async function shutdown(signal: string): Promise<void> {
       logger.info("Flight recorder closed");
     }
 
-    process.exit(0);
+    process.exit(exitCode);
   } catch (error) {
     logger.error("Error during shutdown:", error);
     process.exit(1);
@@ -15610,15 +15618,32 @@ async function main() {
   // fault-isolated). Read surfaces peek this memo synchronously.
   void warmProviderCapabilities({ logger }).catch(() => undefined);
 
+  const persistence = getPersistenceConfig(logger);
+  const runtimeAsyncJobManager = getAsyncJobManager(logger);
+  // A configured durable backend that cannot open must not leave a long-lived
+  // process falsely alive but permanently unable to recover (there is no store
+  // instance to heartbeat). Exit nonzero so a supervisor retries startup, and
+  // make stdio clients receive an immediate, actionable startup failure.
+  if (
+    persistence.backend !== "none" &&
+    persistence.asyncJobsEnabled &&
+    !runtimeAsyncJobManager.hasStore()
+  ) {
+    throw new Error(
+      `Configured ${persistence.backend} job store could not be opened; refusing to start without durable async persistence`
+    );
+  }
+
   const serverDeps: GatewayServerDeps = {
     sessionManager,
     resourceProvider,
     db,
     performanceMetrics,
-    asyncJobManager: getAsyncJobManager(logger),
+    asyncJobManager: runtimeAsyncJobManager,
     approvalManager: getApprovalManager(logger),
     flightRecorder: getFlightRecorder(logger),
     logger,
+    persistence,
   };
 
   if (transportMode === "http") {
@@ -15639,6 +15664,17 @@ async function main() {
     ...serverDeps,
   });
 
+  // Protocol.connect chains transport.onclose, then invokes this Server-level
+  // callback. It covers explicit transport closure; stdin's end event covers
+  // clients that simply close their pipe, which the SDK's stdio transport does
+  // not subscribe to itself.
+  activeServer.server.onclose = () => {
+    void shutdown("stdio MCP connection closed");
+  };
+  process.stdin.once("end", () => {
+    void shutdown("stdio stdin EOF");
+  });
+
   // Register health check resource if using PostgreSQL
   registerHealthResource(activeServer);
 
@@ -15653,6 +15689,6 @@ const __entryUrl = entrypointFileURL(process.argv[1]);
 if (__entryUrl === import.meta.url) {
   main().catch(error => {
     logger.error("Fatal server error:", error);
-    process.exit(1);
+    void shutdown("fatal startup error", 1);
   });
 }

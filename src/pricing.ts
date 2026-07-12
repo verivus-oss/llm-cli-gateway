@@ -58,7 +58,6 @@ import type {
   TokenEstimate,
   CostResult,
   AccountingMode,
-  PriceSource,
 } from "./least-cost-types.js";
 
 export interface PricePerMillion {

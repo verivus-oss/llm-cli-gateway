@@ -216,7 +216,7 @@ export function checkVibeSessionLogging(home = homedir()): VibeSessionLoggingSta
 function parseVibeSessionLoggingEnabled(text: string): boolean | undefined {
   const lines = text.split(/\r?\n/);
   let inSection = false;
-  for (let raw of lines) {
+  for (const raw of lines) {
     const line = raw.replace(/#.*$/, "").trim();
     if (!line) continue;
     const sectionMatch = line.match(/^\[\s*([A-Za-z0-9_.-]+)\s*\]$/);

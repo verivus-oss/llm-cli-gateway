@@ -1,6 +1,6 @@
 {
   "name": "llm-cli-gateway",
-  "version": "2.16.0",
+  "version": "2.17.0",
   "mcpName": "io.github.verivus-oss/llm-cli-gateway",
   "description": "Secure local control plane for AI coding agents across supported MCP clients, with workspace-scoped remote access, approval gates, durable jobs, sessions, and audit receipts.",
   "license": "MIT",
@@ -93,8 +93,8 @@
     "supply-chain:scan:check": "node scripts/supply-chain/dep-drift-scan.mjs --frozen",
     "supply-chain:seed": "node scripts/supply-chain/dep-drift-scan.mjs --seed",
     "test:supply-chain": "vitest run scripts/supply-chain/dep-drift-scan.test.mjs",
-    "lint": "eslint src/**/*.ts",
-    "lint:fix": "eslint src/**/*.ts --fix",
+    "lint": "eslint src --ignore-pattern 'src/__tests__/**'",
+    "lint:fix": "eslint src --ignore-pattern 'src/__tests__/**' --fix",
     "format": "prettier --write 'src/**/*.ts'",
     "format:check": "prettier --check 'src/**/*.ts'",
     "security:audit": "bash scripts/release-security-audit.sh",

@@ -42,7 +42,8 @@ export async function migrateFromFile(
     fileData = JSON.parse(fileContent);
   } catch (error) {
     throw new Error(
-      `Failed to read sessions file: ${error instanceof Error ? error.message : String(error)}`
+      `Failed to read sessions file: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error }
     );
   }
 

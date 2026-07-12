@@ -2,8 +2,8 @@
 
 ## Prerequisites
 
-- Docker & Docker Compose
-- Node.js 20+
+- Docker with Compose, or Podman with Compose support
+- Node.js >=24.4.0
 
 ## Quick Start
 
@@ -11,11 +11,19 @@
 # Start test databases, run PG tests, tear down
 npm run test:pg
 
-# Or manually:
-docker compose -f docker/test.compose.yml up -d
+# Or manually, choose docker or podman:
+CONTAINER_CLI=docker
+"${CONTAINER_CLI}" compose -f docker/test.compose.yml up -d
 TEST_DATABASE_URL=postgresql://test:test@localhost:5433/llm_gateway_test \
 PG_TESTS=1 npx vitest --no-file-parallelism src/__tests__/*-pg.test.ts
-docker compose -f docker/test.compose.yml down
+"${CONTAINER_CLI}" compose -f docker/test.compose.yml down
+```
+
+When `CONTAINER_CLI` is unset, `npm run test:pg` detects `docker compose`
+first and then `podman compose`. Set `CONTAINER_CLI` to select one explicitly:
+
+```bash
+CONTAINER_CLI=podman npm run test:pg
 ```
 
 ## Test Suites
@@ -45,6 +53,7 @@ npm run test:session-pg
 
 | Variable            | Default                                                  | Description                    |
 | ------------------- | -------------------------------------------------------- | ------------------------------ |
+| `CONTAINER_CLI`     | auto-detect (`docker`, then `podman`)                    | Container CLI used for Compose |
 | `TEST_DATABASE_URL` | `postgresql://test:test@localhost:5433/llm_gateway_test` | Test PG connection             |
 | `PG_TESTS`          | unset                                                    | Set to `1` to include PG tests |
 

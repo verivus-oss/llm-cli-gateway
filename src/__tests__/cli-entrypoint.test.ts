@@ -35,6 +35,54 @@ describe.skipIf(!existsSync(entrypoint))("CLI metadata entrypoint", () => {
       schemaVersion: "upstream-cli-contracts.v1",
     });
   });
+
+  it("exits cleanly when its stdio MCP client closes stdin", () => {
+    const result = spawnSync(process.execPath, [entrypoint], {
+      encoding: "utf8",
+      input: "",
+      timeout: 15_000,
+      env: {
+        ...process.env,
+        LLM_GATEWAY_LOGS_DB: "none",
+        LLM_GATEWAY_JOBS_DB: "none",
+      },
+    });
+    expect(result.error).toBeUndefined();
+    expect(result.signal).toBeNull();
+    expect(result.status).toBe(0);
+  });
+
+  it("fails startup when a configured durable store cannot be opened", () => {
+    const dir = mkdtempSync(join(tmpdir(), "cli-unavailable-postgres-"));
+    const config = join(dir, "config.toml");
+    writeFileSync(
+      config,
+      [
+        "[persistence]",
+        'backend = "postgres"',
+        'dsn = "postgresql://127.0.0.1:1/unavailable"',
+      ].join("\n")
+    );
+    try {
+      const result = spawnSync(process.execPath, [entrypoint], {
+        encoding: "utf8",
+        input: "",
+        timeout: 15_000,
+        env: {
+          ...process.env,
+          LLM_GATEWAY_CONFIG: config,
+          LLM_GATEWAY_LOGS_DB: "",
+          LLM_GATEWAY_JOBS_DB: "",
+        },
+      });
+      expect(result.error).toBeUndefined();
+      expect(result.signal).toBeNull();
+      expect(result.status).toBe(1);
+      expect(result.stderr).toMatch(/durable job store|durable async persistence/i);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe.skipIf(!existsSync(entrypoint))("CLI oauth client + connector setup", () => {

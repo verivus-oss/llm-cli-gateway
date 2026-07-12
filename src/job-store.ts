@@ -1,8 +1,8 @@
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync } from "fs";
+import { chmodSync, existsSync } from "fs";
 import os from "os";
 import path from "path";
 import { createHash } from "crypto";
-import { Worker } from "worker_threads";
+import { MessageChannel, receiveMessageOnPort, Worker } from "worker_threads";
 import { fileURLToPath } from "url";
 import { openDatabase } from "./sqlite-driver.js";
 import type { GatewayDatabase, GatewayStatement } from "./sqlite-driver.js";
@@ -110,6 +110,12 @@ export function resolveJobRetentionMs(): number {
 }
 
 const DEFAULT_DEDUP_WINDOW_MS = 60 * 60 * 1000; // 1 hour
+
+// The Postgres worker uses a 5s connection timeout and a 27s driver query
+// timeout. Keep the synchronous watchdog beyond that complete budget. Schema
+// bootstrap can also wait briefly on the transaction-scoped advisory lock.
+const POSTGRES_WORKER_OPERATION_TIMEOUT_MS = 35_000;
+const POSTGRES_WORKER_INITIALIZATION_TIMEOUT_MS = 45_000;
 
 export function resolveDedupWindowMs(): number {
   const raw = process.env.LLM_GATEWAY_DEDUP_WINDOW_MS;
@@ -1399,10 +1405,19 @@ export class MemoryJobStore implements JobStore {
  * managed by AsyncJobManager's limiter.
  */
 export class PostgresJobStore implements JobStore, ValidationRunStore {
-  private worker: Worker;
-  private tmpDir: string;
-  private nextRequestId = 0;
+  private worker: Worker | null = null;
+  private retiringWorker: Worker | null = null;
+  private readonly intentionallyRetiredWorkers = new WeakSet<Worker>();
+  private workerTerminationPending = false;
   private closed = false;
+  private readonly workerData: {
+    dsn: string;
+    retentionMs: number;
+    dedupWindowMs: number;
+    leaseTtlMs: number;
+    farFutureIso: string;
+    connectionTimeoutMillis: number;
+  };
 
   constructor(
     dsn: string,
@@ -1412,55 +1427,183 @@ export class PostgresJobStore implements JobStore, ValidationRunStore {
     if (!dsn) {
       throw new Error("PostgresJobStore requires a non-empty DSN");
     }
-    this.tmpDir = mkdtempSync(path.join(os.tmpdir(), "llm-gateway-pg-job-store-"));
-    this.worker = new Worker(resolvePostgresWorkerUrl(), {
-      execArgv: [],
-      workerData: {
-        dsn,
-        retentionMs: options.retentionMs ?? resolveJobRetentionMs(),
-        dedupWindowMs: options.dedupWindowMs ?? resolveDedupWindowMs(),
-        leaseTtlMs: options.leaseTtlMs ?? DEFAULT_INSTANCE_LEASE_TTL_MS,
-        farFutureIso: FAR_FUTURE_ISO,
-        connectionTimeoutMillis: 5000,
-      },
-    });
+    this.workerData = {
+      dsn,
+      retentionMs: options.retentionMs ?? resolveJobRetentionMs(),
+      dedupWindowMs: options.dedupWindowMs ?? resolveDedupWindowMs(),
+      leaseTtlMs: options.leaseTtlMs ?? DEFAULT_INSTANCE_LEASE_TTL_MS,
+      farFutureIso: FAR_FUTURE_ISO,
+      connectionTimeoutMillis: 5000,
+    };
     try {
-      this.syncCall("init");
+      this.ensureWorker();
     } catch (err) {
       this.closed = true;
-      void this.worker.terminate();
-      rmSync(this.tmpDir, { recursive: true, force: true });
+      this.retireWorker(this.worker);
       throw err;
     }
   }
 
+  private createWorker(): Worker {
+    const worker = new Worker(resolvePostgresWorkerUrl(), {
+      execArgv: [],
+      workerData: this.workerData,
+    });
+    worker.on("message", message => {
+      if (!isPostgresWorkerDiagnostic(message)) return;
+      const error = new Error(message.message);
+      if (message.stack) error.stack = message.stack;
+      this.logger.error(`PostgresJobStore worker ${message.kind}`, error);
+    });
+    worker.on("error", error => {
+      this.logger.error("PostgresJobStore worker crashed", error);
+      if (!this.closed && this.worker === worker) this.retireWorker(worker);
+    });
+    worker.on("exit", code => {
+      const wasRetiring =
+        this.retiringWorker === worker || this.intentionallyRetiredWorkers.has(worker);
+      if (this.worker === worker) this.worker = null;
+      if (wasRetiring) this.markWorkerRetired(worker);
+      if (this.closed || wasRetiring || code === 0) return;
+      this.logger.error(
+        "PostgresJobStore worker exited unexpectedly",
+        new Error(`PostgresJobStore worker exited with code ${code}`)
+      );
+    });
+    return worker;
+  }
+
+  /**
+   * The JobStore API is synchronous, but Postgres runs in a worker.  Do not use
+   * files as the response bridge here: an exhausted or externally cleaned
+   * runtime directory must not turn a healthy durable store into a failed one.
+   * A per-call MessagePort carries arbitrary-sized payloads, including the
+   * gateway's 50 MB captured-output limit; the SharedArrayBuffer only wakes the
+   * synchronous caller after the payload has been queued.
+   */
   private syncCall<T>(method: string, ...args: unknown[]): T {
-    if (this.closed && method !== "close") {
+    if (this.closed) {
       throw new Error("PostgresJobStore is closed");
     }
-    const shared = new SharedArrayBuffer(4);
-    const state = new Int32Array(shared);
-    const resultPath = path.join(this.tmpDir, `result-${process.pid}-${++this.nextRequestId}.json`);
-    this.worker.postMessage({ method, args, resultPath, shared });
-    const wait = Atomics.wait(state, 0, 0, method === "init" ? 10_000 : 30_000);
-    if (wait !== "ok" && wait !== "not-equal") {
-      throw new Error(`PostgresJobStore ${method} wait failed: ${wait}`);
+    const worker = this.ensureWorker();
+    return this.callWorker<T>(worker, method, args);
+  }
+
+  /**
+   * Recreate a worker only after its predecessor has fully exited. A bridge
+   * timeout has an unknown mutation outcome, so starting another worker before
+   * termination completes would allow overlapping store calls and is unsafe.
+   */
+  private ensureWorker(): Worker {
+    if (this.closed) throw new Error("PostgresJobStore is closed");
+    if (this.worker) return this.worker;
+    if (this.workerTerminationPending) {
+      throw new Error(
+        "PostgresJobStore is waiting for a failed worker to terminate before it can recover"
+      );
     }
-    if (Atomics.load(state, 0) === 2) {
-      throw new Error(`PostgresJobStore ${method} worker could not write its result`);
-    }
-    let payload: { ok: true; value: T } | { ok: false; error: { message: string; stack?: string } };
+    const worker = this.createWorker();
+    this.worker = worker;
     try {
-      payload = JSON.parse(readFileSync(resultPath, "utf8"));
-    } finally {
-      rmSync(resultPath, { force: true });
-    }
-    if (!payload.ok) {
-      const err = new Error(payload.error.message);
-      if (payload.error.stack) err.stack = payload.error.stack;
+      this.callWorker<void>(worker, "init", []);
+      return worker;
+    } catch (err) {
+      // A fresh worker whose bootstrap failed cannot safely service regular
+      // operations. Retire it, then let a later heartbeat retry the full init.
+      this.retireWorker(worker);
       throw err;
     }
-    return payload.value;
+  }
+
+  private callWorker<T>(worker: Worker, method: string, args: unknown[]): T {
+    const shared = new SharedArrayBuffer(4);
+    const state = new Int32Array(shared);
+    const { port1: workerPort, port2: responsePort } = new MessageChannel();
+    try {
+      try {
+        worker.postMessage({ method, args, shared, responsePort: workerPort }, [workerPort]);
+      } catch (err) {
+        throw this.retireAfterBridgeFailure(
+          worker,
+          `PostgresJobStore ${method} could not dispatch work to its worker`,
+          err
+        );
+      }
+
+      // The worker has a 5s connection timeout and a 27s driver query timeout.
+      // Keep this watchdog comfortably beyond both, otherwise a healthy query
+      // can be terminated by the parent before the driver's own cancellation
+      // has completed. Bootstrap additionally performs serialized DDL.
+      const timeoutMs =
+        method === "init"
+          ? POSTGRES_WORKER_INITIALIZATION_TIMEOUT_MS
+          : POSTGRES_WORKER_OPERATION_TIMEOUT_MS;
+      const wait = Atomics.wait(state, 0, 0, timeoutMs);
+      if (wait === "timed-out") {
+        // The worker may have committed a mutation after the caller stopped
+        // waiting.  Terminate it and fail closed rather than allowing a second
+        // call to overlap an operation whose outcome is unknown.
+        throw this.retireAfterBridgeFailure(
+          worker,
+          `PostgresJobStore ${method} timed out after ${timeoutMs}ms; the operation outcome is unknown`
+        );
+      }
+      if (wait !== "ok" && wait !== "not-equal") {
+        throw this.retireAfterBridgeFailure(
+          worker,
+          `PostgresJobStore ${method} wait failed: ${wait}`
+        );
+      }
+      if (Atomics.load(state, 0) !== 1) {
+        throw this.retireAfterBridgeFailure(
+          worker,
+          `PostgresJobStore ${method} worker response transport failed`
+        );
+      }
+
+      const received = receiveMessageOnPort(responsePort);
+      if (!received || !isPostgresWorkerPayload(received.message)) {
+        throw this.retireAfterBridgeFailure(
+          worker,
+          `PostgresJobStore ${method} worker signalled without a valid response`
+        );
+      }
+      const payload = received.message as PostgresWorkerPayload<T>;
+      if (!payload.ok) {
+        const err = new Error(payload.error.message);
+        if (payload.error.stack) err.stack = payload.error.stack;
+        throw err;
+      }
+      return payload.value;
+    } finally {
+      responsePort.close();
+    }
+  }
+
+  private retireAfterBridgeFailure(worker: Worker, message: string, cause?: unknown): Error {
+    this.retireWorker(worker);
+    return cause === undefined ? new Error(message) : new Error(message, { cause });
+  }
+
+  private retireWorker(worker: Worker | null): void {
+    if (!worker || this.retiringWorker === worker) return;
+    if (this.worker === worker) this.worker = null;
+    this.retiringWorker = worker;
+    this.intentionallyRetiredWorkers.add(worker);
+    this.workerTerminationPending = true;
+    void worker.terminate().then(
+      () => this.markWorkerRetired(worker),
+      error => {
+        this.logger.error("PostgresJobStore worker termination failed", error);
+        this.markWorkerRetired(worker);
+      }
+    );
+  }
+
+  private markWorkerRetired(worker: Worker): void {
+    if (this.retiringWorker !== worker) return;
+    this.retiringWorker = null;
+    this.workerTerminationPending = false;
   }
 
   recordStart(input: {
@@ -1612,16 +1755,48 @@ export class PostgresJobStore implements JobStore, ValidationRunStore {
 
   close(): void {
     if (this.closed) return;
+    const worker = this.worker;
     try {
-      this.syncCall("close");
+      if (worker) this.callWorker<void>(worker, "close", []);
     } catch (err) {
       this.logger.error("PostgresJobStore close failed", err);
     } finally {
       this.closed = true;
-      void this.worker.terminate();
-      rmSync(this.tmpDir, { recursive: true, force: true });
+      this.retireWorker(worker);
     }
   }
+}
+
+type PostgresWorkerPayload<T> =
+  { ok: true; value: T } | { ok: false; error: { message: string; stack?: string } };
+
+function isPostgresWorkerPayload(value: unknown): value is PostgresWorkerPayload<unknown> {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as Record<string, unknown>;
+  if (candidate.ok === true) return "value" in candidate;
+  if (!candidate.error || typeof candidate.error !== "object" || candidate.ok !== false)
+    return false;
+  const error = candidate.error as Record<string, unknown>;
+  return (
+    typeof error.message === "string" &&
+    (error.stack === undefined || typeof error.stack === "string")
+  );
+}
+
+function isPostgresWorkerDiagnostic(value: unknown): value is {
+  type: "postgres-job-store-diagnostic";
+  kind: string;
+  message: string;
+  stack?: string;
+} {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as Record<string, unknown>;
+  return (
+    candidate.type === "postgres-job-store-diagnostic" &&
+    typeof candidate.kind === "string" &&
+    typeof candidate.message === "string" &&
+    (candidate.stack === undefined || typeof candidate.stack === "string")
+  );
 }
 
 function resolvePostgresWorkerUrl(): URL {

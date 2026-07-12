@@ -10,8 +10,11 @@ import { z } from "zod/v3";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { startHttpGateway, type HttpGatewayHandle } from "../http-transport.js";
+import { AsyncJobManager } from "../async-job-manager.js";
+import { MemoryJobStore } from "../job-store.js";
+import { noopLogger } from "../logger.js";
 import { getRequestContext } from "../request-context.js";
-import type { HttpSessionLimitsConfig } from "../config.js";
+import type { HttpSessionLimitsConfig, PersistenceConfig } from "../config.js";
 import { buildRemoteConnectorUrls } from "../remote-url.js";
 import { gatherRemoteHttpOAuthReadiness } from "../doctor.js";
 
@@ -958,6 +961,87 @@ describe("Layer 6 HTTP MCP transport (U20)", () => {
     // Redaction: no prompt/response/token/secret material on this surface.
     const raw = JSON.stringify(body);
     expect(raw).not.toMatch(/authorization|bearer|api[_-]?key|token/i);
+  });
+
+  it("keeps /healthz live but marks readiness false when durable admission is quiesced", async () => {
+    const store = new MemoryJobStore();
+    store.heartbeat = () => {
+      throw new Error("durable store temporarily unavailable");
+    };
+    const manager = new AsyncJobManager(noopLogger, undefined, store);
+    gateway = await startHttpGateway({
+      host: "127.0.0.1",
+      port: 0,
+      path: "/mcp",
+      deps: { asyncJobManager: manager },
+      createGatewayServer: () => makeEchoServer(),
+    });
+
+    try {
+      const response = await fetch(new URL("/healthz", gateway.url).toString());
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as {
+        ok: boolean;
+        ready: boolean;
+        jobs: { durableAdmission: { storeAttached: boolean; admitting: boolean } };
+      };
+      expect(body.ok).toBe(true);
+      expect(body.ready).toBe(false);
+      expect(body.jobs.durableAdmission).toEqual({
+        storeAttached: true,
+        admitting: false,
+        consecutiveHeartbeatFailures: 0,
+        consecutiveHeartbeatSuccesses: 0,
+        lastHeartbeatFailureAt: expect.any(String),
+        lastHeartbeatRecoveryAt: null,
+        lastHeartbeatErrorName: "Error",
+      });
+    } finally {
+      await manager.dispose();
+    }
+  });
+
+  it("marks /healthz not ready when configured durable persistence failed to open", async () => {
+    const manager = new AsyncJobManager(noopLogger, undefined, null);
+    const persistence: PersistenceConfig = {
+      backend: "postgres",
+      path: null,
+      dsn: "postgresql://unavailable.example/gateway",
+      retentionDays: 30,
+      dedupWindowMs: 3_600_000,
+      acknowledgeEphemeral: false,
+      ownsOrphanRecovery: false,
+      instanceHeartbeatMs: 15_000,
+      instanceLeaseTtlMs: 90_000,
+      httpJobGraceMs: 300_000,
+      orphanSweepIntervalMs: 30_000,
+      instanceGcMs: 3_600_000,
+      asyncJobsEnabled: true,
+      sources: { configFile: null, envOverrides: [] },
+    };
+    gateway = await startHttpGateway({
+      host: "127.0.0.1",
+      port: 0,
+      path: "/mcp",
+      deps: { asyncJobManager: manager, persistence },
+      createGatewayServer: () => makeEchoServer(),
+    });
+
+    try {
+      const response = await fetch(new URL("/healthz", gateway.url).toString());
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as {
+        ok: boolean;
+        ready: boolean;
+        jobs: { durableAdmission: { storeAttached: boolean; admitting: boolean } };
+      };
+      expect(body.ok).toBe(true);
+      expect(body.ready).toBe(false);
+      expect(body.jobs.durableAdmission.storeAttached).toBe(false);
+      expect(body.jobs.durableAdmission.admitting).toBe(false);
+    } finally {
+      await manager.dispose();
+    }
   });
 
   it("returns 404 for unknown paths on the gateway host", async () => {

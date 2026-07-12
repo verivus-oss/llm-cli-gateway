@@ -50,7 +50,8 @@ export class DatabaseConnection {
     } catch (error) {
       this.logger.error("Failed to connect to PostgreSQL", { error });
       throw new Error(
-        `Failed to connect to PostgreSQL: ${error instanceof Error ? error.message : String(error)}`
+        `Failed to connect to PostgreSQL: ${error instanceof Error ? error.message : String(error)}`,
+        { cause: error }
       );
     }
   }
@@ -69,7 +70,8 @@ export class DatabaseConnection {
       } catch (error) {
         errors.push(
           new Error(
-            `PostgreSQL disconnect error: ${error instanceof Error ? error.message : String(error)}`
+            `PostgreSQL disconnect error: ${error instanceof Error ? error.message : String(error)}`,
+            { cause: error }
           )
         );
       }
@@ -97,7 +99,7 @@ export class DatabaseConnection {
         await client.query("SELECT 1");
         result.postgres.connected = true;
         result.postgres.latency = Date.now() - pgStart;
-      } catch (error) {
+      } catch {
         result.postgres.connected = false;
       } finally {
         // Always release the client to prevent connection leaks
@@ -130,7 +132,8 @@ async function importOptionalPg(): Promise<typeof import("pg")> {
   } catch (error: any) {
     if (error?.code === "ERR_MODULE_NOT_FOUND" || error?.code === "MODULE_NOT_FOUND") {
       throw new Error(
-        "PostgreSQL sessions require optional peer dependency 'pg'. Install it alongside llm-cli-gateway to use DATABASE_URL-backed sessions."
+        "PostgreSQL sessions require optional peer dependency 'pg'. Install it alongside llm-cli-gateway to use DATABASE_URL-backed sessions.",
+        { cause: error }
       );
     }
     throw error;

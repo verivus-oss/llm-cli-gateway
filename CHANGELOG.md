@@ -4,6 +4,34 @@ All notable changes to the llm-cli-gateway project.
 
 ## [Unreleased]
 
+## [2.17.0] - 2026-07-13
+
+### Added
+
+- **Least-cost routing.** `route_request` and `route_request_async` select the
+  cheapest eligible provider and model within a quality floor, budget cap, and
+  current capacity constraints. The router now exposes pricing, estimates,
+  route decisions, health, and learned cost priors through `routing://`
+  resources.
+- **Cheapest eligible validation.** `validate_with_models` can now select a
+  least-cost eligible model rather than requiring callers to name one.
+- **Supply-chain release guards.** Dependency drift, tag-along packages,
+  unexpected install scripts, licenses, and policy changes are checked before
+  release, with fail-closed protection for uncertain findings.
+
+### Fixed
+
+- **Durable Postgres job-store recovery.** Replaced temporary-file worker
+  result handoff with in-process message channels, preserving failure detail
+  and avoiding host `/tmp` inode exhaustion. A failed bridge now retires and
+  recreates its worker safely, and durable admission recovers only after a
+  successful re-registration.
+- **Async availability reporting and lifecycle.** Readiness and process health
+  now reflect durable-admission state, configured-store startup failures exit
+  for supervised recovery, and shutdown reliably closes the job store.
+- **Release and test gates.** The lint command now checks the actual source
+  tree, and Postgres integration tests work with either Docker or Podman.
+
 ## [2.16.0] - 2026-07-10
 
 ### Added

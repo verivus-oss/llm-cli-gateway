@@ -294,7 +294,7 @@ function addWarning(info: CliInfo, warning: string): void {
 }
 
 function isValidModelName(model: string): boolean {
-  return model.length > 0 && !/[\u0000-\u001f\u007f]/.test(model) && !/\s/.test(model);
+  return model.length > 0 && !/[\s\p{Cc}]/u.test(model);
 }
 
 function addModel(

@@ -71,7 +71,7 @@ function findInstalledExaEntrypoint(): string | null {
     return null;
   }
 
-  let versions: string[] = [];
+  let versions: string[];
   try {
     versions = readdirSync(nvmVersionsDir);
   } catch {

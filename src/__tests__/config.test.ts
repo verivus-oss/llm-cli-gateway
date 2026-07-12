@@ -229,6 +229,18 @@ describe("config", () => {
 
       expect(() => loadSkillsConfig(noopLogger)).toThrow(/Invalid \[skills\] config/);
     });
+
+    it("preserves the schema error when [skills] config is invalid", () => {
+      pointSkillsConfig(["[skills]", 'paths = "/not-an-array"'].join("\n"));
+
+      try {
+        loadSkillsConfig(noopLogger);
+        throw new Error("Expected loadSkillsConfig to reject invalid configuration");
+      } catch (error) {
+        expect(error).toBeInstanceOf(Error);
+        expect((error as Error).cause).toBeDefined();
+      }
+    });
   });
 
   describe("diagnoseRemoteOAuthConfig (remote setup projection)", () => {

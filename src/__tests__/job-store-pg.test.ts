@@ -1,6 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { Worker } from "node:worker_threads";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AsyncJobManager } from "../async-job-manager.js";
 import type { PersistenceConfig } from "../config.js";
@@ -88,6 +89,93 @@ describe("PostgresJobStore", () => {
       payloadJson: null,
     });
     expect(store.findByRequestKey(requestKey)?.id).toBe("pg-job-1");
+  });
+
+  it("uses in-memory worker replies when TMPDIR is unavailable and preserves a 50 MiB result", () => {
+    const originalTmpdir = process.env.TMPDIR;
+    process.env.TMPDIR = join(tempDir, "missing-runtime-dir");
+    const isolated = new PostgresJobStore(TEST_DATABASE_URL, undefined, {
+      retentionMs: 60_000,
+      dedupWindowMs: 60_000,
+    });
+    try {
+      const stdout = "x".repeat(50 * 1024 * 1024);
+      isolated.recordStart({
+        id: "pg-message-port-large-result",
+        correlationId: "pg-message-port-large-result-corr",
+        requestKey: "pg-message-port-large-result-key",
+        cli: "claude",
+        args: [],
+        startedAt: new Date().toISOString(),
+        pid: null,
+      });
+      isolated.recordComplete({
+        id: "pg-message-port-large-result",
+        status: "completed",
+        exitCode: 0,
+        stdout,
+        stderr: "",
+        outputTruncated: false,
+        error: null,
+        finishedAt: new Date().toISOString(),
+      });
+
+      expect(isolated.getById("pg-message-port-large-result")?.stdout).toBe(stdout);
+      isolated.close();
+      expect(() => isolated.getById("pg-message-port-large-result")).toThrow(/closed/);
+    } finally {
+      isolated.close();
+      if (originalTmpdir === undefined) delete process.env.TMPDIR;
+      else process.env.TMPDIR = originalTmpdir;
+    }
+  }, 30_000);
+
+  it("recreates a retired worker before accepting the next durable operation", async () => {
+    const errors: string[] = [];
+    const isolated = new PostgresJobStore(
+      TEST_DATABASE_URL,
+      {
+        info: () => {},
+        warn: () => {},
+        debug: () => {},
+        error: message => errors.push(String(message)),
+      },
+      {
+        retentionMs: 60_000,
+        dedupWindowMs: 60_000,
+      }
+    );
+    const internals = isolated as unknown as {
+      worker: Worker | null;
+      workerTerminationPending: boolean;
+      retireWorker: (worker: Worker | null) => void;
+    };
+    const worker = internals.worker;
+    if (!worker) throw new Error("Expected PostgresJobStore to have a live worker");
+    const exited = new Promise<void>(resolve => worker.once("exit", () => resolve()));
+
+    try {
+      // This is the same controlled-retirement path used after a bridge
+      // timeout. Waiting for exit proves the replacement cannot overlap a
+      // possibly still-running predecessor operation.
+      internals.retireWorker(worker);
+      await exited;
+      expect(internals.workerTerminationPending).toBe(false);
+      expect(errors).not.toContain("PostgresJobStore worker exited unexpectedly");
+
+      isolated.recordStart({
+        id: "pg-worker-recovery",
+        correlationId: "pg-worker-recovery-corr",
+        requestKey: "pg-worker-recovery-key",
+        cli: "claude",
+        args: [],
+        startedAt: new Date().toISOString(),
+        pid: null,
+      });
+      expect(isolated.getById("pg-worker-recovery")?.status).toBe("queued");
+    } finally {
+      isolated.close();
+    }
   });
 
   it("round-trips an HTTP job without persisting an API key", () => {

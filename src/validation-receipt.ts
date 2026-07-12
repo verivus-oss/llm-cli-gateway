@@ -379,7 +379,7 @@ export function eagerMintFromValidationId(deps: ReceiptDeps, validationId: strin
 export function eagerMintFromJobId(deps: ReceiptDeps, jobId: string): void {
   const store = deps.validationRunStore;
   if (!store) return;
-  let validationId: string | null = null;
+  let validationId: string | null;
   try {
     validationId = store.getValidationRunIdByJobId(jobId);
   } catch {

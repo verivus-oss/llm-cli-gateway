@@ -2,7 +2,6 @@ import { createRequire } from "node:module";
 import {
   chmodSync,
   existsSync,
-  lstatSync,
   mkdirSync,
   mkdtempSync,
   openSync,

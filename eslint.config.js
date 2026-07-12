@@ -30,6 +30,7 @@ export default [
         ecmaVersion: 2022,
         sourceType: "module",
         project: "./tsconfig.json",
+        tsconfigRootDir: import.meta.dirname,
       },
     },
     plugins: {
@@ -39,6 +40,9 @@ export default [
     rules: {
       ...tsPlugin.configs.recommended.rules,
       ...securityPlugin.configs["recommended-legacy"].rules,
+      // TypeScript resolves value and type namespaces, including NodeJS.Timeout.
+      // Core no-undef does not understand TypeScript type-only names.
+      "no-undef": "off",
       "no-console": ["error", { allow: ["error", "warn"] }],
       "prefer-const": "error",
       "no-var": "error",

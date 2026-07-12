@@ -78,6 +78,13 @@ const DEFAULT_LEASE_RUNTIME_CONFIG: LeaseRuntimeConfig = {
 const MAX_CONSECUTIVE_HEARTBEAT_FAILURES = 3;
 
 /**
+ * A transient store outage must not leave this process permanently quiesced.
+ * Require several healthy lease writes before re-admitting work, then
+ * re-register the instance atomically with its current process metadata.
+ */
+const MIN_CONSECUTIVE_HEARTBEAT_SUCCESSES_TO_RECOVER = 3;
+
+/**
  * Slice 1: pull the real HTTP status out of a (possibly circuit-breaker-wrapped)
  * runApiRequest rejection. withRetry surfaces the original ApiHttpError as
  * `.cause`, so check both the error and its cause.
@@ -735,6 +742,10 @@ export class AsyncJobManager {
    */
   private durableAdmission: boolean;
   private consecutiveHeartbeatFailures = 0;
+  private consecutiveHeartbeatSuccesses = 0;
+  private lastHeartbeatFailureAt: string | null = null;
+  private lastHeartbeatRecoveryAt: string | null = null;
+  private lastHeartbeatErrorName: string | null = null;
   /**
    * #139: set for one cycle when the heartbeat timer measured excessive
    * scheduling drift (this event loop was blocked and cannot trust its
@@ -784,31 +795,14 @@ export class AsyncJobManager {
 
     // #139: register this instance BEFORE any request can be admitted (the
     // register-before-admit invariant: a job row can only be written after the
-    // ctor returns, so it always follows a live instance row). registerInstance
-    // is fail-closed (NOT swallowed): on failure durable admission is refused
-    // and no recovery runs, rather than silently admitting untracked work.
-    this.durableAdmission = store !== null;
+    // ctor returns, so it always follows a live instance row). A failed initial
+    // registration remains fail-closed, but heartbeat/reaper timers still run
+    // so a transient durable-store outage can recover without a process restart.
+    this.durableAdmission = false;
     if (this.store) {
-      try {
-        this.store.registerInstance({
-          instanceId: this.instanceId,
-          role: this.lease.role ?? "gateway",
-          hostname: this.hostname,
-          pid: this.instancePid,
-        });
-      } catch (err) {
-        this.durableAdmission = false;
-        this.logger.error(
-          "#139 registerInstance failed; durable async admission is disabled for this instance",
-          err
-        );
-      }
-      if (this.durableAdmission) {
-        // Startup recovery: the lease sweep (NOT the old blanket orphan-all).
-        this.runOrphanSweep();
-        this.startHeartbeat();
-        this.startReaper();
-      }
+      this.restoreDurableAdmission("startup");
+      this.startHeartbeat();
+      this.startReaper();
     }
 
     this.evictionTimer = setInterval(() => this.evictCompletedJobs(), EVICTION_INTERVAL_MS);
@@ -827,6 +821,31 @@ export class AsyncJobManager {
   /** #139: true iff this instance may admit durable async jobs right now. */
   canAdmitDurableJobs(): boolean {
     return this.store !== null && this.durableAdmission;
+  }
+
+  /**
+   * Prompt-free durable-store state for health surfaces. Keep diagnostic detail
+   * to timestamps and error class, never a raw database error that could expose
+   * query data or connection material.
+   */
+  getDurableAdmissionHealth(): {
+    storeAttached: boolean;
+    admitting: boolean;
+    consecutiveHeartbeatFailures: number;
+    consecutiveHeartbeatSuccesses: number;
+    lastHeartbeatFailureAt: string | null;
+    lastHeartbeatRecoveryAt: string | null;
+    lastHeartbeatErrorName: string | null;
+  } {
+    return {
+      storeAttached: this.store !== null,
+      admitting: this.canAdmitDurableJobs(),
+      consecutiveHeartbeatFailures: this.consecutiveHeartbeatFailures,
+      consecutiveHeartbeatSuccesses: this.consecutiveHeartbeatSuccesses,
+      lastHeartbeatFailureAt: this.lastHeartbeatFailureAt,
+      lastHeartbeatRecoveryAt: this.lastHeartbeatRecoveryAt,
+      lastHeartbeatErrorName: this.lastHeartbeatErrorName,
+    };
   }
 
   /**
@@ -954,8 +973,17 @@ export class AsyncJobManager {
     try {
       this.store.heartbeat(this.instanceId);
       this.consecutiveHeartbeatFailures = 0;
+      if (!this.durableAdmission) {
+        this.consecutiveHeartbeatSuccesses++;
+        if (this.consecutiveHeartbeatSuccesses >= MIN_CONSECUTIVE_HEARTBEAT_SUCCESSES_TO_RECOVER) {
+          this.restoreDurableAdmission("heartbeat recovery");
+        }
+      }
     } catch (err) {
       this.consecutiveHeartbeatFailures++;
+      this.consecutiveHeartbeatSuccesses = 0;
+      this.lastHeartbeatFailureAt = new Date().toISOString();
+      this.lastHeartbeatErrorName = err instanceof Error ? err.name : typeof err;
       this.logger.error(
         `#139 heartbeat failed (${this.consecutiveHeartbeatFailures}/${MAX_CONSECUTIVE_HEARTBEAT_FAILURES})`,
         err
@@ -967,6 +995,7 @@ export class AsyncJobManager {
         // correctly once the lease lapses.
         if (this.durableAdmission) {
           this.durableAdmission = false;
+          this.consecutiveHeartbeatSuccesses = 0;
           this.logger.error(
             "#139 sustained heartbeat failure; disabling durable admission and orphan sweeping on this instance"
           );
@@ -989,13 +1018,53 @@ export class AsyncJobManager {
     this.sweepTimer = setInterval(() => {
       this.runOrphanSweep();
       // Opportunistically GC long-dead observability rows.
+      if (!this.store || this.disposed || !this.durableAdmission) return;
       try {
-        this.store?.gcInstances(this.lease.instanceGcMs);
+        this.store.gcInstances(this.lease.instanceGcMs);
       } catch (err) {
         this.logger.error("#139 gateway_instances GC failed", err);
       }
     }, this.lease.orphanSweepIntervalMs);
     if (this.sweepTimer.unref) this.sweepTimer.unref();
+  }
+
+  /**
+   * Register before enabling admission. This is used both at startup and after
+   * a sustained heartbeat outage, so an UPDATE that happened to affect zero
+   * rows can never be mistaken for proof that this instance is live.
+   */
+  private restoreDurableAdmission(reason: "startup" | "heartbeat recovery"): void {
+    if (!this.store || this.disposed) return;
+    try {
+      this.store.registerInstance({
+        instanceId: this.instanceId,
+        role: this.lease.role ?? "gateway",
+        hostname: this.hostname,
+        pid: this.instancePid,
+      });
+      this.store.heartbeat(this.instanceId);
+      const wasDisabled = !this.durableAdmission;
+      this.durableAdmission = true;
+      this.consecutiveHeartbeatFailures = 0;
+      this.consecutiveHeartbeatSuccesses = 0;
+      this.lastHeartbeatRecoveryAt = new Date().toISOString();
+      if (wasDisabled && reason === "heartbeat recovery") {
+        this.logger.info(
+          "#139 durable heartbeat recovered; re-enabled async admission and orphan sweeping"
+        );
+      }
+      // Startup and recovery both use the same guarded per-job lease sweep.
+      this.runOrphanSweep();
+    } catch (err) {
+      this.durableAdmission = false;
+      this.consecutiveHeartbeatSuccesses = 0;
+      this.lastHeartbeatFailureAt = new Date().toISOString();
+      this.lastHeartbeatErrorName = err instanceof Error ? err.name : typeof err;
+      this.logger.error(
+        `#139 ${reason} register/heartbeat failed; durable async admission remains disabled`,
+        err
+      );
+    }
   }
 
   /**
@@ -1095,7 +1164,8 @@ export class AsyncJobManager {
         err
       );
       throw new Error(
-        `Durable job admission failed for ${job.cli}: the job store rejected recordStart`
+        `Durable job admission failed for ${job.cli}: the job store rejected recordStart`,
+        { cause: err }
       );
     }
   }
@@ -1108,7 +1178,7 @@ export class AsyncJobManager {
    */
   private markRunningDurable(job: AsyncJobRecord, pid: number | null, failClosed = false): void {
     if (!this.store) return;
-    let transitioned = false;
+    let transitioned: boolean;
     try {
       transitioned = this.store.markRunning(job.id, { pid });
     } catch (err) {
@@ -1305,8 +1375,10 @@ export class AsyncJobManager {
       );
     }
 
-    // Sweep the durable store, too. Errors are non-fatal — the job rows just stay until next sweep.
-    if (this.store) {
+    // Sweep the durable store only while this instance can prove its lease.
+    // After sustained heartbeat failure, every write is likely to fail and the
+    // conservative state is deliberately quiescent until recovery succeeds.
+    if (this.store && this.durableAdmission) {
       try {
         const removed = this.store.evictExpired();
         if (removed > 0) {

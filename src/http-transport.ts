@@ -67,11 +67,7 @@ function firstHeader(value: string | string[] | undefined): string | undefined {
 async function readBody(req: IncomingMessage): Promise<unknown> {
   const raw = await readCappedRawBody(req, maxHttpBodyBytes());
   if (!raw) return undefined;
-  try {
-    return JSON.parse(raw);
-  } catch (error) {
-    throw error;
-  }
+  return JSON.parse(raw);
 }
 
 function methodNotAllowed(res: ServerResponse): void {
@@ -82,11 +78,6 @@ function methodNotAllowed(res: ServerResponse): void {
 function jsonError(res: ServerResponse, status: number, message: string): void {
   res.writeHead(status, { "content-type": "application/json" });
   res.end(JSON.stringify({ error: message }));
-}
-
-function jsonResponse(res: ServerResponse, status: number, body: unknown): void {
-  res.writeHead(status, { "content-type": "application/json" });
-  res.end(JSON.stringify(body));
 }
 
 function parseNoAuthPaths(raw: string | undefined, protectedPath: string): Set<string> {
@@ -216,24 +207,24 @@ export async function startHttpGateway(options: HttpTransportOptions): Promise<H
 
   async function createSession(releaseInitializeReservation: () => void): Promise<SessionEntry> {
     const gatewayServer = options.createGatewayServer(options.deps);
-    let entry!: SessionEntry;
+    const onSessionInitialized = (sessionId: string): void => {
+      const initializedAt = Date.now();
+      releaseInitializeReservation();
+      entry.sessionId = sessionId;
+      entry.createdAt = initializedAt;
+      entry.lastActivityAt = initializedAt;
+      // The initialize request is already inside handleRequest when the SDK
+      // exposes the session id. Count it as in-flight immediately so the idle
+      // reaper cannot close a session that is still being initialized.
+      entry.inFlight++;
+      sessions.set(sessionId, entry);
+    };
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: () => randomUUID(),
-      onsessioninitialized: sessionId => {
-        const now = Date.now();
-        releaseInitializeReservation();
-        entry.sessionId = sessionId;
-        entry.createdAt = now;
-        entry.lastActivityAt = now;
-        // The initialize request is already inside handleRequest when the SDK
-        // exposes the session id. Count it as in-flight immediately so the idle
-        // reaper cannot close a session that is still being initialized.
-        entry.inFlight++;
-        sessions.set(sessionId, entry);
-      },
+      onsessioninitialized: onSessionInitialized,
     });
     const now = Date.now();
-    entry = {
+    const entry: SessionEntry = {
       server: gatewayServer,
       transport,
       createdAt: now,
@@ -307,6 +298,10 @@ export async function startHttpGateway(options: HttpTransportOptions): Promise<H
     if (manager) {
       const limiter = manager.getLimiterSnapshot();
       const limits = manager.getConfiguredLimits();
+      const durableAdmission = manager.getDurableAdmissionHealth();
+      const persistence = options.deps?.persistence;
+      const durablePersistenceConfigured =
+        persistence !== undefined && persistence.backend !== "none" && persistence.asyncJobsEnabled;
       payload.jobs = {
         running: limiter.running,
         queued: limiter.queued,
@@ -320,7 +315,16 @@ export async function startHttpGateway(options: HttpTransportOptions): Promise<H
         saturated: limiter.saturated,
         completedJobMemoryTtlMs: limits.completedJobMemoryTtlMs,
         maxJobOutputBytes: limits.maxJobOutputBytes,
+        durableAdmission,
       };
+      // `ok` remains a liveness signal. `ready` makes the degraded durable
+      // state machine visible to callers without turning a recoverable async
+      // admission outage into a misleading process-dead result. An explicitly
+      // disabled backend remains ready; a configured backend whose store never
+      // opened is not ready even though it has no attached manager store.
+      payload.ready = durableAdmission.storeAttached
+        ? durableAdmission.admitting
+        : !durablePersistenceConfigured;
     }
     return payload;
   }

@@ -88,7 +88,19 @@ function stripEscapes(text: string): string {
 // non-ASCII byte is left unchanged rather than risk dropping content.
 // \r (frame separator) and \t are allowed alongside printable ASCII; the
 // visible frame characters must all be single-column ASCII.
-const ASCII_ONLY = /^[\x09\x0d\x20-\x7e]*$/;
+function isSingleColumnAsciiFrame(text: string): boolean {
+  for (const character of text) {
+    const codePoint = character.codePointAt(0);
+    if (
+      codePoint !== 0x09 &&
+      codePoint !== 0x0d &&
+      (codePoint === undefined || codePoint < 0x20 || codePoint > 0x7e)
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
 
 /**
  * Compute the visible line produced by carriage-return overwrites on an
@@ -116,7 +128,7 @@ function collapseLine(line: string, out: string[], counts: MarkerCounts): void {
     out.push(line);
     return;
   }
-  if (!ASCII_ONLY.test(body)) {
+  if (!isSingleColumnAsciiFrame(body)) {
     // Cannot compute display columns cheaply; keep the raw line (identity).
     out.push(line);
     return;

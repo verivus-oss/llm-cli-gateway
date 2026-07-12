@@ -79,7 +79,8 @@ export function loadConfig(): Config {
     DatabaseUrlSchema.parse(databaseUrl);
   } catch (error) {
     throw new Error(
-      `Invalid database URL: ${error instanceof Error ? error.message : String(error)}`
+      `Invalid database URL: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error }
     );
   }
 
@@ -126,7 +127,8 @@ export const DEFAULT_DEDUP_WINDOW_MS = 60 * 60 * 1000; // 1 hour
 // job; a larger 5-minute grace for no-pid http-transport jobs (their only
 // secondary liveness signal); a 30s reaper cadence; and a 1h GC horizon for the
 // observability-only gateway_instances rows. Zod enforces
-// leaseTtl >= 2*heartbeat and httpJobGrace >= leaseTtl.
+// leaseTtl >= 2*heartbeat, httpJobGrace >= leaseTtl, and a GC horizon no
+// shorter than the lease it observes.
 export const DEFAULT_INSTANCE_HEARTBEAT_MS = 15000;
 export const DEFAULT_INSTANCE_LEASE_TTL_MS = 90000;
 export const DEFAULT_HTTP_JOB_GRACE_MS = 300000;
@@ -175,6 +177,16 @@ const PersistenceSchema = z
         code: z.ZodIssueCode.custom,
         path: ["httpJobGraceMs"],
         message: `httpJobGraceMs (${cfg.httpJobGraceMs}) must be >= instanceLeaseTtlMs (${cfg.instanceLeaseTtlMs})`,
+      });
+    }
+    // gateway_instances is observability data, but the advisory same-host PID
+    // grace uses its hostname. Do not GC a live instance row before the lease
+    // window that still treats its owned job as active.
+    if (cfg.instanceGcMs < cfg.instanceLeaseTtlMs) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["instanceGcMs"],
+        message: `instanceGcMs (${cfg.instanceGcMs}) must be >= instanceLeaseTtlMs (${cfg.instanceLeaseTtlMs})`,
       });
     }
   });
@@ -239,7 +251,12 @@ export function loadSkillsConfig(logger: Logger = noopLogger): SkillsConfig {
   try {
     skillsParsed = SkillsSchema.parse(rawSkills);
   } catch (err) {
-    throw new Error(`Invalid [skills] config: ${err instanceof Error ? err.message : String(err)}`);
+    throw new Error(
+      `Invalid [skills] config: ${err instanceof Error ? err.message : String(err)}`,
+      {
+        cause: err,
+      }
+    );
   }
 
   const paths = [...skillsParsed.paths];
@@ -425,7 +442,8 @@ export function loadPersistenceConfig(logger: Logger = noopLogger): PersistenceC
     parsed = PersistenceSchema.parse(merged);
   } catch (err) {
     throw new Error(
-      `Invalid [persistence] config: ${err instanceof Error ? err.message : String(err)}`
+      `Invalid [persistence] config: ${err instanceof Error ? err.message : String(err)}`,
+      { cause: err }
     );
   }
 
@@ -591,7 +609,8 @@ export function loadLimitsConfig(logger: Logger = noopLogger): GatewayLimitsConf
     httpParsed = HttpSessionLimitsSchema.parse(rawHttp);
   } catch (err) {
     throw new Error(
-      `Invalid [http] session-limit config: ${err instanceof Error ? err.message : String(err)}`
+      `Invalid [http] session-limit config: ${err instanceof Error ? err.message : String(err)}`,
+      { cause: err }
     );
   }
 
@@ -599,7 +618,12 @@ export function loadLimitsConfig(logger: Logger = noopLogger): GatewayLimitsConf
   try {
     limitsParsed = JobLimitsSchema.parse(rawLimits);
   } catch (err) {
-    throw new Error(`Invalid [limits] config: ${err instanceof Error ? err.message : String(err)}`);
+    throw new Error(
+      `Invalid [limits] config: ${err instanceof Error ? err.message : String(err)}`,
+      {
+        cause: err,
+      }
+    );
   }
 
   return {
@@ -727,7 +751,8 @@ export function loadCacheAwarenessConfig(logger: Logger = noopLogger): CacheAwar
     parsed = CacheAwarenessSchema.parse((raw as Record<string, unknown> | undefined) ?? {});
   } catch (err) {
     throw new Error(
-      `Invalid [cache_awareness] config: ${err instanceof Error ? err.message : String(err)}`
+      `Invalid [cache_awareness] config: ${err instanceof Error ? err.message : String(err)}`,
+      { cause: err }
     );
   }
 
@@ -791,7 +816,8 @@ export function loadCompressionConfig(logger: Logger = noopLogger): CompressionC
     parsedCompression = CompressionSchema.parse(raw);
   } catch (err) {
     throw new Error(
-      `Invalid [compression] config: ${err instanceof Error ? err.message : String(err)}`
+      `Invalid [compression] config: ${err instanceof Error ? err.message : String(err)}`,
+      { cause: err }
     );
   }
 

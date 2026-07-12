@@ -10,7 +10,7 @@
 import { mkdtempSync, rmSync } from "fs";
 import os, { tmpdir } from "os";
 import { join } from "path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { openDatabase, type GatewayDatabase } from "../sqlite-driver.js";
 import { SqliteJobStore, MemoryJobStore, type JobStore } from "../job-store.js";
@@ -464,6 +464,16 @@ describe("#139 AsyncJobManager lease lifecycle (M/N series)", () => {
     }
   }
 
+  function runHeartbeatTick(manager: AsyncJobManager): void {
+    (manager as unknown as { onHeartbeatTick: (intervalMs: number) => void }).onHeartbeatTick(
+      15_000
+    );
+  }
+
+  function runEviction(manager: AsyncJobManager): void {
+    (manager as unknown as { evictCompletedJobs: () => void }).evictCompletedJobs();
+  }
+
   it("M6: registers before admit; a job recorded after construction is stamped with the manager's instance id", () => {
     const store = new SqliteJobStore(dbPath);
     const mgr = new AsyncJobManager(noopLogger, undefined, store);
@@ -536,6 +546,133 @@ describe("#139 AsyncJobManager lease lifecycle (M/N series)", () => {
     expect(() => mgr.startJobWithDedup("claude", ["-p", "x"], "corr")).toThrow(
       /Durable async admission is disabled/
     );
+  });
+
+  it("N3: sustained heartbeat failure self-quiesces, then re-registers before recovering admission", async () => {
+    let failHeartbeat = false;
+    let registerCalls = 0;
+    const store = mockStore({
+      registerInstance: () => {
+        registerCalls++;
+      },
+      heartbeat: () => {
+        if (failHeartbeat) throw new Error("transient store outage");
+      },
+    });
+    const mgr = new AsyncJobManager(noopLogger, undefined, store);
+    expect(mgr.canAdmitDurableJobs()).toBe(true);
+
+    failHeartbeat = true;
+    runHeartbeatTick(mgr);
+    runHeartbeatTick(mgr);
+    runHeartbeatTick(mgr);
+    expect(mgr.canAdmitDurableJobs()).toBe(false);
+    expect(mgr.getDurableAdmissionHealth()).toMatchObject({
+      storeAttached: true,
+      admitting: false,
+      consecutiveHeartbeatFailures: 3,
+      consecutiveHeartbeatSuccesses: 0,
+      lastHeartbeatErrorName: "Error",
+    });
+
+    failHeartbeat = false;
+    runHeartbeatTick(mgr);
+    runHeartbeatTick(mgr);
+    expect(mgr.canAdmitDurableJobs()).toBe(false);
+    runHeartbeatTick(mgr);
+
+    expect(mgr.canAdmitDurableJobs()).toBe(true);
+    expect(registerCalls).toBe(2); // initial admission + recovery re-registration
+    expect(mgr.getDurableAdmissionHealth()).toMatchObject({
+      admitting: true,
+      consecutiveHeartbeatFailures: 0,
+      consecutiveHeartbeatSuccesses: 0,
+    });
+    await mgr.dispose();
+  });
+
+  it("N4: a failed startup registration recovers without a process restart", async () => {
+    let registrationAvailable = false;
+    const store = mockStore({
+      registerInstance: () => {
+        if (!registrationAvailable) throw new Error("store unavailable at startup");
+      },
+    });
+    const mgr = new AsyncJobManager(noopLogger, undefined, store);
+    expect(mgr.canAdmitDurableJobs()).toBe(false);
+
+    registrationAvailable = true;
+    runHeartbeatTick(mgr);
+    runHeartbeatTick(mgr);
+    runHeartbeatTick(mgr);
+
+    expect(mgr.canAdmitDurableJobs()).toBe(true);
+    expect(mgr.getDurableAdmissionHealth().lastHeartbeatRecoveryAt).toMatch(/T/);
+    await mgr.dispose();
+  });
+
+  it("N5: a quiesced instance skips reaper GC writes until durable admission recovers", async () => {
+    vi.useFakeTimers();
+    let failHeartbeat = false;
+    let gcCalls = 0;
+    const store = mockStore({
+      heartbeat: () => {
+        if (failHeartbeat) throw new Error("transient store outage");
+      },
+      gcInstances: () => {
+        gcCalls++;
+        return 0;
+      },
+    });
+    const mgr = new AsyncJobManager(noopLogger, undefined, store, undefined, undefined, undefined, {
+      instanceHeartbeatMs: 10_000,
+      instanceLeaseTtlMs: 20_000,
+      httpJobGraceMs: 20_000,
+      orphanSweepIntervalMs: 1,
+      instanceGcMs: 20_000,
+    });
+
+    try {
+      failHeartbeat = true;
+      runHeartbeatTick(mgr);
+      runHeartbeatTick(mgr);
+      runHeartbeatTick(mgr);
+      expect(mgr.canAdmitDurableJobs()).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(1);
+      expect(gcCalls).toBe(0);
+    } finally {
+      await mgr.dispose();
+      vi.useRealTimers();
+    }
+  });
+
+  it("N6: a quiesced instance skips periodic durable eviction writes until recovery", async () => {
+    let failHeartbeat = false;
+    let evictionCalls = 0;
+    const store = mockStore({
+      heartbeat: () => {
+        if (failHeartbeat) throw new Error("transient store outage");
+      },
+      evictExpired: () => {
+        evictionCalls++;
+        return 0;
+      },
+    });
+    const mgr = new AsyncJobManager(noopLogger, undefined, store);
+
+    try {
+      failHeartbeat = true;
+      runHeartbeatTick(mgr);
+      runHeartbeatTick(mgr);
+      runHeartbeatTick(mgr);
+      expect(mgr.canAdmitDurableJobs()).toBe(false);
+
+      runEviction(mgr);
+      expect(evictionCalls).toBe(0);
+    } finally {
+      await mgr.dispose();
+    }
   });
 
   it("M9/M10: dispose deregisters the instance when no owned work remains, and is idempotent", async () => {

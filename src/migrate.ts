@@ -128,7 +128,8 @@ async function importOptionalPg(): Promise<typeof import("pg")> {
   } catch (error: any) {
     if (error?.code === "ERR_MODULE_NOT_FOUND" || error?.code === "MODULE_NOT_FOUND") {
       throw new Error(
-        "PostgreSQL migrations require optional peer dependency 'pg'. Install it alongside llm-cli-gateway before running migrate."
+        "PostgreSQL migrations require optional peer dependency 'pg'. Install it alongside llm-cli-gateway before running migrate.",
+        { cause: error }
       );
     }
     throw error;

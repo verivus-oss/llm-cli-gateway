@@ -1,5 +1,4 @@
-import { writeFileSync } from "node:fs";
-import { parentPort, workerData } from "node:worker_threads";
+import { parentPort, workerData, type MessagePort } from "node:worker_threads";
 
 import type { Pool, PoolClient } from "pg";
 
@@ -11,6 +10,22 @@ let pool: Pool | null = null;
  * (mirrors the sqlite SQLITE_NOW_MS expression on the other backend).
  */
 const PG_NOW_MS = "(EXTRACT(EPOCH FROM now()) * 1000)::bigint";
+const PG_BOOTSTRAP_LOCK_KEY = 13_920_260_713;
+const PG_POOL_MAX = 1;
+const PG_STATEMENT_TIMEOUT_MS = 25_000;
+const PG_LOCK_TIMEOUT_MS = 5_000;
+const PG_QUERY_TIMEOUT_MS = 27_000;
+
+function reportDiagnostic(kind: string, error: unknown): void {
+  const message = error instanceof Error ? error.message : String(error);
+  const stack = error instanceof Error ? error.stack : undefined;
+  parentPort?.postMessage({
+    type: "postgres-job-store-diagnostic",
+    kind,
+    message,
+    stack,
+  });
+}
 
 function signal(shared: SharedArrayBuffer, status: number): void {
   const view = new Int32Array(shared);
@@ -67,9 +82,32 @@ async function init(): Promise<void> {
   pool = new pg.Pool({
     connectionString: workerData.dsn,
     connectionTimeoutMillis: workerData.connectionTimeoutMillis,
+    // The parent JobStore interface is synchronous, so it can issue only one
+    // operation at a time. A larger pool merely consumes connections across
+    // short-lived stdio gateway instances without adding throughput.
+    max: PG_POOL_MAX,
+    idleTimeoutMillis: 30_000,
+    // Ensure PostgreSQL aborts a blocked or pathological operation before the
+    // parent's watchdog makes the mutation outcome ambiguous.
+    statement_timeout: PG_STATEMENT_TIMEOUT_MS,
+    lock_timeout: PG_LOCK_TIMEOUT_MS,
+    query_timeout: PG_QUERY_TIMEOUT_MS,
+    application_name: "llm-cli-gateway-job-store",
   });
+  getPool().on("error", error => reportDiagnostic("pool_error", error));
   await getPool().query("SELECT 1");
-  await getPool().query(`
+  await withClient(async client => {
+    await client.query("BEGIN");
+    try {
+      // Many short-lived stdio instances can initialize concurrently. Serialize
+      // the idempotent bootstrap so CREATE/ALTER statements do not churn on
+      // PostgreSQL DDL locks. The ordinary 5s lock timeout is right for normal
+      // queries, but this deliberate bootstrap serialization may wait up to
+      // the statement timeout for a first initializer to finish safely.
+      await client.query("SET LOCAL lock_timeout = 0");
+      await client.query("SELECT pg_advisory_xact_lock($1::bigint)", [PG_BOOTSTRAP_LOCK_KEY]);
+      await client.query(`SET LOCAL lock_timeout = '${PG_LOCK_TIMEOUT_MS}ms'`);
+      await client.query(`
     CREATE TABLE IF NOT EXISTS jobs (
       id TEXT PRIMARY KEY,
       correlation_id TEXT NOT NULL,
@@ -144,21 +182,31 @@ async function init(): Promise<void> {
       confidence TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_validation_receipts_owner ON validation_receipts(owner_principal);
-  `);
-  await getPool().query("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS owner_principal TEXT");
-  await getPool().query(
-    "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS transport TEXT NOT NULL DEFAULT 'process'"
-  );
-  await getPool().query("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS http_status INTEGER");
-  await getPool().query("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS payload_json TEXT");
-  // #139: idempotent durable-lease columns for a pre-existing jobs table.
-  await getPool().query("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS owner_instance TEXT");
-  await getPool().query("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS lease_deadline BIGINT");
-  // The owner/status index references owner_instance, so it can only be created
-  // AFTER the ALTER adds that column to a pre-existing (migration-created) table.
-  await getPool().query(
-    "CREATE INDEX IF NOT EXISTS idx_jobs_owner_status ON jobs(owner_instance, status)"
-  );
+      `);
+      await client.query("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS owner_principal TEXT");
+      await client.query(
+        "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS transport TEXT NOT NULL DEFAULT 'process'"
+      );
+      await client.query("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS http_status INTEGER");
+      await client.query("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS payload_json TEXT");
+      // #139: idempotent durable-lease columns for a pre-existing jobs table.
+      await client.query("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS owner_instance TEXT");
+      await client.query("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS lease_deadline BIGINT");
+      // The owner/status index references owner_instance, so it can only be created
+      // AFTER the ALTER adds that column to a pre-existing (migration-created) table.
+      await client.query(
+        "CREATE INDEX IF NOT EXISTS idx_jobs_owner_status ON jobs(owner_instance, status)"
+      );
+      await client.query("COMMIT");
+    } catch (error: unknown) {
+      try {
+        await client.query("ROLLBACK");
+      } catch (rollbackError: unknown) {
+        reportDiagnostic("bootstrap_rollback_error", rollbackError);
+      }
+      throw error;
+    }
+  });
 }
 
 async function op(method: string, args: any[]): Promise<unknown> {
@@ -548,10 +596,10 @@ parentPort?.on(
   async (message: {
     method: string;
     args: any[];
-    resultPath: string;
     shared: SharedArrayBuffer;
+    responsePort: MessagePort;
   }) => {
-    const { method, args, resultPath, shared } = message;
+    const { method, args, shared, responsePort } = message;
     let payload;
     try {
       payload = ok(await op(method, args));
@@ -559,10 +607,17 @@ parentPort?.on(
       payload = fail(error);
     }
     try {
-      writeFileSync(resultPath, JSON.stringify(payload));
+      // Queue the complete response before waking the synchronous parent. The
+      // parent reads this MessagePort with receiveMessageOnPort immediately
+      // after Atomics.wait returns, so no temporary-file inode or cleanup path
+      // participates in durable job-store availability.
+      responsePort.postMessage(payload);
       signal(shared, 1);
-    } catch {
+    } catch (error: unknown) {
+      reportDiagnostic("response_transport_error", error);
       signal(shared, 2);
+    } finally {
+      responsePort.close();
     }
   }
 );

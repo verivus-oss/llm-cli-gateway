@@ -800,6 +800,36 @@ describe("createGatewayServer — structural invariant on async tool registratio
     expect(p.warning).toBeNull();
   });
 
+  it("llm_process_health reports an attached store that is temporarily unable to admit work", async () => {
+    const store = new MemoryJobStore();
+    store.heartbeat = () => {
+      throw new Error("durable store temporarily unavailable");
+    };
+    const manager = new AsyncJobManager(noopLogger, undefined, store);
+    const server = createGatewayServer({
+      asyncJobManager: manager,
+      persistence: mkPersistence({ backend: "sqlite", path: ":memory:", asyncJobsEnabled: true }),
+    });
+
+    try {
+      const health = await readHealthFull(server);
+      expect(health.persistence).toMatchObject({
+        backend: "sqlite",
+        asyncJobsConfigured: true,
+        storeAttached: true,
+        asyncJobsEnabled: false,
+        durableAdmission: {
+          storeAttached: true,
+          admitting: false,
+          lastHeartbeatErrorName: "Error",
+        },
+      });
+      expect(health.persistence.warning).toMatch(/temporarily disabled/i);
+    } finally {
+      await manager.dispose();
+    }
+  });
+
   it("llm_process_health keeps the backend='none' disabled warning", async () => {
     const manager = new AsyncJobManager(noopLogger, undefined, null);
     const server = createGatewayServer({
@@ -896,6 +926,13 @@ describe("loadPersistenceConfig #139 durable lease knobs (U15)", () => {
       '[persistence]\nbackend = "sqlite"\ninstanceLeaseTtlMs = 90000\nhttpJobGraceMs = 30000\n'
     );
     expect(() => loadPersistenceConfig(noopLogger)).toThrow(/httpJobGraceMs/);
+  });
+
+  it("rejects instanceGcMs < instanceLeaseTtlMs", () => {
+    pointToFile(
+      '[persistence]\nbackend = "sqlite"\ninstanceLeaseTtlMs = 90000\ninstanceGcMs = 60000\n'
+    );
+    expect(() => loadPersistenceConfig(noopLogger)).toThrow(/instanceGcMs/);
   });
 
   it("still parses ownsOrphanRecovery and emits a one-time deprecation warning", () => {

@@ -209,7 +209,7 @@ export function buildClaudeMcpConfig(servers: ClaudeMcpServerName[]): ClaudeMcpC
     chmodSync(configPath, 0o600);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    throw new Error(`Failed to write Claude MCP config: ${message}`);
+    throw new Error(`Failed to write Claude MCP config: ${message}`, { cause: error });
   }
 
   return { path: configPath, enabled, missing };

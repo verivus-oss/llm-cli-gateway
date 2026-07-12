@@ -2459,7 +2459,7 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
     env: {
       VIBE_ACTIVE_MODEL: {
         arity: "one",
-        pattern: /^[^\s\u0000-\u001f\u007f]+$/,
+        pattern: /^[^\s\p{Cc}]+$/u,
         description: "Active model selector; Vibe uses env instead of a --model flag",
       },
     },
