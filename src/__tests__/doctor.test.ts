@@ -172,7 +172,7 @@ describe("Layer 6 doctor report (U20)", () => {
       expect.arrayContaining(["allowedTools/disallowedTools", "workspace/worktree"])
     );
     expect(report.provider_capabilities.providers.mistral.supported_features).toEqual(
-      expect.arrayContaining(["enabledToolAllowlist", "trustControl"])
+      expect.arrayContaining(["toolAllowDenyControls", "enabledToolAllowlist", "trustControl"])
     );
     expect(JSON.stringify(report.provider_capabilities)).not.toContain(`${tmpdir()}/`);
     expect(JSON.stringify(report.provider_capabilities)).not.toContain("/home/");

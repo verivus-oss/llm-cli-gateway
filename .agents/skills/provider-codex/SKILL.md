@@ -17,14 +17,14 @@ resume rules here or in TOML.
 
 ## Identity
 
-| Field | Value |
-|-------|-------|
-| CliType | `codex` |
-| Executable | `codex` |
-| Package | `@openai/codex` (npm) |
-| Repo | https://github.com/openai/codex |
-| Releases | https://github.com/openai/codex/releases |
-| Changelog | https://developers.openai.com/codex/changelog |
+| Field            | Value                                                                         |
+| ---------------- | ----------------------------------------------------------------------------- |
+| CliType          | `codex`                                                                       |
+| Executable       | `codex`                                                                       |
+| Package          | `@openai/codex` (npm)                                                         |
+| Repo             | https://github.com/openai/codex                                               |
+| Release API      | https://api.github.com/repos/openai/codex/releases/latest                     |
+| Changelog RSS    | https://learn.chatgpt.com/docs/changelog/rss.xml                              |
 | Watch categories | `flags`, `sandbox-modes`, `approval-modes`, `session-resume`, `output-schema` |
 
 These values mirror `UPSTREAM_CLI_CONTRACTS.codex.upstreamMetadata` and
@@ -87,12 +87,13 @@ A failed fetch is advisory (exit 0) unless `--fail-on-critical` is passed.
 
 ## Codex-specific notes (see the contract for exact rules)
 
-- Tested against codex-cli 0.142.4. Codex advertises mcp-server / app-server transports, not a native ACP entrypoint, so `provider-acp://codex` reports `native:false` (no methods, no adapter-as-native masquerade) and `codex_request` exposes no `transport:"acp"` selector.
+- Tested against codex-cli 0.144.3. Codex advertises mcp-server / app-server transports, not a native ACP entrypoint, so `provider-acp://codex` reports `native:false` (no methods, no adapter-as-native masquerade) and `codex_request` exposes no `transport:"acp"` selector.
 - argv must start with `exec`; `exec resume` enters resume context.
 - `--last` is resume-only; `--sandbox` / `--ask-for-approval` / `--full-auto` / `--search` are forbidden on resume (per resumeForbiddenFlags).
-- `--output-schema`, `-c key=value`, `--ephemeral`, safety bypasses (on review), `--json` etc. are accepted on resume/review (codex-cli 0.142.4). Example (resume):
+- `--output-schema`, `-c key=value`, `--ephemeral`, safety bypasses (on review), `--json` etc. are accepted on resume/review (codex-cli 0.144.3). Example (resume):
   ```
   codex exec resume --ephemeral --json <UUID> "follow up"
   ```
 - Sandbox and approval values are closed enums — extend the enum in the contract.
 - Continuity is real via `codex exec resume <UUID>` / `--last`; `sessionId` must be a real Codex UUID (gateway `gw-*` IDs rejected).
+- Top-level interactive `resume` and destructive `delete` are catalogued for drift monitoring, not request argv. Keep them unexposed unless a separately reviewed gateway surface is added.

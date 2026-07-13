@@ -17,13 +17,13 @@ or session rules here or in TOML.
 
 ## Identity
 
-| Field | Value |
-|-------|-------|
-| CliType | `claude` |
-| Executable | `claude` |
-| Package | `@anthropic-ai/claude-code` (npm) |
-| Changelog | https://code.claude.com/docs/en/changelog.md |
-| Install docs | https://code.claude.com/docs/en/overview |
+| Field            | Value                                                                     |
+| ---------------- | ------------------------------------------------------------------------- |
+| CliType          | `claude`                                                                  |
+| Executable       | `claude`                                                                  |
+| Package          | `@anthropic-ai/claude-code` (npm)                                         |
+| Changelog        | https://code.claude.com/docs/en/changelog.md                              |
+| Install docs     | https://code.claude.com/docs/en/overview                                  |
 | Watch categories | `flags`, `output-formats`, `permission-modes`, `session-resume`, `models` |
 
 These values mirror `UPSTREAM_CLI_CONTRACTS.claude.upstreamMetadata` and
@@ -90,11 +90,13 @@ never breaks the default release gate.
 
 ## Claude-specific notes (see the contract for exact rules)
 
-- Tested against claude 2.1.198. Claude Code is CLI-first with no native ACP entrypoint at this version; `provider-acp://claude` reports `native:false` (no methods, no adapter-as-native masquerade) and `claude_request` exposes no `transport:"acp"` selector.
+- Tested against claude 2.1.207. Claude Code is CLI-first with no native ACP entrypoint at this version; `provider-acp://claude` reports `native:false` (no methods, no adapter-as-native masquerade) and `claude_request` exposes no `transport:"acp"` selector.
 - `-p` has `optional` arity: standalone in slice κ stdin mode, legacy `-p <prompt>` otherwise.
 - `stream-json` output requires `--verbose` alongside `--print`; the gateway emits them together.
 - `--input-format stream-json` carries caller `cache_control` breakpoints.
-- Permission modes and reasoning-effort levels are closed enums — extend the enum in the contract, not here.
+- Permission modes and reasoning-effort levels are closed enums. At this target, `manual` is an upstream permission mode; gateway `default` remains a pseudo-mode that emits no upstream permission flag. Extend the enum in the contract, not here.
+- Root `gateway` starts enterprise authentication and telemetry gateway mode. Keep
+  it catalogued as an unexposed server-starting command.
 - `agents --all` (with `--json`) includes completed background sessions (2.1.185+). Example:
   ```
   claude agents --json --all

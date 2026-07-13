@@ -4350,12 +4350,6 @@ export function prepareMistralRequest(
     addDir: params.addDir,
   });
 
-  if (prep.ignoredDisallowedTools) {
-    runtime.logger.info(
-      `[${corrId}] Mistral does not support disallowedTools; ignoring (caller passed ${params.disallowedTools?.length ?? 0} entries)`
-    );
-  }
-
   return {
     corrId,
     effectivePrompt,
@@ -4413,7 +4407,7 @@ export function buildMistralRetryPrep(
     | "addDir"
   > & { effectivePrompt: string },
   recoveryModel: string
-): { args: string[]; env: Record<string, string>; ignoredDisallowedTools: boolean } {
+): { args: string[]; env: Record<string, string> } {
   return buildMistralCliInvocation({
     prompt: params.effectivePrompt,
     resolvedModel: recoveryModel,
@@ -6698,7 +6692,7 @@ export async function handleGrokRequestAsync(
 export interface DevinRequestParams {
   prompt?: string;
   model?: string;
-  permissionMode?: "auto" | "smart" | "dangerous";
+  permissionMode?: "auto" | "accept-edits" | "smart" | "dangerous";
   promptFile?: string;
   /** Devin `--config <PATH>`: config file path. */
   config?: string;
@@ -9427,7 +9421,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .enum(CLAUDE_PERMISSION_MODES)
         .optional()
         .describe(
-          "Claude --permission-mode: default|acceptEdits|plan|auto|dontAsk|bypassPermissions. `default` is a no-op (no flag emitted)."
+          "Claude --permission-mode: default|acceptEdits|auto|bypassPermissions|manual|dontAsk|plan. `default` is a no-op (no flag emitted)."
         ),
       // U25 — Claude high-impact features
       agent: z
@@ -11208,10 +11202,10 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           "Transport: 'cli' (default) runs the Devin CLI; 'acp' routes through `devin acp` when [acp].enabled and the provider's runtime_enabled are set (fails closed otherwise)."
         ),
       permissionMode: z
-        .enum(["auto", "smart", "dangerous"])
+        .enum(["auto", "accept-edits", "smart", "dangerous"])
         .optional()
         .describe(
-          "Devin CLI permission mode (--permission-mode). auto auto-approves read-only tools; smart additionally auto-runs actions a fast model judges safe; dangerous auto-approves all. When omitted, Devin uses its own headless default; pass auto or smart for unattended runs."
+          "Devin CLI permission mode (--permission-mode). auto auto-approves read-only tools; accept-edits also auto-approves workspace edits; smart additionally auto-runs actions a fast model judges safe; dangerous auto-approves all. When omitted, Devin uses its own headless default; choose an explicit mode for unattended runs."
         ),
       promptFile: z
         .string()
@@ -11573,7 +11567,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .array(z.string())
         .optional()
         .describe(
-          "Accepted for caller parity; Vibe has no deny-list flag, so values are ignored (a warning is logged)."
+          "Denylist of built-in tools, each emitted as a separate --disabled-tools <tool> flag"
         ),
       correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
       optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution"),
@@ -11765,7 +11759,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .enum(CLAUDE_PERMISSION_MODES)
           .optional()
           .describe(
-            "Claude --permission-mode: default|acceptEdits|plan|auto|dontAsk|bypassPermissions. `default` is a no-op."
+            "Claude --permission-mode: default|acceptEdits|auto|bypassPermissions|manual|dontAsk|plan. `default` is a no-op."
           ),
         // U25 — Claude high-impact features
         agent: z
@@ -13019,10 +13013,10 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           ),
         model: z.string().optional().describe("Model name or alias (e.g. opus, latest)"),
         permissionMode: z
-          .enum(["auto", "smart", "dangerous"])
+          .enum(["auto", "accept-edits", "smart", "dangerous"])
           .optional()
           .describe(
-            "Devin CLI permission mode (--permission-mode). auto, smart, or dangerous. When omitted, Devin uses its own headless default; pass auto or smart for unattended runs."
+            "Devin CLI permission mode (--permission-mode). auto, accept-edits, smart, or dangerous. When omitted, Devin uses its own headless default; choose an explicit mode for unattended runs."
           ),
         promptFile: z
           .string()
@@ -13356,7 +13350,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .array(z.string())
           .optional()
           .describe(
-            "Accepted for caller parity; Vibe has no deny-list flag, so values are ignored (a warning is logged)."
+            "Denylist of built-in tools, each emitted as a separate --disabled-tools <tool> flag"
           ),
         correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
         optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution"),

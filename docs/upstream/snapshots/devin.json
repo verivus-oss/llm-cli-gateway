@@ -1,12 +1,40 @@
 {
+  "schemaVersion": "upstream-scan-snapshot.v2",
   "cli": "devin",
-  "fetchedAt": "2026-06-18T21:19:08.420Z",
-  "sources": [],
+  "fetchedAt": "2026-07-13T07:44:02.722Z",
+  "sources": [
+    {
+      "url": "https://cli.devin.ai/docs/reference/commands",
+      "ok": true,
+      "status": 200,
+      "bytes": 2137838,
+      "sha256": "c3b85994002877cdc99e09cfd2181258ed0b97fe6786411fcc3a163855f569c6",
+      "semantic": null
+    },
+    {
+      "url": "https://docs.devin.ai/cli",
+      "ok": true,
+      "status": 200,
+      "bytes": 1936361,
+      "sha256": "2e458c11442713081e4bd1e23d618cf1d85dd2ff18a1b9dd98807948ccba872e",
+      "semantic": null
+    },
+    {
+      "url": "https://docs.devin.ai/cli/changelog/stable",
+      "ok": true,
+      "status": 200,
+      "bytes": 2383034,
+      "sha256": "478b3707f3ce09243ae00306ea1322e8e6184e61fc2da657af8ffa1068a105b6",
+      "semantic": null
+    }
+  ],
   "helpSurface": {
-    "probedAt": "2026-06-18T21:19:08.416Z",
+    "probedAt": "2026-07-13T07:44:02.717Z",
     "available": true,
-    "version": null,
-    "flags": [
+    "version": "devin 3000.1.27 (0d4bf12e)",
+    "targetVersion": "devin 3000.1.27 (0d4bf12e)",
+    "versionMatchesTarget": true,
+    "discoveredFlags": [
       "--agent-config",
       "--config",
       "--continue",
@@ -20,9 +48,292 @@
       "--sandbox",
       "--version"
     ],
-    "helpHash": "bb7f7afb4f6d38e06fa42e1370377077a7383db60d258326fbdfa6f845fe4973",
+    "helpHash": "ecb83effb72a86b5212090725f894c7834db6db74a160de573748b97f3b5b192",
     "extraVsContract": [],
-    "missingFromBinary": []
+    "missingFromBinary": [],
+    "arityMismatches": [],
+    "enumMismatches": []
   },
-  "subcommands": {}
+  "rootCommands": [
+    "acp",
+    "auth",
+    "cloud",
+    "help",
+    "list",
+    "mcp",
+    "plugins",
+    "rules",
+    "sandbox",
+    "setup",
+    "shell",
+    "skills",
+    "uninstall",
+    "update",
+    "version"
+  ],
+  "subcommands": {
+    "acp": {
+      "commandPath": [
+        "acp"
+      ],
+      "probedAt": "2026-07-13T07:44:02.666Z",
+      "available": true,
+      "existence": "present",
+      "discoveredFlags": [
+        "--agent-type"
+      ],
+      "helpHash": "a9080e5a29dbfcb543fe85424d850a1d4037a8829f5495e8aa4dcabb5ad33744",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
+      "risk": "starts_server",
+      "exposure": "not_exposed",
+      "tier": "catalog",
+      "summary": "Run the Devin Agent Client Protocol server over stdio."
+    },
+    "auth": {
+      "commandPath": [
+        "auth"
+      ],
+      "probedAt": "2026-07-13T07:44:02.670Z",
+      "available": true,
+      "existence": "present",
+      "discoveredFlags": [],
+      "helpHash": "b25f33675a6597f5e20096d0854700a9080bafd3ddc83eaf050a4d09d0192fe9",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
+      "risk": "auth",
+      "exposure": "not_exposed",
+      "tier": "catalog",
+      "summary": "Manage Devin authentication state."
+    },
+    "cloud": {
+      "commandPath": [
+        "cloud"
+      ],
+      "probedAt": "2026-07-13T07:44:02.673Z",
+      "available": true,
+      "existence": "present",
+      "discoveredFlags": [],
+      "helpHash": "8daefd3856eab9bc3e374747169fa7e4d24cd99faaf47b0316f9979323e899c2",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
+      "risk": "network",
+      "exposure": "not_exposed",
+      "tier": "catalog",
+      "summary": "Manage Devin Cloud environments, sandboxes, and builds."
+    },
+    "list": {
+      "commandPath": [
+        "list"
+      ],
+      "probedAt": "2026-07-13T07:44:02.677Z",
+      "available": true,
+      "existence": "present",
+      "discoveredFlags": [
+        "--format"
+      ],
+      "helpHash": "2ec2ef9ece079fe24da50ccb7ca3f1e1b296639bbcdc135abd3e1974734bb5be",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
+      "risk": "read_only",
+      "exposure": "tracked_only",
+      "tier": "inspect",
+      "summary": "List Devin sessions in the current directory."
+    },
+    "mcp": {
+      "commandPath": [
+        "mcp"
+      ],
+      "probedAt": "2026-07-13T07:44:02.681Z",
+      "available": true,
+      "existence": "present",
+      "discoveredFlags": [],
+      "helpHash": "3e0178dab4543ad279a67de24a538c687aa35cdf64979c3d4f323a8e414a6bb2",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
+      "risk": "writes_local_config",
+      "exposure": "not_exposed",
+      "tier": "catalog",
+      "summary": "Manage Devin MCP server connections."
+    },
+    "plugins": {
+      "commandPath": [
+        "plugins"
+      ],
+      "probedAt": "2026-07-13T07:44:02.684Z",
+      "available": true,
+      "existence": "present",
+      "discoveredFlags": [],
+      "helpHash": "15465cb396e3b08e029bc1fb37a2827ac2dc4ef9737a55fbd888b251c9f988a8",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
+      "risk": "writes_local_config",
+      "exposure": "not_exposed",
+      "tier": "catalog",
+      "summary": "Manage Devin plugins."
+    },
+    "rules": {
+      "commandPath": [
+        "rules"
+      ],
+      "probedAt": "2026-07-13T07:44:02.688Z",
+      "available": true,
+      "existence": "present",
+      "discoveredFlags": [],
+      "helpHash": "21e6e060384f8c473f6ca6c974d72c127bf50a32f841fecda8837afd8ca03037",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
+      "risk": "writes_local_config",
+      "exposure": "not_exposed",
+      "tier": "catalog",
+      "summary": "Manage Devin always-on agent rules."
+    },
+    "sandbox": {
+      "commandPath": [
+        "sandbox"
+      ],
+      "probedAt": "2026-07-13T07:44:02.692Z",
+      "available": true,
+      "existence": "present",
+      "discoveredFlags": [],
+      "helpHash": "4e7284d63162f281a0597e77553de551a20ca167c0f905ea91348ef8392183a1",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
+      "risk": "writes_local_config",
+      "exposure": "not_exposed",
+      "tier": "catalog",
+      "summary": "Manage Devin process sandboxing."
+    },
+    "setup": {
+      "commandPath": [
+        "setup"
+      ],
+      "probedAt": "2026-07-13T07:44:02.697Z",
+      "available": true,
+      "existence": "present",
+      "discoveredFlags": [
+        "--force-manual-token-flow"
+      ],
+      "helpHash": "3e2c9d096a76f651899913aef47a498750e21aa5457ca0ca6599fe32841cbce7",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
+      "risk": "writes_local_config",
+      "exposure": "not_exposed",
+      "tier": "catalog",
+      "summary": "Run Devin interactive setup."
+    },
+    "shell": {
+      "commandPath": [
+        "shell"
+      ],
+      "probedAt": "2026-07-13T07:44:02.700Z",
+      "available": true,
+      "existence": "present",
+      "discoveredFlags": [],
+      "helpHash": "0fd928d1d3228c813ddf9e15d1f46b18460a8bc667804116da8a72b2fb1ef354",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
+      "risk": "writes_local_config",
+      "exposure": "not_exposed",
+      "tier": "catalog",
+      "summary": "Integrate Devin with the local shell."
+    },
+    "skills": {
+      "commandPath": [
+        "skills"
+      ],
+      "probedAt": "2026-07-13T07:44:02.706Z",
+      "available": true,
+      "existence": "present",
+      "discoveredFlags": [],
+      "helpHash": "e84cbe9dac807b4180086aac636015f42ee790188e6f4778af8824540e8ed087",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
+      "risk": "writes_local_config",
+      "exposure": "not_exposed",
+      "tier": "catalog",
+      "summary": "Manage Devin skills."
+    },
+    "uninstall": {
+      "commandPath": [
+        "uninstall"
+      ],
+      "probedAt": "2026-07-13T07:44:02.709Z",
+      "available": true,
+      "existence": "present",
+      "discoveredFlags": [
+        "--clean",
+        "--force"
+      ],
+      "helpHash": "08d2eaa1997fe0f38196d2a181525f3d8d6a6737dee37200c7c597339663712a",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
+      "risk": "destructive",
+      "exposure": "not_exposed",
+      "tier": "catalog",
+      "summary": "Uninstall Devin and remove local data."
+    },
+    "update": {
+      "commandPath": [
+        "update"
+      ],
+      "probedAt": "2026-07-13T07:44:02.713Z",
+      "available": true,
+      "existence": "present",
+      "discoveredFlags": [
+        "--force"
+      ],
+      "helpHash": "86697415e7e3ab4c956f6690f7d25635bbe70e316976c717a12c2ddd19bdb0a4",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
+      "risk": "updates_binary",
+      "exposure": "not_exposed",
+      "tier": "catalog",
+      "summary": "Check for or install Devin CLI updates."
+    },
+    "version": {
+      "commandPath": [
+        "version"
+      ],
+      "probedAt": "2026-07-13T07:44:02.717Z",
+      "available": true,
+      "existence": "present",
+      "discoveredFlags": [],
+      "helpHash": "f870ad98ba79362eaf5fd7daa83c4dbb48b374a4a2c5d4f9b8beccab45c71a41",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
+      "risk": "read_only",
+      "exposure": "tracked_only",
+      "tier": "diagnostic",
+      "summary": "Print Devin version information."
+    }
+  }
 }

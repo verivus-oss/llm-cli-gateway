@@ -209,6 +209,29 @@ export function familyBaseRisk(provider: CliType, fam: ProviderAdminFamily): Cli
   return fam.safety === "read-only" ? "read_only" : "writes_local_config";
 }
 
+/**
+ * The upstream contract can explicitly close its generic admin projection for
+ * one exact command. This stays separate from ordinary subcommand `exposure`,
+ * because discovery intentionally projects established child operations, such
+ * as `auth status` and `mcp list`, independently from their parent catalog.
+ */
+function contractAdminProjectionCeiling(
+  provider: CliType,
+  commandPath: readonly string[]
+): CliSubcommandExposure | null {
+  const exactContract = getCliSubcommandContract(provider, commandPath);
+  return exactContract?.adminProjection === "not_exposed" ? "not_exposed" : null;
+}
+
+/** Resolve projection exposure without allowing registry metadata to widen a contract ceiling. */
+function projectedAdminExposure(
+  provider: CliType,
+  commandPath: readonly string[],
+  risk: CliSubcommandRisk
+): CliSubcommandExposure {
+  return contractAdminProjectionCeiling(provider, commandPath) ?? adminRiskToExposure(risk);
+}
+
 // ---------------------------------------------------------------------------
 // Projection: (provider def + discovered help) -> admin operations.
 // ---------------------------------------------------------------------------
@@ -273,6 +296,7 @@ export function projectProviderAdminOperations(
     if (adminSurfaceKind(fam) !== "cli-subcommand") continue;
 
     const baseRisk = familyBaseRisk(def.id, fam);
+    const familyExposure = projectedAdminExposure(def.id, [fam.family], baseRisk);
 
     if (!discovered) {
       ops.push({
@@ -281,8 +305,8 @@ export function projectProviderAdminOperations(
         operationId: fam.family,
         argv: [fam.family],
         risk: baseRisk,
-        exposure: adminRiskToExposure(baseRisk),
-        mutating: adminRiskToExposure(baseRisk) === "mcp_requires_approval",
+        exposure: familyExposure,
+        mutating: familyExposure === "mcp_requires_approval",
         available: false,
         discoverySource: "no-discovery",
         summary: fam.evidence,
@@ -298,7 +322,7 @@ export function projectProviderAdminOperations(
       for (const sub of subOps) {
         if (!isSafeAdminToken(sub.name)) continue; // never build argv from junk
         const risk = classifyOperationRisk(sub.name, baseRisk, { isSubcommand: true });
-        const exposure = adminRiskToExposure(risk);
+        const exposure = projectedAdminExposure(def.id, [fam.family, sub.name], risk);
         ops.push({
           provider: def.id,
           family: fam.family,
@@ -328,7 +352,7 @@ export function projectProviderAdminOperations(
     const baseExposure = adminRiskToExposure(baseRisk);
     const risk =
       baseExposure === "not_exposed" ? baseRisk : classifyOperationRisk(fam.family, baseRisk);
-    const exposure = adminRiskToExposure(risk);
+    const exposure = projectedAdminExposure(def.id, [fam.family], risk);
     ops.push({
       provider: def.id,
       family: fam.family,

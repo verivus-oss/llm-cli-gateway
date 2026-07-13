@@ -1,12 +1,196 @@
 {
+  "schemaVersion": "upstream-scan-snapshot.v2",
   "cli": "codex",
-  "fetchedAt": "2026-06-18T21:19:08.322Z",
-  "sources": [],
+  "fetchedAt": "2026-07-13T08:42:30.142Z",
+  "sources": [
+    {
+      "url": "https://api.github.com/repos/openai/codex/releases/latest",
+      "ok": true,
+      "status": 200,
+      "bytes": 275818,
+      "sha256": "2d473af7200c3f8006cb7ce30a1be0000b5506d450ccf22ad56245f04324b610",
+      "semantic": {
+        "kind": "github-release.v1",
+        "sha256": "d02e0f9bca9262082e7e94b2c17013d8f65518e524dcfb2bdc305d3e4fc34edf",
+        "fields": {
+          "tagName": "rust-v0.144.3",
+          "name": "0.144.3",
+          "draft": false,
+          "prerelease": false,
+          "publishedAt": "2026-07-13T06:12:19Z",
+          "targetCommitish": "main",
+          "bodySha256": "b53d8579362006f3d0862620fa1f13ba85bade8115dc896a75db21233f54b20d"
+        }
+      }
+    },
+    {
+      "url": "https://learn.chatgpt.com/docs/changelog/rss.xml",
+      "ok": true,
+      "status": 200,
+      "bytes": 104079,
+      "sha256": "aa0b4499bcc13d7f91940f0baed1a4432d32bdb06e7ed331308cb774d2b3f564",
+      "semantic": {
+        "kind": "codex-changelog-rss.v1",
+        "sha256": "c93bdb07533a4a99bd1e78dfa096719fd8a593a656b891ccc323a985675514cc",
+        "fields": {
+          "entries": [
+            {
+              "guid": "https://developers.openai.com/codex/changelog/#codex-2025-06-03",
+              "title": "June update",
+              "contentSha256": "9e468caed4d9b3d49072de62e1d67410077a7745a46a5f6b76dd63a52667a5d9"
+            },
+            {
+              "guid": "https://developers.openai.com/codex/changelog/#codex-2025-06-13",
+              "title": "Best of N",
+              "contentSha256": "bd5d6b75faa38f256f55218f41f334279d193c7e4b086e9b0786aabf489ec505"
+            },
+            {
+              "guid": "https://developers.openai.com/codex/changelog/#codex-2025-08-21",
+              "title": "Mid August update",
+              "contentSha256": "df49a952211f1a61e87081878d33d4a45b4ced4b77f0b29ed9decacd89defb9f"
+            },
+            {
+              "guid": "https://developers.openai.com/codex/changelog/#codex-2025-08-27",
+              "title": "Late August update",
+              "contentSha256": "0972f7de276f4f620c9f337dfcda4f29e4327b0b096706c7837af5b0411ff63c"
+            },
+            {
+              "guid": "https://developers.openai.com/codex/changelog/#codex-2025-09-15",
+              "title": "Introducing GPT-5-Codex",
+              "contentSha256": "4df8194d83e070c374a2ad61451a70a78db5c3ac2e8459e6055cd21ed29369f4"
+            },
+            {
+              "guid": "https://developers.openai.com/codex/changelog/#codex-2025-09-23",
+              "title": "GPT-5-Codex in the API",
+              "contentSha256": "061c231b6c8445447bdeaa3b82d56ab723a8ab65e94392f0049172fb14f8e288"
+            },
+            {
+              "guid": "https://developers.openai.com/codex/changelog/#codex-2025-10-06",
+              "title": "Codex is now GA",
+              "contentSha256": "13b47e61aa5e86776c66851bef5ed6491b3fb0e2ffc7a9983145eb9a5b98ae37"
+            },
+            {
+              "guid": "https://developers.openai.com/codex/changelog/#codex-2025-11-06",
+              "title": "GPT-5-Codex model update",
+              "contentSha256": "950a8299a20d113e072d004b0344239ebc7b74c3d2ce5e2a49437645aa1a459e"
+            },
+            {
+              "guid": "https://developers.openai.com/codex/changelog/#codex-2025-11-07",
+              "title": "Introducing GPT-5-Codex-Mini",
+              "contentSha256": "83b16db1605781d2b3dd0fadc7acc31e4d7c8c45ca2a4f8636b3ec9ba1d22e44"
+            },
+            {
+              "guid": "https://developers.openai.com/codex/changelog/#codex-2025-11-13",
+              "title": "Introducing GPT-5.1-Codex and GPT-5.1-Codex-Mini",
+              "contentSha256": "67d109b877f4df7de6bd908dd2433986009347770fc8521c1fb4e5449e81a1df"
+            },
+            {
+              "guid": "https://developers.openai.com/codex/changelog/#codex-2025-11-18",
+              "title": "Introducing GPT-5.1-Codex-Max",
+              "contentSha256": "345f021b2d2b5c66d6a028cb968e199203f77d55e1797ef76aaed23e7ed18986"
+            },
+            {
+              "guid": "https://developers.openai.com/codex/changelog/#codex-2025-12-04",
+              "title": "Introducing Codex for Linear",
+              "contentSha256": "796fabeb561c35b3517cb5e133858c844dce45ae03c3d30cce6f95fac4112e48"
+            },
+            {
+              "guid": "https://developers.openai.com/codex/changelog/#codex-2025-12-18",
+              "title": "Introducing GPT-5.2-Codex",
+              "contentSha256": "c56de2ec162a9b27cb6747a38a7316d359146e876c0a7b02e20f9a9c211660f2"
+            },
+            {
+              "guid": "https://developers.openai.com/codex/changelog/#codex-2025-12-19",
+              "title": "Agent skills in Codex",
+              "contentSha256": "65c637075e336d22e04a623815a0ef02f70c0459e5a2cf7ddf00073ebb1aa27b"
+            },
+            {
+              "guid": "https://developers.openai.com/codex/changelog/#codex-2026-01-23",
+              "title": "Team Config for shared configuration",
+              "contentSha256": "b1170223e3c23e0d3024b14a492dc106d428868287e3122729341ece69f25119"
+            },
+            {
+              "guid": "https://developers.openai.com/codex/changelog/#codex-2026-01-28",
+              "title": "Web search is now enabled by default",
+              "contentSha256": "8d3155bc46061c6f5dbb2a36a8306b53768ddd5968e2ddff43eaf9943e4960ba"
+            },
+            {
+              "guid": "https://developers.openai.com/codex/changelog/#codex-2026-02-05",
+              "title": "Introducing GPT-5.3-Codex",
+              "contentSha256": "19c644fce2d8a49c57fe912fcfa74fd197d75b5759077b132bf4646582fba35e"
+            },
+            {
+              "guid": "https://developers.openai.com/codex/changelog/#codex-2026-02-12",
+              "title": "Introducing GPT-5.3-Codex-Spark",
+              "contentSha256": "aa468a6ca6b2960cb16c4b4b2a1d515c1113f1e06b5ee63d9e1ce8e6cfe9550c"
+            },
+            {
+              "guid": "https://developers.openai.com/codex/changelog/#codex-2026-03-05",
+              "title": "Introducing GPT-5.4 in Codex",
+              "contentSha256": "bfa77ebba694e8e8693ee7c03985e3bb846dfd4ab158e34337804a9a3a6f2340"
+            },
+            {
+              "guid": "https://developers.openai.com/codex/changelog/#codex-2026-03-17",
+              "title": "Introducing GPT-5.4 mini in Codex",
+              "contentSha256": "ac533a5c5887c6557cf6316406715a726c42d14705e1005c0e10a089dae9501d"
+            },
+            {
+              "guid": "https://developers.openai.com/codex/changelog/#codex-2026-03-25",
+              "title": "Build and install plugins in Codex",
+              "contentSha256": "891542f1d119e761399b92ba0a0d63cef5a94cf3e65610eb50b3a325949219e8"
+            },
+            {
+              "guid": "https://developers.openai.com/codex/changelog/#codex-2026-04-07",
+              "title": "Codex model availability update",
+              "contentSha256": "ea13955a08905dc5ba27933677fbedf94b9a90489e8e2702a9fe499a05ad5404"
+            },
+            {
+              "guid": "https://developers.openai.com/codex/changelog/#codex-2026-04-23",
+              "title": "GPT-5.5 and Codex app updates",
+              "contentSha256": "5faf6340fb06d07352ac6f059d52bf7606126399b5ca9d86e6f42a402f574c79"
+            },
+            {
+              "guid": "https://developers.openai.com/codex/changelog/#codex-2026-05-06",
+              "title": "Codex analytics governance docs update",
+              "contentSha256": "cdaba9ee1a44f4f0319ff4470e247c9baf1bd6d106ce99b28b5b065c15029f17"
+            },
+            {
+              "guid": "https://developers.openai.com/codex/changelog/#codex-2026-05-11",
+              "title": "Expanded Auto-review documentation",
+              "contentSha256": "786a75badccd88b3c1bd668be820476e536f751cb45f0d7c0f10d155c7d79b5a"
+            },
+            {
+              "guid": "https://developers.openai.com/codex/changelog/#codex-2026-05-21",
+              "title": "Appshots, goal mode, and more",
+              "contentSha256": "1a2898dc168f20d380356b8ea715c2af73ced5789815082150906be1fa248198"
+            },
+            {
+              "guid": "https://developers.openai.com/codex/changelog/#codex-2026-06-02",
+              "title": "Build and deploy websites with Sites",
+              "contentSha256": "002b0a33c5726b30201237c22f3cf3e6839422721bb5775443dd0f413d24b71d"
+            },
+            {
+              "guid": "https://developers.openai.com/codex/changelog/#codex-2026-06-11-app",
+              "title": "Codex app",
+              "contentSha256": "6faa0caf253eda10e6aa92fcebb430689ec13d0508e376284cbac1746683a08d"
+            },
+            {
+              "guid": "https://developers.openai.com/codex/changelog/#codex-2026-06-25",
+              "title": "Codex Remote reaches general availability",
+              "contentSha256": "8586332d3037655cc584e90220ffbf320c1058872415b197140836c3a3b7eb6b"
+            }
+          ]
+        }
+      }
+    }
+  ],
   "helpSurface": {
-    "probedAt": "2026-06-18T21:19:08.321Z",
+    "probedAt": "2026-07-13T08:42:30.141Z",
     "available": true,
-    "version": null,
-    "flags": [
+    "version": "codex-cli 0.144.3",
+    "targetVersion": "codex-cli 0.144.3",
+    "versionMatchesTarget": true,
+    "discoveredFlags": [
       "--add-dir",
       "--all",
       "--cd",
@@ -35,16 +219,43 @@
     ],
     "helpHash": "a0758ed066eec3d6650b430f53ba2dcc177eb9cd8f66f1c0c56a3b5a64b5b339",
     "extraVsContract": [],
-    "missingFromBinary": []
+    "missingFromBinary": [],
+    "arityMismatches": [],
+    "enumMismatches": []
   },
+  "rootCommands": [
+    "app-server",
+    "apply",
+    "archive",
+    "cloud",
+    "completion",
+    "debug",
+    "delete",
+    "doctor",
+    "exec",
+    "exec-server",
+    "features",
+    "fork",
+    "help",
+    "login",
+    "logout",
+    "mcp",
+    "mcp-server",
+    "plugin",
+    "remote-control",
+    "resume",
+    "review",
+    "sandbox",
+    "unarchive",
+    "update"
+  ],
   "subcommands": {
     "app-server": {
-      "commandPath": [
-        "app-server"
-      ],
-      "probedAt": "2026-06-18T21:19:07.722Z",
+      "commandPath": ["app-server"],
+      "probedAt": "2026-07-13T08:42:29.432Z",
       "available": true,
-      "flags": [
+      "existence": "present",
+      "discoveredFlags": [
         "--analytics-default-enabled",
         "--config",
         "--disable",
@@ -63,37 +274,35 @@
       "helpHash": "aeddb81bcc227080fd1d4d22b10f9470b623fb55b220e5877b6a9da9ac104b3c",
       "extraVsContract": [],
       "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
       "risk": "starts_server",
       "exposure": "not_exposed",
       "tier": "catalog",
       "summary": "Start Codex app server mode."
     },
     "apply": {
-      "commandPath": [
-        "apply"
-      ],
-      "probedAt": "2026-06-18T21:19:07.748Z",
+      "commandPath": ["apply"],
+      "probedAt": "2026-07-13T08:42:29.464Z",
       "available": true,
-      "flags": [
-        "--config",
-        "--disable",
-        "--enable"
-      ],
+      "existence": "present",
+      "discoveredFlags": ["--config", "--disable", "--enable"],
       "helpHash": "1242d2db6292cd23786b4946f8c7b0fc6edfc3cd1683a98f11202510e703a42e",
       "extraVsContract": [],
       "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
       "risk": "destructive",
       "exposure": "not_exposed",
       "tier": "catalog",
       "summary": "Apply a Codex patch to the workspace."
     },
     "archive": {
-      "commandPath": [
-        "archive"
-      ],
-      "probedAt": "2026-06-18T21:19:07.775Z",
+      "commandPath": ["archive"],
+      "probedAt": "2026-07-13T08:42:29.494Z",
       "available": true,
-      "flags": [
+      "existence": "present",
+      "discoveredFlags": [
         "--add-dir",
         "--cd",
         "--config",
@@ -114,76 +323,101 @@
       "helpHash": "f078c26deb2cf967e8e6aae39183d83722f2ddd7a7d7df2884fc7b2d27cff359",
       "extraVsContract": [],
       "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
       "risk": "writes_local_config",
       "exposure": "not_exposed",
       "tier": "catalog",
       "summary": "Archive Codex session state."
     },
     "cloud": {
-      "commandPath": [
-        "cloud"
-      ],
-      "probedAt": "2026-06-18T21:19:07.801Z",
+      "commandPath": ["cloud"],
+      "probedAt": "2026-07-13T08:42:29.524Z",
       "available": true,
-      "flags": [
-        "--config",
-        "--disable",
-        "--enable",
-        "--version"
-      ],
+      "existence": "present",
+      "discoveredFlags": ["--config", "--disable", "--enable", "--version"],
       "helpHash": "d4e307ab316fe29787a649213d3bd4836db1afd23484ea15ae7ab4d6c375a366",
       "extraVsContract": [],
       "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
       "risk": "network",
       "exposure": "tracked_only",
       "tier": "catalog",
       "summary": "Inspect or manage Codex cloud features."
     },
     "completion": {
-      "commandPath": [
-        "completion"
-      ],
-      "probedAt": "2026-06-18T21:19:07.829Z",
+      "commandPath": ["completion"],
+      "probedAt": "2026-07-13T08:42:29.555Z",
       "available": true,
-      "flags": [
-        "--config",
-        "--disable",
-        "--enable"
-      ],
+      "existence": "present",
+      "discoveredFlags": ["--config", "--disable", "--enable"],
       "helpHash": "6767d45f7d664f6a34c424cc84a5f8b5818d0d21e830905f85fd975e97f0a057",
       "extraVsContract": [],
       "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
       "risk": "read_only",
       "exposure": "tracked_only",
       "tier": "inspect",
       "summary": "Generate Codex shell completions."
     },
     "debug": {
-      "commandPath": [
-        "debug"
-      ],
-      "probedAt": "2026-06-18T21:19:07.857Z",
+      "commandPath": ["debug"],
+      "probedAt": "2026-07-13T08:42:29.585Z",
       "available": true,
-      "flags": [
-        "--config",
-        "--disable",
-        "--enable"
-      ],
+      "existence": "present",
+      "discoveredFlags": ["--config", "--disable", "--enable"],
       "helpHash": "f4f7f6ff8dff8fc223f681284ad192487704a9ce772e88758a3b20f2c2514211",
       "extraVsContract": [],
       "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
       "risk": "read_only",
       "exposure": "tracked_only",
       "tier": "diagnostic",
       "summary": "Run Codex debugging utilities."
     },
-    "doctor": {
-      "commandPath": [
-        "doctor"
-      ],
-      "probedAt": "2026-06-18T21:19:07.884Z",
+    "delete": {
+      "commandPath": ["delete"],
+      "probedAt": "2026-07-13T08:42:29.616Z",
       "available": true,
-      "flags": [
+      "existence": "present",
+      "discoveredFlags": [
+        "--add-dir",
+        "--cd",
+        "--config",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "--dangerously-bypass-hook-trust",
+        "--disable",
+        "--enable",
+        "--force",
+        "--image",
+        "--local-provider",
+        "--model",
+        "--oss",
+        "--profile",
+        "--remote",
+        "--remote-auth-token-env",
+        "--sandbox",
+        "--strict-config"
+      ],
+      "helpHash": "8b33e88808537d060ce2e11fe73f3a62b83a859646cc9ad157841de240cace1e",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
+      "risk": "destructive",
+      "exposure": "not_exposed",
+      "tier": "catalog",
+      "summary": "Permanently delete a saved Codex session."
+    },
+    "doctor": {
+      "commandPath": ["doctor"],
+      "probedAt": "2026-07-13T08:42:29.646Z",
+      "available": true,
+      "existence": "present",
+      "discoveredFlags": [
         "--all",
         "--ascii",
         "--config",
@@ -196,18 +430,19 @@
       "helpHash": "cdb25b4451267406d0d8e277e75c3921d640e11cfa0bff53c096fa220463be86",
       "extraVsContract": [],
       "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
       "risk": "read_only",
       "exposure": "tracked_only",
       "tier": "diagnostic",
       "summary": "Run Codex diagnostic checks."
     },
     "exec": {
-      "commandPath": [
-        "exec"
-      ],
-      "probedAt": "2026-06-18T21:19:07.912Z",
+      "commandPath": ["exec"],
+      "probedAt": "2026-07-13T08:42:29.679Z",
       "available": true,
-      "flags": [
+      "existence": "present",
+      "discoveredFlags": [
         "--add-dir",
         "--cd",
         "--color",
@@ -235,19 +470,19 @@
       "helpHash": "da7f8d58749fb3084723cded1620d133235a090ebe5ee412ef404f171415d434",
       "extraVsContract": [],
       "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
       "risk": "executes_agent",
       "exposure": "tracked_only",
       "tier": "catalog",
       "summary": "Run Codex in non-interactive execution mode."
     },
     "exec resume": {
-      "commandPath": [
-        "exec",
-        "resume"
-      ],
-      "probedAt": "2026-06-18T21:19:07.938Z",
+      "commandPath": ["exec", "resume"],
+      "probedAt": "2026-07-13T08:42:29.738Z",
       "available": true,
-      "flags": [
+      "existence": "present",
+      "discoveredFlags": [
         "--all",
         "--config",
         "--dangerously-bypass-approvals-and-sandbox",
@@ -269,19 +504,19 @@
       "helpHash": "2fb5070886a2e64bd4d18db982096c2d3f295afd207bd50a1a8981aaa9148158",
       "extraVsContract": [],
       "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
       "risk": "executes_agent",
       "exposure": "tracked_only",
       "tier": "catalog",
       "summary": "Resume Codex sessions from the interactive CLI."
     },
     "exec review": {
-      "commandPath": [
-        "exec",
-        "review"
-      ],
-      "probedAt": "2026-06-18T21:19:07.965Z",
+      "commandPath": ["exec", "review"],
+      "probedAt": "2026-07-13T08:42:29.768Z",
       "available": true,
-      "flags": [
+      "existence": "present",
+      "discoveredFlags": [
         "--base",
         "--commit",
         "--config",
@@ -304,18 +539,19 @@
       "helpHash": "60cf6f4eaf5bf09f8a691a695f9a06f905d6bfb3c6412562279b50612672c2e3",
       "extraVsContract": [],
       "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
       "risk": "executes_agent",
       "exposure": "tracked_only",
       "tier": "catalog",
       "summary": "Run Codex code review workflows."
     },
     "exec-server": {
-      "commandPath": [
-        "exec-server"
-      ],
-      "probedAt": "2026-06-18T21:19:07.992Z",
+      "commandPath": ["exec-server"],
+      "probedAt": "2026-07-13T08:42:29.799Z",
       "available": true,
-      "flags": [
+      "existence": "present",
+      "discoveredFlags": [
         "--config",
         "--disable",
         "--enable",
@@ -329,37 +565,35 @@
       "helpHash": "fafa5d052856a381de54525e55b099ece4ae893b61800af3e760abf4d6a67c2a",
       "extraVsContract": [],
       "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
       "risk": "starts_server",
       "exposure": "not_exposed",
       "tier": "catalog",
       "summary": "Start Codex exec server mode."
     },
     "features": {
-      "commandPath": [
-        "features"
-      ],
-      "probedAt": "2026-06-18T21:19:08.018Z",
+      "commandPath": ["features"],
+      "probedAt": "2026-07-13T08:42:29.829Z",
       "available": true,
-      "flags": [
-        "--config",
-        "--disable",
-        "--enable"
-      ],
+      "existence": "present",
+      "discoveredFlags": ["--config", "--disable", "--enable"],
       "helpHash": "fd238f4ed1b5a5975472b1bafb8300d8e547403cf621d0047d247c3b64e0e508",
       "extraVsContract": [],
       "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
       "risk": "writes_local_config",
       "exposure": "tracked_only",
       "tier": "catalog",
       "summary": "Inspect or configure Codex feature flags."
     },
     "fork": {
-      "commandPath": [
-        "fork"
-      ],
-      "probedAt": "2026-06-18T21:19:08.046Z",
+      "commandPath": ["fork"],
+      "probedAt": "2026-07-13T08:42:29.857Z",
       "available": true,
-      "flags": [
+      "existence": "present",
+      "discoveredFlags": [
         "--add-dir",
         "--all",
         "--ask-for-approval",
@@ -383,21 +617,22 @@
         "--strict-config",
         "--version"
       ],
-      "helpHash": "f2276e202447690196caf39f56254a3a42c94df6a76bf271909357b52e71b8e8",
+      "helpHash": "6b77cc7fd7dcbf3250621b658ae94bb000a5c444eccc7ed1ddf74e196b0df626",
       "extraVsContract": [],
       "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
       "risk": "executes_agent",
       "exposure": "tracked_only",
       "tier": "catalog",
       "summary": "Fork a Codex session."
     },
     "login": {
-      "commandPath": [
-        "login"
-      ],
-      "probedAt": "2026-06-18T21:19:08.073Z",
+      "commandPath": ["login"],
+      "probedAt": "2026-07-13T08:42:29.884Z",
       "available": true,
-      "flags": [
+      "existence": "present",
+      "discoveredFlags": [
         "--config",
         "--device-auth",
         "--disable",
@@ -408,115 +643,139 @@
       "helpHash": "92b59bdace262549c63f4225f89c659fc48beffafd60226983d50e7ee3dd600c",
       "extraVsContract": [],
       "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
       "risk": "auth",
       "exposure": "not_exposed",
       "tier": "catalog",
       "summary": "Authenticate Codex CLI."
     },
     "logout": {
-      "commandPath": [
-        "logout"
-      ],
-      "probedAt": "2026-06-18T21:19:08.100Z",
+      "commandPath": ["logout"],
+      "probedAt": "2026-07-13T08:42:29.910Z",
       "available": true,
-      "flags": [
-        "--config",
-        "--disable",
-        "--enable"
-      ],
+      "existence": "present",
+      "discoveredFlags": ["--config", "--disable", "--enable"],
       "helpHash": "d3b52918046a86dc5b0da0106121ca9daf83384a0ccdae3cbbdf6f93ad8b7a7a",
       "extraVsContract": [],
       "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
       "risk": "auth",
       "exposure": "not_exposed",
       "tier": "catalog",
       "summary": "Clear Codex authentication state."
     },
     "mcp": {
-      "commandPath": [
-        "mcp"
-      ],
-      "probedAt": "2026-06-18T21:19:08.127Z",
+      "commandPath": ["mcp"],
+      "probedAt": "2026-07-13T08:42:29.936Z",
       "available": true,
-      "flags": [
-        "--config",
-        "--disable",
-        "--enable"
-      ],
+      "existence": "present",
+      "discoveredFlags": ["--config", "--disable", "--enable"],
       "helpHash": "c3a6874a64da9472b97fdc47ed5dde511150aab6accb808a30953f14e69d6a52",
       "extraVsContract": [],
       "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
       "risk": "writes_local_config",
       "exposure": "tracked_only",
       "tier": "catalog",
       "summary": "Manage Codex MCP configuration."
     },
     "mcp-server": {
-      "commandPath": [
-        "mcp-server"
-      ],
-      "probedAt": "2026-06-18T21:19:08.154Z",
+      "commandPath": ["mcp-server"],
+      "probedAt": "2026-07-13T08:42:29.962Z",
       "available": true,
-      "flags": [
-        "--config",
-        "--disable",
-        "--enable",
-        "--strict-config"
-      ],
+      "existence": "present",
+      "discoveredFlags": ["--config", "--disable", "--enable", "--strict-config"],
       "helpHash": "2fd3e8fec2e4dbf1c4731e59733968f522d6228d14fac87d8eb4e35f5133cc11",
       "extraVsContract": [],
       "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
       "risk": "starts_server",
       "exposure": "not_exposed",
       "tier": "catalog",
       "summary": "Start Codex MCP server mode."
     },
     "plugin": {
-      "commandPath": [
-        "plugin"
-      ],
-      "probedAt": "2026-06-18T21:19:08.181Z",
+      "commandPath": ["plugin"],
+      "probedAt": "2026-07-13T08:42:29.987Z",
       "available": true,
-      "flags": [
-        "--config",
-        "--disable",
-        "--enable"
-      ],
+      "existence": "present",
+      "discoveredFlags": ["--config", "--disable", "--enable"],
       "helpHash": "4597fbf5d3746597df5499c25c3a0de55d89eb4e36b84a59acc1bdd7857e0e2e",
       "extraVsContract": [],
       "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
       "risk": "writes_local_config",
       "exposure": "tracked_only",
       "tier": "catalog",
       "summary": "Manage Codex plugins."
     },
     "remote-control": {
-      "commandPath": [
-        "remote-control"
-      ],
-      "probedAt": "2026-06-18T21:19:08.209Z",
+      "commandPath": ["remote-control"],
+      "probedAt": "2026-07-13T08:42:30.013Z",
       "available": true,
-      "flags": [
-        "--config",
-        "--disable",
-        "--enable",
-        "--json"
-      ],
-      "helpHash": "436e157992666b41ed8d1ee1f2f466d1531c61fca13794857be03fa77e196992",
+      "existence": "present",
+      "discoveredFlags": ["--config", "--disable", "--enable", "--json"],
+      "helpHash": "141aad68297586f1130cc2258b40d6c12306384193077641983443fc8f081419",
       "extraVsContract": [],
       "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
       "risk": "network",
       "exposure": "tracked_only",
       "tier": "catalog",
       "summary": "Inspect or manage Codex remote control state."
     },
-    "review": {
-      "commandPath": [
-        "review"
-      ],
-      "probedAt": "2026-06-18T21:19:08.238Z",
+    "resume": {
+      "commandPath": ["resume"],
+      "probedAt": "2026-07-13T08:42:30.039Z",
       "available": true,
-      "flags": [
+      "existence": "present",
+      "discoveredFlags": [
+        "--add-dir",
+        "--all",
+        "--ask-for-approval",
+        "--cd",
+        "--config",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "--dangerously-bypass-hook-trust",
+        "--disable",
+        "--enable",
+        "--image",
+        "--include-non-interactive",
+        "--last",
+        "--local-provider",
+        "--model",
+        "--no-alt-screen",
+        "--oss",
+        "--profile",
+        "--remote",
+        "--remote-auth-token-env",
+        "--sandbox",
+        "--search",
+        "--strict-config",
+        "--version"
+      ],
+      "helpHash": "f5e05f73691a8e8b399a9e9d70f26e9c6dab02d5903360f261818821b9023f37",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
+      "risk": "executes_agent",
+      "exposure": "not_exposed",
+      "tier": "catalog",
+      "summary": "Resume a saved interactive Codex session."
+    },
+    "review": {
+      "commandPath": ["review"],
+      "probedAt": "2026-07-13T08:42:30.065Z",
+      "available": true,
+      "existence": "present",
+      "discoveredFlags": [
         "--base",
         "--commit",
         "--config",
@@ -529,41 +788,46 @@
       "helpHash": "fc02e73477306269139f9e013ba626932e936e3c151d2031a3bca742f5c400fd",
       "extraVsContract": [],
       "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
       "risk": "executes_agent",
       "exposure": "tracked_only",
       "tier": "catalog",
       "summary": "Run Codex code review workflows."
     },
     "sandbox": {
-      "commandPath": [
-        "sandbox"
-      ],
-      "probedAt": "2026-06-18T21:19:08.267Z",
+      "commandPath": ["sandbox"],
+      "probedAt": "2026-07-13T08:42:30.092Z",
       "available": true,
-      "flags": [
+      "existence": "present",
+      "discoveredFlags": [
         "--cd",
         "--config",
         "--disable",
         "--enable",
         "--include-managed-config",
-        "--permissions-profile",
-        "--profile"
+        "--permission-profile",
+        "--profile",
+        "--sandbox-state-disable-network",
+        "--sandbox-state-json",
+        "--sandbox-state-readable-root"
       ],
-      "helpHash": "fd0f40b6bc5e9bfd64b2f94c91d3e57de4ec52b2af997d400dbb06296b6f2afd",
+      "helpHash": "97178d90ade3864159cfa8ac1e94a49144c5f61eb9277713f17273d0c255e295",
       "extraVsContract": [],
       "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
       "risk": "executes_agent",
       "exposure": "not_exposed",
       "tier": "catalog",
       "summary": "Run or inspect Codex sandbox behavior."
     },
     "unarchive": {
-      "commandPath": [
-        "unarchive"
-      ],
-      "probedAt": "2026-06-18T21:19:08.294Z",
+      "commandPath": ["unarchive"],
+      "probedAt": "2026-07-13T08:42:30.117Z",
       "available": true,
-      "flags": [
+      "existence": "present",
+      "discoveredFlags": [
         "--add-dir",
         "--cd",
         "--config",
@@ -584,25 +848,24 @@
       "helpHash": "a15d70bdb6745fc5aca1c4ca8ae3cba001406f04792e6ce61b8be5e55c46dcc5",
       "extraVsContract": [],
       "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
       "risk": "writes_local_config",
       "exposure": "not_exposed",
       "tier": "catalog",
       "summary": "Restore archived Codex session state."
     },
     "update": {
-      "commandPath": [
-        "update"
-      ],
-      "probedAt": "2026-06-18T21:19:08.321Z",
+      "commandPath": ["update"],
+      "probedAt": "2026-07-13T08:42:30.141Z",
       "available": true,
-      "flags": [
-        "--config",
-        "--disable",
-        "--enable"
-      ],
+      "existence": "present",
+      "discoveredFlags": ["--config", "--disable", "--enable"],
       "helpHash": "0af2ebbf91ab75c1595b57618278999f9eace34f8181d9495da38ae15d0949f6",
       "extraVsContract": [],
       "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
       "risk": "updates_binary",
       "exposure": "not_exposed",
       "tier": "catalog",

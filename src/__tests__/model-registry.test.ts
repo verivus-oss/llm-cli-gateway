@@ -56,6 +56,7 @@ describe("model registry", () => {
     process.env.GROK_CONFIG_PATH = join(tempDir, "missing-grok-config.toml");
     process.env.GEMINI_SETTINGS_PATH = join(tempDir, "missing-gemini-settings.json");
     process.env.GEMINI_HISTORY_ROOT = join(tempDir, "missing-gemini-history");
+    process.env.VIBE_HOME = join(tempDir, "missing-vibe-home");
     clearModelRegistryCache();
   });
 

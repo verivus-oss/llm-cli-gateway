@@ -1,7 +1,7 @@
 {
   "generatedAt": "deterministic build output",
   "packageName": "llm-cli-gateway",
-  "packageVersion": "2.17.0",
+  "packageVersion": "2.17.1",
   "captureCommand": "node scripts/generate-site-discovery.mjs",
   "source": "runtime MCP tools/list from dist/index.js over in-memory MCP transport",
   "toolCount": 52,
@@ -180,12 +180,13 @@
             "enum": [
               "default",
               "acceptEdits",
-              "plan",
               "auto",
+              "bypassPermissions",
+              "manual",
               "dontAsk",
-              "bypassPermissions"
+              "plan"
             ],
-            "description": "Claude --permission-mode: default|acceptEdits|plan|auto|dontAsk|bypassPermissions. `default` is a no-op (no flag emitted)."
+            "description": "Claude --permission-mode: default|acceptEdits|auto|bypassPermissions|manual|dontAsk|plan. `default` is a no-op (no flag emitted)."
           },
           "agent": {
             "type": "string",
@@ -543,12 +544,13 @@
             "enum": [
               "default",
               "acceptEdits",
-              "plan",
               "auto",
+              "bypassPermissions",
+              "manual",
               "dontAsk",
-              "bypassPermissions"
+              "plan"
             ],
-            "description": "Claude --permission-mode: default|acceptEdits|plan|auto|dontAsk|bypassPermissions. `default` is a no-op."
+            "description": "Claude --permission-mode: default|acceptEdits|auto|bypassPermissions|manual|dontAsk|plan. `default` is a no-op."
           },
           "agent": {
             "type": "string",
@@ -1947,10 +1949,11 @@
             "type": "string",
             "enum": [
               "auto",
+              "accept-edits",
               "smart",
               "dangerous"
             ],
-            "description": "Devin CLI permission mode (--permission-mode). auto auto-approves read-only tools; smart additionally auto-runs actions a fast model judges safe; dangerous auto-approves all. When omitted, Devin uses its own headless default; pass auto or smart for unattended runs."
+            "description": "Devin CLI permission mode (--permission-mode). auto auto-approves read-only tools; accept-edits also auto-approves workspace edits; smart additionally auto-runs actions a fast model judges safe; dangerous auto-approves all. When omitted, Devin uses its own headless default; choose an explicit mode for unattended runs."
           },
           "promptFile": {
             "type": "string",
@@ -2055,10 +2058,11 @@
             "type": "string",
             "enum": [
               "auto",
+              "accept-edits",
               "smart",
               "dangerous"
             ],
-            "description": "Devin CLI permission mode (--permission-mode). auto, smart, or dangerous. When omitted, Devin uses its own headless default; pass auto or smart for unattended runs."
+            "description": "Devin CLI permission mode (--permission-mode). auto, accept-edits, smart, or dangerous. When omitted, Devin uses its own headless default; choose an explicit mode for unattended runs."
           },
           "promptFile": {
             "type": "string",
@@ -3787,7 +3791,7 @@
             "items": {
               "type": "string"
             },
-            "description": "Accepted for caller parity; Vibe has no deny-list flag, so values are ignored (a warning is logged)."
+            "description": "Denylist of built-in tools, each emitted as a separate --disabled-tools <tool> flag"
           },
           "correlationId": {
             "type": "string",
@@ -4020,7 +4024,7 @@
             "items": {
               "type": "string"
             },
-            "description": "Accepted for caller parity; Vibe has no deny-list flag, so values are ignored (a warning is logged)."
+            "description": "Denylist of built-in tools, each emitted as a separate --disabled-tools <tool> flag"
           },
           "correlationId": {
             "type": "string",

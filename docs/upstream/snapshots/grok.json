@@ -1,12 +1,24 @@
 {
+  "schemaVersion": "upstream-scan-snapshot.v2",
   "cli": "grok",
-  "fetchedAt": "2026-06-21T20:54:08.667Z",
-  "sources": [],
+  "fetchedAt": "2026-07-13T07:43:59.950Z",
+  "sources": [
+    {
+      "url": "https://docs.x.ai/developers/release-notes.md",
+      "ok": true,
+      "status": 200,
+      "bytes": 12487,
+      "sha256": "4fa13fe16b73bd145968f50c2e283789827f8eca2d9758de1b036eac8872e1f4",
+      "semantic": null
+    }
+  ],
   "helpSurface": {
-    "probedAt": "2026-06-21T20:54:08.631Z",
+    "probedAt": "2026-07-13T07:43:59.480Z",
     "available": true,
-    "version": null,
-    "flags": [
+    "version": "grok 0.2.99 (b1b49ccb71)",
+    "targetVersion": "grok 0.2.99 (b1b49ccb71)",
+    "versionMatchesTarget": true,
+    "discoveredFlags": [
       "--agent",
       "--agents",
       "--allow",
@@ -20,10 +32,13 @@
       "--deny",
       "--disable-web-search",
       "--disallowed-tools",
-      "--effort",
       "--experimental-memory",
+      "--fork-session",
+      "--fullscreen",
+      "--json-schema",
       "--leader-socket",
       "--max-turns",
+      "--minimal",
       "--model",
       "--no-alt-screen",
       "--no-memory",
@@ -39,25 +54,53 @@
       "--resume",
       "--rules",
       "--sandbox",
+      "--session-id",
       "--single",
       "--system-prompt-override",
       "--tools",
       "--verbatim",
       "--version",
-      "--worktree"
+      "--worktree",
+      "--worktree-ref"
     ],
-    "helpHash": "d277cef465079ef5523cb500709c72451585666ed320c3405d8f0e06ddeac719",
+    "helpHash": "97bfaefd1a3f20e51f72df3f9b1eefdbd6d941e114068ff9b15b836b1cc9ee84",
     "extraVsContract": [],
-    "missingFromBinary": []
+    "missingFromBinary": [],
+    "arityMismatches": [],
+    "enumMismatches": []
   },
+  "rootCommands": [
+    "agent",
+    "completions",
+    "dashboard",
+    "export",
+    "help",
+    "import",
+    "inspect",
+    "leader",
+    "login",
+    "logout",
+    "mcp",
+    "memory",
+    "models",
+    "plugin",
+    "sessions",
+    "setup",
+    "trace",
+    "update",
+    "version",
+    "worktree",
+    "wrap"
+  ],
   "subcommands": {
     "agent": {
       "commandPath": [
         "agent"
       ],
-      "probedAt": "2026-06-21T20:54:07.836Z",
+      "probedAt": "2026-07-13T07:43:47.966Z",
       "available": true,
-      "flags": [
+      "existence": "present",
+      "discoveredFlags": [
         "--agent-profile",
         "--always-approve",
         "--cli-chat-proxy-base-url",
@@ -69,13 +112,16 @@
         "--leader-socket",
         "--model",
         "--no-leader",
+        "--plugin-dir",
         "--reasoning-effort",
         "--reauth",
         "--xai-api-base-url"
       ],
-      "helpHash": "3aa516d1a2f59b93f3a459dee3ef2e13d49b18e39af29f12fe90710217495b27",
+      "helpHash": "c1564f0df5e072c7c29c43f1be78c513cb7142ee57b23b42dc407857e96e8800",
       "extraVsContract": [],
       "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
       "risk": "executes_agent",
       "exposure": "tracked_only",
       "tier": "catalog",
@@ -86,9 +132,10 @@
         "agent",
         "headless"
       ],
-      "probedAt": "2026-06-21T20:54:07.871Z",
+      "probedAt": "2026-07-13T07:43:48.938Z",
       "available": true,
-      "flags": [
+      "existence": "present",
+      "discoveredFlags": [
         "--debug",
         "--debug-file",
         "--grok-ws-origin",
@@ -98,6 +145,8 @@
       "helpHash": "ad01f94e43b2c23fcc8659b416f2c3a46b8e11489e4e32ee39039478c6bef4f2",
       "extraVsContract": [],
       "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
       "risk": "executes_agent",
       "exposure": "tracked_only",
       "tier": "catalog",
@@ -108,9 +157,10 @@
         "agent",
         "leader"
       ],
-      "probedAt": "2026-06-21T20:54:07.906Z",
+      "probedAt": "2026-07-13T07:43:49.438Z",
       "available": true,
-      "flags": [
+      "existence": "present",
+      "discoveredFlags": [
         "--debug",
         "--debug-file",
         "--grok-ws-origin",
@@ -123,6 +173,8 @@
       "helpHash": "cabb8548a6031dfd532d453e9aa2d3f4881aa15c399ac584cc77ad78707a4371",
       "extraVsContract": [],
       "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
       "risk": "starts_server",
       "exposure": "not_exposed",
       "tier": "catalog",
@@ -133,9 +185,10 @@
         "agent",
         "serve"
       ],
-      "probedAt": "2026-06-21T20:54:07.941Z",
+      "probedAt": "2026-07-13T07:43:49.966Z",
       "available": true,
-      "flags": [
+      "existence": "present",
+      "discoveredFlags": [
         "--bind",
         "--debug",
         "--debug-file",
@@ -148,6 +201,8 @@
       "helpHash": "420017368f71cb24763a15f73b0d5a7d162788439f8e23256851e038fc145892",
       "extraVsContract": [],
       "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
       "risk": "starts_server",
       "exposure": "not_exposed",
       "tier": "catalog",
@@ -158,9 +213,10 @@
         "agent",
         "stdio"
       ],
-      "probedAt": "2026-06-21T20:54:07.976Z",
+      "probedAt": "2026-07-13T07:43:50.442Z",
       "available": true,
-      "flags": [
+      "existence": "present",
+      "discoveredFlags": [
         "--debug",
         "--debug-file",
         "--leader-socket"
@@ -168,6 +224,8 @@
       "helpHash": "057b98d76709c0e4f986373403c056cfa75e08e07e88952ca1cfaf2090c49095",
       "extraVsContract": [],
       "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
       "risk": "starts_server",
       "exposure": "not_exposed",
       "tier": "catalog",
@@ -177,9 +235,10 @@
       "commandPath": [
         "completions"
       ],
-      "probedAt": "2026-06-21T20:54:08.011Z",
+      "probedAt": "2026-07-13T07:43:50.906Z",
       "available": true,
-      "flags": [
+      "existence": "present",
+      "discoveredFlags": [
         "--debug",
         "--debug-file",
         "--leader-socket"
@@ -187,6 +246,8 @@
       "helpHash": "31a1be5d931a3234cc27868eb9d32ba1f68df59f6ad799772ccfa227a937aceb",
       "extraVsContract": [],
       "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
       "risk": "read_only",
       "exposure": "tracked_only",
       "tier": "inspect",
@@ -196,9 +257,10 @@
       "commandPath": [
         "dashboard"
       ],
-      "probedAt": "2026-06-21T20:54:08.045Z",
+      "probedAt": "2026-07-13T07:43:51.375Z",
       "available": true,
-      "flags": [
+      "existence": "present",
+      "discoveredFlags": [
         "--debug",
         "--debug-file",
         "--leader-socket"
@@ -206,6 +268,8 @@
       "helpHash": "b1c8012a0988e753da5bf16ba5727a2fa97bebd36869f789f2cef213ccb0f424",
       "extraVsContract": [],
       "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
       "risk": "read_only",
       "exposure": "tracked_only",
       "tier": "inspect",
@@ -215,9 +279,10 @@
       "commandPath": [
         "export"
       ],
-      "probedAt": "2026-06-21T20:54:08.079Z",
+      "probedAt": "2026-07-13T07:43:51.854Z",
       "available": true,
-      "flags": [
+      "existence": "present",
+      "discoveredFlags": [
         "--clipboard",
         "--debug",
         "--debug-file",
@@ -226,6 +291,8 @@
       "helpHash": "03caa59f80d17240eaf95dff7e5a374eada4e18773762acf1acbd89cd77ece29",
       "extraVsContract": [],
       "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
       "risk": "read_only",
       "exposure": "tracked_only",
       "tier": "inspect",
@@ -235,9 +302,10 @@
       "commandPath": [
         "import"
       ],
-      "probedAt": "2026-06-21T20:54:08.114Z",
+      "probedAt": "2026-07-13T07:43:52.315Z",
       "available": true,
-      "flags": [
+      "existence": "present",
+      "discoveredFlags": [
         "--debug",
         "--debug-file",
         "--json",
@@ -247,6 +315,8 @@
       "helpHash": "4b94f8bb8c76b74e9d8c7847939d394154359f17c99c1b1b3e4368bc0ee76dfc",
       "extraVsContract": [],
       "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
       "risk": "writes_local_config",
       "exposure": "tracked_only",
       "tier": "catalog",
@@ -256,9 +326,10 @@
       "commandPath": [
         "inspect"
       ],
-      "probedAt": "2026-06-21T20:54:08.148Z",
+      "probedAt": "2026-07-13T07:43:52.795Z",
       "available": true,
-      "flags": [
+      "existence": "present",
+      "discoveredFlags": [
         "--debug",
         "--debug-file",
         "--json",
@@ -267,6 +338,8 @@
       "helpHash": "8218b7005fb645a989dc7605d07ae99ba910bd8153de76df384ea92ce9c95307",
       "extraVsContract": [],
       "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
       "risk": "read_only",
       "exposure": "tracked_only",
       "tier": "inspect",
@@ -276,9 +349,10 @@
       "commandPath": [
         "leader"
       ],
-      "probedAt": "2026-06-21T20:54:08.184Z",
+      "probedAt": "2026-07-13T07:43:53.277Z",
       "available": true,
-      "flags": [
+      "existence": "present",
+      "discoveredFlags": [
         "--debug",
         "--debug-file",
         "--leader-socket"
@@ -286,6 +360,8 @@
       "helpHash": "48380b801c545facb176c333dfe47d7f6bc531c18e91ac3d65900a3daef7943f",
       "extraVsContract": [],
       "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
       "risk": "starts_server",
       "exposure": "not_exposed",
       "tier": "catalog",
@@ -295,9 +371,10 @@
       "commandPath": [
         "login"
       ],
-      "probedAt": "2026-06-21T20:54:08.217Z",
+      "probedAt": "2026-07-13T07:43:53.744Z",
       "available": true,
-      "flags": [
+      "existence": "present",
+      "discoveredFlags": [
         "--debug",
         "--debug-file",
         "--device-auth",
@@ -307,6 +384,8 @@
       "helpHash": "f88f91a8ca47a3619e2b3abc439c002df03b546bcfaa431652edab7e264f08e5",
       "extraVsContract": [],
       "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
       "risk": "auth",
       "exposure": "not_exposed",
       "tier": "catalog",
@@ -316,9 +395,10 @@
       "commandPath": [
         "logout"
       ],
-      "probedAt": "2026-06-21T20:54:08.251Z",
+      "probedAt": "2026-07-13T07:43:54.229Z",
       "available": true,
-      "flags": [
+      "existence": "present",
+      "discoveredFlags": [
         "--debug",
         "--debug-file",
         "--leader-socket"
@@ -326,6 +406,8 @@
       "helpHash": "3dc6c9ac5a53fb73fd3abc09a09efa68b6dfaaeb434988ac908603e7bcfc4b65",
       "extraVsContract": [],
       "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
       "risk": "auth",
       "exposure": "not_exposed",
       "tier": "catalog",
@@ -335,9 +417,10 @@
       "commandPath": [
         "mcp"
       ],
-      "probedAt": "2026-06-21T20:54:08.286Z",
+      "probedAt": "2026-07-13T07:43:54.717Z",
       "available": true,
-      "flags": [
+      "existence": "present",
+      "discoveredFlags": [
         "--debug",
         "--debug-file",
         "--leader-socket"
@@ -345,6 +428,8 @@
       "helpHash": "3e67e78636d4adbb3f53b494ead191d540f2628155bf49b0d183b33139b6104f",
       "extraVsContract": [],
       "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
       "risk": "writes_local_config",
       "exposure": "tracked_only",
       "tier": "catalog",
@@ -354,9 +439,10 @@
       "commandPath": [
         "memory"
       ],
-      "probedAt": "2026-06-21T20:54:08.319Z",
+      "probedAt": "2026-07-13T07:43:55.215Z",
       "available": true,
-      "flags": [
+      "existence": "present",
+      "discoveredFlags": [
         "--debug",
         "--debug-file",
         "--leader-socket"
@@ -364,6 +450,8 @@
       "helpHash": "f9e46ecf5734e9aecae21bff067db2667561f2c07c8b7844752c47c32dfc4a3e",
       "extraVsContract": [],
       "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
       "risk": "writes_local_config",
       "exposure": "tracked_only",
       "tier": "catalog",
@@ -373,9 +461,10 @@
       "commandPath": [
         "models"
       ],
-      "probedAt": "2026-06-21T20:54:08.354Z",
+      "probedAt": "2026-07-13T07:43:55.703Z",
       "available": true,
-      "flags": [
+      "existence": "present",
+      "discoveredFlags": [
         "--debug",
         "--debug-file",
         "--leader-socket"
@@ -383,6 +472,8 @@
       "helpHash": "3ef9acb4dd1a15b90f51c80b38dc93a3cf9ee1bb81cb083db4091c2fa04c50b6",
       "extraVsContract": [],
       "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
       "risk": "network",
       "exposure": "tracked_only",
       "tier": "diagnostic",
@@ -392,9 +483,10 @@
       "commandPath": [
         "plugin"
       ],
-      "probedAt": "2026-06-21T20:54:08.391Z",
+      "probedAt": "2026-07-13T07:43:56.198Z",
       "available": true,
-      "flags": [
+      "existence": "present",
+      "discoveredFlags": [
         "--debug",
         "--debug-file",
         "--leader-socket"
@@ -402,6 +494,8 @@
       "helpHash": "8ad52f19d4c8a69775545013f3f61af0f1444976261177fb9ed6b6ff290f70ad",
       "extraVsContract": [],
       "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
       "risk": "writes_local_config",
       "exposure": "tracked_only",
       "tier": "catalog",
@@ -411,9 +505,10 @@
       "commandPath": [
         "sessions"
       ],
-      "probedAt": "2026-06-21T20:54:08.427Z",
+      "probedAt": "2026-07-13T07:43:56.677Z",
       "available": true,
-      "flags": [
+      "existence": "present",
+      "discoveredFlags": [
         "--debug",
         "--debug-file",
         "--leader-socket"
@@ -421,6 +516,8 @@
       "helpHash": "dfee729c94c507dcfaebf086b75ced0731aace43ace9e535075b8f1064d32985",
       "extraVsContract": [],
       "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
       "risk": "read_only",
       "exposure": "tracked_only",
       "tier": "inspect",
@@ -430,47 +527,33 @@
       "commandPath": [
         "setup"
       ],
-      "probedAt": "2026-06-21T20:54:08.460Z",
+      "probedAt": "2026-07-13T07:43:57.135Z",
       "available": true,
-      "flags": [
+      "existence": "present",
+      "discoveredFlags": [
         "--debug",
         "--debug-file",
+        "--json",
         "--leader-socket"
       ],
-      "helpHash": "24e748b31306d3d34a3a2475b3f2106c25de2d7cd92916e9534a93fb8331d60f",
+      "helpHash": "c73c20614328f7b9c51638af3e14a0d257d0618066ea409aad44df2f6e3d1495",
       "extraVsContract": [],
       "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
       "risk": "writes_local_config",
       "exposure": "not_exposed",
       "tier": "catalog",
       "summary": "Configure Grok CLI local setup."
     },
-    "ssh": {
-      "commandPath": [
-        "ssh"
-      ],
-      "probedAt": "2026-06-21T20:54:08.495Z",
-      "available": true,
-      "flags": [
-        "--debug",
-        "--debug-file",
-        "--leader-socket"
-      ],
-      "helpHash": "2f14aafa1d5bf6a6cfc1f69ead0ff150f8fd10107495ca5743d82d6d16fddf4c",
-      "extraVsContract": [],
-      "missingFromBinary": [],
-      "risk": "network",
-      "exposure": "tracked_only",
-      "tier": "catalog",
-      "summary": "Manage Grok SSH integration."
-    },
     "trace": {
       "commandPath": [
         "trace"
       ],
-      "probedAt": "2026-06-21T20:54:08.526Z",
+      "probedAt": "2026-07-13T07:43:57.605Z",
       "available": true,
-      "flags": [
+      "existence": "present",
+      "discoveredFlags": [
         "--debug",
         "--debug-file",
         "--json",
@@ -481,6 +564,8 @@
       "helpHash": "71b59a3637e05a6e5705de2acf28efd8b998acfdf53c4d406fd34b9bfe725a5a",
       "extraVsContract": [],
       "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
       "risk": "read_only",
       "exposure": "tracked_only",
       "tier": "diagnostic",
@@ -490,9 +575,10 @@
       "commandPath": [
         "update"
       ],
-      "probedAt": "2026-06-21T20:54:08.561Z",
+      "probedAt": "2026-07-13T07:43:58.080Z",
       "available": true,
-      "flags": [
+      "existence": "present",
+      "discoveredFlags": [
         "--alpha",
         "--check",
         "--debug",
@@ -506,6 +592,8 @@
       "helpHash": "ecdf2a599cd19e5593adde54866826d688baa4f45ec1bdcc3258bb192f31be17",
       "extraVsContract": [],
       "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
       "risk": "updates_binary",
       "exposure": "not_exposed",
       "tier": "catalog",
@@ -515,9 +603,10 @@
       "commandPath": [
         "version"
       ],
-      "probedAt": "2026-06-21T20:54:08.596Z",
+      "probedAt": "2026-07-13T07:43:58.555Z",
       "available": true,
-      "flags": [
+      "existence": "present",
+      "discoveredFlags": [
         "--debug",
         "--debug-file",
         "--json",
@@ -526,6 +615,8 @@
       "helpHash": "0e2b707034bac7a8e912a4109ab93ce1b6797537143211cbceb430356def3f21",
       "extraVsContract": [],
       "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
       "risk": "read_only",
       "exposure": "tracked_only",
       "tier": "diagnostic",
@@ -535,20 +626,45 @@
       "commandPath": [
         "worktree"
       ],
-      "probedAt": "2026-06-21T20:54:08.631Z",
+      "probedAt": "2026-07-13T07:43:59.008Z",
       "available": true,
-      "flags": [
+      "existence": "present",
+      "discoveredFlags": [
         "--debug",
         "--debug-file",
         "--leader-socket"
       ],
-      "helpHash": "7675aabb893861eeabe40d4212939bdbe5f486def398007b34ba06c691b6c074",
+      "helpHash": "a8c64eca08292b13fb08c6cb5e8337c114a36234bc847567e09546a7fa1122fe",
       "extraVsContract": [],
       "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
       "risk": "writes_local_config",
       "exposure": "tracked_only",
       "tier": "catalog",
       "summary": "Manage Grok worktree sessions."
+    },
+    "wrap": {
+      "commandPath": [
+        "wrap"
+      ],
+      "probedAt": "2026-07-13T07:43:59.480Z",
+      "available": true,
+      "existence": "present",
+      "discoveredFlags": [
+        "--debug",
+        "--debug-file",
+        "--leader-socket"
+      ],
+      "helpHash": "7c717195522c7f7fe0cb23dc504886fff2391f33444153b93737ee1ff8e11332",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
+      "risk": "destructive",
+      "exposure": "not_exposed",
+      "tier": "execute_candidate",
+      "summary": "Run an arbitrary command inside a local clipboard-forwarding PTY."
     }
   }
 }

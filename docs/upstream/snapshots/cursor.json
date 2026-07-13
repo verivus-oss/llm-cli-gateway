@@ -1,0 +1,378 @@
+{
+  "schemaVersion": "upstream-scan-snapshot.v2",
+  "cli": "cursor",
+  "fetchedAt": "2026-07-13T07:44:09.533Z",
+  "sources": [
+    {
+      "url": "https://cursor.com/cli",
+      "ok": true,
+      "status": 200,
+      "bytes": 194082,
+      "sha256": "2f6bed5032abc8448ebe6b7f1f42f73348ca00e7a4fffd3141f7cfce69322bd5",
+      "semantic": null
+    },
+    {
+      "url": "https://cursor.com/docs/cli/acp",
+      "ok": true,
+      "status": 200,
+      "bytes": 175840,
+      "sha256": "8ef0f4362baab82331087bf7f74a602af80d8af0bd41cd1224592a2eef86e752",
+      "semantic": null
+    },
+    {
+      "url": "https://cursor.com/docs/cli/reference/parameters",
+      "ok": true,
+      "status": 200,
+      "bytes": 168450,
+      "sha256": "07876663900026b2cdcc42abae40a2358495f6911e7c794cf1788ba6aef7bbea",
+      "semantic": null
+    }
+  ],
+  "helpSurface": {
+    "probedAt": "2026-07-13T07:44:09.194Z",
+    "available": true,
+    "version": "2026.07.09-a3815c0",
+    "targetVersion": "cursor-agent 2026.07.09-a3815c0",
+    "versionMatchesTarget": true,
+    "discoveredFlags": [
+      "--add-dir",
+      "--api-key",
+      "--approve-mcps",
+      "--auto-review",
+      "--continue",
+      "--force",
+      "--header",
+      "--list-models",
+      "--mode",
+      "--model",
+      "--output-format",
+      "--plan",
+      "--plugin-dir",
+      "--print",
+      "--resume",
+      "--sandbox",
+      "--skip-worktree-setup",
+      "--stream-partial-output",
+      "--trust",
+      "--version",
+      "--workspace",
+      "--worktree",
+      "--worktree-base",
+      "--yolo"
+    ],
+    "helpHash": "7eb895075f6d0b0ba06c7c152b72599d5285d5d0ff3d2008f4fc73ac6f8bfe6a",
+    "extraVsContract": [],
+    "missingFromBinary": [],
+    "arityMismatches": [],
+    "enumMismatches": []
+  },
+  "rootCommands": [
+    "about",
+    "agent",
+    "create-chat",
+    "generate-rule",
+    "help",
+    "install-shell-integration",
+    "login",
+    "logout",
+    "ls",
+    "mcp",
+    "models",
+    "resume",
+    "rule",
+    "status",
+    "uninstall-shell-integration",
+    "update",
+    "whoami",
+    "worker"
+  ],
+  "subcommands": {
+    "about": {
+      "commandPath": [
+        "about"
+      ],
+      "probedAt": "2026-07-13T07:44:04.434Z",
+      "available": true,
+      "existence": "present",
+      "discoveredFlags": [
+        "--format"
+      ],
+      "helpHash": "b2218aa0027830d508ebcf8f0ec216087ad1d45ccfcca840bf65e9c47be83446",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
+      "risk": "read_only",
+      "exposure": "tracked_only",
+      "tier": "diagnostic",
+      "summary": "Display Cursor Agent version, system, and account information."
+    },
+    "agent": {
+      "commandPath": [
+        "agent"
+      ],
+      "probedAt": "2026-07-13T07:44:04.772Z",
+      "available": true,
+      "existence": "present",
+      "discoveredFlags": [],
+      "helpHash": "d78871450c095967fbf3306dc2a0d990d3572fda0fbe59a9041ad2bd3ee30e0c",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
+      "risk": "executes_agent",
+      "exposure": "not_exposed",
+      "tier": "catalog",
+      "summary": "Start an interactive Cursor Agent session."
+    },
+    "create-chat": {
+      "commandPath": [
+        "create-chat"
+      ],
+      "probedAt": "2026-07-13T07:44:05.126Z",
+      "available": true,
+      "existence": "present",
+      "discoveredFlags": [],
+      "helpHash": "bb1bf15edf60529fc114c2d052ee51af13fba890393cb3a18d4fc84669a25621",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
+      "risk": "network",
+      "exposure": "not_exposed",
+      "tier": "catalog",
+      "summary": "Create a new Cursor chat and return its ID."
+    },
+    "generate-rule": {
+      "commandPath": [
+        "generate-rule"
+      ],
+      "probedAt": "2026-07-13T07:44:05.464Z",
+      "available": true,
+      "existence": "present",
+      "discoveredFlags": [],
+      "helpHash": "f746721f959a63eb73b76ae7f69ceda1ee9ccea895455ab8a35dc506fccfb4fb",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
+      "risk": "writes_local_config",
+      "exposure": "not_exposed",
+      "tier": "catalog",
+      "summary": "Generate a Cursor rule through interactive prompts."
+    },
+    "install-shell-integration": {
+      "commandPath": [
+        "install-shell-integration"
+      ],
+      "probedAt": "2026-07-13T07:44:05.804Z",
+      "available": true,
+      "existence": "present",
+      "discoveredFlags": [],
+      "helpHash": "c16fa7d283e01335c03ea7621b6e1731852df67fd927d6bd5897fe8a57e0eacb",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
+      "risk": "writes_local_config",
+      "exposure": "not_exposed",
+      "tier": "catalog",
+      "summary": "Install Cursor shell integration."
+    },
+    "login": {
+      "commandPath": [
+        "login"
+      ],
+      "probedAt": "2026-07-13T07:44:06.144Z",
+      "available": true,
+      "existence": "present",
+      "discoveredFlags": [],
+      "helpHash": "5e7ee70c2f31480821426bbedb7d03190c86e7a83a67f2307d03fdcd0b2e8cb4",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
+      "risk": "auth",
+      "exposure": "not_exposed",
+      "tier": "catalog",
+      "summary": "Authenticate with Cursor."
+    },
+    "logout": {
+      "commandPath": [
+        "logout"
+      ],
+      "probedAt": "2026-07-13T07:44:06.482Z",
+      "available": true,
+      "existence": "present",
+      "discoveredFlags": [],
+      "helpHash": "2dda398fefb29ad70073941c28b5609ba13f692801b6e59a335e8138d88216f8",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
+      "risk": "auth",
+      "exposure": "not_exposed",
+      "tier": "catalog",
+      "summary": "Clear Cursor authentication state."
+    },
+    "ls": {
+      "commandPath": [
+        "ls"
+      ],
+      "probedAt": "2026-07-13T07:44:06.818Z",
+      "available": true,
+      "existence": "present",
+      "discoveredFlags": [],
+      "helpHash": "7d402891d0e3611c81c09a8d50d379f1a53543b91dca7666279d3447a3c2e4a1",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
+      "risk": "executes_agent",
+      "exposure": "not_exposed",
+      "tier": "catalog",
+      "summary": "Resume a Cursor chat session."
+    },
+    "mcp": {
+      "commandPath": [
+        "mcp"
+      ],
+      "probedAt": "2026-07-13T07:44:07.151Z",
+      "available": true,
+      "existence": "present",
+      "discoveredFlags": [],
+      "helpHash": "46b02014ab142ac2da6a91bd49b6341d40c791a28fa481d30234103ddefa8fbb",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
+      "risk": "writes_local_config",
+      "exposure": "not_exposed",
+      "tier": "catalog",
+      "summary": "Manage Cursor MCP server configuration."
+    },
+    "models": {
+      "commandPath": [
+        "models"
+      ],
+      "probedAt": "2026-07-13T07:44:07.493Z",
+      "available": true,
+      "existence": "present",
+      "discoveredFlags": [],
+      "helpHash": "a1b96ddb2ccc205d9a6f41e0023e5b67a2a5a70d9bdf32bb353da38e7aad75c6",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
+      "risk": "read_only",
+      "exposure": "tracked_only",
+      "tier": "inspect",
+      "summary": "List Cursor account models."
+    },
+    "resume": {
+      "commandPath": [
+        "resume"
+      ],
+      "probedAt": "2026-07-13T07:44:07.831Z",
+      "available": true,
+      "existence": "present",
+      "discoveredFlags": [],
+      "helpHash": "edecbf8b8fbae84eb9afbb5a41084abda650cd0b57870ab4e6af57de25d785ff",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
+      "risk": "executes_agent",
+      "exposure": "not_exposed",
+      "tier": "catalog",
+      "summary": "Resume the latest Cursor chat."
+    },
+    "status": {
+      "commandPath": [
+        "status"
+      ],
+      "probedAt": "2026-07-13T07:44:08.168Z",
+      "available": true,
+      "existence": "present",
+      "discoveredFlags": [
+        "--format"
+      ],
+      "helpHash": "4c9f731ef5213fbe8b9f7fbfa25c377f04414a456c3e146ed27217fa2a3035ab",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
+      "risk": "read_only",
+      "exposure": "tracked_only",
+      "tier": "inspect",
+      "summary": "View Cursor authentication status."
+    },
+    "uninstall-shell-integration": {
+      "commandPath": [
+        "uninstall-shell-integration"
+      ],
+      "probedAt": "2026-07-13T07:44:08.512Z",
+      "available": true,
+      "existence": "present",
+      "discoveredFlags": [],
+      "helpHash": "e7eb143db16cf08e95e36751ded977ccdb71028ed294fcc7e86e3726c415736b",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
+      "risk": "writes_local_config",
+      "exposure": "not_exposed",
+      "tier": "catalog",
+      "summary": "Remove Cursor shell integration."
+    },
+    "update": {
+      "commandPath": [
+        "update"
+      ],
+      "probedAt": "2026-07-13T07:44:08.855Z",
+      "available": true,
+      "existence": "present",
+      "discoveredFlags": [],
+      "helpHash": "cac40e57ab6d9128e9e4ea3530724e09e46c3b23322e22e3ea9ada4e2916b34b",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
+      "risk": "updates_binary",
+      "exposure": "not_exposed",
+      "tier": "catalog",
+      "summary": "Update Cursor Agent."
+    },
+    "worker": {
+      "commandPath": [
+        "worker"
+      ],
+      "probedAt": "2026-07-13T07:44:09.194Z",
+      "available": true,
+      "existence": "present",
+      "discoveredFlags": [
+        "--auth-token-file",
+        "--data-dir",
+        "--debug",
+        "--idle-release-timeout",
+        "--label",
+        "--labels-file",
+        "--management-addr",
+        "--name",
+        "--pool",
+        "--pool-name",
+        "--single-use",
+        "--worker-dir"
+      ],
+      "helpHash": "6ece6d6e74cec5017afa031e3fee6cee14fcfcef85f911f5adf36216c5b2baf0",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
+      "risk": "starts_server",
+      "exposure": "not_exposed",
+      "tier": "catalog",
+      "summary": "Start a private Cursor cloud worker for local agent runs."
+    }
+  }
+}

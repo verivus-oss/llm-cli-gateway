@@ -370,12 +370,12 @@ Vibe-specific notes:
   `default | plan | accept-edits | auto-approve`; Vibe also accepts install-gated
   builtins (e.g. `lean`) and custom agents from `~/.vibe/agents`, so any name is
   passed through and Vibe validates availability. The gateway's
-  programmatic-mode default is `auto-approve`; pick a stricter mode
-  explicitly if you need approval gates.
-- **`allowedTools` is allow-list only** — the gateway emits one
-  `--enabled-tools <tool>` flag per entry. `disallowedTools` is accepted in
-  the schema for caller-side parity but is silently ignored at the CLI
-  boundary (a `logger.info` warning records the no-op).
+  programmatic-mode default is `accept-edits`; use `auto-approve` only as an
+  explicit opt-in.
+- **Tool controls use Vibe's native flags.** The gateway emits one
+  `--enabled-tools <tool>` flag per `allowedTools` entry and one
+  `--disabled-tools <tool>` flag per `disallowedTools` entry. Vibe applies
+  disabled tools after enabled-tool filtering.
 - **No self-update**: `cli_upgrade --cli mistral` detects whether you used
   pip / uv / brew and dispatches the matching upgrade command. Running
   `vibe update` is not a thing.
@@ -992,9 +992,9 @@ Run a Mistral Vibe agentic coding request. Like `grok_request` in shape, but wit
 
 - `model` (string, optional): Vibe model alias (for example `mistral-medium-3.5` or `latest`). The resolved value is injected via the `VIBE_ACTIVE_MODEL` environment variable; omit it to let the gateway discover Vibe config and avoid stale hardcoded defaults.
 - `transport` (string, optional): `"cli"` (default) runs the Vibe CLI; `"acp"` routes through Vibe's native `vibe-acp` transport when `[acp].enabled` and the provider's `runtime_enabled` are set (fails closed otherwise). Sync-only: `mistral_request_async` always runs the CLI transport and does not accept `transport`
-- `permissionMode`: the Vibe `--agent` name — builtins `default | plan | accept-edits | auto-approve`, or any install-gated/custom agent. Emitted as `--agent <name>`. Defaults to `auto-approve` in programmatic mode.
-- `allowedTools` (string[], optional): One `--enabled-tools <tool>` flag per entry (allow-list only).
-- `disallowedTools` (string[], optional): Accepted for parity with the other providers; ignored at the CLI boundary with a logged warning.
+- `permissionMode`: the Vibe `--agent` name: builtins `default | plan | accept-edits | auto-approve`, or any install-gated/custom agent. Emitted as `--agent <name>`. Defaults to `accept-edits` in programmatic mode; use `auto-approve` only as an explicit opt-in.
+- `allowedTools` (string[], optional): One `--enabled-tools <tool>` flag per entry.
+- `disallowedTools` (string[], optional): One `--disabled-tools <tool>` flag per entry, applied after the enabled-tool filter.
 - `outputFormat` (string, optional): Vibe 2.x values are `"text"`, `"json"`, or `"streaming"`; legacy aliases `"plain"` and `"stream-json"` are accepted and normalized before spawn.
 - `sessionId` / `resumeLatest` / `createNewSession`: standard session controls. Current Vibe defaults session logging to enabled; if an older config has `[session_logging] enabled = false`, `doctor --json` surfaces an actionable next-action.
 - `trust` (boolean, optional): Emit `--trust` so Vibe trusts the cwd for this invocation only (not persisted; skips the interactive trust prompt)
@@ -1023,7 +1023,7 @@ Run a Cognition Devin CLI request synchronously (headless print mode, `devin -p`
 - `model` (string, optional): Model name or alias (e.g. `opus`, `latest`)
 - `transport` (string, optional): `"cli"` (default) runs the Devin CLI; `"acp"` routes through Devin's native `devin acp` transport when `[acp].enabled` and the provider's `runtime_enabled` are set (fails closed otherwise). Sync-only: `devin_request_async` always runs the CLI transport and accepts neither `transport` nor `agentType`
 - `agentType` (string, optional): ACP agent variant for `transport: "acp"` (`devin acp --agent-type`): `"summarizer"` (no tools, text summary) or `"review"` (read-only plus shell code-review); ignored for the CLI transport
-- `permissionMode` (string, optional): Devin CLI permission mode (`--permission-mode`): `auto` (auto-approves read-only tools), `smart` (also auto-runs actions a fast model judges safe), `dangerous` (auto-approves all). Omit to use Devin's headless default
+- `permissionMode` (string, optional): Devin CLI permission mode (`--permission-mode`): `auto` (auto-approves read-only tools), `accept-edits` (also auto-approves workspace edits), `smart` (also auto-runs actions a fast model judges safe), `dangerous` (auto-approves all). Omit to use Devin's headless default
 - `promptFile` (string, optional): Load the initial prompt from a file (`--prompt-file`)
 - `sessionId` (string, optional): Devin session ID to resume (`--resume <id>`). The `gw-*` id minted for a brand-new session is not resumable via `sessionId`; continue with `resumeLatest: true`
 - `resumeLatest` (boolean, optional): Resume the most recent Devin session in cwd (`--continue`)

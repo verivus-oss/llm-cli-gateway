@@ -151,7 +151,10 @@ describe("provider tool capabilities", () => {
     expect(capabilities.codex.controls.allowlist.supported).toBe(false);
     expect(capabilities.gemini.controls.allowlist.behavior).toContain("rejected");
     expect(capabilities.grok.controls.denylist.cliFlag).toBe("--disallowed-tools");
-    expect(capabilities.mistral.controls.denylist.behavior).toContain("ignored");
+    expect(capabilities.mistral.controls.denylist).toMatchObject({
+      supported: true,
+      cliFlag: "--disabled-tools",
+    });
     expect(capabilities.grok_api.providerKind).toBe("api");
     expect(capabilities.grok_api.gatewayRequestTools).toEqual([]);
     expect(capabilities.cursor.controls.permissionMode.behavior).toContain("approvalStrategy");
@@ -314,7 +317,11 @@ describe("provider tool capabilities", () => {
 
     expect(capabilities.mistral?.controls).toMatchObject({
       allowlist: { supported: true, requestField: "allowedTools" },
-      denylist: { supported: false, requestField: "disallowedTools" },
+      denylist: {
+        supported: true,
+        requestField: "disallowedTools",
+        cliFlag: "--disabled-tools",
+      },
       permissionMode: { supported: true, requestField: "permissionMode" },
       outputFormat: { supported: true, requestField: "outputFormat" },
       trust: { supported: true, requestField: "trust" },
@@ -327,14 +334,17 @@ describe("provider tool capabilities", () => {
       approvalAndSandboxControls: { supported: true },
       costAndLoopControls: { supported: true },
       workspaceAndWorktreeControls: { supported: true },
+      toolAllowDenyControls: { supported: true },
       enabledToolAllowlist: { supported: true },
       trustControl: { supported: true },
     });
     expect(capabilities.mistral?.unsupportedInputs).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ input: "disallowedTools", behavior: "ignored" }),
         expect.objectContaining({ input: "effort/reasoningEffort", behavior: "not_supported" }),
       ])
+    );
+    expect(capabilities.mistral?.unsupportedInputs).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ input: "disallowedTools" })])
     );
   });
 

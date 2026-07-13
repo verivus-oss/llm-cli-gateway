@@ -17,7 +17,7 @@ const RUNTIME = {} as never;
 function prep(params: {
   prompt?: string;
   model?: string;
-  permissionMode?: "auto" | "smart" | "dangerous";
+  permissionMode?: "auto" | "accept-edits" | "smart" | "dangerous";
   promptFile?: string;
   optimizePrompt?: boolean;
 }): { args: string[] } | { content: unknown } {
@@ -83,8 +83,9 @@ describe("Slice D0 prepareDevinRequest — headless argv", () => {
     expect(args).not.toContain("--permission-mode");
   });
 
-  // Verified against devin 2026.7.23 (3bd47f77): modes are `auto`, `smart`, `dangerous`.
-  it.each(["auto", "smart", "dangerous"] as const)(
+  // `accept-edits` auto-approves workspace edits while retaining approval for
+  // more dangerous operations. Keep all installed CLI modes wired verbatim.
+  it.each(["auto", "accept-edits", "smart", "dangerous"] as const)(
     "forwards the CLI-valid permission-mode %s verbatim",
     mode => {
       const args = argsOf(prep({ prompt: "x", permissionMode: mode }));

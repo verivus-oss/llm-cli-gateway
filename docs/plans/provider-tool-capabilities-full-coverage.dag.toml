@@ -162,7 +162,7 @@ must_cover = [
   "mistral_request_async",
   "model/default/env alias discovery via VIBE_ACTIVE_MODEL and ~/.vibe/config.toml",
   "allowedTools via --enabled-tools",
-  "disallowedTools accepted but ignored",
+  "disallowedTools via --disabled-tools",
   "local ~/.vibe/skills discovery if present",
   "agent modes default/plan/accept-edits/auto-approve/chat/explore/lean",
   "outputFormat text/json/streaming aliases",
@@ -545,19 +545,18 @@ action = """
 Fill Mistral Vibe capability coverage:
 
   - gatewayRequestTools: mistral_request, mistral_request_async.
-  - controls: allowedTools, permissionMode/agent mode, outputFormat, trust,
+  - controls: allowedTools, disallowedTools, permissionMode/agent mode, outputFormat, trust,
     maxTurns, maxPrice, maxTokens, workingDir, addDir, workspace, worktree.
   - features:
       nativeSkills=true when ~/.vibe/skills exists,
       enabledToolAllowlist=true,
-      denylist=false/ignored,
+      toolAllowDenyControls=true,
       sessionContinuity=true,
       workspace=true,
       costControls=true,
       loopControls=true,
       trustControl=true.
   - unsupportedInputs:
-      disallowedTools ignored,
       effort/reasoningEffort rejected/not supported,
       mcpServers approval-tracking-only; not Vibe config mutation.
   - configSurfaces:
@@ -566,9 +565,9 @@ Fill Mistral Vibe capability coverage:
 """
 idempotent = false
 validation = """
-Mistral-specific tests assert disallowedTools is represented as ignored, cost
-controls are represented, and active-model config source is included without
-secret/env leakage. Existing Mistral handler tests still pass.
+Mistral-specific tests assert repeated --disabled-tools emission, cost controls,
+and active-model config source without secret/env leakage. Existing Mistral
+handler tests still pass.
 """
 
 # ===========================================================================
@@ -695,7 +694,7 @@ Add or extend tests:
   - doctor test for compact provider_capabilities summary.
   - regression test: Grok Imagine fixture must surface image_gen and image_edit.
   - regression test: Gemini unsupported fields are reported as rejected.
-  - regression test: Mistral disallowedTools is reported as ignored.
+  - regression test: Mistral disallowedTools is emitted as --disabled-tools.
   - regression test: Codex allowedTools/disallowedTools are reported as absent,
     not silently supported.
 """

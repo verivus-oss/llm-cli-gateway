@@ -234,6 +234,13 @@ describe("request-helpers", () => {
       ]);
     });
 
+    it("emits --permission-mode manual", () => {
+      expect(resolveClaudePermissionFlags({ permissionMode: "manual" }).args).toEqual([
+        "--permission-mode",
+        "manual",
+      ]);
+    });
+
     it("emits --permission-mode plan", () => {
       expect(resolveClaudePermissionFlags({ permissionMode: "plan" }).args).toEqual([
         "--permission-mode",
@@ -277,14 +284,15 @@ describe("request-helpers", () => {
       expect(result.warning).toMatch(/permissionMode wins/);
     });
 
-    it("exposes a stable enum with the six documented values", () => {
+    it("keeps default as a gateway pseudo-mode and includes all CLI wire modes", () => {
       expect(CLAUDE_PERMISSION_MODES).toEqual([
         "default",
         "acceptEdits",
-        "plan",
         "auto",
-        "dontAsk",
         "bypassPermissions",
+        "manual",
+        "dontAsk",
+        "plan",
       ]);
     });
   });
@@ -436,6 +444,24 @@ describe("request-helpers", () => {
       const { prepareMistralRequest } = await import("../request-helpers.js");
       const result = prepareMistralRequest({ prompt: "hi" });
       expect(result.env).toEqual({});
+    });
+
+    it("emits each disallowed tool as a Vibe --disabled-tools pair", async () => {
+      const { prepareMistralRequest } = await import("../request-helpers.js");
+      const result = prepareMistralRequest({
+        prompt: "hi",
+        disallowedTools: ["shell", "network"],
+      });
+      expect(result.args).toEqual([
+        "-p",
+        "hi",
+        "--agent",
+        "accept-edits",
+        "--disabled-tools",
+        "shell",
+        "--disabled-tools",
+        "network",
+      ]);
     });
   });
 });

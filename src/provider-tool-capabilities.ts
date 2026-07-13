@@ -1014,7 +1014,7 @@ const TOOL_CONTROLS: Record<KnownProviderCapabilityId, ProviderCapabilityStaticD
     providerKind: "cli",
     gatewayRequestTools: ["mistral_request", "mistral_request_async"],
     summary:
-      "Mistral Vibe owns its runtime tool catalog; the gateway can pass Vibe enabled-tool controls and reports local skills if present.",
+      "Mistral Vibe owns its runtime tool catalog; the gateway can pass Vibe enabled- and disabled-tool controls and reports local skills if present.",
     controls: {
       allowlist: {
         supported: true,
@@ -1023,9 +1023,10 @@ const TOOL_CONTROLS: Record<KnownProviderCapabilityId, ProviderCapabilityStaticD
         behavior: "Each entry is emitted as a separate Vibe enabled-tool flag.",
       },
       denylist: {
-        supported: false,
+        supported: true,
         requestField: "disallowedTools",
-        behavior: "Accepted for caller parity but ignored because Vibe has no deny-list flag.",
+        cliFlag: "--disabled-tools",
+        behavior: "Each entry is emitted as a separate Vibe disabled-tool flag.",
       },
       mcpServers: {
         supported: false,
@@ -1077,15 +1078,11 @@ const TOOL_CONTROLS: Record<KnownProviderCapabilityId, ProviderCapabilityStaticD
       approvalAndSandboxControls: true,
       costAndLoopControls: true,
       workspaceAndWorktreeControls: true,
+      toolAllowDenyControls: true,
       enabledToolAllowlist: true,
       trustControl: true,
     }),
     unsupportedInputs: [
-      {
-        input: "disallowedTools",
-        behavior: "ignored",
-        details: "Accepted for caller parity but ignored because Vibe has no deny-list flag.",
-      },
       {
         input: "mcpServers",
         behavior: "approval_tracking_only",
@@ -1207,7 +1204,7 @@ const TOOL_CONTROLS: Record<KnownProviderCapabilityId, ProviderCapabilityStaticD
         requestField: "permissionMode",
         cliFlag: "--permission-mode",
         behavior:
-          "Maps to Devin CLI --permission-mode: auto auto-approves read-only tools; smart additionally auto-runs actions a fast model judges safe; dangerous auto-approves all.",
+          "Maps to Devin CLI --permission-mode: auto auto-approves read-only tools; accept-edits also auto-approves workspace edits; smart additionally auto-runs actions a fast model judges safe; dangerous auto-approves all.",
       },
       promptControl: {
         supported: true,

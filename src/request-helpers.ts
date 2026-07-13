@@ -7,6 +7,7 @@ import { tmpdir } from "os";
 import { join, isAbsolute } from "path";
 import { randomUUID } from "crypto";
 import { z } from "zod/v3";
+import { CLAUDE_WIRE_PERMISSION_MODES } from "./upstream-contracts.js";
 
 /** Prefix for gateway-generated session IDs. Enforces provenance structurally. */
 export const GATEWAY_SESSION_PREFIX = "gw-";
@@ -226,9 +227,8 @@ export interface PrepareMistralRequestInput {
   permissionMode?: MistralAgentMode;
   allowedTools?: string[];
   /**
-   * Vibe has no flag to deny tools; this is accepted in the schema for caller
-   * parity with Grok/Claude but produces no CLI flag. The caller is expected to
-   * emit a `logger.warn` when this is non-empty.
+   * Vibe 2.19.1 supports repeatable `--disabled-tools <tool>` entries. They
+   * are applied after the enabled-tool filter when both lists are supplied.
    */
   disallowedTools?: string[];
   /**
@@ -270,7 +270,6 @@ export interface PrepareMistralRequestInput {
 export interface PrepareMistralRequestResult {
   args: string[];
   env: Record<string, string>;
-  ignoredDisallowedTools: boolean;
 }
 
 /**
@@ -278,10 +277,10 @@ export interface PrepareMistralRequestResult {
  *
  * - Model is selected via `VIBE_ACTIVE_MODEL` env var (NOT a `--model` flag).
  * - Permission mode emits `--agent <mode>` (defaults to `accept-edits` when unset).
- * - Allowed tools emit `--enabled-tools <tool>` once per tool (allowlist only).
+ * - Allowed and disallowed tools emit `--enabled-tools <tool>` and
+ *   `--disabled-tools <tool>` once per tool.
  * - Output format emits `--output <text|json|streaming>` (legacy gateway
  *   aliases `plain` and `stream-json` are normalized before spawn).
- * - Disallowed tools are accepted but ignored at the CLI boundary.
  */
 export function prepareMistralRequest(
   input: PrepareMistralRequestInput
@@ -309,6 +308,12 @@ export function prepareMistralRequest(
       args.push("--enabled-tools", tool);
     }
   }
+  if (input.disallowedTools && input.disallowedTools.length > 0) {
+    sanitizeCliArgValues(input.disallowedTools, "disallowedTools");
+    for (const tool of input.disallowedTools) {
+      args.push("--disabled-tools", tool);
+    }
+  }
 
   if (input.trust) {
     args.push("--trust");
@@ -332,9 +337,7 @@ export function prepareMistralRequest(
     }
   }
 
-  const ignoredDisallowedTools = Boolean(input.disallowedTools && input.disallowedTools.length > 0);
-
-  return { args, env, ignoredDisallowedTools };
+  return { args, env };
 }
 
 function normalizeMistralOutputFormat(format: string): string {
@@ -348,18 +351,10 @@ function normalizeMistralOutputFormat(format: string): string {
 //──────────────────────────────────────────────────────────────────────────────
 
 /**
- * Claude `--permission-mode` values. `default` is a no-op (no flag emitted) —
- * matches the CLI's behavior when the flag is absent, and avoids hard-coding an
- * undocumented literal.
+ * Gateway-facing Claude permission modes. `default` is a gateway-only no-op
+ * (no flag emitted); all other values are sourced from the upstream contract.
  */
-export const CLAUDE_PERMISSION_MODES = [
-  "default",
-  "acceptEdits",
-  "plan",
-  "auto",
-  "dontAsk",
-  "bypassPermissions",
-] as const;
+export const CLAUDE_PERMISSION_MODES = ["default", ...CLAUDE_WIRE_PERMISSION_MODES] as const;
 export type ClaudePermissionMode = (typeof CLAUDE_PERMISSION_MODES)[number];
 
 export interface ClaudePermissionFlagsInput {

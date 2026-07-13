@@ -1,0 +1,4 @@
+interface:
+  display_name: "Cursor Provider Contract"
+  short_description: "Maintain Cursor CLI contracts"
+  default_prompt: "Use $provider-cursor to check Cursor CLI contract drift."

@@ -249,14 +249,23 @@ Commands:
         o,
       ])
     );
-    // Mutation probe: restore the `session` family (a codex subcommand that does
-    // not exist) -> resume/archive/delete/unarchive never project -> red.
-    expect(byId.get("resume")).toMatchObject({ available: true, mutating: true });
+    // `resume` launches an agent session, so the upstream contract keeps it
+    // catalogued but not exposed as an admin operation.
+    expect(byId.get("resume")).toMatchObject({
+      available: false,
+      exposure: "not_exposed",
+      risk: "executes_agent",
+      mutating: false,
+    });
+    // Archive/unarchive stay approval-gated, but delete is catalog-only: an
+    // explicit contract `not_exposed` ceiling must override the generic admin
+    // family declaration rather than reopening a destructive command.
     expect(byId.get("archive")).toMatchObject({ available: true, mutating: true });
     expect(byId.get("delete")).toMatchObject({
-      available: true,
+      available: false,
+      exposure: "not_exposed",
       risk: "destructive",
-      mutating: true,
+      mutating: false,
     });
     expect(byId.get("unarchive")).toMatchObject({ available: true, mutating: true });
     // `fork` is executes_agent per the upstream contract, so it stays NOT exposed:

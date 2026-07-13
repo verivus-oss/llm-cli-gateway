@@ -76,8 +76,11 @@ describe("devin argv golden (Phase 4 Part B)", () => {
     expect(valueAfter(args, "--agent-config")).toBe("/tmp/agent.toml");
   });
 
-  it("permission modes auto / smart emit verbatim", () => {
+  it("permission modes auto / accept-edits / smart emit verbatim", () => {
     expect(valueAfter(argsFor({ permissionMode: "auto" }), "--permission-mode")).toBe("auto");
+    expect(valueAfter(argsFor({ permissionMode: "accept-edits" }), "--permission-mode")).toBe(
+      "accept-edits"
+    );
     expect(valueAfter(argsFor({ permissionMode: "smart" }), "--permission-mode")).toBe("smart");
   });
 
