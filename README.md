@@ -97,7 +97,7 @@ The next documentation focus is provider-specific skill and DAG-TOML pairs for e
 - CI runs build, lint, format, tests, package checks, and npm audit.
 - Security CI runs actionlint, zizmor, shellcheck, typos, osv-scanner, gitleaks, and lychee.
 - GitHub release installer artifacts are checksummed and signed with Sigstore keyless signing.
-- npm releases use a generated prod-only shrinkwrap and release security audit; the publish token is fetched at runtime from Azure Key Vault through GitHub OIDC to Entra.
+- npm releases use a generated prod-only shrinkwrap and release security audit; GitHub Actions Trusted Publishing exchanges the job's OIDC identity for short-lived npm publish credentials.
 - The npm package intentionally ships a generated, prod-only `npm-shrinkwrap.json` so registry installs resolve the audited release tree. Release gates regenerate it from `package-lock.json`, compare for parity, and run a registry-fidelity consumer install before publishing.
 - Socket behavioural alerts are documented in [`socket.yml`](./socket.yml) and under "Security Considerations" below. `shellAccess` and `shrinkwrap` are reviewed package capabilities/configuration for this CLI appliance, not hidden install behaviour.
 
@@ -1653,7 +1653,7 @@ The gateway supports concurrent requests across different CLIs. Each request spa
 - **Command Execution**: Uses `spawn` with separate arguments (not shell execution)
 - **No Eval**: No dynamic code evaluation in our source (see "Socket alerts" below for the transitive `ajv` codegen case)
 - **Sandboxing**: Consider running in containers for production use
-- **npm publish control**: npm releases are gated by the generated prod-only shrinkwrap, release security audit, packed-consumer checks, and a publish token fetched at runtime from Azure Key Vault through GitHub OIDC to Entra
+- **npm publish control**: npm releases are gated by the generated prod-only shrinkwrap, release security audit, packed-consumer checks, and GitHub Actions Trusted Publishing with short-lived OIDC-derived npm publish credentials
 - **Release signing**: GitHub release installer artifacts are signed with Sigstore keyless signing; verify `SHA256SUMS.sigstore.json` before trusting the checksum file
 
 ### Socket alerts — context for reviewers

@@ -24,29 +24,46 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          # Drop the auth token from .git/config after checkout (zizmor
-          # artipacked). `npm publish` uses NODE_AUTH_TOKEN, not git
-          # credentials, so this is safe.
+          # Publishing uses the job's short-lived GitHub OIDC identity, so
+          # git credentials are unnecessary.
           persist-credentials: false
 
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6 # zizmor: ignore[cache-poisoning]
         # Why the ignore: zizmor's cache-poisoning audit flags setup-node
         # on any `release: published` trigger regardless of whether cache
-        # is enabled. We do NOT set `cache:` here — no cache is read or
-        # written — so the attack vector (poisoned cache restored during
-        # publish) does not exist. The ignore is targeted and the rationale
-        # is documented inline.
+        # is enabled. Package-manager caching is explicitly disabled, so the
+        # attack vector (a poisoned cache restored during publish) does not
+        # exist. The ignore is targeted and the rationale is documented inline.
         with:
           node-version: 24
           registry-url: "https://registry.npmjs.org"
+          package-manager-cache: false
 
-      - name: Fetch npm publish token from Azure Key Vault
-        env:
-          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
-          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
-          AZURE_KEY_VAULT_NAME: ${{ vars.AZURE_KEY_VAULT_NAME }}
-          AZURE_KEY_VAULT_NPM_TOKEN_SECRET_NAME: ${{ vars.AZURE_KEY_VAULT_NPM_TOKEN_SECRET_NAME }}
-        run: node .github/scripts/fetch-azure-keyvault-secrets.mjs NODE_AUTH_TOKEN="${AZURE_KEY_VAULT_NPM_TOKEN_SECRET_NAME}"
+      # The npm trusted-publisher record binds this GitHub-hosted job to this
+      # package, workflow filename, and npm-publish environment. Do not rename
+      # the workflow or environment without updating that npm configuration.
+      # Keep publish-token environment variables unset so npm exchanges the
+      # GitHub OIDC identity for short-lived publish credentials.
+      - name: Verify trusted-publishing prerequisites
+        run: |
+          test -z "${NODE_AUTH_TOKEN:-}"
+          test -z "${NPM_TOKEN:-}"
+          test -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}"
+          test -n "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}"
+          npm_version="$(npm --version)"
+          node -e '
+            const version = process.argv[1];
+            const [major, minor, patch] = version.split(".").map(Number);
+            if (![major, minor, patch].every(Number.isInteger)) {
+              throw new Error(`Unexpected npm version: ${version}`);
+            }
+            if (major < 11 || (major === 11 && (minor < 5 || (minor === 5 && patch < 1)))) {
+              throw new Error(`npm ${version} is too old for trusted publishing (need >= 11.5.1)`);
+            }
+          ' "$npm_version"
+
+      - name: Verify npm OIDC exchange
+        run: node .github/scripts/verify-npm-oidc.mjs
 
       - run: npm ci --ignore-scripts --no-audit --no-fund
       - run: npm run build
@@ -88,12 +105,12 @@ jobs:
       - name: Verify package contents
         run: npm pack --dry-run
 
-      - name: Verify npm auth (dry run)
+      - name: Verify npm package dry run
         if: ${{ inputs['dry-run'] }}
         run: |
-          # A dry-run against the real version still fails once that version is
-          # already published, so exercise auth and publish permissions against
-          # a throwaway prerelease in an isolated temp copy instead.
+          # The explicit OIDC exchange step above validates trusted publishing.
+          # This dry-run validates a throwaway prerelease package without a
+          # registry write, avoiding a collision with an already-published version.
           tmpdir="$(mktemp -d)"
           trap 'rm -rf "${tmpdir}"' EXIT
           rsync -a --exclude .git ./ "${tmpdir}/"
