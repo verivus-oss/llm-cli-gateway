@@ -151,5 +151,9 @@
   "directories": {
     "doc": "docs"
   },
-  "types": "./dist/index.d.ts"
+  "types": "./dist/index.d.ts",
+  "allowScripts": {
+    "better-sqlite3@12.11.1": true,
+    "fsevents": false
+  }
 }

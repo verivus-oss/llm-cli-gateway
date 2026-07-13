@@ -74,3 +74,33 @@ jobs:
         run: |
           timeout 5 node dist/index.js < /dev/null 2>/dev/null || true
           echo "Server startup smoke test passed"
+
+  npm12-install-policy:
+    # build-and-test owns the full test suite and security audit. This job
+    # isolates npm 12's clean-install lifecycle-script policy.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 24
+          cache: false
+      # npm 12 blocks lifecycle scripts unless package.json explicitly approves
+      # them. The pinned better-sqlite3 approval is required only by legacy
+      # SQLite migration and WAL compatibility tests. fsevents stays denied:
+      # it is an optional Vite watcher optimization, not a test requirement.
+      # A better-sqlite3 update must be explicitly re-reviewed and re-approved.
+      # --no-audit is deliberate: build-and-test runs security:audit; this job
+      # must isolate install-script policy failures from audit network noise.
+      - name: Clean install with npm 12 script policy
+        run: npx --yes npm@12.0.1 ci --strict-allow-scripts --no-audit --no-fund
+      - name: Verify approved native test fixture
+        run: ./node_modules/.bin/vitest run src/__tests__/flight-recorder.test.ts
+      # Keep the platform-specific simulation separate from the Linux native
+      # fixture above, so each policy assertion has a clear failure mode.
+      - name: Verify macOS policy has no unreviewed lifecycle scripts
+        run: npx --yes npm@12.0.1 ci --dry-run --strict-allow-scripts --os=darwin --no-audit --no-fund
