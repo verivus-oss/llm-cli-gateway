@@ -20,6 +20,10 @@ import {
 import type { CliContract } from "../upstream-contracts.js";
 import { CLI_TYPES, type CliType } from "../provider-types.js";
 
+// The full seven-provider command catalog intentionally remains compact; added
+// upstream coverage exceeds 12 KiB without including raw help text.
+const COMPACT_PROVIDER_CATALOG_MAX_BYTES = 16 * 1024;
+
 describe("upstream CLI contracts", () => {
   it("accepts a valid Claude argv emitted by the gateway", () => {
     // Claude CLI 2.x requires --verbose alongside --print + stream-json;
@@ -248,7 +252,7 @@ describe("upstream CLI contracts", () => {
     const compactCatalog = buildProviderSubcommandsCompactCatalog();
     const catalogJson = JSON.stringify(compactCatalog);
     expect(catalog.length).toBeGreaterThan(50);
-    expect(catalogJson.length).toBeLessThan(12 * 1024);
+    expect(catalogJson.length).toBeLessThan(COMPACT_PROVIDER_CATALOG_MAX_BYTES);
     expect(catalogJson).not.toMatch(/Usage:|Options:/);
     expect(compactCatalog.columns).toContain("resourceUri");
     expect(compactCatalog.columns as readonly string[]).not.toContain("flags");
@@ -338,7 +342,7 @@ describe("upstream CLI contracts", () => {
       provider: "grok",
     } as never)) as { content: { text: string }[] };
     const listText = listResult.content[0].text;
-    expect(listText.length).toBeLessThan(12 * 1024);
+    expect(listText.length).toBeLessThan(COMPACT_PROVIDER_CATALOG_MAX_BYTES);
     expect(listText).not.toMatch(/Usage:|Options:/);
     expect(listText).not.toContain('"flags"');
 
@@ -380,7 +384,7 @@ describe("upstream CLI contracts", () => {
     const provider = new ResourceProvider(sessionManagerStub as never, new PerformanceMetrics());
 
     const catalog = await provider.readResource("provider-subcommands://catalog");
-    expect(catalog?.text.length).toBeLessThan(12 * 1024);
+    expect(catalog?.text.length).toBeLessThan(COMPACT_PROVIDER_CATALOG_MAX_BYTES);
     expect(catalog?.text).not.toMatch(/Usage:|Options:/);
 
     const detail = await provider.readResource("provider-subcommands://grok/agent/serve");
@@ -713,11 +717,11 @@ Options:
       expect((ACP_ENTRYPOINT_CONTRACTS.claude.adapterCandidates ?? []).length).toBeGreaterThan(0);
     });
 
-    it("keeps agy on the watchlist with no ACP surface at agy 1.1.0", () => {
+    it("keeps agy on the watchlist with no ACP surface at agy 1.1.1", () => {
       const agy = ACP_ENTRYPOINT_CONTRACTS.gemini;
       expect(agy.status).toBe("absent_watchlist");
       expect(agy.executable).toBe("agy");
-      expect(agy.targetVersion).toContain("1.1.0");
+      expect(agy.targetVersion).toContain("1.1.1");
       expect(agy.entrypointArgs).toEqual([]);
       expect(agy.probeArgs).toEqual([]);
     });

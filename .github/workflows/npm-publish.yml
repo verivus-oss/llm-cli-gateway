@@ -57,6 +57,7 @@ jobs:
           test -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}"
           test -n "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}"
           npm_version="$(npm --version)"
+          # shellcheck disable=SC2016
           node -e '
             const version = process.argv[1];
             const [major, minor, patch] = version.split(".").map(Number);

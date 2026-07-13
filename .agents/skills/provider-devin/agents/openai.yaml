@@ -1,0 +1,4 @@
+interface:
+  display_name: "Devin Provider Contract"
+  short_description: "Maintain Devin CLI contracts"
+  default_prompt: "Use $provider-devin to check Devin CLI contract drift."

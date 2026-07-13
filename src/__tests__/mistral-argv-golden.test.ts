@@ -3,8 +3,9 @@
  *
  * Locks the EXACT `prepareMistralRequest(params).args` emission for every wired
  * `must_cover` flag: -p (--prompt), --output, --agent (permissionMode /
- * auto-approve alias), --enabled-tools (allowedTools), --trust, --max-turns,
- * --max-price, --max-tokens, --workdir (workingDir), --add-dir. Every flag
+ * auto-approve alias), --enabled-tools (allowedTools), --disabled-tools
+ * (disallowedTools), --trust, --max-turns, --max-price, --max-tokens, --workdir
+ * (workingDir), --add-dir. Every flag
  * traces to `vibe --help` in /tmp/ffci-help/vibe_--help.txt.
  *
  * Sync/async parity: both `mistral_request` and `mistral_request_async` build
@@ -74,6 +75,7 @@ describe("mistral argv golden (Phase 4 Part B)", () => {
       permissionMode: "accept-edits",
       outputFormat: "json",
       allowedTools: ["bash", "grep"],
+      disallowedTools: ["network", "shell"],
       trust: true,
       maxTurns: 7,
       maxPrice: 1.5,
@@ -88,6 +90,11 @@ describe("mistral argv golden (Phase 4 Part B)", () => {
     const firstTool = args.indexOf("--enabled-tools");
     expect(args[firstTool + 1]).toBe("bash");
     expect(args[firstTool + 3]).toBe("grep");
+    expect(count(args, "--disabled-tools")).toBe(2);
+    const firstDisabledTool = args.indexOf("--disabled-tools");
+    expect(args[firstDisabledTool + 1]).toBe("network");
+    expect(args[firstDisabledTool + 3]).toBe("shell");
+    expect(firstDisabledTool).toBeGreaterThan(args.lastIndexOf("--enabled-tools"));
     expect(count(args, "--trust")).toBe(1);
     expect(valueAfter(args, "--max-turns")).toBe("7");
     expect(valueAfter(args, "--max-price")).toBe("1.5");

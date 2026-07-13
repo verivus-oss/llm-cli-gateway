@@ -70,26 +70,29 @@ load-bearing gateway integration point.
 - **Read-only**: the gateway never writes to `~/.vibe/config.toml`. The
   remediation is surfaced as guidance only.
 
-### 2.3 `--agent <mode>` enum (no `--always-approve`)
+### 2.3 `--agent <name>` selector (no `--always-approve`)
 
-- **Upstream**: Vibe's agent mode is selected by `--agent
-default|plan|accept-edits|auto-approve|chat|explore|lean`. There is no
-  Grok-style `--always-approve` boolean.
-- **Gateway impact**: `permissionMode` is a typed enum in `mistral_request` /
-  `mistral_request_async`. See `MISTRAL_AGENT_MODES` and `prepareMistralRequest`
-  in [`src/request-helpers.ts`](../../src/request-helpers.ts).
-- **Programmatic default**: `auto-approve`. The gateway **always** emits
+- **Upstream**: Vibe's agent is selected by `--agent <name>`. It accepts the
+  documented built-ins (`default`, `plan`, `accept-edits`, `auto-approve`),
+  install-gated agents such as `lean`, and custom agents. There is no Grok-style
+  `--always-approve` boolean.
+- **Gateway impact**: `permissionMode` is an arbitrary agent name in
+  `mistral_request` / `mistral_request_async`; the gateway forwards it to Vibe,
+  which validates availability. See `MISTRAL_BUILTIN_AGENT_MODES` and
+  `prepareMistralRequest` in [`src/request-helpers.ts`](../../src/request-helpers.ts).
+- **Programmatic default**: `accept-edits`. The gateway **always** emits
   `--agent` explicitly; omitting it would let Vibe pick its own default,
-  which could surprise programmatic callers (e.g. validation jobs).
+  which could surprise programmatic callers. `auto-approve` remains an
+  explicit opt-in.
 
-### 2.4 `--enabled-tools` allowlist-only (no deny-list flag)
+### 2.4 `--enabled-tools` and `--disabled-tools` controls
 
-- **Upstream**: Vibe accepts `--enabled-tools <tool>` once per allowed tool.
-  There is no `--disabled-tools` or `--disallowed-tools` flag.
+- **Upstream**: Vibe accepts repeated `--enabled-tools <tool>` and
+  `--disabled-tools <tool>` entries. Disabled tools apply after enabled-tool
+  filtering.
 - **Gateway impact**: `allowedTools` emits one `--enabled-tools` per entry;
-  `disallowedTools` is accepted in the schema (for caller-side parity with
-  the other four providers) but produces no flag and logs an info-level
-  warning. See `prepareMistralRequest` in
+  `disallowedTools` emits one `--disabled-tools` per entry. See
+  `prepareMistralRequest` in
   [`src/request-helpers.ts`](../../src/request-helpers.ts).
 
 ### 2.5 No self-update — `cli_upgrade` dispatches to pip/uv/brew

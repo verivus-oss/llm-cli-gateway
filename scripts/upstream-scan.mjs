@@ -24,6 +24,7 @@
 // contract enforcement.
 
 import { createHash } from "node:crypto";
+import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -32,9 +33,13 @@ import { parse as parseToml } from "smol-toml";
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(SCRIPT_DIR, "..");
 const DIST_CONTRACTS = join(REPO_ROOT, "dist", "upstream-contracts.js");
+const DIST_EXECUTOR = join(REPO_ROOT, "dist", "executor.js");
+const DIST_PROVIDER_DEFINITIONS = join(REPO_ROOT, "dist", "provider-definitions.js");
 const TOML_PATH = join(REPO_ROOT, "docs", "upstream", "provider-sources.dag.toml");
 const SNAPSHOT_DIR = join(REPO_ROOT, "docs", "upstream", "snapshots");
 const REPORT_DIR = join(REPO_ROOT, "docs", "upstream", "reports");
+const PROBE_TIMEOUT_MS = 5_000;
+const PROBE_MAX_BUFFER = 1024 * 1024;
 
 function parseArgs(argv) {
   const flags = {
@@ -71,10 +76,11 @@ function printHelp() {
       "",
       "  --contracts-check     Offline gate: fixtures + report + TOML-sync. No network, no writes.",
       "  --live                Fetch tracked changelog/release URLs (network).",
-      "  --write-snapshot      Persist fetched source hashes under docs/upstream/snapshots/ (requires --live).",
+      "  --write-snapshot      Persist fetched source hashes and local probe surfaces under docs/upstream/snapshots/",
+      "                        (requires --live or --probe-installed).",
       "  --write-report        Write a markdown report under docs/upstream/reports/YYYY-MM-DD-<provider>.md.",
       "  --fail-on-critical    Exit non-zero when a critical finding is present (advisory otherwise).",
-      "  --provider <cli>      Limit to one CliType (claude|codex|gemini|grok|mistral).",
+      "  --provider <cli>      Limit to one CliType (claude|codex|gemini|grok|mistral|devin|cursor).",
       "  --probe-installed     Also run local --help probes and report bidirectional drift vs the contract",
       "                        (and vs prior snapshots when --write-snapshot is also used). Safe no-op if",
       "                        the binary is not present on this machine.",
@@ -86,14 +92,23 @@ function printHelp() {
 }
 
 async function loadMachinery() {
-  if (!existsSync(DIST_CONTRACTS)) {
+  if (
+    !existsSync(DIST_CONTRACTS) ||
+    !existsSync(DIST_EXECUTOR) ||
+    !existsSync(DIST_PROVIDER_DEFINITIONS)
+  ) {
     console.error(
-      "[upstream-scan] dist/upstream-contracts.js not found. Run `npm run build` first " +
+      "[upstream-scan] compiled contract machinery not found. Run `npm run build` first " +
         "(the release gate runs `npm run check` before this)."
     );
     process.exit(2);
   }
-  return import(DIST_CONTRACTS);
+  const [contracts, executor, providerDefinitions] = await Promise.all([
+    import(DIST_CONTRACTS),
+    import(DIST_EXECUTOR),
+    import(DIST_PROVIDER_DEFINITIONS),
+  ]);
+  return { ...contracts, ...executor, ...providerDefinitions };
 }
 
 function loadToml() {
@@ -193,7 +208,9 @@ function runContractsCheck(machinery, toml) {
     const hasProbe = (acp.probeArgs ?? []).length > 0;
     if (acp.status === "native" && !hasProbe) {
       failures++;
-      console.error(`[upstream-scan] ACP FAIL ${cli}: native entrypoint declares no read-only probe`);
+      console.error(
+        `[upstream-scan] ACP FAIL ${cli}: native entrypoint declares no read-only probe`
+      );
     }
     if (acp.status !== "native" && hasProbe) {
       failures++;
@@ -248,6 +265,191 @@ function arraysEqual(a, b) {
   return a.every((v, i) => v === b[i]);
 }
 
+function sha256(value) {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+const CODEX_CHANGELOG_RSS_URL = "https://learn.chatgpt.com/docs/changelog/rss.xml";
+const CODEX_RSS_APP_OR_MOBILE_GUID = /-(?:app|mobile)$/iu;
+const CODEX_RSS_APP_OR_MOBILE_LINK =
+  /(?:\/codex\/(?:app|mobile)(?:[/?#]|$)|#(?:[^#]*-)?(?:app|mobile)(?:[/?#]|$))/iu;
+const CODEX_RSS_APP_OR_MOBILE_TITLE =
+  /\b(?:codex\s+(?:app|mobile)|chatgpt\s+for\s+(?:ios|android))\b/iu;
+const CODEX_RSS_WATCHED_CONCEPT =
+  /\b(?:exec|resume|review|mcp|login|logout|sandbox|cloud|fork|apply|archive|unarchive|delete|update|doctor|features|plugin|app-server|mcp-server|approvals?|permissions?|sessions?|output\s+schema|web\s+search|config(?:\.toml)?)\b/iu;
+const CODEX_RSS_CLI_NAME = /\bcodex\s+cli\b/iu;
+const CODEX_RSS_LONG_FLAG = /--[a-z][a-z0-9-]*/iu;
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+}
+
+function decodeRssText(value) {
+  const entities = {
+    amp: "&",
+    apos: "'",
+    gt: ">",
+    lt: "<",
+    nbsp: " ",
+    quot: '"',
+  };
+  return value
+    .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/gu, "$1")
+    .replace(/&(amp|apos|gt|lt|nbsp|quot);/giu, (_, name) => entities[name.toLowerCase()]);
+}
+
+function normalizeRssText(value) {
+  return decodeRssText(value)
+    .replace(/<[^>]*>/gu, " ")
+    .replace(/\s+/gu, " ")
+    .trim();
+}
+
+function rssTag(item, name) {
+  const escapedName = escapeRegExp(name);
+  const match = new RegExp(
+    `<${escapedName}(?:\\s[^>]*)?>([\\s\\S]*?)<\\/${escapedName}>`,
+    "iu"
+  ).exec(item);
+  return normalizeRssText(match?.[1] ?? "");
+}
+
+function hasCodexCliCodeInvocation(value) {
+  const fragments = [
+    ...value.matchAll(/```[^\n]*\n?([\s\S]*?)```/gu),
+    ...value.matchAll(/`([^`\n]+)`/gu),
+  ];
+  return fragments.some(fragment =>
+    /\bcodex\s+(?:--[a-z][a-z0-9-]*|[a-z][a-z0-9-]*)\b/iu.test(fragment[1])
+  );
+}
+
+function isCodexRssAppOrMobileEntry(guid, title, link) {
+  return (
+    CODEX_RSS_APP_OR_MOBILE_GUID.test(guid) ||
+    CODEX_RSS_APP_OR_MOBILE_GUID.test(link) ||
+    CODEX_RSS_APP_OR_MOBILE_LINK.test(link) ||
+    CODEX_RSS_APP_OR_MOBILE_TITLE.test(title)
+  );
+}
+
+/**
+ * The Codex RSS feed contains broad app and mobile product news, as well as
+ * CLI release notes. Its channel metadata, item ordering, and app/mobile
+ * entries change routinely. Preserve only CLI anchors and non-app/mobile
+ * entries that mention watched contract concepts. App/mobile classification
+ * uses stable GUIDs plus title/link cues, and selected entries are keyed by
+ * their stable RSS GUID.
+ */
+export function codexChangelogRssSemanticSnapshot(url, body) {
+  if (url !== CODEX_CHANGELOG_RSS_URL) return null;
+
+  const entries = [...body.matchAll(/<item\b[^>]*>([\s\S]*?)<\/item>/giu)]
+    .map(match => {
+      const item = match[1];
+      const rawContent =
+        rssTag(item, "content:encoded") || rssTag(item, "description") || rssTag(item, "title");
+      const title = rssTag(item, "title");
+      const link = rssTag(item, "link");
+      const guid = rssTag(item, "guid") || link || title;
+      const text = `${title}\n${rawContent}`;
+      const explicitCli =
+        CODEX_RSS_CLI_NAME.test(text) ||
+        CODEX_RSS_LONG_FLAG.test(text) ||
+        hasCodexCliCodeInvocation(rawContent);
+      const appOrMobile = isCodexRssAppOrMobileEntry(guid, title, link);
+      const watched = CODEX_RSS_WATCHED_CONCEPT.test(text);
+      if (!explicitCli && (appOrMobile || !watched)) return null;
+      return {
+        guid,
+        title,
+        contentSha256: sha256(rawContent),
+      };
+    })
+    .filter(Boolean)
+    .sort((a, b) => a.guid.localeCompare(b.guid) || a.title.localeCompare(b.title));
+
+  const fields = { entries };
+  return {
+    kind: "codex-changelog-rss.v1",
+    sha256: sha256(JSON.stringify(fields)),
+    fields,
+  };
+}
+
+/**
+ * GitHub's release API includes mutable transport metadata such as `updated_at`
+ * and asset download counts. Track release semantics instead of treating that
+ * metadata churn as a new upstream CLI release.
+ */
+export function githubReleaseSemanticSnapshot(url, body) {
+  let parsedUrl;
+  try {
+    parsedUrl = new URL(url);
+  } catch {
+    return null;
+  }
+  if (
+    parsedUrl.hostname !== "api.github.com" ||
+    !/^\/repos\/[^/]+\/[^/]+\/releases\/(?:latest|\d+)$/u.test(parsedUrl.pathname)
+  ) {
+    return null;
+  }
+
+  try {
+    const release = JSON.parse(body);
+    if (!release || typeof release !== "object" || Array.isArray(release)) return null;
+    const fields = {
+      tagName: release.tag_name ?? null,
+      name: release.name ?? null,
+      draft: release.draft === true,
+      prerelease: release.prerelease === true,
+      publishedAt: release.published_at ?? null,
+      targetCommitish: release.target_commitish ?? null,
+      bodySha256: sha256(typeof release.body === "string" ? release.body : ""),
+    };
+    return {
+      kind: "github-release.v1",
+      sha256: sha256(JSON.stringify(fields)),
+      fields,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Prefer a source-specific semantic comparison whenever the current source
+ * supports one. Existing raw-hash snapshots are migrated silently on their
+ * next write, because no historical semantic fingerprint can be reconstructed
+ * from a hash.
+ */
+export function compareSourceSnapshot(before, current) {
+  if (!before) return { changed: false, comparison: "initial" };
+
+  const beforeSemantic = before.semantic;
+  const currentSemantic = current.semantic;
+  if (currentSemantic) {
+    if (beforeSemantic?.sha256) {
+      return {
+        changed: beforeSemantic.sha256 !== currentSemantic.sha256,
+        comparison: "semantic",
+        beforeHash: beforeSemantic.sha256,
+        currentHash: currentSemantic.sha256,
+      };
+    }
+    return { changed: false, comparison: "semantic-baseline-initialized" };
+  }
+
+  if (!before.sha256 || !current.sha256) return { changed: false, comparison: "unavailable" };
+  return {
+    changed: before.sha256 !== current.sha256,
+    comparison: "raw",
+    beforeHash: before.sha256,
+    currentHash: current.sha256,
+  };
+}
+
 async function fetchSource(url) {
   try {
     const res = await fetch(url, {
@@ -260,7 +462,9 @@ async function fetchSource(url) {
       ok: res.ok,
       status: res.status,
       bytes: body.length,
-      sha256: createHash("sha256").update(body).digest("hex"),
+      sha256: sha256(body),
+      semantic:
+        githubReleaseSemanticSnapshot(url, body) ?? codexChangelogRssSemanticSnapshot(url, body),
     };
   } catch (err) {
     return {
@@ -269,16 +473,53 @@ async function fetchSource(url) {
       status: 0,
       bytes: 0,
       sha256: null,
+      semantic: null,
       error: String(err?.message ?? err),
     };
   }
+}
+
+function normalizedDiscoveredFlags(surface) {
+  if (!surface || typeof surface !== "object") return [];
+  if (Array.isArray(surface.discoveredFlags)) return surface.discoveredFlags;
+  if (Array.isArray(surface.flags)) return surface.flags;
+  return [];
+}
+
+function normalizeHelpSurface(surface) {
+  if (!surface || typeof surface !== "object") return surface;
+  const { flags: _legacyFlags, ...rest } = surface;
+  return {
+    ...rest,
+    discoveredFlags: normalizedDiscoveredFlags(surface),
+  };
+}
+
+/**
+ * Preserve compatibility with snapshots written before `discoveredFlags` was
+ * made canonical. Readers always see one stable representation; writers emit
+ * the canonical name below.
+ */
+export function normalizeSnapshot(snapshot) {
+  if (!snapshot || typeof snapshot !== "object") return snapshot;
+  const subcommands = Object.fromEntries(
+    Object.entries(snapshot.subcommands ?? {}).map(([path, surface]) => [
+      path,
+      normalizeHelpSurface(surface),
+    ])
+  );
+  return {
+    ...snapshot,
+    helpSurface: normalizeHelpSurface(snapshot.helpSurface),
+    subcommands,
+  };
 }
 
 function readSnapshot(cli) {
   const path = join(SNAPSHOT_DIR, `${cli}.json`);
   if (!existsSync(path)) return null;
   try {
-    return JSON.parse(readFileSync(path, "utf8"));
+    return normalizeSnapshot(JSON.parse(readFileSync(path, "utf8")));
   } catch {
     return null;
   }
@@ -291,12 +532,632 @@ function writeSnapshot(cli, payload) {
   return path;
 }
 
+/**
+ * Compose a new snapshot without discarding evidence that this scan did not
+ * refresh. This is deliberately pure so the migration behavior is testable.
+ */
+export function mergeSourceSnapshotBaselines(fetched, priorSources) {
+  if (!fetched) return priorSources ?? [];
+  const priorByUrl = new Map((priorSources ?? []).map(source => [source.url, source]));
+  return fetched.map(source => {
+    const prior = priorByUrl.get(source.url);
+    // Keep the last known-good source evidence when a transient network error
+    // occurs. The scan still emits source-unreachable for the failed attempt.
+    const priorIsGood = prior?.ok !== false && Boolean(prior?.sha256);
+    return source.ok || !priorIsGood ? source : prior;
+  });
+}
+
+export function buildSnapshotPayload(cli, fetched, priorSnapshot, helpProbe) {
+  const prior = normalizeSnapshot(priorSnapshot);
+  const snapshotPayload = {
+    schemaVersion: "upstream-scan-snapshot.v2",
+    cli,
+    fetchedAt: new Date().toISOString(),
+    // A help-only refresh must never erase the last live source baseline.
+    // Conversely, a source-only refresh preserves the last help evidence.
+    sources: mergeSourceSnapshotBaselines(fetched, prior?.sources),
+  };
+
+  if (helpProbe?.available) {
+    snapshotPayload.helpSurface = {
+      probedAt: helpProbe.probedAt,
+      available: true,
+      version: helpProbe.versionProbe?.installedVersion ?? null,
+      targetVersion: helpProbe.versionProbe?.targetVersion ?? null,
+      versionMatchesTarget: helpProbe.versionProbe?.matches ?? null,
+      discoveredFlags: helpProbe.discoveredFlags || [],
+      helpHash: helpProbe.helpHash || null,
+      extraVsContract: helpProbe.extraFlags || [],
+      missingFromBinary: helpProbe.missingFlags || [],
+      arityMismatches: helpProbe.arityMismatches || [],
+      enumMismatches: helpProbe.enumMismatches || [],
+    };
+    snapshotPayload.rootCommands = helpProbe.rootCommands || [];
+    snapshotPayload.subcommands = Object.fromEntries(
+      Object.entries(helpProbe.subcommands || {}).map(([path, sub]) => [
+        path,
+        {
+          commandPath: sub.commandPath,
+          probedAt: sub.probedAt,
+          available: sub.available,
+          existence: sub.existence,
+          discoveredFlags: sub.discoveredFlags || [],
+          helpHash: sub.helpHash || null,
+          extraVsContract: sub.extraFlags || [],
+          missingFromBinary: sub.missingFlags || [],
+          arityMismatches: sub.arityMismatches || [],
+          enumMismatches: sub.enumMismatches || [],
+          risk: sub.risk,
+          exposure: sub.exposure,
+          tier: sub.tier,
+          summary: sub.summary,
+        },
+      ])
+    );
+  } else {
+    if (prior?.helpSurface) snapshotPayload.helpSurface = prior.helpSurface;
+    if (Array.isArray(prior?.rootCommands)) snapshotPayload.rootCommands = prior.rootCommands;
+    if (prior?.subcommands) snapshotPayload.subcommands = prior.subcommands;
+  }
+
+  return snapshotPayload;
+}
+
+/** Extract command names and pipe-delimited aliases from a CLI help command section. */
+export function extractRootCommands(helpText) {
+  const commands = new Set();
+  let inCommandSection = false;
+  let commandIndent = null;
+
+  for (const line of helpText.split(/\r?\n/u)) {
+    const trimmed = line.trim();
+    if (/^(?:available\s+)?(?:commands|subcommands):$/iu.test(trimmed)) {
+      inCommandSection = true;
+      commandIndent = null;
+      continue;
+    }
+    if (!inCommandSection) continue;
+    if (/^[A-Za-z][A-Za-z0-9 /_-]*:$/u.test(line)) break;
+    if (trimmed.length === 0) continue;
+
+    const match =
+      /^(\s+)([A-Za-z0-9][A-Za-z0-9_-]*(?:\|[A-Za-z0-9][A-Za-z0-9_-]*)*)(?:\s|\[|$)/u.exec(line);
+    if (!match) continue;
+    const indent = match[1].length;
+    commandIndent ??= indent;
+    if (indent !== commandIndent) continue;
+    for (const command of match[2].split("|")) commands.add(command);
+  }
+
+  return [...commands].sort();
+}
+
+function normalizeLongFlag(flag) {
+  return `--${flag.slice(2).toLowerCase().replace(/_/g, "-")}`;
+}
+
+function inferFlagArity(header) {
+  if (/<[^>]*\.\.\.[^>]*>/u.test(header) || /\[[^\]]*\.\.\.[^\]]*\]/u.test(header)) {
+    return "variadic";
+  }
+  if (/\[[^\]]*(?:<[^>]+>|[A-Za-z][A-Za-z0-9_-]*)[^\]]*\]/u.test(header)) {
+    return "optional";
+  }
+  if (
+    /<[^>]+>/u.test(header) ||
+    /\{[^{}]+\}/u.test(header) ||
+    /\s[A-Z][A-Z0-9_-]*(?:\.\.\.)?$/u.test(header)
+  ) {
+    return "one";
+  }
+  // A bare flag may be a boolean, but some CLIs omit an otherwise required
+  // placeholder. Do not guess and create an arity finding from that ambiguity.
+  return null;
+}
+
+function enumValues(valueText) {
+  const quoted = [...valueText.matchAll(/["']([^"']+)["']/gu)]
+    .map(match => match[1].trim())
+    .filter(Boolean);
+  if (quoted.length > 0) return [...new Set(quoted)].sort();
+
+  const bare = valueText
+    .replaceAll("[", "")
+    .replaceAll("]", "")
+    .split(",")
+    .map(value => value.trim().replace(/[.)]+$/u, ""))
+    .filter(value => /^[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(value));
+  return bare.length > 0 ? [...new Set(bare)].sort() : null;
+}
+
+function inferEnumValues(header, context) {
+  const braceValues = /\{([^{}]+)\}/u.exec(header)?.[1];
+  if (braceValues) return enumValues(braceValues);
+
+  const marker = /\b(?:possible values|choices|modes)\s*:\s*([\s\S]*)/iu.exec(context)?.[1];
+  if (!marker) return null;
+  const bounded = marker.includes("]") ? marker.slice(0, marker.indexOf("]")) : marker;
+  return enumValues(bounded);
+}
+
+/**
+ * Extract only option declarations, not prose mentions of flags. The returned
+ * shapes are advisory scanner evidence and never participate in argv validation.
+ */
+export function extractHelpOptionSpecs(helpText) {
+  const lines = helpText.split(/\r?\n/u);
+  const declarations = [];
+  let declarationIndent = null;
+  for (let index = 0; index < lines.length; index++) {
+    const trimmed = lines[index].trimStart();
+    if (!trimmed.startsWith("-")) continue;
+    const indent = lines[index].length - trimmed.length;
+    declarationIndent ??= indent;
+    if (indent !== declarationIndent) continue;
+    const header = trimmed.split(/\s{2,}/u, 1)[0] ?? "";
+    const flags = [...header.matchAll(/--([a-z0-9][a-z0-9_-]*)(?=[\s,[<{]|$)/giu)].map(match =>
+      normalizeLongFlag(`--${match[1]}`)
+    );
+    if (flags.length === 0) continue;
+    declarations.push({ index, header, flags: [...new Set(flags)] });
+  }
+
+  const specs = {};
+  for (let index = 0; index < declarations.length; index++) {
+    const declaration = declarations[index];
+    const nextIndex = declarations[index + 1]?.index ?? lines.length;
+    const context = lines.slice(declaration.index, nextIndex).join("\n");
+    const shape = {
+      arity: inferFlagArity(declaration.header),
+      values: inferEnumValues(declaration.header, context),
+    };
+    for (const flag of declaration.flags) specs[flag] = shape;
+  }
+  return specs;
+}
+
+/**
+ * Compare only clear syntax and explicitly enumerated values from help output.
+ * An unknown or unadvertised shape is ignored rather than guessed.
+ */
+export function compareHelpFlagShapes(contract, helpText) {
+  const observed = extractHelpOptionSpecs(helpText);
+  const arityMismatches = [];
+  const enumMismatches = [];
+
+  for (const [flag, declared] of Object.entries(contract.flags)) {
+    if (!flag.startsWith("--") || declared.hiddenFromHelp) continue;
+    const actual = observed[flag];
+    if (!actual) continue;
+    if (actual.arity !== null && !isContractAritySupported(declared.arity, actual.arity)) {
+      arityMismatches.push({
+        flag,
+        contractArity: declared.arity,
+        installedArity: actual.arity,
+      });
+    }
+    if (!Array.isArray(declared.values) || declared.values.length === 0 || !actual.values?.length) {
+      continue;
+    }
+    const expectedSet = new Set(declared.values);
+    const actualSet = new Set(actual.values);
+    const missingValues = [...expectedSet].filter(value => !actualSet.has(value)).sort();
+    const extraValues = [...actualSet].filter(value => !expectedSet.has(value)).sort();
+    if (missingValues.length > 0 || extraValues.length > 0) {
+      enumMismatches.push({ flag, missingValues, extraValues, installedValues: actual.values });
+    }
+  }
+
+  return { observed, arityMismatches, enumMismatches };
+}
+
+function isContractAritySupported(contractArity, installedArity) {
+  if (contractArity === "none") return installedArity === "none" || installedArity === "optional";
+  if (contractArity === "one") {
+    return (
+      installedArity === "one" || installedArity === "optional" || installedArity === "variadic"
+    );
+  }
+  if (contractArity === "optional") return installedArity === "optional";
+  return installedArity === "variadic";
+}
+
+function comparableVersion(value) {
+  if (typeof value !== "string") return null;
+  const version = /v?\d+(?:\.\d+)+(?:-[0-9A-Za-z.-]+)?/u.exec(value)?.[0];
+  if (!version) return null;
+  const normalizedVersion = version.replace(/^v/iu, "").toLowerCase();
+  const hash = /\(([0-9a-f]{7,})\)/iu.exec(value)?.[1]?.toLowerCase();
+  return hash && !normalizedVersion.endsWith(`-${hash}`)
+    ? `${normalizedVersion} (${hash})`
+    : normalizedVersion;
+}
+
+/** Compare a full target version, including a build suffix when one is present. */
+export function compareTargetVersion(targetVersion, installedVersion) {
+  const targetComparable = comparableVersion(targetVersion);
+  const installedComparable = comparableVersion(installedVersion);
+  return {
+    targetVersion,
+    installedVersion,
+    targetComparable,
+    installedComparable,
+    matches:
+      targetComparable !== null && installedComparable !== null
+        ? targetComparable === installedComparable
+        : null,
+  };
+}
+
+function runReadOnlyCliCommand(machinery, executable, args, timeoutMs = PROBE_TIMEOUT_MS) {
+  const extendedPath =
+    typeof machinery.getExtendedPath === "function"
+      ? machinery.getExtendedPath()
+      : process.env.PATH;
+  const env =
+    typeof machinery.envWithExtendedPath === "function"
+      ? machinery.envWithExtendedPath(process.env, extendedPath)
+      : process.env;
+  const resolved =
+    typeof machinery.resolveCommandForSpawn === "function"
+      ? machinery.resolveCommandForSpawn(executable, [...args], { envPath: extendedPath })
+      : { command: executable, args: [...args] };
+  const result = spawnSync(resolved.command, resolved.args, {
+    encoding: "utf8",
+    timeout: timeoutMs,
+    maxBuffer: PROBE_MAX_BUFFER,
+    env,
+    windowsHide: true,
+    windowsVerbatimArguments: resolved.windowsVerbatimArguments,
+  });
+  const stdout = result.stdout ?? "";
+  const stderr = result.stderr ?? "";
+  return {
+    available: !result.error,
+    command: resolved.command,
+    args: resolved.args,
+    status: result.status,
+    output: `${stdout}\n${stderr}`,
+    error: result.error?.message,
+  };
+}
+
+function firstVersionLine(output) {
+  return (
+    output
+      .split(/\r?\n/u)
+      .map(line => line.trim())
+      .find(line => comparableVersion(line) !== null)
+      ?.slice(0, 240) ?? null
+  );
+}
+
+export function rootCatalogDrift(subcommands, rootCommands) {
+  if (!Array.isArray(rootCommands) || rootCommands.length === 0) {
+    return { added: [], removed: [] };
+  }
+  const declaredWithAliases = new Set();
+  const aliasGroups = [];
+  for (const subcommand of subcommands) {
+    if (subcommand.commandPath.length !== 1) continue;
+    const names = new Set([subcommand.commandPath[0], ...(subcommand.aliases ?? [])]);
+    for (const name of names) declaredWithAliases.add(name);
+
+    const overlappingGroups = aliasGroups.filter(group => [...names].some(name => group.has(name)));
+    const merged = new Set(names);
+    for (const group of overlappingGroups) {
+      for (const name of group) merged.add(name);
+      aliasGroups.splice(aliasGroups.indexOf(group), 1);
+    }
+    aliasGroups.push(merged);
+  }
+  const discovered = new Set(rootCommands.filter(command => command !== "help"));
+  return {
+    added: [...discovered].filter(command => !declaredWithAliases.has(command)).sort(),
+    // Help output commonly lists aliases only in prose (e.g. `[aliases: ls]`).
+    // Treat each connected alias group as one command surface, including
+    // contracts that intentionally catalog both spellings as separate paths.
+    removed: aliasGroups
+      .filter(group => ![...group].some(command => discovered.has(command)))
+      .map(group => [...group].sort()[0])
+      .sort(),
+  };
+}
+
+/**
+ * Confirm every segment of a declared path is advertised by its parent's help
+ * before the scanner invokes that path's own `--help`. This prevents CLIs that
+ * fall back to root help for unknown commands from creating fake flag drift.
+ */
+export function verifyDeclaredCommandPath(
+  commandPath,
+  readParentSurface,
+  aliasesByPath = new Map()
+) {
+  for (let index = 0; index < commandPath.length; index++) {
+    const parentPath = commandPath.slice(0, index);
+    const parent = readParentSurface(parentPath);
+    if (!parent.available) {
+      return {
+        state: "unknown",
+        reason: `could not inspect parent command ${parentPath.join(" ") || "root"}`,
+      };
+    }
+    if (parent.commands.length === 0) {
+      return {
+        state: "unknown",
+        reason: `parent command ${parentPath.join(" ") || "root"} did not advertise a command list`,
+      };
+    }
+    const pathKey = commandPath.slice(0, index + 1).join(" ");
+    const aliases = aliasesByPath.get(pathKey) ?? [];
+    const advertised = [commandPath[index], ...aliases].some(command =>
+      parent.commands.includes(command)
+    );
+    if (!advertised) {
+      return {
+        state: "missing",
+        reason: `${commandPath[index]} is absent from ${parentPath.join(" ") || "root"} command help`,
+      };
+    }
+  }
+  return { state: "present", reason: null };
+}
+
+function probeInstalledCliSubcommands(machinery, contract, rootHelp, timeoutMs) {
+  const subcommands = machinery.flattenCliSubcommands(contract.subcommands);
+  const aliasesByPath = new Map(
+    subcommands.map(subcommand => [subcommand.commandPath.join(" "), subcommand.aliases ?? []])
+  );
+  const probes = {};
+  const commandHelpCache = new Map([
+    [
+      "",
+      { available: rootHelp.available, commands: rootHelp.commands, helpHash: rootHelp.helpHash },
+    ],
+  ]);
+
+  function commandHelp(commandPath) {
+    const key = commandPath.join(" ");
+    const cached = commandHelpCache.get(key);
+    if (cached) return cached;
+    const result = runReadOnlyCliCommand(
+      machinery,
+      contract.executable,
+      [...commandPath, "--help"],
+      timeoutMs
+    );
+    const surface = {
+      available: result.available,
+      commands: result.available ? extractRootCommands(result.output) : [],
+      helpHash: result.available ? sha256(result.output) : null,
+      status: result.status,
+      error: result.error,
+    };
+    commandHelpCache.set(key, surface);
+    return surface;
+  }
+
+  for (const subcommand of subcommands) {
+    const commandPath = [...subcommand.commandPath];
+    const pathState = verifyDeclaredCommandPath(commandPath, commandHelp, aliasesByPath);
+    const key = commandPath.join(" ");
+    const checkedHelpCommands = subcommand.helpArgs.map(helpArgs => [...commandPath, ...helpArgs]);
+    const warnings = [];
+
+    if (pathState.state === "missing") {
+      probes[key] = {
+        commandPath,
+        checkedHelpCommands,
+        available: false,
+        existence: "missing",
+        missingFlags: [],
+        extraFlags: [],
+        acknowledgedExtraFlags: [],
+        discoveredFlags: [],
+        arityMismatches: [],
+        enumMismatches: [],
+        helpHash: null,
+        probedAt: new Date().toISOString(),
+        warnings: [pathState.reason],
+        risk: subcommand.risk,
+        exposure: subcommand.exposure,
+        tier: subcommand.tier,
+        summary: subcommand.summary,
+      };
+      continue;
+    }
+
+    const outputs = [];
+    let available = true;
+    for (const helpArgs of subcommand.helpArgs) {
+      const result = runReadOnlyCliCommand(
+        machinery,
+        contract.executable,
+        [...commandPath, ...helpArgs],
+        timeoutMs
+      );
+      if (!result.available) {
+        available = false;
+        warnings.push(
+          result.error ??
+            `could not run ${contract.executable} ${[...commandPath, ...helpArgs].join(" ")}`
+        );
+        break;
+      }
+      outputs.push(result.output);
+      if (result.status !== 0 && !subcommand.helpProbeExitTolerant) {
+        warnings.push(
+          `${contract.executable} ${[...commandPath, ...helpArgs].join(" ")} exited with status ${result.status}`
+        );
+      }
+    }
+
+    const helpText = outputs.join("\n");
+    const helpHash = available ? sha256(helpText) : null;
+    const fellBackToRoot =
+      available && rootHelp.helpHash && helpHash === rootHelp.helpHash && commandPath.length > 0;
+    if (fellBackToRoot) {
+      available = false;
+      warnings.push(
+        "subcommand help matched root help output, so the command was treated as unavailable"
+      );
+    }
+    if (pathState.state === "unknown") warnings.push(pathState.reason);
+
+    const discoveredFlags = available ? machinery.extractDiscoveredFlags(helpText) : [];
+    const drift = available
+      ? machinery.computeSubcommandFlagDrift(
+          subcommand,
+          contract.executable,
+          helpText,
+          discoveredFlags
+        )
+      : { missingFlags: [], extraFlags: [], acknowledgedExtraFlags: [], warnings: [] };
+    // Subcommand catalogs are tracking and safety metadata, not a request argv
+    // allowlist. Several deliberately use optional arity as a conservative
+    // catalog shape, so only the fully validated root request surface receives
+    // arity and enum comparisons.
+    warnings.push(...drift.warnings);
+
+    probes[key] = {
+      commandPath,
+      checkedHelpCommands,
+      available,
+      existence: fellBackToRoot ? "missing" : pathState.state,
+      missingFlags: drift.missingFlags,
+      extraFlags: drift.extraFlags,
+      acknowledgedExtraFlags: drift.acknowledgedExtraFlags,
+      discoveredFlags,
+      arityMismatches: [],
+      enumMismatches: [],
+      helpHash,
+      probedAt: new Date().toISOString(),
+      warnings,
+      risk: subcommand.risk,
+      exposure: subcommand.exposure,
+      tier: subcommand.tier,
+      summary: subcommand.summary,
+    };
+  }
+  return probes;
+}
+
+function probeInstalledCliSurface(machinery, cli, timeoutMs = PROBE_TIMEOUT_MS) {
+  const contract = machinery.UPSTREAM_CLI_CONTRACTS[cli];
+  const warnings = [];
+  const outputs = [];
+  let resolvedCommand;
+  let resolvedArgs;
+
+  for (const helpArgs of contract.helpArgs) {
+    const result = runReadOnlyCliCommand(machinery, contract.executable, helpArgs, timeoutMs);
+    resolvedCommand ??= result.command;
+    resolvedArgs ??= result.args;
+    if (!result.available) {
+      return {
+        cli,
+        executable: contract.executable,
+        resolvedCommand,
+        resolvedArgs,
+        available: false,
+        checkedHelpCommands: contract.helpArgs,
+        missingFlags: [],
+        extraFlags: [],
+        acknowledgedExtraFlags: [],
+        discoveredFlags: [],
+        arityMismatches: [],
+        enumMismatches: [],
+        helpHash: null,
+        versionProbe: null,
+        rootCommands: [],
+        rootCatalogDrift: { added: [], removed: [] },
+        subcommands: {},
+        probedAt: new Date().toISOString(),
+        warnings: [result.error ?? `could not run ${contract.executable} ${helpArgs.join(" ")}`],
+      };
+    }
+    outputs.push(result.output);
+    if (result.status !== 0) {
+      warnings.push(
+        `${contract.executable} ${helpArgs.join(" ")} exited with status ${result.status}`
+      );
+    }
+  }
+
+  const helpText = outputs.join("\n");
+  const discoveredFlags = machinery.extractDiscoveredFlags(helpText);
+  const drift = machinery.computeFlagDrift(contract, helpText, discoveredFlags);
+  const shapes = compareHelpFlagShapes(contract, helpText);
+  warnings.push(...drift.warnings);
+
+  const rootResult = runReadOnlyCliCommand(machinery, contract.executable, ["--help"], timeoutMs);
+  const rootHelp = {
+    available: rootResult.available,
+    commands: rootResult.available ? extractRootCommands(rootResult.output) : [],
+    helpHash: rootResult.available ? sha256(rootResult.output) : null,
+  };
+  if (!rootResult.available) {
+    warnings.push(
+      rootResult.error ?? `${contract.executable} --help was unavailable for root command discovery`
+    );
+  } else if (rootResult.status !== 0) {
+    warnings.push(`${contract.executable} --help exited with status ${rootResult.status}`);
+  }
+
+  const versionResult = runReadOnlyCliCommand(
+    machinery,
+    contract.executable,
+    ["--version"],
+    timeoutMs
+  );
+  const installedVersion = versionResult.available ? firstVersionLine(versionResult.output) : null;
+  const targetVersion = machinery.getProviderDefinition(cli).upstreamContract.targetVersion;
+  const versionProbe = {
+    available: versionResult.available,
+    status: versionResult.status,
+    installedVersion,
+    ...compareTargetVersion(targetVersion, installedVersion),
+  };
+  if (!versionResult.available) {
+    warnings.push(versionResult.error ?? `${contract.executable} --version was unavailable`);
+  } else if (versionResult.status !== 0) {
+    warnings.push(`${contract.executable} --version exited with status ${versionResult.status}`);
+  } else if (!installedVersion) {
+    warnings.push(`${contract.executable} --version returned no parseable version`);
+  }
+
+  const flattened = machinery.flattenCliSubcommands(contract.subcommands);
+  return {
+    cli,
+    executable: contract.executable,
+    resolvedCommand,
+    resolvedArgs,
+    available: true,
+    checkedHelpCommands: contract.helpArgs,
+    missingFlags: drift.missingFlags,
+    extraFlags: drift.extraFlags,
+    acknowledgedExtraFlags: drift.acknowledgedExtraFlags,
+    discoveredFlags,
+    arityMismatches: shapes.arityMismatches,
+    enumMismatches: shapes.enumMismatches,
+    helpHash: sha256(helpText),
+    versionProbe,
+    rootCommands: rootHelp.commands,
+    rootCatalogDrift: rootCatalogDrift(flattened, rootHelp.commands),
+    subcommands: probeInstalledCliSubcommands(machinery, contract, rootHelp, timeoutMs),
+    probedAt: new Date().toISOString(),
+    warnings,
+  };
+}
+
 function todayStamp() {
   // Local script context (NOT a Workflow script) — Date is available here.
   return new Date().toISOString().slice(0, 10);
 }
 
-function renderReport(cli, contract, meta, fetched, findings, helpProbe = null) {
+export function renderReport(cli, contract, meta, fetched, findings, helpProbe = null) {
   const stamp = todayStamp();
   const lines = [];
   lines.push(`# Upstream scan report — ${cli} (${contract.upstream})`);
@@ -327,14 +1188,15 @@ function renderReport(cli, contract, meta, fetched, findings, helpProbe = null) 
   lines.push("## Tracked sources");
   lines.push("");
   if (fetched && fetched.length) {
-    lines.push("| Source | Status | Bytes | SHA-256 (12) |");
-    lines.push("| ------ | ------ | ----- | ------------ |");
+    lines.push("| Source | Status | Bytes | SHA-256 (12) | Semantic SHA-256 (12) |");
+    lines.push("| ------ | ------ | ----- | ------------ | --------------------- |");
     for (const f of fetched) {
       const sha = f.sha256 ? f.sha256.slice(0, 12) : "—";
+      const semanticSha = f.semantic?.sha256 ? f.semantic.sha256.slice(0, 12) : "n/a";
       const status = f.ok
         ? `${f.status} OK`
         : `${f.status || "ERR"}${f.error ? ` (${f.error})` : ""}`;
-      lines.push(`| ${f.url} | ${status} | ${f.bytes} | ${sha} |`);
+      lines.push(`| ${f.url} | ${status} | ${f.bytes} | ${sha} | ${semanticSha} |`);
     }
   } else {
     for (const url of meta.sourceUrls) {
@@ -342,6 +1204,37 @@ function renderReport(cli, contract, meta, fetched, findings, helpProbe = null) 
     }
   }
   lines.push("");
+  if (helpProbe) {
+    lines.push("## Installed CLI probe");
+    lines.push("");
+    if (!helpProbe.available) {
+      lines.push("- Installed executable was unavailable for a request-surface probe.");
+    } else {
+      const version = helpProbe.versionProbe;
+      const versionState =
+        version?.matches === true
+          ? "matches"
+          : version?.matches === false
+            ? "mismatch"
+            : "unavailable";
+      lines.push(`- Contract target version: \`${version?.targetVersion ?? "unavailable"}\``);
+      lines.push(`- Installed version: \`${version?.installedVersion ?? "unavailable"}\``);
+      lines.push(`- Version comparison: **${versionState}**`);
+      lines.push(`- Root commands discovered: **${(helpProbe.rootCommands ?? []).length}**`);
+      const rootDrift = helpProbe.rootCatalogDrift ?? { added: [], removed: [] };
+      if (rootDrift.added.length > 0 || rootDrift.removed.length > 0) {
+        lines.push(
+          `- Root catalog drift: added=${rootDrift.added.join(", ") || "none"}; removed=${rootDrift.removed.join(", ") || "none"}`
+        );
+      } else {
+        lines.push("- Root catalog drift: none");
+      }
+      lines.push(
+        `- Root request flag-shape drift: ${(helpProbe.arityMismatches ?? []).length} arity, ${(helpProbe.enumMismatches ?? []).length} enum finding(s)`
+      );
+    }
+    lines.push("");
+  }
   if (helpProbe?.subcommands) {
     const rows = Object.values(helpProbe.subcommands);
     const driftRows = rows.filter(
@@ -403,8 +1296,7 @@ function writeReport(cli, content) {
 }
 
 async function runScan(machinery, toml, flags) {
-  const { UPSTREAM_CLI_CONTRACTS, probeInstalledCliContract, probeInstalledAcpEntrypoint } =
-    machinery;
+  const { UPSTREAM_CLI_CONTRACTS, probeInstalledAcpEntrypoint } = machinery;
   const report = machinery.buildUpstreamContractReport();
   const providers = selectProviders(UPSTREAM_CLI_CONTRACTS, flags.provider);
 
@@ -434,13 +1326,13 @@ async function runScan(machinery, toml, flags) {
     for (const url of meta.sourceUrls) console.log(`    - ${url}`);
 
     const findings = [];
+    const priorSnapshot = readSnapshot(cli);
     let fetched = null;
     let helpProbe = null;
 
     if (flags.live) {
       fetched = [];
-      const prior = readSnapshot(cli);
-      const priorByUrl = new Map((prior?.sources ?? []).map(s => [s.url, s]));
+      const priorByUrl = new Map((priorSnapshot?.sources ?? []).map(s => [s.url, s]));
       for (const url of meta.sourceUrls) {
         const result = await fetchSource(url);
         fetched.push(result);
@@ -456,16 +1348,19 @@ async function runScan(machinery, toml, flags) {
           );
         } else {
           const before = priorByUrl.get(url);
-          if (before && before.sha256 && before.sha256 !== result.sha256) {
+          const comparison = compareSourceSnapshot(before, result);
+          if (comparison.changed) {
             findings.push({
               severity: "critical",
               category: "watched-category-changed",
-              message: `Content hash changed for ${url} since last snapshot — review against watched categories: ${meta.watchCategories.join(", ")}.`,
+              message: `${comparison.comparison === "semantic" ? "Source semantics" : "Content hash"} changed for ${url} since last snapshot. Review against watched categories: ${meta.watchCategories.join(", ")}.`,
             });
             criticalCount++;
             console.log(
-              `  [live] CHANGED ${url} (sha ${before.sha256.slice(0, 12)} → ${result.sha256.slice(0, 12)})`
+              `  [live] CHANGED ${url} (${comparison.comparison} ${comparison.beforeHash.slice(0, 12)} -> ${comparison.currentHash.slice(0, 12)})`
             );
+          } else if (comparison.comparison === "semantic-baseline-initialized") {
+            console.log(`  [live] semantic baseline initialized for ${url}`);
           } else {
             console.log(`  [live] ok ${url} (${result.status}, ${result.bytes} bytes)`);
           }
@@ -476,18 +1371,37 @@ async function runScan(machinery, toml, flags) {
     // Bidirectional installed-CLI help surface probe (when requested).
     // Keep this outside the `--live` branch so offline `--probe-installed`
     // catches local CLI drift without requiring network access.
-    if (flags.probeInstalled && typeof probeInstalledCliContract === "function") {
+    if (flags.probeInstalled) {
       try {
-        helpProbe = probeInstalledCliContract(cli);
+        helpProbe = probeInstalledCliSurface(machinery, cli);
       } catch (e) {
         console.warn(`  [probe] failed for ${cli}: ${e?.message ?? e}`);
       }
 
       if (helpProbe) {
-        const prior = readSnapshot(cli);
-        const priorHelp = prior?.helpSurface;
+        const prior = priorSnapshot;
+        const priorHelp = priorSnapshot?.helpSurface;
 
         if (helpProbe.available) {
+          const versionProbe = helpProbe.versionProbe;
+          if (versionProbe?.matches === false) {
+            findings.push({
+              severity: "critical",
+              category: "installed-version-mismatch",
+              message: `Installed ${cli} version ${versionProbe.installedVersion ?? "unparseable"} does not match the contract baseline ${versionProbe.targetVersion}. Re-probe the CLI, then update PROVIDER_TARGET_VERSIONS and the contract evidence together.`,
+            });
+            criticalCount++;
+            console.log(
+              `  [probe] VERSION MISMATCH: installed=${versionProbe.installedVersion ?? "unparseable"}; target=${versionProbe.targetVersion}`
+            );
+          } else if (versionProbe?.matches === true) {
+            console.log(`  [probe] version matches target: ${versionProbe.targetVersion}`);
+          } else if (versionProbe) {
+            console.log(
+              `  [probe] version could not be compared: installed=${versionProbe.installedVersion ?? "unparseable"}; target=${versionProbe.targetVersion}`
+            );
+          }
+
           const contractFlags = new Set(Object.keys(contract.flags));
           const extras = (helpProbe.extraFlags || []).filter(f => !contractFlags.has(f));
           const missing = helpProbe.missingFlags || [];
@@ -512,9 +1426,55 @@ async function runScan(machinery, toml, flags) {
             console.log(`  [probe] MISSING from binary (vs contract): ${missing.join(", ")}`);
           }
 
+          for (const mismatch of helpProbe.arityMismatches || []) {
+            findings.push({
+              severity: "critical",
+              category: "installed-flag-arity-drift",
+              message: `Installed ${cli} ${mismatch.flag} has ${mismatch.installedArity} arity, but the contract declares ${mismatch.contractArity}.`,
+            });
+            criticalCount++;
+            console.log(
+              `  [probe] FLAG ARITY DRIFT ${mismatch.flag}: installed=${mismatch.installedArity}; contract=${mismatch.contractArity}`
+            );
+          }
+          for (const mismatch of helpProbe.enumMismatches || []) {
+            findings.push({
+              severity: "critical",
+              category: "installed-flag-enum-drift",
+              message: `Installed ${cli} ${mismatch.flag} values differ from the contract (new: ${mismatch.extraValues.join(", ") || "none"}; missing: ${mismatch.missingValues.join(", ") || "none"}).`,
+            });
+            criticalCount++;
+            console.log(
+              `  [probe] FLAG ENUM DRIFT ${mismatch.flag}: new=${mismatch.extraValues.join(", ") || "none"}; missing=${mismatch.missingValues.join(", ") || "none"}`
+            );
+          }
+
+          const rootDrift = helpProbe.rootCatalogDrift ?? { added: [], removed: [] };
+          if (rootDrift.added.length > 0) {
+            findings.push({
+              severity: "critical",
+              category: "installed-root-command-added",
+              message: `Installed ${cli} root help advertises uncatalogued command(s): ${rootDrift.added.join(", ")}. Add safety-classified catalog entries before exposure.`,
+            });
+            criticalCount++;
+            console.log(`  [probe] NEW ROOT COMMANDS: ${rootDrift.added.join(", ")}`);
+          }
+          if (rootDrift.removed.length > 0) {
+            findings.push({
+              severity: "critical",
+              category: "declared-root-command-missing",
+              message: `Declared ${cli} root command(s) are absent from installed help: ${rootDrift.removed.join(", ")}. Remove or correct stale catalog entries.`,
+            });
+            criticalCount++;
+            console.log(`  [probe] MISSING ROOT COMMANDS: ${rootDrift.removed.join(", ")}`);
+          }
+
           const subcommands = Object.values(helpProbe.subcommands || {});
           const subcommandDrift = subcommands.filter(
-            sub => (sub.extraFlags || []).length > 0 || (sub.missingFlags || []).length > 0
+            sub =>
+              sub.existence === "missing" ||
+              (sub.extraFlags || []).length > 0 ||
+              (sub.missingFlags || []).length > 0
           );
           if (subcommands.length > 0) {
             console.log(
@@ -523,6 +1483,16 @@ async function runScan(machinery, toml, flags) {
           }
           for (const sub of subcommandDrift) {
             const path = sub.commandPath.join(" ");
+            if (sub.existence === "missing") {
+              findings.push({
+                severity: "critical",
+                category: "declared-subcommand-missing",
+                message: `Declared ${cli} subcommand ${path} is absent from its parent command help. The scanner skipped its help probe to avoid root-help fallback false positives.`,
+              });
+              criticalCount++;
+              console.log(`  [probe] MISSING SUBCOMMAND: ${path}`);
+              continue;
+            }
             if ((sub.extraFlags || []).length > 0) {
               findings.push({
                 severity: "critical",
@@ -547,8 +1517,9 @@ async function runScan(machinery, toml, flags) {
           }
 
           // Diff vs prior help snapshot (if we have one).
-          if (priorHelp && priorHelp.discoveredFlags && Array.isArray(priorHelp.discoveredFlags)) {
-            const prevSet = new Set(priorHelp.discoveredFlags);
+          const previousFlags = normalizedDiscoveredFlags(priorHelp);
+          if (priorHelp && Array.isArray(previousFlags)) {
+            const prevSet = new Set(previousFlags);
             const currSet = new Set(helpProbe.discoveredFlags || []);
             const newSince = [...currSet].filter(f => !prevSet.has(f));
             const gone = [...prevSet].filter(f => !currSet.has(f));
@@ -571,6 +1542,22 @@ async function runScan(machinery, toml, flags) {
                 message: `Help text hash for ${cli} changed since last snapshot (subtle drift even if flag set looks stable).`,
               });
               console.log(`  [probe] help text hash drift vs prior (no net flag add/remove)`);
+            }
+          }
+
+          if (Array.isArray(prior?.rootCommands)) {
+            const priorRoot = new Set(prior.rootCommands);
+            const currentRoot = new Set(helpProbe.rootCommands || []);
+            const added = [...currentRoot].filter(command => !priorRoot.has(command));
+            const removed = [...priorRoot].filter(command => !currentRoot.has(command));
+            if (added.length > 0 || removed.length > 0) {
+              findings.push({
+                severity: "critical",
+                category: "installed-root-command-snapshot-drift",
+                message: `Root command surface for ${cli} changed since the prior snapshot (new: ${added.slice(0, 8).join(", ") || "none"}; removed: ${removed.slice(0, 8).join(", ") || "none"}).`,
+              });
+              criticalCount++;
+              console.log(`  [probe] ROOT COMMAND SURFACE CHANGED vs prior snapshot`);
             }
           }
         } else {
@@ -613,40 +1600,7 @@ async function runScan(machinery, toml, flags) {
     }
 
     if (flags.writeSnapshot && (flags.live || (helpProbe && helpProbe.available))) {
-      const snapshotPayload = {
-        cli,
-        fetchedAt: new Date().toISOString(),
-        sources: fetched ?? [],
-      };
-      if (helpProbe && helpProbe.available) {
-        snapshotPayload.helpSurface = {
-          probedAt: helpProbe.probedAt,
-          available: true,
-          version: helpProbe.versionHint || null,
-          flags: helpProbe.discoveredFlags || [],
-          helpHash: helpProbe.helpHash || null,
-          extraVsContract: helpProbe.extraFlags || [],
-          missingFromBinary: helpProbe.missingFlags || [],
-        };
-        snapshotPayload.subcommands = Object.fromEntries(
-          Object.entries(helpProbe.subcommands || {}).map(([path, sub]) => [
-            path,
-            {
-              commandPath: sub.commandPath,
-              probedAt: sub.probedAt,
-              available: sub.available,
-              flags: sub.discoveredFlags || [],
-              helpHash: sub.helpHash || null,
-              extraVsContract: sub.extraFlags || [],
-              missingFromBinary: sub.missingFlags || [],
-              risk: sub.risk,
-              exposure: sub.exposure,
-              tier: sub.tier,
-              summary: sub.summary,
-            },
-          ])
-        );
-      }
+      const snapshotPayload = buildSnapshotPayload(cli, fetched, priorSnapshot, helpProbe);
       const path = writeSnapshot(cli, snapshotPayload);
       console.log(`  [snapshot] wrote ${path}`);
     }
@@ -693,7 +1647,9 @@ async function main() {
   process.exit(code);
 }
 
-main().catch(err => {
-  console.error("[upstream-scan] fatal:", err);
-  process.exit(2);
-});
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch(err => {
+    console.error("[upstream-scan] fatal:", err);
+    process.exit(2);
+  });
+}

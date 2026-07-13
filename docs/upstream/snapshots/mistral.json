@@ -1,20 +1,36 @@
 {
+  "schemaVersion": "upstream-scan-snapshot.v2",
   "cli": "mistral",
-  "fetchedAt": "2026-07-09T23:54:26.404Z",
+  "fetchedAt": "2026-07-13T07:44:01.585Z",
   "sources": [
     {
       "url": "https://api.github.com/repos/mistralai/mistral-vibe/releases/latest",
       "ok": true,
       "status": 200,
-      "bytes": 19996,
-      "sha256": "60142ca56bcdd06ba98901a707ca2a12dc83c6134f3201316552494c163aeb69"
+      "bytes": 20006,
+      "sha256": "9e73596396db3977bb3f12e49a682ae4b2f11bc8bf35ddd739496b8573491974",
+      "semantic": {
+        "kind": "github-release.v1",
+        "sha256": "9d746cfb2fd3055a549832f671c0b08bcecc48907b6369a512006ab0cc87c182",
+        "fields": {
+          "tagName": "v2.19.1",
+          "name": "v2.19.1",
+          "draft": false,
+          "prerelease": false,
+          "publishedAt": "2026-07-09T11:39:15Z",
+          "targetCommitish": "30792a4cac2c2e5173c6b5a98739fbbf36324545",
+          "bodySha256": "f66e2414b5745d680c297ae0f225e9f24c35b26808bf41ab3670b57bfca6ac33"
+        }
+      }
     }
   ],
   "helpSurface": {
-    "probedAt": "2026-07-09T23:54:24.888Z",
+    "probedAt": "2026-07-13T07:44:00.102Z",
     "available": true,
-    "version": null,
-    "flags": [
+    "version": "vibe 2.19.1",
+    "targetVersion": "vibe 2.19.1",
+    "versionMatchesTarget": true,
+    "discoveredFlags": [
       "--add-dir",
       "--agent",
       "--auto-approve",
@@ -37,7 +53,10 @@
     ],
     "helpHash": "c12e04642b45bb3e33c371c619e626e5ba78439a14c2711b01a3fbd6cac530f4",
     "extraVsContract": [],
-    "missingFromBinary": []
+    "missingFromBinary": [],
+    "arityMismatches": [],
+    "enumMismatches": []
   },
+  "rootCommands": [],
   "subcommands": {}
 }

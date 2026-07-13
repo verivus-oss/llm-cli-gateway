@@ -180,7 +180,8 @@ Must cover:
     session continuity
   - VIBE_ACTIVE_MODEL behavior and model recovery path
   - permissionMode values emitted as --agent <mode>
-  - allowedTools as allow-list only and disallowedTools no-op warning
+  - allowedTools via repeated --enabled-tools and disallowedTools via repeated
+    --disabled-tools
   - explicit note that no cache statistics are currently surfaced
 """
 idempotent = true

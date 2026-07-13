@@ -1,12 +1,24 @@
 {
+  "schemaVersion": "upstream-scan-snapshot.v2",
   "cli": "claude",
-  "fetchedAt": "2026-06-18T21:19:07.540Z",
-  "sources": [],
+  "fetchedAt": "2026-07-13T07:43:43.549Z",
+  "sources": [
+    {
+      "url": "https://code.claude.com/docs/en/changelog.md",
+      "ok": true,
+      "status": 200,
+      "bytes": 458866,
+      "sha256": "0feb935be08c7a8d05c92725348ea9302672e5e12d1d2d6622a7db3bb5b2cd87",
+      "semantic": null
+    }
+  ],
   "helpSurface": {
-    "probedAt": "2026-06-18T21:19:07.539Z",
+    "probedAt": "2026-07-13T07:43:43.549Z",
     "available": true,
-    "version": null,
-    "flags": [
+    "version": "2.1.207 (Claude Code)",
+    "targetVersion": "claude 2.1.207",
+    "versionMatchesTarget": true,
+    "discoveredFlags": [
       "--add-dir",
       "--agent",
       "--agents",
@@ -15,8 +27,10 @@
       "--allowed-tools",
       "--append-system-prompt",
       "--ax-screen-reader",
+      "--background",
       "--bare",
       "--betas",
+      "--bg",
       "--brief",
       "--chrome",
       "--continue",
@@ -39,7 +53,6 @@
       "--json-schema",
       "--max-budget-usd",
       "--mcp-config",
-      "--mcp-debug",
       "--model",
       "--name",
       "--no-chrome",
@@ -66,18 +79,37 @@
       "--version",
       "--worktree"
     ],
-    "helpHash": "be2ba7d04d33d1a3d105806e06e364ddf45bf04e671bf88e3a954988fe5d0270",
+    "helpHash": "894f0f896580a523fa28a3fb1239d8b53458403352c1a35d2c4b2b54d2af78d2",
     "extraVsContract": [],
-    "missingFromBinary": []
+    "missingFromBinary": [],
+    "arityMismatches": [],
+    "enumMismatches": []
   },
+  "rootCommands": [
+    "agents",
+    "auth",
+    "auto-mode",
+    "doctor",
+    "gateway",
+    "install",
+    "mcp",
+    "plugin",
+    "plugins",
+    "project",
+    "setup-token",
+    "ultrareview",
+    "update",
+    "upgrade"
+  ],
   "subcommands": {
     "agents": {
       "commandPath": [
         "agents"
       ],
-      "probedAt": "2026-06-18T21:19:05.596Z",
+      "probedAt": "2026-07-13T07:43:41.447Z",
       "available": true,
-      "flags": [
+      "existence": "present",
+      "discoveredFlags": [
         "--add-dir",
         "--agent",
         "--all",
@@ -97,6 +129,8 @@
       "helpHash": "40c006a7e2049321d81d8c8db9d1ebc3419d811276fea504751d43f4acf0ba80",
       "extraVsContract": [],
       "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
       "risk": "writes_local_config",
       "exposure": "tracked_only",
       "tier": "inspect",
@@ -106,12 +140,15 @@
       "commandPath": [
         "auth"
       ],
-      "probedAt": "2026-06-18T21:19:05.759Z",
+      "probedAt": "2026-07-13T07:43:41.611Z",
       "available": true,
-      "flags": [],
+      "existence": "present",
+      "discoveredFlags": [],
       "helpHash": "bc651a5ac897fc64c101365e18bf8b91514d5311178305375467cbc466f02972",
       "extraVsContract": [],
       "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
       "risk": "auth",
       "exposure": "not_exposed",
       "tier": "catalog",
@@ -121,12 +158,15 @@
       "commandPath": [
         "auto-mode"
       ],
-      "probedAt": "2026-06-18T21:19:05.923Z",
+      "probedAt": "2026-07-13T07:43:41.771Z",
       "available": true,
-      "flags": [],
+      "existence": "present",
+      "discoveredFlags": [],
       "helpHash": "4de38be3402b3d42e350e1c4aeb3e69de3282b16d2f73ad33782c43fa191757b",
       "extraVsContract": [],
       "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
       "risk": "writes_local_config",
       "exposure": "tracked_only",
       "tier": "catalog",
@@ -136,29 +176,55 @@
       "commandPath": [
         "doctor"
       ],
-      "probedAt": "2026-06-18T21:19:06.087Z",
+      "probedAt": "2026-07-13T07:43:41.931Z",
       "available": true,
-      "flags": [],
-      "helpHash": "983ac24ae6da693c1610cc66b867d44274c30feeb3088d6384d1fd4582eb1fcf",
+      "existence": "present",
+      "discoveredFlags": [],
+      "helpHash": "765316f389fff84db3d64d74474d948f330eedd0b74bbb99c1a7b8975767ea6b",
       "extraVsContract": [],
       "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
       "risk": "read_only",
       "exposure": "tracked_only",
       "tier": "diagnostic",
       "summary": "Run Claude Code diagnostic checks."
     },
+    "gateway": {
+      "commandPath": [
+        "gateway"
+      ],
+      "probedAt": "2026-07-13T07:43:42.093Z",
+      "available": true,
+      "existence": "present",
+      "discoveredFlags": [
+        "--config"
+      ],
+      "helpHash": "2772d859320326d4b3277c088eea128e15cfa2babf8e508762823a84e652d4de",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
+      "risk": "starts_server",
+      "exposure": "not_exposed",
+      "tier": "catalog",
+      "summary": "Run Claude enterprise auth and telemetry gateway mode."
+    },
     "install": {
       "commandPath": [
         "install"
       ],
-      "probedAt": "2026-06-18T21:19:06.248Z",
+      "probedAt": "2026-07-13T07:43:42.252Z",
       "available": true,
-      "flags": [
+      "existence": "present",
+      "discoveredFlags": [
         "--force"
       ],
       "helpHash": "4ad9e987882643d5c22364af1644eefe711770936a8bb02f30315b980c40ec53",
       "extraVsContract": [],
       "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
       "risk": "writes_local_config",
       "exposure": "not_exposed",
       "tier": "catalog",
@@ -168,12 +234,15 @@
       "commandPath": [
         "mcp"
       ],
-      "probedAt": "2026-06-18T21:19:06.412Z",
+      "probedAt": "2026-07-13T07:43:42.418Z",
       "available": true,
-      "flags": [],
-      "helpHash": "94c6edd7160597a4aca1b9fba4a1bcee71b7fb770749713685685984c7724c37",
+      "existence": "present",
+      "discoveredFlags": [],
+      "helpHash": "77e3674b1481d1ef88cc02fa35e6a79b661ff79294919046e852ff3abafea2b6",
       "extraVsContract": [],
       "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
       "risk": "writes_local_config",
       "exposure": "tracked_only",
       "tier": "catalog",
@@ -183,12 +252,15 @@
       "commandPath": [
         "plugin"
       ],
-      "probedAt": "2026-06-18T21:19:06.576Z",
+      "probedAt": "2026-07-13T07:43:42.583Z",
       "available": true,
-      "flags": [],
-      "helpHash": "40b49d5c6e85314d2fe62675b1941d55749f922a373364fe3726e38120d3f85e",
+      "existence": "present",
+      "discoveredFlags": [],
+      "helpHash": "17792d32575e68354b57aa92393443bfc197e455b0b7cc81697026af2d231c25",
       "extraVsContract": [],
       "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
       "risk": "writes_local_config",
       "exposure": "tracked_only",
       "tier": "catalog",
@@ -198,12 +270,15 @@
       "commandPath": [
         "plugins"
       ],
-      "probedAt": "2026-06-18T21:19:06.737Z",
+      "probedAt": "2026-07-13T07:43:42.743Z",
       "available": true,
-      "flags": [],
-      "helpHash": "40b49d5c6e85314d2fe62675b1941d55749f922a373364fe3726e38120d3f85e",
+      "existence": "present",
+      "discoveredFlags": [],
+      "helpHash": "17792d32575e68354b57aa92393443bfc197e455b0b7cc81697026af2d231c25",
       "extraVsContract": [],
       "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
       "risk": "writes_local_config",
       "exposure": "tracked_only",
       "tier": "catalog",
@@ -213,12 +288,15 @@
       "commandPath": [
         "project"
       ],
-      "probedAt": "2026-06-18T21:19:06.896Z",
+      "probedAt": "2026-07-13T07:43:42.903Z",
       "available": true,
-      "flags": [],
+      "existence": "present",
+      "discoveredFlags": [],
       "helpHash": "f11126e66a4726b498cd18098faeccb70bae06939f19da456f2f4453b481e1e3",
       "extraVsContract": [],
       "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
       "risk": "writes_local_config",
       "exposure": "tracked_only",
       "tier": "catalog",
@@ -228,12 +306,15 @@
       "commandPath": [
         "setup-token"
       ],
-      "probedAt": "2026-06-18T21:19:07.059Z",
+      "probedAt": "2026-07-13T07:43:43.066Z",
       "available": true,
-      "flags": [],
+      "existence": "present",
+      "discoveredFlags": [],
       "helpHash": "b545e6f499482ee9854ed2a673686180f175b6d2151f56b300e7382b98c7efbc",
       "extraVsContract": [],
       "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
       "risk": "auth",
       "exposure": "not_exposed",
       "tier": "catalog",
@@ -243,15 +324,18 @@
       "commandPath": [
         "ultrareview"
       ],
-      "probedAt": "2026-06-18T21:19:07.222Z",
+      "probedAt": "2026-07-13T07:43:43.229Z",
       "available": true,
-      "flags": [
+      "existence": "present",
+      "discoveredFlags": [
         "--json",
         "--timeout"
       ],
       "helpHash": "3a14a12c451dc51c04b06d0a10f1056b5460adf6118646aa32600cdf0a52872f",
       "extraVsContract": [],
       "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
       "risk": "executes_agent",
       "exposure": "tracked_only",
       "tier": "diagnostic",
@@ -261,12 +345,15 @@
       "commandPath": [
         "update"
       ],
-      "probedAt": "2026-06-18T21:19:07.381Z",
+      "probedAt": "2026-07-13T07:43:43.388Z",
       "available": true,
-      "flags": [],
+      "existence": "present",
+      "discoveredFlags": [],
       "helpHash": "48859a9514d9d28a94ad11638d5a1497ac55ab7e8930ee050576ee59ec3e087c",
       "extraVsContract": [],
       "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
       "risk": "updates_binary",
       "exposure": "not_exposed",
       "tier": "catalog",
@@ -276,12 +363,15 @@
       "commandPath": [
         "upgrade"
       ],
-      "probedAt": "2026-06-18T21:19:07.539Z",
+      "probedAt": "2026-07-13T07:43:43.549Z",
       "available": true,
-      "flags": [],
+      "existence": "present",
+      "discoveredFlags": [],
       "helpHash": "48859a9514d9d28a94ad11638d5a1497ac55ab7e8930ee050576ee59ec3e087c",
       "extraVsContract": [],
       "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
       "risk": "updates_binary",
       "exposure": "not_exposed",
       "tier": "catalog",

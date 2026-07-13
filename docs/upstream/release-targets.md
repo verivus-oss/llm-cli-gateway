@@ -1,7 +1,8 @@
 # Provider CLI release targets
 
-This file records the exact upstream CLI versions a gateway release was
-validated against. It is release evidence, not a dependency lock.
+This file records exact upstream CLI versions used for gateway release
+validation and explicitly labelled pending contract probes. It is evidence, not
+a dependency lock.
 
 ## Meaning of "target/probed version"
 
@@ -28,7 +29,29 @@ If a provider CLI is not installed in the release validation environment, record
 `not installed` and say which contract-only checks were run instead. Do not
 claim installed-binary compatibility for that provider in the release notes.
 
-## Current release baseline
+## Current contract refresh baseline
+
+### Post-v2.17.0 contract refresh - 2026-07-13
+
+This is a pending contract-maintenance probe, not retrospective release
+evidence for v2.17.0. The values and hashes record the installed provider
+artifacts used to prepare the next contract update. Copy or re-probe this table
+for a release candidate before labelling it a release baseline.
+
+| Provider           | Gateway surface                                              | Executable     | Target/probed CLI version         | Artifact hashed           | Artifact SHA-256                                                   | Validation status                  | Notes for agents                                                                                                                      |
+| ------------------ | ------------------------------------------------------------ | -------------- | --------------------------------- | ------------------------- | ------------------------------------------------------------------ | ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| Claude Code        | `claude_request`, `claude_request_async`                     | `claude`       | `2.1.207 (Claude Code)`           | native Claude executable  | `85e7e988a392d859f90802ca21fb26e89d3c9ab527f5ed0b08df3955e34d5c83` | installed; version and help probed | No native ACP entrypoint. `manual` is an upstream permission mode; gateway `default` emits no upstream permission flag.               |
+| Codex CLI          | `codex_request`, `codex_request_async`, `codex_fork_session` | `codex`        | `codex-cli 0.144.3`               | native Codex payload      | `37e6f5953f191b04f7b62cb07dae90f51d0947ad89f0355665b421fbde28700b` | installed; version and help probed | No native ACP entrypoint. Gateway resume IDs must be real Codex session UUIDs.                                                        |
+| Gemini/Antigravity | `gemini_request`, `gemini_request_async`                     | `agy`          | `agy 1.1.1`                       | native `agy` executable   | `32e394fc0e63a41ed4e7ac05304224678d3e062d707effdc3bbff868767659f9` | installed; version and help probed | No native ACP entrypoint. This version adds upstream `--agent`, `agent`, and `agents` surface.                                        |
+| Grok CLI           | `grok_request`, `grok_request_async`                         | `grok`         | `grok 0.2.99 (b1b49ccb71)`        | native Grok payload       | `9fccba400d3808ec34a991892096b34c6f5846b2b118d355001601fd5428445c` | installed; version and help probed | Native `grok agent stdio` ACP entrypoint. `--fullscreen` persists local UI configuration; `wrap` executes an arbitrary local command. |
+| Mistral Vibe       | `mistral_request`, `mistral_request_async`                   | `vibe`         | `vibe 2.19.1`                     | Vibe console entry point  | `d4fa095cd807d7ddfcb134f4bd9a8914c5ac6b9acd8339ca1d5c36e0b200d29f` | installed; version and help probed | Native `vibe-acp` entrypoint. Gateway defaults to `accept-edits`; `auto-approve` is explicit opt-in.                                  |
+| Devin CLI          | `devin_request`, `devin_request_async`                       | `devin`        | `devin 3000.1.27 (0d4bf12e)`      | native Devin payload      | `6c0a5345055781da752b982c77b3179b5ece1b1bf1a38433156dad9564e2f079` | installed; version and help probed | Native `devin acp` entrypoint. `accept-edits` is an upstream permission mode.                                                         |
+| Cursor Agent CLI   | `cursor_request`, `cursor_request_async`                     | `cursor-agent` | `cursor-agent 2026.07.09-a3815c0` | Cursor Agent entry module | `856d7247e0ea94dff89c482ddb26360622f8d1b8f8846af0a3c827b9a6fb9355` | installed; version and help probed | Native `cursor-agent acp` entrypoint. Keep interactive and administrative root commands catalog-only unless separately approved.      |
+
+Additional ACP wrapper evidence: `vibe-acp` console entry point SHA-256
+`fde63f4648257bf80e234c82af3de7b7f38e05c7de560ed83eda76666883f016`.
+
+## Latest recorded release baseline
 
 ### v2.11.1 - 2026-06-22
 
@@ -37,14 +60,14 @@ were run against the current local provider CLI set; this release also switches
 the Mistral upstream source tracker from the volatile GitHub HTML releases page
 to the stable latest-release API endpoint.
 
-| Provider           | Gateway surface                                              | Executable | Target/probed CLI version        | Artifact hashed          | Artifact SHA-256                                                   | Validation status           | Notes for agents                                                                                                                 |
-| ------------------ | ------------------------------------------------------------ | ---------- | -------------------------------- | ------------------------ | ------------------------------------------------------------------ | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| Claude Code        | `claude_request`, `claude_request_async`                     | `claude`   | `2.1.185 (Claude Code)`          | local executable wrapper | `e1246338699f04ee0e627dee3f6d4ed7a0bab48e0514bde69c6dad43bc303952` | installed and probed        | ACP remains adapter-mediated/deferred; no native entrypoint at this target version.                                             |
-| Codex CLI          | `codex_request`, `codex_request_async`, `codex_fork_session` | `codex`    | `codex-cli 0.141.0`              | local executable wrapper | `d3be844c45c4fd89392536e56e1010963f94785592596b50cd0c45bb8a341406` | installed and probed        | ACP remains adapter-mediated/deferred; session IDs must be real Codex session UUIDs.                                            |
-| Gemini/Antigravity | `gemini_request`, `gemini_request_async`                     | `agy`      | `1.0.10`                         | local executable wrapper | `3c9d88067e3ab6e5c59139ccb4fd7e8650aa39264e2548fc99fe2f700a271f96` | installed and probed        | Antigravity `agy` remains an ACP absent-watchlist item; legacy Gemini CLI ACP evidence does not transfer.                       |
-| Grok CLI           | `grok_request`, `grok_request_async`                         | `grok`     | `grok 0.2.60 (474c2bbfc)`        | local executable wrapper | `ef3e4a8ea61d2272fb214f3cecfab6b7ec98f93705247b040f4264560fb5253f` | installed and ACP-probed    | Native ACP entrypoint `grok agent stdio` was reachable via read-only probe.                                                     |
-| Mistral Vibe       | `mistral_request`, `mistral_request_async`                   | `vibe`     | `vibe 2.17.1`                    | local executable wrapper | `e9ae14c61b133d566292521d2f68ec253d6e1db2d02128c022f08da949c9db41` | installed and ACP-probed    | Native ACP entrypoint `vibe-acp` was reachable via read-only probe; `vibe-acp` wrapper hash `0843d357ac8203e6d3ba69e08d8da8798cf3e0a4ddb3e3238fce40c941a1640f`. |
-| Devin CLI          | `devin_request`, `devin_request_async`                       | `devin`    | `devin 2026.7.23 (3bd47f77)`     | local executable wrapper | `6ee4303c159fe8234f462ba6a04dd2294db709e234cc1be952bef8afc475c2d5` | installed and ACP-probed    | Native ACP entrypoint `devin acp` was reachable via read-only probe.                                                            |
+| Provider           | Gateway surface                                              | Executable | Target/probed CLI version    | Artifact hashed          | Artifact SHA-256                                                   | Validation status        | Notes for agents                                                                                                                                                |
+| ------------------ | ------------------------------------------------------------ | ---------- | ---------------------------- | ------------------------ | ------------------------------------------------------------------ | ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Claude Code        | `claude_request`, `claude_request_async`                     | `claude`   | `2.1.185 (Claude Code)`      | local executable wrapper | `e1246338699f04ee0e627dee3f6d4ed7a0bab48e0514bde69c6dad43bc303952` | installed and probed     | ACP remains adapter-mediated/deferred; no native entrypoint at this target version.                                                                             |
+| Codex CLI          | `codex_request`, `codex_request_async`, `codex_fork_session` | `codex`    | `codex-cli 0.141.0`          | local executable wrapper | `d3be844c45c4fd89392536e56e1010963f94785592596b50cd0c45bb8a341406` | installed and probed     | ACP remains adapter-mediated/deferred; session IDs must be real Codex session UUIDs.                                                                            |
+| Gemini/Antigravity | `gemini_request`, `gemini_request_async`                     | `agy`      | `1.0.10`                     | local executable wrapper | `3c9d88067e3ab6e5c59139ccb4fd7e8650aa39264e2548fc99fe2f700a271f96` | installed and probed     | Antigravity `agy` remains an ACP absent-watchlist item; legacy Gemini CLI ACP evidence does not transfer.                                                       |
+| Grok CLI           | `grok_request`, `grok_request_async`                         | `grok`     | `grok 0.2.60 (474c2bbfc)`    | local executable wrapper | `ef3e4a8ea61d2272fb214f3cecfab6b7ec98f93705247b040f4264560fb5253f` | installed and ACP-probed | Native ACP entrypoint `grok agent stdio` was reachable via read-only probe.                                                                                     |
+| Mistral Vibe       | `mistral_request`, `mistral_request_async`                   | `vibe`     | `vibe 2.17.1`                | local executable wrapper | `e9ae14c61b133d566292521d2f68ec253d6e1db2d02128c022f08da949c9db41` | installed and ACP-probed | Native ACP entrypoint `vibe-acp` was reachable via read-only probe; `vibe-acp` wrapper hash `0843d357ac8203e6d3ba69e08d8da8798cf3e0a4ddb3e3238fce40c941a1640f`. |
+| Devin CLI          | `devin_request`, `devin_request_async`                       | `devin`    | `devin 2026.7.23 (3bd47f77)` | local executable wrapper | `6ee4303c159fe8234f462ba6a04dd2294db709e234cc1be952bef8afc475c2d5` | installed and ACP-probed | Native ACP entrypoint `devin acp` was reachable via read-only probe.                                                                                            |
 
 ### v2.10.0 - 2026-06-15
 

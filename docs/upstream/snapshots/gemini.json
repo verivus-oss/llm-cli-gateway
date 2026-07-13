@@ -1,0 +1,207 @@
+{
+  "schemaVersion": "upstream-scan-snapshot.v2",
+  "cli": "gemini",
+  "fetchedAt": "2026-07-13T07:53:11.347Z",
+  "sources": [
+    {
+      "url": "https://antigravity.google/docs/cli-overview",
+      "ok": true,
+      "status": 200,
+      "bytes": 22769,
+      "sha256": "c6b872324fb2de283b1f685384db0508bc93ce2bfe36b0810974e7f1996c0437",
+      "semantic": null
+    },
+    {
+      "url": "https://api.github.com/repos/google-antigravity/antigravity-cli/releases/latest",
+      "ok": true,
+      "status": 200,
+      "bytes": 13205,
+      "sha256": "0f5209124ebd123011afb448df8cd24f26366be4165b9ad4f897c4bf0bad4af7",
+      "semantic": {
+        "kind": "github-release.v1",
+        "sha256": "ed24d38b16d0229a45ddcdcf9a380599db1f94382846416bc57ee93cd0481ec9",
+        "fields": {
+          "tagName": "1.1.1",
+          "name": "1.1.1",
+          "draft": false,
+          "prerelease": false,
+          "publishedAt": "2026-07-10T03:40:13Z",
+          "targetCommitish": "main",
+          "bodySha256": "39e3fc8540fba9cea0b07ca9ab10308dbdb7d9e7b09a72e1d75a2a2cf020dc4d"
+        }
+      }
+    }
+  ],
+  "helpSurface": {
+    "probedAt": "2026-07-13T07:53:11.346Z",
+    "available": true,
+    "version": "1.1.1",
+    "targetVersion": "agy 1.1.1",
+    "versionMatchesTarget": true,
+    "discoveredFlags": [
+      "--add-dir",
+      "--agent",
+      "--continue",
+      "--conversation",
+      "--dangerously-skip-permissions",
+      "--log-file",
+      "--mode",
+      "--model",
+      "--new-project",
+      "--print",
+      "--print-timeout",
+      "--project",
+      "--prompt",
+      "--prompt-interactive",
+      "--sandbox"
+    ],
+    "helpHash": "17cb3cf61851e3b11b2cce94f687cd99c0ec8ddfc5d82687668840ac81a79078",
+    "extraVsContract": [],
+    "missingFromBinary": [],
+    "arityMismatches": [],
+    "enumMismatches": []
+  },
+  "rootCommands": [
+    "agent",
+    "agents",
+    "changelog",
+    "help",
+    "install",
+    "models",
+    "plugin",
+    "plugins",
+    "update"
+  ],
+  "subcommands": {
+    "agent": {
+      "commandPath": [
+        "agent"
+      ],
+      "probedAt": "2026-07-13T07:53:10.854Z",
+      "available": true,
+      "existence": "present",
+      "discoveredFlags": [],
+      "helpHash": "eaaeaae558793f23ee4dcecb70363d2a47bfd1d86d6106db5356d2ffbadf9895",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
+      "risk": "read_only",
+      "exposure": "tracked_only",
+      "tier": "inspect",
+      "summary": "List available Antigravity agents."
+    },
+    "changelog": {
+      "commandPath": [
+        "changelog"
+      ],
+      "probedAt": "2026-07-13T07:53:10.943Z",
+      "available": true,
+      "existence": "present",
+      "discoveredFlags": [],
+      "helpHash": "425721b90d242d83eaaff1206ccc91070ad0437a801a3d8c9ac0099334e40025",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
+      "risk": "read_only",
+      "exposure": "tracked_only",
+      "tier": "catalog",
+      "summary": "Show Antigravity CLI changelog and release notes."
+    },
+    "install": {
+      "commandPath": [
+        "install"
+      ],
+      "probedAt": "2026-07-13T07:53:11.032Z",
+      "available": true,
+      "existence": "present",
+      "discoveredFlags": [
+        "--dir",
+        "--skip-aliases",
+        "--skip-path"
+      ],
+      "helpHash": "a99871e368447e9f67b10c34d6458b5b9355c6212e6dbbe14921a0d9c268b7b0",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
+      "risk": "writes_local_config",
+      "exposure": "tracked_only",
+      "tier": "catalog",
+      "summary": "Configure Antigravity CLI environment paths and shell settings."
+    },
+    "models": {
+      "commandPath": [
+        "models"
+      ],
+      "probedAt": "2026-07-13T07:53:11.118Z",
+      "available": true,
+      "existence": "present",
+      "discoveredFlags": [],
+      "helpHash": "e29c04769129c3bc8703a38366369c2e4b816ca1e82c06f15935fe63a547a6d8",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
+      "risk": "read_only",
+      "exposure": "mcp_readonly",
+      "tier": "catalog",
+      "summary": "List available Antigravity models."
+    },
+    "plugin": {
+      "commandPath": [
+        "plugin"
+      ],
+      "probedAt": "2026-07-13T07:53:11.203Z",
+      "available": true,
+      "existence": "present",
+      "discoveredFlags": [],
+      "helpHash": "083b08302f0805e246869df7bae5fd4827035888fcec95cdcb362dd9583a1b64",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
+      "risk": "writes_local_config",
+      "exposure": "tracked_only",
+      "tier": "catalog",
+      "summary": "Manage Antigravity plugins."
+    },
+    "plugins": {
+      "commandPath": [
+        "plugins"
+      ],
+      "probedAt": "2026-07-13T07:53:11.273Z",
+      "available": true,
+      "existence": "present",
+      "discoveredFlags": [],
+      "helpHash": "083b08302f0805e246869df7bae5fd4827035888fcec95cdcb362dd9583a1b64",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
+      "risk": "writes_local_config",
+      "exposure": "tracked_only",
+      "tier": "catalog",
+      "summary": "Alias for Antigravity plugin management."
+    },
+    "update": {
+      "commandPath": [
+        "update"
+      ],
+      "probedAt": "2026-07-13T07:53:11.346Z",
+      "available": true,
+      "existence": "present",
+      "discoveredFlags": [],
+      "helpHash": "d27612f5866b5410e829422e2bf154afe0238e645e31d9bd3e422ca906b99f8e",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
+      "risk": "writes_local_config",
+      "exposure": "tracked_only",
+      "tier": "catalog",
+      "summary": "Update Antigravity CLI to the current release."
+    }
+  }
+}

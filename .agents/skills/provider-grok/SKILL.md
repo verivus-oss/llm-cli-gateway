@@ -17,13 +17,13 @@ resume rules here or in TOML.
 
 ## Identity
 
-| Field | Value |
-|-------|-------|
-| CliType | `grok` |
-| Executable | `grok` |
-| Distribution | vendor (no pinned npm/PyPI package recorded) |
-| Changelog | https://docs.x.ai/developers/release-notes.md |
-| Install docs | https://docs.x.ai/build/overview |
+| Field            | Value                                                                      |
+| ---------------- | -------------------------------------------------------------------------- |
+| CliType          | `grok`                                                                     |
+| Executable       | `grok`                                                                     |
+| Distribution     | vendor (no pinned npm/PyPI package recorded)                               |
+| Changelog        | https://docs.x.ai/developers/release-notes.md                              |
+| Install docs     | https://docs.x.ai/build/overview                                           |
 | Watch categories | `flags`, `permission-modes`, `session-resume`, `sandbox`, `output-formats` |
 
 These values mirror `UPSTREAM_CLI_CONTRACTS.grok.upstreamMetadata` and
@@ -99,9 +99,13 @@ A failed fetch is advisory (exit 0) unless `--fail-on-critical` is passed.
 
 ## Grok-specific notes (see the contract for exact rules)
 
-- Tested against grok 0.2.77 (44e77bec3a). Grok has a native ACP entrypoint (`grok agent stdio`); `grok_request` accepts `transport:"acp"` and `provider-acp://grok` reports the negotiated capability set (fails closed unless `[acp]` and the provider `runtime_enabled` gate are set).
+- Tested against grok 0.2.99 (b1b49ccb71). Grok has a native ACP entrypoint (`grok agent stdio`); `grok_request` accepts `transport:"acp"` and `provider-acp://grok` reports the negotiated capability set (fails closed unless `[acp]` and the provider `runtime_enabled` gate are set).
 - `--sandbox` is freeform passthrough (no `values` enum) per `grok --help`; `--permission-mode` / `--effort` / `--output-format` are closed enums.
 - `--allow` / `--deny` / `--rules` repeat once per rule.
+- `--fullscreen` persists UI configuration, so track it as acknowledged upstream
+  surface rather than gateway request argv. `setup --json` is a diagnostic form
+  of setup; `wrap` runs an arbitrary local command and must remain catalogued,
+  unexposed execution.
 - Continuity is real via `--resume` / `--continue`; auth must be set up first (`grok login` OAuth or `GROK_CODE_XAI_API_KEY`).
 - No cache statistics are surfaced by the Grok CLI.
 - `dashboard` subcommand is tracked (read_only risk, inspect tier, tracked_only exposure) in the subcommand catalog and `--probe-installed` drift detection. It opens the central Agent Dashboard view (grok 0.2.60 (474c2bbfc)+). Example:

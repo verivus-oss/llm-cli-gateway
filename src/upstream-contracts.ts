@@ -19,6 +19,13 @@ import { envWithExtendedPath, getExtendedPath, resolveCommandForSpawn } from "./
  */
 export type CliFlagArity = "none" | "one" | "optional" | "variadic";
 
+/**
+ * A fixed positional limit, or an intentionally unbounded command tail. The
+ * latter is catalog-only for commands such as `grok wrap <CMD>...`; it never
+ * widens a provider request argv allowlist.
+ */
+export type CliPositionalLimit = number | "variadic";
+
 export interface CliFlagContract {
   arity: CliFlagArity;
   values?: readonly string[];
@@ -133,12 +140,18 @@ export interface CliSubcommandContract {
   commandPath: readonly string[];
   helpArgs: readonly string[][];
   flags: Record<string, CliFlagContract>;
-  maxPositionals: number;
+  maxPositionals: CliPositionalLimit;
   acknowledgedUpstreamFlags?: readonly string[];
   aliases?: readonly string[];
   children?: Record<string, CliSubcommandContract>;
   risk: CliSubcommandRisk;
   exposure: CliSubcommandExposure;
+  /**
+   * Prevent this exact command from being projected into the generic provider
+   * admin tools. This is intentionally separate from `exposure`: catalog and
+   * request-tool exposure do not describe established admin sub-surfaces.
+   */
+  adminProjection?: "not_exposed";
   tier: CliSubcommandTier;
   tokenCost: CliSubcommandTokenCost;
   summary: string;
@@ -342,9 +355,9 @@ export const ACP_ENTRYPOINT_CONTRACTS: Record<CliType, AcpEntrypointContract> = 
     executable: "devin",
     entrypointArgs: ["acp"],
     targetVersion: PROVIDER_TARGET_VERSIONS.devin,
-    // `devin --version` is the safe probe; bare `devin acp` starts the live ACP
-    // server over stdio and is intentionally NOT probed here.
-    probeArgs: [["--version"]],
+    // `devin acp --help` confirms the real entrypoint without starting the
+    // live ACP server over stdio.
+    probeArgs: [["acp", "--help"]],
     // phase-5/8: replace limited-support label with discovered capability fact
     evidence:
       'Native ACP entrypoint `devin acp` (stdio JSON-RPC). Slice D1 manual initialize + session/new smoke passed (protocolVersion 1, agent "Affogato", session created). Third native runtime pilot; routing stays config-gated.',
@@ -365,13 +378,27 @@ export const ACP_ENTRYPOINT_CONTRACTS: Record<CliType, AcpEntrypointContract> = 
   },
 };
 
-const PERMISSION_MODES = [
+/**
+ * Literal values accepted by Claude's upstream `--permission-mode` flag.
+ * Gateway-only `default` intentionally stays out of this list because it
+ * means omit the flag, rather than send an undocumented upstream value.
+ */
+export const CLAUDE_WIRE_PERMISSION_MODES = [
+  "acceptEdits",
+  "auto",
+  "bypassPermissions",
+  "manual",
+  "dontAsk",
+  "plan",
+] as const;
+
+const GROK_PERMISSION_MODES = [
   "default",
   "acceptEdits",
-  "plan",
   "auto",
   "dontAsk",
   "bypassPermissions",
+  "plan",
 ] as const;
 
 const EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"] as const;
@@ -403,8 +430,9 @@ function subcommand(
     children?: Record<string, CliSubcommandContract>;
     tier?: CliSubcommandTier;
     tokenCost?: CliSubcommandTokenCost;
-    maxPositionals?: number;
+    maxPositionals?: CliPositionalLimit;
     exposure?: CliSubcommandExposure;
+    adminProjection?: "not_exposed";
     flagArities?: Record<string, CliFlagArity>;
     fixtures?: readonly CliContractFixture[];
     acknowledgedUpstreamFlags?: readonly string[];
@@ -420,6 +448,7 @@ function subcommand(
     children: options.children ?? {},
     risk,
     exposure: options.exposure ?? "tracked_only",
+    ...(options.adminProjection ? { adminProjection: options.adminProjection } : {}),
     tier: options.tier ?? "catalog",
     tokenCost: options.tokenCost ?? "small",
     summary,
@@ -466,6 +495,16 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       doctor: subcommand(["doctor"], "Run Claude Code diagnostic checks.", "read_only", [], {
         tier: "diagnostic",
       }),
+      gateway: subcommand(
+        ["gateway"],
+        "Run Claude enterprise auth and telemetry gateway mode.",
+        "starts_server",
+        ["--config"],
+        {
+          exposure: "not_exposed",
+          flagArities: { "--config": "one" },
+        }
+      ),
       mcp: subcommand(["mcp"], "Manage Claude MCP server configuration.", "writes_local_config"),
       plugin: subcommand(["plugin"], "Manage Claude plugins.", "writes_local_config", [], {
         aliases: ["plugins"],
@@ -608,7 +647,7 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       },
       "--output-format": {
         arity: "one",
-        values: ["json", "stream-json"],
+        values: ["text", "json", "stream-json"],
         description: "Machine-readable output format",
       },
       "--include-partial-messages": {
@@ -624,7 +663,7 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       "--disallowed-tools": { arity: "variadic", description: "Disallowed tool names/patterns" },
       "--permission-mode": {
         arity: "one",
-        values: PERMISSION_MODES,
+        values: CLAUDE_WIRE_PERMISSION_MODES,
         description: "Claude permission mode",
       },
       "--mcp-config": { arity: "one", description: "MCP config path" },
@@ -783,6 +822,18 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         expect: "pass",
       },
       {
+        id: "claude-permission-mode-manual",
+        description: "Claude 2.1.207 accepts the manual permission mode literal",
+        args: ["-p", "hello", "--permission-mode", "manual"],
+        expect: "pass",
+      },
+      {
+        id: "claude-permission-mode-default-gateway-only",
+        description: "Gateway default is represented by omitting the upstream flag",
+        args: ["-p", "hello", "--permission-mode", "default"],
+        expect: "fail",
+      },
+      {
         id: "claude-unsupported-flag",
         description: "Unsupported flag is rejected before spawn",
         args: ["-p", "hello", "--not-a-claude-flag"],
@@ -793,6 +844,12 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         id: "claude-fallback-model",
         description: "Phase 4 slice η: --fallback-model accepted",
         args: ["-p", "hello", "--fallback-model", "claude-haiku-4-5-20251001"],
+        expect: "pass",
+      },
+      {
+        id: "claude-output-format-text",
+        description: "Claude 2.1.207 accepts explicit text output format",
+        args: ["-p", "hello", "--output-format", "text"],
         expect: "pass",
       },
       {
@@ -922,8 +979,10 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
     upstream: "OpenAI Codex CLI",
     upstreamMetadata: {
       sourceUrls: [
-        "https://github.com/openai/codex/releases",
-        "https://developers.openai.com/codex/changelog",
+        "https://api.github.com/repos/openai/codex/releases/latest",
+        // The canonical RSS feed carries the full changelog without the
+        // volatile Astro shell used by the rendered documentation page.
+        "https://learn.chatgpt.com/docs/changelog/rss.xml",
       ],
       packageName: "@openai/codex",
       repo: "https://github.com/openai/codex",
@@ -1164,6 +1223,88 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         "destructive",
         ["--config", "--disable", "--enable"],
         { exposure: "not_exposed" }
+      ),
+      resume: subcommand(
+        ["resume"],
+        "Resume a saved interactive Codex session.",
+        "executes_agent",
+        [
+          "--add-dir",
+          "--all",
+          "--ask-for-approval",
+          "--cd",
+          "--config",
+          "--dangerously-bypass-approvals-and-sandbox",
+          "--dangerously-bypass-hook-trust",
+          "--disable",
+          "--enable",
+          "--image",
+          "--include-non-interactive",
+          "--last",
+          "--local-provider",
+          "--model",
+          "--no-alt-screen",
+          "--oss",
+          "--profile",
+          "--remote",
+          "--remote-auth-token-env",
+          "--sandbox",
+          "--search",
+          "--strict-config",
+          "--version",
+        ],
+        {
+          exposure: "not_exposed",
+          maxPositionals: 2,
+          flagArities: {
+            "--all": "none",
+            "--dangerously-bypass-approvals-and-sandbox": "none",
+            "--dangerously-bypass-hook-trust": "none",
+            "--include-non-interactive": "none",
+            "--last": "none",
+            "--no-alt-screen": "none",
+            "--oss": "none",
+            "--search": "none",
+            "--strict-config": "none",
+            "--version": "none",
+          },
+        }
+      ),
+      delete: subcommand(
+        ["delete"],
+        "Permanently delete a saved Codex session.",
+        "destructive",
+        [
+          "--add-dir",
+          "--cd",
+          "--config",
+          "--dangerously-bypass-approvals-and-sandbox",
+          "--dangerously-bypass-hook-trust",
+          "--disable",
+          "--enable",
+          "--force",
+          "--image",
+          "--local-provider",
+          "--model",
+          "--oss",
+          "--profile",
+          "--remote",
+          "--remote-auth-token-env",
+          "--sandbox",
+          "--strict-config",
+        ],
+        {
+          exposure: "not_exposed",
+          adminProjection: "not_exposed",
+          maxPositionals: 1,
+          flagArities: {
+            "--dangerously-bypass-approvals-and-sandbox": "none",
+            "--dangerously-bypass-hook-trust": "none",
+            "--force": "none",
+            "--oss": "none",
+            "--strict-config": "none",
+          },
+        }
       ),
       archive: subcommand(
         ["archive"],
@@ -1492,7 +1633,7 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
     upstreamMetadata: {
       sourceUrls: [
         "https://antigravity.google/docs/cli-overview",
-        "https://github.com/google-antigravity/antigravity-cli/releases",
+        "https://api.github.com/repos/google-antigravity/antigravity-cli/releases/latest",
       ],
       repo: "https://github.com/google-antigravity/antigravity-cli",
       installDocsUrl: "https://antigravity.google/docs/cli-getting-started",
@@ -1501,6 +1642,11 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
     },
     helpArgs: [["--help"]],
     subcommands: {
+      agent: subcommand(["agent"], "List available Antigravity agents.", "read_only", [], {
+        aliases: ["agents"],
+        tier: "inspect",
+        tokenCost: "tiny",
+      }),
       changelog: subcommand(
         ["changelog"],
         "Show Antigravity CLI changelog and release notes.",
@@ -1597,18 +1743,19 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       },
     },
     // Antigravity CLI long flags the gateway deliberately does not emit, as
-    // advertised by `agy --help` on 1.0.14. Probe acknowledgements only, never
+    // advertised by `agy --help` on 1.1.1. Probe acknowledgements only, never
     // an argv allowlist. (`-i` is a short alias of --prompt-interactive and
     // `--version` is a top-level command not listed in --help; neither is
     // parsed by the long-flag probe, so both were dropped to keep the probe
     // quiet.) `--project` / `--new-project` / `--print-timeout` graduated to the
     // flags allowlist.
-    // `--mode` (agy 1.1.0: set the agent execution mode accept-edits|plan) is
-    // advertised by `agy --help` but the gateway does not emit it: yolo maps to
+    // `--mode` (agy 1.1.0: set the agent execution mode accept-edits|plan) and
+    // `--agent` (agy 1.1.1: select a locally configured agent) are advertised
+    // by `agy --help`, but the gateway emits neither: yolo maps to
     // --dangerously-skip-permissions and auto_edit/plan approval modes are
     // rejected at request time (agy has no gateway-wired headless mode yet).
     // Acknowledge-only so drift stays quiet without widening the argv allowlist.
-    acknowledgedUpstreamFlags: ["--log-file", "--mode", "--prompt-interactive"],
+    acknowledgedUpstreamFlags: ["--agent", "--log-file", "--mode", "--prompt-interactive"],
     env: {},
     conformanceFixtures: [
       {
@@ -1621,6 +1768,13 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         id: "gemini-unsupported-flag",
         description: "Unsupported flag is rejected before spawn",
         args: ["--print", "hello", "--not-a-gemini-flag"],
+        expect: "fail",
+      },
+      {
+        id: "gemini-agent-selection-acknowledged-not-emitted",
+        description:
+          "Antigravity 1.1.1 advertises --agent, but gateway request argv stays closed until its security model is explicitly wired",
+        args: ["--print", "hello", "--agent", "reviewer"],
         expect: "fail",
       },
       {
@@ -1847,57 +2001,12 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
           ["setup"],
           "Configure Grok CLI local setup.",
           "writes_local_config",
-          ["--leader-socket"],
-          { exposure: "not_exposed" }
+          ["--json", "--leader-socket"],
+          {
+            exposure: "not_exposed",
+            flagArities: { "--json": "none", "--leader-socket": "one" },
+          }
         ),
-        ssh: subcommand(["ssh"], "Manage Grok SSH integration.", "network", ["--leader-socket"], {
-          // Grok 0.2.77: `grok ssh --help` inherits the full global agent flag
-          // surface (it launches an agent session over SSH). The gateway never
-          // emits `grok ssh`, so acknowledge the inherited flags to keep the
-          // subcommand drift probe quiet without widening any argv allowlist.
-          // (--debug / --debug-file are merged in via GROK_DEBUG_HELP_FLAGS.)
-          acknowledgedUpstreamFlags: [
-            "--agent",
-            "--agents",
-            "--allow",
-            "--always-approve",
-            "--best-of-n",
-            "--check",
-            "--continue",
-            "--cwd",
-            "--deny",
-            "--disable-web-search",
-            "--disallowed-tools",
-            "--experimental-memory",
-            "--fork-session",
-            "--json-schema",
-            "--max-turns",
-            "--minimal",
-            "--model",
-            "--no-alt-screen",
-            "--no-memory",
-            "--no-plan",
-            "--no-subagents",
-            "--oauth",
-            "--output-format",
-            "--permission-mode",
-            "--prompt-file",
-            "--prompt-json",
-            "--reasoning-effort",
-            "--restore-code",
-            "--resume",
-            "--rules",
-            "--sandbox",
-            "--session-id",
-            "--single",
-            "--system-prompt-override",
-            "--tools",
-            "--verbatim",
-            "--version",
-            "--worktree",
-            "--worktree-ref",
-          ],
-        }),
         trace: subcommand(
           ["trace"],
           "Inspect Grok trace data.",
@@ -1933,6 +2042,18 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
           "writes_local_config",
           ["--leader-socket"]
         ),
+        wrap: subcommand(
+          ["wrap"],
+          "Run an arbitrary command inside a local clipboard-forwarding PTY.",
+          "destructive",
+          ["--leader-socket"],
+          {
+            exposure: "not_exposed",
+            tier: "execute_candidate",
+            maxPositionals: "variadic",
+            flagArities: { "--leader-socket": "one" },
+          }
+        ),
       },
       GROK_DEBUG_HELP_FLAGS
     ),
@@ -1944,9 +2065,15 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
     // (it generates and tracks IDs), so letting a caller inject a specific
     // new-conversation UUID would collide with that tracking and with the
     // cross-principal session-isolation guarantees. Acknowledge-only.
-    // `--minimal` is a global grok 0.2.91 flag (root help + `grok ssh`); the
-    // gateway never emits it, so acknowledge-only here too.
-    acknowledgedUpstreamFlags: [...GROK_DEBUG_HELP_FLAGS, "--minimal", "--session-id"],
+    // `--minimal` and `--fullscreen` persist a UI preference, and
+    // `--session-id` conflicts with gateway-owned session lifecycle. The
+    // gateway never emits them, so keep all three acknowledgement-only.
+    acknowledgedUpstreamFlags: [
+      ...GROK_DEBUG_HELP_FLAGS,
+      "--fullscreen",
+      "--minimal",
+      "--session-id",
+    ],
     mcpTools: ["grok_request", "grok_request_async"],
     mcpParameters: [
       "prompt",
@@ -2013,7 +2140,7 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       "--always-approve": { arity: "none", description: "Approve tool use automatically" },
       "--permission-mode": {
         arity: "one",
-        values: PERMISSION_MODES,
+        values: GROK_PERMISSION_MODES,
         description: "Permission mode",
       },
       "--effort": { arity: "one", values: EFFORT_LEVELS, description: "Reasoning effort" },
@@ -2403,6 +2530,7 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       // any model call. Removed from the contract, builder, and request schema; the
       // mistral-effort-rejected / mistral-reasoning-effort-rejected fixtures lock it in.
       "--enabled-tools": { arity: "one", description: "Enabled tool" },
+      "--disabled-tools": { arity: "one", description: "Disabled tool" },
       "--resume": {
         arity: "optional",
         description: "Resume session by ID, or interactive picker when omitted",
@@ -2441,21 +2569,11 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
     },
     // These exist in Vibe's help but are not gateway request-time surfaces.
     // `--auto-approve` / `--yolo` are shortcuts for `--agent auto-approve`,
-    // `--check-upgrade` prompts for a binary update, `--worktree` is Vibe's
-    // native worktree flag (the gateway's slice-λ worktree spawns with cwd and
-    // never emits it), and `--disabled-tools` is the vibe 2.19.1 denylist
-    // counterpart to `--enabled-tools` (the gateway currently accepts
-    // `disallowedTools` but does not emit it at the CLI boundary; see
-    // prepareMistralRequest). Keep them acknowledged but absent from the argv
-    // allowlist so drift detection stays quiet while validateUpstreamCliArgs
-    // still rejects them as caller argv.
-    acknowledgedUpstreamFlags: [
-      "--auto-approve",
-      "--check-upgrade",
-      "--disabled-tools",
-      "--worktree",
-      "--yolo",
-    ],
+    // `--check-upgrade` prompts for a binary update, while `--worktree` is
+    // Vibe's native worktree flag. The gateway's worktree flow spawns with cwd
+    // and never emits either option, so acknowledge them without widening the
+    // request argv allowlist.
+    acknowledgedUpstreamFlags: ["--auto-approve", "--check-upgrade", "--worktree", "--yolo"],
     env: {
       VIBE_ACTIVE_MODEL: {
         arity: "one",
@@ -2587,12 +2705,11 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         expect: "fail",
       },
       {
-        id: "mistral-disabled-tools-rejected",
-        description:
-          "Vibe 2.19.1 adds --disabled-tools (denylist counterpart to --enabled-tools); the gateway does not emit it (disallowedTools is accepted but ignored) and rejects raw --disabled-tools as caller argv",
+        id: "mistral-disabled-tools",
+        description: "Vibe 2.19.1 --disabled-tools denylist is accepted once per tool",
         args: ["-p", "hello", "--disabled-tools", "shell"],
         env: { VIBE_ACTIVE_MODEL: "mistral-medium-3.5" },
-        expect: "fail",
+        expect: "pass",
       },
       {
         id: "mistral-resume-bare",
@@ -2608,14 +2725,117 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
     executable: "devin",
     upstream: "Cognition Devin CLI",
     upstreamMetadata: {
-      sourceUrls: ["https://cli.devin.ai/docs/reference/commands", "https://docs.devin.ai/cli"],
+      sourceUrls: [
+        "https://cli.devin.ai/docs/reference/commands",
+        "https://docs.devin.ai/cli",
+        "https://docs.devin.ai/cli/changelog/stable",
+      ],
       packageName: "devin",
       installDocsUrl: "https://docs.devin.ai/cli",
       releaseChannel: "vendor",
       watchCategories: ["flags", "subcommands", "permission-modes", "acp-entrypoint"],
     },
     helpArgs: [["--help"]],
-    subcommands: {},
+    subcommands: {
+      acp: subcommand(
+        ["acp"],
+        "Run the Devin Agent Client Protocol server over stdio.",
+        "starts_server",
+        ["--agent-type"],
+        {
+          exposure: "not_exposed",
+          flagArities: { "--agent-type": "one" },
+        }
+      ),
+      auth: subcommand(["auth"], "Manage Devin authentication state.", "auth", [], {
+        exposure: "not_exposed",
+        maxPositionals: "variadic",
+      }),
+      cloud: subcommand(
+        ["cloud"],
+        "Manage Devin Cloud environments, sandboxes, and builds.",
+        "network",
+        [],
+        { exposure: "not_exposed", maxPositionals: "variadic" }
+      ),
+      list: subcommand(
+        ["list"],
+        "List Devin sessions in the current directory.",
+        "read_only",
+        ["--format"],
+        {
+          aliases: ["ls"],
+          tier: "inspect",
+          flagArities: { "--format": "one" },
+        }
+      ),
+      mcp: subcommand(["mcp"], "Manage Devin MCP server connections.", "writes_local_config", [], {
+        exposure: "not_exposed",
+        maxPositionals: "variadic",
+      }),
+      plugins: subcommand(["plugins"], "Manage Devin plugins.", "writes_local_config", [], {
+        exposure: "not_exposed",
+        maxPositionals: "variadic",
+      }),
+      rules: subcommand(
+        ["rules"],
+        "Manage Devin always-on agent rules.",
+        "writes_local_config",
+        [],
+        { exposure: "not_exposed", maxPositionals: "variadic" }
+      ),
+      sandbox: subcommand(
+        ["sandbox"],
+        "Manage Devin process sandboxing.",
+        "writes_local_config",
+        [],
+        { exposure: "not_exposed", maxPositionals: "variadic" }
+      ),
+      setup: subcommand(
+        ["setup"],
+        "Run Devin interactive setup.",
+        "writes_local_config",
+        ["--force-manual-token-flow"],
+        {
+          exposure: "not_exposed",
+          flagArities: { "--force-manual-token-flow": "none" },
+        }
+      ),
+      shell: subcommand(
+        ["shell"],
+        "Integrate Devin with the local shell.",
+        "writes_local_config",
+        [],
+        { exposure: "not_exposed", maxPositionals: "variadic" }
+      ),
+      skills: subcommand(["skills"], "Manage Devin skills.", "writes_local_config", [], {
+        exposure: "not_exposed",
+        maxPositionals: "variadic",
+      }),
+      uninstall: subcommand(
+        ["uninstall"],
+        "Uninstall Devin and remove local data.",
+        "destructive",
+        ["--clean", "--force"],
+        {
+          exposure: "not_exposed",
+          flagArities: { "--clean": "none", "--force": "none" },
+        }
+      ),
+      update: subcommand(
+        ["update"],
+        "Check for or install Devin CLI updates.",
+        "updates_binary",
+        ["--force"],
+        {
+          exposure: "not_exposed",
+          flagArities: { "--force": "none" },
+        }
+      ),
+      version: subcommand(["version"], "Print Devin version information.", "read_only", [], {
+        tier: "diagnostic",
+      }),
+    },
     maxPositionals: 0,
     mcpTools: ["devin_request", "devin_request_async"],
     mcpParameters: [
@@ -2643,10 +2863,9 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       "--model": { arity: "one", description: "AI model for this session" },
       "--permission-mode": {
         arity: "one",
-        // Verified against devin 2026.7.23 (3bd47f77): `auto`, `smart`, `dangerous`.
-        values: ["auto", "smart", "dangerous"],
+        values: ["auto", "accept-edits", "smart", "dangerous"],
         description:
-          "Permission mode (auto = read-only auto-approve; smart = additionally auto-runs safe actions per fast model; dangerous = approve all)",
+          "Permission mode (auto = read-only auto-approve; accept-edits = also auto-approve workspace edits; smart = additionally auto-runs safe actions per fast model; dangerous = approve all)",
       },
       "--prompt-file": { arity: "one", description: "Load the initial prompt from a file" },
       "--config": { arity: "one", description: "Config file path" },
@@ -2699,6 +2918,12 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         id: "devin-permission-mode-auto",
         description: "Valid --permission-mode 'auto' accepted",
         args: ["-p", "hello", "--permission-mode", "auto"],
+        expect: "pass",
+      },
+      {
+        id: "devin-permission-mode-accept-edits",
+        description: "Valid --permission-mode 'accept-edits' accepted",
+        args: ["-p", "hello", "--permission-mode", "accept-edits"],
         expect: "pass",
       },
       {
@@ -2791,7 +3016,111 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       ],
     },
     helpArgs: [["--help"]],
-    subcommands: {},
+    subcommands: {
+      about: subcommand(
+        ["about"],
+        "Display Cursor Agent version, system, and account information.",
+        "read_only",
+        ["--format"],
+        { tier: "diagnostic", flagArities: { "--format": "one" } }
+      ),
+      agent: subcommand(
+        ["agent"],
+        "Start an interactive Cursor Agent session.",
+        "executes_agent",
+        [],
+        { exposure: "not_exposed", maxPositionals: "variadic" }
+      ),
+      "create-chat": subcommand(
+        ["create-chat"],
+        "Create a new Cursor chat and return its ID.",
+        "network",
+        [],
+        { exposure: "not_exposed" }
+      ),
+      "generate-rule": subcommand(
+        ["generate-rule"],
+        "Generate a Cursor rule through interactive prompts.",
+        "writes_local_config",
+        [],
+        { aliases: ["rule"], exposure: "not_exposed", maxPositionals: "variadic" }
+      ),
+      "install-shell-integration": subcommand(
+        ["install-shell-integration"],
+        "Install Cursor shell integration.",
+        "writes_local_config",
+        [],
+        { exposure: "not_exposed" }
+      ),
+      login: subcommand(["login"], "Authenticate with Cursor.", "auth", [], {
+        exposure: "not_exposed",
+      }),
+      logout: subcommand(["logout"], "Clear Cursor authentication state.", "auth", [], {
+        exposure: "not_exposed",
+      }),
+      ls: subcommand(["ls"], "Resume a Cursor chat session.", "executes_agent", [], {
+        exposure: "not_exposed",
+        maxPositionals: "variadic",
+      }),
+      mcp: subcommand(
+        ["mcp"],
+        "Manage Cursor MCP server configuration.",
+        "writes_local_config",
+        [],
+        { exposure: "not_exposed", maxPositionals: "variadic" }
+      ),
+      models: subcommand(["models"], "List Cursor account models.", "read_only", [], {
+        tier: "inspect",
+      }),
+      resume: subcommand(["resume"], "Resume the latest Cursor chat.", "executes_agent", [], {
+        exposure: "not_exposed",
+        maxPositionals: "variadic",
+      }),
+      status: subcommand(
+        ["status"],
+        "View Cursor authentication status.",
+        "read_only",
+        ["--format"],
+        {
+          aliases: ["whoami"],
+          tier: "inspect",
+          flagArities: { "--format": "one" },
+        }
+      ),
+      "uninstall-shell-integration": subcommand(
+        ["uninstall-shell-integration"],
+        "Remove Cursor shell integration.",
+        "writes_local_config",
+        [],
+        { exposure: "not_exposed" }
+      ),
+      update: subcommand(["update"], "Update Cursor Agent.", "updates_binary", [], {
+        exposure: "not_exposed",
+      }),
+      worker: subcommand(
+        ["worker"],
+        "Start a private Cursor cloud worker for local agent runs.",
+        "starts_server",
+        [
+          "--auth-token-file",
+          "--data-dir",
+          "--debug",
+          "--idle-release-timeout",
+          "--label",
+          "--labels-file",
+          "--management-addr",
+          "--name",
+          "--pool",
+          "--pool-name",
+          "--single-use",
+          "--worker-dir",
+        ],
+        {
+          exposure: "not_exposed",
+          flagArities: { "--debug": "none", "--single-use": "none" },
+        }
+      ),
+    },
     maxPositionals: 1,
     mcpTools: ["cursor_request", "cursor_request_async"],
     mcpParameters: [
@@ -3121,6 +3450,7 @@ export function serializeCliSubcommandContract(
     })),
     risk: contract.risk,
     exposure: contract.exposure,
+    adminProjection: contract.adminProjection ?? null,
     tier: contract.tier,
     tokenCost: contract.tokenCost,
     summary: contract.summary,
@@ -3290,7 +3620,7 @@ export function validateUpstreamCliSubcommandArgs(
     }
   }
 
-  if (positionals.length > contract.maxPositionals) {
+  if (contract.maxPositionals !== "variadic" && positionals.length > contract.maxPositionals) {
     violations.push({
       cli,
       message: `${cli} subcommand "${subcommandKey(commandPath)}" has ${positionals.length} positional values; upstream subcommand contract allows ${contract.maxPositionals}`,

@@ -38,6 +38,21 @@ describe("upstream provider sources (scanner input)", () => {
     }
   });
 
+  it("uses stable GitHub API release sources for release monitoring", () => {
+    expect(UPSTREAM_CLI_CONTRACTS.codex.upstreamMetadata?.sourceUrls).toContain(
+      "https://api.github.com/repos/openai/codex/releases/latest"
+    );
+    expect(UPSTREAM_CLI_CONTRACTS.gemini.upstreamMetadata?.sourceUrls).toContain(
+      "https://api.github.com/repos/google-antigravity/antigravity-cli/releases/latest"
+    );
+  });
+
+  it("uses Codex's canonical RSS changelog feed instead of the volatile rendered page", () => {
+    const codexSources = UPSTREAM_CLI_CONTRACTS.codex.upstreamMetadata?.sourceUrls ?? [];
+    expect(codexSources).toContain("https://learn.chatgpt.com/docs/changelog/rss.xml");
+    expect(codexSources).not.toContain("https://developers.openai.com/codex/changelog");
+  });
+
   it("keys providers in the TOML by canonical CliType only", () => {
     const toml = loadToml();
     expect(new Set(toml.meta.providers)).toEqual(new Set(CLI_TYPES));

@@ -18,7 +18,7 @@
  * Data-only: nothing here spawns a process, runs a subcommand, or performs I/O.
  * Runtime capability discovery (probing the installed executable) is phase-1b.
  * Every value below is grounded in installed `--help`/`--version` evidence
- * captured on 2026-07-01 and the plan's `[providers.*]` sections; no capability
+ * captured on 2026-07-13 and the plan's `[providers.*]` sections; no capability
  * is invented.
  *
  * IMPORTANT (import direction): this module imports ONLY from
@@ -352,13 +352,13 @@ export interface ProviderDefinition {
  * all follow automatically.
  */
 export const PROVIDER_TARGET_VERSIONS: Record<CliType, string> = {
-  claude: "claude 2.1.206",
-  codex: "codex-cli 0.144.1",
-  gemini: "agy 1.1.0",
-  grok: "grok 0.2.93 (f00f96316d)",
+  claude: "claude 2.1.207",
+  codex: "codex-cli 0.144.3",
+  gemini: "agy 1.1.1",
+  grok: "grok 0.2.99 (b1b49ccb71)",
   mistral: "vibe 2.19.1",
   devin: "devin 3000.1.27 (0d4bf12e)",
-  cursor: "cursor-agent 2026.07.09-c59fd9a",
+  cursor: "cursor-agent 2026.07.09-a3815c0",
 };
 
 const PROVIDER_DEFINITIONS = {

@@ -2,8 +2,8 @@
  * U22 — Mistral Vibe handler tests.
  *
  * These tests exercise the pure helpers in request-helpers.ts (the parts that
- * matter for U22's five hard divergences) — model-via-env, --agent passthrough,
- * --enabled-tools allowlist, and the silent-ignore of disallowedTools.
+ * matter for U22's five hard divergences): model-via-env, --agent passthrough,
+ * --enabled-tools allowlist, and --disabled-tools denylist emission.
  */
 import { describe, it, expect } from "vitest";
 import {
@@ -67,19 +67,26 @@ describe("U22 prepareMistralRequest — Vibe divergences", () => {
     expect(result.args[positions[1] + 1]).toBe("write");
   });
 
-  it("accepts disallowedTools but produces no CLI flag and flags it as ignored", () => {
+  it('emits "--disabled-tools <tool>" once per disallowedTool after enabled tools', () => {
     const result = prepareMistralRequest({
       prompt: "x",
-      disallowedTools: ["bash"],
+      allowedTools: ["read", "write"],
+      disallowedTools: ["bash", "network"],
     });
     expect(result.args).not.toContain("--disallowed-tools");
-    expect(result.args).not.toContain("--disabled-tools");
-    expect(result.ignoredDisallowedTools).toBe(true);
+    const positions = result.args
+      .map((arg, idx) => (arg === "--disabled-tools" ? idx : -1))
+      .filter(idx => idx !== -1);
+    expect(positions).toHaveLength(2);
+    expect(result.args[positions[0] + 1]).toBe("bash");
+    expect(result.args[positions[1] + 1]).toBe("network");
+    expect(positions[0]).toBeGreaterThan(result.args.lastIndexOf("--enabled-tools"));
+    expect(result).not.toHaveProperty("ignoredDisallowedTools");
   });
 
-  it("does not flag ignoredDisallowedTools when disallowedTools is empty", () => {
+  it("does not emit --disabled-tools when disallowedTools is empty", () => {
     const result = prepareMistralRequest({ prompt: "x", disallowedTools: [] });
-    expect(result.ignoredDisallowedTools).toBe(false);
+    expect(result.args).not.toContain("--disabled-tools");
   });
 
   it("emits outputFormat when supplied", () => {

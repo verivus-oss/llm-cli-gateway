@@ -17,15 +17,15 @@ permission modes, output formats, or resume rules here or in TOML.
 
 ## Identity
 
-| Field            | Value                                                                            |
-| ---------------- | -------------------------------------------------------------------------------- |
-| CliType          | `gemini`                                                                         |
-| Executable       | `agy`                                                                            |
-| Package          | vendor installer / self-update                                                   |
-| Repo             | https://github.com/google-antigravity/antigravity-cli                            |
-| Docs             | https://antigravity.google/docs/cli-overview                                     |
-| Changelogs       | `agy changelog` · https://github.com/google-antigravity/antigravity-cli/releases |
-| Watch categories | `flags`, `permissions`, `session-resume`, `subcommands`                          |
+| Field            | Value                                                                                             |
+| ---------------- | ------------------------------------------------------------------------------------------------- |
+| CliType          | `gemini`                                                                                          |
+| Executable       | `agy`                                                                                             |
+| Package          | vendor installer / self-update                                                                    |
+| Repo             | https://github.com/google-antigravity/antigravity-cli                                             |
+| Docs             | https://antigravity.google/docs/cli-overview                                                      |
+| Changelogs       | `agy changelog` · https://api.github.com/repos/google-antigravity/antigravity-cli/releases/latest |
+| Watch categories | `flags`, `permissions`, `session-resume`, `subcommands`                                           |
 
 These values mirror `UPSTREAM_CLI_CONTRACTS.gemini.upstreamMetadata` and
 `docs/upstream/provider-sources.dag.toml` (`[providers.gemini]`). The TypeScript
@@ -87,11 +87,14 @@ is set.
 
 ## Antigravity-specific notes (see the contract for exact rules)
 
-- Tested against agy 1.0.14. Antigravity (`agy`) has no native ACP entrypoint; legacy Gemini CLI ACP evidence does not transfer, so `provider-acp://gemini` reports `native:false` (no methods, no adapter-as-native masquerade) and `gemini_request` exposes no `transport:"acp"` selector.
+- Tested against agy 1.1.1. Antigravity (`agy`) has no native ACP entrypoint; legacy Gemini CLI ACP evidence does not transfer, so `provider-acp://gemini` reports `native:false` (no methods, no adapter-as-native masquerade) and `gemini_request` exposes no `transport:"acp"` selector.
 - The public MCP tool names stay `gemini_request` / `gemini_request_async`, but
   the spawned executable is `agy`.
 - Antigravity print mode uses `--print <prompt-as-positional>`, not Gemini's
   old `-p <prompt>` shape.
+- agy 1.1.1 adds root `--agent` plus `agent` and `agents` commands. Track and
+  acknowledge those upstream-only controls before exposing them through a
+  request schema; custom agent selection can change tool and permission posture.
 - `yolo` maps to `--dangerously-skip-permissions`; unsupported Gemini-only
   knobs such as `--approval-mode`, `-o`, policy files, MCP allowlists, and
   attachment tokens must fail before spawn unless Antigravity adds an equivalent.

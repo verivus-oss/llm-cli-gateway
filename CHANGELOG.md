@@ -4,6 +4,15 @@ All notable changes to the llm-cli-gateway project.
 
 ## [Unreleased]
 
+## [2.17.1] - 2026-07-13
+
+### Fixed
+
+- **Upstream CLI contract refresh.** Updated installed-provider contracts for
+  Claude, Codex, Antigravity, Grok, Mistral Vibe, Devin, and Cursor Agent.
+  Vibe now emits its supported `--disabled-tools` denylist control instead of
+  silently ignoring `disallowedTools`.
+
 ## [2.17.0] - 2026-07-13
 
 ### Added

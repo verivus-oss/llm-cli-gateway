@@ -17,13 +17,13 @@ the env-model rule, or resume rules here or in TOML.
 
 ## Identity
 
-| Field | Value |
-|-------|-------|
-| CliType | `mistral` |
-| Executable | `vibe` |
-| Package | `mistral-vibe` (pypi; also uv / brew) |
-| Repo | https://github.com/mistralai/mistral-vibe |
-| Changelog | https://github.com/mistralai/mistral-vibe/releases |
+| Field            | Value                                                                    |
+| ---------------- | ------------------------------------------------------------------------ |
+| CliType          | `mistral`                                                                |
+| Executable       | `vibe`                                                                   |
+| Package          | `mistral-vibe` (pypi; also uv / brew)                                    |
+| Repo             | https://github.com/mistralai/mistral-vibe                                |
+| Release API      | https://api.github.com/repos/mistralai/mistral-vibe/releases/latest      |
 | Watch categories | `flags`, `agent-modes`, `session-logging`, `output-formats`, `env-model` |
 
 These values mirror `UPSTREAM_CLI_CONTRACTS.mistral.upstreamMetadata` and
@@ -51,10 +51,12 @@ metadata is authoritative; the TOML is scanner input only.
 3. Omit `model` unless the caller explicitly asked for a specific variant; the
    gateway selects the resolved model through `VIBE_ACTIVE_MODEL`.
 4. The gateway emits `--agent <mode>` explicitly and defaults programmatic
-   callers to `auto-approve`. Use `permissionMode:"plan"` or another supported
-   Vibe mode when you need stricter behaviour.
-5. `allowedTools` maps to repeated `--enabled-tools` flags. `disallowedTools`
-   is accepted for caller parity but ignored because Vibe has no deny-list flag.
+   callers to `accept-edits`. Use `permissionMode:"plan"` or another supported
+   Vibe mode when you need stricter behaviour; `auto-approve` is deliberate
+   opt-in only.
+5. `allowedTools` maps to repeated `--enabled-tools` flags and
+   `disallowedTools` maps to repeated `--disabled-tools` flags. Check
+   `provider_tool_capabilities` before relying on either control.
 6. `mcpServers` is approval tracking only; Vibe owns its MCP configuration.
 7. Vibe supports output format, trust, working directory/additional directories,
    workspace/worktree, session, and max-turn/price/token controls as reported
@@ -78,7 +80,7 @@ A failed fetch is advisory (exit 0) unless `--fail-on-critical` is passed.
 ## Update procedure when the upstream CLI changes
 
 1. **Edit the contract** in `src/upstream-contracts.ts` (`UPSTREAM_CLI_CONTRACTS.mistral`):
-   flag arities, the `--agent` / `--output` enums, the `--max-*` patterns, and the
+   flag arities, the `--agent` behavior and `--output` enum, the `--max-*` patterns, and the
    `VIBE_ACTIVE_MODEL` env contract all live here.
 2. **Add a conformance fixture** proving the new accept/reject behaviour
    (mirror the existing `mistral-*` fixtures, including the env fixture).
@@ -88,9 +90,11 @@ A failed fetch is advisory (exit 0) unless `--fail-on-critical` is passed.
 
 ## Mistral-specific notes (see the contract for exact rules)
 
-- Tested against vibe 2.18.3. Vibe has a native ACP entrypoint (`vibe-acp`); `mistral_request` accepts `transport:"acp"` and `provider-acp://mistral` reports the negotiated capability set (fails closed unless `[acp]` and the provider `runtime_enabled` gate are set).
+- Tested against vibe 2.19.1. Vibe has a native ACP entrypoint (`vibe-acp`); `mistral_request` accepts `transport:"acp"` and `provider-acp://mistral` reports the negotiated capability set (fails closed unless `[acp]` and the provider `runtime_enabled` gate are set).
 - Model is selected via the `VIBE_ACTIVE_MODEL` env var (validated by the env contract), not a `--model` flag.
-- Permission/agent modes are emitted as `--agent <mode>` from a closed enum; the gateway defaults programmatic callers to `auto-approve`.
+- Permission/agent names are emitted as `--agent <name>`. Vibe accepts its built-ins, install-gated agents, and custom agents; the gateway defaults programmatic callers to `accept-edits`, with `auto-approve` available only through an explicit opt-in.
+- Vibe 2.19.1 advertises repeatable `--disabled-tools`; the gateway maps
+  `disallowedTools` to that flag once per tool.
 - `--output` formats (`text`, `json`, `streaming`) are a closed enum; `--max-price` is decimal-only (no scientific notation) to match `MAX_PRICE_SCHEMA`.
 - Continuity is real via `--resume` / `--continue`; current Vibe defaults session logging on, and `doctor --json` flags an explicit `[session_logging] enabled = false`.
 - No cache statistics are surfaced by the Vibe CLI.
