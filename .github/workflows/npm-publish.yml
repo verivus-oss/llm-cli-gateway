@@ -42,11 +42,17 @@ jobs:
       # The npm trusted-publisher record binds this GitHub-hosted job to this
       # package, workflow filename, and npm-publish environment. Do not rename
       # the workflow or environment without updating that npm configuration.
-      # Keep publish-token environment variables unset so npm exchanges the
-      # GitHub OIDC identity for short-lived publish credentials.
+      # Keep publish-token environment variables absent so npm exchanges the
+      # GitHub OIDC identity for short-lived publish credentials. setup-node
+      # v6 writes its fixed noncredential NODE_AUTH_TOKEN placeholder when a
+      # registry URL is configured; reject any other value.
       - name: Verify trusted-publishing prerequisites
         run: |
-          test -z "${NODE_AUTH_TOKEN:-}"
+          node_auth_token="${NODE_AUTH_TOKEN:-}"
+          if [ -n "$node_auth_token" ] && [ "$node_auth_token" != "XXXXX-XXXXX-XXXXX-XXXXX" ]; then
+            echo "NODE_AUTH_TOKEN must be unset or setup-node's noncredential placeholder"
+            exit 1
+          fi
           test -z "${NPM_TOKEN:-}"
           test -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}"
           test -n "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}"
