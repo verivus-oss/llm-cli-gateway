@@ -797,11 +797,14 @@ Options:
       expect((ACP_ENTRYPOINT_CONTRACTS.claude.adapterCandidates ?? []).length).toBeGreaterThan(0);
     });
 
-    it("keeps agy on the watchlist with no ACP surface at agy 1.1.2", () => {
+    it("keeps agy on the watchlist with no ACP surface at agy 1.1.3", () => {
       const agy = ACP_ENTRYPOINT_CONTRACTS.gemini;
       expect(agy.status).toBe("absent_watchlist");
       expect(agy.executable).toBe("agy");
-      expect(agy.targetVersion).toContain("1.1.2");
+      // Deliberately a literal, not derived from PROVIDER_TARGET_VERSIONS: bumping
+      // the target must fail here so the ACP claim is re-probed rather than
+      // restamped. Re-probed at agy 1.1.3: absent_watchlist, no native entrypoint.
+      expect(agy.targetVersion).toContain("1.1.3");
       expect(agy.entrypointArgs).toEqual([]);
       expect(agy.probeArgs).toEqual([]);
     });

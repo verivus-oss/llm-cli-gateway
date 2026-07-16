@@ -125,7 +125,7 @@ A failed fetch is advisory (exit 0) unless `--fail-on-critical` is passed.
 
 ## Grok-specific notes (see the contract for exact rules)
 
-- Tested against grok 0.2.99 (b1b49ccb71). Grok has a native ACP entrypoint (`grok agent stdio`); `grok_request` accepts `transport:"acp"` and `provider-acp://grok` reports the negotiated capability set (fails closed unless `[acp]` and the provider `runtime_enabled` gate are set).
+- Tested against grok 0.2.101 (5bc4b5dfad). Grok has a native ACP entrypoint (`grok agent stdio`); `grok_request` accepts `transport:"acp"` and `provider-acp://grok` reports the negotiated capability set (fails closed unless `[acp]` and the provider `runtime_enabled` gate are set).
 - `--sandbox` is freeform passthrough (no `values` enum) per `grok --help`; `--permission-mode` / `--effort` / `--output-format` are closed enums.
 - `--allow` / `--deny` / `--rules` repeat once per rule.
 - `--fullscreen` persists UI configuration, so track it as acknowledged upstream

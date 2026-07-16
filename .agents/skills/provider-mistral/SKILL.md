@@ -118,10 +118,10 @@ A failed fetch is advisory (exit 0) unless `--fail-on-critical` is passed.
 
 ## Mistral-specific notes (see the contract for exact rules)
 
-- Tested against vibe 2.19.1. Vibe has a native ACP entrypoint (`vibe-acp`); `mistral_request` accepts `transport:"acp"` and `provider-acp://mistral` reports the negotiated capability set (fails closed unless `[acp]` and the provider `runtime_enabled` gate are set). ACP rejects `approvalStrategy:"mcp_managed"` and any `approvalPolicy`; the Mistral CLI rejects them as well because managed approval is Claude-only.
+- Tested against vibe 2.20.0. Vibe has a native ACP entrypoint (`vibe-acp`); `mistral_request` accepts `transport:"acp"` and `provider-acp://mistral` reports the negotiated capability set (fails closed unless `[acp]` and the provider `runtime_enabled` gate are set). ACP rejects `approvalStrategy:"mcp_managed"` and any `approvalPolicy`; the Mistral CLI rejects them as well because managed approval is Claude-only.
 - Model is selected via the `VIBE_ACTIVE_MODEL` env var (validated by the env contract), not a `--model` flag.
 - Permission/agent names are emitted as `--agent <name>`. Legacy requests may use Vibe built-ins, install-gated agents, and custom agents; the gateway defaults programmatic callers to `accept-edits`.
-- Vibe 2.19.1 advertises repeatable `--disabled-tools`; the gateway maps
+- Vibe 2.20.0 advertises repeatable `--disabled-tools`; the gateway maps
   `disallowedTools` to that flag once per tool.
 - `--output` formats (`text`, `json`, `streaming`) are a closed enum; `--max-price` is decimal-only (no scientific notation) to match `MAX_PRICE_SCHEMA`.
 - Continuity is real via `--resume` / `--continue`; current Vibe defaults session logging on, and `doctor --json` flags an explicit `[session_logging] enabled = false`.

@@ -855,6 +855,7 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       "--dangerously-skip-permissions",
       "--disallowed", // alias of --disallowed-tools
       "--file",
+      "--forward-subagent-text", // forwards subagent text/thinking into output; gateway captures the final reply
       "--from-pr",
       "--ide",
       "--no-chrome",

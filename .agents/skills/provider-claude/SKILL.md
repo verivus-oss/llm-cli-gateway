@@ -136,7 +136,7 @@ never breaks the default release gate.
 
 ## Claude-specific notes (see the contract for exact rules)
 
-- Tested against claude 2.1.210. Claude Code is CLI-first with no native ACP entrypoint at this version; `provider-acp://claude` reports `native:false` (no methods, no adapter-as-native masquerade) and `claude_request` exposes no `transport:"acp"` selector.
+- Tested against claude 2.1.211. Claude Code is CLI-first with no native ACP entrypoint at this version; `provider-acp://claude` reports `native:false` (no methods, no adapter-as-native masquerade) and `claude_request` exposes no `transport:"acp"` selector.
 - `-p` has `optional` arity: standalone in slice κ stdin mode, legacy `-p <prompt>` otherwise.
 - `stream-json` output requires `--verbose` alongside `--print`; the gateway emits them together.
 - `--input-format stream-json` carries caller `cache_control` breakpoints.

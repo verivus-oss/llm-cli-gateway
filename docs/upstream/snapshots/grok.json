@@ -1,7 +1,7 @@
 {
   "schemaVersion": "upstream-scan-snapshot.v2",
   "cli": "grok",
-  "fetchedAt": "2026-07-13T07:43:59.950Z",
+  "fetchedAt": "2026-07-16T05:41:35.774Z",
   "sources": [
     {
       "url": "https://docs.x.ai/developers/release-notes.md",
@@ -13,10 +13,10 @@
     }
   ],
   "helpSurface": {
-    "probedAt": "2026-07-13T07:43:59.480Z",
+    "probedAt": "2026-07-16T05:41:35.308Z",
     "available": true,
-    "version": "grok 0.2.99 (b1b49ccb71)",
-    "targetVersion": "grok 0.2.99 (b1b49ccb71)",
+    "version": "grok 0.2.101 (5bc4b5dfad)",
+    "targetVersion": "grok 0.2.101 (5bc4b5dfad)",
     "versionMatchesTarget": true,
     "discoveredFlags": [
       "--agent",
@@ -97,7 +97,7 @@
       "commandPath": [
         "agent"
       ],
-      "probedAt": "2026-07-13T07:43:47.966Z",
+      "probedAt": "2026-07-16T05:41:24.401Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -132,7 +132,7 @@
         "agent",
         "headless"
       ],
-      "probedAt": "2026-07-13T07:43:48.938Z",
+      "probedAt": "2026-07-16T05:41:25.315Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -157,7 +157,7 @@
         "agent",
         "leader"
       ],
-      "probedAt": "2026-07-13T07:43:49.438Z",
+      "probedAt": "2026-07-16T05:41:25.774Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -185,7 +185,7 @@
         "agent",
         "serve"
       ],
-      "probedAt": "2026-07-13T07:43:49.966Z",
+      "probedAt": "2026-07-16T05:41:26.227Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -213,7 +213,7 @@
         "agent",
         "stdio"
       ],
-      "probedAt": "2026-07-13T07:43:50.442Z",
+      "probedAt": "2026-07-16T05:41:26.665Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -235,7 +235,7 @@
       "commandPath": [
         "completions"
       ],
-      "probedAt": "2026-07-13T07:43:50.906Z",
+      "probedAt": "2026-07-16T05:41:27.120Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -257,7 +257,7 @@
       "commandPath": [
         "dashboard"
       ],
-      "probedAt": "2026-07-13T07:43:51.375Z",
+      "probedAt": "2026-07-16T05:41:27.556Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -279,7 +279,7 @@
       "commandPath": [
         "export"
       ],
-      "probedAt": "2026-07-13T07:43:51.854Z",
+      "probedAt": "2026-07-16T05:41:28.084Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -302,7 +302,7 @@
       "commandPath": [
         "import"
       ],
-      "probedAt": "2026-07-13T07:43:52.315Z",
+      "probedAt": "2026-07-16T05:41:28.527Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -326,7 +326,7 @@
       "commandPath": [
         "inspect"
       ],
-      "probedAt": "2026-07-13T07:43:52.795Z",
+      "probedAt": "2026-07-16T05:41:28.973Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -349,7 +349,7 @@
       "commandPath": [
         "leader"
       ],
-      "probedAt": "2026-07-13T07:43:53.277Z",
+      "probedAt": "2026-07-16T05:41:29.435Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -371,7 +371,7 @@
       "commandPath": [
         "login"
       ],
-      "probedAt": "2026-07-13T07:43:53.744Z",
+      "probedAt": "2026-07-16T05:41:29.892Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -395,7 +395,7 @@
       "commandPath": [
         "logout"
       ],
-      "probedAt": "2026-07-13T07:43:54.229Z",
+      "probedAt": "2026-07-16T05:41:30.346Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -417,7 +417,7 @@
       "commandPath": [
         "mcp"
       ],
-      "probedAt": "2026-07-13T07:43:54.717Z",
+      "probedAt": "2026-07-16T05:41:30.825Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -439,7 +439,7 @@
       "commandPath": [
         "memory"
       ],
-      "probedAt": "2026-07-13T07:43:55.215Z",
+      "probedAt": "2026-07-16T05:41:31.254Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -461,7 +461,7 @@
       "commandPath": [
         "models"
       ],
-      "probedAt": "2026-07-13T07:43:55.703Z",
+      "probedAt": "2026-07-16T05:41:31.705Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -483,7 +483,7 @@
       "commandPath": [
         "plugin"
       ],
-      "probedAt": "2026-07-13T07:43:56.198Z",
+      "probedAt": "2026-07-16T05:41:32.159Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -505,7 +505,7 @@
       "commandPath": [
         "sessions"
       ],
-      "probedAt": "2026-07-13T07:43:56.677Z",
+      "probedAt": "2026-07-16T05:41:32.615Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -527,7 +527,7 @@
       "commandPath": [
         "setup"
       ],
-      "probedAt": "2026-07-13T07:43:57.135Z",
+      "probedAt": "2026-07-16T05:41:33.077Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -550,7 +550,7 @@
       "commandPath": [
         "trace"
       ],
-      "probedAt": "2026-07-13T07:43:57.605Z",
+      "probedAt": "2026-07-16T05:41:33.526Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -575,7 +575,7 @@
       "commandPath": [
         "update"
       ],
-      "probedAt": "2026-07-13T07:43:58.080Z",
+      "probedAt": "2026-07-16T05:41:33.974Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -603,7 +603,7 @@
       "commandPath": [
         "version"
       ],
-      "probedAt": "2026-07-13T07:43:58.555Z",
+      "probedAt": "2026-07-16T05:41:34.427Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -626,7 +626,7 @@
       "commandPath": [
         "worktree"
       ],
-      "probedAt": "2026-07-13T07:43:59.008Z",
+      "probedAt": "2026-07-16T05:41:34.869Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -648,7 +648,7 @@
       "commandPath": [
         "wrap"
       ],
-      "probedAt": "2026-07-13T07:43:59.480Z",
+      "probedAt": "2026-07-16T05:41:35.308Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [

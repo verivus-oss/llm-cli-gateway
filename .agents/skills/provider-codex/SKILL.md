@@ -128,13 +128,13 @@ A failed fetch is advisory (exit 0) unless `--fail-on-critical` is passed.
 
 ## Codex-specific notes (see the contract for exact rules)
 
-- Tested against codex-cli 0.144.3. Codex advertises mcp-server / app-server transports, not a native ACP entrypoint, so `provider-acp://codex` reports `native:false` (no methods, no adapter-as-native masquerade) and `codex_request` exposes no `transport:"acp"` selector.
+- Tested against codex-cli 0.144.5. Codex advertises mcp-server / app-server transports, not a native ACP entrypoint, so `provider-acp://codex` reports `native:false` (no methods, no adapter-as-native masquerade) and `codex_request` exposes no `transport:"acp"` selector.
 - argv must start with `exec`; `exec resume` enters resume context.
 - `--last` is resume-only. In resume context, `--sandbox`, `-C`, `--cd`,
   `--add-dir`, and `--profile` are forbidden (per `resumeForbiddenFlags`).
   `--ask-for-approval`, `--full-auto`, and `--search` are unsupported by the
   current `codex exec` command on every path.
-- `--output-schema`, `-c key=value`, `--ephemeral`, safety bypasses (on review), `--json` etc. are accepted on resume/review (codex-cli 0.144.3). Example (resume):
+- `--output-schema`, `-c key=value`, `--ephemeral`, safety bypasses (on review), `--json` etc. are accepted on resume/review (codex-cli 0.144.5). Example (resume):
   ```
   codex exec resume --ephemeral --json <UUID> "follow up"
   ```

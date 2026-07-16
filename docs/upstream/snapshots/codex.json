@@ -1,7 +1,7 @@
 {
   "schemaVersion": "upstream-scan-snapshot.v2",
   "cli": "codex",
-  "fetchedAt": "2026-07-13T08:42:30.142Z",
+  "fetchedAt": "2026-07-16T05:41:21.877Z",
   "sources": [
     {
       "url": "https://api.github.com/repos/openai/codex/releases/latest",
@@ -185,10 +185,10 @@
     }
   ],
   "helpSurface": {
-    "probedAt": "2026-07-13T08:42:30.141Z",
+    "probedAt": "2026-07-16T05:41:21.877Z",
     "available": true,
-    "version": "codex-cli 0.144.3",
-    "targetVersion": "codex-cli 0.144.3",
+    "version": "codex-cli 0.144.5",
+    "targetVersion": "codex-cli 0.144.5",
     "versionMatchesTarget": true,
     "discoveredFlags": [
       "--add-dir",
@@ -251,8 +251,10 @@
   ],
   "subcommands": {
     "app-server": {
-      "commandPath": ["app-server"],
-      "probedAt": "2026-07-13T08:42:29.432Z",
+      "commandPath": [
+        "app-server"
+      ],
+      "probedAt": "2026-07-16T05:41:21.228Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -282,11 +284,17 @@
       "summary": "Start Codex app server mode."
     },
     "apply": {
-      "commandPath": ["apply"],
-      "probedAt": "2026-07-13T08:42:29.464Z",
+      "commandPath": [
+        "apply"
+      ],
+      "probedAt": "2026-07-16T05:41:21.254Z",
       "available": true,
       "existence": "present",
-      "discoveredFlags": ["--config", "--disable", "--enable"],
+      "discoveredFlags": [
+        "--config",
+        "--disable",
+        "--enable"
+      ],
       "helpHash": "1242d2db6292cd23786b4946f8c7b0fc6edfc3cd1683a98f11202510e703a42e",
       "extraVsContract": [],
       "missingFromBinary": [],
@@ -298,8 +306,10 @@
       "summary": "Apply a Codex patch to the workspace."
     },
     "archive": {
-      "commandPath": ["archive"],
-      "probedAt": "2026-07-13T08:42:29.494Z",
+      "commandPath": [
+        "archive"
+      ],
+      "probedAt": "2026-07-16T05:41:21.281Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -331,11 +341,18 @@
       "summary": "Archive Codex session state."
     },
     "cloud": {
-      "commandPath": ["cloud"],
-      "probedAt": "2026-07-13T08:42:29.524Z",
+      "commandPath": [
+        "cloud"
+      ],
+      "probedAt": "2026-07-16T05:41:21.307Z",
       "available": true,
       "existence": "present",
-      "discoveredFlags": ["--config", "--disable", "--enable", "--version"],
+      "discoveredFlags": [
+        "--config",
+        "--disable",
+        "--enable",
+        "--version"
+      ],
       "helpHash": "d4e307ab316fe29787a649213d3bd4836db1afd23484ea15ae7ab4d6c375a366",
       "extraVsContract": [],
       "missingFromBinary": [],
@@ -347,11 +364,17 @@
       "summary": "Inspect or manage Codex cloud features."
     },
     "completion": {
-      "commandPath": ["completion"],
-      "probedAt": "2026-07-13T08:42:29.555Z",
+      "commandPath": [
+        "completion"
+      ],
+      "probedAt": "2026-07-16T05:41:21.332Z",
       "available": true,
       "existence": "present",
-      "discoveredFlags": ["--config", "--disable", "--enable"],
+      "discoveredFlags": [
+        "--config",
+        "--disable",
+        "--enable"
+      ],
       "helpHash": "6767d45f7d664f6a34c424cc84a5f8b5818d0d21e830905f85fd975e97f0a057",
       "extraVsContract": [],
       "missingFromBinary": [],
@@ -363,11 +386,17 @@
       "summary": "Generate Codex shell completions."
     },
     "debug": {
-      "commandPath": ["debug"],
-      "probedAt": "2026-07-13T08:42:29.585Z",
+      "commandPath": [
+        "debug"
+      ],
+      "probedAt": "2026-07-16T05:41:21.358Z",
       "available": true,
       "existence": "present",
-      "discoveredFlags": ["--config", "--disable", "--enable"],
+      "discoveredFlags": [
+        "--config",
+        "--disable",
+        "--enable"
+      ],
       "helpHash": "f4f7f6ff8dff8fc223f681284ad192487704a9ce772e88758a3b20f2c2514211",
       "extraVsContract": [],
       "missingFromBinary": [],
@@ -379,8 +408,10 @@
       "summary": "Run Codex debugging utilities."
     },
     "delete": {
-      "commandPath": ["delete"],
-      "probedAt": "2026-07-13T08:42:29.616Z",
+      "commandPath": [
+        "delete"
+      ],
+      "probedAt": "2026-07-16T05:41:21.385Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -413,8 +444,10 @@
       "summary": "Permanently delete a saved Codex session."
     },
     "doctor": {
-      "commandPath": ["doctor"],
-      "probedAt": "2026-07-13T08:42:29.646Z",
+      "commandPath": [
+        "doctor"
+      ],
+      "probedAt": "2026-07-16T05:41:21.409Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -438,8 +471,10 @@
       "summary": "Run Codex diagnostic checks."
     },
     "exec": {
-      "commandPath": ["exec"],
-      "probedAt": "2026-07-13T08:42:29.679Z",
+      "commandPath": [
+        "exec"
+      ],
+      "probedAt": "2026-07-16T05:41:21.435Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -478,8 +513,11 @@
       "summary": "Run Codex in non-interactive execution mode."
     },
     "exec resume": {
-      "commandPath": ["exec", "resume"],
-      "probedAt": "2026-07-13T08:42:29.738Z",
+      "commandPath": [
+        "exec",
+        "resume"
+      ],
+      "probedAt": "2026-07-16T05:41:21.491Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -512,8 +550,11 @@
       "summary": "Resume Codex sessions from the interactive CLI."
     },
     "exec review": {
-      "commandPath": ["exec", "review"],
-      "probedAt": "2026-07-13T08:42:29.768Z",
+      "commandPath": [
+        "exec",
+        "review"
+      ],
+      "probedAt": "2026-07-16T05:41:21.518Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -547,8 +588,10 @@
       "summary": "Run Codex code review workflows."
     },
     "exec-server": {
-      "commandPath": ["exec-server"],
-      "probedAt": "2026-07-13T08:42:29.799Z",
+      "commandPath": [
+        "exec-server"
+      ],
+      "probedAt": "2026-07-16T05:41:21.543Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -573,11 +616,17 @@
       "summary": "Start Codex exec server mode."
     },
     "features": {
-      "commandPath": ["features"],
-      "probedAt": "2026-07-13T08:42:29.829Z",
+      "commandPath": [
+        "features"
+      ],
+      "probedAt": "2026-07-16T05:41:21.569Z",
       "available": true,
       "existence": "present",
-      "discoveredFlags": ["--config", "--disable", "--enable"],
+      "discoveredFlags": [
+        "--config",
+        "--disable",
+        "--enable"
+      ],
       "helpHash": "fd238f4ed1b5a5975472b1bafb8300d8e547403cf621d0047d247c3b64e0e508",
       "extraVsContract": [],
       "missingFromBinary": [],
@@ -589,8 +638,10 @@
       "summary": "Inspect or configure Codex feature flags."
     },
     "fork": {
-      "commandPath": ["fork"],
-      "probedAt": "2026-07-13T08:42:29.857Z",
+      "commandPath": [
+        "fork"
+      ],
+      "probedAt": "2026-07-16T05:41:21.594Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -628,8 +679,10 @@
       "summary": "Fork a Codex session."
     },
     "login": {
-      "commandPath": ["login"],
-      "probedAt": "2026-07-13T08:42:29.884Z",
+      "commandPath": [
+        "login"
+      ],
+      "probedAt": "2026-07-16T05:41:21.618Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -651,11 +704,17 @@
       "summary": "Authenticate Codex CLI."
     },
     "logout": {
-      "commandPath": ["logout"],
-      "probedAt": "2026-07-13T08:42:29.910Z",
+      "commandPath": [
+        "logout"
+      ],
+      "probedAt": "2026-07-16T05:41:21.644Z",
       "available": true,
       "existence": "present",
-      "discoveredFlags": ["--config", "--disable", "--enable"],
+      "discoveredFlags": [
+        "--config",
+        "--disable",
+        "--enable"
+      ],
       "helpHash": "d3b52918046a86dc5b0da0106121ca9daf83384a0ccdae3cbbdf6f93ad8b7a7a",
       "extraVsContract": [],
       "missingFromBinary": [],
@@ -667,11 +726,17 @@
       "summary": "Clear Codex authentication state."
     },
     "mcp": {
-      "commandPath": ["mcp"],
-      "probedAt": "2026-07-13T08:42:29.936Z",
+      "commandPath": [
+        "mcp"
+      ],
+      "probedAt": "2026-07-16T05:41:21.670Z",
       "available": true,
       "existence": "present",
-      "discoveredFlags": ["--config", "--disable", "--enable"],
+      "discoveredFlags": [
+        "--config",
+        "--disable",
+        "--enable"
+      ],
       "helpHash": "c3a6874a64da9472b97fdc47ed5dde511150aab6accb808a30953f14e69d6a52",
       "extraVsContract": [],
       "missingFromBinary": [],
@@ -683,11 +748,18 @@
       "summary": "Manage Codex MCP configuration."
     },
     "mcp-server": {
-      "commandPath": ["mcp-server"],
-      "probedAt": "2026-07-13T08:42:29.962Z",
+      "commandPath": [
+        "mcp-server"
+      ],
+      "probedAt": "2026-07-16T05:41:21.696Z",
       "available": true,
       "existence": "present",
-      "discoveredFlags": ["--config", "--disable", "--enable", "--strict-config"],
+      "discoveredFlags": [
+        "--config",
+        "--disable",
+        "--enable",
+        "--strict-config"
+      ],
       "helpHash": "2fd3e8fec2e4dbf1c4731e59733968f522d6228d14fac87d8eb4e35f5133cc11",
       "extraVsContract": [],
       "missingFromBinary": [],
@@ -699,11 +771,17 @@
       "summary": "Start Codex MCP server mode."
     },
     "plugin": {
-      "commandPath": ["plugin"],
-      "probedAt": "2026-07-13T08:42:29.987Z",
+      "commandPath": [
+        "plugin"
+      ],
+      "probedAt": "2026-07-16T05:41:21.722Z",
       "available": true,
       "existence": "present",
-      "discoveredFlags": ["--config", "--disable", "--enable"],
+      "discoveredFlags": [
+        "--config",
+        "--disable",
+        "--enable"
+      ],
       "helpHash": "4597fbf5d3746597df5499c25c3a0de55d89eb4e36b84a59acc1bdd7857e0e2e",
       "extraVsContract": [],
       "missingFromBinary": [],
@@ -715,11 +793,18 @@
       "summary": "Manage Codex plugins."
     },
     "remote-control": {
-      "commandPath": ["remote-control"],
-      "probedAt": "2026-07-13T08:42:30.013Z",
+      "commandPath": [
+        "remote-control"
+      ],
+      "probedAt": "2026-07-16T05:41:21.747Z",
       "available": true,
       "existence": "present",
-      "discoveredFlags": ["--config", "--disable", "--enable", "--json"],
+      "discoveredFlags": [
+        "--config",
+        "--disable",
+        "--enable",
+        "--json"
+      ],
       "helpHash": "141aad68297586f1130cc2258b40d6c12306384193077641983443fc8f081419",
       "extraVsContract": [],
       "missingFromBinary": [],
@@ -731,8 +816,10 @@
       "summary": "Inspect or manage Codex remote control state."
     },
     "resume": {
-      "commandPath": ["resume"],
-      "probedAt": "2026-07-13T08:42:30.039Z",
+      "commandPath": [
+        "resume"
+      ],
+      "probedAt": "2026-07-16T05:41:21.774Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -771,8 +858,10 @@
       "summary": "Resume a saved interactive Codex session."
     },
     "review": {
-      "commandPath": ["review"],
-      "probedAt": "2026-07-13T08:42:30.065Z",
+      "commandPath": [
+        "review"
+      ],
+      "probedAt": "2026-07-16T05:41:21.799Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -796,8 +885,10 @@
       "summary": "Run Codex code review workflows."
     },
     "sandbox": {
-      "commandPath": ["sandbox"],
-      "probedAt": "2026-07-13T08:42:30.092Z",
+      "commandPath": [
+        "sandbox"
+      ],
+      "probedAt": "2026-07-16T05:41:21.826Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -823,8 +914,10 @@
       "summary": "Run or inspect Codex sandbox behavior."
     },
     "unarchive": {
-      "commandPath": ["unarchive"],
-      "probedAt": "2026-07-13T08:42:30.117Z",
+      "commandPath": [
+        "unarchive"
+      ],
+      "probedAt": "2026-07-16T05:41:21.851Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -856,11 +949,17 @@
       "summary": "Restore archived Codex session state."
     },
     "update": {
-      "commandPath": ["update"],
-      "probedAt": "2026-07-13T08:42:30.141Z",
+      "commandPath": [
+        "update"
+      ],
+      "probedAt": "2026-07-16T05:41:21.877Z",
       "available": true,
       "existence": "present",
-      "discoveredFlags": ["--config", "--disable", "--enable"],
+      "discoveredFlags": [
+        "--config",
+        "--disable",
+        "--enable"
+      ],
       "helpHash": "0af2ebbf91ab75c1595b57618278999f9eace34f8181d9495da38ae15d0949f6",
       "extraVsContract": [],
       "missingFromBinary": [],
