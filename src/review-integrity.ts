@@ -22,8 +22,37 @@ export interface ReviewIntegrityInput {
 const REVIEW_CONTEXT_PATTERN =
   /\b(review|audit|analy[sz]e|analysis|inspect|assess|pentest|security|vulnerabilit(?:y|ies)|bug(?:s)?|defect(?:s)?|quality|code\s+review)\b/i;
 
-const TOOL_SUPPRESSION_PATTERN =
-  /\b(do\s*not|don't|never|without)\b[\s\S]{0,80}\b(tool(?:s)?|shell|bash|command(?:s)?)\b/i;
+// Any character that does not end the current sentence, so a match cannot span
+// a sentence boundary or a paragraph break. Single newlines stay allowed
+// because prompts wrap mid-sentence.
+//
+// Why this matters: the earlier pattern was a bare negation within 80
+// characters of a tool-ish noun, which glued unrelated sentences together. It
+// reported "do not take the packet's word.\n\nNote: a local `rtk` shell" as
+// tool suppression, which is exactly backwards: that text tells the reviewer to
+// verify independently and warns that a shell proxy can fake success. A
+// detector that fires on instructions to be MORE rigorous trains its readers to
+// ignore it.
+const SENTENCE_CHAR = String.raw`(?:(?![.!?]["'”’)\]]?\s|\n\s*\n)[\s\S])`;
+// The negation has to actually govern using a tool, so require a use verb
+// between the two. "without" is kept as a second shape because it governs a
+// noun on its own ("review this without tools").
+const TOOL_USE_VERB = String.raw`(?:us(?:e|ing)|call(?:ing)?|invok(?:e|ing)|run(?:ning)?|execut(?:e|ing)|access(?:ing)?|touch(?:ing)?|rely(?:ing)?\s+on|resort(?:ing)?\s+to)`;
+const TOOL_NOUN = String.raw`(?:tool(?:s)?|shell|bash|command(?:s)?)`;
+const TOOL_SUPPRESSION_PATTERN = new RegExp(
+  [
+    String.raw`\b(?:do\s*not|don['’]t|never)\b`,
+    `${SENTENCE_CHAR}{0,40}?`,
+    String.raw`\b${TOOL_USE_VERB}\b`,
+    `${SENTENCE_CHAR}{0,40}?`,
+    String.raw`\b${TOOL_NOUN}\b`,
+    "|",
+    String.raw`\bwithout\b`,
+    `${SENTENCE_CHAR}{0,40}?`,
+    String.raw`\b${TOOL_NOUN}\b`,
+  ].join(""),
+  "i"
+);
 
 const CRITICAL_TOOLS = ["Read", "Grep", "Glob", "Bash"];
 

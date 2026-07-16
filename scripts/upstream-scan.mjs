@@ -50,6 +50,7 @@ function parseArgs(argv) {
     failOnCritical: false,
     provider: null,
     probeInstalled: false,
+    requireInstalled: false,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -60,7 +61,10 @@ function parseArgs(argv) {
     else if (a === "--fail-on-critical") flags.failOnCritical = true;
     else if (a === "--provider") flags.provider = argv[++i] ?? null;
     else if (a === "--probe-installed") flags.probeInstalled = true;
-    else if (a === "--help" || a === "-h") flags.help = true;
+    else if (a === "--require-installed") {
+      flags.requireInstalled = true;
+      flags.probeInstalled = true;
+    } else if (a === "--help" || a === "-h") flags.help = true;
     else {
       console.error(`[upstream-scan] unknown argument: ${a}`);
       flags.help = true;
@@ -82,8 +86,13 @@ function printHelp() {
       "  --fail-on-critical    Exit non-zero when a critical finding is present (advisory otherwise).",
       "  --provider <cli>      Limit to one CliType (claude|codex|gemini|grok|mistral|devin|cursor).",
       "  --probe-installed     Also run local --help probes and report bidirectional drift vs the contract",
-      "                        (and vs prior snapshots when --write-snapshot is also used). Safe no-op if",
-      "                        the binary is not present on this machine.",
+      "                        (and vs prior snapshots when --write-snapshot is also used). A provider whose",
+      "                        binary is absent is SKIPPED, not failed, so this alone exits 0 on a machine",
+      "                        with no provider CLIs: convenient locally, useless as a gate.",
+      "  --require-installed   Implies --probe-installed, and reports a critical finding for any provider",
+      "                        whose binary is absent. Use this in a gate: --probe-installed alone reports",
+      "                        no drift on a machine with no provider CLIs, which passes while verifying",
+      "                        nothing.",
       "  -h, --help            Show this help.",
       "",
       "Default (no flags): offline, network-free summary of tracked sources + contract surface.",
@@ -1382,6 +1391,25 @@ async function runScan(machinery, toml, flags) {
       if (helpProbe) {
         const prior = priorSnapshot;
         const priorHelp = priorSnapshot?.helpSurface;
+
+        // `--probe-installed` alone is a no-op for an absent binary, which is
+        // right for a developer machine that has only some providers, and a
+        // trap for a gate: a runner with no provider CLIs installed reports
+        // zero drift and passes while checking nothing. `--require-installed`
+        // makes that vacuous pass impossible by demanding the binary actually
+        // be there. The provider set comes from the registry, so this never
+        // needs a hand-maintained list of executables.
+        if (flags.requireInstalled && !helpProbe.available) {
+          findings.push({
+            severity: "critical",
+            category: "installed-binary-absent",
+            message: `--require-installed was set but the ${cli} binary (${contract.executable}) could not be probed on this machine, so its contract is unverified. Install the provider CLI or drop --require-installed; do not treat this run as drift-free.`,
+          });
+          criticalCount++;
+          console.log(
+            `  [probe] BINARY ABSENT: ${contract.executable} not probeable; contract unverified`
+          );
+        }
 
         if (helpProbe.available) {
           const versionProbe = helpProbe.versionProbe;

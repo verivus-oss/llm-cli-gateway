@@ -58,6 +58,20 @@ if (found.length > 0) {
 console.log('Prod-only shrinkwrap is free of better-sqlite3/prebuild-install/tar-fs/tar-stream.');
 NODE
 
+echo "==> installed provider CLI contract drift"
+# Nothing else catches a provider CLI moving underneath the contract. CI cannot:
+# the check needs the seven provider binaries installed, and a stock runner has
+# none of them. The offline `upstream:contracts` gate inside `npm run check`
+# only proves the fixtures, report, and TOML agree with each other, so it stays
+# green while every installed CLI is ahead of its baseline (it did exactly that
+# while five of them were).
+#
+# --require-installed rather than --probe-installed: the latter skips a provider
+# whose binary is absent and exits 0, so on a machine without the CLIs it would
+# verify nothing and still pass. Release validation is the one place the CLIs are
+# guaranteed present, so demand them and fail if any is missing.
+npm run upstream:drift
+
 echo "==> release gate"
 npm run check
 

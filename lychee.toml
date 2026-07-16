@@ -33,6 +33,18 @@ exclude = [
   # GitHub URLs that require auth on private repos (we test the
   # public mirror separately during release).
   "^https://github\\.com/verivusai-labs/",
+  # This project's own Pages site. It is deployed only on a published
+  # stable release, so a page added by an unreleased change 404s here
+  # while being perfectly valid: every new site page would otherwise
+  # fail this gate until the release that publishes it.
+  # These URLs are NOT going unchecked, and are in fact checked more
+  # strictly than lychee can manage: scripts/validate-site-discovery.mjs
+  # (npm run site:validate, inside npm run check) extracts every
+  # llm-cli-gateway.dev link out of the site's markdown routes and
+  # resolves each one against the LOCAL site/ tree, failing on a missing
+  # route. That verifies the tree being merged, whereas probing the live
+  # domain only verifies whatever the last release happened to deploy.
+  "^https://llm-cli-gateway\\.dev/",
   # GitHub's unauthenticated REST API intermittently returns 403 to
   # hosted Actions for public release metadata; upstream scans verify
   # these advisory source URLs separately.
@@ -41,6 +53,16 @@ exclude = [
   # cannot auth into it from public CI. Re-evaluate when it's published.
   # No trailing slash in the pattern so we match the bare repo URL too.
   "^https://github\\.com/verivus-oss/agent-assurance(/|$)",
+  # The Personal Agent Config Kit guide is linked from the site at its
+  # canonical location on the public mirror, but the mirror's main only
+  # receives repository content when a release is published, so it 404s
+  # until then. Scoped to this one path rather than the whole mirror,
+  # because unlike llm-cli-gateway.dev links there is no local validator
+  # covering github.com, so anything excluded here is genuinely
+  # unchecked. DELETE this entry once a release has published the file:
+  # it is a temporary bridge, and leaving it means a later rename of the
+  # guide would rot this link silently.
+  "^https://github\\.com/verivus-oss/llm-cli-gateway/blob/main/docs/guides/PERSONAL_AGENT_CONFIG_KIT\\.md$",
   # PyPI / npm vanity URLs that 302 to authenticated dashboards.
   "^https://platform\\.claude\\.com/manage",
   "^https://pypi\\.org/manage/",

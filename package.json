@@ -90,6 +90,7 @@
     "test:all": "npm run test && npm run test:pg",
     "smoke:cache-control": "node docs/plans/slice-kappa-smoke-test.mjs",
     "upstream:contracts": "node scripts/upstream-scan.mjs --contracts-check",
+    "upstream:drift": "node scripts/upstream-scan.mjs --require-installed --fail-on-critical",
     "upstream:scan": "node scripts/upstream-scan.mjs",
     "provider:surfaces:check": "node scripts/provider-surfaces-check.mjs",
     "site:generate": "node scripts/generate-site-discovery.mjs",
@@ -110,7 +111,7 @@
     "search:google:submit:dry-run": "node scripts/submit-google-search-console.mjs --dry-run",
     "search:submit": "node scripts/submit-indexnow.mjs",
     "search:submit:dry-run": "node scripts/submit-indexnow.mjs --dry-run",
-    "check": "npm run build && npm run lint && npm run format:check && npm run provider:surfaces:check && npm run site:version:check && npm run site:generate:check && npm run site:validate && npm test && npm run security:audit && npm run verify:no-internal-mcp:check",
+    "check": "npm run build && npm run lint && npm run format:check && npm run provider:surfaces:check && npm run upstream:contracts && npm run site:version:check && npm run site:generate:check && npm run site:validate && npm test && npm run security:audit && npm run verify:no-internal-mcp:check",
     "release:build": "bash installer/build-release.sh",
     "release:checksums": "cd installer/dist && sha256sum --check SHA256SUMS",
     "release:docker": "docker compose -f docker/personal.compose.yml build"
