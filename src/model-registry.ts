@@ -75,11 +75,17 @@ const FALLBACK_INFO: CliInfoMap = {
   grok: {
     // No hardcoded `defaultModel`. Let Grok CLI pick its own built-in default
     // unless an explicit value is found via env vars in applyGrokOverrides.
+    // Model list tracks `grok models` as of Grok CLI 0.2.99: the legacy
+    // `grok-build` id was removed upstream and now hard-fails the request with
+    // `Invalid params: "unknown model id"`, so it must not be advertised here.
     description: "xAI's Grok Build CLI - best for agentic coding tasks via xAI's Grok models",
     models: {
-      "grok-build": "Default Grok model for code/agentic tasks. Best for: most Grok build sessions",
+      "grok-4.5":
+        "Grok 4.5 frontier model and the Grok CLI's own default (500K context, supports reasoning effort). Best for: most Grok build sessions and general agentic coding",
+      "grok-composer-2.5-fast":
+        "Composer 2.5, a Cursor coding model exposed by the Grok CLI (200K context, no reasoning-effort support).",
     },
-    modelOrder: ["grok-build"],
+    modelOrder: ["grok-4.5", "grok-composer-2.5-fast"],
   },
   mistral: {
     // Mistral Vibe selects the active model via VIBE_ACTIVE_MODEL; there is no

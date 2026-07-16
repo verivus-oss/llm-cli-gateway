@@ -66,6 +66,21 @@ function payload(content: string): ReviewArtifactPayload {
   return JSON.parse(content) as ReviewArtifactPayload;
 }
 
+/**
+ * A Git filter driver whose command records its own execution. Both the script
+ * and its sentinel sit outside any worktree, so running it leaves the reviewed
+ * repository byte-identical and the sentinel is the only observable.
+ */
+function createExternalFilter(): { marker: string; filter: string } {
+  const directory = mkdtempSync(path.join(tmpdir(), "gateway-review-filter-"));
+  repositories.push(directory);
+  const marker = path.join(directory, "filter-executed");
+  const filter = path.join(directory, "filter-command");
+  writeFileSync(filter, `#!/bin/sh\nprintf executed > '${marker}'\ncat\n`);
+  chmodSync(filter, 0o700);
+  return { marker, filter };
+}
+
 function expectScopeError(callback: () => unknown, code: ReviewScopeError["code"]): void {
   try {
     callback();
@@ -641,48 +656,75 @@ describe("resolveReviewScope", () => {
     );
   });
 
-  it("probes filter safety configuration once per capture rather than once per Git command", () => {
-    const repository = createRepository();
-    write(repository, "nested/deep/deeper/file.txt", "content\n");
-    write(repository, "dirty.txt", "dirty\n");
+  it.skipIf(process.platform === "win32")(
+    "suppresses a filter driver installed after the capture context was created",
+    () => {
+      const repository = createRepository();
+      // Driver and sentinel live outside the worktree, so execution is observed
+      // directly instead of as a side effect on the captured evidence.
+      const { marker, filter } = createExternalFilter();
 
-    const commands: string[][] = [];
-    resolveReviewScope(
-      {
-        repositoryPath: repository,
-        maxArtifactBytes: MAX_REVIEW_ARTIFACT_BYTES,
-      },
-      { onGitCommand: args => commands.push([...args]) }
-    );
-    const configProbes = commands.filter(args => args[0] === "config");
+      // The attribute is present from the start; only the driver definition
+      // arrives late, so there is nothing to discover when the context is built.
+      write(repository, ".gitattributes", "*.txt filter=late\n");
+      commitAll(repository, "attributes only");
+      write(repository, "seed.txt", "worktree change that must be diffed\n");
 
-    // One probe for the selected path's context, one for the resolved root's
-    // context, and one re-verification before the scope returns. Previously
-    // every Git command carried its own probe, so this tracked total spawns.
-    expect(configProbes).toHaveLength(3);
-    expect(commands.length).toBeGreaterThan(10);
-  });
-
-  it("keeps the filter probe count constant as the worktree grows", () => {
-    const countConfigProbes = (repository: string): number => {
-      const commands: string[][] = [];
-      resolveReviewScope(
-        { repositoryPath: repository, maxArtifactBytes: MAX_REVIEW_ARTIFACT_BYTES },
-        { onGitCommand: args => commands.push([...args]) }
+      const result = resolveReviewScope(
+        {
+          repositoryPath: repository,
+          mode: "uncommitted",
+          maxArtifactBytes: MAX_REVIEW_ARTIFACT_BYTES,
+        },
+        {
+          // Fires once the capture context exists and before any evidence is
+          // read: exactly the window a cached override probe would leave open.
+          beforeEvidenceCapture: () => {
+            git(repository, "config", "filter.late.clean", filter);
+            git(repository, "config", "filter.late.required", "true");
+          },
+        }
       );
-      return commands.filter(args => args[0] === "config").length;
-    };
+      const evidence = payload(result.artifact.content);
 
-    const small = createRepository();
-    write(small, "a/one.txt", "one\n");
-
-    const large = createRepository();
-    for (let index = 0; index < 40; index++) {
-      write(large, `pkg${index}/src/one.txt`, "one\n");
+      expect(existsSync(marker)).toBe(false);
+      expect(evidence.unstagedPatch.content).toContain("+worktree change that must be diffed");
     }
+  );
 
-    expect(countConfigProbes(large)).toBe(countConfigProbes(small));
-  });
+  it.skipIf(process.platform === "win32")(
+    "suppresses a filter driver that is withdrawn again before the capture returns",
+    () => {
+      const repository = createRepository();
+      const { marker, filter } = createExternalFilter();
+      write(repository, ".gitattributes", "*.txt filter=transient\n");
+      commitAll(repository, "attributes only");
+      write(repository, "seed.txt", "transient window change\n");
+
+      const result = resolveReviewScope(
+        {
+          repositoryPath: repository,
+          mode: "uncommitted",
+          maxArtifactBytes: MAX_REVIEW_ARTIFACT_BYTES,
+        },
+        {
+          beforeEvidenceCapture: () => {
+            git(repository, "config", "filter.transient.clean", filter);
+            git(repository, "config", "filter.transient.required", "true");
+          },
+          // Withdrawn before the recheck, so a digest comparison taken at the
+          // end would match and report nothing at all.
+          beforeSnapshotRecheck: () => {
+            git(repository, "config", "--unset", "filter.transient.clean");
+            git(repository, "config", "--unset", "filter.transient.required");
+          },
+        }
+      );
+
+      expect(existsSync(marker)).toBe(false);
+      expect(result.artifact.complete).toBe(true);
+    }
+  );
 
   it("spends one batched ignore probe per directory level instead of one per entry", () => {
     const repository = createRepository();

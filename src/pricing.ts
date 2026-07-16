@@ -299,10 +299,19 @@ export function modelIdToFamily(model: string): string {
   }
 
   // Grok family. grok-build / grok-code (cheaper coding tier) before flagship.
+  // `grok-build` stays: the xAI HTTP API still exposes grok-build-0.1, even
+  // though the Grok CLI dropped the bare `grok-build` id at 0.2.99.
   if (lower.includes("grok-build") || lower.includes("grok-code")) return "grok-build";
+  // grok-4.5 (the Grok CLI 0.2.99 default) resolves here via the grok-4 match.
   if (lower.includes("grok-4") || lower.includes("grok-3") || lower.includes("grok-latest")) {
     return "grok-4";
   }
+  // grok-composer-2.5-fast (Grok CLI 0.2.99) is DELIBERATELY unpriced: xAI
+  // publishes no rate for it, and inventing one would silently corrupt cost
+  // telemetry and let a made-up price win a route. It falls through to
+  // "unknown", which fails closed by design (contract decision 5: unpriced
+  // candidates are excluded from routing, never treated as free). Add a family
+  // + rate here only once a published rate exists.
 
   // Mistral family. Version-anchored so legacy medium-3 / -latest do not
   // inherit Medium 3.5's rate.

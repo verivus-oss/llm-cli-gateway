@@ -174,10 +174,20 @@ describe("model registry", () => {
     expect(info.gemini.unverifiedModelHints?.["gemini-2.5-pro"]).toBeDefined();
   });
 
-  it("seeds Grok with grok-build as a fallback model and no default", () => {
+  it("advertises exactly the real Grok CLI models (grok 0.2.99) and no default", () => {
     const info = getCliInfo(true);
 
-    expect(info.grok.models["grok-build"]).toContain("Default Grok model");
+    // `grok models` on Grok CLI 0.2.99 reports EXACTLY these two, in this order.
+    // Advertising anything else hands callers a model the CLI rejects.
+    expect(Object.keys(info.grok.models)).toEqual(["grok-4.5", "grok-composer-2.5-fast"]);
+    expect(info.grok.modelOrder).toEqual(["grok-4.5", "grok-composer-2.5-fast"]);
+    // Removed upstream at 0.2.99: passing it now fails with "unknown model id".
+    expect(info.grok.models["grok-build"]).toBeUndefined();
+  });
+
+  it("seeds Grok with no hardcoded default, letting the CLI pick its own", () => {
+    const info = getCliInfo(true);
+
     expect(info.grok.defaultModel).toBeUndefined();
     expect(resolveModelAlias("grok", "default", info)).toBeUndefined();
   });

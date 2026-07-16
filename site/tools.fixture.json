@@ -3016,7 +3016,7 @@
           },
           "model": {
             "type": "string",
-            "description": "Model name or alias (e.g. grok-build, latest)"
+            "description": "Model name or alias (e.g. grok-4.5, latest)"
           },
           "transport": {
             "type": "string",
@@ -3432,7 +3432,7 @@
           },
           "model": {
             "type": "string",
-            "description": "Model name or alias (e.g. grok-build, latest)"
+            "description": "Model name or alias (e.g. grok-4.5, latest)"
           },
           "outputFormat": {
             "type": "string",

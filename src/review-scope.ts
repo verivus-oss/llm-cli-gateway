@@ -93,6 +93,8 @@ export interface ReviewScopeHooks {
   beforeSnapshotRecheck?: () => void;
   /** Observes the arguments of every Git process this capture spawns. */
   onGitCommand?: (args: readonly string[]) => void;
+  /** Runs after the capture context exists but before any evidence is read. */
+  beforeEvidenceCapture?: () => void;
 }
 
 export interface ReviewWorkingTreeState {
@@ -194,8 +196,8 @@ interface ScopePlan {
 interface GitExecutionOptions {
   allowExitCodes?: readonly number[];
   input?: Buffer;
-  /** Overrides the context environment. Defaults to the literal-pathspec one. */
-  env?: NodeJS.ProcessEnv;
+  /** Set false only for check-ignore, which rejects literal pathspec magic. */
+  literalPathspecs?: boolean;
 }
 
 interface CapturedUntrackedFile {
@@ -376,33 +378,26 @@ function reviewFilterSafetyOverrides(
   ]);
 }
 
-function filterOverrideSignature(overrides: readonly GitConfigOverride[]): string {
-  return sha256(JSON.stringify(overrides));
-}
-
 /**
- * One Git execution context pinned to a single worktree directory. The filter
- * safety overrides are discovered exactly once when the context is built and
- * are then reused verbatim by every command issued through it, so a capture
- * costs one configuration probe rather than one probe per Git invocation.
- * `resolveReviewScope` re-verifies the discovered driver set before it returns
- * and fails closed when repository-local filter configuration changed while the
- * evidence was being captured.
+ * One Git execution context pinned to a single worktree directory. It holds only
+ * the invariants of that directory and carries no environment of its own.
+ *
+ * Filter safety overrides are deliberately NOT cached on the context. They are
+ * rediscovered immediately before every Git invocation, because discovery is what
+ * SUPPRESSES a driver: a driver added to repository-local config after a cached
+ * probe would carry no `-c filter.<name>.clean=` override and would then be
+ * EXECUTED by the next worktree command. Detecting that after the fact cannot
+ * unexecute it, and config restored before a post-hoc check would go unnoticed
+ * entirely. Evidence integrity and execution safety are separate properties and
+ * only per-call discovery buys the second. Captures are kept cheap by removing
+ * per-directory Git calls instead (see `ignoredPathSubset`), never by caching
+ * this probe.
  */
 interface GitContext {
   /** Directory used as the Git command cwd and as the pinned core.worktree. */
   directory: string;
   /** Command-scope safety arguments derived once for this directory. */
   safetyArguments: readonly string[];
-  /** Environment whose filter overrides were discovered once for this directory. */
-  env: NodeJS.ProcessEnv;
-  /**
-   * Same environment without GIT_LITERAL_PATHSPECS, for the one command that
-   * rejects literal pathspec magic outright. See `ignoredPathSubset`.
-   */
-  pathnameEnv: NodeJS.ProcessEnv;
-  /** Digest of the discovered filter drivers, re-verified before the scope returns. */
-  filterSignature: string;
   /** Test seam forwarded from ReviewScopeHooks. */
   onGitCommand?: ((args: readonly string[]) => void) | undefined;
 }
@@ -411,18 +406,22 @@ function createGitContext(
   directory: string,
   onGitCommand?: (args: readonly string[]) => void
 ): GitContext {
-  const overrides = reviewFilterSafetyOverrides(directory, onGitCommand);
-  const env = gitEnvironment(overrides);
-  const pathnameEnv = { ...env };
-  delete pathnameEnv.GIT_LITERAL_PATHSPECS;
   return {
     directory,
     safetyArguments: gitSafetyArguments(directory),
-    env,
-    pathnameEnv,
-    filterSignature: filterOverrideSignature(overrides),
     onGitCommand,
   };
+}
+
+/**
+ * Rediscover the filter safety overrides and build the environment for exactly one
+ * Git invocation. `check-ignore` is the only caller that must run without
+ * GIT_LITERAL_PATHSPECS, which it rejects outright.
+ */
+function gitCommandEnvironment(context: GitContext, literalPathspecs: boolean): NodeJS.ProcessEnv {
+  const env = gitEnvironment(reviewFilterSafetyOverrides(context.directory, context.onGitCommand));
+  if (!literalPathspecs) delete env.GIT_LITERAL_PATHSPECS;
+  return env;
 }
 
 function runGit(
@@ -430,10 +429,11 @@ function runGit(
   args: readonly string[],
   options: GitExecutionOptions = {}
 ): Buffer {
+  const env = gitCommandEnvironment(context, options.literalPathspecs ?? true);
   context.onGitCommand?.(args);
   const result = spawnSync("git", [...context.safetyArguments, ...args], {
     cwd: context.directory,
-    env: options.env ?? context.env,
+    env,
     encoding: null,
     input: options.input,
     maxBuffer: GIT_OUTPUT_HARD_LIMIT_BYTES,
@@ -459,10 +459,11 @@ function runGit(
 }
 
 function runGitMaybe(context: GitContext, args: readonly string[]): Buffer | null {
+  const env = gitCommandEnvironment(context, true);
   context.onGitCommand?.(args);
   const result = spawnSync("git", [...context.safetyArguments, ...args], {
     cwd: context.directory,
-    env: context.env,
+    env,
     encoding: null,
     maxBuffer: GIT_OUTPUT_HARD_LIMIT_BYTES,
     shell: false,
@@ -1155,7 +1156,7 @@ function ignoredPathSubset(context: GitContext, relativePaths: readonly string[]
   if (relativePaths.length === 0) return new Set();
   const output = runGit(context, ["check-ignore", "--no-index", "-z", "--stdin"], {
     allowExitCodes: [0, 1],
-    env: context.pathnameEnv,
+    literalPathspecs: false,
     input: Buffer.from(relativePaths.map(candidate => `./${candidate}\0`).join(""), "utf8"),
   });
   const ignored = new Set(splitNul(output, "Git check-ignore path"));
@@ -1360,6 +1361,7 @@ export function resolveReviewScope(
     request.maxArtifactBytes ?? DEFAULT_REVIEW_ARTIFACT_MAX_BYTES
   );
   const context = createGitContext(repositoryRoot, hooks.onGitCommand);
+  hooks.beforeEvidenceCapture?.();
 
   if (requestedMode !== "commit") refuseUntrackedSpecialEntries(context, paths);
   const initialHead = resolveCommit(context, "HEAD");
@@ -1409,14 +1411,7 @@ export function resolveReviewScope(
   const finalUnstagedPaths = plan.workingTreeIncluded ? captureUnstagedPaths(context, paths) : [];
   if (plan.workingTreeIncluded) refuseUntrackedSpecialEntries(context, paths);
   const finalUntracked = captureUntracked(context, plan, paths, maxArtifactBytes - trackedRawBytes);
-  // The filter overrides pinned in `context` were discovered once, before
-  // capture. Re-verifying the driver set here fails closed when
-  // repository-local filter configuration changed while evidence was read.
-  const finalFilterSignature = filterOverrideSignature(
-    reviewFilterSafetyOverrides(context.directory, hooks.onGitCommand)
-  );
   if (
-    context.filterSignature !== finalFilterSignature ||
     initialHead !== finalHead ||
     !initialStatus.equals(finalStatus) ||
     !committedPatch.equals(finalCommittedPatch) ||

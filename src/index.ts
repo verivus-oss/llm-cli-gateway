@@ -17068,7 +17068,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       promptParts: PromptPartsSchema.optional().describe(
         "Cache-aware structured prompt: { system?, tools?, context?, task }. Mutually exclusive with prompt. Stable parts hash into cache_state for prefix-discipline tracking."
       ),
-      model: z.string().optional().describe("Model name or alias (e.g. grok-build, latest)"),
+      model: z.string().optional().describe("Model name or alias (e.g. grok-4.5, latest)"),
       transport: z
         .enum(["cli", "acp"])
         .default("cli")
@@ -19124,7 +19124,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         promptParts: PromptPartsSchema.optional().describe(
           "Cache-aware structured prompt: { system?, tools?, context?, task }. Mutually exclusive with prompt. Stable parts hash into cache_state for prefix-discipline tracking."
         ),
-        model: z.string().optional().describe("Model name or alias (e.g. grok-build, latest)"),
+        model: z.string().optional().describe("Model name or alias (e.g. grok-4.5, latest)"),
         outputFormat: z
           .enum(["plain", "json", "streaming-json"])
           .optional()
