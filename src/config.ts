@@ -870,6 +870,12 @@ export const DEFAULT_LEAST_COST_TIERS: Readonly<Record<string, QualityTier>> = {
   "gemini:gemini-3-pro": "frontier",
   "grok:grok-build": "economy",
   "grok:grok-4": "standard",
+  // Grok 4.5 and later are frontier, not mainline: 4.5 is xAI's top model for
+  // coding, agentic work, and knowledge tasks, and it is priced above the
+  // grok-4.3 flagship. A later grok-4.x/5 release needs its own family and
+  // rate before it can be tiered; until then it resolves to no family and
+  // least-cost routing declines it rather than guessing.
+  "grok:grok-4.5": "frontier",
   "mistral:mistral-devstral": "economy",
   "mistral:mistral-medium": "standard",
 };

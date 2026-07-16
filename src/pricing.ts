@@ -29,8 +29,14 @@
  *   Google bills cached (context-cache read) tokens at 10% of input across the
  *   family, so cacheReadMultiplier = 0.10.
  *
- * Grok / xAI (source: <https://docs.x.ai/developers/models/grok-4.3> and
- * <https://docs.x.ai/developers/models/grok-build-0.1>):
+ * Grok / xAI (source: <https://docs.x.ai/developers/models.md>,
+ * <https://docs.x.ai/developers/grok-4-5.md>, and
+ * <https://docs.x.ai/developers/models/grok-build-0.1>). Rates are the
+ * sub-200k-prompt tier; xAI doubles every rate at or above a 200k prompt,
+ * which this table does not model:
+ *   - grok-4.5: $2.00 input / $6.00 output; cached input $0.50 (0.25×). Its own
+ *     family, NOT a grok-4.x alias: it is the Grok CLI default and costs more
+ *     than the grok-4.3 flagship, so it must not inherit that rate.
  *   - grok-4.x flagship: $1.25 input / $2.50 output; cached input $0.20 (0.16×).
  *     The grok-4-fast / grok-4.20 / grok-3 names are flagship aliases at the
  *     same rate per xAI's model pages.
@@ -119,6 +125,14 @@ const GROK_BUILD: PricePerMillion = {
   inputUsd: 1,
   outputUsd: 2,
   cacheReadMultiplier: 0.2,
+};
+// Grok 4.5 is NOT billed at the grok-4.3 flagship rate, so it needs its own
+// family: it is the Grok CLI's default model, and matching it on the shared
+// "grok-4" substring silently billed it at grok-4.3's cheaper rate.
+const GROK_4_5: PricePerMillion = {
+  inputUsd: 2,
+  outputUsd: 6,
+  cacheReadMultiplier: 0.25,
 };
 
 // Mistral — cache-read ~10% of input. Vibe emits no cache fields today, so the
@@ -215,6 +229,9 @@ export function getPricing(cli: CliType, model: string): PricePerMillion {
   }
   if (cli === "grok") {
     if (lower.includes("grok-build") || lower.includes("grok-code")) return GROK_BUILD;
+    // Before the generic grok-4 test: "grok-4.5" contains "grok-4", so the
+    // flagship branch would otherwise bill it at grok-4.3's rate.
+    if (lower.includes("grok-4.5")) return GROK_4_5;
     // grok-4.x AND the grok-3 / grok-latest slugs, which xAI now bills at the
     // grok-4.3 flagship rate (grok-3 redirected to grok-4.3 after 2026-05-15).
     if (lower.includes("grok-4") || lower.includes("grok-3") || lower.includes("grok-latest")) {
@@ -302,7 +319,11 @@ export function modelIdToFamily(model: string): string {
   // `grok-build` stays: the xAI HTTP API still exposes grok-build-0.1, even
   // though the Grok CLI dropped the bare `grok-build` id at 0.2.99.
   if (lower.includes("grok-build") || lower.includes("grok-code")) return "grok-build";
-  // grok-4.5 (the Grok CLI 0.2.99 default) resolves here via the grok-4 match.
+  // grok-4.5 is its own family and MUST be tested before the grok-4 match it
+  // would otherwise be swallowed by: xAI bills it at $2/$6, not grok-4.3's
+  // $1.25/$2.50. It is the Grok CLI default, so getting this wrong misprices
+  // every Grok request that does not name a model.
+  if (lower.includes("grok-4.5")) return "grok-4.5";
   if (lower.includes("grok-4") || lower.includes("grok-3") || lower.includes("grok-latest")) {
     return "grok-4";
   }
@@ -332,6 +353,7 @@ const FAMILY_PRICING = new Map<string, PricePerMillion>([
   ["gemini-2.5-flash", GEMINI_FLASH],
   ["gemini-3-pro", GEMINI_3_PRO],
   ["grok-4", GROK_4],
+  ["grok-4.5", GROK_4_5],
   ["grok-build", GROK_BUILD],
   ["mistral-medium", MISTRAL_MEDIUM],
   ["mistral-devstral", MISTRAL_DEVSTRAL],

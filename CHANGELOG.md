@@ -82,6 +82,23 @@ All notable changes to the llm-cli-gateway project.
 
 ### Fixed
 
+- **Grok 4.5 is priced as itself, not as a grok-4.3 alias.** `grok-4.5` contains
+  the `grok-4` substring, so it resolved to the flagship family and was billed at
+  $1.25/$2.50 instead of its actual $2.00/$6.00. It is the Grok CLI's default
+  model, so every Grok request that named no model under-reported cost by 1.6x on
+  input and 2.4x on output, and least-cost routing ranked Grok cheaper than it is.
+  It now has its own pricing family, tested ahead of the `grok-4` match, and is
+  tiered `frontier`. The grok-4.3 flagship rate is unchanged. A later Grok release
+  needs its own family and published rate before it can be priced or tiered;
+  until then it resolves to no family and routing declines it rather than
+  guessing a rate.
+- **Provider CLI contract baselines re-probed.** `PROVIDER_TARGET_VERSIONS` had
+  fallen behind five installed CLIs (claude 2.1.211, codex-cli 0.144.5, agy
+  1.1.3, grok 0.2.101, vibe 2.20.0), so the installed-binary drift probe reported
+  seven critical findings. Claude's new `--forward-subagent-text` is recorded as
+  acknowledged upstream surface rather than added to the argv allowlist, because
+  the gateway does not emit it. Snapshots, README, and the provider skills follow
+  the re-probed baseline.
 - **Validation receipts minted before the planned-judge gate still verify.**
   Read-time verification accepted only the current synthesis shape, so a
   receipt minted by an earlier release for a run whose judge was planned but
