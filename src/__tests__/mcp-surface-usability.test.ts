@@ -136,13 +136,109 @@ describe("MCP tool-surface usability (post-usability-review regressions)", () =>
     }
   });
 
+  it("pins complete Codex and Claude native-continuation target semantics", async () => {
+    const server = await makeServer(true);
+    const registry = (
+      server as unknown as Record<string, Record<string, { inputSchema?: unknown }>>
+    )._registeredTools;
+    const descriptionFor = (toolName: string, fieldName: string): string => {
+      const schema = registry[toolName].inputSchema as {
+        _def?: { shape?: () => Record<string, unknown> };
+      };
+      const shape = (schema._def?.shape?.() ?? {}) as Record<
+        string,
+        { _def?: { description?: string } }
+      >;
+      return shape[fieldName]?._def?.description ?? "";
+    };
+
+    for (const toolName of ["codex_request", "codex_request_async"]) {
+      const description = descriptionFor(toolName, "resumeLatest");
+      expect(description, `${toolName}.resumeLatest must identify the global selector`).toMatch(
+        /globally latest/i
+      );
+      expect(description, `${toolName}.resumeLatest must preserve the original cwd`).toMatch(
+        /inherits that session's original cwd/i
+      );
+      expect(description, `${toolName}.resumeLatest must reject path retargeting claims`).toMatch(
+        /workingDir\/addDir do not retarget it/i
+      );
+      expect(description, `${toolName}.resumeLatest must explain explicit UUID targeting`).toMatch(
+        /explicit real Codex UUID targets that session/i
+      );
+    }
+
+    for (const toolName of ["claude_request", "claude_request_async"]) {
+      const description = descriptionFor(toolName, "continueSession");
+      expect(description, `${toolName}.continueSession must require stable selection`).toMatch(
+        /stable workspace selection is required/i
+      );
+      expect(description, `${toolName}.continueSession must name workingDir`).toMatch(/workingDir/);
+      expect(description, `${toolName}.continueSession must name registered workspace`).toMatch(
+        /registered workspace/i
+      );
+      expect(description, `${toolName}.continueSession must name configured default`).toMatch(
+        /configured default workspace/i
+      );
+    }
+  });
+
+  it("pins the gateway-owned worktree materialization side-effect boundary", async () => {
+    const server = await makeServer(true);
+    const registry = (
+      server as unknown as Record<string, Record<string, { inputSchema?: unknown }>>
+    )._registeredTools;
+
+    for (const toolName of [
+      "claude_request",
+      "claude_request_async",
+      "codex_request",
+      "codex_request_async",
+      "gemini_request",
+      "gemini_request_async",
+      "grok_request",
+      "grok_request_async",
+      "mistral_request",
+      "mistral_request_async",
+      "devin_request",
+      "devin_request_async",
+    ]) {
+      const schema = registry[toolName].inputSchema as {
+        _def?: { shape?: () => Record<string, unknown> };
+      };
+      const shape = (schema._def?.shape?.() ?? {}) as Record<
+        string,
+        { _def?: { description?: string } }
+      >;
+      const description = shape.worktree?._def?.description ?? "";
+
+      expect(description, `${toolName}.worktree must pin hook suppression`).toMatch(
+        /repository, system, and global Git hooks/i
+      );
+      expect(description, `${toolName}.worktree must pin checkout filter suppression`).toMatch(
+        /clean, smudge, and process checkout filters/i
+      );
+      expect(description, `${toolName}.worktree must explain Git LFS representation`).toMatch(
+        /Git LFS remains in its repository representation/i
+      );
+      expect(description, `${toolName}.worktree must reject host-command execution claims`).toMatch(
+        /instead of executing host commands/i
+      );
+    }
+  });
+
   it("server instructions advertise async/job tools only when they are registered", () => {
     const withAsync = buildServerInstructions(true);
     expect(withAsync).toContain("*_request_async");
     expect(withAsync).toContain("llm_job_status");
+    expect(withAsync).toContain("llm_job_watch");
+    expect(withAsync).toContain("review_changes");
     expect(withAsync).toContain("auto-defers");
     expect(withAsync).toContain("do not use workspace_*");
     expect(withAsync).toContain("Stdio/local provider calls may pass local workingDir");
+    expect(withAsync).toContain("Codex new and resume prompts use stdin.");
+    expect(withAsync).toContain("codex_fork_session remains argv-bound");
+    expect(withAsync).not.toContain("Codex prompts use stdin.");
     expect(withAsync).not.toContain("${SYNC_DEADLINE_MS}"); // interpolation regression guard
 
     const withoutAsync = buildServerInstructions(false);
@@ -151,8 +247,16 @@ describe("MCP tool-surface usability (post-usability-review regressions)", () =>
     expect(withoutAsync).not.toContain("*_request_async (async)");
     expect(withoutAsync).toContain("not registered");
     expect(withoutAsync).not.toContain("Jobs: llm_job_status");
+    expect(withoutAsync).not.toContain("review_changes");
     expect(withoutAsync).toContain("DISABLED");
     expect(withoutAsync).toContain("no auto-deferral");
+  });
+
+  it("does not advertise validation tools when Kit mode leaves them unregistered", () => {
+    const kitInstructions = buildServerInstructions(true, false, false);
+    expect(kitInstructions).toContain("validation tools are not registered");
+    expect(kitInstructions).not.toContain("validate_with_models");
+    expect(kitInstructions).not.toContain("second_opinion");
   });
 
   it("backend=none registers no async/job tools (structural invariant, client-visible)", async () => {
@@ -166,6 +270,7 @@ describe("MCP tool-surface usability (post-usability-review regressions)", () =>
       "grok_request_async",
       "mistral_request_async",
       "llm_job_status",
+      "llm_job_watch",
       "llm_job_result",
       "llm_job_cancel",
     ]) {
@@ -207,7 +312,7 @@ describe("MCP tool-surface usability (post-usability-review regressions)", () =>
     // EXACT set pinning (post-2.3.0-gate Codex finding): derive the actual
     // sets from the registry and compare them exactly — positive membership
     // alone would let a future mis-classified or unlisted tool slip through.
-    expect(names.length).toBe(52);
+    expect(names.length).toBe(61);
     const setOf = (pred: (a: NonNullable<(typeof registry)[string]["annotations"]>) => boolean) =>
       names.filter(n => pred(registry[n].annotations!)).sort();
     expect(setOf(a => a.readOnlyHint === true)).toEqual(
@@ -215,14 +320,17 @@ describe("MCP tool-surface usability (post-usability-review regressions)", () =>
         "approval_list",
         "cli_versions",
         "compare_answers",
+        "config_status",
         "job_result",
         "job_status",
         "list_available_models",
         "list_models",
         "llm_job_result",
         "llm_job_status",
+        "llm_job_watch",
         "llm_process_health",
         "llm_request_result",
+        "explain_effective_config",
         "provider_tool_capabilities",
         "provider_subcommand_contract",
         "provider_subcommand_drift",
@@ -288,6 +396,8 @@ describe("MCP tool-surface usability (post-usability-review regressions)", () =>
         "synthesize_validation",
         // gateway-destructive (4)
         "cli_upgrade",
+        "config_init",
+        "config_recover_kit_attempt",
         "llm_job_cancel",
         "session_delete",
         "session_clear_all",

@@ -1,5 +1,6 @@
-import { createHash } from "node:crypto";
-import type { AsyncJobManager } from "./async-job-manager.js";
+import { createHash, timingSafeEqual } from "node:crypto";
+import { z } from "zod/v3";
+import type { AsyncJobManager, AsyncJobResult } from "./async-job-manager.js";
 import type {
   ValidationReceiptRecord,
   ValidationRunLink,
@@ -30,6 +31,91 @@ import { getRequestContext, principalCanAccess, resolveOwnerPrincipal } from "./
 export const VALIDATION_RECEIPT_SCHEMA_VERSION = "validation-receipt.v1";
 
 const TERMINAL_JOB_STATUSES = new Set(["completed", "failed", "canceled", "orphaned"]);
+
+const rawJobReferenceSchema = z
+  .object({
+    jobId: z.string().min(1),
+    correlationId: z.string().min(1),
+    statusTool: z.literal("job_status"),
+    resultTool: z.literal("job_result"),
+  })
+  .strict();
+
+const validationReportV1ContentSchema = z
+  .object({
+    validationId: z.string().min(1),
+    status: z.enum(["running", "partial", "not_started", "completed"]),
+    startedAt: z.string().min(1),
+    intent: z.enum(["validate", "second_opinion", "red_team", "consensus", "ask_model", "review"]),
+    originalRequest: z
+      .object({
+        question: z.string().optional(),
+        content: z.string().optional(),
+        focus: z.string().optional(),
+      })
+      .strict(),
+    modelList: z.array(z.string().min(1)),
+    perModelOutputs: z.array(
+      z
+        .object({
+          provider: z.string().min(1),
+          model: z.string().nullable(),
+          status: z.enum(["running", "completed", "failed", "canceled", "orphaned", "skipped"]),
+          verdict: z.string().nullable(),
+          rationale: z.string().nullable(),
+          risks: z.array(z.string()),
+          jobId: z.string().nullable(),
+          correlationId: z.string().nullable(),
+          warning: z.string().nullable(),
+          error: z.string().nullable(),
+        })
+        .strict()
+    ),
+    disagreements: z
+      .object({
+        hasMaterialDisagreement: z.boolean(),
+        summary: z.string(),
+        signals: z.array(z.string()),
+      })
+      .strict(),
+    finalRecommendation: z.string(),
+    confidence: z.enum(["none", "low", "medium", "high"]),
+    limitations: z.array(z.string()),
+    jobIds: z.array(z.string()),
+    synthesis: z
+      .object({
+        status: z.enum([
+          "not_requested",
+          "waiting_for_provider_results",
+          "running",
+          "skipped",
+          "completed",
+        ]),
+        judgeModel: z.string().nullable(),
+        rawJobReference: rawJobReferenceSchema.nullable(),
+        note: z.string(),
+      })
+      .strict(),
+  })
+  .strict();
+
+const validationRunRequestSchema = z
+  .object({
+    question: z.string().optional(),
+    content: z.string().optional(),
+    focus: z.string().optional(),
+    modelList: z.array(z.string().min(1)).min(1),
+    judgeProvider: z.string().min(1).nullable().optional(),
+  })
+  .passthrough();
+
+interface VerifiedValidationRunRequest {
+  question?: string;
+  content?: string;
+  focus?: string;
+  modelList: string[];
+  judgeProvider: string | null;
+}
 
 export interface ReceiptDeps {
   asyncJobManager: AsyncJobManager;
@@ -76,7 +162,22 @@ export type ValidationReceiptResult =
       rawResponses?: RawResponse[];
     }
   | { status: "pending"; validationId: string; run: ValidationRunState }
+  /**
+   * No receipt exists and none can be minted: the exact immutable evidence is
+   * missing, incomplete, truncated, or fails link integrity. This is an
+   * ABSENCE, never the outcome of checking a receipt that does exist.
+   */
   | { status: "expired_unminted"; validationId: string }
+  /**
+   * A receipt row EXISTS but does not verify against the durable run: corrupt
+   * report bytes, a hash mismatch, forged envelope metadata, or a report whose
+   * roster/synthesis contradicts the run it claims to attest. Distinct from
+   * `expired_unminted` on purpose: a verification FAILURE must never be
+   * reported as an absence, because the two demand opposite responses (an
+   * absence is expected after eviction; a failure means stored evidence and
+   * the durable run disagree and someone must look).
+   */
+  | { status: "verification_failed"; validationId: string }
   | { status: "not_found"; validationId: string };
 
 /**
@@ -109,52 +210,168 @@ function isTerminal(status: string): boolean {
   return TERMINAL_JOB_STATUSES.has(status);
 }
 
-function parseRequest(requestJson: string): {
-  question?: string;
-  content?: string;
-  focus?: string;
-  modelList?: string[];
-} {
+function hasCompleteOutput(result: AsyncJobResult): boolean {
+  return (
+    !result.outputTruncated &&
+    !result.stdoutTruncated &&
+    !result.stderrTruncated &&
+    result.stdoutOffsetChars === 0 &&
+    result.stderrOffsetChars === 0 &&
+    result.stdoutNextOffsetChars === null &&
+    result.stderrNextOffsetChars === null &&
+    result.stdout.length === result.stdoutTotalChars &&
+    result.stderr.length === result.stderrTotalChars &&
+    Buffer.byteLength(result.stdout, "utf8") === result.stdoutBytes &&
+    Buffer.byteLength(result.stderr, "utf8") === result.stderrBytes
+  );
+}
+
+function parseValidationRunRequest(requestJson: string): VerifiedValidationRunRequest | null {
   try {
-    const parsed = JSON.parse(requestJson);
-    return parsed && typeof parsed === "object" ? parsed : {};
+    const parsed = validationRunRequestSchema.safeParse(JSON.parse(requestJson));
+    if (!parsed.success || new Set(parsed.data.modelList).size !== parsed.data.modelList.length) {
+      return null;
+    }
+    return {
+      question: parsed.data.question,
+      content: parsed.data.content,
+      focus: parsed.data.focus,
+      modelList: parsed.data.modelList,
+      judgeProvider: parsed.data.judgeProvider ?? null,
+    };
   } catch {
-    return {};
+    return null;
   }
 }
 
 type MintOutcome =
-  { kind: "minted"; record: ValidationReceiptRecord } | { kind: "pending" } | { kind: "evicted" };
+  | { kind: "minted"; record: ValidationReceiptRecord }
+  | { kind: "pending" }
+  | { kind: "unmintable" };
+
+type VerifiedLinkedJob =
+  { kind: "terminal"; result: AsyncJobResult } | { kind: "pending" } | { kind: "unmintable" };
+
+/**
+ * Reload one exact linked job through the durable manager boundary. A receipt
+ * is immutable evidence, so legacy-unowned, cross-owner, mislinked, or partial
+ * output is permanently unmintable rather than something the hash may bless.
+ */
+function readVerifiedLinkedJob(
+  deps: ReceiptDeps,
+  store: ValidationRunStore,
+  run: ValidationRunRecord,
+  link: ValidationRunLink
+): VerifiedLinkedJob {
+  let jobOwner: string | null | undefined;
+  try {
+    jobOwner = deps.asyncJobManager.getJobOwner(link.jobId);
+  } catch {
+    return { kind: "unmintable" };
+  }
+  if (jobOwner !== run.ownerPrincipal) {
+    return { kind: "unmintable" };
+  }
+
+  let linkedValidationId: string | null;
+  try {
+    linkedValidationId = store.getValidationRunIdByJobId(link.jobId);
+  } catch {
+    return { kind: "unmintable" };
+  }
+  if (linkedValidationId !== run.validationId) return { kind: "unmintable" };
+
+  let result: AsyncJobResult | null;
+  try {
+    result = deps.asyncJobManager.getJobResult(link.jobId, Number.MAX_SAFE_INTEGER);
+  } catch {
+    return { kind: "unmintable" };
+  }
+  if (!result) return { kind: "unmintable" };
+  if (
+    result.id !== link.jobId ||
+    String(result.cli) !== link.provider ||
+    result.correlationId !== link.correlationId
+  ) {
+    return { kind: "unmintable" };
+  }
+  if (!isTerminal(result.status)) return { kind: "pending" };
+
+  return hasCompleteOutput(result) ? { kind: "terminal", result } : { kind: "unmintable" };
+}
 
 /**
  * Mint the receipt iff the run is terminal and all linked jobs are still
- * readable. Returns `evicted` when a linked job was already evicted (so a first
- * mint is no longer possible) and `pending` when the run is not yet terminal.
- * The write is INSERT OR IGNORE, so concurrent mints converge on one row.
+ * readable and pass durable owner/link/output integrity checks. Returns
+ * `unmintable` when exact evidence is missing, incomplete, truncated, or
+ * mismatched, and `pending` when the run is not yet terminal. The public result
+ * maps `unmintable` to the terminal `expired_unminted` status: in both cases no
+ * receipt exists and immutable evidence can no longer be minted safely. A
+ * receipt that DOES exist but fails verification is reported as
+ * `verification_failed` instead (see `mintedResult`). The write is INSERT OR
+ * IGNORE, so concurrent mints converge on one row.
  */
 function tryMint(deps: ReceiptDeps, run: ValidationRunRecord): MintOutcome {
   const store = deps.validationRunStore;
   if (!store) return { kind: "pending" };
+  if (run.status === "admitting" || run.status === "admission_failed") {
+    return { kind: "pending" };
+  }
+  const request = parseValidationRunRequest(run.requestJson);
+  if (!request) return { kind: "unmintable" };
+  const requested = request.modelList;
+  const requestedProviders = new Set(requested);
+
+  const providerNames = new Set<string>();
+  const providerJobIds = new Set<string>();
+  const providerCorrelationIds = new Set<string>();
+  for (const link of run.providerLinks) {
+    if (
+      !requestedProviders.has(link.provider) ||
+      providerNames.has(link.provider) ||
+      providerJobIds.has(link.jobId) ||
+      providerCorrelationIds.has(link.correlationId)
+    ) {
+      return { kind: "unmintable" };
+    }
+    providerNames.add(link.provider);
+    providerJobIds.add(link.jobId);
+    providerCorrelationIds.add(link.correlationId);
+  }
+  if (
+    run.judgeLink &&
+    (providerJobIds.has(run.judgeLink.jobId) ||
+      providerCorrelationIds.has(run.judgeLink.correlationId))
+  ) {
+    return { kind: "unmintable" };
+  }
+
+  const plannedJudge = request.judgeProvider;
+  if (plannedJudge && run.judgeLink && run.judgeLink.provider !== plannedJudge) {
+    return { kind: "unmintable" };
+  }
+  if (plannedJudge && !run.judgeLink && run.status !== "judge_skipped") {
+    return { kind: "pending" };
+  }
 
   const providerResults: Array<{ link: ValidationRunLink; result: NormalizedValidationResult }> =
     [];
   for (const link of run.providerLinks) {
-    const jobResult = deps.asyncJobManager.getJobResult(link.jobId);
-    if (!jobResult) return { kind: "evicted" };
-    if (!isTerminal(jobResult.status)) return { kind: "pending" };
-    providerResults.push({ link, result: normalizeJobResult(link.provider, null, jobResult) });
+    const verified = readVerifiedLinkedJob(deps, store, run, link);
+    if (verified.kind !== "terminal") return verified;
+    providerResults.push({
+      link,
+      result: normalizeJobResult(link.provider, null, verified.result),
+    });
   }
 
   let judgeStatus: string | null = null;
   if (run.judgeLink) {
-    const judgeResult = deps.asyncJobManager.getJobResult(run.judgeLink.jobId);
-    if (!judgeResult) return { kind: "evicted" };
-    if (!isTerminal(judgeResult.status)) return { kind: "pending" };
-    judgeStatus = judgeResult.status;
+    const verified = readVerifiedLinkedJob(deps, store, run, run.judgeLink);
+    if (verified.kind !== "terminal") return verified;
+    judgeStatus = verified.result.status;
   }
 
-  const request = parseRequest(run.requestJson);
-  const requested = Array.isArray(request.modelList) ? request.modelList : [];
   const dispatched = new Set(run.providerLinks.map(link => link.provider));
   const results: NormalizedValidationResult[] = providerResults.map(entry => entry.result);
   for (const provider of requested) {
@@ -186,12 +403,19 @@ function tryMint(deps: ReceiptDeps, run: ValidationRunRecord): MintOutcome {
           ? "Judge synthesis completed."
           : `Judge job ended in '${judgeStatus}' without a synthesis result.`,
       }
-    : {
-        status: "not_requested",
-        judgeModel: null,
-        rawJobReference: null,
-        note: "No judge synthesis was requested.",
-      };
+    : run.status === "judge_skipped" && plannedJudge
+      ? {
+          status: "skipped",
+          judgeModel: plannedJudge as ValidationProvider,
+          rawJobReference: null,
+          note: "The planned judge could not be dispatched.",
+        }
+      : {
+          status: "not_requested",
+          judgeModel: null,
+          rawJobReference: null,
+          note: "No judge synthesis was requested.",
+        };
 
   const modelList = (
     requested.length > 0 ? requested : Array.from(dispatched)
@@ -235,15 +459,203 @@ function tryMint(deps: ReceiptDeps, run: ValidationRunRecord): MintOutcome {
   return { kind: "minted", record: stored ?? record };
 }
 
-function receiptEnvelope(record: ValidationReceiptRecord): ValidationReceipt {
-  const report = JSON.parse(record.reportJson) as ValidationReportV1Content;
+function equalSha256(left: string, right: string): boolean {
+  if (!/^[0-9a-f]{64}$/.test(left) || !/^[0-9a-f]{64}$/.test(right)) return false;
+  return timingSafeEqual(Buffer.from(left, "hex"), Buffer.from(right, "hex"));
+}
+
+function sameStrings(left: readonly string[], right: readonly string[]): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function originalRequestMatchesRun(
+  report: ValidationReportV1Content,
+  request: VerifiedValidationRunRequest
+): boolean {
+  return (
+    report.originalRequest.question === request.question &&
+    report.originalRequest.content === request.content &&
+    report.originalRequest.focus === request.focus
+  );
+}
+
+function providerRosterMatchesRun(
+  report: ValidationReportV1Content,
+  run: ValidationRunRecord,
+  request: VerifiedValidationRunRequest
+): boolean {
+  if (!sameStrings(report.modelList, request.modelList)) return false;
+
+  const requestedProviders = new Set(request.modelList);
+  const linkedProviders = new Set<string>();
+  const linkedJobIds = new Set<string>();
+  const linkedCorrelationIds = new Set<string>();
+  for (const link of run.providerLinks) {
+    if (
+      !link.provider ||
+      !link.jobId ||
+      !link.correlationId ||
+      !requestedProviders.has(link.provider) ||
+      linkedProviders.has(link.provider) ||
+      linkedJobIds.has(link.jobId) ||
+      linkedCorrelationIds.has(link.correlationId)
+    ) {
+      return false;
+    }
+    linkedProviders.add(link.provider);
+    linkedJobIds.add(link.jobId);
+    linkedCorrelationIds.add(link.correlationId);
+  }
+
+  const expectedOutputs: Array<{
+    provider: string;
+    jobId: string | null;
+    correlationId: string | null;
+    dispatched: boolean;
+  }> = run.providerLinks.map(link => ({
+    provider: link.provider,
+    jobId: link.jobId,
+    correlationId: link.correlationId,
+    dispatched: true,
+  }));
+  for (const provider of request.modelList) {
+    if (!linkedProviders.has(provider)) {
+      expectedOutputs.push({ provider, jobId: null, correlationId: null, dispatched: false });
+    }
+  }
+  if (report.perModelOutputs.length !== expectedOutputs.length) return false;
+  const remainingOutputs = [...report.perModelOutputs];
+  for (const expected of expectedOutputs) {
+    const actual = remainingOutputs.shift();
+    if (
+      !actual ||
+      actual.provider !== expected.provider ||
+      actual.jobId !== expected.jobId ||
+      actual.correlationId !== expected.correlationId ||
+      (expected.dispatched ? !isTerminal(actual.status) : actual.status !== "skipped")
+    ) {
+      return false;
+    }
+  }
+
+  return (
+    sameStrings(
+      report.jobIds,
+      run.providerLinks.map(link => link.jobId)
+    ) && report.status === (run.providerLinks.length === 0 ? "not_started" : "completed")
+  );
+}
+
+function synthesisMatchesRun(
+  report: ValidationReportV1Content,
+  run: ValidationRunRecord,
+  request: VerifiedValidationRunRequest
+): boolean {
+  const synthesis = report.synthesis;
+  const plannedJudge = request.judgeProvider;
+  const boundJudge = plannedJudge ?? run.judgeLink?.provider ?? null;
+  if (run.judgeLink) {
+    const link = run.judgeLink;
+    return (
+      Boolean(link.provider && link.jobId && link.correlationId) &&
+      !run.providerLinks.some(
+        providerLink =>
+          providerLink.jobId === link.jobId || providerLink.correlationId === link.correlationId
+      ) &&
+      link.provider === boundJudge &&
+      (run.status === "running" || run.status === "finalized") &&
+      (synthesis.status === "completed" || synthesis.status === "skipped") &&
+      synthesis.judgeModel === link.provider &&
+      synthesis.rawJobReference?.jobId === link.jobId &&
+      synthesis.rawJobReference.correlationId === link.correlationId &&
+      synthesis.rawJobReference.statusTool === "job_status" &&
+      synthesis.rawJobReference.resultTool === "job_result"
+    );
+  }
+
+  if (boundJudge) {
+    if (synthesis.rawJobReference !== null) return false;
+    // Current shape: a planned judge that was never claimed is recorded as an
+    // explicit `skipped` bound to the planned provider.
+    if (
+      (run.status === "judge_skipped" || run.status === "finalized") &&
+      synthesis.status === "skipped" &&
+      synthesis.judgeModel === boundJudge
+    ) {
+      return true;
+    }
+    // Legacy shape (receipts minted by <= 2.17.x): before the plannedJudge
+    // pending gate existed, a run with a planned judge and no judge link was
+    // minted immediately as `not_requested` with a null judgeModel, then marked
+    // `finalized`. Those receipts are valid immutable evidence produced by
+    // shipped production code, and the canonical hashing they were minted under
+    // is byte-identical to today's, so they must keep verifying. Accepting them
+    // costs no integrity: it is reachable only when the run has NO judge link,
+    // so no judge job's evidence can be hidden by this shape, and `finalized`
+    // is exactly the state the legacy mint left behind (a `running` run with a
+    // planned judge is still gated to `pending` and can never reach here).
+    return (
+      run.status === "finalized" &&
+      synthesis.status === "not_requested" &&
+      synthesis.judgeModel === null
+    );
+  }
+
+  return (
+    (run.status === "running" || run.status === "finalized") &&
+    synthesis.status === "not_requested" &&
+    synthesis.judgeModel === null &&
+    synthesis.rawJobReference === null
+  );
+}
+
+function verifiedReceiptEnvelope(
+  record: ValidationReceiptRecord,
+  run: ValidationRunRecord
+): ValidationReceipt | null {
+  if (
+    record.schemaVersion !== VALIDATION_RECEIPT_SCHEMA_VERSION ||
+    record.validationId !== run.validationId ||
+    record.ownerPrincipal !== run.ownerPrincipal ||
+    record.prevSha256 !== null ||
+    record.seq !== null ||
+    record.signature !== null
+  ) {
+    return null;
+  }
+  let rawReport: unknown;
+  try {
+    rawReport = JSON.parse(record.reportJson);
+  } catch {
+    return null;
+  }
+  const parsed = validationReportV1ContentSchema.safeParse(rawReport);
+  if (!parsed.success) return null;
+  const report = parsed.data as ValidationReportV1Content;
+  const request = parseValidationRunRequest(run.requestJson);
+  if (!request) return null;
+  const actualSha256 = computeCanonicalSha256(report);
+  if (!equalSha256(actualSha256, record.canonicalSha256)) return null;
+  if (
+    report.validationId !== record.validationId ||
+    JSON.stringify(report.modelList) !== JSON.stringify(record.models) ||
+    report.disagreements.hasMaterialDisagreement !== record.hasMaterialDisagreement ||
+    report.confidence !== record.confidence ||
+    report.intent !== run.intent ||
+    report.startedAt !== run.createdAt ||
+    !originalRequestMatchesRun(report, request) ||
+    !providerRosterMatchesRun(report, run, request) ||
+    !synthesisMatchesRun(report, run, request)
+  ) {
+    return null;
+  }
   return {
     schemaVersion: record.schemaVersion,
     validationId: record.validationId,
     ownerPrincipal: record.ownerPrincipal,
     mintedAt: record.mintedAt,
     intent: report.intent,
-    models: record.models,
+    models: report.modelList as string[],
     report,
     humanReadable: renderHumanReport(report),
     canonicalSha256: record.canonicalSha256,
@@ -256,7 +668,8 @@ function receiptEnvelope(record: ValidationReceiptRecord): ValidationReceipt {
 /**
  * Read-time-only raw provider answers, pulled live per linked jobId under the
  * SAME owner check, never persisted in the receipt and never part of the hash.
- * Absent for jobs that have been evicted.
+ * Absent for jobs that have been evicted or no longer expose a complete,
+ * identity-matching output page.
  */
 function collectRawResponses(
   deps: ReceiptDeps,
@@ -264,18 +677,45 @@ function collectRawResponses(
   caller: string
 ): RawResponse[] {
   const out: RawResponse[] = [];
-  const refs: Array<{ provider: string; jobId: string }> = [];
+  const refs: Array<{ provider: string; jobId: string; correlationId: string }> = [];
   for (const output of receipt.report.perModelOutputs) {
-    if (output.jobId) refs.push({ provider: output.provider, jobId: output.jobId });
+    if (output.jobId && output.correlationId) {
+      refs.push({
+        provider: output.provider,
+        jobId: output.jobId,
+        correlationId: output.correlationId,
+      });
+    }
   }
   const judgeRef = receipt.report.synthesis.rawJobReference;
   if (judgeRef?.jobId) {
-    refs.push({ provider: receipt.report.synthesis.judgeModel ?? "judge", jobId: judgeRef.jobId });
+    refs.push({
+      provider: receipt.report.synthesis.judgeModel ?? "judge",
+      jobId: judgeRef.jobId,
+      correlationId: judgeRef.correlationId,
+    });
   }
   for (const ref of refs) {
-    if (!principalCanAccess(deps.asyncJobManager.getJobOwner(ref.jobId), caller)) continue;
-    const jobResult = deps.asyncJobManager.getJobResult(ref.jobId);
-    if (jobResult) out.push({ provider: ref.provider, jobId: ref.jobId, text: jobResult.stdout });
+    let owner: string | null | undefined;
+    let jobResult: AsyncJobResult | null;
+    try {
+      owner = deps.asyncJobManager.getJobOwner(ref.jobId);
+      jobResult = deps.asyncJobManager.getJobResult(ref.jobId, Number.MAX_SAFE_INTEGER);
+    } catch {
+      continue;
+    }
+    if (
+      !principalCanAccess(owner, caller) ||
+      !jobResult ||
+      jobResult.id !== ref.jobId ||
+      String(jobResult.cli) !== ref.provider ||
+      jobResult.correlationId !== ref.correlationId ||
+      !isTerminal(jobResult.status) ||
+      !hasCompleteOutput(jobResult)
+    ) {
+      continue;
+    }
+    out.push({ provider: ref.provider, jobId: ref.jobId, text: jobResult.stdout });
   }
   return out;
 }
@@ -283,10 +723,14 @@ function collectRawResponses(
 function mintedResult(
   deps: ReceiptDeps,
   record: ValidationReceiptRecord,
+  run: ValidationRunRecord,
   includeRawResponses: boolean,
   caller: string
 ): ValidationReceiptResult {
-  const receipt = receiptEnvelope(record);
+  const receipt = verifiedReceiptEnvelope(record, run);
+  // A stored receipt that fails verification is a failure, not an absence:
+  // report it as such rather than as `expired_unminted` ("never minted").
+  if (!receipt) return { status: "verification_failed", validationId: run.validationId };
   return {
     status: "minted",
     validationId: record.validationId,
@@ -332,10 +776,18 @@ export function resolveValidationReceipt(
 
   const existing = store.getValidationReceipt(validationId);
   if (existing) {
-    if (!principalCanAccess(existing.ownerPrincipal, opts.caller)) {
+    // The run is the durable ownership authority. Authorizing from receipt
+    // metadata before cross-checking it would let a corrupted receipt owner
+    // transfer visibility without invalidating the report-only canonical hash.
+    const run = store.getValidationRun(validationId);
+    if (
+      !run ||
+      run.validationId !== validationId ||
+      !principalCanAccess(run.ownerPrincipal, opts.caller)
+    ) {
       return { status: "not_found", validationId };
     }
-    return mintedResult(deps, existing, opts.includeRawResponses ?? false, opts.caller);
+    return mintedResult(deps, existing, run, opts.includeRawResponses ?? false, opts.caller);
   }
 
   const run = store.getValidationRun(validationId);
@@ -345,9 +797,9 @@ export function resolveValidationReceipt(
 
   const outcome = tryMint(deps, run);
   if (outcome.kind === "minted") {
-    return mintedResult(deps, outcome.record, opts.includeRawResponses ?? false, opts.caller);
+    return mintedResult(deps, outcome.record, run, opts.includeRawResponses ?? false, opts.caller);
   }
-  if (outcome.kind === "evicted") {
+  if (outcome.kind === "unmintable") {
     return { status: "expired_unminted", validationId };
   }
   return { status: "pending", validationId, run: runStateOf(deps, run) };

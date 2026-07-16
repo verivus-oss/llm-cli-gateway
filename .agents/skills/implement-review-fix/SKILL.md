@@ -1,154 +1,210 @@
 ---
 name: implement-review-fix
-description: Run implement-review-fix cycle using multiple LLMs (Claude, Codex, Gemini, Grok, Mistral). Use for features, bugs, or refactoring with multi-LLM collaboration. Mistral defaults to `--agent auto-approve`; current Vibe defaults session logging on, and doctor flags explicit `[session_logging] enabled = false` before session-continuity use.
+description: Implement a change, obtain complete evidence-backed review through the local stdio gateway, fix findings, and repeat without arbitrary review limits. Use for features, bugs, or refactoring.
 metadata:
   author: verivus-oss
-  version: "1.6"
+  version: "1.7"
 ---
 
-# Implement-Review-Fix Cycle
+# Implement, Review, Fix
 
-Structured workflow: multiple LLMs implement, review, iterate until quality met.
+Use one parent orchestrator. It may call gateway providers, but provider jobs do
+not recursively orchestrate other providers. Every review dispatch uses the
+installed local stdio gateway MCP surface, never a direct provider binary, SDK,
+connector/shadow gateway, or ad hoc shell fallback.
 
-## Cycle
+## Outcome contract
 
-```
-1. Implement (Codex) → 2. Review (Claude+Gemini) → 3. Fix (Codex) → 4. Verify
-   └──────────────── loop until unconditional APPROVED ────────────────┘
-```
+The cycle ends only after the final change set has relevant local verification
+and every required reviewer returns evidence-backed
+`APPROVED_UNCONDITIONALLY`. Do not use an arbitrary review-round, turn, token,
+price, budget, or wallclock cap. A timeout, malformed reply, residual
+condition, unavailable reviewer, or qualified approval is not approval.
 
-Single-level orchestration only — parent agent coordinates all steps. Child LLMs cannot call other LLMs through gateway.
+Repair and re-review until all required reviewers approve. If a provider reaches
+a terminal external failure, retain the error/repair evidence and report
+`INCOMPLETE` or `BLOCKED`; do not silently reduce the review roster. Stop only
+on explicit user cancellation or after reporting the terminal blocker.
 
-## Dispatch Defaults
+## Explicit user-authorized full-access review override
 
-Apply these on every dispatch unless the caller has explicitly overridden a rule in the current turn:
+Keep the ordinary implementation and inspection defaults below unless the user
+explicitly authorizes full provider permissions and native MCP access for the
+review. In that case, follow the complete `multi-llm-review` full-access
+protocol rather than weakening it into a safe-default example: build the target
+checkout, launch `node dist/index.js --transport=stdio` from that checkout, and
+do not use a globally installed or stale gateway process.
 
-1. **Omit `model`** — let the gateway use its configured default per CLI. Nominating a model risks deprecated IDs (`o3`, `o3-pro`, `gpt-4o`, …) and capability mismatches. Use `list_models` only if the caller has asked for a specific variant.
-2. **`approvalStrategy:"mcp_managed"`** is the skill dispatch default (the gateway schema default is `"legacy"`). It gates the request before execution; Claude then runs with `--permission-mode bypassPermissions`, Gemini with `--approval-mode yolo`, and Codex still needs `fullAuto:true` for autonomous file/shell work. Prefer this over raw bypass flags.
-3. **No wallclock timeout; poll every 60 s** — let sync auto-defer at 45 s or use `*_request_async`. Poll `llm_job_status` once every 60 seconds. Do **not** cancel jobs for taking too long; cancel only on explicit instruction or hard failure. `idleTimeoutMs` (no-output safeguard) is separate.
-4. **Iterate until unconditional APPROVED** (review dispatches only) — every review/re-review dispatch is a loop. End every review prompt with "End with APPROVED or NOT APPROVED with findings." On `NOT APPROVED` or conditional approval, consolidate findings, dispatch fixes (Codex + `fullAuto:true`), re-dispatch the review to the **same reviewer**. Repeat until unconditional APPROVED. Escalate after 3 rounds. This rule does **not** apply to pure implementation or non-review analysis dispatches. (The implementation step in Step 1 is not itself a review; the loop is driven by the reviewer verdict in Step 2 / Step 4.)
+Apply the current provider-native full-access control on every new review job,
+preserve ambient provider MCP configuration without gateway tool allowlists,
+and do not assume a resumed session retained the grant. Give every reviewer the
+verification report as a corrective-program specification plus the exact base,
+diff or changed-file list, and persistent evidence locations. Require
+independent code, docs, tests, and command inspection. A report claim, intent,
+or green-check summary is never approval; a disputed finding needs direct
+code/doc/test evidence.
 
-## Session Continuity
+Do not set caller review caps. When the user requests a 90-second progress
+cadence, make a non-blocking wait and do not poll earlier. Re-run the complete
+required roster after every material change until each reachable reviewer returns
+`APPROVED_UNCONDITIONALLY` or records a concrete `BLOCKED_EXTERNAL` condition.
 
-| CLI | Effect | Mechanism |
-|-----|--------|-----------|
-| **Claude** | Real continuity | `--session-id` or `--continue` passed to CLI |
-| **Codex** | Real continuity | `codex exec resume <UUID>` (`sessionId`) or `codex exec resume --last` (`resumeLatest:true`). `sessionId` must be a real Codex session UUID from `~/.codex/sessions/`; gateway-generated `gw-*` IDs are rejected |
-| **Gemini** | Real continuity | `--resume` passed to CLI |
-| **Grok** | Real continuity | `--resume` / `--continue` passed to CLI |
+## 1. Establish the target and roster
 
-For Codex resumption: pass the UUID printed by `codex resume` / visible under `~/.codex/sessions/`, **or** pass `resumeLatest:true` to use the most recent session in cwd. Note: `--full-auto` is silently dropped on resume — Codex inherits the original session's approval policy.
+1. Capture the exact target repository, base/head or dirty worktree state,
+   changed-file list, relevant specs, and intended invariants.
+2. Call `cli_versions()`, `list_models()`, and
+   `provider_tool_capabilities({cli:"..."})` for Claude, Codex, Gemini, Grok,
+   Mistral, Devin, and Cursor.
+3. Use the target-routing matrix in `multi-llm-review`: explicit `workingDir`
+   for Claude/Codex/Grok/Mistral/Devin, a verified registered `workspace` for
+   Gemini, and `workspace` for Cursor. Do not let a default workspace decide the
+   review target. An unscoped child uses a neutral temporary cwd, not the
+   gateway repository.
+4. Start an exhaustive CLI review roster with all seven canonical providers.
+   If the user explicitly asks for a narrower scope, record excluded providers
+   and the limitation before dispatching.
 
-## Cache-Aware Prompts (`promptParts`)
+`approvalStrategy:"mcp_managed"` and `approvalPolicy` are Claude-only. For
+Claude managed work, `workingDir`, selectors, native continuation, and other
+posture changes require an approval decision plus
+`LLM_GATEWAY_APPROVAL_ALLOW_BYPASS=1`. Codex, Gemini, Grok, Mistral, Devin, and
+Cursor use `approvalStrategy:"legacy"`.
 
-The implement → review → fix loop is the canonical use case for the structured `promptParts` field: across rounds the system instructions, tool block, and file/spec context are byte-identical; only the `task` mutates. Switch from `prompt` to `promptParts` in every step so the gateway can hash the stable prefix once and providers can serve the long prefix from cache:
+## 2. Implement with an explicit workspace
 
-```
+Gateway tool call:
+
+```text
 codex_request({
-  promptParts: {
-    system:  "<stable implementation brief>",
-    context: "<spec + relevant file paths or dump>",
-    task:    "Implement [feature]. Requirements: …"
-  },
-  fullAuto: true,
-  approvalStrategy: "mcp_managed",
-  optimizePrompt: true
+  prompt:"Implement <feature> in <repo>. Requirements: <requirements>. Update focused tests and report commands actually run.",
+  workingDir:"<repo>",
+  sandboxMode:"workspace-write",
+  approvalStrategy:"legacy",
+  correlationId:"implementation"
 })
 ```
 
-`prompt` and `promptParts` are mutually exclusive — supplying both returns `provide exactly one of \`prompt\` or \`promptParts\``; supplying neither returns `one of \`prompt\` or \`promptParts\` is required`. The gateway assembles in canonical order `system → tools → context → task` so a re-review or fix call with the same `system` + `context` and a new `task` reuses the same hash.
+Use `sandboxMode:"read-only"` only for inspection. `fullAuto:true` is a
+deprecated compatibility shorthand for `workspace-write`; do not use it in new
+dispatches. A resumed Codex session drops sandbox selection, so choose a fresh
+session if the required native posture has changed.
 
-After a round, `session_get({sessionId})` projects a compact `cacheState` block (hit rate, distinct prefix count, savings, `ttlRemainingMs` for Claude) — useful for confirming the loop is actually cache-warming as expected.
+Run the smallest relevant local tests/builds after implementation. Preserve the
+commands, outputs, change set, and any failures as review evidence.
 
-## Step 1: Implement
+## 3. Build the review packet
 
-```
-codex_request({prompt:"Implement [feature]. Requirements:\n- [req 1]\n- [req 2]\n\nWrite code in [path]. Include tests.",fullAuto:true,approvalStrategy:"mcp_managed",optimizePrompt:true})
-```
+For a normal read-only Git review, prefer `review_changes` when its durable
+SQLite/PostgreSQL validation surface is registered. It constructs the complete
+hashed committed/staged/unstaged/untracked packet without truncation and starts
+repository-bound read-only reviewers. Collect its returned validation
+`job_status`/`job_result` references for progress and human visibility. If a
+judge was requested, wait for terminal results, then call
+`synthesize_validation` with the `validationId` and same repository selector.
+For `review_changes`, do not pass caller results as evidence: synthesis ignores
+caller `question`/`providerResults`, reloads exact owned durable linked terminal
+jobs, reconstructs unavailable requested seats as skipped, and atomically claims
+the stored judge once. Stored repository, owner, judge, and consent are
+authoritative. General validation still requires caller question/results. Use
+the custom packet below when the user-authorized full-access protocol is
+required or the target is not a Git change set.
 
-## Step 2: Review
+Include:
 
-Send to reviewers in parallel. Reviewers **must have tool access** to read files and verify claims — never use `allowedTools:[]` or include tool-suppression language in review prompts. `mcp_managed` removes Claude/Gemini approval prompts; Codex also requires `fullAuto:true`.
+- Base/head identifiers or an explicit uncommitted-worktree statement.
+- Exact diff and changed-file list.
+- Requirements, invariants, migration/deployment behavior, and docs contract.
+- Tests/build/lint/typecheck commands actually run with their outcomes.
+- Earlier reviewer findings and evidence-backed responses.
 
-Before adding provider-specific controls, check `provider_tool_capabilities` for
-that provider. Do not copy Claude tool names into Grok, Gemini, Codex, or Vibe
-requests; omit allowlists unless the capability record says the provider
-supports the exact native tool names you intend to use.
+Require reviewers to open source/tests/docs directly and return strict JSON:
 
-**Claude — Quality:**
-```
-claude_request({prompt:"Review changes in [path]. Read the files directly. Check:\n- Code quality/maintainability\n- Project conventions\n- Error handling\n- Documentation gaps\nList issues with severity and fixes. End with APPROVED or NOT APPROVED with findings.",allowedTools:["Read","Grep","Glob"],approvalStrategy:"mcp_managed",optimizePrompt:true,optimizeResponse:true})
-```
-
-**Gemini — Bugs/Security:**
-```
-gemini_request({prompt:"Analyze [path] for bugs, edge cases, security issues. Read the files directly. Check test coverage. Rate: critical/high/medium/low. End with APPROVED or NOT APPROVED with findings.",approvalStrategy:"mcp_managed",optimizePrompt:true,optimizeResponse:true})
-```
-
-**Grok — Optional 4th Reviewer (Diversity / Consensus):**
-```
-grok_request({prompt:"Independent review of [path]. Flag issues the other reviewers may have missed; contradict findings you disagree with. End with APPROVED or NOT APPROVED with findings.",approvalStrategy:"mcp_managed",optimizePrompt:true,optimizeResponse:true})
-```
-
-Add Grok when consensus matters (high-stakes paths) or to break ties. Auth must already be set up (`grok login` or `GROK_CODE_XAI_API_KEY`).
-
-Sync tools auto-defer at 45s — if response contains `status:"deferred"`, poll `jobId` via `llm_job_status` every 60s, fetch with `llm_job_result`. Results are durable (default 30 days) — if your polling wrapper times out, fetch by `jobId` later or re-issue the identical call (auto-dedup reattaches to the live job).
-
-## Step 3: Fix
-
-Consolidate findings, send to Codex. Use `resumeLatest:true` or a real Codex
-session UUID when you want Codex CLI continuity; otherwise re-state problem
-context inline:
-
-```
-codex_request({prompt:"Fix issues in [path]:\n\n1. [Critical] [desc]\n2. [High] [desc]\n3. [Medium] [desc]\n\nApply fixes and update tests.",fullAuto:true,approvalStrategy:"mcp_managed",optimizePrompt:true})
-```
-
-## Step 4: Verify (re-review)
-
-Re-dispatch the **same reviewers** from Step 2 with fix context:
-
-```
-claude_request({prompt:"Re-review [path] after fixes. Previous findings:\n1. [issue 1] — Fixed by: [what changed]\n2. [issue 2] — Fixed by: [what changed]\n\nConfirm each fix or flag remaining issues. End with APPROVED or NOT APPROVED with findings.",approvalStrategy:"mcp_managed",optimizePrompt:true,optimizeResponse:true})
+```json
+{
+  "verdict": "APPROVED_UNCONDITIONALLY | CHANGES_REQUIRED | BLOCKED_EXTERNAL",
+  "findings": [
+    {
+      "file": "src/example.ts",
+      "line": 1,
+      "issue": "...",
+      "evidence": "...",
+      "suggested_fix": "..."
+    }
+  ],
+  "inspected": ["..."],
+  "reviewed_change_identity": "exact diff artifact or exhaustive file list"
+}
 ```
 
-## Iteration (mandatory)
+The packet is a claim, not proof. A reviewer that cannot inspect a claimed
+input must report `CHANGES_REQUIRED` with evidence or `BLOCKED_EXTERNAL` with
+its exact external access error.
 
-- Any `NOT APPROVED` or conditional approval → back to Step 3 → Step 4
-- "APPROVED with residual notes" counts as approved only if notes are purely informational
-- Max 3 iterations before escalating to the user (but continue iterating until then)
-- All reviewers must return unconditional APPROVED before the cycle ends
+## 4. Review through the full roster
 
-## Long-Running Tasks
+Use `*_request_async` when async tools are registered and dispatch the seven
+provider calls described in `multi-llm-review`. They are gateway tool calls, not
+shell commands. Start all required reviewers with the same substantive packet,
+provider-appropriate target routing, and an explicit strict verdict clause.
 
-Sync tools auto-defer if execution exceeds 45s deadline. Response contains `status:"deferred"` with `jobId` — poll with `llm_job_status`, fetch with `llm_job_result`. No manual sync/async choice needed.
+- For a pure source review, start Codex with `sandboxMode:"read-only"`; move to
+  `workspace-write` only when it must run checks that write artifacts.
+- The preceding safe Codex posture is not the explicit full-access override.
+  For that user-authorized case, use the full provider mapping in
+  `multi-llm-review`, including Codex `sandboxMode:"danger-full-access"` and
+  `dangerouslyBypassApprovalsAndSandbox:true` on a fresh session.
+- Do not pass Claude `allowedTools` or `tools` selectors in a routine managed
+  review. They are high-risk managed inputs, not a way to guarantee access.
+- Gemini rejects non-empty `allowedTools`, `skipTrust:true`, JSON/stream-JSON
+  output, and unsupported policy/attachment fields in the Antigravity path.
+- Devin and Cursor take flat `prompt` only. Claude/Codex/Gemini/Grok/Mistral can
+  receive `promptParts`, but it is mutually exclusive with `prompt`; keep the
+  canonical flat packet for the two providers that do not support it.
 
-For explicit non-blocking (fire-and-forget, parallel jobs):
+SQLite/PostgreSQL jobs survive restarts. Acknowledged memory jobs do not, and
+`persistence.backend = "none"` has no async/job tools. Poll with a non-blocking
+cadence, but never treat cadence as a review deadline.
 
-```
-codex_request_async({prompt:"...",fullAuto:true,approvalStrategy:"mcp_managed"})
-```
+## 5. Triage, fix, and re-review
 
-### Parallel Async Reviews (up to 4 CLIs)
+1. Verify every finding against source, tests, docs, or upstream references.
+2. Fix correct findings in the target workspace and run focused verification.
+3. For a disputed finding, send the same reviewer exact counter-evidence. It
+   must withdraw or revise the finding with evidence; assertion is not rebuttal.
+4. Refresh the packet and exact diff after every change.
+5. Re-dispatch every reviewer whose prior verdict is not unconditional and any
+   reviewer whose evidence predates the changed diff.
+6. Repeat until all required reviewers unconditionally approve the final exact
+   change set.
 
-```
-codex_request_async({prompt:"Implement [feature]...",fullAuto:true,approvalStrategy:"mcp_managed",correlationId:"impl"})
-// Poll every 60s until completed...
+## Session and Kit boundaries
 
-claude_request_async({prompt:"Review [path] for quality... End with APPROVED or NOT APPROVED with findings.",approvalStrategy:"mcp_managed",correlationId:"review-quality"})
-codex_request_async({prompt:"Check [path] for logic bugs... End with APPROVED or NOT APPROVED with findings.",fullAuto:true,approvalStrategy:"mcp_managed",correlationId:"review-bugs"})
-gemini_request_async({prompt:"Security audit [path]... End with APPROVED or NOT APPROVED with findings.",approvalStrategy:"mcp_managed",correlationId:"review-security"})
-grok_request_async({prompt:"Independent review of [path]... End with APPROVED or NOT APPROVED with findings.",approvalStrategy:"mcp_managed",correlationId:"review-grok"})
-// Poll every 60s, collect, synthesize, fix, re-review — until all APPROVED
-```
+`session_create` creates gateway bookkeeping, not a generic provider-native
+conversation. Use a provider-native handle only when the provider response and
+its capability record say it is resumable. Do not pass a gateway `gw-*` ID as a
+native session ID. Codex needs a real Codex UUID or `resumeLatest:true`; Gemini
+only reports `resumable:true` for a caller-supplied usable conversation ID.
 
-## Tips
+Personal Agent Config Kit is local-only and supports only Claude/Codex with
+healthy SQLite/PostgreSQL durable admission. It disables validation and
+least-cost routing. If an effective Kit profile caps turns or budget, it cannot
+produce an unconditional exhaustive review. Use
+`explain_effective_config({workingDir:"<repo>"})` first, then obtain an
+uncapped approved profile or explicit user direction rather than silently
+lowering the review scope.
 
-- Consolidate findings before sending fixes (avoid redundant work)
-- Use `correlationId` to trace full cycle
-- For security-sensitive code: raise to `approvalPolicy:"strict"` (on top of default `mcp_managed`)
-- Keep implementation prompts specific — file paths, function names, acceptance criteria
-- For Codex fixes: either pass `resumeLatest:true` (or the session UUID) to carry conversation context, **or** re-state problem context inline if running fresh
-- Never pass Gemini `gw-*` session IDs — use your own Gemini IDs for resumable workflows
-- Check for `status:"deferred"` in sync responses — poll `jobId` every 60s if present
-- **Durable results**: deferred jobs persist for 30 days (`LLM_GATEWAY_JOB_RETENTION_DAYS`). If the cycle is interrupted, re-issue identical calls (auto-dedup snaps onto the live job) or fetch by `jobId` later. Use `forceRefresh:true` only when inputs have actually changed
+That `workingDir` is valid for read-only Kit inspection only. A Claude Kit
+request rejects caller-supplied `workingDir` before it compiles context. Target
+Claude Kit execution through an already configured registered `workspace` alias
+or the configured default workspace. It never inherits the gateway process cwd.
+
+## Do not do this
+
+- Do not call a provider CLI directly for implementation review.
+- Do not use `route_request`, `select:"cheapest"`, a cost cap, or a fixed number
+  of review rounds for a mandatory review.
+- Do not skip unavailable providers or accept conditional approval.
+- Do not use Claude managed approval on a non-Claude request.
+- Do not treat cache hashes, a session record, a summary, or a green plan as
+  substitute evidence for inspection and verification.

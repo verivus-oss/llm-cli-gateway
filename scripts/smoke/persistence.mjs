@@ -161,7 +161,9 @@ async function runVariant(variant) {
 
   try {
     await client.close();
-  } catch {}
+  } catch {
+    // Best-effort cleanup after a failed smoke scenario.
+  }
 
   rmSync(workDir, { recursive: true, force: true });
 

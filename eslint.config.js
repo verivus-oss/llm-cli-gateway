@@ -9,6 +9,51 @@ export default [
   },
   js.configs.recommended,
   {
+    files: ["scripts/**/*.{js,mjs}"],
+    languageOptions: {
+      ecmaVersion: 2022,
+      sourceType: "module",
+      globals: {
+        AbortController: "readonly",
+        Blob: "readonly",
+        Buffer: "readonly",
+        console: "readonly",
+        fetch: "readonly",
+        FormData: "readonly",
+        process: "readonly",
+        setInterval: "readonly",
+        setTimeout: "readonly",
+        structuredClone: "readonly",
+        URL: "readonly",
+        URLSearchParams: "readonly",
+      },
+    },
+    plugins: {
+      security: securityPlugin,
+    },
+    rules: {
+      ...securityPlugin.configs["recommended-legacy"].rules,
+      "no-var": "error",
+      "prefer-const": "error",
+      "security/detect-child-process": "off",
+      "security/detect-non-literal-fs-filename": "warn",
+      "security/detect-object-injection": "warn",
+    },
+  },
+  {
+    files: ["scripts/**/*.test.mjs"],
+    languageOptions: {
+      globals: {
+        afterEach: "readonly",
+        beforeEach: "readonly",
+        describe: "readonly",
+        expect: "readonly",
+        it: "readonly",
+        vi: "readonly",
+      },
+    },
+  },
+  {
     files: ["src/**/*.ts"],
     languageOptions: {
       parser: tsParser,

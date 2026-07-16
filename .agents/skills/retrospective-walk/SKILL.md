@@ -35,13 +35,21 @@ Resolve the target into immutable evidence before analysis:
 - `diff`: use the supplied diff text. If the target is empty, capture
   `git diff --no-ext-diff` and `git diff --cached --no-ext-diff`.
 - `commit-range`: capture `git diff --stat <range>`, `git diff --name-status
-  <range>`, and per-commit metadata from `git log --format=fuller <range>`.
+<range>`, and per-commit metadata from `git log --format=fuller <range>`.
 - `worktree`: capture status, dirty file list, staged diff, and unstaged diff.
   Do not stash, reset, or mutate the target worktree. If deeper model/tool
   analysis may write files, create a disposable isolated worktree or analyze a
   read-only evidence packet instead.
 - `job-id`: fetch `llm_job_status` and `llm_job_result`; include `cli`,
-  `correlationId`, `sessionId`, timestamps, exit status, and output digests.
+  `correlationId`, `sessionId`, timestamps, exit status, captured output, and
+  the bounded normalized progress snapshot actually returned. Page progress by
+  `afterProgressSeq` when its event history matters, and record its capability
+  and dropped count. Do not treat privacy-safe progress messages as raw
+  reasoning, tool arguments, paths, or output evidence. Do not invent an output
+  digest when the result has none. Personal Agent Config Kit deliberately
+  withholds compiled context, provider output/error, and native handles from
+  durable history; after a restart its job result may therefore be an explicit
+  withheld marker rather than reconstructable output.
 - `episode-ref`: resolve through the caller's available episode/DAG context. If
   no episode tool is available, record the unresolved reference and continue
   from any linked diff, job, receipt, or review artifacts the user supplied.
@@ -102,10 +110,25 @@ For each change unit:
    confidence.
 
 Use `multi-llm-review` or direct gateway model calls only when why-synthesis is
-ambiguous, high stakes, or explicitly requested. Omit `model` unless the user
-requested specific variants; use `approvalStrategy:"mcp_managed"` and async job
-handling from `async-job-orchestration` for longer analysis. Ask models for
-intent/rationale synthesis, not for unverified approval.
+ambiguous, high stakes, or explicitly requested. Dispatch those review/model
+calls through the current local stdio gateway MCP surface, never a direct provider
+CLI, connector/shadow gateway, SDK, or shell fallback. Omit `model` unless the
+user requested specific variants. Use `approvalStrategy:"mcp_managed"` only for a
+Claude request, where the gateway creates a request-scoped strict config from
+provisioned gateway-owned local MCP definitions, excluding dynamic `npx`,
+ambient `PATH`, and Codex-config overrides. Use `approvalStrategy:"legacy"`
+and omit `approvalPolicy` for every other provider, then use async handling from
+`async-job-orchestration` for longer analysis. Ask models for intent/rationale
+synthesis, not for unverified approval.
+
+If the user asks the retrospective to trigger an explicit full-access final
+review, switch to the full protocol in `multi-llm-review`. Start a freshly built
+target-checkout stdio gateway, reapply the provider-native grants per iteration,
+preserve ambient native MCP configuration, and provide the verification report
+as a corrective-program specification with the exact base, diff or changed-file
+list, and durable evidence. A retrospective narrative or model comment is not
+approval. On a user-required 90-second cadence, do not poll the resulting jobs
+earlier than 90 seconds.
 
 ## Comment Capture
 
@@ -174,10 +197,13 @@ Mode: <mode>
 Evidence baseline: <commands, commits, jobs, receipts>
 
 ## Narrative
+
 <overall story: what happened, why, and remaining uncertainty>
 
 ## Change Units
+
 ### cu_001 - <title>
+
 What: ...
 Why: ...
 Who / when: ...
@@ -185,9 +211,11 @@ Evidence: ...
 Comments: ...
 
 ## Open Questions
+
 - ...
 
 ## Evidence Package
+
 - validation_receipt: <id or unavailable: reason>
 - linked_jobs: [...]
 - linked_receipts: [...]
@@ -226,9 +254,11 @@ Machine-readable shape:
 ## Validation Receipts
 
 Use existing gateway validation receipt machinery when the retrospective is
-backed by a terminal validation run:
+backed by a terminal validation run and the validation surface is registered:
 
-- For prior validation ids, call `validation_receipt` and link the receipt.
+- For a prior validation ID, call
+  `validation_receipt({validationId:"<id>"})` or read
+  `validation-receipt://<id>` and link the own-or-not-found result.
 - For review or why-synthesis model jobs launched during the retrospective,
   preserve job ids and retrieve receipts if those jobs are part of a validation
   run that can mint one.
@@ -236,6 +266,9 @@ backed by a terminal validation run:
   `validation_receipt.status` to `unavailable` and include a reason. Do not
   claim a receipt was minted when the current gateway surface only produced a
   retrospective artifact.
+
+Personal Agent Config Kit disables validation tools and is limited to local
+Claude/Codex execution. Do not expect a validation receipt in Kit mode.
 
 ## DAG Plan
 
@@ -292,3 +325,10 @@ evidence package without side effects.
   persisted comments and receipts unless the user explicitly requires them.
 - Treat model-generated comments as model evidence, not human approval.
 - Preserve provenance for every comment, job, receipt, and inferred rationale.
+- Approval records are separate managed-Claude decisions. Their prompt preview
+  is redacted by default and they contain neither a job ID nor correlation ID;
+  do not use them to reconstruct a complete dispatch.
+- If the retrospective includes a mandatory review, apply the strict completion
+  contract from `multi-llm-review`: only
+  `APPROVED_UNCONDITIONALLY` completes a reviewer, and a failed or unavailable
+  reviewer is `BLOCKED_EXTERNAL` with its exact error.

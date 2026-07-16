@@ -103,10 +103,14 @@ class FakeAgent extends EventEmitter implements AcpChildProcess {
 
 class FakeSessionManager implements Partial<ISessionManager> {
   readonly sessions = new Map<string, Session>();
+  lastCreatedSessionId: string | null = null;
+  failProviderSessionInfoWrite = false;
+
   createSession(cli: ProviderType, description?: string, sessionId?: string): Session {
     const id = sessionId ?? `auto-${this.sessions.size}`;
     const s: Session = { id, cli, createdAt: "t", lastUsedAt: "t", description };
     this.sessions.set(id, s);
+    this.lastCreatedSessionId = id;
     return s;
   }
   getSession(id: string): Session | null {
@@ -115,8 +119,13 @@ class FakeSessionManager implements Partial<ISessionManager> {
   updateSessionMetadata(id: string, metadata: Record<string, unknown>): boolean {
     const s = this.sessions.get(id);
     if (!s) return false;
+    const acp = metadata.acp as { sessionId?: unknown } | undefined;
+    if (this.failProviderSessionInfoWrite && typeof acp?.sessionId === "string") return false;
     s.metadata = { ...s.metadata, ...metadata };
     return true;
+  }
+  deleteSession(id: string): boolean {
+    return this.sessions.delete(id);
   }
 }
 
@@ -214,6 +223,25 @@ describe("ACP runtime — happy path", () => {
     expect(res.protocolVersion).toBe(1);
     expect(res.gatewaySessionId.startsWith("gw-")).toBe(true);
     expect(agent.killed.length).toBeGreaterThan(0); // process torn down
+  });
+
+  it("records the selected workspace binding with a fresh ACP session", async () => {
+    const sessionManager = new FakeSessionManager();
+    const result = await runAcpRequest(
+      deps(new FakeAgent(), { sessionManager: sessionManager as unknown as ISessionManager }),
+      {
+        provider: "mistral",
+        prompt: "hello",
+        workspaceAlias: "canonical-workspace",
+        cwd: "/canonical/workspace",
+        correlationId: "c-workspace",
+      }
+    );
+
+    expect(sessionManager.sessions.get(result.gatewaySessionId)?.metadata?.acp).toMatchObject({
+      workspaceAlias: "canonical-workspace",
+      cwd: "/canonical/workspace",
+    });
   });
 
   it("writes only summarized prompt/response to the flight recorder", async () => {
@@ -453,6 +481,41 @@ describe("ACP runtime — resume scope", () => {
 });
 
 describe("ACP runtime — failure handling", () => {
+  it("fails closed and removes an unbound gateway session when metadata persistence is lost", async () => {
+    const sessionManager = new FakeSessionManager();
+    sessionManager.failProviderSessionInfoWrite = true;
+    const agent = new FakeAgent();
+    const runtimeDeps = deps(agent, {
+      sessionManager: sessionManager as unknown as ISessionManager,
+    });
+
+    await expect(
+      runAcpRequest(runtimeDeps, {
+        provider: "mistral",
+        prompt: "x",
+        correlationId: "c-persist-failure",
+      })
+    ).rejects.toMatchObject({
+      kind: "protocol",
+      message:
+        "ACP session setup could not be persisted. Retry the request to create a new session.",
+    });
+
+    const incompleteGatewaySessionId = sessionManager.lastCreatedSessionId;
+    expect(incompleteGatewaySessionId).not.toBeNull();
+    expect(sessionManager.sessions.has(incompleteGatewaySessionId!)).toBe(false);
+    expect(agent.killed.length).toBeGreaterThan(0);
+
+    await expect(
+      runAcpRequest(runtimeDeps, {
+        provider: "mistral",
+        prompt: "resume",
+        sessionId: incompleteGatewaySessionId!,
+        correlationId: "c-persist-failure-resume",
+      })
+    ).rejects.toMatchObject({ kind: "protocol" });
+  });
+
   it("throws and tears down the process when the prompt fails", async () => {
     const agent = new FakeAgent();
     agent.failPrompt = true;

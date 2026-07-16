@@ -32,6 +32,10 @@
           "type": "text/markdown"
         },
         {
+          "href": "https://llm-cli-gateway.dev/guides/personal-agent-config-kit.md",
+          "type": "text/markdown"
+        },
+        {
           "href": "https://llm-cli-gateway.dev/workflows/cross-model-review.md",
           "type": "text/markdown"
         },

@@ -239,10 +239,13 @@ provider-agnostic; let the handler that already knows `cli` and
 
 ## What this slice does not change
 
-- The session manager (`~/.llm-cli-gateway/sessions.json`) is untouched.
-  The new FR writes go to the existing `~/.llm-cli-gateway/logs.db`,
-  which already records prompts/responses for audit and is **not**
-  subject to the "no conversation content in session storage" rule.
+- The session manager is untouched. Its default file backend uses
+  `~/.llm-cli-gateway/sessions.json`; when `DATABASE_URL` is set, its
+  PostgreSQL backend is likewise unaffected. The new FR writes go to the
+  configured SQLite flight-recorder database (default:
+  `~/.llm-cli-gateway/logs.db`), which already records prompts/responses for
+  audit and is **not** subject to the "no conversation content in session
+  storage" rule.
 - The flight recorder schema is unchanged from v1.6.x (no v4 migration).
 - No opt-in flag. Async-path FR writes happen unconditionally whenever a
   caller supplies a `flightRecorderEntry` in `StartJobOptions`. Tests

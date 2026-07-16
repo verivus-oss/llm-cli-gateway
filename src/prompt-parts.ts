@@ -29,6 +29,9 @@ export interface PromptParts {
   cacheControl?: PromptPartsCacheControl;
 }
 
+/** Match the flat `prompt` MCP boundary and bound assembled prompt memory. */
+export const MAX_PROMPT_CODE_UNITS = 100_000;
+
 const CacheControlSchema = z
   .object({
     system: z.boolean().optional(),
@@ -37,13 +40,23 @@ const CacheControlSchema = z
   })
   .strict();
 
-export const PromptPartsSchema = z.object({
-  system: z.string().optional(),
-  tools: z.string().optional(),
-  context: z.string().optional(),
-  task: z.string().min(1),
-  cacheControl: CacheControlSchema.optional(),
-});
+export const PromptPartsSchema = z
+  .object({
+    system: z.string().max(MAX_PROMPT_CODE_UNITS).optional(),
+    tools: z.string().max(MAX_PROMPT_CODE_UNITS).optional(),
+    context: z.string().max(MAX_PROMPT_CODE_UNITS).optional(),
+    task: z.string().min(1).max(MAX_PROMPT_CODE_UNITS),
+    cacheControl: CacheControlSchema.optional(),
+  })
+  .superRefine((parts, ctx) => {
+    const assembledLength = assemble(parts).text.length;
+    if (assembledLength <= MAX_PROMPT_CODE_UNITS) return;
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: `Assembled promptParts is too long (max ${MAX_PROMPT_CODE_UNITS} UTF-16 code units)`,
+      path: ["task"],
+    });
+  });
 
 const SEPARATOR = "\n\n";
 

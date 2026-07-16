@@ -115,8 +115,8 @@ const GUIDANCE: Record<CliType, ProviderLoginGuidance> = {
     },
     login: {
       summary:
-        "Sign in through Mistral's official auth flow. Current Vibe defaults session logging to enabled; if an older config disabled it, edit ~/.vibe/config.toml and set [session_logging] enabled = true.",
-      commands: ["vibe auth login"],
+        "Run vibe --setup to configure a Mistral API key locally. Current Vibe defaults session logging to enabled; if an older config disabled it, edit ~/.vibe/config.toml and set [session_logging] enabled = true.",
+      commands: ["vibe --setup"],
       credentialHandling:
         "Do not paste Mistral API keys, OAuth tokens, or ~/.vibe/credentials into the gateway or a remote chat.",
     },

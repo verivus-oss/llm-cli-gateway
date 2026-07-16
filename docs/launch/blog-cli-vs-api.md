@@ -1,6 +1,6 @@
 # Why CLI Wrapping Beats API Proxying for Multi-LLM Development
 
-*Published 2026-03-31 by VerivusAI Labs*
+_Published 2026-03-31 by VerivusAI Labs_
 
 The multi-LLM orchestration space has a dozen tools now. LiteLLM, PAL MCP, Claude Octopus, Zen MCP. Most of them proxy API calls to multiple providers. You send a prompt, they forward it to OpenAI or Anthropic or Google's API, and you get text back.
 
@@ -16,9 +16,15 @@ This matters most for implementation tasks. Asking an API to "implement retry lo
 
 ## Session continuity is built in
 
-Claude Code has `--continue`. Gemini CLI has `--resume`. These flags pick up where the last conversation left off, including full tool-use history and file context.
+At publication, Claude Code had `--continue` and the Gemini CLI surface used
+`--resume`. These flags picked up where the last conversation left off,
+including full tool-use history and file context. The current Gemini-compatible
+Antigravity adapter uses `--conversation <id>` for `sessionId` and `--continue`
+for `resumeLatest:true`.
 
-llm-cli-gateway uses these natively. When you create a session and make multiple requests, Claude sessions pass `--continue` and Gemini sessions pass `--resume`. The CLI maintains the real conversation state. You are not reconstructing context from a message array.
+At that time, llm-cli-gateway used those flags natively: Claude sessions passed
+`--continue` and Gemini sessions passed `--resume`. The CLI maintained the real
+conversation state. You were not reconstructing context from a message array.
 
 API-based orchestrators have to manage conversation state themselves. They store message histories, token-count them to stay under limits, and replay them with each request. This works, but it is a reimplementation of something the CLI tools already handle, and it loses the tool-use context that CLI sessions preserve.
 
@@ -72,4 +78,4 @@ We built llm-cli-gateway for the first group.
 
 ---
 
-*llm-cli-gateway is MIT licensed. npm: [llm-cli-gateway](https://npmjs.com/package/llm-cli-gateway) | GitHub: [verivus-oss/llm-cli-gateway](https://github.com/verivus-oss/llm-cli-gateway)*
+_llm-cli-gateway is MIT licensed. npm: [llm-cli-gateway](https://npmjs.com/package/llm-cli-gateway) | GitHub: [verivus-oss/llm-cli-gateway](https://github.com/verivus-oss/llm-cli-gateway)_

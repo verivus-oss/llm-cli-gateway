@@ -8,8 +8,8 @@ This file is generated from the gateway's actual MCP `tools/list` response, not 
 npm run site:generate
 ```
 
-- Package: `llm-cli-gateway@2.17.1`
-- Tool count: 52
+- Public site version: `2.17.1`
+- Tool count: 63
 - Source: runtime MCP tools/list from dist/index.js over in-memory MCP transport
 - Capture command: `node scripts/generate-site-discovery.mjs`
 - Generated at: deterministic build output
@@ -18,10 +18,10 @@ npm run site:generate
 
 - `claude_request` - Run a Claude Code CLI request synchronously (when async jobs are enabled, auto-defers to a pollable job past the sync deadline; otherwise runs to completion). Requires exactly one of prompt or promptParts.
 - `claude_request_async` - Start a Claude Code CLI request as a durable background job. Poll with llm_job_status, collect with llm_job_result.
-- `codex_fork_session` - Fork an existing Codex session into a new branch (codex fork <ID|--last>) and run a prompt against the fork without mutating the original.
+- `codex_fork_session` - Fork an existing Codex session into a new branch (codex fork <ID|--last>) without mutating the original. This prompt remains argv-bound and rejects oversized UTF-8 input as non-retryable input_too_large.
 - `codex_request` - Run an OpenAI Codex CLI request synchronously (when async jobs are enabled, auto-defers to a pollable job past the sync deadline; otherwise runs to completion). Requires exactly one of prompt or promptParts.
 - `codex_request_async` - Start an OpenAI Codex CLI request as a durable background job. Poll with llm_job_status, collect with llm_job_result.
-- `cursor_request` - Run a Cursor Agent CLI request synchronously (auto-defers to a pollable job past the sync deadline when async jobs are enabled; otherwise runs to completion). Headless print mode (`cursor-agent --print`).
+- `cursor_request` - Run a Cursor Agent request synchronously (auto-defers to a pollable job past the sync deadline when async jobs are enabled; otherwise runs to completion). Default `cli` uses headless print mode (`cursor-agent --print`); gated `acp` uses native `cursor-agent acp` and accepts prompt, model, a gateway ACP session, and a registered workspace alias.
 - `cursor_request_async` - Start a Cursor Agent CLI request as a durable background job. Poll with llm_job_status, collect with llm_job_result.
 - `devin_request` - Run a Cognition Devin CLI request synchronously (auto-defers to a pollable job past the sync deadline when async jobs are enabled; otherwise runs to completion). Headless print mode (`devin -p`).
 - `devin_request_async` - Start a Cognition Devin CLI request as a durable background job. Poll with llm_job_status, collect with llm_job_result.
@@ -29,14 +29,15 @@ npm run site:generate
 - `gemini_request_async` - Start a Google Antigravity CLI (`agy`) request as a durable background job through the Gemini-compatible gateway tool. Poll with llm_job_status, collect with llm_job_result.
 - `grok_request` - Run an xAI Grok CLI request synchronously (when async jobs are enabled, auto-defers to a pollable job past the sync deadline; otherwise runs to completion). Requires exactly one of prompt or promptParts.
 - `grok_request_async` - Start an xAI Grok CLI request as a durable background job. Poll with llm_job_status, collect with llm_job_result.
-- `mistral_request` - Run a Mistral Vibe CLI request synchronously (when async jobs are enabled, auto-defers to a pollable job past the sync deadline; otherwise runs to completion). Requires exactly one of prompt or promptParts. Defaults to --agent accept-edits (auto-accepts file edits; dangerous ops such as shell stay gated); pass permissionMode auto-approve (or set LLM_GATEWAY_APPROVAL_ALLOW_BYPASS) for unattended tool execution.
+- `mistral_request` - Run a Mistral Vibe CLI request synchronously (when async jobs are enabled, auto-defers to a pollable job past the sync deadline; otherwise runs to completion). Requires exactly one of prompt or promptParts. Defaults to --agent accept-edits (auto-accepts file edits; dangerous ops such as shell stay gated).
 - `mistral_request_async` - Start a Mistral Vibe CLI request as a durable background job. Poll with llm_job_status, collect with llm_job_result.
 
 ## Async jobs
 
 - `llm_job_cancel` - Cancel a running gateway async or deferred-sync job by jobId.
-- `llm_job_result` - Retrieve captured stdout/stderr for a gateway async or deferred-sync job by jobId.
-- `llm_job_status` - Check lifecycle status (queued|running|completed|failed|canceled|orphaned) of a gateway async or deferred-sync job by jobId.
+- `llm_job_result` - Retrieve captured stdout/stderr for a gateway async or deferred-sync job by jobId. Use rawOutput:true with independent stream offsets for resumable pages.
+- `llm_job_status` - Check lifecycle status and bounded privacy-safe normalized progress for a gateway async or deferred-sync job by jobId.
+- `llm_job_watch` - Wait briefly for privacy-safe normalized progress on an owned async job. When the MCP request carries a progress token, notifications are emitted only while this watch request remains active.
 - `llm_request_result` - Read back any persisted request (sync or async) from the flight recorder by correlationId, including prompt and response.
 
 ## Sessions
@@ -57,9 +58,11 @@ npm run site:generate
 - `job_status` - Check a VALIDATION job's status (jobs started by validate_with_models/ask_model/etc.) — distinct from llm_job_status, which tracks provider request jobs.
 - `list_available_models` - List models and capabilities for every available provider CLI (takes no arguments; complements per-provider list_models).
 - `red_team_review` - Challenge a plan, answer, or document for risks and failure modes via provider CLIs (starts validation jobs).
+- `review_changes` - Capture one complete, immutable Git evidence artifact, fence it as untrusted data, and start independent read-only provider reviews. Includes committed, staged, unstaged, and untracked changes without truncation.
 - `second_opinion` - Ask one provider CLI to review an answer (starts a validation job; poll job_status, collect job_result).
-- `synthesize_validation` - Run an explicit judge model over already-collected validation results to produce a synthesis.
+- `synthesize_validation` - Run an explicit judge model over validation results. General validation uses caller-supplied terminal results; review_changes rebuilds its question and results from the owned durable run.
 - `validate_with_models` - Ask two or more provider CLIs to independently validate a question. Starts validation jobs — poll with job_status, collect with job_result (not llm_job_*).
+- `validation_receipt` - Retrieve the canonically hashed immutable receipt of a terminal cross-LLM validation run by validationId. Returns minted | pending | expired_unminted (no receipt exists and none can be minted) | verification_failed (a stored receipt does not verify against its run) | not_found (own-or-not-found).
 
 ## Workspaces
 
@@ -83,6 +86,14 @@ npm run site:generate
 - `approval_list` - List recent MCP-managed approval decisions recorded by the gateway (approvalStrategy: mcp_managed).
 - `cli_upgrade` - Plan (dryRun, default true) or execute an upgrade for one provider CLI using its native update mechanism.
 - `cli_versions` - Report installed provider CLI versions, availability, and login status for all registered CLI providers (claude|codex|gemini|grok|mistral|devin|cursor) or one.
+- `config_ack_stale` - Acknowledge the current stale Personal Agent Config release for at most 24 hours.
+- `config_init` - Initialize or clone the local Personal Agent Config baseline. This never activates a release by itself.
+- `config_publish` - Push the clean local Personal Agent Config baseline to its configured Git upstream without force-pushing.
+- `config_recover_kit_attempt` - Fence and release one exact unadmitted durable Kit attempt after the previous gateway process has been stopped. Copy the execution and attempt identity from local session_get output. This action is local-only and cannot recover an existing durable job.
+- `config_rollback` - Atomically activate an already verified retained Personal Agent Config release.
+- `config_status` - Show Personal Agent Config state without exposing baseline paths or local machine binding values.
+- `config_sync` - Synchronize, verify, compile, and atomically activate a Personal Agent Config release. It never pushes.
+- `explain_effective_config` - Explain the selected Personal Agent Config release and context provenance without returning local paths or instruction text.
 - `list_models` - List models, aliases, and defaults for one provider (claude|codex|gemini|grok|mistral|devin|cursor, or an enabled API provider name), or omit cli to list all providers. API providers are returned under an `apiProviders` array.
 - `llm_process_health` - Report gateway process health: async-job manager state plus the resolved persistence configuration and paths.
 - `upstream_contracts` - Return the gateway's declared provider CLI contracts; with probeInstalled true, diff against installed --help surfaces to detect flag drift.

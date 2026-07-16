@@ -42,7 +42,7 @@ const grokContract = UPSTREAM_CLI_CONTRACTS.grok;
 
 /**
  * Drive the REAL production prepare function and return its argv. Restricting
- * `params` to covered flags only means the result is `["-p", prompt, ...maybe
+ * `params` to covered flags only means the result is `["-p=<prompt>", ...maybe
  * --model..., ...covered flags...]` with the covered flags as the tail.
  */
 function realGrokArgs(coveredParams: Record<string, unknown>): string[] {
@@ -81,7 +81,6 @@ const CASES: Array<{ name: string; params: Record<string, unknown> }> = [
       compactionDetail: "verbose",
       agent: "reviewer",
       promptFile: "/tmp/p.txt",
-      single: "one-shot",
       leaderSocket: "/tmp/leader.sock",
     },
   },
@@ -149,8 +148,7 @@ describe("provider-codegen: grok argv byte-parity vs prepareGrokRequest", () => 
     // Everything before the tail is only the prompt prefix (and possibly a
     // default --model) — i.e. no covered flag leaked into the prefix.
     const prefix = real.slice(0, real.length - gen.length);
-    expect(prefix[0]).toBe("-p");
-    expect(prefix[1]).toBe("say the line");
+    expect(prefix[0]).toBe("-p=say the line");
     for (const g of GROK_FLAG_GENERATION) {
       expect(prefix, `covered flag ${g.flag} leaked into prefix`).not.toContain(g.flag);
     }
@@ -172,6 +170,24 @@ describe("provider-codegen: grok argv byte-parity vs prepareGrokRequest", () => 
     const params = GROK_FLAG_GENERATION.map(g => g.requestParameter);
     expect(new Set(params).size).toBe(params.length);
   });
+
+  it.each([
+    ["scalar", { sandbox: "--always-approve" }],
+    ["csv", { allowedTools: ["Read", "--always-approve"] }],
+    ["repeat", { allow: ["--always-approve"] }],
+  ])("rejects option-like %s values before argv assembly", (_kind, params) => {
+    expect(() => genGrokArgs(params)).toThrow(/argument injection prevention/);
+    expect(() => realGrokArgs(params)).toThrow(/argument injection prevention/);
+  });
+
+  it.each(["rules", "systemPromptOverride"])(
+    "accepts leading-hyphen free text for %s",
+    parameter => {
+      const params = { [parameter]: "--private-instruction" };
+      expect(genGrokArgs(params)).toEqual(realGrokArgs(params).slice(-2));
+      expect(genGrokArgs(params)).toContain("--private-instruction");
+    }
+  );
 });
 
 describe("provider-codegen: grok schema derivation from the contract", () => {

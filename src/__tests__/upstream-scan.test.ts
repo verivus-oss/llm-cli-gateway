@@ -202,7 +202,7 @@ describe("upstream scanner hardening", () => {
   });
 
   it("compares explicit version probes including build suffixes", () => {
-    expect(compareTargetVersion("claude 2.1.207", "2.1.207 (Claude Code)").matches).toBe(true);
+    expect(compareTargetVersion("claude 2.1.210", "2.1.210 (Claude Code)").matches).toBe(true);
     expect(
       compareTargetVersion("cursor-agent 2026.07.09-c59fd9a", "cursor-agent 2026.07.09-a3815c0")
         .matches

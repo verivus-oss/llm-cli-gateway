@@ -246,7 +246,7 @@ describe("U26 fix: AsyncJobManager.onComplete contract", () => {
     };
   }
 
-  it("onComplete fires exactly once when a job is canceled", () => {
+  it("onComplete fires exactly once after a canceled child closes", async () => {
     const { manager, cleanup } = makeManager();
     try {
       const onComplete = vi.fn();
@@ -254,7 +254,9 @@ describe("U26 fix: AsyncJobManager.onComplete contract", () => {
         onComplete,
       });
       manager.cancelJob(job.snapshot.id);
-      expect(onComplete).toHaveBeenCalledTimes(1);
+      await vi.waitFor(() => {
+        expect(onComplete).toHaveBeenCalledTimes(1);
+      });
       // Cancel again — should not double-fire.
       manager.cancelJob(job.snapshot.id);
       expect(onComplete).toHaveBeenCalledTimes(1);
@@ -263,7 +265,7 @@ describe("U26 fix: AsyncJobManager.onComplete contract", () => {
     }
   });
 
-  it("onComplete fires immediately (without spawning) when a request dedups onto an existing job", () => {
+  it("onComplete fires immediately (without spawning) when a request dedups onto an existing job", async () => {
     const { manager, cleanup } = makeManager();
     try {
       const onComplete1 = vi.fn();
@@ -279,9 +281,11 @@ describe("U26 fix: AsyncJobManager.onComplete contract", () => {
       // orphaned otherwise). The original job's onComplete stays attached.
       expect(onComplete2).toHaveBeenCalledTimes(1);
       expect(onComplete1).not.toHaveBeenCalled();
-      // Now cancel the original — its onComplete fires.
+      // Now cancel the original; its onComplete fires after child close.
       manager.cancelJob(j1.snapshot.id);
-      expect(onComplete1).toHaveBeenCalledTimes(1);
+      await vi.waitFor(() => {
+        expect(onComplete1).toHaveBeenCalledTimes(1);
+      });
       // Duplicate's hook does not re-fire.
       expect(onComplete2).toHaveBeenCalledTimes(1);
     } finally {
@@ -289,7 +293,7 @@ describe("U26 fix: AsyncJobManager.onComplete contract", () => {
     }
   });
 
-  it("onComplete is reclaimed by awaitJobOrDefer's contract when the manager throws synchronously", () => {
+  it("onComplete is reclaimed by awaitJobOrDefer's contract when the manager throws synchronously", async () => {
     // Smoke: AsyncJobManager.startJob throws synchronously when spawn fails
     // (e.g. the binary doesn't exist on PATH). Since we can't easily force
     // spawn to throw in this environment, we verify the contract instead:
@@ -317,7 +321,9 @@ describe("U26 fix: AsyncJobManager.onComplete contract", () => {
         onComplete
       );
       manager.cancelJob(snapshot.id);
-      expect(fired).toBe(true);
+      await vi.waitFor(() => {
+        expect(fired).toBe(true);
+      });
     } finally {
       cleanup();
     }

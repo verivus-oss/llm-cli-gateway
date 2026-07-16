@@ -27,14 +27,14 @@ All commands must be safe to paste from an assistant conversation and safe to ru
 
 ## Go vs Rust
 
-| Capability | Go | Rust |
-| --- | --- | --- |
-| Static cross-platform binaries | Straightforward with `CGO_ENABLED=0` for the bootstrapper core. | Strong, but fully static builds are target/toolchain dependent. |
-| Embedded HTTP setup UI | Simple standard-library `net/http` path. | Strong with ecosystem crates, but more dependencies for equivalent ergonomics. |
-| Process supervision | Simple `os/exec`, signal handling, and platform-specific service wrappers. | Strong control, more code for common service/install plumbing. |
-| Config editing | Standard JSON/TOML/file APIs are adequate. | Strong typed parsing and safety, more compile-time ceremony. |
-| Cross-platform distribution | Mature Linux self-hosted and GitHub-hosted Windows/macOS builds with explicit `GOOS/GOARCH` targets. | Mature, but target setup and linker details are more involved. |
-| Long-lived native runtime | Adequate, but not the reason to pick Go. | Stronger if the bootstrapper becomes the gateway runtime. |
+| Capability                     | Go                                                                                                                                                                    | Rust                                                                           |
+| ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| Static cross-platform binaries | Straightforward with `CGO_ENABLED=0` for the bootstrapper core.                                                                                                       | Strong, but fully static builds are target/toolchain dependent.                |
+| Embedded HTTP setup UI         | Simple standard-library `net/http` path.                                                                                                                              | Strong with ecosystem crates, but more dependencies for equivalent ergonomics. |
+| Process supervision            | Simple `os/exec`, signal handling, and platform-specific service wrappers.                                                                                            | Strong control, more code for common service/install plumbing.                 |
+| Config editing                 | Standard JSON/TOML/file APIs are adequate.                                                                                                                            | Strong typed parsing and safety, more compile-time ceremony.                   |
+| Cross-platform distribution    | Public mirror uses GitHub-hosted Linux, Windows, and macOS builds with explicit `GOOS/GOARCH` targets; private upstream retains an internal self-hosted Linux runner. | Mature, but target setup and linker details are more involved.                 |
+| Long-lived native runtime      | Adequate, but not the reason to pick Go.                                                                                                                              | Stronger if the bootstrapper becomes the gateway runtime.                      |
 
 Go is preferred because the MVP bootstrapper is mostly filesystem edits, process supervision, local HTTP setup UI, archive verification, and service registration. Rust remains a fallback if U08 expands into a long-lived native runtime with more demanding memory-safety or concurrency requirements.
 
@@ -45,7 +45,7 @@ Recommended MVP path:
 1. Build the TypeScript gateway with `npm run build` in release CI.
 2. Package `dist/`, `package.json`, lockfile metadata, and required runtime assets into a compressed bundle.
 3. Publish the bundle with SHA-256 checksums and a release signature.
-4. Build Go bootstrappers on the Linux self-hosted runner and GitHub-hosted Windows/macOS runners, with each runner owning its OS artifacts.
+4. Build public-mirror Go bootstrappers on GitHub-hosted Linux, Windows, and macOS runners, with each runner owning its OS artifacts. Private upstream Linux builds use its internal self-hosted runner.
 5. On first run, the bootstrapper verifies and unpacks the embedded or downloaded bundle into a user-owned application directory.
 6. The bootstrapper starts the Node gateway with managed environment variables and keeps provider credentials in their official local stores.
 

@@ -52,27 +52,76 @@ fetch-in-dist) / P2 license-violation (non-allowlisted or missing SPDX license) 
 P2 socket-policy-drift (a `socket.yml` issueRule changed from its reviewed value),
 `1` tool error. If clean, stop; otherwise triage every flagged row.
 
-### 2. Research each actionable package with exa
+### 2. Research each actionable package
 
-For each drifted package: latest npm version; any GHSA/OSV advisory (exa is the
-authoritative current check; `osv-scanner` pre-screens known ones); for a
-roll-forward, the changelog baseline -> resolved (no new capability, no
-maintainer change); for a tag-along, `npm ls <pkg>` (who pulled it in), the
-license, and a full first-time trust review.
+Use exa as a search/research aid, not as the authority. Verify current package
+facts against the npm registry/package publisher, GHSA/OSV advisory records, and
+the relevant vendor changelog or repository. `osv-scanner` pre-screens known
+advisories but does not replace that research. For each drifted package, record
+the latest npm version and advisories; for a roll-forward, compare the changelog
+baseline to resolved version; for a tag-along, run `npm ls <pkg>`, inspect the
+license, and perform a first-time trust review.
 
 ### 3. Decide + fill the contract
 
 Fill each generated `contracts/<pkg>.md`: `safe-to-upgrade: YES/NO` + rationale;
-run `npm run build && npm test && npm run security:audit` and record PASS/FAIL.
+run `npm run build && npm test && npm run security:audit` and record each
+command result separately from the reviewer verdict.
 
 ### 4. Cross-LLM validation (mandatory, independent)
 
-Before any ledger change, dispatch via the `gtwy` MCP to codex + grok + mistral,
-each `createNewSession: true`, read-only, verifying the classification and
-safe-to-upgrade calls **against npm / advisory DBs / changelogs directly**, not
-your summary. codex sandbox read-only; mistral `permissionMode: auto-approve`
-(its `plan` mode blocks reads); grok high effort. A tag-along needs unanimous
-approval. Record each verdict + job id in the contract.
+Dispatch only through the installed local stdio `gtwy` MCP surface
+(`mcp__gtwy__*` or the client-rendered equivalent), never a direct provider
+binary, SDK, connector/shadow gateway, or shell fallback. The supply-chain
+runbook's explicit selected roster is Codex, Grok, and Mistral. It is a
+purpose-specific minimum, not a claim that those three are a universal
+seven-provider review.
+
+Before any ledger change, call `provider_tool_capabilities` for each selected
+reviewer and confirm that its configured native tools can reach the required
+research sources. Then create an independent session for each selected reviewer
+and require it to verify the classification and safe-to-upgrade call against
+npm, advisory databases, and changelogs, not merely the summary. If a reviewer
+cannot access a required source, preserve that research gap, repair the
+configuration or provide independently verifiable source provenance, and keep
+the validation incomplete until it can return an evidence-backed verdict.
+Use Codex's read-only sandbox for inspection; Mistral's programmatic legacy
+default is `permissionMode:"accept-edits"`, so retain an explicit no-mutation
+instruction; and use only Grok controls confirmed by
+`provider_tool_capabilities`. All three use `approvalStrategy:"legacy"` and
+omit `approvalPolicy`: `mcp_managed` is Claude-only.
+
+Do not impose a review-round, turn, token, price, budget, or wallclock cap. A
+tag-along requires `APPROVED_UNCONDITIONALLY` from every reviewer in the
+selected roster. Every review prompt must require exactly one terminal JSON
+verdict: `APPROVED_UNCONDITIONALLY`, `CHANGES_REQUIRED`, or
+`BLOCKED_EXTERNAL`. A conditional, malformed, timed-out, or unavailable
+reviewer makes the validation incomplete: repair/retry it or hold the ledger
+change and report `BLOCKED_EXTERNAL` with its exact error. Record each verdict
+and job ID in the contract. `CHANGES_REQUIRED` must contain independent source
+evidence and cannot be treated as approval.
+
+### Explicit user-authorized full-access review
+
+When the user explicitly grants full provider permissions and native MCP access
+for this validation, follow the canonical `multi-llm-review` full-access
+protocol. Build the target checkout and start a fresh local
+`node dist/index.js --transport=stdio` process from it; do not use a globally
+installed or stale gateway. Reapply provider-native full-access controls on
+every new job, preserve ambient native MCP configuration, and do not construct
+a pretend gateway allowlist.
+
+Give each reviewer the verification report as a corrective-program
+specification, exact base and diff or exhaustive changed-file list, relevant
+untracked files, and durable raw evidence. Require independent verification of
+the repository, package metadata, registry data, advisories, changelogs, docs,
+tests, commands, and available MCP facts. A reviewer must not approve from the
+report alone. A disagreement needs code, package, advisory, documentation,
+test, or command evidence, not assertion. Retain the purpose-specific Codex,
+Grok, and Mistral roster only when the user explicitly scopes this supply-chain
+gate to it; otherwise the canonical exhaustive protocol requires all seven CLI
+providers. Do not set caller review caps. On a user-required 90-second cadence,
+make non-blocking progress checks no more frequently than every 90 seconds.
 
 ### 5. Write the ledger + refresh the baseline
 
@@ -90,7 +139,8 @@ the ledger change, land on `master` via PR (`build(supply-chain):` /
 
 ## Anti-patterns to refuse
 
-- Rubber-stamping a tag-along (full review + unanimous cross-LLM approval, or out).
+- Rubber-stamping a tag-along (full review plus explicit
+  `APPROVED_UNCONDITIONALLY` from the required roster, or out).
 - Skipping the advisory sweep "because it's just a patch."
 - Writing a ledger change before cross-LLM validation (steps 2 to 4 first).
 - Accepting a reviewer verdict without cited evidence.

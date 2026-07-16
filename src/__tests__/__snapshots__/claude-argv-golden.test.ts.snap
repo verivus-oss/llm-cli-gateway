@@ -3,7 +3,6 @@
 exports[`claude argv golden (Phase 4 Part A) > emits every wired Part A flag with exact argv (kitchen sink) 1`] = `
 [
   "-p",
-  "PROMPT",
   "--include-hook-events",
   "--replay-user-messages",
   "--system-prompt-file",
@@ -26,5 +25,7 @@ exports[`claude argv golden (Phase 4 Part A) > emits every wired Part A flag wit
   "api,hooks",
   "--debug-file",
   "/tmp/debug.log",
+  "--",
+  "PROMPT",
 ]
 `;

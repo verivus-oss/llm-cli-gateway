@@ -1,14 +1,15 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
+import { homedir, hostname, tmpdir } from "node:os";
 import { createGatewayServer } from "../index.js";
 import { runWithRequestContext } from "../request-context.js";
 import { AsyncJobManager } from "../async-job-manager.js";
 import { MemoryJobStore } from "../job-store.js";
 import { noopLogger } from "../logger.js";
 import { FileSessionManager } from "../session-manager.js";
+import { createWorktree } from "../worktree-manager.js";
 import type { PersistenceConfig } from "../config.js";
 import type { WorkspaceRegistry } from "../workspace-registry.js";
 import {
@@ -61,6 +62,30 @@ function disabledWorkspacesWith(
   return { ...disabledWorkspaces(), ...overrides };
 }
 
+function defaultWorkspace(
+  root: string,
+  providers: WorkspaceRegistry["repos"][number]["providers"] = ["grok", "mistral"]
+): WorkspaceRegistry {
+  return {
+    enabled: true,
+    defaultAlias: "default",
+    allowUnregisteredWorkingDir: false,
+    repos: [
+      {
+        alias: "default",
+        path: root,
+        providers,
+        allowWorktree: false,
+        allowAddDir: false,
+        kind: "git",
+        operatorEntry: true,
+      },
+    ],
+    allowedRoots: [],
+    sources: { configFile: null },
+  };
+}
+
 function mkPersistence(): PersistenceConfig {
   return {
     backend: "memory",
@@ -76,9 +101,19 @@ function mkPersistence(): PersistenceConfig {
 }
 
 class ThrowingAsyncJobManager extends AsyncJobManager {
+  readonly starts: Array<{ cli: string; args: string[]; cwd: string | undefined }> = [];
+
   override startJob(
-    ..._args: Parameters<AsyncJobManager["startJob"]>
+    ...args: Parameters<AsyncJobManager["startJob"]>
   ): ReturnType<AsyncJobManager["startJob"]> {
+    this.starts.push({ cli: args[0], args: [...args[1]], cwd: args[3] });
+    throw new Error("spawn sentinel");
+  }
+
+  override startJobWithDedup(
+    ...args: Parameters<AsyncJobManager["startJobWithDedup"]>
+  ): ReturnType<AsyncJobManager["startJobWithDedup"]> {
+    this.starts.push({ cli: args[0], args: [...args[1]], cwd: args[3]?.cwd });
     throw new Error("spawn sentinel");
   }
 }
@@ -89,13 +124,21 @@ function createAsyncGatewayServer(
     noopLogger,
     undefined,
     new MemoryJobStore()
-  )
+  ),
+  sessionManager = new FileSessionManager(join(tempRootForShims, "sessions.json"))
 ) {
   return createGatewayServer({
     workspaces,
-    sessionManager: new FileSessionManager(join(tempRootForShims, "sessions.json")),
+    sessionManager,
     asyncJobManager,
     persistence: mkPersistence(),
+  });
+}
+
+function createSyncGatewayServer(workspaces: WorkspaceRegistry) {
+  return createGatewayServer({
+    workspaces,
+    sessionManager: new FileSessionManager(join(tempRootForShims, "sync-sessions.json")),
   });
 }
 
@@ -279,6 +322,618 @@ describe("workspace registry", () => {
     expect(result.content[0]?.text).not.toContain("workingDir/addDir require");
   });
 
+  it("local stdio direct paths override an implicit default workspace", async () => {
+    const asyncJobManager = new ThrowingAsyncJobManager(
+      noopLogger,
+      undefined,
+      new MemoryJobStore()
+    );
+    const server = createAsyncGatewayServer(defaultWorkspace(repoRoot), asyncJobManager);
+
+    const result = await registeredTools(server).mistral_request_async.handler(
+      {
+        prompt: "hello",
+        workingDir: tempDir,
+        addDir: [tempDir],
+        approvalStrategy: "legacy",
+        optimizePrompt: false,
+      },
+      {}
+    );
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0]?.text).toContain("spawn sentinel");
+    expect(result.content[0]?.text).not.toContain("Absolute workingDir is not allowed");
+    expect(asyncJobManager.starts).toHaveLength(1);
+    expect(asyncJobManager.starts[0]).toEqual(
+      expect.objectContaining({ cli: "mistral", cwd: tempDir })
+    );
+    expect(asyncJobManager.starts[0]?.args).toEqual(
+      expect.arrayContaining(["--workdir", tempDir, "--add-dir", tempDir])
+    );
+  });
+
+  it.each(["claude_request", "claude_request_async"] as const)(
+    "local Claude workingDir overrides an incompatible default workspace and reaches %s",
+    async toolName => {
+      const asyncJobManager = new ThrowingAsyncJobManager(
+        noopLogger,
+        undefined,
+        new MemoryJobStore()
+      );
+      // The default intentionally excludes Claude. If the explicit local cwd
+      // is dropped before workspace resolution, this request fails before the
+      // child-process handoff with a provider-not-allowed error instead.
+      const server = createAsyncGatewayServer(defaultWorkspace(repoRoot), asyncJobManager);
+
+      const result = await registeredTools(server)[toolName].handler(
+        {
+          prompt: "hello",
+          workingDir: tempDir,
+          approvalStrategy: "legacy",
+          optimizePrompt: false,
+        },
+        {}
+      );
+
+      expect(result.isError).toBe(true);
+      expect(result.content[0]?.text).toContain("spawn sentinel");
+      expect(result.content[0]?.text).not.toContain('does not allow provider "claude"');
+      expect(asyncJobManager.starts).toEqual([
+        expect.objectContaining({ cli: "claude", cwd: tempDir }),
+      ]);
+    }
+  );
+
+  it("local stdio addDir retains an implicit default workspace cwd and canonicalizes argv", async () => {
+    const asyncJobManager = new ThrowingAsyncJobManager(
+      noopLogger,
+      undefined,
+      new MemoryJobStore()
+    );
+    const server = createAsyncGatewayServer(defaultWorkspace(repoRoot), asyncJobManager);
+
+    const result = await registeredTools(server).mistral_request_async.handler(
+      {
+        prompt: "hello",
+        addDir: ["."],
+        approvalStrategy: "legacy",
+        optimizePrompt: false,
+      },
+      {}
+    );
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0]?.text).toContain("spawn sentinel");
+    expect(asyncJobManager.starts).toHaveLength(1);
+    expect(asyncJobManager.starts[0]).toEqual(
+      expect.objectContaining({ cli: "mistral", cwd: repoRoot })
+    );
+    expect(asyncJobManager.starts[0]?.args).toEqual(
+      expect.arrayContaining(["--add-dir", repoRoot])
+    );
+  });
+
+  it("local stdio Cursor addDir retains an implicit default workspace cwd and canonicalizes argv", async () => {
+    const asyncJobManager = new ThrowingAsyncJobManager(
+      noopLogger,
+      undefined,
+      new MemoryJobStore()
+    );
+    const server = createAsyncGatewayServer(
+      defaultWorkspace(repoRoot, ["cursor"]),
+      asyncJobManager
+    );
+
+    const result = await registeredTools(server).cursor_request_async.handler(
+      {
+        prompt: "hello",
+        addDir: ["."],
+        approvalStrategy: "legacy",
+        optimizePrompt: false,
+      },
+      {}
+    );
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0]?.text).toContain("spawn sentinel");
+    expect(asyncJobManager.starts).toHaveLength(1);
+    expect(asyncJobManager.starts[0]).toEqual(
+      expect.objectContaining({ cli: "cursor", cwd: repoRoot })
+    );
+    expect(asyncJobManager.starts[0]?.args).toEqual(
+      expect.arrayContaining(["--add-dir", repoRoot])
+    );
+  });
+
+  it("local stdio Gemini includeDirs retains an implicit default workspace cwd and canonicalizes argv", async () => {
+    const asyncJobManager = new ThrowingAsyncJobManager(
+      noopLogger,
+      undefined,
+      new MemoryJobStore()
+    );
+    const server = createAsyncGatewayServer(
+      defaultWorkspace(repoRoot, ["gemini"]),
+      asyncJobManager
+    );
+
+    const result = await registeredTools(server).gemini_request_async.handler(
+      {
+        prompt: "hello",
+        includeDirs: ["."],
+        approvalStrategy: "legacy",
+        optimizePrompt: false,
+      },
+      {}
+    );
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0]?.text).toContain("spawn sentinel");
+    expect(asyncJobManager.starts).toHaveLength(1);
+    expect(asyncJobManager.starts[0]).toEqual(
+      expect.objectContaining({ cli: "gemini", cwd: repoRoot })
+    );
+    expect(asyncJobManager.starts[0]?.args).toEqual(
+      expect.arrayContaining(["--add-dir", repoRoot])
+    );
+  });
+
+  it.each([
+    ["addDir", "mistral_request_async"],
+    ["includeDirs", "gemini_request_async"],
+  ] as const)(
+    "does not let local %s alone bypass the gateway app-directory cwd safeguard",
+    async (field, toolName) => {
+      const asyncJobManager = new ThrowingAsyncJobManager(
+        noopLogger,
+        undefined,
+        new MemoryJobStore()
+      );
+      const server = createAsyncGatewayServer(disabledWorkspaces(), asyncJobManager);
+      const cwdSpy = vi.spyOn(process, "cwd").mockReturnValue(join(homedir(), ".llm-cli-gateway"));
+
+      try {
+        const result = await registeredTools(server)[toolName].handler(
+          {
+            prompt: "hello",
+            [field]: [tempDir],
+            approvalStrategy: "legacy",
+            optimizePrompt: false,
+          },
+          {}
+        );
+
+        expect(result.isError).toBe(true);
+        expect(result.content[0]?.text).toContain("No workspace selected");
+        expect(asyncJobManager.starts).toHaveLength(0);
+      } finally {
+        cwdSpy.mockRestore();
+      }
+    }
+  );
+
+  it("rejects direct local paths combined with a managed worktree", async () => {
+    const asyncJobManager = new ThrowingAsyncJobManager(
+      noopLogger,
+      undefined,
+      new MemoryJobStore()
+    );
+    const server = createAsyncGatewayServer(defaultWorkspace(repoRoot), asyncJobManager);
+
+    const result = await registeredTools(server).mistral_request_async.handler(
+      {
+        prompt: "hello",
+        workingDir: tempDir,
+        worktree: true,
+        approvalStrategy: "legacy",
+        optimizePrompt: false,
+      },
+      {}
+    );
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0]?.text).toContain(
+      "workingDir, addDir, or includeDirs cannot be combined with worktree"
+    );
+    expect(asyncJobManager.starts).toHaveLength(0);
+  });
+
+  it.each([
+    ["workingDir", "."],
+    ["addDir", ["."]],
+  ] as const)(
+    "rejects remote worktree combined with %s before scope can be discarded",
+    async (field, value) => {
+      const workspaces = defaultWorkspace(repoRoot, ["mistral"]);
+      workspaces.repos[0]!.allowWorktree = true;
+      workspaces.repos[0]!.allowAddDir = true;
+      const asyncJobManager = new ThrowingAsyncJobManager(
+        noopLogger,
+        undefined,
+        new MemoryJobStore()
+      );
+      const server = createAsyncGatewayServer(workspaces, asyncJobManager);
+      const oauthContext = {
+        transport: "http" as const,
+        authKind: "oauth" as const,
+        authScopes: ["mcp"],
+        authPrincipal: "remote-worktree-direct-path-user",
+      };
+
+      const result = await runWithRequestContext(oauthContext, () =>
+        registeredTools(server).mistral_request_async.handler(
+          {
+            prompt: "hello",
+            workspace: "default",
+            worktree: true,
+            [field]: value,
+            approvalStrategy: "legacy",
+            optimizePrompt: false,
+          },
+          {}
+        )
+      );
+
+      expect(result.isError).toBe(true);
+      expect(result.content[0]?.text).toContain(
+        "workingDir, addDir, or includeDirs cannot be combined with worktree"
+      );
+      expect(asyncJobManager.starts).toHaveLength(0);
+    }
+  );
+
+  it("rejects reuse of a session worktree from a different selected workspace", async () => {
+    const secondRepoRoot = join(tempDir, "second-repo");
+    execFileSync("mkdir", ["-p", secondRepoRoot]);
+    initGitRepo(secondRepoRoot);
+    const workspaces: WorkspaceRegistry = {
+      enabled: true,
+      defaultAlias: "first",
+      allowUnregisteredWorkingDir: false,
+      repos: [
+        {
+          alias: "first",
+          path: repoRoot,
+          providers: ["mistral"],
+          allowWorktree: true,
+          allowAddDir: false,
+          kind: "git",
+          operatorEntry: true,
+        },
+        {
+          alias: "second",
+          path: secondRepoRoot,
+          providers: ["mistral"],
+          allowWorktree: true,
+          allowAddDir: false,
+          kind: "git",
+          operatorEntry: true,
+        },
+      ],
+      allowedRoots: [],
+      sources: { configFile: null },
+    };
+    const sessionManager = new FileSessionManager(join(tempDir, "sessions.json"));
+    const session = sessionManager.createSession("mistral", "first workspace session");
+    sessionManager.updateSessionMetadata(session.id, {
+      workspaceAlias: "first",
+      workspaceRoot: repoRoot,
+      worktreePath: join(repoRoot, ".worktrees", "first-session"),
+      worktreeName: "first-session",
+    });
+    const asyncJobManager = new ThrowingAsyncJobManager(
+      noopLogger,
+      undefined,
+      new MemoryJobStore()
+    );
+    const server = createAsyncGatewayServer(workspaces, asyncJobManager, sessionManager);
+
+    const result = await registeredTools(server).mistral_request_async.handler(
+      {
+        prompt: "hello",
+        sessionId: session.id,
+        workspace: "second",
+        worktree: true,
+        approvalStrategy: "legacy",
+        optimizePrompt: false,
+      },
+      {}
+    );
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0]?.text).toContain(
+      "Durable session worktree metadata no longer matches a same-host gateway-owned Git worktree"
+    );
+    expect(asyncJobManager.starts).toHaveLength(0);
+  });
+
+  it("remote OAuth rejects a reused worktree symlink that escapes its workspace", async () => {
+    const externalDirectory = join(tempDir, "external-directory");
+    const worktreesDirectory = join(repoRoot, ".worktrees");
+    const escapedWorktree = join(worktreesDirectory, "escaped-worktree");
+    execFileSync("mkdir", ["-p", externalDirectory, worktreesDirectory]);
+    symlinkSync(externalDirectory, escapedWorktree, "dir");
+
+    const workspaces: WorkspaceRegistry = {
+      enabled: true,
+      defaultAlias: "gateway",
+      allowUnregisteredWorkingDir: false,
+      repos: [
+        {
+          alias: "gateway",
+          path: repoRoot,
+          providers: ["mistral"],
+          allowWorktree: true,
+          allowAddDir: false,
+          kind: "git",
+          operatorEntry: true,
+        },
+      ],
+      allowedRoots: [],
+      sources: { configFile: null },
+    };
+    const oauthContext = {
+      transport: "http" as const,
+      authKind: "oauth" as const,
+      authScopes: ["mcp"],
+      authPrincipal: "remote-worktree-user",
+    };
+    const sessionManager = new FileSessionManager(join(tempDir, "sessions.json"));
+    const session = await runWithRequestContext(oauthContext, () =>
+      Promise.resolve(sessionManager.createSession("mistral", "escaped worktree session"))
+    );
+    await runWithRequestContext(oauthContext, () =>
+      Promise.resolve(
+        sessionManager.updateSessionMetadata(session.id, {
+          workspaceAlias: "gateway",
+          workspaceRoot: repoRoot,
+          worktreePath: escapedWorktree,
+          worktreeName: "escaped-worktree",
+        })
+      )
+    );
+    const asyncJobManager = new ThrowingAsyncJobManager(
+      noopLogger,
+      undefined,
+      new MemoryJobStore()
+    );
+    const server = createAsyncGatewayServer(workspaces, asyncJobManager, sessionManager);
+
+    const result = await runWithRequestContext(oauthContext, () =>
+      registeredTools(server).mistral_request_async.handler(
+        {
+          prompt: "hello",
+          sessionId: session.id,
+          workspace: "gateway",
+          worktree: true,
+          approvalStrategy: "legacy",
+          optimizePrompt: false,
+        },
+        {}
+      )
+    );
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0]?.text).toContain(
+      "Durable session worktree metadata no longer matches a same-host gateway-owned Git worktree"
+    );
+    expect(result.content[0]?.text).not.toContain(externalDirectory);
+    expect(asyncJobManager.starts).toHaveLength(0);
+  });
+
+  it("remote OAuth reuses a gateway-created worktree inside its workspace", async () => {
+    execFileSync(
+      "git",
+      [
+        "-c",
+        "user.name=Gateway Test",
+        "-c",
+        "user.email=gateway-test@example.invalid",
+        "commit",
+        "--allow-empty",
+        "-m",
+        "initial test commit",
+      ],
+      { cwd: repoRoot, stdio: "ignore" }
+    );
+    const worktree = await createWorktree({
+      repoRoot,
+      name: "remote-valid",
+      logger: noopLogger,
+    });
+    const workspaces: WorkspaceRegistry = {
+      enabled: true,
+      defaultAlias: "gateway",
+      allowUnregisteredWorkingDir: false,
+      repos: [
+        {
+          alias: "gateway",
+          path: repoRoot,
+          providers: ["mistral"],
+          allowWorktree: true,
+          allowAddDir: false,
+          kind: "git",
+          operatorEntry: true,
+        },
+      ],
+      allowedRoots: [],
+      sources: { configFile: null },
+    };
+    const oauthContext = {
+      transport: "http" as const,
+      authKind: "oauth" as const,
+      authScopes: ["mcp"],
+      authPrincipal: "remote-worktree-user",
+    };
+    const sessionManager = new FileSessionManager(join(tempDir, "sessions.json"));
+    const session = await runWithRequestContext(oauthContext, () =>
+      Promise.resolve(sessionManager.createSession("mistral", "valid worktree session"))
+    );
+    await runWithRequestContext(oauthContext, () =>
+      Promise.resolve(
+        sessionManager.updateSessionMetadata(session.id, {
+          workspaceAlias: "gateway",
+          workspaceRoot: repoRoot,
+          worktreePath: worktree.path,
+          worktreeName: worktree.name,
+          worktreeOwnerHostname: hostname(),
+          worktreeOwnerInstanceId: "workspace-registry-test-instance",
+        })
+      )
+    );
+    const asyncJobManager = new ThrowingAsyncJobManager(
+      noopLogger,
+      undefined,
+      new MemoryJobStore()
+    );
+    const server = createAsyncGatewayServer(workspaces, asyncJobManager, sessionManager);
+
+    const result = await runWithRequestContext(oauthContext, () =>
+      registeredTools(server).mistral_request_async.handler(
+        {
+          prompt: "hello",
+          sessionId: session.id,
+          workspace: "gateway",
+          worktree: true,
+          approvalStrategy: "legacy",
+          optimizePrompt: false,
+        },
+        {}
+      )
+    );
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0]?.text).toContain("spawn sentinel");
+    expect(asyncJobManager.starts).toEqual([
+      expect.objectContaining({ cli: "mistral", cwd: worktree.path }),
+    ]);
+    expect(remoteSafeWorktreePath(worktree.path, repoRoot)).toBe(
+      join(".worktrees", "remote-valid")
+    );
+  });
+
+  it.each(["cursor_request", "cursor_request_async"] as const)(
+    "local Cursor workspace paths use the requested directory for %s",
+    async toolName => {
+      const cursorWorkspace = join(tempDir, "cursor-local");
+      execFileSync("mkdir", ["-p", cursorWorkspace]);
+      const asyncJobManager = new ThrowingAsyncJobManager(
+        noopLogger,
+        undefined,
+        new MemoryJobStore()
+      );
+      const server = createAsyncGatewayServer(disabledWorkspaces(), asyncJobManager);
+
+      const result = await registeredTools(server)[toolName].handler(
+        {
+          prompt: "hello",
+          workspace: cursorWorkspace,
+          approvalStrategy: "legacy",
+          optimizePrompt: false,
+        },
+        {}
+      );
+
+      expect(result.isError).toBe(true);
+      expect(result.content[0]?.text).toContain("spawn sentinel");
+      expect(asyncJobManager.starts).toHaveLength(1);
+      expect(asyncJobManager.starts[0]).toEqual(
+        expect.objectContaining({ cli: "cursor", cwd: cursorWorkspace })
+      );
+      expect(asyncJobManager.starts[0]?.args).toEqual(
+        expect.arrayContaining(["--workspace", cursorWorkspace])
+      );
+    }
+  );
+
+  it.each(["cursor_request", "cursor_request_async"] as const)(
+    "local Cursor workspace files remain native workspace arguments for %s",
+    async toolName => {
+      const cursorWorkspaceFile = join(tempDir, "review.code-workspace");
+      writeFileSync(cursorWorkspaceFile, "{}");
+      const asyncJobManager = new ThrowingAsyncJobManager(
+        noopLogger,
+        undefined,
+        new MemoryJobStore()
+      );
+      const server = createAsyncGatewayServer(disabledWorkspaces(), asyncJobManager);
+
+      const result = await registeredTools(server)[toolName].handler(
+        {
+          prompt: "hello",
+          workspace: cursorWorkspaceFile,
+          approvalStrategy: "legacy",
+          optimizePrompt: false,
+        },
+        {}
+      );
+
+      expect(result.isError).toBe(true);
+      expect(result.content[0]?.text).toContain("spawn sentinel");
+      expect(asyncJobManager.starts).toHaveLength(1);
+      expect(asyncJobManager.starts[0]).toEqual(
+        expect.objectContaining({ cli: "cursor", cwd: undefined })
+      );
+      expect(asyncJobManager.starts[0]?.args).toEqual(
+        expect.arrayContaining(["--workspace", cursorWorkspaceFile])
+      );
+    }
+  );
+
+  it("remote HTTP Cursor rejects a local workspace path before spawn", async () => {
+    const asyncJobManager = new ThrowingAsyncJobManager(
+      noopLogger,
+      undefined,
+      new MemoryJobStore()
+    );
+    const server = createAsyncGatewayServer(disabledWorkspaces(), asyncJobManager);
+
+    const result = await runWithRequestContext(
+      { transport: "http", authKind: "gateway_bearer", authScopes: ["mcp"] },
+      () =>
+        registeredTools(server).cursor_request_async.handler(
+          {
+            prompt: "hello",
+            workspace: tempDir,
+            approvalStrategy: "legacy",
+            optimizePrompt: false,
+          },
+          {}
+        )
+    );
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0]?.text).toContain("Invalid workspace alias");
+    expect(asyncJobManager.starts).toHaveLength(0);
+  });
+
+  it("remote HTTP confines direct paths to the configured default workspace", async () => {
+    const asyncJobManager = new ThrowingAsyncJobManager(
+      noopLogger,
+      undefined,
+      new MemoryJobStore()
+    );
+    const server = createAsyncGatewayServer(defaultWorkspace(repoRoot), asyncJobManager);
+
+    const result = await runWithRequestContext(
+      { transport: "http", authKind: "gateway_bearer", authScopes: ["mcp"] },
+      () =>
+        registeredTools(server).mistral_request_async.handler(
+          {
+            prompt: "hello",
+            workingDir: tempDir,
+            approvalStrategy: "legacy",
+            optimizePrompt: false,
+          },
+          {}
+        )
+    );
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0]?.text).toContain("Absolute workingDir is not allowed");
+    expect(asyncJobManager.starts).toHaveLength(0);
+  });
+
   it.each([
     ["gateway bearer", { transport: "http", authKind: "gateway_bearer", authScopes: ["mcp"] }],
     ["auth disabled", { transport: "http", authKind: "disabled", authScopes: [] }],
@@ -288,7 +943,7 @@ describe("workspace registry", () => {
   ] as const)(
     "remote %s provider tools require a registered workspace by default",
     async (_label, context) => {
-      const server = createGatewayServer({ workspaces: disabledWorkspaces() });
+      const server = createSyncGatewayServer(disabledWorkspaces());
 
       const result = await runWithRequestContext(context, () =>
         registeredTools(server).codex_request.handler(
@@ -307,7 +962,7 @@ describe("workspace registry", () => {
   );
 
   it("allow_unregistered_working_dir does not bypass remote HTTP workspace gating", async () => {
-    const server = createGatewayServer({ workspaces: disabledWorkspaces() });
+    const server = createSyncGatewayServer(disabledWorkspaces());
 
     const result = await runWithRequestContext(
       { transport: "http", authKind: "gateway_bearer", authScopes: [] },
@@ -326,9 +981,9 @@ describe("workspace registry", () => {
     expect(result.isError).toBe(true);
     expect(result.content[0]?.text).toContain("Remote HTTP provider requests require");
 
-    const allowUnregisteredServer = createGatewayServer({
-      workspaces: disabledWorkspacesWith({ allowUnregisteredWorkingDir: true }),
-    });
+    const allowUnregisteredServer = createSyncGatewayServer(
+      disabledWorkspacesWith({ allowUnregisteredWorkingDir: true })
+    );
     const stillRejected = await runWithRequestContext(
       { transport: "http", authKind: "gateway_bearer", authScopes: [] },
       () =>
@@ -381,11 +1036,13 @@ describe("workspace registry", () => {
       "gemini_request",
       "grok_request",
       "mistral_request",
+      "cursor_request",
       "claude_request_async",
       "codex_request_async",
       "gemini_request_async",
       "grok_request_async",
       "mistral_request_async",
+      "cursor_request_async",
     ]) {
       const result = await runWithRequestContext(
         { transport: "http", authKind: "gateway_bearer", authScopes: [] },

@@ -30,6 +30,7 @@ import {
   type ApiProviderConfig,
 } from "../config.js";
 import { noopLogger } from "../logger.js";
+import { CLI_TYPES } from "../provider-types.js";
 
 const baseReq = (over: Partial<ApiRequest> = {}): ApiRequest => ({
   baseUrl: "https://api.example.com/v1",
@@ -339,12 +340,14 @@ default_model = "grok-build-0.1"
     expect(cfg.providers.xai.kind).toBe("xai-responses");
   });
 
-  it("rejects an API provider named after a spawnable CLI (name-collision guard)", () => {
-    pointToFile(`
-[providers.claude]
+  it("rejects every canonical CLI name as an API provider name", () => {
+    const reservedProviders = CLI_TYPES.map(
+      name => `[providers.${name}]
 kind = "openai-compatible"
 base_url = "http://127.0.0.1:11434/v1"
-default_model = "x"
+default_model = "x"`
+    ).join("\n\n");
+    pointToFile(`${reservedProviders}
 
 [providers.ollama]
 kind = "openai-compatible"
@@ -352,9 +355,9 @@ base_url = "http://127.0.0.1:11434/v1"
 default_model = "qwen2.5"
 `);
     const cfg = loadProvidersConfig(noopLogger);
-    // "claude" is reserved — rejected so it can't shadow the CLI on the reviewer
-    // path; the legitimate "ollama" provider still loads.
-    expect(cfg.providers.claude).toBeUndefined();
+    for (const name of CLI_TYPES) {
+      expect(cfg.providers[name]).toBeUndefined();
+    }
     expect(cfg.providers.ollama).toBeDefined();
   });
 

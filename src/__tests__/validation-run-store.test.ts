@@ -12,6 +12,8 @@ import { startJudgeSynthesis, startValidationRun } from "../validation-orchestra
 import { AsyncJobManager, type AsyncJobSnapshot } from "../async-job-manager.js";
 import type { NormalizedValidationResult, ValidationProvider } from "../validation-normalizer.js";
 import { noopLogger } from "../logger.js";
+import { openDatabase } from "../sqlite-driver.js";
+import { eagerMintFromJobId } from "../validation-receipt.js";
 
 // Cross-LLM validation receipts (Phase 0): durable validation-run identity.
 
@@ -32,11 +34,13 @@ function runRecord(overrides: Partial<ValidationRunRecord> = {}): ValidationRunR
 
 describe("ValidationRunStore (SqliteJobStore)", () => {
   let tempDir: string;
+  let dbPath: string;
   let store: SqliteJobStore;
 
   beforeEach(() => {
     tempDir = mkdtempSync(join(tmpdir(), "validation-run-store-"));
-    store = new SqliteJobStore(join(tempDir, "jobs.db"));
+    dbPath = join(tempDir, "jobs.db");
+    store = new SqliteJobStore(dbPath);
   });
 
   afterEach(() => {
@@ -53,6 +57,49 @@ describe("ValidationRunStore (SqliteJobStore)", () => {
     store.recordValidationRun(record);
     expect(store.getValidationRun("val-1")).toEqual(record);
   });
+
+  it.each([
+    ["provider_links", "job-claude", /provider links are malformed/],
+    ["judge_link", "job-judge", /judge link is malformed/],
+  ] as const)(
+    "fails closed when durable SQLite %s is malformed despite a surviving reverse link",
+    (column, reverseJobId, expectedError) => {
+      store.recordValidationRun(
+        runRecord({
+          requestJson: JSON.stringify({ question: "?", modelList: ["claude"] }),
+          providerLinks:
+            column === "provider_links"
+              ? [{ provider: "claude", jobId: reverseJobId, correlationId: "corr-claude" }]
+              : [],
+          status: "running",
+        })
+      );
+      if (column === "judge_link") {
+        store.setValidationJudgeLink("val-1", {
+          provider: "codex",
+          jobId: reverseJobId,
+          correlationId: "corr-judge",
+        });
+      }
+
+      const corruptionDb = openDatabase(dbPath);
+      try {
+        corruptionDb
+          .prepare(`UPDATE validation_runs SET ${column} = ? WHERE validation_id = ?`)
+          .run("not-json", "val-1");
+      } finally {
+        corruptionDb.close();
+      }
+
+      expect(store.getValidationRunIdByJobId(reverseJobId)).toBe("val-1");
+      expect(() => store.getValidationRun("val-1")).toThrow(expectedError);
+      eagerMintFromJobId(
+        { validationRunStore: store, asyncJobManager: {} as AsyncJobManager },
+        reverseJobId
+      );
+      expect(store.getValidationReceipt("val-1")).toBeNull();
+    }
+  );
 
   it("returns null for an unknown validation id", () => {
     expect(store.getValidationRun("missing")).toBeNull();
@@ -79,6 +126,200 @@ describe("ValidationRunStore (SqliteJobStore)", () => {
       jobId: "job-judge",
       correlationId: "corr-judge",
     });
+
+    expect(() =>
+      store.setValidationJudgeLink("val-1", {
+        provider: "claude",
+        jobId: "job-second-judge",
+        correlationId: "corr-second-judge",
+      })
+    ).toThrow(/one-shot claim/);
+    expect(store.getValidationRun("val-1")?.judgeLink).toEqual({
+      provider: "codex",
+      jobId: "job-judge",
+      correlationId: "corr-judge",
+    });
+  });
+
+  it("attaches provider links after a pre-dispatch run record", () => {
+    store.recordValidationRun(runRecord({ providerLinks: [] }));
+    const links = [
+      { provider: "claude", jobId: "job-claude", correlationId: "corr-claude" },
+      { provider: "codex", jobId: "job-codex", correlationId: "corr-codex" },
+    ];
+    store.setValidationProviderLinks("val-1", links);
+    expect(store.getValidationRun("val-1")?.providerLinks).toEqual(links);
+    expect(store.getValidationRunIdByJobId("job-claude")).toBe("val-1");
+    expect(store.getValidationRunIdByJobId("job-codex")).toBe("val-1");
+  });
+
+  it("atomically rolls back a queued job when validation-link admission fails", () => {
+    store.recordValidationRun(
+      runRecord({ intent: "review", providerLinks: [], status: "admitting" })
+    );
+    expect(() =>
+      store.recordStart({
+        id: "job-wrong-owner",
+        correlationId: "corr-wrong-owner",
+        requestKey: "request-wrong-owner",
+        cli: "codex",
+        args: ["exec"],
+        startedAt: new Date(0).toISOString(),
+        pid: null,
+        ownerPrincipal: "other-owner",
+        validationAdmission: { validationId: "val-1", provider: "codex" },
+      })
+    ).toThrow(/missing or owned by another principal/);
+    expect(store.getById("job-wrong-owner")).toBeNull();
+    expect(store.getValidationRun("val-1")?.providerLinks).toEqual([]);
+    expect(store.getValidationRunIdByJobId("job-wrong-owner")).toBeNull();
+  });
+
+  it("atomically admits a queued job and its provider/reverse links", () => {
+    store.recordValidationRun(
+      runRecord({ intent: "review", providerLinks: [], status: "admitting" })
+    );
+    store.recordStart({
+      id: "job-admitted",
+      correlationId: "corr-admitted",
+      requestKey: "request-admitted",
+      cli: "codex",
+      args: ["exec"],
+      startedAt: new Date(0).toISOString(),
+      pid: null,
+      ownerPrincipal: "local",
+      validationAdmission: { validationId: "val-1", provider: "codex" },
+    });
+    expect(store.getById("job-admitted")?.status).toBe("queued");
+    expect(store.getValidationRun("val-1")?.providerLinks).toEqual([
+      { provider: "codex", jobId: "job-admitted", correlationId: "corr-admitted" },
+    ]);
+    expect(store.getValidationRunIdByJobId("job-admitted")).toBe("val-1");
+  });
+
+  it("atomically claims the exact planned review judge only once", () => {
+    store.recordValidationRun(
+      runRecord({
+        intent: "review",
+        providerLinks: [],
+        requestJson: JSON.stringify({
+          judgeProvider: "judge-api",
+          reviewAuthorization: { judgeProvider: "judge-api" },
+        }),
+        status: "running",
+      })
+    );
+    store.recordStart({
+      id: "job-judge",
+      correlationId: "corr-judge",
+      requestKey: "request-judge",
+      cli: "judge-api",
+      args: [],
+      startedAt: new Date(0).toISOString(),
+      pid: null,
+      ownerPrincipal: "local",
+      validationAdmission: {
+        validationId: "val-1",
+        provider: "judge-api",
+        role: "judge",
+      },
+    });
+    expect(store.getValidationRun("val-1")?.judgeLink).toEqual({
+      provider: "judge-api",
+      jobId: "job-judge",
+      correlationId: "corr-judge",
+    });
+    expect(store.getValidationRunIdByJobId("job-judge")).toBe("val-1");
+
+    expect(() =>
+      store.recordStart({
+        id: "job-judge-duplicate",
+        correlationId: "corr-judge-duplicate",
+        requestKey: "request-judge-duplicate",
+        cli: "judge-api",
+        args: [],
+        startedAt: new Date(0).toISOString(),
+        pid: null,
+        ownerPrincipal: "local",
+        validationAdmission: {
+          validationId: "val-1",
+          provider: "judge-api",
+          role: "judge",
+        },
+      })
+    ).toThrow(/already claimed/);
+    expect(store.getById("job-judge-duplicate")).toBeNull();
+  });
+
+  it("rejects a judge claim for the wrong plan, owner, or run state", () => {
+    const requestJson = JSON.stringify({
+      judgeProvider: "judge-api",
+      reviewAuthorization: { judgeProvider: "judge-api" },
+    });
+    for (const [validationId, ownerPrincipal, status] of [
+      ["wrong-plan", "local", "running"],
+      ["wrong-owner", "alice", "running"],
+      ["closed", "local", "finalized"],
+    ] as const) {
+      store.recordValidationRun(
+        runRecord({
+          validationId,
+          ownerPrincipal,
+          intent: "review",
+          providerLinks: [],
+          requestJson,
+          status,
+        })
+      );
+    }
+    const attempts = [
+      { validationId: "wrong-plan", provider: "other-judge", ownerPrincipal: "local" },
+      { validationId: "wrong-owner", provider: "judge-api", ownerPrincipal: "local" },
+      { validationId: "closed", provider: "judge-api", ownerPrincipal: "local" },
+    ];
+    for (const [index, attempt] of attempts.entries()) {
+      const jobId = `rejected-judge-${index}`;
+      expect(() =>
+        store.recordStart({
+          id: jobId,
+          correlationId: `corr-${jobId}`,
+          requestKey: `request-${jobId}`,
+          cli: attempt.provider,
+          args: [],
+          startedAt: new Date(0).toISOString(),
+          pid: null,
+          ownerPrincipal: attempt.ownerPrincipal,
+          validationAdmission: {
+            validationId: attempt.validationId,
+            provider: attempt.provider,
+            role: "judge",
+          },
+        })
+      ).toThrow();
+      expect(store.getById(jobId)).toBeNull();
+    }
+  });
+
+  it("transitions roster state by owner and records a skipped judge atomically", () => {
+    store.recordValidationRun(
+      runRecord({
+        intent: "review",
+        providerLinks: [],
+        requestJson: JSON.stringify({
+          judgeProvider: "judge-api",
+          reviewAuthorization: { judgeProvider: "judge-api" },
+        }),
+        status: "admitting",
+      })
+    );
+    expect(store.transitionValidationRunStatus("val-1", "other", "admitting", "running")).toBe(
+      false
+    );
+    expect(store.transitionValidationRunStatus("val-1", "local", "admitting", "running")).toBe(
+      true
+    );
+    store.skipValidationJudge("val-1", "judge-api", "local");
+    expect(store.getValidationRun("val-1")?.status).toBe("judge_skipped");
   });
 
   it("updates the run status to finalized", () => {
@@ -109,27 +350,34 @@ describe("ValidationRunStore (SqliteJobStore)", () => {
   });
 });
 
-// A minimal scripted async-job manager whose startJob always returns a running
+// A minimal scripted async-job manager whose startJobWithDedup always returns a running
 // snapshot (mirrors the orchestrator test's scripted manager).
 function scriptedManager() {
   let n = 0;
   return {
-    startJob(cli: string, _args: string[], correlationId: string): AsyncJobSnapshot {
+    startJobWithDedup(
+      cli: string,
+      _args: string[],
+      correlationId: string
+    ): { snapshot: AsyncJobSnapshot; deduped: boolean } {
       n += 1;
       return {
-        id: `job-${cli}-${n}`,
-        cli,
-        status: "running",
-        startedAt: new Date(0).toISOString(),
-        finishedAt: null,
-        exitCode: null,
-        correlationId,
-        outputTruncated: false,
-        stdoutBytes: 0,
-        stderrBytes: 0,
-        error: null,
-        exited: false,
-      } as AsyncJobSnapshot;
+        snapshot: {
+          id: `job-${cli}-${n}`,
+          cli,
+          status: "running",
+          startedAt: new Date(0).toISOString(),
+          finishedAt: null,
+          exitCode: null,
+          correlationId,
+          outputTruncated: false,
+          stdoutBytes: 0,
+          stderrBytes: 0,
+          error: null,
+          exited: false,
+        } as AsyncJobSnapshot,
+        deduped: false,
+      };
     },
   };
 }

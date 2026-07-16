@@ -8,6 +8,7 @@ import { join, isAbsolute } from "path";
 import { randomUUID } from "crypto";
 import { z } from "zod/v3";
 import { CLAUDE_WIRE_PERMISSION_MODES } from "./upstream-contracts.js";
+import { assertCliArgUtf8Size, assertCliArgvUtf8Size } from "./cli-input-limits.js";
 
 /** Prefix for gateway-generated session IDs. Enforces provenance structurally. */
 export const GATEWAY_SESSION_PREFIX = "gw-";
@@ -19,13 +20,19 @@ export interface SessionResumeResult {
 }
 
 /**
- * Validate that a user-provided sessionId doesn't use the reserved gateway prefix.
- * Throws if the ID starts with "gw-" — this namespace is reserved for gateway-generated IDs.
+ * Validate that a user-provided sessionId does not use the reserved gateway
+ * prefix or resemble a CLI option. Throws if the ID starts with "gw-" or "-".
  */
-export function validateSessionId(sessionId: string): void {
+export function validateSessionId(sessionId: string, provider = "provider CLI"): void {
+  assertCliArgUtf8Size(sessionId, { provider, inputName: "sessionId" });
   if (sessionId.startsWith(GATEWAY_SESSION_PREFIX)) {
     throw new Error(
       `Session ID "${sessionId}" uses reserved prefix "${GATEWAY_SESSION_PREFIX}". Gateway-generated session IDs cannot be used for --resume.`
+    );
+  }
+  if (sessionId.startsWith("-")) {
+    throw new Error(
+      `Session ID "${sessionId}" must not start with "-" (argument injection prevention)`
     );
   }
 }
@@ -44,11 +51,44 @@ export function sanitizeCliArgValues(values: string[], fieldName: string): strin
   for (const v of values) {
     if (v.startsWith("-")) {
       throw new Error(
-        `Invalid ${fieldName} value "${v}": values must not start with "-" (argument injection prevention)`
+        `Invalid ${fieldName}: values must not start with "-" (argument injection prevention)`
       );
     }
   }
   return values;
+}
+
+/** Reject one option value that could otherwise be parsed as another flag. */
+export function sanitizeCliArgValue(value: string, fieldName: string): string {
+  sanitizeCliArgValues([value], fieldName);
+  return value;
+}
+
+/**
+ * Place a caller-controlled positional prompt after the CLI end-of-options
+ * marker. This prevents a leading dash in prompt text from being parsed as an
+ * additional provider flag.
+ */
+export function appendCliPrompt(args: string[], prompt: string): void {
+  args.push("--", prompt);
+}
+
+/**
+ * Some handlers resolve native session flags after building provider argv.
+ * Keep those flags before the prompt terminator rather than turning them into
+ * prompt text after `--`.
+ */
+export function insertCliArgsBeforePrompt(args: string[], values: readonly string[]): void {
+  if (values.length === 0) return;
+  // appendCliPrompt always leaves the boundary as the penultimate token.
+  // Looking for the first or last "--" is unsafe: a caller value before the
+  // boundary, or the literal prompt itself, may also equal "--".
+  const terminatorIndex = args.length >= 2 && args.at(-2) === "--" ? args.length - 2 : -1;
+  if (terminatorIndex === -1) {
+    args.push(...values);
+    return;
+  }
+  args.splice(terminatorIndex, 0, ...values);
 }
 
 export function resolveSessionResumeArgs(opts: {
@@ -67,7 +107,7 @@ export function resolveSessionResumeArgs(opts: {
     };
   }
   if (opts.sessionId) {
-    validateSessionId(opts.sessionId);
+    validateSessionId(opts.sessionId, "claude");
     return {
       resumeArgs: ["--resume", opts.sessionId],
       effectiveSessionId: opts.sessionId,
@@ -113,7 +153,7 @@ export function resolveCodexSessionArgs(opts: {
     return { mode: "new" };
   }
   if (opts.sessionId) {
-    validateSessionId(opts.sessionId);
+    validateSessionId(opts.sessionId, "codex");
     return { mode: "resume-by-id", sessionId: opts.sessionId };
   }
   if (opts.resumeLatest) {
@@ -132,6 +172,7 @@ export function resolveGrokSessionArgs(opts: {
   sessionId?: string;
   resumeLatest?: boolean;
   createNewSession?: boolean;
+  provider?: "grok" | "devin" | "cursor";
 }): SessionResumeResult {
   if (opts.createNewSession) {
     return { resumeArgs: [], effectiveSessionId: undefined, userProvidedSession: false };
@@ -144,7 +185,7 @@ export function resolveGrokSessionArgs(opts: {
     };
   }
   if (opts.sessionId) {
-    validateSessionId(opts.sessionId);
+    validateSessionId(opts.sessionId, opts.provider ?? "grok");
     return {
       resumeArgs: ["--resume", opts.sessionId],
       effectiveSessionId: opts.sessionId,
@@ -180,7 +221,7 @@ export function resolveMistralSessionArgs(opts: {
     };
   }
   if (opts.sessionId) {
-    validateSessionId(opts.sessionId);
+    validateSessionId(opts.sessionId, "mistral");
     return {
       resumeArgs: ["--resume", opts.sessionId],
       effectiveSessionId: opts.sessionId,
@@ -216,8 +257,8 @@ export const MISTRAL_BUILTIN_AGENT_MODES = [
 export type MistralAgentMode = string;
 // Safe default for the raw argv builder (#155): auto-accept file edits, gate
 // dangerous ops (shell), which Vibe DENIES rather than hangs on in programmatic
-// mode. auto-approve ("YOLO") is only reached via an explicit caller mode or the
-// operator opt-in, resolved one layer up in `resolveMistralAgentMode`.
+// mode. auto-approve ("YOLO") is reached only through an explicit caller mode.
+// The Mistral adapter rejects mcp_managed before this argv builder runs.
 export const MISTRAL_DEFAULT_AGENT_MODE: MistralAgentMode = "accept-edits";
 
 export interface PrepareMistralRequestInput {
@@ -285,7 +326,12 @@ export interface PrepareMistralRequestResult {
 export function prepareMistralRequest(
   input: PrepareMistralRequestInput
 ): PrepareMistralRequestResult {
-  const args: string[] = ["-p", input.prompt];
+  // Vibe does not honor an end-of-options marker after `-p`. Keep the
+  // caller-controlled prompt in the flag's inline value so a leading dash
+  // cannot become a second CLI option.
+  const promptArg = `-p=${input.prompt}`;
+  assertCliArgUtf8Size(promptArg, { provider: "mistral", inputName: "prompt" });
+  const args: string[] = [promptArg];
   const env: Record<string, string> = {};
 
   if (input.resolvedModel) {
@@ -297,6 +343,7 @@ export function prepareMistralRequest(
   }
 
   const mode = input.permissionMode ?? MISTRAL_DEFAULT_AGENT_MODE;
+  assertCliArgUtf8Size(mode, { provider: "mistral", inputName: "permissionMode" });
   args.push("--agent", mode);
 
   // No reasoning-effort surface on vibe: --effort / --reasoning-effort are not
@@ -304,13 +351,21 @@ export function prepareMistralRequest(
 
   if (input.allowedTools && input.allowedTools.length > 0) {
     sanitizeCliArgValues(input.allowedTools, "allowedTools");
-    for (const tool of input.allowedTools) {
+    for (const [index, tool] of input.allowedTools.entries()) {
+      assertCliArgUtf8Size(tool, {
+        provider: "mistral",
+        inputName: `allowedTools[${index}]`,
+      });
       args.push("--enabled-tools", tool);
     }
   }
   if (input.disallowedTools && input.disallowedTools.length > 0) {
     sanitizeCliArgValues(input.disallowedTools, "disallowedTools");
-    for (const tool of input.disallowedTools) {
+    for (const [index, tool] of input.disallowedTools.entries()) {
+      assertCliArgUtf8Size(tool, {
+        provider: "mistral",
+        inputName: `disallowedTools[${index}]`,
+      });
       args.push("--disabled-tools", tool);
     }
   }
@@ -329,14 +384,18 @@ export function prepareMistralRequest(
     args.push("--max-tokens", String(input.maxTokens));
   }
   if (input.workingDir) {
+    assertCliArgUtf8Size(input.workingDir, { provider: "mistral", inputName: "workingDir" });
     args.push("--workdir", input.workingDir);
   }
   if (input.addDir && input.addDir.length > 0) {
-    for (const dir of input.addDir) {
+    sanitizeCliArgValues(input.addDir, "addDir");
+    for (const [index, dir] of input.addDir.entries()) {
+      assertCliArgUtf8Size(dir, { provider: "mistral", inputName: `addDir[${index}]` });
       args.push("--add-dir", dir);
     }
   }
 
+  assertCliArgvUtf8Size("vibe", args, { provider: "mistral" });
   return { args, env };
 }
 
@@ -708,6 +767,53 @@ export function filterCodexResumeFlags(args: string[]): string[] {
 export const CLAUDE_EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"] as const;
 export type ClaudeEffortLevel = (typeof CLAUDE_EFFORT_LEVELS)[number];
 
+const AGENT_MAP_KEY_ENVELOPE = "agent-name:";
+
+function isPlainAgentMap(value: unknown): value is Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function encodeAgentMapKeys(value: unknown): unknown {
+  if (!isPlainAgentMap(value)) return value;
+  const encoded = Object.create(null) as Record<string, unknown>;
+  for (const [key, entry] of Object.entries(value)) {
+    Object.defineProperty(encoded, `${AGENT_MAP_KEY_ENVELOPE}${JSON.stringify(key)}`, {
+      value: entry,
+      enumerable: true,
+      configurable: false,
+      writable: false,
+    });
+  }
+  return encoded;
+}
+
+function decodeAgentMapKeys(value: Record<string, unknown>): Record<string, unknown> {
+  const decoded = Object.create(null) as Record<string, unknown>;
+  for (const [encodedKey, entry] of Object.entries(value)) {
+    const key = JSON.parse(encodedKey.slice(AGENT_MAP_KEY_ENVELOPE.length)) as string;
+    Object.defineProperty(decoded, key, {
+      value: entry,
+      enumerable: true,
+      configurable: false,
+      writable: false,
+    });
+  }
+  return decoded;
+}
+
+/**
+ * Preserve every caller-owned agent-name key until bounded manual validation.
+ * `z.record` reconstructs through an ordinary object and cannot directly carry
+ * an own `__proto__` key. The preprocess step uses an injective safe envelope,
+ * then the transform restores all names on a null-prototype record. Keeping the
+ * record as the inner schema also publishes the truthful object-map JSON shape.
+ */
+export const CLAUDE_AGENTS_MAP_INPUT_SCHEMA = z
+  .preprocess(encodeAgentMapKeys, z.record(z.string(), z.unknown()))
+  .transform(decodeAgentMapKeys);
+
 /**
  * Standalone Zod object for U25's high-impact param subset. Enforces the
  * `systemPrompt` / `appendSystemPrompt` mutual-exclusion via `.refine(...)`.
@@ -719,10 +825,13 @@ export type ClaudeEffortLevel = (typeof CLAUDE_EFFORT_LEVELS)[number];
 export const CLAUDE_HIGH_IMPACT_PARAMS_SCHEMA = z
   .object({
     agent: z.string().optional(),
-    agents: z.record(z.string(), z.record(z.string(), z.unknown())).optional(),
+    // Keep the outer tool/input boundary opaque. Definition validation happens
+    // in validateClaudeAgentsMap, which reports bounded ordinal paths instead
+    // of allowing Zod to echo a caller-controlled map key.
+    agents: CLAUDE_AGENTS_MAP_INPUT_SCHEMA.optional(),
     forkSession: z.boolean().optional(),
-    systemPrompt: z.string().optional(),
-    appendSystemPrompt: z.string().optional(),
+    systemPrompt: z.string().min(1).optional(),
+    appendSystemPrompt: z.string().min(1).optional(),
     maxBudgetUsd: z.number().positive().optional(),
     maxTurns: z.number().int().positive().optional(),
     effort: z.enum(CLAUDE_EFFORT_LEVELS).optional(),
@@ -755,27 +864,46 @@ export type ClaudeAgentDefinition = z.infer<typeof CLAUDE_AGENT_DEFINITION_SCHEM
  * Validate an `agents` map against {@link CLAUDE_AGENT_DEFINITION_SCHEMA}.
  *
  * Returns `{ ok: true, value }` on success and `{ ok: false, agentKey, message }`
- * on the first failing entry. The caller is responsible for turning the failure
- * into a tool-level error response (e.g. via `createErrorResponse`).
+ * on the first failing entry. For failures, `agentKey` is a bounded ordinal
+ * path such as `agents[1]`, never the caller-controlled map key. The caller is
+ * responsible for turning the failure into a tool-level error response (e.g.
+ * via `createErrorResponse`).
  */
 export function validateClaudeAgentsMap(
   agents: Record<string, unknown>
 ):
   | { ok: true; value: Record<string, ClaudeAgentDefinition> }
   | { ok: false; agentKey: string; message: string } {
-  const validated: Record<string, ClaudeAgentDefinition> = {};
-  for (const [key, raw] of Object.entries(agents)) {
+  const validated = Object.create(null) as Record<string, ClaudeAgentDefinition>;
+  for (const [index, [key, raw]] of Object.entries(agents).entries()) {
     const parsed = CLAUDE_AGENT_DEFINITION_SCHEMA.safeParse(raw);
     if (!parsed.success) {
       const issue = parsed.error.issues[0];
-      const path = issue?.path?.length ? `.${issue.path.join(".")}` : "";
+      const agentPath = `agents[${index}]`;
+      // This schema can report only its fixed field names and numeric array
+      // indexes. Keep future schema changes fail-closed so a caller-controlled
+      // path segment cannot reintroduce key disclosure through validation text.
+      const path = (issue?.path ?? [])
+        .map(segment => {
+          if (typeof segment === "number") return `[${segment}]`;
+          if (["description", "prompt", "tools", "model"].includes(segment)) {
+            return `.${segment}`;
+          }
+          return ".field";
+        })
+        .join("");
       return {
         ok: false,
-        agentKey: key,
-        message: `Invalid agent definition for "${key}"${path}: ${issue?.message ?? "schema validation failed"}`,
+        agentKey: agentPath,
+        message: `Invalid agent definition at ${agentPath}${path}: ${issue?.message ?? "schema validation failed"}`,
       };
     }
-    validated[key] = parsed.data;
+    Object.defineProperty(validated, key, {
+      value: parsed.data,
+      enumerable: true,
+      configurable: false,
+      writable: false,
+    });
   }
   return { ok: true, value: validated };
 }
@@ -916,21 +1044,25 @@ export interface ClaudeHighImpactFlagsInput {
  */
 export function prepareClaudeHighImpactFlags(input: ClaudeHighImpactFlagsInput): string[] {
   const args: string[] = [];
+  const admit = (value: string, inputName: string): string => {
+    assertCliArgUtf8Size(value, { provider: "claude", inputName });
+    return value;
+  };
 
   if (input.agent) {
-    args.push("--agent", input.agent);
+    args.push("--agent", admit(input.agent, "agent"));
   }
   if (input.agents && Object.keys(input.agents).length > 0) {
-    args.push("--agents", JSON.stringify(input.agents));
+    args.push("--agents", admit(JSON.stringify(input.agents), "agents"));
   }
   if (input.forkSession) {
     args.push("--fork-session");
   }
   if (input.systemPrompt !== undefined) {
-    args.push("--system-prompt", input.systemPrompt);
+    args.push("--system-prompt", admit(input.systemPrompt, "systemPrompt"));
   }
   if (input.appendSystemPrompt !== undefined) {
-    args.push("--append-system-prompt", input.appendSystemPrompt);
+    args.push("--append-system-prompt", admit(input.appendSystemPrompt, "appendSystemPrompt"));
   }
   if (input.maxBudgetUsd !== undefined) {
     args.push("--max-budget-usd", String(input.maxBudgetUsd));
@@ -945,31 +1077,33 @@ export function prepareClaudeHighImpactFlags(input: ClaudeHighImpactFlagsInput):
     args.push("--exclude-dynamic-system-prompt-sections");
   }
   if (input.fallbackModel !== undefined) {
-    args.push("--fallback-model", input.fallbackModel);
+    args.push("--fallback-model", admit(input.fallbackModel, "fallbackModel"));
   }
   if (input.jsonSchema !== undefined) {
     const schemaArg =
       typeof input.jsonSchema === "string" ? input.jsonSchema : JSON.stringify(input.jsonSchema);
-    args.push("--json-schema", schemaArg);
+    args.push("--json-schema", admit(schemaArg, "jsonSchema"));
   }
   if (input.addDir && input.addDir.length > 0) {
-    for (const dir of input.addDir) {
-      args.push("--add-dir", dir);
+    sanitizeCliArgValues(input.addDir, "addDir");
+    for (const [index, dir] of input.addDir.entries()) {
+      args.push("--add-dir", admit(dir, `addDir[${index}]`));
     }
   }
   if (input.noSessionPersistence) {
     args.push("--no-session-persistence");
   }
   if (input.settingSources !== undefined) {
-    args.push("--setting-sources", input.settingSources);
+    args.push("--setting-sources", admit(input.settingSources, "settingSources"));
   }
   if (input.settings !== undefined) {
-    args.push("--settings", input.settings);
+    args.push("--settings", admit(input.settings, "settings"));
   }
   if (input.tools && input.tools.length > 0) {
     // Single variadic flag (mirrors --allowed-tools emission). `[""]` → `--tools ""`
     // which disables all built-in tools per `claude --help`.
-    args.push("--tools", ...input.tools);
+    sanitizeCliArgValues(input.tools, "tools");
+    args.push("--tools", ...input.tools.map((tool, index) => admit(tool, `tools[${index}]`)));
   }
 
   // Phase 4 Part A: additional headless-safe modifiers.
@@ -980,22 +1114,27 @@ export function prepareClaudeHighImpactFlags(input: ClaudeHighImpactFlagsInput):
     args.push("--replay-user-messages");
   }
   if (input.systemPromptFile !== undefined) {
-    args.push("--system-prompt-file", input.systemPromptFile);
+    args.push("--system-prompt-file", admit(input.systemPromptFile, "systemPromptFile"));
   }
   if (input.appendSystemPromptFile !== undefined) {
-    args.push("--append-system-prompt-file", input.appendSystemPromptFile);
+    args.push(
+      "--append-system-prompt-file",
+      admit(input.appendSystemPromptFile, "appendSystemPromptFile")
+    );
   }
   if (input.name !== undefined) {
-    args.push("--name", input.name);
+    args.push("--name", admit(input.name, "name"));
   }
   if (input.pluginDir && input.pluginDir.length > 0) {
-    for (const dir of input.pluginDir) {
-      args.push("--plugin-dir", dir);
+    sanitizeCliArgValues(input.pluginDir, "pluginDir");
+    for (const [index, dir] of input.pluginDir.entries()) {
+      args.push("--plugin-dir", admit(dir, `pluginDir[${index}]`));
     }
   }
   if (input.pluginUrl && input.pluginUrl.length > 0) {
-    for (const url of input.pluginUrl) {
-      args.push("--plugin-url", url);
+    sanitizeCliArgValues(input.pluginUrl, "pluginUrl");
+    for (const [index, url] of input.pluginUrl.entries()) {
+      args.push("--plugin-url", admit(url, `pluginUrl[${index}]`));
     }
   }
   if (input.safeMode) {
@@ -1006,13 +1145,16 @@ export function prepareClaudeHighImpactFlags(input: ClaudeHighImpactFlagsInput):
   }
   if (input.debug !== undefined && input.debug !== false) {
     if (typeof input.debug === "string") {
-      args.push("--debug", input.debug);
+      if (input.debug.startsWith("-")) {
+        throw new Error("debug must not start with '-' (argument injection prevention)");
+      }
+      args.push("--debug", admit(input.debug, "debug"));
     } else {
       args.push("--debug");
     }
   }
   if (input.debugFile !== undefined) {
-    args.push("--debug-file", input.debugFile);
+    args.push("--debug-file", admit(input.debugFile, "debugFile"));
   }
 
   return args;
@@ -1033,19 +1175,42 @@ export function prepareClaudeHighImpactFlags(input: ClaudeHighImpactFlagsInput):
  * The CLI consumes overrides as `-c key=value`. We rely on `spawn(..., args)`
  * passing argv directly without a shell, so we forbid shape-breaking
  * characters rather than shell-escaping values.
+ *
+ * Gateway request handlers additionally reject this control for remote
+ * HTTP/OAuth callers because it changes the host-local Codex configuration.
  */
+const CODEX_CONFIG_OVERRIDE_KEY_PATTERN = /^[a-zA-Z0-9._]+$/;
+const CODEX_CONFIG_OVERRIDE_KEY_ERROR =
+  "configOverrides keys must match /^[a-zA-Z0-9._]+$/ (no whitespace, '=', or flag-like prefixes)";
+const CODEX_CONFIG_OVERRIDE_VALUE_SCHEMA = z.string().refine(v => !/[\n\r]/.test(v), {
+  message: "configOverrides values must not contain CR or LF characters",
+});
+
 export const CODEX_CONFIG_OVERRIDES_SCHEMA = z
-  .record(
-    z
-      .string()
-      .regex(
-        /^[a-zA-Z0-9._]+$/,
-        "configOverrides keys must match /^[a-zA-Z0-9._]+$/ (no whitespace, '=', or flag-like prefixes)"
-      ),
-    z.string().refine(v => !/[\n\r]/.test(v), {
-      message: "configOverrides values must not contain CR or LF characters",
-    })
-  )
+  .record(z.string(), z.unknown())
+  .superRefine((overrides, ctx) => {
+    for (const [index, [key, value]] of Object.entries(overrides).entries()) {
+      // A Zod record key schema copies the complete caller-controlled key into
+      // each issue path. Validate manually so even a very large invalid key is
+      // represented by a bounded ordinal name in public errors.
+      const path = [`configOverrides[${index}]`];
+      if (!CODEX_CONFIG_OVERRIDE_KEY_PATTERN.test(key)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path,
+          message: CODEX_CONFIG_OVERRIDE_KEY_ERROR,
+        });
+      }
+
+      const parsedValue = CODEX_CONFIG_OVERRIDE_VALUE_SCHEMA.safeParse(value);
+      if (!parsedValue.success) {
+        for (const issue of parsedValue.error.issues) {
+          ctx.addIssue({ ...issue, path });
+        }
+      }
+    }
+  })
+  .transform(overrides => overrides as Record<string, string>)
   .optional();
 
 export type CodexConfigOverrides = z.infer<typeof CODEX_CONFIG_OVERRIDES_SCHEMA>;
@@ -1059,8 +1224,13 @@ export function emitCodexConfigOverrideArgs(
 ): string[] {
   if (!overrides) return [];
   const args: string[] = [];
-  for (const [key, value] of Object.entries(overrides)) {
-    args.push("-c", `${key}=${value}`);
+  for (const [index, [key, value]] of Object.entries(overrides).entries()) {
+    const argument = `${key}=${value}`;
+    assertCliArgUtf8Size(argument, {
+      provider: "codex",
+      inputName: `configOverrides[${index}]`,
+    });
+    args.push("-c", argument);
   }
   return args;
 }
@@ -1090,6 +1260,7 @@ export function prepareCodexOutputSchema(
   if (outputSchema === undefined) return null;
 
   if (typeof outputSchema === "string") {
+    assertCliArgUtf8Size(outputSchema, { provider: "codex", inputName: "outputSchema" });
     return { path: outputSchema, cleanup: () => {} };
   }
 
@@ -1139,7 +1310,8 @@ export const CODEX_HIGH_IMPACT_PARAMS_SCHEMA = z.object({
   ignoreRules: z.boolean().optional(),
   // Phase 4 Part A: feature toggles. `--enable`/`--disable` are equivalent to
   // `-c features.<name>=true|false`, and `-c` is accepted on `codex exec
-  // resume`, so these are safe in both new and resume branches.
+  // resume`, so these are safe in both new and resume branches. Gateway request
+  // handlers restrict them to local callers with configOverrides.
   enable: z.array(z.string()).optional(),
   disable: z.array(z.string()).optional(),
 });
@@ -1173,6 +1345,20 @@ export interface CodexHighImpactFlagsResult {
   missingImagePath: string | null;
   /** Set when deprecated/no-op compatibility inputs are supplied. */
   warning?: string;
+  /** True when pure planning deferred an image check or schema temp-file write. */
+  filesystemDeferred?: boolean;
+}
+
+export interface CodexHighImpactFlagsOptions {
+  /** Build byte-exact argv shape without filesystem reads or writes. */
+  deferFilesystem?: boolean;
+}
+
+const CODEX_SCHEMA_UUID_PLACEHOLDER = "00000000-0000-0000-0000-000000000000";
+
+/** Exact-length stand-in for the random schema path used during pure planning. */
+export function plannedCodexOutputSchemaPath(): string {
+  return join(tmpdir(), `codex-schema-${CODEX_SCHEMA_UUID_PLACEHOLDER}.json`);
 }
 
 /**
@@ -1184,9 +1370,32 @@ export interface CodexHighImpactFlagsResult {
  * files into `os.tmpdir()`.
  */
 export function prepareCodexHighImpactFlags(
-  input: CodexHighImpactFlagsInput
+  input: CodexHighImpactFlagsInput,
+  options: CodexHighImpactFlagsOptions = {}
 ): CodexHighImpactFlagsResult {
-  const missingImagePath = findMissingImagePath(input.images);
+  if (typeof input.outputSchema === "string") {
+    assertCliArgUtf8Size(input.outputSchema, {
+      provider: "codex",
+      inputName: "outputSchema",
+    });
+  }
+  if (input.profile) {
+    assertCliArgUtf8Size(input.profile, { provider: "codex", inputName: "profile" });
+  }
+  const configOverrideArgs = emitCodexConfigOverrideArgs(input.configOverrides);
+  for (const [field, values] of [
+    ["images", input.images],
+    ["enable", input.enable],
+    ["disable", input.disable],
+  ] as const) {
+    if (!values) continue;
+    sanitizeCliArgValues(values, field);
+    for (const [index, value] of values.entries()) {
+      assertCliArgUtf8Size(value, { provider: "codex", inputName: `${field}[${index}]` });
+    }
+  }
+
+  const missingImagePath = options.deferFilesystem ? null : findMissingImagePath(input.images);
   if (missingImagePath) {
     return { args: [], cleanup: () => {}, missingImagePath };
   }
@@ -1194,7 +1403,10 @@ export function prepareCodexHighImpactFlags(
   const args: string[] = [];
   let cleanup: () => void = () => {};
 
-  const schema = prepareCodexOutputSchema(input.outputSchema);
+  const schema =
+    options.deferFilesystem && typeof input.outputSchema === "object"
+      ? { path: plannedCodexOutputSchemaPath(), cleanup: () => {} }
+      : prepareCodexOutputSchema(input.outputSchema);
   if (schema) {
     args.push("--output-schema", schema.path);
     cleanup = schema.cleanup;
@@ -1212,7 +1424,7 @@ export function prepareCodexHighImpactFlags(
     args.push("--profile", input.profile);
   }
 
-  args.push(...emitCodexConfigOverrideArgs(input.configOverrides));
+  args.push(...configOverrideArgs);
 
   if (input.ephemeral) {
     args.push("--ephemeral");
@@ -1250,6 +1462,9 @@ export function prepareCodexHighImpactFlags(
     cleanup,
     missingImagePath: null,
     warning: warnings.length > 0 ? warnings.join(" ") : undefined,
+    filesystemDeferred:
+      options.deferFilesystem === true &&
+      (typeof input.outputSchema === "object" || (input.images?.length ?? 0) > 0),
   };
 }
 
@@ -1280,12 +1495,17 @@ export function prepareCodexForkRequest(input: CodexForkRequestInput): {
     throw new Error("codex_fork_session: one of sessionId or forkLast is required");
   }
 
+  // The installed contract verifies stdin for `codex exec` and `exec resume`,
+  // not for the distinct `codex fork` subcommand. Keep fork on argv and fail
+  // before spawn when its final positional prompt cannot fit.
+  assertCliArgUtf8Size(prompt, { provider: "codex fork", inputName: "prompt" });
+
   if (forkLast) {
-    return { args: ["fork", "--last", prompt] };
+    return { args: ["fork", "--last", "--", prompt] };
   }
   // sessionId path
-  validateSessionId(sessionId as string);
-  return { args: ["fork", sessionId as string, prompt] };
+  validateSessionId(sessionId as string, "codex fork");
+  return { args: ["fork", sessionId as string, "--", prompt] };
 }
 
 //──────────────────────────────────────────────────────────────────────────────
@@ -1293,48 +1513,13 @@ export function prepareCodexForkRequest(input: CodexForkRequestInput): {
 //──────────────────────────────────────────────────────────────────────────────
 
 /**
- * Prepend `@<abs-path>` tokens to a Gemini prompt so the CLI's attachment
- * resolver picks them up. Each path MUST be absolute and exist on disk.
- *
- * Returns the mutated prompt. Throws on validation failure so the caller can
- * convert to a `createErrorResponse`.
- */
-export function prependGeminiAttachments(prompt: string, attachments: string[]): string {
-  if (!attachments || attachments.length === 0) return prompt;
-  for (const p of attachments) {
-    if (!isAbsolute(p)) {
-      throw new Error(`attachments: path is not absolute: ${p}`);
-    }
-    if (!existsSync(p)) {
-      throw new Error(`attachments: path does not exist: ${p}`);
-    }
-    validateGeminiAttachmentTokenPath(p);
-  }
-  const tokens = attachments.map(p => `@${p}`).join(" ");
-  // Gemini attachments are prompt-level @path tokens rather than shell
-  // commands. Paths are absolute, existing, and token-safe before this join.
-  //
-  // codeql[js/shell-command-constructed-from-input]
-  return `${tokens} ${prompt}`;
-}
-
-function validateGeminiAttachmentTokenPath(path: string): void {
-  for (const ch of path) {
-    if (ch === "@" || ch <= " ") {
-      throw new Error(
-        `attachments: path cannot be represented as a Gemini @path token without escaping: ${path}`
-      );
-    }
-  }
-}
-
-/**
  * Zod schema for the U27 Gemini high-impact feature subset. Used by the
  * `gemini_request` / `gemini_request_async` tool schemas to validate the new
  * params before they reach `prepareGeminiRequest`.
  *
- * `attachments` paths are validated to be absolute at the Zod layer; existence
- * is enforced at execution time via `prependGeminiAttachments`.
+ * `attachments` paths remain absolute at the schema boundary for compatibility,
+ * then the Antigravity request path rejects non-empty attachment input because
+ * agy has no supported attachment-token contract.
  */
 export const GEMINI_HIGH_IMPACT_PARAMS_SCHEMA = z.object({
   sandbox: z.boolean().optional(),
@@ -1348,68 +1533,6 @@ export const GEMINI_HIGH_IMPACT_PARAMS_SCHEMA = z.object({
     )
     .optional(),
 });
-
-export interface GeminiHighImpactFlagsInput {
-  sandbox?: boolean;
-  policyFiles?: string[];
-  adminPolicyFiles?: string[];
-}
-
-export interface GeminiHighImpactFlagsResult {
-  args: string[];
-  /** First missing policy path, if any. When set, the caller should bail. */
-  missingPolicyPath: string | null;
-  /** Which field the missing path came from (for actionable error messages). */
-  missingPolicyField: "policyFiles" | "adminPolicyFiles" | null;
-}
-
-/**
- * Emit Gemini U27 high-impact flags. Policy paths are existence-checked here
- * so a missing file fails fast with an actionable error rather than producing
- * an opaque CLI exit.
- *
- * Does NOT handle `attachments` — those are mutated into the prompt string
- * via {@link prependGeminiAttachments} BEFORE the `-p <prompt>` pair is
- * emitted, preserving the U21 `-p` ordering invariant.
- */
-export function prepareGeminiHighImpactFlags(
-  input: GeminiHighImpactFlagsInput
-): GeminiHighImpactFlagsResult {
-  if (input.policyFiles) {
-    for (const p of input.policyFiles) {
-      if (!existsSync(p)) {
-        return { args: [], missingPolicyPath: p, missingPolicyField: "policyFiles" };
-      }
-    }
-  }
-  if (input.adminPolicyFiles) {
-    for (const p of input.adminPolicyFiles) {
-      if (!existsSync(p)) {
-        return {
-          args: [],
-          missingPolicyPath: p,
-          missingPolicyField: "adminPolicyFiles",
-        };
-      }
-    }
-  }
-
-  const args: string[] = [];
-  if (input.sandbox) {
-    args.push("-s");
-  }
-  if (input.policyFiles) {
-    for (const p of input.policyFiles) {
-      args.push("--policy", p);
-    }
-  }
-  if (input.adminPolicyFiles) {
-    for (const p of input.adminPolicyFiles) {
-      args.push("--admin-policy", p);
-    }
-  }
-  return { args, missingPolicyPath: null, missingPolicyField: null };
-}
 
 /**
  * Result of resolving Gemini's session strategy.
@@ -1433,7 +1556,7 @@ export function resolveGeminiSessionPlan(opts: {
   createNewSession?: boolean;
 }): GeminiSessionPlan {
   if (opts.sessionId && !opts.createNewSession) {
-    validateSessionId(opts.sessionId);
+    validateSessionId(opts.sessionId, "gemini");
     return {
       args: ["--conversation", opts.sessionId],
       resumed: true,

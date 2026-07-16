@@ -1,271 +1,203 @@
 ---
 name: session-workflow
-description: Manage conversation sessions across Claude, Codex, Gemini, Grok, and Mistral. Use for multi-turn conversations, session switching, workspace management. Covers the `session_get.cacheState` projection, cache-aware `promptParts`, and `cache-state://` MCP resources.
+description: Manage gateway bookkeeping and provider-native conversation continuity across Claude, Codex, Gemini, Grok, Mistral, Devin, and Cursor. Use for multi-turn work, session inspection, and safe resume decisions.
 metadata:
   author: verivus-oss
-  version: "1.6"
+  version: "1.8"
 ---
 
 # Session Workflow
 
-Sessions track conversation context across requests. One active session per CLI.
+Separate gateway bookkeeping from native provider continuity. `session_create`,
+`session_list`, `session_set_active`, and `session_get` manage gateway metadata;
+they do not create or prove a provider-native conversation. Never pass a
+gateway-generated ID to a provider as though it were a native handle.
 
-## Dispatch Defaults
+For a review session, dispatch requests through the local stdio gateway MCP
+surface. A session does not authorize a direct provider CLI, connector/shadow
+gateway, or shell fallback.
 
-Apply these on every dispatch unless the caller has explicitly overridden a rule in the current turn:
+## Discover before resuming
 
-1. **Omit `model`** — let the gateway use its configured default per CLI.
-2. **`approvalStrategy:"mcp_managed"`** is the skill dispatch default (the gateway schema default is `"legacy"`). For Codex, also pass `fullAuto:true` when the task needs file/shell access.
-3. **No wallclock timeout; poll every 60 s** — `idleTimeoutMs` is a separate no-output safeguard.
-4. **Iterate until unconditional APPROVED** (review dispatches only) — every review prompt must end with "End with APPROVED or NOT APPROVED with findings." Loop: dispatch review → poll if deferred → parse verdict → on `NOT APPROVED` or conditional approval, dispatch fixes + re-review → repeat. Escalate after 3 rounds. This rule does **not** apply to pure implementation or non-review analysis dispatches. Sessions make the loop cheap (Claude and Gemini preserve conversation continuity).
+Before using a provider-specific session field, query:
 
-## Key Concepts
-
-- **Active session** — default when no `sessionId` specified
-- **Session ID** — string identifier (UUID or arbitrary)
-- **`gw-*` prefix** — gateway-generated Gemini bookkeeping IDs; rejected if passed back to Gemini as `sessionId`
-- **`resumable`** — Gemini response field: `true`=user-provided ID, `false`=gateway `gw-*` ID
-- **Session TTL** — 30 days inactivity (configurable: `SESSION_TTL` env var, seconds)
-- Stores metadata only (id, cli, timestamps, description) — not conversation content
-
-## Session Continuity Per CLI
-
-| CLI | Effect | Mechanism |
-|-----|--------|-----------|
-| **Claude** | Real continuity | `--session-id` or `--continue` to CLI |
-| **Codex** | Real continuity | `codex exec resume <UUID>` (`sessionId`) or `codex exec resume --last` (`resumeLatest:true`). `sessionId` must be a real Codex UUID from `~/.codex/sessions/`; gateway-generated `gw-*` IDs are rejected. `--full-auto` silently dropped on resume (approval policy inherits from the original session) |
-| **Gemini** | Real continuity | `--resume` to CLI |
-| **Grok** | Real continuity | `--resume` / `--continue` to CLI |
-| **Mistral** | Real continuity | `--resume` / `--continue` to CLI; current Vibe defaults session logging on, and doctor flags explicit `[session_logging] enabled = false` |
-
-All four CLIs now carry true multi-turn continuity. For Codex, you must either pass `resumeLatest:true` or supply a real Codex session UUID — the gateway no longer treats Codex sessions as bookkeeping-only.
-
-## Creating Sessions
-
-### Explicit
-
-```
-session_create({cli:"claude",description:"Refactoring auth module",setAsActive:true})
+```text
+provider_tool_capabilities({cli:"claude"})
+provider_tool_capabilities({cli:"codex"})
+provider_tool_capabilities({cli:"gemini"})
+provider_tool_capabilities({cli:"grok"})
+provider_tool_capabilities({cli:"mistral"})
+provider_tool_capabilities({cli:"devin"})
+provider_tool_capabilities({cli:"cursor"})
 ```
 
-Returns: `{success:true,session:{id,cli,description,createdAt,isActive}}`
+Use a native `sessionId` only when it came from that provider or was supplied by
+the caller as a verified native handle. A fresh gateway session often uses a
+`gw-*` bookkeeping ID. It is not resumable for Codex, Grok, Mistral, Devin, or
+Cursor, and must never be replayed to Gemini either.
 
-### Via request
+## Native continuity matrix
 
-```
-claude_request({prompt:"...",createNewSession:true,approvalStrategy:"mcp_managed"})
-```
+| Provider | Native resume                                                                                                                 | Important boundary                                                                                                                                                                      |
+| -------- | ----------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Claude   | `sessionId` maps to `--session-id`; continuation maps to `--continue`.                                                        | Managed native continuation is a high-risk posture input requiring an approval decision and `LLM_GATEWAY_APPROVAL_ALLOW_BYPASS=1`.                                                      |
+| Codex    | Real Codex UUID maps to `codex exec resume <UUID>`; `resumeLatest:true` selects the globally latest session through `--last`. | The selected session inherits its original cwd; `workingDir` cannot target `--last`. Use a real UUID for a specific Codex session. Resume drops sandbox settings, including `fullAuto`. |
+| Gemini   | A caller-owned Antigravity conversation ID maps to `--conversation`; `resumeLatest:true` maps to `--continue`.                | Fresh launches do not produce a reusable native ID. Check `resumable:true`; never replay `gw-*`.                                                                                        |
+| Grok     | Native ID maps to `--resume`; `resumeLatest:true` maps to `--continue`.                                                       | A fresh `gw-*` ID is bookkeeping only. Cwd affects `--continue` context.                                                                                                                |
+| Mistral  | Native ID maps to `--resume`; `resumeLatest:true` maps to `--continue`.                                                       | A fresh `gw-*` ID is bookkeeping only. Vibe session logging defaults on; `doctor --json` flags only explicit `[session_logging] enabled = false`.                                       |
+| Devin    | Native ID maps to `--resume`; `resumeLatest:true` maps to `--continue`.                                                       | A fresh `gw-*` ID is bookkeeping only. Use `workingDir` or `workspace` to bind the selected cwd.                                                                                        |
+| Cursor   | Native chat/session ID maps to `--resume`; `resumeLatest:true` maps to `--continue`.                                          | A fresh `gw-*` ID is bookkeeping only. Use a verified `workspace` for its checkout.                                                                                                     |
 
-### Implicit active session
+All non-Claude providers use `approvalStrategy:"legacy"`; they reject
+Claude-only `mcp_managed` and ignore `approvalPolicy`. `mcp_managed` is usable
+only with Claude and its request-scoped gateway-owned MCP configuration.
 
-- **Claude** — auto-continues active session via `--continue`
-- **Codex** — no auto-lookup; pass `resumeLatest:true` (→ `codex exec resume --last`) or `sessionId:<UUID>` (→ `codex exec resume <UUID>`) explicitly
-- **Gemini** — no auto-lookup; use `sessionId` or `resumeLatest:true` explicitly
-- **Grok** — pass `sessionId` (or `resumeLatest:true`) to resume via `--resume`/`--continue`
+## Explicit full-access review sessions
 
-```
-claude_request({prompt:"Continue where we left off",approvalStrategy:"mcp_managed"})           // auto-continues
-codex_request({prompt:"Continue",resumeLatest:true,fullAuto:true,approvalStrategy:"mcp_managed"}) // codex exec resume --last
-gemini_request({prompt:"Continue analysis",resumeLatest:true,approvalStrategy:"mcp_managed"}) // explicit resume
-grok_request({prompt:"Continue",sessionId:"my-grok-session",approvalStrategy:"mcp_managed"})  // explicit resume
-```
+When a user explicitly authorizes full provider permissions and native MCP
+access for review, follow `multi-llm-review`'s full-access protocol instead of
+the safe examples below. Build and launch a fresh target-checkout stdio gateway
+with `node dist/index.js --transport=stdio`; do not use a globally installed
+gateway whose revision is unknown. Reapply the provider-native full-access
+mapping on every new job and verify it through the live capability surface.
 
-## Multi-Turn Patterns
+Do not rely on continuity for the grant. In particular, Codex resume inherits
+its old sandbox and cannot take a new one, so a full-access Codex review needs
+a fresh native session. Keep ambient provider MCP configuration available, do
+not turn request tool/MCP lists into an asserted allowlist, and record the
+exact base, diff or changed-file list, verification report, and durable job
+evidence with every review iteration. If the user requests 90-second progress
+checks, do not poll earlier than that cadence.
 
-### Claude (real continuity)
+## Gateway bookkeeping sessions
 
-```
-claude_request({prompt:"Implement rate limiter in src/rate-limiter.ts",createNewSession:true,approvalStrategy:"mcp_managed"})
-// Save returned sessionId
+Create a gateway record when you need description, active-pointer, cache
+projection, or local workflow organization:
 
-claude_request({prompt:"Add unit tests for rate limiter",sessionId:"[saved id]",approvalStrategy:"mcp_managed"})
-```
-
-### Codex (real continuity via `codex exec resume`)
-
-Pass `resumeLatest:true` to continue the most recent Codex session in cwd, or `sessionId:<UUID>` to target a specific session (UUID visible in `~/.codex/sessions/` or via `codex resume`):
-
-```
-codex_request({prompt:"Implement rate limiter with sliding window",fullAuto:true,approvalStrategy:"mcp_managed"})
-// Subsequent turn — resume the same Codex session:
-codex_request({prompt:"Add tests: basic limiting, burst traffic, window expiry.",resumeLatest:true,approvalStrategy:"mcp_managed"})
-// Or target a known UUID:
-codex_request({prompt:"Now add metrics.",sessionId:"7f9f9a2e-1b3c-4c7a-9b0e-deadbeefcafe",approvalStrategy:"mcp_managed"})
-```
-
-Note: `fullAuto:true` is silently dropped on resume — the original session's approval policy is inherited. If you need a fresh approval posture, pass `createNewSession:true` and re-state the context.
-
-### Gemini (resumable)
-
-```
-gemini_request({prompt:"Continue analysis",resumeLatest:true,approvalStrategy:"mcp_managed"})
-gemini_request({prompt:"Continue",sessionId:"latest",approvalStrategy:"mcp_managed"})
-gemini_request_async({prompt:"Deep analysis...",sessionId:"my-gemini-session",approvalStrategy:"mcp_managed"})
-// Response: resumable:true
+```text
+session_create({cli:"claude",description:"Refactor auth module",setAsActive:true})
+session_list({cli:"claude"})
+session_get({sessionId:"<gateway-session-id>"})
+session_set_active({cli:"claude",sessionId:"<gateway-session-id>"})
 ```
 
-### Grok (real continuity)
+Treat the returned ID as gateway metadata. Pair it with a separately verified
+native handle if you want provider continuation. Do not assume an active gateway
+session causes Codex, Gemini, Grok, Mistral, Devin, or Cursor to resume a
+provider conversation.
 
-Grok carries real CLI continuity via `--resume` / `--continue`. Auth must already be set up (`grok login` OAuth, or `GROK_CODE_XAI_API_KEY`):
+## Safe request examples
 
-```
-grok_request({prompt:"Implement rate limiter in src/rate-limiter.ts",createNewSession:true,approvalStrategy:"mcp_managed"})
-// Save returned sessionId
+Gateway tool calls:
 
-grok_request({prompt:"Add unit tests for the rate limiter",sessionId:"[saved id]",approvalStrategy:"mcp_managed"})
-```
+```text
+claude_request({
+  prompt:"Continue the approved task.",
+  sessionId:"<verified-claude-id>",
+  approvalStrategy:"legacy"
+})
 
-## Switching Sessions
+codex_request({
+  prompt:"Continue the approved task.",
+  resumeLatest:true,
+  approvalStrategy:"legacy"
+})
 
-```
-session_list()                                    // all sessions
-session_list({cli:"claude"})                      // filter by CLI
-session_set_active({cli:"claude",sessionId:"..."}) // switch active
-session_set_active({cli:"claude",sessionId:null})  // clear active
-```
+gemini_request({
+  prompt:"Continue the approved task.",
+  sessionId:"<caller-owned-antigravity-conversation>",
+  workspace:"<registered-repo>",
+  approvalStrategy:"legacy"
+})
 
-## Parallel Workflows
-
-Separate sessions for independent workstreams:
-
-```
-session_create({cli:"claude",description:"Feature: user auth"})   // → authSessionId
-session_create({cli:"claude",description:"Bugfix: rate limit"})   // → bugfixSessionId
-
-claude_request({prompt:"...",sessionId:authSessionId,approvalStrategy:"mcp_managed"})    // auth context
-claude_request({prompt:"...",sessionId:bugfixSessionId,approvalStrategy:"mcp_managed"})  // bugfix context
-```
-
-## Session TTL
-
-Default: 30 days. Expired sessions silently evicted on next operation.
-
-```bash
-SESSION_TTL=604800  # 7 days
-SESSION_TTL=7776000 # 90 days
+grok_request({prompt:"Continue.",resumeLatest:true,workingDir:"<repo>",approvalStrategy:"legacy"})
+mistral_request({prompt:"Continue.",resumeLatest:true,workingDir:"<repo>",approvalStrategy:"legacy"})
+devin_request({prompt:"Continue.",resumeLatest:true,workingDir:"<repo>",approvalStrategy:"legacy"})
+cursor_request({prompt:"Continue.",resumeLatest:true,workspace:"<repo>",approvalStrategy:"legacy"})
 ```
 
-- Based on `lastUsedAt`, not `createdAt`
-- Active sessions stay alive with use
-- If active session expires, active pointer cleared
-- File-based and PostgreSQL backends both enforce TTL
+Codex `resumeLatest` is global, not cwd-scoped. It inherits the selected
+session's original cwd. To target a specific native session, pass its verified
+real Codex UUID as `sessionId`; `workingDir` cannot select that session.
 
-## Gateway Prefix (`gw-`)
+For Codex, start source inspection with `sandboxMode:"read-only"`; use
+`workspace-write` only if the work needs write-producing commands. Do not use
+new `fullAuto:true` examples. On a Codex resume, sandbox selection is not
+emitted, so start a fresh native session if you must alter it.
 
-Gemini requests without explicit `sessionId` → gateway generates `gw-*` ID.
+## Target and concurrency discipline
 
-Passing `gw-*` as `sessionId` → rejected:
-> Session ID "gw-..." uses reserved prefix "gw-".
+Native session state is contextual. Verify the repository/workspace and cwd
+before every resume, especially when multiple workstations or repositories run
+simultaneously:
 
-Check `resumable` field: `true`=safe to reuse, `false`=gateway-generated.
+- Use explicit `workingDir` for Claude, Grok, Mistral, and Devin.
+- Use `workingDir` for a fresh Codex session. It does not scope Codex
+  `resumeLatest`; use a verified real Codex UUID to target a specific session.
+- Gemini has no `workingDir`; `includeDirs` does not select cwd. Use a verified
+  configured/registered target workspace.
+- Use Cursor `workspace` for its target checkout.
+
+For providers whose latest-session selection is cwd-scoped, an unscoped local
+CLI child runs in a fresh neutral temporary directory, not the gateway
+repository. Their cwd-scoped `resumeLatest` therefore fails closed unless
+`workingDir`, `workspace`, or a configured default workspace supplies a stable
+target. Codex is the exception: `resumeLatest` selects its globally latest
+session and inherits that session's original cwd.
+
+The gateway's cache/session metadata does not prove that a provider resumed the
+intended repository. Record the native handle, selected target, provider, and
+commit/diff evidence together.
+
+## Cache-aware turns
+
+Claude, Codex, Gemini, Grok, and Mistral accept either `prompt` or structured
+`promptParts`. Devin and Cursor accept only flat `prompt`. Keep the stable
+system/tools/context prefix byte-identical only where `promptParts` is
+supported, and retain a canonical flat equivalent for the other two providers.
+
+```text
+claude_request({
+  promptParts:{system:"<stable>",context:"<stable spec>",task:"Follow-up task"},
+  sessionId:"<verified-claude-id>",
+  approvalStrategy:"legacy"
+})
+```
+
+`prompt` and `promptParts` are mutually exclusive. `cache-state://global`,
+`cache-state://session/{sessionId}`, and `cache-state://prefix/{hash}` contain
+token/hash aggregates, not prompt/response text. A shared prefix hash is not
+evidence that every provider hit an equivalent cache.
+
+## Async and review continuity
+
+When async tools are registered, a sync call may return a deferred job. Poll
+with `llm_job_status` and read `llm_job_result` once terminal. SQLite/PostgreSQL
+job results survive restarts; acknowledged memory is ephemeral; backend `none`
+does not register async/job tools.
+
+Do not impose a review deadline or arbitrary review round count because a
+session is involved. A mandatory review remains incomplete until every required
+reviewer returns an evidence-backed unconditional approval. A provider failure
+must be repaired/retried or reported `INCOMPLETE`/`BLOCKED`, never skipped.
+
+## Personal Agent Config Kit
+
+Kit mode is local-only, supports only Claude/Codex, requires healthy
+SQLite/PostgreSQL durable admission, and retires native continuation after a
+gateway restart. It disables validation and least-cost routing. Use
+`explain_effective_config` before consequential Kit work. If effective Kit caps
+constrain an exhaustive review, do not claim an unconditional/complete review
+without an approved uncapped profile or explicit user direction.
+
+`explain_effective_config({workingDir:"<repo>"})` can inspect a candidate Kit
+scope. Do not pass that `workingDir` to a Claude Kit request: Kit rejects it
+before compiling context. Select a Claude Kit target through an already
+configured registered `workspace` alias or the configured default workspace. It
+never inherits the gateway process cwd.
 
 ## Cleanup
 
-```
-session_delete({sessionId:"..."})   // single
-session_clear_all({cli:"codex"})    // per CLI
-session_clear_all()                 // everything
-```
-
-## Inspect
-
-```
-session_get({sessionId:"..."})
-```
-
-Returns: timestamps, description, CLI type, active status.
-
-When the session has prior requests in the flight recorder, the response also includes a compact `cacheState` block (omitted entirely for fresh sessions — not null, not empty object):
-
-```json
-{
-  "cacheState": {
-    "cli": "claude",
-    "prefixDistinct": 3,
-    "totalCacheReadTokens": 14210,
-    "totalCacheCreationTokens": 8420,
-    "requestCount": 7,
-    "hitCount": 5,
-    "hitRate": 0.714,
-    "estimatedSavingsUsd": 0.0184,
-    "ttlRemainingMs": 142000
-  }
-}
-```
-
-`ttlRemainingMs` is non-null only for Claude sessions and reflects the configured `[cache_awareness] anthropic_ttl_seconds` (default 300 = 5 min, or 3600 = 1 h). Use it to decide whether the next turn will hit a warm cache or pay full cache-creation cost. No prompt/response text is stored or returned — only tokens, hashes, and aggregates.
-
-## Cache-Aware Prompts and Cache Observability
-
-Sessions and cache awareness compose. The structured `promptParts` field (mutually exclusive with `prompt`) lets you keep `system` / `tools` / `context` byte-identical across turns of a session while only the `task` mutates:
-
-```
-claude_request({
-  promptParts: {
-    system: "<stable system instruction>",
-    context: "<file dump or spec — same as last turn>",
-    task: "Now add metrics."
-  },
-  sessionId: savedSessionId,
-  approvalStrategy: "mcp_managed"
-})
-```
-
-The gateway hashes the stable prefix and writes it to the flight recorder so per-session and per-prefix cache effectiveness is queryable via MCP resources:
-
-- `cache-state://global` — last-24h aggregate hit rate, total hits, estimated savings, with per-CLI breakdown
-- `cache-state://session/{sessionId}` — per-session aggregates (same shape as `session_get.cacheState`)
-- `cache-state://prefix/{hash}` — per-stable-prefix-hash aggregates with CLI × model breakdown
-
-### Provider-specific cache direction examples
-
-**Claude (explicit cacheControl)**
-
-```
-claude_request({
-  promptParts: {
-    system: "<stable>",
-    context: "<large stable context>",
-    task: "Now add metrics.",
-    cacheControl: { system: true, context: true }
-  },
-  outputFormat: "stream-json",
-  sessionId: savedSessionId
-})
-```
-
-**Grok (compaction)**
-
-```
-grok_request({
-  promptParts: { system: "<stable>", context: "...", task: "..." },
-  compactionMode: "segments",
-  compactionDetail: "balanced",
-  sessionId: savedSessionId
-})
-```
-
-See `docs/personal-mcp/PROVIDER_CACHE_SURFACES.md` for exact stream-json payload shape, telemetry differences, and the full matrix. Prefix discipline (`promptParts` without cacheControl) works for all CLIs.
-
-### TTL warning (Claude, opt-in)
-
-With `[cache_awareness] warn_on_ttl_expiry = true` in `~/.llm-cli-gateway/config.toml`, a resumed Claude turn whose prior `lastRequestAt` is within 30 s of the cache TTL returns:
-
-```json
-{ "warnings": [{ "code": "cache_ttl_expiring_soon", "ttlRemainingMs": 12000, "message": "..." }] }
-```
-
-That is a hint that the next turn will likely cold-miss; coalesce or accept the cost.
-
-## Tips
-
-- Descriptive names: "Refactoring auth module" > "Session 1"
-- Use `createNewSession:true` for quick one-offs
-- Clean up completed workflow sessions
-- Each CLI tracks active session independently
-- For Codex: real `codex exec resume <UUID>` / `--last` continuity. The gateway-tracked session ID is independent of the Codex CLI's session UUID — for resume, supply a real Codex UUID or use `resumeLatest:true`. `--full-auto` is dropped on resume (approval policy inherits from the original session)
-- For Grok: real `--resume`/`--continue` continuity, same model as Claude — but auth must be set up first (`grok login` or `GROK_CODE_XAI_API_KEY`)
-- Expired sessions (past TTL) silently evicted
-- Never pass Gemini `gw-*` IDs as `sessionId` — use own IDs for resumable Gemini workflows
-- Check Gemini's `resumable` field to know if that session can continue
-- Sync tools may auto-defer at 45s — deferred response preserves `sessionId`. Deferred jobs and their results are now durable (default 30-day retention via `LLM_GATEWAY_JOB_RETENTION_DAYS`), so a session that auto-defers can be picked up across gateway restarts
+Use `session_delete({sessionId:"..."})` for an obsolete bookkeeping record and
+`session_clear_all({cli:"..."})` only when the caller wants to clear that
+gateway metadata. Neither command deletes a provider-native conversation.

@@ -58,9 +58,10 @@ describe("upstream contract upgrade regressions", () => {
 
     expect(prep.args).toEqual([
       "-p",
-      "make the requested edit",
       "--permission-mode",
       "accept-edits",
+      "--",
+      "make the requested edit",
     ]);
     expect(validateUpstreamCliArgs("devin", prep.args).ok).toBe(true);
     expect(
@@ -109,6 +110,29 @@ describe("upstream contract upgrade regressions", () => {
       expect(permissionMode?.safeParse("manual").success).toBe(true);
     }
   );
+
+  it.each([
+    ["claude", "--system-prompt"],
+    ["claude", "--append-system-prompt"],
+    ["grok", "--rules"],
+    ["grok", "--system-prompt-override"],
+  ] as const)("accepts leading-hyphen free text for %s %s without exposing it", (cli, flag) => {
+    const privateText = "--private-review-instruction";
+    const prefix = cli === "claude" ? ["-p", "hello"] : ["-p", "hello"];
+    const result = validateUpstreamCliArgs(cli, [...prefix, flag, privateText]);
+
+    expect(result.ok, JSON.stringify(result.violations)).toBe(true);
+    expect(JSON.stringify(result)).not.toContain(privateText);
+  });
+
+  it("keeps leading-hyphen values closed for non-free-text flags", () => {
+    const result = validateUpstreamCliArgs("claude", ["-p", "hello", "--model", "--secret"]);
+
+    expect(result.ok).toBe(false);
+    expect(result.violations[0]?.arg).toBe("--model");
+    expect(result.violations[0]?.message).not.toContain("--secret");
+    expect(JSON.stringify(result)).not.toContain("--secret");
+  });
 
   it("tracks Antigravity agent selection without exposing it through request argv", () => {
     const contract = UPSTREAM_CLI_CONTRACTS.gemini;

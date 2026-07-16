@@ -23,8 +23,6 @@
  * account ids, or any raw JSON-RPC body.
  */
 
-import { tmpdir } from "node:os";
-
 import type { HostServices } from "./client.js";
 import { AcpError } from "./errors.js";
 import { AcpProcessManager, type AcpSpawnFn, type ProcessEnv } from "./process-manager.js";
@@ -32,6 +30,7 @@ import { getAcpProviderEntry, providerHasNativeAcp } from "./provider-registry.j
 import type { AcpConfig } from "../config.js";
 import type { Logger } from "../logger.js";
 import { noopLogger } from "../logger.js";
+import { createNeutralExecutionWorkspace } from "../neutral-workspace.js";
 import type { CliType } from "../session-manager.js";
 
 /**
@@ -77,7 +76,8 @@ export interface AcpSmokeOptions {
   readonly baseEnv?: ProcessEnv;
   /**
    * Working directory for the smoke `session/new`. MUST be a gateway-controlled
-   * directory. Defaults to a per-provider subdir of the OS temp dir.
+   * directory. When omitted, the harness creates a fresh private neutral
+   * directory and removes it after the smoke process is terminated.
    */
   readonly cwd?: string;
   /** Injectable clock (ms) for deterministic durations in tests. Defaults to `Date.now`. */
@@ -123,9 +123,12 @@ export async function runAcpSmoke(
     spawn: options.spawn,
     baseEnv: options.baseEnv,
   });
-  const cwd = options.cwd ?? `${tmpdir()}/llm-gateway-acp-smoke-${provider}`;
+  let neutralWorkspace: ReturnType<typeof createNeutralExecutionWorkspace> | undefined;
 
   try {
+    neutralWorkspace = options.cwd ? undefined : createNeutralExecutionWorkspace();
+    const cwd = options.cwd ?? neutralWorkspace?.cwd;
+    if (!cwd) throw new Error("ACP smoke cwd resolution failed");
     // start() spawns and runs `initialize` with the read-only posture (no
     // capabilities advertised). The empty host services deny every callback.
     const proc = await manager.start({ provider, cwd, hostServices: SMOKE_HOST_SERVICES });
@@ -169,6 +172,7 @@ export async function runAcpSmoke(
   } finally {
     // Defensive: tear down anything still tracked by this single-use manager.
     manager.shutdownAll("SIGKILL");
+    neutralWorkspace?.cleanup();
   }
 }
 

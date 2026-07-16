@@ -7,6 +7,7 @@
  * captured (never thrown), and that the result leaks no session id / temp path.
  */
 import { EventEmitter } from "node:events";
+import { existsSync } from "node:fs";
 import { PassThrough } from "node:stream";
 
 import { describe, expect, it } from "vitest";
@@ -142,6 +143,16 @@ describe("ACP smoke harness — runAcpSmoke", () => {
     const { spawn } = spawnReturning(agent);
     await runAcpSmoke("mistral", { config: makeConfig(), spawn });
     expect(agent.killed.length).toBeGreaterThan(0);
+  });
+
+  it("uses a private neutral cwd for an unscoped smoke and removes it", async () => {
+    const agent = new FakeAgent().autoInitialize().autoSessionNew("sess-1");
+    const { spawn, resolved } = spawnReturning(agent);
+    await runAcpSmoke("mistral", { config: makeConfig(), spawn });
+
+    expect(resolved).toHaveLength(1);
+    expect(resolved[0].cwd).toMatch(/llm-cli-gateway-neutral-/);
+    expect(existsSync(resolved[0].cwd)).toBe(false);
   });
 
   it("never records the provider ACP session id or the cwd/temp path (redaction)", async () => {

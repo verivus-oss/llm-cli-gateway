@@ -77,7 +77,7 @@ describe("codex argv golden (Phase 4 Part A)", () => {
 
   it("emits the always-on baseline (--json, --skip-git-repo-check) and no Part A flags", () => {
     const args = argsFor({});
-    expect(args).toEqual(["exec", "--json", "--skip-git-repo-check", "hello codex"]);
+    expect(args).toEqual(["exec", "--json", "--skip-git-repo-check", "--", "-"]);
     // Guardrail: the danger flag is never silently defaulted on.
     expect(args).not.toContain("--dangerously-bypass-hook-trust");
     for (const flag of [
@@ -123,7 +123,8 @@ describe("codex argv golden (Phase 4 Part A)", () => {
       "feat_b",
       "--disable",
       "feat_c",
-      "hello codex",
+      "--",
+      "-",
     ]);
     expect(args).toMatchSnapshot();
 

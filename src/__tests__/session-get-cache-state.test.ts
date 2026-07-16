@@ -201,6 +201,7 @@ describe("session_get cacheState (slice 2)", () => {
         };
       };
       expect(resp.success).toBe(true);
+      expect(resp.session).not.toHaveProperty("generation");
       expect(resp.session.cacheState).toBeDefined();
       expect(resp.session.cacheState!.requestCount).toBe(2);
       expect(resp.session.cacheState!.hitRate).toBeCloseTo(0.5, 5);

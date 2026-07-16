@@ -88,8 +88,7 @@ export function prodFilter(lock) {
 
 // Script entrypoint: run only when this file is invoked directly (not imported).
 const invokedDirectly =
-  process.argv[1] !== undefined &&
-  resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+  process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 
 if (invokedDirectly) {
   const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));

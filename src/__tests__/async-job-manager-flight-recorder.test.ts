@@ -481,6 +481,55 @@ describe("AsyncJobManager + flight-recorder (slice 1.5)", () => {
       // durationMs derived from seeded startedAt
       expect(c1?.result.durationMs).toBeGreaterThanOrEqual(29000);
     });
+
+    it("does not replay raw legacy Kit output into the flight recorder during recovery", () => {
+      const fr = new CapturingFlightRecorder();
+      const startedAt = new Date(Date.now() - 30000).toISOString();
+      const privateOutput = "PRIVATE_LEGACY_KIT_ORPHAN_SENTINEL";
+      // A historical or partially upgraded row can still contain provider
+      // output even though modern Kit writes suppress it. Recovery must use
+      // the durable Kit marker, rather than trusting stdout/stderr to be safe.
+      const orphanRows = [
+        {
+          id: "legacy-kit-orphan",
+          correlationId: "corr-legacy-kit-orphan",
+          startedAt,
+          stdout: privateOutput,
+          stderr: `${privateOutput}-stderr`,
+          exitCode: 137,
+          transport: "process" as const,
+          httpStatus: null,
+          isPersonalConfigKit: true,
+        },
+      ];
+      const fakeStore = {
+        registerInstance: () => {},
+        heartbeat: () => {},
+        deregisterInstance: () => {},
+        gcInstances: () => 0,
+        selectStaleProcessCandidates: () => [],
+        recoverStaleJobs: () => orphanRows,
+        markRunning: () => {},
+        markOrphanedOnStartup: () => ({ count: orphanRows.length, orphaned: orphanRows }),
+        recordStart: () => {},
+        recordOutput: () => {},
+        recordComplete: () => {},
+        getById: () => null,
+        findByRequestKey: () => null,
+        evictExpired: () => 0,
+        close: () => {},
+      };
+
+      new AsyncJobManager(noopLogger, undefined, fakeStore as unknown as MemoryJobStore, fr);
+
+      const completion = fr.completes.find(
+        entry => entry.correlationId === "corr-legacy-kit-orphan"
+      );
+      expect(completion?.result.status).toBe("failed");
+      expect(completion?.result.response).toContain("output is withheld");
+      expect(completion?.result.errorMessage).toContain("detailed output is withheld");
+      expect(JSON.stringify(completion?.result)).not.toContain(privateOutput);
+    });
   });
 
   describe("retryability + closure clearing (cases j + k, Codex-F4 + F5)", () => {
@@ -695,5 +744,22 @@ describe("AsyncJobManager — provider sessionId + stopReason (phase 7)", () => 
     // the logComplete payload in writeFlightComplete.
     expect(c?.result.providerSessionId).toBe("grok-uuid-7777");
     expect(c?.result.stopReason).toBe("stop");
+  });
+
+  it("persists failed process metadata for remote persisted-result redaction", () => {
+    const fr = new CapturingFlightRecorder();
+    const manager = new AsyncJobManager(noopLogger, undefined, new MemoryJobStore(), fr);
+    const job = seedCompletedGrokJob(manager, "job-grok-failed");
+    job.status = "failed";
+    job.exitCode = 1;
+    (
+      manager as unknown as { writeFlightComplete(j: unknown, s: string): void }
+    ).writeFlightComplete(job, "failed");
+    const c = fr.completes.find(x => x.correlationId === "corr-grok-p7");
+    expect(c?.result.status).toBe("failed");
+    // Native continuation remains non-resumable to callers, but the private
+    // recorder must retain the known id so remote llm_request_result can scrub
+    // it without parsing response text.
+    expect(c?.result.providerSessionId).toBe("grok-uuid-7777");
   });
 });

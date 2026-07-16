@@ -1,179 +1,191 @@
 ---
 name: model-routing
-description: Choose the right LLM and model for each task based on proven patterns. Use when deciding whether to delegate to Claude, Codex, Gemini, Grok, or Mistral, or when selecting model variants. Mistral Vibe selects model via `VIBE_ACTIVE_MODEL` env var (no `--model` flag).
+description: Select and dispatch llm-cli-gateway providers by live capability, target access, and task requirements. Use when choosing among Claude, Codex, Gemini, Grok, Mistral, Devin, and Cursor, or when selecting an explicit model through the local stdio gateway.
 ---
 
 # Model Routing
 
-Choose the right LLM for each task. Based on real usage across 11+ VerivusAI projects.
+Choose providers from live gateway capability data, not a static claim that one
+model is universally best. Send every request, including reviews, through the
+local gtwy stdio MCP server. Do not invoke a provider CLI directly to bypass
+the gateway's request, session, and audit surfaces.
 
-## Dispatch Defaults
+## Discover Before Selecting
 
-Apply these on every dispatch unless the caller has explicitly overridden a rule in the current turn:
+1. Call provider_tool_capabilities through gtwy for current request surfaces,
+   transports, local configuration, and provider-owned tool availability.
+2. Call cli_versions when a provider behaves differently from its recorded
+   contract.
+3. Omit model unless the user explicitly named a model. If an explicit model is
+   needed, use list_models for the target provider first.
+4. Record why a provider is selected: task scope, required capabilities, target
+   repository access, and safety posture.
 
-1. **Omit `model`** — let the gateway use its configured default per CLI. Nominating a model risks deprecated IDs (`o3`, `o3-pro`, `gpt-4o`, …) and capability mismatches. Call `list_models` only when the caller has asked for a specific variant.
-2. **`approvalStrategy:"mcp_managed"`** is the skill dispatch default (the gateway schema default is `"legacy"`). It gates the request before execution, then sets each provider to a safe accept-edits-level mode (auto-accept file edits; Bash and other dangerous tools stay gated): Claude and Grok `--permission-mode acceptEdits`, Mistral `--agent accept-edits`, and Gemini prompted `default` (the `agy` CLI has no accept-edits rung, so Gemini cannot auto-approve mutating tools under `mcp_managed`). Codex still needs `fullAuto:true` for autonomous file/shell work (its sandboxed `workspace-write` mode is unchanged). Full unattended execution requires the operator opt-in `LLM_GATEWAY_APPROVAL_ALLOW_BYPASS=1`, which restores each provider's full auto-approve mode (Claude `bypassPermissions`, Grok `--always-approve`, Mistral `auto-approve`, Gemini `--dangerously-skip-permissions`).
-3. **No wallclock timeout; poll every 60 s** — `idleTimeoutMs` is a separate no-output safeguard.
-4. **Iterate until unconditional APPROVED** (review dispatches only) — every review prompt must end with "End with APPROVED or NOT APPROVED with findings." Loop: dispatch → parse verdict → on `NOT APPROVED` or conditional, fix + re-review → repeat. Escalate after 3 rounds. This rule does **not** apply to pure implementation or non-review analysis dispatches.
+The gateway's CLI provider roster is:
 
-## Decision Matrix
+| Provider | Gateway request surface                   | Selection notes                                                                                                                                    |
+| -------- | ----------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Claude   | claude_request and claude_request_async   | The only provider that can use mcp_managed.                                                                                                        |
+| Codex    | codex_request and codex_request_async     | Use current sandboxMode values, not fullAuto.                                                                                                      |
+| Gemini   | gemini_request and gemini_request_async   | Antigravity owns its native tool configuration and does not accept workingDir.                                                                     |
+| Grok     | grok_request and grok_request_async       | CLI request surface plus native ACP capability.                                                                                                    |
+| Mistral  | mistral_request and mistral_request_async | CLI request surface plus native ACP capability; explicit model selection is injected through VIBE_ACTIVE_MODEL because Vibe has no CLI model flag. |
+| Devin    | devin_request and devin_request_async     | CLI request surface plus native ACP capability; it accepts flat prompt, not promptParts.                                                           |
+| Cursor   | cursor_request and cursor_request_async   | CLI request surface plus native ACP capability; it accepts flat prompt, not promptParts.                                                           |
 
-All tool invocations below use the dispatch defaults above (omit `model`, `approvalStrategy:"mcp_managed"`, `fullAuto:true` for Codex, poll every 60 s, loop on reviews).
+The exact installed or usable set comes from provider_tool_capabilities. Do not
+turn an unavailable provider into a fictional successful review.
 
-| Task | Best LLM | Why | Tool |
-|------|----------|-----|------|
-| **Code implementation** | Codex | Strongest at writing correct code, handles large codebases | `codex_request` (`fullAuto:true`, `approvalStrategy:"mcp_managed"`) |
-| **Code review (quality)** | Codex | Thorough, finds real issues, gives actionable feedback | `codex_request` (`fullAuto:true`, `approvalStrategy:"mcp_managed"`) |
-| **Code review (security)** | Gemini | Strong security focus, OWASP awareness, edge case detection | `gemini_request` (`approvalStrategy:"mcp_managed"`) |
-| **Architecture review** | Claude | Best at high-level design, pattern recognition, trade-off analysis | `claude_request` (`approvalStrategy:"mcp_managed"`) |
-| **Design doc review** | Codex | Checks feasibility, completeness, finds gaps in plans | `codex_request` (`fullAuto:true`, `approvalStrategy:"mcp_managed"`) |
-| **Bug investigation** | Codex | Can read code, trace logic, identify root causes | `codex_request` (`fullAuto:true`, `approvalStrategy:"mcp_managed"`) |
-| **Refactoring** | Codex | Handles multi-file changes reliably | `codex_request` (`fullAuto:true`, `approvalStrategy:"mcp_managed"`) |
-| **Documentation** | Claude | Best prose quality, understands audience | `claude_request` (`approvalStrategy:"mcp_managed"`) |
-| **Test generation** | Codex | Understands test frameworks, generates comprehensive cases | `codex_request` (`fullAuto:true`, `approvalStrategy:"mcp_managed"`) |
-| **Security audit** | Gemini | Security-focused analysis, threat modeling | `gemini_request` (`approvalStrategy:"mcp_managed"`) |
-| **Multi-file analysis** | Codex | Handles large codebases with sqry integration | `codex_request` (`fullAuto:true`, `approvalStrategy:"mcp_managed"`) |
-| **Diversity / tie-breaker review** | Grok (xAI) | Independent fourth model from a different vendor family — useful when Claude/Codex/Gemini might share a blind spot | `grok_request` (`approvalStrategy:"mcp_managed"`) |
-| **Maximum diversity** | Mistral Vibe | Fifth independent vendor (EU / open-weights family); uncorrelated with OpenAI/Anthropic/Google/xAI | `mistral_request` (`approvalStrategy:"mcp_managed"`) |
-| **Consensus / unanimous gate** | All five in parallel | Catches issues any single model misses; use when correctness > cost | `*_request_async` for Claude/Codex/Gemini/Grok/Mistral |
+Configured API providers are discovered through `list_models` and their runtime
+capability data. They are not members of the canonical CLI roster: do not assume
+local workspace/worktree targeting or native ACP, and do not substitute one for
+a required source-inspecting CLI review without explicit scope approval.
 
-## Model Selection Rules
+If persistence.backend = "none", the async request and llm_job_* surfaces are
+not registered. Use the corresponding sync request for the same required
+provider roster; it runs to completion without auto-deferral.
 
-### Rule 1: Omit the model parameter by default
+## Approval and Sandbox Selection
 
-The gateway uses sensible configured defaults. Omitting `model` is almost always correct.
+- Claude alone can use approvalStrategy: "mcp_managed" and approvalPolicy.
+  Use it only with its generated strict allowlist and its configured approval
+  path.
+- Codex, Gemini, Grok, Mistral, Devin, and Cursor use
+  approvalStrategy: "legacy". Their approvalPolicy values have no effect and
+  mcp_managed is rejected before launch.
+- For Codex, use sandboxMode: "read-only" for inspection and
+  sandboxMode: "workspace-write" when an implementation or test must create
+  artifacts. fullAuto is a deprecated workspace-write shorthand.
+- ACP transport has its own configuration-gated permission bridge. Do not claim
+  mcp_managed or approvalPolicy applies to an ACP request.
+
+For a managed Claude request, custom tool selectors, expanded workspace,
+workingDir, native continuation, and other posture changes require a gateway
+approval decision and the operator bypass setting. Do not add them casually to
+a routing example.
+
+## Explicit user-authorized full-access review routing
+
+Do not use model routing, cheapest selection, or ordinary safe-review examples
+when a user explicitly requires full provider permissions and native MCP access.
+Follow `multi-llm-review`'s full-access protocol instead. Build the exact target
+checkout and launch `node dist/index.js --transport=stdio` there, rather than
+using a globally installed or stale gateway process. Apply the native
+full-access mapping to each fresh provider job, do not assume a resume retained
+it, and do not add tool/MCP allowlists, deny lists, or caller caps.
+
+The verification report is a corrective-program specification, not proof. Send
+it with the exact base, diff or exhaustive changed-file list including relevant
+untracked files, and durable evidence locations. Require independent inspection
+of code, docs, tests, commands, and available native MCP tools. Accept only
+`APPROVED_UNCONDITIONALLY`, `CHANGES_REQUIRED` with evidence, or a concrete
+`BLOCKED_EXTERNAL` result. On a user-required 90-second cadence, do not check
+job progress earlier than 90 seconds.
+
+## Route by Task Needs
+
+Use these as starting lenses, then verify the provider's live capability and
+the reviewer evidence:
+
+| Need                                         | Starting selection                                                                                 |
+| -------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| Local code inspection or implementation      | Codex with an appropriate sandbox mode, or another provider whose target access has been verified. |
+| Strict gateway-managed Claude tool isolation | Claude mcp_managed, only when its approval conditions are satisfied.                               |
+| Independent vendor-family review             | Add Grok, Mistral, Devin, or Cursor as a required reviewer when the review scope calls for it.     |
+| Native ACP integration                       | Grok, Mistral, Devin, or Cursor, after checking provider_tool_capabilities and ACP configuration.  |
+| Workspace-aware Cursor task                  | Cursor with workspace set to the intended local directory or registered alias.                     |
+| Cost-constrained non-review task             | Use route_request only when the user explicitly asks for cost-constrained model-agnostic routing.  |
+
+Do not use route_request, select: "cheapest", maxCostUsd, maxPrice,
+maxTokens, or any equivalent to reduce a mandatory review. route_request and
+route_request_async are not registered in Personal Agent Config Kit mode, even
+when `[least_cost].enabled = true`.
+
+## Repository Targeting
+
+Never let providers review different default repositories.
+
+| Provider                     | Correct local target method                                                                                                                |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| Claude, Codex, Grok, Mistral | Pass workingDir on a new session, or select a registered workspace explicitly or by configured default.                                    |
+| Gemini                       | No workingDir exists. includeDirs is auxiliary and does not select cwd. Select a registered workspace explicitly or by configured default. |
+| Devin                        | Pass workingDir on a new CLI session, or select a registered workspace explicitly or by configured default.                                |
+| Cursor                       | Set workspace to the local directory or registered alias.                                                                                  |
+
+Do not use workspace_* administration tools merely to repair a local stdio
+path. They are remote HTTP/OAuth administration surfaces.
+
+## Model and Prompt Selection
+
+Omit model by default:
 
 ```
-codex_request({prompt: "...", fullAuto: true, approvalStrategy: "mcp_managed"})
-gemini_request({prompt: "...", approvalStrategy: "mcp_managed"})
-claude_request({prompt: "...", approvalStrategy: "mcp_managed"})
-grok_request({prompt: "...", approvalStrategy: "mcp_managed"})
+codex_request({
+  prompt: "Inspect [path] and explain the defect.",
+  sandboxMode: "read-only",
+  approvalStrategy: "legacy"
+})
+
+mistral_request({
+  prompt: "Independently inspect [path].",
+  approvalStrategy: "legacy"
+})
 ```
 
-### Rule 2: Avoid stale hardcoded model IDs
+Only use an explicit model when the caller named it or live capability data
+requires it. For Mistral, the gateway maps the model input to VIBE_ACTIVE_MODEL
+rather than emitting a Vibe model flag.
 
-Treat old memory/config IDs such as `o3`, `o3-pro`, and `gpt-4o` as legacy unless `list_models` currently reports them for the target CLI.
-
-If you see stale IDs in old configs or memory, prefer the configured default or call `list_models`.
-
-### Rule 3: Specify model only when the caller has asked for a specific variant
-
-The dispatch default is to omit `model`. Only include it if the user has explicitly named a model in the current turn.
-
-```
-// Only when the caller asked for this specific variant:
-gemini_request({prompt: "...", model: "<explicit-user-request>", approvalStrategy: "mcp_managed"})
-```
-
-### Rule 4: Check available models when unsure
-
-```
-list_models()                    // All CLIs
-list_models({cli: "codex"})      // Codex models only
-```
-
-### Rule 5: Use `promptParts` to share stable prefix bytes across calls
-
-When the same long system / tools / context block is sent to multiple CLIs (parallel reviews, consensus, multi-round loops), switch from `prompt` to the structured `promptParts` field:
+Claude, Codex, Gemini, Grok, and Mistral accept promptParts as an alternative
+to prompt. Devin and Cursor accept flat prompt only. When fan-out requires all
+seven, keep a canonical exact flat prompt, use it directly for Devin and Cursor,
+and derive identical structured stable context for the other five.
 
 ```
 codex_request({
   promptParts: {
-    system:  "<long stable system instruction>",
-    tools:   "<long stable tool description>",
-    context: "<long stable file dump / spec>",
-    task:    "Implement X per the above."
+    system: "Stable task contract",
+    context: "Stable repository facts and acceptance criteria",
+    task: "Inspect the current implementation."
   },
-  fullAuto: true,
-  approvalStrategy: "mcp_managed"
+  sandboxMode: "read-only",
+  approvalStrategy: "legacy"
 })
 ```
 
-The gateway concatenates in canonical order `system → tools → context → task`, so the stable prefix bytes are byte-identical across the parallel dispatch and across rounds — that raises implicit cache hit rate at each provider with no special-case API contortions. `prompt` and `promptParts` are mutually exclusive (the runtime returns `provide exactly one of \`prompt\` or \`promptParts\`` if both are supplied). The stable prefix hash is recorded in the flight recorder and queryable via `cache-state://prefix/{hash}` so you can verify the prefix actually got shared.
+Use exactly one of prompt or promptParts. Cache-state resources expose hashes
+and aggregates, not prompt text or proof of task correctness.
 
-For short one-off questions, plain `prompt` is fine.
+## Mandatory Review Routing
 
-## Delegation Patterns
-
-### "Ask Codex to implement"
-
-The most common pattern. Codex with fullAuto handles implementation + testing:
+For a full cross-LLM review, first define the required provider roster and send
+each request through gtwy. Every prompt must require this terminal JSON verdict:
 
 ```
-codex_request({
-  prompt: "Implement [feature] in [path]. Requirements:\n- [req 1]\n- [req 2]\n\nInclude tests.",
-  fullAuto: true,
-  approvalStrategy: "mcp_managed"
-})
+APPROVED_UNCONDITIONALLY | CHANGES_REQUIRED | BLOCKED_EXTERNAL
 ```
 
-### "Ask Codex to review"
+Do not apply round, turn, token, price, cost, or wallclock caps. Continue until
+every required reviewer gives `APPROVED_UNCONDITIONALLY`. A condition, residual
+finding, inability to verify, malformed response, cancellation, timeout, or
+provider error is not approval. Correct the issue and re-dispatch. Stop only on
+explicit user cancellation or a terminal external provider failure, which must
+be reported as `BLOCKED_EXTERNAL` without shrinking the roster.
 
-Second most common. Codex reviews with full codebase access:
+## Sessions, Jobs, and Kit Mode
 
-```
-codex_request({
-  prompt: "Review [path] for [criteria]. End with APPROVED or NOT APPROVED with findings.",
-  fullAuto: true,
-  approvalStrategy: "mcp_managed"
-})
-```
+All seven CLI providers have native continuity support, but each has its own
+native handle rules. Codex requires a real Codex UUID and inherits its original
+sandbox and target on resume. Gateway-generated gw-* identifiers must not be
+used as Codex native session IDs. Current Mistral Vibe defaults session logging
+to enabled; run doctor and correct an explicit [session_logging] enabled =
+false before relying on Vibe resume.
 
-### "Ask Gemini for security perspective"
+If async tools are available, poll deferred jobs with llm_job_status and fetch
+llm_job_result through gtwy. SQLite and Postgres jobs are durable; memory is
+process-lifetime only, and persistence.backend = "none" exposes no async or job
+tools. Do not cancel a mandatory review simply because it is long-running.
 
-For security-sensitive changes:
-
-```
-gemini_request({
-  prompt: "Security audit [path]. Check for injection, auth bypass, data leaks, OWASP Top 10. End with APPROVED or NOT APPROVED with findings.",
-  approvalStrategy: "mcp_managed"
-})
-```
-
-### "Parallel review from multiple LLMs"
-
-For comprehensive coverage:
-
-```
-codex_request_async({prompt: "Review [path] for correctness... End with APPROVED or NOT APPROVED with findings.", fullAuto: true, approvalStrategy: "mcp_managed", correlationId: "review-codex"})
-gemini_request_async({prompt: "Security audit [path]... End with APPROVED or NOT APPROVED with findings.", approvalStrategy: "mcp_managed", correlationId: "review-gemini"})
-grok_request_async({prompt: "Independent review of [path]... End with APPROVED or NOT APPROVED with findings.", approvalStrategy: "mcp_managed", correlationId: "review-grok"})
-```
-
-## Session Continuity Implications
-
-Model routing affects session strategy:
-
-| LLM | Session Continuity | Implication |
-|-----|-------------------|-------------|
-| Claude | Real (`--continue` / `--session-id`) | Can do multi-turn refinement |
-| Codex | Real (`codex exec resume <UUID>` / `--last`) — sessionId must be a real Codex UUID from `~/.codex/sessions/`; `--full-auto` dropped on resume | Good for iterative work; pass `resumeLatest:true` for the most recent cwd session |
-| Gemini | Real (`--resume`) | Good for iterative analysis |
-| Grok | Real (`--resume <id>` / `--continue`) | Good for iterative review/diversity rounds |
-
-This means:
-- **All four CLIs support multi-turn workflows** through the gateway
-- Codex resume requires either `resumeLatest:true` or a real Codex session UUID — gateway-generated `gw-*` IDs are rejected
-- Resumed Codex sessions inherit the original approval policy; `fullAuto:true` is silently dropped on resume
-- Gemini-generated `gw-*` IDs are bookkeeping handles and rejected if replayed
-
-## Cost Considerations
-
-- Codex with `fullAuto` is the most autonomous but most expensive per call
-- Gemini is generally cheaper for review tasks
-- Claude is middle ground
-- Grok depends on xAI billing/pricing — treat as an extra reviewer slot for high-stakes paths, not the default
-- For routine reviews: single LLM (Codex) is sufficient
-- For critical reviews: parallel multi-LLM (see multi-llm-consensus skill); add Grok when consensus across vendor families matters
-- For huge codebases: use async variants to avoid blocking
-
-## Tips
-
-- For routine read-only analysis, drafting, or review, prefer Claude or Gemini with omitted `model` so configured fast defaults such as Haiku or Flash can apply.
-- Use Codex with `fullAuto: true` and `approvalStrategy: "mcp_managed"` when the task needs autonomous code edits, tests, or shell commands.
-- For security-specific work, always include Gemini. Add Grok for an independent vendor-family perspective when stakes are high.
-- Don't overthink model selection — the default is almost always fine. **Omit `model` unless the caller asked for a specific variant.**
-- Use `correlationId` on every request for tracing.
-- If a task exceeds 45s, it auto-defers. Check for `status:"deferred"` in responses, then poll every 60s. Results are durable for 30 days (`LLM_GATEWAY_JOB_RETENTION_DAYS`) — re-issuing the same call within the dedup window (`LLM_GATEWAY_DEDUP_WINDOW_MS`, default 1h) reattaches to the live job. Pass `forceRefresh:true` only when inputs actually changed.
-- Use `cli_versions` to inspect installed CLI versions. Use `cli_upgrade` with `dryRun:true` first; run real upgrades only when the caller wants the local CLI updated. Grok self-updates via `grok update`; the same `cli_upgrade` tool routes it for you.
-- For prefix-stable workloads, prefer `promptParts` over `prompt` — same routing rules apply per CLI, but the gateway hashes the stable prefix so you can verify cache effectiveness via `cache-state://global` or `cache-state://prefix/{hash}` (tokens / hashes only, no prompt text).
+Personal Agent Config Kit supports Claude and Codex only and needs durable job
+admission. Treat a requested multi-provider review while Kit is enabled as a
+scope blocker, not an opportunity to silently downgrade the review.

@@ -43,14 +43,46 @@ metadata is authoritative; the TOML is scanner input only.
    with `llm_job_result` when that happens.
 3. Omit `model` unless the caller explicitly requests one. Use only controls
    reported by `provider_tool_capabilities`, especially execution mode, sandbox,
-   workspace, and session controls.
-4. Keep provider-owned MCP configuration separate from gateway approval tracking.
-   Do not assume every Cursor CLI control is safe to expose through a request.
-5. Use a real resumable Cursor chat only when the response reports it as
+   workspace, and session controls. Cursor must use
+   `approvalStrategy:"legacy"`: it rejects `mcp_managed` before launch because
+   ambient MCP configuration cannot be isolated, and `approvalPolicy` has no
+   effect.
+4. Keep provider-owned MCP configuration separate from gateway metadata. Do not
+   assume every Cursor CLI control is safe to expose through a request.
+5. Cursor accepts flat `prompt` only, not `promptParts`. Its `workspace` field
+   selects a local target directory, registered alias, or provider-native
+   `.code-workspace` file. A directory/alias establishes child cwd; a workspace
+   file remains a native argument and is not misused as `spawn.cwd`. Verify the
+   target before reviewing concurrent repositories. An unregistered relative
+   value remains a provider-native saved-workspace name and is passed through
+   verbatim, never resolved against the gateway process cwd. Use an absolute
+   path when selecting an unregistered local directory as child cwd.
+6. Use a real resumable Cursor chat only when the response reports it as
    resumable. Gateway bookkeeping IDs are not automatically valid Cursor chat
-   IDs.
-6. Native ACP is capability-gated. Probe `cursor-agent acp --help` when
-   validating the installed entrypoint.
+   IDs. Continuation remains provider-native under legacy. A cwd-scoped
+   `resumeLatest` needs a stable selected target.
+7. Native ACP is capability-gated. It rejects `approvalStrategy:"mcp_managed"`
+   and any `approvalPolicy`, as does the Cursor CLI gateway path. Probe
+   `cursor-agent acp --help` when validating the installed entrypoint.
+8. An unscoped CLI child uses a fresh neutral temporary cwd, not the gateway
+   repository. Cursor's argv-bound prompt rejects oversized UTF-8 input as
+   non-retryable `input_too_large`; the gateway never truncates it. All other
+   caller-controlled argv values are admitted in their final encoded form
+   before spawn. Embedded NUL bytes return non-retryable `invalid_input`
+   without exposing the rejected value.
+
+### Full-access review handoff
+
+For a user-authorized exhaustive review that needs full provider permissions and
+native MCP access, do not infer the launch controls from this maintenance guide.
+Follow `multi-llm-review`'s full-access protocol, inspect the current request
+schema and live capability response, and use a fresh target-checkout
+`node dist/index.js --transport=stdio` gateway rather than a global process.
+Reapply the grant on every new job, preserve native MCP configuration without a
+pretend gateway allowlist, send the corrective-program report and exact
+diff/file identity, set no caller caps, and honor a user-required 90-second
+progress cadence. The reviewer must independently inspect code, docs, tests,
+and commands before it can approve.
 
 ## Scan for upstream change
 

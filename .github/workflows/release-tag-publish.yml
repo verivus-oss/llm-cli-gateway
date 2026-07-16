@@ -1,5 +1,7 @@
-# Manual release: merge release commit on main, then run this workflow with tag vX.Y.Z.
-# Verifies npm run check, creates GitHub release (triggers npm-publish + release-installer).
+# Public-mirror release: merge the release commit on main, then run this
+# workflow with tag vX.Y.Z. It verifies npm run check and creates the GitHub
+# release. The published event starts npm publishing and installer artifacts;
+# a stable public-mirror release also starts the separate Pages deployment.
 name: Create release from tag ref
 
 on:
@@ -18,7 +20,55 @@ permissions:
   contents: read
 
 jobs:
+  resolve-release-tag:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      target_sha: ${{ steps.tag_target.outputs.target_sha }}
+    steps:
+      - name: Validate selected release tag
+        id: tag
+        shell: bash
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [[ ! "${TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]]; then
+            echo "ERROR: release tag must be vX.Y.Z or vX.Y.Z-<prerelease> (got ${TAG})" >&2
+            exit 1
+          fi
+          printf 'tag=%s\n' "${TAG}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: refs/tags/${{ steps.tag.outputs.tag }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Resolve existing tag target
+        id: tag_target
+        shell: bash
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          TAG_REF="refs/tags/${TAG}"
+          if ! git show-ref --verify --quiet "${TAG_REF}"; then
+            echo "ERROR: expected existing tag ref ${TAG_REF}" >&2
+            exit 1
+          fi
+          TAG_TARGET="$(git rev-parse "${TAG_REF}^{commit}")"
+          CHECKED_OUT="$(git rev-parse HEAD)"
+          if [[ "${CHECKED_OUT}" != "${TAG_TARGET}" ]]; then
+            echo "ERROR: checkout ${CHECKED_OUT} does not match ${TAG_REF} target ${TAG_TARGET}" >&2
+            exit 1
+          fi
+          printf 'target_sha=%s\n' "${TAG_TARGET}" >> "$GITHUB_OUTPUT"
+
   verify-and-release:
+    needs: resolve-release-tag
     runs-on: ubuntu-latest
     permissions:
       # `gh release create` (below) needs write; nothing else in this job does.
@@ -26,16 +76,42 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          ref: ${{ inputs.tag }}
+          ref: refs/tags/${{ needs.resolve-release-tag.outputs.tag }}
+          fetch-depth: 0
           persist-credentials: false
 
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version: 24
 
+      - name: Verify checkout matches selected tag target
+        id: tested_ref
+        shell: bash
+        env:
+          TAG: ${{ needs.resolve-release-tag.outputs.tag }}
+          EXPECTED_TARGET_SHA: ${{ needs.resolve-release-tag.outputs.target_sha }}
+        run: |
+          set -euo pipefail
+          TAG_REF="refs/tags/${TAG}"
+          if ! git show-ref --verify --quiet "${TAG_REF}"; then
+            echo "ERROR: expected existing tag ref ${TAG_REF}" >&2
+            exit 1
+          fi
+          TAG_TARGET="$(git rev-parse "${TAG_REF}^{commit}")"
+          CHECKED_OUT="$(git rev-parse HEAD)"
+          if [[ "${TAG_TARGET}" != "${EXPECTED_TARGET_SHA}" ]]; then
+            echo "ERROR: ${TAG_REF} moved from ${EXPECTED_TARGET_SHA} to ${TAG_TARGET}" >&2
+            exit 1
+          fi
+          if [[ "${CHECKED_OUT}" != "${TAG_TARGET}" ]]; then
+            echo "ERROR: checkout ${CHECKED_OUT} does not match ${TAG_REF} target ${TAG_TARGET}" >&2
+            exit 1
+          fi
+          printf 'commit=%s\n' "${CHECKED_OUT}" >> "$GITHUB_OUTPUT"
+
       - name: Verify package version matches tag
         env:
-          REF_NAME: ${{ inputs.tag }}
+          REF_NAME: ${{ needs.resolve-release-tag.outputs.tag }}
         run: |
           PKG_VERSION=$(node -p "require('./package.json').version")
           TAG_VERSION="${REF_NAME#v}"
@@ -58,14 +134,76 @@ jobs:
       - name: Create GitHub release (published)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ inputs.tag }}
+          TAG: ${{ needs.resolve-release-tag.outputs.tag }}
+          TESTED_SHA: ${{ steps.tested_ref.outputs.commit }}
         run: |
+          set -euo pipefail
           VER="${TAG#v}"
           NOTES="llm-cli-gateway v${VER}. See CHANGELOG.md on this tag for release notes."
+          CURRENT_SHA="$(git rev-parse HEAD)"
+          TAG_TARGET="$(git rev-parse "refs/tags/${TAG}^{commit}")"
+          if [[ "${CURRENT_SHA}" != "${TESTED_SHA}" || "${TAG_TARGET}" != "${TESTED_SHA}" ]]; then
+            echo "ERROR: refusing to release ${TAG}; tested commit ${TESTED_SHA}, checkout ${CURRENT_SHA}, tag target ${TAG_TARGET}" >&2
+            exit 1
+          fi
           if gh release view "${TAG}" >/dev/null 2>&1; then
             echo "Release ${TAG} already exists."
             exit 0
           fi
+          RELEASE_KIND="$(node scripts/release-version.mjs "${VER}")"
+          RELEASE_ARGS=()
+          if [ "${RELEASE_KIND}" = "prerelease" ]; then
+            # GitHub's release metadata drives downstream workflows. Mark every
+            # RC/alpha/beta release explicitly so the production Pages workflow
+            # is skipped as well as guarded by its checked-out package version.
+            RELEASE_ARGS+=(--prerelease)
+          fi
+
+          # Re-read the public remote immediately before publishing. Checkout
+          # deliberately persists no credentials, and this unauthenticated
+          # lookup must not prompt or inherit the token reserved for `gh`.
+          if ! REMOTE_TAG_REFS="$(
+            GIT_TERMINAL_PROMPT=0 GH_TOKEN="" GITHUB_TOKEN="" \
+              git -c credential.helper= -c core.askPass=/bin/false \
+                ls-remote --exit-code --tags origin \
+                "refs/tags/${TAG}" \
+                "refs/tags/${TAG}^{}"
+          )"; then
+            echo "ERROR: could not resolve ${TAG} from the public remote" >&2
+            exit 1
+          fi
+          REMOTE_TAG_TARGET="$(
+            awk -v tag_ref="refs/tags/${TAG}" '
+              $2 == tag_ref {
+                direct = $1
+                direct_count++
+              }
+              $2 == tag_ref "^{}" {
+                peeled = $1
+                peeled_count++
+              }
+              END {
+                if (direct_count != 1 || peeled_count > 1) {
+                  exit 1
+                }
+                if (peeled_count == 1) {
+                  print peeled
+                } else {
+                  print direct
+                }
+              }
+            ' <<< "${REMOTE_TAG_REFS}"
+          )" || {
+            echo "ERROR: unexpected remote tag resolution for ${TAG}" >&2
+            exit 1
+          }
+          if [[ "${REMOTE_TAG_TARGET}" != "${TESTED_SHA}" ]]; then
+            echo "ERROR: refusing to release ${TAG}; remote target ${REMOTE_TAG_TARGET} does not match tested commit ${TESTED_SHA}" >&2
+            exit 1
+          fi
           gh release create "${TAG}" \
+            --verify-tag \
+            --target "${TESTED_SHA}" \
             --title "llm-cli-gateway v${VER}" \
-            --notes "${NOTES}"
+            --notes "${NOTES}" \
+            "${RELEASE_ARGS[@]}"

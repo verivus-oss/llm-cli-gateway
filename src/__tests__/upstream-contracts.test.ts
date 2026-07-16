@@ -43,16 +43,84 @@ describe("upstream CLI contracts", () => {
     expect(result.ok).toBe(true);
   });
 
+  it("requires a provider's headless mode for every request shape", () => {
+    for (const [cli, requiredFlag] of [
+      ["claude", "-p"],
+      ["devin", "-p"],
+      ["gemini", "--print"],
+      ["cursor", "--print"],
+    ] as const) {
+      const plain = validateUpstreamCliArgs(cli, ["review this"]);
+      expect(plain.ok, cli).toBe(false);
+      expect(plain.violations.map(violation => violation.message).join(" ")).toContain(
+        `requires headless flag(s): ${requiredFlag}`
+      );
+
+      expect(validateUpstreamCliArgs(cli, [requiredFlag, "review this"]).ok, cli).toBe(true);
+    }
+
+    for (const [cli, requiredFlag] of [
+      ["claude", "-p"],
+      ["devin", "-p"],
+      ["cursor", "--print"],
+    ] as const) {
+      const bare = validateUpstreamCliArgs(cli, ["--", "review this"]);
+      expect(bare.ok, cli).toBe(false);
+      expect(bare.violations.map(violation => violation.message).join(" ")).toContain(
+        `requires headless flag(s): ${requiredFlag}`
+      );
+
+      expect(validateUpstreamCliArgs(cli, [requiredFlag, "--", "review this"]).ok, cli).toBe(true);
+    }
+  });
+
   it("rejects unsupported flags before they reach an upstream CLI", () => {
     const result = validateUpstreamCliArgs("gemini", ["-p", "hello", "--not-a-gemini-flag"]);
     expect(result.ok).toBe(false);
     expect(result.violations[0]?.message).toMatch(/Unsupported gemini CLI flag/);
   });
 
+  it("rejects Grok duplicate prompt aliases", () => {
+    const result = validateUpstreamCliArgs("grok", [
+      "-p",
+      "first prompt",
+      "--single",
+      "second prompt",
+    ]);
+    expect(result.ok).toBe(false);
+    expect(result.violations.map(violation => violation.message).join(" ")).toContain(
+      "mutually exclusive"
+    );
+  });
+
+  it("does not allow a known flag to masquerade as a required flag value", () => {
+    const result = validateUpstreamCliArgs("cursor", ["--model", "--print", "review this"]);
+    expect(result.ok).toBe(false);
+    expect(result.violations.map(violation => violation.message).join(" ")).toContain(
+      'flag "--model" requires one non-option value'
+    );
+  });
+
   it("rejects enum values outside the provider contract", () => {
     const result = validateUpstreamCliArgs("codex", ["exec", "--sandbox", "workspace", "prompt"]);
     expect(result.ok).toBe(false);
     expect(result.violations[0]?.message).toMatch(/does not accept value "workspace"/);
+  });
+
+  it("accepts only documented Antigravity execution modes", () => {
+    expect(
+      validateUpstreamCliArgs("gemini", ["--print", "hello", "--mode", "accept-edits"]).ok
+    ).toBe(true);
+    expect(validateUpstreamCliArgs("gemini", ["--print", "hello", "--mode", "plan"]).ok).toBe(true);
+
+    const invalid = validateUpstreamCliArgs("gemini", [
+      "--print",
+      "hello",
+      "--mode",
+      "unrestricted",
+    ]);
+    expect(invalid.ok).toBe(false);
+    expect(invalid.violations[0]?.message).toMatch(/does not accept value "unrestricted"/);
   });
 
   it("rejects Codex approval flags removed from the installed CLI", () => {
@@ -128,6 +196,18 @@ describe("upstream CLI contracts", () => {
       "/tmp/schema.json",
       "-c",
       "model.foo=bar",
+      "session-id",
+      "prompt",
+    ]);
+    expect(result.ok).toBe(true);
+  });
+
+  it("accepts the gateway-owned quoted Codex project-trust override", () => {
+    const result = validateUpstreamCliArgs("codex", [
+      "exec",
+      "resume",
+      "-c",
+      'projects."/tmp/kit workspace/\\"quoted\\"".trust_level="untrusted"',
       "session-id",
       "prompt",
     ]);
@@ -717,11 +797,11 @@ Options:
       expect((ACP_ENTRYPOINT_CONTRACTS.claude.adapterCandidates ?? []).length).toBeGreaterThan(0);
     });
 
-    it("keeps agy on the watchlist with no ACP surface at agy 1.1.1", () => {
+    it("keeps agy on the watchlist with no ACP surface at agy 1.1.2", () => {
       const agy = ACP_ENTRYPOINT_CONTRACTS.gemini;
       expect(agy.status).toBe("absent_watchlist");
       expect(agy.executable).toBe("agy");
-      expect(agy.targetVersion).toContain("1.1.1");
+      expect(agy.targetVersion).toContain("1.1.2");
       expect(agy.entrypointArgs).toEqual([]);
       expect(agy.probeArgs).toEqual([]);
     });

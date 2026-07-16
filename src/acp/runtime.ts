@@ -71,6 +71,8 @@ export interface AcpRunRequest {
   readonly model?: string;
   /** Gateway gw-* session id to resume; omit to create a fresh ACP session. */
   readonly sessionId?: string;
+  /** Registered workspace alias selected by the gateway transport, when any. */
+  readonly workspaceAlias?: string;
   readonly cwd?: string;
   readonly correlationId: string;
   /**
@@ -198,6 +200,7 @@ export async function runAcpRequest(
     gatewaySessionId = await createAcpSession(deps.sessionManager, {
       provider: req.provider,
       cwd: req.cwd,
+      workspaceAlias: req.workspaceAlias,
     });
   }
 
@@ -242,12 +245,27 @@ export async function runAcpRequest(
     } else {
       const session = await proc.client.newSession({ cwd, mcpServers: [] });
       providerSessionId = session.sessionId;
-      await recordAcpSessionInfo(deps.sessionManager, gatewaySessionId, {
+      const recorded = await recordAcpSessionInfo(deps.sessionManager, gatewaySessionId, {
         providerSessionId,
         protocolVersion: init?.protocolVersion,
         agentName: init?.agentInfo?.name,
         agentVersion: init?.agentInfo?.version,
       });
+      if (!recorded) {
+        // A provider session that cannot be durably bound to its gateway-owned
+        // session must never receive a prompt: callers could not safely resume
+        // it later. Remove the incomplete gateway record when possible; the
+        // process teardown below remains the fallback if storage is unavailable.
+        try {
+          await deps.sessionManager.deleteSession(gatewaySessionId);
+        } catch {
+          logger.warn?.("acp.session.cleanup_failed", { provider: req.provider });
+        }
+        throw new AcpProtocolError(
+          "ACP session setup could not be persisted. Retry the request to create a new session.",
+          { provider: req.provider }
+        );
+      }
     }
 
     const promptResult = await proc.client.prompt({

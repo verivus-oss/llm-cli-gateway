@@ -49,8 +49,9 @@ function count(args: string[], flag: string): number {
 }
 
 describe("mistral argv golden (Phase 4 Part B)", () => {
-  // The legacy default is bypass-sensitive (#155); pin the operator opt-in off
-  // so the golden argv is deterministic, and restore it afterward.
+  // The operator opt-in is an authorization gate for MCP-managed explicit
+  // bypass requests. It must not alter legacy defaults, so pin and restore it
+  // to guard that contract as well.
   let savedBypass: string | undefined;
   beforeEach(() => {
     savedBypass = process.env.LLM_GATEWAY_APPROVAL_ALLOW_BYPASS;
@@ -61,13 +62,13 @@ describe("mistral argv golden (Phase 4 Part B)", () => {
     else process.env.LLM_GATEWAY_APPROVAL_ALLOW_BYPASS = savedBypass;
   });
 
-  it("minimal request emits -p + prompt and the default --agent accept-edits (#155)", () => {
-    expect(argsFor({})).toEqual(["-p", "PROMPT", "--agent", "accept-edits"]);
+  it("minimal request emits an inline -p prompt and the default --agent accept-edits (#155)", () => {
+    expect(argsFor({})).toEqual(["-p=PROMPT", "--agent", "accept-edits"]);
   });
 
-  it("legacy default escalates to --agent auto-approve only with the operator opt-in (#155)", () => {
+  it("legacy default remains --agent accept-edits with the operator opt-in", () => {
     process.env.LLM_GATEWAY_APPROVAL_ALLOW_BYPASS = "1";
-    expect(argsFor({})).toEqual(["-p", "PROMPT", "--agent", "auto-approve"]);
+    expect(argsFor({})).toEqual(["-p=PROMPT", "--agent", "accept-edits"]);
   });
 
   it("kitchen sink: every wired flag emits with its value", () => {
@@ -83,7 +84,7 @@ describe("mistral argv golden (Phase 4 Part B)", () => {
       workingDir: "/tmp/wd",
       addDir: ["/x", "/y"],
     });
-    expect(args.slice(0, 2)).toEqual(["-p", "PROMPT"]);
+    expect(args[0]).toBe("-p=PROMPT");
     expect(valueAfter(args, "--output")).toBe("json");
     expect(valueAfter(args, "--agent")).toBe("accept-edits");
     expect(count(args, "--enabled-tools")).toBe(2);

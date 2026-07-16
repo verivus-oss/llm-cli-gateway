@@ -6,6 +6,21 @@ import { createCircuitBreaker, withRetry, CircuitBreakerState } from "./retry.js
 import type { Logger } from "./logger.js";
 import type { CliType } from "./provider-types.js";
 import { applySpawnEnvIsolation } from "./spawn-env-isolation.js";
+import {
+  assertCliArgUtf8Size,
+  assertCliArgvUtf8Size,
+  assertCliProcessInputUtf8Size,
+  normalizeCliInputAdmissionError,
+} from "./cli-input-limits.js";
+import { createNeutralExecutionWorkspace } from "./neutral-workspace.js";
+import {
+  type ChildStdinDelivery,
+  ChildStdinIncompleteError,
+  ChildStdinWriteFailedError,
+  isChildStdinDeliveryIncomplete,
+  normalizeChildStdinDeliveryError,
+  writeAndCloseChildStdin,
+} from "./child-stdin.js";
 
 export interface ExecuteOptions {
   timeout?: number;
@@ -378,6 +393,7 @@ function resolveWindowsCommandPath(command: string, envPath: string): string | n
 
 /** Registry of active detached process groups for shutdown cleanup. */
 const activeProcessGroups = new Set<number>();
+export const PROCESS_GROUP_KILL_GRACE_MS = 5000;
 
 export function shouldDetachProviderProcess(platform: NodeJS.Platform = process.platform): boolean {
   // On Windows, detached console children can flash visible cmd/conhost windows
@@ -392,6 +408,11 @@ export function registerProcessGroup(pid: number): void {
 
 export function unregisterProcessGroup(pid: number): void {
   activeProcessGroups.delete(pid);
+}
+
+/** Test-only ownership check for one detached provider process group. */
+export function isProcessGroupRegisteredForTest(pid: number): boolean {
+  return activeProcessGroups.has(pid);
 }
 
 /**
@@ -463,6 +484,59 @@ export function killProcessGroup(proc: ChildProcess, signal: NodeJS.Signals): bo
   }
 }
 
+export interface ProcessGroupTerminationFence {
+  /** Signal the group and retain ownership until the force-kill fence fires. */
+  request(signal?: NodeJS.Signals, graceMs?: number): void;
+  /** Release a cleanly exited leader only when no group termination is pending. */
+  cleanupAfterLeaderExit(): void;
+  readonly pending: boolean;
+}
+
+/**
+ * Keep a detached provider process group owned after its leader exits.
+ *
+ * SIGTERM is only a request: a same-group descendant can ignore it and outlive
+ * the leader. Once termination starts, the fence always targets the original
+ * negative pgid with SIGKILL after the grace window, even if the leader has
+ * already emitted `close`, and unregisters the group only after that attempt.
+ */
+export function createProcessGroupTerminationFence(
+  proc: ChildProcess,
+  cleanup: () => void,
+  defaultGraceMs = PROCESS_GROUP_KILL_GRACE_MS
+): ProcessGroupTerminationFence {
+  let escalationTimer: ReturnType<typeof setTimeout> | undefined;
+  let terminationPending = false;
+
+  const forceKillAndCleanup = (): void => {
+    escalationTimer = undefined;
+    killProcessGroup(proc, "SIGKILL");
+    terminationPending = false;
+    cleanup();
+  };
+
+  return {
+    request(signal = "SIGTERM", graceMs = defaultGraceMs): void {
+      terminationPending = true;
+      killProcessGroup(proc, signal);
+      if (signal === "SIGKILL" || graceMs <= 0) {
+        if (escalationTimer) clearTimeout(escalationTimer);
+        forceKillAndCleanup();
+        return;
+      }
+      if (escalationTimer) return;
+      escalationTimer = setTimeout(forceKillAndCleanup, graceMs);
+      // Deliberately referenced: group ownership must survive through SIGKILL.
+    },
+    cleanupAfterLeaderExit(): void {
+      if (!terminationPending) cleanup();
+    },
+    get pending(): boolean {
+      return terminationPending;
+    },
+  };
+}
+
 function killWindowsProcessTree(pid: number): boolean {
   const result = spawnSync("taskkill.exe", ["/PID", String(pid), "/T", "/F"], {
     stdio: "ignore",
@@ -481,23 +555,90 @@ export function spawnCliProcess(
     logger?: Logger;
   }
 ): ChildProcess {
+  // Reject a many-element argv before command resolution performs platform
+  // path reads. An unresolved Windows provider conservatively assumes an npm
+  // cmd/bat shim; resolved native and wrapper commands receive an exact-surface
+  // check below.
+  assertCliArgvUtf8Size(command, args, {
+    provider: command,
+    platform: process.platform,
+  });
   // Single spawn chokepoint for provider CLIs: strip inherited endpoint/proxy
   // redirection vars from the FINAL merged env (opt-in). Applying it here, not
   // at each call site, means an upstream `{ ...process.env, ...env }` re-splat
   // (e.g. the inline sync path) cannot reintroduce a stripped var.
   const env = applySpawnEnvIsolation(options.env, options.logger);
+  assertCliProcessInputUtf8Size(
+    command,
+    args,
+    env,
+    { provider: command },
+    {},
+    {
+      reserveRuntimeHeadroom: false,
+    }
+  );
   const detached = shouldDetachProviderProcess();
   const resolved = resolveCommandForSpawn(command, args, {
     envPath: pathValueFromEnv(env, process.platform),
   });
-  const proc = spawn(resolved.command, resolved.args, {
-    cwd: options.cwd,
-    detached,
-    windowsHide: true,
-    windowsVerbatimArguments: resolved.windowsVerbatimArguments,
-    stdio: options.stdio,
-    env,
+  assertCliArgvUtf8Size(resolved.command, resolved.args, {
+    provider: command,
+    platform: process.platform,
+    windowsCommandWrapper: resolved.windowsVerbatimArguments === true,
   });
+  assertCliProcessInputUtf8Size(
+    resolved.command,
+    resolved.args,
+    env,
+    {
+      provider: command,
+      platform: process.platform,
+      windowsCommandWrapper: resolved.windowsVerbatimArguments === true,
+    },
+    {},
+    { reserveRuntimeHeadroom: false }
+  );
+  // Final defense for every provider/admin/update launch path, including
+  // future argv construction that has not yet gained a field-specific guard.
+  // Provider preparation owns precise public input names; this chokepoint
+  // guarantees no oversized element reaches child_process.spawn.
+  for (const [index, argument] of resolved.args.entries()) {
+    assertCliArgUtf8Size(argument, {
+      provider: command,
+      inputName: `argv[${index}]`,
+    });
+  }
+  // Never let Node silently substitute process.cwd(). When an upstream caller
+  // has not resolved a repository, workspace, worktree, or Kit cwd, isolate this
+  // one process in a fresh gateway-owned neutral directory. Higher layers still
+  // own session-aware cwd selection; this is the concrete defense at the final
+  // spawn boundary.
+  const neutralWorkspace = options.cwd === undefined ? createNeutralExecutionWorkspace() : null;
+  const effectiveCwd = neutralWorkspace ? neutralWorkspace.cwd : options.cwd;
+  if (effectiveCwd === undefined) {
+    throw new Error("Provider process cwd resolution failed closed");
+  }
+  let proc: ChildProcess;
+  try {
+    proc = spawn(resolved.command, resolved.args, {
+      cwd: effectiveCwd,
+      detached,
+      windowsHide: true,
+      windowsVerbatimArguments: resolved.windowsVerbatimArguments,
+      stdio: options.stdio,
+      env,
+    });
+  } catch (error) {
+    neutralWorkspace?.cleanup();
+    throw normalizeCliInputAdmissionError(error, { provider: command, inputName: "argv" }) ?? error;
+  }
+  if (neutralWorkspace) {
+    // Either event may arrive first depending on the spawn failure mode.
+    // cleanup() is idempotent, so both handlers are safe.
+    proc.once("error", neutralWorkspace.cleanup);
+    proc.once("close", neutralWorkspace.cleanup);
+  }
   if (proc.pid) registerProcessGroup(proc.pid);
   proc.unref();
   return proc;
@@ -508,6 +649,13 @@ export async function executeCli(
   args: string[],
   options: ExecuteOptions = {}
 ): Promise<ExecuteResult> {
+  // Keep deterministic admission failures outside retry/circuit-breaker state.
+  // The spawn chokepoint repeats this after command resolution as defense in
+  // depth for every caller, including paths that do not use executeCli.
+  assertCliArgvUtf8Size(command, args, {
+    provider: command,
+    platform: process.platform,
+  });
   const { timeout, idleTimeout, cwd, env: extraEnv, stdin } = options;
   const extendedPath = getExtendedPath();
   const baseEnv = envWithExtendedPath(process.env, extendedPath);
@@ -523,19 +671,16 @@ export async function executeCli(
         env: { ...baseEnv, ...(extraEnv ?? {}) },
         logger: options.logger,
       });
-      if (stdin !== undefined && proc.stdin) {
-        proc.stdin.write(stdin);
-        proc.stdin.end();
-      }
 
       let stdout = "";
       let stderr = "";
       let timedOut = false;
       let idledOut = false;
-      let overflowed = false;
       let exited = false;
       let outputSize = 0;
       let settled = false;
+      let stdinFailure: Error | null = null;
+      let stdinDelivery: ChildStdinDelivery | null = null;
 
       // Single cleanup flag to prevent double-unregister
       let groupCleaned = false;
@@ -544,6 +689,7 @@ export async function executeCli(
         groupCleaned = true;
         if (proc.pid) unregisterProcessGroup(proc.pid);
       };
+      const terminationFence = createProcessGroupTerminationFence(proc, cleanupProcessGroup);
 
       const timeoutMs =
         typeof timeout === "number" && Number.isFinite(timeout) && timeout > 0
@@ -552,12 +698,7 @@ export async function executeCli(
       const timeoutId = timeoutMs
         ? setTimeout(() => {
             timedOut = true;
-            killProcessGroup(proc, "SIGTERM");
-
-            setTimeout(() => {
-              if (!exited) killProcessGroup(proc, "SIGKILL");
-              cleanupProcessGroup();
-            }, 5000);
+            terminationFence.request();
           }, timeoutMs)
         : undefined;
 
@@ -574,11 +715,7 @@ export async function executeCli(
         idleTimerId = setTimeout(() => {
           idledOut = true;
           if (timeoutId) clearTimeout(timeoutId);
-          killProcessGroup(proc, "SIGTERM");
-          setTimeout(() => {
-            if (!exited) killProcessGroup(proc, "SIGKILL");
-            cleanupProcessGroup();
-          }, 5000);
+          terminationFence.request();
         }, idleMs);
       };
 
@@ -602,12 +739,7 @@ export async function executeCli(
       const handleOutputChunk = (data: Buffer, stream: "stdout" | "stderr") => {
         outputSize += data.length;
         if (outputSize > MAX_OUTPUT_SIZE) {
-          overflowed = true;
-          killProcessGroup(proc, "SIGTERM");
-          setTimeout(() => {
-            if (!exited) killProcessGroup(proc, "SIGKILL");
-            cleanupProcessGroup();
-          }, 5000);
+          terminationFence.request();
           finalizeReject(new Error("Output exceeded maximum size (50MB)"));
           return;
         }
@@ -638,13 +770,14 @@ export async function executeCli(
 
       proc.on("close", code => {
         exited = true;
+        const stdinDeliveryIncomplete = isChildStdinDeliveryIncomplete(stdinDelivery);
+        stdinDelivery?.cleanup();
         if (idleTimerId) {
           clearTimeout(idleTimerId);
         }
-        // Unregister process group on clean exit (no kill was issued)
-        if (!timedOut && !idledOut && !overflowed) {
-          cleanupProcessGroup();
-        }
+        // A terminating leader does not prove same-group descendants died.
+        // The fence retains ownership through its unconditional SIGKILL.
+        terminationFence.cleanupAfterLeaderExit();
         if (settled) {
           return;
         }
@@ -703,15 +836,28 @@ export async function executeCli(
           return;
         }
 
+        // A timeout, idle timeout, or provider nonzero exit is authoritative.
+        // Only turn an otherwise-successful exit into a transport failure when
+        // the provider closed its pipe before the full request was delivered.
+        if (stdinFailure) {
+          finalizeReject(stdinFailure);
+          return;
+        }
+        if (stdinDeliveryIncomplete) {
+          finalizeReject(new ChildStdinIncompleteError());
+          return;
+        }
+
         resolve(result);
       });
 
       proc.on("error", err => {
         exited = true;
+        stdinDelivery?.cleanup();
         if (idleTimerId) {
           clearTimeout(idleTimerId);
         }
-        cleanupProcessGroup();
+        terminationFence.cleanupAfterLeaderExit();
         if (settled) {
           return;
         }
@@ -721,11 +867,38 @@ export async function executeCli(
         settled = true;
         reject(err);
       });
+
+      if (stdin !== undefined) {
+        if (!proc.stdin) {
+          stdinFailure = new ChildStdinWriteFailedError();
+          terminationFence.request();
+        } else {
+          stdinDelivery = writeAndCloseChildStdin(proc.stdin, stdin, error => {
+            if (exited || settled) return;
+            const deliveryError = normalizeChildStdinDeliveryError(error);
+            // Closed-pipe errors must remain owned by this request so they do
+            // not reach the process-level uncaught handler. They are harmless
+            // after timeout/nonzero exit, but an exit 0 cannot be reported as
+            // success when the complete request was never delivered.
+            if (deliveryError instanceof ChildStdinIncompleteError) {
+              stdinFailure ??= deliveryError;
+              return;
+            }
+            stdinFailure = deliveryError;
+            terminationFence.request();
+          });
+        }
+      }
     });
 
   try {
     return await withRetry(runOnce, circuitBreaker, undefined, options.logger);
   } catch (error: any) {
+    const inputAdmission = normalizeCliInputAdmissionError(error, {
+      provider: command,
+      inputName: "argv",
+    });
+    if (inputAdmission) throw inputAdmission;
     if (error?.cause?.message === "Output exceeded maximum size (50MB)") {
       throw error.cause;
     }

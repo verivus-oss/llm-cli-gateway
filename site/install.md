@@ -58,11 +58,13 @@ It binds to `127.0.0.1:3333` at `/mcp` by default (`LLM_GATEWAY_HTTP_HOST`,
   `LLM_GATEWAY_TRUSTED_PRINCIPAL_HEADER` (honoured only on a bearer-authenticated
   hop).
 
-Every session, job, and stored request is owned by a principal, so one caller
-never sees another's. Remote provider calls require a registered workspace: set
-one up with `llm-cli-gateway workspace create` / `workspace add`, or a
-`[workspaces].default`. A dangerous OAuth configuration (open registration on a
-non-loopback bind) fails closed rather than starting.
+Every session, job, and stored request is owned by a principal. OAuth or
+trusted-principal callers cannot see another principal's records; callers that
+share one static bearer token deliberately share one principal. Remote provider
+calls require a registered workspace: set one up with
+`llm-cli-gateway workspace create` / `workspace add`, or a `[workspaces].default`.
+A dangerous OAuth configuration (open registration on a non-loopback bind) fails
+closed rather than starting.
 
 ## Provider CLIs
 
@@ -99,8 +101,32 @@ dedupWindowMs = 3600000
 ```
 
 Install `pg` alongside the gateway before using `backend = "postgres"`.
-Async job prompts are persisted in plaintext in SQLite or Postgres rows; treat
-the job store as sensitive at rest. `backend = "none"` disables async job tools.
+Ordinary non-Kit async job prompts are persisted in plaintext in SQLite or
+Postgres rows; treat the job store as sensitive at rest. Personal Agent Config
+Kit durable rows do not persist compiled instructions or request arguments and
+withhold provider output and errors. `backend = "none"` disables async job
+tools. See the [Personal Agent Config Kit guide](guides/personal-agent-config-kit.md)
+for its narrower durable-record boundary.
+
+### PostgreSQL schema migrations
+
+Before starting a DML-only gateway role, run migrations with a schema-owner or
+dedicated migration role:
+
+```bash
+DATABASE_URL='postgresql://<user>:<password>@<host>/<database>' npm run migrate
+```
+
+The runner takes an advisory lock and records a SHA-256 for each migration in
+`schema_migrations.checksum_sha256`. A later malformed or mismatched recorded
+checksum stops the runner before pending migrations are considered. A `NULL`
+checksum is an explicit legacy row from before checksum recording. It remains
+unverified and is never backfilled, because the current package cannot prove
+what SQL ran historically. Do not edit released migration files or fill ledger
+checksums manually. The runner preserves the historical 002/003 SQL and applies
+compatibility only while one of those legacy versions remains pending; forward
+migration 018 repairs an already-recorded legacy session/view layout. Release
+checks reject a source edit to a published migration file.
 
 ## API providers (optional)
 

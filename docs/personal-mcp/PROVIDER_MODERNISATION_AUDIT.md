@@ -57,15 +57,14 @@ load-bearing gateway integration point.
   `defaultModel` (see `FALLBACK_INFO.mistral` in
   [`src/model-registry.ts`](../../src/model-registry.ts)).
 
-### 2.2 Session-logging opt-in via `~/.vibe/config.toml`
+### 2.2 Session logging via `~/.vibe/config.toml`
 
-- **Upstream**: Vibe only persists sessions when
-  `[session_logging] enabled = true` is present in `~/.vibe/config.toml`.
-  Without that toggle, `--continue` / `--resume` will silently start a fresh
-  session — surprising any caller that expects continuity.
+- **Upstream**: Current Vibe defaults session logging to enabled. An explicit
+  `[session_logging] enabled = false` in `~/.vibe/config.toml` disables
+  `--continue` / `--resume` continuity.
 - **Gateway impact**: `doctor.ts` probes the config file via
   `checkVibeSessionLogging` and adds an actionable `next_actions` entry
-  (`vibe config set session_logging.enabled true`) before any request fails
+  telling the user to edit the config before a continuity request fails
   opaquely.
 - **Read-only**: the gateway never writes to `~/.vibe/config.toml`. The
   remediation is surfaced as guidance only.
@@ -147,10 +146,10 @@ Vibe CLI may require revision.
 5. **CLI binary name**: `vibe`. The gateway uses `mistral` as the _provider
    key_ and spawns `vibe` via `PROVIDER_COMMANDS` and the async-job-manager
    rewrite.
-6. **Output usage/cost**: Vibe does not surface token/cost data in stdout
-   JSON in any documented form, so `extractUsageAndCost` returns `null` for
-   `mistral`. A TODO comment points at the future source
-   (`~/.vibe/logs/session/<id>/metadata.json`).
+6. **Output usage/cost**: Vibe does not surface token/cost data in stdout.
+   `extractUsageAndCost` reads
+   `~/.vibe/logs/session/session_<...>/meta.json` best-effort when a native
+   Vibe session UUID is available; otherwise it returns no usage fields.
 
 ## 5. Followups (U23–U27)
 

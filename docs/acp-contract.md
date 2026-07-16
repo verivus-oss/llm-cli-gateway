@@ -9,6 +9,11 @@ the authoritative, human-readable statement of what the first-class ACP gateway
 extension is and is not. Implementation steps must not weaken these decisions;
 they may only add detail underneath them.
 
+The version values in the frozen provider table are the historical baseline at
+the time this contract was written, not a claim about currently installed CLIs.
+The current code target for each provider is maintained in
+`src/provider-definitions.ts` (`PROVIDER_TARGET_VERSIONS`).
+
 ## Acronym scope (read first)
 
 In this gateway, **ACP means Agent Client Protocol** — the JSON-RPC protocol
@@ -28,7 +33,7 @@ implementation note, doc, and capability-metadata field in this slice uses
 2. **ACP is an internal provider transport.** ACP is used to talk to provider
    agents that expose a native ACP process. The primary flow is
    `MCP client -> gateway MCP tool -> provider request router -> ACP client/host
-   layer -> provider ACP agent`. Gateway stdout stays reserved for MCP JSON-RPC;
+layer -> provider ACP agent`. Gateway stdout stays reserved for MCP JSON-RPC;
    provider ACP stdout is consumed only by the ACP transport and is never
    forwarded to gateway stdout.
 
@@ -85,15 +90,15 @@ capability fields (`acp.status`, `acp.entrypoint`, smoke status, and so on) are
 added by the later `extend-provider-capability-metadata` step; this frozen
 classification does not pre-empt them.
 
-| Provider               | Target CLI version       | Frozen ACP classification | Native entrypoint        |
-| ---------------------- | ------------------------ | ------------------------- | ------------------------ |
-| Mistral Vibe           | vibe 2.17.1              | native_candidate          | `vibe-acp`               |
-| xAI Grok CLI           | grok 0.2.60 (474c2bbfc)  | native_candidate          | `grok agent stdio`       |
-| Cognition Devin CLI    | devin 2026.7.23 (3bd47f77) | native_candidate      | `devin acp`              |
-| Cursor Agent CLI       | cursor-agent 2026.06.29-2ad2186 | native_candidate | `cursor-agent acp`       |
-| OpenAI Codex CLI       | codex-cli 0.141.0        | adapter_mediated_deferred | none at target version   |
-| Anthropic Claude Code  | claude 2.1.185           | adapter_mediated_deferred | none at target version   |
-| Google Antigravity agy | agy 1.0.10                | absent_watchlist          | none at target version   |
+| Provider               | Target CLI version              | Frozen ACP classification | Native entrypoint      |
+| ---------------------- | ------------------------------- | ------------------------- | ---------------------- |
+| Mistral Vibe           | vibe 2.17.1                     | native_candidate          | `vibe-acp`             |
+| xAI Grok CLI           | grok 0.2.60 (474c2bbfc)         | native_candidate          | `grok agent stdio`     |
+| Cognition Devin CLI    | devin 2026.7.23 (3bd47f77)      | native_candidate          | `devin acp`            |
+| Cursor Agent CLI       | cursor-agent 2026.06.29-2ad2186 | native_candidate          | `cursor-agent acp`     |
+| OpenAI Codex CLI       | codex-cli 0.141.0               | adapter_mediated_deferred | none at target version |
+| Anthropic Claude Code  | claude 2.1.185                  | adapter_mediated_deferred | none at target version |
+| Google Antigravity agy | agy 1.0.10                      | absent_watchlist          | none at target version |
 
 Notes:
 
@@ -104,8 +109,9 @@ Notes:
   stays behind global and per-provider config gates.
 - Codex and Claude are adapter-mediated and deferred at their target CLI
   versions; adapter evidence is documentation only and never native support.
-- Antigravity `agy` 1.0.10 has no ACP surface. Legacy Gemini CLI ACP evidence
-  does not transfer to `agy`, so `agy` stays a watchlist item.
+- At the frozen-era Antigravity target, `agy` had no ACP surface. Legacy Gemini
+  CLI ACP evidence does not transfer to `agy`, so it stays a watchlist item
+  until current-contract evidence changes that classification.
 
 ## Authoritative references
 

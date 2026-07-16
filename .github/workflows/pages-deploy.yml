@@ -1,28 +1,71 @@
 # Deploy the static marketing site (site/) to its Cloudflare Pages project on
-# every published release. llm-cli-gateway.dev is a DIRECT-UPLOAD Pages project
+# every published stable release. llm-cli-gateway.dev is a DIRECT-UPLOAD Pages project
 # (not git-connected), so nothing rebuilds it automatically — this workflow is
 # what keeps the live site in lock-step with each release.
 #
-# The site version is bumped in `site/index.html` during release prep
+# The site version surfaces are synchronized during release prep
 # (scripts/sync-site-version.mjs, run by scripts/pre-release.sh) and pinned by
 # src/__tests__/site-version.test.ts, so by the time a release exists the
 # checked-out site/ already carries the right version; the --check step here is
 # a belt-and-braces assertion before publishing.
+#
+# This workflow can also be dispatched manually against an explicit stable tag.
+# That is the recovery path for a site-only fix or an emergency rollback, both
+# of which would otherwise require cutting a new release. Deploying anything
+# other than the highest published stable release requires opting in to
+# allow-rollback, so superseding the live site is always a deliberate act.
 name: Deploy site to Cloudflare Pages
 
 on:
   release:
     types: [published]
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Stable release tag to deploy (for example, v2.17.1)"
+        required: true
+        type: string
+      allow-rollback:
+        description: "Deploy a tag that is NOT the highest published stable release (emergency rollback or re-deploy of superseded content)"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
 
 jobs:
-  deploy:
-    # Only the public mirror owns the Pages project. The private dev repo skips
-    # this job.
+  # A manual dispatch is the only recovery path for a site-only problem: the
+  # Pages project is direct-upload, so without this the live site can only be
+  # changed by cutting a whole new release. The stable-only tag regex here (not
+  # the release `prerelease` flag) is what keeps an RC off the production
+  # domain, so a dispatch cannot smuggle a prerelease onto llm-cli-gateway.dev.
+  resolve-release-tag:
     if: github.repository == 'verivus-oss/llm-cli-gateway'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - name: Validate selected release tag
+        id: tag
+        env:
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.event.release.tag_name }}
+        run: |
+          if [[ ! "${RELEASE_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "ERROR: the Pages production domain only serves stable releases; expected vX.Y.Z (got ${RELEASE_TAG})" >&2
+            exit 1
+          fi
+          printf 'tag=%s\n' "${RELEASE_TAG}" >> "$GITHUB_OUTPUT"
+
+  deploy:
+    needs: resolve-release-tag
+    # Only the public mirror owns the Pages project. The private dev repo skips
+    # this job. release-tag-publish.yml marks RCs as prereleases; the checked-out
+    # package gate below independently fails closed if release metadata is ever
+    # created incorrectly.
+    if: github.repository == 'verivus-oss/llm-cli-gateway' && (github.event_name != 'release' || github.event.release.prerelease == false)
     environment: cloudflare-pages-llm-cli-gateway
     permissions:
       contents: read
@@ -30,16 +73,17 @@ jobs:
     # MUST run on the self-hosted runner: the Cloudflare token is IP-allowlist
     # restricted (a deliberate control), so it only works from a trusted egress
     # IP. GitHub-hosted runners are rejected with Cloudflare error 9109. The
-    # workhorse2-oss runner sits on an allowlisted IP. If it is offline at
+    # workhorse2 self-hosted runner sits on an allowlisted IP. If it is offline at
     # release time the deploy job queues until it comes back up; bring the runner
     # online to drain it (see release-flow notes).
     runs-on: [self-hosted, workhorse2]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          # On a release, check out the released tag so the deployed site/ matches
-          # exactly what was published. On manual dispatch, use the branch ref.
-          ref: ${{ github.event.release.tag_name || github.ref }}
+          # Deploy the released tag so the site/ matches exactly what was
+          # published. The refs/tags/ prefix is explicit so a same-named branch
+          # can never be resolved in preference to the tag.
+          ref: refs/tags/${{ needs.resolve-release-tag.outputs.tag }}
           persist-credentials: false
 
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6 # zizmor: ignore[cache-poisoning]
@@ -50,8 +94,109 @@ jobs:
         with:
           node-version: 24
 
-      - name: Verify site version matches package.json
-        run: node scripts/sync-site-version.mjs --check
+      - name: Verify released tag is the current highest stable release
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.resolve-release-tag.outputs.tag }}
+          # Only a manual dispatch may waive the highest-stable ordering check.
+          # An automatic release deploy can never set this.
+          ALLOW_ROLLBACK: ${{ github.event_name == 'workflow_dispatch' && inputs['allow-rollback'] }}
+        run: |
+          node --input-type=module <<'NODE'
+          import { readFile } from "node:fs/promises";
+
+          const releaseTag = process.env.RELEASE_TAG;
+          const token = process.env.GITHUB_TOKEN;
+          const allowRollback = process.env.ALLOW_ROLLBACK === "true";
+          const packageJson = JSON.parse(await readFile("./package.json", "utf8"));
+          const expectedTag = `v${packageJson.version}`;
+
+          if (!/^v\d+\.\d+\.\d+$/.test(releaseTag)) {
+            throw new Error(`Expected a stable vX.Y.Z release tag, received ${releaseTag}`);
+          }
+          // The checked-out tree must be the release it claims to be, whether
+          // this is an automatic deploy or a deliberate rollback.
+          if (releaseTag !== expectedTag) {
+            throw new Error(`Release tag ${releaseTag} does not match package version ${expectedTag}`);
+          }
+          if (!token) {
+            throw new Error("GITHUB_TOKEN is required to verify the release ordering");
+          }
+
+          const parseVersion = tag => {
+            const match = /^v(\d+)\.(\d+)\.(\d+)$/.exec(tag);
+            return match ? match.slice(1).map(Number) : null;
+          };
+          const compareVersions = (left, right) => {
+            for (let index = 0; index < left.length; index += 1) {
+              if (left[index] !== right[index]) {
+                return left[index] > right[index] ? 1 : -1;
+              }
+            }
+            return 0;
+          };
+
+          let page = 1;
+          let highest = null;
+          for (;;) {
+            const response = await fetch(
+              `https://api.github.com/repos/${process.env.GITHUB_REPOSITORY}/releases?per_page=100&page=${page}`,
+              {
+                headers: {
+                  Accept: "application/vnd.github+json",
+                  Authorization: `Bearer ${token}`,
+                  "X-GitHub-Api-Version": "2022-11-28",
+                },
+              }
+            );
+            if (!response.ok) {
+              throw new Error(`GitHub releases request failed: ${response.status} ${response.statusText}`);
+            }
+            const releases = await response.json();
+            if (!Array.isArray(releases)) {
+              throw new Error("GitHub releases response was not an array");
+            }
+            for (const release of releases) {
+              if (release.draft || release.prerelease) continue;
+              const version = parseVersion(release.tag_name);
+              if (!version || (highest && compareVersions(version, highest.version) <= 0)) continue;
+              highest = { tag: release.tag_name, version };
+            }
+            if (releases.length < 100) break;
+            page += 1;
+          }
+
+          if (!highest) {
+            throw new Error("No published stable vX.Y.Z release was available for Pages deployment");
+          }
+          if (highest.tag !== releaseTag) {
+            if (!allowRollback) {
+              throw new Error(
+                `Refusing to deploy ${releaseTag}: the highest published stable release is ${highest.tag}. ` +
+                  "Re-run this workflow with allow-rollback enabled to deploy it deliberately."
+              );
+            }
+            console.log(
+              `::warning::Rollback deploy: publishing ${releaseTag} while the highest published stable release is ${highest.tag}`
+            );
+          }
+          NODE
+
+      - name: Verify stable site version contract
+        run: node scripts/sync-site-version.mjs --check --require-stable
+
+      # The discovery generator captures the compiled MCP tools/list surface,
+      # so this deployment-specific checkout needs both dependencies and dist.
+      - name: Install site verification dependencies
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Build site discovery verifier
+        run: npm run build
+
+      - name: Verify generated site discovery files
+        run: |
+          node scripts/generate-site-discovery.mjs --check
+          node scripts/validate-site-discovery.mjs
 
       - name: Fetch Cloudflare Pages token from Azure Key Vault
         env:

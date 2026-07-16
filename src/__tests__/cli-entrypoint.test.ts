@@ -1,8 +1,10 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import { afterEach, describe, expect, it } from "vitest";
+import { buildClaudeMcpConfig } from "../claude-mcp-config.js";
+import { SqliteJobStore } from "../job-store.js";
 
 const entrypoint = join(process.cwd(), "dist", "index.js");
 
@@ -263,5 +265,97 @@ describe.skipIf(!existsSync(entrypoint))("CLI oauth client + connector setup", (
     const legacyPacket = JSON.parse(withLegacy.stdout);
     expect(legacyPacket.legacy_no_auth.deprecated).toBe(true);
     expect(legacyPacket.legacy_no_auth.connector_url).toContain("/chatgpt/secretpath/mcp");
+  });
+});
+
+describe.skipIf(!existsSync(entrypoint))("CLI MCP artifact recovery", () => {
+  const dirs: string[] = [];
+
+  afterEach(() => {
+    for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("recovers only the exact persisted local artifact and does not print its path or scope", () => {
+    const home = mkdtempSync(join(tmpdir(), "cli-mcp-artifact-recovery-"));
+    dirs.push(home);
+    const dbPath = join(home, "jobs.db");
+    const gatewayConfigPath = join(home, "gateway-config.toml");
+    const jobId = "11111111-1111-4111-8111-111111111111";
+    const originalHome = process.env.HOME;
+    process.env.HOME = home;
+    try {
+      const artifact = buildClaudeMcpConfig(["sqry"]);
+      const store = new SqliteJobStore(dbPath);
+      try {
+        store.recordStart({
+          id: jobId,
+          correlationId: "cli-mcp-artifact-recovery",
+          requestKey: "cli-mcp-artifact-recovery",
+          cli: "claude",
+          args: ["-p", "review", "--mcp-config", artifact.path],
+          startedAt: new Date().toISOString(),
+          pid: null,
+          ownerInstance: "cli-mcp-artifact-owner",
+          ownerHostname: hostname(),
+          mcpArtifactPath: artifact.path,
+          mcpArtifactScope: artifact.artifactScope,
+          transport: "process",
+        });
+        store.recordComplete({
+          id: jobId,
+          status: "completed",
+          exitCode: 0,
+          stdout: "",
+          stderr: "",
+          outputTruncated: false,
+          error: null,
+          finishedAt: new Date().toISOString(),
+        });
+      } finally {
+        store.close();
+      }
+      writeFileSync(
+        gatewayConfigPath,
+        `[persistence]\nbackend = "sqlite"\npath = ${JSON.stringify(dbPath)}\n`,
+        "utf8"
+      );
+
+      const result = spawnSync(
+        process.execPath,
+        [entrypoint, "mcp-artifact", "recover", jobId, "--acknowledge-local-mcp-artifact-proof"],
+        {
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            HOME: home,
+            LLM_GATEWAY_CONFIG: gatewayConfigPath,
+            LLM_GATEWAY_LOGS_DB: "",
+            LLM_GATEWAY_JOBS_DB: "",
+          },
+        }
+      );
+
+      expect(result.status).toBe(0);
+      expect(JSON.parse(result.stdout)).toEqual({
+        ok: true,
+        jobId,
+        outcome: "removed_and_acknowledged",
+      });
+      expect(result.stdout).not.toContain(artifact.path);
+      expect(result.stdout).not.toContain(artifact.artifactScope);
+      expect(existsSync(artifact.path)).toBe(false);
+      const verifiedStore = new SqliteJobStore(dbPath);
+      try {
+        expect(verifiedStore.getById(jobId)?.mcpArtifactCleanupPending).toBe(false);
+      } finally {
+        verifiedStore.close();
+      }
+    } finally {
+      if (originalHome === undefined) {
+        delete process.env.HOME;
+      } else {
+        process.env.HOME = originalHome;
+      }
+    }
   });
 });

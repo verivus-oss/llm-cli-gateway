@@ -18,13 +18,15 @@
         <li><a href="/tools.md">Runtime-derived MCP tool index</a></li>
       </ul>
       <h2>Authentication</h2>
-      <p>HTTP transport supports static bearer tokens and built-in OAuth 2.0 with PKCE. OAuth scopes include <code>mcp:read</code>, <code>mcp:call</code>, <code>workspace:read</code>, <code>workspace:admin</code>, <code>approval:read</code>, and <code>provider:admin</code>.</p>
+      <p>HTTP transport supports a configured static bearer token and optional built-in OAuth 2.0 with PKCE. A shared static bearer token is one shared principal, not multi-tenant isolation. OAuth advertises <code>mcp</code>, <code>workspace:admin</code>, and <code>cli:admin</code>. Remote workspace creation or registration also requires <code>LLM_GATEWAY_WORKSPACE_ADMIN=1</code>; remote provider-admin operations also require <code>LLM_GATEWAY_CLI_ADMIN=1</code>.</p>
       <h2>JSON errors</h2>
-      <p>HTTP API errors are JSON objects with <code>error</code>, <code>code</code>, and <code>message</code> fields. MCP tool errors are returned through normal JSON-RPC error or tool result envelopes.</p>
+      <p>HTTP transport errors always include <code>error</code> and may add structured fields such as <code>code</code>, <code>retryable</code>, or session-capacity details. MCP protocol errors and tool failures use normal JSON-RPC or MCP tool-result envelopes.</p>
       <h2>Endpoints</h2>
       <ul>
-        <li><code>POST /mcp</code> - MCP JSON-RPC and Streamable HTTP transport.</li>
-        <li><code>GET /healthz</code> - unauthenticated readiness and bounded process-health summary.</li>
+        <li><code>POST /mcp</code> - initialize and send MCP JSON-RPC requests.</li>
+        <li><code>GET /mcp</code> - continue a Streamable HTTP MCP session with <code>Mcp-Session-Id</code>.</li>
+        <li><code>DELETE /mcp</code> - close a Streamable HTTP MCP session with <code>Mcp-Session-Id</code>.</li>
+        <li><code>GET /healthz</code> - unauthenticated liveness and readiness summary with bounded process-health metrics.</li>
       </ul>
     </main>
   </body>

@@ -27,7 +27,6 @@ exports[`grok schema fidelity (pre/post cutover) > covered-field describe text i
   "restoreCode": "Grok --restore-code: check out the original session commit when resuming.",
   "rules": "Grok --rules <RULES>: extra rules to append to the system prompt. Supports \`@file\` prefix per \`grok --help\` to load from a file; gateway passes the value verbatim and lets Grok parse the prefix.",
   "sandbox": "Grok --sandbox <PROFILE>: sandbox profile for filesystem and network access. Freeform per \`grok --help\` (no enum constraint on Grok 0.1.210); also settable via GROK_SANDBOX env var. Caller responsibility to pass a valid profile name.",
-  "single": "Grok --single <PROMPT>: single-turn prompt (in addition to gateway -p).",
   "systemPromptOverride": "Grok --system-prompt-override <PROMPT>: replace the agent's system prompt entirely. Distinct from Claude's --system-prompt / --append-system-prompt (Grok has only one override flag, not a pair).",
   "todoGate": "Grok --todo-gate: enable runtime turn-end TodoGate for this session (session-scoped, not persisted).",
   "verbatim": "Grok --verbatim: send the prompt exactly as given. Also skips gateway optimizePrompt when true.",

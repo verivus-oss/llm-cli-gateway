@@ -72,7 +72,7 @@ describe("claude argv golden (Phase 4 Part A)", () => {
 
   it("emits no Part A flags for a minimal prompt-only request", () => {
     const args = argsFor({});
-    expect(args).toEqual(["-p", "PROMPT"]);
+    expect(args).toEqual(["-p", "--", "PROMPT"]);
     for (const flag of [
       "--include-hook-events",
       "--replay-user-messages",
@@ -130,7 +130,7 @@ describe("claude argv golden (Phase 4 Part A)", () => {
 
   it("emits a bare --debug (no value token) when debug === true", () => {
     const args = argsFor({ debug: true });
-    expect(args).toEqual(["-p", "PROMPT", "--debug"]);
+    expect(args).toEqual(["-p", "--debug", "--", "PROMPT"]);
   });
 
   it("omits --debug entirely when debug === false", () => {
@@ -140,7 +140,7 @@ describe("claude argv golden (Phase 4 Part A)", () => {
 
   it("emits --debug <filter> when debug is a string", () => {
     const args = argsFor({ debug: "hooks" });
-    expect(args).toEqual(["-p", "PROMPT", "--debug", "hooks"]);
+    expect(args).toEqual(["-p", "--debug", "hooks", "--", "PROMPT"]);
   });
 
   it("produces byte-identical argv for sync and async operations (parity)", () => {

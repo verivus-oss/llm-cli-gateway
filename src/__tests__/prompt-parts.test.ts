@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   assemble,
+  MAX_PROMPT_CODE_UNITS,
   PromptPartsSchema,
   resolvePromptInput,
   type PromptParts,
@@ -77,6 +78,29 @@ describe("PromptPartsSchema", () => {
 
   it("rejects missing task", () => {
     expect(() => PromptPartsSchema.parse({ system: "s" } as unknown)).toThrow();
+  });
+
+  it("accepts an assembled prompt exactly at the flat prompt limit", () => {
+    const system = "s".repeat(40_000);
+    const task = "t".repeat(MAX_PROMPT_CODE_UNITS - system.length - 2);
+    expect(PromptPartsSchema.parse({ system, task })).toEqual({ system, task });
+  });
+
+  it("rejects promptParts whose assembled text exceeds the flat prompt limit", () => {
+    const system = "s".repeat(50_000);
+    const task = "t".repeat(50_000);
+    const parsed = PromptPartsSchema.safeParse({ system, task });
+    expect(parsed.success).toBe(false);
+    if (parsed.success) throw new Error("expected assembled promptParts limit failure");
+    expect(parsed.error.issues.map(issue => issue.message).join(" ")).toContain(
+      "Assembled promptParts is too long"
+    );
+  });
+
+  it("rejects an individual component over the prompt limit", () => {
+    expect(
+      PromptPartsSchema.safeParse({ task: "t".repeat(MAX_PROMPT_CODE_UNITS + 1) }).success
+    ).toBe(false);
   });
 });
 

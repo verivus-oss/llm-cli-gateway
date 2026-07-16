@@ -108,8 +108,8 @@ describe("ApprovalManager", () => {
   it("denies a bypass request by default under MCP-managed approval, even on permissive policy (F15)", () => {
     const manager = new ApprovalManager(logPath);
     const decision = manager.decide({
-      cli: "codex",
-      operation: "codex_request",
+      cli: "claude",
+      operation: "claude_request",
       prompt: "Summarize this document",
       bypassRequested: true,
       fullAuto: false,
@@ -117,7 +117,9 @@ describe("ApprovalManager", () => {
       policy: "permissive", // threshold 7; score would otherwise approve
     });
     expect(decision.status).toBe("denied");
-    expect(decision.reasons.join(" ")).toMatch(/bypass denied by default/i);
+    expect(decision.reasons.join(" ")).toMatch(
+      /bypass or unverified execution posture denied by default/i
+    );
   });
 
   it("permits a bypass request only with the explicit operator opt-in (F15)", () => {

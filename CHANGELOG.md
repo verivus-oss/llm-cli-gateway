@@ -4,6 +4,183 @@ All notable changes to the llm-cli-gateway project.
 
 ## [Unreleased]
 
+### Added
+
+- **Complete repository review primitive.** `review_changes` captures one
+  immutable, hashed Git artifact across committed, staged, unstaged, and regular
+  untracked content, fences it as untrusted data, and starts repository-bound
+  read-only reviewers. Durable job payloads retain the exact prompt until job
+  expiry while persisted argv contains only a hash marker. HTTP/API reviewer
+  upload requires explicit local consent and is refused for remote workspace
+  reviews. Git capture forces readable text evidence even when repository
+  attributes mark source as non-diffable, and API judges cannot bypass the
+  upload-consent resolver. Every roster seat and the planned judge use atomic
+  job-and-link admission behind launch gates; a failed roster is fenced before
+  provider I/O. Judge synthesis reloads exact owned durable results, treats the
+  stored repository, judge, owner, and consent as authoritative, and claims the
+  judge once.
+- **Durable normalized async progress.** `llm_job_status` now supports sequence
+  pagination over bounded privacy-safe progress snapshots, and
+  `llm_job_watch` long-polls an owned job with request-scoped MCP progress
+  notifications. SQLite and PostgreSQL persist the versioned projection,
+  refresh it across gateway instances, and fence orphan terminal state from
+  stale writers (PostgreSQL migration 019). Forward pages expose an explicit
+  next cursor and high-water mark without skipping retained events. Capability
+  labels follow the actual provider wire format, HTTP jobs report lifecycle-only
+  progress, and canceled watches emit no later notifications.
+- **Personal Agent Config Kit.** One developer can synchronise a verified
+  private baseline across workstations while applying a bounded repository
+  overlay and bounded request instructions. The Kit compiles an immutable
+  context stamp, keeps machine binding local, and scopes provider sessions to
+  the release, repository, selected folder, owner, and workstation.
+- **Durable Kit and request-artifact lifecycle.** PostgreSQL migrations 006
+  through 017 add scoped Kit sessions, durable finalisation and attempt fences,
+  the canonical job-store schema, privacy repairs, response-compression state,
+  native-handle retirement, and origin-host, exact-path, and scope provenance
+  for generated Claude MCP request configs.
+- **Resumable raw job output.** `llm_job_result` accepts `stdoutOffsetChars`
+  and `stderrOffsetChars` to resume captured provider streams from an exact
+  character offset instead of refetching a whole large capture. A non-zero
+  offset requires `rawOutput:true`, because display parsing and compression do
+  not preserve stable offsets. Local stdio pages concatenate back to the
+  captured streams; remote pages redact provider session IDs.
+
+### Changed
+
+- **BREAKING: `approvalStrategy:"mcp_managed"` is now Claude-only.** Codex,
+  Gemini, Grok, Mistral, Devin, and Cursor now reject the strategy before
+  launch instead of accepting it and running an adapter that cannot isolate
+  ambient MCP configuration. The request fails closed naming the two supported
+  paths: `approvalStrategy:"legacy"`, or Claude, which keeps the request-scoped
+  generated `--strict-mcp-config` allowlist. `transport=acp` rejects
+  `mcp_managed` and `approvalPolicy` separately, because the ACP permission
+  bridge owns that decision and silently discarding the caller's requested
+  policy semantics would misreport the gate. **Behaviour change:** callers that
+  passed `mcp_managed` to a non-Claude provider believed they had a managed
+  approval gate but never had isolation; those requests now fail rather than
+  launch under a gate that was not there. Move them to `legacy` (accepting the
+  provider's own default posture) or route the request to Claude. Supersedes
+  the 2.9.0 behaviour noted in that section below.
+- **Gateway worktree lifecycle is fail-closed.** PostgreSQL-backed sessions now
+  reject gateway-managed worktrees before creation, because a different
+  database-connected host cannot safely own this filesystem-local feature's
+  cleanup. Grok, Devin, and Mistral now require an explicit provider-native
+  `sessionId` for a gateway worktree: fresh, `createNewSession`, and
+  `resumeLatest`-only worktree requests fail closed because they cannot durably
+  reselect the checkout. Same-session reuse requires same-host durable
+  ownership plus a matching live Git registration and gateway branch, and
+  manager-level named path collisions fail closed. When Git removal fails, the
+  file-backed store retains a hidden durable cleanup-pending tombstone, blocks
+  reuse, and retries cleanup when that store is registered on the owning host;
+  the record is finalised only after verified Git removal. Session deletion and
+  TTL eviction hide a durably owned worktree session while cleanup runs.
+- **Release packaging and migration integrity.** Builds clean generated
+  `dist/` output first, the package gate compares npm's actual packed `dist/`
+  manifest with TypeScript's production output, and the migration contract
+  gate verifies contiguous receipts, runtime schema requirements, required
+  SQL semantics, and inclusion of every migration in the published tarball.
+
+### Fixed
+
+- **Validation receipts minted before the planned-judge gate still verify.**
+  Read-time verification accepted only the current synthesis shape, so a
+  receipt minted by an earlier release for a run whose judge was planned but
+  never dispatched was silently reclassified as unminted. Verification now
+  accepts that legacy shape on a finalised run with no judge link, and a
+  receipt that exists but disagrees with its durable run reports the new
+  `verification_failed` status instead of `expired_unminted`, which is
+  reserved for genuine absence. Canonical hashing is unchanged, so every
+  previously minted receipt keeps its hash.
+- **CLI prompt transport limits.** Codex new and resume requests stream the
+  exact prompt through stdin. `codex_fork_session` remains argv-bound and, like
+  other argv-bound providers, measures final UTF-8 bytes and returns
+  non-retryable `input_too_large` before spawn. Every caller-controlled argv
+  value is checked in its final encoded form, including serialized JSON and
+  joined lists. Pure planning rejects an oversized aggregate before generated
+  Claude MCP or Codex schema artifacts, while the process-spawn boundary
+  rechecks every element, a conservative platform-specific aggregate budget,
+  and a 2,048-element cap. Windows pre-resolution checks assume the smaller npm
+  `.cmd`/`.bat` wrapper limit, and handler-added native session flags are
+  admitted before workspace, session, provider-artifact handoff, or job-store
+  effects on non-Kit requests. Claude Kit projects its eventual argv before
+  compiled-context artifact materialization or durable Kit-session allocation.
+  Embedded NUL bytes in command or argv return non-retryable `invalid_input`
+  before spawn. Long-lived job memory, durable args, and async flight rows
+  replace the invalid vector with a fixed marker; the optional duplicate durable
+  payload is suppressed. None retains Node's value-echoing native error. Native `E2BIG`
+  failures are normalized without retaining `spawnargs` or truncating
+  instructions. Both admission categories and their retry flags survive async
+  status/result retrieval and SQLite/PostgreSQL restart hydration (PostgreSQL
+  migration 020). Direct and async stdin writers now own deferred pipe errors
+  without exposing an uncaught `EPIPE`. An otherwise-clean exit fails with a
+  fixed incomplete-delivery error unless the complete payload write callback
+  succeeded, including when child close races a still-pending callback.
+  Timeout, cancellation, and provider nonzero exits remain authoritative, and
+  termination retains process-group ownership until forced escalation has
+  covered descendants that outlive the provider leader.
+- **Unscoped provider cwd isolation.** A CLI process without a selected
+  `workingDir`, registered `workspace`, or gateway worktree runs in a fresh
+  private neutral directory instead of inheriting the gateway repository.
+  Devin now supports the same explicit CLI target routing, and cwd-scoped
+  `resumeLatest` requests fail closed when no stable target is available.
+  Neutral roots reject repository/instruction-bearing ancestors, local ACP uses
+  a fresh private directory per process, Cursor saved-workspace names remain
+  provider-native, and Claude continuation requires a stable cwd.
+- **Public site validation truth.** Local discovery validation reads the actual
+  Cloudflare `_headers` rules and static MIME defaults, so incorrect deployed
+  content-type declarations fail the release gate.
+- **Session writes cannot land on a recreated session.** Session updates now
+  compare-and-set against an opaque random `session_generation` token
+  (PostgreSQL migration 021) instead of trusting the session ID, provider,
+  owner, and timestamps, every one of which a competing creator can reproduce
+  after a delete/recreate race. The file-backed store applies the same
+  compare-and-set, so a stale writer's update is dropped rather than silently
+  overwriting the different session now occupying that ID.
+- **Legacy PostgreSQL session schema repair.** Migration 018 repairs a database
+  that already recorded migrations 002 and 003 but retains an older physical
+  column shape or lost the canonical `active_sessions.session_id` ->
+  `sessions.id` cascade, without rewriting those published migrations. The
+  runner wraps still-pending versions in a transaction-local view compatibility
+  step.
+
+### Security
+
+- **Kit durable-data privacy.** Kit job rows, session state, and new Flight
+  Recorder entries withhold compiled context, request data, provider output,
+  provider errors, and provider-native continuation handles. Historical Kit
+  rows are repaired to remove those values, and deterministic Kit request keys
+  are replaced with opaque job-id keys.
+- **Claude MCP request-config provenance and retention.** A generated non-Kit
+  Claude MCP config is retained until its origin host proves the captured
+  path-and-scope identity, removes the exact regular file, and atomically
+  acknowledges cleanup. Cross-host, unknown-provenance, symlinked, or
+  scope-mismatched artifacts remain retention-pinned instead of being guessed
+  or deleted. Migration 017 and the matching SQLite and PostgreSQL job-store
+  startup repairs automatically backfill a missing hostname for a pre-015 row
+  only from a surviving matching `gateway_instances` record; they never guess
+  hostname or scope, and operators have no manual SQL repair path. An absent
+  config requires the explicit same-host proof below.
+- **Conservative local MCP-pin recovery.** The local `mcp-artifact recover`
+  command can acknowledge an independently confirmed absent config only after
+  a platform-matched proof of its exact local scope: descriptor-pinned on
+  Linux with usable `/proc/self/fd`, otherwise strict pathname and scope
+  validation. It accepts no arbitrary path, hostname, scope, or force
+  override, and every mismatch retains the pin.
+
+### Upgrade notes
+
+- **PostgreSQL operators:** stop gateway instances and run `npm run migrate`
+  with the migration role before enabling Personal Agent Config Kit or running
+  the upgraded runtime. After migration, the normal gateway role only needs
+  schema verification and DML access.
+- **Existing Kit deployments:** migrations 011, 013, and 014 repair durable
+  job and session records, but cannot reliably identify historical Flight
+  Recorder rows. Let durable jobs settle, stop every gateway process, then
+  rotate or delete the complete configured SQLite Flight Recorder database set,
+  including `-wal` and `-shm` sidecars plus retained backups and replicas. Do
+  not keep an old database merely to preserve jobs; migrate any required
+  durable job or session state into a clean store first.
+
 ## [2.17.1] - 2026-07-13
 
 ### Fixed
@@ -526,6 +703,12 @@ behaviour change). Provider CLI release targets are unchanged from 2.8.0/2.9.0
   deny-path coverage for the request handlers and the `sessions://*` resources).
 
 ## [2.9.0] - 2026-06-14: MCP-surface red-team remediation
+
+> **Superseded behavior:** Current builds permit `approvalStrategy:"mcp_managed"`
+> only for Claude. Codex, Gemini, Grok, Mistral, Devin, and Cursor reject it
+> before launch because their ambient MCP configuration cannot be isolated. See
+> the BREAKING entry under [Unreleased] for the authoritative change; the notes
+> below are left as published and describe the 2.9.0 behavior at that time.
 
 This release remediates all 17 findings of a multi-LLM red-team of the gateway's
 external and internal MCP surface. Every change is material only in the opt-in

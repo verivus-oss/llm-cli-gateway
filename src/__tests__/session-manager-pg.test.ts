@@ -1,6 +1,8 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { PROVIDER_TYPES } from "../session-manager.js";
+import { PROVIDER_TYPES, sessionGenerationIdentity } from "../session-manager.js";
 import { PostgreSQLSessionManager } from "../session-manager-pg.js";
+import { resolveGatewayServerRuntime, resolveWorktreeForRequest } from "../index.js";
+import { runWithRequestContext } from "../request-context.js";
 import { setupTestDatabase, cleanTestDatabase } from "./setup.js";
 
 describe("PostgreSQLSessionManager", () => {
@@ -33,6 +35,43 @@ describe("PostgreSQLSessionManager", () => {
 
       expect(session.id).toBe(customId);
       expect(session.cli).toBe("codex");
+    });
+
+    it("rejects an explicit ID collision without replacing the existing row", async () => {
+      const winner = await runWithRequestContext(
+        { transport: "http", authScopes: [], authPrincipal: "owner-a" },
+        () => manager.createSession("claude", "winner", "shared-id")
+      );
+      await expect(manager.createSession("claude", "same", "shared-id")).rejects.toThrow();
+      await expect(manager.createSession("codex", "different", "shared-id")).rejects.toThrow();
+      await expect(
+        runWithRequestContext({ transport: "http", authScopes: [], authPrincipal: "owner-b" }, () =>
+          manager.createSession("claude", "different owner", "shared-id")
+        )
+      ).rejects.toThrow();
+      expect(await manager.getSession("shared-id")).toMatchObject({
+        id: winner.id,
+        cli: winner.cli,
+        description: winner.description,
+        ownerPrincipal: winner.ownerPrincipal,
+        generation: winner.generation,
+      });
+    });
+
+    it("atomically creates an explicit session with its admitted metadata", async () => {
+      const winner = await manager.createSessionWithMetadata(
+        "claude",
+        "scoped winner",
+        "scoped-id",
+        { workspaceAlias: "repo-a", workspaceRoot: "/workspace/a" }
+      );
+      await expect(
+        manager.createSessionWithMetadata("claude", "loser", "scoped-id", {
+          workspaceAlias: "repo-b",
+          workspaceRoot: "/workspace/b",
+        })
+      ).rejects.toThrow();
+      expect((await manager.getSession("scoped-id"))?.metadata).toEqual(winner.metadata);
     });
 
     it("should use default description if not provided", async () => {
@@ -147,6 +186,22 @@ describe("PostgreSQLSessionManager", () => {
   //──────────────────────────────────────────────────────────────────────────
 
   describe("deleteSession", () => {
+    it("notifies cleanup observers only after successful removals", async () => {
+      const observed: string[] = [];
+      const unsubscribe = manager.addSessionRemovalObserver(session => observed.push(session.id));
+      const deleted = await manager.createSession("claude", "Observer delete");
+      const cleared = await manager.createSession("codex", "Observer clear");
+
+      expect(await manager.deleteSession("missing-session")).toBe(false);
+      expect(observed).toEqual([]);
+      expect(await manager.deleteSession(deleted.id)).toBe(true);
+      expect(observed).toEqual([deleted.id]);
+
+      expect(await manager.clearAllSessions("codex")).toBe(1);
+      expect(observed).toEqual([deleted.id, cleared.id]);
+      unsubscribe();
+    });
+
     it("should delete an existing session", async () => {
       const session = await manager.createSession("claude", "Test Session");
       const deleted = await manager.deleteSession(session.id);
@@ -172,6 +227,68 @@ describe("PostgreSQLSessionManager", () => {
       const activeSession = await manager.getActiveSession("claude");
       expect(activeSession).toBeNull();
     });
+  });
+
+  describe("compareAndSetSession", () => {
+    it("requires exact generation and expected metadata for replace and delete", async () => {
+      const session = await manager.createSession("claude", "CAS", "cas-session");
+      const identity = sessionGenerationIdentity(session);
+      expect(
+        await manager.compareAndSetSession(identity, {
+          kind: "replace_metadata",
+          expectedMetadata: undefined,
+          metadata: { workspaceAlias: "repo" },
+        })
+      ).toBe(true);
+      expect(
+        await manager.compareAndSetSession(identity, {
+          kind: "replace_metadata",
+          expectedMetadata: undefined,
+          metadata: { workspaceAlias: "stale" },
+        })
+      ).toBe(false);
+      expect(
+        await manager.compareAndSetSession(identity, {
+          kind: "delete",
+          expectedMetadata: undefined,
+        })
+      ).toBe(false);
+      expect(
+        await manager.compareAndSetSession(identity, {
+          kind: "delete",
+          expectedMetadata: { workspaceAlias: "repo" },
+        })
+      ).toBe(true);
+    });
+
+    it("rejects an old generation after an id is deleted and recreated", async () => {
+      const original = await manager.createSession("claude", "first", "reused-id");
+      const staleIdentity = sessionGenerationIdentity(original);
+      expect(await manager.deleteSession(original.id)).toBe(true);
+      const replacement = await manager.createSession("claude", "replacement", "reused-id");
+
+      expect(
+        await manager.compareAndSetSession(
+          { ...staleIdentity, createdAt: replacement.createdAt },
+          {
+            kind: "replace_metadata",
+            expectedMetadata: undefined,
+            metadata: { shouldNotAppear: true },
+          }
+        )
+      ).toBe(false);
+      expect((await manager.getSession(replacement.id))?.metadata ?? {}).toEqual({});
+    });
+  });
+
+  it("fails closed before creating a worktree for PostgreSQL-backed sessions", async () => {
+    const session = await manager.createSession("claude", "PG worktree rejection");
+    const runtime = resolveGatewayServerRuntime({ sessionManager: manager });
+
+    await expect(
+      resolveWorktreeForRequest(true, session.id, runtime, { repoRoot: process.cwd() })
+    ).rejects.toThrow(/require file-backed session persistence/);
+    expect((await manager.getSession(session.id))?.metadata?.worktreePath).toBeUndefined();
   });
 
   //──────────────────────────────────────────────────────────────────────────

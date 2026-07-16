@@ -1,5 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { extractProviderOutputMetadata } from "../provider-output-metadata.js";
+import {
+  createPersonalKitTerminalMetadata,
+  extractProviderOutputMetadata,
+  parsePersonalKitTerminalMetadata,
+} from "../provider-output-metadata.js";
 
 describe("extractProviderOutputMetadata (phase 7 dispatch + capability facts)", () => {
   it("grok: extracts sessionId + stopReason and records usage as absent", () => {
@@ -52,5 +56,35 @@ describe("extractProviderOutputMetadata (phase 7 dispatch + capability facts)", 
     expect(meta.sessionId).toBeUndefined();
     expect(meta.stopReason).toBeUndefined();
     expect(meta.absentFields).toEqual(expect.arrayContaining(["sessionId", "stopReason"]));
+  });
+
+  it("Kit terminal metadata retains only a valid native UUID", () => {
+    const privateContextSentinel = "PRIVATE_KIT_CONTEXT_SENTINEL";
+    const forged = JSON.stringify({
+      type: "result",
+      session_id: privateContextSentinel,
+      result: privateContextSentinel,
+    });
+    expect(createPersonalKitTerminalMetadata("claude", forged, "stream-json")).toEqual({
+      version: 1,
+      nativeSessionId: null,
+    });
+
+    const validId = "11111111-1111-4111-8111-111111111111";
+    const valid = JSON.stringify({ type: "result", session_id: validId, result: "ok" });
+    expect(createPersonalKitTerminalMetadata("claude", valid, "stream-json")).toEqual({
+      version: 1,
+      nativeSessionId: validId,
+    });
+    expect(
+      parsePersonalKitTerminalMetadata(
+        JSON.stringify({ version: 1, nativeSessionId: privateContextSentinel })
+      )
+    ).toBeNull();
+    expect(
+      parsePersonalKitTerminalMetadata(
+        JSON.stringify({ version: 1, nativeSessionId: validId, leaked: privateContextSentinel })
+      )
+    ).toEqual({ version: 1, nativeSessionId: validId });
   });
 });

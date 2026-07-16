@@ -136,6 +136,7 @@ async function setup(opts: {
   server: ReturnType<typeof createGatewayServer>;
   flight: SeededFlightRecorder;
   sessions: ISessionManager;
+  workingDir: string;
 }> {
   const flight = new SeededFlightRecorder();
   const sessionDir = mkdtempSync(join(tmpdir(), "ttl-warning-sessions-"));
@@ -155,7 +156,7 @@ async function setup(opts: {
     flightRecorder: flight,
     workspaces: disabledWorkspaces(),
   });
-  return { server, flight, sessions };
+  return { server, flight, sessions, workingDir: sessionDir };
 }
 
 async function callTool(
@@ -170,7 +171,7 @@ async function callTool(
 
 describe("slice 3: cache_ttl_expiring_soon warning", () => {
   it("SYNC path: claude_request with TTL ≈ 5s emits warning (read from prior session row, not the row about to be inserted)", async () => {
-    const { server, flight, sessions } = await setup({ warnOnTtlExpiry: true });
+    const { server, flight, sessions, workingDir } = await setup({ warnOnTtlExpiry: true });
     const sess = await sessions.createSession("claude", "ttl-sync");
     flight.seedHit({ sessionId: sess.id, minutesAgo: 4 + 55 / 60 });
 
@@ -178,6 +179,7 @@ describe("slice 3: cache_ttl_expiring_soon warning", () => {
       prompt: "any prompt",
       approvalStrategy: "legacy",
       sessionId: sess.id,
+      workingDir,
     });
     // The CLI invocation will most likely fail (no claude installed in
     // test sandbox / no API key), but the warning is computed BEFORE the
@@ -192,7 +194,7 @@ describe("slice 3: cache_ttl_expiring_soon warning", () => {
   });
 
   it("ASYNC path: claude_request_async with TTL ≈ 5s (4m55s elapsed of 5min policy) emits warning", async () => {
-    const { server, flight, sessions } = await setup({ warnOnTtlExpiry: true });
+    const { server, flight, sessions, workingDir } = await setup({ warnOnTtlExpiry: true });
     const sess = await sessions.createSession("claude", "ttl-async");
     flight.seedHit({ sessionId: sess.id, minutesAgo: 4 + 55 / 60 });
 
@@ -200,6 +202,7 @@ describe("slice 3: cache_ttl_expiring_soon warning", () => {
       prompt: "any prompt",
       approvalStrategy: "legacy",
       sessionId: sess.id,
+      workingDir,
     });
     const parsed = JSON.parse(result.content[0].text);
     expect(parsed.warnings).toBeDefined();
@@ -209,7 +212,7 @@ describe("slice 3: cache_ttl_expiring_soon warning", () => {
   });
 
   it("ASYNC path: claude_request_async with TTL > 30s does NOT emit the warning", async () => {
-    const { server, flight, sessions } = await setup({ warnOnTtlExpiry: true });
+    const { server, flight, sessions, workingDir } = await setup({ warnOnTtlExpiry: true });
     const sess = await sessions.createSession("claude", "ttl-async-fresh");
     flight.seedHit({ sessionId: sess.id, minutesAgo: 1 });
 
@@ -217,13 +220,14 @@ describe("slice 3: cache_ttl_expiring_soon warning", () => {
       prompt: "any prompt",
       approvalStrategy: "legacy",
       sessionId: sess.id,
+      workingDir,
     });
     const parsed = JSON.parse(result.content[0].text);
     expect(parsed.warnings).toBeUndefined();
   });
 
   it("flag OFF: warning is omitted entirely even with imminent expiry", async () => {
-    const { server, flight, sessions } = await setup({ warnOnTtlExpiry: false });
+    const { server, flight, sessions, workingDir } = await setup({ warnOnTtlExpiry: false });
     const sess = await sessions.createSession("claude", "ttl-async-flag-off");
     flight.seedHit({ sessionId: sess.id, minutesAgo: 4 + 55 / 60 });
 
@@ -231,13 +235,14 @@ describe("slice 3: cache_ttl_expiring_soon warning", () => {
       prompt: "any prompt",
       approvalStrategy: "legacy",
       sessionId: sess.id,
+      workingDir,
     });
     const parsed = JSON.parse(result.content[0].text);
     expect(parsed.warnings).toBeUndefined();
   });
 
   it("1-hour TTL policy: 4m elapsed is well within window → no warning", async () => {
-    const { server, flight, sessions } = await setup({
+    const { server, flight, sessions, workingDir } = await setup({
       warnOnTtlExpiry: true,
       anthropicTtlSeconds: 3600,
     });
@@ -248,6 +253,7 @@ describe("slice 3: cache_ttl_expiring_soon warning", () => {
       prompt: "any prompt",
       approvalStrategy: "legacy",
       sessionId: sess.id,
+      workingDir,
     });
     const parsed = JSON.parse(result.content[0].text);
     expect(parsed.warnings).toBeUndefined();
@@ -264,7 +270,7 @@ describe("slice 3: cache_ttl_expiring_soon warning", () => {
   });
 
   it("uses 1-hour TTL override when cache_control_blocks > 0 is found in latest row", async () => {
-    const { server, flight, sessions } = await setup({
+    const { server, flight, sessions, workingDir } = await setup({
       warnOnTtlExpiry: true,
       anthropicTtlSeconds: 300, // 5 min policy in config
     });
@@ -280,6 +286,7 @@ describe("slice 3: cache_ttl_expiring_soon warning", () => {
       prompt: "any prompt",
       approvalStrategy: "legacy",
       sessionId: sess.id,
+      workingDir,
     });
     const parsed = JSON.parse(result.content[0].text);
     // Should NOT warn since 10 minutes is well within the 1-hour override window

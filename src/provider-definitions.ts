@@ -352,9 +352,9 @@ export interface ProviderDefinition {
  * all follow automatically.
  */
 export const PROVIDER_TARGET_VERSIONS: Record<CliType, string> = {
-  claude: "claude 2.1.207",
+  claude: "claude 2.1.210",
   codex: "codex-cli 0.144.3",
-  gemini: "agy 1.1.1",
+  gemini: "agy 1.1.2",
   grok: "grok 0.2.99 (b1b49ccb71)",
   mistral: "vibe 2.19.1",
   devin: "devin 3000.1.27 (0d4bf12e)",
@@ -720,7 +720,7 @@ const PROVIDER_DEFINITIONS = {
       permissionMode: false,
       approvalMode: true,
       trust: false,
-      flags: ["--sandbox", "--dangerously-skip-permissions"],
+      flags: ["--sandbox", "--mode", "--dangerously-skip-permissions"],
     },
     outputFormats: ["text"],
     streamingFormats: [],
@@ -895,12 +895,12 @@ const PROVIDER_DEFINITIONS = {
           effortLevels: [],
           supportsFallbackModelChain: false,
           aliases: [],
-          // vibe --help: --agent NAME (builtin: default, plan, accept-edits, auto-approve,
-          // or custom from ~/.vibe/agents/NAME.toml).
-          agentProfiles: ["default", "plan", "accept-edits", "auto-approve", "custom"],
+          // vibe --help lists these four builtins. A custom --agent NAME can be
+          // configured separately, but is not itself a builtin profile.
+          agentProfiles: ["default", "plan", "accept-edits", "auto-approve"],
         },
         evidence:
-          "Vibe has NO --model flag; the active model is selected via VIBE_ACTIVE_MODEL and config.toml active_model. default_agent plus --agent profiles (default, plan, accept-edits, auto-approve, or custom from ~/.vibe/agents/NAME.toml) are the vibe --help agent-profile facts.",
+          "Vibe has NO --model flag; the active model is selected via VIBE_ACTIVE_MODEL and config.toml active_model. default_agent plus the built-in --agent profiles (default, plan, accept-edits, auto-approve) are the vibe --help discovery facts. Vibe validates separately configured custom agent names.",
       },
       sessionContinuity: {
         continue: true,

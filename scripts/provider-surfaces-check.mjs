@@ -40,8 +40,7 @@ const srcRoot = join(repoRoot, "src");
 const PROVIDER_NAME = "claude|codex|gemini|grok|mistral|devin|cursor";
 
 /** Pattern (1): a literal provider-name array spelling out the CLI providers. */
-const LITERAL_PROVIDER_ARRAY =
-  /"claude"\s*,\s*"codex"\s*,\s*"gemini"\s*,\s*"grok"\s*,\s*"mistral"/;
+const LITERAL_PROVIDER_ARRAY = /"claude"\s*,\s*"codex"\s*,\s*"gemini"\s*,\s*"grok"\s*,\s*"mistral"/;
 
 /** Pattern (2): a manual `uri === "sessions://<name>"` / `models://<name>`. */
 const MANUAL_RESOURCE_BLOCK = new RegExp(

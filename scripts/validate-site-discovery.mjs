@@ -1,11 +1,13 @@
 #!/usr/bin/env node
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { assertNoPublicInternalMcpAliases } from "./public-site-mcp-policy.mjs";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
-const siteDir = join(repoRoot, "site");
+const siteArg = process.argv.find(arg => arg.startsWith("--site-dir="));
+const siteDir = siteArg ? resolve(siteArg.slice("--site-dir=".length)) : join(repoRoot, "site");
 
 const baseArg = process.argv.find(arg => arg.startsWith("--base-url="));
 const mode = baseArg ? "remote" : "local";
@@ -57,6 +59,12 @@ const routes = [
     json: true,
     required: ["version", "surfaces"],
   },
+  {
+    path: "/tools.fixture.json",
+    type: "application/json",
+    json: true,
+    required: ["siteVersion", "toolCount", "tools"],
+  },
   { path: "/llms.txt", type: "text/plain" },
   { path: "/docs", type: "text/html" },
   { path: "/api", type: "text/html" },
@@ -64,11 +72,17 @@ const routes = [
   { path: "/about", type: "text/html" },
   { path: "/contact", type: "text/html" },
   { path: "/privacy", type: "text/html" },
-  { path: "/openapi.json", type: "application/vnd.oai.openapi+json", json: true, required: ["openapi", "info", "paths"] },
+  {
+    path: "/openapi.json",
+    type: "application/vnd.oai.openapi+json",
+    json: true,
+    required: ["openapi", "info", "paths"],
+  },
   { path: "/install.md", type: "text/markdown" },
   { path: "/agents.md", type: "text/markdown" },
   { path: "/tools.md", type: "text/markdown" },
   { path: "/guides/coding-agent-gateway-technical-guide.md", type: "text/markdown" },
+  { path: "/guides/personal-agent-config-kit.md", type: "text/markdown" },
   { path: "/workflows/cross-model-review.md", type: "text/markdown" },
   { path: "/DISCOVERY.md", type: "text/markdown" },
   { path: "/sitemap.md", type: "text/markdown" },
@@ -114,12 +128,68 @@ function assertRequired(route, value) {
   }
 }
 
+function headerPatternMatches(pattern, routePath) {
+  const escaped = pattern
+    .split("*")
+    .map(part => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+    .join(".*");
+  return new RegExp(`^${escaped}$`).test(routePath);
+}
+
+function parseHeadersFile(body) {
+  const rules = [];
+  let current = null;
+  for (const rawLine of body.split(/\r?\n/)) {
+    if (!rawLine.trim() || rawLine.trimStart().startsWith("#")) continue;
+    if (!/^\s/.test(rawLine)) {
+      current = { pattern: rawLine.trim(), headers: new Map() };
+      rules.push(current);
+      continue;
+    }
+    if (!current) fail("site/_headers contains a header before any route pattern");
+    const header = rawLine.trim();
+    const separator = header.indexOf(":");
+    if (separator <= 0) fail(`site/_headers contains an invalid header line: ${header}`);
+    current.headers.set(
+      header.slice(0, separator).trim().toLowerCase(),
+      header.slice(separator + 1).trim()
+    );
+  }
+  return rules;
+}
+
+function defaultStaticContentType(path) {
+  return (
+    new Map([
+      [".html", "text/html; charset=utf-8"],
+      [".json", "application/json; charset=utf-8"],
+      [".md", "text/markdown; charset=utf-8"],
+      [".txt", "text/plain; charset=utf-8"],
+      [".xml", "application/xml; charset=utf-8"],
+    ]).get(extname(path).toLowerCase()) ?? "application/octet-stream"
+  );
+}
+
+function localContentType(routePath, filePath) {
+  const headersPath = join(siteDir, "_headers");
+  if (!existsSync(headersPath)) fail(`site/_headers missing local file ${headersPath}`);
+  let contentType = defaultStaticContentType(filePath);
+  for (const rule of parseHeadersFile(readFileSync(headersPath, "utf8"))) {
+    if (!headerPatternMatches(rule.pattern, routePath)) continue;
+    const declared = rule.headers.get("content-type");
+    if (declared) contentType = declared;
+  }
+  return contentType;
+}
+
 async function readLocal(route) {
   const path = fileForPath(route.path);
-  if (!existsSync(path)) fail(`${route.path} missing local file ${path}`);
+  if (!existsSync(path)) {
+    return { status: 404, contentType: "", body: "", finalUrl: route.path };
+  }
   return {
     status: 200,
-    contentType: route.type,
+    contentType: localContentType(route.path, path),
     body: readFileSync(path, "utf8"),
     finalUrl: route.path,
   };
@@ -167,6 +237,42 @@ function extractMarkdownLinks(body) {
   return [...new Set(links)];
 }
 
+function assertCodexPromptTransportContract(bodies) {
+  const required = new Map([
+    [
+      "/llms.txt",
+      [
+        "Codex new and resume prompts use stdin.",
+        "`codex_fork_session` remains argv-bound",
+        "non-retryable `input_too_large`",
+      ],
+    ],
+    [
+      "/agents.md",
+      [
+        "Codex new and resume prompts use stdin.",
+        "`codex_fork_session` remains argv-bound",
+        "non-retryable `input_too_large`",
+      ],
+    ],
+    ["/tools.md", ["`codex_fork_session`", "prompt remains argv-bound", "input_too_large"]],
+  ]);
+
+  for (const [path, fragments] of required) {
+    const body = bodies.get(path);
+    if (typeof body !== "string") fail(`${path} is unavailable for prompt transport validation`);
+    const normalized = body.replace(/\s+/g, " ");
+    for (const fragment of fragments) {
+      if (!normalized.includes(fragment)) {
+        fail(`${path} is missing the Codex prompt transport contract fragment: ${fragment}`);
+      }
+    }
+    if (/\bCodex prompts use stdin\b/.test(normalized)) {
+      fail(`${path} overgeneralizes Codex stdin support and omits codex_fork_session`);
+    }
+  }
+}
+
 async function assertInternalLink(url) {
   const parsed = new URL(url);
   if (parsed.hostname !== "llm-cli-gateway.dev") return;
@@ -193,7 +299,9 @@ async function main() {
       fail(`${route.path} returned ${result.status}`);
     }
     if (route.type && !result.contentType.toLowerCase().startsWith(route.type)) {
-      fail(`${route.path} content-type "${result.contentType}" does not start with "${route.type}"`);
+      fail(
+        `${route.path} content-type "${result.contentType}" does not start with "${route.type}"`
+      );
     }
     if (isHtmlHomepage(result.body) && route.path !== "/") {
       fail(`${route.path} returned homepage HTML`);
@@ -201,6 +309,9 @@ async function main() {
     if (route.json) {
       const value = parseJson(route, result.body);
       assertRequired(route, value);
+      if (route.path === "/tools.fixture.json") {
+        assertNoPublicInternalMcpAliases(value, route.path);
+      }
       if (route.path.includes("catalog")) {
         for (const href of extractCatalogLinks(value)) {
           await assertInternalLink(href);
@@ -213,6 +324,8 @@ async function main() {
     }
     bodies.set(route.path, result.body);
   }
+
+  assertCodexPromptTransportContract(bodies);
 
   for (const route of routes.filter(r => r.equivalentTo)) {
     const source = bodies.get(route.equivalentTo);
@@ -245,7 +358,9 @@ async function main() {
     fail("unknown path returned homepage HTML");
   }
 
-  process.stdout.write(`site discovery validation passed (${mode}${baseUrl ? ` ${baseUrl}` : ""})\n`);
+  process.stdout.write(
+    `site discovery validation passed (${mode}${baseUrl ? ` ${baseUrl}` : ""})\n`
+  );
 }
 
 main().catch(error => {

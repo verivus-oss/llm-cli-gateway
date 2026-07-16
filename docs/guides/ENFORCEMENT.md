@@ -48,6 +48,7 @@ if (uri === "docs://best-practices") {
 **Tools to Add:**
 
 #### ESLint Configuration
+
 ```json
 // .eslintrc.json
 {
@@ -86,6 +87,7 @@ if (uri === "docs://best-practices") {
 ```
 
 #### Prettier Configuration
+
 ```json
 // .prettierrc
 {
@@ -98,11 +100,13 @@ if (uri === "docs://best-practices") {
 ```
 
 **Installation:**
+
 ```bash
 npm install --save-dev eslint @typescript-eslint/parser @typescript-eslint/eslint-plugin prettier eslint-config-prettier
 ```
 
 **Package.json scripts:**
+
 ```json
 {
   "scripts": {
@@ -121,6 +125,7 @@ npm install --save-dev eslint @typescript-eslint/parser @typescript-eslint/eslin
 **Tool:** Husky + lint-staged
 
 **Installation:**
+
 ```bash
 npm install --save-dev husky lint-staged
 npx husky install
@@ -132,21 +137,19 @@ npx husky install
 // package.json
 {
   "lint-staged": {
-    "*.ts": [
-      "eslint --fix",
-      "prettier --write",
-      "vitest related --run"
-    ]
+    "*.ts": ["eslint --fix", "prettier --write", "vitest related --run"]
   }
 }
 ```
 
 **Create hook:**
+
 ```bash
 npx husky add .husky/pre-commit "npx lint-staged"
 ```
 
 **Enforces:**
+
 - Code formatting
 - Linting rules
 - Tests must pass before commit
@@ -174,7 +177,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v3
         with:
-          node-version: '20'
+          node-version: "20"
 
       - name: Install dependencies
         run: npm ci
@@ -192,18 +195,19 @@ jobs:
         run: npm test
 
       - name: Check test coverage
-        run: npm run test -- --coverage --coverage.threshold.lines=80
+        run: npm run test -- --coverage
 
       - name: Dependency audit
         run: npm audit --audit-level=moderate
 ```
 
 **Enforces:**
+
 - ✅ TypeScript compiles without errors
 - ✅ All linting rules pass
 - ✅ Code is properly formatted
 - ✅ All tests pass
-- ✅ Minimum 80% test coverage
+- ✅ Minimum 70% line/function/statement and 60% branch coverage
 - ✅ No high/critical security vulnerabilities
 
 ---
@@ -248,7 +252,11 @@ export function validateToolDescription(description: string): boolean {
 // Test these validators
 // src/__tests__/validators.test.ts
 import { describe, it, expect } from "vitest";
-import { validateToolName, validateErrorMessage, validateToolDescription } from "../validators/mcp-validators";
+import {
+  validateToolName,
+  validateErrorMessage,
+  validateToolDescription,
+} from "../validators/mcp-validators";
 
 describe("MCP Validators", () => {
   describe("validateToolName", () => {
@@ -272,7 +280,9 @@ describe("MCP Validators", () => {
     });
 
     it("should accept actionable error messages", () => {
-      expect(validateErrorMessage("Session xyz could not be retrieved. Available sessions: ...")).toBe(true);
+      expect(
+        validateErrorMessage("Session xyz could not be retrieved. Available sessions: ...")
+      ).toBe(true);
       expect(validateErrorMessage("Command failed with exit code 1. Please check...")).toBe(true);
     });
   });
@@ -298,7 +308,7 @@ function registerToolWithValidation(
   if (!validateToolName(name)) {
     throw new Error(
       `Tool name "${name}" does not follow snake_case convention. ` +
-      `See BEST_PRACTICES.md section "Tool Naming Standards"`
+        `See BEST_PRACTICES.md section "Tool Naming Standards"`
     );
   }
 
@@ -306,7 +316,7 @@ function registerToolWithValidation(
   if (!validateToolDescription(description)) {
     throw new Error(
       `Tool description for "${name}" is not clear enough. ` +
-      `See BEST_PRACTICES.md section "Instructions Are Context"`
+        `See BEST_PRACTICES.md section "Instructions Are Context"`
     );
   }
 
@@ -323,13 +333,16 @@ function registerToolWithValidation(
 
 ```markdown
 # .cursorrules
+
 You are working on the llm-cli-gateway MCP server.
 
 CRITICAL: Before making ANY changes to this codebase:
+
 1. Read the best practices in docs/guides/BEST_PRACTICES.md
 2. Follow ALL conventions outlined in BEST_PRACTICES.md
 
 Key Rules:
+
 - Tool names MUST use snake_case (e.g., claude_request, not claudeRequest)
 - Error messages MUST be actionable, not just "not found"
 - Logging MUST go to stderr, never stdout (MCP protocol uses stdout)
@@ -340,6 +353,7 @@ Key Rules:
 - DRY principle - no duplicate constants or logic
 
 When adding new tools:
+
 1. Use Zod for input validation
 2. Provide clear descriptions (20+ chars with action words)
 3. Return structured error responses via createErrorResponse()
@@ -347,28 +361,32 @@ When adding new tools:
 5. Update BEST_PRACTICES.md if introducing new patterns
 
 When adding retry/resilience logic:
+
 1. Always add jitter to exponential backoff
 2. Ensure operations are idempotent
 3. Use appropriate circuit breaker
 4. Log retry attempts with context
 
 Test Requirements:
-- Minimum 80% coverage
+
+- Minimum 70% line/function/statement and 60% branch coverage
 - Both unit tests (isolation) and integration tests (real calls)
 - Follow AAA pattern (Arrange, Act, Assert)
 ```
 
 #### B. Add a CONTRIBUTING.md
 
-```markdown
+````markdown
 # Contributing to LLM CLI Gateway
 
 ## Before You Start
 
 **Read the best practices first:**
+
 ```bash
 cat docs/guides/BEST_PRACTICES.md
 ```
+````
 
 If you're an LLM working via MCP, read `docs/guides/BEST_PRACTICES.md` with your
 file tools (the `docs://best-practices` resource above is still a proposal).
@@ -376,6 +394,7 @@ file tools (the `docs://best-practices` resource above is still a proposal).
 ## Development Workflow
 
 1. **Setup**
+
    ```bash
    npm install
    npm run build
@@ -387,6 +406,7 @@ file tools (the `docs://best-practices` resource above is still a proposal).
    - Lint and format: `npm run lint:fix && npm run format`
 
 3. **Test**
+
    ```bash
    npm test
    npm run test -- --coverage
@@ -399,16 +419,18 @@ file tools (the `docs://best-practices` resource above is still a proposal).
 ## Code Review Checklist
 
 Before submitting PR, verify:
+
 - [ ] All tests pass (`npm test`)
 - [ ] TypeScript compiles (`npm run build`)
 - [ ] Linting passes (`npm run lint`)
 - [ ] Code is formatted (`npm run format:check`)
-- [ ] Test coverage >= 80%
+- [ ] Coverage meets 70% lines/functions/statements and 60% branches
 - [ ] No console.log statements (use logger)
 - [ ] Error messages are actionable
 - [ ] Tool names use snake_case
 - [ ] Best practices document updated (if new patterns added)
-```
+
+````
 
 ---
 
@@ -458,7 +480,7 @@ const sourceFiles = modifiedFiles.filter(f => f.endsWith(".ts") && !f.includes("
 if (sourceFiles.length > testFiles.length) {
   warn("📝 More source files than test files changed. Consider adding tests.");
 }
-```
+````
 
 ---
 
@@ -483,7 +505,7 @@ class BestPracticesMonitor {
       rule,
       severity,
       context,
-      timestamp: new Date()
+      timestamp: new Date(),
     });
 
     logger.warn(`[Best Practice Violation] ${rule}: ${context}`);
@@ -495,15 +517,18 @@ class BestPracticesMonitor {
 
   // Expose via MCP resource
   getViolationsReport() {
-    const grouped = this.violations.reduce((acc, v) => {
-      acc[v.rule] = (acc[v.rule] || 0) + 1;
-      return acc;
-    }, {} as Record<string, number>);
+    const grouped = this.violations.reduce(
+      (acc, v) => {
+        acc[v.rule] = (acc[v.rule] || 0) + 1;
+        return acc;
+      },
+      {} as Record<string, number>
+    );
 
     return {
       total: this.violations.length,
       byRule: grouped,
-      recent: this.violations.slice(-10)
+      recent: this.violations.slice(-10),
     };
   }
 }
@@ -525,24 +550,28 @@ if (!validateToolName(name)) {
 ## Implementation Priority
 
 ### Phase 1: Immediate (No LLM needed)
+
 1. ✅ Create docs/guides/BEST_PRACTICES.md (done)
 2. ✅ Create this docs/guides/ENFORCEMENT.md (in progress)
 3. Add .cursorrules file
 4. Add CONTRIBUTING.md
 
 ### Phase 2: Development Tools (1-2 hours)
+
 5. Install and configure ESLint + Prettier
 6. Add npm scripts for linting/formatting
 7. Create custom MCP validators
 8. Add validator tests
 
 ### Phase 3: Automation (2-4 hours)
+
 9. Setup Husky + lint-staged
 10. Create GitHub Actions workflow
 11. Add best practices as MCP resource
 12. Setup Danger.js
 
 ### Phase 4: Monitoring (Optional)
+
 13. Add best practices violation tracking
 14. Expose metrics via MCP resource
 15. Add alerting for repeated violations
@@ -576,12 +605,14 @@ npm run build && npm run lint && npm test
 When an LLM (Claude, Codex, Gemini, Grok, or Mistral) is asked to modify this codebase:
 
 **Before making changes:**
+
 - [ ] Read `docs/guides/BEST_PRACTICES.md`
 - [ ] Check existing code patterns in the relevant file
 - [ ] Verify tool naming convention if adding new tools
 - [ ] Plan tests alongside code changes
 
 **While making changes:**
+
 - [ ] Follow snake_case for tool names
 - [ ] Use Zod for input validation
 - [ ] Provide actionable error messages
@@ -590,6 +621,7 @@ When an LLM (Claude, Codex, Gemini, Grok, or Mistral) is asked to modify this co
 - [ ] Keep session state minimal
 
 **After making changes:**
+
 - [ ] Run `npm run build` - verify TypeScript compiles
 - [ ] Run `npm run lint` - verify linting passes
 - [ ] Run `npm test` - verify all tests pass
@@ -597,6 +629,7 @@ When an LLM (Claude, Codex, Gemini, Grok, or Mistral) is asked to modify this co
 - [ ] Update BEST_PRACTICES.md if introducing new patterns
 
 **Self-validation prompt:**
+
 ```
 Before finalizing my changes, let me verify adherence to best practices:
 

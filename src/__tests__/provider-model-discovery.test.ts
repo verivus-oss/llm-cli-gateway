@@ -176,7 +176,6 @@ describe("provider-model-discovery", () => {
       "plan",
       "accept-edits",
       "auto-approve",
-      "custom",
     ]);
     expect(listing.configSources.some(s => s.keys.includes("VIBE_ACTIVE_MODEL"))).toBe(true);
   });

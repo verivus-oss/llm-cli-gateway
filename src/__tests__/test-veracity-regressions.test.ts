@@ -235,7 +235,6 @@ describe("REGRESSIONS C — Phase 4 contracts must expose slice α/γ/δ params"
       "agents",
       "promptFile",
       "promptJson",
-      "single",
       "experimentalMemory",
       "noAltScreen",
       "noMemory",
@@ -247,6 +246,7 @@ describe("REGRESSIONS C — Phase 4 contracts must expose slice α/γ/δ params"
     ]) {
       expect(params).toContain(name);
     }
+    expect(params).not.toContain("single");
   });
 
   it("Mistral contract exposes slice γ trust + slice δ maxTurns + maxPrice", () => {
@@ -320,6 +320,17 @@ describe("REGRESSIONS E — both sync and async tools expose slice fields", () =
     expect(Object.keys(shape)).toContain("skipTrust");
   });
 
+  it.each(["gemini_request", "gemini_request_async"])(
+    "%s exposes the closed Antigravity approvalMode enum",
+    name => {
+      const { shape } = getRegisteredToolSchema(name);
+      for (const mode of ["default", "auto_edit", "yolo", "plan"]) {
+        expect(shape.approvalMode.safeParse(mode).success).toBe(true);
+      }
+      expect(shape.approvalMode.safeParse("accept-edits").success).toBe(false);
+    }
+  );
+
   it.each(["grok_request", "grok_request_async"])("%s exposes maxTurns", name => {
     const { shape } = getRegisteredToolSchema(name);
     expect(Object.keys(shape)).toContain("maxTurns");
@@ -338,7 +349,6 @@ describe("REGRESSIONS E — both sync and async tools expose slice fields", () =
       "agents",
       "promptFile",
       "promptJson",
-      "single",
       "experimentalMemory",
       "noAltScreen",
       "noMemory",
@@ -350,6 +360,7 @@ describe("REGRESSIONS E — both sync and async tools expose slice fields", () =
     ]) {
       expect(fields).toContain(param);
     }
+    expect(fields).not.toContain("single");
   });
 
   it.each(["mistral_request", "mistral_request_async"])(

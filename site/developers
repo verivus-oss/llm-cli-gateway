@@ -20,6 +20,7 @@ llm-cli-gateway --transport=http</code></pre>
         <li><a href="/openapi.json">OpenAPI spec</a></li>
         <li><a href="/tools.md">MCP tool list</a></li>
         <li><a href="/guides/coding-agent-gateway-technical-guide.md">Coding-agent gateway technical guide</a></li>
+        <li><a href="/guides/personal-agent-config-kit.md">Personal Agent Config Kit guide</a></li>
         <li><a href="/agents.md">Agent onboarding guide</a></li>
         <li><a href="https://github.com/verivus-oss/llm-cli-gateway">GitHub repository</a></li>
         <li><a href="https://www.npmjs.com/package/llm-cli-gateway">npm package</a></li>

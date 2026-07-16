@@ -35,12 +35,22 @@ function runtime(provider: ValidationProvider, installed = true): ProviderRuntim
 
 function fakeAsyncJobManager() {
   const jobs = new Map<string, any>();
-  const startCalls: Array<{ cli: ValidationProvider; args: string[]; correlationId: string }> = [];
+  const startCalls: Array<{
+    cli: ValidationProvider;
+    args: string[];
+    correlationId: string;
+    stdin?: string;
+  }> = [];
   return {
     startCalls,
     manager: {
-      startJob(cli: ValidationProvider, args: string[], correlationId: string): AsyncJobSnapshot {
-        startCalls.push({ cli, args, correlationId });
+      startJobWithDedup(
+        cli: ValidationProvider,
+        args: string[],
+        correlationId: string,
+        options: { stdin?: string } = {}
+      ): { snapshot: AsyncJobSnapshot; deduped: boolean } {
+        startCalls.push({ cli, args, correlationId, stdin: options.stdin });
         const id = `job-${cli}-${startCalls.length}`;
         const snapshot: AsyncJobSnapshot = {
           id,
@@ -66,7 +76,7 @@ function fakeAsyncJobManager() {
           stdoutTruncated: false,
           stderrTruncated: false,
         });
-        return snapshot;
+        return { snapshot, deduped: false };
       },
       getJobResult(jobId: string) {
         return jobs.get(jobId) ?? null;
@@ -281,7 +291,7 @@ describe("Layer 4 validation orchestration", () => {
     expect(judgePrompt).not.toContain('"provider": "grok"');
   });
 
-  it("U22 routes mistral as a validation provider and uses -p prompt args", () => {
+  it("U22 routes mistral as a validation provider and uses an inline -p prompt", () => {
     const fake = fakeAsyncJobManager();
     const report = startValidationRun(
       {
@@ -298,8 +308,8 @@ describe("Layer 4 validation orchestration", () => {
     expect(report.modelList).toEqual(["mistral"]);
     expect(fake.startCalls).toHaveLength(1);
     expect(fake.startCalls[0].cli).toBe("mistral");
-    // Mistral mirrors Grok's headless surface: `-p PROMPT`
-    expect(fake.startCalls[0].args[0]).toBe("-p");
+    // Mistral mirrors Grok's headless surface: `-p=PROMPT`.
+    expect(fake.startCalls[0].args[0]).toMatch(/^-p=/);
   });
 
   it("U22 skips mistral when its runtime is not installed", () => {

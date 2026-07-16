@@ -56,10 +56,10 @@ function parsePolicy(policy?: ApprovalPolicy): ApprovalPolicy {
   return "balanced";
 }
 
-// F15: under MCP-managed approval, a full permission / sandbox bypass is a
-// deny-by-default escalation — the heuristic score must not be able to approve
-// it. Operators opt back in explicitly. `decide()` is only ever reached on the
-// `approvalStrategy:"mcp_managed"` path.
+// F15: under MCP-managed approval, a full permission / sandbox bypass or an
+// unverified execution posture is a deny-by-default escalation. The heuristic
+// score must not be able to approve it until the operator opts in explicitly.
+// `decide()` is only ever reached on the `approvalStrategy:"mcp_managed"` path.
 export function bypassAllowedByOperator(env: NodeJS.ProcessEnv = process.env): boolean {
   const raw = (env.LLM_GATEWAY_APPROVAL_ALLOW_BYPASS || "").trim().toLowerCase();
   return raw === "1" || raw === "true" || raw === "yes" || raw === "on";
@@ -103,7 +103,7 @@ export class ApprovalManager {
 
     if (request.bypassRequested) {
       score += 3;
-      reasons.push("Request includes full permission bypass");
+      reasons.push("Request includes a bypass or unverified execution posture");
     }
 
     if (request.fullAuto) {
@@ -185,14 +185,14 @@ export class ApprovalManager {
       }
     }
 
-    // F15: deny-by-default for full permission/sandbox bypass under MCP-managed
-    // approval, regardless of score, unless the operator explicitly opted in.
-    // (`fullAuto` — e.g. codex `--sandbox workspace-write` — is sandboxed and
-    // stays score-governed; only the unsandboxed bypass is hard-denied.)
+    // F15: deny-by-default for full permission/sandbox bypasses and unverified
+    // execution postures under MCP-managed approval, regardless of score, until
+    // the operator explicitly opts in. (`fullAuto`, for example Codex
+    // `--sandbox workspace-write`, is sandboxed and remains score-governed.)
     const bypassDeniedByDefault = request.bypassRequested && !bypassAllowedByOperator();
     if (bypassDeniedByDefault) {
       reasons.push(
-        "Full permission/sandbox bypass denied by default under MCP-managed approval " +
+        "Bypass or unverified execution posture denied by default under MCP-managed approval " +
           "(set LLM_GATEWAY_APPROVAL_ALLOW_BYPASS=1 to permit)"
       );
     }

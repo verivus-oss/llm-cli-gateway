@@ -44,6 +44,7 @@ interface RegisteredTool {
 }
 
 describe("F3b-2 job / request ownership isolation", () => {
+  const PROVIDER_SESSION_ID = "019ec070-26ab-7fa3-b66b-72fc6964f250";
   let tmp: string;
   let store: MemoryJobStore;
   let flight: FlightRecorder;
@@ -190,6 +191,84 @@ describe("F3b-2 job / request ownership isolation", () => {
     );
     expect(alice.success).toBe(true);
     expect(alice.request.correlationId).toBe("req-alice");
+  });
+
+  it("llm_request_result redacts native provider ids for the remote owner before slicing", async () => {
+    const response = `${"x".repeat(995)}${PROVIDER_SESSION_ID} trailing response`;
+    runWithRequestContext(ctx("alice"), () =>
+      flight.logStart({
+        correlationId: "req-native-id",
+        cli: "grok",
+        model: "grok-4.5",
+        prompt: `prompt ${PROVIDER_SESSION_ID}`,
+      })
+    );
+    flight.logComplete("req-native-id", {
+      response,
+      durationMs: 1,
+      retryCount: 0,
+      circuitBreakerState: "closed",
+      optimizationApplied: false,
+      exitCode: 0,
+      status: "completed",
+      providerSessionId: PROVIDER_SESSION_ID,
+    });
+
+    const sliced = await call(
+      "llm_request_result",
+      { correlationId: "req-native-id", maxChars: 1000, includePrompt: true },
+      "alice"
+    );
+    expect(sliced.success).toBe(true);
+    expect(JSON.stringify(sliced)).not.toContain(PROVIDER_SESSION_ID);
+    expect(sliced.request.response).not.toContain(PROVIDER_SESSION_ID.slice(0, 5));
+    // The replacement begins before the original native id would have crossed
+    // the public slice boundary. A slice-first implementation would leak xxxxx.
+    expect(sliced.request.response).toContain("[reda");
+
+    const full = await call(
+      "llm_request_result",
+      { correlationId: "req-native-id", maxChars: 200000, includePrompt: true },
+      "alice"
+    );
+    expect(full.request.response).toContain("[redacted-session-id]");
+    expect(full.request.prompt).toBe("prompt [redacted-session-id]");
+  });
+
+  it("llm_request_result scrubs error and thinking fields for a remote owner", async () => {
+    runWithRequestContext(ctx("alice"), () =>
+      flight.logStart({
+        correlationId: "req-native-failure-fields",
+        cli: "grok",
+        model: "grok-4.5",
+        prompt: `prompt ${PROVIDER_SESSION_ID}`,
+        sessionId: PROVIDER_SESSION_ID,
+      })
+    );
+    flight.logComplete("req-native-failure-fields", {
+      response: `response ${PROVIDER_SESSION_ID}`,
+      durationMs: 1,
+      retryCount: 0,
+      circuitBreakerState: "closed",
+      optimizationApplied: false,
+      exitCode: 1,
+      errorMessage: `error ${PROVIDER_SESSION_ID}`,
+      thinkingBlocks: [`thinking ${PROVIDER_SESSION_ID}`],
+      status: "failed",
+      providerSessionId: PROVIDER_SESSION_ID,
+    });
+
+    const remote = await call(
+      "llm_request_result",
+      { correlationId: "req-native-failure-fields", maxChars: 200000, includePrompt: true },
+      "alice"
+    );
+
+    expect(remote.success).toBe(true);
+    expect(JSON.stringify(remote)).not.toContain(PROVIDER_SESSION_ID);
+    expect(remote.request.sessionId).toBe("[redacted-session-id]");
+    expect(remote.request.errorMessage).toBe("error [redacted-session-id]");
+    expect(remote.request.thinkingBlocks).toEqual(["thinking [redacted-session-id]"]);
   });
 
   it("local principal can read legacy-unowned jobs/requests; a remote principal cannot", async () => {

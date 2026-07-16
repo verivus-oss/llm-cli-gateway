@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { handleCursorRequest, prepareCursorRequest, type GatewayServerRuntime } from "../index.js";
+import {
+  handleCursorRequest,
+  handleCursorRequestAsync,
+  prepareCursorRequest,
+  type GatewayServerRuntime,
+} from "../index.js";
 import { runWithRequestContext } from "../request-context.js";
 import type { WorkspaceRegistry } from "../workspace-registry.js";
 
@@ -96,8 +101,8 @@ function argsOf(result: { args: string[] } | { content: unknown }): string[] {
 }
 
 describe("prepareCursorRequest", () => {
-  it("emits cursor-agent print mode with the prompt as the final positional", () => {
-    expect(argsOf(prep({ prompt: "review this" }))).toEqual(["--print", "review this"]);
+  it("emits cursor-agent print mode with the prompt after an option boundary", () => {
+    expect(argsOf(prep({ prompt: "review this" }))).toEqual(["--print", "--", "review this"]);
   });
 
   it("rejects an empty prompt", () => {
@@ -144,13 +149,14 @@ describe("prepareCursorRequest", () => {
       "/extra-a",
       "--add-dir",
       "/extra-b",
+      "--",
       "x",
     ]);
   });
 
   it("does not emit --output-format for the default text mode", () => {
     const args = argsOf(prep({ prompt: "x", outputFormat: "text" }));
-    expect(args).toEqual(["--print", "x"]);
+    expect(args).toEqual(["--print", "--", "x"]);
   });
 
   it("rewrites the prompt text when optimizePrompt is true", () => {
@@ -160,10 +166,12 @@ describe("prepareCursorRequest", () => {
     expect(args.at(-1)!.length).toBeLessThanOrEqual(raw.length);
   });
 
-  it("denies high-impact Cursor flags under mcp_managed approval when bypass is not enabled", () => {
+  it("rejects mcp_managed because Cursor cannot isolate ambient MCP configuration", () => {
     const result = prep({ prompt: "x", force: true, approvalStrategy: "mcp_managed" });
     expect("args" in result).toBe(false);
-    expect(JSON.stringify(result)).toContain("denied by MCP-managed approval policy");
+    const text = JSON.stringify(result);
+    expect(text).toContain("approvalStrategy:mcp_managed is unavailable for cursor");
+    expect(text).toContain("cannot isolate ambient MCP configuration");
   });
 });
 
@@ -181,6 +189,56 @@ describe("handleCursorRequest", () => {
     );
     expect(JSON.stringify(res)).toContain("transport=acp does not support");
     expect(JSON.stringify(res)).toContain("mode");
+  });
+
+  it("rejects managed MCP before reading the Cursor workspace registry", async () => {
+    const runtime = fakeRuntime();
+    let workspaceRegistryRead = false;
+    Object.defineProperty(runtime, "workspaces", {
+      configurable: true,
+      get() {
+        workspaceRegistryRead = true;
+        throw new Error("workspace registry should not be read");
+      },
+    });
+
+    const res = await handleCursorRequest(
+      { sessionManager: runtime.sessionManager, logger: runtime.logger, runtime } as never,
+      {
+        prompt: "x",
+        workspace: "/workspace/should-not-be-probed",
+        approvalStrategy: "mcp_managed",
+        optimizePrompt: false,
+      }
+    );
+
+    expect(JSON.stringify(res)).toContain("approvalStrategy:mcp_managed is unavailable for cursor");
+    expect(workspaceRegistryRead).toBe(false);
+  });
+
+  it("rejects async managed MCP before reading the Cursor workspace registry", async () => {
+    const runtime = fakeRuntime();
+    let workspaceRegistryRead = false;
+    Object.defineProperty(runtime, "workspaces", {
+      configurable: true,
+      get() {
+        workspaceRegistryRead = true;
+        throw new Error("workspace registry should not be read");
+      },
+    });
+
+    const res = await handleCursorRequestAsync(
+      { sessionManager: runtime.sessionManager, logger: runtime.logger, runtime } as never,
+      {
+        prompt: "x",
+        workspace: "/workspace/should-not-be-probed",
+        approvalStrategy: "mcp_managed",
+        optimizePrompt: false,
+      }
+    );
+
+    expect(JSON.stringify(res)).toContain("approvalStrategy:mcp_managed is unavailable for cursor");
+    expect(workspaceRegistryRead).toBe(false);
   });
 
   it("requires a registered workspace before accepting raw Cursor paths over remote HTTP", async () => {

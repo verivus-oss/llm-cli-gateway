@@ -121,12 +121,18 @@ not enter the tree (pin the caret range or hold the release).
 Before writing any ledger change, get independent validation via the `gtwy` MCP
 from at least codex, grok, and mistral, each as an independent reviewer:
 
-- `createNewSession: true`, read-only tool access (no resume, no commits);
+- `createNewSession: true`, no resume or commits; prompt every reviewer to make
+  no mutations. Codex retains its default read-only sandbox unless a task
+  explicitly requires more access;
 - hand each the `report.json` + the filled contracts, and ask them to verify the
   classification and the safe-to-upgrade calls **against npm / the advisory DBs /
   the changelog directly**, not against your summary;
-- codex via `codex_request` (sandbox read-only); mistral `permissionMode:
-  auto-approve` (its `plan` mode blocks file reads); grok high effort. Antigravity
+- Codex via `codex_request` (default read-only sandbox), Mistral with
+  `permissionMode:"accept-edits"` (the gateway's non-interactive default; it
+  accepts workspace edits, so retain the no-mutation instruction), and Grok at
+  high effort. All three use `approvalStrategy:"legacy"` and omit
+  `approvalPolicy`: `mcp_managed` is Claude-only and is rejected before launch
+  because their adapters cannot isolate ambient MCP configuration. Antigravity
   refuses security reviews and a same-repo `claude_request` reviewer has a
   write-access hazard, so prefer Codex + Grok + Mistral.
 

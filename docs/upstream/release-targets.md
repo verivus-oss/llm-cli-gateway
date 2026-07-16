@@ -29,7 +29,7 @@ If a provider CLI is not installed in the release validation environment, record
 `not installed` and say which contract-only checks were run instead. Do not
 claim installed-binary compatibility for that provider in the release notes.
 
-## Current contract refresh baseline
+## Most recent recorded contract refresh baseline
 
 ### Post-v2.17.0 contract refresh - 2026-07-13
 
@@ -37,6 +37,11 @@ This is a pending contract-maintenance probe, not retrospective release
 evidence for v2.17.0. The values and hashes record the installed provider
 artifacts used to prepare the next contract update. Copy or re-probe this table
 for a release candidate before labelling it a release baseline.
+
+This dated artifact table is not the active source of truth after a newer
+contract target is accepted. Read `PROVIDER_TARGET_VERSIONS` in
+`src/provider-definitions.ts` for the current code target, then create a new
+dated table with fresh artifact hashes when recording the next probe.
 
 | Provider           | Gateway surface                                              | Executable     | Target/probed CLI version         | Artifact hashed           | Artifact SHA-256                                                   | Validation status                  | Notes for agents                                                                                                                      |
 | ------------------ | ------------------------------------------------------------ | -------------- | --------------------------------- | ------------------------- | ------------------------------------------------------------------ | ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |

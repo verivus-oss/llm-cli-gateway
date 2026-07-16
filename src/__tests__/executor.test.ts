@@ -13,7 +13,7 @@ import {
 import { spawn } from "child_process";
 import type { ChildProcess } from "child_process";
 import { delimiter, win32 } from "path";
-import { mkdirSync, mkdtempSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 
@@ -98,6 +98,15 @@ describe("executeCli", () => {
       const result = await executeCli("sh", ["-c", "echo error >&2; exit 1"]);
       expect(result.stderr.trim()).toBe("error");
       expect(result.code).toBe(1);
+    });
+
+    it("returns provider stderr containing an argument-list phrase as an ordinary exit", async () => {
+      const result = await executeCli("sh", ["-c", "echo 'Argument list too long' >&2; exit 23"]);
+
+      expect(result).toMatchObject({
+        code: 23,
+        stderr: expect.stringContaining("Argument list too long"),
+      });
     });
 
     it("should handle commands that produce large output", async () => {
@@ -288,9 +297,30 @@ describe("executeCli", () => {
       expect(result.stdout.trim()).toBe("/tmp");
     });
 
-    it("should default to current directory when cwd not specified", async () => {
-      const result = await executeCli("pwd", []);
-      expect(result.stdout.trim()).toBeTruthy();
+    it("uses a fresh neutral directory when cwd is not specified", async () => {
+      const contaminatedRepo = mkdtempSync(join(tmpdir(), "gateway-cwd-contamination-"));
+      const previousCwd = process.cwd();
+      writeFileSync(join(contaminatedRepo, "AGENTS.md"), "repo-only instructions\n");
+      writeFileSync(join(contaminatedRepo, "CLAUDE.md"), "repo-only instructions\n");
+
+      try {
+        process.chdir(contaminatedRepo);
+        const result = await executeCli("sh", [
+          "-c",
+          "pwd; test -e AGENTS.md && echo AGENTS_VISIBLE; test -e CLAUDE.md && echo CLAUDE_VISIBLE; true",
+        ]);
+        const [childCwd, ...visibleFiles] = result.stdout.trim().split("\n");
+
+        expect(childCwd).toBeTruthy();
+        expect(childCwd).not.toBe(contaminatedRepo);
+        expect(visibleFiles).not.toContain("AGENTS_VISIBLE");
+        expect(visibleFiles).not.toContain("CLAUDE_VISIBLE");
+        // The fallback workspace is scoped to the child lifecycle.
+        expect(existsSync(childCwd!)).toBe(false);
+      } finally {
+        process.chdir(previousCwd);
+        rmSync(contaminatedRepo, { recursive: true, force: true });
+      }
     });
   });
 

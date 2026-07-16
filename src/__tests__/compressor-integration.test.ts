@@ -241,7 +241,11 @@ describe("async llm_job_result wiring (spec 5.2 / 5.4 / 9.9)", () => {
     );
   }
 
-  async function callJobResult(store: MemoryJobStore, jobId: string): Promise<any> {
+  async function callJobResult(
+    store: MemoryJobStore,
+    jobId: string,
+    params: Record<string, unknown> = {}
+  ): Promise<any> {
     const mgr = new AsyncJobManager(undefined, undefined, store, new NoopFlightRecorder());
     const server = createGatewayServer({
       asyncJobManager: mgr,
@@ -249,7 +253,7 @@ describe("async llm_job_result wiring (spec 5.2 / 5.4 / 9.9)", () => {
     });
     const tool = (server as any)._registeredTools["llm_job_result"];
     const res = await runWithRequestContext({ principal: "local" } as any, () =>
-      tool.handler({ jobId, maxChars: 200000 }, {})
+      tool.handler({ jobId, maxChars: 200000, ...params }, {})
     );
     return JSON.parse(res.content[0].text);
   }
@@ -273,6 +277,45 @@ describe("async llm_job_result wiring (spec 5.2 / 5.4 / 9.9)", () => {
     expect(raw.result.stdout.length).toBeLessThan(REPLY.length);
     expect("text" in raw.parsed).toBe(false);
     expect(raw.parsed.usage).toBeTruthy();
+  });
+
+  it("returns concatenable raw pages for complete forensic retrieval", async () => {
+    const store = new MemoryJobStore();
+    const nd = claudeNdjson(REPLY);
+    seed(store, "jpages", false, nd);
+
+    const first = await callJobResult(store, "jpages", {
+      maxChars: 20,
+      rawOutput: true,
+      stdoutOffsetChars: 0,
+      stderrOffsetChars: 0,
+    });
+    const second = await callJobResult(store, "jpages", {
+      maxChars: 20,
+      rawOutput: true,
+      stdoutOffsetChars: first.result.stdoutNextOffsetChars,
+      stderrOffsetChars: first.result.stderrNextOffsetChars ?? 0,
+    });
+
+    expect(first.result.stdout).toContain('{"type":"assistant"');
+    expect(first.result.stdoutOffsetChars).toBe(0);
+    expect(first.result.stdoutTotalChars).toBe(nd.length);
+    expect(first.result.stdoutNextOffsetChars).toBe(20);
+    expect(first.parsed).toBeUndefined();
+    expect(first.result.stdout + second.result.stdout).toBe(nd.slice(0, 40));
+  });
+
+  it("rejects display-mode offsets because transformed pages cannot concatenate", async () => {
+    const store = new MemoryJobStore();
+    seed(store, "jdisplay-offset", false, claudeNdjson(REPLY));
+
+    const response = await callJobResult(store, "jdisplay-offset", {
+      maxChars: 20,
+      stdoutOffsetChars: 20,
+    });
+
+    expect(response.success).toBe(false);
+    expect(response.error).toMatch(/rawOutput:true/);
   });
 
   it("dedup key folds the effective decision in both directions (spec 9.9)", () => {

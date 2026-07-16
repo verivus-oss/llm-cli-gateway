@@ -9,6 +9,7 @@
 - [/agents.md](https://llm-cli-gateway.dev/agents.md) - full agent-facing guide
 - [/tools.md](https://llm-cli-gateway.dev/tools.md) - runtime-derived MCP tool index
 - [/guides/coding-agent-gateway-technical-guide.md](https://llm-cli-gateway.dev/guides/coding-agent-gateway-technical-guide.md) - architecture and implementation guide for coding-agent orchestration
+- [/guides/personal-agent-config-kit.md](https://llm-cli-gateway.dev/guides/personal-agent-config-kit.md) - single-developer Personal Agent Config Kit guide
 - [/workflows/cross-model-review.md](https://llm-cli-gateway.dev/workflows/cross-model-review.md) - deterministic cross-model review workflow demo
 - [/DISCOVERY.md](https://llm-cli-gateway.dev/DISCOVERY.md) - discovery route matrix and validation contract
 - [/llms.txt](https://llm-cli-gateway.dev/llms.txt) - compact retrieval entry point

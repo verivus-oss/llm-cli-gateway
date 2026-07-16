@@ -28,7 +28,7 @@ When adding retry/resilience logic:
 4. Log retry attempts with context
 
 Test Requirements:
-- Minimum 80% coverage
+- Enforced coverage: 70% lines, functions, and statements; 60% branches
 - Both unit tests (isolation) and integration tests (real calls)
 - Follow AAA pattern (Arrange, Act, Assert)
 

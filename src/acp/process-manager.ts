@@ -37,7 +37,7 @@
  * `shell:false`.
  */
 
-import { spawn as nodeSpawn } from "node:child_process";
+import { spawn as nodeSpawn, type ChildProcess } from "node:child_process";
 import { mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import type { Readable, Writable } from "node:stream";
@@ -46,12 +46,24 @@ import { AcpClient, type AcpClientCallbacks, type HostServices } from "./client.
 import { AcpError, AcpProcessExitError, ProviderUnavailableError } from "./errors.js";
 import {
   JsonRpcStdioTransport,
+  type AcpTransportTerminal,
   type JsonRpcInboundRequest,
   type JsonRpcNotification,
 } from "./json-rpc-stdio.js";
 import { getAcpProviderEntry } from "./provider-registry.js";
 import type { AcpConfig, AcpProviderConfig } from "../config.js";
-import { envWithExtendedPath, getExtendedPath } from "../executor.js";
+import {
+  envWithExtendedPath,
+  getExtendedPath,
+  killProcessGroup,
+  registerProcessGroup,
+  shouldDetachProviderProcess,
+  unregisterProcessGroup,
+} from "../executor.js";
+import {
+  createNeutralExecutionWorkspace,
+  type NeutralExecutionWorkspace,
+} from "../neutral-workspace.js";
 import { applySpawnEnvIsolation } from "../spawn-env-isolation.js";
 import type { Logger } from "../logger.js";
 import { noopLogger } from "../logger.js";
@@ -97,6 +109,12 @@ export interface AcpChildProcess {
   on(event: "error", listener: (err: Error) => void): unknown;
   /** Send a termination signal. Returns whether the signal was delivered. */
   kill(signal?: TerminationSignal | number): boolean;
+  /**
+   * Gateway-owned process-tree termination surface. The default spawner sets
+   * this for its detached process group; injected single-process spawners may
+   * omit it and retain their existing `kill` behavior.
+   */
+  killProcessTree?(signal: TerminationSignal): boolean;
 }
 
 /** Fully-resolved spawn parameters. Always executable + argv; never a shell string. */
@@ -137,8 +155,9 @@ export interface StartProviderOptions {
   readonly provider: CliType;
   /**
    * Working directory for the provider process. MUST be a real, controlled
-   * directory (resolved workspace or a safe temp dir). When omitted, a
-   * per-provider subdirectory of the OS temp dir is used.
+   * directory (resolved workspace or a safe temp dir). When omitted, the
+   * manager creates a fresh private neutral directory and removes it after the
+   * provider process exits.
    */
   readonly cwd?: string;
   /** Gateway-owned host services for agent callbacks. */
@@ -236,13 +255,13 @@ export function buildProviderEnv(
  *
  * The provider config's command/args take precedence (operator override); the
  * registry entrypoint is the fallback. Either way the result is executable +
- * argv only.
+ * argv only. The caller must supply the concrete authorized or neutral cwd.
  */
 export function resolveProviderSpawn(
   provider: CliType,
   config: AcpConfig,
   baseEnv: ProcessEnv,
-  cwd?: string,
+  cwd: string,
   extraArgs: readonly string[] = []
 ): ResolvedAcpSpawn {
   const providerConfig = config.providers[provider];
@@ -286,7 +305,7 @@ export function resolveProviderSpawn(
   return {
     command,
     args: [...combinedArgs],
-    cwd: cwd ?? `${tmpdir()}/llm-gateway-acp-${provider}`,
+    cwd,
     env: buildProviderEnv(provider, effectiveConfig, baseEnv),
   };
 }
@@ -297,18 +316,15 @@ export function resolveProviderSpawn(
  * real provider binary.
  */
 export const defaultSpawn: AcpSpawnFn = (resolved): AcpChildProcess => {
-  // Ensure the working directory exists before spawning. The default no-cwd path
-  // resolves to a gateway-owned `${tmpdir()}/llm-gateway-acp-<provider>` directory
-  // that may not exist on a clean host; passing a missing cwd to spawn yields
-  // ENOENT. `recursive: true` makes this idempotent and a no-op when the caller
-  // supplied an already-existing directory. Failures here are surfaced through the
-  // manager's spawn try/catch as a typed ProviderUnavailableError.
+  // Ensure the resolved working directory exists before spawning. Unscoped
+  // starts are already resolved by AcpProcessManager to a fresh private neutral
+  // workspace. Explicit workspace paths are gateway-authorized upstream.
+  // `recursive: true` is idempotent for either case; failures surface through
+  // the manager's spawn try/catch as a typed ProviderUnavailableError.
   //
-  // resolved.cwd is gateway-controlled: it is either a caller-supplied workspace
-  // path or the gateway-owned `${tmpdir()}/llm-gateway-acp-<provider>` default
-  // from resolveProviderSpawn. It is never derived from provider output, prompt
-  // text, or any agent-controlled value, so the non-literal-fs heuristic does not
-  // apply here.
+  // resolved.cwd is gateway-controlled: it is either an authorized workspace or
+  // a gateway-owned neutral directory. It is never derived from provider output
+  // or prompt text, so the non-literal-fs heuristic does not apply here.
   // eslint-disable-next-line security/detect-non-literal-fs-filename
   mkdirSync(resolved.cwd, { recursive: true });
   const child = nodeSpawn(resolved.command, [...resolved.args], {
@@ -319,11 +335,19 @@ export const defaultSpawn: AcpSpawnFn = (resolved): AcpChildProcess => {
     // the JSON-RPC transport; stderr is a pipe forwarded through the gateway
     // logger. stdout is NEVER inherited (would leak onto gateway stdout).
     shell: false,
+    detached: shouldDetachProviderProcess(),
     stdio: ["pipe", "pipe", "pipe"],
     windowsHide: true,
   });
-  return child as unknown as AcpChildProcess;
+  const managedChild = child as ChildProcess & AcpChildProcess;
+  managedChild.killProcessTree = (signal: TerminationSignal): boolean =>
+    killProcessGroup(child, signal);
+  return managedChild;
 };
+
+function killAcpProcessTree(child: AcpChildProcess, signal: TerminationSignal): boolean {
+  return child.killProcessTree?.(signal) ?? child.kill(signal);
+}
 
 /**
  * Manages provider ACP process lifecycles. One manager can supervise multiple
@@ -352,18 +376,33 @@ export class AcpProcessManager {
    * {@link AcpError} is thrown. The returned process is healthy and initialized.
    */
   async start(options: StartProviderOptions): Promise<ManagedAcpProcess> {
-    const resolved = resolveProviderSpawn(
-      options.provider,
-      this.config,
-      this.baseEnv,
-      options.cwd,
-      options.extraArgs
-    );
+    let neutralWorkspace: NeutralExecutionWorkspace | undefined;
+    let resolved: ResolvedAcpSpawn;
+    try {
+      neutralWorkspace = options.cwd ? undefined : createNeutralExecutionWorkspace();
+      const effectiveCwd = options.cwd ?? neutralWorkspace?.cwd;
+      if (!effectiveCwd) {
+        throw new ProviderUnavailableError(options.provider, "ACP process cwd resolution failed", {
+          provider: options.provider,
+        });
+      }
+      resolved = resolveProviderSpawn(
+        options.provider,
+        this.config,
+        this.baseEnv,
+        effectiveCwd,
+        options.extraArgs
+      );
+    } catch (error) {
+      neutralWorkspace?.cleanup();
+      throw error;
+    }
 
     let child: AcpChildProcess;
     try {
       child = this.spawnFn(resolved);
     } catch (err) {
+      neutralWorkspace?.cleanup();
       this.logger.error("acp.process.spawn.failed", {
         provider: options.provider,
         errorClass: err instanceof Error ? err.name : "unknown",
@@ -376,16 +415,20 @@ export class AcpProcessManager {
     if (!child.stdin || !child.stdout) {
       // Spawn produced no usable stdio. Kill defensively and fail closed.
       try {
-        child.kill("SIGKILL");
+        killAcpProcessTree(child, "SIGKILL");
       } catch {
         /* best effort */
       }
+      if (child.pid) unregisterProcessGroup(child.pid);
+      neutralWorkspace?.cleanup();
       throw new ProviderUnavailableError(
         options.provider,
         "ACP process did not expose stdin/stdout pipes",
         { provider: options.provider }
       );
     }
+
+    if (child.killProcessTree && child.pid) registerProcessGroup(child.pid);
 
     this.logger.info("acp.process.spawn", {
       provider: options.provider,
@@ -404,6 +447,7 @@ export class AcpProcessManager {
       sessionNewTimeoutMs: this.config.sessionNewTimeoutMs,
       promptTimeoutMs: this.config.promptTimeoutMs,
       allowMutatingSessionOps: this.config.allowMutatingSessionOps,
+      cleanupOwnedCwd: neutralWorkspace?.cleanup,
       onTerminal: m => this.live.delete(m),
     });
     this.live.add(managed);
@@ -452,6 +496,8 @@ interface ManagedProcessImplOptions {
   readonly sessionNewTimeoutMs?: number;
   readonly promptTimeoutMs?: number;
   readonly allowMutatingSessionOps?: boolean;
+  /** Cleanup for a gateway-owned neutral cwd, run only after the child exits/errors. */
+  readonly cleanupOwnedCwd?: () => void;
   readonly onTerminal: (self: ManagedProcessImpl) => void;
 }
 
@@ -471,6 +517,7 @@ class ManagedProcessImpl implements ManagedAcpProcess {
   private readonly callbacks?: AcpClientCallbacks;
   private readonly idleTimeoutMs: number;
   private readonly onTerminal: (self: ManagedProcessImpl) => void;
+  private readonly cleanupOwnedCwd?: () => void;
 
   private _state: AcpProcessState = "starting";
   private _exitCode: number | null = null;
@@ -478,6 +525,7 @@ class ManagedProcessImpl implements ManagedAcpProcess {
   private _terminalError: AcpError | null = null;
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
   private killTimer: ReturnType<typeof setTimeout> | null = null;
+  private terminationPending = false;
 
   constructor(options: ManagedProcessImplOptions) {
     this.provider = options.provider;
@@ -488,6 +536,7 @@ class ManagedProcessImpl implements ManagedAcpProcess {
     this.callbacks = options.callbacks;
     this.idleTimeoutMs = options.idleTimeoutMs;
     this.onTerminal = options.onTerminal;
+    this.cleanupOwnedCwd = options.cleanupOwnedCwd;
 
     // The transport consumes provider stdout as protocol frames only and
     // forwards provider stderr through the gateway logger. Provider stdout is
@@ -511,10 +560,9 @@ class ManagedProcessImpl implements ManagedAcpProcess {
       // killed only after genuine quiescence — not immediately after a
       // client-driven request/response exchange.
       onActivity: () => this.touchIdle(),
-      // The stdout protocol channel ended without a child `exit` (e.g. the
-      // agent closed its stdout, or stdout errored). Drive the managed process
-      // terminal so it stops reporting healthy/live.
-      onClose: () => this.handleChannelClosed(),
+      // A protocol channel became unusable without a child `exit`. Preserve the
+      // transport's exact channel/reason/error through managed lifecycle state.
+      onTerminal: terminal => this.handleTransportTerminal(terminal),
     });
 
     this.client = new AcpClient({
@@ -618,17 +666,18 @@ class ManagedProcessImpl implements ManagedAcpProcess {
    * If the child has not emitted `exit` within {@link SHUTDOWN_KILL_GRACE_MS},
    * force-kill it so a provider that ignores the graceful signal cannot linger.
    * Idempotent (a second graceful signal does not reset the window); the timer
-   * is unref'd so it never keeps the event loop alive, and it is cleared the
-   * moment the child actually exits ({@link handleExit}).
+   * remains referenced and survives a real process-group leader's exit because
+   * a same-group descendant may still be alive.
    */
   private armKillTimer(): void {
     if (this.killTimer || SHUTDOWN_KILL_GRACE_MS <= 0) {
       return;
     }
+    this.terminationPending = true;
     this.killTimer = setTimeout(() => {
       this.killTimer = null;
       try {
-        this.child.kill("SIGKILL");
+        killAcpProcessTree(this.child, "SIGKILL");
         this.logger.info("acp.process.force_killed", {
           provider: this.provider,
           pid: this.pid,
@@ -639,9 +688,13 @@ class ManagedProcessImpl implements ManagedAcpProcess {
           pid: this.pid,
           errorClass: err instanceof Error ? err.name : "unknown",
         });
+      } finally {
+        this.terminationPending = false;
+        this.releaseProcessOwnership();
       }
     }, SHUTDOWN_KILL_GRACE_MS);
-    this.killTimer.unref?.();
+    // Deliberately referenced. Process-tree ownership must survive until the
+    // SIGKILL fence runs, including when the group leader exits first.
   }
 
   private clearKillTimer(): void {
@@ -649,11 +702,23 @@ class ManagedProcessImpl implements ManagedAcpProcess {
       clearTimeout(this.killTimer);
       this.killTimer = null;
     }
+    this.terminationPending = false;
+  }
+
+  private releaseProcessOwnership(): void {
+    if (this.pid) unregisterProcessGroup(this.pid);
+    this.cleanupOwnedCwd?.();
   }
 
   private handleExit(code: number | null, signal: TerminationSignal | null): void {
-    // The child exited, so any pending force-kill escalation is moot.
-    this.clearKillTimer();
+    // A real detached group leader can exit while a descendant ignores the
+    // graceful signal. Retain that group through the SIGKILL fence. Injected
+    // single-process spawners have no group surface, so leader exit remains
+    // sufficient for their existing lifecycle semantics.
+    if (!this.terminationPending || !this.child.killProcessTree) {
+      this.clearKillTimer();
+      this.releaseProcessOwnership();
+    }
     if (this._state === "exited" || this._state === "quarantined") {
       // Already terminal (e.g. shutdown initiated). Record exit detail and stop.
       this._exitCode = code;
@@ -685,6 +750,9 @@ class ManagedProcessImpl implements ManagedAcpProcess {
   }
 
   private handleSpawnError(err: Error): void {
+    // An error event is terminal for ownership purposes even if shutdown has
+    // already moved the process to quarantined. Cleanup is idempotent.
+    if (!this.terminationPending) this.releaseProcessOwnership();
     if (this._state === "exited" || this._state === "quarantined") {
       return;
     }
@@ -705,38 +773,33 @@ class ManagedProcessImpl implements ManagedAcpProcess {
   }
 
   /**
-   * The provider's stdout protocol channel ended without a child `exit` signal
-   * (the transport's {@link JsonRpcStdioTransportOptions.onClose}). The process
-   * may still be alive at the OS level, but it can no longer speak ACP, so it
-   * must not be reported healthy. Quarantine it: a fresh process is required.
-   *
-   * Idempotent and a no-op once any terminal path has run (`exit` may still
-   * arrive afterwards and is handled separately by {@link handleExit}).
+   * A provider protocol channel became terminal without a child `exit`. The
+   * process may still be alive at the OS level, but it can no longer speak ACP,
+   * so quarantine it and preserve the transport's typed reason/error verbatim.
+   * Idempotent once any terminal path has run.
    */
-  private handleChannelClosed(): void {
+  private handleTransportTerminal(terminal: AcpTransportTerminal): void {
     if (this._state === "exited" || this._state === "quarantined") {
       return;
     }
     this._state = "quarantined";
     this.clearIdleTimer();
-    const error =
-      this._terminalError ??
-      new AcpProcessExitError(this.provider, {
-        debug: { reason: "stdout_channel_closed" },
-      });
+    const error = terminal.error;
     this._terminalError = error;
-    this.logger.error("acp.process.channel_closed", {
+    this.logger.error("acp.process.transport_terminal", {
       provider: this.provider,
       pid: this.pid,
+      channel: terminal.channel,
+      reason: terminal.reason,
     });
     // The transport has already failed its own pending requests; notify the
     // client so any awaiting caller surfaces a terminal error, then signal the
     // pool. Best-effort kill so we do not leak a half-dead OS process.
     this.client.notifyProcessExit(error);
     try {
-      this.child.kill("SIGTERM");
       // Escalate to SIGKILL if the half-dead process ignores SIGTERM.
       this.armKillTimer();
+      killAcpProcessTree(this.child, "SIGTERM");
     } catch (err) {
       this.logger.error("acp.process.kill_failed", {
         provider: this.provider,
@@ -768,12 +831,12 @@ class ManagedProcessImpl implements ManagedAcpProcess {
     this.transport.dispose();
     if (wasRunning) {
       try {
-        this.child.kill(signal);
         // A graceful signal may be ignored by the provider; escalate to SIGKILL
         // after the grace window. A direct SIGKILL needs no escalation.
         if (signal !== "SIGKILL") {
           this.armKillTimer();
         }
+        killAcpProcessTree(this.child, signal);
       } catch (err) {
         this.logger.error("acp.process.kill_failed", {
           provider: this.provider,

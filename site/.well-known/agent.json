@@ -31,6 +31,7 @@
     "openapi": "https://llm-cli-gateway.dev/openapi.json",
     "agents": "https://llm-cli-gateway.dev/agents.md",
     "tools": "https://llm-cli-gateway.dev/tools.md",
+    "personalConfigKit": "https://llm-cli-gateway.dev/guides/personal-agent-config-kit.md",
     "workflowDemo": "https://llm-cli-gateway.dev/workflows/cross-model-review.md",
     "discoveryMatrix": "https://llm-cli-gateway.dev/DISCOVERY.md",
     "apiCatalog": "https://llm-cli-gateway.dev/.well-known/api-catalog",

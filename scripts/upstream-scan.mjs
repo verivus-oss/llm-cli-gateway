@@ -488,7 +488,8 @@ function normalizedDiscoveredFlags(surface) {
 
 function normalizeHelpSurface(surface) {
   if (!surface || typeof surface !== "object") return surface;
-  const { flags: _legacyFlags, ...rest } = surface;
+  const rest = { ...surface };
+  delete rest.flags;
   return {
     ...rest,
     discoveredFlags: normalizedDiscoveredFlags(surface),

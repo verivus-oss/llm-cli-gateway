@@ -66,6 +66,42 @@ describe("AsyncJobManager principal-safe dedup (issue #130)", () => {
     expect(l2.snapshot.id).toBe(l1.snapshot.id);
   });
 
+  it("uses managed config fingerprints to dedup equal content but separate different content", () => {
+    const manager = new AsyncJobManager(noopLogger, undefined, new MemoryJobStore());
+    const firstFingerprint = "a".repeat(64);
+    const secondFingerprint = "b".repeat(64);
+    const first = manager.startJobWithDedup(
+      "echo" as LlmCli,
+      ["--mcp-config", "/tmp/request-a.json", "--", "hello"],
+      "artifact-a",
+      {
+        dedupArgs: ["--mcp-config", `[gateway-claude-mcp:${firstFingerprint}]`, "--", "hello"],
+      }
+    );
+    const second = manager.startJobWithDedup(
+      "echo" as LlmCli,
+      ["--mcp-config", "/tmp/request-b.json", "--", "hello"],
+      "artifact-b",
+      {
+        dedupArgs: ["--mcp-config", `[gateway-claude-mcp:${firstFingerprint}]`, "--", "hello"],
+      }
+    );
+    const changedConfig = manager.startJobWithDedup(
+      "echo" as LlmCli,
+      ["--mcp-config", "/tmp/request-c.json", "--", "hello"],
+      "artifact-c",
+      {
+        dedupArgs: ["--mcp-config", `[gateway-claude-mcp:${secondFingerprint}]`, "--", "hello"],
+      }
+    );
+
+    expect(first.deduped).toBe(false);
+    expect(second.deduped).toBe(true);
+    expect(second.snapshot.id).toBe(first.snapshot.id);
+    expect(changedConfig.deduped).toBe(false);
+    expect(changedConfig.snapshot.id).not.toBe(first.snapshot.id);
+  });
+
   it("keeps cross-principal isolation across the store-hydration (restart) reuse path", () => {
     // The reuse path prefers an in-memory record but falls back to hydrating
     // from the store (e.g. after a gateway restart). Prove isolation holds on

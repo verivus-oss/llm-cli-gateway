@@ -21,6 +21,12 @@ one of the supported installers
 `pip install mistral-vibe`, `uv tool install mistral-vibe`, or
 `brew install mistral-vibe`) and ask for fresh doctor JSON.
 
+Once the CLI is installed, instruct the user to run `vibe --setup` in their
+local terminal and complete the API-key setup there. Never ask them to paste
+the key, a credential file, or setup output containing secret material into
+the chat. Doctor can report local credential-store evidence, but it does not
+make a live authenticated request.
+
 For inbound MCP setup, prefer `llm-cli-gateway print-client-config` or the
 setup UI output over remembered Vibe command syntax. Keep bearer tokens local
 and use placeholders in any chat transcript.
@@ -53,8 +59,11 @@ authorization headers, or `~/.vibe/credentials` files. If the user shares a
 secret accidentally, tell them to rotate it through Mistral's official flow
 and continue only with redacted diagnostics.
 
-The gateway defaults to `--agent auto-approve` for programmatic Mistral
-callers. Do not weaken this default unless the user explicitly asks.
+The gateway defaults to `--agent accept-edits` for programmatic Mistral
+callers. Mistral supports only `approvalStrategy:"legacy"`; `mcp_managed` is
+rejected before Vibe launches and `approvalPolicy` has no effect. Choose a
+different Vibe `permissionMode`, including a custom agent, only when the user
+explicitly requests it.
 
 Verification prompt after setup:
 

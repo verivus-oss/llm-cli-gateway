@@ -44,14 +44,14 @@ Or use directly with `npx` from an MCP client:
 - Persists long-running jobs, supports restart-safe result collection, deduplication, cancellation, and sync-to-async deferral.
 - Tracks sessions, real CLI resume paths, structured response metadata, and cache telemetry.
 - Supports cache-aware `promptParts`, including explicit Claude `cache_control` when opted in.
-- Can run requests inside gateway-managed git worktrees for isolated multi-agent review and implementation loops.
+- Can run supported provider requests inside gateway-managed git worktrees for isolated multi-agent review and implementation loops when using the local file-backed session manager. PostgreSQL-backed sessions reject this filesystem-local feature before creation. Grok, Devin, and Mistral require an explicit provider-native `sessionId` for a gateway worktree; fresh, `createNewSession`, and `resumeLatest`-only worktree requests fail closed because they cannot durably reselect it. Materialization suppresses repository, system, and global Git hooks, configured clean, smudge, and process checkout filters, sparse checkout, and lazy object fetching. Filter-dependent content such as Git LFS remains in its repository representation instead of executing host commands.
 - Ships personal-appliance setup surfaces: HTTP transport with bearer-token auth, `doctor --json`, setup UI artifacts, provider setup snippets, Docker fallback, and checked release bundles.
 - Remote web connectors use MCP OAuth discovery and authorization-code setup with static client or shared-secret gates. Client secrets are generated locally, stored only as hashes, and printed only by explicit copy-once commands.
 - Provider CLI requests can select registered workspaces by alias via `workspace`; every HTTP/tunnel request must use a registered alias, session workspace, or `[workspaces].default` before provider execution. Local unrestricted filesystem access is the stdio transport.
 
 ## Workflow Assets
 
-The repo ships agent-ready workflow skills under [`.agents/skills`](.agents/skills) for async orchestration, session continuity, multi-LLM review, implement-review-fix loops, retrospective evidence walks, and secure approval-gated dispatch. Seven caller-facing skills are bundled in the published npm package: `async-job-orchestration`, `multi-llm-review`, `session-workflow`, `secure-orchestration`, `implement-review-fix`, `retrospective-walk`, and `public-demo-session`. Machine-readable DAG-TOML plans live under [`docs/plans`](docs/plans) and [`setup/install-plan.dag.toml`](setup/install-plan.dag.toml) for workflows that need deterministic sequencing and verification gates.
+The repo ships agent-ready workflow skills under [`.agents/skills`](.agents/skills) for async orchestration, session continuity, multi-LLM review, implement-review-fix loops, retrospective evidence walks, secure approval-gated dispatch, and Personal Agent Config Kit operations. Nine caller-facing skills are bundled in the published npm package: `async-job-orchestration`, `multi-llm-review`, `session-workflow`, `secure-orchestration`, `implement-review-fix`, `retrospective-walk`, `public-demo-session`, `least-cost-routing`, and `personal-agent-config-kit`. Machine-readable DAG-TOML plans live under [`docs/plans`](docs/plans) and [`setup/install-plan.dag.toml`](setup/install-plan.dag.toml) for workflows that need deterministic sequencing and verification gates.
 
 Skill packs can be updated outside the core npm release by placing skill
 directories in local, operator-controlled paths. The gateway loads bundled
@@ -109,6 +109,10 @@ The product contract is documented in [docs/personal-mcp/PRODUCT_CONTRACT.md](do
 
 This project does not provide hosted multi-tenant credential custody. Provider credentials stay on the user's machine or user-owned deployment volume.
 
+For a single developer who works on several workstations and repositories, the [Personal Agent Config Kit guide](docs/guides/PERSONAL_AGENT_CONFIG_KIT.md) explains the Git-synchronised personal baseline, repository overlays, immutable context stamps, and workstation-safe provider continuity model. The baseline directory is confined to a non-symlinked descendant of the local home directory, and every publish or sync revalidates its configured `origin` fetch and push URLs against the HTTPS/SSH-only policy. The Kit is intentionally local-caller-only; Kit provider execution and recovery of an unadmitted attempt require healthy durable SQLite or PostgreSQL async-job admission. Kit scope never inherits the gateway process cwd: Claude requires a registered workspace selection or configured default, while Codex can also use an explicit absolute `workingDir`. Relative Kit `workingDir` values are rejected before filesystem or Git inspection. It disables cross-model validation tools while enabled and is not an HTTP/OAuth configuration or remote execution feature.
+
+For a retention-pinned non-Kit Claude MCP request configuration, follow the local-only [same-host recovery procedure](docs/guides/PERSONAL_AGENT_CONFIG_KIT.md#same-host-mcp-cleanup-pin-recovery). It accepts no SQL or arbitrary-path override. A valid recovery invocation emits JSON and exits 0 after success or 2 for a safe refusal; invalid usage or unavailable durable storage exits 1.
+
 Release-readiness history is tracked in [docs/personal-mcp/RELEASE_READINESS.md](docs/personal-mcp/RELEASE_READINESS.md). Dogfooding evidence (which target LLMs guided setup, what unsafe suggestions were captured, and which findings were deferred from the initial personal-appliance rollout) is in [docs/personal-mcp/DOGFOODING_RESULTS.md](docs/personal-mcp/DOGFOODING_RESULTS.md).
 
 Current personal-appliance artifacts include:
@@ -116,11 +120,11 @@ Current personal-appliance artifacts include:
 - Streamable HTTP startup: `LLM_GATEWAY_AUTH_TOKEN=<token> npm run start:http`
 - Machine-readable diagnostics: `npm run doctor`
 - Go bootstrapper: `installer/` with `setup`, `doctor --json`, `start`, `stop`, `status`, `repair`, `upgrade`, `uninstall`, `print-client-config`, and verified bundle download commands.
-- Release packaging: the release workflow builds Linux binaries on the local self-hosted runner, builds Windows/macOS binaries on GitHub-hosted runners, then publishes checksummed platform bundles with the gateway, production dependencies, and a managed Node runtime; see [installer/packaging/README.md](installer/packaging/README.md).
+- Release packaging: on the public mirror, the release workflow builds Linux binaries on GitHub-hosted `ubuntu-latest` and builds Windows/macOS binaries on their GitHub-hosted platform runners. The private upstream uses its internal self-hosted Linux runner. Each release publishes checksummed platform bundles with the gateway, production dependencies, and a managed Node runtime; see [installer/packaging/README.md](installer/packaging/README.md).
 - Docker Compose fallback: [docker/personal.compose.yml](docker/personal.compose.yml) + [docker/Dockerfile.personal](docker/Dockerfile.personal) for users who already manage containers.
 - Local setup UI artifact: [setup/ui/index.html](setup/ui/index.html)
 - Provider setup snippets: [setup/providers/](setup/providers/)
-- Cross-validation tools: `validate_with_models`, `second_opinion`, `compare_answers`, `red_team_review`, `consensus_check`, `ask_model`, `synthesize_validation`, `job_status`, `job_result`, and `validation_receipt` (plus the `validation-receipt://{validationId}` resource).
+- Cross-validation tools: `review_changes`, `validate_with_models`, `second_opinion`, `compare_answers`, `red_team_review`, `consensus_check`, `ask_model`, `synthesize_validation`, `job_status`, `job_result`, and `validation_receipt` (plus the `validation-receipt://{validationId}` resource). `review_changes` and durable receipts require a SQLite or PostgreSQL validation-run store and are absent in Personal Agent Config Kit mode.
 
 ### Install / Upgrade / Uninstall (single binary)
 
@@ -194,8 +198,8 @@ docker compose -f docker/personal.compose.yml run --rm doctor
 ### Core Capabilities
 
 - **Multi-LLM Orchestration**: Unified interface for Claude Code, Codex, Gemini, Grok, Mistral (Vibe), Devin, and Cursor Agent CLIs
-- **Session Management**: Track and resume conversations across all CLIs with persistent storage
-- **Gateway-owned worktrees**: Run any sync or async provider request inside a managed git worktree, with per-session reuse and cleanup
+- **Session Management**: Track gateway session metadata and provider-specific continuity with persistent storage
+- **Gateway-owned worktrees**: Run supported sync or async provider requests inside a managed git worktree with the local file-backed session manager. Same-session reuse requires same-host durable ownership plus a matching live Git registration and gateway branch; manager-level named path collisions fail closed. PostgreSQL-backed sessions reject worktrees before creation because a different database-connected host cannot safely own filesystem cleanup. Grok, Devin, and Mistral require an explicit provider-native `sessionId`; fresh, `createNewSession`, and `resumeLatest`-only worktree requests fail closed. A worktree requires a registered workspace selected explicitly, through caller-owned session metadata, or by the configured default; it never inherits process cwd or combines with `workingDir`, `addDir`, or `includeDirs`. Materialization suppresses repository, system, and global Git hooks, configured clean, smudge, and process checkout filters, sparse checkout, and lazy object fetching. Filter-dependent content such as Git LFS remains in its repository representation instead of executing host commands. Session deletion and TTL eviction hide a durably owned worktree session while cleanup runs. If Git removal fails, the file-backed store retains a durable cleanup-pending tombstone, blocks reuse, and retries cleanup when that store is registered on the owning host. The record is finalized only after verified Git removal.
 - **Token Optimization**: Automatic 44% reduction on prompts, 37% on responses (opt-in)
 - **Correlation ID Tracking**: Full request tracing across all LLM interactions
 - **Cross-Tool Collaboration**: LLMs can use each other via MCP (validated through dogfooding)
@@ -289,21 +293,23 @@ Opt-in flags (all default off) live under `[cache_awareness]` in `~/.llm-cli-gat
 
 Every provider is reachable through the same request, session, job, and validation machinery, but the underlying CLIs differ in what they natively expose. The table records what actually shipped per provider; discover the live surface at runtime with `provider_tool_capabilities`, `list_models`, and the `provider-acp://<provider>` / `provider-tools://<provider>` resources.
 
-| Provider | CLI request tools | Native ACP | Live model discovery | Admin surface |
-| --- | --- | --- | --- | --- |
-| Claude Code (`claude`) | `claude_request` / `_async` | None (CLI-first; no ACP entrypoint at claude 2.1.198) | model aliases, reasoning-effort levels, fallback model | read-only via `provider_admin_list` / `provider_admin_run` |
-| OpenAI Codex (`codex`) | `codex_request` / `_async`, `codex_fork_session` | None (codex-cli 0.142.4 advertises mcp-server / app-server transports, not native ACP) | `codex debug models` | read-only via `provider_admin_list` / `provider_admin_run` |
-| Gemini / Antigravity (`gemini`, `agy`) | `gemini_request` / `_async` | None (agy 1.0.14 exposes no ACP entrypoint; legacy Gemini CLI ACP evidence does not transfer) | `agy models` | read-only via `provider_admin_list` / `provider_admin_run` |
-| xAI Grok (`grok`) | `grok_request` (sync `transport: "acp"`) / `_async` | Native via `grok agent stdio` | `grok models` + `~/.grok/config.toml` | read-only via `provider_admin_list` / `provider_admin_run` |
-| Mistral Vibe (`mistral`) | `mistral_request` (sync `transport: "acp"`) / `_async` | Native via `vibe-acp` | Vibe config plus the `VIBE_ACTIVE_MODEL` active model and agent profiles | read-only via `provider_admin_list` / `provider_admin_run` |
-| Cognition Devin (`devin`) | `devin_request` (sync `transport: "acp"`, `agentType: summarizer\|review`) / `_async` | Native via `devin acp` | `--model` / `DEVIN_MODEL` | read-only via `provider_admin_list` / `provider_admin_run` |
-| Cursor Agent (`cursor`) | `cursor_request` (sync `transport: "acp"`) / `_async` | Native via `cursor-agent acp` (companion-owned) | model aliases | read-only via `provider_admin_list` / `provider_admin_run` |
+| Provider                               | CLI request tools                                                                     | Native ACP                                                                                   | Live model discovery                                                     | Admin surface                                              |
+| -------------------------------------- | ------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ | ---------------------------------------------------------- |
+| Claude Code (`claude`)                 | `claude_request` / `_async`                                                           | None (CLI-first; no ACP entrypoint at claude 2.1.210)                                        | model aliases, reasoning-effort levels, fallback model                   | read-only via `provider_admin_list` / `provider_admin_run` |
+| OpenAI Codex (`codex`)                 | `codex_request` / `_async`, `codex_fork_session`                                      | None (codex-cli 0.144.3 advertises mcp-server / app-server transports, not native ACP)       | `codex debug models`                                                     | read-only via `provider_admin_list` / `provider_admin_run` |
+| Gemini / Antigravity (`gemini`, `agy`) | `gemini_request` / `_async`                                                           | None (agy 1.1.2 exposes no ACP entrypoint; legacy Gemini CLI ACP evidence does not transfer) | `agy models`                                                             | read-only via `provider_admin_list` / `provider_admin_run` |
+| xAI Grok (`grok`)                      | `grok_request` (sync `transport: "acp"`) / `_async`                                   | Native via `grok agent stdio`                                                                | `grok models` + `~/.grok/config.toml`                                    | read-only via `provider_admin_list` / `provider_admin_run` |
+| Mistral Vibe (`mistral`)               | `mistral_request` (sync `transport: "acp"`) / `_async`                                | Native via `vibe-acp`                                                                        | Vibe config plus the `VIBE_ACTIVE_MODEL` active model and agent profiles | read-only via `provider_admin_list` / `provider_admin_run` |
+| Cognition Devin (`devin`)              | `devin_request` (sync `transport: "acp"`, `agentType: summarizer\|review`) / `_async` | Native via `devin acp`                                                                       | `--model` / `DEVIN_MODEL`                                                | read-only via `provider_admin_list` / `provider_admin_run` |
+| Cursor Agent (`cursor`)                | `cursor_request` (sync `transport: "acp"`) / `_async`                                 | Native via `cursor-agent acp` (companion-owned)                                              | model aliases                                                            | read-only via `provider_admin_list` / `provider_admin_run` |
 
-- **Native ACP** is reported honestly. `grok`, `mistral`, `devin`, and `cursor` expose a native ACP entrypoint, so `provider-acp://<provider>` carries the negotiated `initialize` capability set and the derived session-method availability, and the sync `*_request` accepts `transport: "acp"` (fails closed unless `[acp]` and the provider's `runtime_enabled` gate are set). ACP routing is sync-only: the `*_request_async` variants always run the CLI transport and do not accept `transport: "acp"` (nor Devin's `agentType`); async ACP parity is a later phase. `claude`, `codex`, and `gemini` have no native ACP entrypoint at their target CLI versions; their `provider-acp://` records report `native: false` with no methods and no adapter-as-native masquerade, and they expose no `transport: "acp"` selector.
+- **Native ACP** is reported honestly. `grok`, `mistral`, `devin`, and `cursor` expose a native ACP entrypoint, so `provider-acp://<provider>` carries the negotiated `initialize` capability set and the derived session-method availability, and the sync `*_request` accepts `transport: "acp"` (fails closed unless `[acp]` and the provider's `runtime_enabled` gate are set). ACP routing is sync-only: the `*_request_async` variants always run the CLI transport and do not accept `transport: "acp"` (nor Devin's `agentType`); async ACP parity is a later phase. ACP workspace selection is gateway-owned: an explicit ACP `workspace` must be a registered alias. A fresh remote ACP request uses that alias or `[workspaces].default`; a remote resume is fixed to its recorded canonical alias and cwd, and a different or unbound workspace is rejected. Local ACP may omit `workspace`; each unscoped process then gets a fresh private `0o700` neutral directory that is removed after the process exits, never a shared predictable temp path. `claude`, `codex`, and `gemini` have no native ACP entrypoint at their target CLI versions; their `provider-acp://` records report `native: false` with no methods and no adapter-as-native masquerade, and they expose no `transport: "acp"` selector.
+- **Managed approval is Claude-only today.** `approvalStrategy:"mcp_managed"` is executable only by the Claude CLI adapter, which launches Claude with a request-scoped generated MCP configuration and `--strict-mcp-config`. It permits only provisioned, gateway-owned MCP definitions and rejects dynamic `npx`, ambient-PATH, and Codex-config overrides. Codex, Gemini, Grok, Mistral, Devin, and Cursor reject `mcp_managed` before launching a provider because their current adapters cannot isolate ambient MCP configuration. For those adapters, use `approvalStrategy:"legacy"`; `approvalPolicy` has no effect.
+- **ACP has its own permission bridge.** `approvalStrategy:"mcp_managed"` and any `approvalPolicy` are rejected when `transport:"acp"` is selected. Use the Claude CLI transport for managed approval. ACP host services fail closed: reads are unavailable by default, and write or terminal callbacks need `[acp]` host-service configuration plus a one-time ApprovalManager decision. ACP never maps a raw CLI bypass input to a standing permission grant.
 - **Resources** are generated from the provider registry for every CLI provider: `models://<provider>`, `sessions://<provider>`, `provider-acp://<provider>`, `provider-tools://<provider>`, and `provider-subcommands://<provider>`.
 - **Model discovery** is live and account-aware: the discovery listed above reaches `models://<provider>` and `list_models`, degrading to static registry facts when a live probe is unavailable (a resource read never spawns a CLI).
 - **Admin surfaces** are discovery-driven and output-redacted. `provider_admin_list` and `provider_admin_run` are read-only for every provider. State-mutating admin operations are exposed only through `provider_admin_mutate`, gated behind `[admin] allow_mutating_cli_admin_ops`, the remote `cli:admin` scope, an approval gate, and an audit record. Mutating ACP session operations are likewise gated behind `[acp] allow_mutating_session_ops`.
-- **Validation** commands work across every provider: `validate_with_models`, `second_opinion`, `compare_answers`, `red_team_review`, `consensus_check`, `ask_model`, and `synthesize_validation`, with durable signed receipts via `validation_receipt` and the `validation-receipt://{validationId}` resource.
+- **Validation** commands work across every provider: `review_changes`, `validate_with_models`, `second_opinion`, `compare_answers`, `red_team_review`, `consensus_check`, `ask_model`, and `synthesize_validation`, with canonically hashed immutable receipts via `validation_receipt` and the `validation-receipt://{validationId}` resource. `review_changes` captures a complete, hashed Git artifact and starts repository-bound read-only reviewers.
 
 ## Prerequisites
 
@@ -352,7 +358,8 @@ pip install mistral-vibe
 uv tool install mistral-vibe
 brew install mistral-vibe
 
-vibe auth login
+vibe --setup
+# Complete the API-key setup locally. Do not paste the key into a chat.
 # Current Vibe defaults session logging to enabled. If an older config disabled it,
 # edit ~/.vibe/config.toml and set:
 # [session_logging]
@@ -368,14 +375,17 @@ Vibe-specific notes:
   model-not-found failure with refreshed discovery.
 - **`permissionMode` is the Vibe `--agent` name.** Builtins are
   `default | plan | accept-edits | auto-approve`; Vibe also accepts install-gated
-  builtins (e.g. `lean`) and custom agents from `~/.vibe/agents`, so any name is
-  passed through and Vibe validates availability. The gateway's
-  programmatic-mode default is `accept-edits`; use `auto-approve` only as an
-  explicit opt-in.
+  builtins (e.g. `lean`) and custom agents from `~/.vibe/agents`. Requests pass
+  the selected name through for Vibe to validate. `mcp_managed` is not available
+  for Vibe.
 - **Tool controls use Vibe's native flags.** The gateway emits one
   `--enabled-tools <tool>` flag per `allowedTools` entry and one
   `--disabled-tools <tool>` flag per `disallowedTools` entry. Vibe applies
   disabled tools after enabled-tool filtering.
+- **Usage telemetry is best-effort.** Vibe does not emit token or cost data in
+  programmatic stdout. When the gateway knows Vibe's native session UUID, it
+  reads `~/.vibe/logs/session/session_<...>/meta.json` for usage and cost.
+  A missing, malformed, or not-yet-known session log leaves those fields empty.
 - **No self-update**: `cli_upgrade --cli mistral` detects whether you used
   pip / uv / brew and dispatches the matching upgrade command. Running
   `vibe update` is not a thing.
@@ -427,7 +437,55 @@ For clients that already support local stdio MCP servers, add a configuration li
 }
 ```
 
-Stdio is the recommended path for unrestricted machine-local development access. HTTP MCP, including localhost HTTP and tunneled HTTPS, is treated as remote-capable for provider execution: provider tools must resolve a registered workspace alias, a session workspace, or `[workspaces].default` before spawning a CLI. Remote clients should pass relative `workingDir`, `addDir`, and include-directory values inside the selected workspace; disabling auth or using a no-auth connector path is not a filesystem bypass.
+Stdio is the recommended path for unrestricted machine-local development access. HTTP MCP, including localhost HTTP and tunneled HTTPS, is treated as remote-capable for provider execution: provider tools must resolve a registered workspace alias, a session workspace, or `[workspaces].default` before spawning a CLI. Remote clients should pass relative `workingDir`, `addDir`, and include-directory values inside the selected workspace, and may resume only gateway-tracked sessions they own. Raw native provider session IDs are local-only. Disabling auth or using a no-auth connector path is not a filesystem bypass.
+
+For a local CLI request with no resolved `workingDir`, registered `workspace`,
+or gateway-managed `worktree`, the child runs in a fresh private `0o700`
+temporary directory that is removed after the process exits. It never inherits
+the gateway repository cwd or its provider-native instruction context. The
+gateway canonicalizes the temp root and rejects or relocates it when any
+ancestor contains `.git`, `AGENTS.md`, `AGENTS.override.md`, `Agents.md`,
+`AGENT.md`, `CLAUDE.md`, `Claude.md`, `CLAUDE.local.md`,
+`.claude/CLAUDE.md`, `.claude/rules/`, `.cursor/rules/`, `.cursorrules`,
+`GEMINI.md`, or `.vibe/config.toml`, including through a symlinked or custom
+`TMPDIR` beneath that context. The list covers entries a provider discovers by
+walking up from its cwd. User-scope configuration such as
+`~/.claude/settings.json` is deliberately absent: it loads on every invocation
+regardless of cwd, so relocating the workspace would not isolate it.
+Provider-native `resumeLatest` operations that use a cwd-scoped latest-session
+pointer therefore require an explicit `workingDir`, `workspace`, or configured
+default workspace and fail closed when none is available. Use explicit target
+selection whenever several repositories are active at once.
+
+CLI request schemas accept prompts up to 100,000 characters, but operating
+systems also impose byte limits on individual argv elements. Codex new and
+resume requests stream the exact prompt over stdin. `codex_fork_session`
+remains argv-bound and rejects an oversized UTF-8 prompt before spawn as
+non-retryable `input_too_large`. Other providers whose current CLI contracts
+require an argv prompt use the same admission rule. Every other
+caller-controlled argv value is checked on its final encoded form too,
+including serialized agent/schema JSON, joined tool lists, instruction
+overrides, paths, model names, and native session IDs. The final spawn boundary
+checks every argv element plus the aggregate resolved command line against a
+conservative platform-specific byte budget and a 2,048-element cap. The
+aggregate byte budget excludes the environment but reserves headroom for it;
+on Windows, pre-resolution admission assumes the smaller npm `.cmd`/`.bat`
+wrapper limit until command resolution proves a native executable. Native
+session and resume flags on non-Kit requests are included before workspace,
+session, provider-artifact handoff, or durable job side effects. Claude Kit
+projects its eventual argv before materializing its compiled context artifact
+or allocating a durable Kit session.
+An embedded NUL byte in the command or any argv element is rejected before
+spawn as non-retryable `invalid_input`. Caller-facing results, long-lived job
+memory, durable job args, and async flight rows use a fixed invalid-argv marker;
+the optional duplicate durable payload is suppressed. None retains the rejected
+vector or Node's value-echoing native error.
+Native `E2BIG`, including an environment-driven failure, is normalized without
+retaining the native `spawnargs`. The gateway never truncates instructions or
+other values to make them fit. For stdin-backed requests, a clean provider exit
+is accepted only after the complete payload write callback succeeds. A closed
+or still-pending pipe becomes a fixed, non-sensitive incomplete-delivery
+failure; timeout, cancellation, and provider nonzero exits remain authoritative.
 
 This generic stdio example is not provider-support verification for the Personal MCP Appliance. Client-specific setup guides for ChatGPT, Claude web, Claude Desktop, Codex, Gemini CLI, Gemini web, and Grok remain gated by the provider-support matrix in [docs/personal-mcp/PRODUCT_CONTRACT.md](docs/personal-mcp/PRODUCT_CONTRACT.md).
 
@@ -438,18 +496,73 @@ This generic stdio example is not provider-support verification for the Personal
 The personal-appliance surface exposes simplified validation tools for non-developer clients. These tools start provider CLI jobs through the durable async job manager and return normalized provider status plus raw job references.
 
 - `validate_with_models`: ask two or more providers to independently validate a question.
+- `review_changes`: capture one complete Git review artifact, fence repository
+  content as untrusted data, and start read-only independent reviewers. See
+  [Repository change review](#repository-change-review).
 - `second_opinion`: ask one provider to review an answer.
 - `red_team_review`: challenge a plan, answer, or document for risks and failure modes.
 - `consensus_check`: check whether providers agree with a claim.
 - `ask_model`: ask one provider through the simplified surface.
-- `synthesize_validation`: run an explicit judge model after provider results have been collected.
+- `synthesize_validation`: run an explicit judge model after provider results have
+  been collected. General validation requires the caller's question and terminal
+  normalized results. A `review_changes` run instead reloads its exact owned
+  durable results from `validationId`; caller-supplied question/results are ignored.
 - `list_available_models`: list the models each provider CLI exposes through the simplified surface.
 - `job_status` and `job_result`: poll and collect validation job outputs.
-- `validation_receipt`: retrieve the immutable receipt of a terminal cross-LLM validation run by `validationId` (returns `minted | pending | expired_unminted | not_found`, own-or-not-found). `format: "markdown"` renders a human-readable report; `includeRawResponses` inlines provider answer text. Registered only when the attached job store provides the durable validation-run store capability (`sqlite` and `postgres`).
+- `validation_receipt`: retrieve the canonically hashed immutable receipt of a terminal cross-LLM validation run by `validationId` (returns `minted | pending | verification_failed | expired_unminted | not_found`, own-or-not-found). `verification_failed` means a stored receipt exists but disagrees with its durable run, which is a defect to investigate; `expired_unminted` only ever means absence. `format: "markdown"` renders a human-readable report; `includeRawResponses` inlines complete provider answer text when the linked job still exposes identity-verified output. Registered only when the attached job store provides the durable validation-run store capability (`sqlite` and `postgres`).
 
 The same receipt is also exposed as the `validation-receipt://{validationId}` MCP resource (same durable gate and own-or-not-found owner scoping).
 
 The validation report preserves per-provider disagreement. Optional judge synthesis is explicit about which provider produced the judge job.
+
+##### Repository change review
+
+`review_changes` accepts an absolute local `workingDir` or a registered
+`workspace`, then resolves `scope: "auto" | "uncommitted" | "branch" |
+"commit"`. It can take an explicit Git `base`, literal repository-relative
+`paths`, `stance: "standard" | "adversarial"`, reviewer `models`, an optional
+`judgeModel`, and fail-closed artifact/prompt byte ceilings. The artifact keeps
+committed, staged, unstaged, and regular non-ignored untracked file evidence separate. It
+forces tracked diffs to remain readable even when in-tree attributes mark them
+as non-diffable. The `review-evidence.v2` artifact exposes `committedPatch`,
+`stagedPatch`, and `unstagedPatch` independently; each segment carries its
+sorted path inventory, encoding, exact byte length, SHA-256 identity, and
+content. This prevents an index change and its worktree-only reversal from
+canceling out. The artifact is collision-fenced, byte-counted, SHA-256
+identified, race-checked, and never truncated. In `auto` mode, a diverged branch is
+reviewed from its merge base with working-tree evidence included. Otherwise,
+a dirty tree selects uncommitted changes, while a clean tree falls back to the
+last commit (`HEAD^..HEAD`) without working-tree evidence. Unsafe untracked
+file types or a repository mutation during capture cause a refusal.
+
+The tool starts asynchronous provider jobs and returns a `validationId`, exact
+artifact and prompt identities, file inventory, and one `rawJobReference` per
+reviewer. Poll those references with validation `job_status` and collect them
+with validation `job_result`, not the similarly named `llm_job_*` tools. If a
+judge was requested, wait for every reviewer to become terminal, then call
+`synthesize_validation` with the `validationId` and the same `workingDir` or
+`workspace` selector. Continue collecting results for progress and human
+visibility, but do not pass them as review evidence: for a `review_changes` run,
+the gateway ignores caller-supplied `question` and `providerResults`, reloads
+the exact owned durable linked terminal jobs, and reconstructs requested but
+unavailable seats as skipped. General validation synthesis still requires a
+caller-supplied question and terminal normalized results.
+
+The review surface is registered only with durable SQLite or PostgreSQL job and
+validation-run storage. Each CLI review job retains the exact fenced prompt in
+its expiry-bound `payload_json`; its persisted argv contains only a hash marker.
+The non-expiring flight recorder does not receive repository-review prompts.
+Configured HTTP/API reviewer seats require explicit `allowApiUpload:true`
+because the complete artifact leaves the local CLI boundary. Remote HTTP/OAuth
+workspace reviews reject API reviewer uploads even with that flag. Treat the
+durable job store as sensitive until the configured job retention expires.
+When `judgeModel` is an HTTP/API provider, `review_changes` binds that explicit
+consent, the judge provider, the resolved repository, and the caller identity to
+the durable `validationId`. The later `synthesize_validation` call must provide
+that id and the same repository selector. The stored judge, repository, owner,
+and upload consent are authoritative. The gateway atomically claims the planned
+judge once, so concurrent or repeated synthesis cannot start a second judge.
+A follow-up argument cannot grant or override upload consent.
 
 #### LLM Request Tools
 
@@ -462,35 +575,40 @@ Execute a Claude Code request with optional session management.
 - `prompt` (string, optional*): The prompt to send (1-100,000 chars). *Exactly one of `prompt` or `promptParts` is required (mutually exclusive)
 - `model` (string, optional): Model name or alias (use `list_models` for available values; supports `latest`)
 - `outputFormat` (string, optional): Output format (`text|json|stream-json`), default: `stream-json` — the gateway parses NDJSON usage events for token/cost observability; override to `text` only when you want unparsed stdout
-- `sessionId` (string, optional): Specific session ID to use
-- `continueSession` (boolean, optional): Continue the active session
+- `sessionId` (string, optional): Specific session ID to use. Under `mcp_managed`, native continuation is a high-risk input because it can inherit an unverified provider posture; it requires approval and `LLM_GATEWAY_APPROVAL_ALLOW_BYPASS=1`, but does not select a full-permission profile.
+- `continueSession` (boolean, optional): Continue the active session. It has the same managed-approval requirement as `sessionId`. Because Claude `--continue` selects by cwd, it requires `workingDir` or a registered workspace selected explicitly, through caller-owned session metadata, or by the configured default. That workspace may optionally supply a gateway worktree. The request fails closed when no selection supplies a stable cwd.
 - `createNewSession` (boolean, optional): Always create a new session
-- `forkSession` (boolean, optional): Fork the resumed session instead of appending to it
-- `allowedTools` (string[], optional): Restrict Claude tools to this allow-list
+- `forkSession` (boolean, optional): Fork the resumed session instead of appending to it. Under `mcp_managed`, it is a high-risk native-fork input that requires approval and `LLM_GATEWAY_APPROVAL_ALLOW_BYPASS=1`, but stays bounded.
+- `allowedTools` (string[], optional): Restrict Claude tools to this allow-list. A non-empty allow-list is a high-risk managed input because it can change the tool posture.
 - `disallowedTools` (string[], optional): Explicitly deny listed Claude tools
-- `permissionMode` (string, optional): Claude permission mode (`default|acceptEdits|plan|auto|dontAsk|bypassPermissions`); preferred over `dangerouslySkipPermissions`
-- `dangerouslySkipPermissions` (boolean, optional): Deprecated — maps to `permissionMode: "bypassPermissions"`; `permissionMode` wins when both are set
-- `agent` (string, optional): Named sub-agent to run as
-- `agents` (string, optional): Inline agent definitions JSON
-- `systemPrompt` / `appendSystemPrompt` (string, optional): Replace or extend the system prompt
+- `permissionMode` (string, optional): Claude permission mode (`default|acceptEdits|plan|auto|dontAsk|bypassPermissions`); preferred over `dangerouslySkipPermissions`. `bypassPermissions` is a direct full-permission request under `mcp_managed`.
+- `dangerouslySkipPermissions` (boolean, optional): Deprecated, maps to `permissionMode: "bypassPermissions"`; `permissionMode` wins when both are set. It is a direct full-permission request under `mcp_managed`.
+- `agent` (string, optional): Named sub-agent to run as. A non-empty value is a high-risk managed input because it can change tool and permission posture.
+- `agents` (string, optional): Inline agent definitions JSON. A non-empty value is a high-risk managed input for the same reason.
+- `systemPrompt` / `appendSystemPrompt` (string, optional): Replace or extend the system prompt. A non-empty value is a high-risk managed input.
+- `systemPromptFile` / `appendSystemPromptFile` (string, optional): Replace or extend the system prompt from a file. A non-empty file path is a high-risk managed input.
+- `safeMode` (boolean, optional): Start Claude with local customizations disabled, including `CLAUDE.md`, skills, plugins, hooks, MCP, commands, and agents. `true` is a high-risk managed input.
+- `bare` (boolean, optional): Start Claude in minimal mode, skipping local customization discovery. `true` is a high-risk managed input.
+- `debugFile` (string, optional): Write Claude debug output to a file. A non-empty path is a high-risk managed input.
 - `maxBudgetUsd` (number, optional): Budget cap in USD for the request
 - `maxTurns` (integer, optional): Agent-loop turn cap
 - `effort` (string, optional): Reasoning effort (`low|medium|high|xhigh|max`)
 - `fallbackModel` (string, optional): Auto-fallback model when the default is overloaded
 - `jsonSchema` (string, optional): JSON Schema literal constraining structured output
-- `addDir` (string[], optional): Additional workspace directories
+- `addDir` (string[], optional): Additional workspace directories. A non-empty value is a high-risk managed input.
 - `noSessionPersistence` (boolean, optional): Ephemeral session (not persisted to disk)
-- `settingSources` / `settings` / `tools` (optional): Setting sources to load, settings JSON path/literal, built-in tool restriction
+- `settingSources` / `settings` / `tools` (optional): Setting sources to load, settings JSON path/literal, built-in tool restriction. Non-empty setting sources, settings, or tool selections are high-risk managed inputs.
+- `pluginDir` / `pluginUrl` (string[], optional): Load Claude plugins from local directories or URLs. Non-empty values are high-risk managed inputs.
 - `excludeDynamicSystemPromptSections` (boolean, optional): Trim dynamic system prompt sections
-- `approvalStrategy` (string, optional): `"legacy"` (default) or `"mcp_managed"`
+- `approvalStrategy` (string, optional): `"legacy"` (default) or `"mcp_managed"`. Managed mode uses `acceptEdits` by default and forces `strictMcpConfig:true`, so Claude uses only the gateway-generated MCP configuration. A direct full-permission request requires all of an explicit caller request, an approval-manager approval, and `LLM_GATEWAY_APPROVAL_ALLOW_BYPASS=1`. Other high-risk inputs require the approval and operator setting too, but remain bounded and do not themselves select full permission.
 - `approvalPolicy` (string, optional): `"strict"`, `"balanced"`, or `"permissive"`
-- `mcpServers` (string[], optional): Names of MCP servers to expose to Claude (default: none). The gateway resolves each name to a launch command from its local registry / Codex MCP config; unknown names are reported as unavailable. Configure the servers your deployment uses in the gateway environment.
-- `strictMcpConfig` (boolean, optional): Require Claude to use only supplied MCP config, default: true (request fails if any requested server is unavailable)
+- `mcpServers` (string[], optional): Names of MCP servers to expose to Claude (default: none). Legacy requests resolve names from the local registry or Codex MCP config; unknown names are reported as unavailable. Under `mcp_managed`, Claude uses only the generated configuration and only registry entries explicitly provisioned as gateway-owned local commands are eligible. Dynamic `npx` launchers, ambient-PATH commands, and Codex-config overrides are rejected. Configure and deploy the managed entries in the gateway environment.
+- `strictMcpConfig` (boolean, optional): In legacy mode this defaults to `false`; set `true` to require only the generated MCP config and fail if requested servers are unavailable. Under `mcp_managed`, the gateway forces it to `true` and a caller-supplied `false` cannot weaken that boundary.
 - `optimizePrompt` (boolean, optional): Optimize prompt for token efficiency (44% reduction), default: false
 - `optimizeResponse` (boolean, optional): Optimize response for token efficiency (37% reduction), default: false
 - `correlationId` (string, optional): Request trace ID (auto-generated if omitted)
 - `idleTimeoutMs` (integer, optional): Kill a stuck process after output inactivity; 30,000 to 3,600,000 ms
-- `worktree` (boolean|object, optional): Run inside a gateway-owned git worktree (slice λ)
+- `worktree` (boolean|object, optional): Run inside a gateway-owned git worktree (slice λ). A worktree requires a registered workspace selected explicitly, through caller-owned session metadata, or by the configured default; it never inherits process cwd or combines with `workingDir`, `addDir`, or `includeDirs`. Materialization suppresses repository, system, and global Git hooks and configured clean, smudge, and process checkout filters, so filter-dependent content such as Git LFS remains in its repository representation instead of executing host commands. Requesting a worktree is a high-risk managed input that requires approval and `LLM_GATEWAY_APPROVAL_ALLOW_BYPASS=1`, but remains bounded.
 - `promptParts` (object, optional): Cache-aware structured prompt `{ system?, tools?, context?, task }`; mutually exclusive with `prompt`
 - `forceRefresh` (boolean, optional): Bypass dedup and force a fresh CLI run, default: false
 
@@ -522,25 +640,30 @@ Execute a Codex request with optional session tracking.
 - `prompt` (string, optional*): The prompt to send (1-100,000 chars). *Exactly one of `prompt` or `promptParts` is required (mutually exclusive)
 - `model` (string, optional): Model name or alias (use `list_models` for available values; supports `latest`, recommended: `gpt-5.5`)
 - `fullAuto` (boolean, optional): Deprecated — expands to `--sandbox workspace-write` only (current Codex no longer accepts approval-policy flags); prefer `sandboxMode`
-- `sandboxMode` (string, optional): Codex sandbox (`read-only|workspace-write|danger-full-access`)
-- `dangerouslyBypassApprovalsAndSandbox` (boolean, optional): Request Codex bypass flags
-- `approvalStrategy` (string, optional): `"legacy"` (default) or `"mcp_managed"`
-- `approvalPolicy` (string, optional): `"strict"`, `"balanced"`, or `"permissive"`
-- `mcpServers` (string[], optional): MCP servers expected for Codex execution context
-- `sessionId` (string, optional): Session identifier for tracking
-- `resumeLatest` (boolean, optional): Resume the most recent Codex session in the current cwd (`codex exec resume --last`); ignored if `sessionId` is set
+- `sandboxMode` (string, optional): Codex sandbox (`read-only|workspace-write|danger-full-access`).
+- `dangerouslyBypassApprovalsAndSandbox` (boolean, optional): Request Codex's full approvals-and-sandbox bypass.
+- `dangerouslyBypassHookTrust` (boolean, optional): Request Codex hook-trust bypass.
+- `approvalStrategy` (string, optional): `"legacy"` is the only executable strategy. `"mcp_managed"` is rejected before Codex launches because the adapter cannot isolate ambient MCP configuration.
+- `approvalPolicy` (string, optional): Has no effect for Codex because `mcp_managed` is unavailable.
+- `mcpServers` (string[], optional): Metadata only. It does not configure or isolate Codex MCP servers.
+- `sessionId` (string, optional): Session identifier for tracking.
+- `resumeLatest` (boolean, optional): Resume the globally most recent Codex session (`codex exec resume --last`); the resumed session inherits its original cwd and is not selected by `workingDir`. Ignored if `sessionId` is set.
 - `createNewSession` (boolean, optional): Always create a new session
 - `forceRefresh` (boolean, optional): Bypass dedup and force a fresh CLI run, default: false
 - `outputFormat` (string, optional): `text` (default) or `json` (`--json` JSONL events for token usage extraction)
-- `outputSchema` (string|object, optional): Codex `--output-schema` — path or inline JSON Schema
-- `workingDir` (string, optional): Working root for this session (`-C`/`--cd`; new sessions only)
-- `addDir` (string[], optional): Additional writable workspace directories (one `--add-dir` per entry; new sessions only)
+- `outputSchema` (string|object, optional): Codex `--output-schema`, path or inline JSON Schema.
+- `workingDir` (string, optional): Working root for this session (`-C`/`--cd`; new sessions only). Personal Agent Config Kit mode requires an absolute path.
+- `addDir` (string[], optional): Additional writable workspace directories (one `--add-dir` per entry; new sessions only).
 - `ephemeral` (boolean, optional): Codex `--ephemeral` (no session persistence)
-- `images` (string[], optional): Image attachments (one `-i <path>` per entry)
-- `profile` (string, optional): Codex `--profile <name>` (new sessions only; ignored with a logged warning on resume)
-- `configOverrides` (object, optional): Codex `-c key=value` overrides
-- `ignoreRules` / `ignoreUserConfig` (boolean, optional): Codex `--ignore-rules` / `--ignore-user-config`
-- `worktree` (boolean|object, optional): Run inside a gateway-owned git worktree (slice λ)
+- `images` (string[], optional): Image attachments (one `-i <path>` per entry).
+- `profile` (string, optional): Codex `--profile <name>` (new sessions only; ignored with a logged warning on resume).
+- `configOverrides` (object, optional): Codex `-c key=value` overrides. Local callers only; remote HTTP/OAuth requests are rejected.
+- `enable` / `disable` (string[], optional): Codex `--enable` / `--disable` feature overrides. They are `-c features.*` equivalents and are also local-only.
+- `ignoreRules` / `ignoreUserConfig` (boolean, optional): Codex `--ignore-rules` / `--ignore-user-config`.
+- `outputLastMessage` (string, optional): Codex `--output-last-message <path>`.
+- `oss` (boolean, optional): Codex `--oss`, selecting the open-source provider.
+- `localProvider` (string, optional): Codex `--local-provider <name>`.
+- `worktree` (boolean|object, optional): Run inside a gateway-owned git worktree (slice λ). A worktree requires a registered workspace selected explicitly, through caller-owned session metadata, or by the configured default; it never inherits process cwd or combines with `workingDir`, `addDir`, or `includeDirs`. Materialization suppresses repository, system, and global Git hooks and configured clean, smudge, and process checkout filters, so filter-dependent content such as Git LFS remains in its repository representation instead of executing host commands.
 - `promptParts` (object, optional): Cache-aware structured prompt `{ system?, tools?, context?, task }`; mutually exclusive with `prompt`
 - `optimizePrompt` (boolean, optional): Optimize prompt for token efficiency, default: false
 - `optimizeResponse` (boolean, optional): Optimize response for token efficiency, default: false
@@ -549,8 +672,7 @@ Execute a Codex request with optional session tracking.
 
 **Response extras:**
 
-- `approval`: Approval decision record when `approvalStrategy="mcp_managed"`
-- `mcpServers`: Requested MCP servers for this call
+- `mcpServers`: Requested MCP-server metadata for this call
 
 **Example:**
 
@@ -565,15 +687,17 @@ Execute a Codex request with optional session tracking.
 
 ##### `codex_fork_session`
 
-Fork an existing Codex session into a new branch (`codex fork <SESSION_ID|--last> <prompt>`), preserving the original session's history while the fork diverges.
+Fork an existing Codex session into a new branch (`codex fork <SESSION_ID|--last> <prompt>`), preserving the original session's history while the fork diverges. Unlike Codex new and resume requests, this command remains argv-bound and rejects oversized UTF-8 prompts as non-retryable `input_too_large`.
 
 **Parameters:**
 
 - `prompt` (string, required): Prompt text for the forked session (1-100,000 chars)
-- `sessionId` (string, optional): Codex session UUID to fork from (mutually exclusive with `forkLast`)
-- `forkLast` (boolean, optional): Fork the most recent Codex session instead of naming one
+- `sessionId` (string, optional): Codex session UUID to fork from (mutually exclusive with `forkLast`).
+- `forkLast` (boolean, optional): Fork the most recent Codex session instead of naming one.
 - `model` (string, optional): Model name or alias (e.g. `gpt-5.5`, `latest`)
-- `sandboxMode` (string, optional): Codex sandbox (`read-only|workspace-write|danger-full-access`)
+- `sandboxMode` (string, optional): Codex sandbox (`read-only|workspace-write|danger-full-access`).
+- `approvalStrategy` (string, optional): `"legacy"` is the only executable strategy. `"mcp_managed"` is rejected before Codex launches because the adapter cannot isolate ambient MCP configuration.
+- `approvalPolicy` (string, optional): Has no effect for Codex because `mcp_managed` is unavailable.
 - `correlationId` (string, optional): Request trace ID (auto-generated if omitted)
 - `idleTimeoutMs` (number, optional): Idle timeout in ms (30s-1h, omit for CLI default)
 
@@ -585,20 +709,24 @@ Execute a Google Antigravity CLI (`agy`) request with session support.
 
 - `prompt` (string, optional*): The prompt to send (1-100,000 chars). *Exactly one of `prompt` or `promptParts` is required (mutually exclusive)
 - `model` (string, optional): Model name or alias (use `list_models` for available values; supports `latest`, `pro`, `flash`)
-- `sessionId` (string, optional): Session ID to resume
-- `resumeLatest` (boolean, optional): Resume the latest session automatically
+- `sessionId` (string, optional): Session ID to resume.
+- `resumeLatest` (boolean, optional): Resume the latest session automatically.
 - `createNewSession` (boolean, optional): Always create a new session
-- `approvalMode` (string, optional): Antigravity approval mode in legacy mode. Only `default` (prompted execution) and `yolo` (emits `--dangerously-skip-permissions`) are accepted; `auto_edit` and `plan` are rejected with an error.
-- `approvalStrategy` (string, optional): `"legacy"` (default) or `"mcp_managed"`
-- `approvalPolicy` (string, optional): `"strict"`, `"balanced"`, or `"permissive"`
-- `includeDirs` (string[], optional): Additional workspace directories (passed as `--add-dir`)
-- `project` (string, optional): Select the Antigravity project for this session (`--project <ID>`); mutually exclusive with `newProject`
-- `newProject` (boolean, optional): Create a new Antigravity project for this session (`--new-project`); mutually exclusive with `project`
+- `approvalMode` (string, optional): Antigravity approval mode in legacy mode: `default` leaves agy prompted, `auto_edit` emits `--mode accept-edits`, `plan` emits `--mode plan`, and `yolo` emits `--dangerously-skip-permissions`.
+- `approvalStrategy` (string, optional): `"legacy"` is the only executable strategy. `"mcp_managed"` is rejected before Antigravity launches because the adapter cannot isolate ambient MCP configuration.
+- `approvalPolicy` (string, optional): Has no effect for Antigravity because `mcp_managed` is unavailable.
+- `includeDirs` (string[], optional): Additional workspace directories (passed as `--add-dir`).
+- `project` (string, optional): Select the Antigravity project for this session (`--project <ID>`); mutually exclusive with `newProject`.
+- `newProject` (boolean, optional): Create a new Antigravity project for this session (`--new-project`); mutually exclusive with `project`.
 - `sandbox` (boolean, optional): Run Antigravity in sandbox mode (`--sandbox`)
+- `workspace` (string, optional): Registered gateway workspace alias that selects
+  the Antigravity process cwd. `includeDirs` adds read paths but does not select
+  cwd.
 - `outputFormat` (string, optional): `text` only. Antigravity print mode emits text; `json` and `stream-json` are rejected.
-- `mcpServers`, `allowedTools`, `policyFiles`, `adminPolicyFiles`, `attachments` (string[], optional) and `skipTrust` (boolean, optional): **Unsupported by Antigravity CLI** — non-empty values (or `skipTrust: true`) are rejected with an explanatory error. Retained in the schema for caller parity.
-- `yolo` (boolean, optional): Auto-approve all; equivalent to `approvalMode: "yolo"`. Emits `--dangerously-skip-permissions`
-- `worktree` (boolean|object, optional): Run inside a gateway-owned git worktree (slice λ)
+- `mcpServers` (string[], optional): Metadata only. Antigravity manages its own MCP configuration; this field does not create an allowlist.
+- `allowedTools`, `policyFiles`, `adminPolicyFiles`, `attachments` (string[], optional) and `skipTrust` (boolean, optional): **Unsupported by Antigravity CLI**. Non-empty values, or `skipTrust: true`, are rejected with an explanatory error.
+- `yolo` (boolean, optional): Auto-approve all; equivalent to `approvalMode: "yolo"`. Emits `--dangerously-skip-permissions` in legacy mode.
+- `worktree` (boolean|object, optional): Run inside a gateway-owned git worktree (slice λ). A worktree requires a registered workspace selected explicitly, through caller-owned session metadata, or by the configured default; it never inherits process cwd or combines with `workingDir`, `addDir`, or `includeDirs`. Materialization suppresses repository, system, and global Git hooks and configured clean, smudge, and process checkout filters, so filter-dependent content such as Git LFS remains in its repository representation instead of executing host commands.
 - `promptParts` (object, optional): Cache-aware structured prompt `{ system?, tools?, context?, task }`; mutually exclusive with `prompt`
 - `optimizePrompt` (boolean, optional): Optimize prompt for token efficiency, default: false
 - `optimizeResponse` (boolean, optional): Optimize response for token efficiency, default: false
@@ -608,8 +736,7 @@ Execute a Google Antigravity CLI (`agy`) request with session support.
 
 **Response extras:**
 
-- `approval`: Approval decision record when `approvalStrategy="mcp_managed"`
-- `mcpServers`: Requested MCP servers for this call
+- `mcpServers`: Requested MCP-server metadata for this call
 
 **Example:**
 
@@ -630,46 +757,46 @@ Execute a Grok CLI (xAI) request with session support.
 
 - `prompt` (string, optional*): The prompt to send (1-100,000 chars). *Exactly one of `prompt` or `promptParts` is required (mutually exclusive)
 - `model` (string, optional): Model name or alias (e.g. `grok-build`, `latest`)
-- `transport` (string, optional): `"cli"` (default) runs the Grok CLI; `"acp"` routes through Grok's native `grok agent stdio` transport when `[acp].enabled` and the provider's `runtime_enabled` are set (fails closed otherwise). Sync-only: `grok_request_async` always runs the CLI transport and does not accept `transport`
+- `transport` (string, optional): `"cli"` (default) runs the Grok CLI; `"acp"` routes through Grok's native `grok agent stdio` transport when `[acp].enabled` and the provider's `runtime_enabled` are set (fails closed otherwise). Both transports reject `approvalStrategy:"mcp_managed"`; `approvalPolicy` has no effect. Sync-only: `grok_request_async` always runs the CLI transport and does not accept `transport`
 - `outputFormat` (string, optional): `"plain"` (default), `"json"`, or `"streaming-json"`
-- `sessionId` (string, optional): Session ID to resume (`--resume <id>`)
-- `resumeLatest` (boolean, optional): Resume the most recent session in the current cwd (`--continue`)
+- `sessionId` (string, optional): Session ID to resume (`--resume <id>`).
+- `resumeLatest` (boolean, optional): Resume the most recent session in the current cwd (`--continue`).
 - `createNewSession` (boolean, optional): Always create a new session
-- `alwaysApprove` (boolean, optional): Auto-approve all tool executions (`--always-approve`) in legacy mode
-- `permissionMode` (string, optional): `default|acceptEdits|auto|dontAsk|bypassPermissions|plan`
+- `alwaysApprove` (boolean, optional): Auto-approve all tool executions (`--always-approve`) in legacy mode.
+- `permissionMode` (string, optional): `default|acceptEdits|auto|dontAsk|bypassPermissions|plan`.
 - `effort` (string, optional): `low|medium|high|xhigh|max`
 - `reasoningEffort` (string, optional): Reasoning effort for reasoning models
-- `approvalStrategy` (string, optional): `"legacy"` (default) or `"mcp_managed"`
-- `approvalPolicy` (string, optional): `"strict"`, `"balanced"`, or `"permissive"`
-- `mcpServers` (string[], optional): MCP server names tracked for approvals (Grok manages its own MCP config via `grok mcp`)
-- `allowedTools` (string[], optional): Allowed built-in tools (passed as `--tools` comma list)
+- `approvalStrategy` (string, optional): `"legacy"` is the only executable strategy. `"mcp_managed"` is rejected before Grok launches because the adapter cannot isolate ambient MCP configuration.
+- `approvalPolicy` (string, optional): Has no effect for Grok because `mcp_managed` is unavailable.
+- `mcpServers` (string[], optional): Metadata only. Grok manages its own MCP configuration via `grok mcp`; this field does not create an allowlist.
+- `allowedTools` (string[], optional): Allowed built-in tools (passed as `--tools` comma list).
 - `disallowedTools` (string[], optional): Disallowed built-in tools (passed as `--disallowed-tools` comma list)
 - `maxTurns` (integer, optional): Agent-loop iteration cap (`--max-turns`)
 - `workingDir` (string, optional): Working directory for this invocation (`--cwd`)
-- `sandbox` (string, optional): Sandbox profile for filesystem/network access (`--sandbox`, freeform; also via `GROK_SANDBOX`)
-- `rules` (string, optional): Extra rules appended to the system prompt (`--rules`; supports `@file` prefix)
-- `systemPromptOverride` (string, optional): Replace the agent's system prompt entirely
-- `allow` / `deny` (string[], optional): Permission allow/deny rules (one `--allow`/`--deny` per entry)
+- `sandbox` (string, optional): Sandbox profile for filesystem/network access (`--sandbox`, freeform; also via `GROK_SANDBOX`).
+- `rules` (string, optional): Extra rules appended to the system prompt (`--rules`; supports `@file` prefix).
+- `systemPromptOverride` (string, optional): Replace the agent's system prompt entirely.
+- `allow` / `deny` (string[], optional): Permission allow/deny rules (one `--allow`/`--deny` per entry).
 - `compactionMode` (string, optional): `summary` (default) `|transcript|segments`
 - `compactionDetail` (string, optional): `none|minimal|balanced|verbose` (segments mode only)
-- `agent` (string, optional): Agent name or definition file path
-- `agents` (string|object, optional): Inline subagent definitions JSON
+- `agent` (string, optional): Agent name or definition file path.
+- `agents` (string|object, optional): Inline subagent definitions JSON.
 - `bestOfN` (integer, optional): Run the task N ways in parallel and pick the best (headless only)
 - `check` (boolean, optional): Append a self-verification loop (headless only)
 - `disableWebSearch` (boolean, optional): Disable web search and remote retrieval tools
 - `todoGate` (boolean, optional): Enable runtime turn-end TodoGate (session-scoped)
 - `verbatim` (boolean, optional): Send the prompt exactly as given (also skips gateway prompt optimisation)
-- `promptFile` / `promptJson` / `single` (optional): Single-turn prompt from a file / JSON blocks / literal
-- `experimentalMemory` / `noMemory` (boolean, optional): Enable/disable cross-session memory
+- `promptFile` / `promptJson` / `single` (optional): Single-turn prompt from a file / JSON blocks / literal.
+- `experimentalMemory` / `noMemory` (boolean, optional): Enable/disable cross-session memory.
 - `noAltScreen` / `noPlan` / `noSubagents` (boolean, optional): Disable alt screen / plan mode / subagent spawning
-- `oauth` (boolean, optional): Use OAuth during authentication
-- `restoreCode` (boolean, optional): Check out the original session commit when resuming
-- `leaderSocket` (string, optional): Custom leader socket path (`--leader-socket`, Grok 0.2.32+; default `~/.grok/leader.sock`) — targets an isolated leader process, e.g. a local/branch Grok build
-- `nativeWorktree` (boolean|string, optional): Grok's own `--worktree` flag (`true` → bare, string → named); distinct from the gateway `worktree` option
-- `worktreeRef` (string, optional): Branch/tag/commit to base the native worktree on (`--worktree-ref`); requires `nativeWorktree`
-- `forkSession` (boolean, optional): Fork the resumed session into a new branch instead of appending to it
+- `oauth` (boolean, optional): Use OAuth during authentication.
+- `restoreCode` (boolean, optional): Check out the original session commit when resuming.
+- `leaderSocket` (string, optional): Custom leader socket path (`--leader-socket`, Grok 0.2.32+; default `~/.grok/leader.sock`) targeting an isolated leader process, for example a local or branch Grok build.
+- `nativeWorktree` (boolean|string, optional): Grok's own `--worktree` flag (`true` means bare, string means named); distinct from the gateway `worktree` option.
+- `worktreeRef` (string, optional): Branch/tag/commit to base the native worktree on (`--worktree-ref`); requires `nativeWorktree`.
+- `forkSession` (boolean, optional): Fork the resumed session into a new branch instead of appending to it.
 - `jsonSchema` (string|object, optional): JSON Schema (string or object) constraining structured output (`--json-schema`)
-- `worktree` (boolean|object, optional): Run inside a gateway-owned git worktree (slice λ)
+- `worktree` (boolean|object, optional): Run inside a gateway-owned git worktree (slice λ). Grok requires an explicit provider-native `sessionId`; fresh, `createNewSession`, and `resumeLatest`-only worktree requests are rejected because they cannot durably reselect the worktree. A worktree requires a registered workspace selected explicitly, through caller-owned session metadata, or by the configured default; it never inherits process cwd or combines with `workingDir`, `addDir`, or `includeDirs`. Materialization suppresses repository, system, and global Git hooks and configured clean, smudge, and process checkout filters, so filter-dependent content such as Git LFS remains in its repository representation instead of executing host commands.
 - `promptParts` (object, optional): Cache-aware structured prompt `{ system?, tools?, context?, task }`; mutually exclusive with `prompt`
 - `optimizePrompt` (boolean, optional): Optimize prompt for token efficiency, default: false
 - `optimizeResponse` (boolean, optional): Optimize response for token efficiency, default: false
@@ -728,6 +855,24 @@ Backends:
 - **`postgres`** — durable PostgreSQL-backed async job, dedup, orphan recovery, HTTP job, and validation receipt storage. Use this for multi-instance or service deployments. Requires the optional peer dependency `pg` to be installed alongside the gateway.
 - **`memory`** — in-process Map. Lost on gateway exit. Requires `acknowledgeEphemeral = true` to be loaded. Suitable for tests and ephemeral CI gateways.
 - **`none`** — no store. **`*_request_async`, `llm_job_status`, `llm_job_result`, and `llm_job_cancel` are NOT registered on the gateway.** This is a structural invariant: agents that try to call async tools against a gateway with `backend = "none"` get a clean "tool not found" at connect time instead of silent in-memory loss after the 1-hour TTL. Use `llm_process_health` to inspect the resolved persistence state programmatically.
+
+For PostgreSQL, apply the schema with a schema-owner or dedicated migration role before starting a DML-only gateway role:
+
+```bash
+DATABASE_URL='postgresql://<user>:<password>@<host>/<database>' npm run migrate
+```
+
+The runner serializes migration work with an advisory lock and records a SHA-256
+of each migration in `schema_migrations.checksum_sha256`. On later runs, a
+malformed or mismatched recorded checksum stops the runner before it calculates
+or applies pending migrations. A `NULL` checksum is an explicit legacy row from
+before checksum recording. It is allowed with a warning but is never backfilled,
+because current source files cannot prove what SQL ran historically. Do not edit
+released migration files or populate ledger checksums manually. The runner
+preserves the historical 002/003 SQL and applies compatibility only while one
+of those legacy versions remains pending; forward migration 018 repairs an
+already-recorded legacy session/view layout. Release checks reject a source edit
+to a published migration file.
 
 Legacy environment variables (deprecated; emit a warning at startup):
 
@@ -793,15 +938,17 @@ after restart and `llm_process_health.backpressure` should be used to tune
 
 ##### Per-project isolation
 
-By default, **all gateway data is global per user**, not per project. With no overrides, every Claude Code window — across every repo — spawns its own gateway subprocess but they all read and write the same files:
+By default, **gateway state is global per user**, not per project. With no overrides, every Claude Code window across every repo spawns its own gateway subprocess but they all read and write the same state:
 
 - `~/.llm-cli-gateway/logs.db` (async jobs + flight recorder)
-- `~/.llm-cli-gateway/sessions.json` (CLI sessions)
+- `~/.llm-cli-gateway/sessions.json` (gateway session metadata when using the default file session backend)
 - `~/.llm-cli-gateway/config.toml` (resolved config)
 
-This is usually what you want — `session_list` from repo A shows sessions from repo B, an async job started in window A can be polled from window B, and the 1-hour dedup window catches re-issues across windows. SQLite WAL mode makes concurrent access from multiple gateway subprocesses safe.
+When `DATABASE_URL` selects the PostgreSQL session manager, the session metadata lives in PostgreSQL instead of `sessions.json`. This is usually what you want: `session_list` from repo A can show sessions from repo B, an async job started in window A can be polled from window B, and the 1-hour dedup window catches re-issues across windows. Gateway-managed worktrees are the exception: they are filesystem-local and therefore fail closed with PostgreSQL session storage. SQLite WAL mode protects the default job/flight-recorder database, while the file session manager uses locked atomic writes.
 
-If you instead want **per-project isolation** (e.g. unrelated repos shouldn't share session lists or risk false dedup hits), point each project at its own config file. In `.claude/settings.local.json` for the project:
+##### Per-project durable-job isolation
+
+If unrelated repositories should not share async jobs, flight-recorder rows, or deduplication, point each project at its own persistence config. In `.claude/settings.local.json` for the project:
 
 ```json
 {
@@ -823,7 +970,7 @@ backend = "sqlite"
 path = "/srv/repos/.../my-repo/.gateway/logs.db"
 ```
 
-Now every gateway subprocess spawned for _this_ repo's Claude Code window reads its own config and writes to its own SQLite file; sessions, jobs, and dedup state are scoped to the repo. Other repos keep using the global default. `llm_process_health.persistence.sources.configFile` lets an agent confirm which config it's actually running under.
+Now every gateway subprocess spawned for _this_ repo's Claude Code window reads its own config and writes its durable jobs, flight-recorder rows, and deduplication state to its own SQLite file. Other repos keep using the global default. This `[persistence]` override does not move the default file-backed `sessions.json`, so it does not isolate session lists. `llm_process_health.persistence.sources.configFile` lets an agent confirm which persistence config it is actually running under.
 
 ###### Agent-executable spec (DAG-TOML)
 
@@ -835,8 +982,8 @@ schema_version    = "1.0.0"
 template_kind     = "implementation-dag"
 docs              = "https://github.com/verivus-oss/agent-assurance/blob/main/SPEC.md"
 confidentiality   = "public"
-title             = "Per-project llm-cli-gateway persistence isolation"
-spec              = "https://github.com/verivus-oss/llm-cli-gateway#per-project-isolation"
+title             = "Per-project llm-cli-gateway durable-job isolation"
+spec              = "https://github.com/verivus-oss/llm-cli-gateway#per-project-durable-job-isolation"
 created           = "YYYY-MM-DD"
 total_units       = 5
 tier1_units       = ["U01","U02","U03","U04","U05"]
@@ -850,14 +997,14 @@ tier3_units       = []
 [policy.agent]
 name                 = "Gateway Persistence Isolator"
 role                 = "Configuration Engineer"
-purpose              = "Configure the llm-cli-gateway MCP server so its async job store, sessions, dedup state, and flight recorder are scoped to THIS repository instead of the per-user default at ~/.llm-cli-gateway/."
+purpose              = "Configure the llm-cli-gateway MCP server so its async job store, dedup state, and flight recorder are scoped to THIS repository instead of the per-user default at ~/.llm-cli-gateway/. The default file-backed session metadata remains shared."
 validation_type      = "Structural + Runtime Verification"
 workflow_initiator   = false
 description          = "Writes a repo-local config.toml, registers an LLM_GATEWAY_CONFIG override in .claude/settings.local.json, restarts the MCP server, and confirms via llm_process_health that the gateway is now reading the repo-local config and writing to the repo-local SQLite path."
 
 [policy.agent.orchestration]
 consumes_events      = ["PerProjectIsolationRequested"]
-produces_events      = ["PerProjectIsolationComplete"]
+produces_events      = ["PerProjectDurableJobIsolationComplete"]
 
 [policy.agent.responsibilities]
 items = [
@@ -980,33 +1127,33 @@ depends_on     = ["U04"]
 blocks         = []
 estimated_loc  = 5
 files_modify   = []
-produces       = ["ART:isolation-verification","OUT:per-project-isolation-complete"]
+produces       = ["ART:durable-isolation-verification","OUT:per-project-durable-isolation-complete"]
 consumes       = ["OUT:mcp-reconnected"]
 ```
 
-**Why this matters for agents:** the gateway has multiple configuration surfaces (TOML file, env-var overrides, two different MCP settings files) and one easy mistake — editing the committed `.mcp.json` instead of the local-only `.claude/settings.local.json` — will silently break the per-project scope for every other developer on the repo. The DAG above encodes the correct sequence, the verification gate, and the failure modes explicitly so an agent can execute it without inference.
+**Why this matters for agents:** the gateway has multiple configuration surfaces (TOML file, env-var overrides, two different MCP settings files) and one easy mistake, editing the committed `.mcp.json` instead of the local-only `.claude/settings.local.json`, will silently break the per-project persistence scope for every other developer on the repo. The DAG above encodes the correct sequence, the verification gate, and the failure modes explicitly so an agent can execute it without inference. It deliberately does not claim to isolate the default file-backed session store.
 
 ##### `mistral_request`
 
 Run a Mistral Vibe agentic coding request. Like `grok_request` in shape, but with Vibe's specific surface:
 
 - `model` (string, optional): Vibe model alias (for example `mistral-medium-3.5` or `latest`). The resolved value is injected via the `VIBE_ACTIVE_MODEL` environment variable; omit it to let the gateway discover Vibe config and avoid stale hardcoded defaults.
-- `transport` (string, optional): `"cli"` (default) runs the Vibe CLI; `"acp"` routes through Vibe's native `vibe-acp` transport when `[acp].enabled` and the provider's `runtime_enabled` are set (fails closed otherwise). Sync-only: `mistral_request_async` always runs the CLI transport and does not accept `transport`
-- `permissionMode`: the Vibe `--agent` name: builtins `default | plan | accept-edits | auto-approve`, or any install-gated/custom agent. Emitted as `--agent <name>`. Defaults to `accept-edits` in programmatic mode; use `auto-approve` only as an explicit opt-in.
+- `transport` (string, optional): `"cli"` (default) runs the Vibe CLI; `"acp"` routes through Vibe's native `vibe-acp` transport when `[acp].enabled` and the provider's `runtime_enabled` are set (fails closed otherwise). Both transports reject `approvalStrategy:"mcp_managed"`; `approvalPolicy` has no effect. Sync-only: `mistral_request_async` always runs the CLI transport and does not accept `transport`
+- `permissionMode`: the Vibe `--agent` name: builtins `default | plan | accept-edits | auto-approve`, or any install-gated/custom agent. Requests emit the supplied name in legacy mode.
 - `allowedTools` (string[], optional): One `--enabled-tools <tool>` flag per entry.
 - `disallowedTools` (string[], optional): One `--disabled-tools <tool>` flag per entry, applied after the enabled-tool filter.
 - `outputFormat` (string, optional): Vibe 2.x values are `"text"`, `"json"`, or `"streaming"`; legacy aliases `"plain"` and `"stream-json"` are accepted and normalized before spawn.
 - `sessionId` / `resumeLatest` / `createNewSession`: standard session controls. Current Vibe defaults session logging to enabled; if an older config has `[session_logging] enabled = false`, `doctor --json` surfaces an actionable next-action.
-- `trust` (boolean, optional): Emit `--trust` so Vibe trusts the cwd for this invocation only (not persisted; skips the interactive trust prompt)
+- `trust` (boolean, optional): Emit `--trust` so Vibe trusts the cwd for this invocation only (not persisted; skips the interactive trust prompt).
 - `maxTurns` (integer, optional): Agent-loop iteration cap (`--max-turns`, programmatic mode only)
 - `maxPrice` (number, optional): Interrupt when cumulative cost crosses this USD cap (`--max-price`, programmatic mode only)
 - `maxTokens` (integer, optional): Cap cumulative prompt + completion tokens (`--max-tokens`, programmatic mode only)
 - `workingDir` (string, optional): Change to this directory before running (`--workdir`)
-- `addDir` (string[], optional): Additional writable workspace directories (one `--add-dir` per entry)
-- `approvalStrategy` (string, optional): `"legacy"` (default) or `"mcp_managed"`
-- `approvalPolicy` (string, optional): `"strict"`, `"balanced"`, or `"permissive"`
-- `mcpServers` (string[], optional): MCP server names tracked for approvals (Vibe manages its own MCP config via `vibe mcp`)
-- `worktree` (boolean|object, optional): Run inside a gateway-owned git worktree (slice λ)
+- `addDir` (string[], optional): Additional writable workspace directories (one `--add-dir` per entry).
+- `approvalStrategy` (string, optional): `"legacy"` is the only executable strategy. `"mcp_managed"` is rejected before Vibe launches because the adapter cannot isolate ambient MCP configuration.
+- `approvalPolicy` (string, optional): Has no effect for Vibe because `mcp_managed` is unavailable.
+- `mcpServers` (string[], optional): Metadata only. Vibe reads its MCP configuration from `VIBE_HOME` config; this field does not create an allowlist.
+- `worktree` (boolean|object, optional): Run inside a gateway-owned git worktree (slice λ). Mistral requires an explicit provider-native `sessionId`; fresh, `createNewSession`, and `resumeLatest`-only worktree requests are rejected because they cannot durably reselect the worktree. A worktree requires a registered workspace selected explicitly, through caller-owned session metadata, or by the configured default; it never inherits process cwd or combines with `workingDir`, `addDir`, or `includeDirs`. Materialization suppresses repository, system, and global Git hooks and configured clean, smudge, and process checkout filters, so filter-dependent content such as Git LFS remains in its repository representation instead of executing host commands.
 - `promptParts` (object, optional): Cache-aware structured prompt `{ system?, tools?, context?, task }`; mutually exclusive with `prompt`
 - `optimizePrompt` / `optimizeResponse` (boolean, optional): Token-efficiency optimisation, default: false
 - `correlationId` (string, optional): Request trace ID (auto-generated if omitted)
@@ -1021,13 +1168,31 @@ Run a Cognition Devin CLI request synchronously (headless print mode, `devin -p`
 
 - `prompt` (string, optional*): Prompt text for Devin CLI (1-100,000 chars). Required in practice; `promptFile` is additive
 - `model` (string, optional): Model name or alias (e.g. `opus`, `latest`)
-- `transport` (string, optional): `"cli"` (default) runs the Devin CLI; `"acp"` routes through Devin's native `devin acp` transport when `[acp].enabled` and the provider's `runtime_enabled` are set (fails closed otherwise). Sync-only: `devin_request_async` always runs the CLI transport and accepts neither `transport` nor `agentType`
+- `transport` (string, optional): `"cli"` (default) runs the Devin CLI; `"acp"` routes through Devin's native `devin acp` transport when `[acp].enabled` and the provider's `runtime_enabled` are set (fails closed otherwise). Both transports reject `approvalStrategy:"mcp_managed"`; `approvalPolicy` has no effect. Sync-only: `devin_request_async` always runs the CLI transport and accepts neither `transport` nor `agentType`
 - `agentType` (string, optional): ACP agent variant for `transport: "acp"` (`devin acp --agent-type`): `"summarizer"` (no tools, text summary) or `"review"` (read-only plus shell code-review); ignored for the CLI transport
 - `permissionMode` (string, optional): Devin CLI permission mode (`--permission-mode`): `auto` (auto-approves read-only tools), `accept-edits` (also auto-approves workspace edits), `smart` (also auto-runs actions a fast model judges safe), `dangerous` (auto-approves all). Omit to use Devin's headless default
+- `approvalStrategy` (string, optional): `"legacy"` is the only executable strategy. `"mcp_managed"` is rejected before Devin launches because the adapter cannot isolate ambient MCP configuration.
+- `approvalPolicy` (string, optional): Has no effect for Devin because `mcp_managed` is unavailable.
 - `promptFile` (string, optional): Load the initial prompt from a file (`--prompt-file`)
 - `sessionId` (string, optional): Devin session ID to resume (`--resume <id>`). The `gw-*` id minted for a brand-new session is not resumable via `sessionId`; continue with `resumeLatest: true`
-- `resumeLatest` (boolean, optional): Resume the most recent Devin session in cwd (`--continue`)
+- `resumeLatest` (boolean, optional): Resume the most recent Devin session in
+  the selected cwd (`--continue`). Requires `workingDir`, `workspace`, or a
+  configured default workspace.
 - `createNewSession` (boolean, optional): Force a new session
+- `workingDir` (string, optional): Local Devin process cwd. CLI transport only.
+- `workspace` (string, optional): Registered gateway workspace alias that
+  selects the Devin process cwd.
+- `worktree` (boolean|object, optional): Run the Devin CLI request inside a
+  gateway-owned Git worktree. Devin requires an explicit provider-native
+  `sessionId`; fresh, `createNewSession`, and `resumeLatest`-only worktree
+  requests are rejected because they cannot durably reselect the worktree. A
+  worktree requires a registered workspace
+  selected explicitly, through caller-owned session metadata, or by the
+  configured default; it never inherits process cwd or combines with
+  `workingDir`, `addDir`, or `includeDirs`. Materialization suppresses
+  repository, system, and global Git hooks and configured clean, smudge, and
+  process checkout filters, so filter-dependent content such as Git LFS remains
+  in its repository representation instead of executing host commands.
 - `optimizePrompt` / `optimizeResponse` (boolean, optional): Token-efficiency optimisation, default: false
 - `correlationId` (string, optional): Request trace ID (auto-generated if omitted)
 - `idleTimeoutMs` (integer, optional): Kill a stuck process after output inactivity; 30,000 to 3,600,000 ms
@@ -1035,7 +1200,7 @@ Run a Cognition Devin CLI request synchronously (headless print mode, `devin -p`
 
 ##### `cursor_request`
 
-Run a Cursor Agent CLI request synchronously. Defaults to headless print mode (`cursor-agent --print`) and auto-defers to a pollable job past the sync deadline when async jobs are enabled. Set `transport: "acp"` to use Cursor's native `cursor-agent acp` transport when `[acp]` and `[acp.providers.cursor].runtime_enabled` are enabled; current ACP routing accepts only prompt/model/session inputs and rejects CLI-only options such as `mode`, `workspace`, `sandbox`, `force`, and `trust`.
+Run a Cursor Agent request synchronously. The default CLI transport uses headless print mode (`cursor-agent --print`) and auto-defers to a pollable job past the sync deadline when async jobs are enabled. Set `transport: "acp"` to use Cursor's native `cursor-agent acp` transport when `[acp].enabled`, `[acp.providers.cursor].enabled`, and `[acp.providers.cursor].runtime_enabled` are enabled. ACP accepts `prompt`, `model`, a gateway-owned ACP `sessionId`, and a registered gateway `workspace` alias. Both Cursor transports reject `approvalStrategy:"mcp_managed"`; `approvalPolicy` has no effect on CLI and is rejected on ACP.
 
 **Parameters:**
 
@@ -1043,18 +1208,18 @@ Run a Cursor Agent CLI request synchronously. Defaults to headless print mode (`
 - `model` (string, optional): Model name or alias (for example `gpt-5`, `sonnet-4-thinking`, or `latest`)
 - `mode` (string, optional): Cursor mode, `"plan"` or `"ask"` (`--mode`)
 - `outputFormat` (string, optional): `"text"` (default), `"json"`, or `"stream-json"`
-- `transport` (string, optional): `"cli"` (default) or `"acp"`; ACP fails closed unless enabled in gateway config and rejects unsupported Cursor CLI-only controls instead of dropping them. Sync-only: `cursor_request_async` always runs the CLI transport and does not accept `transport`
-- `force` (boolean, optional): Emit `--force` for non-interactive operation
-- `autoReview` (boolean, optional): Emit `--auto-review`
-- `sandbox` (string, optional): `"enabled"` or `"disabled"` (`--sandbox`)
-- `trust` (boolean, optional): Emit `--trust` for this invocation
-- `workspace` (string, optional): Cursor workspace path or name (`--workspace`); remote HTTP/OAuth callers must pass a registered workspace alias, while local stdio callers may pass paths
-- `addDir` (string[], optional): Additional workspace roots (one `--add-dir` per entry); remote HTTP/OAuth callers must use registered workspace roots
-- `sessionId` (string, optional): Cursor chat/session ID to resume (`--resume <id>`). The `gw-*` id minted for a brand-new gateway session is not resumable through `sessionId`; continue with `resumeLatest: true`
-- `resumeLatest` (boolean, optional): Resume the most recent Cursor chat (`--continue`)
-- `createNewSession` (boolean, optional): Force a new session
-- `approvalStrategy` (string, optional): `"legacy"` (default) or `"mcp_managed"`; under MCP-managed approval, high-impact Cursor flags (`force`, `trust`, or `sandbox: "disabled"`) are denied unless bypass approval is explicitly allowed
-- `approvalPolicy` (string, optional): `"strict"`, `"balanced"`, or `"permissive"` override for MCP-managed approval
+- `transport` (string, optional): `"cli"` (default) or `"acp"`; ACP fails closed unless its global and Cursor provider gates are enabled. ACP accepts only `prompt`, `model`, `sessionId`, and a registered `workspace`; non-default Cursor CLI controls (`mode`, non-text `outputFormat`, non-empty `addDir`, `force`, `autoReview`, `sandbox`, `trust`, `resumeLatest`, `createNewSession`, optimization or compression, `idleTimeoutMs`, and `forceRefresh`) are rejected. Sync-only: `cursor_request_async` always runs the CLI transport and does not accept `transport`
+- `force` (boolean, optional): Emit `--force` for non-interactive operation.
+- `autoReview` (boolean, optional): Emit `--auto-review`.
+- `sandbox` (string, optional): `"enabled"` or `"disabled"` (`--sandbox`).
+- `trust` (boolean, optional): Emit `--trust` for this invocation.
+- `workspace` (string, optional): On `transport: "cli"`, a Cursor workspace path or name (`--workspace`); remote HTTP/OAuth callers must pass a registered workspace alias, while local stdio callers may pass paths. An unregistered relative local value is preserved verbatim as a provider-native saved-workspace name and is never resolved against the gateway process cwd; pass an absolute path to select a local directory cwd. On `transport: "acp"`, it must be a registered gateway workspace alias. A fresh remote ACP request uses the supplied alias or `[workspaces].default`; a remote ACP resume stays bound to its recorded canonical alias and cwd
+- `addDir` (string[], optional): Additional workspace roots (one `--add-dir` per entry); remote HTTP/OAuth callers must use registered workspace roots.
+- `sessionId` (string, optional): On `transport: "cli"`, a Cursor chat/session ID to resume (`--resume <id>`). The `gw-*` id minted for a brand-new gateway session is not resumable through the CLI transport; continue with `resumeLatest: true`. On `transport: "acp"`, pass the gateway-owned ACP session ID returned by an earlier ACP call; Cursor-native and CLI session IDs are rejected
+- `resumeLatest` (boolean, optional): CLI only: resume the most recent Cursor chat (`--continue`). `true` is rejected on ACP.
+- `createNewSession` (boolean, optional): CLI only: force a new session. `true` is rejected on ACP.
+- `approvalStrategy` (string, optional): `"legacy"` is the only executable CLI strategy. `"mcp_managed"` is rejected before Cursor launches; ACP has its own permission bridge and also rejects it.
+- `approvalPolicy` (string, optional): Has no effect on CLI because `mcp_managed` is unavailable. ACP rejects it because ACP uses its own permission bridge.
 - `optimizePrompt` / `optimizeResponse` (boolean, optional): Token-efficiency optimisation, default: false
 - `correlationId` (string, optional): Request trace ID (auto-generated if omitted)
 - `idleTimeoutMs` (integer, optional): Kill a stuck process after output inactivity; 30,000 to 3,600,000 ms
@@ -1071,20 +1236,64 @@ Use this flow when analysis/runtime can exceed client tool-call limits:
 3. Read output with `llm_job_result`
 4. Optionally stop with `llm_job_cancel`
 
-Async request tools accept the same approval strategy fields as their sync variants:
+Async request tools accept the same strategy fields as their sync variants:
 
-- `approvalStrategy`: `"legacy"` (default) or `"mcp_managed"`
-- `approvalPolicy`: `"strict"|"balanced"|"permissive"` override
-- `mcpServers`: Names of requested MCP servers, resolved against the gateway's local registry / Codex MCP config
-- `claude_request_async` also supports `strictMcpConfig` and fails fast when requested servers are unavailable
+- `claude_request_async` supports `approvalStrategy:"legacy"` (default) or `"mcp_managed"`, and `approvalPolicy:"strict"|"balanced"|"permissive"`. Managed mode forces `strictMcpConfig:true` and launches Claude with only the generated MCP config.
+- Every other `*_request_async` tool supports only executable `approvalStrategy:"legacy"`. It rejects `mcp_managed` before provider launch because ambient MCP configuration cannot be isolated; `approvalPolicy` has no effect.
+- `mcpServers` configures the Claude generated config only. For the other CLI adapters it is metadata only and does not create an MCP allowlist.
 
 ##### `llm_job_status`
 
-Return lifecycle status (`queued`, `running`, `completed`, `failed`, `canceled`, `orphaned`) and metadata for an async job.
+Return lifecycle status (`queued`, `running`, `completed`, `failed`, `canceled`,
+`orphaned`), metadata, and bounded normalized progress for an async job.
+`afterProgressSeq` returns events with a greater sequence number and
+`progressLimit` selects up to 64 events in forward sequence order. Continue with
+`nextAfterSeq`; `highWaterSeq` (and its compatibility alias `lastSeq`) reports
+the highest sequence observed for the job, while `hasMore` reports whether
+another retained page is immediately available. The progress snapshot reports
+`capability` (`structured`, `activity_only`, or `lifecycle_only`),
+`lastActivityAt`, cursor/high-water metadata, `droppedCount`, and events with a phase, kind,
+timestamp, safe message, and source. Claude stream-JSON, Codex JSONL, and Grok
+streaming-JSON expose structured activity. Codex validation and repository
+review calls do not request JSONL and therefore report `activity_only`. HTTP/API
+jobs report `lifecycle_only`; other process output modes expose only privacy-safe
+activity/lifecycle signals. Raw reasoning, provider-supplied tool names, tool
+arguments, paths, provider IDs, and output text are not copied into progress
+messages. Tool-start activity uses the fixed message `Using a provider tool`.
+
+##### `llm_job_watch`
+
+Wait up to 30 seconds for new normalized progress on an owned async job. Pass
+the response's `nextAfterSeq` as `afterProgressSeq`; the response uses the same
+snapshot shape as `llm_job_status`. When the MCP request carries a progress
+token, the gateway emits `notifications/progress` only while that watch call is
+active. The tool rechecks owner access throughout the wait and returns the same
+own-or-not-found result as other job tools.
 
 ##### `llm_job_result`
 
-Return captured stdout/stderr for an async job (with configurable max chars per stream).
+Return captured stdout/stderr for an async job. By default it returns a
+display-oriented result, with `maxChars` limiting each stdout and stderr stream
+to 1,000 through 2,000,000 characters per call (200,000 by default).
+
+For complete, resumable retrieval of a large provider stream, set
+`rawOutput:true`. The response's `result` includes independent
+`stdoutOffsetChars`, `stdoutTotalChars`, and `stdoutNextOffsetChars` fields,
+plus matching `stderr*` fields. Start both offsets at zero, then pass each
+non-null next offset back as `stdoutOffsetChars` or `stderrOffsetChars` until
+that stream's next offset is `null`. Raw pages are not display-parsed or
+compressed. On the local stdio surface, pages concatenate in stream order to
+the captured stdout or stderr stream. Remote callers use the same offset
+protocol, but provider-session-ID ranges are redacted before pages are
+returned, including an ID that crosses a page boundary. Treat remote
+`rawOutput:true` as resumable, sanitized output, not byte-for-byte captured
+provider output.
+
+Non-zero offsets are rejected in default display mode. Display mode can parse a
+streaming provider format, reconstruct a Codex reply, or compress text, so a
+slice of the captured stream cannot safely resume or concatenate the displayed
+result. Use `rawOutput:true` whenever an application must resume output
+collection.
 
 ##### `llm_job_cancel`
 
@@ -1092,12 +1301,12 @@ Cancel a running async job.
 
 ##### `approval_list`
 
-List recent MCP-managed approval decisions recorded by the gateway.
+List recent Claude MCP-managed approval decisions recorded by the gateway.
 
 **Parameters:**
 
 - `limit` (number, optional): Max records (1-500), default: 50
-- `cli` (string, optional): Filter by `"claude"`, `"codex"`, `"gemini"`, `"grok"`, or `"mistral"`
+- `cli` (string, optional): Filter by `"claude"`, `"codex"`, `"gemini"`, `"grok"`, `"mistral"`, `"devin"`, or `"cursor"`
 
 Approval records are persisted to `~/.llm-cli-gateway/approvals.jsonl`.
 
@@ -1388,53 +1597,48 @@ The API key value is never emitted on any of these surfaces (only the env var na
 
 ### Security note
 
-The resolved API key is excluded from `payloadJson`, the dedup key, logs, and the flight recorder. However, the **request prompt is persisted in plaintext** in the async job store (SQLite at `[persistence].path`, default `~/.llm-cli-gateway/logs.db`, or Postgres rows under `backend = "postgres"`) and is not covered by secret redaction. This mirrors the CLI tools, whose prompt is persisted in `argsJson` whenever it is passed as a command argument (a few CLI paths instead stream the prompt over stdin and so do not persist it). Treat the job store as sensitive at rest. See [Security Considerations](#security-considerations).
+The resolved API key is excluded from `payloadJson`, the dedup key, logs, and the flight recorder. For ordinary non-Kit async jobs, the **request prompt is persisted in plaintext** in the async job store (SQLite at `[persistence].path`, default `~/.llm-cli-gateway/logs.db`, or Postgres rows under `backend = "postgres"`) and is not covered by secret redaction. This mirrors the CLI tools, whose prompt is persisted in `argsJson` whenever it is passed as a command argument rather than streamed over stdin. `review_changes` deliberately retains the complete fenced CLI prompt in expiry-bound `payloadJson`, stores only a hash marker in `argsJson`, and does not copy that prompt into the flight recorder. Personal Agent Config Kit durable rows use a separate privacy boundary: they do not persist compiled instructions or request arguments, and they withhold provider output and errors while retaining only the recovery and integrity state the Kit needs. Treat the job store as sensitive at rest. See [Security Considerations](#security-considerations) and the [Personal Agent Config Kit guide](docs/guides/PERSONAL_AGENT_CONFIG_KIT.md).
 
 ## Session Management
 
 ### How It Works
 
-1. **Automatic Session Tracking**: By default, the gateway automatically tracks sessions for each CLI
-2. **Active Sessions**: Each CLI can have one active session that's used by default
-3. **Persistent Storage**: Sessions are stored in `~/.llm-cli-gateway/sessions.json`
-4. **Context Reuse**: Using sessions maintains conversation history and context
+1. **Gateway metadata, not transcripts**: Session records track ownership, timestamps, active pointers, and provider metadata. They do not store a conversation transcript.
+2. **Storage backend**: The default file session manager uses `~/.llm-cli-gateway/sessions.json`; setting `DATABASE_URL` selects the PostgreSQL session manager instead.
+3. **Provider-native continuity**: A gateway session ID is tracking metadata, not automatically a provider-native resume ID. Native behavior remains provider-specific: `claude_request` with `continueSession:true` uses Claude's latest conversation in a stable selected working directory and fails closed without `workingDir` or a registered workspace selected explicitly, through caller-owned session metadata, or by the configured default. That workspace may optionally supply a gateway worktree. `codex_request` needs a real Codex UUID for `sessionId` or `resumeLatest:true` for Codex's latest session.
+4. **Caller isolation**: HTTP/OAuth callers can retrieve or reuse only sessions they own. Their session projection hides local paths and native provider identifiers.
+5. **Personal Kit**: With Personal Agent Config Kit enabled, Claude and Codex use a separate, context-bound active-session pointer and retain a native continuation handle only in the current gateway process. See the [Personal Agent Config Kit guide](docs/guides/PERSONAL_AGENT_CONFIG_KIT.md).
 
 ### Session Workflow
 
 ```javascript
-// 1. Create a new session
+// 1. Create a gateway tracking record when you need one.
+// This ID is not automatically a native provider resume ID.
 await callTool("session_create", {
   cli: "claude",
   description: "Debugging session",
   setAsActive: true,
 });
 
-// 2. Make requests (automatically uses active session)
+// 2. Use the provider's documented native continuity control.
 await callTool("claude_request", {
   prompt: "What's the bug in this code?",
-  // sessionId is automatically used
+  continueSession: true, // Claude's latest conversation in this working directory
 });
 
-// 3. Continue the conversation
-await callTool("claude_request", {
-  prompt: "Can you explain that fix in more detail?",
-  continueSession: true,
+await callTool("codex_request", {
+  prompt: "Review the proposed fix.",
+  resumeLatest: true, // or pass a real Codex UUID as sessionId
 });
 
-// 4. List all sessions
+// 3. Inspect or remove gateway tracking records.
 await callTool("session_list", { cli: "claude" });
-
-// 5. Switch to a different session
-await callTool("session_set_active", {
-  cli: "claude",
-  sessionId: "some-other-session-id",
-});
-
-// 6. Delete when done
 await callTool("session_delete", {
   sessionId: "session-id-to-delete",
 });
 ```
+
+`session_delete` removes gateway tracking from caller-visible session surfaces. For file-backed sessions, it also runs cleanup for associated gateway-owned lifecycle resources, such as a managed worktree. A durably owned worktree session remains as a hidden cleanup-pending tombstone until Git removal is verified; failed removal is retried when that store is registered on the owning host. It does not delete a provider's own stored conversation.
 
 ## Configuration
 
@@ -1444,17 +1648,13 @@ await callTool("session_delete", {
   ```bash
   DEBUG=1 node dist/index.js
   ```
-- `LLM_GATEWAY_APPROVAL_POLICY`: Default approval policy when request does not pass `approvalPolicy` (`strict`, `balanced`, `permissive`)
+- `LLM_GATEWAY_APPROVAL_POLICY`: Default approval policy for a Claude `mcp_managed` request when it does not pass `approvalPolicy` (`strict`, `balanced`, `permissive`). It has no effect on non-Claude adapters because they reject `mcp_managed` before launch.
   ```bash
   LLM_GATEWAY_APPROVAL_POLICY=strict node dist/index.js
   ```
-- `LLM_GATEWAY_APPROVAL_ALLOW_BYPASS`: Under `approvalStrategy:"mcp_managed"`, a full permission / sandbox bypass request (e.g. `dangerouslyBypassApprovalsAndSandbox`, `dangerouslySkipPermissions`) is **denied by default** regardless of approval score, **and** `mcp_managed` no longer force-bypasses any provider — each defaults to an auto-accept-edits-level mode (auto-accept file edits, still gate Bash and other dangerous tools) instead of full auto-approve:
-  - **Claude** → `--permission-mode acceptEdits` (was `bypassPermissions`)
-  - **Grok** → `--permission-mode acceptEdits` (was `--always-approve`)
-  - **Mistral (Vibe)** → `--agent accept-edits` (was `--agent auto-approve`)
-  - **Gemini (Antigravity)** → `default` / prompted, i.e. **no** `--dangerously-skip-permissions` (the `agy` CLI has no accept-edits middle rung, so the safe default is prompted execution; without the opt-in, Gemini cannot auto-approve mutating tools under `mcp_managed`)
+- `LLM_GATEWAY_APPROVAL_ALLOW_BYPASS`: Applies only to Claude `approvalStrategy:"mcp_managed"`. A direct `bypassPermissions` request, or an unverified execution posture such as settings, instruction overrides, plugins, additional directories, worktrees, or native continuation, is **denied by default** regardless of approval score. Ordinary managed Claude requests use `--permission-mode acceptEdits`.
 
-  Set to `1`/`true` to let the operator opt back in: this permits bypass requests through the approval gate **and** restores each provider's full auto-approve mode under `mcp_managed` (Claude `bypassPermissions`, Grok `--always-approve`, Mistral `--agent auto-approve`, Gemini `--dangerously-skip-permissions`). Sandboxed auto modes (e.g. codex `--sandbox workspace-write`) are unaffected.
+  Set this to `1`/`true` only to allow an explicit caller request through Claude's normal approval decision. The environment setting alone never escalates an ordinary managed Claude request. This setting does not enable `mcp_managed` on Codex, Gemini, Grok, Mistral, Devin, or Cursor: those adapters reject it before provider launch.
 
   ```bash
   LLM_GATEWAY_APPROVAL_ALLOW_BYPASS=1 node dist/index.js
@@ -1613,25 +1813,23 @@ chmod +x $(which agy)
 
 ### Session Storage Issues
 
-Sessions are stored in `~/.llm-cli-gateway/sessions.json`. If you encounter issues:
+These file checks apply only to the default file session manager. When `DATABASE_URL` selects PostgreSQL session storage, `sessions.json` is not authoritative. Do not delete or edit session storage while gateway processes, provider children, or Personal Agent Config Kit attempts are active.
 
-1. Check file permissions:
+1. Check file permissions after stopping local gateway processes:
 
 ```bash
 ls -la ~/.llm-cli-gateway/
 ```
 
-2. Reset sessions:
+2. Use `session_delete` or `session_clear_all` for intentional gateway-record cleanup. Do not manually edit the file as a normal recovery method.
 
-```bash
-rm ~/.llm-cli-gateway/sessions.json
-```
-
-3. Or manually edit the session file:
+3. If a file-backed store is unreadable, inspect a copy only after the gateway is stopped:
 
 ```bash
 cat ~/.llm-cli-gateway/sessions.json
 ```
+
+For a stuck Personal Agent Config Kit attempt, do not reset `sessions.json`; follow the local-only recovery procedure in the [Personal Agent Config Kit guide](docs/guides/PERSONAL_AGENT_CONFIG_KIT.md#operating-safely).
 
 ## Performance
 
@@ -1649,7 +1847,7 @@ The gateway supports concurrent requests across different CLIs. Each request spa
 
 - **Input Validation**: All prompts are validated (min 1 char, max 100k chars)
 - **API-provider keys**: For `[providers.<name>]` HTTP providers, the gateway reads the key from the named environment variable at request time only. The resolved key is excluded from the persisted `payloadJson`, the dedup key, logs, and the flight recorder, and is never surfaced on the discovery/diagnostic surfaces (which report only the env var name and a presence boolean). `base_url` userinfo is redacted on the diagnostic surfaces. See [API providers (HTTP)](#api-providers-http).
-- **Prompt persistence at rest**: Async job rows store the request **prompt in plaintext** (HTTP `payloadJson`, and CLI `argsJson` whenever the prompt is passed as a command argument rather than streamed over stdin); this is not covered by secret redaction. The SQLite job-store file (default `~/.llm-cli-gateway/logs.db`, configurable via `[persistence].path`) is `chmod`ed to `0o600` on non-Windows hosts; the Postgres backend stores the same fields in database rows. Treat either backend as sensitive and scope/rotate it like any prompt log. Set `[persistence].backend = "none"` to disable the async job store entirely (the `*_request_async` / `llm_job_*` tools are then not registered).
+- **Prompt persistence at rest**: Ordinary non-Kit async job rows store the request **prompt in plaintext** (HTTP `payloadJson`, and CLI `argsJson` whenever the prompt is passed as a command argument rather than streamed over stdin); this is not covered by secret redaction. `review_changes` is explicit about its different CLI layout: the complete fenced prompt is retained in expiry-bound `payloadJson`, persisted argv contains only its hash marker, and the prompt is not copied into the flight recorder. Personal Agent Config Kit durable rows do not persist compiled instructions or request arguments and withhold provider output and errors, retaining only privacy-safe recovery and integrity state. The SQLite job-store file (default `~/.llm-cli-gateway/logs.db`, configurable via `[persistence].path`) is `chmod`ed to `0o600` on non-Windows hosts; the Postgres backend stores the corresponding fields in database rows. Treat either backend as sensitive and scope/rotate it like any prompt log. Set `[persistence].backend = "none"` to disable the async job store entirely (the `*_request_async` / `llm_job_*` tools are then not registered). See the [Personal Agent Config Kit guide](docs/guides/PERSONAL_AGENT_CONFIG_KIT.md) for its narrower durable-record boundary.
 - **Command Execution**: Uses `spawn` with separate arguments (not shell execution)
 - **No Eval**: No dynamic code evaluation in our source (see "Socket alerts" below for the transitive `ajv` codegen case)
 - **Sandboxing**: Consider running in containers for production use

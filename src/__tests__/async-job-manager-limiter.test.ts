@@ -235,6 +235,9 @@ describe("AsyncJobManager limiter (issue #130)", () => {
     // Queue is size 0, so a direct-sync acquire must be rejected (saturation).
     await expect(manager.acquireProcessSlot("claude")).rejects.toBeInstanceOf(JobSaturationError);
     manager.cancelJob(a.id);
+    // A signal is not proof that the process has stopped. The slot becomes
+    // available only after the close path finalizes the cancellation.
+    await waitFor(() => manager.getJobSnapshot(a.id)!.status === "canceled", 5000);
     // Slot now free: acquire resolves with a releasable permit.
     const slot = await manager.acquireProcessSlot("claude");
     expect(typeof slot.release).toBe("function");

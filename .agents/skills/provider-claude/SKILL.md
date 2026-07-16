@@ -1,6 +1,6 @@
 ---
 name: provider-claude
-description: Track and maintain the upstream Claude Code CLI contract. Use when Anthropic ships a Claude Code release, when a `claude` flag/output/permission/subcommand behaviour changes, or when an upstream scan flags drift. Process guidance only — `src/upstream-contracts.ts` is the mechanical source of truth.
+description: Track and maintain the upstream Claude Code CLI contract. Use when Anthropic ships a Claude Code release, when a `claude` flag/output/permission/subcommand behaviour changes, or when an upstream scan flags drift. Process guidance only; `src/upstream-contracts.ts` is the mechanical source of truth.
 metadata:
   author: verivus-oss
   version: "1.2"
@@ -9,7 +9,7 @@ metadata:
 # Provider: Claude Code CLI
 
 Process guidance for keeping the gateway's Claude (`claude`) integration aligned
-with the upstream CLI. This skill does **not** define argv/env behaviour — the
+with the upstream CLI. This skill does **not** define argv/env behaviour; the
 single mechanical source of truth is `UPSTREAM_CLI_CONTRACTS.claude` in
 `src/upstream-contracts.ts`, enforced by `validateUpstreamCliArgs` /
 `validateUpstreamCliEnv`. Never re-encode flags, output modes, permission modes,
@@ -51,15 +51,61 @@ metadata is authoritative; the TOML is scanner input only.
    gateway resolves the configured Claude default.
 4. For review or code-reading tasks, keep tool access available. Claude supports
    `allowedTools`, `disallowedTools`, and `tools`, but do not pass an empty
-   allowlist for reviews.
-5. Use `mcpServers` only for gateway-known MCP servers, and set
-   `strictMcpConfig:true` when missing MCP access should fail fast.
+   allowlist for reviews. Under `mcp_managed`, non-empty `allowedTools` or
+   `tools` is a high-risk managed input that requires approval plus
+   `LLM_GATEWAY_APPROVAL_ALLOW_BYPASS=1`, but remains bounded.
+5. Use `mcpServers` only for gateway-known MCP servers. Under legacy approval,
+   `strictMcpConfig` defaults to `false`; set it to `true` when missing MCP
+   access should fail fast. Under `mcp_managed`, the gateway forces
+   `strictMcpConfig:true`, so Claude uses only the generated configuration and
+   only provisioned gateway-owned local definitions are eligible. Dynamic
+   `npx`, ambient-PATH, and Codex-config overrides remain legacy-only; a
+   caller-supplied `false` cannot weaken that boundary.
 6. Prefer `approvalStrategy:"mcp_managed"` over raw
-   `dangerouslySkipPermissions`; the gateway approval gate runs before Claude's
-   permissive execution mode is applied.
+   `dangerouslySkipPermissions`. Under managed approval, a direct
+   `dangerouslySkipPermissions` or `permissionMode:"bypassPermissions"` request
+   is honored only with an explicit caller request, approval-manager approval,
+   and `LLM_GATEWAY_APPROVAL_ALLOW_BYPASS=1`. Settings or setting sources,
+   agents, native forks, plugins, added directories, non-empty
+   `systemPrompt` / `appendSystemPrompt`, prompt-file controls
+   (`systemPromptFile` / `appendSystemPromptFile`), `safeMode:true`, `bare:true`,
+   and `debugFile` are high-risk managed inputs: they require approval and the
+   operator setting, but remain bounded and do not select full permission on
+   their own. A
+   gateway-created worktree is also a high-risk managed input under the same
+   conditions.
 7. Use `createNewSession`, `sessionId`, or `continueSession` for real Claude
-   continuity. Claude also supports structured output via `outputFormat` and
-   `jsonSchema`.
+   continuity. Under `mcp_managed`, native continuation is also a high-risk
+   input that requires approval plus the operator setting but remains bounded.
+   Claude also supports structured output via `outputFormat` and `jsonSchema`.
+8. Select local repository work with `workingDir`, a verified registered
+   `workspace`, or gateway `worktree`. An unscoped CLI child uses a fresh
+   neutral temporary cwd, not the gateway repository. A cwd-scoped continuation
+   needs a stable selected target.
+9. Claude's ordinary print path, including `promptParts` without effective
+   cache control, carries the prompt in argv. Oversized UTF-8 input on that path
+   fails before spawn as non-retryable `input_too_large`; the gateway does not
+   truncate instructions. Effective cache-control requests require
+   `outputFormat:"stream-json"` and carry the assembled content blocks through
+   stream-json stdin instead. All other caller-controlled argv values are
+   admitted in their final encoded form before spawn. Embedded NUL bytes return
+   non-retryable `invalid_input` without exposing the rejected value. The stdin
+   branch completes only after the full payload write callback succeeds; a
+   clean child exit with closed or pending delivery is a fixed non-sensitive
+   failure.
+
+### Full-access review handoff
+
+For a user-authorized exhaustive review that needs full provider permissions and
+native MCP access, do not infer the launch controls from this maintenance guide.
+Follow `multi-llm-review`'s full-access protocol, inspect the current request
+schema and live capability response, and use a fresh target-checkout
+`node dist/index.js --transport=stdio` gateway rather than a global process.
+Reapply the grant on every new job, preserve native MCP configuration without a
+pretend gateway allowlist, send the corrective-program report and exact
+diff/file identity, set no caller caps, and honor a user-required 90-second
+progress cadence. The reviewer must independently inspect code, docs, tests,
+and commands before it can approve.
 
 ## Scan for upstream change
 
@@ -90,7 +136,7 @@ never breaks the default release gate.
 
 ## Claude-specific notes (see the contract for exact rules)
 
-- Tested against claude 2.1.207. Claude Code is CLI-first with no native ACP entrypoint at this version; `provider-acp://claude` reports `native:false` (no methods, no adapter-as-native masquerade) and `claude_request` exposes no `transport:"acp"` selector.
+- Tested against claude 2.1.210. Claude Code is CLI-first with no native ACP entrypoint at this version; `provider-acp://claude` reports `native:false` (no methods, no adapter-as-native masquerade) and `claude_request` exposes no `transport:"acp"` selector.
 - `-p` has `optional` arity: standalone in slice κ stdin mode, legacy `-p <prompt>` otherwise.
 - `stream-json` output requires `--verbose` alongside `--print`; the gateway emits them together.
 - `--input-format stream-json` carries caller `cache_control` breakpoints.

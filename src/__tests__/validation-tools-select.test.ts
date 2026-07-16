@@ -47,9 +47,9 @@ function makeManager() {
   return {
     startJobCalls,
     manager: {
-      startJob(cli: string): AsyncJobSnapshot {
+      startJobWithDedup(cli: string): { snapshot: AsyncJobSnapshot; deduped: boolean } {
         startJobCalls.push(cli);
-        return snapshot(`cli-${++n}`, cli);
+        return { snapshot: snapshot(`cli-${++n}`, cli), deduped: false };
       },
       getLimiterSnapshot(): JobLimiterSnapshot {
         return EMPTY_LIMITER;

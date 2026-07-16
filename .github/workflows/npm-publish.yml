@@ -5,6 +5,10 @@ on:
     types: [published]
   workflow_dispatch:
     inputs:
+      tag:
+        description: "Release tag to publish (for example, v2.14.0)"
+        required: true
+        type: string
       dry-run:
         description: "Dry run (skip actual publish)"
         required: false
@@ -15,7 +19,26 @@ permissions:
   contents: read
 
 jobs:
+  resolve-release-tag:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - name: Validate selected release tag
+        id: tag
+        env:
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.event.release.tag_name }}
+        run: |
+          if [[ ! "${RELEASE_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]]; then
+            echo "ERROR: release tag must be vX.Y.Z or vX.Y.Z-<prerelease> (got ${RELEASE_TAG})" >&2
+            exit 1
+          fi
+          printf 'tag=%s\n' "${RELEASE_TAG}" >> "$GITHUB_OUTPUT"
+
   publish:
+    needs: resolve-release-tag
     runs-on: ubuntu-latest
     environment: npm-publish
     permissions:
@@ -24,6 +47,9 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
+          # A manual dispatch must publish an explicit immutable release tag,
+          # never whichever revision happens to be the default branch.
+          ref: refs/tags/${{ needs.resolve-release-tag.outputs.tag }}
           # Publishing uses the job's short-lived GitHub OIDC identity, so
           # git credentials are unnecessary.
           persist-credentials: false
@@ -73,7 +99,14 @@ jobs:
         run: node .github/scripts/verify-npm-oidc.mjs
 
       - run: npm ci --ignore-scripts --no-audit --no-fund
+      # The full suite imports the dev-only better-sqlite3 writer in legacy/WAL
+      # fixtures. Lifecycle scripts were disabled above, so build that native
+      # test dependency explicitly before running the release tests.
+      - run: npm rebuild better-sqlite3
       - run: npm run build
+      # Publish bypasses lifecycle scripts to preserve the deliberately stripped
+      # release dist, so the workflow must execute the full test suite itself.
+      - run: npm test
 
       # The prod-only npm-shrinkwrap.json is generated, never committed (a
       # committed one is treated as the authoritative lockfile and breaks
@@ -97,15 +130,20 @@ jobs:
       - name: Verify no internal MCP names in the packed tarball
         run: node scripts/verify-no-internal-mcp.mjs
 
-      - name: Verify package version matches tag
-        if: github.event_name == 'release'
+      # Publish intentionally uses --ignore-scripts so the release-only stripped
+      # MCP registry cannot be rebuilt. Verify the exact dist path manifest here
+      # because that lifecycle bypass would otherwise skip the package prepack gate.
+      - name: Verify packed dist manifest
+        run: npm run pack:check
+
+      - name: Verify package version matches selected release tag
         env:
-          REF_NAME: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ needs.resolve-release-tag.outputs.tag }}
         run: |
           PKG_VERSION=$(node -p "require('./package.json').version")
-          TAG_VERSION="${REF_NAME#v}"
+          TAG_VERSION="${RELEASE_TAG#v}"
           if [ "$PKG_VERSION" != "$TAG_VERSION" ]; then
-            echo "ERROR: package.json version ($PKG_VERSION) does not match release tag ($TAG_VERSION)"
+            echo "ERROR: package.json version ($PKG_VERSION) does not match release tag ($RELEASE_TAG)"
             exit 1
           fi
 

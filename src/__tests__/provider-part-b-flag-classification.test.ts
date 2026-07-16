@@ -67,6 +67,7 @@ describe("Phase 4 Part B unexposed-flag classification", () => {
       "--model",
       "--add-dir",
       "--sandbox",
+      "--mode",
       "--dangerously-skip-permissions",
       "--project",
       "--new-project",

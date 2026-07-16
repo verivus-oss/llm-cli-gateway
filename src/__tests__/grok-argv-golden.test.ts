@@ -58,7 +58,6 @@ describe("grok argv golden (pre/post cutover parity)", () => {
         agents: '{"reviewer":{"description":"d","prompt":"p"}}',
         promptFile: "/tmp/p.txt",
         promptJson: '[{"type":"text","text":"x"}]',
-        single: "one-shot",
         experimentalMemory: true,
         noAltScreen: true,
         noMemory: true,
