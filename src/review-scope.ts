@@ -417,6 +417,23 @@ function createGitContext(
  * Rediscover the filter safety overrides and build the environment for exactly one
  * Git invocation. `check-ignore` is the only caller that must run without
  * GIT_LITERAL_PATHSPECS, which it rejects outright.
+ *
+ * Rediscovering per invocation is the whole point: it suppresses a driver at the
+ * moment of use, so a driver installed after an earlier probe is still overridden.
+ * Never hoist this to build the environment once and reuse it. Doing so lets a
+ * driver installed after the hoisted probe execute during capture, and no later
+ * check can unexecute it.
+ *
+ * Known and accepted limitation: probing config and then spawning Git cannot be
+ * made atomic, so a driver written into `.git/config` between this probe and the
+ * spawn below is not suppressed. Narrowing that gap further is not achievable by
+ * reordering; it needs Git to stop reading the repository's own config (a shadow
+ * GIT_DIR holding a controlled config plus object alternates), which would change
+ * how evidence is captured. It is accepted because it requires a hostile process
+ * running concurrently as this user, which is a strictly stronger precondition
+ * than the hostile-repository threat this capture defends against: a hostile
+ * repository at rest is fully suppressed, and a same-user process can already act
+ * directly without routing through a Git filter.
  */
 function gitCommandEnvironment(context: GitContext, literalPathspecs: boolean): NodeJS.ProcessEnv {
   const env = gitEnvironment(reviewFilterSafetyOverrides(context.directory, context.onGitCommand));
