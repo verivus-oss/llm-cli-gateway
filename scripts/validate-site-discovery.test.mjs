@@ -324,6 +324,64 @@ describe("local site discovery validation", () => {
     expect(validate(site2).status).toBe(1);
   });
 
+  it("keeps a real heading at column zero after a top-level indented code block", () => {
+    // A four-space-indented run of backticks is an INDENTED code block, not a
+    // fence; a "# Heading" at column zero right after it is a real heading and
+    // must resolve. (Relaxing the fence indent instead wrongly swallowed it.)
+    const site = copiedSite();
+    writeFileSync(join(site, "ic.md"), "    ```\n# Live Heading\n    ```\n\nbody\n");
+    const maintainers = join(site, "maintainers.md");
+    writeFileSync(
+      maintainers,
+      `${readFileSync(maintainers, "utf8")}\n[live](https://llm-cli-gateway.dev/ic.md#live-heading)\n`
+    );
+    expect(validate(site).status).toBe(0);
+  });
+
+  it("strips list-nested fences at 16-space and tab indentation too", () => {
+    for (const indent of ["                ", "\t"]) {
+      const site = copiedSite();
+      const content = [
+        "# Real",
+        "",
+        "1. Step:",
+        "",
+        `${indent}\`\`\`html`,
+        `${indent}<a id="deep-phantom"></a>`,
+        `${indent}\`\`\``,
+        "",
+        "done",
+        "",
+      ].join("\n");
+      writeFileSync(join(site, "deep.md"), content);
+      const maintainers = join(site, "maintainers.md");
+      writeFileSync(
+        maintainers,
+        `${readFileSync(maintainers, "utf8")}\n[deep](https://llm-cli-gateway.dev/deep.md#deep-phantom)\n`
+      );
+      const result = validate(site);
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("absent from the headings");
+    }
+  });
+
+  it("stays linear on a malformed run of <a prefixes (no quadratic anchor scan)", () => {
+    // A file of many "<a " with no closing ">" must not make the explicit-anchor
+    // regex scan to EOF from every position. Bound the run and assert it is fast.
+    const site = copiedSite();
+    writeFileSync(join(site, "q.md"), "<a ".repeat(40000));
+    const maintainers = join(site, "maintainers.md");
+    writeFileSync(
+      maintainers,
+      `${readFileSync(maintainers, "utf8")}\n[q](https://llm-cli-gateway.dev/q.md#missing)\n`
+    );
+    const start = Date.now();
+    const result = validate(site);
+    const elapsed = Date.now() - start;
+    expect(result.status).toBe(1);
+    expect(elapsed).toBeLessThan(3000);
+  });
+
   it("strips a list-nested (four-space) fence so its explicit anchor is not minted", () => {
     // Fences indented to a list item's content column (four spaces under a
     // numbered list, as in docs/plans/) must still be recognised, so an

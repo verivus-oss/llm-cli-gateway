@@ -406,12 +406,15 @@ describe("checkReviewIntegrity", () => {
       }
     });
 
-    it("splits after a sentence-final abbreviation or initial before a capital", () => {
-      // "Inc." / "A." keep a sentence together only before a LOWERCASE word
-      // ("e.g. the shell"). Before a capitalised next sentence they are a real
-      // boundary, so the negation must not glue to the following clause.
+    it("treats a can-end abbreviation or initial as a real sentence boundary", () => {
+      // "Inc." / "Dept." / an initial "A." CAN end a sentence, so they are not
+      // special-cased: the boundary splits regardless of the next word's case.
+      // This must not glue the negation to a later clause, whether the next
+      // sentence starts capitalised ("Inc. Use ...") or lowercase ("Inc. npm
+      // ..."), which an earlier case-based heuristic false-flagged.
       for (const prompt of [
         "Review this. Do not trust Acme Inc. Use the tools for verification.",
+        "Review this. Do not trust Acme Inc. npm can use the shell for independent verification.",
         "Review this. Do not trust reviewer A. Use the tools for verification.",
         "Review this. Do not rely on Dept. Use bash to confirm the counts.",
       ]) {
@@ -419,9 +422,23 @@ describe("checkReviewIntegrity", () => {
         expect(result.isReviewContext).toBe(true);
         expect(result.violations.filter(v => v.type === "tool_suppression")).toHaveLength(0);
       }
-      // The mid-sentence abbreviation case still keeps a real suppression intact.
-      const detected = checkReviewIntegrity({ prompt: "Review this. Do not use e.g. the shell." });
-      expect(detected.violations.find(v => v.type === "tool_suppression")).toBeDefined();
+    });
+
+    it("keeps a suppression that contains an always-mid abbreviation", () => {
+      // e.g. / i.e. / viz. / cf. are never sentence-final, so they keep the
+      // sentence together regardless of what follows: an opening delimiter, a
+      // long run of spaces, or a capitalised next word must NOT split them.
+      for (const prompt of [
+        "Review this. Do not use e.g. the shell.",
+        "Review this. Do not use e.g. (the shell).",
+        'Review this. Do not use i.e. "the shell".',
+        "Review this. Do not use e.g.         the shell.",
+        "Review this. Do not use e.g. Bash.",
+      ]) {
+        const result = checkReviewIntegrity({ prompt });
+        expect(result.isReviewContext).toBe(true);
+        expect(result.violations.find(v => v.type === "tool_suppression")).toBeDefined();
+      }
     });
 
     it("does not flag hygiene prose whose next sentence starts with a tool noun", () => {

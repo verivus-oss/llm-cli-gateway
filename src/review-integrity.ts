@@ -274,56 +274,19 @@ export function neutraliseInlineMarkup(prompt: string): string {
 // ideographic marks segments the same as one using `.!?`.
 const SENTENCE_TERMINATOR = new RegExp(TERMINATOR_CLASS, "u");
 
-// Abbreviations whose trailing period is not a sentence end, so a suppression
-// that contains one ("do not use e.g. the shell") is not split mid-clause. The
+// Abbreviations that are ALWAYS mid-sentence (they introduce an example or
+// restatement and are never sentence-final), so a suppression that contains one
+// ("do not use e.g. the shell") is not split mid-clause, regardless of what
+// follows. Only this narrow set is special-cased. Other abbreviations and
+// single-letter initials (Inc., Ltd., "A.") CAN end a sentence, and telling
+// "Acme Inc. and ..." (continuation) from "Acme Inc. Use ..." / "Acme Inc. npm
+// ..." (new sentence) needs real parsing; both are lowercase or both capital in
+// different cases, so a case heuristic mis-classifies one direction or the
+// other. They are therefore treated as ordinary sentence boundaries: splitting
+// there at worst misses a contrived suppression, but never false-flags an
+// abbreviation-ending sentence (the worse fault for this detector). The
 // candidate token is normalised (dots stripped, lowercased) before lookup.
-const SENTENCE_ABBREVIATIONS = new Set([
-  "eg",
-  "ie",
-  "etc",
-  "vs",
-  "cf",
-  "al",
-  "no",
-  "nos",
-  "mr",
-  "mrs",
-  "ms",
-  "dr",
-  "prof",
-  "st",
-  "vol",
-  "fig",
-  "eq",
-  "ex",
-  "inc",
-  "ltd",
-  "co",
-  "corp",
-  "dept",
-  "univ",
-  "approx",
-  "est",
-  "min",
-  "max",
-  "sec",
-  "esp",
-  "resp",
-  "viz",
-  "ibid",
-  "jan",
-  "feb",
-  "mar",
-  "apr",
-  "jun",
-  "jul",
-  "aug",
-  "sep",
-  "sept",
-  "oct",
-  "nov",
-  "dec",
-]);
+const SENTENCE_MID_ABBREVIATIONS = new Set(["eg", "ie", "viz", "cf"]);
 
 // A soft boundary (code-span-origin terminator) splits only when the next
 // sentence is capitalised, optionally behind opening quote/bracket delimiters
@@ -413,27 +376,19 @@ function segmentSentences(text: string): string[] {
       if (ch === "." && j - i === 1) {
         const before = i > 0 ? text[i - 1] : "";
         // Bounded forward scan for the first non-whitespace after the boundary
-        // (bounded so a long whitespace run cannot make it quadratic).
+        // (a decimal like "2. 3"); bounded so a long whitespace run cannot make
+        // it quadratic.
         let d = boundaryEnd;
         while (d < n && d < boundaryEnd + 8 && /\s/.test(text[d])) d++;
         const nextChar = d < n ? text[d] : "";
         if (/\d/.test(before) && /\d/.test(nextChar)) {
           suppress = true;
         }
-        // An abbreviation or single-letter initial keeps the sentence together
-        // ONLY when the next word starts lowercase (mid-sentence, "e.g. the
-        // shell"). A capitalised or non-letter next start ("Acme Inc. Use ...",
-        // "reviewer A. Use ...") is a real sentence boundary, so it must split.
-        // Bounded lookback keeps a run of initials from growing the slice to
-        // O(n^2).
-        if (/\p{Ll}/u.test(nextChar)) {
-          const token = /([\p{L}][\p{L}.]*)$/u.exec(text.slice(Math.max(start, i - 16), i));
-          if (token) {
-            const normalised = token[1].replace(/\./g, "").toLowerCase();
-            if (SENTENCE_ABBREVIATIONS.has(normalised) || normalised.length === 1) {
-              suppress = true;
-            }
-          }
+        // An always-mid abbreviation keeps the sentence together regardless of
+        // what follows. Bounded lookback keeps this O(1) per period.
+        const token = /([\p{L}][\p{L}.]*)$/u.exec(text.slice(Math.max(start, i - 16), i));
+        if (token && SENTENCE_MID_ABBREVIATIONS.has(token[1].replace(/\./g, "").toLowerCase())) {
+          suppress = true;
         }
       }
       if (!suppress) {

@@ -296,24 +296,29 @@ function slugifyHeading(text) {
   );
 }
 
-// Strip GFM fenced code blocks so a line that looks like a heading (or an
-// explicit anchor) inside one cannot mint a spurious anchor. A block opens on a
-// line of three or more backticks or tildes and closes on a later line of the
-// SAME character, at least as long, carrying no info string; an unclosed fence
-// runs to the end of the document, as GFM specifies. A length comparison cannot
-// be expressed with a backreference, so this scans lines.
+// Strip GFM code blocks so a line that looks like a heading (or an explicit
+// anchor) inside one cannot mint a spurious anchor. Two block kinds are removed:
 //
-// Indentation up to 15 spaces is allowed on the opener and closer so a fence
-// nested inside a list item (its content indented by the list marker width, e.g.
-// the four-space fences under numbered lists in docs/plans/) is still stripped
-// and cannot leak an explicit anchor. A more-indented line of backticks at the
-// top level would be an indented code block in GFM, but treating it as a fence
-// here is harmless: its content is code either way, and a four-or-more-space `#`
-// is never an ATX heading. Bounded scope: a fence nested inside a BLOCK-QUOTE
-// (`> ```) is still not recognised, because that needs blockquote-marker
-// stripping; this repo's docs do not use blockquote-nested fences, and the
-// anchor check is a best-effort fragment layer atop lychee and the repo-wide
-// self-link sweep.
+//   - FENCED blocks: a line of three or more backticks or tildes, indented at
+//     most three spaces (GFM's top-level fence indent), closing on a later line
+//     of the SAME character, at least as long, carrying no info string; an
+//     unclosed fence runs to the end of the document. A length comparison cannot
+//     be a backreference, so this scans lines.
+//   - INDENTED code: a line indented four or more spaces (or a leading tab). GFM
+//     renders such lines as literal code. Dropping them (instead of relaxing the
+//     fence indent) is what makes container context implicit-correct: a fence
+//     nested in a list item has its content indented four or more spaces (as in
+//     the docs/plans/ examples) so the whole thing is dropped here, INCLUDING at
+//     16-space or tab indents; meanwhile a top-level indented code block of
+//     backticks is also dropped, but a real heading at column zero right after
+//     it ("# Heading") is NOT indented and is correctly kept. Relaxing the fence
+//     indent instead was wrong in both directions.
+//
+// Bounded scope: a fence nested inside a BLOCK-QUOTE (`> ```) is still not
+// recognised (its content is not indented, so the indented-code rule misses it);
+// that needs blockquote-marker stripping. This repo's docs do not use
+// blockquote-nested fences, and the anchor check is a best-effort fragment layer
+// atop lychee and the repo-wide self-link sweep.
 function stripFencedBlocks(body) {
   const kept = [];
   let fence = null;
@@ -325,13 +330,18 @@ function stripFencedBlocks(body) {
       // A close is a run of ONE character type, at least as long as the opener,
       // with no trailing content. Matching a single type (not [`~]) stops a
       // mixed run like ```~ from closing a backtick block.
-      const close = /^ {0,15}(`{3,}|~{3,})[ \t]*$/.exec(line);
+      const close = /^ {0,3}(`{3,}|~{3,})[ \t]*$/.exec(line);
       if (close && close[1][0] === fence.char && close[1].length >= fence.length) {
         fence = null;
       }
       continue;
     }
-    const open = /^ {0,15}(`{3,}|~{3,})(.*)$/.exec(line);
+    // Indented code (four+ spaces or a leading tab): drop so its content cannot
+    // mint an anchor. This also removes list-nested fences and their content.
+    if (/^(?: {4,}|\t)/.test(line)) {
+      continue;
+    }
+    const open = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
     if (open) {
       // A backtick fence's info string may not contain a backtick (GFM), so a
       // line like ```lang`x is not a fence open and must not swallow the rest of
@@ -409,8 +419,11 @@ function markdownAnchors(body) {
   // Explicit anchors survive the slugger: inline HTML ids and {#custom-id}. Read
   // from the fence-stripped body so an `<a id>` or `{#id}` written as an example
   // INSIDE a fenced code block does not mint a live anchor (a fragment pointing
-  // at documentation-only markup would otherwise resolve).
-  for (const match of withoutFences.matchAll(/<a\b[^>]*\b(?:id|name)=["']([^"']+)["']/gi)) {
+  // at documentation-only markup would otherwise resolve). The attribute span is
+  // bounded ({0,1000}, far longer than any real tag) so a malformed run of `<a `
+  // prefixes with no closing `>` cannot scan to EOF from each position and go
+  // quadratic on attacker-controlled markdown.
+  for (const match of withoutFences.matchAll(/<a\b[^>]{0,1000}\b(?:id|name)=["']([^"']+)["']/gi)) {
     anchors.add(match[1]);
   }
   for (const match of withoutFences.matchAll(/\{#([A-Za-z0-9_-]+)\}/g)) {
