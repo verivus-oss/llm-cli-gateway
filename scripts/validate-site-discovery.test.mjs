@@ -125,6 +125,43 @@ describe("local site discovery validation", () => {
     expect(result.stderr).toContain("absent from the headings");
   });
 
+  it("keeps underscores in heading slugs like GitHub", () => {
+    // The repo's docs use identifier headings (codex_request, llm_job_status).
+    // The slug must retain underscores, so #codex_request resolves and the
+    // underscore-stripped #codexrequest does not.
+    const site = copiedSite();
+    writeFileSync(join(site, "id.md"), "# Title\n\n## codex_request\n\nbody\n");
+    const maintainers = join(site, "maintainers.md");
+    writeFileSync(
+      maintainers,
+      `${readFileSync(maintainers, "utf8")}\n[ok](https://llm-cli-gateway.dev/id.md#codex_request)\n`
+    );
+    expect(validate(site).status).toBe(0);
+
+    const site2 = copiedSite();
+    writeFileSync(join(site2, "id.md"), "# Title\n\n## codex_request\n\nbody\n");
+    const maintainers2 = join(site2, "maintainers.md");
+    writeFileSync(
+      maintainers2,
+      `${readFileSync(maintainers2, "utf8")}\n[stripped](https://llm-cli-gateway.dev/id.md#codexrequest)\n`
+    );
+    expect(validate(site2).status).toBe(1);
+  });
+
+  it("reserves emitted slugs when a base and its disambiguator collide", () => {
+    // Headings Foo, Foo, Foo-1 must slug to foo, foo-1, foo-1-1 (github-slugger
+    // occurrence loop), not silently drop the third to a taken slug.
+    const site = copiedSite();
+    writeFileSync(join(site, "col.md"), "# Foo\n\na\n\n# Foo\n\nb\n\n# Foo-1\n\nc\n");
+    const maintainers = join(site, "maintainers.md");
+    writeFileSync(
+      maintainers,
+      `${readFileSync(maintainers, "utf8")}\n[third](https://llm-cli-gateway.dev/col.md#foo-1-1)\n`
+    );
+
+    expect(validate(site).status).toBe(0);
+  });
+
   it("fails when public guidance overgeneralizes Codex stdin prompt support", () => {
     const site = copiedSite();
     const llmsPath = join(site, "llms.txt");

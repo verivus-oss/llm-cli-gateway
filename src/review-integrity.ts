@@ -34,15 +34,26 @@ const REVIEW_CONTEXT_PATTERN =
 // detector that fires on instructions to be MORE rigorous trains its readers to
 // ignore it.
 //
-// The closer after the sentence punctuation allows any run of Markdown emphasis
-// delimiters (backtick, asterisk, underscore, tilde) so a period inside inline
-// markup still ends the sentence: "do not trust `summary.` Use the tools" is
-// two sentences, not a suppression of "Use the tools". The quantifier is `*`,
-// not `?`, so doubled markup closes too: "**summary.**", "__x.__", "~~y.~~".
+// A sentence boundary is end punctuation, then any run of closing Markdown
+// emphasis (backtick, asterisk, underscore, tilde), then EITHER whitespace and a
+// capitalised new-sentence start OR end of text; a blank line also ends a
+// sentence. Anchoring on the capital, via an inline case-sensitive group so the
+// outer /i flag does not fold it, is what lets the detector tell a real sentence
+// end from a period inside inline markup mid-sentence:
+//   "trust **summary.** Use the tools"   -> boundary at the period (capital U),
+//                                           so "do not" cannot glue to "Use".
+//   "do not use the `foo.**` shell here" -> NOT a boundary (lowercase "shell"),
+//                                           so this real suppression still fires.
+// Doubled markup closes too (** __ ~~), because the closer run is `*`, not `?`.
 // The backtick is written as \x60 because a literal backtick would close this
-// String.raw template. `[...]*\s` cannot backtrack pathologically: the class
-// and `\s` are disjoint, so there is exactly one way to match each position.
-const SENTENCE_CHAR = String.raw`(?:(?![.!?]["'”’)\]\x60*_~]*\s|\n\s*\n)[\s\S])`;
+// String.raw template. The closer class and the following \s are disjoint, so
+// the run cannot backtrack pathologically.
+//
+// This is a bounded heuristic, not a parser: an adversary who fully controls the
+// prompt can still capitalise a continuation to force a false boundary, the same
+// way unlisted synonyms or passive voice evade the verb list. review-integrity
+// is defence-in-depth scoring, not a hard gate, so that residual is accepted.
+const SENTENCE_CHAR = String.raw`(?:(?![.!?]["'”’)\]\x60*_~]*(?:\s+(?-i:[A-Z])|\s*$)|\n\s*\n)[\s\S])`;
 // The negation has to actually govern using a tool, so require a use verb
 // between the two. "without" is kept as a second shape because it governs a
 // noun on its own ("review this without tools"). The verb list is a curated

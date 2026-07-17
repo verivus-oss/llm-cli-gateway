@@ -259,19 +259,26 @@ function extractSelfLinks(body) {
   return links;
 }
 
-// GitHub-style heading slug for Markdown fragment validation. Approximates
-// github-slugger without a Markdown-parser dependency: link syntax contributes
-// only its visible text, inline formatting markers are dropped, and Unicode
-// letters/numbers survive (only ASCII punctuation is stripped). Duplicate
-// disambiguation (-1, -2) is handled by the caller, which sees all headings.
+// Heading slug for Markdown fragment validation. Approximates github-slugger
+// without a Markdown-parser dependency: link syntax contributes only its visible
+// text, inline code and emphasis markers (backtick, asterisk, tilde) are
+// dropped, and Unicode letters/numbers plus underscores survive. Underscores are
+// KEPT (github-slugger keeps connector punctuation); this repo's headings use
+// identifier names like `codex_request`, so stripping `_` would reject a valid
+// fragment. Input is capped so the link regexes stay linear on a pathological
+// heading. Known approximations vs a full GFM parser: nested-bracket link text
+// (`[a [b]]`) and underscore-emphasis headings (`_x_`) are not special-cased,
+// and hyphen runs are collapsed. Duplicate disambiguation is handled by the
+// caller so it sees the whole document.
 function slugifyHeading(text) {
   return text
+    .slice(0, 256)
     .replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1")
     .replace(/!?\[([^\]]*)\]\[[^\]]*\]/g, "$1")
-    .replace(/[`*_~]/g, "")
+    .replace(/[`*~]/g, "")
     .trim()
     .toLowerCase()
-    .replace(/[^\p{L}\p{N} \-]/gu, "")
+    .replace(/[^\p{L}\p{N}_ -]/gu, "")
     .replace(/\s+/g, "-")
     .replace(/-+/g, "-")
     .replace(/^-|-$/g, "");
@@ -280,17 +287,27 @@ function slugifyHeading(text) {
 function markdownAnchors(body) {
   const anchors = new Set();
   // Fenced code blocks can contain lines that look like headings; strip them so
-  // they do not mint spurious anchors.
-  const withoutFences = body.replace(/^```[\s\S]*?^```/gm, "");
+  // they do not mint spurious anchors. Handles backtick and tilde fences with
+  // up to three spaces of indentation; the close must repeat the exact fence
+  // (a run longer than the open is left unstripped, which is only lenient).
+  const withoutFences = body.replace(/^ {0,3}(`{3,}|~{3,})[^\n]*\n[\s\S]*?^ {0,3}\1[ \t]*$/gm, "");
   // GitHub disambiguates repeated heading slugs with -1, -2, ... in document
-  // order; mirror that so a link to the second "## Setup" resolves.
-  const seen = new Map();
+  // order, and reserves each emitted slug so a literal "Setup 1" heading and the
+  // auto-generated "setup-1" cannot collide. Mirror that occurrence loop.
+  const used = new Map();
+  const reserve = base => {
+    if (!base) return;
+    let candidate = base;
+    let n = used.get(base) ?? 0;
+    while (anchors.has(candidate)) {
+      n += 1;
+      candidate = `${base}-${n}`;
+    }
+    used.set(base, n);
+    anchors.add(candidate);
+  };
   for (const match of withoutFences.matchAll(/^ {0,3}#{1,6}[ \t]+(.+?)[ \t]*#*[ \t]*$/gm)) {
-    const base = slugifyHeading(match[1]);
-    if (!base) continue;
-    const count = seen.get(base) ?? 0;
-    seen.set(base, count + 1);
-    anchors.add(count === 0 ? base : `${base}-${count}`);
+    reserve(slugifyHeading(match[1]));
   }
   // Explicit anchors survive the slugger: inline HTML ids and {#custom-id}.
   for (const match of body.matchAll(/<a\b[^>]*\b(?:id|name)=["']([^"']+)["']/gi)) {

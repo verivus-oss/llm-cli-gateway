@@ -165,6 +165,18 @@ describe("checkReviewIntegrity", () => {
       expect(result.violations.filter(v => v.type === "tool_suppression")).toHaveLength(0);
     });
 
+    it("detects suppression even when a code span mid-sentence ends in a period", () => {
+      // A period inside inline markup is only a sentence end when a capitalised
+      // sentence follows. Here the markup closes mid-sentence and a lowercase
+      // word continues, so the negation still governs the tool noun and the
+      // suppression must fire; treating `foo.**` as a boundary would bypass it.
+      const result = checkReviewIntegrity({
+        prompt: "Review it, but do not use the `foo.**` shell command while checking it.",
+      });
+      expect(result.isReviewContext).toBe(true);
+      expect(result.violations.find(v => v.type === "tool_suppression")).toBeDefined();
+    });
+
     it("does not glue a negation to a tool noun in a later sentence", () => {
       // Verbatim from a real reviewer dispatch this detector wrongly flagged.
       // The negation ("do not take the packet word") and the tool noun
