@@ -82,6 +82,49 @@ describe("local site discovery validation", () => {
     expect(result.stderr).toContain("absent from the headings");
   });
 
+  it("treats a directory-resolving self-link as a clean 404, not an EISDIR crash", () => {
+    // site/guides/ is a directory; a trailing-slash self-link must fail cleanly
+    // rather than throw an uncaught EISDIR from readFileSync.
+    const site = copiedSite();
+    const maintainers = join(site, "maintainers.md");
+    writeFileSync(
+      maintainers,
+      `${readFileSync(maintainers, "utf8")}\n[dir](https://llm-cli-gateway.dev/guides/)\n`
+    );
+
+    const result = validate(site);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("returned 404");
+    expect(result.stderr).not.toContain("EISDIR");
+  });
+
+  it("resolves a duplicate-heading fragment via the -1 disambiguator", () => {
+    const site = copiedSite();
+    writeFileSync(join(site, "dup.md"), "# Title\n\n## Setup\n\nfirst\n\n## Setup\n\nsecond\n");
+    const maintainers = join(site, "maintainers.md");
+    writeFileSync(
+      maintainers,
+      `${readFileSync(maintainers, "utf8")}\n[second setup](https://llm-cli-gateway.dev/dup.md#setup-1)\n`
+    );
+
+    const result = validate(site);
+    expect(result.status).toBe(0);
+  });
+
+  it("fails on a duplicate-heading fragment past the last disambiguator", () => {
+    const site = copiedSite();
+    writeFileSync(join(site, "dup.md"), "# Title\n\n## Setup\n\nfirst\n\n## Setup\n\nsecond\n");
+    const maintainers = join(site, "maintainers.md");
+    writeFileSync(
+      maintainers,
+      `${readFileSync(maintainers, "utf8")}\n[missing](https://llm-cli-gateway.dev/dup.md#setup-9)\n`
+    );
+
+    const result = validate(site);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("absent from the headings");
+  });
+
   it("fails when public guidance overgeneralizes Codex stdin prompt support", () => {
     const site = copiedSite();
     const llmsPath = join(site, "llms.txt");

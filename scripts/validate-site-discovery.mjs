@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { assertNoPublicInternalMcpAliases } from "./public-site-mcp-policy.mjs";
@@ -184,13 +184,23 @@ function localContentType(routePath, filePath) {
 
 async function readLocal(route) {
   const path = fileForPath(route.path);
-  if (!existsSync(path)) {
+  // A path that is absent, or that resolves to a directory (e.g. a
+  // trailing-slash self-link like /guides/), is not a servable page here.
+  // Treating it as 404 keeps a directory-resolving link a clean validation
+  // failure instead of an uncaught EISDIR from readFileSync.
+  if (!existsSync(path) || statSync(path).isDirectory()) {
+    return { status: 404, contentType: "", body: "", finalUrl: route.path };
+  }
+  let body;
+  try {
+    body = readFileSync(path, "utf8");
+  } catch {
     return { status: 404, contentType: "", body: "", finalUrl: route.path };
   }
   return {
     status: 200,
     contentType: localContentType(route.path, path),
-    body: readFileSync(path, "utf8"),
+    body,
     finalUrl: route.path,
   };
 }
@@ -249,13 +259,19 @@ function extractSelfLinks(body) {
   return links;
 }
 
-// GitHub-style heading slug, used to validate Markdown fragment links.
+// GitHub-style heading slug for Markdown fragment validation. Approximates
+// github-slugger without a Markdown-parser dependency: link syntax contributes
+// only its visible text, inline formatting markers are dropped, and Unicode
+// letters/numbers survive (only ASCII punctuation is stripped). Duplicate
+// disambiguation (-1, -2) is handled by the caller, which sees all headings.
 function slugifyHeading(text) {
   return text
-    .replace(/`/g, "")
+    .replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/!?\[([^\]]*)\]\[[^\]]*\]/g, "$1")
+    .replace(/[`*_~]/g, "")
     .trim()
     .toLowerCase()
-    .replace(/[^\w\s-]/g, "")
+    .replace(/[^\p{L}\p{N} \-]/gu, "")
     .replace(/\s+/g, "-")
     .replace(/-+/g, "-")
     .replace(/^-|-$/g, "");
@@ -263,8 +279,18 @@ function slugifyHeading(text) {
 
 function markdownAnchors(body) {
   const anchors = new Set();
-  for (const match of body.matchAll(/^ {0,3}#{1,6}[ \t]+(.+?)[ \t]*#*[ \t]*$/gm)) {
-    anchors.add(slugifyHeading(match[1]));
+  // Fenced code blocks can contain lines that look like headings; strip them so
+  // they do not mint spurious anchors.
+  const withoutFences = body.replace(/^```[\s\S]*?^```/gm, "");
+  // GitHub disambiguates repeated heading slugs with -1, -2, ... in document
+  // order; mirror that so a link to the second "## Setup" resolves.
+  const seen = new Map();
+  for (const match of withoutFences.matchAll(/^ {0,3}#{1,6}[ \t]+(.+?)[ \t]*#*[ \t]*$/gm)) {
+    const base = slugifyHeading(match[1]);
+    if (!base) continue;
+    const count = seen.get(base) ?? 0;
+    seen.set(base, count + 1);
+    anchors.add(count === 0 ? base : `${base}-${count}`);
   }
   // Explicit anchors survive the slugger: inline HTML ids and {#custom-id}.
   for (const match of body.matchAll(/<a\b[^>]*\b(?:id|name)=["']([^"']+)["']/gi)) {
@@ -277,7 +303,8 @@ function markdownAnchors(body) {
 }
 
 // Binary payloads never carry a text self-link; skipping them keeps the sweep
-// from decoding fonts and images as UTF-8.
+// from decoding fonts and images as UTF-8. SVG is deliberately absent: it is
+// XML and can carry clickable href self-links, so it must be swept as text.
 const SWEEP_BINARY_EXTENSIONS = new Set([
   ".png",
   ".jpg",
@@ -285,7 +312,6 @@ const SWEEP_BINARY_EXTENSIONS = new Set([
   ".gif",
   ".ico",
   ".webp",
-  ".svg",
   ".woff",
   ".woff2",
   ".ttf",

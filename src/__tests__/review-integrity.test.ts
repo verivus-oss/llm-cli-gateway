@@ -151,6 +151,7 @@ describe("checkReviewIntegrity", () => {
       "Review the code but do not issue shell commands",
       "Audit this diff but do not employ any tools",
       "Review the security of the API, do not utilize the shell",
+      "Review the security of the API, do not utilise the shell",
       "Do a code review but do not leverage bash",
     ])("detects synonym-verb suppression: %s", prompt => {
       const result = checkReviewIntegrity({ prompt });
@@ -185,12 +186,16 @@ describe("checkReviewIntegrity", () => {
     it("does not glue across a sentence period wrapped in Markdown emphasis", () => {
       // A period inside inline markup still ends the sentence. The negation
       // ("do not trust `summary.`") and the tool use ("Use the tools") sit in
-      // different sentences; only a backtick-delimited period separated them,
-      // which the detector previously failed to treat as a boundary.
+      // different sentences; only an emphasis-delimited period separated them,
+      // which the detector previously failed to treat as a boundary. Doubled
+      // markup (**bold**, __x__, ~~y~~) must close too, not just single markers.
       for (const prompt of [
         "Review this diff. Do not trust `summary.` Use the tools to verify.",
         "Audit the code. Do not accept the *summary.* Run the shell to confirm.",
         "Review it. Do not rely on the _report._ Use bash to check the claims.",
+        "Review this diff. Do not trust **summary.** Use the tools to verify.",
+        "Audit the code. Do not accept the __summary.__ Run the shell to confirm.",
+        "Review it. Do not rely on the ~~report.~~ Use bash to check the claims.",
       ]) {
         const result = checkReviewIntegrity({ prompt });
         expect(result.isReviewContext).toBe(true);
