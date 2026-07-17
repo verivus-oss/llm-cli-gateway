@@ -5,9 +5,12 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>llm-cli-gateway developer docs</title>
     <meta name="description" content="Developer documentation for installing, configuring, and operating llm-cli-gateway as a local or remote MCP server." />
+    <link rel="icon" href="/images/llmcligwlogov7-y-tm-64.png" />
+    <link rel="stylesheet" href="/css/fonts.css" />
+    <link rel="stylesheet" href="/style.css" />
   </head>
   <body>
-    <main>
+    <main class="doc">
       <h1>llm-cli-gateway developer docs</h1>
       <p>Start with the <a href="/install.md">install guide</a>, then read the <a href="/agents.md">agent guide</a> for when to use the gateway, authentication, workspaces, durable jobs, sessions, and troubleshooting.</p>
       <h2>Core references</h2>

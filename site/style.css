@@ -882,3 +882,66 @@ code {
     flex-direction: column;
   }
 }
+
+/* Document pages (developers, docs, api, about, contact, privacy, 404).
+   These link style.css + fonts.css and use semantic HTML without the
+   home page's .hp-* component classes, so they need a plain reading
+   layout. Scoped to main.doc so nothing here touches the home page. */
+main.doc {
+  max-width: 780px;
+  margin: 0 auto;
+  padding: 72px 24px 96px;
+}
+main.doc h1 {
+  font-family: var(--font-display);
+  font-size: clamp(2rem, 5vw, 2.75rem);
+  font-weight: 800;
+  line-height: 1.1;
+  letter-spacing: -0.02em;
+  color: var(--text-100);
+  margin: 0 0 20px;
+}
+main.doc h2 {
+  font-family: var(--font-display);
+  font-size: 1.35rem;
+  font-weight: 700;
+  color: var(--text-100);
+  margin: 44px 0 14px;
+}
+main.doc p {
+  color: var(--text-200);
+  margin: 0 0 16px;
+}
+main.doc a {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+main.doc a:hover {
+  text-decoration: underline;
+}
+main.doc ul {
+  margin: 0 0 20px;
+  padding-left: 1.3rem;
+}
+main.doc li {
+  margin: 7px 0;
+}
+main.doc pre {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 16px 18px;
+  overflow-x: auto;
+  margin: 0 0 20px;
+}
+main.doc pre code {
+  background: none;
+  border: 0;
+  padding: 0;
+  color: var(--text-100);
+}
+@media (max-width: 768px) {
+  main.doc {
+    padding: 56px 18px 72px;
+  }
+}

@@ -5,9 +5,12 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>llm-cli-gateway developers</title>
     <meta name="description" content="Developer portal for llm-cli-gateway, with quickstart, API references, examples, and support links." />
+    <link rel="icon" href="/images/llmcligwlogov7-y-tm-64.png" />
+    <link rel="stylesheet" href="/css/fonts.css" />
+    <link rel="stylesheet" href="/style.css" />
   </head>
   <body>
-    <main>
+    <main class="doc">
       <h1>llm-cli-gateway developers</h1>
       <p>This developer portal collects the public resources for installing and integrating llm-cli-gateway.</p>
       <h2>Quickstart</h2>

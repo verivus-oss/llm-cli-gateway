@@ -5,9 +5,12 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>llm-cli-gateway API reference</title>
     <meta name="description" content="API reference for llm-cli-gateway MCP tools, Streamable HTTP endpoint, authentication, scopes, and JSON errors." />
+    <link rel="icon" href="/images/llmcligwlogov7-y-tm-64.png" />
+    <link rel="stylesheet" href="/css/fonts.css" />
+    <link rel="stylesheet" href="/style.css" />
   </head>
   <body>
-    <main>
+    <main class="doc">
       <h1>llm-cli-gateway API reference</h1>
       <p>llm-cli-gateway exposes the Model Context Protocol over local stdio by default and over Streamable HTTP at <code>/mcp</code> when the operator starts <code>llm-cli-gateway --transport=http</code>.</p>
       <h2>Machine-readable API files</h2>
