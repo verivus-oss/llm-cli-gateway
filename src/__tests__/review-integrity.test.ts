@@ -7,17 +7,21 @@ import {
 
 describe("neutraliseInlineMarkup", () => {
   // Assertions collapse runs of whitespace: markup is replaced with spaces (so
-  // nothing welds), and the exact space count is not the contract.
-  const collapse = (s: string): string => neutraliseInlineMarkup(s).replace(/\s+/g, " ").trim();
+  // nothing welds), and the exact space count is not the contract. A code span's
+  // trailing sentence punctuation is emitted as a private-use SOFT terminator
+  // (U+E010); rendered here as "[.]" so the soft/hard distinction is visible.
+  const collapse = (s: string): string =>
+    neutraliseInlineMarkup(s).replaceAll("\uE010", "[.]").replace(/\s+/g, " ").trim();
   it.each([
     // Emphasis markers become spaces; prose (incl. its period) survives.
     ["Do not trust **summary.** Use", "Do not trust summary. Use"],
     // Code span: words kept, internal period blanked, no boundary forged.
     ["do not use the `foo. **Bar` shell", "do not use the foo Bar shell"],
-    // Code span ending in a period keeps the trailing period.
-    ["trust the `summary.` Use", "trust the summary. Use"],
-    // Trailing emphasis before the period is stripped, period kept.
-    ["use the `foo.**` shell", "use the foo. shell"],
+    // Code span ending in a period emits a SOFT terminator (span-origin), not a
+    // hard period, so a lowercase tool noun after it does not wrongly split.
+    ["trust the `summary.` Use", "trust the summary[.] Use"],
+    // Trailing emphasis before the period is stripped, period kept as SOFT.
+    ["use the `foo.**` shell", "use the foo[.] shell"],
     // A verb hidden in code keeps its word.
     ["Do not `use` the shell", "Do not use the shell"],
     // A double-backtick span may contain single backticks (GFM); the whole span
@@ -319,18 +323,59 @@ describe("checkReviewIntegrity", () => {
       }
     });
 
-    it("over-flags a genuine sentence that starts lowercase (accepted residual)", () => {
-      // Documented limitation: the boundary anchors on a capitalised (or
-      // markup/quote-then-capital) new sentence, so a real sentence that begins
-      // with a lowercase word reads as a continuation and the negation glues to
-      // the later tool noun. Distinguishing this from a mid-sentence code span
-      // needs real sentence parsing; review-integrity is defence-in-depth
-      // scoring, so this false positive is accepted. Pinned so a future change
-      // to the boundary is a deliberate decision, not an accident.
+    it("does not over-flag a genuine sentence that starts lowercase", () => {
+      // The sentence segmenter splits on the period after "files", so the
+      // negation "Do not delete files" and the permitting "rely on the tool"
+      // are separate sentences and cannot glue. A period is a boundary whether
+      // or not the next sentence happens to start lowercase, because the input
+      // is already markup-normalised so no capital anchor is needed. Pinned so a
+      // future change to segmentation is a deliberate decision, not an accident.
       const result = checkReviewIntegrity({
         prompt: "Review this. Do not delete files. rely on the tool for cleanup.",
       });
-      expect(result.violations.find(v => v.type === "tool_suppression")).toBeDefined();
+      expect(result.violations.filter(v => v.type === "tool_suppression")).toHaveLength(0);
+    });
+
+    it("does not glue a negation to a permitting clause across a hard period", () => {
+      // A genuine two-sentence prompt whose second sentence starts lowercase and
+      // permits tool use. The segmenter splits on the prose period, so the
+      // negation cannot reach the permitting verb. These are the natural
+      // lowercase-continuation false positives a full-access reviewer surfaced.
+      for (const prompt of [
+        "Review this. Do not modify package files. npm can use the shell for verification.",
+        "Review this diff. Do not touch the config. git can invoke bash to check the tree.",
+        "Audit the code. Do not edit anything. yarn may run any command it needs.",
+      ]) {
+        const result = checkReviewIntegrity({ prompt });
+        expect(result.isReviewContext).toBe(true);
+        expect(result.violations.filter(v => v.type === "tool_suppression")).toHaveLength(0);
+      }
+    });
+
+    it("does not read a non-ASCII identifier's underscore as a keyword boundary", () => {
+      // GFM's intraword-underscore rule is Unicode, not ASCII: "café_use" is one
+      // literal identifier, so "use" is not a standalone verb and this is not a
+      // suppression. ASCII `\w` would have torn it and false-flagged.
+      const result = checkReviewIntegrity({
+        prompt: "Review this. Do not rename café_use near the shell option.",
+      });
+      expect(result.isReviewContext).toBe(true);
+      expect(result.violations.filter(v => v.type === "tool_suppression")).toHaveLength(0);
+    });
+
+    it("segments on fullwidth and ideographic sentence terminators", () => {
+      // A prompt that ends sentences with fullwidth/ideographic punctuation must
+      // segment the same as one using ASCII `.`, so a negation before the
+      // terminator does not glue to a permitting clause after it.
+      for (const prompt of [
+        "Review this. Do not trust the summary． Use the tools to verify.",
+        "Review this。 Do not trust the summary。 Use the tools to verify。",
+        "Review this. Do not trust the report！ Use bash to check！",
+      ]) {
+        const result = checkReviewIntegrity({ prompt });
+        expect(result.isReviewContext).toBe(true);
+        expect(result.violations.filter(v => v.type === "tool_suppression")).toHaveLength(0);
+      }
     });
 
     it("does not flag review hygiene instructions that name no tool", () => {

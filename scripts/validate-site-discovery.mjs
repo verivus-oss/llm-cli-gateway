@@ -252,6 +252,11 @@ function extractMarkdownLinks(body) {
 // that can close a URL in those formats, then trims trailing prose punctuation.
 function extractSelfLinks(body) {
   const links = new Set();
+  // The URL run stops at `)` deliberately, matching both GFM inline-link syntax
+  // (`[text](url)`, where `)` closes the link) and GFM autolink boundaries; a
+  // literal parenthesis inside a real URL path must be percent-encoded (%28/%29)
+  // and so is not truncated. Extending the class to accept `)` would over-consume
+  // the closing paren of every Markdown link.
   for (const match of body.matchAll(/https:\/\/llm-cli-gateway\.dev\/[^\s"'`)<>\]}]*/g)) {
     const cleaned = match[0].replace(/[.,;:>)\]}]+$/, "");
     links.add(cleaned);
@@ -271,17 +276,29 @@ function extractSelfLinks(body) {
 // and hyphen runs are collapsed. Duplicate disambiguation is handled by the
 // caller so it sees the whole document.
 function slugifyHeading(text) {
-  return text
-    .slice(0, 256)
-    .replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1")
-    .replace(/!?\[([^\]]*)\]\[[^\]]*\]/g, "$1")
-    .replace(/[`*~]/g, "")
-    .trim()
-    .toLowerCase()
-    .replace(/[^\p{L}\p{N}_ -]/gu, "")
-    .replace(/\s+/g, "-")
-    .replace(/-+/g, "-")
-    .replace(/^-|-$/g, "");
+  return (
+    text
+      .slice(0, 256)
+      .replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1")
+      .replace(/!?\[([^\]]*)\]\[[^\]]*\]/g, "$1")
+      .replace(/[`*~]/g, "")
+      // GFM emphasis underscores (word-boundary flanked, `_Setup_`) are markup and
+      // are dropped like `*`/`~`, so the slug matches github-slugger's ("setup").
+      // An INTRAWORD underscore (`codex_request`) is a literal identifier char and
+      // is kept, mirroring GFM's intraword-underscore rule.
+      .replace(/_+/g, (run, offset, str) => {
+        const before = offset > 0 ? str[offset - 1] : "";
+        const after = str[offset + run.length] ?? "";
+        const intraword = /[\p{L}\p{N}]/u.test(before) && /[\p{L}\p{N}]/u.test(after);
+        return intraword ? run : "";
+      })
+      .trim()
+      .toLowerCase()
+      .replace(/[^\p{L}\p{N}_ -]/gu, "")
+      .replace(/\s+/g, "-")
+      .replace(/-+/g, "-")
+      .replace(/^-|-$/g, "")
+  );
 }
 
 // Strip GFM fenced code blocks so a line that looks like a heading inside one
@@ -293,7 +310,10 @@ function slugifyHeading(text) {
 function stripFencedBlocks(body) {
   const kept = [];
   let fence = null;
-  for (const line of body.split("\n")) {
+  // Split on CRLF or LF, so a Windows-authored file's fence close (```\r\n) is
+  // recognised. A trailing \r would otherwise defeat the `[ \t]*$` close anchor,
+  // leaving the fence open to EOF and hiding every heading after it.
+  for (const line of body.split(/\r?\n/)) {
     if (fence) {
       // A close is a run of ONE character type, at least as long as the opener,
       // with no trailing content. Matching a single type (not [`~]) stops a
@@ -339,14 +359,41 @@ function markdownAnchors(body) {
     used.set(base, n);
     anchors.add(candidate);
   };
-  for (const match of withoutFences.matchAll(/^ {0,3}#{1,6}[ \t]+(.+?)[ \t]*#*[ \t]*$/gm)) {
-    reserve(slugifyHeading(match[1]));
+  // One document-ordered pass over the fence-stripped lines so ATX and Setext
+  // headings interleave correctly for the disambiguation counter.
+  const lines = withoutFences.split("\n");
+  for (let idx = 0; idx < lines.length; idx++) {
+    const atx = /^ {0,3}#{1,6}[ \t]+(.+?)[ \t]*#*[ \t]*$/.exec(lines[idx]);
+    if (atx) {
+      reserve(slugifyHeading(atx[1]));
+      continue;
+    }
+    // Setext heading: a line of only `=` (h1) or only `-` (h2) directly under a
+    // non-blank paragraph line that is not itself a heading underline, an ATX
+    // heading, a list item, or a blockquote. A `---` under a blank line is a
+    // thematic break, not a heading (prev.trim() is empty), so it is skipped.
+    const setext = /^ {0,3}(=+|-+)[ \t]*$/.exec(lines[idx]);
+    if (setext && idx > 0) {
+      const prev = lines[idx - 1];
+      const prevIsContent =
+        prev.trim() &&
+        !/^ {0,3}#/.test(prev) &&
+        !/^ {0,3}(=+|-+)[ \t]*$/.test(prev) &&
+        !/^ {0,3}([-+*]|\d+[.)])[ \t]/.test(prev) &&
+        !/^ {0,3}>/.test(prev);
+      if (prevIsContent) {
+        reserve(slugifyHeading(prev.trim()));
+      }
+    }
   }
-  // Explicit anchors survive the slugger: inline HTML ids and {#custom-id}.
-  for (const match of body.matchAll(/<a\b[^>]*\b(?:id|name)=["']([^"']+)["']/gi)) {
+  // Explicit anchors survive the slugger: inline HTML ids and {#custom-id}. Read
+  // from the fence-stripped body so an `<a id>` or `{#id}` written as an example
+  // INSIDE a fenced code block does not mint a live anchor (a fragment pointing
+  // at documentation-only markup would otherwise resolve).
+  for (const match of withoutFences.matchAll(/<a\b[^>]*\b(?:id|name)=["']([^"']+)["']/gi)) {
     anchors.add(match[1]);
   }
-  for (const match of body.matchAll(/\{#([A-Za-z0-9_-]+)\}/g)) {
+  for (const match of withoutFences.matchAll(/\{#([A-Za-z0-9_-]+)\}/g)) {
     anchors.add(match[1]);
   }
   return anchors;
@@ -385,8 +432,10 @@ function* walkTextFiles(dir, excludeTopLevelDirs = new Set()) {
   let entries;
   try {
     entries = readdirSync(dir, { withFileTypes: true });
-  } catch {
-    return;
+  } catch (error) {
+    // Do not silently prune an unreadable directory: the sweep is the only thing
+    // resolving these self-links, so a swallowed error is a fail-open hole.
+    fail(`unable to read directory ${dir} for the self-link sweep: ${error.message}`);
   }
   for (const entry of entries) {
     if (entry.name === ".git" || entry.name === "node_modules") continue;
@@ -482,8 +531,10 @@ async function sweepRepoSelfLinks() {
     let body;
     try {
       body = readFileSync(file, "utf8");
-    } catch {
-      continue;
+    } catch (error) {
+      // walkTextFiles already confirmed this is a regular, non-binary file, so a
+      // read failure is anomalous. Surface it rather than skip the file's links.
+      fail(`unable to read ${file} for the self-link sweep: ${error.message}`);
     }
     if (!body.includes("llm-cli-gateway.dev/")) continue;
     for (const url of extractSelfLinks(body)) {

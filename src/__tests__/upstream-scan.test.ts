@@ -8,6 +8,7 @@ import {
   extractRootCommands,
   githubReleaseSemanticSnapshot,
   normalizeSnapshot,
+  parseTrustedInstalledVersion,
   renderReport,
   requireInstalledVersionIndeterminateIsCritical,
   rootCatalogDrift,
@@ -228,6 +229,35 @@ describe("upstream scanner hardening", () => {
     // Without require-installed, or without a declared target, it stays a log.
     expect(requireInstalledVersionIndeterminateIsCritical(false, unparseable)).toBe(false);
     expect(requireInstalledVersionIndeterminateIsCritical(true, noTarget)).toBe(false);
+  });
+
+  it("does not trust a --version that exits nonzero, closing the parse fail-open", () => {
+    // A clean exit-0 probe yields the parsed version line.
+    expect(parseTrustedInstalledVersion({ available: true, status: 0, output: "2.1.211" })).toBe(
+      "2.1.211"
+    );
+
+    // The fail-open: --version exits nonzero but prints a string that parses to
+    // the target. Trusting it would pass the gate with the CLI unverified. The
+    // fix returns null, which compareTargetVersion turns into an indeterminate
+    // match that --require-installed escalates to a critical.
+    for (const status of [1, 3, 127, null]) {
+      const untrusted = parseTrustedInstalledVersion({
+        available: true,
+        status,
+        output: "2.1.211",
+      });
+      expect(untrusted).toBeNull();
+      const probe = {
+        targetVersion: "cli 2.1.211",
+        ...compareTargetVersion("cli 2.1.211", untrusted),
+      };
+      expect(probe.matches).toBeNull();
+      expect(requireInstalledVersionIndeterminateIsCritical(true, probe)).toBe(true);
+    }
+
+    // A spawn that never ran (available:false) is also untrusted.
+    expect(parseTrustedInstalledVersion({ available: false, status: null, output: "" })).toBeNull();
   });
 
   it("discovers root commands, handles aliases, and guards missing paths before help", () => {

@@ -22,42 +22,21 @@ export interface ReviewIntegrityInput {
 const REVIEW_CONTEXT_PATTERN =
   /\b(review|audit|analy[sz]e|analysis|inspect|assess|pentest|security|vulnerabilit(?:y|ies)|bug(?:s)?|defect(?:s)?|quality|code\s+review)\b/i;
 
-// Any character that does not end the current sentence, so a match cannot span
-// a sentence boundary or a paragraph break. Single newlines stay allowed
-// because prompts wrap mid-sentence.
+// Detection runs per sentence, on the markup-normalised prompt. The suppression
+// patterns below match WITHIN one sentence; `segmentSentences` (defined after
+// the normaliser) splits the text first, so a negation in one sentence can never
+// glue across a boundary to a permitting clause in the next.
 //
-// Why this matters: the earlier pattern was a bare negation within 80
-// characters of a tool-ish noun, which glued unrelated sentences together. It
-// reported "do not take the packet's word.\n\nNote: a local `rtk` shell" as
-// tool suppression, which is exactly backwards: that text tells the reviewer to
-// verify independently and warns that a shell proxy can fake success. A
-// detector that fires on instructions to be MORE rigorous trains its readers to
-// ignore it.
+// Why this matters: an earlier pattern was a bare negation within 80 characters
+// of a tool-ish noun, which glued unrelated sentences together. It reported
+// "do not take the packet's word.\n\nNote: a local `rtk` shell" as tool
+// suppression, which is exactly backwards: that text tells the reviewer to
+// verify independently and warns that a shell proxy can fake success. A detector
+// that fires on instructions to be MORE rigorous trains its readers to ignore
+// it. Segmenting also fixes the converse over-flag: a genuine lowercase sentence
+// start ("... do not modify files. npm can use the shell ...") is now its own
+// sentence, so the negation does not reach the permitting verb.
 //
-// A sentence boundary is end punctuation, then any run of closing Markdown
-// emphasis (backtick, asterisk, underscore, tilde), then EITHER whitespace, any
-// opening markup/quote delimiters, and a capitalised new-sentence start, OR end
-// of text; a blank line also ends a sentence. Anchoring on the capital, via an
-// inline case-sensitive group so the outer /i flag does not fold it, is what
-// lets the detector tell a real sentence end from a period inside inline markup
-// mid-sentence:
-//   "trust **summary.** Use the tools"    -> boundary (capital U after closers),
-//                                            so "do not" cannot glue to "Use".
-//   "summary. **Use the tools.**"         -> boundary (opening ** then capital U).
-//   "do not use the `foo.**` shell here"  -> NOT a boundary (lowercase "shell"),
-//                                            so this real suppression still fires.
-// Doubled markup closes too (** __ ~~), because the closer run is `*`, not `?`.
-// The backtick is written as \x60 because a literal backtick would close this
-// String.raw template. The closer class and the following \s are disjoint, so
-// the run cannot backtrack pathologically.
-//
-// This is a bounded heuristic, not a parser, with a residual in BOTH directions:
-// an adversary who controls the prompt can capitalise a continuation to force a
-// false boundary (a missed suppression), and a genuine sentence that begins with
-// a lowercase word ("... files. rely on the tool ...") is read as a continuation
-// and can over-flag. Both are accepted because review-integrity is defence-in-
-// depth scoring, not a hard gate, and closing either needs real sentence parsing.
-const SENTENCE_CHAR = String.raw`(?:(?![.!?]["'”’)\]\x60*_~]*(?:\s+["'“‘([*_~\x60]*(?-i:[A-Z])|\s*$)|\n\s*\n)[\s\S])`;
 // The negation has to actually govern using a tool, so require a use verb
 // between the two. "without" is kept as a second shape because it governs a
 // noun on its own ("review this without tools"). The verb list is a curated
@@ -71,18 +50,25 @@ const SENTENCE_CHAR = String.raw`(?:(?![.!?]["'”’)\]\x60*_~]*(?:\s+["'“‘
 // negation-verb-noun order invites false positives.
 const TOOL_USE_VERB = String.raw`(?:us(?:e|ing)|call(?:ing)?|invok(?:e|ing)|run(?:ning)?|execut(?:e|ing)|access(?:ing)?|touch(?:ing)?|issu(?:e|ing)|employ(?:ing)?|utili[sz](?:e|ing)|leverag(?:e|ing)|rely(?:ing)?\s+on|resort(?:ing)?\s+to)`;
 const TOOL_NOUN = String.raw`(?:tool(?:s)?|shell|bash|command(?:s)?)`;
-const TOOL_SUPPRESSION_PATTERN = new RegExp(
+// Within one sentence: a negation that governs a tool-use verb that governs a
+// tool noun. The 40-char windows keep the three parts in proximity so unrelated
+// clauses in a long sentence do not glue. `[\s\S]` (not SENTENCE_CHAR) because
+// the sentence has already been segmented, so there is no boundary to cross;
+// the class is disjoint enough that the lazy quantifiers cannot backtrack
+// pathologically.
+const SUPPRESSION_VERB_NOUN = new RegExp(
   [
     String.raw`\b(?:do\s*not|don['’]t|never)\b`,
-    `${SENTENCE_CHAR}{0,40}?`,
+    String.raw`[\s\S]{0,40}?`,
     String.raw`\b${TOOL_USE_VERB}\b`,
-    `${SENTENCE_CHAR}{0,40}?`,
-    String.raw`\b${TOOL_NOUN}\b`,
-    "|",
-    String.raw`\bwithout\b`,
-    `${SENTENCE_CHAR}{0,40}?`,
+    String.raw`[\s\S]{0,40}?`,
     String.raw`\b${TOOL_NOUN}\b`,
   ].join(""),
+  "i"
+);
+// "without" governs a tool noun on its own ("review this without tools").
+const WITHOUT_NOUN = new RegExp(
+  [String.raw`\bwithout\b`, String.raw`[\s\S]{0,40}?`, String.raw`\b${TOOL_NOUN}\b`].join(""),
   "i"
 );
 
@@ -91,18 +77,33 @@ const TOOL_SUPPRESSION_PATTERN = new RegExp(
 // matching CommonMark's opener/closer asymmetry), or literal text.
 type InlineToken = { btrun: true; len: number; canOpen: boolean } | { btrun: false; text: string };
 
+// A private-use sentinel marking a sentence terminator that ORIGINATED inside a
+// code span. The segmenter treats it as a SOFT boundary (splits only before a
+// capitalised next sentence), unlike a real prose terminator which is a hard
+// boundary. This is what tells "... trust the `summary.` Use the tools" (a span
+// period ending a real sentence, next word capitalised -> split, no false
+// positive) from "... do not use the `foo.` shell" (a span period mid-clause
+// before the lowercase tool noun -> no split, real suppression still fires).
+// Prose periods do not get this treatment, so a genuine lowercase continuation
+// ("... modify files. npm can use the shell") still splits and does not glue.
+const SOFT_TERMINATOR = "\uE010";
+
 // Normalise a code span's literal content: keep the WORDS (a verb or noun
 // written as code is still seen), turn `*`/`~` and inner backticks into spaces,
 // blank INTERNAL sentence punctuation so literal code cannot forge a boundary,
-// and keep only TRAILING sentence punctuation so a span that genuinely ends a
-// sentence ("... trust the `summary.` Use") still reads as two. `_` is a word
-// character and is left alone: an identifier like `use_shell` must stay one word
-// so it is not read as the keyword "use".
+// and collapse any TRAILING sentence punctuation to a single soft terminator so
+// a span that genuinely ends a sentence ("... trust the `summary.` Use") still
+// reads as two while a span period before a lowercase tool noun does not split.
+// `_` is a word character and is left alone: an identifier like `use_shell` must
+// stay one word so it is not read as the keyword "use".
 function normaliseCodeSpanContent(content: string): string {
   const cleaned = content.replace(/[`*~]/g, " ").replace(/\s+$/, "");
   const trailing = /[.!?]+$/.exec(cleaned);
   const end = trailing ? trailing[0] : "";
-  return cleaned.slice(0, cleaned.length - end.length).replace(/[.!?]/g, " ") + end;
+  return (
+    cleaned.slice(0, cleaned.length - end.length).replace(/[.!?]/g, " ") +
+    (end ? SOFT_TERMINATOR : "")
+  );
 }
 
 // Inline-markup normaliser, run before the suppression scan. A prompt is
@@ -128,16 +129,17 @@ function normaliseCodeSpanContent(content: string): string {
 //     content is normalised and padded with spaces, an unmatched or escaped run
 //     becomes spaces.
 //
-// The result feeds TOOL_SUPPRESSION_PATTERN, so the markup classes inside
-// SENTENCE_CHAR are now a backstop, not the primary defence.
+// The result feeds `segmentSentences` and the per-sentence suppression
+// patterns, so blanking a code span's internal punctuation is what keeps a
+// literal like "`foo. Bar`" from forging a sentence boundary.
 //
 // Residuals (accepted, defence-in-depth scoring, not hide paths that a config
 // author hits by accident): a code span whose literal content holds an internal
-// sentence break ("`this. Use`"), a genuine lowercase sentence start, an
-// adversary who splits a keyword across markup ("u`s`e", "*u*s*e*"), and a
-// backslash escaping only the FIRST backtick of a multi-backtick run (the run is
-// treated whole). Closing those needs a full CommonMark render, disproportionate
-// for a score-4 scorer.
+// sentence break ("`this. Use`") still reads as one sentence because its period
+// is blanked; an adversary who splits a keyword across markup ("u`s`e",
+// "*u*s*e*"); and a backslash escaping only the FIRST backtick of a
+// multi-backtick run (the run is treated whole). Closing those needs a full
+// CommonMark render, disproportionate for a score-4 scorer.
 export function neutraliseInlineMarkup(prompt: string): string {
   const tokens: InlineToken[] = [];
   let buf: string[] = [];
@@ -184,12 +186,23 @@ export function neutraliseInlineMarkup(prompt: string): string {
       while (u < n && prompt[u] === "_") u++;
       const before = i > 0 ? prompt[i - 1] : "";
       const after = u < n ? prompt[u] : "";
-      const intraword = /\w/.test(before) && /\w/.test(after);
+      // Word char per Unicode, not ASCII `\w`: a non-ASCII identifier like
+      // `café_use` is one literal word, so its `_` must stay and it must not be
+      // read as the keyword "use".
+      const intraword = /[\p{L}\p{N}_]/u.test(before) && /[\p{L}\p{N}_]/u.test(after);
       buf.push(intraword ? prompt.slice(i, u) : " ".repeat(u - i));
       i = u;
       continue;
     }
     if (ch === "*" || ch === "~") {
+      buf.push(" ");
+      i++;
+      continue;
+    }
+    if (ch === SOFT_TERMINATOR) {
+      // Scrub any raw sentinel from the caller's text so an adversary cannot
+      // inject a soft boundary to split a suppression's verb from its noun. Only
+      // this module may mint the sentinel, via normaliseCodeSpanContent.
       buf.push(" ");
       i++;
       continue;
@@ -242,6 +255,146 @@ export function neutraliseInlineMarkup(prompt: string): string {
   return out.join("");
 }
 
+// ASCII plus fullwidth/ideographic sentence terminators, so a prompt that ends
+// its sentences with `．`/`。`/`！`/`？` segments the same as one using `.!?`.
+const SENTENCE_TERMINATOR = /[.!?．。！？]/u;
+
+// Abbreviations whose trailing period is not a sentence end, so a suppression
+// that contains one ("do not use e.g. the shell") is not split mid-clause. The
+// candidate token is normalised (dots stripped, lowercased) before lookup.
+const SENTENCE_ABBREVIATIONS = new Set([
+  "eg",
+  "ie",
+  "etc",
+  "vs",
+  "cf",
+  "al",
+  "no",
+  "nos",
+  "mr",
+  "mrs",
+  "ms",
+  "dr",
+  "prof",
+  "st",
+  "vol",
+  "fig",
+  "eq",
+  "ex",
+  "inc",
+  "ltd",
+  "co",
+  "corp",
+  "dept",
+  "univ",
+  "approx",
+  "est",
+  "min",
+  "max",
+  "sec",
+  "esp",
+  "resp",
+  "viz",
+  "ibid",
+  "jan",
+  "feb",
+  "mar",
+  "apr",
+  "jun",
+  "jul",
+  "aug",
+  "sep",
+  "sept",
+  "oct",
+  "nov",
+  "dec",
+]);
+
+// A soft boundary (code-span-origin terminator) splits only when the next
+// sentence is capitalised, optionally behind opening quote/bracket delimiters
+// that survive normalisation. This is the old capital anchor, now applied ONLY
+// to soft terminators: it tells "`summary.` Use" (split, no false positive) from
+// "`foo.` shell" (no split, real suppression fires), while prose periods split
+// regardless of the next word's case (so "files. npm ..." still splits).
+const SOFT_BOUNDARY_NEXT = /^\s+["'“‘([]*\p{Lu}/u;
+
+// Split markup-normalised prompt text into sentences. A HARD terminator (real
+// prose `.!?` plus fullwidth/ideographic) ends a sentence when followed by
+// whitespace or end-of-text, except a single ASCII period inside a decimal
+// ("2.1"), after a known abbreviation ("e.g."), or after a single-letter initial
+// ("A."). A SOFT terminator (minted only for a code span's trailing punctuation)
+// ends a sentence only before a capitalised next sentence. Splitting on real
+// terminators is what makes "do not modify files. npm can use the shell" two
+// sentences, so the negation cannot reach the permitting verb. O(n): each index
+// is visited once.
+function segmentSentences(text: string): string[] {
+  const sentences: string[] = [];
+  const n = text.length;
+  let start = 0;
+  let i = 0;
+  const emit = (end: number): void => {
+    sentences.push(text.slice(start, end));
+    let k = end;
+    while (k < n && /\s/.test(text[k])) k++;
+    start = k;
+    i = k;
+  };
+  while (i < n) {
+    const ch = text[i];
+    if (ch === SOFT_TERMINATOR) {
+      let j = i;
+      while (j < n && text[j] === SOFT_TERMINATOR) j++;
+      if (j >= n || SOFT_BOUNDARY_NEXT.test(text.slice(j))) {
+        emit(j);
+        continue;
+      }
+      i = j;
+      continue;
+    }
+    if (!SENTENCE_TERMINATOR.test(ch)) {
+      i++;
+      continue;
+    }
+    let j = i;
+    while (j < n && SENTENCE_TERMINATOR.test(text[j])) j++;
+    const followedByWhitespace = j >= n || /\s/.test(text[j]);
+    if (followedByWhitespace) {
+      let suppress = false;
+      if (ch === "." && j - i === 1) {
+        const before = i > 0 ? text[i - 1] : "";
+        const afterNonWhitespace = (text.slice(j).match(/\S/) ?? [""])[0];
+        if (/\d/.test(before) && /\d/.test(afterNonWhitespace)) {
+          suppress = true;
+        }
+        const token = /([\p{L}][\p{L}.]*)$/u.exec(text.slice(start, i));
+        if (token) {
+          const normalised = token[1].replace(/\./g, "").toLowerCase();
+          if (SENTENCE_ABBREVIATIONS.has(normalised) || normalised.length === 1) {
+            suppress = true;
+          }
+        }
+      }
+      if (!suppress) {
+        emit(j);
+        continue;
+      }
+    }
+    i = j;
+  }
+  if (start < n) sentences.push(text.slice(start));
+  return sentences;
+}
+
+// True when any single sentence of the markup-normalised prompt tells the
+// reviewer to suppress tool use. Segmenting first is what stops a negation
+// gluing across a sentence boundary to an unrelated permitting clause.
+export function containsToolSuppression(prompt: string): boolean {
+  const normalised = neutraliseInlineMarkup(prompt);
+  return segmentSentences(normalised).some(
+    sentence => SUPPRESSION_VERB_NOUN.test(sentence) || WITHOUT_NOUN.test(sentence)
+  );
+}
+
 const CRITICAL_TOOLS = ["Read", "Grep", "Glob", "Bash"];
 
 function canonicalizeTools(tools: string[]): string[] {
@@ -284,7 +437,7 @@ export function checkReviewIntegrity(input: ReviewIntegrityInput): ReviewIntegri
     }
   }
 
-  if (reviewContext && TOOL_SUPPRESSION_PATTERN.test(neutraliseInlineMarkup(input.prompt))) {
+  if (reviewContext && containsToolSuppression(input.prompt)) {
     violations.push({
       type: "tool_suppression",
       score: 4,

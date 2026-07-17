@@ -193,6 +193,109 @@ describe("local site discovery validation", () => {
     expect(validate(site2).status).toBe(1);
   });
 
+  it("does not mint an anchor from an explicit id inside a fenced block", () => {
+    // An <a id> or {#custom-id} written as an EXAMPLE inside a code fence is
+    // documentation, not a live anchor. A fragment pointing at it must 404.
+    const fence = "`".repeat(3);
+    const content = [
+      "# Real",
+      "",
+      fence,
+      '<a id="fenced-html-id"></a>',
+      "## Fenced Heading {#fenced-custom-id}",
+      fence,
+      "",
+      "body",
+      "",
+    ].join("\n");
+
+    for (const anchor of ["fenced-html-id", "fenced-custom-id"]) {
+      const site = copiedSite();
+      writeFileSync(join(site, "anc.md"), content);
+      const maintainers = join(site, "maintainers.md");
+      writeFileSync(
+        maintainers,
+        `${readFileSync(maintainers, "utf8")}\n[x](https://llm-cli-gateway.dev/anc.md#${anchor})\n`
+      );
+      const result = validate(site);
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("absent from the headings");
+    }
+  });
+
+  it("resolves a heading after a CRLF-authored fenced block", () => {
+    // A Windows (CRLF) file's fence close is ```\r\n. If the scanner splits on
+    // "\n" only, the trailing \r defeats the close anchor and the fence runs to
+    // EOF, hiding every heading after it. The heading fragment must resolve.
+    const fence = "`".repeat(3);
+    const content = [
+      "# Real",
+      "",
+      fence,
+      "code line",
+      fence,
+      "",
+      "## After Fence",
+      "",
+      "body",
+      "",
+    ].join("\r\n");
+
+    const site = copiedSite();
+    writeFileSync(join(site, "crlf.md"), content);
+    const maintainers = join(site, "maintainers.md");
+    writeFileSync(
+      maintainers,
+      `${readFileSync(maintainers, "utf8")}\n[after](https://llm-cli-gateway.dev/crlf.md#after-fence)\n`
+    );
+    expect(validate(site).status).toBe(0);
+  });
+
+  it("mints an anchor for a Setext (underlined) heading", () => {
+    const site = copiedSite();
+    writeFileSync(
+      join(site, "setext.md"),
+      "Top Title\n=========\n\nSubsection Two\n--------------\n\nbody\n"
+    );
+    const maintainers = join(site, "maintainers.md");
+    writeFileSync(
+      maintainers,
+      `${readFileSync(maintainers, "utf8")}\n[h1](https://llm-cli-gateway.dev/setext.md#top-title)\n[h2](https://llm-cli-gateway.dev/setext.md#subsection-two)\n`
+    );
+    expect(validate(site).status).toBe(0);
+
+    const site2 = copiedSite();
+    writeFileSync(join(site2, "setext.md"), "Top Title\n=========\n\nbody\n");
+    const maintainers2 = join(site2, "maintainers.md");
+    writeFileSync(
+      maintainers2,
+      `${readFileSync(maintainers2, "utf8")}\n[hr](https://llm-cli-gateway.dev/setext.md#no-such-heading)\n`
+    );
+    expect(validate(site2).status).toBe(1);
+  });
+
+  it("drops emphasis underscores from a heading slug but keeps intraword ones", () => {
+    // GitHub renders `_Setup_` as italic "Setup" -> slug "setup"; the emphasis
+    // underscores are markup. An intraword underscore (codex_request) is kept.
+    const site = copiedSite();
+    writeFileSync(join(site, "emph.md"), "# Title\n\n## _Setup_\n\nbody\n");
+    const maintainers = join(site, "maintainers.md");
+    writeFileSync(
+      maintainers,
+      `${readFileSync(maintainers, "utf8")}\n[emph](https://llm-cli-gateway.dev/emph.md#setup)\n`
+    );
+    expect(validate(site).status).toBe(0);
+
+    const site2 = copiedSite();
+    writeFileSync(join(site2, "emph.md"), "# Title\n\n## _Setup_\n\nbody\n");
+    const maintainers2 = join(site2, "maintainers.md");
+    writeFileSync(
+      maintainers2,
+      `${readFileSync(maintainers2, "utf8")}\n[kept](https://llm-cli-gateway.dev/emph.md#_setup_)\n`
+    );
+    expect(validate(site2).status).toBe(1);
+  });
+
   it("does not mint an anchor from a heading inside a longer-closed fence", () => {
     // GFM lets a fence close with more delimiters than it opened. A 4-backtick
     // block closed by 5 backticks still hides its `# Phantom` line, so a

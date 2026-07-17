@@ -858,6 +858,19 @@ function firstVersionLine(output) {
   );
 }
 
+/**
+ * Parse the installed version from a `--version` probe result, but ONLY when the
+ * command both spawned and exited 0. A nonzero exit (or a signal kill, where
+ * `status` is null) means `--version` itself failed, so its stdout may be stale
+ * or error text that happens to parse; trusting it was a fail-open. Returning
+ * null here forces the version comparison to `matches: null`, which under
+ * --require-installed is escalated to a critical rather than passing as verified.
+ */
+export function parseTrustedInstalledVersion(versionResult) {
+  const trusted = Boolean(versionResult?.available) && versionResult?.status === 0;
+  return trusted ? firstVersionLine(versionResult.output ?? "") : null;
+}
+
 export function rootCatalogDrift(subcommands, rootCommands) {
   if (!Array.isArray(rootCommands) || rootCommands.length === 0) {
     return { added: [], removed: [] };
@@ -1137,7 +1150,11 @@ function probeInstalledCliSurface(machinery, cli, timeoutMs = PROBE_TIMEOUT_MS) 
     ["--version"],
     timeoutMs
   );
-  const installedVersion = versionResult.available ? firstVersionLine(versionResult.output) : null;
+  // Trust the parsed version ONLY when the command both spawned AND exited 0
+  // (see parseTrustedInstalledVersion). A nonzero exit yields null here, making
+  // `matches` indeterminate, which under --require-installed is escalated to a
+  // critical (installed-version-indeterminate) rather than passing as verified.
+  const installedVersion = parseTrustedInstalledVersion(versionResult);
   const targetVersion = machinery.getProviderDefinition(cli).upstreamContract.targetVersion;
   const versionProbe = {
     available: versionResult.available,
