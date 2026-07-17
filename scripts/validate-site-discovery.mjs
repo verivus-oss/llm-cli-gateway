@@ -238,7 +238,12 @@ function extractCatalogLinks(catalog) {
 function extractMarkdownLinks(body) {
   const cleanUrl = url => url.replace(/[>)\].,;:]+$/, "");
   const links = [];
-  for (const match of body.matchAll(/\[[^\]]+\]\((https:\/\/llm-cli-gateway\.dev\/[^)]+)\)/g)) {
+  // The link text run is bounded ({1,1000}, far longer than any real link text)
+  // so a run of unmatched `[` cannot make `[^\]]+` scan to EOF from every bracket
+  // and go quadratic on attacker-controlled markdown.
+  for (const match of body.matchAll(
+    /\[[^\]]{1,1000}\]\((https:\/\/llm-cli-gateway\.dev\/[^)]{1,2000})\)/g
+  )) {
     links.push(cleanUrl(match[1]));
   }
   for (const match of body.matchAll(/https:\/\/llm-cli-gateway\.dev\/[^\s`]+/g)) {
@@ -304,24 +309,58 @@ function slugifyHeading(text) {
 //     of the SAME character, at least as long, carrying no info string; an
 //     unclosed fence runs to the end of the document. A length comparison cannot
 //     be a backreference, so this scans lines.
-//   - INDENTED code: a line indented four or more spaces (or a leading tab). GFM
-//     renders such lines as literal code. Dropping them (instead of relaxing the
-//     fence indent) is what makes container context implicit-correct: a fence
-//     nested in a list item has its content indented four or more spaces (as in
-//     the docs/plans/ examples) so the whole thing is dropped here, INCLUDING at
-//     16-space or tab indents; meanwhile a top-level indented code block of
-//     backticks is also dropped, but a real heading at column zero right after
-//     it ("# Heading") is NOT indented and is correctly kept. Relaxing the fence
-//     indent instead was wrong in both directions.
+//   - INDENTED code: a line indented four or more COLUMNS (tabs expanded to
+//     four-column stops, so a space-then-tab counts), dropped only where a code
+//     block may begin (see codeContext). GFM renders such lines as literal code.
+//     Dropping them (instead of relaxing the fence indent) makes container
+//     context implicit-correct: a fence nested in a list item has its content
+//     indented, so the whole thing is dropped at any depth; a top-level indented
+//     code block is also dropped, but a real heading at column zero after it is
+//     kept; and a lazy paragraph continuation (an indented line that does not
+//     start a code block because it cannot interrupt a paragraph) is kept, so its
+//     anchor stays live. Relaxing the fence indent instead was wrong both ways.
 //
 // Bounded scope: a fence nested inside a BLOCK-QUOTE (`> ```) is still not
 // recognised (its content is not indented, so the indented-code rule misses it);
 // that needs blockquote-marker stripping. This repo's docs do not use
 // blockquote-nested fences, and the anchor check is a best-effort fragment layer
 // atop lychee and the repo-wide self-link sweep.
+// Visual indentation of a line's leading whitespace, expanding tabs to the next
+// four-column stop (GFM's rule). So " \t" and "   \t" both reach column four, the
+// same as four literal spaces.
+function leadingIndentColumns(line) {
+  let col = 0;
+  for (const ch of line) {
+    if (ch === " ") col += 1;
+    else if (ch === "\t") col += 4 - (col % 4);
+    else break;
+  }
+  return col;
+}
+
+// A line that continues a paragraph (so an indented line right after it is a
+// lazy continuation, not a new indented code block). It is NOT a paragraph line
+// if it is a fence, ATX heading, list-item marker, blockquote, or thematic
+// break; after any of those an indented block can begin.
+function isParagraphTextLine(line) {
+  return (
+    !/^ {0,3}(`{3,}|~{3,})/.test(line) &&
+    !/^ {0,3}#{1,6}(?:[ \t]|$)/.test(line) &&
+    !/^ {0,3}(?:[-+*]|\d{1,9}[.)])(?:[ \t]|$)/.test(line) &&
+    !/^ {0,3}>/.test(line) &&
+    !/^ {0,3}(?:[-*_][ \t]*){3,}$/.test(line)
+  );
+}
+
 function stripFencedBlocks(body) {
   const kept = [];
   let fence = null;
+  // True when an indented line here would begin (or continue) an indented code
+  // block: at document start, after a blank line, a list marker, a heading, a
+  // thematic break, or a closed fence, and while already inside indented code.
+  // It is false right after a paragraph text line, so an indented line there is a
+  // lazy paragraph continuation and is kept, not dropped as code.
+  let codeContext = true;
   // Split on CRLF or LF, so a Windows-authored file's fence close (```\r\n) is
   // recognised. A trailing \r would otherwise defeat the `[ \t]*$` close anchor,
   // leaving the fence open to EOF and hiding every heading after it.
@@ -333,12 +372,20 @@ function stripFencedBlocks(body) {
       const close = /^ {0,3}(`{3,}|~{3,})[ \t]*$/.exec(line);
       if (close && close[1][0] === fence.char && close[1].length >= fence.length) {
         fence = null;
+        codeContext = true;
       }
       continue;
     }
-    // Indented code (four+ spaces or a leading tab): drop so its content cannot
-    // mint an anchor. This also removes list-nested fences and their content.
-    if (/^(?: {4,}|\t)/.test(line)) {
+    if (line.trim() === "") {
+      kept.push(line);
+      codeContext = true;
+      continue;
+    }
+    // Indented code: a line indented four or more columns (tabs expanded), but
+    // only where a code block may begin. Dropping it keeps its content, including
+    // a list-nested fence at any depth or a space-then-tab indent, from minting
+    // an anchor; a paragraph continuation is left to the kept path below.
+    if (codeContext && leadingIndentColumns(line) >= 4) {
       continue;
     }
     const open = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
@@ -348,12 +395,15 @@ function stripFencedBlocks(body) {
       // the document to EOF. Tilde fences carry no such restriction.
       if (open[1][0] === "`" && open[2].includes("`")) {
         kept.push(line);
+        codeContext = false;
         continue;
       }
       fence = { char: open[1][0], length: open[1].length };
+      codeContext = true;
       continue;
     }
     kept.push(line);
+    codeContext = !isParagraphTextLine(line);
   }
   return kept.join("\n");
 }
@@ -380,9 +430,12 @@ function markdownAnchors(body) {
   // headings interleave correctly for the disambiguation counter.
   const lines = withoutFences.split("\n");
   for (let idx = 0; idx < lines.length; idx++) {
-    const atx = /^ {0,3}#{1,6}[ \t]+(.+?)[ \t]*#*[ \t]*$/.exec(lines[idx]);
+    // Capture the heading text greedily to `$` (linear), then strip an optional
+    // GFM closing hash sequence in code. A lazy `(.+?)` before `#*[ \t]*$` would
+    // backturn quadratic on a hash-heavy line ("# " + "#".repeat(N)).
+    const atx = /^ {0,3}#{1,6}[ \t]+(.*)$/.exec(lines[idx]);
     if (atx) {
-      reserve(slugifyHeading(atx[1]));
+      reserve(slugifyHeading(atx[1].replace(/[ \t]+#+[ \t]*$/, "")));
       continue;
     }
     // Setext heading: a line of only `=` (h1) or only `-` (h2) directly under a

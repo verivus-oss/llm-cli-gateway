@@ -274,19 +274,18 @@ export function neutraliseInlineMarkup(prompt: string): string {
 // ideographic marks segments the same as one using `.!?`.
 const SENTENCE_TERMINATOR = new RegExp(TERMINATOR_CLASS, "u");
 
-// Abbreviations that are ALWAYS mid-sentence (they introduce an example or
-// restatement and are never sentence-final), so a suppression that contains one
-// ("do not use e.g. the shell") is not split mid-clause, regardless of what
-// follows. Only this narrow set is special-cased. Other abbreviations and
-// single-letter initials (Inc., Ltd., "A.") CAN end a sentence, and telling
-// "Acme Inc. and ..." (continuation) from "Acme Inc. Use ..." / "Acme Inc. npm
-// ..." (new sentence) needs real parsing; both are lowercase or both capital in
-// different cases, so a case heuristic mis-classifies one direction or the
-// other. They are therefore treated as ordinary sentence boundaries: splitting
-// there at worst misses a contrived suppression, but never false-flags an
-// abbreviation-ending sentence (the worse fault for this detector). The
-// candidate token is normalised (dots stripped, lowercased) before lookup.
-const SENTENCE_MID_ABBREVIATIONS = new Set(["eg", "ie", "viz", "cf"]);
+// Abbreviations are NOT special-cased. A period after an abbreviation ("Inc.",
+// "e.g.") is genuinely ambiguous between a sentence end and a mid-sentence use,
+// and the two collide in both case directions: "Acme Inc. shell" (mid-sentence,
+// lowercase next) vs "Acme Inc. npm can ..." (new sentence, lowercase next); or
+// the metalinguistic "the abbreviation \"e.g.\" Shell access ..." (sentence-final)
+// vs "use e.g. the shell" (mid-sentence). No regex heuristic can separate these
+// without real parsing, and every heuristic tried flipped one class of error for
+// another. So every abbreviation period is treated as an ordinary boundary. The
+// only cost is a defence-in-depth MISS on the contrived phrasing of a suppression
+// that embeds a sentence-internal abbreviation ("do not use e.g. the shell"); a
+// miss is acceptable here, whereas false-flagging benign or metalinguistic prose
+// (an instruction to be rigorous) is the worse fault this detector must avoid.
 
 // A soft boundary (code-span-origin terminator) splits only when the next
 // sentence is capitalised, optionally behind opening quote/bracket delimiters
@@ -315,8 +314,9 @@ const SENTENCE_CLOSERS = /["'”’)\]]/u;
 
 // Split markup-normalised prompt text into sentences. An ASCII HARD terminator
 // (`.!?`) ends a sentence when followed by optional closing quotes/brackets then
-// whitespace or end-of-text, except a single "." inside a decimal ("2.1"), after
-// a known abbreviation ("e.g."), or after a single-letter initial ("A."). A
+// whitespace or end-of-text, except a single "." inside a decimal ("2.1").
+// Abbreviations and initials ("Inc.", "e.g.", "A.") are NOT special-cased (see
+// the note above the decimal check): they are ordinary boundaries. A
 // fullwidth/ideographic terminator always ends a sentence (CJK typography puts
 // no space after it). A SOFT terminator (minted only for a code span's trailing
 // punctuation) ends a sentence only before a capitalised next sentence.
@@ -356,8 +356,8 @@ function segmentSentences(text: string): string[] {
     while (j < n && SENTENCE_TERMINATOR.test(text[j])) j++;
     // Fullwidth/ideographic terminators are unambiguous sentence ends and, per
     // CJK typography, are NOT followed by a space, so they split regardless of
-    // what follows (no whitespace requirement, no decimal/abbreviation guard,
-    // which only apply to an ASCII ".").
+    // what follows (no whitespace requirement and no decimal guard, which only
+    // applies to an ASCII ".").
     // Test the WHOLE terminator run for a fullwidth mark, not just its first
     // character: a mixed run like ".。" must still split (an earlier version
     // checked only the first char and glued "summary.。Use").
@@ -373,21 +373,14 @@ function segmentSentences(text: string): string[] {
     const followedByWhitespace = boundaryEnd >= n || /\s/.test(text[boundaryEnd]);
     if (followedByWhitespace) {
       let suppress = false;
+      // A single "." between two digits ("2. 3") is a decimal, not a boundary.
+      // Bounded forward scan so a long whitespace run cannot make it quadratic.
       if (ch === "." && j - i === 1) {
         const before = i > 0 ? text[i - 1] : "";
-        // Bounded forward scan for the first non-whitespace after the boundary
-        // (a decimal like "2. 3"); bounded so a long whitespace run cannot make
-        // it quadratic.
         let d = boundaryEnd;
         while (d < n && d < boundaryEnd + 8 && /\s/.test(text[d])) d++;
         const nextChar = d < n ? text[d] : "";
         if (/\d/.test(before) && /\d/.test(nextChar)) {
-          suppress = true;
-        }
-        // An always-mid abbreviation keeps the sentence together regardless of
-        // what follows. Bounded lookback keeps this O(1) per period.
-        const token = /([\p{L}][\p{L}.]*)$/u.exec(text.slice(Math.max(start, i - 16), i));
-        if (token && SENTENCE_MID_ABBREVIATIONS.has(token[1].replace(/\./g, "").toLowerCase())) {
           suppress = true;
         }
       }

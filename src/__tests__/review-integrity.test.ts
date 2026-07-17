@@ -406,38 +406,30 @@ describe("checkReviewIntegrity", () => {
       }
     });
 
-    it("treats a can-end abbreviation or initial as a real sentence boundary", () => {
-      // "Inc." / "Dept." / an initial "A." CAN end a sentence, so they are not
-      // special-cased: the boundary splits regardless of the next word's case.
-      // This must not glue the negation to a later clause, whether the next
-      // sentence starts capitalised ("Inc. Use ...") or lowercase ("Inc. npm
-      // ..."), which an earlier case-based heuristic false-flagged.
+    it("treats every abbreviation and initial period as a sentence boundary", () => {
+      // Abbreviations are NOT special-cased: their period is a boundary. This is
+      // deliberate. The period after "Inc." / "A." / "e.g." is genuinely
+      // ambiguous between a sentence end and a mid-sentence use, and the two
+      // collide in both case directions ("Acme Inc. shell" mid-sentence vs "Acme
+      // Inc. npm can ..." new sentence; metalinguistic 'the abbreviation "e.g."
+      // Shell access ...' sentence-final vs "use e.g. the shell" mid-sentence).
+      // No regex separates these, so the boundary always splits: this never
+      // false-flags benign or metalinguistic prose, at the cost of missing a
+      // contrived suppression that embeds a sentence-internal abbreviation.
       for (const prompt of [
+        // Split -> negation does not reach the later clause -> no false flag.
         "Review this. Do not trust Acme Inc. Use the tools for verification.",
         "Review this. Do not trust Acme Inc. npm can use the shell for independent verification.",
         "Review this. Do not trust reviewer A. Use the tools for verification.",
-        "Review this. Do not rely on Dept. Use bash to confirm the counts.",
+        'Review this. Do not use the abbreviation "e.g." Shell access is available for verification.',
+        // Accepted defence-in-depth misses: a suppression that embeds an
+        // abbreviation splits at it and is not detected (contrived phrasing).
+        "Review this. Do not use e.g. the shell.",
+        "Review this. Do not use the Acme Inc. shell.",
       ]) {
         const result = checkReviewIntegrity({ prompt });
         expect(result.isReviewContext).toBe(true);
         expect(result.violations.filter(v => v.type === "tool_suppression")).toHaveLength(0);
-      }
-    });
-
-    it("keeps a suppression that contains an always-mid abbreviation", () => {
-      // e.g. / i.e. / viz. / cf. are never sentence-final, so they keep the
-      // sentence together regardless of what follows: an opening delimiter, a
-      // long run of spaces, or a capitalised next word must NOT split them.
-      for (const prompt of [
-        "Review this. Do not use e.g. the shell.",
-        "Review this. Do not use e.g. (the shell).",
-        'Review this. Do not use i.e. "the shell".',
-        "Review this. Do not use e.g.         the shell.",
-        "Review this. Do not use e.g. Bash.",
-      ]) {
-        const result = checkReviewIntegrity({ prompt });
-        expect(result.isReviewContext).toBe(true);
-        expect(result.violations.find(v => v.type === "tool_suppression")).toBeDefined();
       }
     });
 

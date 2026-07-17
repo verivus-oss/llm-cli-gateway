@@ -338,6 +338,64 @@ describe("local site discovery validation", () => {
     expect(validate(site).status).toBe(0);
   });
 
+  it("keeps an indented paragraph-continuation anchor (not treated as code)", () => {
+    // An indented line right after a paragraph is a lazy continuation, not an
+    // indented code block (code cannot interrupt a paragraph), so an <a id> there
+    // stays a live anchor and must resolve.
+    const site = copiedSite();
+    writeFileSync(join(site, "pc.md"), '# T\n\nParagraph text\n    <a id="active"></a>\n\nbody\n');
+    const maintainers = join(site, "maintainers.md");
+    writeFileSync(
+      maintainers,
+      `${readFileSync(maintainers, "utf8")}\n[a](https://llm-cli-gateway.dev/pc.md#active)\n`
+    );
+    expect(validate(site).status).toBe(0);
+  });
+
+  it("strips a space-then-tab indented list fence (tab-stop columns)", () => {
+    // " \t" reaches column four via the tab stop, so it is indented code; a
+    // fenced <a id> under it must not mint an anchor.
+    const site = copiedSite();
+    const content = [
+      "# R",
+      "",
+      "1. x:",
+      "",
+      " \t```html",
+      ' \t<a id="stphantom"></a>',
+      " \t```",
+      "",
+      "b",
+      "",
+    ].join("\n");
+    writeFileSync(join(site, "st.md"), content);
+    const maintainers = join(site, "maintainers.md");
+    writeFileSync(
+      maintainers,
+      `${readFileSync(maintainers, "utf8")}\n[s](https://llm-cli-gateway.dev/st.md#stphantom)\n`
+    );
+    const result = validate(site);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("absent from the headings");
+  });
+
+  it("stays linear on a hash-heavy heading line and an unclosed-bracket file", () => {
+    // The ATX capture is greedy-to-EOL with a code-side close-hash strip, and the
+    // markdown-link text run is bounded, so neither goes quadratic.
+    const site = copiedSite();
+    writeFileSync(join(site, "hash.md"), `# ${"#".repeat(30000)}x\n`);
+    writeFileSync(join(site, "install.md"), "[".repeat(60000));
+    const maintainers = join(site, "maintainers.md");
+    writeFileSync(
+      maintainers,
+      `${readFileSync(maintainers, "utf8")}\n[h](https://llm-cli-gateway.dev/hash.md#missing)\n`
+    );
+    const start = Date.now();
+    const result = validate(site);
+    expect(result.status).toBe(1);
+    expect(Date.now() - start).toBeLessThan(3000);
+  });
+
   it("strips list-nested fences at 16-space and tab indentation too", () => {
     for (const indent of ["                ", "\t"]) {
       const site = copiedSite();
