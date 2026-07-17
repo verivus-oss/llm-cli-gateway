@@ -4,9 +4,144 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>About llm-cli-gateway</title>
+    <meta name="description" content="About llm-cli-gateway: an open-source MCP server from Verivus for operating local AI coding agents and configured API providers through one user-owned control plane." />
+    <link rel="canonical" href="https://llm-cli-gateway.dev/about" />
     <link rel="icon" href="/images/llmcligwlogov7-y-tm-64.png" />
     <link rel="stylesheet" href="/css/fonts.css" />
     <link rel="stylesheet" href="/style.css" />
   </head>
-  <body><main class="doc"><h1>About llm-cli-gateway</h1><p>llm-cli-gateway is an open-source MCP server from Verivus for operating local AI coding agents and configured API providers through one user-owned control plane.</p><p>Repository: <a href="https://github.com/verivus-oss/llm-cli-gateway">verivus-oss/llm-cli-gateway</a>.</p></main></body>
+  <body>
+    <a href="#main-content" class="skip-link">Skip to content</a>
+    <nav class="navbar" id="navbar">
+      <div class="navbar-inner">
+        <a href="/" class="navbar-logo" aria-label="llm-cli-gateway home">
+          <img src="/images/llmcligwlogov7-y-tm-64.webp" alt="" width="32" height="32" />
+          <span>llm-cli-gateway</span>
+        </a>
+        <button
+          type="button"
+          class="navbar-toggle"
+          id="nav-toggle"
+          aria-label="Toggle navigation"
+          aria-expanded="false"
+        >
+          <span></span><span></span><span></span>
+        </button>
+        <ul class="navbar-links" id="nav-links">
+          <li><a href="/install">Install</a></li>
+          <li><a href="/docs">Docs</a></li>
+          <li><a href="/api">API</a></li>
+          <li><a href="/developers">Developers</a></li>
+          <li>
+            <a href="https://github.com/verivus-oss/llm-cli-gateway#security-and-supply-chain"
+              >Security</a
+            >
+          </li>
+          <li><a href="/llms.txt">llms.txt</a></li>
+        </ul>
+        <div class="theme-toggle" role="group" aria-label="Color theme">
+          <button
+            type="button"
+            class="theme-toggle__option"
+            data-theme-choice="system"
+            aria-pressed="false"
+          >
+            System
+          </button>
+          <button
+            type="button"
+            class="theme-toggle__option"
+            data-theme-choice="dark"
+            aria-pressed="false"
+          >
+            Dark
+          </button>
+          <button
+            type="button"
+            class="theme-toggle__option"
+            data-theme-choice="light"
+            aria-pressed="false"
+          >
+            Light
+          </button>
+        </div>
+        <div class="navbar-cta">
+          <a
+            href="https://github.com/verivus-oss/llm-cli-gateway"
+            class="btn btn-outline"
+            target="_blank"
+            rel="noopener"
+            >GitHub</a
+          >
+        </div>
+      </div>
+    </nav>
+    <main id="main-content" class="doc">
+      <h1>About llm-cli-gateway</h1>
+      <p>llm-cli-gateway is an open-source MCP server from Verivus for operating local AI coding agents and configured API providers through one user-owned control plane.</p>
+      <p>Repository: <a href="https://github.com/verivus-oss/llm-cli-gateway">verivus-oss/llm-cli-gateway</a>.</p>
+    </main>
+    <footer class="footer">
+      <div class="footer-inner">
+        <div>
+          <div class="footer-brand">
+            <img src="/images/llmcligwlogov7-y-tm-64.webp" alt="llm-cli-gateway" height="24" />
+          </div>
+          <div class="footer-tagline">
+            Secure local control plane for AI coding agents.<br />Open source. Built by Verivus.
+          </div>
+        </div>
+        <div class="footer-links">
+          <div class="footer-col">
+            <h3>Product</h3>
+            <ul>
+              <li><a href="/install">Install</a></li>
+              <li><a href="/docs">Docs</a></li>
+              <li><a href="/developers">Developers</a></li>
+              <li><a href="/guides/coding-agent-gateway-technical-guide.md">Technical guide</a></li>
+              <li><a href="/agents.md">Agent guide</a></li>
+              <li><a href="/tools.md">Tools</a></li>
+              <li>
+                <a href="https://github.com/verivus-oss/llm-cli-gateway#configuration"
+                  >Configuration</a
+                >
+              </li>
+            </ul>
+          </div>
+          <div class="footer-col">
+            <h3>Reference</h3>
+            <ul>
+              <li><a href="/llms.txt">llms.txt</a></li>
+              <li><a href="/api">API reference</a></li>
+              <li><a href="/openapi.json">OpenAPI</a></li>
+              <li><a href="/workflows/cross-model-review.md">Workflow demo</a></li>
+              <li><a href="/DISCOVERY.md">Discovery</a></li>
+              <li><a href="/.well-known/api-catalog">API catalog</a></li>
+              <li><a href="/.well-known/mcp/server-card.json">MCP server card</a></li>
+              <li><a href="/.well-known/integrations.json">integrations.json</a></li>
+              <li><a href="/maintainers.md">Maintainers</a></li>
+              <li><a href="/sitemap.md">Sitemap</a></li>
+              <li><a href="/.well-known/agent.json">agent.json</a></li>
+            </ul>
+          </div>
+          <div class="footer-col">
+            <h3>Company</h3>
+            <ul>
+              <li><a href="https://github.com/verivus-oss/llm-cli-gateway">GitHub</a></li>
+              <li><a href="https://www.npmjs.com/package/llm-cli-gateway">npm</a></li>
+              <li><a href="/about">About</a></li>
+              <li><a href="/contact">Contact</a></li>
+              <li><a href="/privacy">Privacy</a></li>
+              <li><a href="https://verivus.com">Verivus</a></li>
+            </ul>
+          </div>
+        </div>
+      </div>
+      <div class="footer-bottom">
+        <span>© 2026 Verivus Pty Ltd</span><span>llm-cli-gateway v3.0.0</span>
+      </div>
+    </footer>
+    <script src="/js/theme.js" defer></script>
+    <script src="/js/nav.js" defer></script>
+  </body>
 </html>

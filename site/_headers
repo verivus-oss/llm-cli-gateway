@@ -22,6 +22,10 @@
 /googleb0dea30e179d1a8e.html
   Content-Type: text/html; charset=utf-8
 
+/install
+  Content-Type: text/html; charset=utf-8
+  Cache-Control: public, max-age=300, must-revalidate
+
 /docs
   Content-Type: text/html; charset=utf-8
   Cache-Control: public, max-age=300, must-revalidate

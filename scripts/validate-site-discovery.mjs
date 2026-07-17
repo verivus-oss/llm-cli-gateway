@@ -75,6 +75,7 @@ const routes = [
     required: ["siteVersion", "toolCount", "tools"],
   },
   { path: "/llms.txt", type: "text/plain" },
+  { path: "/install", type: "text/html" },
   { path: "/docs", type: "text/html" },
   { path: "/api", type: "text/html" },
   { path: "/developers", type: "text/html" },

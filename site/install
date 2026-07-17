@@ -3,9 +3,9 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Privacy for llm-cli-gateway</title>
-    <meta name="description" content="Privacy for llm-cli-gateway: self-hosted software; the public website serves documentation, and provider credentials remain under the operator's control." />
-    <link rel="canonical" href="https://llm-cli-gateway.dev/privacy" />
+    <title>Install llm-cli-gateway</title>
+    <meta name="description" content="Install llm-cli-gateway: run it locally over stdio with npx, add provider CLIs, and optionally serve it remotely over HTTP behind a bearer token or OAuth." />
+    <link rel="canonical" href="https://llm-cli-gateway.dev/install" />
     <link rel="icon" href="/images/llmcligwlogov7-y-tm-64.png" />
     <link rel="stylesheet" href="/css/fonts.css" />
     <link rel="stylesheet" href="/style.css" />
@@ -77,8 +77,92 @@
       </div>
     </nav>
     <main id="main-content" class="doc">
-      <h1>Privacy</h1>
-      <p>llm-cli-gateway is self-hosted software. The public website serves documentation. The gateway itself runs on the operator's machine or infrastructure; provider credentials remain in provider CLIs or named environment variables controlled by the operator.</p>
+      <h1>Install llm-cli-gateway</h1>
+      <p>
+        llm-cli-gateway is a secure local control plane for AI coding agents. It wraps installed
+        coding-agent CLIs, can register HTTP API providers from config, and lets supported MCP
+        clients operate them through one user-owned gateway. It runs locally over stdio by default,
+        and can also run remotely over HTTP behind a bearer token or a built-in OAuth 2.0 server.
+      </p>
+      <p>
+        Requires Node.js 24.4.0 or newer. The default durable store uses Node's built-in
+        <code>node:sqlite</code> module: no native bindings, no install scripts. PostgreSQL is
+        available for service or multi-instance deployments when the optional <code>pg</code> peer
+        dependency is installed.
+      </p>
+
+      <h2>Quick install</h2>
+      <p>Run it without a global install:</p>
+      <pre><code>npx -y llm-cli-gateway</code></pre>
+      <p>Or install it globally:</p>
+      <pre><code>npm install -g llm-cli-gateway
+llm-cli-gateway</code></pre>
+      <p>
+        Use stdio transport and point your MCP client at the command above. No subcommand is
+        required.
+      </p>
+
+      <h2>Install with an agent</h2>
+      <p>Give your coding agent this prompt and let it configure your MCP client:</p>
+      <pre><code>Read https://llm-cli-gateway.dev/install.md and configure yourself to use llm-cli-gateway as an MCP server.</code></pre>
+      <p>The machine-readable spec lives at <a href="/install.md">install.md</a>.</p>
+
+      <h2>Provider CLIs</h2>
+      <p>Install whichever provider CLIs you want the gateway to expose:</p>
+      <pre><code>npm install -g @anthropic-ai/claude-code
+npm install -g @openai/codex
+# Gemini provider runs through Google Antigravity CLI (agy):
+curl -fsSL https://antigravity.google/cli/install.sh | bash
+# Grok Build (xAI):
+curl -fsSL https://x.ai/cli/install.sh | bash
+# Mistral Vibe:
+curl -LsSf https://mistral.ai/vibe/install.sh | bash
+# Devin:
+curl -fsSL https://cli.devin.ai/install.sh | bash
+# Cursor Agent CLI: install from https://cursor.com/cli and ensure cursor-agent is on PATH.</code></pre>
+      <p>
+        Mistral Vibe ships separately as the <code>vibe</code> binary
+        (<code>pip install mistral-vibe</code>, <code>uv tool install mistral-vibe</code>, or
+        <code>brew install mistral-vibe</code>).
+      </p>
+
+      <h2>Remote / HTTP transport (optional)</h2>
+      <p>
+        The default is stdio. To serve the gateway over HTTP for remote MCP clients, start it with
+        <code>--transport=http</code> (or <code>LLM_GATEWAY_TRANSPORT=http</code>):
+      </p>
+      <pre><code>LLM_GATEWAY_AUTH_TOKEN=your-long-random-token llm-cli-gateway --transport=http</code></pre>
+      <p>
+        It binds to <code>127.0.0.1:3333</code> at <code>/mcp</code> by default. Authenticate with a
+        static bearer token (<code>LLM_GATEWAY_AUTH_TOKEN</code>), the built-in OAuth 2.0 server
+        (PKCE on by default), or your own trusted identity proxy. Every session, job, and stored
+        request is owned by a principal, and remote provider calls require a registered workspace. A
+        dangerous OAuth configuration fails closed rather than starting. See the
+        <a href="/install.md">full install spec</a> and the
+        <a href="/agents.md">agent guide</a> for the complete options.
+      </p>
+
+      <h2>Persistence (optional)</h2>
+      <p>
+        SQLite is the default durable backend. PostgreSQL can be selected in
+        <code>~/.llm-cli-gateway/config.toml</code> for service or multi-instance deployments;
+        install <code>pg</code> alongside the gateway first. <code>backend = "none"</code> disables
+        the async job tools.
+      </p>
+
+      <h2>MCP registry</h2>
+      <p>Registry name and package:</p>
+      <pre><code>io.github.verivus-oss/llm-cli-gateway
+llm-cli-gateway</code></pre>
+
+      <h2>More</h2>
+      <ul>
+        <li><a href="/docs">Developer docs</a></li>
+        <li><a href="/api">API reference</a></li>
+        <li><a href="/install.md">Machine-readable install spec (install.md)</a></li>
+        <li><a href="https://github.com/verivus-oss/llm-cli-gateway">GitHub repository</a></li>
+        <li><a href="https://www.npmjs.com/package/llm-cli-gateway">npm package</a></li>
+      </ul>
     </main>
     <footer class="footer">
       <div class="footer-inner">
