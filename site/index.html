@@ -883,6 +883,44 @@
         font-size: 0.8125rem;
         display: flex;
       }
+      @media (width<=900px) {
+        .navbar-logo {
+          order: 1;
+        }
+        .theme-toggle {
+          order: 2;
+          margin-left: auto;
+        }
+        .navbar-toggle {
+          order: 3;
+          display: flex;
+        }
+        .navbar-links {
+          background: var(--mobile-nav-bg);
+          border-bottom: 1px solid #fbbf241a;
+          flex-direction: column;
+          order: 4;
+          align-items: stretch;
+          gap: 0;
+          padding: 16px 24px;
+          display: none;
+          position: absolute;
+          top: 64px;
+          left: 0;
+          right: 0;
+        }
+        .navbar-links.open {
+          display: flex;
+        }
+        .navbar-links a {
+          min-height: 44px;
+          line-height: 44px;
+          display: block;
+        }
+        .navbar-cta {
+          display: none;
+        }
+      }
       @media (width<=768px) {
         .navbar-inner {
           gap: 8px;
@@ -1053,9 +1091,9 @@
           <span></span><span></span><span></span>
         </button>
         <ul class="navbar-links" id="nav-links">
-          <li><a href="/install.md">Install</a></li>
-          <li><a href="/agents.md">Docs</a></li>
-          <li><a href="/tools.md">API</a></li>
+          <li><a href="/install">Install</a></li>
+          <li><a href="/docs">Docs</a></li>
+          <li><a href="/api">API</a></li>
           <li><a href="/developers">Developers</a></li>
           <li>
             <a href="https://github.com/verivus-oss/llm-cli-gateway#security-and-supply-chain"
@@ -1112,7 +1150,7 @@
           execution workspace-scoped, approval-gated, durable, and auditable.
         </p>
         <div class="hp-hero-main__actions">
-          <a class="btn btn-primary" href="/install.md">Install with an agent</a>
+          <a class="btn btn-primary" href="/install">Install</a>
           <a class="btn btn-outline" href="https://github.com/verivus-oss/llm-cli-gateway"
             >View GitHub</a
           >
@@ -1531,7 +1569,7 @@
           <div class="footer-col">
             <h3>Product</h3>
             <ul>
-              <li><a href="/install.md">Install</a></li>
+              <li><a href="/install">Install</a></li>
               <li><a href="/docs">Docs</a></li>
               <li><a href="/developers">Developers</a></li>
               <li><a href="/guides/coding-agent-gateway-technical-guide.md">Technical guide</a></li>

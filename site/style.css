@@ -775,6 +775,48 @@ code {
   font-size: 0.8125rem;
 }
 
+/* Collapse to the hamburger nav below 900px: the full inline nav (logo + six
+   links + theme toggle + GitHub CTA) cannot fit on a tablet-width bar without
+   wrapping. The 768px block below then tightens the collapsed bar for phones. */
+@media (max-width: 900px) {
+  .navbar-toggle {
+    display: flex;
+    order: 3;
+  }
+  .navbar-logo {
+    order: 1;
+  }
+  .theme-toggle {
+    order: 2;
+    margin-left: auto;
+  }
+  .navbar-links {
+    order: 4;
+    display: none;
+    position: absolute;
+    top: 64px;
+    left: 0;
+    right: 0;
+    padding: 16px 24px;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0;
+    background: var(--mobile-nav-bg);
+    border-bottom: 1px solid rgba(251, 191, 36, 0.1);
+  }
+  .navbar-links.open {
+    display: flex;
+  }
+  .navbar-links a {
+    display: block;
+    min-height: 44px;
+    line-height: 44px;
+  }
+  .navbar-cta {
+    display: none;
+  }
+}
+
 @media (max-width: 768px) {
   .navbar-inner {
     width: min(100% - 24px, 1200px);

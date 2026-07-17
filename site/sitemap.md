@@ -1,6 +1,7 @@
 # Sitemap
 
 - [/](https://llm-cli-gateway.dev/) - product homepage
+- [/install](https://llm-cli-gateway.dev/install) - human install guide (quickstart, providers, remote HTTP)
 - [/docs](https://llm-cli-gateway.dev/docs) - developer documentation entry point
 - [/api](https://llm-cli-gateway.dev/api) - API reference and scoped permission summary
 - [/developers](https://llm-cli-gateway.dev/developers) - developer portal and quickstart
