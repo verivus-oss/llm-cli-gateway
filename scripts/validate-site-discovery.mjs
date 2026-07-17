@@ -9,9 +9,18 @@ const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const siteArg = process.argv.find(arg => arg.startsWith("--site-dir="));
 const siteDir = siteArg ? resolve(siteArg.slice("--site-dir=".length)) : join(repoRoot, "site");
 
+// Strip a trailing run of any character in `chars` with a linear backward scan.
+// A `[chars]+$` regex backtracks quadratically on a long run followed by a
+// non-member ("...////x"); this cannot.
+function stripTrailingChars(value, chars) {
+  let end = value.length;
+  while (end > 0 && chars.includes(value[end - 1])) end--;
+  return value.slice(0, end);
+}
+
 const baseArg = process.argv.find(arg => arg.startsWith("--base-url="));
 const mode = baseArg ? "remote" : "local";
-const baseUrl = baseArg?.slice("--base-url=".length).replace(/\/+$/, "");
+const baseUrl = baseArg ? stripTrailingChars(baseArg.slice("--base-url=".length), "/") : undefined;
 
 const routes = [
   {
@@ -129,7 +138,10 @@ function assertRequired(route, value) {
 }
 
 function headerPatternMatches(pattern, routePath) {
+  // Collapse consecutive `*` to one first: otherwise "***" becomes ".*.*.*",
+  // which backtracks catastrophically against a non-matching path.
   const escaped = pattern
+    .replace(/\*+/g, "*")
     .split("*")
     .map(part => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
     .join(".*");
@@ -236,7 +248,7 @@ function extractCatalogLinks(catalog) {
 }
 
 function extractMarkdownLinks(body) {
-  const cleanUrl = url => url.replace(/[>)\].,;:]+$/, "");
+  const cleanUrl = url => stripTrailingChars(url, ">)].,;:");
   const links = [];
   // The link text run is bounded ({1,1000}, far longer than any real link text)
   // so a run of unmatched `[` cannot make `[^\]]+` scan to EOF from every bracket
@@ -263,7 +275,7 @@ function extractSelfLinks(body) {
   // and so is not truncated. Extending the class to accept `)` would over-consume
   // the closing paren of every Markdown link.
   for (const match of body.matchAll(/https:\/\/llm-cli-gateway\.dev\/[^\s"'`)<>\]}]*/g)) {
-    const cleaned = match[0].replace(/[.,;:>)\]}]+$/, "");
+    const cleaned = stripTrailingChars(match[0], ".,;:>)]}");
     links.add(cleaned);
   }
   return links;
@@ -301,66 +313,28 @@ function slugifyHeading(text) {
   );
 }
 
-// Strip GFM code blocks so a line that looks like a heading (or an explicit
-// anchor) inside one cannot mint a spurious anchor. Two block kinds are removed:
+// Strip GFM FENCED code blocks so a line that looks like a heading (or an
+// explicit anchor) inside one cannot mint a spurious anchor. A block opens on a
+// line of three or more backticks or tildes, indented at most three spaces (GFM's
+// top-level fence indent), and closes on a later line of the SAME character, at
+// least as long, carrying no info string; an unclosed fence runs to the end of
+// the document. A length comparison cannot be a backreference, so this scans
+// lines.
 //
-//   - FENCED blocks: a line of three or more backticks or tildes, indented at
-//     most three spaces (GFM's top-level fence indent), closing on a later line
-//     of the SAME character, at least as long, carrying no info string; an
-//     unclosed fence runs to the end of the document. A length comparison cannot
-//     be a backreference, so this scans lines.
-//   - INDENTED code: a line indented four or more COLUMNS (tabs expanded to
-//     four-column stops, so a space-then-tab counts), dropped only where a code
-//     block may begin (see codeContext). GFM renders such lines as literal code.
-//     Dropping them (instead of relaxing the fence indent) makes container
-//     context implicit-correct: a fence nested in a list item has its content
-//     indented, so the whole thing is dropped at any depth; a top-level indented
-//     code block is also dropped, but a real heading at column zero after it is
-//     kept; and a lazy paragraph continuation (an indented line that does not
-//     start a code block because it cannot interrupt a paragraph) is kept, so its
-//     anchor stays live. Relaxing the fence indent instead was wrong both ways.
-//
-// Bounded scope: a fence nested inside a BLOCK-QUOTE (`> ```) is still not
-// recognised (its content is not indented, so the indented-code rule misses it);
-// that needs blockquote-marker stripping. This repo's docs do not use
-// blockquote-nested fences, and the anchor check is a best-effort fragment layer
-// atop lychee and the repo-wide self-link sweep.
-// Visual indentation of a line's leading whitespace, expanding tabs to the next
-// four-column stop (GFM's rule). So " \t" and "   \t" both reach column four, the
-// same as four literal spaces.
-function leadingIndentColumns(line) {
-  let col = 0;
-  for (const ch of line) {
-    if (ch === " ") col += 1;
-    else if (ch === "\t") col += 4 - (col % 4);
-    else break;
-  }
-  return col;
-}
-
-// A line that continues a paragraph (so an indented line right after it is a
-// lazy continuation, not a new indented code block). It is NOT a paragraph line
-// if it is a fence, ATX heading, list-item marker, blockquote, or thematic
-// break; after any of those an indented block can begin.
-function isParagraphTextLine(line) {
-  return (
-    !/^ {0,3}(`{3,}|~{3,})/.test(line) &&
-    !/^ {0,3}#{1,6}(?:[ \t]|$)/.test(line) &&
-    !/^ {0,3}(?:[-+*]|\d{1,9}[.)])(?:[ \t]|$)/.test(line) &&
-    !/^ {0,3}>/.test(line) &&
-    !/^ {0,3}(?:[-*_][ \t]*){3,}$/.test(line)
-  );
-}
-
+// Bounded scope (best-effort fragment layer, atop lychee and the repo-wide
+// self-link sweep): INDENTED code blocks and fenced/heading examples nested
+// inside a list item or block-quote are NOT stripped. Distinguishing indented
+// code from live list-item content requires tracking each open container's
+// content-indent column, i.e. a real CommonMark block parser, which this repo
+// deliberately omits (see slugifyHeading). A previous line-scanner attempt was
+// wrong in both directions: it dropped live list-paragraph anchors (a false CI
+// failure, the worse fault) while still mishandling Setext/table/link-reference
+// boundaries. So a `#fragment` that resolves ONLY to an anchor defined inside
+// indented or container-nested code may over-resolve. No such construct exists
+// in this repo's tracked docs (verified), and this fails OPEN, never closed.
 function stripFencedBlocks(body) {
   const kept = [];
   let fence = null;
-  // True when an indented line here would begin (or continue) an indented code
-  // block: at document start, after a blank line, a list marker, a heading, a
-  // thematic break, or a closed fence, and while already inside indented code.
-  // It is false right after a paragraph text line, so an indented line there is a
-  // lazy paragraph continuation and is kept, not dropped as code.
-  let codeContext = true;
   // Split on CRLF or LF, so a Windows-authored file's fence close (```\r\n) is
   // recognised. A trailing \r would otherwise defeat the `[ \t]*$` close anchor,
   // leaving the fence open to EOF and hiding every heading after it.
@@ -372,20 +346,7 @@ function stripFencedBlocks(body) {
       const close = /^ {0,3}(`{3,}|~{3,})[ \t]*$/.exec(line);
       if (close && close[1][0] === fence.char && close[1].length >= fence.length) {
         fence = null;
-        codeContext = true;
       }
-      continue;
-    }
-    if (line.trim() === "") {
-      kept.push(line);
-      codeContext = true;
-      continue;
-    }
-    // Indented code: a line indented four or more columns (tabs expanded), but
-    // only where a code block may begin. Dropping it keeps its content, including
-    // a list-nested fence at any depth or a space-then-tab indent, from minting
-    // an anchor; a paragraph continuation is left to the kept path below.
-    if (codeContext && leadingIndentColumns(line) >= 4) {
       continue;
     }
     const open = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
@@ -395,15 +356,12 @@ function stripFencedBlocks(body) {
       // the document to EOF. Tilde fences carry no such restriction.
       if (open[1][0] === "`" && open[2].includes("`")) {
         kept.push(line);
-        codeContext = false;
         continue;
       }
       fence = { char: open[1][0], length: open[1].length };
-      codeContext = true;
       continue;
     }
     kept.push(line);
-    codeContext = !isParagraphTextLine(line);
   }
   return kept.join("\n");
 }
@@ -431,11 +389,18 @@ function markdownAnchors(body) {
   const lines = withoutFences.split("\n");
   for (let idx = 0; idx < lines.length; idx++) {
     // Capture the heading text greedily to `$` (linear), then strip an optional
-    // GFM closing hash sequence in code. A lazy `(.+?)` before `#*[ \t]*$` would
-    // backturn quadratic on a hash-heavy line ("# " + "#".repeat(N)).
+    // GFM closing hash sequence (a trailing run of `#` preceded by whitespace)
+    // with a backward scan. A regex `[ \t]+#+[ \t]*$` here would backtrack
+    // quadratically on a space-heavy line ("# a" + " ".repeat(N) + "x").
     const atx = /^ {0,3}#{1,6}[ \t]+(.*)$/.exec(lines[idx]);
     if (atx) {
-      reserve(slugifyHeading(atx[1].replace(/[ \t]+#+[ \t]*$/, "")));
+      let text = atx[1].trimEnd();
+      let hashEnd = text.length;
+      while (hashEnd > 0 && text[hashEnd - 1] === "#") hashEnd--;
+      if (hashEnd < text.length && hashEnd > 0 && /[ \t]/.test(text[hashEnd - 1])) {
+        text = text.slice(0, hashEnd).trimEnd();
+      }
+      reserve(slugifyHeading(text));
       continue;
     }
     // Setext heading: a line of only `=` (h1) or only `-` (h2) directly under a
@@ -594,12 +559,22 @@ async function assertInternalLink(url) {
   // JSON-LD @id identifiers (e.g. /#software, /#api), not navigable anchors.
   if (parsed.hash && mode === "local" && parsed.pathname.endsWith(".md")) {
     const fragment = decodeURIComponent(parsed.hash.slice(1));
-    const anchors = markdownAnchors(result.body);
+    // Memoize per target path: many fragment links can point at the same file,
+    // and re-parsing its whole body for each one is quadratic in link count.
+    let anchors = markdownAnchorsCache.get(parsed.pathname);
+    if (!anchors) {
+      anchors = markdownAnchors(result.body);
+      markdownAnchorsCache.set(parsed.pathname, anchors);
+    }
     if (!anchors.has(fragment)) {
       fail(`${url} references #${fragment}, absent from the headings of ${parsed.pathname}`);
     }
   }
 }
+
+// Cache of resolved Markdown targets' anchor sets, keyed by pathname, so a file
+// referenced by many fragment links is parsed once, not once per link.
+const markdownAnchorsCache = new Map();
 
 // Repo-wide self-link sweep. lychee excludes the whole llm-cli-gateway.dev
 // domain because unreleased pages 404 on the live site, so this local check is

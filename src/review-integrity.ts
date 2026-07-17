@@ -98,6 +98,8 @@ const SOFT_TERMINATOR = "\uE010";
 // ideographic characters; the value is the regex char class "[.!?\uFF0E\u3002\uFF01\uFF1F]".
 const TERMINATOR_CLASS = "[.!?\uFF0E\u3002\uFF01\uFF1F]";
 const FULLWIDTH_TERMINATOR = /[\uFF0E\u3002\uFF01\uFF1F]/u;
+const TERMINATOR_CHARS = new Set([".", "!", "?", "\uFF0E", "\u3002", "\uFF01", "\uFF1F"]);
+const TERMINATOR_GLOBAL = new RegExp(TERMINATOR_CLASS, "gu");
 
 // Normalise a code span's literal content: keep the WORDS (a verb or noun
 // written as code is still seen), turn `*`/`~` and inner backticks into spaces,
@@ -108,16 +110,16 @@ const FULLWIDTH_TERMINATOR = /[\uFF0E\u3002\uFF01\uFF1F]/u;
 // `_` is a word character and is left alone: an identifier like `use_shell` must
 // stay one word so it is not read as the keyword "use".
 function normaliseCodeSpanContent(content: string): string {
-  const cleaned = content.replace(/[`*~]/g, " ").replace(/\s+$/, "");
-  // Use the full terminator set (ASCII + fullwidth/ideographic), not just ASCII:
-  // otherwise a fullwidth period trailing a span leaks into the stream as a HARD
-  // terminator and hides a real suppression (the segmenter would split there).
-  const trailing = new RegExp(`${TERMINATOR_CLASS}+$`, "u").exec(cleaned);
-  const end = trailing ? trailing[0] : "";
-  return (
-    cleaned.slice(0, cleaned.length - end.length).replace(new RegExp(TERMINATOR_CLASS, "gu"), " ") +
-    (end ? SOFT_TERMINATOR : "")
-  );
+  // trimEnd (not `/\s+$/`) and a backward scan for the trailing terminator run
+  // (not `[class]+$`) so a long space or dot run inside a code span cannot make
+  // this quadratic through regex backtracking. Uses the full terminator set
+  // (ASCII + fullwidth/ideographic): otherwise a fullwidth period trailing a span
+  // leaks into the stream as a HARD terminator and hides a suppression.
+  const cleaned = content.replace(/[`*~]/g, " ").trimEnd();
+  let end = cleaned.length;
+  while (end > 0 && TERMINATOR_CHARS.has(cleaned[end - 1])) end--;
+  const body = cleaned.slice(0, end).replace(TERMINATOR_GLOBAL, " ");
+  return body + (end < cleaned.length ? SOFT_TERMINATOR : "");
 }
 
 // Inline-markup normaliser, run before the suppression scan. A prompt is
@@ -314,9 +316,9 @@ const SENTENCE_CLOSERS = /["'”’)\]]/u;
 
 // Split markup-normalised prompt text into sentences. An ASCII HARD terminator
 // (`.!?`) ends a sentence when followed by optional closing quotes/brackets then
-// whitespace or end-of-text, except a single "." inside a decimal ("2.1").
-// Abbreviations and initials ("Inc.", "e.g.", "A.") are NOT special-cased (see
-// the note above the decimal check): they are ordinary boundaries. A
+// whitespace or end-of-text. There are no exceptions: abbreviations, initials
+// ("Inc.", "e.g.", "A.") and decimals are all ordinary boundaries (a real
+// decimal "2.1" has no trailing space, so it is never a boundary candidate). A
 // fullwidth/ideographic terminator always ends a sentence (CJK typography puts
 // no space after it). A SOFT terminator (minted only for a code span's trailing
 // punctuation) ends a sentence only before a capitalised next sentence.
@@ -367,27 +369,15 @@ function segmentSentences(text: string): string[] {
     }
     // A terminator may be followed by closing quotes/brackets before the
     // sentence-ending whitespace (as in a quoted or parenthesised sentence end),
-    // so consume them before deciding the boundary.
+    // so consume them before deciding the boundary. A terminator followed by
+    // whitespace or end-of-text is a boundary: no decimal special-case, because a
+    // real decimal ("2.1") has no space after the "." and so is never a boundary
+    // candidate here, while "2. 3" (period then space) is a genuine sentence end.
     let boundaryEnd = j;
     while (boundaryEnd < n && SENTENCE_CLOSERS.test(text[boundaryEnd])) boundaryEnd++;
-    const followedByWhitespace = boundaryEnd >= n || /\s/.test(text[boundaryEnd]);
-    if (followedByWhitespace) {
-      let suppress = false;
-      // A single "." between two digits ("2. 3") is a decimal, not a boundary.
-      // Bounded forward scan so a long whitespace run cannot make it quadratic.
-      if (ch === "." && j - i === 1) {
-        const before = i > 0 ? text[i - 1] : "";
-        let d = boundaryEnd;
-        while (d < n && d < boundaryEnd + 8 && /\s/.test(text[d])) d++;
-        const nextChar = d < n ? text[d] : "";
-        if (/\d/.test(before) && /\d/.test(nextChar)) {
-          suppress = true;
-        }
-      }
-      if (!suppress) {
-        emit(boundaryEnd);
-        continue;
-      }
+    if (boundaryEnd >= n || /\s/.test(text[boundaryEnd])) {
+      emit(boundaryEnd);
+      continue;
     }
     i = j;
   }

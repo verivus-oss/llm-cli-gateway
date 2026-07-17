@@ -324,10 +324,10 @@ describe("local site discovery validation", () => {
     expect(validate(site2).status).toBe(1);
   });
 
-  it("keeps a real heading at column zero after a top-level indented code block", () => {
-    // A four-space-indented run of backticks is an INDENTED code block, not a
-    // fence; a "# Heading" at column zero right after it is a real heading and
-    // must resolve. (Relaxing the fence indent instead wrongly swallowed it.)
+  it("keeps a real heading at column zero after four-space-indented backticks", () => {
+    // A four-space-indented run of backticks is not a top-level fence (fence
+    // indent is <=3 spaces), so it is not stripped and does not swallow the real
+    // "# Heading" at column zero right after it, which must resolve.
     const site = copiedSite();
     writeFileSync(join(site, "ic.md"), "    ```\n# Live Heading\n    ```\n\nbody\n");
     const maintainers = join(site, "maintainers.md");
@@ -338,10 +338,10 @@ describe("local site discovery validation", () => {
     expect(validate(site).status).toBe(0);
   });
 
-  it("keeps an indented paragraph-continuation anchor (not treated as code)", () => {
-    // An indented line right after a paragraph is a lazy continuation, not an
-    // indented code block (code cannot interrupt a paragraph), so an <a id> there
-    // stays a live anchor and must resolve.
+  it("keeps an indented explicit anchor as a live anchor", () => {
+    // Indented (non-fenced) content is not stripped, so an <a id> on an indented
+    // line stays a live anchor and resolves. This is the fail-open direction of
+    // the documented best-effort scope (never a false CI failure).
     const site = copiedSite();
     writeFileSync(join(site, "pc.md"), '# T\n\nParagraph text\n    <a id="active"></a>\n\nbody\n');
     const maintainers = join(site, "maintainers.md");
@@ -350,33 +350,6 @@ describe("local site discovery validation", () => {
       `${readFileSync(maintainers, "utf8")}\n[a](https://llm-cli-gateway.dev/pc.md#active)\n`
     );
     expect(validate(site).status).toBe(0);
-  });
-
-  it("strips a space-then-tab indented list fence (tab-stop columns)", () => {
-    // " \t" reaches column four via the tab stop, so it is indented code; a
-    // fenced <a id> under it must not mint an anchor.
-    const site = copiedSite();
-    const content = [
-      "# R",
-      "",
-      "1. x:",
-      "",
-      " \t```html",
-      ' \t<a id="stphantom"></a>',
-      " \t```",
-      "",
-      "b",
-      "",
-    ].join("\n");
-    writeFileSync(join(site, "st.md"), content);
-    const maintainers = join(site, "maintainers.md");
-    writeFileSync(
-      maintainers,
-      `${readFileSync(maintainers, "utf8")}\n[s](https://llm-cli-gateway.dev/st.md#stphantom)\n`
-    );
-    const result = validate(site);
-    expect(result.status).toBe(1);
-    expect(result.stderr).toContain("absent from the headings");
   });
 
   it("stays linear on a hash-heavy heading line and an unclosed-bracket file", () => {
@@ -396,31 +369,30 @@ describe("local site discovery validation", () => {
     expect(Date.now() - start).toBeLessThan(3000);
   });
 
-  it("strips list-nested fences at 16-space and tab indentation too", () => {
-    for (const indent of ["                ", "\t"]) {
-      const site = copiedSite();
-      const content = [
-        "# Real",
-        "",
-        "1. Step:",
-        "",
-        `${indent}\`\`\`html`,
-        `${indent}<a id="deep-phantom"></a>`,
-        `${indent}\`\`\``,
-        "",
-        "done",
-        "",
-      ].join("\n");
-      writeFileSync(join(site, "deep.md"), content);
-      const maintainers = join(site, "maintainers.md");
-      writeFileSync(
-        maintainers,
-        `${readFileSync(maintainers, "utf8")}\n[deep](https://llm-cli-gateway.dev/deep.md#deep-phantom)\n`
-      );
-      const result = validate(site);
-      expect(result.status).toBe(1);
-      expect(result.stderr).toContain("absent from the headings");
-    }
+  it("stays linear on a wildcard-heavy header rule and many fragments to one target", () => {
+    // The header wildcard collapses consecutive `*` (so "***" does not become a
+    // catastrophic ".*.*.*"), and a target's anchors are parsed once per file
+    // rather than once per link, so neither of these repo-controlled inputs is
+    // quadratic.
+    const site = copiedSite();
+    const headersPath = join(site, "_headers");
+    writeFileSync(
+      headersPath,
+      `${readFileSync(headersPath, "utf8")}\n/${"*".repeat(16)}X\n  Content-Type: text/plain\n`
+    );
+    const n = 3000;
+    const headings = Array.from({ length: n }, (_, i) => `## h${i}`).join("\n\n");
+    const links = Array.from(
+      { length: n },
+      (_, i) => `[l${i}](https://llm-cli-gateway.dev/big.md#h${i})`
+    ).join("\n");
+    writeFileSync(join(site, "big.md"), `# T\n\n${headings}\n`);
+    const maintainers = join(site, "maintainers.md");
+    writeFileSync(maintainers, `${readFileSync(maintainers, "utf8")}\n${links}\n`);
+    const start = Date.now();
+    const result = validate(site);
+    expect(result.status).toBe(0);
+    expect(Date.now() - start).toBeLessThan(3000);
   });
 
   it("stays linear on a malformed run of <a prefixes (no quadratic anchor scan)", () => {
@@ -438,34 +410,6 @@ describe("local site discovery validation", () => {
     const elapsed = Date.now() - start;
     expect(result.status).toBe(1);
     expect(elapsed).toBeLessThan(3000);
-  });
-
-  it("strips a list-nested (four-space) fence so its explicit anchor is not minted", () => {
-    // Fences indented to a list item's content column (four spaces under a
-    // numbered list, as in docs/plans/) must still be recognised, so an
-    // <a id> written as an example inside one does not resolve as a live anchor.
-    const site = copiedSite();
-    const content = [
-      "# Real",
-      "",
-      "1. Step one:",
-      "",
-      "    ```html",
-      '    <a id="listfence-phantom"></a>',
-      "    ```",
-      "",
-      "done",
-      "",
-    ].join("\n");
-    writeFileSync(join(site, "lf.md"), content);
-    const maintainers = join(site, "maintainers.md");
-    writeFileSync(
-      maintainers,
-      `${readFileSync(maintainers, "utf8")}\n[phantom](https://llm-cli-gateway.dev/lf.md#listfence-phantom)\n`
-    );
-    const result = validate(site);
-    expect(result.status).toBe(1);
-    expect(result.stderr).toContain("absent from the headings");
   });
 
   it("does not mint an anchor from a heading inside a longer-closed fence", () => {
