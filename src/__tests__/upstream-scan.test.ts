@@ -10,6 +10,7 @@ import {
   normalizeSnapshot,
   parseTrustedInstalledVersion,
   renderReport,
+  requireInstalledHelpProbeErrorIsCritical,
   requireInstalledVersionIndeterminateIsCritical,
   rootCatalogDrift,
   verifyDeclaredCommandPath,
@@ -229,6 +230,24 @@ describe("upstream scanner hardening", () => {
     // Without require-installed, or without a declared target, it stays a log.
     expect(requireInstalledVersionIndeterminateIsCritical(false, unparseable)).toBe(false);
     expect(requireInstalledVersionIndeterminateIsCritical(true, noTarget)).toBe(false);
+  });
+
+  it("escalates a nonzero-exit help probe to critical only under --require-installed", () => {
+    const okHelp = { available: true, helpExitedNonzero: false };
+    const failedHelp = { available: true, helpExitedNonzero: true };
+    const absentHelp = { available: false, helpExitedNonzero: false };
+
+    // The fail-open the fix closes: a help probe that spawned but exited nonzero
+    // produced untrustworthy help text, so under --require-installed its contract
+    // is unverified and this must be critical.
+    expect(requireInstalledHelpProbeErrorIsCritical(true, failedHelp)).toBe(true);
+
+    // A clean help exit, an absent binary (decided elsewhere), and runs without
+    // --require-installed are not this critical.
+    expect(requireInstalledHelpProbeErrorIsCritical(true, okHelp)).toBe(false);
+    expect(requireInstalledHelpProbeErrorIsCritical(true, absentHelp)).toBe(false);
+    expect(requireInstalledHelpProbeErrorIsCritical(false, failedHelp)).toBe(false);
+    expect(requireInstalledHelpProbeErrorIsCritical(true, undefined)).toBe(false);
   });
 
   it("does not trust a --version that exits nonzero, closing the parse fail-open", () => {

@@ -50,27 +50,34 @@ const REVIEW_CONTEXT_PATTERN =
 // negation-verb-noun order invites false positives.
 const TOOL_USE_VERB = String.raw`(?:us(?:e|ing)|call(?:ing)?|invok(?:e|ing)|run(?:ning)?|execut(?:e|ing)|access(?:ing)?|touch(?:ing)?|issu(?:e|ing)|employ(?:ing)?|utili[sz](?:e|ing)|leverag(?:e|ing)|rely(?:ing)?\s+on|resort(?:ing)?\s+to)`;
 const TOOL_NOUN = String.raw`(?:tool(?:s)?|shell|bash|command(?:s)?)`;
-const NEGATION = String.raw`\b(?:do\s*not|don['’]t|never)\b`;
+// Unicode-aware word boundary via lookarounds. JS `\b` is ASCII-only even under
+// the /u flag, so a non-ASCII letter next to a keyword forges a boundary:
+// `\buse\b` matches the "use" inside "caféuse" because "é" is not an ASCII word
+// char. Requiring no Unicode letter/number/underscore on either side fixes that.
+const WB = String.raw`(?<![\p{L}\p{N}_])`;
+const WA = String.raw`(?![\p{L}\p{N}_])`;
+const uword = (body: string): string => `${WB}(?:${body})${WA}`;
+const NEGATION = uword(String.raw`do\s*not|don['’]t|never`);
 // Within one sentence: a negation that governs a tool-use verb that governs a
 // tool noun. The 40-char windows keep the three parts in proximity so unrelated
 // clauses in a long sentence do not glue. `[\s\S]` (not SENTENCE_CHAR) because
 // the sentence has already been segmented, so there is no boundary to cross;
 // the class is disjoint enough that the lazy quantifiers cannot backtrack
-// pathologically.
+// pathologically. All flags include `u` for the Unicode boundary lookarounds.
 const SUPPRESSION_VERB_NOUN = new RegExp(
   [
     NEGATION,
     String.raw`[\s\S]{0,40}?`,
-    String.raw`\b${TOOL_USE_VERB}\b`,
+    uword(TOOL_USE_VERB),
     String.raw`[\s\S]{0,40}?`,
-    String.raw`\b${TOOL_NOUN}\b`,
+    uword(TOOL_NOUN),
   ].join(""),
-  "i"
+  "iu"
 );
 // "without" governs a tool noun on its own ("review this without tools").
 const WITHOUT_NOUN = new RegExp(
-  [String.raw`\bwithout\b`, String.raw`[\s\S]{0,40}?`, String.raw`\b${TOOL_NOUN}\b`].join(""),
-  "i"
+  [uword("without"), String.raw`[\s\S]{0,40}?`, uword(TOOL_NOUN)].join(""),
+  "iu"
 );
 
 // One token of the inline stream: a run of L backticks (canOpen is false when it
@@ -114,8 +121,11 @@ function normaliseCodeSpanContent(content: string): string {
   // (not `[class]+$`) so a long space or dot run inside a code span cannot make
   // this quadratic through regex backtracking. Uses the full terminator set
   // (ASCII + fullwidth/ideographic): otherwise a fullwidth period trailing a span
-  // leaks into the stream as a HARD terminator and hides a suppression.
-  const cleaned = content.replace(/[`*~]/g, " ").trimEnd();
+  // leaks into the stream as a HARD terminator and hides a suppression. Newlines
+  // inside the span become spaces: a code span is inlined content, so a line
+  // break inside it is a code wrap, not a sentence boundary the segmenter should
+  // split on.
+  const cleaned = content.replace(/[`*~\r\n]/g, " ").trimEnd();
   let end = cleaned.length;
   while (end > 0 && TERMINATOR_CHARS.has(cleaned[end - 1])) end--;
   const body = cleaned.slice(0, end).replace(TERMINATOR_GLOBAL, " ");
@@ -154,8 +164,11 @@ function normaliseCodeSpanContent(content: string): string {
 // sentence break ("`this. Use`") still reads as one sentence because its period
 // is blanked; an adversary who splits a keyword across markup ("u`s`e",
 // "*u*s*e*"); and a backslash escaping only the FIRST backtick of a
-// multi-backtick run (the run is treated whole). Closing those needs a full
-// CommonMark render, disproportionate for a score-4 scorer.
+// multi-backtick run (the run is treated whole). A further recall residual: an
+// ellipsis or repeated terminator run mid-suppression ("do not use... tools",
+// "do not use!!! tools") is read as a sentence end, so that (contrived) phrasing
+// is missed. Closing these needs a full CommonMark render, disproportionate for
+// a score-4 scorer; a miss is acceptable where a false alarm on prose is not.
 export function neutraliseInlineMarkup(prompt: string): string {
   const tokens: InlineToken[] = [];
   let buf: string[] = [];
@@ -348,6 +361,20 @@ function segmentSentences(text: string): string[] {
         continue;
       }
       i = j;
+      continue;
+    }
+    if (ch === "\n") {
+      // A blank line (paragraph break) always ends a sentence. A single newline
+      // ends one only before a capitalised next sentence (a line break used as a
+      // sentence separator, "... the summary\nUse the tools ..."), not a
+      // mid-sentence wrap ("... use the\nshell ...", which stays one sentence so a
+      // real suppression that wraps is still detected).
+      const rest = text.slice(i + 1, i + 48);
+      if (/^[ \t\r]*\n/.test(rest) || SOFT_BOUNDARY_NEXT.test(text.slice(i, i + 48))) {
+        emit(i + 1);
+        continue;
+      }
+      i++;
       continue;
     }
     if (!SENTENCE_TERMINATOR.test(ch)) {

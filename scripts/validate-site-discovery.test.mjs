@@ -298,6 +298,47 @@ describe("local site discovery validation", () => {
     expect(validate(site2).status).toBe(1);
   });
 
+  it("mints an anchor for an ATX heading inside a blockquote callout", () => {
+    // `> # Heading` is a real heading in a blockquote; a single blockquote marker
+    // is stripped so the anchor resolves rather than falsely failing CI.
+    const site = copiedSite();
+    writeFileSync(join(site, "c.md"), "# Title\n\n> # Important Setup\n>\n> Details.\n");
+    const maintainers = join(site, "maintainers.md");
+    writeFileSync(
+      maintainers,
+      `${readFileSync(maintainers, "utf8")}\n[c](https://llm-cli-gateway.dev/c.md#important-setup)\n`
+    );
+    expect(validate(site).status).toBe(0);
+  });
+
+  it("treats a hash-without-space line as Setext paragraph text, not an ATX heading", () => {
+    // "#not-a-heading" (no space) is not an ATX heading, so it is part of the
+    // preceding paragraph a Setext underline promotes.
+    const site = copiedSite();
+    writeFileSync(join(site, "s.md"), "# T\n\nFirst line\n#not-a-heading\n---\n\nbody\n");
+    const maintainers = join(site, "maintainers.md");
+    writeFileSync(
+      maintainers,
+      `${readFileSync(maintainers, "utf8")}\n[s](https://llm-cli-gateway.dev/s.md#first-line-not-a-heading)\n`
+    );
+    expect(validate(site).status).toBe(0);
+  });
+
+  it("does not mint a phantom Setext heading from a paragraph split by a fenced block", () => {
+    // Removing the fenced block must leave a block boundary, so the `---` after it
+    // is a thematic break, not a Setext underline for the paragraph above it.
+    const site = copiedSite();
+    writeFileSync(join(site, "p.md"), "# T\n\nParagraph\n```\ncode\n```\n---\n\nbody\n");
+    const maintainers = join(site, "maintainers.md");
+    writeFileSync(
+      maintainers,
+      `${readFileSync(maintainers, "utf8")}\n[p](https://llm-cli-gateway.dev/p.md#paragraph)\n`
+    );
+    const result = validate(site);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("absent from the headings");
+  });
+
   it("slugs a multiline Setext heading from all its paragraph lines", () => {
     // GFM: a Setext underline turns the WHOLE preceding paragraph into the
     // heading, so "First Line\nSecond Line\n---" slugs to first-line-second-line,

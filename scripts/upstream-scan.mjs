@@ -815,6 +815,19 @@ export function requireInstalledVersionIndeterminateIsCritical(requireInstalled,
   return Boolean(versionProbe?.targetVersion);
 }
 
+/**
+ * Decide whether a help probe that spawned but exited nonzero must count as a
+ * critical unverified state. Such help text cannot be trusted for drift
+ * comparison (it may be an error message that happens to match), so under
+ * --require-installed it is a fail-open exactly like a nonzero `--version` exit,
+ * and is escalated to a critical rather than a mere warning.
+ */
+export function requireInstalledHelpProbeErrorIsCritical(requireInstalled, helpProbe) {
+  if (!requireInstalled) return false;
+  if (!helpProbe?.available) return false;
+  return Boolean(helpProbe?.helpExitedNonzero);
+}
+
 function runReadOnlyCliCommand(machinery, executable, args, timeoutMs = PROBE_TIMEOUT_MS) {
   const extendedPath =
     typeof machinery.getExtendedPath === "function"
@@ -1086,6 +1099,11 @@ function probeInstalledCliSurface(machinery, cli, timeoutMs = PROBE_TIMEOUT_MS) 
   const contract = machinery.UPSTREAM_CLI_CONTRACTS[cli];
   const warnings = [];
   const outputs = [];
+  // A help command that exits nonzero (or by signal) produced help text we cannot
+  // trust for drift comparison. Track it so --require-installed can escalate it to
+  // a critical instead of a mere warning (the same fail-open the --version fix
+  // closes; a matching-looking help output with a failed exit must not pass).
+  let helpExitedNonzero = false;
   let resolvedCommand;
   let resolvedArgs;
 
@@ -1118,6 +1136,7 @@ function probeInstalledCliSurface(machinery, cli, timeoutMs = PROBE_TIMEOUT_MS) 
     }
     outputs.push(result.output);
     if (result.status !== 0) {
+      helpExitedNonzero = true;
       warnings.push(
         `${contract.executable} ${helpArgs.join(" ")} exited with status ${result.status}`
       );
@@ -1141,6 +1160,7 @@ function probeInstalledCliSurface(machinery, cli, timeoutMs = PROBE_TIMEOUT_MS) 
       rootResult.error ?? `${contract.executable} --help was unavailable for root command discovery`
     );
   } else if (rootResult.status !== 0) {
+    helpExitedNonzero = true;
     warnings.push(`${contract.executable} --help exited with status ${rootResult.status}`);
   }
 
@@ -1185,6 +1205,7 @@ function probeInstalledCliSurface(machinery, cli, timeoutMs = PROBE_TIMEOUT_MS) 
     arityMismatches: shapes.arityMismatches,
     enumMismatches: shapes.enumMismatches,
     helpHash: sha256(helpText),
+    helpExitedNonzero,
     versionProbe,
     rootCommands: rootHelp.commands,
     rootCatalogDrift: rootCatalogDrift(flattened, rootHelp.commands),
@@ -1457,6 +1478,23 @@ async function runScan(machinery, toml, flags) {
           criticalCount++;
           console.log(
             `  [probe] BINARY ABSENT: ${contract.executable} not probeable; contract unverified`
+          );
+        }
+
+        if (requireInstalledHelpProbeErrorIsCritical(flags.requireInstalled, helpProbe)) {
+          // A help command spawned but exited nonzero, so the help text used for
+          // drift comparison is untrustworthy (it may be an error message that
+          // happens to match, or partial output). Under --require-installed that
+          // is an unverified contract, the same fail-open the --version exit fix
+          // closes, so escalate it to a critical rather than a warning.
+          findings.push({
+            severity: "critical",
+            category: "installed-help-probe-error",
+            message: `--require-installed was set but a ${cli} help probe (${contract.executable}) exited nonzero, so its help output cannot be trusted for drift comparison and its contract is unverified. Re-probe the CLI; do not treat this run as drift-free.`,
+          });
+          criticalCount++;
+          console.log(
+            `  [probe] HELP PROBE ERROR (require-installed): ${contract.executable} help exited nonzero; contract unverified`
           );
         }
 

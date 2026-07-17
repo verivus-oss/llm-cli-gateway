@@ -433,6 +433,42 @@ describe("checkReviewIntegrity", () => {
       }
     });
 
+    it("treats a spaced period as a boundary but a bare decimal as one sentence", () => {
+      // No decimal guard: "2. 3" (period then space) is a sentence boundary, so
+      // the negation does not glue to the numeral-starting next sentence, while a
+      // real decimal "2.1" (no space after the ".") is never a boundary candidate
+      // and stays in one sentence, so a suppression around it is still detected.
+      const notFlagged = checkReviewIntegrity({
+        prompt:
+          "Review this. Do not change the limit of 2. 3 reviewers can use the shell for verification.",
+      });
+      expect(notFlagged.violations.filter(v => v.type === "tool_suppression")).toHaveLength(0);
+
+      const flagged = checkReviewIntegrity({
+        prompt: "Review version 2.1 and do not use any tools.",
+      });
+      expect(flagged.violations.find(v => v.type === "tool_suppression")).toBeDefined();
+    });
+
+    it("splits on a line break before a capital but keeps a wrapped sentence", () => {
+      // A line break used as a sentence separator before a capitalised sentence
+      // ("... the summary\nUse the tools") splits, so pro-tool hygiene prose is
+      // not false-flagged; a blank line (paragraph break) always splits; a
+      // mid-sentence wrap before a lowercase word stays one sentence so a real
+      // suppression that wraps is still detected.
+      for (const prompt of [
+        "Review this independently. Do not trust the summary\nUse the tools to verify every claim.",
+        "Review this. Do not trust the summary\n\nUse the tools to verify.",
+      ]) {
+        const result = checkReviewIntegrity({ prompt });
+        expect(result.violations.filter(v => v.type === "tool_suppression")).toHaveLength(0);
+      }
+      const wrapped = checkReviewIntegrity({
+        prompt: "Review it. Do not use the\nshell right now.",
+      });
+      expect(wrapped.violations.find(v => v.type === "tool_suppression")).toBeDefined();
+    });
+
     it("does not flag hygiene prose whose next sentence starts with a tool noun", () => {
       // A soft (code-span) period before a CAPITALISED tool noun starts a new
       // sentence, not a continuation of the negation. Firing here would flag

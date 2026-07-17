@@ -322,16 +322,22 @@ function slugifyHeading(text) {
 // lines.
 //
 // Bounded scope (best-effort fragment layer, atop lychee and the repo-wide
-// self-link sweep): INDENTED code blocks and fenced/heading examples nested
-// inside a list item or block-quote are NOT stripped. Distinguishing indented
-// code from live list-item content requires tracking each open container's
-// content-indent column, i.e. a real CommonMark block parser, which this repo
-// deliberately omits (see slugifyHeading). A previous line-scanner attempt was
-// wrong in both directions: it dropped live list-paragraph anchors (a false CI
-// failure, the worse fault) while still mishandling Setext/table/link-reference
-// boundaries. So a `#fragment` that resolves ONLY to an anchor defined inside
-// indented or container-nested code may over-resolve. No such construct exists
-// in this repo's tracked docs (verified), and this fails OPEN, never closed.
+// self-link sweep). Anchor extraction here is a line scanner, not a CommonMark
+// block parser (which this repo deliberately omits; see slugifyHeading), so a
+// few container-block constructs are out of scope. Correctly handling them needs
+// per-container content-indent tracking; a previous line-scanner attempt was
+// wrong in both directions (it dropped live list-paragraph anchors, a false CI
+// failure, the worse fault). None of these constructs occurs in this repo's
+// tracked docs (verified), and the residual biases toward failing OPEN:
+//   - INDENTED code blocks and fences/headings nested inside a list item are not
+//     stripped, so an anchor defined only inside such an example may over-resolve.
+//   - A fence opened INSIDE a list item that never closes is treated as running
+//     to end-of-document, which can hide a later outdented heading (fail-closed);
+//     this repo has no list-nested unclosed fences.
+//   - Only one level of block-quote marker is stripped (so a `> # Heading`
+//     callout resolves); deeper `> >` nesting is not handled.
+//   - A link destination with balanced parentheses ("(foo(bar).md)") is
+//     truncated at the first ")"; this repo uses no parenthesised paths.
 function stripFencedBlocks(body) {
   const kept = [];
   let fence = null;
@@ -359,6 +365,10 @@ function stripFencedBlocks(body) {
         continue;
       }
       fence = { char: open[1][0], length: open[1].length };
+      // Leave a blank line in place of the removed block so it still acts as a
+      // block boundary: without it, a paragraph immediately before the fence and
+      // a `---` immediately after it would merge into a phantom Setext heading.
+      kept.push("");
       continue;
     }
     kept.push(line);
@@ -385,8 +395,11 @@ function markdownAnchors(body) {
     anchors.add(candidate);
   };
   // One document-ordered pass over the fence-stripped lines so ATX and Setext
-  // headings interleave correctly for the disambiguation counter.
-  const lines = withoutFences.split("\n");
+  // headings interleave correctly for the disambiguation counter. A single level
+  // of blockquote marker is stripped from each line first, so an ATX heading in a
+  // callout (`> # Heading`) still mints its anchor. (Deeper blockquote nesting is
+  // part of the documented container-block scope, below.)
+  const lines = withoutFences.split("\n").map(line => line.replace(/^ {0,3}> ?/, ""));
   for (let idx = 0; idx < lines.length; idx++) {
     // Capture the heading text greedily to `$` (linear), then strip an optional
     // GFM closing hash sequence (a trailing run of `#` preceded by whitespace)
@@ -415,7 +428,9 @@ function markdownAnchors(body) {
     if (setext && idx > 0) {
       const isContent = line =>
         line.trim() &&
-        !/^ {0,3}#/.test(line) &&
+        // Only a real ATX heading ("# " with a space) stops the gather; a line
+        // like "#not-a-heading" (no space) is ordinary paragraph text.
+        !/^ {0,3}#{1,6}(?:[ \t]|$)/.test(line) &&
         !/^ {0,3}(=+|-+)[ \t]*$/.test(line) &&
         !/^ {0,3}([-+*]|\d+[.)])[ \t]/.test(line) &&
         !/^ {0,3}>/.test(line);
@@ -541,12 +556,20 @@ async function assertInternalLink(url) {
   const parsed = new URL(url);
   if (parsed.hostname !== "llm-cli-gateway.dev") return;
   const route = { path: parsed.pathname, type: "", json: false };
-  const result =
-    mode === "remote"
-      ? await readRemote(route)
-      : existsSync(fileForPath(parsed.pathname))
+  let result;
+  if (mode === "remote") {
+    result = await readRemote(route);
+  } else {
+    // Cache the local read per pathname: a target linked by many fragments must
+    // be read (and its body held) once, not re-read from disk for every link.
+    result = readResultCache.get(parsed.pathname);
+    if (!result) {
+      result = existsSync(fileForPath(parsed.pathname))
         ? await readLocal({ ...route, type: "" })
         : { status: 404, body: "", contentType: "" };
+      readResultCache.set(parsed.pathname, result);
+    }
+  }
   if (result.status < 200 || result.status >= 300) {
     fail(`${url} referenced by site metadata returned ${result.status}`);
   }
@@ -572,8 +595,9 @@ async function assertInternalLink(url) {
   }
 }
 
-// Cache of resolved Markdown targets' anchor sets, keyed by pathname, so a file
-// referenced by many fragment links is parsed once, not once per link.
+// Caches keyed by pathname (local mode) so a file referenced by many fragment
+// links is read from disk once and its anchor set parsed once, not once per link.
+const readResultCache = new Map();
 const markdownAnchorsCache = new Map();
 
 // Repo-wide self-link sweep. lychee excludes the whole llm-cli-gateway.dev
