@@ -86,39 +86,87 @@ const TOOL_SUPPRESSION_PATTERN = new RegExp(
   "i"
 );
 
+// Normalise a code span's literal content: markers and inner backticks are
+// literal, so keep the WORDS (a verb or noun written as code is still seen) but
+// turn markers into spaces, blank INTERNAL sentence punctuation so literal code
+// cannot forge a boundary, and keep only TRAILING sentence punctuation so a span
+// that genuinely ends a sentence ("... trust the `summary.` Use") still reads as
+// two. Spaces, never deletion, so nothing welds to a neighbour.
+function normaliseCodeSpanContent(content: string): string {
+  const cleaned = content.replace(/[`*_~]/g, " ").replace(/\s+$/, "");
+  const trailing = /[.!?]+$/.exec(cleaned);
+  const end = trailing ? trailing[0] : "";
+  return cleaned.slice(0, cleaned.length - end.length).replace(/[.!?]/g, " ") + end;
+}
+
 // Inline-markup normaliser, run before the suppression scan. A prompt is
-// Markdown, and markers around or inside a suppression were the source of a long
-// tail of both false positives (markup faking a sentence boundary, e.g.
-// "**summary.** Use the tools") and false negatives (markup hiding the verb or
-// noun, e.g. "do not `use` the shell", or a code span forging a boundary, e.g.
-// "do not use the `foo. **Bar` shell"). Rather than keep encoding Markdown in
-// the detection regex, one whack-a-mole edge at a time, normalise the text once:
+// Markdown, and markers around or inside a suppression were a long tail of both
+// false positives (markup faking a sentence boundary, "**summary.** Use") and
+// false negatives (markup hiding the verb or noun, "do not `use` the shell", or
+// a code span forging a boundary, "do not use the `foo. **Bar` shell"). Rather
+// than encode Markdown in the detection regex one edge at a time, normalise
+// once. This is a real tokenizer, not a regex: a run of L backticks opens a code
+// span that closes only at the next run of EXACTLY L (GFM), a backslash-escaped
+// backtick is literal, and an unclosed run is literal text. Everything removed
+// becomes a SPACE, so stripping markup can neither weld two words into a keyword
+// nor tear a keyword apart. The result feeds TOOL_SUPPRESSION_PATTERN, so the
+// markup classes inside SENTENCE_CHAR are now a backstop, not the primary
+// defence. Work is linear in practice (each character is consumed once; only an
+// unclosed run scans ahead), with no catastrophic backtracking.
 //
-//   - Inline code spans keep their WORDS, so a verb or noun written as code is
-//     still seen. Emphasis markers inside are dropped, INTERNAL sentence
-//     punctuation is blanked so literal code cannot forge a boundary, and only
-//     TRAILING sentence punctuation survives so a span that genuinely ends a
-//     sentence ("... trust the `summary.` Use the tools") still reads as two.
-//   - Emphasis markers and stray backticks in the surrounding prose are removed;
-//     their content is prose and stays.
-//
-// The normalised text is what TOOL_SUPPRESSION_PATTERN scans, so the closer and
-// opener markup classes inside SENTENCE_CHAR are now a backstop rather than the
-// primary defence. Both replacements are linear (negated classes), no ReDoS.
+// Residual (accepted, defence-in-depth scoring): a code span whose literal
+// content contains an INTERNAL sentence break ("`this. Use`") is blanked to one
+// run, so a negation can over-flag across it; and the documented lowercase
+// sentence-start case still over-flags. Both are precision costs of closing the
+// boundary-forge class and need real sentence parsing to remove.
 export function neutraliseInlineMarkup(prompt: string): string {
-  const normaliseCodeSpan = (content: string): string => {
-    const withoutEmphasis = content.replace(/[*_~]/g, "");
-    const trailing = /[.!?]+$/.exec(withoutEmphasis);
-    const end = trailing ? trailing[0] : "";
-    const body = withoutEmphasis
-      .slice(0, withoutEmphasis.length - end.length)
-      .replace(/[.!?]/g, " ");
-    return body + end;
-  };
-  return prompt
-    .replace(/`+([^`\n]*)`+/g, (_match, content: string) => normaliseCodeSpan(content))
-    .replace(/[*_~]/g, "")
-    .replace(/`/g, "");
+  const out: string[] = [];
+  const n = prompt.length;
+  let i = 0;
+  while (i < n) {
+    const ch = prompt[i];
+    if (ch === "\\" && prompt[i + 1] === "`") {
+      out.push(" ");
+      i += 2;
+      continue;
+    }
+    if (ch === "`") {
+      let j = i;
+      while (j < n && prompt[j] === "`") j++;
+      const runLength = j - i;
+      let k = j;
+      let close = -1;
+      while (k < n) {
+        if (prompt[k] === "`") {
+          let m = k;
+          while (m < n && prompt[m] === "`") m++;
+          if (m - k === runLength) {
+            close = k;
+            break;
+          }
+          k = m;
+        } else {
+          k++;
+        }
+      }
+      if (close === -1) {
+        out.push(" ".repeat(runLength));
+        i = j;
+        continue;
+      }
+      out.push(" ", normaliseCodeSpanContent(prompt.slice(j, close)), " ");
+      i = close + runLength;
+      continue;
+    }
+    if (ch === "*" || ch === "_" || ch === "~") {
+      out.push(" ");
+      i++;
+      continue;
+    }
+    out.push(ch);
+    i++;
+  }
+  return out.join("");
 }
 
 const CRITICAL_TOOLS = ["Read", "Grep", "Glob", "Bash"];

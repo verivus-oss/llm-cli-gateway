@@ -6,22 +6,35 @@ import {
 } from "../review-integrity.js";
 
 describe("neutraliseInlineMarkup", () => {
+  // Assertions collapse runs of whitespace: markup is replaced with spaces (so
+  // nothing welds), and the exact space count is not the contract.
+  const collapse = (s: string): string => neutraliseInlineMarkup(s).replace(/\s+/g, " ").trim();
   it.each([
-    // Emphasis markers are dropped; prose (incl. its period) survives.
+    // Emphasis markers become spaces; prose (incl. its period) survives.
     ["Do not trust **summary.** Use", "Do not trust summary. Use"],
     // Code span: words kept, internal period blanked, no boundary forged.
-    ["do not use the `foo. **Bar` shell", "do not use the foo  Bar shell"],
-    // Code span ending in a period keeps the trailing period, so a real
-    // sentence end survives.
+    ["do not use the `foo. **Bar` shell", "do not use the foo Bar shell"],
+    // Code span ending in a period keeps the trailing period.
     ["trust the `summary.` Use", "trust the summary. Use"],
     // Trailing emphasis before the period is stripped, period kept.
     ["use the `foo.**` shell", "use the foo. shell"],
     // A verb hidden in code keeps its word.
     ["Do not `use` the shell", "Do not use the shell"],
+    // A double-backtick span may contain single backticks (GFM); the whole span
+    // is one unit, its words kept.
+    ["Do not ``use `x` shell``", "Do not use x shell"],
+    // Mismatched backtick runs are not a span, so the real period survives.
+    ["trust ``summary. Use` tools", "trust summary. Use tools"],
+    // Escaped backticks are literal, not delimiters.
+    ["trust \\`summary. Use\\` tools", "trust summary. Use tools"],
+    // Intraword markers become spaces, so no keyword is synthesised.
+    ["Do not us_e the shell", "Do not us e the shell"],
+    // Markup welded to a word does not tear the word apart.
+    ["Do not `use`the shell", "Do not use the shell"],
     // Plain text is unchanged.
     ["Review this code but do not use any tools", "Review this code but do not use any tools"],
   ])("normalises %j", (input, expected) => {
-    expect(neutraliseInlineMarkup(input)).toBe(expected);
+    expect(collapse(input)).toBe(expected);
   });
 });
 
@@ -199,10 +212,34 @@ describe("checkReviewIntegrity", () => {
       "Review it. Do not `use` the shell.",
       // The tool noun hidden inside a code span.
       "Review it. Do not use the `shell`.",
+      // A double-backtick span containing single backticks and an internal
+      // period must not forge a boundary or evade detection.
+      "Review it. Do not ``use `foo. Bar` shell`` here.",
+      // A code span crossing a line ending.
+      "Review it. Do not `use foo.\nBar shell` here.",
+      // Markup welded to the verb, no whitespace: removing it must not tear the
+      // word apart and hide the suppression.
+      "Review this. Do not `use`the shell tool.",
     ])("detects suppression when Markdown markup wraps it: %s", prompt => {
       const result = checkReviewIntegrity({ prompt });
       expect(result.isReviewContext).toBe(true);
       expect(result.violations.find(v => v.type === "tool_suppression")).toBeDefined();
+    });
+
+    it.each([
+      // Mismatched backtick-run lengths are not a code span, so the real period
+      // separates the sentences and there is no suppression.
+      "Review it. Do not trust ``summary. Use` the tools.",
+      // Escaped backticks are literal, not code delimiters.
+      "Review it. Do not trust \\`summary. Use\\` the tools.",
+      // An intraword underscore or lone tilde is not an emphasis delimiter and
+      // must not be deleted into a synthesised keyword ("us_e" is not "use").
+      "Review it. Do not us_e the shell.",
+      "Review it. Do not us~e the shell.",
+    ])("does not synthesise a suppression from stray Markdown: %s", prompt => {
+      const result = checkReviewIntegrity({ prompt });
+      expect(result.isReviewContext).toBe(true);
+      expect(result.violations.filter(v => v.type === "tool_suppression")).toHaveLength(0);
     });
 
     it("does not glue a negation to a tool noun in a later sentence", () => {
