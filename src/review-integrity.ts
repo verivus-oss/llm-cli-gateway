@@ -327,24 +327,23 @@ const SENTENCE_ABBREVIATIONS = new Set([
 
 // A soft boundary (code-span-origin terminator) splits only when the next
 // sentence is capitalised, optionally behind opening quote/bracket delimiters
-// that survive normalisation. This is the old capital anchor, now applied ONLY
-// to soft terminators: it tells "`summary.` Use" (split, no false positive) from
+// that survive normalisation. This is the old capital anchor, applied ONLY to
+// soft terminators: it tells "`summary.` Use" (split, no false positive) from
 // "`foo.` shell" (no split, real suppression fires), while prose periods split
 // regardless of the next word's case (so "files. npm ..." still splits).
+//
+// Accepted residual (defence-in-depth, not a hard gate): a code span that ends
+// in a period immediately before a CAPITALISED tool noun ("do not use the
+// `foo.` Bash command") splits on the capital and misses that suppression. This
+// is left as a documented fail-open rather than "fixed" by holding the boundary,
+// because holding it fires on ordinary review-hygiene prose whose next sentence
+// merely starts with a capitalised tool noun ("do not use the `rtk.` Shell
+// proxy can fake success; verify independently"). Firing on an instruction to be
+// MORE rigorous is the exact anti-pattern this detector exists to avoid, and a
+// false alarm trains readers to ignore it; a rare miss on a contrived construct
+// does not. Both directions need real parsing to separate, so the miss is the
+// safer bias here.
 const SOFT_BOUNDARY_NEXT = /^\s+["'“‘([]*\p{Lu}/u;
-
-// A soft boundary is HELD (not split) when the next word is a tool noun AND the
-// pending sentence already carries a dangling suppression lead (negation + tool
-// verb, noun not yet seen). The suppression continues into that noun ("do not
-// use the `foo.` Bash command"), so splitting on the capital would hide it (a
-// fail-open). This is the only case where the capital anchor is overridden; when
-// the next word is not a tool noun ("`summary.` Use the tools") the split stands,
-// so no false positive is introduced.
-const SOFT_NEXT_TOOL_NOUN = new RegExp(`^\\s*["'“‘([]*${TOOL_NOUN}\\b`, "iu");
-const DANGLING_SUPPRESSION = new RegExp(
-  `${NEGATION}[\\s\\S]{0,40}?\\b${TOOL_USE_VERB}\\b[\\s\\S]{0,40}?$`,
-  "i"
-);
 
 // Closing quotes/brackets that may sit between a terminator and the whitespace
 // that ends a sentence, so a sentence ending inside quotes or parens
@@ -357,11 +356,10 @@ const SENTENCE_CLOSERS = /["'”’)\]]/u;
 // a known abbreviation ("e.g."), or after a single-letter initial ("A."). A
 // fullwidth/ideographic terminator always ends a sentence (CJK typography puts
 // no space after it). A SOFT terminator (minted only for a code span's trailing
-// punctuation) ends a sentence only before a capitalised next sentence, and even
-// then is HELD when that next word is a tool noun completing a dangling
-// suppression. Splitting on real terminators is what makes "do not modify files.
-// npm can use the shell" two sentences, so the negation cannot reach the
-// permitting verb. O(n): every slice is bounded, so each index costs O(1).
+// punctuation) ends a sentence only before a capitalised next sentence.
+// Splitting on real terminators is what makes "do not modify files. npm can use
+// the shell" two sentences, so the negation cannot reach the permitting verb.
+// O(n): every slice is bounded, so each index costs O(1).
 function segmentSentences(text: string): string[] {
   const sentences: string[] = [];
   const n = text.length;
@@ -379,17 +377,8 @@ function segmentSentences(text: string): string[] {
     if (ch === SOFT_TERMINATOR) {
       let j = i;
       while (j < n && text[j] === SOFT_TERMINATOR) j++;
-      // Bounded slice: the boundary/next-noun checks need only a few characters,
-      // so this stays O(1) per soft terminator.
-      const rest = text.slice(j, j + 48);
-      if (j >= n || SOFT_BOUNDARY_NEXT.test(rest)) {
-        // Bounded lookback for the dangling-suppression check (negation + verb
-        // fit well within 96 chars), so it cannot grow to O(n^2).
-        const pendingTail = text.slice(Math.max(start, i - 96), i);
-        if (SOFT_NEXT_TOOL_NOUN.test(rest) && DANGLING_SUPPRESSION.test(pendingTail)) {
-          i = j;
-          continue;
-        }
+      // Bounded slice keeps the boundary check O(1) per soft terminator.
+      if (j >= n || SOFT_BOUNDARY_NEXT.test(text.slice(j, j + 48))) {
         emit(j);
         continue;
       }
@@ -406,7 +395,10 @@ function segmentSentences(text: string): string[] {
     // CJK typography, are NOT followed by a space, so they split regardless of
     // what follows (no whitespace requirement, no decimal/abbreviation guard,
     // which only apply to an ASCII ".").
-    if (FULLWIDTH_TERMINATOR.test(ch)) {
+    // Test the WHOLE terminator run for a fullwidth mark, not just its first
+    // character: a mixed run like ".。" must still split (an earlier version
+    // checked only the first char and glued "summary.。Use").
+    if (FULLWIDTH_TERMINATOR.test(text.slice(i, j))) {
       emit(j);
       continue;
     }
@@ -420,22 +412,27 @@ function segmentSentences(text: string): string[] {
       let suppress = false;
       if (ch === "." && j - i === 1) {
         const before = i > 0 ? text[i - 1] : "";
-        // Bounded forward scan for the next non-whitespace (a decimal like
-        // "2. 3"); bounded so a long whitespace run cannot make it quadratic.
+        // Bounded forward scan for the first non-whitespace after the boundary
+        // (bounded so a long whitespace run cannot make it quadratic).
         let d = boundaryEnd;
         while (d < n && d < boundaryEnd + 8 && /\s/.test(text[d])) d++;
-        const afterNonWhitespace = d < n ? text[d] : "";
-        if (/\d/.test(before) && /\d/.test(afterNonWhitespace)) {
+        const nextChar = d < n ? text[d] : "";
+        if (/\d/.test(before) && /\d/.test(nextChar)) {
           suppress = true;
         }
-        // Bounded lookback for the abbreviation/initial token (always short), so
-        // a run of suppressed initials ("A. A. A. ...") cannot grow the slice to
+        // An abbreviation or single-letter initial keeps the sentence together
+        // ONLY when the next word starts lowercase (mid-sentence, "e.g. the
+        // shell"). A capitalised or non-letter next start ("Acme Inc. Use ...",
+        // "reviewer A. Use ...") is a real sentence boundary, so it must split.
+        // Bounded lookback keeps a run of initials from growing the slice to
         // O(n^2).
-        const token = /([\p{L}][\p{L}.]*)$/u.exec(text.slice(Math.max(start, i - 16), i));
-        if (token) {
-          const normalised = token[1].replace(/\./g, "").toLowerCase();
-          if (SENTENCE_ABBREVIATIONS.has(normalised) || normalised.length === 1) {
-            suppress = true;
+        if (/\p{Ll}/u.test(nextChar)) {
+          const token = /([\p{L}][\p{L}.]*)$/u.exec(text.slice(Math.max(start, i - 16), i));
+          if (token) {
+            const normalised = token[1].replace(/\./g, "").toLowerCase();
+            if (SENTENCE_ABBREVIATIONS.has(normalised) || normalised.length === 1) {
+              suppress = true;
+            }
           }
         }
       }

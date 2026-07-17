@@ -378,6 +378,10 @@ describe("checkReviewIntegrity", () => {
         "Review this. Do not trust the summary。Use the tools to verify.",
         "Review this. Do not trust the report！Use bash to verify.",
         "Review this. Do not trust the summary？Use the tools.",
+        // A MIXED terminator run ("." then a fullwidth mark) must still split;
+        // the whole run is tested for a fullwidth mark, not just its first char.
+        "Review this. Do not trust the summary.。Use the tools to verify.",
+        "Review this. Do not trust the report!！Use bash to verify.",
       ]) {
         const result = checkReviewIntegrity({ prompt });
         expect(result.isReviewContext).toBe(true);
@@ -399,6 +403,43 @@ describe("checkReviewIntegrity", () => {
         const result = checkReviewIntegrity({ prompt });
         expect(result.isReviewContext).toBe(true);
         expect(result.violations.find(v => v.type === "tool_suppression")).toBeDefined();
+      }
+    });
+
+    it("splits after a sentence-final abbreviation or initial before a capital", () => {
+      // "Inc." / "A." keep a sentence together only before a LOWERCASE word
+      // ("e.g. the shell"). Before a capitalised next sentence they are a real
+      // boundary, so the negation must not glue to the following clause.
+      for (const prompt of [
+        "Review this. Do not trust Acme Inc. Use the tools for verification.",
+        "Review this. Do not trust reviewer A. Use the tools for verification.",
+        "Review this. Do not rely on Dept. Use bash to confirm the counts.",
+      ]) {
+        const result = checkReviewIntegrity({ prompt });
+        expect(result.isReviewContext).toBe(true);
+        expect(result.violations.filter(v => v.type === "tool_suppression")).toHaveLength(0);
+      }
+      // The mid-sentence abbreviation case still keeps a real suppression intact.
+      const detected = checkReviewIntegrity({ prompt: "Review this. Do not use e.g. the shell." });
+      expect(detected.violations.find(v => v.type === "tool_suppression")).toBeDefined();
+    });
+
+    it("does not flag hygiene prose whose next sentence starts with a tool noun", () => {
+      // A soft (code-span) period before a CAPITALISED tool noun starts a new
+      // sentence, not a continuation of the negation. Firing here would flag
+      // ordinary review-hygiene prose (an instruction to be MORE rigorous), the
+      // exact anti-pattern the detector avoids. The dual miss (a genuine
+      // suppression written as "do not use the `foo.` Bash command") is the
+      // accepted, documented residual; a false alarm on rigor is the worse fault.
+      for (const prompt of [
+        "Review this. Do not use the `rtk.` Shell proxy can fake success; verify independently.",
+        "Review this. Do not use the `summary.` Tools exist for independent verification.",
+        "Review this. Do not run the `packet.` Shell scripts can forge exit codes; verify yourself.",
+        "Review this. Never execute the `script.` Bash is available if you need to verify.",
+      ]) {
+        const result = checkReviewIntegrity({ prompt });
+        expect(result.isReviewContext).toBe(true);
+        expect(result.violations.filter(v => v.type === "tool_suppression")).toHaveLength(0);
       }
     });
 

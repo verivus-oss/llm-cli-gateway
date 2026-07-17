@@ -324,6 +324,34 @@ describe("local site discovery validation", () => {
     expect(validate(site2).status).toBe(1);
   });
 
+  it("strips a list-nested (four-space) fence so its explicit anchor is not minted", () => {
+    // Fences indented to a list item's content column (four spaces under a
+    // numbered list, as in docs/plans/) must still be recognised, so an
+    // <a id> written as an example inside one does not resolve as a live anchor.
+    const site = copiedSite();
+    const content = [
+      "# Real",
+      "",
+      "1. Step one:",
+      "",
+      "    ```html",
+      '    <a id="listfence-phantom"></a>',
+      "    ```",
+      "",
+      "done",
+      "",
+    ].join("\n");
+    writeFileSync(join(site, "lf.md"), content);
+    const maintainers = join(site, "maintainers.md");
+    writeFileSync(
+      maintainers,
+      `${readFileSync(maintainers, "utf8")}\n[phantom](https://llm-cli-gateway.dev/lf.md#listfence-phantom)\n`
+    );
+    const result = validate(site);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("absent from the headings");
+  });
+
   it("does not mint an anchor from a heading inside a longer-closed fence", () => {
     // GFM lets a fence close with more delimiters than it opened. A 4-backtick
     // block closed by 5 backticks still hides its `# Phantom` line, so a

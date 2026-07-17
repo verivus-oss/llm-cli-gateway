@@ -298,19 +298,22 @@ function slugifyHeading(text) {
 
 // Strip GFM fenced code blocks so a line that looks like a heading (or an
 // explicit anchor) inside one cannot mint a spurious anchor. A block opens on a
-// line of three or more backticks or tildes (up to three spaces of indentation)
-// and closes on a later line of the SAME character, at least as long, carrying
-// no info string; an unclosed fence runs to the end of the document, as GFM
-// specifies. A length comparison cannot be expressed with a backreference, so
-// this scans lines.
+// line of three or more backticks or tildes and closes on a later line of the
+// SAME character, at least as long, carrying no info string; an unclosed fence
+// runs to the end of the document, as GFM specifies. A length comparison cannot
+// be expressed with a backreference, so this scans lines.
 //
-// Bounded scope: fences nested inside a block-quote (`> ```) or indented four or
-// more spaces inside a list item are NOT recognised, because that needs full
-// container-block parsing (blockquote-marker stripping and per-list content
-// indentation). This repo's docs use only top-level and <=3-space-indented
-// fences (verified), and the anchor check is a best-effort fragment layer atop
-// lychee and the repo-wide self-link sweep, so a fenced example inside a
-// container is an accepted, documented gap rather than a silent one.
+// Indentation up to 15 spaces is allowed on the opener and closer so a fence
+// nested inside a list item (its content indented by the list marker width, e.g.
+// the four-space fences under numbered lists in docs/plans/) is still stripped
+// and cannot leak an explicit anchor. A more-indented line of backticks at the
+// top level would be an indented code block in GFM, but treating it as a fence
+// here is harmless: its content is code either way, and a four-or-more-space `#`
+// is never an ATX heading. Bounded scope: a fence nested inside a BLOCK-QUOTE
+// (`> ```) is still not recognised, because that needs blockquote-marker
+// stripping; this repo's docs do not use blockquote-nested fences, and the
+// anchor check is a best-effort fragment layer atop lychee and the repo-wide
+// self-link sweep.
 function stripFencedBlocks(body) {
   const kept = [];
   let fence = null;
@@ -322,13 +325,13 @@ function stripFencedBlocks(body) {
       // A close is a run of ONE character type, at least as long as the opener,
       // with no trailing content. Matching a single type (not [`~]) stops a
       // mixed run like ```~ from closing a backtick block.
-      const close = /^ {0,3}(`{3,}|~{3,})[ \t]*$/.exec(line);
+      const close = /^ {0,15}(`{3,}|~{3,})[ \t]*$/.exec(line);
       if (close && close[1][0] === fence.char && close[1].length >= fence.length) {
         fence = null;
       }
       continue;
     }
-    const open = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
+    const open = /^ {0,15}(`{3,}|~{3,})(.*)$/.exec(line);
     if (open) {
       // A backtick fence's info string may not contain a backtick (GFM), so a
       // line like ```lang`x is not a fence open and must not swallow the rest of
@@ -388,12 +391,18 @@ function markdownAnchors(body) {
         !/^ {0,3}(=+|-+)[ \t]*$/.test(line) &&
         !/^ {0,3}([-+*]|\d+[.)])[ \t]/.test(line) &&
         !/^ {0,3}>/.test(line);
-      const paragraph = [];
-      for (let back = idx - 1; back >= 0 && isContent(lines[back]); back--) {
-        paragraph.unshift(lines[back].trim());
-      }
-      if (paragraph.length > 0) {
-        reserve(slugifyHeading(paragraph.join(" ")));
+      // Walk back to the paragraph start, then slice+join once. Building the
+      // array with unshift would be O(n^2) on a pathological run of content
+      // lines; scanning an index and slicing is linear.
+      let back = idx - 1;
+      while (back >= 0 && isContent(lines[back])) back--;
+      const paragraphStart = back + 1;
+      if (paragraphStart < idx) {
+        const heading = lines
+          .slice(paragraphStart, idx)
+          .map(line => line.trim())
+          .join(" ");
+        reserve(slugifyHeading(heading));
       }
     }
   }
