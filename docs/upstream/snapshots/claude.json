@@ -1,7 +1,7 @@
 {
   "schemaVersion": "upstream-scan-snapshot.v2",
   "cli": "claude",
-  "fetchedAt": "2026-07-13T07:43:43.549Z",
+  "fetchedAt": "2026-07-17T14:22:00.523Z",
   "sources": [
     {
       "url": "https://code.claude.com/docs/en/changelog.md",
@@ -13,10 +13,10 @@
     }
   ],
   "helpSurface": {
-    "probedAt": "2026-07-13T07:43:43.549Z",
+    "probedAt": "2026-07-17T14:22:00.522Z",
     "available": true,
-    "version": "2.1.207 (Claude Code)",
-    "targetVersion": "claude 2.1.207",
+    "version": "2.1.212 (Claude Code)",
+    "targetVersion": "claude 2.1.212",
     "versionMatchesTarget": true,
     "discoveredFlags": [
       "--add-dir",
@@ -45,6 +45,7 @@
       "--fallback-model",
       "--file",
       "--fork-session",
+      "--forward-subagent-text",
       "--from-pr",
       "--ide",
       "--include-hook-events",
@@ -79,7 +80,7 @@
       "--version",
       "--worktree"
     ],
-    "helpHash": "894f0f896580a523fa28a3fb1239d8b53458403352c1a35d2c4b2b54d2af78d2",
+    "helpHash": "d1569cf8f80e935a3ed7ddbfcacbfac9093fd878733c652250771199805d1d19",
     "extraVsContract": [],
     "missingFromBinary": [],
     "arityMismatches": [],
@@ -106,7 +107,7 @@
       "commandPath": [
         "agents"
       ],
-      "probedAt": "2026-07-13T07:43:41.447Z",
+      "probedAt": "2026-07-17T14:21:58.544Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -140,7 +141,7 @@
       "commandPath": [
         "auth"
       ],
-      "probedAt": "2026-07-13T07:43:41.611Z",
+      "probedAt": "2026-07-17T14:21:58.697Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -158,11 +159,11 @@
       "commandPath": [
         "auto-mode"
       ],
-      "probedAt": "2026-07-13T07:43:41.771Z",
+      "probedAt": "2026-07-17T14:21:58.850Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
-      "helpHash": "4de38be3402b3d42e350e1c4aeb3e69de3282b16d2f73ad33782c43fa191757b",
+      "helpHash": "a77ea63f5376050eecaff169d7660abeb59c6b86c60976f126da288057689893",
       "extraVsContract": [],
       "missingFromBinary": [],
       "arityMismatches": [],
@@ -176,7 +177,7 @@
       "commandPath": [
         "doctor"
       ],
-      "probedAt": "2026-07-13T07:43:41.931Z",
+      "probedAt": "2026-07-17T14:21:59.005Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -194,7 +195,7 @@
       "commandPath": [
         "gateway"
       ],
-      "probedAt": "2026-07-13T07:43:42.093Z",
+      "probedAt": "2026-07-17T14:21:59.157Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -214,7 +215,7 @@
       "commandPath": [
         "install"
       ],
-      "probedAt": "2026-07-13T07:43:42.252Z",
+      "probedAt": "2026-07-17T14:21:59.309Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -234,7 +235,7 @@
       "commandPath": [
         "mcp"
       ],
-      "probedAt": "2026-07-13T07:43:42.418Z",
+      "probedAt": "2026-07-17T14:21:59.463Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -252,7 +253,7 @@
       "commandPath": [
         "plugin"
       ],
-      "probedAt": "2026-07-13T07:43:42.583Z",
+      "probedAt": "2026-07-17T14:21:59.612Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -270,7 +271,7 @@
       "commandPath": [
         "plugins"
       ],
-      "probedAt": "2026-07-13T07:43:42.743Z",
+      "probedAt": "2026-07-17T14:21:59.762Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -288,7 +289,7 @@
       "commandPath": [
         "project"
       ],
-      "probedAt": "2026-07-13T07:43:42.903Z",
+      "probedAt": "2026-07-17T14:21:59.913Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -306,7 +307,7 @@
       "commandPath": [
         "setup-token"
       ],
-      "probedAt": "2026-07-13T07:43:43.066Z",
+      "probedAt": "2026-07-17T14:22:00.068Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -324,7 +325,7 @@
       "commandPath": [
         "ultrareview"
       ],
-      "probedAt": "2026-07-13T07:43:43.229Z",
+      "probedAt": "2026-07-17T14:22:00.219Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -345,7 +346,7 @@
       "commandPath": [
         "update"
       ],
-      "probedAt": "2026-07-13T07:43:43.388Z",
+      "probedAt": "2026-07-17T14:22:00.372Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -363,7 +364,7 @@
       "commandPath": [
         "upgrade"
       ],
-      "probedAt": "2026-07-13T07:43:43.549Z",
+      "probedAt": "2026-07-17T14:22:00.522Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],

@@ -1,6 +1,6 @@
 /**
  * Phase 7: single, DRY dispatcher that extracts the provider-minted session id
- * and terminal stop reason from a completed CLI request's stdout, plus a typed
+ * and terminal stop reason from captured CLI stdout, plus a typed
  * capability fact naming the fields the transport genuinely does not emit.
  *
  * Both the synchronous handlers (`src/index.ts`) and the async job manager
@@ -17,6 +17,7 @@ import { parseStreamJson } from "./stream-json-parser.js";
 import { parseCodexJsonStream } from "./codex-json-parser.js";
 import { parseGeminiJson, parseGeminiStreamJson } from "./gemini-json-parser.js";
 import { parseGrokOutput } from "./grok-json-parser.js";
+import { isKitNativeSessionId } from "./personal-config-types.js";
 
 /** A field the transport genuinely does not emit (typed capability fact). */
 export type ProviderMetadataAbsentField = "sessionId" | "stopReason" | "usage";
@@ -34,8 +35,82 @@ export interface ProviderOutputMetadata {
 }
 
 /**
- * Extract `{ sessionId, stopReason, absentFields }` from a completed request's
- * raw stdout. `cli` is the gateway provider bucket; `outputFormat` is the
+ * Replace a known provider-native continuation handle in caller-visible text.
+ * The gateway keeps the original value in its local durable store, but a
+ * remote caller must never receive a handle that could resume a host-owned
+ * provider session. Callers must perform this on complete values before they
+ * truncate, page, or serialize them.
+ */
+export function redactKnownProviderSessionId(
+  value: string,
+  providerSessionId: string | null | undefined
+): string {
+  if (!providerSessionId || !value.includes(providerSessionId)) return value;
+  return value.split(providerSessionId).join("[redacted-session-id]");
+}
+
+/**
+ * The provider-derived fact a live Kit terminal callback may use. Provider
+ * stdout/stderr can echo the compiled instruction context, and neither this
+ * record nor a provider-native continuation handle may cross a durable-store
+ * boundary.
+ */
+export interface PersonalKitTerminalMetadata {
+  version: 1;
+  nativeSessionId: string | null;
+}
+
+function isPersonalKitTerminalMetadata(value: unknown): value is PersonalKitTerminalMetadata {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const metadata = value as Record<string, unknown>;
+  return (
+    metadata.version === 1 &&
+    (typeof metadata.nativeSessionId === "string" || metadata.nativeSessionId === null) &&
+    (metadata.nativeSessionId === null || isKitNativeSessionId(metadata.nativeSessionId))
+  );
+}
+
+/**
+ * Extract and validate the continuation metadata for the current process. A
+ * schema drift or unexpected provider value fails closed to null rather than
+ * treating arbitrary stdout as a native handle.
+ */
+export function createPersonalKitTerminalMetadata(
+  cli: string,
+  stdout: string,
+  outputFormat: string | undefined
+): PersonalKitTerminalMetadata {
+  const metadata = extractProviderOutputMetadata(cli, stdout, outputFormat);
+  return {
+    version: 1,
+    nativeSessionId:
+      metadata.sessionId && isKitNativeSessionId(metadata.sessionId) ? metadata.sessionId : null,
+  };
+}
+
+/**
+ * Parse a legacy terminal metadata record only for compatibility tests and
+ * defensive migration handling. Runtime persistence retires this value.
+ */
+export function parsePersonalKitTerminalMetadata(
+  value: unknown
+): PersonalKitTerminalMetadata | null {
+  if (typeof value !== "string" || value.length === 0) return null;
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (!isPersonalKitTerminalMetadata(parsed)) return null;
+    // Canonicalize rather than returning the parsed object. A durable metadata
+    // record has exactly two fields even if a hand-edited or low-level caller
+    // supplied harmless-looking extra JSON keys.
+    return { version: 1, nativeSessionId: parsed.nativeSessionId };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Extract `{ sessionId, stopReason, absentFields }` from captured process
+ * stdout. `cli` is the gateway provider bucket; `outputFormat` is the
  * caller-facing output format (some providers only emit structured metadata in
  * their json/stream modes). Purely functional and lenient: any parse miss
  * leaves the value undefined and names it in `absentFields`.

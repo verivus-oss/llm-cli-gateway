@@ -1,7 +1,7 @@
 {
   "schemaVersion": "upstream-scan-snapshot.v2",
   "cli": "mistral",
-  "fetchedAt": "2026-07-13T07:44:01.585Z",
+  "fetchedAt": "2026-07-16T05:41:37.689Z",
   "sources": [
     {
       "url": "https://api.github.com/repos/mistralai/mistral-vibe/releases/latest",
@@ -25,10 +25,10 @@
     }
   ],
   "helpSurface": {
-    "probedAt": "2026-07-13T07:44:00.102Z",
+    "probedAt": "2026-07-16T05:41:36.257Z",
     "available": true,
-    "version": "vibe 2.19.1",
-    "targetVersion": "vibe 2.19.1",
+    "version": "vibe 2.20.0",
+    "targetVersion": "vibe 2.20.0",
     "versionMatchesTarget": true,
     "discoveredFlags": [
       "--add-dir",

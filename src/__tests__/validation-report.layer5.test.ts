@@ -112,8 +112,8 @@ describe("Layer 5 validation report", () => {
       },
     };
     const asyncJobManager = {
-      startJob(cli: ValidationProvider, _args: string[], correlationId: string) {
-        return fakeSnapshot(cli, correlationId);
+      startJobWithDedup(cli: ValidationProvider, _args: string[], correlationId: string) {
+        return { snapshot: fakeSnapshot(cli, correlationId), deduped: false };
       },
       getJobResult() {
         return null;

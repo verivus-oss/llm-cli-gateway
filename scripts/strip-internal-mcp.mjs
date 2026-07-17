@@ -53,6 +53,7 @@ export interface RegistryEntry {
     forwardEnv?: readonly string[];
     requireEnv?: readonly string[];
     requireCommandOnPath?: boolean;
+    managedEligible?: boolean;
     approval?: {
         score: number;
         reason: string;

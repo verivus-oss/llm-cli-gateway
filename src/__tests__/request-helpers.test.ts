@@ -4,6 +4,8 @@ import {
   resolveGrokSessionArgs,
   resolveCodexSessionArgs,
   validateSessionId,
+  appendCliPrompt,
+  insertCliArgsBeforePrompt,
   sanitizeCliArgValues,
   GATEWAY_SESSION_PREFIX,
   resolveClaudePermissionFlags,
@@ -29,6 +31,10 @@ describe("request-helpers", () => {
       expect(() => validateSessionId("gw-")).toThrow("reserved prefix");
     });
 
+    it("should throw for option-looking native session IDs", () => {
+      expect(() => validateSessionId("--always-approve")).toThrow("argument injection");
+    });
+
     it("should not throw for normal user IDs", () => {
       expect(() => validateSessionId("user-abc")).not.toThrow();
     });
@@ -48,9 +54,15 @@ describe("request-helpers", () => {
     });
 
     it("should reject values starting with -", () => {
-      expect(() =>
-        sanitizeCliArgValues(["Edit", "--dangerously-skip-permissions"], "allowedTools")
-      ).toThrow("argument injection");
+      const privateValue = "--dangerously-skip-permissions";
+      let message = "";
+      try {
+        sanitizeCliArgValues(["Edit", privateValue], "allowedTools");
+      } catch (error) {
+        message = String(error);
+      }
+      expect(message).toContain("argument injection");
+      expect(message).not.toContain(privateValue);
     });
 
     it("should reject values starting with single dash", () => {
@@ -59,6 +71,36 @@ describe("request-helpers", () => {
 
     it("should accept empty array", () => {
       expect(sanitizeCliArgValues([], "allowedTools")).toEqual([]);
+    });
+  });
+
+  describe("CLI prompt boundary helpers", () => {
+    it("places a leading-dash prompt after an end-of-options marker", () => {
+      const args = ["-p"];
+      appendCliPrompt(args, "--always-approve");
+      expect(args).toEqual(["-p", "--", "--always-approve"]);
+    });
+
+    it("inserts session flags before a literal -- prompt", () => {
+      const args = ["-p"];
+      appendCliPrompt(args, "--");
+      insertCliArgsBeforePrompt(args, ["--resume", "native-session"]);
+      expect(args).toEqual(["-p", "--resume", "native-session", "--", "--"]);
+    });
+
+    it("does not mistake an earlier option value of -- for the prompt boundary", () => {
+      const args = ["-p", "--settings", "--"];
+      appendCliPrompt(args, "review this");
+      insertCliArgsBeforePrompt(args, ["--resume", "native-session"]);
+      expect(args).toEqual([
+        "-p",
+        "--settings",
+        "--",
+        "--resume",
+        "native-session",
+        "--",
+        "review this",
+      ]);
     });
   });
 
@@ -453,8 +495,7 @@ describe("request-helpers", () => {
         disallowedTools: ["shell", "network"],
       });
       expect(result.args).toEqual([
-        "-p",
-        "hi",
+        "-p=hi",
         "--agent",
         "accept-edits",
         "--disabled-tools",
@@ -462,6 +503,13 @@ describe("request-helpers", () => {
         "--disabled-tools",
         "network",
       ]);
+    });
+
+    it("rejects a multibyte prompt whose final inline argv value is too large", async () => {
+      const { prepareMistralRequest } = await import("../request-helpers.js");
+      expect(() => prepareMistralRequest({ prompt: "中".repeat(44_000) })).toThrow(
+        /too large for the provider CLI argv transport/
+      );
     });
   });
 });

@@ -19,6 +19,7 @@
     "cache_awareness",
     "provider_capabilities",
     "least_cost",
+    "personal_config",
     "upstream",
     "next_actions"
   ],
@@ -545,6 +546,35 @@
             "additionalProperties": false
           }
         }
+      },
+      "additionalProperties": false
+    },
+    "personal_config": {
+      "type": "object",
+      "description": "Secret-free local readiness for the optional Personal Agent Config Kit. durable_async_configured reflects resolved configuration only, not live store admission. claude_bare_auth_configured reports only whether the isolated Claude Kit credential is present.",
+      "required": [
+        "enabled",
+        "configuration_valid",
+        "ready",
+        "claude_bare_auth_configured",
+        "baseline_present",
+        "current_release_id",
+        "last_success_at",
+        "stale",
+        "last_sync_error",
+        "durable_async_configured"
+      ],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "configuration_valid": { "type": "boolean" },
+        "ready": { "type": "boolean" },
+        "claude_bare_auth_configured": { "type": "boolean" },
+        "baseline_present": { "type": "boolean" },
+        "current_release_id": { "type": ["string", "null"] },
+        "last_success_at": { "type": ["string", "null"], "format": "date-time" },
+        "stale": { "type": "boolean" },
+        "last_sync_error": { "type": ["string", "null"] },
+        "durable_async_configured": { "type": "boolean" }
       },
       "additionalProperties": false
     },

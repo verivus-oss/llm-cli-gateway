@@ -116,6 +116,7 @@ describe("#139 durable-lease DDL idempotency (U13, sqlite)", () => {
     try {
       const jobCols = tableColumns(db, "jobs");
       expect(jobCols.has("owner_instance")).toBe(true);
+      expect(jobCols.has("owner_hostname")).toBe(true);
       expect(jobCols.has("lease_deadline")).toBe(true);
       expect(tableExists(db, "gateway_instances")).toBe(true);
       const instCols = tableColumns(db, "gateway_instances");
@@ -163,6 +164,7 @@ describe("#139 durable-lease DDL idempotency (U13, sqlite)", () => {
     try {
       const jobCols = tableColumns(db, "jobs");
       expect(jobCols.has("owner_instance")).toBe(true);
+      expect(jobCols.has("owner_hostname")).toBe(true);
       expect(jobCols.has("lease_deadline")).toBe(true);
       expect(jobCols.has("owner_principal")).toBe(true);
       expect(jobCols.has("transport")).toBe(true);
@@ -220,10 +222,11 @@ describe("#139 SqliteJobStore lease surface (U1-U11)", () => {
   }
 
   it("U7: recordStart persists queued + owner_instance + a non-null lease_deadline", () => {
-    start("j");
+    start("j", { ownerHostname: "host-A" });
     const row = store.getById("j");
     expect(row?.status).toBe("queued");
     expect(row?.ownerInstance).toBe("inst-A");
+    expect(row?.ownerHostname).toBe("host-A");
     expect(row?.leaseDeadline).not.toBeNull();
     expect(typeof row?.leaseDeadline).toBe("number");
   });
@@ -343,6 +346,87 @@ describe("#139 SqliteJobStore lease surface (U1-U11)", () => {
     // GC with a 0ms horizon removes rows older than now (heartbeat is ~now, so
     // nothing removed immediately); a negative horizon removes everything.
     expect(store.gcInstances(-1)).toBe(1);
+  });
+});
+
+describe("#139 legacy owner-hostname provenance repair", () => {
+  let tmpDir: string;
+  let dbPath: string;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), "orphan139-hostname-backfill-"));
+    dbPath = join(tmpDir, "jobs.db");
+  });
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("retains a backfilled legacy hostname after its instance row is garbage-collected", () => {
+    const ownerInstance = "legacy-backfill-instance";
+    const ownerHostname = "legacy-backfill-host";
+    const store = new SqliteJobStore(dbPath);
+    try {
+      store.registerInstance({
+        instanceId: ownerInstance,
+        role: "gateway",
+        hostname: ownerHostname,
+        pid: 1234,
+      });
+      store.recordStart({
+        id: "legacy-backfill-known",
+        correlationId: "legacy-backfill-known-corr",
+        requestKey: "legacy-backfill-known-key",
+        cli: "claude",
+        args: ["-p", "review"],
+        startedAt: new Date().toISOString(),
+        pid: null,
+        ownerInstance,
+      });
+      store.recordStart({
+        id: "legacy-backfill-unknown",
+        correlationId: "legacy-backfill-unknown-corr",
+        requestKey: "legacy-backfill-unknown-key",
+        cli: "claude",
+        args: ["-p", "review"],
+        startedAt: new Date().toISOString(),
+        pid: null,
+        ownerInstance: "already-gone-instance",
+      });
+    } finally {
+      store.close();
+    }
+
+    const reopened = new SqliteJobStore(dbPath);
+    try {
+      expect(reopened.getById("legacy-backfill-known")?.ownerHostname).toBe(ownerHostname);
+      // An unobservable historical owner remains unknown rather than guessed.
+      expect(reopened.getById("legacy-backfill-unknown")?.ownerHostname).toBeNull();
+
+      const db = openDatabase(dbPath);
+      try {
+        db.prepare("UPDATE jobs SET status = 'orphaned', lease_deadline = NULL WHERE id = ?").run(
+          "legacy-backfill-known"
+        );
+        db.prepare("UPDATE gateway_instances SET last_heartbeat = 1 WHERE instance_id = ?").run(
+          ownerInstance
+        );
+      } finally {
+        db.close();
+      }
+      expect(reopened.gcInstances(-1)).toBe(1);
+      expect(reopened.selectOrphanedProcessCandidates(ownerHostname)).toEqual([
+        {
+          id: "legacy-backfill-known",
+          pid: null,
+          transport: "process",
+          ownerInstance,
+          hostname: ownerHostname,
+        },
+      ]);
+    } finally {
+      reopened.close();
+    }
   });
 });
 
@@ -546,6 +630,30 @@ describe("#139 AsyncJobManager lease lifecycle (M/N series)", () => {
     expect(() => mgr.startJobWithDedup("claude", ["-p", "x"], "corr")).toThrow(
       /Durable async admission is disabled/
     );
+  });
+
+  it("N2a: a failed candidate read skips the sweep rather than losing PID grace", async () => {
+    let recoverCalls = 0;
+    const store = mockStore({
+      selectStaleProcessCandidates: () => {
+        throw new Error("candidate read unavailable");
+      },
+      recoverStaleJobs: () => {
+        recoverCalls++;
+        return [];
+      },
+    });
+    const mgr = new AsyncJobManager(noopLogger, undefined, store);
+    try {
+      // Construction runs one guarded sweep, and the explicit call exercises a
+      // later periodic/startup-style cycle. Neither may sweep without having
+      // first read candidates and preserved any live PID grace.
+      expect(recoverCalls).toBe(0);
+      mgr.runOrphanSweepNow();
+      expect(recoverCalls).toBe(0);
+    } finally {
+      await mgr.dispose();
+    }
   });
 
   it("N3: sustained heartbeat failure self-quiesces, then re-registers before recovering admission", async () => {

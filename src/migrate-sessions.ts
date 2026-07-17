@@ -3,9 +3,18 @@
 import { readFileSync } from "fs";
 import { homedir } from "os";
 import { join } from "path";
-import { PostgreSQLSessionManager } from "./session-manager-pg.js";
+import {
+  PostgreSQLSessionManager,
+  type FileSessionMigrationPlan,
+  type FileSessionMigrationRecord,
+} from "./session-manager-pg.js";
 import type { Logger } from "./logger.js";
-import { SessionStorage, ProviderType } from "./session-manager.js";
+import {
+  canonicalizeKitActiveSessionPointerKey,
+  getKitSessionBinding,
+  type ProviderType,
+  type Session,
+} from "./session-manager.js";
 import { loadConfig } from "./config.js";
 import { createDatabaseConnection } from "./db.js";
 
@@ -22,8 +31,192 @@ interface MigrationResult {
   errors: string[];
 }
 
+interface SourceMigrationRecord {
+  source: Session;
+  record: FileSessionMigrationRecord;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function isProviderType(value: unknown): value is ProviderType {
+  return typeof value === "string" && /^[A-Za-z][A-Za-z0-9._-]*$/.test(value) && value.length <= 32;
+}
+
+function ownerForMigration(session: Session): string {
+  return typeof session.ownerPrincipal === "string" && session.ownerPrincipal.trim().length > 0
+    ? session.ownerPrincipal
+    : "local";
+}
+
+function makeSourceMigrationRecord(
+  storageKey: string,
+  value: unknown
+): SourceMigrationRecord | null {
+  if (!isRecord(value)) return null;
+  const id = value.id;
+  const cli = value.cli;
+  const description = value.description;
+  const rawMetadata = value.metadata;
+  if (
+    typeof id !== "string" ||
+    id.trim().length === 0 ||
+    id !== storageKey ||
+    !isProviderType(cli) ||
+    (description !== undefined && typeof description !== "string") ||
+    (rawMetadata !== undefined && rawMetadata !== null && !isRecord(rawMetadata))
+  ) {
+    return null;
+  }
+
+  const ownerPrincipal =
+    typeof value.ownerPrincipal === "string" && value.ownerPrincipal.trim().length > 0
+      ? value.ownerPrincipal
+      : "local";
+  const metadata = rawMetadata && isRecord(rawMetadata) ? { ...rawMetadata } : {};
+  const source: Session = {
+    id,
+    cli,
+    createdAt: typeof value.createdAt === "string" ? value.createdAt : "",
+    lastUsedAt: typeof value.lastUsedAt === "string" ? value.lastUsedAt : "",
+    ...(description === undefined ? {} : { description }),
+    metadata,
+    ownerPrincipal,
+  };
+  const binding = getKitSessionBinding(source);
+  // Never silently drop a malformed Kit document during a general session
+  // import. The operator must repair it before a transactional retry.
+  if (Object.prototype.hasOwnProperty.call(metadata, "kit") && !binding) return null;
+
+  return {
+    source,
+    record: {
+      id,
+      cli,
+      ...(description === undefined ? {} : { description }),
+      metadata,
+      ownerPrincipal,
+      binding,
+    },
+  };
+}
+
+function invalidSourceError(): string {
+  return "Skipped invalid session record";
+}
+
+function invalidActiveSessionPointerError(): string {
+  return "Skipped invalid active session pointer";
+}
+
+function invalidKitPointerError(): string {
+  return "Skipped invalid Personal Agent Config Kit pointer";
+}
+
 /**
- * Migrate sessions from file-based storage to PostgreSQL
+ * Validate every source record and pointer before any target write begins.
+ * Errors intentionally omit source ids, paths, keys, and metadata because
+ * those values can include private workspace information.
+ */
+function buildMigrationPlan(fileData: unknown): {
+  plan: FileSessionMigrationPlan | null;
+  errors: string[];
+} {
+  if (!isRecord(fileData) || !isRecord(fileData.sessions) || !isRecord(fileData.activeSession)) {
+    return { plan: null, errors: [invalidSourceError()] };
+  }
+
+  const errors: string[] = [];
+  const sourceRecords = new Map<string, SourceMigrationRecord>();
+  const sessions: FileSessionMigrationRecord[] = [];
+  for (const [storageKey, value] of Object.entries(fileData.sessions)) {
+    const sourceRecord = makeSourceMigrationRecord(storageKey, value);
+    if (!sourceRecord || sourceRecords.has(sourceRecord.record.id)) {
+      errors.push(invalidSourceError());
+      continue;
+    }
+    sourceRecords.set(sourceRecord.record.id, sourceRecord);
+    sessions.push(sourceRecord.record);
+  }
+
+  const activeSessions: FileSessionMigrationPlan["activeSessions"][number][] = [];
+  for (const [cliValue, sessionId] of Object.entries(fileData.activeSession)) {
+    if (sessionId === null) continue;
+    if (typeof sessionId !== "string" || !isProviderType(cliValue)) {
+      errors.push(invalidActiveSessionPointerError());
+      continue;
+    }
+    const source = sourceRecords.get(sessionId);
+    if (!source || source.record.cli !== cliValue) {
+      errors.push(invalidActiveSessionPointerError());
+      continue;
+    }
+    activeSessions.push({ cli: cliValue, sessionId });
+  }
+
+  const activeKitSessions: FileSessionMigrationPlan["activeKitSessions"][number][] = [];
+  const kitPointerTargets = new Map<string, string>();
+  const activeKitSession = fileData.activeKitSession;
+  if (activeKitSession !== undefined && activeKitSession !== null) {
+    if (!isRecord(activeKitSession)) {
+      errors.push(invalidKitPointerError());
+    } else {
+      for (const [cliValue, pointers] of Object.entries(activeKitSession)) {
+        if (!isProviderType(cliValue) || !isRecord(pointers)) {
+          errors.push(invalidKitPointerError());
+          continue;
+        }
+        for (const [sourceKey, sessionId] of Object.entries(pointers)) {
+          if (typeof sessionId !== "string") {
+            errors.push(invalidKitPointerError());
+            continue;
+          }
+          const source = sourceRecords.get(sessionId);
+          const binding = source ? getKitSessionBinding(source.source) : null;
+          if (!source || !binding || source.record.cli !== cliValue) {
+            errors.push(invalidKitPointerError());
+            continue;
+          }
+          const ownerPrincipal = ownerForMigration(source.source);
+          const scopeKey = canonicalizeKitActiveSessionPointerKey(
+            sourceKey,
+            binding.execution,
+            ownerPrincipal
+          );
+          if (!scopeKey) {
+            errors.push(invalidKitPointerError());
+            continue;
+          }
+          const targetKey = `${cliValue}\u0000${scopeKey}`;
+          const existingTarget = kitPointerTargets.get(targetKey);
+          if (existingTarget && existingTarget !== sessionId) {
+            errors.push(invalidKitPointerError());
+            continue;
+          }
+          if (existingTarget) continue;
+          kitPointerTargets.set(targetKey, sessionId);
+          activeKitSessions.push({
+            cli: cliValue,
+            scopeRoot: binding.execution.scopeRoot,
+            sessionId,
+            execution: binding.execution,
+            ownerPrincipal,
+          });
+        }
+      }
+    }
+  }
+
+  if (errors.length > 0) return { plan: null, errors };
+  return { plan: { sessions, activeSessions, activeKitSessions }, errors };
+}
+
+/**
+ * Migrate sessions from file-based storage to PostgreSQL. The importer never
+ * overwrites a different target active pointer: a live-pointer conflict rolls
+ * the entire import back. Pause writers for a coherent cutover, or resolve the
+ * conflict and retry from a fresh source snapshot.
  */
 export async function migrateFromFile(
   filePath: string,
@@ -36,52 +229,33 @@ export async function migrateFromFile(
   };
 
   // Read file-based sessions
-  let fileData: SessionStorage;
+  let fileData: unknown;
   try {
     const fileContent = readFileSync(filePath, "utf-8");
     fileData = JSON.parse(fileContent);
-  } catch (error) {
-    throw new Error(
-      `Failed to read sessions file: ${error instanceof Error ? error.message : String(error)}`,
-      { cause: error }
-    );
+  } catch {
+    throw new Error("Failed to read sessions file");
   }
 
-  console.error(`Found ${Object.keys(fileData.sessions).length} sessions to migrate`);
-
-  // Migrate sessions
-  for (const [id, session] of Object.entries(fileData.sessions)) {
-    try {
-      await pgManager.createSession(session.cli, session.description, session.id);
-
-      // Migrate metadata if present
-      if (session.metadata) {
-        await pgManager.updateSessionMetadata(id, session.metadata);
-      }
-
-      result.migrated++;
-      console.error(`✓ Migrated session ${id} (${session.cli})`);
-    } catch (error) {
-      result.failed++;
-      const errorMsg = `Failed to migrate session ${id}: ${error instanceof Error ? error.message : String(error)}`;
-      result.errors.push(errorMsg);
-      console.error(`✗ ${errorMsg}`);
-    }
+  const { plan, errors } = buildMigrationPlan(fileData);
+  if (!plan) {
+    result.failed = errors.length;
+    result.errors.push(...errors);
+    for (const error of errors) console.error(`✗ ${error}`);
+    return result;
   }
 
-  // Restore active sessions
-  console.error("\nRestoring active sessions...");
-  for (const [cli, sessionId] of Object.entries(fileData.activeSession)) {
-    if (sessionId) {
-      try {
-        await pgManager.setActiveSession(cli as ProviderType, sessionId);
-        console.error(`✓ Set active session for ${cli}: ${sessionId}`);
-      } catch (error) {
-        const errorMsg = `Failed to set active session for ${cli}: ${error instanceof Error ? error.message : String(error)}`;
-        result.errors.push(errorMsg);
-        console.error(`✗ ${errorMsg}`);
-      }
-    }
+  console.error(`Found ${plan.sessions.length} sessions to migrate`);
+  try {
+    const outcome = await pgManager.importFileSessionMigration(plan);
+    result.migrated = outcome.migrated;
+    if (outcome.migrated > 0) console.error(`✓ Migrated ${outcome.migrated} session(s)`);
+    if (outcome.replayed > 0) console.error(`✓ Replayed ${outcome.replayed} session(s)`);
+  } catch {
+    const errorMsg = "Session migration failed before completion; transaction rolled back";
+    result.failed = Math.max(1, plan.sessions.length);
+    result.errors.push(errorMsg);
+    console.error(`✗ ${errorMsg}`);
   }
 
   return result;
@@ -139,6 +313,9 @@ Environment Variables:
   try {
     // Run migration
     console.error("Starting migration...\n");
+    console.error(
+      "Pause target writers for a coherent cutover. Live active-pointer conflicts fail closed and can be retried.\n"
+    );
     const result = await migrateFromFile(filePath, pgManager);
 
     console.error("\n" + "=".repeat(50));

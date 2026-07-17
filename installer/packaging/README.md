@@ -4,11 +4,12 @@ Status: Layer 7 (U13) packaging contract
 Builder: `installer/build-release.sh`
 
 This directory documents how `llm-cli-gateway` is built into a non-developer
-release: the local Linux self-hosted runner builds Linux Go bootstrapper
-binaries, GitHub-hosted Windows and macOS runners build their platform
-binaries, and each OS runner packages its platform bundle. The final publish
-job signs the combined artifact set with Sigstore keyless signing, then uploads
-checksums, metadata, artifacts, and signature bundles.
+release: the public mirror builds Linux Go bootstrapper binaries on
+GitHub-hosted `ubuntu-latest`, while GitHub-hosted Windows and macOS runners
+build their platform binaries. The private upstream retains its internal
+self-hosted Linux runner. Each OS runner packages its platform bundle. The
+final publish job signs the combined artifact set with Sigstore keyless
+signing, then uploads checksums, metadata, artifacts, and signature bundles.
 
 ## Artifact set
 
@@ -43,10 +44,10 @@ From the repository root:
 installer/build-release.sh
 ```
 
-Direct local runs build only the current host target by default. Release CI
-invokes the script from the Linux self-hosted runner and GitHub-hosted
-Windows/macOS runners, passing explicit `--target` values for the artifacts
-owned by that runner.
+Direct local runs build only the current host target by default. Public-mirror
+release CI invokes the script from GitHub-hosted Linux, Windows, and macOS
+runners, passing explicit `--target` values for the artifacts owned by that
+runner. The private upstream uses its internal self-hosted Linux runner.
 
 If `release-installer.yml` is re-run manually with `workflow_dispatch`, select
 the existing release tag as the workflow ref. The workflow fails fast when a

@@ -49,8 +49,8 @@ function count(args: string[], flag: string): number {
 }
 
 describe("devin argv golden (Phase 4 Part B)", () => {
-  it("minimal request emits only -p + prompt", () => {
-    expect(argsFor({})).toEqual(["-p", "PROMPT"]);
+  it("minimal request emits -p plus an option boundary and prompt", () => {
+    expect(argsFor({})).toEqual(["-p", "--", "PROMPT"]);
   });
 
   it("kitchen sink: every wired flag emits in order with its value", () => {
@@ -64,7 +64,8 @@ describe("devin argv golden (Phase 4 Part B)", () => {
       respectWorkspaceTrust: true,
       agentConfig: "/tmp/agent.toml",
     });
-    expect(args.slice(0, 2)).toEqual(["-p", "PROMPT"]);
+    expect(args[0]).toBe("-p");
+    expect(args.slice(-2)).toEqual(["--", "PROMPT"]);
     expect(args.indexOf("--model")).toBeGreaterThan(0);
     expect(valueAfter(args, "--model")).toBeTruthy();
     expect(valueAfter(args, "--permission-mode")).toBe("dangerous");
@@ -87,8 +88,8 @@ describe("devin argv golden (Phase 4 Part B)", () => {
   it("--export true emits a bare flag; a string emits --export <path>", () => {
     const bare = argsFor({ exportSession: true });
     expect(count(bare, "--export")).toBe(1);
-    // Bare boolean form: --export must be the last token (no value follows).
-    expect(bare[bare.length - 1]).toBe("--export");
+    // Bare boolean form has no value before the prompt boundary.
+    expect(bare[bare.indexOf("--export") + 1]).toBe("--");
 
     const withPath = argsFor({ exportSession: "/tmp/out.json" });
     expect(valueAfter(withPath, "--export")).toBe("/tmp/out.json");

@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { existsSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import {
   buildSnapshotPayload,
   codexChangelogRssSemanticSnapshot,
@@ -8,10 +10,18 @@ import {
   extractRootCommands,
   githubReleaseSemanticSnapshot,
   normalizeSnapshot,
+  parseTrustedInstalledVersion,
+  probeInstalledCliSubcommands,
+  probeInstalledCliSurface,
   renderReport,
+  requireInstalledHelpProbeErrorIsCritical,
+  requireInstalledVersionIndeterminateIsCritical,
   rootCatalogDrift,
   verifyDeclaredCommandPath,
 } from "../../scripts/upstream-scan.mjs";
+// The trust predicate now lives in the runtime module (the scanner imports it
+// via loadMachinery); the scanner no longer keeps a duplicate copy. See F4.
+import { subcommandHelpProbeIsUntrusted } from "../upstream-contracts.js";
 
 describe("upstream scanner hardening", () => {
   it("compares stable GitHub release semantics instead of mutable API payload fields", () => {
@@ -202,11 +212,189 @@ describe("upstream scanner hardening", () => {
   });
 
   it("compares explicit version probes including build suffixes", () => {
-    expect(compareTargetVersion("claude 2.1.207", "2.1.207 (Claude Code)").matches).toBe(true);
+    expect(compareTargetVersion("claude 2.1.210", "2.1.210 (Claude Code)").matches).toBe(true);
     expect(
       compareTargetVersion("cursor-agent 2026.07.09-c59fd9a", "cursor-agent 2026.07.09-a3815c0")
         .matches
     ).toBe(false);
+  });
+
+  it("treats an unconfirmed installed version as critical only under --require-installed", () => {
+    const parsed = { targetVersion: "claude 2.1.211", installedVersion: "2.1.211", matches: true };
+    const mismatch = { targetVersion: "claude 2.1.211", installedVersion: "2.1.9", matches: false };
+    const unparseable = { targetVersion: "claude 2.1.211", installedVersion: null, matches: null };
+    const noTarget = { targetVersion: null, installedVersion: null, matches: null };
+
+    // A clean match or mismatch is decided elsewhere, never here.
+    expect(requireInstalledVersionIndeterminateIsCritical(true, parsed)).toBe(false);
+    expect(requireInstalledVersionIndeterminateIsCritical(true, mismatch)).toBe(false);
+
+    // The fail-open the fix closes: require-installed + a declared target we
+    // could not confirm must be critical instead of a silent log.
+    expect(requireInstalledVersionIndeterminateIsCritical(true, unparseable)).toBe(true);
+    expect(requireInstalledVersionIndeterminateIsCritical(true, undefined)).toBe(false);
+
+    // Without require-installed, or without a declared target, it stays a log.
+    expect(requireInstalledVersionIndeterminateIsCritical(false, unparseable)).toBe(false);
+    expect(requireInstalledVersionIndeterminateIsCritical(true, noTarget)).toBe(false);
+  });
+
+  it("escalates a nonzero-exit help probe to critical only under --require-installed", () => {
+    const okHelp = { available: true, helpExitedNonzero: false };
+    const failedHelp = { available: true, helpExitedNonzero: true };
+    const absentHelp = { available: false, helpExitedNonzero: false };
+
+    // The fail-open the fix closes: a help probe that spawned but exited nonzero
+    // produced untrustworthy help text, so under --require-installed its contract
+    // is unverified and this must be critical.
+    expect(requireInstalledHelpProbeErrorIsCritical(true, failedHelp)).toBe(true);
+
+    // A clean help exit, an absent binary (decided elsewhere), and runs without
+    // --require-installed are not this critical.
+    expect(requireInstalledHelpProbeErrorIsCritical(true, okHelp)).toBe(false);
+    expect(requireInstalledHelpProbeErrorIsCritical(true, absentHelp)).toBe(false);
+    expect(requireInstalledHelpProbeErrorIsCritical(false, failedHelp)).toBe(false);
+    expect(requireInstalledHelpProbeErrorIsCritical(true, undefined)).toBe(false);
+  });
+
+  it("treats a subcommand help probe that could not run as untrusted, not drift-free", () => {
+    const strict = { helpProbeExitTolerant: false };
+    const tolerant = { helpProbeExitTolerant: true };
+
+    // The fail-open the fix closes: the root binary spawned, but the SUBCOMMAND
+    // help probe never completed (timeout / EACCES => available:false). That is
+    // an unverified contract, not an absent path, so a non-tolerant subcommand
+    // must flag it (and, downstream, --require-installed escalates it).
+    expect(subcommandHelpProbeIsUntrusted(strict, { available: false, status: null })).toBe(true);
+    // A subcommand that ran but exited nonzero is likewise untrusted.
+    expect(subcommandHelpProbeIsUntrusted(strict, { available: true, status: 1 })).toBe(true);
+    // A clean exit is trusted.
+    expect(subcommandHelpProbeIsUntrusted(strict, { available: true, status: 0 })).toBe(false);
+
+    // A help-exit-tolerant subcommand tolerates a nonzero EXIT STATUS, so a probe
+    // that ran (available:true) is trusted whatever its status. It does NOT
+    // tolerate a probe that never ran: a spawn failure produced no help to
+    // compare, so it is still untrusted.
+    expect(subcommandHelpProbeIsUntrusted(tolerant, { available: true, status: 1 })).toBe(false);
+    expect(subcommandHelpProbeIsUntrusted(tolerant, { available: true, status: 0 })).toBe(false);
+    expect(subcommandHelpProbeIsUntrusted(tolerant, { available: false, status: null })).toBe(true);
+  });
+
+  it("sets helpExitedNonzero on a subcommand help probe that fails to spawn (wiring, not just the predicate)", () => {
+    // Pins the fix end-to-end, not only the leaf predicate: probeInstalledCliSubcommands
+    // must actually route a spawn-failed subcommand probe through the predicate and
+    // set the probe's helpExitedNonzero flag. A machinery mock forces the root help
+    // to discover the subcommand (so its path is not "missing") but makes the
+    // subcommand help probe spawn-fail (resolveCommandForSpawn -> a path that ENOENTs).
+    const subDef = { commandPath: ["update"], helpArgs: [["--help"]], aliases: [] };
+    const contract = { executable: "faketool", subcommands: [subDef] };
+    const rootHelp = { available: true, commands: ["update"], helpHash: "root-hash" };
+    const machinery = {
+      subcommandHelpProbeIsUntrusted,
+      flattenCliSubcommands: subs => subs,
+      getExtendedPath: () => process.env.PATH ?? "",
+      envWithExtendedPath: env => env,
+      // The subcommand help probe resolves to a binary that cannot be spawned, so
+      // spawnSync returns result.error and runReadOnlyCliCommand reports available:false.
+      resolveCommandForSpawn: (_executable, args) => ({
+        command: "/nonexistent/faketool-does-not-exist-xyz",
+        args,
+      }),
+      // Only reached when available:true, which never happens here; provided for safety.
+      extractDiscoveredFlags: () => [],
+      computeSubcommandFlagDrift: () => ({
+        missingFlags: [],
+        extraFlags: [],
+        acknowledgedExtraFlags: [],
+        warnings: [],
+      }),
+    };
+
+    const probes = probeInstalledCliSubcommands(machinery, contract, rootHelp, 2000);
+    const probe = probes.update;
+    expect(probe).toBeDefined();
+    expect(probe.available).toBe(false);
+    // The spawn-failed, non-tolerant subcommand is flagged, so the surface fold
+    // (Object.values(subcommands).some(p => p.helpExitedNonzero)) escalates it.
+    expect(probe.helpExitedNonzero).toBe(true);
+    expect(probe.existence).not.toBe("missing");
+  });
+
+  // The scanner imports the shared predicate from the compiled runtime via
+  // loadMachinery(); a stale or missing dist would drop the F4 escalation.
+  // loadMachinery hard-fails on a missing export, and this pins the symbol so a
+  // build that forgot to compile the runtime change is caught by the suite too.
+  // Skip when dist/ is absent so a clean-checkout `npm test` (no build step, see
+  // package.json) does not fail on a missing module; `npm run check` and CI build
+  // first, so the guard still runs there.
+  const distContractsPath = fileURLToPath(
+    new URL("../../dist/upstream-contracts.js", import.meta.url)
+  );
+  it.skipIf(!existsSync(distContractsPath))(
+    "exports subcommandHelpProbeIsUntrusted from the BUILT dist (loadMachinery/build-order guard)",
+    async () => {
+      const dist = await import(distContractsPath);
+      expect(typeof dist.subcommandHelpProbeIsUntrusted).toBe("function");
+      // Behaviour parity with the TS source: a nonzero non-tolerant exit is untrusted.
+      expect(
+        dist.subcommandHelpProbeIsUntrusted(
+          { helpProbeExitTolerant: false },
+          { available: true, status: 1 }
+        )
+      ).toBe(true);
+    }
+  );
+
+  it("preserves an earlier nonzero root helpArgs exit when a later helpArgs spawn-fails (surface early return)", () => {
+    // Mirror of the runtime probeInstalledCliContract fix: contract.helpArgs can
+    // hold more than one entry. The first spawns and exits nonzero (untrusted
+    // help), the second spawn-fails and triggers the early return. The early
+    // return must carry helpExitedNonzero (the accumulator), not drop it.
+    const contract = { executable: "faketool", helpArgs: [["a"], ["b"]], subcommands: [] };
+    const machinery = {
+      UPSTREAM_CLI_CONTRACTS: { faketool: contract },
+      getExtendedPath: () => process.env.PATH ?? "",
+      envWithExtendedPath: env => env,
+      resolveCommandForSpawn: (_executable, args) =>
+        args[0] === "b"
+          ? // Second helpArgs: a binary that cannot be spawned (ENOENT -> available:false).
+            { command: "/nonexistent/faketool-does-not-exist-xyz", args }
+          : // First helpArgs: spawns but exits nonzero.
+            { command: "sh", args: ["-c", "exit 1"] },
+    };
+
+    const probe = probeInstalledCliSurface(machinery, "faketool", 2000);
+    expect(probe.available).toBe(false);
+    expect(probe.helpExitedNonzero).toBe(true);
+  });
+
+  it("does not trust a --version that exits nonzero, closing the parse fail-open", () => {
+    // A clean exit-0 probe yields the parsed version line.
+    expect(parseTrustedInstalledVersion({ available: true, status: 0, output: "2.1.211" })).toBe(
+      "2.1.211"
+    );
+
+    // The fail-open: --version exits nonzero but prints a string that parses to
+    // the target. Trusting it would pass the gate with the CLI unverified. The
+    // fix returns null, which compareTargetVersion turns into an indeterminate
+    // match that --require-installed escalates to a critical.
+    for (const status of [1, 3, 127, null]) {
+      const untrusted = parseTrustedInstalledVersion({
+        available: true,
+        status,
+        output: "2.1.211",
+      });
+      expect(untrusted).toBeNull();
+      const probe = {
+        targetVersion: "cli 2.1.211",
+        ...compareTargetVersion("cli 2.1.211", untrusted),
+      };
+      expect(probe.matches).toBeNull();
+      expect(requireInstalledVersionIndeterminateIsCritical(true, probe)).toBe(true);
+    }
+
+    // A spawn that never ran (available:false) is also untrusted.
+    expect(parseTrustedInstalledVersion({ available: false, status: null, output: "" })).toBeNull();
   });
 
   it("discovers root commands, handles aliases, and guards missing paths before help", () => {

@@ -1,6 +1,6 @@
 # Cache-Aware Spawning: What Changed in llm-cli-gateway, a Week On
 
-*Published 2026-05-26 by VerivusAI Labs*
+_Published 2026-05-26 by VerivusAI Labs_
 
 If your multi-LLM workload sends the same long system prompt or file dump to Claude / Codex / Gemini ten times an hour, you are paying for the same input tokens ten times. Each provider has a cache for exactly this case, and each one expresses the cache differently. This post is about how llm-cli-gateway now uses those caches for you, across all five providers, without you having to re-implement the per-provider cache APIs yourself. I covered [the previous round of changes](https://dev.to/wernerk_au/whats-new-in-llm-cli-gateway-58b8) last week, and I closed that piece with a teaser, that Mistral Vibe was next on the list. A week later, Mistral is in, and a much larger change has landed alongside it, which is what most of this follow-up is about.
 
@@ -12,7 +12,7 @@ The new shape of the gateway: it now understands prompt caching as a first-class
 
 ## Mistral Vibe makes five (closing last week's loop)
 
-Mistral shipped [Vibe](https://docs.mistral.ai/mistral-vibe/overview), their open-source CLI coding agent powered by Devstral 2. The gateway now wires `mistral_request` and `mistral_request_async` alongside the other four providers. Same shape as the rest, sessions through `--resume` / `--continue` (current Vibe defaults session logging on; doctor flags explicit disablement), model registry entries, installer-aware upgrades via pip/uv/Homebrew, the same circuit-breaker, approval-gate, flight recorder, metrics, dedup, and durable-job-store plumbing as the others.
+Mistral shipped [Vibe](https://docs.mistral.ai/mistral-vibe/overview), their open-source CLI coding agent powered by Devstral 2. The gateway now wires `mistral_request` and `mistral_request_async` alongside the other four providers. Same shape as the rest, sessions through `--resume` / `--continue` (current Vibe defaults session logging on; doctor flags explicit disablement), model registry entries, installer-aware upgrades via pip/uv/Homebrew, circuit-breaker, flight-recorder, metrics, dedup, and durable-job-store plumbing. Mistral is legacy-only: its permissions and MCP configuration remain provider-owned rather than using Claude's gateway-managed approval gate.
 
 The model alias resolution is slightly different. Vibe has no `--model` flag, so the gateway injects the resolved alias via `VIBE_ACTIVE_MODEL` instead. That is the only material divergence from the Claude / Codex / Gemini / Grok pattern, and it is documented inline at the call site.
 
@@ -26,9 +26,9 @@ The change that took most of the engineering is `promptParts`. The shape is smal
 {
   "promptParts": {
     "system": "You are a careful reviewer of TypeScript diffs.",
-    "tools":  "<long, stable description of the tools you can call>",
+    "tools": "<long, stable description of the tools you can call>",
     "context": "<long, stable file dump or repo summary>",
-    "task":    "What did the last patch change?"
+    "task": "What did the last patch change?"
   }
 }
 ```
@@ -61,11 +61,13 @@ Slice 3 is the bit that uses the observability data for actionable warnings. Whe
 
 ```json
 {
-  "warnings": [{
-    "code": "cache_ttl_expiring_soon",
-    "ttlRemainingMs": 12000,
-    "message": "Anthropic cache breakpoint for session ... expires in 12000ms (< 30000ms). Subsequent requests may miss the cache."
-  }]
+  "warnings": [
+    {
+      "code": "cache_ttl_expiring_soon",
+      "ttlRemainingMs": 12000,
+      "message": "Anthropic cache breakpoint for session ... expires in 12000ms (< 30000ms). Subsequent requests may miss the cache."
+    }
+  ]
 }
 ```
 
@@ -113,4 +115,4 @@ Thanks for reading this far. As always, MIT licensed.
 
 ---
 
-*llm-cli-gateway is MIT licensed. npm: `llm-cli-gateway` | GitHub: [verivus-oss/llm-cli-gateway](https://github.com/verivus-oss/llm-cli-gateway)*
+_llm-cli-gateway is MIT licensed. npm: `llm-cli-gateway` | GitHub: [verivus-oss/llm-cli-gateway](https://github.com/verivus-oss/llm-cli-gateway)_

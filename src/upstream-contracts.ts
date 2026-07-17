@@ -32,12 +32,21 @@ export interface CliFlagContract {
   pattern?: RegExp;
   description: string;
   /**
+   * This flag carries free-form text, so a value beginning with `-` remains a
+   * value rather than being reclassified as another option. Keep this narrow:
+   * path, enum, and identifier flags still reject leading-hyphen values before
+   * spawn.
+   */
+  allowLeadingHyphenValue?: boolean;
+  /**
    * The flag is real and accepted by the installed binary but deliberately
    * absent from its --help output, so the installed-binary probe must not
    * report it under `missingFlags`. If the flag later reappears in the help
    * text the probe emits a warning so the stale marker gets removed.
    */
   hiddenFromHelp?: boolean;
+  /** The CLI accepts this flag's value in `--flag=value` form. */
+  inlineValue?: boolean;
 }
 
 /**
@@ -94,6 +103,30 @@ export interface CliContract {
     optionalSecondArg?: string;
   };
   maxPositionals: number;
+  /**
+   * This request grammar accepts exactly one caller prompt after a `--`
+   * end-of-options marker. Kept explicit so the validator does not globally
+   * loosen positional handling for CLIs that do not support this boundary.
+   */
+  allowsEndOfOptionsPrompt?: boolean;
+  /**
+   * Every gateway request invocation must include at least one flag from each
+   * group. This keeps a request tool from accidentally launching the upstream
+   * CLI in an interactive mode. A group permits documented aliases such as
+   * Gemini's `--print` / `-p` / `--prompt` spellings.
+   */
+  requiredRequestFlagGroups?: readonly (readonly string[])[];
+  /**
+   * Each group names alternative upstream flag spellings. A valid invocation
+   * may include at most one flag from a group.
+   */
+  mutuallyExclusiveFlagGroups?: readonly (readonly string[])[];
+  /**
+   * Exact positional marker that instructs the upstream CLI to read the
+   * prompt from stdin. It remains a positional value for arity enforcement,
+   * despite beginning with a hyphen.
+   */
+  stdinPromptMarker?: string;
   resumeMaxPositionals?: number;
   resumeOnlyFlags?: readonly string[];
   resumeForbiddenFlags?: readonly string[];
@@ -141,6 +174,8 @@ export interface CliSubcommandContract {
   helpArgs: readonly string[][];
   flags: Record<string, CliFlagContract>;
   maxPositionals: CliPositionalLimit;
+  /** Allow exactly one prompt after a `--` option boundary for this subcommand. */
+  allowsEndOfOptionsPrompt?: boolean;
   acknowledgedUpstreamFlags?: readonly string[];
   aliases?: readonly string[];
   children?: Record<string, CliSubcommandContract>;
@@ -437,6 +472,7 @@ function subcommand(
     fixtures?: readonly CliContractFixture[];
     acknowledgedUpstreamFlags?: readonly string[];
     helpProbeExitTolerant?: boolean;
+    allowsEndOfOptionsPrompt?: boolean;
   } = {}
 ): CliSubcommandContract {
   return {
@@ -454,6 +490,7 @@ function subcommand(
     summary,
     conformanceFixtures: options.fixtures ?? [],
     acknowledgedUpstreamFlags: options.acknowledgedUpstreamFlags ?? [],
+    ...(options.allowsEndOfOptionsPrompt ? { allowsEndOfOptionsPrompt: true } : {}),
     ...(options.helpProbeExitTolerant ? { helpProbeExitTolerant: true } : {}),
   };
 }
@@ -598,6 +635,8 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       ),
     },
     maxPositionals: 0,
+    allowsEndOfOptionsPrompt: true,
+    requiredRequestFlagGroups: [["-p", "--print"]],
     mcpTools: ["claude_request", "claude_request_async"],
     mcpParameters: [
       "prompt",
@@ -671,8 +710,16 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       "--agent": { arity: "one", description: "Named sub-agent" },
       "--agents": { arity: "one", description: "Inline agent definitions JSON" },
       "--fork-session": { arity: "none", description: "Fork current session" },
-      "--system-prompt": { arity: "one", description: "Replacement system prompt" },
-      "--append-system-prompt": { arity: "one", description: "Appended system prompt" },
+      "--system-prompt": {
+        arity: "one",
+        allowLeadingHyphenValue: true,
+        description: "Replacement system prompt",
+      },
+      "--append-system-prompt": {
+        arity: "one",
+        allowLeadingHyphenValue: true,
+        description: "Appended system prompt",
+      },
       "--max-budget-usd": {
         arity: "one",
         pattern: /^[0-9]+(?:\.[0-9]+)?$/,
@@ -709,6 +756,10 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         description: "Additional workspace directory (Phase 4 slice ζ; repeat once per directory)",
       },
       "--continue": { arity: "none", description: "Continue active session" },
+      "--resume": {
+        arity: "optional",
+        description: "Resume a specific persisted conversation by session ID",
+      },
       "--session-id": { arity: "one", description: "Session id" },
       // Claude 2.x session / settings / tools surface
       "--no-session-persistence": {
@@ -739,7 +790,7 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         arity: "none",
         description: "Replay user messages back on stdout in stream-json mode",
       },
-      // claude 2.1.204 folds these into the `--system-prompt[-file]` /
+      // Claude folds these into the `--system-prompt[-file]` /
       // `--append-system-prompt[-file]` bracket notation in --help, so the
       // literal `--system-prompt-file` token no longer appears in the help
       // text even though the flag is still real, accepted, and emitted by
@@ -773,6 +824,10 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         description:
           "Minimal mode: skip hooks, LSP, plugin sync, attribution, auto-memory, keychain, CLAUDE.md discovery",
       },
+      "--disable-slash-commands": {
+        arity: "none",
+        description: "Disable slash-command and skill resolution for this invocation",
+      },
       "--debug": {
         arity: "optional",
         description: "Enable debug mode with an optional category filter (e.g. api,hooks)",
@@ -782,7 +837,7 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         description: "Write debug logs to a specific file path (implies debug mode)",
       },
     },
-    // Claude Code 2.1.204 --help surface the gateway deliberately does not
+    // Claude Code --help surface the gateway deliberately does not
     // emit. Long-form aliases of declared short flags (--print for -p),
     // interactive/IDE-only switches, background-agent launchers, and flags
     // superseded by gateway parameters (--dangerously-skip-permissions maps to
@@ -792,15 +847,15 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       "--allow-dangerously-skip-permissions",
       "--allowed", // alias of --allowed-tools
       "--ax-screen-reader",
-      "--background", // 2.1.204: start the session as a background agent
+      "--background", // start the session as a background agent
       "--betas",
-      "--bg", // 2.1.204: short form of --background
+      "--bg", // short form of --background
       "--brief",
       "--chrome",
       "--dangerously-skip-permissions",
-      "--disable-slash-commands",
       "--disallowed", // alias of --disallowed-tools
       "--file",
+      "--forward-subagent-text", // forwards subagent text/thinking into output; gateway captures the final reply
       "--from-pr",
       "--ide",
       "--no-chrome",
@@ -808,7 +863,6 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       "--prompt-suggestions",
       "--remote-control",
       "--remote-control-session-name-prefix",
-      "--resume", // interactive resume; gateway uses --continue/--session-id
       "--tmux",
       "--version",
       "--worktree",
@@ -823,7 +877,7 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       },
       {
         id: "claude-permission-mode-manual",
-        description: "Claude 2.1.207 accepts the manual permission mode literal",
+        description: "Current Claude Code accepts the manual permission mode literal",
         args: ["-p", "hello", "--permission-mode", "manual"],
         expect: "pass",
       },
@@ -848,7 +902,7 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       },
       {
         id: "claude-output-format-text",
-        description: "Claude 2.1.207 accepts explicit text output format",
+        description: "Current Claude Code accepts explicit text output format",
         args: ["-p", "hello", "--output-format", "text"],
         expect: "pass",
       },
@@ -895,6 +949,12 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         expect: "pass",
       },
       {
+        id: "claude-resume-by-id",
+        description: "Claude accepts an explicit persisted session ID in print mode",
+        args: ["-p", "hello", "--resume", "5db7e8f0-9fd8-4656-9a8a-7fd35b0d21e1"],
+        expect: "pass",
+      },
+      {
         // Phase 4 Part A: headless-safe modifiers emitted by
         // prepareClaudeHighImpactFlags. Pins that each genuinely-emitted flag
         // is accepted by the argv allowlist (guards the BLOCKER 1 class: a flag
@@ -918,6 +978,7 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
           "https://example.com/a.zip",
           "--safe-mode",
           "--bare",
+          "--disable-slash-commands",
           "--debug",
           "api,hooks",
           "--debug-file",
@@ -967,7 +1028,7 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       {
         id: "claude-background-acknowledged-not-emitted",
         description:
-          "Claude 2.1.204 advertises --bg/--background (background agent), but the gateway acknowledges them without emitting; caller argv is rejected",
+          "Claude Code advertises --bg/--background (background agent), but the gateway acknowledges them without emitting; caller argv is rejected",
         args: ["-p", "hello", "--background"],
         expect: "fail",
       },
@@ -1354,30 +1415,36 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         ],
         { exposure: "not_exposed" }
       ),
-      fork: subcommand(["fork"], "Fork a Codex session.", "executes_agent", [
-        "--add-dir",
-        "--all",
-        "--ask-for-approval",
-        "--cd",
-        "--config",
-        "--dangerously-bypass-approvals-and-sandbox",
-        "--dangerously-bypass-hook-trust",
-        "--disable",
-        "--enable",
-        "--image",
-        "--last",
-        "--local-provider",
-        "--model",
-        "--no-alt-screen",
-        "--oss",
-        "--profile",
-        "--remote",
-        "--remote-auth-token-env",
-        "--sandbox",
-        "--search",
-        "--strict-config",
-        "--version",
-      ]),
+      fork: subcommand(
+        ["fork"],
+        "Fork a Codex session.",
+        "executes_agent",
+        [
+          "--add-dir",
+          "--all",
+          "--ask-for-approval",
+          "--cd",
+          "--config",
+          "--dangerously-bypass-approvals-and-sandbox",
+          "--dangerously-bypass-hook-trust",
+          "--disable",
+          "--enable",
+          "--image",
+          "--last",
+          "--local-provider",
+          "--model",
+          "--no-alt-screen",
+          "--oss",
+          "--profile",
+          "--remote",
+          "--remote-auth-token-env",
+          "--sandbox",
+          "--search",
+          "--strict-config",
+          "--version",
+        ],
+        { maxPositionals: 1, allowsEndOfOptionsPrompt: true }
+      ),
       cloud: subcommand(["cloud"], "Inspect or manage Codex cloud features.", "network", [
         "--config",
         "--disable",
@@ -1410,6 +1477,8 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
     },
     command: { requiredFirstArg: "exec", optionalSecondArg: "resume" },
     maxPositionals: 1,
+    allowsEndOfOptionsPrompt: true,
+    stdinPromptMarker: "-",
     resumeMaxPositionals: 2,
     mcpTools: ["codex_request", "codex_request_async"],
     mcpParameters: [
@@ -1462,13 +1531,17 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       "--profile": { arity: "one", description: "Config profile" },
       "-c": {
         arity: "one",
-        pattern: /^[a-zA-Z0-9._]+=([^\r\n]*)$/,
-        description: "Config override key=value",
+        pattern:
+          /^(?:[a-zA-Z0-9._]+=([^\r\n]*)|projects\."(?:[^"\\\r\n]|\\(?:["\\btnfr]|u[0-9a-fA-F]{4}|U[0-9a-fA-F]{8}))*"\.trust_level="untrusted")$/,
+        description:
+          "Config override key=value (including a gateway-owned quoted project trust key)",
       },
       "--config": {
         arity: "one",
-        pattern: /^[a-zA-Z0-9._]+=([^\r\n]*)$/,
-        description: "Config override key=value",
+        pattern:
+          /^(?:[a-zA-Z0-9._]+=([^\r\n]*)|projects\."(?:[^"\\\r\n]|\\(?:["\\btnfr]|u[0-9a-fA-F]{4}|U[0-9a-fA-F]{8}))*"\.trust_level="untrusted")$/,
+        description:
+          "Config override key=value (including a gateway-owned quoted project trust key)",
       },
       "--enable": { arity: "one", description: "Enable a Codex feature flag" },
       "--disable": { arity: "one", description: "Disable a Codex feature flag" },
@@ -1530,6 +1603,18 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         expect: "pass",
       },
       {
+        id: "codex-stdin-prompt",
+        description: "Literal dash prompt reads the new-session request from stdin",
+        args: ["exec", "--skip-git-repo-check", "-"],
+        expect: "pass",
+      },
+      {
+        id: "codex-resume-stdin-prompt",
+        description: "Literal dash prompt reads a resumed-session request from stdin",
+        args: ["exec", "resume", "session-id", "-"],
+        expect: "pass",
+      },
+      {
         id: "codex-invalid-sandbox",
         description: "Unsupported sandbox enum is rejected",
         args: ["exec", "--sandbox", "workspace", "hello"],
@@ -1560,6 +1645,19 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         id: "codex-resume-config-override",
         description: "Phase 4 slice α: -c key=value accepted on resume",
         args: ["exec", "resume", "-c", "model.foo=bar", "session-id", "hello"],
+        expect: "pass",
+      },
+      {
+        id: "codex-kit-project-trust-override",
+        description: "Gateway-owned quoted project trust override is accepted on resume",
+        args: [
+          "exec",
+          "resume",
+          "-c",
+          'projects."/tmp/kit workspace/\\"quoted\\"".trust_level="untrusted"',
+          "session-id",
+          "hello",
+        ],
         expect: "pass",
       },
       {
@@ -1691,6 +1789,7 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       ),
     },
     maxPositionals: 1,
+    requiredRequestFlagGroups: [["--print", "-p", "--prompt"]],
     mcpTools: ["gemini_request", "gemini_request_async"],
     mcpParameters: [
       "prompt",
@@ -1718,12 +1817,20 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       "printTimeout",
     ],
     flags: {
-      "--print": { arity: "none", description: "Run a single prompt non-interactively" },
+      "--print": {
+        arity: "none",
+        description: "Run a single prompt non-interactively",
+      },
       "-p": { arity: "none", description: "Short alias for --print" },
       "--prompt": { arity: "none", description: "Alias for --print" },
       "--model": { arity: "one", description: "Model selector" },
       "--add-dir": { arity: "one", description: "Additional workspace directory" },
       "--sandbox": { arity: "none", description: "Run with terminal sandbox restrictions" },
+      "--mode": {
+        arity: "one",
+        values: ["accept-edits", "plan"],
+        description: "Set Antigravity execution mode",
+      },
       "--dangerously-skip-permissions": {
         arity: "none",
         description: "Auto-approve all tool permission requests without prompting",
@@ -1743,19 +1850,17 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       },
     },
     // Antigravity CLI long flags the gateway deliberately does not emit, as
-    // advertised by `agy --help` on 1.1.1. Probe acknowledgements only, never
+    // advertised by `agy --help` on 1.1.2. Probe acknowledgements only, never
     // an argv allowlist. (`-i` is a short alias of --prompt-interactive and
     // `--version` is a top-level command not listed in --help; neither is
     // parsed by the long-flag probe, so both were dropped to keep the probe
     // quiet.) `--project` / `--new-project` / `--print-timeout` graduated to the
     // flags allowlist.
-    // `--mode` (agy 1.1.0: set the agent execution mode accept-edits|plan) and
-    // `--agent` (agy 1.1.1: select a locally configured agent) are advertised
-    // by `agy --help`, but the gateway emits neither: yolo maps to
-    // --dangerously-skip-permissions and auto_edit/plan approval modes are
-    // rejected at request time (agy has no gateway-wired headless mode yet).
-    // Acknowledge-only so drift stays quiet without widening the argv allowlist.
-    acknowledgedUpstreamFlags: ["--agent", "--log-file", "--mode", "--prompt-interactive"],
+    // `--agent` (agy 1.1.2: select a locally configured agent) is advertised
+    // by `agy --help`, but stays acknowledge-only because custom agents can
+    // change tool and permission posture. `--mode` is deliberately wired for
+    // the bounded gateway approval profiles above.
+    acknowledgedUpstreamFlags: ["--agent", "--log-file", "--prompt-interactive"],
     env: {},
     conformanceFixtures: [
       {
@@ -1773,7 +1878,7 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       {
         id: "gemini-agent-selection-acknowledged-not-emitted",
         description:
-          "Antigravity 1.1.1 advertises --agent, but gateway request argv stays closed until its security model is explicitly wired",
+          "Antigravity 1.1.2 advertises --agent, but gateway request argv stays closed until its security model is explicitly wired",
         args: ["--print", "hello", "--agent", "reviewer"],
         expect: "fail",
       },
@@ -1787,6 +1892,18 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         id: "gemini-yolo",
         description: "Antigravity permission bypass is accepted",
         args: ["--print", "hello", "--dangerously-skip-permissions"],
+        expect: "pass",
+      },
+      {
+        id: "gemini-accept-edits-mode",
+        description: "Antigravity bounded accept-edits execution mode is accepted",
+        args: ["--print", "hello", "--mode", "accept-edits"],
+        expect: "pass",
+      },
+      {
+        id: "gemini-plan-mode",
+        description: "Antigravity plan execution mode is accepted",
+        args: ["--print", "hello", "--mode", "plan"],
         expect: "pass",
       },
       {
@@ -2058,6 +2175,10 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       GROK_DEBUG_HELP_FLAGS
     ),
     maxPositionals: 0,
+    // Grok documents --single as the long alias of -p, not a second prompt
+    // field. Keeping this in the argv contract prevents a future gateway path
+    // from rebuilding the duplicate prompt invocation fixed in this release.
+    mutuallyExclusiveFlagGroups: [["-p", "--single"]],
     // Grok 0.2.77: `--fork-session`, `--json-schema`, and `--worktree-ref` are
     // now wired through the request path (see flags + prepareGrokRequest), so
     // they live in the argv allowlist, not here. `--session-id` is advertised
@@ -2114,7 +2235,6 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       "agents",
       "promptFile",
       "promptJson",
-      "single",
       "experimentalMemory",
       "noAltScreen",
       "noMemory",
@@ -2130,7 +2250,7 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       "jsonSchema",
     ],
     flags: {
-      "-p": { arity: "one", description: "Prompt text" },
+      "-p": { arity: "one", inlineValue: true, description: "Prompt text" },
       "--model": { arity: "one", description: "Model selector" },
       "--output-format": {
         arity: "one",
@@ -2175,11 +2295,13 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       },
       "--rules": {
         arity: "one",
+        allowLeadingHyphenValue: true,
         description:
           "Extra rules appended to the system prompt; supports `@file` prefix (Phase 4 slice θ)",
       },
       "--system-prompt-override": {
         arity: "one",
+        allowLeadingHyphenValue: true,
         description: "Replace the agent's system prompt entirely (Phase 4 slice θ)",
       },
       "--allow": {
@@ -2222,7 +2344,10 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         arity: "one",
         description: "Custom leader socket path (isolated leader, Grok 0.2.32+)",
       },
-      "--single": { arity: "one", description: "Single-turn prompt" },
+      "--single": {
+        arity: "one",
+        description: "Alias for -p single-turn prompt; do not combine with -p",
+      },
       "--todo-gate": {
         arity: "none",
         description:
@@ -2361,8 +2486,6 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
           "--restore-code",
           "--leader-socket",
           "/tmp/leader.sock",
-          "--single",
-          "single prompt",
           "--todo-gate",
           "--verbatim",
           "--version",
@@ -2373,6 +2496,18 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
           "balanced",
         ],
         expect: "pass",
+      },
+      {
+        id: "grok-single-alias",
+        description: "Grok --single is the alternative spelling of -p, not an additional prompt",
+        args: ["--single", "single prompt"],
+        expect: "pass",
+      },
+      {
+        id: "grok-prompt-alias-conflict",
+        description: "Grok rejects duplicate -p and --single prompt aliases",
+        args: ["-p", "prompt", "--single", "second prompt"],
+        expect: "fail",
       },
       {
         id: "grok-compaction",
@@ -2502,7 +2637,11 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       "addDir",
     ],
     flags: {
-      "-p": { arity: "one", description: "Prompt text (programmatic mode)" },
+      "-p": {
+        arity: "one",
+        inlineValue: true,
+        description: "Prompt text (programmatic mode)",
+      },
       "--prompt": {
         arity: "optional",
         description: "Programmatic prompt (long form of -p; TEXT optional per vibe --help)",
@@ -2837,6 +2976,8 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       }),
     },
     maxPositionals: 0,
+    allowsEndOfOptionsPrompt: true,
+    requiredRequestFlagGroups: [["-p"]],
     mcpTools: ["devin_request", "devin_request_async"],
     mcpParameters: [
       "prompt",
@@ -2857,8 +2998,9 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
     // shared --resume/--continue surface (resolveGrokSessionArgs).
     flags: {
       "-p": {
-        arity: "one",
-        description: "Print response and exit (non-interactive); prompt value",
+        arity: "optional",
+        description:
+          "Print response and exit (non-interactive); accepts a prompt value or a prompt after --",
       },
       "--model": { arity: "one", description: "AI model for this session" },
       "--permission-mode": {
@@ -3072,6 +3214,19 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       models: subcommand(["models"], "List Cursor account models.", "read_only", [], {
         tier: "inspect",
       }),
+      plugin: subcommand(
+        ["plugin"],
+        "Manage Cursor plugins and plugin marketplaces.",
+        // `network`, not `writes_local_config`: `plugin marketplace add` fetches a
+        // remote Git repository and the marketplace operations reach an
+        // authenticated backend, so the more conservative remote-interaction risk
+        // is the honest single classification for a security inventory. (Deliberately
+        // stricter than the peer plugin families, which are catalog-only writes_local_config
+        // pending their own re-probe.)
+        "network",
+        [],
+        { exposure: "not_exposed", maxPositionals: "variadic" }
+      ),
       resume: subcommand(["resume"], "Resume the latest Cursor chat.", "executes_agent", [], {
         exposure: "not_exposed",
         maxPositionals: "variadic",
@@ -3122,6 +3277,8 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       ),
     },
     maxPositionals: 1,
+    allowsEndOfOptionsPrompt: true,
+    requiredRequestFlagGroups: [["--print"]],
     mcpTools: ["cursor_request", "cursor_request_async"],
     mcpParameters: [
       "prompt",
@@ -3266,7 +3423,10 @@ export function validateUpstreamCliArgs(
   const violations: ContractViolation[] = [];
   let i = 0;
   let resumeContext = false;
+  let endOfOptions = false;
   const positionals: string[] = [];
+  const endOfOptionsPositionals: string[] = [];
+  const presentFlags = new Set<string>();
 
   if (contract.command) {
     if (args[0] !== contract.command.requiredFirstArg) {
@@ -3287,35 +3447,68 @@ export function validateUpstreamCliArgs(
 
   for (; i < args.length; i++) {
     const arg = args[i];
-    const flag = contract.flags[arg];
-    if (!flag) {
-      if (arg.startsWith("-")) {
+    if (endOfOptions) {
+      endOfOptionsPositionals.push(arg);
+      continue;
+    }
+    if (arg === "--") {
+      if (!contract.allowsEndOfOptionsPrompt) {
         violations.push({
           cli,
           arg,
           index: i,
-          message: `Unsupported ${cli} CLI flag "${arg}" for bundled upstream contract`,
+          message: `${cli} request contract does not allow an end-of-options prompt boundary`,
+        });
+      }
+      endOfOptions = true;
+      continue;
+    }
+    const equalsIndex = arg.indexOf("=");
+    const flagName = equalsIndex > 0 ? arg.slice(0, equalsIndex) : arg;
+    const inlineValue = equalsIndex > 0 ? arg.slice(equalsIndex + 1) : undefined;
+    const flag = contract.flags[flagName];
+    if (!flag) {
+      if (arg === contract.stdinPromptMarker || !arg.startsWith("-")) {
+        positionals.push(arg);
+      } else {
+        violations.push({
+          cli,
+          index: i,
+          message: `Unsupported ${cli} CLI flag for bundled upstream contract`,
+        });
+      }
+      continue;
+    }
+    presentFlags.add(flagName);
+
+    if (inlineValue !== undefined) {
+      if (!flag.inlineValue) {
+        violations.push({
+          cli,
+          arg,
+          index: i,
+          message: `${cli} flag "${flagName}" does not accept an inline value`,
         });
       } else {
-        positionals.push(arg);
+        validateFlagValue(cli, flagName, flag, inlineValue, i, violations);
       }
       continue;
     }
 
-    if (resumeContext && contract.resumeForbiddenFlags?.includes(arg)) {
+    if (resumeContext && contract.resumeForbiddenFlags?.includes(flagName)) {
       violations.push({
         cli,
-        arg,
+        arg: flagName,
         index: i,
-        message: `${cli} flag "${arg}" is not accepted by the resume command contract`,
+        message: `${cli} flag "${flagName}" is not accepted by the resume command contract`,
       });
     }
-    if (!resumeContext && contract.resumeOnlyFlags?.includes(arg)) {
+    if (!resumeContext && contract.resumeOnlyFlags?.includes(flagName)) {
       violations.push({
         cli,
-        arg,
+        arg: flagName,
         index: i,
-        message: `${cli} flag "${arg}" is only valid with the resume command contract`,
+        message: `${cli} flag "${flagName}" is only valid with the resume command contract`,
       });
     }
 
@@ -3325,12 +3518,12 @@ export function validateUpstreamCliArgs(
 
     if (flag.arity === "one") {
       const value = args[i + 1];
-      if (value === undefined) {
+      if (value === undefined || (!flag.allowLeadingHyphenValue && value.startsWith("-"))) {
         violations.push({
           cli,
           arg,
           index: i,
-          message: `${cli} flag "${arg}" requires one value`,
+          message: `${cli} flag "${arg}" requires one non-option value`,
         });
         continue;
       }
@@ -3372,6 +3565,29 @@ export function validateUpstreamCliArgs(
     violations.push({
       cli,
       message: `${cli} argv has ${positionals.length} positional values; upstream contract allows ${maxPositionals}`,
+    });
+  }
+  if (endOfOptionsPositionals.length > 0 || endOfOptions) {
+    if (!contract.allowsEndOfOptionsPrompt || endOfOptionsPositionals.length !== 1) {
+      violations.push({
+        cli,
+        message: `${cli} argv must place exactly one prompt after an allowed end-of-options boundary`,
+      });
+    }
+  }
+  for (const requiredGroup of contract.requiredRequestFlagGroups ?? []) {
+    if (requiredGroup.some(flag => presentFlags.has(flag))) continue;
+    violations.push({
+      cli,
+      message: `${cli} request requires headless flag(s): ${requiredGroup.join(" or ")}`,
+    });
+  }
+  for (const mutuallyExclusiveGroup of contract.mutuallyExclusiveFlagGroups ?? []) {
+    const present = mutuallyExclusiveGroup.filter(flag => presentFlags.has(flag));
+    if (present.length <= 1) continue;
+    violations.push({
+      cli,
+      message: `${cli} request flags are mutually exclusive: ${present.join(" and ")}`,
     });
   }
 
@@ -3560,16 +3776,33 @@ export function validateUpstreamCliSubcommandArgs(
   }
 
   const positionals: string[] = [];
+  const endOfOptionsPositionals: string[] = [];
+  let endOfOptions = false;
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
+    if (endOfOptions) {
+      endOfOptionsPositionals.push(arg);
+      continue;
+    }
+    if (arg === "--") {
+      if (!contract.allowsEndOfOptionsPrompt) {
+        violations.push({
+          cli,
+          arg,
+          index: i,
+          message: `${cli} subcommand "${subcommandKey(commandPath)}" does not allow an end-of-options prompt boundary`,
+        });
+      }
+      endOfOptions = true;
+      continue;
+    }
     const flag = contract.flags[arg];
     if (!flag) {
       if (arg.startsWith("-")) {
         violations.push({
           cli,
-          arg,
           index: i,
-          message: `Unsupported ${cli} subcommand flag "${arg}" for ${subcommandKey(commandPath)}`,
+          message: `Unsupported ${cli} subcommand flag for ${subcommandKey(commandPath)}`,
         });
       } else {
         positionals.push(arg);
@@ -3581,12 +3814,12 @@ export function validateUpstreamCliSubcommandArgs(
 
     if (flag.arity === "one") {
       const value = args[i + 1];
-      if (value === undefined) {
+      if (value === undefined || (!flag.allowLeadingHyphenValue && value.startsWith("-"))) {
         violations.push({
           cli,
           arg,
           index: i,
-          message: `${cli} subcommand flag "${arg}" requires one value`,
+          message: `${cli} subcommand flag "${arg}" requires one non-option value`,
         });
         continue;
       }
@@ -3626,6 +3859,14 @@ export function validateUpstreamCliSubcommandArgs(
       message: `${cli} subcommand "${subcommandKey(commandPath)}" has ${positionals.length} positional values; upstream subcommand contract allows ${contract.maxPositionals}`,
     });
   }
+  if (endOfOptions || endOfOptionsPositionals.length > 0) {
+    if (!contract.allowsEndOfOptionsPrompt || endOfOptionsPositionals.length !== 1) {
+      violations.push({
+        cli,
+        message: `${cli} subcommand "${subcommandKey(commandPath)}" must place exactly one prompt after an allowed end-of-options boundary`,
+      });
+    }
+  }
 
   return {
     ok: violations.length === 0,
@@ -3637,14 +3878,30 @@ export function validateUpstreamCliSubcommandArgs(
   };
 }
 
+export function assertUpstreamCliSubcommandArgs(
+  cli: CliType,
+  commandPath: readonly string[],
+  args: readonly string[]
+): void {
+  const result = validateUpstreamCliSubcommandArgs(cli, commandPath, args);
+  if (!result.ok) {
+    const details = result.violations.map(violation => violation.message).join("; ");
+    throw new Error(`Upstream ${cli} subcommand contract violation: ${details}`);
+  }
+}
+
 export function validateUpstreamCliEnv(
   cli: CliType,
-  env: Record<string, string> | undefined
+  env: NodeJS.ProcessEnv | undefined
 ): ContractValidationResult {
   if (!env || Object.keys(env).length === 0) return { ok: true, violations: [] };
   const contract = UPSTREAM_CLI_CONTRACTS[cli];
   const violations: ContractViolation[] = [];
   for (const [key, value] of Object.entries(env)) {
+    // `undefined` explicitly removes an inherited environment variable at the
+    // spawn boundary. It is not a provider CLI setting and must not be treated
+    // as an unallowlisted injection.
+    if (value === undefined) continue;
     const envContract = contract.env?.[key];
     if (!envContract) {
       violations.push({
@@ -3659,7 +3916,7 @@ export function validateUpstreamCliEnv(
   return { ok: violations.length === 0, violations };
 }
 
-export function assertUpstreamCliEnv(cli: CliType, env: Record<string, string> | undefined): void {
+export function assertUpstreamCliEnv(cli: CliType, env: NodeJS.ProcessEnv | undefined): void {
   const result = validateUpstreamCliEnv(cli, env);
   if (!result.ok) {
     const details = result.violations.map(v => v.message).join("; ");
@@ -3853,6 +4110,13 @@ export interface InstalledCliSubcommandProbe {
   exposure: CliSubcommandExposure;
   tier: CliSubcommandTier;
   summary: string;
+  /**
+   * True when this subcommand help probe could not be trusted: it failed to run
+   * (available:false) or ran but exited nonzero without help-exit tolerance. A
+   * nonzero exit whose help text still parsed clean would otherwise look
+   * drift-free; see {@link subcommandHelpProbeIsUntrusted}.
+   */
+  helpExitedNonzero: boolean;
 }
 
 export interface InstalledCliContractProbe {
@@ -3878,6 +4142,39 @@ export interface InstalledCliContractProbe {
   /** ISO timestamp when this probe was performed. */
   probedAt: string;
   warnings: string[];
+  /**
+   * Rolled-up untrusted-help signal: true when a declared `helpArgs` probe
+   * exited nonzero, or ANY subcommand probe was untrusted. Kept distinct from
+   * `available` (a spawn failure of the root executable) so a nonzero-but-parses
+   * help exit is still surfaced to consumers that gate on drift.
+   */
+  helpExitedNonzero: boolean;
+}
+
+/**
+ * Trust decision for a subcommand `--help` probe result, shared by the runtime
+ * probe ({@link probeInstalledCliSubcommands}) and the build-time scanner
+ * (`scripts/upstream-scan.mjs`, which imports this via `loadMachinery`). The
+ * `result` argument is a NORMALIZED `{ available, status }` view, NOT a raw
+ * `spawnSync` result: at every runtime call site the caller must translate the
+ * raw result (spawn error => available:false; otherwise available:true) before
+ * calling, because a raw spawnSync result has no `available` field and would
+ * make every probe (including clean exit-0) look untrusted.
+ *
+ * `available:false` (spawn error / timeout / EACCES) is always untrusted: the
+ * probe produced no help text to compare against the contract, and
+ * `helpProbeExitTolerant` tolerates a nonzero exit STATUS, not a probe that never
+ * ran. Otherwise a probe is untrusted when the subcommand is not help-exit
+ * tolerant and it ran but exited nonzero. A clean exit, or a tolerant subcommand
+ * that ran, is trusted.
+ */
+export function subcommandHelpProbeIsUntrusted(
+  subcommand: { helpProbeExitTolerant?: boolean } | undefined,
+  result: { available: boolean; status: number | null }
+): boolean {
+  if (!result?.available) return true;
+  if (subcommand?.helpProbeExitTolerant) return false;
+  return result.status !== 0;
 }
 
 export function probeInstalledCliContract(
@@ -3889,6 +4186,10 @@ export function probeInstalledCliContract(
   const warnings: string[] = [];
   let resolvedCommand: string | undefined;
   let resolvedArgs: string[] | undefined;
+  // Declared `helpArgs` probes carry no per-subcommand tolerance, so any nonzero
+  // exit here is untrusted (predicate called with an undefined subcommand). The
+  // subcommand fold is OR'd in at the success return below.
+  let helpExitedNonzero = false;
 
   for (const helpArgs of contract.helpArgs) {
     const extendedPath = getExtendedPath();
@@ -3923,10 +4224,17 @@ export function probeInstalledCliContract(
         subcommands: {},
         probedAt: new Date().toISOString(),
         warnings: [result.error.message],
+        // `available:false` carries this probe's spawn failure. Preserve any
+        // untrusted-help signal already accumulated from an EARLIER helpArgs
+        // entry that spawned but exited nonzero (contract.helpArgs can hold more
+        // than one entry, e.g. Codex `exec --help` + `exec resume --help`);
+        // hard-coding false here would silently drop that prior nonzero exit.
+        helpExitedNonzero,
       };
     }
     outputs.push(`${result.stdout ?? ""}\n${result.stderr ?? ""}`);
-    if (result.status !== 0) {
+    if (subcommandHelpProbeIsUntrusted(undefined, { available: true, status: result.status })) {
+      helpExitedNonzero = true;
       warnings.push(
         `${contract.executable} ${helpArgs.join(" ")} exited with status ${result.status}`
       );
@@ -3961,6 +4269,8 @@ export function probeInstalledCliContract(
     subcommands,
     probedAt: new Date().toISOString(),
     warnings,
+    helpExitedNonzero:
+      helpExitedNonzero || Object.values(subcommands).some(probe => probe.helpExitedNonzero),
   };
 }
 
@@ -3974,6 +4284,7 @@ function probeInstalledCliSubcommands(
     const outputs: string[] = [];
     const warnings: string[] = [];
     let available = true;
+    let helpExitedNonzero = false;
     const checkedHelpCommands = sub.helpArgs.map(helpArgs => [...sub.commandPath, ...helpArgs]);
 
     for (const helpArgs of sub.helpArgs) {
@@ -3993,11 +4304,21 @@ function probeInstalledCliSubcommands(
       });
       if (result.error) {
         available = false;
+        // A spawn failure after the root executable ran is a probe we could not
+        // complete, not an absent path: untrusted even for a tolerant subcommand
+        // (tolerance covers a nonzero exit STATUS, not a probe that never ran).
+        helpExitedNonzero = subcommandHelpProbeIsUntrusted(sub, {
+          available: false,
+          status: result.status,
+        });
         warnings.push(result.error.message);
         break;
       }
       outputs.push(`${result.stdout ?? ""}\n${result.stderr ?? ""}`);
-      if (result.status !== 0 && !sub.helpProbeExitTolerant) {
+      // Spawn succeeded, so normalize to available:true; do NOT pass the raw
+      // spawnSync result (it has no `available` field and would invert the test).
+      if (subcommandHelpProbeIsUntrusted(sub, { available: true, status: result.status })) {
+        helpExitedNonzero = true;
         warnings.push(
           `${contract.executable} ${args.join(" ")} exited with status ${result.status}`
         );
@@ -4025,6 +4346,7 @@ function probeInstalledCliSubcommands(
       exposure: sub.exposure,
       tier: sub.tier,
       summary: sub.summary,
+      helpExitedNonzero,
     };
   }
   return probes;
@@ -4203,6 +4525,8 @@ export function buildUpstreamContractReport(
             ])
           ),
           maxPositionals: contract.maxPositionals,
+          requiredRequestFlagGroups: contract.requiredRequestFlagGroups ?? [],
+          mutuallyExclusiveFlagGroups: contract.mutuallyExclusiveFlagGroups ?? [],
           resumeMaxPositionals: contract.resumeMaxPositionals ?? null,
           resumeOnlyFlags: contract.resumeOnlyFlags ?? [],
           resumeForbiddenFlags: contract.resumeForbiddenFlags ?? [],

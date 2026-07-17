@@ -54,14 +54,24 @@ type ScriptedJob = {
 };
 
 function makeScriptedManager(script: Partial<Record<ValidationProvider, ScriptedJob>>) {
-  const startCalls: Array<{ cli: ValidationProvider; args: string[]; correlationId: string }> = [];
+  const startCalls: Array<{
+    cli: ValidationProvider;
+    args: string[];
+    correlationId: string;
+    stdin?: string;
+  }> = [];
   const jobs = new Map<string, AsyncJobResult>();
 
   return {
     startCalls,
     manager: {
-      startJob(cli: ValidationProvider, args: string[], correlationId: string): AsyncJobSnapshot {
-        startCalls.push({ cli, args, correlationId });
+      startJobWithDedup(
+        cli: ValidationProvider,
+        args: string[],
+        correlationId: string,
+        options: { stdin?: string } = {}
+      ): { snapshot: AsyncJobSnapshot; deduped: boolean } {
+        startCalls.push({ cli, args, correlationId, stdin: options.stdin });
         const id = `job-${cli}-${startCalls.length}`;
         const planned = script[cli];
         if (!planned) {
@@ -79,7 +89,7 @@ function makeScriptedManager(script: Partial<Record<ValidationProvider, Scripted
             error: null,
             exited: false,
           };
-          return snapshot;
+          return { snapshot, deduped: false };
         }
         const result: AsyncJobResult = {
           id,
@@ -101,18 +111,21 @@ function makeScriptedManager(script: Partial<Record<ValidationProvider, Scripted
         };
         jobs.set(id, result);
         return {
-          id,
-          cli,
-          status: "running",
-          startedAt: result.startedAt,
-          finishedAt: null,
-          exitCode: null,
-          correlationId,
-          outputTruncated: false,
-          stdoutBytes: 0,
-          stderrBytes: 0,
-          error: null,
-          exited: false,
+          snapshot: {
+            id,
+            cli,
+            status: "running",
+            startedAt: result.startedAt,
+            finishedAt: null,
+            exitCode: null,
+            correlationId,
+            outputTruncated: false,
+            stdoutBytes: 0,
+            stderrBytes: 0,
+            error: null,
+            exited: false,
+          },
+          deduped: false,
         };
       },
       getJobResult(jobId: string): AsyncJobResult | null {
@@ -161,6 +174,48 @@ describe("Layer 6 validation orchestrator (U20)", () => {
     expect(fake.startCalls[0].args.slice(0, 4)).toEqual(["--print", "--mode", "ask", "--sandbox"]);
     expect(fake.startCalls[0].args[4]).toBe("enabled");
     expect(fake.startCalls[0].args.at(-1)).toContain("can cursor review?");
+  });
+
+  it("uses the verified Codex stdin marker for validation prompts", () => {
+    const fake = makeScriptedManager({});
+    startValidationRun(
+      { asyncJobManager: fake.manager as any, getProviderRuntimeStatus: runtime },
+      { intent: "validate", question: "review through stdin", providers: ["codex"] }
+    );
+
+    expect(fake.startCalls).toHaveLength(1);
+    expect(fake.startCalls[0]).toMatchObject({
+      cli: "codex",
+      args: ["exec", "--skip-git-repo-check", "--", "-"],
+    });
+    expect(fake.startCalls[0].stdin).toContain("review through stdin");
+    expect(fake.startCalls[0].args.join(" ")).not.toContain("review through stdin");
+  });
+
+  it("skips only argv-bound reviewers whose assembled prompt exceeds the byte limit", () => {
+    const fake = makeScriptedManager({});
+    const report = startValidationRun(
+      { asyncJobManager: fake.manager as any, getProviderRuntimeStatus: runtime },
+      {
+        intent: "validate",
+        question: "中".repeat(44_000),
+        providers: ["grok", "codex"],
+      }
+    );
+
+    expect(report.status).toBe("partial");
+    expect(report.results).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          provider: "grok",
+          status: "skipped",
+          error: expect.stringContaining("too large"),
+        }),
+        expect.objectContaining({ provider: "codex", status: "running" }),
+      ])
+    );
+    expect(fake.startCalls.map(call => call.cli)).toEqual(["codex"]);
+    expect(fake.startCalls[0].stdin).toContain("中".repeat(100));
   });
 
   it("normalizes a completed provider result with a verdict heading", () => {

@@ -11,6 +11,7 @@ providers stay, additive; (5) single-shot for stateless API providers (xAI keeps
 `previous_response_id`).
 
 Verified anchor points (read 2026-06-15):
+
 - `src/xai-api-provider.ts` — `createXaiResponse(params, logger)`, `postJson`,
   `isHttpTransient`, `parseResponsesResult`, `XaiApiError`, `responsesUrl`
   (https-or-loopback guard).
@@ -90,25 +91,40 @@ New file `src/api-provider.ts`:
 ```ts
 export type ApiProviderKind = "openai-compatible" | "anthropic" | "xai-responses";
 
-export interface ApiChatMessage { role: "system" | "user" | "assistant"; content: string; }
+export interface ApiChatMessage {
+  role: "system" | "user" | "assistant";
+  content: string;
+}
 
 export interface ApiRequest {
-  baseUrl: string; apiKey: string; model: string;
-  messages: ApiChatMessage[];          // single-shot: full prompt each call
-  maxOutputTokens?: number; temperature?: number; topP?: number;
+  baseUrl: string;
+  apiKey: string;
+  model: string;
+  messages: ApiChatMessage[]; // single-shot: full prompt each call
+  maxOutputTokens?: number;
+  temperature?: number;
+  topP?: number;
   reasoningEffort?: "none" | "low" | "medium" | "high";
   timeoutMs?: number;
 }
 export interface ApiResult {
-  model: string; text: string;
-  usage: { inputTokens?: number; outputTokens?: number; cacheReadTokens?: number; costUsd?: number; raw?: unknown };
-  raw: unknown; httpStatus: number;
+  model: string;
+  text: string;
+  usage: {
+    inputTokens?: number;
+    outputTokens?: number;
+    cacheReadTokens?: number;
+    costUsd?: number;
+    raw?: unknown;
+  };
+  raw: unknown;
+  httpStatus: number;
 }
 
 export interface ApiProvider {
-  readonly name: string;            // config key, e.g. "ollama", "openai", "xai"
+  readonly name: string; // config key, e.g. "ollama", "openai", "xai"
   readonly kind: ApiProviderKind;
-  endpointUrl(baseUrl: string): URL;            // path + https-or-loopback guard
+  endpointUrl(baseUrl: string): URL; // path + https-or-loopback guard
   buildBody(req: ApiRequest): Record<string, unknown>;
   parseResult(httpStatus: number, body: string): ApiResult;
   isTransient(err: unknown): boolean;
@@ -171,9 +187,10 @@ cancel, orphan, and flight-recorder all work without a parallel path.
 > session-manager, validation path). Round 2 verdicts below are authoritative.
 >
 > **Round-2 headline corrections to the earlier draft:**
+>
 > - No hidden unconditional `job.process`/`.pid` crash path exists — the `?.` /
 >   `&&` guards plus `ProcessMonitor.checkJobHealth` (`process-monitor.ts:162`,
->   handles `pid:null`) are already safe. §1c is about *explicit enumerated*
+>   handles `pid:null`) are already safe. §1c is about _explicit enumerated_
 >   guards, not a latent crash.
 > - `computeRequestKey` is **NOT** an independent runtime path — it is only
 >   reached via `AsyncJobManager.buildRequestKey` (`job-store.ts:68` ←
@@ -184,11 +201,12 @@ cancel, orphan, and flight-recorder all work without a parallel path.
 >   constraints — see the new cross-cutting section before Slice 0/1.
 
 ### 1a. AsyncJobRecord identity + transport
+
 - Add to `AsyncJobRecord`: `transport: "process" | "http"`,
   `httpStatus: number | null`, `abort: AbortController | null` (for http jobs
   `process` stays `null`; for process jobs `abort` stays `null`).
 - **`AsyncJobRecord.cli` is typed `LlmCli` (`:24`) but http jobs carry an
-  arbitrary `[providers.<name>]` key.** Widen the *record/manager-facing* `cli`
+  arbitrary `[providers.<name>]` key.** Widen the _record/manager-facing_ `cli`
   field to `string` (a discriminated `JobProvider = LlmCli | string`), leaving the
   `LlmCli` type itself untouched so `providerCommandName`/`spawnCliProcess`/
   `buildProviderArgs` stay narrow. Every LlmCli-specific use of a job's `cli` must
@@ -198,6 +216,7 @@ cancel, orphan, and flight-recorder all work without a parallel path.
   already `ApiResult.text`).
 
 ### 1b. Branch the start path (not just the spawn line)
+
 - Branch **before** `providerCommandName`/`spawnCliProcess` (`:880-882`), via a
   new `startHttpJob(...)` + `HttpJobRunner`. The http path must populate the
   common record fields that the spawn block sets today: `id`, `cli=providerName`,
@@ -211,6 +230,7 @@ cancel, orphan, and flight-recorder all work without a parallel path.
   `provider?: ApiProvider`.
 
 ### 1c. Shared finalize, not a copied terminal path
+
 - **Extract the finalize/complete logic** (field assignments + `onComplete` +
   flight-recorder + metrics + `exited=true`) into one helper called by BOTH the
   process `close` handler AND http settlement. On settlement set
@@ -230,6 +250,7 @@ cancel, orphan, and flight-recorder all work without a parallel path.
   defaults for `pid:null` — no change, http jobs pass `pid:null`.
 
 ### 1d. Cancel + orphan
+
 - `cancelJob` (`:1124`, refuses `!job.process`): add an http branch →
   `job.abort?.abort()` + mark canceled; do NOT refuse when an abort handle exists.
 - `markOrphanedOnStartup` (`:297` / `job-store.ts:146`): http rows reconstituted
@@ -242,14 +263,15 @@ cancel, orphan, and flight-recorder all work without a parallel path.
   `costUsd` from `ApiResult.usage`.
 
 ### 1e. Dedup — one runtime path, full canonical material
+
 - **Corrected (Round 2):** `buildRequestKey` (`async-job-manager.ts:517-550`) is
   the single production entry point; it delegates to `computeRequestKey`
   (`job-store.ts:68`). `computeRequestKey` is not an independent path — keep it
   aligned so test/seed fixtures match, but the live work is in `buildRequestKey`.
 - Namespace the http key with `transport` AND hash the **fully canonicalized API
   request**, not a partial field list: `hash({ transport:"http", provider,
-  baseUrl, model, instructions/system, input/messages, temperature, topP,
-  reasoningEffort, maxOutputTokens, previousResponseId })`. Round 2 flagged that
+baseUrl, model, instructions/system, input/messages, temperature, topP,
+reasoningEffort, maxOutputTokens, previousResponseId })`. Round 2 flagged that
   the earlier list **omitted `topP`** (live in `xai-api-provider.ts:221-233`) and
   the `instructions` vs `input` split — derive the key from the same canonical
   object the adapter sends, so no field can drift out.
@@ -258,9 +280,11 @@ cancel, orphan, and flight-recorder all work without a parallel path.
   discriminator keeps http keys disjoint from argv keys on any name collision.
 
 ### 1f. Job-store migration — more than `ALTER TABLE`
+
 Precedent: `ensureJobsOwnerColumn` (`job-store.ts:100-106`) does idempotent
 `PRAGMA table_info(jobs)` → `ALTER TABLE jobs ADD COLUMN`. Mirror it, but the full
 change set is:
+
 - Update `CREATE TABLE jobs(...)` (`:198-217`) for fresh DBs to include
   `transport TEXT NOT NULL DEFAULT 'process'` and `http_status INTEGER NULL`.
 - Add the two idempotent `ADD COLUMN` migrations and **run them before any
@@ -275,7 +299,7 @@ change set is:
   explicit values if the INSERT column list widens.
 - **`hydrateFromStore` (`async-job-manager.ts:730-761`) is a Round-2-discovered
   blocker:** it parses `row.argsJson` as a `string[]` and casts `row.cli as
-  LlmCli`. If http rows persist canonical request JSON (not argv) under arbitrary
+LlmCli`. If http rows persist canonical request JSON (not argv) under arbitrary
   provider names, hydrated rows silently lose payload (`args=[]`) and masquerade as
   CLI jobs. Define a **transport-aware persisted payload format** (e.g. a separate
   `payload_json` column, or a tagged union in `args_json`) and branch
@@ -298,6 +322,7 @@ change set is:
   `JobStore` surface. Legacy-schema seed tests + cross-engine WAL fixtures updated.
 
 ### 1g. Tests
+
 http job lifecycle (start→complete), failure→exitCode 1 + httpStatus set, cancel
 via AbortController, dedup hit across two identical http requests + miss when
 model OR `previousResponseId` differs, orphan-on-restart for in-flight http,
@@ -316,8 +341,9 @@ touches process-group/idle machinery.
   `isXaiProviderEnabled` gating of `grok_api_request`).
 - Handler: `prepareApiRequest(params)` → assemble `messages` (system +
   prompt/promptParts), resolve model against the provider allowlist (tool-local,
-  NOT `model-registry.ts`), then defer via a transport-aware helper. Sync
-  auto-defers at 45s like CLI tools; async variant requires persistence.
+  NOT `model-registry.ts`), then defer via a transport-aware helper. When
+  durable async jobs are enabled, sync work can auto-defer at the 45 s deadline;
+  otherwise it runs to completion. The async variant requires persistence.
 - **`awaitJobOrDefer` is CLI-only (Round 2)** — `index.ts:712-820` types `cli` as
   the five-CLI union, asserts CLI args/env, calls `providerCommandName()` +
   `executeCli()` + `startJobWithDedup(cli,args,…)`. It cannot take
@@ -329,8 +355,8 @@ touches process-group/idle machinery.
   surface).
 - **`ProviderCapabilityId = CliType | "grok_api"` is a hardcoded choke point**
   (Codex/Grok): a generic `[providers.<name>]` cannot be represented in that union.
-  Widen it to admit arbitrary api provider ids (or a `\`api:${string}\`` template)
-  and update every map keyed by `ProviderCapabilityId`, else new API providers have
+  Widen it to admit arbitrary api provider ids (or a `\`api:${string}\``template)
+and update every map keyed by`ProviderCapabilityId`, else new API providers have
   no type-level home in the capability/catalog/request-tool surfaces.
 
 Tests: tool registration gated by config/env; sync→defer boundary; model
@@ -357,7 +383,7 @@ allowlist rejection; promptParts assembly.
   `PROVIDERS: CliType[]` + `getProviderRuntimeStatus(provider: CliType)` (spawnSync
   version/login), and is also consumed by `health.ts:40` and `doctor.ts:562`. API
   providers report `installed = config-present && (key-present || keyless-local
-  exception)` (no version probe); displayName from config. The **enabled reviewer
+exception)` (no version probe); displayName from config. The **enabled reviewer
   set** = CLI-installed ∪ enabled API providers, computed once and reused by the
   validation schema, the Slice 5 catalog, health, and doctor — generalised beyond
   the xai-only `isXaiProviderEnabled` / `[providers.xai]` gate.
@@ -438,6 +464,7 @@ Tests: catalog includes/excludes per config; health block shape.
 ## Cross-LLM review outcome (2026-06-15)
 
 Two rounds, Codex (gpt-5.4) + Grok (grok-build) + Mistral.
+
 - **Round 1** — reviewers had no repo access (gateway sandbox blocked absolute
   paths); verified against pasted excerpts. Confirmed the strategy, left bodies as
   `[verify-on-impl]`.
@@ -453,6 +480,7 @@ unconditional `job.process` crash path; workspace-registry stays CLI-only; the
 `node:https` audit (`grep fetch dist/`) will still pass.
 
 **Round-2 findings folded in:**
+
 1. **Provider-identity is a closed `ProviderType` enum** across session-manager,
    metrics, flight-recorder, resources, cache-stats, capabilities, AND **Postgres
    CHECK constraints** (`migrations/001`,`003`). Biggest gap; needs scope decision

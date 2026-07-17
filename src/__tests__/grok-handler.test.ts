@@ -129,7 +129,7 @@ describe("Phase 4 slice δ — Grok --max-turns wiring", () => {
     if (!("args" in prep)) throw new Error("expected args");
     // `-p` is still first; --max-turns is appended after the existing flag
     // set, mirroring prepareClaudeHighImpactFlags' append-only contract.
-    expect(prep.args[0]).toBe("-p");
+    expect(prep.args[0]).toBe("-p=hello");
     expect(prep.args).toContain("--model");
     expect(prep.args).toContain("--output-format");
     expect(prep.args).toContain("--tools");
@@ -213,7 +213,7 @@ describe("Grok 0.2.x: --compaction-mode / --compaction-detail wiring", () => {
       })
     );
     if (!("args" in prep)) throw new Error("expected args");
-    expect(prep.args[0]).toBe("-p");
+    expect(prep.args[0]).toBe("-p=hello");
     const mIdx = prep.args.indexOf("--compaction-mode");
     const dIdx = prep.args.indexOf("--compaction-detail");
     expect(prep.args[mIdx + 1]).toBe("transcript");
@@ -272,7 +272,6 @@ describe("Grok 0.2.x: headless control flags", () => {
         agents: { reviewer: { description: "review", prompt: "check code" } },
         promptFile: "/tmp/prompt.md",
         promptJson: [{ type: "text", text: "hi" }],
-        single: "single-turn",
         experimentalMemory: true,
         noAltScreen: true,
         oauth: true,
@@ -285,8 +284,6 @@ describe("Grok 0.2.x: headless control flags", () => {
     expect(prep.args).toContain("--prompt-file");
     expect(prep.args).toContain("/tmp/prompt.md");
     expect(prep.args).toContain("--prompt-json");
-    expect(prep.args).toContain("--single");
-    expect(prep.args).toContain("single-turn");
     expect(prep.args).toContain("--experimental-memory");
     expect(prep.args).toContain("--no-alt-screen");
     expect(prep.args).toContain("--oauth");

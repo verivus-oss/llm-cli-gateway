@@ -2,8 +2,7 @@
 
 exports[`grok argv golden (pre/post cutover parity) > always-approve path with named worktree string 1`] = `
 [
-  "-p",
-  "PROMPT",
+  "-p=PROMPT",
   "--model",
   "grok-4",
   "--always-approve",
@@ -18,15 +17,13 @@ exports[`grok argv golden (pre/post cutover parity) > always-approve path with n
 
 exports[`grok argv golden (pre/post cutover parity) > minimal prompt-only request 1`] = `
 [
-  "-p",
-  "PROMPT",
+  "-p=PROMPT",
 ]
 `;
 
 exports[`grok argv golden (pre/post cutover parity) > named worktree with --worktree-ref (cross-flag guard) 1`] = `
 [
-  "-p",
-  "PROMPT",
+  "-p=PROMPT",
   "--worktree",
   "feat",
   "--worktree-ref",
@@ -36,8 +33,7 @@ exports[`grok argv golden (pre/post cutover parity) > named worktree with --work
 
 exports[`grok argv golden (pre/post cutover parity) > no covered flags, only specials 1`] = `
 [
-  "-p",
-  "PROMPT",
+  "-p=PROMPT",
   "--model",
   "grok-4",
   "--permission-mode",
@@ -48,8 +44,7 @@ exports[`grok argv golden (pre/post cutover parity) > no covered flags, only spe
 
 exports[`grok argv golden (pre/post cutover parity) > permission-mode path with covered flags across every special boundary 1`] = `
 [
-  "-p",
-  "PROMPT",
+  "-p=PROMPT",
   "--model",
   "grok-4",
   "--output-format",
@@ -98,8 +93,6 @@ exports[`grok argv golden (pre/post cutover parity) > permission-mode path with 
   "/tmp/p.txt",
   "--prompt-json",
   "[{"type":"text","text":"x"}]",
-  "--single",
-  "one-shot",
   "--experimental-memory",
   "--no-alt-screen",
   "--no-memory",

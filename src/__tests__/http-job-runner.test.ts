@@ -94,12 +94,14 @@ describe("Slice 1 — HttpJobRunner", () => {
     expect(deduped).toBe(false);
     expect(snapshot.cli).toBe("ollama");
     expect(snapshot.status).toBe("running");
+    expect(snapshot.progress.capability).toBe("lifecycle_only");
 
     await waitForTerminal(mgr, snapshot.id);
     const result = mgr.getJobResult(snapshot.id)!;
     expect(result.status).toBe("completed");
     expect(result.stdout).toBe("pong");
     expect(result.exitCode).toBe(0);
+    expect(result.progress.capability).toBe("lifecycle_only");
   });
 
   it("never persists the apiKey into the durable jobs payload (secret-leak guard)", async () => {
@@ -244,6 +246,7 @@ describe("Slice 1 — http job persistence + orphan + migration (SqliteJobStore)
     // Hydrated http row has no live abort handle → cancel is refused.
     const snap = mgr.getJobSnapshot("job-http-1");
     expect(snap?.cli).toBe("ollama");
+    expect(snap?.progress.capability).toBe("lifecycle_only");
     const cancel = mgr.cancelJob("job-http-1");
     expect(cancel.canceled).toBe(false);
     store2.close();

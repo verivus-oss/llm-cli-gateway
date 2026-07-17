@@ -1,190 +1,230 @@
 ---
 name: design-review-cycle
-description: Structured design document review via LLM gateway — submit plans, specs, or designs for peer review from Codex, Gemini, Grok, or Mistral, iterate on feedback, track review rounds. Use before implementing complex features. Mistral Vibe defaults to `--agent auto-approve`.
+description: Run evidence-backed design, specification, and implementation-plan reviews through the local llm-cli-gateway stdio MCP server. Use for single-provider or complete cross-LLM design review before implementation. Covers all seven CLI request surfaces and Mistral Vibe's current accept-edits default.
 ---
 
 # Design Review Cycle
 
-Submit design documents, implementation plans, or specifications for peer review through the LLM gateway. Track review iterations until approval.
+Review a design, specification, or implementation plan before code changes make
+the decision expensive to reverse. Dispatch every review through the local gtwy
+stdio MCP server, not by launching provider CLIs directly.
 
-## Dispatch Defaults
+The gateway has seven CLI request surfaces: Claude, Codex, Gemini, Grok,
+Mistral, Devin, and Cursor. Each has a sync request tool and an async request
+tool when async jobs are enabled. Grok, Mistral, Devin, and Cursor also expose
+native ACP transports, but review requests still go through the gateway request
+tools.
 
-Apply these on every dispatch unless the caller has explicitly overridden a rule in the current turn:
+Configured API providers can add generic request tools. Discover them with
+`list_models` and their reported capabilities. They do not supply a local CLI
+checkout/worktree or native ACP boundary, so they are not an automatic
+replacement for a source-inspecting required CLI reviewer.
 
-1. **Omit `model`** — let the gateway use its configured default per CLI.
-2. **`approvalStrategy:"mcp_managed"`** is the skill dispatch default (the gateway schema default is `"legacy"`). For Codex, also pass `fullAuto:true` when it must read files or run commands.
-3. **No wallclock timeout; poll every 60 s** — `idleTimeoutMs` is a separate no-output safeguard.
-4. **Iterate until unconditional APPROVED** (review dispatches only) — every review prompt must end with "End with APPROVED or NOT APPROVED with findings." Loop: dispatch → parse verdict → on `NOT APPROVED` or conditional, revise + re-submit → repeat. Escalate after 3 rounds. This rule does **not** apply to pure implementation or non-review analysis dispatches.
+## Start With Scope, Capability, and Target Checks
 
-## When to Use
+1. Call provider_tool_capabilities through gtwy to discover the usable request
+   surface, native transport capability, and local provider state.
+2. Define the review roster. A full cross-LLM review requires every provider
+   that the user or process names. Do not silently reduce that roster because a
+   provider is slow or unavailable.
+3. Verify that every reviewer will inspect the same repository and revision.
+   A review of a default or unrelated workspace is invalid.
+4. If Personal Agent Config Kit mode is enabled, it supports Claude and Codex
+   only. route_request and normal cross-provider validation surfaces are
+   unavailable. A requested seven-provider review is therefore blocked until
+   Kit is disabled for that workflow or the user explicitly changes scope.
+   Claude Kit requests also reject caller-supplied `workingDir` before context
+   compilation. `explain_effective_config({workingDir:"<repo>"})` can inspect a
+   candidate scope, but execute Claude Kit work with an already configured
+   registered `workspace` alias or the configured default workspace. It never
+   inherits the gateway process cwd.
 
-- Before implementing a complex feature (review the plan first)
-- After writing a specification or design document
-- When a development process requires peer review before code
-- For architecture decisions that affect multiple components
+Use this local stdio targeting map:
 
-## Review Workflow
+| Provider                     | Target the repository                                                                                                                                                |
+| ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Claude, Codex, Grok, Mistral | Pass local workingDir on a new session when supported by the request, or select a registered workspace explicitly or by configured default.                          |
+| Gemini                       | It has no workingDir field. includeDirs adds auxiliary paths and does not select the process cwd. Select a registered workspace explicitly or by configured default. |
+| Devin                        | Pass local workingDir on a new CLI session, or select a registered workspace explicitly or by configured default.                                                    |
+| Cursor                       | Pass workspace as a local directory or registered alias. Cursor uses that selection for its native workspace and child cwd.                                          |
 
-### Step 1: Prepare the Review Request
+Do not use workspace_* administration tools to repair a local stdio path
+problem. They are for remote HTTP/OAuth workspace clients.
 
-Write a clear review request that includes:
-- What document to review (file path)
-- What kind of review (design, spec, plan, architecture)
-- Specific concerns or focus areas
-- Iteration number (for tracking)
+For Claude mcp_managed, a custom working directory, expanded workspace, native
+resume, custom tool rules, and similar posture changes require a gateway
+approval decision plus the operator bypass setting. Use only the minimal managed
+Claude request unless that approval path is deliberately configured.
 
-### Step 2: Submit to Reviewer(s)
+## Complete-Review Contract
 
-**Single reviewer (Codex — most common):**
+Every required reviewer prompt must require this terminal JSON verdict:
+
+```
+APPROVED_UNCONDITIONALLY | CHANGES_REQUIRED | BLOCKED_EXTERNAL
+```
+
+Apply these rules:
+
+1. Omit model unless the caller explicitly selected one.
+2. Use approvalStrategy: "legacy" for all non-Claude providers. Their
+   approvalPolicy field has no effect and mcp_managed is rejected.
+3. Use mcp_managed only for a deliberately configured Claude request. Do not
+   carry its approval semantics into another provider or ACP transport.
+4. Use sandboxMode: "read-only" for a Codex document inspection. Use
+   sandboxMode: "workspace-write" only if the review must create generated
+   build or test output. Do not use fullAuto; it is deprecated shorthand.
+5. Do not set review-round, turn, token, price, cost, or wallclock limits.
+   The configured idle-timeout safeguard detects lack of output, not completion.
+6. Accept only explicit, evidence-backed `APPROVED_UNCONDITIONALLY` results. A
+   condition, remaining finding, incomplete evidence, malformed response,
+   timeout, cancellation, or provider failure is not approval.
+
+Continue to revise and re-review without a numeric cap. Stop only when the user
+cancels or a provider has a terminal external failure. A terminal failure is
+`BLOCKED_EXTERNAL` with its exact error, never a reason to omit the reviewer or
+approve the design.
+
+## Explicit user-authorized full-access design review
+
+Keep the normal review controls above unless the user explicitly grants full
+provider permissions and native MCP access. For that exception, follow the
+complete `multi-llm-review` full-access protocol: build the exact target,
+launch `node dist/index.js --transport=stdio` from it, and do not use a global
+or stale gateway process. Reapply each provider-native grant to every new job,
+not a resumed assumption, and preserve ambient native MCP configuration without
+adding gateway allowlists or deny lists.
+
+Every provider receives the verification report as a corrective-program
+specification plus the exact base, diff or exhaustive changed-file list,
+product-relevant untracked files, and persistent evidence references. Require
+independent code, docs, tests, command, and native-MCP inspection. The only
+acceptable terminal outcomes are `APPROVED_UNCONDITIONALLY`, evidence-backed
+`CHANGES_REQUIRED`, or concrete `BLOCKED_EXTERNAL`. Do not impose caller caps.
+For a user-required 90-second progress cadence, use non-blocking waits and do
+not poll earlier. Full capability remains non-mutating review access unless the
+user separately authorizes edits.
+
+## Dispatch the Review
+
+For a single Codex design review:
 
 ```
 codex_request({
-  prompt: "Review the design document at [path]. This is a [spec/plan/design] for [feature].\n\nReview for:\n- Completeness (are all requirements addressed?)\n- Correctness (will this approach work?)\n- Feasibility (can this be implemented as described?)\n- Risks (what could go wrong?)\n- Missing considerations\n\nEnd with APPROVED or NOT APPROVED with specific, actionable findings.",
-  fullAuto: true,
-  approvalStrategy: "mcp_managed",
-  correlationId: "design-review-r1"
+  prompt: "Review [design path] for completeness, feasibility, alternatives,
+    risks, dependencies, test strategy, rollout, rollback, and project
+    conventions. Return terminal JSON verdict APPROVED_UNCONDITIONALLY,
+    CHANGES_REQUIRED, or BLOCKED_EXTERNAL with inspected evidence.",
+  sandboxMode: "read-only",
+  workingDir: "[repo]",
+  approvalStrategy: "legacy",
+  correlationId: "design-review-codex"
 })
 ```
 
-**Dual reviewer (Codex + Gemini for security-sensitive designs):**
+For a full cross-LLM review, dispatch the required roster in parallel after
+applying the targeting map above:
 
 ```
+claude_request_async({
+  prompt: "Review [design path] for architecture, assumptions, failure modes,
+    and missing alternatives. Return terminal JSON verdict APPROVED_UNCONDITIONALLY, CHANGES_REQUIRED, or BLOCKED_EXTERNAL with inspected evidence.",
+  approvalStrategy: "legacy",
+  workingDir: "[repo]",
+  correlationId: "design-review-claude"
+})
+
 codex_request_async({
-  prompt: "Review the design document at [path]... End with APPROVED or NOT APPROVED with findings.",
-  fullAuto: true,
-  approvalStrategy: "mcp_managed",
-  correlationId: "design-review-r1-codex"
+  prompt: "Review [design path] for feasibility, task ordering, test strategy,
+    and implementation risks. Return terminal JSON verdict APPROVED_UNCONDITIONALLY, CHANGES_REQUIRED, or BLOCKED_EXTERNAL with inspected evidence.",
+  sandboxMode: "read-only",
+  approvalStrategy: "legacy",
+  workingDir: "[repo]",
+  correlationId: "design-review-codex"
 })
+
 gemini_request_async({
-  prompt: "Review the design document at [path]. Focus on security implications, attack surfaces, data flow risks, and failure modes... End with APPROVED or NOT APPROVED with findings.",
-  approvalStrategy: "mcp_managed",
-  correlationId: "design-review-r1-gemini"
+  prompt: "Review [design path] for security, data flow, operational failure
+    modes, and missing requirements. Return terminal JSON verdict APPROVED_UNCONDITIONALLY, CHANGES_REQUIRED, or BLOCKED_EXTERNAL with inspected evidence.",
+  approvalStrategy: "legacy",
+  workspace: "[verified Gemini workspace]",
+  correlationId: "design-review-gemini"
 })
-```
 
-**Triple reviewer (add Grok for independent diversity on high-stakes designs):**
-
-```
 grok_request_async({
-  prompt: "Independent review of the design document at [path]. Flag completeness gaps, feasibility concerns, and assumptions the other reviewers may accept too easily. End with APPROVED or NOT APPROVED with findings.",
-  approvalStrategy: "mcp_managed",
-  correlationId: "design-review-r1-grok"
+  prompt: "Independently review [design path] for assumptions, blind spots, and
+    alternatives. Return terminal JSON verdict APPROVED_UNCONDITIONALLY, CHANGES_REQUIRED, or BLOCKED_EXTERNAL with inspected evidence.",
+  approvalStrategy: "legacy",
+  workingDir: "[repo]",
+  correlationId: "design-review-grok"
+})
+
+mistral_request_async({
+  prompt: "Independently review [design path] for feasibility, maintainability,
+    and missing constraints. Return terminal JSON verdict APPROVED_UNCONDITIONALLY, CHANGES_REQUIRED, or BLOCKED_EXTERNAL with inspected evidence.",
+  approvalStrategy: "legacy",
+  workingDir: "[repo]",
+  correlationId: "design-review-mistral"
+})
+
+devin_request_async({
+  prompt: "Independently review [design path] for implementation risk, security,
+    and missing verification. Return terminal JSON verdict APPROVED_UNCONDITIONALLY, CHANGES_REQUIRED, or BLOCKED_EXTERNAL with inspected evidence.",
+  approvalStrategy: "legacy",
+  correlationId: "design-review-devin"
+})
+// Dispatch Devin only from a gateway process whose confirmed cwd is [repo].
+
+cursor_request_async({
+  prompt: "Independently review [design path] for usability, implementation
+    gaps, and regressions. Return terminal JSON verdict APPROVED_UNCONDITIONALLY, CHANGES_REQUIRED, or BLOCKED_EXTERNAL with inspected evidence.",
+  approvalStrategy: "legacy",
+  workspace: "[repo]",
+  correlationId: "design-review-cursor"
 })
 ```
 
-### Step 3: Process Feedback
+Use prompt, not promptParts, for Devin and Cursor. The other five CLI request
+surfaces accept promptParts. Keep a canonical flat review text and derive the
+five structured requests from it so all reviewers receive the same substantive
+criteria.
 
-Parse the review response for:
-1. **APPROVED** → Proceed to implementation
-2. **NOT APPROVED** with findings → Address each finding
-3. **Conditional approval** ("approved if X is addressed") → Address X, re-submit
+## Process Findings
 
-For each finding:
-- Update the design document to address it
-- Or explicitly document why the finding doesn't apply (with justification)
+1. Union all findings. A finding reported by one reviewer still needs
+   verification; a majority vote is not evidence that it is wrong.
+2. Update the design or provide focused counter-evidence.
+3. Build or validate any technical claims that can be checked locally.
+4. Re-dispatch every required reviewer against the changed design.
+5. Record each verdict and evidence trail. Do not call a qualified response
+   informational unless the reviewer gives a fresh
+   `APPROVED_UNCONDITIONALLY` after the issue is resolved.
 
-### Step 4: Re-submit
+## Deferred Jobs and Continuity
 
-```
-codex_request({
-  prompt: "Re-review the design at [path] after addressing round 1 feedback:\n\n1. [Finding] — Addressed by: [what changed]\n2. [Finding] — Addressed by: [what changed]\n3. [Finding] — Not applicable because: [justification]\n\nReview the updated document. End with APPROVED or NOT APPROVED with findings.",
-  fullAuto: true,
-  approvalStrategy: "mcp_managed",
-  correlationId: "design-review-r2"
-})
-```
+When async tools are registered, poll through gtwy with llm_job_status and
+collect results with llm_job_result. Use a non-blocking wakeup mechanism. Do
+not cancel because a review is taking a long time.
 
-### Step 5: Track Iterations
+When persistence.backend = "none", use the corresponding sync request tools;
+they run to completion and do not auto-defer. Lack of async tools does not
+justify reducing the required reviewer roster.
 
-Use correlation IDs to track rounds:
-- `design-review-r1` → Initial review
-- `design-review-r2` → After first round of fixes
-- `design-review-r3` → After second round (rare)
+SQLite and Postgres persistence retain jobs durably. Memory persistence is
+ephemeral and requires explicit acknowledgement; persistence.backend = "none"
+does not register async or job tools. Reissue an identical deduplicable request
+only when the design inputs are unchanged.
 
-If after 3 rounds the design is still not approved, the design likely needs a fundamental rethink — escalate to the user.
+Mistral Vibe defaults session logging to enabled. Before relying on
+resumeLatest or sessionId continuity, run doctor and correct an explicit
+[session_logging] enabled = false configuration. Codex native resume requires a
+real Codex UUID and inherits its original target and sandbox settings.
 
-## Document Types and Review Focus
+## Acceptance Record
 
-| Document Type | Primary Reviewer | Focus Areas |
-|--------------|-----------------|-------------|
-| Implementation plan | Codex | Feasibility, task ordering, test strategy |
-| API specification | Codex + Gemini | Completeness, security, error handling |
-| Architecture decision | Codex + Grok | Trade-offs, scalability, maintenance burden, independent perspective |
-| Security design | Gemini | Attack surfaces, threat model, mitigations |
-| Data model | Codex | Normalization, query patterns, migration path |
-| High-stakes / hard-to-reverse design | Codex + Gemini + Grok | Use all three when the design locks in a contract or migration path |
-
-## Review Request Templates
-
-### For Implementation Plans
-
-```
-Review the implementation plan at [path].
-
-Context: This plan implements [feature] for [project].
-
-Check:
-- Are tasks ordered correctly (dependencies respected)?
-- Is the test strategy adequate?
-- Are there missing tasks or gaps?
-- Is the scope appropriate (not too broad, not too narrow)?
-- Are file paths and function names consistent throughout?
-
-APPROVED or NOT APPROVED with findings.
-```
-
-### For API Specifications
-
-```
-Review the API specification at [path].
-
-Context: This API serves [purpose] for [consumers].
-
-Check:
-- Are all endpoints documented with request/response schemas?
-- Are error cases handled (400, 401, 403, 404, 500)?
-- Is authentication/authorization specified?
-- Are there rate limiting or pagination considerations?
-- Is the naming consistent and RESTful?
-
-APPROVED or NOT APPROVED with findings.
-```
-
-### For Architecture Decisions
-
-```
-Review the architecture decision at [path].
-
-Context: This decision affects [components] in [project].
-
-Check:
-- Are alternatives considered and trade-offs documented?
-- Is the chosen approach justified with concrete reasons?
-- What are the long-term maintenance implications?
-- Are there migration or rollback considerations?
-- Does this align with existing system architecture?
-
-APPROVED or NOT APPROVED with findings.
-```
-
-## Integration with sqry Review Process
-
-Many sqry review documents follow this naming convention:
-- `01_SPEC.md` → Specification
-- `02_DESIGN.md` → Design document
-- `02_DESIGN_review_r1_request.md` → Review request (round 1)
-- `02_DESIGN_review_r2_request.md` → Review request (round 2)
-
-The skill works with any document structure — the naming convention is optional.
-
-## Tips
-
-- Always provide file paths, not inline content. Let the reviewer read the document.
-- Include context about the project and feature — reviewers don't have your conversation history.
-- Use `correlationId` for every review round to enable tracing.
-- For large documents, tell the reviewer which sections changed between rounds.
-- Always pass `fullAuto: true` **and** `approvalStrategy: "mcp_managed"` for Codex reviews — `fullAuto:true` gives Codex sandboxed file/shell access, while `mcp_managed` records and gates the request. If Codex still can't access something specific, paste the relevant sections inline.
-- Design reviews are cheaper than code reviews — catch issues before writing code.
-- For multi-round reviews of the same design, pass `resumeLatest:true` to Codex on round 2+ to carry the reviewer's prior context (or `sessionId:<UUID>` for a specific Codex session). Note: `--full-auto` is dropped on resume — the original session's approval policy is inherited.
-- **Deferred review jobs are durable** (default 30-day retention, `LLM_GATEWAY_JOB_RETENTION_DAYS`). If polling times out mid-round, re-issue the same call (auto-dedup reattaches to the running job) or fetch by `jobId` later. Use `forceRefresh:true` only when the design document has actually been updated.
-- For multi-round design reviews where the design document itself doesn't move much between rounds, switch from `prompt` to the structured `promptParts` field: put the stable review brief in `system`, the design content (or path-to-design) in `context`, and the round-specific question in `task`. `prompt` and `promptParts` are mutually exclusive. Stable `system`/`context` across rounds keeps the prefix-hash identical, raising implicit cache hit rate at the provider. After a round, read `cache-state://prefix/{hash}` to confirm reviewers actually shared the prefix.
+- Review scope and required provider roster
+- Target repository, revision, and targeting method for every reviewer
+- Prompt and review criteria used
+- Every finding, response, validation result, and re-review
+- Explicit `APPROVED_UNCONDITIONALLY` from every required reviewer
+- Any terminal provider error labeled as `BLOCKED_EXTERNAL`, never as approval

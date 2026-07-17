@@ -50,6 +50,7 @@ function parseArgs(argv) {
     failOnCritical: false,
     provider: null,
     probeInstalled: false,
+    requireInstalled: false,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -60,7 +61,10 @@ function parseArgs(argv) {
     else if (a === "--fail-on-critical") flags.failOnCritical = true;
     else if (a === "--provider") flags.provider = argv[++i] ?? null;
     else if (a === "--probe-installed") flags.probeInstalled = true;
-    else if (a === "--help" || a === "-h") flags.help = true;
+    else if (a === "--require-installed") {
+      flags.requireInstalled = true;
+      flags.probeInstalled = true;
+    } else if (a === "--help" || a === "-h") flags.help = true;
     else {
       console.error(`[upstream-scan] unknown argument: ${a}`);
       flags.help = true;
@@ -82,8 +86,13 @@ function printHelp() {
       "  --fail-on-critical    Exit non-zero when a critical finding is present (advisory otherwise).",
       "  --provider <cli>      Limit to one CliType (claude|codex|gemini|grok|mistral|devin|cursor).",
       "  --probe-installed     Also run local --help probes and report bidirectional drift vs the contract",
-      "                        (and vs prior snapshots when --write-snapshot is also used). Safe no-op if",
-      "                        the binary is not present on this machine.",
+      "                        (and vs prior snapshots when --write-snapshot is also used). A provider whose",
+      "                        binary is absent is SKIPPED, not failed, so this alone exits 0 on a machine",
+      "                        with no provider CLIs: convenient locally, useless as a gate.",
+      "  --require-installed   Implies --probe-installed, and reports a critical finding for any provider",
+      "                        whose binary is absent. Use this in a gate: --probe-installed alone reports",
+      "                        no drift on a machine with no provider CLIs, which passes while verifying",
+      "                        nothing.",
       "  -h, --help            Show this help.",
       "",
       "Default (no flags): offline, network-free summary of tracked sources + contract surface.",
@@ -108,7 +117,19 @@ async function loadMachinery() {
     import(DIST_EXECUTOR),
     import(DIST_PROVIDER_DEFINITIONS),
   ]);
-  return { ...contracts, ...executor, ...providerDefinitions };
+  const machinery = { ...contracts, ...executor, ...providerDefinitions };
+  // The shared trust predicate now lives in the runtime module and is imported
+  // here rather than duplicated. A stale dist (built before F4) would silently
+  // drop the escalation, so fail loudly instead of scanning with a missing
+  // predicate.
+  if (typeof machinery.subcommandHelpProbeIsUntrusted !== "function") {
+    console.error(
+      "[upstream-scan] compiled machinery is missing subcommandHelpProbeIsUntrusted. " +
+        "The dist is stale; run `npm run build` and re-run."
+    );
+    process.exit(2);
+  }
+  return machinery;
 }
 
 function loadToml() {
@@ -488,7 +509,8 @@ function normalizedDiscoveredFlags(surface) {
 
 function normalizeHelpSurface(surface) {
   if (!surface || typeof surface !== "object") return surface;
-  const { flags: _legacyFlags, ...rest } = surface;
+  const rest = { ...surface };
+  delete rest.flags;
   return {
     ...rest,
     discoveredFlags: normalizedDiscoveredFlags(surface),
@@ -790,6 +812,34 @@ export function compareTargetVersion(targetVersion, installedVersion) {
   };
 }
 
+/**
+ * Decide whether an indeterminate installed-version comparison must count as a
+ * critical unverified state. `compareTargetVersion` returns `matches: null` when
+ * either side is unparseable or unavailable; under --require-installed a
+ * declared target we could not confirm is a fail-open (the run would otherwise
+ * only log and exit 0), so it is critical. A clean match or mismatch is decided
+ * elsewhere, and a probe with no declared target is left alone so a provider
+ * that intentionally pins no version is not forced to fail.
+ */
+export function requireInstalledVersionIndeterminateIsCritical(requireInstalled, versionProbe) {
+  if (!requireInstalled) return false;
+  if (versionProbe?.matches === true || versionProbe?.matches === false) return false;
+  return Boolean(versionProbe?.targetVersion);
+}
+
+/**
+ * Decide whether a help probe that spawned but exited nonzero must count as a
+ * critical unverified state. Such help text cannot be trusted for drift
+ * comparison (it may be an error message that happens to match), so under
+ * --require-installed it is a fail-open exactly like a nonzero `--version` exit,
+ * and is escalated to a critical rather than a mere warning.
+ */
+export function requireInstalledHelpProbeErrorIsCritical(requireInstalled, helpProbe) {
+  if (!requireInstalled) return false;
+  if (!helpProbe?.available) return false;
+  return Boolean(helpProbe?.helpExitedNonzero);
+}
+
 function runReadOnlyCliCommand(machinery, executable, args, timeoutMs = PROBE_TIMEOUT_MS) {
   const extendedPath =
     typeof machinery.getExtendedPath === "function"
@@ -832,6 +882,24 @@ function firstVersionLine(output) {
       ?.slice(0, 240) ?? null
   );
 }
+
+/**
+ * Parse the installed version from a `--version` probe result, but ONLY when the
+ * command both spawned and exited 0. A nonzero exit (or a signal kill, where
+ * `status` is null) means `--version` itself failed, so its stdout may be stale
+ * or error text that happens to parse; trusting it was a fail-open. Returning
+ * null here forces the version comparison to `matches: null`, which under
+ * --require-installed is escalated to a critical rather than passing as verified.
+ */
+export function parseTrustedInstalledVersion(versionResult) {
+  const trusted = Boolean(versionResult?.available) && versionResult?.status === 0;
+  return trusted ? firstVersionLine(versionResult.output ?? "") : null;
+}
+
+// `subcommandHelpProbeIsUntrusted` is the shared trust predicate. It lives in
+// src/upstream-contracts.ts (the runtime probe uses the SAME decision) and is
+// imported here via loadMachinery() rather than duplicated, so the two probes
+// can never drift apart again (the F4 fail-open root cause).
 
 export function rootCatalogDrift(subcommands, rootCommands) {
   if (!Array.isArray(rootCommands) || rootCommands.length === 0) {
@@ -905,7 +973,7 @@ export function verifyDeclaredCommandPath(
   return { state: "present", reason: null };
 }
 
-function probeInstalledCliSubcommands(machinery, contract, rootHelp, timeoutMs) {
+export function probeInstalledCliSubcommands(machinery, contract, rootHelp, timeoutMs) {
   const subcommands = machinery.flattenCliSubcommands(contract.subcommands);
   const aliasesByPath = new Map(
     subcommands.map(subcommand => [subcommand.commandPath.join(" "), subcommand.aliases ?? []])
@@ -971,6 +1039,10 @@ function probeInstalledCliSubcommands(machinery, contract, rootHelp, timeoutMs) 
 
     const outputs = [];
     let available = true;
+    // A non-tolerant subcommand help that exits nonzero produced untrustworthy
+    // drift-comparison text, the same fail-open the root help / --version fixes
+    // close. Track it so --require-installed can escalate it to a critical.
+    let helpExitedNonzero = false;
     for (const helpArgs of subcommand.helpArgs) {
       const result = runReadOnlyCliCommand(
         machinery,
@@ -980,6 +1052,15 @@ function probeInstalledCliSubcommands(machinery, contract, rootHelp, timeoutMs) 
       );
       if (!result.available) {
         available = false;
+        // The root executable already spawned, so a subcommand help probe that
+        // fails to run (timeout, EACCES, ...) is a probe we could not complete,
+        // not an absent path. That is untrustworthy even for a help-exit-tolerant
+        // subcommand (tolerance covers a nonzero exit status, not a probe that
+        // never ran), so flag it and let --require-installed escalate it rather
+        // than passing this path as drift-free.
+        if (machinery.subcommandHelpProbeIsUntrusted(subcommand, result)) {
+          helpExitedNonzero = true;
+        }
         warnings.push(
           result.error ??
             `could not run ${contract.executable} ${[...commandPath, ...helpArgs].join(" ")}`
@@ -987,7 +1068,8 @@ function probeInstalledCliSubcommands(machinery, contract, rootHelp, timeoutMs) 
         break;
       }
       outputs.push(result.output);
-      if (result.status !== 0 && !subcommand.helpProbeExitTolerant) {
+      if (machinery.subcommandHelpProbeIsUntrusted(subcommand, result)) {
+        helpExitedNonzero = true;
         warnings.push(
           `${contract.executable} ${[...commandPath, ...helpArgs].join(" ")} exited with status ${result.status}`
         );
@@ -1025,6 +1107,7 @@ function probeInstalledCliSubcommands(machinery, contract, rootHelp, timeoutMs) 
       commandPath,
       checkedHelpCommands,
       available,
+      helpExitedNonzero,
       existence: fellBackToRoot ? "missing" : pathState.state,
       missingFlags: drift.missingFlags,
       extraFlags: drift.extraFlags,
@@ -1044,10 +1127,15 @@ function probeInstalledCliSubcommands(machinery, contract, rootHelp, timeoutMs) 
   return probes;
 }
 
-function probeInstalledCliSurface(machinery, cli, timeoutMs = PROBE_TIMEOUT_MS) {
+export function probeInstalledCliSurface(machinery, cli, timeoutMs = PROBE_TIMEOUT_MS) {
   const contract = machinery.UPSTREAM_CLI_CONTRACTS[cli];
   const warnings = [];
   const outputs = [];
+  // A help command that exits nonzero (or by signal) produced help text we cannot
+  // trust for drift comparison. Track it so --require-installed can escalate it to
+  // a critical instead of a mere warning (the same fail-open the --version fix
+  // closes; a matching-looking help output with a failed exit must not pass).
+  let helpExitedNonzero = false;
   let resolvedCommand;
   let resolvedArgs;
 
@@ -1070,6 +1158,12 @@ function probeInstalledCliSurface(machinery, cli, timeoutMs = PROBE_TIMEOUT_MS) 
         arityMismatches: [],
         enumMismatches: [],
         helpHash: null,
+        // `available:false` fails closed on its own, but contract.helpArgs can
+        // hold more than one entry (Codex `exec --help` + `exec resume --help`).
+        // Preserve any nonzero exit an EARLIER entry already produced rather than
+        // dropping it, so the reported signal stays honest (matches the runtime
+        // probeInstalledCliContract early return).
+        helpExitedNonzero,
         versionProbe: null,
         rootCommands: [],
         rootCatalogDrift: { added: [], removed: [] },
@@ -1080,6 +1174,7 @@ function probeInstalledCliSurface(machinery, cli, timeoutMs = PROBE_TIMEOUT_MS) 
     }
     outputs.push(result.output);
     if (result.status !== 0) {
+      helpExitedNonzero = true;
       warnings.push(
         `${contract.executable} ${helpArgs.join(" ")} exited with status ${result.status}`
       );
@@ -1103,6 +1198,7 @@ function probeInstalledCliSurface(machinery, cli, timeoutMs = PROBE_TIMEOUT_MS) 
       rootResult.error ?? `${contract.executable} --help was unavailable for root command discovery`
     );
   } else if (rootResult.status !== 0) {
+    helpExitedNonzero = true;
     warnings.push(`${contract.executable} --help exited with status ${rootResult.status}`);
   }
 
@@ -1112,7 +1208,11 @@ function probeInstalledCliSurface(machinery, cli, timeoutMs = PROBE_TIMEOUT_MS) 
     ["--version"],
     timeoutMs
   );
-  const installedVersion = versionResult.available ? firstVersionLine(versionResult.output) : null;
+  // Trust the parsed version ONLY when the command both spawned AND exited 0
+  // (see parseTrustedInstalledVersion). A nonzero exit yields null here, making
+  // `matches` indeterminate, which under --require-installed is escalated to a
+  // critical (installed-version-indeterminate) rather than passing as verified.
+  const installedVersion = parseTrustedInstalledVersion(versionResult);
   const targetVersion = machinery.getProviderDefinition(cli).upstreamContract.targetVersion;
   const versionProbe = {
     available: versionResult.available,
@@ -1129,6 +1229,13 @@ function probeInstalledCliSurface(machinery, cli, timeoutMs = PROBE_TIMEOUT_MS) 
   }
 
   const flattened = machinery.flattenCliSubcommands(contract.subcommands);
+  const subcommands = probeInstalledCliSubcommands(machinery, contract, rootHelp, timeoutMs);
+  // A non-tolerant subcommand help that exited nonzero is the same untrustworthy
+  // fail-open as a nonzero root help, so fold it into helpExitedNonzero and let
+  // requireInstalledHelpProbeErrorIsCritical escalate it under --require-installed.
+  if (Object.values(subcommands).some(probe => probe.helpExitedNonzero)) {
+    helpExitedNonzero = true;
+  }
   return {
     cli,
     executable: contract.executable,
@@ -1143,10 +1250,11 @@ function probeInstalledCliSurface(machinery, cli, timeoutMs = PROBE_TIMEOUT_MS) 
     arityMismatches: shapes.arityMismatches,
     enumMismatches: shapes.enumMismatches,
     helpHash: sha256(helpText),
+    helpExitedNonzero,
     versionProbe,
     rootCommands: rootHelp.commands,
     rootCatalogDrift: rootCatalogDrift(flattened, rootHelp.commands),
-    subcommands: probeInstalledCliSubcommands(machinery, contract, rootHelp, timeoutMs),
+    subcommands,
     probedAt: new Date().toISOString(),
     warnings,
   };
@@ -1376,11 +1484,64 @@ async function runScan(machinery, toml, flags) {
         helpProbe = probeInstalledCliSurface(machinery, cli);
       } catch (e) {
         console.warn(`  [probe] failed for ${cli}: ${e?.message ?? e}`);
+        // A thrown probe must not be silently treated as drift-free. Under
+        // --require-installed the entire contract of the flag is that drift was
+        // actually checked against the installed binary, so a probe that could
+        // not run is a critical unverified state, exactly like the absent-binary
+        // path below. Without this, a machinery bug in the probe path lets
+        // --fail-on-critical exit 0 while checking nothing.
+        if (flags.requireInstalled) {
+          findings.push({
+            severity: "critical",
+            category: "installed-probe-error",
+            message: `--require-installed was set but probing the ${cli} binary (${contract.executable}) threw (${e?.message ?? e}), so its contract is unverified. Fix the probe or drop --require-installed; do not treat this run as drift-free.`,
+          });
+          criticalCount++;
+          console.log(
+            `  [probe] PROBE ERROR: ${contract.executable} probe threw; contract unverified`
+          );
+        }
       }
 
       if (helpProbe) {
         const prior = priorSnapshot;
         const priorHelp = priorSnapshot?.helpSurface;
+
+        // `--probe-installed` alone is a no-op for an absent binary, which is
+        // right for a developer machine that has only some providers, and a
+        // trap for a gate: a runner with no provider CLIs installed reports
+        // zero drift and passes while checking nothing. `--require-installed`
+        // makes that vacuous pass impossible by demanding the binary actually
+        // be there. The provider set comes from the registry, so this never
+        // needs a hand-maintained list of executables.
+        if (flags.requireInstalled && !helpProbe.available) {
+          findings.push({
+            severity: "critical",
+            category: "installed-binary-absent",
+            message: `--require-installed was set but the ${cli} binary (${contract.executable}) could not be probed on this machine, so its contract is unverified. Install the provider CLI or drop --require-installed; do not treat this run as drift-free.`,
+          });
+          criticalCount++;
+          console.log(
+            `  [probe] BINARY ABSENT: ${contract.executable} not probeable; contract unverified`
+          );
+        }
+
+        if (requireInstalledHelpProbeErrorIsCritical(flags.requireInstalled, helpProbe)) {
+          // A help command either exited nonzero or (for a subcommand probe) could
+          // not run at all (timeout, EACCES), so the help text used for drift
+          // comparison is untrustworthy or absent. Under --require-installed that
+          // is an unverified contract, the same fail-open the --version exit fix
+          // closes, so escalate it to a critical rather than a warning.
+          findings.push({
+            severity: "critical",
+            category: "installed-help-probe-error",
+            message: `--require-installed was set but a ${cli} help probe (${contract.executable}) exited nonzero or could not run, so its help output cannot be trusted for drift comparison and its contract is unverified. Re-probe the CLI; do not treat this run as drift-free.`,
+          });
+          criticalCount++;
+          console.log(
+            `  [probe] HELP PROBE ERROR (require-installed): ${contract.executable} help exited nonzero or could not run; contract unverified`
+          );
+        }
 
         if (helpProbe.available) {
           const versionProbe = helpProbe.versionProbe;
@@ -1396,10 +1557,33 @@ async function runScan(machinery, toml, flags) {
             );
           } else if (versionProbe?.matches === true) {
             console.log(`  [probe] version matches target: ${versionProbe.targetVersion}`);
-          } else if (versionProbe) {
-            console.log(
-              `  [probe] version could not be compared: installed=${versionProbe.installedVersion ?? "unparseable"}; target=${versionProbe.targetVersion}`
-            );
+          } else {
+            // Indeterminate: the installed version could not be parsed or read,
+            // or no version probe ran at all. A declared target we cannot
+            // confirm is an unverified contract, so under --require-installed it
+            // is critical rather than a log line, closing the same fail-open as
+            // the absent-binary and probe-error paths. targetVersion is present
+            // for every provider today; guarding on it avoids inventing a
+            // failure for a provider that intentionally pins no version.
+            const installed = versionProbe?.installedVersion ?? "unparseable";
+            const target = versionProbe?.targetVersion ?? null;
+            if (
+              requireInstalledVersionIndeterminateIsCritical(flags.requireInstalled, versionProbe)
+            ) {
+              findings.push({
+                severity: "critical",
+                category: "installed-version-indeterminate",
+                message: `--require-installed was set but the installed ${cli} version could not be compared against the contract baseline ${target} (installed=${installed}), so its version is unverified. Re-probe the CLI; do not treat this run as drift-free.`,
+              });
+              criticalCount++;
+              console.log(
+                `  [probe] VERSION INDETERMINATE (require-installed): installed=${installed}; target=${target}`
+              );
+            } else {
+              console.log(
+                `  [probe] version could not be compared: installed=${installed}; target=${target ?? "unknown"}`
+              );
+            }
           }
 
           const contractFlags = new Set(Object.keys(contract.flags));

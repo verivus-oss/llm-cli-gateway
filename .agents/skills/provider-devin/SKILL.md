@@ -42,14 +42,44 @@ metadata is authoritative; the TOML is scanner input only.
    work. Sync calls may auto-defer; poll `llm_job_status` and fetch with
    `llm_job_result` when that happens.
 3. Omit `model` unless the caller explicitly requests one. Use only request
-   controls reported by `provider_tool_capabilities`.
+   controls reported by `provider_tool_capabilities`. Devin must use
+   `approvalStrategy:"legacy"`: it rejects Claude-only `mcp_managed` before
+   launch, and `approvalPolicy` has no effect.
 4. Treat `permissionMode:"accept-edits"` as an explicit edit-authorizing choice.
    It is not equivalent to unrestricted autonomous execution.
-5. Use a real resumable provider session only when the response reports it as
+5. Devin accepts flat `prompt` only, not `promptParts`. For CLI transport, pass
+   local `workingDir` or a verified registered `workspace` to bind the
+   repository. Use gateway `worktree` only with an explicit provider-native
+   `sessionId` that is not overridden by `createNewSession`; fresh,
+   `createNewSession`, and `resumeLatest`-only worktree requests fail closed.
+   ACP rejects `workingDir` and `worktree`; use its registered `workspace`
+   selector. An unscoped CLI child runs in a fresh neutral temporary cwd, not
+   the gateway repository.
+6. Use a real resumable provider session only when the response reports it as
    resumable. Gateway bookkeeping IDs are not automatically valid Devin session
-   IDs.
-6. Native ACP is capability-gated. Probe the actual entrypoint with
-   `devin acp --help`, not only `devin --version`.
+   IDs. `resumeLatest:true` needs `workingDir`, `workspace`, or a configured
+   default workspace because Devin's latest-session pointer is cwd-scoped.
+7. Native ACP is capability-gated. It rejects `approvalStrategy:"mcp_managed"`
+   and any `approvalPolicy`, as does the Devin CLI gateway path. Probe the
+   actual entrypoint with `devin acp --help`, not only `devin --version`.
+8. Devin's CLI print prompt is argv-bound. Oversized UTF-8 input fails before
+   spawn as non-retryable `input_too_large`; the gateway never truncates it.
+   All other caller-controlled argv values are admitted in their final encoded
+   form before spawn. Embedded NUL bytes return non-retryable `invalid_input`
+   without exposing the rejected value.
+
+### Full-access review handoff
+
+For a user-authorized exhaustive review that needs full provider permissions and
+native MCP access, do not infer the launch controls from this maintenance guide.
+Follow `multi-llm-review`'s full-access protocol, inspect the current request
+schema and live capability response, and use a fresh target-checkout
+`node dist/index.js --transport=stdio` gateway rather than a global process.
+Reapply the grant on every new job, preserve native MCP configuration without a
+pretend gateway allowlist, send the corrective-program report and exact
+diff/file identity, set no caller caps, and honor a user-required 90-second
+progress cadence. The reviewer must independently inspect code, docs, tests,
+and commands before it can approve.
 
 ## Scan for upstream change
 

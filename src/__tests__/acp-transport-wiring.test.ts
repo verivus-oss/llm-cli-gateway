@@ -8,8 +8,15 @@
  */
 import { describe, expect, it } from "vitest";
 
-import { handleCursorRequest, handleDevinRequest, type GatewayServerRuntime } from "../index.js";
+import {
+  handleCursorRequest,
+  handleDevinRequest,
+  handleGrokRequest,
+  handleMistralRequest,
+  type GatewayServerRuntime,
+} from "../index.js";
 import type { AcpConfig, AcpProviderConfig } from "../config.js";
+import { PersonalConfigManager } from "../personal-config.js";
 import type { ISessionManager, ProviderType, Session } from "../session-manager.js";
 
 const noopLog = { info() {}, warn() {}, error() {}, debug() {} };
@@ -61,6 +68,11 @@ function runtimeWith(cfg: AcpConfig): GatewayServerRuntime {
     approvalManager: { decide: () => ({ status: "approved" }) },
     flightRecorder: { logStart() {}, logComplete() {} },
     logger: noopLog,
+    personalConfig: new PersonalConfigManager({
+      enabled: false,
+      baselinePath: "/unused",
+      maxStaleHours: 168,
+    }),
   } as unknown as GatewayServerRuntime;
 }
 
@@ -117,4 +129,107 @@ describe("ACP transport wiring — fail closed", () => {
     expect(text).toContain("runtime routing is not enabled");
     expect(text).toContain("cursor");
   });
+
+  it("rejects CLI managed approval strategy on ACP instead of silently ignoring it", async () => {
+    const res = await handleCursorRequest(deps(acpConfig()), {
+      transport: "acp",
+      prompt: "hi",
+      approvalStrategy: "mcp_managed",
+      optimizePrompt: false,
+    });
+    const text = JSON.stringify(res);
+    expect(text).toContain("does not support approvalStrategy:mcp_managed");
+    expect(text).toContain("transport=cli");
+  });
+
+  it("rejects Grok ACP CLI-only continuation controls instead of dropping them", async () => {
+    const res = await handleGrokRequest(deps(acpConfig()), {
+      transport: "acp",
+      prompt: "hi",
+      resumeLatest: true,
+      createNewSession: false,
+      approvalStrategy: "legacy",
+      optimizePrompt: false,
+    });
+    const text = JSON.stringify(res);
+    expect(text).toContain("transport=acp does not support");
+    expect(text).toContain("resumeLatest");
+  });
+
+  it("rejects Mistral ACP gateway worktree controls instead of dropping them", async () => {
+    const res = await handleMistralRequest(deps(acpConfig()), {
+      transport: "acp",
+      prompt: "hi",
+      resumeLatest: false,
+      createNewSession: false,
+      approvalStrategy: "legacy",
+      optimizePrompt: false,
+      worktree: true,
+    });
+    const text = JSON.stringify(res);
+    expect(text).toContain("transport=acp does not support");
+    expect(text).toContain("worktree");
+  });
+
+  it("rejects Devin ACP safety and execution controls instead of dropping them", async () => {
+    const res = await handleDevinRequest(deps(acpConfig()), {
+      transport: "acp",
+      prompt: "hi",
+      permissionMode: "dangerous",
+      sandbox: true,
+      resumeLatest: true,
+      idleTimeoutMs: 30_000,
+      optimizePrompt: false,
+    });
+    const text = JSON.stringify(res);
+    expect(text).toContain("transport=acp does not support");
+    expect(text).toContain("permissionMode");
+    expect(text).toContain("sandbox");
+    expect(text).toContain("resumeLatest");
+    expect(text).toContain("idleTimeoutMs");
+  });
+
+  it.each([true, false])(
+    "rejects explicit compressResponse=%s for every ACP provider instead of dropping it",
+    async compressResponse => {
+      const responses = await Promise.all([
+        handleGrokRequest(deps(acpConfig()), {
+          transport: "acp",
+          prompt: "hi",
+          resumeLatest: false,
+          createNewSession: false,
+          approvalStrategy: "legacy",
+          optimizePrompt: false,
+          compressResponse,
+        }),
+        handleMistralRequest(deps(acpConfig()), {
+          transport: "acp",
+          prompt: "hi",
+          resumeLatest: false,
+          createNewSession: false,
+          approvalStrategy: "legacy",
+          optimizePrompt: false,
+          compressResponse,
+        }),
+        handleDevinRequest(deps(acpConfig()), {
+          transport: "acp",
+          prompt: "hi",
+          optimizePrompt: false,
+          compressResponse,
+        }),
+        handleCursorRequest(deps(acpConfig()), {
+          transport: "acp",
+          prompt: "hi",
+          optimizePrompt: false,
+          compressResponse,
+        }),
+      ]);
+
+      for (const response of responses) {
+        const text = JSON.stringify(response);
+        expect(text).toContain("transport=acp does not support");
+        expect(text).toContain("compressResponse");
+      }
+    }
+  );
 });

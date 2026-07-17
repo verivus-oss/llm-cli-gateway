@@ -73,7 +73,19 @@ function getRegisteredToolSchema(toolName: string): {
 // rejection case.
 
 describe("REGRESSIONS Zα — registered tool addDir / workingDir (slice ζ)", () => {
-  // Claude: addDir only (Claude has no working-dir flag).
+  // Claude has no native working-dir flag, but the gateway must expose a
+  // workingDir input so it can launch the child process in that checkout.
+  it.each(["claude_request", "claude_request_async"])(
+    "%s.workingDir accepts non-empty string and rejects empty",
+    name => {
+      const { shape } = getRegisteredToolSchema(name);
+      const f = shape.workingDir;
+      expect(f, `${name}.workingDir must be registered`).toBeDefined();
+      expect(f.safeParse("/tmp/work").success).toBe(true);
+      expect(f.safeParse("").success).toBe(false);
+    }
+  );
+
   it.each(["claude_request", "claude_request_async"])("%s.addDir accepts string[]", name => {
     const { shape } = getRegisteredToolSchema(name);
     const f = shape.addDir;

@@ -4,11 +4,11 @@
 
 - [ ] `package.json` version bumped as a minor release.
 - [ ] `CHANGELOG.md` documents:
-	  - OAuth for remote MCP connectors.
-	  - Static client/shared-secret setup.
-	  - Workspace registry and provider cwd behavior.
-	  - Controlled workspace folder/repo creation under allowed roots.
-	  - No-auth ChatGPT path deprecation.
+  - OAuth for remote MCP connectors.
+  - Static client/shared-secret setup.
+  - Workspace registry and provider cwd behavior.
+  - Controlled workspace folder/repo creation under allowed roots.
+  - No-auth ChatGPT path deprecation.
 - [ ] `README.md` and setup docs no longer recommend no-auth ChatGPT setup for
       new installs.
 - [ ] `setup/status.schema.json` accepts doctor OAuth/workspace blocks.
@@ -55,7 +55,10 @@ npm run upstream:contracts
       secret references are committed.
 - [ ] Private upstream CI passes.
 - [ ] Public mirror CI passes.
-- [ ] GitHub release on public mirror runs npm provenance publish.
+- [ ] Published stable GitHub release on the public mirror starts npm OIDC
+      trusted publishing, installer-artifact builds, and the Pages deployment.
+- [ ] Pages deployment checks out the release tag and passes stable-version,
+      generated-discovery, and static-site validation before upload.
 - [ ] Published npm package contains built OAuth/workspace code and setup
       schemas.
 - [ ] Fresh install from npm can configure a remote connector without relying

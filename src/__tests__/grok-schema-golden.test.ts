@@ -61,7 +61,6 @@ const MIN1_STRINGS = [
   "systemPromptOverride",
   "agent",
   "promptFile",
-  "single",
   "leaderSocket",
 ];
 const ENUMS: Array<[string, string, string]> = [

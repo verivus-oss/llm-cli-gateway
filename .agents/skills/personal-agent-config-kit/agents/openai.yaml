@@ -1,0 +1,4 @@
+interface:
+  display_name: "Personal Agent Config Kit"
+  short_description: "Sync safe personal agent configuration"
+  default_prompt: "Use $personal-agent-config-kit to configure and synchronize a safe Personal Agent Config Kit."

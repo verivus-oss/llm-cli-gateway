@@ -232,16 +232,18 @@ describe("REGRESSIONS Kβ — prepareClaudeRequest κ branch (slice κ)", () => 
     expect(r.content[0].text).toMatch(/outputFormat.*stream-json/i);
   });
 
-  it("Kβ-4: promptParts WITHOUT cacheControl keeps the positional -p path and emits no stdinPayload (regression)", () => {
+  it("Kβ-4: promptParts WITHOUT cacheControl keeps the guarded positional -p path and emits no stdinPayload (regression)", () => {
     const prep = prepareClaudeRequest({
       ...BASE_CLAUDE_PARAMS,
       outputFormat: "text",
       promptParts: { system: "S", task: "K" },
     } as never);
     if (!("args" in prep)) throw new Error("expected args");
-    // Positional path: ["-p", "S\n\nK", …]
+    // Positional path stays in argv, after the end-of-options marker so a
+    // caller prompt beginning with '-' cannot be reinterpreted as a CLI flag.
     expect(prep.args[0]).toBe("-p");
-    expect(prep.args[1]).toBe("S\n\nK");
+    expect(prep.args.at(-2)).toBe("--");
+    expect(prep.args.at(-1)).toBe("S\n\nK");
     expect(prep.stdinPayload).toBeUndefined();
     expect(prep.cacheControlBlocks).toBeUndefined();
     expect(prep.args).not.toContain("--input-format");
@@ -254,7 +256,8 @@ describe("REGRESSIONS Kβ — prepareClaudeRequest κ branch (slice κ)", () => 
     } as never);
     if (!("args" in prep)) throw new Error("expected args");
     expect(prep.args[0]).toBe("-p");
-    expect(prep.args[1]).toBe("hi");
+    expect(prep.args.at(-2)).toBe("--");
+    expect(prep.args.at(-1)).toBe("hi");
     expect(prep.stdinPayload).toBeUndefined();
     expect(prep.args).not.toContain("--input-format");
   });
@@ -268,7 +271,8 @@ describe("REGRESSIONS Kβ — prepareClaudeRequest κ branch (slice κ)", () => 
     expect(prep.stdinPayload).toBeUndefined();
     expect(prep.cacheControlBlocks).toBeUndefined();
     expect(prep.args[0]).toBe("-p");
-    expect(prep.args[1]).toBe("K");
+    expect(prep.args.at(-2)).toBe("--");
+    expect(prep.args.at(-1)).toBe("K");
     expect(prep.warnings?.find(w => w.code === "cache_control_noop")).toBeDefined();
   });
 

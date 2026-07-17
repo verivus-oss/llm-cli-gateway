@@ -1,12 +1,16 @@
 # Three Things That Have Changed Since "Why CLI Wrapping Beats API Proxying"
 
-*Published 2026-05-19 by VerivusAI Labs*
+_Published 2026-05-19 by VerivusAI Labs_
 
 A few weeks ago I wrote [Why CLI Wrapping Beats API Proxying for Multi-LLM Development](./blog-cli-vs-api.md), the case for spawning `claude`, `codex`, and `gemini` as child processes instead of proxying to their APIs. Three things have changed since I published that piece. Two of them fix real limitations I named at the time, and one of them is a new capability that I wish had been there from the start. Worth a follow-up.
 
 ## Codex sessions are now real, not bookkeeping
 
-In the original post I said llm-cli-gateway uses real CLI continuity flags, "`--continue` and `--resume`, not bookkeeping". That was true for Claude and Gemini. For Codex it was, frankly, a half-truth.
+In the original post I said llm-cli-gateway uses real CLI continuity flags,
+"`--continue` and `--resume`, not bookkeeping". That was true for Claude and,
+at that time, Gemini. The current Gemini-compatible Antigravity adapter uses
+`--conversation <id>` for `sessionId` and `--continue` for `resumeLatest:true`.
+For Codex it was, frankly, a half-truth.
 
 Codex did not have a documented resume mechanism at the time. So when you opened a Codex session through the gateway, the session record was real (UUID, created/lastUsed timestamps, the active-session-per-CLI invariant) but the `codex` process itself started fresh on every request. The gateway tagged subsequent requests as belonging to a session, you could see the session in `session_list`, but Codex did not know that.
 
@@ -49,4 +53,4 @@ If you are evaluating llm-cli-gateway against an API proxy, the comparison is sl
 
 ---
 
-*llm-cli-gateway is MIT licensed. npm: [llm-cli-gateway](https://npmjs.com/package/llm-cli-gateway) | GitHub: [verivus-oss/llm-cli-gateway](https://github.com/verivus-oss/llm-cli-gateway)*
+_llm-cli-gateway is MIT licensed. npm: [llm-cli-gateway](https://npmjs.com/package/llm-cli-gateway) | GitHub: [verivus-oss/llm-cli-gateway](https://github.com/verivus-oss/llm-cli-gateway)_

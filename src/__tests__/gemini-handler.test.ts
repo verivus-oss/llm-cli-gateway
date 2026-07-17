@@ -12,29 +12,42 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { mkdtempSync, writeFileSync, rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
-import {
-  GEMINI_HIGH_IMPACT_PARAMS_SCHEMA,
-  prependGeminiAttachments,
-  prepareGeminiHighImpactFlags,
-  resolveGeminiSessionPlan,
-} from "../request-helpers.js";
-import { prepareGeminiRequest } from "../index.js";
+import { GEMINI_HIGH_IMPACT_PARAMS_SCHEMA, resolveGeminiSessionPlan } from "../request-helpers.js";
+import { prepareGeminiRequest, type GatewayServerRuntime } from "../index.js";
+import { ApprovalManager } from "../approval-manager.js";
+import { noopLogger } from "../logger.js";
 
 let tmp: string;
 let realFile1: string;
-let realFile2: string;
+let originalApprovalAllowBypass: string | undefined;
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), "u27-gemini-"));
   realFile1 = join(tmp, "policy-1.json");
-  realFile2 = join(tmp, "policy-2.json");
+  originalApprovalAllowBypass = process.env.LLM_GATEWAY_APPROVAL_ALLOW_BYPASS;
+  delete process.env.LLM_GATEWAY_APPROVAL_ALLOW_BYPASS;
   writeFileSync(realFile1, "{}", { mode: 0o600 });
-  writeFileSync(realFile2, "{}", { mode: 0o600 });
 });
 
 afterEach(() => {
+  if (originalApprovalAllowBypass === undefined) {
+    delete process.env.LLM_GATEWAY_APPROVAL_ALLOW_BYPASS;
+  } else {
+    process.env.LLM_GATEWAY_APPROVAL_ALLOW_BYPASS = originalApprovalAllowBypass;
+  }
   rmSync(tmp, { recursive: true, force: true });
 });
+
+function managedRuntime(): { runtime: GatewayServerRuntime; approvalManager: ApprovalManager } {
+  const approvalManager = new ApprovalManager(join(tmp, "approvals.jsonl"), noopLogger);
+  return {
+    approvalManager,
+    runtime: {
+      logger: noopLogger,
+      approvalManager,
+    } as unknown as GatewayServerRuntime,
+  };
+}
 
 function baseParams(extra: Record<string, unknown> = {}) {
   return {
@@ -45,75 +58,6 @@ function baseParams(extra: Record<string, unknown> = {}) {
     ...extra,
   };
 }
-
-describe("U27 prepareGeminiHighImpactFlags", () => {
-  it("emits -s when sandbox=true", () => {
-    const out = prepareGeminiHighImpactFlags({ sandbox: true });
-    expect(out.args).toContain("-s");
-    expect(out.missingPolicyPath).toBeNull();
-  });
-
-  it("omits -s when sandbox is false/undefined", () => {
-    expect(prepareGeminiHighImpactFlags({}).args).not.toContain("-s");
-    expect(prepareGeminiHighImpactFlags({ sandbox: false }).args).not.toContain("-s");
-  });
-
-  it("emits --policy <path> per file when paths exist", () => {
-    const out = prepareGeminiHighImpactFlags({ policyFiles: [realFile1, realFile2] });
-    expect(out.missingPolicyPath).toBeNull();
-    expect(out.args).toEqual(["--policy", realFile1, "--policy", realFile2]);
-  });
-
-  it("returns missingPolicyPath when a policyFile does not exist", () => {
-    const missing = join(tmp, "nope.json");
-    const out = prepareGeminiHighImpactFlags({ policyFiles: [realFile1, missing] });
-    expect(out.missingPolicyPath).toBe(missing);
-    expect(out.missingPolicyField).toBe("policyFiles");
-    expect(out.args).toEqual([]);
-  });
-
-  it("emits --admin-policy <path> per file when paths exist", () => {
-    const out = prepareGeminiHighImpactFlags({ adminPolicyFiles: [realFile1] });
-    expect(out.args).toEqual(["--admin-policy", realFile1]);
-  });
-
-  it("returns missingPolicyPath for missing admin policy", () => {
-    const missing = join(tmp, "absent.json");
-    const out = prepareGeminiHighImpactFlags({ adminPolicyFiles: [missing] });
-    expect(out.missingPolicyPath).toBe(missing);
-    expect(out.missingPolicyField).toBe("adminPolicyFiles");
-  });
-});
-
-describe("U27 prependGeminiAttachments", () => {
-  it("prepends @<abs-path> tokens space-separated before the prompt", () => {
-    const result = prependGeminiAttachments("describe this", [realFile1, realFile2]);
-    expect(result).toBe(`@${realFile1} @${realFile2} describe this`);
-  });
-
-  it("returns the prompt unchanged when attachments is empty", () => {
-    expect(prependGeminiAttachments("hello", [])).toBe("hello");
-  });
-
-  it("throws on relative paths (caller should map to error response)", () => {
-    expect(() => prependGeminiAttachments("p", ["./relative.png"])).toThrow(/absolute/);
-  });
-
-  it("throws on missing paths", () => {
-    const missing = join(tmp, "missing.png");
-    expect(() => prependGeminiAttachments("p", [missing])).toThrow(/does not exist/);
-  });
-
-  it("throws on paths that cannot be represented as Gemini @path tokens", () => {
-    const pathWithSpace = join(tmp, "file with space.png");
-    const pathWithAt = join(tmp, "file@name.png");
-    writeFileSync(pathWithSpace, "image", { mode: 0o600 });
-    writeFileSync(pathWithAt, "image", { mode: 0o600 });
-
-    expect(() => prependGeminiAttachments("p", [pathWithSpace])).toThrow(/without escaping/);
-    expect(() => prependGeminiAttachments("p", [pathWithAt])).toThrow(/without escaping/);
-  });
-});
 
 describe("U27 GEMINI_HIGH_IMPACT_PARAMS_SCHEMA", () => {
   it("rejects relative attachment paths at Zod validation", () => {
@@ -225,6 +169,41 @@ describe("U27 prepareGeminiRequest end-to-end", () => {
     expect(remainder).toContain("--model");
     expect(remainder).toContain("--sandbox");
   });
+
+  it("rejects mcp_managed before a Gemini approval decision", () => {
+    const { runtime, approvalManager } = managedRuntime();
+    const prep = prepareGeminiRequest(
+      baseParams({
+        approvalStrategy: "mcp_managed",
+        includeDirs: ["/workspace/extra"],
+      }) as never,
+      runtime
+    );
+
+    expect("args" in prep).toBe(false);
+    expect(JSON.stringify(prep)).toContain(
+      "approvalStrategy:mcp_managed is unavailable for gemini"
+    );
+    expect(approvalManager.list()).toEqual([]);
+  });
+
+  it("rejects mcp_managed even when the operator bypass setting is enabled", () => {
+    process.env.LLM_GATEWAY_APPROVAL_ALLOW_BYPASS = "1";
+    const { runtime, approvalManager } = managedRuntime();
+    const prep = prepareGeminiRequest(
+      baseParams({
+        approvalStrategy: "mcp_managed",
+        includeDirs: ["/workspace/extra"],
+      }) as never,
+      runtime
+    );
+
+    expect("args" in prep).toBe(false);
+    expect(JSON.stringify(prep)).toContain(
+      "approvalStrategy:mcp_managed is unavailable for gemini"
+    );
+    expect(approvalManager.list()).toEqual([]);
+  });
 });
 
 describe("Phase 4 slice γ — Antigravity rejects Gemini --skip-trust wiring", () => {
@@ -249,6 +228,22 @@ describe("Phase 4 slice γ — Antigravity rejects Gemini --skip-trust wiring", 
 });
 
 describe("Gemini --yolo wiring", () => {
+  it("emits --mode accept-edits for legacy auto_edit", () => {
+    const prep = prepareGeminiRequest(baseParams({ approvalMode: "auto_edit" }));
+    if (!("args" in prep)) throw new Error("expected args");
+    expect(prep.args).toContain("--mode");
+    expect(prep.args[prep.args.indexOf("--mode") + 1]).toBe("accept-edits");
+    expect(prep.args).not.toContain("--dangerously-skip-permissions");
+  });
+
+  it("emits --mode plan for legacy plan", () => {
+    const prep = prepareGeminiRequest(baseParams({ approvalMode: "plan" }));
+    if (!("args" in prep)) throw new Error("expected args");
+    expect(prep.args).toContain("--mode");
+    expect(prep.args[prep.args.indexOf("--mode") + 1]).toBe("plan");
+    expect(prep.args).not.toContain("--dangerously-skip-permissions");
+  });
+
   it("emits --dangerously-skip-permissions when yolo=true (legacy, no approvalMode)", () => {
     const prep = prepareGeminiRequest(baseParams({ yolo: true }));
     if (!("args" in prep)) throw new Error("expected args");
@@ -268,5 +263,12 @@ describe("Gemini --yolo wiring", () => {
     if (!("args" in prep)) throw new Error("expected args");
     expect(prep.args.filter(arg => arg === "--dangerously-skip-permissions")).toHaveLength(1);
     expect(prep.args).not.toContain("--approval-mode");
+  });
+
+  it("rejects legacy yolo combined with another execution mode", () => {
+    const prep = prepareGeminiRequest(baseParams({ yolo: true, approvalMode: "auto_edit" }));
+    expect("args" in prep).toBe(false);
+    if ("args" in prep) throw new Error("expected error response");
+    expect(prep.content[0].text).toContain("cannot be combined");
   });
 });

@@ -16,26 +16,34 @@
  *   Lδ — resolveWorktreeForRequest reuses an existing per-session worktree.
  *   Lε — FileSessionManager.deleteSession invokes the cleanup hook BEFORE removal.
  *   Lζ — executor.executeCli honors the cwd option (regression mirror).
- *   Lη — No CLI receives -w or --worktree in emitted argv (all 5 CLIs).
+ *   Lη: No CLI receives -w or --worktree in emitted argv (all 6 CLIs).
  *   Lθ — AsyncJobManager dedup key includes cwd (different worktrees
  *        with identical argv do NOT collide).
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { execFileSync } from "child_process";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import {
   formatWorktreePrefix,
   prepareClaudeRequest,
   prepareCodexRequest,
+  prepareDevinRequest,
   prepareGeminiRequest,
   prepareGrokRequest,
   prepareMistralRequest,
   resolveGatewayServerRuntime,
   resolveWorktreeForRequest,
+  validateResolvedWorktreeForWorkspace,
 } from "../index.js";
-import { createWorktree, sanitizeWorktreeName, WorktreeError } from "../worktree-manager.js";
+import {
+  createWorktree,
+  removeWorktree,
+  sanitizeWorktreeName,
+  WorktreeCollisionError,
+  WorktreeError,
+} from "../worktree-manager.js";
 import { FileSessionManager, type Session } from "../session-manager.js";
 import { AsyncJobManager } from "../async-job-manager.js";
 import { MemoryJobStore } from "../job-store.js";
@@ -87,6 +95,11 @@ const BASE_CODEX = {
   mcpServers: [] as never[],
   optimizePrompt: false,
   operation: "codex_request",
+};
+const BASE_DEVIN = {
+  prompt: "hello",
+  optimizePrompt: false,
+  operation: "devin_request",
 };
 const BASE_GEMINI = {
   prompt: "hello",
@@ -189,7 +202,7 @@ describe("REGRESSIONS Lγ — resolveWorktreeForRequest writes worktreePath onto
     const session = sm.createSession("claude", "test-session");
     const runtime = resolveGatewayServerRuntime({ sessionManager: sm });
 
-    const resolution = await resolveWorktreeForRequest(true, session.id, runtime);
+    const resolution = await resolveWorktreeForRequest(true, session.id, runtime, { repoRoot });
 
     expect(resolution.cwd).toBeDefined();
     expect(resolution.worktreePath).toBe(resolution.cwd);
@@ -205,7 +218,7 @@ describe("REGRESSIONS Lγ — resolveWorktreeForRequest writes worktreePath onto
     const sm = new FileSessionManager(sessionsPath);
     const runtime = resolveGatewayServerRuntime({ sessionManager: sm });
 
-    const resolution = await resolveWorktreeForRequest(true, undefined, runtime);
+    const resolution = await resolveWorktreeForRequest(true, undefined, runtime, { repoRoot });
     expect(resolution.worktreePath).toBeDefined();
     expect(existsSync(resolution.worktreePath!)).toBe(true);
     // No session exists → no metadata to inspect; just confirm listSessions stays empty.
@@ -224,6 +237,141 @@ describe("REGRESSIONS Lγ — resolveWorktreeForRequest writes worktreePath onto
 
     const after = sm.getSession(session.id)!;
     expect(after.metadata?.worktreePath).toBeUndefined();
+  });
+
+  it("Lγ-4: a post-binding workspace validation failure restores metadata and removes the worktree", async () => {
+    const sm = new FileSessionManager(sessionsPath);
+    const session = sm.createSession("claude", "pre-handoff rollback");
+    sm.updateSessionMetadata(session.id, { marker: "before" });
+    const before = sm.getSession(session.id)!;
+    const runtime = resolveGatewayServerRuntime({ sessionManager: sm });
+    const resolution = await resolveWorktreeForRequest(
+      { name: "validation-rollback" },
+      session.id,
+      runtime,
+      {
+        repoRoot,
+        workspaceAlias: "selected",
+        workspaceRoot: repoRoot,
+        expectedSession: before,
+      }
+    );
+    const worktreePath = resolution.worktreePath!;
+    const wrongWorkspaceRoot = initRepo();
+
+    try {
+      await expect(
+        validateResolvedWorktreeForWorkspace(
+          resolution,
+          {
+            alias: "wrong",
+            root: wrongWorkspaceRoot,
+            cwd: wrongWorkspaceRoot,
+            repo: {
+              alias: "wrong",
+              path: wrongWorkspaceRoot,
+              providers: ["claude"],
+              allowWorktree: true,
+              allowAddDir: false,
+              kind: "git",
+              operatorEntry: true,
+            },
+          },
+          runtime
+        )
+      ).rejects.toThrow(/does not belong to selected workspace/);
+
+      expect(sm.getSession(session.id)?.metadata).toEqual(before.metadata);
+      expect(existsSync(worktreePath)).toBe(false);
+      expect(
+        execFileSync("git", ["branch", "--list", "gateway/validation-rollback"], {
+          cwd: repoRoot,
+          encoding: "utf8",
+        })
+      ).toBe("");
+    } finally {
+      rmTree(wrongWorkspaceRoot);
+    }
+  });
+
+  it("Lγ-5: failed Git cleanup retains a non-reusable durable cleanup claim", async () => {
+    const sm = new FileSessionManager(sessionsPath);
+    const session = sm.createSession("claude", "failed cleanup ownership");
+    const before = sm.getSession(session.id)!;
+    const runtime = resolveGatewayServerRuntime({ sessionManager: sm });
+    const resolution = await resolveWorktreeForRequest(
+      { name: "cleanup-pending" },
+      session.id,
+      runtime,
+      {
+        repoRoot,
+        workspaceAlias: "selected",
+        workspaceRoot: repoRoot,
+        expectedSession: before,
+      }
+    );
+    const wrongWorkspaceRoot = initRepo();
+    const originalPath = process.env.PATH;
+    const gitBinary = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
+    const fakeBin = join(wrongWorkspaceRoot, "fake-bin");
+    mkdirSync(fakeBin);
+    const fakeGit = join(fakeBin, "git");
+    writeFileSync(
+      fakeGit,
+      `#!/bin/sh\ncase " $* " in\n  *" worktree remove "*) exit 42 ;;\nesac\nexec "${gitBinary}" "$@"\n`
+    );
+    chmodSync(fakeGit, 0o755);
+
+    try {
+      process.env.PATH = `${fakeBin}:${originalPath ?? ""}`;
+      await expect(
+        validateResolvedWorktreeForWorkspace(
+          resolution,
+          {
+            alias: "wrong",
+            root: wrongWorkspaceRoot,
+            cwd: wrongWorkspaceRoot,
+            repo: {
+              alias: "wrong",
+              path: wrongWorkspaceRoot,
+              providers: ["claude"],
+              allowWorktree: true,
+              allowAddDir: false,
+              kind: "git",
+              operatorEntry: true,
+            },
+          },
+          runtime
+        )
+      ).rejects.toThrow(/does not belong to selected workspace/);
+    } finally {
+      if (originalPath === undefined) delete process.env.PATH;
+      else process.env.PATH = originalPath;
+      rmTree(wrongWorkspaceRoot);
+    }
+
+    const retained = sm.getSession(session.id)!;
+    expect(existsSync(resolution.worktreePath!)).toBe(true);
+    expect(retained.metadata).toEqual(
+      expect.objectContaining({
+        worktreePath: resolution.worktreePath,
+        worktreeName: "cleanup-pending",
+        worktreeCleanupPending: true,
+      })
+    );
+    await expect(
+      resolveWorktreeForRequest(true, session.id, runtime, {
+        repoRoot,
+        expectedSession: retained,
+      })
+    ).rejects.toThrow(/no longer matches a same-host gateway-owned Git worktree/);
+
+    await removeWorktree({
+      repoRoot,
+      path: resolution.worktreePath!,
+      name: "cleanup-pending",
+      logger: noopLogger,
+    });
   });
 });
 
@@ -257,7 +405,8 @@ describe("REGRESSIONS Lδ — resolveWorktreeForRequest reuses an existing per-s
     const session = sm.createSession("claude", "reuse-test");
     const runtime = resolveGatewayServerRuntime({ sessionManager: sm });
 
-    const first = await resolveWorktreeForRequest(true, session.id, runtime);
+    const directive = { name: "same-session" };
+    const first = await resolveWorktreeForRequest(directive, session.id, runtime, { repoRoot });
     expect(first.worktreePath).toBeDefined();
 
     // Spy on createWorktree by counting git worktree list entries before
@@ -267,7 +416,7 @@ describe("REGRESSIONS Lδ — resolveWorktreeForRequest reuses an existing per-s
       cwd: repoRoot,
       encoding: "utf8",
     });
-    const second = await resolveWorktreeForRequest(true, session.id, runtime);
+    const second = await resolveWorktreeForRequest(directive, session.id, runtime, { repoRoot });
     const afterList = execFileSync("git", ["worktree", "list", "--porcelain"], {
       cwd: repoRoot,
       encoding: "utf8",
@@ -284,9 +433,44 @@ describe("REGRESSIONS Lδ — resolveWorktreeForRequest reuses an existing per-s
     const sessionB = sm.createSession("claude", "sess-B");
     const runtime = resolveGatewayServerRuntime({ sessionManager: sm });
 
-    const a = await resolveWorktreeForRequest(true, sessionA.id, runtime);
-    const b = await resolveWorktreeForRequest(true, sessionB.id, runtime);
+    const a = await resolveWorktreeForRequest(true, sessionA.id, runtime, { repoRoot });
+    const b = await resolveWorktreeForRequest(true, sessionB.id, runtime, { repoRoot });
     expect(b.worktreePath).not.toBe(a.worktreePath);
+  });
+
+  it("Lδ-3: a different session cannot claim the same named worktree", async () => {
+    const sm = new FileSessionManager(sessionsPath);
+    const sessionA = sm.createSession("claude", "named owner");
+    const sessionB = sm.createSession("claude", "named contender");
+    const runtime = resolveGatewayServerRuntime({ sessionManager: sm });
+    const directive = { name: "session-owned" };
+
+    const owned = await resolveWorktreeForRequest(directive, sessionA.id, runtime, { repoRoot });
+    await expect(
+      resolveWorktreeForRequest(directive, sessionB.id, runtime, { repoRoot })
+    ).rejects.toBeInstanceOf(WorktreeCollisionError);
+
+    expect(sm.getSession(sessionA.id)?.metadata?.worktreePath).toBe(owned.worktreePath);
+    expect(sm.getSession(sessionB.id)?.metadata?.worktreePath).toBeUndefined();
+  });
+
+  it("Lδ-4: a replaced ordinary directory cannot satisfy durable worktree reuse", async () => {
+    const sm = new FileSessionManager(sessionsPath);
+    const session = sm.createSession("claude", "replaced worktree");
+    const runtime = resolveGatewayServerRuntime({ sessionManager: sm });
+    const directive = { name: "replaced-registration" };
+    const first = await resolveWorktreeForRequest(directive, session.id, runtime, { repoRoot });
+
+    execFileSync("git", ["worktree", "remove", "--force", first.worktreePath!], {
+      cwd: repoRoot,
+      stdio: "ignore",
+    });
+    mkdirSync(first.worktreePath!);
+    writeFileSync(join(first.worktreePath!, "attacker-controlled.txt"), "not a worktree\n");
+
+    await expect(
+      resolveWorktreeForRequest(directive, session.id, runtime, { repoRoot })
+    ).rejects.toThrow(/no longer matches a same-host gateway-owned Git worktree/);
   });
 });
 
@@ -383,8 +567,8 @@ describe("REGRESSIONS Lζ — executor.executeCli honors cwd (slice λ)", () => 
 // ─── REGRESSIONS Lη — gateway-owned model emits NO -w/--worktree argv ──
 //
 // Falsifiability: in any `prepareXRequest` (or any tool handler), add
-// `args.push("-w")` or `args.push("--worktree", "...")`. Lη-1..5 MUST
-// go red — the assertion below checks all 5 CLIs.
+// `args.push("-w")` or `args.push("--worktree", "...")`. Lη-1..6 MUST
+// go red: the assertion below checks all 6 CLIs.
 
 describe("REGRESSIONS Lη — no CLI receives -w / --worktree in emitted argv (slice λ)", () => {
   it("Lη-1: prepareClaudeRequest argv contains neither -w nor --worktree", () => {
@@ -413,6 +597,12 @@ describe("REGRESSIONS Lη — no CLI receives -w / --worktree in emitted argv (s
   });
   it("Lη-5: prepareMistralRequest argv contains neither -w nor --worktree", () => {
     const prep = prepareMistralRequest(BASE_MISTRAL as never);
+    if (!("args" in prep)) throw new Error("expected args");
+    expect(prep.args).not.toContain("-w");
+    expect(prep.args).not.toContain("--worktree");
+  });
+  it("Lη-6: prepareDevinRequest argv contains neither -w nor --worktree", () => {
+    const prep = prepareDevinRequest(BASE_DEVIN as never, resolveGatewayServerRuntime());
     if (!("args" in prep)) throw new Error("expected args");
     expect(prep.args).not.toContain("-w");
     expect(prep.args).not.toContain("--worktree");

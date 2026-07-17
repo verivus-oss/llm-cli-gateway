@@ -157,13 +157,27 @@ describe("provider tool capabilities", () => {
     });
     expect(capabilities.grok_api.providerKind).toBe("api");
     expect(capabilities.grok_api.gatewayRequestTools).toEqual([]);
-    expect(capabilities.cursor.controls.permissionMode.behavior).toContain("approvalStrategy");
+    expect(capabilities.cursor.controls.approvalStrategy.behavior).toContain(
+      "cannot isolate ambient MCP configuration"
+    );
     expect(capabilities.cursor.controls.workspace.behavior).toContain("registered workspace");
     expect(capabilities.cursor.controls.session.behavior).toContain("gw-*");
     expect(
       capabilities.cursor.unsupportedInputs.some(input =>
         input.details.includes("rejected instead of silently ignored")
       )
+    ).toBe(true);
+    expect(capabilities.devin.unsupportedInputs).toContainEqual(
+      expect.objectContaining({
+        input: 'transport:"acp" with Devin CLI-only controls',
+        behavior: "reject",
+      })
+    );
+    expect(capabilities.codex.unsupportedInputs).not.toContainEqual(
+      expect.objectContaining({ input: 'transport:"acp" with Devin CLI-only controls' })
+    );
+    expect(
+      capabilities.cursor.unsupportedInputs.some(input => input.details.includes("idleTimeoutMs"))
     ).toBe(true);
   });
 
@@ -217,7 +231,11 @@ describe("provider tool capabilities", () => {
       expect.arrayContaining([
         expect.objectContaining({ input: "allowedTools", behavior: "not_supported" }),
         expect.objectContaining({ input: "disallowedTools", behavior: "not_supported" }),
-        expect.objectContaining({ input: "mcpServers", behavior: "approval_tracking_only" }),
+        expect.objectContaining({ input: "mcpServers", behavior: "ignored" }),
+        expect.objectContaining({
+          input: 'approvalStrategy:"mcp_managed"',
+          behavior: "reject",
+        }),
       ])
     );
 
@@ -227,14 +245,18 @@ describe("provider tool capabilities", () => {
     ]);
     expect(capabilities.gemini?.controls).toMatchObject({
       approvalMode: { supported: true, requestField: "approvalMode/yolo" },
-      sandbox: { supported: true, requestField: "sandbox", cliFlag: "-s" },
+      sandbox: { supported: true, requestField: "sandbox", cliFlag: "--sandbox" },
       workspace: { supported: true, requestField: "includeDirs/workspace/worktree" },
       session: { supported: true, requestField: "sessionId/resumeLatest/createNewSession" },
     });
     expect(capabilities.gemini?.unsupportedInputs).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ input: "allowedTools", behavior: "reject" }),
-        expect.objectContaining({ input: "mcpServers", behavior: "approval_tracking_only" }),
+        expect.objectContaining({ input: "mcpServers", behavior: "ignored" }),
+        expect.objectContaining({
+          input: 'approvalStrategy:"mcp_managed"',
+          behavior: "reject",
+        }),
         expect.objectContaining({ input: "outputFormat=json/stream-json", behavior: "reject" }),
         expect.objectContaining({
           input: "policyFiles/adminPolicyFiles/skipTrust",
@@ -253,8 +275,9 @@ describe("provider tool capabilities", () => {
       alwaysApprove: { supported: true, requestField: "alwaysApprove" },
       permissionAndApproval: {
         supported: true,
-        requestField: "permissionMode/approvalStrategy/approvalPolicy",
+        requestField: "permissionMode",
       },
+      approvalStrategy: { supported: false, requestField: "approvalStrategy/approvalPolicy" },
       agents: { supported: true, requestField: "agent/agents/bestOfN/check/todoGate/noSubagents" },
       webSearch: { supported: true, requestField: "disableWebSearch" },
       memoryAndPlan: {
@@ -290,7 +313,7 @@ describe("provider tool capabilities", () => {
       compactionControls: { supported: true },
     });
     expect(capabilities.grok?.unsupportedInputs).toContainEqual(
-      expect.objectContaining({ input: "mcpServers", behavior: "approval_tracking_only" })
+      expect.objectContaining({ input: "mcpServers", behavior: "ignored" })
     );
 
     expect(capabilities.grok_api?.controls).toMatchObject({

@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AcpProcessExitError, AcpProtocolError, AcpTimeoutError } from "../acp/errors.js";
 import {
   JsonRpcStdioTransport,
+  type AcpTransportTerminal,
   type JsonRpcInboundRequest,
   type JsonRpcNotification,
   type ProviderStdioStreams,
@@ -29,13 +30,15 @@ interface Harness {
   stdout: PassThrough;
   /** Provider stderr. */
   stderr: PassThrough;
+  /** Provider stdin owned by the transport. */
+  stdin: PassThrough;
   /** Everything the transport wrote to provider stdin, as decoded lines. */
   written: string[];
   logger: Logger;
   /** Number of onActivity callbacks the transport fired. */
   activity: () => number;
-  /** Number of onClose callbacks the transport fired. */
-  closes: () => number;
+  /** Typed terminal callbacks fired by the transport. */
+  terminals: () => readonly AcpTransportTerminal[];
 }
 
 function makeLogger(): Logger {
@@ -52,7 +55,7 @@ function createHarness(
     onNotification?: (n: JsonRpcNotification) => void;
     onRequest?: (r: JsonRpcInboundRequest) => void;
     onActivity?: () => void;
-    onClose?: () => void;
+    onTerminal?: (terminal: AcpTransportTerminal) => void;
     defaultTimeoutMs?: number;
   } = {}
 ): Harness {
@@ -74,7 +77,7 @@ function createHarness(
   const streams: ProviderStdioStreams = { stdin, stdout, stderr };
   const logger = makeLogger();
   let activityCount = 0;
-  let closeCount = 0;
+  const terminals: AcpTransportTerminal[] = [];
   const transport = new JsonRpcStdioTransport({
     streams,
     logger,
@@ -86,20 +89,21 @@ function createHarness(
       activityCount += 1;
       options.onActivity?.();
     },
-    onClose: () => {
-      closeCount += 1;
-      options.onClose?.();
+    onTerminal: terminal => {
+      terminals.push(terminal);
+      options.onTerminal?.(terminal);
     },
   });
 
   return {
     transport,
+    stdin,
     stdout,
     stderr,
     written,
     logger,
     activity: () => activityCount,
-    closes: () => closeCount,
+    terminals: () => terminals,
   };
 }
 
@@ -143,6 +147,23 @@ describe("JsonRpcStdioTransport", () => {
     h.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id, result: { agent: "vibe" } })}\n`);
 
     await expect(p).resolves.toEqual({ agent: "vibe" });
+  });
+
+  it("terminalizes pending requests on an asynchronous child stdin error", async () => {
+    const h = createHarness();
+    const pending = h.transport.request("session/prompt", { prompt: "x".repeat(70_000) });
+    const error = Object.assign(new Error("write EPIPE"), { code: "EPIPE" });
+
+    h.stdin.emit("error", error);
+
+    await expect(pending).rejects.toBeInstanceOf(AcpProcessExitError);
+    expect(h.transport.isClosed).toBe(true);
+    expect(h.transport.pendingCount).toBe(0);
+    expect(h.terminals()).toMatchObject([{ channel: "stdin", reason: "stdin_write_failed" }]);
+    expect(h.logger.error).toHaveBeenCalledWith(
+      "acp.transport.stdin.error",
+      expect.objectContaining({ errorCode: "EPIPE" })
+    );
   });
 
   it("parses fragmented newline-delimited messages split across chunks", async () => {
@@ -381,7 +402,7 @@ describe("JsonRpcStdioTransport", () => {
     await expect(h.transport.request("late")).rejects.toBeInstanceOf(AcpProcessExitError);
   });
 
-  it("fires onClose exactly once when the stdout channel ends without an exit", async () => {
+  it("fires one typed stdout terminal event when the channel ends without an exit", async () => {
     // Round-2 codex finding 1: the manager must learn the protocol channel is
     // gone (so it stops reporting healthy) even with no child `exit`.
     const h = createHarness();
@@ -390,19 +411,19 @@ describe("JsonRpcStdioTransport", () => {
     // A subsequent close event must not re-fire the terminal notification.
     h.stdout.emit("close");
 
-    expect(h.closes()).toBe(1);
+    expect(h.terminals()).toMatchObject([{ channel: "stdout", reason: "stdout_channel_closed" }]);
   });
 
-  it("does not fire onClose when the manager drives teardown via handleProcessExit/dispose", () => {
-    // onClose is only for stdout-channel loss without an exit; manager-initiated
-    // teardown paths must not double-signal the terminal callback.
+  it("does not fire onTerminal when the manager drives handleProcessExit/dispose", () => {
+    // Terminal channel events represent independent stream loss; manager-driven
+    // teardown paths must not double-signal the callback.
     const exitH = createHarness();
     exitH.transport.handleProcessExit(0, null);
-    expect(exitH.closes()).toBe(0);
+    expect(exitH.terminals()).toHaveLength(0);
 
     const disposeH = createHarness();
     disposeH.transport.dispose();
-    expect(disposeH.closes()).toBe(0);
+    expect(disposeH.terminals()).toHaveLength(0);
   });
 
   it("emits onActivity for an outbound request and for inbound traffic", async () => {

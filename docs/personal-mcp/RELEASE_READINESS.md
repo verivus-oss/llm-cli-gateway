@@ -10,16 +10,16 @@ gate and the command an assistant can quote to a user.
 
 ## Install
 
-| Gate                                                                                             | Evidence                                                                                                                |
-| ------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------- |
-| Go bootstrapper binaries are built on Linux self-hosted plus GitHub-hosted Windows/macOS runners | `.github/workflows/release-installer.yml` `build-binaries` matrix; `installer/build-release.sh` defaults to host target |
-| Platform bundles include the gateway, production dependencies, and a managed Node runtime        | `installer/build-release.sh` `package_platform_bundle` + `download_node_runtime`                                        |
-| Windows has a one-command installer that still verifies release checksums                        | `installer/build-release.sh` `write_windows_installer_script`                                                           |
-| `SHA256SUMS` and Sigstore bundles are produced; users must verify before run                     | `installer/packaging/README.md` "Verification" and "Signing" sections                                                   |
-| Bootstrapper has `setup` + `install-bundle` to materialize the gateway dir                       | `installer/main.go:37-42, 96-97`                                                                                        |
-| Docker Compose fallback exists                                                                   | `docker/personal.compose.yml`, `docker/Dockerfile.personal`                                                             |
-| Install commands are idempotent and copy/paste safe                                              | `setup/install-plan.dag.toml` step `start-gateway` + `install-bundle`                                                   |
-| README documents the single-binary install path                                                  | `README.md` "Install / Upgrade / Uninstall" section                                                                     |
+| Gate                                                                                                                                                             | Evidence                                                                                                                          |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| Public-mirror Go bootstrapper binaries are built on GitHub-hosted Linux, Windows, and macOS runners; private upstream Linux uses its internal self-hosted runner | `.github/workflows/release-installer.yml` `build-binaries` runner selection; `installer/build-release.sh` defaults to host target |
+| Platform bundles include the gateway, production dependencies, and a managed Node runtime                                                                        | `installer/build-release.sh` `package_platform_bundle` + `download_node_runtime`                                                  |
+| Windows has a one-command installer that still verifies release checksums                                                                                        | `installer/build-release.sh` `write_windows_installer_script`                                                                     |
+| `SHA256SUMS` and Sigstore bundles are produced; users must verify before run                                                                                     | `installer/packaging/README.md` "Verification" and "Signing" sections                                                             |
+| Bootstrapper has `setup` + `install-bundle` to materialize the gateway dir                                                                                       | `installer/main.go:37-42, 96-97`                                                                                                  |
+| Docker Compose fallback exists                                                                                                                                   | `docker/personal.compose.yml`, `docker/Dockerfile.personal`                                                                       |
+| Install commands are idempotent and copy/paste safe                                                                                                              | `setup/install-plan.dag.toml` step `start-gateway` + `install-bundle`                                                             |
+| README documents the single-binary install path                                                                                                                  | `README.md` "Install / Upgrade / Uninstall" section                                                                               |
 
 Quote-for-user:
 
@@ -229,9 +229,10 @@ and were verified by:
 - Upstream contracts: `npm run upstream:contracts` clean (offline fixtures +
   report + TOML-sync).
 - Unit + integration: 1789 tests pass via `npx vitest run` (count as of 2.12.0).
-- Release pipeline: `.github/workflows/release-installer.yml` builds
-  platform binaries on the Linux self-hosted runner plus GitHub-hosted
-  Windows/macOS runners; the final packaging job produces combined
+- Release pipeline: `.github/workflows/release-installer.yml` builds public
+  mirror platform binaries on GitHub-hosted Linux, Windows, and macOS runners;
+  private upstream Linux uses its internal self-hosted runner. The final
+  packaging job produces combined
   `SHA256SUMS`, Sigstore bundles, and a `release-manifest.json` with
   copy/paste setup commands.
 - DAG validator: PASSED, 27 units, layers 0-12, `critical_path_loc=4060`.

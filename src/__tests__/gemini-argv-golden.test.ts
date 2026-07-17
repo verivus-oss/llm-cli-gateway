@@ -3,7 +3,7 @@
  *
  * Locks the EXACT `prepareGeminiRequest(params).args` emission for every wired
  * `must_cover` flag: --print, --model, --add-dir (includeDirs), --sandbox,
- * --dangerously-skip-permissions (yolo), --project, --new-project,
+ * --mode (auto_edit/plan), --dangerously-skip-permissions (yolo), --project, --new-project,
  * --print-timeout. Every flag traces to `agy --help` in
  * /tmp/ffci-help/agy_--help.txt.
  *
@@ -98,6 +98,16 @@ describe("gemini argv golden (Phase 4 Part B)", () => {
   it("approvalMode yolo also emits --dangerously-skip-permissions", () => {
     const args = argsFor({ approvalMode: "yolo" });
     expect(count(args, "--dangerously-skip-permissions")).toBe(1);
+  });
+
+  it("maps legacy auto_edit and plan to their exact agy --mode values", () => {
+    const autoEdit = argsFor({ approvalMode: "auto_edit" });
+    expect(valueAfter(autoEdit, "--mode")).toBe("accept-edits");
+    expect(count(autoEdit, "--dangerously-skip-permissions")).toBe(0);
+
+    const plan = argsFor({ approvalMode: "plan" });
+    expect(valueAfter(plan, "--mode")).toBe("plan");
+    expect(count(plan, "--dangerously-skip-permissions")).toBe(0);
   });
 
   it("project + newProject together is rejected (no args)", () => {

@@ -77,6 +77,19 @@ export interface ProviderStdioStreams {
   readonly stderr?: Readable | null;
 }
 
+/** Exact provider channel and stable reason that made the transport unusable. */
+export type AcpTransportTerminal =
+  | {
+      readonly channel: "stdin";
+      readonly reason: "stdin_write_failed";
+      readonly error: AcpProcessExitError;
+    }
+  | {
+      readonly channel: "stdout";
+      readonly reason: "stdout_channel_closed";
+      readonly error: AcpProcessExitError;
+    };
+
 /** Options controlling transport behaviour. */
 export interface JsonRpcStdioTransportOptions {
   /** Streams from the process manager. */
@@ -107,14 +120,14 @@ export interface JsonRpcStdioTransportOptions {
    */
   readonly onActivity?: () => void;
   /**
-   * Fired exactly once when the provider stdout channel ends (`close`/`end`) or
-   * errors WITHOUT a separate process-exit signal having been delivered. The
-   * process manager uses this to drive the managed process terminal so it stops
-   * reporting healthy/live when the protocol channel is gone. Not fired when the
-   * manager itself initiates teardown via {@link JsonRpcStdioTransport.handleProcessExit}
+   * Fired exactly once with the typed terminal channel/reason when provider
+   * stdin fails, or stdout ends/errors, without a preceding process-exit
+   * signal. The process manager quarantines the unusable process and preserves
+   * the supplied typed error for lifecycle observers. Not fired when the
+   * manager initiates teardown via {@link JsonRpcStdioTransport.handleProcessExit}
    * or {@link JsonRpcStdioTransport.dispose}.
    */
-  readonly onClose?: () => void;
+  readonly onTerminal?: (terminal: AcpTransportTerminal) => void;
 }
 
 interface PendingRequest {
@@ -163,7 +176,7 @@ export class JsonRpcStdioTransport {
   private readonly onNotification?: (notification: JsonRpcNotification) => void;
   private readonly onRequest?: (request: JsonRpcInboundRequest) => void;
   private readonly onActivity?: () => void;
-  private readonly onClose?: () => void;
+  private readonly onTerminal?: (terminal: AcpTransportTerminal) => void;
 
   private readonly pending = new Map<JsonRpcId, PendingRequest>();
   private nextId = 1;
@@ -181,14 +194,19 @@ export class JsonRpcStdioTransport {
     this.onNotification = options.onNotification;
     this.onRequest = options.onRequest;
     this.onActivity = options.onActivity;
-    this.onClose = options.onClose;
+    this.onTerminal = options.onTerminal;
 
     this.attach();
   }
 
   /** Wire stream listeners. Called once at construction. */
   private attach(): void {
-    const { stdout, stderr } = this.streams;
+    const { stdin, stdout, stderr } = this.streams;
+
+    // Child stdin failures are asynchronous even when write() itself returns
+    // normally. Own the Writable error channel for the transport lifetime so a
+    // provider exit can never become a process-level uncaught EPIPE.
+    stdin.on("error", (err: Error) => this.handleStdinError(err));
 
     stdout.setEncoding("utf8");
     stdout.on("data", (chunk: string) => this.onStdoutData(chunk));
@@ -217,6 +235,42 @@ export class JsonRpcStdioTransport {
           errorClass: err.name,
         });
       });
+    }
+  }
+
+  /** A broken outbound protocol channel terminalizes every pending request. */
+  private handleStdinError(error: Error): void {
+    this.logger.error("acp.transport.stdin.error", {
+      provider: this.provider,
+      errorClass: error.name,
+      errorCode: (error as NodeJS.ErrnoException).code,
+    });
+    if (this.exitError || this.closed) return;
+    const terminalError = new AcpProcessExitError(this.provider ?? ("unknown" as CliType), {
+      debug: {
+        reason: "stdin_write_failed",
+        errorClass: error.name,
+        errorCode: (error as NodeJS.ErrnoException).code,
+      },
+    });
+    this.exitError = terminalError;
+    this.failPending(terminalError);
+    this.closed = true;
+    this.emitTerminal({
+      channel: "stdin",
+      reason: "stdin_write_failed",
+      error: terminalError,
+    });
+  }
+
+  /** Write one outbound frame and route deferred Writable failures terminally. */
+  private writeFrame(frame: string): void {
+    try {
+      this.streams.stdin.write(frame, error => {
+        if (error) this.handleStdinError(error);
+      });
+    } catch (error) {
+      this.handleStdinError(error instanceof Error ? error : new Error(String(error)));
     }
   }
 
@@ -456,22 +510,17 @@ export class JsonRpcStdioTransport {
           method,
           ...(params !== undefined ? { params } : {}),
         }) + "\n";
-      try {
-        this.streams.stdin.write(frame);
-      } catch (err) {
+      this.writeFrame(frame);
+      if (this.exitError || this.closed) {
+        // A synchronous write failure may already have failed and removed this
+        // request. Guard unusual Writable implementations that throw without
+        // allowing the shared terminal path to observe the pending entry.
+        if (this.pending.get(id) !== pending) return;
         this.pending.delete(id);
         if (pending.timer) {
           clearTimeout(pending.timer);
         }
-        reject(
-          new AcpProcessExitError(this.provider ?? ("unknown" as CliType), {
-            debug: {
-              method,
-              reason: "stdin_write_failed",
-              errorClass: err instanceof Error ? err.name : "unknown",
-            },
-          })
-        );
+        reject(this.exitError ?? new AcpProcessExitError(this.provider ?? ("unknown" as CliType)));
       }
     });
   }
@@ -484,15 +533,7 @@ export class JsonRpcStdioTransport {
     const frame =
       JSON.stringify({ jsonrpc: "2.0", method, ...(params !== undefined ? { params } : {}) }) +
       "\n";
-    try {
-      this.streams.stdin.write(frame);
-    } catch (err) {
-      this.logger.error("acp.transport.notify_write_failed", {
-        provider: this.provider,
-        method,
-        errorClass: err instanceof Error ? err.name : "unknown",
-      });
-    }
+    this.writeFrame(frame);
   }
 
   /** Respond to an agent-initiated request with a result. */
@@ -501,14 +542,7 @@ export class JsonRpcStdioTransport {
       return;
     }
     const frame = JSON.stringify({ jsonrpc: "2.0", id, result }) + "\n";
-    try {
-      this.streams.stdin.write(frame);
-    } catch (err) {
-      this.logger.error("acp.transport.respond_write_failed", {
-        provider: this.provider,
-        errorClass: err instanceof Error ? err.name : "unknown",
-      });
-    }
+    this.writeFrame(frame);
   }
 
   /** Respond to an agent-initiated request with a JSON-RPC error. */
@@ -526,14 +560,7 @@ export class JsonRpcStdioTransport {
           ...(error.data !== undefined ? { data: error.data } : {}),
         },
       }) + "\n";
-    try {
-      this.streams.stdin.write(frame);
-    } catch (err) {
-      this.logger.error("acp.transport.respond_error_write_failed", {
-        provider: this.provider,
-        errorClass: err instanceof Error ? err.name : "unknown",
-      });
-    }
+    this.writeFrame(frame);
   }
 
   /**
@@ -566,18 +593,23 @@ export class JsonRpcStdioTransport {
     if (this.exitError || this.closed) {
       return;
     }
-    this.exitError = new AcpProcessExitError(this.provider ?? ("unknown" as CliType), {
-      debug: { reason: "stdout_closed" },
+    const terminalError = new AcpProcessExitError(this.provider ?? ("unknown" as CliType), {
+      debug: { reason: "stdout_channel_closed" },
     });
+    this.exitError = terminalError;
     this.logger.error("acp.transport.stdout_closed", {
       provider: this.provider,
       pending: this.pending.size,
     });
-    this.failPending(this.exitError);
+    this.failPending(terminalError);
     this.closed = true;
     // Tell the manager the protocol channel is gone even though the child may
     // not have emitted `exit` yet, so it stops reporting the process healthy.
-    this.emitClose();
+    this.emitTerminal({
+      channel: "stdout",
+      reason: "stdout_channel_closed",
+      error: terminalError,
+    });
   }
 
   /** Notify the manager of protocol activity; never let a hook break framing. */
@@ -589,10 +621,10 @@ export class JsonRpcStdioTransport {
     }
   }
 
-  /** Notify the manager the stdout channel ended without a child-exit signal. */
-  private emitClose(): void {
+  /** Notify the manager that one provider protocol channel became terminal. */
+  private emitTerminal(terminal: AcpTransportTerminal): void {
     try {
-      this.onClose?.();
+      this.onTerminal?.(terminal);
     } catch {
       // Terminal-notification hook is best-effort; swallow.
     }

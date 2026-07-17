@@ -20,6 +20,7 @@ exports[`codex argv golden (Phase 4 Part A) > emits every wired Part A flag with
   "feat_b",
   "--disable",
   "feat_c",
-  "hello codex",
+  "--",
+  "-",
 ]
 `;

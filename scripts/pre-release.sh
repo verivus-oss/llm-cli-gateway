@@ -4,11 +4,11 @@
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
-echo "==> sync static site version to package.json (site/index.html)"
-# The marketing site carries hard-coded version strings; keep them in lock-step
-# with package.json so the site never drifts behind a release. The companion
-# test (site-version.test.ts) makes a mismatch a red build in `npm run check`
-# below. Deploy the result with scripts/deploy-site.sh after publishing.
+echo "==> sync static site product-version contract"
+# Stable releases synchronize every public label and package.json#publicSiteVersion
+# to package.json#version. Prereleases retain the explicit stable
+# publicSiteVersion while repairing stale discovery metadata.
+# The companion tests make a mismatch a red build in `npm run check` below.
 node scripts/sync-site-version.mjs
 
 echo "==> npm install (apply overrides; package-lock.json is the source of truth)"
@@ -25,6 +25,13 @@ echo "==> regenerate npm-shrinkwrap.json (prod-only; ships in the tarball, pins 
 # would reify all ~316 packages into consumer trees instead of the prod ~124).
 # Deterministic; the security audit regenerates and compares for parity.
 node scripts/make-prod-shrinkwrap.mjs
+
+echo "==> build gateway and regenerate static site discovery"
+# The generator captures dist/index.js through the live MCP tools/list surface.
+# Build first, then write all generated discovery artifacts before the release
+# gate verifies their checked-in bytes.
+npm run build
+npm run site:generate
 
 echo "==> prod graph is free of the better-sqlite3 / tar chain (2.0.0)"
 # 2.0.0 moved better-sqlite3 to devDependencies and dropped the tar-stream
@@ -50,6 +57,20 @@ if (found.length > 0) {
 }
 console.log('Prod-only shrinkwrap is free of better-sqlite3/prebuild-install/tar-fs/tar-stream.');
 NODE
+
+echo "==> installed provider CLI contract drift"
+# Nothing else catches a provider CLI moving underneath the contract. CI cannot:
+# the check needs the seven provider binaries installed, and a stock runner has
+# none of them. The offline `upstream:contracts` gate inside `npm run check`
+# only proves the fixtures, report, and TOML agree with each other, so it stays
+# green while every installed CLI is ahead of its baseline (it did exactly that
+# while five of them were).
+#
+# --require-installed rather than --probe-installed: the latter skips a provider
+# whose binary is absent and exits 0, so on a machine without the CLIs it would
+# verify nothing and still pass. Release validation is the one place the CLIs are
+# guaranteed present, so demand them and fail if any is missing.
+npm run upstream:drift
 
 echo "==> release gate"
 npm run check

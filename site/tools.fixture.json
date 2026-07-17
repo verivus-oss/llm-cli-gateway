@@ -1,10 +1,11 @@
 {
   "generatedAt": "deterministic build output",
   "packageName": "llm-cli-gateway",
-  "packageVersion": "2.17.1",
+  "packageVersion": "3.0.0",
+  "siteVersion": "3.0.0",
   "captureCommand": "node scripts/generate-site-discovery.mjs",
   "source": "runtime MCP tools/list from dist/index.js over in-memory MCP transport",
-  "toolCount": 52,
+  "toolCount": 63,
   "tools": [
     {
       "name": "approval_list",
@@ -94,17 +95,21 @@
             "type": "object",
             "properties": {
               "system": {
-                "type": "string"
+                "type": "string",
+                "maxLength": 100000
               },
               "tools": {
-                "type": "string"
+                "type": "string",
+                "maxLength": 100000
               },
               "context": {
-                "type": "string"
+                "type": "string",
+                "maxLength": 100000
               },
               "task": {
                 "type": "string",
-                "minLength": 1
+                "minLength": 1,
+                "maxLength": 100000
               },
               "cacheControl": {
                 "type": "object",
@@ -140,16 +145,17 @@
               "stream-json"
             ],
             "default": "stream-json",
-            "description": "Output format (text|json|stream-json). DEFAULT: stream-json — the gateway parses NDJSON usage events to extract input/output/cache_read/cache_creation tokens + cost + model, persists them to the flight recorder for cache_state aggregates, and still returns the assistant text. Override to 'text' only when you truly want unparsed stdout (loses observability)."
+            "description": "Output format (text|json|stream-json). DEFAULT: stream-json; the gateway parses NDJSON usage events to extract input/output/cache_read/cache_creation tokens + cost + model, persists them to the flight recorder for cache_state aggregates, and still returns the assistant text. Override to 'text' only when you truly want unparsed stdout (loses observability)."
           },
           "sessionId": {
             "type": "string",
+            "minLength": 1,
             "description": "On a fresh request this id is emitted as Claude --session-id <uuid> (must be a valid UUID that does not already exist). Resume the latest cwd conversation with continueSession:true. gw-* ids are not valid Claude --session-id values."
           },
           "continueSession": {
             "type": "boolean",
             "default": false,
-            "description": "Continue the most recent Claude conversation in this cwd (emits --continue; real CLI continuity)."
+            "description": "Continue the most recent Claude conversation in the selected workspace (emits --continue; real CLI continuity). Stable workspace selection is required via workingDir, a registered workspace, or the configured default workspace."
           },
           "createNewSession": {
             "type": "boolean",
@@ -173,7 +179,7 @@
           "dangerouslySkipPermissions": {
             "type": "boolean",
             "default": false,
-            "description": "DEPRECATED: prefer `permissionMode: \"bypassPermissions\"`. Maps to it when `permissionMode` is unset."
+            "description": "DEPRECATED: prefer `permissionMode: \"bypassPermissions\"`. Maps to it when `permissionMode` is unset. Under mcp_managed, either form requires approval and LLM_GATEWAY_APPROVAL_ALLOW_BYPASS=1."
           },
           "permissionMode": {
             "type": "string",
@@ -186,7 +192,7 @@
               "dontAsk",
               "plan"
             ],
-            "description": "Claude --permission-mode: default|acceptEdits|auto|bypassPermissions|manual|dontAsk|plan. `default` is a no-op (no flag emitted)."
+            "description": "Claude --permission-mode: default|acceptEdits|auto|bypassPermissions|manual|dontAsk|plan. `default` is a no-op (no flag emitted). Under mcp_managed, bypassPermissions requires approval and LLM_GATEWAY_APPROVAL_ALLOW_BYPASS=1."
           },
           "agent": {
             "type": "string",
@@ -194,10 +200,7 @@
           },
           "agents": {
             "type": "object",
-            "additionalProperties": {
-              "type": "object",
-              "additionalProperties": {}
-            },
+            "additionalProperties": {},
             "description": "Claude --agents: inline JSON map of agent name → { description, prompt, tools?, model? }."
           },
           "forkSession": {
@@ -206,11 +209,13 @@
           },
           "systemPrompt": {
             "type": "string",
-            "description": "Claude --system-prompt: replace the system prompt entirely. Mutually exclusive with appendSystemPrompt."
+            "minLength": 1,
+            "description": "Claude --system-prompt: replace the system prompt entirely. Mutually exclusive with appendSystemPrompt. Under mcp_managed, an override requires approval and LLM_GATEWAY_APPROVAL_ALLOW_BYPASS=1."
           },
           "appendSystemPrompt": {
             "type": "string",
-            "description": "Claude --append-system-prompt: append to the existing system prompt. Mutually exclusive with systemPrompt."
+            "minLength": 1,
+            "description": "Claude --append-system-prompt: append to the existing system prompt. Mutually exclusive with systemPrompt. Under mcp_managed, an override requires approval and LLM_GATEWAY_APPROVAL_ALLOW_BYPASS=1."
           },
           "maxBudgetUsd": {
             "type": "number",
@@ -254,12 +259,17 @@
             ],
             "description": "Claude --json-schema: JSON Schema literal (NOT a path) constraining structured output. Object values are JSON.stringify-d; string values are passed verbatim. Use with outputFormat='json'. Set outputFormat:json so the gateway treats the reply as structured output (skips response optimization and warning injection); the default output format is not json, so pass it explicitly."
           },
+          "workingDir": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Claude process working directory. The gateway launches Claude in this directory. Stdio/local callers may pass local paths directly. Remote HTTP/OAuth callers must use relative paths inside a selected registered workspace. Do not call workspace_* tools to fix stdio/local provider path access."
+          },
           "addDir": {
             "type": "array",
             "items": {
               "type": "string"
             },
-            "description": "Claude --add-dir: additional directories the CLI is allowed to read/write beyond the process cwd. Each entry is emitted as its own --add-dir instance. Stdio/local callers may pass local paths directly. Remote HTTP/OAuth callers must use relative paths inside a selected registered workspace. Do not call workspace_* tools to fix stdio/local provider path access."
+            "description": "Claude --add-dir: additional directories the CLI is allowed to read/write beyond the process cwd. Each entry is emitted as its own --add-dir instance. Under mcp_managed, non-empty addDir requires approval and LLM_GATEWAY_APPROVAL_ALLOW_BYPASS=1. Stdio/local callers may pass local paths directly. Remote HTTP/OAuth callers must use relative paths inside a selected registered workspace. Do not call workspace_* tools to fix stdio/local provider path access."
           },
           "noSessionPersistence": {
             "type": "boolean",
@@ -321,16 +331,20 @@
           },
           "safeMode": {
             "type": "boolean",
-            "description": "Claude --safe-mode: start with all customizations (CLAUDE.md, skills, plugins, hooks, MCP, commands, agents) disabled for troubleshooting. Explicit opt-in."
+            "description": "Claude --safe-mode: start with all customizations (CLAUDE.md, skills, plugins, hooks, MCP, commands, agents) disabled for troubleshooting. Under mcp_managed, this repository-rule suppression requires approval and LLM_GATEWAY_APPROVAL_ALLOW_BYPASS=1."
           },
           "bare": {
             "type": "boolean",
-            "description": "Claude --bare: minimal mode (skip hooks, LSP, plugin sync, attribution, auto-memory, keychain reads, CLAUDE.md auto-discovery). Explicit opt-in."
+            "description": "Claude --bare: minimal mode (skip hooks, LSP, plugin sync, attribution, auto-memory, keychain reads, CLAUDE.md auto-discovery). Under mcp_managed, this repository-rule suppression requires approval and LLM_GATEWAY_APPROVAL_ALLOW_BYPASS=1."
           },
           "debug": {
-            "type": [
-              "string",
-              "boolean"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "boolean"
+              }
             ],
             "description": "Claude -d/--debug: enable debug mode. true emits a bare --debug; a string emits --debug <filter> (e.g. \"api,hooks\"). Debug output goes to stderr only."
           },
@@ -368,7 +382,7 @@
                 "additionalProperties": false
               }
             ],
-            "description": "Slice λ: run this request inside a dedicated git worktree owned by the gateway. `true` creates a fresh worktree at `<repoRoot>/.worktrees/<uuid>` branched from HEAD. `{ name?, ref? }` lets the caller supply a sanitized name and/or a git ref (default: HEAD). When the request carries a sessionId and the session already has a worktree, that worktree is reused. The gateway spawns the child CLI with `cwd: <worktree-path>` — no `-w`/`--worktree` flag is ever emitted to the underlying CLI. On session_delete or TTL eviction the gateway runs `git worktree remove --force`. Successful responses are prefixed with `[gateway] worktree=<absolute-path>\\n` so callers can use the path. NOTE: callers should `.gitignore` the `.worktrees/` directory in their repo (the gateway does NOT auto-gitignore — see slice λ spec Q4)."
+            "description": "Slice λ: run this request inside a dedicated git worktree owned by the gateway. `true` creates a fresh worktree at `<repoRoot>/.worktrees/<uuid>` branched from HEAD. `{ name?, ref? }` lets the caller supply a sanitized name and/or a git ref (default: HEAD). When the request carries a sessionId and the session already has a worktree, reuse requires same-host ownership metadata and a matching live Git registration. Named path collisions never reuse manager state. Gateway-managed worktrees require the local file-backed session manager and fail closed with PostgreSQL sessions. The Grok, Devin, and Mistral adapters require an explicit provider-native sessionId; fresh, createNewSession, and resumeLatest-only worktree requests fail closed because they cannot durably reselect the worktree. The request must select a registered workspace explicitly, through caller-owned session metadata, or through the configured default. Worktrees never fall back to the gateway process cwd and cannot be combined with local workingDir, addDir, or includeDirs paths. The gateway spawns the child CLI with `cwd: <worktree-path>`; no `-w`/`--worktree` flag is ever emitted to the underlying CLI. On worktree materialization, the gateway suppresses repository, system, and global Git hooks and configured clean, smudge, and process checkout filters, sparse checkout, and lazy object fetching. Filter-dependent content such as Git LFS remains in its repository representation instead of executing host commands. On session_delete or TTL eviction the gateway hides the session and runs `git worktree remove --force`. Failed removal retains a durable cleanup-pending tombstone which blocks reuse and is retried when the file store is registered on the owning host. The tombstone is finalized only after verified Git removal. Successful responses are prefixed with `[gateway] worktree=<absolute-path>\\n` so callers can use the path. For Claude approvalStrategy:mcp_managed, requesting or reusing a worktree requires approval and LLM_GATEWAY_APPROVAL_ALLOW_BYPASS=1. Other adapters reject mcp_managed before launch. NOTE: callers should `.gitignore` the `.worktrees/` directory in their repo (the gateway does NOT auto-gitignore; see slice λ spec Q4)."
           },
           "approvalStrategy": {
             "type": "string",
@@ -377,7 +391,7 @@
               "mcp_managed"
             ],
             "default": "legacy",
-            "description": "Approval strategy: legacy (default) lets the provider CLI's own flags decide; mcp_managed routes the run through the gateway approval gate (required for approvalPolicy and approval_list). Under mcp_managed the caller's permissionMode/alwaysApprove may be overridden by the gate."
+            "description": "Approval strategy: legacy (default) lets Claude's own flags decide; mcp_managed routes the run through the gateway approval gate and uses acceptEdits by default. An explicit bypassPermissions request requires approval and LLM_GATEWAY_APPROVAL_ALLOW_BYPASS=1."
           },
           "approvalPolicy": {
             "type": "string",
@@ -391,14 +405,7 @@
           "mcpServers": {
             "type": "array",
             "items": {
-              "type": "string",
-              "enum": [
-                "sqry",
-                "exa",
-                "ref_tools",
-                "trstr",
-                "agent_browser"
-              ]
+              "type": "string"
             },
             "default": [],
             "description": "MCP servers exposed to Claude"
@@ -406,7 +413,7 @@
           "strictMcpConfig": {
             "type": "boolean",
             "default": false,
-            "description": "Restrict Claude to provided MCP config only"
+            "description": "Restrict Claude to provided MCP config only. mcp_managed always enforces this isolation, even when false is supplied."
           },
           "correlationId": {
             "type": "string",
@@ -436,6 +443,11 @@
             "type": "boolean",
             "default": false,
             "description": "Bypass dedup and force a fresh CLI run even if a recent identical request exists"
+          },
+          "requestInstructions": {
+            "type": "string",
+            "maxLength": 16384,
+            "description": "Per-request Kit instructions. Available only when [personal_config].enabled = true."
           }
         },
         "additionalProperties": false,
@@ -458,17 +470,21 @@
             "type": "object",
             "properties": {
               "system": {
-                "type": "string"
+                "type": "string",
+                "maxLength": 100000
               },
               "tools": {
-                "type": "string"
+                "type": "string",
+                "maxLength": 100000
               },
               "context": {
-                "type": "string"
+                "type": "string",
+                "maxLength": 100000
               },
               "task": {
                 "type": "string",
-                "minLength": 1
+                "minLength": 1,
+                "maxLength": 100000
               },
               "cacheControl": {
                 "type": "object",
@@ -508,12 +524,13 @@
           },
           "sessionId": {
             "type": "string",
+            "minLength": 1,
             "description": "On a fresh request this id is emitted as Claude --session-id <uuid> (must be a valid UUID that does not already exist). Resume the latest cwd conversation with continueSession:true. gw-* ids are not valid Claude --session-id values."
           },
           "continueSession": {
             "type": "boolean",
             "default": false,
-            "description": "Continue the most recent Claude conversation in this cwd (emits --continue; real CLI continuity)."
+            "description": "Continue the most recent Claude conversation in the selected workspace (emits --continue; real CLI continuity). Stable workspace selection is required via workingDir, a registered workspace, or the configured default workspace."
           },
           "createNewSession": {
             "type": "boolean",
@@ -537,7 +554,7 @@
           "dangerouslySkipPermissions": {
             "type": "boolean",
             "default": false,
-            "description": "DEPRECATED: prefer `permissionMode: \"bypassPermissions\"`. Maps to it when `permissionMode` is unset."
+            "description": "DEPRECATED: prefer `permissionMode: \"bypassPermissions\"`. Maps to it when `permissionMode` is unset. Under mcp_managed, either form requires approval and LLM_GATEWAY_APPROVAL_ALLOW_BYPASS=1."
           },
           "permissionMode": {
             "type": "string",
@@ -550,7 +567,7 @@
               "dontAsk",
               "plan"
             ],
-            "description": "Claude --permission-mode: default|acceptEdits|auto|bypassPermissions|manual|dontAsk|plan. `default` is a no-op."
+            "description": "Claude --permission-mode: default|acceptEdits|auto|bypassPermissions|manual|dontAsk|plan. `default` is a no-op. Under mcp_managed, bypassPermissions requires approval and LLM_GATEWAY_APPROVAL_ALLOW_BYPASS=1."
           },
           "agent": {
             "type": "string",
@@ -558,10 +575,7 @@
           },
           "agents": {
             "type": "object",
-            "additionalProperties": {
-              "type": "object",
-              "additionalProperties": {}
-            },
+            "additionalProperties": {},
             "description": "Claude --agents: inline JSON map of agent name → { description, prompt, tools?, model? }."
           },
           "forkSession": {
@@ -570,11 +584,13 @@
           },
           "systemPrompt": {
             "type": "string",
-            "description": "Claude --system-prompt: replace the system prompt entirely. Mutually exclusive with appendSystemPrompt."
+            "minLength": 1,
+            "description": "Claude --system-prompt: replace the system prompt entirely. Mutually exclusive with appendSystemPrompt. Under mcp_managed, an override requires approval and LLM_GATEWAY_APPROVAL_ALLOW_BYPASS=1."
           },
           "appendSystemPrompt": {
             "type": "string",
-            "description": "Claude --append-system-prompt: append to the existing system prompt. Mutually exclusive with systemPrompt."
+            "minLength": 1,
+            "description": "Claude --append-system-prompt: append to the existing system prompt. Mutually exclusive with systemPrompt. Under mcp_managed, an override requires approval and LLM_GATEWAY_APPROVAL_ALLOW_BYPASS=1."
           },
           "maxBudgetUsd": {
             "type": "number",
@@ -618,12 +634,17 @@
             ],
             "description": "Claude --json-schema: JSON Schema literal (NOT a path) constraining structured output. Object values are JSON.stringify-d; string values are passed verbatim. Use with outputFormat='json'. Set outputFormat:json so the gateway treats the reply as structured output (skips response optimization and warning injection); the default output format is not json, so pass it explicitly."
           },
+          "workingDir": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Claude process working directory. The gateway launches Claude in this directory. Stdio/local callers may pass local paths directly. Remote HTTP/OAuth callers must use relative paths inside a selected registered workspace. Do not call workspace_* tools to fix stdio/local provider path access."
+          },
           "addDir": {
             "type": "array",
             "items": {
               "type": "string"
             },
-            "description": "Claude --add-dir: additional directories the CLI is allowed to read/write beyond the process cwd. Each entry is emitted as its own --add-dir instance. Stdio/local callers may pass local paths directly. Remote HTTP/OAuth callers must use relative paths inside a selected registered workspace. Do not call workspace_* tools to fix stdio/local provider path access."
+            "description": "Claude --add-dir: additional directories the CLI is allowed to read/write beyond the process cwd. Each entry is emitted as its own --add-dir instance. Under mcp_managed, non-empty addDir requires approval and LLM_GATEWAY_APPROVAL_ALLOW_BYPASS=1. Stdio/local callers may pass local paths directly. Remote HTTP/OAuth callers must use relative paths inside a selected registered workspace. Do not call workspace_* tools to fix stdio/local provider path access."
           },
           "noSessionPersistence": {
             "type": "boolean",
@@ -685,16 +706,20 @@
           },
           "safeMode": {
             "type": "boolean",
-            "description": "Claude --safe-mode: start with all customizations (CLAUDE.md, skills, plugins, hooks, MCP, commands, agents) disabled for troubleshooting. Explicit opt-in."
+            "description": "Claude --safe-mode: start with all customizations (CLAUDE.md, skills, plugins, hooks, MCP, commands, agents) disabled for troubleshooting. Under mcp_managed, this repository-rule suppression requires approval and LLM_GATEWAY_APPROVAL_ALLOW_BYPASS=1."
           },
           "bare": {
             "type": "boolean",
-            "description": "Claude --bare: minimal mode (skip hooks, LSP, plugin sync, attribution, auto-memory, keychain reads, CLAUDE.md auto-discovery). Explicit opt-in."
+            "description": "Claude --bare: minimal mode (skip hooks, LSP, plugin sync, attribution, auto-memory, keychain reads, CLAUDE.md auto-discovery). Under mcp_managed, this repository-rule suppression requires approval and LLM_GATEWAY_APPROVAL_ALLOW_BYPASS=1."
           },
           "debug": {
-            "type": [
-              "string",
-              "boolean"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "boolean"
+              }
             ],
             "description": "Claude -d/--debug: enable debug mode. true emits a bare --debug; a string emits --debug <filter> (e.g. \"api,hooks\"). Debug output goes to stderr only."
           },
@@ -732,7 +757,7 @@
                 "additionalProperties": false
               }
             ],
-            "description": "Slice λ: run this request inside a dedicated git worktree owned by the gateway. `true` creates a fresh worktree at `<repoRoot>/.worktrees/<uuid>` branched from HEAD. `{ name?, ref? }` lets the caller supply a sanitized name and/or a git ref (default: HEAD). When the request carries a sessionId and the session already has a worktree, that worktree is reused. The gateway spawns the child CLI with `cwd: <worktree-path>` — no `-w`/`--worktree` flag is ever emitted to the underlying CLI. On session_delete or TTL eviction the gateway runs `git worktree remove --force`. Successful responses are prefixed with `[gateway] worktree=<absolute-path>\\n` so callers can use the path. NOTE: callers should `.gitignore` the `.worktrees/` directory in their repo (the gateway does NOT auto-gitignore — see slice λ spec Q4)."
+            "description": "Slice λ: run this request inside a dedicated git worktree owned by the gateway. `true` creates a fresh worktree at `<repoRoot>/.worktrees/<uuid>` branched from HEAD. `{ name?, ref? }` lets the caller supply a sanitized name and/or a git ref (default: HEAD). When the request carries a sessionId and the session already has a worktree, reuse requires same-host ownership metadata and a matching live Git registration. Named path collisions never reuse manager state. Gateway-managed worktrees require the local file-backed session manager and fail closed with PostgreSQL sessions. The Grok, Devin, and Mistral adapters require an explicit provider-native sessionId; fresh, createNewSession, and resumeLatest-only worktree requests fail closed because they cannot durably reselect the worktree. The request must select a registered workspace explicitly, through caller-owned session metadata, or through the configured default. Worktrees never fall back to the gateway process cwd and cannot be combined with local workingDir, addDir, or includeDirs paths. The gateway spawns the child CLI with `cwd: <worktree-path>`; no `-w`/`--worktree` flag is ever emitted to the underlying CLI. On worktree materialization, the gateway suppresses repository, system, and global Git hooks and configured clean, smudge, and process checkout filters, sparse checkout, and lazy object fetching. Filter-dependent content such as Git LFS remains in its repository representation instead of executing host commands. On session_delete or TTL eviction the gateway hides the session and runs `git worktree remove --force`. Failed removal retains a durable cleanup-pending tombstone which blocks reuse and is retried when the file store is registered on the owning host. The tombstone is finalized only after verified Git removal. Successful responses are prefixed with `[gateway] worktree=<absolute-path>\\n` so callers can use the path. For Claude approvalStrategy:mcp_managed, requesting or reusing a worktree requires approval and LLM_GATEWAY_APPROVAL_ALLOW_BYPASS=1. Other adapters reject mcp_managed before launch. NOTE: callers should `.gitignore` the `.worktrees/` directory in their repo (the gateway does NOT auto-gitignore; see slice λ spec Q4)."
           },
           "approvalStrategy": {
             "type": "string",
@@ -741,7 +766,7 @@
               "mcp_managed"
             ],
             "default": "legacy",
-            "description": "Approval strategy: legacy (default) lets the provider CLI's own flags decide; mcp_managed routes the run through the gateway approval gate (required for approvalPolicy and approval_list). Under mcp_managed the caller's permissionMode/alwaysApprove may be overridden by the gate."
+            "description": "Approval strategy: legacy (default) lets Claude's own flags decide; mcp_managed routes the run through the gateway approval gate and uses acceptEdits by default. An explicit bypassPermissions request requires approval and LLM_GATEWAY_APPROVAL_ALLOW_BYPASS=1."
           },
           "approvalPolicy": {
             "type": "string",
@@ -755,14 +780,7 @@
           "mcpServers": {
             "type": "array",
             "items": {
-              "type": "string",
-              "enum": [
-                "sqry",
-                "exa",
-                "ref_tools",
-                "trstr",
-                "agent_browser"
-              ]
+              "type": "string"
             },
             "default": [],
             "description": "MCP servers exposed to Claude"
@@ -770,7 +788,7 @@
           "strictMcpConfig": {
             "type": "boolean",
             "default": false,
-            "description": "Restrict Claude to provided MCP config only"
+            "description": "Restrict Claude to provided MCP config only. mcp_managed always enforces this isolation, even when false is supplied."
           },
           "correlationId": {
             "type": "string",
@@ -795,6 +813,11 @@
             "type": "boolean",
             "default": false,
             "description": "Bypass dedup and force a fresh CLI run even if a recent identical request exists"
+          },
+          "requestInstructions": {
+            "type": "string",
+            "maxLength": 16384,
+            "description": "Per-request Kit instructions. Available only when [personal_config].enabled = true."
           }
         },
         "additionalProperties": false,
@@ -871,7 +894,7 @@
     },
     {
       "name": "codex_fork_session",
-      "description": "Fork an existing Codex session into a new branch (codex fork <ID|--last>) and run a prompt against the fork without mutating the original.",
+      "description": "Fork an existing Codex session into a new branch (codex fork <ID|--last>) without mutating the original. This prompt remains argv-bound and rejects oversized UTF-8 input as non-retryable input_too_large.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -879,10 +902,11 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 100000,
-            "description": "Prompt text for the forked Codex session"
+            "description": "Prompt text for the forked Codex session. This codex fork path remains argv-bound and rejects oversized UTF-8 input."
           },
           "sessionId": {
             "type": "string",
+            "minLength": 1,
             "description": "Codex session UUID to fork from. Mutually exclusive with `forkLast`."
           },
           "forkLast": {
@@ -910,6 +934,24 @@
               "never"
             ],
             "description": "DEPRECATED compatibility input: accepted but ignored because current Codex no longer accepts --ask-for-approval."
+          },
+          "approvalStrategy": {
+            "type": "string",
+            "enum": [
+              "legacy",
+              "mcp_managed"
+            ],
+            "default": "legacy",
+            "description": "Approval strategy: legacy is supported. mcp_managed is rejected before launch because this adapter cannot isolate ambient MCP configuration."
+          },
+          "approvalPolicy": {
+            "type": "string",
+            "enum": [
+              "strict",
+              "balanced",
+              "permissive"
+            ],
+            "description": "approvalPolicy is unavailable for this provider. It has no effect with legacy, and mcp_managed is rejected before launch because ambient MCP configuration cannot be isolated."
           },
           "correlationId": {
             "type": "string",
@@ -952,17 +994,21 @@
             "type": "object",
             "properties": {
               "system": {
-                "type": "string"
+                "type": "string",
+                "maxLength": 100000
               },
               "tools": {
-                "type": "string"
+                "type": "string",
+                "maxLength": 100000
               },
               "context": {
-                "type": "string"
+                "type": "string",
+                "maxLength": 100000
               },
               "task": {
                 "type": "string",
-                "minLength": 1
+                "minLength": 1,
+                "maxLength": 100000
               },
               "cacheControl": {
                 "type": "object",
@@ -1021,7 +1067,7 @@
           "dangerouslyBypassApprovalsAndSandbox": {
             "type": "boolean",
             "default": false,
-            "description": "Run Codex without approvals/sandbox"
+            "description": "Run Codex without approvals/sandbox."
           },
           "approvalStrategy": {
             "type": "string",
@@ -1030,7 +1076,7 @@
               "mcp_managed"
             ],
             "default": "legacy",
-            "description": "Approval strategy: legacy (default) lets the provider CLI's own flags decide; mcp_managed routes the run through the gateway approval gate (required for approvalPolicy and approval_list). Under mcp_managed the caller's permissionMode/alwaysApprove may be overridden by the gate."
+            "description": "Approval strategy: legacy is supported. mcp_managed is rejected before launch because this adapter cannot isolate ambient MCP configuration."
           },
           "approvalPolicy": {
             "type": "string",
@@ -1039,31 +1085,25 @@
               "balanced",
               "permissive"
             ],
-            "description": "Approval policy when approvalStrategy is mcp_managed: strict|balanced|permissive (default balanced). Ignored under legacy strategy."
+            "description": "approvalPolicy is unavailable for this provider. It has no effect with legacy, and mcp_managed is rejected before launch because ambient MCP configuration cannot be isolated."
           },
           "mcpServers": {
             "type": "array",
             "items": {
-              "type": "string",
-              "enum": [
-                "sqry",
-                "exa",
-                "ref_tools",
-                "trstr",
-                "agent_browser"
-              ]
+              "type": "string"
             },
             "default": [],
-            "description": "MCP server names for approval tracking (Codex manages its own MCP config)"
+            "description": "This provider does not receive gateway-managed MCP configuration. mcpServers has no effect with legacy, and mcp_managed is rejected before launch because ambient MCP configuration cannot be isolated."
           },
           "sessionId": {
             "type": "string",
+            "minLength": 1,
             "description": "Codex session UUID to resume via `codex exec resume <ID>`. Must be a real Codex session ID (from `~/.codex/sessions/` or the `codex resume` picker). Gateway-generated `gw-*` IDs are rejected. For a brand-new session no resumable sessionId is returned; continue with resumeLatest:true or a real Codex UUID."
           },
           "resumeLatest": {
             "type": "boolean",
             "default": false,
-            "description": "Resume the most recent Codex session via `codex exec resume --last`. Ignored if sessionId is set. A brand-new session returns no resumable sessionId; continue with resumeLatest:true or a real Codex UUID."
+            "description": "Resume Codex's globally latest session via `codex exec resume --last`; it inherits that session's original cwd, and workingDir/addDir do not retarget it. Ignored if sessionId is set; an explicit real Codex UUID targets that session. A brand-new session returns no resumable sessionId; continue with resumeLatest:true or a real Codex UUID."
           },
           "createNewSession": {
             "type": "boolean",
@@ -1099,13 +1139,17 @@
             "default": false,
             "description": "Bypass dedup and force a fresh CLI run even if a recent identical request exists"
           },
+          "requestInstructions": {
+            "type": "string",
+            "maxLength": 16384,
+            "description": "Per-request Kit instructions. Available only when [personal_config].enabled = true."
+          },
           "outputFormat": {
             "type": "string",
             "enum": [
               "text",
               "json"
             ],
-            "default": "text",
             "description": "Codex caller-facing output format. Token/cache usage is recorded in the flight recorder regardless. `text` (default) returns the plain reply; `json` returns the raw `--json` JSONL event stream."
           },
           "outputSchema": {
@@ -1130,13 +1174,8 @@
           },
           "configOverrides": {
             "type": "object",
-            "additionalProperties": {
-              "type": "string"
-            },
-            "propertyNames": {
-              "pattern": "^[a-zA-Z0-9._]+$"
-            },
-            "description": "Codex -c key=value overrides. Keys: /^[a-zA-Z0-9._]+$/. Values: no CR/LF."
+            "additionalProperties": {},
+            "description": "Codex -c key=value overrides. Keys: /^[a-zA-Z0-9._]+$/. Values: no CR/LF. Local callers only, remote HTTP/OAuth requests are rejected."
           },
           "ephemeral": {
             "type": "boolean",
@@ -1160,7 +1199,7 @@
           "workingDir": {
             "type": "string",
             "minLength": 1,
-            "description": "Codex -C/--cd <DIR>: working root for this session. Emitted on new sessions only; resume inherits the original session's cwd via CODEX_RESUME_FILTERED_FLAGS. Stdio/local callers may pass local paths directly. Remote HTTP/OAuth callers must use relative paths inside a selected registered workspace. Do not call workspace_* tools to fix stdio/local provider path access."
+            "description": "Codex -C/--cd <DIR>: working root for this session. Emitted on new sessions only; resume inherits the original session's cwd via CODEX_RESUME_FILTERED_FLAGS. Personal Agent Config Kit mode requires an absolute path. Stdio/local callers may pass local paths directly. Remote HTTP/OAuth callers must use relative paths inside a selected registered workspace. Do not call workspace_* tools to fix stdio/local provider path access."
           },
           "addDir": {
             "type": "array",
@@ -1174,14 +1213,14 @@
             "items": {
               "type": "string"
             },
-            "description": "Codex --enable <FEATURE> (repeatable): enable a feature for this run (equivalent to -c features.<name>=true). Accepted on resume."
+            "description": "Codex --enable <FEATURE> (repeatable): enable a feature for this run (equivalent to -c features.<name>=true). Accepted on resume. Local callers only, remote HTTP/OAuth requests are rejected."
           },
           "disable": {
             "type": "array",
             "items": {
               "type": "string"
             },
-            "description": "Codex --disable <FEATURE> (repeatable): disable a feature for this run (equivalent to -c features.<name>=false). Accepted on resume."
+            "description": "Codex --disable <FEATURE> (repeatable): disable a feature for this run (equivalent to -c features.<name>=false). Accepted on resume. Local callers only, remote HTTP/OAuth requests are rejected."
           },
           "strictConfig": {
             "type": "boolean",
@@ -1215,7 +1254,7 @@
           },
           "dangerouslyBypassHookTrust": {
             "type": "boolean",
-            "description": "Codex --dangerously-bypass-hook-trust: run enabled hooks without persisted hook trust for this invocation. DANGEROUS. Explicit opt-in; never defaulted on."
+            "description": "Codex --dangerously-bypass-hook-trust: run enabled hooks without persisted hook trust for this invocation. DANGEROUS."
           },
           "workspace": {
             "type": "string",
@@ -1246,7 +1285,7 @@
                 "additionalProperties": false
               }
             ],
-            "description": "Slice λ: run this request inside a dedicated git worktree owned by the gateway. `true` creates a fresh worktree at `<repoRoot>/.worktrees/<uuid>` branched from HEAD. `{ name?, ref? }` lets the caller supply a sanitized name and/or a git ref (default: HEAD). When the request carries a sessionId and the session already has a worktree, that worktree is reused. The gateway spawns the child CLI with `cwd: <worktree-path>` — no `-w`/`--worktree` flag is ever emitted to the underlying CLI. On session_delete or TTL eviction the gateway runs `git worktree remove --force`. Successful responses are prefixed with `[gateway] worktree=<absolute-path>\\n` so callers can use the path. NOTE: callers should `.gitignore` the `.worktrees/` directory in their repo (the gateway does NOT auto-gitignore — see slice λ spec Q4)."
+            "description": "Slice λ: run this request inside a dedicated git worktree owned by the gateway. `true` creates a fresh worktree at `<repoRoot>/.worktrees/<uuid>` branched from HEAD. `{ name?, ref? }` lets the caller supply a sanitized name and/or a git ref (default: HEAD). When the request carries a sessionId and the session already has a worktree, reuse requires same-host ownership metadata and a matching live Git registration. Named path collisions never reuse manager state. Gateway-managed worktrees require the local file-backed session manager and fail closed with PostgreSQL sessions. The Grok, Devin, and Mistral adapters require an explicit provider-native sessionId; fresh, createNewSession, and resumeLatest-only worktree requests fail closed because they cannot durably reselect the worktree. The request must select a registered workspace explicitly, through caller-owned session metadata, or through the configured default. Worktrees never fall back to the gateway process cwd and cannot be combined with local workingDir, addDir, or includeDirs paths. The gateway spawns the child CLI with `cwd: <worktree-path>`; no `-w`/`--worktree` flag is ever emitted to the underlying CLI. On worktree materialization, the gateway suppresses repository, system, and global Git hooks and configured clean, smudge, and process checkout filters, sparse checkout, and lazy object fetching. Filter-dependent content such as Git LFS remains in its repository representation instead of executing host commands. On session_delete or TTL eviction the gateway hides the session and runs `git worktree remove --force`. Failed removal retains a durable cleanup-pending tombstone which blocks reuse and is retried when the file store is registered on the owning host. The tombstone is finalized only after verified Git removal. Successful responses are prefixed with `[gateway] worktree=<absolute-path>\\n` so callers can use the path. For Claude approvalStrategy:mcp_managed, requesting or reusing a worktree requires approval and LLM_GATEWAY_APPROVAL_ALLOW_BYPASS=1. Other adapters reject mcp_managed before launch. NOTE: callers should `.gitignore` the `.worktrees/` directory in their repo (the gateway does NOT auto-gitignore; see slice λ spec Q4)."
           }
         },
         "additionalProperties": false,
@@ -1269,17 +1308,21 @@
             "type": "object",
             "properties": {
               "system": {
-                "type": "string"
+                "type": "string",
+                "maxLength": 100000
               },
               "tools": {
-                "type": "string"
+                "type": "string",
+                "maxLength": 100000
               },
               "context": {
-                "type": "string"
+                "type": "string",
+                "maxLength": 100000
               },
               "task": {
                 "type": "string",
-                "minLength": 1
+                "minLength": 1,
+                "maxLength": 100000
               },
               "cacheControl": {
                 "type": "object",
@@ -1338,7 +1381,7 @@
           "dangerouslyBypassApprovalsAndSandbox": {
             "type": "boolean",
             "default": false,
-            "description": "Run Codex without approvals/sandbox"
+            "description": "Run Codex without approvals/sandbox."
           },
           "approvalStrategy": {
             "type": "string",
@@ -1347,7 +1390,7 @@
               "mcp_managed"
             ],
             "default": "legacy",
-            "description": "Approval strategy: legacy (default) lets the provider CLI's own flags decide; mcp_managed routes the run through the gateway approval gate (required for approvalPolicy and approval_list). Under mcp_managed the caller's permissionMode/alwaysApprove may be overridden by the gate."
+            "description": "Approval strategy: legacy is supported. mcp_managed is rejected before launch because this adapter cannot isolate ambient MCP configuration."
           },
           "approvalPolicy": {
             "type": "string",
@@ -1356,31 +1399,25 @@
               "balanced",
               "permissive"
             ],
-            "description": "Approval policy when approvalStrategy is mcp_managed: strict|balanced|permissive (default balanced). Ignored under legacy strategy."
+            "description": "approvalPolicy is unavailable for this provider. It has no effect with legacy, and mcp_managed is rejected before launch because ambient MCP configuration cannot be isolated."
           },
           "mcpServers": {
             "type": "array",
             "items": {
-              "type": "string",
-              "enum": [
-                "sqry",
-                "exa",
-                "ref_tools",
-                "trstr",
-                "agent_browser"
-              ]
+              "type": "string"
             },
             "default": [],
-            "description": "MCP server names for approval tracking (Codex manages its own MCP config)"
+            "description": "This provider does not receive gateway-managed MCP configuration. mcpServers has no effect with legacy, and mcp_managed is rejected before launch because ambient MCP configuration cannot be isolated."
           },
           "sessionId": {
             "type": "string",
+            "minLength": 1,
             "description": "Codex session UUID to resume via `codex exec resume <ID>`. Must be a real Codex session ID (from `~/.codex/sessions/` or the `codex resume` picker). Gateway-generated `gw-*` IDs are rejected. For a brand-new session no resumable sessionId is returned; continue with resumeLatest:true or a real Codex UUID."
           },
           "resumeLatest": {
             "type": "boolean",
             "default": false,
-            "description": "Resume the most recent Codex session via `codex exec resume --last`. Ignored if sessionId is set. A brand-new session returns no resumable sessionId; continue with resumeLatest:true or a real Codex UUID."
+            "description": "Resume Codex's globally latest session via `codex exec resume --last`; it inherits that session's original cwd, and workingDir/addDir do not retarget it. Ignored if sessionId is set; an explicit real Codex UUID targets that session. A brand-new session returns no resumable sessionId; continue with resumeLatest:true or a real Codex UUID."
           },
           "createNewSession": {
             "type": "boolean",
@@ -1417,7 +1454,6 @@
               "text",
               "json"
             ],
-            "default": "text",
             "description": "Codex caller-facing output format. Token/cache usage is recorded in the flight recorder regardless. `text` (default) returns the plain reply; `json` returns the raw `--json` JSONL event stream."
           },
           "outputSchema": {
@@ -1442,13 +1478,8 @@
           },
           "configOverrides": {
             "type": "object",
-            "additionalProperties": {
-              "type": "string"
-            },
-            "propertyNames": {
-              "pattern": "^[a-zA-Z0-9._]+$"
-            },
-            "description": "Codex -c key=value overrides. Keys: /^[a-zA-Z0-9._]+$/. Values: no CR/LF."
+            "additionalProperties": {},
+            "description": "Codex -c key=value overrides. Keys: /^[a-zA-Z0-9._]+$/. Values: no CR/LF. Local callers only, remote HTTP/OAuth requests are rejected."
           },
           "ephemeral": {
             "type": "boolean",
@@ -1472,7 +1503,7 @@
           "workingDir": {
             "type": "string",
             "minLength": 1,
-            "description": "Codex -C/--cd <DIR>: working root for this session. New sessions only; resume inherits the original session's cwd. Stdio/local callers may pass local paths directly. Remote HTTP/OAuth callers must use relative paths inside a selected registered workspace. Do not call workspace_* tools to fix stdio/local provider path access."
+            "description": "Codex -C/--cd <DIR>: working root for this session. New sessions only; resume inherits the original session's cwd. Personal Agent Config Kit mode requires an absolute path. Stdio/local callers may pass local paths directly. Remote HTTP/OAuth callers must use relative paths inside a selected registered workspace. Do not call workspace_* tools to fix stdio/local provider path access."
           },
           "addDir": {
             "type": "array",
@@ -1486,14 +1517,14 @@
             "items": {
               "type": "string"
             },
-            "description": "Codex --enable <FEATURE> (repeatable): enable a feature for this run (equivalent to -c features.<name>=true). Accepted on resume."
+            "description": "Codex --enable <FEATURE> (repeatable): enable a feature for this run (equivalent to -c features.<name>=true). Accepted on resume. Local callers only, remote HTTP/OAuth requests are rejected."
           },
           "disable": {
             "type": "array",
             "items": {
               "type": "string"
             },
-            "description": "Codex --disable <FEATURE> (repeatable): disable a feature for this run (equivalent to -c features.<name>=false). Accepted on resume."
+            "description": "Codex --disable <FEATURE> (repeatable): disable a feature for this run (equivalent to -c features.<name>=false). Accepted on resume. Local callers only, remote HTTP/OAuth requests are rejected."
           },
           "strictConfig": {
             "type": "boolean",
@@ -1527,7 +1558,7 @@
           },
           "dangerouslyBypassHookTrust": {
             "type": "boolean",
-            "description": "Codex --dangerously-bypass-hook-trust: run enabled hooks without persisted hook trust for this invocation. DANGEROUS. Explicit opt-in; never defaulted on."
+            "description": "Codex --dangerously-bypass-hook-trust: run enabled hooks without persisted hook trust for this invocation. DANGEROUS."
           },
           "workspace": {
             "type": "string",
@@ -1558,7 +1589,12 @@
                 "additionalProperties": false
               }
             ],
-            "description": "Slice λ: run this request inside a dedicated git worktree owned by the gateway. `true` creates a fresh worktree at `<repoRoot>/.worktrees/<uuid>` branched from HEAD. `{ name?, ref? }` lets the caller supply a sanitized name and/or a git ref (default: HEAD). When the request carries a sessionId and the session already has a worktree, that worktree is reused. The gateway spawns the child CLI with `cwd: <worktree-path>` — no `-w`/`--worktree` flag is ever emitted to the underlying CLI. On session_delete or TTL eviction the gateway runs `git worktree remove --force`. Successful responses are prefixed with `[gateway] worktree=<absolute-path>\\n` so callers can use the path. NOTE: callers should `.gitignore` the `.worktrees/` directory in their repo (the gateway does NOT auto-gitignore — see slice λ spec Q4)."
+            "description": "Slice λ: run this request inside a dedicated git worktree owned by the gateway. `true` creates a fresh worktree at `<repoRoot>/.worktrees/<uuid>` branched from HEAD. `{ name?, ref? }` lets the caller supply a sanitized name and/or a git ref (default: HEAD). When the request carries a sessionId and the session already has a worktree, reuse requires same-host ownership metadata and a matching live Git registration. Named path collisions never reuse manager state. Gateway-managed worktrees require the local file-backed session manager and fail closed with PostgreSQL sessions. The Grok, Devin, and Mistral adapters require an explicit provider-native sessionId; fresh, createNewSession, and resumeLatest-only worktree requests fail closed because they cannot durably reselect the worktree. The request must select a registered workspace explicitly, through caller-owned session metadata, or through the configured default. Worktrees never fall back to the gateway process cwd and cannot be combined with local workingDir, addDir, or includeDirs paths. The gateway spawns the child CLI with `cwd: <worktree-path>`; no `-w`/`--worktree` flag is ever emitted to the underlying CLI. On worktree materialization, the gateway suppresses repository, system, and global Git hooks and configured clean, smudge, and process checkout filters, sparse checkout, and lazy object fetching. Filter-dependent content such as Git LFS remains in its repository representation instead of executing host commands. On session_delete or TTL eviction the gateway hides the session and runs `git worktree remove --force`. Failed removal retains a durable cleanup-pending tombstone which blocks reuse and is retried when the file store is registered on the owning host. The tombstone is finalized only after verified Git removal. Successful responses are prefixed with `[gateway] worktree=<absolute-path>\\n` so callers can use the path. For Claude approvalStrategy:mcp_managed, requesting or reusing a worktree requires approval and LLM_GATEWAY_APPROVAL_ALLOW_BYPASS=1. Other adapters reject mcp_managed before launch. NOTE: callers should `.gitignore` the `.worktrees/` directory in their repo (the gateway does NOT auto-gitignore; see slice λ spec Q4)."
+          },
+          "requestInstructions": {
+            "type": "string",
+            "maxLength": 16384,
+            "description": "Per-request Kit instructions. Available only when [personal_config].enabled = true."
           }
         },
         "additionalProperties": false,
@@ -1591,6 +1627,166 @@
           "answers"
         ],
         "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "config_ack_stale",
+      "description": "Acknowledge the current stale Personal Agent Config release for at most 24 hours.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "config_init",
+      "description": "Initialize or clone the local Personal Agent Config baseline. This never activates a release by itself.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "remote": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Optional private Git remote to clone"
+          }
+        },
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "config_publish",
+      "description": "Push the clean local Personal Agent Config baseline to its configured Git upstream without force-pushing.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "config_recover_kit_attempt",
+      "description": "Fence and release one exact unadmitted durable Kit attempt after the previous gateway process has been stopped. Copy the execution and attempt identity from local session_get output. This action is local-only and cannot recover an existing durable job.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "provider": {
+            "type": "string",
+            "enum": [
+              "claude",
+              "codex"
+            ]
+          },
+          "sessionId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "attemptId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "execution": {
+            "type": "object",
+            "properties": {
+              "version": {
+                "type": "number",
+                "const": 1
+              },
+              "releaseId": {
+                "type": "string",
+                "pattern": "^(?:[a-f0-9]{40}|[a-f0-9]{64})$"
+              },
+              "configStamp": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "scopeRoot": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4096
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "scopeHead": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "pattern": "^(?:[a-f0-9]{40}|[a-f0-9]{64})$"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "contextIdentity": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              }
+            },
+            "required": [
+              "version",
+              "releaseId",
+              "configStamp",
+              "scopeRoot",
+              "scopeHead",
+              "contextIdentity"
+            ],
+            "additionalProperties": false
+          },
+          "acknowledgement": {
+            "type": "string",
+            "const": "I_CONFIRM_THE_PREVIOUS_GATEWAY_IS_STOPPED"
+          }
+        },
+        "required": [
+          "provider",
+          "sessionId",
+          "attemptId",
+          "execution",
+          "acknowledgement"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "config_rollback",
+      "description": "Atomically activate an already verified retained Personal Agent Config release.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "releaseId": {
+            "type": "string",
+            "pattern": "^(?:[a-f0-9]{40}|[a-f0-9]{64})$"
+          }
+        },
+        "required": [
+          "releaseId"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "config_status",
+      "description": "Show Personal Agent Config state without exposing baseline paths or local machine binding values.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "config_sync",
+      "description": "Synchronize, verify, compile, and atomically activate a Personal Agent Config release. It never pushes.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
         "$schema": "http://json-schema.org/draft-07/schema#"
       }
     },
@@ -1644,7 +1840,7 @@
     },
     {
       "name": "cursor_request",
-      "description": "Run a Cursor Agent CLI request synchronously (auto-defers to a pollable job past the sync deadline when async jobs are enabled; otherwise runs to completion). Headless print mode (`cursor-agent --print`).",
+      "description": "Run a Cursor Agent request synchronously (auto-defers to a pollable job past the sync deadline when async jobs are enabled; otherwise runs to completion). Default `cli` uses headless print mode (`cursor-agent --print`); gated `acp` uses native `cursor-agent acp` and accepts prompt, model, a gateway ACP session, and a registered workspace alias.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -1683,7 +1879,7 @@
               "acp"
             ],
             "default": "cli",
-            "description": "Transport selector. Default `cli` uses cursor-agent --print. `acp` uses the native cursor-agent acp transport and fails closed unless [acp] and [acp.providers.cursor].runtime_enabled are true."
+            "description": "Transport selector. Default `cli` uses cursor-agent --print. `acp` uses native cursor-agent acp and fails closed unless [acp].enabled plus [acp.providers.cursor].enabled and runtime_enabled are true. ACP accepts prompt, model, a gateway ACP sessionId, and a registered workspace alias; Cursor CLI-only controls are rejected."
           },
           "force": {
             "type": "boolean",
@@ -1710,28 +1906,28 @@
           },
           "workspace": {
             "type": "string",
-            "description": "Workspace directory or saved workspace name (--workspace). Remote HTTP/OAuth callers must pass a registered workspace alias; local stdio callers may pass local Cursor workspace paths."
+            "description": "Workspace directory or saved workspace name (--workspace) on transport=cli. transport=acp requires a registered gateway workspace alias. Remote HTTP/OAuth callers must pass an alias; local callers may pass local Cursor workspace paths only on transport=cli."
           },
           "addDir": {
             "type": "array",
             "items": {
               "type": "string"
             },
-            "description": "Additional workspace root directories (--add-dir, repeatable)"
+            "description": "Additional workspace root directories (--add-dir, repeatable)."
           },
           "sessionId": {
             "type": "string",
-            "description": "Cursor chat/session ID to resume (emits --resume <id>). Note: the gw-* id minted for a brand-new gateway session is not resumable via sessionId; continue with resumeLatest:true."
+            "description": "On transport=cli, Cursor chat/session ID to resume (emits --resume <id>); gateway gw-* tracking ids are not CLI session ids. On transport=acp, gateway-owned ACP session ID returned by an earlier ACP call; Cursor-native and CLI session ids are rejected."
           },
           "resumeLatest": {
             "type": "boolean",
             "default": false,
-            "description": "Resume the latest Cursor chat (--continue). Note: the gw-* id minted for a brand-new gateway session is not resumable via sessionId; continue with resumeLatest:true."
+            "description": "Resume the latest Cursor chat (--continue) on transport=cli. true is rejected on transport=acp."
           },
           "createNewSession": {
             "type": "boolean",
             "default": false,
-            "description": "Force a new session"
+            "description": "Force a new session on transport=cli. true is rejected on transport=acp."
           },
           "approvalStrategy": {
             "type": "string",
@@ -1740,7 +1936,7 @@
               "mcp_managed"
             ],
             "default": "legacy",
-            "description": "Approval strategy: legacy (default) lets Cursor's own flags decide; mcp_managed routes high-impact Cursor controls (force, trust, sandbox disabled) through the gateway approval gate."
+            "description": "Approval strategy. legacy is the only executable CLI strategy; mcp_managed is rejected before Cursor launches because the CLI adapter cannot isolate ambient MCP configuration. transport=acp has its own permission bridge and also rejects mcp_managed."
           },
           "approvalPolicy": {
             "type": "string",
@@ -1749,7 +1945,7 @@
               "balanced",
               "permissive"
             ],
-            "description": "Approval policy when approvalStrategy is mcp_managed: strict|balanced|permissive (default balanced). Ignored under legacy strategy."
+            "description": "On transport=cli, approvalPolicy has no effect because mcp_managed is unavailable. On transport=acp, supplying approvalPolicy is rejected because ACP has its own permission bridge."
           },
           "correlationId": {
             "type": "string",
@@ -1847,14 +2043,14 @@
           },
           "workspace": {
             "type": "string",
-            "description": "Workspace directory or saved workspace name (--workspace). Remote HTTP/OAuth callers must pass a registered workspace alias; local stdio callers may pass local Cursor workspace paths."
+            "description": "Workspace directory or saved workspace name (--workspace). This async tool always uses the CLI transport; remote HTTP/OAuth callers must pass a registered workspace alias, while local callers may pass local Cursor workspace paths."
           },
           "addDir": {
             "type": "array",
             "items": {
               "type": "string"
             },
-            "description": "Additional workspace root directories (--add-dir, repeatable)"
+            "description": "Additional workspace root directories (--add-dir, repeatable)."
           },
           "sessionId": {
             "type": "string",
@@ -1877,7 +2073,7 @@
               "mcp_managed"
             ],
             "default": "legacy",
-            "description": "Approval strategy: legacy (default) lets Cursor's own flags decide; mcp_managed routes high-impact Cursor controls (force, trust, sandbox disabled) through the gateway approval gate."
+            "description": "Approval strategy: legacy is supported. mcp_managed is rejected before launch because this adapter cannot isolate ambient MCP configuration."
           },
           "approvalPolicy": {
             "type": "string",
@@ -1886,7 +2082,7 @@
               "balanced",
               "permissive"
             ],
-            "description": "Approval policy when approvalStrategy is mcp_managed: strict|balanced|permissive (default balanced). Ignored under legacy strategy."
+            "description": "approvalPolicy is unavailable for this provider. It has no effect with legacy, and mcp_managed is rejected before launch because ambient MCP configuration cannot be isolated."
           },
           "correlationId": {
             "type": "string",
@@ -1943,7 +2139,7 @@
               "acp"
             ],
             "default": "cli",
-            "description": "Transport: 'cli' (default) runs the Devin CLI; 'acp' routes through `devin acp` when [acp].enabled and the provider's runtime_enabled are set (fails closed otherwise)."
+            "description": "Transport: 'cli' (default) runs the Devin CLI. 'acp' routes through `devin acp` only when [acp].enabled plus [acp.providers.devin].enabled and runtime_enabled are true (fails closed otherwise). ACP accepts prompt, model, a gateway ACP sessionId, and the validated agentType; Devin CLI-only controls are rejected."
           },
           "permissionMode": {
             "type": "string",
@@ -1954,6 +2150,24 @@
               "dangerous"
             ],
             "description": "Devin CLI permission mode (--permission-mode). auto auto-approves read-only tools; accept-edits also auto-approves workspace edits; smart additionally auto-runs actions a fast model judges safe; dangerous auto-approves all. When omitted, Devin uses its own headless default; choose an explicit mode for unattended runs."
+          },
+          "approvalStrategy": {
+            "type": "string",
+            "enum": [
+              "legacy",
+              "mcp_managed"
+            ],
+            "default": "legacy",
+            "description": "Approval strategy. legacy is supported. mcp_managed is rejected before Devin launches because the CLI adapter cannot isolate ambient MCP configuration; transport=acp has its own permission bridge and also rejects mcp_managed."
+          },
+          "approvalPolicy": {
+            "type": "string",
+            "enum": [
+              "strict",
+              "balanced",
+              "permissive"
+            ],
+            "description": "On transport=cli, approvalPolicy has no effect because mcp_managed is unavailable. On transport=acp, supplying approvalPolicy is rejected because ACP has its own permission bridge."
           },
           "promptFile": {
             "type": "string",
@@ -1968,9 +2182,13 @@
             "description": "Run the Devin session in a sandbox (Devin --sandbox). Safety control: never defaulted on; pass true to opt in."
           },
           "exportSession": {
-            "type": [
-              "boolean",
-              "string"
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "string"
+              }
             ],
             "description": "Export the session (Devin --export [<PATH>]). true emits a bare --export; a string path emits --export <path>."
           },
@@ -1992,17 +2210,17 @@
           },
           "sessionId": {
             "type": "string",
-            "description": "Devin session ID to resume (emits --resume <id>; use resumeLatest for --continue). Note: the gw-* id minted for a brand-new session is not resumable via sessionId; continue with resumeLatest:true."
+            "description": "On transport=cli, Devin session ID to resume (emits --resume <id>; use resumeLatest for --continue); gateway gw-* tracking ids are not CLI session ids. On transport=acp, gateway-owned ACP session ID returned by an earlier ACP call; Devin-native and CLI session ids are rejected."
           },
           "resumeLatest": {
             "type": "boolean",
             "default": false,
-            "description": "Resume the most recent Devin session in cwd (--continue). Note: the gw-* id minted for a brand-new session is not resumable via sessionId; continue with resumeLatest:true."
+            "description": "Resume the most recent Devin session in cwd (--continue) on transport=cli. true is rejected on transport=acp."
           },
           "createNewSession": {
             "type": "boolean",
             "default": false,
-            "description": "Force a new session"
+            "description": "Force a new session on transport=cli. true is rejected on transport=acp."
           },
           "correlationId": {
             "type": "string",
@@ -2032,6 +2250,42 @@
             "type": "boolean",
             "default": false,
             "description": "Bypass dedup and force a fresh CLI run even if a recent identical request exists"
+          },
+          "workingDir": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Local Devin process working directory. Stdio/local callers may pass local paths directly. Remote HTTP/OAuth callers must use relative paths inside a selected registered workspace. Do not call workspace_* tools to fix stdio/local provider path access."
+          },
+          "workspace": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "pattern": "^[A-Za-z][A-Za-z0-9._-]{0,63}$",
+            "description": "Registered workspace alias for remote HTTP/OAuth provider calls. Do not use this field, workspace_list, or workspace_register_existing_repo as a fallback for stdio/local provider path access; pass workingDir/addDir/includeDirs directly instead."
+          },
+          "worktree": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64
+                  },
+                  "ref": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 255
+                  }
+                },
+                "additionalProperties": false
+              }
+            ],
+            "description": "Slice λ: run this request inside a dedicated git worktree owned by the gateway. `true` creates a fresh worktree at `<repoRoot>/.worktrees/<uuid>` branched from HEAD. `{ name?, ref? }` lets the caller supply a sanitized name and/or a git ref (default: HEAD). When the request carries a sessionId and the session already has a worktree, reuse requires same-host ownership metadata and a matching live Git registration. Named path collisions never reuse manager state. Gateway-managed worktrees require the local file-backed session manager and fail closed with PostgreSQL sessions. The Grok, Devin, and Mistral adapters require an explicit provider-native sessionId; fresh, createNewSession, and resumeLatest-only worktree requests fail closed because they cannot durably reselect the worktree. The request must select a registered workspace explicitly, through caller-owned session metadata, or through the configured default. Worktrees never fall back to the gateway process cwd and cannot be combined with local workingDir, addDir, or includeDirs paths. The gateway spawns the child CLI with `cwd: <worktree-path>`; no `-w`/`--worktree` flag is ever emitted to the underlying CLI. On worktree materialization, the gateway suppresses repository, system, and global Git hooks and configured clean, smudge, and process checkout filters, sparse checkout, and lazy object fetching. Filter-dependent content such as Git LFS remains in its repository representation instead of executing host commands. On session_delete or TTL eviction the gateway hides the session and runs `git worktree remove --force`. Failed removal retains a durable cleanup-pending tombstone which blocks reuse and is retried when the file store is registered on the owning host. The tombstone is finalized only after verified Git removal. Successful responses are prefixed with `[gateway] worktree=<absolute-path>\\n` so callers can use the path. For Claude approvalStrategy:mcp_managed, requesting or reusing a worktree requires approval and LLM_GATEWAY_APPROVAL_ALLOW_BYPASS=1. Other adapters reject mcp_managed before launch. NOTE: callers should `.gitignore` the `.worktrees/` directory in their repo (the gateway does NOT auto-gitignore; see slice λ spec Q4)."
           }
         },
         "additionalProperties": false,
@@ -2064,6 +2318,24 @@
             ],
             "description": "Devin CLI permission mode (--permission-mode). auto, accept-edits, smart, or dangerous. When omitted, Devin uses its own headless default; choose an explicit mode for unattended runs."
           },
+          "approvalStrategy": {
+            "type": "string",
+            "enum": [
+              "legacy",
+              "mcp_managed"
+            ],
+            "default": "legacy",
+            "description": "Approval strategy: legacy is supported. mcp_managed is rejected before launch because this adapter cannot isolate ambient MCP configuration."
+          },
+          "approvalPolicy": {
+            "type": "string",
+            "enum": [
+              "strict",
+              "balanced",
+              "permissive"
+            ],
+            "description": "approvalPolicy is unavailable for this provider. It has no effect with legacy, and mcp_managed is rejected before launch because ambient MCP configuration cannot be isolated."
+          },
           "promptFile": {
             "type": "string",
             "description": "Load the initial prompt from a file (--prompt-file)"
@@ -2077,9 +2349,13 @@
             "description": "Run the Devin session in a sandbox (Devin --sandbox). Safety control: never defaulted on; pass true to opt in."
           },
           "exportSession": {
-            "type": [
-              "boolean",
-              "string"
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "string"
+              }
             ],
             "description": "Export the session (Devin --export [<PATH>]). true emits a bare --export; a string path emits --export <path>."
           },
@@ -2128,6 +2404,69 @@
             "type": "boolean",
             "default": false,
             "description": "Bypass dedup and force a fresh CLI run even if a recent identical request exists"
+          },
+          "workingDir": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Local Devin process working directory. Stdio/local callers may pass local paths directly. Remote HTTP/OAuth callers must use relative paths inside a selected registered workspace. Do not call workspace_* tools to fix stdio/local provider path access."
+          },
+          "workspace": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "pattern": "^[A-Za-z][A-Za-z0-9._-]{0,63}$",
+            "description": "Registered workspace alias for remote HTTP/OAuth provider calls. Do not use this field, workspace_list, or workspace_register_existing_repo as a fallback for stdio/local provider path access; pass workingDir/addDir/includeDirs directly instead."
+          },
+          "worktree": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64
+                  },
+                  "ref": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 255
+                  }
+                },
+                "additionalProperties": false
+              }
+            ],
+            "description": "Slice λ: run this request inside a dedicated git worktree owned by the gateway. `true` creates a fresh worktree at `<repoRoot>/.worktrees/<uuid>` branched from HEAD. `{ name?, ref? }` lets the caller supply a sanitized name and/or a git ref (default: HEAD). When the request carries a sessionId and the session already has a worktree, reuse requires same-host ownership metadata and a matching live Git registration. Named path collisions never reuse manager state. Gateway-managed worktrees require the local file-backed session manager and fail closed with PostgreSQL sessions. The Grok, Devin, and Mistral adapters require an explicit provider-native sessionId; fresh, createNewSession, and resumeLatest-only worktree requests fail closed because they cannot durably reselect the worktree. The request must select a registered workspace explicitly, through caller-owned session metadata, or through the configured default. Worktrees never fall back to the gateway process cwd and cannot be combined with local workingDir, addDir, or includeDirs paths. The gateway spawns the child CLI with `cwd: <worktree-path>`; no `-w`/`--worktree` flag is ever emitted to the underlying CLI. On worktree materialization, the gateway suppresses repository, system, and global Git hooks and configured clean, smudge, and process checkout filters, sparse checkout, and lazy object fetching. Filter-dependent content such as Git LFS remains in its repository representation instead of executing host commands. On session_delete or TTL eviction the gateway hides the session and runs `git worktree remove --force`. Failed removal retains a durable cleanup-pending tombstone which blocks reuse and is retried when the file store is registered on the owning host. The tombstone is finalized only after verified Git removal. Successful responses are prefixed with `[gateway] worktree=<absolute-path>\\n` so callers can use the path. For Claude approvalStrategy:mcp_managed, requesting or reusing a worktree requires approval and LLM_GATEWAY_APPROVAL_ALLOW_BYPASS=1. Other adapters reject mcp_managed before launch. NOTE: callers should `.gitignore` the `.worktrees/` directory in their repo (the gateway does NOT auto-gitignore; see slice λ spec Q4)."
+          }
+        },
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "explain_effective_config",
+      "description": "Explain the selected Personal Agent Config release and context provenance without returning local paths or instruction text.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "workingDir": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Absolute working directory whose Personal Agent Config Kit scope should be inspected. Relative paths are rejected so scope never depends on the gateway process cwd."
+          },
+          "workspace": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "pattern": "^[A-Za-z][A-Za-z0-9._-]{0,63}$",
+            "description": "Registered workspace alias for remote HTTP/OAuth provider calls. Do not use this field, workspace_list, or workspace_register_existing_repo as a fallback for stdio/local provider path access; pass workingDir/addDir/includeDirs directly instead."
+          },
+          "requestInstructions": {
+            "type": "string",
+            "maxLength": 16384
           }
         },
         "additionalProperties": false,
@@ -2150,17 +2489,21 @@
             "type": "object",
             "properties": {
               "system": {
-                "type": "string"
+                "type": "string",
+                "maxLength": 100000
               },
               "tools": {
-                "type": "string"
+                "type": "string",
+                "maxLength": 100000
               },
               "context": {
-                "type": "string"
+                "type": "string",
+                "maxLength": 100000
               },
               "task": {
                 "type": "string",
-                "minLength": 1
+                "minLength": 1,
+                "maxLength": 100000
               },
               "cacheControl": {
                 "type": "object",
@@ -2190,6 +2533,7 @@
           },
           "sessionId": {
             "type": "string",
+            "minLength": 1,
             "description": "Antigravity conversation ID to resume (emits --conversation <id>). agy owns conversation ids; a fresh request returns no resumable sessionId, continue via resumeLatest:true."
           },
           "resumeLatest": {
@@ -2210,7 +2554,7 @@
               "yolo",
               "plan"
             ],
-            "description": "Approval mode. Only default (prompted) and yolo (auto-approve all, emits --dangerously-skip-permissions) work with the Antigravity agy headless path; auto_edit and plan are rejected at request time (agy has no headless accept-edits/plan mode)."
+            "description": "Approval mode for legacy strategy: default leaves agy prompted, auto_edit emits --mode accept-edits, plan emits --mode plan, and yolo emits --dangerously-skip-permissions."
           },
           "approvalStrategy": {
             "type": "string",
@@ -2219,7 +2563,7 @@
               "mcp_managed"
             ],
             "default": "legacy",
-            "description": "Approval strategy: legacy (default) lets the provider CLI's own flags decide; mcp_managed routes the run through the gateway approval gate (required for approvalPolicy and approval_list). Under mcp_managed the caller's permissionMode/alwaysApprove may be overridden by the gate."
+            "description": "Approval strategy: legacy is supported. mcp_managed is rejected before launch because this adapter cannot isolate ambient MCP configuration."
           },
           "approvalPolicy": {
             "type": "string",
@@ -2228,22 +2572,15 @@
               "balanced",
               "permissive"
             ],
-            "description": "Approval policy when approvalStrategy is mcp_managed: strict|balanced|permissive (default balanced). Ignored under legacy strategy."
+            "description": "approvalPolicy is unavailable for this provider. It has no effect with legacy, and mcp_managed is rejected before launch because ambient MCP configuration cannot be isolated."
           },
           "mcpServers": {
             "type": "array",
             "items": {
-              "type": "string",
-              "enum": [
-                "sqry",
-                "exa",
-                "ref_tools",
-                "trstr",
-                "agent_browser"
-              ]
+              "type": "string"
             },
             "default": [],
-            "description": "MCP server names accepted for approval tracking only; Antigravity manages its own MCP configuration."
+            "description": "This provider does not receive gateway-managed MCP configuration. mcpServers has no effect with legacy, and mcp_managed is rejected before launch because ambient MCP configuration cannot be isolated."
           },
           "allowedTools": {
             "type": "array",
@@ -2330,7 +2667,7 @@
           },
           "yolo": {
             "type": "boolean",
-            "description": "Emit `--dangerously-skip-permissions` to auto-approve all actions. Routed through the same approval gate. Under mcp_managed the gate still decides."
+            "description": "Emit `--dangerously-skip-permissions` to auto-approve all actions."
           },
           "project": {
             "type": "string",
@@ -2375,7 +2712,7 @@
                 "additionalProperties": false
               }
             ],
-            "description": "Slice λ: run this request inside a dedicated git worktree owned by the gateway. `true` creates a fresh worktree at `<repoRoot>/.worktrees/<uuid>` branched from HEAD. `{ name?, ref? }` lets the caller supply a sanitized name and/or a git ref (default: HEAD). When the request carries a sessionId and the session already has a worktree, that worktree is reused. The gateway spawns the child CLI with `cwd: <worktree-path>` — no `-w`/`--worktree` flag is ever emitted to the underlying CLI. On session_delete or TTL eviction the gateway runs `git worktree remove --force`. Successful responses are prefixed with `[gateway] worktree=<absolute-path>\\n` so callers can use the path. NOTE: callers should `.gitignore` the `.worktrees/` directory in their repo (the gateway does NOT auto-gitignore — see slice λ spec Q4)."
+            "description": "Slice λ: run this request inside a dedicated git worktree owned by the gateway. `true` creates a fresh worktree at `<repoRoot>/.worktrees/<uuid>` branched from HEAD. `{ name?, ref? }` lets the caller supply a sanitized name and/or a git ref (default: HEAD). When the request carries a sessionId and the session already has a worktree, reuse requires same-host ownership metadata and a matching live Git registration. Named path collisions never reuse manager state. Gateway-managed worktrees require the local file-backed session manager and fail closed with PostgreSQL sessions. The Grok, Devin, and Mistral adapters require an explicit provider-native sessionId; fresh, createNewSession, and resumeLatest-only worktree requests fail closed because they cannot durably reselect the worktree. The request must select a registered workspace explicitly, through caller-owned session metadata, or through the configured default. Worktrees never fall back to the gateway process cwd and cannot be combined with local workingDir, addDir, or includeDirs paths. The gateway spawns the child CLI with `cwd: <worktree-path>`; no `-w`/`--worktree` flag is ever emitted to the underlying CLI. On worktree materialization, the gateway suppresses repository, system, and global Git hooks and configured clean, smudge, and process checkout filters, sparse checkout, and lazy object fetching. Filter-dependent content such as Git LFS remains in its repository representation instead of executing host commands. On session_delete or TTL eviction the gateway hides the session and runs `git worktree remove --force`. Failed removal retains a durable cleanup-pending tombstone which blocks reuse and is retried when the file store is registered on the owning host. The tombstone is finalized only after verified Git removal. Successful responses are prefixed with `[gateway] worktree=<absolute-path>\\n` so callers can use the path. For Claude approvalStrategy:mcp_managed, requesting or reusing a worktree requires approval and LLM_GATEWAY_APPROVAL_ALLOW_BYPASS=1. Other adapters reject mcp_managed before launch. NOTE: callers should `.gitignore` the `.worktrees/` directory in their repo (the gateway does NOT auto-gitignore; see slice λ spec Q4)."
           }
         },
         "additionalProperties": false,
@@ -2398,17 +2735,21 @@
             "type": "object",
             "properties": {
               "system": {
-                "type": "string"
+                "type": "string",
+                "maxLength": 100000
               },
               "tools": {
-                "type": "string"
+                "type": "string",
+                "maxLength": 100000
               },
               "context": {
-                "type": "string"
+                "type": "string",
+                "maxLength": 100000
               },
               "task": {
                 "type": "string",
-                "minLength": 1
+                "minLength": 1,
+                "maxLength": 100000
               },
               "cacheControl": {
                 "type": "object",
@@ -2438,6 +2779,7 @@
           },
           "sessionId": {
             "type": "string",
+            "minLength": 1,
             "description": "Antigravity conversation ID to resume (emits --conversation <id>). agy owns conversation ids; a fresh request returns no resumable sessionId, continue via resumeLatest:true."
           },
           "resumeLatest": {
@@ -2458,7 +2800,7 @@
               "yolo",
               "plan"
             ],
-            "description": "Approval mode. Only default (prompted) and yolo (auto-approve all, emits --dangerously-skip-permissions) work with the Antigravity agy headless path; auto_edit and plan are rejected at request time (agy has no headless accept-edits/plan mode)."
+            "description": "Approval mode for legacy strategy: default leaves agy prompted, auto_edit emits --mode accept-edits, plan emits --mode plan, and yolo emits --dangerously-skip-permissions."
           },
           "approvalStrategy": {
             "type": "string",
@@ -2467,7 +2809,7 @@
               "mcp_managed"
             ],
             "default": "legacy",
-            "description": "Approval strategy: legacy (default) lets the provider CLI's own flags decide; mcp_managed routes the run through the gateway approval gate (required for approvalPolicy and approval_list). Under mcp_managed the caller's permissionMode/alwaysApprove may be overridden by the gate."
+            "description": "Approval strategy: legacy is supported. mcp_managed is rejected before launch because this adapter cannot isolate ambient MCP configuration."
           },
           "approvalPolicy": {
             "type": "string",
@@ -2476,22 +2818,15 @@
               "balanced",
               "permissive"
             ],
-            "description": "Approval policy when approvalStrategy is mcp_managed: strict|balanced|permissive (default balanced). Ignored under legacy strategy."
+            "description": "approvalPolicy is unavailable for this provider. It has no effect with legacy, and mcp_managed is rejected before launch because ambient MCP configuration cannot be isolated."
           },
           "mcpServers": {
             "type": "array",
             "items": {
-              "type": "string",
-              "enum": [
-                "sqry",
-                "exa",
-                "ref_tools",
-                "trstr",
-                "agent_browser"
-              ]
+              "type": "string"
             },
             "default": [],
-            "description": "MCP server names accepted for approval tracking only; Antigravity manages its own MCP configuration."
+            "description": "This provider does not receive gateway-managed MCP configuration. mcpServers has no effect with legacy, and mcp_managed is rejected before launch because ambient MCP configuration cannot be isolated."
           },
           "allowedTools": {
             "type": "array",
@@ -2573,7 +2908,7 @@
           },
           "yolo": {
             "type": "boolean",
-            "description": "Emit `--dangerously-skip-permissions` to auto-approve all actions. Routed through the same approval gate. Under mcp_managed the gate still decides."
+            "description": "Emit `--dangerously-skip-permissions` to auto-approve all actions."
           },
           "project": {
             "type": "string",
@@ -2618,7 +2953,7 @@
                 "additionalProperties": false
               }
             ],
-            "description": "Slice λ: run this request inside a dedicated git worktree owned by the gateway. `true` creates a fresh worktree at `<repoRoot>/.worktrees/<uuid>` branched from HEAD. `{ name?, ref? }` lets the caller supply a sanitized name and/or a git ref (default: HEAD). When the request carries a sessionId and the session already has a worktree, that worktree is reused. The gateway spawns the child CLI with `cwd: <worktree-path>` — no `-w`/`--worktree` flag is ever emitted to the underlying CLI. On session_delete or TTL eviction the gateway runs `git worktree remove --force`. Successful responses are prefixed with `[gateway] worktree=<absolute-path>\\n` so callers can use the path. NOTE: callers should `.gitignore` the `.worktrees/` directory in their repo (the gateway does NOT auto-gitignore — see slice λ spec Q4)."
+            "description": "Slice λ: run this request inside a dedicated git worktree owned by the gateway. `true` creates a fresh worktree at `<repoRoot>/.worktrees/<uuid>` branched from HEAD. `{ name?, ref? }` lets the caller supply a sanitized name and/or a git ref (default: HEAD). When the request carries a sessionId and the session already has a worktree, reuse requires same-host ownership metadata and a matching live Git registration. Named path collisions never reuse manager state. Gateway-managed worktrees require the local file-backed session manager and fail closed with PostgreSQL sessions. The Grok, Devin, and Mistral adapters require an explicit provider-native sessionId; fresh, createNewSession, and resumeLatest-only worktree requests fail closed because they cannot durably reselect the worktree. The request must select a registered workspace explicitly, through caller-owned session metadata, or through the configured default. Worktrees never fall back to the gateway process cwd and cannot be combined with local workingDir, addDir, or includeDirs paths. The gateway spawns the child CLI with `cwd: <worktree-path>`; no `-w`/`--worktree` flag is ever emitted to the underlying CLI. On worktree materialization, the gateway suppresses repository, system, and global Git hooks and configured clean, smudge, and process checkout filters, sparse checkout, and lazy object fetching. Filter-dependent content such as Git LFS remains in its repository representation instead of executing host commands. On session_delete or TTL eviction the gateway hides the session and runs `git worktree remove --force`. Failed removal retains a durable cleanup-pending tombstone which blocks reuse and is retried when the file store is registered on the owning host. The tombstone is finalized only after verified Git removal. Successful responses are prefixed with `[gateway] worktree=<absolute-path>\\n` so callers can use the path. For Claude approvalStrategy:mcp_managed, requesting or reusing a worktree requires approval and LLM_GATEWAY_APPROVAL_ALLOW_BYPASS=1. Other adapters reject mcp_managed before launch. NOTE: callers should `.gitignore` the `.worktrees/` directory in their repo (the gateway does NOT auto-gitignore; see slice λ spec Q4)."
           }
         },
         "additionalProperties": false,
@@ -2641,17 +2976,21 @@
             "type": "object",
             "properties": {
               "system": {
-                "type": "string"
+                "type": "string",
+                "maxLength": 100000
               },
               "tools": {
-                "type": "string"
+                "type": "string",
+                "maxLength": 100000
               },
               "context": {
-                "type": "string"
+                "type": "string",
+                "maxLength": 100000
               },
               "task": {
                 "type": "string",
-                "minLength": 1
+                "minLength": 1,
+                "maxLength": 100000
               },
               "cacheControl": {
                 "type": "object",
@@ -2677,7 +3016,7 @@
           },
           "model": {
             "type": "string",
-            "description": "Model name or alias (e.g. grok-build, latest)"
+            "description": "Model name or alias (e.g. grok-4.5, latest)"
           },
           "transport": {
             "type": "string",
@@ -2686,7 +3025,7 @@
               "acp"
             ],
             "default": "cli",
-            "description": "Transport: 'cli' (default) runs the Grok CLI; 'acp' routes through `grok agent stdio` when [acp].enabled and the provider's runtime_enabled are set (fails closed otherwise)."
+            "description": "Transport: 'cli' (default) runs the Grok CLI. 'acp' routes through `grok agent stdio` only when [acp].enabled plus [acp.providers.grok].enabled and runtime_enabled are true (fails closed otherwise). ACP accepts prompt, model, a gateway ACP sessionId, and a registered workspace alias; Grok CLI-only controls are rejected."
           },
           "outputFormat": {
             "type": "string",
@@ -2819,11 +3158,6 @@
             "minLength": 1,
             "description": "Grok --prompt-file <PATH>: single-turn prompt loaded from a file."
           },
-          "single": {
-            "type": "string",
-            "minLength": 1,
-            "description": "Grok --single <PROMPT>: single-turn prompt (in addition to gateway -p)."
-          },
           "experimentalMemory": {
             "type": "boolean",
             "description": "Grok --experimental-memory: enable cross-session memory."
@@ -2859,22 +3193,22 @@
           },
           "sessionId": {
             "type": "string",
-            "description": "Provider-native session ID to resume (emits --resume <id>; use resumeLatest for --continue). Note: the gw-* id minted for a brand-new session is not resumable via sessionId; continue with resumeLatest:true."
+            "description": "On transport=cli, provider-native session ID to resume (emits --resume <id>; use resumeLatest for --continue); gateway gw-* tracking ids are not CLI session ids. On transport=acp, gateway-owned ACP session ID returned by an earlier ACP call; provider-native and CLI session ids are rejected."
           },
           "resumeLatest": {
             "type": "boolean",
             "default": false,
-            "description": "Resume most recent Grok session in cwd (--continue). Note: the gw-* id minted for a brand-new session is not resumable via sessionId; continue with resumeLatest:true."
+            "description": "Resume the most recent Grok session in cwd (--continue) on transport=cli. true is rejected on transport=acp."
           },
           "createNewSession": {
             "type": "boolean",
             "default": false,
-            "description": "Force new session"
+            "description": "Force a new session on transport=cli. true is rejected on transport=acp."
           },
           "alwaysApprove": {
             "type": "boolean",
             "default": false,
-            "description": "Auto-approve all tool executions (--always-approve)"
+            "description": "Auto-approve all tool executions (--always-approve)."
           },
           "permissionMode": {
             "type": "string",
@@ -2895,7 +3229,7 @@
               "mcp_managed"
             ],
             "default": "legacy",
-            "description": "Approval strategy: legacy (default) lets the provider CLI's own flags decide; mcp_managed routes the run through the gateway approval gate (required for approvalPolicy and approval_list). Under mcp_managed the caller's permissionMode/alwaysApprove may be overridden by the gate."
+            "description": "Approval strategy. legacy is supported. mcp_managed is rejected before Grok launches because the CLI adapter cannot isolate ambient MCP configuration; transport=acp has its own permission bridge and also rejects mcp_managed."
           },
           "approvalPolicy": {
             "type": "string",
@@ -2904,22 +3238,15 @@
               "balanced",
               "permissive"
             ],
-            "description": "Approval policy when approvalStrategy is mcp_managed: strict|balanced|permissive (default balanced). Ignored under legacy strategy."
+            "description": "On transport=cli, approvalPolicy has no effect because mcp_managed is unavailable. On transport=acp, supplying approvalPolicy is rejected because ACP has its own permission bridge."
           },
           "mcpServers": {
             "type": "array",
             "items": {
-              "type": "string",
-              "enum": [
-                "sqry",
-                "exa",
-                "ref_tools",
-                "trstr",
-                "agent_browser"
-              ]
+              "type": "string"
             },
             "default": [],
-            "description": "MCP server names for approval tracking (Grok manages its own MCP config via `grok mcp`)"
+            "description": "This provider does not receive gateway-managed MCP configuration. mcpServers has no effect with legacy, and mcp_managed is rejected before launch because ambient MCP configuration cannot be isolated."
           },
           "correlationId": {
             "type": "string",
@@ -2958,10 +3285,7 @@
               },
               {
                 "type": "object",
-                "additionalProperties": {
-                  "type": "object",
-                  "additionalProperties": {}
-                }
+                "additionalProperties": {}
               }
             ],
             "description": "Grok --agents <JSON>: inline subagent definitions (JSON string or name → { description, prompt, … } map)."
@@ -3045,7 +3369,7 @@
                 "additionalProperties": false
               }
             ],
-            "description": "Slice λ: run this request inside a dedicated git worktree owned by the gateway. `true` creates a fresh worktree at `<repoRoot>/.worktrees/<uuid>` branched from HEAD. `{ name?, ref? }` lets the caller supply a sanitized name and/or a git ref (default: HEAD). When the request carries a sessionId and the session already has a worktree, that worktree is reused. The gateway spawns the child CLI with `cwd: <worktree-path>` — no `-w`/`--worktree` flag is ever emitted to the underlying CLI. On session_delete or TTL eviction the gateway runs `git worktree remove --force`. Successful responses are prefixed with `[gateway] worktree=<absolute-path>\\n` so callers can use the path. NOTE: callers should `.gitignore` the `.worktrees/` directory in their repo (the gateway does NOT auto-gitignore — see slice λ spec Q4)."
+            "description": "Slice λ: run this request inside a dedicated git worktree owned by the gateway. `true` creates a fresh worktree at `<repoRoot>/.worktrees/<uuid>` branched from HEAD. `{ name?, ref? }` lets the caller supply a sanitized name and/or a git ref (default: HEAD). When the request carries a sessionId and the session already has a worktree, reuse requires same-host ownership metadata and a matching live Git registration. Named path collisions never reuse manager state. Gateway-managed worktrees require the local file-backed session manager and fail closed with PostgreSQL sessions. The Grok, Devin, and Mistral adapters require an explicit provider-native sessionId; fresh, createNewSession, and resumeLatest-only worktree requests fail closed because they cannot durably reselect the worktree. The request must select a registered workspace explicitly, through caller-owned session metadata, or through the configured default. Worktrees never fall back to the gateway process cwd and cannot be combined with local workingDir, addDir, or includeDirs paths. The gateway spawns the child CLI with `cwd: <worktree-path>`; no `-w`/`--worktree` flag is ever emitted to the underlying CLI. On worktree materialization, the gateway suppresses repository, system, and global Git hooks and configured clean, smudge, and process checkout filters, sparse checkout, and lazy object fetching. Filter-dependent content such as Git LFS remains in its repository representation instead of executing host commands. On session_delete or TTL eviction the gateway hides the session and runs `git worktree remove --force`. Failed removal retains a durable cleanup-pending tombstone which blocks reuse and is retried when the file store is registered on the owning host. The tombstone is finalized only after verified Git removal. Successful responses are prefixed with `[gateway] worktree=<absolute-path>\\n` so callers can use the path. For Claude approvalStrategy:mcp_managed, requesting or reusing a worktree requires approval and LLM_GATEWAY_APPROVAL_ALLOW_BYPASS=1. Other adapters reject mcp_managed before launch. NOTE: callers should `.gitignore` the `.worktrees/` directory in their repo (the gateway does NOT auto-gitignore; see slice λ spec Q4)."
           }
         },
         "additionalProperties": false,
@@ -3068,17 +3392,21 @@
             "type": "object",
             "properties": {
               "system": {
-                "type": "string"
+                "type": "string",
+                "maxLength": 100000
               },
               "tools": {
-                "type": "string"
+                "type": "string",
+                "maxLength": 100000
               },
               "context": {
-                "type": "string"
+                "type": "string",
+                "maxLength": 100000
               },
               "task": {
                 "type": "string",
-                "minLength": 1
+                "minLength": 1,
+                "maxLength": 100000
               },
               "cacheControl": {
                 "type": "object",
@@ -3104,7 +3432,7 @@
           },
           "model": {
             "type": "string",
-            "description": "Model name or alias (e.g. grok-build, latest)"
+            "description": "Model name or alias (e.g. grok-4.5, latest)"
           },
           "outputFormat": {
             "type": "string",
@@ -3132,7 +3460,7 @@
           "alwaysApprove": {
             "type": "boolean",
             "default": false,
-            "description": "Auto-approve all tool executions (--always-approve)"
+            "description": "Auto-approve all tool executions (--always-approve)."
           },
           "permissionMode": {
             "type": "string",
@@ -3168,7 +3496,7 @@
               "mcp_managed"
             ],
             "default": "legacy",
-            "description": "Approval strategy: legacy (default) lets the provider CLI's own flags decide; mcp_managed routes the run through the gateway approval gate (required for approvalPolicy and approval_list). Under mcp_managed the caller's permissionMode/alwaysApprove may be overridden by the gate."
+            "description": "Approval strategy: legacy is supported. mcp_managed is rejected before launch because this adapter cannot isolate ambient MCP configuration."
           },
           "approvalPolicy": {
             "type": "string",
@@ -3177,22 +3505,15 @@
               "balanced",
               "permissive"
             ],
-            "description": "Approval policy when approvalStrategy is mcp_managed: strict|balanced|permissive (default balanced). Ignored under legacy strategy."
+            "description": "approvalPolicy is unavailable for this provider. It has no effect with legacy, and mcp_managed is rejected before launch because ambient MCP configuration cannot be isolated."
           },
           "mcpServers": {
             "type": "array",
             "items": {
-              "type": "string",
-              "enum": [
-                "sqry",
-                "exa",
-                "ref_tools",
-                "trstr",
-                "agent_browser"
-              ]
+              "type": "string"
             },
             "default": [],
-            "description": "MCP server names for approval tracking (Grok manages its own MCP config via `grok mcp`)"
+            "description": "This provider does not receive gateway-managed MCP configuration. mcpServers has no effect with legacy, and mcp_managed is rejected before launch because ambient MCP configuration cannot be isolated."
           },
           "allowedTools": {
             "type": "array",
@@ -3325,10 +3646,7 @@
               },
               {
                 "type": "object",
-                "additionalProperties": {
-                  "type": "object",
-                  "additionalProperties": {}
-                }
+                "additionalProperties": {}
               }
             ],
             "description": "Grok --agents <JSON>: inline subagent definitions (JSON string or name → { description, prompt, … } map)."
@@ -3353,11 +3671,6 @@
               }
             ],
             "description": "Grok --prompt-json <JSON>: single-turn prompt JSON blocks (string or serializable value)."
-          },
-          "single": {
-            "type": "string",
-            "minLength": 1,
-            "description": "Grok --single <PROMPT>: single-turn prompt (in addition to gateway -p)."
           },
           "experimentalMemory": {
             "type": "boolean",
@@ -3455,7 +3768,7 @@
                 "additionalProperties": false
               }
             ],
-            "description": "Slice λ: run this request inside a dedicated git worktree owned by the gateway. `true` creates a fresh worktree at `<repoRoot>/.worktrees/<uuid>` branched from HEAD. `{ name?, ref? }` lets the caller supply a sanitized name and/or a git ref (default: HEAD). When the request carries a sessionId and the session already has a worktree, that worktree is reused. The gateway spawns the child CLI with `cwd: <worktree-path>` — no `-w`/`--worktree` flag is ever emitted to the underlying CLI. On session_delete or TTL eviction the gateway runs `git worktree remove --force`. Successful responses are prefixed with `[gateway] worktree=<absolute-path>\\n` so callers can use the path. NOTE: callers should `.gitignore` the `.worktrees/` directory in their repo (the gateway does NOT auto-gitignore — see slice λ spec Q4)."
+            "description": "Slice λ: run this request inside a dedicated git worktree owned by the gateway. `true` creates a fresh worktree at `<repoRoot>/.worktrees/<uuid>` branched from HEAD. `{ name?, ref? }` lets the caller supply a sanitized name and/or a git ref (default: HEAD). When the request carries a sessionId and the session already has a worktree, reuse requires same-host ownership metadata and a matching live Git registration. Named path collisions never reuse manager state. Gateway-managed worktrees require the local file-backed session manager and fail closed with PostgreSQL sessions. The Grok, Devin, and Mistral adapters require an explicit provider-native sessionId; fresh, createNewSession, and resumeLatest-only worktree requests fail closed because they cannot durably reselect the worktree. The request must select a registered workspace explicitly, through caller-owned session metadata, or through the configured default. Worktrees never fall back to the gateway process cwd and cannot be combined with local workingDir, addDir, or includeDirs paths. The gateway spawns the child CLI with `cwd: <worktree-path>`; no `-w`/`--worktree` flag is ever emitted to the underlying CLI. On worktree materialization, the gateway suppresses repository, system, and global Git hooks and configured clean, smudge, and process checkout filters, sparse checkout, and lazy object fetching. Filter-dependent content such as Git LFS remains in its repository representation instead of executing host commands. On session_delete or TTL eviction the gateway hides the session and runs `git worktree remove --force`. Failed removal retains a durable cleanup-pending tombstone which blocks reuse and is retried when the file store is registered on the owning host. The tombstone is finalized only after verified Git removal. Successful responses are prefixed with `[gateway] worktree=<absolute-path>\\n` so callers can use the path. For Claude approvalStrategy:mcp_managed, requesting or reusing a worktree requires approval and LLM_GATEWAY_APPROVAL_ALLOW_BYPASS=1. Other adapters reject mcp_managed before launch. NOTE: callers should `.gitignore` the `.worktrees/` directory in their repo (the gateway does NOT auto-gitignore; see slice λ spec Q4)."
           }
         },
         "additionalProperties": false,
@@ -3573,7 +3886,7 @@
     },
     {
       "name": "llm_job_result",
-      "description": "Retrieve captured stdout/stderr for a gateway async or deferred-sync job by jobId.",
+      "description": "Retrieve captured stdout/stderr for a gateway async or deferred-sync job by jobId. Use rawOutput:true with independent stream offsets for resumable pages.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -3586,7 +3899,24 @@
             "minimum": 1000,
             "maximum": 2000000,
             "default": 200000,
-            "description": "Max chars returned per stream"
+            "description": "Maximum chars returned per stdout/stderr page"
+          },
+          "stdoutOffsetChars": {
+            "type": "integer",
+            "minimum": 0,
+            "default": 0,
+            "description": "Captured stdout character offset for resumable retrieval. Non-zero offsets require rawOutput:true."
+          },
+          "stderrOffsetChars": {
+            "type": "integer",
+            "minimum": 0,
+            "default": 0,
+            "description": "Captured stderr character offset for resumable retrieval. Non-zero offsets require rawOutput:true."
+          },
+          "rawOutput": {
+            "type": "boolean",
+            "default": false,
+            "description": "Return captured provider streams without display parsing or compression. Local stdio pages concatenate to the captured streams; remote pages redact provider session IDs. Required for resumable offsets."
           }
         },
         "required": [
@@ -3598,13 +3928,61 @@
     },
     {
       "name": "llm_job_status",
-      "description": "Check lifecycle status (queued|running|completed|failed|canceled|orphaned) of a gateway async or deferred-sync job by jobId.",
+      "description": "Check lifecycle status and bounded privacy-safe normalized progress for a gateway async or deferred-sync job by jobId.",
       "inputSchema": {
         "type": "object",
         "properties": {
           "jobId": {
             "type": "string",
             "description": "Async job ID from *_request_async"
+          },
+          "afterProgressSeq": {
+            "type": "integer",
+            "minimum": 0,
+            "default": 0,
+            "description": "Return normalized progress events with a sequence greater than this value"
+          },
+          "progressLimit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 64,
+            "default": 32,
+            "description": "Maximum next normalized progress events to return in forward sequence order"
+          }
+        },
+        "required": [
+          "jobId"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "llm_job_watch",
+      "description": "Wait briefly for privacy-safe normalized progress on an owned async job. When the MCP request carries a progress token, notifications are emitted only while this watch request remains active.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "jobId": {
+            "type": "string",
+            "description": "Async job ID from *_request_async"
+          },
+          "afterProgressSeq": {
+            "type": "integer",
+            "minimum": 0,
+            "default": 0
+          },
+          "progressLimit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 64,
+            "default": 32
+          },
+          "waitMs": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 30000,
+            "default": 30000
           }
         },
         "required": [
@@ -3656,7 +4034,7 @@
     },
     {
       "name": "mistral_request",
-      "description": "Run a Mistral Vibe CLI request synchronously (when async jobs are enabled, auto-defers to a pollable job past the sync deadline; otherwise runs to completion). Requires exactly one of prompt or promptParts. Defaults to --agent accept-edits (auto-accepts file edits; dangerous ops such as shell stay gated); pass permissionMode auto-approve (or set LLM_GATEWAY_APPROVAL_ALLOW_BYPASS) for unattended tool execution.",
+      "description": "Run a Mistral Vibe CLI request synchronously (when async jobs are enabled, auto-defers to a pollable job past the sync deadline; otherwise runs to completion). Requires exactly one of prompt or promptParts. Defaults to --agent accept-edits (auto-accepts file edits; dangerous ops such as shell stay gated).",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -3670,17 +4048,21 @@
             "type": "object",
             "properties": {
               "system": {
-                "type": "string"
+                "type": "string",
+                "maxLength": 100000
               },
               "tools": {
-                "type": "string"
+                "type": "string",
+                "maxLength": 100000
               },
               "context": {
-                "type": "string"
+                "type": "string",
+                "maxLength": 100000
               },
               "task": {
                 "type": "string",
-                "minLength": 1
+                "minLength": 1,
+                "maxLength": 100000
               },
               "cacheControl": {
                 "type": "object",
@@ -3744,7 +4126,7 @@
           },
           "permissionMode": {
             "type": "string",
-            "description": "Vibe --agent name. Builtins: default|plan|accept-edits|auto-approve; Vibe also accepts install-gated builtins (e.g. lean) and custom agents from ~/.vibe/agents, so any name is passed through. Defaults to accept-edits; pass auto-approve (or set LLM_GATEWAY_APPROVAL_ALLOW_BYPASS) for unattended tool execution."
+            "description": "Vibe --agent name. Legacy requests pass builtins (default|plan|accept-edits|auto-approve), install-gated builtins (e.g. lean), and custom agents from ~/.vibe/agents through to Vibe."
           },
           "approvalStrategy": {
             "type": "string",
@@ -3753,7 +4135,7 @@
               "mcp_managed"
             ],
             "default": "legacy",
-            "description": "Approval strategy: legacy (default) lets the provider CLI's own flags decide; mcp_managed routes the run through the gateway approval gate (required for approvalPolicy and approval_list). Under mcp_managed the caller's permissionMode/alwaysApprove may be overridden by the gate."
+            "description": "Approval strategy: legacy is supported. mcp_managed is rejected before launch because this adapter cannot isolate ambient MCP configuration."
           },
           "approvalPolicy": {
             "type": "string",
@@ -3762,22 +4144,15 @@
               "balanced",
               "permissive"
             ],
-            "description": "Approval policy when approvalStrategy is mcp_managed: strict|balanced|permissive (default balanced). Ignored under legacy strategy."
+            "description": "approvalPolicy is unavailable for this provider. It has no effect with legacy, and mcp_managed is rejected before launch because ambient MCP configuration cannot be isolated."
           },
           "mcpServers": {
             "type": "array",
             "items": {
-              "type": "string",
-              "enum": [
-                "sqry",
-                "exa",
-                "ref_tools",
-                "trstr",
-                "agent_browser"
-              ]
+              "type": "string"
             },
             "default": [],
-            "description": "MCP server names for approval tracking (Vibe manages its own MCP config via `vibe mcp`)"
+            "description": "This provider does not receive gateway-managed MCP configuration. mcpServers has no effect with legacy, and mcp_managed is rejected before launch because ambient MCP configuration cannot be isolated."
           },
           "allowedTools": {
             "type": "array",
@@ -3889,7 +4264,7 @@
                 "additionalProperties": false
               }
             ],
-            "description": "Slice λ: run this request inside a dedicated git worktree owned by the gateway. `true` creates a fresh worktree at `<repoRoot>/.worktrees/<uuid>` branched from HEAD. `{ name?, ref? }` lets the caller supply a sanitized name and/or a git ref (default: HEAD). When the request carries a sessionId and the session already has a worktree, that worktree is reused. The gateway spawns the child CLI with `cwd: <worktree-path>` — no `-w`/`--worktree` flag is ever emitted to the underlying CLI. On session_delete or TTL eviction the gateway runs `git worktree remove --force`. Successful responses are prefixed with `[gateway] worktree=<absolute-path>\\n` so callers can use the path. NOTE: callers should `.gitignore` the `.worktrees/` directory in their repo (the gateway does NOT auto-gitignore — see slice λ spec Q4)."
+            "description": "Slice λ: run this request inside a dedicated git worktree owned by the gateway. `true` creates a fresh worktree at `<repoRoot>/.worktrees/<uuid>` branched from HEAD. `{ name?, ref? }` lets the caller supply a sanitized name and/or a git ref (default: HEAD). When the request carries a sessionId and the session already has a worktree, reuse requires same-host ownership metadata and a matching live Git registration. Named path collisions never reuse manager state. Gateway-managed worktrees require the local file-backed session manager and fail closed with PostgreSQL sessions. The Grok, Devin, and Mistral adapters require an explicit provider-native sessionId; fresh, createNewSession, and resumeLatest-only worktree requests fail closed because they cannot durably reselect the worktree. The request must select a registered workspace explicitly, through caller-owned session metadata, or through the configured default. Worktrees never fall back to the gateway process cwd and cannot be combined with local workingDir, addDir, or includeDirs paths. The gateway spawns the child CLI with `cwd: <worktree-path>`; no `-w`/`--worktree` flag is ever emitted to the underlying CLI. On worktree materialization, the gateway suppresses repository, system, and global Git hooks and configured clean, smudge, and process checkout filters, sparse checkout, and lazy object fetching. Filter-dependent content such as Git LFS remains in its repository representation instead of executing host commands. On session_delete or TTL eviction the gateway hides the session and runs `git worktree remove --force`. Failed removal retains a durable cleanup-pending tombstone which blocks reuse and is retried when the file store is registered on the owning host. The tombstone is finalized only after verified Git removal. Successful responses are prefixed with `[gateway] worktree=<absolute-path>\\n` so callers can use the path. For Claude approvalStrategy:mcp_managed, requesting or reusing a worktree requires approval and LLM_GATEWAY_APPROVAL_ALLOW_BYPASS=1. Other adapters reject mcp_managed before launch. NOTE: callers should `.gitignore` the `.worktrees/` directory in their repo (the gateway does NOT auto-gitignore; see slice λ spec Q4)."
           }
         },
         "additionalProperties": false,
@@ -3912,17 +4287,21 @@
             "type": "object",
             "properties": {
               "system": {
-                "type": "string"
+                "type": "string",
+                "maxLength": 100000
               },
               "tools": {
-                "type": "string"
+                "type": "string",
+                "maxLength": 100000
               },
               "context": {
-                "type": "string"
+                "type": "string",
+                "maxLength": 100000
               },
               "task": {
                 "type": "string",
-                "minLength": 1
+                "minLength": 1,
+                "maxLength": 100000
               },
               "cacheControl": {
                 "type": "object",
@@ -3977,7 +4356,7 @@
           },
           "permissionMode": {
             "type": "string",
-            "description": "Vibe --agent name. Builtins: default|plan|accept-edits|auto-approve; Vibe also accepts install-gated builtins (e.g. lean) and custom agents from ~/.vibe/agents, so any name is passed through. Defaults to accept-edits; pass auto-approve (or set LLM_GATEWAY_APPROVAL_ALLOW_BYPASS) for unattended tool execution."
+            "description": "Vibe --agent name. Legacy requests pass builtins (default|plan|accept-edits|auto-approve), install-gated builtins (e.g. lean), and custom agents from ~/.vibe/agents through to Vibe."
           },
           "approvalStrategy": {
             "type": "string",
@@ -3986,7 +4365,7 @@
               "mcp_managed"
             ],
             "default": "legacy",
-            "description": "Approval strategy: legacy (default) lets the provider CLI's own flags decide; mcp_managed routes the run through the gateway approval gate (required for approvalPolicy and approval_list). Under mcp_managed the caller's permissionMode/alwaysApprove may be overridden by the gate."
+            "description": "Approval strategy: legacy is supported. mcp_managed is rejected before launch because this adapter cannot isolate ambient MCP configuration."
           },
           "approvalPolicy": {
             "type": "string",
@@ -3995,22 +4374,15 @@
               "balanced",
               "permissive"
             ],
-            "description": "Approval policy when approvalStrategy is mcp_managed: strict|balanced|permissive (default balanced). Ignored under legacy strategy."
+            "description": "approvalPolicy is unavailable for this provider. It has no effect with legacy, and mcp_managed is rejected before launch because ambient MCP configuration cannot be isolated."
           },
           "mcpServers": {
             "type": "array",
             "items": {
-              "type": "string",
-              "enum": [
-                "sqry",
-                "exa",
-                "ref_tools",
-                "trstr",
-                "agent_browser"
-              ]
+              "type": "string"
             },
             "default": [],
-            "description": "MCP server names for approval tracking (Vibe manages its own MCP config via `vibe mcp`)"
+            "description": "This provider does not receive gateway-managed MCP configuration. mcpServers has no effect with legacy, and mcp_managed is rejected before launch because ambient MCP configuration cannot be isolated."
           },
           "allowedTools": {
             "type": "array",
@@ -4117,7 +4489,7 @@
                 "additionalProperties": false
               }
             ],
-            "description": "Slice λ: run this request inside a dedicated git worktree owned by the gateway. `true` creates a fresh worktree at `<repoRoot>/.worktrees/<uuid>` branched from HEAD. `{ name?, ref? }` lets the caller supply a sanitized name and/or a git ref (default: HEAD). When the request carries a sessionId and the session already has a worktree, that worktree is reused. The gateway spawns the child CLI with `cwd: <worktree-path>` — no `-w`/`--worktree` flag is ever emitted to the underlying CLI. On session_delete or TTL eviction the gateway runs `git worktree remove --force`. Successful responses are prefixed with `[gateway] worktree=<absolute-path>\\n` so callers can use the path. NOTE: callers should `.gitignore` the `.worktrees/` directory in their repo (the gateway does NOT auto-gitignore — see slice λ spec Q4)."
+            "description": "Slice λ: run this request inside a dedicated git worktree owned by the gateway. `true` creates a fresh worktree at `<repoRoot>/.worktrees/<uuid>` branched from HEAD. `{ name?, ref? }` lets the caller supply a sanitized name and/or a git ref (default: HEAD). When the request carries a sessionId and the session already has a worktree, reuse requires same-host ownership metadata and a matching live Git registration. Named path collisions never reuse manager state. Gateway-managed worktrees require the local file-backed session manager and fail closed with PostgreSQL sessions. The Grok, Devin, and Mistral adapters require an explicit provider-native sessionId; fresh, createNewSession, and resumeLatest-only worktree requests fail closed because they cannot durably reselect the worktree. The request must select a registered workspace explicitly, through caller-owned session metadata, or through the configured default. Worktrees never fall back to the gateway process cwd and cannot be combined with local workingDir, addDir, or includeDirs paths. The gateway spawns the child CLI with `cwd: <worktree-path>`; no `-w`/`--worktree` flag is ever emitted to the underlying CLI. On worktree materialization, the gateway suppresses repository, system, and global Git hooks and configured clean, smudge, and process checkout filters, sparse checkout, and lazy object fetching. Filter-dependent content such as Git LFS remains in its repository representation instead of executing host commands. On session_delete or TTL eviction the gateway hides the session and runs `git worktree remove --force`. Failed removal retains a durable cleanup-pending tombstone which blocks reuse and is retried when the file store is registered on the owning host. The tombstone is finalized only after verified Git removal. Successful responses are prefixed with `[gateway] worktree=<absolute-path>\\n` so callers can use the path. For Claude approvalStrategy:mcp_managed, requesting or reusing a worktree requires approval and LLM_GATEWAY_APPROVAL_ALLOW_BYPASS=1. Other adapters reject mcp_managed before launch. NOTE: callers should `.gitignore` the `.worktrees/` directory in their repo (the gateway does NOT auto-gitignore; see slice λ spec Q4)."
           }
         },
         "additionalProperties": false,
@@ -4275,7 +4647,7 @@
           "includeClean": {
             "type": "boolean",
             "default": false,
-            "description": "When false, return only unavailable or drifted command paths"
+            "description": "When false, return only unavailable, drifted, or untrusted-help-exit command paths"
           }
         },
         "additionalProperties": false,
@@ -4451,6 +4823,113 @@
         "required": [
           "content"
         ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "review_changes",
+      "description": "Capture one complete, immutable Git evidence artifact, fence it as untrusted data, and start independent read-only provider reviews. Includes committed, staged, unstaged, and untracked changes without truncation.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "workingDir": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Absolute local path to the checkout. Stdio/local callers should use this; remote HTTP/OAuth callers must use workspace instead."
+          },
+          "workspace": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "pattern": "^[A-Za-z][A-Za-z0-9._-]{0,63}$",
+            "description": "Authorized workspace alias, required for remote HTTP/OAuth callers."
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "auto",
+              "uncommitted",
+              "branch",
+              "commit"
+            ],
+            "default": "auto",
+            "description": "Review scope. auto reviews a diverged branch from its merge-base with working-tree evidence included, otherwise reviews dirty uncommitted changes, and falls back to the last commit when the tree is clean."
+          },
+          "base": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512,
+            "description": "Explicit Git base ref or commit. Overrides automatic base selection."
+          },
+          "paths": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            },
+            "maxItems": 256,
+            "description": "Optional literal repository-relative path filters."
+          },
+          "stance": {
+            "type": "string",
+            "enum": [
+              "standard",
+              "adversarial"
+            ],
+            "default": "standard"
+          },
+          "focus": {
+            "type": "string",
+            "maxLength": 20000,
+            "description": "Additional reviewer focus outside the untrusted evidence boundary."
+          },
+          "models": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "claude",
+                "codex",
+                "gemini",
+                "grok",
+                "mistral",
+                "devin",
+                "cursor"
+              ]
+            },
+            "minItems": 1,
+            "default": [
+              "claude",
+              "codex"
+            ],
+            "description": "Independent providers to start. Defaults to Claude and Codex."
+          },
+          "judgeModel": {
+            "$ref": "#/properties/models/items",
+            "description": "Optional judge provider to reconcile terminal reviews in a second step. An HTTP/API judge requires allowApiUpload=true, which is bound to the durable validationId."
+          },
+          "allowApiUpload": {
+            "type": "boolean",
+            "default": false,
+            "description": "Explicitly allow repository review evidence to be sent to configured HTTP/API reviewers or a planned API judge. API judge consent is bound to the durable validationId; remote workspace reviews do not permit API upload."
+          },
+          "maxArtifactBytes": {
+            "type": "integer",
+            "minimum": 1024,
+            "maximum": 16777216,
+            "default": 120000,
+            "description": "Fail-closed byte ceiling for the complete serialized Git artifact."
+          },
+          "maxPromptBytes": {
+            "type": "integer",
+            "minimum": 1024,
+            "maximum": 16777216,
+            "default": 128000,
+            "description": "Fail-closed byte ceiling for the fenced provider prompt."
+          }
+        },
         "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       }
@@ -4661,14 +5140,14 @@
     },
     {
       "name": "synthesize_validation",
-      "description": "Run an explicit judge model over already-collected validation results to produce a synthesis.",
+      "description": "Run an explicit judge model over validation results. General validation uses caller-supplied terminal results; review_changes rebuilds its question and results from the owned durable run.",
       "inputSchema": {
         "type": "object",
         "properties": {
           "question": {
             "type": "string",
             "minLength": 1,
-            "description": "Original request that was validated."
+            "description": "Original request for general validation. Ignored for review_changes, which uses the question stored in the durable run."
           },
           "providerResults": {
             "type": "array",
@@ -4777,8 +5256,8 @@
               ],
               "additionalProperties": false
             },
-            "minItems": 1,
-            "description": "Terminal normalized provider results from job_result."
+            "default": [],
+            "description": "Terminal normalized results for general validation. Ignored for review_changes, which reloads every exact linked durable job result."
           },
           "judgeModel": {
             "$ref": "#/properties/providerResults/items/properties/provider",
@@ -4787,13 +5266,21 @@
           },
           "validationId": {
             "type": "string",
-            "description": "Optional run id (from the kickoff response) to link this judge job back into the durable validation run."
+            "description": "Run id from kickoff. Optional for general validation, but required for review_changes so the stored question, provider jobs, repository, planned judge, and upload policy can be enforced."
+          },
+          "workingDir": {
+            "type": "string",
+            "minLength": 1,
+            "description": "For a review_changes run, the same absolute local checkout path used at kickoff."
+          },
+          "workspace": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "pattern": "^[A-Za-z][A-Za-z0-9._-]{0,63}$",
+            "description": "For a remote review_changes run, the same authorized workspace alias."
           }
         },
-        "required": [
-          "question",
-          "providerResults"
-        ],
         "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       }
@@ -4879,6 +5366,39 @@
         },
         "required": [
           "question"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "validation_receipt",
+      "description": "Retrieve the canonically hashed immutable receipt of a terminal cross-LLM validation run by validationId. Returns minted | pending | expired_unminted (no receipt exists and none can be minted) | verification_failed (a stored receipt does not verify against its run) | not_found (own-or-not-found).",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "validationId": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The run-level validationId from a validation kickoff response (not a job/correlation id)."
+          },
+          "format": {
+            "type": "string",
+            "enum": [
+              "json",
+              "markdown"
+            ],
+            "default": "json",
+            "description": "Response format. markdown returns the human-readable rendering (derived on read, never stored or hashed)."
+          },
+          "includeRawResponses": {
+            "type": "boolean",
+            "default": false,
+            "description": "Inline complete provider answer text when the owned linked job still exposes identity-verified output (read-time only; never persisted or hashed)."
+          }
+        },
+        "required": [
+          "validationId"
         ],
         "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"

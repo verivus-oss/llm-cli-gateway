@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -7,6 +7,7 @@ import { AsyncJobManager } from "../async-job-manager.js";
 import { MemoryJobStore } from "../job-store.js";
 import { NoopFlightRecorder } from "../flight-recorder.js";
 import { noopLogger } from "../logger.js";
+import { PersonalConfigManager, type KitPathLayout } from "../personal-config.js";
 import { FileSessionManager } from "../session-manager.js";
 import { defaultLeastCostConfig, type LeastCostConfig, type PersistenceConfig } from "../config.js";
 import { runWithRequestContext, type GatewayRequestContext } from "../request-context.js";
@@ -39,6 +40,20 @@ function ctx(): GatewayRequestContext {
   return { transport: "stdio", authScopes: [] };
 }
 
+function kitLayout(root: string): KitPathLayout {
+  const runtimeDir = join(root, "kit-runtime");
+  return {
+    baselineDir: join(root, "kit-baseline"),
+    runtimeDir,
+    localTomlPath: join(runtimeDir, "local.toml"),
+    statePath: join(runtimeDir, "personal-config-state.json"),
+    releasesDir: join(runtimeDir, "personal-config", "releases"),
+    currentPointerPath: join(runtimeDir, "personal-config", "current.json"),
+    lockPath: join(runtimeDir, "personal-config", "lock"),
+    artifactsDir: join(runtimeDir, "personal-config", "artifacts"),
+  };
+}
+
 interface RegisteredTool {
   handler: (
     args: Record<string, unknown>,
@@ -63,13 +78,18 @@ describe("route_request / route_request_async registration + fail-closed", () =>
     rmSync(tmp, { recursive: true, force: true });
   });
 
-  function makeServer(leastCost: LeastCostConfig) {
+  function makeServer(
+    leastCost: LeastCostConfig,
+    personalConfig?: PersonalConfigManager,
+    asyncJobManager = new AsyncJobManager(noopLogger, undefined, new MemoryJobStore())
+  ) {
     return createGatewayServer({
       sessionManager: sessions,
-      asyncJobManager: new AsyncJobManager(noopLogger, undefined, new MemoryJobStore()),
+      asyncJobManager,
       persistence: mkPersistence(),
       flightRecorder: new NoopFlightRecorder(),
       leastCost,
+      personalConfig,
     });
   }
 
@@ -85,12 +105,18 @@ describe("route_request / route_request_async registration + fail-closed", () =>
     text: string;
     isError?: boolean;
     routing?: Record<string, unknown>;
+    structuredContent?: Record<string, unknown>;
   }> {
     const reg = tools(server);
     const result = await runWithRequestContext(ctx(), () => reg[name].handler(args, {}));
     const routing = (result.structuredContent?.routing ?? undefined) as
       Record<string, unknown> | undefined;
-    return { text: result.content[0]?.text ?? "", isError: result.isError, routing };
+    return {
+      text: result.content[0]?.text ?? "",
+      isError: result.isError,
+      routing,
+      structuredContent: result.structuredContent,
+    };
   }
 
   it("does NOT register the route tools when [least_cost].enabled is false (dormant)", () => {
@@ -107,6 +133,22 @@ describe("route_request / route_request_async registration + fail-closed", () =>
     expect(reg.route_request_async).toBeDefined();
     // A direct per-provider tool is untouched by LCR.
     expect(reg.claude_request).toBeDefined();
+  });
+
+  it("does NOT register route tools when Personal Agent Config Kit is enabled", async () => {
+    const personalConfig = new PersonalConfigManager(
+      { enabled: true, baselinePath: join(tmp, "kit-baseline"), maxStaleHours: 24 },
+      kitLayout(tmp)
+    );
+    const server = makeServer({ ...defaultLeastCostConfig(), enabled: true }, personalConfig);
+    const reg = tools(server);
+
+    expect(reg.route_request).toBeUndefined();
+    expect(reg.route_request_async).toBeUndefined();
+    expect(reg.claude_request).toBeDefined();
+    expect(reg.codex_request).toBeDefined();
+
+    await server.close();
   });
 
   it("fails closed with a routing block when nothing fits an impossibly low budget", async () => {
@@ -137,5 +179,53 @@ describe("route_request / route_request_async registration + fail-closed", () =>
     expect(res.routing).toBeDefined();
     expect(typeof res.routing?.consideredCount).toBe("number");
     expect(Array.isArray(res.routing?.rejected)).toBe(true);
+  });
+
+  it("preserves an exhausted argv provider's input_too_large classification", async () => {
+    const manager = new AsyncJobManager(noopLogger, undefined, new MemoryJobStore());
+    const spawn = vi.spyOn(manager, "startJobWithDedup").mockImplementation(() => {
+      throw new Error("oversized routed input must fail before provider spawn");
+    });
+    const server = makeServer(
+      { ...defaultLeastCostConfig(), enabled: true, maxReroutes: 0 },
+      undefined,
+      manager
+    );
+
+    const res = await call(server, "route_request", {
+      prompt: "中".repeat(44_000),
+      candidates: [{ provider: "grok", model: "grok-4.5" }],
+      allowUnpriced: true,
+      maxCostUsd: 100,
+    });
+
+    expect(spawn).not.toHaveBeenCalled();
+    expect(res.isError).toBe(true);
+    expect(res.structuredContent).toMatchObject({
+      cli: "route_request",
+      provider: "grok",
+      model: "grok-4.5",
+      exitCode: 1,
+      errorCategory: "input_too_large",
+      retryable: false,
+      lastFailure: {
+        provider: "grok",
+        cli: "route_request",
+        model: "grok-4.5",
+        exitCode: 1,
+        errorCategory: "input_too_large",
+        retryable: false,
+      },
+    });
+    expect(res.routing).toMatchObject({
+      chosen: null,
+      error: "NoEligibleCandidate",
+      rejected: [
+        {
+          candidate: { provider: "grok", model: "grok-4.5" },
+          reason: "dispatch-failed:non-transient",
+        },
+      ],
+    });
   });
 });

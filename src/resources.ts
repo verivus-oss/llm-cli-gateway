@@ -1,6 +1,7 @@
 import {
   ISessionManager,
   callerIsRemote,
+  publicSafeSession,
   remoteSafeSession,
   type Session,
 } from "./session-manager.js";
@@ -421,7 +422,7 @@ export class ResourceProvider {
     const owned = sessions.filter(s => principalCanAccess(s.ownerPrincipal, caller));
     // Remote callers must not learn local absolute paths via session metadata
     // (worktreePath/workspaceRoot); redact them for the remote-facing resources.
-    return callerIsRemote() ? owned.map(remoteSafeSession) : owned;
+    return callerIsRemote() ? owned.map(remoteSafeSession) : owned.map(publicSafeSession);
   }
 
   /** F3b: the active-session id for a provider, or null if the caller may not see it. */

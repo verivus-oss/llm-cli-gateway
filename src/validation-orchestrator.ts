@@ -1,5 +1,11 @@
-import { randomUUID } from "node:crypto";
-import type { AsyncJobManager, AsyncJobSnapshot } from "./async-job-manager.js";
+import { createHash, randomUUID } from "node:crypto";
+import type {
+  AsyncJobManager,
+  AsyncJobSnapshot,
+  DeferredJobLaunch,
+  StartJobOutcome,
+} from "./async-job-manager.js";
+import { DurableJobAdmissionError } from "./async-job-manager.js";
 import { getProviderRuntimeStatus, type ProviderRuntimeStatus } from "./provider-status.js";
 import type { CliType } from "./provider-types.js";
 import { createApiProvider } from "./api-provider.js";
@@ -17,13 +23,31 @@ import {
   deriveValidationRunStatus,
   type ValidationReport,
 } from "./validation-report.js";
-import type { ValidationRunLink, ValidationRunStore } from "./job-store.js";
+import type {
+  ValidationJobAdmission,
+  ValidationRunLink,
+  ValidationRunRecord,
+  ValidationRunStore,
+} from "./job-store.js";
 import { getRequestContext, principalCanAccess, resolveOwnerPrincipal } from "./request-context.js";
 import {
   buildJudgePrompt,
+  buildReviewJudgePrompt,
   buildValidationPrompt,
+  type DurableReviewJudgeEvidence,
   type ValidationIntent,
 } from "./validation-prompts.js";
+import { appendCliPrompt, sanitizeCliArgValue } from "./request-helpers.js";
+import { assertUpstreamCliArgs } from "./upstream-contracts.js";
+import {
+  assertCliArgUtf8Size,
+  isCliInputAdmissionError,
+  planCodexStdinPrompt,
+} from "./cli-input-limits.js";
+import {
+  isAuthorizedReviewRepositoryRoot,
+  type ReviewRunAuthorization,
+} from "./review-run-authorization.js";
 
 // Slice 3 review-integrity decision (plan §3, option b): validation reviewers —
 // CLI *and* API alike — are intentionally OUT OF SCOPE for the direct-request
@@ -52,6 +76,8 @@ export interface ValidationOrchestratorDeps {
    * retrievable run.
    */
   validationRunStore?: ValidationRunStore | null;
+  /** Resolve a concrete CLI cwd under the caller's local or remote workspace policy. */
+  resolveProviderCwd?: (provider: CliType) => string | undefined;
 }
 
 /** Slice 3: the enabled API-provider runtime for `provider`, or null (a CLI). */
@@ -97,27 +123,82 @@ function dispatchProviderJob(
   deps: ValidationOrchestratorDeps,
   provider: ValidationProvider,
   prompt: string,
-  correlationId: string
-): AsyncJobSnapshot {
+  correlationId: string,
+  options: {
+    cwd?: string;
+    review?: boolean;
+    forceRefresh?: boolean;
+    deferLaunch?: boolean;
+    validationAdmission?: ValidationJobAdmission;
+  } = {}
+): StartJobOutcome {
   const api = findApiReviewer(deps, provider);
   if (api) {
     const apiProvider = createApiProvider(api.name, api.kind);
     const apiRequest = prepareApiRequest(api, { prompt });
+    const retainFlightRecord = options.review !== true;
     // Slice 1: reviewer http jobs are pure-async (the orchestrator polls the
     // snapshot), so the manager owns logStart + the usage-bearing logComplete.
+    // Repository review evidence is retained with the job's configured expiry,
+    // not copied into the flight recorder, whose request rows have no matching
+    // retention eviction policy.
     return deps.asyncJobManager.startHttpJob({
       provider: apiProvider,
       apiRequest,
       correlationId,
-      writeFlightStart: true,
-      flightRecorderEntry: { model: apiRequest.model, prompt },
-    }).snapshot;
+      writeFlightStart: retainFlightRecord,
+      flightRecorderEntry: retainFlightRecord ? { model: apiRequest.model, prompt } : undefined,
+      forceRefresh: options.forceRefresh,
+      deferLaunch: options.deferLaunch,
+      validationAdmission: options.validationAdmission,
+    });
   }
-  return deps.asyncJobManager.startJob(
-    provider as CliType,
-    buildProviderArgs(provider, prompt),
-    correlationId
-  );
+  const cli = provider as CliType;
+  const invocation = buildProviderInvocation(provider, prompt, options.review ?? false);
+  assertUpstreamCliArgs(cli, invocation.args);
+  const cwd = options.cwd ?? deps.resolveProviderCwd?.(cli);
+  if (options.review) {
+    const promptSha256 = createHash("sha256").update(prompt).digest("hex");
+    return deps.asyncJobManager.startJobWithDedup(cli, invocation.args, correlationId, {
+      cwd,
+      stdin: invocation.stdin,
+      persistedArgs: redactReviewPromptArgs(provider, invocation.args, prompt, promptSha256),
+      payloadJson: JSON.stringify({
+        schemaVersion: "review-job-input.v1",
+        promptSha256,
+        prompt,
+      }),
+      forceRefresh: options.forceRefresh,
+      deferLaunch: options.deferLaunch,
+      validationAdmission: options.validationAdmission,
+    });
+  }
+  return deps.asyncJobManager.startJobWithDedup(cli, invocation.args, correlationId, {
+    cwd,
+    stdin: invocation.stdin,
+    forceRefresh: options.forceRefresh,
+    deferLaunch: options.deferLaunch,
+    validationAdmission: options.validationAdmission,
+  });
+}
+
+function redactReviewPromptArgs(
+  provider: ValidationProvider,
+  args: string[],
+  prompt: string,
+  promptSha256: string
+): string[] {
+  const redacted = [...args];
+  const marker = `[review prompt retained in payload_json sha256=${promptSha256}]`;
+  if (provider === "grok" || provider === "mistral") {
+    const promptArg = `-p=${prompt}`;
+    const index = redacted.indexOf(promptArg);
+    if (index >= 0) redacted[index] = `-p=${marker}`;
+    return redacted;
+  }
+  const index = redacted.lastIndexOf(prompt);
+  if (index >= 0) redacted[index] = marker;
+  return redacted;
 }
 
 export interface StartValidationInput {
@@ -128,6 +209,37 @@ export interface StartValidationInput {
   focus?: string;
   riskLevel?: "normal" | "high";
   judgeProvider?: ValidationProvider;
+}
+
+export interface StartReviewInput {
+  prompt: string;
+  providers: ValidationProvider[];
+  focus?: string;
+  cwd: string;
+  artifactSha256: string;
+  artifactByteLength: number;
+  scope: string;
+  judgeProvider?: ValidationProvider;
+  /** Explicit repository-upload policy bound durably to this review run. */
+  reviewAuthorization: ReviewRunAuthorization;
+}
+
+export class ValidationRunPersistenceError extends Error {
+  readonly code = "validation_run_persistence_failed";
+
+  constructor() {
+    super("The review run could not be bound to durable validation-run storage");
+    this.name = "ValidationRunPersistenceError";
+  }
+}
+
+export class ReviewRunAuthorizationError extends Error {
+  readonly code = "review_run_authorization_invalid";
+
+  constructor() {
+    super("The review-run authorization does not match the requested repository review plan");
+    this.name = "ReviewRunAuthorizationError";
+  }
 }
 
 export interface ValidationRunReport {
@@ -223,6 +335,118 @@ export function startValidationRun(
   };
 }
 
+/**
+ * Start a first-class repository review from an already verified and fenced
+ * evidence prompt. The raw artifact stays in the provider job prompt; the
+ * durable validation-run metadata records only its identity and scope.
+ */
+export function startReviewRun(
+  deps: ValidationOrchestratorDeps,
+  input: StartReviewInput
+): ValidationRunReport {
+  const providers = uniqueProviders(input.providers);
+  const apiJudge = findApiReviewer(deps, input.judgeProvider ?? "");
+  const includesApiUpload =
+    apiJudge !== null || providers.some(provider => findApiReviewer(deps, provider) !== null);
+  if (
+    !isAuthorizedReviewRepositoryRoot(
+      input.reviewAuthorization.repositoryPath,
+      input.reviewAuthorization.repositoryRoot
+    ) ||
+    input.reviewAuthorization.repositoryRoot !== input.cwd ||
+    input.reviewAuthorization.judgeProvider !== (input.judgeProvider ?? null) ||
+    (includesApiUpload && !input.reviewAuthorization.allowApiUpload)
+  ) {
+    throw new ReviewRunAuthorizationError();
+  }
+  const validationId = randomUUID();
+  const startedAt = new Date().toISOString();
+  const originalRequest = {
+    question: `Review artifact sha256=${input.artifactSha256} bytes=${input.artifactByteLength} scope=${input.scope}`,
+    focus: input.focus,
+  };
+  const persistenceInput: StartValidationInput = {
+    intent: "review",
+    providers,
+    question: originalRequest.question,
+    focus: input.focus,
+    judgeProvider: input.judgeProvider,
+  };
+  // Establish and verify the owner-scoped review authorization before any
+  // reviewer can receive repository evidence. Each provider job is then
+  // admitted and linked atomically behind a roster-wide launch barrier.
+  persistValidationRun(deps, {
+    validationId,
+    startedAt,
+    intent: "review",
+    input: persistenceInput,
+    providers,
+    results: [],
+    reviewAuthorization: input.reviewAuthorization,
+    requireDurable: true,
+    initialStatus: "admitting",
+  });
+  const results: NormalizedValidationResult[] = [];
+  const deferredLaunches: DeferredJobLaunch[] = [];
+  try {
+    for (const provider of providers) {
+      results.push(
+        startProviderJob(deps, provider, input.prompt, validationId, {
+          cwd: input.cwd,
+          review: true,
+          forceRefresh: true,
+          deferLaunch: true,
+          validationAdmission: { validationId, provider },
+          deferredLaunches,
+        })
+      );
+    }
+    verifyValidationProviderLinks(deps, validationId, results);
+    completeReviewAdmission(deps, validationId);
+  } catch (error) {
+    for (const deferred of deferredLaunches.reverse()) deferred.cancel();
+    fenceReviewAdmission(deps, validationId);
+    if (error instanceof DurableJobAdmissionError) {
+      throw new ValidationRunPersistenceError();
+    }
+    throw error;
+  }
+  for (const deferred of deferredLaunches) deferred.release();
+  const runningCount = results.filter(result => result.status === "running").length;
+  const synthesis = plannedJudgeSynthesis({
+    intent: "review",
+    providers,
+    judgeProvider: input.judgeProvider,
+  });
+  const status: ValidationRunReport["status"] = deriveValidationRunStatus(
+    results,
+    synthesis.status
+  );
+  const reportInput = {
+    validationId,
+    status,
+    startedAt,
+    intent: "review" as const,
+    originalRequest,
+    modelList: providers,
+    results,
+    synthesis,
+  };
+  return {
+    success: runningCount > 0,
+    validationId,
+    status,
+    startedAt,
+    intent: "review",
+    originalRequest,
+    modelList: providers,
+    results,
+    synthesis,
+    report: buildValidationReport(reportInput),
+    next: "Use job_status to poll each rawJobReference.jobId and job_result to collect the evidence-backed reviews. If a judge was requested, call synthesize_validation only after every provider result is terminal and pass the same workingDir or workspace selector so the judge remains bound to the reviewed repository.",
+  };
+}
+
 export function startJudgeSynthesis(
   deps: ValidationOrchestratorDeps,
   input: {
@@ -236,8 +460,17 @@ export function startJudgeSynthesis(
      * mutation, behaviour is exactly as before.
      */
     validationId?: string;
+    /** Concrete repository cwd for a code-review judge. */
+    cwd?: string;
+    /** Apply provider-native read-only review controls to the judge. */
+    review?: boolean;
+    /** Exact terminal durable output, populated only by owned review-run binding. */
+    reviewEvidence?: DurableReviewJudgeEvidence[];
   }
 ): ValidationRunReport["synthesis"] {
+  if (input.review && !input.validationId) {
+    throw new ValidationRunPersistenceError();
+  }
   const pending = input.providerResults.find(
     result => result.status === "running" || result.verdict === "pending"
   );
@@ -252,6 +485,7 @@ export function startJudgeSynthesis(
   const completedResults = input.providerResults.filter(result => result.status === "completed");
   const omittedResults = input.providerResults.filter(result => result.status !== "completed");
   if (completedResults.length === 0) {
+    if (input.review) markReviewJudgeSkipped(deps, input.validationId!, input.judgeProvider);
     return {
       status: "skipped",
       judgeModel: input.judgeProvider,
@@ -262,6 +496,7 @@ export function startJudgeSynthesis(
 
   const runtime = resolveReviewerStatus(deps, input.judgeProvider);
   if (!runtime.installed) {
+    if (input.review) markReviewJudgeSkipped(deps, input.validationId!, input.judgeProvider);
     return {
       status: "skipped",
       judgeModel: input.judgeProvider,
@@ -270,16 +505,73 @@ export function startJudgeSynthesis(
     };
   }
 
-  const snapshot = dispatchProviderJob(
-    deps,
-    input.judgeProvider,
-    buildJudgePrompt({
-      question: input.question,
-      providerResults: completedResults,
-    }),
-    `validation-judge-${randomUUID()}-${input.judgeProvider}`
-  );
-  linkJudgeJob(deps, input.validationId, input.judgeProvider, snapshot);
+  let snapshot: AsyncJobSnapshot;
+  let deferredLaunch: DeferredJobLaunch | undefined;
+  try {
+    if (input.review && (!input.reviewEvidence || input.reviewEvidence.length === 0)) {
+      throw new Error("Review judge synthesis requires complete durable provider evidence");
+    }
+    const judgePrompt = input.review
+      ? buildReviewJudgePrompt({
+          question: input.question,
+          roster: input.providerResults.map(result => ({
+            provider: String(result.provider),
+            status: result.status,
+            verdict: result.verdict,
+            dispatched: result.rawJobReference !== null,
+            jobId: result.rawJobReference?.jobId ?? null,
+            correlationId: result.rawJobReference?.correlationId ?? null,
+            error: result.error,
+            warning: result.warning ?? null,
+          })),
+          evidence: input.reviewEvidence!,
+        })
+      : buildJudgePrompt({
+          question: input.question,
+          providerResults: completedResults,
+        });
+    const outcome = dispatchProviderJob(
+      deps,
+      input.judgeProvider,
+      judgePrompt,
+      `validation-judge-${randomUUID()}-${input.judgeProvider}`,
+      {
+        cwd: input.cwd,
+        review: input.review,
+        ...(input.review
+          ? {
+              forceRefresh: true,
+              deferLaunch: true,
+              validationAdmission: {
+                validationId: input.validationId!,
+                provider: input.judgeProvider,
+                role: "judge" as const,
+              },
+            }
+          : {}),
+      }
+    );
+    snapshot = outcome.snapshot;
+    deferredLaunch = outcome.deferredLaunch;
+    if (input.review && !deferredLaunch) {
+      deps.asyncJobManager.cancelJob(snapshot.id);
+      throw new ValidationRunPersistenceError();
+    }
+  } catch (error) {
+    if (error instanceof DurableJobAdmissionError) {
+      throw new ValidationRunPersistenceError();
+    }
+    if (!isCliInputAdmissionError(error)) throw error;
+    if (input.review) markReviewJudgeSkipped(deps, input.validationId!, input.judgeProvider);
+    return {
+      status: "skipped",
+      judgeModel: input.judgeProvider,
+      rawJobReference: null,
+      note: error.message,
+    };
+  }
+  if (input.review) deferredLaunch!.release();
+  else linkJudgeJob(deps, input.validationId, input.judgeProvider, snapshot);
   return {
     status: "running",
     judgeModel: input.judgeProvider,
@@ -312,7 +604,15 @@ function startProviderJob(
   deps: ValidationOrchestratorDeps,
   provider: ValidationProvider,
   prompt: string,
-  validationId: string
+  validationId: string,
+  options: {
+    cwd?: string;
+    review?: boolean;
+    forceRefresh?: boolean;
+    deferLaunch?: boolean;
+    validationAdmission?: ValidationJobAdmission;
+    deferredLaunches?: DeferredJobLaunch[];
+  } = {}
 ): NormalizedValidationResult {
   const runtime = resolveReviewerStatus(deps, provider);
   if (!runtime.installed) {
@@ -323,12 +623,30 @@ function startProviderJob(
     runtime.loginStatus === "authenticated"
       ? undefined
       : `${runtime.displayName} login status is ${runtime.loginStatus}; the job may fail until login is complete.`;
-  const snapshot = dispatchProviderJob(
-    deps,
-    provider,
-    prompt,
-    `validation-${validationId}-${provider}`
-  );
+  let snapshot: AsyncJobSnapshot;
+  try {
+    const outcome = dispatchProviderJob(
+      deps,
+      provider,
+      prompt,
+      `validation-${validationId}-${provider}`,
+      options
+    );
+    if (options.deferLaunch) {
+      if (!outcome.deferredLaunch) {
+        deps.asyncJobManager.cancelJob(outcome.snapshot.id);
+        throw new ValidationRunPersistenceError();
+      }
+      options.deferredLaunches?.push(outcome.deferredLaunch);
+    }
+    snapshot = outcome.snapshot;
+  } catch (error) {
+    if (isCliInputAdmissionError(error)) {
+      if (options.deferLaunch) throw error;
+      return normalizeSkippedProvider(provider, error.message);
+    }
+    throw error;
+  }
   return normalizeStartedJob(provider, runtime.version, snapshot, warning);
 }
 
@@ -367,6 +685,22 @@ function linkJudgeJob(
     const run = store.getValidationRun(validationId);
     if (!run) return;
     if (!principalCanAccess(run.ownerPrincipal, resolveOwnerPrincipal(getRequestContext()))) return;
+    if (run.status !== "running" || run.judgeLink || store.getValidationReceipt(validationId)) {
+      return;
+    }
+    let plannedJudge: unknown = null;
+    try {
+      const request = JSON.parse(run.requestJson) as { judgeProvider?: unknown };
+      plannedJudge = request.judgeProvider ?? null;
+    } catch {
+      return;
+    }
+    if (
+      (plannedJudge !== null && typeof plannedJudge !== "string") ||
+      (typeof plannedJudge === "string" && plannedJudge !== provider)
+    ) {
+      return;
+    }
     store.setValidationJudgeLink(validationId, {
       provider: String(provider),
       jobId: snapshot.id,
@@ -379,8 +713,9 @@ function linkJudgeJob(
 
 /**
  * Cross-LLM validation receipts (Phase 0): write the durable `validation_runs`
- * row at kickoff. No-op when no durable run store is wired (non-sqlite backend).
- * Swallows persistence errors so a storage hiccup never breaks the kickoff.
+ * row at kickoff. No-op when no durable run store is wired. Ordinary validation
+ * runs degrade gracefully on persistence failure. An API review-judge plan
+ * requires an exact durable readback so the stored upload policy is authoritative.
  */
 function persistValidationRun(
   deps: ValidationOrchestratorDeps,
@@ -391,10 +726,16 @@ function persistValidationRun(
     input: StartValidationInput;
     providers: ValidationProvider[];
     results: NormalizedValidationResult[];
+    reviewAuthorization?: ReviewRunAuthorization;
+    requireDurable?: boolean;
+    initialStatus?: ValidationRunRecord["status"];
   }
 ): void {
   const store = deps.validationRunStore;
-  if (!store) return;
+  if (!store) {
+    if (args.requireDurable) throw new ValidationRunPersistenceError();
+    return;
+  }
   try {
     const providerLinks: ValidationRunLink[] = args.results
       .filter(result => result.rawJobReference !== null)
@@ -403,40 +744,187 @@ function persistValidationRun(
         jobId: result.rawJobReference!.jobId,
         correlationId: result.rawJobReference!.correlationId,
       }));
+    const ownerPrincipal = resolveOwnerPrincipal(getRequestContext());
+    const requestJson = JSON.stringify({
+      question: args.input.question,
+      content: args.input.content,
+      focus: args.input.focus,
+      riskLevel: args.input.riskLevel,
+      modelList: args.providers,
+      judgeProvider: args.input.judgeProvider ?? null,
+      ...(args.reviewAuthorization ? { reviewAuthorization: args.reviewAuthorization } : {}),
+    });
     store.recordValidationRun({
       validationId: args.validationId,
-      ownerPrincipal: resolveOwnerPrincipal(getRequestContext()),
+      ownerPrincipal,
       intent: args.intent,
       createdAt: args.startedAt,
-      requestJson: JSON.stringify({
-        question: args.input.question,
-        content: args.input.content,
-        focus: args.input.focus,
-        riskLevel: args.input.riskLevel,
-        modelList: args.providers,
-        judgeProvider: args.input.judgeProvider ?? null,
-      }),
+      requestJson,
       providerLinks,
       judgeLink: null,
-      status: "running",
+      status: args.initialStatus ?? "running",
     });
-  } catch {
+    if (args.requireDurable) {
+      const persisted = store.getValidationRun(args.validationId);
+      if (
+        !persisted ||
+        persisted.ownerPrincipal !== ownerPrincipal ||
+        persisted.intent !== args.intent ||
+        persisted.requestJson !== requestJson ||
+        persisted.status !== (args.initialStatus ?? "running") ||
+        JSON.stringify(persisted.providerLinks) !== JSON.stringify(providerLinks)
+      ) {
+        throw new ValidationRunPersistenceError();
+      }
+    }
+  } catch (error) {
+    if (args.requireDurable) {
+      if (error instanceof ValidationRunPersistenceError) throw error;
+      throw new ValidationRunPersistenceError();
+    }
     // Graceful degradation: a persistence hiccup must not fail the validation
     // kickoff. The validationId is still returned; the run simply is not durable.
   }
 }
 
-function buildProviderArgs(provider: ValidationProvider, prompt: string): string[] {
-  if (provider === "claude" || provider === "grok" || provider === "mistral") {
-    // Mistral Vibe mirrors Grok's `-p PROMPT` headless surface. Model selection
-    // is via VIBE_ACTIVE_MODEL env var (no --model flag); for validation runs we
-    // let the user's environment pick the active model.
-    return ["-p", prompt];
+function completeReviewAdmission(deps: ValidationOrchestratorDeps, validationId: string): void {
+  const store = deps.validationRunStore;
+  if (!store) throw new ValidationRunPersistenceError();
+  const ownerPrincipal = resolveOwnerPrincipal(getRequestContext());
+  try {
+    if (
+      !store.transitionValidationRunStatus(validationId, ownerPrincipal, "admitting", "running")
+    ) {
+      throw new ValidationRunPersistenceError();
+    }
+  } catch (error) {
+    if (error instanceof ValidationRunPersistenceError) throw error;
+    throw new ValidationRunPersistenceError();
   }
-  if (provider === "devin") return ["-p", prompt];
-  if (provider === "cursor") return ["--print", "--mode", "ask", "--sandbox", "enabled", prompt];
-  if (provider === "codex") return ["exec", "--skip-git-repo-check", prompt];
-  return [prompt];
+}
+
+function fenceReviewAdmission(deps: ValidationOrchestratorDeps, validationId: string): void {
+  const store = deps.validationRunStore;
+  if (!store) throw new ValidationRunPersistenceError();
+  const ownerPrincipal = resolveOwnerPrincipal(getRequestContext());
+  try {
+    const fenced = store.transitionValidationRunStatus(
+      validationId,
+      ownerPrincipal,
+      "admitting",
+      "admission_failed"
+    );
+    if (!fenced && store.getValidationRun(validationId)?.status !== "admission_failed") {
+      throw new ValidationRunPersistenceError();
+    }
+  } catch (error) {
+    if (error instanceof ValidationRunPersistenceError) throw error;
+    throw new ValidationRunPersistenceError();
+  }
+}
+
+function markReviewJudgeSkipped(
+  deps: ValidationOrchestratorDeps,
+  validationId: string,
+  provider: ValidationProvider
+): void {
+  const store = deps.validationRunStore;
+  if (!store) throw new ValidationRunPersistenceError();
+  try {
+    store.skipValidationJudge(
+      validationId,
+      String(provider),
+      resolveOwnerPrincipal(getRequestContext())
+    );
+  } catch {
+    throw new ValidationRunPersistenceError();
+  }
+}
+
+function verifyValidationProviderLinks(
+  deps: ValidationOrchestratorDeps,
+  validationId: string,
+  results: NormalizedValidationResult[]
+): void {
+  const store = deps.validationRunStore;
+  if (!store) throw new ValidationRunPersistenceError();
+  const providerLinks: ValidationRunLink[] = results
+    .filter(result => result.rawJobReference !== null)
+    .map(result => ({
+      provider: String(result.provider),
+      jobId: result.rawJobReference!.jobId,
+      correlationId: result.rawJobReference!.correlationId,
+    }));
+  try {
+    const persisted = store.getValidationRun(validationId);
+    if (!persisted || JSON.stringify(persisted.providerLinks) !== JSON.stringify(providerLinks)) {
+      throw new ValidationRunPersistenceError();
+    }
+  } catch (error) {
+    if (error instanceof ValidationRunPersistenceError) throw error;
+    throw new ValidationRunPersistenceError();
+  }
+}
+
+interface ValidationCliInvocation {
+  args: string[];
+  stdin?: string;
+}
+
+function guardedArgvInvocation(
+  provider: string,
+  promptArg: string,
+  args: string[]
+): ValidationCliInvocation {
+  assertCliArgUtf8Size(promptArg, { provider, inputName: "validation prompt" });
+  return { args };
+}
+
+function buildProviderInvocation(
+  provider: ValidationProvider,
+  prompt: string,
+  review = false
+): ValidationCliInvocation {
+  if (provider === "claude") {
+    const args = ["-p", ...(review ? ["--permission-mode", "plan"] : [])];
+    appendCliPrompt(args, prompt);
+    // The current mechanical contract verifies stream-json stdin only. Keep
+    // plain validation prompts on argv until text stdin has equivalent evidence.
+    return guardedArgvInvocation(provider, prompt, args);
+  }
+  // Grok and Vibe do not honor an end-of-options marker after `-p`.
+  // Keeping the review prompt in the inline value prevents a leading dash
+  // from becoming an independently parsed provider option.
+  if (provider === "grok" || provider === "mistral") {
+    const promptArg = `-p=${prompt}`;
+    const reviewArgs = provider === "grok" ? ["--permission-mode", "plan"] : ["--agent", "plan"];
+    return guardedArgvInvocation(provider, promptArg, [promptArg, ...(review ? reviewArgs : [])]);
+  }
+  if (provider === "devin") {
+    const args = ["-p", ...(review ? ["--permission-mode", "auto", "--sandbox"] : [])];
+    appendCliPrompt(args, prompt);
+    return guardedArgvInvocation(provider, prompt, args);
+  }
+  if (provider === "cursor") {
+    const args = ["--print", "--mode", review ? "plan" : "ask", "--sandbox", "enabled"];
+    appendCliPrompt(args, prompt);
+    return guardedArgvInvocation(provider, prompt, args);
+  }
+  if (provider === "codex") {
+    const args = ["exec", "--skip-git-repo-check", ...(review ? ["--sandbox", "read-only"] : [])];
+    const planned = planCodexStdinPrompt(prompt);
+    appendCliPrompt(args, planned.argument);
+    return { args, stdin: planned.stdin };
+  }
+  if (provider === "gemini") {
+    const promptArg = sanitizeCliArgValue(prompt, "prompt");
+    return guardedArgvInvocation(provider, promptArg, [
+      "--print",
+      ...(review ? ["--mode", "plan", "--sandbox"] : []),
+      promptArg,
+    ]);
+  }
+  throw new Error(`Unsupported CLI validation provider: ${provider}`);
 }
 
 function uniqueProviders(providers: ValidationProvider[]): ValidationProvider[] {

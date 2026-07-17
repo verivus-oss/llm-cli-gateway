@@ -262,12 +262,16 @@ node scripts/verify-packed-skill-pack-e2e.mjs
 
 echo "==> shipped dist Socket network heuristic scan"
 npm run build --silent
+
+echo "==> PostgreSQL migration contract"
+node scripts/verify-postgres-migration-contract.mjs
+
 node --input-type=module <<'NODE'
 import fs from 'node:fs';
 import path from 'node:path';
+import { findShippedFetchViolations } from './scripts/shipped-fetch-policy.mjs';
 
 const dist = path.resolve('dist');
-const pattern = /\bfetch\b/i;
 const findings = [];
 
 function walk(dir) {
@@ -278,13 +282,12 @@ function walk(dir) {
       walk(full);
       continue;
     }
-    if (!entry.name.endsWith('.js')) continue;
-    const lines = fs.readFileSync(full, 'utf8').split(/\r?\n/);
-    lines.forEach((line, index) => {
-      if (pattern.test(line)) {
-        findings.push(`${path.relative(process.cwd(), full)}:${index + 1}: ${line.trim()}`);
-      }
-    });
+    if (!entry.isFile()) continue;
+    const relative = path.relative(process.cwd(), full);
+    const violations = findShippedFetchViolations(relative, fs.readFileSync(full, 'utf8'));
+    for (const { line, lineNumber } of violations) {
+      findings.push(`${relative}:${lineNumber}: ${line.trim()}`);
+    }
   }
 }
 
@@ -296,13 +299,16 @@ if (!fs.existsSync(dist)) {
 walk(dist);
 
 if (findings.length > 0) {
-  console.error('Literal "fetch" found in shipped dist/*.js (Socket networkAccess heuristic):');
+  console.error('Literal "fetch" found in shipped dist source files (Socket networkAccess heuristic):');
   for (const finding of findings) console.error(finding);
   process.exit(1);
 }
 
-console.log('No literal "fetch" in shipped dist/*.js.');
+console.log('No literal "fetch" in shipped dist source files.');
 NODE
+
+echo "==> packed dist manifest"
+node scripts/verify-packed-dist.mjs
 
 echo "==> supply-chain guard (prod-closure allowlist / tag-along)"
 # The prod-closure allowlist layer (docs/plans/supply-chain-guard.draft.md).

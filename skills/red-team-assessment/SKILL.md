@@ -1,321 +1,298 @@
 ---
 name: red-team-assessment
-description: Get an adversarial red team security assessment from any LLM (Claude, Codex, Gemini, Grok, or Mistral) with gateway-managed approvals and optional sqry, exa, and ref_tools MCP access. Use when you need adversarial security analysis of code, architecture, or configurations.
+description: Run an evidence-backed adversarial security assessment through the local llm-cli-gateway stdio MCP server. Use for code, architecture, configuration, data-flow, or supply-chain security review across the full Claude, Codex, Gemini, Grok, Mistral, Devin, and Cursor roster.
 ---
 
-# Red Team Assessment
+# Red-Team Assessment
 
-Submit code, designs, or configurations to one or more LLMs for adversarial security analysis. Give reviewers file/tool access appropriate to the CLI and request `sqry`, `exa`, and `ref_tools` when code search, CVE research, or documentation checks are needed.
+Use the local gtwy stdio MCP server for every red-team and blue-team request.
+Do not launch a provider CLI directly. Start by calling
+provider_tool_capabilities to verify the live provider, transport, tool, and
+target-access surface.
 
-## Dispatch Defaults
+The complete gateway CLI roster is Claude, Codex, Gemini, Grok, Mistral, Devin,
+and Cursor. A full red-team assessment dispatches every required reviewer in
+that roster. If a required provider is unavailable, report a blocker and repair
+it or obtain explicit user direction. Do not silently call a smaller set
+"complete."
 
-Apply these on every dispatch unless the caller has explicitly overridden a rule in the current turn:
+Configured API providers are discovered dynamically with `list_models` and
+their reported capabilities. They do not provide a local CLI checkout/worktree
+or native ACP boundary, so they are not silently interchangeable with a
+required source-inspecting red-team reviewer.
 
-1. **Omit `model`** — let the gateway use its configured default per CLI. Nominating a model risks deprecated IDs (`o3`, `o3-pro`, `gpt-4o`, …) and capability mismatches. Only nominate when the caller has explicitly named a specific variant.
-2. **`approvalStrategy:"mcp_managed"`** is the skill dispatch default (the gateway schema default is `"legacy"`). It runs the gateway gate first, then sets each provider to a safe accept-edits-level mode (auto-accept file edits; Bash and other dangerous tools stay gated): Claude and Grok `--permission-mode acceptEdits`, Mistral `--agent accept-edits`, and Gemini prompted `default` (the `agy` CLI has no accept-edits rung, so under `mcp_managed` Gemini cannot auto-approve mutating tools at all). Read-only analysis (Read/Grep/Glob plus the `sqry`/`exa`/`ref_tools` MCP tools) needs no approval and works under this default; a reviewer that must run shell commands or tests headlessly does not. Codex still needs `fullAuto:true` for autonomous file/shell work (its sandboxed `workspace-write` mode is unchanged by this gate). For full unattended execution the operator must opt in with `LLM_GATEWAY_APPROVAL_ALLOW_BYPASS=1`, which restores each provider's full auto-approve mode (Claude `bypassPermissions`, Grok `--always-approve`, Mistral `auto-approve`, Gemini `--dangerously-skip-permissions`). Add `mcpServers:["sqry","exa","ref_tools"]` when research tools are needed.
-3. **No wallclock timeout; poll every 60 s** — red team assessments are thorough and routinely run for 5–20 minutes. Do **not** cancel for "taking too long." `idleTimeoutMs` (no-output safeguard) is separate.
-4. **Iterate until unconditional APPROVED** (review dispatches only) — every red team prompt must end with "End with PASS (no critical/high findings) or FAIL with findings" (the PASS/FAIL verdict is the red-team equivalent of APPROVED/NOT APPROVED; treat PASS as APPROVED). On FAIL, run the blue-team cycle below, then re-dispatch to the same red teamer. Loop until PASS. Escalate after 3 rounds.
+## Security Gate Contract
 
-## When to Use
-
-- Before shipping security-sensitive code (auth, crypto, data handling)
-- After implementing access control or permission systems
-- When changing API surfaces or data models
-- For threat modeling of new architectures
-- When you want an adversarial perspective ("how would I break this?")
-
-## LLM Selection for Red Teaming
-
-Any LLM can red team. Choose based on the assessment type:
-
-| LLM | Red Team Strength | Best For |
-|-----|-------------------|----------|
-| **Gemini** | Security-focused, OWASP-aware, CVE research via exa | Web security, API security, dependency audits |
-| **Codex** | Deep code analysis, logic bug hunting, can execute tests | Implementation vulnerabilities, race conditions, logic flaws |
-| **Claude** | Architecture analysis, design-level threats, broad reasoning | Threat modeling, design review, trust boundary analysis |
-| **Grok (xAI)** | Independent vendor-family perspective; useful when the other three converge on the same threat model and miss adversarial angles outside it | Diversity reviewer / tie-breaker for high-stakes assessments |
-| **Mistral Vibe** | Fifth-vendor diversity perspective (EU / open-weights family); useful for shared-blind-spot defence across OpenAI/Anthropic/Google/xAI; under `mcp_managed` defaults to `--agent accept-edits` (full `auto-approve` needs `LLM_GATEWAY_APPROVAL_ALLOW_BYPASS`; legacy calls still default to `auto-approve`) | Additional diversity reviewer; pair with Grok when consensus is the goal |
-
-For maximum coverage, use **multiple LLMs in parallel** (see Multi-LLM Red Team below).
-
-## Single-LLM Red Team
-
-### Using Gemini
+Every red-team prompt must finish with the exact terminal verdict schema:
 
 ```
-gemini_request({
-  prompt: "Red team security assessment of [path/component].\n\nContext: [what it does, who uses it, what data it handles]\n\nUse available tools. Read the code directly. Use sqry for semantic search across the codebase. Use exa for known CVEs and vulnerability patterns. Use ref_tools for framework-specific security docs.\n\nAssess:\n1. Attack surface analysis — what can an attacker reach?\n2. Input validation gaps — what inputs are trusted but shouldn't be?\n3. Authentication/authorization bypasses\n4. Data exposure risks (logs, errors, side channels)\n5. Dependency risks (known CVEs, supply chain)\n6. Race conditions and state management\n7. Injection vectors (SQL, command, template, path traversal)\n8. Cryptographic misuse\n\nFor each finding: severity (critical/high/medium/low), attack scenario, and recommended fix.\n\nEnd with PASS (no critical/high findings) or FAIL with findings.",
-  approvalStrategy: "mcp_managed",
-  mcpServers: ["sqry", "exa", "ref_tools"]
-})
+APPROVED_UNCONDITIONALLY | CHANGES_REQUIRED | BLOCKED_EXTERNAL
 ```
 
-### Using Codex
+`APPROVED_UNCONDITIONALLY` is allowed only when no unresolved finding or
+verification gap remains. `CHANGES_REQUIRED` must include evidence-backed
+findings. `BLOCKED_EXTERNAL` is reserved for a concrete external access,
+provider, or environment failure with its exact error. Approval with caveats,
+an accepted-but-unverified claim, a skipped surface, a malformed response,
+timeout, cancellation, or provider failure is not unconditional approval.
+
+Apply these rules:
+
+1. Omit model unless the caller explicitly selected it.
+2. Use approvalStrategy: "legacy" for Codex, Gemini, Grok, Mistral, Devin, and
+   Cursor. mcp_managed is rejected for them and approvalPolicy has no effect.
+3. Use mcp_managed only for a deliberately configured Claude request. In that
+   mode, request-scoped strict MCP configuration is limited to provisioned
+   gateway-owned definitions; do not assume ambient research tools are present.
+4. Use sandboxMode: "read-only" for inspection-only Codex work, or
+   sandboxMode: "workspace-write" only when red-team verification needs to
+   create build or test artifacts. Do not use fullAuto.
+5. Do not set review-round, turn, token, price, cost, or wallclock caps. The
+   configured idle-timeout safeguard only detects a silent process.
+6. Continue red-team, blue-team, and reassessment work until every required
+   reviewer returns `APPROVED_UNCONDITIONALLY`.
+
+Stop only on explicit user cancellation or a terminal external provider failure.
+Treat a terminal failure as `BLOCKED_EXTERNAL` with its exact error, never as
+an approval.
+
+## Explicit user-authorized full-access red-team review
+
+The normal inspection controls remain the default. If the user explicitly grants
+full provider permissions and native MCP access, use the full
+`multi-llm-review` protocol for this red-team gate. Build the target checkout
+and start `node dist/index.js --transport=stdio` from it. Do not use a globally
+installed or stale gateway process.
+
+Reapply each provider-native full-access control on each new job, preserve its
+ambient native MCP configuration, and do not construct a pretend full-access
+gateway allowlist. Give every reviewer the verification report as a
+corrective-program specification, the exact base plus diff or exhaustive
+changed-file list with relevant untracked files, and durable raw evidence.
+Require independent inspection of source, docs, tests, commands, and MCP facts.
+For this strict review use `APPROVED_UNCONDITIONALLY`, evidence-backed
+`CHANGES_REQUIRED`, or a concrete `BLOCKED_EXTERNAL` result rather than a
+summary-based verdict. Do not set caller caps. If the user requires 90-second
+progress checks, use non-blocking waits and do not poll early. Full capability
+does not authorize review mutation unless the user separately asks for it.
+
+## Target the Correct Repository
+
+| Provider                     | Local target rule                                                                                                                          |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| Claude, Codex, Grok, Mistral | Use workingDir on a new session, or select a registered workspace explicitly or by configured default.                                     |
+| Gemini                       | No workingDir exists. includeDirs is auxiliary and does not choose cwd. Select a registered workspace explicitly or by configured default. |
+| Devin                        | Use workingDir on a new CLI session, or select a registered workspace explicitly or by configured default.                                 |
+| Cursor                       | Pass workspace as the intended local directory or registered alias.                                                                        |
+
+Do not use workspace_* administration tools to repair a local stdio path. Under
+managed Claude, custom workingDir, expanded workspace, custom tool selectors,
+and native continuation require its gateway approval decision and operator
+bypass configuration.
+
+## Review Brief
+
+Give each reviewer the target path and revision, asset classification, trust
+boundaries, attacker capabilities, authentication and authorization model,
+external dependencies, deployment context, and acceptance criteria. Require it
+to inspect source and verification artifacts rather than rely on a summary.
+
+Cover at least:
+
+1. Attack surface and reachable entry points
+2. Trust-boundary and data-flow violations
+3. Authentication, authorization, tenancy, and privilege escalation
+4. Input validation, injection, deserialization, path, command, and template risks
+5. Secrets, logging, error disclosure, and privacy failures
+6. Race conditions, state confusion, replay, and denial-of-service risks
+7. Dependency, build, release, and supply-chain exposure
+8. Cryptographic and protocol misuse
+9. Detection, monitoring, and regression-test gaps
+
+Only ask a reviewer to use a research or semantic-search tool if its current
+provider configuration exposes it. Managed Claude receives only its provisioned
+gateway-owned strict allowlist; it does not inherit ambient exa, ref, dynamic
+npx, or other provider configuration.
+
+## Single-Provider Assessment
+
+Use a single provider only when the user explicitly scopes the assessment that
+way. For example:
 
 ```
 codex_request({
-  prompt: "Red team security assessment of [path/component].\n\nContext: [what it does, who uses it, what data it handles]\n\nUse available tools. Read the code, run tests, trace execution paths. Use sqry for semantic code search and call graph analysis if it is configured for Codex.\n\nAssess:\n1. Attack surface analysis\n2. Input validation gaps\n3. Authentication/authorization bypasses\n4. Race conditions and state management issues\n5. Logic vulnerabilities that could be exploited\n6. Injection vectors\n7. Error handling that leaks information\n8. Test coverage gaps in security-critical paths\n\nFor each finding: severity (critical/high/medium/low), attack scenario, and recommended fix.\n\nEnd with PASS (no critical/high findings) or FAIL with findings.",
-  fullAuto: true,
-  approvalStrategy: "mcp_managed"
+  prompt: "Red-team [target] at [revision]. Inspect the repository and
+    validation evidence. Assess attack surface, trust boundaries, auth,
+    validation, injection, data exposure, dependency risks, concurrency,
+    crypto, and detection. For each finding provide severity, exploit path,
+    proof, affected path, and remediation. Finish with exactly one terminal
+    verdict: APPROVED_UNCONDITIONALLY only with no unresolved finding or
+    verification gap, CHANGES_REQUIRED with evidence-backed findings, or
+    BLOCKED_EXTERNAL with a concrete external error.",
+  sandboxMode: "read-only",
+  workingDir: "[repo]",
+  approvalStrategy: "legacy",
+  correlationId: "red-team-codex"
 })
 ```
 
-### Using Claude
+## Complete Cross-LLM Assessment
 
-```
-claude_request({
-  prompt: "Red team security assessment of [path/component].\n\nContext: [what it does, who uses it, what data it handles]\n\nUse available tools. Read the code directly. Use sqry for semantic search. Use exa for known vulnerability patterns. Use ref_tools for security documentation.\n\nAssess:\n1. Trust boundary analysis — where does trusted meet untrusted?\n2. Attack surface analysis\n3. Authentication/authorization design flaws\n4. Data flow risks — where does sensitive data go?\n5. Dependency and supply chain risks\n6. Cryptographic design issues\n7. Injection vectors\n8. Failure mode analysis — what happens when things break?\n\nFor each finding: severity (critical/high/medium/low), attack scenario, and recommended fix.\n\nEnd with PASS (no critical/high findings) or FAIL with findings.",
-  approvalStrategy: "mcp_managed",
-  mcpServers: ["sqry", "exa", "ref_tools"],
-  allowedTools: ["Read", "Grep", "Glob", "Bash"]
-})
-```
-
-## Multi-LLM Red Team (Maximum Coverage)
-
-For critical security reviews, run all three in parallel. Each LLM catches different classes of vulnerabilities.
+For a required full assessment, dispatch all required reviewers through gtwy in
+parallel. Apply the targeting table before each request.
 
 ```
 claude_request_async({
-  prompt: "Red team [path]. Focus on architecture-level threats: trust boundaries, data flow, design flaws, failure modes. End with PASS or FAIL with findings.",
-  approvalStrategy: "mcp_managed",
-  mcpServers: ["sqry", "exa", "ref_tools"],
-  allowedTools: ["Read", "Grep", "Glob", "Bash"],
+  prompt: "Red-team [target]. Focus on trust boundaries, architecture, data
+    flow, failure modes, and supply-chain exposure. Finish with exactly one
+    terminal verdict: APPROVED_UNCONDITIONALLY only with no unresolved finding
+    or verification gap, CHANGES_REQUIRED with evidence-backed findings, or
+    BLOCKED_EXTERNAL with a concrete external error.",
+  approvalStrategy: "legacy",
+  workingDir: "[repo]",
   correlationId: "red-team-claude"
 })
 
 codex_request_async({
-  prompt: "Red team [path]. Focus on implementation-level threats: logic bugs, race conditions, injection, error handling, test gaps. End with PASS or FAIL with findings.",
-  fullAuto: true,
-  approvalStrategy: "mcp_managed",
+  prompt: "Red-team [target]. Focus on implementation flaws, authorization,
+    concurrency, injection, error handling, and tests. Finish with exactly one
+    terminal verdict: APPROVED_UNCONDITIONALLY only with no unresolved finding
+    or verification gap, CHANGES_REQUIRED with evidence-backed findings, or
+    BLOCKED_EXTERNAL with a concrete external error.",
+  sandboxMode: "read-only",
+  approvalStrategy: "legacy",
+  workingDir: "[repo]",
   correlationId: "red-team-codex"
 })
 
 gemini_request_async({
-  prompt: "Red team [path]. Focus on known vulnerability patterns: OWASP Top 10, CVEs in dependencies, crypto misuse, data exposure. End with PASS or FAIL with findings.",
-  approvalStrategy: "mcp_managed",
-  mcpServers: ["sqry", "exa", "ref_tools"],
+  prompt: "Red-team [target]. Focus on web and API attack patterns, data
+    exposure, dependencies, cryptography, and operational failure modes. Finish
+    with exactly one terminal verdict: APPROVED_UNCONDITIONALLY only with no
+    unresolved finding or verification gap, CHANGES_REQUIRED with
+    evidence-backed findings, or BLOCKED_EXTERNAL with a concrete external error.",
+  approvalStrategy: "legacy",
+  workspace: "[verified Gemini workspace]",
   correlationId: "red-team-gemini"
 })
 
 grok_request_async({
-  prompt: "Red team [path] from an independent perspective. Look for threats the other reviewers may have missed, contradict findings you disagree with, and call out shared blind spots in the threat model. End with PASS or FAIL with findings.",
-  approvalStrategy: "mcp_managed",
+  prompt: "Independently red-team [target]. Seek overlooked attack paths,
+    challenge assumptions, and identify shared blind spots. Finish with exactly
+    one terminal verdict: APPROVED_UNCONDITIONALLY only with no unresolved
+    finding or verification gap, CHANGES_REQUIRED with evidence-backed
+    findings, or BLOCKED_EXTERNAL with a concrete external error.",
+  approvalStrategy: "legacy",
+  workingDir: "[repo]",
   correlationId: "red-team-grok"
 })
+
+mistral_request_async({
+  prompt: "Independently red-team [target] for implementation, data-flow, and
+    maintainability security risks. Finish with exactly one terminal verdict:
+    APPROVED_UNCONDITIONALLY only with no unresolved finding or verification
+    gap, CHANGES_REQUIRED with evidence-backed findings, or BLOCKED_EXTERNAL
+    with a concrete external error.",
+  approvalStrategy: "legacy",
+  workingDir: "[repo]",
+  correlationId: "red-team-mistral"
+})
+
+devin_request_async({
+  prompt: "Independently red-team [target] for exploitable defects, permission
+    gaps, and missing validation. Finish with exactly one terminal verdict:
+    APPROVED_UNCONDITIONALLY only with no unresolved finding or verification
+    gap, CHANGES_REQUIRED with evidence-backed findings, or BLOCKED_EXTERNAL
+    with a concrete external error.",
+  approvalStrategy: "legacy",
+  correlationId: "red-team-devin"
+})
+// Dispatch Devin only from a gateway process whose confirmed cwd is [repo].
+
+cursor_request_async({
+  prompt: "Independently red-team [target] for repository-specific vulnerabilities,
+    unsafe defaults, and regression risks. Finish with exactly one terminal
+    verdict: APPROVED_UNCONDITIONALLY only with no unresolved finding or
+    verification gap, CHANGES_REQUIRED with evidence-backed findings, or
+    BLOCKED_EXTERNAL with a concrete external error.",
+  approvalStrategy: "legacy",
+  workspace: "[repo]",
+  correlationId: "red-team-cursor"
+})
 ```
 
-Poll every 60 seconds. Synthesize findings:
+Poll with llm_job_status and collect with llm_job_result through gtwy whenever
+async job tools are registered. Use non-blocking waits and do not cancel merely
+because an assessment runs for a long time.
 
-1. **Union all findings** — every finding from every LLM counts
-2. **Deduplicate** — same issue found by multiple LLMs = high confidence
-3. **Cross-validate unique findings** — issue found by only one LLM may be a false positive or a blind spot the others missed
-4. **Verdict**: ALL must PASS for the assessment to pass. Any FAIL = fix and re-assess.
+When persistence.backend = "none", use the corresponding sync request tools for
+the same required roster. They run to completion without auto-deferral. Missing
+async tooling is not a reason to omit a required red teamer.
 
-## Handling Deferred Responses
+## Triage and Blue-Team Response
 
-Red team assessments are thorough — expect auto-deferral at 45s.
-
-```
-// Response will likely be: status:"deferred", jobId:"..."
-// Poll every 60 seconds (no wallclock timeout; cancel only on explicit instruction or hard failure):
-llm_job_status({jobId: "[jobId]"})
-
-// When completed:
-llm_job_result({jobId: "[jobId]"})
-```
-
-Red-team jobs are **durable** (default 30-day retention, `LLM_GATEWAY_JOB_RETENTION_DAYS`). If your polling wrapper times out or restarts mid-assessment, fetch by `jobId` later, or re-issue the identical call — auto-dedup (default 1 h window, `LLM_GATEWAY_DEDUP_WINDOW_MS`) reattaches to the live job. This protects long-running adversarial sweeps from being silently restarted. Use `forceRefresh:true` only when the target code/config has actually changed.
-
-## Triage Findings
-
-| Severity | Action | Timeline |
-|----------|--------|----------|
-| Critical | Fix immediately, re-assess | Before any merge |
-| High | Fix before shipping | Before release |
-| Medium | Fix in current sprint | Scheduled |
-| Low | Track, fix when convenient | Backlog |
-
-## Blue Team Response
-
-Every red team finding requires a blue team response. The blue team (a different LLM than the one that found the issue) produces a defensive remediation plan for each finding.
-
-### Step 1: Collect Red Team Findings
-
-After the red team assessment completes, structure the findings as a numbered list with severity and attack scenario.
-
-### Step 2: Send to Blue Team LLM
-
-Use a **different LLM** than the red teamer for the blue team response. This avoids confirmation bias — the defender shouldn't be the same model that found the attack.
-
-| Red Teamer | Blue Team Responder | Why |
-|------------|-------------------|-----|
-| Gemini | Codex or Claude | Codex can implement fixes directly; Claude reasons about defense-in-depth |
-| Codex | Claude or Gemini | Claude designs defensive architecture; Gemini validates against known mitigations |
-| Claude | Codex or Gemini | Codex implements concrete patches; Gemini verifies against OWASP remediation guides |
-| Grok | Codex or Claude | Same reasoning — pair with a model from a different vendor family to break confirmation bias |
-| Multi-LLM | Use the strongest available for the fix domain | Match remediation LLM to the type of fix needed |
+1. Union findings from all reviewers. A single credible report must be
+   investigated; agreement is useful evidence, not a substitute for proof.
+2. Confirm the exploit path, affected scope, and severity.
+3. Produce a blue-team response for every finding: defense, detection,
+   prevention, and verification.
+4. Implement every remediation needed to reach the requested unconditional
+   `APPROVED_UNCONDITIONALLY` verdict. Critical and high findings must be fixed
+   before merge or release.
+   Medium and low findings require remediation or explicit user risk acceptance;
+   label accepted risk distinctly, never as unconditional approval.
+5. Build and test the changes, then re-run every required original red teamer.
 
 ```
 codex_request({
-  prompt: "Blue team response to red team findings for [path/component].\n\nRed team findings:\n1. [Critical] [finding + attack scenario]\n2. [High] [finding + attack scenario]\n3. [Medium] [finding + attack scenario]\n...\n\nFor EACH finding, provide:\n- **Defense**: Specific code change or configuration fix\n- **Detection**: How to detect this attack in production (logging, monitoring, alerting)\n- **Prevention**: Architectural change to prevent this class of vulnerability\n- **Verification**: How to test that the fix works (test case or verification step)\n\nThen implement the fixes for all Critical and High findings. Include tests.",
-  fullAuto: true,
-  approvalStrategy: "mcp_managed",
-  correlationId: "blue-team-response"
+  prompt: "Implement and test the approved blue-team remediations for [target].
+    For each finding provide the code change, detection signal, prevention
+    measure, and regression test. Do not claim APPROVED_UNCONDITIONALLY. Return
+    implementation and validation evidence for a fresh red-team assessment.",
+  sandboxMode: "workspace-write",
+  workingDir: "[repo]",
+  approvalStrategy: "legacy",
+  correlationId: "blue-team-implementation"
 })
 ```
 
-### Step 3: Blue Team Response Format
+## PromptParts, Sessions, and Persistence
 
-For each red team finding, the blue team must address all four dimensions:
+Claude, Codex, Gemini, Grok, and Mistral accept promptParts. Devin and Cursor
+accept only flat prompt. Preserve one canonical review brief, send it as prompt
+to Devin and Cursor, and derive identical structured stable context for the
+other five. Use exactly one of prompt or promptParts. Cache-state resources
+expose aggregate hashes and token counts only, never red-team prompt or result
+content.
 
-```markdown
-### Finding 1: [Red team finding title] (Critical)
+Mistral Vibe defaults to accept-edits for programmatic callers and uses legacy
+approval. Current Vibe session logging defaults to enabled; run doctor and
+correct an explicit [session_logging] enabled = false setting before relying on
+resume. Codex native resume requires a real Codex UUID and inherits its
+original target and sandbox posture.
 
-**Red team**: [attack scenario summary]
+SQLite and Postgres persistence make async jobs durable. Memory persistence is
+process-lifetime only and needs explicit acknowledgement. With
+persistence.backend = "none", async and job tools are absent. Do not interpret
+an unavailable job store as evidence that an assessment completed.
 
-**Defense**: [specific code/config change]
-- File: [path]
-- Change: [what to change and why]
+Personal Agent Config Kit supports Claude and Codex only and requires durable
+job admission. A complete seven-provider assessment cannot run in Kit mode;
+treat that as a blocker unless the user explicitly changes the required scope.
+The normal Claude `workingDir` target rule does not apply to a Claude Kit
+request: it rejects caller-supplied `workingDir` before context compilation.
+`explain_effective_config({workingDir:"<repo>"})` can inspect a candidate scope,
+but Claude Kit execution must use an already configured registered `workspace`
+alias or the configured default workspace. It never inherits the gateway
+process cwd.
 
-**Detection**: [how to detect this attack in production]
-- Log: [what to log]
-- Alert: [what threshold triggers an alert]
-- Monitor: [what metric to watch]
+## Final Assessment Record
 
-**Prevention**: [architectural change to prevent this class of vulnerability]
-- [e.g., "Add input validation layer before all handlers"]
-- [e.g., "Move secret rotation to vault with TTL"]
-
-**Verification**: [how to prove the fix works]
-- Test: [specific test case]
-- Manual: [manual verification step]
-```
-
-### Step 4: Implement Blue Team Fixes
-
-For Critical and High findings, the blue team LLM should implement fixes directly (not just describe them). Use Codex with `fullAuto: true` for implementation:
-
-```
-codex_request({
-  prompt: "Implement the blue team fixes for Critical and High findings:\n\n1. [Defense for finding 1 — what to change in which file]\n2. [Defense for finding 2 — what to change in which file]\n\nAlso add:\n- Detection logging for each finding\n- Test cases verifying each fix\n\nDo not change Medium/Low findings — those are tracked for later.",
-  fullAuto: true,
-  approvalStrategy: "mcp_managed",
-  correlationId: "blue-team-impl"
-})
-```
-
-### Step 5: Re-assess (Red Team Verifies Blue Team)
-
-Send the original red teamer back to verify the fixes are effective. Use the per-CLI snippet that matches your original red teamer — do **not** use a generic placeholder, because `fullAuto:true` is required for Codex and easy to miss if hidden in a comment.
-
-**If the original red teamer was Codex:**
-
-```
-codex_request({
-  prompt: "Re-assess security after blue team fixes.\n\nOriginal findings and blue team responses:\n1. [Critical] [finding] — Blue team fix: [what changed]\n2. [High] [finding] — Blue team fix: [what changed]\n\nVerify:\n- Are the fixes effective against the original attack scenarios?\n- Did the fixes introduce new vulnerabilities?\n- Are the detection/monitoring additions adequate?\n\nEnd with PASS or FAIL with findings.",
-  fullAuto: true,
-  approvalStrategy: "mcp_managed"
-})
-```
-
-**If the original red teamer was Gemini:**
-
-```
-gemini_request({
-  prompt: "Re-assess security after blue team fixes.\n\nOriginal findings and blue team responses:\n1. [Critical] [finding] — Blue team fix: [what changed]\n2. [High] [finding] — Blue team fix: [what changed]\n\nVerify:\n- Are the fixes effective against the original attack scenarios?\n- Did the fixes introduce new vulnerabilities?\n- Are the detection/monitoring additions adequate?\n\nEnd with PASS or FAIL with findings.",
-  approvalStrategy: "mcp_managed",
-  mcpServers: ["sqry", "exa", "ref_tools"]
-})
-```
-
-**If the original red teamer was Claude:**
-
-```
-claude_request({
-  prompt: "Re-assess security after blue team fixes.\n\nOriginal findings and blue team responses:\n1. [Critical] [finding] — Blue team fix: [what changed]\n2. [High] [finding] — Blue team fix: [what changed]\n\nVerify:\n- Are the fixes effective against the original attack scenarios?\n- Did the fixes introduce new vulnerabilities?\n- Are the detection/monitoring additions adequate?\n\nEnd with PASS or FAIL with findings.",
-  approvalStrategy: "mcp_managed",
-  mcpServers: ["sqry", "exa", "ref_tools"],
-  allowedTools: ["Read", "Grep", "Glob", "Bash"]
-})
-```
-
-**If the original red teamer was Grok:**
-
-```
-grok_request({
-  prompt: "Re-assess security after blue team fixes.\n\nOriginal findings and blue team responses:\n1. [Critical] [finding] — Blue team fix: [what changed]\n2. [High] [finding] — Blue team fix: [what changed]\n\nVerify:\n- Are the fixes effective against the original attack scenarios?\n- Did the fixes introduce new vulnerabilities?\n- Are the detection/monitoring additions adequate?\n\nEnd with PASS or FAIL with findings.",
-  approvalStrategy: "mcp_managed"
-})
-```
-
-For multi-LLM red teams, re-submit to ALL original reviewers after blue team fixes.
-
-## Full Red/Blue Cycle
-
-```
-1. Red Team (one or more LLMs)     → findings with attack scenarios
-2. Blue Team (different LLM)       → defense + detection + prevention + verification per finding
-3. Blue Team Implementation        → code fixes for Critical/High
-4. Red Team Re-assess              → verify fixes, check for regressions
-5. Iterate until all red teamers PASS
-```
-
-## Assessment Templates
-
-### API Security
-
-```
-Red team the API at [path].
-- Authentication mechanism: [type]
-- Authorization model: [RBAC/ABAC/etc]
-- Data sensitivity: [PII/financial/health/etc]
-
-Focus on: auth bypass, privilege escalation, rate limiting, input validation, error information leakage.
-```
-
-### Data Pipeline
-
-```
-Red team the data pipeline at [path].
-- Data sources: [list]
-- Data sinks: [list]
-- Sensitive fields: [list]
-
-Focus on: injection at ingestion, data leakage in logs/errors, access control on sinks, encryption at rest/transit.
-```
-
-### Infrastructure / Configuration
-
-```
-Red team the configuration at [path].
-- Environment: [dev/staging/prod]
-- Exposed services: [list]
-
-Focus on: default credentials, exposed debug endpoints, misconfigured CORS/CSP, secrets in config, overly permissive IAM.
-```
-
-## MCP Tool Usage During Assessment
-
-The reviewer should use these MCP tools:
-
-| Tool | Purpose |
-|------|---------|
-| **sqry** | Semantic code search — find all callers of a function, trace data flow, find similar patterns |
-| **exa** | Web search — look up CVEs for dependencies, find known vulnerability patterns |
-| **ref_tools** | Documentation — check framework security docs, verify best practices |
-
-## Tips
-
-- Omit `model` by default — let the gateway default apply. Only nominate a specific variant when the caller has explicitly asked for it.
-- Include `mcpServers: ["sqry", "exa", "ref_tools"]` for research-heavy assessments. Claude gets a generated MCP config, Gemini gets allowed server names for its existing MCP config, and Codex/Grok treat this as approval tracking while using their own MCP config.
-- Provide context about data sensitivity and threat model — generic assessments miss domain-specific risks
-- Red team assessments are expensive but catch issues that code review misses
-- Use `correlationId` for tracing: `"red-team-r1-claude"`, `"red-team-r1-codex"`, `"red-team-r1-gemini"`, `"red-team-r1-grok"`
-- For large codebases, scope to specific components rather than "audit everything"
-- Multi-LLM red teams find more issues but cost 3–4x — use for critical security paths. Adding Grok specifically defends against shared blind spots across the Anthropic/OpenAI/Google family.
-- Single-LLM is fine for routine security checks
-- Use `approvalStrategy: "mcp_managed"` as the skill default; add `fullAuto: true` for Codex — do not use raw `dangerouslyBypassApprovalsAndSandbox` for red-team work
-- For multi-round red/blue cycles, pass `resumeLatest:true` (or `sessionId:<UUID>`) to Codex on the re-assess step so it carries the original threat model into the verification. Note: `--full-auto` is dropped on Codex resume — the original session's approval policy is inherited.
-- **Durable assessment results** (default 30 days, `LLM_GATEWAY_JOB_RETENTION_DAYS`) mean you can complete a red/blue cycle hours or days later from where you left off; jobs are not lost when the orchestrator dies or polling times out.
-- For multi-LLM red teams (parallel dispatch to Claude/Codex/Gemini/Grok/Mistral on the same target), prefer the structured `promptParts` field over `prompt`: put the long stable threat-model brief and target code dump into `system` / `context`, and the per-reviewer focus in `task`. `prompt` and `promptParts` are mutually exclusive. Stable bytes shared across reviewers raise implicit cache hit rate; you can verify reviewers actually shared the prefix via `cache-state://prefix/{hash}` (tokens/hashes only — no prompt or response text is exposed, which preserves the audit posture appropriate for red-team work).
+- Required roster, provider capability evidence, and target revision
+- Threat model and assessment brief
+- Every finding, proof, severity, and blue-team response
+- Validation and regression-test evidence
+- Fresh final `APPROVED_UNCONDITIONALLY` verdict from every required reviewer,
+  with no caveats
+- Any accepted risk or terminal provider failure separately labeled as
+  `CHANGES_REQUIRED` or `BLOCKED_EXTERNAL`

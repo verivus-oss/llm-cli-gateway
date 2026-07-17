@@ -1,5 +1,13 @@
 import { EventEmitter } from "node:events";
-import { existsSync, rmSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -22,6 +30,7 @@ import {
   DEFAULT_ACP_PROCESS_IDLE_TIMEOUT_MS,
 } from "../config.js";
 import type { Logger } from "../logger.js";
+import { isProcessGroupRegisteredForTest, PROCESS_GROUP_KILL_GRACE_MS } from "../executor.js";
 
 // Step: add-acp-process-manager.
 // Validation: tests assert argv is passed without shell parsing, cwd is
@@ -163,6 +172,25 @@ function recordingSpawn(child: AcpChildProcess): {
   return { spawn, resolved };
 }
 
+function pidIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ESRCH") return false;
+    throw error;
+  }
+}
+
+async function waitForProcessGroupCleanup(parentPid: number, descendantPid: number): Promise<void> {
+  const deadline = Date.now() + PROCESS_GROUP_KILL_GRACE_MS + 3000;
+  while (Date.now() < deadline) {
+    if (!pidIsAlive(descendantPid) && !isProcessGroupRegisteredForTest(parentPid)) return;
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  throw new Error(`ACP group did not clean parent ${parentPid} / descendant ${descendantPid}`);
+}
+
 describe("AcpProcessManager", () => {
   let stdoutWriteSpy: ReturnType<typeof vi.spyOn>;
   let stdoutWrites: string[];
@@ -190,7 +218,7 @@ describe("AcpProcessManager", () => {
           grok: makeProviderConfig({ command: "grok", args: ["agent", "stdio"] }),
         },
       });
-      const resolved = resolveProviderSpawn("grok", config, {});
+      const resolved = resolveProviderSpawn("grok", config, {}, "/workspace");
       expect(resolved.command).toBe("grok");
       expect(resolved.args).toEqual(["agent", "stdio"]);
       // No single concatenated shell string is ever produced.
@@ -198,7 +226,7 @@ describe("AcpProcessManager", () => {
     });
 
     it("falls back to the registry entrypoint when no provider config command", () => {
-      const resolved = resolveProviderSpawn("mistral", makeConfig(), {});
+      const resolved = resolveProviderSpawn("mistral", makeConfig(), {}, "/workspace");
       expect(resolved.command).toBe("vibe-acp");
       expect(resolved.args).toEqual([]);
     });
@@ -207,20 +235,21 @@ describe("AcpProcessManager", () => {
       const config = makeConfig({
         providers: { mistral: makeProviderConfig({ command: "vibe-acp; rm -rf /" }) },
       });
-      expect(() => resolveProviderSpawn("mistral", config, {})).toThrowError(AcpError);
+      expect(() => resolveProviderSpawn("mistral", config, {}, "/workspace")).toThrowError(
+        AcpError
+      );
     });
 
     it("throws when the provider has no entrypoint at all (codex)", () => {
       // codex has no native entrypoint in the registry and no config override.
-      expect(() => resolveProviderSpawn("codex", makeConfig(), {})).toThrowError(AcpError);
+      expect(() => resolveProviderSpawn("codex", makeConfig(), {}, "/workspace")).toThrowError(
+        AcpError
+      );
     });
 
-    it("uses the provided cwd verbatim and a temp cwd otherwise", () => {
+    it("uses the concrete cwd supplied by the process manager", () => {
       const withCwd = resolveProviderSpawn("mistral", makeConfig(), {}, "/work/space");
       expect(withCwd.cwd).toBe("/work/space");
-
-      const withoutCwd = resolveProviderSpawn("mistral", makeConfig(), {});
-      expect(withoutCwd.cwd.startsWith(tmpdir())).toBe(true);
     });
   });
 
@@ -340,6 +369,46 @@ describe("AcpProcessManager", () => {
       proc.shutdown();
     });
 
+    it("uses a fresh private neutral cwd for each unscoped process and cleans it after exit", async () => {
+      const firstChild = new FakeChild().autoInitialize();
+      const secondChild = new FakeChild().autoInitialize();
+      const children = [firstChild, secondChild];
+      const resolved: ResolvedAcpSpawn[] = [];
+      const manager = new AcpProcessManager({
+        config: makeConfig({
+          providers: { mistral: makeProviderConfig({ command: "vibe-acp" }) },
+        }),
+        spawn: spawnArgs => {
+          resolved.push(spawnArgs);
+          const child = children[resolved.length - 1];
+          if (!child) throw new Error("missing fake child");
+          return child;
+        },
+        logger: makeLogger(),
+        baseEnv: {},
+      });
+
+      const first = await manager.start({ provider: "mistral", hostServices: {} });
+      const second = await manager.start({ provider: "mistral", hostServices: {} });
+      const firstCwd = resolved[0].cwd;
+      const secondCwd = resolved[1].cwd;
+
+      expect(firstCwd).not.toBe(secondCwd);
+      expect(firstCwd).toMatch(/llm-cli-gateway-neutral-/);
+      expect(secondCwd).toMatch(/llm-cli-gateway-neutral-/);
+      if (process.platform !== "win32") {
+        expect(statSync(firstCwd).mode & 0o777).toBe(0o700);
+        expect(statSync(secondCwd).mode & 0o777).toBe(0o700);
+      }
+
+      first.shutdown("SIGKILL");
+      firstChild.emitExit(0, "SIGKILL");
+      second.shutdown("SIGKILL");
+      secondChild.emitExit(0, "SIGKILL");
+      expect(existsSync(firstCwd)).toBe(false);
+      expect(existsSync(secondCwd)).toBe(false);
+    });
+
     it("fails closed with a typed error when spawn produces no stdio", async () => {
       const noStdio: AcpChildProcess = {
         pid: 1,
@@ -382,12 +451,9 @@ describe("AcpProcessManager", () => {
   });
 
   describe("defaultSpawn (real process)", () => {
-    // The default no-cwd path resolves the working directory to a gateway-owned
-    // `${tmpdir()}/llm-gateway-acp-<provider>` directory that may not exist on a
-    // clean host. defaultSpawn must create it before spawning, otherwise a real
-    // child_process.spawn rejects the missing cwd with ENOENT. These tests drive
-    // the real spawner (not an injected fake) so the directory-creation path and
-    // a successful real spawn are exercised.
+    // AcpProcessManager normally supplies either an authorized workspace or a
+    // pre-created neutral cwd. defaultSpawn still creates a missing resolved cwd
+    // defensively before invoking the real child_process spawner.
     const createdDirs: string[] = [];
     afterEach(() => {
       for (const dir of createdDirs.splice(0)) {
@@ -432,6 +498,98 @@ describe("AcpProcessManager", () => {
       expect(typeof child.pid).toBe("number");
       child.kill("SIGKILL");
     });
+
+    it.skipIf(process.platform === "win32")(
+      "force-kills a SIGTERM-ignoring descendant after the ACP leader exits",
+      async () => {
+        const testDir = mkdtempSync(join(tmpdir(), "llm-gateway-acp-tree-"));
+        createdDirs.push(testDir);
+        const pidFile = join(testDir, "acp-pids.txt");
+        const providerStub = join(testDir, "vibe-acp");
+        const descendantSource = [
+          'process.on("SIGTERM", () => {});',
+          'process.stdout.write("ready\\n");',
+          "setInterval(() => {}, 1000);",
+        ].join("");
+        const stubSource = [
+          "#!/usr/bin/env node",
+          'const { spawn } = require("node:child_process");',
+          'const { writeFileSync } = require("node:fs");',
+          'const readline = require("node:readline");',
+          `const descendant = spawn(process.execPath, ["-e", ${JSON.stringify(
+            descendantSource
+          )}], { stdio: ["ignore", "pipe", "ignore"] });`,
+          "let ready = false;",
+          "const pending = [];",
+          "function reply(frame) {",
+          '  process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: frame.id, result: { protocolVersion: 1, agentInfo: { name: "vibe-acp", version: "test" } } }) + "\\n");',
+          "}",
+          'readline.createInterface({ input: process.stdin }).on("line", line => {',
+          "  const frame = JSON.parse(line);",
+          "  if (ready) reply(frame); else pending.push(frame);",
+          "});",
+          'descendant.stdout.once("data", () => {',
+          "  writeFileSync(process.env.ACP_TEST_PID_FILE, `${process.pid}:${descendant.pid}`);",
+          "  ready = true;",
+          "  for (const frame of pending.splice(0)) reply(frame);",
+          "});",
+          'process.on("SIGTERM", () => process.exit(0));',
+        ].join("\n");
+        writeFileSync(providerStub, stubSource, { mode: 0o700 });
+        chmodSync(providerStub, 0o700);
+
+        let parentPid: number | undefined;
+        let descendantPid: number | undefined;
+        try {
+          const manager = new AcpProcessManager({
+            config: makeConfig({
+              providers: { mistral: makeProviderConfig({ command: "vibe-acp" }) },
+            }),
+            logger: makeLogger(),
+            spawn: () =>
+              defaultSpawn({
+                command: process.execPath,
+                args: [providerStub],
+                cwd: testDir,
+                env: {
+                  ...process.env,
+                  ACP_TEST_PID_FILE: pidFile,
+                },
+              }),
+            baseEnv: {
+              ...process.env,
+              PATH: `${testDir}:${process.env.PATH ?? ""}`,
+              ACP_TEST_PID_FILE: pidFile,
+            },
+          });
+          const proc = await manager.start({
+            provider: "mistral",
+            cwd: testDir,
+            hostServices: {},
+          });
+          [parentPid, descendantPid] = readFileSync(pidFile, "utf8").split(":").map(Number);
+          expect(proc.pid).toBe(parentPid);
+          expect(pidIsAlive(descendantPid)).toBe(true);
+          expect(isProcessGroupRegisteredForTest(parentPid)).toBe(true);
+
+          proc.shutdown("SIGTERM");
+          await waitForProcessGroupCleanup(parentPid, descendantPid);
+
+          expect(proc.state).toBe("quarantined");
+          expect(pidIsAlive(descendantPid)).toBe(false);
+          expect(isProcessGroupRegisteredForTest(parentPid)).toBe(false);
+        } finally {
+          if (parentPid) {
+            try {
+              process.kill(-parentPid, "SIGKILL");
+            } catch {
+              /* best-effort test cleanup */
+            }
+          }
+        }
+      },
+      15_000
+    );
   });
 
   describe("idle timeout", () => {
@@ -511,11 +669,12 @@ describe("AcpProcessManager", () => {
     });
   });
 
-  describe("stdout protocol channel loss without a child exit", () => {
+  describe("terminal protocol channel loss without a child exit", () => {
     it("stops reporting healthy and quarantines when stdout ends without exit", async () => {
       // Round-2 codex finding 1: if the ACP stdout channel closes but the child
       // emits no `exit`, the manager previously kept state === "running" and
-      // isHealthy() === true. The transport's onClose must drive it terminal.
+      // isHealthy() === true. The typed transport terminal event must drive it
+      // terminal with the exact stdout reason.
       const child = new FakeChild().autoInitialize();
       const exits: AcpError[] = [];
       const manager = new AcpProcessManager({
@@ -534,7 +693,7 @@ describe("AcpProcessManager", () => {
       expect(manager.liveCount).toBe(1);
 
       // The agent closes its stdout; no child `exit` event is emitted. Wait for
-      // the stream's `end`/`close` to propagate to the transport's onClose.
+      // the stream's `end`/`close` to propagate to onTerminal.
       await new Promise<void>(resolve => {
         child.stdout.once("end", () => resolve());
         child.stdout.once("close", () => resolve());
@@ -545,7 +704,9 @@ describe("AcpProcessManager", () => {
       expect(proc.isHealthy()).toBe(false);
       expect(proc.state).toBe("quarantined");
       expect(proc.terminalError).toBeInstanceOf(AcpProcessExitError);
+      expect(proc.terminalError?.debug.reason).toBe("stdout_channel_closed");
       expect(exits).toHaveLength(1);
+      expect(exits[0]?.debug.reason).toBe("stdout_channel_closed");
       // The process was killed defensively (no half-dead OS process left).
       expect(child.killed.length).toBeGreaterThan(0);
       // It is no longer tracked as live.
@@ -573,6 +734,44 @@ describe("AcpProcessManager", () => {
 
       await expect(inflight).rejects.toBeInstanceOf(AcpProcessExitError);
       expect(proc.isHealthy()).toBe(false);
+    });
+
+    it("preserves stdin_write_failed through quarantine and lifecycle callbacks", async () => {
+      const child = new FakeChild().autoInitialize();
+      const exits: AcpError[] = [];
+      const manager = new AcpProcessManager({
+        config: makeConfig({ providers: { mistral: makeProviderConfig() } }),
+        spawn: () => child,
+        logger: makeLogger(),
+        baseEnv: {},
+      });
+      const proc = await manager.start({
+        provider: "mistral",
+        hostServices: {},
+        callbacks: { onProcessExit: error => exits.push(error) },
+      });
+      const pending = proc.transport.request("session/prompt", { prompt: "pending" }, 0);
+      const stdinError = Object.assign(new Error("write EPIPE"), { code: "EPIPE" });
+
+      child.stdin.emit("error", stdinError);
+      const rejected = await pending.catch((error: unknown) => error);
+
+      expect(proc.state).toBe("quarantined");
+      expect(proc.isHealthy()).toBe(false);
+      expect(proc.terminalError).toBeInstanceOf(AcpProcessExitError);
+      expect(proc.terminalError?.debug.reason).toBe("stdin_write_failed");
+      expect(rejected).toBe(proc.terminalError);
+      expect(exits).toEqual([proc.terminalError]);
+      expect(exits[0]?.debug.reason).toBe("stdin_write_failed");
+      expect(child.killed).toEqual(["SIGTERM"]);
+      expect(manager.liveCount).toBe(0);
+
+      // Later stdout/exit signals are idempotent and must not fire lifecycle
+      // observers a second time.
+      child.stdout.end();
+      child.emitExit(1, "SIGTERM");
+      await Promise.resolve();
+      expect(exits).toHaveLength(1);
     });
   });
 

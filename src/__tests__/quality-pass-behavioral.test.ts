@@ -11,6 +11,12 @@ import {
   createErrorResponse,
   extractUsageAndCost,
   prepareClaudeRequest,
+  prepareCodexRequest,
+  prepareCursorRequest,
+  prepareDevinRequest,
+  prepareGeminiRequest,
+  prepareGrokRequest,
+  prepareMistralRequest,
 } from "../index.js";
 
 // Minimal CliRequestPrep for buildCliResponse (only the fields it reads).
@@ -191,6 +197,125 @@ describe("v2.12.0 behavioral: createErrorResponse remediation + categories (#2, 
     expect(res.content[0].text).toMatch(/retry/i);
     // Must not be misclassified as a provider/CLI failure.
     expect(res.content[0].text).not.toContain("Error executing");
+  });
+
+  it("classifies native E2BIG as a non-retryable input_too_large error", () => {
+    const native = Object.assign(new Error("spawn E2BIG"), { code: "E2BIG" });
+    const res = createErrorResponse("grok", 126, "", "c1", native);
+
+    expect(res.structuredContent?.errorCategory).toBe("input_too_large");
+    expect(res.structuredContent?.retryable).toBe(false);
+    expect(res.content[0].text).toContain("will not truncate");
+  });
+
+  it("does not infer input_too_large from ordinary provider stderr text", () => {
+    const stderr = "Provider rejected the task: Argument list too long";
+    const res = createErrorResponse("grok", 2, stderr, "c-provider-stderr");
+
+    expect(res.structuredContent).toMatchObject({
+      exitCode: 2,
+      errorCategory: "cli_error",
+    });
+    expect(res.content[0].text).toContain(stderr);
+  });
+
+  it("preserves timeout classification when provider stderr mentions an argument list", () => {
+    const stderr = "Argument list too long\nProcess timed out after 300ms";
+    const res = createErrorResponse("codex", 124, stderr, "c-timeout-stderr");
+
+    expect(res.structuredContent).toMatchObject({
+      exitCode: 124,
+      errorCategory: "timeout",
+    });
+    expect(res.content[0].text).toContain(stderr);
+    expect(res.content[0].text).toMatch(/_request_async|llm_job_status/);
+  });
+
+  it("returns Mistral argv overflow through the structured public error surface", () => {
+    const res = prepareMistralRequest({
+      prompt: "中".repeat(44_000),
+      approvalStrategy: "legacy",
+      optimizePrompt: false,
+      operation: "mistral_request",
+    });
+
+    expect("args" in res).toBe(false);
+    expect(
+      (res as { structuredContent?: Record<string, unknown> }).structuredContent
+    ).toMatchObject({
+      errorCategory: "input_too_large",
+      retryable: false,
+    });
+  });
+
+  it("guards argv-bound provider requests while Codex new sessions use stdin", () => {
+    const prompt = "中".repeat(44_000);
+    const runtime = {} as never;
+    const argvBound = [
+      prepareClaudeRequest({
+        prompt,
+        outputFormat: "text",
+        dangerouslySkipPermissions: false,
+        approvalStrategy: "legacy",
+        strictMcpConfig: false,
+        optimizePrompt: false,
+        operation: "claude_request",
+      }),
+      prepareGeminiRequest({
+        prompt,
+        approvalStrategy: "legacy",
+        optimizePrompt: false,
+        operation: "gemini_request",
+      }),
+      prepareGrokRequest({
+        prompt,
+        approvalStrategy: "legacy",
+        optimizePrompt: false,
+        operation: "grok_request",
+      }),
+      prepareMistralRequest({
+        prompt,
+        approvalStrategy: "legacy",
+        optimizePrompt: false,
+        operation: "mistral_request",
+      }),
+      prepareDevinRequest(
+        { prompt, approvalStrategy: "legacy", optimizePrompt: false, operation: "devin_request" },
+        runtime
+      ),
+      prepareCursorRequest(
+        {
+          prompt,
+          approvalStrategy: "legacy",
+          optimizePrompt: false,
+          operation: "cursor_request",
+        },
+        runtime
+      ),
+    ];
+
+    for (const result of argvBound) {
+      expect("args" in result).toBe(false);
+      expect(
+        (result as { structuredContent?: Record<string, unknown> }).structuredContent
+      ).toMatchObject({ errorCategory: "input_too_large", retryable: false });
+    }
+
+    const codex = prepareCodexRequest({
+      prompt,
+      fullAuto: false,
+      dangerouslyBypassApprovalsAndSandbox: false,
+      approvalStrategy: "legacy",
+      createNewSession: true,
+      optimizePrompt: false,
+      operation: "codex_request",
+    });
+    expect("args" in codex).toBe(true);
+    if ("args" in codex) {
+      expect(codex.args.slice(-2)).toEqual(["--", "-"]);
+      expect(codex.args.join(" ")).not.toContain(prompt);
+      expect(codex.stdinPayload).toBe(prompt);
+    }
   });
 
   it("adds async-retry guidance on wall-clock timeout (124)", () => {

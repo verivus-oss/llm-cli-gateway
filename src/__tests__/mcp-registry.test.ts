@@ -53,6 +53,8 @@ describe("INTERNAL_MCP_REGISTRY", () => {
     expect(INTERNAL_MCP_REGISTRY.sqry.approval).toBeUndefined();
     expect(INTERNAL_MCP_REGISTRY.trstr.approval).toBeUndefined();
     expect(INTERNAL_MCP_REGISTRY.sqry.requireEnv).toBeUndefined();
+    expect(INTERNAL_MCP_REGISTRY.sqry.managedEligible).toBe(true);
+    expect(INTERNAL_MCP_REGISTRY.trstr.managedEligible).toBe(true);
   });
 
   it("agent_browser is a PATH-gated local server with browser-automation approval weight", () => {
@@ -70,6 +72,7 @@ describe("INTERNAL_MCP_REGISTRY", () => {
 
   it("exa requires + forwards EXA_API_KEY and scores +2", () => {
     const exa = INTERNAL_MCP_REGISTRY.exa;
+    expect(exa.managedEligible).toBeUndefined();
     expect(exa.requireEnv).toEqual(["EXA_API_KEY"]);
     expect(exa.forwardEnv).toEqual(["EXA_API_KEY"]);
     expect(exa.approval).toEqual({
@@ -82,6 +85,7 @@ describe("INTERNAL_MCP_REGISTRY", () => {
 
   it("ref_tools requires + forwards REF_API_KEY and scores +1", () => {
     const ref = INTERNAL_MCP_REGISTRY.ref_tools;
+    expect(ref.managedEligible).toBeUndefined();
     expect(ref.requireEnv).toEqual(["REF_API_KEY"]);
     expect(ref.forwardEnv).toEqual(["REF_API_KEY"]);
     expect(ref.approval).toEqual({

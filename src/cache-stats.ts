@@ -18,6 +18,7 @@
 
 import type { FlightRecorderQuery } from "./flight-recorder.js";
 import { estimateCacheSavingsUsd } from "./pricing.js";
+import { redactKnownProviderSessionId } from "./provider-output-metadata.js";
 
 export type CacheStatsCli = "claude" | "codex" | "gemini" | "grok" | "mistral";
 
@@ -549,6 +550,12 @@ export interface ReadPersistedRequestOptions {
   maxChars?: number;
   /** Include the full persisted prompt text in the result. Default false. */
   includePrompt?: boolean;
+  /**
+   * Redact the provider-native session id recorded alongside the request before
+   * returning any persisted text. Remote callers use this because native
+   * provider continuation handles are local-only.
+   */
+  redactProviderSessionId?: boolean;
 }
 
 interface PersistedRequestRawRow {
@@ -570,16 +577,24 @@ interface PersistedRequestRawRow {
   exit_code: number | null;
   error_message: string | null;
   async_job_id: string | null;
+  provider_session_id: string | null;
   status: string | null;
   thinking_blocks: string | null;
   owner_principal: string | null;
 }
 
-function parseThinkingBlocks(raw: string | null): string[] | null {
+function parseThinkingBlocks(
+  raw: string | null,
+  providerSessionId: string | null | undefined
+): string[] | null {
   if (!raw) return null;
   try {
     const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed.filter((b): b is string => typeof b === "string") : null;
+    return Array.isArray(parsed)
+      ? parsed
+          .filter((block): block is string => typeof block === "string")
+          .map(block => redactKnownProviderSessionId(block, providerSessionId))
+      : null;
   } catch {
     return null;
   }
@@ -602,7 +617,7 @@ export function readPersistedRequest(
             r.datetime_utc, r.duration_ms, r.input_tokens, r.output_tokens,
             r.cache_read_tokens, r.cache_creation_tokens, r.owner_principal,
             m.retry_count, m.circuit_breaker_state, m.cost_usd,
-            m.exit_code, m.error_message, m.async_job_id, m.status,
+            m.exit_code, m.error_message, m.async_job_id, m.provider_session_id, m.status,
             m.thinking_blocks
      FROM requests r
      LEFT JOIN gateway_metadata m ON m.request_id = r.id
@@ -614,7 +629,24 @@ export function readPersistedRequest(
   const [row] = rows;
   if (!row) return null;
 
-  const fullResponse = row.response;
+  // Scrub complete caller-visible text before calculating or applying the
+  // caller's slice. A provider id beginning just before maxChars must not leak
+  // its prefix through a pre-redaction response slice. Error and thinking text
+  // are not sliced, but must be scrubbed before this object is serialized.
+  const redactProviderSessionId = opts.redactProviderSessionId ? row.provider_session_id : null;
+  const fullResponse =
+    row.response === null
+      ? null
+      : redactKnownProviderSessionId(row.response, redactProviderSessionId);
+  const fullPrompt = redactKnownProviderSessionId(row.prompt ?? "", redactProviderSessionId);
+  const errorMessage =
+    row.error_message === null
+      ? null
+      : redactKnownProviderSessionId(row.error_message, redactProviderSessionId);
+  const sessionId =
+    row.session_id === null
+      ? null
+      : redactKnownProviderSessionId(row.session_id, redactProviderSessionId);
   const responseChars = fullResponse ? fullResponse.length : 0;
   const responseTruncated = fullResponse != null && responseChars > maxChars;
   const response = fullResponse == null ? null : fullResponse.slice(0, maxChars);
@@ -623,12 +655,12 @@ export function readPersistedRequest(
     correlationId: row.id,
     cli: row.cli,
     model: row.model,
-    sessionId: row.session_id,
+    sessionId,
     datetimeUtc: row.datetime_utc,
     durationMs: row.duration_ms,
     status: row.status,
     exitCode: row.exit_code,
-    errorMessage: row.error_message,
+    errorMessage,
     retryCount: row.retry_count,
     circuitBreakerState: row.circuit_breaker_state,
     costUsd: row.cost_usd,
@@ -637,16 +669,16 @@ export function readPersistedRequest(
     outputTokens: row.output_tokens,
     cacheReadTokens: row.cache_read_tokens,
     cacheCreationTokens: row.cache_creation_tokens,
-    promptChars: row.prompt ? row.prompt.length : 0,
+    promptChars: fullPrompt.length,
     responseChars,
     responseTruncated,
     response,
-    thinkingBlocks: parseThinkingBlocks(row.thinking_blocks),
+    thinkingBlocks: parseThinkingBlocks(row.thinking_blocks, redactProviderSessionId),
     ownerPrincipal: row.owner_principal,
   };
 
   if (opts.includePrompt) {
-    record.prompt = row.prompt ?? "";
+    record.prompt = fullPrompt;
   }
 
   return record;

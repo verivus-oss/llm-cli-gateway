@@ -1,142 +1,166 @@
 ---
 name: codex-review-gate
-description: Submit work to Codex for review and iterate until unconditional approval. Use after completing implementation tasks, before merging, or when a development process requires Codex sign-off.
+description: Submit completed work to Codex through the local llm-cli-gateway stdio MCP server and continue until an evidence-backed, unconditional approval. Use after implementation, before merging, or whenever a process requires Codex sign-off.
 ---
 
 # Codex Review Gate
 
-Submit completed work to Codex via the llm-gateway for review. Iterate on feedback until you receive unconditional approval. This is the standard quality gate used across all VerivusAI projects.
+Use this gate after implementation and local verification. Dispatch reviews only
+through the local gtwy stdio MCP server, never through a direct codex CLI
+command. In Codex the gateway tools normally have names such as
+mcp__gtwy__codex_request and mcp__gtwy__codex_request_async; some clients show
+their short names instead.
 
-## Dispatch Defaults
+## Non-Negotiable Review Rules
 
-Apply these on every dispatch unless the caller has explicitly overridden a rule in the current turn:
+1. Omit model unless the user selected one.
+2. Pass approvalStrategy: "legacy". Codex cannot use mcp_managed, and
+   approvalPolicy has no effect for it.
+3. Use sandboxMode: "read-only" for an inspection-only review. Use
+   sandboxMode: "workspace-write" only when the reviewer needs to create build
+   or test artifacts. Do not use fullAuto; it is deprecated shorthand for
+   workspace-write.
+4. Require this exact terminal JSON verdict:
+   `APPROVED_UNCONDITIONALLY`, `CHANGES_REQUIRED`, or `BLOCKED_EXTERNAL`.
+5. Do not impose a review-round, turn, token, price, cost, or wallclock cap.
+   Do not use a provider equivalent of those controls to shorten a mandatory
+   review. The configured idle-timeout safeguard only detects a process that
+   stops producing output.
+6. Accept only explicit, evidence-backed `APPROVED_UNCONDITIONALLY`.
+   Conditional approval, residual findings, a malformed verdict, inability to
+   verify, cancellation, timeout, or provider error does not pass the gate.
 
-1. **Omit `model`** — let the gateway use its configured default per CLI.
-2. **`approvalStrategy:"mcp_managed"`** is the skill dispatch default (the gateway schema default is `"legacy"`). For Codex, also pass `fullAuto:true`; this gives sandboxed autonomy while keeping the gateway approval gate in front of execution.
-3. **No wallclock timeout; poll every 60 s** — `idleTimeoutMs` is a separate no-output safeguard.
-4. **Iterate until unconditional APPROVED** (review dispatches only) — every review prompt must end with "End with APPROVED or NOT APPROVED with findings." Loop: dispatch → parse verdict → on `NOT APPROVED` or conditional, fix + re-submit → repeat. Escalate after 3 rounds. This rule does **not** apply to pure implementation or non-review analysis dispatches.
+Keep fixing and re-reviewing until the required verdict arrives. Stop only on
+explicit user cancellation or a terminal external provider failure. A terminal
+failure is `BLOCKED_EXTERNAL` with its exact error, never permission to skip the gate.
 
-## When to Use
+## Explicit user-authorized full-access override
 
-- After completing an implementation task
-- Before merging or shipping
-- When CLAUDE.md or a development process mandates "Codex review via llm gateway"
-- When a plan says "iterate until unconditional approval"
+The normal safe posture above does not apply when the user explicitly grants
+full provider permissions and native MCP access for this review. Build the
+target checkout and start `node dist/index.js --transport=stdio` from that
+checkout. Do not call a global or stale `gtwy` process. On a fresh Codex session
+use `approvalStrategy:"legacy"`, `sandboxMode:"danger-full-access"`, and
+`dangerouslyBypassApprovalsAndSandbox:true`.
 
-## Protocol
+Do not combine that posture with `fullAuto`, a resume that needs a new sandbox,
+or a gateway tool/MCP restriction. Let Codex's ambient native MCP configuration
+be the MCP surface, verify it live, and ask the reviewer to use available MCP
+tools when useful. Full capability remains review-only unless separately
+authorized: prohibit edits, staging, commits, resets, and destructive actions
+in the reviewer prompt.
 
-### Step 1: Submit for Review
+Give the reviewer a corrective-program verification report, the exact base and
+diff or exhaustive changed-file list including relevant untracked files, and
+durable job/test output locations. It must inspect code, documentation, tests,
+and commands directly, not accept the report as proof. Require
+`APPROVED_UNCONDITIONALLY`, `CHANGES_REQUIRED` with file/command evidence, or
+`BLOCKED_EXTERNAL` with its exact error. Set no caller caps. If the user asks
+for 90-second progress checks, do not poll earlier, and reapply the full posture
+on every new job because Codex resume inherits its original sandbox.
 
-Use `codex_request` with a review prompt that includes:
-- What was changed and why
-- File paths (let Codex read them — never inline code)
-- Specific review criteria if applicable
+## Submit the Initial Review
 
-```
-codex_request({
-  prompt: "Review the changes in [path]. This implements [feature/fix]. Check for: correctness, edge cases, test coverage, and adherence to project conventions. End with APPROVED or NOT APPROVED with specific findings.",
-  fullAuto: true,
-  approvalStrategy: "mcp_managed"
-})
-```
-
-**`fullAuto: true` is mandatory.** Without it, Codex runs in a restricted sandbox where it cannot read files, run commands, or use MCP tools. The review will fail with "cannot verify" errors. Always pass `fullAuto: true` and `approvalStrategy: "mcp_managed"` for review requests.
-
-If the task is large or complex, expect auto-deferral at 45s. When response contains `status:"deferred"`:
-
-```
-llm_job_status({jobId: "[from deferred response]"})
-// Poll every 60 seconds until completed (no wallclock timeout)
-llm_job_result({jobId: "[jobId]"})
-```
-
-### Step 2: Parse the Verdict
-
-Look for explicit **APPROVED** or **NOT APPROVED** in the response.
-
-- **APPROVED** (unconditional, no caveats) → Gate passed. Proceed.
-- **APPROVED with residual notes** → Gate passed if notes are informational only (e.g., "approved; residual: index was stale"). Proceed.
-- **NOT APPROVED** → Fix the issues listed, then re-submit.
-- **Cannot verify** (sandbox/access blocked) → Re-submit with evidence inline (file contents, command output).
-
-### Step 3: Fix and Re-submit
-
-When NOT APPROVED:
-1. Read Codex's findings carefully — each is a specific, actionable issue
-2. Fix every issue (not just the easy ones)
-3. Verify fixes locally (build, test)
-4. Re-submit with a focused prompt describing what was fixed
+State the change, target paths, acceptance criteria, and requested evidence.
+Make sure the local stdio gateway is operating in the intended repository, or
+pass Codex a local workingDir on the first new session.
 
 ```
 codex_request({
-  prompt: "Re-review after fixes. Previous findings:\n1. [issue] — Fixed by [what you did]\n2. [issue] — Fixed by [what you did]\n\nVerify the fixes are correct. End with APPROVED or NOT APPROVED with findings.",
-  fullAuto: true,
-  approvalStrategy: "mcp_managed"
+  prompt: "Review the changes in [paths]. They implement [feature or fix].
+    Check correctness, edge cases, test coverage, regressions, and project
+    conventions. Read the repository and validation evidence. Return terminal
+    JSON verdict APPROVED_UNCONDITIONALLY, CHANGES_REQUIRED, or
+    BLOCKED_EXTERNAL with inspected evidence.",
+  sandboxMode: "read-only",
+  approvalStrategy: "legacy",
+  correlationId: "review-initial"
 })
 ```
 
-### Step 4: Iterate
+If the normal review needs to run a command that writes generated output, use
+sandboxMode: "workspace-write" for that call. Do not use danger-full-access as
+the normal review mode. Use it only through the explicit user-authorized
+full-access override above.
 
-Repeat Steps 2-3 until you get unconditional APPROVED. Typical iterations:
-- Simple tasks: 1 round (often approved first time)
-- Medium tasks: 1-2 rounds
-- Complex tasks: 2-3 rounds
+## Handle Results
 
-If after 3 rounds Codex still has issues, escalate to the user.
+- `APPROVED_UNCONDITIONALLY`: record the response and its evidence. The gate passes.
+- `CHANGES_REQUIRED`: fix every finding, build and test, then submit the updated work.
+- A qualified approval: treat it as `CHANGES_REQUIRED` until every condition is
+  explicitly resolved and Codex gives a fresh strict verdict.
+- Cannot verify: correct repository targeting, sandbox access, or missing
+  evidence and submit again. Do not accept a conclusion based on an inaccessible
+  target.
+- Failed, canceled, orphaned, or malformed response: diagnose and retry through
+  gtwy. If the provider has a terminal external failure, report `BLOCKED_EXTERNAL`.
 
-## Permissions — the Most Common Mistake
+```
+codex_request({
+  prompt: "Re-review [paths] after these fixes: [finding and evidence list].
+    Verify every prior finding and inspect for regressions. Return terminal JSON
+    verdict APPROVED_UNCONDITIONALLY, CHANGES_REQUIRED, or BLOCKED_EXTERNAL with
+    inspected evidence.",
+  sandboxMode: "read-only",
+  approvalStrategy: "legacy",
+  correlationId: "review-follow-up"
+})
+```
 
-If Codex says "cannot verify" or you see `bwrap` sandbox errors, you almost certainly forgot `fullAuto: true`. Without it, Codex runs in a restricted sandbox that blocks file access, shell commands, and MCP tools.
+Do not use a numerical round count as a reason to escalate or accept work.
+Continue while a meaningful repair or verification action remains.
 
-With `fullAuto: true`, Codex gets sandboxed autonomous execution:
-- Full file system read/write access in the workspace
-- Shell command execution
-- any MCP/tools configured for that Codex CLI environment
+## Deferred Jobs
 
-In the rare case where Codex genuinely cannot access something specific (e.g., needs credentials it doesn't have), provide the evidence inline:
-- Paste the test output, build output, or file contents
-- This gives the reviewer the same information it would get from running the commands itself
+When async jobs are registered and the gateway returns status: "deferred", poll
+through gtwy using llm_job_status and collect the terminal response with
+llm_job_result. Use the orchestrator's non-blocking wakeup mechanism between
+polls. Do not cancel a review because it is long-running.
 
-## Anti-Patterns
+SQLite and Postgres persistence make jobs durable; memory persistence lasts only
+for the gateway process and requires explicit ephemeral acknowledgement.
+persistence.backend = "none" does not expose async or job tools. Reuse a job
+identifier or an identical deduplicable request only when the reviewed inputs
+have not changed.
 
-- **Don't skip the gate** because "it's a small change." Small changes break things.
-- **Don't accept NOT APPROVED** and move on. Fix the issues.
-- **Don't argue with Codex.** If the finding is wrong, verify locally and provide evidence.
-- **Don't inline large code blocks.** Provide file paths. Codex can read via sqry/GitHub.
-- **Don't submit without building/testing first.** Codex catches code issues, not "forgot to compile."
+## Continuity and Stable Prompts
 
-## Integration with Development Workflows
+On a new Codex session, establish the target working directory and sandbox
+correctly. Native resume inherits those properties. resumeLatest:true or a real
+Codex session UUID can continue a legacy Codex session; a gateway-generated
+gw-* identifier cannot be supplied as a native Codex sessionId. Resume also
+does not apply new sandbox, working-directory, or add-directory settings.
 
-This skill is referenced by:
-- trstr CLAUDE.md: "Every work product MUST include reviews and unconditional approvals from Codex via the llm MCP gateway"
-- aivcs implementation plans: "Submit to Codex via llm-gateway for review. Iterate until approval."
-- sqry review documents: Codex review requests with iteration tracking
+For repeated reviews of the same target, Codex supports promptParts:
 
-## Polling Strategy for Deferred Jobs
+```
+codex_request({
+  promptParts: {
+    system: "Stable review policy",
+    context: "Stable paths and acceptance criteria",
+    task: "Re-review the fixes. Return terminal JSON verdict APPROVED_UNCONDITIONALLY, CHANGES_REQUIRED, or BLOCKED_EXTERNAL with inspected evidence."
+  },
+  sandboxMode: "read-only",
+  approvalStrategy: "legacy"
+})
+```
 
-When `codex_request` returns `status:"deferred"`:
+Use exactly one of prompt or promptParts. Cache-state resources expose aggregate
+hash and token evidence only; they do not prove a review verdict.
 
-1. Poll `llm_job_status` every 60 seconds using a **non-blocking** wait between polls (see below)
-2. When `status:"completed"`, fetch with `llm_job_result`
-3. Do **not** cancel running jobs for taking too long. Cancel only on explicit user instruction or hard failure (process dead, non-transient error such as exit 125/126)
-4. `idleTimeoutMs` (no-output safeguard, default 10 min) remains active and will kill genuinely hung processes — this is separate from wallclock timeout
+## Cross-LLM Requirements
 
-### Wait-between-polls (orchestrator-specific)
+This is a Codex gate. If the task requires a full cross-LLM review, call
+provider_tool_capabilities through gtwy first, use the required roster from
+Claude, Codex, Gemini, Grok, Mistral, Devin, and Cursor, and follow the
+multi-llm-consensus workflow. Do not treat an unavailable required reviewer as a
+successful Codex-only substitute.
 
-Standalone `sleep 60` is blocked in some orchestrators (e.g. the Claude Code harness rejects `Bash({command: "sleep 60"})` and also rejects chained short sleeps). Use a non-blocking equivalent:
+## Final Checklist
 
-- **Claude Code harness**: `Bash({command: "sleep 60 && echo done", run_in_background: true})` — emits a completion notification after 60s; poll then. `Monitor` is for streaming progress, not one-shot waits.
-- **`ScheduleWakeup`** (if available in your orchestrator): schedule a wakeup with `delaySeconds: 60` and a prompt that resumes the polling loop.
-- **Other orchestrators**: use the native non-blocking wait primitive. Treat the 60 s as "yield control, get notified," not "block the shell for 60 s."
-
-## Tips
-
-- Use `correlationId` to trace review rounds: `"review-round-1"`, `"review-round-2"`
-- Omit `model` — let the gateway default apply
-- For large reviews, use `codex_request_async` explicitly to avoid any sync wait
-- Codex is thorough but literal — it checks what you ask it to check. Be specific in review criteria.
-- When Codex's sqry index is stale, it may report "cannot find X." Provide the file contents inline.
-- **For multi-round reviews, pass `resumeLatest:true`** (or `sessionId:<real Codex UUID from ~/.codex/sessions/>`) on round 2+ so Codex carries the prior round's findings into the re-review. `--full-auto` is silently dropped on resume — the resumed session inherits its original approval policy.
-- **Deferred jobs are durable** (default 30-day retention, `LLM_GATEWAY_JOB_RETENTION_DAYS`). If your polling wrapper times out, fetch by `jobId` later or re-issue the identical call — auto-dedup reattaches to the existing Codex job within the dedup window (`LLM_GATEWAY_DEDUP_WINDOW_MS`, default 1 h). Use `forceRefresh:true` only when the diff under review has actually changed.
-- For high-stakes paths, consider stacking a Grok diversity reviewer on top of the Codex gate (`grok_request` with `approvalStrategy:"mcp_managed"`) and require both to APPROVE. For maximum cross-vendor diversity, add `mistral_request` as a fifth reviewer (Mistral Vibe defaults to `--agent auto-approve`).
-- For multi-round review gates on the same diff, prefer the structured `promptParts` field over `prompt`: `{ system: "<stable review brief>", context: "<file paths under review>", task: "Review for …" }`. The two are mutually exclusive (`provide exactly one of \`prompt\` or \`promptParts\`` if both supplied). Stable `system`/`context` keeps the prefix bytes identical round-to-round, raising implicit cache hit rate at the provider. Confirm via `cache-state://prefix/{hash}` or `session_get.cacheState`.
+- [ ] The request used the local gtwy stdio MCP tool, not a direct provider CLI.
+- [ ] The target repository and paths were verified.
+- [ ] The request used legacy approval and a current Codex sandbox mode.
+- [ ] Findings, conditions, and verification gaps were all resolved.
+- [ ] Codex returned explicit `APPROVED_UNCONDITIONALLY`.
+- [ ] A terminal provider failure, if any, was reported as `BLOCKED_EXTERNAL`.

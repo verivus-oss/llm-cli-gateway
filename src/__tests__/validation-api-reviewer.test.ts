@@ -48,9 +48,9 @@ function makeManager() {
     startJobCalls,
     startHttpCalls,
     manager: {
-      startJob(cli: string): AsyncJobSnapshot {
+      startJobWithDedup(cli: string): { snapshot: AsyncJobSnapshot; deduped: boolean } {
         startJobCalls.push(cli);
-        return snapshot(`cli-${++n}`, cli, "running");
+        return { snapshot: snapshot(`cli-${++n}`, cli, "running"), deduped: false };
       },
       startHttpJob(params: { provider: { name: string } }): {
         snapshot: AsyncJobSnapshot;

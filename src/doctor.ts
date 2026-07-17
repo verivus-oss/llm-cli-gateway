@@ -26,9 +26,11 @@ import {
   enabledApiProviders,
   loadCacheAwarenessConfig,
   loadLeastCostConfig,
+  loadPersistenceConfig,
   loadProvidersConfig,
   type CacheAwarenessConfig,
   type LeastCostConfig,
+  type PersistenceConfig,
   type ProvidersConfig,
   type RemoteOAuthConfigDiagnostics,
 } from "./config.js";
@@ -46,13 +48,22 @@ import {
 import { buildRemoteConnectorUrls, resolveConfiguredRemoteOrigin } from "./remote-url.js";
 import { computeGlobalCacheStats } from "./cache-stats.js";
 import { FlightRecorder, resolveFlightRecorderDbPath } from "./flight-recorder.js";
-import { buildUpstreamContractReport } from "./upstream-contracts.js";
+import {
+  buildUpstreamContractReport,
+  type InstalledCliContractProbe,
+} from "./upstream-contracts.js";
 import {
   getProviderToolCapabilities,
   knownProviderCapabilityIds,
   type ProviderCapabilityId,
   type ProviderKind,
 } from "./provider-tool-capabilities.js";
+import {
+  loadPersonalConfigSettings,
+  PersonalConfigManager,
+  PERSONAL_CONFIG_SYNC_ERROR_WITHHELD,
+  type PersonalConfigStatus,
+} from "./personal-config.js";
 import { CLI_TYPES, type CliType } from "./session-manager.js";
 
 /**
@@ -382,6 +393,40 @@ export interface LeastCostReport {
   calibrationQuality: LeastCostCalibrationBucketReport[];
 }
 
+/**
+ * Read-only Personal Agent Config Kit readiness. This is intentionally a
+ * narrow projection: it never includes baseline paths, configuration source
+ * paths, remote URLs, or raw synchronization diagnostics.
+ *
+ * `durable_async_configured` describes resolved configuration only. It does
+ * not claim that a running gateway currently has a healthy durable store.
+ */
+export interface PersonalConfigReadinessReport {
+  enabled: boolean;
+  configuration_valid: boolean;
+  ready: boolean;
+  /** Whether Claude Kit's isolated --bare mode has its required API credential. */
+  claude_bare_auth_configured: boolean;
+  baseline_present: boolean;
+  current_release_id: string | null;
+  last_success_at: string | null;
+  stale: boolean;
+  last_sync_error: string | null;
+  durable_async_configured: boolean;
+}
+
+export interface PersonalConfigReadinessInput {
+  enabled: boolean;
+  configurationValid?: boolean;
+  /** Secret-free presence signal for ANTHROPIC_API_KEY in the gateway process. */
+  claudeBareAuthConfigured?: boolean;
+  status?: Pick<
+    PersonalConfigStatus,
+    "baselinePresent" | "currentReleaseId" | "lastSuccessAt" | "stale" | "lastSyncError"
+  >;
+  persistence?: Pick<PersistenceConfig, "backend" | "asyncJobsEnabled"> | null;
+}
+
 export interface DoctorReport {
   schema_version: "1.0";
   ok: boolean;
@@ -478,6 +523,11 @@ export interface DoctorReport {
    * Economics-only and secret-free (see {@link LeastCostReport}).
    */
   least_cost: LeastCostReport;
+  /**
+   * Secret-free local readiness for the optional Personal Agent Config Kit.
+   * Always present, including when the Kit is disabled.
+   */
+  personal_config: PersonalConfigReadinessReport;
   /**
    * Slice 6: health of enabled generic `[providers.<name>]` (kind:"api")
    * providers. OMITTED entirely when none are enabled, so a CLI-only gateway's
@@ -853,6 +903,103 @@ export interface CreateDoctorReportOptions {
    * present in its compact disabled form.
    */
   leastCost?: LeastCostConfig;
+  /**
+   * Optional precomputed, redacted Personal Agent Config Kit readiness for an
+   * embedded caller. Normal doctor invocations compute it from local state.
+   */
+  personalConfigReadiness?: PersonalConfigReadinessReport;
+}
+
+const PERSONAL_CONFIG_RELEASE_ID_PATTERN = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i;
+
+function redactedReleaseId(value: string | null | undefined): string | null {
+  return value && PERSONAL_CONFIG_RELEASE_ID_PATTERN.test(value) ? value.toLowerCase() : null;
+}
+
+function redactedTimestamp(value: string | null | undefined): string | null {
+  if (!value) return null;
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : null;
+}
+
+/**
+ * Build the report-safe readiness view from already-resolved local state.
+ * Untrusted status strings are normalized or withheld before they can reach
+ * the doctor JSON surface.
+ */
+export function buildPersonalConfigReadinessReport(
+  input: PersonalConfigReadinessInput
+): PersonalConfigReadinessReport {
+  const configurationValid = input.configurationValid ?? true;
+  const status = input.enabled && configurationValid ? input.status : undefined;
+  const claudeBareAuthConfigured =
+    input.enabled && configurationValid && input.claudeBareAuthConfigured === true;
+  const durableAsyncConfigured =
+    input.enabled &&
+    configurationValid &&
+    input.persistence !== null &&
+    input.persistence !== undefined &&
+    (input.persistence.backend === "sqlite" || input.persistence.backend === "postgres") &&
+    input.persistence.asyncJobsEnabled;
+  const baselinePresent = status?.baselinePresent === true;
+  const currentReleaseId = redactedReleaseId(status?.currentReleaseId);
+  const lastSuccessAt = redactedTimestamp(status?.lastSuccessAt);
+  const stale = status?.stale === true;
+
+  return {
+    enabled: input.enabled,
+    configuration_valid: configurationValid,
+    ready:
+      !input.enabled ||
+      (configurationValid &&
+        baselinePresent &&
+        currentReleaseId !== null &&
+        !stale &&
+        durableAsyncConfigured &&
+        claudeBareAuthConfigured),
+    claude_bare_auth_configured: claudeBareAuthConfigured,
+    baseline_present: baselinePresent,
+    current_release_id: currentReleaseId,
+    last_success_at: lastSuccessAt,
+    stale,
+    last_sync_error: status?.lastSyncError ? PERSONAL_CONFIG_SYNC_ERROR_WITHHELD : null,
+    durable_async_configured: durableAsyncConfigured,
+  };
+}
+
+function loadPersonalConfigReadinessReport(
+  env: NodeJS.ProcessEnv = process.env
+): PersonalConfigReadinessReport {
+  try {
+    const { settings } = loadPersonalConfigSettings();
+    if (!settings.enabled) {
+      return buildPersonalConfigReadinessReport({ enabled: false });
+    }
+
+    const status = new PersonalConfigManager(settings).status();
+    let persistence: Pick<PersistenceConfig, "backend" | "asyncJobsEnabled"> | null = null;
+    try {
+      const resolved = loadPersistenceConfig();
+      persistence = {
+        backend: resolved.backend,
+        asyncJobsEnabled: resolved.asyncJobsEnabled,
+      };
+    } catch {
+      // A durable backend cannot be asserted when its configuration is invalid.
+    }
+
+    return buildPersonalConfigReadinessReport({
+      enabled: true,
+      status,
+      persistence,
+      claudeBareAuthConfigured: Boolean(env.ANTHROPIC_API_KEY?.trim()),
+    });
+  } catch {
+    // Do not expose parsing, filesystem, or Git diagnostics through doctor.
+    // Treat an unreadable Kit configuration as enabled and not ready so a
+    // malformed config cannot silently appear as a disabled Kit.
+    return buildPersonalConfigReadinessReport({ enabled: true, configurationValid: false });
+  }
 }
 
 /**
@@ -1147,6 +1294,8 @@ export function createDoctorReport(
 
   const generatedAt = new Date().toISOString();
   const leastCostConfig = opts.leastCost ?? defaultLeastCostConfig();
+  const personalConfigReadiness =
+    opts.personalConfigReadiness ?? loadPersonalConfigReadinessReport(env);
 
   const report: DoctorReport = {
     schema_version: "1.0",
@@ -1216,6 +1365,7 @@ export function createDoctorReport(
     cache_awareness: buildCacheAwarenessReport(opts),
     provider_capabilities: buildProviderCapabilitySummary(providerStatuses),
     least_cost: buildLeastCostReport(leastCostConfig, generatedAt, opts.flightRecorder),
+    personal_config: personalConfigReadiness,
     upstream,
     next_actions: [],
   };
@@ -1230,6 +1380,34 @@ export function createDoctorReport(
   if (transport === "http" && auth.required && !auth.tokenConfigured) {
     report.ok = false;
     report.next_actions.push("Set LLM_GATEWAY_AUTH_TOKEN before starting HTTP transport.");
+  }
+  if (report.personal_config.enabled && !report.personal_config.ready) {
+    report.ok = false;
+    if (!report.personal_config.configuration_valid) {
+      report.next_actions.push(
+        "Repair the local [personal_config] configuration, then run doctor --json again."
+      );
+    } else if (!report.personal_config.baseline_present) {
+      report.next_actions.push(
+        "Initialize the local Personal Agent Config baseline with config_init, then publish and config_sync."
+      );
+    } else if (!report.personal_config.current_release_id) {
+      report.next_actions.push(
+        "Run config_sync locally to activate a verified Personal Agent Config release."
+      );
+    } else if (report.personal_config.stale) {
+      report.next_actions.push(
+        "Run config_sync locally, or use the bounded local config_ack_stale workflow."
+      );
+    } else if (!report.personal_config.durable_async_configured) {
+      report.next_actions.push(
+        "Personal Agent Config Kit requires [persistence] backend = sqlite or postgres with async jobs enabled."
+      );
+    } else if (!report.personal_config.claude_bare_auth_configured) {
+      report.next_actions.push(
+        "Set ANTHROPIC_API_KEY in the gateway process environment before using Claude Personal Agent Config Kit requests."
+      );
+    }
   }
   report.next_actions.push(...endpointExposure.next_actions);
   for (const [name, provider] of Object.entries(report.providers)) {
@@ -1271,6 +1449,31 @@ export function createDoctorReport(
           report.upstream.how_to_check +
           "  (add --probe-upstream to this doctor command for one-shot probing)"
       );
+    }
+  }
+
+  // F4: whenever the installed probe actually ran, a subcommand/help probe that
+  // exited nonzero (help still parsed) or could not run leaves that CLI's
+  // contract unverified. Surface ONE specific advisory so it is visible without
+  // hand-scanning probe_report. Doctor stays advisory: report.ok is deliberately
+  // NOT flipped (matches the scanner's opt-in --require-installed). Gated on the
+  // probe having run, independent of hasAnyCli.
+  if (report.upstream.probed) {
+    const installedProbe =
+      (probeReport?.installedProbe as
+        Record<string, InstalledCliContractProbe> | null | undefined) ?? null;
+    if (installedProbe) {
+      const unverified = Object.entries(installedProbe)
+        .filter(
+          ([, probe]) =>
+            probe.helpExitedNonzero || Object.values(probe.subcommands).some(sub => !sub.available)
+        )
+        .map(([cli]) => cli);
+      if (unverified.length > 0) {
+        report.next_actions.push(
+          `re-probe ${unverified.join(", ")}: an installed help probe exited nonzero or could not run; its contract is unverified.`
+        );
+      }
     }
   }
 
@@ -1391,6 +1594,10 @@ function isCreateDoctorReportOptions(
     // would be a STRING, so the typeof-object check cannot collide.
     const candidate = (value as { leastCost?: unknown }).leastCost;
     return candidate === undefined || typeof candidate === "object";
+  }
+  if (Object.prototype.hasOwnProperty.call(value, "personalConfigReadiness")) {
+    const candidate = (value as { personalConfigReadiness?: unknown }).personalConfigReadiness;
+    return candidate === undefined || (candidate !== null && typeof candidate === "object");
   }
   if (Object.prototype.hasOwnProperty.call(value, "env")) {
     const candidate = (value as { env?: unknown }).env;

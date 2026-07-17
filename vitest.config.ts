@@ -17,7 +17,7 @@ export default defineConfig({
     environment: "node",
     testTimeout: 120000,
     hookTimeout: 30000,
-    include: ["src/__tests__/**/*.test.ts", "scripts/supply-chain/**/*.test.mjs"],
+    include: ["src/__tests__/**/*.test.ts", "scripts/**/*.test.mjs"],
     exclude: dynamicExcludes,
     setupFiles: ["src/__tests__/setup.ts"],
     coverage: {
@@ -29,8 +29,8 @@ export default defineConfig({
         lines: 70,
         functions: 70,
         branches: 60,
-        statements: 70
-      }
-    }
-  }
+        statements: 70,
+      },
+    },
+  },
 });

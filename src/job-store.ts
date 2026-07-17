@@ -10,6 +10,16 @@ import type { Logger } from "./logger.js";
 import { noopLogger } from "./logger.js";
 import type { PersistenceConfig } from "./config.js";
 import { DEFAULT_INSTANCE_LEASE_TTL_MS, DEFAULT_HTTP_JOB_GRACE_MS } from "./config.js";
+import {
+  cloneKitExecutionRef,
+  isKitExecutionRef,
+  personalKitJobRequestKey,
+  sameKitExecutionRef,
+  type KitExecutionRef,
+} from "./personal-config-types.js";
+import { assertMcpArtifactAdmissionInvariant } from "./mcp-artifact-admission.js";
+import type { PersonalKitTerminalMetadata } from "./provider-output-metadata.js";
+import { principalCanAccess } from "./request-context.js";
 
 // #139: `queued` is now a durable status. A job is persisted `queued` at
 // recordStart (owner stamped, no pid yet) and transitions to `running` at
@@ -20,11 +30,55 @@ import { DEFAULT_INSTANCE_LEASE_TTL_MS, DEFAULT_HTTP_JOB_GRACE_MS } from "./conf
 export type JobStoreStatus =
   "queued" | "running" | "completed" | "failed" | "canceled" | "orphaned";
 
+export type TerminalJobStoreStatus = Exclude<JobStoreStatus, "queued" | "running">;
+
 /** #139: the two non-terminal durable statuses the lease sweep considers. */
 export type JobStoreActiveStatus = Extract<JobStoreStatus, "queued" | "running">;
 
+/** Result of atomically reserving a permanently single-use Kit attempt id. */
+export type KitAttemptFenceResult = "reserved" | "already_recovered" | "conflict";
+
+/** Immutable identity recorded when a Kit job id is claimed or recovered. */
+export interface KitAttemptFenceInput {
+  attemptId: string;
+  cli: string;
+  kitExecution: KitExecutionRef;
+  kitSessionId: string;
+  ownerPrincipal?: string | null;
+  fencedAt: string;
+}
+
 /** Slice 1: how a job executes — a spawned CLI subprocess, or an HTTP request. */
 export type JobTransport = "process" | "http";
+
+/** Internal durable binding established atomically with a queued review job. */
+export interface ValidationJobAdmission {
+  validationId: string;
+  provider: string;
+  /** Provider roster seats are the default; a judge is a one-shot claim. */
+  role?: "provider" | "judge";
+}
+
+const PERSONAL_KIT_REDACTED_ARGS_JSON = '["[personal-config-kit arguments redacted]"]';
+const PERSONAL_KIT_FAILURE_WITHHELD =
+  "Personal Agent Config Kit provider execution failed; detailed output is withheld";
+
+/**
+ * Match a recovered fence to the caller that is replaying it. Legacy fences
+ * predate owner stamping, so their NULL owner remains local-only just like a
+ * legacy Kit session. The caller is always stamped by AsyncJobManager; fail
+ * closed if a direct store caller supplies no principal.
+ */
+function recoveredFenceOwnerMatches(
+  storedOwner: unknown,
+  callerOwner: string | null | undefined
+): boolean {
+  if (typeof callerOwner !== "string") return false;
+  if (storedOwner !== null && storedOwner !== undefined && typeof storedOwner !== "string") {
+    return false;
+  }
+  return principalCanAccess(storedOwner, callerOwner);
+}
 
 export interface JobRecord {
   id: string;
@@ -44,6 +98,10 @@ export interface JobRecord {
   stderr: string;
   outputTruncated: boolean;
   error: string | null;
+  /** Stable gateway error category, null for legacy and unclassified rows. */
+  errorCategory?: string | null;
+  /** Stable retry guidance paired with errorCategory. */
+  retryable?: boolean | null;
   startedAt: string;
   finishedAt: string | null;
   pid: number | null;
@@ -67,6 +125,31 @@ export interface JobRecord {
    */
   ownerInstance: string | null;
   /**
+   * Durable snapshot of the owning gateway hostname at recordStart. Unlike
+   * `gateway_instances.hostname`, this survives observability-row GC and is
+   * used only to scope same-host request-artifact reconciliation.
+   */
+  ownerHostname: string | null;
+  /**
+   * Exact gateway-generated Claude MCP config path, when this process job owns
+   * one. This is separate from argv so restart reconciliation never has to
+   * infer an artifact from a generic caller-supplied flag.
+   */
+  mcpArtifactPath: string | null;
+  /**
+   * Durable installation-and-filesystem scope for `mcpArtifactPath`. New
+   * artifacts bind this to the private request directory as well as the
+   * installation root, so matching hostnames alone can never authorize a
+   * different installation to acknowledge a missing file.
+   */
+  mcpArtifactScope: string | null;
+  /**
+   * A same-host cleanup acknowledgement is still required for
+   * `mcpArtifactPath`. Retention eviction must leave the durable row intact
+   * until the origin host has safely handled that exact request artifact.
+   */
+  mcpArtifactCleanupPending: boolean;
+  /**
    * #139: the per-job fencing lease deadline as epoch milliseconds (DB-clock).
    * The owner's heartbeat advances it to `db_now + leaseTtl`; the sweep orphans
    * a `queued`/`running` row whose `leaseDeadline < db_now` (or IS NULL for a
@@ -74,6 +157,51 @@ export interface JobRecord {
    * live row always has it set in the same write as recordStart/markRunning.
    */
   leaseDeadline: number | null;
+  /**
+   * Immutable Personal Agent Config Kit execution identity. Null for legacy
+   * jobs and for every request while the Kit is disabled.
+   */
+  kitExecution: KitExecutionRef | null;
+  /** Gateway-owned Kit session whose terminal attempt must be finalized. */
+  kitSessionId: string | null;
+  /** Compatibility projection, always null for Kit rows. */
+  kitTerminalMetadata: PersonalKitTerminalMetadata | null;
+  /** True only after the terminal output has been applied to the Kit session. */
+  kitTerminalFinalized: boolean;
+  /** Durable audit timestamp for the successful Kit terminal finalization. */
+  kitTerminalFinalizedAt: string | null;
+  /** Bounded, privacy-projected async progress state. Never contains raw provider output. */
+  progressJson: string | null;
+}
+
+/**
+ * Durable terminal Kit result waiting to be finalized against its gateway
+ * session. It carries immutable identity only; native continuation state is
+ * deliberately not durable.
+ */
+export interface PendingKitFinalization {
+  jobId: string;
+  cli: string;
+  status: TerminalJobStoreStatus;
+  kitSessionId: string;
+  kitExecution: KitExecutionRef;
+  terminalMetadata: PersonalKitTerminalMetadata | null;
+  finishedAt: string;
+  exitCode: number | null;
+  ownerPrincipal: string | null;
+}
+
+/**
+ * A terminal Kit row whose durable finalization marker is already committed,
+ * but whose exact session attempt may still need releasing after a crash in the
+ * acknowledgement sequence. Reconciliation needs only the immutable binding.
+ */
+export interface AcknowledgedKitAttemptRelease {
+  jobId: string;
+  cli: string;
+  kitSessionId: string;
+  kitExecution: KitExecutionRef;
+  ownerPrincipal: string | null;
 }
 
 export function resolveJobStoreDbPath(): string | null {
@@ -148,6 +276,9 @@ function rowToRecord(row: any): JobRecord {
     stderr: row.stderr ?? "",
     outputTruncated: Boolean(row.output_truncated),
     error: row.error ?? null,
+    errorCategory: row.error_category ?? null,
+    retryable:
+      row.retryable === null || row.retryable === undefined ? null : Boolean(row.retryable),
     startedAt: row.started_at,
     finishedAt: row.finished_at,
     pid: row.pid,
@@ -157,9 +288,104 @@ function rowToRecord(row: any): JobRecord {
     httpStatus: row.http_status ?? null,
     payloadJson: row.payload_json ?? null,
     ownerInstance: row.owner_instance ?? null,
+    ownerHostname: row.owner_hostname ?? null,
+    mcpArtifactPath: row.mcp_artifact_path ?? null,
+    mcpArtifactScope: row.mcp_artifact_scope ?? null,
+    mcpArtifactCleanupPending: parseDurableBoolean(row.mcp_artifact_cleanup_pending),
     // sqlite returns lease_deadline as a number; node-pg returns BIGINT as a
     // string. Coerce to number|null so JobRecord.leaseDeadline is uniform.
     leaseDeadline: row.lease_deadline == null ? null : Number(row.lease_deadline),
+    kitExecution: parseKitExecution(row.kit_execution_json),
+    kitSessionId: parseKitSessionId(row.kit_session_id),
+    // A legacy database can still have this additive column, but its contents
+    // are never trusted or surfaced. Startup scrub clears it for Kit rows.
+    kitTerminalMetadata: null,
+    kitTerminalFinalized: parseDurableBoolean(row.kit_terminal_finalized),
+    kitTerminalFinalizedAt: row.kit_terminal_finalized_at ?? null,
+    progressJson: typeof row.progress_json === "string" ? row.progress_json : null,
+  };
+}
+
+function parseKitSessionId(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function parseDurableBoolean(value: unknown): boolean {
+  return value === true || value === 1 || value === "1" || value === "true";
+}
+
+function parseKitExecution(value: unknown): KitExecutionRef | null {
+  if (typeof value !== "string" || value.length === 0) return null;
+  try {
+    const parsed: unknown = JSON.parse(value);
+    return isKitExecutionRef(parsed) ? cloneKitExecutionRef(parsed) : null;
+  } catch {
+    // Durable job rows are audit data. A malformed legacy or manually-edited
+    // value must not make result retrieval fail, and cannot become a release pin.
+    return null;
+  }
+}
+
+function serializeKitTerminalMetadata(value: unknown): string | null {
+  // Native continuation handles are process-local. Keep this compatibility
+  // helper at the persistence boundary so legacy callers cannot accidentally
+  // reintroduce them into the durable job row.
+  void value;
+  return null;
+}
+
+function cloneJobRecord(record: JobRecord): JobRecord {
+  return {
+    ...record,
+    kitExecution: record.kitExecution ? cloneKitExecutionRef(record.kitExecution) : null,
+    kitTerminalMetadata: record.kitTerminalMetadata ? { ...record.kitTerminalMetadata } : null,
+  };
+}
+
+function toPendingKitFinalization(record: JobRecord): PendingKitFinalization | null {
+  if (
+    record.status === "queued" ||
+    record.status === "running" ||
+    record.status === "orphaned" ||
+    record.kitTerminalFinalized ||
+    !record.kitExecution ||
+    !record.kitSessionId ||
+    !record.finishedAt
+  ) {
+    return null;
+  }
+  return {
+    jobId: record.id,
+    cli: record.cli,
+    status: record.status,
+    kitSessionId: record.kitSessionId,
+    kitExecution: cloneKitExecutionRef(record.kitExecution),
+    terminalMetadata: record.kitTerminalMetadata ? { ...record.kitTerminalMetadata } : null,
+    finishedAt: record.finishedAt,
+    exitCode: record.exitCode,
+    ownerPrincipal: record.ownerPrincipal,
+  };
+}
+
+function toAcknowledgedKitAttemptRelease(record: JobRecord): AcknowledgedKitAttemptRelease | null {
+  if (
+    record.status === "queued" ||
+    record.status === "running" ||
+    record.status === "orphaned" ||
+    !record.kitTerminalFinalized ||
+    !record.kitExecution ||
+    !record.kitSessionId
+  ) {
+    return null;
+  }
+  return {
+    jobId: record.id,
+    cli: record.cli,
+    kitSessionId: record.kitSessionId,
+    kitExecution: cloneKitExecutionRef(record.kitExecution),
+    ownerPrincipal: record.ownerPrincipal,
   };
 }
 
@@ -197,9 +423,31 @@ function ensureJobsTransportColumns(db: GatewayDatabase): void {
   }
 }
 
+/** #192: add bounded normalized progress storage to legacy SQLite job tables. */
+function ensureJobsProgressColumn(db: GatewayDatabase): void {
+  const cols = db.prepare("PRAGMA table_info(jobs)").all() as Array<{ name?: string }>;
+  if (!cols.some(col => col?.name === "progress_json")) {
+    db.exec("ALTER TABLE jobs ADD COLUMN progress_json TEXT");
+  }
+}
+
+/** #189: preserve typed async failure classification across gateway restarts. */
+function ensureJobsErrorClassificationColumns(db: GatewayDatabase): void {
+  const cols = db.prepare("PRAGMA table_info(jobs)").all() as Array<{ name?: string }>;
+  const names = new Set(cols.map(col => col?.name));
+  if (!names.has("error_category")) {
+    db.exec("ALTER TABLE jobs ADD COLUMN error_category TEXT");
+  }
+  if (!names.has("retryable")) {
+    db.exec("ALTER TABLE jobs ADD COLUMN retryable INTEGER");
+  }
+}
+
 /**
- * #139: idempotent migration adding the durable-lease columns to a pre-existing
- * jobs table. `owner_instance` records the owning gateway instance; the
+ * #139: idempotent migration adding durable ownership and lease columns to a
+ * pre-existing jobs table. `owner_instance` records the owning gateway
+ * instance, while `owner_hostname` is an immutable same-host reconciliation
+ * snapshot that outlives gateway-instance observability GC. The
  * `lease_deadline` fencing column (epoch ms, DB-clock) is what the sweep checks.
  * Legacy rows backfill both to NULL: a NULL `lease_deadline` on a `running` row
  * predates the lease and is treated as an expired lease by the sweep (orphaned),
@@ -212,9 +460,60 @@ function ensureJobsLeaseColumns(db: GatewayDatabase): void {
   if (!names.has("owner_instance")) {
     db.exec("ALTER TABLE jobs ADD COLUMN owner_instance TEXT");
   }
+  if (!names.has("owner_hostname")) {
+    db.exec("ALTER TABLE jobs ADD COLUMN owner_hostname TEXT");
+  }
   if (!names.has("lease_deadline")) {
     db.exec("ALTER TABLE jobs ADD COLUMN lease_deadline INTEGER");
   }
+}
+
+/**
+ * Durable provenance for gateway-generated Claude MCP request artifacts. A
+ * terminal row with `mcp_artifact_cleanup_pending=1` is intentionally retained
+ * past its ordinary expiry until its own host confirms safe cleanup. Legacy
+ * rows remain unpinned because they were created before exact-path provenance
+ * existed.
+ */
+function ensureJobsMcpArtifactCleanupColumns(db: GatewayDatabase): void {
+  const cols = db.prepare("PRAGMA table_info(jobs)").all() as Array<{ name?: string }>;
+  const names = new Set(cols.map(col => col?.name));
+  if (!names.has("mcp_artifact_path")) {
+    db.exec("ALTER TABLE jobs ADD COLUMN mcp_artifact_path TEXT");
+  }
+  if (!names.has("mcp_artifact_scope")) {
+    db.exec("ALTER TABLE jobs ADD COLUMN mcp_artifact_scope TEXT");
+  }
+  if (!names.has("mcp_artifact_cleanup_pending")) {
+    db.exec("ALTER TABLE jobs ADD COLUMN mcp_artifact_cleanup_pending INTEGER NOT NULL DEFAULT 0");
+  }
+}
+
+/**
+ * Recover hostname provenance for rows written before migration 015 only while
+ * their observability row is still available. Once that row has been GCed,
+ * there is no safe way to infer which host owned the filesystem path, so the
+ * NULL is intentionally retained and local artifact reconciliation fails
+ * closed.
+ */
+function backfillLegacyOwnerHostnames(db: GatewayDatabase): void {
+  db.exec(`
+    UPDATE jobs
+    SET owner_hostname = (
+      SELECT gi.hostname
+      FROM gateway_instances AS gi
+      WHERE gi.instance_id = jobs.owner_instance
+    )
+    WHERE owner_hostname IS NULL
+      AND owner_instance IS NOT NULL
+      AND EXISTS (
+        SELECT 1
+        FROM gateway_instances AS gi
+        WHERE gi.instance_id = jobs.owner_instance
+          AND gi.hostname IS NOT NULL
+          AND gi.hostname <> ''
+      )
+  `);
 }
 
 /**
@@ -232,6 +531,85 @@ function ensureJobsCompressResponseColumn(db: GatewayDatabase): void {
 }
 
 /**
+ * Additive Kit migration. A JSON string preserves the immutable execution ref
+ * without exposing individual fields as ad-hoc mutable columns. Legacy rows
+ * remain NULL and therefore retain their exact disabled-mode behavior.
+ */
+function ensureJobsKitExecutionColumn(db: GatewayDatabase): void {
+  const cols = db.prepare("PRAGMA table_info(jobs)").all() as Array<{ name?: string }>;
+  const names = new Set(cols.map(col => col?.name));
+  if (!names.has("kit_execution_json")) {
+    db.exec("ALTER TABLE jobs ADD COLUMN kit_execution_json TEXT");
+  }
+}
+
+/**
+ * Additive Kit terminal-finalization migration. The session id lets a fresh
+ * gateway instance map a completed provider run back to its gateway session;
+ * the finalized marker is deliberately independent from job status so an
+ * output can be durable before its session update succeeds.
+ */
+function ensureJobsKitFinalizationColumns(db: GatewayDatabase): void {
+  const cols = db.prepare("PRAGMA table_info(jobs)").all() as Array<{ name?: string }>;
+  const names = new Set(cols.map(col => col?.name));
+  if (!names.has("kit_session_id")) {
+    db.exec("ALTER TABLE jobs ADD COLUMN kit_session_id TEXT");
+  }
+  if (!names.has("kit_terminal_finalized")) {
+    db.exec("ALTER TABLE jobs ADD COLUMN kit_terminal_finalized INTEGER NOT NULL DEFAULT 0");
+  }
+  if (!names.has("kit_terminal_finalized_at")) {
+    db.exec("ALTER TABLE jobs ADD COLUMN kit_terminal_finalized_at TEXT");
+  }
+}
+
+/**
+ * Privacy boundary for Kit terminal recovery. The additive migration also
+ * removes legacy raw Kit output and arguments. Existing pre-upgrade provider
+ * handles are intentionally retired rather than retaining instruction-derived
+ * material in a durable database.
+ */
+function ensureJobsKitTerminalMetadataColumn(db: GatewayDatabase): void {
+  const cols = db.prepare("PRAGMA table_info(jobs)").all() as Array<{ name?: string }>;
+  const names = new Set(cols.map(col => col?.name));
+  if (!names.has("kit_terminal_metadata_json")) {
+    db.exec("ALTER TABLE jobs ADD COLUMN kit_terminal_metadata_json TEXT");
+  }
+  // SQLite DDL can commit before a following data update. Run the scrub on
+  // every open so a crash between the additive ALTER and this update heals on
+  // the next startup instead of preserving legacy Kit context indefinitely.
+  // The guarded predicate leaves already-clean rows untouched.
+  db.prepare(
+    `UPDATE jobs
+     SET args_json = '${PERSONAL_KIT_REDACTED_ARGS_JSON.replace(/'/g, "''")}',
+         request_key = 'kit:' || id,
+         stdout = '',
+         stderr = '',
+         payload_json = NULL,
+         kit_terminal_metadata_json = NULL,
+         error = CASE
+                   WHEN status IN ('queued', 'running', 'completed') THEN NULL
+                   ELSE '${PERSONAL_KIT_FAILURE_WITHHELD}'
+                 END
+     WHERE kit_execution_json IS NOT NULL
+       AND (
+         args_json IS NOT '${PERSONAL_KIT_REDACTED_ARGS_JSON.replace(/'/g, "''")}'
+         OR request_key IS NOT ('kit:' || id)
+         OR stdout IS NOT ''
+         OR stderr IS NOT ''
+         OR payload_json IS NOT NULL
+         OR kit_terminal_metadata_json IS NOT NULL
+         OR error IS NOT (
+           CASE
+             WHEN status IN ('queued', 'running', 'completed') THEN NULL
+             ELSE '${PERSONAL_KIT_FAILURE_WITHHELD}'
+           END
+         )
+       )`
+  ).run();
+}
+
+/**
  * #139: registration metadata for a live gateway instance. Written to
  * `gateway_instances` at construction (before the manager can admit any job).
  * Retained for observability / GC / role only; the sweep does NOT read it for
@@ -245,13 +623,15 @@ export interface GatewayInstanceMeta {
 }
 
 /**
- * #139: an expired process-transport sweep candidate the manager may probe with
- * an advisory `kill(pid,0)` before the terminal orphan write. `hostname` is the
- * OWNING instance's hostname (LEFT JOINed from `gateway_instances`) so the
- * manager only pid-checks same-host candidates; a foreign-host or unknown-host
- * candidate falls straight through to orphaning. This candidate read is NOT the
- * fencing decision (that stays purely `lease_deadline < db_now` on the job row);
- * it only scopes an advisory, never-vetoing grace.
+ * #139: an expired process-transport sweep candidate. `pid` is null for a
+ * queued/pre-spawn job, so the manager skips the advisory `kill(pid,0)` probe
+ * but can still use the owning hostname to safely reclaim request artifacts
+ * after the atomic orphan transition. `hostname` is the durable owner-hostname
+ * snapshot for new rows, with a live `gateway_instances` fallback only for
+ * legacy rows. The manager only pid-checks and artifact-cleans same-host
+ * candidates; a foreign-host or unknown-host candidate falls straight through
+ * to orphaning without local cleanup. This candidate read is NOT the fencing decision (that stays purely
+ * `lease_deadline < db_now` on the job row); it only scopes advisory recovery.
  */
 export interface SweepCandidate {
   id: string;
@@ -259,6 +639,19 @@ export interface SweepCandidate {
   transport: JobTransport;
   ownerInstance: string | null;
   hostname: string | null;
+}
+
+/**
+ * A terminal, origin-host-owned Claude MCP artifact whose durable cleanup
+ * acknowledgement is still outstanding. The path was recorded explicitly at
+ * admission, not reconstructed from an arbitrary durable argv.
+ */
+export interface PendingMcpArtifactCleanup {
+  id: string;
+  ownerInstance: string | null;
+  hostname: string;
+  artifactScope: string;
+  artifactPath: string;
 }
 
 /**
@@ -280,11 +673,38 @@ export interface JobStore {
     ownerPrincipal?: string | null;
     /** #139: the gateway instance that owns this job (stamped at enqueue). */
     ownerInstance?: string | null;
+    /** Durable owner-hostname snapshot for same-host orphan reconciliation. */
+    ownerHostname?: string | null;
+    /**
+     * Exact gateway-generated Claude MCP config path. Supplying this records a
+     * durable cleanup obligation that retention cannot evict until the origin
+     * host acknowledges safe handling of this artifact.
+     */
+    mcpArtifactPath?: string | null;
+    /**
+     * Durable installation-and-filesystem cleanup scope. Required whenever an
+     * exact Claude MCP artifact path is supplied.
+     */
+    mcpArtifactScope?: string | null;
     /** Slice 1: defaults to 'process'. */
     transport?: JobTransport;
     /** Slice 1: canonical API request JSON for http jobs (null/undefined for process). */
     payloadJson?: string | null;
+    /** Immutable Kit execution identity, null/undefined outside Kit mode. */
+    kitExecution?: KitExecutionRef | null;
+    /** Gateway-owned Kit session that must receive the terminal provider output. */
+    kitSessionId?: string | null;
+    /** Repository-review provider link committed in the same transaction as the job row. */
+    validationAdmission?: ValidationJobAdmission;
   }): void;
+  /**
+   * Permanently reserve an unadmitted Kit attempt id. This is an atomic
+   * insert-if-absent fence, not a job row: it is intentionally excluded from
+   * terminal-finalization and retention paths. A false result means another
+   * admission or recovery already owns the id, so callers must retain the
+   * matching session attempt.
+   */
+  fenceUnadmittedKitAttempt(input: KitAttemptFenceInput): KitAttemptFenceResult;
   /**
    * #139: transition a durable `queued` row to `running`, stamp the real child
    * pid (process transport; null for http), and re-set the lease. Returns true
@@ -305,10 +725,34 @@ export interface JobStore {
   /** #139: remove this instance's `gateway_instances` row (graceful shutdown). */
   deregisterInstance(instanceId: string): void;
   /**
-   * #139: expired process-transport candidates (non-null pid) for the advisory
-   * `kill(pid,0)` check. Read-only; does not mutate any row.
+   * #139: expired process-transport candidates for the advisory `kill(pid,0)`
+   * check and same-host request-artifact cleanup. Queued/pre-spawn rows carry a
+   * null pid and are not pid-probed. Read-only; does not mutate any row.
    */
   selectStaleProcessCandidates(leaseTtlMs: number, httpJobGraceMs: number): SweepCandidate[];
+  /**
+   * #139: already-orphaned process rows whose durable owner-hostname snapshot
+   * matches `hostname`. Used only by that host's startup reconciliation to
+   * reclaim its own request-scoped artifacts. Read-only; never returns
+   * remote/unknown hosts.
+   */
+  selectOrphanedProcessCandidates(hostname: string): SweepCandidate[];
+  /**
+   * Terminal Claude MCP artifacts awaiting local cleanup acknowledgement. This
+   * capability is optional so older third-party JobStore implementations keep
+   * their safe fail-closed behavior (the row remains retained instead).
+   */
+  selectPendingMcpArtifactCleanups?(hostname: string): PendingMcpArtifactCleanup[];
+  /**
+   * Compare-and-set acknowledgement for one exact origin-host artifact. An
+   * acknowledgement only succeeds for a terminal row still marked pending.
+   */
+  acknowledgeMcpArtifactCleanup?(
+    id: string,
+    hostname: string,
+    artifactScope: string,
+    artifactPath: string
+  ): boolean;
   /**
    * #139: the fencing sweep. In one atomic unit: (a) advance the lease by one
    * `leaseTtlMs` for every id in `liveConfirmedIds` (the manager's advisory
@@ -326,6 +770,10 @@ export interface JobStore {
   /** #139: delete `gateway_instances` rows whose last_heartbeat is older than instanceGcMs. */
   gcInstances(instanceGcMs: number): number;
   recordOutput(id: string, stdout: string, stderr: string, outputTruncated: boolean): void;
+  /** Replace one job's complete bounded progress projection atomically. */
+  recordProgress(id: string, progressJson: string): void;
+  /** Replace progress only while the durable row still has the expected status. */
+  recordProgressIfStatus?(id: string, status: JobStoreStatus, progressJson: string): boolean;
   recordComplete(input: {
     id: string;
     status: Exclude<JobStoreStatus, "running" | "queued">;
@@ -334,14 +782,52 @@ export interface JobStore {
     stderr: string;
     outputTruncated: boolean;
     error: string | null;
+    errorCategory?: string | null;
+    retryable?: boolean | null;
     finishedAt: string;
     /** Slice 1: real HTTP status for http jobs; null for process jobs. */
     httpStatus?: number | null;
+    progressJson?: string | null;
+    /** Compatibility input ignored at the durable persistence boundary. */
+    kitTerminalMetadata?: PersonalKitTerminalMetadata | null;
   }): void;
   getById(id: string): JobRecord | null;
   findByRequestKey(requestKey: string): JobRecord | null;
   /**
-   * Flip every `status='running'` row to `'orphaned'` at gateway boot.
+   * Terminal Kit jobs whose durable output has not yet been applied to their
+   * gateway session. Used by the startup/retry reconciliation path only.
+   */
+  getPendingKitFinalizations(): PendingKitFinalization[];
+  /**
+   * Terminal Kit jobs acknowledged before a crash may retain their exact
+   * session attempt. The periodic reconciler uses this to release only that
+   * generation, never a newer attempt.
+   */
+  getAcknowledgedKitAttemptReleases(): AcknowledgedKitAttemptRelease[];
+  /**
+   * Compare-and-set the terminal-finalized marker after the session update
+   * succeeds. The session id prevents a stale caller from finalizing a job for
+   * a different gateway session.
+   */
+  markKitTerminalFinalized(id: string, kitSessionId: string): boolean;
+  /**
+   * Active jobs and terminal Kit jobs awaiting finalization pin their immutable
+   * releases. A release cannot be garbage-collected between a durable provider
+   * result and its session-binding write.
+   */
+  getPinnedKitReleaseIds?(): string[];
+  /** Alias with explicit release-GC language for callers outside the store. */
+  getReferencedKitReleaseIds?(): string[];
+  /**
+   * @deprecated #139: a documented alias for `recoverStaleJobs`, kept for the
+   * single-owner sqlite/memory path and existing callers/tests.
+   *
+   * It does NOT blanket-orphan every `status='running'` row: doing so orphaned
+   * OTHER live instances' jobs on a shared store (issue #139). Recovery is
+   * lease-fenced, so only a row whose lease has expired against the DB clock
+   * (its owner died) or a legacy NULL-lease row is swept; a row kept alive by
+   * a live instance's heartbeat is left running. Do not reintroduce an
+   * unscoped `WHERE status = 'running'` UPDATE here or in any implementor.
    *
    * Returns the row count AND a snapshot of every row that was flipped, so
    * AsyncJobManager can write a flight-recorder logComplete with the full
@@ -372,6 +858,8 @@ export interface OrphanedJobSnapshot {
   /** Slice 1: so a force-orphaned http row produces a faithful flight-recorder complete. */
   transport: JobTransport;
   httpStatus: number | null;
+  /** True for a Kit row even if its legacy execution JSON is malformed. */
+  isPersonalConfigKit: boolean;
 }
 
 /**
@@ -399,7 +887,7 @@ export interface ValidationRunRecord {
   requestJson: string;
   providerLinks: ValidationRunLink[];
   judgeLink: ValidationRunLink | null;
-  status: "running" | "finalized";
+  status: "admitting" | "running" | "judge_skipped" | "admission_failed" | "finalized";
 }
 
 /**
@@ -439,7 +927,18 @@ export interface ValidationRunStore {
   /** Insert the run row once at kickoff. Idempotent on validation_id (INSERT OR IGNORE). */
   recordValidationRun(run: ValidationRunRecord): void;
   getValidationRun(validationId: string): ValidationRunRecord | null;
+  /** Replace provider links after a pre-dispatch authorization row is established. */
+  setValidationProviderLinks(validationId: string, providerLinks: ValidationRunLink[]): void;
   setValidationJudgeLink(validationId: string, judgeLink: ValidationRunLink): void;
+  /** Owner-scoped compare-and-set used to open or fence a review roster. */
+  transitionValidationRunStatus(
+    validationId: string,
+    ownerPrincipal: string,
+    expectedStatus: ValidationRunRecord["status"],
+    status: ValidationRunRecord["status"]
+  ): boolean;
+  /** Atomically terminalize a planned review judge that cannot be dispatched. */
+  skipValidationJudge(validationId: string, provider: string, ownerPrincipal: string): void;
   setValidationRunStatus(validationId: string, status: ValidationRunRecord["status"]): void;
   /** Reverse lookup for eager mint: which run owns this provider/judge job, if any. */
   getValidationRunIdByJobId(jobId: string): string | null;
@@ -448,13 +947,16 @@ export interface ValidationRunStore {
   getValidationReceipt(validationId: string): ValidationReceiptRecord | null;
 }
 
-/** True when a job store also persists validation runs (only SqliteJobStore today). */
+/** True when a job store also persists validation runs and their job links. */
 export function isValidationRunStore(store: unknown): store is ValidationRunStore {
   return (
     typeof store === "object" &&
     store !== null &&
     typeof (store as ValidationRunStore).recordValidationRun === "function" &&
     typeof (store as ValidationRunStore).getValidationRun === "function" &&
+    typeof (store as ValidationRunStore).setValidationProviderLinks === "function" &&
+    typeof (store as ValidationRunStore).transitionValidationRunStatus === "function" &&
+    typeof (store as ValidationRunStore).skipValidationJudge === "function" &&
     typeof (store as ValidationRunStore).recordValidationReceipt === "function"
   );
 }
@@ -471,12 +973,17 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
   private leaseTtlMs: number;
 
   private insertStmt: GatewayStatement;
+  private insertKitAttemptFenceStmt: GatewayStatement;
+  private getKitAttemptFenceStmt: GatewayStatement;
   private updateOutputStmt: GatewayStatement;
+  private updateProgressStmt: GatewayStatement;
+  private updateProgressIfStatusStmt: GatewayStatement;
   private updateCompleteStmt: GatewayStatement;
   private getByIdStmt: GatewayStatement;
   private findByRequestKeyStmt: GatewayStatement;
-  private selectRunningOrphansStmt: GatewayStatement;
-  private markOrphanedStmt: GatewayStatement;
+  private selectPendingKitFinalizationsStmt: GatewayStatement;
+  private selectAcknowledgedKitAttemptReleasesStmt: GatewayStatement;
+  private markKitTerminalFinalizedStmt: GatewayStatement;
   private deleteExpiredStmt: GatewayStatement;
   // #139 lease surface.
   private markRunningStmt: GatewayStatement;
@@ -485,6 +992,9 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
   private heartbeatJobsStmt: GatewayStatement;
   private deregisterInstanceStmt: GatewayStatement;
   private selectStaleCandidatesStmt: GatewayStatement;
+  private selectOrphanedCandidatesStmt: GatewayStatement;
+  private selectPendingMcpArtifactCleanupsStmt: GatewayStatement;
+  private acknowledgeMcpArtifactCleanupStmt: GatewayStatement;
   private orphanExpiredStmt: GatewayStatement;
   private advanceLeaseStmt: GatewayStatement;
   private gcInstancesStmt: GatewayStatement;
@@ -521,6 +1031,8 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
         stderr TEXT,
         output_truncated INTEGER NOT NULL DEFAULT 0,
         error TEXT,
+        error_category TEXT,
+        retryable INTEGER,
         started_at TEXT NOT NULL,
         finished_at TEXT,
         pid INTEGER,
@@ -530,7 +1042,17 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
         http_status INTEGER,
         payload_json TEXT,
         owner_instance TEXT,
-        lease_deadline INTEGER
+        owner_hostname TEXT,
+        mcp_artifact_path TEXT,
+        mcp_artifact_scope TEXT,
+        mcp_artifact_cleanup_pending INTEGER NOT NULL DEFAULT 0,
+        lease_deadline INTEGER,
+        kit_execution_json TEXT,
+        kit_session_id TEXT,
+        kit_terminal_metadata_json TEXT,
+        kit_terminal_finalized INTEGER NOT NULL DEFAULT 0,
+        kit_terminal_finalized_at TEXT,
+        progress_json TEXT
       );
       CREATE INDEX IF NOT EXISTS idx_jobs_request_key ON jobs(request_key);
       CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
@@ -547,6 +1069,20 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
       );
       CREATE INDEX IF NOT EXISTS idx_gateway_instances_heartbeat
         ON gateway_instances(last_heartbeat);
+
+      -- Kit attempt ids are single-use durable capabilities. A recovery fence
+      -- is deliberately separate from jobs so retention and terminal-output
+      -- reconciliation can never make a paused pre-admission process runnable
+      -- again after an operator releases its session attempt.
+      CREATE TABLE IF NOT EXISTS kit_attempt_fences (
+        attempt_id TEXT PRIMARY KEY,
+        state TEXT NOT NULL CHECK (state IN ('admitted', 'recovered')),
+        cli TEXT NOT NULL,
+        kit_execution_json TEXT NOT NULL,
+        kit_session_id TEXT NOT NULL,
+        owner_principal TEXT,
+        fenced_at TEXT NOT NULL
+      );
     `);
 
     // Cross-LLM validation receipts (Phase 0): durable validation-run identity.
@@ -601,16 +1137,42 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
     // Slice 1: idempotent migration for the http-transport columns. MUST run
     // before the prepared statements below bind to the column list.
     ensureJobsTransportColumns(this.db);
-    // #139: idempotent migration for the durable-lease columns (owner_instance,
-    // lease_deadline). Same must-run-before-prepare ordering.
+    ensureJobsProgressColumn(this.db);
+    ensureJobsErrorClassificationColumns(this.db);
+    // #139: idempotent migration for durable ownership and lease columns.
+    // Same must-run-before-prepare ordering.
     ensureJobsLeaseColumns(this.db);
+    // Exact-path request-artifact provenance must exist before the INSERT and
+    // retention statements below are prepared.
+    ensureJobsMcpArtifactCleanupColumns(this.db);
+    // Migration 017 equivalent for SQLite stores: repair only the rows whose
+    // retained instance metadata can prove their old hostname.
+    backfillLegacyOwnerHostnames(this.db);
     // #139: the owner/status index references owner_instance, so it can only be
     // created AFTER ensureJobsLeaseColumns adds that column to a legacy table.
     this.db.exec(
       "CREATE INDEX IF NOT EXISTS idx_jobs_owner_status ON jobs(owner_instance, status)"
     );
+    this.db.exec(
+      "CREATE INDEX IF NOT EXISTS idx_jobs_owner_hostname_status ON jobs(owner_hostname, status)"
+    );
+    this.db.exec(
+      "CREATE INDEX IF NOT EXISTS idx_jobs_mcp_artifact_cleanup ON jobs(owner_hostname, mcp_artifact_cleanup_pending, status)"
+    );
+    this.db.exec(
+      "CREATE INDEX IF NOT EXISTS idx_jobs_mcp_artifact_scope_cleanup ON jobs(owner_hostname, mcp_artifact_scope, mcp_artifact_cleanup_pending, status)"
+    );
     // Native compressor PR-1: nullable compress_response column.
     ensureJobsCompressResponseColumn(this.db);
+    // Personal Agent Config Kit: nullable immutable execution identity.
+    ensureJobsKitExecutionColumn(this.db);
+    // Personal Agent Config Kit: restart-safe terminal session finalization.
+    ensureJobsKitFinalizationColumns(this.db);
+    // Personal Agent Config Kit: compatibility column, scrubbed to NULL.
+    ensureJobsKitTerminalMetadataColumn(this.db);
+    this.db.exec(
+      "CREATE INDEX IF NOT EXISTS idx_jobs_kit_finalization ON jobs(kit_terminal_finalized, status)"
+    );
 
     if (process.platform !== "win32") {
       try {
@@ -633,32 +1195,95 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
                         compress_response,
                         status, exit_code, stdout, stderr, output_truncated, error,
                         started_at, finished_at, pid, expires_at, owner_principal,
-                        transport, http_status, payload_json, owner_instance, lease_deadline)
+                        transport, http_status, payload_json, owner_instance, owner_hostname,
+                        mcp_artifact_path, mcp_artifact_scope, mcp_artifact_cleanup_pending, lease_deadline,
+                        kit_execution_json, kit_session_id, kit_terminal_finalized,
+                        kit_terminal_finalized_at, kit_terminal_metadata_json)
       VALUES (@id, @correlation_id, @request_key, @cli, @args_json, @output_format,
               @compress_response,
               'queued', @exit_code, @stdout, @stderr, @output_truncated, @error,
               @started_at, @finished_at, @pid, @expires_at, @owner_principal,
-              @transport, @http_status, @payload_json, @owner_instance,
-              ${SQLITE_NOW_MS} + @lease_ttl_ms)
+              @transport, @http_status, @payload_json, @owner_instance, @owner_hostname,
+              @mcp_artifact_path, @mcp_artifact_scope, @mcp_artifact_cleanup_pending,
+              ${SQLITE_NOW_MS} + @lease_ttl_ms, @kit_execution_json, @kit_session_id,
+              0, NULL, NULL)
+    `);
+    this.insertKitAttemptFenceStmt = this.db.prepare(`
+      INSERT OR IGNORE INTO kit_attempt_fences
+        (attempt_id, state, cli, kit_execution_json, kit_session_id, owner_principal, fenced_at)
+      VALUES
+        (@attempt_id, @state, @cli, @kit_execution_json, @kit_session_id, @owner_principal, @fenced_at)
+    `);
+    this.getKitAttemptFenceStmt = this.db.prepare(`
+      SELECT state, cli, kit_execution_json, kit_session_id, owner_principal
+      FROM kit_attempt_fences
+      WHERE attempt_id = ?
     `);
 
     this.updateOutputStmt = this.db.prepare(`
-      UPDATE jobs SET stdout = @stdout, stderr = @stderr, output_truncated = @output_truncated
+      UPDATE jobs
+      SET stdout = CASE WHEN kit_execution_json IS NULL THEN @stdout ELSE '' END,
+          stderr = CASE WHEN kit_execution_json IS NULL THEN @stderr ELSE '' END,
+          output_truncated = @output_truncated
       WHERE id = @id
+    `);
+    this.updateProgressStmt = this.db.prepare(`
+      UPDATE jobs SET progress_json = @progress_json WHERE id = @id
+    `);
+    this.updateProgressIfStatusStmt = this.db.prepare(`
+      UPDATE jobs SET progress_json = @progress_json
+      WHERE id = @id AND status = @status
     `);
 
     // #139: guarded completion. A terminal result may only land on a still-open
     // row (queued/running) or one a mistaken sweep marked orphaned; it is a
     // no-op on an already-terminal row (last committed terminal state wins).
     this.updateCompleteStmt = this.db.prepare(`
-      UPDATE jobs SET status = @status, exit_code = @exit_code, stdout = @stdout, stderr = @stderr,
-                      output_truncated = @output_truncated, error = @error,
+      UPDATE jobs SET status = @status, exit_code = @exit_code,
+                      stdout = CASE WHEN kit_execution_json IS NULL THEN @stdout ELSE '' END,
+                      stderr = CASE WHEN kit_execution_json IS NULL THEN @stderr ELSE '' END,
+                      output_truncated = @output_truncated,
+                      error = CASE
+                        WHEN kit_execution_json IS NULL THEN @error
+                        WHEN @status = 'completed' THEN NULL
+                        ELSE '${PERSONAL_KIT_FAILURE_WITHHELD}'
+                      END,
+                      error_category = @error_category,
+                      retryable = @retryable,
                       finished_at = @finished_at, expires_at = @expires_at,
-                      http_status = @http_status, lease_deadline = NULL
+                      http_status = @http_status, lease_deadline = NULL,
+                      kit_terminal_metadata_json = @kit_terminal_metadata_json,
+                      progress_json = COALESCE(@progress_json, progress_json)
       WHERE id = @id AND status IN ('queued', 'running', 'orphaned')
     `);
 
     this.getByIdStmt = this.db.prepare(`SELECT * FROM jobs WHERE id = ?`);
+
+    this.selectPendingKitFinalizationsStmt = this.db.prepare(`
+      SELECT * FROM jobs
+      WHERE kit_execution_json IS NOT NULL
+        AND kit_session_id IS NOT NULL
+        AND COALESCE(kit_terminal_finalized, 0) = 0
+        AND status IN ('completed', 'failed', 'canceled')
+      ORDER BY finished_at ASC, id ASC
+    `);
+    this.selectAcknowledgedKitAttemptReleasesStmt = this.db.prepare(`
+      SELECT * FROM jobs
+      WHERE kit_execution_json IS NOT NULL
+        AND kit_session_id IS NOT NULL
+        AND COALESCE(kit_terminal_finalized, 0) = 1
+        AND status IN ('completed', 'failed', 'canceled')
+      ORDER BY finished_at ASC, id ASC
+    `);
+    this.markKitTerminalFinalizedStmt = this.db.prepare(`
+      UPDATE jobs
+      SET kit_terminal_finalized = 1,
+          kit_terminal_finalized_at = COALESCE(kit_terminal_finalized_at, @finalized_at)
+      WHERE id = @id
+        AND kit_session_id = @kit_session_id
+        AND kit_execution_json IS NOT NULL
+        AND status IN ('completed', 'failed', 'canceled')
+    `);
 
     // Dedup query: most recent reusable job with matching request_key, started
     // within window. Reuse a completed job, a running job, or a still-live
@@ -677,27 +1302,19 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
       LIMIT 1
     `);
 
-    // Snapshot every in-flight row's audit data BEFORE the orphan-flip
-    // UPDATE so AsyncJobManager can construct a full FlightLogResult per
-    // orphan. No transaction wrapper required: gateway boot is
-    // single-threaded before any new jobs can arrive, so no
-    // status='running' row can be inserted between this SELECT and the
-    // UPDATE below.
-    this.selectRunningOrphansStmt = this.db.prepare(`
-      SELECT id, correlation_id, started_at, stdout, stderr, exit_code, transport, http_status
-      FROM jobs WHERE status = 'running'
+    // A terminal Kit result is retained until its session binding is marked
+    // finalized, and an origin-host Claude MCP artifact is retained until its
+    // exact cleanup acknowledgement lands. Otherwise a long-lived outage could
+    // delete the only durable reconciliation handle before the owner returns.
+    this.deleteExpiredStmt = this.db.prepare(`
+      DELETE FROM jobs
+      WHERE expires_at < ?
+        AND (
+          kit_execution_json IS NULL
+          OR COALESCE(kit_terminal_finalized, 0) = 1
+        )
+        AND COALESCE(mcp_artifact_cleanup_pending, 0) = 0
     `);
-
-    this.markOrphanedStmt = this.db.prepare(`
-      UPDATE jobs
-      SET status = 'orphaned',
-          error = COALESCE(error, 'Gateway restarted while job was running'),
-          finished_at = COALESCE(finished_at, ?),
-          expires_at = ?
-      WHERE status = 'running'
-    `);
-
-    this.deleteExpiredStmt = this.db.prepare(`DELETE FROM jobs WHERE expires_at < ?`);
 
     // #139 lease surface.
     // markRunning: queued -> running, stamp the real pid, re-set the lease.
@@ -727,18 +1344,50 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
     this.deregisterInstanceStmt = this.db.prepare(
       `DELETE FROM gateway_instances WHERE instance_id = @instance_id`
     );
-    // Candidate read for the advisory pid check: expired process-transport rows
-    // with a real pid, LEFT JOINed to the owner's hostname (for same-host
-    // scoping only; the fencing decision stays on lease_deadline).
+    // Candidate read for the advisory pid check and same-host artifact cleanup:
+    // expired process-transport rows, including queued/pre-spawn rows with a
+    // null pid, using the durable owner-hostname snapshot and a live-instance
+    // fallback only for legacy rows. The fencing decision stays on lease_deadline.
     this.selectStaleCandidatesStmt = this.db.prepare(`
       SELECT j.id AS id, j.pid AS pid, j.transport AS transport,
-             j.owner_instance AS owner_instance, gi.hostname AS hostname
+             j.owner_instance AS owner_instance,
+             COALESCE(j.owner_hostname, gi.hostname) AS hostname
       FROM jobs j
       LEFT JOIN gateway_instances gi ON gi.instance_id = j.owner_instance
       WHERE j.status IN ('queued', 'running')
         AND j.transport = 'process'
-        AND j.pid IS NOT NULL
         AND (j.lease_deadline IS NULL OR j.lease_deadline < ${SQLITE_NOW_MS})
+    `);
+    this.selectOrphanedCandidatesStmt = this.db.prepare(`
+      SELECT j.id AS id, j.pid AS pid, j.transport AS transport,
+             j.owner_instance AS owner_instance, j.owner_hostname AS hostname
+      FROM jobs j
+      WHERE j.status = 'orphaned'
+        AND j.transport = 'process'
+        AND j.owner_hostname = @hostname
+    `);
+    this.selectPendingMcpArtifactCleanupsStmt = this.db.prepare(`
+      SELECT j.id AS id, j.owner_instance AS owner_instance,
+             j.owner_hostname AS hostname, j.mcp_artifact_scope AS artifact_scope,
+             j.mcp_artifact_path AS artifact_path
+      FROM jobs j
+      WHERE j.owner_hostname = @hostname
+        AND j.cli = 'claude'
+        AND j.transport = 'process'
+        AND COALESCE(j.mcp_artifact_cleanup_pending, 0) = 1
+        AND j.mcp_artifact_path IS NOT NULL
+        AND j.mcp_artifact_scope IS NOT NULL
+        AND j.status IN ('completed', 'failed', 'canceled', 'orphaned')
+    `);
+    this.acknowledgeMcpArtifactCleanupStmt = this.db.prepare(`
+      UPDATE jobs
+      SET mcp_artifact_cleanup_pending = 0
+      WHERE id = @id
+        AND owner_hostname = @hostname
+        AND mcp_artifact_scope = @artifact_scope
+        AND mcp_artifact_path = @artifact_path
+        AND COALESCE(mcp_artifact_cleanup_pending, 0) = 1
+        AND status IN ('completed', 'failed', 'canceled', 'orphaned')
     `);
     // The fencing sweep is a SINGLE guarded UPDATE ... RETURNING (not a
     // SELECT-then-blind-flip): the orphan predicate is re-evaluated in the same
@@ -754,7 +1403,13 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
     this.orphanExpiredStmt = this.db.prepare(`
       UPDATE jobs
       SET status = 'orphaned',
-          error = COALESCE(error, 'owning gateway instance is no longer alive'),
+          stdout = CASE WHEN kit_execution_json IS NULL THEN stdout ELSE '' END,
+          stderr = CASE WHEN kit_execution_json IS NULL THEN stderr ELSE '' END,
+          payload_json = CASE WHEN kit_execution_json IS NULL THEN payload_json ELSE NULL END,
+          error = CASE
+            WHEN kit_execution_json IS NULL THEN COALESCE(error, 'owning gateway instance is no longer alive')
+            ELSE '${PERSONAL_KIT_FAILURE_WITHHELD}'
+          END,
           finished_at = COALESCE(finished_at, @now_iso),
           expires_at = @expires_iso,
           lease_deadline = NULL
@@ -763,7 +1418,8 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
         AND (transport <> 'http'
              OR started_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', @http_grace_modifier))
         AND id NOT IN (SELECT value FROM json_each(@exclude_json))
-      RETURNING id, correlation_id, started_at, stdout, stderr, exit_code, transport, http_status
+      RETURNING id, correlation_id, started_at, stdout, stderr, exit_code, transport, http_status,
+                kit_execution_json IS NOT NULL AS is_personal_config_kit
     `);
     // Advisory grace: advance the lease by ONE leaseTtl for pid-confirmed-live
     // rows AND clear the pid. Clearing the pid makes the grace strictly one-shot:
@@ -795,36 +1451,205 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
     pid: number | null;
     ownerPrincipal?: string | null;
     ownerInstance?: string | null;
+    ownerHostname?: string | null;
+    mcpArtifactPath?: string | null;
+    mcpArtifactScope?: string | null;
     transport?: JobTransport;
     payloadJson?: string | null;
+    kitExecution?: KitExecutionRef | null;
+    kitSessionId?: string | null;
+    validationAdmission?: ValidationJobAdmission;
   }): void {
-    this.insertStmt.run({
-      id: input.id,
-      correlation_id: input.correlationId,
-      request_key: input.requestKey,
-      cli: input.cli,
-      args_json: JSON.stringify(input.args),
-      output_format: input.outputFormat ?? null,
-      compress_response:
-        input.compressResponse === undefined ? null : input.compressResponse ? 1 : 0,
-      // status is hard-coded 'queued' in the INSERT (see insertStmt).
-      exit_code: null,
-      stdout: "",
-      stderr: "",
-      error: null,
-      output_truncated: 0,
-      started_at: input.startedAt,
-      finished_at: null,
-      pid: input.pid,
-      // queued/running jobs never expire; only completed/failed/canceled do.
-      expires_at: FAR_FUTURE_ISO,
-      owner_principal: input.ownerPrincipal ?? null,
-      transport: input.transport ?? "process",
-      http_status: null,
-      payload_json: input.payloadJson ?? null,
-      owner_instance: input.ownerInstance ?? null,
-      lease_ttl_ms: this.leaseTtlMs,
+    assertMcpArtifactAdmissionInvariant(input);
+    const insertJob = (): void => {
+      this.insertStmt.run({
+        id: input.id,
+        correlation_id: input.correlationId,
+        request_key: input.kitExecution ? personalKitJobRequestKey(input.id) : input.requestKey,
+        cli: input.cli,
+        args_json: input.kitExecution
+          ? PERSONAL_KIT_REDACTED_ARGS_JSON
+          : JSON.stringify(input.args),
+        output_format: input.outputFormat ?? null,
+        compress_response:
+          input.compressResponse === undefined ? null : input.compressResponse ? 1 : 0,
+        // status is hard-coded 'queued' in the INSERT (see insertStmt).
+        exit_code: null,
+        stdout: "",
+        stderr: "",
+        error: null,
+        output_truncated: 0,
+        started_at: input.startedAt,
+        finished_at: null,
+        pid: input.pid,
+        // queued/running jobs never expire; only completed/failed/canceled do.
+        expires_at: FAR_FUTURE_ISO,
+        owner_principal: input.ownerPrincipal ?? null,
+        transport: input.transport ?? "process",
+        http_status: null,
+        payload_json: input.kitExecution ? null : (input.payloadJson ?? null),
+        owner_instance: input.ownerInstance ?? null,
+        owner_hostname: input.ownerHostname ?? null,
+        mcp_artifact_path: input.kitExecution ? null : (input.mcpArtifactPath ?? null),
+        mcp_artifact_scope: input.kitExecution ? null : (input.mcpArtifactScope ?? null),
+        mcp_artifact_cleanup_pending:
+          !input.kitExecution && input.mcpArtifactPath && input.mcpArtifactScope ? 1 : 0,
+        lease_ttl_ms: this.leaseTtlMs,
+        kit_execution_json: input.kitExecution
+          ? JSON.stringify(cloneKitExecutionRef(input.kitExecution))
+          : null,
+        kit_session_id: input.kitSessionId ?? null,
+      });
+    };
+    if (!input.kitExecution && !input.validationAdmission) {
+      insertJob();
+      return;
+    }
+    if (input.validationAdmission) {
+      if (input.kitExecution) {
+        throw new Error("Validation job admission cannot be combined with a Kit execution");
+      }
+      const run = this.db.withTransaction(() => {
+        insertJob();
+        this.appendValidationJobLink(
+          input.validationAdmission!,
+          {
+            provider: input.validationAdmission!.provider,
+            jobId: input.id,
+            correlationId: input.correlationId,
+          },
+          input.ownerPrincipal ?? null
+        );
+      });
+      run();
+      return;
+    }
+    const kitSessionId = input.kitSessionId?.trim();
+    if (!kitSessionId) {
+      throw new Error("Kit job admission requires a gateway kitSessionId");
+    }
+    const run = this.db.withTransaction(() => {
+      if (
+        !this.insertKitAttemptFence({
+          attemptId: input.id,
+          state: "admitted",
+          cli: input.cli,
+          kitExecution: input.kitExecution!,
+          kitSessionId,
+          ownerPrincipal: input.ownerPrincipal,
+          fencedAt: input.startedAt,
+        })
+      ) {
+        throw new Error(`Kit job id ${input.id} is already admitted or permanently recovered`);
+      }
+      insertJob();
     });
+    run();
+  }
+
+  private appendValidationJobLink(
+    admission: ValidationJobAdmission,
+    link: ValidationRunLink,
+    ownerPrincipal: string | null
+  ): void {
+    const row = this.db
+      .prepare(
+        `SELECT owner_principal, intent, request_json, provider_links, judge_link, status
+         FROM validation_runs WHERE validation_id = ?`
+      )
+      .get(admission.validationId) as
+      | {
+          owner_principal?: unknown;
+          intent?: unknown;
+          request_json?: unknown;
+          provider_links?: unknown;
+          judge_link?: unknown;
+          status?: unknown;
+        }
+      | undefined;
+    if (!row || row.owner_principal !== ownerPrincipal) {
+      throw new Error("Validation run is missing or owned by another principal");
+    }
+    const role = admission.role ?? "provider";
+    if (role === "judge") {
+      assertReviewJudgeClaim(row, admission.provider);
+      this.db
+        .prepare(`UPDATE validation_runs SET judge_link = ? WHERE validation_id = ?`)
+        .run(JSON.stringify(link), admission.validationId);
+      this.db
+        .prepare(
+          `INSERT INTO validation_run_jobs (job_id, validation_id, role)
+           VALUES (?, ?, 'judge')`
+        )
+        .run(link.jobId, admission.validationId);
+      return;
+    }
+    if (row.intent !== "review" || row.status !== "admitting") {
+      throw new Error("Validation review run is not admitting provider jobs");
+    }
+    let providerLinks: ValidationRunLink[];
+    try {
+      providerLinks = JSON.parse(String(row.provider_links)) as ValidationRunLink[];
+      if (!Array.isArray(providerLinks)) throw new Error("invalid provider links");
+    } catch {
+      throw new Error("Validation run provider links are invalid");
+    }
+    if (providerLinks.some(existing => existing.provider === admission.provider)) {
+      throw new Error(`Validation provider ${admission.provider} is already admitted`);
+    }
+    providerLinks.push(link);
+    this.db
+      .prepare(`UPDATE validation_runs SET provider_links = ? WHERE validation_id = ?`)
+      .run(JSON.stringify(providerLinks), admission.validationId);
+    this.db
+      .prepare(
+        `INSERT INTO validation_run_jobs (job_id, validation_id, role)
+         VALUES (?, ?, 'provider')`
+      )
+      .run(link.jobId, admission.validationId);
+  }
+
+  /** Atomically reserve a never-reusable pre-admission attempt id for recovery. */
+  fenceUnadmittedKitAttempt(input: KitAttemptFenceInput): KitAttemptFenceResult {
+    const inserted = this.insertKitAttemptFence({ ...input, state: "recovered" });
+    if (inserted) return "reserved";
+    const existing = this.getKitAttemptFenceStmt.get(input.attemptId) as
+      | {
+          state?: unknown;
+          cli?: unknown;
+          kit_execution_json?: unknown;
+          kit_session_id?: unknown;
+          owner_principal?: unknown;
+        }
+      | undefined;
+    const existingExecution = existing ? parseKitExecution(existing.kit_execution_json) : null;
+    if (
+      existing?.state === "recovered" &&
+      existing.cli === input.cli &&
+      typeof existing.kit_session_id === "string" &&
+      existing.kit_session_id === input.kitSessionId &&
+      recoveredFenceOwnerMatches(existing.owner_principal, input.ownerPrincipal) &&
+      existingExecution !== null &&
+      sameKitExecutionRef(existingExecution, input.kitExecution)
+    ) {
+      return "already_recovered";
+    }
+    return "conflict";
+  }
+
+  private insertKitAttemptFence(
+    input: KitAttemptFenceInput & { state: "admitted" | "recovered" }
+  ): boolean {
+    const result = this.insertKitAttemptFenceStmt.run({
+      attempt_id: input.attemptId,
+      state: input.state,
+      cli: input.cli,
+      kit_execution_json: JSON.stringify(cloneKitExecutionRef(input.kitExecution)),
+      kit_session_id: input.kitSessionId,
+      owner_principal: input.ownerPrincipal ?? null,
+      fenced_at: input.fencedAt,
+    });
+    return Number(result.changes) === 1;
   }
 
   markRunning(id: string, opts: { pid: number | null }): boolean {
@@ -878,6 +1703,55 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
     }));
   }
 
+  selectOrphanedProcessCandidates(hostname: string): SweepCandidate[] {
+    const rows = this.selectOrphanedCandidatesStmt.all({ hostname }) as Array<{
+      id: string;
+      pid: number | null;
+      transport: string | null;
+      owner_instance: string | null;
+      hostname: string | null;
+    }>;
+    return rows.map(r => ({
+      id: r.id,
+      pid: r.pid,
+      transport: (r.transport as JobTransport) ?? "process",
+      ownerInstance: r.owner_instance ?? null,
+      hostname: r.hostname ?? null,
+    }));
+  }
+
+  selectPendingMcpArtifactCleanups(hostname: string): PendingMcpArtifactCleanup[] {
+    const rows = this.selectPendingMcpArtifactCleanupsStmt.all({ hostname }) as Array<{
+      id: string;
+      owner_instance: string | null;
+      hostname: string;
+      artifact_scope: string;
+      artifact_path: string;
+    }>;
+    return rows.map(row => ({
+      id: row.id,
+      ownerInstance: row.owner_instance ?? null,
+      hostname: row.hostname,
+      artifactScope: row.artifact_scope,
+      artifactPath: row.artifact_path,
+    }));
+  }
+
+  acknowledgeMcpArtifactCleanup(
+    id: string,
+    hostname: string,
+    artifactScope: string,
+    artifactPath: string
+  ): boolean {
+    const result = this.acknowledgeMcpArtifactCleanupStmt.run({
+      id,
+      hostname,
+      artifact_scope: artifactScope,
+      artifact_path: artifactPath,
+    });
+    return Number(result.changes) === 1;
+  }
+
   recoverStaleJobs(
     leaseTtlMs: number,
     httpJobGraceMs: number,
@@ -911,6 +1785,7 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
         exit_code: number | null;
         transport: string | null;
         http_status: number | null;
+        is_personal_config_kit: number | boolean | null;
       }>;
       return rows.map(r => ({
         id: r.id,
@@ -921,6 +1796,7 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
         exitCode: r.exit_code,
         transport: (r.transport as JobTransport) ?? "process",
         httpStatus: r.http_status ?? null,
+        isPersonalConfigKit: Boolean(r.is_personal_config_kit),
       }));
     });
     return run();
@@ -943,6 +1819,19 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
     });
   }
 
+  recordProgress(id: string, progressJson: string): void {
+    this.updateProgressStmt.run({ id, progress_json: progressJson });
+  }
+
+  recordProgressIfStatus(id: string, status: JobStoreStatus, progressJson: string): boolean {
+    const result = this.updateProgressIfStatusStmt.run({
+      id,
+      status,
+      progress_json: progressJson,
+    });
+    return Number(result.changes) === 1;
+  }
+
   /**
    * Mark a job as completed/failed/canceled. Sets expires_at = now + retention.
    */
@@ -954,8 +1843,12 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
     stderr: string;
     outputTruncated: boolean;
     error: string | null;
+    errorCategory?: string | null;
+    retryable?: boolean | null;
     finishedAt: string;
     httpStatus?: number | null;
+    progressJson?: string | null;
+    kitTerminalMetadata?: PersonalKitTerminalMetadata | null;
   }): void {
     const expiresAt = new Date(Date.parse(input.finishedAt) + this.retentionMs).toISOString();
     this.updateCompleteStmt.run({
@@ -966,9 +1859,13 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
       stderr: input.stderr,
       output_truncated: input.outputTruncated ? 1 : 0,
       error: input.error,
+      error_category: input.errorCategory ?? null,
+      retryable: input.retryable == null ? null : input.retryable ? 1 : 0,
       finished_at: input.finishedAt,
       expires_at: expiresAt,
       http_status: input.httpStatus ?? null,
+      progress_json: input.progressJson ?? null,
+      kit_terminal_metadata_json: serializeKitTerminalMetadata(input.kitTerminalMetadata),
     });
   }
 
@@ -987,15 +1884,62 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
     return row ? rowToRecord(row) : null;
   }
 
+  getPendingKitFinalizations(): PendingKitFinalization[] {
+    const rows = this.selectPendingKitFinalizationsStmt.all();
+    return rows
+      .map(row => toPendingKitFinalization(rowToRecord(row)))
+      .filter((entry): entry is PendingKitFinalization => entry !== null);
+  }
+
+  getAcknowledgedKitAttemptReleases(): AcknowledgedKitAttemptRelease[] {
+    const rows = this.selectAcknowledgedKitAttemptReleasesStmt.all();
+    return rows
+      .map(row => toAcknowledgedKitAttemptRelease(rowToRecord(row)))
+      .filter((entry): entry is AcknowledgedKitAttemptRelease => entry !== null);
+  }
+
+  markKitTerminalFinalized(id: string, kitSessionId: string): boolean {
+    const result = this.markKitTerminalFinalizedStmt.run({
+      id,
+      kit_session_id: kitSessionId,
+      finalized_at: new Date().toISOString(),
+    });
+    return Number(result.changes) > 0;
+  }
+
+  getPinnedKitReleaseIds(): string[] {
+    const rows = this.db
+      .prepare(
+        `SELECT kit_execution_json FROM jobs
+         WHERE kit_execution_json IS NOT NULL
+           AND (
+             status IN ('queued', 'running')
+             OR (
+               status NOT IN ('queued', 'running')
+               AND COALESCE(kit_terminal_finalized, 0) = 0
+             )
+           )`
+      )
+      .all() as Array<{ kit_execution_json?: string | null }>;
+    const releases = new Set<string>();
+    for (const row of rows) {
+      const execution = parseKitExecution(row.kit_execution_json);
+      if (execution) releases.add(execution.releaseId);
+    }
+    return [...releases].sort();
+  }
+
+  getReferencedKitReleaseIds(): string[] {
+    return this.getPinnedKitReleaseIds();
+  }
+
   /**
    * @deprecated #139: superseded by the durable per-job lease. This is now a
    * thin shim delegating to `recoverStaleJobs` for the single-owner
    * sqlite/memory path; it NO LONGER blanket-orphans every `running` row. A
    * genuinely stale prior-process job (its lease expired when the owner died)
    * and a legacy NULL-lease row are recovered; a job kept alive by a live
-   * instance's heartbeat is not. Retained only for the boot path and existing
-   * callers/tests. `selectRunningOrphansStmt`/`markOrphanedStmt` are kept for
-   * back-compat but are no longer used by this method.
+   * instance's heartbeat is not. Retained only for existing callers/tests.
    */
   markOrphanedOnStartup(): {
     count: number;
@@ -1068,11 +2012,86 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
     return row ? rowToValidationRunRecord(row) : null;
   }
 
+  setValidationProviderLinks(validationId: string, providerLinks: ValidationRunLink[]): void {
+    const update = this.db.prepare(
+      `UPDATE validation_runs SET provider_links = ? WHERE validation_id = ?`
+    );
+    const removeOldLinks = this.db.prepare(
+      `DELETE FROM validation_run_jobs WHERE validation_id = ? AND role = 'provider'`
+    );
+    const insertLink = this.db.prepare(
+      `INSERT INTO validation_run_jobs (job_id, validation_id, role)
+       VALUES (?, ?, 'provider')`
+    );
+    this.db.withTransaction(() => {
+      const result = update.run(JSON.stringify(providerLinks), validationId);
+      if (Number(result.changes) !== 1) {
+        throw new Error(`Unknown validation run: ${validationId}`);
+      }
+      removeOldLinks.run(validationId);
+      for (const link of providerLinks) insertLink.run(link.jobId, validationId);
+    })();
+  }
+
   setValidationJudgeLink(validationId: string, judgeLink: ValidationRunLink): void {
-    this.db
-      .prepare(`UPDATE validation_runs SET judge_link = ? WHERE validation_id = ?`)
-      .run(JSON.stringify(judgeLink), validationId);
-    this.linkRunJob(validationId, judgeLink.jobId, "judge");
+    this.db.withTransaction(() => {
+      const result = this.db
+        .prepare(
+          `UPDATE validation_runs SET judge_link = ?
+           WHERE validation_id = ?
+             AND status = 'running'
+             AND judge_link IS NULL
+             AND NOT EXISTS (
+               SELECT 1 FROM validation_receipts WHERE validation_id = ?
+             )`
+        )
+        .run(JSON.stringify(judgeLink), validationId, validationId);
+      if (Number(result.changes) !== 1) {
+        throw new Error("Validation judge link is not open for a one-shot claim");
+      }
+      this.linkRunJob(validationId, judgeLink.jobId, "judge");
+    })();
+  }
+
+  transitionValidationRunStatus(
+    validationId: string,
+    ownerPrincipal: string,
+    expectedStatus: ValidationRunRecord["status"],
+    status: ValidationRunRecord["status"]
+  ): boolean {
+    const result = this.db
+      .prepare(
+        `UPDATE validation_runs SET status = ?
+         WHERE validation_id = ? AND owner_principal = ? AND status = ?`
+      )
+      .run(status, validationId, ownerPrincipal, expectedStatus);
+    return Number(result.changes) === 1;
+  }
+
+  skipValidationJudge(validationId: string, provider: string, ownerPrincipal: string): void {
+    this.db.withTransaction(() => {
+      const row = this.db
+        .prepare(
+          `SELECT owner_principal, intent, request_json, judge_link, status
+           FROM validation_runs WHERE validation_id = ?`
+        )
+        .get(validationId) as
+        | {
+            owner_principal?: unknown;
+            intent?: unknown;
+            request_json?: unknown;
+            judge_link?: unknown;
+            status?: unknown;
+          }
+        | undefined;
+      if (!row || row.owner_principal !== ownerPrincipal) {
+        throw new Error("Validation run is missing or owned by another principal");
+      }
+      assertReviewJudgeClaim(row, provider);
+      this.db
+        .prepare(`UPDATE validation_runs SET status = 'judge_skipped' WHERE validation_id = ?`)
+        .run(validationId);
+    })();
   }
 
   setValidationRunStatus(validationId: string, status: ValidationRunRecord["status"]): void {
@@ -1134,8 +2153,8 @@ function rowToValidationRunRecord(row: any): ValidationRunRecord {
     intent: row.intent,
     createdAt: row.created_at,
     requestJson: row.request_json,
-    providerLinks: parseLinks(row.provider_links) ?? [],
-    judgeLink: parseLink(row.judge_link),
+    providerLinks: parseDurableValidationRunLinks(row.provider_links),
+    judgeLink: parseDurableValidationRunJudgeLink(row.judge_link),
     status: row.status as ValidationRunRecord["status"],
   };
 }
@@ -1157,13 +2176,32 @@ function rowToValidationReceiptRecord(row: any): ValidationReceiptRecord {
   };
 }
 
-function parseLinks(value: unknown): ValidationRunLink[] | null {
-  if (typeof value !== "string" || value.length === 0) return null;
+function isValidationRunLink(value: unknown): value is ValidationRunLink {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const link = value as Record<string, unknown>;
+  const keys = Object.keys(link);
+  return (
+    keys.length === 3 &&
+    keys.every(key => key === "provider" || key === "jobId" || key === "correlationId") &&
+    typeof link.provider === "string" &&
+    link.provider.trim().length > 0 &&
+    typeof link.jobId === "string" &&
+    link.jobId.trim().length > 0 &&
+    typeof link.correlationId === "string" &&
+    link.correlationId.trim().length > 0
+  );
+}
+
+function parseDurableValidationRunLinks(value: unknown): ValidationRunLink[] {
   try {
-    const parsed = JSON.parse(value);
-    return Array.isArray(parsed) ? (parsed as ValidationRunLink[]) : null;
+    if (typeof value !== "string" || value.length === 0) throw new Error("missing links");
+    const parsed: unknown = JSON.parse(value);
+    if (!Array.isArray(parsed) || !parsed.every(isValidationRunLink)) {
+      throw new Error("invalid links");
+    }
+    return parsed;
   } catch {
-    return null;
+    throw new Error("Durable validation run provider links are malformed");
   }
 }
 
@@ -1177,13 +2215,53 @@ function parseStringArray(value: unknown): string[] {
   }
 }
 
-function parseLink(value: unknown): ValidationRunLink | null {
-  if (typeof value !== "string" || value.length === 0) return null;
+function parseDurableValidationRunJudgeLink(value: unknown): ValidationRunLink | null {
+  if (value === null) return null;
   try {
-    const parsed = JSON.parse(value);
-    return parsed && typeof parsed === "object" ? (parsed as ValidationRunLink) : null;
+    if (typeof value !== "string" || value.length === 0) throw new Error("missing link");
+    const parsed: unknown = JSON.parse(value);
+    if (!isValidationRunLink(parsed)) throw new Error("invalid link");
+    return parsed;
   } catch {
-    return null;
+    throw new Error("Durable validation run judge link is malformed");
+  }
+}
+
+function assertReviewJudgeClaim(
+  row: {
+    intent?: unknown;
+    request_json?: unknown;
+    judge_link?: unknown;
+    status?: unknown;
+  },
+  provider: string
+): void {
+  if (row.intent !== "review" || row.status !== "running") {
+    throw new Error("Validation run is not an open admitted review");
+  }
+  if (row.judge_link !== null && row.judge_link !== undefined) {
+    throw new Error("Validation review judge is already claimed");
+  }
+  let request: unknown;
+  try {
+    request = JSON.parse(String(row.request_json));
+  } catch {
+    throw new Error("Validation review request is invalid");
+  }
+  if (
+    typeof request !== "object" ||
+    request === null ||
+    (request as { judgeProvider?: unknown }).judgeProvider !== provider
+  ) {
+    throw new Error(`Validation review does not authorize judge ${provider}`);
+  }
+  const authorization = (request as { reviewAuthorization?: unknown }).reviewAuthorization;
+  if (
+    typeof authorization !== "object" ||
+    authorization === null ||
+    (authorization as { judgeProvider?: unknown }).judgeProvider !== provider
+  ) {
+    throw new Error(`Validation review authorization does not permit judge ${provider}`);
   }
 }
 
@@ -1204,6 +2282,10 @@ export const JobStoreClass = SqliteJobStore;
  */
 export class MemoryJobStore implements JobStore {
   private rows = new Map<string, JobRecord>();
+  private kitAttemptFences = new Map<
+    string,
+    KitAttemptFenceInput & { state: "admitted" | "recovered" }
+  >();
   private retentionMs: number;
   private dedupWindowMs: number;
   private leaseTtlMs: number;
@@ -1226,15 +2308,44 @@ export class MemoryJobStore implements JobStore {
     pid: number | null;
     ownerPrincipal?: string | null;
     ownerInstance?: string | null;
+    ownerHostname?: string | null;
+    mcpArtifactPath?: string | null;
+    mcpArtifactScope?: string | null;
     transport?: JobTransport;
     payloadJson?: string | null;
+    kitExecution?: KitExecutionRef | null;
+    kitSessionId?: string | null;
+    validationAdmission?: ValidationJobAdmission;
   }): void {
+    assertMcpArtifactAdmissionInvariant(input);
+    if (input.kitExecution) {
+      const kitSessionId = input.kitSessionId?.trim();
+      if (!kitSessionId) {
+        throw new Error("Kit job admission requires a gateway kitSessionId");
+      }
+      if (
+        !this.insertKitAttemptFence({
+          attemptId: input.id,
+          state: "admitted",
+          cli: input.cli,
+          kitExecution: input.kitExecution,
+          kitSessionId,
+          ownerPrincipal: input.ownerPrincipal,
+          fencedAt: input.startedAt,
+        })
+      ) {
+        throw new Error(`Kit job id ${input.id} is already admitted or permanently recovered`);
+      }
+    }
+    if (input.validationAdmission) {
+      throw new Error("Validation job admission requires a durable validation-run store");
+    }
     this.rows.set(input.id, {
       id: input.id,
       correlationId: input.correlationId,
-      requestKey: input.requestKey,
+      requestKey: input.kitExecution ? personalKitJobRequestKey(input.id) : input.requestKey,
       cli: input.cli,
-      argsJson: JSON.stringify(input.args),
+      argsJson: input.kitExecution ? PERSONAL_KIT_REDACTED_ARGS_JSON : JSON.stringify(input.args),
       outputFormat: input.outputFormat ?? null,
       compressResponse: input.compressResponse ?? null,
       // #139: persist queued (markRunning flips to running at launch).
@@ -1244,6 +2355,8 @@ export class MemoryJobStore implements JobStore {
       stderr: "",
       outputTruncated: false,
       error: null,
+      errorCategory: null,
+      retryable: null,
       startedAt: input.startedAt,
       finishedAt: null,
       pid: input.pid,
@@ -1251,11 +2364,49 @@ export class MemoryJobStore implements JobStore {
       ownerPrincipal: input.ownerPrincipal ?? null,
       transport: input.transport ?? "process",
       httpStatus: null,
-      payloadJson: input.payloadJson ?? null,
+      payloadJson: input.kitExecution ? null : (input.payloadJson ?? null),
       ownerInstance: input.ownerInstance ?? null,
+      ownerHostname: input.ownerHostname ?? null,
+      mcpArtifactPath: input.kitExecution ? null : (input.mcpArtifactPath ?? null),
+      mcpArtifactScope: input.kitExecution ? null : (input.mcpArtifactScope ?? null),
+      mcpArtifactCleanupPending:
+        !input.kitExecution && Boolean(input.mcpArtifactPath && input.mcpArtifactScope),
       // In-process store: DB clock == client clock, so the lease is client-time.
       leaseDeadline: Date.now() + this.leaseTtlMs,
+      kitExecution: input.kitExecution ? cloneKitExecutionRef(input.kitExecution) : null,
+      kitSessionId: input.kitSessionId ?? null,
+      kitTerminalMetadata: null,
+      kitTerminalFinalized: false,
+      kitTerminalFinalizedAt: null,
+      progressJson: null,
     });
+  }
+
+  fenceUnadmittedKitAttempt(input: KitAttemptFenceInput): KitAttemptFenceResult {
+    if (this.insertKitAttemptFence({ ...input, state: "recovered" })) return "reserved";
+    const existing = this.kitAttemptFences.get(input.attemptId);
+    if (
+      existing?.state === "recovered" &&
+      existing.cli === input.cli &&
+      existing.kitSessionId === input.kitSessionId &&
+      recoveredFenceOwnerMatches(existing.ownerPrincipal, input.ownerPrincipal) &&
+      sameKitExecutionRef(existing.kitExecution, input.kitExecution)
+    ) {
+      return "already_recovered";
+    }
+    return "conflict";
+  }
+
+  private insertKitAttemptFence(
+    input: KitAttemptFenceInput & { state: "admitted" | "recovered" }
+  ): boolean {
+    if (this.kitAttemptFences.has(input.attemptId)) return false;
+    this.kitAttemptFences.set(input.attemptId, {
+      ...input,
+      kitExecution: cloneKitExecutionRef(input.kitExecution),
+      ownerPrincipal: input.ownerPrincipal ?? null,
+    });
+    return true;
   }
 
   markRunning(id: string, opts: { pid: number | null }): boolean {
@@ -1290,6 +2441,58 @@ export class MemoryJobStore implements JobStore {
     return [];
   }
 
+  selectOrphanedProcessCandidates(_hostname: string): SweepCandidate[] {
+    return [];
+  }
+
+  selectPendingMcpArtifactCleanups(hostname: string): PendingMcpArtifactCleanup[] {
+    return [...this.rows.values()]
+      .filter(
+        row =>
+          row.ownerHostname === hostname &&
+          row.cli === "claude" &&
+          row.transport === "process" &&
+          row.mcpArtifactCleanupPending &&
+          row.mcpArtifactPath !== null &&
+          row.mcpArtifactScope !== null &&
+          (row.status === "completed" ||
+            row.status === "failed" ||
+            row.status === "canceled" ||
+            row.status === "orphaned")
+      )
+      .map(row => ({
+        id: row.id,
+        ownerInstance: row.ownerInstance,
+        hostname,
+        artifactScope: row.mcpArtifactScope!,
+        artifactPath: row.mcpArtifactPath!,
+      }));
+  }
+
+  acknowledgeMcpArtifactCleanup(
+    id: string,
+    hostname: string,
+    artifactScope: string,
+    artifactPath: string
+  ): boolean {
+    const row = this.rows.get(id);
+    if (
+      !row ||
+      row.ownerHostname !== hostname ||
+      row.mcpArtifactScope !== artifactScope ||
+      row.mcpArtifactPath !== artifactPath ||
+      !row.mcpArtifactCleanupPending ||
+      (row.status !== "completed" &&
+        row.status !== "failed" &&
+        row.status !== "canceled" &&
+        row.status !== "orphaned")
+    ) {
+      return false;
+    }
+    row.mcpArtifactCleanupPending = false;
+    return true;
+  }
+
   /**
    * In-memory stores have no cross-process state, so any open rows here belong
    * to this very process and are not actually orphaned. Per-process no-op.
@@ -1309,9 +2512,21 @@ export class MemoryJobStore implements JobStore {
   recordOutput(id: string, stdout: string, stderr: string, outputTruncated: boolean): void {
     const row = this.rows.get(id);
     if (!row) return;
-    row.stdout = stdout;
-    row.stderr = stderr;
+    row.stdout = row.kitExecution ? "" : stdout;
+    row.stderr = row.kitExecution ? "" : stderr;
     row.outputTruncated = outputTruncated;
+  }
+
+  recordProgress(id: string, progressJson: string): void {
+    const row = this.rows.get(id);
+    if (row) row.progressJson = progressJson;
+  }
+
+  recordProgressIfStatus(id: string, status: JobStoreStatus, progressJson: string): boolean {
+    const row = this.rows.get(id);
+    if (!row || row.status !== status) return false;
+    row.progressJson = progressJson;
+    return true;
   }
 
   recordComplete(input: {
@@ -1322,8 +2537,12 @@ export class MemoryJobStore implements JobStore {
     stderr: string;
     outputTruncated: boolean;
     error: string | null;
+    errorCategory?: string | null;
+    retryable?: boolean | null;
     finishedAt: string;
     httpStatus?: number | null;
+    progressJson?: string | null;
+    kitTerminalMetadata?: PersonalKitTerminalMetadata | null;
   }): void {
     const row = this.rows.get(input.id);
     if (!row) return;
@@ -1333,19 +2552,31 @@ export class MemoryJobStore implements JobStore {
     if (row.status !== "queued" && row.status !== "running" && row.status !== "orphaned") return;
     row.status = input.status;
     row.exitCode = input.exitCode;
-    row.stdout = input.stdout;
-    row.stderr = input.stderr;
+    row.stdout = row.kitExecution ? "" : input.stdout;
+    row.stderr = row.kitExecution ? "" : input.stderr;
     row.outputTruncated = input.outputTruncated;
-    row.error = input.error;
+    row.error = row.kitExecution
+      ? input.status === "completed"
+        ? null
+        : PERSONAL_KIT_FAILURE_WITHHELD
+      : input.error;
+    row.errorCategory = input.errorCategory ?? null;
+    row.retryable = input.retryable ?? null;
     row.finishedAt = input.finishedAt;
     row.expiresAt = new Date(Date.parse(input.finishedAt) + this.retentionMs).toISOString();
     row.leaseDeadline = null;
     if (input.httpStatus !== undefined) row.httpStatus = input.httpStatus;
+    // Keep the compatibility input out of the in-memory representation too:
+    // a MemoryJobStore must not mask a privacy regression in a durable backend.
+    row.kitTerminalMetadata = null;
+    if (input.progressJson !== undefined && input.progressJson !== null) {
+      row.progressJson = input.progressJson;
+    }
   }
 
   getById(id: string): JobRecord | null {
     const row = this.rows.get(id);
-    return row ? { ...row } : null;
+    return row ? cloneJobRecord(row) : null;
   }
 
   findByRequestKey(requestKey: string): JobRecord | null {
@@ -1366,7 +2597,57 @@ export class MemoryJobStore implements JobStore {
         best = row;
       }
     }
-    return best ? { ...best } : null;
+    return best ? cloneJobRecord(best) : null;
+  }
+
+  getPendingKitFinalizations(): PendingKitFinalization[] {
+    return [...this.rows.values()]
+      .map(toPendingKitFinalization)
+      .filter((entry): entry is PendingKitFinalization => entry !== null)
+      .sort((a, b) => a.finishedAt.localeCompare(b.finishedAt) || a.jobId.localeCompare(b.jobId));
+  }
+
+  getAcknowledgedKitAttemptReleases(): AcknowledgedKitAttemptRelease[] {
+    return [...this.rows.values()]
+      .map(toAcknowledgedKitAttemptRelease)
+      .filter((entry): entry is AcknowledgedKitAttemptRelease => entry !== null)
+      .sort((a, b) => a.jobId.localeCompare(b.jobId));
+  }
+
+  markKitTerminalFinalized(id: string, kitSessionId: string): boolean {
+    const row = this.rows.get(id);
+    if (
+      !row ||
+      row.status === "queued" ||
+      row.status === "running" ||
+      row.status === "orphaned" ||
+      !row.kitExecution ||
+      row.kitSessionId !== kitSessionId
+    ) {
+      return false;
+    }
+    if (!row.kitTerminalFinalized) {
+      row.kitTerminalFinalized = true;
+      row.kitTerminalFinalizedAt = new Date().toISOString();
+    }
+    return true;
+  }
+
+  getPinnedKitReleaseIds(): string[] {
+    const releases = new Set<string>();
+    for (const row of this.rows.values()) {
+      if (
+        row.kitExecution &&
+        (row.status === "queued" || row.status === "running" || !row.kitTerminalFinalized)
+      ) {
+        releases.add(row.kitExecution.releaseId);
+      }
+    }
+    return [...releases].sort();
+  }
+
+  getReferencedKitReleaseIds(): string[] {
+    return this.getPinnedKitReleaseIds();
   }
 
   /**
@@ -1384,7 +2665,11 @@ export class MemoryJobStore implements JobStore {
     const nowIso = new Date().toISOString();
     let removed = 0;
     for (const [id, row] of this.rows) {
-      if (row.expiresAt < nowIso) {
+      if (
+        row.expiresAt < nowIso &&
+        (!row.kitExecution || row.kitTerminalFinalized) &&
+        !row.mcpArtifactCleanupPending
+      ) {
         this.rows.delete(id);
         removed++;
       }
@@ -1613,14 +2898,26 @@ export class PostgresJobStore implements JobStore, ValidationRunStore {
     cli: string;
     args: string[];
     outputFormat?: string;
+    compressResponse?: boolean;
     startedAt: string;
     pid: number | null;
     ownerPrincipal?: string | null;
     ownerInstance?: string | null;
+    ownerHostname?: string | null;
+    mcpArtifactPath?: string | null;
+    mcpArtifactScope?: string | null;
     transport?: JobTransport;
     payloadJson?: string | null;
+    kitExecution?: KitExecutionRef | null;
+    kitSessionId?: string | null;
+    validationAdmission?: ValidationJobAdmission;
   }): void {
+    assertMcpArtifactAdmissionInvariant(input);
     this.syncCall("recordStart", input);
+  }
+
+  fenceUnadmittedKitAttempt(input: KitAttemptFenceInput): KitAttemptFenceResult {
+    return this.syncCall("fenceUnadmittedKitAttempt", input);
   }
 
   markRunning(id: string, opts: { pid: number | null }): boolean {
@@ -1643,6 +2940,29 @@ export class PostgresJobStore implements JobStore, ValidationRunStore {
     return this.syncCall("selectStaleProcessCandidates", leaseTtlMs, httpJobGraceMs);
   }
 
+  selectOrphanedProcessCandidates(hostname: string): SweepCandidate[] {
+    return this.syncCall("selectOrphanedProcessCandidates", hostname);
+  }
+
+  selectPendingMcpArtifactCleanups(hostname: string): PendingMcpArtifactCleanup[] {
+    return this.syncCall("selectPendingMcpArtifactCleanups", hostname);
+  }
+
+  acknowledgeMcpArtifactCleanup(
+    id: string,
+    hostname: string,
+    artifactScope: string,
+    artifactPath: string
+  ): boolean {
+    return this.syncCall(
+      "acknowledgeMcpArtifactCleanup",
+      id,
+      hostname,
+      artifactScope,
+      artifactPath
+    );
+  }
+
   recoverStaleJobs(
     leaseTtlMs: number,
     httpJobGraceMs: number,
@@ -1658,6 +2978,7 @@ export class PostgresJobStore implements JobStore, ValidationRunStore {
         exit_code: number | null;
         transport: string | null;
         http_status: number | null;
+        is_personal_config_kit: boolean | null;
       }>;
     }>("recoverStaleJobs", leaseTtlMs, httpJobGraceMs, liveConfirmedIds);
     return result.orphaned.map(row => ({
@@ -1669,6 +2990,7 @@ export class PostgresJobStore implements JobStore, ValidationRunStore {
       exitCode: row.exit_code,
       transport: (row.transport as JobTransport) ?? "process",
       httpStatus: row.http_status ?? null,
+      isPersonalConfigKit: Boolean(row.is_personal_config_kit),
     }));
   }
 
@@ -1680,6 +3002,14 @@ export class PostgresJobStore implements JobStore, ValidationRunStore {
     this.syncCall("recordOutput", id, stdout, stderr, outputTruncated);
   }
 
+  recordProgress(id: string, progressJson: string): void {
+    this.syncCall("recordProgress", id, progressJson);
+  }
+
+  recordProgressIfStatus(id: string, status: JobStoreStatus, progressJson: string): boolean {
+    return this.syncCall("recordProgressIfStatus", id, status, progressJson);
+  }
+
   recordComplete(input: {
     id: string;
     status: Exclude<JobStoreStatus, "running" | "queued">;
@@ -1688,8 +3018,12 @@ export class PostgresJobStore implements JobStore, ValidationRunStore {
     stderr: string;
     outputTruncated: boolean;
     error: string | null;
+    errorCategory?: string | null;
+    retryable?: boolean | null;
     finishedAt: string;
     httpStatus?: number | null;
+    progressJson?: string | null;
+    kitTerminalMetadata?: PersonalKitTerminalMetadata | null;
   }): void {
     this.syncCall("recordComplete", input);
   }
@@ -1702,6 +3036,39 @@ export class PostgresJobStore implements JobStore, ValidationRunStore {
   findByRequestKey(requestKey: string): JobRecord | null {
     const row = this.syncCall("findByRequestKey", requestKey);
     return row ? rowToRecord(row) : null;
+  }
+
+  getPendingKitFinalizations(): PendingKitFinalization[] {
+    const rows = this.syncCall<unknown[]>("getPendingKitFinalizations");
+    return rows
+      .map(row => toPendingKitFinalization(rowToRecord(row)))
+      .filter((entry): entry is PendingKitFinalization => entry !== null);
+  }
+
+  getAcknowledgedKitAttemptReleases(): AcknowledgedKitAttemptRelease[] {
+    const rows = this.syncCall<unknown[]>("getAcknowledgedKitAttemptReleases");
+    return rows
+      .map(row => toAcknowledgedKitAttemptRelease(rowToRecord(row)))
+      .filter((entry): entry is AcknowledgedKitAttemptRelease => entry !== null);
+  }
+
+  markKitTerminalFinalized(id: string, kitSessionId: string): boolean {
+    return this.syncCall("markKitTerminalFinalized", id, kitSessionId);
+  }
+
+  getPinnedKitReleaseIds(): string[] {
+    const rows =
+      this.syncCall<Array<{ kit_execution_json?: string | null }>>("getPinnedKitReleaseIds");
+    const releases = new Set<string>();
+    for (const row of rows) {
+      const execution = parseKitExecution(row.kit_execution_json);
+      if (execution) releases.add(execution.releaseId);
+    }
+    return [...releases].sort();
+  }
+
+  getReferencedKitReleaseIds(): string[] {
+    return this.getPinnedKitReleaseIds();
   }
 
   /**
@@ -1732,8 +3099,31 @@ export class PostgresJobStore implements JobStore, ValidationRunStore {
     return row ? rowToValidationRunRecord(row) : null;
   }
 
+  setValidationProviderLinks(validationId: string, providerLinks: ValidationRunLink[]): void {
+    this.syncCall("setValidationProviderLinks", validationId, providerLinks);
+  }
+
   setValidationJudgeLink(validationId: string, judgeLink: ValidationRunLink): void {
     this.syncCall("setValidationJudgeLink", validationId, judgeLink);
+  }
+
+  transitionValidationRunStatus(
+    validationId: string,
+    ownerPrincipal: string,
+    expectedStatus: ValidationRunRecord["status"],
+    status: ValidationRunRecord["status"]
+  ): boolean {
+    return this.syncCall(
+      "transitionValidationRunStatus",
+      validationId,
+      ownerPrincipal,
+      expectedStatus,
+      status
+    );
+  }
+
+  skipValidationJudge(validationId: string, provider: string, ownerPrincipal: string): void {
+    this.syncCall("skipValidationJudge", validationId, provider, ownerPrincipal);
   }
 
   setValidationRunStatus(validationId: string, status: ValidationRunRecord["status"]): void {

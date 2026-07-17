@@ -48,6 +48,7 @@ afterAll(() => {
 
 const noopLogger = {
   info: (..._args: any[]) => {},
+  warn: (..._args: any[]) => {},
   error: (..._args: any[]) => {},
   debug: (..._args: any[]) => {},
 };
@@ -79,6 +80,43 @@ function createMockSessionManager(sessions: Map<string, Session> = new Map()): I
     updateSessionMetadata: vi.fn(async () => true),
     clearAllSessions: vi.fn(async () => 0),
   };
+}
+
+function createMcpManagedRuntime(
+  sessionManager: ISessionManager,
+  asyncJobManager: AsyncJobManager
+) {
+  const decide = vi.fn(() => ({ status: "approved" }));
+  return {
+    decide,
+    runtime: {
+      sessionManager,
+      asyncJobManager,
+      approvalManager: { decide },
+      flightRecorder: { logStart() {}, logComplete() {} },
+      logger: noopLogger,
+      performanceMetrics: { recordRequest() {} },
+      compression: { enabled: false, sources: { configFile: null } },
+      persistence: { backend: "none", asyncJobsEnabled: false },
+      workspaces: {
+        enabled: false,
+        defaultAlias: null,
+        allowUnregisteredWorkingDir: false,
+        repos: [],
+        allowedRoots: [],
+        sources: { configFile: null },
+      },
+      personalConfig: { settings: { enabled: false } },
+    } as never,
+  };
+}
+
+function restoreBypassEnvironment(previous: string | undefined): void {
+  if (previous === undefined) {
+    delete process.env.LLM_GATEWAY_APPROVAL_ALLOW_BYPASS;
+  } else {
+    process.env.LLM_GATEWAY_APPROVAL_ALLOW_BYPASS = previous;
+  }
 }
 
 describe("handleGeminiRequestAsync", () => {
@@ -116,6 +154,120 @@ describe("handleGeminiRequestAsync", () => {
     // Cleanup
     ajm.cancelJob(body.job.id);
   });
+
+  it("rejects mcp_managed async jobs before approval or enqueue", async () => {
+    const previousBypass = process.env.LLM_GATEWAY_APPROVAL_ALLOW_BYPASS;
+    delete process.env.LLM_GATEWAY_APPROVAL_ALLOW_BYPASS;
+
+    const sm = createMockSessionManager();
+    const ajm = new AsyncJobManager(noopLogger);
+    const startJobSpy = vi.spyOn(ajm, "startJob");
+    const { runtime, decide } = createMcpManagedRuntime(sm, ajm);
+
+    try {
+      const result = await handleGeminiRequestAsync(
+        { sessionManager: sm, asyncJobManager: ajm, logger: noopLogger, runtime },
+        {
+          prompt: "review the workspace",
+          resumeLatest: false,
+          createNewSession: false,
+          approvalStrategy: "mcp_managed",
+          optimizePrompt: false,
+        }
+      );
+
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain(
+        "approvalStrategy:mcp_managed is unavailable for gemini"
+      );
+      expect(decide).not.toHaveBeenCalled();
+      expect(startJobSpy).not.toHaveBeenCalled();
+      expect(ajm.getRunningJobs()).toHaveLength(0);
+    } finally {
+      restoreBypassEnvironment(previousBypass);
+      await ajm.dispose();
+    }
+  });
+
+  it.each([
+    ["yolo=true", { yolo: true }],
+    ["approvalMode=yolo", { approvalMode: "yolo" }],
+  ])(
+    "rejects mcp_managed async %s before approval or enqueue without the operator bypass override",
+    async (_label, bypassInput) => {
+      const previousBypass = process.env.LLM_GATEWAY_APPROVAL_ALLOW_BYPASS;
+      delete process.env.LLM_GATEWAY_APPROVAL_ALLOW_BYPASS;
+      const sm = createMockSessionManager();
+      const ajm = new AsyncJobManager(noopLogger);
+      const startJobSpy = vi.spyOn(ajm, "startJob");
+      const { runtime, decide } = createMcpManagedRuntime(sm, ajm);
+
+      try {
+        const result = await handleGeminiRequestAsync(
+          { sessionManager: sm, asyncJobManager: ajm, logger: noopLogger, runtime },
+          {
+            prompt: "review the workspace",
+            resumeLatest: false,
+            createNewSession: false,
+            approvalStrategy: "mcp_managed",
+            optimizePrompt: false,
+            ...bypassInput,
+          }
+        );
+
+        expect(result.isError).toBe(true);
+        expect(result.content[0].text).toContain(
+          "approvalStrategy:mcp_managed is unavailable for gemini"
+        );
+        expect(decide).not.toHaveBeenCalled();
+        expect(startJobSpy).not.toHaveBeenCalled();
+        expect(ajm.getRunningJobs()).toHaveLength(0);
+      } finally {
+        restoreBypassEnvironment(previousBypass);
+        await ajm.dispose();
+      }
+    }
+  );
+
+  it.each([
+    ["yolo=true", { yolo: true }],
+    ["approvalMode=yolo", { approvalMode: "yolo" }],
+  ])(
+    "rejects mcp_managed async %s before approval or enqueue even with the operator bypass override",
+    async (_label, bypassInput) => {
+      const previousBypass = process.env.LLM_GATEWAY_APPROVAL_ALLOW_BYPASS;
+      process.env.LLM_GATEWAY_APPROVAL_ALLOW_BYPASS = "1";
+      const sm = createMockSessionManager();
+      const ajm = new AsyncJobManager(noopLogger);
+      const startJobSpy = vi.spyOn(ajm, "startJob");
+      const { runtime, decide } = createMcpManagedRuntime(sm, ajm);
+
+      try {
+        const result = await handleGeminiRequestAsync(
+          { sessionManager: sm, asyncJobManager: ajm, logger: noopLogger, runtime },
+          {
+            prompt: "review the workspace",
+            resumeLatest: false,
+            createNewSession: false,
+            approvalStrategy: "mcp_managed",
+            optimizePrompt: false,
+            ...bypassInput,
+          }
+        );
+
+        expect(result.isError).toBe(true);
+        expect(result.content[0].text).toContain(
+          "approvalStrategy:mcp_managed is unavailable for gemini"
+        );
+        expect(decide).not.toHaveBeenCalled();
+        expect(startJobSpy).not.toHaveBeenCalled();
+        expect(ajm.getRunningJobs()).toHaveLength(0);
+      } finally {
+        restoreBypassEnvironment(previousBypass);
+        await ajm.dispose();
+      }
+    }
+  );
 
   it("should include resumable=true when user provides sessionId", async () => {
     const sm = createMockSessionManager();
@@ -264,12 +416,12 @@ describe("handleGeminiRequestAsync", () => {
     ajm.cancelJob(jobId);
   });
 
-  it("should pass --continue when resumeLatest=true and no sessionId", async () => {
+  it("fails closed when resumeLatest has no stable cwd", async () => {
     const sm = createMockSessionManager();
     const ajm = new AsyncJobManager(noopLogger);
     const startJobSpy = vi.spyOn(ajm, "startJob");
 
-    await handleGeminiRequestAsync(
+    const response = await handleGeminiRequestAsync(
       { sessionManager: sm, asyncJobManager: ajm, logger: noopLogger },
       {
         prompt: "test",
@@ -280,11 +432,9 @@ describe("handleGeminiRequestAsync", () => {
       }
     );
 
-    const args = startJobSpy.mock.calls[0][1];
-    expect(args).toContain("--continue");
-
-    const jobId = startJobSpy.mock.results[0].value.id;
-    ajm.cancelJob(jobId);
+    expect(response.isError).toBe(true);
+    expect(response.content[0]?.text).toMatch(/workingDir|workspace/);
+    expect(startJobSpy).not.toHaveBeenCalled();
   });
 });
 
@@ -295,6 +445,84 @@ describe("handleGeminiRequest (sync)", () => {
     const mod = await import("../index.js");
     handleGeminiRequest = mod.handleGeminiRequest;
   });
+
+  it.each([
+    ["yolo=true", { yolo: true }],
+    ["approvalMode=yolo", { approvalMode: "yolo" }],
+  ])(
+    "rejects mcp_managed sync %s before approval or provider execution without the operator bypass override",
+    async (_label, bypassInput) => {
+      const previousBypass = process.env.LLM_GATEWAY_APPROVAL_ALLOW_BYPASS;
+      delete process.env.LLM_GATEWAY_APPROVAL_ALLOW_BYPASS;
+      const sm = createMockSessionManager();
+      const ajm = new AsyncJobManager(noopLogger);
+      const { runtime, decide } = createMcpManagedRuntime(sm, ajm);
+      vi.mocked(executeCli).mockClear();
+
+      try {
+        const result = await handleGeminiRequest(
+          { sessionManager: sm, logger: noopLogger, runtime },
+          {
+            prompt: "review the workspace",
+            resumeLatest: false,
+            createNewSession: false,
+            approvalStrategy: "mcp_managed",
+            optimizePrompt: false,
+            ...bypassInput,
+          }
+        );
+
+        expect(result.isError).toBe(true);
+        expect(result.content[0].text).toContain(
+          "approvalStrategy:mcp_managed is unavailable for gemini"
+        );
+        expect(decide).not.toHaveBeenCalled();
+        expect(vi.mocked(executeCli)).not.toHaveBeenCalled();
+      } finally {
+        restoreBypassEnvironment(previousBypass);
+        await ajm.dispose();
+      }
+    }
+  );
+
+  it.each([
+    ["yolo=true", { yolo: true }],
+    ["approvalMode=yolo", { approvalMode: "yolo" }],
+  ])(
+    "rejects mcp_managed sync %s before approval or provider execution even with the operator bypass override",
+    async (_label, bypassInput) => {
+      const previousBypass = process.env.LLM_GATEWAY_APPROVAL_ALLOW_BYPASS;
+      process.env.LLM_GATEWAY_APPROVAL_ALLOW_BYPASS = "1";
+      const sm = createMockSessionManager();
+      const ajm = new AsyncJobManager(noopLogger);
+      const { runtime, decide } = createMcpManagedRuntime(sm, ajm);
+      vi.mocked(executeCli).mockClear();
+
+      try {
+        const result = await handleGeminiRequest(
+          { sessionManager: sm, logger: noopLogger, runtime },
+          {
+            prompt: "review the workspace",
+            resumeLatest: false,
+            createNewSession: false,
+            approvalStrategy: "mcp_managed",
+            optimizePrompt: false,
+            ...bypassInput,
+          }
+        );
+
+        expect(result.isError).toBe(true);
+        expect(result.content[0].text).toContain(
+          "approvalStrategy:mcp_managed is unavailable for gemini"
+        );
+        expect(decide).not.toHaveBeenCalled();
+        expect(vi.mocked(executeCli)).not.toHaveBeenCalled();
+      } finally {
+        restoreBypassEnvironment(previousBypass);
+        await ajm.dispose();
+      }
+    }
+  );
 
   it("should return error for gw- prefixed sessionId (sync replay protection)", async () => {
     const sm = createMockSessionManager();

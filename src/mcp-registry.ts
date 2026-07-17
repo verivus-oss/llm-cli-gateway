@@ -59,6 +59,13 @@ export interface RegistryEntry {
    */
   requireCommandOnPath?: boolean;
   /**
+   * This registry definition is safe to place in a Claude `mcp_managed`
+   * config. It must resolve only to a gateway-provisioned local command, with
+   * no ambient PATH lookup, Codex override, or network-install fallback.
+   * Omit it for legacy-only definitions such as dynamic `npx` launchers.
+   */
+  managedEligible?: boolean;
+  /**
    * Approval-risk scoring applied by ApprovalManager when this server is
    * requested. Omit for zero-risk servers (e.g. `sqry`, `trstr`).
    */
@@ -106,6 +113,7 @@ function findInstalledExaEntrypoint(): string | null {
 export const INTERNAL_MCP_REGISTRY: Record<string, RegistryEntry> = {
   sqry: {
     defaultDef: () => ({ command: join(homedir(), ".local", "bin", "sqry-mcp"), args: [] }),
+    managedEligible: true,
   },
   exa: {
     defaultDef: () => {
@@ -127,6 +135,7 @@ export const INTERNAL_MCP_REGISTRY: Record<string, RegistryEntry> = {
   },
   trstr: {
     defaultDef: () => ({ command: join(homedir(), ".local", "bin", "trstr-mcp"), args: [] }),
+    managedEligible: true,
   },
   agent_browser: {
     // Local browser-automation MCP. No npx fallback — it must be installed on

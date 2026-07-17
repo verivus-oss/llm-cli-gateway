@@ -12,8 +12,29 @@ metadata:
 eligible `(provider, model)`** candidate that meets your constraints, then
 dispatch it through the normal provider path. They are **dormant by default**:
 registered only when `[least_cost].enabled = true` in
-`~/.llm-cli-gateway/config.toml`. If the tools are absent, routing is off; use a
-specific provider tool instead.
+`~/.llm-cli-gateway/config.toml` and Personal Agent Config Kit is disabled. If
+the tools are absent, routing is off or Kit is active; use a specific provider
+tool only when that tool is valid for the active boundary.
+
+## Never use this for a mandatory exhaustive review
+
+Least-cost routing is for a model-agnostic, cost-constrained task. It is not a
+review-completion mechanism. Do not use `route_request`, `route_request_async`,
+`select:"cheapest"`, `select:"cheapest_per_tier"`, `maxCostUsd`, a budget
+waiver, or output/token caps to restrict a required cross-provider review. A
+complete review must use the local stdio gateway MCP surface and its explicit
+required reviewer roster until every reviewer returns an evidence-backed
+unconditional approval. If a reviewer cannot run, repair/retry it or report the
+review incomplete/blocked; do not replace it with the cheapest candidate.
+
+When the user explicitly authorizes full provider permissions and native MCP
+access for that mandatory review, use `multi-llm-review`'s full-access protocol:
+build and launch the current target checkout's `node dist/index.js
+--transport=stdio` server, not a global gateway; reapply each provider-native
+grant per fresh job; provide the corrective-program report and exact diff/file
+identity; and set no caller caps. A user-required 90-second progress cadence
+also applies. Neither cost routing nor an LCR budget setting can implement or
+shorten that protocol.
 
 ## When to use this vs a named provider tool
 
@@ -21,8 +42,19 @@ specific provider tool instead.
   classify, rewrite) and you want the cheapest model that clears a quality floor.
 - Use `claude_request` / `codex_request` / etc. when you need a SPECIFIC model or
   provider, a provider-specific flag, session resume, or a worktree. In phase_1
-  `route_request` is fresh one-shot only (no `sessionId` / `workspace` /
-  `worktree`).
+  `route_request` is fresh one-shot only: it accepts a registered `workspace`
+  for CLI candidates, but no `sessionId` or `worktree`.
+- Discover configured API and CLI candidates with `list_models()` and provider
+  capabilities before forming an explicit candidate list. Do not assume a
+  canonical CLI provider is installed, authenticated, priced, or eligible.
+
+CLI candidates selected by `route_request` do not inherit the gateway process
+repository. The unscoped execution boundary gives each child a fresh private
+neutral cwd. For repository-dependent work, pass a registered `workspace` and
+restrict `candidates` to CLI providers authorized for that workspace. A routed
+HTTP/API provider does not receive workspace files, and `workspace` does not
+turn it into a filesystem-capable provider. Use an explicitly targeted named
+provider tool when the provider itself must be fixed.
 
 ## Inputs
 
@@ -33,10 +65,12 @@ specific provider tool instead.
 - `expectedOutputTokens` / `maxOutputTokens`: tune the ranking and the
   conservative budget bound.
 - `requiredCapabilities`: `{ images?, attachments?, toolCalling?, jsonSchema?,
-  outputFormat?, effort? }`. A candidate missing a required capability is
+outputFormat?, effort? }`. A candidate missing a required capability is
   excluded.
 - `candidates`: an explicit `(provider, model)[]` to restrict the pool (also
   whitelists otherwise-untiered / maintain-only candidates like cursor/devin).
+- `workspace`: registered gateway workspace alias used as the cwd when the
+  selected candidate is a CLI provider. It is not sent to HTTP/API providers.
 - `allowUnpriced` + `budgetWaiver`: BOTH are required to admit an unpriced
   (`source: "unknown"`) candidate. An unpriced candidate always ranks strictly
   last and cannot win over any priced candidate.
@@ -64,9 +98,10 @@ pre-flight-estimate`), `confidence`, `nearTie`, `estInputTokens`,
   per-candidate rejection reasons (auth / breaker / capacity / capability / tier
   / price / budget). Loosen `minTier`, add `candidates`, or set
   `allowUnpriced` + `budgetWaiver`.
-- Transient dispatch failure (breaker trip, timeout): LCR re-selects over the
+- For synchronous routing, a transient dispatch failure can re-select over the
   remaining pool up to `[least_cost].max_reroutes`. Non-transient failures drop
-  the candidate and continue.
+  the candidate and continue. `route_request_async` makes one selection and
+  does not perform reroutes after its job is admitted.
 
 ## Observability (phase_2)
 
@@ -101,6 +136,20 @@ the cheapest provider in each quality tier (economy/standard/frontier). It fails
 closed (no jobs started) when `[least_cost].enabled` is false or nothing is
 eligible.
 
+These opt-in selectors are appropriate only where the user deliberately wants a
+cost-constrained sampling/review task. They are forbidden for a mandatory
+complete review under this repository's no-limit review contract.
+
+## Personal Agent Config Kit
+
+`route_request`, `route_request_async`, validation tools, and least-cost
+selection are not registered while Personal Agent Config Kit mode is enabled,
+even if `[least_cost].enabled = true`. Kit is local-only, supports Claude/Codex
+only, and requires durable
+SQLite/PostgreSQL admission. Do not try to route around that boundary; either
+use a normal non-Kit gateway only with the user's explicit approval of the
+changed boundary, or report the requested routing unavailable.
+
 ## Config (operator, `~/.llm-cli-gateway/config.toml`)
 
 ```toml
@@ -121,3 +170,6 @@ deny = []
 
 See `docs/least-cost-routing-contract.md` for the frozen decisions and
 invariants.
+
+`max_reroutes` limits only the router's transient dispatch retries for an
+ordinary cost-routed request. It is never an approval/review-round limit.

@@ -81,6 +81,19 @@ describe("REGRESSIONS Hα — registered tool fallbackModel + jsonSchema (slice 
   );
 
   it.each(["claude_request", "claude_request_async"])(
+    "%s rejects empty system-prompt overrides",
+    name => {
+      const { shape } = getRegisteredToolSchema(name);
+      for (const field of ["systemPrompt", "appendSystemPrompt"]) {
+        const schema = shape[field];
+        expect(schema, `${name}.${field} must be registered`).toBeDefined();
+        expect(schema.safeParse("override").success).toBe(true);
+        expect(schema.safeParse("").success).toBe(false);
+      }
+    }
+  );
+
+  it.each(["claude_request", "claude_request_async"])(
     "%s.jsonSchema accepts both string and object branches",
     name => {
       const { shape } = getRegisteredToolSchema(name);

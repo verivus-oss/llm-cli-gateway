@@ -16,6 +16,7 @@
         <li><a href="/tools.md">Runtime-derived MCP tool index</a></li>
         <li><a href="/api">API reference</a></li>
         <li><a href="/guides/coding-agent-gateway-technical-guide.md">Coding-agent gateway technical guide</a></li>
+        <li><a href="/guides/personal-agent-config-kit.md">Personal Agent Config Kit guide</a></li>
         <li><a href="/openapi.json">OpenAPI description for the HTTP MCP transport</a></li>
         <li><a href="/.well-known/mcp/server-card.json">MCP server card</a></li>
         <li><a href="/.well-known/api-catalog">API catalog</a></li>
@@ -24,7 +25,7 @@
       <h2>Use cases</h2>
       <p>Use llm-cli-gateway when a supported MCP client needs to operate multiple local coding-agent CLIs, run cross-model review, recover long-running async jobs, keep provider-native sessions, or expose a remote HTTP MCP endpoint with bearer or OAuth authentication.</p>
       <h2>Security model</h2>
-      <p>Remote HTTP calls are principal-scoped, require authentication unless explicitly disabled for a configured connector path, and require registered workspaces before provider tools can access files.</p>
+      <p>Remote HTTP calls are principal-scoped, require authentication unless the operator explicitly disables it globally or for a configured connector path, and require registered workspaces before provider tools can access files. Callers sharing one static bearer token deliberately share one principal; use OAuth or a trusted identity proxy for distinct identities.</p>
     </main>
   </body>
 </html>

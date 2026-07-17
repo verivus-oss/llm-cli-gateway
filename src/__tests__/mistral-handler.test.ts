@@ -25,10 +25,9 @@ describe("U22 prepareMistralRequest — Vibe divergences", () => {
     expect(result.args).not.toContain("mistral-medium-3.5");
   });
 
-  it("emits prompt via -p (mirrors Grok's headless surface)", () => {
+  it("emits prompt via an inline -p value (mirrors Grok's headless surface)", () => {
     const result = prepareMistralRequest({ prompt: "hello there" });
-    expect(result.args[0]).toBe("-p");
-    expect(result.args[1]).toBe("hello there");
+    expect(result.args[0]).toBe("-p=hello there");
   });
 
   it("defaults to --agent accept-edits in programmatic mode when no permissionMode is set (#155)", () => {

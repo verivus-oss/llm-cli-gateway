@@ -21,24 +21,23 @@ import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from "node:f
 import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  PACKED_INTERNAL_MCP_ALIASES,
+  findInternalMcpAliases,
+} from "./internal-mcp-alias-policy.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
-// Case-sensitive. `\bexa\b` therefore does not match `EXA_API_KEY` (uppercase)
-// or `example`/`exact` (word boundaries); each name's command form is matched
-// literally.
-const PATTERNS = [
-  /\bsqry\b/,
-  /sqry-mcp/,
-  /\bexa\b/,
-  /exa-mcp-server/,
-  /\bref_tools\b/,
-  /ref-tools-mcp/,
-  /\btrstr\b/,
-  /trstr-mcp/,
-  /\bagent_browser\b/,
-  /agent-browser/,
-];
+const args = process.argv.slice(2);
+if (args.some(arg => arg !== "--allow-unstripped-dist")) {
+  throw new Error("Usage: node scripts/verify-no-internal-mcp.mjs [--allow-unstripped-dist]");
+}
+const allowUnstrippedDist = args.includes("--allow-unstripped-dist");
+
+// Case-sensitive. Alias tokens therefore do not match `EXA_API_KEY` (uppercase)
+// or `example`/`exact`; canonical `mcp__alias__tool` names are deliberately
+// included because underscores delimit MCP server aliases.
+const PATTERNS = [/sqry-mcp/, /exa-mcp-server/, /ref-tools-mcp/, /trstr-mcp/, /agent-browser/];
 
 // Host-internal leak guard for shipped skills. Only caller-facing skills are
 // listed in package.json `files`; operator/maintainer skills (provider-* contract
@@ -104,11 +103,22 @@ try {
       continue; // unreadable/binary — none expected in this package
     }
     const rel = relative(extractDir, file);
+    const pathParts = rel.split(/[/\\]/);
     const isShippedSkill = /[/\\]\.agents[/\\]skills[/\\]/.test(rel);
+    const isDist = pathParts.includes("dist");
     content.split(/\r?\n/).forEach((line, index) => {
-      for (const pattern of PATTERNS) {
-        if (pattern.test(line)) {
-          findings.push(`${rel}:${index + 1}: matches ${pattern} :: ${line.trim().slice(0, 160)}`);
+      if (!allowUnstrippedDist || !isDist) {
+        for (const alias of findInternalMcpAliases(line, PACKED_INTERNAL_MCP_ALIASES)) {
+          findings.push(
+            `${rel}:${index + 1}: matches internal MCP alias ${alias} :: ${line.trim().slice(0, 160)}`
+          );
+        }
+        for (const pattern of PATTERNS) {
+          if (pattern.test(line)) {
+            findings.push(
+              `${rel}:${index + 1}: matches ${pattern} :: ${line.trim().slice(0, 160)}`
+            );
+          }
         }
       }
       if (isShippedSkill) {
@@ -134,9 +144,8 @@ try {
     process.exit(1);
   }
 
-  console.log(
-    `verify-no-internal-mcp: clean — no internal MCP names in the packed tarball (${tgzName}).`
-  );
+  const scope = allowUnstrippedDist ? " outside unstripped dist" : "";
+  console.log(`verify-no-internal-mcp: clean${scope} in the packed tarball (${tgzName}).`);
 } finally {
   rmSync(workDir, { recursive: true, force: true });
 }

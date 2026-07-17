@@ -3,6 +3,7 @@ import { randomUUID } from "crypto";
 import os from "os";
 import { hrtime } from "process";
 import {
+  createProcessGroupTerminationFence,
   envWithExtendedPath,
   getExtendedPath,
   killProcessGroup,
@@ -10,20 +11,51 @@ import {
   spawnCliProcess,
   unregisterProcessGroup,
 } from "./executor.js";
+import {
+  type ChildStdinDelivery,
+  CHILD_STDIN_INCOMPLETE_EXIT_CODE,
+  CHILD_STDIN_INCOMPLETE_MESSAGE,
+  ChildStdinIncompleteError,
+  ChildStdinWriteFailedError,
+  isChildStdinDeliveryIncomplete,
+  normalizeChildStdinDeliveryError,
+  writeAndCloseChildStdin,
+} from "./child-stdin.js";
 import type { Logger } from "./logger.js";
 import { noopLogger, logWarn } from "./logger.js";
 import { ProcessMonitor, type JobHealth } from "./process-monitor.js";
-import { JobStore, computeRequestKey, isValidationRunStore } from "./job-store.js";
+import {
+  JobStore,
+  computeRequestKey,
+  isValidationRunStore,
+  type AcknowledgedKitAttemptRelease,
+  type JobRecord,
+  type KitAttemptFenceResult,
+  type ValidationJobAdmission,
+} from "./job-store.js";
 import {
   NoopFlightRecorder,
   type FlightLogResult,
   type FlightRecorderLike,
 } from "./flight-recorder.js";
 import { codexFrResponse } from "./codex-json-parser.js";
-import { extractProviderOutputMetadata } from "./provider-output-metadata.js";
+import {
+  getClaudeMcpArtifactScopeForPath,
+  isClaudeMcpArtifactPath,
+  removeClaudeMcpArtifact,
+} from "./claude-mcp-config.js";
+import { assertMcpArtifactAdmissionInvariant } from "./mcp-artifact-admission.js";
+import {
+  createPersonalKitTerminalMetadata,
+  extractProviderOutputMetadata,
+  redactKnownProviderSessionId,
+  type PersonalKitTerminalMetadata,
+} from "./provider-output-metadata.js";
 import type {
   JobTransport,
   OrphanedJobSnapshot,
+  PendingMcpArtifactCleanup,
+  PendingKitFinalization,
   ValidationRunStore,
   SweepCandidate,
 } from "./job-store.js";
@@ -44,6 +76,24 @@ import {
   DEFAULT_ORPHAN_SWEEP_INTERVAL_MS,
   DEFAULT_INSTANCE_GC_MS,
 } from "./config.js";
+import {
+  cloneKitExecutionRef,
+  personalKitJobRequestKey,
+  type KitExecutionRef,
+} from "./personal-config-types.js";
+import {
+  JobProgressTracker,
+  parseStoredJobProgress,
+  type JobProgressCapability,
+  type JobProgressKind,
+  type JobProgressPhase,
+  type JobProgressSnapshot,
+} from "./job-progress.js";
+import {
+  CLI_INVALID_INPUT_CATEGORY,
+  CLI_INPUT_TOO_LARGE_CATEGORY,
+  normalizeCliInputAdmissionError,
+} from "./cli-input-limits.js";
 
 /**
  * #139: runtime lease/heartbeat/sweep cadences threaded into the manager. All
@@ -126,6 +176,8 @@ export type LlmCli = "claude" | "codex" | "gemini" | "grok" | "mistral" | "devin
 export type JobProvider = LlmCli | (string & {});
 export type AsyncJobStatus =
   "queued" | "running" | "completed" | "failed" | "canceled" | "orphaned";
+export type AsyncJobErrorCategory =
+  typeof CLI_INPUT_TOO_LARGE_CATEGORY | typeof CLI_INVALID_INPUT_CATEGORY;
 
 export function isAsyncJobInProgress(status: AsyncJobStatus): boolean {
   return status === "queued" || status === "running";
@@ -135,6 +187,118 @@ const MAX_OUTPUT_SIZE = 50 * 1024 * 1024;
 const JOB_TTL_MS = 60 * 60 * 1000; // 1 hour in-memory retention; durable store has its own (longer) retention
 const EVICTION_INTERVAL_MS = 5 * 60 * 1000; // Check every 5 minutes
 const OUTPUT_FLUSH_INTERVAL_MS = 1000; // Throttle DB writes for streaming stdout/stderr
+const TERMINAL_HOOK_WAIT_TIMEOUT_MS = 30_000;
+const PERSONAL_KIT_OUTPUT_WITHHELD =
+  "Personal Agent Config Kit provider output is withheld from durable job history";
+const PERSONAL_KIT_FAILURE_WITHHELD =
+  "Personal Agent Config Kit provider execution failed; detailed output is withheld";
+
+function parsePersistedJobArgs(argsJson: string): string[] {
+  try {
+    const parsed: unknown = JSON.parse(argsJson);
+    return Array.isArray(parsed) ? parsed.map(String) : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Capability follows the provider's actual wire format, not its presentation mode. */
+function resolveJobProgressCapability(
+  cli: string,
+  args: readonly string[],
+  outputFormat: string | undefined,
+  transport: JobTransport
+): JobProgressCapability {
+  if (transport === "http") return "lifecycle_only";
+  if (cli === "codex") {
+    const endOfOptions = args.indexOf("--");
+    const options = endOfOptions >= 0 ? args.slice(0, endOfOptions) : args;
+    return options.includes("--json") ? "structured" : "activity_only";
+  }
+  if (cli === "claude" && outputFormat === "stream-json") return "structured";
+  if (cli === "grok" && outputFormat === "streaming-json") return "structured";
+  return "activity_only";
+}
+
+/**
+ * Return the one generated `--mcp-config` argument only when the durable argv
+ * is structurally unambiguous. Durable rows are recovery input, not authority
+ * to delete arbitrary paths, so malformed or repeated flags are rejected.
+ */
+function parseClaudeMcpArtifactArg(argsJson: string): string | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(argsJson);
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(parsed) || !parsed.every(arg => typeof arg === "string")) {
+    return null;
+  }
+
+  let configPath: string | null = null;
+  for (let index = 0; index < parsed.length; index++) {
+    if (parsed[index] !== "--mcp-config") continue;
+    const value = parsed[index + 1];
+    if (configPath !== null || typeof value !== "string") return null;
+    configPath = value;
+    index++;
+  }
+  return configPath;
+}
+
+/**
+ * A cleanup pin is accepted only for a Claude argv whose one `--mcp-config`
+ * value is the same generated path. This keeps a generic caller-supplied
+ * artifact flag from becoming a durable retention pin.
+ */
+function resolvePersistedClaudeMcpArtifactPath(
+  cli: LlmCli,
+  args: string[],
+  requestedPath: string | undefined
+): string | null {
+  if (!requestedPath) return null;
+  if (cli !== "claude") {
+    throw new Error("Only Claude jobs can persist an MCP artifact cleanup obligation");
+  }
+  const argvPath = parseClaudeMcpArtifactArg(JSON.stringify(args));
+  if (argvPath !== requestedPath || !isClaudeMcpArtifactPath(requestedPath)) {
+    throw new Error("Claude MCP artifact provenance does not match the launched argv");
+  }
+  return requestedPath;
+}
+
+/**
+ * Persist the scope captured by the config writer, not a newly observed scope.
+ * A directory replacement between artifact creation and admission must fail
+ * closed before a child launches or a retention pin is written.
+ */
+function resolvePersistedClaudeMcpArtifactScope(
+  artifactPath: string | null,
+  requestedScope: string | undefined
+): string | null {
+  if (!artifactPath) {
+    if (requestedScope !== undefined) {
+      throw new Error("Claude MCP artifact scope requires an artifact path");
+    }
+    return null;
+  }
+  if (!requestedScope) {
+    throw new Error("Claude MCP artifact cleanup obligation requires a captured artifact scope");
+  }
+  let observedScope: string;
+  try {
+    observedScope = getClaudeMcpArtifactScopeForPath(artifactPath);
+  } catch (error) {
+    throw new Error("Claude MCP request artifact directory changed before durable admission", {
+      cause: error,
+    });
+  }
+  if (observedScope !== requestedScope) {
+    throw new Error("Claude MCP request artifact directory changed before durable admission");
+  }
+  return requestedScope;
+}
 
 /**
  * Issue #130: limits used when an AsyncJobManager is constructed WITHOUT an
@@ -181,6 +345,18 @@ export class JobSaturationError extends Error {
   ) {
     super(`Gateway is at capacity for ${provider}: ${detail}`);
     this.name = "JobSaturationError";
+  }
+}
+
+export class DurableJobAdmissionError extends Error {
+  constructor(
+    readonly provider: string,
+    cause: unknown
+  ) {
+    super(`Durable job admission failed for ${provider}: the job store rejected recordStart`, {
+      cause,
+    });
+    this.name = "DurableJobAdmissionError";
   }
 }
 
@@ -388,17 +564,38 @@ const STALL_WARNING_MARKS_MS = [5, 10, 15].map(min => min * 60 * 1000);
 function describeProcessLaunchError(
   cli: LlmCli,
   error: Error
-): { exitCode: number; message: string } {
+): {
+  exitCode: number;
+  message: string;
+  errorCategory: AsyncJobErrorCategory | null;
+  retryable: boolean | null;
+} {
+  const inputAdmission = normalizeCliInputAdmissionError(error, {
+    provider: cli,
+    inputName: "argv",
+  });
+  if (inputAdmission) {
+    return {
+      exitCode: 126,
+      message: inputAdmission.message,
+      errorCategory: inputAdmission.errorCategory,
+      retryable: inputAdmission.retryable,
+    };
+  }
   const code = (error as NodeJS.ErrnoException).code;
   if (code === "ENOENT") {
     return {
       exitCode: 127,
       message: `The '${cli}' command was not found. Install the ${cli} CLI and make sure it is on PATH. (${error.message})`,
+      errorCategory: null,
+      retryable: null,
     };
   }
   return {
     exitCode: 126,
     message: `Failed to launch ${cli} CLI: ${error.message}`,
+    errorCategory: null,
+    retryable: null,
   };
 }
 
@@ -447,6 +644,27 @@ export interface AsyncJobFlightRecorderEntry {
   optimizationApplied?: boolean;
 }
 
+const PERSONAL_KIT_FLIGHT_PROMPT_WITHHELD =
+  "Personal Agent Config Kit prompt is withheld from durable history";
+
+/**
+ * The manager is the final flight-recorder boundary for every durable Kit
+ * execution. Handler-level callers may retain a caller task for non-Kit jobs,
+ * but a Kit record receives only this fixed marker and narrow operational
+ * metadata so a new call site cannot persist a compiled context by accident.
+ */
+function redactPersonalKitFlightRecorderEntry(
+  entry: AsyncJobFlightRecorderEntry | undefined,
+  kitExecution: KitExecutionRef | null
+): AsyncJobFlightRecorderEntry | undefined {
+  if (!entry || !kitExecution) return entry;
+  return {
+    model: entry.model,
+    prompt: PERSONAL_KIT_FLIGHT_PROMPT_WITHHELD,
+    optimizationApplied: entry.optimizationApplied,
+  };
+}
+
 /**
  * Slice 1.5 usage-extraction callback. Closures MUST be constructed from
  * primitive locals only (e.g. const fmt = params.outputFormat; closure
@@ -468,6 +686,28 @@ export type AsyncJobUsageExtractor = (stdout: string) => {
   costBasis?: string;
 };
 
+/**
+ * Terminal lifecycle signal for gateway-owned state such as Kit release pins.
+ * It is deliberately distinct from `artifactCleanup`: the latter releases a
+ * request-local temp resource and must also run immediately on dedup reuse.
+ */
+export interface AsyncJobTerminalEvent {
+  snapshot: AsyncJobSnapshot;
+  /** Durable owner of the job. Lifecycle hooks must restore this principal before touching owned state. */
+  ownerPrincipal: string | null;
+  kitExecution: KitExecutionRef | null;
+  /** Gateway-owned Kit session that must receive terminal lifecycle finalization. */
+  kitSessionId: string | null;
+  /** Validated provider continuation fact, never raw stdout/stderr. */
+  terminalMetadata: PersonalKitTerminalMetadata | null;
+}
+
+export type AsyncJobTerminalHook = (event: AsyncJobTerminalEvent) => void | Promise<void>;
+
+/** Durable restart-reconciliation payload for a terminal Kit job. */
+export type AsyncKitTerminalFinalization = PendingKitFinalization;
+export type AsyncAcknowledgedKitAttemptRelease = AcknowledgedKitAttemptRelease;
+
 interface AsyncJobRecord {
   id: string;
   cli: JobProvider;
@@ -483,6 +723,8 @@ interface AsyncJobRecord {
   outputTruncated: boolean;
   canceled: boolean;
   error: string | null;
+  errorCategory: AsyncJobErrorCategory | null;
+  retryable: boolean | null;
   process: ChildProcess | null; // null when reconstituted from persistence (orphan/historical)
   /**
    * Slice 1: transport family. 'process' jobs carry a live `process`/`pid` and
@@ -512,6 +754,12 @@ interface AsyncJobRecord {
   /** Slice 1: canonical API request JSON persisted for http jobs (null for process). */
   payloadJson?: string | null;
   exited: boolean;
+  /** A process has been signalled but has not reached its close event yet. */
+  terminationRequested?: boolean;
+  /** The provider closed stdin before the complete request reached its pipe. */
+  stdinDeliveryIncomplete?: boolean;
+  /** A non-closure stdin write failed with its native details discarded. */
+  stdinDeliveryFailed?: boolean;
   metricsRecorded: boolean;
   outputFormat?: string;
   /**
@@ -522,9 +770,36 @@ interface AsyncJobRecord {
   compressResponse?: boolean | null;
   /** F3: ownership principal that created the job (null for legacy rows). */
   ownerPrincipal?: string | null;
+  /** Exact Claude MCP artifact still awaiting durable cleanup acknowledgement. */
+  mcpArtifactPath: string | null;
+  /** Durable installation-and-filesystem scope for the exact MCP artifact. */
+  mcpArtifactScope: string | null;
+  /** Immutable Kit execution identity, null for disabled/legacy requests. */
+  kitExecution: KitExecutionRef | null;
+  /** Gateway-owned Kit session which is eligible for durable reconciliation. */
+  kitSessionId: string | null;
+  /** Set only after the terminal hook's session update was durably acknowledged. */
+  kitTerminalFinalized: boolean;
+  /** Process-local validated continuation fact, never a durable job value. */
+  kitTerminalMetadata?: PersonalKitTerminalMetadata | null;
+  /** False only for a row hydrated after a process restart. */
+  kitOutputAvailableInMemory?: boolean;
+  /** True only after recordComplete has durably recorded this terminal result. */
+  terminalPersistenceAcknowledged?: boolean;
+  /** Bounded-backoff retry timer for a failed durable terminal write. */
+  terminalPersistenceRetryTimer?: ReturnType<typeof setTimeout>;
+  terminalPersistenceRetryDelayMs?: number;
+  /** Privacy-projected, bounded live progress. Raw provider content never enters this tracker. */
+  progress: JobProgressTracker;
+  progressDirty: boolean;
+  lastProgressFlushAt: number;
+  /** True only for a projection reconstructed from the shared durable store. */
+  hydratedFromStore?: boolean;
   resetIdleTimer?: () => void;
   clearIdleTimer?: () => void;
   cleanupGroup?: () => void;
+  /** Signal the whole provider group and retain ownership through escalation. */
+  terminateProcessGroup?: (signal?: NodeJS.Signals, graceMs?: number) => void;
   /**
    * Issue #130: the running-slot permit held while this job executes. Released
    * exactly once (idempotently) via releaseJobPermit on any terminal transition
@@ -538,14 +813,20 @@ interface AsyncJobRecord {
    * before the limiter granted or timed it out. Cleared once the job launches.
    */
   queueCancel?: () => boolean;
+  /** Request-local artifact cleanup, including the legacy `onComplete` alias. */
+  artifactCleanup?: () => void;
+  artifactCleanupFired?: boolean;
+  /** Durable lifecycle callback, never fired for a dedup-reused caller. */
+  onTerminal?: AsyncJobTerminalHook;
+  onTerminalFired?: boolean;
   /**
-   * U26 fix: fired exactly once when the job reaches a terminal state
-   * (completed/failed/canceled/orphaned), regardless of exit path. Used to
-   * release per-request resources such as outputSchema temp files that must
-   * outlive the deferred sync window.
+   * Resolves when this instance has finished the terminal lifecycle callback.
+   * It is intentionally in-memory only: a restarted instance must reconcile a
+   * durable Kit job rather than assume its former callback completed.
    */
-  onComplete?: () => void;
-  onCompleteFired?: boolean;
+  terminalHookCompletion?: Promise<boolean>;
+  resolveTerminalHookCompletion?: (success: boolean) => void;
+  terminalHookOutcome?: boolean;
   outputDirty: boolean; // true if stdout/stderr changed since last DB flush
   lastOutputFlushAt: number;
   /**
@@ -588,14 +869,47 @@ export interface AsyncJobSnapshot {
   stdoutBytes: number;
   stderrBytes: number;
   error: string | null;
+  /** Stable public classification for typed gateway failures. */
+  errorCategory?: AsyncJobErrorCategory;
+  /** Whether retrying the same unchanged request can succeed. */
+  retryable?: boolean;
   exited: boolean;
+  progress: JobProgressSnapshot;
 }
+
+/**
+ * Recovery callers must distinguish a missing durable row from an unavailable
+ * store. Treating both as null lets a transient database error release a Kit
+ * native-session lease while its provider process may still be alive.
+ */
+export type AsyncJobSnapshotLookup =
+  | {
+      state: "found";
+      snapshot: AsyncJobSnapshot;
+      kitExecution: KitExecutionRef | null;
+      kitSessionId: string | null;
+      kitTerminalFinalized: boolean;
+    }
+  | { state: "not_found" }
+  | { state: "unavailable" };
 
 export interface AsyncJobResult extends AsyncJobSnapshot {
   stdout: string;
   stderr: string;
   stdoutTruncated: boolean;
   stderrTruncated: boolean;
+  /** Character offset of this stdout page in the captured stream. */
+  stdoutOffsetChars: number;
+  /** Total captured stdout length in UTF-16 code units. */
+  stdoutTotalChars: number;
+  /** Next stdout offset, or null when this page reaches the end of the stream. */
+  stdoutNextOffsetChars: number | null;
+  /** Character offset of this stderr page in the captured stream. */
+  stderrOffsetChars: number;
+  /** Total captured stderr length in UTF-16 code units. */
+  stderrTotalChars: number;
+  /** Next stderr offset, or null when this page reaches the end of the stream. */
+  stderrNextOffsetChars: number | null;
   /**
    * Slice 1: structured http telemetry, present only for `transport:'http'`
    * jobs still resident in memory (captured in finalizeHttpJob). Lets the sync
@@ -627,7 +941,7 @@ export interface AsyncJobResult extends AsyncJobSnapshot {
  * Returns "" when env is undefined or empty (preserves dedup key continuity for
  * pre-U22 callers that pass no env).
  */
-function canonicaliseEnvForKey(env?: Record<string, string>): string {
+function canonicaliseEnvForKey(env?: NodeJS.ProcessEnv): string {
   if (!env) return "";
   const entries = Object.entries(env)
     .filter(([, v]) => v !== undefined && v !== null)
@@ -637,14 +951,156 @@ function canonicaliseEnvForKey(env?: Record<string, string>): string {
   return JSON.stringify(entries);
 }
 
-function truncateText(value: string, maxChars: number): { text: string; truncated: boolean } {
-  if (value.length <= maxChars) {
-    return { text: value, truncated: false };
+/**
+ * Kit output must always be tied to a gateway session before a job can be
+ * admitted. Without that binding a terminal provider handle would be durable
+ * but unrecoverable after a gateway restart, so reject the request up front.
+ */
+function normalizeKitSessionId(
+  kitExecution: KitExecutionRef | null,
+  kitSessionId: string | undefined
+): string | null {
+  if (!kitExecution) {
+    if (kitSessionId !== undefined) {
+      throw new Error("kitSessionId requires kitExecution");
+    }
+    return null;
   }
+  if (typeof kitSessionId !== "string") {
+    throw new Error("Kit async jobs require a gateway kitSessionId");
+  }
+  const normalized = kitSessionId.trim();
+  const containsControlCharacter = Array.from(normalized).some(character => {
+    const code = character.charCodeAt(0);
+    return code <= 0x1f || code === 0x7f;
+  });
+  if (!normalized || normalized.length > 512 || containsControlCharacter) {
+    throw new Error("Kit async jobs require a valid gateway kitSessionId");
+  }
+  return normalized;
+}
+
+function normalizeReservedKitJobId(
+  kitExecution: KitExecutionRef | null,
+  jobId: string | undefined
+): string | null {
+  if (!kitExecution) {
+    if (jobId !== undefined) throw new Error("jobId reservation requires kitExecution");
+    return null;
+  }
+  if (jobId === undefined) return null;
+  const normalized = jobId.trim();
+  if (
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(normalized)
+  ) {
+    throw new Error("Kit jobId reservation must be a UUID");
+  }
+  return normalized;
+}
+
+/**
+ * Kit argv contains compiled private instructions for Codex. An invalid argv
+ * containing NUL must also never become durable evidence. A persisted job
+ * cannot restart either vector, so retain only an audit marker and keep the
+ * exact live argv in memory until launch admission finishes.
+ */
+const INVALID_ARGV_REDACTION_MARKER = "[invalid argv redacted]";
+const INVALID_ARGV_FLIGHT_MODEL = "invalid-input";
+
+function containsInvalidCliArg(args: readonly string[]): boolean {
+  return args.some(argument => argument.includes("\0"));
+}
+
+function persistableJobArgs(args: string[], kitExecution: KitExecutionRef | null): string[] {
+  if (kitExecution) return ["[personal-config-kit arguments redacted]"];
+  if (containsInvalidCliArg(args)) {
+    return [INVALID_ARGV_REDACTION_MARKER];
+  }
+  return [...args];
+}
+
+/**
+ * A NUL-bearing argv is not a provider request and must never create a second
+ * durable copy of the rejected vector through flight-recorder metadata. Keep a
+ * bounded audit row while dropping every caller-derived flight field. Valid
+ * jobs retain their exact existing flight-recorder behavior.
+ */
+function redactInvalidArgvFlightRecorderEntry(
+  entry: AsyncJobFlightRecorderEntry | undefined,
+  invalidArgv: boolean
+): AsyncJobFlightRecorderEntry | undefined {
+  if (!entry || !invalidArgv) return entry;
   return {
-    text: value.slice(0, maxChars),
-    truncated: true,
+    model: INVALID_ARGV_FLIGHT_MODEL,
+    prompt: INVALID_ARGV_REDACTION_MARKER,
+    optimizationApplied: entry.optimizationApplied,
   };
+}
+
+function createTerminalHookCompletion(): {
+  promise: Promise<boolean>;
+  resolve: (success: boolean) => void;
+} {
+  let resolve!: (success: boolean) => void;
+  const promise = new Promise<boolean>(settle => {
+    resolve = settle;
+  });
+  return { promise, resolve };
+}
+
+function pageText(
+  value: string,
+  maxChars: number,
+  requestedOffsetChars: number
+): {
+  text: string;
+  truncated: boolean;
+  offsetChars: number;
+  totalChars: number;
+  nextOffsetChars: number | null;
+} {
+  const offsetChars = Math.min(Math.max(0, requestedOffsetChars), value.length);
+  const endOffsetChars = Math.min(value.length, offsetChars + maxChars);
+  return {
+    text: value.slice(offsetChars, endOffsetChars),
+    truncated: endOffsetChars < value.length,
+    offsetChars,
+    totalChars: value.length,
+    nextOffsetChars: endOffsetChars < value.length ? endOffsetChars : null,
+  };
+}
+
+/**
+ * Redact every overlap between a known provider-native identifier and one
+ * captured-output page. `offsetChars` is measured in the original stream, so
+ * a secret split across two caller-selected pages is redacted on both pages
+ * instead of escaping a whole-string replacement performed after pagination.
+ */
+function redactKnownTextPage(
+  page: string,
+  offsetChars: number,
+  fullText: string,
+  secret: string
+): string {
+  if (!page || !secret) return page;
+  const pageEnd = offsetChars + page.length;
+  let matchOffset = fullText.indexOf(secret);
+  let cursor = 0;
+  let redacted = "";
+  while (matchOffset !== -1) {
+    const matchEnd = matchOffset + secret.length;
+    const overlapStart = Math.max(offsetChars, matchOffset);
+    const overlapEnd = Math.min(pageEnd, matchEnd);
+    if (overlapStart < overlapEnd) {
+      const localStart = overlapStart - offsetChars;
+      const localEnd = overlapEnd - offsetChars;
+      redacted += page.slice(cursor, localStart);
+      redacted += "[redacted-session-id]";
+      cursor = localEnd;
+    }
+    matchOffset = fullText.indexOf(secret, matchOffset + secret.length);
+  }
+  return cursor === 0 ? page : redacted + page.slice(cursor);
 }
 
 export interface StartJobOptions {
@@ -654,6 +1110,20 @@ export interface StartJobOptions {
   /** Bypass dedup and force a fresh CLI run even if a recent matching job exists. */
   forceRefresh?: boolean;
   /**
+   * Canonical argv used only to calculate dedup identity. The launched and
+   * persisted argv remain `args`. This supports request-local artifact paths
+   * whose random filename must not defeat otherwise identical dedup requests.
+   */
+  dedupArgs?: string[];
+  /**
+   * Redacted argv written to durable storage while `args` remains the exact
+   * launch vector. Intended for bounded retained evidence such as code-review
+   * prompts that must not also be copied into args_json.
+   */
+  persistedArgs?: string[];
+  /** Optional retained non-secret process input, evicted with the job row. */
+  payloadJson?: string;
+  /**
    * Extra environment variables to inject when spawning the child CLI.
    * Used by Mistral Vibe to pass `VIBE_ACTIVE_MODEL` (Vibe has no `--model` flag).
    *
@@ -662,20 +1132,47 @@ export interface StartJobOptions {
    * Mistral requests with the same prompt but different VIBE_ACTIVE_MODEL)
    * therefore do NOT collide on dedup.
    */
-  env?: Record<string, string>;
+  env?: NodeJS.ProcessEnv;
   /**
-   * Slice κ: optional UTF-8 payload to pipe into the child's stdin.
-   * Participates in the dedup key — two requests with identical argv
-   * but different stdin do NOT collide. When set, stdio[0] is "pipe";
-   * when unset, stdio[0] stays "ignore" (regression-protected).
+   * Optional gateway-owned UTF-8 payload to pipe into the child stdin. Claude
+   * uses it for cache-control streams. Every Codex new/resume request uses it
+   * with the literal `-` prompt marker; Kit requests prepend private context to
+   * that payload. It participates in dedup, so matching argv with different
+   * stdin never collide. `codex_fork_session` remains argv-bound. When absent,
+   * stdio[0] remains "ignore".
    */
   stdin?: string;
   /**
-   * Optional hook fired exactly once when the job reaches a terminal state.
-   * Used by callers that own per-request resources (outputSchema temp files,
-   * etc.) that must persist for the lifetime of the spawned CLI process.
+   * Legacy alias for `artifactCleanup`. It releases request-local resources
+   * (such as output-schema temp files) on terminal completion or immediately
+   * when the request dedups onto an existing job.
    */
   onComplete?: () => void;
+  /** Explicit name for the request-local cleanup hook. */
+  artifactCleanup?: () => void;
+  /**
+   * Exact gateway-generated Claude MCP config path. The manager validates that
+   * it is the one launched in argv before making durable retention depend on
+   * its origin-host cleanup acknowledgement.
+   */
+  mcpArtifactPath?: string;
+  /**
+   * Scope captured by the config writer for `mcpArtifactPath`. It is required
+   * for a durable cleanup obligation so a later directory lookup cannot bind a
+   * request file to a replacement installation.
+   */
+  mcpArtifactScope?: string;
+  /** Exactly-once terminal lifecycle signal for the newly-created job only. */
+  onTerminal?: AsyncJobTerminalHook;
+  /** Immutable Kit context persisted for session fencing and release pinning. */
+  kitExecution?: KitExecutionRef | null;
+  /** Gateway-owned Kit session. Required whenever `kitExecution` is supplied. */
+  kitSessionId?: string;
+  /**
+   * Caller-reserved durable id for a Kit job. The Kit session records this id
+   * before admission, closing the session-to-job crash gap.
+   */
+  jobId?: string;
   /**
    * Slice 1.5: when true, AsyncJobManager writes a flight-recorder logStart
    * row at startJob entry using `flightRecorderEntry`. Pure async handlers
@@ -702,6 +1199,15 @@ export interface StartJobOptions {
    * compression-off job (or vice versa).
    */
   compressResponse?: boolean;
+  /** Hold a newly admitted queued job until the caller releases the launch gate. */
+  deferLaunch?: boolean;
+  /** Durable review-run link committed atomically with the queued job row. */
+  validationAdmission?: ValidationJobAdmission;
+}
+
+export interface DeferredJobLaunch {
+  release(): void;
+  cancel(): boolean;
 }
 
 export interface StartJobOutcome {
@@ -710,6 +1216,8 @@ export interface StartJobOutcome {
   deduped: boolean;
   /** Set when deduped — the original job's correlation id, useful for logging. */
   originalCorrelationId?: string;
+  /** Present only when deferLaunch admitted a fresh job behind a launch gate. */
+  deferredLaunch?: DeferredJobLaunch;
 }
 
 export class AsyncJobManager {
@@ -854,6 +1362,9 @@ export class AsyncJobManager {
    * (isolate-mode / tests without persistence) is unaffected.
    */
   private assertDurableAdmission(provider: string): void {
+    if (this.disposed) {
+      throw new Error(`Async admission is disabled for ${provider}: gateway is shutting down.`);
+    }
     if (this.store && !this.durableAdmission) {
       throw new Error(
         `Durable async admission is disabled for ${provider}: this gateway instance could not register or lost its heartbeat lease. Retry after the gateway recovers.`
@@ -874,7 +1385,8 @@ export class AsyncJobManager {
    * produce (drain AFTER the kills); (4) deregister ONLY when no active owned
    * work remains, else skip deregister and let the lease expire naturally so a
    * job still being finalized is never orphaned mid-write by another instance.
-   * Idempotent; a null-store (isolate-mode) manager disposes as a no-op.
+   * Idempotent; a null-store (isolate-mode) manager still stops live local work
+   * but has no instance row to deregister.
    */
   async dispose(opts: { timeoutMs?: number } = {}): Promise<void> {
     const timeoutMs = opts.timeoutMs ?? 5000;
@@ -891,45 +1403,83 @@ export class AsyncJobManager {
     this.evictionTimer = null;
     this.stallTimer = null;
 
-    if (!this.store) return; // isolate-mode / no durable state: nothing to deregister.
+    // (3) terminalize queued work before signalling running work. A released
+    // permit can otherwise grant a queued job while shutdown is in progress.
+    const queued = [...this.jobs.values()].filter(job => job.status === "queued");
+    for (const job of queued) {
+      job.queueCancel?.();
+      this.failQueuedJob(job, "Gateway is shutting down before execution", 1);
+    }
 
-    // (3) abort/kill active owned jobs; their close handlers / finalizers run the
-    // synchronous terminal recordComplete when they fire.
-    const active = [...this.jobs.values()].filter(job => isAsyncJobInProgress(job.status));
+    // Terminal Kit writes may already be waiting on an unref retry timer. Make
+    // one immediate attempt while dispose still owns the store and includes the
+    // result in its drain fence.
+    for (const job of this.jobs.values()) {
+      this.retryTerminalPersistenceNow(job);
+    }
+
+    // (4) abort/kill active owned jobs. Mark the shutdown fence before the
+    // signal: SIGTERM is only a request, and the close event is the proof that
+    // the provider can no longer mutate its native session.
+    const deadline = Date.now() + timeoutMs;
+    const killEscalationDelayMs =
+      timeoutMs <= 50 ? 0 : Math.max(25, Math.min(1_000, Math.floor(timeoutMs / 3)));
+    const active = [...this.jobs.values()].filter(job => job.status === "running");
     for (const job of active) {
       try {
+        job.terminationRequested = true;
+        job.exitCode = 1;
+        job.error = "Gateway shutdown requested before provider process reached close";
+        job.clearIdleTimer?.();
         if (job.transport === "http") {
           job.abort?.abort();
         } else if (job.process) {
-          killProcessGroup(job.process, "SIGTERM");
+          if (job.terminateProcessGroup) {
+            job.terminateProcessGroup("SIGTERM", killEscalationDelayMs);
+          } else {
+            // Defensive compatibility for an unusual live record created
+            // before the per-launch termination fence was installed.
+            killProcessGroup(job.process, "SIGKILL");
+            job.cleanupGroup?.();
+          }
         }
       } catch (err) {
         this.logger.error(`#139 dispose: failed to signal job ${job.id}`, err);
       }
     }
-    // Drain (bounded): wait for the killed jobs to reach a terminal state and for
-    // any tracked async terminal writes to settle.
-    const deadline = Date.now() + timeoutMs;
+    // Drain (bounded): wait for the killed jobs to reach a terminal state, for
+    // any Kit terminal persistence retry to be acknowledged, and for tracked
+    // asynchronous terminal hooks to settle.
     while (Date.now() < deadline) {
       const stillActive = [...this.jobs.values()].some(job => isAsyncJobInProgress(job.status));
-      if (!stillActive && this.pendingWrites.size === 0) break;
-      await Promise.race([
-        Promise.allSettled([...this.pendingWrites]),
-        new Promise(resolve => setTimeout(resolve, 50)),
-      ]);
+      const hasPendingTerminalPersistence = this.hasPendingTerminalPersistence();
+      if (!stillActive && !hasPendingTerminalPersistence && this.pendingWrites.size === 0) break;
+      const delay = new Promise<void>(resolve => setTimeout(resolve, 50));
+      // Promise.allSettled([]) resolves in a microtask. Racing that empty
+      // promise against the timer would spin until the deadline and starve an
+      // unref terminal-persistence retry from ever running.
+      if (this.pendingWrites.size > 0) {
+        await Promise.race([Promise.allSettled([...this.pendingWrites]), delay]);
+      } else {
+        await delay;
+      }
     }
 
     const stillActive = [...this.jobs.values()].some(job => isAsyncJobInProgress(job.status));
-    if (stillActive) {
-      // (4) do NOT deregister while jobs are still finalizing: let the lease
+    const hasPendingTerminalPersistence = this.hasPendingTerminalPersistence();
+    if (stillActive || hasPendingTerminalPersistence || this.pendingWrites.size > 0) {
+      // (5) do NOT deregister while jobs are still finalizing: let the lease
       // expire so another instance recovers them correctly rather than a
-      // mid-write orphan.
+      // mid-write orphan. This includes terminal Kit rows whose captured output
+      // has not yet reached durable storage and terminal lifecycle hooks that
+      // have not settled.
       logWarn(
         this.logger,
-        "#139 dispose timed out with active owned jobs; skipping deregister and letting the lease expire"
+        "#139 dispose timed out with unfinished owned job finalization; skipping deregister and letting the lease expire"
       );
       return;
     }
+    if (!this.store) return; // isolate-mode / no durable state: nothing to deregister.
     try {
       this.store.deregisterInstance(this.instanceId);
     } catch (err) {
@@ -1055,6 +1605,7 @@ export class AsyncJobManager {
       }
       // Startup and recovery both use the same guarded per-job lease sweep.
       this.runOrphanSweep();
+      this.reconcileLocalOrphanedClaudeMcpArtifacts();
     } catch (err) {
       this.durableAdmission = false;
       this.consecutiveHeartbeatSuccesses = 0;
@@ -1084,12 +1635,17 @@ export class AsyncJobManager {
     }
     const leaseTtl = this.lease.instanceLeaseTtlMs;
     const httpGrace = this.lease.httpJobGraceMs;
-    let liveConfirmedIds: string[] = [];
+    let candidates: SweepCandidate[];
+    let liveConfirmedIds: string[];
     try {
-      const candidates = this.store.selectStaleProcessCandidates(leaseTtl, httpGrace);
+      candidates = this.store.selectStaleProcessCandidates(leaseTtl, httpGrace);
       liveConfirmedIds = this.confirmLiveProcessCandidates(candidates);
     } catch (err) {
       this.logger.error("#139 selecting stale process candidates failed", err);
+      // Without the candidate read, this instance cannot preserve the one-shot
+      // same-host PID grace. Skipping this cycle is safer than sweeping every
+      // expired lease as if no live process had been found.
+      return;
     }
     let orphaned: OrphanedJobSnapshot[];
     try {
@@ -1103,12 +1659,259 @@ export class AsyncJobManager {
         `#139 orphaned ${orphaned.length} stale job(s) whose owning instance is gone`
       );
     }
+    const candidatesById = new Map(candidates.map(candidate => [candidate.id, candidate]));
     for (const orphan of orphaned) {
+      this.persistOrphanProgress(orphan.id);
+      this.cleanupConfirmedOrphanClaudeMcpArtifact(orphan.id, candidatesById.get(orphan.id));
       try {
         this.flightRecorder.logComplete(orphan.correlationId, this.buildOrphanFlightResult(orphan));
       } catch (err) {
         this.logger.error(`#139 FR logComplete for orphaned job ${orphan.id} failed`, err);
       }
+    }
+  }
+
+  /**
+   * Append an orphan terminal event without racing a late live completion. The
+   * status-guarded write is a no-op if the row has already advanced beyond the
+   * orphaned state.
+   */
+  private persistOrphanProgress(jobId: string): void {
+    if (!this.store?.recordProgressIfStatus) return;
+    try {
+      const row = this.store.getById(jobId);
+      if (!row || row.status !== "orphaned") return;
+      const tracker = new JobProgressTracker(
+        row.cli,
+        row.outputFormat ?? undefined,
+        parseStoredJobProgress(row.progressJson),
+        row.startedAt,
+        resolveJobProgressCapability(
+          row.cli,
+          parsePersistedJobArgs(row.argsJson),
+          row.outputFormat ?? undefined,
+          row.transport
+        )
+      );
+      if (!tracker.snapshot().events.some(event => event.kind === "terminal")) {
+        tracker.emit("failed", "terminal", "Job orphaned after its gateway lease expired");
+      }
+      this.store.recordProgressIfStatus(jobId, "orphaned", tracker.serialize());
+    } catch (err) {
+      this.logger.error(`#192 failed to persist terminal progress for orphaned job ${jobId}`, err);
+    }
+  }
+
+  /**
+   * A shared store may be swept by a different workstation. When this host
+   * later starts, reconcile only rows whose durable owner hostname matches this
+   * host. There is no globbing or remote-path cleanup: every row is validated
+   * again by the same strict artifact predicate below.
+   */
+  private reconcileLocalOrphanedClaudeMcpArtifacts(): void {
+    if (!this.store || this.disposed || !this.durableAdmission) return;
+    // Legacy rows predate exact-path provenance, so retain the old orphan-only
+    // projection for their best-effort cleanup. New rows use the durable
+    // pending/ack projection below, which also covers terminal cleanup retries.
+    const selectCandidates = this.store.selectOrphanedProcessCandidates;
+    if (typeof selectCandidates === "function") {
+      try {
+        const candidates = selectCandidates.call(this.store, this.hostname);
+        for (const candidate of candidates) {
+          this.cleanupConfirmedOrphanClaudeMcpArtifact(candidate.id, candidate);
+        }
+      } catch (err) {
+        this.logger.error("#139 selecting local orphaned MCP artifact candidates failed", err);
+      }
+    }
+
+    // A row remains retention-pinned until the originating host has handled
+    // its exact path. New scopes are per-request-directory identities, so the
+    // selector deliberately returns same-host candidates and the shared
+    // remover compares each row's captured scope after it has opened that
+    // candidate's directory. This remains a database projection, not a
+    // directory scan.
+    const selectPending = this.store.selectPendingMcpArtifactCleanups;
+    if (typeof selectPending !== "function") return;
+    try {
+      const pending = selectPending.call(this.store, this.hostname);
+      for (const candidate of pending) {
+        this.cleanupPendingClaudeMcpArtifact(candidate);
+      }
+    } catch (err) {
+      this.logger.error("#139 selecting pending local MCP artifact cleanups failed", err);
+    }
+  }
+
+  /**
+   * Reclaim a request-scoped Claude MCP config only after the durable sweep
+   * atomically changed its job row to `orphaned`. A local, stale process
+   * candidate is required as an additional guard. A candidate may be queued
+   * with no pid, in which case no child was started. A shared store may contain
+   * remote jobs whose argv paths are meaningful only on their owner host.
+   */
+  private cleanupConfirmedOrphanClaudeMcpArtifact(
+    jobId: string,
+    candidate: SweepCandidate | undefined
+  ): void {
+    if (
+      !this.store ||
+      !candidate ||
+      candidate.transport !== "process" ||
+      candidate.hostname !== this.hostname
+    ) {
+      return;
+    }
+
+    let row: JobRecord | null;
+    try {
+      row = this.store.getById(jobId);
+    } catch (err) {
+      this.logger.error(`#139 failed to read orphaned job ${jobId} for MCP artifact cleanup`, err);
+      return;
+    }
+    if (
+      !row ||
+      row.status !== "orphaned" ||
+      row.cli !== "claude" ||
+      row.transport !== "process" ||
+      row.ownerInstance !== candidate.ownerInstance ||
+      row.ownerHostname !== candidate.hostname
+    ) {
+      return;
+    }
+
+    // A retained artifact without its captured scope cannot safely be
+    // reclaimed. This applies to legacy unpinned rows too: their argv remains
+    // recovery input, never authority to delete a current local path.
+    if (!row.mcpArtifactScope) {
+      this.logger.error(
+        `#139 orphaned Claude MCP artifact cleanup has no captured scope for job ${jobId}; retaining artifact path`
+      );
+      return;
+    }
+    const artifactPath = row.mcpArtifactPath ?? parseClaudeMcpArtifactArg(row.argsJson);
+    if (!artifactPath) return;
+    const result = removeClaudeMcpArtifact(artifactPath, row.mcpArtifactScope);
+    if (result !== "removed") {
+      this.logger.error(
+        `#139 orphaned Claude MCP artifact cleanup ${result} for job ${jobId}; retaining durable acknowledgement pending`
+      );
+      return;
+    }
+    if (
+      row.mcpArtifactCleanupPending &&
+      row.mcpArtifactPath === artifactPath &&
+      row.mcpArtifactScope
+    ) {
+      this.acknowledgeMcpArtifactCleanup(
+        jobId,
+        candidate.hostname,
+        row.mcpArtifactScope,
+        artifactPath
+      );
+    }
+  }
+
+  /**
+   * Reconcile a path explicitly recorded at admission. The extra row checks
+   * turn the selector into a narrow hint only: the acknowledgement remains a
+   * compare-and-set against the same job id, host, and artifact path.
+   */
+  private cleanupPendingClaudeMcpArtifact(candidate: PendingMcpArtifactCleanup): void {
+    if (!this.store || candidate.hostname !== this.hostname) return;
+    let row: JobRecord | null;
+    try {
+      row = this.store.getById(candidate.id);
+    } catch (err) {
+      this.logger.error(`#139 failed to read pending MCP artifact job ${candidate.id}`, err);
+      return;
+    }
+    if (
+      !row ||
+      row.cli !== "claude" ||
+      row.transport !== "process" ||
+      row.ownerHostname !== candidate.hostname ||
+      row.ownerInstance !== candidate.ownerInstance ||
+      row.mcpArtifactScope !== candidate.artifactScope ||
+      row.mcpArtifactPath !== candidate.artifactPath ||
+      !row.mcpArtifactCleanupPending ||
+      (row.status !== "completed" &&
+        row.status !== "failed" &&
+        row.status !== "canceled" &&
+        row.status !== "orphaned")
+    ) {
+      return;
+    }
+    const result = removeClaudeMcpArtifact(candidate.artifactPath, candidate.artifactScope);
+    if (result !== "removed") {
+      this.logger.error(
+        `#139 pending Claude MCP artifact cleanup ${result} for job ${candidate.id}; retaining durable acknowledgement pending`
+      );
+      return;
+    }
+    this.acknowledgeMcpArtifactCleanup(
+      candidate.id,
+      candidate.hostname,
+      candidate.artifactScope,
+      candidate.artifactPath
+    );
+  }
+
+  private acknowledgeMcpArtifactCleanup(
+    jobId: string,
+    hostname: string,
+    artifactScope: string,
+    artifactPath: string
+  ): boolean {
+    const acknowledge = this.store?.acknowledgeMcpArtifactCleanup;
+    if (typeof acknowledge !== "function") return false;
+    try {
+      const acknowledged = acknowledge.call(
+        this.store,
+        jobId,
+        hostname,
+        artifactScope,
+        artifactPath
+      );
+      if (!acknowledged) {
+        this.logger.error(
+          `#139 Claude MCP artifact cleanup acknowledgement did not match pending job ${jobId}`
+        );
+      }
+      return acknowledged;
+    } catch (err) {
+      this.logger.error(
+        `#139 Claude MCP artifact cleanup acknowledgement failed for job ${jobId}`,
+        err
+      );
+      return false;
+    }
+  }
+
+  /**
+   * Normal terminal cleanup has already proved the local child is gone. If a
+   * wrapper cleanup failed, retry only the exact persisted artifact here; never
+   * scan the directory. A failed durable acknowledgement stays pinned and is
+   * retried by the origin-host startup reconciliation.
+   */
+  private finalizeMcpArtifactCleanup(job: AsyncJobRecord): void {
+    const artifactPath = job.mcpArtifactPath;
+    const artifactScope = job.mcpArtifactScope;
+    if (!artifactPath || !artifactScope) return;
+    // removeClaudeMcpArtifact performs the same pre-unlink scope proof and
+    // turns an unsafe or unreadable replacement directory into a retained-pin
+    // result rather than allowing terminal lifecycle handling to throw.
+    const result = removeClaudeMcpArtifact(artifactPath, artifactScope);
+    if (result !== "removed") {
+      this.logger.error(
+        `#139 Claude MCP artifact terminal cleanup ${result} for job ${job.id}; retaining durable acknowledgement pending`
+      );
+      return;
+    }
+    if (this.acknowledgeMcpArtifactCleanup(job.id, this.hostname, artifactScope, artifactPath)) {
+      job.mcpArtifactPath = null;
+      job.mcpArtifactScope = null;
     }
   }
 
@@ -1152,7 +1955,16 @@ export class AsyncJobManager {
     acq: { state: "granted"; permit: LimiterPermit } | { state: "queued"; cancel: () => boolean },
     input: Parameters<JobStore["recordStart"]>[0]
   ): void {
-    if (!this.store) return;
+    if (!this.store || (input.validationAdmission && !isValidationRunStore(this.store))) {
+      if (!input.validationAdmission) return;
+      if (acq.state === "granted") acq.permit.release();
+      else acq.cancel();
+      this.jobs.delete(job.id);
+      throw new DurableJobAdmissionError(
+        job.cli,
+        new Error("Validation job admission requires a healthy validation-run store")
+      );
+    }
     try {
       this.store.recordStart(input);
     } catch (err) {
@@ -1163,10 +1975,7 @@ export class AsyncJobManager {
         `#139 durable recordStart failed for job ${job.id}; failing the request (fail-closed)`,
         err
       );
-      throw new Error(
-        `Durable job admission failed for ${job.cli}: the job store rejected recordStart`,
-        { cause: err }
-      );
+      throw new DurableJobAdmissionError(job.cli, err);
     }
   }
 
@@ -1201,6 +2010,19 @@ export class AsyncJobManager {
 
   private buildOrphanFlightResult(orphan: OrphanedJobSnapshot): FlightLogResult {
     const durationMs = Math.max(0, Date.now() - new Date(orphan.startedAt).getTime());
+    if (orphan.isPersonalConfigKit) {
+      return {
+        response: "Personal Agent Config Kit provider output is withheld",
+        durationMs,
+        retryCount: 0,
+        circuitBreakerState: "closed",
+        optimizationApplied: false,
+        exitCode: orphan.exitCode ?? 1,
+        httpStatus: orphan.transport === "http" ? (orphan.httpStatus ?? undefined) : undefined,
+        errorMessage: "Personal Agent Config Kit job was orphaned; detailed output is withheld",
+        status: "failed",
+      };
+    }
     const hasCapturedStdout = orphan.stdout.length > 0;
     const hasKnownSuccessfulExit = orphan.exitCode === 0;
     const hasCapturedResponseWithoutFailure = orphan.exitCode === null && hasCapturedStdout;
@@ -1391,8 +2213,10 @@ export class AsyncJobManager {
   }
 
   /**
-   * Compute the dedup key for a job. Stable across re-issues of the same request,
-   * which is exactly what allows agents to safely retry without restarting the run.
+   * Compute the dedup key for a non-Kit job. Stable across re-issues of the same
+   * request, which is exactly what allows agents to safely retry without
+   * restarting the run. Kit jobs always force a fresh run and use their
+   * pre-reserved durable UUID as an opaque request key instead.
    *
    * U22 fix: env vars participate in the key via a deterministic canonicalisation
    * (sorted keys → JSON-stringified). This prevents two Mistral requests with the
@@ -1401,18 +2225,16 @@ export class AsyncJobManager {
   private buildRequestKey(
     cli: LlmCli,
     args: string[],
-    env?: Record<string, string>,
+    env?: NodeJS.ProcessEnv,
     stdin?: string,
     cwd?: string,
     outputFormat?: string,
     compressResponse?: boolean
   ): string {
-    // Slice κ: stdin participates in the dedup key. Two Claude requests
-    // with identical argv but different cache_control content blocks
-    // would otherwise collide on dedup and the second caller would get
-    // the wrong response. The legacy "no stdin" code path passes
-    // stdin=undefined, which serialises to the same empty marker the
-    // previous version emitted — non-κ dedup is unchanged.
+    // stdin participates in the dedup key. Two process requests with identical
+    // argv but different cache-control payloads would otherwise collide
+    // and return the wrong response. The legacy no-stdin path keeps its prior
+    // empty marker shape.
     // Slice λ: cwd participates similarly. Two requests with identical
     // argv but different worktrees would otherwise collide on dedup and
     // the second caller would receive a response executed in the wrong
@@ -1485,7 +2307,7 @@ export class AsyncJobManager {
     requestKey: string,
     correlationId: string,
     label: string,
-    onComplete?: () => void
+    artifactCleanup?: () => void
   ): StartJobOutcome | null {
     if (!this.store) return null;
     try {
@@ -1516,11 +2338,11 @@ export class AsyncJobManager {
       });
       // U26: the new request's per-request resources are not consumed by the
       // deduped job — release its cleanup now to avoid an orphaned temp file.
-      if (onComplete) {
+      if (artifactCleanup) {
         try {
-          onComplete();
+          artifactCleanup();
         } catch (err) {
-          this.logger.error("dedup onComplete cleanup threw", err);
+          this.logger.error("dedup artifact cleanup threw", err);
         }
       }
       return {
@@ -1547,10 +2369,17 @@ export class AsyncJobManager {
     apiRequest: ApiRequest;
     correlationId: string;
     forceRefresh?: boolean;
+    /** Legacy alias for artifactCleanup. */
     onComplete?: () => void;
+    artifactCleanup?: () => void;
+    onTerminal?: AsyncJobTerminalHook;
+    kitExecution?: KitExecutionRef | null;
+    kitSessionId?: string;
     writeFlightStart?: boolean;
     flightRecorderEntry?: AsyncJobFlightRecorderEntry;
     extractUsage?: AsyncJobUsageExtractor;
+    deferLaunch?: boolean;
+    validationAdmission?: ValidationJobAdmission;
   }): StartJobOutcome {
     const {
       provider,
@@ -1558,14 +2387,35 @@ export class AsyncJobManager {
       correlationId,
       forceRefresh,
       onComplete,
+      artifactCleanup,
+      onTerminal,
+      kitExecution,
+      kitSessionId,
       writeFlightStart,
       flightRecorderEntry,
       extractUsage,
+      deferLaunch,
+      validationAdmission,
     } = params;
+    const stableKitExecution = kitExecution ? cloneKitExecutionRef(kitExecution) : null;
+    const stableKitSessionId = normalizeKitSessionId(stableKitExecution, kitSessionId);
+    if (stableKitExecution) {
+      throw new Error("Personal Agent Config Kit jobs must use the durable CLI execution path");
+    }
     const requestKey = this.buildHttpRequestKey(provider.name, apiRequest);
+    const cleanup = artifactCleanup ?? onComplete;
 
+    if (validationAdmission && !forceRefresh) {
+      throw new Error("Validation review jobs require forceRefresh");
+    }
+    if (validationAdmission && (!isValidationRunStore(this.store) || !this.durableAdmission)) {
+      throw new DurableJobAdmissionError(
+        provider.name,
+        new Error("Validation job admission requires a healthy validation-run store")
+      );
+    }
     if (!forceRefresh) {
-      const reused = this.tryReuseDedupedJob(requestKey, correlationId, provider.name, onComplete);
+      const reused = this.tryReuseDedupedJob(requestKey, correlationId, provider.name, cleanup);
       if (reused) return reused;
     }
 
@@ -1592,6 +2442,7 @@ export class AsyncJobManager {
       reasoningEffort: apiRequest.reasoningEffort,
       previousResponseId: apiRequest.previousResponseId,
     });
+    const terminalHookCompletion = createTerminalHookCompletion();
 
     const job: AsyncJobRecord = {
       id,
@@ -1611,6 +2462,8 @@ export class AsyncJobManager {
       outputTruncated: false,
       canceled: false,
       error: null,
+      errorCategory: null,
+      retryable: null,
       process: null,
       transport: "http",
       abort,
@@ -1619,8 +2472,22 @@ export class AsyncJobManager {
       exited: false,
       metricsRecorded: false,
       ownerPrincipal,
-      onComplete,
-      onCompleteFired: false,
+      mcpArtifactPath: null,
+      mcpArtifactScope: null,
+      kitExecution: stableKitExecution,
+      kitSessionId: stableKitSessionId,
+      kitOutputAvailableInMemory: stableKitExecution !== null,
+      kitTerminalFinalized: false,
+      terminalPersistenceAcknowledged: stableKitExecution === null,
+      progress: new JobProgressTracker(provider.name, undefined, null, startedAt, "lifecycle_only"),
+      progressDirty: true,
+      lastProgressFlushAt: Date.now(),
+      artifactCleanup: cleanup,
+      artifactCleanupFired: false,
+      onTerminal,
+      onTerminalFired: false,
+      terminalHookCompletion: terminalHookCompletion.promise,
+      resolveTerminalHookCompletion: terminalHookCompletion.resolve,
       outputDirty: false,
       lastOutputFlushAt: Date.now(),
       flightRecorderEntry,
@@ -1629,18 +2496,25 @@ export class AsyncJobManager {
       flightCompleteArmed: writeFlightStart === true,
     };
 
+    job.progress.emit("queued", "lifecycle", "Job queued");
+
     this.jobs.set(id, job);
 
     // Issue #130: fire the outbound request only once a limiter permit is held.
     const launch = (permit: LimiterPermit): void => {
       job.limiterPermit = permit;
       job.queueCancel = undefined;
+      if (this.disposed && job.status === "queued") {
+        this.failQueuedJob(job, "Gateway is shutting down before execution", 1);
+        return;
+      }
       // Canceled/aborted while queued before this grant landed: return the permit.
       if (job.status !== "queued") {
         this.releaseJobPermit(job);
         return;
       }
       job.status = "running";
+      this.emitProgress(job, "starting", "lifecycle", "Provider request started");
       // #139: flip the durable row queued -> running (http jobs have no pid).
       // Best-effort here: the row already exists (recordStart) and the lease
       // keeps it alive; an http row that fails to mark-running still carries a
@@ -1658,9 +2532,21 @@ export class AsyncJobManager {
       this.trackPendingWrite(settle);
     };
 
+    let launchReleased = deferLaunch !== true;
+    let heldPermit: LimiterPermit | null = null;
+    const grantOrHold = (permit: LimiterPermit): void => {
+      job.queueCancel = undefined;
+      if (!launchReleased) {
+        heldPermit = permit;
+        job.limiterPermit = permit;
+        return;
+      }
+      launch(permit);
+    };
+
     const acq = this.limiter.acquire(
       provider.name,
-      permit => launch(permit),
+      permit => grantOrHold(permit),
       () => this.failQueuedJob(job, "queue wait timed out before a run slot was free")
     );
     if (acq.state === "rejected") {
@@ -1684,9 +2570,14 @@ export class AsyncJobManager {
       pid: null,
       ownerPrincipal,
       ownerInstance: this.instanceId,
+      ownerHostname: this.hostname,
       transport: "http",
       payloadJson,
+      kitExecution: stableKitExecution,
+      kitSessionId: stableKitSessionId,
+      validationAdmission,
     });
+    this.maybeFlushProgress(job, true);
     if (writeFlightStart && flightRecorderEntry) {
       try {
         this.flightRecorder.logStart({
@@ -1703,8 +2594,14 @@ export class AsyncJobManager {
     }
 
     if (acq.state === "granted") {
-      this.logger.info(`Job ${id} started for ${provider.name} (http)`, { correlationId });
-      launch(acq.permit);
+      if (deferLaunch) {
+        heldPermit = acq.permit;
+        job.limiterPermit = acq.permit;
+        this.logger.info(`Job ${id} prepared for ${provider.name} (http)`, { correlationId });
+      } else {
+        this.logger.info(`Job ${id} started for ${provider.name} (http)`, { correlationId });
+        launch(acq.permit);
+      }
     } else {
       job.queueCancel = acq.cancel;
       this.logger.info(`Job ${id} queued for ${provider.name} (http, limiter saturated)`, {
@@ -1712,7 +2609,25 @@ export class AsyncJobManager {
       });
     }
 
-    return { snapshot: this.snapshot(job), deduped: false };
+    const deferredControl: DeferredJobLaunch | undefined = deferLaunch
+      ? {
+          release: () => {
+            if (launchReleased) return;
+            launchReleased = true;
+            if (job.status !== "queued") return;
+            const permit = heldPermit;
+            heldPermit = null;
+            if (permit) launch(permit);
+          },
+          cancel: () => {
+            if (launchReleased) return false;
+            launchReleased = true;
+            heldPermit = null;
+            return this.cancelJob(id).canceled;
+          },
+        }
+      : undefined;
+    return { snapshot: this.snapshot(job), deduped: false, deferredLaunch: deferredControl };
   }
 
   /**
@@ -1727,7 +2642,12 @@ export class AsyncJobManager {
     error: Error | null
   ): void {
     if (job.status !== "running") return; // canceled or already settled
-    if (result) {
+    if (job.terminationRequested) {
+      job.status = "failed";
+      job.exitCode = job.exitCode ?? 1;
+      job.error ??= "Gateway shutdown requested before provider request settled";
+      if (error) job.stderr = error.message;
+    } else if (result) {
       job.status = "completed";
       job.stdout = result.text;
       job.httpStatus = result.httpStatus;
@@ -1759,20 +2679,98 @@ export class AsyncJobManager {
     this.fireOnComplete(job);
   }
 
+  private settleTerminalHook(job: AsyncJobRecord, success: boolean): void {
+    if (job.terminalHookOutcome !== undefined) return;
+    // The session-side terminal hook must finish before the job row can lose
+    // its durable finalization pin. A failed hook remains pending for restart
+    // reconciliation instead of being acknowledged optimistically.
+    if (success && job.kitExecution && job.kitSessionId) {
+      success = job.kitTerminalFinalized || this.markKitTerminalFinalized(job.id, job.kitSessionId);
+      if (!success) {
+        this.logger.error(
+          `Kit terminal-finalization acknowledgement failed for job ${job.id}; retaining it for reconciliation`
+        );
+      }
+    }
+    job.terminalHookOutcome = success;
+    const resolve = job.resolveTerminalHookCompletion;
+    job.resolveTerminalHookCompletion = undefined;
+    resolve?.(success);
+  }
+
   private fireOnComplete(job: AsyncJobRecord): void {
+    const liveProcessMayStillReadArtifacts =
+      job.transport === "process" && job.process !== null && !job.exited;
+    // A signal request is not death proof. In particular, a child can ignore
+    // SIGTERM while still mutating a provider-native session. Only the close
+    // handler (or a definitive child error) may hand a Kit attempt to its
+    // terminal session callback.
+    if (job.kitExecution && liveProcessMayStillReadArtifacts) return;
+    if (job.kitExecution && !job.terminalPersistenceAcknowledged) {
+      this.scheduleTerminalPersistenceRetry(job);
+      return;
+    }
     // Issue #130: releasing the running slot is the FIRST thing every terminal
     // transition does. fireOnComplete is invoked at every terminal site
     // (completed/failed/canceled/orphaned/idle-timeout/output-overflow), and
     // releaseJobPermit is idempotent, so the permit is released exactly once
     // regardless of which callback fires first or how many fire.
     this.releaseJobPermit(job);
-    if (job.onCompleteFired) return;
-    if (!job.onComplete) return;
-    job.onCompleteFired = true;
-    try {
-      job.onComplete();
-    } catch (err) {
-      this.logger.error(`Job ${job.id} onComplete hook threw`, err);
+    if (job.onTerminal) {
+      if (!job.onTerminalFired) {
+        job.onTerminalFired = true;
+        try {
+          const terminalResult = job.onTerminal({
+            snapshot: this.snapshot(job),
+            ownerPrincipal: job.ownerPrincipal ?? null,
+            kitExecution: job.kitExecution ? cloneKitExecutionRef(job.kitExecution) : null,
+            kitSessionId: job.kitSessionId,
+            terminalMetadata: this.kitTerminalMetadata(job),
+          });
+          if (terminalResult && typeof (terminalResult as Promise<void>).then === "function") {
+            const completion = Promise.resolve(terminalResult)
+              .then(() => {
+                this.settleTerminalHook(job, true);
+                return true;
+              })
+              .catch(err => {
+                this.logger.error(`Job ${job.id} async onTerminal hook threw`, err);
+                this.settleTerminalHook(job, false);
+                return false;
+              });
+            this.trackPendingWrite(completion);
+          } else {
+            this.settleTerminalHook(job, true);
+          }
+        } catch (err) {
+          this.logger.error(`Job ${job.id} onTerminal hook threw`, err);
+          this.settleTerminalHook(job, false);
+        }
+      }
+    } else {
+      // A non-Kit job has no terminal state to persist. A Kit job without its
+      // required hook must remain unsuccessful so a caller cannot mistake it
+      // for a finalized durable continuation.
+      this.settleTerminalHook(job, !job.kitExecution);
+    }
+    if (!liveProcessMayStillReadArtifacts) {
+      // The durable MCP path must perform its own confirmed unlink before the
+      // generic request cleanup hook. A hook that removes the file first would
+      // leave only ENOENT, which intentionally cannot acknowledge a pin.
+      this.finalizeMcpArtifactCleanup(job);
+    }
+    // A process can keep reading a request-scoped schema/MCP config after a
+    // cancellation, idle timeout, or output-overflow SIGTERM. Keep that file
+    // until `close` (or a definitive no-PID error) proves the child is gone.
+    // Queued jobs and HTTP requests have no live process, so they clean up on
+    // their first terminal transition as before.
+    if (!liveProcessMayStillReadArtifacts && !job.artifactCleanupFired && job.artifactCleanup) {
+      job.artifactCleanupFired = true;
+      try {
+        job.artifactCleanup();
+      } catch (err) {
+        this.logger.error(`Job ${job.id} artifact cleanup hook threw`, err);
+      }
     }
   }
 
@@ -1819,6 +2817,11 @@ export class AsyncJobManager {
             ? this.safeExtractUsage(job)
             : {};
     const isFailure = finalStatus === "failed";
+    const isKit = Boolean(job.kitExecution);
+    // Token and cost telemetry fingerprint the size of a compiled Kit context.
+    // Keep ordinary job telemetry intact, but do not persist that derivative for
+    // a Kit execution.
+    const flightUsage = isKit ? {} : usage;
     // #44: codex always runs with `--json`, so a codex job's stdout is a raw
     // JSONL event stream on BOTH success and failure. Never persist it raw as the
     // FR response in text mode (read back by llm_request_result / cache-stats) —
@@ -1832,7 +2835,9 @@ export class AsyncJobManager {
     // Slice 1: the codex `--json` JSONL reconstruction is process-only. An http
     // job's stdout is already ApiResult.text — never run it through codexFrResponse
     // (guard on transport so a provider that happens to be named "codex" can't trip it).
-    if (job.transport === "process" && job.cli === "codex") {
+    if (isKit) {
+      response = PERSONAL_KIT_OUTPUT_WITHHELD;
+    } else if (job.transport === "process" && job.cli === "codex") {
       const codexText = codexFrResponse(job.outputFormat, job.stdout);
       response = isFailure ? job.stderr || codexText : codexText;
     } else {
@@ -1840,14 +2845,18 @@ export class AsyncJobManager {
     }
     const exitCode = job.exitCode ?? (finalStatus === "completed" ? 0 : 1);
     const errorMessage = isFailure
-      ? (overrideErrorMessage ?? job.error ?? job.stderr ?? `Exit code ${exitCode}`)
+      ? isKit
+        ? PERSONAL_KIT_FAILURE_WITHHELD
+        : (overrideErrorMessage ?? job.error ?? job.stderr ?? `Exit code ${exitCode}`)
       : undefined;
 
-    // Phase 7: persist the provider-minted session id + stop reason so a
-    // deferred/async job stays resumable. Process jobs parse them from stdout;
-    // http jobs carry the continuation handle in apiResponseId instead.
+    // Preserve provider-minted terminal metadata in the private flight
+    // recorder for every process outcome. Completed jobs use it for local
+    // resume; failed/canceled output still needs the known value so remote
+    // persisted-result readback can redact it. HTTP jobs carry the
+    // continuation handle in apiResponseId instead.
     const providerMeta =
-      finalStatus === "completed" && job.transport === "process"
+      !isKit && job.transport === "process"
         ? extractProviderOutputMetadata(job.cli, job.stdout, job.outputFormat)
         : undefined;
 
@@ -1867,14 +2876,14 @@ export class AsyncJobManager {
         httpStatus: job.transport === "http" ? (job.httpStatus ?? undefined) : undefined,
         errorMessage,
         status: finalStatus,
-        inputTokens: usage.inputTokens,
-        outputTokens: usage.outputTokens,
-        cacheReadTokens: usage.cacheReadTokens,
-        cacheCreationTokens: usage.cacheCreationTokens,
-        costUsd: usage.costUsd,
+        inputTokens: flightUsage.inputTokens,
+        outputTokens: flightUsage.outputTokens,
+        cacheReadTokens: flightUsage.cacheReadTokens,
+        cacheCreationTokens: flightUsage.cacheCreationTokens,
+        costUsd: flightUsage.costUsd,
         // LCR phase_1: the process extractUsage handoff labels cost_basis (T2
         // derived-from-tokens backfill); http/{} usage carries none.
-        costBasis: (usage as { costBasis?: string }).costBasis,
+        costBasis: (flightUsage as { costBasis?: string }).costBasis,
         providerSessionId: providerMeta?.sessionId,
         stopReason: providerMeta?.stopReason,
       });
@@ -1958,6 +2967,10 @@ export class AsyncJobManager {
   private maybeFlushOutput(job: AsyncJobRecord, force = false): void {
     if (!this.store) return;
     if (!job.outputDirty) return;
+    // A Kit provider can echo the full compiled instruction context from stdin.
+    // Keep process output in memory until terminal metadata has been extracted;
+    // never stream that raw material to the durable job store.
+    if (job.kitExecution) return;
     const now = Date.now();
     if (!force && now - job.lastOutputFlushAt < OUTPUT_FLUSH_INTERVAL_MS) return;
     job.outputDirty = false;
@@ -1967,27 +2980,159 @@ export class AsyncJobManager {
     );
   }
 
-  private persistComplete(job: AsyncJobRecord): void {
-    if (!this.store) return;
+  private emitProgress(
+    job: AsyncJobRecord,
+    phase: JobProgressPhase,
+    kind: JobProgressKind,
+    message: string,
+    source: "gateway" | "provider" = "gateway"
+  ): void {
+    this.progressTracker(job).emit(phase, kind, message, source);
+    job.progressDirty = true;
+    this.maybeFlushProgress(job);
+  }
+
+  private maybeFlushProgress(job: AsyncJobRecord, force = false): void {
+    if (!this.store || !job.progressDirty) return;
+    const now = Date.now();
+    if (!force && now - job.lastProgressFlushAt < OUTPUT_FLUSH_INTERVAL_MS) return;
+    job.lastProgressFlushAt = now;
+    try {
+      const serialized = this.progressTracker(job).serialize();
+      const written = this.store.recordProgressIfStatus
+        ? this.store.recordProgressIfStatus(job.id, job.status, serialized)
+        : (this.store.recordProgress(job.id, serialized), true);
+      if (!written) return;
+      job.progressDirty = false;
+    } catch (err) {
+      // Keep progressDirty set so the next output chunk or terminal flush retries.
+      this.logger.error("JobStore.recordProgress failed", err);
+    }
+  }
+
+  private ensureTerminalProgress(job: AsyncJobRecord): void {
+    if (job.status === "running" || job.status === "queued") return;
+    const current = this.progressTracker(job).snapshot();
+    if (current.events.some(event => event.kind === "terminal")) return;
+    if (job.status === "completed") {
+      this.emitProgress(job, "completed", "terminal", "Job completed");
+    } else {
+      this.emitProgress(job, "failed", "terminal", `Job ${job.status}`);
+    }
+  }
+
+  private persistComplete(job: AsyncJobRecord): boolean {
+    if (!this.store) return !job.kitExecution;
     // Never persist a non-terminal job as complete. "queued" (issue #130) is
     // pre-execution, exactly like "running": neither has a terminal row to write.
-    if (job.status === "running" || job.status === "queued") return;
-    if (!job.finishedAt) return;
+    if (job.status === "running" || job.status === "queued") return false;
+    if (!job.finishedAt) return false;
+    this.ensureTerminalProgress(job);
+    this.maybeFlushProgress(job, true);
     // Make sure the latest output is captured in the same row update.
     job.outputDirty = false;
-    this.safeStoreCall("recordComplete", () =>
-      this.store!.recordComplete({
+    const isKit = Boolean(job.kitExecution);
+    try {
+      this.store.recordComplete({
         id: job.id,
-        status: job.status === "running" || job.status === "queued" ? "failed" : job.status,
+        status: job.status,
         exitCode: job.exitCode,
-        stdout: job.stdout,
-        stderr: job.stderr,
+        stdout: isKit ? "" : job.stdout,
+        stderr: isKit ? "" : job.stderr,
         outputTruncated: job.outputTruncated,
-        error: job.error,
+        error: isKit && job.status !== "completed" ? PERSONAL_KIT_FAILURE_WITHHELD : job.error,
+        errorCategory: job.errorCategory,
+        retryable: job.retryable,
         finishedAt: job.finishedAt!,
         httpStatus: job.httpStatus,
-      })
+        progressJson: this.progressTracker(job).serialize(),
+      });
+      job.terminalPersistenceAcknowledged = true;
+      return true;
+    } catch (err) {
+      this.logger.error(`JobStore.recordComplete failed for ${job.id}`, err);
+      if (job.kitExecution) this.scheduleTerminalPersistenceRetry(job);
+      return false;
+    }
+  }
+
+  /**
+   * Extract the provider-derived fact needed by this process's terminal hook.
+   * Raw output and the derived native handle remain process-local and never
+   * cross a durable-store or flight-recorder boundary.
+   */
+  private kitTerminalMetadata(job: AsyncJobRecord): PersonalKitTerminalMetadata | null {
+    if (!job.kitExecution) return null;
+    if (job.kitTerminalMetadata !== undefined) return job.kitTerminalMetadata;
+    job.kitTerminalMetadata =
+      job.status === "completed"
+        ? createPersonalKitTerminalMetadata(job.cli, job.stdout, job.outputFormat)
+        : null;
+    return job.kitTerminalMetadata;
+  }
+
+  /**
+   * Retain the Kit session attempt while a terminal durable write is retried.
+   * The exponential delay is bounded, but retries continue while this gateway
+   * lives so a transient store outage cannot turn a known terminal process into
+   * an unrecoverable running row.
+   */
+  private scheduleTerminalPersistenceRetry(job: AsyncJobRecord): void {
+    if (
+      !job.kitExecution ||
+      job.terminalPersistenceAcknowledged ||
+      job.terminalPersistenceRetryTimer ||
+      !job.finishedAt
+    ) {
+      return;
+    }
+    const delayMs = job.terminalPersistenceRetryDelayMs ?? 100;
+    job.terminalPersistenceRetryDelayMs = Math.min(delayMs * 2, 30_000);
+    job.terminalPersistenceRetryTimer = setTimeout(() => {
+      job.terminalPersistenceRetryTimer = undefined;
+      if (!this.persistComplete(job)) return;
+      const flightStatus = job.status === "completed" ? "completed" : "failed";
+      const override = job.status === "canceled" ? "canceled by caller" : undefined;
+      this.writeFlightComplete(job, flightStatus, override);
+      this.fireOnComplete(job);
+    }, delayMs);
+    job.terminalPersistenceRetryTimer.unref?.();
+  }
+
+  /** True when a terminal Kit result is still only resident in this process. */
+  private hasPendingTerminalPersistence(): boolean {
+    return [...this.jobs.values()].some(
+      job =>
+        Boolean(job.kitExecution) &&
+        !job.terminalPersistenceAcknowledged &&
+        job.finishedAt !== null &&
+        !isAsyncJobInProgress(job.status)
     );
+  }
+
+  /**
+   * Dispose must not trust an unref retry timer to keep terminal Kit output
+   * alive. Retry once synchronously while the manager still owns its store;
+   * ordinary bounded backoff resumes if the store remains unavailable.
+   */
+  private retryTerminalPersistenceNow(job: AsyncJobRecord): void {
+    if (
+      !job.kitExecution ||
+      job.terminalPersistenceAcknowledged ||
+      job.finishedAt === null ||
+      isAsyncJobInProgress(job.status)
+    ) {
+      return;
+    }
+    if (job.terminalPersistenceRetryTimer) {
+      clearTimeout(job.terminalPersistenceRetryTimer);
+      job.terminalPersistenceRetryTimer = undefined;
+    }
+    if (!this.persistComplete(job)) return;
+    const flightStatus = job.status === "completed" ? "completed" : "failed";
+    const override = job.status === "canceled" ? "canceled by caller" : undefined;
+    this.writeFlightComplete(job, flightStatus, override);
+    this.fireOnComplete(job);
   }
 
   /**
@@ -1997,7 +3142,7 @@ export class AsyncJobManager {
    */
   private hydrateFromStore(jobId: string): AsyncJobRecord | null {
     if (!this.store) return null;
-    let row;
+    let row: JobRecord | null;
     try {
       row = this.store.getById(jobId);
     } catch (err) {
@@ -2006,14 +3151,11 @@ export class AsyncJobManager {
     }
     if (!row) return null;
 
-    const args: string[] = (() => {
-      try {
-        const parsed = JSON.parse(row.argsJson);
-        return Array.isArray(parsed) ? parsed.map(String) : [];
-      } catch {
-        return [];
-      }
-    })();
+    return this.hydrateJobRecord(row);
+  }
+
+  private hydrateJobRecord(row: JobRecord): AsyncJobRecord {
+    const args = parsePersistedJobArgs(row.argsJson);
 
     // Slice 1: branch on transport. http rows persist canonical request JSON in
     // payload_json (argv is meaningless), so don't treat args_json as their
@@ -2034,6 +3176,16 @@ export class AsyncJobManager {
       outputTruncated: row.outputTruncated,
       canceled: row.status === "canceled",
       error: row.error,
+      errorCategory:
+        row.errorCategory === CLI_INPUT_TOO_LARGE_CATEGORY
+          ? CLI_INPUT_TOO_LARGE_CATEGORY
+          : row.errorCategory === CLI_INVALID_INPUT_CATEGORY
+            ? CLI_INVALID_INPUT_CATEGORY
+            : null,
+      // Retry guidance is an independent durable field. Some terminal states,
+      // such as incomplete child stdin delivery, intentionally carry no public
+      // error category while still being definitively non-retryable.
+      retryable: typeof row.retryable === "boolean" ? row.retryable : null,
       process: null,
       transport: row.transport,
       abort: null,
@@ -2047,10 +3199,30 @@ export class AsyncJobManager {
       outputFormat: row.outputFormat ?? undefined,
       compressResponse: row.compressResponse ?? null,
       ownerPrincipal: row.ownerPrincipal,
+      mcpArtifactPath: row.mcpArtifactPath,
+      mcpArtifactScope: row.mcpArtifactScope,
+      kitExecution: row.kitExecution ? cloneKitExecutionRef(row.kitExecution) : null,
+      kitSessionId: row.kitSessionId,
+      // Hydrated rows intentionally have no native continuation metadata.
+      // A gateway restart must retire a Kit provider handle rather than resume it.
+      kitTerminalMetadata: null,
+      kitOutputAvailableInMemory: !row.kitExecution,
+      kitTerminalFinalized: row.kitTerminalFinalized,
+      terminalPersistenceAcknowledged: row.status !== "queued" && row.status !== "running",
+      progress: new JobProgressTracker(
+        row.cli,
+        row.outputFormat ?? undefined,
+        parseStoredJobProgress(row.progressJson),
+        row.startedAt,
+        resolveJobProgressCapability(row.cli, args, row.outputFormat ?? undefined, row.transport)
+      ),
+      progressDirty: false,
+      lastProgressFlushAt: Date.now(),
+      hydratedFromStore: true,
       outputDirty: false,
       lastOutputFlushAt: Date.now(),
     };
-    this.jobs.set(jobId, reconstituted);
+    this.jobs.set(row.id, reconstituted);
     return reconstituted;
   }
 
@@ -2063,6 +3235,96 @@ export class AsyncJobManager {
     let job = this.jobs.get(jobId);
     if (!job) job = this.hydrateFromStore(jobId) ?? undefined;
     return job?.ownerPrincipal;
+  }
+
+  /** Durable Kit context for internal continuation checks, never tool-projected. */
+  getJobKitExecution(jobId: string): KitExecutionRef | null | undefined {
+    let job = this.jobs.get(jobId);
+    if (!job) job = this.hydrateFromStore(jobId) ?? undefined;
+    if (!job) return undefined;
+    return job.kitExecution ? cloneKitExecutionRef(job.kitExecution) : null;
+  }
+
+  /**
+   * Return terminal Kit outputs that survived a process restart before their
+   * provider metadata was attached to the bound gateway session.
+   */
+  getPendingKitFinalizations(): AsyncKitTerminalFinalization[] {
+    if (!this.store) return [];
+    try {
+      return this.store.getPendingKitFinalizations().map(entry => ({
+        ...entry,
+        kitExecution: cloneKitExecutionRef(entry.kitExecution),
+      }));
+    } catch (err) {
+      this.logger.error("Kit terminal-finalization query failed", err);
+      return [];
+    }
+  }
+
+  /**
+   * Return terminal Kit rows that were acknowledged before a crash prevented
+   * their exact session attempt from being released. This is internal-only
+   * maintenance metadata and never reaches an MCP tool response.
+   */
+  getAcknowledgedKitAttemptReleases(): AsyncAcknowledgedKitAttemptRelease[] {
+    if (!this.store) return [];
+    try {
+      return this.store.getAcknowledgedKitAttemptReleases().map(entry => ({
+        ...entry,
+        kitExecution: cloneKitExecutionRef(entry.kitExecution),
+      }));
+    } catch (err) {
+      this.logger.error("Kit acknowledged-attempt release query failed", err);
+      return [];
+    }
+  }
+
+  /**
+   * Acknowledge a successfully reconciled terminal Kit output. The durable
+   * compare-and-set includes the gateway session id, so a stale caller cannot
+   * clear a pending result for another session.
+   */
+  markKitTerminalFinalized(jobId: string, kitSessionId: string): boolean {
+    if (!this.store) return false;
+    try {
+      const marked = this.store.markKitTerminalFinalized(jobId, kitSessionId);
+      if (marked) {
+        const job = this.jobs.get(jobId);
+        if (job && job.kitSessionId === kitSessionId) {
+          job.kitTerminalFinalized = true;
+        }
+      }
+      return marked;
+    } catch (err) {
+      this.logger.error(`Kit terminal-finalization mark failed for job ${jobId}`, err);
+      return false;
+    }
+  }
+
+  /**
+   * Release-GC query. Durable store rows are authoritative across restarts;
+   * scan memory too in case a test/ephemeral backend has not exposed the query.
+   */
+  getPinnedKitReleaseIds(): string[] {
+    const releases = new Set<string>();
+    try {
+      for (const releaseId of this.store?.getPinnedKitReleaseIds?.() ?? []) {
+        releases.add(releaseId);
+      }
+    } catch (err) {
+      this.logger.error("Kit release-pin query failed", err);
+    }
+    for (const job of this.jobs.values()) {
+      if (job.kitExecution && (isAsyncJobInProgress(job.status) || !job.kitTerminalFinalized)) {
+        releases.add(job.kitExecution.releaseId);
+      }
+    }
+    return [...releases].sort();
+  }
+
+  getReferencedKitReleaseIds(): string[] {
+    return this.getPinnedKitReleaseIds();
   }
 
   /**
@@ -2078,13 +3340,20 @@ export class AsyncJobManager {
     idleTimeoutMs?: number,
     outputFormat?: string,
     forceRefresh?: boolean,
-    env?: Record<string, string>,
+    env?: NodeJS.ProcessEnv,
     onComplete?: () => void,
     flightRecorderEntry?: AsyncJobFlightRecorderEntry,
     extractUsage?: AsyncJobUsageExtractor,
     writeFlightStart?: boolean,
     stdin?: string,
-    compressResponse?: boolean
+    compressResponse?: boolean,
+    kitExecution?: KitExecutionRef | null,
+    onTerminal?: AsyncJobTerminalHook,
+    kitSessionId?: string,
+    jobId?: string,
+    dedupArgs?: string[],
+    mcpArtifactPath?: string,
+    mcpArtifactScope?: string
   ): AsyncJobSnapshot {
     return this.startJobWithDedup(cli, args, correlationId, {
       cwd,
@@ -2098,6 +3367,13 @@ export class AsyncJobManager {
       extractUsage,
       writeFlightStart,
       compressResponse,
+      kitExecution,
+      onTerminal,
+      kitSessionId,
+      jobId,
+      dedupArgs,
+      mcpArtifactPath,
+      mcpArtifactScope,
     }).snapshot;
   }
 
@@ -2123,40 +3399,116 @@ export class AsyncJobManager {
       env: extraEnv,
       stdin,
       onComplete,
+      artifactCleanup,
+      onTerminal,
+      kitExecution,
+      kitSessionId,
+      jobId,
       flightRecorderEntry,
       extractUsage,
       writeFlightStart,
       compressResponse,
+      dedupArgs,
+      persistedArgs,
+      payloadJson,
+      mcpArtifactPath: requestedMcpArtifactPath,
+      mcpArtifactScope: requestedMcpArtifactScope,
+      deferLaunch,
+      validationAdmission,
     } = opts;
-    const requestKey = this.buildRequestKey(
+    const stableKitExecution = kitExecution ? cloneKitExecutionRef(kitExecution) : null;
+    const stableKitSessionId = normalizeKitSessionId(stableKitExecution, kitSessionId);
+    const invalidArgv = containsInvalidCliArg(args);
+    const durableFlightRecorderEntry = redactInvalidArgvFlightRecorderEntry(
+      redactPersonalKitFlightRecorderEntry(flightRecorderEntry, stableKitExecution),
+      invalidArgv
+    );
+    const reservedKitJobId = normalizeReservedKitJobId(stableKitExecution, jobId);
+    assertMcpArtifactAdmissionInvariant({
+      cli,
+      transport: "process",
+      ownerHostname: this.hostname,
+      mcpArtifactPath: requestedMcpArtifactPath ?? null,
+      mcpArtifactScope: requestedMcpArtifactScope ?? null,
+      kitExecution: stableKitExecution,
+    });
+    const durableMcpArtifactPath = resolvePersistedClaudeMcpArtifactPath(
       cli,
       args,
-      extraEnv,
-      stdin,
-      cwd,
-      outputFormat,
-      compressResponse
+      requestedMcpArtifactPath
     );
+    const durableMcpArtifactScope = resolvePersistedClaudeMcpArtifactScope(
+      durableMcpArtifactPath,
+      requestedMcpArtifactScope
+    );
+    assertMcpArtifactAdmissionInvariant({
+      cli,
+      transport: "process",
+      ownerHostname: this.hostname,
+      mcpArtifactPath: durableMcpArtifactPath,
+      mcpArtifactScope: durableMcpArtifactScope,
+      kitExecution: stableKitExecution,
+    });
+    let requestKey: string;
+    if (stableKitExecution) {
+      if (!isValidationRunStore(this.store) || !this.durableAdmission) {
+        throw new Error("Personal Agent Config Kit requires a healthy durable job store");
+      }
+      if (!reservedKitJobId || !forceRefresh) {
+        throw new Error("A Kit job requires a reserved durable id and forceRefresh");
+      }
+      // Kit jobs are forced fresh and their durable row must not fingerprint the
+      // private compiled context, argv, stdin, or environment. The caller has
+      // already reserved this UUID, so it is a stable opaque key for this one job.
+      requestKey = personalKitJobRequestKey(reservedKitJobId);
+    } else {
+      requestKey = this.buildRequestKey(
+        cli,
+        dedupArgs ?? args,
+        extraEnv,
+        stdin,
+        cwd,
+        outputFormat,
+        compressResponse
+      );
+    }
+    const cleanup = artifactCleanup ?? onComplete;
 
+    if (validationAdmission && !forceRefresh) {
+      throw new Error("Validation review jobs require forceRefresh");
+    }
+    if (validationAdmission && (!isValidationRunStore(this.store) || !this.durableAdmission)) {
+      throw new DurableJobAdmissionError(
+        cli,
+        new Error("Validation job admission requires a healthy validation-run store")
+      );
+    }
     if (!forceRefresh) {
-      const reused = this.tryReuseDedupedJob(requestKey, correlationId, cli, onComplete);
+      const reused = this.tryReuseDedupedJob(requestKey, correlationId, cli, cleanup);
       if (reused) return reused;
     }
 
     // #139: fail-closed admission gate (see startHttpJob).
     this.assertDurableAdmission(cli);
 
-    const id = randomUUID();
+    const id = reservedKitJobId ?? randomUUID();
+    if (this.jobs.has(id) || this.store?.getById(id)) {
+      throw new Error(`Job id ${id} is already in use`);
+    }
     const startedAt = new Date().toISOString();
 
     // F3: ownership principal from the request context ambient at job creation
     // (synchronous with the tool handler). stdio / boot-time paths → "local".
     const ownerPrincipal = resolveOwnerPrincipal(getRequestContext());
+    const terminalHookCompletion = createTerminalHookCompletion();
     const job: AsyncJobRecord = {
       id,
       cli,
       ownerPrincipal,
-      args: [...args],
+      // Retain the exact vector only in the launch closure. A queued job needs
+      // it until admission runs, but the long-lived job record must not keep a
+      // rejected NUL-bearing vector through its completed-memory TTL.
+      args: invalidArgv ? persistableJobArgs(args, stableKitExecution) : [...args],
       requestKey,
       correlationId,
       // Issue #130: created "queued"; flipped to "running" by launch() the
@@ -2171,6 +3523,8 @@ export class AsyncJobManager {
       outputTruncated: false,
       canceled: false,
       error: null,
+      errorCategory: null,
+      retryable: null,
       process: null,
       transport: "process",
       abort: null,
@@ -2179,11 +3533,31 @@ export class AsyncJobManager {
       metricsRecorded: false,
       outputFormat,
       compressResponse: compressResponse ?? null,
-      onComplete,
-      onCompleteFired: false,
+      mcpArtifactPath: durableMcpArtifactPath,
+      mcpArtifactScope: durableMcpArtifactScope,
+      kitExecution: stableKitExecution,
+      kitSessionId: stableKitSessionId,
+      kitOutputAvailableInMemory: stableKitExecution !== null,
+      kitTerminalFinalized: false,
+      terminalPersistenceAcknowledged: stableKitExecution === null,
+      progress: new JobProgressTracker(
+        cli,
+        outputFormat,
+        null,
+        startedAt,
+        resolveJobProgressCapability(cli, args, outputFormat, "process")
+      ),
+      progressDirty: true,
+      lastProgressFlushAt: Date.now(),
+      artifactCleanup: cleanup,
+      artifactCleanupFired: false,
+      onTerminal,
+      onTerminalFired: false,
+      terminalHookCompletion: terminalHookCompletion.promise,
+      resolveTerminalHookCompletion: terminalHookCompletion.resolve,
       outputDirty: false,
       lastOutputFlushAt: Date.now(),
-      flightRecorderEntry,
+      flightRecorderEntry: durableFlightRecorderEntry,
       extractUsage,
       flightRecorderComplete: false,
       // R2 Codex-Unit-B F1: pure async path arms now (writeFlightStart=true
@@ -2192,6 +3566,7 @@ export class AsyncJobManager {
       // armFlightCompleteForDeferral when awaitJobOrDefer decides to defer.
       flightCompleteArmed: writeFlightStart === true,
     };
+    job.progress.emit("queued", "lifecycle", "Job queued");
     this.jobs.set(id, job);
 
     // Issue #130: spawn + wire the child process. Run inline when the limiter
@@ -2200,6 +3575,10 @@ export class AsyncJobManager {
     const launch = (permit: LimiterPermit): void => {
       job.limiterPermit = permit;
       job.queueCancel = undefined;
+      if (this.disposed && job.status === "queued") {
+        this.failQueuedJob(job, "Gateway is shutting down before execution", 1);
+        return;
+      }
       // If the job was canceled/failed while queued (e.g. queue timeout, or a
       // client cancel) before this grant landed, do not spawn; hand the permit
       // straight back.
@@ -2208,6 +3587,7 @@ export class AsyncJobManager {
         return;
       }
       job.status = "running";
+      this.emitProgress(job, "starting", "lifecycle", "Provider process started");
       try {
         this.launchProcessJob(job, { cli, args, cwd, stdin, extraEnv, idleTimeoutMs });
       } catch (err) {
@@ -2215,6 +3595,8 @@ export class AsyncJobManager {
         job.status = "failed";
         job.exitCode = launchError.exitCode;
         job.error = launchError.message;
+        job.errorCategory = launchError.errorCategory;
+        job.retryable = launchError.retryable;
         job.stderr = launchError.message;
         job.finishedAt = new Date().toISOString();
         job.exited = true;
@@ -2226,9 +3608,21 @@ export class AsyncJobManager {
       }
     };
 
+    let launchReleased = deferLaunch !== true;
+    let heldPermit: LimiterPermit | null = null;
+    const grantOrHold = (permit: LimiterPermit): void => {
+      job.queueCancel = undefined;
+      if (!launchReleased) {
+        heldPermit = permit;
+        job.limiterPermit = permit;
+        return;
+      }
+      launch(permit);
+    };
+
     const acq = this.limiter.acquire(
       cli,
-      permit => launch(permit),
+      permit => grantOrHold(permit),
       () => this.failQueuedJob(job, "queue wait timed out before a run slot was free")
     );
     if (acq.state === "rejected") {
@@ -2247,31 +3641,44 @@ export class AsyncJobManager {
       correlationId,
       requestKey,
       cli,
-      args: [...args],
+      args: invalidArgv
+        ? persistableJobArgs(args, stableKitExecution)
+        : persistableJobArgs(persistedArgs ?? args, stableKitExecution),
       outputFormat,
       compressResponse,
       startedAt,
       pid: null,
       ownerPrincipal,
       ownerInstance: this.instanceId,
+      ownerHostname: this.hostname,
+      mcpArtifactPath: durableMcpArtifactPath,
+      mcpArtifactScope: durableMcpArtifactScope,
+      // payloadJson is an optional second retained representation of process
+      // input. Suppress it when argv admission is already known to fail so a
+      // caller cannot bypass the invalid-vector redaction via that column.
+      payloadJson: stableKitExecution || invalidArgv ? null : (payloadJson ?? null),
+      kitExecution: stableKitExecution,
+      kitSessionId: stableKitSessionId,
+      validationAdmission,
     });
+    this.maybeFlushProgress(job, true);
     // Slice 1.5: only opt-in callers (pure async handlers) write logStart
     // here. The sync-deferred path passes writeFlightStart=false because
     // the upstream sync handler already wrote a logStart row keyed on the
     // same correlationId; a duplicate INSERT would crash on the PK.
-    if (writeFlightStart && flightRecorderEntry) {
+    if (writeFlightStart && durableFlightRecorderEntry) {
       try {
         this.flightRecorder.logStart({
           correlationId,
           cli,
-          model: flightRecorderEntry.model,
-          prompt: flightRecorderEntry.prompt,
-          sessionId: flightRecorderEntry.sessionId,
+          model: durableFlightRecorderEntry.model,
+          prompt: durableFlightRecorderEntry.prompt,
+          sessionId: durableFlightRecorderEntry.sessionId,
           asyncJobId: id,
-          stablePrefixHash: flightRecorderEntry.stablePrefixHash,
-          stablePrefixTokens: flightRecorderEntry.stablePrefixTokens,
-          cacheControlBlocks: flightRecorderEntry.cacheControlBlocks,
-          cacheControlTtlSeconds: flightRecorderEntry.cacheControlTtlSeconds,
+          stablePrefixHash: durableFlightRecorderEntry.stablePrefixHash,
+          stablePrefixTokens: durableFlightRecorderEntry.stablePrefixTokens,
+          cacheControlBlocks: durableFlightRecorderEntry.cacheControlBlocks,
+          cacheControlTtlSeconds: durableFlightRecorderEntry.cacheControlTtlSeconds,
         });
       } catch (err) {
         this.logger.error("Async-path flight recorder logStart failed", err);
@@ -2279,14 +3686,38 @@ export class AsyncJobManager {
     }
 
     if (acq.state === "granted") {
-      this.logger.info(`Job ${id} started for ${cli}`, { correlationId });
-      launch(acq.permit);
+      if (deferLaunch) {
+        heldPermit = acq.permit;
+        job.limiterPermit = acq.permit;
+        this.logger.info(`Job ${id} prepared for ${cli}`, { correlationId });
+      } else {
+        this.logger.info(`Job ${id} started for ${cli}`, { correlationId });
+        launch(acq.permit);
+      }
     } else {
       job.queueCancel = acq.cancel;
       this.logger.info(`Job ${id} queued for ${cli} (limiter saturated)`, { correlationId });
     }
 
-    return { snapshot: this.snapshot(job), deduped: false };
+    const deferredControl: DeferredJobLaunch | undefined = deferLaunch
+      ? {
+          release: () => {
+            if (launchReleased) return;
+            launchReleased = true;
+            if (job.status !== "queued") return;
+            const permit = heldPermit;
+            heldPermit = null;
+            if (permit) launch(permit);
+          },
+          cancel: () => {
+            if (launchReleased) return false;
+            launchReleased = true;
+            heldPermit = null;
+            return this.cancelJob(id).canceled;
+          },
+        }
+      : undefined;
+    return { snapshot: this.snapshot(job), deduped: false, deferredLaunch: deferredControl };
   }
 
   /**
@@ -2303,7 +3734,7 @@ export class AsyncJobManager {
       args: string[];
       cwd?: string;
       stdin?: string;
-      extraEnv?: Record<string, string>;
+      extraEnv?: NodeJS.ProcessEnv;
       idleTimeoutMs?: number;
     }
   ): void {
@@ -2325,32 +3756,19 @@ export class AsyncJobManager {
     // a stale durable 'queued' row (the sweep would treat it as never-launched).
     // Kill the child and rethrow so the launch() caller terminalizes the job and
     // releases the permit.
+    let durableMarkFailure: Error | null = null;
     try {
       this.markRunningDurable(job, child.pid ?? null, true);
     } catch (err) {
-      try {
-        killProcessGroup(child, "SIGKILL");
-      } catch {
-        /* best effort */
-      }
-      if (child.pid) {
-        try {
-          unregisterProcessGroup(child.pid);
-        } catch {
-          /* best effort */
-        }
-      }
-      throw err;
+      durableMarkFailure = err instanceof Error ? err : new Error(String(err));
+      // Keep the record running until `close` proves the just-spawned child is
+      // gone. Finalizing now would release a Kit continuation while an OS
+      // process may still be consuming it.
+      job.terminationRequested = true;
+      job.exitCode = 1;
+      job.error = `Durable job transition failed: ${durableMarkFailure.message}`;
+      job.stderr = job.error;
     }
-    if (stdin !== undefined && child.stdin) {
-      try {
-        child.stdin.write(stdin);
-      } catch (err) {
-        this.logger.error(`Job ${id} failed to write stdin payload`, err);
-      }
-      child.stdin.end();
-    }
-
     // Single cleanup flag to prevent double-unregister
     let groupCleaned = false;
     const cleanupGroup = () => {
@@ -2359,6 +3777,11 @@ export class AsyncJobManager {
       if (child.pid) unregisterProcessGroup(child.pid);
     };
     job.cleanupGroup = cleanupGroup;
+    const terminationFence = createProcessGroupTerminationFence(child, cleanupGroup);
+    job.terminateProcessGroup = (signal, graceMs): void => {
+      terminationFence.request(signal, graceMs);
+    };
+    let stdinDelivery: ChildStdinDelivery | null = null;
 
     // Idle timeout: kill process if no output activity for idleTimeoutMs
     let idleTimerId: ReturnType<typeof setTimeout> | undefined;
@@ -2366,23 +3789,24 @@ export class AsyncJobManager {
       if (!idleTimeoutMs || idleTimeoutMs <= 0) return;
       if (idleTimerId) clearTimeout(idleTimerId);
       idleTimerId = setTimeout(() => {
-        if (job.status !== "running") return;
-        job.status = "failed";
+        if (job.status !== "running" || job.terminationRequested) return;
+        job.terminationRequested = true;
         job.exitCode = 125;
         job.error = `Process killed after ${idleTimeoutMs}ms of inactivity`;
-        job.finishedAt = new Date().toISOString();
-        if (job.process) killProcessGroup(job.process, "SIGTERM");
+        if (!job.kitExecution) {
+          job.status = "failed";
+          job.finishedAt = new Date().toISOString();
+        }
+        terminationFence.request();
         this.logger.info(`Job ${id} killed due to inactivity (${idleTimeoutMs}ms)`, {
           correlationId,
         });
-        this.emitMetrics(job);
-        this.persistComplete(job);
-        this.writeFlightComplete(job, "failed");
-        this.fireOnComplete(job);
-        setTimeout(() => {
-          if (!job.exited && job.process) killProcessGroup(job.process, "SIGKILL");
-          job.cleanupGroup?.();
-        }, 5000);
+        if (!job.kitExecution) {
+          this.emitMetrics(job);
+          this.persistComplete(job);
+          this.writeFlightComplete(job, "failed");
+          this.fireOnComplete(job);
+        }
       }, idleTimeoutMs);
     };
     job.resetIdleTimer = resetIdleTimer;
@@ -2400,14 +3824,36 @@ export class AsyncJobManager {
     });
 
     child.on("error", (error: Error) => {
+      // A ChildProcess error does not by itself prove death after spawn. For
+      // example, a failed signal delivery can emit `error` while the provider
+      // process continues using its native session. Only a no-PID spawn failure
+      // is definitive here; every spawned child remains owned until `close`.
+      if (child.pid) {
+        this.logger.error(`Job ${id} process error while awaiting close`, {
+          error,
+          correlationId,
+        });
+        return;
+      }
       job.exited = true;
+      stdinDelivery?.cleanup();
       job.clearIdleTimer?.();
-      job.cleanupGroup?.();
+      terminationFence.cleanupAfterLeaderExit();
       if (job.status === "running") {
-        const launchError = describeProcessLaunchError(cli, error);
+        const launchError = job.terminationRequested
+          ? {
+              exitCode: job.exitCode ?? 1,
+              message:
+                job.error ?? "Gateway shutdown requested before provider process reached close",
+              errorCategory: job.errorCategory,
+              retryable: job.retryable,
+            }
+          : describeProcessLaunchError(cli, error);
         job.status = job.canceled ? "canceled" : "failed";
         job.exitCode = launchError.exitCode;
         job.error = launchError.message;
+        job.errorCategory = launchError.errorCategory;
+        job.retryable = launchError.retryable;
         job.stderr = job.stderr ? `${job.stderr}\n${launchError.message}` : launchError.message;
         job.finishedAt = new Date().toISOString();
         this.logger.error(`Job ${id} error: ${launchError.message}`, { correlationId });
@@ -2418,13 +3864,15 @@ export class AsyncJobManager {
       }
     });
 
-    child.on("close", (code: number | null) => {
+    child.on("close", (code: number | null, signal: NodeJS.Signals | null) => {
       job.exited = true;
+      const stdinDeliveryIncomplete = isChildStdinDeliveryIncomplete(stdinDelivery);
+      stdinDelivery?.cleanup();
       job.clearIdleTimer?.();
-      // Unregister process group on clean exit (no kill was issued)
-      if (!job.canceled && job.status === "running") {
-        job.cleanupGroup?.();
-      }
+      // Close is the positive death proof for every process termination path.
+      // Release its process-group bookkeeping here, never merely because a
+      // SIGTERM/SIGKILL request was sent.
+      terminationFence.cleanupAfterLeaderExit();
       if (job.status !== "running") {
         job.exitCode = job.exitCode ?? code ?? null;
         if (!job.finishedAt) {
@@ -2442,10 +3890,17 @@ export class AsyncJobManager {
         return;
       }
 
-      const rawExitCode = code ?? 0;
+      const rawExitCode = code ?? (signal ? 1 : 0);
+      if (signal && !job.canceled && !job.terminationRequested) {
+        job.terminationRequested = true;
+        job.exitCode = 1;
+        job.error ??= `Process terminated by ${signal}`;
+      }
       const launchExit =
         !job.stdout && !job.stderr ? describeWindowsLaunchExit(cli, rawExitCode) : null;
-      job.exitCode = launchExit?.exitCode ?? rawExitCode;
+      if (!job.terminationRequested || job.exitCode === null) {
+        job.exitCode = launchExit?.exitCode ?? rawExitCode;
+      }
       if (launchExit) {
         job.error = launchExit.message;
         job.stderr = launchExit.message;
@@ -2454,10 +3909,38 @@ export class AsyncJobManager {
 
       if (job.canceled) {
         job.status = "canceled";
-      } else if (job.exitCode === 0) {
-        job.status = "completed";
-      } else {
+      } else if (job.stdinDeliveryFailed && code !== null && code !== 0) {
+        // A real provider nonzero exit remains authoritative when it races a
+        // stdin failure. Never replace provider diagnostics with pipe state.
         job.status = "failed";
+        job.exitCode = code;
+        job.error = null;
+        job.errorCategory = null;
+        job.retryable = null;
+      } else if (job.terminationRequested) {
+        // Idle/output termination retains the diagnostic captured when the
+        // signal was requested, regardless of the process's eventual code.
+        job.status = "failed";
+        if (job.stdinDeliveryFailed) {
+          const deliveryError = new ChildStdinWriteFailedError();
+          job.exitCode = 1;
+          job.error = deliveryError.message;
+          job.errorCategory = null;
+          job.retryable = deliveryError.retryable;
+          job.stderr = job.stderr ? `${job.stderr}\n${job.error}` : job.error;
+        }
+      } else if (job.exitCode !== 0) {
+        // Preserve the provider's own nonzero exit and diagnostics.
+        job.status = "failed";
+      } else if (job.stdinDeliveryIncomplete || stdinDeliveryIncomplete) {
+        job.status = "failed";
+        job.exitCode = CHILD_STDIN_INCOMPLETE_EXIT_CODE;
+        job.error = CHILD_STDIN_INCOMPLETE_MESSAGE;
+        job.errorCategory = null;
+        job.retryable = false;
+        job.stderr = job.stderr ? `${job.stderr}\n${job.error}` : job.error;
+      } else {
+        job.status = "completed";
       }
       this.emitMetrics(job);
       this.persistComplete(job);
@@ -2468,6 +3951,45 @@ export class AsyncJobManager {
       );
       this.fireOnComplete(job);
     });
+
+    if (!durableMarkFailure && stdin !== undefined) {
+      const failStdinWrite = (error: Error): void => {
+        if (job.exited || job.canceled || job.terminationRequested) return;
+        const deliveryError = normalizeChildStdinDeliveryError(error);
+        // Keep closed-pipe errors out of process-level handlers and never
+        // retain their native message. The close path lets cancellation,
+        // timeout, and provider nonzero exit take precedence, but rejects an
+        // otherwise-successful exit because its request was incomplete.
+        if (deliveryError instanceof ChildStdinIncompleteError) {
+          job.stdinDeliveryIncomplete = true;
+          return;
+        }
+        job.terminationRequested = true;
+        job.stdinDeliveryFailed = true;
+        job.exitCode = 1;
+        job.errorCategory = null;
+        job.retryable = null;
+        this.logger.error(`Job ${id} failed to write stdin payload`, {
+          error: deliveryError,
+          correlationId,
+        });
+        terminationFence.request();
+      };
+
+      if (child.stdin) {
+        stdinDelivery = writeAndCloseChildStdin(child.stdin, stdin, failStdinWrite);
+      } else {
+        failStdinWrite(new ChildStdinWriteFailedError());
+      }
+    }
+
+    if (durableMarkFailure) {
+      try {
+        terminationFence.request("SIGKILL", 0);
+      } catch {
+        // The close handler remains the terminal ownership boundary.
+      }
+    }
   }
 
   /**
@@ -2477,14 +3999,14 @@ export class AsyncJobManager {
    * runs the standard terminal path (metrics, persist, flight-complete,
    * onComplete). Holds no permit, so releaseJobPermit is a no-op.
    */
-  private failQueuedJob(job: AsyncJobRecord, reason: string): void {
+  private failQueuedJob(job: AsyncJobRecord, reason: string, exitCode = 75): void {
     if (job.status !== "queued") return;
     job.queueCancel = undefined;
     job.status = "failed";
     // EX_TEMPFAIL (75): a deterministic "temporary failure, safe to retry" code
     // distinct from spawn/timeout/idle exit codes already in use.
-    job.exitCode = 75;
-    job.error = `Gateway is at capacity for ${job.cli}: ${reason}`;
+    job.exitCode = exitCode;
+    job.error = exitCode === 75 ? `Gateway is at capacity for ${job.cli}: ${reason}` : reason;
     job.finishedAt = new Date().toISOString();
     job.exited = true;
     this.logger.info(`Job ${job.id} failed while queued: ${reason}`, {
@@ -2496,45 +4018,169 @@ export class AsyncJobManager {
     this.fireOnComplete(job);
   }
 
-  getJobSnapshot(jobId: string): AsyncJobSnapshot | null {
+  getJobSnapshot(
+    jobId: string,
+    options: { afterProgressSeq?: number; progressLimit?: number } = {}
+  ): AsyncJobSnapshot | null {
     let job = this.jobs.get(jobId);
-    if (!job) {
+    if (job) {
+      job = this.refreshOpenHydratedJob(jobId, job) ?? undefined;
+      if (!job) return null;
+    } else {
       job = this.hydrateFromStore(jobId) ?? undefined;
       if (!job) return null;
     }
-    return this.snapshot(job);
+    return this.snapshot(job, options.afterProgressSeq ?? 0, options.progressLimit ?? 32);
+  }
+
+  /**
+   * Fail-closed durable lookup for Kit attempt recovery. Unlike
+   * getJobSnapshot(), a database exception is not collapsed into "not found".
+   */
+  lookupJobSnapshot(jobId: string): AsyncJobSnapshotLookup {
+    const inMemory = this.jobs.get(jobId);
+    if (inMemory) {
+      return {
+        state: "found",
+        snapshot: this.snapshot(inMemory),
+        kitExecution: inMemory.kitExecution ? cloneKitExecutionRef(inMemory.kitExecution) : null,
+        kitSessionId: inMemory.kitSessionId,
+        kitTerminalFinalized: inMemory.kitTerminalFinalized,
+      };
+    }
+    if (!this.store) return { state: "unavailable" };
+    let row: JobRecord | null;
+    try {
+      row = this.store.getById(jobId);
+    } catch (err) {
+      this.logger.error(`JobStore.getById failed during Kit recovery for ${jobId}`, err);
+      return { state: "unavailable" };
+    }
+    if (!row) return { state: "not_found" };
+    const job = this.hydrateJobRecord(row);
+    return {
+      state: "found",
+      snapshot: this.snapshot(job),
+      kitExecution: job.kitExecution ? cloneKitExecutionRef(job.kitExecution) : null,
+      kitSessionId: job.kitSessionId,
+      kitTerminalFinalized: job.kitTerminalFinalized,
+    };
+  }
+
+  /**
+   * Permanently fence a Kit attempt that has no durable job row. The store
+   * performs the insert-if-absent in the same namespace used by normal Kit
+   * recordStart, so a gateway paused before admission cannot later launch the
+   * old provider turn after its session lease is explicitly released.
+   */
+  fenceUnadmittedKitAttempt(input: {
+    attemptId: string;
+    cli: LlmCli;
+    kitExecution: KitExecutionRef;
+    kitSessionId: string;
+  }): KitAttemptFenceResult {
+    if (!this.store || !this.durableAdmission) {
+      throw new Error("Durable Kit attempt fencing is unavailable");
+    }
+    return this.store.fenceUnadmittedKitAttempt({
+      attemptId: input.attemptId,
+      cli: input.cli,
+      kitExecution: cloneKitExecutionRef(input.kitExecution),
+      kitSessionId: input.kitSessionId,
+      ownerPrincipal: resolveOwnerPrincipal(getRequestContext()),
+      fencedAt: new Date().toISOString(),
+    });
+  }
+
+  /**
+   * Wait for this instance's terminal lifecycle hook. A hook closure is not
+   * durable, so an unknown or restart-hydrated job returns false and must use
+   * the durable reconciliation path instead.
+   */
+  async awaitTerminalHook(jobId: string): Promise<boolean> {
+    const job = this.jobs.get(jobId);
+    if (!job) return false;
+    if (job.terminalHookOutcome !== undefined) return job.terminalHookOutcome;
+    if (!job.terminalHookCompletion) return false;
+    return await new Promise<boolean>(resolve => {
+      const timer = setTimeout(() => resolve(false), TERMINAL_HOOK_WAIT_TIMEOUT_MS);
+      timer.unref?.();
+      void job.terminalHookCompletion!.then(outcome => {
+        clearTimeout(timer);
+        resolve(outcome);
+      });
+    });
   }
 
   getJobSnapshots(jobIds: string[]): Record<string, AsyncJobSnapshot | null> {
     return Object.fromEntries(jobIds.map(jobId => [jobId, this.getJobSnapshot(jobId)]));
   }
 
-  getJobResult(jobId: string, maxChars = 200000): AsyncJobResult | null {
+  getJobResult(
+    jobId: string,
+    maxChars = 200000,
+    options: {
+      stdoutOffsetChars?: number;
+      stderrOffsetChars?: number;
+      redactProviderSessionIds?: boolean;
+    } = {}
+  ): AsyncJobResult | null {
     let job = this.jobs.get(jobId);
-    if (!job) {
+    if (job) {
+      job = this.refreshOpenHydratedJob(jobId, job) ?? undefined;
+      if (!job) return null;
+    } else {
       job = this.hydrateFromStore(jobId) ?? undefined;
       if (!job) return null;
     }
 
-    const stdout = truncateText(job.stdout, maxChars);
-    const stderr = truncateText(job.stderr, maxChars);
-
-    // Phase 7: parse provider session id + stop reason from a completed process
-    // job's stdout so the poll result carries what a resume needs. Parsed from
-    // the FULL (untruncated) stdout, not the display slice above.
+    const durableKitResult = Boolean(job.kitExecution) && job.kitOutputAvailableInMemory === false;
+    const fullStdout = durableKitResult ? PERSONAL_KIT_OUTPUT_WITHHELD : job.stdout;
+    const fullStderr = durableKitResult ? "" : job.stderr;
+    // Parse from the full captured stream, not from a page, so remote redaction
+    // can cover an identifier that happens to straddle a page boundary.
     const providerMeta =
-      job.transport === "process" && job.status === "completed"
+      !job.kitExecution && job.transport === "process"
         ? extractProviderOutputMetadata(job.cli, job.stdout, job.outputFormat)
         : undefined;
+    // A native session id is resumable only after a successful completion, but
+    // remote redaction must use the parsed value for every captured outcome.
+    const resumableProviderMeta = job.status === "completed" ? providerMeta : undefined;
+    const stdout = pageText(fullStdout, maxChars, options.stdoutOffsetChars ?? 0);
+    const stderr = pageText(fullStderr, maxChars, options.stderrOffsetChars ?? 0);
+    const sessionId = options.redactProviderSessionIds ? providerMeta?.sessionId : undefined;
+    // `snapshot.error` is caller-visible too. It is not paged, so scrub it in
+    // full before returning the object rather than relying on the stdout/stderr
+    // page redactor below.
+    const snapshot = this.snapshot(job);
+    const error =
+      sessionId && snapshot.error !== null
+        ? redactKnownProviderSessionId(snapshot.error, sessionId)
+        : snapshot.error;
 
     return {
-      ...this.snapshot(job),
-      stdout: stdout.text,
-      stderr: stderr.text,
+      ...snapshot,
+      error,
+      stdout: sessionId
+        ? redactKnownTextPage(stdout.text, stdout.offsetChars, fullStdout, sessionId)
+        : stdout.text,
+      stderr: sessionId
+        ? redactKnownTextPage(stderr.text, stderr.offsetChars, fullStderr, sessionId)
+        : stderr.text,
       stdoutTruncated: stdout.truncated,
       stderrTruncated: stderr.truncated,
-      ...(providerMeta?.sessionId ? { providerSessionId: providerMeta.sessionId } : {}),
-      ...(providerMeta?.stopReason ? { stopReason: providerMeta.stopReason } : {}),
+      stdoutOffsetChars: stdout.offsetChars,
+      stdoutTotalChars: stdout.totalChars,
+      stdoutNextOffsetChars: stdout.nextOffsetChars,
+      stderrOffsetChars: stderr.offsetChars,
+      stderrTotalChars: stderr.totalChars,
+      stderrNextOffsetChars: stderr.nextOffsetChars,
+      ...(resumableProviderMeta?.sessionId
+        ? { providerSessionId: resumableProviderMeta.sessionId }
+        : {}),
+      ...(resumableProviderMeta?.stopReason
+        ? { stopReason: resumableProviderMeta.stopReason }
+        : {}),
       // Slice 1: structured http telemetry (in-memory http jobs only).
       ...(job.transport === "http"
         ? {
@@ -2560,6 +4206,9 @@ export class AsyncJobManager {
     if (job.status === "queued") {
       job.queueCancel?.();
       job.queueCancel = undefined;
+      // A deferred-launch roster can hold an already-granted permit while the
+      // job deliberately remains queued. Release it before terminalizing.
+      this.releaseJobPermit(job);
       job.canceled = true;
       job.status = "canceled";
       job.finishedAt = new Date().toISOString();
@@ -2609,19 +4258,24 @@ export class AsyncJobManager {
     }
 
     job.canceled = true;
-    job.status = "canceled";
-    job.finishedAt = new Date().toISOString();
+    job.terminationRequested = Boolean(job.kitExecution);
+    if (!job.kitExecution) {
+      job.status = "canceled";
+      job.finishedAt = new Date().toISOString();
+    }
     job.clearIdleTimer?.();
-    killProcessGroup(job.process, "SIGTERM");
-    this.logger.info(`Job ${jobId} canceled`, { correlationId: job.correlationId });
-    this.persistComplete(job);
-    this.writeFlightComplete(job, "failed", "canceled by caller");
-    this.fireOnComplete(job);
-
-    setTimeout(() => {
-      if (!job.exited && job.process) killProcessGroup(job.process, "SIGKILL");
+    if (job.terminateProcessGroup) {
+      job.terminateProcessGroup();
+    } else {
+      killProcessGroup(job.process, "SIGKILL");
       job.cleanupGroup?.();
-    }, 5000);
+    }
+    this.logger.info(`Job ${jobId} canceled`, { correlationId: job.correlationId });
+    if (!job.kitExecution) {
+      this.persistComplete(job);
+      this.writeFlightComplete(job, "failed", "canceled by caller");
+      this.fireOnComplete(job);
+    }
 
     return { canceled: true };
   }
@@ -2635,7 +4289,7 @@ export class AsyncJobManager {
   }[] {
     const result = [];
     for (const [id, job] of this.jobs) {
-      if (job.status === "running") {
+      if (job.status === "running" && !job.terminationRequested) {
         result.push({
           jobId: id,
           cli: job.cli,
@@ -2674,10 +4328,24 @@ export class AsyncJobManager {
    * as async/deferred jobs.
    */
   acquireProcessSlot(provider: string): Promise<{ release: () => void }> {
+    if (this.disposed) {
+      return Promise.reject(
+        new JobSaturationError(provider, "Gateway is shutting down; retry after it restarts")
+      );
+    }
     return new Promise((resolve, reject) => {
       const acq = this.limiter.acquire(
         provider,
-        permit => resolve(permit),
+        permit => {
+          if (this.disposed) {
+            permit.release();
+            reject(
+              new JobSaturationError(provider, "Gateway is shutting down; retry after it restarts")
+            );
+            return;
+          }
+          resolve(permit);
+        },
         () =>
           reject(
             new JobSaturationError(
@@ -2727,7 +4395,56 @@ export class AsyncJobManager {
     return this.jobs.get(jobId)?.cli;
   }
 
-  private snapshot(job: AsyncJobRecord): AsyncJobSnapshot {
+  /**
+   * Refresh a queued/running row that this process only hydrated from shared
+   * storage. The owning instance may append progress or finish it at any time;
+   * caching that projection forever makes cross-instance status and watch stale.
+   */
+  private refreshOpenHydratedJob(jobId: string, job: AsyncJobRecord): AsyncJobRecord | null {
+    if (
+      !this.store ||
+      job.hydratedFromStore !== true ||
+      (job.status !== "queued" && job.status !== "running") ||
+      job.process !== null ||
+      job.abort !== null
+    ) {
+      return job;
+    }
+    try {
+      const row = this.store.getById(jobId);
+      if (!row) {
+        this.jobs.delete(jobId);
+        return null;
+      }
+      this.jobs.delete(jobId);
+      return this.hydrateJobRecord(row);
+    } catch (err) {
+      this.logger.error(`JobStore.getById failed while refreshing shared job ${jobId}`, err);
+      return job;
+    }
+  }
+
+  /** Lazily backfill progress for legacy in-memory embedder records. */
+  private progressTracker(job: AsyncJobRecord): JobProgressTracker {
+    if (!job.progress) {
+      job.progress = new JobProgressTracker(
+        job.cli,
+        job.outputFormat,
+        null,
+        job.startedAt,
+        resolveJobProgressCapability(job.cli, job.args, job.outputFormat, job.transport)
+      );
+      job.progressDirty = true;
+      job.lastProgressFlushAt = Date.now();
+    }
+    return job.progress;
+  }
+
+  private snapshot(
+    job: AsyncJobRecord,
+    afterProgressSeq = 0,
+    progressLimit = 32
+  ): AsyncJobSnapshot {
     return {
       id: job.id,
       cli: job.cli,
@@ -2739,8 +4456,11 @@ export class AsyncJobManager {
       outputTruncated: job.outputTruncated,
       stdoutBytes: Buffer.byteLength(job.stdout),
       stderrBytes: Buffer.byteLength(job.stderr),
-      error: job.error,
+      error: job.kitExecution && job.error ? PERSONAL_KIT_FAILURE_WITHHELD : job.error,
+      ...(job.errorCategory ? { errorCategory: job.errorCategory } : {}),
+      ...(job.retryable !== null ? { retryable: job.retryable } : {}),
       exited: job.exited,
+      progress: this.progressTracker(job).snapshot(afterProgressSeq, progressLimit),
     };
   }
 
@@ -2752,27 +4472,30 @@ export class AsyncJobManager {
         // Issue #130: the cap is configurable via [limits].max_job_output_bytes;
         // the message renders "50MB" at the default cap (asserted by tests).
         const overflowMsg = `Output exceeded maximum size (${formatByteCap(this.maxJobOutputBytes)})`;
-        job.status = "failed";
+        job.terminationRequested = true;
         job.exitCode = 126;
         job.error = overflowMsg;
-        job.finishedAt = new Date().toISOString();
+        if (!job.kitExecution) {
+          job.status = "failed";
+          job.finishedAt = new Date().toISOString();
+        }
         job.clearIdleTimer?.();
-        if (job.process) {
-          killProcessGroup(job.process, "SIGTERM");
+        if (job.terminateProcessGroup) {
+          job.terminateProcessGroup();
+        } else if (job.process) {
+          killProcessGroup(job.process, "SIGKILL");
+          job.cleanupGroup?.();
         }
         this.logger.info(`Job ${job.id} killed due to output overflow`, {
           correlationId: job.correlationId,
         });
-        this.emitMetrics(job);
-        this.persistComplete(job);
-        this.writeFlightComplete(job, "failed", overflowMsg);
-        this.fireOnComplete(job);
-        if (job.process) {
-          setTimeout(() => {
-            if (!job.exited && job.process) killProcessGroup(job.process, "SIGKILL");
-            job.cleanupGroup?.();
-          }, 5000);
-        } else {
+        if (!job.kitExecution) {
+          this.emitMetrics(job);
+          this.persistComplete(job);
+          this.writeFlightComplete(job, "failed", overflowMsg);
+          this.fireOnComplete(job);
+        }
+        if (!job.process) {
           job.cleanupGroup?.();
         }
       }
@@ -2780,6 +4503,9 @@ export class AsyncJobManager {
     }
 
     job.resetIdleTimer?.();
+    this.progressTracker(job).ingest(stream, chunk);
+    job.progressDirty = true;
+    this.maybeFlushProgress(job);
 
     const text = chunk.toString();
     if (stream === "stdout") {

@@ -24,6 +24,7 @@ describe("readPersistedRequest", () => {
     prompt?: string;
     response?: string;
     sessionId?: string;
+    providerSessionId?: string;
   }): void {
     rec.logStart({
       correlationId: opts.id,
@@ -43,6 +44,7 @@ describe("readPersistedRequest", () => {
       optimizationApplied: false,
       exitCode: 0,
       status: "completed",
+      providerSessionId: opts.providerSessionId,
     });
   }
 
@@ -91,6 +93,70 @@ describe("readPersistedRequest", () => {
     const full = readPersistedRequest(rec, "corr-big", { maxChars: 10000 });
     expect(full!.response).toHaveLength(5000);
     expect(full!.responseTruncated).toBe(false);
+  });
+
+  it("redacts a known native provider id before persisted-response slicing", () => {
+    const nativeId = "019ec070-26ab-7fa3-b66b-72fc6964f250";
+    seedSync({
+      id: "corr-native-id",
+      prompt: `prompt ${nativeId}`,
+      response: `${"x".repeat(995)}${nativeId} trailing response`,
+      providerSessionId: nativeId,
+    });
+
+    const sliced = readPersistedRequest(rec, "corr-native-id", {
+      maxChars: 1000,
+      includePrompt: true,
+      redactProviderSessionId: true,
+    });
+    expect(sliced!.response).not.toContain(nativeId.slice(0, 5));
+    expect(sliced!.response).toContain("[reda");
+    expect(sliced!.prompt).toBe("prompt [redacted-session-id]");
+
+    const local = readPersistedRequest(rec, "corr-native-id", {
+      maxChars: 200000,
+      includePrompt: true,
+    });
+    expect(local!.response).toContain(nativeId);
+    expect(local!.prompt).toContain(nativeId);
+  });
+
+  it("redacts every caller-visible persisted text field for remote readback", () => {
+    const nativeId = "019ec070-26ab-7fa3-b66b-72fc6964f250";
+    rec.logStart({
+      correlationId: "corr-native-fields",
+      cli: "grok",
+      model: "grok-build",
+      prompt: `prompt ${nativeId}`,
+      sessionId: nativeId,
+    });
+    rec.logComplete("corr-native-fields", {
+      response: `response ${nativeId}`,
+      durationMs: 1,
+      retryCount: 0,
+      circuitBreakerState: "closed",
+      optimizationApplied: false,
+      exitCode: 1,
+      errorMessage: `error ${nativeId}`,
+      thinkingBlocks: [`thinking ${nativeId}`],
+      status: "failed",
+      providerSessionId: nativeId,
+    });
+
+    const remote = readPersistedRequest(rec, "corr-native-fields", {
+      includePrompt: true,
+      redactProviderSessionId: true,
+    });
+    expect(JSON.stringify(remote)).not.toContain(nativeId);
+    expect(remote!.sessionId).toBe("[redacted-session-id]");
+    expect(remote!.errorMessage).toBe("error [redacted-session-id]");
+    expect(remote!.thinkingBlocks).toEqual(["thinking [redacted-session-id]"]);
+
+    const local = readPersistedRequest(rec, "corr-native-fields", { includePrompt: true });
+    expect(JSON.stringify(local)).toContain(nativeId);
+    expect(local!.sessionId).toBe(nativeId);
+    expect(local!.errorMessage).toBe(`error ${nativeId}`);
+    expect(local!.thinkingBlocks).toEqual([`thinking ${nativeId}`]);
   });
 
   it("defaults maxChars to the documented constant", () => {

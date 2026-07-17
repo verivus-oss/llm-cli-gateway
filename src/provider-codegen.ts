@@ -30,6 +30,8 @@
 // zod v3 and v4 field instances ("Mixed Zod versions detected in object shape").
 import { z } from "zod/v3";
 import type { CliContract } from "./upstream-contracts.js";
+import { assertCliArgUtf8Size } from "./cli-input-limits.js";
+import { sanitizeCliArgValue, sanitizeCliArgValues } from "./request-helpers.js";
 
 /**
  * How a present request-parameter value becomes argv tokens. Each rule mirrors
@@ -87,7 +89,8 @@ export function buildArgvFromGeneration(
 ): string[] {
   const args: string[] = [];
   for (const gen of generation) {
-    if (!contract.flags[gen.flag]) {
+    const flagContract = contract.flags[gen.flag];
+    if (!flagContract) {
       throw new Error(
         `provider-codegen: generation references flag '${gen.flag}' absent from ${contract.cli} contract.flags`
       );
@@ -95,22 +98,57 @@ export function buildArgvFromGeneration(
     const value = params[gen.requestParameter];
     switch (gen.emit) {
       case "value_if_present":
-        if (value) args.push(gen.flag, String(value));
+        if (value) {
+          const scalar = String(value);
+          if (!flagContract.allowLeadingHyphenValue) {
+            sanitizeCliArgValue(scalar, gen.requestParameter);
+          }
+          assertCliArgUtf8Size(scalar, {
+            provider: contract.cli,
+            inputName: gen.requestParameter,
+          });
+          args.push(gen.flag, scalar);
+        }
         break;
       case "value_if_defined":
-        if (value !== undefined && value !== null) args.push(gen.flag, String(value));
+        if (value !== undefined && value !== null) {
+          const scalar = String(value);
+          if (!flagContract.allowLeadingHyphenValue) {
+            sanitizeCliArgValue(scalar, gen.requestParameter);
+          }
+          assertCliArgUtf8Size(scalar, {
+            provider: contract.cli,
+            inputName: gen.requestParameter,
+          });
+          args.push(gen.flag, scalar);
+        }
         break;
       case "flag_if_true":
         if (value) args.push(gen.flag);
         break;
       case "csv_if_nonempty":
         if (Array.isArray(value) && value.length > 0) {
-          args.push(gen.flag, value.map(String).join(","));
+          const values = value.map(String);
+          sanitizeCliArgValues(values, gen.requestParameter);
+          const csv = values.join(",");
+          assertCliArgUtf8Size(csv, {
+            provider: contract.cli,
+            inputName: gen.requestParameter,
+          });
+          args.push(gen.flag, csv);
         }
         break;
       case "repeat_if_nonempty":
         if (Array.isArray(value) && value.length > 0) {
-          for (const item of value) args.push(gen.flag, String(item));
+          const values = value.map(String);
+          sanitizeCliArgValues(values, gen.requestParameter);
+          for (const [index, item] of values.entries()) {
+            assertCliArgUtf8Size(item, {
+              provider: contract.cli,
+              inputName: `${gen.requestParameter}[${index}]`,
+            });
+            args.push(gen.flag, item);
+          }
         }
         break;
     }
@@ -362,18 +400,6 @@ export const GROK_GEN_PROMPT_FILE: readonly FlagGenerationMeta[] = [
   },
 ];
 
-/** Emitted after `--prompt-json`, before the tail run. */
-export const GROK_GEN_SINGLE: readonly FlagGenerationMeta[] = [
-  {
-    flag: "--single",
-    requestParameter: "single",
-    emit: "value_if_present",
-    inputType: "string",
-    minLength: 1,
-    describe: "Grok --single <PROMPT>: single-turn prompt (in addition to gateway -p).",
-  },
-];
-
 /** The tail run, emitted before the final `--worktree` special. */
 export const GROK_GEN_TAIL: readonly FlagGenerationMeta[] = [
   {
@@ -445,7 +471,6 @@ export const GROK_FLAG_GENERATION: readonly FlagGenerationMeta[] = [
   ...GROK_GEN_OUTPUT_FORMAT,
   ...GROK_GEN_MAIN,
   ...GROK_GEN_PROMPT_FILE,
-  ...GROK_GEN_SINGLE,
   ...GROK_GEN_TAIL,
 ];
 

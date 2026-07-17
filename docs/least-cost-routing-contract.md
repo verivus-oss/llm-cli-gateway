@@ -16,7 +16,7 @@ these decisions; they may only add detail underneath them.
 **LCR routes a request to the cheapest eligible `(provider, model)` candidate
 that still satisfies the caller's capability and quality constraints, then
 dispatches it through the existing execution path.** It is cost-minimization
-*subject to constraints*, never "always the cheapest thing". LCR is unrelated to
+_subject to constraints_, never "always the cheapest thing". LCR is unrelated to
 ACP (Agent Client Protocol); the two only intersect where LCR reasons about
 grok's transport (below).
 
@@ -27,10 +27,12 @@ across models than across providers, so LCR never routes a bare provider.
 
 ## Frozen decisions
 
-1. **Dormant by default.** `[least_cost].enabled` defaults false. When off, the
+1. **Dormant by default.** `[least_cost].enabled` defaults false. The
    `route_request` / `route_request_async` tools are **not registered at all**
-   (mirrors the async-jobs and `[acp]` gating): nothing routes until an operator
-   opts in.
+   unless it is enabled and Personal Agent Config Kit is disabled. Kit admits
+   only its compiled local Claude/Codex path, so LCR cannot advertise a generic
+   route surface there: nothing routes until an operator opts in outside Kit
+   mode.
 
 2. **A dedicated tool surface, existing tools unchanged.** LCR is reached only
    through `route_request` / `route_request_async`. `claude_request` still goes
@@ -58,12 +60,12 @@ across models than across providers, so LCR never routes a bare provider.
 
 6. **Cost basis is explicit on every figure.** Every recorded or returned cost
    carries `cost_basis: "provider-reported" | "derived-from-tokens" |
-   "pre-flight-estimate"` (accuracy descending). A single pure
+"pre-flight-estimate"` (accuracy descending). A single pure
    `composeCost(counts | null, estimate, modelCost)` produces all three and is
    the only place cost is composed.
 
 7. **Derived cost is composition, never decomposition.** For providers that
-   report token counts but no dollar cost (T2), cost is *derived* as
+   report token counts but no dollar cost (T2), cost is _derived_ as
    `counts x getModelCost rate`. LCR never decomposes a scalar total `costUsd`
    into per-token rates: a single total cannot be split into input and output
    rates. Composing a total from known rates times reported counts is the sound,
@@ -172,7 +174,8 @@ across models than across providers, so LCR never routes a bare provider.
 - Confidence is advisory metadata and never re-orders candidates; `argmin` is
   over point estimates only.
 - `getPricing` semantics are unchanged (ZERO-for-unknown stays for cache-stats).
-- Dormant by default; the route tools are unregistered when `enabled` is false.
+- Dormant by default; the route tools are unregistered when `enabled` is false
+  or Personal Agent Config Kit is enabled.
 
 ## References
 

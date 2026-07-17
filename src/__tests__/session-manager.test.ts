@@ -1,12 +1,16 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import {
   FileSessionManager,
+  FileSessionStorageFaultError,
   remoteSafeSession,
   callerIsRemote,
+  publicSafeSession,
+  sessionGenerationIdentity,
   type Session,
 } from "../session-manager.js";
 import { runWithRequestContext } from "../request-context.js";
-import { existsSync, mkdirSync, rmSync, readFileSync, statSync } from "fs";
+import type { KitExecutionRef, KitSessionBinding } from "../personal-config-types.js";
+import { existsSync, mkdirSync, rmSync, readFileSync, statSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
@@ -62,6 +66,47 @@ describe("SessionManager", () => {
 
       expect(session.id).toBe(customId);
       expect(session.cli).toBe("codex");
+    });
+
+    it("atomically rejects explicit ID collisions without replacing the winner", () => {
+      const winner = runWithRequestContext(
+        { transport: "http", authScopes: [], authPrincipal: "owner-a" },
+        () => sessionManager.createSession("claude", "winner", "shared-id")
+      );
+
+      expect(() => sessionManager.createSession("claude", "same provider", "shared-id")).toThrow(
+        /already exists/
+      );
+      expect(() =>
+        sessionManager.createSession("codex", "different provider", "shared-id")
+      ).toThrow(/already exists/);
+      expect(() =>
+        runWithRequestContext({ transport: "http", authScopes: [], authPrincipal: "owner-b" }, () =>
+          sessionManager.createSession("claude", "different owner", "shared-id")
+        )
+      ).toThrow(/already exists/);
+
+      expect(sessionManager.getSession("shared-id")).toEqual(winner);
+    });
+
+    it("atomically creates an explicit session with its admitted metadata", () => {
+      const winner = sessionManager.createSessionWithMetadata(
+        "claude",
+        "scoped winner",
+        "scoped-id",
+        { workspaceAlias: "repo-a", workspaceRoot: "/workspace/a" }
+      );
+      expect(winner.metadata).toEqual({
+        workspaceAlias: "repo-a",
+        workspaceRoot: "/workspace/a",
+      });
+      expect(() =>
+        sessionManager.createSessionWithMetadata("claude", "loser", "scoped-id", {
+          workspaceAlias: "repo-b",
+          workspaceRoot: "/workspace/b",
+        })
+      ).toThrow(/already exists/);
+      expect(sessionManager.getSession("scoped-id")?.metadata).toEqual(winner.metadata);
     });
 
     it("should set newly created session as active if none exists", () => {
@@ -147,6 +192,79 @@ describe("SessionManager", () => {
   });
 
   describe("session deletion", () => {
+    it("notifies cleanup observers for successful delete, clear, and TTL eviction", async () => {
+      const observed: string[] = [];
+      sessionManager.addSessionRemovalObserver(session => observed.push(session.id));
+      const deleted = sessionManager.createSession("claude");
+      const retained = sessionManager.createSession("codex");
+
+      expect(sessionManager.deleteSession("missing-session")).toBe(false);
+      expect(observed).toEqual([]);
+      expect(sessionManager.deleteSession(deleted.id)).toBe(true);
+      expect(observed).toEqual([deleted.id]);
+
+      expect(sessionManager.clearAllSessions("codex")).toBe(1);
+      expect(observed).toEqual([deleted.id, retained.id]);
+
+      const ttlManager = new FileSessionManager(join(testDir, "ttl-sessions.json"), 1);
+      ttlManager.addSessionRemovalObserver(session => observed.push(session.id));
+      const expired = ttlManager.createSession("gemini");
+      await new Promise(resolve => setTimeout(resolve, 5));
+      expect(ttlManager.getSession(expired.id)).toBeNull();
+      expect(observed).toContain(expired.id);
+    });
+
+    it("runs cleanup and removal hooks when an active session expires during lookup", () => {
+      const cleaned: string[] = [];
+      const removed: string[] = [];
+      const manager = new FileSessionManager(join(testDir, "active-ttl-sessions.json"), -1, {
+        cleanupHook: session => cleaned.push(session.id),
+      });
+      manager.addSessionRemovalObserver(session => removed.push(session.id));
+      const expired = manager.createSession("claude");
+
+      expect(manager.getActiveSession("claude")).toBeNull();
+      expect(cleaned).toEqual([expired.id]);
+      expect(removed).toEqual([expired.id]);
+      expect(manager.getSession(expired.id)).toBeNull();
+    });
+
+    it("runs cleanup and removal hooks on the expired active Kit lookup branch", () => {
+      const cleaned: string[] = [];
+      const removed: string[] = [];
+      const manager = new FileSessionManager(
+        join(testDir, "active-kit-ttl-sessions.json"),
+        60_000,
+        {
+          cleanupHook: session => cleaned.push(session.id),
+        }
+      );
+      manager.addSessionRemovalObserver(session => removed.push(session.id));
+      const execution: KitExecutionRef = {
+        version: 1,
+        releaseId: "release-active-ttl",
+        configStamp: "stamp-active-ttl",
+        scopeRoot: "/workspace/active-ttl",
+        scopeHead: "head-active-ttl",
+        contextIdentity: "context-active-ttl",
+      };
+      const binding: KitSessionBinding = {
+        execution,
+        nativeSessionId: "11111111-1111-4111-8111-111111111111",
+        resumeEligible: true,
+      };
+      const expired = manager.createKitSession("codex", binding);
+      const internals = manager as unknown as {
+        isExpired(session: Session): boolean;
+      };
+      internals.isExpired = () => true;
+
+      expect(manager.getActiveKitSession("codex", execution.scopeRoot, execution)).toBeNull();
+      expect(cleaned).toEqual([expired.id]);
+      expect(removed).toEqual([expired.id]);
+      expect(manager.getSession(expired.id)).toBeNull();
+    });
+
     it("should delete a session by ID", () => {
       const session = sessionManager.createSession("claude");
       const deleted = sessionManager.deleteSession(session.id);
@@ -286,6 +404,60 @@ describe("SessionManager", () => {
       const result = sessionManager.updateSessionMetadata("non-existent", { key: "value" });
       expect(result).toBe(false);
     });
+
+    it("compare-and-set binds metadata only for the exact generation and expected state", () => {
+      const session = sessionManager.createSession("claude", "CAS", "cas-session");
+      const identity = sessionGenerationIdentity(session);
+      expect(
+        sessionManager.compareAndSetSession(identity, {
+          kind: "replace_metadata",
+          expectedMetadata: undefined,
+          metadata: { workspaceAlias: "repo" },
+        })
+      ).toBe(true);
+      expect(sessionManager.getSession(session.id)?.metadata).toEqual({ workspaceAlias: "repo" });
+
+      expect(
+        sessionManager.compareAndSetSession(identity, {
+          kind: "replace_metadata",
+          expectedMetadata: undefined,
+          metadata: { workspaceAlias: "stale-overwrite" },
+        })
+      ).toBe(false);
+      expect(
+        sessionManager.compareAndSetSession(identity, {
+          kind: "delete",
+          expectedMetadata: undefined,
+        })
+      ).toBe(false);
+    });
+
+    it("rejects an old generation even when id, provider, owner, and timestamp match", () => {
+      const original = sessionManager.createSession("claude", "first", "reused-id");
+      const staleIdentity = sessionGenerationIdentity(original);
+      expect(sessionManager.deleteSession(original.id)).toBe(true);
+      const replacement = sessionManager.createSession("claude", "replacement", "reused-id");
+      const forgedOldIdentity = {
+        ...staleIdentity,
+        createdAt: replacement.createdAt,
+      };
+
+      expect(
+        sessionManager.compareAndSetSession(forgedOldIdentity, {
+          kind: "replace_metadata",
+          expectedMetadata: undefined,
+          metadata: { shouldNotAppear: true },
+        })
+      ).toBe(false);
+      expect(sessionManager.getSession(replacement.id)?.metadata).toBeUndefined();
+    });
+
+    it("strips the opaque generation from public session projections", () => {
+      const session = sessionManager.createSession("claude", "public projection");
+      expect(session.generation).toBeTypeOf("string");
+      expect(publicSafeSession(session)).not.toHaveProperty("generation");
+      expect(remoteSafeSession(session)).not.toHaveProperty("generation");
+    });
   });
 
   describe("persistence", () => {
@@ -317,6 +489,35 @@ describe("SessionManager", () => {
       expect(loaded?.description).toBe("Original");
     });
 
+    it("backfills and persists a random generation for legacy file sessions", () => {
+      const storagePath = join(testDir, "legacy-sessions.json");
+      writeFileSync(
+        storagePath,
+        JSON.stringify({
+          sessions: {
+            legacy: {
+              id: "legacy",
+              cli: "claude",
+              description: "legacy",
+              createdAt: new Date().toISOString(),
+              lastUsedAt: new Date().toISOString(),
+              ownerPrincipal: "local",
+            },
+          },
+          activeSession: { claude: "legacy" },
+        })
+      );
+
+      const migrated = new FileSessionManager(storagePath);
+      const generation = migrated.getSession("legacy")?.generation;
+      expect(generation).toMatch(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
+      );
+      expect(JSON.parse(readFileSync(storagePath, "utf8")).sessions.legacy.generation).toBe(
+        generation
+      );
+    });
+
     it("should persist active sessions", () => {
       const session = sessionManager.createSession("claude");
       sessionManager.setActiveSession("claude", session.id);
@@ -328,18 +529,27 @@ describe("SessionManager", () => {
       expect(activeSession?.id).toBe(session.id);
     });
 
-    it("should handle corrupted storage file gracefully", () => {
+    it("does not overwrite a corrupted storage file", () => {
       const storagePath = join(testDir, "sessions.json");
+      const corrupt = "{ invalid json";
+      require("fs").writeFileSync(storagePath, corrupt, "utf-8");
 
-      // Write invalid JSON
-      const fs = require("fs");
-      fs.writeFileSync(storagePath, "{ invalid json", "utf-8");
+      const newManager = new FileSessionManager(storagePath);
+      // Safe legacy reads do not invent state, while every mutation remains
+      // blocked until an operator replaces the invalid file.
+      expect(newManager.listSessions()).toEqual([]);
+      expect(() => newManager.createSession("claude")).toThrow(FileSessionStorageFaultError);
+      expect(readFileSync(storagePath, "utf-8")).toBe(corrupt);
+    });
 
-      // Should not throw, should start fresh
-      expect(() => {
-        const newManager = new FileSessionManager(storagePath);
-        expect(newManager.listSessions()).toEqual([]);
-      }).not.toThrow();
+    it("faults valid JSON with missing session state without overwriting it", () => {
+      const storagePath = join(testDir, "sessions.json");
+      const invalidState = JSON.stringify({ activeSession: {} });
+      require("fs").writeFileSync(storagePath, invalidState, "utf-8");
+
+      const newManager = new FileSessionManager(storagePath);
+      expect(() => newManager.getPinnedKitReleaseIds()).toThrow(FileSessionStorageFaultError);
+      expect(readFileSync(storagePath, "utf-8")).toBe(invalidState);
     });
 
     it("should persist metadata", () => {
@@ -586,13 +796,21 @@ describe("remoteSafeSession + callerIsRemote", () => {
       workspaceAlias: "gateway",
       workspaceRoot: "/home/operator/src/prod",
       worktreePath: "/home/operator/src/prod/.worktrees/abc123",
+      worktreeOwnerHostname: "developer-workstation",
+      worktreeOwnerInstanceId: "gateway-instance-uuid",
+      worktreeCleanupPending: true,
+      worktreeCleanupPendingDeletion: true,
     },
   };
 
-  it("strips workspaceRoot and reduces worktreePath to a relative label, keeping alias", () => {
+  it("strips internal worktree ownership, strips workspaceRoot, and reduces worktreePath", () => {
     const safe = remoteSafeSession(baseSession);
     expect(safe.metadata?.workspaceRoot).toBeUndefined();
     expect(safe.metadata?.worktreePath).toBe(join(".worktrees", "abc123"));
+    expect(safe.metadata?.worktreeOwnerHostname).toBeUndefined();
+    expect(safe.metadata?.worktreeOwnerInstanceId).toBeUndefined();
+    expect(safe.metadata?.worktreeCleanupPending).toBeUndefined();
+    expect(safe.metadata?.worktreeCleanupPendingDeletion).toBeUndefined();
     expect(safe.metadata?.workspaceAlias).toBe("gateway");
     expect(safe.metadata?.model).toBe("opus");
     // No absolute operator path anywhere in the projection.
@@ -600,6 +818,18 @@ describe("remoteSafeSession + callerIsRemote", () => {
     expect(blob).not.toContain("/home/operator");
     // The original session object is not mutated.
     expect(baseSession.metadata?.workspaceRoot).toBe("/home/operator/src/prod");
+    expect(baseSession.metadata?.worktreeOwnerHostname).toBe("developer-workstation");
+    expect(baseSession.metadata?.worktreeOwnerInstanceId).toBe("gateway-instance-uuid");
+  });
+
+  it("strips internal worktree ownership from the local public projection", () => {
+    const safe = publicSafeSession(baseSession);
+    expect(safe.metadata?.worktreeOwnerHostname).toBeUndefined();
+    expect(safe.metadata?.worktreeOwnerInstanceId).toBeUndefined();
+    expect(safe.metadata?.worktreeCleanupPending).toBeUndefined();
+    expect(safe.metadata?.worktreeCleanupPendingDeletion).toBeUndefined();
+    expect(safe.metadata?.workspaceRoot).toBe("/home/operator/src/prod");
+    expect(safe.metadata?.worktreePath).toBe("/home/operator/src/prod/.worktrees/abc123");
   });
 
   // BLOCKER 1 (security): the nested `metadata.acp` block leaks the operator's

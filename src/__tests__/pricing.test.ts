@@ -86,6 +86,21 @@ describe("pricing", () => {
       expect(getPricing("grok", "grok-3-mini").inputUsd).toBe(1.25);
       expect(getPricing("grok", "grok-latest").inputUsd).toBe(1.25);
     });
+    it("grok-4.5 → its own pricing ($2.00 / $6.00, 0.25x cache), never the grok-4.3 rate", () => {
+      const p = getPricing("grok", "grok-4.5");
+      expect(p.inputUsd).toBe(2);
+      expect(p.outputUsd).toBe(6);
+      expect(p.cacheReadMultiplier).toBe(0.25);
+      // The bug this guards: "grok-4.5" contains "grok-4", so an ordering slip
+      // silently bills the Grok CLI's DEFAULT model at grok-4.3's cheaper rate.
+      expect(p.inputUsd).not.toBe(1.25);
+      expect(p.outputUsd).not.toBe(2.5);
+      // The neighbouring flagship rate must not move with it.
+      expect(getPricing("grok", "grok-4.3").inputUsd).toBe(1.25);
+      expect(getPricing("grok", "grok-4.20-0309-reasoning").inputUsd).toBe(1.25);
+      expect(modelIdToFamily("grok-4.5")).toBe("grok-4.5");
+      expect(modelIdToFamily("grok-4.3")).toBe("grok-4");
+    });
     it("mistral medium-3.5 → Medium pricing ($1.50 / $7.50)", () => {
       const p = getPricing("mistral", "mistral-medium-3.5");
       expect(p.inputUsd).toBe(1.5);

@@ -1,227 +1,225 @@
 ---
 name: secure-orchestration
-description: Security-conscious LLM orchestration with approval gates across Claude, Codex, Gemini, Grok, and Mistral. Use for high-risk operations, permissions, auditing.
+description: Orchestrate security-sensitive LLM work with the gateway's Claude-managed approval boundary, provider-native legacy controls, evidence-aware auditing, and complete no-limit review handling.
 metadata:
   author: verivus-oss
-  version: "1.6"
+  version: "1.7"
 ---
 
 # Secure Orchestration
 
-Approval gate scores request risk, enforces policy thresholds. Applies uniformly to Claude, Codex, Gemini, Grok (xAI), and Mistral Vibe dispatches. Use when security matters — production codebases, sensitive data, autonomous operations.
+Use this skill for sensitive code, privileged operations, autonomous changes,
+and security review. A security review request goes through the installed local
+stdio gateway MCP surface, never a direct provider binary, SDK, connector/shadow
+gateway, or shell fallback. If that stdio surface is unavailable, repair it or
+report the review incomplete.
 
-> **Mistral Vibe note**: the gateway always emits `--agent <mode>` explicitly and defaults the programmatic mode to `auto-approve`. Set `permissionMode:"plan"` (or `chat`/`explore`) when you want stricter behaviour. Current Vibe defaults session logging on; `doctor --json` surfaces explicit `[session_logging] enabled = false` as a `next_actions` entry.
+## The approval boundary
 
-## Dispatch Defaults
+`approvalStrategy:"mcp_managed"` is an enforcement boundary only for Claude.
+The gateway creates a request-scoped strict MCP configuration from provisioned
+gateway-owned local definitions. Codex, Gemini, Grok, Mistral, Devin, and Cursor
+must use `approvalStrategy:"legacy"`; they reject managed approval before
+launch because their ambient MCP configuration cannot be isolated.
 
-Apply these on every dispatch unless the caller has explicitly overridden a rule in the current turn:
+For Claude managed requests:
 
-1. **Omit `model`** — let the gateway use its configured default per CLI. Nominating a model risks deprecated IDs (`o3`, `o3-pro`, `gpt-4o`, …) and capability mismatches.
-2. **`approvalStrategy:"mcp_managed"`** is the skill dispatch default (the gateway schema default is `"legacy"`). It runs the scored gateway gate first; Claude then uses `bypassPermissions`, Gemini uses `yolo`, and Codex still needs `fullAuto:true` for autonomous file/shell work. **The `mcp_managed` auto-flip itself is not scored as raw bypass; only caller-supplied raw bypass flags incur the +3 permission-bypass penalty below.** Raw `dangerouslySkipPermissions` / `dangerouslyBypassApprovalsAndSandbox` / caller-set `approvalMode:"yolo"` remain prohibited in production because they bypass the gateway gate entirely.
-3. **No wallclock timeout; poll every 60 s** — good security reviews take minutes to tens of minutes. `idleTimeoutMs` (no-output safeguard) remains a valid security control and is separate from wallclock timeout.
-4. **Iterate until unconditional APPROVED** (review dispatches only) — end every review prompt with "End with APPROVED or NOT APPROVED with findings." Loop: dispatch → parse verdict → on `NOT APPROVED` or conditional approval, dispatch fixes + re-review → repeat until unconditional APPROVED. Escalate after 3 rounds. This rule does **not** apply to pure implementation or non-review analysis dispatches.
+- `approvalPolicy` may be `strict`, `balanced`, or `permissive`.
+- The default policy is `balanced`; thresholds are strict `2`, balanced `5`, and
+  permissive `7`.
+- Full permission bypasses and unverified execution posture are denied by
+  default. They require the caller's explicit request, an approval decision,
+  and `LLM_GATEWAY_APPROVAL_ALLOW_BYPASS=1`.
+- Native continuation/fork, `workingDir`, tool selectors, settings/plugins,
+  additional directories, prompt-file controls, and other posture changes can
+  require that same decision and operator setting. Do not add them casually.
+- Under managed approval, only gateway-owned local definitions explicitly
+  provisioned for the request are eligible. Dynamic package execution, ambient
+  PATH, and provider-configuration overrides cannot bypass that boundary.
 
-## Risk Scoring
+Do not imply that gateway-managed approval protects a non-Claude legacy request.
+Its sandbox, tool, permission, MCP, session, and ACP controls belong to the
+provider. Query `provider_tool_capabilities({cli:"..."})` before relying on any
+of them.
 
-| Factor | Points | Trigger |
-|--------|--------|---------|
-| Permission bypass | +3 | Raw caller-supplied bypass: `dangerouslySkipPermissions:true`, `dangerouslyBypassApprovalsAndSandbox:true`, or caller-set Gemini `approvalMode:"yolo"`. The `approvalStrategy:"mcp_managed"` auto-flip is **not** scored here. |
-| Sensitive keywords | +3 | `delete`, `destroy`, `wipe`, `exfiltrate`, `credential`, `token`, `password`, `secret` |
-| Full auto | +2 | `fullAuto:true` (Codex) |
-| Bypass + full-auto | +2 | Both requested together |
-| Weighted MCP server | varies | Per-server approval weights from the host's MCP registry (e.g. a web-search server) add to the score |
-| Review tool suppression | +4 | Tool-suppression language detected in review context (e.g., "do not run tools") |
-| Empty allowedTools (review) | +6 | `allowedTools:[]` in review context — reviewers need tool access |
-| Critical tools disallowed (review) | +6 | Review context with `Read`, `Grep`, `Glob`, or `Bash` in `disallowedTools` |
-| Ref tools MCP | +1 | Reference tools access |
-| Empty allowedTools (non-review) | +0 | Recorded as "No tool permissions requested"; does not lower score |
-| Explicit disallowedTools (non-critical/non-review) | +0 | Recorded as a restriction; does not lower score |
+## Safe request patterns
 
-## Policy Thresholds
+Routine Claude managed inspection:
 
-| Policy | Max Score | Use When |
-|--------|-----------|----------|
-| `strict` | 2 | Production, security-sensitive, untrusted prompts |
-| `balanced` | 5 | Normal development, trusted prompts |
-| `permissive` | 7 | Experimentation, sandboxed environments |
-
-Score > threshold → **denied**. Default: `balanced` (override: `LLM_GATEWAY_APPROVAL_POLICY` env var).
-
-## Enabling Approval Gates
-
-### Per-request
-
-```
-claude_request({prompt:"Refactor auth module",approvalStrategy:"mcp_managed",approvalPolicy:"strict"})
-```
-
-Response includes:
-```json
-{"approval":{"id":"appr-...","status":"approved","score":0,"policy":"strict","reasons":[]}}
+```text
+claude_request({
+  prompt:"Audit the supplied evidence packet for security defects. Inspect available source directly and cite evidence.",
+  approvalStrategy:"mcp_managed",
+  approvalPolicy:"strict"
+})
 ```
 
-### Denied example
+If the security audit must target a particular local checkout, treat
+`workingDir` as a managed posture change. Obtain the approval decision and
+operator setting first, or use a deliberate legacy provider-native path and
+state that it is outside the managed boundary.
 
-```
-codex_request({prompt:"Delete all test fixtures",fullAuto:true,dangerouslyBypassApprovalsAndSandbox:true,approvalStrategy:"mcp_managed",approvalPolicy:"strict"})
-```
+Codex inspection starts read-only:
 
-Score: bypass(+3) + full-auto(+2) + combo(+2) + "delete"(+3) = **10** > strict threshold 2. Request NOT executed.
-
-### Async requests
-
-Approval check happens before job spawn:
-
-```
-gemini_request_async({prompt:"Audit auth module for vulnerabilities. End with APPROVED or NOT APPROVED with findings.",approvalStrategy:"mcp_managed",approvalPolicy:"strict"})
-```
-
-Approved → job starts, get `job.id` to poll (every 60s per dispatch defaults). Denied → no job created, denial returned.
-
-### mcp_managed CLI effects
-
-When `approvalStrategy:"mcp_managed"`:
-- Claude: `--permission-mode bypassPermissions`
-- Gemini: `--approval-mode yolo`
-- Codex: no automatic bypass flag; use `fullAuto:true` for sandboxed autonomous execution. `dangerouslyBypassApprovalsAndSandbox:true` is still raw bypass. On `codex exec resume` (when `sessionId` or `resumeLatest` is set), `fullAuto` is silently dropped — the original session's approval policy is inherited, so audit the source session's approval posture before resuming.
-- Grok: equivalent permissive flag handled by the Grok provider; raw `alwaysApprove` / `permissionMode` overrides are scored the same way as Claude/Gemini raw bypass.
-
-Gateway approval engine becomes the gatekeeper before permissive CLI modes are applied.
-
-## Audit Trail
-
-```
-approval_list({limit:50})
+```text
+codex_request({
+  prompt:"Inspect <repo> for security defects and report evidence.",
+  workingDir:"<repo>",
+  sandboxMode:"read-only",
+  approvalStrategy:"legacy"
+})
 ```
 
-Returns:
-```json
-{"approvals":[{"id":"appr-...","ts":"...","status":"approved","policy":"balanced","cli":"claude","operation":"claude_request","score":0,"reasons":[],"promptPreview":"Refactor the auth...","promptSha256":"a1b2c3...","requestedMcpServers":["example-server"]}]}
+Use `sandboxMode:"workspace-write"` only when testing must write artifacts.
+`fullAuto:true` is deprecated compatibility shorthand, not a modern security
+control. On a Codex resume the sandbox setting is dropped.
+
+Gemini/Antigravity rejects non-empty `allowedTools`, `skipTrust:true`, JSON and
+stream-JSON output in the current headless path, plus unsupported policy and
+attachment inputs. Mistral defaults programmatic legacy requests to
+`accept-edits`; its session logging defaults on and `doctor --json` flags only
+an explicit `[session_logging] enabled = false`. Devin and Cursor use legacy
+controls reported by their capability records.
+
+Native ACP is separately config-gated and rejects `mcp_managed` and
+`approvalPolicy`. It is not a managed-CLI permission bypass.
+
+## Complete security reviews
+
+For a mandatory review, use the evidence packet and seven-provider roster in
+`multi-llm-review`:
+
+- For a normal read-only Git audit, prefer `review_changes` when durable
+  SQLite/PostgreSQL validation storage is available. It captures the complete
+  committed/staged/unstaged/untracked artifact, fences repository content as
+  untrusted data, and starts repository-bound read-only reviewers. Collect its
+  validation `job_status`/`job_result` references and keep the returned hashes.
+  If a judge was planned, wait for terminal results and call
+  `synthesize_validation` with the `validationId` and same repository selector.
+  Review synthesis ignores caller question/results, reloads exact owned durable
+  linked terminal jobs, reconstructs unavailable requested seats as skipped,
+  and claims the authoritative stored judge once. The stored repository, owner,
+  judge, and consent cannot be replaced by follow-up arguments.
+  HTTP/API seats require explicit local upload consent; remote workspace audits
+  cannot upload the artifact to an API reviewer.
+
+- Discover Claude, Codex, Gemini, Grok, Mistral, Devin, and Cursor capability
+  and target-routing status before dispatching.
+- Require direct source/test/doc inspection, file:line or command evidence, and
+  strict `APPROVED_UNCONDITIONALLY | CHANGES_REQUIRED | BLOCKED_EXTERNAL`
+  output.
+- Do not set a review round, turn, token, price, budget, or wallclock cap. Do
+  not use least-cost routing or cheapest-reviewer selection.
+- Repaired findings require fresh evidence and re-review. A conditional,
+  malformed, timed-out, or unavailable required reviewer means
+  `INCOMPLETE`/`BLOCKED`, never approval.
+- An `idleTimeoutMs` is a no-output safeguard, not an acceptance deadline. If
+  it terminates a review, repair/retry the dispatch or report the reviewer
+  blocked; never accept the partial result as a pass.
+
+Do not weaken a security review by excluding a provider, tool, target, or
+verification step unless the user explicitly accepts the narrowed scope and its
+limitation.
+
+An unscoped local CLI child runs in a fresh private neutral cwd, not the gateway
+repository. Use explicit `workingDir`, registered `workspace`, or gateway
+`worktree` target routing. Cwd-scoped latest-session continuation fails closed
+without a stable target. Argv-bound providers reject an oversized UTF-8 prompt
+as non-retryable `input_too_large`; Codex sends new and resume prompts through
+stdin, while `codex_fork_session` remains argv-bound and applies that rejection.
+Every caller-controlled argv value is admitted in its final encoded form,
+including serialized JSON and joined lists, before spawn. No path truncates
+instructions or other values to make them fit. The resolved command line also
+has a conservative platform-specific aggregate byte budget and a 2,048-element
+cap. The byte budget excludes environment bytes while reserving headroom;
+Windows preflight assumes the smaller npm `.cmd`/`.bat` wrapper limit until
+resolution proves a native executable. Handler-added native session flags are
+admitted before workspace, session, provider-artifact handoff, or durable-job
+effects on non-Kit requests. Claude Kit projects its eventual argv before
+compiled-context artifact materialization or durable Kit-session allocation.
+Native `E2BIG` remains a redacted fallback.
+An embedded NUL byte in command or argv is rejected before spawn as
+non-retryable `invalid_input`. Public results, long-lived job memory, durable
+args, and async flight rows use a fixed invalid-argv marker, while the optional
+duplicate durable payload is suppressed. None retains the rejected vector or
+Node's value-echoing native error. Stdin-backed
+requests accept a clean provider exit only after the complete payload write
+callback succeeds; a closed or pending delivery becomes a fixed non-sensitive
+failure.
+
+## Explicit user-authorized full-access security review
+
+An explicit user grant of full provider permissions and native MCP access is a
+deliberate legacy-provider review posture, not a Claude-managed approval
+boundary. Keep the safe patterns above for ordinary security work. For the
+full-access case, use the complete `multi-llm-review` protocol and its exact
+per-provider mapping, rather than adding an ad hoc allowlist or assuming that
+`mcp_managed` can grant other providers native MCP access.
+
+Build the exact target checkout and start `node dist/index.js --transport=stdio`
+there for every review iteration. Do not use a globally installed or stale
+gateway. Reapply each provider's full-access controls to each new job, preserve
+ambient native MCP configuration, and record the live capability result. Give
+the reviewer a corrective-program verification report, the exact base and diff
+or changed-file list, untracked product files, and durable review evidence. It
+must independently inspect source, docs, tests, commands, and relevant MCP
+facts, then return only `APPROVED_UNCONDITIONALLY`, `CHANGES_REQUIRED`, or a
+concrete `BLOCKED_EXTERNAL` result.
+
+Do not set caller review caps. On a user-required 90-second progress cadence,
+use a non-blocking wait and do not poll early. Full execution capability does
+not authorize review mutation: ask reviewers not to edit, stage, commit, reset,
+or otherwise alter the target unless separately instructed.
+
+## Approval records and privacy
+
+Read managed-Claude decisions with:
+
+```text
+approval_list({limit:50,cli:"claude"})
 ```
 
-Filter: `approval_list({limit:50,cli:"codex"})`
+An approval record includes its ID, timestamp, status, policy, CLI, operation,
+score/reasons, requested MCP names, bypass/full-auto flags, a prompt hash, and
+optional metadata. `promptPreview` is `[redacted]` by default. It contains up
+to 280 normalized characters only when `APPROVAL_LOG_PROMPTS=1` is explicitly
+enabled. `promptSha256` identifies prompt content; it is not a correlation ID.
 
-Key fields: `promptPreview` (first 280 chars) | `promptSha256` (correlation) | `reasons` (score breakdown) | `bypassRequested` | `fullAuto`
+Approval records are stored in the approval manager's JSONL log and have their
+own lifecycle. Do not claim they share the async job store's retention policy.
+They contain no job ID or correlation ID, so they cannot be joined to job output
+by correlation. Preserve a caller-owned correlation ID, job ID, request result,
+and exact evidence packet separately when an audit needs that linkage.
 
-## Security Guidelines
+`approval_list` is evidence of a managed approval decision, not a complete
+reconstruction of the request or provider output. Cache resources contain only
+token/hash aggregates and cannot restore prompt/response text.
 
-**Production:** Always strict approval:
-```
-claude_request({prompt:"...",approvalStrategy:"mcp_managed",approvalPolicy:"strict"})
-```
+## Personal Agent Config Kit
 
-**Development:** Balanced for trusted prompts:
-```
-codex_request({prompt:"...",approvalStrategy:"mcp_managed",approvalPolicy:"balanced",fullAuto:true})
-```
+Kit is local-only, supports only Claude/Codex, requires healthy durable
+SQLite/PostgreSQL admission, and disables validation and least-cost routing. Its
+effective profile may intentionally cap ordinary work. Before calling a Kit
+security review complete, inspect `explain_effective_config`; a turn/budget cap
+makes an exhaustive no-limit review constrained until an approved uncapped
+profile or explicit user direction is available.
 
-**Never in production (raw CLI bypass flags — bypass the gateway gate entirely):**
-- `dangerouslySkipPermissions:true` (Claude)
-- `dangerouslyBypassApprovalsAndSandbox:true` (Codex)
-- `approvalMode:"yolo"` (Gemini)
-- Raw permissive flags on `grok_request` (e.g., caller-supplied `alwaysApprove` or permissive `permissionMode`)
+The normal Claude `workingDir` posture guidance does not apply to Kit execution.
+Claude Kit requests reject caller-supplied `workingDir` before context
+compilation. `explain_effective_config({workingDir:"<repo>"})` remains valid for
+read-only inspection; execute Claude Kit work with an already configured
+registered `workspace` alias or the configured default workspace. It never
+inherits the gateway process cwd.
 
-Use `approvalStrategy:"mcp_managed"` instead so the gateway scores and gates the request before permissive CLI modes are applied. For Codex, include `fullAuto:true` when the task needs file or shell access (note: not honored on `codex exec resume` — the resumed session inherits its original approval policy).
+## Security checklist
 
-## Permission Management
-
-Before setting provider-specific tool, MCP, sandbox, or session fields, query:
-
-```
-provider_tool_capabilities({cli:"claude"})
-```
-
-Repeat for `codex`, `gemini`, `grok`, or `mistral` as needed. Use the returned
-`controls` and `unsupportedInputs`; do not infer one provider's permission
-surface from another provider's CLI.
-
-### Claude MCP servers
-
-```
-claude_request({prompt:"...",mcpServers:["<server-name>"],strictMcpConfig:true})
-```
-
-- `mcpServers`: the MCP server names to enable for this request (the available set depends on the host's Claude MCP configuration)
-- `strictMcpConfig:true`: fail if a requested server is unavailable
-
-For Codex, Grok, and Mistral Vibe, `mcpServers` is approval tracking only; each
-provider owns its MCP configuration. For the current Gemini/Antigravity request
-path, non-empty `mcpServers` is rejected.
-
-### Codex sandboxing
-
-`fullAuto:true` enables automated changes, stays sandboxed.
-
-### Gemini approval modes
-
-`approvalMode`: `default` (ask) | `auto_edit` (auto-approve edits) | `yolo` (dev only)
-
-### Tool restrictions
-
-**Claude** — allowlists + blocklists:
-```
-claude_request({prompt:"...",allowedTools:["Read","Grep","Glob"],disallowedTools:["Bash","Write"]})
-```
-
-**Gemini/Antigravity** — current path rejects non-empty allowlists:
-```
-gemini_request({prompt:"...",approvalStrategy:"mcp_managed"})
-```
-
-**Grok** — provider-native allowlists only:
-```
-grok_request({prompt:"...",approvalStrategy:"mcp_managed"})
-```
-Do not pass Claude tool names such as `Read`, `Grep`, `Glob`, or `Bash` as Grok
-`allowedTools`; query `provider_tool_capabilities({cli:"grok"})` and use
-discovered provider-native tool names only when you intentionally need an
-allowlist.
-
-**Mistral Vibe** — enabled-tool allowlist only:
-```
-mistral_request({prompt:"...",allowedTools:["<vibe-enabled-tool>"],approvalStrategy:"mcp_managed"})
-```
-`disallowedTools` is accepted for parity but ignored because Vibe has no
-deny-list flag.
-
-## Idle Timeout as Security Control
-
-Tight idle timeout limits window for unintended operations:
-
-```
-claude_request({prompt:"Audit secrets module",approvalStrategy:"mcp_managed",approvalPolicy:"strict",idleTimeoutMs:120000})
-```
-
-Kills process after 2min inactivity. Exit code 125 (non-transient, no retry).
-
-**Guideline:** 60-120s for security audits. Full 10min default for large analysis only.
-
-## Cache Observability for Audit Tracing
-
-Three read-only MCP resources expose cache effectiveness from the flight recorder — tokens / hashes / aggregates only, **no prompt or response text**:
-
-- `cache-state://global` — last-24h aggregate hit rate, total hits, estimated savings, per-CLI breakdown
-- `cache-state://session/{sessionId}` — per-session aggregates (also surfaces as `session_get.cacheState` when the session has prior requests)
-- `cache-state://prefix/{hash}` — per-stable-prefix-hash aggregates with CLI × model breakdown
-
-The "tokens/hashes only" property is the security guarantee: these resources let an auditor reconstruct "did the model see fresh context or a cached prefix?" without ever exposing prompt or response content. Combine with `approval_list` (which already redacts to a `promptPreview` + `promptSha256`) and `llm_job_status/result` by `correlationId` to reconstruct any past dispatch fully.
-
-For Claude sessions, `[cache_awareness] warn_on_ttl_expiry = true` in `~/.llm-cli-gateway/config.toml` adds a structured `cache_ttl_expiring_soon` warning to responses whose prior `lastRequestAt` is within 30 s of Anthropic's TTL — useful as a signal that an audit-relevant turn may have hit a cold cache and is paying full cache-creation tokens.
-
-### `promptParts` for prompt-discipline auditing
-
-Switching from `prompt` to the structured `promptParts` field (`{ system?, tools?, context?, task }`, mutually exclusive with `prompt`) makes the audit story stronger: the stable prefix hash is stable across calls, so reviewing an audit trail you can see at a glance whether two requests shared a system/tools/context block or genuinely differed. Identical hashes across reviewers in a parallel dispatch = same brief; differing hashes = drift to investigate.
-
-## Tips
-
-- Start `strict`, relax only when needed
-- Review audit trail regularly: `approval_list`
-- Use `correlationId` on every request for tracing
-- `approvalStrategy:"mcp_managed"` is the skill default dispatch path — the gateway schema default is `"legacy"`, which skips the gate unless explicitly selected
-- Denied requests return immediately without executing
-- Gates apply equally to sync and async requests
-- `idleTimeoutMs` is a security control (tight 60–120 s for security audits kills silent processes quickly) — this is **not** a wallclock timeout, so it does not conflict with the "no wallclock timeout, poll every 60 s" dispatch default
-- Approval checks run before auto-deferral — denied requests reject instantly
-- Review dispatches loop until unconditional APPROVED — the approval gate is separate from the reviewer's verdict, and both must pass
-- **Durable audit trail**: approvals and job state are persisted (default 30 days, `LLM_GATEWAY_JOB_RETENTION_DAYS`). Combine `approval_list` with `llm_job_status/result` by `correlationId` to reconstruct any past dispatch, even across gateway restarts
-- **Auto-dedup interacts with approvals**: an identical replayed request within the dedup window (`LLM_GATEWAY_DEDUP_WINDOW_MS`, default 1 h) reuses the original job. The **original** approval decision is the one of record; the dedup hit does not re-run the gate. Use `forceRefresh:true` to force a fresh approval evaluation when the security-relevant context (caller, prompt, flags) has actually changed
+- Confirm the actual provider, target checkout, session/native handle, and
+  capability surface before dispatch.
+- Use Claude managed approval only where its narrow boundary is sufficient.
+- Keep secrets and credentials out of prompts, evidence packets, approval logs,
+  and retained artifacts.
+- Treat legacy provider permissions and native ACP as independent security
+  surfaces.
+- Preserve explicit audit linkage outside `approval_list`.
+- Never turn an incomplete review into an approval because it was expensive,
+  slow, or difficult to route.

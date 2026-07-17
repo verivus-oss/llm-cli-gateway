@@ -1,14 +1,17 @@
 ---
-title: "How to Set Up Multi-LLM Code Review with Claude, Codex, and Gemini"
+title: "How to Set Up Multi-LLM Code Review with CLI Agents"
 published: true
 tags: ai, codereview, mcp, typescript
 ---
 
-> *"Without consultation, plans are frustrated, but with many counselors they succeed."* - Proverbs 15:22
+> _"Without consultation, plans are frustrated, but with many counselors they succeed."_ - Proverbs 15:22
 
 Every LLM has blind spots. Claude is strong on architecture and design patterns. Codex catches logic bugs and missing error handling. Gemini is thorough on security issues and edge cases. Using just one reviewer means you are only getting one perspective.
 
-This tutorial walks through setting up **llm-cli-gateway**, an MCP server that wraps the Claude Code, Codex, and Gemini CLIs, and running a parallel code review that combines all three.
+This tutorial walks through setting up **llm-cli-gateway**, an MCP server that
+wraps seven CLI providers: Claude Code, Codex, Gemini / Antigravity, Grok
+Build, Mistral Vibe, Devin, and Cursor Agent. The review example below uses
+Claude, Codex, and Gemini, but you can substitute any installed provider.
 
 ## Prerequisites
 
@@ -26,7 +29,9 @@ codex login
 curl -fsSL https://antigravity.google/cli/install.sh | bash
 ```
 
-You do not need all three. The gateway works with whichever CLIs you have installed.
+You do not need all seven. The gateway works with whichever supported CLIs you
+have installed. This tutorial uses Claude, Codex, and Gemini as a focused
+three-reviewer example.
 
 ## Step 1: Install the Gateway
 
@@ -57,7 +62,9 @@ This returns the available models for each detected CLI. If a CLI is not install
 
 ## Step 3: Run a Parallel Code Review
 
-Here is the core workflow. You send the same codebase to all three LLMs, each with a prompt tuned to its strengths.
+Here is the core workflow. You send the same codebase to three reviewers, each
+with a prompt tuned to its strengths. The same request pattern is available to
+the other installed providers.
 
 ### Claude: Architecture and Quality
 
@@ -74,13 +81,13 @@ claude_request({
 ```json
 codex_request({
   "prompt": "Analyze src/auth/ for logic bugs, off-by-one errors, missing error handling, race conditions, and test coverage gaps. Read the files directly. Rate each finding: critical, high, medium, or low.",
-  "fullAuto": true,
+  "sandboxMode": "workspace-write",
   "optimizePrompt": true,
   "optimizeResponse": true
 })
 ```
 
-Note: `fullAuto: true` is required for Codex. Without it, Codex runs in a restricted sandbox and cannot read files or run commands.
+Note: use `sandboxMode: "workspace-write"` when Codex needs to edit files. Omitting it preserves Codex's read-only default. `fullAuto: true` remains a deprecated compatibility shorthand for this mode.
 
 ### Gemini: Security and Edge Cases
 
@@ -93,13 +100,14 @@ gemini_request({
 })
 ```
 
-In an MCP client like Claude Code, you can fire all three of these as parallel tool calls in a single turn.
+In an MCP client like Claude Code, you can fire these three calls in parallel in
+a single turn.
 
 ## Step 4: Handle Long-Running Reviews
 
-Code reviews on large files can take over a minute. The gateway handles this transparently.
+Code reviews on large files can take over a minute. When async jobs are enabled, the gateway handles this transparently.
 
-Any sync request that exceeds 45 seconds automatically becomes an async job. Instead of timing out, you get back a job reference:
+Any sync request that exceeds 45 seconds becomes an async job. With async jobs disabled, the sync request runs to completion instead. A deferred request returns a job reference:
 
 ```json
 {
@@ -129,7 +137,7 @@ llm_job_cancel({ "jobId": "abc-123" })
 
 ## Step 5: Synthesize the Results
 
-Once all three reviews come back, combine them. Here is a structured approach:
+Once the reviews come back, combine them. Here is a structured approach:
 
 1. **Deduplicate.** Multiple LLMs will often flag the same issue. Merge these and note which LLMs agreed.
 2. **Prioritize.** Critical findings first, then high, medium, low. If two or more LLMs flag the same thing as critical, it almost certainly is.
@@ -142,13 +150,16 @@ The output should look like:
 ## Code Review Summary
 
 ### Critical (must fix)
+
 - SQL injection in login handler (line 47). Found by Gemini, confirmed by Codex.
 
 ### High
+
 - Missing error handling on token refresh (line 112). Found by Codex.
 - Session fixation vulnerability (line 89). Found by Gemini.
 
 ### Medium
+
 - Duplicated validation logic across handlers. Found by Claude.
 - No rate limiting on auth endpoints. Found by Gemini, noted by Claude.
 ```
@@ -160,7 +171,7 @@ Send the consolidated findings back through Codex for fixes:
 ```json
 codex_request({
   "prompt": "Fix the following issues in src/auth/:\n\n1. [Critical] SQL injection in login handler, line 47 - use parameterized queries\n2. [High] Missing error handling on token refresh, line 112\n3. [High] Session fixation vulnerability, line 89 - regenerate session on login\n\nApply fixes and update tests.",
-  "fullAuto": true,
+  "sandboxMode": "workspace-write",
   "optimizePrompt": true
 })
 ```
@@ -188,24 +199,30 @@ claude_request({
 })
 ```
 
-## Optional: Approval Gates
+## Optional: Claude Approval Gates
 
-For high-risk operations, enable approval gates:
+For high-risk Claude operations, enable the gateway-managed approval gate:
 
 ```json
-codex_request({
+claude_request({
   "prompt": "Refactor the authentication module",
-  "fullAuto": true,
   "approvalStrategy": "mcp_managed",
   "approvalPolicy": "strict"
 })
 ```
 
-The gateway scores the operation's risk and records an approval decision before execution. Review past decisions with `approval_list()`.
+The gateway scores the Claude operation's risk and records an approval decision
+before execution. Review past decisions with `approval_list()`. Managed approval
+is Claude-only: Codex, Gemini, Grok, Mistral, Devin, and Cursor requests must
+use `approvalStrategy: "legacy"`, and `approvalPolicy` has no effect for them.
 
 ## What This Is (and Is Not)
 
-**llm-cli-gateway wraps CLI binaries, not APIs.** It spawns `claude`, `codex`, and `agy` (Antigravity, for the Gemini provider) as child processes. You get the full CLI experience: tool use, sandboxing, file access, your existing authentication and billing. There is no API key to configure for the gateway itself.
+**llm-cli-gateway wraps CLI binaries, not APIs.** Depending on the selected
+provider, it spawns `claude`, `codex`, `agy` (Antigravity), `grok`, `vibe`,
+`devin`, or `cursor-agent` as a child process. You get the full CLI experience:
+tool use, sandboxing, file access, and your existing authentication and billing.
+There is no API key to configure for the gateway itself.
 
 This means it does not work like LiteLLM or other API proxy tools. It cannot run in a cloud environment without the CLIs installed. It is designed for local development machines where you already have these tools.
 

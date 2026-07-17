@@ -87,6 +87,43 @@ describe("AsyncJobManager", () => {
       expect(result.stdoutTruncated).toBe(true);
       expect(result.stderrTruncated).toBe(true);
     });
+
+    it("should expose resumable stdout and stderr pages without losing captured bytes", async () => {
+      const manager = new AsyncJobManager();
+      const job = manager.startJob(
+        "sh" as LlmCli,
+        ["-c", "printf abcdefghij; printf klmnopqrst >&2"],
+        "corr-paginated-result"
+      );
+
+      await waitForJobDone(manager, job.id);
+
+      const first = manager.getJobResult(job.id, 4)!;
+      expect(first.stdout).toBe("abcd");
+      expect(first.stderr).toBe("klmn");
+      expect(first.stdoutOffsetChars).toBe(0);
+      expect(first.stdoutTotalChars).toBe(10);
+      expect(first.stdoutNextOffsetChars).toBe(4);
+      expect(first.stderrOffsetChars).toBe(0);
+      expect(first.stderrTotalChars).toBe(10);
+      expect(first.stderrNextOffsetChars).toBe(4);
+
+      const second = manager.getJobResult(job.id, 4, {
+        stdoutOffsetChars: first.stdoutNextOffsetChars!,
+        stderrOffsetChars: first.stderrNextOffsetChars!,
+      })!;
+      const third = manager.getJobResult(job.id, 4, {
+        stdoutOffsetChars: second.stdoutNextOffsetChars!,
+        stderrOffsetChars: second.stderrNextOffsetChars!,
+      })!;
+
+      expect(first.stdout + second.stdout + third.stdout).toBe("abcdefghij");
+      expect(first.stderr + second.stderr + third.stderr).toBe("klmnopqrst");
+      expect(third.stdoutTruncated).toBe(false);
+      expect(third.stderrTruncated).toBe(false);
+      expect(third.stdoutNextOffsetChars).toBeNull();
+      expect(third.stderrNextOffsetChars).toBeNull();
+    });
   });
 
   describe("idle timeout", () => {
@@ -150,6 +187,9 @@ describe("AsyncJobManager", () => {
       const result = manager.cancelJob(job.id);
       expect(result.canceled).toBe(true);
 
+      // SIGTERM is only a request. The provider attempt remains owned until
+      // ChildProcess `close` proves it cannot keep running.
+      await waitForJobDone(manager, job.id);
       const snapshot = manager.getJobSnapshot(job.id)!;
       expect(snapshot.status).toBe("canceled");
       expect(snapshot.finishedAt).toBeTruthy();

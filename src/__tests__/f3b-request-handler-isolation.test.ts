@@ -119,6 +119,28 @@ describe("F3b request-handler ownership isolation", () => {
     const res = await call("claude_request", { prompt: "hi", sessionId: mine.id }, "alice");
     expect(res.text).not.toMatch(/not accessible/i);
   });
+
+  it("session_get does not expose internal worktree ownership to an HTTP owner", async () => {
+    const mine = create("mistral", "alice");
+    sessions.updateSessionMetadata(mine.id, {
+      worktreeOwnerHostname: "developer-workstation",
+      worktreeOwnerInstanceId: "gateway-instance-uuid",
+      worktreeCleanupPending: true,
+    });
+
+    const res = await call("session_get", { sessionId: mine.id }, "alice");
+    const body = JSON.parse(res.text) as { session: { metadata?: Record<string, unknown> } };
+    expect(res.isError).not.toBe(true);
+    expect(body.session.metadata?.worktreeOwnerHostname).toBeUndefined();
+    expect(body.session.metadata?.worktreeOwnerInstanceId).toBeUndefined();
+    expect(body.session.metadata?.worktreeCleanupPending).toBeUndefined();
+    expect(sessions.getSession(mine.id)?.metadata?.worktreeOwnerHostname).toBe(
+      "developer-workstation"
+    );
+    expect(sessions.getSession(mine.id)?.metadata?.worktreeOwnerInstanceId).toBe(
+      "gateway-instance-uuid"
+    );
+  });
 });
 
 describe("F3b sessions://* resource ownership isolation", () => {
@@ -153,6 +175,7 @@ describe("F3b sessions://* resource ownership isolation", () => {
     const ids = aliceView.sessions.map((s: any) => s.id);
     expect(ids).toContain(alice.id);
     expect(ids).not.toContain(bob.id);
+    expect(aliceView.sessions.every((session: any) => !("generation" in session))).toBe(true);
   });
 
   it("sessions://all hides another principal's active-session pointer", async () => {
@@ -174,6 +197,27 @@ describe("F3b sessions://* resource ownership isolation", () => {
     const ids = aliceView.sessions.map((s: any) => s.id);
     expect(ids).toContain(alice.id);
     expect(ids).not.toContain(bob.id);
+  });
+
+  it("sessions://all does not expose internal worktree ownership to an HTTP owner", async () => {
+    const alice = create("mistral", "alice");
+    sessions.updateSessionMetadata(alice.id, {
+      worktreeOwnerHostname: "developer-workstation",
+      worktreeOwnerInstanceId: "gateway-instance-uuid",
+      worktreeCleanupPending: true,
+    });
+
+    const view = await read("sessions://all", "alice");
+    const projected = view.sessions.find((session: any) => session.id === alice.id);
+    expect(projected.metadata?.worktreeOwnerHostname).toBeUndefined();
+    expect(projected.metadata?.worktreeOwnerInstanceId).toBeUndefined();
+    expect(projected.metadata?.worktreeCleanupPending).toBeUndefined();
+    expect(sessions.getSession(alice.id)?.metadata?.worktreeOwnerHostname).toBe(
+      "developer-workstation"
+    );
+    expect(sessions.getSession(alice.id)?.metadata?.worktreeOwnerInstanceId).toBe(
+      "gateway-instance-uuid"
+    );
   });
 
   it("the local (stdio) principal sees legacy-unowned + local rows, not a remote principal's", async () => {

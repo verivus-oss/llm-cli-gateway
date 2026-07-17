@@ -42,10 +42,10 @@ function argsOf(result: { args: string[] } | { content: unknown }): string[] {
 }
 
 describe("Slice D0 prepareDevinRequest — headless argv", () => {
-  it("emits the prompt via `-p` in print mode (first two argv slots)", () => {
+  it("emits the prompt after an end-of-options boundary in print mode", () => {
     const args = argsOf(prep({ prompt: "hello devin" }));
     expect(args[0]).toBe("-p");
-    expect(args[1]).toBe("hello devin");
+    expect(args.slice(-2)).toEqual(["--", "hello devin"]);
   });
 
   it("returns an error response (not argv) when the prompt is empty", () => {
@@ -102,9 +102,9 @@ describe("Slice D0 prepareDevinRequest — headless argv", () => {
     expect(args[idx + 1]).toBe("/tmp/p.txt");
   });
 
-  it("emits only `-p <prompt>` when no optional flags are supplied", () => {
+  it("emits only `-p -- <prompt>` when no optional flags are supplied", () => {
     const args = argsOf(prep({ prompt: "just a prompt" }));
-    expect(args).toEqual(["-p", "just a prompt"]);
+    expect(args).toEqual(["-p", "--", "just a prompt"]);
   });
 
   it("rewrites the prompt text when optimizePrompt is true", () => {
@@ -112,13 +112,13 @@ describe("Slice D0 prepareDevinRequest — headless argv", () => {
     const raw = "please    do      the     thing";
     const args = argsOf(prep({ prompt: raw, optimizePrompt: true }));
     expect(args[0]).toBe("-p");
-    expect(args[1]).not.toBe(raw);
-    expect(args[1].length).toBeLessThanOrEqual(raw.length);
+    expect(args.at(-1)).not.toBe(raw);
+    expect(args.at(-1)!.length).toBeLessThanOrEqual(raw.length);
   });
 
   it("leaves the prompt verbatim when optimizePrompt is false", () => {
     const raw = "please    do      the     thing";
     const args = argsOf(prep({ prompt: raw, optimizePrompt: false }));
-    expect(args[1]).toBe(raw);
+    expect(args.at(-1)).toBe(raw);
   });
 });

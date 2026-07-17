@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   buildRemoteHttpOAuthReadiness,
+  buildPersonalConfigReadinessReport,
   checkGeminiConfig,
   checkVibeSessionLogging,
   createDoctorReport,
@@ -17,6 +18,7 @@ import { PRICING_AS_OF, API_CATALOG_AS_OF } from "../pricing.js";
 import type { FlightRecorderQuery } from "../flight-recorder.js";
 import type { AuthConfig, RemoteOAuthConfig } from "../auth.js";
 import type { EndpointExposureReport } from "../endpoint-exposure.js";
+import { PERSONAL_CONFIG_SYNC_ERROR_WITHHELD } from "../personal-config.js";
 import type { RemoteSafeWorkspaceSummary } from "../workspace-registry.js";
 import { CLI_TYPES } from "../provider-types.js";
 import { knownProviderCapabilityIds } from "../provider-tool-capabilities.js";
@@ -306,6 +308,130 @@ describe("Layer 6 doctor report (U20)", () => {
       expect(typeof action).toBe("string");
       expect(action.length).toBeGreaterThan(0);
     }
+  });
+});
+
+describe("Personal Agent Config doctor readiness", () => {
+  const healthyStatus = {
+    baselinePresent: true,
+    currentReleaseId: "a".repeat(40),
+    lastSuccessAt: "2026-07-14T00:00:00.000Z",
+    stale: false,
+    lastSyncError: null,
+  };
+
+  it("emits a compact, schema-valid, path-free ready projection", () => {
+    const readiness = buildPersonalConfigReadinessReport({
+      enabled: true,
+      status: healthyStatus,
+      persistence: { backend: "sqlite", asyncJobsEnabled: true },
+      claudeBareAuthConfigured: true,
+    });
+    const personalConfigSchema = (schema.properties as Record<string, JsonSchemaNode>)
+      .personal_config;
+
+    validateAgainstSchema(readiness, personalConfigSchema, "doctor.personal_config");
+    expect(readiness).toMatchObject({
+      enabled: true,
+      configuration_valid: true,
+      ready: true,
+      claude_bare_auth_configured: true,
+      baseline_present: true,
+      current_release_id: "a".repeat(40),
+      stale: false,
+      durable_async_configured: true,
+    });
+    expect(JSON.stringify(readiness)).not.toContain("/home/");
+    expect(JSON.stringify(readiness)).not.toContain(`${tmpdir()}/`);
+  });
+
+  it("withholds untrusted state strings and rejects ephemeral Kit persistence", () => {
+    const readiness = buildPersonalConfigReadinessReport({
+      enabled: true,
+      status: {
+        ...healthyStatus,
+        currentReleaseId: "release-id-secret",
+        lastSuccessAt: "timestamp-secret",
+        lastSyncError: "sync token SECRET_ABC",
+      },
+      persistence: { backend: "memory", asyncJobsEnabled: true },
+    });
+
+    expect(readiness.ready).toBe(false);
+    expect(readiness.claude_bare_auth_configured).toBe(false);
+    expect(readiness.durable_async_configured).toBe(false);
+    expect(readiness.current_release_id).toBeNull();
+    expect(readiness.last_success_at).toBeNull();
+    expect(readiness.last_sync_error).toBe(PERSONAL_CONFIG_SYNC_ERROR_WITHHELD);
+    expect(JSON.stringify(readiness)).not.toContain("SECRET_ABC");
+  });
+
+  it("fails closed when the Kit configuration cannot be read", () => {
+    const readiness = buildPersonalConfigReadinessReport({
+      enabled: true,
+      configurationValid: false,
+      status: healthyStatus,
+      persistence: { backend: "sqlite", asyncJobsEnabled: true },
+      claudeBareAuthConfigured: true,
+    });
+
+    expect(readiness).toMatchObject({
+      configuration_valid: false,
+      ready: false,
+      baseline_present: false,
+      current_release_id: null,
+      durable_async_configured: false,
+    });
+  });
+
+  it("fails doctor readiness with an actionable stale-release next action", () => {
+    const report = createDoctorReport({
+      personalConfigReadiness: buildPersonalConfigReadinessReport({
+        enabled: true,
+        status: { ...healthyStatus, stale: true },
+        persistence: { backend: "postgres", asyncJobsEnabled: true },
+        claudeBareAuthConfigured: true,
+      }),
+    });
+
+    expect(report.personal_config.ready).toBe(false);
+    expect(report.ok).toBe(false);
+    expect(report.next_actions).toEqual(
+      expect.arrayContaining([expect.stringContaining("config_sync locally")])
+    );
+  });
+
+  it("keeps the disabled Kit compact and ready", () => {
+    expect(buildPersonalConfigReadinessReport({ enabled: false })).toEqual({
+      enabled: false,
+      configuration_valid: true,
+      ready: true,
+      claude_bare_auth_configured: false,
+      baseline_present: false,
+      current_release_id: null,
+      last_success_at: null,
+      stale: false,
+      last_sync_error: null,
+      durable_async_configured: false,
+    });
+  });
+
+  it("reports the Claude Kit isolated-auth prerequisite without exposing a credential", () => {
+    const report = createDoctorReport({
+      personalConfigReadiness: buildPersonalConfigReadinessReport({
+        enabled: true,
+        status: healthyStatus,
+        persistence: { backend: "postgres", asyncJobsEnabled: true },
+        claudeBareAuthConfigured: false,
+      }),
+    });
+
+    expect(report.personal_config.ready).toBe(false);
+    expect(report.personal_config.claude_bare_auth_configured).toBe(false);
+    expect(report.next_actions).toEqual(
+      expect.arrayContaining([expect.stringContaining("ANTHROPIC_API_KEY")])
+    );
+    expect(JSON.stringify(report.personal_config)).not.toContain("ANTHROPIC_API_KEY=");
   });
 });
 

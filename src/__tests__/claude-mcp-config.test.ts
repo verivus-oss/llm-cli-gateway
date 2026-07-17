@@ -1,16 +1,26 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import {
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import fs, {
   chmodSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  renameSync,
   rmSync,
+  symlinkSync,
+  unlinkSync,
   writeFileSync,
 } from "fs";
-import { delimiter, join } from "path";
+import { syncBuiltinESMExports } from "module";
+import { basename, delimiter, dirname, join } from "path";
 import { tmpdir } from "os";
-import { buildClaudeMcpConfig } from "../claude-mcp-config.js";
+import {
+  buildClaudeMcpConfig,
+  getClaudeMcpArtifactScope,
+  getClaudeMcpArtifactScopeForPath,
+  removeClaudeMcpArtifact,
+} from "../claude-mcp-config.js";
 
 describe("buildClaudeMcpConfig", () => {
   let testHome: string;
@@ -56,6 +66,41 @@ describe("buildClaudeMcpConfig", () => {
     mkdirSync(codexDir, { recursive: true });
     writeFileSync(join(codexDir, "config.toml"), content, "utf-8");
   }
+
+  it("creates private installation and per-request scope markers", () => {
+    const firstScope = getClaudeMcpArtifactScope();
+    const config = buildClaudeMcpConfig(["sqry"]);
+    const secondScope = getClaudeMcpArtifactScope();
+    const rootDirectory = join(testHome, ".llm-cli-gateway", "claude-mcp");
+    const artifactDirectory = dirname(config.path);
+    const rootMarkerPath = join(rootDirectory, ".artifact-scope-id");
+    const artifactMarkerPath = join(artifactDirectory, ".artifact-scope-id");
+
+    try {
+      expect(secondScope).toBe(firstScope);
+      expect(config.artifactScope).toBe(getClaudeMcpArtifactScopeForPath(config.path));
+      expect(
+        config.artifactScope?.startsWith(`v2:${firstScope}:${basename(artifactDirectory)}:`)
+      ).toBe(true);
+      expect(firstScope).toMatch(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}:\d+:\d+$/i
+      );
+      expect(readFileSync(rootMarkerPath, "utf8").trim()).toMatch(/^[0-9a-f-]{36}$/i);
+      expect(readFileSync(artifactMarkerPath, "utf8").trim()).toMatch(/^[0-9a-f-]{36}$/i);
+      expect(lstatSync(rootDirectory).isDirectory()).toBe(true);
+      expect(lstatSync(artifactDirectory).isDirectory()).toBe(true);
+      expect(lstatSync(rootMarkerPath).isSymbolicLink()).toBe(false);
+      expect(lstatSync(artifactMarkerPath).isSymbolicLink()).toBe(false);
+      if (process.platform !== "win32") {
+        expect(lstatSync(rootDirectory).mode & 0o777).toBe(0o700);
+        expect(lstatSync(artifactDirectory).mode & 0o777).toBe(0o700);
+        expect(lstatSync(rootMarkerPath).mode & 0o777).toBe(0o600);
+        expect(lstatSync(artifactMarkerPath).mode & 0o777).toBe(0o600);
+      }
+    } finally {
+      config.cleanup?.();
+    }
+  });
 
   it("reads mcp server definitions from codex config.toml", () => {
     writeCodexConfig(`
@@ -211,6 +256,213 @@ command = "/opt/trstr-mcp"
     const parsed = JSON.parse(readFileSync(result.path, "utf-8"));
     expect(Object.keys(parsed.mcpServers)).toEqual(["trstr"]);
   });
+
+  it("uses a stable fingerprint for equal config content and changes it when the resolved config changes", () => {
+    writeCodexConfig(`
+[mcp_servers.sqry]
+command = "/opt/sqry-mcp-v1"
+args = ["--stdio"]
+`);
+    const first = buildClaudeMcpConfig(["sqry"]);
+    const sameContent = buildClaudeMcpConfig(["sqry"]);
+
+    writeCodexConfig(`
+[mcp_servers.sqry]
+command = "/opt/sqry-mcp-v2"
+args = ["--stdio"]
+`);
+    const changedContent = buildClaudeMcpConfig(["sqry"]);
+
+    try {
+      expect(first.fingerprint).toMatch(/^[a-f0-9]{64}$/);
+      expect(sameContent.fingerprint).toBe(first.fingerprint);
+      expect(changedContent.fingerprint).not.toBe(first.fingerprint);
+    } finally {
+      first.cleanup?.();
+      sameContent.cleanup?.();
+      changedContent.cleanup?.();
+    }
+  });
+
+  it("uses only provisioned gateway-owned definitions when Codex overrides are disabled", () => {
+    process.env.EXA_API_KEY = "exa-from-env";
+    process.env.REF_API_KEY = "ref-from-env";
+    writeCodexConfig(`
+[mcp_servers.sqry]
+command = "/untrusted/codex-override"
+args = ["--untrusted"]
+
+[mcp_servers.exa]
+command = "/untrusted/exa-override"
+[mcp_servers.exa.env]
+EXA_API_KEY = "untrusted-from-codex-config"
+`);
+
+    const result = buildClaudeMcpConfig(["sqry", "exa", "ref_tools", "agent_browser"], {
+      allowCodexConfigOverrides: false,
+    });
+    try {
+      expect(result.enabled).toEqual(["sqry"]);
+      expect(result.missing).toEqual(["exa", "ref_tools", "agent_browser"]);
+
+      const parsed = JSON.parse(readFileSync(result.path, "utf-8"));
+      expect(parsed.mcpServers.sqry).toEqual({
+        command: join(testHome, ".local", "bin", "sqry-mcp"),
+        args: [],
+      });
+      expect(parsed.mcpServers.exa).toBeUndefined();
+      expect(parsed.mcpServers.ref_tools).toBeUndefined();
+      expect(parsed.mcpServers.agent_browser).toBeUndefined();
+    } finally {
+      result.cleanup?.();
+    }
+  });
+
+  it("keeps concurrent request allowlists in distinct cleanup-owned artifacts", () => {
+    const first = buildClaudeMcpConfig(["sqry"]);
+    const second = buildClaudeMcpConfig(["trstr"]);
+
+    expect(first.path).not.toBe(second.path);
+    expect(Object.keys(JSON.parse(readFileSync(first.path, "utf-8")).mcpServers)).toEqual(["sqry"]);
+    expect(Object.keys(JSON.parse(readFileSync(second.path, "utf-8")).mcpServers)).toEqual([
+      "trstr",
+    ]);
+
+    first.cleanup?.();
+    expect(existsSync(first.path)).toBe(false);
+    expect(existsSync(dirname(first.path))).toBe(true);
+    expect(existsSync(second.path)).toBe(true);
+
+    second.cleanup?.();
+    second.cleanup?.();
+    expect(existsSync(second.path)).toBe(false);
+    expect(existsSync(dirname(second.path))).toBe(true);
+  });
+
+  it("does not delete an unsafe replacement through the generic cleanup closure", () => {
+    const config = buildClaudeMcpConfig(["sqry"]);
+    const sentinel = join(testHome, "cleanup-sentinel.txt");
+    writeFileSync(sentinel, "must remain", "utf8");
+    unlinkSync(config.path);
+    symlinkSync(sentinel, config.path);
+
+    config.cleanup?.();
+
+    expect(lstatSync(config.path).isSymbolicLink()).toBe(true);
+    expect(existsSync(config.path)).toBe(true);
+    expect(existsSync(sentinel)).toBe(true);
+  });
+
+  it.skipIf(process.platform !== "linux")(
+    "removes the original file, not a cross-scope replacement in the unlink race",
+    () => {
+      const config = buildClaudeMcpConfig(["sqry"]);
+      const rootDirectory = dirname(dirname(config.path));
+      const artifactDirectoryName = basename(dirname(config.path));
+      const movedRootDirectory = join(testHome, "moved-claude-mcp-root");
+      const originalArtifactPath = join(movedRootDirectory, artifactDirectoryName, "config.json");
+      const originalUnlinkSync = fs.unlinkSync;
+      let replacementInjected = false;
+      const unlinkSpy = vi.spyOn(fs, "unlinkSync").mockImplementation(path => {
+        const pathname = String(path);
+        if (
+          !replacementInjected &&
+          pathname.startsWith("/proc/self/fd/") &&
+          pathname.endsWith("/config.json")
+        ) {
+          replacementInjected = true;
+          renameSync(rootDirectory, movedRootDirectory);
+          mkdirSync(join(rootDirectory, artifactDirectoryName), { recursive: true, mode: 0o700 });
+          writeFileSync(config.path, "replacement must survive", "utf8");
+        }
+        return originalUnlinkSync(path);
+      });
+      syncBuiltinESMExports();
+
+      try {
+        expect(removeClaudeMcpArtifact(config.path, config.artifactScope)).toBe("removed");
+        expect(replacementInjected).toBe(true);
+        expect(readFileSync(config.path, "utf8")).toBe("replacement must survive");
+        expect(existsSync(originalArtifactPath)).toBe(false);
+      } finally {
+        unlinkSpy.mockRestore();
+        syncBuiltinESMExports();
+      }
+    }
+  );
+
+  it.skipIf(process.platform !== "linux")(
+    "does not remove an empty request-directory replacement after pinned cleanup",
+    () => {
+      const config = buildClaudeMcpConfig(["sqry"]);
+      const artifactDirectory = dirname(config.path);
+      const movedArtifactDirectory = join(testHome, "moved-claude-mcp-request-directory");
+      const originalUnlinkSync = fs.unlinkSync;
+      let replacementInjected = false;
+      const unlinkSpy = vi.spyOn(fs, "unlinkSync").mockImplementation(path => {
+        const pathname = String(path);
+        if (
+          !replacementInjected &&
+          pathname.startsWith("/proc/self/fd/") &&
+          pathname.endsWith("/config.json")
+        ) {
+          replacementInjected = true;
+          renameSync(artifactDirectory, movedArtifactDirectory);
+          mkdirSync(artifactDirectory, { mode: 0o700 });
+        }
+        return originalUnlinkSync(path);
+      });
+      syncBuiltinESMExports();
+
+      try {
+        expect(removeClaudeMcpArtifact(config.path, config.artifactScope)).toBe("removed");
+        expect(replacementInjected).toBe(true);
+        expect(lstatSync(artifactDirectory).isDirectory()).toBe(true);
+        expect(existsSync(join(movedArtifactDirectory, "config.json"))).toBe(false);
+      } finally {
+        unlinkSpy.mockRestore();
+        syncBuiltinESMExports();
+      }
+    }
+  );
+
+  it.skipIf(process.platform !== "linux")(
+    "uses read-only pathname cleanup when the descriptor bridge is unavailable",
+    () => {
+      const config = buildClaudeMcpConfig(["sqry"]);
+      const missingMarkerConfig = buildClaudeMcpConfig(["trstr"]);
+      const artifactDirectory = dirname(config.path);
+      const markerPath = join(artifactDirectory, ".artifact-scope-id");
+      const missingMarkerPath = join(dirname(missingMarkerConfig.path), ".artifact-scope-id");
+      const originalLstatSync = fs.lstatSync;
+      const lstatSpy = vi.spyOn(fs, "lstatSync").mockImplementation((path, options) => {
+        if (path === "/proc/self/fd") {
+          const error = new Error("descriptor bridge unavailable") as NodeJS.ErrnoException;
+          error.code = "ENOENT";
+          throw error;
+        }
+        return originalLstatSync(path, options);
+      });
+      syncBuiltinESMExports();
+
+      try {
+        expect(removeClaudeMcpArtifact(config.path, config.artifactScope)).toBe("removed");
+        expect(existsSync(config.path)).toBe(false);
+        expect(existsSync(artifactDirectory)).toBe(true);
+        expect(lstatSync(markerPath).isFile()).toBe(true);
+
+        unlinkSync(missingMarkerPath);
+        expect(
+          removeClaudeMcpArtifact(missingMarkerConfig.path, missingMarkerConfig.artifactScope)
+        ).toBe("unsafe");
+        expect(existsSync(missingMarkerPath)).toBe(false);
+        expect(existsSync(missingMarkerConfig.path)).toBe(true);
+      } finally {
+        lstatSpy.mockRestore();
+        syncBuiltinESMExports();
+      }
+    }
+  );
 
   it("trstr coexists with all default servers when credentials present", () => {
     process.env.EXA_API_KEY = "exa-from-env";

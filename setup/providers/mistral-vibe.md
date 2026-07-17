@@ -17,9 +17,9 @@ lets the gateway call Vibe for model responses.
    - `pip install mistral-vibe`
    - `uv tool install mistral-vibe`
    - `brew install mistral-vibe`
-2. Sign in to Mistral through Vibe's official auth flow (`vibe auth login`).
-   Do not paste API keys, OAuth tokens, or `~/.vibe/credentials` files into a
-   remote chat.
+2. Run `vibe --setup` and complete the Mistral API-key setup in the local
+   terminal. Do not paste API keys, OAuth tokens, or `~/.vibe/credentials`
+   files into a remote chat.
 3. Confirm session logging is not explicitly disabled. Current Vibe defaults
    session logging to enabled; if an older config has
    `[session_logging] enabled = false`, edit `~/.vibe/config.toml` and set it
@@ -55,8 +55,8 @@ this is a human-on-the-loop step.
 curl -LsSf https://mistral.ai/vibe/install.sh | bash
 # or: pip install mistral-vibe / uv tool install mistral-vibe / brew install mistral-vibe
 
-# Sign in
-vibe auth login
+# Configure the API key locally
+vibe --setup
 
 # If an older config disabled session persistence, edit ~/.vibe/config.toml:
 # [session_logging]
@@ -71,9 +71,12 @@ gateway; do not paste it into a remote chat.
 
 ## Approval Mode
 
-The gateway defaults to `--agent auto-approve` for programmatic Mistral
-callers because Vibe's own default may be interactive. Override per-request
-with the `permissionMode` parameter on `mistral_request`.
+The gateway defaults to `--agent accept-edits` for programmatic Mistral
+callers because Vibe's own default may be interactive. Mistral supports only
+`approvalStrategy:"legacy"`; `mcp_managed` is rejected before Vibe launches,
+and `approvalPolicy` has no effect. Override the Vibe agent per request with
+the `permissionMode` parameter when the caller explicitly needs a different
+native mode.
 
 ## Verification
 
@@ -88,21 +91,24 @@ validate this sentence with two other models: gateway setup works.
 | Setup step                                 | Doctor field                                                 |
 | ------------------------------------------ | ------------------------------------------------------------ |
 | Vibe CLI installed                         | `providers.mistral.cli_available`                            |
-| Vibe login complete                        | `providers.mistral.login_present`                            |
+| Vibe setup requested                       | `providers.mistral.login_status` and `login_check`           |
 | Session continuity available               | `client_config.vibe_session_logging.session_logging_enabled` |
 | Actionable fix when session logging is off | `next_actions[]` entry beginning `mistral:`                  |
 
 ## Known Limitations
 
-- Vibe does not surface token/cost usage in its stdout `--output streaming` output;
-  per-request usage in gateway metrics is therefore `null` until a future
-  unit reads `~/.vibe/logs/session/<id>/metadata.json`.
+- Vibe does not surface token/cost usage in its stdout `--output streaming`
+  output. When the gateway knows Vibe's native session UUID, it reads
+  `~/.vibe/logs/session/session_<...>/meta.json` best-effort for usage and
+  cost. A fresh response without a known native session ID, or a missing or
+  malformed log, leaves those metrics empty.
 - Vibe has no `--model` flag. Model selection only works through
   `VIBE_ACTIVE_MODEL` (env) or `[model] active = "..."` in
   `~/.vibe/config.toml`.
-- Vibe accepts allow-listed tools via `--enabled-tools` but has no
-  deny-tool flag; the gateway accepts `disallowedTools` in the request
-  schema for caller symmetry but ignores it for Mistral.
+- Vibe accepts allow-listed tools via `--enabled-tools` and supports repeated
+  `--disabled-tools`; the gateway maps `allowedTools` and `disallowedTools` to
+  those native flags in legacy mode. Gateway-managed approval is unavailable
+  for Mistral.
 - Keep inbound MCP setup and outbound validation separate. Vibe can call the
   gateway as an MCP client, and the gateway can call Vibe as an outbound
   provider, but those are independently verified paths.

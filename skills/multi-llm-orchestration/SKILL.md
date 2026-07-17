@@ -1,109 +1,168 @@
 ---
 name: multi-llm-orchestration
-description: Guide for orchestrating multiple LLMs via the llm-gateway — use when delegating tasks to Codex, Gemini, Grok, or Mistral, running parallel reviews, or managing cross-LLM workflows. Covers cache-aware `promptParts` dispatch and the `cache-state://` MCP resources.
+description: Orchestrate the complete llm-cli-gateway provider surface through its local stdio MCP server. Use for parallel implementation, review, session, async-job, cache-aware prompt, and cross-LLM workflows across Claude, Codex, Gemini, Grok, Mistral, Devin, and Cursor.
 ---
 
 # Multi-LLM Orchestration
 
-Use the llm-gateway MCP server tools to orchestrate work across Claude, Codex, Gemini, Grok (xAI), and Mistral Vibe.
+Use the local gtwy stdio MCP server as the single orchestration surface. Do not
+launch provider CLIs directly for implementation, review, or consensus work.
+In Codex the tools usually appear as mcp__gtwy__<tool>; other clients can show
+their short tool names.
 
-## Dispatch Defaults
+## Discover the Live Surface
 
-Apply these on every dispatch unless the caller has explicitly overridden a rule in the current turn:
+Call provider_tool_capabilities before planning a cross-provider workflow and
+use cli_versions when behavior is unexpected. The canonical CLI provider roster
+has seven members:
 
-1. **Omit `model`** — let the gateway use its configured default per CLI. Nominating a model risks deprecated IDs (`o3`, `o3-pro`, `gpt-4o`, …) and capability mismatches.
-2. **`approvalStrategy:"mcp_managed"`** is the skill dispatch default (the gateway schema default is `"legacy"`). It gates the request before execution, then sets each provider to a safe accept-edits-level mode (auto-accept file edits; Bash and other dangerous tools stay gated): Claude and Grok `--permission-mode acceptEdits`, Mistral `--agent accept-edits`, and Gemini prompted `default` (the `agy` CLI has no accept-edits rung, so Gemini cannot auto-approve mutating tools under `mcp_managed`). Codex still needs `fullAuto:true` for autonomous file/shell work (its sandboxed `workspace-write` mode is unchanged). Full unattended execution requires the operator opt-in `LLM_GATEWAY_APPROVAL_ALLOW_BYPASS=1`, which restores each provider's full auto-approve mode (Claude `bypassPermissions`, Grok `--always-approve`, Mistral `auto-approve`, Gemini `--dangerously-skip-permissions`).
-3. **No wallclock timeout; poll every 60 s** — `idleTimeoutMs` is a separate no-output safeguard.
-4. **Iterate until unconditional APPROVED** (review dispatches only) — every review prompt must end with "End with APPROVED or NOT APPROVED with findings." Loop: dispatch → parse verdict → on `NOT APPROVED` or conditional, fix + re-review → repeat. Escalate after 3 rounds. This rule does **not** apply to pure implementation or non-review analysis dispatches.
+| Provider | Request tools                          | Important boundary                                           |
+| -------- | -------------------------------------- | ------------------------------------------------------------ |
+| Claude   | claude_request, claude_request_async   | Only provider with mcp_managed.                              |
+| Codex    | codex_request, codex_request_async     | Use sandboxMode, not fullAuto.                               |
+| Gemini   | gemini_request, gemini_request_async   | No workingDir; Antigravity owns native MCP configuration.    |
+| Grok     | grok_request, grok_request_async       | Native ACP capability is also available through the gateway. |
+| Mistral  | mistral_request, mistral_request_async | Native ACP capability; programmatic default is accept-edits. |
+| Devin    | devin_request, devin_request_async     | Native ACP capability; accepts flat prompt only.             |
+| Cursor   | cursor_request, cursor_request_async   | Native ACP capability; accepts flat prompt only.             |
 
-## Available Tools
+Async tools and llm_job_* tools are absent when persistence.backend = "none".
+Do not invent an unavailable tool or silently change a required reviewer roster.
 
-- `claude_request` / `claude_request_async` — Send prompts to Claude Code CLI
-- `codex_request` / `codex_request_async` — Delegate tasks to Codex CLI (pass `sessionId:<UUID>` or `resumeLatest:true` to use `codex exec resume`)
-- `gemini_request` / `gemini_request_async` — Delegate tasks to Gemini CLI
-- `grok_request` / `grok_request_async` — Delegate tasks to Grok CLI (xAI). Auth via prior `grok login` (OAuth) or local `XAI_API_KEY`
-- `mistral_request` / `mistral_request_async` — Delegate tasks to Mistral Vibe CLI. Model selection is via `VIBE_ACTIVE_MODEL` env var (no `--model` flag); `permissionMode` is the `--agent` enum and defaults to `auto-approve` for programmatic callers. Session continuity (`sessionId`/`resumeLatest`) requires `[session_logging] enabled = true` in `~/.vibe/config.toml`.
-- `llm_job_status` — Check async job progress (in-memory + durable store fallback)
-- `llm_job_result` — Fetch completed job output (durable: default 30-day retention, `LLM_GATEWAY_JOB_RETENTION_DAYS`)
-- `llm_job_cancel` — Cancel a running async job (only on explicit instruction or hard failure)
-- `llm_process_health` — Inspect in-memory process/job health
-- `list_models`, `cli_versions`, `cli_upgrade` — Inspect model/CLI registry and manage CLI upgrades (Grok self-updates via `grok update`)
-- `session_*` — Manage conversation sessions
+Configured API providers are discovered dynamically with `list_models` and
+their runtime capability data. They are not canonical local CLI providers and
+do not imply local workspace/worktree targeting or native ACP. Do not use one
+as an unannounced replacement for a required source-inspecting CLI reviewer.
 
-## Cache-Aware Prompts (`promptParts`)
+## Approval, Sandboxing, and Targeting
 
-Every `*_request` / `*_request_async` tool accepts a structured `promptParts` object as an alternative to the flat `prompt` string. The two are **mutually exclusive** — supplying both returns `provide exactly one of \`prompt\` or \`promptParts\``; supplying neither returns `one of \`prompt\` or \`promptParts\` is required`.
+- Use approvalStrategy: "legacy" for Codex, Gemini, Grok, Mistral, Devin, and
+  Cursor. They reject mcp_managed and approvalPolicy has no effect.
+- Use mcp_managed only for a deliberately configured Claude CLI request. ACP
+  transport does not accept mcp_managed or approvalPolicy.
+- For Codex inspection, use sandboxMode: "read-only". Use
+  sandboxMode: "workspace-write" only when code edits or write-producing tests
+  are needed. fullAuto is deprecated shorthand.
+- For local stdio calls, never use workspace_* tools merely to fix a path.
+  Those tools are remote HTTP/OAuth administration surfaces.
 
-```json
-{
-  "promptParts": {
-    "system":  "long stable system instruction (optional)",
-    "tools":   "long stable tool description (optional)",
-    "context": "long stable file dump / spec / repo summary (optional)",
-    "task":    "the volatile per-turn question (required)"
-  }
-}
+| Provider                     | Local repository targeting                                                                                                          |
+| ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| Claude, Codex, Grok, Mistral | Use workingDir on a new session, or select a registered workspace explicitly or by configured default.                              |
+| Gemini                       | No workingDir. includeDirs is auxiliary and does not select cwd. Select a registered workspace explicitly or by configured default. |
+| Devin                        | Use workingDir on a new CLI session, or select a registered workspace explicitly or by configured default.                          |
+| Cursor                       | Set workspace to the local directory or registered alias.                                                                           |
+
+Managed Claude treats expanded workspace, custom workingDir, custom selectors,
+native continuation, and similar posture changes as approval-gated. Do not
+assume they are free additions to a managed request.
+
+## Explicit user-authorized full-access review orchestration
+
+Keep the safe defaults in this skill for ordinary work. When the user explicitly
+requires full provider permissions and native MCP access for review, switch to
+the full `multi-llm-review` protocol. Build the exact target checkout and start
+`node dist/index.js --transport=stdio` from it. Do not use a globally installed
+or stale `gtwy` process that might run different code.
+
+Reapply the source-verified provider-native full-access mapping on every new
+job. Preserve ambient provider MCP configuration, do not present gateway
+tool/MCP lists as a full-access grant, and do not rely on a resume to retain a
+new permission posture. Every reviewer receives the verification report as a
+corrective-program specification, the exact base and diff or exhaustive
+changed-file list including relevant untracked files, and persistent evidence
+locations. Require independent source, documentation, test, command, and MCP
+inspection. Accept only `APPROVED_UNCONDITIONALLY`, evidence-backed
+`CHANGES_REQUIRED`, or concrete `BLOCKED_EXTERNAL`. Set no caller caps; honor a
+user-required 90-second progress cadence without polling early.
+
+## Cache-Aware Prompting
+
+Claude, Codex, Gemini, Grok, and Mistral accept promptParts:
+
+```
+codex_request({
+  promptParts: {
+    system: "Stable orchestration policy",
+    tools: "Stable tool constraints",
+    context: "Stable repository facts",
+    task: "Implement or review the current task."
+  },
+  sandboxMode: "read-only",
+  approvalStrategy: "legacy"
+})
 ```
 
-The gateway concatenates in canonical order — `system → tools → context → task` — so the stable prefix bytes precede the volatile task tail **unchanged across calls**. That raises implicit cache hit rate at the provider with no API contortions, and the gateway hashes the stable prefix into the flight recorder so cache effectiveness is observable.
+Use exactly one of prompt or promptParts. Devin and Cursor accept only prompt,
+so keep a canonical flat request for them when fanning out. Cache-state
+resources expose aggregate hashes and token data, not prompt text or a quality
+verdict.
 
-When to reach for `promptParts` over `prompt`:
-- Multi-turn workflows where the system/tools/context blocks are long and repeated.
-- Parallel dispatch across CLIs where each reviewer sees the same stable prefix.
-- Any review loop (`implement → review → fix → re-review`) on the same file set — the context block is identical round-to-round; only the `task` mutates.
+## Parallel Workflows
 
-For one-off questions or short prompts, plain `prompt` is fine — `promptParts` only earns its keep when the stable prefix is large enough to matter.
+For independent tasks, dispatch the selected providers with the async tools,
+associate each call with a correlationId, and retain every job identifier. Use
+llm_job_status and llm_job_result through gtwy when those tools are registered.
+Use non-blocking waits between polls.
 
-### Cache observability (read-only MCP resources)
+If async tools are absent because persistence.backend = "none", use the
+corresponding sync request tools. They run to completion without auto-deferral;
+the missing async surface does not authorize a smaller review roster.
 
-- `cache-state://global` — last-24h aggregate hit rate, total hits, estimated savings, with per-CLI breakdown.
-- `cache-state://session/{sessionId}` — per-session aggregates, including `ttlRemainingMs` for Claude.
-- `cache-state://prefix/{hash}` — per-stable-prefix-hash aggregates with CLI × model breakdown.
+For an implement-review-fix workflow:
 
-All three return tokens / hashes / aggregates only — no prompt or response text. Read via the MCP `resources/read` flow. `session_get` also projects a compact `cacheState` block when the session has prior requests in the flight recorder; the field is omitted for fresh sessions.
+1. Dispatch the implementation through an appropriate gateway provider.
+2. Build and test the resulting change.
+3. Dispatch every required reviewer through gtwy against the same target and
+   revision.
+4. Union findings, fix or rebut them with evidence, then re-run the required
+   reviewer set after material changes.
 
-### TTL warning (Claude only, opt-in)
+## Complete Review Rule
 
-With `[cache_awareness] warn_on_ttl_expiry = true` in `~/.llm-cli-gateway/config.toml`, `claude_request` / `claude_request_async` responses on resumed Claude sessions carry a structured warning when the session's prior `lastRequestAt` is within 30 s of Anthropic's cache TTL (5 min default, 1 h when `anthropic_ttl_seconds = 3600`):
+Every mandatory review prompt must require this terminal JSON verdict:
 
-```json
-{ "warnings": [{ "code": "cache_ttl_expiring_soon", "ttlRemainingMs": 12000, "message": "..." }] }
+```
+APPROVED_UNCONDITIONALLY | CHANGES_REQUIRED | BLOCKED_EXTERNAL
 ```
 
-Treat it as a hint to coalesce the next turn or accept the upcoming cache miss.
+Do not set a review round, turn, token, price, cost, or wallclock cap. Do not
+use cost routing to drop a mandatory reviewer. Continue until every required
+reviewer returns explicit `APPROVED_UNCONDITIONALLY`. Conditional approval,
+remaining findings, inability to verify, malformed output, timeout,
+cancellation, or provider failure is not approval.
 
-## Patterns
+Stop only on explicit user cancellation or a terminal external provider failure.
+Record a terminal failure as `BLOCKED_EXTERNAL` with its exact error. Never call
+a partial roster or failed reviewer an unconditional approval.
 
-### Parallel Review
-Send the same review request to multiple LLMs simultaneously using async tools, then compare results:
-1. `codex_request_async` with review prompt (`fullAuto:true`, `approvalStrategy:"mcp_managed"`)
-2. `gemini_request_async` with same review prompt (`approvalStrategy:"mcp_managed"`)
-3. `grok_request_async` with same review prompt (`approvalStrategy:"mcp_managed"`) — optional 4th reviewer for diversity / consensus tie-breaks
-4. Poll each with `llm_job_status` every 60 s
-5. Fetch results with `llm_job_result`
-6. Synthesize findings; on any `NOT APPROVED` verdict, fix and re-review — loop until all APPROVED
+Use multi-llm-consensus for a complete seven-provider gate and
+implement-review-fix for the detailed repair loop.
 
-If polling times out, re-issue the same call (auto-dedup snaps onto the live job) or fetch by `jobId` later — results are durable.
+## Sessions, Jobs, and Persistence
 
-### Implement-Review-Fix
-1. `codex_request` to implement (`fullAuto:true`, `approvalStrategy:"mcp_managed"`)
-2. `gemini_request` to review (`approvalStrategy:"mcp_managed"`, verdict clause in prompt)
-3. `codex_request` to apply fixes; re-dispatch step 2 to same reviewer — loop until unconditional APPROVED
+All seven providers have provider-native continuity behavior. Codex requires a
+real native Codex UUID and resume inherits its original working directory and
+sandbox posture. Do not pass a gateway-generated gw-* identifier as a native
+Codex sessionId.
 
-### Session Continuity
-All four CLIs carry real session continuity through the gateway:
-- **Claude** — `--session-id` / `--continue`. `createNewSession:true` for fresh, otherwise active session auto-continues.
-- **Codex** — `codex exec resume <UUID>` via `sessionId:<real Codex UUID>`, or `codex exec resume --last` via `resumeLatest:true`. Gateway-generated `gw-*` IDs are rejected for Codex. `--full-auto` is silently dropped on resume; the original session's approval policy is inherited.
-- **Gemini** — `--resume` via `sessionId` (or `resumeLatest:true`). Gateway-generated `gw-*` IDs are bookkeeping-only and rejected if replayed.
-- **Grok** — `--resume <id>` via `sessionId` or `--continue` via `resumeLatest:true`.
+Mistral Vibe defaults session logging to enabled. Run doctor before relying on
+Vibe resume and correct an explicit [session_logging] enabled = false setting.
+Mistral model selection is injected as VIBE_ACTIVE_MODEL because Vibe has no
+model CLI flag.
 
-Use `session_create` before a multi-turn workflow, then pass `sessionId` to subsequent requests.
+SQLite and Postgres persistence store jobs durably. Memory persistence is
+process-lifetime only and requires explicit acknowledgement. With
+persistence.backend = "none", sync calls run to completion and async/job tools
+are not registered. Do not cancel a mandatory review because it is slow.
 
-## Rules
-- Explicit async tools return `job.id`; sync auto-deferral returns top-level `jobId`. Poll with `llm_job_status` every 60 s, fetch with `llm_job_result`.
-- Sync requests that exceed 45s auto-defer to async — check the response for `jobId`. Results are durable (30-day default retention via `LLM_GATEWAY_JOB_RETENTION_DAYS`), so you can fetch by `jobId` after a polling timeout or across gateway restarts.
-- Identical replays within `LLM_GATEWAY_DEDUP_WINDOW_MS` (default 1 h) auto-dedup onto the existing job. Pass `forceRefresh:true` to force a fresh CLI run.
-- `mcpServers` defaults to `["sqry"]`. Add `exa`, `ref_tools`, or `trstr` explicitly when needed.
-- Prefer `promptParts` over `prompt` for any workflow with a large stable prefix (system/tools/context) — the gateway maintains canonical-order concatenation so the prefix bytes are identical across calls, raising implicit cache hit rate. The two fields are mutually exclusive.
-- Claude: `mcpServers` builds a Claude MCP config. Gemini: gateway passes `--allowed-mcp-server-names`, but Gemini CLI must already have those servers configured. Codex and Grok: `mcpServers` is approval tracking only; the CLIs manage their own MCP config.
-- Check `cli_versions` when a CLI behaves unexpectedly; call `cli_upgrade` with `dryRun:true` before running an actual upgrade (Grok self-updates via `grok update`).
+Personal Agent Config Kit supports Claude and Codex only, requires durable job
+admission, and disables route_request and normal cross-provider validation
+workflows. A required seven-provider review in Kit mode is a blocker unless the
+user explicitly changes scope.
+The ordinary Claude `workingDir` targeting rule does not apply to a Claude Kit
+request: it rejects caller-supplied `workingDir` before context compilation.
+Use `explain_effective_config({workingDir:"<repo>"})` to inspect a candidate
+scope, then execute Claude Kit work through an already configured registered
+`workspace` alias or the configured default workspace. It never inherits the
+gateway process cwd.

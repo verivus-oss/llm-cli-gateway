@@ -4,6 +4,7 @@ import { join } from "path";
 import { createRequire } from "module";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
+  MemoryJobStore,
   SqliteJobStore,
   type JobStore,
   computeRequestKey,
@@ -107,6 +108,84 @@ describe("JobStore", () => {
     });
   });
 
+  describe("MCP artifact admission", () => {
+    const kitExecution = {
+      version: 1 as const,
+      releaseId: "job-store-admission-release",
+      configStamp: "job-store-admission-stamp",
+      scopeRoot: "/workspace/job-store-admission",
+      scopeHead: "job-store-admission-head",
+      contextIdentity: "job-store-admission-context",
+    };
+
+    const validArtifact = {
+      cli: "claude",
+      transport: "process" as const,
+      ownerHostname: "job-store-origin",
+      mcpArtifactPath: "/tmp/job-store-request/config.json",
+      mcpArtifactScope: "job-store-artifact-scope",
+    };
+
+    it("rejects invalid artifact provenance before every local store writes", () => {
+      const stores: Array<[string, JobStore]> = [
+        ["sqlite", store],
+        ["memory", new MemoryJobStore()],
+      ];
+      const invalidInputs = [
+        { ...validArtifact, kitExecution, kitSessionId: "kit-session" },
+        { ...validArtifact, mcpArtifactScope: null },
+        { ...validArtifact, mcpArtifactPath: null },
+        { ...validArtifact, cli: "codex" },
+        { ...validArtifact, transport: "http" as const },
+        { ...validArtifact, ownerHostname: "" },
+      ];
+
+      for (const [storeName, candidate] of stores) {
+        for (const [index, invalid] of invalidInputs.entries()) {
+          const id = `${storeName}-invalid-artifact-${index}`;
+          expect(() =>
+            candidate.recordStart({
+              id,
+              correlationId: `corr-${id}`,
+              requestKey: `key-${id}`,
+              args: ["-p", "review"],
+              startedAt: new Date().toISOString(),
+              pid: null,
+              ...invalid,
+            })
+          ).toThrow();
+          expect(candidate.getById(id)).toBeNull();
+        }
+      }
+
+      const db = openDatabase(dbPath);
+      try {
+        const fenceCount = db.prepare("SELECT COUNT(*) AS count FROM kit_attempt_fences").get() as {
+          count: number;
+        };
+        expect(fenceCount.count).toBe(0);
+      } finally {
+        db.close();
+      }
+    });
+
+    it("persists a complete non-Kit Claude process provenance record", () => {
+      store.recordStart({
+        id: "valid-artifact-provenance",
+        correlationId: "corr-valid-artifact-provenance",
+        requestKey: "key-valid-artifact-provenance",
+        args: ["-p", "review"],
+        startedAt: new Date().toISOString(),
+        pid: null,
+        ...validArtifact,
+      });
+      expect(store.getById("valid-artifact-provenance")).toMatchObject({
+        ...validArtifact,
+        mcpArtifactCleanupPending: true,
+      });
+    });
+  });
+
   describe("owner principal (F3)", () => {
     it("stamps and returns the owner principal on recordStart", () => {
       store.recordStart({
@@ -133,6 +212,71 @@ describe("JobStore", () => {
         pid: 1,
       });
       expect(store.getById("job-unowned")?.ownerPrincipal).toBeNull();
+    });
+
+    it("allows only local replay of an exact legacy-unowned recovered Kit fence", () => {
+      const fence = {
+        attemptId: "legacy-unowned-recovered-fence",
+        cli: "claude",
+        kitExecution: {
+          version: 1 as const,
+          releaseId: "legacy-fence-release",
+          configStamp: "legacy-fence-stamp",
+          scopeRoot: "/workspace/legacy-fence",
+          scopeHead: "legacy-fence-head",
+          contextIdentity: "legacy-fence-context",
+        },
+        kitSessionId: "legacy-unowned-fence-session",
+        ownerPrincipal: null,
+        fencedAt: new Date().toISOString(),
+      };
+
+      expect(store.fenceUnadmittedKitAttempt(fence)).toBe("reserved");
+      expect(store.fenceUnadmittedKitAttempt({ ...fence, ownerPrincipal: "local" })).toBe(
+        "already_recovered"
+      );
+      expect(store.fenceUnadmittedKitAttempt({ ...fence, ownerPrincipal: "remote-reviewer" })).toBe(
+        "conflict"
+      );
+      expect(store.fenceUnadmittedKitAttempt(fence)).toBe("conflict");
+      expect(store.fenceUnadmittedKitAttempt({ ...fence, ownerPrincipal: undefined })).toBe(
+        "conflict"
+      );
+      expect(
+        store.fenceUnadmittedKitAttempt({
+          ...fence,
+          ownerPrincipal: 42 as unknown as string,
+        })
+      ).toBe("conflict");
+
+      const db = openDatabase(dbPath);
+      try {
+        const persisted = db
+          .prepare("SELECT owner_principal FROM kit_attempt_fences WHERE attempt_id = ?")
+          .get(fence.attemptId) as { owner_principal: string | null };
+        expect(persisted.owner_principal).toBeNull();
+      } finally {
+        db.close();
+      }
+
+      const memory = new MemoryJobStore();
+      expect(memory.fenceUnadmittedKitAttempt(fence)).toBe("reserved");
+      expect(memory.fenceUnadmittedKitAttempt({ ...fence, ownerPrincipal: "local" })).toBe(
+        "already_recovered"
+      );
+      expect(
+        memory.fenceUnadmittedKitAttempt({ ...fence, ownerPrincipal: "remote-reviewer" })
+      ).toBe("conflict");
+      expect(memory.fenceUnadmittedKitAttempt(fence)).toBe("conflict");
+      expect(memory.fenceUnadmittedKitAttempt({ ...fence, ownerPrincipal: undefined })).toBe(
+        "conflict"
+      );
+      expect(
+        memory.fenceUnadmittedKitAttempt({
+          ...fence,
+          ownerPrincipal: 42 as unknown as string,
+        })
+      ).toBe("conflict");
     });
 
     it("migrates a pre-existing jobs table by adding owner_principal (NULL for legacy rows)", () => {
@@ -170,6 +314,10 @@ describe("JobStore", () => {
       try {
         // Legacy row survives migration; owner is NULL (legacy-unowned).
         expect(migrated.getById("legacy-1")?.ownerPrincipal).toBeNull();
+        expect(migrated.getById("legacy-1")).toMatchObject({
+          errorCategory: null,
+          retryable: null,
+        });
         // New inserts after migration can carry an owner.
         migrated.recordStart({
           id: "new-1",
@@ -182,6 +330,22 @@ describe("JobStore", () => {
           ownerPrincipal: "bob",
         });
         expect(migrated.getById("new-1")?.ownerPrincipal).toBe("bob");
+        migrated.recordComplete({
+          id: "new-1",
+          status: "failed",
+          exitCode: 126,
+          stdout: "",
+          stderr: "input too large",
+          outputTruncated: false,
+          error: "input too large",
+          errorCategory: "input_too_large",
+          retryable: false,
+          finishedAt: new Date().toISOString(),
+        });
+        expect(migrated.getById("new-1")).toMatchObject({
+          errorCategory: "input_too_large",
+          retryable: false,
+        });
       } finally {
         migrated.close();
         rmSync(legacyDir, { recursive: true, force: true });

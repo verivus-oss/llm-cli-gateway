@@ -12,13 +12,21 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { mkdtempSync, rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
-import { prepareClaudeRequest } from "../index.js";
+import { AsyncJobManager } from "../async-job-manager.js";
+import { ApprovalManager } from "../approval-manager.js";
+import type { PersistenceConfig } from "../config.js";
+import { NoopFlightRecorder } from "../flight-recorder.js";
+import { createGatewayServer, prepareClaudeRequest, type GatewayServerRuntime } from "../index.js";
+import { MemoryJobStore } from "../job-store.js";
+import { noopLogger } from "../logger.js";
+import { PersonalConfigManager } from "../personal-config.js";
 import {
   CLAUDE_AGENT_DEFINITION_SCHEMA,
   CLAUDE_HIGH_IMPACT_PARAMS_SCHEMA,
   prepareClaudeHighImpactFlags,
   validateClaudeAgentsMap,
 } from "../request-helpers.js";
+import { FileSessionManager } from "../session-manager.js";
 
 const BASE_PARAMS = {
   prompt: "hello",
@@ -30,6 +38,27 @@ const BASE_PARAMS = {
   optimizePrompt: false,
   operation: "claude_request",
 };
+
+interface RegisteredTool {
+  handler: (
+    args: Record<string, unknown>,
+    extra?: Record<string, unknown>
+  ) => Promise<{ content: Array<{ type: string; text: string }>; isError?: boolean }>;
+}
+
+function memoryPersistence(): PersistenceConfig {
+  return {
+    backend: "memory",
+    path: null,
+    dsn: null,
+    retentionDays: 30,
+    dedupWindowMs: 3_600_000,
+    acknowledgeEphemeral: true,
+    ownsOrphanRecovery: false,
+    asyncJobsEnabled: true,
+    sources: { configFile: null, envOverrides: [] },
+  };
+}
 
 /**
  * Pull out the args from a prepare() result, asserting it didn't bail with an
@@ -49,19 +78,57 @@ function callPrepare(extra: Record<string, unknown>): string[] {
 describe("U25 — Claude high-impact feature flags", () => {
   let testHome: string;
   let originalHome: string | undefined;
+  let originalApprovalAllowBypass: string | undefined;
 
   beforeEach(() => {
     // Sandbox HOME so the MCP-config write side-effect lands in /tmp.
     testHome = mkdtempSync(join(tmpdir(), "u25-claude-handler-"));
     originalHome = process.env.HOME;
+    originalApprovalAllowBypass = process.env.LLM_GATEWAY_APPROVAL_ALLOW_BYPASS;
     process.env.HOME = testHome;
+    delete process.env.LLM_GATEWAY_APPROVAL_ALLOW_BYPASS;
   });
 
   afterEach(() => {
     if (originalHome === undefined) delete process.env.HOME;
     else process.env.HOME = originalHome;
+    if (originalApprovalAllowBypass === undefined) {
+      delete process.env.LLM_GATEWAY_APPROVAL_ALLOW_BYPASS;
+    } else {
+      process.env.LLM_GATEWAY_APPROVAL_ALLOW_BYPASS = originalApprovalAllowBypass;
+    }
     rmSync(testHome, { recursive: true, force: true });
   });
+
+  function managedRuntime(): GatewayServerRuntime {
+    return {
+      logger: noopLogger,
+      approvalManager: new ApprovalManager(join(testHome, "approvals.jsonl"), noopLogger),
+      cacheAwareness: {
+        emitAnthropicCacheControl: false,
+        anthropicTtlSeconds: 300,
+        warnOnTtlExpiry: false,
+        minStableTokensForCacheControl: { sonnet: 1024, opus: 4096, haiku: 4096, default: 4096 },
+        sources: { configFile: null },
+      },
+    } as unknown as GatewayServerRuntime;
+  }
+
+  function createBoundaryServer(): ReturnType<typeof createGatewayServer> {
+    const recorder = new NoopFlightRecorder();
+    return createGatewayServer({
+      sessionManager: new FileSessionManager(join(testHome, "sessions.json")),
+      asyncJobManager: new AsyncJobManager(noopLogger, undefined, new MemoryJobStore(), recorder),
+      persistence: memoryPersistence(),
+      flightRecorder: recorder,
+      logger: noopLogger,
+      personalConfig: new PersonalConfigManager({
+        enabled: false,
+        baselinePath: join(testHome, "baseline"),
+        maxStaleHours: 168,
+      }),
+    });
+  }
 
   describe("CLAUDE_AGENT_DEFINITION_SCHEMA", () => {
     it("accepts a minimal valid agent definition", () => {
@@ -119,7 +186,8 @@ describe("U25 — Claude high-impact feature flags", () => {
       expect("args" in result).toBe(false);
       const err = result as { isError?: boolean; content: { text: string }[] };
       expect(err.isError).toBe(true);
-      expect(err.content[0].text).toContain("broken");
+      expect(err.content[0].text).toContain("agents[0].description");
+      expect(err.content[0].text).not.toContain("broken");
     });
 
     it("emits --fork-session when forkSession=true", () => {
@@ -204,6 +272,69 @@ describe("U25 — Claude high-impact feature flags", () => {
     });
   });
 
+  describe("mcp_managed additional workspace directories", () => {
+    it("denies addDir without the operator authorization", () => {
+      const prep = prepareClaudeRequest(
+        {
+          ...BASE_PARAMS,
+          approvalStrategy: "mcp_managed",
+          addDir: ["/workspace/extra"],
+        },
+        managedRuntime()
+      );
+
+      expect("args" in prep).toBe(false);
+      expect(JSON.stringify(prep)).toContain("denied by MCP-managed approval policy");
+    });
+
+    it("preserves addDir while keeping the managed permission mode bounded after authorization", () => {
+      process.env.LLM_GATEWAY_APPROVAL_ALLOW_BYPASS = "1";
+      const prep = prepareClaudeRequest(
+        {
+          ...BASE_PARAMS,
+          approvalStrategy: "mcp_managed",
+          addDir: ["/workspace/extra"],
+        },
+        managedRuntime()
+      );
+
+      if (!("args" in prep)) throw new Error("expected an approved Claude request prep");
+      expect(prep.args).toContain("--add-dir");
+      expect(prep.args[prep.args.indexOf("--add-dir") + 1]).toBe("/workspace/extra");
+      expect(prep.args[prep.args.indexOf("--permission-mode") + 1]).toBe("acceptEdits");
+      expect(prep.args).not.toContain("bypassPermissions");
+    });
+  });
+
+  describe("session selection boundaries", () => {
+    it.each(["claude_request", "claude_request_async"])(
+      "%s rejects createNewSession together with continueSession",
+      async toolName => {
+        const server = createBoundaryServer();
+        const tools = (server as unknown as Record<string, Record<string, RegisteredTool>>)
+          ._registeredTools;
+        const result = await tools[toolName]!.handler(
+          {
+            prompt: "review this",
+            outputFormat: "text",
+            createNewSession: true,
+            continueSession: true,
+            dangerouslySkipPermissions: false,
+            approvalStrategy: "legacy",
+            strictMcpConfig: false,
+            optimizePrompt: false,
+          },
+          {}
+        );
+
+        expect(result.isError).toBe(true);
+        expect(result.content[0]?.text).toContain(
+          "createNewSession and continueSession cannot be combined"
+        );
+      }
+    );
+  });
+
   describe("CLAUDE_HIGH_IMPACT_PARAMS_SCHEMA mutual exclusion", () => {
     it("fails when both systemPrompt and appendSystemPrompt are set", () => {
       const parsed = CLAUDE_HIGH_IMPACT_PARAMS_SCHEMA.safeParse({
@@ -228,6 +359,10 @@ describe("U25 — Claude high-impact feature flags", () => {
       expect(parsed.success).toBe(true);
     });
 
+    it.each(["systemPrompt", "appendSystemPrompt"])("rejects an empty %s override", field => {
+      expect(CLAUDE_HIGH_IMPACT_PARAMS_SCHEMA.safeParse({ [field]: "" }).success).toBe(false);
+    });
+
     it("rejects non-positive maxBudgetUsd", () => {
       expect(CLAUDE_HIGH_IMPACT_PARAMS_SCHEMA.safeParse({ maxBudgetUsd: 0 }).success).toBe(false);
       expect(CLAUDE_HIGH_IMPACT_PARAMS_SCHEMA.safeParse({ maxBudgetUsd: -1 }).success).toBe(false);
@@ -249,15 +384,16 @@ describe("U25 — Claude high-impact feature flags", () => {
       if (result.ok) expect(Object.keys(result.value)).toEqual(["a", "b"]);
     });
 
-    it("reports the failing agent key on schema violation", () => {
+    it("reports a bounded ordinal path for the failing agent", () => {
       const result = validateClaudeAgentsMap({
         good: { description: "d", prompt: "p" },
         bad: { prompt: "p-only" },
       });
       expect(result.ok).toBe(false);
       if (!result.ok) {
-        expect(result.agentKey).toBe("bad");
-        expect(result.message).toContain("bad");
+        expect(result.agentKey).toBe("agents[1]");
+        expect(result.message).toContain("agents[1].description");
+        expect(result.message).not.toContain("bad");
       }
     });
   });

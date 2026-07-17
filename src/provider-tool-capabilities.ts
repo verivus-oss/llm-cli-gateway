@@ -607,6 +607,9 @@ const NOISE_TOOL_IDENTIFIERS = new Set([
   "short_description",
 ]);
 
+const UNISOLATED_MCP_MANAGED_UNAVAILABLE =
+  "approvalStrategy:mcp_managed is unavailable because the current adapter cannot isolate ambient MCP configuration. Use approvalStrategy:legacy until an isolated, allowlisted launch path is available; approvalPolicy has no effect on this provider.";
+
 const TOOL_CONTROLS: Record<KnownProviderCapabilityId, ProviderCapabilityStaticDefinition> = {
   claude: {
     providerKind: "cli",
@@ -630,7 +633,7 @@ const TOOL_CONTROLS: Record<KnownProviderCapabilityId, ProviderCapabilityStaticD
         supported: true,
         requestField: "mcpServers",
         behavior:
-          "Gateway can generate a Claude MCP config for selected gateway-known MCP servers.",
+          "Gateway generates a Claude MCP config for selected gateway-known MCP servers. Under mcp_managed, Claude uses only that generated config and only provisioned gateway-owned local definitions are eligible; dynamic npx, ambient-PATH, and Codex-config overrides remain legacy-only.",
       },
       nativeSkills: {
         supported: true,
@@ -647,12 +650,14 @@ const TOOL_CONTROLS: Record<KnownProviderCapabilityId, ProviderCapabilityStaticD
         supported: true,
         requestField: "permissionMode",
         cliFlag: "--permission-mode",
-        behavior: "Passes Claude permission-mode values through to the CLI.",
+        behavior:
+          "Legacy passes Claude permission modes through. Under mcp_managed, acceptEdits is the bounded default; bypassPermissions requires an explicit request, an approved gateway decision, and LLM_GATEWAY_APPROVAL_ALLOW_BYPASS=1.",
       },
       approvalStrategy: {
         supported: true,
         requestField: "approvalStrategy",
-        behavior: "Gateway approval strategy controls MCP-managed permission gating.",
+        behavior:
+          "mcp_managed applies the gateway approval decision and forces strictMcpConfig=true, so Claude uses only the generated MCP config. Permission/configuration/plugin, instruction override, bare-mode, tool-selection, file-input/output, additional-directory/worktree, native-fork, and native-resume risks are denied unless the decision is approved and LLM_GATEWAY_APPROVAL_ALLOW_BYPASS=1.",
       },
       approvalPolicy: {
         supported: true,
@@ -662,7 +667,8 @@ const TOOL_CONTROLS: Record<KnownProviderCapabilityId, ProviderCapabilityStaticD
       strictMcpConfig: {
         supported: true,
         requestField: "strictMcpConfig",
-        behavior: "Restricts Claude to the generated MCP config when mcpServers is used.",
+        behavior:
+          "Legacy defaults strictMcpConfig to false. Under mcp_managed, the gateway forces it true and Claude uses only the generated MCP config; caller false cannot weaken that boundary.",
       },
       agents: {
         supported: true,
@@ -679,13 +685,15 @@ const TOOL_CONTROLS: Record<KnownProviderCapabilityId, ProviderCapabilityStaticD
       workspace: {
         supported: true,
         requestField: "addDir/workspace/worktree",
-        behavior: "Gateway resolves additional directories, workspace aliases, and worktrees.",
+        behavior:
+          "Gateway resolves additional directories, workspace aliases, and worktrees. Under mcp_managed, non-empty addDir and gateway worktree creation/reuse are approval-gated filesystem-scope expansions.",
       },
       session: {
         supported: true,
         requestField:
           "continueSession/sessionId/forkSession/noSessionPersistence/settings/settingSources",
-        behavior: "Supports Claude session continuation, forks, ephemeral runs, and settings.",
+        behavior:
+          "Supports Claude session continuation, forks, ephemeral runs, and settings. Native continuation is approval-gated under mcp_managed because it can inherit provider state.",
       },
       loopAndBudget: {
         supported: true,
@@ -730,7 +738,7 @@ const TOOL_CONTROLS: Record<KnownProviderCapabilityId, ProviderCapabilityStaticD
         supported: false,
         requestField: "mcpServers",
         behavior:
-          "Accepted for approval tracking only; Codex manages its own MCP configuration outside the gateway.",
+          "Codex manages MCP configuration outside the gateway. Any caller-supplied list is descriptive metadata, not an enforceable allowlist.",
       },
       nativeSkills: {
         supported: true,
@@ -752,7 +760,8 @@ const TOOL_CONTROLS: Record<KnownProviderCapabilityId, ProviderCapabilityStaticD
         supported: true,
         requestField: "askForApproval",
         cliFlag: "--ask-for-approval",
-        behavior: "Passes Codex approval prompting policy through to the CLI.",
+        behavior:
+          "Deprecated compatibility input. Current Codex exec does not receive --ask-for-approval from the gateway.",
       },
       bypassApprovalsAndSandbox: {
         supported: true,
@@ -762,7 +771,8 @@ const TOOL_CONTROLS: Record<KnownProviderCapabilityId, ProviderCapabilityStaticD
       profileAndConfig: {
         supported: true,
         requestField: "profile/configOverrides/ignoreUserConfig/ignoreRules",
-        behavior: "Passes Codex profile and config override controls.",
+        behavior:
+          "Local callers can pass Codex profile and config controls. Remote HTTP/OAuth callers cannot use configOverrides or its enable/disable feature-override equivalents; other host-path controls are separately rejected.",
       },
       structuredOutput: {
         supported: true,
@@ -784,6 +794,11 @@ const TOOL_CONTROLS: Record<KnownProviderCapabilityId, ProviderCapabilityStaticD
         supported: true,
         requestField: "sessionId/resumeLatest/createNewSession/ephemeral",
         behavior: "Supports Codex resume/latest/new-session and ephemeral controls.",
+      },
+      approvalStrategy: {
+        supported: false,
+        requestField: "approvalStrategy/approvalPolicy",
+        behavior: UNISOLATED_MCP_MANAGED_UNAVAILABLE,
       },
     },
     features: baseFeatures({
@@ -808,8 +823,14 @@ const TOOL_CONTROLS: Record<KnownProviderCapabilityId, ProviderCapabilityStaticD
       },
       {
         input: "mcpServers",
-        behavior: "approval_tracking_only",
-        details: "Accepted only for gateway approval tracking; Codex owns MCP configuration.",
+        behavior: "ignored",
+        details:
+          "Codex owns MCP configuration; a caller list is not an enforceable gateway allowlist.",
+      },
+      {
+        input: 'approvalStrategy:"mcp_managed"',
+        behavior: "reject",
+        details: UNISOLATED_MCP_MANAGED_UNAVAILABLE,
       },
     ],
   },
@@ -817,7 +838,7 @@ const TOOL_CONTROLS: Record<KnownProviderCapabilityId, ProviderCapabilityStaticD
     providerKind: "cli",
     gatewayRequestTools: ["gemini_request", "gemini_request_async"],
     summary:
-      "Antigravity/Gemini owns its runtime tool catalog and MCP configuration; this gateway rejects non-empty tool allow-list inputs and tracks requested MCP servers for approvals.",
+      "Antigravity/Gemini owns its runtime tool catalog and MCP configuration; this gateway rejects non-empty tool allow-list inputs and does not claim to enforce a caller MCP allowlist.",
     controls: {
       allowlist: {
         supported: false,
@@ -833,7 +854,7 @@ const TOOL_CONTROLS: Record<KnownProviderCapabilityId, ProviderCapabilityStaticD
         supported: false,
         requestField: "mcpServers",
         behavior:
-          "Accepted for approval tracking only; Antigravity manages its own MCP configuration outside the gateway.",
+          "Antigravity manages MCP configuration outside the gateway. Any caller-supplied list is descriptive metadata, not an enforceable allowlist.",
       },
       nativeSkills: {
         supported: true,
@@ -843,12 +864,18 @@ const TOOL_CONTROLS: Record<KnownProviderCapabilityId, ProviderCapabilityStaticD
       approvalMode: {
         supported: true,
         requestField: "approvalMode/yolo",
-        behavior: "Passes Antigravity approval mode when supported by the gateway path.",
+        behavior:
+          "Legacy mode supports prompted default, --mode accept-edits, --mode plan, and full yolo.",
+      },
+      approvalStrategy: {
+        supported: false,
+        requestField: "approvalStrategy/approvalPolicy",
+        behavior: UNISOLATED_MCP_MANAGED_UNAVAILABLE,
       },
       sandbox: {
         supported: true,
         requestField: "sandbox",
-        cliFlag: "-s",
+        cliFlag: "--sandbox",
         behavior: "Runs Gemini/Antigravity in sandbox mode.",
       },
       workspace: {
@@ -876,8 +903,14 @@ const TOOL_CONTROLS: Record<KnownProviderCapabilityId, ProviderCapabilityStaticD
       },
       {
         input: "mcpServers",
-        behavior: "approval_tracking_only",
-        details: "Accepted only for gateway approval tracking; Antigravity owns MCP configuration.",
+        behavior: "ignored",
+        details:
+          "Antigravity owns MCP configuration; a caller list is not an enforceable gateway allowlist.",
+      },
+      {
+        input: 'approvalStrategy:"mcp_managed"',
+        behavior: "reject",
+        details: UNISOLATED_MCP_MANAGED_UNAVAILABLE,
       },
       {
         input: "attachments",
@@ -919,7 +952,7 @@ const TOOL_CONTROLS: Record<KnownProviderCapabilityId, ProviderCapabilityStaticD
         supported: false,
         requestField: "mcpServers",
         behavior:
-          "Accepted for approval tracking only; Grok manages its own MCP configuration via grok mcp.",
+          "Grok manages MCP configuration via grok mcp. Any caller-supplied list is descriptive metadata, not an enforceable allowlist.",
       },
       nativeSkills: {
         supported: true,
@@ -940,8 +973,13 @@ const TOOL_CONTROLS: Record<KnownProviderCapabilityId, ProviderCapabilityStaticD
       },
       permissionAndApproval: {
         supported: true,
-        requestField: "permissionMode/approvalStrategy/approvalPolicy",
-        behavior: "Combines Grok CLI permission mode with gateway approval controls.",
+        requestField: "permissionMode",
+        behavior: "Passes Grok CLI permission mode through to the provider.",
+      },
+      approvalStrategy: {
+        supported: false,
+        requestField: "approvalStrategy/approvalPolicy",
+        behavior: UNISOLATED_MCP_MANAGED_UNAVAILABLE,
       },
       agents: {
         supported: true,
@@ -962,7 +1000,7 @@ const TOOL_CONTROLS: Record<KnownProviderCapabilityId, ProviderCapabilityStaticD
         supported: true,
         requestField: "promptFile/promptJson/single/verbatim/systemPromptOverride/rules",
         behavior:
-          "Surfaces Grok prompt-file, JSON prompt, single-run, verbatim, and rules controls.",
+          "Surfaces Grok prompt-file, JSON prompt, single-run, verbatim, system-prompt override, and rules controls.",
       },
       outputFormat: {
         supported: true,
@@ -1005,8 +1043,14 @@ const TOOL_CONTROLS: Record<KnownProviderCapabilityId, ProviderCapabilityStaticD
     unsupportedInputs: [
       {
         input: "mcpServers",
-        behavior: "approval_tracking_only",
-        details: "Accepted only for gateway approval tracking; Grok owns MCP configuration.",
+        behavior: "ignored",
+        details:
+          "Grok owns MCP configuration; a caller list is not an enforceable gateway allowlist.",
+      },
+      {
+        input: 'approvalStrategy:"mcp_managed"',
+        behavior: "reject",
+        details: UNISOLATED_MCP_MANAGED_UNAVAILABLE,
       },
     ],
   },
@@ -1032,7 +1076,7 @@ const TOOL_CONTROLS: Record<KnownProviderCapabilityId, ProviderCapabilityStaticD
         supported: false,
         requestField: "mcpServers",
         behavior:
-          "Accepted for approval tracking only; Vibe manages its own MCP configuration via vibe mcp.",
+          "Vibe reads MCP configuration from VIBE_HOME config. Any caller-supplied list is descriptive metadata, not an enforceable allowlist.",
       },
       nativeSkills: {
         supported: true,
@@ -1043,7 +1087,12 @@ const TOOL_CONTROLS: Record<KnownProviderCapabilityId, ProviderCapabilityStaticD
         supported: true,
         requestField: "permissionMode",
         behavior:
-          "Passes any Vibe --agent name through (builtins like plan/auto-approve, plus install-gated and custom agents).",
+          "Legacy requests pass any Vibe --agent name through, including builtins like plan/auto-approve plus install-gated and custom agents.",
+      },
+      approvalStrategy: {
+        supported: false,
+        requestField: "approvalStrategy/approvalPolicy",
+        behavior: UNISOLATED_MCP_MANAGED_UNAVAILABLE,
       },
       outputFormat: {
         supported: true,
@@ -1085,8 +1134,14 @@ const TOOL_CONTROLS: Record<KnownProviderCapabilityId, ProviderCapabilityStaticD
     unsupportedInputs: [
       {
         input: "mcpServers",
-        behavior: "approval_tracking_only",
-        details: "Accepted only for gateway approval tracking; Vibe owns MCP configuration.",
+        behavior: "ignored",
+        details:
+          "Vibe owns MCP configuration; a caller list is not an enforceable gateway allowlist.",
+      },
+      {
+        input: 'approvalStrategy:"mcp_managed"',
+        behavior: "reject",
+        details: UNISOLATED_MCP_MANAGED_UNAVAILABLE,
       },
       {
         input: "effort/reasoningEffort",
@@ -1177,7 +1232,7 @@ const TOOL_CONTROLS: Record<KnownProviderCapabilityId, ProviderCapabilityStaticD
     providerKind: "cli",
     gatewayRequestTools: ["devin_request", "devin_request_async"],
     summary:
-      "Cognition Devin CLI runs an agentic coding session; the gateway passes the prompt, model, permission mode, and session resume. Devin owns its own tools, MCP, skills, and rules.",
+      "Cognition Devin CLI runs an agentic coding session; the gateway passes the prompt, model, permission mode, and session resume. Devin owns its own tools, MCP, skills, and rules, so the gateway does not claim to enforce a caller MCP allowlist.",
     controls: {
       allowlist: {
         supported: false,
@@ -1190,9 +1245,7 @@ const TOOL_CONTROLS: Record<KnownProviderCapabilityId, ProviderCapabilityStaticD
       },
       mcpServers: {
         supported: false,
-        requestField: "mcpServers",
-        behavior:
-          "Accepted for approval tracking only; Devin manages its own MCP config via `devin mcp`.",
+        behavior: "Devin manages its own MCP configuration via `devin mcp`.",
       },
       nativeSkills: {
         supported: false,
@@ -1205,6 +1258,11 @@ const TOOL_CONTROLS: Record<KnownProviderCapabilityId, ProviderCapabilityStaticD
         cliFlag: "--permission-mode",
         behavior:
           "Maps to Devin CLI --permission-mode: auto auto-approves read-only tools; accept-edits also auto-approves workspace edits; smart additionally auto-runs actions a fast model judges safe; dangerous auto-approves all.",
+      },
+      approvalStrategy: {
+        supported: false,
+        requestField: "approvalStrategy/approvalPolicy",
+        behavior: UNISOLATED_MCP_MANAGED_UNAVAILABLE,
       },
       promptControl: {
         supported: true,
@@ -1228,9 +1286,19 @@ const TOOL_CONTROLS: Record<KnownProviderCapabilityId, ProviderCapabilityStaticD
     unsupportedInputs: [
       {
         input: "mcpServers",
-        behavior: "approval_tracking_only",
+        behavior: "not_supported",
+        details: "Devin owns MCP configuration via `devin mcp`.",
+      },
+      {
+        input: 'approvalStrategy:"mcp_managed"',
+        behavior: "reject",
+        details: UNISOLATED_MCP_MANAGED_UNAVAILABLE,
+      },
+      {
+        input: 'transport:"acp" with Devin CLI-only controls',
+        behavior: "reject",
         details:
-          "Accepted only for gateway approval tracking; Devin owns MCP config via `devin mcp`.",
+          "Devin ACP routing accepts prompt, model, gateway sessionId, and the validated agentType only. Remote calls use a registered default workspace when new and their recorded canonical workspace when resumed. Permission, sandbox, trust, file/export, native-continuation, optimization, compression, idle-timeout, and dedup controls are rejected instead of silently ignored.",
       },
     ],
   },
@@ -1250,7 +1318,6 @@ const TOOL_CONTROLS: Record<KnownProviderCapabilityId, ProviderCapabilityStaticD
       },
       mcpServers: {
         supported: false,
-        requestField: "mcpServers",
         behavior:
           "Cursor manages its own MCP configuration via `cursor-agent mcp`; the gateway does not mutate Cursor MCP config.",
       },
@@ -1261,10 +1328,15 @@ const TOOL_CONTROLS: Record<KnownProviderCapabilityId, ProviderCapabilityStaticD
       },
       permissionMode: {
         supported: true,
-        requestField: "mode/force/autoReview/sandbox/trust/approvalStrategy/approvalPolicy",
+        requestField: "mode/force/autoReview/sandbox/trust",
         cliFlag: "--mode/--force/--auto-review/--sandbox/--trust",
         behavior:
-          'Cursor supports read-only plan/ask modes, Smart Auto-review, force/yolo, sandbox overrides, and workspace trust in headless mode; under approvalStrategy:"mcp_managed", high-impact force/trust/sandbox-disabled requests are gated by the gateway approval manager.',
+          "Cursor supports read-only plan/ask modes, Smart Auto-review, force/yolo, sandbox overrides, and workspace trust in headless mode.",
+      },
+      approvalStrategy: {
+        supported: false,
+        requestField: "approvalStrategy/approvalPolicy",
+        behavior: UNISOLATED_MCP_MANAGED_UNAVAILABLE,
       },
       promptControl: {
         supported: true,
@@ -1300,10 +1372,15 @@ const TOOL_CONTROLS: Record<KnownProviderCapabilityId, ProviderCapabilityStaticD
           "Cursor owns MCP config via `cursor-agent mcp`; gateway request-time MCP server injection is not implemented.",
       },
       {
+        input: 'approvalStrategy:"mcp_managed"',
+        behavior: "reject",
+        details: UNISOLATED_MCP_MANAGED_UNAVAILABLE,
+      },
+      {
         input: 'transport:"acp" with CLI-only options',
         behavior: "reject",
         details:
-          "Cursor ACP routing currently accepts prompt/model/session inputs only; mode, outputFormat, workspace, addDir, force, autoReview, sandbox, trust, and prompt/response optimization are rejected instead of silently ignored.",
+          "Cursor ACP routing accepts prompt/model/session inputs plus a registered workspace selection. mode, outputFormat, addDir, force, autoReview, sandbox, trust, native-continuation, prompt/response optimization or compression, idleTimeoutMs, and forceRefresh are rejected instead of silently ignored.",
       },
     ],
   },
