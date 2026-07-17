@@ -86,14 +86,19 @@ const TOOL_SUPPRESSION_PATTERN = new RegExp(
   "i"
 );
 
-// Normalise a code span's literal content: markers and inner backticks are
-// literal, so keep the WORDS (a verb or noun written as code is still seen) but
-// turn markers into spaces, blank INTERNAL sentence punctuation so literal code
-// cannot forge a boundary, and keep only TRAILING sentence punctuation so a span
-// that genuinely ends a sentence ("... trust the `summary.` Use") still reads as
-// two. Spaces, never deletion, so nothing welds to a neighbour.
+// One token of the inline stream: a run of L active backticks, or literal text
+// (with `*`/`~` already turned to spaces and `_` kept, see below).
+type InlineToken = { btrun: true; len: number } | { btrun: false; text: string };
+
+// Normalise a code span's literal content: keep the WORDS (a verb or noun
+// written as code is still seen), turn `*`/`~` and inner backticks into spaces,
+// blank INTERNAL sentence punctuation so literal code cannot forge a boundary,
+// and keep only TRAILING sentence punctuation so a span that genuinely ends a
+// sentence ("... trust the `summary.` Use") still reads as two. `_` is a word
+// character and is left alone: an identifier like `use_shell` must stay one word
+// so it is not read as the keyword "use".
 function normaliseCodeSpanContent(content: string): string {
-  const cleaned = content.replace(/[`*_~]/g, " ").replace(/\s+$/, "");
+  const cleaned = content.replace(/[`*~]/g, " ").replace(/\s+$/, "");
   const trailing = /[.!?]+$/.exec(cleaned);
   const end = trailing ? trailing[0] : "";
   return cleaned.slice(0, cleaned.length - end.length).replace(/[.!?]/g, " ") + end;
@@ -102,69 +107,105 @@ function normaliseCodeSpanContent(content: string): string {
 // Inline-markup normaliser, run before the suppression scan. A prompt is
 // Markdown, and markers around or inside a suppression were a long tail of both
 // false positives (markup faking a sentence boundary, "**summary.** Use") and
-// false negatives (markup hiding the verb or noun, "do not `use` the shell", or
-// a code span forging a boundary, "do not use the `foo. **Bar` shell"). Rather
-// than encode Markdown in the detection regex one edge at a time, normalise
-// once. This is a real tokenizer, not a regex: a run of L backticks opens a code
-// span that closes only at the next run of EXACTLY L (GFM), a backslash-escaped
-// backtick is literal, and an unclosed run is literal text. Everything removed
-// becomes a SPACE, so stripping markup can neither weld two words into a keyword
-// nor tear a keyword apart. The result feeds TOOL_SUPPRESSION_PATTERN, so the
-// markup classes inside SENTENCE_CHAR are now a backstop, not the primary
-// defence. Work is linear in practice (each character is consumed once; only an
-// unclosed run scans ahead), with no catastrophic backtracking.
+// false negatives (markup hiding the verb or noun, "do not `use` the shell").
+// Rather than encode Markdown in the detection regex one edge at a time,
+// normalise once. This is a real tokenizer:
 //
-// Residual (accepted, defence-in-depth scoring): a code span whose literal
-// content contains an INTERNAL sentence break ("`this. Use`") is blanked to one
-// run, so a negation can over-flag across it; and the documented lowercase
-// sentence-start case still over-flags. Both are precision costs of closing the
-// boundary-forge class and need real sentence parsing to remove.
+//   - Phase 1 tokenizes the prompt. Backslash escapes are resolved with parity
+//     (an odd run of backslashes escapes a following backtick, an even run does
+//     not, per GFM), `*`/`~` become spaces so nothing welds or tears, and `_`
+//     is kept because it is a word character (so `use_shell` stays one word and
+//     is not read as "use").
+//   - Phase 2 links each backtick run to the next run of the SAME length in one
+//     right-to-left pass. This is what keeps the whole function O(n): an
+//     unmatched run costs O(1), not a rescan of the tail, so adversarial
+//     backtick soup cannot make it quadratic.
+//   - Phase 3 matches spans greedily (a run of L opens a span closing at the
+//     next run of L, GFM) and emits: matched span content is normalised and
+//     padded with spaces, an unmatched run becomes spaces.
+//
+// The result feeds TOOL_SUPPRESSION_PATTERN, so the markup classes inside
+// SENTENCE_CHAR are now a backstop, not the primary defence.
+//
+// Residuals (accepted, defence-in-depth scoring, not hide paths that a config
+// author hits by accident): a code span whose literal content holds an internal
+// sentence break ("`this. Use`"), a genuine lowercase sentence start, and an
+// adversary who splits a keyword across markup ("u`s`e", "*u*s*e*"). Closing
+// those needs a full CommonMark render, disproportionate for a score-4 scorer.
 export function neutraliseInlineMarkup(prompt: string): string {
-  const out: string[] = [];
+  const tokens: InlineToken[] = [];
+  let buf: string[] = [];
+  const flush = (): void => {
+    if (buf.length) {
+      tokens.push({ btrun: false, text: buf.join("") });
+      buf = [];
+    }
+  };
   const n = prompt.length;
   let i = 0;
   while (i < n) {
     const ch = prompt[i];
-    if (ch === "\\" && prompt[i + 1] === "`") {
-      out.push(" ");
-      i += 2;
+    if (ch === "\\") {
+      let b = i;
+      while (b < n && prompt[b] === "\\") b++;
+      const count = b - i;
+      buf.push(" ".repeat(count));
+      i = b;
+      if (count % 2 === 1 && i < n && prompt[i] === "`") {
+        buf.push(" ");
+        i++;
+      }
       continue;
     }
     if (ch === "`") {
       let j = i;
       while (j < n && prompt[j] === "`") j++;
-      const runLength = j - i;
-      let k = j;
-      let close = -1;
-      while (k < n) {
-        if (prompt[k] === "`") {
-          let m = k;
-          while (m < n && prompt[m] === "`") m++;
-          if (m - k === runLength) {
-            close = k;
-            break;
-          }
-          k = m;
-        } else {
-          k++;
-        }
-      }
-      if (close === -1) {
-        out.push(" ".repeat(runLength));
-        i = j;
-        continue;
-      }
-      out.push(" ", normaliseCodeSpanContent(prompt.slice(j, close)), " ");
-      i = close + runLength;
+      flush();
+      tokens.push({ btrun: true, len: j - i });
+      i = j;
       continue;
     }
-    if (ch === "*" || ch === "_" || ch === "~") {
-      out.push(" ");
+    if (ch === "*" || ch === "~") {
+      buf.push(" ");
       i++;
       continue;
     }
-    out.push(ch);
+    buf.push(ch);
     i++;
+  }
+  flush();
+
+  const nextSame = new Map<number, number>();
+  const lastByLen = new Map<number, number>();
+  for (let t = tokens.length - 1; t >= 0; t--) {
+    const tok = tokens[t];
+    if (!tok.btrun) continue;
+    nextSame.set(t, lastByLen.has(tok.len) ? (lastByLen.get(tok.len) as number) : -1);
+    lastByLen.set(tok.len, t);
+  }
+
+  const out: string[] = [];
+  let t = 0;
+  while (t < tokens.length) {
+    const tok = tokens[t];
+    if (!tok.btrun) {
+      out.push(tok.text);
+      t++;
+      continue;
+    }
+    const close = nextSame.get(t);
+    if (close === undefined || close === -1) {
+      out.push(" ".repeat(tok.len));
+      t++;
+      continue;
+    }
+    let content = "";
+    for (let u = t + 1; u < close; u++) {
+      const inner = tokens[u];
+      content += inner.btrun ? "`".repeat(inner.len) : inner.text;
+    }
+    out.push(" ", normaliseCodeSpanContent(content), " ");
+    t = close + 1;
   }
   return out.join("");
 }

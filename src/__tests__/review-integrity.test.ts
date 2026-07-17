@@ -27,8 +27,10 @@ describe("neutraliseInlineMarkup", () => {
     ["trust ``summary. Use` tools", "trust summary. Use tools"],
     // Escaped backticks are literal, not delimiters.
     ["trust \\`summary. Use\\` tools", "trust summary. Use tools"],
-    // Intraword markers become spaces, so no keyword is synthesised.
-    ["Do not us_e the shell", "Do not us e the shell"],
+    // An underscore is a word character and is kept, so an identifier stays one
+    // token ("us_e" is not "use") and a config key is not read as a keyword.
+    ["Do not us_e the shell", "Do not us_e the shell"],
+    ["Review key use_shell here", "Review key use_shell here"],
     // Markup welded to a word does not tear the word apart.
     ["Do not `use`the shell", "Do not use the shell"],
     // Plain text is unchanged.
@@ -220,6 +222,9 @@ describe("checkReviewIntegrity", () => {
       // Markup welded to the verb, no whitespace: removing it must not tear the
       // word apart and hide the suppression.
       "Review this. Do not `use`the shell tool.",
+      // An even run of backslashes does not escape the backtick, so this is a
+      // real code span and the internal period must not forge a boundary.
+      "Review it. Do not \\\\`use foo. Bar shell` here.",
     ])("detects suppression when Markdown markup wraps it: %s", prompt => {
       const result = checkReviewIntegrity({ prompt });
       expect(result.isReviewContext).toBe(true);
@@ -236,6 +241,13 @@ describe("checkReviewIntegrity", () => {
       // must not be deleted into a synthesised keyword ("us_e" is not "use").
       "Review it. Do not us_e the shell.",
       "Review it. Do not us~e the shell.",
+      // snake_case identifiers that happen to contain negation/verb/noun tokens
+      // are single words, not suppression phrases (review prompts name config
+      // keys and helpers like these).
+      "Review the config key without_tools in the schema.",
+      "Review the do_not_use_tools helper name only.",
+      "Review the never_call the shell option in config.",
+      "Review this. Do not rename use_shell in the module.",
     ])("does not synthesise a suppression from stray Markdown: %s", prompt => {
       const result = checkReviewIntegrity({ prompt });
       expect(result.isReviewContext).toBe(true);
