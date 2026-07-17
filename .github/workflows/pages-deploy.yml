@@ -86,7 +86,7 @@ jobs:
           ref: refs/tags/${{ needs.resolve-release-tag.outputs.tag }}
           persist-credentials: false
 
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6 # zizmor: ignore[cache-poisoning]
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6 # zizmor: ignore[cache-poisoning]
         # Why the ignore: zizmor flags setup-node on any release-triggered
         # workflow regardless of whether caching is on. We do NOT set `cache:`,
         # so no cache is read or written and the poisoned-cache vector does not

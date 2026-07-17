@@ -102,7 +102,7 @@ jobs:
       # ---------------------------------------------------------------
       # Go — gosec (SAST) + govulncheck (reachable CVEs) on installer/.
       # ---------------------------------------------------------------
-      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           # >= go1.26.5 clears the earlier crypto/x509 + net/textproto stdlib
           # advisories (fixed in 1.26.4) plus GO-2026-4970 / GO-2026-5856, which
