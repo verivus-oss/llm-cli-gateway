@@ -246,12 +246,15 @@ describe("local site discovery validation", () => {
     }
   });
 
-  it("keeps a real anchor that only shares a line with an HTML comment", () => {
-    // The comment strip must not swallow live content: a heading and an explicit
-    // <a id> outside any comment still resolve after stripping.
+  it("keeps live content near an HTML comment, including a heading on the comment's own line", () => {
+    // The comment strip must not swallow live content: a heading or explicit
+    // <a id> outside any comment still resolves after stripping, even when a
+    // trailing comment sits on the SAME line as the heading (only the comment
+    // span is blanked, the heading text survives).
     for (const [body, anchor] of [
       ["# Real Heading\n\n<!-- note -->\n\nbody\n", "real-heading"],
       ['# T\n\n<a id="live-anchor"></a>\n\n<!-- x -->\n\nbody\n', "live-anchor"],
+      ["# Real Heading <!-- trailing note -->\n\nbody\n", "real-heading"],
     ]) {
       const site = copiedSite();
       writeFileSync(join(site, "live.md"), body);
@@ -263,6 +266,49 @@ describe("local site discovery validation", () => {
       const result = validate(site);
       expect(result.status).toBe(0);
     }
+  });
+
+  it("does not let an unclosed <!-- inside inline code swallow later headings", () => {
+    // A literal `<!--` written inside an inline code span is not an HTML comment,
+    // so it must not run to EOF and hide the headings after it. Only a real
+    // block-level opener (start of line) runs to EOF when unclosed.
+    const body = "# The `<!--` opener\n\n## Real Later\n\nbody\n";
+    const site = copiedSite();
+    writeFileSync(join(site, "inl.md"), body);
+    const maintainers = join(site, "maintainers.md");
+    writeFileSync(
+      maintainers,
+      `${readFileSync(maintainers, "utf8")}\n[later](https://llm-cli-gateway.dev/inl.md#real-later)\n`
+    );
+    expect(validate(site).status).toBe(0);
+  });
+
+  it("runs an unclosed HTML comment to EOF: earlier heading survives, later heading is gone", () => {
+    // Per CommonMark an unclosed <!-- runs to end of document. A heading BEFORE
+    // it must still resolve; a heading AFTER it is inside the comment and must
+    // 404 (it is never rendered).
+    const body =
+      "# Before Comment\n\n<!-- unclosed from here\n\n## After Comment {#after-id}\n\nbody\n";
+
+    const survives = copiedSite();
+    writeFileSync(join(survives, "eof.md"), body);
+    const m1 = join(survives, "maintainers.md");
+    writeFileSync(
+      m1,
+      `${readFileSync(m1, "utf8")}\n[before](https://llm-cli-gateway.dev/eof.md#before-comment)\n`
+    );
+    expect(validate(survives).status).toBe(0);
+
+    const gone = copiedSite();
+    writeFileSync(join(gone, "eof.md"), body);
+    const m2 = join(gone, "maintainers.md");
+    writeFileSync(
+      m2,
+      `${readFileSync(m2, "utf8")}\n[after](https://llm-cli-gateway.dev/eof.md#after-id)\n`
+    );
+    const result = validate(gone);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("absent from the headings");
   });
 
   it("resolves a heading after a CRLF-authored fenced block", () => {

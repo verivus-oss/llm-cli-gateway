@@ -887,17 +887,18 @@ export function parseTrustedInstalledVersion(versionResult) {
 /**
  * Decide whether a subcommand help probe result is untrustworthy, i.e. should set
  * the probe's `helpExitedNonzero` flag so `--require-installed` escalates it. A
- * probe is untrusted when the subcommand is NOT declared help-exit tolerant and
- * either it failed to run at all (`available:false`: timeout, EACCES, a spawn the
- * root executable could complete but this path could not) OR it ran and exited
- * nonzero. Both states produced help text we cannot compare against the contract,
- * which is the same fail-open the root-help / --version trust fixes close. A
- * clean exit, or any tolerant subcommand, is trusted. Kept a pure predicate so
- * both probe branches and the tests share one decision.
+ * probe that FAILED TO RUN (`available:false`: timeout, EACCES, a spawn the root
+ * executable could complete but this path could not) is always untrusted: it
+ * produced no help text to compare against the contract, and `helpProbeExitTolerant`
+ * tolerates a nonzero exit STATUS, not a probe that never ran. Otherwise a probe
+ * is untrusted when the subcommand is NOT help-exit tolerant and it ran but exited
+ * nonzero. A clean exit, or a tolerant subcommand that ran, is trusted. This is
+ * the same fail-open the root-help / --version trust fixes close. Kept a pure
+ * predicate so both probe branches and the tests share one decision.
  */
 export function subcommandHelpProbeIsUntrusted(subcommand, result) {
-  if (subcommand?.helpProbeExitTolerant) return false;
   if (!result?.available) return true;
+  if (subcommand?.helpProbeExitTolerant) return false;
   return result.status !== 0;
 }
 
@@ -973,7 +974,7 @@ export function verifyDeclaredCommandPath(
   return { state: "present", reason: null };
 }
 
-function probeInstalledCliSubcommands(machinery, contract, rootHelp, timeoutMs) {
+export function probeInstalledCliSubcommands(machinery, contract, rootHelp, timeoutMs) {
   const subcommands = machinery.flattenCliSubcommands(contract.subcommands);
   const aliasesByPath = new Map(
     subcommands.map(subcommand => [subcommand.commandPath.join(" "), subcommand.aliases ?? []])
@@ -1054,9 +1055,10 @@ function probeInstalledCliSubcommands(machinery, contract, rootHelp, timeoutMs) 
         available = false;
         // The root executable already spawned, so a subcommand help probe that
         // fails to run (timeout, EACCES, ...) is a probe we could not complete,
-        // not an absent path. That is the same untrustworthy state as a nonzero
-        // exit, so flag it too (unless tolerant) and let --require-installed
-        // escalate it rather than passing this path as drift-free.
+        // not an absent path. That is untrustworthy even for a help-exit-tolerant
+        // subcommand (tolerance covers a nonzero exit status, not a probe that
+        // never ran), so flag it and let --require-installed escalate it rather
+        // than passing this path as drift-free.
         if (subcommandHelpProbeIsUntrusted(subcommand, result)) {
           helpExitedNonzero = true;
         }
@@ -1520,19 +1522,19 @@ async function runScan(machinery, toml, flags) {
         }
 
         if (requireInstalledHelpProbeErrorIsCritical(flags.requireInstalled, helpProbe)) {
-          // A help command spawned but exited nonzero, so the help text used for
-          // drift comparison is untrustworthy (it may be an error message that
-          // happens to match, or partial output). Under --require-installed that
+          // A help command either exited nonzero or (for a subcommand probe) could
+          // not run at all (timeout, EACCES), so the help text used for drift
+          // comparison is untrustworthy or absent. Under --require-installed that
           // is an unverified contract, the same fail-open the --version exit fix
           // closes, so escalate it to a critical rather than a warning.
           findings.push({
             severity: "critical",
             category: "installed-help-probe-error",
-            message: `--require-installed was set but a ${cli} help probe (${contract.executable}) exited nonzero, so its help output cannot be trusted for drift comparison and its contract is unverified. Re-probe the CLI; do not treat this run as drift-free.`,
+            message: `--require-installed was set but a ${cli} help probe (${contract.executable}) exited nonzero or could not run, so its help output cannot be trusted for drift comparison and its contract is unverified. Re-probe the CLI; do not treat this run as drift-free.`,
           });
           criticalCount++;
           console.log(
-            `  [probe] HELP PROBE ERROR (require-installed): ${contract.executable} help exited nonzero; contract unverified`
+            `  [probe] HELP PROBE ERROR (require-installed): ${contract.executable} help exited nonzero or could not run; contract unverified`
           );
         }
 

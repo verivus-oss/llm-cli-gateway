@@ -376,31 +376,61 @@ function stripFencedBlocks(body) {
   return kept.join("\n");
 }
 
+// Decide whether a `<!--` at `start` is a CommonMark HTML *block* opener: the
+// first non-space on its line, with at most 3 spaces of indent (4+ spaces is an
+// indented code block, not an HTML block). Only a block opener runs to EOF when
+// unclosed. Looks back at most 4 characters, so it stays O(1) per opener.
+function isBlockCommentOpener(body, start) {
+  let j = start - 1;
+  let spaces = 0;
+  while (j >= 0 && body[j] === " ") {
+    spaces += 1;
+    if (spaces > 3) return false;
+    j -= 1;
+  }
+  return j < 0 || body[j] === "\n";
+}
+
 // Remove HTML comments so a heading or explicit anchor written inside one (e.g.
 // `<!-- ## Ghost {#ghost-id} -->` or `<!-- <a id="hidden"> -->`) does not mint a
 // live anchor; a comment is not rendered, so a fragment pointing at it must fail.
 // The comment body is replaced with only its newlines, so line boundaries (and
-// thus Setext/paragraph structure) are preserved. An unclosed `<!--` runs to
-// end-of-document (CommonMark). Uses indexOf, not a `<!--[\s\S]*?-->` regex,
-// which would backtrack quadratically on a run of unclosed `<!--`; indexOf scans
-// each character once, so this is linear.
+// thus Setext/paragraph structure) are preserved.
+//
+// A CLOSED comment (`<!-- ... -->`, block or inline) is bounded, so its span is
+// always blanked; this also drops a trailing inline comment from a heading line
+// before slugifying, matching GitHub. An UNCLOSED `<!--` runs to end-of-document
+// ONLY as a real HTML block (opener at line start). An unclosed INLINE `<!--`
+// (mid-line, e.g. a literal `<!--` written inside an inline code span) is NOT a
+// comment and must not swallow the live headings that follow, so it is left as
+// text. Uses indexOf, not a `<!--[\s\S]*?-->` regex that would backtrack
+// quadratically; `noMoreClose` latches the single -1 scan so a run of unclosed
+// openers cannot rescan to EOF each time. Linear in the document length.
 function stripHtmlComments(body) {
   let result = "";
   let i = 0;
+  let noMoreClose = false;
   for (;;) {
     const start = body.indexOf("<!--", i);
     if (start === -1) {
-      result += body.slice(i);
-      return result;
+      return result + body.slice(i);
     }
-    result += body.slice(i, start);
-    const end = body.indexOf("-->", start + 4);
-    if (end === -1) {
-      result += body.slice(start).replace(/[^\n]/g, "");
-      return result;
+    const end = noMoreClose ? -1 : body.indexOf("-->", start + 4);
+    if (end !== -1) {
+      result += body.slice(i, start);
+      result += body.slice(start, end + 3).replace(/[^\n]/g, "");
+      i = end + 3;
+      continue;
     }
-    result += body.slice(start, end + 3).replace(/[^\n]/g, "");
-    i = end + 3;
+    // No `-->` exists at or after this opener; it is true for every later opener
+    // too, so latch it and stop rescanning.
+    noMoreClose = true;
+    if (isBlockCommentOpener(body, start)) {
+      result += body.slice(i, start);
+      return result + body.slice(start).replace(/[^\n]/g, "");
+    }
+    result += body.slice(i, start + 4);
+    i = start + 4;
   }
 }
 

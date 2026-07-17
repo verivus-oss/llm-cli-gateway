@@ -9,6 +9,7 @@ import {
   githubReleaseSemanticSnapshot,
   normalizeSnapshot,
   parseTrustedInstalledVersion,
+  probeInstalledCliSubcommands,
   renderReport,
   requireInstalledHelpProbeErrorIsCritical,
   requireInstalledVersionIndeterminateIsCritical,
@@ -265,13 +266,52 @@ describe("upstream scanner hardening", () => {
     // A clean exit is trusted.
     expect(subcommandHelpProbeIsUntrusted(strict, { available: true, status: 0 })).toBe(false);
 
-    // A help-exit-tolerant subcommand (one whose help is expected to exit nonzero)
-    // is trusted in every case, including a probe that never ran.
-    expect(subcommandHelpProbeIsUntrusted(tolerant, { available: false, status: null })).toBe(
-      false
-    );
+    // A help-exit-tolerant subcommand tolerates a nonzero EXIT STATUS, so a probe
+    // that ran (available:true) is trusted whatever its status. It does NOT
+    // tolerate a probe that never ran: a spawn failure produced no help to
+    // compare, so it is still untrusted.
     expect(subcommandHelpProbeIsUntrusted(tolerant, { available: true, status: 1 })).toBe(false);
     expect(subcommandHelpProbeIsUntrusted(tolerant, { available: true, status: 0 })).toBe(false);
+    expect(subcommandHelpProbeIsUntrusted(tolerant, { available: false, status: null })).toBe(true);
+  });
+
+  it("sets helpExitedNonzero on a subcommand help probe that fails to spawn (wiring, not just the predicate)", () => {
+    // Pins the fix end-to-end, not only the leaf predicate: probeInstalledCliSubcommands
+    // must actually route a spawn-failed subcommand probe through the predicate and
+    // set the probe's helpExitedNonzero flag. A machinery mock forces the root help
+    // to discover the subcommand (so its path is not "missing") but makes the
+    // subcommand help probe spawn-fail (resolveCommandForSpawn -> a path that ENOENTs).
+    const subDef = { commandPath: ["update"], helpArgs: [["--help"]], aliases: [] };
+    const contract = { executable: "faketool", subcommands: [subDef] };
+    const rootHelp = { available: true, commands: ["update"], helpHash: "root-hash" };
+    const machinery = {
+      flattenCliSubcommands: subs => subs,
+      getExtendedPath: () => process.env.PATH ?? "",
+      envWithExtendedPath: env => env,
+      // The subcommand help probe resolves to a binary that cannot be spawned, so
+      // spawnSync returns result.error and runReadOnlyCliCommand reports available:false.
+      resolveCommandForSpawn: (_executable, args) => ({
+        command: "/nonexistent/faketool-does-not-exist-xyz",
+        args,
+      }),
+      // Only reached when available:true, which never happens here; provided for safety.
+      extractDiscoveredFlags: () => [],
+      computeSubcommandFlagDrift: () => ({
+        missingFlags: [],
+        extraFlags: [],
+        acknowledgedExtraFlags: [],
+        warnings: [],
+      }),
+    };
+
+    const probes = probeInstalledCliSubcommands(machinery, contract, rootHelp, 2000);
+    const probe = probes.update;
+    expect(probe).toBeDefined();
+    expect(probe.available).toBe(false);
+    // The spawn-failed, non-tolerant subcommand is flagged, so the surface fold
+    // (Object.values(subcommands).some(p => p.helpExitedNonzero)) escalates it.
+    expect(probe.helpExitedNonzero).toBe(true);
+    expect(probe.existence).not.toBe("missing");
   });
 
   it("does not trust a --version that exits nonzero, closing the parse fail-open", () => {
