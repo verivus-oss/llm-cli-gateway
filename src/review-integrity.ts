@@ -53,9 +53,11 @@ const TOOL_NOUN = String.raw`(?:tool(?:s)?|shell|bash|command(?:s)?)`;
 // Unicode-aware word boundary via lookarounds. JS `\b` is ASCII-only even under
 // the /u flag, so a non-ASCII letter next to a keyword forges a boundary:
 // `\buse\b` matches the "use" inside "caféuse" because "é" is not an ASCII word
-// char. Requiring no Unicode letter/number/underscore on either side fixes that.
-const WB = String.raw`(?<![\p{L}\p{N}_])`;
-const WA = String.raw`(?![\p{L}\p{N}_])`;
+// char. Requiring no Unicode letter/number/COMBINING MARK/underscore on either
+// side fixes that, including for a decomposed (NFD) "café" whose accent is a
+// combining mark (\p{M}) that would otherwise read as a boundary.
+const WB = String.raw`(?<![\p{L}\p{N}\p{M}_])`;
+const WA = String.raw`(?![\p{L}\p{N}\p{M}_])`;
 const uword = (body: string): string => `${WB}(?:${body})${WA}`;
 const NEGATION = uword(String.raw`do\s*not|don['’]t|never`);
 // Within one sentence: a negation that governs a tool-use verb that governs a
@@ -218,7 +220,7 @@ export function neutraliseInlineMarkup(prompt: string): string {
       // Word char per Unicode, not ASCII `\w`: a non-ASCII identifier like
       // `café_use` is one literal word, so its `_` must stay and it must not be
       // read as the keyword "use".
-      const intraword = /[\p{L}\p{N}_]/u.test(before) && /[\p{L}\p{N}_]/u.test(after);
+      const intraword = /[\p{L}\p{N}\p{M}_]/u.test(before) && /[\p{L}\p{N}\p{M}_]/u.test(after);
       buf.push(intraword ? prompt.slice(i, u) : " ".repeat(u - i));
       i = u;
       continue;
@@ -369,6 +371,15 @@ function segmentSentences(text: string): string[] {
       // sentence separator, "... the summary\nUse the tools ..."), not a
       // mid-sentence wrap ("... use the\nshell ...", which stays one sentence so a
       // real suppression that wraps is still detected).
+      //
+      // Accepted residual (the dual of that hygiene fix, same class as the soft
+      // capital-tool-noun residual): a suppression whose wrap falls right before a
+      // CAPITALISED tool noun ("do not use\nBash commands") splits and is missed.
+      // A single newline before a capital is genuinely ambiguous between a new
+      // sentence and a wrapped proper noun, and no line heuristic separates them;
+      // biasing toward the split avoids false-flagging pro-tool hygiene prose,
+      // which this detector treats as the worse fault, and a lowercase wrap (the
+      // common way a suppression continues) is still detected.
       const rest = text.slice(i + 1, i + 48);
       if (/^[ \t\r]*\n/.test(rest) || SOFT_BOUNDARY_NEXT.test(text.slice(i, i + 48))) {
         emit(i + 1);

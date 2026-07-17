@@ -573,7 +573,11 @@ async function assertInternalLink(url) {
   if (result.status < 200 || result.status >= 300) {
     fail(`${url} referenced by site metadata returned ${result.status}`);
   }
-  if (isHtmlHomepage(result.body) && !parsed.pathname.endsWith("/") && parsed.pathname !== "/") {
+  // Memoize on the (cached) result: isHtmlHomepage scans the whole body, and a
+  // target linked by N fragments would otherwise re-scan it N times (a quadratic
+  // cross-product with body size).
+  result.isHomepage ??= isHtmlHomepage(result.body);
+  if (result.isHomepage && !parsed.pathname.endsWith("/") && parsed.pathname !== "/") {
     fail(`${url} resolved to homepage HTML`);
   }
   // Fragment validation for Markdown targets, where anchors are deterministic

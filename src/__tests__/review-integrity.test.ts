@@ -352,15 +352,26 @@ describe("checkReviewIntegrity", () => {
       }
     });
 
-    it("does not read a non-ASCII identifier's underscore as a keyword boundary", () => {
-      // GFM's intraword-underscore rule is Unicode, not ASCII: "café_use" is one
-      // literal identifier, so "use" is not a standalone verb and this is not a
-      // suppression. ASCII `\w` would have torn it and false-flagged.
-      const result = checkReviewIntegrity({
-        prompt: "Review this. Do not rename café_use near the shell option.",
-      });
-      expect(result.isReviewContext).toBe(true);
-      expect(result.violations.filter(v => v.type === "tool_suppression")).toHaveLength(0);
+    it("does not read a keyword welded to a non-ASCII letter as a standalone verb", () => {
+      // Unicode-boundary cases: an intraword underscore ("café_use" is one literal
+      // identifier); a keyword welded to a non-ASCII letter ("caféuse", where JS
+      // ASCII `\b` would wrongly see "use"); the same in DECOMPOSED (NFD) form
+      // where the accent is a combining mark (U+0301); and a keyword welded on the
+      // other side ("toolshed"). None is a suppression; only a whole-word tool
+      // verb next to a whole-word tool noun is.
+      // Explicit decomposed (NFD) "caf\u00e9" = "cafe" + U+0301 combining acute.
+      const nfd = "Review this. Do not rename cafe\u0301use near the shell option.";
+      expect(nfd).not.toBe(nfd.normalize("NFC"));
+      for (const prompt of [
+        "Review this. Do not rename café_use near the shell option.",
+        "Review this. Do not rename caféuse near the shell option.",
+        nfd,
+        "Review this. Do not touch the toolshed near the config.",
+      ]) {
+        const result = checkReviewIntegrity({ prompt });
+        expect(result.isReviewContext).toBe(true);
+        expect(result.violations.filter(v => v.type === "tool_suppression")).toHaveLength(0);
+      }
     });
 
     it("segments on fullwidth and ideographic sentence terminators", () => {

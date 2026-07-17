@@ -1022,6 +1022,10 @@ function probeInstalledCliSubcommands(machinery, contract, rootHelp, timeoutMs) 
 
     const outputs = [];
     let available = true;
+    // A non-tolerant subcommand help that exits nonzero produced untrustworthy
+    // drift-comparison text, the same fail-open the root help / --version fixes
+    // close. Track it so --require-installed can escalate it to a critical.
+    let helpExitedNonzero = false;
     for (const helpArgs of subcommand.helpArgs) {
       const result = runReadOnlyCliCommand(
         machinery,
@@ -1039,6 +1043,7 @@ function probeInstalledCliSubcommands(machinery, contract, rootHelp, timeoutMs) 
       }
       outputs.push(result.output);
       if (result.status !== 0 && !subcommand.helpProbeExitTolerant) {
+        helpExitedNonzero = true;
         warnings.push(
           `${contract.executable} ${[...commandPath, ...helpArgs].join(" ")} exited with status ${result.status}`
         );
@@ -1076,6 +1081,7 @@ function probeInstalledCliSubcommands(machinery, contract, rootHelp, timeoutMs) 
       commandPath,
       checkedHelpCommands,
       available,
+      helpExitedNonzero,
       existence: fellBackToRoot ? "missing" : pathState.state,
       missingFlags: drift.missingFlags,
       extraFlags: drift.extraFlags,
@@ -1191,6 +1197,13 @@ function probeInstalledCliSurface(machinery, cli, timeoutMs = PROBE_TIMEOUT_MS) 
   }
 
   const flattened = machinery.flattenCliSubcommands(contract.subcommands);
+  const subcommands = probeInstalledCliSubcommands(machinery, contract, rootHelp, timeoutMs);
+  // A non-tolerant subcommand help that exited nonzero is the same untrustworthy
+  // fail-open as a nonzero root help, so fold it into helpExitedNonzero and let
+  // requireInstalledHelpProbeErrorIsCritical escalate it under --require-installed.
+  if (Object.values(subcommands).some(probe => probe.helpExitedNonzero)) {
+    helpExitedNonzero = true;
+  }
   return {
     cli,
     executable: contract.executable,
@@ -1209,7 +1222,7 @@ function probeInstalledCliSurface(machinery, cli, timeoutMs = PROBE_TIMEOUT_MS) 
     versionProbe,
     rootCommands: rootHelp.commands,
     rootCatalogDrift: rootCatalogDrift(flattened, rootHelp.commands),
-    subcommands: probeInstalledCliSubcommands(machinery, contract, rootHelp, timeoutMs),
+    subcommands,
     probedAt: new Date().toISOString(),
     warnings,
   };
