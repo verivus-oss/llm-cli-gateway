@@ -109,7 +109,7 @@ installed help probe as the primary signal for rapidly changing command surface.
 
 ## Cursor-specific notes
 
-- Tested against `cursor-agent 2026.07.09-a3815c0`.
+- Tested against `cursor-agent 2026.07.16-899851b`.
 - Root commands include authentication, MCP, worker, update, chat/session, and
   rule-management surfaces. Catalog them with an explicit risk and exposure tier
   before exposing any of them through gateway admin or request tools.

@@ -352,13 +352,13 @@ export interface ProviderDefinition {
  * all follow automatically.
  */
 export const PROVIDER_TARGET_VERSIONS: Record<CliType, string> = {
-  claude: "claude 2.1.211",
+  claude: "claude 2.1.212",
   codex: "codex-cli 0.144.5",
   gemini: "agy 1.1.3",
   grok: "grok 0.2.101 (5bc4b5dfad)",
   mistral: "vibe 2.20.0",
   devin: "devin 3000.1.27 (0d4bf12e)",
-  cursor: "cursor-agent 2026.07.09-a3815c0",
+  cursor: "cursor-agent 2026.07.16-899851b",
 };
 
 const PROVIDER_DEFINITIONS = {

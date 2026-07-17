@@ -1,7 +1,7 @@
 {
   "schemaVersion": "upstream-scan-snapshot.v2",
   "cli": "cursor",
-  "fetchedAt": "2026-07-16T05:41:44.241Z",
+  "fetchedAt": "2026-07-17T14:49:56.021Z",
   "sources": [
     {
       "url": "https://cursor.com/cli",
@@ -29,10 +29,10 @@
     }
   ],
   "helpSurface": {
-    "probedAt": "2026-07-16T05:41:43.902Z",
+    "probedAt": "2026-07-17T14:49:55.687Z",
     "available": true,
-    "version": "2026.07.09-a3815c0",
-    "targetVersion": "cursor-agent 2026.07.09-a3815c0",
+    "version": "2026.07.16-899851b",
+    "targetVersion": "cursor-agent 2026.07.16-899851b",
     "versionMatchesTarget": true,
     "discoveredFlags": [
       "--add-dir",
@@ -60,7 +60,7 @@
       "--worktree-base",
       "--yolo"
     ],
-    "helpHash": "7eb895075f6d0b0ba06c7c152b72599d5285d5d0ff3d2008f4fc73ac6f8bfe6a",
+    "helpHash": "98e06245ca0b9f7d73266e9e0541e91ddf1e4d96224bdb22a98a27db3be803a5",
     "extraVsContract": [],
     "missingFromBinary": [],
     "arityMismatches": [],
@@ -78,6 +78,7 @@
     "ls",
     "mcp",
     "models",
+    "plugin",
     "resume",
     "rule",
     "status",
@@ -91,7 +92,7 @@
       "commandPath": [
         "about"
       ],
-      "probedAt": "2026-07-16T05:41:39.117Z",
+      "probedAt": "2026-07-17T14:49:50.734Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -111,7 +112,7 @@
       "commandPath": [
         "agent"
       ],
-      "probedAt": "2026-07-16T05:41:39.457Z",
+      "probedAt": "2026-07-17T14:49:51.067Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -129,7 +130,7 @@
       "commandPath": [
         "create-chat"
       ],
-      "probedAt": "2026-07-16T05:41:39.798Z",
+      "probedAt": "2026-07-17T14:49:51.395Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -147,7 +148,7 @@
       "commandPath": [
         "generate-rule"
       ],
-      "probedAt": "2026-07-16T05:41:40.136Z",
+      "probedAt": "2026-07-17T14:49:51.735Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -165,7 +166,7 @@
       "commandPath": [
         "install-shell-integration"
       ],
-      "probedAt": "2026-07-16T05:41:40.474Z",
+      "probedAt": "2026-07-17T14:49:52.066Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -183,7 +184,7 @@
       "commandPath": [
         "login"
       ],
-      "probedAt": "2026-07-16T05:41:40.815Z",
+      "probedAt": "2026-07-17T14:49:52.401Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -201,7 +202,7 @@
       "commandPath": [
         "logout"
       ],
-      "probedAt": "2026-07-16T05:41:41.156Z",
+      "probedAt": "2026-07-17T14:49:52.729Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -219,7 +220,7 @@
       "commandPath": [
         "ls"
       ],
-      "probedAt": "2026-07-16T05:41:41.496Z",
+      "probedAt": "2026-07-17T14:49:53.055Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -237,7 +238,7 @@
       "commandPath": [
         "mcp"
       ],
-      "probedAt": "2026-07-16T05:41:41.837Z",
+      "probedAt": "2026-07-17T14:49:53.387Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -255,7 +256,7 @@
       "commandPath": [
         "models"
       ],
-      "probedAt": "2026-07-16T05:41:42.175Z",
+      "probedAt": "2026-07-17T14:49:53.723Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -269,11 +270,29 @@
       "tier": "inspect",
       "summary": "List Cursor account models."
     },
+    "plugin": {
+      "commandPath": [
+        "plugin"
+      ],
+      "probedAt": "2026-07-17T14:49:54.054Z",
+      "available": true,
+      "existence": "present",
+      "discoveredFlags": [],
+      "helpHash": "f56dce23b841b0347478e8be2200701d2544e7a409981443a8bc83e09ac407ec",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
+      "risk": "network",
+      "exposure": "not_exposed",
+      "tier": "catalog",
+      "summary": "Manage Cursor plugins and plugin marketplaces."
+    },
     "resume": {
       "commandPath": [
         "resume"
       ],
-      "probedAt": "2026-07-16T05:41:42.514Z",
+      "probedAt": "2026-07-17T14:49:54.386Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -291,7 +310,7 @@
       "commandPath": [
         "status"
       ],
-      "probedAt": "2026-07-16T05:41:42.860Z",
+      "probedAt": "2026-07-17T14:49:54.712Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -311,7 +330,7 @@
       "commandPath": [
         "uninstall-shell-integration"
       ],
-      "probedAt": "2026-07-16T05:41:43.202Z",
+      "probedAt": "2026-07-17T14:49:55.033Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -329,7 +348,7 @@
       "commandPath": [
         "update"
       ],
-      "probedAt": "2026-07-16T05:41:43.552Z",
+      "probedAt": "2026-07-17T14:49:55.358Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -347,7 +366,7 @@
       "commandPath": [
         "worker"
       ],
-      "probedAt": "2026-07-16T05:41:43.902Z",
+      "probedAt": "2026-07-17T14:49:55.686Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [

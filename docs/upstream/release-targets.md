@@ -31,6 +31,32 @@ claim installed-binary compatibility for that provider in the release notes.
 
 ## Most recent recorded contract refresh baseline
 
+### 3.0.0 release baseline - 2026-07-18
+
+Target versions accepted for the 3.0.0 release, matching
+`PROVIDER_TARGET_VERSIONS` in `src/provider-definitions.ts` (the source of
+truth) and the regenerated per-provider help-surface evidence under
+`docs/upstream/snapshots/*.json`:
+
+| Provider           | Executable     | Target/probed CLI version         |
+| ------------------ | -------------- | --------------------------------- |
+| Claude Code        | `claude`       | `2.1.212 (Claude Code)`           |
+| Codex CLI          | `codex`        | `codex-cli 0.144.5`               |
+| Gemini/Antigravity | `agy`          | `agy 1.1.3`                       |
+| Grok CLI           | `grok`         | `grok 0.2.101 (5bc4b5dfad)`       |
+| Mistral Vibe       | `vibe`         | `vibe 2.20.0`                     |
+| Devin CLI          | `devin`        | `devin 3000.1.27 (0d4bf12e)`      |
+| Cursor Agent CLI   | `cursor-agent` | `cursor-agent 2026.07.16-899851b` |
+
+Changes since the dated table below: claude 2.1.211 to 2.1.212 (patch, no flag
+change) and cursor-agent 2026.07.09 to 2026.07.16. Cursor gained a `plugin`
+root command (plugin/marketplace management), recorded as a `network`,
+`not_exposed` catalog subcommand (marketplace `add` fetches a remote Git
+repository) so it is tracked but never routed. The full native-artifact SHA-256
+matrix re-probe is carried
+forward from the dated table below and refreshed separately; the installed-CLI
+drift gate (`npm run upstream:drift`) is clean at these versions.
+
 ### Post-v2.17.0 contract refresh - 2026-07-13
 
 This is a pending contract-maintenance probe, not retrospective release

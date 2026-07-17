@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "llm-cli-gateway MCP HTTP API",
-    "version": "2.17.1",
+    "version": "3.0.0",
     "description": "Streamable HTTP MCP endpoint for llm-cli-gateway. Local stdio remains the default and HTTP is opt-in. The documented default /mcp endpoint uses a configured static bearer token; the built-in OAuth 2.0 server is optional."
   },
   "servers": [
@@ -46,10 +46,10 @@
               }
             }
           },
-          "401": {
+          "400": {
             "$ref": "#/components/responses/JsonError"
           },
-          "400": {
+          "401": {
             "$ref": "#/components/responses/JsonError"
           },
           "404": {
@@ -168,7 +168,9 @@
                       "type": "object"
                     }
                   },
-                  "required": ["ok"]
+                  "required": [
+                    "ok"
+                  ]
                 }
               }
             }
@@ -220,14 +222,21 @@
           },
           "method": {
             "type": "string",
-            "examples": ["initialize", "tools/list", "tools/call"]
+            "examples": [
+              "initialize",
+              "tools/list",
+              "tools/call"
+            ]
           },
           "params": {
             "type": "object",
             "additionalProperties": true
           }
         },
-        "required": ["jsonrpc", "method"]
+        "required": [
+          "jsonrpc",
+          "method"
+        ]
       },
       "JsonRpcResponse": {
         "type": "object",
@@ -257,7 +266,9 @@
             "$ref": "#/components/schemas/JsonRpcError"
           }
         },
-        "required": ["jsonrpc"]
+        "required": [
+          "jsonrpc"
+        ]
       },
       "JsonError": {
         "type": "object",
@@ -275,7 +286,9 @@
             "type": "boolean"
           }
         },
-        "required": ["error"],
+        "required": [
+          "error"
+        ],
         "additionalProperties": true
       },
       "JsonRpcError": {
@@ -289,7 +302,10 @@
           },
           "data": {}
         },
-        "required": ["code", "message"],
+        "required": [
+          "code",
+          "message"
+        ],
         "additionalProperties": true
       }
     },

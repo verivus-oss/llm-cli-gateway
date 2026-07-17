@@ -3214,6 +3214,19 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       models: subcommand(["models"], "List Cursor account models.", "read_only", [], {
         tier: "inspect",
       }),
+      plugin: subcommand(
+        ["plugin"],
+        "Manage Cursor plugins and plugin marketplaces.",
+        // `network`, not `writes_local_config`: `plugin marketplace add` fetches a
+        // remote Git repository and the marketplace operations reach an
+        // authenticated backend, so the more conservative remote-interaction risk
+        // is the honest single classification for a security inventory. (Deliberately
+        // stricter than the peer plugin families, which are catalog-only writes_local_config
+        // pending their own re-probe.)
+        "network",
+        [],
+        { exposure: "not_exposed", maxPositionals: "variadic" }
+      ),
       resume: subcommand(["resume"], "Resume the latest Cursor chat.", "executes_agent", [], {
         exposure: "not_exposed",
         maxPositionals: "variadic",

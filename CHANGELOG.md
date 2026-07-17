@@ -4,6 +4,8 @@ All notable changes to the llm-cli-gateway project.
 
 ## [Unreleased]
 
+## [3.0.0] - 2026-07-18
+
 ### Added
 
 - **Complete repository review primitive.** `review_changes` captures one
@@ -99,6 +101,16 @@ All notable changes to the llm-cli-gateway project.
   acknowledged upstream surface rather than added to the argv allowlist, because
   the gateway does not emit it. Snapshots, README, and the provider skills follow
   the re-probed baseline.
+- **Runtime subcommand help-probe fail-open closed.** The `doctor` and
+  `provider_subcommand_*` runtime drift probe now flags a subcommand `--help`
+  that exits non-zero but still parses into matching flags, instead of reporting
+  it clean and dropping the row under the default `includeClean=false`. The trust
+  decision is defined once and shared with the build-time drift scanner, so the
+  runtime and gate cannot diverge again (the scanner's own multi-`helpArgs`
+  early-return keeps the same signal). `provider_subcommand_drift` counts and
+  reports the new `helpExitedNonzero` field, and `doctor` adds one advisory
+  action for an installed contract left unverified by a non-zero or failed help
+  probe without changing its `ok` verdict.
 - **Validation receipts minted before the planned-judge gate still verify.**
   Read-time verification accepted only the current synthesis shape, so a
   receipt minted by an earlier release for a run whose judge was planned but
@@ -183,6 +195,12 @@ All notable changes to the llm-cli-gateway project.
   Linux with usable `/proc/self/fd`, otherwise strict pathname and scope
   validation. It accepts no arbitrary path, hostname, scope, or force
   override, and every mismatch retains the pin.
+- **Review-suppression detection reads Markdown correctly.** The multi-LLM
+  review-integrity scanner normalises inline Markdown (code spans, intraword
+  underscores, escaped characters, and Unicode format characters) before it
+  checks a review prompt for tool-suppression instructions. Evasion through
+  markup can no longer slip past the gate, and legitimate review prompts are no
+  longer misflagged. The normaliser is linear and identifier-safe.
 
 ### Upgrade notes
 

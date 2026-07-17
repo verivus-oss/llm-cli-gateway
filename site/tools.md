@@ -8,7 +8,7 @@ This file is generated from the gateway's actual MCP `tools/list` response, not 
 npm run site:generate
 ```
 
-- Public site version: `2.17.1`
+- Public site version: `3.0.0`
 - Tool count: 63
 - Source: runtime MCP tools/list from dist/index.js over in-memory MCP transport
 - Capture command: `node scripts/generate-site-discovery.mjs`

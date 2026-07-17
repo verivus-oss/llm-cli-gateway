@@ -1,6 +1,6 @@
 {
   "name": "llm-cli-gateway",
-  "version": "2.17.1",
+  "version": "3.0.0",
   "description": "Secure local control plane for AI coding agents. Operate Claude Code, Codex, Gemini/Antigravity, Grok Build, Mistral Vibe, Devin, Cursor Agent, and optional HTTP API providers from supported MCP clients while keeping execution workspace-scoped, approval-gated, durable, and auditable.",
   "repository": "https://github.com/verivus-oss/llm-cli-gateway",
   "documentation": "https://llm-cli-gateway.dev/agents.md",

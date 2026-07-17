@@ -1,8 +1,8 @@
 {
   "generatedAt": "deterministic build output",
   "packageName": "llm-cli-gateway",
-  "packageVersion": "2.17.1",
-  "siteVersion": "2.17.1",
+  "packageVersion": "3.0.0",
+  "siteVersion": "3.0.0",
   "captureCommand": "node scripts/generate-site-discovery.mjs",
   "source": "runtime MCP tools/list from dist/index.js over in-memory MCP transport",
   "toolCount": 63,
