@@ -912,6 +912,13 @@ main.doc p {
   color: var(--text-200);
   margin: 0 0 16px;
 }
+main.doc a {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+main.doc a:hover {
+  text-decoration: underline;
+}
 main.doc ul {
   margin: 0 0 20px;
   padding-left: 1.3rem;
