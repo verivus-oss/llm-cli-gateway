@@ -366,15 +366,39 @@ describe("checkReviewIntegrity", () => {
     it("segments on fullwidth and ideographic sentence terminators", () => {
       // A prompt that ends sentences with fullwidth/ideographic punctuation must
       // segment the same as one using ASCII `.`, so a negation before the
-      // terminator does not glue to a permitting clause after it.
+      // terminator does not glue to a permitting clause after it. Fullwidth marks
+      // split regardless of whether whitespace follows, because CJK typography
+      // does not put a space after them (an earlier fix required whitespace and
+      // false-flagged the unspaced form).
       for (const prompt of [
         "Review this. Do not trust the summary． Use the tools to verify.",
         "Review this。 Do not trust the summary。 Use the tools to verify。",
         "Review this. Do not trust the report！ Use bash to check！",
+        // Unspaced (CJK-native) forms must also split.
+        "Review this. Do not trust the summary。Use the tools to verify.",
+        "Review this. Do not trust the report！Use bash to verify.",
+        "Review this. Do not trust the summary？Use the tools.",
       ]) {
         const result = checkReviewIntegrity({ prompt });
         expect(result.isReviewContext).toBe(true);
         expect(result.violations.filter(v => v.type === "tool_suppression")).toHaveLength(0);
+      }
+    });
+
+    it("keeps a real suppression when a code span ends in fullwidth punctuation", () => {
+      // The code-span normaliser softens the FULL terminator set, not just ASCII.
+      // A fullwidth period trailing a span must become a soft terminator (which
+      // does not split before the lowercase tool noun), so the suppression still
+      // fires. An ASCII-only normaliser left the fullwidth mark as a HARD
+      // terminator that split the verb from the noun and hid the suppression.
+      for (const prompt of [
+        "Review it, but do not use the `foo．` shell command while checking it.",
+        "Review it. Do not use the `bar。` shell now.",
+        "Review it. Do not use the `baz！` bash here.",
+      ]) {
+        const result = checkReviewIntegrity({ prompt });
+        expect(result.isReviewContext).toBe(true);
+        expect(result.violations.find(v => v.type === "tool_suppression")).toBeDefined();
       }
     });
 

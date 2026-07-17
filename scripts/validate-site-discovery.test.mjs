@@ -274,24 +274,52 @@ describe("local site discovery validation", () => {
     expect(validate(site2).status).toBe(1);
   });
 
-  it("drops emphasis underscores from a heading slug but keeps intraword ones", () => {
-    // GitHub renders `_Setup_` as italic "Setup" -> slug "setup"; the emphasis
-    // underscores are markup. An intraword underscore (codex_request) is kept.
+  it("keeps a code-span identifier's trailing underscore in the slug", () => {
+    // A heading like `## \`output_\`` is a code span: GitHub renders the
+    // underscore literally, so the slug is "output_", not "output". Pinned so the
+    // slugger never drops a trailing identifier underscore (a regression an
+    // emphasis-stripping attempt introduced).
     const site = copiedSite();
-    writeFileSync(join(site, "emph.md"), "# Title\n\n## _Setup_\n\nbody\n");
+    writeFileSync(join(site, "ident.md"), "# Title\n\n## `output_`\n\nbody\n");
     const maintainers = join(site, "maintainers.md");
     writeFileSync(
       maintainers,
-      `${readFileSync(maintainers, "utf8")}\n[emph](https://llm-cli-gateway.dev/emph.md#setup)\n`
+      `${readFileSync(maintainers, "utf8")}\n[id](https://llm-cli-gateway.dev/ident.md#output_)\n`
     );
     expect(validate(site).status).toBe(0);
 
     const site2 = copiedSite();
-    writeFileSync(join(site2, "emph.md"), "# Title\n\n## _Setup_\n\nbody\n");
+    writeFileSync(join(site2, "ident.md"), "# Title\n\n## `output_`\n\nbody\n");
     const maintainers2 = join(site2, "maintainers.md");
     writeFileSync(
       maintainers2,
-      `${readFileSync(maintainers2, "utf8")}\n[kept](https://llm-cli-gateway.dev/emph.md#_setup_)\n`
+      `${readFileSync(maintainers2, "utf8")}\n[stripped](https://llm-cli-gateway.dev/ident.md#output)\n`
+    );
+    expect(validate(site2).status).toBe(1);
+  });
+
+  it("slugs a multiline Setext heading from all its paragraph lines", () => {
+    // GFM: a Setext underline turns the WHOLE preceding paragraph into the
+    // heading, so "First Line\nSecond Line\n---" slugs to first-line-second-line,
+    // not just second-line.
+    const site = copiedSite();
+    writeFileSync(join(site, "ml.md"), "# Title\n\nFirst Line\nSecond Line\n-----------\n\nbody\n");
+    const maintainers = join(site, "maintainers.md");
+    writeFileSync(
+      maintainers,
+      `${readFileSync(maintainers, "utf8")}\n[ml](https://llm-cli-gateway.dev/ml.md#first-line-second-line)\n`
+    );
+    expect(validate(site).status).toBe(0);
+
+    const site2 = copiedSite();
+    writeFileSync(
+      join(site2, "ml.md"),
+      "# Title\n\nFirst Line\nSecond Line\n-----------\n\nbody\n"
+    );
+    const maintainers2 = join(site2, "maintainers.md");
+    writeFileSync(
+      maintainers2,
+      `${readFileSync(maintainers2, "utf8")}\n[partial](https://llm-cli-gateway.dev/ml.md#second-line)\n`
     );
     expect(validate(site2).status).toBe(1);
   });

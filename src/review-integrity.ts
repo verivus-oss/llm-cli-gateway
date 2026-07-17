@@ -50,6 +50,7 @@ const REVIEW_CONTEXT_PATTERN =
 // negation-verb-noun order invites false positives.
 const TOOL_USE_VERB = String.raw`(?:us(?:e|ing)|call(?:ing)?|invok(?:e|ing)|run(?:ning)?|execut(?:e|ing)|access(?:ing)?|touch(?:ing)?|issu(?:e|ing)|employ(?:ing)?|utili[sz](?:e|ing)|leverag(?:e|ing)|rely(?:ing)?\s+on|resort(?:ing)?\s+to)`;
 const TOOL_NOUN = String.raw`(?:tool(?:s)?|shell|bash|command(?:s)?)`;
+const NEGATION = String.raw`\b(?:do\s*not|don['’]t|never)\b`;
 // Within one sentence: a negation that governs a tool-use verb that governs a
 // tool noun. The 40-char windows keep the three parts in proximity so unrelated
 // clauses in a long sentence do not glue. `[\s\S]` (not SENTENCE_CHAR) because
@@ -58,7 +59,7 @@ const TOOL_NOUN = String.raw`(?:tool(?:s)?|shell|bash|command(?:s)?)`;
 // pathologically.
 const SUPPRESSION_VERB_NOUN = new RegExp(
   [
-    String.raw`\b(?:do\s*not|don['’]t|never)\b`,
+    NEGATION,
     String.raw`[\s\S]{0,40}?`,
     String.raw`\b${TOOL_USE_VERB}\b`,
     String.raw`[\s\S]{0,40}?`,
@@ -88,6 +89,16 @@ type InlineToken = { btrun: true; len: number; canOpen: boolean } | { btrun: fal
 // ("... modify files. npm can use the shell") still splits and does not glue.
 const SOFT_TERMINATOR = "\uE010";
 
+// The full sentence-terminator set: ASCII plus fullwidth/ideographic. Shared so
+// the code-span normaliser and the segmenter treat the SAME characters as
+// sentence ends. An asymmetry here (the normaliser handling only ASCII while the
+// segmenter also split on fullwidth) was a fail-open: a fullwidth period trailing
+// a code span leaked as a hard boundary and hid a real suppression.
+// A plain string (not String.raw) so the \u escapes resolve to the fullwidth /
+// ideographic characters; the value is the regex char class "[.!?\uFF0E\u3002\uFF01\uFF1F]".
+const TERMINATOR_CLASS = "[.!?\uFF0E\u3002\uFF01\uFF1F]";
+const FULLWIDTH_TERMINATOR = /[\uFF0E\u3002\uFF01\uFF1F]/u;
+
 // Normalise a code span's literal content: keep the WORDS (a verb or noun
 // written as code is still seen), turn `*`/`~` and inner backticks into spaces,
 // blank INTERNAL sentence punctuation so literal code cannot forge a boundary,
@@ -98,10 +109,13 @@ const SOFT_TERMINATOR = "\uE010";
 // stay one word so it is not read as the keyword "use".
 function normaliseCodeSpanContent(content: string): string {
   const cleaned = content.replace(/[`*~]/g, " ").replace(/\s+$/, "");
-  const trailing = /[.!?]+$/.exec(cleaned);
+  // Use the full terminator set (ASCII + fullwidth/ideographic), not just ASCII:
+  // otherwise a fullwidth period trailing a span leaks into the stream as a HARD
+  // terminator and hides a real suppression (the segmenter would split there).
+  const trailing = new RegExp(`${TERMINATOR_CLASS}+$`, "u").exec(cleaned);
   const end = trailing ? trailing[0] : "";
   return (
-    cleaned.slice(0, cleaned.length - end.length).replace(/[.!?]/g, " ") +
+    cleaned.slice(0, cleaned.length - end.length).replace(new RegExp(TERMINATOR_CLASS, "gu"), " ") +
     (end ? SOFT_TERMINATOR : "")
   );
 }
@@ -255,9 +269,10 @@ export function neutraliseInlineMarkup(prompt: string): string {
   return out.join("");
 }
 
-// ASCII plus fullwidth/ideographic sentence terminators, so a prompt that ends
-// its sentences with `．`/`。`/`！`/`？` segments the same as one using `.!?`.
-const SENTENCE_TERMINATOR = /[.!?．。！？]/u;
+// ASCII plus fullwidth/ideographic sentence terminators (the shared
+// TERMINATOR_CLASS), so a prompt that ends its sentences with the fullwidth /
+// ideographic marks segments the same as one using `.!?`.
+const SENTENCE_TERMINATOR = new RegExp(TERMINATOR_CLASS, "u");
 
 // Abbreviations whose trailing period is not a sentence end, so a suppression
 // that contains one ("do not use e.g. the shell") is not split mid-clause. The
@@ -318,15 +333,35 @@ const SENTENCE_ABBREVIATIONS = new Set([
 // regardless of the next word's case (so "files. npm ..." still splits).
 const SOFT_BOUNDARY_NEXT = /^\s+["'“‘([]*\p{Lu}/u;
 
-// Split markup-normalised prompt text into sentences. A HARD terminator (real
-// prose `.!?` plus fullwidth/ideographic) ends a sentence when followed by
-// whitespace or end-of-text, except a single ASCII period inside a decimal
-// ("2.1"), after a known abbreviation ("e.g."), or after a single-letter initial
-// ("A."). A SOFT terminator (minted only for a code span's trailing punctuation)
-// ends a sentence only before a capitalised next sentence. Splitting on real
-// terminators is what makes "do not modify files. npm can use the shell" two
-// sentences, so the negation cannot reach the permitting verb. O(n): each index
-// is visited once.
+// A soft boundary is HELD (not split) when the next word is a tool noun AND the
+// pending sentence already carries a dangling suppression lead (negation + tool
+// verb, noun not yet seen). The suppression continues into that noun ("do not
+// use the `foo.` Bash command"), so splitting on the capital would hide it (a
+// fail-open). This is the only case where the capital anchor is overridden; when
+// the next word is not a tool noun ("`summary.` Use the tools") the split stands,
+// so no false positive is introduced.
+const SOFT_NEXT_TOOL_NOUN = new RegExp(`^\\s*["'“‘([]*${TOOL_NOUN}\\b`, "iu");
+const DANGLING_SUPPRESSION = new RegExp(
+  `${NEGATION}[\\s\\S]{0,40}?\\b${TOOL_USE_VERB}\\b[\\s\\S]{0,40}?$`,
+  "i"
+);
+
+// Closing quotes/brackets that may sit between a terminator and the whitespace
+// that ends a sentence, so a sentence ending inside quotes or parens
+// ("... stale.") still splits and its negation cannot glue to the next clause.
+const SENTENCE_CLOSERS = /["'”’)\]]/u;
+
+// Split markup-normalised prompt text into sentences. An ASCII HARD terminator
+// (`.!?`) ends a sentence when followed by optional closing quotes/brackets then
+// whitespace or end-of-text, except a single "." inside a decimal ("2.1"), after
+// a known abbreviation ("e.g."), or after a single-letter initial ("A."). A
+// fullwidth/ideographic terminator always ends a sentence (CJK typography puts
+// no space after it). A SOFT terminator (minted only for a code span's trailing
+// punctuation) ends a sentence only before a capitalised next sentence, and even
+// then is HELD when that next word is a tool noun completing a dangling
+// suppression. Splitting on real terminators is what makes "do not modify files.
+// npm can use the shell" two sentences, so the negation cannot reach the
+// permitting verb. O(n): every slice is bounded, so each index costs O(1).
 function segmentSentences(text: string): string[] {
   const sentences: string[] = [];
   const n = text.length;
@@ -344,7 +379,17 @@ function segmentSentences(text: string): string[] {
     if (ch === SOFT_TERMINATOR) {
       let j = i;
       while (j < n && text[j] === SOFT_TERMINATOR) j++;
-      if (j >= n || SOFT_BOUNDARY_NEXT.test(text.slice(j))) {
+      // Bounded slice: the boundary/next-noun checks need only a few characters,
+      // so this stays O(1) per soft terminator.
+      const rest = text.slice(j, j + 48);
+      if (j >= n || SOFT_BOUNDARY_NEXT.test(rest)) {
+        // Bounded lookback for the dangling-suppression check (negation + verb
+        // fit well within 96 chars), so it cannot grow to O(n^2).
+        const pendingTail = text.slice(Math.max(start, i - 96), i);
+        if (SOFT_NEXT_TOOL_NOUN.test(rest) && DANGLING_SUPPRESSION.test(pendingTail)) {
+          i = j;
+          continue;
+        }
         emit(j);
         continue;
       }
@@ -357,16 +402,36 @@ function segmentSentences(text: string): string[] {
     }
     let j = i;
     while (j < n && SENTENCE_TERMINATOR.test(text[j])) j++;
-    const followedByWhitespace = j >= n || /\s/.test(text[j]);
+    // Fullwidth/ideographic terminators are unambiguous sentence ends and, per
+    // CJK typography, are NOT followed by a space, so they split regardless of
+    // what follows (no whitespace requirement, no decimal/abbreviation guard,
+    // which only apply to an ASCII ".").
+    if (FULLWIDTH_TERMINATOR.test(ch)) {
+      emit(j);
+      continue;
+    }
+    // A terminator may be followed by closing quotes/brackets before the
+    // sentence-ending whitespace (as in a quoted or parenthesised sentence end),
+    // so consume them before deciding the boundary.
+    let boundaryEnd = j;
+    while (boundaryEnd < n && SENTENCE_CLOSERS.test(text[boundaryEnd])) boundaryEnd++;
+    const followedByWhitespace = boundaryEnd >= n || /\s/.test(text[boundaryEnd]);
     if (followedByWhitespace) {
       let suppress = false;
       if (ch === "." && j - i === 1) {
         const before = i > 0 ? text[i - 1] : "";
-        const afterNonWhitespace = (text.slice(j).match(/\S/) ?? [""])[0];
+        // Bounded forward scan for the next non-whitespace (a decimal like
+        // "2. 3"); bounded so a long whitespace run cannot make it quadratic.
+        let d = boundaryEnd;
+        while (d < n && d < boundaryEnd + 8 && /\s/.test(text[d])) d++;
+        const afterNonWhitespace = d < n ? text[d] : "";
         if (/\d/.test(before) && /\d/.test(afterNonWhitespace)) {
           suppress = true;
         }
-        const token = /([\p{L}][\p{L}.]*)$/u.exec(text.slice(start, i));
+        // Bounded lookback for the abbreviation/initial token (always short), so
+        // a run of suppressed initials ("A. A. A. ...") cannot grow the slice to
+        // O(n^2).
+        const token = /([\p{L}][\p{L}.]*)$/u.exec(text.slice(Math.max(start, i - 16), i));
         if (token) {
           const normalised = token[1].replace(/\./g, "").toLowerCase();
           if (SENTENCE_ABBREVIATIONS.has(normalised) || normalised.length === 1) {
@@ -375,7 +440,7 @@ function segmentSentences(text: string): string[] {
         }
       }
       if (!suppress) {
-        emit(j);
+        emit(boundaryEnd);
         continue;
       }
     }

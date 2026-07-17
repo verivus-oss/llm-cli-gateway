@@ -282,16 +282,11 @@ function slugifyHeading(text) {
       .replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1")
       .replace(/!?\[([^\]]*)\]\[[^\]]*\]/g, "$1")
       .replace(/[`*~]/g, "")
-      // GFM emphasis underscores (word-boundary flanked, `_Setup_`) are markup and
-      // are dropped like `*`/`~`, so the slug matches github-slugger's ("setup").
-      // An INTRAWORD underscore (`codex_request`) is a literal identifier char and
-      // is kept, mirroring GFM's intraword-underscore rule.
-      .replace(/_+/g, (run, offset, str) => {
-        const before = offset > 0 ? str[offset - 1] : "";
-        const after = str[offset + run.length] ?? "";
-        const intraword = /[\p{L}\p{N}]/u.test(before) && /[\p{L}\p{N}]/u.test(after);
-        return intraword ? run : "";
-      })
+      // ALL underscores are kept: this repo's headings are code-span identifiers
+      // (`output_`, `codex_request`) whose underscores GitHub renders literally.
+      // Dropping word-boundary underscores to special-case emphasis headings
+      // (`_Setup_`) would wrongly strip a code-span identifier's trailing `_`, so
+      // emphasis-underscore headings stay a documented approximation (below).
       .trim()
       .toLowerCase()
       .replace(/[^\p{L}\p{N}_ -]/gu, "")
@@ -301,12 +296,21 @@ function slugifyHeading(text) {
   );
 }
 
-// Strip GFM fenced code blocks so a line that looks like a heading inside one
-// cannot mint a spurious anchor. A block opens on a line of three or more
-// backticks or tildes (up to three spaces of indentation) and closes on a later
-// line of the SAME character, at least as long, carrying no info string; an
-// unclosed fence runs to the end of the document, as GFM specifies. A length
-// comparison cannot be expressed with a backreference, so this scans lines.
+// Strip GFM fenced code blocks so a line that looks like a heading (or an
+// explicit anchor) inside one cannot mint a spurious anchor. A block opens on a
+// line of three or more backticks or tildes (up to three spaces of indentation)
+// and closes on a later line of the SAME character, at least as long, carrying
+// no info string; an unclosed fence runs to the end of the document, as GFM
+// specifies. A length comparison cannot be expressed with a backreference, so
+// this scans lines.
+//
+// Bounded scope: fences nested inside a block-quote (`> ```) or indented four or
+// more spaces inside a list item are NOT recognised, because that needs full
+// container-block parsing (blockquote-marker stripping and per-list content
+// indentation). This repo's docs use only top-level and <=3-space-indented
+// fences (verified), and the anchor check is a best-effort fragment layer atop
+// lychee and the repo-wide self-link sweep, so a fenced example inside a
+// container is an accepted, documented gap rather than a silent one.
 function stripFencedBlocks(body) {
   const kept = [];
   let fence = null;
@@ -369,20 +373,27 @@ function markdownAnchors(body) {
       continue;
     }
     // Setext heading: a line of only `=` (h1) or only `-` (h2) directly under a
-    // non-blank paragraph line that is not itself a heading underline, an ATX
-    // heading, a list item, or a blockquote. A `---` under a blank line is a
-    // thematic break, not a heading (prev.trim() is empty), so it is skipped.
+    // paragraph. GFM lets the paragraph span multiple lines, and the heading text
+    // is ALL of them joined, so gather every consecutive preceding content line.
+    // A line that is an ATX heading, another underline, a list item, or a
+    // blockquote is not paragraph content and stops the gather. A `---` under a
+    // blank line (no content above) is a thematic break, not a heading. Bounded
+    // scope (as with fences): a Setext heading nested INSIDE a list item or
+    // blockquote is not recognised, which this repo's docs do not use.
     const setext = /^ {0,3}(=+|-+)[ \t]*$/.exec(lines[idx]);
     if (setext && idx > 0) {
-      const prev = lines[idx - 1];
-      const prevIsContent =
-        prev.trim() &&
-        !/^ {0,3}#/.test(prev) &&
-        !/^ {0,3}(=+|-+)[ \t]*$/.test(prev) &&
-        !/^ {0,3}([-+*]|\d+[.)])[ \t]/.test(prev) &&
-        !/^ {0,3}>/.test(prev);
-      if (prevIsContent) {
-        reserve(slugifyHeading(prev.trim()));
+      const isContent = line =>
+        line.trim() &&
+        !/^ {0,3}#/.test(line) &&
+        !/^ {0,3}(=+|-+)[ \t]*$/.test(line) &&
+        !/^ {0,3}([-+*]|\d+[.)])[ \t]/.test(line) &&
+        !/^ {0,3}>/.test(line);
+      const paragraph = [];
+      for (let back = idx - 1; back >= 0 && isContent(lines[back]); back--) {
+        paragraph.unshift(lines[back].trim());
+      }
+      if (paragraph.length > 0) {
+        reserve(slugifyHeading(paragraph.join(" ")));
       }
     }
   }
