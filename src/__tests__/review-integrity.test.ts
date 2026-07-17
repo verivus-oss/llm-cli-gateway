@@ -208,11 +208,29 @@ describe("checkReviewIntegrity", () => {
         "Review this diff. Do not trust **summary.** Use the tools to verify.",
         "Audit the code. Do not accept the __summary.__ Run the shell to confirm.",
         "Review it. Do not rely on the ~~report.~~ Use bash to check the claims.",
+        // The next sentence itself opens with markup or a quote before the capital.
+        "Review it. Do not trust the summary. **Use the tools to verify.**",
+        'Review it. Do not trust the summary. "Use the tools to verify."',
+        "Review it. Do not trust the summary. (Use the tools to verify.)",
       ]) {
         const result = checkReviewIntegrity({ prompt });
         expect(result.isReviewContext).toBe(true);
         expect(result.violations.filter(v => v.type === "tool_suppression")).toHaveLength(0);
       }
+    });
+
+    it("over-flags a genuine sentence that starts lowercase (accepted residual)", () => {
+      // Documented limitation: the boundary anchors on a capitalised (or
+      // markup/quote-then-capital) new sentence, so a real sentence that begins
+      // with a lowercase word reads as a continuation and the negation glues to
+      // the later tool noun. Distinguishing this from a mid-sentence code span
+      // needs real sentence parsing; review-integrity is defence-in-depth
+      // scoring, so this false positive is accepted. Pinned so a future change
+      // to the boundary is a deliberate decision, not an accident.
+      const result = checkReviewIntegrity({
+        prompt: "Review this. Do not delete files. rely on the tool for cleanup.",
+      });
+      expect(result.violations.find(v => v.type === "tool_suppression")).toBeDefined();
     });
 
     it("does not flag review hygiene instructions that name no tool", () => {

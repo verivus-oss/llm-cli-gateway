@@ -35,25 +35,29 @@ const REVIEW_CONTEXT_PATTERN =
 // ignore it.
 //
 // A sentence boundary is end punctuation, then any run of closing Markdown
-// emphasis (backtick, asterisk, underscore, tilde), then EITHER whitespace and a
-// capitalised new-sentence start OR end of text; a blank line also ends a
-// sentence. Anchoring on the capital, via an inline case-sensitive group so the
-// outer /i flag does not fold it, is what lets the detector tell a real sentence
-// end from a period inside inline markup mid-sentence:
-//   "trust **summary.** Use the tools"   -> boundary at the period (capital U),
-//                                           so "do not" cannot glue to "Use".
-//   "do not use the `foo.**` shell here" -> NOT a boundary (lowercase "shell"),
-//                                           so this real suppression still fires.
+// emphasis (backtick, asterisk, underscore, tilde), then EITHER whitespace, any
+// opening markup/quote delimiters, and a capitalised new-sentence start, OR end
+// of text; a blank line also ends a sentence. Anchoring on the capital, via an
+// inline case-sensitive group so the outer /i flag does not fold it, is what
+// lets the detector tell a real sentence end from a period inside inline markup
+// mid-sentence:
+//   "trust **summary.** Use the tools"    -> boundary (capital U after closers),
+//                                            so "do not" cannot glue to "Use".
+//   "summary. **Use the tools.**"         -> boundary (opening ** then capital U).
+//   "do not use the `foo.**` shell here"  -> NOT a boundary (lowercase "shell"),
+//                                            so this real suppression still fires.
 // Doubled markup closes too (** __ ~~), because the closer run is `*`, not `?`.
 // The backtick is written as \x60 because a literal backtick would close this
 // String.raw template. The closer class and the following \s are disjoint, so
 // the run cannot backtrack pathologically.
 //
-// This is a bounded heuristic, not a parser: an adversary who fully controls the
-// prompt can still capitalise a continuation to force a false boundary, the same
-// way unlisted synonyms or passive voice evade the verb list. review-integrity
-// is defence-in-depth scoring, not a hard gate, so that residual is accepted.
-const SENTENCE_CHAR = String.raw`(?:(?![.!?]["'”’)\]\x60*_~]*(?:\s+(?-i:[A-Z])|\s*$)|\n\s*\n)[\s\S])`;
+// This is a bounded heuristic, not a parser, with a residual in BOTH directions:
+// an adversary who controls the prompt can capitalise a continuation to force a
+// false boundary (a missed suppression), and a genuine sentence that begins with
+// a lowercase word ("... files. rely on the tool ...") is read as a continuation
+// and can over-flag. Both are accepted because review-integrity is defence-in-
+// depth scoring, not a hard gate, and closing either needs real sentence parsing.
+const SENTENCE_CHAR = String.raw`(?:(?![.!?]["'”’)\]\x60*_~]*(?:\s+["'“‘([*_~\x60]*(?-i:[A-Z])|\s*$)|\n\s*\n)[\s\S])`;
 // The negation has to actually govern using a tool, so require a use verb
 // between the two. "without" is kept as a second shape because it governs a
 // noun on its own ("review this without tools"). The verb list is a curated

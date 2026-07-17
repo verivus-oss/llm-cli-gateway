@@ -284,13 +284,36 @@ function slugifyHeading(text) {
     .replace(/^-|-$/g, "");
 }
 
+// Strip GFM fenced code blocks so a line that looks like a heading inside one
+// cannot mint a spurious anchor. A block opens on a line of three or more
+// backticks or tildes (up to three spaces of indentation) and closes on a later
+// line of the SAME character, at least as long, carrying no info string; an
+// unclosed fence runs to the end of the document, as GFM specifies. A length
+// comparison cannot be expressed with a backreference, so this scans lines.
+function stripFencedBlocks(body) {
+  const kept = [];
+  let fence = null;
+  for (const line of body.split("\n")) {
+    if (fence) {
+      const close = /^ {0,3}([`~]{3,})[ \t]*$/.exec(line);
+      if (close && close[1][0] === fence.char && close[1].length >= fence.length) {
+        fence = null;
+      }
+      continue;
+    }
+    const open = /^ {0,3}(`{3,}|~{3,})/.exec(line);
+    if (open) {
+      fence = { char: open[1][0], length: open[1].length };
+      continue;
+    }
+    kept.push(line);
+  }
+  return kept.join("\n");
+}
+
 function markdownAnchors(body) {
   const anchors = new Set();
-  // Fenced code blocks can contain lines that look like headings; strip them so
-  // they do not mint spurious anchors. Handles backtick and tilde fences with
-  // up to three spaces of indentation; the close must repeat the exact fence
-  // (a run longer than the open is left unstripped, which is only lenient).
-  const withoutFences = body.replace(/^ {0,3}(`{3,}|~{3,})[^\n]*\n[\s\S]*?^ {0,3}\1[ \t]*$/gm, "");
+  const withoutFences = stripFencedBlocks(body);
   // GitHub disambiguates repeated heading slugs with -1, -2, ... in document
   // order, and reserves each emitted slug so a literal "Setup 1" heading and the
   // auto-generated "setup-1" cannot collide. Mirror that occurrence loop.

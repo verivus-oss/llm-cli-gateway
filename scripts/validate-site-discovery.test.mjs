@@ -148,6 +148,39 @@ describe("local site discovery validation", () => {
     expect(validate(site2).status).toBe(1);
   });
 
+  it("does not mint an anchor from a heading inside a longer-closed fence", () => {
+    // GFM lets a fence close with more delimiters than it opened. A 4-backtick
+    // block closed by 5 backticks still hides its `# Phantom` line, so a
+    // #phantom fragment must fail rather than resolve to a phantom anchor.
+    const site = copiedSite();
+    const open = "`".repeat(4);
+    const close = "`".repeat(5);
+    writeFileSync(join(site, "fence.md"), `# Real\n\n${open}\n# Phantom\n${close}\n\nbody\n`);
+    const maintainers = join(site, "maintainers.md");
+    writeFileSync(
+      maintainers,
+      `${readFileSync(maintainers, "utf8")}\n[phantom](https://llm-cli-gateway.dev/fence.md#phantom)\n`
+    );
+
+    const result = validate(site);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("absent from the headings");
+  });
+
+  it("resolves a real heading fragment in a file that also has a fenced block", () => {
+    const site = copiedSite();
+    const open = "`".repeat(4);
+    const close = "`".repeat(5);
+    writeFileSync(join(site, "fence.md"), `# Real Heading\n\n${open}\n# Phantom\n${close}\n`);
+    const maintainers = join(site, "maintainers.md");
+    writeFileSync(
+      maintainers,
+      `${readFileSync(maintainers, "utf8")}\n[real](https://llm-cli-gateway.dev/fence.md#real-heading)\n`
+    );
+
+    expect(validate(site).status).toBe(0);
+  });
+
   it("reserves emitted slugs when a base and its disambiguator collide", () => {
     // Headings Foo, Foo, Foo-1 must slug to foo, foo-1, foo-1-1 (github-slugger
     // occurrence loop), not silently drop the third to a taken slug.
