@@ -113,9 +113,10 @@ function normaliseCodeSpanContent(content: string): string {
 //
 //   - Phase 1 tokenizes the prompt. Backslash escapes are resolved with parity
 //     (an odd run of backslashes escapes a following backtick, an even run does
-//     not, per GFM), `*`/`~` become spaces so nothing welds or tears, and `_`
-//     is kept because it is a word character (so `use_shell` stays one word and
-//     is not read as "use").
+//     not, per GFM) and non-escaping backslashes are kept literal; `*`/`~`
+//     become spaces so nothing welds or tears; an underscore run is kept when it
+//     is intraword (a literal identifier like `use_shell`) and spaced otherwise
+//     (GFM emphasis like `_use_`), following GFM's intraword-underscore rule.
 //   - Phase 2 links each backtick run to the next run of the SAME length in one
 //     right-to-left pass. This is what keeps the whole function O(n): an
 //     unmatched run costs O(1), not a rescan of the tail, so adversarial
@@ -149,10 +150,13 @@ export function neutraliseInlineMarkup(prompt: string): string {
       let b = i;
       while (b < n && prompt[b] === "\\") b++;
       const count = b - i;
-      buf.push(" ".repeat(count));
+      // Keep literal backslashes as themselves, not spaces: a stray `do\not`
+      // must not synthesise the negation `do not`. Only the backtick consumed by
+      // an odd (escaping) run is dropped, as a literal backtick.
+      buf.push("\\".repeat(count));
       i = b;
       if (count % 2 === 1 && i < n && prompt[i] === "`") {
-        buf.push(" ");
+        buf.push("`");
         i++;
       }
       continue;
@@ -163,6 +167,20 @@ export function neutraliseInlineMarkup(prompt: string): string {
       flush();
       tokens.push({ btrun: true, len: j - i });
       i = j;
+      continue;
+    }
+    if (ch === "_") {
+      // GFM does not open emphasis on an intraword underscore, so a run of `_`
+      // flanked by word characters on both sides is a literal identifier
+      // (use_shell, without_tools) and is kept; otherwise it is emphasis and
+      // becomes a space, restoring detection of `_use_` / `__shell__`.
+      let u = i;
+      while (u < n && prompt[u] === "_") u++;
+      const before = i > 0 ? prompt[i - 1] : "";
+      const after = u < n ? prompt[u] : "";
+      const intraword = /\w/.test(before) && /\w/.test(after);
+      buf.push(intraword ? prompt.slice(i, u) : " ".repeat(u - i));
+      i = u;
       continue;
     }
     if (ch === "*" || ch === "~") {

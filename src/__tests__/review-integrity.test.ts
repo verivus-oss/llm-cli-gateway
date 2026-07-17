@@ -25,12 +25,19 @@ describe("neutraliseInlineMarkup", () => {
     ["Do not ``use `x` shell``", "Do not use x shell"],
     // Mismatched backtick runs are not a span, so the real period survives.
     ["trust ``summary. Use` tools", "trust summary. Use tools"],
-    // Escaped backticks are literal, not delimiters.
-    ["trust \\`summary. Use\\` tools", "trust summary. Use tools"],
-    // An underscore is a word character and is kept, so an identifier stays one
-    // token ("us_e" is not "use") and a config key is not read as a keyword.
+    // Escaped backticks are literal, not code delimiters, so they are kept
+    // (as a literal backslash + backtick) and the real period survives rather
+    // than being swallowed into a code span.
+    ["trust \\`summary. Use\\` tools", "trust \\`summary. Use\\` tools"],
+    // An INTRAWORD underscore is kept, so an identifier stays one token ("us_e"
+    // is not "use") and a config key is not read as a keyword.
     ["Do not us_e the shell", "Do not us_e the shell"],
     ["Review key use_shell here", "Review key use_shell here"],
+    // A word-boundary underscore is emphasis and becomes a space, so the
+    // emphasised keyword is recovered.
+    ["Do not _use_ the shell", "Do not use the shell"],
+    // A non-escaping backslash is kept literal, not turned into a separator.
+    ["Do\\not use", "Do\\not use"],
     // Markup welded to a word does not tear the word apart.
     ["Do not `use`the shell", "Do not use the shell"],
     // Plain text is unchanged.
@@ -225,6 +232,11 @@ describe("checkReviewIntegrity", () => {
       // An even run of backslashes does not escape the backtick, so this is a
       // real code span and the internal period must not forge a boundary.
       "Review it. Do not \\\\`use foo. Bar shell` here.",
+      // Underscore emphasis at word boundaries is emphasis, not an identifier,
+      // so the keyword is still seen.
+      "Review it. Do not _use_ the shell.",
+      "Review it. Do not __use__ the shell.",
+      "Review it. Do not use the _shell_.",
     ])("detects suppression when Markdown markup wraps it: %s", prompt => {
       const result = checkReviewIntegrity({ prompt });
       expect(result.isReviewContext).toBe(true);
@@ -248,6 +260,9 @@ describe("checkReviewIntegrity", () => {
       "Review the do_not_use_tools helper name only.",
       "Review the never_call the shell option in config.",
       "Review this. Do not rename use_shell in the module.",
+      // A stray non-escaping backslash is literal, not a word separator, so it
+      // must not fuse "do" and "not" into the negation "do not".
+      "Review it. Do\\not use the shell here.",
     ])("does not synthesise a suppression from stray Markdown: %s", prompt => {
       const result = checkReviewIntegrity({ prompt });
       expect(result.isReviewContext).toBe(true);
