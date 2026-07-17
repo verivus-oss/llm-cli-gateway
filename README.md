@@ -338,7 +338,7 @@ The Gemini provider runs through Google Antigravity CLI (`agy`).
 
 ```bash
 curl -fsSL https://antigravity.google/cli/install.sh | bash
-# Docs: https://antigravity.google/docs/cli-overview
+# Docs: https://antigravity.google/docs
 ```
 
 ### Grok Build CLI (xAI)

@@ -23,7 +23,7 @@ permission modes, output formats, or resume rules here or in TOML.
 | Executable       | `agy`                                                                                             |
 | Package          | vendor installer / self-update                                                                    |
 | Repo             | https://github.com/google-antigravity/antigravity-cli                                             |
-| Docs             | https://antigravity.google/docs/cli-overview                                                      |
+| Docs             | https://antigravity.google/docs                                                                   |
 | Changelogs       | `agy changelog` · https://api.github.com/repos/google-antigravity/antigravity-cli/releases/latest |
 | Watch categories | `flags`, `permissions`, `session-resume`, `subcommands`                                           |
 
