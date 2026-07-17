@@ -86,9 +86,10 @@ const TOOL_SUPPRESSION_PATTERN = new RegExp(
   "i"
 );
 
-// One token of the inline stream: a run of L active backticks, or literal text
-// (with `*`/`~` already turned to spaces and `_` kept, see below).
-type InlineToken = { btrun: true; len: number } | { btrun: false; text: string };
+// One token of the inline stream: a run of L backticks (canOpen is false when it
+// was escaped by an odd backslash run, so it may close a span but not open one,
+// matching CommonMark's opener/closer asymmetry), or literal text.
+type InlineToken = { btrun: true; len: number; canOpen: boolean } | { btrun: false; text: string };
 
 // Normalise a code span's literal content: keep the WORDS (a verb or noun
 // written as code is still seen), turn `*`/`~` and inner backticks into spaces,
@@ -121,18 +122,22 @@ function normaliseCodeSpanContent(content: string): string {
 //     right-to-left pass. This is what keeps the whole function O(n): an
 //     unmatched run costs O(1), not a rescan of the tail, so adversarial
 //     backtick soup cannot make it quadratic.
-//   - Phase 3 matches spans greedily (a run of L opens a span closing at the
-//     next run of L, GFM) and emits: matched span content is normalised and
-//     padded with spaces, an unmatched run becomes spaces.
+//   - Phase 3 matches spans greedily (an unescaped run of L opens a span that
+//     closes at the next run of L, escaped or not, mirroring CommonMark's rule
+//     that escapes do not operate inside a code span) and emits: matched span
+//     content is normalised and padded with spaces, an unmatched or escaped run
+//     becomes spaces.
 //
 // The result feeds TOOL_SUPPRESSION_PATTERN, so the markup classes inside
 // SENTENCE_CHAR are now a backstop, not the primary defence.
 //
 // Residuals (accepted, defence-in-depth scoring, not hide paths that a config
 // author hits by accident): a code span whose literal content holds an internal
-// sentence break ("`this. Use`"), a genuine lowercase sentence start, and an
-// adversary who splits a keyword across markup ("u`s`e", "*u*s*e*"). Closing
-// those needs a full CommonMark render, disproportionate for a score-4 scorer.
+// sentence break ("`this. Use`"), a genuine lowercase sentence start, an
+// adversary who splits a keyword across markup ("u`s`e", "*u*s*e*"), and a
+// backslash escaping only the FIRST backtick of a multi-backtick run (the run is
+// treated whole). Closing those needs a full CommonMark render, disproportionate
+// for a score-4 scorer.
 export function neutraliseInlineMarkup(prompt: string): string {
   const tokens: InlineToken[] = [];
   let buf: string[] = [];
@@ -144,6 +149,7 @@ export function neutraliseInlineMarkup(prompt: string): string {
   };
   const n = prompt.length;
   let i = 0;
+  let escapePending = false;
   while (i < n) {
     const ch = prompt[i];
     if (ch === "\\") {
@@ -151,21 +157,21 @@ export function neutraliseInlineMarkup(prompt: string): string {
       while (b < n && prompt[b] === "\\") b++;
       const count = b - i;
       // Keep literal backslashes as themselves, not spaces: a stray `do\not`
-      // must not synthesise the negation `do not`. Only the backtick consumed by
-      // an odd (escaping) run is dropped, as a literal backtick.
+      // must not synthesise the negation `do not`. An odd run escapes a
+      // following backtick, which then may still CLOSE a span (escapes do not
+      // operate inside code spans) but not OPEN one, so mark it and let the
+      // backtick branch record canOpen rather than consuming the backtick here.
       buf.push("\\".repeat(count));
       i = b;
-      if (count % 2 === 1 && i < n && prompt[i] === "`") {
-        buf.push("`");
-        i++;
-      }
+      escapePending = count % 2 === 1 && i < n && prompt[i] === "`";
       continue;
     }
     if (ch === "`") {
       let j = i;
       while (j < n && prompt[j] === "`") j++;
       flush();
-      tokens.push({ btrun: true, len: j - i });
+      tokens.push({ btrun: true, len: j - i, canOpen: !escapePending });
+      escapePending = false;
       i = j;
       continue;
     }
@@ -208,6 +214,14 @@ export function neutraliseInlineMarkup(prompt: string): string {
     const tok = tokens[t];
     if (!tok.btrun) {
       out.push(tok.text);
+      t++;
+      continue;
+    }
+    if (!tok.canOpen) {
+      // An escaped backtick run cannot open a span; it is literal here (it may
+      // still have served as a closer for an earlier opener, in which case this
+      // token was skipped over).
+      out.push(" ".repeat(tok.len));
       t++;
       continue;
     }

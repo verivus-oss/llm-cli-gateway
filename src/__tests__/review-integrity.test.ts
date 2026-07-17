@@ -25,10 +25,10 @@ describe("neutraliseInlineMarkup", () => {
     ["Do not ``use `x` shell``", "Do not use x shell"],
     // Mismatched backtick runs are not a span, so the real period survives.
     ["trust ``summary. Use` tools", "trust summary. Use tools"],
-    // Escaped backticks are literal, not code delimiters, so they are kept
-    // (as a literal backslash + backtick) and the real period survives rather
-    // than being swallowed into a code span.
-    ["trust \\`summary. Use\\` tools", "trust \\`summary. Use\\` tools"],
+    // An escaped backtick cannot open a code span, so it does not swallow the
+    // real period into a span; the literal backslash is kept and the escaped
+    // backtick (never matched as an opener) blanks to a space.
+    ["trust \\`summary. Use\\` tools", "trust \\ summary. Use\\ tools"],
     // An INTRAWORD underscore is kept, so an identifier stays one token ("us_e"
     // is not "use") and a config key is not read as a keyword.
     ["Do not us_e the shell", "Do not us_e the shell"],
@@ -237,6 +237,10 @@ describe("checkReviewIntegrity", () => {
       "Review it. Do not _use_ the shell.",
       "Review it. Do not __use__ the shell.",
       "Review it. Do not use the _shell_.",
+      // A backslash before a code-span closer does not escape it (escapes do not
+      // operate inside code spans), so this is a real span and the internal
+      // period must not forge a boundary that hides the suppression.
+      "Review it. Do not `use foo. Bar shell\\` here.",
     ])("detects suppression when Markdown markup wraps it: %s", prompt => {
       const result = checkReviewIntegrity({ prompt });
       expect(result.isReviewContext).toBe(true);
@@ -263,6 +267,10 @@ describe("checkReviewIntegrity", () => {
       // A stray non-escaping backslash is literal, not a word separator, so it
       // must not fuse "do" and "not" into the negation "do not".
       "Review it. Do\\not use the shell here.",
+      // A backslash before a closer keeps the code span intact, so the opener
+      // does not reach forward to a later run and swallow the real sentence
+      // boundary between the spans.
+      "Review it. Do not trust `summary\\`. Use the tools to verify. `other`.",
     ])("does not synthesise a suppression from stray Markdown: %s", prompt => {
       const result = checkReviewIntegrity({ prompt });
       expect(result.isReviewContext).toBe(true);
