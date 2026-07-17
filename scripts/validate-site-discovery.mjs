@@ -295,14 +295,24 @@ function stripFencedBlocks(body) {
   let fence = null;
   for (const line of body.split("\n")) {
     if (fence) {
-      const close = /^ {0,3}([`~]{3,})[ \t]*$/.exec(line);
+      // A close is a run of ONE character type, at least as long as the opener,
+      // with no trailing content. Matching a single type (not [`~]) stops a
+      // mixed run like ```~ from closing a backtick block.
+      const close = /^ {0,3}(`{3,}|~{3,})[ \t]*$/.exec(line);
       if (close && close[1][0] === fence.char && close[1].length >= fence.length) {
         fence = null;
       }
       continue;
     }
-    const open = /^ {0,3}(`{3,}|~{3,})/.exec(line);
+    const open = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
     if (open) {
+      // A backtick fence's info string may not contain a backtick (GFM), so a
+      // line like ```lang`x is not a fence open and must not swallow the rest of
+      // the document to EOF. Tilde fences carry no such restriction.
+      if (open[1][0] === "`" && open[2].includes("`")) {
+        kept.push(line);
+        continue;
+      }
       fence = { char: open[1][0], length: open[1].length };
       continue;
     }

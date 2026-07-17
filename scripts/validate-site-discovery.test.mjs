@@ -98,6 +98,51 @@ describe("local site discovery validation", () => {
     expect(result.stderr).not.toContain("EISDIR");
   });
 
+  it("does not close a fenced block on a mixed-delimiter line", () => {
+    // A ```~ line is not a valid close for a backtick fence, so the block stays
+    // open until the real close: "# After" is kept, the phantoms are dropped.
+    const f3 = "`".repeat(3);
+    const mixed = "`".repeat(3) + "~";
+    const content = ["# Real", f3, "# Phantom A", mixed, "# Phantom B", f3, "# After", ""].join(
+      "\n"
+    );
+
+    const site = copiedSite();
+    writeFileSync(join(site, "mix.md"), content);
+    const m1 = join(site, "maintainers.md");
+    writeFileSync(
+      m1,
+      `${readFileSync(m1, "utf8")}\n[after](https://llm-cli-gateway.dev/mix.md#after)\n`
+    );
+    expect(validate(site).status).toBe(0);
+
+    const site2 = copiedSite();
+    writeFileSync(join(site2, "mix.md"), content);
+    const m2 = join(site2, "maintainers.md");
+    writeFileSync(
+      m2,
+      `${readFileSync(m2, "utf8")}\n[phantom](https://llm-cli-gateway.dev/mix.md#phantom-b)\n`
+    );
+    expect(validate(site2).status).toBe(1);
+  });
+
+  it("does not treat a backtick fence with a backtick info string as a fence", () => {
+    // ```lang`x is not a GFM fence open, so it must not swallow the heading that
+    // follows it to the end of the document.
+    const badOpen = "`".repeat(3) + "lang`bad";
+    const content = ["# Real", badOpen, "# Should Still Exist", "end", ""].join("\n");
+
+    const site = copiedSite();
+    writeFileSync(join(site, "info.md"), content);
+    const maintainers = join(site, "maintainers.md");
+    writeFileSync(
+      maintainers,
+      `${readFileSync(maintainers, "utf8")}\n[still here](https://llm-cli-gateway.dev/info.md#should-still-exist)\n`
+    );
+
+    expect(validate(site).status).toBe(0);
+  });
+
   it("resolves a duplicate-heading fragment via the -1 disambiguator", () => {
     const site = copiedSite();
     writeFileSync(join(site, "dup.md"), "# Title\n\n## Setup\n\nfirst\n\n## Setup\n\nsecond\n");

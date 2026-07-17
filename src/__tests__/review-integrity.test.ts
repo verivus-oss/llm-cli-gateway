@@ -1,5 +1,29 @@
 import { describe, expect, it } from "vitest";
-import { isReviewContext, checkReviewIntegrity } from "../review-integrity.js";
+import {
+  isReviewContext,
+  checkReviewIntegrity,
+  neutraliseInlineMarkup,
+} from "../review-integrity.js";
+
+describe("neutraliseInlineMarkup", () => {
+  it.each([
+    // Emphasis markers are dropped; prose (incl. its period) survives.
+    ["Do not trust **summary.** Use", "Do not trust summary. Use"],
+    // Code span: words kept, internal period blanked, no boundary forged.
+    ["do not use the `foo. **Bar` shell", "do not use the foo  Bar shell"],
+    // Code span ending in a period keeps the trailing period, so a real
+    // sentence end survives.
+    ["trust the `summary.` Use", "trust the summary. Use"],
+    // Trailing emphasis before the period is stripped, period kept.
+    ["use the `foo.**` shell", "use the foo. shell"],
+    // A verb hidden in code keeps its word.
+    ["Do not `use` the shell", "Do not use the shell"],
+    // Plain text is unchanged.
+    ["Review this code but do not use any tools", "Review this code but do not use any tools"],
+  ])("normalises %j", (input, expected) => {
+    expect(neutraliseInlineMarkup(input)).toBe(expected);
+  });
+});
 
 describe("isReviewContext", () => {
   it.each([
@@ -165,14 +189,18 @@ describe("checkReviewIntegrity", () => {
       expect(result.violations.filter(v => v.type === "tool_suppression")).toHaveLength(0);
     });
 
-    it("detects suppression even when a code span mid-sentence ends in a period", () => {
-      // A period inside inline markup is only a sentence end when a capitalised
-      // sentence follows. Here the markup closes mid-sentence and a lowercase
-      // word continues, so the negation still governs the tool noun and the
-      // suppression must fire; treating `foo.**` as a boundary would bypass it.
-      const result = checkReviewIntegrity({
-        prompt: "Review it, but do not use the `foo.**` shell command while checking it.",
-      });
+    it.each([
+      // A code span that ends in a period, wrapping emphasis markers.
+      "Review it, but do not use the `foo.**` shell command while checking it.",
+      // A code span whose content has an INTERNAL period then a capital: the
+      // markup must not be able to forge a sentence boundary and hide this.
+      "Review it, but do not use the `foo. **Bar` shell command while checking it.",
+      // The verb itself hidden inside a code span.
+      "Review it. Do not `use` the shell.",
+      // The tool noun hidden inside a code span.
+      "Review it. Do not use the `shell`.",
+    ])("detects suppression when Markdown markup wraps it: %s", prompt => {
+      const result = checkReviewIntegrity({ prompt });
       expect(result.isReviewContext).toBe(true);
       expect(result.violations.find(v => v.type === "tool_suppression")).toBeDefined();
     });

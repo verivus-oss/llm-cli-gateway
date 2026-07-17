@@ -86,6 +86,41 @@ const TOOL_SUPPRESSION_PATTERN = new RegExp(
   "i"
 );
 
+// Inline-markup normaliser, run before the suppression scan. A prompt is
+// Markdown, and markers around or inside a suppression were the source of a long
+// tail of both false positives (markup faking a sentence boundary, e.g.
+// "**summary.** Use the tools") and false negatives (markup hiding the verb or
+// noun, e.g. "do not `use` the shell", or a code span forging a boundary, e.g.
+// "do not use the `foo. **Bar` shell"). Rather than keep encoding Markdown in
+// the detection regex, one whack-a-mole edge at a time, normalise the text once:
+//
+//   - Inline code spans keep their WORDS, so a verb or noun written as code is
+//     still seen. Emphasis markers inside are dropped, INTERNAL sentence
+//     punctuation is blanked so literal code cannot forge a boundary, and only
+//     TRAILING sentence punctuation survives so a span that genuinely ends a
+//     sentence ("... trust the `summary.` Use the tools") still reads as two.
+//   - Emphasis markers and stray backticks in the surrounding prose are removed;
+//     their content is prose and stays.
+//
+// The normalised text is what TOOL_SUPPRESSION_PATTERN scans, so the closer and
+// opener markup classes inside SENTENCE_CHAR are now a backstop rather than the
+// primary defence. Both replacements are linear (negated classes), no ReDoS.
+export function neutraliseInlineMarkup(prompt: string): string {
+  const normaliseCodeSpan = (content: string): string => {
+    const withoutEmphasis = content.replace(/[*_~]/g, "");
+    const trailing = /[.!?]+$/.exec(withoutEmphasis);
+    const end = trailing ? trailing[0] : "";
+    const body = withoutEmphasis
+      .slice(0, withoutEmphasis.length - end.length)
+      .replace(/[.!?]/g, " ");
+    return body + end;
+  };
+  return prompt
+    .replace(/`+([^`\n]*)`+/g, (_match, content: string) => normaliseCodeSpan(content))
+    .replace(/[*_~]/g, "")
+    .replace(/`/g, "");
+}
+
 const CRITICAL_TOOLS = ["Read", "Grep", "Glob", "Bash"];
 
 function canonicalizeTools(tools: string[]): string[] {
@@ -128,7 +163,7 @@ export function checkReviewIntegrity(input: ReviewIntegrityInput): ReviewIntegri
     }
   }
 
-  if (reviewContext && TOOL_SUPPRESSION_PATTERN.test(input.prompt)) {
+  if (reviewContext && TOOL_SUPPRESSION_PATTERN.test(neutraliseInlineMarkup(input.prompt))) {
     violations.push({
       type: "tool_suppression",
       score: 4,
