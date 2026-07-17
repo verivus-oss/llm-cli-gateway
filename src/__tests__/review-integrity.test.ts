@@ -367,6 +367,12 @@ describe("checkReviewIntegrity", () => {
         "Review this. Do not rename caféuse near the shell option.",
         nfd,
         "Review this. Do not touch the toolshed near the config.",
+        // Format characters (\p{Cf}) that sit inside words must not forge a
+        // boundary either: a zero-width joiner/non-joiner or a soft hyphen glued
+        // to the keyword keeps it from being a whole-word tool verb.
+        "Review this. Do not rename cafe\u200Duse near the shell option.",
+        "Review this. Do not rename cafe\u200Cuse near the shell option.",
+        "Review this. Do not rename cafe\u00ADuse near the shell option.",
       ]) {
         const result = checkReviewIntegrity({ prompt });
         expect(result.isReviewContext).toBe(true);

@@ -51,13 +51,15 @@ const REVIEW_CONTEXT_PATTERN =
 const TOOL_USE_VERB = String.raw`(?:us(?:e|ing)|call(?:ing)?|invok(?:e|ing)|run(?:ning)?|execut(?:e|ing)|access(?:ing)?|touch(?:ing)?|issu(?:e|ing)|employ(?:ing)?|utili[sz](?:e|ing)|leverag(?:e|ing)|rely(?:ing)?\s+on|resort(?:ing)?\s+to)`;
 const TOOL_NOUN = String.raw`(?:tool(?:s)?|shell|bash|command(?:s)?)`;
 // Unicode-aware word boundary via lookarounds. JS `\b` is ASCII-only even under
-// the /u flag, so a non-ASCII letter next to a keyword forges a boundary:
+// the /u flag, so a non-ASCII character next to a keyword forges a boundary:
 // `\buse\b` matches the "use" inside "caféuse" because "é" is not an ASCII word
-// char. Requiring no Unicode letter/number/COMBINING MARK/underscore on either
-// side fixes that, including for a decomposed (NFD) "café" whose accent is a
-// combining mark (\p{M}) that would otherwise read as a boundary.
-const WB = String.raw`(?<![\p{L}\p{N}\p{M}_])`;
-const WA = String.raw`(?![\p{L}\p{N}\p{M}_])`;
+// char. The word-char class is letters/numbers/underscore plus combining marks
+// (\p{M}, so a decomposed NFD "café" whose accent is U+0301 does not read as a
+// boundary) plus format characters (\p{Cf}: zero-width joiner/non-joiner, soft
+// hyphen and the like, which sit inside words and must not forge one either).
+const WORD_CHAR = String.raw`[\p{L}\p{N}\p{M}\p{Cf}_]`;
+const WB = String.raw`(?<!${WORD_CHAR})`;
+const WA = String.raw`(?!${WORD_CHAR})`;
 const uword = (body: string): string => `${WB}(?:${body})${WA}`;
 const NEGATION = uword(String.raw`do\s*not|don['’]t|never`);
 // Within one sentence: a negation that governs a tool-use verb that governs a
@@ -220,7 +222,8 @@ export function neutraliseInlineMarkup(prompt: string): string {
       // Word char per Unicode, not ASCII `\w`: a non-ASCII identifier like
       // `café_use` is one literal word, so its `_` must stay and it must not be
       // read as the keyword "use".
-      const intraword = /[\p{L}\p{N}\p{M}_]/u.test(before) && /[\p{L}\p{N}\p{M}_]/u.test(after);
+      const intraword =
+        /[\p{L}\p{N}\p{M}\p{Cf}_]/u.test(before) && /[\p{L}\p{N}\p{M}\p{Cf}_]/u.test(after);
       buf.push(intraword ? prompt.slice(i, u) : " ".repeat(u - i));
       i = u;
       continue;
