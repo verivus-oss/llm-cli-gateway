@@ -13,6 +13,7 @@ import {
   requireInstalledHelpProbeErrorIsCritical,
   requireInstalledVersionIndeterminateIsCritical,
   rootCatalogDrift,
+  subcommandHelpProbeIsUntrusted,
   verifyDeclaredCommandPath,
 } from "../../scripts/upstream-scan.mjs";
 
@@ -248,6 +249,29 @@ describe("upstream scanner hardening", () => {
     expect(requireInstalledHelpProbeErrorIsCritical(true, absentHelp)).toBe(false);
     expect(requireInstalledHelpProbeErrorIsCritical(false, failedHelp)).toBe(false);
     expect(requireInstalledHelpProbeErrorIsCritical(true, undefined)).toBe(false);
+  });
+
+  it("treats a subcommand help probe that could not run as untrusted, not drift-free", () => {
+    const strict = { helpProbeExitTolerant: false };
+    const tolerant = { helpProbeExitTolerant: true };
+
+    // The fail-open the fix closes: the root binary spawned, but the SUBCOMMAND
+    // help probe never completed (timeout / EACCES => available:false). That is
+    // an unverified contract, not an absent path, so a non-tolerant subcommand
+    // must flag it (and, downstream, --require-installed escalates it).
+    expect(subcommandHelpProbeIsUntrusted(strict, { available: false, status: null })).toBe(true);
+    // A subcommand that ran but exited nonzero is likewise untrusted.
+    expect(subcommandHelpProbeIsUntrusted(strict, { available: true, status: 1 })).toBe(true);
+    // A clean exit is trusted.
+    expect(subcommandHelpProbeIsUntrusted(strict, { available: true, status: 0 })).toBe(false);
+
+    // A help-exit-tolerant subcommand (one whose help is expected to exit nonzero)
+    // is trusted in every case, including a probe that never ran.
+    expect(subcommandHelpProbeIsUntrusted(tolerant, { available: false, status: null })).toBe(
+      false
+    );
+    expect(subcommandHelpProbeIsUntrusted(tolerant, { available: true, status: 1 })).toBe(false);
+    expect(subcommandHelpProbeIsUntrusted(tolerant, { available: true, status: 0 })).toBe(false);
   });
 
   it("does not trust a --version that exits nonzero, closing the parse fail-open", () => {

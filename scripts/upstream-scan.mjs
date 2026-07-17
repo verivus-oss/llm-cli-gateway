@@ -884,6 +884,23 @@ export function parseTrustedInstalledVersion(versionResult) {
   return trusted ? firstVersionLine(versionResult.output ?? "") : null;
 }
 
+/**
+ * Decide whether a subcommand help probe result is untrustworthy, i.e. should set
+ * the probe's `helpExitedNonzero` flag so `--require-installed` escalates it. A
+ * probe is untrusted when the subcommand is NOT declared help-exit tolerant and
+ * either it failed to run at all (`available:false`: timeout, EACCES, a spawn the
+ * root executable could complete but this path could not) OR it ran and exited
+ * nonzero. Both states produced help text we cannot compare against the contract,
+ * which is the same fail-open the root-help / --version trust fixes close. A
+ * clean exit, or any tolerant subcommand, is trusted. Kept a pure predicate so
+ * both probe branches and the tests share one decision.
+ */
+export function subcommandHelpProbeIsUntrusted(subcommand, result) {
+  if (subcommand?.helpProbeExitTolerant) return false;
+  if (!result?.available) return true;
+  return result.status !== 0;
+}
+
 export function rootCatalogDrift(subcommands, rootCommands) {
   if (!Array.isArray(rootCommands) || rootCommands.length === 0) {
     return { added: [], removed: [] };
@@ -1035,6 +1052,14 @@ function probeInstalledCliSubcommands(machinery, contract, rootHelp, timeoutMs) 
       );
       if (!result.available) {
         available = false;
+        // The root executable already spawned, so a subcommand help probe that
+        // fails to run (timeout, EACCES, ...) is a probe we could not complete,
+        // not an absent path. That is the same untrustworthy state as a nonzero
+        // exit, so flag it too (unless tolerant) and let --require-installed
+        // escalate it rather than passing this path as drift-free.
+        if (subcommandHelpProbeIsUntrusted(subcommand, result)) {
+          helpExitedNonzero = true;
+        }
         warnings.push(
           result.error ??
             `could not run ${contract.executable} ${[...commandPath, ...helpArgs].join(" ")}`
@@ -1042,7 +1067,7 @@ function probeInstalledCliSubcommands(machinery, contract, rootHelp, timeoutMs) 
         break;
       }
       outputs.push(result.output);
-      if (result.status !== 0 && !subcommand.helpProbeExitTolerant) {
+      if (subcommandHelpProbeIsUntrusted(subcommand, result)) {
         helpExitedNonzero = true;
         warnings.push(
           `${contract.executable} ${[...commandPath, ...helpArgs].join(" ")} exited with status ${result.status}`

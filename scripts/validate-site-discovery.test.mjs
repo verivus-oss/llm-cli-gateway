@@ -223,6 +223,48 @@ describe("local site discovery validation", () => {
     }
   });
 
+  it("does not mint an anchor from a heading or id inside an HTML comment", () => {
+    // A heading or explicit <a id>/{#id} written inside an HTML comment is not
+    // rendered, so a fragment pointing at it must 404. Covers single-line and
+    // multi-line comments and both anchor shapes.
+    const cases = [
+      { body: '# Real\n\n<!-- <a id="hidden-id"></a> -->\n\nbody\n', anchor: "hidden-id" },
+      { body: "# Real\n\n<!-- ## Ghost {#ghost-id} -->\n\nbody\n", anchor: "ghost-id" },
+      { body: "# Real\n\n<!--\n## Ghost {#multi-id}\n-->\n\nbody\n", anchor: "multi-id" },
+    ];
+    for (const { body, anchor } of cases) {
+      const site = copiedSite();
+      writeFileSync(join(site, "cmt.md"), body);
+      const maintainers = join(site, "maintainers.md");
+      writeFileSync(
+        maintainers,
+        `${readFileSync(maintainers, "utf8")}\n[x](https://llm-cli-gateway.dev/cmt.md#${anchor})\n`
+      );
+      const result = validate(site);
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("absent from the headings");
+    }
+  });
+
+  it("keeps a real anchor that only shares a line with an HTML comment", () => {
+    // The comment strip must not swallow live content: a heading and an explicit
+    // <a id> outside any comment still resolve after stripping.
+    for (const [body, anchor] of [
+      ["# Real Heading\n\n<!-- note -->\n\nbody\n", "real-heading"],
+      ['# T\n\n<a id="live-anchor"></a>\n\n<!-- x -->\n\nbody\n', "live-anchor"],
+    ]) {
+      const site = copiedSite();
+      writeFileSync(join(site, "live.md"), body);
+      const maintainers = join(site, "maintainers.md");
+      writeFileSync(
+        maintainers,
+        `${readFileSync(maintainers, "utf8")}\n[ok](https://llm-cli-gateway.dev/live.md#${anchor})\n`
+      );
+      const result = validate(site);
+      expect(result.status).toBe(0);
+    }
+  });
+
   it("resolves a heading after a CRLF-authored fenced block", () => {
     // A Windows (CRLF) file's fence close is ```\r\n. If the scanner splits on
     // "\n" only, the trailing \r defeats the close anchor and the fence runs to

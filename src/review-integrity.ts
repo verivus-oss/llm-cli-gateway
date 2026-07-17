@@ -57,6 +57,14 @@ const TOOL_NOUN = String.raw`(?:tool(?:s)?|shell|bash|command(?:s)?)`;
 // (\p{M}, so a decomposed NFD "café" whose accent is U+0301 does not read as a
 // boundary) plus format characters (\p{Cf}: zero-width joiner/non-joiner, soft
 // hyphen and the like, which sit inside words and must not forge one either).
+//
+// Accepted residual (the dual of treating these as word chars): a keyword
+// deliberately broken by a combining or format char inserted before or inside
+// it (a zero-width space or soft hyphen splitting "use", an accent on it) no
+// longer reads as a whole word and is missed. That is an adversarial intentional
+// misspelling, not natural prose, and this is a defence-in-depth score-4 scorer,
+// not a hard gate; the false-positive direction (a keyword welded to a
+// neighbour) is the one worth closing.
 const WORD_CHAR = String.raw`[\p{L}\p{N}\p{M}\p{Cf}_]`;
 const WB = String.raw`(?<!${WORD_CHAR})`;
 const WA = String.raw`(?!${WORD_CHAR})`;

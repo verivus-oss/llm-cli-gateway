@@ -376,9 +376,39 @@ function stripFencedBlocks(body) {
   return kept.join("\n");
 }
 
+// Remove HTML comments so a heading or explicit anchor written inside one (e.g.
+// `<!-- ## Ghost {#ghost-id} -->` or `<!-- <a id="hidden"> -->`) does not mint a
+// live anchor; a comment is not rendered, so a fragment pointing at it must fail.
+// The comment body is replaced with only its newlines, so line boundaries (and
+// thus Setext/paragraph structure) are preserved. An unclosed `<!--` runs to
+// end-of-document (CommonMark). Uses indexOf, not a `<!--[\s\S]*?-->` regex,
+// which would backtrack quadratically on a run of unclosed `<!--`; indexOf scans
+// each character once, so this is linear.
+function stripHtmlComments(body) {
+  let result = "";
+  let i = 0;
+  for (;;) {
+    const start = body.indexOf("<!--", i);
+    if (start === -1) {
+      result += body.slice(i);
+      return result;
+    }
+    result += body.slice(i, start);
+    const end = body.indexOf("-->", start + 4);
+    if (end === -1) {
+      result += body.slice(start).replace(/[^\n]/g, "");
+      return result;
+    }
+    result += body.slice(start, end + 3).replace(/[^\n]/g, "");
+    i = end + 3;
+  }
+}
+
 function markdownAnchors(body) {
   const anchors = new Set();
-  const withoutFences = stripFencedBlocks(body);
+  // Strip fenced code first (so a `<!--` inside a code example is not treated as
+  // a real comment), then strip real HTML comments from what remains.
+  const withoutFences = stripHtmlComments(stripFencedBlocks(body));
   // GitHub disambiguates repeated heading slugs with -1, -2, ... in document
   // order, and reserves each emitted slug so a literal "Setup 1" heading and the
   // auto-generated "setup-1" cannot collide. Mirror that occurrence loop.
