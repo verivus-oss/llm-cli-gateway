@@ -9,6 +9,7 @@ import {
   githubReleaseSemanticSnapshot,
   normalizeSnapshot,
   renderReport,
+  requireInstalledVersionIndeterminateIsCritical,
   rootCatalogDrift,
   verifyDeclaredCommandPath,
 } from "../../scripts/upstream-scan.mjs";
@@ -207,6 +208,26 @@ describe("upstream scanner hardening", () => {
       compareTargetVersion("cursor-agent 2026.07.09-c59fd9a", "cursor-agent 2026.07.09-a3815c0")
         .matches
     ).toBe(false);
+  });
+
+  it("treats an unconfirmed installed version as critical only under --require-installed", () => {
+    const parsed = { targetVersion: "claude 2.1.211", installedVersion: "2.1.211", matches: true };
+    const mismatch = { targetVersion: "claude 2.1.211", installedVersion: "2.1.9", matches: false };
+    const unparseable = { targetVersion: "claude 2.1.211", installedVersion: null, matches: null };
+    const noTarget = { targetVersion: null, installedVersion: null, matches: null };
+
+    // A clean match or mismatch is decided elsewhere, never here.
+    expect(requireInstalledVersionIndeterminateIsCritical(true, parsed)).toBe(false);
+    expect(requireInstalledVersionIndeterminateIsCritical(true, mismatch)).toBe(false);
+
+    // The fail-open the fix closes: require-installed + a declared target we
+    // could not confirm must be critical instead of a silent log.
+    expect(requireInstalledVersionIndeterminateIsCritical(true, unparseable)).toBe(true);
+    expect(requireInstalledVersionIndeterminateIsCritical(true, undefined)).toBe(false);
+
+    // Without require-installed, or without a declared target, it stays a log.
+    expect(requireInstalledVersionIndeterminateIsCritical(false, unparseable)).toBe(false);
+    expect(requireInstalledVersionIndeterminateIsCritical(true, noTarget)).toBe(false);
   });
 
   it("discovers root commands, handles aliases, and guards missing paths before help", () => {

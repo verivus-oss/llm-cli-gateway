@@ -800,6 +800,21 @@ export function compareTargetVersion(targetVersion, installedVersion) {
   };
 }
 
+/**
+ * Decide whether an indeterminate installed-version comparison must count as a
+ * critical unverified state. `compareTargetVersion` returns `matches: null` when
+ * either side is unparseable or unavailable; under --require-installed a
+ * declared target we could not confirm is a fail-open (the run would otherwise
+ * only log and exit 0), so it is critical. A clean match or mismatch is decided
+ * elsewhere, and a probe with no declared target is left alone so a provider
+ * that intentionally pins no version is not forced to fail.
+ */
+export function requireInstalledVersionIndeterminateIsCritical(requireInstalled, versionProbe) {
+  if (!requireInstalled) return false;
+  if (versionProbe?.matches === true || versionProbe?.matches === false) return false;
+  return Boolean(versionProbe?.targetVersion);
+}
+
 function runReadOnlyCliCommand(machinery, executable, args, timeoutMs = PROBE_TIMEOUT_MS) {
   const extendedPath =
     typeof machinery.getExtendedPath === "function"
@@ -1386,6 +1401,23 @@ async function runScan(machinery, toml, flags) {
         helpProbe = probeInstalledCliSurface(machinery, cli);
       } catch (e) {
         console.warn(`  [probe] failed for ${cli}: ${e?.message ?? e}`);
+        // A thrown probe must not be silently treated as drift-free. Under
+        // --require-installed the entire contract of the flag is that drift was
+        // actually checked against the installed binary, so a probe that could
+        // not run is a critical unverified state, exactly like the absent-binary
+        // path below. Without this, a machinery bug in the probe path lets
+        // --fail-on-critical exit 0 while checking nothing.
+        if (flags.requireInstalled) {
+          findings.push({
+            severity: "critical",
+            category: "installed-probe-error",
+            message: `--require-installed was set but probing the ${cli} binary (${contract.executable}) threw (${e?.message ?? e}), so its contract is unverified. Fix the probe or drop --require-installed; do not treat this run as drift-free.`,
+          });
+          criticalCount++;
+          console.log(
+            `  [probe] PROBE ERROR: ${contract.executable} probe threw; contract unverified`
+          );
+        }
       }
 
       if (helpProbe) {
@@ -1425,10 +1457,33 @@ async function runScan(machinery, toml, flags) {
             );
           } else if (versionProbe?.matches === true) {
             console.log(`  [probe] version matches target: ${versionProbe.targetVersion}`);
-          } else if (versionProbe) {
-            console.log(
-              `  [probe] version could not be compared: installed=${versionProbe.installedVersion ?? "unparseable"}; target=${versionProbe.targetVersion}`
-            );
+          } else {
+            // Indeterminate: the installed version could not be parsed or read,
+            // or no version probe ran at all. A declared target we cannot
+            // confirm is an unverified contract, so under --require-installed it
+            // is critical rather than a log line, closing the same fail-open as
+            // the absent-binary and probe-error paths. targetVersion is present
+            // for every provider today; guarding on it avoids inventing a
+            // failure for a provider that intentionally pins no version.
+            const installed = versionProbe?.installedVersion ?? "unparseable";
+            const target = versionProbe?.targetVersion ?? null;
+            if (
+              requireInstalledVersionIndeterminateIsCritical(flags.requireInstalled, versionProbe)
+            ) {
+              findings.push({
+                severity: "critical",
+                category: "installed-version-indeterminate",
+                message: `--require-installed was set but the installed ${cli} version could not be compared against the contract baseline ${target} (installed=${installed}), so its version is unverified. Re-probe the CLI; do not treat this run as drift-free.`,
+              });
+              criticalCount++;
+              console.log(
+                `  [probe] VERSION INDETERMINATE (require-installed): installed=${installed}; target=${target}`
+              );
+            } else {
+              console.log(
+                `  [probe] version could not be compared: installed=${installed}; target=${target ?? "unknown"}`
+              );
+            }
           }
 
           const contractFlags = new Set(Object.keys(contract.flags));

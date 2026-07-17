@@ -147,6 +147,16 @@ describe("checkReviewIntegrity", () => {
       expect(result.violations.find(v => v.type === "tool_suppression")).toBeDefined();
     });
 
+    it.each([
+      "Review the code but do not issue shell commands",
+      "Audit this diff but do not employ any tools",
+      "Review the security of the API, do not utilize the shell",
+      "Do a code review but do not leverage bash",
+    ])("detects synonym-verb suppression: %s", prompt => {
+      const result = checkReviewIntegrity({ prompt });
+      expect(result.violations.find(v => v.type === "tool_suppression")).toBeDefined();
+    });
+
     it("does not flag non-suppression language", () => {
       const result = checkReviewIntegrity({
         prompt: "Review the code using all available tools",
@@ -170,6 +180,22 @@ describe("checkReviewIntegrity", () => {
       });
       expect(result.isReviewContext).toBe(true);
       expect(result.violations.filter(v => v.type === "tool_suppression")).toHaveLength(0);
+    });
+
+    it("does not glue across a sentence period wrapped in Markdown emphasis", () => {
+      // A period inside inline markup still ends the sentence. The negation
+      // ("do not trust `summary.`") and the tool use ("Use the tools") sit in
+      // different sentences; only a backtick-delimited period separated them,
+      // which the detector previously failed to treat as a boundary.
+      for (const prompt of [
+        "Review this diff. Do not trust `summary.` Use the tools to verify.",
+        "Audit the code. Do not accept the *summary.* Run the shell to confirm.",
+        "Review it. Do not rely on the _report._ Use bash to check the claims.",
+      ]) {
+        const result = checkReviewIntegrity({ prompt });
+        expect(result.isReviewContext).toBe(true);
+        expect(result.violations.filter(v => v.type === "tool_suppression")).toHaveLength(0);
+      }
     });
 
     it("does not flag review hygiene instructions that name no tool", () => {

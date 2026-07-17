@@ -39,11 +39,14 @@ exclude = [
   # fail this gate until the release that publishes it.
   # These URLs are NOT going unchecked, and are in fact checked more
   # strictly than lychee can manage: scripts/validate-site-discovery.mjs
-  # (npm run site:validate, inside npm run check) extracts every
-  # llm-cli-gateway.dev link out of the site's markdown routes and
-  # resolves each one against the LOCAL site/ tree, failing on a missing
-  # route. That verifies the tree being merged, whereas probing the live
-  # domain only verifies whatever the last release happened to deploy.
+  # (npm run site:validate, inside npm run check) sweeps every tracked file
+  # under site/ and docs/ (excluding the archived/reviews evidence dirs),
+  # extracts every llm-cli-gateway.dev self-link, and resolves each one
+  # against the LOCAL site/ tree, failing on a missing page and on a broken
+  # Markdown heading fragment. That covers non-route files (site/maintainers.md,
+  # site/robots.txt, site/index.html, docs/launch/) that the enumerated route
+  # list alone would miss, and it verifies the tree being merged, whereas
+  # probing the live domain only verifies whatever the last release deployed.
   "^https://llm-cli-gateway\\.dev/",
   # GitHub's unauthenticated REST API intermittently returns 403 to
   # hosted Actions for public release metadata; upstream scans verify

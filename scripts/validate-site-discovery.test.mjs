@@ -52,6 +52,36 @@ describe("local site discovery validation", () => {
     );
   });
 
+  it("fails on a broken self-link in a non-route site file", () => {
+    // site/maintainers.md is not in the enumerated route list, so the old
+    // route-only validator never saw its links while lychee's whole-domain
+    // exclusion skipped them too. The repo-wide sweep must catch this.
+    const site = copiedSite();
+    const maintainers = join(site, "maintainers.md");
+    writeFileSync(
+      maintainers,
+      `${readFileSync(maintainers, "utf8")}\n[dead](https://llm-cli-gateway.dev/does-not-exist.md)\n`
+    );
+
+    const result = validate(site);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("does-not-exist.md");
+    expect(result.stderr).toContain("returned 404");
+  });
+
+  it("fails on a broken Markdown heading fragment in a self-link", () => {
+    const site = copiedSite();
+    const maintainers = join(site, "maintainers.md");
+    writeFileSync(
+      maintainers,
+      `${readFileSync(maintainers, "utf8")}\n[bad anchor](https://llm-cli-gateway.dev/install.md#definitely-not-a-real-anchor-xyz)\n`
+    );
+
+    const result = validate(site);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("absent from the headings");
+  });
+
   it("fails when public guidance overgeneralizes Codex stdin prompt support", () => {
     const site = copiedSite();
     const llmsPath = join(site, "llms.txt");

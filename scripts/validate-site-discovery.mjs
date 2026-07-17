@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { dirname, extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { assertNoPublicInternalMcpAliases } from "./public-site-mcp-policy.mjs";
@@ -237,6 +237,94 @@ function extractMarkdownLinks(body) {
   return [...new Set(links)];
 }
 
+// A quote/bracket/JSON-safe self-link extractor for the repo-wide sweep, which
+// reads Markdown, HTML, and JSON alike. Stops at whitespace and any delimiter
+// that can close a URL in those formats, then trims trailing prose punctuation.
+function extractSelfLinks(body) {
+  const links = new Set();
+  for (const match of body.matchAll(/https:\/\/llm-cli-gateway\.dev\/[^\s"'`)<>\]}]*/g)) {
+    const cleaned = match[0].replace(/[.,;:>)\]}]+$/, "");
+    links.add(cleaned);
+  }
+  return links;
+}
+
+// GitHub-style heading slug, used to validate Markdown fragment links.
+function slugifyHeading(text) {
+  return text
+    .replace(/`/g, "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^\w\s-]/g, "")
+    .replace(/\s+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "");
+}
+
+function markdownAnchors(body) {
+  const anchors = new Set();
+  for (const match of body.matchAll(/^ {0,3}#{1,6}[ \t]+(.+?)[ \t]*#*[ \t]*$/gm)) {
+    anchors.add(slugifyHeading(match[1]));
+  }
+  // Explicit anchors survive the slugger: inline HTML ids and {#custom-id}.
+  for (const match of body.matchAll(/<a\b[^>]*\b(?:id|name)=["']([^"']+)["']/gi)) {
+    anchors.add(match[1]);
+  }
+  for (const match of body.matchAll(/\{#([A-Za-z0-9_-]+)\}/g)) {
+    anchors.add(match[1]);
+  }
+  return anchors;
+}
+
+// Binary payloads never carry a text self-link; skipping them keeps the sweep
+// from decoding fonts and images as UTF-8.
+const SWEEP_BINARY_EXTENSIONS = new Set([
+  ".png",
+  ".jpg",
+  ".jpeg",
+  ".gif",
+  ".ico",
+  ".webp",
+  ".svg",
+  ".woff",
+  ".woff2",
+  ".ttf",
+  ".otf",
+  ".pdf",
+  ".zip",
+  ".gz",
+  ".tgz",
+  ".wasm",
+  ".mp4",
+  ".webm",
+]);
+
+// Directories the link-rot scan treats as historical evidence. Mirrors the
+// docs/archive and docs/reviews entries in lychee.toml exclude_path so the
+// sweep and lychee agree on scope; a dead self-link in an archived artefact is
+// evidence, not a bug.
+const SWEEP_EXCLUDE_DIRS = new Set(["archive", "reviews"]);
+
+function* walkTextFiles(dir, excludeTopLevelDirs = new Set()) {
+  let entries;
+  try {
+    entries = readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    if (entry.name === ".git" || entry.name === "node_modules") continue;
+    const full = join(dir, entry.name);
+    if (entry.isDirectory()) {
+      if (excludeTopLevelDirs.has(entry.name)) continue;
+      yield* walkTextFiles(full);
+    } else if (entry.isFile()) {
+      if (SWEEP_BINARY_EXTENSIONS.has(extname(entry.name).toLowerCase())) continue;
+      yield full;
+    }
+  }
+}
+
 function assertCodexPromptTransportContract(bodies) {
   const required = new Map([
     [
@@ -289,6 +377,43 @@ async function assertInternalLink(url) {
   if (isHtmlHomepage(result.body) && !parsed.pathname.endsWith("/") && parsed.pathname !== "/") {
     fail(`${url} resolved to homepage HTML`);
   }
+  // Fragment validation for Markdown targets, where anchors are deterministic
+  // heading slugs we can resolve from the local file. Fragments on the site
+  // root / HTML pages are intentionally NOT checked: there they are schema.org
+  // JSON-LD @id identifiers (e.g. /#software, /#api), not navigable anchors.
+  if (parsed.hash && mode === "local" && parsed.pathname.endsWith(".md")) {
+    const fragment = decodeURIComponent(parsed.hash.slice(1));
+    const anchors = markdownAnchors(result.body);
+    if (!anchors.has(fragment)) {
+      fail(`${url} references #${fragment}, absent from the headings of ${parsed.pathname}`);
+    }
+  }
+}
+
+// Repo-wide self-link sweep. lychee excludes the whole llm-cli-gateway.dev
+// domain because unreleased pages 404 on the live site, so this local check is
+// the ONLY thing that resolves those links against the tree being merged. It
+// must cover every file that can carry one, not just the enumerated routes: a
+// self-link in site/maintainers.md, site/robots.txt, site/index.html, or
+// docs/launch/ was previously checked by neither lychee nor this validator.
+async function sweepRepoSelfLinks() {
+  const docsDir = join(repoRoot, "docs");
+  const sources = [
+    ...walkTextFiles(siteDir),
+    ...(existsSync(docsDir) ? walkTextFiles(docsDir, SWEEP_EXCLUDE_DIRS) : []),
+  ];
+  for (const file of sources) {
+    let body;
+    try {
+      body = readFileSync(file, "utf8");
+    } catch {
+      continue;
+    }
+    if (!body.includes("llm-cli-gateway.dev/")) continue;
+    for (const url of extractSelfLinks(body)) {
+      await assertInternalLink(url);
+    }
+  }
 }
 
 async function main() {
@@ -326,6 +451,13 @@ async function main() {
   }
 
   assertCodexPromptTransportContract(bodies);
+
+  // In local mode this is the backstop for every self-link lychee's whole-domain
+  // exclusion skips, resolved against the tree being merged. Remote mode already
+  // probes the deployed site, so a local-tree sweep would not describe it.
+  if (mode === "local") {
+    await sweepRepoSelfLinks();
+  }
 
   for (const route of routes.filter(r => r.equivalentTo)) {
     const source = bodies.get(route.equivalentTo);
