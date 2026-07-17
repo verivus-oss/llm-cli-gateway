@@ -48,7 +48,10 @@ import {
 import { buildRemoteConnectorUrls, resolveConfiguredRemoteOrigin } from "./remote-url.js";
 import { computeGlobalCacheStats } from "./cache-stats.js";
 import { FlightRecorder, resolveFlightRecorderDbPath } from "./flight-recorder.js";
-import { buildUpstreamContractReport } from "./upstream-contracts.js";
+import {
+  buildUpstreamContractReport,
+  type InstalledCliContractProbe,
+} from "./upstream-contracts.js";
 import {
   getProviderToolCapabilities,
   knownProviderCapabilityIds,
@@ -1446,6 +1449,31 @@ export function createDoctorReport(
           report.upstream.how_to_check +
           "  (add --probe-upstream to this doctor command for one-shot probing)"
       );
+    }
+  }
+
+  // F4: whenever the installed probe actually ran, a subcommand/help probe that
+  // exited nonzero (help still parsed) or could not run leaves that CLI's
+  // contract unverified. Surface ONE specific advisory so it is visible without
+  // hand-scanning probe_report. Doctor stays advisory: report.ok is deliberately
+  // NOT flipped (matches the scanner's opt-in --require-installed). Gated on the
+  // probe having run, independent of hasAnyCli.
+  if (report.upstream.probed) {
+    const installedProbe =
+      (probeReport?.installedProbe as
+        Record<string, InstalledCliContractProbe> | null | undefined) ?? null;
+    if (installedProbe) {
+      const unverified = Object.entries(installedProbe)
+        .filter(
+          ([, probe]) =>
+            probe.helpExitedNonzero || Object.values(probe.subcommands).some(sub => !sub.available)
+        )
+        .map(([cli]) => cli);
+      if (unverified.length > 0) {
+        report.next_actions.push(
+          `re-probe ${unverified.join(", ")}: an installed help probe exited nonzero or could not run; its contract is unverified.`
+        );
+      }
     }
   }
 

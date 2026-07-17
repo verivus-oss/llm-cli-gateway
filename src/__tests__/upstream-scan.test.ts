@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { existsSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import {
   buildSnapshotPayload,
   codexChangelogRssSemanticSnapshot,
@@ -10,13 +12,16 @@ import {
   normalizeSnapshot,
   parseTrustedInstalledVersion,
   probeInstalledCliSubcommands,
+  probeInstalledCliSurface,
   renderReport,
   requireInstalledHelpProbeErrorIsCritical,
   requireInstalledVersionIndeterminateIsCritical,
   rootCatalogDrift,
-  subcommandHelpProbeIsUntrusted,
   verifyDeclaredCommandPath,
 } from "../../scripts/upstream-scan.mjs";
+// The trust predicate now lives in the runtime module (the scanner imports it
+// via loadMachinery); the scanner no longer keeps a duplicate copy. See F4.
+import { subcommandHelpProbeIsUntrusted } from "../upstream-contracts.js";
 
 describe("upstream scanner hardening", () => {
   it("compares stable GitHub release semantics instead of mutable API payload fields", () => {
@@ -285,6 +290,7 @@ describe("upstream scanner hardening", () => {
     const contract = { executable: "faketool", subcommands: [subDef] };
     const rootHelp = { available: true, commands: ["update"], helpHash: "root-hash" };
     const machinery = {
+      subcommandHelpProbeIsUntrusted,
       flattenCliSubcommands: subs => subs,
       getExtendedPath: () => process.env.PATH ?? "",
       envWithExtendedPath: env => env,
@@ -312,6 +318,54 @@ describe("upstream scanner hardening", () => {
     // (Object.values(subcommands).some(p => p.helpExitedNonzero)) escalates it.
     expect(probe.helpExitedNonzero).toBe(true);
     expect(probe.existence).not.toBe("missing");
+  });
+
+  // The scanner imports the shared predicate from the compiled runtime via
+  // loadMachinery(); a stale or missing dist would drop the F4 escalation.
+  // loadMachinery hard-fails on a missing export, and this pins the symbol so a
+  // build that forgot to compile the runtime change is caught by the suite too.
+  // Skip when dist/ is absent so a clean-checkout `npm test` (no build step, see
+  // package.json) does not fail on a missing module; `npm run check` and CI build
+  // first, so the guard still runs there.
+  const distContractsPath = fileURLToPath(
+    new URL("../../dist/upstream-contracts.js", import.meta.url)
+  );
+  it.skipIf(!existsSync(distContractsPath))(
+    "exports subcommandHelpProbeIsUntrusted from the BUILT dist (loadMachinery/build-order guard)",
+    async () => {
+      const dist = await import(distContractsPath);
+      expect(typeof dist.subcommandHelpProbeIsUntrusted).toBe("function");
+      // Behaviour parity with the TS source: a nonzero non-tolerant exit is untrusted.
+      expect(
+        dist.subcommandHelpProbeIsUntrusted(
+          { helpProbeExitTolerant: false },
+          { available: true, status: 1 }
+        )
+      ).toBe(true);
+    }
+  );
+
+  it("preserves an earlier nonzero root helpArgs exit when a later helpArgs spawn-fails (surface early return)", () => {
+    // Mirror of the runtime probeInstalledCliContract fix: contract.helpArgs can
+    // hold more than one entry. The first spawns and exits nonzero (untrusted
+    // help), the second spawn-fails and triggers the early return. The early
+    // return must carry helpExitedNonzero (the accumulator), not drop it.
+    const contract = { executable: "faketool", helpArgs: [["a"], ["b"]], subcommands: [] };
+    const machinery = {
+      UPSTREAM_CLI_CONTRACTS: { faketool: contract },
+      getExtendedPath: () => process.env.PATH ?? "",
+      envWithExtendedPath: env => env,
+      resolveCommandForSpawn: (_executable, args) =>
+        args[0] === "b"
+          ? // Second helpArgs: a binary that cannot be spawned (ENOENT -> available:false).
+            { command: "/nonexistent/faketool-does-not-exist-xyz", args }
+          : // First helpArgs: spawns but exits nonzero.
+            { command: "sh", args: ["-c", "exit 1"] },
+    };
+
+    const probe = probeInstalledCliSurface(machinery, "faketool", 2000);
+    expect(probe.available).toBe(false);
+    expect(probe.helpExitedNonzero).toBe(true);
   });
 
   it("does not trust a --version that exits nonzero, closing the parse fail-open", () => {

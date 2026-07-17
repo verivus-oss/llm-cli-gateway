@@ -4647,7 +4647,7 @@
           "includeClean": {
             "type": "boolean",
             "default": false,
-            "description": "When false, return only unavailable or drifted command paths"
+            "description": "When false, return only unavailable, drifted, or untrusted-help-exit command paths"
           }
         },
         "additionalProperties": false,

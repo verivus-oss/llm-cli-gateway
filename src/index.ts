@@ -21063,7 +21063,9 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       includeClean: z
         .boolean()
         .default(false)
-        .describe("When false, return only unavailable or drifted command paths"),
+        .describe(
+          "When false, return only unavailable, drifted, or untrusted-help-exit command paths"
+        ),
     },
     {
       title: "Provider subcommand drift",
@@ -21078,7 +21080,10 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         const probe = probeInstalledCliContract(cli);
         return Object.values(probe.subcommands).flatMap(sub => {
           const drifted =
-            !sub.available || sub.extraFlags.length > 0 || sub.missingFlags.length > 0;
+            !sub.available ||
+            sub.helpExitedNonzero ||
+            sub.extraFlags.length > 0 ||
+            sub.missingFlags.length > 0;
           if (!includeClean && !drifted) return [];
           return [
             {
@@ -21086,6 +21091,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
               commandPath: sub.commandPath,
               driftStatus: drifted ? "drift" : "clean",
               available: sub.available,
+              helpExitedNonzero: sub.helpExitedNonzero,
               extraVsContract: sub.extraFlags,
               missingFromBinary: sub.missingFlags,
               helpHash: sub.helpHash ?? null,

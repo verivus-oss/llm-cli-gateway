@@ -4097,6 +4097,13 @@ export interface InstalledCliSubcommandProbe {
   exposure: CliSubcommandExposure;
   tier: CliSubcommandTier;
   summary: string;
+  /**
+   * True when this subcommand help probe could not be trusted: it failed to run
+   * (available:false) or ran but exited nonzero without help-exit tolerance. A
+   * nonzero exit whose help text still parsed clean would otherwise look
+   * drift-free; see {@link subcommandHelpProbeIsUntrusted}.
+   */
+  helpExitedNonzero: boolean;
 }
 
 export interface InstalledCliContractProbe {
@@ -4122,6 +4129,39 @@ export interface InstalledCliContractProbe {
   /** ISO timestamp when this probe was performed. */
   probedAt: string;
   warnings: string[];
+  /**
+   * Rolled-up untrusted-help signal: true when a declared `helpArgs` probe
+   * exited nonzero, or ANY subcommand probe was untrusted. Kept distinct from
+   * `available` (a spawn failure of the root executable) so a nonzero-but-parses
+   * help exit is still surfaced to consumers that gate on drift.
+   */
+  helpExitedNonzero: boolean;
+}
+
+/**
+ * Trust decision for a subcommand `--help` probe result, shared by the runtime
+ * probe ({@link probeInstalledCliSubcommands}) and the build-time scanner
+ * (`scripts/upstream-scan.mjs`, which imports this via `loadMachinery`). The
+ * `result` argument is a NORMALIZED `{ available, status }` view, NOT a raw
+ * `spawnSync` result: at every runtime call site the caller must translate the
+ * raw result (spawn error => available:false; otherwise available:true) before
+ * calling, because a raw spawnSync result has no `available` field and would
+ * make every probe (including clean exit-0) look untrusted.
+ *
+ * `available:false` (spawn error / timeout / EACCES) is always untrusted: the
+ * probe produced no help text to compare against the contract, and
+ * `helpProbeExitTolerant` tolerates a nonzero exit STATUS, not a probe that never
+ * ran. Otherwise a probe is untrusted when the subcommand is not help-exit
+ * tolerant and it ran but exited nonzero. A clean exit, or a tolerant subcommand
+ * that ran, is trusted.
+ */
+export function subcommandHelpProbeIsUntrusted(
+  subcommand: { helpProbeExitTolerant?: boolean } | undefined,
+  result: { available: boolean; status: number | null }
+): boolean {
+  if (!result?.available) return true;
+  if (subcommand?.helpProbeExitTolerant) return false;
+  return result.status !== 0;
 }
 
 export function probeInstalledCliContract(
@@ -4133,6 +4173,10 @@ export function probeInstalledCliContract(
   const warnings: string[] = [];
   let resolvedCommand: string | undefined;
   let resolvedArgs: string[] | undefined;
+  // Declared `helpArgs` probes carry no per-subcommand tolerance, so any nonzero
+  // exit here is untrusted (predicate called with an undefined subcommand). The
+  // subcommand fold is OR'd in at the success return below.
+  let helpExitedNonzero = false;
 
   for (const helpArgs of contract.helpArgs) {
     const extendedPath = getExtendedPath();
@@ -4167,10 +4211,17 @@ export function probeInstalledCliContract(
         subcommands: {},
         probedAt: new Date().toISOString(),
         warnings: [result.error.message],
+        // `available:false` carries this probe's spawn failure. Preserve any
+        // untrusted-help signal already accumulated from an EARLIER helpArgs
+        // entry that spawned but exited nonzero (contract.helpArgs can hold more
+        // than one entry, e.g. Codex `exec --help` + `exec resume --help`);
+        // hard-coding false here would silently drop that prior nonzero exit.
+        helpExitedNonzero,
       };
     }
     outputs.push(`${result.stdout ?? ""}\n${result.stderr ?? ""}`);
-    if (result.status !== 0) {
+    if (subcommandHelpProbeIsUntrusted(undefined, { available: true, status: result.status })) {
+      helpExitedNonzero = true;
       warnings.push(
         `${contract.executable} ${helpArgs.join(" ")} exited with status ${result.status}`
       );
@@ -4205,6 +4256,8 @@ export function probeInstalledCliContract(
     subcommands,
     probedAt: new Date().toISOString(),
     warnings,
+    helpExitedNonzero:
+      helpExitedNonzero || Object.values(subcommands).some(probe => probe.helpExitedNonzero),
   };
 }
 
@@ -4218,6 +4271,7 @@ function probeInstalledCliSubcommands(
     const outputs: string[] = [];
     const warnings: string[] = [];
     let available = true;
+    let helpExitedNonzero = false;
     const checkedHelpCommands = sub.helpArgs.map(helpArgs => [...sub.commandPath, ...helpArgs]);
 
     for (const helpArgs of sub.helpArgs) {
@@ -4237,11 +4291,21 @@ function probeInstalledCliSubcommands(
       });
       if (result.error) {
         available = false;
+        // A spawn failure after the root executable ran is a probe we could not
+        // complete, not an absent path: untrusted even for a tolerant subcommand
+        // (tolerance covers a nonzero exit STATUS, not a probe that never ran).
+        helpExitedNonzero = subcommandHelpProbeIsUntrusted(sub, {
+          available: false,
+          status: result.status,
+        });
         warnings.push(result.error.message);
         break;
       }
       outputs.push(`${result.stdout ?? ""}\n${result.stderr ?? ""}`);
-      if (result.status !== 0 && !sub.helpProbeExitTolerant) {
+      // Spawn succeeded, so normalize to available:true; do NOT pass the raw
+      // spawnSync result (it has no `available` field and would invert the test).
+      if (subcommandHelpProbeIsUntrusted(sub, { available: true, status: result.status })) {
+        helpExitedNonzero = true;
         warnings.push(
           `${contract.executable} ${args.join(" ")} exited with status ${result.status}`
         );
@@ -4269,6 +4333,7 @@ function probeInstalledCliSubcommands(
       exposure: sub.exposure,
       tier: sub.tier,
       summary: sub.summary,
+      helpExitedNonzero,
     };
   }
   return probes;

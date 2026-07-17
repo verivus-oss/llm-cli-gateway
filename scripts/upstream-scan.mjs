@@ -117,7 +117,19 @@ async function loadMachinery() {
     import(DIST_EXECUTOR),
     import(DIST_PROVIDER_DEFINITIONS),
   ]);
-  return { ...contracts, ...executor, ...providerDefinitions };
+  const machinery = { ...contracts, ...executor, ...providerDefinitions };
+  // The shared trust predicate now lives in the runtime module and is imported
+  // here rather than duplicated. A stale dist (built before F4) would silently
+  // drop the escalation, so fail loudly instead of scanning with a missing
+  // predicate.
+  if (typeof machinery.subcommandHelpProbeIsUntrusted !== "function") {
+    console.error(
+      "[upstream-scan] compiled machinery is missing subcommandHelpProbeIsUntrusted. " +
+        "The dist is stale; run `npm run build` and re-run."
+    );
+    process.exit(2);
+  }
+  return machinery;
 }
 
 function loadToml() {
@@ -884,23 +896,10 @@ export function parseTrustedInstalledVersion(versionResult) {
   return trusted ? firstVersionLine(versionResult.output ?? "") : null;
 }
 
-/**
- * Decide whether a subcommand help probe result is untrustworthy, i.e. should set
- * the probe's `helpExitedNonzero` flag so `--require-installed` escalates it. A
- * probe that FAILED TO RUN (`available:false`: timeout, EACCES, a spawn the root
- * executable could complete but this path could not) is always untrusted: it
- * produced no help text to compare against the contract, and `helpProbeExitTolerant`
- * tolerates a nonzero exit STATUS, not a probe that never ran. Otherwise a probe
- * is untrusted when the subcommand is NOT help-exit tolerant and it ran but exited
- * nonzero. A clean exit, or a tolerant subcommand that ran, is trusted. This is
- * the same fail-open the root-help / --version trust fixes close. Kept a pure
- * predicate so both probe branches and the tests share one decision.
- */
-export function subcommandHelpProbeIsUntrusted(subcommand, result) {
-  if (!result?.available) return true;
-  if (subcommand?.helpProbeExitTolerant) return false;
-  return result.status !== 0;
-}
+// `subcommandHelpProbeIsUntrusted` is the shared trust predicate. It lives in
+// src/upstream-contracts.ts (the runtime probe uses the SAME decision) and is
+// imported here via loadMachinery() rather than duplicated, so the two probes
+// can never drift apart again (the F4 fail-open root cause).
 
 export function rootCatalogDrift(subcommands, rootCommands) {
   if (!Array.isArray(rootCommands) || rootCommands.length === 0) {
@@ -1059,7 +1058,7 @@ export function probeInstalledCliSubcommands(machinery, contract, rootHelp, time
         // subcommand (tolerance covers a nonzero exit status, not a probe that
         // never ran), so flag it and let --require-installed escalate it rather
         // than passing this path as drift-free.
-        if (subcommandHelpProbeIsUntrusted(subcommand, result)) {
+        if (machinery.subcommandHelpProbeIsUntrusted(subcommand, result)) {
           helpExitedNonzero = true;
         }
         warnings.push(
@@ -1069,7 +1068,7 @@ export function probeInstalledCliSubcommands(machinery, contract, rootHelp, time
         break;
       }
       outputs.push(result.output);
-      if (subcommandHelpProbeIsUntrusted(subcommand, result)) {
+      if (machinery.subcommandHelpProbeIsUntrusted(subcommand, result)) {
         helpExitedNonzero = true;
         warnings.push(
           `${contract.executable} ${[...commandPath, ...helpArgs].join(" ")} exited with status ${result.status}`
@@ -1128,7 +1127,7 @@ export function probeInstalledCliSubcommands(machinery, contract, rootHelp, time
   return probes;
 }
 
-function probeInstalledCliSurface(machinery, cli, timeoutMs = PROBE_TIMEOUT_MS) {
+export function probeInstalledCliSurface(machinery, cli, timeoutMs = PROBE_TIMEOUT_MS) {
   const contract = machinery.UPSTREAM_CLI_CONTRACTS[cli];
   const warnings = [];
   const outputs = [];
@@ -1159,6 +1158,12 @@ function probeInstalledCliSurface(machinery, cli, timeoutMs = PROBE_TIMEOUT_MS) 
         arityMismatches: [],
         enumMismatches: [],
         helpHash: null,
+        // `available:false` fails closed on its own, but contract.helpArgs can
+        // hold more than one entry (Codex `exec --help` + `exec resume --help`).
+        // Preserve any nonzero exit an EARLIER entry already produced rather than
+        // dropping it, so the reported signal stays honest (matches the runtime
+        // probeInstalledCliContract early return).
+        helpExitedNonzero,
         versionProbe: null,
         rootCommands: [],
         rootCatalogDrift: { added: [], removed: [] },
