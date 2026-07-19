@@ -87,6 +87,16 @@ export class PrepPipeline<C, H> {
    * dropping or double-running a phase.
    */
   resolve(provider: string): PrepStage<C, H>[] {
+    // ArgvAndMcp is a fixed provider sub-block (design 5.1.1), not a free stage:
+    // free ordinals are 10..50. Reject any attempt to register a stage at it so
+    // the "ordinals stop before ArgvAndMcp" invariant cannot be violated.
+    for (const stage of this.stages) {
+      if (stage.phase === PrepPhase.ArgvAndMcp) {
+        throw new Error(
+          "PrepPipeline: ArgvAndMcp is a fixed sub-block, not a registrable stage (design 5.1.1); free ordinals are 10..50"
+        );
+      }
+    }
     const byPhase = new Map<PrepPhase, PrepStage<C, H>>();
     // Two passes so a provider-specific stage always wins regardless of
     // registration order: seed defaults first, then let provider stages

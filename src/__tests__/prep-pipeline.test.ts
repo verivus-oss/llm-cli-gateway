@@ -94,6 +94,12 @@ describe("PrepPipeline", () => {
     expect(() => pipeline.run({ trace: [] }, "codex")).toThrow(/two 'codex' stages/);
   });
 
+  it("rejects a stage registered at the fixed ArgvAndMcp phase (design 5.1.1)", () => {
+    const pipeline = new PrepPipeline<Ctx, Resp>().register(stage("argv", PrepPhase.ArgvAndMcp));
+    expect(() => pipeline.run({ trace: [] }, "claude")).toThrow(/ArgvAndMcp is a fixed sub-block/);
+    expect(() => pipeline.orderedPhases("claude")).toThrow(/ArgvAndMcp is a fixed sub-block/);
+  });
+
   it("keeps PromptShape (optimize) strictly before Policy (approval)", () => {
     // Guards the design's load-bearing ordinal: optimize before approval.
     expect(PrepPhase.PromptShape).toBeLessThan(PrepPhase.Policy);
