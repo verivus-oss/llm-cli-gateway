@@ -206,5 +206,10 @@ describe("claude prep parity (Phase 0 CliRequestPrep acceptance net)", () => {
       mcpServers: ["definitely-not-a-gateway-server"],
     });
     expect(isPrep(p)).toBe(false); // createMcpConfigErrorResponse
+    // Pin the SPECIFIC Policy-gate error, not merely "not a prep": deleting the
+    // gate lets the request die later in ArgvAndMcp with a different message
+    // (strictMcpConfig unavailable-servers), which `isPrep === false` alone would
+    // not catch. Mirrors the strong lock in model-defaults.test.ts.
+    expect(JSON.stringify(p)).toContain("only permits gateway-managed MCP servers");
   });
 });
