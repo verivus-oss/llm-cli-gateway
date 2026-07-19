@@ -197,4 +197,14 @@ describe("claude prep parity (Phase 0 CliRequestPrep acceptance net)", () => {
     const p = prep({ debug: "-x" });
     expect(isPrep(p)).toBe(false);
   });
+
+  it("mcp_managed with a non-gateway MCP server halts (Policy managed-server gate)", () => {
+    // Policy phase (50): a managed request may only use gateway-managed MCP
+    // servers. A non-gateway name must halt before the ArgvAndMcp try / approval.
+    const p = prep({
+      approvalStrategy: "mcp_managed",
+      mcpServers: ["definitely-not-a-gateway-server"],
+    });
+    expect(isPrep(p)).toBe(false); // createMcpConfigErrorResponse
+  });
 });
