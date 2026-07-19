@@ -288,6 +288,7 @@ import {
 } from "./request-context.js";
 import { printDoctorJson } from "./doctor.js";
 import { redactDiagnosticUrl } from "./endpoint-exposure.js";
+import { PrepPhase, PrepPipeline, type PrepStage } from "./prep-pipeline.js";
 import { buildRemoteConnectorUrls } from "./remote-url.js";
 import {
   gatherConnectorSetupPacket,
@@ -4366,6 +4367,200 @@ function remoteCodexConfigOverrideError(
   );
 }
 
+/**
+ * Tier-A front-phase context threaded through the Claude PrepPipeline stages
+ * (design draft v5, section 5.1). Carries the request params plus the values the
+ * front phases produce and the entangled tail (Policy + cache-control + arg
+ * assembly + the ArgvAndMcp fence) consumes. The tail stays inline in
+ * `prepareClaudeRequest`; ordinals stop before ArgvAndMcp by design (5.1.1).
+ */
+interface ClaudePrepFrontContext {
+  readonly params: ClaudePrepParams;
+  readonly runtime: GatewayServerRuntime;
+  readonly corrId: string;
+  // Outputs produced by the front stages, consumed by the inline tail:
+  assembledPrompt: string;
+  stablePrefixHash: string | null;
+  stablePrefixTokens: number | null;
+  reviewIntegrity: ReviewIntegrityResult;
+  effectiveExplicitCacheControl: boolean;
+  cacheControlNoop: boolean;
+  effectivePrompt: string;
+}
+
+type ClaudePrepParams = Parameters<typeof prepareClaudeRequest>[0];
+type ClaudePrepStage = PrepStage<ClaudePrepFrontContext, ExtendedToolResponse>;
+
+/**
+ * InputGuards (phase 10): reject argv-injection via `debug` and, for remote
+ * principals, arbitrary host paths. Byte-identical to the former inline guards.
+ */
+const claudeInputGuardsStage: ClaudePrepStage = {
+  name: "claude:input-guards",
+  phase: PrepPhase.InputGuards,
+  provider: "claude",
+  run({ params, corrId }) {
+    if (typeof params.debug === "string" && params.debug.startsWith("-")) {
+      return {
+        kind: "halt",
+        response: createErrorResponse(
+          params.operation,
+          1,
+          "",
+          corrId,
+          new Error("debug must not start with '-' (argument injection prevention)")
+        ) as ExtendedToolResponse,
+      };
+    }
+    // H1: remote principals may not hand Claude arbitrary host paths / plugins.
+    const remoteFieldErr = remoteHostPathFieldError(params.operation, corrId, {
+      settings: params.settings,
+      systemPromptFile: params.systemPromptFile,
+      appendSystemPromptFile: params.appendSystemPromptFile,
+      pluginDir: params.pluginDir,
+      pluginUrl: params.pluginUrl,
+      debugFile: params.debugFile,
+    });
+    if (remoteFieldErr) return { kind: "halt", response: remoteFieldErr };
+    return { kind: "continue" };
+  },
+};
+
+/**
+ * InputResolve (phase 20): assemble the prompt (legacy `prompt` or `promptParts`)
+ * and capture the stable-prefix hash/token count for the flight recorder.
+ */
+const claudeInputResolveStage: ClaudePrepStage = {
+  name: "claude:input-resolve",
+  phase: PrepPhase.InputResolve,
+  provider: "claude",
+  run(ctx) {
+    const { params, corrId } = ctx;
+    const inputResolution = resolvePromptOrPartsForPrep({
+      prompt: params.prompt,
+      promptParts: params.promptParts,
+      operation: params.operation,
+      correlationId: corrId,
+    });
+    if (!inputResolution.ok) return { kind: "halt", response: inputResolution.error };
+    ctx.assembledPrompt = inputResolution.assembledPrompt;
+    ctx.stablePrefixHash = inputResolution.stablePrefixHash;
+    ctx.stablePrefixTokens = inputResolution.stablePrefixTokens;
+    return { kind: "continue" };
+  },
+};
+
+/**
+ * Integrity (phase 30): review-integrity check on the RAW assembled prompt
+ * (before optimization). Never halts; only records and logs violations.
+ */
+const claudeIntegrityStage: ClaudePrepStage = {
+  name: "claude:integrity",
+  phase: PrepPhase.Integrity,
+  provider: "claude",
+  run(ctx) {
+    const { params, runtime, corrId } = ctx;
+    const reviewIntegrity = checkReviewIntegrity({
+      prompt: ctx.assembledPrompt,
+      allowedTools: params.allowedTools,
+      disallowedTools: params.disallowedTools,
+    });
+    if (reviewIntegrity.violations.length > 0) {
+      runtime.logger.info(
+        `[${corrId}] Review integrity violations detected: ${reviewIntegrity.violations.map(v => v.type).join(", ")}`,
+        {
+          cli: "claude",
+          operation: params.operation,
+          score: reviewIntegrity.totalScore,
+        }
+      );
+    }
+    ctx.reviewIntegrity = reviewIntegrity;
+    return { kind: "continue" };
+  },
+};
+
+/**
+ * PromptShape (phase 40): the slice-κ cache-control early analysis, the
+ * optimize+cacheControl incompatibility guard (Rec #5), and prompt optimization
+ * (with its `logOptimizationTokens` telemetry). Runs BEFORE Policy/approval, and
+ * both Integrity and the later approval read the RAW prompt; only
+ * `effectivePrompt` is rewritten here.
+ */
+const claudePromptShapeStage: ClaudePrepStage = {
+  name: "claude:prompt-shape",
+  phase: PrepPhase.PromptShape,
+  provider: "claude",
+  run(ctx) {
+    const { params, corrId } = ctx;
+    // Rec #5 (slice κ): refuse the optimizePrompt + cacheControl combo before
+    // running optimization. Optimization rewrites the assembled prompt text the
+    // flight-recorder logs, but the κ stdin payload is built from raw
+    // `promptParts` content blocks; letting both run produces a FR row whose
+    // `prompt` no longer matches what Claude actually received, AND any
+    // optimisation-driven text change would silently break Anthropic
+    // prefix-cache reuse on the next call.
+    const ccEarly = params.promptParts?.cacheControl;
+    const cacheControlRequestedEarly = !!(
+      ccEarly &&
+      (ccEarly.system || ccEarly.tools || ccEarly.context)
+    );
+    const explicitCacheControlBlockCount =
+      params.promptParts && ccEarly
+        ? (ccEarly.system && params.promptParts.system && params.promptParts.system.length > 0
+            ? 1
+            : 0) +
+          (ccEarly.tools && params.promptParts.tools && params.promptParts.tools.length > 0
+            ? 1
+            : 0) +
+          (ccEarly.context && params.promptParts.context && params.promptParts.context.length > 0
+            ? 1
+            : 0)
+        : 0;
+    ctx.effectiveExplicitCacheControl = explicitCacheControlBlockCount > 0;
+    ctx.cacheControlNoop = cacheControlRequestedEarly && !ctx.effectiveExplicitCacheControl;
+
+    if (params.optimizePrompt && ctx.effectiveExplicitCacheControl) {
+      return {
+        kind: "halt",
+        response: createErrorResponse(
+          params.operation,
+          1,
+          "",
+          corrId,
+          new Error(
+            "optimizePrompt is incompatible with promptParts.cacheControl (slice κ): optimization rewrites the assembled prompt text the flight recorder logs, while the cache_control payload is built from raw promptParts; the two would desync and break Anthropic prefix-cache reuse. Disable optimizePrompt when opting into cacheControl."
+          )
+        ) as ExtendedToolResponse,
+      };
+    }
+
+    let effectivePrompt = ctx.assembledPrompt;
+    if (params.optimizePrompt) {
+      const optimized = optimizePromptText(effectivePrompt);
+      logOptimizationTokens("prompt", corrId, effectivePrompt, optimized);
+      effectivePrompt = optimized;
+    }
+    ctx.effectivePrompt = effectivePrompt;
+    return { kind: "continue" };
+  },
+};
+
+/**
+ * The Claude Tier-A front pipeline (phases 10-40). The entangled tail (Policy,
+ * cache-control auto-emit, arg assembly, and the ArgvAndMcp fence) remains inline
+ * in `prepareClaudeRequest`; ordinals stop before ArgvAndMcp by design (5.1.1).
+ */
+const claudePrepFrontPipeline = new PrepPipeline<
+  ClaudePrepFrontContext,
+  ExtendedToolResponse
+>().registerAll([
+  claudeInputGuardsStage,
+  claudeInputResolveStage,
+  claudeIntegrityStage,
+  claudePromptShapeStage,
+]);
+
 export function prepareClaudeRequest(
   params: {
     prompt?: string;
@@ -4439,98 +4634,28 @@ export function prepareClaudeRequest(
   const cliInfo = getCliInfo();
   const resolvedModel = resolveModelAlias("claude", params.model, cliInfo);
 
-  if (typeof params.debug === "string" && params.debug.startsWith("-")) {
-    return createErrorResponse(
-      params.operation,
-      1,
-      "",
-      corrId,
-      new Error("debug must not start with '-' (argument injection prevention)")
-    ) as ExtendedToolResponse;
-  }
-
-  // H1: remote principals may not hand Claude arbitrary host paths / plugins.
-  const remoteFieldErr = remoteHostPathFieldError(params.operation, corrId, {
-    settings: params.settings,
-    systemPromptFile: params.systemPromptFile,
-    appendSystemPromptFile: params.appendSystemPromptFile,
-    pluginDir: params.pluginDir,
-    pluginUrl: params.pluginUrl,
-    debugFile: params.debugFile,
-  });
-  if (remoteFieldErr) return remoteFieldErr;
-
-  const inputResolution = resolvePromptOrPartsForPrep({
-    prompt: params.prompt,
-    promptParts: params.promptParts,
-    operation: params.operation,
-    correlationId: corrId,
-  });
-  if (!inputResolution.ok) return inputResolution.error;
-  const assembledPrompt = inputResolution.assembledPrompt;
-  const stablePrefixHash = inputResolution.stablePrefixHash;
-  const stablePrefixTokens = inputResolution.stablePrefixTokens;
-
-  // Review integrity check on raw prompt (before optimization)
-  const reviewIntegrity = checkReviewIntegrity({
-    prompt: assembledPrompt,
-    allowedTools: params.allowedTools,
-    disallowedTools: params.disallowedTools,
-  });
-  if (reviewIntegrity.violations.length > 0) {
-    runtime.logger.info(
-      `[${corrId}] Review integrity violations detected: ${reviewIntegrity.violations.map(v => v.type).join(", ")}`,
-      {
-        cli: "claude",
-        operation: params.operation,
-        score: reviewIntegrity.totalScore,
-      }
-    );
-  }
-
-  // Rec #5 (slice κ): refuse the optimizePrompt + cacheControl combo
-  // before running optimization. Optimization rewrites the assembled
-  // prompt text the flight-recorder logs, but the κ stdin payload is
-  // built from raw `promptParts` content blocks — letting both run
-  // produces a FR row whose `prompt` no longer matches what Claude
-  // actually received, AND any optimisation-driven text change would
-  // silently break Anthropic prefix-cache reuse on the next call.
-  const ccEarly = params.promptParts?.cacheControl;
-  const cacheControlRequestedEarly = !!(
-    ccEarly &&
-    (ccEarly.system || ccEarly.tools || ccEarly.context)
-  );
-  const explicitCacheControlBlockCount =
-    params.promptParts && ccEarly
-      ? (ccEarly.system && params.promptParts.system && params.promptParts.system.length > 0
-          ? 1
-          : 0) +
-        (ccEarly.tools && params.promptParts.tools && params.promptParts.tools.length > 0 ? 1 : 0) +
-        (ccEarly.context && params.promptParts.context && params.promptParts.context.length > 0
-          ? 1
-          : 0)
-      : 0;
-  const effectiveExplicitCacheControl = explicitCacheControlBlockCount > 0;
-  const cacheControlNoop = cacheControlRequestedEarly && !effectiveExplicitCacheControl;
-
-  if (params.optimizePrompt && effectiveExplicitCacheControl) {
-    return createErrorResponse(
-      params.operation,
-      1,
-      "",
-      corrId,
-      new Error(
-        "optimizePrompt is incompatible with promptParts.cacheControl (slice κ): optimization rewrites the assembled prompt text the flight recorder logs, while the cache_control payload is built from raw promptParts; the two would desync and break Anthropic prefix-cache reuse. Disable optimizePrompt when opting into cacheControl."
-      )
-    ) as ExtendedToolResponse;
-  }
-
-  let effectivePrompt = assembledPrompt;
-  if (params.optimizePrompt) {
-    const optimized = optimizePromptText(effectivePrompt);
-    logOptimizationTokens("prompt", corrId, effectivePrompt, optimized);
-    effectivePrompt = optimized;
-  }
+  // Tier-A front phases (InputGuards, InputResolve, Integrity, PromptShape) run
+  // through the PrepPipeline (design draft v5, section 5.1). The entangled tail
+  // below (Policy interleaved with cache-control auto-emit, arg assembly, and the
+  // ArgvAndMcp fence) stays inline; ordinals stop before ArgvAndMcp (5.1.1).
+  const front: ClaudePrepFrontContext = {
+    params,
+    runtime,
+    corrId,
+    assembledPrompt: "",
+    stablePrefixHash: null,
+    stablePrefixTokens: null,
+    reviewIntegrity: undefined as unknown as ReviewIntegrityResult,
+    effectiveExplicitCacheControl: false,
+    cacheControlNoop: false,
+    effectivePrompt: "",
+  };
+  const frontResult = claudePrepFrontPipeline.run(front, "claude");
+  if (frontResult.kind === "halted") return frontResult.response;
+  const { assembledPrompt, stablePrefixHash, stablePrefixTokens, reviewIntegrity } = front;
+  const effectiveExplicitCacheControl = front.effectiveExplicitCacheControl;
+  const cacheControlNoop = front.cacheControlNoop;
+  const effectivePrompt = front.effectivePrompt;
 
   const requestedMcpServers = params.mcpServers ? [...new Set(params.mcpServers)] : [];
   if (params.approvalStrategy === "mcp_managed") {
