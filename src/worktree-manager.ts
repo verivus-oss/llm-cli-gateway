@@ -665,24 +665,34 @@ export async function removeWorktreeWithResult(opts: RemoveWorktreeOptions): Pro
     logWarn(logger, "Skipping cleanup for a non-managed worktree path");
     return false;
   }
-  if (
-    managed.exists &&
-    (!managed.name ||
-      !(await validateManagedWorktreeIdentity({
-        repoRoot: managed.repoRoot,
-        path: managed.path,
-        name: managed.name,
-        logger,
-      })))
-  ) {
-    logWarn(logger, "Skipping cleanup because the live path is not the expected Git worktree");
-    return false;
-  }
+  // Coalesce concurrent cleanup claims for the same managed worktree BEFORE any
+  // git-mutating or git-reading work. `managedWorktreeForCleanup` is synchronous,
+  // so this get/create/set runs in a single synchronous turn with no await
+  // between the get and the set: the first claim registers the removal promise
+  // and every
+  // concurrent claim awaits that same promise as a silent no-op. The identity
+  // validation lives inside the removal promise (below) so exactly one claim
+  // performs it. Previously validation ran here, before the dedup check, so a
+  // losing claim could validate a path the winning claim was concurrently
+  // removing and emit a spurious "not the expected Git worktree" warning.
   const removalKey = `${managed.repoRoot}\0${managed.path}`;
   const existingRemoval = worktreeRemovals.get(removalKey);
   if (existingRemoval) return existingRemoval;
 
   const removal = (async (): Promise<boolean> => {
+    if (
+      managed.exists &&
+      (!managed.name ||
+        !(await validateManagedWorktreeIdentity({
+          repoRoot: managed.repoRoot,
+          path: managed.path,
+          name: managed.name,
+          logger,
+        })))
+    ) {
+      logWarn(logger, "Skipping cleanup because the live path is not the expected Git worktree");
+      return false;
+    }
     let remove: Awaited<ReturnType<typeof execGit>>;
     try {
       remove = await execGit(
