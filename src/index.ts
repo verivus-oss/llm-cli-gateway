@@ -4378,7 +4378,7 @@ interface ClaudePrepFrontContext {
   readonly params: ClaudePrepParams;
   readonly runtime: GatewayServerRuntime;
   readonly corrId: string;
-  // Outputs produced by the front stages, consumed by the inline tail:
+  // Outputs produced by the InputResolve/Integrity/PromptShape stages:
   assembledPrompt: string;
   stablePrefixHash: string | null;
   stablePrefixTokens: number | null;
@@ -4386,6 +4386,14 @@ interface ClaudePrepFrontContext {
   effectiveExplicitCacheControl: boolean;
   cacheControlNoop: boolean;
   effectivePrompt: string;
+  // Outputs produced by the Policy stage (phase 50), consumed by the inline
+  // ArgvAndMcp tail and the inline approval decision:
+  requestedMcpServers: ClaudeMcpServerName[];
+  isGatewayOwnedKitExecution: boolean;
+  effectiveStrictMcpConfig: boolean;
+  managedRiskReasons: string[];
+  directPermissionBypass: boolean;
+  rawBypassRequested: boolean;
 }
 
 type ClaudePrepParams = Parameters<typeof prepareClaudeRequest>[0];
@@ -4547,11 +4555,105 @@ const claudePromptShapeStage: ClaudePrepStage = {
 };
 
 /**
- * The Claude Tier-A front pipeline (phases 10-40). The entangled tail (Policy,
- * cache-control auto-emit, arg assembly, and the ArgvAndMcp fence) remains inline
- * in `prepareClaudeRequest`; ordinals stop before ArgvAndMcp by design (5.1.1).
+ * Policy (phase 50): the managed-risk assessment and managed-config policy that
+ * feed the approval decision and the ArgvAndMcp block. Collects `managedRiskReasons`
+ * (which alter effective authority after approval), computes the effective strict
+ * MCP-config policy, and gates a managed request that requests non-gateway MCP
+ * servers. Byte-identical to the former inline pre-`try` block. The
+ * `approvalManager.decide` execution itself stays inline in the ArgvAndMcp `try`
+ * because reordering it against the arg-size admission checks it currently follows
+ * would change behavior; Policy here produces the inputs it consumes.
  */
-const claudePrepFrontPipeline = new PrepPipeline<
+const claudePolicyStage: ClaudePrepStage = {
+  name: "claude:policy",
+  phase: PrepPhase.Policy,
+  provider: "claude",
+  run(ctx) {
+    const { params, corrId } = ctx;
+    const requestedMcpServers = params.mcpServers ? [...new Set(params.mcpServers)] : [];
+    if (params.approvalStrategy === "mcp_managed") {
+      const nonGatewayMcpServers = requestedMcpServers.filter(
+        server => !CLAUDE_MCP_SERVER_NAMES.includes(server)
+      );
+      if (nonGatewayMcpServers.length > 0) {
+        return {
+          kind: "halt",
+          response: createMcpConfigErrorResponse(
+            params.operation,
+            corrId,
+            requestedMcpServers,
+            `approvalStrategy:mcp_managed only permits gateway-managed MCP servers; rejected: ${nonGatewayMcpServers.join(", ")}`,
+            nonGatewayMcpServers
+          ) as ExtendedToolResponse,
+        };
+      }
+    }
+    // A managed request must not inherit ambient Claude MCP configuration. The
+    // Personal Kit path is the exception: it forces Claude safe mode, which
+    // disables MCP, and intentionally avoids the shared generated config file.
+    const isGatewayOwnedKitExecution = params.kitAppendSystemPromptFile !== undefined;
+    const effectiveStrictMcpConfig =
+      params.approvalStrategy === "mcp_managed" ? true : params.strictMcpConfig;
+    // Under MCP-managed approval, unverified settings, instruction overrides,
+    // agents, plugins, native continuation, and explicit permission allow rules
+    // can alter the effective authority after the approval decision. Record them
+    // as bypass requests, then require the operator authorization gate. The
+    // environment switch must never turn an ordinary request into an unsandboxed
+    // one by itself.
+    const managedRiskReasons: string[] = [];
+    const directPermissionBypass =
+      params.permissionMode !== undefined
+        ? params.permissionMode === "bypassPermissions"
+        : params.dangerouslySkipPermissions === true;
+    if (directPermissionBypass) managedRiskReasons.push("permission_bypass");
+    if (hasNonEmptyString(params.settings)) managedRiskReasons.push("settings");
+    if (hasNonEmptyString(params.settingSources)) managedRiskReasons.push("setting_sources");
+    if (params.systemPrompt !== undefined) managedRiskReasons.push("system_prompt");
+    if (params.appendSystemPrompt !== undefined) {
+      managedRiskReasons.push("append_system_prompt");
+    }
+    if (hasNonEmptyString(params.agent)) managedRiskReasons.push("agent");
+    if (hasNonEmptyObject(params.agents)) managedRiskReasons.push("agents");
+    if (params.forkSession === true) managedRiskReasons.push("native_fork");
+    if (hasNonEmptyStringArray(params.pluginDir)) managedRiskReasons.push("plugin_dir");
+    if (hasNonEmptyStringArray(params.pluginUrl)) managedRiskReasons.push("plugin_url");
+    if (hasNonEmptyStringArray(params.allowedTools)) managedRiskReasons.push("allowed_tools");
+    if (hasNonEmptyStringArray(params.tools)) managedRiskReasons.push("builtin_tools");
+    if (hasNonEmptyStringArray(params.addDir)) managedRiskReasons.push("additional_workspace_dir");
+    if (hasNonEmptyString(params.workingDir)) managedRiskReasons.push("primary_workspace_dir");
+    if (hasNonEmptyString(params.systemPromptFile)) managedRiskReasons.push("system_prompt_file");
+    if (hasNonEmptyString(params.appendSystemPromptFile)) {
+      managedRiskReasons.push("append_system_prompt_file");
+    }
+    if (hasNonEmptyString(params.debugFile)) managedRiskReasons.push("debug_file");
+    // Kit owns its safe/bare startup isolation. Every caller-provided instance
+    // is a managed repository-rule suppression and must pass the same gate.
+    if (params.safeMode === true && !isGatewayOwnedKitExecution) {
+      managedRiskReasons.push("safe_mode");
+    }
+    if (params.bare === true && !isGatewayOwnedKitExecution) {
+      managedRiskReasons.push("bare_mode");
+    }
+    if (params.nativeResumeRequested === true) managedRiskReasons.push("native_resume");
+    if (params.gatewayWorktreeRequested === true) managedRiskReasons.push("gateway_worktree");
+
+    ctx.requestedMcpServers = requestedMcpServers;
+    ctx.isGatewayOwnedKitExecution = isGatewayOwnedKitExecution;
+    ctx.effectiveStrictMcpConfig = effectiveStrictMcpConfig;
+    ctx.managedRiskReasons = managedRiskReasons;
+    ctx.directPermissionBypass = directPermissionBypass;
+    ctx.rawBypassRequested = managedRiskReasons.length > 0;
+    return { kind: "continue" };
+  },
+};
+
+/**
+ * The Claude Tier-A prep pipeline (phases 10-50). The fixed ArgvAndMcp sub-block
+ * (cache-control auto-emit, arg assembly, and the MCP materialize/insert/re-admit
+ * fence) remains inline in `prepareClaudeRequest`; ordinals stop before ArgvAndMcp
+ * by design (5.1.1). The approval decision also stays inline (see claudePolicyStage).
+ */
+const claudePrepPipeline = new PrepPipeline<
   ClaudePrepFrontContext,
   ExtendedToolResponse
 >().registerAll([
@@ -4559,6 +4661,7 @@ const claudePrepFrontPipeline = new PrepPipeline<
   claudeInputResolveStage,
   claudeIntegrityStage,
   claudePromptShapeStage,
+  claudePolicyStage,
 ]);
 
 export function prepareClaudeRequest(
@@ -4634,10 +4737,11 @@ export function prepareClaudeRequest(
   const cliInfo = getCliInfo();
   const resolvedModel = resolveModelAlias("claude", params.model, cliInfo);
 
-  // Tier-A front phases (InputGuards, InputResolve, Integrity, PromptShape) run
-  // through the PrepPipeline (design draft v5, section 5.1). The entangled tail
-  // below (Policy interleaved with cache-control auto-emit, arg assembly, and the
-  // ArgvAndMcp fence) stays inline; ordinals stop before ArgvAndMcp (5.1.1).
+  // Tier-A phases (InputGuards, InputResolve, Integrity, PromptShape, Policy) run
+  // through the PrepPipeline (design draft v5, sections 5.1 / 5.1.1). The fixed
+  // ArgvAndMcp sub-block below (cache-control auto-emit, arg assembly, and the MCP
+  // materialize/insert/re-admit fence) plus the approval decision stay inline;
+  // ordinals stop before ArgvAndMcp (5.1.1).
   const front: ClaudePrepFrontContext = {
     params,
     runtime,
@@ -4649,78 +4753,28 @@ export function prepareClaudeRequest(
     effectiveExplicitCacheControl: false,
     cacheControlNoop: false,
     effectivePrompt: "",
+    requestedMcpServers: [],
+    isGatewayOwnedKitExecution: false,
+    effectiveStrictMcpConfig: false,
+    managedRiskReasons: [],
+    directPermissionBypass: false,
+    rawBypassRequested: false,
   };
-  const frontResult = claudePrepFrontPipeline.run(front, "claude");
+  const frontResult = claudePrepPipeline.run(front, "claude");
   if (frontResult.kind === "halted") return frontResult.response;
   const { assembledPrompt, stablePrefixHash, stablePrefixTokens, reviewIntegrity } = front;
   const effectiveExplicitCacheControl = front.effectiveExplicitCacheControl;
   const cacheControlNoop = front.cacheControlNoop;
   const effectivePrompt = front.effectivePrompt;
+  const {
+    requestedMcpServers,
+    isGatewayOwnedKitExecution,
+    effectiveStrictMcpConfig,
+    managedRiskReasons,
+    directPermissionBypass,
+    rawBypassRequested,
+  } = front;
 
-  const requestedMcpServers = params.mcpServers ? [...new Set(params.mcpServers)] : [];
-  if (params.approvalStrategy === "mcp_managed") {
-    const nonGatewayMcpServers = requestedMcpServers.filter(
-      server => !CLAUDE_MCP_SERVER_NAMES.includes(server)
-    );
-    if (nonGatewayMcpServers.length > 0) {
-      return createMcpConfigErrorResponse(
-        params.operation,
-        corrId,
-        requestedMcpServers,
-        `approvalStrategy:mcp_managed only permits gateway-managed MCP servers; rejected: ${nonGatewayMcpServers.join(", ")}`,
-        nonGatewayMcpServers
-      ) as ExtendedToolResponse;
-    }
-  }
-  // A managed request must not inherit ambient Claude MCP configuration. The
-  // Personal Kit path is the exception: it forces Claude safe mode, which
-  // disables MCP, and intentionally avoids the shared generated config file.
-  const isGatewayOwnedKitExecution = params.kitAppendSystemPromptFile !== undefined;
-  const effectiveStrictMcpConfig =
-    params.approvalStrategy === "mcp_managed" ? true : params.strictMcpConfig;
-  // Under MCP-managed approval, unverified settings, instruction overrides,
-  // agents, plugins, native continuation, and explicit permission allow rules
-  // can alter the effective authority after the approval decision. Record them
-  // as bypass requests, then require the operator authorization gate. The
-  // environment switch must never turn an ordinary request into an unsandboxed
-  // one by itself.
-  const managedRiskReasons: string[] = [];
-  const directPermissionBypass =
-    params.permissionMode !== undefined
-      ? params.permissionMode === "bypassPermissions"
-      : params.dangerouslySkipPermissions === true;
-  if (directPermissionBypass) managedRiskReasons.push("permission_bypass");
-  if (hasNonEmptyString(params.settings)) managedRiskReasons.push("settings");
-  if (hasNonEmptyString(params.settingSources)) managedRiskReasons.push("setting_sources");
-  if (params.systemPrompt !== undefined) managedRiskReasons.push("system_prompt");
-  if (params.appendSystemPrompt !== undefined) {
-    managedRiskReasons.push("append_system_prompt");
-  }
-  if (hasNonEmptyString(params.agent)) managedRiskReasons.push("agent");
-  if (hasNonEmptyObject(params.agents)) managedRiskReasons.push("agents");
-  if (params.forkSession === true) managedRiskReasons.push("native_fork");
-  if (hasNonEmptyStringArray(params.pluginDir)) managedRiskReasons.push("plugin_dir");
-  if (hasNonEmptyStringArray(params.pluginUrl)) managedRiskReasons.push("plugin_url");
-  if (hasNonEmptyStringArray(params.allowedTools)) managedRiskReasons.push("allowed_tools");
-  if (hasNonEmptyStringArray(params.tools)) managedRiskReasons.push("builtin_tools");
-  if (hasNonEmptyStringArray(params.addDir)) managedRiskReasons.push("additional_workspace_dir");
-  if (hasNonEmptyString(params.workingDir)) managedRiskReasons.push("primary_workspace_dir");
-  if (hasNonEmptyString(params.systemPromptFile)) managedRiskReasons.push("system_prompt_file");
-  if (hasNonEmptyString(params.appendSystemPromptFile)) {
-    managedRiskReasons.push("append_system_prompt_file");
-  }
-  if (hasNonEmptyString(params.debugFile)) managedRiskReasons.push("debug_file");
-  // Kit owns its safe/bare startup isolation. Every caller-provided instance
-  // is a managed repository-rule suppression and must pass the same gate.
-  if (params.safeMode === true && !isGatewayOwnedKitExecution) {
-    managedRiskReasons.push("safe_mode");
-  }
-  if (params.bare === true && !isGatewayOwnedKitExecution) {
-    managedRiskReasons.push("bare_mode");
-  }
-  if (params.nativeResumeRequested === true) managedRiskReasons.push("native_resume");
-  if (params.gatewayWorktreeRequested === true) managedRiskReasons.push("gateway_worktree");
-  const rawBypassRequested = managedRiskReasons.length > 0;
   let mcpConfig: ClaudeMcpConfigResult | undefined;
   let mcpConfigHandedOff = false;
   try {

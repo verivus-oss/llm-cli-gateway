@@ -26,8 +26,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
-import { logger, prepareClaudeRequest } from "../index.js";
+import { logger, prepareClaudeRequest, type GatewayServerRuntime } from "../index.js";
 import { estimateTokens, optimizePrompt } from "../optimizer.js";
+import { noopLogger } from "../logger.js";
 
 const BASE_PARAMS = {
   prompt: "PROMPT",
@@ -43,6 +44,35 @@ const BASE_PARAMS = {
 function prep(extra: Record<string, unknown>): Record<string, unknown> {
   const result = prepareClaudeRequest({ ...BASE_PARAMS, ...extra } as never);
   return result as unknown as Record<string, unknown>;
+}
+
+/**
+ * A runtime whose approvalManager.decide captures the `managedRiskReasons` the
+ * Policy stage threaded into the approval request, then approves. This observes
+ * the Policy output directly, avoiding the singleton runtime's approvals-file
+ * write (both reviewers' recipe for a deterministic per-reason lock).
+ */
+function capturingRuntime(sink: { managedRiskReasons?: string[] }): GatewayServerRuntime {
+  return {
+    logger: noopLogger,
+    cacheAwareness: {
+      emitAnthropicCacheControl: false,
+      anthropicTtlSeconds: 300,
+      warnOnTtlExpiry: false,
+      minStableTokensForCacheControl: { sonnet: 1024, opus: 4096, haiku: 4096, default: 4096 },
+      sources: { configFile: null },
+    },
+    approvalManager: {
+      decide: (request: { metadata?: { managedRiskReasons?: string[] } }) => {
+        sink.managedRiskReasons = request.metadata?.managedRiskReasons;
+        return { status: "approved" };
+      },
+    },
+  } as unknown as GatewayServerRuntime;
+}
+
+function prepWith(extra: Record<string, unknown>, runtime: GatewayServerRuntime): void {
+  prepareClaudeRequest({ ...BASE_PARAMS, ...extra } as never, runtime);
 }
 
 function isPrep(result: Record<string, unknown>): boolean {
@@ -196,5 +226,69 @@ describe("claude prep parity (Phase 0 CliRequestPrep acceptance net)", () => {
   it("debug starting with '-' halts with an argument-injection error (input guard)", () => {
     const p = prep({ debug: "-x" });
     expect(isPrep(p)).toBe(false);
+  });
+
+  it("mcp_managed with a non-gateway MCP server halts (Policy managed-server gate)", () => {
+    // Policy phase (50): a managed request may only use gateway-managed MCP
+    // servers. A non-gateway name must halt before the ArgvAndMcp try / approval.
+    const p = prep({
+      approvalStrategy: "mcp_managed",
+      mcpServers: ["definitely-not-a-gateway-server"],
+    });
+    expect(isPrep(p)).toBe(false); // createMcpConfigErrorResponse
+    // Pin the SPECIFIC Policy-gate error, not merely "not a prep": deleting the
+    // gate lets the request die later in ArgvAndMcp with a different message
+    // (strictMcpConfig unavailable-servers), which `isPrep === false` alone would
+    // not catch. Mirrors the strong lock in model-defaults.test.ts.
+    expect(JSON.stringify(p)).toContain("only permits gateway-managed MCP servers");
+  });
+
+  // Per-reason lock for the Policy stage's managedRiskReasons collection. Each
+  // case sets exactly one input and asserts the exact reason label the Policy
+  // stage threads into the approval request. Dropping or relabelling any push
+  // in claudePolicyStage flips the matching case red.
+  const RISK_REASON_CASES: Array<[string, Record<string, unknown>]> = [
+    ["permission_bypass", { dangerouslySkipPermissions: true }],
+    ["permission_bypass", { permissionMode: "bypassPermissions" }],
+    ["settings", { settings: "SETTINGS" }],
+    ["setting_sources", { settingSources: "project" }],
+    ["system_prompt", { systemPrompt: "SYS" }],
+    ["append_system_prompt", { appendSystemPrompt: "APP" }],
+    ["agent", { agent: "reviewer" }],
+    ["agents", { agents: { helper: { description: "d", prompt: "p" } } }],
+    ["native_fork", { forkSession: true }],
+    ["plugin_dir", { pluginDir: ["/tmp/plugins"] }],
+    ["plugin_url", { pluginUrl: ["https://example.com/p"] }],
+    ["allowed_tools", { allowedTools: ["Bash"] }],
+    ["builtin_tools", { tools: ["Read"] }],
+    ["additional_workspace_dir", { addDir: ["/tmp/ws"] }],
+    ["primary_workspace_dir", { workingDir: "/tmp/root" }],
+    ["system_prompt_file", { systemPromptFile: "/tmp/sys.txt" }],
+    ["append_system_prompt_file", { appendSystemPromptFile: "/tmp/app.txt" }],
+    ["debug_file", { debugFile: "/tmp/debug.log" }],
+    ["safe_mode", { safeMode: true }],
+    ["bare_mode", { bare: true }],
+    ["native_resume", { nativeResumeRequested: true }],
+    ["gateway_worktree", { gatewayWorktreeRequested: true }],
+  ];
+
+  it.each(RISK_REASON_CASES)(
+    "Policy threads managed-risk reason %s to the approval request",
+    (reason, extra) => {
+      const sink: { managedRiskReasons?: string[] } = {};
+      // approvalStrategy:mcp_managed is the only path that reaches decide; empty
+      // mcpServers passes the managed-server gate so the request reaches approval.
+      prepWith(
+        { approvalStrategy: "mcp_managed", mcpServers: [], ...extra },
+        capturingRuntime(sink)
+      );
+      expect(sink.managedRiskReasons).toEqual([reason]);
+    }
+  );
+
+  it("Policy emits no managed-risk reasons for a clean managed request", () => {
+    const sink: { managedRiskReasons?: string[] } = {};
+    prepWith({ approvalStrategy: "mcp_managed", mcpServers: [] }, capturingRuntime(sink));
+    expect(sink.managedRiskReasons).toEqual([]);
   });
 });
