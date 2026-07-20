@@ -29,7 +29,6 @@ import {
 import { isDefaultTransient } from "./retry.js";
 import { parseStreamJson } from "./stream-json-parser.js";
 import { parseCodexJsonStream, codexDisplayText, codexFrResponse } from "./codex-json-parser.js";
-import { grokDisplayText } from "./grok-json-parser.js";
 import {
   createPersonalKitTerminalMetadata,
   extractProviderOutputMetadata,
@@ -289,6 +288,7 @@ import {
 import { printDoctorJson } from "./doctor.js";
 import { redactDiagnosticUrl } from "./endpoint-exposure.js";
 import { PrepPhase, PrepPipeline, type PrepStage } from "./prep-pipeline.js";
+import { applyProviderDisplayText } from "./provider-display.js";
 import { buildRemoteConnectorUrls } from "./remote-url.js";
 import {
   gatherConnectorSetupPacket,
@@ -6650,30 +6650,14 @@ export function buildCliResponse(
   compressResponse = false
 ): ExtendedToolResponse {
   const trackingOnlySession = isGatewayTrackingOnlySession(cli, sessionId);
-  let finalStdout = stdout;
-  // #44: codex always runs with `--json` (so usage/cache tokens are always
-  // recorded), but in the default `text` mode the caller expects the plain
-  // reply, not the raw JSONL event stream. codexDisplayText() reconstructs the
-  // final agent_message (== codex text-mode stdout) with a fallback chain that
-  // never leaks raw JSONL. The raw `stdout` is still passed unchanged to
-  // extractUsageAndCost() below, so telemetry is parsed from the events
-  // regardless of this display swap. `json` mode (opt-in) returns raw JSONL.
-  // Done before the optimize / review-integrity steps so they operate on the
-  // human reply.
-  if (cli === "codex" && outputFormat !== "json") {
-    finalStdout = codexDisplayText(stdout);
-  }
-  // Phase 7: grok `--output-format streaming-json` emits raw NDJSON delta
-  // events, which are not a human reply. grokDisplayText() concatenates the
-  // `text` deltas into the final reply (and never leaks raw NDJSON), mirroring
-  // the codex display swap above. `json` mode is returned verbatim (the caller
-  // asked for the raw object) and `plain` is returned unchanged, so this is a
-  // no-op outside streaming-json. Raw `stdout` is still passed unchanged to
-  // extractUsageAndCost() below, so telemetry parsing is unaffected. Done before
-  // the optimize / review-integrity steps so they operate on the human reply.
-  if (cli === "grok") {
-    finalStdout = grokDisplayText(outputFormat, stdout);
-  }
+  // Provider display swap (design 5.4): codex reconstructs the final
+  // agent_message from its raw JSONL; grok concatenates streaming-json text
+  // deltas. The raw `stdout` is still passed unchanged to extractUsageAndCost()
+  // below, so telemetry parsing is unaffected. `json` mode returns raw. Done
+  // before optimize / compress / review-integrity so they operate on the human
+  // reply. The inline path applies grok display (applyGrokDisplay: true); the
+  // llm_job_result readback passes false, keeping its current asymmetry.
+  let finalStdout = applyProviderDisplayText({ cli, outputFormat, stdout, applyGrokDisplay: true });
   // Skip response optimization for JSON output to prevent corrupting structured data
   if (optimizeResponse && outputFormat !== "json") {
     const optimized = optimizeResponseText(finalStdout);
@@ -20442,13 +20426,17 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         // in-memory job record. Token usage was already recorded to the flight
         // recorder at job completion, so this display swap loses nothing. `json`
         // mode returns the raw JSONL.
-        if (
-          !rawOutput &&
-          asyncJobManager.getJobCli(jobId) === "codex" &&
-          outputFormat !== "json" &&
-          result.stdout
-        ) {
-          result.stdout = codexDisplayText(result.stdout);
+        if (!rawOutput && result.stdout) {
+          // Same shared display helper the sync path uses (design 5.4), but with
+          // applyGrokDisplay: false so the readback keeps its current behavior
+          // (codex reconstructs; grok stays raw). A codex job swaps; grok/claude
+          // are unchanged, byte-identical to the former codex-only branch.
+          result.stdout = applyProviderDisplayText({
+            cli: asyncJobManager.getJobCli(jobId) ?? "unknown",
+            outputFormat,
+            stdout: result.stdout,
+            applyGrokDisplay: false,
+          });
         }
 
         // Native compressor (spec 5.2): honor the job's PERSISTED effective
