@@ -18,6 +18,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createGatewayServer } from "../index.js";
+import { grokDisplayText } from "../grok-json-parser.js";
 import { AsyncJobManager } from "../async-job-manager.js";
 import { MemoryJobStore } from "../job-store.js";
 import { FlightRecorder } from "../flight-recorder.js";
@@ -160,6 +161,25 @@ describe("Phase 7 B3: llm_job_result remote redaction of providerSessionId", () 
     const local = await call("llm_job_result", { jobId: "job-local", maxChars: 200000 }, undefined);
     expect(local.success).toBe(true);
     expect(local.result.providerSessionId).toBe(PROVIDER_SESSION_ID);
+  });
+
+  it("grok streaming-json readback preserves raw NDJSON (locked display asymmetry)", async () => {
+    // Design 5.4: the llm_job_result readback routes through the shared
+    // applyProviderDisplayText helper with applyGrokDisplay=false, so a grok
+    // streaming-json job's stdout stays RAW NDJSON on readback (the inline
+    // buildCliResponse path would reconstruct it). Flipping the readback flag to
+    // true (an intentional asymmetry fix) makes stdout the reconstructed reply
+    // and flips this red on purpose.
+    seedGrokJob("job-grok-display", "local");
+    const res = await call(
+      "llm_job_result",
+      { jobId: "job-grok-display", maxChars: 200000 },
+      undefined
+    );
+    expect(res.success).toBe(true);
+    expect(res.result.stdout).toBe(GROK_STDOUT);
+    // Not the grokDisplayText-reconstructed reply that the inline path produces.
+    expect(res.result.stdout).not.toBe(grokDisplayText("streaming-json", GROK_STDOUT));
   });
 
   it("llm_job_status never carries a provider session id (remote or local)", async () => {
