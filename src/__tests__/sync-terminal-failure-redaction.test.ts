@@ -12,6 +12,7 @@ vi.mock("../executor.js", async () => {
 
 import {
   createGatewayServer,
+  handleClaudeRequest,
   handleGrokRequest,
   type GatewayServerRuntime,
   type HandlerDeps,
@@ -135,6 +136,13 @@ describe("synchronous terminal failure provider-session privacy", () => {
       performanceMetrics: { recordRequest() {} },
       persistence: persistenceNone(),
       compression: { enabled: false, sources: { configFile: null } },
+      cacheAwareness: {
+        emitAnthropicCacheControl: false,
+        anthropicTtlSeconds: 300,
+        warnOnTtlExpiry: false,
+        minStableTokensForCacheControl: { sonnet: 0, opus: 0, haiku: 0, default: 0 },
+        sources: { configFile: null },
+      },
       workspaces: workspaceRegistry(tmp),
       personalConfig: { settings: { enabled: false } },
       providers: { xai: null, providers: {}, sources: { configFile: null } },
@@ -192,6 +200,68 @@ describe("synchronous terminal failure provider-session privacy", () => {
         createNewSession: false,
         approvalStrategy: "legacy",
         optimizePrompt: false,
+      })
+    );
+    expect(local.isError).toBe(true);
+    expect(JSON.stringify(local)).toContain(PROVIDER_SESSION_ID);
+  });
+
+  it("drives the extracted handleClaudeRequest seam directly on the terminal failure path", async () => {
+    executeCliMock.mockResolvedValue({
+      stdout: CLAUDE_FAILURE_STDOUT,
+      stderr: FAILURE_STDERR,
+      code: 1,
+    });
+    const currentRuntime = runtime();
+
+    const remote = await runWithRequestContext(REMOTE_ALICE, () =>
+      handleClaudeRequest(deps(currentRuntime), {
+        prompt: "fail remotely",
+        outputFormat: "json",
+        correlationId: "remote-claude-failure",
+        continueSession: false,
+        createNewSession: false,
+        dangerouslySkipPermissions: false,
+        approvalStrategy: "legacy",
+        mcpServers: [],
+        strictMcpConfig: false,
+        optimizePrompt: false,
+        optimizeResponse: false,
+        forceRefresh: false,
+      })
+    );
+
+    expect(remote.isError).toBe(true);
+    expect(JSON.stringify(remote)).not.toContain(PROVIDER_SESSION_ID);
+    expect(remote.content[0]?.text).toContain("[redacted-session-id]");
+
+    const stored = flight.queryRequests<{ provider_session_id: string | null }>(
+      "SELECT provider_session_id FROM gateway_metadata WHERE request_id = ?",
+      "remote-claude-failure"
+    );
+    expect(stored[0]?.provider_session_id).toBe(PROVIDER_SESSION_ID);
+
+    const persisted = readPersistedRequest(flight, "remote-claude-failure", {
+      includePrompt: true,
+      redactProviderSessionId: true,
+    });
+    expect(JSON.stringify(persisted)).not.toContain(PROVIDER_SESSION_ID);
+    expect(persisted?.errorMessage).toBe("provider failure while resuming [redacted-session-id]");
+
+    const local = await runWithRequestContext(LOCAL, () =>
+      handleClaudeRequest(deps(currentRuntime), {
+        prompt: "fail locally",
+        outputFormat: "json",
+        correlationId: "local-claude-failure",
+        continueSession: false,
+        createNewSession: false,
+        dangerouslySkipPermissions: false,
+        approvalStrategy: "legacy",
+        mcpServers: [],
+        strictMcpConfig: false,
+        optimizePrompt: false,
+        optimizeResponse: false,
+        forceRefresh: false,
       })
     );
     expect(local.isError).toBe(true);
