@@ -59,11 +59,15 @@ const REGISTRY_PREFIX = "https://registry.npmjs.org/";
 // Reused-invariant sets, mirroring scripts/release-security-audit.sh (superset,
 // not a subset, of today's coverage on the instance dimension).
 const FORBIDDEN_CHAIN = new Set(["better-sqlite3", "prebuild-install", "tar-fs", "tar-stream"]);
-const BLOCKED_VERSIONS = new Map([
-  ["content-type", new Set(["2.0.0"])],
-  ["type-is", new Set(["2.1.0"])],
-  ["tar-stream", new Set(["2.2.0", "2.1.4", "2.0.0"])],
-]);
+// content-type@2.0.0 + type-is@2.1.0 (jshttp) un-blocked 2026-07-21 (mirrors the
+// release-security-audit.sh blocklist): re-evaluated as mainstream jshttp majors
+// (no CVE; Socket new-releaser + build-time `prepare` heuristics only). Neither
+// version declares preinstall/install/postinstall; content-type's only lifecycle
+// script is `prepare`, which npm does not run for a registry dependency install,
+// so no install-time code runs for consumers. Required by body-parser@2.3.0
+// (clears GHSA-v422-hmwv-36x6).
+// Cross-LLM validated + ledgered. tar-stream stays a hard tripwire.
+const BLOCKED_VERSIONS = new Map([["tar-stream", new Set(["2.2.0", "2.1.4", "2.0.0"])]]);
 const LICENSE_ALLOWLIST_PATH = join(
   SCRIPT_DIR,
   "..",
