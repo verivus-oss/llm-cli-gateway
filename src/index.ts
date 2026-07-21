@@ -10253,6 +10253,676 @@ export async function handleClaudeRequest(
   }
 }
 
+export interface CodexRequestParams {
+  prompt?: string;
+  promptParts?: PromptParts;
+  model?: string;
+  fullAuto: boolean;
+  sandboxMode?: CodexSandboxMode;
+  askForApproval?: CodexAskForApproval;
+  useLegacyFullAutoFlag?: boolean;
+  dangerouslyBypassApprovalsAndSandbox: boolean;
+  approvalStrategy: "legacy" | "mcp_managed";
+  approvalPolicy?: string;
+  mcpServers?: ClaudeMcpServerName[];
+  sessionId?: string;
+  resumeLatest?: boolean;
+  createNewSession: boolean;
+  correlationId?: string;
+  optimizePrompt: boolean;
+  optimizeResponse: boolean;
+  compressResponse?: boolean;
+  idleTimeoutMs?: number;
+  forceRefresh?: boolean;
+  outputFormat?: "text" | "json";
+  outputSchema?: string | Record<string, unknown>;
+  search?: boolean;
+  profile?: string;
+  configOverrides?: Record<string, string>;
+  ephemeral?: boolean;
+  images?: string[];
+  ignoreUserConfig?: boolean;
+  ignoreRules?: boolean;
+  workingDir?: string;
+  addDir?: string[];
+  enable?: string[];
+  disable?: string[];
+  strictConfig?: boolean;
+  oss?: boolean;
+  localProvider?: CodexLocalProvider;
+  color?: CodexColorMode;
+  outputLastMessage?: string;
+  dangerouslyBypassHookTrust?: boolean;
+  workspace?: string;
+  worktree?: boolean | { name?: string; ref?: string };
+  requestInstructions?: string;
+}
+
+export async function handleCodexRequest(
+  deps: HandlerDeps,
+  params: CodexRequestParams
+): Promise<ExtendedToolResponse> {
+  const runtime = resolveHandlerRuntime(deps);
+  const sessionManager = deps.sessionManager;
+  const logger = runtime.logger;
+  const {
+    prompt,
+    promptParts,
+    model,
+    fullAuto,
+    sandboxMode,
+    askForApproval,
+    useLegacyFullAutoFlag,
+    dangerouslyBypassApprovalsAndSandbox,
+    approvalStrategy,
+    approvalPolicy,
+    mcpServers,
+    sessionId,
+    resumeLatest,
+    createNewSession,
+    correlationId,
+    optimizePrompt,
+    optimizeResponse,
+    compressResponse,
+    idleTimeoutMs,
+    forceRefresh,
+    outputFormat,
+    outputSchema,
+    search,
+    profile,
+    configOverrides,
+    ephemeral,
+    images,
+    ignoreUserConfig,
+    ignoreRules,
+    workingDir,
+    addDir,
+    enable,
+    disable,
+    strictConfig,
+    oss,
+    localProvider,
+    color,
+    outputLastMessage,
+    dangerouslyBypassHookTrust,
+    workspace,
+    worktree,
+    requestInstructions,
+  } = params;
+  const startTime = Date.now();
+  let kit: PersonalKitRequestContext | null = null;
+  let kitSession: PersonalKitSessionResolution | null = null;
+  let kitPrefix: string | undefined;
+  try {
+    // A zero sync deadline cannot safely run any Kit provider preflight:
+    // even Codex isolation probes are provider work and must not run for a
+    // request that will fail closed before durable deferral.
+    if (runtime.personalConfig.settings.enabled) assertKitSyncDeferralEnabled();
+    kit = resolvePersonalKitRequest(runtime, "codex", {
+      prompt,
+      promptParts,
+      fullAuto,
+      sandboxMode,
+      askForApproval,
+      useLegacyFullAutoFlag,
+      dangerouslyBypassApprovalsAndSandbox,
+      approvalStrategy,
+      approvalPolicy,
+      mcpServers,
+      sessionId,
+      resumeLatest,
+      createNewSession,
+      outputSchema,
+      search,
+      profile,
+      configOverrides,
+      ephemeral,
+      images,
+      ignoreUserConfig,
+      ignoreRules,
+      workingDir,
+      addDir,
+      enable,
+      disable,
+      strictConfig,
+      oss,
+      localProvider,
+      color,
+      outputLastMessage,
+      dangerouslyBypassHookTrust,
+      workspace,
+      worktree,
+      outputFormat,
+      requestInstructions,
+    });
+  } catch (error) {
+    kit?.artifact?.cleanup();
+    return personalKitErrorResponse("codex_request", correlationId, error);
+  }
+  const kitPreferences = kit
+    ? applyKitPreferences({ model, outputFormat }, kit.context.preferences)
+    : { model, outputFormat };
+  const effectiveOutputFormat = (
+    kit
+      ? (kit.codexIsolation?.outputFormat ?? resolveCodexKitOutputFormat(kit.context.preferences))
+      : (kitPreferences.outputFormat ?? "text")
+  ) as "text" | "json";
+  const codexPreparationParams: Parameters<typeof prepareCodexRequest>[0] = {
+    prompt,
+    promptParts,
+    model: kitPreferences.model as string | undefined,
+    fullAuto,
+    sandboxMode: kit ? resolveCodexKitSandboxMode(kit.context.preferences) : sandboxMode,
+    askForApproval,
+    useLegacyFullAutoFlag,
+    dangerouslyBypassApprovalsAndSandbox,
+    approvalStrategy,
+    approvalPolicy,
+    mcpServers,
+    sessionId,
+    resumeLatest,
+    createNewSession,
+    correlationId,
+    optimizePrompt,
+    operation: "codex_request",
+    outputFormat: effectiveOutputFormat,
+    outputSchema,
+    search,
+    profile,
+    configOverrides,
+    ephemeral,
+    images,
+    ignoreUserConfig: kit ? true : ignoreUserConfig,
+    ignoreRules: kit ? true : ignoreRules,
+    workingDir,
+    addDir,
+    enable,
+    disable,
+    strictConfig,
+    oss,
+    localProvider,
+    color,
+    outputLastMessage,
+    dangerouslyBypassHookTrust,
+    gatewayWorktreeRequested: hasGatewayWorktreeRequest(worktree),
+    kitContextPrefix: kit ? kitContextPrefix(kit.context) : undefined,
+  };
+
+  if (kit) {
+    kitPrefix = codexPreparationParams.kitContextPrefix;
+    const rejected = preAdmitCodexKitRequest(runtime, kit, codexPreparationParams);
+    if (rejected) return rejected;
+    try {
+      kit.codexIsolation = await createCodexKitIsolationPlan(kit.context.scope.cwd, {
+        contextPrefix: kitPrefix!,
+        sandboxMode: resolveCodexKitSandboxMode(kit.context.preferences),
+        outputFormat: resolveCodexKitOutputFormat(kit.context.preferences),
+      });
+      kitSession = await resolvePersonalKitSession(
+        runtime,
+        "codex",
+        kit.context,
+        sessionId,
+        createNewSession,
+        personalKitSyncAttemptKind(runtime)
+      );
+    } catch (error) {
+      return personalKitErrorResponse("codex_request", correlationId, error);
+    }
+  }
+
+  const prep = prepareCodexRequest(
+    {
+      ...codexPreparationParams,
+      sandboxMode: kit?.codexIsolation?.sandboxMode ?? codexPreparationParams.sandboxMode,
+      sessionId: kitSession?.nativeSessionId ?? sessionId,
+      resumeLatest: kitSession ? false : resumeLatest,
+      createNewSession: kitSession ? !kitSession.resume : createNewSession,
+      kitIsolation: kit?.codexIsolation,
+    },
+    runtime
+  );
+  if (!("args" in prep)) {
+    await discardPendingPersonalKitSession(runtime, kitSession);
+    return prep;
+  }
+
+  const { corrId, args } = prep;
+  const prepCleanup =
+    "cleanup" in prep && typeof prep.cleanup === "function" ? prep.cleanup : undefined;
+  let durationMs = 0;
+  let wasSuccessful = false;
+  let effectiveSessionId = kitSession?.gatewaySessionId ?? sessionId;
+
+  // U26 fix: pass the outputSchema cleanup to awaitJobOrDefer, which
+  // guarantees the cleanup runs exactly once — inline for direct
+  // execution, on terminal status for the job-backed path (sync
+  // completion or deferred). The outer finally MUST NOT clean again.
+  let sessionAdmission: SessionAdmissionMutation | undefined;
+  let sessionAdmissionCommitted = false;
+
+  let existingSession: Session | null;
+  try {
+    existingSession = kitSession
+      ? await getCallerOwnedSession(runtime.sessionManager, kitSession.gatewaySessionId)
+      : await getExistingSessionForProvider(runtime.sessionManager, sessionId, "codex", {
+          requireTrackedRemoteSession: true,
+        });
+    if (!kitSession && !sessionId) {
+      if (!createNewSession) {
+        existingSession = await getCallerOwnedActiveSession(runtime.sessionManager, "codex");
+      }
+      effectiveSessionId = existingSession?.id ?? `${GATEWAY_SESSION_PREFIX}${randomUUID()}`;
+    }
+  } catch (err) {
+    try {
+      prepCleanup?.();
+    } catch (cleanupError) {
+      logger.error(`[${corrId}] codex_request outputSchema cleanup threw`, cleanupError);
+    }
+    await discardPendingPersonalKitSession(runtime, kitSession);
+    return kitAwareErrorResponse("codex_request", 1, "", corrId, err as Error, kit);
+  }
+
+  // Resolve scope once using the caller-owned explicit or active session.
+  // Its durable metadata may be the registered workspace selector for a
+  // remote continuation.
+  let worktreeResolution: ResolvedWorktree;
+  try {
+    worktreeResolution = await resolveWorkspaceAndWorktreeForRequest({
+      provider: "codex",
+      workspace,
+      worktree,
+      sessionId: effectiveSessionId,
+      runtime,
+      workingDir,
+      addDir,
+      deferWorktree: true,
+    });
+  } catch (err) {
+    try {
+      prepCleanup?.();
+    } catch (cleanupError) {
+      logger.error(`[${corrId}] codex_request outputSchema cleanup threw`, cleanupError);
+    }
+    await discardPendingPersonalKitSession(runtime, kitSession);
+    return kitAwareErrorResponse("codex_request", 1, "", corrId, err as Error, kit);
+  }
+  try {
+    applyEffectiveWorkingDirectory(
+      "codex",
+      args,
+      "-C",
+      worktreeResolution.effectiveWorkingDir,
+      "codex",
+      "--add-dir",
+      worktreeResolution.effectiveAddDirs
+    );
+    assertUpstreamCliArgs("codex", args);
+    assertUpstreamCliEnv("codex", kit?.codexIsolation?.env);
+    assertFinalCliProcessAdmission("codex", args, "codex", kit?.codexIsolation?.env);
+  } catch (error) {
+    try {
+      prepCleanup?.();
+    } catch (cleanupError) {
+      logger.error(`[${corrId}] codex_request outputSchema cleanup threw`, cleanupError);
+    }
+    await discardPendingPersonalKitSession(runtime, kitSession);
+    return kitAwareErrorResponse("codex_request", 1, "", corrId, error as Error, kit);
+  }
+  let admittedSession = existingSession;
+  try {
+    if (effectiveSessionId) {
+      if (existingSession) {
+        admittedSession = await persistResolvedSessionScope(
+          runtime.sessionManager,
+          effectiveSessionId,
+          worktreeResolution,
+          runtime,
+          existingSession
+        );
+        if (!kitSession) {
+          sessionAdmission = { original: existingSession, admitted: admittedSession };
+        }
+      } else if (!kitSession) {
+        const admitted = await createSessionWithResolvedScope(
+          runtime.sessionManager,
+          "codex",
+          "Codex Session",
+          effectiveSessionId,
+          worktreeResolution,
+          runtime
+        );
+        admittedSession = admitted.session;
+        sessionAdmission = { original: admitted.previousSession, admitted: admitted.session };
+      }
+    }
+    if (worktree) {
+      worktreeResolution = await resolveWorkspaceAndWorktreeForRequest({
+        provider: "codex",
+        workspace,
+        worktree,
+        sessionId: admittedSession ? effectiveSessionId : undefined,
+        runtime,
+        workingDir,
+        addDir,
+        expectedSession: admittedSession ?? undefined,
+      });
+      if (sessionAdmission) {
+        advanceSessionAdmissionWorktree(sessionAdmission, worktreeResolution);
+      } else if (kitSession && worktreeResolution.boundSession) {
+        worktreeResolution.requestOwnedWorktree = undefined;
+      }
+    }
+  } catch (error) {
+    if (!kitSession) {
+      await rollbackSessionAndWorktreeAdmission(
+        runtime.sessionManager,
+        sessionAdmission,
+        undefined,
+        runtime
+      );
+    }
+    prepCleanup?.();
+    await discardPendingPersonalKitSession(runtime, kitSession);
+    return kitAwareErrorResponse("codex_request", 1, "", corrId, error as Error, kit);
+  }
+  const worktreeLifecycle = createRequestOwnedWorktreeLifecycle(worktreeResolution, runtime, true);
+  const requestCleanup = composeRequestCleanup(runtime, prepCleanup, worktreeLifecycle.onTerminal);
+  safeFlightStart(
+    personalKitFlightStart(
+      {
+        correlationId: corrId,
+        cli: "codex",
+        model: prep.resolvedModel || "default",
+        prompt: prep.effectivePrompt,
+        sessionId: effectiveSessionId,
+        stablePrefixHash: prep.stablePrefixHash ?? undefined,
+        stablePrefixTokens: prep.stablePrefixTokens ?? undefined,
+      },
+      kit
+    ),
+    runtime
+  );
+  logger.info(
+    `[${corrId}] codex_request invoked with model=${prep.resolvedModel || "default"}, fullAuto=${fullAuto}, prompt length=${prep.effectivePrompt.length}`
+  );
+
+  let kitJobHandedOff = false;
+  try {
+    const effectiveCompress = resolveEffectiveCompression(runtime.compression, {
+      compressResponse,
+      outputFormat: effectiveOutputFormat,
+      outputSchemaDeclared: outputSchema !== undefined,
+    });
+    const codexSyncFrHandoff = buildAsyncFlightRecorderHandoff(
+      "codex",
+      prep,
+      effectiveSessionId,
+      effectiveOutputFormat,
+      optimizePrompt
+    );
+    codexSyncFrHandoff.flightRecorderEntry = personalKitFlightRecorderEntry(
+      codexSyncFrHandoff.flightRecorderEntry,
+      kit
+    );
+    const result = await runWithPersonalKitAttemptLease({
+      runtime,
+      session: kitSession,
+      artifact: kit?.artifact,
+      heartbeat: true,
+      run: () =>
+        awaitJobOrDefer(
+          "codex",
+          args,
+          corrId,
+          resolveIdleTimeout("codex", idleTimeoutMs),
+          effectiveOutputFormat,
+          kitSession ? true : forceRefresh,
+          runtime,
+          kit?.codexIsolation?.env,
+          requestCleanup,
+          codexSyncFrHandoff.flightRecorderEntry,
+          codexSyncFrHandoff.extractUsage,
+          prep.stdinPayload,
+          kit?.codexIsolation?.cwd ?? worktreeResolution.cwd,
+          effectiveCompress,
+          kit?.context.execution ?? null,
+          kit && kitSession
+            ? event =>
+                finalizePersonalKitTerminalEvent({
+                  event,
+                  runtime,
+                  provider: "codex",
+                  gatewaySessionId: kitSession!.gatewaySessionId,
+                  execution: kit!.context.execution,
+                  attemptId: kitSession!.attemptId,
+                })
+            : undefined,
+          kitSession?.gatewaySessionId,
+          kitSession?.attemptKind === "durable" ? kitSession.attemptId : undefined,
+          sessionBoundDedupArgs(args, effectiveSessionId)
+        ),
+    });
+    kitJobHandedOff = !isDeferredResponse(result) && result.jobId !== undefined;
+
+    // Deferred — job still running, return async reference. Cleanup
+    // ownership belongs to AsyncJobManager via onComplete.
+    if (isDeferredResponse(result)) {
+      kitJobHandedOff = true;
+      sessionAdmissionCommitted = true;
+      if (sessionAdmission || kitSession) worktreeLifecycle.transfer();
+      else await worktreeLifecycle.finishHandler();
+      if (!kitSession) {
+        await safeUpdateSessionUsageAfterJobAdmission(
+          runtime.sessionManager,
+          effectiveSessionId,
+          runtime
+        );
+      }
+      return buildDeferredToolResponse(result, effectiveSessionId);
+    }
+
+    const { stdout, stderr, code } = result;
+    durationMs = Math.max(0, Date.now() - startTime);
+
+    if (code !== 0) {
+      if (!kitSession) {
+        await rollbackSessionAndWorktreeAdmission(
+          runtime.sessionManager,
+          sessionAdmission,
+          worktreeLifecycle,
+          runtime
+        );
+      }
+      const terminalFailure = buildTerminalCliFailure(
+        "codex",
+        stdout,
+        stderr,
+        code,
+        effectiveOutputFormat
+      );
+      if (kit && kitSession && !result.jobId) {
+        await finalizePersonalKitSessionOrThrow({
+          runtime,
+          provider: "codex",
+          gatewaySessionId: kitSession.gatewaySessionId,
+          execution: kit.context.execution,
+          terminalMetadata: null,
+          completed: false,
+          attemptId: kitSession.attemptId,
+        });
+      }
+      logger.info(`[${corrId}] codex_request failed in ${durationMs}ms`);
+      safePersonalKitFlightComplete(
+        corrId,
+        {
+          ...terminalFailure,
+          durationMs,
+          retryCount: 0,
+          circuitBreakerState: "closed",
+          optimizationApplied: optimizePrompt || optimizeResponse,
+          exitCode: code,
+          status: "failed",
+        },
+        kit,
+        runtime
+      );
+      // Codex reports failures (turn.failed / error events) on the JSONL
+      // stdout stream; on a non-zero exit stderr is often empty. Prefer the
+      // parsed failure reason (the turn.failed/error text) over the
+      // reconstructed agent message, so the caller sees the real reason and
+      // not a partial reply Codex printed before failing; fall back to the
+      // display text (never raw JSONL) then the exit code. Add a resume hint
+      // when a by-id resume/fork looks like it missed its session.
+      const parsedCodexError = parseCodexJsonStream(stdout).error;
+      const codexErrorDetail =
+        stderr && stderr.trim().length > 0
+          ? stderr
+          : parsedCodexError && parsedCodexError.trim().length > 0
+            ? parsedCodexError
+            : codexDisplayText(stdout);
+      const codexResumeHint =
+        sessionId &&
+        /not found|no such|unknown session|does not exist|invalid session/i.test(codexErrorDetail)
+          ? `\n\nSession ${sessionId} could not be resumed. Codex session IDs are UUIDs under ~/.codex/sessions/; verify the id, omit sessionId, or set createNewSession:true.`
+          : "";
+      return kitAwareErrorResponse(
+        "codex",
+        code,
+        `${codexErrorDetail}${codexResumeHint}`,
+        corrId,
+        undefined,
+        kit,
+        { providerSessionId: terminalFailure.providerSessionId },
+        result
+      );
+    }
+    wasSuccessful = true;
+    sessionAdmissionCommitted = true;
+    if (sessionAdmission || kitSession) worktreeLifecycle.transfer();
+    else await worktreeLifecycle.finishHandler();
+    if (!kitSession) {
+      await safeUpdateSessionUsageAfterJobAdmission(
+        runtime.sessionManager,
+        effectiveSessionId,
+        runtime
+      );
+    }
+
+    logger.info(`[${corrId}] codex_request completed successfully in ${durationMs}ms`);
+    const codexUsage = extractUsageAndCost("codex", stdout, effectiveOutputFormat);
+    // LCR: label cost_basis (codex is T2, so a counts-only completion is
+    // derived-from-tokens; a rare reported cost_usd stays provider-reported);
+    // parity with the async/deferred handoff.
+    const { costUsd: codexCostUsd, costBasis: codexCostBasis } = deriveCostBasis(
+      "codex",
+      prep.resolvedModel || "default",
+      codexUsage
+    );
+    // Phase 7: capture codex's thread id (session) from the JSONL stream so
+    // the FR row keeps the provider session id. Stop reason is a capability
+    // fact (codex `exec --json` does not emit one), so it stays NULL.
+    const codexMeta = extractProviderOutputMetadata("codex", stdout, effectiveOutputFormat);
+    if (kit && kitSession && !result.jobId) {
+      await finalizePersonalKitSessionOrThrow({
+        runtime,
+        provider: "codex",
+        gatewaySessionId: kitSession.gatewaySessionId,
+        execution: kit.context.execution,
+        terminalMetadata: createPersonalKitTerminalMetadata("codex", stdout, effectiveOutputFormat),
+        completed: true,
+        attemptId: kitSession.attemptId,
+      });
+    }
+    // #44: usage is parsed from the raw JSONL `stdout`, but the FR response
+    // column stores the reconstructed reply (== text-mode stdout) so
+    // read-back surfaces (llm_request_result, cache-stats) get plain text,
+    // not the raw event stream. `json` mode persists the raw JSONL verbatim.
+    // This is the sync-in-time / deferral-disabled writer; the deferred and
+    // pure-async writer is AsyncJobManager.logComplete — both use the same
+    // codexFrResponse() helper so the persisted value agrees byte-for-byte.
+    safePersonalKitFlightComplete(
+      corrId,
+      {
+        response: codexFrResponse(effectiveOutputFormat, stdout),
+        durationMs,
+        retryCount: 0,
+        circuitBreakerState: "closed",
+        optimizationApplied: optimizePrompt || optimizeResponse,
+        exitCode: 0,
+        status: "completed",
+        inputTokens: codexUsage.inputTokens,
+        outputTokens: codexUsage.outputTokens,
+        cacheReadTokens: codexUsage.cacheReadTokens,
+        cacheCreationTokens: codexUsage.cacheCreationTokens,
+        costUsd: codexCostUsd,
+        costBasis: codexCostBasis,
+        providerSessionId: codexMeta.sessionId,
+        stopReason: codexMeta.stopReason,
+      },
+      kit,
+      runtime
+    );
+    const codexResponse = buildCliResponse(
+      "codex",
+      stdout,
+      optimizeResponse,
+      corrId,
+      effectiveSessionId,
+      prep,
+      durationMs,
+      undefined,
+      effectiveOutputFormat,
+      undefined,
+      effectiveCompress
+    );
+    safeRecordCompression(corrId, codexResponse.compression, runtime, kit !== null);
+    if (worktreeResolution.worktreePath) {
+      const first = codexResponse.content[0];
+      if (first && first.type === "text") {
+        first.text = formatWorktreePrefix(worktreeResolution.worktreePath) + first.text;
+      }
+    }
+    return codexResponse;
+  } catch (error) {
+    if (!kitSession && !sessionAdmissionCommitted) {
+      await rollbackSessionAndWorktreeAdmission(
+        sessionManager,
+        sessionAdmission,
+        worktreeLifecycle,
+        runtime
+      );
+    }
+    if (!kitJobHandedOff && !(error instanceof KitTerminalFinalizationError)) {
+      await discardPendingPersonalKitSession(runtime, kitSession);
+    }
+    const elapsedMs = Math.max(0, Date.now() - startTime);
+    logger.info(`[${corrId}] codex_request threw exception after ${elapsedMs}ms`);
+    safePersonalKitFlightComplete(
+      corrId,
+      {
+        response: "",
+        durationMs: elapsedMs,
+        retryCount: 0,
+        circuitBreakerState: "closed",
+        optimizationApplied: optimizePrompt || optimizeResponse,
+        exitCode: 1,
+        errorMessage: (error as Error).message,
+        status: "failed",
+      },
+      kit,
+      runtime
+    );
+    return kitAwareErrorResponse("codex", 1, "", corrId, error as Error, kit);
+  } finally {
+    await worktreeLifecycle?.finishHandler();
+    const finalizedDurationMs = Math.max(0, durationMs || Date.now() - startTime);
+    runtime.performanceMetrics.recordRequest("codex", finalizedDurationMs, wasSuccessful);
+    // Cleanup is owned by awaitJobOrDefer's contract; nothing to do here.
+  }
+}
+
 export async function handleGeminiRequest(
   deps: HandlerDeps,
   params: GeminiRequestParams
@@ -16303,19 +16973,13 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       workspace,
       worktree,
       requestInstructions,
-    }) => {
-      const startTime = Date.now();
-      let kit: PersonalKitRequestContext | null = null;
-      let kitSession: PersonalKitSessionResolution | null = null;
-      let kitPrefix: string | undefined;
-      try {
-        // A zero sync deadline cannot safely run any Kit provider preflight:
-        // even Codex isolation probes are provider work and must not run for a
-        // request that will fail closed before durable deferral.
-        if (runtime.personalConfig.settings.enabled) assertKitSyncDeferralEnabled();
-        kit = resolvePersonalKitRequest(runtime, "codex", {
+    }) =>
+      handleCodexRequest(
+        { sessionManager, logger, runtime },
+        {
           prompt,
           promptParts,
+          model,
           fullAuto,
           sandboxMode,
           askForApproval,
@@ -16327,6 +16991,13 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           sessionId,
           resumeLatest,
           createNewSession,
+          correlationId,
+          optimizePrompt,
+          optimizeResponse,
+          compressResponse,
+          idleTimeoutMs,
+          forceRefresh,
+          outputFormat,
           outputSchema,
           search,
           profile,
@@ -16347,551 +17018,9 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           dangerouslyBypassHookTrust,
           workspace,
           worktree,
-          outputFormat,
           requestInstructions,
-        });
-      } catch (error) {
-        kit?.artifact?.cleanup();
-        return personalKitErrorResponse("codex_request", correlationId, error);
-      }
-      const kitPreferences = kit
-        ? applyKitPreferences({ model, outputFormat }, kit.context.preferences)
-        : { model, outputFormat };
-      const effectiveOutputFormat = (
-        kit
-          ? (kit.codexIsolation?.outputFormat ??
-            resolveCodexKitOutputFormat(kit.context.preferences))
-          : (kitPreferences.outputFormat ?? "text")
-      ) as "text" | "json";
-      const codexPreparationParams: Parameters<typeof prepareCodexRequest>[0] = {
-        prompt,
-        promptParts,
-        model: kitPreferences.model as string | undefined,
-        fullAuto,
-        sandboxMode: kit ? resolveCodexKitSandboxMode(kit.context.preferences) : sandboxMode,
-        askForApproval,
-        useLegacyFullAutoFlag,
-        dangerouslyBypassApprovalsAndSandbox,
-        approvalStrategy,
-        approvalPolicy,
-        mcpServers,
-        sessionId,
-        resumeLatest,
-        createNewSession,
-        correlationId,
-        optimizePrompt,
-        operation: "codex_request",
-        outputFormat: effectiveOutputFormat,
-        outputSchema,
-        search,
-        profile,
-        configOverrides,
-        ephemeral,
-        images,
-        ignoreUserConfig: kit ? true : ignoreUserConfig,
-        ignoreRules: kit ? true : ignoreRules,
-        workingDir,
-        addDir,
-        enable,
-        disable,
-        strictConfig,
-        oss,
-        localProvider,
-        color,
-        outputLastMessage,
-        dangerouslyBypassHookTrust,
-        gatewayWorktreeRequested: hasGatewayWorktreeRequest(worktree),
-        kitContextPrefix: kit ? kitContextPrefix(kit.context) : undefined,
-      };
-
-      if (kit) {
-        kitPrefix = codexPreparationParams.kitContextPrefix;
-        const rejected = preAdmitCodexKitRequest(runtime, kit, codexPreparationParams);
-        if (rejected) return rejected;
-        try {
-          kit.codexIsolation = await createCodexKitIsolationPlan(kit.context.scope.cwd, {
-            contextPrefix: kitPrefix!,
-            sandboxMode: resolveCodexKitSandboxMode(kit.context.preferences),
-            outputFormat: resolveCodexKitOutputFormat(kit.context.preferences),
-          });
-          kitSession = await resolvePersonalKitSession(
-            runtime,
-            "codex",
-            kit.context,
-            sessionId,
-            createNewSession,
-            personalKitSyncAttemptKind(runtime)
-          );
-        } catch (error) {
-          return personalKitErrorResponse("codex_request", correlationId, error);
         }
-      }
-
-      const prep = prepareCodexRequest(
-        {
-          ...codexPreparationParams,
-          sandboxMode: kit?.codexIsolation?.sandboxMode ?? codexPreparationParams.sandboxMode,
-          sessionId: kitSession?.nativeSessionId ?? sessionId,
-          resumeLatest: kitSession ? false : resumeLatest,
-          createNewSession: kitSession ? !kitSession.resume : createNewSession,
-          kitIsolation: kit?.codexIsolation,
-        },
-        runtime
-      );
-      if (!("args" in prep)) {
-        await discardPendingPersonalKitSession(runtime, kitSession);
-        return prep;
-      }
-
-      const { corrId, args } = prep;
-      const prepCleanup =
-        "cleanup" in prep && typeof prep.cleanup === "function" ? prep.cleanup : undefined;
-      let durationMs = 0;
-      let wasSuccessful = false;
-      let effectiveSessionId = kitSession?.gatewaySessionId ?? sessionId;
-
-      // U26 fix: pass the outputSchema cleanup to awaitJobOrDefer, which
-      // guarantees the cleanup runs exactly once — inline for direct
-      // execution, on terminal status for the job-backed path (sync
-      // completion or deferred). The outer finally MUST NOT clean again.
-      let sessionAdmission: SessionAdmissionMutation | undefined;
-      let sessionAdmissionCommitted = false;
-
-      let existingSession: Session | null;
-      try {
-        existingSession = kitSession
-          ? await getCallerOwnedSession(runtime.sessionManager, kitSession.gatewaySessionId)
-          : await getExistingSessionForProvider(runtime.sessionManager, sessionId, "codex", {
-              requireTrackedRemoteSession: true,
-            });
-        if (!kitSession && !sessionId) {
-          if (!createNewSession) {
-            existingSession = await getCallerOwnedActiveSession(runtime.sessionManager, "codex");
-          }
-          effectiveSessionId = existingSession?.id ?? `${GATEWAY_SESSION_PREFIX}${randomUUID()}`;
-        }
-      } catch (err) {
-        try {
-          prepCleanup?.();
-        } catch (cleanupError) {
-          logger.error(`[${corrId}] codex_request outputSchema cleanup threw`, cleanupError);
-        }
-        await discardPendingPersonalKitSession(runtime, kitSession);
-        return kitAwareErrorResponse("codex_request", 1, "", corrId, err as Error, kit);
-      }
-
-      // Resolve scope once using the caller-owned explicit or active session.
-      // Its durable metadata may be the registered workspace selector for a
-      // remote continuation.
-      let worktreeResolution: ResolvedWorktree;
-      try {
-        worktreeResolution = await resolveWorkspaceAndWorktreeForRequest({
-          provider: "codex",
-          workspace,
-          worktree,
-          sessionId: effectiveSessionId,
-          runtime,
-          workingDir,
-          addDir,
-          deferWorktree: true,
-        });
-      } catch (err) {
-        try {
-          prepCleanup?.();
-        } catch (cleanupError) {
-          logger.error(`[${corrId}] codex_request outputSchema cleanup threw`, cleanupError);
-        }
-        await discardPendingPersonalKitSession(runtime, kitSession);
-        return kitAwareErrorResponse("codex_request", 1, "", corrId, err as Error, kit);
-      }
-      try {
-        applyEffectiveWorkingDirectory(
-          "codex",
-          args,
-          "-C",
-          worktreeResolution.effectiveWorkingDir,
-          "codex",
-          "--add-dir",
-          worktreeResolution.effectiveAddDirs
-        );
-        assertUpstreamCliArgs("codex", args);
-        assertUpstreamCliEnv("codex", kit?.codexIsolation?.env);
-        assertFinalCliProcessAdmission("codex", args, "codex", kit?.codexIsolation?.env);
-      } catch (error) {
-        try {
-          prepCleanup?.();
-        } catch (cleanupError) {
-          logger.error(`[${corrId}] codex_request outputSchema cleanup threw`, cleanupError);
-        }
-        await discardPendingPersonalKitSession(runtime, kitSession);
-        return kitAwareErrorResponse("codex_request", 1, "", corrId, error as Error, kit);
-      }
-      let admittedSession = existingSession;
-      try {
-        if (effectiveSessionId) {
-          if (existingSession) {
-            admittedSession = await persistResolvedSessionScope(
-              runtime.sessionManager,
-              effectiveSessionId,
-              worktreeResolution,
-              runtime,
-              existingSession
-            );
-            if (!kitSession) {
-              sessionAdmission = { original: existingSession, admitted: admittedSession };
-            }
-          } else if (!kitSession) {
-            const admitted = await createSessionWithResolvedScope(
-              runtime.sessionManager,
-              "codex",
-              "Codex Session",
-              effectiveSessionId,
-              worktreeResolution,
-              runtime
-            );
-            admittedSession = admitted.session;
-            sessionAdmission = { original: admitted.previousSession, admitted: admitted.session };
-          }
-        }
-        if (worktree) {
-          worktreeResolution = await resolveWorkspaceAndWorktreeForRequest({
-            provider: "codex",
-            workspace,
-            worktree,
-            sessionId: admittedSession ? effectiveSessionId : undefined,
-            runtime,
-            workingDir,
-            addDir,
-            expectedSession: admittedSession ?? undefined,
-          });
-          if (sessionAdmission) {
-            advanceSessionAdmissionWorktree(sessionAdmission, worktreeResolution);
-          } else if (kitSession && worktreeResolution.boundSession) {
-            worktreeResolution.requestOwnedWorktree = undefined;
-          }
-        }
-      } catch (error) {
-        if (!kitSession) {
-          await rollbackSessionAndWorktreeAdmission(
-            runtime.sessionManager,
-            sessionAdmission,
-            undefined,
-            runtime
-          );
-        }
-        prepCleanup?.();
-        await discardPendingPersonalKitSession(runtime, kitSession);
-        return kitAwareErrorResponse("codex_request", 1, "", corrId, error as Error, kit);
-      }
-      const worktreeLifecycle = createRequestOwnedWorktreeLifecycle(
-        worktreeResolution,
-        runtime,
-        true
-      );
-      const requestCleanup = composeRequestCleanup(
-        runtime,
-        prepCleanup,
-        worktreeLifecycle.onTerminal
-      );
-      safeFlightStart(
-        personalKitFlightStart(
-          {
-            correlationId: corrId,
-            cli: "codex",
-            model: prep.resolvedModel || "default",
-            prompt: prep.effectivePrompt,
-            sessionId: effectiveSessionId,
-            stablePrefixHash: prep.stablePrefixHash ?? undefined,
-            stablePrefixTokens: prep.stablePrefixTokens ?? undefined,
-          },
-          kit
-        ),
-        runtime
-      );
-      logger.info(
-        `[${corrId}] codex_request invoked with model=${prep.resolvedModel || "default"}, fullAuto=${fullAuto}, prompt length=${prep.effectivePrompt.length}`
-      );
-
-      let kitJobHandedOff = false;
-      try {
-        const effectiveCompress = resolveEffectiveCompression(runtime.compression, {
-          compressResponse,
-          outputFormat: effectiveOutputFormat,
-          outputSchemaDeclared: outputSchema !== undefined,
-        });
-        const codexSyncFrHandoff = buildAsyncFlightRecorderHandoff(
-          "codex",
-          prep,
-          effectiveSessionId,
-          effectiveOutputFormat,
-          optimizePrompt
-        );
-        codexSyncFrHandoff.flightRecorderEntry = personalKitFlightRecorderEntry(
-          codexSyncFrHandoff.flightRecorderEntry,
-          kit
-        );
-        const result = await runWithPersonalKitAttemptLease({
-          runtime,
-          session: kitSession,
-          artifact: kit?.artifact,
-          heartbeat: true,
-          run: () =>
-            awaitJobOrDefer(
-              "codex",
-              args,
-              corrId,
-              resolveIdleTimeout("codex", idleTimeoutMs),
-              effectiveOutputFormat,
-              kitSession ? true : forceRefresh,
-              runtime,
-              kit?.codexIsolation?.env,
-              requestCleanup,
-              codexSyncFrHandoff.flightRecorderEntry,
-              codexSyncFrHandoff.extractUsage,
-              prep.stdinPayload,
-              kit?.codexIsolation?.cwd ?? worktreeResolution.cwd,
-              effectiveCompress,
-              kit?.context.execution ?? null,
-              kit && kitSession
-                ? event =>
-                    finalizePersonalKitTerminalEvent({
-                      event,
-                      runtime,
-                      provider: "codex",
-                      gatewaySessionId: kitSession!.gatewaySessionId,
-                      execution: kit!.context.execution,
-                      attemptId: kitSession!.attemptId,
-                    })
-                : undefined,
-              kitSession?.gatewaySessionId,
-              kitSession?.attemptKind === "durable" ? kitSession.attemptId : undefined,
-              sessionBoundDedupArgs(args, effectiveSessionId)
-            ),
-        });
-        kitJobHandedOff = !isDeferredResponse(result) && result.jobId !== undefined;
-
-        // Deferred — job still running, return async reference. Cleanup
-        // ownership belongs to AsyncJobManager via onComplete.
-        if (isDeferredResponse(result)) {
-          kitJobHandedOff = true;
-          sessionAdmissionCommitted = true;
-          if (sessionAdmission || kitSession) worktreeLifecycle.transfer();
-          else await worktreeLifecycle.finishHandler();
-          if (!kitSession) {
-            await safeUpdateSessionUsageAfterJobAdmission(
-              runtime.sessionManager,
-              effectiveSessionId,
-              runtime
-            );
-          }
-          return buildDeferredToolResponse(result, effectiveSessionId);
-        }
-
-        const { stdout, stderr, code } = result;
-        durationMs = Math.max(0, Date.now() - startTime);
-
-        if (code !== 0) {
-          if (!kitSession) {
-            await rollbackSessionAndWorktreeAdmission(
-              runtime.sessionManager,
-              sessionAdmission,
-              worktreeLifecycle,
-              runtime
-            );
-          }
-          const terminalFailure = buildTerminalCliFailure(
-            "codex",
-            stdout,
-            stderr,
-            code,
-            effectiveOutputFormat
-          );
-          if (kit && kitSession && !result.jobId) {
-            await finalizePersonalKitSessionOrThrow({
-              runtime,
-              provider: "codex",
-              gatewaySessionId: kitSession.gatewaySessionId,
-              execution: kit.context.execution,
-              terminalMetadata: null,
-              completed: false,
-              attemptId: kitSession.attemptId,
-            });
-          }
-          logger.info(`[${corrId}] codex_request failed in ${durationMs}ms`);
-          safePersonalKitFlightComplete(
-            corrId,
-            {
-              ...terminalFailure,
-              durationMs,
-              retryCount: 0,
-              circuitBreakerState: "closed",
-              optimizationApplied: optimizePrompt || optimizeResponse,
-              exitCode: code,
-              status: "failed",
-            },
-            kit,
-            runtime
-          );
-          // Codex reports failures (turn.failed / error events) on the JSONL
-          // stdout stream; on a non-zero exit stderr is often empty. Prefer the
-          // parsed failure reason (the turn.failed/error text) over the
-          // reconstructed agent message, so the caller sees the real reason and
-          // not a partial reply Codex printed before failing; fall back to the
-          // display text (never raw JSONL) then the exit code. Add a resume hint
-          // when a by-id resume/fork looks like it missed its session.
-          const parsedCodexError = parseCodexJsonStream(stdout).error;
-          const codexErrorDetail =
-            stderr && stderr.trim().length > 0
-              ? stderr
-              : parsedCodexError && parsedCodexError.trim().length > 0
-                ? parsedCodexError
-                : codexDisplayText(stdout);
-          const codexResumeHint =
-            sessionId &&
-            /not found|no such|unknown session|does not exist|invalid session/i.test(
-              codexErrorDetail
-            )
-              ? `\n\nSession ${sessionId} could not be resumed. Codex session IDs are UUIDs under ~/.codex/sessions/; verify the id, omit sessionId, or set createNewSession:true.`
-              : "";
-          return kitAwareErrorResponse(
-            "codex",
-            code,
-            `${codexErrorDetail}${codexResumeHint}`,
-            corrId,
-            undefined,
-            kit,
-            { providerSessionId: terminalFailure.providerSessionId },
-            result
-          );
-        }
-        wasSuccessful = true;
-        sessionAdmissionCommitted = true;
-        if (sessionAdmission || kitSession) worktreeLifecycle.transfer();
-        else await worktreeLifecycle.finishHandler();
-        if (!kitSession) {
-          await safeUpdateSessionUsageAfterJobAdmission(
-            runtime.sessionManager,
-            effectiveSessionId,
-            runtime
-          );
-        }
-
-        logger.info(`[${corrId}] codex_request completed successfully in ${durationMs}ms`);
-        const codexUsage = extractUsageAndCost("codex", stdout, effectiveOutputFormat);
-        // LCR: label cost_basis (codex is T2, so a counts-only completion is
-        // derived-from-tokens; a rare reported cost_usd stays provider-reported);
-        // parity with the async/deferred handoff.
-        const { costUsd: codexCostUsd, costBasis: codexCostBasis } = deriveCostBasis(
-          "codex",
-          prep.resolvedModel || "default",
-          codexUsage
-        );
-        // Phase 7: capture codex's thread id (session) from the JSONL stream so
-        // the FR row keeps the provider session id. Stop reason is a capability
-        // fact (codex `exec --json` does not emit one), so it stays NULL.
-        const codexMeta = extractProviderOutputMetadata("codex", stdout, effectiveOutputFormat);
-        if (kit && kitSession && !result.jobId) {
-          await finalizePersonalKitSessionOrThrow({
-            runtime,
-            provider: "codex",
-            gatewaySessionId: kitSession.gatewaySessionId,
-            execution: kit.context.execution,
-            terminalMetadata: createPersonalKitTerminalMetadata(
-              "codex",
-              stdout,
-              effectiveOutputFormat
-            ),
-            completed: true,
-            attemptId: kitSession.attemptId,
-          });
-        }
-        // #44: usage is parsed from the raw JSONL `stdout`, but the FR response
-        // column stores the reconstructed reply (== text-mode stdout) so
-        // read-back surfaces (llm_request_result, cache-stats) get plain text,
-        // not the raw event stream. `json` mode persists the raw JSONL verbatim.
-        // This is the sync-in-time / deferral-disabled writer; the deferred and
-        // pure-async writer is AsyncJobManager.logComplete — both use the same
-        // codexFrResponse() helper so the persisted value agrees byte-for-byte.
-        safePersonalKitFlightComplete(
-          corrId,
-          {
-            response: codexFrResponse(effectiveOutputFormat, stdout),
-            durationMs,
-            retryCount: 0,
-            circuitBreakerState: "closed",
-            optimizationApplied: optimizePrompt || optimizeResponse,
-            exitCode: 0,
-            status: "completed",
-            inputTokens: codexUsage.inputTokens,
-            outputTokens: codexUsage.outputTokens,
-            cacheReadTokens: codexUsage.cacheReadTokens,
-            cacheCreationTokens: codexUsage.cacheCreationTokens,
-            costUsd: codexCostUsd,
-            costBasis: codexCostBasis,
-            providerSessionId: codexMeta.sessionId,
-            stopReason: codexMeta.stopReason,
-          },
-          kit,
-          runtime
-        );
-        const codexResponse = buildCliResponse(
-          "codex",
-          stdout,
-          optimizeResponse,
-          corrId,
-          effectiveSessionId,
-          prep,
-          durationMs,
-          undefined,
-          effectiveOutputFormat,
-          undefined,
-          effectiveCompress
-        );
-        safeRecordCompression(corrId, codexResponse.compression, runtime, kit !== null);
-        if (worktreeResolution.worktreePath) {
-          const first = codexResponse.content[0];
-          if (first && first.type === "text") {
-            first.text = formatWorktreePrefix(worktreeResolution.worktreePath) + first.text;
-          }
-        }
-        return codexResponse;
-      } catch (error) {
-        if (!kitSession && !sessionAdmissionCommitted) {
-          await rollbackSessionAndWorktreeAdmission(
-            sessionManager,
-            sessionAdmission,
-            worktreeLifecycle,
-            runtime
-          );
-        }
-        if (!kitJobHandedOff && !(error instanceof KitTerminalFinalizationError)) {
-          await discardPendingPersonalKitSession(runtime, kitSession);
-        }
-        const elapsedMs = Math.max(0, Date.now() - startTime);
-        logger.info(`[${corrId}] codex_request threw exception after ${elapsedMs}ms`);
-        safePersonalKitFlightComplete(
-          corrId,
-          {
-            response: "",
-            durationMs: elapsedMs,
-            retryCount: 0,
-            circuitBreakerState: "closed",
-            optimizationApplied: optimizePrompt || optimizeResponse,
-            exitCode: 1,
-            errorMessage: (error as Error).message,
-            status: "failed",
-          },
-          kit,
-          runtime
-        );
-        return kitAwareErrorResponse("codex", 1, "", corrId, error as Error, kit);
-      } finally {
-        await worktreeLifecycle?.finishHandler();
-        const finalizedDurationMs = Math.max(0, durationMs || Date.now() - startTime);
-        performanceMetrics.recordRequest("codex", finalizedDurationMs, wasSuccessful);
-        // Cleanup is owned by awaitJobOrDefer's contract; nothing to do here.
-      }
-    }
+      )
   );
 
   //──────────────────────────────────────────────────────────────────────────────
