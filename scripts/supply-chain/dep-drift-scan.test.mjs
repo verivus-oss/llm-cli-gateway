@@ -222,8 +222,10 @@ describe("reused invariants", () => {
     expect(f.some(x => x.class === "forbidden-chain")).toBe(true);
   });
   it("blocklisted version -> 3", () => {
+    // tar-stream 2.x is the remaining hard-blocked version (content-type@2.0.0 +
+    // type-is@2.1.0 were un-blocked 2026-07-21 as vetted jshttp majors).
     const f = reusedInvariantFindings([
-      inst({ path: "node_modules/type-is", name: "type-is", version: "2.1.0" }),
+      inst({ path: "node_modules/tar-stream", name: "tar-stream", version: "2.2.0" }),
     ]);
     expect(f.some(x => x.class === "blocked-version")).toBe(true);
   });
