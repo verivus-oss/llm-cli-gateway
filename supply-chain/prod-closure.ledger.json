@@ -58,14 +58,19 @@
     },
     "body-parser": {
       "acceptedVersions": [
-        "2.2.2"
+        "2.2.2",
+        "2.3.0"
       ],
       "source": "registry.npmjs.org",
       "state": "trusted",
       "firstVetted": "2026-07-10",
-      "lastReviewed": "2026-07-10",
-      "reviewers": [],
-      "rationale": "bootstrap from 2.16.0 shipped closure, not individually reviewed"
+      "lastReviewed": "2026-07-21",
+      "reviewers": [
+        "codex",
+        "grok",
+        "mistral"
+      ],
+      "rationale": "2.3.0 accepted 2026-07-21 to clear GHSA-v422-hmwv-36x6 / CVE-2026-12590 (invalid-limit DoS, affected >=2.0.0 <2.3.0; patched 2.3.0 via expressjs/body-parser PR #698, which validates the limit at construction and is behavior-preserving for valid/absent limits). Cross-LLM validated (Codex + Grok + Mistral, APPROVED_UNCONDITIONALLY). 2.2.2 retained per append discipline."
     },
     "bytes": {
       "acceptedVersions": [
@@ -113,14 +118,19 @@
     },
     "content-type": {
       "acceptedVersions": [
-        "1.0.5"
+        "1.0.5",
+        "2.0.0"
       ],
       "source": "registry.npmjs.org",
       "state": "trusted",
       "firstVetted": "2026-07-10",
-      "lastReviewed": "2026-07-10",
-      "reviewers": [],
-      "rationale": "bootstrap from 2.16.0 shipped closure, not individually reviewed"
+      "lastReviewed": "2026-07-21",
+      "reviewers": [
+        "codex",
+        "grok",
+        "mistral"
+      ],
+      "rationale": "2.0.0 accepted 2026-07-21 (also removed from the release-audit + dep-drift-scan blocklists). jshttp content-type 2.0.0 (TS rewrite, 3x faster, lenient parse; MIT; 0 deps; 137M weekly downloads). Original block was a Socket behavioral heuristic (new-but-reputable releaser blakeembrey + a build-time `prepare` script); `prepare` never runs for a registry dependency install (only dev/git/local) and content-type declares no install/postinstall/preinstall hook, so no install-time code executes for consumers. Required by body-parser@2.3.0. Cross-LLM validated (Codex + Grok + Mistral, APPROVED_UNCONDITIONALLY). 1.0.5 retained per append discipline."
     },
     "cookie": {
       "acceptedVersions": [
@@ -938,14 +948,19 @@
     },
     "type-is": {
       "acceptedVersions": [
-        "2.0.1"
+        "2.0.1",
+        "2.1.0"
       ],
       "source": "registry.npmjs.org",
       "state": "trusted",
       "firstVetted": "2026-07-10",
-      "lastReviewed": "2026-07-10",
-      "reviewers": [],
-      "rationale": "bootstrap from 2.16.0 shipped closure, not individually reviewed"
+      "lastReviewed": "2026-07-21",
+      "reviewers": [
+        "codex",
+        "grok",
+        "mistral"
+      ],
+      "rationale": "2.1.0 accepted 2026-07-21 (also removed from the release-audit + dep-drift-scan blocklists). jshttp type-is 2.1.0 (its only change vs 2.0.1 is upgrading to content-type@2 for faster parsing; MIT; 116M weekly downloads; deps content-type/media-typer/mime-types). No install scripts. Original block was a Socket behavioral heuristic on the jshttp 2.x majors, not a CVE. Required by body-parser@2.3.0. Cross-LLM validated (Codex + Grok + Mistral, APPROVED_UNCONDITIONALLY). 2.0.1 retained per append discipline."
     },
     "unpipe": {
       "acceptedVersions": [
