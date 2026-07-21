@@ -127,9 +127,18 @@ node --input-type=module <<'NODE'
 import fs from 'node:fs';
 
 const lock = JSON.parse(fs.readFileSync('package-lock.json', 'utf8'));
+// content-type@2.0.0 + type-is@2.1.0 (jshttp) un-blocked 2026-07-21. Re-evaluated
+// as mainstream jshttp majors (137M/116M weekly downloads, MIT, no CVE); the
+// original block was a Socket behavioral heuristic (new-but-reputable releaser
+// blakeembrey + content-type's build-time `prepare` script). Neither version
+// declares preinstall/install/postinstall; content-type's only lifecycle script
+// is `prepare`, which npm does not run for a registry dependency install (only
+// dev/git/local), so no install-time code runs for consumers (the packed-consumer
+// check below additionally installs with --ignore-scripts). Required by
+// body-parser@2.3.0 (clears GHSA-v422-hmwv-36x6 / CVE-2026-12590). Cross-LLM
+// validated + ledgered (supply-chain/prod-closure.ledger.json). tar-stream stays
+// a hard tripwire.
 const blocked = new Map([
-  ['content-type', new Set(['2.0.0'])],
-  ['type-is', new Set(['2.1.0'])],
   ['tar-stream', new Set(['2.2.0', '2.1.4', '2.0.0'])],
 ]);
 const findings = [];
@@ -168,12 +177,14 @@ echo "==> hono floor tripwire"
 node --input-type=module <<'NODE'
 import fs from 'node:fs';
 
-// hono ships transitively via @modelcontextprotocol/sdk. 4.12.22 and below carry
-// known advisories (SNYK-JS-HONO-*; fix line = upgrade to 4.12.25+). A
-// package.json#overrides pin (hono ^4.12.25) raises the floor; this tripwire
+// hono ships transitively via @modelcontextprotocol/sdk. 4.12.26 and below carry
+// known advisories (GHSA-hvrm-45r6-mjfj hono/jsx cross-request context,
+// GHSA-w62v-xxxg-mg59 hono/css cx() SSR XSS, GHSA-xgm2-5f3f-mvvc / CVE-2026-59897
+// hono/aws-lambda header dedup; fix line = upgrade to 4.12.27+). A
+// package.json#overrides pin (hono ^4.12.27) raises the floor; this tripwire
 // fails the release if anything regresses below it. Mirrors the blocked-version
 // checks above but as a minimum-version floor rather than a blocklist.
-const FLOOR = [4, 12, 25];
+const FLOOR = [4, 12, 27];
 function below(version) {
   const parts = version.split('.').map(n => parseInt(n, 10));
   for (let i = 0; i < FLOOR.length; i++) {
@@ -216,17 +227,28 @@ node --input-type=module <<'NODE'
 import fs from 'node:fs';
 
 const lock = JSON.parse(fs.readFileSync('package-lock.json', 'utf8'));
+// content-type@2.0.0 + type-is@2.1.0 (jshttp) un-blocked 2026-07-21. Re-evaluated
+// as mainstream jshttp majors (137M/116M weekly downloads, MIT, no CVE); the
+// original block was a Socket behavioral heuristic (new-but-reputable releaser
+// blakeembrey + content-type's build-time `prepare` script). Neither version
+// declares preinstall/install/postinstall; content-type's only lifecycle script
+// is `prepare`, which npm does not run for a registry dependency install (only
+// dev/git/local), so no install-time code runs for consumers (the packed-consumer
+// check below additionally installs with --ignore-scripts). Required by
+// body-parser@2.3.0 (clears GHSA-v422-hmwv-36x6 / CVE-2026-12590). Cross-LLM
+// validated + ledgered (supply-chain/prod-closure.ledger.json). tar-stream stays
+// a hard tripwire.
 const blocked = new Map([
-  ['content-type', new Set(['2.0.0'])],
-  ['type-is', new Set(['2.1.0'])],
   ['tar-stream', new Set(['2.2.0', '2.1.4', '2.0.0'])],
 ]);
 // 2.0.0: the entire better-sqlite3 → prebuild-install → tar-fs → tar-stream
 // chain left the prod graph (node:sqlite is built into Node). better-sqlite3
 // is a devDependency now and dev deps do not install for consumers, so a
 // packed consumer install must contain NO tar-stream at all — any version,
-// any path, is a hard fail (the advisory carve-out is gone). Blocked versions
-// of content-type/type-is remain hard tripwires via `blocked`.
+// any path, is a hard fail (the advisory carve-out is gone). Blocked tar-stream
+// versions remain hard tripwires via `blocked`; content-type@2.0.0 and
+// type-is@2.1.0 were un-blocked 2026-07-21 as vetted jshttp majors (see the
+// blocked-map comment above).
 const findings = [];
 const tarStreamSightings = [];
 
