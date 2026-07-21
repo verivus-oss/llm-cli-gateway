@@ -4,9 +4,9 @@
     {
       "path": "node_modules/@hono/node-server",
       "name": "@hono/node-server",
-      "version": "1.19.14",
-      "resolved": "https://registry.npmjs.org/@hono/node-server/-/node-server-1.19.14.tgz",
-      "integrity": "sha512-GwtvgtXxnWsucXvbQXkRgqksiH2Qed37H9xHZocE5sA3N8O8O8/8FA3uclQXxXVzc9XBZuEOMK7+r02FmSpHtw=="
+      "version": "2.0.5",
+      "resolved": "https://registry.npmjs.org/@hono/node-server/-/node-server-2.0.5.tgz",
+      "integrity": "sha512-yQFvDmyDo3y6rEOJZDUYPJ49DIKTPpIk4kGvm40xx4Ejne0Pu9a1+exxPN+C1UppWK/WGZX9F++/Xs231tE86g=="
     },
     {
       "path": "node_modules/@modelcontextprotocol/sdk",
@@ -284,9 +284,9 @@
     {
       "path": "node_modules/hono",
       "name": "hono",
-      "version": "4.12.25",
-      "resolved": "https://registry.npmjs.org/hono/-/hono-4.12.25.tgz",
-      "integrity": "sha512-2NFaIyNVgJmBs/ecmtGzlmluTFs5cHEWGTdu0t1HBwYzoGXOL5nUQBRMXsXWla5i4KkG//QMzVP88m1+I3fdAQ=="
+      "version": "4.12.31",
+      "resolved": "https://registry.npmjs.org/hono/-/hono-4.12.31.tgz",
+      "integrity": "sha512-zJIHFrl6bq3RDd2YusFNCDlM8qUprxKswyi/OPzPyzKDdyBXDqWx8bZlZ7R+saTdSTatUmb3O7K4SspGPaEOQg=="
     },
     {
       "path": "node_modules/http-errors",

@@ -177,12 +177,14 @@ echo "==> hono floor tripwire"
 node --input-type=module <<'NODE'
 import fs from 'node:fs';
 
-// hono ships transitively via @modelcontextprotocol/sdk. 4.12.22 and below carry
-// known advisories (SNYK-JS-HONO-*; fix line = upgrade to 4.12.25+). A
-// package.json#overrides pin (hono ^4.12.25) raises the floor; this tripwire
+// hono ships transitively via @modelcontextprotocol/sdk. 4.12.26 and below carry
+// known advisories (GHSA-hvrm-45r6-mjfj hono/jsx cross-request context,
+// GHSA-w62v-xxxg-mg59 hono/css cx() SSR XSS, GHSA-xgm2-5f3f-mvvc / CVE-2026-59897
+// hono/aws-lambda header dedup; fix line = upgrade to 4.12.27+). A
+// package.json#overrides pin (hono ^4.12.27) raises the floor; this tripwire
 // fails the release if anything regresses below it. Mirrors the blocked-version
 // checks above but as a minimum-version floor rather than a blocklist.
-const FLOOR = [4, 12, 25];
+const FLOOR = [4, 12, 27];
 function below(version) {
   const parts = version.split('.').map(n => parseInt(n, 10));
   for (let i = 0; i < FLOOR.length; i++) {
