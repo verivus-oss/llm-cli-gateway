@@ -15,7 +15,17 @@ import {
   writeCapabilityCache,
 } from "../provider-capability-cache.js";
 import { discoverProviderModels } from "../provider-model-discovery.js";
-import type { CliInfo } from "../model-registry.js";
+import {
+  resolveProviderCapabilitySet,
+  __resetCapabilityResolverMemoForTest,
+} from "../provider-capability-resolver.js";
+import {
+  clearModelRegistryCache,
+  getAvailableCliInfo,
+  getLiveModelCatalog,
+  setLiveModelCatalog,
+  type CliInfo,
+} from "../model-registry.js";
 
 /** Fake probe runner keyed by `"<exe> <argv...>"`; missing keys return empty. */
 function makeRunner(config: Record<string, string | Error>): ProbeRunner {
@@ -138,6 +148,48 @@ describe("provider-model-discovery", () => {
     );
     // Config custom model is represented with a config origin.
     expect(listing.models.find(m => m.id === "grok-reasoning-2")?.origin).toBe("config");
+  });
+
+  // Systemic fix: a resolved live grok catalog is bridged into the model
+  // registry, making it authoritative for every read surface / --model default,
+  // so a rotated-away id (e.g. grok-build) can never be advertised again.
+  it("bridges a live grok catalog into the model registry as the authoritative source", async () => {
+    __resetCapabilityResolverMemoForTest();
+    setLiveModelCatalog("grok", null);
+    clearModelRegistryCache();
+    try {
+      const def = getProviderDefinition("grok");
+      const set = await discoverProviderCapabilities(
+        def,
+        options(
+          {
+            "grok --version": "grok 0.2.101",
+            "grok models": "Default model: grok-4.5\n\nAvailable models:\n  * grok-4.5 (default)\n",
+          },
+          "grok"
+        )
+      );
+      // Resolve via the inject path (the registry bridge runs on every resolve).
+      const resolved = await resolveProviderCapabilitySet(def, {
+        inject: async () => ({ set, source: "live", degraded: false }),
+      });
+      expect(resolved).not.toBeNull();
+
+      // The live catalog is published to the registry...
+      expect(getLiveModelCatalog("grok")?.defaultModel).toBe("grok-4.5");
+      expect(getLiveModelCatalog("grok")?.models.map(m => m.id)).toEqual(["grok-4.5"]);
+
+      // ...and is authoritative on the read surface, not any stale config value.
+      const grokInfo = getAvailableCliInfo(true).grok;
+      expect(grokInfo.defaultModel).toBe("grok-4.5");
+      expect(grokInfo.defaultModelSource).toContain("live CLI catalog");
+      expect(grokInfo.models["grok-4.5"]).toBeDefined();
+      expect(grokInfo.models["grok-build"]).toBeUndefined();
+    } finally {
+      setLiveModelCatalog("grok", null);
+      __resetCapabilityResolverMemoForTest();
+      clearModelRegistryCache();
+    }
   });
 
   // FIX C follow-up: the live-derived defaultModel is a user-visible scalar and

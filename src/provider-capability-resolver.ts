@@ -35,8 +35,55 @@ import {
 } from "./provider-capability-discovery.js";
 import { readCapabilityCache, resolveCapabilitySet } from "./provider-capability-cache.js";
 import { discoverProviderModels, type DiscoveredModelListing } from "./provider-model-discovery.js";
-import type { CliInfo } from "./model-registry.js";
+import { getAvailableCliInfo, setLiveModelCatalog, type CliInfo } from "./model-registry.js";
 import { noopLogger, type Logger } from "./logger.js";
+
+/**
+ * Providers whose model-registry entry is designed to DEFER to the live CLI
+ * lineup rather than a static/config default (their upstream default rotates).
+ * For these, a freshly-resolved capability set is bridged into the registry as
+ * the authoritative `live` catalog so every read surface (list_models,
+ * provider_tool_capabilities) and `--model default` resolution reflect what the
+ * installed CLI actually accepts. Grok is the first: `grok models` rotates its
+ * default (e.g. it dropped `grok-build`), and the registry entry carries no
+ * hardcoded default by design.
+ */
+const LIVE_CATALOG_REGISTRY_PROVIDERS = new Set<CliType>(["grok"]);
+
+/**
+ * Publish a freshly-resolved capability set's model catalog into the model
+ * registry, for bridge-eligible providers. Only a GENUINE live catalog
+ * (`source: "live-command"`) is published; any other outcome clears the prior
+ * live entry so the registry degrades to its static hints plus the CLI's own
+ * built-in default. Best-effort and fault-isolated: never throws.
+ */
+function bridgeLiveCatalogToRegistry(
+  def: ProviderDefinition,
+  resolution: ResolvedProviderCapability
+): void {
+  if (!LIVE_CATALOG_REGISTRY_PROVIDERS.has(def.id)) {
+    return;
+  }
+  try {
+    const listing = discoverProviderModels(def, resolution.set, {
+      registryInfo: getAvailableCliInfo()[def.id],
+    });
+    if (listing.source !== "live-command") {
+      setLiveModelCatalog(def.id, null);
+      return;
+    }
+    const models = listing.models
+      .filter(model => model.origin === "live-catalog" || model.origin === "live-hidden")
+      .map(model => ({ id: model.id, description: model.description }));
+    setLiveModelCatalog(def.id, {
+      defaultModel: listing.defaultModel ?? undefined,
+      models,
+      fetchedAt: Date.now(),
+    });
+  } catch {
+    // Best-effort: leave any existing live catalog in place on a parse/read error.
+  }
+}
 
 /**
  * Max age of an on-disk capability cache entry that the resolver will SEED from
@@ -142,7 +189,10 @@ export async function resolveProviderCapabilitySet(
   try {
     if (options.inject) {
       const injected = await options.inject(def);
-      if (injected) memo.set(def.id, injected);
+      if (injected) {
+        memo.set(def.id, injected);
+        bridgeLiveCatalogToRegistry(def, injected);
+      }
       return injected;
     }
 
@@ -159,6 +209,7 @@ export async function resolveProviderCapabilitySet(
           degraded: cached.capabilitySet.status === "degraded",
         };
         memo.set(def.id, resolution);
+        bridgeLiveCatalogToRegistry(def, resolution);
         return resolution;
       }
     }
@@ -181,6 +232,7 @@ export async function resolveProviderCapabilitySet(
       degraded: resolved.degraded,
     };
     memo.set(def.id, resolution);
+    bridgeLiveCatalogToRegistry(def, resolution);
     return resolution;
   } catch (err) {
     logger.debug(`capability resolve failed for ${def.id}`, {

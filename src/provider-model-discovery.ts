@@ -238,6 +238,8 @@ function registryOrigin(source: string | undefined): ModelOrigin {
       return "env";
     case "config":
       return "config";
+    case "live":
+      return "live-catalog";
     default:
       return "curated-fallback";
   }
