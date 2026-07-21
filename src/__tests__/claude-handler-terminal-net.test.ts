@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -22,8 +23,19 @@ vi.mock("../executor.js", async () => {
   return { ...actual, executeCli: executeCliMock };
 });
 
+// Keep createWorktree real (so a genuine request-owned worktree is produced) but
+// wrap removeWorktree in a spy that calls through, so the worktree-latch increment
+// can observe transfer (no removal) vs finishHandler/abort (removal) without
+// leaking worktree directories.
+vi.mock("../worktree-manager.js", async () => {
+  const actual =
+    await vi.importActual<typeof import("../worktree-manager.js")>("../worktree-manager.js");
+  return { ...actual, removeWorktree: vi.fn(actual.removeWorktree) };
+});
+
 import {
   handleClaudeRequest,
+  resolveGatewayServerRuntime,
   type ClaudeRequestParams,
   type GatewayServerRuntime,
   type HandlerDeps,
@@ -31,10 +43,17 @@ import {
 import { AsyncJobManager } from "../async-job-manager.js";
 import { PersistenceConfig, type JobLimitsConfig } from "../config.js";
 import { FlightRecorder } from "../flight-recorder.js";
-import { MemoryJobStore } from "../job-store.js";
+import { MemoryJobStore, SqliteJobStore } from "../job-store.js";
 import { noopLogger } from "../logger.js";
+import {
+  PersonalConfigManager,
+  type KitPathLayout,
+  type ResolvedKitContext,
+} from "../personal-config.js";
+import type { KitExecutionRef } from "../personal-config-types.js";
 import { runWithRequestContext, type GatewayRequestContext } from "../request-context.js";
 import { FileSessionManager } from "../session-manager.js";
+import { removeWorktree } from "../worktree-manager.js";
 
 const PROVIDER_SESSION_ID = "019ec070-26ab-7fa3-b66b-72fc6964f250";
 const LOCAL: GatewayRequestContext = { transport: "stdio", authScopes: [] };
@@ -324,6 +343,440 @@ describe("handleClaudeRequest terminal net: deferred (Mode B)", () => {
     } finally {
       slot.release();
       await manager.dispose();
+    }
+  });
+});
+
+// Increment 3: the worktree latch. When a request owns a git worktree, the
+// terminal outcome is one of transfer / finishHandler / abort. Its only external
+// signal is whether removeWorktree fires (the lifecycle latch state is
+// closure-private, index.ts:2183-2185), so this block uses a REAL git repo +
+// real createWorktree and observes the (call-through) removeWorktree spy:
+//  - no session  + success  -> finishHandler -> worktree removed
+//  - session     + success  -> transfer      -> worktree NOT removed (session owns it)
+//  - no session  + failure  -> abort         -> worktree removed
+function seedRepo(root: string): void {
+  execFileSync("git", ["init", "-b", "main"], { cwd: root, stdio: "ignore" });
+  execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: root, stdio: "ignore" });
+  execFileSync("git", ["config", "user.name", "Test"], { cwd: root, stdio: "ignore" });
+  writeFileSync(join(root, "README.md"), "seed\n");
+  execFileSync("git", ["add", "README.md"], { cwd: root, stdio: "ignore" });
+  execFileSync("git", ["commit", "-m", "seed"], { cwd: root, stdio: "ignore" });
+}
+
+function worktreeRegistry(root: string): GatewayServerRuntime["workspaces"] {
+  return {
+    enabled: true,
+    defaultAlias: "wt",
+    allowUnregisteredWorkingDir: false,
+    repos: [
+      {
+        alias: "wt",
+        path: root,
+        providers: ["claude"],
+        allowWorktree: true,
+        allowAddDir: false,
+        kind: "git",
+        operatorEntry: true,
+      },
+    ],
+    allowedRoots: [],
+    sources: { configFile: null },
+  };
+}
+
+describe("handleClaudeRequest terminal net: worktree latch", () => {
+  let tmp: string;
+  let flight: FlightRecorder;
+  let manager: AsyncJobManager;
+  let sessions: FileSessionManager;
+  const removeSpy = vi.mocked(removeWorktree);
+
+  beforeEach(() => {
+    tmp = mkdtempSync(join(tmpdir(), "claude-terminal-net-wt-"));
+    seedRepo(tmp);
+    flight = new FlightRecorder(join(tmp, "logs.db"));
+    manager = new AsyncJobManager(noopLogger);
+    sessions = new FileSessionManager(join(tmp, "sessions.json"));
+    executeCliMock.mockReset();
+    removeSpy.mockClear();
+  });
+
+  afterEach(async () => {
+    await manager.dispose();
+    flight.close();
+    rmSync(tmp, { recursive: true, force: true });
+    vi.restoreAllMocks();
+  });
+
+  function runtime(): GatewayServerRuntime {
+    return resolveGatewayServerRuntime(
+      {
+        asyncJobManager: manager,
+        sessionManager: sessions,
+        logger: noopLogger,
+        flightRecorder: flight,
+        persistence: persistenceNone(),
+        workspaces: worktreeRegistry(tmp),
+      },
+      { isolateState: true }
+    );
+  }
+
+  function deps(value: GatewayServerRuntime): HandlerDeps {
+    return { runtime: value, sessionManager: sessions, logger: noopLogger };
+  }
+
+  it("no session + success (finishHandler): removes the request-owned worktree", async () => {
+    executeCliMock.mockResolvedValue({
+      stdout: claudeResult("success", false),
+      stderr: "",
+      code: 0,
+    });
+    const result = await runWithRequestContext(LOCAL, () =>
+      handleClaudeRequest(deps(runtime()), baseParams({ workspace: "wt", worktree: true }))
+    );
+
+    expect(result.isError).toBeFalsy();
+    expect(sessions.listSessions().length).toBe(0);
+    expect(removeSpy).toHaveBeenCalled();
+  });
+
+  it("session admission + success (transfer): keeps the worktree, binds it to the session", async () => {
+    executeCliMock.mockResolvedValue({
+      stdout: claudeResult("success", false),
+      stderr: "",
+      code: 0,
+    });
+    // A concrete sessionId drives real session admission (plannedEffectiveSessionId
+    // = sessionId at index.ts:9654); createNewSession alone mints no id, so no
+    // admission and thus no transfer.
+    const result = await runWithRequestContext(LOCAL, () =>
+      handleClaudeRequest(
+        deps(runtime()),
+        baseParams({
+          workspace: "wt",
+          worktree: true,
+          sessionId: "11111111-1111-4111-8111-111111111111",
+        })
+      )
+    );
+
+    expect(result.isError).toBeFalsy();
+    const listed = sessions.listSessions();
+    expect(listed.length).toBe(1);
+    expect(listed[0]?.metadata?.worktreePath).toBeDefined();
+    // Transfer disowns the request half; the session now owns removal.
+    expect(removeSpy).not.toHaveBeenCalled();
+  });
+
+  it("no session + failure code!=0 (abort): removes the request-owned worktree", async () => {
+    executeCliMock.mockResolvedValue({
+      stdout: claudeResult("error", true),
+      stderr: "provider failed",
+      code: 1,
+    });
+    const result = await runWithRequestContext(LOCAL, () =>
+      handleClaudeRequest(deps(runtime()), baseParams({ workspace: "wt", worktree: true }))
+    );
+
+    expect(result.isError).toBe(true);
+    expect(sessions.listSessions().length).toBe(0);
+    expect(removeSpy).toHaveBeenCalled();
+  });
+});
+
+// Increment 4: the Kit variants. A Kit request withholds provider output from
+// durable history and its terminal handling is Kit-gated. Kit finalize/discard
+// are module-private, so this block observes them through their injectable
+// effects: the flight recorder's Kit-withheld completion text and the session
+// manager's releaseKitSessionAttempt (which discardPendingPersonalKitSession
+// calls, index.ts). Kit needs durable (SQLite) job admission.
+function kitLayout(root: string): KitPathLayout {
+  const runtimeDir = join(root, "runtime");
+  return {
+    baselineDir: join(root, "baseline"),
+    runtimeDir,
+    localTomlPath: join(runtimeDir, "local.toml"),
+    statePath: join(runtimeDir, "personal-config-state.json"),
+    releasesDir: join(runtimeDir, "personal-config", "releases"),
+    currentPointerPath: join(runtimeDir, "personal-config", "current.json"),
+    lockPath: join(runtimeDir, "personal-config", "lock"),
+    artifactsDir: join(runtimeDir, "personal-config", "artifacts"),
+  };
+}
+
+function kitPersistence(path: string): PersistenceConfig {
+  return {
+    backend: "sqlite",
+    path,
+    dsn: null,
+    retentionDays: 30,
+    dedupWindowMs: 0,
+    acknowledgeEphemeral: false,
+    ownsOrphanRecovery: false,
+    asyncJobsEnabled: true,
+    sources: { configFile: null, envOverrides: [] },
+  };
+}
+
+function kitRegistry(root: string): GatewayServerRuntime["workspaces"] {
+  return {
+    enabled: true,
+    defaultAlias: "kit-target",
+    allowUnregisteredWorkingDir: false,
+    repos: [
+      {
+        alias: "kit-target",
+        path: root,
+        providers: ["claude", "codex"],
+        allowWorktree: false,
+        allowAddDir: false,
+        kind: "folder",
+        operatorEntry: true,
+      },
+    ],
+    allowedRoots: [],
+    sources: { configFile: null },
+  };
+}
+
+function kitContext(root: string): ResolvedKitContext {
+  const execution: KitExecutionRef = {
+    version: 1,
+    releaseId: "a".repeat(40),
+    configStamp: "b".repeat(64),
+    scopeRoot: root,
+    scopeHead: "c".repeat(40),
+    contextIdentity: "d".repeat(64),
+  };
+  return {
+    release: {
+      id: execution.releaseId,
+      root,
+      manifest: {
+        version: 1,
+        releaseId: execution.releaseId,
+        baselineCommit: execution.releaseId,
+        createdAt: new Date().toISOString(),
+        verified: true,
+        treeDigest: "e".repeat(64),
+      },
+    },
+    scope: {
+      cwd: root,
+      scopeRoot: root,
+      registeredWorkspaceAlias: "kit-target",
+      repoHead: execution.scopeHead,
+      overlayPath: null,
+    },
+    text: "Private Kit context which must never reach durable history.",
+    contextDigest: "f".repeat(64),
+    configStamp: execution.configStamp,
+    execution,
+    preferences: {},
+    provenance: [],
+  };
+}
+
+// The Kit terminal reachable without simulating a child process is the DEFERRED
+// one: holding the process slot keeps the kit job queued (it never spawns), so
+// this pins the Kit-gated terminal ledger without a spawnCliProcess fake. On
+// defer the kit path is Mode B (arms the manager, no inline logComplete) AND
+// hands the claimed kit session off to the job rather than discarding it
+// (kitJobHandedOff): releaseKitSessionAttempt must NOT fire. The genuine Kit
+// inline success/failure execution paths (and their durable-history withholding)
+// are covered by personal-config-flight-recorder-privacy.test.ts, which already
+// stands up a full kit run; re-deriving them here would need a child-process
+// simulation for no added ledger coverage.
+describe("handleClaudeRequest terminal net: Kit deferred (Mode B, kitJobHandedOff)", () => {
+  let originalDeadline: string | undefined;
+  let root: string;
+  let flight: FlightRecorder;
+  let store: SqliteJobStore;
+  let jobs: AsyncJobManager;
+  let sessions: FileSessionManager;
+
+  beforeEach(() => {
+    originalDeadline = process.env.SYNC_DEADLINE_MS;
+    process.env.SYNC_DEADLINE_MS = "25";
+    root = mkdtempSync(join(tmpdir(), "claude-terminal-net-kit-"));
+    flight = new FlightRecorder(join(root, "logs.db"));
+    store = new SqliteJobStore(join(root, "jobs.db"));
+    jobs = new AsyncJobManager(noopLogger, undefined, store, undefined, saturationLimits());
+    sessions = new FileSessionManager(join(root, "sessions.json"));
+    executeCliMock.mockReset();
+    vi.resetModules();
+  });
+
+  afterEach(async () => {
+    if (originalDeadline === undefined) delete process.env.SYNC_DEADLINE_MS;
+    else process.env.SYNC_DEADLINE_MS = originalDeadline;
+    await jobs.dispose();
+    store.close();
+    flight.close();
+    rmSync(root, { recursive: true, force: true });
+    vi.resetModules();
+    vi.restoreAllMocks();
+  });
+
+  it("kit deferred (10a): arms the manager, no inline complete, hands off (does not discard) the kit session", async () => {
+    const {
+      handleClaudeRequest: handleClaudeRequestDyn,
+      resolveGatewayServerRuntime: resolveRuntimeDyn,
+    } = await import("../index.js");
+    // Hold the only process slot so the kit job queues past the 25ms deadline.
+    const slot = await jobs.acquireProcessSlot("claude");
+    const personalConfig = new PersonalConfigManager(
+      { enabled: true, baselinePath: join(root, "baseline"), maxStaleHours: 168 },
+      kitLayout(root)
+    );
+    vi.spyOn(personalConfig, "buildContext").mockReturnValue(kitContext(root));
+    vi.spyOn(personalConfig, "assertExecutionCurrent").mockImplementation(() => {});
+    const runtime = resolveRuntimeDyn(
+      {
+        asyncJobManager: jobs,
+        sessionManager: sessions,
+        logger: noopLogger,
+        flightRecorder: flight,
+        persistence: kitPersistence(join(root, "jobs.db")),
+        personalConfig,
+        workspaces: kitRegistry(root),
+      },
+      { isolateState: true }
+    );
+    const logComplete = vi.spyOn(flight, "logComplete");
+    const arm = vi.spyOn(jobs, "armFlightCompleteForDeferral");
+    const release = vi.spyOn(sessions, "releaseKitSessionAttempt");
+
+    try {
+      const result = await runWithRequestContext(LOCAL, () =>
+        handleClaudeRequestDyn(
+          { runtime, sessionManager: sessions, logger: noopLogger },
+          baseParams({ workspace: "kit-target", correlationId: "kit-deferred" })
+        )
+      );
+
+      const body = JSON.parse(result.content[0]!.text);
+      expect(body.status).toBe("deferred");
+      expect(arm).toHaveBeenCalledTimes(1);
+      // Mode B: manager owns completion; the handler must not inline-complete.
+      expect(logComplete).not.toHaveBeenCalled();
+      // kitJobHandedOff: the claimed kit session attempt is handed to the job,
+      // not discarded, so the pending attempt survives for the async terminal.
+      expect(release).not.toHaveBeenCalled();
+      jobs.cancelJob(body.jobId);
+    } finally {
+      slot.release();
+    }
+  });
+});
+
+// Increment 5: the H-DoubleComplete pre-existing hazard (spec section 4). The
+// intended pin: on the deferred path (manager armed) with a request-owned
+// worktree and NO session/kit, if the else-branch `await finishHandler()`
+// rejects (removeWorktree throws), the rejection lands in the catch, whose guard
+// is skipped (kitJobHandedOff is already true) while the unconditional inline
+// safePersonalKitFlightComplete (index.ts:10233) still runs, so the handler
+// completes the flight recorder even though the manager was armed to own it.
+//
+// This is SKIPPED, not deleted, because it is not deterministically reproducible
+// at the handler-unit layer today: finishHandler() only reaches removeWorktree
+// when the worktree `terminal` latch is set, and that latch is set only by the
+// executor `onComplete` (worktreeLifecycle.onTerminal). On a genuine defer that
+// onComplete is handed to the AsyncJobManager (index.ts:1650/1669) and fires
+// asynchronously AFTER the handler has already returned the deferral, so the
+// in-handler finishHandler() at index.ts:10017 is a no-op and cannot reject.
+// Forcing the latch requires a seam over the worktree lifecycle that T3
+// (FlightOwnership) introduces; T3 both adds that seam and fences the hazard
+// (manager is the sole completer once armed), at which point this becomes T3's
+// executable acceptance test. Pinning it here would require a fake that
+// contradicts the real lifecycle wiring, which would characterize the fake
+// rather than the handler.
+describe("handleClaudeRequest terminal net: H-DoubleComplete (pre-fence pin)", () => {
+  let originalDeadline: string | undefined;
+  let tmp: string;
+  let flight: FlightRecorder;
+  let jobs: AsyncJobManager;
+  const removeSpy = vi.mocked(removeWorktree);
+
+  beforeEach(() => {
+    originalDeadline = process.env.SYNC_DEADLINE_MS;
+    process.env.SYNC_DEADLINE_MS = "25";
+    tmp = mkdtempSync(join(tmpdir(), "claude-terminal-net-hdc-"));
+    seedRepo(tmp);
+    flight = new FlightRecorder(join(tmp, "logs.db"));
+    jobs = new AsyncJobManager(
+      noopLogger,
+      undefined,
+      new MemoryJobStore(),
+      undefined,
+      saturationLimits()
+    );
+    executeCliMock.mockReset();
+    removeSpy.mockReset();
+    vi.resetModules();
+  });
+
+  afterEach(async () => {
+    if (originalDeadline === undefined) delete process.env.SYNC_DEADLINE_MS;
+    else process.env.SYNC_DEADLINE_MS = originalDeadline;
+    await jobs.dispose();
+    flight.close();
+    rmSync(tmp, { recursive: true, force: true });
+    vi.resetModules();
+    vi.restoreAllMocks();
+  });
+
+  // eslint-disable-next-line vitest/no-disabled-tests -- executable spec for T3; see block comment above.
+  it.skip("deferred + finishHandler() rejects: the handler STILL inline-completes after arming (double owner) [needs T3 lifecycle seam]", async () => {
+    const {
+      handleClaudeRequest: handleClaudeRequestDyn,
+      resolveGatewayServerRuntime: resolveRuntimeDyn,
+    } = await import("../index.js");
+    // The worktree gate is `sessionManager instanceof FileSessionManager`, so the
+    // session manager must be the SAME (dynamically re-imported) class the fresh
+    // index module sees; a statically-imported instance fails the check.
+    const { FileSessionManager: FileSessionManagerDyn } = await import("../session-manager.js");
+    const sessions = new FileSessionManagerDyn(join(tmp, "sessions.json"));
+    // The post-handoff worktree cleanup rejects.
+    removeSpy.mockRejectedValue(new Error("worktree removal failed"));
+    // Hold the slot so the job queues and the request defers (arming the manager).
+    const slot = await jobs.acquireProcessSlot("claude");
+    const runtime = resolveRuntimeDyn(
+      {
+        asyncJobManager: jobs,
+        sessionManager: sessions,
+        logger: noopLogger,
+        flightRecorder: flight,
+        persistence: persistenceMemory(),
+        workspaces: worktreeRegistry(tmp),
+      },
+      { isolateState: true }
+    );
+    const arm = vi.spyOn(jobs, "armFlightCompleteForDeferral");
+    const logComplete = vi.spyOn(flight, "logComplete");
+
+    try {
+      const result = await runWithRequestContext(LOCAL, () =>
+        handleClaudeRequestDyn(
+          { runtime, sessionManager: sessions, logger: noopLogger },
+          baseParams({ workspace: "wt", worktree: true, correlationId: "hdc" })
+        )
+      );
+
+      // The manager was armed to own completion for the deferral...
+      expect(arm).toHaveBeenCalledTimes(1);
+      expect(removeSpy).toHaveBeenCalled();
+      // ...yet the rejecting finishHandler drops into the catch, which still
+      // writes an inline completion. This is the pre-existing double-complete.
+      expect(logComplete).toHaveBeenCalledTimes(1);
+      // The finishHandler rejection surfaces as an error response to the caller.
+      expect(result.isError).toBe(true);
+      const jobId = (jobs.listJobs?.() ?? [])[0]?.id;
+      if (jobId) jobs.cancelJob(jobId);
+    } finally {
+      slot.release();
     }
   });
 });
