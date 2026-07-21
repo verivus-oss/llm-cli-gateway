@@ -67,9 +67,7 @@ const FORBIDDEN_CHAIN = new Set(["better-sqlite3", "prebuild-install", "tar-fs",
 // so no install-time code runs for consumers. Required by body-parser@2.3.0
 // (clears GHSA-v422-hmwv-36x6).
 // Cross-LLM validated + ledgered. tar-stream stays a hard tripwire.
-const BLOCKED_VERSIONS = new Map([
-  ["tar-stream", new Set(["2.2.0", "2.1.4", "2.0.0"])],
-]);
+const BLOCKED_VERSIONS = new Map([["tar-stream", new Set(["2.2.0", "2.1.4", "2.0.0"])]]);
 const LICENSE_ALLOWLIST_PATH = join(
   SCRIPT_DIR,
   "..",
