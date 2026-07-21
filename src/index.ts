@@ -9432,6 +9432,827 @@ function resolveHandlerRuntime(deps: HandlerDeps): GatewayServerRuntime {
   return runtime;
 }
 
+export interface ClaudeRequestParams {
+  prompt?: string;
+  promptParts?: PromptParts;
+  model?: string;
+  outputFormat: "text" | "json" | "stream-json";
+  sessionId?: string;
+  continueSession: boolean;
+  createNewSession: boolean;
+  allowedTools?: string[];
+  disallowedTools?: string[];
+  dangerouslySkipPermissions: boolean;
+  permissionMode?: ClaudePermissionMode;
+  agent?: string;
+  agents?: Record<string, unknown>;
+  forkSession?: boolean;
+  systemPrompt?: string;
+  appendSystemPrompt?: string;
+  maxBudgetUsd?: number;
+  maxTurns?: number;
+  effort?: ClaudeEffortLevel;
+  excludeDynamicSystemPromptSections?: boolean;
+  fallbackModel?: string;
+  jsonSchema?: string | Record<string, unknown>;
+  workingDir?: string;
+  addDir?: string[];
+  noSessionPersistence?: boolean;
+  settingSources?: string;
+  settings?: string;
+  tools?: string[];
+  includeHookEvents?: boolean;
+  replayUserMessages?: boolean;
+  systemPromptFile?: string;
+  appendSystemPromptFile?: string;
+  name?: string;
+  pluginDir?: string[];
+  pluginUrl?: string[];
+  safeMode?: boolean;
+  bare?: boolean;
+  debug?: string | boolean;
+  debugFile?: string;
+  workspace?: string;
+  worktree?: boolean | { name?: string; ref?: string };
+  approvalStrategy: "legacy" | "mcp_managed";
+  approvalPolicy?: "strict" | "balanced" | "permissive";
+  mcpServers: ClaudeMcpServerName[];
+  strictMcpConfig: boolean;
+  correlationId?: string;
+  optimizePrompt: boolean;
+  optimizeResponse: boolean;
+  compressResponse?: boolean;
+  idleTimeoutMs?: number;
+  forceRefresh: boolean;
+  requestInstructions?: string;
+}
+
+export async function handleClaudeRequest(
+  deps: HandlerDeps,
+  params: ClaudeRequestParams
+): Promise<ExtendedToolResponse> {
+  const runtime = resolveHandlerRuntime(deps);
+  const sessionManager = deps.sessionManager;
+  const logger = runtime.logger;
+  const {
+    prompt,
+    promptParts,
+    model,
+    outputFormat: requestedOutputFormat,
+    sessionId,
+    continueSession,
+    createNewSession,
+    allowedTools,
+    disallowedTools,
+    dangerouslySkipPermissions,
+    permissionMode,
+    agent,
+    agents,
+    forkSession,
+    systemPrompt,
+    appendSystemPrompt,
+    maxBudgetUsd,
+    maxTurns,
+    effort,
+    excludeDynamicSystemPromptSections,
+    fallbackModel,
+    jsonSchema,
+    workingDir,
+    addDir,
+    noSessionPersistence,
+    settingSources,
+    settings,
+    tools,
+    includeHookEvents,
+    replayUserMessages,
+    systemPromptFile,
+    appendSystemPromptFile,
+    name,
+    pluginDir,
+    pluginUrl,
+    safeMode,
+    bare,
+    debug,
+    debugFile,
+    workspace,
+    worktree,
+    approvalStrategy,
+    approvalPolicy,
+    mcpServers,
+    strictMcpConfig,
+    correlationId,
+    optimizePrompt,
+    optimizeResponse,
+    compressResponse,
+    idleTimeoutMs,
+    forceRefresh,
+    requestInstructions,
+  } = params;
+  const startTime = Date.now();
+  if (systemPrompt !== undefined && appendSystemPrompt !== undefined) {
+    return createErrorResponse(
+      "claude",
+      1,
+      "",
+      correlationId,
+      new Error(
+        "systemPrompt and appendSystemPrompt are mutually exclusive; use one or the other (not both)."
+      )
+    );
+  }
+  if (createNewSession && continueSession) {
+    return createErrorResponse(
+      "claude_request",
+      1,
+      "",
+      correlationId,
+      new Error("createNewSession and continueSession cannot be combined")
+    );
+  }
+  let kit: PersonalKitRequestContext | null = null;
+  let kitSession: PersonalKitSessionResolution | null = null;
+  try {
+    // Keep zero-deadline synchronous Kit calls outside context compilation,
+    // session allocation, and all provider preparation. Their only safe
+    // execution path is durable async admission.
+    if (runtime.personalConfig.settings.enabled) assertKitSyncDeferralEnabled();
+    kit = resolvePersonalKitRequest(runtime, "claude", {
+      prompt,
+      promptParts,
+      systemPrompt,
+      appendSystemPrompt,
+      systemPromptFile,
+      appendSystemPromptFile,
+      name,
+      settings,
+      settingSources,
+      tools,
+      agent,
+      agents,
+      forkSession,
+      noSessionPersistence,
+      allowedTools,
+      disallowedTools,
+      dangerouslySkipPermissions,
+      permissionMode,
+      effort,
+      fallbackModel,
+      jsonSchema,
+      workingDir,
+      addDir,
+      excludeDynamicSystemPromptSections,
+      includeHookEvents,
+      replayUserMessages,
+      pluginDir,
+      pluginUrl,
+      mcpServers,
+      strictMcpConfig,
+      safeMode,
+      bare,
+      debug,
+      debugFile,
+      worktree,
+      approvalStrategy,
+      approvalPolicy,
+      // The public schema default is present here. Kit execution ignores
+      // this field and resolves its output format from the verified baseline.
+      outputFormat: requestedOutputFormat,
+      continueSession,
+      sessionId,
+      createNewSession,
+      workspace,
+      requestInstructions,
+    });
+  } catch (error) {
+    kit?.artifact?.cleanup();
+    return personalKitErrorResponse("claude_request", correlationId, error);
+  }
+  const kitPreferences = kit
+    ? applyKitPreferences(
+        {
+          model,
+          outputFormat: requestedOutputFormat,
+          maxTurns,
+          maxBudgetUsd,
+        },
+        kit.context.preferences
+      )
+    : {
+        model,
+        outputFormat: requestedOutputFormat,
+        maxTurns,
+        maxBudgetUsd,
+      };
+  const outputFormat = (
+    kit
+      ? resolveClaudeKitOutputFormat(kit.context.preferences)
+      : (kitPreferences.outputFormat ?? "stream-json")
+  ) as "text" | "json" | "stream-json";
+  // Resolve native continuation before the managed approval decision. A
+  // resumed Claude session can carry an unverified provider posture, while
+  // Kit owns and verifies its own native handle separately.
+  let plannedEffectiveSessionId = sessionId;
+  let plannedUseContinue = kit ? false : continueSession;
+  let plannedActiveSession: Awaited<ReturnType<ISessionManager["getActiveSession"]>> | null = null;
+  let plannedNativeSessionArgs: string[];
+  const kitArtifactProjection = kit ? projectedClaudeKitArtifactPath(runtime) : undefined;
+  if (kit) {
+    try {
+      plannedNativeSessionArgs = projectedClaudeKitSessionArgs(sessionId);
+    } catch (error) {
+      return createErrorResponse("claude_request", 1, "", correlationId, error as Error);
+    }
+  } else {
+    try {
+      plannedActiveSession = await getCallerOwnedActiveSession(sessionManager, "claude");
+    } catch (err) {
+      logger.warn(
+        `[${correlationId ?? "pending"}] sessionManager.getActiveSession failed (non-fatal): ${(err as Error).message}`
+      );
+    }
+    if (!createNewSession && !continueSession && !sessionId && plannedActiveSession) {
+      plannedEffectiveSessionId = plannedActiveSession.id;
+      plannedUseContinue = true;
+    }
+    if (
+      !plannedUseContinue &&
+      plannedEffectiveSessionId &&
+      plannedActiveSession?.id === plannedEffectiveSessionId
+    ) {
+      plannedUseContinue = true;
+    }
+    try {
+      if (plannedEffectiveSessionId) {
+        assertCliArgUtf8Size(plannedEffectiveSessionId, {
+          provider: "claude",
+          inputName: "sessionId",
+        });
+      }
+    } catch (error) {
+      return kitAwareErrorResponse("claude_request", 1, "", correlationId, error as Error, kit);
+    }
+    plannedNativeSessionArgs = plannedUseContinue
+      ? ["--continue"]
+      : plannedEffectiveSessionId
+        ? ["--session-id", plannedEffectiveSessionId]
+        : [];
+  }
+  const prep = prepareClaudeRequest(
+    {
+      prompt,
+      promptParts,
+      model: kitPreferences.model as string | undefined,
+      outputFormat,
+      allowedTools,
+      disallowedTools,
+      dangerouslySkipPermissions,
+      permissionMode,
+      approvalStrategy,
+      approvalPolicy,
+      mcpServers,
+      strictMcpConfig,
+      correlationId,
+      optimizePrompt,
+      operation: "claude_request",
+      agent,
+      agents,
+      forkSession,
+      systemPrompt,
+      appendSystemPrompt,
+      maxBudgetUsd: kitPreferences.maxBudgetUsd as number | undefined,
+      maxTurns: kitPreferences.maxTurns as number | undefined,
+      effort,
+      excludeDynamicSystemPromptSections,
+      fallbackModel,
+      jsonSchema,
+      workingDir,
+      addDir,
+      noSessionPersistence,
+      settingSources,
+      settings,
+      tools,
+      includeHookEvents,
+      replayUserMessages,
+      systemPromptFile,
+      appendSystemPromptFile,
+      name,
+      pluginDir,
+      pluginUrl,
+      safeMode: kit ? true : safeMode,
+      bare: kit ? true : bare,
+      debug,
+      debugFile,
+      nativeResumeRequested: !kit && plannedUseContinue,
+      nativeSessionArgs: plannedNativeSessionArgs,
+      gatewayWorktreeRequested: hasGatewayWorktreeRequest(worktree),
+      kitAppendSystemPromptFile: kitArtifactProjection,
+    },
+    runtime
+  );
+  if (!("args" in prep)) {
+    kit?.artifact?.cleanup();
+    await discardPendingPersonalKitSession(runtime, kitSession);
+    return prep;
+  }
+
+  const { corrId, args, mcpConfig } = prep;
+  if (kit && kitArtifactProjection) {
+    try {
+      // Full caller argv, verified Kit preferences, safe/bare isolation,
+      // projected continuity, and an exact-width artifact path have all
+      // crossed preparation admission. Only now may durable Kit resources
+      // be created or claimed.
+      materializeClaudeKitArtifact(runtime, kit, args, kitArtifactProjection);
+      kitSession = await resolvePersonalKitSession(
+        runtime,
+        "claude",
+        kit.context,
+        sessionId,
+        createNewSession,
+        personalKitSyncAttemptKind(runtime)
+      );
+      plannedEffectiveSessionId = kitSession.gatewaySessionId;
+      plannedUseContinue = false;
+      if (kitSession.resume && kitSession.nativeSessionId) {
+        assertCliArgUtf8Size(kitSession.nativeSessionId, {
+          provider: "claude",
+          inputName: "kit nativeSessionId",
+        });
+      }
+      plannedNativeSessionArgs =
+        kitSession.resume && kitSession.nativeSessionId
+          ? ["--resume", kitSession.nativeSessionId]
+          : ["--session-id", kitSession.gatewaySessionId];
+    } catch (error) {
+      prep.cleanup?.();
+      kit.artifact?.cleanup();
+      await discardPendingPersonalKitSession(runtime, kitSession);
+      return kitAwareErrorResponse("claude_request", 1, "", corrId, error as Error, kit);
+    }
+  }
+  const baseRequestCleanup = composeRequestCleanup(runtime, prep.cleanup, kit?.artifact?.cleanup);
+  let durationMs = 0;
+  let wasSuccessful = false;
+  let worktreeLifecycle: RequestOwnedWorktreeLifecycle | undefined;
+  let requestCleanup = baseRequestCleanup;
+  let sessionAdmission: SessionAdmissionMutation | undefined;
+  let sessionAdmissionCommitted = false;
+
+  try {
+    insertAndAdmitFinalSessionArgs("claude", args, plannedNativeSessionArgs, "claude");
+  } catch (error) {
+    baseRequestCleanup?.();
+    await discardPendingPersonalKitSession(runtime, kitSession);
+    return kitAwareErrorResponse("claude_request", 1, "", corrId, error as Error, kit);
+  }
+
+  // Session resolution happens BEFORE safeFlightStart so that:
+  //   (1) the TTL warning reads the PRIOR session's lastWriteAt
+  //       rather than the row about to be inserted (codex-r1/F1).
+  //   (2) the flight-recorder row is tagged with effectiveSessionId
+  //       (the session the CLI will actually resume), not the raw
+  //       user-provided sessionId.
+  const effectiveSessionId = plannedEffectiveSessionId;
+  const useContinue = plannedUseContinue;
+
+  let existingSession: Session | null;
+  try {
+    existingSession = kitSession
+      ? await getCallerOwnedSession(sessionManager, kitSession.gatewaySessionId)
+      : await getExistingSessionForProvider(sessionManager, effectiveSessionId, "claude", {
+          requireTrackedRemoteSession: true,
+        });
+  } catch (err) {
+    requestCleanup?.();
+    await discardPendingPersonalKitSession(runtime, kitSession);
+    return kitAwareErrorResponse("claude_request", 1, "", corrId, err as Error, kit);
+  }
+
+  // Slice 3: if the resolved session has a near-expiry Anthropic
+  // cache breakpoint, attach a structured warning (NOT a hard error)
+  // to the response. Computed BEFORE safeFlightStart so the current
+  // row does not skew lastRequestAt.
+  const ttlWarning = maybeBuildCacheTtlWarning({
+    runtime,
+    sessionId: effectiveSessionId,
+    cli: "claude",
+  });
+  // Rec #4: include any prep-time warnings (e.g. cacheable_prefix_uncached).
+  const warnings: WarningEntry[] = [...(ttlWarning ? [ttlWarning] : []), ...(prep.warnings ?? [])];
+
+  let kitJobHandedOff = false;
+  try {
+    // Slice λ: resolve worktree directive into spawn cwd. Done after
+    // session resolution so resume reuse can read metadata.worktreePath.
+    let worktreeResolution: ResolvedWorktree = {};
+    try {
+      worktreeResolution = await resolveWorkspaceAndWorktreeForRequest({
+        provider: "claude",
+        workspace,
+        worktree,
+        sessionId: effectiveSessionId,
+        runtime,
+        workingDir,
+        addDir,
+        requireStableCwd: useContinue,
+        deferWorktree: true,
+      });
+    } catch (err) {
+      requestCleanup?.();
+      await discardPendingPersonalKitSession(runtime, kitSession);
+      return kitAwareErrorResponse("claude_request", 1, "", corrId, err as Error, kit);
+    }
+    applyEffectiveWorkingDirectory(
+      "claude",
+      args,
+      undefined,
+      undefined,
+      "claude",
+      "--add-dir",
+      worktreeResolution.effectiveAddDirs
+    );
+    assertUpstreamCliArgs("claude", args);
+    assertUpstreamCliEnv("claude", undefined);
+    assertFinalCliProcessAdmission("claude", args, "claude");
+    let admittedSession = existingSession;
+    if (effectiveSessionId) {
+      if (existingSession) {
+        admittedSession = await persistResolvedSessionScope(
+          runtime.sessionManager,
+          effectiveSessionId,
+          worktreeResolution,
+          runtime,
+          existingSession
+        );
+        if (!kitSession) {
+          sessionAdmission = { original: existingSession, admitted: admittedSession };
+        }
+      } else if (!kitSession) {
+        const admitted = await createSessionWithResolvedScope(
+          runtime.sessionManager,
+          "claude",
+          "Claude Session",
+          effectiveSessionId,
+          worktreeResolution,
+          runtime
+        );
+        admittedSession = admitted.session;
+        sessionAdmission = { original: admitted.previousSession, admitted: admitted.session };
+      }
+    }
+    if (worktree) {
+      worktreeResolution = await resolveWorkspaceAndWorktreeForRequest({
+        provider: "claude",
+        workspace,
+        worktree,
+        sessionId: admittedSession ? effectiveSessionId : undefined,
+        runtime,
+        workingDir,
+        addDir,
+        requireStableCwd: useContinue,
+        expectedSession: admittedSession ?? undefined,
+      });
+      if (sessionAdmission) {
+        advanceSessionAdmissionWorktree(sessionAdmission, worktreeResolution);
+      } else if (kitSession && worktreeResolution.boundSession) {
+        worktreeResolution.requestOwnedWorktree = undefined;
+      }
+    }
+    worktreeLifecycle = createRequestOwnedWorktreeLifecycle(worktreeResolution, runtime, true);
+    requestCleanup = composeRequestCleanup(
+      runtime,
+      baseRequestCleanup,
+      worktreeLifecycle.onTerminal
+    );
+    safeFlightStart(
+      personalKitFlightStart(
+        {
+          correlationId: corrId,
+          cli: "claude",
+          model: prep.resolvedModel || "default",
+          prompt: prep.effectivePrompt,
+          sessionId: effectiveSessionId,
+          stablePrefixHash: prep.stablePrefixHash ?? undefined,
+          stablePrefixTokens: prep.stablePrefixTokens ?? undefined,
+          cacheControlBlocks: prep.cacheControlBlocks,
+          cacheControlTtlSeconds: prep.cacheControlTtlSeconds,
+        },
+        kit
+      ),
+      runtime
+    );
+    logger.info(
+      `[${corrId}] claude_request invoked with model=${prep.resolvedModel || "default"}, outputFormat=${outputFormat}, prompt length=${prep.effectivePrompt.length}, sessionId=${effectiveSessionId}, cacheControlBlocks=${prep.cacheControlBlocks ?? 0}`
+    );
+
+    // Idle timeout only for stream-json (text/json produce no output until done)
+    const effectiveIdleTimeout =
+      outputFormat === "stream-json" ? resolveIdleTimeout("claude", idleTimeoutMs) : undefined;
+    const effectiveCompress = resolveEffectiveCompression(runtime.compression, {
+      compressResponse,
+      outputFormat,
+      outputSchemaDeclared: false,
+    });
+    const claudeSyncFrHandoff = buildAsyncFlightRecorderHandoff(
+      "claude",
+      prep,
+      effectiveSessionId,
+      outputFormat,
+      optimizePrompt
+    );
+    claudeSyncFrHandoff.flightRecorderEntry = personalKitFlightRecorderEntry(
+      claudeSyncFrHandoff.flightRecorderEntry,
+      kit
+    );
+    const result = await runWithPersonalKitAttemptLease({
+      runtime,
+      session: kitSession,
+      artifact: kit?.artifact,
+      heartbeat: true,
+      run: () =>
+        awaitJobOrDefer(
+          "claude",
+          args,
+          corrId,
+          effectiveIdleTimeout,
+          outputFormat,
+          kitSession ? true : forceRefresh,
+          runtime,
+          undefined,
+          requestCleanup,
+          claudeSyncFrHandoff.flightRecorderEntry,
+          claudeSyncFrHandoff.extractUsage,
+          prep.stdinPayload,
+          kit?.context.scope.cwd ?? worktreeResolution.cwd ?? workingDir,
+          effectiveCompress,
+          kit?.context.execution ?? null,
+          kit && kitSession
+            ? event =>
+                finalizePersonalKitTerminalEvent({
+                  event,
+                  runtime,
+                  provider: "claude",
+                  gatewaySessionId: kitSession!.gatewaySessionId,
+                  execution: kit!.context.execution,
+                  attemptId: kitSession!.attemptId,
+                  initialNativeSessionId:
+                    kitSession!.nativeSessionId ?? kitSession!.gatewaySessionId,
+                })
+            : undefined,
+          kitSession?.gatewaySessionId,
+          kitSession?.attemptKind === "durable" ? kitSession.attemptId : undefined,
+          sessionBoundDedupArgs(buildClaudeMcpDedupArgs(args, mcpConfig), effectiveSessionId),
+          undefined,
+          mcpConfig?.cleanup ? mcpConfig.path : undefined,
+          mcpConfig?.cleanup ? mcpConfig.artifactScope : undefined
+        ),
+    });
+    kitJobHandedOff = !isDeferredResponse(result) && result.jobId !== undefined;
+
+    // Deferred — job still running, return async reference
+    if (isDeferredResponse(result)) {
+      kitJobHandedOff = true;
+      sessionAdmissionCommitted = true;
+      if (sessionAdmission || kitSession) worktreeLifecycle.transfer();
+      else await worktreeLifecycle.finishHandler();
+      if (!kitSession) {
+        await safeUpdateSessionUsageAfterJobAdmission(sessionManager, effectiveSessionId, runtime);
+      }
+      const deferred = buildDeferredToolResponse(result, effectiveSessionId);
+      if (warnings.length > 0) {
+        deferred.warnings = warnings;
+      }
+      return deferred;
+    }
+
+    const { stdout, stderr, code } = result;
+    durationMs = Math.max(0, Date.now() - startTime);
+
+    if (code !== 0) {
+      if (!kitSession) {
+        await rollbackSessionAndWorktreeAdmission(
+          sessionManager,
+          sessionAdmission,
+          worktreeLifecycle,
+          runtime
+        );
+      }
+      const terminalFailure = buildTerminalCliFailure("claude", stdout, stderr, code, outputFormat);
+      if (kit && kitSession && !result.jobId) {
+        await finalizePersonalKitSessionOrThrow({
+          runtime,
+          provider: "claude",
+          gatewaySessionId: kitSession.gatewaySessionId,
+          execution: kit.context.execution,
+          terminalMetadata: null,
+          completed: false,
+          attemptId: kitSession.attemptId,
+          initialNativeSessionId: kitSession.nativeSessionId ?? kitSession.gatewaySessionId,
+        });
+      }
+      logger.info(`[${corrId}] claude_request failed in ${durationMs}ms`);
+      safePersonalKitFlightComplete(
+        corrId,
+        {
+          ...terminalFailure,
+          durationMs,
+          retryCount: 0,
+          circuitBreakerState: "closed",
+          optimizationApplied: optimizePrompt || optimizeResponse,
+          exitCode: code,
+          status: "failed",
+        },
+        kit,
+        runtime
+      );
+      // Slice 3: attach any computed warnings to the error response so
+      // the caller still sees cache_ttl_expiring_soon when the CLI
+      // happens to fail for an unrelated reason.
+      const errResp = kitAwareErrorResponse(
+        "claude",
+        code,
+        stderr,
+        corrId,
+        undefined,
+        kit,
+        {
+          providerSessionId: terminalFailure.providerSessionId,
+        },
+        result
+      );
+      if (warnings.length > 0) {
+        (errResp as ExtendedToolResponse).warnings = warnings;
+      }
+      return errResp;
+    }
+    wasSuccessful = true;
+    sessionAdmissionCommitted = true;
+    if (sessionAdmission || kitSession) worktreeLifecycle.transfer();
+    else await worktreeLifecycle.finishHandler();
+    if (!kitSession) {
+      await safeUpdateSessionUsageAfterJobAdmission(sessionManager, effectiveSessionId, runtime);
+    }
+
+    logger.info(`[${corrId}] claude_request completed successfully in ${durationMs}ms`);
+
+    if (kit && kitSession && !result.jobId) {
+      await finalizePersonalKitSessionOrThrow({
+        runtime,
+        provider: "claude",
+        gatewaySessionId: kitSession.gatewaySessionId,
+        execution: kit.context.execution,
+        terminalMetadata: createPersonalKitTerminalMetadata("claude", stdout, outputFormat),
+        completed: true,
+        attemptId: kitSession.attemptId,
+        initialNativeSessionId: kitSession.nativeSessionId ?? kitSession.gatewaySessionId,
+      });
+    }
+
+    // Parse stream-json NDJSON output to extract result text
+    if (outputFormat === "stream-json") {
+      const parsed = parseStreamJson(stdout);
+      if (parsed.costUsd !== null) {
+        logger.debug(
+          `[${corrId}] stream-json cost=$${parsed.costUsd}, model=${parsed.model}, turns=${parsed.numTurns}`
+        );
+      }
+      // LCR: label cost_basis. Claude is T1, so a reported total_cost_usd is
+      // provider-reported; a rare missing cost with counts is derived-from-tokens.
+      const { costUsd: claudeCostUsd, costBasis: claudeCostBasis } = deriveCostBasis(
+        "claude",
+        prep.resolvedModel || "default",
+        {
+          inputTokens: parsed.usage?.inputTokens,
+          outputTokens: parsed.usage?.outputTokens,
+          cacheReadTokens: parsed.usage?.cacheReadInputTokens || undefined,
+          cacheCreationTokens: parsed.usage?.cacheCreationInputTokens || undefined,
+          costUsd: parsed.costUsd ?? undefined,
+        }
+      );
+      safePersonalKitFlightComplete(
+        corrId,
+        {
+          response: parsed.text,
+          inputTokens: parsed.usage?.inputTokens,
+          outputTokens: parsed.usage?.outputTokens,
+          cacheReadTokens: parsed.usage?.cacheReadInputTokens || undefined,
+          cacheCreationTokens: parsed.usage?.cacheCreationInputTokens || undefined,
+          durationMs,
+          retryCount: 0,
+          circuitBreakerState: "closed",
+          costUsd: claudeCostUsd,
+          costBasis: claudeCostBasis,
+          optimizationApplied: optimizePrompt || optimizeResponse,
+          exitCode: 0,
+          status: "completed",
+          // Phase 7: the terminal result event carries the session id +
+          // Anthropic stop_reason; persist both for durable resume/audit.
+          providerSessionId: parsed.sessionId ?? undefined,
+          stopReason: parsed.stopReason ?? undefined,
+        },
+        kit,
+        runtime
+      );
+      const streamResponse = buildCliResponse(
+        "claude",
+        parsed.text,
+        optimizeResponse,
+        corrId,
+        effectiveSessionId,
+        prep,
+        durationMs,
+        undefined,
+        outputFormat ?? "stream-json",
+        warnings,
+        effectiveCompress
+      );
+      safeRecordCompression(corrId, streamResponse.compression, runtime, kit !== null);
+      if (worktreeResolution.worktreePath) {
+        const first = streamResponse.content[0];
+        if (first && first.type === "text") {
+          first.text = formatWorktreePrefix(worktreeResolution.worktreePath) + first.text;
+        }
+      }
+      return streamResponse;
+    }
+    // Phase 7: non-stream claude (json/text). parseStreamJson also scans a
+    // single json result object; plain text yields no fields (capability fact).
+    const claudeMeta = extractProviderOutputMetadata("claude", stdout, outputFormat);
+    safePersonalKitFlightComplete(
+      corrId,
+      {
+        response: stdout,
+        durationMs,
+        retryCount: 0,
+        circuitBreakerState: "closed",
+        optimizationApplied: optimizePrompt || optimizeResponse,
+        exitCode: 0,
+        status: "completed",
+        providerSessionId: claudeMeta.sessionId,
+        stopReason: claudeMeta.stopReason,
+      },
+      kit,
+      runtime
+    );
+    const nonStreamResponse = buildCliResponse(
+      "claude",
+      stdout,
+      optimizeResponse,
+      corrId,
+      effectiveSessionId,
+      prep,
+      durationMs,
+      undefined,
+      outputFormat,
+      warnings,
+      effectiveCompress
+    );
+    safeRecordCompression(corrId, nonStreamResponse.compression, runtime, kit !== null);
+    if (worktreeResolution.worktreePath) {
+      const first = nonStreamResponse.content[0];
+      if (first && first.type === "text") {
+        first.text = formatWorktreePrefix(worktreeResolution.worktreePath) + first.text;
+      }
+    }
+    return nonStreamResponse;
+  } catch (error) {
+    if (!kitSession && !sessionAdmissionCommitted) {
+      await rollbackSessionAndWorktreeAdmission(
+        runtime.sessionManager,
+        sessionAdmission,
+        worktreeLifecycle,
+        runtime
+      );
+    }
+    if (!kitJobHandedOff && !(error instanceof KitTerminalFinalizationError)) {
+      requestCleanup?.();
+      await discardPendingPersonalKitSession(runtime, kitSession);
+    }
+    const elapsedMs = Math.max(0, Date.now() - startTime);
+    logger.info(`[${corrId}] claude_request threw exception after ${elapsedMs}ms`);
+    safePersonalKitFlightComplete(
+      corrId,
+      {
+        response: "",
+        durationMs: elapsedMs,
+        retryCount: 0,
+        circuitBreakerState: "closed",
+        optimizationApplied: optimizePrompt || optimizeResponse,
+        exitCode: 1,
+        errorMessage: (error as Error).message,
+        status: "failed",
+      },
+      kit,
+      runtime
+    );
+    return kitAwareErrorResponse("claude", 1, "", corrId, error as Error, kit);
+  } finally {
+    await worktreeLifecycle?.finishHandler();
+    const finalizedDurationMs = Math.max(0, durationMs || Date.now() - startTime);
+    runtime.performanceMetrics.recordRequest("claude", finalizedDurationMs, wasSuccessful);
+  }
+}
+
 export async function handleGeminiRequest(
   deps: HandlerDeps,
   params: GeminiRequestParams
@@ -15157,7 +15978,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       prompt,
       promptParts,
       model,
-      outputFormat: requestedOutputFormat,
+      outputFormat,
       sessionId,
       continueSession,
       createNewSession,
@@ -15206,733 +16027,64 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       idleTimeoutMs,
       forceRefresh,
       requestInstructions,
-    }) => {
-      const startTime = Date.now();
-      if (systemPrompt !== undefined && appendSystemPrompt !== undefined) {
-        return createErrorResponse(
-          "claude",
-          1,
-          "",
-          correlationId,
-          new Error(
-            "systemPrompt and appendSystemPrompt are mutually exclusive; use one or the other (not both)."
-          )
-        );
-      }
-      if (createNewSession && continueSession) {
-        return createErrorResponse(
-          "claude_request",
-          1,
-          "",
-          correlationId,
-          new Error("createNewSession and continueSession cannot be combined")
-        );
-      }
-      let kit: PersonalKitRequestContext | null = null;
-      let kitSession: PersonalKitSessionResolution | null = null;
-      try {
-        // Keep zero-deadline synchronous Kit calls outside context compilation,
-        // session allocation, and all provider preparation. Their only safe
-        // execution path is durable async admission.
-        if (runtime.personalConfig.settings.enabled) assertKitSyncDeferralEnabled();
-        kit = resolvePersonalKitRequest(runtime, "claude", {
+    }) =>
+      handleClaudeRequest(
+        { sessionManager, logger, runtime },
+        {
           prompt,
           promptParts,
-          systemPrompt,
-          appendSystemPrompt,
-          systemPromptFile,
-          appendSystemPromptFile,
-          name,
-          settings,
-          settingSources,
-          tools,
-          agent,
-          agents,
-          forkSession,
-          noSessionPersistence,
+          model,
+          outputFormat,
+          sessionId,
+          continueSession,
+          createNewSession,
           allowedTools,
           disallowedTools,
           dangerouslySkipPermissions,
           permissionMode,
+          agent,
+          agents,
+          forkSession,
+          systemPrompt,
+          appendSystemPrompt,
+          maxBudgetUsd,
+          maxTurns,
           effort,
+          excludeDynamicSystemPromptSections,
           fallbackModel,
           jsonSchema,
           workingDir,
           addDir,
-          excludeDynamicSystemPromptSections,
+          noSessionPersistence,
+          settingSources,
+          settings,
+          tools,
           includeHookEvents,
           replayUserMessages,
+          systemPromptFile,
+          appendSystemPromptFile,
+          name,
           pluginDir,
           pluginUrl,
-          mcpServers,
-          strictMcpConfig,
           safeMode,
           bare,
           debug,
           debugFile,
-          worktree,
-          approvalStrategy,
-          approvalPolicy,
-          // The public schema default is present here. Kit execution ignores
-          // this field and resolves its output format from the verified baseline.
-          outputFormat: requestedOutputFormat,
-          continueSession,
-          sessionId,
-          createNewSession,
           workspace,
-          requestInstructions,
-        });
-      } catch (error) {
-        kit?.artifact?.cleanup();
-        return personalKitErrorResponse("claude_request", correlationId, error);
-      }
-      const kitPreferences = kit
-        ? applyKitPreferences(
-            {
-              model,
-              outputFormat: requestedOutputFormat,
-              maxTurns,
-              maxBudgetUsd,
-            },
-            kit.context.preferences
-          )
-        : {
-            model,
-            outputFormat: requestedOutputFormat,
-            maxTurns,
-            maxBudgetUsd,
-          };
-      const outputFormat = (
-        kit
-          ? resolveClaudeKitOutputFormat(kit.context.preferences)
-          : (kitPreferences.outputFormat ?? "stream-json")
-      ) as "text" | "json" | "stream-json";
-      // Resolve native continuation before the managed approval decision. A
-      // resumed Claude session can carry an unverified provider posture, while
-      // Kit owns and verifies its own native handle separately.
-      let plannedEffectiveSessionId = sessionId;
-      let plannedUseContinue = kit ? false : continueSession;
-      let plannedActiveSession: Awaited<ReturnType<ISessionManager["getActiveSession"]>> | null =
-        null;
-      let plannedNativeSessionArgs: string[];
-      const kitArtifactProjection = kit ? projectedClaudeKitArtifactPath(runtime) : undefined;
-      if (kit) {
-        try {
-          plannedNativeSessionArgs = projectedClaudeKitSessionArgs(sessionId);
-        } catch (error) {
-          return createErrorResponse("claude_request", 1, "", correlationId, error as Error);
-        }
-      } else {
-        try {
-          plannedActiveSession = await getCallerOwnedActiveSession(sessionManager, "claude");
-        } catch (err) {
-          logger.warn(
-            `[${correlationId ?? "pending"}] sessionManager.getActiveSession failed (non-fatal): ${(err as Error).message}`
-          );
-        }
-        if (!createNewSession && !continueSession && !sessionId && plannedActiveSession) {
-          plannedEffectiveSessionId = plannedActiveSession.id;
-          plannedUseContinue = true;
-        }
-        if (
-          !plannedUseContinue &&
-          plannedEffectiveSessionId &&
-          plannedActiveSession?.id === plannedEffectiveSessionId
-        ) {
-          plannedUseContinue = true;
-        }
-        try {
-          if (plannedEffectiveSessionId) {
-            assertCliArgUtf8Size(plannedEffectiveSessionId, {
-              provider: "claude",
-              inputName: "sessionId",
-            });
-          }
-        } catch (error) {
-          return kitAwareErrorResponse("claude_request", 1, "", correlationId, error as Error, kit);
-        }
-        plannedNativeSessionArgs = plannedUseContinue
-          ? ["--continue"]
-          : plannedEffectiveSessionId
-            ? ["--session-id", plannedEffectiveSessionId]
-            : [];
-      }
-      const prep = prepareClaudeRequest(
-        {
-          prompt,
-          promptParts,
-          model: kitPreferences.model as string | undefined,
-          outputFormat,
-          allowedTools,
-          disallowedTools,
-          dangerouslySkipPermissions,
-          permissionMode,
+          worktree,
           approvalStrategy,
           approvalPolicy,
           mcpServers,
           strictMcpConfig,
           correlationId,
           optimizePrompt,
-          operation: "claude_request",
-          agent,
-          agents,
-          forkSession,
-          systemPrompt,
-          appendSystemPrompt,
-          maxBudgetUsd: kitPreferences.maxBudgetUsd as number | undefined,
-          maxTurns: kitPreferences.maxTurns as number | undefined,
-          effort,
-          excludeDynamicSystemPromptSections,
-          fallbackModel,
-          jsonSchema,
-          workingDir,
-          addDir,
-          noSessionPersistence,
-          settingSources,
-          settings,
-          tools,
-          includeHookEvents,
-          replayUserMessages,
-          systemPromptFile,
-          appendSystemPromptFile,
-          name,
-          pluginDir,
-          pluginUrl,
-          safeMode: kit ? true : safeMode,
-          bare: kit ? true : bare,
-          debug,
-          debugFile,
-          nativeResumeRequested: !kit && plannedUseContinue,
-          nativeSessionArgs: plannedNativeSessionArgs,
-          gatewayWorktreeRequested: hasGatewayWorktreeRequest(worktree),
-          kitAppendSystemPromptFile: kitArtifactProjection,
-        },
-        runtime
-      );
-      if (!("args" in prep)) {
-        kit?.artifact?.cleanup();
-        await discardPendingPersonalKitSession(runtime, kitSession);
-        return prep;
-      }
-
-      const { corrId, args, mcpConfig } = prep;
-      if (kit && kitArtifactProjection) {
-        try {
-          // Full caller argv, verified Kit preferences, safe/bare isolation,
-          // projected continuity, and an exact-width artifact path have all
-          // crossed preparation admission. Only now may durable Kit resources
-          // be created or claimed.
-          materializeClaudeKitArtifact(runtime, kit, args, kitArtifactProjection);
-          kitSession = await resolvePersonalKitSession(
-            runtime,
-            "claude",
-            kit.context,
-            sessionId,
-            createNewSession,
-            personalKitSyncAttemptKind(runtime)
-          );
-          plannedEffectiveSessionId = kitSession.gatewaySessionId;
-          plannedUseContinue = false;
-          if (kitSession.resume && kitSession.nativeSessionId) {
-            assertCliArgUtf8Size(kitSession.nativeSessionId, {
-              provider: "claude",
-              inputName: "kit nativeSessionId",
-            });
-          }
-          plannedNativeSessionArgs =
-            kitSession.resume && kitSession.nativeSessionId
-              ? ["--resume", kitSession.nativeSessionId]
-              : ["--session-id", kitSession.gatewaySessionId];
-        } catch (error) {
-          prep.cleanup?.();
-          kit.artifact?.cleanup();
-          await discardPendingPersonalKitSession(runtime, kitSession);
-          return kitAwareErrorResponse("claude_request", 1, "", corrId, error as Error, kit);
-        }
-      }
-      const baseRequestCleanup = composeRequestCleanup(
-        runtime,
-        prep.cleanup,
-        kit?.artifact?.cleanup
-      );
-      let durationMs = 0;
-      let wasSuccessful = false;
-      let worktreeLifecycle: RequestOwnedWorktreeLifecycle | undefined;
-      let requestCleanup = baseRequestCleanup;
-      let sessionAdmission: SessionAdmissionMutation | undefined;
-      let sessionAdmissionCommitted = false;
-
-      try {
-        insertAndAdmitFinalSessionArgs("claude", args, plannedNativeSessionArgs, "claude");
-      } catch (error) {
-        baseRequestCleanup?.();
-        await discardPendingPersonalKitSession(runtime, kitSession);
-        return kitAwareErrorResponse("claude_request", 1, "", corrId, error as Error, kit);
-      }
-
-      // Session resolution happens BEFORE safeFlightStart so that:
-      //   (1) the TTL warning reads the PRIOR session's lastWriteAt
-      //       rather than the row about to be inserted (codex-r1/F1).
-      //   (2) the flight-recorder row is tagged with effectiveSessionId
-      //       (the session the CLI will actually resume), not the raw
-      //       user-provided sessionId.
-      const effectiveSessionId = plannedEffectiveSessionId;
-      const useContinue = plannedUseContinue;
-
-      let existingSession: Session | null;
-      try {
-        existingSession = kitSession
-          ? await getCallerOwnedSession(sessionManager, kitSession.gatewaySessionId)
-          : await getExistingSessionForProvider(sessionManager, effectiveSessionId, "claude", {
-              requireTrackedRemoteSession: true,
-            });
-      } catch (err) {
-        requestCleanup?.();
-        await discardPendingPersonalKitSession(runtime, kitSession);
-        return kitAwareErrorResponse("claude_request", 1, "", corrId, err as Error, kit);
-      }
-
-      // Slice 3: if the resolved session has a near-expiry Anthropic
-      // cache breakpoint, attach a structured warning (NOT a hard error)
-      // to the response. Computed BEFORE safeFlightStart so the current
-      // row does not skew lastRequestAt.
-      const ttlWarning = maybeBuildCacheTtlWarning({
-        runtime,
-        sessionId: effectiveSessionId,
-        cli: "claude",
-      });
-      // Rec #4: include any prep-time warnings (e.g. cacheable_prefix_uncached).
-      const warnings: WarningEntry[] = [
-        ...(ttlWarning ? [ttlWarning] : []),
-        ...(prep.warnings ?? []),
-      ];
-
-      let kitJobHandedOff = false;
-      try {
-        // Slice λ: resolve worktree directive into spawn cwd. Done after
-        // session resolution so resume reuse can read metadata.worktreePath.
-        let worktreeResolution: ResolvedWorktree = {};
-        try {
-          worktreeResolution = await resolveWorkspaceAndWorktreeForRequest({
-            provider: "claude",
-            workspace,
-            worktree,
-            sessionId: effectiveSessionId,
-            runtime,
-            workingDir,
-            addDir,
-            requireStableCwd: useContinue,
-            deferWorktree: true,
-          });
-        } catch (err) {
-          requestCleanup?.();
-          await discardPendingPersonalKitSession(runtime, kitSession);
-          return kitAwareErrorResponse("claude_request", 1, "", corrId, err as Error, kit);
-        }
-        applyEffectiveWorkingDirectory(
-          "claude",
-          args,
-          undefined,
-          undefined,
-          "claude",
-          "--add-dir",
-          worktreeResolution.effectiveAddDirs
-        );
-        assertUpstreamCliArgs("claude", args);
-        assertUpstreamCliEnv("claude", undefined);
-        assertFinalCliProcessAdmission("claude", args, "claude");
-        let admittedSession = existingSession;
-        if (effectiveSessionId) {
-          if (existingSession) {
-            admittedSession = await persistResolvedSessionScope(
-              runtime.sessionManager,
-              effectiveSessionId,
-              worktreeResolution,
-              runtime,
-              existingSession
-            );
-            if (!kitSession) {
-              sessionAdmission = { original: existingSession, admitted: admittedSession };
-            }
-          } else if (!kitSession) {
-            const admitted = await createSessionWithResolvedScope(
-              runtime.sessionManager,
-              "claude",
-              "Claude Session",
-              effectiveSessionId,
-              worktreeResolution,
-              runtime
-            );
-            admittedSession = admitted.session;
-            sessionAdmission = { original: admitted.previousSession, admitted: admitted.session };
-          }
-        }
-        if (worktree) {
-          worktreeResolution = await resolveWorkspaceAndWorktreeForRequest({
-            provider: "claude",
-            workspace,
-            worktree,
-            sessionId: admittedSession ? effectiveSessionId : undefined,
-            runtime,
-            workingDir,
-            addDir,
-            requireStableCwd: useContinue,
-            expectedSession: admittedSession ?? undefined,
-          });
-          if (sessionAdmission) {
-            advanceSessionAdmissionWorktree(sessionAdmission, worktreeResolution);
-          } else if (kitSession && worktreeResolution.boundSession) {
-            worktreeResolution.requestOwnedWorktree = undefined;
-          }
-        }
-        worktreeLifecycle = createRequestOwnedWorktreeLifecycle(worktreeResolution, runtime, true);
-        requestCleanup = composeRequestCleanup(
-          runtime,
-          baseRequestCleanup,
-          worktreeLifecycle.onTerminal
-        );
-        safeFlightStart(
-          personalKitFlightStart(
-            {
-              correlationId: corrId,
-              cli: "claude",
-              model: prep.resolvedModel || "default",
-              prompt: prep.effectivePrompt,
-              sessionId: effectiveSessionId,
-              stablePrefixHash: prep.stablePrefixHash ?? undefined,
-              stablePrefixTokens: prep.stablePrefixTokens ?? undefined,
-              cacheControlBlocks: prep.cacheControlBlocks,
-              cacheControlTtlSeconds: prep.cacheControlTtlSeconds,
-            },
-            kit
-          ),
-          runtime
-        );
-        logger.info(
-          `[${corrId}] claude_request invoked with model=${prep.resolvedModel || "default"}, outputFormat=${outputFormat}, prompt length=${prep.effectivePrompt.length}, sessionId=${effectiveSessionId}, cacheControlBlocks=${prep.cacheControlBlocks ?? 0}`
-        );
-
-        // Idle timeout only for stream-json (text/json produce no output until done)
-        const effectiveIdleTimeout =
-          outputFormat === "stream-json" ? resolveIdleTimeout("claude", idleTimeoutMs) : undefined;
-        const effectiveCompress = resolveEffectiveCompression(runtime.compression, {
-          compressResponse,
-          outputFormat,
-          outputSchemaDeclared: false,
-        });
-        const claudeSyncFrHandoff = buildAsyncFlightRecorderHandoff(
-          "claude",
-          prep,
-          effectiveSessionId,
-          outputFormat,
-          optimizePrompt
-        );
-        claudeSyncFrHandoff.flightRecorderEntry = personalKitFlightRecorderEntry(
-          claudeSyncFrHandoff.flightRecorderEntry,
-          kit
-        );
-        const result = await runWithPersonalKitAttemptLease({
-          runtime,
-          session: kitSession,
-          artifact: kit?.artifact,
-          heartbeat: true,
-          run: () =>
-            awaitJobOrDefer(
-              "claude",
-              args,
-              corrId,
-              effectiveIdleTimeout,
-              outputFormat,
-              kitSession ? true : forceRefresh,
-              runtime,
-              undefined,
-              requestCleanup,
-              claudeSyncFrHandoff.flightRecorderEntry,
-              claudeSyncFrHandoff.extractUsage,
-              prep.stdinPayload,
-              kit?.context.scope.cwd ?? worktreeResolution.cwd ?? workingDir,
-              effectiveCompress,
-              kit?.context.execution ?? null,
-              kit && kitSession
-                ? event =>
-                    finalizePersonalKitTerminalEvent({
-                      event,
-                      runtime,
-                      provider: "claude",
-                      gatewaySessionId: kitSession!.gatewaySessionId,
-                      execution: kit!.context.execution,
-                      attemptId: kitSession!.attemptId,
-                      initialNativeSessionId:
-                        kitSession!.nativeSessionId ?? kitSession!.gatewaySessionId,
-                    })
-                : undefined,
-              kitSession?.gatewaySessionId,
-              kitSession?.attemptKind === "durable" ? kitSession.attemptId : undefined,
-              sessionBoundDedupArgs(buildClaudeMcpDedupArgs(args, mcpConfig), effectiveSessionId),
-              undefined,
-              mcpConfig?.cleanup ? mcpConfig.path : undefined,
-              mcpConfig?.cleanup ? mcpConfig.artifactScope : undefined
-            ),
-        });
-        kitJobHandedOff = !isDeferredResponse(result) && result.jobId !== undefined;
-
-        // Deferred — job still running, return async reference
-        if (isDeferredResponse(result)) {
-          kitJobHandedOff = true;
-          sessionAdmissionCommitted = true;
-          if (sessionAdmission || kitSession) worktreeLifecycle.transfer();
-          else await worktreeLifecycle.finishHandler();
-          if (!kitSession) {
-            await safeUpdateSessionUsageAfterJobAdmission(
-              sessionManager,
-              effectiveSessionId,
-              runtime
-            );
-          }
-          const deferred = buildDeferredToolResponse(result, effectiveSessionId);
-          if (warnings.length > 0) {
-            deferred.warnings = warnings;
-          }
-          return deferred;
-        }
-
-        const { stdout, stderr, code } = result;
-        durationMs = Math.max(0, Date.now() - startTime);
-
-        if (code !== 0) {
-          if (!kitSession) {
-            await rollbackSessionAndWorktreeAdmission(
-              sessionManager,
-              sessionAdmission,
-              worktreeLifecycle,
-              runtime
-            );
-          }
-          const terminalFailure = buildTerminalCliFailure(
-            "claude",
-            stdout,
-            stderr,
-            code,
-            outputFormat
-          );
-          if (kit && kitSession && !result.jobId) {
-            await finalizePersonalKitSessionOrThrow({
-              runtime,
-              provider: "claude",
-              gatewaySessionId: kitSession.gatewaySessionId,
-              execution: kit.context.execution,
-              terminalMetadata: null,
-              completed: false,
-              attemptId: kitSession.attemptId,
-              initialNativeSessionId: kitSession.nativeSessionId ?? kitSession.gatewaySessionId,
-            });
-          }
-          logger.info(`[${corrId}] claude_request failed in ${durationMs}ms`);
-          safePersonalKitFlightComplete(
-            corrId,
-            {
-              ...terminalFailure,
-              durationMs,
-              retryCount: 0,
-              circuitBreakerState: "closed",
-              optimizationApplied: optimizePrompt || optimizeResponse,
-              exitCode: code,
-              status: "failed",
-            },
-            kit,
-            runtime
-          );
-          // Slice 3: attach any computed warnings to the error response so
-          // the caller still sees cache_ttl_expiring_soon when the CLI
-          // happens to fail for an unrelated reason.
-          const errResp = kitAwareErrorResponse(
-            "claude",
-            code,
-            stderr,
-            corrId,
-            undefined,
-            kit,
-            {
-              providerSessionId: terminalFailure.providerSessionId,
-            },
-            result
-          );
-          if (warnings.length > 0) {
-            (errResp as ExtendedToolResponse).warnings = warnings;
-          }
-          return errResp;
-        }
-        wasSuccessful = true;
-        sessionAdmissionCommitted = true;
-        if (sessionAdmission || kitSession) worktreeLifecycle.transfer();
-        else await worktreeLifecycle.finishHandler();
-        if (!kitSession) {
-          await safeUpdateSessionUsageAfterJobAdmission(
-            sessionManager,
-            effectiveSessionId,
-            runtime
-          );
-        }
-
-        logger.info(`[${corrId}] claude_request completed successfully in ${durationMs}ms`);
-
-        if (kit && kitSession && !result.jobId) {
-          await finalizePersonalKitSessionOrThrow({
-            runtime,
-            provider: "claude",
-            gatewaySessionId: kitSession.gatewaySessionId,
-            execution: kit.context.execution,
-            terminalMetadata: createPersonalKitTerminalMetadata("claude", stdout, outputFormat),
-            completed: true,
-            attemptId: kitSession.attemptId,
-            initialNativeSessionId: kitSession.nativeSessionId ?? kitSession.gatewaySessionId,
-          });
-        }
-
-        // Parse stream-json NDJSON output to extract result text
-        if (outputFormat === "stream-json") {
-          const parsed = parseStreamJson(stdout);
-          if (parsed.costUsd !== null) {
-            logger.debug(
-              `[${corrId}] stream-json cost=$${parsed.costUsd}, model=${parsed.model}, turns=${parsed.numTurns}`
-            );
-          }
-          // LCR: label cost_basis. Claude is T1, so a reported total_cost_usd is
-          // provider-reported; a rare missing cost with counts is derived-from-tokens.
-          const { costUsd: claudeCostUsd, costBasis: claudeCostBasis } = deriveCostBasis(
-            "claude",
-            prep.resolvedModel || "default",
-            {
-              inputTokens: parsed.usage?.inputTokens,
-              outputTokens: parsed.usage?.outputTokens,
-              cacheReadTokens: parsed.usage?.cacheReadInputTokens || undefined,
-              cacheCreationTokens: parsed.usage?.cacheCreationInputTokens || undefined,
-              costUsd: parsed.costUsd ?? undefined,
-            }
-          );
-          safePersonalKitFlightComplete(
-            corrId,
-            {
-              response: parsed.text,
-              inputTokens: parsed.usage?.inputTokens,
-              outputTokens: parsed.usage?.outputTokens,
-              cacheReadTokens: parsed.usage?.cacheReadInputTokens || undefined,
-              cacheCreationTokens: parsed.usage?.cacheCreationInputTokens || undefined,
-              durationMs,
-              retryCount: 0,
-              circuitBreakerState: "closed",
-              costUsd: claudeCostUsd,
-              costBasis: claudeCostBasis,
-              optimizationApplied: optimizePrompt || optimizeResponse,
-              exitCode: 0,
-              status: "completed",
-              // Phase 7: the terminal result event carries the session id +
-              // Anthropic stop_reason; persist both for durable resume/audit.
-              providerSessionId: parsed.sessionId ?? undefined,
-              stopReason: parsed.stopReason ?? undefined,
-            },
-            kit,
-            runtime
-          );
-          const streamResponse = buildCliResponse(
-            "claude",
-            parsed.text,
-            optimizeResponse,
-            corrId,
-            effectiveSessionId,
-            prep,
-            durationMs,
-            undefined,
-            outputFormat ?? "stream-json",
-            warnings,
-            effectiveCompress
-          );
-          safeRecordCompression(corrId, streamResponse.compression, runtime, kit !== null);
-          if (worktreeResolution.worktreePath) {
-            const first = streamResponse.content[0];
-            if (first && first.type === "text") {
-              first.text = formatWorktreePrefix(worktreeResolution.worktreePath) + first.text;
-            }
-          }
-          return streamResponse;
-        }
-        // Phase 7: non-stream claude (json/text). parseStreamJson also scans a
-        // single json result object; plain text yields no fields (capability fact).
-        const claudeMeta = extractProviderOutputMetadata("claude", stdout, outputFormat);
-        safePersonalKitFlightComplete(
-          corrId,
-          {
-            response: stdout,
-            durationMs,
-            retryCount: 0,
-            circuitBreakerState: "closed",
-            optimizationApplied: optimizePrompt || optimizeResponse,
-            exitCode: 0,
-            status: "completed",
-            providerSessionId: claudeMeta.sessionId,
-            stopReason: claudeMeta.stopReason,
-          },
-          kit,
-          runtime
-        );
-        const nonStreamResponse = buildCliResponse(
-          "claude",
-          stdout,
           optimizeResponse,
-          corrId,
-          effectiveSessionId,
-          prep,
-          durationMs,
-          undefined,
-          outputFormat,
-          warnings,
-          effectiveCompress
-        );
-        safeRecordCompression(corrId, nonStreamResponse.compression, runtime, kit !== null);
-        if (worktreeResolution.worktreePath) {
-          const first = nonStreamResponse.content[0];
-          if (first && first.type === "text") {
-            first.text = formatWorktreePrefix(worktreeResolution.worktreePath) + first.text;
-          }
+          compressResponse,
+          idleTimeoutMs,
+          forceRefresh,
+          requestInstructions,
         }
-        return nonStreamResponse;
-      } catch (error) {
-        if (!kitSession && !sessionAdmissionCommitted) {
-          await rollbackSessionAndWorktreeAdmission(
-            runtime.sessionManager,
-            sessionAdmission,
-            worktreeLifecycle,
-            runtime
-          );
-        }
-        if (!kitJobHandedOff && !(error instanceof KitTerminalFinalizationError)) {
-          requestCleanup?.();
-          await discardPendingPersonalKitSession(runtime, kitSession);
-        }
-        const elapsedMs = Math.max(0, Date.now() - startTime);
-        logger.info(`[${corrId}] claude_request threw exception after ${elapsedMs}ms`);
-        safePersonalKitFlightComplete(
-          corrId,
-          {
-            response: "",
-            durationMs: elapsedMs,
-            retryCount: 0,
-            circuitBreakerState: "closed",
-            optimizationApplied: optimizePrompt || optimizeResponse,
-            exitCode: 1,
-            errorMessage: (error as Error).message,
-            status: "failed",
-          },
-          kit,
-          runtime
-        );
-        return kitAwareErrorResponse("claude", 1, "", corrId, error as Error, kit);
-      } finally {
-        await worktreeLifecycle?.finishHandler();
-        const finalizedDurationMs = Math.max(0, durationMs || Date.now() - startTime);
-        performanceMetrics.recordRequest("claude", finalizedDurationMs, wasSuccessful);
-      }
-    }
+      )
   );
 
   //──────────────────────────────────────────────────────────────────────────────
