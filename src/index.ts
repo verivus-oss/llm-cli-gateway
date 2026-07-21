@@ -2222,6 +2222,23 @@ function createRequestOwnedWorktreeLifecycle(
   };
 }
 
+/**
+ * Tier-B T1: the single transfer-or-finish settle decision for a request-owned
+ * worktree at a terminal (deferral or success). Replaces the duplicated inline
+ * `if (predicate) transfer(); else await finishHandler();` sites. `shouldTransfer`
+ * is the explicit, per-provider transfer predicate: the Kit siblings (claude,
+ * codex) pass `sessionAdmission || kitSession`; the non-Kit siblings pass
+ * `sessionAdmission`. transfer() disowns the request half so a durable/kit session
+ * owns the worktree; finishHandler() settles the request-scoped half.
+ */
+async function settleWorktreeOnTerminal(
+  worktreeLifecycle: RequestOwnedWorktreeLifecycle,
+  shouldTransfer: boolean
+): Promise<void> {
+  if (shouldTransfer) worktreeLifecycle.transfer();
+  else await worktreeLifecycle.finishHandler();
+}
+
 async function persistResolvedSessionScope(
   sessionManager: ISessionManager,
   sessionId: string,
@@ -10013,8 +10030,7 @@ export async function handleClaudeRequest(
     if (isDeferredResponse(result)) {
       kitJobHandedOff = true;
       sessionAdmissionCommitted = true;
-      if (sessionAdmission || kitSession) worktreeLifecycle.transfer();
-      else await worktreeLifecycle.finishHandler();
+      await settleWorktreeOnTerminal(worktreeLifecycle, Boolean(sessionAdmission || kitSession));
       if (!kitSession) {
         await safeUpdateSessionUsageAfterJobAdmission(sessionManager, effectiveSessionId, runtime);
       }
@@ -10087,8 +10103,7 @@ export async function handleClaudeRequest(
     }
     wasSuccessful = true;
     sessionAdmissionCommitted = true;
-    if (sessionAdmission || kitSession) worktreeLifecycle.transfer();
-    else await worktreeLifecycle.finishHandler();
+    await settleWorktreeOnTerminal(worktreeLifecycle, Boolean(sessionAdmission || kitSession));
     if (!kitSession) {
       await safeUpdateSessionUsageAfterJobAdmission(sessionManager, effectiveSessionId, runtime);
     }
@@ -10711,8 +10726,7 @@ export async function handleCodexRequest(
     if (isDeferredResponse(result)) {
       kitJobHandedOff = true;
       sessionAdmissionCommitted = true;
-      if (sessionAdmission || kitSession) worktreeLifecycle.transfer();
-      else await worktreeLifecycle.finishHandler();
+      await settleWorktreeOnTerminal(worktreeLifecycle, Boolean(sessionAdmission || kitSession));
       if (!kitSession) {
         await safeUpdateSessionUsageAfterJobAdmission(
           runtime.sessionManager,
@@ -10800,8 +10814,7 @@ export async function handleCodexRequest(
     }
     wasSuccessful = true;
     sessionAdmissionCommitted = true;
-    if (sessionAdmission || kitSession) worktreeLifecycle.transfer();
-    else await worktreeLifecycle.finishHandler();
+    await settleWorktreeOnTerminal(worktreeLifecycle, Boolean(sessionAdmission || kitSession));
     if (!kitSession) {
       await safeUpdateSessionUsageAfterJobAdmission(
         runtime.sessionManager,
