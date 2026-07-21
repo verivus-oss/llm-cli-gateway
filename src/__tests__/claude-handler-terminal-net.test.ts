@@ -672,27 +672,27 @@ describe("handleClaudeRequest terminal net: Kit deferred (Mode B, kitJobHandedOf
   });
 });
 
-// Increment 5: the H-DoubleComplete pre-existing hazard (spec section 4). The
-// intended pin: on the deferred path (manager armed) with a request-owned
-// worktree and NO session/kit, if the else-branch `await finishHandler()`
-// rejects (removeWorktree throws), the rejection lands in the catch, whose guard
-// is skipped (kitJobHandedOff is already true) while the unconditional inline
-// safePersonalKitFlightComplete (index.ts:10233) still runs, so the handler
-// completes the flight recorder even though the manager was armed to own it.
+// Increment 5: the H-DoubleComplete pre-existing hazard (spec section 4),
+// reproduced deterministically. An earlier version of this test skipped the
+// hazard on the (wrong) belief that the worktree `terminal` latch could not be
+// set in-handler on a deferred path; the cross-LLM review gate (Codex + Grok)
+// rejected that and supplied the lever, which this test now uses.
 //
-// This is SKIPPED, not deleted, because it is not deterministically reproducible
-// at the handler-unit layer today: finishHandler() only reaches removeWorktree
-// when the worktree `terminal` latch is set, and that latch is set only by the
-// executor `onComplete` (worktreeLifecycle.onTerminal). On a genuine defer that
-// onComplete is handed to the AsyncJobManager (index.ts:1650/1669) and fires
-// asynchronously AFTER the handler has already returned the deferral, so the
-// in-handler finishHandler() at index.ts:10017 is a no-op and cannot reject.
-// Forcing the latch requires a seam over the worktree lifecycle that T3
-// (FlightOwnership) introduces; T3 both adds that seam and fences the hazard
-// (manager is the sole completer once armed), at which point this becomes T3's
-// executable acceptance test. Pinning it here would require a fake that
-// contradicts the real lifecycle wiring, which would characterize the fake
-// rather than the handler.
+// Lever: a job that TERMINALIZES DURING awaitJobOrDefer's poll sleep. With
+// SYNC_DEADLINE_MS=25 << SYNC_POLL_INTERVAL_MS=1000 (index.ts:1447) the loop
+// checks the snapshot once (job still queued -> in progress), sleeps 1000ms, and
+// on waking exits on the expired deadline WITHOUT re-checking the snapshot
+// (index.ts:1685-1719). Cancelling the queued job mid-sleep sets a terminal
+// status and fires onComplete -> worktreeLifecycle.onTerminal, so `terminal` is
+// true while handlerFinished is still false (no cleanup runs yet). The loop then
+// arms the manager (index.ts:1719) and returns deferred; the deferred branch's
+// `await finishHandler()` (index.ts:10017) now reaches removeWorktree, which we
+// make reject. The rejection lands in the catch (index.ts:10218): the guard is
+// skipped (kitJobHandedOff is true) but the unconditional
+// safePersonalKitFlightComplete (index.ts:10233) STILL runs, so the handler
+// inline-completes the flight recorder AFTER arming the manager to own it -- the
+// double owner. This pins the CURRENT behavior so T3 (FlightOwnership) flips it
+// visibly. Do NOT "fix" it here.
 describe("handleClaudeRequest terminal net: H-DoubleComplete (pre-fence pin)", () => {
   let originalDeadline: string | undefined;
   let tmp: string;
@@ -728,20 +728,19 @@ describe("handleClaudeRequest terminal net: H-DoubleComplete (pre-fence pin)", (
     vi.restoreAllMocks();
   });
 
-  // eslint-disable-next-line vitest/no-disabled-tests -- executable spec for T3; see block comment above.
-  it.skip("deferred + finishHandler() rejects: the handler STILL inline-completes after arming (double owner) [needs T3 lifecycle seam]", async () => {
+  it("deferred race (cancel during poll-sleep) + finishHandler() rejects: the handler STILL inline-completes after arming (double owner)", async () => {
     const {
       handleClaudeRequest: handleClaudeRequestDyn,
       resolveGatewayServerRuntime: resolveRuntimeDyn,
     } = await import("../index.js");
-    // The worktree gate is `sessionManager instanceof FileSessionManager`, so the
-    // session manager must be the SAME (dynamically re-imported) class the fresh
-    // index module sees; a statically-imported instance fails the check.
+    // The worktree gate is `sessionManager instanceof FileSessionManager`, so use
+    // the dynamically re-imported class the fresh index module sees; a statically
+    // imported instance fails the check.
     const { FileSessionManager: FileSessionManagerDyn } = await import("../session-manager.js");
     const sessions = new FileSessionManagerDyn(join(tmp, "sessions.json"));
     // The post-handoff worktree cleanup rejects.
     removeSpy.mockRejectedValue(new Error("worktree removal failed"));
-    // Hold the slot so the job queues and the request defers (arming the manager).
+    // Hold the only slot so the job queues (in progress at the first poll check).
     const slot = await jobs.acquireProcessSlot("claude");
     const runtime = resolveRuntimeDyn(
       {
@@ -756,25 +755,45 @@ describe("handleClaudeRequest terminal net: H-DoubleComplete (pre-fence pin)", (
     );
     const arm = vi.spyOn(jobs, "armFlightCompleteForDeferral");
     const logComplete = vi.spyOn(flight, "logComplete");
+    // Capture the queued job id the instant it is created. startJobWithDedup is
+    // synchronous and the first poll check runs before the handler yields to the
+    // 1000ms sleep, so by the time this resolves the handler is already sleeping.
+    const realStart = jobs.startJobWithDedup.bind(jobs);
+    let jobId: string | undefined;
+    vi.spyOn(jobs, "startJobWithDedup").mockImplementation(
+      (...args: Parameters<typeof realStart>) => {
+        const out = realStart(...args);
+        jobId = out.snapshot.id;
+        return out;
+      }
+    );
 
     try {
-      const result = await runWithRequestContext(LOCAL, () =>
+      const pending = runWithRequestContext(LOCAL, () =>
         handleClaudeRequestDyn(
           { runtime, sessionManager: sessions, logger: noopLogger },
           baseParams({ workspace: "wt", worktree: true, correlationId: "hdc" })
         )
       );
+      // Cancel the queued job mid-sleep so it terminalizes (fires onTerminal ->
+      // sets the worktree terminal latch) before the loop wakes and arms.
+      await vi.waitFor(() => expect(jobId).toBeDefined());
+      jobs.cancelJob(jobId!);
+
+      // The deferred-branch finishHandler() (index.ts:10017) rejects; the catch
+      // inline-completes (index.ts:10233), then the unconditional finally
+      // (index.ts:10250) re-runs finishHandler(), re-awaits the cached rejected
+      // cleanup, and re-throws, so the handler ultimately REJECTS. Pin that.
+      await expect(pending).rejects.toThrow(/worktree removal failed/);
 
       // The manager was armed to own completion for the deferral...
       expect(arm).toHaveBeenCalledTimes(1);
+      // ...the terminal latch let the deferred-branch finishHandler reach the
+      // (rejecting) worktree removal...
       expect(removeSpy).toHaveBeenCalled();
-      // ...yet the rejecting finishHandler drops into the catch, which still
-      // writes an inline completion. This is the pre-existing double-complete.
-      expect(logComplete).toHaveBeenCalledTimes(1);
-      // The finishHandler rejection surfaces as an error response to the caller.
-      expect(result.isError).toBe(true);
-      const jobId = (jobs.listJobs?.() ?? [])[0]?.id;
-      if (jobId) jobs.cancelJob(jobId);
+      // ...and the catch STILL wrote an inline completion despite the manager
+      // being armed. This is the pre-existing double owner (H-DoubleComplete).
+      expect(logComplete).toHaveBeenCalled();
     } finally {
       slot.release();
     }
