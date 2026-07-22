@@ -22,6 +22,6 @@
 - npm run supply-chain:scan:check (--frozen gate): PASS exit 0 after ledger append (2.0.11) + baseline refresh
 
 ## cross-LLM validation (gtwy; independent sessions; APPROVED_UNCONDITIONALLY required for a tag-along)
-- codex: <pending>
-- grok: <pending>
-- mistral: <pending>
+- codex: APPROVED_UNCONDITIONALLY (r1; correlationId osv2-codex-r1, job 4e05da10-e976-457a-8cf8-611500f706f3; verified GHSA fix lines, getRequestListener retained + SDK import, ajv->fast-uri wiring, baseline<->lock<->registry integrity match, exact acceptedVersions, maintainer continuity, scope. Exa/live-registry unreachable so registry provenance via committed lock/baseline/report; GHSA advisory pages verified.)
+- grok: APPROVED_UNCONDITIONALLY (r1; correlationId osv2-grok-r1, job f3b82683-12a3-4ed5-a509-49c5543a9cd6; full-access: ran npm audit + supply-chain:scan:check + build + npm ls + live npm view + OSV/GHSA; OSV empty for pinned 2.0.11/3.1.4, integrity triples match, maintainers continuous, scope limited to the 2 packages; zero findings.)
+- mistral: APPROVED_UNCONDITIONALLY (r3; correlationId osv2-mistral-r3, job 3fe00c92-b0f7-4fed-8f15-73493d128f2c; local-tree: git diff scope, installed 2.0.11/3.1.4, no upgradeWebSocket in src, baseline<->lock match, exact acceptedVersions. scan/audit exit codes marked unverified - independently run green by Grok + author. r1/r2 hung on a transient Vibe environmental stall; r3 lean-prompt completed.)
