@@ -2308,6 +2308,14 @@ class RequestTerminalLedger {
     }
   }
 
+  // Both rollback methods use `this.runtime.sessionManager`. The pre-T2 inline
+  // sites were inconsistent (claude failure used the `deps.sessionManager` local
+  // while claude exception used `runtime.sessionManager`; codex was the reverse),
+  // but the two are the SAME OBJECT at every call site: createGatewayServer
+  // destructures `sessionManager` from `runtime` (index.ts ~16140) and passes
+  // both in the same deps, and resolveHandlerRuntime builds `runtime` from
+  // `deps.sessionManager` when no runtime is supplied. So canonicalizing to
+  // `runtime.sessionManager` here is behaviour-identical and removes the drift.
   /** CLI-failure (code != 0) rollback: unwind session + worktree admission, except
    *  for a Kit session (its finalize path owns cleanup). */
   async rollbackOnFailure(kitSession: PersonalKitSessionResolution | null): Promise<void> {
