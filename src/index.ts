@@ -2308,20 +2308,26 @@ class RequestTerminalLedger {
     }
   }
 
-  // Both rollback methods use `this.runtime.sessionManager`. The pre-T2 inline
-  // sites were inconsistent (claude failure used the `deps.sessionManager` local
-  // while claude exception used `runtime.sessionManager`; codex was the reverse),
-  // but the two are the SAME OBJECT at every call site: createGatewayServer
-  // destructures `sessionManager` from `runtime` (index.ts ~16140) and passes
-  // both in the same deps, and resolveHandlerRuntime builds `runtime` from
-  // `deps.sessionManager` when no runtime is supplied. So canonicalizing to
-  // `runtime.sessionManager` here is behaviour-identical and removes the drift.
+  // The rollback methods take the session manager as an explicit argument rather
+  // than reading this.runtime.sessionManager: on the two exported direct-handler
+  // seams (handleClaudeRequest / handleCodexRequest) HandlerDeps permits a
+  // supplied runtime whose sessionManager differs from deps.sessionManager, and
+  // the pre-T2 inline sites were inconsistent about which they used (claude
+  // failure -> deps.sessionManager, claude exception -> runtime.sessionManager;
+  // codex the reverse). Each caller passes exactly the manager its pre-T2 site
+  // used, so the compare-and-set/delete targets the same manager as before -
+  // provably behaviour-identical even for a mismatched-deps direct caller. (At
+  // the registered tool paths the two are the same object anyway: createGatewayServer
+  // destructures `sessionManager` from `runtime`.)
   /** CLI-failure (code != 0) rollback: unwind session + worktree admission, except
    *  for a Kit session (its finalize path owns cleanup). */
-  async rollbackOnFailure(kitSession: PersonalKitSessionResolution | null): Promise<void> {
+  async rollbackOnFailure(
+    kitSession: PersonalKitSessionResolution | null,
+    sessionManager: ISessionManager
+  ): Promise<void> {
     if (!kitSession) {
       await rollbackSessionAndWorktreeAdmission(
-        this.runtime.sessionManager,
+        sessionManager,
         this.sessionAdmission,
         this.worktreeLifecycle,
         this.runtime
@@ -2331,10 +2337,13 @@ class RequestTerminalLedger {
 
   /** Exception-path rollback: same as failure, additionally skipped once the
    *  admission was committed at a deferral/successful terminal. */
-  async rollbackOnException(kitSession: PersonalKitSessionResolution | null): Promise<void> {
+  async rollbackOnException(
+    kitSession: PersonalKitSessionResolution | null,
+    sessionManager: ISessionManager
+  ): Promise<void> {
     if (!kitSession && !this.sessionAdmissionCommitted) {
       await rollbackSessionAndWorktreeAdmission(
-        this.runtime.sessionManager,
+        sessionManager,
         this.sessionAdmission,
         this.worktreeLifecycle,
         this.runtime
@@ -10167,7 +10176,7 @@ export async function handleClaudeRequest(
     durationMs = Math.max(0, Date.now() - startTime);
 
     if (code !== 0) {
-      await ledger.rollbackOnFailure(kitSession);
+      await ledger.rollbackOnFailure(kitSession, sessionManager);
       const terminalFailure = buildTerminalCliFailure("claude", stdout, stderr, code, outputFormat);
       if (kit && kitSession && !result.jobId) {
         await finalizePersonalKitSessionOrThrow({
@@ -10346,7 +10355,7 @@ export async function handleClaudeRequest(
     }
     return nonStreamResponse;
   } catch (error) {
-    await ledger.rollbackOnException(kitSession);
+    await ledger.rollbackOnException(kitSession, runtime.sessionManager);
     await ledger.cleanupOnException(kitJobHandedOff, error, kitSession, true);
     const elapsedMs = Math.max(0, Date.now() - startTime);
     logger.info(`[${corrId}] claude_request threw exception after ${elapsedMs}ms`);
@@ -10737,7 +10746,7 @@ export async function handleCodexRequest(
       }
     }
   } catch (error) {
-    await ledger.rollbackOnFailure(kitSession);
+    await ledger.rollbackOnFailure(kitSession, runtime.sessionManager);
     ledger.requestCleanup?.();
     await discardPendingPersonalKitSession(runtime, kitSession);
     return kitAwareErrorResponse("codex_request", 1, "", corrId, error as Error, kit);
@@ -10840,7 +10849,7 @@ export async function handleCodexRequest(
     durationMs = Math.max(0, Date.now() - startTime);
 
     if (code !== 0) {
-      await ledger.rollbackOnFailure(kitSession);
+      await ledger.rollbackOnFailure(kitSession, runtime.sessionManager);
       const terminalFailure = buildTerminalCliFailure(
         "codex",
         stdout,
@@ -10991,7 +11000,7 @@ export async function handleCodexRequest(
     }
     return codexResponse;
   } catch (error) {
-    await ledger.rollbackOnException(kitSession);
+    await ledger.rollbackOnException(kitSession, deps.sessionManager);
     await ledger.cleanupOnException(kitJobHandedOff, error, kitSession, false);
     const elapsedMs = Math.max(0, Date.now() - startTime);
     logger.info(`[${corrId}] codex_request threw exception after ${elapsedMs}ms`);
