@@ -2239,6 +2239,121 @@ async function settleWorktreeOnTerminal(
   else await worktreeLifecycle.finishHandler();
 }
 
+/**
+ * Tier-B T2: RequestTerminalLedger.
+ *
+ * Groups a request's terminal-cleanup state - the request-scoped cleanup, the
+ * session-admission mutation, the request-owned worktree lifecycle, and the
+ * `sessionAdmissionCommitted` latch - behind the Kit-gated settle / rollback /
+ * cleanup decisions shared by the two Kit-sibling handlers (claude, codex-sync).
+ * The handler holds ONE ledger instead of those separate locals (spec T2).
+ *
+ * Members are populated PROGRESSIVELY: the worktree lifecycle and the recomposed
+ * request cleanup only exist after worktree resolution, and session admission is
+ * set only when a session is admitted. So the ledger is a mutable object the
+ * handler advances (`installWorktree(...)`, `ledger.sessionAdmission = ...`), and
+ * every method reads the CURRENT state. This preserves the pre-existing behaviour
+ * where the catch runs for exceptions thrown both before and after those points
+ * (worktree/admission still undefined vs. installed).
+ *
+ * All Kit gates are METHOD INPUTS, never assumed (spec section 8): settle transfers
+ * on `sessionAdmission || kitSession` (Kit-aware, unlike the gemini sibling);
+ * `rollbackOnFailure` is `!kitSession`-gated; `rollbackOnException` adds the
+ * `!sessionAdmissionCommitted` gate; `cleanupOnException` runs the dual
+ * `requestCleanup + discardPendingPersonalKitSession` action TOGETHER under the
+ * `!kitJobHandedOff && !(error instanceof KitTerminalFinalizationError)` gate.
+ */
+class RequestTerminalLedger {
+  /** Request-scoped cleanup fan-out: the base composition until a worktree is
+   *  installed, then recomposed to fold in the worktree terminal latch. Exposed
+   *  because it is also passed to the executor as the terminal onComplete. */
+  requestCleanup: (() => void) | undefined;
+  /** 3-latch request-owned worktree lifecycle; undefined until worktree resolution. */
+  worktreeLifecycle: RequestOwnedWorktreeLifecycle | undefined = undefined;
+  /** Session-admission mutation to roll back on failure; undefined until admitted. */
+  sessionAdmission: SessionAdmissionMutation | undefined = undefined;
+  /** Set once a deferral/success commits the admission, gating the catch rollback. */
+  sessionAdmissionCommitted = false;
+  private readonly runtime: GatewayServerRuntime;
+  private readonly baseRequestCleanup: (() => void) | undefined;
+
+  constructor(runtime: GatewayServerRuntime, baseRequestCleanup: (() => void) | undefined) {
+    this.runtime = runtime;
+    this.baseRequestCleanup = baseRequestCleanup;
+    this.requestCleanup = baseRequestCleanup;
+  }
+
+  /**
+   * Install the request-owned worktree lifecycle and fold its terminal latch into
+   * the request-scoped cleanup. Mirrors the pre-T2
+   * `requestCleanup = composeRequestCleanup(runtime, baseRequestCleanup, worktreeLifecycle.onTerminal)`.
+   */
+  installWorktree(worktreeLifecycle: RequestOwnedWorktreeLifecycle): void {
+    this.worktreeLifecycle = worktreeLifecycle;
+    this.requestCleanup = composeRequestCleanup(
+      this.runtime,
+      this.baseRequestCleanup,
+      worktreeLifecycle.onTerminal
+    );
+  }
+
+  /** Terminal settle (deferral or success): transfer the request-owned worktree
+   *  to a durable owner when a session/Kit keeps it, else finish the request half. */
+  async settle(kitSession: PersonalKitSessionResolution | null): Promise<void> {
+    if (this.worktreeLifecycle) {
+      await settleWorktreeOnTerminal(
+        this.worktreeLifecycle,
+        Boolean(this.sessionAdmission || kitSession)
+      );
+    }
+  }
+
+  /** CLI-failure (code != 0) rollback: unwind session + worktree admission, except
+   *  for a Kit session (its finalize path owns cleanup). */
+  async rollbackOnFailure(kitSession: PersonalKitSessionResolution | null): Promise<void> {
+    if (!kitSession) {
+      await rollbackSessionAndWorktreeAdmission(
+        this.runtime.sessionManager,
+        this.sessionAdmission,
+        this.worktreeLifecycle,
+        this.runtime
+      );
+    }
+  }
+
+  /** Exception-path rollback: same as failure, additionally skipped once the
+   *  admission was committed at a deferral/successful terminal. */
+  async rollbackOnException(kitSession: PersonalKitSessionResolution | null): Promise<void> {
+    if (!kitSession && !this.sessionAdmissionCommitted) {
+      await rollbackSessionAndWorktreeAdmission(
+        this.runtime.sessionManager,
+        this.sessionAdmission,
+        this.worktreeLifecycle,
+        this.runtime
+      );
+    }
+  }
+
+  /** Exception-path cleanup under the pre-existing gate (skipped once the job
+   *  handed off to the async manager, or when the throw IS the Kit terminal
+   *  finalization error). The pending-Kit-session discard runs for both siblings;
+   *  the request-scoped cleanup fires only when the handler owns it in its catch
+   *  (`fireRequestCleanup`): claude does (true), codex-sync does NOT (false) since
+   *  awaitJobOrDefer's contract owns its request cleanup. Both actions stay under
+   *  the SINGLE gate so they are never split across the condition (spec section 8). */
+  async cleanupOnException(
+    kitJobHandedOff: boolean,
+    error: unknown,
+    kitSession: PersonalKitSessionResolution | null,
+    fireRequestCleanup: boolean
+  ): Promise<void> {
+    if (!kitJobHandedOff && !(error instanceof KitTerminalFinalizationError)) {
+      if (fireRequestCleanup) this.requestCleanup?.();
+      await discardPendingPersonalKitSession(this.runtime, kitSession);
+    }
+  }
+}
+
 async function persistResolvedSessionScope(
   sessionManager: ISessionManager,
   sessionId: string,
@@ -9810,10 +9925,11 @@ export async function handleClaudeRequest(
   const baseRequestCleanup = composeRequestCleanup(runtime, prep.cleanup, kit?.artifact?.cleanup);
   let durationMs = 0;
   let wasSuccessful = false;
-  let worktreeLifecycle: RequestOwnedWorktreeLifecycle | undefined;
-  let requestCleanup = baseRequestCleanup;
-  let sessionAdmission: SessionAdmissionMutation | undefined;
-  let sessionAdmissionCommitted = false;
+  // Tier-B T2: the request's terminal-cleanup state (request cleanup, worktree
+  // lifecycle, session-admission mutation, committed latch) behind one Kit-gated
+  // ledger. Populated progressively as the handler admits a session / resolves a
+  // worktree.
+  const ledger = new RequestTerminalLedger(runtime, baseRequestCleanup);
 
   try {
     insertAndAdmitFinalSessionArgs("claude", args, plannedNativeSessionArgs, "claude");
@@ -9840,7 +9956,7 @@ export async function handleClaudeRequest(
           requireTrackedRemoteSession: true,
         });
   } catch (err) {
-    requestCleanup?.();
+    ledger.requestCleanup?.();
     await discardPendingPersonalKitSession(runtime, kitSession);
     return kitAwareErrorResponse("claude_request", 1, "", corrId, err as Error, kit);
   }
@@ -9875,7 +9991,7 @@ export async function handleClaudeRequest(
         deferWorktree: true,
       });
     } catch (err) {
-      requestCleanup?.();
+      ledger.requestCleanup?.();
       await discardPendingPersonalKitSession(runtime, kitSession);
       return kitAwareErrorResponse("claude_request", 1, "", corrId, err as Error, kit);
     }
@@ -9902,7 +10018,7 @@ export async function handleClaudeRequest(
           existingSession
         );
         if (!kitSession) {
-          sessionAdmission = { original: existingSession, admitted: admittedSession };
+          ledger.sessionAdmission = { original: existingSession, admitted: admittedSession };
         }
       } else if (!kitSession) {
         const admitted = await createSessionWithResolvedScope(
@@ -9914,7 +10030,10 @@ export async function handleClaudeRequest(
           runtime
         );
         admittedSession = admitted.session;
-        sessionAdmission = { original: admitted.previousSession, admitted: admitted.session };
+        ledger.sessionAdmission = {
+          original: admitted.previousSession,
+          admitted: admitted.session,
+        };
       }
     }
     if (worktree) {
@@ -9929,18 +10048,13 @@ export async function handleClaudeRequest(
         requireStableCwd: useContinue,
         expectedSession: admittedSession ?? undefined,
       });
-      if (sessionAdmission) {
-        advanceSessionAdmissionWorktree(sessionAdmission, worktreeResolution);
+      if (ledger.sessionAdmission) {
+        advanceSessionAdmissionWorktree(ledger.sessionAdmission, worktreeResolution);
       } else if (kitSession && worktreeResolution.boundSession) {
         worktreeResolution.requestOwnedWorktree = undefined;
       }
     }
-    worktreeLifecycle = createRequestOwnedWorktreeLifecycle(worktreeResolution, runtime, true);
-    requestCleanup = composeRequestCleanup(
-      runtime,
-      baseRequestCleanup,
-      worktreeLifecycle.onTerminal
-    );
+    ledger.installWorktree(createRequestOwnedWorktreeLifecycle(worktreeResolution, runtime, true));
     safeFlightStart(
       personalKitFlightStart(
         {
@@ -9996,7 +10110,7 @@ export async function handleClaudeRequest(
           kitSession ? true : forceRefresh,
           runtime,
           undefined,
-          requestCleanup,
+          ledger.requestCleanup,
           claudeSyncFrHandoff.flightRecorderEntry,
           claudeSyncFrHandoff.extractUsage,
           prep.stdinPayload,
@@ -10029,8 +10143,8 @@ export async function handleClaudeRequest(
     // Deferred — job still running, return async reference
     if (isDeferredResponse(result)) {
       kitJobHandedOff = true;
-      sessionAdmissionCommitted = true;
-      await settleWorktreeOnTerminal(worktreeLifecycle, Boolean(sessionAdmission || kitSession));
+      ledger.sessionAdmissionCommitted = true;
+      await ledger.settle(kitSession);
       if (!kitSession) {
         await safeUpdateSessionUsageAfterJobAdmission(sessionManager, effectiveSessionId, runtime);
       }
@@ -10045,14 +10159,7 @@ export async function handleClaudeRequest(
     durationMs = Math.max(0, Date.now() - startTime);
 
     if (code !== 0) {
-      if (!kitSession) {
-        await rollbackSessionAndWorktreeAdmission(
-          sessionManager,
-          sessionAdmission,
-          worktreeLifecycle,
-          runtime
-        );
-      }
+      await ledger.rollbackOnFailure(kitSession);
       const terminalFailure = buildTerminalCliFailure("claude", stdout, stderr, code, outputFormat);
       if (kit && kitSession && !result.jobId) {
         await finalizePersonalKitSessionOrThrow({
@@ -10102,8 +10209,8 @@ export async function handleClaudeRequest(
       return errResp;
     }
     wasSuccessful = true;
-    sessionAdmissionCommitted = true;
-    await settleWorktreeOnTerminal(worktreeLifecycle, Boolean(sessionAdmission || kitSession));
+    ledger.sessionAdmissionCommitted = true;
+    await ledger.settle(kitSession);
     if (!kitSession) {
       await safeUpdateSessionUsageAfterJobAdmission(sessionManager, effectiveSessionId, runtime);
     }
@@ -10231,18 +10338,8 @@ export async function handleClaudeRequest(
     }
     return nonStreamResponse;
   } catch (error) {
-    if (!kitSession && !sessionAdmissionCommitted) {
-      await rollbackSessionAndWorktreeAdmission(
-        runtime.sessionManager,
-        sessionAdmission,
-        worktreeLifecycle,
-        runtime
-      );
-    }
-    if (!kitJobHandedOff && !(error instanceof KitTerminalFinalizationError)) {
-      requestCleanup?.();
-      await discardPendingPersonalKitSession(runtime, kitSession);
-    }
+    await ledger.rollbackOnException(kitSession);
+    await ledger.cleanupOnException(kitJobHandedOff, error, kitSession, true);
     const elapsedMs = Math.max(0, Date.now() - startTime);
     logger.info(`[${corrId}] claude_request threw exception after ${elapsedMs}ms`);
     safePersonalKitFlightComplete(
@@ -10262,7 +10359,7 @@ export async function handleClaudeRequest(
     );
     return kitAwareErrorResponse("claude", 1, "", corrId, error as Error, kit);
   } finally {
-    await worktreeLifecycle?.finishHandler();
+    await ledger.worktreeLifecycle?.finishHandler();
     const finalizedDurationMs = Math.max(0, durationMs || Date.now() - startTime);
     runtime.performanceMetrics.recordRequest("claude", finalizedDurationMs, wasSuccessful);
   }
@@ -10318,7 +10415,6 @@ export async function handleCodexRequest(
   params: CodexRequestParams
 ): Promise<ExtendedToolResponse> {
   const runtime = resolveHandlerRuntime(deps);
-  const sessionManager = deps.sessionManager;
   const logger = runtime.logger;
   const {
     prompt,
@@ -10513,8 +10609,8 @@ export async function handleCodexRequest(
   // guarantees the cleanup runs exactly once — inline for direct
   // execution, on terminal status for the job-backed path (sync
   // completion or deferred). The outer finally MUST NOT clean again.
-  let sessionAdmission: SessionAdmissionMutation | undefined;
-  let sessionAdmissionCommitted = false;
+  // Tier-B T2: one Kit-gated terminal-cleanup ledger (base cleanup = prepCleanup).
+  const ledger = new RequestTerminalLedger(runtime, prepCleanup);
 
   let existingSession: Session | null;
   try {
@@ -10597,7 +10693,7 @@ export async function handleCodexRequest(
           existingSession
         );
         if (!kitSession) {
-          sessionAdmission = { original: existingSession, admitted: admittedSession };
+          ledger.sessionAdmission = { original: existingSession, admitted: admittedSession };
         }
       } else if (!kitSession) {
         const admitted = await createSessionWithResolvedScope(
@@ -10609,7 +10705,10 @@ export async function handleCodexRequest(
           runtime
         );
         admittedSession = admitted.session;
-        sessionAdmission = { original: admitted.previousSession, admitted: admitted.session };
+        ledger.sessionAdmission = {
+          original: admitted.previousSession,
+          admitted: admitted.session,
+        };
       }
     }
     if (worktree) {
@@ -10623,27 +10722,19 @@ export async function handleCodexRequest(
         addDir,
         expectedSession: admittedSession ?? undefined,
       });
-      if (sessionAdmission) {
-        advanceSessionAdmissionWorktree(sessionAdmission, worktreeResolution);
+      if (ledger.sessionAdmission) {
+        advanceSessionAdmissionWorktree(ledger.sessionAdmission, worktreeResolution);
       } else if (kitSession && worktreeResolution.boundSession) {
         worktreeResolution.requestOwnedWorktree = undefined;
       }
     }
   } catch (error) {
-    if (!kitSession) {
-      await rollbackSessionAndWorktreeAdmission(
-        runtime.sessionManager,
-        sessionAdmission,
-        undefined,
-        runtime
-      );
-    }
-    prepCleanup?.();
+    await ledger.rollbackOnFailure(kitSession);
+    ledger.requestCleanup?.();
     await discardPendingPersonalKitSession(runtime, kitSession);
     return kitAwareErrorResponse("codex_request", 1, "", corrId, error as Error, kit);
   }
-  const worktreeLifecycle = createRequestOwnedWorktreeLifecycle(worktreeResolution, runtime, true);
-  const requestCleanup = composeRequestCleanup(runtime, prepCleanup, worktreeLifecycle.onTerminal);
+  ledger.installWorktree(createRequestOwnedWorktreeLifecycle(worktreeResolution, runtime, true));
   safeFlightStart(
     personalKitFlightStart(
       {
@@ -10696,7 +10787,7 @@ export async function handleCodexRequest(
           kitSession ? true : forceRefresh,
           runtime,
           kit?.codexIsolation?.env,
-          requestCleanup,
+          ledger.requestCleanup,
           codexSyncFrHandoff.flightRecorderEntry,
           codexSyncFrHandoff.extractUsage,
           prep.stdinPayload,
@@ -10725,8 +10816,8 @@ export async function handleCodexRequest(
     // ownership belongs to AsyncJobManager via onComplete.
     if (isDeferredResponse(result)) {
       kitJobHandedOff = true;
-      sessionAdmissionCommitted = true;
-      await settleWorktreeOnTerminal(worktreeLifecycle, Boolean(sessionAdmission || kitSession));
+      ledger.sessionAdmissionCommitted = true;
+      await ledger.settle(kitSession);
       if (!kitSession) {
         await safeUpdateSessionUsageAfterJobAdmission(
           runtime.sessionManager,
@@ -10741,14 +10832,7 @@ export async function handleCodexRequest(
     durationMs = Math.max(0, Date.now() - startTime);
 
     if (code !== 0) {
-      if (!kitSession) {
-        await rollbackSessionAndWorktreeAdmission(
-          runtime.sessionManager,
-          sessionAdmission,
-          worktreeLifecycle,
-          runtime
-        );
-      }
+      await ledger.rollbackOnFailure(kitSession);
       const terminalFailure = buildTerminalCliFailure(
         "codex",
         stdout,
@@ -10813,8 +10897,8 @@ export async function handleCodexRequest(
       );
     }
     wasSuccessful = true;
-    sessionAdmissionCommitted = true;
-    await settleWorktreeOnTerminal(worktreeLifecycle, Boolean(sessionAdmission || kitSession));
+    ledger.sessionAdmissionCommitted = true;
+    await ledger.settle(kitSession);
     if (!kitSession) {
       await safeUpdateSessionUsageAfterJobAdmission(
         runtime.sessionManager,
@@ -10899,17 +10983,8 @@ export async function handleCodexRequest(
     }
     return codexResponse;
   } catch (error) {
-    if (!kitSession && !sessionAdmissionCommitted) {
-      await rollbackSessionAndWorktreeAdmission(
-        sessionManager,
-        sessionAdmission,
-        worktreeLifecycle,
-        runtime
-      );
-    }
-    if (!kitJobHandedOff && !(error instanceof KitTerminalFinalizationError)) {
-      await discardPendingPersonalKitSession(runtime, kitSession);
-    }
+    await ledger.rollbackOnException(kitSession);
+    await ledger.cleanupOnException(kitJobHandedOff, error, kitSession, false);
     const elapsedMs = Math.max(0, Date.now() - startTime);
     logger.info(`[${corrId}] codex_request threw exception after ${elapsedMs}ms`);
     safePersonalKitFlightComplete(
@@ -10929,7 +11004,7 @@ export async function handleCodexRequest(
     );
     return kitAwareErrorResponse("codex", 1, "", corrId, error as Error, kit);
   } finally {
-    await worktreeLifecycle?.finishHandler();
+    await ledger.worktreeLifecycle?.finishHandler();
     const finalizedDurationMs = Math.max(0, durationMs || Date.now() - startTime);
     runtime.performanceMetrics.recordRequest("codex", finalizedDurationMs, wasSuccessful);
     // Cleanup is owned by awaitJobOrDefer's contract; nothing to do here.
