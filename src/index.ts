@@ -2371,6 +2371,73 @@ class RequestTerminalLedger {
   }
 }
 
+/**
+ * Tier-B T3: FlightOwnership.
+ *
+ * Names the flight-recorder completion-ownership contract for a sync request so
+ * the terminal branches stop open-coding "did we hand completion to the manager?".
+ * The three modes (spec section 3):
+ *  - Mode A (handler-owned inline): the handler writes BOTH flight ends - `start()`
+ *    for `logStart`, `completeInline(...)` for `logComplete`.
+ *  - Mode B (handler-start / manager-complete): the handler wrote `logStart`, then
+ *    at the sync deadline `awaitJobOrDefer` arms the async manager
+ *    (`armFlightCompleteForDeferral`, index.ts:1719) and returns a deferral. From
+ *    that instant the manager owns `logComplete`, so the handler must NOT inline-
+ *    complete. Enforcing that on the exceptional catch path is what fences the
+ *    pre-existing H-DoubleComplete hazard (spec section 4): a rejecting
+ *    post-handoff `finishHandler()` used to still reach the unconditional inline
+ *    `safePersonalKitFlightComplete`, writing a SECOND completion after the manager
+ *    was armed to own it.
+ *  - Mode C (manager-owned): the pure `*_request_async` path; these sync handlers
+ *    never construct a Mode C FlightOwnership.
+ *
+ * The two sync Kit-sibling handlers (claude, codex-sync) begin in Mode A and
+ * transition to Mode B the instant they observe a deferral (`isDeferredResponse`),
+ * signalled by `transferCompletionToManager()`. `completeInline()` is the single
+ * gate: a no-op once completion belongs to the manager, so the handler can never
+ * double-complete a flight the manager was armed to finish.
+ *
+ * Generic machinery (spec section 5): the actual `logStart` / `logComplete` writes
+ * carry Kit redaction and per-provider metadata, so they are injected as closures;
+ * this unit owns only WHO completes the flight, never WHAT is written.
+ */
+class FlightOwnership {
+  private started = false;
+  private managerOwnsCompletion = false;
+  private readonly startFn: () => void;
+  private readonly completeFn: (result: Parameters<FlightRecorderLike["logComplete"]>[1]) => void;
+
+  constructor(
+    startFn: () => void,
+    completeFn: (result: Parameters<FlightRecorderLike["logComplete"]>[1]) => void
+  ) {
+    this.startFn = startFn;
+    this.completeFn = completeFn;
+  }
+
+  /** Write the flight `logStart` (Mode A/B, handler-start). Idempotent. */
+  start(): void {
+    if (this.started) return;
+    this.startFn();
+    this.started = true;
+  }
+
+  /** Mode A -> B transition: the sync deadline handed `logComplete` to the async
+   *  manager (armed in `awaitJobOrDefer`), so every subsequent inline completion -
+   *  including on the exceptional catch path - becomes a no-op. This is the
+   *  H-DoubleComplete fence (spec section 4). */
+  transferCompletionToManager(): void {
+    this.managerOwnsCompletion = true;
+  }
+
+  /** Write an inline `logComplete` (Mode A). A no-op once the manager owns
+   *  completion (Mode B/C). */
+  completeInline(result: Parameters<FlightRecorderLike["logComplete"]>[1]): void {
+    if (this.managerOwnsCompletion) return;
+    this.completeFn(result);
+  }
+}
+
 async function persistResolvedSessionScope(
   sessionManager: ISessionManager,
   sessionId: string,
@@ -9990,6 +10057,34 @@ export async function handleClaudeRequest(
   // Rec #4: include any prep-time warnings (e.g. cacheable_prefix_uncached).
   const warnings: WarningEntry[] = [...(ttlWarning ? [ttlWarning] : []), ...(prep.warnings ?? [])];
 
+  // Tier-B T3: flight-recorder completion ownership for this sync request.
+  // Constructed before the try so the catch path can consult it; `start()` is
+  // still called only after session resolution (ordering invariant, spec
+  // section 8), and `transferCompletionToManager()` fires on deferral so the
+  // catch never inline-completes a flight the manager was armed to finish
+  // (H-DoubleComplete, spec section 4).
+  const flight = new FlightOwnership(
+    () =>
+      safeFlightStart(
+        personalKitFlightStart(
+          {
+            correlationId: corrId,
+            cli: "claude",
+            model: prep.resolvedModel || "default",
+            prompt: prep.effectivePrompt,
+            sessionId: effectiveSessionId,
+            stablePrefixHash: prep.stablePrefixHash ?? undefined,
+            stablePrefixTokens: prep.stablePrefixTokens ?? undefined,
+            cacheControlBlocks: prep.cacheControlBlocks,
+            cacheControlTtlSeconds: prep.cacheControlTtlSeconds,
+          },
+          kit
+        ),
+        runtime
+      ),
+    metadata => safePersonalKitFlightComplete(corrId, metadata, kit, runtime)
+  );
+
   let kitJobHandedOff = false;
   try {
     // Slice λ: resolve worktree directive into spawn cwd. Done after
@@ -10072,23 +10167,9 @@ export async function handleClaudeRequest(
       }
     }
     ledger.installWorktree(createRequestOwnedWorktreeLifecycle(worktreeResolution, runtime, true));
-    safeFlightStart(
-      personalKitFlightStart(
-        {
-          correlationId: corrId,
-          cli: "claude",
-          model: prep.resolvedModel || "default",
-          prompt: prep.effectivePrompt,
-          sessionId: effectiveSessionId,
-          stablePrefixHash: prep.stablePrefixHash ?? undefined,
-          stablePrefixTokens: prep.stablePrefixTokens ?? undefined,
-          cacheControlBlocks: prep.cacheControlBlocks,
-          cacheControlTtlSeconds: prep.cacheControlTtlSeconds,
-        },
-        kit
-      ),
-      runtime
-    );
+    // State 8 (flight start): after session resolution so the flight row reads the
+    // prior session's lastWriteAt, not the row about to be written (spec section 8).
+    flight.start();
     logger.info(
       `[${corrId}] claude_request invoked with model=${prep.resolvedModel || "default"}, outputFormat=${outputFormat}, prompt length=${prep.effectivePrompt.length}, sessionId=${effectiveSessionId}, cacheControlBlocks=${prep.cacheControlBlocks ?? 0}`
     );
@@ -10160,6 +10241,11 @@ export async function handleClaudeRequest(
     // Deferred — job still running, return async reference
     if (isDeferredResponse(result)) {
       kitJobHandedOff = true;
+      // Mode A to B: awaitJobOrDefer armed the manager to own the flight
+      // completion (index.ts:1719). Transfer BEFORE settle so that if settle's
+      // finishHandler() rejects into the catch, the inline completion no-ops
+      // instead of double-completing (H-DoubleComplete fence).
+      flight.transferCompletionToManager();
       ledger.sessionAdmissionCommitted = true;
       await ledger.settle(kitSession);
       if (!kitSession) {
@@ -10191,20 +10277,15 @@ export async function handleClaudeRequest(
         });
       }
       logger.info(`[${corrId}] claude_request failed in ${durationMs}ms`);
-      safePersonalKitFlightComplete(
-        corrId,
-        {
-          ...terminalFailure,
-          durationMs,
-          retryCount: 0,
-          circuitBreakerState: "closed",
-          optimizationApplied: optimizePrompt || optimizeResponse,
-          exitCode: code,
-          status: "failed",
-        },
-        kit,
-        runtime
-      );
+      flight.completeInline({
+        ...terminalFailure,
+        durationMs,
+        retryCount: 0,
+        circuitBreakerState: "closed",
+        optimizationApplied: optimizePrompt || optimizeResponse,
+        exitCode: code,
+        status: "failed",
+      });
       // Slice 3: attach any computed warnings to the error response so
       // the caller still sees cache_ttl_expiring_soon when the CLI
       // happens to fail for an unrelated reason.
@@ -10268,30 +10349,25 @@ export async function handleClaudeRequest(
           costUsd: parsed.costUsd ?? undefined,
         }
       );
-      safePersonalKitFlightComplete(
-        corrId,
-        {
-          response: parsed.text,
-          inputTokens: parsed.usage?.inputTokens,
-          outputTokens: parsed.usage?.outputTokens,
-          cacheReadTokens: parsed.usage?.cacheReadInputTokens || undefined,
-          cacheCreationTokens: parsed.usage?.cacheCreationInputTokens || undefined,
-          durationMs,
-          retryCount: 0,
-          circuitBreakerState: "closed",
-          costUsd: claudeCostUsd,
-          costBasis: claudeCostBasis,
-          optimizationApplied: optimizePrompt || optimizeResponse,
-          exitCode: 0,
-          status: "completed",
-          // Phase 7: the terminal result event carries the session id +
-          // Anthropic stop_reason; persist both for durable resume/audit.
-          providerSessionId: parsed.sessionId ?? undefined,
-          stopReason: parsed.stopReason ?? undefined,
-        },
-        kit,
-        runtime
-      );
+      flight.completeInline({
+        response: parsed.text,
+        inputTokens: parsed.usage?.inputTokens,
+        outputTokens: parsed.usage?.outputTokens,
+        cacheReadTokens: parsed.usage?.cacheReadInputTokens || undefined,
+        cacheCreationTokens: parsed.usage?.cacheCreationInputTokens || undefined,
+        durationMs,
+        retryCount: 0,
+        circuitBreakerState: "closed",
+        costUsd: claudeCostUsd,
+        costBasis: claudeCostBasis,
+        optimizationApplied: optimizePrompt || optimizeResponse,
+        exitCode: 0,
+        status: "completed",
+        // Phase 7: the terminal result event carries the session id +
+        // Anthropic stop_reason; persist both for durable resume/audit.
+        providerSessionId: parsed.sessionId ?? undefined,
+        stopReason: parsed.stopReason ?? undefined,
+      });
       const streamResponse = buildCliResponse(
         "claude",
         parsed.text,
@@ -10317,22 +10393,17 @@ export async function handleClaudeRequest(
     // Phase 7: non-stream claude (json/text). parseStreamJson also scans a
     // single json result object; plain text yields no fields (capability fact).
     const claudeMeta = extractProviderOutputMetadata("claude", stdout, outputFormat);
-    safePersonalKitFlightComplete(
-      corrId,
-      {
-        response: stdout,
-        durationMs,
-        retryCount: 0,
-        circuitBreakerState: "closed",
-        optimizationApplied: optimizePrompt || optimizeResponse,
-        exitCode: 0,
-        status: "completed",
-        providerSessionId: claudeMeta.sessionId,
-        stopReason: claudeMeta.stopReason,
-      },
-      kit,
-      runtime
-    );
+    flight.completeInline({
+      response: stdout,
+      durationMs,
+      retryCount: 0,
+      circuitBreakerState: "closed",
+      optimizationApplied: optimizePrompt || optimizeResponse,
+      exitCode: 0,
+      status: "completed",
+      providerSessionId: claudeMeta.sessionId,
+      stopReason: claudeMeta.stopReason,
+    });
     const nonStreamResponse = buildCliResponse(
       "claude",
       stdout,
@@ -10359,21 +10430,19 @@ export async function handleClaudeRequest(
     await ledger.cleanupOnException(kitJobHandedOff, error, kitSession, true);
     const elapsedMs = Math.max(0, Date.now() - startTime);
     logger.info(`[${corrId}] claude_request threw exception after ${elapsedMs}ms`);
-    safePersonalKitFlightComplete(
-      corrId,
-      {
-        response: "",
-        durationMs: elapsedMs,
-        retryCount: 0,
-        circuitBreakerState: "closed",
-        optimizationApplied: optimizePrompt || optimizeResponse,
-        exitCode: 1,
-        errorMessage: (error as Error).message,
-        status: "failed",
-      },
-      kit,
-      runtime
-    );
+    // A no-op once the request deferred (Mode B): the manager owns completion,
+    // so a rejecting post-handoff finishHandler() reaching here no longer writes
+    // a second flight completion (H-DoubleComplete fence, spec section 4).
+    flight.completeInline({
+      response: "",
+      durationMs: elapsedMs,
+      retryCount: 0,
+      circuitBreakerState: "closed",
+      optimizationApplied: optimizePrompt || optimizeResponse,
+      exitCode: 1,
+      errorMessage: (error as Error).message,
+      status: "failed",
+    });
     return kitAwareErrorResponse("claude", 1, "", corrId, error as Error, kit);
   } finally {
     await ledger.worktreeLifecycle?.finishHandler();
@@ -10752,21 +10821,31 @@ export async function handleCodexRequest(
     return kitAwareErrorResponse("codex_request", 1, "", corrId, error as Error, kit);
   }
   ledger.installWorktree(createRequestOwnedWorktreeLifecycle(worktreeResolution, runtime, true));
-  safeFlightStart(
-    personalKitFlightStart(
-      {
-        correlationId: corrId,
-        cli: "codex",
-        model: prep.resolvedModel || "default",
-        prompt: prep.effectivePrompt,
-        sessionId: effectiveSessionId,
-        stablePrefixHash: prep.stablePrefixHash ?? undefined,
-        stablePrefixTokens: prep.stablePrefixTokens ?? undefined,
-      },
-      kit
-    ),
-    runtime
+  // Tier-B T3: flight-recorder completion ownership (spec section 3). Already
+  // positioned after session resolution (ordering invariant) and before the try,
+  // so the catch path can consult it. `transferCompletionToManager()` fires on
+  // deferral so the catch never inline-completes a flight the manager was armed
+  // to finish (H-DoubleComplete fence, spec section 4).
+  const flight = new FlightOwnership(
+    () =>
+      safeFlightStart(
+        personalKitFlightStart(
+          {
+            correlationId: corrId,
+            cli: "codex",
+            model: prep.resolvedModel || "default",
+            prompt: prep.effectivePrompt,
+            sessionId: effectiveSessionId,
+            stablePrefixHash: prep.stablePrefixHash ?? undefined,
+            stablePrefixTokens: prep.stablePrefixTokens ?? undefined,
+          },
+          kit
+        ),
+        runtime
+      ),
+    metadata => safePersonalKitFlightComplete(corrId, metadata, kit, runtime)
   );
+  flight.start();
   logger.info(
     `[${corrId}] codex_request invoked with model=${prep.resolvedModel || "default"}, fullAuto=${fullAuto}, prompt length=${prep.effectivePrompt.length}`
   );
@@ -10833,6 +10912,11 @@ export async function handleCodexRequest(
     // ownership belongs to AsyncJobManager via onComplete.
     if (isDeferredResponse(result)) {
       kitJobHandedOff = true;
+      // Mode A to B: awaitJobOrDefer armed the manager to own the flight
+      // completion (index.ts:1719). Transfer BEFORE settle so that if settle's
+      // finishHandler() rejects into the catch, the inline completion no-ops
+      // instead of double-completing (H-DoubleComplete fence).
+      flight.transferCompletionToManager();
       ledger.sessionAdmissionCommitted = true;
       await ledger.settle(kitSession);
       if (!kitSession) {
@@ -10869,20 +10953,15 @@ export async function handleCodexRequest(
         });
       }
       logger.info(`[${corrId}] codex_request failed in ${durationMs}ms`);
-      safePersonalKitFlightComplete(
-        corrId,
-        {
-          ...terminalFailure,
-          durationMs,
-          retryCount: 0,
-          circuitBreakerState: "closed",
-          optimizationApplied: optimizePrompt || optimizeResponse,
-          exitCode: code,
-          status: "failed",
-        },
-        kit,
-        runtime
-      );
+      flight.completeInline({
+        ...terminalFailure,
+        durationMs,
+        retryCount: 0,
+        circuitBreakerState: "closed",
+        optimizationApplied: optimizePrompt || optimizeResponse,
+        exitCode: code,
+        status: "failed",
+      });
       // Codex reports failures (turn.failed / error events) on the JSONL
       // stdout stream; on a non-zero exit stderr is often empty. Prefer the
       // parsed failure reason (the turn.failed/error text) over the
@@ -10956,28 +11035,23 @@ export async function handleCodexRequest(
     // This is the sync-in-time / deferral-disabled writer; the deferred and
     // pure-async writer is AsyncJobManager.logComplete — both use the same
     // codexFrResponse() helper so the persisted value agrees byte-for-byte.
-    safePersonalKitFlightComplete(
-      corrId,
-      {
-        response: codexFrResponse(effectiveOutputFormat, stdout),
-        durationMs,
-        retryCount: 0,
-        circuitBreakerState: "closed",
-        optimizationApplied: optimizePrompt || optimizeResponse,
-        exitCode: 0,
-        status: "completed",
-        inputTokens: codexUsage.inputTokens,
-        outputTokens: codexUsage.outputTokens,
-        cacheReadTokens: codexUsage.cacheReadTokens,
-        cacheCreationTokens: codexUsage.cacheCreationTokens,
-        costUsd: codexCostUsd,
-        costBasis: codexCostBasis,
-        providerSessionId: codexMeta.sessionId,
-        stopReason: codexMeta.stopReason,
-      },
-      kit,
-      runtime
-    );
+    flight.completeInline({
+      response: codexFrResponse(effectiveOutputFormat, stdout),
+      durationMs,
+      retryCount: 0,
+      circuitBreakerState: "closed",
+      optimizationApplied: optimizePrompt || optimizeResponse,
+      exitCode: 0,
+      status: "completed",
+      inputTokens: codexUsage.inputTokens,
+      outputTokens: codexUsage.outputTokens,
+      cacheReadTokens: codexUsage.cacheReadTokens,
+      cacheCreationTokens: codexUsage.cacheCreationTokens,
+      costUsd: codexCostUsd,
+      costBasis: codexCostBasis,
+      providerSessionId: codexMeta.sessionId,
+      stopReason: codexMeta.stopReason,
+    });
     const codexResponse = buildCliResponse(
       "codex",
       stdout,
@@ -11004,21 +11078,19 @@ export async function handleCodexRequest(
     await ledger.cleanupOnException(kitJobHandedOff, error, kitSession, false);
     const elapsedMs = Math.max(0, Date.now() - startTime);
     logger.info(`[${corrId}] codex_request threw exception after ${elapsedMs}ms`);
-    safePersonalKitFlightComplete(
-      corrId,
-      {
-        response: "",
-        durationMs: elapsedMs,
-        retryCount: 0,
-        circuitBreakerState: "closed",
-        optimizationApplied: optimizePrompt || optimizeResponse,
-        exitCode: 1,
-        errorMessage: (error as Error).message,
-        status: "failed",
-      },
-      kit,
-      runtime
-    );
+    // A no-op once the request deferred (Mode B): the manager owns completion,
+    // so a rejecting post-handoff finishHandler() reaching here no longer writes
+    // a second flight completion (H-DoubleComplete fence, spec section 4).
+    flight.completeInline({
+      response: "",
+      durationMs: elapsedMs,
+      retryCount: 0,
+      circuitBreakerState: "closed",
+      optimizationApplied: optimizePrompt || optimizeResponse,
+      exitCode: 1,
+      errorMessage: (error as Error).message,
+      status: "failed",
+    });
     return kitAwareErrorResponse("codex", 1, "", corrId, error as Error, kit);
   } finally {
     await ledger.worktreeLifecycle?.finishHandler();
