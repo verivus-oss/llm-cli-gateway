@@ -672,28 +672,33 @@ describe("handleClaudeRequest terminal net: Kit deferred (Mode B, kitJobHandedOf
   });
 });
 
-// Increment 5: the H-DoubleComplete pre-existing hazard (spec section 4),
-// reproduced deterministically. An earlier version of this test skipped the
-// hazard on the (wrong) belief that the worktree `terminal` latch could not be
-// set in-handler on a deferred path; the cross-LLM review gate (Codex + Grok)
-// rejected that and supplied the lever, which this test now uses.
+// Increment 5: the H-DoubleComplete hazard (spec section 4), now FENCED by
+// Tier-B T3 (FlightOwnership). This test reproduces the exact race the earlier
+// increments pinned as the pre-existing double-owner and asserts the T3 flip:
+// the handler no longer inline-completes once the manager owns completion.
 //
 // Lever: a job that TERMINALIZES DURING awaitJobOrDefer's poll sleep. With
 // SYNC_DEADLINE_MS=25 << SYNC_POLL_INTERVAL_MS=1000 (index.ts:1447) the loop
 // checks the snapshot once (job still queued -> in progress), sleeps 1000ms, and
 // on waking exits on the expired deadline WITHOUT re-checking the snapshot
-// (index.ts:1685-1719). Cancelling the queued job mid-sleep sets a terminal
+// (index.ts:1685-1710). Cancelling the queued job mid-sleep sets a terminal
 // status and fires onComplete -> worktreeLifecycle.onTerminal, so `terminal` is
 // true while handlerFinished is still false (no cleanup runs yet). The loop then
-// arms the manager (index.ts:1719) and returns deferred; the deferred branch's
-// `await finishHandler()` (index.ts:10017) now reaches removeWorktree, which we
-// make reject. The rejection lands in the catch (index.ts:10218): the guard is
-// skipped (kitJobHandedOff is true) but the unconditional
-// safePersonalKitFlightComplete (index.ts:10233) STILL runs, so the handler
-// inline-completes the flight recorder AFTER arming the manager to own it -- the
-// double owner. This pins the CURRENT behavior so T3 (FlightOwnership) flips it
-// visibly. Do NOT "fix" it here.
-describe("handleClaudeRequest terminal net: H-DoubleComplete (pre-fence pin)", () => {
+// arms the manager (index.ts:1719) and returns deferred; the deferred branch
+// calls flight.transferCompletionToManager() BEFORE settle, then settle's
+// `await finishHandler()` reaches removeWorktree, which we make reject.
+//
+// Pre-T3 (the pinned hazard): the rejection landed in the catch where an
+// unconditional safePersonalKitFlightComplete STILL ran, so the handler wrote a
+// SECOND flight completion after the manager was armed to own it (double owner).
+//
+// T3 (this expectation): the catch now routes through flight.completeInline(),
+// which is a no-op once transferCompletionToManager() flipped ownership, so the
+// handler writes NO inline completion. The manager (armed) is the sole completer.
+// The handler still ultimately REJECTS because the unconditional finally re-runs
+// finishHandler() and re-awaits the cached rejected worktree removal - the fence
+// is about completion ownership, not about swallowing the cleanup failure.
+describe("handleClaudeRequest terminal net: H-DoubleComplete (fenced by T3 FlightOwnership)", () => {
   let originalDeadline: string | undefined;
   let tmp: string;
   let flight: FlightRecorder;
@@ -728,7 +733,7 @@ describe("handleClaudeRequest terminal net: H-DoubleComplete (pre-fence pin)", (
     vi.restoreAllMocks();
   });
 
-  it("deferred race (cancel during poll-sleep) + finishHandler() rejects: the handler STILL inline-completes after arming (double owner)", async () => {
+  it("deferred race (cancel during poll-sleep) + finishHandler() rejects: the handler does NOT inline-complete after arming (T3 fence)", async () => {
     const {
       handleClaudeRequest: handleClaudeRequestDyn,
       resolveGatewayServerRuntime: resolveRuntimeDyn,
@@ -780,10 +785,10 @@ describe("handleClaudeRequest terminal net: H-DoubleComplete (pre-fence pin)", (
       await vi.waitFor(() => expect(jobId).toBeDefined());
       jobs.cancelJob(jobId!);
 
-      // The deferred-branch finishHandler() (index.ts:10017) rejects; the catch
-      // inline-completes (index.ts:10233), then the unconditional finally
-      // (index.ts:10250) re-runs finishHandler(), re-awaits the cached rejected
-      // cleanup, and re-throws, so the handler ultimately REJECTS. Pin that.
+      // The deferred branch's settle -> finishHandler() rejects; the catch runs
+      // flight.completeInline() (a no-op once armed), then the unconditional
+      // finally re-runs finishHandler(), re-awaits the cached rejected cleanup,
+      // and re-throws, so the handler ultimately REJECTS. Pin that.
       await expect(pending).rejects.toThrow(/worktree removal failed/);
 
       // The manager was armed to own completion for the deferral...
@@ -791,9 +796,11 @@ describe("handleClaudeRequest terminal net: H-DoubleComplete (pre-fence pin)", (
       // ...the terminal latch let the deferred-branch finishHandler reach the
       // (rejecting) worktree removal...
       expect(removeSpy).toHaveBeenCalled();
-      // ...and the catch STILL wrote an inline completion despite the manager
-      // being armed. This is the pre-existing double owner (H-DoubleComplete).
-      expect(logComplete).toHaveBeenCalled();
+      // ...and the catch did NOT write an inline completion, because
+      // transferCompletionToManager() flipped ownership to the manager before
+      // settle. This is the T3 FlightOwnership fence for H-DoubleComplete: the
+      // manager (armed) is the sole completer once the request defers.
+      expect(logComplete).not.toHaveBeenCalled();
     } finally {
       slot.release();
     }
