@@ -4,14 +4,15 @@
     "@hono/node-server": {
       "acceptedVersions": [
         "1.19.14",
-        "2.0.5"
+        "2.0.5",
+        "2.0.11"
       ],
       "source": "registry.npmjs.org",
       "state": "trusted",
       "firstVetted": "2026-07-10",
       "lastReviewed": "2026-07-22",
       "reviewers": [],
-      "rationale": "roll-forward 1.19.14 -> 2.0.5 (major, forced above the MCP SDK's declared ^1.19.9) clears GHSA-frvp-7c67-39w9 (Windows-only serve-static path traversal; 2.0.5 is the only patched line, no 1.x fix). v2 breaking changes are non-impacting here: Node 18 drop is below our >=24.4 floor, and the removed Vercel adapter is unused. getRequestListener retained and the HTTP transport is runtime-verified (68 HTTP/OAuth/transport tests, full 3696-test suite). See ledger/2026-07-22/@hono_node-server@2.0.5.md."
+      "rationale": "roll-forward 1.19.14 -> 2.0.5 (major, forced above the MCP SDK's declared ^1.19.9) clears GHSA-frvp-7c67-39w9 (Windows-only serve-static path traversal; 2.0.5 is the only patched line, no 1.x fix). v2 breaking changes are non-impacting here: Node 18 drop is below our >=24.4 floor, and the removed Vercel adapter is unused. getRequestListener retained and the HTTP transport is runtime-verified (68 HTTP/OAuth/transport tests, full 3696-test suite). Further in-2.0.x roll-forward 2.0.5 -> 2.0.11 clears GHSA-9mqv-5hh9-4cgg (unauthenticated memory-leak DoS on upgradeWebSocket via missing/malformed Sec-WebSocket-Key; fixed 2.0.10); upgradeWebSocket is unused here (gateway uses getRequestListener via the MCP SDK). Same maintainer (honojs/yusukebe), patch line. See ledger/2026-07-22/@hono_node-server@2.0.5.md and @hono_node-server@2.0.11.md."
     },
     "@modelcontextprotocol/sdk": {
       "acceptedVersions": [
@@ -344,14 +345,15 @@
     },
     "fast-uri": {
       "acceptedVersions": [
-        "3.1.3"
+        "3.1.3",
+        "3.1.4"
       ],
       "source": "registry.npmjs.org",
       "state": "trusted",
       "firstVetted": "2026-07-10",
-      "lastReviewed": "2026-07-10",
+      "lastReviewed": "2026-07-22",
       "reviewers": [],
-      "rationale": "bootstrap from 2.16.0 shipped closure, not individually reviewed"
+      "rationale": "roll-forward 3.1.3 -> 3.1.4 (in-3.x patch) clears GHSA-v2hh-gcrm-f6hx (host confusion via a literal backslash authority delimiter; affected >=3.0.0 <=3.1.3, fixed 3.1.4). fast-uri is transitive via ajv (JSON-schema $id/$ref URI parsing), NOT used here for host-based policy / SSRF filtering, so the confusion is not exploitable in this closure; the bump clears the advisory regardless. Same maintainer (fastify). Stayed on the 3.x line (4.x is a separate major). See ledger/2026-07-22/fast-uri@3.1.4.md."
     },
     "finalhandler": {
       "acceptedVersions": [
