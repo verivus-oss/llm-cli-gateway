@@ -776,13 +776,13 @@ const PROVIDER_DEFINITIONS = {
           {
             kind: "config-file",
             path: ".grok/config.toml",
-            keys: ["models.default", "models", "ui.fork_secondary_model"],
-            note: "Grok config.toml configured default ([models].default) and custom model facts.",
+            keys: ["models"],
+            note: "Only user-declared custom [models].<name> entries are adopted. [models].default and [ui].fork_secondary_model are Grok-CLI-managed / rotating values read by Grok itself and are NOT adopted by the gateway; the live `grok models` catalog is the authoritative default/list.",
           },
           {
             kind: "env",
             keys: ["GROK_DEFAULT_MODEL", "GROK_MODELS"],
-            note: "Gateway env overrides for the Grok default model and extra models.",
+            note: "Gateway env overrides for the Grok default model and extra models (an explicit default outranks even the live catalog).",
           },
         ],
         facts: {
@@ -793,7 +793,7 @@ const PROVIDER_DEFINITIONS = {
           agentProfiles: [],
         },
         evidence:
-          "grok models lists the CLI-local catalog ('Default model: X' then '* id (default)'/'- id' lines); ~/.grok/config.toml [models].default and custom model facts are additional. Native Grok Build API models are catalogued separately.",
+          "grok models lists the CLI-local catalog ('Default model: X' then '* id (default)'/'- id' lines) and is the authoritative default/list; ~/.grok/config.toml [models].default is Grok-native (not gateway-adopted) and user-declared custom models are additional. Native Grok Build API models are catalogued separately.",
       },
       sessionContinuity: {
         continue: true,

@@ -192,6 +192,110 @@ describe("provider-model-discovery", () => {
     }
   });
 
+  // Fail-closed: a cache-SEEDED set (not freshly probed) must never become the
+  // authoritative live catalog, even though its `grok models` snapshot parses as
+  // source "live-command". An aged snapshot could name a since-removed id
+  // (grok-build) after a CLI upgrade; publishing it would recreate the bug.
+  it("does NOT publish a cache-seeded (non-live) grok set, and clears any prior catalog", async () => {
+    __resetCapabilityResolverMemoForTest();
+    setLiveModelCatalog("grok", null);
+    clearModelRegistryCache();
+    try {
+      const def = getProviderDefinition("grok");
+      // First: a genuine fresh (source "live") catalog is published.
+      const freshSet = await discoverProviderCapabilities(
+        def,
+        options(
+          {
+            "grok --version": "grok 0.2.101",
+            "grok models": "Default model: grok-4.5\n\nAvailable models:\n  * grok-4.5 (default)\n",
+          },
+          "grok"
+        )
+      );
+      await resolveProviderCapabilitySet(def, {
+        inject: async () => ({ set: freshSet, source: "live", degraded: false }),
+      });
+      expect(getLiveModelCatalog("grok")?.defaultModel).toBe("grok-4.5");
+
+      // Now a cache-SEEDED set naming the removed id arrives (source "cache").
+      const staleSet = await discoverProviderCapabilities(
+        def,
+        options(
+          {
+            "grok --version": "grok 0.2.77",
+            "grok models":
+              "Default model: grok-build\n\nAvailable models:\n  * grok-build (default)\n",
+          },
+          "grok"
+        )
+      );
+      __resetCapabilityResolverMemoForTest();
+      await resolveProviderCapabilitySet(def, {
+        inject: async () => ({ set: staleSet, source: "cache", degraded: false }),
+      });
+
+      // The cache-seeded catalog is rejected AND the prior live catalog cleared.
+      expect(getLiveModelCatalog("grok")).toBeNull();
+      const grokInfo = getAvailableCliInfo(true).grok;
+      expect(grokInfo.defaultModel).toBeUndefined();
+      expect(grokInfo.models["grok-build"]).toBeUndefined();
+    } finally {
+      setLiveModelCatalog("grok", null);
+      __resetCapabilityResolverMemoForTest();
+      clearModelRegistryCache();
+    }
+  });
+
+  // Fail-closed: a failed resolve (inject -> null) clears a prior live catalog so
+  // a failed (possibly forced) refresh never leaves a stale default authoritative.
+  it("clears the live grok catalog when a resolve fails", async () => {
+    __resetCapabilityResolverMemoForTest();
+    setLiveModelCatalog("grok", {
+      defaultModel: "grok-4.5",
+      models: [{ id: "grok-4.5" }],
+      fetchedAt: 1,
+    });
+    clearModelRegistryCache();
+    try {
+      const def = getProviderDefinition("grok");
+      await resolveProviderCapabilitySet(def, { inject: async () => null });
+      expect(getLiveModelCatalog("grok")).toBeNull();
+    } finally {
+      setLiveModelCatalog("grok", null);
+      __resetCapabilityResolverMemoForTest();
+      clearModelRegistryCache();
+    }
+  });
+
+  // Fail-closed: a fresh probe that yields an EMPTY catalog (no models, no
+  // default) clears rather than publishing an empty entry (which the registry
+  // merge could otherwise round-trip a prior live set back into).
+  it("clears the live grok catalog on an empty fresh probe", async () => {
+    __resetCapabilityResolverMemoForTest();
+    setLiveModelCatalog("grok", {
+      defaultModel: "grok-4.5",
+      models: [{ id: "grok-4.5" }],
+      fetchedAt: 1,
+    });
+    clearModelRegistryCache();
+    try {
+      const def = getProviderDefinition("grok");
+      const emptySet = await discoverProviderCapabilities(
+        def,
+        options({ "grok --version": "grok 0.2.101", "grok models": "" }, "grok")
+      );
+      await resolveProviderCapabilitySet(def, {
+        inject: async () => ({ set: emptySet, source: "live", degraded: false }),
+      });
+      expect(getLiveModelCatalog("grok")).toBeNull();
+    } finally {
+      setLiveModelCatalog("grok", null);
+      __resetCapabilityResolverMemoForTest();
+      clearModelRegistryCache();
+    }
+  });
+
   // FIX C follow-up: the live-derived defaultModel is a user-visible scalar and
   // must be scrubbed too. parseGrokModelsText reads `Default model: <token>`
   // straight from stdout, so an account id printed there must not leak onto the
