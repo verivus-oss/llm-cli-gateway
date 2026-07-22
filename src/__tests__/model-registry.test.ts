@@ -7,6 +7,7 @@ import {
   getAvailableCliInfo,
   getCliInfo,
   resolveModelAlias,
+  setLiveModelCatalog,
 } from "../model-registry.js";
 
 const ENV_KEYS = [
@@ -57,10 +58,12 @@ describe("model registry", () => {
     process.env.GEMINI_SETTINGS_PATH = join(tempDir, "missing-gemini-settings.json");
     process.env.GEMINI_HISTORY_ROOT = join(tempDir, "missing-gemini-history");
     process.env.VIBE_HOME = join(tempDir, "missing-vibe-home");
+    setLiveModelCatalog("grok", null);
     clearModelRegistryCache();
   });
 
   afterEach(() => {
+    setLiveModelCatalog("grok", null);
     clearModelRegistryCache();
     ENV_KEYS.forEach(key => {
       if (originalEnv[key] === undefined) {
@@ -207,7 +210,7 @@ describe("model registry", () => {
     expect(resolveModelAlias("grok", "default", info)).toBe("grok-team-pin");
   });
 
-  it("reads Grok default and custom models from ~/.grok/config.toml", () => {
+  it("ignores the drifting Grok config default/fork but keeps user-declared custom models", () => {
     const configPath = join(tempDir, "grok-config.toml");
     writeFileSync(
       configPath,
@@ -224,16 +227,60 @@ describe("model registry", () => {
 
     const info = getCliInfo(true);
 
-    // Configured default is represented (not hardcoded).
-    expect(info.grok.defaultModel).toBe("grok-build");
-    expect(info.grok.defaultModelSource).toContain("[models].default");
-    // Custom model facts from config are surfaced.
+    // The Grok-CLI-managed / rotating [models].default is NOT adopted as the
+    // gateway default (Grok reads it natively; a snapshot goes stale). With no
+    // live catalog or env override, Grok has no gateway default and self-defaults.
+    expect(info.grok.defaultModel).toBeUndefined();
+    expect(info.grok.defaultModelSource).toBeUndefined();
+    // The removed `grok-build` id must not be advertised anywhere.
+    expect(info.grok.models["grok-build"]).toBeUndefined();
+    // The [ui].fork_secondary_model UI setting is likewise not advertised.
+    expect(info.grok.models["grok-fast-1"]).toBeUndefined();
+    // User-declared custom model facts from config ARE surfaced.
     expect(info.grok.models["grok-reasoning-2"]).toContain("Custom Grok model");
-    expect(info.grok.models["grok-fast-1"]).toContain("fork/secondary");
-    // An explicit env default still wins over the config default.
+    // An explicit env default wins (nothing to override, but it sets the default).
     process.env.GROK_DEFAULT_MODEL = "grok-reasoning-2";
     const withEnv = getCliInfo(true);
     expect(withEnv.grok.defaultModel).toBe("grok-reasoning-2");
+  });
+
+  it("makes a live grok catalog authoritative over a stale config, and env wins over live", () => {
+    const configPath = join(tempDir, "grok-config-stale.toml");
+    writeFileSync(configPath, ["[models]", 'default = "grok-build"'].join("\n"));
+    process.env.GROK_CONFIG_PATH = configPath;
+
+    // Publish a live catalog (as the capability resolver would after probing
+    // `grok models`). It supersedes the stale config default and is surfaced as
+    // a verified (non-hint) model.
+    setLiveModelCatalog("grok", {
+      defaultModel: "grok-4.5",
+      models: [{ id: "grok-4.5", description: "Grok 4.5 (live)" }],
+      fetchedAt: 1,
+    });
+    const info = getCliInfo(true);
+    expect(info.grok.defaultModel).toBe("grok-4.5");
+    expect(info.grok.defaultModelSource).toContain("live CLI catalog");
+    expect(info.grok.models["grok-4.5"]).toBe("Grok 4.5 (live)");
+    expect(info.grok.models["grok-build"]).toBeUndefined();
+    // Live models survive the unverified-hint filter (they are verified).
+    expect(getAvailableCliInfo(true).grok.models["grok-4.5"]).toBe("Grok 4.5 (live)");
+
+    // An explicit operator env default still outranks the live catalog.
+    process.env.GROK_DEFAULT_MODEL = "grok-4.5-fast";
+    const withEnv = getCliInfo(true);
+    expect(withEnv.grok.defaultModel).toBe("grok-4.5-fast");
+
+    // Clearing the live catalog reverts to no gateway default (self-default),
+    // and grok-4.5 falls back to an UNVERIFIED static hint (not a verified
+    // model and not the "live CLI catalog" description any more).
+    delete process.env.GROK_DEFAULT_MODEL;
+    setLiveModelCatalog("grok", null);
+    const cleared = getCliInfo(true);
+    expect(cleared.grok.defaultModel).toBeUndefined();
+    expect(cleared.grok.models["grok-4.5"]).not.toBe("Grok 4.5 (live)");
+    const availableCleared = getAvailableCliInfo(true).grok;
+    expect(availableCleared.models["grok-4.5"]).toBeUndefined();
+    expect(availableCleared.unverifiedModelHints?.["grok-4.5"]).toBeDefined();
   });
 
   it("does not hardcode a Mistral default when Vibe has no config", () => {

@@ -4,7 +4,7 @@ import path from "path";
 import { parse as parseToml } from "smol-toml";
 import { CLI_TYPES, type CliType } from "./provider-types.js";
 
-type ModelSource = "fallback" | "observed" | "config" | "env";
+type ModelSource = "fallback" | "observed" | "config" | "live" | "env";
 type ModelConfidence = "low" | "medium" | "high";
 
 export interface ModelMetadata {
@@ -137,10 +137,55 @@ const SOURCE_PRIORITY: Record<ModelSource, number> = {
   fallback: 0,
   observed: 1,
   config: 2,
-  env: 3,
+  // A live CLI catalog (e.g. `grok models`) is the authoritative statement of
+  // what the installed CLI actually accepts, so it outranks a config file that
+  // drifts. An explicit operator env override still wins over everything.
+  live: 3,
+  env: 4,
 };
 
 let cachedInfo: { loadedAt: number; info: CliInfoMap } | null = null;
+
+/**
+ * A live, CLI-probed model catalog for one provider (e.g. parsed from
+ * `grok models`). This is the authoritative statement of what the installed CLI
+ * currently accepts, so it supersedes drifting config-file defaults. It is
+ * populated out-of-band by the capability resolver (which owns the async probe)
+ * via {@link setLiveModelCatalog}, and consumed synchronously here so the hot
+ * read path never spawns. `null`/absent means "no live data" and the registry
+ * falls back to its static hints plus the provider's own built-in default.
+ */
+export interface LiveModelCatalog {
+  /** The CLI's own current default model id, when it reports one. */
+  readonly defaultModel?: string;
+  /** The models the live CLI catalog actually lists. */
+  readonly models: ReadonlyArray<{ readonly id: string; readonly description?: string }>;
+  /** Epoch ms the catalog was probed (observability only; no TTL enforced here). */
+  readonly fetchedAt: number;
+}
+
+const liveModelCatalogs = new Map<CliType, LiveModelCatalog>();
+
+/**
+ * Publish (or clear, with `null`) a live CLI-probed model catalog for a provider.
+ * Called by the capability resolver after it discovers a genuine live catalog.
+ * Clears the built-registry cache so the next {@link getCliInfo} reflects it.
+ * One-way: the registry never imports the resolver, so there is no cycle.
+ */
+export function setLiveModelCatalog(cli: CliType, catalog: LiveModelCatalog | null): void {
+  if (catalog === null) {
+    if (!liveModelCatalogs.has(cli)) return;
+    liveModelCatalogs.delete(cli);
+  } else {
+    liveModelCatalogs.set(cli, catalog);
+  }
+  cachedInfo = null;
+}
+
+/** Test/diagnostic accessor for the currently-published live catalog. */
+export function getLiveModelCatalog(cli: CliType): LiveModelCatalog | null {
+  return liveModelCatalogs.get(cli) ?? null;
+}
 
 export function getCliInfo(forceRefresh = false): CliInfoMap {
   if (!forceRefresh && cachedInfo && Date.now() - cachedInfo.loadedAt < MODEL_CACHE_TTL_MS) {
@@ -544,17 +589,49 @@ function applyGeminiOverrides(info: CliInfo): void {
   info.modelOrder = buildOrder(info, info.defaultModel);
 }
 
+/**
+ * Merge a provider's live CLI-probed catalog (see {@link setLiveModelCatalog})
+ * into the built info as the authoritative `live` source. Live models are
+ * surfaced as verified (non-fallback), and the live default supersedes a
+ * config-file default. A later explicit env default still wins (higher priority
+ * and applied afterwards). No-op when no live catalog is published, so the read
+ * path degrades to the static hints plus the CLI's own built-in default.
+ */
+function applyLiveCatalog(info: CliInfo, cli: CliType): void {
+  const catalog = liveModelCatalogs.get(cli);
+  if (!catalog) {
+    return;
+  }
+  const detail = `${cli} models (live CLI catalog)`;
+  catalog.models.forEach(model => {
+    addModel(info, model.id, model.description ?? `Live model reported by \`${cli} models\``, {
+      source: "live",
+      sourceDetail: detail,
+      confidence: "high",
+    });
+  });
+  if (catalog.defaultModel) {
+    setDefaultModel(info, catalog.defaultModel, detail, "live");
+  }
+}
+
 function applyGrokOverrides(info: CliInfo): void {
   const envDefault = process.env.GROK_DEFAULT_MODEL;
 
-  // ~/.grok/config.toml carries the configured default ([models].default) and any
-  // custom model facts. Config is read first so an explicit env default still wins.
+  // ~/.grok/config.toml carries custom model facts, but its [models].default is
+  // DELIBERATELY not adopted as the gateway default (see applyGrokConfig): Grok
+  // reads that file natively and rotates its own model lineup, so pinning a
+  // snapshot of it goes stale (e.g. the removed `grok-build`). The authoritative
+  // default/list is the live `grok models` catalog; absent that, we emit no
+  // --model and Grok picks its own current built-in default.
   applyGrokConfig(info);
+  applyLiveCatalog(info, "grok");
 
   addEnvModels(info, "GROK_MODELS");
   addEnvAliases(info, "grok", "GROK_MODEL_ALIASES");
   addGlobalEnvAliases(info, "grok");
 
+  // An explicit operator env default outranks even the live catalog.
   if (envDefault) {
     setDefaultModel(info, envDefault, "GROK_DEFAULT_MODEL", "env");
   }
@@ -571,15 +648,21 @@ function applyGrokConfig(info: CliInfo): void {
   try {
     const parsed = parseToml(readFileSync(configPath, "utf-8"));
 
-    // The Grok config nests model facts under [models]: `default` is the
-    // configured default; any additional string entries are custom model ids.
+    // The Grok config nests model facts under [models]. We DELIBERATELY ignore
+    // the Grok-CLI-MANAGED / rotating values here so a drifting snapshot can
+    // never point callers at a removed model:
+    //   - [models].default   - Grok reads it natively and rotates its lineup
+    //                          (e.g. it dropped `grok-build`); the live
+    //                          `grok models` catalog is the source of truth, and
+    //                          a user default is still honoured by Grok itself
+    //                          when we emit no --model.
+    //   - [ui].fork_secondary_model - a UI/fork setting the CLI auto-writes, not
+    //                          a model the user declared for invocation.
+    // Only USER-DECLARED custom model ids (`[models].<name>`, name != default)
+    // remain, as intentional additive facts.
     const models = readRecordProperty(parsed, "models");
     Object.entries(models).forEach(([key, value]) => {
-      if (typeof value !== "string") {
-        return;
-      }
-      if (key === "default") {
-        setDefaultModel(info, value, `${configPath} [models].default`, "config");
+      if (typeof value !== "string" || key === "default") {
         return;
       }
       addModel(info, value, `Custom Grok model from config.toml [models].${key}`, {
@@ -588,17 +671,6 @@ function applyGrokConfig(info: CliInfo): void {
         confidence: "medium",
       });
     });
-
-    // A configured secondary/fork model is an additional model fact.
-    const ui = readRecordProperty(parsed, "ui");
-    const forkModel = readStringProperty(ui, "fork_secondary_model");
-    if (forkModel) {
-      addModel(info, forkModel, "Configured Grok fork/secondary model", {
-        source: "config",
-        sourceDetail: `${configPath} [ui].fork_secondary_model`,
-        confidence: "medium",
-      });
-    }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     addWarning(info, `Could not parse Grok config ${configPath}: ${message}`);

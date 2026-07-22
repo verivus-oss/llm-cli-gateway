@@ -35,8 +35,77 @@ import {
 } from "./provider-capability-discovery.js";
 import { readCapabilityCache, resolveCapabilitySet } from "./provider-capability-cache.js";
 import { discoverProviderModels, type DiscoveredModelListing } from "./provider-model-discovery.js";
-import type { CliInfo } from "./model-registry.js";
+import { setLiveModelCatalog, type CliInfo } from "./model-registry.js";
 import { noopLogger, type Logger } from "./logger.js";
+
+/**
+ * Providers whose model-registry entry is designed to DEFER to the live CLI
+ * lineup rather than a static/config default (their upstream default rotates).
+ * For these, a freshly-resolved capability set is bridged into the registry as
+ * the authoritative `live` catalog so every read surface (list_models,
+ * provider_tool_capabilities) and `--model default` resolution reflect what the
+ * installed CLI actually accepts. Grok is the first: `grok models` rotates its
+ * default (e.g. it dropped `grok-build`), and the registry entry carries no
+ * hardcoded default by design.
+ */
+const LIVE_CATALOG_REGISTRY_PROVIDERS = new Set<CliType>(["grok"]);
+
+/**
+ * Reconcile the model registry's live catalog for a bridge-eligible provider
+ * with a resolution outcome. Fail-closed against EVERY stale source, not just a
+ * stale config file:
+ *
+ *   - Publishes ONLY a resolution whose capability set was FRESHLY PROBED this
+ *     process (`resolution.source === "live"`). A cache-SEEDED set (source
+ *     "cache") is never published, because the seed path does not re-probe and
+ *     an on-disk `grok models` snapshot can be up to the cache TTL old and name
+ *     a since-removed id. (We gate on the set's PROVENANCE, not on the parse
+ *     format: `grok-models-text` always parses to `source: "live-command"` even
+ *     for a cached/empty catalog, so that flag cannot distinguish fresh live.)
+ *   - Any other outcome (cache, minimal, failure, `null`) CLEARS the catalog so
+ *     the registry degrades to its static hints plus the CLI's own built-in
+ *     default (self-default) rather than serving a possibly-stale id.
+ *   - The native parse is read WITHOUT `registryInfo` so a previously-published
+ *     live model cannot re-enter through the registry merge (a feedback loop
+ *     that would re-publish a stale set on an empty fresh probe). An empty fresh
+ *     catalog therefore clears too.
+ *
+ * Best-effort and fault-isolated: never throws.
+ */
+function syncLiveCatalogForRegistry(
+  def: ProviderDefinition,
+  resolution: ResolvedProviderCapability | null
+): void {
+  if (!LIVE_CATALOG_REGISTRY_PROVIDERS.has(def.id)) {
+    return;
+  }
+  // Only a freshly-probed set may become the authoritative live catalog.
+  if (!resolution || resolution.source !== "live") {
+    setLiveModelCatalog(def.id, null);
+    return;
+  }
+  try {
+    // No registryInfo: parse the CURRENT native catalog only, so a prior live
+    // entry can never round-trip back in and mask an empty/changed fresh probe.
+    const listing = discoverProviderModels(def, resolution.set, {});
+    const models = listing.models
+      .filter(model => model.origin === "live-catalog" || model.origin === "live-hidden")
+      .map(model => ({ id: model.id, description: model.description }));
+    if (models.length === 0 && !listing.defaultModel) {
+      // Fresh probe yielded no usable catalog (empty/unparseable): clear.
+      setLiveModelCatalog(def.id, null);
+      return;
+    }
+    setLiveModelCatalog(def.id, {
+      defaultModel: listing.defaultModel ?? undefined,
+      models,
+      fetchedAt: Date.now(),
+    });
+  } catch {
+    // A parse failure on a fresh set is anomalous: fail closed (clear).
+    setLiveModelCatalog(def.id, null);
+  }
+}
 
 /**
  * Max age of an on-disk capability cache entry that the resolver will SEED from
@@ -143,6 +212,7 @@ export async function resolveProviderCapabilitySet(
     if (options.inject) {
       const injected = await options.inject(def);
       if (injected) memo.set(def.id, injected);
+      syncLiveCatalogForRegistry(def, injected);
       return injected;
     }
 
@@ -150,7 +220,13 @@ export async function resolveProviderCapabilitySet(
     // spawn. The TTL bounds staleness: an aged-out entry falls through to a
     // fresh discovery (which recomputes the cache key and auto-invalidates on a
     // provider CLI upgrade/move), so a stale set is never served indefinitely.
-    if (!options.forceRefresh) {
+    //
+    // Bridge-eligible providers SKIP the seed: their live model catalog feeds
+    // `--model default` resolution, so a since-removed id in an aged (up to TTL)
+    // cache snapshot must never become authoritative. They always attempt a
+    // fresh probe; on failure syncLiveCatalogForRegistry clears the catalog and
+    // the provider self-defaults.
+    if (!options.forceRefresh && !LIVE_CATALOG_REGISTRY_PROVIDERS.has(def.id)) {
       const cached = readCapabilityCache(def.id);
       if (cached && cached.capabilitySet.status !== "error" && isCacheSeedFresh(cached.cachedAt)) {
         const resolution: ResolvedProviderCapability = {
@@ -172,7 +248,8 @@ export async function resolveProviderCapabilitySet(
     const resolved = resolveCapabilitySet(fresh);
     if (resolved.source === "minimal") {
       // No usable set: let the caller fall back to static. Do NOT memoize so a
-      // later resolve (e.g. after auth) can retry.
+      // later resolve (e.g. after auth) can retry. Clear any prior live catalog.
+      syncLiveCatalogForRegistry(def, null);
       return null;
     }
     const resolution: ResolvedProviderCapability = {
@@ -181,11 +258,15 @@ export async function resolveProviderCapabilitySet(
       degraded: resolved.degraded,
     };
     memo.set(def.id, resolution);
+    syncLiveCatalogForRegistry(def, resolution);
     return resolution;
   } catch (err) {
     logger.debug(`capability resolve failed for ${def.id}`, {
       reason: err instanceof Error ? err.message : String(err),
     });
+    // Fail closed: a failed (possibly forced) refresh must not leave a stale
+    // live catalog authoritative.
+    syncLiveCatalogForRegistry(def, null);
     return null; // degrade to static; do not memoize (allow later retry)
   }
 }
